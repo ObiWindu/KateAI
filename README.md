@@ -6,7 +6,7 @@
 
 <p align="center">
   <strong>An AI coding agent for <a href="https://kate-editor.org/">Kate</a></strong><br>
-  Chat, sandboxed tools, and permission asks — Grok, OpenAI, and OpenRouter.
+  Chat, sandboxed tools, and permission — Grok, OpenAI, and OpenRouter.
 </p>
 
 <p align="center">
