@@ -26,17 +26,21 @@ JOBS="$(command -v nproc >/dev/null && nproc || echo 4)"
 USER_PLUGIN_DIR="${HOME}/.local/lib/qt6/plugins"
 USER_PLUGIN_SO="${USER_PLUGIN_DIR}/kf6/ktexteditor/kateai.so"
 
+# shellcheck source=scripts/kateai-build-dir.sh
+source "$(dirname "$0")/scripts/kateai-build-dir.sh"
+BUILD_DIR="$(kateai_resolve_build_dir)"
+
 if [[ "${MODE}" == "user" ]]; then
-    echo "==> Configuring user install (${HOME}/.local, ${BUILD_TYPE})"
-    cmake -S . -B build \
+    echo "==> Configuring user install (${HOME}/.local, ${BUILD_TYPE}, ${BUILD_DIR})"
+    cmake -S . -B "${BUILD_DIR}" \
         -DCMAKE_BUILD_TYPE="${BUILD_TYPE}" \
         -DKATEAI_USER_INSTALL=ON \
         -DCMAKE_INSTALL_PREFIX="${HOME}/.local" \
         -DKDE_INSTALL_USE_QT_SYS_PATHS=OFF \
         -DKDE_INSTALL_QTPLUGINDIR=lib/qt6/plugins
 else
-    echo "==> Configuring system install (/usr, ${BUILD_TYPE})"
-    cmake -S . -B build \
+    echo "==> Configuring system install (/usr, ${BUILD_TYPE}, ${BUILD_DIR})"
+    cmake -S . -B "${BUILD_DIR}" \
         -DCMAKE_BUILD_TYPE="${BUILD_TYPE}" \
         -DKATEAI_USER_INSTALL=OFF \
         -DCMAKE_INSTALL_PREFIX=/usr \
@@ -44,16 +48,16 @@ else
 fi
 
 echo "==> Building"
-cmake --build build -j"${JOBS}"
+cmake --build "${BUILD_DIR}" -j"${JOBS}"
 
 if [[ "${SKIP_TESTS:-0}" != "1" ]]; then
     echo "==> Tests"
-    ctest --test-dir build --output-on-failure
+    ctest --test-dir "${BUILD_DIR}" --output-on-failure
 fi
 
 if [[ "${MODE}" == "user" ]]; then
     echo "==> Installing for ${USER} only"
-    cmake --install build
+    cmake --install "${BUILD_DIR}"
     mkdir -p "${USER_PLUGIN_DIR}/kf6/ktexteditor"
     chmod 700 "${HOME}/.local/lib/qt6/plugins/kf6/ktexteditor" 2>/dev/null || true
     if [[ -f "${USER_PLUGIN_SO}" ]]; then
@@ -88,9 +92,9 @@ fi
 
 echo "==> Installing system-wide (sudo)"
 if [[ "$(id -u)" -eq 0 ]]; then
-    cmake --install build
+    cmake --install "${BUILD_DIR}"
 else
-    sudo cmake --install build
+    sudo cmake --install "${BUILD_DIR}"
 fi
 
 qtpaths_bin="$(command -v qtpaths6 || command -v qtpaths || true)"

@@ -174,7 +174,7 @@ cmake --build build -j"$(nproc)"
 ctest --test-dir build --output-on-failure
 ```
 
-Always configure out-of-source (`-B build`, not `cmake .`).
+Always configure out-of-source (`-B build`, not `cmake .`). Do not copy a `build/` directory between machines or users — it embeds absolute paths such as `/home/<someone>/…`. `./install.sh` and `./build.sh` throw away a cache that belongs to another source path, or they switch to `build-$USER` if `build/` is not writable.
 
 | Path | Role |
 | --- | --- |
@@ -195,6 +195,7 @@ Always configure out-of-source (`-B build`, not `cmake .`).
 | --- | --- |
 | Plugin missing after **user** install | Start Kate from a shell with `export QT_PLUGIN_PATH="$HOME/.local/lib/qt6/plugins${QT_PLUGIN_PATH:+:$QT_PLUGIN_PATH}"`. For the app menu, log out/in once. Check `ls -l ~/.local/lib/qt6/plugins/kf6/ktexteditor/kateai.so` is `-rwx------`. |
 | Plugin missing after **system** install | Fully quit Kate. Confirm `ls -l $(qtpaths --plugin-dir)/kf6/ktexteditor/kateai.so` is `-rwxr-xr-x`. If it is `--x`, run `sudo chmod 755` on that file. |
+| `cmake` complains about a foreign `/home/…` path or `CMakeCache.txt` | Leftover `build/` from another user or machine. `rm -rf build` and run `./install.sh` again. |
 | `cmake` *Operation not permitted* on `prefix.sh` | Stale files in `build/` from another user. `rm -rf build` and configure again. |
 | Sandboxed `bash` fails | Install `bubblewrap` (`bwrap`). File tools still work without it. |
 | No API key error | Open **Settings → Configure Kate → Kate AI** and paste a key for the selected provider. |
