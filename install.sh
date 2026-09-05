@@ -56,13 +56,18 @@ if [[ "${SKIP_TESTS:-0}" != "1" ]]; then
 fi
 
 if [[ "${MODE}" == "user" ]]; then
-    echo "==> Installing for ${USER} only"
-    cmake --install "${BUILD_DIR}"
-    mkdir -p "${USER_PLUGIN_DIR}/kf6/ktexteditor"
-    chmod 700 "${HOME}/.local/lib/qt6/plugins/kf6/ktexteditor" 2>/dev/null || true
-    if [[ -f "${USER_PLUGIN_SO}" ]]; then
-        chmod 700 "${USER_PLUGIN_SO}"
+    echo "==> Installing for ${USER} only (${HOME}/.local)"
+    BUILT_SO="${BUILD_DIR}/bin/kf6/ktexteditor/kateai.so"
+    if [[ ! -f "${BUILT_SO}" ]]; then
+        BUILT_SO="$(find "${BUILD_DIR}" -name kateai.so -print -quit)"
     fi
+    if [[ -z "${BUILT_SO}" || ! -f "${BUILT_SO}" ]]; then
+        echo "Build did not produce kateai.so under ${BUILD_DIR}" >&2
+        exit 1
+    fi
+    mkdir -p "${USER_PLUGIN_DIR}/kf6/ktexteditor"
+    install -m 700 "${BUILT_SO}" "${USER_PLUGIN_SO}"
+    chmod 700 "${USER_PLUGIN_DIR}/kf6/ktexteditor" "${USER_PLUGIN_SO}"
 
     mkdir -p "${HOME}/.config/plasma-workspace/env" "${HOME}/.config/environment.d"
     cp -f scripts/kate-ai-user-env.sh "${HOME}/.config/plasma-workspace/env/kate-ai.sh"

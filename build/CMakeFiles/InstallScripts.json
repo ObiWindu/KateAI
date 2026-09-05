@@ -1,9 +1,9 @@
 {
 	"InstallScripts" : 
 	[
-		"/home/dizeman/zed_folder/kate_ai/build/cmake_install.cmake",
-		"/home/dizeman/zed_folder/kate_ai/build/src/cmake_install.cmake",
-		"/home/dizeman/zed_folder/kate_ai/build/tests/cmake_install.cmake"
+		"/home/macewindu/ai-dev/KateAI/build/cmake_install.cmake",
+		"/home/macewindu/ai-dev/KateAI/build/src/cmake_install.cmake",
+		"/home/macewindu/ai-dev/KateAI/build/tests/cmake_install.cmake"
 	],
 	"Parallel" : false
 }

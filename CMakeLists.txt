@@ -17,7 +17,8 @@ if(KATEAI_USER_INSTALL)
     endif()
     set(CMAKE_INSTALL_PREFIX "$ENV{HOME}/.local" CACHE PATH "User-local prefix" FORCE)
     set(KDE_INSTALL_USE_QT_SYS_PATHS OFF CACHE BOOL "Do not write into the system Qt plugin dir" FORCE)
-    set(KDE_INSTALL_QTPLUGINDIR "lib/qt6/plugins" CACHE PATH "Qt plugins under the install prefix" FORCE)
+    # CACHE PATH would turn a relative value into ${CMAKE_SOURCE_DIR}/lib/qt6/plugins.
+    set(KDE_INSTALL_QTPLUGINDIR "${CMAKE_INSTALL_PREFIX}/lib/qt6/plugins" CACHE STRING "Qt plugins under the install prefix" FORCE)
 else()
     # System Kate only scans Qt's plugin dir, not /usr/local.
     set(KDE_INSTALL_USE_QT_SYS_PATHS ON CACHE BOOL "Install into Qt plugin dir (required for Kate)" FORCE)

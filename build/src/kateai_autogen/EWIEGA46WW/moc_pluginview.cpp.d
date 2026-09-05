@@ -1,6 +1,6 @@
-/home/dizeman/zed_folder/kate_ai/build/src/kateai_autogen/EWIEGA46WW/moc_pluginview.cpp: /home/dizeman/zed_folder/kate_ai/src/pluginview.h \
-  /home/dizeman/zed_folder/kate_ai/build/src/kateai_autogen/moc_predefs.h \
-  /home/dizeman/zed_folder/kate_ai/src/documentbridge.h \
+/home/macewindu/ai-dev/KateAI/build/src/kateai_autogen/EWIEGA46WW/moc_pluginview.cpp: /home/macewindu/ai-dev/KateAI/src/pluginview.h \
+  /home/macewindu/ai-dev/KateAI/build/src/kateai_autogen/moc_predefs.h \
+  /home/macewindu/ai-dev/KateAI/src/documentbridge.h \
   /usr/include/KF6/KTextEditor/KTextEditor/MainWindow \
   /usr/include/KF6/KTextEditor/ktexteditor/mainwindow.h \
   /usr/include/KF6/KTextEditor/ktexteditor_export.h \
@@ -19,7 +19,6 @@
   /usr/include/asm/bitsperlong.h \
   /usr/include/asm/errno.h \
   /usr/include/asm/posix_types.h \
-  /usr/include/asm/posix_types_64.h \
   /usr/include/asm/types.h \
   /usr/include/assert.h \
   /usr/include/bits/atomic_wide_counter.h \
@@ -83,6 +82,17 @@
   /usr/include/bits/wchar.h \
   /usr/include/bits/wctype-wchar.h \
   /usr/include/bits/wordsize.h \
+  /usr/include/c++/16/aarch64-redhat-linux/bits/atomic_word.h \
+  /usr/include/c++/16/aarch64-redhat-linux/bits/c++allocator.h \
+  /usr/include/c++/16/aarch64-redhat-linux/bits/c++config.h \
+  /usr/include/c++/16/aarch64-redhat-linux/bits/c++locale.h \
+  /usr/include/c++/16/aarch64-redhat-linux/bits/cpu_defines.h \
+  /usr/include/c++/16/aarch64-redhat-linux/bits/ctype_base.h \
+  /usr/include/c++/16/aarch64-redhat-linux/bits/ctype_inline.h \
+  /usr/include/c++/16/aarch64-redhat-linux/bits/error_constants.h \
+  /usr/include/c++/16/aarch64-redhat-linux/bits/gthr-default.h \
+  /usr/include/c++/16/aarch64-redhat-linux/bits/gthr.h \
+  /usr/include/c++/16/aarch64-redhat-linux/bits/os_defines.h \
   /usr/include/c++/16/algorithm \
   /usr/include/c++/16/array \
   /usr/include/c++/16/atomic \
@@ -271,23 +281,12 @@
   /usr/include/c++/16/variant \
   /usr/include/c++/16/vector \
   /usr/include/c++/16/version \
-  /usr/include/c++/16/x86_64-pc-linux-gnu/bits/atomic_word.h \
-  /usr/include/c++/16/x86_64-pc-linux-gnu/bits/c++allocator.h \
-  /usr/include/c++/16/x86_64-pc-linux-gnu/bits/c++config.h \
-  /usr/include/c++/16/x86_64-pc-linux-gnu/bits/c++locale.h \
-  /usr/include/c++/16/x86_64-pc-linux-gnu/bits/cpu_defines.h \
-  /usr/include/c++/16/x86_64-pc-linux-gnu/bits/ctype_base.h \
-  /usr/include/c++/16/x86_64-pc-linux-gnu/bits/ctype_inline.h \
-  /usr/include/c++/16/x86_64-pc-linux-gnu/bits/error_constants.h \
-  /usr/include/c++/16/x86_64-pc-linux-gnu/bits/gthr-default.h \
-  /usr/include/c++/16/x86_64-pc-linux-gnu/bits/gthr.h \
-  /usr/include/c++/16/x86_64-pc-linux-gnu/bits/os_defines.h \
   /usr/include/ctype.h \
   /usr/include/endian.h \
   /usr/include/errno.h \
   /usr/include/features-time64.h \
   /usr/include/features.h \
-  /usr/include/gnu/stubs-64.h \
+  /usr/include/gnu/stubs-lp64.h \
   /usr/include/gnu/stubs.h \
   /usr/include/linux/errno.h \
   /usr/include/linux/posix_types.h \
@@ -427,6 +426,6 @@
   /usr/include/time.h \
   /usr/include/wchar.h \
   /usr/include/wctype.h \
-  /usr/lib/gcc/x86_64-pc-linux-gnu/16/include/stdarg.h \
-  /usr/lib/gcc/x86_64-pc-linux-gnu/16/include/stdbool.h \
-  /usr/lib/gcc/x86_64-pc-linux-gnu/16/include/stddef.h
+  /usr/lib/gcc/aarch64-redhat-linux/16/include/stdarg.h \
+  /usr/lib/gcc/aarch64-redhat-linux/16/include/stdbool.h \
+  /usr/lib/gcc/aarch64-redhat-linux/16/include/stddef.h

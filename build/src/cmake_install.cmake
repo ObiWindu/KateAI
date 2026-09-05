@@ -1,8 +1,8 @@
-# Install script for directory: /home/dizeman/zed_folder/kate_ai/src
+# Install script for directory: /home/macewindu/ai-dev/KateAI/src
 
 # Set the install prefix
 if(NOT DEFINED CMAKE_INSTALL_PREFIX)
-  set(CMAKE_INSTALL_PREFIX "/usr")
+  set(CMAKE_INSTALL_PREFIX "/home/macewindu/.local")
 endif()
 string(REGEX REPLACE "/$" "" CMAKE_INSTALL_PREFIX "${CMAKE_INSTALL_PREFIX}")
 
@@ -43,28 +43,40 @@ if(NOT DEFINED CMAKE_OBJDUMP)
 endif()
 
 if(CMAKE_INSTALL_COMPONENT STREQUAL "kateai" OR NOT CMAKE_INSTALL_COMPONENT)
-  if(EXISTS "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/lib/qt6/plugins/kf6/ktexteditor/kateai.so" AND
-     NOT IS_SYMLINK "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/lib/qt6/plugins/kf6/ktexteditor/kateai.so")
+  if(EXISTS "$ENV{DESTDIR}/home/macewindu/.local/lib/qt6/plugins/kf6/ktexteditor/kateai.so" AND
+     NOT IS_SYMLINK "$ENV{DESTDIR}/home/macewindu/.local/lib/qt6/plugins/kf6/ktexteditor/kateai.so")
     file(RPATH_CHECK
-         FILE "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/lib/qt6/plugins/kf6/ktexteditor/kateai.so"
-         RPATH "")
+         FILE "$ENV{DESTDIR}/home/macewindu/.local/lib/qt6/plugins/kf6/ktexteditor/kateai.so"
+         RPATH "/home/macewindu/.local/lib64")
   endif()
-  file(INSTALL DESTINATION "${CMAKE_INSTALL_PREFIX}/lib/qt6/plugins/kf6/ktexteditor" TYPE MODULE FILES "/home/dizeman/zed_folder/kate_ai/build/bin/kf6/ktexteditor/kateai.so")
-  if(EXISTS "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/lib/qt6/plugins/kf6/ktexteditor/kateai.so" AND
-     NOT IS_SYMLINK "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/lib/qt6/plugins/kf6/ktexteditor/kateai.so")
+  list(APPEND CMAKE_ABSOLUTE_DESTINATION_FILES
+   "/home/macewindu/.local/lib/qt6/plugins/kf6/ktexteditor/kateai.so")
+  if(CMAKE_WARN_ON_ABSOLUTE_INSTALL_DESTINATION)
+    message(WARNING "ABSOLUTE path INSTALL DESTINATION : ${CMAKE_ABSOLUTE_DESTINATION_FILES}")
+  endif()
+  if(CMAKE_ERROR_ON_ABSOLUTE_INSTALL_DESTINATION)
+    message(FATAL_ERROR "ABSOLUTE path INSTALL DESTINATION forbidden (by caller): ${CMAKE_ABSOLUTE_DESTINATION_FILES}")
+  endif()
+  file(INSTALL DESTINATION "/home/macewindu/.local/lib/qt6/plugins/kf6/ktexteditor" TYPE MODULE FILES "/home/macewindu/ai-dev/KateAI/build/bin/kf6/ktexteditor/kateai.so")
+  if(EXISTS "$ENV{DESTDIR}/home/macewindu/.local/lib/qt6/plugins/kf6/ktexteditor/kateai.so" AND
+     NOT IS_SYMLINK "$ENV{DESTDIR}/home/macewindu/.local/lib/qt6/plugins/kf6/ktexteditor/kateai.so")
+    file(RPATH_CHANGE
+         FILE "$ENV{DESTDIR}/home/macewindu/.local/lib/qt6/plugins/kf6/ktexteditor/kateai.so"
+         OLD_RPATH "::::::::::::::::::::::::::::"
+         NEW_RPATH "/home/macewindu/.local/lib64")
     if(CMAKE_INSTALL_DO_STRIP)
-      execute_process(COMMAND "/usr/bin/strip" "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/lib/qt6/plugins/kf6/ktexteditor/kateai.so")
+      execute_process(COMMAND "/usr/bin/strip" "$ENV{DESTDIR}/home/macewindu/.local/lib/qt6/plugins/kf6/ktexteditor/kateai.so")
     endif()
   endif()
 endif()
 
 if(CMAKE_INSTALL_COMPONENT STREQUAL "kateai" OR NOT CMAKE_INSTALL_COMPONENT)
-  include("/home/dizeman/zed_folder/kate_ai/build/src/CMakeFiles/kateai.dir/install-cxx-module-bmi-Release.cmake" OPTIONAL)
+  include("/home/macewindu/ai-dev/KateAI/build/src/CMakeFiles/kateai.dir/install-cxx-module-bmi-Release.cmake" OPTIONAL)
 endif()
 
 string(REPLACE ";" "\n" CMAKE_INSTALL_MANIFEST_CONTENT
        "${CMAKE_INSTALL_MANIFEST_FILES}")
 if(CMAKE_INSTALL_LOCAL_ONLY)
-  file(WRITE "/home/dizeman/zed_folder/kate_ai/build/src/install_local_manifest.txt"
+  file(WRITE "/home/macewindu/ai-dev/KateAI/build/src/install_local_manifest.txt"
      "${CMAKE_INSTALL_MANIFEST_CONTENT}")
 endif()

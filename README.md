@@ -65,11 +65,13 @@ This is the only case that needs world-readable `755`: the file is owned by root
 
 ### Manual user install
 
+Prefer `./install.sh`. CMake’s relative `PATH` cache can otherwise install into the source tree. The script copies the built `.so` itself:
+
 ```bash
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DKATEAI_USER_INSTALL=ON
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j"$(nproc)"
-cmake --install build
-chmod 700 ~/.local/lib/qt6/plugins/kf6/ktexteditor/kateai.so
+mkdir -p ~/.local/lib/qt6/plugins/kf6/ktexteditor
+install -m 700 build/bin/kf6/ktexteditor/kateai.so ~/.local/lib/qt6/plugins/kf6/ktexteditor/kateai.so
 ```
 
 ### Dependencies

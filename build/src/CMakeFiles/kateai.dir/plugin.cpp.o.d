@@ -1,7 +1,7 @@
 src/CMakeFiles/kateai.dir/plugin.cpp.o: \
- /home/dizeman/zed_folder/kate_ai/src/plugin.cpp \
- /usr/include/stdc-predef.h /home/dizeman/zed_folder/kate_ai/src/plugin.h \
- /home/dizeman/zed_folder/kate_ai/src/types.h \
+ /home/macewindu/ai-dev/KateAI/src/plugin.cpp /usr/include/stdc-predef.h \
+ /home/macewindu/ai-dev/KateAI/src/plugin.h \
+ /home/macewindu/ai-dev/KateAI/src/types.h \
  /usr/include/qt6/QtCore/QJsonArray /usr/include/qt6/QtCore/qjsonarray.h \
  /usr/include/qt6/QtCore/qjsonvalue.h \
  /usr/include/qt6/QtCore/qcborvalue.h \
@@ -14,13 +14,13 @@ src/CMakeFiles/kateai.dir/plugin.cpp.o: \
  /usr/include/qt6/QtCore/qsystemdetection.h \
  /usr/include/qt6/QtCore/qtconfiginclude.h /usr/include/c++/16/version \
  /usr/include/c++/16/bits/version.h \
- /usr/include/c++/16/x86_64-pc-linux-gnu/bits/c++config.h \
- /usr/include/c++/16/x86_64-pc-linux-gnu/bits/os_defines.h \
+ /usr/include/c++/16/aarch64-redhat-linux/bits/c++config.h \
+ /usr/include/c++/16/aarch64-redhat-linux/bits/os_defines.h \
  /usr/include/features.h /usr/include/features-time64.h \
  /usr/include/bits/wordsize.h /usr/include/bits/timesize.h \
  /usr/include/sys/cdefs.h /usr/include/bits/long-double.h \
- /usr/include/gnu/stubs.h /usr/include/gnu/stubs-64.h \
- /usr/include/c++/16/x86_64-pc-linux-gnu/bits/cpu_defines.h \
+ /usr/include/gnu/stubs.h /usr/include/gnu/stubs-lp64.h \
+ /usr/include/c++/16/aarch64-redhat-linux/bits/cpu_defines.h \
  /usr/include/c++/16/pstl/pstl_config.h /usr/include/qt6/QtCore/qconfig.h \
  /usr/include/qt6/QtCore/qtcore-config.h /usr/include/c++/16/utility \
  /usr/include/c++/16/bits/stl_relops.h \
@@ -39,9 +39,9 @@ src/CMakeFiles/kateai.dir/plugin.cpp.o: \
  /usr/include/qt6/QtCore/qtdeprecationmarkers.h \
  /usr/include/qt6/QtCore/qtclasshelpermacros.h \
  /usr/include/qt6/QtCore/qtnoop.h /usr/include/c++/16/cstddef \
- /usr/lib/gcc/x86_64-pc-linux-gnu/16/include/stddef.h \
+ /usr/lib/gcc/aarch64-redhat-linux/16/include/stddef.h \
  /usr/include/c++/16/cstdint \
- /usr/lib/gcc/x86_64-pc-linux-gnu/16/include/stdint.h \
+ /usr/lib/gcc/aarch64-redhat-linux/16/include/stdint.h \
  /usr/include/stdint.h /usr/include/bits/libc-header-start.h \
  /usr/include/bits/types.h /usr/include/bits/typesizes.h \
  /usr/include/bits/time64.h /usr/include/bits/wchar.h \
@@ -53,8 +53,8 @@ src/CMakeFiles/kateai.dir/plugin.cpp.o: \
  /usr/include/c++/16/bits/exception_defines.h \
  /usr/include/c++/16/bits/atomic_lockfree_defines.h \
  /usr/include/c++/16/bits/atomic_wait.h \
- /usr/include/c++/16/x86_64-pc-linux-gnu/bits/gthr.h \
- /usr/include/c++/16/x86_64-pc-linux-gnu/bits/gthr-default.h \
+ /usr/include/c++/16/aarch64-redhat-linux/bits/gthr.h \
+ /usr/include/c++/16/aarch64-redhat-linux/bits/gthr-default.h \
  /usr/include/pthread.h /usr/include/sched.h \
  /usr/include/bits/types/time_t.h \
  /usr/include/bits/types/struct_timespec.h /usr/include/bits/endian.h \
@@ -64,7 +64,7 @@ src/CMakeFiles/kateai.dir/plugin.cpp.o: \
  /usr/include/asm-generic/int-ll64.h /usr/include/asm/bitsperlong.h \
  /usr/include/asm-generic/bitsperlong.h /usr/include/linux/posix_types.h \
  /usr/include/linux/stddef.h /usr/include/asm/posix_types.h \
- /usr/include/asm/posix_types_64.h /usr/include/asm-generic/posix_types.h \
+ /usr/include/asm-generic/posix_types.h \
  /usr/include/bits/types/struct_sched_param.h /usr/include/bits/cpu-set.h \
  /usr/include/time.h /usr/include/bits/time.h /usr/include/bits/timex.h \
  /usr/include/bits/types/struct_timeval.h \
@@ -80,7 +80,7 @@ src/CMakeFiles/kateai.dir/plugin.cpp.o: \
  /usr/include/bits/types/struct___jmp_buf_tag.h \
  /usr/include/bits/pthread_stack_min-dynamic.h \
  /usr/include/qt6/QtCore/qnamespace.h /usr/include/qt6/QtCore/qglobal.h \
- /usr/lib/gcc/x86_64-pc-linux-gnu/16/include/stdbool.h \
+ /usr/lib/gcc/aarch64-redhat-linux/16/include/stdbool.h \
  /usr/include/qt6/QtCore/qtcoreglobal.h \
  /usr/include/qt6/QtCore/qtpreprocessorsupport.h \
  /usr/include/qt6/QtCore/qtversion.h /usr/include/qt6/QtCore/qtypeinfo.h \
@@ -180,7 +180,7 @@ src/CMakeFiles/kateai.dir/plugin.cpp.o: \
  /usr/include/c++/16/bits/alloc_traits.h \
  /usr/include/c++/16/bits/memoryfwd.h \
  /usr/include/c++/16/bits/allocator.h \
- /usr/include/c++/16/x86_64-pc-linux-gnu/bits/c++allocator.h \
+ /usr/include/c++/16/aarch64-redhat-linux/bits/c++allocator.h \
  /usr/include/c++/16/bits/new_allocator.h \
  /usr/include/c++/16/bits/new_throw.h \
  /usr/include/c++/16/bits/node_handle.h \
@@ -205,18 +205,18 @@ src/CMakeFiles/kateai.dir/plugin.cpp.o: \
  /usr/include/c++/16/iosfwd /usr/include/c++/16/bits/stringfwd.h \
  /usr/include/c++/16/bits/postypes.h /usr/include/c++/16/cwchar \
  /usr/include/wchar.h \
- /usr/lib/gcc/x86_64-pc-linux-gnu/16/include/stdarg.h \
+ /usr/lib/gcc/aarch64-redhat-linux/16/include/stdarg.h \
  /usr/include/bits/types/wint_t.h /usr/include/bits/types/mbstate_t.h \
  /usr/include/bits/types/__mbstate_t.h /usr/include/bits/types/__FILE.h \
  /usr/include/bits/types/FILE.h \
  /usr/include/c++/16/bits/streambuf_iterator.h \
  /usr/include/c++/16/streambuf /usr/include/c++/16/bits/localefwd.h \
- /usr/include/c++/16/x86_64-pc-linux-gnu/bits/c++locale.h \
+ /usr/include/c++/16/aarch64-redhat-linux/bits/c++locale.h \
  /usr/include/c++/16/clocale /usr/include/locale.h \
  /usr/include/bits/locale.h /usr/include/c++/16/cctype \
  /usr/include/ctype.h /usr/include/c++/16/bits/ios_base.h \
  /usr/include/c++/16/ext/atomicity.h \
- /usr/include/c++/16/x86_64-pc-linux-gnu/bits/atomic_word.h \
+ /usr/include/c++/16/aarch64-redhat-linux/bits/atomic_word.h \
  /usr/include/sys/single_threaded.h \
  /usr/include/c++/16/bits/locale_classes.h /usr/include/c++/16/string \
  /usr/include/c++/16/bits/char_traits.h \
@@ -238,7 +238,7 @@ src/CMakeFiles/kateai.dir/plugin.cpp.o: \
  /usr/include/c++/16/bits/basic_string.tcc \
  /usr/include/c++/16/bits/locale_classes.tcc \
  /usr/include/c++/16/system_error \
- /usr/include/c++/16/x86_64-pc-linux-gnu/bits/error_constants.h \
+ /usr/include/c++/16/aarch64-redhat-linux/bits/error_constants.h \
  /usr/include/c++/16/stdexcept \
  /usr/include/c++/16/bits/stdexcept_except.h \
  /usr/include/c++/16/bits/streambuf.tcc /usr/include/c++/16/memory \
@@ -248,8 +248,8 @@ src/CMakeFiles/kateai.dir/plugin.cpp.o: \
  /usr/include/c++/16/bits/basic_ios.h \
  /usr/include/c++/16/bits/locale_facets.h /usr/include/c++/16/cwctype \
  /usr/include/wctype.h /usr/include/bits/wctype-wchar.h \
- /usr/include/c++/16/x86_64-pc-linux-gnu/bits/ctype_base.h \
- /usr/include/c++/16/x86_64-pc-linux-gnu/bits/ctype_inline.h \
+ /usr/include/c++/16/aarch64-redhat-linux/bits/ctype_base.h \
+ /usr/include/c++/16/aarch64-redhat-linux/bits/ctype_inline.h \
  /usr/include/c++/16/bits/locale_facets.tcc \
  /usr/include/c++/16/bits/basic_ios.tcc \
  /usr/include/c++/16/bits/shared_ptr.h \
@@ -292,8 +292,8 @@ src/CMakeFiles/kateai.dir/plugin.cpp.o: \
  /usr/include/c++/16/format /usr/include/c++/16/charconv \
  /usr/include/c++/16/locale \
  /usr/include/c++/16/bits/locale_facets_nonio.h /usr/include/c++/16/ctime \
- /usr/include/c++/16/x86_64-pc-linux-gnu/bits/time_members.h \
- /usr/include/c++/16/x86_64-pc-linux-gnu/bits/messages_members.h \
+ /usr/include/c++/16/aarch64-redhat-linux/bits/time_members.h \
+ /usr/include/c++/16/aarch64-redhat-linux/bits/messages_members.h \
  /usr/include/libintl.h /usr/include/c++/16/bits/codecvt.h \
  /usr/include/c++/16/bits/locale_facets_nonio.tcc \
  /usr/include/c++/16/bits/locale_conv.h /usr/include/c++/16/span \
@@ -313,8 +313,8 @@ src/CMakeFiles/kateai.dir/plugin.cpp.o: \
  /usr/include/qt6/QtCore/qlocale.h /usr/include/qt6/QtCore/qvariant.h \
  /usr/include/qt6/QtCore/qdebug.h /usr/include/qt6/QtCore/qtextstream.h \
  /usr/include/qt6/QtCore/qcontiguouscache.h /usr/include/c++/16/climits \
- /usr/lib/gcc/x86_64-pc-linux-gnu/16/include/limits.h \
- /usr/lib/gcc/x86_64-pc-linux-gnu/16/include/syslimits.h \
+ /usr/lib/gcc/aarch64-redhat-linux/16/include/limits.h \
+ /usr/lib/gcc/aarch64-redhat-linux/16/include/syslimits.h \
  /usr/include/limits.h /usr/include/bits/posix1_lim.h \
  /usr/include/bits/local_lim.h /usr/include/linux/limits.h \
  /usr/include/bits/posix2_lim.h /usr/include/bits/xopen_lim.h \
@@ -355,7 +355,7 @@ src/CMakeFiles/kateai.dir/plugin.cpp.o: \
  /usr/include/qt6/QtCore/QObject \
  /usr/include/KF6/KTextEditor/ktexteditor_export.h \
  /usr/include/KF6/KTextEditor/ktexteditor_version.h \
- /home/dizeman/zed_folder/kate_ai/src/configpage.h \
+ /home/macewindu/ai-dev/KateAI/src/configpage.h \
  /usr/include/KF6/KTextEditor/KTextEditor/ConfigPage \
  /usr/include/KF6/KTextEditor/ktexteditor/configpage.h \
  /usr/include/qt6/QtWidgets/QWidget /usr/include/qt6/QtWidgets/qwidget.h \
@@ -383,8 +383,8 @@ src/CMakeFiles/kateai.dir/plugin.cpp.o: \
  /usr/include/qt6/QtGui/qfontvariableaxis.h \
  /usr/include/qt6/QtWidgets/qsizepolicy.h \
  /usr/include/qt6/QtGui/qcursor.h /usr/include/qt6/QtGui/qbitmap.h \
- /home/dizeman/zed_folder/kate_ai/src/pluginview.h \
- /home/dizeman/zed_folder/kate_ai/src/documentbridge.h \
+ /home/macewindu/ai-dev/KateAI/src/pluginview.h \
+ /home/macewindu/ai-dev/KateAI/src/documentbridge.h \
  /usr/include/KF6/KTextEditor/KTextEditor/MainWindow \
  /usr/include/KF6/KTextEditor/ktexteditor/mainwindow.h \
  /usr/include/qt6/QtGui/QWidgetList \
@@ -393,7 +393,7 @@ src/CMakeFiles/kateai.dir/plugin.cpp.o: \
  /usr/include/KF6/KXmlGui/kxmlgui_export.h \
  /usr/include/KF6/KXmlGui/kxmlgui_version.h \
  /usr/include/qt6/QtCore/QPointer /usr/include/qt6/QtCore/qpointer.h \
- /home/dizeman/zed_folder/kate_ai/src/settings.h \
+ /home/macewindu/ai-dev/KateAI/src/settings.h \
  /usr/include/KF6/KI18n/KLocalizedString \
  /usr/include/KF6/KI18n/klocalizedstring.h \
  /usr/include/KF6/KI18n/ki18n_export.h \
@@ -409,7 +409,7 @@ src/CMakeFiles/kateai.dir/plugin.cpp.o: \
  /usr/include/KF6/KCoreAddons/kpluginmetadata.h \
  /usr/include/qt6/QtCore/QExplicitlySharedDataPointer \
  /usr/include/qt6/QtCore/QMetaType \
- /home/dizeman/zed_folder/kate_ai/build/src/kateai_autogen/include/plugin.moc \
+ /home/macewindu/ai-dev/KateAI/build/src/kateai_autogen/include/plugin.moc \
  /usr/include/qt6/QtCore/qplugin.h /usr/include/qt6/QtCore/q20algorithm.h \
  /usr/include/qt6/QtCore/qtmochelpers.h \
  /usr/include/qt6/QtCore/qtmocconstants.h

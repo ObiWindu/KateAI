@@ -8,8 +8,8 @@ set(CMAKE_DEPENDS_LANGUAGES
 
 # The set of dependency files which are needed:
 set(CMAKE_DEPENDS_DEPENDENCY_FILES
-  "/home/dizeman/zed_folder/kate_ai/tests/test_sandbox.cpp" "tests/CMakeFiles/test_sandbox.dir/test_sandbox.cpp.o" "gcc" "tests/CMakeFiles/test_sandbox.dir/test_sandbox.cpp.o.d"
-  "/home/dizeman/zed_folder/kate_ai/build/tests/test_sandbox_autogen/mocs_compilation.cpp" "tests/CMakeFiles/test_sandbox.dir/test_sandbox_autogen/mocs_compilation.cpp.o" "gcc" "tests/CMakeFiles/test_sandbox.dir/test_sandbox_autogen/mocs_compilation.cpp.o.d"
+  "/home/macewindu/ai-dev/KateAI/tests/test_sandbox.cpp" "tests/CMakeFiles/test_sandbox.dir/test_sandbox.cpp.o" "gcc" "tests/CMakeFiles/test_sandbox.dir/test_sandbox.cpp.o.d"
+  "/home/macewindu/ai-dev/KateAI/build/tests/test_sandbox_autogen/mocs_compilation.cpp" "tests/CMakeFiles/test_sandbox.dir/test_sandbox_autogen/mocs_compilation.cpp.o" "gcc" "tests/CMakeFiles/test_sandbox.dir/test_sandbox_autogen/mocs_compilation.cpp.o.d"
   )
 
 # Targets to which this target links which contain Fortran sources.
