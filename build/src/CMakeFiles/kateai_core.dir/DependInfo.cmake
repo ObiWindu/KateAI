@@ -1,0 +1,32 @@
+
+# Consider dependencies only in project.
+set(CMAKE_DEPENDS_IN_PROJECT_ONLY OFF)
+
+# The set of languages for which implicit dependencies are needed:
+set(CMAKE_DEPENDS_LANGUAGES
+  )
+
+# The set of dependency files which are needed:
+set(CMAKE_DEPENDS_DEPENDENCY_FILES
+  "/home/dizeman/zed_folder/kate_ai/src/agentloop.cpp" "src/CMakeFiles/kateai_core.dir/agentloop.cpp.o" "gcc" "src/CMakeFiles/kateai_core.dir/agentloop.cpp.o.d"
+  "/home/dizeman/zed_folder/kate_ai/src/documentbridge.cpp" "src/CMakeFiles/kateai_core.dir/documentbridge.cpp.o" "gcc" "src/CMakeFiles/kateai_core.dir/documentbridge.cpp.o.d"
+  "/home/dizeman/zed_folder/kate_ai/build/src/kateai_core_autogen/mocs_compilation.cpp" "src/CMakeFiles/kateai_core.dir/kateai_core_autogen/mocs_compilation.cpp.o" "gcc" "src/CMakeFiles/kateai_core.dir/kateai_core_autogen/mocs_compilation.cpp.o.d"
+  "/home/dizeman/zed_folder/kate_ai/src/llmclient.cpp" "src/CMakeFiles/kateai_core.dir/llmclient.cpp.o" "gcc" "src/CMakeFiles/kateai_core.dir/llmclient.cpp.o.d"
+  "/home/dizeman/zed_folder/kate_ai/src/permissions.cpp" "src/CMakeFiles/kateai_core.dir/permissions.cpp.o" "gcc" "src/CMakeFiles/kateai_core.dir/permissions.cpp.o.d"
+  "/home/dizeman/zed_folder/kate_ai/src/sandbox.cpp" "src/CMakeFiles/kateai_core.dir/sandbox.cpp.o" "gcc" "src/CMakeFiles/kateai_core.dir/sandbox.cpp.o.d"
+  "/home/dizeman/zed_folder/kate_ai/src/settings.cpp" "src/CMakeFiles/kateai_core.dir/settings.cpp.o" "gcc" "src/CMakeFiles/kateai_core.dir/settings.cpp.o.d"
+  "/home/dizeman/zed_folder/kate_ai/src/tools.cpp" "src/CMakeFiles/kateai_core.dir/tools.cpp.o" "gcc" "src/CMakeFiles/kateai_core.dir/tools.cpp.o.d"
+  "/home/dizeman/zed_folder/kate_ai/src/types.cpp" "src/CMakeFiles/kateai_core.dir/types.cpp.o" "gcc" "src/CMakeFiles/kateai_core.dir/types.cpp.o.d"
+  "/home/dizeman/zed_folder/kate_ai/src/workspace.cpp" "src/CMakeFiles/kateai_core.dir/workspace.cpp.o" "gcc" "src/CMakeFiles/kateai_core.dir/workspace.cpp.o.d"
+  )
+
+# Targets to which this target links which contain Fortran sources.
+set(CMAKE_Fortran_TARGET_LINKED_INFO_FILES
+  )
+
+# Targets to which this target links which contain Fortran sources.
+set(CMAKE_Fortran_TARGET_FORWARD_LINKED_INFO_FILES
+  )
+
+# Fortran module output directory.
+set(CMAKE_Fortran_TARGET_MODULE_DIR "")

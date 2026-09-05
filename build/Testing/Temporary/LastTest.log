@@ -1,0 +1,98 @@
+Start testing: Sep 05 09:56 CEST
+----------------------------------------------------------
+1/4 Testing: appstreamtest
+1/4 Test: appstreamtest
+Command: "/usr/bin/cmake" "-DAPPSTREAMCLI=/usr/bin/appstreamcli" "-DINSTALL_FILES=/home/dizeman/zed_folder/kate_ai/build/install_manifest.txt" "-P" "/usr/share/ECM/kde-modules/appstreamtest.cmake"
+Directory: /home/dizeman/zed_folder/kate_ai/build
+"appstreamtest" start time: Sep 05 09:56 CEST
+Output:
+----------------------------------------------------------
+[0mNot installed yet, skipping[0m
+<end of output>
+Test time =   0.01 sec
+----------------------------------------------------------
+Test Passed.
+"appstreamtest" end time: Sep 05 09:56 CEST
+"appstreamtest" time elapsed: 00:00:00
+----------------------------------------------------------
+
+2/4 Testing: test_sandbox
+2/4 Test: test_sandbox
+Command: "/home/dizeman/zed_folder/kate_ai/build/bin/test_sandbox"
+Directory: /home/dizeman/zed_folder/kate_ai/build/tests
+"test_sandbox" start time: Sep 05 09:56 CEST
+Output:
+----------------------------------------------------------
+********* Start testing of TestSandbox *********
+Config: Using QtTest library 6.11.2, Qt 6.11.2 (x86_64-little_endian-lp64 shared (dynamic) release build; by GCC 16.2.1 20260810), arch unknown
+PASS   : TestSandbox::initTestCase()
+PASS   : TestSandbox::pathEscapeIsBlocked()
+PASS   : TestSandbox::envFileIsDenied()
+PASS   : TestSandbox::readOnlyBlocksWrites()
+PASS   : TestSandbox::strictBlocksOutsideReads()
+PASS   : TestSandbox::dangerousCommands()
+PASS   : TestSandbox::globWorkspaceMatch()
+PASS   : TestSandbox::cleanupTestCase()
+Totals: 8 passed, 0 failed, 0 skipped, 0 blacklisted, 3ms
+********* Finished testing of TestSandbox *********
+<end of output>
+Test time =   0.03 sec
+----------------------------------------------------------
+Test Passed.
+"test_sandbox" end time: Sep 05 09:56 CEST
+"test_sandbox" time elapsed: 00:00:00
+----------------------------------------------------------
+
+3/4 Testing: test_permissions
+3/4 Test: test_permissions
+Command: "/home/dizeman/zed_folder/kate_ai/build/bin/test_permissions"
+Directory: /home/dizeman/zed_folder/kate_ai/build/tests
+"test_permissions" start time: Sep 05 09:56 CEST
+Output:
+----------------------------------------------------------
+********* Start testing of TestPermissions *********
+Config: Using QtTest library 6.11.2, Qt 6.11.2 (x86_64-little_endian-lp64 shared (dynamic) release build; by GCC 16.2.1 20260810), arch unknown
+PASS   : TestPermissions::initTestCase()
+PASS   : TestPermissions::readToolsAutoAllow()
+PASS   : TestPermissions::writesAskByDefault()
+PASS   : TestPermissions::acceptEditsAllowsWritesButAsksShell()
+PASS   : TestPermissions::alwaysApprove()
+PASS   : TestPermissions::sessionGrant()
+PASS   : TestPermissions::cleanupTestCase()
+Totals: 7 passed, 0 failed, 0 skipped, 0 blacklisted, 1ms
+********* Finished testing of TestPermissions *********
+<end of output>
+Test time =   0.03 sec
+----------------------------------------------------------
+Test Passed.
+"test_permissions" end time: Sep 05 09:56 CEST
+"test_permissions" time elapsed: 00:00:00
+----------------------------------------------------------
+
+4/4 Testing: test_llmparse
+4/4 Test: test_llmparse
+Command: "/home/dizeman/zed_folder/kate_ai/build/bin/test_llmparse"
+Directory: /home/dizeman/zed_folder/kate_ai/build/tests
+"test_llmparse" start time: Sep 05 09:56 CEST
+Output:
+----------------------------------------------------------
+********* Start testing of TestLlmParse *********
+Config: Using QtTest library 6.11.2, Qt 6.11.2 (x86_64-little_endian-lp64 shared (dynamic) release build; by GCC 16.2.1 20260810), arch unknown
+PASS   : TestLlmParse::initTestCase()
+PASS   : TestLlmParse::parsesContentDelta()
+PASS   : TestLlmParse::parsesDone()
+PASS   : TestLlmParse::parsesToolCall()
+PASS   : TestLlmParse::providerUrls()
+PASS   : TestLlmParse::settingsKeys()
+PASS   : TestLlmParse::cleanupTestCase()
+Totals: 7 passed, 0 failed, 0 skipped, 0 blacklisted, 0ms
+********* Finished testing of TestLlmParse *********
+<end of output>
+Test time =   0.03 sec
+----------------------------------------------------------
+Test Passed.
+"test_llmparse" end time: Sep 05 09:56 CEST
+"test_llmparse" time elapsed: 00:00:00
+----------------------------------------------------------
+
+End testing: Sep 05 09:56 CEST

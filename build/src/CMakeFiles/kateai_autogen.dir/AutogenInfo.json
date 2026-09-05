@@ -1,0 +1,175 @@
+{
+	"BUILD_DIR" : "/home/dizeman/zed_folder/kate_ai/build/src/kateai_autogen",
+	"CMAKE_BINARY_DIR" : "/home/dizeman/zed_folder/kate_ai/build",
+	"CMAKE_CURRENT_BINARY_DIR" : "/home/dizeman/zed_folder/kate_ai/build/src",
+	"CMAKE_CURRENT_SOURCE_DIR" : "/home/dizeman/zed_folder/kate_ai/src",
+	"CMAKE_EXECUTABLE" : "/usr/bin/cmake",
+	"CMAKE_LIST_FILES" : 
+	[
+		"/home/dizeman/zed_folder/kate_ai/src/CMakeLists.txt",
+		"/home/dizeman/zed_folder/kate_ai/src/kateai.qrc"
+	],
+	"CMAKE_SOURCE_DIR" : "/home/dizeman/zed_folder/kate_ai",
+	"CROSS_CONFIG" : false,
+	"DEP_FILE" : "/home/dizeman/zed_folder/kate_ai/build/src/kateai_autogen/deps",
+	"DEP_FILE_RULE_NAME" : "kateai_autogen/timestamp",
+	"HEADERS" : 
+	[
+		[
+			"/home/dizeman/zed_folder/kate_ai/src/chatwidget.h",
+			"Mu",
+			"EWIEGA46WW/moc_chatwidget.cpp",
+			null
+		],
+		[
+			"/home/dizeman/zed_folder/kate_ai/src/configpage.h",
+			"Mu",
+			"EWIEGA46WW/moc_configpage.cpp",
+			null
+		],
+		[
+			"/home/dizeman/zed_folder/kate_ai/src/permissionbar.h",
+			"Mu",
+			"EWIEGA46WW/moc_permissionbar.cpp",
+			null
+		],
+		[
+			"/home/dizeman/zed_folder/kate_ai/src/plugin.h",
+			"Mu",
+			"EWIEGA46WW/moc_plugin.cpp",
+			null
+		],
+		[
+			"/home/dizeman/zed_folder/kate_ai/src/pluginview.h",
+			"Mu",
+			"EWIEGA46WW/moc_pluginview.cpp",
+			null
+		],
+		[
+			"/home/dizeman/zed_folder/kate_ai/src/promptedit.h",
+			"Mu",
+			"EWIEGA46WW/moc_promptedit.cpp",
+			null
+		]
+	],
+	"HEADER_EXTENSIONS" : [ "h", "hh", "h++", "hm", "hpp", "hxx", "in", "txx" ],
+	"INCLUDE_DIR" : "/home/dizeman/zed_folder/kate_ai/build/src/kateai_autogen/include",
+	"MOC_COMPILATION_FILE" : "/home/dizeman/zed_folder/kate_ai/build/src/kateai_autogen/mocs_compilation.cpp",
+	"MOC_DEFINITIONS" : 
+	[
+		"KCOREADDONS_LIB",
+		"KGUIADDONS_LIB",
+		"KPLUGINFACTORY_PLUGIN_CLASS_INTERNAL_NAME=kateai_factory",
+		"QT_CORE_LIB",
+		"QT_DBUS_LIB",
+		"QT_GUI_LIB",
+		"QT_NETWORK_LIB",
+		"QT_NO_CAST_FROM_ASCII",
+		"QT_NO_CAST_FROM_BYTEARRAY",
+		"QT_NO_CAST_TO_ASCII",
+		"QT_NO_DEBUG",
+		"QT_NO_FOREACH",
+		"QT_NO_KEYWORDS",
+		"QT_NO_NARROWING_CONVERSIONS_IN_CONNECT",
+		"QT_NO_URL_CAST_FROM_STRING",
+		"QT_STRICT_ITERATORS",
+		"QT_USE_QSTRINGBUILDER",
+		"QT_WIDGETS_LIB",
+		"QT_XML_LIB",
+		"TRANSLATION_DOMAIN=\"kateai\"",
+		"_GNU_SOURCE",
+		"_LARGEFILE64_SOURCE",
+		"kateai_EXPORTS"
+	],
+	"MOC_DEPEND_FILTERS" : 
+	[
+		[
+			"Q_PLUGIN_METADATA",
+			"[\n][ \t]*Q_PLUGIN_METADATA[ \t]*\\([^\\)]*FILE[ \t]*\"([^\"]+)\""
+		]
+	],
+	"MOC_INCLUDES" : 
+	[
+		"/home/dizeman/zed_folder/kate_ai/build/src",
+		"/home/dizeman/zed_folder/kate_ai/src",
+		"/usr/include/qt6/QtCore",
+		"/usr/include/qt6",
+		"/usr/lib/qt6/mkspecs/linux-g++",
+		"/usr/include/qt6/QtGui",
+		"/usr/include/qt6/QtWidgets",
+		"/usr/include/qt6/QtNetwork",
+		"/usr/include/KF6/KCoreAddons",
+		"/usr/include/KF6/KConfig",
+		"/usr/include/KF6/KConfigCore",
+		"/usr/include/KF6/KI18n",
+		"/usr/include/KF6/KTextEditor",
+		"/usr/include/KF6/KParts",
+		"/usr/include/KF6/KIOCore",
+		"/usr/include/KF6/KIO",
+		"/usr/include/qt6/QtDBus",
+		"/usr/include/KF6/KXmlGui",
+		"/usr/include/qt6/QtXml",
+		"/usr/include/KF6/KConfigWidgets",
+		"/usr/include/KF6/KWidgetsAddons",
+		"/usr/include/KF6/KConfigGui",
+		"/usr/include/KF6/KColorScheme",
+		"/usr/include/KF6/KGuiAddons",
+		"/usr/include/KF6/KCompletion",
+		"/usr/include/KF6/KSyntaxHighlighting",
+		"/usr/include",
+		"/usr/include/c++/16",
+		"/usr/include/c++/16/x86_64-pc-linux-gnu",
+		"/usr/include/c++/16/backward",
+		"/usr/lib/gcc/x86_64-pc-linux-gnu/16/include",
+		"/usr/local/include"
+	],
+	"MOC_MACRO_NAMES" : 
+	[
+		"Q_OBJECT",
+		"Q_GADGET",
+		"Q_NAMESPACE",
+		"Q_NAMESPACE_EXPORT",
+		"Q_GADGET_EXPORT",
+		"Q_ENUM_NS",
+		"K_PLUGIN_FACTORY",
+		"K_PLUGIN_CLASS",
+		"K_PLUGIN_FACTORY_WITH_JSON",
+		"K_PLUGIN_CLASS_WITH_JSON"
+	],
+	"MOC_OPTIONS" : [],
+	"MOC_PATH_PREFIX" : false,
+	"MOC_PREDEFS_CMD" : 
+	[
+		"/usr/bin/c++",
+		"-std=c++20",
+		"-w",
+		"-dM",
+		"-E",
+		"/usr/share/cmake/Modules/CMakeCXXCompilerABI.cpp"
+	],
+	"MOC_PREDEFS_FILE" : "/home/dizeman/zed_folder/kate_ai/build/src/kateai_autogen/moc_predefs.h",
+	"MOC_RELAXED_MODE" : false,
+	"MOC_SKIP" : 
+	[
+		"/home/dizeman/zed_folder/kate_ai/build/src/kateai_core_autogen/mocs_compilation.cpp"
+	],
+	"MULTI_CONFIG" : false,
+	"PARALLEL" : 8,
+	"PARSE_CACHE_FILE" : "/home/dizeman/zed_folder/kate_ai/build/src/CMakeFiles/kateai_autogen.dir/ParseCache.txt",
+	"QT_MOC_EXECUTABLE" : "/usr/lib/qt6/moc",
+	"QT_UIC_EXECUTABLE" : "",
+	"QT_VERSION_MAJOR" : 6,
+	"QT_VERSION_MINOR" : 11,
+	"SETTINGS_FILE" : "/home/dizeman/zed_folder/kate_ai/build/src/CMakeFiles/kateai_autogen.dir/AutogenUsed.txt",
+	"SOURCES" : 
+	[
+		[ "/home/dizeman/zed_folder/kate_ai/src/chatwidget.cpp", "Mu", null ],
+		[ "/home/dizeman/zed_folder/kate_ai/src/configpage.cpp", "Mu", null ],
+		[ "/home/dizeman/zed_folder/kate_ai/src/permissionbar.cpp", "Mu", null ],
+		[ "/home/dizeman/zed_folder/kate_ai/src/plugin.cpp", "Mu", null ],
+		[ "/home/dizeman/zed_folder/kate_ai/src/pluginview.cpp", "Mu", null ],
+		[ "/home/dizeman/zed_folder/kate_ai/src/promptedit.cpp", "Mu", null ]
+	],
+	"USE_BETTER_GRAPH" : true,
+	"VERBOSITY" : 0
+}

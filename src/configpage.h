@@ -1,0 +1,49 @@
+#pragma once
+
+#include "types.h"
+
+#include <KTextEditor/ConfigPage>
+
+class QComboBox;
+class QLineEdit;
+class QPlainTextEdit;
+class QSpinBox;
+
+namespace KateAi
+{
+
+class KateAiPlugin;
+
+class KateAiConfigPage : public KTextEditor::ConfigPage
+{
+    Q_OBJECT
+
+public:
+    KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin);
+
+    QString name() const override;
+    QString fullName() const override;
+    QIcon icon() const override;
+
+    void apply() override;
+    void reset() override;
+    void defaults() override;
+
+private:
+    KateAiPlugin *m_plugin = nullptr;
+    QComboBox *m_provider = nullptr;
+    QLineEdit *m_grokKey = nullptr;
+    QLineEdit *m_openaiKey = nullptr;
+    QLineEdit *m_openrouterKey = nullptr;
+    QLineEdit *m_grokModel = nullptr;
+    QLineEdit *m_openaiModel = nullptr;
+    QLineEdit *m_openrouterModel = nullptr;
+    QComboBox *m_permission = nullptr;
+    QComboBox *m_sandbox = nullptr;
+    QSpinBox *m_maxIter = nullptr;
+    QSpinBox *m_timeout = nullptr;
+    QPlainTextEdit *m_system = nullptr;
+    QPlainTextEdit *m_deny = nullptr;
+};
+
+} // namespace KateAi

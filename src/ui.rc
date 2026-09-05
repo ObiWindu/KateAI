@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE gui SYSTEM "kpartgui.dtd">
+<gui name="kateai" version="1" translationDomain="kateai">
+  <MenuBar>
+    <Menu name="tools">
+      <Separator/>
+      <Action name="kateai_toggle"/>
+      <Action name="kateai_new_chat"/>
+      <Action name="kateai_ask_selection"/>
+    </Menu>
+  </MenuBar>
+  <Menu name="ktexteditor_popup">
+    <Separator/>
+    <Action name="kateai_ask_selection"/>
+  </Menu>
+</gui>
