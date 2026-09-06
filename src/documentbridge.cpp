@@ -67,8 +67,11 @@ bool DiskDocumentBridge::writeDocument(const QString &path, const QString &conte
             }
             return false;
         }
-        if (doc->isModified() && !doc->url().isEmpty()) {
-            doc->save();
+        if (doc->isModified() && !doc->url().isEmpty() && !doc->save()) {
+            if (error) {
+                *error = u"The open document was updated but could not be saved."_s;
+            }
+            return false;
         }
         return true;
     }

@@ -76,6 +76,7 @@ ChatWidget::ChatWidget(QWidget *parent)
     connect(m_prompt, &PromptEdit::submitRequested, this, &ChatWidget::submit);
     connect(m_newChat, &QPushButton::clicked, this, &ChatWidget::newChat);
     connect(m_stop, &QPushButton::clicked, this, [this]() {
+        m_permissionBar->hideBar();
         m_agent.abort();
     });
     connect(m_permissionBar, &PermissionBar::decided, &m_agent, &AgentLoop::resolvePermission);
@@ -146,6 +147,7 @@ ChatWidget::ChatWidget(QWidget *parent)
     });
     connect(&m_agent, &AgentLoop::permissionNeeded, this, [this](const PermissionRequest &request) {
         m_permissionBar->showRequest(request);
+        m_prompt->setEnabled(false);
     });
     connect(&m_agent, &AgentLoop::statusChanged, this, [this](const QString &status) {
         m_status->setText(status.isEmpty() ? i18n("Enter to send · Shift+Enter for a new line") : status);

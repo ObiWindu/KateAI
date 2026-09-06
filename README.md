@@ -6,7 +6,7 @@
 
 <p align="center">
   <strong>An AI coding agent for <a href="https://kate-editor.org/">Kate</a></strong><br>
-  Chat, sandboxed tools, and permission — Grok, OpenAI, and OpenRouter.
+  Chat, sandboxed tools, and permission asks — Grok, OpenAI, and OpenRouter.
 </p>
 
 <p align="center">
@@ -25,7 +25,7 @@ Kate AI adds an AI coding assistant to the Kate text editor: a chat prompt in a 
 Kate does not need a world-readable system plugin. The **default** install is per-user: the `.so` lives in your home directory, owned by you, mode `700`. Other accounts on the machine cannot read it. No `sudo`.
 
 ```bash
-git clone https://github.com/ObiWindu/KateAI.git
+git clone https://github.com/<you>/kate-ai.git
 cd kate-ai
 ./install.sh          # same as ./install.sh --user
 ```

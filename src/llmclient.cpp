@@ -263,11 +263,47 @@ void LlmClient::handleFinished()
         return;
     }
 
+    // A final SSE event is allowed to arrive without a trailing newline.  It
+    // has not been handled by readyRead(), so consume it before considering a
+    // non-stream response. Keep m_text and m_toolAcc: earlier events may have
+    // already contributed text and partial tool arguments.
+    if (leftover.trimmed().startsWith("data:")) {
+        QList<ToolCall> tools;
+        for (const QByteArray &line : leftover.split('\n')) {
+            const CompletionChunk chunk = parseSseLine(line, &m_toolAcc);
+            if (!chunk.error.isEmpty()) {
+                Q_EMIT failed(chunk.error);
+                return;
+            }
+            if (!chunk.contentDelta.isEmpty()) {
+                m_text += chunk.contentDelta;
+                Q_EMIT textDelta(chunk.contentDelta);
+            }
+            if (chunk.finished) {
+                tools = chunk.completedTools;
+            }
+        }
+        Q_EMIT finished(m_text, tools);
+        return;
+    }
+
     // Non-stream JSON fallback.
     QJsonParseError parseError;
     const QJsonDocument doc = QJsonDocument::fromJson(leftover, &parseError);
     if (parseError.error == QJsonParseError::NoError && doc.isObject()) {
-        const QJsonObject choice = doc.object().value(u"choices"_s).toArray().at(0).toObject();
+        const QJsonObject root = doc.object();
+        const QJsonValue apiError = root.value(u"error"_s);
+        if (!apiError.isUndefined() && !apiError.isNull()) {
+            const QString message = apiError.isObject() ? apiError.toObject().value(u"message"_s).toString() : apiError.toString();
+            Q_EMIT failed(message.isEmpty() ? u"The provider returned an unknown error."_s : message);
+            return;
+        }
+        const QJsonArray choices = root.value(u"choices"_s).toArray();
+        if (choices.isEmpty()) {
+            Q_EMIT failed(u"The provider response did not contain a completion."_s);
+            return;
+        }
+        const QJsonObject choice = choices.first().toObject();
         const QJsonObject message = choice.value(u"message"_s).toObject();
         const QString content = message.value(u"content"_s).toString();
         QList<ToolCall> tools;
@@ -306,7 +342,7 @@ void LlmClient::handleFinished()
                 return;
             }
         }
-        Q_EMIT finished(text, tools);
+        Q_EMIT finished(m_text + text, tools);
         return;
     }
 

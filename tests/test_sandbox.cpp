@@ -79,6 +79,23 @@ private Q_SLOTS:
         QVERIFY(Sandbox::globMatch(u"*.json"_s, u"kateai.json"_s));
         QVERIFY(Sandbox::globMatch(u"**/.ssh/**"_s, u"/home/me/.ssh/id_rsa"_s));
     }
+
+    void strictCommandsDoNotMountTheHostRoot()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        Sandbox box(dir.path(), SandboxProfile::Strict);
+        QString error;
+        const QStringList command = box.wrapCommand(u"pwd"_s, &error);
+        if (command.isEmpty()) {
+            QSKIP(qPrintable(error));
+        }
+        QVERIFY(command.contains(u"--tmpfs"_s));
+        QVERIFY(!command.contains(u"/bin/sh"_s));
+        for (int i = 0; i + 2 < command.size(); ++i) {
+            QVERIFY(!(command.at(i) == u"--ro-bind"_s && command.at(i + 1) == u"/"_s && command.at(i + 2) == u"/"_s));
+        }
+    }
 };
 
 QTEST_GUILESS_MAIN(TestSandbox)

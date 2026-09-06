@@ -63,6 +63,18 @@ private Q_SLOTS:
         s.provider = Provider::OpenRouter;
         QCOMPARE(apiKeyFor(s), u"or-test"_s);
     }
+
+    void malformedToolArgumentsArePreservedForAnErrorResult()
+    {
+        QHash<int, ToolCall> acc;
+        const CompletionChunk chunk = LlmClient::parseSseLine(
+            QByteArray("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"read_file\",\"arguments\":\"not json\"}}]},\"finish_reason\":\"tool_calls\"}]}"),
+            &acc);
+        QVERIFY(chunk.finished);
+        QCOMPARE(chunk.completedTools.size(), 1);
+        QCOMPARE(chunk.completedTools.first().argumentsJson, u"not json"_s);
+        QVERIFY(chunk.completedTools.first().arguments.isEmpty());
+    }
 };
 
 QTEST_GUILESS_MAIN(TestLlmParse)

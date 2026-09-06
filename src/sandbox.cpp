@@ -329,8 +329,23 @@ QStringList Sandbox::wrapCommand(const QString &command, QString *error) const
 
     const bool readOnlyFs = m_profile == SandboxProfile::ReadOnly;
     QStringList args;
-    args << bwrap << u"--die-with-parent"_s << u"--unshare-pid"_s << u"--unshare-ipc"_s << u"--unshare-uts"_s
-         << u"--proc"_s << u"/proc"_s << u"--dev"_s << u"/dev"_s << u"--ro-bind"_s << u"/"_s << u"/"_s;
+    args << bwrap << u"--die-with-parent"_s << u"--unshare-pid"_s << u"--unshare-ipc"_s << u"--unshare-uts"_s;
+    if (m_profile == SandboxProfile::Strict) {
+        // Do not inherit a read-only host root: strict mode must not expose
+        // arbitrary host files to shell commands. /usr plus runtime library
+        // locations provide the shell and shared libraries on supported Linux
+        // systems; project access is mounted explicitly below.
+        args << u"--tmpfs"_s << u"/"_s;
+        const QStringList runtimeDirectories = {u"/usr"_s, u"/lib"_s, u"/lib64"_s};
+        for (const QString &directory : runtimeDirectories) {
+            if (QFileInfo::exists(directory)) {
+                args << u"--ro-bind"_s << directory << directory;
+            }
+        }
+    } else {
+        args << u"--ro-bind"_s << u"/"_s << u"/"_s;
+    }
+    args << u"--proc"_s << u"/proc"_s << u"--dev"_s << u"/dev"_s;
     args << (readOnlyFs ? u"--ro-bind"_s : u"--bind"_s) << m_workspaceRoot << m_workspaceRoot;
     args << u"--bind"_s << u"/tmp"_s << u"/tmp"_s << u"--chdir"_s << m_workspaceRoot;
 
@@ -338,7 +353,8 @@ QStringList Sandbox::wrapCommand(const QString &command, QString *error) const
         args << u"--unshare-net"_s;
     }
 
-    args << u"--"_s << u"/bin/sh"_s << u"-lc"_s << command;
+    const QString shell = m_profile == SandboxProfile::Strict ? u"/usr/bin/sh"_s : u"/bin/sh"_s;
+    args << u"--"_s << shell << u"-lc"_s << command;
     return args;
 }
 

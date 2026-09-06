@@ -78,13 +78,18 @@ void AgentLoop::resetConversation()
 
 void AgentLoop::abort()
 {
+    const bool hadActiveTurn = m_busy || m_client.isBusy() || !m_queue.isEmpty() || !m_pendingResults.isEmpty()
+        || !m_waitingCall.name.isEmpty();
     m_client.abort();
     m_queue.clear();
     m_pendingResults.clear();
     m_busy = false;
     m_waitingCall = {};
-    Q_EMIT statusChanged(u"Stopped"_s);
-    Q_EMIT turnFinished();
+    m_waitingRequest = {};
+    if (hadActiveTurn) {
+        Q_EMIT statusChanged(u"Stopped"_s);
+        Q_EMIT turnFinished();
+    }
 }
 
 void AgentLoop::start(const QString &userText)
@@ -111,6 +116,10 @@ void AgentLoop::start(const QString &userText)
         system.role = ChatMessage::Role::System;
         system.content = systemPrompt();
         m_messages.append(system);
+    } else if (m_messages.first().role == ChatMessage::Role::System) {
+        // Workspace, selection, and safety settings can change between turns.
+        // Keep the one system message current without discarding the chat history.
+        m_messages.first().content = systemPrompt();
     }
 
     ChatMessage user;
@@ -248,6 +257,8 @@ void AgentLoop::resolvePermission(PermissionDecision decision)
     }
     const ToolCall call = m_waitingCall;
     m_waitingCall = {};
+    const PermissionRequest request = m_waitingRequest;
+    m_waitingRequest = {};
 
     if (decision == PermissionDecision::Deny) {
         ToolResult result;
@@ -264,7 +275,7 @@ void AgentLoop::resolvePermission(PermissionDecision decision)
         m_policy.grantSession(call.name);
     }
 
-    Q_EMIT toolStarted(m_waitingRequest);
+    Q_EMIT toolStarted(request);
     Q_EMIT statusChanged(u"Running %1…"_s.arg(call.name));
     ToolResult result = m_tools->run(call);
     result.toolCallId = call.id;
