@@ -1,10 +1,12 @@
 #include "agentloop.h"
+#include "graph.h"
 
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QFile>
 #include <QFileInfo>
+#include <QDebug>
 
 using namespace Qt::Literals::StringLiterals;
 
@@ -14,6 +16,9 @@ namespace KateAi
 AgentLoop::AgentLoop(QObject *parent)
     : QObject(parent)
 {
+    // Initialize the project graph for understanding and tracking the project
+    m_projectGraph = std::make_unique<ProjectGraph>();
+
     connect(&m_client, &LlmClient::textDelta, this, [this](const QString &delta) {
         m_currentAssistant += delta;
         Q_EMIT assistantDelta(delta);
@@ -37,6 +42,14 @@ void AgentLoop::setSettings(const Settings &settings)
         m_tools = std::make_unique<ToolRunner>(*m_sandbox, m_bridge, this);
         m_tools->setTimeoutMs(settings.bashTimeoutMs);
     }
+    
+    // Persist graph to JSON after generation/update
+    m_projectGraph->saveToFile(m_workspace + "/.kateai/project_graph.json");
+    
+    // Regenerate project graph with new settings
+    if (!m_workspace.isEmpty()) {
+        m_projectGraph->generateGraph(m_workspace);
+    }
 }
 
 void AgentLoop::setWorkspace(const QString &workspace)
@@ -46,6 +59,22 @@ void AgentLoop::setWorkspace(const QString &workspace)
     m_sandbox = std::make_unique<Sandbox>(m_workspace, m_settings.sandbox, m_settings.extraDenyGlobs);
     m_tools = std::make_unique<ToolRunner>(*m_sandbox, m_bridge, this);
     m_tools->setTimeoutMs(m_settings.bashTimeoutMs);
+
+    // Auto-generate or load project graph
+    if (m_projectGraph) {
+        QString graphFilePath = m_workspace + "/.kateai/project_graph.json";
+        if (QFile::exists(graphFilePath)) {
+            // Load existing graph
+            if (!m_projectGraph->loadFromFile(graphFilePath)) {
+                qWarning() << "Failed to load existing graph from" << graphFilePath;
+                // Fall back to generating a new graph
+                m_projectGraph->generateGraph(m_workspace);
+            }
+        } else {
+            // Generate new graph
+            m_projectGraph->generateGraph(m_workspace);
+        }
+    }
 }
 
 void AgentLoop::setDocumentBridge(DocumentBridge *bridge)
@@ -62,6 +91,36 @@ void AgentLoop::setEditorContext(const QString &context)
 {
     // Update the editor context with information about the current document and cursor position
     m_editorContext = context;
+}
+
+void AgentLoop::updateProjectGraph(const QString &filePath, const QString &content)
+{
+    // Update the project graph with changes to a file
+    if (m_projectGraph) {
+        m_projectGraph->updateGraph(filePath, content);
+        m_projectGraph->saveToFile(m_workspace + "/.kateai/project_graph.json");
+    }
+}
+
+QList<GraphNode*> AgentLoop::getProjectNodes() const
+{
+    if (m_projectGraph) {
+        return m_projectGraph->getAllNodes();
+    }
+    return QList<GraphNode*>();
+}
+
+QList<GraphEdge*> AgentLoop::getProjectEdges() const
+{
+    if (m_projectGraph) {
+        // Convert from internal edge representation to public interface
+        QList<GraphEdge*> edges;
+        for (auto it = m_projectGraph->getEdges().begin(); it != m_projectGraph->getEdges().end(); ++it) {
+            edges.append(*it);
+        }
+        return edges;
+    }
+    return QList<GraphEdge*>();
 }
 
 QString AgentLoop::systemPrompt() const
@@ -90,6 +149,38 @@ QString AgentLoop::systemPrompt() const
             }
         }
     }
+    
+    // Add project graph information to help the agent understand the project structure
+    if (m_projectGraph && m_projectGraph->getNodeCount() > 0) {
+        prompt += u"\n\n<project_graph>\n"_s;
+        prompt += u"Project contains "_s + QString::number(m_projectGraph->getNodeCount()) + u" nodes and "_s + 
+                  QString::number(m_projectGraph->getEdgeCount()) + u" edges.\n"_s;
+        
+        // Add summary of node types
+        QMap<QString, int> typeCount;
+        for (auto it = m_projectGraph->getNodes().begin(); it != m_projectGraph->getNodes().end(); ++it) {
+            const GraphNode *node = it.value();
+            typeCount[node->type]++;
+        }
+        
+        prompt += u"Node types:\n"_s;
+        for (auto it = typeCount.begin(); it != typeCount.end(); ++it) {
+            prompt += u"  - "_s + it.key() + u": "_s + QString::number(it.value()) + u"\n"_s;
+        }
+        
+        // Add key dependencies
+        prompt += u"\nKey dependencies:\n"_s;
+        for (auto it = m_projectGraph->getEdges().begin(); it != m_projectGraph->getEdges().end(); ++it) {
+            const GraphEdge *edge = it.value();
+            if (edge->relationship == u"imports"_s || edge->relationship == u"calls"_s || edge->relationship == u"extends"_s) {
+                prompt += u"  - "_s + edge->sourceId + u" -> "_s + edge->targetId +
+                          u" ("_s + edge->relationship + u")\n"_s;
+            }
+        }
+        
+        prompt += u"</project_graph>\n"_s;
+    }
+    
     return prompt;
 }
 

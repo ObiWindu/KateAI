@@ -387,6 +387,17 @@ src/CMakeFiles/kateai.dir/kateai_autogen/mocs_compilation.cpp.o: \
  /home/macewindu/ai-dev/KateAI/build/src/kateai_autogen/EWIEGA46WW/../../../../src/permissions.h \
  /home/macewindu/ai-dev/KateAI/build/src/kateai_autogen/EWIEGA46WW/../../../../src/sandbox.h \
  /home/macewindu/ai-dev/KateAI/build/src/kateai_autogen/EWIEGA46WW/../../../../src/tools.h \
+ /home/macewindu/ai-dev/KateAI/build/src/kateai_autogen/EWIEGA46WW/../../../../src/graph.h \
+ /usr/include/qt6/QtCore/QMap /usr/include/qt6/QtCore/QSet \
+ /usr/include/qt6/QtCore/QDir /usr/include/qt6/QtCore/qdir.h \
+ /usr/include/qt6/QtCore/qdirlisting.h \
+ /usr/include/qt6/QtCore/qfiledevice.h /usr/include/c++/16/filesystem \
+ /usr/include/c++/16/bits/fs_fwd.h /usr/include/c++/16/bits/fs_path.h \
+ /usr/include/c++/16/iomanip /usr/include/c++/16/bits/quoted_string.h \
+ /usr/include/c++/16/codecvt /usr/include/c++/16/bits/fs_dir.h \
+ /usr/include/c++/16/bits/fs_ops.h /usr/include/qt6/QtCore/qfile.h \
+ /usr/include/qt6/QtCore/qfileinfo.h /usr/include/qt6/QtCore/qtimezone.h \
+ /usr/include/qt6/QtCore/QDateTime /usr/include/qt6/QtCore/QFileInfo \
  /usr/include/qt6/QtWidgets/QWidget /usr/include/qt6/QtWidgets/qwidget.h \
  /usr/include/qt6/QtWidgets/qtwidgetsglobal.h \
  /usr/include/qt6/QtGui/qtguiglobal.h \

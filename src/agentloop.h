@@ -6,6 +6,7 @@
 #include "sandbox.h"
 #include "tools.h"
 #include "types.h"
+#include "graph.h"
 
 #include <QObject>
 #include <memory>
@@ -24,6 +25,12 @@ public:
     void setWorkspace(const QString &workspace);
     void setDocumentBridge(DocumentBridge *bridge);
     void setEditorContext(const QString &context);
+
+    // Project graph management
+    void updateProjectGraph(const QString &filePath, const QString &content);
+    ProjectGraph* getProjectGraph() const { return m_projectGraph.get(); }
+    QList<GraphNode*> getProjectNodes() const;
+    QList<GraphEdge*> getProjectEdges() const;
 
     bool isBusy() const
     {
@@ -76,6 +83,7 @@ private:
     PermissionPolicy m_policy;
     std::unique_ptr<Sandbox> m_sandbox;
     std::unique_ptr<ToolRunner> m_tools;
+    std::unique_ptr<ProjectGraph> m_projectGraph;
     QList<ChatMessage> m_messages;
     QList<ToolCall> m_queue;
     QList<ToolResult> m_pendingResults;

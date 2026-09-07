@@ -351,6 +351,30 @@ documentbridge.cpp.s:
 	cd /home/macewindu/ai-dev/KateAI/build && $(MAKE) $(MAKESILENT) -f src/CMakeFiles/kateai_core.dir/build.make src/CMakeFiles/kateai_core.dir/documentbridge.cpp.s
 .PHONY : documentbridge.cpp.s
 
+graph/projectgraph.o: graph/projectgraph.cpp.o
+.PHONY : graph/projectgraph.o
+
+# target to build an object file
+graph/projectgraph.cpp.o:
+	cd /home/macewindu/ai-dev/KateAI/build && $(MAKE) $(MAKESILENT) -f src/CMakeFiles/kateai_core.dir/build.make src/CMakeFiles/kateai_core.dir/graph/projectgraph.cpp.o
+.PHONY : graph/projectgraph.cpp.o
+
+graph/projectgraph.i: graph/projectgraph.cpp.i
+.PHONY : graph/projectgraph.i
+
+# target to preprocess a source file
+graph/projectgraph.cpp.i:
+	cd /home/macewindu/ai-dev/KateAI/build && $(MAKE) $(MAKESILENT) -f src/CMakeFiles/kateai_core.dir/build.make src/CMakeFiles/kateai_core.dir/graph/projectgraph.cpp.i
+.PHONY : graph/projectgraph.cpp.i
+
+graph/projectgraph.s: graph/projectgraph.cpp.s
+.PHONY : graph/projectgraph.s
+
+# target to generate assembly for a file
+graph/projectgraph.cpp.s:
+	cd /home/macewindu/ai-dev/KateAI/build && $(MAKE) $(MAKESILENT) -f src/CMakeFiles/kateai_core.dir/build.make src/CMakeFiles/kateai_core.dir/graph/projectgraph.cpp.s
+.PHONY : graph/projectgraph.cpp.s
+
 kateai_autogen/EWIEGA46WW/qrc_kateai.o: kateai_autogen/EWIEGA46WW/qrc_kateai.cpp.o
 .PHONY : kateai_autogen/EWIEGA46WW/qrc_kateai.o
 
@@ -718,6 +742,9 @@ help:
 	@echo "... documentbridge.o"
 	@echo "... documentbridge.i"
 	@echo "... documentbridge.s"
+	@echo "... graph/projectgraph.o"
+	@echo "... graph/projectgraph.i"
+	@echo "... graph/projectgraph.s"
 	@echo "... kateai_autogen/EWIEGA46WW/qrc_kateai.o"
 	@echo "... kateai_autogen/EWIEGA46WW/qrc_kateai.i"
 	@echo "... kateai_autogen/EWIEGA46WW/qrc_kateai.s"

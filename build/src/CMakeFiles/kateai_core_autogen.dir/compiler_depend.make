@@ -7,6 +7,9 @@ src/kateai_core_autogen/timestamp: src/kateai_core_autogen/moc_predefs.h \
   /home/macewindu/ai-dev/KateAI/src/agentloop.h \
   /home/macewindu/ai-dev/KateAI/src/documentbridge.cpp \
   /home/macewindu/ai-dev/KateAI/src/documentbridge.h \
+  /home/macewindu/ai-dev/KateAI/src/graph.h \
+  /home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp \
+  /home/macewindu/ai-dev/KateAI/src/graph/projectgraph.h \
   /home/macewindu/ai-dev/KateAI/src/kateai.qrc \
   /home/macewindu/ai-dev/KateAI/src/llmclient.cpp \
   /home/macewindu/ai-dev/KateAI/src/llmclient.h \
@@ -270,6 +273,7 @@ src/kateai_core_autogen/timestamp: src/kateai_core_autogen/moc_predefs.h \
   /usr/include/c++/16/ext/numeric_traits.h \
   /usr/include/c++/16/ext/string_conversions.h \
   /usr/include/c++/16/ext/type_traits.h \
+  /usr/include/c++/16/filesystem \
   /usr/include/c++/16/format \
   /usr/include/c++/16/functional \
   /usr/include/c++/16/initializer_list \
@@ -340,13 +344,18 @@ src/kateai_core_autogen/timestamp: src/kateai_core_autogen/moc_predefs.h \
   /usr/include/linux/types.h \
   /usr/include/locale.h \
   /usr/include/pthread.h \
+  /usr/include/qt6/QtCore/QDateTime \
+  /usr/include/qt6/QtCore/QDir \
+  /usr/include/qt6/QtCore/QFileInfo \
   /usr/include/qt6/QtCore/QFlags \
   /usr/include/qt6/QtCore/QHash \
   /usr/include/qt6/QtCore/QJsonArray \
   /usr/include/qt6/QtCore/QJsonObject \
   /usr/include/qt6/QtCore/QList \
+  /usr/include/qt6/QtCore/QMap \
   /usr/include/qt6/QtCore/QMetaType \
   /usr/include/qt6/QtCore/QObject \
+  /usr/include/qt6/QtCore/QSet \
   /usr/include/qt6/QtCore/QSharedDataPointer \
   /usr/include/qt6/QtCore/QString \
   /usr/include/qt6/QtCore/QStringList \
@@ -396,8 +405,13 @@ src/kateai_core_autogen/timestamp: src/kateai_core_autogen/moc_predefs.h \
   /usr/include/qt6/QtCore/qdatastream.h \
   /usr/include/qt6/QtCore/qdatetime.h \
   /usr/include/qt6/QtCore/qdebug.h \
+  /usr/include/qt6/QtCore/qdir.h \
+  /usr/include/qt6/QtCore/qdirlisting.h \
   /usr/include/qt6/QtCore/qendian.h \
   /usr/include/qt6/QtCore/qexceptionhandling.h \
+  /usr/include/qt6/QtCore/qfile.h \
+  /usr/include/qt6/QtCore/qfiledevice.h \
+  /usr/include/qt6/QtCore/qfileinfo.h \
   /usr/include/qt6/QtCore/qflags.h \
   /usr/include/qt6/QtCore/qfloat16.h \
   /usr/include/qt6/QtCore/qforeach.h \
@@ -473,6 +487,7 @@ src/kateai_core_autogen/timestamp: src/kateai_core_autogen/moc_predefs.h \
   /usr/include/qt6/QtCore/qtenvironmentvariables.h \
   /usr/include/qt6/QtCore/qtextstream.h \
   /usr/include/qt6/QtCore/qtformat_impl.h \
+  /usr/include/qt6/QtCore/qtimezone.h \
   /usr/include/qt6/QtCore/qtmetamacros.h \
   /usr/include/qt6/QtCore/qtnoop.h \
   /usr/include/qt6/QtCore/qtpreprocessorsupport.h \
@@ -650,9 +665,19 @@ src/kateai_core_autogen/timestamp: src/kateai_core_autogen/moc_predefs.h \
 
 /usr/include/qt6/QtCore/qfloat16.h:
 
+/usr/include/qt6/QtCore/qfileinfo.h:
+
+/usr/include/qt6/QtCore/qfile.h:
+
 /usr/include/qt6/QtCore/qexceptionhandling.h:
 
 /usr/include/qt6/QtCore/qendian.h:
+
+/usr/include/qt6/QtCore/qtimezone.h:
+
+/usr/include/qt6/QtCore/qfiledevice.h:
+
+/usr/include/qt6/QtCore/qdirlisting.h:
 
 /usr/include/qt6/QtCore/qdatastream.h:
 
@@ -674,6 +699,8 @@ src/kateai_core_autogen/timestamp: src/kateai_core_autogen/moc_predefs.h \
 
 /usr/include/qt6/QtCore/qcomparehelpers.h:
 
+/usr/include/qt6/QtCore/qdir.h:
+
 /usr/include/qt6/QtCore/qcompare.h:
 
 /usr/include/qt6/QtCore/qchar.h:
@@ -690,8 +717,6 @@ src/kateai_core_autogen/timestamp: src/kateai_core_autogen/moc_predefs.h \
 
 /usr/include/qt6/QtCore/qbytearrayalgorithms.h:
 
-/usr/include/qt6/QtCore/qbindingstorage.h:
-
 /usr/include/qt6/QtCore/qatomic_cxx11.h:
 
 /usr/include/qt6/QtCore/qassert.h:
@@ -699,8 +724,6 @@ src/kateai_core_autogen/timestamp: src/kateai_core_autogen/moc_predefs.h \
 /usr/include/qt6/QtCore/qflags.h:
 
 /usr/include/qt6/QtCore/qarraydataops.h:
-
-/usr/include/qt6/QtCore/qanystringview.h:
 
 /usr/include/qt6/QtCore/qalloc.h:
 
@@ -718,11 +741,23 @@ src/kateai_core_autogen/timestamp: src/kateai_core_autogen/moc_predefs.h \
 
 /usr/include/qt6/QtCore/QVariant:
 
+/usr/include/qt6/QtCore/qanystringview.h:
+
+/usr/include/qt6/QtCore/QMap:
+
 /usr/include/qt6/QtCore/QJsonObject:
 
 /usr/include/qt6/QtCore/QJsonArray:
 
 /usr/include/qt6/QtCore/QFlags:
+
+/usr/include/qt6/QtCore/qbindingstorage.h:
+
+/usr/include/qt6/QtCore/QFileInfo:
+
+/usr/include/qt6/QtCore/QDir:
+
+/usr/include/qt6/QtCore/QDateTime:
 
 /usr/include/locale.h:
 
@@ -816,6 +851,8 @@ src/kateai_core_autogen/timestamp: src/kateai_core_autogen/moc_predefs.h \
 
 /usr/include/c++/16/ios:
 
+/usr/include/c++/16/filesystem:
+
 /usr/include/c++/16/ext/concurrence.h:
 
 /usr/include/sys/select.h:
@@ -832,19 +869,9 @@ src/kateai_core_autogen/timestamp: src/kateai_core_autogen/moc_predefs.h \
 
 /usr/include/c++/16/cwchar:
 
-/usr/include/qt6/QtCore/qarraydatapointer.h:
+/usr/include/c++/16/ctime:
 
-/usr/include/c++/16/bits/atomic_lockfree_defines.h:
-
-/usr/include/qt6/QtCore/QHash:
-
-/usr/include/bits/cpu-set.h:
-
-/usr/include/qt6/QtNetwork/qnetworkrequest.h:
-
-/usr/include/qt6/QtCore/qcontainertools_impl.h:
-
-/usr/include/c++/16/bits/atomic_base.h:
+/usr/include/c++/16/cstring:
 
 /usr/include/qt6/QtCore/qspan.h:
 
@@ -1010,31 +1037,17 @@ src/kateai_core_autogen/timestamp: src/kateai_core_autogen/moc_predefs.h \
 
 /usr/include/bits/thread-shared-types.h:
 
-/usr/include/bits/types/time_t.h:
-
-/usr/include/c++/16/unordered_map:
-
-/usr/include/c++/16/bits/localefwd.h:
-
-/usr/include/c++/16/bits/shared_ptr_atomic.h:
-
 /usr/include/c++/16/bits/allocated_ptr.h:
 
-/usr/include/qt6/QtCore/qconfig.h:
+/home/macewindu/ai-dev/KateAI/src/graph.h:
 
-/usr/include/c++/16/clocale:
+/usr/include/bits/stdio_lim.h:
 
-/usr/include/asm-generic/errno-base.h:
-
-/usr/include/c++/16/bits/stl_multiset.h:
+/usr/include/bits/types/__mbstate_t.h:
 
 /usr/include/qt6/QtCore/quuid.h:
 
 /usr/include/c++/16/array:
-
-/usr/include/bits/types/__mbstate_t.h:
-
-/usr/include/bits/stdio_lim.h:
 
 /usr/include/bits/time.h:
 
@@ -1056,14 +1069,6 @@ src/kateai_core_autogen/timestamp: src/kateai_core_autogen/moc_predefs.h \
 
 /usr/include/bits/typesizes.h:
 
-/home/macewindu/ai-dev/KateAI/src/settings.h:
-
-/usr/include/qt6/QtCore/QUrl:
-
-/home/macewindu/ai-dev/KateAI/src/llmclient.h:
-
-/usr/include/bits/pthreadtypes.h:
-
 /usr/include/bits/types/mbstate_t.h:
 
 /usr/include/c++/16/functional:
@@ -1071,6 +1076,30 @@ src/kateai_core_autogen/timestamp: src/kateai_core_autogen/moc_predefs.h \
 /home/macewindu/ai-dev/KateAI/src/settings.cpp:
 
 /usr/include/c++/16/bits/node_handle.h:
+
+/usr/include/qt6/QtNetwork/qtnetworkexports.h:
+
+/usr/include/c++/16/string_view:
+
+/usr/include/bits/types/__fpos64_t.h:
+
+/home/macewindu/ai-dev/KateAI/src/permissions.cpp:
+
+/usr/include/qt6/QtCore/qsystemdetection.h:
+
+/usr/include/c++/16/tr1/modified_bessel_func.tcc:
+
+src/kateai_core_autogen/moc_predefs.h:
+
+/usr/include/c++/16/pstl/glue_numeric_defs.h:
+
+/usr/include/c++/16/aarch64-redhat-linux/bits/error_constants.h:
+
+/usr/include/qt6/QtCore/qlist.h:
+
+/usr/include/bits/uintn-identity.h:
+
+/usr/include/bits/select.h:
 
 /usr/include/bits/waitstatus.h:
 
@@ -1088,6 +1117,16 @@ src/kateai_core_autogen/timestamp: src/kateai_core_autogen/moc_predefs.h \
 
 /usr/include/bits/pthread_stack_min-dynamic.h:
 
+/usr/include/asm/bitsperlong.h:
+
+/home/macewindu/ai-dev/KateAI/src/tools.h:
+
+/usr/include/bits/long-double.h:
+
+/usr/include/c++/16/aarch64-redhat-linux/bits/c++locale.h:
+
+/usr/include/bits/posix2_lim.h:
+
 /usr/include/qt6/QtCore/qxptype_traits.h:
 
 /usr/include/qt6/QtCore/qdatetime.h:
@@ -1096,25 +1135,21 @@ src/kateai_core_autogen/timestamp: src/kateai_core_autogen/moc_predefs.h \
 
 /usr/include/asm-generic/int-ll64.h:
 
-/usr/include/asm/bitsperlong.h:
+/home/macewindu/ai-dev/KateAI/src/settings.h:
 
-/usr/include/c++/16/aarch64-redhat-linux/bits/c++locale.h:
+/usr/include/qt6/QtCore/QUrl:
 
-/usr/include/bits/posix2_lim.h:
+/home/macewindu/ai-dev/KateAI/src/llmclient.h:
 
-/usr/include/c++/16/bits/ostream.tcc:
+/usr/include/bits/pthreadtypes.h:
 
-/usr/include/c++/16/aarch64-redhat-linux/bits/gthr-default.h:
+/usr/include/bits/types/time_t.h:
 
-/usr/include/c++/16/iosfwd:
+/usr/include/c++/16/unordered_map:
 
-/usr/include/bits/types/__sigset_t.h:
+/usr/include/c++/16/bits/localefwd.h:
 
-/usr/include/c++/16/bits/stl_map.h:
-
-/home/macewindu/ai-dev/KateAI/src/tools.h:
-
-/usr/include/bits/long-double.h:
+/usr/include/c++/16/bits/shared_ptr_atomic.h:
 
 /usr/lib/gcc/aarch64-redhat-linux/16/include/stdarg.h:
 
@@ -1126,13 +1161,33 @@ src/kateai_core_autogen/timestamp: src/kateai_core_autogen/moc_predefs.h \
 
 /usr/include/bits/posix1_lim.h:
 
-/usr/include/qt6/QtNetwork/qtnetworkexports.h:
+/usr/include/c++/16/bits/stl_multiset.h:
 
-/usr/include/c++/16/string_view:
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:
 
-/usr/include/bits/types/__fpos64_t.h:
+/usr/include/c++/16/bits/stl_uninitialized.h:
 
-/home/macewindu/ai-dev/KateAI/src/permissions.cpp:
+/home/macewindu/ai-dev/KateAI/src/sandbox.h:
+
+/usr/include/c++/16/bits/string_view.tcc:
+
+/usr/include/c++/16/bits/stl_construct.h:
+
+/usr/include/bits/xopen_lim.h:
+
+/usr/include/c++/16/bits/ranges_algo.h:
+
+/usr/include/c++/16/bits/ranges_base.h:
+
+/usr/include/c++/16/bits/uses_allocator_args.h:
+
+/usr/include/sys/cdefs.h:
+
+/home/macewindu/ai-dev/KateAI/src/kateai.qrc:
+
+/usr/include/qt6/QtCore/q26numeric.h:
+
+/usr/include/c++/16/bits/stl_relops.h:
 
 /usr/include/alloca.h:
 
@@ -1160,6 +1215,8 @@ src/kateai_core_autogen/timestamp: src/kateai_core_autogen/moc_predefs.h \
 
 /usr/include/c++/16/bits/istream.tcc:
 
+/usr/include/qt6/QtCore/QSet:
+
 /usr/include/c++/16/bits/stl_tree.h:
 
 /usr/include/c++/16/cerrno:
@@ -1170,10 +1227,6 @@ src/kateai_core_autogen/timestamp: src/kateai_core_autogen/moc_predefs.h \
 
 /usr/include/c++/16/bits/unordered_map.h:
 
-/home/macewindu/ai-dev/KateAI/src/documentbridge.h:
-
-/usr/include/c++/16/bits/stl_function.h:
-
 /usr/include/stdio.h:
 
 /usr/include/c++/16/stdexcept:
@@ -1182,45 +1235,25 @@ src/kateai_core_autogen/timestamp: src/kateai_core_autogen/moc_predefs.h \
 
 /home/macewindu/ai-dev/KateAI/src/workspace.h:
 
+/home/macewindu/ai-dev/KateAI/src/documentbridge.h:
+
+/usr/include/c++/16/bits/stl_function.h:
+
 /usr/include/qt6/QtCore/qtcoreexports.h:
 
 /usr/include/bits/local_lim.h:
 
 /usr/include/c++/16/bits/iterator_concepts.h:
 
-/usr/include/qt6/QtCore/qsystemdetection.h:
+/usr/include/c++/16/bits/ostream.tcc:
 
-/usr/include/c++/16/tr1/modified_bessel_func.tcc:
+/usr/include/c++/16/aarch64-redhat-linux/bits/gthr-default.h:
 
-src/kateai_core_autogen/moc_predefs.h:
+/usr/include/c++/16/iosfwd:
 
-/usr/include/c++/16/pstl/glue_numeric_defs.h:
+/usr/include/bits/types/__sigset_t.h:
 
-/usr/include/c++/16/aarch64-redhat-linux/bits/error_constants.h:
-
-/usr/include/qt6/QtCore/qlist.h:
-
-/usr/include/bits/uintn-identity.h:
-
-/usr/include/bits/select.h:
-
-/usr/include/c++/16/bits/stl_construct.h:
-
-/usr/include/bits/xopen_lim.h:
-
-/usr/include/c++/16/bits/ranges_algo.h:
-
-/usr/include/c++/16/bits/ranges_base.h:
-
-/usr/include/c++/16/bits/uses_allocator_args.h:
-
-/usr/include/sys/cdefs.h:
-
-/home/macewindu/ai-dev/KateAI/src/kateai.qrc:
-
-/usr/include/qt6/QtCore/q26numeric.h:
-
-/usr/include/c++/16/bits/stl_relops.h:
+/usr/include/c++/16/bits/stl_map.h:
 
 /usr/include/bits/types/struct_FILE.h:
 
@@ -1242,9 +1275,13 @@ src/kateai_core_autogen/moc_predefs.h:
 
 /usr/include/c++/16/bits/requires_hosted.h:
 
-/usr/include/bits/stdint-uintn.h:
+/usr/include/qt6/QtCore/QHash:
 
-/usr/include/asm/errno.h:
+/usr/include/bits/cpu-set.h:
+
+/usr/include/qt6/QtCore/qarraydatapointer.h:
+
+/usr/include/c++/16/bits/atomic_lockfree_defines.h:
 
 /usr/include/c++/16/tr1/riemann_zeta.tcc:
 
@@ -1260,11 +1297,27 @@ src/kateai_core_autogen/moc_predefs.h:
 
 /usr/include/c++/16/backward/auto_ptr.h:
 
-/usr/include/c++/16/bits/atomic_wait.h:
+/usr/include/bits/types/cookie_io_functions_t.h:
+
+/usr/include/asm/errno.h:
+
+/usr/include/bits/stdint-uintn.h:
+
+/usr/include/qt6/QtNetwork/qnetworkrequest.h:
+
+/usr/include/qt6/QtCore/qcontainertools_impl.h:
+
+/usr/include/c++/16/bits/atomic_base.h:
 
 /usr/include/bits/pthreadtypes-arch.h:
 
-/usr/include/bits/types/cookie_io_functions_t.h:
+/usr/include/c++/16/bits/atomic_wait.h:
+
+/usr/include/qt6/QtCore/qconfig.h:
+
+/usr/include/asm-generic/errno-base.h:
+
+/usr/include/c++/16/clocale:
 
 /usr/include/qt6/QtCore/qstringalgorithms.h:
 
@@ -1378,6 +1431,8 @@ src/kateai_core_autogen/moc_predefs.h:
 
 /usr/include/c++/16/bits/chrono_io.h:
 
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.h:
+
 /usr/include/c++/16/bits/exception_ptr.h:
 
 /usr/include/c++/16/bits/functexcept.h:
@@ -1488,8 +1543,6 @@ src/kateai_core_autogen/moc_predefs.h:
 
 /usr/include/c++/16/bits/specfun.h:
 
-/usr/include/c++/16/cstring:
-
 /usr/include/c++/16/bits/sstream.tcc:
 
 /usr/include/c++/16/bits/stdexcept_throw.h:
@@ -1502,9 +1555,9 @@ src/kateai_core_autogen/moc_predefs.h:
 
 /usr/include/c++/16/debug/debug.h:
 
-/usr/include/asm-generic/types.h:
-
 /usr/include/asm-generic/bitsperlong.h:
+
+/usr/include/asm-generic/types.h:
 
 /usr/include/c++/16/bits/stl_bvector.h:
 
@@ -1531,12 +1584,6 @@ src/kateai_core_autogen/moc_predefs.h:
 /usr/include/features-time64.h:
 
 /usr/include/c++/16/bits/stl_set.h:
-
-/usr/include/c++/16/bits/stl_uninitialized.h:
-
-/home/macewindu/ai-dev/KateAI/src/sandbox.h:
-
-/usr/include/c++/16/bits/string_view.tcc:
 
 /usr/include/asm-generic/errno.h:
 
@@ -1575,5 +1622,3 @@ src/kateai_core_autogen/moc_predefs.h:
 /usr/include/c++/16/cstdint:
 
 /usr/include/c++/16/cstdio:
-
-/usr/include/c++/16/ctime:

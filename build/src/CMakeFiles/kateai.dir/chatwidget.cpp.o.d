@@ -386,6 +386,16 @@ src/CMakeFiles/kateai.dir/chatwidget.cpp.o: \
  /home/macewindu/ai-dev/KateAI/src/permissions.h \
  /home/macewindu/ai-dev/KateAI/src/sandbox.h \
  /home/macewindu/ai-dev/KateAI/src/tools.h \
+ /home/macewindu/ai-dev/KateAI/src/graph.h /usr/include/qt6/QtCore/QMap \
+ /usr/include/qt6/QtCore/QSet /usr/include/qt6/QtCore/QDir \
+ /usr/include/qt6/QtCore/qdir.h /usr/include/qt6/QtCore/qdirlisting.h \
+ /usr/include/qt6/QtCore/qfiledevice.h /usr/include/c++/16/filesystem \
+ /usr/include/c++/16/bits/fs_fwd.h /usr/include/c++/16/bits/fs_path.h \
+ /usr/include/c++/16/iomanip /usr/include/c++/16/bits/quoted_string.h \
+ /usr/include/c++/16/codecvt /usr/include/c++/16/bits/fs_dir.h \
+ /usr/include/c++/16/bits/fs_ops.h /usr/include/qt6/QtCore/qfile.h \
+ /usr/include/qt6/QtCore/qfileinfo.h /usr/include/qt6/QtCore/qtimezone.h \
+ /usr/include/qt6/QtCore/QDateTime /usr/include/qt6/QtCore/QFileInfo \
  /usr/include/qt6/QtWidgets/QWidget /usr/include/qt6/QtWidgets/qwidget.h \
  /usr/include/qt6/QtWidgets/qtwidgetsglobal.h \
  /usr/include/qt6/QtGui/qtguiglobal.h \
@@ -449,8 +459,7 @@ src/CMakeFiles/kateai.dir/chatwidget.cpp.o: \
  /usr/include/KF6/KI18n/klocalizedstring.h \
  /usr/include/KF6/KI18n/ki18n_export.h \
  /usr/include/KF6/KI18n/ki18n_version.h /usr/include/qt6/QtCore/QChar \
- /usr/include/qt6/QtCore/QLatin1Char /usr/include/qt6/QtCore/QSet \
- /usr/include/KF6/KI18n/kuitsetup.h \
+ /usr/include/qt6/QtCore/QLatin1Char /usr/include/KF6/KI18n/kuitsetup.h \
  /usr/include/KF6/KI18n/klocalizedcontext.h \
  /usr/include/qt6/QtCore/QVariant /usr/include/qt6/QtWidgets/QComboBox \
  /usr/include/qt6/QtWidgets/qcombobox.h \

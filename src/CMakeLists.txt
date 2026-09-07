@@ -8,6 +8,7 @@ add_library(kateai_core STATIC
     agentloop.cpp
     workspace.cpp
     documentbridge.cpp
+    graph/projectgraph.cpp
 )
 
 set_target_properties(kateai_core PROPERTIES POSITION_INDEPENDENT_CODE ON)

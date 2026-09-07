@@ -5,6 +5,9 @@ kateai_core_autogen/timestamp: \
 	/home/macewindu/ai-dev/KateAI/src/agentloop.h \
 	/home/macewindu/ai-dev/KateAI/src/documentbridge.cpp \
 	/home/macewindu/ai-dev/KateAI/src/documentbridge.h \
+	/home/macewindu/ai-dev/KateAI/src/graph.h \
+	/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp \
+	/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.h \
 	/home/macewindu/ai-dev/KateAI/src/kateai.qrc \
 	/home/macewindu/ai-dev/KateAI/src/llmclient.cpp \
 	/home/macewindu/ai-dev/KateAI/src/llmclient.h \
@@ -267,6 +270,7 @@ kateai_core_autogen/timestamp: \
 	/usr/include/c++/16/ext/numeric_traits.h \
 	/usr/include/c++/16/ext/string_conversions.h \
 	/usr/include/c++/16/ext/type_traits.h \
+	/usr/include/c++/16/filesystem \
 	/usr/include/c++/16/format \
 	/usr/include/c++/16/functional \
 	/usr/include/c++/16/initializer_list \
@@ -337,13 +341,18 @@ kateai_core_autogen/timestamp: \
 	/usr/include/linux/types.h \
 	/usr/include/locale.h \
 	/usr/include/pthread.h \
+	/usr/include/qt6/QtCore/QDateTime \
+	/usr/include/qt6/QtCore/QDir \
+	/usr/include/qt6/QtCore/QFileInfo \
 	/usr/include/qt6/QtCore/QFlags \
 	/usr/include/qt6/QtCore/QHash \
 	/usr/include/qt6/QtCore/QJsonArray \
 	/usr/include/qt6/QtCore/QJsonObject \
 	/usr/include/qt6/QtCore/QList \
+	/usr/include/qt6/QtCore/QMap \
 	/usr/include/qt6/QtCore/QMetaType \
 	/usr/include/qt6/QtCore/QObject \
+	/usr/include/qt6/QtCore/QSet \
 	/usr/include/qt6/QtCore/QSharedDataPointer \
 	/usr/include/qt6/QtCore/QString \
 	/usr/include/qt6/QtCore/QStringList \
@@ -393,8 +402,13 @@ kateai_core_autogen/timestamp: \
 	/usr/include/qt6/QtCore/qdatastream.h \
 	/usr/include/qt6/QtCore/qdatetime.h \
 	/usr/include/qt6/QtCore/qdebug.h \
+	/usr/include/qt6/QtCore/qdir.h \
+	/usr/include/qt6/QtCore/qdirlisting.h \
 	/usr/include/qt6/QtCore/qendian.h \
 	/usr/include/qt6/QtCore/qexceptionhandling.h \
+	/usr/include/qt6/QtCore/qfile.h \
+	/usr/include/qt6/QtCore/qfiledevice.h \
+	/usr/include/qt6/QtCore/qfileinfo.h \
 	/usr/include/qt6/QtCore/qflags.h \
 	/usr/include/qt6/QtCore/qfloat16.h \
 	/usr/include/qt6/QtCore/qforeach.h \
@@ -470,6 +484,7 @@ kateai_core_autogen/timestamp: \
 	/usr/include/qt6/QtCore/qtenvironmentvariables.h \
 	/usr/include/qt6/QtCore/qtextstream.h \
 	/usr/include/qt6/QtCore/qtformat_impl.h \
+	/usr/include/qt6/QtCore/qtimezone.h \
 	/usr/include/qt6/QtCore/qtmetamacros.h \
 	/usr/include/qt6/QtCore/qtnoop.h \
 	/usr/include/qt6/QtCore/qtpreprocessorsupport.h \

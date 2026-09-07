@@ -40,6 +40,7 @@ private:
     ToolResult grep(const QJsonObject &args) const;
     ToolResult glob(const QJsonObject &args) const;
     ToolResult bash(const QJsonObject &args);
+    ToolResult queryProjectGraph(const QJsonObject &args) const;
 
     Sandbox m_sandbox;
     DocumentBridge *m_bridge = nullptr;

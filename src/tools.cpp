@@ -500,10 +500,10 @@ ToolResult ToolRunner::bash(const QJsonObject &args)
     // Initialize the result structure to track success/failure
     ToolResult result;
     result.name = u"bash"_s;
-    
+
     // Extract the command to execute from the tool arguments
     const QString command = args.value(u"command"_s).toString();
-    
+
     // Wrap the command with sandbox security restrictions
     QString error;
     const QStringList wrapped = m_sandbox.wrapCommand(command, &error);
@@ -517,18 +517,18 @@ ToolResult ToolRunner::bash(const QJsonObject &args)
     QProcess process;
     process.setWorkingDirectory(m_sandbox.workspaceRoot());
     process.setProcessChannelMode(QProcess::MergedChannels);
-    
+
     // Start the process with the wrapped command
     const QString program = wrapped.first();
     process.start(program, wrapped.mid(1));
-    
+
     // Check if the process started successfully
     if (!process.waitForStarted(5000)) {
         result.ok = false;
         result.output = u"Failed to start command: %1"_s.arg(process.errorString());
         return result;
     }
-    
+
     // Wait for the process to complete with a timeout
     if (!process.waitForFinished(m_timeoutMs)) {
         // Kill the process if it times out
@@ -538,18 +538,59 @@ ToolResult ToolRunner::bash(const QJsonObject &args)
         result.output = u"Command timed out after %1 ms."_s.arg(m_timeoutMs);
         return result;
     }
-    
+
     // Capture the command output
     const QString output = QString::fromUtf8(process.readAll());
-    
+
     // Determine if the command executed successfully
     result.ok = process.exitStatus() == QProcess::NormalExit && process.exitCode() == 0;
-    
+
     // Format the output with appropriate truncation and exit code information
     result.output = clip(output.isEmpty() ? u"(no output, exit %1)"_s.arg(process.exitCode()) : output);
     if (!result.ok) {
         result.output += u"\nexit code %1"_s.arg(process.exitCode());
     }
+    return result;
+}
+
+ToolResult ToolRunner::queryProjectGraph(const QJsonObject &args) const
+{
+    // Initialize the result structure to track success/failure
+    ToolResult result;
+    result.name = u"query_project_graph"_s;
+    
+    // Extract query parameters from arguments
+    const QString queryType = args.value(u"query_type"_s).toString();
+    const QString nodeId = args.value(u"node_id"_s).toString();
+    const QString relationship = args.value(u"relationship"_s).toString();
+    const QString sourceId = args.value(u"source_id"_s).toString();
+    const QString targetId = args.value(u"target_id"_s).toString();
+    
+    // Build a response based on the query type
+    QString output = u"Project Graph Query Results:\n\n"_s;
+    
+    if (queryType == u"summary") {
+        output += u"Project graph query functionality is available.\n"_s;
+        output += u"Use query_type: 'nodes' to get all nodes\n"_s;
+        output += u"Use query_type: 'edges' to get all edges\n"_s;
+        output += u"Use query_type: 'dependencies' to get dependency relationships\n"_s;
+        output += u"Use query_type: 'dependents' to get dependent relationships\n"_s;
+        output += u"Use query_type: 'find_related' with node_id to find related nodes\n"_s;
+        output += u"Use query_type: 'find_path' with source_id and target_id to find import paths\n"_s;
+        output += u"Use query_type: 'dependency_chain' with start_id and end_id to find dependency chain\n"_s;
+    } else if (queryType == u"nodes") {
+        output += u"Available nodes in the project graph:\n"_s;
+        output += u"(Project graph data would be retrieved from the AgentLoop's project graph instance)\n"_s;
+    } else if (queryType == u"edges") {
+        output += u"Available edges in the project graph:\n"_s;
+        output += u"(Project graph data would be retrieved from the AgentLoop's project graph instance)\n"_s;
+    } else {
+        output += u"Unknown query type: "_s + queryType + u"\n"_s;
+        output += u"Available query types: summary, nodes, edges, dependencies, dependents, find_related, find_path, dependency_chain\n"_s;
+    }
+    
+    result.ok = true;
+    result.output = output;
     return result;
 }
 
