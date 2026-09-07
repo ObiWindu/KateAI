@@ -72,7 +72,7 @@ include src/CMakeFiles/kateai.dir/flags.make
 src/kateai_autogen/timestamp: /usr/lib64/qt6/libexec/moc
 src/kateai_autogen/timestamp: src/CMakeFiles/kateai.dir/compiler_depend.ts
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --blue --bold --progress-dir=/home/macewindu/ai-dev/KateAI/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_1) "Automatic MOC for target kateai"
-	cd /home/macewindu/ai-dev/KateAI/build/src && /usr/bin/cmake -E cmake_autogen /home/macewindu/ai-dev/KateAI/build/src/CMakeFiles/kateai_autogen.dir/AutogenInfo.json Release
+	cd /home/macewindu/ai-dev/KateAI/build/src && /usr/bin/cmake -E cmake_autogen /home/macewindu/ai-dev/KateAI/build/src/CMakeFiles/kateai_autogen.dir/AutogenInfo.json RelWithDebInfo
 	cd /home/macewindu/ai-dev/KateAI/build/src && /usr/bin/cmake -E touch /home/macewindu/ai-dev/KateAI/build/src/kateai_autogen/timestamp
 
 src/kateai_autogen/EWIEGA46WW/qrc_kateai.cpp: /home/macewindu/ai-dev/KateAI/src/kateai.qrc
@@ -81,7 +81,7 @@ src/kateai_autogen/EWIEGA46WW/qrc_kateai.cpp: /home/macewindu/ai-dev/KateAI/src/
 src/kateai_autogen/EWIEGA46WW/qrc_kateai.cpp: /usr/lib64/qt6/libexec/rcc
 src/kateai_autogen/EWIEGA46WW/qrc_kateai.cpp: /usr/lib64/qt6/libexec/rcc
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --blue --bold --progress-dir=/home/macewindu/ai-dev/KateAI/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_2) "Automatic RCC for kateai.qrc"
-	cd /home/macewindu/ai-dev/KateAI/build/src && /usr/bin/cmake -E cmake_autorcc /home/macewindu/ai-dev/KateAI/build/src/CMakeFiles/kateai_autogen.dir/AutoRcc_kateai_EWIEGA46WW_Info.json Release
+	cd /home/macewindu/ai-dev/KateAI/build/src && /usr/bin/cmake -E cmake_autorcc /home/macewindu/ai-dev/KateAI/build/src/CMakeFiles/kateai_autogen.dir/AutoRcc_kateai_EWIEGA46WW_Info.json RelWithDebInfo
 
 src/CMakeFiles/kateai.dir/codegen:
 .PHONY : src/CMakeFiles/kateai.dir/codegen

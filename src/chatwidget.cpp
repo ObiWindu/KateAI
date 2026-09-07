@@ -24,10 +24,12 @@ namespace KateAi
 ChatWidget::ChatWidget(QWidget *parent)
     : QWidget(parent)
 {
+    // Create the main vertical layout for the chat widget
     auto *root = new QVBoxLayout(this);
     root->setContentsMargins(6, 6, 6, 6);
     root->setSpacing(6);
 
+    // Create the toolbar layout for provider and model selection
     auto *toolbar = new QHBoxLayout;
     m_provider = new QComboBox(this);
     m_model = new QComboBox(this);
@@ -35,6 +37,8 @@ ChatWidget::ChatWidget(QWidget *parent)
     m_model->lineEdit()->setPlaceholderText(i18n("Filter models..."));
     m_model->view()->setMinimumWidth(420);
     m_model->setInsertPolicy(QComboBox::NoInsert);
+    
+    // Connect model filter changes to refresh the model list
     connect(m_model->lineEdit(), &QLineEdit::textChanged, this, [this](const QString &filter) {
         if (m_updatingCombos) {
             return;
@@ -94,9 +98,10 @@ ChatWidget::ChatWidget(QWidget *parent)
     composer->setContentsMargins(0, 0, 0, 0);
     composer->setSpacing(4);
     composer->addWidget(m_prompt, 1);
-    auto *composerActions = new QVBoxLayout;
+    auto *composerActions = new QHBoxLayout;
     composerActions->setContentsMargins(0, 0, 0, 0);
     composerActions->setSpacing(4);
+    composerActions->addStretch();
     composerActions->addWidget(m_send);
     composerActions->addStretch();
     composer->addLayout(composerActions);

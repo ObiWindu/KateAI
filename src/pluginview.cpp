@@ -30,21 +30,28 @@ KateAiView::KateAiView(KateAiPlugin *plugin, KTextEditor::MainWindow *mainWindow
     , m_plugin(plugin)
     , m_mainWindow(mainWindow)
 {
+    // Initialize the plugin with its component name and UI resource file
     setComponentName(u"kateai"_s, i18n("Kate AI"));
     setXMLFile(u"ui.rc"_s);
 
+    // Create the tool view panel on the right side of the main window
     m_toolView = m_mainWindow->createToolView(plugin,
                                               u"kateai"_s,
                                               KTextEditor::MainWindow::Right,
                                               QIcon::fromTheme(u"help-hint"_s),
                                               i18n("Kate AI"));
+    
+    // Create the chat widget that will contain the AI interface
     m_chat = new ChatWidget(m_toolView);
+    
+    // Ensure the tool view has a layout and add our chat widget to it
     if (!m_toolView->layout()) {
         auto *layout = new QVBoxLayout(m_toolView);
         layout->setContentsMargins(0, 0, 0, 0);
     }
     m_toolView->layout()->addWidget(m_chat);
 
+    // Configure the chat widget with plugin settings and set up document bridging
     m_chat->setSettings(plugin->settings());
     m_chat->agent()->setDocumentBridge(&m_bridge);
     refreshWorkspace();
@@ -140,47 +147,62 @@ void KateAiView::askSelection()
 
 void KateAiView::askSelectionWithInstruction(const QString &instruction)
 {
+    // Show the AI panel and get the currently active editor view
     showPanel();
     auto *view = m_mainWindow->activeView();
     if (!view) {
         return;
     }
+    
+    // Extract the selected text or the current line if nothing is selected
     QString snippet = view->selectionText();
     if (snippet.isEmpty()) {
         snippet = view->document()->line(view->cursorPosition().line());
     }
+    
+    // Get the file path or document name for context
     const QString path = view->document()->url().toLocalFile();
+    
+    // Create a comprehensive prompt with instruction, file info, and code snippet
     const QString prompt = i18n("%1\n\nFile: %2\n\nCode:\n%3",
                                 instruction,
                                 path.isEmpty() ? view->document()->documentName() : path,
                                 snippet);
+    
+    // Send the prompt to the AI for analysis
     m_chat->ask(prompt);
 }
 
 void KateAiView::showConfiguration()
 {
+    // If configuration dialog already exists, bring it to the front
     if (m_configDialog) {
         m_configDialog->raise();
         m_configDialog->activateWindow();
         return;
     }
 
+    // Create a new configuration dialog as a child of the main window
     auto *dialog = new QDialog(m_mainWindow->window());
     dialog->setAttribute(Qt::WA_DeleteOnClose);
     dialog->setWindowTitle(i18n("Configure Kate AI"));
     dialog->resize(640, 520);
 
+    // Set up the dialog layout with configuration page and buttons
     auto *layout = new QVBoxLayout(dialog);
     auto *page = new KateAiConfigPage(dialog, m_plugin);
     layout->addWidget(page);
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Apply | QDialogButtonBox::Close, dialog);
     layout->addWidget(buttons);
+    
+    // Connect dialog buttons to their respective actions
     connect(buttons->button(QDialogButtonBox::Apply), &QPushButton::clicked, page, &KateAiConfigPage::apply);
     connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::close);
     connect(dialog, &QObject::destroyed, this, [this]() {
         m_configDialog = nullptr;
     });
 
+    // Store reference to the dialog and show it
     m_configDialog = dialog;
     dialog->show();
 }

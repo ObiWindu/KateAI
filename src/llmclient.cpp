@@ -14,6 +14,8 @@ namespace KateAi
 LlmClient::LlmClient(QObject *parent)
     : QObject(parent)
 {
+    // Initialize the LLM client with default settings
+    // The client will handle network requests to AI providers
 }
 
 LlmClient::~LlmClient()
@@ -23,30 +25,37 @@ LlmClient::~LlmClient()
 
 QJsonArray LlmClient::messagesToJson(const QList<ChatMessage> &messages)
 {
+    // Convert the conversation messages to JSON format for the LLM API
     QJsonArray out;
     for (const ChatMessage &msg : messages) {
         QJsonObject obj;
         switch (msg.role) {
         case ChatMessage::Role::System:
+            // System messages contain instructions and context for the AI
             obj.insert(u"role"_s, u"system"_s);
             obj.insert(u"content"_s, msg.content);
             break;
         case ChatMessage::Role::User:
+            // User messages contain the actual questions or prompts from the user
             obj.insert(u"role"_s, u"user"_s);
             obj.insert(u"content"_s, msg.content);
             break;
         case ChatMessage::Role::Assistant:
+            // Assistant messages contain the AI's responses and any tool calls it made
             obj.insert(u"role"_s, u"assistant"_s);
             obj.insert(u"content"_s, msg.content);
             if (!msg.toolCalls.isEmpty()) {
+                // Include tool calls if the AI used any tools
                 obj.insert(u"tool_calls"_s, msg.toolCalls);
             }
             break;
         case ChatMessage::Role::Tool:
+            // Tool messages contain the results of tool calls made by the AI
             obj.insert(u"role"_s, u"tool"_s);
             obj.insert(u"content"_s, msg.content);
             obj.insert(u"tool_call_id"_s, msg.toolCallId);
             if (!msg.name.isEmpty()) {
+                // Include the tool name for reference
                 obj.insert(u"name"_s, msg.name);
             }
             break;
@@ -135,12 +144,14 @@ CompletionChunk LlmClient::parseSseLine(const QByteArray &line, QHash<int, ToolC
 
 void LlmClient::complete(const QList<ChatMessage> &messages)
 {
+    // Clean up any previous network requests and reset state
     abort();
     m_buffer.clear();
     m_text.clear();
     m_toolAcc.clear();
     m_sawDone = false;
 
+    // Validate that we have the necessary configuration for the selected provider
     const QString key = apiKeyFor(m_settings).trimmed();
     if (key.isEmpty()) {
         Q_EMIT failed(u"No API key configured for %1."_s.arg(providerLabel(m_settings.provider)));
@@ -152,6 +163,7 @@ void LlmClient::complete(const QList<ChatMessage> &messages)
         return;
     }
 
+    // Build the JSON payload for the LLM API request
     QJsonObject body;
     body.insert(u"model"_s, model);
     body.insert(u"messages"_s, messagesToJson(messages));
@@ -160,15 +172,18 @@ void LlmClient::complete(const QList<ChatMessage> &messages)
     body.insert(u"stream"_s, true);
     body.insert(u"temperature"_s, 0.2);
 
+    // Create the HTTP request with appropriate headers for the selected provider
     QNetworkRequest request{QUrl(providerBaseUrl(m_settings.provider) + u"/chat/completions"_s)};
     request.setHeader(QNetworkRequest::ContentTypeHeader, u"application/json"_s);
     request.setRawHeader("Authorization", "Bearer " + key.toUtf8());
     request.setRawHeader("Accept", "text/event-stream");
     if (m_settings.provider == Provider::OpenRouter) {
+        // Add OpenRouter-specific headers for tracking and identification
         request.setRawHeader("HTTP-Referer", "https://kate-editor.org");
         request.setRawHeader("X-Title", "Kate AI");
     }
 
+    // Send the HTTP POST request and set up signal handlers for response processing
     m_reply = m_nam.post(request, QJsonDocument(body).toJson(QJsonDocument::Compact));
     connect(m_reply, &QNetworkReply::readyRead, this, &LlmClient::handleReadyRead);
     connect(m_reply, &QNetworkReply::finished, this, &LlmClient::handleFinished);

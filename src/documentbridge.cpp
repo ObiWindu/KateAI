@@ -17,19 +17,28 @@ namespace KateAi
 
 static KTextEditor::Document *openDocumentFor(const QString &path)
 {
+    // Get the global KTextEditor instance to access open documents
     auto *editor = KTextEditor::Editor::instance();
     if (!editor) {
         return nullptr;
     }
+    
+    // Get the canonical (normalized) path for comparison
     const QString canonical = QFileInfo(path).canonicalFilePath().isEmpty() ? QFileInfo(path).absoluteFilePath()
                                                                             : QFileInfo(path).canonicalFilePath();
+    
+    // Iterate through all open documents to find a match
     for (KTextEditor::Document *doc : editor->documents()) {
         const QString local = doc->url().toLocalFile();
         if (local.isEmpty()) {
             continue;
         }
+        
+        // Get the canonical path of the document's local file
         const QString other = QFileInfo(local).canonicalFilePath().isEmpty() ? QFileInfo(local).absoluteFilePath()
                                                                              : QFileInfo(local).canonicalFilePath();
+        
+        // Check if the paths match (either canonical or local)
         if (QDir::cleanPath(other) == QDir::cleanPath(canonical) || QDir::cleanPath(local) == QDir::cleanPath(path)) {
             return doc;
         }
