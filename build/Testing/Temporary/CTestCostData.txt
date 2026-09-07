@@ -1,5 +1,5 @@
-appstreamtest 4 0.00112389
-test_sandbox 4 0.0119283
-test_permissions 4 0.0134104
-test_llmparse 4 0.0112326
+appstreamtest 9 0.000473843
+test_sandbox 9 0.00538809
+test_permissions 9 0.00354121
+test_llmparse 9 0.00347971
 ---

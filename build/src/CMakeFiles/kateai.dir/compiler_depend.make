@@ -606,10 +606,12 @@ src/kateai_autogen/timestamp: src/kateai_autogen/moc_predefs.h \
   /usr/include/qt6/QtNetwork/qtnetwork-config.h \
   /usr/include/qt6/QtNetwork/qtnetworkexports.h \
   /usr/include/qt6/QtNetwork/qtnetworkglobal.h \
+  /usr/include/qt6/QtWidgets/QLineEdit \
   /usr/include/qt6/QtWidgets/QPlainTextEdit \
   /usr/include/qt6/QtWidgets/QWidget \
   /usr/include/qt6/QtWidgets/qabstractscrollarea.h \
   /usr/include/qt6/QtWidgets/qframe.h \
+  /usr/include/qt6/QtWidgets/qlineedit.h \
   /usr/include/qt6/QtWidgets/qplaintextedit.h \
   /usr/include/qt6/QtWidgets/qsizepolicy.h \
   /usr/include/qt6/QtWidgets/qtextedit.h \
@@ -1069,6 +1071,7 @@ src/CMakeFiles/kateai.dir/chatwidget.cpp.o: /home/macewindu/ai-dev/KateAI/src/ch
   /usr/include/qt6/QtCore/qhashfunctions.h \
   /usr/include/qt6/QtCore/qiodevice.h \
   /usr/include/qt6/QtCore/qiodevicebase.h \
+  /usr/include/qt6/QtCore/qitemselectionmodel.h \
   /usr/include/qt6/QtCore/qiterable.h \
   /usr/include/qt6/QtCore/qiterator.h \
   /usr/include/qt6/QtCore/qjsonarray.h \
@@ -1224,9 +1227,11 @@ src/CMakeFiles/kateai.dir/chatwidget.cpp.o: /home/macewindu/ai-dev/KateAI/src/ch
   /usr/include/qt6/QtNetwork/qtnetwork-config.h \
   /usr/include/qt6/QtNetwork/qtnetworkexports.h \
   /usr/include/qt6/QtNetwork/qtnetworkglobal.h \
+  /usr/include/qt6/QtWidgets/QAbstractItemView \
   /usr/include/qt6/QtWidgets/QComboBox \
   /usr/include/qt6/QtWidgets/QHBoxLayout \
   /usr/include/qt6/QtWidgets/QLabel \
+  /usr/include/qt6/QtWidgets/QLineEdit \
   /usr/include/qt6/QtWidgets/QPlainTextEdit \
   /usr/include/qt6/QtWidgets/QPushButton \
   /usr/include/qt6/QtWidgets/QScrollBar \
@@ -1235,6 +1240,7 @@ src/CMakeFiles/kateai.dir/chatwidget.cpp.o: /home/macewindu/ai-dev/KateAI/src/ch
   /usr/include/qt6/QtWidgets/QWidget \
   /usr/include/qt6/QtWidgets/qabstractbutton.h \
   /usr/include/qt6/QtWidgets/qabstractitemdelegate.h \
+  /usr/include/qt6/QtWidgets/qabstractitemview.h \
   /usr/include/qt6/QtWidgets/qabstractscrollarea.h \
   /usr/include/qt6/QtWidgets/qabstractslider.h \
   /usr/include/qt6/QtWidgets/qabstractspinbox.h \
@@ -1245,6 +1251,7 @@ src/CMakeFiles/kateai.dir/chatwidget.cpp.o: /home/macewindu/ai-dev/KateAI/src/ch
   /usr/include/qt6/QtWidgets/qlabel.h \
   /usr/include/qt6/QtWidgets/qlayout.h \
   /usr/include/qt6/QtWidgets/qlayoutitem.h \
+  /usr/include/qt6/QtWidgets/qlineedit.h \
   /usr/include/qt6/QtWidgets/qplaintextedit.h \
   /usr/include/qt6/QtWidgets/qpushbutton.h \
   /usr/include/qt6/QtWidgets/qrubberband.h \
@@ -2510,10 +2517,12 @@ src/CMakeFiles/kateai.dir/kateai_autogen/mocs_compilation.cpp.o: src/kateai_auto
   /usr/include/qt6/QtNetwork/qtnetwork-config.h \
   /usr/include/qt6/QtNetwork/qtnetworkexports.h \
   /usr/include/qt6/QtNetwork/qtnetworkglobal.h \
+  /usr/include/qt6/QtWidgets/QLineEdit \
   /usr/include/qt6/QtWidgets/QPlainTextEdit \
   /usr/include/qt6/QtWidgets/QWidget \
   /usr/include/qt6/QtWidgets/qabstractscrollarea.h \
   /usr/include/qt6/QtWidgets/qframe.h \
+  /usr/include/qt6/QtWidgets/qlineedit.h \
   /usr/include/qt6/QtWidgets/qplaintextedit.h \
   /usr/include/qt6/QtWidgets/qsizepolicy.h \
   /usr/include/qt6/QtWidgets/qtextedit.h \
@@ -4319,6 +4328,8 @@ src/CMakeFiles/kateai.dir/pluginview.cpp.o: /home/macewindu/ai-dev/KateAI/src/pl
   /usr/include/qt6/QtGui/qregion.h \
   /usr/include/qt6/QtGui/qrgb.h \
   /usr/include/qt6/QtGui/qrgba64.h \
+  /usr/include/qt6/QtGui/qtextcursor.h \
+  /usr/include/qt6/QtGui/qtextdocument.h \
   /usr/include/qt6/QtGui/qtextformat.h \
   /usr/include/qt6/QtGui/qtextoption.h \
   /usr/include/qt6/QtGui/qtgui-config.h \
@@ -4347,6 +4358,7 @@ src/CMakeFiles/kateai.dir/pluginview.cpp.o: /home/macewindu/ai-dev/KateAI/src/pl
   /usr/include/qt6/QtWidgets/QDialog \
   /usr/include/qt6/QtWidgets/QDialogButtonBox \
   /usr/include/qt6/QtWidgets/QLayout \
+  /usr/include/qt6/QtWidgets/QLineEdit \
   /usr/include/qt6/QtWidgets/QMenu \
   /usr/include/qt6/QtWidgets/QPushButton \
   /usr/include/qt6/QtWidgets/QToolButton \
@@ -4357,9 +4369,11 @@ src/CMakeFiles/kateai.dir/pluginview.cpp.o: /home/macewindu/ai-dev/KateAI/src/pl
   /usr/include/qt6/QtWidgets/qboxlayout.h \
   /usr/include/qt6/QtWidgets/qdialog.h \
   /usr/include/qt6/QtWidgets/qdialogbuttonbox.h \
+  /usr/include/qt6/QtWidgets/qframe.h \
   /usr/include/qt6/QtWidgets/qgridlayout.h \
   /usr/include/qt6/QtWidgets/qlayout.h \
   /usr/include/qt6/QtWidgets/qlayoutitem.h \
+  /usr/include/qt6/QtWidgets/qlineedit.h \
   /usr/include/qt6/QtWidgets/qmenu.h \
   /usr/include/qt6/QtWidgets/qpushbutton.h \
   /usr/include/qt6/QtWidgets/qsizepolicy.h \
@@ -5078,10 +5092,6 @@ src/kateai_autogen/EWIEGA46WW/qrc_kateai.cpp:
 
 /usr/include/qt6/QtWidgets/QSpinBox:
 
-/usr/include/qt6/QtWidgets/QLineEdit:
-
-/usr/include/qt6/QtWidgets/QFormLayout:
-
 /usr/include/qt6/QtWidgets/QCheckBox:
 
 /usr/include/qt6/QtGui/QIcon:
@@ -5110,6 +5120,8 @@ src/kateai_autogen/EWIEGA46WW/qrc_kateai.cpp:
 
 /usr/include/qt6/QtWidgets/qabstractspinbox.h:
 
+/usr/include/qt6/QtWidgets/qabstractitemview.h:
+
 /usr/include/qt6/QtWidgets/qabstractitemdelegate.h:
 
 /usr/include/qt6/QtWidgets/QScrollBar:
@@ -5118,9 +5130,13 @@ src/kateai_autogen/EWIEGA46WW/qrc_kateai.cpp:
 
 /usr/include/qt6/QtWidgets/QComboBox:
 
+/usr/include/qt6/QtWidgets/QAbstractItemView:
+
 /usr/include/qt6/QtGui/qvalidator.h:
 
 /usr/include/qt6/QtGui/QTextDocument:
+
+/usr/include/qt6/QtCore/qitemselectionmodel.h:
 
 /usr/include/qt6/QtCore/qabstractitemmodel.h:
 
@@ -5175,6 +5191,10 @@ src/kateai_autogen/EWIEGA46WW/qrc_kateai.cpp:
 /usr/include/qt6/QtWidgets/qabstractscrollarea.h:
 
 /usr/include/qt6/QtWidgets/QWidget:
+
+/usr/include/qt6/QtWidgets/QFormLayout:
+
+/usr/include/qt6/QtWidgets/QLineEdit:
 
 /usr/include/qt6/QtNetwork/qtnetworkglobal.h:
 

@@ -606,10 +606,12 @@ src/kateai_autogen/timestamp: src/kateai_autogen/moc_predefs.h \
   /usr/include/qt6/QtNetwork/qtnetwork-config.h \
   /usr/include/qt6/QtNetwork/qtnetworkexports.h \
   /usr/include/qt6/QtNetwork/qtnetworkglobal.h \
+  /usr/include/qt6/QtWidgets/QLineEdit \
   /usr/include/qt6/QtWidgets/QPlainTextEdit \
   /usr/include/qt6/QtWidgets/QWidget \
   /usr/include/qt6/QtWidgets/qabstractscrollarea.h \
   /usr/include/qt6/QtWidgets/qframe.h \
+  /usr/include/qt6/QtWidgets/qlineedit.h \
   /usr/include/qt6/QtWidgets/qplaintextedit.h \
   /usr/include/qt6/QtWidgets/qsizepolicy.h \
   /usr/include/qt6/QtWidgets/qtextedit.h \
@@ -670,6 +672,8 @@ src/kateai_autogen/timestamp: src/kateai_autogen/moc_predefs.h \
 
 /usr/include/qt6/QtWidgets/QWidget:
 
+/usr/include/qt6/QtWidgets/QLineEdit:
+
 /usr/include/qt6/QtNetwork/qtnetworkglobal.h:
 
 /usr/include/qt6/QtNetwork/qtnetworkexports.h:
@@ -727,6 +731,8 @@ src/kateai_autogen/timestamp: src/kateai_autogen/moc_predefs.h \
 /usr/include/qt6/QtGui/qfontmetrics.h:
 
 /usr/include/qt6/QtGui/qfontinfo.h:
+
+/usr/include/qt6/QtWidgets/qlineedit.h:
 
 /usr/include/qt6/QtGui/qtguiglobal.h:
 

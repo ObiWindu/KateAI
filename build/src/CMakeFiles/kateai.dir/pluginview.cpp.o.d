@@ -422,6 +422,12 @@ src/CMakeFiles/kateai.dir/pluginview.cpp.o: \
  /usr/include/qt6/QtGui/qfontvariableaxis.h \
  /usr/include/qt6/QtWidgets/qsizepolicy.h \
  /usr/include/qt6/QtGui/qcursor.h /usr/include/qt6/QtGui/qbitmap.h \
+ /usr/include/qt6/QtWidgets/QLineEdit \
+ /usr/include/qt6/QtWidgets/qlineedit.h \
+ /usr/include/qt6/QtWidgets/qframe.h /usr/include/qt6/QtGui/qtextcursor.h \
+ /usr/include/qt6/QtGui/qtextdocument.h \
+ /usr/include/qt6/QtGui/qtextformat.h /usr/include/qt6/QtGui/qpen.h \
+ /usr/include/qt6/QtGui/qtextoption.h \
  /home/macewindu/ai-dev/KateAI/src/configpage.h \
  /usr/include/KF6/KTextEditor/KTextEditor/ConfigPage \
  /usr/include/KF6/KTextEditor/ktexteditor/configpage.h \
@@ -478,8 +484,6 @@ src/CMakeFiles/kateai.dir/pluginview.cpp.o: \
  /usr/include/qt6/QtCore/QExplicitlySharedDataPointer \
  /usr/include/qt6/QtCore/QSharedData \
  /usr/include/qt6/QtGui/QTextCharFormat \
- /usr/include/qt6/QtGui/qtextformat.h /usr/include/qt6/QtGui/qpen.h \
- /usr/include/qt6/QtGui/qtextoption.h \
  /usr/include/KF6/KSyntaxHighlighting/KSyntaxHighlighting/Theme \
  /usr/include/KF6/KSyntaxHighlighting/KSyntaxHighlighting/theme.h \
  /usr/include/KF6/KSyntaxHighlighting/KSyntaxHighlighting/ksyntaxhighlighting_export.h \

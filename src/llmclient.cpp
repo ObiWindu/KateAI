@@ -141,7 +141,7 @@ void LlmClient::complete(const QList<ChatMessage> &messages)
     m_toolAcc.clear();
     m_sawDone = false;
 
-    const QString key = apiKeyFor(m_settings);
+    const QString key = apiKeyFor(m_settings).trimmed();
     if (key.isEmpty()) {
         Q_EMIT failed(u"No API key configured for %1."_s.arg(providerLabel(m_settings.provider)));
         return;

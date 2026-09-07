@@ -7,6 +7,7 @@
 #include <KLocalizedString>
 
 #include <QComboBox>
+#include <QAbstractItemView>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QPushButton>
@@ -30,7 +31,17 @@ ChatWidget::ChatWidget(QWidget *parent)
     auto *toolbar = new QHBoxLayout;
     m_provider = new QComboBox(this);
     m_model = new QComboBox(this);
-    m_model->setEditable(false);
+    m_model->setEditable(true);
+    m_model->lineEdit()->setPlaceholderText(i18n("Filter models..."));
+    m_model->view()->setMinimumWidth(420);
+    m_model->setInsertPolicy(QComboBox::NoInsert);
+    connect(m_model->lineEdit(), &QLineEdit::textChanged, this, [this](const QString &filter) {
+        if (m_updatingCombos) {
+            return;
+        }
+        m_modelFilter = filter.trimmed();
+        refreshModels();
+    });
     m_permission = new QComboBox(this);
     m_sandbox = new QComboBox(this);
     m_mode = new QComboBox(this);
@@ -38,17 +49,15 @@ ChatWidget::ChatWidget(QWidget *parent)
     m_configure = new QPushButton(QIcon::fromTheme(u"settings-configure"_s), QString(), this);
     m_configure->setToolTip(i18n("Configure Kate AI"));
     m_configure->setAccessibleName(i18n("Configure Kate AI"));
-    m_send = new QPushButton(u"➤"_s, this);
+    m_send = new QPushButton(this);
     m_send->setToolTip(i18n("Send message"));
     m_send->setAccessibleName(i18n("Send message"));
     m_send->setFixedSize(38, 38);
-    m_send->setStyleSheet(u"QPushButton { color: #1d99f3; font-size: 22px; font-weight: bold; }"_s);
-    m_stop = new QPushButton(u"■"_s, this);
-    m_stop->setToolTip(i18n("Stop response"));
-    m_stop->setAccessibleName(i18n("Stop response"));
-    m_stop->setFixedSize(38, 38);
-    m_stop->setStyleSheet(u"QPushButton { color: #e74c3c; font-size: 17px; font-weight: bold; }"_s);
-    m_stop->setEnabled(false);
+    m_send->setStyleSheet(u"QPushButton { font-size: 22px; font-weight: bold; border-radius: 19px; }"_s);
+    updateSendButtonState();
+
+    m_stop = new QPushButton(this);
+    m_stop->setVisible(false);
 
     m_permission->addItem(permissionModeLabel(PermissionMode::Ask), permissionModeId(PermissionMode::Ask));
     m_permission->addItem(permissionModeLabel(PermissionMode::AcceptEdits), permissionModeId(PermissionMode::AcceptEdits));
@@ -74,6 +83,7 @@ ChatWidget::ChatWidget(QWidget *parent)
     m_transcript = new QTextBrowser(this);
     m_transcript->setOpenExternalLinks(true);
     m_transcript->setPlaceholderText(i18n("Kate AI — send a prompt to read and write project files with permission asks."));
+    m_transcript->setStyleSheet(u"QTextBrowser { background-color: #12141a; color: #e8e8e8; border: none; padding: 8px; }"_s);
     root->addWidget(m_transcript, 1);
 
     m_permissionBar = new PermissionBar(this);
@@ -88,7 +98,6 @@ ChatWidget::ChatWidget(QWidget *parent)
     composerActions->setContentsMargins(0, 0, 0, 0);
     composerActions->setSpacing(4);
     composerActions->addWidget(m_send);
-    composerActions->addWidget(m_stop);
     composerActions->addStretch();
     composer->addLayout(composerActions);
     root->addLayout(composer);
@@ -98,13 +107,16 @@ ChatWidget::ChatWidget(QWidget *parent)
     root->addWidget(m_status);
 
     connect(m_prompt, &PromptEdit::submitRequested, this, &ChatWidget::submit);
-    connect(m_send, &QPushButton::clicked, this, &ChatWidget::submit);
+    connect(m_send, &QPushButton::clicked, this, [this]() {
+        if (m_agent.isBusy()) {
+            m_permissionBar->hideBar();
+            m_agent.abort();
+        } else {
+            submit();
+        }
+    });
     connect(m_newChat, &QPushButton::clicked, this, &ChatWidget::newChat);
     connect(m_configure, &QPushButton::clicked, this, &ChatWidget::configureRequested);
-    connect(m_stop, &QPushButton::clicked, this, [this]() {
-        m_permissionBar->hideBar();
-        m_agent.abort();
-    });
     connect(m_permissionBar, &PermissionBar::decided, &m_agent, &AgentLoop::resolvePermission);
 
     connect(m_provider, &QComboBox::currentIndexChanged, this, [this]() {
@@ -164,7 +176,7 @@ ChatWidget::ChatWidget(QWidget *parent)
     connect(&m_agent, &AgentLoop::userMessage, this, [this](const QString &text) {
         freezeStreaming();
         m_streamText.clear();
-        appendHtml(u"<p><b>%1</b></p><pre>%2</pre>"_s.arg(i18n("You"), escape(text)));
+        appendHtml(u"<div style=\"background-color:#2a2f3a; color:#e8e8e8; padding:12px 16px; border-radius:8px; margin:8px 0 8px auto; max-width:85%; text-align:right; font-family:sans-serif; font-size:13px; line-height:1.5; border:1px solid #3a3f4a;\"><b style=\"color:#7aa2f7; font-size:11px; text-transform:uppercase; letter-spacing:0.5px;\">You</b><br>%1</div>"_s.arg(escape(text).replace(u"\n"_s, u"<br>"_s)));
     });
     connect(&m_agent, &AgentLoop::assistantDelta, this, [this](const QString &delta) {
         setStreaming(m_streamText + delta);
@@ -174,25 +186,28 @@ ChatWidget::ChatWidget(QWidget *parent)
         freezeStreaming();
     });
     connect(&m_agent, &AgentLoop::toolStarted, this, [this](const PermissionRequest &request) {
-        appendHtml(u"<p><i>%1</i></p>"_s.arg(escape(u"→ %1"_s.arg(request.summary))));
+        appendHtml(u"<div style=\"color:#7aa2f7; font-size:12px; padding:4px 0 4px 8px; margin:4px 0; border-left:2px solid #7aa2f7; font-family:sans-serif;\">⚙ %1</div>"_s.arg(escape(u"→ %1"_s.arg(request.summary))));
     });
     connect(&m_agent, &AgentLoop::toolFinished, this, [this](const ToolResult &result) {
-        const QString mark = result.ok ? u"ok"_s : u"failed"_s;
-        appendHtml(u"<p><code>%1</code> — %2</p><pre>%3</pre>"_s.arg(escape(result.name), mark, escape(result.output.left(2000))));
+        const QString mark = result.ok ? u"<span style='color:#9ece6a;'>✓</span>"_s : u"<span style='color:#f7768e;'>✗</span>"_s;
+        appendHtml(u"<div style=\"color:#7a7a8a; font-size:12px; padding:4px 0 4px 8px; margin:4px 0; border-left:2px solid #3a3a4a; font-family:sans-serif;\"><code style='color:#bb9af7;'>%1</code> %2 <span style='font-size:10px;'>%3</span></div>"_s.arg(escape(result.name), mark, escape(result.output.left(300).replace(u"\n"_s, u" · "_s))));
     });
     connect(&m_agent, &AgentLoop::permissionNeeded, this, [this](const PermissionRequest &request) {
         m_permissionBar->showRequest(request);
         m_prompt->setEnabled(false);
         m_send->setEnabled(false);
     });
+    connect(m_permissionBar, &PermissionBar::decided, &m_agent, &AgentLoop::resolvePermission);
+
     connect(&m_agent, &AgentLoop::statusChanged, this, [this](const QString &status) {
         m_status->setText(status.isEmpty() ? i18n("Enter to send · Shift+Enter for a new line") : status);
         m_stop->setEnabled(m_agent.isBusy());
         m_prompt->setEnabled(!m_permissionBar->isVisible());
         m_send->setEnabled(!m_agent.isBusy() && !m_permissionBar->isVisible());
+        updateSendButtonState();
     });
     connect(&m_agent, &AgentLoop::failed, this, [this](const QString &error) {
-        appendHtml(u"<p style='color:#c0392b'><b>%1</b> %2</p>"_s.arg(i18n("Error:"), escape(error)));
+        appendHtml(u"<p style='color:#c0392b'><b>Error:</b> %1</p>"_s.arg(escape(error)));
         m_stop->setEnabled(false);
         m_send->setEnabled(true);
         freezeStreaming();
@@ -283,9 +298,21 @@ void ChatWidget::refreshModels()
     const bool wasUpdating = m_updatingCombos;
     m_updatingCombos = true;
     m_model->clear();
-    const QStringList models = m_modelCatalog.value(m_settings.provider);
+    const QStringList allModels = m_modelCatalog.value(m_settings.provider);
+    QStringList models = allModels;
+    if (!m_modelFilter.isEmpty()) {
+        models.clear();
+        for (const QString &m : allModels) {
+            if (m.contains(m_modelFilter, Qt::CaseInsensitive)) {
+                models.append(m);
+            }
+        }
+    }
     m_model->addItems(models);
-    m_model->setEnabled(!models.isEmpty());
+    m_model->setEnabled(!allModels.isEmpty());
+    if (m_modelFilter.isEmpty()) {
+        m_model->lineEdit()->setText(QString());
+    }
     const int index = m_model->findText(modelFor(m_settings));
     const int selectedIndex = index >= 0 ? index : (models.isEmpty() ? -1 : 0);
     m_model->setCurrentIndex(selectedIndex);
@@ -310,6 +337,19 @@ void ChatWidget::refreshModels()
 void ChatWidget::focusPrompt()
 {
     m_prompt->setFocus();
+}
+
+void ChatWidget::updateSendButtonState()
+{
+    if (m_agent.isBusy()) {
+        m_send->setText(u"■"_s);
+        m_send->setStyleSheet(u"QPushButton { color: #e74c3c; font-size: 17px; font-weight: bold; border-radius: 19px; }"_s);
+        m_send->setToolTip(i18n("Stop response"));
+    } else {
+        m_send->setText(u"➤"_s);
+        m_send->setStyleSheet(u"QPushButton { color: #1d99f3; font-size: 22px; font-weight: bold; border-radius: 19px; }"_s);
+        m_send->setToolTip(i18n("Send message"));
+    }
 }
 
 void ChatWidget::ask(const QString &text)
@@ -351,14 +391,14 @@ void ChatWidget::appendHtml(const QString &html)
 void ChatWidget::setStreaming(const QString &text)
 {
     m_streamText = text;
-    m_transcript->setHtml(m_historyHtml + markdownToHtml(m_streamText));
+    m_transcript->setHtml(m_historyHtml + QStringLiteral("<div style=\"background-color:#1e222d; color:#e8e8e8; padding:12px 16px; border-radius:8px; margin:8px 0; border:1px solid #3a3f4a; font-family:sans-serif; font-size:13px; line-height:1.6;\"><div style=\"white-space:pre-wrap;\">") + markdownToHtml(m_streamText) + QStringLiteral("</div></div>"));
     m_transcript->verticalScrollBar()->setValue(m_transcript->verticalScrollBar()->maximum());
 }
 
 void ChatWidget::freezeStreaming()
 {
     if (!m_streamText.isEmpty()) {
-        m_historyHtml += markdownToHtml(m_streamText);
+        m_historyHtml += QStringLiteral("<div style=\"background-color:#1e222d; color:#e8e8e8; padding:12px 16px; border-radius:8px; margin:8px 0; border:1px solid #3a3f4a; font-family:sans-serif; font-size:13px; line-height:1.6;\"><div style=\"white-space:pre-wrap;\">") + markdownToHtml(m_streamText) + QStringLiteral("</div></div>");
         m_streamText.clear();
         m_transcript->setHtml(m_historyHtml);
     }

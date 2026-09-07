@@ -5,6 +5,7 @@
 
 #include <QWidget>
 #include <QHash>
+#include <QLineEdit>
 
 class QComboBox;
 class QLabel;
@@ -51,6 +52,7 @@ private:
     void applyProviderToCombos();
     void refreshProviders();
     void refreshModels();
+    void updateSendButtonState();
     static QString escape(const QString &text);
     static QString markdownToHtml(const QString &text);
 
@@ -74,6 +76,7 @@ private:
     QHash<Provider, QStringList> m_modelCatalog;
     Provider m_preferredProvider = Provider::Grok;
     bool m_updatingCombos = false;
+    QString m_modelFilter;
 };
 
 } // namespace KateAi

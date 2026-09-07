@@ -481,12 +481,17 @@
  mdp:/usr/include/qt6/QtGui/qkeysequence.h
  mdp:/usr/include/qt6/QtGui/qpaintdevice.h
  mdp:/usr/include/qt6/QtGui/qpalette.h
+ mdp:/usr/include/qt6/QtGui/qpen.h
  mdp:/usr/include/qt6/QtGui/qpixelformat.h
  mdp:/usr/include/qt6/QtGui/qpixmap.h
  mdp:/usr/include/qt6/QtGui/qpolygon.h
  mdp:/usr/include/qt6/QtGui/qregion.h
  mdp:/usr/include/qt6/QtGui/qrgb.h
  mdp:/usr/include/qt6/QtGui/qrgba64.h
+ mdp:/usr/include/qt6/QtGui/qtextcursor.h
+ mdp:/usr/include/qt6/QtGui/qtextdocument.h
+ mdp:/usr/include/qt6/QtGui/qtextformat.h
+ mdp:/usr/include/qt6/QtGui/qtextoption.h
  mdp:/usr/include/qt6/QtGui/qtgui-config.h
  mdp:/usr/include/qt6/QtGui/qtguiexports.h
  mdp:/usr/include/qt6/QtGui/qtguiglobal.h
@@ -510,7 +515,10 @@
  mdp:/usr/include/qt6/QtNetwork/qtnetwork-config.h
  mdp:/usr/include/qt6/QtNetwork/qtnetworkexports.h
  mdp:/usr/include/qt6/QtNetwork/qtnetworkglobal.h
+ mdp:/usr/include/qt6/QtWidgets/QLineEdit
  mdp:/usr/include/qt6/QtWidgets/QWidget
+ mdp:/usr/include/qt6/QtWidgets/qframe.h
+ mdp:/usr/include/qt6/QtWidgets/qlineedit.h
  mdp:/usr/include/qt6/QtWidgets/qsizepolicy.h
  mdp:/usr/include/qt6/QtWidgets/qtwidgets-config.h
  mdp:/usr/include/qt6/QtWidgets/qtwidgetsexports.h
