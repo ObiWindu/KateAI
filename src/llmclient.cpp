@@ -155,7 +155,7 @@ void LlmClient::complete(const QList<ChatMessage> &messages)
     QJsonObject body;
     body.insert(u"model"_s, model);
     body.insert(u"messages"_s, messagesToJson(messages));
-    body.insert(u"tools"_s, toolDefinitions());
+    body.insert(u"tools"_s, toolDefinitions(m_settings.planMode));
     body.insert(u"tool_choice"_s, u"auto"_s);
     body.insert(u"stream"_s, true);
     body.insert(u"temperature"_s, 0.2);
@@ -172,6 +172,30 @@ void LlmClient::complete(const QList<ChatMessage> &messages)
     m_reply = m_nam.post(request, QJsonDocument(body).toJson(QJsonDocument::Compact));
     connect(m_reply, &QNetworkReply::readyRead, this, &LlmClient::handleReadyRead);
     connect(m_reply, &QNetworkReply::finished, this, &LlmClient::handleFinished);
+}
+
+void LlmClient::fetchModels(Provider provider)
+{
+    Settings providerSettings = m_settings;
+    providerSettings.provider = provider;
+    const QString key = apiKeyFor(providerSettings).trimmed();
+    if (key.isEmpty()) {
+        Q_EMIT modelsFailed(provider, u"No API key configured."_s);
+        return;
+    }
+
+    QNetworkRequest request{QUrl(providerBaseUrl(provider) + u"/models"_s)};
+    request.setRawHeader("Authorization", "Bearer " + key.toUtf8());
+    request.setHeader(QNetworkRequest::UserAgentHeader, u"Kate AI"_s);
+    if (provider == Provider::OpenRouter) {
+        request.setRawHeader("HTTP-Referer", "https://kate-editor.org");
+        request.setRawHeader("X-Title", "Kate AI");
+    }
+
+    QNetworkReply *reply = m_nam.get(request);
+    connect(reply, &QNetworkReply::finished, this, [this, reply, provider]() {
+        handleModelsFinished(reply, provider);
+    });
 }
 
 void LlmClient::abort()
@@ -191,6 +215,45 @@ void LlmClient::reset()
         m_reply->deleteLater();
         m_reply = nullptr;
     }
+}
+
+void LlmClient::handleModelsFinished(QNetworkReply *reply, Provider provider)
+{
+    const QByteArray body = reply->readAll();
+    const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    const QString networkError = reply->errorString();
+    const bool ok = reply->error() == QNetworkReply::NoError;
+    reply->deleteLater();
+
+    QJsonParseError parseError;
+    const QJsonDocument document = QJsonDocument::fromJson(body, &parseError);
+    if (!ok || parseError.error != QJsonParseError::NoError || !document.isObject()) {
+        const QString detail = !ok ? networkError : u"The response was not valid JSON."_s;
+        Q_EMIT modelsFailed(provider, u"Could not load models (HTTP %1): %2"_s.arg(status).arg(detail));
+        return;
+    }
+
+    const QJsonObject root = document.object();
+    const QJsonValue apiError = root.value(u"error"_s);
+    if (!apiError.isUndefined() && !apiError.isNull()) {
+        const QString message = apiError.isObject() ? apiError.toObject().value(u"message"_s).toString() : apiError.toString();
+        Q_EMIT modelsFailed(provider, message.isEmpty() ? u"The provider rejected the API key."_s : message);
+        return;
+    }
+
+    QStringList models;
+    for (const QJsonValue &value : root.value(u"data"_s).toArray()) {
+        const QString id = value.toObject().value(u"id"_s).toString().trimmed();
+        if (!id.isEmpty() && !models.contains(id)) {
+            models.append(id);
+        }
+    }
+    models.sort(Qt::CaseInsensitive);
+    if (models.isEmpty()) {
+        Q_EMIT modelsFailed(provider, u"The provider did not return any available models."_s);
+        return;
+    }
+    Q_EMIT modelsReceived(provider, models);
 }
 
 void LlmClient::handleReadyRead()

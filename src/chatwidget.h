@@ -4,6 +4,7 @@
 #include "types.h"
 
 #include <QWidget>
+#include <QHash>
 
 class QComboBox;
 class QLabel;
@@ -40,6 +41,7 @@ public:
 
 Q_SIGNALS:
     void settingsChanged(const Settings &settings);
+    void configureRequested();
 
 private:
     void appendHtml(const QString &html);
@@ -47,6 +49,8 @@ private:
     void freezeStreaming();
     void submit();
     void applyProviderToCombos();
+    void refreshProviders();
+    void refreshModels();
     static QString escape(const QString &text);
     static QString markdownToHtml(const QString &text);
 
@@ -56,7 +60,10 @@ private:
     QComboBox *m_model = nullptr;
     QComboBox *m_permission = nullptr;
     QComboBox *m_sandbox = nullptr;
+    QComboBox *m_mode = nullptr;
     QPushButton *m_newChat = nullptr;
+    QPushButton *m_configure = nullptr;
+    QPushButton *m_send = nullptr;
     QPushButton *m_stop = nullptr;
     QTextBrowser *m_transcript = nullptr;
     PermissionBar *m_permissionBar = nullptr;
@@ -64,6 +71,8 @@ private:
     QLabel *m_status = nullptr;
     QString m_historyHtml;
     QString m_streamText;
+    QHash<Provider, QStringList> m_modelCatalog;
+    Provider m_preferredProvider = Provider::Grok;
     bool m_updatingCombos = false;
 };
 

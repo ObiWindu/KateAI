@@ -422,6 +422,9 @@ src/CMakeFiles/kateai.dir/pluginview.cpp.o: \
  /usr/include/qt6/QtGui/qfontvariableaxis.h \
  /usr/include/qt6/QtWidgets/qsizepolicy.h \
  /usr/include/qt6/QtGui/qcursor.h /usr/include/qt6/QtGui/qbitmap.h \
+ /home/macewindu/ai-dev/KateAI/src/configpage.h \
+ /usr/include/KF6/KTextEditor/KTextEditor/ConfigPage \
+ /usr/include/KF6/KTextEditor/ktexteditor/configpage.h \
  /home/macewindu/ai-dev/KateAI/src/plugin.h \
  /usr/include/KF6/KTextEditor/KTextEditor/Plugin \
  /usr/include/KF6/KTextEditor/ktexteditor/plugin.h \
@@ -504,8 +507,14 @@ src/CMakeFiles/kateai.dir/pluginview.cpp.o: \
  /usr/include/qt6/QtCore/qabstractitemmodel.h \
  /usr/include/qt6/QtCore/QFlags /usr/include/KF6/KXmlGui/KXMLGUIFactory \
  /usr/include/KF6/KXmlGui/kxmlguifactory.h \
+ /usr/include/qt6/QtWidgets/QDialog /usr/include/qt6/QtWidgets/qdialog.h \
+ /usr/include/qt6/QtWidgets/QDialogButtonBox \
+ /usr/include/qt6/QtWidgets/qdialogbuttonbox.h \
  /usr/include/qt6/QtWidgets/QLayout /usr/include/qt6/QtWidgets/qlayout.h \
  /usr/include/qt6/QtWidgets/qlayoutitem.h \
  /usr/include/qt6/QtWidgets/qboxlayout.h \
  /usr/include/qt6/QtWidgets/qgridlayout.h \
+ /usr/include/qt6/QtWidgets/QMenu /usr/include/qt6/QtWidgets/qmenu.h \
+ /usr/include/qt6/QtWidgets/QPushButton \
+ /usr/include/qt6/QtWidgets/qpushbutton.h \
  /usr/include/qt6/QtWidgets/QVBoxLayout

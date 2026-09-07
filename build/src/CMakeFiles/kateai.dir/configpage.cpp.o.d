@@ -404,6 +404,9 @@ src/CMakeFiles/kateai.dir/configpage.cpp.o: \
  /usr/include/qt6/QtWidgets/qrubberband.h \
  /usr/include/qt6/QtWidgets/qframe.h \
  /usr/include/qt6/QtCore/qabstractitemmodel.h \
+ /usr/include/qt6/QtWidgets/QCheckBox \
+ /usr/include/qt6/QtWidgets/qcheckbox.h \
+ /usr/include/qt6/QtWidgets/qabstractbutton.h \
  /usr/include/qt6/QtWidgets/QFormLayout \
  /usr/include/qt6/QtWidgets/qformlayout.h \
  /usr/include/qt6/QtWidgets/QLayout /usr/include/qt6/QtWidgets/qlayout.h \

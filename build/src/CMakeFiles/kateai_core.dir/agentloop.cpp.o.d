@@ -384,4 +384,11 @@ src/CMakeFiles/kateai_core.dir/agentloop.cpp.o: \
  /home/macewindu/ai-dev/KateAI/src/permissions.h \
  /home/macewindu/ai-dev/KateAI/src/sandbox.h \
  /home/macewindu/ai-dev/KateAI/src/tools.h \
- /usr/include/qt6/QtCore/QJsonDocument
+ /usr/include/qt6/QtCore/QJsonDocument /usr/include/qt6/QtCore/QFile \
+ /usr/include/qt6/QtCore/qfile.h /usr/include/qt6/QtCore/qfiledevice.h \
+ /usr/include/c++/16/filesystem /usr/include/c++/16/bits/fs_fwd.h \
+ /usr/include/c++/16/bits/fs_path.h /usr/include/c++/16/iomanip \
+ /usr/include/c++/16/bits/quoted_string.h /usr/include/c++/16/codecvt \
+ /usr/include/c++/16/bits/fs_dir.h /usr/include/c++/16/bits/fs_ops.h \
+ /usr/include/qt6/QtCore/QFileInfo /usr/include/qt6/QtCore/qfileinfo.h \
+ /usr/include/qt6/QtCore/qtimezone.h

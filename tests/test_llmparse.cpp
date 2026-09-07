@@ -64,6 +64,16 @@ private Q_SLOTS:
         QCOMPARE(apiKeyFor(s), u"or-test"_s);
     }
 
+    void planModeOnlyAdvertisesReadTools()
+    {
+        const QJsonArray tools = toolDefinitions(true);
+        QCOMPARE(tools.size(), 4);
+        for (const QJsonValue &tool : tools) {
+            const QString name = tool.toObject().value(u"function"_s).toObject().value(u"name"_s).toString();
+            QVERIFY(name == u"read_file"_s || name == u"list_dir"_s || name == u"grep"_s || name == u"glob"_s);
+        }
+    }
+
     void malformedToolArgumentsArePreservedForAnErrorResult()
     {
         QHash<int, ToolCall> acc;

@@ -202,7 +202,7 @@ static QJsonObject toolDef(const QString &name, const QString &description, cons
     return tool;
 }
 
-QJsonArray toolDefinitions()
+QJsonArray toolDefinitions(bool readOnlyOnly)
 {
     QJsonArray tools;
 
@@ -262,7 +262,18 @@ QJsonArray toolDefinitions()
                          },
                          {u"command"_s}));
 
-    return tools;
+    if (!readOnlyOnly) {
+        return tools;
+    }
+
+    QJsonArray readOnlyTools;
+    for (const QJsonValue &tool : tools) {
+        const QString name = tool.toObject().value(u"function"_s).toObject().value(u"name"_s).toString();
+        if (name == u"read_file"_s || name == u"list_dir"_s || name == u"grep"_s || name == u"glob"_s) {
+            readOnlyTools.append(tool);
+        }
+    }
+    return readOnlyTools;
 }
 
 QString defaultSystemPrompt(const QString &workspace)

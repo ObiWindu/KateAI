@@ -30,6 +30,7 @@ public:
     }
 
     void complete(const QList<ChatMessage> &messages);
+    void fetchModels(Provider provider);
     void abort();
 
     static QJsonArray messagesToJson(const QList<ChatMessage> &messages);
@@ -39,10 +40,13 @@ Q_SIGNALS:
     void textDelta(const QString &delta);
     void finished(const QString &fullText, const QList<ToolCall> &toolCalls);
     void failed(const QString &error);
+    void modelsReceived(Provider provider, const QStringList &models);
+    void modelsFailed(Provider provider, const QString &error);
 
 private:
     void handleReadyRead();
     void handleFinished();
+    void handleModelsFinished(QNetworkReply *reply, Provider provider);
     void reset();
 
     Settings m_settings;

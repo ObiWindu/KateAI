@@ -28,6 +28,8 @@ Settings SettingsStore::load()
     s.sandbox = sandboxProfileFromId(g.readEntry(u"Sandbox"_s, sandboxProfileId(SandboxProfile::Workspace)));
     s.maxIterations = g.readEntry(u"MaxIterations"_s, 20);
     s.bashTimeoutMs = g.readEntry(u"BashTimeoutMs"_s, 60000);
+    s.planMode = g.readEntry(u"PlanMode"_s, false);
+    s.loadProjectInstructions = g.readEntry(u"LoadProjectInstructions"_s, true);
     s.extraSystemPrompt = g.readEntry(u"ExtraSystemPrompt"_s, QString());
     s.extraDenyGlobs = g.readEntry(u"ExtraDenyGlobs"_s, QStringList());
     if (s.maxIterations < 1) {
@@ -53,6 +55,8 @@ void SettingsStore::save(const Settings &settings)
     g.writeEntry(u"Sandbox"_s, sandboxProfileId(settings.sandbox));
     g.writeEntry(u"MaxIterations"_s, settings.maxIterations);
     g.writeEntry(u"BashTimeoutMs"_s, settings.bashTimeoutMs);
+    g.writeEntry(u"PlanMode"_s, settings.planMode);
+    g.writeEntry(u"LoadProjectInstructions"_s, settings.loadProjectInstructions);
     g.writeEntry(u"ExtraSystemPrompt"_s, settings.extraSystemPrompt);
     g.writeEntry(u"ExtraDenyGlobs"_s, settings.extraDenyGlobs);
     g.sync();

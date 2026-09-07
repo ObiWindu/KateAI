@@ -34,6 +34,7 @@ public:
     void abort();
     void resetConversation();
     void resolvePermission(PermissionDecision decision);
+    void fetchModels(Provider provider);
 
     const QList<ChatMessage> &messages() const
     {
@@ -55,6 +56,8 @@ Q_SIGNALS:
     void statusChanged(const QString &status);
     void failed(const QString &error);
     void turnFinished();
+    void modelsReceived(Provider provider, const QStringList &models);
+    void modelsFailed(Provider provider, const QString &error);
 
 private:
     void sendToModel();

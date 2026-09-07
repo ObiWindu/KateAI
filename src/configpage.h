@@ -5,6 +5,7 @@
 #include <KTextEditor/ConfigPage>
 
 class QComboBox;
+class QCheckBox;
 class QLineEdit;
 class QPlainTextEdit;
 class QSpinBox;
@@ -42,6 +43,8 @@ private:
     QComboBox *m_sandbox = nullptr;
     QSpinBox *m_maxIter = nullptr;
     QSpinBox *m_timeout = nullptr;
+    QCheckBox *m_planMode = nullptr;
+    QCheckBox *m_projectInstructions = nullptr;
     QPlainTextEdit *m_system = nullptr;
     QPlainTextEdit *m_deny = nullptr;
 };

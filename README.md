@@ -89,6 +89,7 @@ Needs **Kate ≥ 24.08** (KF6), **Qt ≥ 6.5**, **CMake ≥ 3.25**, and `bwrap` 
 ## Features
 
 - **Chat panel** on the right — multi-line prompt, Enter to send, Shift+Enter for a new line
+- **Plan mode** — gives the AI only read-only project tools, so it can inspect and propose a plan without changing files
 - **Streaming** replies and an agent loop (model → tools → model, up to 20 iterations)
 - **Providers via API keys:** Grok (xAI), OpenAI, OpenRouter
 - **Tools:** `read_file`, `write_file`, `edit_file`, `list_dir`, `grep`, `glob`, `bash`
@@ -96,7 +97,8 @@ Needs **Kate ≥ 24.08** (KF6), **Qt ≥ 6.5**, **CMake ≥ 3.25**, and `bwrap` 
 - **Sandbox profiles** — workspace, read-only, strict, or off; shell runs under [bubblewrap](https://github.com/containers/bubblewrap)
 - **Secrets stay blocked** — `.env`, `*.pem`, `*.key`, `.ssh`, AWS credentials, GnuPG
 - **Editor-aware** — reads/writes go through open Kate documents so unsaved buffers stay in sync
-- **Ask Kate AI About This** in the editor context menu
+- **Editor actions** — explain, fix, refactor, or add tests for the current selection
+- **Project instructions** — optional workspace-root `KATEAI.md` is included as project context
 
 ```text
 You ──► LLM (Grok / OpenAI / OpenRouter)
@@ -122,7 +124,13 @@ You ──► LLM (Grok / OpenAI / OpenRouter)
 | Stop a turn | **Stop** |
 | Ask about the selection | Right-click in the editor → **Ask Kate AI About This** |
 
-The toolbar at the top of the panel switches provider, model, permission mode, and sandbox without opening settings.
+The toolbar at the top of the panel switches provider, model, permission mode, sandbox, and Agent/Plan mode without opening settings. Use the gear button for the full configuration window.
+
+### Plan mode and project instructions
+
+Choose **Plan** in the chat toolbar when you want an implementation plan before any edits. In this mode Kate AI only receives `read_file`, `list_dir`, `grep`, and `glob`; it cannot run shell commands or change files.
+
+For repository-specific guidance, create a `KATEAI.md` at the workspace root. It can describe architecture, style, test commands, and contribution rules. Loading it is enabled by default and can be disabled from **Configure Kate AI**.
 
 ---
 

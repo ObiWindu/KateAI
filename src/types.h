@@ -91,6 +91,8 @@ struct Settings {
     SandboxProfile sandbox = SandboxProfile::Workspace;
     int maxIterations = 20;
     int bashTimeoutMs = 60000;
+    bool planMode = false;
+    bool loadProjectInstructions = true;
     QString extraSystemPrompt;
     QStringList extraDenyGlobs;
 };
@@ -112,7 +114,7 @@ SandboxProfile sandboxProfileFromId(const QString &id);
 QString apiKeyFor(const Settings &settings);
 QString modelFor(const Settings &settings);
 
-QJsonArray toolDefinitions();
+QJsonArray toolDefinitions(bool readOnlyOnly = false);
 QString defaultSystemPrompt(const QString &workspace);
 
 } // namespace KateAi

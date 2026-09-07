@@ -3,6 +3,8 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QFile>
+#include <QFileInfo>
 
 using namespace Qt::Literals::StringLiterals;
 
@@ -18,6 +20,8 @@ AgentLoop::AgentLoop(QObject *parent)
     });
     connect(&m_client, &LlmClient::finished, this, &AgentLoop::onFinished);
     connect(&m_client, &LlmClient::failed, this, &AgentLoop::onFailed);
+    connect(&m_client, &LlmClient::modelsReceived, this, &AgentLoop::modelsReceived);
+    connect(&m_client, &LlmClient::modelsFailed, this, &AgentLoop::modelsFailed);
 }
 
 void AgentLoop::setSettings(const Settings &settings)
@@ -65,6 +69,21 @@ QString AgentLoop::systemPrompt() const
     }
     prompt += u"\nSandbox profile: "_s + sandboxProfileId(m_settings.sandbox);
     prompt += u"\nPermission mode: "_s + permissionModeId(m_settings.permissionMode);
+    if (m_settings.planMode) {
+        prompt += u"\n\nPlan mode is active. Inspect the project and return a concise, ordered implementation plan. "
+                  "Only read-only tools are available; do not claim to have changed files or run commands."_s;
+    }
+    if (m_settings.loadProjectInstructions) {
+        const QString instructionPath = m_workspace + u"/KATEAI.md"_s;
+        QFile instructions(instructionPath);
+        if (instructions.exists() && instructions.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            const QByteArray contents = instructions.read(32768);
+            if (!contents.isEmpty()) {
+                prompt += u"\n\n<project_instructions path=\"KATEAI.md\">\n"_s
+                    + QString::fromUtf8(contents) + u"\n</project_instructions>"_s;
+            }
+        }
+    }
     return prompt;
 }
 
@@ -219,6 +238,20 @@ void AgentLoop::executeOne(const ToolCall &call)
         return;
     }
 
+    // Tool definitions are advisory to a provider. Enforce plan mode locally
+    // as well, so malformed or injected tool calls cannot modify a project.
+    if (m_settings.planMode && !m_policy.isReadTool(call.name)) {
+        ToolResult result;
+        result.toolCallId = call.id;
+        result.name = call.name;
+        result.ok = false;
+        result.output = u"Plan mode only permits read-only project tools."_s;
+        m_pendingResults.append(result);
+        Q_EMIT toolFinished(result);
+        processQueue();
+        return;
+    }
+
     const PermissionRequest request = m_tools->describe(call);
     QString reason;
     const auto verdict = m_policy.evaluate(call.name, call.arguments, *m_sandbox, &reason);
@@ -282,6 +315,11 @@ void AgentLoop::resolvePermission(PermissionDecision decision)
     m_pendingResults.append(result);
     Q_EMIT toolFinished(result);
     processQueue();
+}
+
+void AgentLoop::fetchModels(Provider provider)
+{
+    m_client.fetchModels(provider);
 }
 
 } // namespace KateAi

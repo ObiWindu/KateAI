@@ -5,6 +5,7 @@
 #include <KLocalizedString>
 
 #include <QComboBox>
+#include <QCheckBox>
 #include <QFormLayout>
 #include <QIcon>
 #include <QLabel>
@@ -74,6 +75,12 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     m_timeout->setSuffix(i18n(" s"));
     form->addRow(i18n("Command timeout:"), m_timeout);
 
+    m_planMode = new QCheckBox(i18n("Only allow read-only tools and ask for an implementation plan"), this);
+    form->addRow(i18n("Plan mode:"), m_planMode);
+
+    m_projectInstructions = new QCheckBox(i18n("Load KATEAI.md from the workspace root"), this);
+    form->addRow(i18n("Project instructions:"), m_projectInstructions);
+
     m_system = new QPlainTextEdit(this);
     m_system->setPlaceholderText(i18n("Extra system prompt (optional)"));
     m_system->setMaximumHeight(100);
@@ -106,6 +113,8 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     connect(m_sandbox, &QComboBox::currentIndexChanged, this, markChanged);
     connect(m_maxIter, &QSpinBox::valueChanged, this, markChanged);
     connect(m_timeout, &QSpinBox::valueChanged, this, markChanged);
+    connect(m_planMode, &QCheckBox::toggled, this, markChanged);
+    connect(m_projectInstructions, &QCheckBox::toggled, this, markChanged);
     connect(m_system, &QPlainTextEdit::textChanged, this, markChanged);
     connect(m_deny, &QPlainTextEdit::textChanged, this, markChanged);
 
@@ -141,6 +150,8 @@ void KateAiConfigPage::apply()
     s.sandbox = sandboxProfileFromId(m_sandbox->currentData().toString());
     s.maxIterations = m_maxIter->value();
     s.bashTimeoutMs = m_timeout->value() * 1000;
+    s.planMode = m_planMode->isChecked();
+    s.loadProjectInstructions = m_projectInstructions->isChecked();
     s.extraSystemPrompt = m_system->toPlainText();
     s.extraDenyGlobs = m_deny->toPlainText().split(u'\n', Qt::SkipEmptyParts);
     m_plugin->setSettings(s);
@@ -160,6 +171,8 @@ void KateAiConfigPage::reset()
     m_sandbox->setCurrentIndex(std::max(0, m_sandbox->findData(sandboxProfileId(s.sandbox))));
     m_maxIter->setValue(s.maxIterations);
     m_timeout->setValue(std::max(1, s.bashTimeoutMs / 1000));
+    m_planMode->setChecked(s.planMode);
+    m_projectInstructions->setChecked(s.loadProjectInstructions);
     m_system->setPlainText(s.extraSystemPrompt);
     m_deny->setPlainText(s.extraDenyGlobs.join(u'\n'));
 }
