@@ -49,7 +49,12 @@ template <> constexpr inline auto KateAi::LlmClient::qt_create_metaobjectdata<qt
         "QList<ToolCall>",
         "toolCalls",
         "failed",
-        "error"
+        "error",
+        "modelsReceived",
+        "Provider",
+        "provider",
+        "models",
+        "modelsFailed"
     };
 
     QtMocHelpers::UintData qt_methods {
@@ -64,6 +69,14 @@ template <> constexpr inline auto KateAi::LlmClient::qt_create_metaobjectdata<qt
         // Signal 'failed'
         QtMocHelpers::SignalData<void(const QString &)>(8, 2, QMC::AccessPublic, QMetaType::Void, {{
             { QMetaType::QString, 9 },
+        }}),
+        // Signal 'modelsReceived'
+        QtMocHelpers::SignalData<void(Provider, const QStringList &)>(10, 2, QMC::AccessPublic, QMetaType::Void, {{
+            { 0x80000000 | 11, 12 }, { QMetaType::QStringList, 13 },
+        }}),
+        // Signal 'modelsFailed'
+        QtMocHelpers::SignalData<void(Provider, const QString &)>(14, 2, QMC::AccessPublic, QMetaType::Void, {{
+            { 0x80000000 | 11, 12 }, { QMetaType::QString, 9 },
         }}),
     };
     QtMocHelpers::UintData qt_properties {
@@ -91,6 +104,8 @@ void KateAi::LlmClient::qt_static_metacall(QObject *_o, QMetaObject::Call _c, in
         case 0: _t->textDelta((*reinterpret_cast<std::add_pointer_t<QString>>(_a[1]))); break;
         case 1: _t->finished((*reinterpret_cast<std::add_pointer_t<QString>>(_a[1])),(*reinterpret_cast<std::add_pointer_t<QList<ToolCall>>>(_a[2]))); break;
         case 2: _t->failed((*reinterpret_cast<std::add_pointer_t<QString>>(_a[1]))); break;
+        case 3: _t->modelsReceived((*reinterpret_cast<std::add_pointer_t<Provider>>(_a[1])),(*reinterpret_cast<std::add_pointer_t<QStringList>>(_a[2]))); break;
+        case 4: _t->modelsFailed((*reinterpret_cast<std::add_pointer_t<Provider>>(_a[1])),(*reinterpret_cast<std::add_pointer_t<QString>>(_a[2]))); break;
         default: ;
         }
     }
@@ -100,6 +115,10 @@ void KateAi::LlmClient::qt_static_metacall(QObject *_o, QMetaObject::Call _c, in
         if (QtMocHelpers::indexOfMethod<void (LlmClient::*)(const QString & , const QList<ToolCall> & )>(_a, &LlmClient::finished, 1))
             return;
         if (QtMocHelpers::indexOfMethod<void (LlmClient::*)(const QString & )>(_a, &LlmClient::failed, 2))
+            return;
+        if (QtMocHelpers::indexOfMethod<void (LlmClient::*)(Provider , const QStringList & )>(_a, &LlmClient::modelsReceived, 3))
+            return;
+        if (QtMocHelpers::indexOfMethod<void (LlmClient::*)(Provider , const QString & )>(_a, &LlmClient::modelsFailed, 4))
             return;
     }
 }
@@ -123,14 +142,14 @@ int KateAi::LlmClient::qt_metacall(QMetaObject::Call _c, int _id, void **_a)
     if (_id < 0)
         return _id;
     if (_c == QMetaObject::InvokeMetaMethod) {
-        if (_id < 3)
+        if (_id < 5)
             qt_static_metacall(this, _c, _id, _a);
-        _id -= 3;
+        _id -= 5;
     }
     if (_c == QMetaObject::RegisterMethodArgumentMetaType) {
-        if (_id < 3)
+        if (_id < 5)
             *reinterpret_cast<QMetaType *>(_a[0]) = QMetaType();
-        _id -= 3;
+        _id -= 5;
     }
     return _id;
 }
@@ -151,5 +170,17 @@ void KateAi::LlmClient::finished(const QString & _t1, const QList<ToolCall> & _t
 void KateAi::LlmClient::failed(const QString & _t1)
 {
     QMetaObject::activate<void>(this, &staticMetaObject, 2, nullptr, _t1);
+}
+
+// SIGNAL 3
+void KateAi::LlmClient::modelsReceived(Provider _t1, const QStringList & _t2)
+{
+    QMetaObject::activate<void>(this, &staticMetaObject, 3, nullptr, _t1, _t2);
+}
+
+// SIGNAL 4
+void KateAi::LlmClient::modelsFailed(Provider _t1, const QString & _t2)
+{
+    QMetaObject::activate<void>(this, &staticMetaObject, 4, nullptr, _t1, _t2);
 }
 QT_WARNING_POP

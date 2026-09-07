@@ -1845,6 +1845,7 @@ src/CMakeFiles/kateai.dir/configpage.cpp.o: /home/macewindu/ai-dev/KateAI/src/co
   /usr/include/qt6/QtGui/qvector2d.h \
   /usr/include/qt6/QtGui/qvectornd.h \
   /usr/include/qt6/QtGui/qwindowdefs.h \
+  /usr/include/qt6/QtWidgets/QCheckBox \
   /usr/include/qt6/QtWidgets/QComboBox \
   /usr/include/qt6/QtWidgets/QFormLayout \
   /usr/include/qt6/QtWidgets/QLabel \
@@ -1853,11 +1854,13 @@ src/CMakeFiles/kateai.dir/configpage.cpp.o: /home/macewindu/ai-dev/KateAI/src/co
   /usr/include/qt6/QtWidgets/QPlainTextEdit \
   /usr/include/qt6/QtWidgets/QSpinBox \
   /usr/include/qt6/QtWidgets/QWidget \
+  /usr/include/qt6/QtWidgets/qabstractbutton.h \
   /usr/include/qt6/QtWidgets/qabstractitemdelegate.h \
   /usr/include/qt6/QtWidgets/qabstractscrollarea.h \
   /usr/include/qt6/QtWidgets/qabstractslider.h \
   /usr/include/qt6/QtWidgets/qabstractspinbox.h \
   /usr/include/qt6/QtWidgets/qboxlayout.h \
+  /usr/include/qt6/QtWidgets/qcheckbox.h \
   /usr/include/qt6/QtWidgets/qcombobox.h \
   /usr/include/qt6/QtWidgets/qformlayout.h \
   /usr/include/qt6/QtWidgets/qframe.h \
@@ -3711,6 +3714,7 @@ src/CMakeFiles/kateai.dir/plugin.cpp.o: /home/macewindu/ai-dev/KateAI/src/plugin
 src/CMakeFiles/kateai.dir/pluginview.cpp.o: /home/macewindu/ai-dev/KateAI/src/pluginview.cpp \
   /home/macewindu/ai-dev/KateAI/src/agentloop.h \
   /home/macewindu/ai-dev/KateAI/src/chatwidget.h \
+  /home/macewindu/ai-dev/KateAI/src/configpage.h \
   /home/macewindu/ai-dev/KateAI/src/documentbridge.h \
   /home/macewindu/ai-dev/KateAI/src/llmclient.h \
   /home/macewindu/ai-dev/KateAI/src/permissions.h \
@@ -3753,12 +3757,14 @@ src/CMakeFiles/kateai.dir/pluginview.cpp.o: /home/macewindu/ai-dev/KateAI/src/pl
   /usr/include/KF6/KSyntaxHighlighting/KSyntaxHighlighting/ksyntaxhighlighting_export.h \
   /usr/include/KF6/KSyntaxHighlighting/KSyntaxHighlighting/theme.h \
   /usr/include/KF6/KSyntaxHighlighting/ksyntaxhighlighting_version.h \
+  /usr/include/KF6/KTextEditor/KTextEditor/ConfigPage \
   /usr/include/KF6/KTextEditor/KTextEditor/Document \
   /usr/include/KF6/KTextEditor/KTextEditor/MainWindow \
   /usr/include/KF6/KTextEditor/KTextEditor/Plugin \
   /usr/include/KF6/KTextEditor/KTextEditor/View \
   /usr/include/KF6/KTextEditor/ktexteditor/attribute.h \
   /usr/include/KF6/KTextEditor/ktexteditor/codecompletionmodel.h \
+  /usr/include/KF6/KTextEditor/ktexteditor/configpage.h \
   /usr/include/KF6/KTextEditor/ktexteditor/cursor.h \
   /usr/include/KF6/KTextEditor/ktexteditor/document.h \
   /usr/include/KF6/KTextEditor/ktexteditor/linerange.h \
@@ -4338,18 +4344,24 @@ src/CMakeFiles/kateai.dir/pluginview.cpp.o: /home/macewindu/ai-dev/KateAI/src/pl
   /usr/include/qt6/QtNetwork/qtnetwork-config.h \
   /usr/include/qt6/QtNetwork/qtnetworkexports.h \
   /usr/include/qt6/QtNetwork/qtnetworkglobal.h \
+  /usr/include/qt6/QtWidgets/QDialog \
+  /usr/include/qt6/QtWidgets/QDialogButtonBox \
   /usr/include/qt6/QtWidgets/QLayout \
   /usr/include/qt6/QtWidgets/QMenu \
+  /usr/include/qt6/QtWidgets/QPushButton \
   /usr/include/qt6/QtWidgets/QToolButton \
   /usr/include/qt6/QtWidgets/QVBoxLayout \
   /usr/include/qt6/QtWidgets/QWidget \
   /usr/include/qt6/QtWidgets/QWidgetAction \
   /usr/include/qt6/QtWidgets/qabstractbutton.h \
   /usr/include/qt6/QtWidgets/qboxlayout.h \
+  /usr/include/qt6/QtWidgets/qdialog.h \
+  /usr/include/qt6/QtWidgets/qdialogbuttonbox.h \
   /usr/include/qt6/QtWidgets/qgridlayout.h \
   /usr/include/qt6/QtWidgets/qlayout.h \
   /usr/include/qt6/QtWidgets/qlayoutitem.h \
   /usr/include/qt6/QtWidgets/qmenu.h \
+  /usr/include/qt6/QtWidgets/qpushbutton.h \
   /usr/include/qt6/QtWidgets/qsizepolicy.h \
   /usr/include/qt6/QtWidgets/qtoolbutton.h \
   /usr/include/qt6/QtWidgets/qtwidgets-config.h \
@@ -4950,11 +4962,15 @@ src/CMakeFiles/kateai.dir/promptedit.cpp.o: /home/macewindu/ai-dev/KateAI/src/pr
 
 /usr/include/qt6/QtGui/QKeyEvent:
 
+/usr/include/qt6/QtWidgets/qdialogbuttonbox.h:
+
 /usr/include/qt6/QtWidgets/QWidgetAction:
 
 /usr/include/qt6/QtWidgets/QToolButton:
 
 /usr/include/qt6/QtWidgets/QMenu:
+
+/usr/include/qt6/QtWidgets/QDialog:
 
 /usr/include/qt6/QtGui/QKeySequence:
 
@@ -5010,6 +5026,8 @@ src/CMakeFiles/kateai.dir/promptedit.cpp.o: /home/macewindu/ai-dev/KateAI/src/pr
 
 /usr/include/KF6/KParts/kparts_version.h:
 
+/usr/include/qt6/QtWidgets/qdialog.h:
+
 /usr/include/KF6/KParts/kparts/readonlypart.h:
 
 /usr/include/KF6/KParts/KParts/ReadWritePart:
@@ -5063,6 +5081,8 @@ src/kateai_autogen/EWIEGA46WW/qrc_kateai.cpp:
 /usr/include/qt6/QtWidgets/QLineEdit:
 
 /usr/include/qt6/QtWidgets/QFormLayout:
+
+/usr/include/qt6/QtWidgets/QCheckBox:
 
 /usr/include/qt6/QtGui/QIcon:
 
@@ -5535,6 +5555,8 @@ src/kateai_autogen/moc_predefs.h:
 /usr/include/c++/16/aarch64-redhat-linux/bits/c++locale.h:
 
 /usr/include/KF6/KXmlGui/KXMLGUIClient:
+
+/usr/include/qt6/QtWidgets/qcheckbox.h:
 
 /usr/include/c++/16/bits/stl_tree.h:
 
@@ -6323,6 +6345,8 @@ src/kateai_autogen/EWIEGA46WW/moc_permissionbar.cpp:
 /usr/include/qt6/QtCore/qexceptionhandling.h:
 
 /usr/include/qt6/QtCore/qfloat16.h:
+
+/usr/include/qt6/QtWidgets/QDialogButtonBox:
 
 /usr/include/KF6/KXmlGui/kxmlgui_version.h:
 

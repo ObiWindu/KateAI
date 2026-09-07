@@ -146,6 +146,10 @@ src/CMakeFiles/kateai_core.dir/agentloop.cpp.o: /home/macewindu/ai-dev/KateAI/sr
   /usr/include/c++/16/bits/exception_defines.h \
   /usr/include/c++/16/bits/exception_ptr.h \
   /usr/include/c++/16/bits/formatfwd.h \
+  /usr/include/c++/16/bits/fs_dir.h \
+  /usr/include/c++/16/bits/fs_fwd.h \
+  /usr/include/c++/16/bits/fs_ops.h \
+  /usr/include/c++/16/bits/fs_path.h \
   /usr/include/c++/16/bits/functexcept.h \
   /usr/include/c++/16/bits/functional_hash.h \
   /usr/include/c++/16/bits/hash_bytes.h \
@@ -183,6 +187,7 @@ src/CMakeFiles/kateai_core.dir/agentloop.cpp.o: /home/macewindu/ai-dev/KateAI/sr
   /usr/include/c++/16/bits/postypes.h \
   /usr/include/c++/16/bits/predefined_ops.h \
   /usr/include/c++/16/bits/ptr_traits.h \
+  /usr/include/c++/16/bits/quoted_string.h \
   /usr/include/c++/16/bits/range_access.h \
   /usr/include/c++/16/bits/ranges_algo.h \
   /usr/include/c++/16/bits/ranges_algobase.h \
@@ -248,6 +253,7 @@ src/CMakeFiles/kateai_core.dir/agentloop.cpp.o: /home/macewindu/ai-dev/KateAI/sr
   /usr/include/c++/16/climits \
   /usr/include/c++/16/clocale \
   /usr/include/c++/16/cmath \
+  /usr/include/c++/16/codecvt \
   /usr/include/c++/16/compare \
   /usr/include/c++/16/concepts \
   /usr/include/c++/16/cstddef \
@@ -268,9 +274,11 @@ src/CMakeFiles/kateai_core.dir/agentloop.cpp.o: /home/macewindu/ai-dev/KateAI/sr
   /usr/include/c++/16/ext/numeric_traits.h \
   /usr/include/c++/16/ext/string_conversions.h \
   /usr/include/c++/16/ext/type_traits.h \
+  /usr/include/c++/16/filesystem \
   /usr/include/c++/16/format \
   /usr/include/c++/16/functional \
   /usr/include/c++/16/initializer_list \
+  /usr/include/c++/16/iomanip \
   /usr/include/c++/16/ios \
   /usr/include/c++/16/iosfwd \
   /usr/include/c++/16/istream \
@@ -340,6 +348,8 @@ src/CMakeFiles/kateai_core.dir/agentloop.cpp.o: /home/macewindu/ai-dev/KateAI/sr
   /usr/include/locale.h \
   /usr/include/math.h \
   /usr/include/pthread.h \
+  /usr/include/qt6/QtCore/QFile \
+  /usr/include/qt6/QtCore/QFileInfo \
   /usr/include/qt6/QtCore/QFlags \
   /usr/include/qt6/QtCore/QHash \
   /usr/include/qt6/QtCore/QJsonArray \
@@ -399,6 +409,9 @@ src/CMakeFiles/kateai_core.dir/agentloop.cpp.o: /home/macewindu/ai-dev/KateAI/sr
   /usr/include/qt6/QtCore/qdebug.h \
   /usr/include/qt6/QtCore/qendian.h \
   /usr/include/qt6/QtCore/qexceptionhandling.h \
+  /usr/include/qt6/QtCore/qfile.h \
+  /usr/include/qt6/QtCore/qfiledevice.h \
+  /usr/include/qt6/QtCore/qfileinfo.h \
   /usr/include/qt6/QtCore/qflags.h \
   /usr/include/qt6/QtCore/qfloat16.h \
   /usr/include/qt6/QtCore/qforeach.h \
@@ -474,6 +487,7 @@ src/CMakeFiles/kateai_core.dir/agentloop.cpp.o: /home/macewindu/ai-dev/KateAI/sr
   /usr/include/qt6/QtCore/qtenvironmentvariables.h \
   /usr/include/qt6/QtCore/qtextstream.h \
   /usr/include/qt6/QtCore/qtformat_impl.h \
+  /usr/include/qt6/QtCore/qtimezone.h \
   /usr/include/qt6/QtCore/qtmetamacros.h \
   /usr/include/qt6/QtCore/qtnoop.h \
   /usr/include/qt6/QtCore/qtpreprocessorsupport.h \
@@ -5465,10 +5479,6 @@ src/kateai_core_autogen/mocs_compilation.cpp:
 
 /usr/include/qt6/QtCore/qline.h:
 
-/usr/include/qt6/QtCore/qfileinfo.h:
-
-/usr/include/qt6/QtCore/qfile.h:
-
 /usr/include/qt6/QtCore/qdirlisting.h:
 
 /usr/include/qt6/QtCore/qcheckedint_impl.h:
@@ -5480,14 +5490,6 @@ src/kateai_core_autogen/mocs_compilation.cpp:
 /usr/include/qt6/QtCore/QSharedData:
 
 /usr/include/qt6/QtCore/QSaveFile:
-
-/usr/include/qt6/QtCore/QFileInfo:
-
-/usr/include/c++/16/iomanip:
-
-/usr/include/c++/16/bits/quoted_string.h:
-
-/usr/include/c++/16/bits/fs_path.h:
 
 /usr/include/KF6/KXmlGui/kxmlguiclient.h:
 
@@ -5511,11 +5513,25 @@ src/kateai_core_autogen/mocs_compilation.cpp:
 
 /usr/include/KF6/KSyntaxHighlighting/KSyntaxHighlighting/Theme:
 
-/usr/include/qt6/QtCore/QProcess:
+/usr/include/KF6/KParts/kparts_version.h:
 
-/usr/include/c++/16/ctime:
+/usr/include/qt6/QtCore/q20algorithm.h:
 
-/usr/include/c++/16/cstdio:
+/usr/include/KF6/KParts/kparts/readwritepart.h:
+
+/usr/include/KF6/KParts/kparts/readonlypart.h:
+
+/usr/include/qt6/QtGui/qtgui-config.h:
+
+/usr/include/KF6/KParts/kparts/kparts_export.h:
+
+/usr/include/KF6/KParts/KParts/ReadWritePart:
+
+/usr/include/KF6/KCoreAddons/kcoreaddons_version.h:
+
+/usr/include/KF6/KCoreAddons/KPluginMetaData:
+
+/usr/lib/gcc/aarch64-redhat-linux/16/include/stdint.h:
 
 /usr/include/c++/16/cstdint:
 
@@ -5566,10 +5582,6 @@ src/kateai_core_autogen/mocs_compilation.cpp:
 /usr/include/qt6/QtCore/QTypeInfo:
 
 /usr/include/c++/16/bits/sstream.tcc:
-
-/usr/include/c++/16/bits/stl_uninitialized.h:
-
-/usr/include/c++/16/cstring:
 
 /usr/include/c++/16/bits/specfun.h:
 
@@ -5675,6 +5687,8 @@ src/kateai_core_autogen/mocs_compilation.cpp:
 
 /usr/include/c++/16/bits/functexcept.h:
 
+/usr/include/bits/types/__sigset_t.h:
+
 /usr/include/c++/16/climits:
 
 /usr/include/c++/16/bits/formatfwd.h:
@@ -5725,8 +5739,6 @@ src/kateai_core_autogen/mocs_compilation.cpp:
 
 /usr/include/c++/16/bits/chrono.h:
 
-/usr/include/c++/16/bits/cxxabi_forced.h:
-
 /usr/include/c++/16/bits/std_abs.h:
 
 /usr/include/c++/16/bits/charconv.h:
@@ -5735,15 +5747,15 @@ src/kateai_core_autogen/mocs_compilation.cpp:
 
 /usr/include/c++/16/ext/string_conversions.h:
 
-/usr/include/qt6/QtCore/QFile:
-
-/usr/include/c++/16/bits/char_traits.h:
-
 /usr/include/bits/types/__fpos_t.h:
 
 /usr/include/c++/16/ranges:
 
 /usr/include/qt6/QtCore/qfunctionpointer.h:
+
+/usr/include/c++/16/bits/fs_path.h:
+
+/usr/include/c++/16/backward/binders.h:
 
 /usr/include/qt6/QtCore/qarraydata.h:
 
@@ -5764,12 +5776,6 @@ src/kateai_core_autogen/mocs_compilation.cpp:
 /usr/include/c++/16/tr1/exp_integral.tcc:
 
 /usr/include/c++/16/bits/shared_ptr_atomic.h:
-
-/usr/include/qt6/QtCore/qfiledevice.h:
-
-/usr/include/c++/16/bits/uniform_int_dist.h:
-
-/usr/include/c++/16/bits/ostream.tcc:
 
 /usr/include/pthread.h:
 
@@ -5947,19 +5953,13 @@ src/kateai_core_autogen/mocs_compilation.cpp:
 
 /usr/include/c++/16/ext/alloc_traits.h:
 
-/usr/include/KF6/KParts/kparts/readonlypart.h:
-
 /home/macewindu/ai-dev/KateAI/src/types.h:
 
 /usr/include/c++/16/bits/stl_map.h:
 
-/usr/include/bits/types/__sigset_t.h:
+/usr/include/c++/16/bits/quoted_string.h:
 
-/usr/include/qt6/QtCore/qcompare_impl.h:
-
-/usr/include/c++/16/cwchar:
-
-/usr/include/linux/sched/types.h:
+/usr/include/qt6/QtCore/qmap.h:
 
 /usr/include/c++/16/aarch64-redhat-linux/bits/time_members.h:
 
@@ -6000,10 +6000,6 @@ src/kateai_core_autogen/mocs_compilation.cpp:
 /usr/include/bits/local_lim.h:
 
 /usr/include/qt6/QtCore/qtcoreexports.h:
-
-/usr/include/qt6/QtCore/qtimezone.h:
-
-/usr/include/bits/stdio_lim.h:
 
 /usr/include/c++/16/bits/stream_iterator.h:
 
@@ -6119,7 +6115,11 @@ src/kateai_core_autogen/mocs_compilation.cpp:
 
 /usr/include/bits/struct_rwlock.h:
 
+/usr/include/c++/16/iomanip:
+
 /usr/include/qt6/QtCore/q20type_traits.h:
+
+/usr/include/c++/16/bits/cxxabi_forced.h:
 
 /usr/include/bits/types/struct_sched_param.h:
 
@@ -6179,10 +6179,6 @@ src/kateai_core_autogen/mocs_compilation.cpp:
 
 /usr/include/c++/16/aarch64-redhat-linux/bits/ctype_base.h:
 
-/usr/include/c++/16/filesystem:
-
-/usr/include/qt6/QtNetwork/qsslconfiguration.h:
-
 /usr/include/bits/endianness.h:
 
 /usr/include/libintl.h:
@@ -6229,8 +6225,6 @@ src/kateai_core_autogen/mocs_compilation.cpp:
 
 /usr/include/c++/16/new:
 
-/usr/include/c++/16/backward/binders.h:
-
 /usr/include/c++/16/cwctype:
 
 /home/macewindu/ai-dev/KateAI/src/agentloop.cpp:
@@ -6265,6 +6259,22 @@ src/kateai_core_autogen/mocs_compilation.cpp:
 
 /usr/include/qt6/QtCore/qarraydatapointer.h:
 
+/usr/include/c++/16/cstdio:
+
+/usr/include/c++/16/bits/stl_uninitialized.h:
+
+/usr/include/c++/16/cstring:
+
+/usr/include/qt6/QtCore/QProcess:
+
+/usr/include/c++/16/ctime:
+
+/usr/include/qt6/QtCore/qcompare_impl.h:
+
+/usr/include/c++/16/cwchar:
+
+/usr/include/linux/sched/types.h:
+
 /usr/include/KF6/KTextEditor/KTextEditor/Editor:
 
 /usr/include/c++/16/pstl/execution_defs.h:
@@ -6280,6 +6290,10 @@ src/kateai_core_autogen/mocs_compilation.cpp:
 /usr/include/sys/select.h:
 
 /usr/include/c++/16/ext/concurrence.h:
+
+/usr/include/qt6/QtNetwork/qsslconfiguration.h:
+
+/usr/include/c++/16/filesystem:
 
 /usr/include/c++/16/functional:
 
@@ -6308,6 +6322,16 @@ src/kateai_core_autogen/mocs_compilation.cpp:
 /usr/include/c++/16/bits/fs_fwd.h:
 
 /usr/include/c++/16/set:
+
+/usr/include/KF6/KCoreAddons/kpluginmetadata.h:
+
+/usr/include/c++/16/bits/stl_iterator_base_types.h:
+
+/home/macewindu/ai-dev/KateAI/src/llmclient.h:
+
+/usr/include/c++/16/bits/stl_relops.h:
+
+/usr/include/c++/16/span:
 
 /usr/include/c++/16/bits/stdexcept_throwfwd.h:
 
@@ -6393,6 +6417,18 @@ src/kateai_core_autogen/EWIEGA46WW/moc_llmclient.cpp:
 
 /usr/include/math.h:
 
+/usr/include/c++/16/bits/char_traits.h:
+
+/usr/include/qt6/QtCore/QFile:
+
+/usr/include/c++/16/debug/debug.h:
+
+/usr/include/qt6/QtCore/QJsonObject:
+
+/usr/include/qt6/QtCore/QFileInfo:
+
+/usr/include/qt6/QtCore/qbindingstorage.h:
+
 /usr/include/c++/16/bits/ios_base.h:
 
 /usr/include/c++/16/aarch64-redhat-linux/bits/messages_members.h:
@@ -6400,10 +6436,6 @@ src/kateai_core_autogen/EWIEGA46WW/moc_llmclient.cpp:
 /usr/include/qt6/QtCore/QFlags:
 
 /usr/include/qt6/QtCore/QJsonArray:
-
-/usr/include/c++/16/debug/debug.h:
-
-/usr/include/qt6/QtCore/QJsonObject:
 
 /usr/include/qt6/QtCore/QVariant:
 
@@ -6429,10 +6461,6 @@ src/kateai_core_autogen/EWIEGA46WW/moc_llmclient.cpp:
 
 /usr/include/qt6/QtCore/qalloc.h:
 
-/usr/include/qt6/QtCore/q20algorithm.h:
-
-/usr/include/KF6/KParts/kparts/readwritepart.h:
-
 /usr/include/c++/16/aarch64-redhat-linux/bits/gthr-default.h:
 
 /usr/include/qt6/QtCore/qanystringview.h:
@@ -6445,13 +6473,7 @@ src/kateai_core_autogen/EWIEGA46WW/moc_llmclient.cpp:
 
 /usr/include/qt6/QtCore/qatomic_cxx11.h:
 
-/usr/include/KF6/KCoreAddons/KPluginMetaData:
-
-/usr/include/qt6/QtCore/qbindingstorage.h:
-
 /usr/include/qt6/QtCore/qbytearrayalgorithms.h:
-
-/usr/lib/gcc/aarch64-redhat-linux/16/include/stdint.h:
 
 /usr/include/qt6/QtCore/qbytearraylist.h:
 
@@ -6462,8 +6484,6 @@ src/kateai_core_autogen/EWIEGA46WW/moc_llmclient.cpp:
 /usr/include/qt6/QtCore/qcompare.h:
 
 /usr/include/qt6/QtCore/qcomparehelpers.h:
-
-/usr/include/KF6/KCoreAddons/kcoreaddons_version.h:
 
 /usr/include/qt6/QtCore/qconstructormacros.h:
 
@@ -6483,21 +6503,25 @@ src/kateai_core_autogen/EWIEGA46WW/moc_llmclient.cpp:
 
 /usr/include/qt6/QtCore/qdarwinhelpers.h:
 
-/usr/include/c++/16/bits/stl_iterator_base_types.h:
-
-/home/macewindu/ai-dev/KateAI/src/llmclient.h:
-
-/usr/include/c++/16/bits/stl_relops.h:
-
-/usr/include/c++/16/span:
-
-/usr/include/KF6/KCoreAddons/kpluginmetadata.h:
-
 /usr/include/c++/16/exception:
 
 /usr/include/qt6/QtCore/qendian.h:
 
 /usr/include/qt6/QtCore/qexceptionhandling.h:
+
+/usr/include/qt6/QtCore/qfile.h:
+
+/usr/include/c++/16/bits/uniform_int_dist.h:
+
+/usr/include/c++/16/bits/ostream.tcc:
+
+/usr/include/qt6/QtCore/qfiledevice.h:
+
+/usr/include/bits/stdio_lim.h:
+
+/usr/include/qt6/QtCore/qtimezone.h:
+
+/usr/include/qt6/QtCore/qfileinfo.h:
 
 /usr/include/qt6/QtGui/qpolygon.h:
 
@@ -6526,8 +6550,6 @@ src/kateai_core_autogen/EWIEGA46WW/moc_llmclient.cpp:
 /usr/include/qt6/QtCore/qlogging.h:
 
 /usr/include/qt6/QtCore/qmalloc.h:
-
-/usr/include/qt6/QtCore/qmap.h:
 
 /usr/include/qt6/QtGui/qtextformat.h:
 
@@ -6568,10 +6590,6 @@ src/kateai_core_autogen/EWIEGA46WW/moc_llmclient.cpp:
 /usr/include/qt6/QtCore/qrefcount.h:
 
 /usr/include/qt6/QtCore/qscopedpointer.h:
-
-/usr/include/qt6/QtGui/qtgui-config.h:
-
-/usr/include/KF6/KParts/kparts/kparts_export.h:
 
 /usr/include/c++/16/algorithm:
 
@@ -6623,9 +6641,9 @@ src/kateai_core_autogen/EWIEGA46WW/moc_llmclient.cpp:
 
 /usr/include/qt6/QtCore/qtpreprocessorsupport.h:
 
-/usr/include/c++/16/bit:
-
 /usr/include/KF6/KCoreAddons/kcoreaddons_export.h:
+
+/usr/include/c++/16/bit:
 
 /usr/include/qt6/QtCore/qtypeinfo.h:
 
@@ -6653,9 +6671,9 @@ src/kateai_core_autogen/EWIEGA46WW/moc_llmclient.cpp:
 
 /usr/include/qt6/QtNetwork/QSslConfiguration:
 
-/usr/include/bits/mathcalls-macros.h:
-
 /usr/include/KF6/KParts/kparts/partbase.h:
+
+/usr/include/bits/mathcalls-macros.h:
 
 /usr/include/qt6/QtNetwork/qsslcertificate.h:
 
@@ -6689,16 +6707,12 @@ src/kateai_core_autogen/EWIEGA46WW/moc_llmclient.cpp:
 
 /usr/include/sys/cdefs.h:
 
-/usr/include/c++/16/bits/fs_ops.h:
-
 /usr/include/qt6/QtCore/qlocale.h:
+
+/usr/include/c++/16/bits/fs_ops.h:
 
 /usr/include/time.h:
 
 /usr/include/c++/16/bits/node_handle.h:
 
 /usr/lib/gcc/aarch64-redhat-linux/16/include/limits.h:
-
-/usr/include/KF6/KParts/KParts/ReadWritePart:
-
-/usr/include/KF6/KParts/kparts_version.h:
