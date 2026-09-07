@@ -66,6 +66,7 @@ private:
     void processQueue();
     void executeOne(const ToolCall &call);
     QString systemPrompt() const;
+    QList<ToolCall> bundleSimilarTools(const QList<ToolCall> &calls);
 
     Settings m_settings;
     QString m_workspace;

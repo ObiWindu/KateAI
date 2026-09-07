@@ -163,6 +163,24 @@ void AgentLoop::sendToModel()
     m_client.complete(m_messages);
 }
 
+QList<ToolCall> AgentLoop::bundleSimilarTools(const QList<ToolCall> &calls)
+{
+    if (calls.isEmpty()) {
+        return {};
+    }
+
+    // Group by tool name for batching
+    QHash<QString, QList<ToolCall>> grouped;
+    for (const ToolCall &call : calls) {
+        grouped[call.name].append(call);
+    }
+
+    // For now, return all calls as-is since we need to maintain order
+    // In a more advanced implementation, we could batch similar calls
+    // into a single request if the LLM supports it
+    return calls;
+}
+
 void AgentLoop::onFailed(const QString &error)
 {
     m_busy = false;
@@ -181,7 +199,7 @@ void AgentLoop::onFinished(const QString &text, const QList<ToolCall> &toolCalls
             QJsonObject fn;
             fn.insert(u"name"_s, call.name);
             fn.insert(u"arguments"_s, call.argumentsJson.isEmpty() ? QString::fromUtf8(QJsonDocument(call.arguments).toJson(QJsonDocument::Compact))
-                                                                   : call.argumentsJson);
+                                                                  : call.argumentsJson);
             QJsonObject obj;
             obj.insert(u"id"_s, call.id);
             obj.insert(u"type"_s, u"function"_s);
@@ -200,7 +218,8 @@ void AgentLoop::onFinished(const QString &text, const QList<ToolCall> &toolCalls
         return;
     }
 
-    m_queue = toolCalls;
+    // Bundle similar tool calls for optimization
+    m_queue = bundleSimilarTools(toolCalls);
     processQueue();
 }
 

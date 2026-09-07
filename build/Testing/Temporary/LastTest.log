@@ -1,18 +1,18 @@
-Start testing: Sep 07 06:54 CEST
+Start testing: Sep 07 07:19 CEST
 ----------------------------------------------------------
 1/4 Testing: appstreamtest
 1/4 Test: appstreamtest
 Command: "/usr/bin/cmake" "-DAPPSTREAMCLI=/usr/bin/appstreamcli" "-DINSTALL_FILES=/home/macewindu/ai-dev/KateAI/build/install_manifest.txt" "-P" "/usr/share/ECM/kde-modules/appstreamtest.cmake"
 Directory: /home/macewindu/ai-dev/KateAI/build
-"appstreamtest" start time: Sep 07 06:54 CEST
+"appstreamtest" start time: Sep 07 07:19 CEST
 Output:
 ----------------------------------------------------------
 Not installed yet, skipping
 <end of output>
-Test time =   0.00 sec
+Test time =   0.01 sec
 ----------------------------------------------------------
 Test Passed.
-"appstreamtest" end time: Sep 07 06:54 CEST
+"appstreamtest" end time: Sep 07 07:19 CEST
 "appstreamtest" time elapsed: 00:00:00
 ----------------------------------------------------------
 
@@ -20,7 +20,7 @@ Test Passed.
 2/4 Test: test_sandbox
 Command: "/home/macewindu/ai-dev/KateAI/build/bin/test_sandbox"
 Directory: /home/macewindu/ai-dev/KateAI/build/tests
-"test_sandbox" start time: Sep 07 06:54 CEST
+"test_sandbox" start time: Sep 07 07:19 CEST
 Output:
 ----------------------------------------------------------
 ********* Start testing of TestSandbox *********
@@ -37,10 +37,10 @@ PASS   : TestSandbox::cleanupTestCase()
 Totals: 9 passed, 0 failed, 0 skipped, 0 blacklisted, 2ms
 ********* Finished testing of TestSandbox *********
 <end of output>
-Test time =   0.05 sec
+Test time =   0.04 sec
 ----------------------------------------------------------
 Test Passed.
-"test_sandbox" end time: Sep 07 06:54 CEST
+"test_sandbox" end time: Sep 07 07:19 CEST
 "test_sandbox" time elapsed: 00:00:00
 ----------------------------------------------------------
 
@@ -48,7 +48,7 @@ Test Passed.
 3/4 Test: test_permissions
 Command: "/home/macewindu/ai-dev/KateAI/build/bin/test_permissions"
 Directory: /home/macewindu/ai-dev/KateAI/build/tests
-"test_permissions" start time: Sep 07 06:54 CEST
+"test_permissions" start time: Sep 07 07:19 CEST
 Output:
 ----------------------------------------------------------
 ********* Start testing of TestPermissions *********
@@ -66,7 +66,7 @@ Totals: 7 passed, 0 failed, 0 skipped, 0 blacklisted, 0ms
 Test time =   0.03 sec
 ----------------------------------------------------------
 Test Passed.
-"test_permissions" end time: Sep 07 06:54 CEST
+"test_permissions" end time: Sep 07 07:19 CEST
 "test_permissions" time elapsed: 00:00:00
 ----------------------------------------------------------
 
@@ -74,7 +74,7 @@ Test Passed.
 4/4 Test: test_llmparse
 Command: "/home/macewindu/ai-dev/KateAI/build/bin/test_llmparse"
 Directory: /home/macewindu/ai-dev/KateAI/build/tests
-"test_llmparse" start time: Sep 07 06:54 CEST
+"test_llmparse" start time: Sep 07 07:19 CEST
 Output:
 ----------------------------------------------------------
 ********* Start testing of TestLlmParse *********
@@ -94,8 +94,8 @@ Totals: 9 passed, 0 failed, 0 skipped, 0 blacklisted, 0ms
 Test time =   0.03 sec
 ----------------------------------------------------------
 Test Passed.
-"test_llmparse" end time: Sep 07 06:54 CEST
+"test_llmparse" end time: Sep 07 07:19 CEST
 "test_llmparse" time elapsed: 00:00:00
 ----------------------------------------------------------
 
-End testing: Sep 07 06:54 CEST
+End testing: Sep 07 07:19 CEST

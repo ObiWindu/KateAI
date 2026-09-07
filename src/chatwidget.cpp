@@ -176,7 +176,7 @@ ChatWidget::ChatWidget(QWidget *parent)
     connect(&m_agent, &AgentLoop::userMessage, this, [this](const QString &text) {
         freezeStreaming();
         m_streamText.clear();
-        appendHtml(u"<div style=\"background-color:#2a2f3a; color:#e8e8e8; padding:12px 16px; border-radius:8px; margin:8px 0 8px auto; max-width:85%; text-align:right; font-family:sans-serif; font-size:13px; line-height:1.5; border:1px solid #3a3f4a;\"><b style=\"color:#7aa2f7; font-size:11px; text-transform:uppercase; letter-spacing:0.5px;\">You</b><br>%1</div>"_s.arg(escape(text).replace(u"\n"_s, u"<br>"_s)));
+        appendHtml(u"<div style=\"background-color:#2a2f3a; color:#e8e8e8; padding:12px 16px; border-radius:8px; margin:8px 0 8px 0; max-width:85%; text-align:left; font-family:sans-serif; font-size:13px; line-height:1.5; border:2px solid #3a3f4a; box-shadow:0 2px 8px rgba(0,0,0,0.3);\"><b style=\"color:#7aa2f7; font-size:11px; text-transform:uppercase; letter-spacing:0.5px;\">You</b><br>%1</div>"_s.arg(escape(text).replace(u"\n"_s, u"<br>"_s)));
     });
     connect(&m_agent, &AgentLoop::assistantDelta, this, [this](const QString &delta) {
         setStreaming(m_streamText + delta);
