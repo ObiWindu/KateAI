@@ -926,9 +926,9 @@ QString ProjectGraph::generateNodeId(const QString &path, const QString &type)
 {
     // Generate a unique ID for a node based on its path and type
     QString id = path;
-    id.replace('/', '_');
-    id.replace(':', '_');
-    id.replace('\\', '_');
+    id.replace(u'/', u'_');
+    id.replace(u':', u'_');
+    id.replace(u'\\', u'_');
     if (!type.isEmpty()) {
         id += u"_"_s + type;
     }
@@ -941,161 +941,123 @@ QString ProjectGraph::getNodeTypeFromPath(const QString &path)
     QFileInfo info(path);
     QString ext = info.suffix().toLower();
 
-    if (ext == "cpp" || ext == "cxx" || ext == "cc" || ext == "c") {
+    if (ext == QStringLiteral("cpp") || ext == QStringLiteral("cxx") || ext == QStringLiteral("cc") || ext == QStringLiteral("c")) {
         return u"cpp"_s;
-    } else if (ext == "h" || ext == "hpp" || ext == "hxx") {
+    } else if (ext == QStringLiteral("h") || ext == QStringLiteral("hpp") || ext == QStringLiteral("hxx")) {
         return u"header"_s;
-    } else if (ext == "py") {
+    } else if (ext == QStringLiteral("py")) {
         return u"python"_s;
-    } else if (ext == "js" || ext == "jsx" || ext == "ts") {
+    } else if (ext == QStringLiteral("js") || ext == QStringLiteral("jsx") || ext == QStringLiteral("ts")) {
         return u"javascript"_s;
-    } else if (ext == "json") {
+    } else if (ext == QStringLiteral("json")) {
         return u"json"_s;
-    } else if (ext == "md") {
+    } else if (ext == QStringLiteral("md")) {
         return u"markdown"_s;
-    } else if (ext == "txt") {
+    } else if (ext == QStringLiteral("txt")) {
         return u"text"_s;
-    } else if (ext == "java") {
+    } else if (ext == QStringLiteral("java")) {
         return u"java"_s;
-    } else if (ext == "php") {
+    } else if (ext == QStringLiteral("php")) {
         return u"php"_s;
-    } else if (ext == "rb") {
+    } else if (ext == QStringLiteral("rb")) {
         return u"ruby"_s;
-    } else if (ext == "go") {
+    } else if (ext == QStringLiteral("go")) {
         return u"go"_s;
-    } else if (ext == "rs") {
+    } else if (ext == QStringLiteral("rs")) {
         return u"rust"_s;
-    } else if (ext == "html" || ext == "htm") {
+    } else if (ext == QStringLiteral("html") || ext == QStringLiteral("htm")) {
         return u"html"_s;
-    } else if (ext == "css") {
+    } else if (ext == QStringLiteral("css")) {
         return u"css"_s;
-    } else if (ext == "xml") {
+    } else if (ext == QStringLiteral("xml")) {
         return u"xml"_s;
-    } else if (ext == "sql") {
+    } else if (ext == QStringLiteral("sql")) {
         return u"sql"_s;
-    } else if (ext == "sh") {
+    } else if (ext == QStringLiteral("sh")) {
         return u"shell"_s;
-    } else if (ext == "yml" || ext == "yaml") {
+    } else if (ext == QStringLiteral("yml") || ext == QStringLiteral("yaml")) {
         return u"yaml"_s;
-    } else if (ext == "toml") {
+    } else if (ext == QStringLiteral("toml")) {
         return u"toml"_s;
-    } else if (ext == "ini") {
+    } else if (ext == QStringLiteral("ini")) {
         return u"ini"_s;
-    } else if (ext == "cfg" || ext == "conf") {
+    } else if (ext == QStringLiteral("cfg") || ext == QStringLiteral("conf")) {
         return u"config"_s;
-    } else if (ext == "bat" || ext == "cmd") {
+    } else if (ext == QStringLiteral("bat") || ext == QStringLiteral("cmd")) {
         return u"batch"_s;
-    } else if (ext == "pl") {
+    } else if (ext == QStringLiteral("pl")) {
         return u"perl"_s;
-    } else if (ext == "r") {
+    } else if (ext == QStringLiteral("r")) {
         return u"r"_s;
-    } else if (ext == "m") {
+    } else if (ext == QStringLiteral("m")) {
         return u"matlab"_s;
-    } else if (ext == "scala") {
+    } else if (ext == QStringLiteral("scala")) {
         return u"scala"_s;
-    } else if (ext == "kt") {
+    } else if (ext == QStringLiteral("kt")) {
         return u"kotlin"_s;
-    } else if (ext == "swift") {
+    } else if (ext == QStringLiteral("swift")) {
         return u"swift"_s;
-    } else if (ext == "ts") {
+    } else if (ext == QStringLiteral("ts")) {
         return u"typescript"_s;
-    } else if (ext == "tsx") {
+    } else if (ext == QStringLiteral("tsx")) {
         return u"tsx"_s;
-    } else if (ext == "jsx") {
+    } else if (ext == QStringLiteral("jsx")) {
         return u"jsx"_s;
-    } else if (ext == "vue") {
+    } else if (ext == QStringLiteral("vue")) {
         return u"vue"_s;
-    } else if (ext == "svelte") {
+    } else if (ext == QStringLiteral("svelte")) {
         return u"svelte"_s;
-    } else if (ext == "astro") {
+    } else if (ext == QStringLiteral("astro")) {
         return u"astro"_s;
-    } else if (ext == "solid") {
+    } else if (ext == QStringLiteral("solid")) {
         return u"solid"_s;
-    } else if (ext == "qml") {
+    } else if (ext == QStringLiteral("qml")) {
         return u"qml"_s;
-    } else if (ext == "yaml") {
+    } else if (ext == QStringLiteral("yaml")) {
         return u"yaml"_s;
-    } else if (ext == "yml") {
+    } else if (ext == QStringLiteral("yml")) {
         return u"yaml"_s;
-    } else if (ext == "toml") {
+    } else if (ext == QStringLiteral("toml")) {
         return u"toml"_s;
-    } else if (ext == "ini") {
+    } else if (ext == QStringLiteral("ini")) {
         return u"ini"_s;
-    } else if (ext == "cfg" || ext == "conf") {
+    } else if (ext == QStringLiteral("cfg") || ext == QStringLiteral("conf")) {
         return u"config"_s;
-    } else if (ext == "bat" || ext == "cmd") {
+    } else if (ext == QStringLiteral("bat") || ext == QStringLiteral("cmd")) {
         return u"batch"_s;
-    } else if (ext == "pl") {
+    } else if (ext == QStringLiteral("pl")) {
         return u"perl"_s;
-    } else if (ext == "r") {
+    } else if (ext == QStringLiteral("r")) {
         return u"r"_s;
-    } else if (ext == "m") {
+    } else if (ext == QStringLiteral("m")) {
         return u"matlab"_s;
-    } else if (ext == "scala") {
+    } else if (ext == QStringLiteral("scala")) {
         return u"scala"_s;
-    } else if (ext == "kt") {
+    } else if (ext == QStringLiteral("kt")) {
         return u"kotlin"_s;
-    } else if (ext == "swift") {
+    } else if (ext == QStringLiteral("swift")) {
         return u"swift"_s;
-    } else if (ext == "ts") {
+    } else if (ext == QStringLiteral("ts")) {
         return u"typescript"_s;
-    } else if (ext == "tsx") {
+    } else if (ext == QStringLiteral("tsx")) {
         return u"tsx"_s;
-    } else if (ext == "jsx") {
+    } else if (ext == QStringLiteral("jsx")) {
         return u"jsx"_s;
-    } else if (ext == "vue") {
+    } else if (ext == QStringLiteral("vue")) {
         return u"vue"_s;
-    } else if (ext == "svelte") {
+    } else if (ext == QStringLiteral("svelte")) {
         return u"svelte"_s;
-    } else if (ext == "astro") {
+    } else if (ext == QStringLiteral("astro")) {
         return u"astro"_s;
-    } else if (ext == "solid") {
+    } else if (ext == QStringLiteral("solid")) {
         return u"solid"_s;
-    } else if (ext == "qml") {
-        return u"qml"_s;
-    } else if (ext == "yaml") {
-        return u"yaml"_s;
-    } else if (ext == "yml") {
-        return u"yaml"_s;
-    } else if (ext == "toml") {
-        return u"toml"_s;
-    } else if (ext == "ini") {
-        return u"ini"_s;
-    } else if (ext == "cfg" || ext == "conf") {
-        return u"config"_s;
-    } else if (ext == "bat" || ext == "cmd") {
-        return u"batch"_s;
-    } else if (ext == "pl") {
-        return u"perl"_s;
-    } else if (ext == "r") {
-        return u"r"_s;
-    } else if (ext == "m") {
-        return u"matlab"_s;
-    } else if (ext == "scala") {
-        return u"scala"_s;
-    } else if (ext == "kt") {
-        return u"kotlin"_s;
-    } else if (ext == "swift") {
-        return u"swift"_s;
-    } else if (ext == "ts") {
-        return u"typescript"_s;
-    } else if (ext == "tsx") {
-        return u"tsx"_s;
-    } else if (ext == "jsx") {
-        return u"jsx"_s;
-    } else if (ext == "vue") {
-        return u"vue"_s;
-    } else if (ext == "svelte") {
-        return u"svelte"_s;
-    } else if (ext == "astro") {
-        return u"astro"_s;
-    } else if (ext == "solid") {
-        return u"solid"_s;
-    } else if (ext == "qml") {
+    } else if (ext == QStringLiteral("qml")) {
         return u"qml"_s;
     } else {
         return u"unknown"_s;
     }
+}
+
 }
 
 

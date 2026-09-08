@@ -35,17 +35,17 @@ void AgentLoop::setSettings(const Settings &settings)
     m_settings = settings;
     m_client.setSettings(settings);
     m_policy.setMode(settings.permissionMode);
-    
+
     // Initialize sandbox and tool runner if workspace is set
     if (!m_workspace.isEmpty()) {
-        m_sandbox = std::make_unique<Sandbox>(m_workspace, settings.sandbox, settings.extraDenyGlobs);
+        m_sandbox = std::make_unique<Sandbox>(m_workspace, m_settings.sandbox, m_settings.extraDenyGlobs);
         m_tools = std::make_unique<ToolRunner>(*m_sandbox, m_bridge, this);
-        m_tools->setTimeoutMs(settings.bashTimeoutMs);
+        m_tools->setTimeoutMs(m_settings.bashTimeoutMs);
     }
-    
+
     // Persist graph to JSON after generation/update
-    m_projectGraph->saveToFile(m_workspace + "/.kateai/project_graph.json");
-    
+    m_projectGraph->saveToFile(m_workspace + u"/.kateai/project_graph.json"_s);
+
     // Regenerate project graph with new settings
     if (!m_workspace.isEmpty()) {
         m_projectGraph->generateGraph(m_workspace);
@@ -54,15 +54,17 @@ void AgentLoop::setSettings(const Settings &settings)
 
 void AgentLoop::setWorkspace(const QString &workspace)
 {
-    // Set the workspace directory and initialize sandbox and tool runner
     m_workspace = workspace;
-    m_sandbox = std::make_unique<Sandbox>(m_workspace, m_settings.sandbox, m_settings.extraDenyGlobs);
-    m_tools = std::make_unique<ToolRunner>(*m_sandbox, m_bridge, this);
-    m_tools->setTimeoutMs(m_settings.bashTimeoutMs);
+
+    if (!m_workspace.isEmpty()) {
+        m_sandbox = std::make_unique<Sandbox>(m_workspace, m_settings.sandbox, m_settings.extraDenyGlobs);
+        m_tools = std::make_unique<ToolRunner>(*m_sandbox, m_bridge, this);
+        m_tools->setTimeoutMs(m_settings.bashTimeoutMs);
+    }
 
     // Auto-generate or load project graph
     if (m_projectGraph) {
-        QString graphFilePath = m_workspace + "/.kateai/project_graph.json";
+        QString graphFilePath = m_workspace + u"/.kateai/project_graph.json"_s;
         if (QFile::exists(graphFilePath)) {
             // Load existing graph
             if (!m_projectGraph->loadFromFile(graphFilePath)) {
@@ -98,7 +100,7 @@ void AgentLoop::updateProjectGraph(const QString &filePath, const QString &conte
     // Update the project graph with changes to a file
     if (m_projectGraph) {
         m_projectGraph->updateGraph(filePath, content);
-        m_projectGraph->saveToFile(m_workspace + "/.kateai/project_graph.json");
+        m_projectGraph->saveToFile(m_workspace + u"/.kateai/project_graph.json"_s);
     }
 }
 
