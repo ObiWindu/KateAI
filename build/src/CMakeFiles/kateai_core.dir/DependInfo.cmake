@@ -10,6 +10,7 @@ set(CMAKE_DEPENDS_LANGUAGES
 set(CMAKE_DEPENDS_DEPENDENCY_FILES
   "/home/macewindu/ai-dev/KateAI/src/agentloop.cpp" "src/CMakeFiles/kateai_core.dir/agentloop.cpp.o" "gcc" "src/CMakeFiles/kateai_core.dir/agentloop.cpp.o.d"
   "/home/macewindu/ai-dev/KateAI/src/documentbridge.cpp" "src/CMakeFiles/kateai_core.dir/documentbridge.cpp.o" "gcc" "src/CMakeFiles/kateai_core.dir/documentbridge.cpp.o.d"
+  "/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp" "src/CMakeFiles/kateai_core.dir/graph/projectgraph.cpp.o" "gcc" "src/CMakeFiles/kateai_core.dir/graph/projectgraph.cpp.o.d"
   "/home/macewindu/ai-dev/KateAI/build/src/kateai_core_autogen/mocs_compilation.cpp" "src/CMakeFiles/kateai_core.dir/kateai_core_autogen/mocs_compilation.cpp.o" "gcc" "src/CMakeFiles/kateai_core.dir/kateai_core_autogen/mocs_compilation.cpp.o.d"
   "/home/macewindu/ai-dev/KateAI/src/llmclient.cpp" "src/CMakeFiles/kateai_core.dir/llmclient.cpp.o" "gcc" "src/CMakeFiles/kateai_core.dir/llmclient.cpp.o.d"
   "/home/macewindu/ai-dev/KateAI/src/permissions.cpp" "src/CMakeFiles/kateai_core.dir/permissions.cpp.o" "gcc" "src/CMakeFiles/kateai_core.dir/permissions.cpp.o.d"

@@ -262,6 +262,17 @@ QJsonArray toolDefinitions(bool readOnlyOnly)
                          },
                          {u"command"_s}));
 
+    tools.append(toolDef(u"query_project_graph"_s,
+                         u"Query the project graph for nodes, edges, dependencies, and relationships."_s,
+                         QJsonObject{
+                             {u"query_type"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"Type of query: summary, nodes, edges, dependencies, dependents, find_related, find_path, dependency_chain"_s}}},
+                             {u"node_id"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"Node ID for queries that require a specific node"_s}}},
+                             {u"relationship"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"Relationship type for filtering edges"_s}}},
+                             {u"source_id"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"Source node ID for path finding"_s}}},
+                             {u"target_id"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"Target node ID for path finding"_s}}},
+                         },
+                         {}));
+
     if (!readOnlyOnly) {
         return tools;
     }

@@ -8,6 +8,8 @@ file(REMOVE_RECURSE
   "CMakeFiles/kateai_core.dir/agentloop.cpp.o.d"
   "CMakeFiles/kateai_core.dir/documentbridge.cpp.o"
   "CMakeFiles/kateai_core.dir/documentbridge.cpp.o.d"
+  "CMakeFiles/kateai_core.dir/graph/projectgraph.cpp.o"
+  "CMakeFiles/kateai_core.dir/graph/projectgraph.cpp.o.d"
   "CMakeFiles/kateai_core.dir/kateai_core_autogen/mocs_compilation.cpp.o"
   "CMakeFiles/kateai_core.dir/kateai_core_autogen/mocs_compilation.cpp.o.d"
   "CMakeFiles/kateai_core.dir/llmclient.cpp.o"

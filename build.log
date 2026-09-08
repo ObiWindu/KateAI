@@ -1,0 +1,1174 @@
+Installing in /home/macewindu/.local. Run /home/macewindu/ai-dev/KateAI/build/prefix.sh to set the environment for kateai.
+fatal: no upstream configured for branch 'Graph'
+-- Kate AI plugin install path: /home/macewindu/.local/lib/qt6/plugins/kf6/ktexteditor/kateai.so
+-- User install (mode 700): cmake --build build && cmake --install build
+-- The following OPTIONAL packages have been found:
+
+ * OpenGL
+ * Vulkan
+ * Qt6Core (required version >= 6.9.0)
+ * WrapVulkanHeaders
+ * Qt6Gui (required version >= 6.9.0)
+ * Qt6QmlTools (required version >= 6.11.2)
+ * Qt6GuiTools (required version >= 6.11.2)
+ * Qt6WidgetsTools (required version >= 6.11.2)
+ * Qt6Widgets (required version >= 6.9.0)
+ * Qt6Network (required version >= 6.9.0)
+ * Qt6CoreTools (required version >= 6.11.2)
+ * Qt6DBusTools (required version >= 6.11.2)
+ * Qt6Test (required version >= 6.5.0)
+
+-- The following REQUIRED packages have been found:
+
+ * ECM (required version >= 6.0)
+ * Gettext
+ * KF6I18n (required version >= 6.0.0)
+ * KF6Config (required version >= 6.29.0)
+ * KF6CoreAddons (required version >= 6.29.0)
+ * KF6ConfigWidgets (required version >= 6.29.0)
+ * KF6TextEditor (required version >= 6.0.0)
+ * KF6XmlGui (required version >= 6.0.0)
+ * KF6WidgetsAddons (required version >= 6.0.0)
+ * KF6 (required version >= 6.0.0)
+ * Qt6 (required version >= 6.5.0)
+
+-- The following OPTIONAL packages have not been found:
+
+ * Qt6QmlCompilerPlusPrivateTools (required version >= 6.11.2)
+
+-- Configuring done (0.3s)
+-- Generating done (0.0s)
+-- Build files have been written to: /home/macewindu/ai-dev/KateAI/build
+[  0%] Built target kateai_core_autogen_timestamp_deps
+[  2%] Built target kateai_core_autogen
+[  5%] Building CXX object src/CMakeFiles/kateai_core.dir/graph/projectgraph.cpp.o
+[  8%] Building CXX object src/CMakeFiles/kateai_core.dir/agentloop.cpp.o
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp: In static member function ‘static QString KateAi::ProjectGraph::generateNodeId(const QString&, const QString&)’:
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:929:15: error: no matching function for call to ‘QString::replace(char, char)’
+  929 |     id.replace('/', '_');
+      |     ~~~~~~~~~~^~~~~~~~~~
+  • there are 12 candidates
+In file included from /usr/include/qt6/QtCore/QString:1,
+                 from /home/macewindu/ai-dev/KateAI/src/graph/projectgraph.h:3,
+                 from /home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1:
+    • candidate 1: ‘QString& QString::replace(qsizetype, qsizetype, QChar)’
+      /usr/include/qt6/QtCore/qstring.h:685:14:
+        685 |     QString &replace(qsizetype i, qsizetype len, QChar after);
+            |              ^~~~~~~
+      • candidate expects 3 arguments, 2 provided
+    • candidate 2: ‘QString& QString::replace(qsizetype, qsizetype, const QChar*, qsizetype)’
+      /usr/include/qt6/QtCore/qstring.h:686:14:
+        686 |     QString &replace(qsizetype i, qsizetype len, const QChar *s, qsizetype slen);
+            |              ^~~~~~~
+      • candidate expects 4 arguments, 2 provided
+    • candidate 3: ‘QString& QString::replace(qsizetype, qsizetype, const QString&)’
+      /usr/include/qt6/QtCore/qstring.h:687:14:
+        687 |     QString &replace(qsizetype i, qsizetype len, const QString &after);
+            |              ^~~~~~~
+      • candidate expects 3 arguments, 2 provided
+    • candidate 4: ‘QString& QString::replace(QChar, QChar, Qt::CaseSensitivity)’
+      /usr/include/qt6/QtCore/qstring.h:688:14:
+        688 |     QString &replace(QChar before, QChar after, Qt::CaseSensitivity cs = Qt::CaseSensitive);
+            |              ^~~~~~~
+      • no known conversion for argument 1 from ‘char’ to ‘QChar’
+        /usr/include/qt6/QtCore/qstring.h:688:28:
+          688 |     QString &replace(QChar before, QChar after, Qt::CaseSensitivity cs = Qt::CaseSensitive);
+              |                      ~~~~~~^~~~~~
+    • candidate 5: ‘QString& QString::replace(const QChar*, qsizetype, const QChar*, qsizetype, Qt::CaseSensitivity)’
+      /usr/include/qt6/QtCore/qstring.h:689:14:
+        689 |     QString &replace(const QChar *before, qsizetype blen, const QChar *after, qsizetype alen, Qt::CaseSensitivity cs = Qt::CaseSensitive);
+            |              ^~~~~~~
+      • candidate expects 5 arguments, 2 provided
+    • candidate 6: ‘QString& QString::replace(QLatin1StringView, QLatin1StringView, Qt::CaseSensitivity)’
+      /usr/include/qt6/QtCore/qstring.h:690:14:
+        690 |     QString &replace(QLatin1StringView before, QLatin1StringView after, Qt::CaseSensitivity cs = Qt::CaseSensitive);
+            |              ^~~~~~~
+      • no known conversion for argument 1 from ‘char’ to ‘QLatin1StringView’ {aka ‘QLatin1String’}
+        /usr/include/qt6/QtCore/qstring.h:690:40:
+          690 |     QString &replace(QLatin1StringView before, QLatin1StringView after, Qt::CaseSensitivity cs = Qt::CaseSensitive);
+              |                      ~~~~~~~~~~~~~~~~~~^~~~~~
+    • candidate 7: ‘QString& QString::replace(QLatin1StringView, const QString&, Qt::CaseSensitivity)’
+      /usr/include/qt6/QtCore/qstring.h:691:14:
+        691 |     QString &replace(QLatin1StringView before, const QString &after, Qt::CaseSensitivity cs = Qt::CaseSensitive);
+            |              ^~~~~~~
+      • no known conversion for argument 1 from ‘char’ to ‘QLatin1StringView’ {aka ‘QLatin1String’}
+        /usr/include/qt6/QtCore/qstring.h:691:40:
+          691 |     QString &replace(QLatin1StringView before, const QString &after, Qt::CaseSensitivity cs = Qt::CaseSensitive);
+              |                      ~~~~~~~~~~~~~~~~~~^~~~~~
+    • candidate 8: ‘QString& QString::replace(const QString&, QLatin1StringView, Qt::CaseSensitivity)’
+      /usr/include/qt6/QtCore/qstring.h:692:14:
+        692 |     QString &replace(const QString &before, QLatin1StringView after, Qt::CaseSensitivity cs = Qt::CaseSensitive);
+            |              ^~~~~~~
+      • no known conversion for argument 1 from ‘char’ to ‘const QString&’
+        /usr/include/qt6/QtCore/qstring.h:692:37:
+          692 |     QString &replace(const QString &before, QLatin1StringView after, Qt::CaseSensitivity cs = Qt::CaseSensitive);
+              |                      ~~~~~~~~~~~~~~~^~~~~~
+    • candidate 9: ‘QString& QString::replace(const QString&, const QString&, Qt::CaseSensitivity)’
+      /usr/include/qt6/QtCore/qstring.h:693:14:
+        693 |     QString &replace(const QString &before, const QString &after,
+            |              ^~~~~~~
+      • no known conversion for argument 1 from ‘char’ to ‘const QString&’
+        /usr/include/qt6/QtCore/qstring.h:693:37:
+          693 |     QString &replace(const QString &before, const QString &after,
+              |                      ~~~~~~~~~~~~~~~^~~~~~
+    • candidate 10: ‘QString& QString::replace(QChar, const QString&, Qt::CaseSensitivity)’
+      /usr/include/qt6/QtCore/qstring.h:695:14:
+        695 |     QString &replace(QChar c, const QString &after, Qt::CaseSensitivity cs = Qt::CaseSensitive);
+            |              ^~~~~~~
+      • no known conversion for argument 1 from ‘char’ to ‘QChar’
+        /usr/include/qt6/QtCore/qstring.h:695:28:
+          695 |     QString &replace(QChar c, const QString &after, Qt::CaseSensitivity cs = Qt::CaseSensitive);
+              |                      ~~~~~~^
+    • candidate 11: ‘QString& QString::replace(QChar, QLatin1StringView, Qt::CaseSensitivity)’
+      /usr/include/qt6/QtCore/qstring.h:696:14:
+        696 |     QString &replace(QChar c, QLatin1StringView after, Qt::CaseSensitivity cs = Qt::CaseSensitive);
+            |              ^~~~~~~
+      • no known conversion for argument 1 from ‘char’ to ‘QChar’
+        /usr/include/qt6/QtCore/qstring.h:696:28:
+          696 |     QString &replace(QChar c, QLatin1StringView after, Qt::CaseSensitivity cs = Qt::CaseSensitive);
+              |                      ~~~~~~^
+    • candidate 12: ‘QString& QString::replace(const QRegularExpression&, const QString&)’
+      /usr/include/qt6/QtCore/qstring.h:698:14:
+        698 |     QString &replace(const QRegularExpression &re, const QString  &after);
+            |              ^~~~~~~
+      • no known conversion for argument 1 from ‘char’ to ‘const QRegularExpression&’
+        /usr/include/qt6/QtCore/qstring.h:698:48:
+          698 |     QString &replace(const QRegularExpression &re, const QString  &after);
+              |                      ~~~~~~~~~~~~~~~~~~~~~~~~~~^~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:930:15: error: no matching function for call to ‘QString::replace(char, char)’
+  930 |     id.replace(':', '_');
+      |     ~~~~~~~~~~^~~~~~~~~~
+  • there are 12 candidates
+    • candidate 1: ‘QString& QString::replace(qsizetype, qsizetype, QChar)’
+      /usr/include/qt6/QtCore/qstring.h:685:14:
+        685 |     QString &replace(qsizetype i, qsizetype len, QChar after);
+            |              ^~~~~~~
+      • candidate expects 3 arguments, 2 provided
+    • candidate 2: ‘QString& QString::replace(qsizetype, qsizetype, const QChar*, qsizetype)’
+      /usr/include/qt6/QtCore/qstring.h:686:14:
+        686 |     QString &replace(qsizetype i, qsizetype len, const QChar *s, qsizetype slen);
+            |              ^~~~~~~
+      • candidate expects 4 arguments, 2 provided
+    • candidate 3: ‘QString& QString::replace(qsizetype, qsizetype, const QString&)’
+      /usr/include/qt6/QtCore/qstring.h:687:14:
+        687 |     QString &replace(qsizetype i, qsizetype len, const QString &after);
+            |              ^~~~~~~
+      • candidate expects 3 arguments, 2 provided
+    • candidate 4: ‘QString& QString::replace(QChar, QChar, Qt::CaseSensitivity)’
+      /usr/include/qt6/QtCore/qstring.h:688:14:
+        688 |     QString &replace(QChar before, QChar after, Qt::CaseSensitivity cs = Qt::CaseSensitive);
+            |              ^~~~~~~
+      • no known conversion for argument 1 from ‘char’ to ‘QChar’
+        /usr/include/qt6/QtCore/qstring.h:688:28:
+          688 |     QString &replace(QChar before, QChar after, Qt::CaseSensitivity cs = Qt::CaseSensitive);
+              |                      ~~~~~~^~~~~~
+    • candidate 5: ‘QString& QString::replace(const QChar*, qsizetype, const QChar*, qsizetype, Qt::CaseSensitivity)’
+      /usr/include/qt6/QtCore/qstring.h:689:14:
+        689 |     QString &replace(const QChar *before, qsizetype blen, const QChar *after, qsizetype alen, Qt::CaseSensitivity cs = Qt::CaseSensitive);
+            |              ^~~~~~~
+      • candidate expects 5 arguments, 2 provided
+    • candidate 6: ‘QString& QString::replace(QLatin1StringView, QLatin1StringView, Qt::CaseSensitivity)’
+      /usr/include/qt6/QtCore/qstring.h:690:14:
+        690 |     QString &replace(QLatin1StringView before, QLatin1StringView after, Qt::CaseSensitivity cs = Qt::CaseSensitive);
+            |              ^~~~~~~
+      • no known conversion for argument 1 from ‘char’ to ‘QLatin1StringView’ {aka ‘QLatin1String’}
+        /usr/include/qt6/QtCore/qstring.h:690:40:
+          690 |     QString &replace(QLatin1StringView before, QLatin1StringView after, Qt::CaseSensitivity cs = Qt::CaseSensitive);
+              |                      ~~~~~~~~~~~~~~~~~~^~~~~~
+    • candidate 7: ‘QString& QString::replace(QLatin1StringView, const QString&, Qt::CaseSensitivity)’
+      /usr/include/qt6/QtCore/qstring.h:691:14:
+        691 |     QString &replace(QLatin1StringView before, const QString &after, Qt::CaseSensitivity cs = Qt::CaseSensitive);
+            |              ^~~~~~~
+      • no known conversion for argument 1 from ‘char’ to ‘QLatin1StringView’ {aka ‘QLatin1String’}
+        /usr/include/qt6/QtCore/qstring.h:691:40:
+          691 |     QString &replace(QLatin1StringView before, const QString &after, Qt::CaseSensitivity cs = Qt::CaseSensitive);
+              |                      ~~~~~~~~~~~~~~~~~~^~~~~~
+    • candidate 8: ‘QString& QString::replace(const QString&, QLatin1StringView, Qt::CaseSensitivity)’
+      /usr/include/qt6/QtCore/qstring.h:692:14:
+        692 |     QString &replace(const QString &before, QLatin1StringView after, Qt::CaseSensitivity cs = Qt::CaseSensitive);
+            |              ^~~~~~~
+      • no known conversion for argument 1 from ‘char’ to ‘const QString&’
+        /usr/include/qt6/QtCore/qstring.h:692:37:
+          692 |     QString &replace(const QString &before, QLatin1StringView after, Qt::CaseSensitivity cs = Qt::CaseSensitive);
+              |                      ~~~~~~~~~~~~~~~^~~~~~
+    • candidate 9: ‘QString& QString::replace(const QString&, const QString&, Qt::CaseSensitivity)’
+      /usr/include/qt6/QtCore/qstring.h:693:14:
+        693 |     QString &replace(const QString &before, const QString &after,
+            |              ^~~~~~~
+      • no known conversion for argument 1 from ‘char’ to ‘const QString&’
+        /usr/include/qt6/QtCore/qstring.h:693:37:
+          693 |     QString &replace(const QString &before, const QString &after,
+              |                      ~~~~~~~~~~~~~~~^~~~~~
+    • candidate 10: ‘QString& QString::replace(QChar, const QString&, Qt::CaseSensitivity)’
+      /usr/include/qt6/QtCore/qstring.h:695:14:
+        695 |     QString &replace(QChar c, const QString &after, Qt::CaseSensitivity cs = Qt::CaseSensitive);
+            |              ^~~~~~~
+      • no known conversion for argument 1 from ‘char’ to ‘QChar’
+        /usr/include/qt6/QtCore/qstring.h:695:28:
+          695 |     QString &replace(QChar c, const QString &after, Qt::CaseSensitivity cs = Qt::CaseSensitive);
+              |                      ~~~~~~^
+    • candidate 11: ‘QString& QString::replace(QChar, QLatin1StringView, Qt::CaseSensitivity)’
+      /usr/include/qt6/QtCore/qstring.h:696:14:
+        696 |     QString &replace(QChar c, QLatin1StringView after, Qt::CaseSensitivity cs = Qt::CaseSensitive);
+            |              ^~~~~~~
+      • no known conversion for argument 1 from ‘char’ to ‘QChar’
+        /usr/include/qt6/QtCore/qstring.h:696:28:
+          696 |     QString &replace(QChar c, QLatin1StringView after, Qt::CaseSensitivity cs = Qt::CaseSensitive);
+              |                      ~~~~~~^
+    • candidate 12: ‘QString& QString::replace(const QRegularExpression&, const QString&)’
+      /usr/include/qt6/QtCore/qstring.h:698:14:
+        698 |     QString &replace(const QRegularExpression &re, const QString  &after);
+            |              ^~~~~~~
+      • no known conversion for argument 1 from ‘char’ to ‘const QRegularExpression&’
+        /usr/include/qt6/QtCore/qstring.h:698:48:
+          698 |     QString &replace(const QRegularExpression &re, const QString  &after);
+              |                      ~~~~~~~~~~~~~~~~~~~~~~~~~~^~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:931:15: error: no matching function for call to ‘QString::replace(char, char)’
+  931 |     id.replace('\\', '_');
+      |     ~~~~~~~~~~^~~~~~~~~~~
+  • there are 12 candidates
+    • candidate 1: ‘QString& QString::replace(qsizetype, qsizetype, QChar)’
+      /usr/include/qt6/QtCore/qstring.h:685:14:
+        685 |     QString &replace(qsizetype i, qsizetype len, QChar after);
+            |              ^~~~~~~
+      • candidate expects 3 arguments, 2 provided
+    • candidate 2: ‘QString& QString::replace(qsizetype, qsizetype, const QChar*, qsizetype)’
+      /usr/include/qt6/QtCore/qstring.h:686:14:
+        686 |     QString &replace(qsizetype i, qsizetype len, const QChar *s, qsizetype slen);
+            |              ^~~~~~~
+      • candidate expects 4 arguments, 2 provided
+    • candidate 3: ‘QString& QString::replace(qsizetype, qsizetype, const QString&)’
+      /usr/include/qt6/QtCore/qstring.h:687:14:
+        687 |     QString &replace(qsizetype i, qsizetype len, const QString &after);
+            |              ^~~~~~~
+      • candidate expects 3 arguments, 2 provided
+    • candidate 4: ‘QString& QString::replace(QChar, QChar, Qt::CaseSensitivity)’
+      /usr/include/qt6/QtCore/qstring.h:688:14:
+        688 |     QString &replace(QChar before, QChar after, Qt::CaseSensitivity cs = Qt::CaseSensitive);
+            |              ^~~~~~~
+      • no known conversion for argument 1 from ‘char’ to ‘QChar’
+        /usr/include/qt6/QtCore/qstring.h:688:28:
+          688 |     QString &replace(QChar before, QChar after, Qt::CaseSensitivity cs = Qt::CaseSensitive);
+              |                      ~~~~~~^~~~~~
+    • candidate 5: ‘QString& QString::replace(const QChar*, qsizetype, const QChar*, qsizetype, Qt::CaseSensitivity)’
+      /usr/include/qt6/QtCore/qstring.h:689:14:
+        689 |     QString &replace(const QChar *before, qsizetype blen, const QChar *after, qsizetype alen, Qt::CaseSensitivity cs = Qt::CaseSensitive);
+            |              ^~~~~~~
+      • candidate expects 5 arguments, 2 provided
+    • candidate 6: ‘QString& QString::replace(QLatin1StringView, QLatin1StringView, Qt::CaseSensitivity)’
+      /usr/include/qt6/QtCore/qstring.h:690:14:
+        690 |     QString &replace(QLatin1StringView before, QLatin1StringView after, Qt::CaseSensitivity cs = Qt::CaseSensitive);
+            |              ^~~~~~~
+      • no known conversion for argument 1 from ‘char’ to ‘QLatin1StringView’ {aka ‘QLatin1String’}
+        /usr/include/qt6/QtCore/qstring.h:690:40:
+          690 |     QString &replace(QLatin1StringView before, QLatin1StringView after, Qt::CaseSensitivity cs = Qt::CaseSensitive);
+              |                      ~~~~~~~~~~~~~~~~~~^~~~~~
+    • candidate 7: ‘QString& QString::replace(QLatin1StringView, const QString&, Qt::CaseSensitivity)’
+      /usr/include/qt6/QtCore/qstring.h:691:14:
+        691 |     QString &replace(QLatin1StringView before, const QString &after, Qt::CaseSensitivity cs = Qt::CaseSensitive);
+            |              ^~~~~~~
+      • no known conversion for argument 1 from ‘char’ to ‘QLatin1StringView’ {aka ‘QLatin1String’}
+        /usr/include/qt6/QtCore/qstring.h:691:40:
+          691 |     QString &replace(QLatin1StringView before, const QString &after, Qt::CaseSensitivity cs = Qt::CaseSensitive);
+              |                      ~~~~~~~~~~~~~~~~~~^~~~~~
+    • candidate 8: ‘QString& QString::replace(const QString&, QLatin1StringView, Qt::CaseSensitivity)’
+      /usr/include/qt6/QtCore/qstring.h:692:14:
+        692 |     QString &replace(const QString &before, QLatin1StringView after, Qt::CaseSensitivity cs = Qt::CaseSensitive);
+            |              ^~~~~~~
+      • no known conversion for argument 1 from ‘char’ to ‘const QString&’
+        /usr/include/qt6/QtCore/qstring.h:692:37:
+          692 |     QString &replace(const QString &before, QLatin1StringView after, Qt::CaseSensitivity cs = Qt::CaseSensitive);
+              |                      ~~~~~~~~~~~~~~~^~~~~~
+    • candidate 9: ‘QString& QString::replace(const QString&, const QString&, Qt::CaseSensitivity)’
+      /usr/include/qt6/QtCore/qstring.h:693:14:
+        693 |     QString &replace(const QString &before, const QString &after,
+            |              ^~~~~~~
+      • no known conversion for argument 1 from ‘char’ to ‘const QString&’
+        /usr/include/qt6/QtCore/qstring.h:693:37:
+          693 |     QString &replace(const QString &before, const QString &after,
+              |                      ~~~~~~~~~~~~~~~^~~~~~
+    • candidate 10: ‘QString& QString::replace(QChar, const QString&, Qt::CaseSensitivity)’
+      /usr/include/qt6/QtCore/qstring.h:695:14:
+        695 |     QString &replace(QChar c, const QString &after, Qt::CaseSensitivity cs = Qt::CaseSensitive);
+            |              ^~~~~~~
+      • no known conversion for argument 1 from ‘char’ to ‘QChar’
+        /usr/include/qt6/QtCore/qstring.h:695:28:
+          695 |     QString &replace(QChar c, const QString &after, Qt::CaseSensitivity cs = Qt::CaseSensitive);
+              |                      ~~~~~~^
+    • candidate 11: ‘QString& QString::replace(QChar, QLatin1StringView, Qt::CaseSensitivity)’
+      /usr/include/qt6/QtCore/qstring.h:696:14:
+        696 |     QString &replace(QChar c, QLatin1StringView after, Qt::CaseSensitivity cs = Qt::CaseSensitive);
+            |              ^~~~~~~
+      • no known conversion for argument 1 from ‘char’ to ‘QChar’
+        /usr/include/qt6/QtCore/qstring.h:696:28:
+          696 |     QString &replace(QChar c, QLatin1StringView after, Qt::CaseSensitivity cs = Qt::CaseSensitive);
+              |                      ~~~~~~^
+    • candidate 12: ‘QString& QString::replace(const QRegularExpression&, const QString&)’
+      /usr/include/qt6/QtCore/qstring.h:698:14:
+        698 |     QString &replace(const QRegularExpression &re, const QString  &after);
+            |              ^~~~~~~
+      • no known conversion for argument 1 from ‘char’ to ‘const QRegularExpression&’
+        /usr/include/qt6/QtCore/qstring.h:698:48:
+          698 |     QString &replace(const QRegularExpression &re, const QString  &after);
+              |                      ~~~~~~~~~~~~~~~~~~~~~~~~~~^~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp: In static member function ‘static QString KateAi::ProjectGraph::getNodeTypeFromPath(const QString&)’:
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:944:16: error: use of deleted function ‘QString::QString(const char*)’
+  944 |     if (ext == "cpp" || ext == "cxx" || ext == "cc" || ext == "c") {
+      |                ^~~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:944:16: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+  944 |     if (ext == "cpp" || ext == "cxx" || ext == "cc" || ext == "c") {
+      |                ^~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:944:32: error: use of deleted function ‘QString::QString(const char*)’
+  944 |     if (ext == "cpp" || ext == "cxx" || ext == "cc" || ext == "c") {
+      |                                ^~~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:944:32: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+  944 |     if (ext == "cpp" || ext == "cxx" || ext == "cc" || ext == "c") {
+      |                                ^~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:944:48: error: use of deleted function ‘QString::QString(const char*)’
+  944 |     if (ext == "cpp" || ext == "cxx" || ext == "cc" || ext == "c") {
+      |                                                ^~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:944:48: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+  944 |     if (ext == "cpp" || ext == "cxx" || ext == "cc" || ext == "c") {
+      |                                                ^~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:944:63: error: use of deleted function ‘QString::QString(const char*)’
+  944 |     if (ext == "cpp" || ext == "cxx" || ext == "cc" || ext == "c") {
+      |                                                               ^~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:944:63: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+  944 |     if (ext == "cpp" || ext == "cxx" || ext == "cc" || ext == "c") {
+      |                                                               ^~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:946:23: error: use of deleted function ‘QString::QString(const char*)’
+  946 |     } else if (ext == "h" || ext == "hpp" || ext == "hxx") {
+      |                       ^~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:946:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+  946 |     } else if (ext == "h" || ext == "hpp" || ext == "hxx") {
+      |                       ^~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:946:37: error: use of deleted function ‘QString::QString(const char*)’
+  946 |     } else if (ext == "h" || ext == "hpp" || ext == "hxx") {
+      |                                     ^~~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:946:37: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+  946 |     } else if (ext == "h" || ext == "hpp" || ext == "hxx") {
+      |                                     ^~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:946:53: error: use of deleted function ‘QString::QString(const char*)’
+  946 |     } else if (ext == "h" || ext == "hpp" || ext == "hxx") {
+      |                                                     ^~~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:946:53: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+  946 |     } else if (ext == "h" || ext == "hpp" || ext == "hxx") {
+      |                                                     ^~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:948:23: error: use of deleted function ‘QString::QString(const char*)’
+  948 |     } else if (ext == "py") {
+      |                       ^~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:948:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+  948 |     } else if (ext == "py") {
+      |                       ^~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:950:23: error: use of deleted function ‘QString::QString(const char*)’
+  950 |     } else if (ext == "js" || ext == "jsx" || ext == "ts") {
+      |                       ^~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:950:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+  950 |     } else if (ext == "js" || ext == "jsx" || ext == "ts") {
+      |                       ^~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:950:38: error: use of deleted function ‘QString::QString(const char*)’
+  950 |     } else if (ext == "js" || ext == "jsx" || ext == "ts") {
+      |                                      ^~~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:950:38: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+  950 |     } else if (ext == "js" || ext == "jsx" || ext == "ts") {
+      |                                      ^~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:950:54: error: use of deleted function ‘QString::QString(const char*)’
+  950 |     } else if (ext == "js" || ext == "jsx" || ext == "ts") {
+      |                                                      ^~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:950:54: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+  950 |     } else if (ext == "js" || ext == "jsx" || ext == "ts") {
+      |                                                      ^~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:952:23: error: use of deleted function ‘QString::QString(const char*)’
+  952 |     } else if (ext == "json") {
+      |                       ^~~~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:952:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+  952 |     } else if (ext == "json") {
+      |                       ^~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:954:23: error: use of deleted function ‘QString::QString(const char*)’
+  954 |     } else if (ext == "md") {
+      |                       ^~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:954:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+  954 |     } else if (ext == "md") {
+      |                       ^~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:956:23: error: use of deleted function ‘QString::QString(const char*)’
+  956 |     } else if (ext == "txt") {
+      |                       ^~~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:956:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+  956 |     } else if (ext == "txt") {
+      |                       ^~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:958:23: error: use of deleted function ‘QString::QString(const char*)’
+  958 |     } else if (ext == "java") {
+      |                       ^~~~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:958:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+  958 |     } else if (ext == "java") {
+      |                       ^~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:960:23: error: use of deleted function ‘QString::QString(const char*)’
+  960 |     } else if (ext == "php") {
+      |                       ^~~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:960:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+  960 |     } else if (ext == "php") {
+      |                       ^~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:962:23: error: use of deleted function ‘QString::QString(const char*)’
+  962 |     } else if (ext == "rb") {
+      |                       ^~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:962:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+  962 |     } else if (ext == "rb") {
+      |                       ^~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:964:23: error: use of deleted function ‘QString::QString(const char*)’
+  964 |     } else if (ext == "go") {
+      |                       ^~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:964:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+  964 |     } else if (ext == "go") {
+      |                       ^~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:966:23: error: use of deleted function ‘QString::QString(const char*)’
+  966 |     } else if (ext == "rs") {
+      |                       ^~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:966:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+  966 |     } else if (ext == "rs") {
+      |                       ^~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:968:23: error: use of deleted function ‘QString::QString(const char*)’
+  968 |     } else if (ext == "html" || ext == "htm") {
+      |                       ^~~~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:968:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+  968 |     } else if (ext == "html" || ext == "htm") {
+      |                       ^~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:968:40: error: use of deleted function ‘QString::QString(const char*)’
+  968 |     } else if (ext == "html" || ext == "htm") {
+      |                                        ^~~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:968:40: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+  968 |     } else if (ext == "html" || ext == "htm") {
+      |                                        ^~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:970:23: error: use of deleted function ‘QString::QString(const char*)’
+  970 |     } else if (ext == "css") {
+      |                       ^~~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:970:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+  970 |     } else if (ext == "css") {
+      |                       ^~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:972:23: error: use of deleted function ‘QString::QString(const char*)’
+  972 |     } else if (ext == "xml") {
+      |                       ^~~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:972:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+  972 |     } else if (ext == "xml") {
+      |                       ^~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:974:23: error: use of deleted function ‘QString::QString(const char*)’
+  974 |     } else if (ext == "sql") {
+      |                       ^~~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:974:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+  974 |     } else if (ext == "sql") {
+      |                       ^~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:976:23: error: use of deleted function ‘QString::QString(const char*)’
+  976 |     } else if (ext == "sh") {
+      |                       ^~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:976:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+  976 |     } else if (ext == "sh") {
+      |                       ^~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:978:23: error: use of deleted function ‘QString::QString(const char*)’
+  978 |     } else if (ext == "yml" || ext == "yaml") {
+      |                       ^~~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:978:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+  978 |     } else if (ext == "yml" || ext == "yaml") {
+      |                       ^~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:978:39: error: use of deleted function ‘QString::QString(const char*)’
+  978 |     } else if (ext == "yml" || ext == "yaml") {
+      |                                       ^~~~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:978:39: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+  978 |     } else if (ext == "yml" || ext == "yaml") {
+      |                                       ^~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:980:23: error: use of deleted function ‘QString::QString(const char*)’
+  980 |     } else if (ext == "toml") {
+      |                       ^~~~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:980:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+  980 |     } else if (ext == "toml") {
+      |                       ^~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:982:23: error: use of deleted function ‘QString::QString(const char*)’
+  982 |     } else if (ext == "ini") {
+      |                       ^~~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:982:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+  982 |     } else if (ext == "ini") {
+      |                       ^~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:984:23: error: use of deleted function ‘QString::QString(const char*)’
+  984 |     } else if (ext == "cfg" || ext == "conf") {
+      |                       ^~~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:984:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+  984 |     } else if (ext == "cfg" || ext == "conf") {
+      |                       ^~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:984:39: error: use of deleted function ‘QString::QString(const char*)’
+  984 |     } else if (ext == "cfg" || ext == "conf") {
+      |                                       ^~~~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:984:39: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+  984 |     } else if (ext == "cfg" || ext == "conf") {
+      |                                       ^~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:986:23: error: use of deleted function ‘QString::QString(const char*)’
+  986 |     } else if (ext == "bat" || ext == "cmd") {
+      |                       ^~~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:986:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+  986 |     } else if (ext == "bat" || ext == "cmd") {
+      |                       ^~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:986:39: error: use of deleted function ‘QString::QString(const char*)’
+  986 |     } else if (ext == "bat" || ext == "cmd") {
+      |                                       ^~~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:986:39: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+  986 |     } else if (ext == "bat" || ext == "cmd") {
+      |                                       ^~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:988:23: error: use of deleted function ‘QString::QString(const char*)’
+  988 |     } else if (ext == "pl") {
+      |                       ^~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:988:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+  988 |     } else if (ext == "pl") {
+      |                       ^~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:990:23: error: use of deleted function ‘QString::QString(const char*)’
+  990 |     } else if (ext == "r") {
+      |                       ^~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:990:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+  990 |     } else if (ext == "r") {
+      |                       ^~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:992:23: error: use of deleted function ‘QString::QString(const char*)’
+  992 |     } else if (ext == "m") {
+      |                       ^~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:992:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+  992 |     } else if (ext == "m") {
+      |                       ^~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:994:23: error: use of deleted function ‘QString::QString(const char*)’
+  994 |     } else if (ext == "scala") {
+      |                       ^~~~~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:994:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+  994 |     } else if (ext == "scala") {
+      |                       ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:996:23: error: use of deleted function ‘QString::QString(const char*)’
+  996 |     } else if (ext == "kt") {
+      |                       ^~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:996:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+  996 |     } else if (ext == "kt") {
+      |                       ^~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:998:23: error: use of deleted function ‘QString::QString(const char*)’
+  998 |     } else if (ext == "swift") {
+      |                       ^~~~~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:998:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+  998 |     } else if (ext == "swift") {
+      |                       ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1000:23: error: use of deleted function ‘QString::QString(const char*)’
+ 1000 |     } else if (ext == "ts") {
+      |                       ^~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1000:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+ 1000 |     } else if (ext == "ts") {
+      |                       ^~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1002:23: error: use of deleted function ‘QString::QString(const char*)’
+ 1002 |     } else if (ext == "tsx") {
+      |                       ^~~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1002:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+ 1002 |     } else if (ext == "tsx") {
+      |                       ^~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1004:23: error: use of deleted function ‘QString::QString(const char*)’
+ 1004 |     } else if (ext == "jsx") {
+      |                       ^~~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1004:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+ 1004 |     } else if (ext == "jsx") {
+      |                       ^~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1006:23: error: use of deleted function ‘QString::QString(const char*)’
+ 1006 |     } else if (ext == "vue") {
+      |                       ^~~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1006:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+ 1006 |     } else if (ext == "vue") {
+      |                       ^~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1008:23: error: use of deleted function ‘QString::QString(const char*)’
+ 1008 |     } else if (ext == "svelte") {
+      |                       ^~~~~~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1008:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+ 1008 |     } else if (ext == "svelte") {
+      |                       ^~~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1010:23: error: use of deleted function ‘QString::QString(const char*)’
+ 1010 |     } else if (ext == "astro") {
+      |                       ^~~~~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1010:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+ 1010 |     } else if (ext == "astro") {
+      |                       ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1012:23: error: use of deleted function ‘QString::QString(const char*)’
+ 1012 |     } else if (ext == "solid") {
+      |                       ^~~~~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1012:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+ 1012 |     } else if (ext == "solid") {
+      |                       ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1014:23: error: use of deleted function ‘QString::QString(const char*)’
+ 1014 |     } else if (ext == "qml") {
+      |                       ^~~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1014:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+ 1014 |     } else if (ext == "qml") {
+      |                       ^~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1016:23: error: use of deleted function ‘QString::QString(const char*)’
+ 1016 |     } else if (ext == "yaml") {
+      |                       ^~~~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1016:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+ 1016 |     } else if (ext == "yaml") {
+      |                       ^~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1018:23: error: use of deleted function ‘QString::QString(const char*)’
+ 1018 |     } else if (ext == "yml") {
+      |                       ^~~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1018:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+ 1018 |     } else if (ext == "yml") {
+      |                       ^~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1020:23: error: use of deleted function ‘QString::QString(const char*)’
+ 1020 |     } else if (ext == "toml") {
+      |                       ^~~~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1020:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+ 1020 |     } else if (ext == "toml") {
+      |                       ^~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1022:23: error: use of deleted function ‘QString::QString(const char*)’
+ 1022 |     } else if (ext == "ini") {
+      |                       ^~~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1022:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+ 1022 |     } else if (ext == "ini") {
+      |                       ^~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1024:23: error: use of deleted function ‘QString::QString(const char*)’
+ 1024 |     } else if (ext == "cfg" || ext == "conf") {
+      |                       ^~~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1024:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+ 1024 |     } else if (ext == "cfg" || ext == "conf") {
+      |                       ^~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1024:39: error: use of deleted function ‘QString::QString(const char*)’
+ 1024 |     } else if (ext == "cfg" || ext == "conf") {
+      |                                       ^~~~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1024:39: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+ 1024 |     } else if (ext == "cfg" || ext == "conf") {
+      |                                       ^~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1026:23: error: use of deleted function ‘QString::QString(const char*)’
+ 1026 |     } else if (ext == "bat" || ext == "cmd") {
+      |                       ^~~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1026:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+ 1026 |     } else if (ext == "bat" || ext == "cmd") {
+      |                       ^~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1026:39: error: use of deleted function ‘QString::QString(const char*)’
+ 1026 |     } else if (ext == "bat" || ext == "cmd") {
+      |                                       ^~~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1026:39: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+ 1026 |     } else if (ext == "bat" || ext == "cmd") {
+      |                                       ^~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1028:23: error: use of deleted function ‘QString::QString(const char*)’
+ 1028 |     } else if (ext == "pl") {
+      |                       ^~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1028:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+ 1028 |     } else if (ext == "pl") {
+      |                       ^~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1030:23: error: use of deleted function ‘QString::QString(const char*)’
+ 1030 |     } else if (ext == "r") {
+      |                       ^~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1030:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+ 1030 |     } else if (ext == "r") {
+      |                       ^~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1032:23: error: use of deleted function ‘QString::QString(const char*)’
+ 1032 |     } else if (ext == "m") {
+      |                       ^~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1032:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+ 1032 |     } else if (ext == "m") {
+      |                       ^~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1034:23: error: use of deleted function ‘QString::QString(const char*)’
+ 1034 |     } else if (ext == "scala") {
+      |                       ^~~~~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1034:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+ 1034 |     } else if (ext == "scala") {
+      |                       ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1036:23: error: use of deleted function ‘QString::QString(const char*)’
+ 1036 |     } else if (ext == "kt") {
+      |                       ^~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1036:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+ 1036 |     } else if (ext == "kt") {
+      |                       ^~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1038:23: error: use of deleted function ‘QString::QString(const char*)’
+ 1038 |     } else if (ext == "swift") {
+      |                       ^~~~~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1038:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+ 1038 |     } else if (ext == "swift") {
+      |                       ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1040:23: error: use of deleted function ‘QString::QString(const char*)’
+ 1040 |     } else if (ext == "ts") {
+      |                       ^~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1040:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+ 1040 |     } else if (ext == "ts") {
+      |                       ^~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1042:23: error: use of deleted function ‘QString::QString(const char*)’
+ 1042 |     } else if (ext == "tsx") {
+      |                       ^~~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1042:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+ 1042 |     } else if (ext == "tsx") {
+      |                       ^~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1044:23: error: use of deleted function ‘QString::QString(const char*)’
+ 1044 |     } else if (ext == "jsx") {
+      |                       ^~~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1044:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+ 1044 |     } else if (ext == "jsx") {
+      |                       ^~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1046:23: error: use of deleted function ‘QString::QString(const char*)’
+ 1046 |     } else if (ext == "vue") {
+      |                       ^~~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1046:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+ 1046 |     } else if (ext == "vue") {
+      |                       ^~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1048:23: error: use of deleted function ‘QString::QString(const char*)’
+ 1048 |     } else if (ext == "svelte") {
+      |                       ^~~~~~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1048:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+ 1048 |     } else if (ext == "svelte") {
+      |                       ^~~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1050:23: error: use of deleted function ‘QString::QString(const char*)’
+ 1050 |     } else if (ext == "astro") {
+      |                       ^~~~~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1050:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+ 1050 |     } else if (ext == "astro") {
+      |                       ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1052:23: error: use of deleted function ‘QString::QString(const char*)’
+ 1052 |     } else if (ext == "solid") {
+      |                       ^~~~~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1052:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+ 1052 |     } else if (ext == "solid") {
+      |                       ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1054:23: error: use of deleted function ‘QString::QString(const char*)’
+ 1054 |     } else if (ext == "qml") {
+      |                       ^~~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1054:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+ 1054 |     } else if (ext == "qml") {
+      |                       ^~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1056:23: error: use of deleted function ‘QString::QString(const char*)’
+ 1056 |     } else if (ext == "yaml") {
+      |                       ^~~~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1056:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+ 1056 |     } else if (ext == "yaml") {
+      |                       ^~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1058:23: error: use of deleted function ‘QString::QString(const char*)’
+ 1058 |     } else if (ext == "yml") {
+      |                       ^~~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1058:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+ 1058 |     } else if (ext == "yml") {
+      |                       ^~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1060:23: error: use of deleted function ‘QString::QString(const char*)’
+ 1060 |     } else if (ext == "toml") {
+      |                       ^~~~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1060:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+ 1060 |     } else if (ext == "toml") {
+      |                       ^~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1062:23: error: use of deleted function ‘QString::QString(const char*)’
+ 1062 |     } else if (ext == "ini") {
+      |                       ^~~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1062:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+ 1062 |     } else if (ext == "ini") {
+      |                       ^~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1064:23: error: use of deleted function ‘QString::QString(const char*)’
+ 1064 |     } else if (ext == "cfg" || ext == "conf") {
+      |                       ^~~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1064:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+ 1064 |     } else if (ext == "cfg" || ext == "conf") {
+      |                       ^~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1064:39: error: use of deleted function ‘QString::QString(const char*)’
+ 1064 |     } else if (ext == "cfg" || ext == "conf") {
+      |                                       ^~~~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1064:39: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+ 1064 |     } else if (ext == "cfg" || ext == "conf") {
+      |                                       ^~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1066:23: error: use of deleted function ‘QString::QString(const char*)’
+ 1066 |     } else if (ext == "bat" || ext == "cmd") {
+      |                       ^~~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1066:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+ 1066 |     } else if (ext == "bat" || ext == "cmd") {
+      |                       ^~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1066:39: error: use of deleted function ‘QString::QString(const char*)’
+ 1066 |     } else if (ext == "bat" || ext == "cmd") {
+      |                                       ^~~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1066:39: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+ 1066 |     } else if (ext == "bat" || ext == "cmd") {
+      |                                       ^~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1068:23: error: use of deleted function ‘QString::QString(const char*)’
+ 1068 |     } else if (ext == "pl") {
+      |                       ^~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1068:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+ 1068 |     } else if (ext == "pl") {
+      |                       ^~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1070:23: error: use of deleted function ‘QString::QString(const char*)’
+ 1070 |     } else if (ext == "r") {
+      |                       ^~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1070:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+ 1070 |     } else if (ext == "r") {
+      |                       ^~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1072:23: error: use of deleted function ‘QString::QString(const char*)’
+ 1072 |     } else if (ext == "m") {
+      |                       ^~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1072:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+ 1072 |     } else if (ext == "m") {
+      |                       ^~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1074:23: error: use of deleted function ‘QString::QString(const char*)’
+ 1074 |     } else if (ext == "scala") {
+      |                       ^~~~~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1074:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+ 1074 |     } else if (ext == "scala") {
+      |                       ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1076:23: error: use of deleted function ‘QString::QString(const char*)’
+ 1076 |     } else if (ext == "kt") {
+      |                       ^~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1076:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+ 1076 |     } else if (ext == "kt") {
+      |                       ^~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1078:23: error: use of deleted function ‘QString::QString(const char*)’
+ 1078 |     } else if (ext == "swift") {
+      |                       ^~~~~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1078:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+ 1078 |     } else if (ext == "swift") {
+      |                       ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1080:23: error: use of deleted function ‘QString::QString(const char*)’
+ 1080 |     } else if (ext == "ts") {
+      |                       ^~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1080:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+ 1080 |     } else if (ext == "ts") {
+      |                       ^~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1082:23: error: use of deleted function ‘QString::QString(const char*)’
+ 1082 |     } else if (ext == "tsx") {
+      |                       ^~~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1082:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+ 1082 |     } else if (ext == "tsx") {
+      |                       ^~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1084:23: error: use of deleted function ‘QString::QString(const char*)’
+ 1084 |     } else if (ext == "jsx") {
+      |                       ^~~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1084:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+ 1084 |     } else if (ext == "jsx") {
+      |                       ^~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1086:23: error: use of deleted function ‘QString::QString(const char*)’
+ 1086 |     } else if (ext == "vue") {
+      |                       ^~~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1086:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+ 1086 |     } else if (ext == "vue") {
+      |                       ^~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1088:23: error: use of deleted function ‘QString::QString(const char*)’
+ 1088 |     } else if (ext == "svelte") {
+      |                       ^~~~~~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1088:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+ 1088 |     } else if (ext == "svelte") {
+      |                       ^~~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1090:23: error: use of deleted function ‘QString::QString(const char*)’
+ 1090 |     } else if (ext == "astro") {
+      |                       ^~~~~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1090:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+ 1090 |     } else if (ext == "astro") {
+      |                       ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1092:23: error: use of deleted function ‘QString::QString(const char*)’
+ 1092 |     } else if (ext == "solid") {
+      |                       ^~~~~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1092:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+ 1092 |     } else if (ext == "solid") {
+      |                       ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1094:23: error: use of deleted function ‘QString::QString(const char*)’
+ 1094 |     } else if (ext == "qml") {
+      |                       ^~~~~
+/usr/include/qt6/QtCore/qstring.h:1143:5: note: declared here
+ 1143 |     QString(const char *ch) QSTRING_DECL_DELETED_ASCII_OP;
+      |     ^~~~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1094:23: note: use ‘-fdiagnostics-all-candidates’ to display considered candidates
+ 1094 |     } else if (ext == "qml") {
+      |                       ^~~~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp: At global scope:
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1099:2: error: expected ‘}’ at end of input
+ 1099 | }
+      |  ^
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:923:1: note: to match this ‘{’
+  923 | {
+      | ^
+In file included from /usr/include/qt6/QtCore/qstring.h:1829,
+                 from /usr/include/qt6/QtCore/QString:1,
+                 from /home/macewindu/ai-dev/KateAI/src/documentbridge.h:3,
+                 from /home/macewindu/ai-dev/KateAI/src/agentloop.h:3,
+                 from /home/macewindu/ai-dev/KateAI/src/agentloop.cpp:1:
+/usr/include/qt6/QtCore/qstringbuilder.h: In instantiation of ‘static void QConcatenable<QStringBuilder< <template-parameter-1-1>, <template-parameter-1-2> > >::appendTo(const type&, T*&) [with T = QChar; A = QString&; B = const char (&)[28]; type = QStringBuilder<QString&, const char (&)[28]>]’:
+/usr/include/qt6/QtCore/qstringbuilder.h:116:31:   required from ‘T QStringBuilder< <template-parameter-1-1>, <template-parameter-1-2> >::convertToImpl(qsizetype) const [with T = QString; A = QString&; B = const char (&)[28]; qsizetype = long long int]’
+  116 |         Concatenable::appendTo(*this, d);
+      |         ~~~~~~~~~~~~~~~~~~~~~~^~~~~~~~~~
+/usr/include/qt6/QtCore/qstringbuilder.h:104:32:   required from ‘T QStringBuilder< <template-parameter-1-1>, <template-parameter-1-2> >::convertTo() const [with T = QString; A = QString&; B = const char (&)[28]]’
+  104 |         return convertToImpl<T>(Concatenable::size(*this));
+      |                ~~~~~~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~
+/usr/include/qt6/QtCore/qstringbuilder.h:133:61:   required from ‘QStringBuilder< <template-parameter-1-1>, <template-parameter-1-2> >::operator ConvertTo() const [with A = QString&; B = const char (&)[28]; ConvertTo = QString]’
+  133 |     operator ConvertTo() const { return convertTo<ConvertTo>(); }
+      |                                         ~~~~~~~~~~~~~~~~~~~~^~
+/home/macewindu/ai-dev/KateAI/src/agentloop.cpp:47:44:   required from here
+   47 |     m_projectGraph->saveToFile(m_workspace + "/.kateai/project_graph.json");
+      |                                ~~~~~~~~~~~~^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+/usr/include/qt6/QtCore/qstringbuilder.h:403:37: error: cannot convert ‘QChar*’ to ‘char*&’
+  403 |         QConcatenableEx<B>::appendTo(p.b, out);
+      |         ~~~~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~~~~~~
+/usr/include/qt6/QtCore/qstringbuilder.h:291:57: note: initializing argument 2 of ‘static void QConcatenable<const char [N]>::appendTo(const char*, char*&) [with long long int N = 28]’
+  291 |     static inline void appendTo(const char a[N], char *&out)
+      |                                                  ~~~~~~~^~~
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp: In static member function ‘static QString KateAi::ProjectGraph::getNodeTypeFromPath(const QString&)’:
+/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp:1099:1: error: control reaches end of non-void function [-Werror=return-type]
+ 1099 | }
+      | ^
+cc1plus: some warnings being treated as errors
+gmake[2]: *** [src/CMakeFiles/kateai_core.dir/build.make:219: src/CMakeFiles/kateai_core.dir/graph/projectgraph.cpp.o] Error 1
+gmake[2]: *** Waiting for unfinished jobs....
+gmake[2]: *** [src/CMakeFiles/kateai_core.dir/build.make:177: src/CMakeFiles/kateai_core.dir/agentloop.cpp.o] Error 1
+gmake[1]: *** [CMakeFiles/Makefile2:182: src/CMakeFiles/kateai_core.dir/all] Error 2
+gmake: *** [Makefile:146: all] Error 2

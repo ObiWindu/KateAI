@@ -212,6 +212,20 @@ src/CMakeFiles/kateai_core.dir/documentbridge.cpp.s: cmake_force
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/kateai_core.dir/documentbridge.cpp.s"
 	cd /home/macewindu/ai-dev/KateAI/build/src && /usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/macewindu/ai-dev/KateAI/src/documentbridge.cpp -o CMakeFiles/kateai_core.dir/documentbridge.cpp.s
 
+src/CMakeFiles/kateai_core.dir/graph/projectgraph.cpp.o: src/CMakeFiles/kateai_core.dir/flags.make
+src/CMakeFiles/kateai_core.dir/graph/projectgraph.cpp.o: /home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp
+src/CMakeFiles/kateai_core.dir/graph/projectgraph.cpp.o: src/CMakeFiles/kateai_core.dir/compiler_depend.ts
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --progress-dir=/home/macewindu/ai-dev/KateAI/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_11) "Building CXX object src/CMakeFiles/kateai_core.dir/graph/projectgraph.cpp.o"
+	cd /home/macewindu/ai-dev/KateAI/build/src && /usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -MD -MT src/CMakeFiles/kateai_core.dir/graph/projectgraph.cpp.o -MF CMakeFiles/kateai_core.dir/graph/projectgraph.cpp.o.d -o CMakeFiles/kateai_core.dir/graph/projectgraph.cpp.o -c /home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp
+
+src/CMakeFiles/kateai_core.dir/graph/projectgraph.cpp.i: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Preprocessing CXX source to CMakeFiles/kateai_core.dir/graph/projectgraph.cpp.i"
+	cd /home/macewindu/ai-dev/KateAI/build/src && /usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -E /home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp > CMakeFiles/kateai_core.dir/graph/projectgraph.cpp.i
+
+src/CMakeFiles/kateai_core.dir/graph/projectgraph.cpp.s: cmake_force
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green "Compiling CXX source to assembly CMakeFiles/kateai_core.dir/graph/projectgraph.cpp.s"
+	cd /home/macewindu/ai-dev/KateAI/build/src && /usr/bin/c++ $(CXX_DEFINES) $(CXX_INCLUDES) $(CXX_FLAGS) -S /home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp -o CMakeFiles/kateai_core.dir/graph/projectgraph.cpp.s
+
 # Object files for target kateai_core
 kateai_core_OBJECTS = \
 "CMakeFiles/kateai_core.dir/kateai_core_autogen/mocs_compilation.cpp.o" \
@@ -223,7 +237,8 @@ kateai_core_OBJECTS = \
 "CMakeFiles/kateai_core.dir/llmclient.cpp.o" \
 "CMakeFiles/kateai_core.dir/agentloop.cpp.o" \
 "CMakeFiles/kateai_core.dir/workspace.cpp.o" \
-"CMakeFiles/kateai_core.dir/documentbridge.cpp.o"
+"CMakeFiles/kateai_core.dir/documentbridge.cpp.o" \
+"CMakeFiles/kateai_core.dir/graph/projectgraph.cpp.o"
 
 # External object files for target kateai_core
 kateai_core_EXTERNAL_OBJECTS =
@@ -238,9 +253,10 @@ lib/libkateai_core.a: src/CMakeFiles/kateai_core.dir/llmclient.cpp.o
 lib/libkateai_core.a: src/CMakeFiles/kateai_core.dir/agentloop.cpp.o
 lib/libkateai_core.a: src/CMakeFiles/kateai_core.dir/workspace.cpp.o
 lib/libkateai_core.a: src/CMakeFiles/kateai_core.dir/documentbridge.cpp.o
+lib/libkateai_core.a: src/CMakeFiles/kateai_core.dir/graph/projectgraph.cpp.o
 lib/libkateai_core.a: src/CMakeFiles/kateai_core.dir/build.make
 lib/libkateai_core.a: src/CMakeFiles/kateai_core.dir/link.txt
-	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --bold --progress-dir=/home/macewindu/ai-dev/KateAI/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_11) "Linking CXX static library ../lib/libkateai_core.a"
+	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --green --bold --progress-dir=/home/macewindu/ai-dev/KateAI/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_12) "Linking CXX static library ../lib/libkateai_core.a"
 	cd /home/macewindu/ai-dev/KateAI/build/src && $(CMAKE_COMMAND) -P CMakeFiles/kateai_core.dir/cmake_clean_target.cmake
 	cd /home/macewindu/ai-dev/KateAI/build/src && $(CMAKE_COMMAND) -E cmake_link_script CMakeFiles/kateai_core.dir/link.txt --verbose=$(VERBOSE)
 

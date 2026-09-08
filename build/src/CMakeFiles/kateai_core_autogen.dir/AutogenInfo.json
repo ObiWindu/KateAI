@@ -28,6 +28,12 @@
 			null
 		],
 		[
+			"/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.h",
+			"Mu",
+			"35G2TUPHEV/moc_projectgraph.cpp",
+			null
+		],
+		[
 			"/home/macewindu/ai-dev/KateAI/src/llmclient.h",
 			"Mu",
 			"EWIEGA46WW/moc_llmclient.cpp",
@@ -178,6 +184,11 @@
 	[
 		[ "/home/macewindu/ai-dev/KateAI/src/agentloop.cpp", "Mu", null ],
 		[ "/home/macewindu/ai-dev/KateAI/src/documentbridge.cpp", "Mu", null ],
+		[
+			"/home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp",
+			"Mu",
+			null
+		],
 		[ "/home/macewindu/ai-dev/KateAI/src/llmclient.cpp", "Mu", null ],
 		[ "/home/macewindu/ai-dev/KateAI/src/permissions.cpp", "Mu", null ],
 		[ "/home/macewindu/ai-dev/KateAI/src/sandbox.cpp", "Mu", null ],

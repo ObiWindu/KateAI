@@ -35,7 +35,7 @@ CMAKE_AR:FILEPATH=/usr/bin/ar
 
 //Choose the type of build, options are: None Debug Release RelWithDebInfo
 // MinSizeRel ...
-CMAKE_BUILD_TYPE:STRING=RelWithDebInfo
+CMAKE_BUILD_TYPE:STRING=Release
 
 //Enable/Disable color output during build.
 CMAKE_COLOR_MAKEFILE:BOOL=ON
@@ -335,7 +335,7 @@ KDE_INSTALL_LIBEXECDIR:PATH=
 //locale-dependent data (DATAROOTDIR/locale)
 KDE_INSTALL_LOCALEDIR:PATH=
 
-//modifiable single-machine data (var)
+//modifiable single-machine data (/var)
 KDE_INSTALL_LOCALSTATEDIR:PATH=
 
 //Qt Logging categories files (DATAROOTDIR/qlogging-categories6)
@@ -360,14 +360,17 @@ KDE_INSTALL_PREFIX_SCRIPT:BOOL=OFF
 //documentation bundles in QCH format (DATAROOTDIR/doc/qch)
 KDE_INSTALL_QCHDIR:PATH=
 
-//QtQuick2 imports (LIBDIR/qml)
+//QtQuick2 imports (lib64/qt6/qml)
 KDE_INSTALL_QMLDIR:PATH=
+
+//Qt metatypes files (lib64/qt6/metatypes)
+KDE_INSTALL_QTMETATYPESDIR:PATH=
 
 //Qt plugins (LIBDIR/plugins)
 KDE_INSTALL_QTPLUGINDIR:PATH=/home/macewindu/.local/lib/qt6/plugins
 
 //documentation bundles in QCH format for Qt-extending libraries
-// (DATAROOTDIR/doc/qch)
+// (/usr/share/doc/qt6)
 KDE_INSTALL_QTQCHDIR:PATH=
 
 //system admin executables (EXECROOTDIR/sbin)
@@ -379,7 +382,7 @@ KDE_INSTALL_SHAREDSTATEDIR:PATH=
 //sound files (DATAROOTDIR/sounds)
 KDE_INSTALL_SOUNDDIR:PATH=
 
-//read-only single-machine data (etc)
+//read-only single-machine data (/etc)
 KDE_INSTALL_SYSCONFDIR:PATH=
 
 //Systemd units (CMAKE_INSTALL_PREFIX/lib/systemd)
@@ -1259,6 +1262,8 @@ KDE_INSTALL_PLUGINDIR-ADVANCED:INTERNAL=1
 KDE_INSTALL_QCHDIR-ADVANCED:INTERNAL=1
 //ADVANCED property for variable: KDE_INSTALL_QMLDIR
 KDE_INSTALL_QMLDIR-ADVANCED:INTERNAL=1
+//ADVANCED property for variable: KDE_INSTALL_QTMETATYPESDIR
+KDE_INSTALL_QTMETATYPESDIR-ADVANCED:INTERNAL=1
 //ADVANCED property for variable: KDE_INSTALL_QTPLUGINDIR
 KDE_INSTALL_QTPLUGINDIR-ADVANCED:INTERNAL=1
 //ADVANCED property for variable: KDE_INSTALL_QTQCHDIR

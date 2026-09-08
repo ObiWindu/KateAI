@@ -1,10 +1,7 @@
-src/CMakeFiles/kateai.dir/kateai_autogen/mocs_compilation.cpp.o: \
- /home/macewindu/ai-dev/KateAI/build/src/kateai_autogen/mocs_compilation.cpp \
+src/CMakeFiles/kateai_core.dir/graph/projectgraph.cpp.o: \
+ /home/macewindu/ai-dev/KateAI/src/graph/projectgraph.cpp \
  /usr/include/stdc-predef.h \
- /home/macewindu/ai-dev/KateAI/build/src/kateai_autogen/EWIEGA46WW/moc_chatwidget.cpp \
- /home/macewindu/ai-dev/KateAI/build/src/kateai_autogen/EWIEGA46WW/../../../../src/chatwidget.h \
- /home/macewindu/ai-dev/KateAI/build/src/kateai_autogen/EWIEGA46WW/../../../../src/agentloop.h \
- /home/macewindu/ai-dev/KateAI/build/src/kateai_autogen/EWIEGA46WW/../../../../src/documentbridge.h \
+ /home/macewindu/ai-dev/KateAI/src/graph/projectgraph.h \
  /usr/include/qt6/QtCore/QString /usr/include/qt6/QtCore/qstring.h \
  /usr/include/qt6/QtCore/qchar.h /usr/include/qt6/QtCore/qglobal.h \
  /usr/include/c++/16/type_traits \
@@ -277,9 +274,8 @@ src/CMakeFiles/kateai.dir/kateai_autogen/mocs_compilation.cpp.o: \
  /usr/include/qt6/QtCore/qstringbuilder.h \
  /usr/include/qt6/QtCore/qstringconverter.h \
  /usr/include/qt6/QtCore/qstringconverter_base.h \
- /home/macewindu/ai-dev/KateAI/build/src/kateai_autogen/EWIEGA46WW/../../../../src/llmclient.h \
- /home/macewindu/ai-dev/KateAI/build/src/kateai_autogen/EWIEGA46WW/../../../../src/types.h \
- /usr/include/qt6/QtCore/QJsonArray /usr/include/qt6/QtCore/qjsonarray.h \
+ /usr/include/qt6/QtCore/QJsonObject \
+ /usr/include/qt6/QtCore/qjsonobject.h \
  /usr/include/qt6/QtCore/qjsonvalue.h \
  /usr/include/qt6/QtCore/qcborvalue.h \
  /usr/include/qt6/QtCore/qcborcommon.h \
@@ -354,131 +350,22 @@ src/CMakeFiles/kateai.dir/kateai_autogen/mocs_compilation.cpp.o: \
  /usr/include/qt6/QtCore/qendian.h \
  /usr/include/qt6/QtCore/qjsondocument.h \
  /usr/include/qt6/QtCore/qjsonparseerror.h \
- /usr/include/qt6/QtCore/QJsonObject \
- /usr/include/qt6/QtCore/qjsonobject.h \
- /usr/include/qt6/QtCore/QStringList /usr/include/qt6/QtCore/QHash \
- /usr/include/qt6/QtNetwork/QNetworkAccessManager \
- /usr/include/qt6/QtNetwork/qnetworkaccessmanager.h \
- /usr/include/qt6/QtNetwork/qtnetworkglobal.h \
- /usr/include/qt6/QtNetwork/qtnetwork-config.h \
- /usr/include/qt6/QtNetwork/qtnetworkexports.h \
- /usr/include/qt6/QtNetwork/qnetworkrequest.h \
- /usr/include/qt6/QtNetwork/qhttpheaders.h \
- /usr/include/qt6/QtCore/qmetaobject.h \
- /usr/include/qt6/QtCore/QSharedDataPointer \
- /usr/include/qt6/QtCore/QString /usr/include/qt6/QtCore/QUrl \
- /usr/include/qt6/QtCore/QVariant /usr/include/qt6/QtCore/q26numeric.h \
- /usr/include/qt6/QtCore/QList /usr/include/qt6/QtCore/QObject \
- /usr/include/qt6/QtNetwork/QSslConfiguration \
- /usr/include/qt6/QtNetwork/qsslconfiguration.h \
- /usr/include/qt6/QtNetwork/qsslsocket.h \
- /usr/include/qt6/QtNetwork/qtcpsocket.h \
- /usr/include/qt6/QtNetwork/qabstractsocket.h \
+ /usr/include/qt6/QtCore/QJsonArray /usr/include/qt6/QtCore/qjsonarray.h \
+ /usr/include/qt6/QtCore/QMap /usr/include/qt6/QtCore/QSet \
+ /usr/include/qt6/QtCore/QStringList /usr/include/qt6/QtCore/QDir \
+ /usr/include/qt6/QtCore/qdir.h /usr/include/qt6/QtCore/qdirlisting.h \
+ /usr/include/qt6/QtCore/qfiledevice.h \
  /usr/include/qt6/QtCore/qiodevice.h /usr/include/qt6/QtCore/qspan.h \
  /usr/include/c++/16/cassert /usr/include/qt6/QtCore/q20iterator.h \
- /usr/include/qt6/QtNetwork/qhostaddress.h \
- /usr/include/qt6/QtNetwork/qsslerror.h \
- /usr/include/qt6/QtNetwork/qsslcertificate.h \
- /usr/include/qt6/QtCore/qcryptographichash.h \
- /usr/include/qt6/QtNetwork/qssl.h /usr/include/qt6/QtCore/QFlags \
- /usr/include/qt6/QtNetwork/QSslPreSharedKeyAuthenticator \
- /usr/include/qt6/QtNetwork/qsslpresharedkeyauthenticator.h \
- /usr/include/qt6/QtCore/QMetaType /usr/include/qt6/QtCore/QObject \
- /home/macewindu/ai-dev/KateAI/build/src/kateai_autogen/EWIEGA46WW/../../../../src/permissions.h \
- /home/macewindu/ai-dev/KateAI/build/src/kateai_autogen/EWIEGA46WW/../../../../src/sandbox.h \
- /home/macewindu/ai-dev/KateAI/build/src/kateai_autogen/EWIEGA46WW/../../../../src/tools.h \
- /home/macewindu/ai-dev/KateAI/build/src/kateai_autogen/EWIEGA46WW/../../../../src/graph.h \
- /usr/include/qt6/QtCore/QMap /usr/include/qt6/QtCore/QSet \
- /usr/include/qt6/QtCore/QDir /usr/include/qt6/QtCore/qdir.h \
- /usr/include/qt6/QtCore/qdirlisting.h \
- /usr/include/qt6/QtCore/qfiledevice.h /usr/include/c++/16/filesystem \
- /usr/include/c++/16/bits/fs_fwd.h /usr/include/c++/16/bits/fs_path.h \
- /usr/include/c++/16/iomanip /usr/include/c++/16/bits/quoted_string.h \
- /usr/include/c++/16/codecvt /usr/include/c++/16/bits/fs_dir.h \
- /usr/include/c++/16/bits/fs_ops.h /usr/include/qt6/QtCore/qfile.h \
- /usr/include/qt6/QtCore/qfileinfo.h /usr/include/qt6/QtCore/qtimezone.h \
- /usr/include/qt6/QtCore/QDateTime /usr/include/qt6/QtCore/QFileInfo \
- /usr/include/qt6/QtWidgets/QWidget /usr/include/qt6/QtWidgets/qwidget.h \
- /usr/include/qt6/QtWidgets/qtwidgetsglobal.h \
- /usr/include/qt6/QtGui/qtguiglobal.h \
- /usr/include/qt6/QtGui/qtgui-config.h \
- /usr/include/qt6/QtGui/qtguiexports.h \
- /usr/include/qt6/QtWidgets/qtwidgets-config.h \
- /usr/include/qt6/QtWidgets/qtwidgetsexports.h \
- /usr/include/qt6/QtGui/qwindowdefs.h /usr/include/qt6/QtCore/qmargins.h \
- /usr/include/qt6/QtCore/qcheckedint_impl.h \
- /usr/include/qt6/QtGui/qaction.h /usr/include/qt6/QtGui/qkeysequence.h \
- /usr/include/qt6/QtGui/qicon.h /usr/include/qt6/QtCore/qsize.h \
- /usr/include/qt6/QtGui/qpixmap.h /usr/include/qt6/QtGui/qpaintdevice.h \
- /usr/include/qt6/QtCore/qrect.h /usr/include/qt6/QtCore/qpoint.h \
- /usr/include/qt6/QtGui/qcolor.h /usr/include/qt6/QtGui/qrgb.h \
- /usr/include/qt6/QtGui/qrgba64.h /usr/include/qt6/QtGui/qimage.h \
- /usr/include/qt6/QtGui/qpixelformat.h \
- /usr/include/qt6/QtGui/qtransform.h /usr/include/qt6/QtGui/qpolygon.h \
- /usr/include/qt6/QtGui/qregion.h /usr/include/qt6/QtCore/qline.h \
- /usr/include/qt6/QtGui/qpalette.h /usr/include/qt6/QtGui/qbrush.h \
- /usr/include/qt6/QtGui/qfont.h /usr/include/qt6/QtGui/qfontmetrics.h \
- /usr/include/qt6/QtGui/qfontinfo.h \
- /usr/include/qt6/QtGui/qfontvariableaxis.h \
- /usr/include/qt6/QtWidgets/qsizepolicy.h \
- /usr/include/qt6/QtGui/qcursor.h /usr/include/qt6/QtGui/qbitmap.h \
- /usr/include/qt6/QtWidgets/QLineEdit \
- /usr/include/qt6/QtWidgets/qlineedit.h \
- /usr/include/qt6/QtWidgets/qframe.h /usr/include/qt6/QtGui/qtextcursor.h \
- /usr/include/qt6/QtGui/qtextdocument.h \
- /usr/include/qt6/QtGui/qtextformat.h /usr/include/qt6/QtGui/qpen.h \
- /usr/include/qt6/QtGui/qtextoption.h \
- /usr/include/qt6/QtNetwork/QSslError \
- /usr/include/qt6/QtCore/qtmochelpers.h \
- /usr/include/qt6/QtCore/qtmocconstants.h \
- /usr/include/qt6/QtCore/q20algorithm.h \
- /home/macewindu/ai-dev/KateAI/build/src/kateai_autogen/EWIEGA46WW/moc_configpage.cpp \
- /home/macewindu/ai-dev/KateAI/build/src/kateai_autogen/EWIEGA46WW/../../../../src/configpage.h \
- /usr/include/KF6/KTextEditor/KTextEditor/ConfigPage \
- /usr/include/KF6/KTextEditor/ktexteditor/configpage.h \
- /usr/include/KF6/KTextEditor/ktexteditor_export.h \
- /usr/include/KF6/KTextEditor/ktexteditor_version.h \
- /home/macewindu/ai-dev/KateAI/build/src/kateai_autogen/EWIEGA46WW/moc_permissionbar.cpp \
- /home/macewindu/ai-dev/KateAI/build/src/kateai_autogen/EWIEGA46WW/../../../../src/permissionbar.h \
- /home/macewindu/ai-dev/KateAI/build/src/kateai_autogen/EWIEGA46WW/moc_plugin.cpp \
- /home/macewindu/ai-dev/KateAI/build/src/kateai_autogen/EWIEGA46WW/../../../../src/plugin.h \
- /usr/include/KF6/KTextEditor/KTextEditor/Plugin \
- /usr/include/KF6/KTextEditor/ktexteditor/plugin.h \
- /home/macewindu/ai-dev/KateAI/build/src/kateai_autogen/EWIEGA46WW/moc_pluginview.cpp \
- /home/macewindu/ai-dev/KateAI/build/src/kateai_autogen/EWIEGA46WW/../../../../src/pluginview.h \
- /usr/include/KF6/KTextEditor/KTextEditor/MainWindow \
- /usr/include/KF6/KTextEditor/ktexteditor/mainwindow.h \
- /usr/include/qt6/QtGui/QWidgetList \
- /usr/include/KF6/KXmlGui/KXMLGUIClient \
- /usr/include/KF6/KXmlGui/kxmlguiclient.h \
- /usr/include/KF6/KXmlGui/kxmlgui_export.h \
- /usr/include/KF6/KXmlGui/kxmlgui_version.h \
- /usr/include/qt6/QtCore/QPointer /usr/include/qt6/QtCore/qpointer.h \
- /home/macewindu/ai-dev/KateAI/build/src/kateai_autogen/EWIEGA46WW/moc_promptedit.cpp \
- /home/macewindu/ai-dev/KateAI/build/src/kateai_autogen/EWIEGA46WW/../../../../src/promptedit.h \
- /usr/include/qt6/QtWidgets/QPlainTextEdit \
- /usr/include/qt6/QtWidgets/qplaintextedit.h \
- /usr/include/qt6/QtWidgets/qtextedit.h \
- /usr/include/qt6/QtWidgets/qabstractscrollarea.h \
- /usr/include/qt6/QtGui/qabstracttextdocumentlayout.h \
- /usr/include/qt6/QtGui/qtextlayout.h /usr/include/qt6/QtGui/qevent.h \
- /usr/include/qt6/QtCore/qcoreevent.h \
- /usr/include/qt6/QtCore/qbasictimer.h \
- /usr/include/qt6/QtCore/qabstracteventdispatcher.h \
- /usr/include/qt6/QtCore/qeventloop.h \
- /usr/include/qt6/QtCore/qdeadlinetimer.h \
- /usr/include/qt6/QtGui/qeventpoint.h /usr/include/qt6/QtGui/qvector2d.h \
- /usr/include/qt6/QtGui/qvectornd.h \
- /usr/include/qt6/QtGui/qpointingdevice.h \
- /usr/include/qt6/QtGui/qinputdevice.h /usr/include/qt6/QtGui/qscreen.h \
- /usr/include/qt6/QtCore/QRect /usr/include/qt6/QtCore/QSize \
- /usr/include/qt6/QtCore/QSizeF /usr/include/qt6/QtGui/QTransform \
- /usr/include/qt6/QtCore/qnativeinterface.h \
- /usr/include/qt6/QtGui/qscreen_platform.h \
- /usr/include/qt6/QtGui/qguiapplication.h \
- /usr/include/qt6/QtCore/qcoreapplication.h \
- /usr/include/qt6/QtCore/qcoreapplication_platform.h \
- /usr/include/qt6/QtGui/qinputmethod.h \
- /usr/include/qt6/QtGui/qguiapplication_platform.h \
- /usr/include/qt6/QtGui/qglyphrun.h /usr/include/qt6/QtGui/qrawfont.h \
- /usr/include/qt6/QtGui/qfontdatabase.h
+ /usr/include/c++/16/filesystem /usr/include/c++/16/bits/fs_fwd.h \
+ /usr/include/c++/16/bits/fs_path.h /usr/include/c++/16/iomanip \
+ /usr/include/c++/16/bits/quoted_string.h /usr/include/c++/16/codecvt \
+ /usr/include/c++/16/bits/fs_dir.h /usr/include/c++/16/bits/fs_ops.h \
+ /usr/include/qt6/QtCore/qfile.h /usr/include/qt6/QtCore/qfileinfo.h \
+ /usr/include/qt6/QtCore/qtimezone.h /usr/include/qt6/QtCore/QDateTime \
+ /usr/include/qt6/QtCore/QFileInfo \
+ /usr/include/qt6/QtCore/QRegularExpression \
+ /usr/include/qt6/QtCore/QStack /usr/include/qt6/QtCore/qstack.h \
+ /usr/include/qt6/QtCore/QQueue /usr/include/qt6/QtCore/qqueue.h \
+ /usr/include/qt6/QtCore/QFile /usr/include/qt6/QtCore/QTextStream \
+ /usr/include/qt6/QtCore/QJsonDocument

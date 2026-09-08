@@ -71,7 +71,7 @@ tests/CMakeFiles/test_sandbox_autogen: tests/test_sandbox_autogen/timestamp
 tests/test_sandbox_autogen/timestamp: /usr/lib64/qt6/libexec/moc
 tests/test_sandbox_autogen/timestamp: tests/CMakeFiles/test_sandbox_autogen.dir/compiler_depend.ts
 	@$(CMAKE_COMMAND) -E cmake_echo_color "--switch=$(COLOR)" --blue --bold --progress-dir=/home/macewindu/ai-dev/KateAI/build/CMakeFiles --progress-num=$(CMAKE_PROGRESS_1) "Automatic MOC for target test_sandbox"
-	cd /home/macewindu/ai-dev/KateAI/build/tests && /usr/bin/cmake -E cmake_autogen /home/macewindu/ai-dev/KateAI/build/tests/CMakeFiles/test_sandbox_autogen.dir/AutogenInfo.json RelWithDebInfo
+	cd /home/macewindu/ai-dev/KateAI/build/tests && /usr/bin/cmake -E cmake_autogen /home/macewindu/ai-dev/KateAI/build/tests/CMakeFiles/test_sandbox_autogen.dir/AutogenInfo.json Release
 	cd /home/macewindu/ai-dev/KateAI/build/tests && /usr/bin/cmake -E touch /home/macewindu/ai-dev/KateAI/build/tests/test_sandbox_autogen/timestamp
 
 tests/CMakeFiles/test_sandbox_autogen.dir/codegen:
