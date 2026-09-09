@@ -1,5 +1,6 @@
 #include "agentloop.h"
 #include "graph.h"
+#include "types.h"
 
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -7,6 +8,8 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QDebug>
+#include <algorithm>
+#include <QMap>
 
 using namespace Qt::Literals::StringLiterals;
 
@@ -128,10 +131,20 @@ QList<GraphEdge*> AgentLoop::getProjectEdges() const
 QString AgentLoop::systemPrompt() const
 {
     QString prompt = defaultSystemPrompt(m_workspace);
-    if (!m_settings.extraSystemPrompt.trimmed().isEmpty()) {
+    if (!m_settings.extraSystemPrompt.trimmed().isEmpty() && m_settings.compressSystemPrompt) {
+        // Apply compression to extra system prompt if enabled
+        prompt += u"\n\n"_s + compressText(m_settings.extraSystemPrompt.trimmed(), m_settings.maxSystemPromptLength, true);
+    } else if (!m_settings.extraSystemPrompt.trimmed().isEmpty()) {
         prompt += u"\n\n"_s + m_settings.extraSystemPrompt.trimmed();
     }
-    if (!m_editorContext.isEmpty()) {
+    if (!m_editorContext.isEmpty() && m_settings.compressEditorContext) {
+        // Apply compression to editor context if enabled
+        QString editorContext = m_editorContext;
+        if (editorContext.length() > m_settings.maxEditorContextLength) {
+            editorContext = editorContext.left(m_settings.maxEditorContextLength) + u"... (truncated)"_s;
+        }
+        prompt += u"\n\n<editor_context>\n"_s + editorContext + u"\n</editor_context>\n"_s;
+    } else if (!m_editorContext.isEmpty()) {
         prompt += u"\n\n<editor_context>\n"_s + m_editorContext + u"\n</editor_context>\n"_s;
     }
     prompt += u"\nSandbox profile: "_s + sandboxProfileId(m_settings.sandbox);
@@ -144,8 +157,14 @@ QString AgentLoop::systemPrompt() const
         const QString instructionPath = m_workspace + u"/KATEAI.md"_s;
         QFile instructions(instructionPath);
         if (instructions.exists() && instructions.open(QIODevice::ReadOnly | QIODevice::Text)) {
-            const QByteArray contents = instructions.read(32768);
+            QByteArray contents = instructions.read(32768);
             if (!contents.isEmpty()) {
+                // Apply compression to project instructions if enabled
+                if (m_settings.compressProjectInstructions && contents.size() > m_settings.maxProjectInstructionsLength) {
+                    contents = contents.left(m_settings.maxProjectInstructionsLength);
+                    // Add truncation indicator
+                    contents += "\n... (project instructions truncated)";
+                }
                 prompt += u"\n\n<project_instructions path=\"KATEAI.md\">\n"_s
                     + QString::fromUtf8(contents) + u"\n</project_instructions>"_s;
             }
@@ -153,30 +172,77 @@ QString AgentLoop::systemPrompt() const
     }
     
     // Add project graph information to help the agent understand the project structure
-    if (m_projectGraph && m_projectGraph->getNodeCount() > 0) {
+    if (m_projectGraph && m_projectGraph->getNodeCount() > 0 && m_settings.compressProjectGraph) {
         prompt += u"\n\n<project_graph>\n"_s;
-        prompt += u"Project contains "_s + QString::number(m_projectGraph->getNodeCount()) + u" nodes and "_s + 
-                  QString::number(m_projectGraph->getEdgeCount()) + u" edges.\n"_s;
         
-        // Add summary of node types
-        QMap<QString, int> typeCount;
-        for (auto it = m_projectGraph->getNodes().begin(); it != m_projectGraph->getNodes().end(); ++it) {
-            const GraphNode *node = it.value();
-            typeCount[node->type]++;
-        }
+        // Apply context compression based on settings
+        int maxNodes = m_settings.maxGraphNodes;
+        int maxEdges = m_settings.maxGraphEdges;
         
-        prompt += u"Node types:\n"_s;
-        for (auto it = typeCount.begin(); it != typeCount.end(); ++it) {
-            prompt += u"  - "_s + it.key() + u": "_s + QString::number(it.value()) + u"\n"_s;
-        }
-        
-        // Add key dependencies
-        prompt += u"\nKey dependencies:\n"_s;
-        for (auto it = m_projectGraph->getEdges().begin(); it != m_projectGraph->getEdges().end(); ++it) {
-            const GraphEdge *edge = it.value();
-            if (edge->relationship == u"imports"_s || edge->relationship == u"calls"_s || edge->relationship == u"extends"_s) {
-                prompt += u"  - "_s + edge->sourceId + u" -> "_s + edge->targetId +
-                          u" ("_s + edge->relationship + u")\n"_s;
+        if (m_settings.contextCompressionLevel == 0) {
+            // Full context - include all nodes and edges
+            prompt += u"Project contains "_s + QString::number(m_projectGraph->getNodeCount()) + u" nodes and "_s + 
+                      QString::number(m_projectGraph->getEdgeCount()) + u" edges.\n"_s;
+            
+            // Include node types for full context
+            QMap<QString, int> typeCount;
+            for (auto it = m_projectGraph->getNodes().begin(); it != m_projectGraph->getNodes().end(); ++it) {
+                const GraphNode *node = it.value();
+                typeCount[node->type]++;
+            }
+            
+            prompt += u"Node types:\n"_s;
+            for (auto it = typeCount.begin(); it != typeCount.end(); ++it) {
+                prompt += u"  - "_s + it.key() + u": "_s + QString::number(it.value()) + u"\n"_s;
+            }
+            
+            // Include key dependencies for full context
+            prompt += u"\nKey dependencies:\n"_s;
+            for (auto it = m_projectGraph->getEdges().begin(); it != m_projectGraph->getEdges().end(); ++it) {
+                const GraphEdge *edge = it.value();
+                if (edge->relationship == u"imports"_s || edge->relationship == u"calls"_s || edge->relationship == u"extends"_s) {
+                    prompt += u"  - "_s + edge->sourceId + u" -> "_s + edge->targetId +
+                              u" ("_s + edge->relationship + u")\n"_s;
+                }
+            }
+        } else {
+            // Compressed context - include limited information
+            prompt += u"Project contains "_s + QString::number(qMin(m_projectGraph->getNodeCount(), maxNodes)) + u" nodes and "_s + 
+                      QString::number(qMin(m_projectGraph->getEdgeCount(), maxEdges)) + u" edges.\n"_s;
+            
+            if (m_settings.contextCompressionLevel == 1) {
+                // Summary level - include node types and key dependencies
+                QMap<QString, int> typeCount;
+                for (auto it = m_projectGraph->getNodes().begin(); it != m_projectGraph->getNodes().end(); ++it) {
+                    const GraphNode *node = it.value();
+                    typeCount[node->type]++;
+                }
+                
+                prompt += u"Node types:\n"_s;
+                for (auto it = typeCount.begin(); it != typeCount.end(); ++it) {
+                    prompt += u"  - "_s + it.key() + u": "_s + QString::number(it.value()) + u"\n"_s;
+                }
+                
+                // Add key dependencies (limited to most important relationships)
+                prompt += u"\nKey dependencies:\n"_s;
+                int edgeCount = 0;
+                for (auto it = m_projectGraph->getEdges().begin(); it != m_projectGraph->getEdges().end() && edgeCount < maxEdges; ++it) {
+                    const GraphEdge *edge = it.value();
+                    if (edge->relationship == u"imports"_s || edge->relationship == u"calls"_s || edge->relationship == u"extends"_s) {
+                        prompt += u"  - "_s + edge->sourceId + u" -> "_s + edge->targetId +
+                                  u" ("_s + edge->relationship + u")\n"_s;
+                        edgeCount++;
+                    }
+                }
+            } else if (m_settings.contextCompressionLevel == 2) {
+                // Minimal level - just basic structure
+                prompt += u"Project structure overview.\n"_s;
+                if (m_settings.includeFileContents) {
+                    prompt += u"Key files and directories are available for inspection.\n"_s;
+                }
+            } else if (m_settings.contextCompressionLevel == 3) {
+                // Ultra-minimal level - only essential info
+                prompt += u"Project overview available. Use tools to explore specific files as needed.\n"_s;
             }
         }
         
@@ -289,7 +355,9 @@ void AgentLoop::sendToModel()
     m_currentAssistant.clear();
     
     // Notify UI that we're thinking and waiting for AI response
-    Q_EMIT statusChanged(u"Thinking…"_s);
+    if (m_settings.thinkingMode) {
+        Q_EMIT statusChanged(u"Thinking…"_s);
+    }
     
     // Send the conversation to the LLM client for completion
     m_client.complete(m_messages);

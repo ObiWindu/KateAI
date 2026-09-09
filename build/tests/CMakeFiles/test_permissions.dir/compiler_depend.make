@@ -51,7 +51,9 @@ tests/CMakeFiles/test_permissions.dir/test_permissions.cpp.o: /home/macewindu/ai
   /usr/include/bits/stdint-intn.h \
   /usr/include/bits/stdint-least.h \
   /usr/include/bits/stdint-uintn.h \
+  /usr/include/bits/stdio.h \
   /usr/include/bits/stdio_lim.h \
+  /usr/include/bits/stdlib-bsearch.h \
   /usr/include/bits/stdlib-float.h \
   /usr/include/bits/struct_mutex.h \
   /usr/include/bits/struct_rwlock.h \
@@ -820,13 +822,7 @@ tests/test_permissions_autogen/mocs_compilation.cpp:
 
 /usr/include/qt6/QtCore/qxpfunctional.h:
 
-/usr/include/c++/16/concepts:
-
-/usr/include/c++/16/bits/ranges_util.h:
-
-/usr/include/qt6/QtTest/qtestdata.h:
-
-/usr/include/c++/16/bits/locale_classes.h:
+/usr/include/qt6/QtCore/qvariant.h:
 
 /usr/include/c++/16/bits/unique_ptr.h:
 
@@ -866,6 +862,10 @@ tests/test_permissions_autogen/mocs_compilation.cpp:
 
 /usr/include/qt6/QtCore/qjsonobject.h:
 
+/usr/include/qt6/QtCore/qvarlengtharray.h:
+
+/usr/include/c++/16/bits/stl_algobase.h:
+
 /usr/include/c++/16/bits/stl_iterator_base_funcs.h:
 
 /usr/include/c++/16/bits/stdexcept_throw.h:
@@ -879,6 +879,14 @@ tests/test_permissions_autogen/mocs_compilation.cpp:
 /usr/include/c++/16/bits/shared_ptr_base.h:
 
 /usr/include/bits/stdint-least.h:
+
+/usr/include/c++/16/bits/ranges_util.h:
+
+/usr/include/qt6/QtTest/qtestdata.h:
+
+/usr/include/c++/16/bits/locale_classes.h:
+
+/usr/include/c++/16/concepts:
 
 /usr/include/qt6/QtWidgets/qtwidgets-config.h:
 
@@ -933,10 +941,6 @@ tests/test_permissions_autogen/mocs_compilation.cpp:
 /usr/include/bits/struct_mutex.h:
 
 /usr/include/c++/16/bits/streambuf.tcc:
-
-/usr/include/c++/16/bits/stl_algobase.h:
-
-/usr/include/qt6/QtCore/qvarlengtharray.h:
 
 /usr/include/qt6/QtCore/QMetaType:
 
@@ -1024,7 +1028,21 @@ tests/test_permissions_autogen/mocs_compilation.cpp:
 
 /usr/include/c++/16/ranges:
 
-/usr/include/asm/errno.h:
+/usr/include/c++/16/bits/this_thread_sleep.h:
+
+/usr/include/qt6/QtCore/qstringtokenizer.h:
+
+/usr/include/qt6/QtCore/QEvent:
+
+/usr/include/qt6/QtCore/qfunctionpointer.h:
+
+/usr/include/c++/16/bits/fs_path.h:
+
+/usr/include/c++/16/bits/semaphore_base.h:
+
+/usr/include/c++/16/backward/binders.h:
+
+/usr/include/qt6/QtCore/qarraydata.h:
 
 /usr/include/bits/thread-shared-types.h:
 
@@ -1046,10 +1064,6 @@ tests/test_permissions_autogen/mocs_compilation.cpp:
 
 /usr/include/c++/16/bits/shared_ptr_atomic.h:
 
-/usr/include/pthread.h:
-
-/usr/include/c++/16/bits/localefwd.h:
-
 /usr/include/c++/16/unordered_map:
 
 /usr/include/bits/types/time_t.h:
@@ -1069,6 +1083,12 @@ tests/test_permissions_autogen/mocs_compilation.cpp:
 /usr/include/qt6/QtCore/q20iterator.h:
 
 /usr/include/features.h:
+
+/usr/include/bits/stdlib-bsearch.h:
+
+/usr/include/qt6/QtCore/qbytearrayview.h:
+
+/usr/include/qt6/QtCore/qjsondocument.h:
 
 /usr/include/c++/16/bits/stl_heap.h:
 
@@ -1106,9 +1126,23 @@ tests/test_permissions_autogen/mocs_compilation.cpp:
 
 /usr/include/c++/16/backward/auto_ptr.h:
 
+/usr/include/qt6/QtCore/QStringList:
+
+/usr/include/bits/pthread_stack_min-dynamic.h:
+
 /usr/include/c++/16/cctype:
 
 /usr/include/bits/posix1_lim.h:
+
+/usr/include/c++/16/bits/basic_string.tcc:
+
+/usr/include/c++/16/bits/stl_raw_storage_iter.h:
+
+/usr/include/bits/fp-fast.h:
+
+/usr/include/bits/stdio.h:
+
+/usr/include/qt6/QtCore/qfloat16.h:
 
 /usr/include/qt6/QtCore/q26numeric.h:
 
@@ -1176,6 +1210,8 @@ tests/test_permissions_autogen/mocs_compilation.cpp:
 
 /usr/include/bits/types/struct_FILE.h:
 
+/usr/include/asm/errno.h:
+
 /usr/include/asm/bitsperlong.h:
 
 /usr/include/c++/16/semaphore:
@@ -1183,6 +1219,10 @@ tests/test_permissions_autogen/mocs_compilation.cpp:
 /usr/include/qt6/QtNetwork/qsslcertificate.h:
 
 /usr/include/bits/mathcalls-macros.h:
+
+/usr/include/c++/16/tr1/hypergeometric.tcc:
+
+/usr/include/asm-generic/int-ll64.h:
 
 /usr/include/c++/16/version:
 
@@ -1200,7 +1240,9 @@ tests/test_permissions_autogen/mocs_compilation.cpp:
 
 /usr/include/bits/types/timer_t.h:
 
-/usr/include/qt6/QtCore/qvariant.h:
+/usr/include/c++/16/bits/binders.h:
+
+/usr/include/c++/16/aarch64-redhat-linux/bits/atomic_word.h:
 
 /usr/include/bits/waitflags.h:
 
@@ -1270,19 +1312,23 @@ tests/test_permissions_autogen/mocs_compilation.cpp:
 
 /home/macewindu/ai-dev/KateAI/src/types.h:
 
-/usr/include/bits/timex.h:
+/usr/include/qt6/QtCore/qcoreapplication.h:
 
-/usr/include/qt6/QtCore/QIODevice:
+/usr/include/qt6/QtCore/qdatastream.h:
 
 /usr/include/c++/16/bits/atomic_timed_wait.h:
 
 /usr/include/bits/errno.h:
 
+/usr/include/qt6/QtCore/qlatin1stringview.h:
+
+/usr/include/c++/16/cstdlib:
+
 /usr/include/qt6/QtCore/qstdlibdetection.h:
 
-/usr/include/qt6/QtCore/qcoreapplication.h:
+/usr/include/bits/timex.h:
 
-/usr/include/qt6/QtCore/qdatastream.h:
+/usr/include/qt6/QtCore/QIODevice:
 
 /usr/include/bits/types.h:
 
@@ -1299,30 +1345,6 @@ tests/test_permissions_autogen/mocs_compilation.cpp:
 /usr/include/linux/posix_types.h:
 
 /usr/include/qt6/QtCore/QObject:
-
-/usr/include/c++/16/bits/this_thread_sleep.h:
-
-/usr/include/qt6/QtCore/qstringtokenizer.h:
-
-/usr/include/qt6/QtCore/QEvent:
-
-/usr/include/bits/pthread_stack_min-dynamic.h:
-
-/usr/include/qt6/QtCore/QStringList:
-
-/usr/include/qt6/QtCore/qfunctionpointer.h:
-
-/usr/include/c++/16/bits/fs_path.h:
-
-/usr/include/c++/16/bits/semaphore_base.h:
-
-/usr/include/c++/16/backward/binders.h:
-
-/usr/include/c++/16/aarch64-redhat-linux/bits/atomic_word.h:
-
-/usr/include/c++/16/bits/binders.h:
-
-/usr/include/qt6/QtCore/qarraydata.h:
 
 /usr/include/bits/types/__fpos64_t.h:
 
@@ -1514,15 +1536,9 @@ tests/test_permissions_autogen/mocs_compilation.cpp:
 
 /usr/include/c++/16/cstdint:
 
-/usr/include/c++/16/bits/stl_raw_storage_iter.h:
+/usr/include/c++/16/bits/localefwd.h:
 
-/usr/include/bits/fp-fast.h:
-
-/usr/include/asm-generic/int-ll64.h:
-
-/usr/include/c++/16/tr1/hypergeometric.tcc:
-
-/usr/include/c++/16/bits/basic_string.tcc:
+/usr/include/pthread.h:
 
 /usr/include/c++/16/bits/stl_bvector.h:
 
@@ -1782,10 +1798,6 @@ tests/test_permissions_autogen/include/test_permissions.moc:
 
 /usr/include/qt6/QtCore/qbytearraylist.h:
 
-/usr/include/qt6/QtCore/qbytearrayview.h:
-
-/usr/include/qt6/QtCore/qjsondocument.h:
-
 /usr/include/qt6/QtCore/qstringview.h:
 
 /usr/include/c++/16/bits/stl_iterator.h:
@@ -1849,12 +1861,6 @@ tests/test_permissions_autogen/include/test_permissions.moc:
 /usr/include/qt6/QtCore/qfile.h:
 
 /usr/include/qt6/QtCore/qfileinfo.h:
-
-/usr/include/qt6/QtCore/qfloat16.h:
-
-/usr/include/c++/16/cstdlib:
-
-/usr/include/qt6/QtCore/qlatin1stringview.h:
 
 /usr/include/qt6/QtGui/qpolygon.h:
 

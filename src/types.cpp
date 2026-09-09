@@ -298,4 +298,16 @@ QString defaultSystemPrompt(const QString &workspace)
         + workspace;
 }
 
+QString compressText(const QString &text, int maxLength, bool enabled)
+{
+    if (!enabled || text.length() <= maxLength) {
+        return text;
+    }
+    
+    // Truncate and add indicator
+    QString result = text.left(maxLength);
+    result += u"... (truncated)"_s;
+    return result;
+}
+
 } // namespace KateAi

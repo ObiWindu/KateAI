@@ -552,6 +552,7 @@ src/kateai_autogen/timestamp: src/kateai_autogen/moc_predefs.h \
   /usr/include/qt6/QtCore/qversiontagging.h \
   /usr/include/qt6/QtCore/qxptype_traits.h \
   /usr/include/qt6/QtCore/qyieldcpu.h \
+  /usr/include/qt6/QtGui/QIcon \
   /usr/include/qt6/QtGui/QTransform \
   /usr/include/qt6/QtGui/QWidgetList \
   /usr/include/qt6/QtGui/qabstracttextdocumentlayout.h \
@@ -713,7 +714,9 @@ src/CMakeFiles/kateai.dir/chatwidget.cpp.o: /home/macewindu/ai-dev/KateAI/src/ch
   /usr/include/bits/stdint-intn.h \
   /usr/include/bits/stdint-least.h \
   /usr/include/bits/stdint-uintn.h \
+  /usr/include/bits/stdio.h \
   /usr/include/bits/stdio_lim.h \
+  /usr/include/bits/stdlib-bsearch.h \
   /usr/include/bits/stdlib-float.h \
   /usr/include/bits/struct_mutex.h \
   /usr/include/bits/struct_rwlock.h \
@@ -1188,6 +1191,7 @@ src/CMakeFiles/kateai.dir/chatwidget.cpp.o: /home/macewindu/ai-dev/KateAI/src/ch
   /usr/include/qt6/QtCore/qversiontagging.h \
   /usr/include/qt6/QtCore/qxptype_traits.h \
   /usr/include/qt6/QtCore/qyieldcpu.h \
+  /usr/include/qt6/QtGui/QIcon \
   /usr/include/qt6/QtGui/QTextDocument \
   /usr/include/qt6/QtGui/QTransform \
   /usr/include/qt6/QtGui/qabstracttextdocumentlayout.h \
@@ -1380,7 +1384,9 @@ src/CMakeFiles/kateai.dir/configpage.cpp.o: /home/macewindu/ai-dev/KateAI/src/co
   /usr/include/bits/stdint-intn.h \
   /usr/include/bits/stdint-least.h \
   /usr/include/bits/stdint-uintn.h \
+  /usr/include/bits/stdio.h \
   /usr/include/bits/stdio_lim.h \
+  /usr/include/bits/stdlib-bsearch.h \
   /usr/include/bits/stdlib-float.h \
   /usr/include/bits/struct_mutex.h \
   /usr/include/bits/struct_rwlock.h \
@@ -2019,7 +2025,9 @@ src/CMakeFiles/kateai.dir/kateai_autogen/mocs_compilation.cpp.o: src/kateai_auto
   /usr/include/bits/stdint-intn.h \
   /usr/include/bits/stdint-least.h \
   /usr/include/bits/stdint-uintn.h \
+  /usr/include/bits/stdio.h \
   /usr/include/bits/stdio_lim.h \
+  /usr/include/bits/stdlib-bsearch.h \
   /usr/include/bits/stdlib-float.h \
   /usr/include/bits/struct_mutex.h \
   /usr/include/bits/struct_rwlock.h \
@@ -2495,6 +2503,7 @@ src/CMakeFiles/kateai.dir/kateai_autogen/mocs_compilation.cpp.o: src/kateai_auto
   /usr/include/qt6/QtCore/qversiontagging.h \
   /usr/include/qt6/QtCore/qxptype_traits.h \
   /usr/include/qt6/QtCore/qyieldcpu.h \
+  /usr/include/qt6/QtGui/QIcon \
   /usr/include/qt6/QtGui/QTransform \
   /usr/include/qt6/QtGui/QWidgetList \
   /usr/include/qt6/QtGui/qabstracttextdocumentlayout.h \
@@ -2650,7 +2659,9 @@ src/CMakeFiles/kateai.dir/permissionbar.cpp.o: /home/macewindu/ai-dev/KateAI/src
   /usr/include/bits/stdint-intn.h \
   /usr/include/bits/stdint-least.h \
   /usr/include/bits/stdint-uintn.h \
+  /usr/include/bits/stdio.h \
   /usr/include/bits/stdio_lim.h \
+  /usr/include/bits/stdlib-bsearch.h \
   /usr/include/bits/stdlib-float.h \
   /usr/include/bits/struct_mutex.h \
   /usr/include/bits/struct_rwlock.h \
@@ -3265,7 +3276,9 @@ src/CMakeFiles/kateai.dir/plugin.cpp.o: /home/macewindu/ai-dev/KateAI/src/plugin
   /usr/include/bits/stdint-intn.h \
   /usr/include/bits/stdint-least.h \
   /usr/include/bits/stdint-uintn.h \
+  /usr/include/bits/stdio.h \
   /usr/include/bits/stdio_lim.h \
+  /usr/include/bits/stdlib-bsearch.h \
   /usr/include/bits/stdlib-float.h \
   /usr/include/bits/struct_mutex.h \
   /usr/include/bits/struct_rwlock.h \
@@ -3887,7 +3900,9 @@ src/CMakeFiles/kateai.dir/pluginview.cpp.o: /home/macewindu/ai-dev/KateAI/src/pl
   /usr/include/bits/stdint-intn.h \
   /usr/include/bits/stdint-least.h \
   /usr/include/bits/stdint-uintn.h \
+  /usr/include/bits/stdio.h \
   /usr/include/bits/stdio_lim.h \
+  /usr/include/bits/stdlib-bsearch.h \
   /usr/include/bits/stdlib-float.h \
   /usr/include/bits/struct_mutex.h \
   /usr/include/bits/struct_rwlock.h \
@@ -4515,7 +4530,9 @@ src/CMakeFiles/kateai.dir/promptedit.cpp.o: /home/macewindu/ai-dev/KateAI/src/pr
   /usr/include/bits/stdint-intn.h \
   /usr/include/bits/stdint-least.h \
   /usr/include/bits/stdint-uintn.h \
+  /usr/include/bits/stdio.h \
   /usr/include/bits/stdio_lim.h \
+  /usr/include/bits/stdlib-bsearch.h \
   /usr/include/bits/stdlib-float.h \
   /usr/include/bits/struct_mutex.h \
   /usr/include/bits/struct_rwlock.h \
@@ -5150,8 +5167,6 @@ src/kateai_autogen/EWIEGA46WW/qrc_kateai.cpp:
 
 /usr/include/qt6/QtWidgets/QCheckBox:
 
-/usr/include/qt6/QtGui/QIcon:
-
 /usr/lib/gcc/aarch64-redhat-linux/16/include/stdint.h:
 
 /usr/include/qt6/QtWidgets/qstyleoption.h:
@@ -5205,6 +5220,8 @@ src/kateai_autogen/EWIEGA46WW/qrc_kateai.cpp:
 /usr/include/c++/16/bits/quoted_string.h:
 
 /usr/include/c++/16/bits/fs_path.h:
+
+/usr/include/bits/stdio.h:
 
 /usr/include/bits/mathcalls.h:
 
@@ -5333,6 +5350,8 @@ src/kateai_autogen/EWIEGA46WW/qrc_kateai.cpp:
 /usr/include/qt6/QtGui/qaction.h:
 
 /usr/include/qt6/QtGui/QTransform:
+
+/usr/include/qt6/QtGui/QIcon:
 
 /usr/include/qt6/QtCore/qyieldcpu.h:
 
@@ -5805,6 +5824,8 @@ src/kateai_autogen/moc_predefs.h:
 /usr/include/qt6/QtGui/qfontdatabase.h:
 
 /home/macewindu/ai-dev/KateAI/src/documentbridge.h:
+
+/usr/include/bits/stdlib-bsearch.h:
 
 /home/macewindu/ai-dev/KateAI/src/settings.h:
 

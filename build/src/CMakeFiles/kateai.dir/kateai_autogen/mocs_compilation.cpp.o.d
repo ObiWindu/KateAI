@@ -427,7 +427,7 @@ src/CMakeFiles/kateai.dir/kateai_autogen/mocs_compilation.cpp.o: \
  /usr/include/qt6/QtWidgets/qframe.h /usr/include/qt6/QtGui/qtextcursor.h \
  /usr/include/qt6/QtGui/qtextdocument.h \
  /usr/include/qt6/QtGui/qtextformat.h /usr/include/qt6/QtGui/qpen.h \
- /usr/include/qt6/QtGui/qtextoption.h \
+ /usr/include/qt6/QtGui/qtextoption.h /usr/include/qt6/QtGui/QIcon \
  /usr/include/qt6/QtNetwork/QSslError \
  /usr/include/qt6/QtCore/qtmochelpers.h \
  /usr/include/qt6/QtCore/qtmocconstants.h \
