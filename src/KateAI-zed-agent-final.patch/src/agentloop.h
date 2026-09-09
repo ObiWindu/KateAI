@@ -55,7 +55,6 @@ Q_SIGNALS:
     void toolFinished(const ToolResult &result);
     void permissionNeeded(const PermissionRequest &request);
     void statusChanged(const QString &status);
-    void activityUpdated(const QString &text);
     void failed(const QString &error);
     void turnFinished();
     void modelsReceived(Provider provider, const QStringList &models);
@@ -79,8 +78,6 @@ private:
     bool isRepeatSensitiveTool(const QString &toolName) const;
     void appendControllerMessage(const QString &content);
     QString formatToolResult(const ToolCall &call, const ToolResult &result) const;
-    QString describePlannedWork(const QList<ToolCall> &calls) const;
-    QString summarizeCompletedWork() const;
     bool isMutationTool(const QString &toolName) const;
     bool isVerificationTool(const QString &toolName) const;
     bool isVerificationForChangedFiles(const ToolCall &call) const;

@@ -353,7 +353,6 @@ void AgentLoop::start(const QString &userText)
     user.content = userText;
     m_messages.append(user);
     Q_EMIT userMessage(userText);
-    Q_EMIT activityUpdated(u"I’ll inspect the relevant parts of the project and work through the task step by step."_s);
 
     scheduleNextModelStep();
 }
@@ -411,7 +410,7 @@ void AgentLoop::scheduleNextModelStep()
         return;
     }
 
-    Q_EMIT statusChanged(u"I’m pacing the next step to stay within the provider limit…"_s);
+    Q_EMIT statusChanged(u"Rate limit pacing: next model step in %1 s…"_s.arg((delay + 999) / 1000));
     m_nextModelTimer.stop();
     m_nextModelTimer.start(static_cast<int>(qMin<qint64>(delay, std::numeric_limits<int>::max())));
 }
@@ -445,7 +444,7 @@ void AgentLoop::sendToModel()
     m_state = State::WaitingForModel;
 
     if (m_settings.thinkingMode) {
-        Q_EMIT statusChanged(u"Working on it…"_s);
+        Q_EMIT statusChanged(u"Thinking… (model step %1)"_s.arg(m_modelRequests));
     }
 
     m_client.complete(m_messages);
@@ -509,118 +508,6 @@ bool AgentLoop::isVerificationForChangedFiles(const ToolCall &call) const
     // tied to a specific path; the model is explicitly instructed to use them
     // for tests/builds/checks after changes.
     return call.name == u"grep"_s || call.name == u"bash"_s;
-}
-
-QString AgentLoop::describePlannedWork(const QList<ToolCall> &calls) const
-{
-    int reads = 0;
-    int mutations = 0;
-    int commands = 0;
-    int searches = 0;
-    for (const ToolCall &call : calls) {
-        if (call.name == u"read_file"_s || call.name == u"list_dir"_s || call.name == u"query_project_graph"_s) {
-            ++reads;
-        } else if (call.name == u"write_file"_s || call.name == u"edit_file"_s) {
-            ++mutations;
-        } else if (call.name == u"bash"_s) {
-            ++commands;
-        } else if (call.name == u"grep"_s || call.name == u"glob"_s) {
-            ++searches;
-        }
-    }
-
-    QStringList parts;
-    if (reads) {
-        parts << (reads == 1 ? u"inspect the relevant project files"_s
-                              : u"inspect %1 relevant project items"_s.arg(reads));
-    }
-    if (searches) {
-        parts << (searches == 1 ? u"search for the relevant code"_s
-                                : u"search for %1 relevant code patterns"_s.arg(searches));
-    }
-    if (mutations) {
-        parts << (mutations == 1 ? u"make the necessary code change"_s
-                                  : u"make %1 focused code changes"_s.arg(mutations));
-    }
-    if (commands) {
-        parts << (commands == 1 ? u"run a command to check the result"_s
-                                : u"run %1 checks or commands"_s.arg(commands));
-    }
-
-    if (parts.isEmpty()) {
-        return u"I’m working through the next step of the task."_s;
-    }
-
-    QString sentence;
-    if (parts.size() == 1) {
-        sentence = parts.first();
-    } else if (parts.size() == 2) {
-        sentence = parts.at(0) + u" and "_s + parts.at(1);
-    } else {
-        sentence = parts.mid(0, parts.size() - 1).join(u", "_s) + u", and "_s + parts.last();
-    }
-    return u"I’m going to %1."_s.arg(sentence);
-}
-
-QString AgentLoop::summarizeCompletedWork() const
-{
-    int succeeded = 0;
-    int failed = 0;
-    int reads = 0;
-    int mutations = 0;
-    int commands = 0;
-    QStringList changedFiles;
-
-    for (const ToolResult &result : m_pendingResults) {
-        if (result.ok) {
-            ++succeeded;
-        } else {
-            ++failed;
-        }
-
-        if (result.name == u"read_file"_s || result.name == u"list_dir"_s || result.name == u"query_project_graph"_s) {
-            ++reads;
-        } else if (result.name == u"write_file"_s || result.name == u"edit_file"_s) {
-            ++mutations;
-        } else if (result.name == u"bash"_s) {
-            ++commands;
-        }
-    }
-
-    for (const ToolResult &result : m_pendingResults) {
-        if (!result.ok || (result.name != u"write_file"_s && result.name != u"edit_file"_s)) {
-            continue;
-        }
-        // Keep this intentionally compact; detailed diffs remain in the model context,
-        // while the transcript only tells the user what was accomplished.
-        const QString pathLine = result.output.section(u"TARGET: "_s, 1, 1).section(u'\n', 0, 0).trimmed();
-        if (!pathLine.isEmpty() && !changedFiles.contains(pathLine)) {
-            changedFiles.append(pathLine);
-        }
-    }
-
-    if (failed > 0 && succeeded == 0) {
-        return u"I ran into an issue while doing that, so I’m adjusting the approach."_s;
-    }
-    if (mutations > 0) {
-        if (!changedFiles.isEmpty()) {
-            return u"I’ve made the requested change in %1. I’m checking the result now."_s.arg(changedFiles.join(u", "_s));
-        }
-        return u"I’ve made the requested change. I’m checking the result now."_s;
-    }
-    if (commands > 0 && failed == 0) {
-        return u"I’ve completed the checks from this step and am using the results to decide what to do next."_s;
-    }
-    if (reads > 0 && searches > 0 && failed == 0) {
-        return u"I’ve inspected the relevant code and narrowed down the next step."_s;
-    }
-    if (reads > 0 && failed == 0) {
-        return u"I’ve inspected the relevant code and am working from what I found."_s;
-    }
-    if (failed > 0) {
-        return u"Part of that step failed, so I’m using the error to adjust the approach."_s;
-    }
-    return u"That step is complete. I’m deciding what’s needed next."_s;
 }
 
 QString AgentLoop::formatToolResult(const ToolCall &call, const ToolResult &result) const
@@ -736,7 +623,6 @@ void AgentLoop::onFinished(const QString &text, const QList<ToolCall> &toolCalls
     m_actionsThisModelTurn.clear();
     m_queue = bundleSimilarTools(toolCalls);
     m_pendingResults.clear();
-    Q_EMIT activityUpdated(describePlannedWork(m_queue));
     m_state = State::ExecutingTools;
     processQueue();
 }
@@ -788,7 +674,6 @@ void AgentLoop::processQueue()
     }
 
     if (m_queue.isEmpty()) {
-        Q_EMIT activityUpdated(summarizeCompletedWork());
         appendToolResultsToConversation();
         m_state = State::WaitingForNextModel;
         scheduleNextModelStep();
@@ -912,7 +797,7 @@ void AgentLoop::executeOne(const ToolCall &call)
 
     ++m_toolCalls;
     Q_EMIT toolStarted(request);
-    Q_EMIT statusChanged(u"Working on the next step…"_s);
+    Q_EMIT statusChanged(u"Running %1… (tool %2/%3)"_s.arg(call.name).arg(m_toolCalls).arg(m_settings.maxToolCalls));
     ToolResult result = m_tools->run(call);
     appendToolResult(call, result);
     processQueue();
@@ -958,7 +843,7 @@ void AgentLoop::resolvePermission(PermissionDecision decision)
 
     ++m_toolCalls;
     Q_EMIT toolStarted(request);
-    Q_EMIT statusChanged(u"Working on the next step…"_s);
+    Q_EMIT statusChanged(u"Running %1… (tool %2/%3)"_s.arg(call.name).arg(m_toolCalls).arg(m_settings.maxToolCalls));
     ToolResult result = m_tools->run(call);
     appendToolResult(call, result);
     m_state = State::ExecutingTools;

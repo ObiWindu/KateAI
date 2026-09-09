@@ -204,13 +204,16 @@ ChatWidget::ChatWidget(QWidget *parent)
         Q_UNUSED(text);
         freezeStreaming();
     });
-    connect(&m_agent, &AgentLoop::toolStarted, this, [this](const PermissionRequest &request) {
-        appendHtml(u"<div style=\"color:#7aa2f7; font-size:12px; padding:4px 0 4px 8px; margin:4px 0; border-left:2px solid #7aa2f7; font-family:sans-serif;\">⚙ %1</div>"_s.arg(escape(u"→ %1"_s.arg(request.summary))));
+    // Keep implementation details such as individual tool calls out of the transcript.
+    // AgentLoop emits one human-readable activity update per coherent batch instead.
+    connect(&m_agent, &AgentLoop::activityUpdated, this, [this](const QString &text) {
+        appendHtml(u"<div style=\"color:#a9b1c6; font-size:12px; padding:8px 10px; margin:5px 0; border-left:2px solid #565f73; font-family:sans-serif; line-height:1.45;\"><span style='color:#7aa2f7;'>●</span> %1</div>"_s.arg(escape(text)));
     });
-    connect(&m_agent, &AgentLoop::toolFinished, this, [this](const ToolResult &result) {
-        const QString mark = result.ok ? u"<span style='color:#9ece6a;'>✓</span>"_s : u"<span style='color:#f7768e;'>✗</span>"_s;
-        appendHtml(u"<div style=\"color:#7a7a8a; font-size:12px; padding:4px 0 4px 8px; margin:4px 0; border-left:2px solid #3a3a4a; font-family:sans-serif;\"><code style='color:#bb9af7;'>%1</code> %2 <span style='font-size:10px;'>%3</span></div>"_s.arg(escape(result.name), mark, escape(result.output.left(300).replace(u"\n"_s, u" · "_s))));
-    });
+
+    // Tool-level signals are intentionally not rendered. They remain available for
+    // the permission UI and future diagnostics, but the chat stays human-readable.
+    connect(&m_agent, &AgentLoop::toolStarted, this, [](const PermissionRequest &) {});
+    connect(&m_agent, &AgentLoop::toolFinished, this, [](const ToolResult &) {});
     connect(&m_agent, &AgentLoop::permissionNeeded, this, [this](const PermissionRequest &request) {
         m_permissionBar->showRequest(request);
         m_prompt->setEnabled(false);
