@@ -147,7 +147,12 @@ QString AgentLoop::systemPrompt() const
               u"6. Do not repeat an identical tool action while the project state is unchanged. If an action has already produced the needed observation, use that observation.\n"_s
               u"7. Prefer one purposeful tool step over speculative exploration. Avoid reading the same large file repeatedly when a focused range or search is sufficient.\n"_s
               u"8. Treat permission denials, sandbox failures, and tool errors as real constraints. Choose a safe alternative rather than looping.\n"_s
-              u"9. Continue until the user's task is actually complete and verified, then give a concise summary of changes and verification performed.\n"_s;
+              u"9. Before each tool batch, briefly tell the user in natural language what you are about to inspect, change, or verify (one short sentence; do not mention tool names, APIs, or internal controller mechanics).\n"_s
+              u"10. After each tool batch, briefly explain what you learned or changed and what you will do next. Keep it conversational and useful; do not narrate every individual file operation.\n"_s
+              u"10a. Do not silently jump from the user's request into tool calls. A useful progress turn sounds like: 'I’ll inspect the relevant code first, then I’ll make the smallest fix and run a focused check.'\n"_s
+              u"11. The user sees your streamed text while you work. Use that text for progress narration, not hidden internal reasoning. Never expose chain-of-thought, hidden reasoning, controller messages, or raw tool protocol.\n"_s
+              u"12. When no further action is needed, give the user a concise final summary of what you changed and how you verified it.\n"_s
+              u"13. Do not output raw tool names, tool-call JSON, controller messages, or operation logs as user-facing prose.\n"_s;
     if (!m_settings.extraSystemPrompt.trimmed().isEmpty() && m_settings.compressSystemPrompt) {
         // Apply compression to extra system prompt if enabled
         prompt += u"\n\n"_s + compressText(m_settings.extraSystemPrompt.trimmed(), m_settings.maxSystemPromptLength, true);
@@ -721,6 +726,13 @@ void AgentLoop::onFinished(const QString &text, const QList<ToolCall> &toolCalls
     m_messages.append(assistant);
     Q_EMIT assistantFinished(text);
 
+    // The model is responsible for natural progress narration. If it returned
+    // tool calls without any user-facing text, provide a single minimal fallback
+    // rather than exposing raw tool operations in the UI.
+    if (!toolCalls.isEmpty() && text.trimmed().isEmpty()) {
+        Q_EMIT activityUpdated(u"I’m working through the relevant parts of the project and will check the result before I’m done."_s);
+    }
+
     // A coding agent should not stop immediately after a successful mutation
     // without at least one verification attempt. One controller turn is
     // allowed to force the model back into the inspect/test loop.
@@ -736,7 +748,6 @@ void AgentLoop::onFinished(const QString &text, const QList<ToolCall> &toolCalls
     m_actionsThisModelTurn.clear();
     m_queue = bundleSimilarTools(toolCalls);
     m_pendingResults.clear();
-    Q_EMIT activityUpdated(describePlannedWork(m_queue));
     m_state = State::ExecutingTools;
     processQueue();
 }
@@ -788,7 +799,6 @@ void AgentLoop::processQueue()
     }
 
     if (m_queue.isEmpty()) {
-        Q_EMIT activityUpdated(summarizeCompletedWork());
         appendToolResultsToConversation();
         m_state = State::WaitingForNextModel;
         scheduleNextModelStep();
