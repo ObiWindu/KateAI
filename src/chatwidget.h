@@ -6,6 +6,7 @@
 #include <QWidget>
 #include <QHash>
 #include <QLineEdit>
+#include <QIcon>
 
 class QComboBox;
 class QLabel;
@@ -67,6 +68,7 @@ private:
     QPushButton *m_configure = nullptr;
     QPushButton *m_send = nullptr;
     QPushButton *m_stop = nullptr;
+    QPushButton *m_thinking = nullptr;
     QTextBrowser *m_transcript = nullptr;
     PermissionBar *m_permissionBar = nullptr;
     PromptEdit *m_prompt = nullptr;

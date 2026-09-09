@@ -104,6 +104,81 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     m_deny->setMaximumHeight(80);
     form->addRow(i18n("Extra deny globs:"), m_deny);
 
+    // Create separator line for context compression settings
+    auto *compressionSeparator = new QLabel(i18n("--- Context Compression ---"), this);
+    compressionSeparator->setStyleSheet(u"font-weight: bold; margin-top: 10px;"_s);
+    form->addRow(compressionSeparator);
+
+    // Create spin box for context compression level
+    m_compressionLevel = new QSpinBox(this);
+    m_compressionLevel->setRange(0, 3);
+    m_compressionLevel->setSuffix(i18n(" (0=full, 1=summary, 2=minimal, 3=ultra-minimal)"));
+    form->addRow(i18n("Context compression level:"), m_compressionLevel);
+
+    // Create spin box for maximum graph nodes
+    m_maxGraphNodes = new QSpinBox(this);
+    m_maxGraphNodes->setRange(10, 200);
+    form->addRow(i18n("Max project graph nodes:"), m_maxGraphNodes);
+
+    // Create spin box for maximum graph edges
+    m_maxGraphEdges = new QSpinBox(this);
+    m_maxGraphEdges->setRange(10, 500);
+    form->addRow(i18n("Max project graph edges:"), m_maxGraphEdges);
+
+    // Create checkbox for compressing project graph
+    m_compressGraph = new QCheckBox(i18n("Compress project graph information"), this);
+    form->addRow(m_compressGraph);
+
+    // Create checkbox for including file contents
+    m_includeFileContents = new QCheckBox(i18n("Include file contents in project graph"), this);
+    form->addRow(m_includeFileContents);
+
+    // Create spin box for maximum file content length
+    m_maxFileContentLength = new QSpinBox(this);
+    m_maxFileContentLength->setRange(100, 5000);
+    m_maxFileContentLength->setSuffix(i18n(" chars"));
+    form->addRow(i18n("Max file content length:"), m_maxFileContentLength);
+
+    // Create checkbox for compressing editor context
+    m_compressEditorContext = new QCheckBox(i18n("Compress editor context"), this);
+    form->addRow(m_compressEditorContext);
+
+    // Create spin box for maximum editor context length
+    m_maxEditorContextLength = new QSpinBox(this);
+    m_maxEditorContextLength->setRange(50, 500);
+    m_maxEditorContextLength->setSuffix(i18n(" chars"));
+    form->addRow(i18n("Max editor context length:"), m_maxEditorContextLength);
+
+    // Create checkbox for compressing project instructions
+    m_compressProjectInstructions = new QCheckBox(i18n("Compress project instructions (KATEAI.md)"), this);
+    form->addRow(m_compressProjectInstructions);
+
+    // Create spin box for maximum project instructions length
+    m_maxProjectInstructionsLength = new QSpinBox(this);
+    m_maxProjectInstructionsLength->setRange(500, 10000);
+    m_maxProjectInstructionsLength->setSuffix(i18n(" chars"));
+    form->addRow(i18n("Max project instructions length:"), m_maxProjectInstructionsLength);
+
+    // Create checkbox for compressing system prompt
+    m_compressSystemPrompt = new QCheckBox(i18n("Compress system prompt"), this);
+    form->addRow(m_compressSystemPrompt);
+
+    // Create spin box for maximum system prompt length
+    m_maxSystemPromptLength = new QSpinBox(this);
+    m_maxSystemPromptLength->setRange(256, 2048);
+    m_maxSystemPromptLength->setSuffix(i18n(" chars"));
+    form->addRow(i18n("Max system prompt length:"), m_maxSystemPromptLength);
+
+    // Create hint label with information about context compression
+    auto *compressionHint = new QLabel(
+        i18n("Context compression reduces token usage by limiting the amount of project information sent to the AI. "
+             "Higher compression levels provide less context but use fewer tokens. "
+             "Enable compression to improve performance with large projects."),
+        this);
+    compressionHint->setWordWrap(true);
+    compressionHint->setStyleSheet(u"font-size: 9pt; color: gray;"_s);
+    form->addRow(compressionHint);
+
     // Create hint label with information about API keys and security
     auto *hint = new QLabel(
         i18n("Keys are stored in your Kate config. Grok uses https://api.x.ai/v1, OpenAI https://api.openai.com/v1, "
@@ -134,6 +209,18 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     connect(m_projectInstructions, &QCheckBox::toggled, this, markChanged);
     connect(m_system, &QPlainTextEdit::textChanged, this, markChanged);
     connect(m_deny, &QPlainTextEdit::textChanged, this, markChanged);
+    connect(m_compressionLevel, &QSpinBox::valueChanged, this, markChanged);
+    connect(m_maxGraphNodes, &QSpinBox::valueChanged, this, markChanged);
+    connect(m_maxGraphEdges, &QSpinBox::valueChanged, this, markChanged);
+    connect(m_compressGraph, &QCheckBox::toggled, this, markChanged);
+    connect(m_includeFileContents, &QCheckBox::toggled, this, markChanged);
+    connect(m_maxFileContentLength, &QSpinBox::valueChanged, this, markChanged);
+    connect(m_compressEditorContext, &QCheckBox::toggled, this, markChanged);
+    connect(m_maxEditorContextLength, &QSpinBox::valueChanged, this, markChanged);
+    connect(m_compressProjectInstructions, &QCheckBox::toggled, this, markChanged);
+    connect(m_maxProjectInstructionsLength, &QSpinBox::valueChanged, this, markChanged);
+    connect(m_compressSystemPrompt, &QCheckBox::toggled, this, markChanged);
+    connect(m_maxSystemPromptLength, &QSpinBox::valueChanged, this, markChanged);
 
     // Load current settings into the configuration form
     reset();
@@ -172,6 +259,21 @@ void KateAiConfigPage::apply()
     s.loadProjectInstructions = m_projectInstructions->isChecked();
     s.extraSystemPrompt = m_system->toPlainText();
     s.extraDenyGlobs = m_deny->toPlainText().split(u'\n', Qt::SkipEmptyParts);
+    
+    // Apply context compression settings
+    s.contextCompressionLevel = m_compressionLevel->value();
+    s.maxGraphNodes = m_maxGraphNodes->value();
+    s.maxGraphEdges = m_maxGraphEdges->value();
+    s.compressProjectGraph = m_compressGraph->isChecked();
+    s.includeFileContents = m_includeFileContents->isChecked();
+    s.maxFileContentLength = m_maxFileContentLength->value();
+    s.compressEditorContext = m_compressEditorContext->isChecked();
+    s.maxEditorContextLength = m_maxEditorContextLength->value();
+    s.compressProjectInstructions = m_compressProjectInstructions->isChecked();
+    s.maxProjectInstructionsLength = m_maxProjectInstructionsLength->value();
+    s.compressSystemPrompt = m_compressSystemPrompt->isChecked();
+    s.maxSystemPromptLength = m_maxSystemPromptLength->value();
+    
     m_plugin->setSettings(s);
 }
 
@@ -193,6 +295,20 @@ void KateAiConfigPage::reset()
     m_projectInstructions->setChecked(s.loadProjectInstructions);
     m_system->setPlainText(s.extraSystemPrompt);
     m_deny->setPlainText(s.extraDenyGlobs.join(u'\n'));
+    
+    // Load context compression settings
+    m_compressionLevel->setValue(s.contextCompressionLevel);
+    m_maxGraphNodes->setValue(s.maxGraphNodes);
+    m_maxGraphEdges->setValue(s.maxGraphEdges);
+    m_compressGraph->setChecked(s.compressProjectGraph);
+    m_includeFileContents->setChecked(s.includeFileContents);
+    m_maxFileContentLength->setValue(s.maxFileContentLength);
+    m_compressEditorContext->setChecked(s.compressEditorContext);
+    m_maxEditorContextLength->setValue(s.maxEditorContextLength);
+    m_compressProjectInstructions->setChecked(s.compressProjectInstructions);
+    m_maxProjectInstructionsLength->setValue(s.maxProjectInstructionsLength);
+    m_compressSystemPrompt->setChecked(s.compressSystemPrompt);
+    m_maxSystemPromptLength->setValue(s.maxSystemPromptLength);
 }
 
 void KateAiConfigPage::defaults()

@@ -47,6 +47,18 @@ private:
     QCheckBox *m_projectInstructions = nullptr;
     QPlainTextEdit *m_system = nullptr;
     QPlainTextEdit *m_deny = nullptr;
+    QSpinBox *m_compressionLevel = nullptr;
+    QSpinBox *m_maxGraphNodes = nullptr;
+    QSpinBox *m_maxGraphEdges = nullptr;
+    QCheckBox *m_compressGraph = nullptr;
+    QCheckBox *m_includeFileContents = nullptr;
+    QSpinBox *m_maxFileContentLength = nullptr;
+    QCheckBox *m_compressEditorContext = nullptr;
+    QSpinBox *m_maxEditorContextLength = nullptr;
+    QCheckBox *m_compressProjectInstructions = nullptr;
+    QSpinBox *m_maxProjectInstructionsLength = nullptr;
+    QCheckBox *m_compressSystemPrompt = nullptr;
+    QSpinBox *m_maxSystemPromptLength = nullptr;
 };
 
 } // namespace KateAi

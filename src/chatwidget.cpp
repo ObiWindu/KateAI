@@ -75,11 +75,20 @@ ChatWidget::ChatWidget(QWidget *parent)
     m_mode->addItem(i18n("Plan"), true);
     m_mode->setToolTip(i18n("Plan mode only gives the AI read-only project tools."));
 
+    m_thinking = new QPushButton(this);
+    m_thinking->setIcon(QIcon::fromTheme(u"view-refresh"_s));
+    m_thinking->setToolTip(i18n("Enable/disable thinking mode"));
+    m_thinking->setCheckable(true);
+    m_thinking->setChecked(true);
+    m_thinking->setFixedSize(38, 38);
+    m_thinking->setStyleSheet(u"QPushButton { background-color: #4a5568; border-radius: 19px; } QPushButton:checked { background-color: #48bb78; }"_s);
+
     toolbar->addWidget(m_provider, 1);
     toolbar->addWidget(m_model, 2);
     toolbar->addWidget(m_permission, 1);
     toolbar->addWidget(m_sandbox, 1);
     toolbar->addWidget(m_mode);
+    toolbar->addWidget(m_thinking);
     toolbar->addWidget(m_newChat);
     toolbar->addWidget(m_configure);
     root->addLayout(toolbar);
@@ -177,6 +186,11 @@ ChatWidget::ChatWidget(QWidget *parent)
         m_agent.setSettings(m_settings);
         Q_EMIT settingsChanged(m_settings);
     });
+    connect(m_thinking, &QPushButton::toggled, this, [this](bool checked) {
+        m_settings.thinkingMode = checked;
+        m_agent.setSettings(m_settings);
+        Q_EMIT settingsChanged(m_settings);
+    });
 
     connect(&m_agent, &AgentLoop::userMessage, this, [this](const QString &text) {
         freezeStreaming();
@@ -254,6 +268,7 @@ void ChatWidget::setSettings(const Settings &settings)
     if (modeIndex >= 0) {
         m_mode->setCurrentIndex(modeIndex);
     }
+    m_thinking->setChecked(settings.thinkingMode);
     m_updatingCombos = false;
     refreshProviders();
     for (Provider provider : {Provider::Grok, Provider::OpenAI, Provider::OpenRouter}) {

@@ -552,6 +552,7 @@ src/kateai_autogen/timestamp: src/kateai_autogen/moc_predefs.h \
   /usr/include/qt6/QtCore/qversiontagging.h \
   /usr/include/qt6/QtCore/qxptype_traits.h \
   /usr/include/qt6/QtCore/qyieldcpu.h \
+  /usr/include/qt6/QtGui/QIcon \
   /usr/include/qt6/QtGui/QTransform \
   /usr/include/qt6/QtGui/QWidgetList \
   /usr/include/qt6/QtGui/qabstracttextdocumentlayout.h \
@@ -755,6 +756,8 @@ src/kateai_autogen/timestamp: src/kateai_autogen/moc_predefs.h \
 /usr/include/qt6/QtGui/qaction.h:
 
 /usr/include/qt6/QtGui/QTransform:
+
+/usr/include/qt6/QtGui/QIcon:
 
 /usr/include/qt6/QtCore/qyieldcpu.h:
 

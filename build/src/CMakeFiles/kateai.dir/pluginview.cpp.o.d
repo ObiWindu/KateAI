@@ -437,7 +437,7 @@ src/CMakeFiles/kateai.dir/pluginview.cpp.o: \
  /usr/include/qt6/QtWidgets/qframe.h /usr/include/qt6/QtGui/qtextcursor.h \
  /usr/include/qt6/QtGui/qtextdocument.h \
  /usr/include/qt6/QtGui/qtextformat.h /usr/include/qt6/QtGui/qpen.h \
- /usr/include/qt6/QtGui/qtextoption.h \
+ /usr/include/qt6/QtGui/qtextoption.h /usr/include/qt6/QtGui/QIcon \
  /home/macewindu/ai-dev/KateAI/src/configpage.h \
  /usr/include/KF6/KTextEditor/KTextEditor/ConfigPage \
  /usr/include/KF6/KTextEditor/ktexteditor/configpage.h \
@@ -497,8 +497,8 @@ src/CMakeFiles/kateai.dir/pluginview.cpp.o: \
  /usr/include/KF6/KSyntaxHighlighting/KSyntaxHighlighting/theme.h \
  /usr/include/KF6/KSyntaxHighlighting/KSyntaxHighlighting/ksyntaxhighlighting_export.h \
  /usr/include/KF6/KSyntaxHighlighting/ksyntaxhighlighting_version.h \
- /usr/include/qt6/QtGui/QColor /usr/include/qt6/QtGui/QIcon \
- /usr/include/qt6/QtCore/QTypeInfo /usr/include/qt6/QtCore/qobjectdefs.h \
+ /usr/include/qt6/QtGui/QColor /usr/include/qt6/QtCore/QTypeInfo \
+ /usr/include/qt6/QtCore/qobjectdefs.h \
  /usr/include/KF6/KTextEditor/ktexteditor/linerange.h \
  /usr/include/KF6/KTextEditor/ktexteditor/range.h \
  /usr/include/KF6/KParts/KParts/ReadWritePart \

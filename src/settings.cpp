@@ -30,8 +30,21 @@ Settings SettingsStore::load()
     s.bashTimeoutMs = g.readEntry(u"BashTimeoutMs"_s, 60000);
     s.planMode = g.readEntry(u"PlanMode"_s, false);
     s.loadProjectInstructions = g.readEntry(u"LoadProjectInstructions"_s, true);
+    s.thinkingMode = g.readEntry(u"ThinkingMode"_s, true);
     s.extraSystemPrompt = g.readEntry(u"ExtraSystemPrompt"_s, QString());
     s.extraDenyGlobs = g.readEntry(u"ExtraDenyGlobs"_s, QStringList());
+    s.contextCompressionLevel = g.readEntry(u"ContextCompressionLevel"_s, 1);
+    s.maxGraphNodes = g.readEntry(u"MaxGraphNodes"_s, 50);
+    s.maxGraphEdges = g.readEntry(u"MaxGraphEdges"_s, 100);
+    s.compressProjectGraph = g.readEntry(u"CompressProjectGraph"_s, true);
+    s.includeFileContents = g.readEntry(u"IncludeFileContents"_s, true);
+    s.maxFileContentLength = g.readEntry(u"MaxFileContentLength"_s, 500);
+    s.compressEditorContext = g.readEntry(u"CompressEditorContext"_s, true);
+    s.maxEditorContextLength = g.readEntry(u"MaxEditorContextLength"_s, 200);
+    s.compressProjectInstructions = g.readEntry(u"CompressProjectInstructions"_s, true);
+    s.maxProjectInstructionsLength = g.readEntry(u"MaxProjectInstructionsLength"_s, 2048);
+    s.compressSystemPrompt = g.readEntry(u"CompressSystemPrompt"_s, true);
+    s.maxSystemPromptLength = g.readEntry(u"MaxSystemPromptLength"_s, 1024);
     if (s.maxIterations < 1) {
         s.maxIterations = 1;
     }
@@ -57,8 +70,24 @@ void SettingsStore::save(const Settings &settings)
     g.writeEntry(u"BashTimeoutMs"_s, settings.bashTimeoutMs);
     g.writeEntry(u"PlanMode"_s, settings.planMode);
     g.writeEntry(u"LoadProjectInstructions"_s, settings.loadProjectInstructions);
+    g.writeEntry(u"ThinkingMode"_s, settings.thinkingMode);
     g.writeEntry(u"ExtraSystemPrompt"_s, settings.extraSystemPrompt);
     g.writeEntry(u"ExtraDenyGlobs"_s, settings.extraDenyGlobs);
+    
+    // Save context compression settings
+    g.writeEntry(u"ContextCompressionLevel"_s, settings.contextCompressionLevel);
+    g.writeEntry(u"MaxGraphNodes"_s, settings.maxGraphNodes);
+    g.writeEntry(u"MaxGraphEdges"_s, settings.maxGraphEdges);
+    g.writeEntry(u"CompressProjectGraph"_s, settings.compressProjectGraph);
+    g.writeEntry(u"IncludeFileContents"_s, settings.includeFileContents);
+    g.writeEntry(u"MaxFileContentLength"_s, settings.maxFileContentLength);
+    g.writeEntry(u"CompressEditorContext"_s, settings.compressEditorContext);
+    g.writeEntry(u"MaxEditorContextLength"_s, settings.maxEditorContextLength);
+    g.writeEntry(u"CompressProjectInstructions"_s, settings.compressProjectInstructions);
+    g.writeEntry(u"MaxProjectInstructionsLength"_s, settings.maxProjectInstructionsLength);
+    g.writeEntry(u"CompressSystemPrompt"_s, settings.compressSystemPrompt);
+    g.writeEntry(u"MaxSystemPromptLength"_s, settings.maxSystemPromptLength);
+    
     g.sync();
 }
 

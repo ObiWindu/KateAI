@@ -425,7 +425,7 @@ src/CMakeFiles/kateai.dir/chatwidget.cpp.o: \
  /usr/include/qt6/QtWidgets/qframe.h /usr/include/qt6/QtGui/qtextcursor.h \
  /usr/include/qt6/QtGui/qtextdocument.h \
  /usr/include/qt6/QtGui/qtextformat.h /usr/include/qt6/QtGui/qpen.h \
- /usr/include/qt6/QtGui/qtextoption.h \
+ /usr/include/qt6/QtGui/qtextoption.h /usr/include/qt6/QtGui/QIcon \
  /home/macewindu/ai-dev/KateAI/src/permissionbar.h \
  /home/macewindu/ai-dev/KateAI/src/promptedit.h \
  /usr/include/qt6/QtWidgets/QPlainTextEdit \

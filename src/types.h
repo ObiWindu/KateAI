@@ -93,8 +93,21 @@ struct Settings {
     int bashTimeoutMs = 60000;
     bool planMode = false;
     bool loadProjectInstructions = true;
+    bool thinkingMode = true;
     QString extraSystemPrompt;
     QStringList extraDenyGlobs;
+    int contextCompressionLevel = 1; // 0=full, 1=summary, 2=minimal, 3=ultra-minimal
+    int maxGraphNodes = 50; // Maximum number of nodes to include in project graph
+    int maxGraphEdges = 100; // Maximum number of edges to include in project graph
+    bool compressProjectGraph = true; // Whether to compress project graph information
+    bool includeFileContents = true; // Whether to include file content in project graph
+    int maxFileContentLength = 500; // Maximum characters per file content preview
+    bool compressEditorContext = true; // Whether to compress editor context
+    int maxEditorContextLength = 200; // Maximum characters for editor context
+    bool compressProjectInstructions = true; // Whether to compress project instructions
+    int maxProjectInstructionsLength = 2048; // Maximum characters for project instructions
+    bool compressSystemPrompt = true; // Whether to compress system prompt
+    int maxSystemPromptLength = 1024; // Maximum characters for system prompt
 };
 
 QString providerId(Provider provider);
@@ -116,5 +129,6 @@ QString modelFor(const Settings &settings);
 
 QJsonArray toolDefinitions(bool readOnlyOnly = false);
 QString defaultSystemPrompt(const QString &workspace);
+QString compressText(const QString &text, int maxLength, bool enabled);
 
 } // namespace KateAi
