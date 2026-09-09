@@ -26,7 +26,11 @@ Settings SettingsStore::load()
     s.openrouterModel = g.readEntry(u"OpenRouterModel"_s, u"x-ai/grok-4"_s);
     s.permissionMode = permissionModeFromId(g.readEntry(u"PermissionMode"_s, permissionModeId(PermissionMode::Ask)));
     s.sandbox = sandboxProfileFromId(g.readEntry(u"Sandbox"_s, sandboxProfileId(SandboxProfile::Workspace)));
-    s.maxIterations = g.readEntry(u"MaxIterations"_s, 20);
+    const int legacyMaxIterations = g.readEntry(u"MaxIterations"_s, 20);
+    s.maxModelRequests = g.readEntry(u"MaxModelRequests"_s, 40);
+    s.maxToolCalls = g.readEntry(u"MaxToolCalls"_s, legacyMaxIterations);
+    s.requestsPerMinute = g.readEntry(u"RequestsPerMinute"_s, 15);
+    s.maxIterations = legacyMaxIterations;
     s.bashTimeoutMs = g.readEntry(u"BashTimeoutMs"_s, 60000);
     s.planMode = g.readEntry(u"PlanMode"_s, false);
     s.loadProjectInstructions = g.readEntry(u"LoadProjectInstructions"_s, true);
@@ -45,9 +49,20 @@ Settings SettingsStore::load()
     s.maxProjectInstructionsLength = g.readEntry(u"MaxProjectInstructionsLength"_s, 2048);
     s.compressSystemPrompt = g.readEntry(u"CompressSystemPrompt"_s, true);
     s.maxSystemPromptLength = g.readEntry(u"MaxSystemPromptLength"_s, 1024);
-    if (s.maxIterations < 1) {
-        s.maxIterations = 1;
+    if (s.maxModelRequests < 1) {
+        s.maxModelRequests = 1;
     }
+    if (s.maxToolCalls < 1) {
+        s.maxToolCalls = 1;
+    }
+    if (s.requestsPerMinute < 1) {
+        s.requestsPerMinute = 1;
+    }
+    if (s.requestsPerMinute > 60) {
+        s.requestsPerMinute = 60;
+    }
+    // Keep the legacy field coherent for older callers.
+    s.maxIterations = s.maxToolCalls;
     if (s.bashTimeoutMs < 1000) {
         s.bashTimeoutMs = 1000;
     }
@@ -66,7 +81,11 @@ void SettingsStore::save(const Settings &settings)
     g.writeEntry(u"OpenRouterModel"_s, settings.openrouterModel);
     g.writeEntry(u"PermissionMode"_s, permissionModeId(settings.permissionMode));
     g.writeEntry(u"Sandbox"_s, sandboxProfileId(settings.sandbox));
-    g.writeEntry(u"MaxIterations"_s, settings.maxIterations);
+    g.writeEntry(u"MaxModelRequests"_s, settings.maxModelRequests);
+    g.writeEntry(u"MaxToolCalls"_s, settings.maxToolCalls);
+    g.writeEntry(u"RequestsPerMinute"_s, settings.requestsPerMinute);
+    // Preserve the old key for existing versions/UI.
+    g.writeEntry(u"MaxIterations"_s, settings.maxToolCalls);
     g.writeEntry(u"BashTimeoutMs"_s, settings.bashTimeoutMs);
     g.writeEntry(u"PlanMode"_s, settings.planMode);
     g.writeEntry(u"LoadProjectInstructions"_s, settings.loadProjectInstructions);

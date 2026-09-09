@@ -390,6 +390,7 @@ src/kateai_autogen/timestamp: src/kateai_autogen/moc_predefs.h \
   /usr/include/qt6/QtCore/QSizeF \
   /usr/include/qt6/QtCore/QString \
   /usr/include/qt6/QtCore/QStringList \
+  /usr/include/qt6/QtCore/QTimer \
   /usr/include/qt6/QtCore/QUrl \
   /usr/include/qt6/QtCore/QVariant \
   /usr/include/qt6/QtCore/q17memory.h \
@@ -533,6 +534,7 @@ src/kateai_autogen/timestamp: src/kateai_autogen/moc_predefs.h \
   /usr/include/qt6/QtCore/qtenvironmentvariables.h \
   /usr/include/qt6/QtCore/qtextstream.h \
   /usr/include/qt6/QtCore/qtformat_impl.h \
+  /usr/include/qt6/QtCore/qtimer.h \
   /usr/include/qt6/QtCore/qtimezone.h \
   /usr/include/qt6/QtCore/qtmetamacros.h \
   /usr/include/qt6/QtCore/qtnoop.h \
@@ -769,6 +771,10 @@ src/kateai_autogen/timestamp: src/kateai_autogen/moc_predefs.h \
 
 /usr/include/qt6/QtCore/qurl.h:
 
+/usr/include/qt6/QtCore/qtversionchecks.h:
+
+/usr/include/qt6/QtCore/qtversion.h:
+
 /usr/include/c++/16/bits/streambuf_iterator.h:
 
 /usr/include/c++/16/bits/stl_vector.h:
@@ -970,6 +976,8 @@ src/kateai_autogen/moc_predefs.h:
 /usr/include/c++/16/bits/alloc_traits.h:
 
 /usr/include/c++/16/bits/algorithmfwd.h:
+
+/usr/include/qt6/QtCore/QTimer:
 
 /usr/include/c++/16/bits/stl_list.h:
 
@@ -1929,6 +1937,8 @@ src/kateai_autogen/moc_predefs.h:
 
 /usr/include/qt6/QtCore/qtextstream.h:
 
+/usr/include/qt6/QtCore/qtimer.h:
+
 /usr/include/c++/16/bits/nested_exception.h:
 
 /usr/include/qt6/QtCore/qtpreprocessorsupport.h:
@@ -1942,7 +1952,3 @@ src/kateai_autogen/moc_predefs.h:
 /usr/include/qt6/QtCore/qttranslation.h:
 
 /usr/include/qt6/QtCore/qttypetraits.h:
-
-/usr/include/qt6/QtCore/qtversion.h:
-
-/usr/include/qt6/QtCore/qtversionchecks.h:

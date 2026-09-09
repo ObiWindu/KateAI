@@ -8,8 +8,12 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QDebug>
+#include <QDateTime>
+#include <utility>
 #include <algorithm>
 #include <QMap>
+#include <QQueue>
+#include <limits>
 
 using namespace Qt::Literals::StringLiterals;
 
@@ -21,6 +25,9 @@ AgentLoop::AgentLoop(QObject *parent)
 {
     // Initialize the project graph for understanding and tracking the project
     m_projectGraph = std::make_unique<ProjectGraph>();
+
+    m_nextModelTimer.setSingleShot(true);
+    connect(&m_nextModelTimer, &QTimer::timeout, this, &AgentLoop::sendToModel);
 
     connect(&m_client, &LlmClient::textDelta, this, [this](const QString &delta) {
         m_currentAssistant += delta;
@@ -131,6 +138,16 @@ QList<GraphEdge*> AgentLoop::getProjectEdges() const
 QString AgentLoop::systemPrompt() const
 {
     QString prompt = defaultSystemPrompt(m_workspace);
+    prompt += u"\n\nAgent execution protocol:\n"_s
+              u"1. Understand the requested outcome and inspect the relevant project before editing.\n"_s
+              u"2. Work incrementally: make the smallest coherent change, then observe the result before choosing another action.\n"_s
+              u"3. Never assume an edit worked merely because the tool returned; use the tool output as evidence.\n"_s
+              u"4. After any mutation, verify the affected file or behavior with a focused read, test, build, lint, or equivalent check.\n"_s
+              u"5. When verification fails, diagnose the actual failure and make a targeted repair; do not repeat the same failing action unchanged.\n"_s
+              u"6. Do not repeat an identical tool action while the project state is unchanged. If an action has already produced the needed observation, use that observation.\n"_s
+              u"7. Prefer one purposeful tool step over speculative exploration. Avoid reading the same large file repeatedly when a focused range or search is sufficient.\n"_s
+              u"8. Treat permission denials, sandbox failures, and tool errors as real constraints. Choose a safe alternative rather than looping.\n"_s
+              u"9. Continue until the user's task is actually complete and verified, then give a concise summary of changes and verification performed.\n"_s;
     if (!m_settings.extraSystemPrompt.trimmed().isEmpty() && m_settings.compressSystemPrompt) {
         // Apply compression to extra system prompt if enabled
         prompt += u"\n\n"_s + compressText(m_settings.extraSystemPrompt.trimmed(), m_settings.maxSystemPromptLength, true);
@@ -254,38 +271,37 @@ QString AgentLoop::systemPrompt() const
 
 void AgentLoop::resetConversation()
 {
-    // Stop any ongoing AI interaction and clear all conversation state
     abort();
-    
-    // Clear the conversation history to start fresh
     m_messages.clear();
-    
-    // Revoke any active permission sessions for security
     m_policy.revokeSession();
-    
-    // Reset iteration counter to track tool usage
-    m_iterations = 0;
+    m_modelRequests = 0;
+    m_toolCalls = 0;
+    m_stateEpoch = 0;
+    m_actionSignatures.clear();
+    m_changedPaths.clear();
+    m_changesNeedVerification = false;
+    m_verificationAttempted = false;
+    m_verificationPromptCount = 0;
+    m_changedPaths.clear();
+    m_changesNeedVerification = false;
+    m_verificationAttempted = false;
+    m_verificationPromptCount = 0;
 }
 
 void AgentLoop::abort()
 {
-    // Check if there was an active AI turn that needs to be cleaned up
     const bool hadActiveTurn = m_busy || m_client.isBusy() || !m_queue.isEmpty() || !m_pendingResults.isEmpty()
-        || !m_waitingCall.name.isEmpty();
-    
-    // Cancel any ongoing AI operations
+        || !m_waitingCall.name.isEmpty() || m_nextModelTimer.isActive();
+
+    m_nextModelTimer.stop();
     m_client.abort();
-    
-    // Clear all pending tool calls and results
     m_queue.clear();
     m_pendingResults.clear();
-    
-    // Reset the agent state
-    m_busy = false;
     m_waitingCall = {};
     m_waitingRequest = {};
-    
-    // If there was an active turn, notify the UI that it was stopped
+    m_busy = false;
+    m_state = State::Idle;
+
     if (hadActiveTurn) {
         Q_EMIT statusChanged(u"Stopped"_s);
         Q_EMIT turnFinished();
@@ -294,117 +310,268 @@ void AgentLoop::abort()
 
 void AgentLoop::start(const QString &userText)
 {
-    // If already processing a request, ignore new ones
     if (m_busy) {
         return;
     }
-    
-    // Ensure we have an active workspace before proceeding
     if (m_workspace.isEmpty()) {
         Q_EMIT failed(u"No workspace is open."_s);
         return;
     }
-    
-    // Initialize tools if not already set up
     if (!m_tools) {
         setWorkspace(m_workspace);
     }
 
-    // Reset conversation state for new interaction
     m_busy = true;
-    m_iterations = 0;
+    m_state = State::WaitingForNextModel;
+    m_modelRequests = 0;
+    m_toolCalls = 0;
+    m_stateEpoch = 0;
     m_queue.clear();
     m_pendingResults.clear();
+    m_waitingCall = {};
+    m_waitingRequest = {};
     m_currentAssistant.clear();
+    m_actionSignatures.clear();
 
-    // Initialize conversation with system prompt if this is the first message
     if (m_messages.isEmpty()) {
         ChatMessage system;
         system.role = ChatMessage::Role::System;
         system.content = systemPrompt();
         m_messages.append(system);
     } else if (m_messages.first().role == ChatMessage::Role::System) {
-        // Workspace, selection, and safety settings can change between turns.
-        // Keep the one system message current without discarding the chat history.
         m_messages.first().content = systemPrompt();
     }
 
-    // Add user message to conversation and notify UI
     ChatMessage user;
     user.role = ChatMessage::Role::User;
     user.content = userText;
     m_messages.append(user);
     Q_EMIT userMessage(userText);
-    sendToModel();
+
+    scheduleNextModelStep();
+}
+
+bool AgentLoop::canStartModelRequest(QString *error) const
+{
+    if (!m_busy) {
+        if (error) *error = u"The agent is not running."_s;
+        return false;
+    }
+    if (m_state != State::WaitingForNextModel) {
+        if (error) *error = u"The agent is not ready for another model request."_s;
+        return false;
+    }
+    if (m_client.isBusy()) {
+        if (error) *error = u"A model request is already in progress."_s;
+        return false;
+    }
+    if (m_modelRequests >= qMax(1, m_settings.maxModelRequests)) {
+        if (error) {
+            *error = u"Model-request budget exhausted (%1 requests)."_s.arg(m_settings.maxModelRequests);
+        }
+        return false;
+    }
+    return true;
+}
+
+void AgentLoop::scheduleNextModelStep()
+{
+    if (!m_busy) {
+        return;
+    }
+
+    QString error;
+    if (!canStartModelRequest(&error)) {
+        finishWithFailure(error);
+        return;
+    }
+
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    const qint64 windowMs = 60'000;
+    const int rpm = qBound(1, m_settings.requestsPerMinute, 60);
+    while (!m_modelRequestTimes.isEmpty() && now - m_modelRequestTimes.head() >= windowMs) {
+        m_modelRequestTimes.dequeue();
+    }
+
+    qint64 delay = 0;
+    if (m_modelRequestTimes.size() >= rpm) {
+        delay = qMax<qint64>(1, windowMs - (now - m_modelRequestTimes.head()) + 25);
+    }
+
+    m_state = State::WaitingForNextModel;
+    if (delay == 0) {
+        QMetaObject::invokeMethod(this, &AgentLoop::sendToModel, Qt::QueuedConnection);
+        return;
+    }
+
+    Q_EMIT statusChanged(u"Rate limit pacing: next model step in %1 s…"_s.arg((delay + 999) / 1000));
+    m_nextModelTimer.stop();
+    m_nextModelTimer.start(static_cast<int>(qMin<qint64>(delay, std::numeric_limits<int>::max())));
 }
 
 void AgentLoop::sendToModel()
 {
-    // Increment the iteration counter to track tool usage
-    ++m_iterations;
-    
-    // Check if we've exceeded the maximum allowed iterations
-    if (m_iterations > m_settings.maxIterations) {
-        m_busy = false;
-        Q_EMIT failed(u"Stopped after %1 tool iterations."_s.arg(m_settings.maxIterations));
-        Q_EMIT turnFinished();
+    if (!m_busy) {
         return;
     }
-    
-    // Clear any previous assistant response
-    m_currentAssistant.clear();
-    
-    // Notify UI that we're thinking and waiting for AI response
-    if (m_settings.thinkingMode) {
-        Q_EMIT statusChanged(u"Thinking…"_s);
+
+    QString error;
+    if (!canStartModelRequest(&error)) {
+        finishWithFailure(error);
+        return;
     }
-    
-    // Send the conversation to the LLM client for completion
+
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    const qint64 windowMs = 60'000;
+    const int rpm = qBound(1, m_settings.requestsPerMinute, 60);
+    while (!m_modelRequestTimes.isEmpty() && now - m_modelRequestTimes.head() >= windowMs) {
+        m_modelRequestTimes.dequeue();
+    }
+    if (m_modelRequestTimes.size() >= rpm) {
+        scheduleNextModelStep();
+        return;
+    }
+
+    ++m_modelRequests;
+    m_modelRequestTimes.enqueue(now);
+    m_currentAssistant.clear();
+    m_state = State::WaitingForModel;
+
+    if (m_settings.thinkingMode) {
+        Q_EMIT statusChanged(u"Thinking… (model step %1)"_s.arg(m_modelRequests));
+    }
+
     m_client.complete(m_messages);
 }
 
 QList<ToolCall> AgentLoop::bundleSimilarTools(const QList<ToolCall> &calls)
 {
-    // Return empty list if no calls to process
-    if (calls.isEmpty()) {
-        return {};
-    }
-
-    // Group tool calls by name for potential batching optimization
-    QHash<QString, QList<ToolCall>> grouped;
-    for (const ToolCall &call : calls) {
-        grouped[call.name].append(call);
-    }
-
-    // For now, return all calls as-is since we need to maintain order
-    // In a more advanced implementation, we could batch similar calls
-    // into a single request if the LLM supports it
+    // Keep provider order. Tool calls are executed as one model step so that
+    // all observations are returned together in the next model request.
     return calls;
+}
+
+QString AgentLoop::actionSignature(const ToolCall &call) const
+{
+    const QByteArray args = call.argumentsJson.isEmpty()
+        ? QJsonDocument(call.arguments).toJson(QJsonDocument::Compact)
+        : call.argumentsJson.toUtf8();
+    // The epoch changes after a successful mutation. Therefore repeating the
+    // same read after an actual edit is allowed, while a hot loop in an
+    // unchanged state is detected and reported to the model.
+    return QString::number(m_stateEpoch) + u"|"_s + call.name + u"|"_s + QString::fromUtf8(args);
+}
+
+bool AgentLoop::isMutationTool(const QString &toolName) const
+{
+    return toolName == u"write_file"_s || toolName == u"edit_file"_s;
+}
+
+bool AgentLoop::isVerificationTool(const QString &toolName) const
+{
+    return toolName == u"read_file"_s || toolName == u"grep"_s || toolName == u"bash"_s;
+}
+
+bool AgentLoop::isVerificationForChangedFiles(const ToolCall &call) const
+{
+    if (!m_changesNeedVerification) {
+        return false;
+    }
+    if (call.name == u"read_file"_s || call.name == u"write_file"_s || call.name == u"edit_file"_s) {
+        const QString path = call.arguments.value(u"path"_s).toString();
+        return !path.isEmpty() && m_changedPaths.contains(path);
+    }
+    // grep/bash can be a real verification when the command/search is not
+    // tied to a specific path; the model is explicitly instructed to use them
+    // for tests/builds/checks after changes.
+    return call.name == u"grep"_s || call.name == u"bash"_s;
+}
+
+QString AgentLoop::formatToolResult(const ToolCall &call, const ToolResult &result) const
+{
+    QString out;
+    out += u"TOOL: %1\n"_s.arg(call.name);
+    out += u"STATUS: %1\n"_s.arg(result.ok ? u"success"_s : u"failure"_s);
+
+    const QString path = call.arguments.value(u"path"_s).toString();
+    if (!path.isEmpty()) {
+        out += u"TARGET: %1\n"_s.arg(path);
+    }
+
+    out += u"OBSERVATION:\n"_s;
+    out += result.output.trimmed().isEmpty() ? u"(no output)"_s : result.output.trimmed();
+    out += u"\n"_s;
+
+    if (!result.ok) {
+        out += u"NEXT: Diagnose the reported failure; do not repeat the identical action blindly.\n"_s;
+    } else if (isMutationTool(call.name)) {
+        out += u"NEXT: The mutation succeeded. Verify the changed behavior/file before declaring the task complete.\n"_s;
+    } else if (isVerificationTool(call.name)) {
+        out += u"NEXT: Treat this output as evidence and choose the next necessary action; stop when the task is verified complete.\n"_s;
+    } else {
+        out += u"NEXT: Use this observation to choose the smallest next action; do not repeat unchanged exploration.\n"_s;
+    }
+    return out;
+}
+
+void AgentLoop::appendToolResult(const ToolCall &call, ToolResult result)
+{
+    result.toolCallId = call.id;
+    result.name = call.name;
+    result.output = formatToolResult(call, result);
+    m_pendingResults.append(result);
+    Q_EMIT toolFinished(result);
+
+    if (result.ok && isMutationTool(call.name)) {
+        ++m_stateEpoch;
+        const QString path = call.arguments.value(u"path"_s).toString();
+        if (!path.isEmpty()) {
+            m_changedPaths.insert(path);
+        }
+        m_changesNeedVerification = true;
+        m_verificationAttempted = false;
+    } else if (result.ok && isVerificationForChangedFiles(call)) {
+        m_verificationAttempted = true;
+    }
+}
+
+void AgentLoop::appendToolResultsToConversation()
+{
+    for (const ToolResult &result : std::as_const(m_pendingResults)) {
+        ChatMessage toolMsg;
+        toolMsg.role = ChatMessage::Role::Tool;
+        toolMsg.toolCallId = result.toolCallId;
+        toolMsg.name = result.name;
+        toolMsg.content = result.output;
+        m_messages.append(toolMsg);
+    }
+    m_pendingResults.clear();
 }
 
 void AgentLoop::onFailed(const QString &error)
 {
-    // Mark the agent as no longer busy and notify UI of the failure
-    m_busy = false;
-    Q_EMIT failed(error);
-    Q_EMIT turnFinished();
+    finishWithFailure(error);
 }
 
 void AgentLoop::onFinished(const QString &text, const QList<ToolCall> &toolCalls)
 {
-    // Create and populate the assistant's response message
+    if (!m_busy || m_state != State::WaitingForModel) {
+        return;
+    }
+
     ChatMessage assistant;
     assistant.role = ChatMessage::Role::Assistant;
     assistant.content = text;
-    
-    // If the AI used any tools, encode them for the conversation history
+
     if (!toolCalls.isEmpty()) {
         QJsonArray encoded;
         for (const ToolCall &call : toolCalls) {
             QJsonObject fn;
             fn.insert(u"name"_s, call.name);
-            fn.insert(u"arguments"_s, call.argumentsJson.isEmpty() ? QString::fromUtf8(QJsonDocument(call.arguments).toJson(QJsonDocument::Compact))
-                                                                  : call.argumentsJson);
+            fn.insert(u"arguments"_s, call.argumentsJson.isEmpty()
+                          ? QString::fromUtf8(QJsonDocument(call.arguments).toJson(QJsonDocument::Compact))
+                          : call.argumentsJson);
+
             QJsonObject obj;
             obj.insert(u"id"_s, call.id);
             obj.insert(u"type"_s, u"function"_s);
@@ -413,154 +580,212 @@ void AgentLoop::onFinished(const QString &text, const QList<ToolCall> &toolCalls
         }
         assistant.toolCalls = encoded;
     }
-    
-    // Add the assistant's response to the conversation history
+
     m_messages.append(assistant);
     Q_EMIT assistantFinished(text);
 
-    // If no tools were used, this turn is complete
+    // A coding agent should not stop immediately after a successful mutation
+    // without at least one verification attempt. One controller turn is
+    // allowed to force the model back into the inspect/test loop.
     if (toolCalls.isEmpty()) {
-        m_busy = false;
-        Q_EMIT statusChanged(QString());
-        Q_EMIT turnFinished();
+        if (m_changesNeedVerification && !m_verificationAttempted && m_verificationPromptCount < 1) {
+            requestVerificationTurn();
+            return;
+        }
+        finishTurn();
         return;
     }
 
-    // Bundle similar tool calls for optimization and process them
     m_queue = bundleSimilarTools(toolCalls);
+    m_pendingResults.clear();
+    m_state = State::ExecutingTools;
     processQueue();
+}
+
+void AgentLoop::finishWithFailure(const QString &error)
+{
+    m_nextModelTimer.stop();
+    m_client.abort();
+    m_busy = false;
+    m_state = State::Idle;
+    m_queue.clear();
+    m_pendingResults.clear();
+    m_waitingCall = {};
+    m_waitingRequest = {};
+    Q_EMIT failed(error);
+    Q_EMIT turnFinished();
+}
+
+void AgentLoop::requestVerificationTurn()
+{
+    ++m_verificationPromptCount;
+    ChatMessage controller;
+    controller.role = ChatMessage::Role::User;
+    controller.content = u"[KateAI agent controller] You made project changes but have not verified them yet. "
+                         u"Before giving the final answer, inspect the affected files and/or run the most relevant focused test, build, or check. "
+                         u"Only finish after using the verification result as evidence."_s;
+    m_messages.append(controller);
+    m_state = State::WaitingForNextModel;
+    scheduleNextModelStep();
+}
+
+void AgentLoop::finishTurn()
+{
+    m_nextModelTimer.stop();
+    m_busy = false;
+    m_state = State::Idle;
+    m_queue.clear();
+    m_pendingResults.clear();
+    m_waitingCall = {};
+    m_waitingRequest = {};
+    Q_EMIT statusChanged(QString());
+    Q_EMIT turnFinished();
 }
 
 void AgentLoop::processQueue()
 {
-    // If there are no more tool calls to execute, process any pending results
-    if (m_queue.isEmpty()) {
-        // Convert all pending tool results into chat messages for the conversation history
-        for (const ToolResult &result : m_pendingResults) {
-            ChatMessage toolMsg;
-            toolMsg.role = ChatMessage::Role::Tool;
-            toolMsg.toolCallId = result.toolCallId;
-            toolMsg.name = result.name;
-            toolMsg.content = result.output;
-            m_messages.append(toolMsg);
-        }
-        
-        // Clear the pending results since they've been processed
-        m_pendingResults.clear();
-        
-        // Send any new messages to the AI model for processing
-        sendToModel();
+    if (!m_busy) {
         return;
     }
 
-    // Get the next tool call from the queue and execute it
+    if (m_queue.isEmpty()) {
+        appendToolResultsToConversation();
+        m_state = State::WaitingForNextModel;
+        scheduleNextModelStep();
+        return;
+    }
+
     const ToolCall call = m_queue.takeFirst();
     executeOne(call);
 }
 
 void AgentLoop::executeOne(const ToolCall &call)
 {
-    // Check if sandbox and tools are properly initialized before proceeding
+    if (!m_busy) {
+        return;
+    }
+
+    if (m_toolCalls >= qMax(1, m_settings.maxToolCalls)) {
+        ToolResult result;
+        result.ok = false;
+        result.output = u"Tool-call budget exhausted (%1 calls). No further tool execution is permitted in this turn."_s.arg(m_settings.maxToolCalls);
+        appendToolResult(call, result);
+        while (!m_queue.isEmpty()) {
+            const ToolCall skipped = m_queue.takeFirst();
+            ToolResult skippedResult;
+            skippedResult.ok = false;
+            skippedResult.output = u"Skipped because the tool-call budget was exhausted."_s;
+            appendToolResult(skipped, skippedResult);
+        }
+        appendToolResultsToConversation();
+        finishWithFailure(u"Stopped after reaching the tool-call budget (%1)."_s.arg(m_settings.maxToolCalls));
+        return;
+    }
+
     if (!m_sandbox || !m_tools) {
         ToolResult result;
-        result.toolCallId = call.id;
-        result.name = call.name;
         result.ok = false;
-        result.output = u"Sandbox is not initialized."_s;
-        m_pendingResults.append(result);
-        Q_EMIT toolFinished(result);
+        result.output = u"Tool execution is unavailable because the sandbox is not initialized."_s;
+        appendToolResult(call, result);
         processQueue();
         return;
     }
 
-    // Tool definitions are advisory to a provider. Enforce plan mode locally
-    // as well, so malformed or injected tool calls cannot modify a project.
     if (m_settings.planMode && !m_policy.isReadTool(call.name)) {
         ToolResult result;
-        result.toolCallId = call.id;
-        result.name = call.name;
         result.ok = false;
-        result.output = u"Plan mode only permits read-only project tools."_s;
-        m_pendingResults.append(result);
-        Q_EMIT toolFinished(result);
+        result.output = u"Tool rejected: plan mode only permits read-only tools. Choose a read-only tool."_s;
+        appendToolResult(call, result);
         processQueue();
         return;
     }
 
-    // Prepare permission request for the tool call
+    const QString signature = actionSignature(call);
+    if (m_actionSignatures.contains(signature)) {
+        ToolResult result;
+        result.ok = false;
+        result.output = u"This exact tool action was already executed in the current project state. "
+                        u"Do not repeat it blindly; use the previous observation, change the action, or verify a different aspect of the task."_s;
+        appendToolResult(call, result);
+        processQueue();
+        return;
+    }
+    m_actionSignatures.insert(signature);
+
     const PermissionRequest request = m_tools->describe(call);
     QString reason;
     const auto verdict = m_policy.evaluate(call.name, call.arguments, *m_sandbox, &reason);
-    
-    // Handle different permission verdicts
+
     if (verdict == PermissionPolicy::Verdict::Deny) {
         ToolResult result;
-        result.toolCallId = call.id;
-        result.name = call.name;
         result.ok = false;
-        result.output = reason;
-        m_pendingResults.append(result);
-        Q_EMIT toolFinished(result);
+        result.output = u"Tool denied: "_s + reason;
+        appendToolResult(call, result);
         processQueue();
         return;
     }
+
     if (verdict == PermissionPolicy::Verdict::Ask) {
-        // Request user permission for this tool call
         m_waitingCall = call;
         m_waitingRequest = request;
+        m_state = State::WaitingForPermission;
         Q_EMIT statusChanged(u"Waiting for permission…"_s);
         Q_EMIT permissionNeeded(request);
         return;
     }
 
-    // If we get here, the tool call is approved - proceed with execution
+    ++m_toolCalls;
     Q_EMIT toolStarted(request);
-    Q_EMIT statusChanged(u"Running %1…"_s.arg(call.name));
+    Q_EMIT statusChanged(u"Running %1… (tool %2/%3)"_s.arg(call.name).arg(m_toolCalls).arg(m_settings.maxToolCalls));
     ToolResult result = m_tools->run(call);
-    result.toolCallId = call.id;
-    m_pendingResults.append(result);
-    Q_EMIT toolFinished(result);
+    appendToolResult(call, result);
     processQueue();
 }
 
 void AgentLoop::resolvePermission(PermissionDecision decision)
 {
-    // If there's no pending permission request, just return
-    if (m_waitingCall.name.isEmpty()) {
+    if (!m_busy || m_state != State::WaitingForPermission || m_waitingCall.name.isEmpty()) {
         return;
     }
-    
-    // Extract the pending tool call and request details
+
     const ToolCall call = m_waitingCall;
-    m_waitingCall = {};
     const PermissionRequest request = m_waitingRequest;
+    m_waitingCall = {};
     m_waitingRequest = {};
 
-    // Handle user rejection of the tool call
     if (decision == PermissionDecision::Deny) {
         ToolResult result;
         result.toolCallId = call.id;
         result.name = call.name;
         result.ok = false;
-        result.output = u"User denied this tool call."_s;
+        result.output = u"User denied this tool call. Continue the task without assuming the denied action happened."_s;
         m_pendingResults.append(result);
         Q_EMIT toolFinished(result);
+        m_state = State::ExecutingTools;
         processQueue();
         return;
     }
-    
-    // If user allows the tool call for this session, grant permission
+
     if (decision == PermissionDecision::AllowSession) {
         m_policy.grantSession(call.name);
     }
 
-    // Proceed with executing the approved tool call
+    if (m_toolCalls >= qMax(1, m_settings.maxToolCalls)) {
+        ToolResult result;
+        result.ok = false;
+        result.output = u"Tool-call budget exhausted before permission was resolved."_s;
+        appendToolResult(call, result);
+        m_state = State::ExecutingTools;
+        processQueue();
+        return;
+    }
+
+    ++m_toolCalls;
     Q_EMIT toolStarted(request);
-    Q_EMIT statusChanged(u"Running %1…"_s.arg(call.name));
+    Q_EMIT statusChanged(u"Running %1… (tool %2/%3)"_s.arg(call.name).arg(m_toolCalls).arg(m_settings.maxToolCalls));
     ToolResult result = m_tools->run(call);
-    result.toolCallId = call.id;
-    m_pendingResults.append(result);
-    Q_EMIT toolFinished(result);
+    appendToolResult(call, result);
+    m_state = State::ExecutingTools;
     processQueue();
 }
 

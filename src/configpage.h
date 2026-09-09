@@ -42,6 +42,8 @@ private:
     QComboBox *m_permission = nullptr;
     QComboBox *m_sandbox = nullptr;
     QSpinBox *m_maxIter = nullptr;
+    QSpinBox *m_maxModelRequests = nullptr;
+    QSpinBox *m_requestsPerMinute = nullptr;
     QSpinBox *m_timeout = nullptr;
     QCheckBox *m_planMode = nullptr;
     QCheckBox *m_projectInstructions = nullptr;

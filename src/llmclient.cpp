@@ -6,6 +6,8 @@
 #include <QNetworkReply>
 #include <QNetworkRequest>
 
+#include <algorithm>
+
 using namespace Qt::Literals::StringLiterals;
 
 namespace KateAi
@@ -14,8 +16,6 @@ namespace KateAi
 LlmClient::LlmClient(QObject *parent)
     : QObject(parent)
 {
-    // Initialize the LLM client with default settings
-    // The client will handle network requests to AI providers
 }
 
 LlmClient::~LlmClient()
@@ -25,37 +25,30 @@ LlmClient::~LlmClient()
 
 QJsonArray LlmClient::messagesToJson(const QList<ChatMessage> &messages)
 {
-    // Convert the conversation messages to JSON format for the LLM API
     QJsonArray out;
     for (const ChatMessage &msg : messages) {
         QJsonObject obj;
         switch (msg.role) {
         case ChatMessage::Role::System:
-            // System messages contain instructions and context for the AI
             obj.insert(u"role"_s, u"system"_s);
             obj.insert(u"content"_s, msg.content);
             break;
         case ChatMessage::Role::User:
-            // User messages contain the actual questions or prompts from the user
             obj.insert(u"role"_s, u"user"_s);
             obj.insert(u"content"_s, msg.content);
             break;
         case ChatMessage::Role::Assistant:
-            // Assistant messages contain the AI's responses and any tool calls it made
             obj.insert(u"role"_s, u"assistant"_s);
             obj.insert(u"content"_s, msg.content);
             if (!msg.toolCalls.isEmpty()) {
-                // Include tool calls if the AI used any tools
                 obj.insert(u"tool_calls"_s, msg.toolCalls);
             }
             break;
         case ChatMessage::Role::Tool:
-            // Tool messages contain the results of tool calls made by the AI
             obj.insert(u"role"_s, u"tool"_s);
             obj.insert(u"content"_s, msg.content);
             obj.insert(u"tool_call_id"_s, msg.toolCallId);
             if (!msg.name.isEmpty()) {
-                // Include the tool name for reference
                 obj.insert(u"name"_s, msg.name);
             }
             break;
@@ -63,6 +56,29 @@ QJsonArray LlmClient::messagesToJson(const QList<ChatMessage> &messages)
         out.append(obj);
     }
     return out;
+}
+
+QList<ToolCall> LlmClient::completedToolsFromAccumulator()
+{
+    QList<ToolCall> tools;
+    tools.reserve(m_toolAcc.size());
+    for (auto it = m_toolAcc.cbegin(); it != m_toolAcc.cend(); ++it) {
+        ToolCall tool = it.value();
+        if (tool.id.isEmpty()) {
+            tool.id = u"call_%1"_s.arg(it.key());
+        }
+        QJsonParseError parseError;
+        const QJsonDocument argsDoc = QJsonDocument::fromJson(tool.argumentsJson.toUtf8(), &parseError);
+        if (parseError.error == QJsonParseError::NoError && argsDoc.isObject()) {
+            tool.arguments = argsDoc.object();
+        }
+        tools.append(tool);
+    }
+    std::sort(tools.begin(), tools.end(), [](const ToolCall &a, const ToolCall &b) {
+        return a.id < b.id;
+    });
+    m_toolAcc.clear();
+    return tools;
 }
 
 CompletionChunk LlmClient::parseSseLine(const QByteArray &line, QHash<int, ToolCall> *acc)
@@ -78,6 +94,21 @@ CompletionChunk LlmClient::parseSseLine(const QByteArray &line, QHash<int, ToolC
     if (payload == "[DONE]") {
         chunk.finished = true;
         chunk.finishReason = u"stop"_s;
+        if (acc) {
+            for (auto it = acc->cbegin(); it != acc->cend(); ++it) {
+                ToolCall tool = it.value();
+                if (tool.id.isEmpty()) {
+                    tool.id = u"call_%1"_s.arg(it.key());
+                }
+                QJsonParseError parseError;
+                const QJsonDocument argsDoc = QJsonDocument::fromJson(tool.argumentsJson.toUtf8(), &parseError);
+                if (parseError.error == QJsonParseError::NoError && argsDoc.isObject()) {
+                    tool.arguments = argsDoc.object();
+                }
+                chunk.completedTools.append(tool);
+            }
+            acc->clear();
+        }
         return chunk;
     }
 
@@ -86,6 +117,7 @@ CompletionChunk LlmClient::parseSseLine(const QByteArray &line, QHash<int, ToolC
     if (err.error != QJsonParseError::NoError || !doc.isObject()) {
         return chunk;
     }
+
     const QJsonObject root = doc.object();
     if (root.contains(u"error"_s)) {
         const QJsonValue error = root.value(u"error"_s);
@@ -101,69 +133,89 @@ CompletionChunk LlmClient::parseSseLine(const QByteArray &line, QHash<int, ToolC
     if (choices.isEmpty()) {
         return chunk;
     }
+
     const QJsonObject choice = choices.at(0).toObject();
-    const QJsonObject delta = choice.contains(u"delta"_s) ? choice.value(u"delta"_s).toObject() : choice.value(u"message"_s).toObject();
+    const QJsonObject delta = choice.contains(u"delta"_s)
+        ? choice.value(u"delta"_s).toObject()
+        : choice.value(u"message"_s).toObject();
     chunk.contentDelta = delta.value(u"content"_s).toString();
     chunk.finishReason = choice.value(u"finish_reason"_s).toString();
 
-    const QJsonArray toolCalls = delta.value(u"tool_calls"_s).toArray();
-    for (const QJsonValue &value : toolCalls) {
-        const QJsonObject obj = value.toObject();
-        const int index = obj.value(u"index"_s).toInt();
-        ToolCall &tool = (*acc)[index];
-        if (obj.contains(u"id"_s) && !obj.value(u"id"_s).toString().isEmpty()) {
-            tool.id = obj.value(u"id"_s).toString();
-        }
-        const QJsonObject fn = obj.value(u"function"_s).toObject();
-        if (fn.contains(u"name"_s) && !fn.value(u"name"_s).toString().isEmpty()) {
-            tool.name = fn.value(u"name"_s).toString();
-        }
-        if (fn.contains(u"arguments"_s)) {
-            tool.argumentsJson += fn.value(u"arguments"_s).toString();
+    if (acc) {
+        const QJsonArray toolCalls = delta.value(u"tool_calls"_s).toArray();
+        for (const QJsonValue &value : toolCalls) {
+            const QJsonObject obj = value.toObject();
+            const int index = obj.value(u"index"_s).toInt();
+            ToolCall &tool = (*acc)[index];
+            if (obj.contains(u"id"_s) && !obj.value(u"id"_s).toString().isEmpty()) {
+                tool.id = obj.value(u"id"_s).toString();
+            }
+            const QJsonObject fn = obj.value(u"function"_s).toObject();
+            if (fn.contains(u"name"_s) && !fn.value(u"name"_s).toString().isEmpty()) {
+                tool.name = fn.value(u"name"_s).toString();
+            }
+            if (fn.contains(u"arguments"_s)) {
+                tool.argumentsJson += fn.value(u"arguments"_s).toString();
+            }
         }
     }
 
     if (!chunk.finishReason.isEmpty() && chunk.finishReason != u"null"_s) {
         chunk.finished = true;
-        for (auto it = acc->begin(); it != acc->end(); ++it) {
-            ToolCall tool = it.value();
-            if (tool.id.isEmpty()) {
-                tool.id = u"call_%1"_s.arg(it.key());
+        if (acc) {
+            for (auto it = acc->cbegin(); it != acc->cend(); ++it) {
+                ToolCall tool = it.value();
+                if (tool.id.isEmpty()) {
+                    tool.id = u"call_%1"_s.arg(it.key());
+                }
+                QJsonParseError parseError;
+                const QJsonDocument argsDoc = QJsonDocument::fromJson(tool.argumentsJson.toUtf8(), &parseError);
+                if (parseError.error == QJsonParseError::NoError && argsDoc.isObject()) {
+                    tool.arguments = argsDoc.object();
+                }
+                chunk.completedTools.append(tool);
             }
-            QJsonParseError parseError;
-            const QJsonDocument argsDoc = QJsonDocument::fromJson(tool.argumentsJson.toUtf8(), &parseError);
-            if (parseError.error == QJsonParseError::NoError && argsDoc.isObject()) {
-                tool.arguments = argsDoc.object();
-            }
-            chunk.completedTools.append(tool);
+            acc->clear();
         }
-        acc->clear();
     }
     return chunk;
 }
 
-void LlmClient::complete(const QList<ChatMessage> &messages)
+void LlmClient::resetCompletionState()
 {
-    // Clean up any previous network requests and reset state
-    abort();
     m_buffer.clear();
     m_text.clear();
     m_toolAcc.clear();
+    m_completedTools.clear();
+    m_completionError.clear();
     m_sawDone = false;
+    m_finishEmitted = false;
+    m_abortRequested = false;
+}
 
-    // Validate that we have the necessary configuration for the selected provider
+void LlmClient::complete(const QList<ChatMessage> &messages)
+{
+    // Starting a new completion while another one is alive is a programming
+    // error in the agent state machine. Never abort the active reply here.
+    if (m_reply) {
+        Q_EMIT failed(u"A model request is already in progress."_s);
+        return;
+    }
+
+    resetCompletionState();
+
     const QString key = apiKeyFor(m_settings).trimmed();
     if (key.isEmpty()) {
         Q_EMIT failed(u"No API key configured for %1."_s.arg(providerLabel(m_settings.provider)));
         return;
     }
+
     const QString model = modelFor(m_settings);
     if (model.isEmpty()) {
         Q_EMIT failed(u"No model selected."_s);
         return;
     }
 
-    // Build the JSON payload for the LLM API request
     QJsonObject body;
     body.insert(u"model"_s, model);
     body.insert(u"messages"_s, messagesToJson(messages));
@@ -172,18 +224,15 @@ void LlmClient::complete(const QList<ChatMessage> &messages)
     body.insert(u"stream"_s, true);
     body.insert(u"temperature"_s, 0.2);
 
-    // Create the HTTP request with appropriate headers for the selected provider
     QNetworkRequest request{QUrl(providerBaseUrl(m_settings.provider) + u"/chat/completions"_s)};
     request.setHeader(QNetworkRequest::ContentTypeHeader, u"application/json"_s);
     request.setRawHeader("Authorization", "Bearer " + key.toUtf8());
     request.setRawHeader("Accept", "text/event-stream");
     if (m_settings.provider == Provider::OpenRouter) {
-        // Add OpenRouter-specific headers for tracking and identification
         request.setRawHeader("HTTP-Referer", "https://kate-editor.org");
         request.setRawHeader("X-Title", "Kate AI");
     }
 
-    // Send the HTTP POST request and set up signal handlers for response processing
     m_reply = m_nam.post(request, QJsonDocument(body).toJson(QJsonDocument::Compact));
     connect(m_reply, &QNetworkReply::readyRead, this, &LlmClient::handleReadyRead);
     connect(m_reply, &QNetworkReply::finished, this, &LlmClient::handleFinished);
@@ -215,21 +264,33 @@ void LlmClient::fetchModels(Provider provider)
 
 void LlmClient::abort()
 {
-    if (!m_reply) {
+    QNetworkReply *reply = m_reply;
+    if (!reply) {
         return;
     }
-    m_reply->disconnect(this);
-    m_reply->abort();
-    m_reply->deleteLater();
+
+    // Clear our ownership first. Any queued QNetworkReply::finished signal will
+    // see a null m_reply and therefore cannot re-enter the agent lifecycle.
     m_reply = nullptr;
+    m_abortRequested = true;
+    reply->disconnect(this);
+    reply->abort();
+    reply->deleteLater();
+    resetCompletionState();
 }
 
 void LlmClient::reset()
 {
-    if (m_reply) {
-        m_reply->deleteLater();
-        m_reply = nullptr;
+    abort();
+}
+
+void LlmClient::emitCompletedOnce()
+{
+    if (m_finishEmitted) {
+        return;
     }
+    m_finishEmitted = true;
+    Q_EMIT finished(m_text, m_completedTools);
 }
 
 void LlmClient::handleModelsFinished(QNetworkReply *reply, Provider provider)
@@ -273,9 +334,10 @@ void LlmClient::handleModelsFinished(QNetworkReply *reply, Provider provider)
 
 void LlmClient::handleReadyRead()
 {
-    if (!m_reply) {
+    if (!m_reply || m_abortRequested) {
         return;
     }
+
     m_buffer.append(m_reply->readAll());
     while (true) {
         const int idx = m_buffer.indexOf('\n');
@@ -287,144 +349,150 @@ void LlmClient::handleReadyRead()
         if (line.trimmed().isEmpty()) {
             continue;
         }
+
         const CompletionChunk chunk = parseSseLine(line, &m_toolAcc);
         if (!chunk.error.isEmpty()) {
-            Q_EMIT failed(chunk.error);
-            abort();
+            m_completionError = chunk.error;
+            if (m_reply) {
+                // Do not emit failed() or call abort() from readyRead(). Keep
+                // lifecycle transitions inside handleFinished().
+                m_reply->abort();
+            }
             return;
         }
         if (!chunk.contentDelta.isEmpty()) {
             m_text += chunk.contentDelta;
             Q_EMIT textDelta(chunk.contentDelta);
         }
-        if (chunk.finished && !m_sawDone) {
+        if (!chunk.completedTools.isEmpty()) {
+            m_completedTools.append(chunk.completedTools);
+        }
+        if (chunk.finished) {
             m_sawDone = true;
-            Q_EMIT finished(m_text, chunk.completedTools);
         }
     }
 }
 
 void LlmClient::handleFinished()
 {
-    if (!m_reply) {
+    QNetworkReply *reply = m_reply;
+    if (!reply) {
         return;
     }
-    const QByteArray leftover = m_buffer + m_reply->readAll();
-    const QNetworkReply::NetworkError error = m_reply->error();
-    const QString errorString = m_reply->errorString();
-    const int status = m_reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-    m_reply->deleteLater();
+
+    // Detach the reply before emitting anything. AgentLoop may immediately
+    // schedule the next turn, and complete() must observe a fully idle client.
     m_reply = nullptr;
+    reply->disconnect(this);
 
-    if (m_sawDone) {
+    const QByteArray leftover = m_buffer + reply->readAll();
+    const QNetworkReply::NetworkError error = reply->error();
+    const QString errorString = reply->errorString();
+    const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    reply->deleteLater();
+
+    if (m_abortRequested) {
+        resetCompletionState();
         return;
     }
 
-    if (error != QNetworkReply::NoError && error != QNetworkReply::OperationCanceledError) {
-        QJsonParseError parseError;
-        const QJsonDocument doc = QJsonDocument::fromJson(leftover, &parseError);
-        QString message;
-        if (parseError.error == QJsonParseError::NoError && doc.isObject()) {
-            message = doc.object().value(u"error"_s).toObject().value(u"message"_s).toString();
-        }
-        if (message.isEmpty()) {
-            message = errorString;
-            if (!leftover.isEmpty()) {
-                message += u": "_s + QString::fromUtf8(leftover.left(500));
-            }
-        }
-        Q_EMIT failed(u"HTTP %1: %2"_s.arg(status).arg(message));
-        return;
-    }
-
-    if (error == QNetworkReply::OperationCanceledError) {
-        return;
-    }
-
-    // A final SSE event is allowed to arrive without a trailing newline.  It
-    // has not been handled by readyRead(), so consume it before considering a
-    // non-stream response. Keep m_text and m_toolAcc: earlier events may have
-    // already contributed text and partial tool arguments.
-    if (leftover.trimmed().startsWith("data:")) {
-        QList<ToolCall> tools;
+    // Consume a possible final SSE event without a trailing newline.
+    if (!leftover.trimmed().isEmpty()) {
         for (const QByteArray &line : leftover.split('\n')) {
+            if (line.trimmed().isEmpty()) {
+                continue;
+            }
             const CompletionChunk chunk = parseSseLine(line, &m_toolAcc);
-            if (!chunk.error.isEmpty()) {
-                Q_EMIT failed(chunk.error);
-                return;
+            if (!chunk.error.isEmpty() && m_completionError.isEmpty()) {
+                m_completionError = chunk.error;
             }
             if (!chunk.contentDelta.isEmpty()) {
                 m_text += chunk.contentDelta;
                 Q_EMIT textDelta(chunk.contentDelta);
             }
+            if (!chunk.completedTools.isEmpty()) {
+                m_completedTools.append(chunk.completedTools);
+            }
             if (chunk.finished) {
-                tools = chunk.completedTools;
+                m_sawDone = true;
             }
         }
-        Q_EMIT finished(m_text, tools);
+    }
+
+    if (!m_toolAcc.isEmpty()) {
+        m_completedTools.append(completedToolsFromAccumulator());
+    }
+
+    if (!m_completionError.isEmpty()) {
+        Q_EMIT failed(u"HTTP %1: %2"_s.arg(status).arg(m_completionError));
+        resetCompletionState();
         return;
     }
 
-    // Non-stream JSON fallback.
-    QJsonParseError parseError;
-    const QJsonDocument doc = QJsonDocument::fromJson(leftover, &parseError);
-    if (parseError.error == QJsonParseError::NoError && doc.isObject()) {
-        const QJsonObject root = doc.object();
-        const QJsonValue apiError = root.value(u"error"_s);
-        if (!apiError.isUndefined() && !apiError.isNull()) {
-            const QString message = apiError.isObject() ? apiError.toObject().value(u"message"_s).toString() : apiError.toString();
-            Q_EMIT failed(message.isEmpty() ? u"The provider returned an unknown error."_s : message);
-            return;
+    if (error != QNetworkReply::NoError) {
+        QString message = errorString;
+        if (message.isEmpty()) {
+            message = u"Network request failed."_s;
         }
-        const QJsonArray choices = root.value(u"choices"_s).toArray();
-        if (choices.isEmpty()) {
-            Q_EMIT failed(u"The provider response did not contain a completion."_s);
-            return;
-        }
-        const QJsonObject choice = choices.first().toObject();
-        const QJsonObject message = choice.value(u"message"_s).toObject();
-        const QString content = message.value(u"content"_s).toString();
-        QList<ToolCall> tools;
-        const QJsonArray toolCalls = message.value(u"tool_calls"_s).toArray();
-        for (int i = 0; i < toolCalls.size(); ++i) {
-            const QJsonObject obj = toolCalls.at(i).toObject();
-            ToolCall tool;
-            tool.id = obj.value(u"id"_s).toString();
-            tool.name = obj.value(u"function"_s).toObject().value(u"name"_s).toString();
-            tool.argumentsJson = obj.value(u"function"_s).toObject().value(u"arguments"_s).toString();
-            const QJsonDocument argsDoc = QJsonDocument::fromJson(tool.argumentsJson.toUtf8());
-            if (argsDoc.isObject()) {
-                tool.arguments = argsDoc.object();
+        if (!leftover.trimmed().isEmpty()) {
+            QJsonParseError parseError;
+            const QJsonDocument doc = QJsonDocument::fromJson(leftover, &parseError);
+            if (parseError.error == QJsonParseError::NoError && doc.isObject()) {
+                const QJsonObject apiError = doc.object().value(u"error"_s).toObject();
+                const QString apiMessage = apiError.value(u"message"_s).toString();
+                if (!apiMessage.isEmpty()) {
+                    message = apiMessage;
+                }
             }
-            tools.append(tool);
         }
-        if (!content.isEmpty()) {
-            Q_EMIT textDelta(content);
-        }
-        Q_EMIT finished(content, tools);
+        Q_EMIT failed(u"HTTP %1: %2"_s.arg(status).arg(message));
+        resetCompletionState();
         return;
     }
 
-    if (!leftover.trimmed().isEmpty()) {
-        QHash<int, ToolCall> acc;
-        QList<ToolCall> tools;
-        QString text;
-        for (const QByteArray &line : leftover.split('\n')) {
-            const CompletionChunk chunk = parseSseLine(line, &acc);
-            text += chunk.contentDelta;
-            if (chunk.finished) {
-                tools = chunk.completedTools;
-            }
-            if (!chunk.error.isEmpty()) {
-                Q_EMIT failed(chunk.error);
+    // Some compatible providers may ignore streaming and return ordinary JSON.
+    if (!m_sawDone && m_text.isEmpty() && m_completedTools.isEmpty() && !leftover.trimmed().isEmpty()) {
+        QJsonParseError parseError;
+        const QJsonDocument doc = QJsonDocument::fromJson(leftover, &parseError);
+        if (parseError.error == QJsonParseError::NoError && doc.isObject()) {
+            const QJsonObject root = doc.object();
+            const QJsonValue apiError = root.value(u"error"_s);
+            if (!apiError.isUndefined() && !apiError.isNull()) {
+                const QString message = apiError.isObject() ? apiError.toObject().value(u"message"_s).toString() : apiError.toString();
+                Q_EMIT failed(message.isEmpty() ? u"The provider returned an unknown error."_s : message);
+                resetCompletionState();
                 return;
             }
+            const QJsonArray choices = root.value(u"choices"_s).toArray();
+            if (!choices.isEmpty()) {
+                const QJsonObject message = choices.first().toObject().value(u"message"_s).toObject();
+                const QString content = message.value(u"content"_s).toString();
+                const QJsonArray toolCalls = message.value(u"tool_calls"_s).toArray();
+                QList<ToolCall> tools;
+                for (const QJsonValue &value : toolCalls) {
+                    const QJsonObject obj = value.toObject();
+                    ToolCall tool;
+                    tool.id = obj.value(u"id"_s).toString();
+                    const QJsonObject fn = obj.value(u"function"_s).toObject();
+                    tool.name = fn.value(u"name"_s).toString();
+                    tool.argumentsJson = fn.value(u"arguments"_s).toString();
+                    const QJsonDocument argsDoc = QJsonDocument::fromJson(tool.argumentsJson.toUtf8());
+                    if (argsDoc.isObject()) {
+                        tool.arguments = argsDoc.object();
+                    }
+                    tools.append(tool);
+                }
+                if (!content.isEmpty()) {
+                    m_text = content;
+                    Q_EMIT textDelta(content);
+                }
+                m_completedTools = tools;
+            }
         }
-        Q_EMIT finished(m_text + text, tools);
-        return;
     }
 
-    Q_EMIT finished(m_text, {});
+    emitCompletedOnce();
+    resetCompletionState();
 }
 
 } // namespace KateAi
