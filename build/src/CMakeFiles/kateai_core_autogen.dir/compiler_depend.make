@@ -355,6 +355,7 @@ src/kateai_core_autogen/timestamp: src/kateai_core_autogen/moc_predefs.h \
   /usr/include/qt6/QtCore/QMap \
   /usr/include/qt6/QtCore/QMetaType \
   /usr/include/qt6/QtCore/QObject \
+  /usr/include/qt6/QtCore/QQueue \
   /usr/include/qt6/QtCore/QSet \
   /usr/include/qt6/QtCore/QSharedDataPointer \
   /usr/include/qt6/QtCore/QString \
@@ -456,6 +457,7 @@ src/kateai_core_autogen/timestamp: src/kateai_core_autogen/moc_predefs.h \
   /usr/include/qt6/QtCore/qoverload.h \
   /usr/include/qt6/QtCore/qpair.h \
   /usr/include/qt6/QtCore/qprocessordetection.h \
+  /usr/include/qt6/QtCore/qqueue.h \
   /usr/include/qt6/QtCore/qrefcount.h \
   /usr/include/qt6/QtCore/qregularexpression.h \
   /usr/include/qt6/QtCore/qscopedpointer.h \
@@ -557,6 +559,8 @@ src/kateai_core_autogen/timestamp: src/kateai_core_autogen/moc_predefs.h \
 
 /usr/include/wchar.h:
 
+/usr/include/sys/types.h:
+
 /usr/include/c++/16/cstdio:
 
 /usr/include/c++/16/cstdint:
@@ -584,6 +588,10 @@ src/kateai_core_autogen/timestamp: src/kateai_core_autogen/moc_predefs.h \
 /usr/include/c++/16/bits/stl_pair.h:
 
 /usr/include/bits/locale.h:
+
+/usr/include/time.h:
+
+/usr/include/qt6/QtCore/qlocale.h:
 
 /usr/include/c++/16/ext/numeric_traits.h:
 
@@ -624,8 +632,6 @@ src/kateai_core_autogen/timestamp: src/kateai_core_autogen/moc_predefs.h \
 /usr/include/qt6/QtCore/qscopeguard.h:
 
 /usr/include/c++/16/bits/ranges_algobase.h:
-
-/usr/include/sys/types.h:
 
 /usr/include/c++/16/bits/range_access.h:
 
@@ -1375,6 +1381,8 @@ src/kateai_core_autogen/moc_predefs.h:
 
 /usr/include/qt6/QtCore/qanystringview.h:
 
+/usr/include/qt6/QtCore/QQueue:
+
 /usr/include/qt6/QtCore/QVariant:
 
 /usr/include/qt6/QtCore/q20bit.h:
@@ -1547,6 +1555,8 @@ src/kateai_core_autogen/moc_predefs.h:
 
 /usr/include/qt6/QtCore/qstringconverter.h:
 
+/usr/include/qt6/QtCore/qqueue.h:
+
 /usr/include/qt6/QtCore/qstringconverter_base.h:
 
 /usr/include/qt6/QtCore/qstringfwd.h:
@@ -1636,7 +1646,3 @@ src/kateai_core_autogen/moc_predefs.h:
 /usr/include/stdlib.h:
 
 /usr/include/string.h:
-
-/usr/include/qt6/QtCore/qlocale.h:
-
-/usr/include/time.h:

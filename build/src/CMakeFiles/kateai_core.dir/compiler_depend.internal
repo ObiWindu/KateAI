@@ -56,9 +56,7 @@ src/CMakeFiles/kateai_core.dir/agentloop.cpp.o
  /usr/include/bits/stdint-intn.h
  /usr/include/bits/stdint-least.h
  /usr/include/bits/stdint-uintn.h
- /usr/include/bits/stdio.h
  /usr/include/bits/stdio_lim.h
- /usr/include/bits/stdlib-bsearch.h
  /usr/include/bits/stdlib-float.h
  /usr/include/bits/struct_mutex.h
  /usr/include/bits/struct_rwlock.h
@@ -364,6 +362,7 @@ src/CMakeFiles/kateai_core.dir/agentloop.cpp.o
  /usr/include/qt6/QtCore/QMap
  /usr/include/qt6/QtCore/QMetaType
  /usr/include/qt6/QtCore/QObject
+ /usr/include/qt6/QtCore/QQueue
  /usr/include/qt6/QtCore/QSet
  /usr/include/qt6/QtCore/QSharedDataPointer
  /usr/include/qt6/QtCore/QString
@@ -465,6 +464,7 @@ src/CMakeFiles/kateai_core.dir/agentloop.cpp.o
  /usr/include/qt6/QtCore/qoverload.h
  /usr/include/qt6/QtCore/qpair.h
  /usr/include/qt6/QtCore/qprocessordetection.h
+ /usr/include/qt6/QtCore/qqueue.h
  /usr/include/qt6/QtCore/qrefcount.h
  /usr/include/qt6/QtCore/qregularexpression.h
  /usr/include/qt6/QtCore/qscopedpointer.h
@@ -639,9 +639,7 @@ src/CMakeFiles/kateai_core.dir/documentbridge.cpp.o
  /usr/include/bits/stdint-intn.h
  /usr/include/bits/stdint-least.h
  /usr/include/bits/stdint-uintn.h
- /usr/include/bits/stdio.h
  /usr/include/bits/stdio_lim.h
- /usr/include/bits/stdlib-bsearch.h
  /usr/include/bits/stdlib-float.h
  /usr/include/bits/struct_mutex.h
  /usr/include/bits/struct_rwlock.h
@@ -1189,9 +1187,7 @@ src/CMakeFiles/kateai_core.dir/graph/projectgraph.cpp.o
  /usr/include/bits/stdint-intn.h
  /usr/include/bits/stdint-least.h
  /usr/include/bits/stdint-uintn.h
- /usr/include/bits/stdio.h
  /usr/include/bits/stdio_lim.h
- /usr/include/bits/stdlib-bsearch.h
  /usr/include/bits/stdlib-float.h
  /usr/include/bits/struct_mutex.h
  /usr/include/bits/struct_rwlock.h
@@ -1721,9 +1717,7 @@ src/CMakeFiles/kateai_core.dir/kateai_core_autogen/mocs_compilation.cpp.o
  /usr/include/bits/stdint-intn.h
  /usr/include/bits/stdint-least.h
  /usr/include/bits/stdint-uintn.h
- /usr/include/bits/stdio.h
  /usr/include/bits/stdio_lim.h
- /usr/include/bits/stdlib-bsearch.h
  /usr/include/bits/stdlib-float.h
  /usr/include/bits/struct_mutex.h
  /usr/include/bits/struct_rwlock.h
@@ -2026,6 +2020,7 @@ src/CMakeFiles/kateai_core.dir/kateai_core_autogen/mocs_compilation.cpp.o
  /usr/include/qt6/QtCore/QMap
  /usr/include/qt6/QtCore/QMetaType
  /usr/include/qt6/QtCore/QObject
+ /usr/include/qt6/QtCore/QQueue
  /usr/include/qt6/QtCore/QSet
  /usr/include/qt6/QtCore/QSharedDataPointer
  /usr/include/qt6/QtCore/QString
@@ -2128,6 +2123,7 @@ src/CMakeFiles/kateai_core.dir/kateai_core_autogen/mocs_compilation.cpp.o
  /usr/include/qt6/QtCore/qoverload.h
  /usr/include/qt6/QtCore/qpair.h
  /usr/include/qt6/QtCore/qprocessordetection.h
+ /usr/include/qt6/QtCore/qqueue.h
  /usr/include/qt6/QtCore/qrefcount.h
  /usr/include/qt6/QtCore/qregularexpression.h
  /usr/include/qt6/QtCore/qscopedpointer.h
@@ -2275,9 +2271,7 @@ src/CMakeFiles/kateai_core.dir/llmclient.cpp.o
  /usr/include/bits/stdint-intn.h
  /usr/include/bits/stdint-least.h
  /usr/include/bits/stdint-uintn.h
- /usr/include/bits/stdio.h
  /usr/include/bits/stdio_lim.h
- /usr/include/bits/stdlib-bsearch.h
  /usr/include/bits/stdlib-float.h
  /usr/include/bits/struct_mutex.h
  /usr/include/bits/struct_rwlock.h
@@ -2806,9 +2800,7 @@ src/CMakeFiles/kateai_core.dir/permissions.cpp.o
  /usr/include/bits/stdint-intn.h
  /usr/include/bits/stdint-least.h
  /usr/include/bits/stdint-uintn.h
- /usr/include/bits/stdio.h
  /usr/include/bits/stdio_lim.h
- /usr/include/bits/stdlib-bsearch.h
  /usr/include/bits/stdlib-float.h
  /usr/include/bits/struct_mutex.h
  /usr/include/bits/struct_rwlock.h
@@ -3298,9 +3290,7 @@ src/CMakeFiles/kateai_core.dir/sandbox.cpp.o
  /usr/include/bits/stdint-intn.h
  /usr/include/bits/stdint-least.h
  /usr/include/bits/stdint-uintn.h
- /usr/include/bits/stdio.h
  /usr/include/bits/stdio_lim.h
- /usr/include/bits/stdlib-bsearch.h
  /usr/include/bits/stdlib-float.h
  /usr/include/bits/struct_mutex.h
  /usr/include/bits/struct_rwlock.h
@@ -3824,9 +3814,7 @@ src/CMakeFiles/kateai_core.dir/settings.cpp.o
  /usr/include/bits/stdint-intn.h
  /usr/include/bits/stdint-least.h
  /usr/include/bits/stdint-uintn.h
- /usr/include/bits/stdio.h
  /usr/include/bits/stdio_lim.h
- /usr/include/bits/stdlib-bsearch.h
  /usr/include/bits/stdlib-float.h
  /usr/include/bits/struct_mutex.h
  /usr/include/bits/struct_rwlock.h
@@ -4339,9 +4327,7 @@ src/CMakeFiles/kateai_core.dir/tools.cpp.o
  /usr/include/bits/stdint-intn.h
  /usr/include/bits/stdint-least.h
  /usr/include/bits/stdint-uintn.h
- /usr/include/bits/stdio.h
  /usr/include/bits/stdio_lim.h
- /usr/include/bits/stdlib-bsearch.h
  /usr/include/bits/stdlib-float.h
  /usr/include/bits/struct_mutex.h
  /usr/include/bits/struct_rwlock.h
@@ -4864,9 +4850,7 @@ src/CMakeFiles/kateai_core.dir/types.cpp.o
  /usr/include/bits/stdint-intn.h
  /usr/include/bits/stdint-least.h
  /usr/include/bits/stdint-uintn.h
- /usr/include/bits/stdio.h
  /usr/include/bits/stdio_lim.h
- /usr/include/bits/stdlib-bsearch.h
  /usr/include/bits/stdlib-float.h
  /usr/include/bits/struct_mutex.h
  /usr/include/bits/struct_rwlock.h
@@ -5395,9 +5379,7 @@ src/CMakeFiles/kateai_core.dir/workspace.cpp.o
  /usr/include/bits/stdint-intn.h
  /usr/include/bits/stdint-least.h
  /usr/include/bits/stdint-uintn.h
- /usr/include/bits/stdio.h
  /usr/include/bits/stdio_lim.h
- /usr/include/bits/stdlib-bsearch.h
  /usr/include/bits/stdlib-float.h
  /usr/include/bits/struct_mutex.h
  /usr/include/bits/struct_rwlock.h

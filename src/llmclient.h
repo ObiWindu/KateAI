@@ -32,7 +32,7 @@ public:
     void complete(const QList<ChatMessage> &messages);
     void fetchModels(Provider provider);
     void abort();
-
+    void reset();
     static QJsonArray messagesToJson(const QList<ChatMessage> &messages);
     static CompletionChunk parseSseLine(const QByteArray &line, QHash<int, ToolCall> *acc);
 

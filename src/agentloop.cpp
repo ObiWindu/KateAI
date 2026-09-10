@@ -574,6 +574,7 @@ QString AgentLoop::summarizeCompletedWork() const
     int reads = 0;
     int mutations = 0;
     int commands = 0;
+    int searches = 0;
     QStringList changedFiles;
 
     for (const ToolResult &result : m_pendingResults) {
@@ -589,6 +590,8 @@ QString AgentLoop::summarizeCompletedWork() const
             ++mutations;
         } else if (result.name == u"bash"_s) {
             ++commands;
+        } else if (result.name == u"grep"_s || result.name == u"glob"_s) {
+            ++searches;
         }
     }
 
@@ -727,10 +730,16 @@ void AgentLoop::onFinished(const QString &text, const QList<ToolCall> &toolCalls
     Q_EMIT assistantFinished(text);
 
     // The model is responsible for natural progress narration. If it returned
-    // tool calls without any user-facing text, provide a single minimal fallback
+    // tool calls without any user-facing text, provide a planned-work update
     // rather than exposing raw tool operations in the UI.
     if (!toolCalls.isEmpty() && text.trimmed().isEmpty()) {
-        Q_EMIT activityUpdated(u"I’m working through the relevant parts of the project and will check the result before I’m done."_s);
+        m_actionsThisModelTurn.clear();
+        m_queue = bundleSimilarTools(toolCalls);
+        m_pendingResults.clear();
+        Q_EMIT activityUpdated(describePlannedWork(m_queue));
+        m_state = State::ExecutingTools;
+        processQueue();
+        return;
     }
 
     // A coding agent should not stop immediately after a successful mutation
@@ -748,6 +757,10 @@ void AgentLoop::onFinished(const QString &text, const QList<ToolCall> &toolCalls
     m_actionsThisModelTurn.clear();
     m_queue = bundleSimilarTools(toolCalls);
     m_pendingResults.clear();
+    if (!text.trimmed().isEmpty()) {
+        // The streamed assistant text already provides the user-facing update
+        // for this model turn.
+    }
     m_state = State::ExecutingTools;
     processQueue();
 }
@@ -799,6 +812,9 @@ void AgentLoop::processQueue()
     }
 
     if (m_queue.isEmpty()) {
+        if (!m_pendingResults.isEmpty()) {
+            Q_EMIT activityUpdated(summarizeCompletedWork());
+        }
         appendToolResultsToConversation();
         m_state = State::WaitingForNextModel;
         scheduleNextModelStep();
@@ -880,12 +896,12 @@ void AgentLoop::executeOne(const ToolCall &call)
             if (repeats >= 2) {
                 if (m_recoveryPromptCount == 0) {
                     ++m_recoveryPromptCount;
-                    appendControllerMessage(u"The model has repeated the same mutating/execute action after it was already blocked. "
+                    appendControllerMessage(QString(u"The model has repeated the same mutating/execute action after it was already blocked. "
                                             u"Stop repeating it. Use the previous tool result and take a materially different action. "
-                                            u"Do not call the same tool with the same arguments again unless the project state changes first.");
+                                            u"Do not call the same tool with the same arguments again unless the project state changes first."));
                 } else {
                     appendToolResultsToConversation();
-                    finishWithFailure(u"Stopped because the agent repeatedly issued the same action without making progress.");
+                    finishWithFailure(QString(u"Stopped because the agent repeatedly issued the same action without making progress."));
                     return;
                 }
             }

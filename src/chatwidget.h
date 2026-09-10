@@ -47,8 +47,10 @@ Q_SIGNALS:
 
 private:
     void appendHtml(const QString &html);
+    void appendKateMessage(const QString &innerHtml);
     void setStreaming(const QString &text);
     void freezeStreaming();
+    static QString kateBubbleHtml(const QString &innerHtml);
     void submit();
     void applyProviderToCombos();
     void refreshProviders();

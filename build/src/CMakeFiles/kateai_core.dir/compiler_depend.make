@@ -55,9 +55,7 @@ src/CMakeFiles/kateai_core.dir/agentloop.cpp.o: /home/macewindu/ai-dev/KateAI/sr
   /usr/include/bits/stdint-intn.h \
   /usr/include/bits/stdint-least.h \
   /usr/include/bits/stdint-uintn.h \
-  /usr/include/bits/stdio.h \
   /usr/include/bits/stdio_lim.h \
-  /usr/include/bits/stdlib-bsearch.h \
   /usr/include/bits/stdlib-float.h \
   /usr/include/bits/struct_mutex.h \
   /usr/include/bits/struct_rwlock.h \
@@ -363,6 +361,7 @@ src/CMakeFiles/kateai_core.dir/agentloop.cpp.o: /home/macewindu/ai-dev/KateAI/sr
   /usr/include/qt6/QtCore/QMap \
   /usr/include/qt6/QtCore/QMetaType \
   /usr/include/qt6/QtCore/QObject \
+  /usr/include/qt6/QtCore/QQueue \
   /usr/include/qt6/QtCore/QSet \
   /usr/include/qt6/QtCore/QSharedDataPointer \
   /usr/include/qt6/QtCore/QString \
@@ -464,6 +463,7 @@ src/CMakeFiles/kateai_core.dir/agentloop.cpp.o: /home/macewindu/ai-dev/KateAI/sr
   /usr/include/qt6/QtCore/qoverload.h \
   /usr/include/qt6/QtCore/qpair.h \
   /usr/include/qt6/QtCore/qprocessordetection.h \
+  /usr/include/qt6/QtCore/qqueue.h \
   /usr/include/qt6/QtCore/qrefcount.h \
   /usr/include/qt6/QtCore/qregularexpression.h \
   /usr/include/qt6/QtCore/qscopedpointer.h \
@@ -637,9 +637,7 @@ src/CMakeFiles/kateai_core.dir/documentbridge.cpp.o: /home/macewindu/ai-dev/Kate
   /usr/include/bits/stdint-intn.h \
   /usr/include/bits/stdint-least.h \
   /usr/include/bits/stdint-uintn.h \
-  /usr/include/bits/stdio.h \
   /usr/include/bits/stdio_lim.h \
-  /usr/include/bits/stdlib-bsearch.h \
   /usr/include/bits/stdlib-float.h \
   /usr/include/bits/struct_mutex.h \
   /usr/include/bits/struct_rwlock.h \
@@ -1186,9 +1184,7 @@ src/CMakeFiles/kateai_core.dir/graph/projectgraph.cpp.o: /home/macewindu/ai-dev/
   /usr/include/bits/stdint-intn.h \
   /usr/include/bits/stdint-least.h \
   /usr/include/bits/stdint-uintn.h \
-  /usr/include/bits/stdio.h \
   /usr/include/bits/stdio_lim.h \
-  /usr/include/bits/stdlib-bsearch.h \
   /usr/include/bits/stdlib-float.h \
   /usr/include/bits/struct_mutex.h \
   /usr/include/bits/struct_rwlock.h \
@@ -1717,9 +1713,7 @@ src/CMakeFiles/kateai_core.dir/kateai_core_autogen/mocs_compilation.cpp.o: src/k
   /usr/include/bits/stdint-intn.h \
   /usr/include/bits/stdint-least.h \
   /usr/include/bits/stdint-uintn.h \
-  /usr/include/bits/stdio.h \
   /usr/include/bits/stdio_lim.h \
-  /usr/include/bits/stdlib-bsearch.h \
   /usr/include/bits/stdlib-float.h \
   /usr/include/bits/struct_mutex.h \
   /usr/include/bits/struct_rwlock.h \
@@ -2022,6 +2016,7 @@ src/CMakeFiles/kateai_core.dir/kateai_core_autogen/mocs_compilation.cpp.o: src/k
   /usr/include/qt6/QtCore/QMap \
   /usr/include/qt6/QtCore/QMetaType \
   /usr/include/qt6/QtCore/QObject \
+  /usr/include/qt6/QtCore/QQueue \
   /usr/include/qt6/QtCore/QSet \
   /usr/include/qt6/QtCore/QSharedDataPointer \
   /usr/include/qt6/QtCore/QString \
@@ -2124,6 +2119,7 @@ src/CMakeFiles/kateai_core.dir/kateai_core_autogen/mocs_compilation.cpp.o: src/k
   /usr/include/qt6/QtCore/qoverload.h \
   /usr/include/qt6/QtCore/qpair.h \
   /usr/include/qt6/QtCore/qprocessordetection.h \
+  /usr/include/qt6/QtCore/qqueue.h \
   /usr/include/qt6/QtCore/qrefcount.h \
   /usr/include/qt6/QtCore/qregularexpression.h \
   /usr/include/qt6/QtCore/qscopedpointer.h \
@@ -2270,9 +2266,7 @@ src/CMakeFiles/kateai_core.dir/llmclient.cpp.o: /home/macewindu/ai-dev/KateAI/sr
   /usr/include/bits/stdint-intn.h \
   /usr/include/bits/stdint-least.h \
   /usr/include/bits/stdint-uintn.h \
-  /usr/include/bits/stdio.h \
   /usr/include/bits/stdio_lim.h \
-  /usr/include/bits/stdlib-bsearch.h \
   /usr/include/bits/stdlib-float.h \
   /usr/include/bits/struct_mutex.h \
   /usr/include/bits/struct_rwlock.h \
@@ -2800,9 +2794,7 @@ src/CMakeFiles/kateai_core.dir/permissions.cpp.o: /home/macewindu/ai-dev/KateAI/
   /usr/include/bits/stdint-intn.h \
   /usr/include/bits/stdint-least.h \
   /usr/include/bits/stdint-uintn.h \
-  /usr/include/bits/stdio.h \
   /usr/include/bits/stdio_lim.h \
-  /usr/include/bits/stdlib-bsearch.h \
   /usr/include/bits/stdlib-float.h \
   /usr/include/bits/struct_mutex.h \
   /usr/include/bits/struct_rwlock.h \
@@ -3291,9 +3283,7 @@ src/CMakeFiles/kateai_core.dir/sandbox.cpp.o: /home/macewindu/ai-dev/KateAI/src/
   /usr/include/bits/stdint-intn.h \
   /usr/include/bits/stdint-least.h \
   /usr/include/bits/stdint-uintn.h \
-  /usr/include/bits/stdio.h \
   /usr/include/bits/stdio_lim.h \
-  /usr/include/bits/stdlib-bsearch.h \
   /usr/include/bits/stdlib-float.h \
   /usr/include/bits/struct_mutex.h \
   /usr/include/bits/struct_rwlock.h \
@@ -3816,9 +3806,7 @@ src/CMakeFiles/kateai_core.dir/settings.cpp.o: /home/macewindu/ai-dev/KateAI/src
   /usr/include/bits/stdint-intn.h \
   /usr/include/bits/stdint-least.h \
   /usr/include/bits/stdint-uintn.h \
-  /usr/include/bits/stdio.h \
   /usr/include/bits/stdio_lim.h \
-  /usr/include/bits/stdlib-bsearch.h \
   /usr/include/bits/stdlib-float.h \
   /usr/include/bits/struct_mutex.h \
   /usr/include/bits/struct_rwlock.h \
@@ -4330,9 +4318,7 @@ src/CMakeFiles/kateai_core.dir/tools.cpp.o: /home/macewindu/ai-dev/KateAI/src/to
   /usr/include/bits/stdint-intn.h \
   /usr/include/bits/stdint-least.h \
   /usr/include/bits/stdint-uintn.h \
-  /usr/include/bits/stdio.h \
   /usr/include/bits/stdio_lim.h \
-  /usr/include/bits/stdlib-bsearch.h \
   /usr/include/bits/stdlib-float.h \
   /usr/include/bits/struct_mutex.h \
   /usr/include/bits/struct_rwlock.h \
@@ -4854,9 +4840,7 @@ src/CMakeFiles/kateai_core.dir/types.cpp.o: /home/macewindu/ai-dev/KateAI/src/ty
   /usr/include/bits/stdint-intn.h \
   /usr/include/bits/stdint-least.h \
   /usr/include/bits/stdint-uintn.h \
-  /usr/include/bits/stdio.h \
   /usr/include/bits/stdio_lim.h \
-  /usr/include/bits/stdlib-bsearch.h \
   /usr/include/bits/stdlib-float.h \
   /usr/include/bits/struct_mutex.h \
   /usr/include/bits/struct_rwlock.h \
@@ -5384,9 +5368,7 @@ src/CMakeFiles/kateai_core.dir/workspace.cpp.o: /home/macewindu/ai-dev/KateAI/sr
   /usr/include/bits/stdint-intn.h \
   /usr/include/bits/stdint-least.h \
   /usr/include/bits/stdint-uintn.h \
-  /usr/include/bits/stdio.h \
   /usr/include/bits/stdio_lim.h \
-  /usr/include/bits/stdlib-bsearch.h \
   /usr/include/bits/stdlib-float.h \
   /usr/include/bits/struct_mutex.h \
   /usr/include/bits/struct_rwlock.h \
@@ -5976,6 +5958,8 @@ src/CMakeFiles/kateai_core.dir/workspace.cpp.o: /home/macewindu/ai-dev/KateAI/sr
 
 /usr/include/KF6/KConfigCore/KConfigGroup:
 
+/home/macewindu/ai-dev/KateAI/src/settings.h:
+
 /usr/include/qt6/QtCore/qstandardpaths.h:
 
 /usr/include/qt6/QtCore/QDate:
@@ -6005,8 +5989,6 @@ src/kateai_core_autogen/EWIEGA46WW/moc_agentloop.cpp:
 src/kateai_core_autogen/mocs_compilation.cpp:
 
 /usr/include/qt6/QtCore/QRegularExpression:
-
-/usr/include/qt6/QtCore/QQueue:
 
 /usr/include/qt6/QtGui/qrgba64.h:
 
@@ -6113,6 +6095,10 @@ src/kateai_core_autogen/mocs_compilation.cpp:
 /usr/include/qt6/QtCore/qrect.h:
 
 /usr/include/stdlib.h:
+
+/usr/include/c++/16/cstdio:
+
+/usr/include/c++/16/cstdint:
 
 /usr/include/c++/16/concepts:
 
@@ -6340,11 +6326,29 @@ src/kateai_core_autogen/mocs_compilation.cpp:
 
 /usr/include/qt6/QtCore/qarraydata.h:
 
-/usr/include/qt6/QtCore/qtclasshelpermacros.h:
+/usr/include/bits/thread-shared-types.h:
 
-/usr/include/c++/16/bits/basic_string.h:
+/usr/include/c++/16/bits/ptr_traits.h:
 
-/usr/include/c++/16/cstdint:
+/usr/include/qt6/QtCore/q17memory.h:
+
+/usr/include/c++/16/bits/enable_special_members.h:
+
+/usr/include/c++/16/bits/invoke.h:
+
+/usr/include/bits/floatn-common.h:
+
+/usr/include/c++/16/tr1/exp_integral.tcc:
+
+/usr/include/c++/16/bits/shared_ptr_atomic.h:
+
+/usr/include/pthread.h:
+
+/usr/include/c++/16/bits/localefwd.h:
+
+/usr/include/c++/16/unordered_map:
+
+/usr/include/bits/types/time_t.h:
 
 /usr/include/c++/16/bits/stl_heap.h:
 
@@ -6400,37 +6404,13 @@ src/kateai_core_autogen/mocs_compilation.cpp:
 
 /usr/include/bits/fp-fast.h:
 
-/usr/include/bits/stdio.h:
-
-/usr/include/qt6/QtCore/QDebug:
-
-/usr/include/qt6/QtCore/qfloat16.h:
-
 /usr/include/qt6/QtCore/q26numeric.h:
 
-/usr/include/c++/16/bits/ptr_traits.h:
-
-/usr/include/qt6/QtCore/q17memory.h:
-
-/usr/include/c++/16/bits/enable_special_members.h:
-
-/usr/include/c++/16/bits/invoke.h:
-
-/usr/include/bits/floatn-common.h:
-
-/usr/include/c++/16/tr1/exp_integral.tcc:
-
-/usr/include/c++/16/bits/shared_ptr_atomic.h:
-
-/usr/include/pthread.h:
-
-/usr/include/c++/16/bits/localefwd.h:
-
-/usr/include/c++/16/unordered_map:
-
-/usr/include/bits/types/time_t.h:
-
 /usr/include/bits/math-vector.h:
+
+/usr/include/c++/16/ext/type_traits.h:
+
+/usr/include/bits/uio_lim.h:
 
 /usr/include/qt6/QtCore/qdatastream.h:
 
@@ -6451,10 +6431,6 @@ src/kateai_core_autogen/mocs_compilation.cpp:
 /usr/include/asm/errno.h:
 
 /home/macewindu/ai-dev/KateAI/src/permissions.h:
-
-/usr/include/c++/16/bits/list.tcc:
-
-/usr/include/bits/libm-simd-decl-stubs.h:
 
 /usr/include/c++/16/bits/algorithmfwd.h:
 
@@ -6495,14 +6471,6 @@ src/kateai_core_autogen/mocs_compilation.cpp:
 /usr/include/qt6/QtCore/q20iterator.h:
 
 /usr/include/features.h:
-
-/home/macewindu/ai-dev/KateAI/src/settings.h:
-
-/usr/include/bits/stdlib-bsearch.h:
-
-/usr/include/qt6/QtCore/qbytearrayview.h:
-
-/usr/include/qt6/QtCore/qjsondocument.h:
 
 /usr/include/c++/16/bits/stl_function.h:
 
@@ -6616,21 +6584,9 @@ src/kateai_core_autogen/mocs_compilation.cpp:
 
 /usr/include/qt6/QtCore/qlist.h:
 
-/usr/include/bits/thread-shared-types.h:
-
-/usr/include/bits/uio_lim.h:
-
-/usr/include/c++/16/ext/type_traits.h:
-
 /usr/include/KF6/KTextEditor/ktexteditor/document.h:
 
 /usr/include/bits/errno.h:
-
-/usr/include/KF6/KXmlGui/kxmlgui_version.h:
-
-/usr/include/qt6/QtCore/qlatin1stringview.h:
-
-/usr/include/c++/16/cstdlib:
 
 /usr/include/qt6/QtCore/qstdlibdetection.h:
 
@@ -6794,6 +6750,14 @@ src/kateai_core_autogen/mocs_compilation.cpp:
 
 /usr/include/c++/16/aarch64-redhat-linux/bits/os_defines.h:
 
+/usr/include/bits/libm-simd-decl-stubs.h:
+
+/usr/include/c++/16/bits/list.tcc:
+
+/usr/include/qt6/QtCore/qtclasshelpermacros.h:
+
+/usr/include/c++/16/bits/basic_string.h:
+
 /usr/include/c++/16/initializer_list:
 
 /usr/include/c++/16/chrono:
@@ -6849,8 +6813,6 @@ src/kateai_core_autogen/mocs_compilation.cpp:
 /usr/include/c++/16/bits/atomic_lockfree_defines.h:
 
 /usr/include/qt6/QtCore/qarraydatapointer.h:
-
-/usr/include/c++/16/cstdio:
 
 /usr/include/c++/16/bits/stl_uninitialized.h:
 
@@ -7010,6 +6972,16 @@ src/kateai_core_autogen/EWIEGA46WW/moc_llmclient.cpp:
 
 /usr/include/qt6/QtCore/QDateTime:
 
+/usr/include/qt6/QtCore/QDebug:
+
+/usr/include/qt6/QtCore/qfloat16.h:
+
+/usr/include/KF6/KXmlGui/kxmlgui_version.h:
+
+/usr/include/c++/16/cstdlib:
+
+/usr/include/qt6/QtCore/qlatin1stringview.h:
+
 /usr/include/c++/16/bits/char_traits.h:
 
 /usr/include/qt6/QtCore/QFile:
@@ -7035,6 +7007,8 @@ src/kateai_core_autogen/EWIEGA46WW/moc_llmclient.cpp:
 /usr/include/c++/16/aarch64-redhat-linux/bits/gthr-default.h:
 
 /usr/include/qt6/QtCore/qanystringview.h:
+
+/usr/include/qt6/QtCore/QQueue:
 
 /usr/include/qt6/QtCore/QVariant:
 
@@ -7073,6 +7047,10 @@ src/kateai_core_autogen/EWIEGA46WW/moc_llmclient.cpp:
 /usr/include/qt6/QtCore/qbytearrayalgorithms.h:
 
 /usr/include/qt6/QtCore/qbytearraylist.h:
+
+/usr/include/qt6/QtCore/qbytearrayview.h:
+
+/usr/include/qt6/QtCore/qjsondocument.h:
 
 /usr/include/qt6/QtCore/qstringview.h:
 
@@ -7210,11 +7188,11 @@ src/kateai_core_autogen/EWIEGA46WW/moc_llmclient.cpp:
 
 /usr/include/qt6/QtCore/qstringconverter.h:
 
-/usr/include/qt6/QtCore/qqueue.h:
-
 /usr/include/qt6/QtGui/qpixmap.h:
 
 /usr/include/qt6/QtCore/QExplicitlySharedDataPointer:
+
+/usr/include/qt6/QtCore/qqueue.h:
 
 /usr/include/qt6/QtCore/qstringconverter_base.h:
 
