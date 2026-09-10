@@ -89,6 +89,11 @@ struct Settings {
     QString openrouterModel = QStringLiteral("x-ai/grok-4");
     PermissionMode permissionMode = PermissionMode::Ask;
     SandboxProfile sandbox = SandboxProfile::Workspace;
+    // Agent budgets are intentionally separate: API model turns, tool calls, and provider rate.
+    int maxModelRequests = 40;
+    int maxToolCalls = 80;
+    int requestsPerMinute = 15;
+    // Legacy compatibility with older KateAI settings/UI. Internally maxToolCalls is used.
     int maxIterations = 20;
     int bashTimeoutMs = 60000;
     bool planMode = false;

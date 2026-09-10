@@ -32,7 +32,7 @@ public:
     void complete(const QList<ChatMessage> &messages);
     void fetchModels(Provider provider);
     void abort();
-
+    void reset();
     static QJsonArray messagesToJson(const QList<ChatMessage> &messages);
     static CompletionChunk parseSseLine(const QByteArray &line, QHash<int, ToolCall> *acc);
 
@@ -47,7 +47,9 @@ private:
     void handleReadyRead();
     void handleFinished();
     void handleModelsFinished(QNetworkReply *reply, Provider provider);
-    void reset();
+    void resetCompletionState();
+    void emitCompletedOnce();
+    QList<ToolCall> completedToolsFromAccumulator();
 
     Settings m_settings;
     QNetworkAccessManager m_nam;
@@ -55,7 +57,11 @@ private:
     QByteArray m_buffer;
     QString m_text;
     QHash<int, ToolCall> m_toolAcc;
+    QList<ToolCall> m_completedTools;
+    QString m_completionError;
     bool m_sawDone = false;
+    bool m_finishEmitted = false;
+    bool m_abortRequested = false;
 };
 
 } // namespace KateAi

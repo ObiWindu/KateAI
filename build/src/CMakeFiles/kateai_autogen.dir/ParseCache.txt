@@ -3353,10 +3353,12 @@
  mdp:/usr/include/qt6/QtCore/QMap
  mdp:/usr/include/qt6/QtCore/QMetaType
  mdp:/usr/include/qt6/QtCore/QObject
+ mdp:/usr/include/qt6/QtCore/QQueue
  mdp:/usr/include/qt6/QtCore/QSet
  mdp:/usr/include/qt6/QtCore/QSharedDataPointer
  mdp:/usr/include/qt6/QtCore/QString
  mdp:/usr/include/qt6/QtCore/QStringList
+ mdp:/usr/include/qt6/QtCore/QTimer
  mdp:/usr/include/qt6/QtCore/QUrl
  mdp:/usr/include/qt6/QtCore/QVariant
  mdp:/usr/include/qt6/QtCore/q17memory.h
@@ -3369,6 +3371,7 @@
  mdp:/usr/include/qt6/QtCore/q23type_traits.h
  mdp:/usr/include/qt6/QtCore/q23utility.h
  mdp:/usr/include/qt6/QtCore/q26numeric.h
+ mdp:/usr/include/qt6/QtCore/qabstracteventdispatcher.h
  mdp:/usr/include/qt6/QtCore/qalgorithms.h
  mdp:/usr/include/qt6/QtCore/qalloc.h
  mdp:/usr/include/qt6/QtCore/qanystringview.h
@@ -3379,6 +3382,7 @@
  mdp:/usr/include/qt6/QtCore/qatomic.h
  mdp:/usr/include/qt6/QtCore/qatomic_cxx11.h
  mdp:/usr/include/qt6/QtCore/qbasicatomic.h
+ mdp:/usr/include/qt6/QtCore/qbasictimer.h
  mdp:/usr/include/qt6/QtCore/qbindingstorage.h
  mdp:/usr/include/qt6/QtCore/qbytearray.h
  mdp:/usr/include/qt6/QtCore/qbytearrayalgorithms.h
@@ -3403,10 +3407,12 @@
  mdp:/usr/include/qt6/QtCore/qdarwinhelpers.h
  mdp:/usr/include/qt6/QtCore/qdatastream.h
  mdp:/usr/include/qt6/QtCore/qdatetime.h
+ mdp:/usr/include/qt6/QtCore/qdeadlinetimer.h
  mdp:/usr/include/qt6/QtCore/qdebug.h
  mdp:/usr/include/qt6/QtCore/qdir.h
  mdp:/usr/include/qt6/QtCore/qdirlisting.h
  mdp:/usr/include/qt6/QtCore/qendian.h
+ mdp:/usr/include/qt6/QtCore/qeventloop.h
  mdp:/usr/include/qt6/QtCore/qexceptionhandling.h
  mdp:/usr/include/qt6/QtCore/qfile.h
  mdp:/usr/include/qt6/QtCore/qfiledevice.h
@@ -3453,6 +3459,7 @@
  mdp:/usr/include/qt6/QtCore/qpair.h
  mdp:/usr/include/qt6/QtCore/qpoint.h
  mdp:/usr/include/qt6/QtCore/qprocessordetection.h
+ mdp:/usr/include/qt6/QtCore/qqueue.h
  mdp:/usr/include/qt6/QtCore/qrect.h
  mdp:/usr/include/qt6/QtCore/qrefcount.h
  mdp:/usr/include/qt6/QtCore/qregularexpression.h
@@ -3491,6 +3498,7 @@
  mdp:/usr/include/qt6/QtCore/qtenvironmentvariables.h
  mdp:/usr/include/qt6/QtCore/qtextstream.h
  mdp:/usr/include/qt6/QtCore/qtformat_impl.h
+ mdp:/usr/include/qt6/QtCore/qtimer.h
  mdp:/usr/include/qt6/QtCore/qtimezone.h
  mdp:/usr/include/qt6/QtCore/qtmetamacros.h
  mdp:/usr/include/qt6/QtCore/qtnoop.h

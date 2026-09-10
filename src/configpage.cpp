@@ -73,10 +73,18 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     m_sandbox->addItem(sandboxProfileLabel(SandboxProfile::Off), sandboxProfileId(SandboxProfile::Off));
     form->addRow(i18n("Sandbox:"), m_sandbox);
 
-    // Create spin box for maximum number of tool iterations
+    // Agent budgets are separate: model/API requests are not the same thing as tool work.
     m_maxIter = new QSpinBox(this);
-    m_maxIter->setRange(1, 50);
-    form->addRow(i18n("Max tool iterations:"), m_maxIter);
+    m_maxIter->setRange(1, 500);
+    form->addRow(i18n("Max tool calls:"), m_maxIter);
+
+    m_maxModelRequests = new QSpinBox(this);
+    m_maxModelRequests->setRange(1, 500);
+    form->addRow(i18n("Max model requests per task:"), m_maxModelRequests);
+
+    m_requestsPerMinute = new QSpinBox(this);
+    m_requestsPerMinute->setRange(1, 60);
+    form->addRow(i18n("Model requests per minute:"), m_requestsPerMinute);
 
     // Create spin box for command timeout in seconds
     m_timeout = new QSpinBox(this);
@@ -204,6 +212,8 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     connect(m_permission, &QComboBox::currentIndexChanged, this, markChanged);
     connect(m_sandbox, &QComboBox::currentIndexChanged, this, markChanged);
     connect(m_maxIter, &QSpinBox::valueChanged, this, markChanged);
+    connect(m_maxModelRequests, &QSpinBox::valueChanged, this, markChanged);
+    connect(m_requestsPerMinute, &QSpinBox::valueChanged, this, markChanged);
     connect(m_timeout, &QSpinBox::valueChanged, this, markChanged);
     connect(m_planMode, &QCheckBox::toggled, this, markChanged);
     connect(m_projectInstructions, &QCheckBox::toggled, this, markChanged);
@@ -253,7 +263,10 @@ void KateAiConfigPage::apply()
     s.openrouterModel = m_openrouterModel->text().trimmed();
     s.permissionMode = permissionModeFromId(m_permission->currentData().toString());
     s.sandbox = sandboxProfileFromId(m_sandbox->currentData().toString());
-    s.maxIterations = m_maxIter->value();
+    s.maxToolCalls = m_maxIter->value();
+    s.maxIterations = s.maxToolCalls;
+    s.maxModelRequests = m_maxModelRequests->value();
+    s.requestsPerMinute = m_requestsPerMinute->value();
     s.bashTimeoutMs = m_timeout->value() * 1000;
     s.planMode = m_planMode->isChecked();
     s.loadProjectInstructions = m_projectInstructions->isChecked();
@@ -289,7 +302,9 @@ void KateAiConfigPage::reset()
     m_openrouterModel->setText(s.openrouterModel);
     m_permission->setCurrentIndex(std::max(0, m_permission->findData(permissionModeId(s.permissionMode))));
     m_sandbox->setCurrentIndex(std::max(0, m_sandbox->findData(sandboxProfileId(s.sandbox))));
-    m_maxIter->setValue(s.maxIterations);
+    m_maxIter->setValue(s.maxToolCalls);
+    m_maxModelRequests->setValue(s.maxModelRequests);
+    m_requestsPerMinute->setValue(s.requestsPerMinute);
     m_timeout->setValue(std::max(1, s.bashTimeoutMs / 1000));
     m_planMode->setChecked(s.planMode);
     m_projectInstructions->setChecked(s.loadProjectInstructions);

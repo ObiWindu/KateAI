@@ -1,13 +1,13 @@
-set(CMAKE_HOST_SYSTEM "Linux-7.1.6-400.asahi.fc44.aarch64+16k")
+set(CMAKE_HOST_SYSTEM "Linux-7.1.13-402.asahi.fc44.aarch64+16k")
 set(CMAKE_HOST_SYSTEM_NAME "Linux")
-set(CMAKE_HOST_SYSTEM_VERSION "7.1.6-400.asahi.fc44.aarch64+16k")
+set(CMAKE_HOST_SYSTEM_VERSION "7.1.13-402.asahi.fc44.aarch64+16k")
 set(CMAKE_HOST_SYSTEM_PROCESSOR "aarch64")
 
 
 
-set(CMAKE_SYSTEM "Linux-7.1.6-400.asahi.fc44.aarch64+16k")
+set(CMAKE_SYSTEM "Linux-7.1.13-402.asahi.fc44.aarch64+16k")
 set(CMAKE_SYSTEM_NAME "Linux")
-set(CMAKE_SYSTEM_VERSION "7.1.6-400.asahi.fc44.aarch64+16k")
+set(CMAKE_SYSTEM_VERSION "7.1.13-402.asahi.fc44.aarch64+16k")
 set(CMAKE_SYSTEM_PROCESSOR "aarch64")
 
 set(CMAKE_CROSSCOMPILING "FALSE")

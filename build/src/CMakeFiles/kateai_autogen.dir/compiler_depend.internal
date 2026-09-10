@@ -384,6 +384,7 @@
  /usr/include/qt6/QtCore/QMetaType
  /usr/include/qt6/QtCore/QObject
  /usr/include/qt6/QtCore/QPointer
+ /usr/include/qt6/QtCore/QQueue
  /usr/include/qt6/QtCore/QRect
  /usr/include/qt6/QtCore/QSet
  /usr/include/qt6/QtCore/QSharedDataPointer
@@ -391,6 +392,7 @@
  /usr/include/qt6/QtCore/QSizeF
  /usr/include/qt6/QtCore/QString
  /usr/include/qt6/QtCore/QStringList
+ /usr/include/qt6/QtCore/QTimer
  /usr/include/qt6/QtCore/QUrl
  /usr/include/qt6/QtCore/QVariant
  /usr/include/qt6/QtCore/q17memory.h
@@ -496,6 +498,7 @@
  /usr/include/qt6/QtCore/qpoint.h
  /usr/include/qt6/QtCore/qpointer.h
  /usr/include/qt6/QtCore/qprocessordetection.h
+ /usr/include/qt6/QtCore/qqueue.h
  /usr/include/qt6/QtCore/qrect.h
  /usr/include/qt6/QtCore/qrefcount.h
  /usr/include/qt6/QtCore/qregularexpression.h
@@ -534,6 +537,7 @@
  /usr/include/qt6/QtCore/qtenvironmentvariables.h
  /usr/include/qt6/QtCore/qtextstream.h
  /usr/include/qt6/QtCore/qtformat_impl.h
+ /usr/include/qt6/QtCore/qtimer.h
  /usr/include/qt6/QtCore/qtimezone.h
  /usr/include/qt6/QtCore/qtmetamacros.h
  /usr/include/qt6/QtCore/qtnoop.h

@@ -55,6 +55,7 @@ template <> constexpr inline auto KateAi::AgentLoop::qt_create_metaobjectdata<qt
         "permissionNeeded",
         "statusChanged",
         "status",
+        "activityUpdated",
         "failed",
         "error",
         "turnFinished",
@@ -94,19 +95,23 @@ template <> constexpr inline auto KateAi::AgentLoop::qt_create_metaobjectdata<qt
         QtMocHelpers::SignalData<void(const QString &)>(14, 2, QMC::AccessPublic, QMetaType::Void, {{
             { QMetaType::QString, 15 },
         }}),
-        // Signal 'failed'
+        // Signal 'activityUpdated'
         QtMocHelpers::SignalData<void(const QString &)>(16, 2, QMC::AccessPublic, QMetaType::Void, {{
-            { QMetaType::QString, 17 },
+            { QMetaType::QString, 3 },
+        }}),
+        // Signal 'failed'
+        QtMocHelpers::SignalData<void(const QString &)>(17, 2, QMC::AccessPublic, QMetaType::Void, {{
+            { QMetaType::QString, 18 },
         }}),
         // Signal 'turnFinished'
-        QtMocHelpers::SignalData<void()>(18, 2, QMC::AccessPublic, QMetaType::Void),
+        QtMocHelpers::SignalData<void()>(19, 2, QMC::AccessPublic, QMetaType::Void),
         // Signal 'modelsReceived'
-        QtMocHelpers::SignalData<void(Provider, const QStringList &)>(19, 2, QMC::AccessPublic, QMetaType::Void, {{
-            { 0x80000000 | 20, 21 }, { QMetaType::QStringList, 22 },
+        QtMocHelpers::SignalData<void(Provider, const QStringList &)>(20, 2, QMC::AccessPublic, QMetaType::Void, {{
+            { 0x80000000 | 21, 22 }, { QMetaType::QStringList, 23 },
         }}),
         // Signal 'modelsFailed'
-        QtMocHelpers::SignalData<void(Provider, const QString &)>(23, 2, QMC::AccessPublic, QMetaType::Void, {{
-            { 0x80000000 | 20, 21 }, { QMetaType::QString, 17 },
+        QtMocHelpers::SignalData<void(Provider, const QString &)>(24, 2, QMC::AccessPublic, QMetaType::Void, {{
+            { 0x80000000 | 21, 22 }, { QMetaType::QString, 18 },
         }}),
     };
     QtMocHelpers::UintData qt_properties {
@@ -138,10 +143,11 @@ void KateAi::AgentLoop::qt_static_metacall(QObject *_o, QMetaObject::Call _c, in
         case 4: _t->toolFinished((*reinterpret_cast<std::add_pointer_t<ToolResult>>(_a[1]))); break;
         case 5: _t->permissionNeeded((*reinterpret_cast<std::add_pointer_t<PermissionRequest>>(_a[1]))); break;
         case 6: _t->statusChanged((*reinterpret_cast<std::add_pointer_t<QString>>(_a[1]))); break;
-        case 7: _t->failed((*reinterpret_cast<std::add_pointer_t<QString>>(_a[1]))); break;
-        case 8: _t->turnFinished(); break;
-        case 9: _t->modelsReceived((*reinterpret_cast<std::add_pointer_t<Provider>>(_a[1])),(*reinterpret_cast<std::add_pointer_t<QStringList>>(_a[2]))); break;
-        case 10: _t->modelsFailed((*reinterpret_cast<std::add_pointer_t<Provider>>(_a[1])),(*reinterpret_cast<std::add_pointer_t<QString>>(_a[2]))); break;
+        case 7: _t->activityUpdated((*reinterpret_cast<std::add_pointer_t<QString>>(_a[1]))); break;
+        case 8: _t->failed((*reinterpret_cast<std::add_pointer_t<QString>>(_a[1]))); break;
+        case 9: _t->turnFinished(); break;
+        case 10: _t->modelsReceived((*reinterpret_cast<std::add_pointer_t<Provider>>(_a[1])),(*reinterpret_cast<std::add_pointer_t<QStringList>>(_a[2]))); break;
+        case 11: _t->modelsFailed((*reinterpret_cast<std::add_pointer_t<Provider>>(_a[1])),(*reinterpret_cast<std::add_pointer_t<QString>>(_a[2]))); break;
         default: ;
         }
     }
@@ -160,13 +166,15 @@ void KateAi::AgentLoop::qt_static_metacall(QObject *_o, QMetaObject::Call _c, in
             return;
         if (QtMocHelpers::indexOfMethod<void (AgentLoop::*)(const QString & )>(_a, &AgentLoop::statusChanged, 6))
             return;
-        if (QtMocHelpers::indexOfMethod<void (AgentLoop::*)(const QString & )>(_a, &AgentLoop::failed, 7))
+        if (QtMocHelpers::indexOfMethod<void (AgentLoop::*)(const QString & )>(_a, &AgentLoop::activityUpdated, 7))
             return;
-        if (QtMocHelpers::indexOfMethod<void (AgentLoop::*)()>(_a, &AgentLoop::turnFinished, 8))
+        if (QtMocHelpers::indexOfMethod<void (AgentLoop::*)(const QString & )>(_a, &AgentLoop::failed, 8))
             return;
-        if (QtMocHelpers::indexOfMethod<void (AgentLoop::*)(Provider , const QStringList & )>(_a, &AgentLoop::modelsReceived, 9))
+        if (QtMocHelpers::indexOfMethod<void (AgentLoop::*)()>(_a, &AgentLoop::turnFinished, 9))
             return;
-        if (QtMocHelpers::indexOfMethod<void (AgentLoop::*)(Provider , const QString & )>(_a, &AgentLoop::modelsFailed, 10))
+        if (QtMocHelpers::indexOfMethod<void (AgentLoop::*)(Provider , const QStringList & )>(_a, &AgentLoop::modelsReceived, 10))
+            return;
+        if (QtMocHelpers::indexOfMethod<void (AgentLoop::*)(Provider , const QString & )>(_a, &AgentLoop::modelsFailed, 11))
             return;
     }
 }
@@ -190,14 +198,14 @@ int KateAi::AgentLoop::qt_metacall(QMetaObject::Call _c, int _id, void **_a)
     if (_id < 0)
         return _id;
     if (_c == QMetaObject::InvokeMetaMethod) {
-        if (_id < 11)
+        if (_id < 12)
             qt_static_metacall(this, _c, _id, _a);
-        _id -= 11;
+        _id -= 12;
     }
     if (_c == QMetaObject::RegisterMethodArgumentMetaType) {
-        if (_id < 11)
+        if (_id < 12)
             *reinterpret_cast<QMetaType *>(_a[0]) = QMetaType();
-        _id -= 11;
+        _id -= 12;
     }
     return _id;
 }
@@ -245,26 +253,32 @@ void KateAi::AgentLoop::statusChanged(const QString & _t1)
 }
 
 // SIGNAL 7
-void KateAi::AgentLoop::failed(const QString & _t1)
+void KateAi::AgentLoop::activityUpdated(const QString & _t1)
 {
     QMetaObject::activate<void>(this, &staticMetaObject, 7, nullptr, _t1);
 }
 
 // SIGNAL 8
-void KateAi::AgentLoop::turnFinished()
+void KateAi::AgentLoop::failed(const QString & _t1)
 {
-    QMetaObject::activate(this, &staticMetaObject, 8, nullptr);
+    QMetaObject::activate<void>(this, &staticMetaObject, 8, nullptr, _t1);
 }
 
 // SIGNAL 9
-void KateAi::AgentLoop::modelsReceived(Provider _t1, const QStringList & _t2)
+void KateAi::AgentLoop::turnFinished()
 {
-    QMetaObject::activate<void>(this, &staticMetaObject, 9, nullptr, _t1, _t2);
+    QMetaObject::activate(this, &staticMetaObject, 9, nullptr);
 }
 
 // SIGNAL 10
-void KateAi::AgentLoop::modelsFailed(Provider _t1, const QString & _t2)
+void KateAi::AgentLoop::modelsReceived(Provider _t1, const QStringList & _t2)
 {
     QMetaObject::activate<void>(this, &staticMetaObject, 10, nullptr, _t1, _t2);
+}
+
+// SIGNAL 11
+void KateAi::AgentLoop::modelsFailed(Provider _t1, const QString & _t2)
+{
+    QMetaObject::activate<void>(this, &staticMetaObject, 11, nullptr, _t1, _t2);
 }
 QT_WARNING_POP

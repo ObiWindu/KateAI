@@ -383,6 +383,7 @@ src/kateai_autogen/timestamp: src/kateai_autogen/moc_predefs.h \
   /usr/include/qt6/QtCore/QMetaType \
   /usr/include/qt6/QtCore/QObject \
   /usr/include/qt6/QtCore/QPointer \
+  /usr/include/qt6/QtCore/QQueue \
   /usr/include/qt6/QtCore/QRect \
   /usr/include/qt6/QtCore/QSet \
   /usr/include/qt6/QtCore/QSharedDataPointer \
@@ -390,6 +391,7 @@ src/kateai_autogen/timestamp: src/kateai_autogen/moc_predefs.h \
   /usr/include/qt6/QtCore/QSizeF \
   /usr/include/qt6/QtCore/QString \
   /usr/include/qt6/QtCore/QStringList \
+  /usr/include/qt6/QtCore/QTimer \
   /usr/include/qt6/QtCore/QUrl \
   /usr/include/qt6/QtCore/QVariant \
   /usr/include/qt6/QtCore/q17memory.h \
@@ -495,6 +497,7 @@ src/kateai_autogen/timestamp: src/kateai_autogen/moc_predefs.h \
   /usr/include/qt6/QtCore/qpoint.h \
   /usr/include/qt6/QtCore/qpointer.h \
   /usr/include/qt6/QtCore/qprocessordetection.h \
+  /usr/include/qt6/QtCore/qqueue.h \
   /usr/include/qt6/QtCore/qrect.h \
   /usr/include/qt6/QtCore/qrefcount.h \
   /usr/include/qt6/QtCore/qregularexpression.h \
@@ -533,6 +536,7 @@ src/kateai_autogen/timestamp: src/kateai_autogen/moc_predefs.h \
   /usr/include/qt6/QtCore/qtenvironmentvariables.h \
   /usr/include/qt6/QtCore/qtextstream.h \
   /usr/include/qt6/QtCore/qtformat_impl.h \
+  /usr/include/qt6/QtCore/qtimer.h \
   /usr/include/qt6/QtCore/qtimezone.h \
   /usr/include/qt6/QtCore/qtmetamacros.h \
   /usr/include/qt6/QtCore/qtnoop.h \
@@ -714,9 +718,7 @@ src/CMakeFiles/kateai.dir/chatwidget.cpp.o: /home/macewindu/ai-dev/KateAI/src/ch
   /usr/include/bits/stdint-intn.h \
   /usr/include/bits/stdint-least.h \
   /usr/include/bits/stdint-uintn.h \
-  /usr/include/bits/stdio.h \
   /usr/include/bits/stdio_lim.h \
-  /usr/include/bits/stdlib-bsearch.h \
   /usr/include/bits/stdlib-float.h \
   /usr/include/bits/struct_mutex.h \
   /usr/include/bits/struct_rwlock.h \
@@ -1021,6 +1023,7 @@ src/CMakeFiles/kateai.dir/chatwidget.cpp.o: /home/macewindu/ai-dev/KateAI/src/ch
   /usr/include/qt6/QtCore/QMap \
   /usr/include/qt6/QtCore/QMetaType \
   /usr/include/qt6/QtCore/QObject \
+  /usr/include/qt6/QtCore/QQueue \
   /usr/include/qt6/QtCore/QRect \
   /usr/include/qt6/QtCore/QSet \
   /usr/include/qt6/QtCore/QSharedDataPointer \
@@ -1028,6 +1031,7 @@ src/CMakeFiles/kateai.dir/chatwidget.cpp.o: /home/macewindu/ai-dev/KateAI/src/ch
   /usr/include/qt6/QtCore/QSizeF \
   /usr/include/qt6/QtCore/QString \
   /usr/include/qt6/QtCore/QStringList \
+  /usr/include/qt6/QtCore/QTimer \
   /usr/include/qt6/QtCore/QUrl \
   /usr/include/qt6/QtCore/QVariant \
   /usr/include/qt6/QtCore/q17memory.h \
@@ -1134,6 +1138,7 @@ src/CMakeFiles/kateai.dir/chatwidget.cpp.o: /home/macewindu/ai-dev/KateAI/src/ch
   /usr/include/qt6/QtCore/qpair.h \
   /usr/include/qt6/QtCore/qpoint.h \
   /usr/include/qt6/QtCore/qprocessordetection.h \
+  /usr/include/qt6/QtCore/qqueue.h \
   /usr/include/qt6/QtCore/qrect.h \
   /usr/include/qt6/QtCore/qrefcount.h \
   /usr/include/qt6/QtCore/qregularexpression.h \
@@ -1172,6 +1177,7 @@ src/CMakeFiles/kateai.dir/chatwidget.cpp.o: /home/macewindu/ai-dev/KateAI/src/ch
   /usr/include/qt6/QtCore/qtenvironmentvariables.h \
   /usr/include/qt6/QtCore/qtextstream.h \
   /usr/include/qt6/QtCore/qtformat_impl.h \
+  /usr/include/qt6/QtCore/qtimer.h \
   /usr/include/qt6/QtCore/qtimezone.h \
   /usr/include/qt6/QtCore/qtmetamacros.h \
   /usr/include/qt6/QtCore/qtnoop.h \
@@ -1384,9 +1390,7 @@ src/CMakeFiles/kateai.dir/configpage.cpp.o: /home/macewindu/ai-dev/KateAI/src/co
   /usr/include/bits/stdint-intn.h \
   /usr/include/bits/stdint-least.h \
   /usr/include/bits/stdint-uintn.h \
-  /usr/include/bits/stdio.h \
   /usr/include/bits/stdio_lim.h \
-  /usr/include/bits/stdlib-bsearch.h \
   /usr/include/bits/stdlib-float.h \
   /usr/include/bits/struct_mutex.h \
   /usr/include/bits/struct_rwlock.h \
@@ -2025,9 +2029,7 @@ src/CMakeFiles/kateai.dir/kateai_autogen/mocs_compilation.cpp.o: src/kateai_auto
   /usr/include/bits/stdint-intn.h \
   /usr/include/bits/stdint-least.h \
   /usr/include/bits/stdint-uintn.h \
-  /usr/include/bits/stdio.h \
   /usr/include/bits/stdio_lim.h \
-  /usr/include/bits/stdlib-bsearch.h \
   /usr/include/bits/stdlib-float.h \
   /usr/include/bits/struct_mutex.h \
   /usr/include/bits/struct_rwlock.h \
@@ -2331,6 +2333,7 @@ src/CMakeFiles/kateai.dir/kateai_autogen/mocs_compilation.cpp.o: src/kateai_auto
   /usr/include/qt6/QtCore/QMetaType \
   /usr/include/qt6/QtCore/QObject \
   /usr/include/qt6/QtCore/QPointer \
+  /usr/include/qt6/QtCore/QQueue \
   /usr/include/qt6/QtCore/QRect \
   /usr/include/qt6/QtCore/QSet \
   /usr/include/qt6/QtCore/QSharedDataPointer \
@@ -2338,6 +2341,7 @@ src/CMakeFiles/kateai.dir/kateai_autogen/mocs_compilation.cpp.o: src/kateai_auto
   /usr/include/qt6/QtCore/QSizeF \
   /usr/include/qt6/QtCore/QString \
   /usr/include/qt6/QtCore/QStringList \
+  /usr/include/qt6/QtCore/QTimer \
   /usr/include/qt6/QtCore/QUrl \
   /usr/include/qt6/QtCore/QVariant \
   /usr/include/qt6/QtCore/q17memory.h \
@@ -2444,6 +2448,7 @@ src/CMakeFiles/kateai.dir/kateai_autogen/mocs_compilation.cpp.o: src/kateai_auto
   /usr/include/qt6/QtCore/qpoint.h \
   /usr/include/qt6/QtCore/qpointer.h \
   /usr/include/qt6/QtCore/qprocessordetection.h \
+  /usr/include/qt6/QtCore/qqueue.h \
   /usr/include/qt6/QtCore/qrect.h \
   /usr/include/qt6/QtCore/qrefcount.h \
   /usr/include/qt6/QtCore/qregularexpression.h \
@@ -2482,6 +2487,7 @@ src/CMakeFiles/kateai.dir/kateai_autogen/mocs_compilation.cpp.o: src/kateai_auto
   /usr/include/qt6/QtCore/qtenvironmentvariables.h \
   /usr/include/qt6/QtCore/qtextstream.h \
   /usr/include/qt6/QtCore/qtformat_impl.h \
+  /usr/include/qt6/QtCore/qtimer.h \
   /usr/include/qt6/QtCore/qtimezone.h \
   /usr/include/qt6/QtCore/qtmetamacros.h \
   /usr/include/qt6/QtCore/qtmocconstants.h \
@@ -2659,9 +2665,7 @@ src/CMakeFiles/kateai.dir/permissionbar.cpp.o: /home/macewindu/ai-dev/KateAI/src
   /usr/include/bits/stdint-intn.h \
   /usr/include/bits/stdint-least.h \
   /usr/include/bits/stdint-uintn.h \
-  /usr/include/bits/stdio.h \
   /usr/include/bits/stdio_lim.h \
-  /usr/include/bits/stdlib-bsearch.h \
   /usr/include/bits/stdlib-float.h \
   /usr/include/bits/struct_mutex.h \
   /usr/include/bits/struct_rwlock.h \
@@ -3276,9 +3280,7 @@ src/CMakeFiles/kateai.dir/plugin.cpp.o: /home/macewindu/ai-dev/KateAI/src/plugin
   /usr/include/bits/stdint-intn.h \
   /usr/include/bits/stdint-least.h \
   /usr/include/bits/stdint-uintn.h \
-  /usr/include/bits/stdio.h \
   /usr/include/bits/stdio_lim.h \
-  /usr/include/bits/stdlib-bsearch.h \
   /usr/include/bits/stdlib-float.h \
   /usr/include/bits/struct_mutex.h \
   /usr/include/bits/struct_rwlock.h \
@@ -3900,9 +3902,7 @@ src/CMakeFiles/kateai.dir/pluginview.cpp.o: /home/macewindu/ai-dev/KateAI/src/pl
   /usr/include/bits/stdint-intn.h \
   /usr/include/bits/stdint-least.h \
   /usr/include/bits/stdint-uintn.h \
-  /usr/include/bits/stdio.h \
   /usr/include/bits/stdio_lim.h \
-  /usr/include/bits/stdlib-bsearch.h \
   /usr/include/bits/stdlib-float.h \
   /usr/include/bits/struct_mutex.h \
   /usr/include/bits/struct_rwlock.h \
@@ -4211,11 +4211,13 @@ src/CMakeFiles/kateai.dir/pluginview.cpp.o: /home/macewindu/ai-dev/KateAI/src/pl
   /usr/include/qt6/QtCore/QModelIndex \
   /usr/include/qt6/QtCore/QObject \
   /usr/include/qt6/QtCore/QPointer \
+  /usr/include/qt6/QtCore/QQueue \
   /usr/include/qt6/QtCore/QSet \
   /usr/include/qt6/QtCore/QSharedData \
   /usr/include/qt6/QtCore/QSharedDataPointer \
   /usr/include/qt6/QtCore/QString \
   /usr/include/qt6/QtCore/QStringList \
+  /usr/include/qt6/QtCore/QTimer \
   /usr/include/qt6/QtCore/QTypeInfo \
   /usr/include/qt6/QtCore/QUrl \
   /usr/include/qt6/QtCore/QVariant \
@@ -4230,6 +4232,7 @@ src/CMakeFiles/kateai.dir/pluginview.cpp.o: /home/macewindu/ai-dev/KateAI/src/pl
   /usr/include/qt6/QtCore/q23type_traits.h \
   /usr/include/qt6/QtCore/q23utility.h \
   /usr/include/qt6/QtCore/q26numeric.h \
+  /usr/include/qt6/QtCore/qabstracteventdispatcher.h \
   /usr/include/qt6/QtCore/qabstractitemmodel.h \
   /usr/include/qt6/QtCore/qalgorithms.h \
   /usr/include/qt6/QtCore/qalloc.h \
@@ -4241,6 +4244,7 @@ src/CMakeFiles/kateai.dir/pluginview.cpp.o: /home/macewindu/ai-dev/KateAI/src/pl
   /usr/include/qt6/QtCore/qatomic.h \
   /usr/include/qt6/QtCore/qatomic_cxx11.h \
   /usr/include/qt6/QtCore/qbasicatomic.h \
+  /usr/include/qt6/QtCore/qbasictimer.h \
   /usr/include/qt6/QtCore/qbindingstorage.h \
   /usr/include/qt6/QtCore/qbytearray.h \
   /usr/include/qt6/QtCore/qbytearrayalgorithms.h \
@@ -4265,10 +4269,12 @@ src/CMakeFiles/kateai.dir/pluginview.cpp.o: /home/macewindu/ai-dev/KateAI/src/pl
   /usr/include/qt6/QtCore/qdarwinhelpers.h \
   /usr/include/qt6/QtCore/qdatastream.h \
   /usr/include/qt6/QtCore/qdatetime.h \
+  /usr/include/qt6/QtCore/qdeadlinetimer.h \
   /usr/include/qt6/QtCore/qdebug.h \
   /usr/include/qt6/QtCore/qdir.h \
   /usr/include/qt6/QtCore/qdirlisting.h \
   /usr/include/qt6/QtCore/qendian.h \
+  /usr/include/qt6/QtCore/qeventloop.h \
   /usr/include/qt6/QtCore/qexceptionhandling.h \
   /usr/include/qt6/QtCore/qfile.h \
   /usr/include/qt6/QtCore/qfiledevice.h \
@@ -4317,6 +4323,7 @@ src/CMakeFiles/kateai.dir/pluginview.cpp.o: /home/macewindu/ai-dev/KateAI/src/pl
   /usr/include/qt6/QtCore/qpoint.h \
   /usr/include/qt6/QtCore/qpointer.h \
   /usr/include/qt6/QtCore/qprocessordetection.h \
+  /usr/include/qt6/QtCore/qqueue.h \
   /usr/include/qt6/QtCore/qrect.h \
   /usr/include/qt6/QtCore/qrefcount.h \
   /usr/include/qt6/QtCore/qregularexpression.h \
@@ -4355,6 +4362,7 @@ src/CMakeFiles/kateai.dir/pluginview.cpp.o: /home/macewindu/ai-dev/KateAI/src/pl
   /usr/include/qt6/QtCore/qtenvironmentvariables.h \
   /usr/include/qt6/QtCore/qtextstream.h \
   /usr/include/qt6/QtCore/qtformat_impl.h \
+  /usr/include/qt6/QtCore/qtimer.h \
   /usr/include/qt6/QtCore/qtimezone.h \
   /usr/include/qt6/QtCore/qtmetamacros.h \
   /usr/include/qt6/QtCore/qtnoop.h \
@@ -4530,9 +4538,7 @@ src/CMakeFiles/kateai.dir/promptedit.cpp.o: /home/macewindu/ai-dev/KateAI/src/pr
   /usr/include/bits/stdint-intn.h \
   /usr/include/bits/stdint-least.h \
   /usr/include/bits/stdint-uintn.h \
-  /usr/include/bits/stdio.h \
   /usr/include/bits/stdio_lim.h \
-  /usr/include/bits/stdlib-bsearch.h \
   /usr/include/bits/stdlib-float.h \
   /usr/include/bits/struct_mutex.h \
   /usr/include/bits/struct_rwlock.h \
@@ -5221,8 +5227,6 @@ src/kateai_autogen/EWIEGA46WW/qrc_kateai.cpp:
 
 /usr/include/c++/16/bits/fs_path.h:
 
-/usr/include/bits/stdio.h:
-
 /usr/include/bits/mathcalls.h:
 
 /usr/include/bits/mathcalls-narrow.h:
@@ -5362,6 +5366,12 @@ src/kateai_autogen/EWIEGA46WW/qrc_kateai.cpp:
 /usr/include/qt6/QtCore/qutf8stringview.h:
 
 /usr/include/qt6/QtCore/qurl.h:
+
+/usr/include/qt6/QtCore/qtversionchecks.h:
+
+/usr/include/qt6/QtCore/qtversion.h:
+
+/usr/include/qt6/QtCore/qttypetraits.h:
 
 /usr/include/c++/16/bits/streambuf_iterator.h:
 
@@ -5591,6 +5601,8 @@ src/kateai_autogen/moc_predefs.h:
 
 /usr/include/c++/16/bits/algorithmfwd.h:
 
+/usr/include/qt6/QtCore/QTimer:
+
 /usr/include/c++/16/bits/stl_list.h:
 
 /usr/include/c++/16/backward/auto_ptr.h:
@@ -5765,8 +5777,6 @@ src/kateai_autogen/moc_predefs.h:
 
 /usr/include/KF6/KI18n/ki18n_export.h:
 
-/home/macewindu/ai-dev/KateAI/src/chatwidget.cpp:
-
 /usr/include/c++/16/backward/binders.h:
 
 /usr/include/c++/16/bits/align.h:
@@ -5824,8 +5834,6 @@ src/kateai_autogen/moc_predefs.h:
 /usr/include/qt6/QtGui/qfontdatabase.h:
 
 /home/macewindu/ai-dev/KateAI/src/documentbridge.h:
-
-/usr/include/bits/stdlib-bsearch.h:
 
 /home/macewindu/ai-dev/KateAI/src/settings.h:
 
@@ -6215,6 +6223,10 @@ src/kateai_autogen/EWIEGA46WW/moc_promptedit.cpp:
 
 /usr/include/c++/16/limits:
 
+/usr/include/qt6/QtCore/qttranslation.h:
+
+/usr/include/c++/16/list:
+
 /usr/include/qt6/QtGui/qscreen_platform.h:
 
 /usr/include/c++/16/locale:
@@ -6388,6 +6400,10 @@ src/kateai_autogen/EWIEGA46WW/moc_permissionbar.cpp:
 /usr/include/qt6/QtCore/QPointer:
 
 /usr/include/qt6/QtCore/qstringfwd.h:
+
+/home/macewindu/ai-dev/KateAI/src/chatwidget.cpp:
+
+/usr/include/qt6/QtCore/QQueue:
 
 /usr/include/qt6/QtCore/QRect:
 
@@ -6599,6 +6615,8 @@ src/kateai_autogen/EWIEGA46WW/moc_permissionbar.cpp:
 
 /usr/include/qt6/QtGui/qpixmap.h:
 
+/usr/include/qt6/QtCore/qqueue.h:
+
 /usr/include/qt6/QtCore/QExplicitlySharedDataPointer:
 
 /usr/include/qt6/QtCore/qstringconverter_base.h:
@@ -6617,6 +6635,8 @@ src/kateai_autogen/EWIEGA46WW/moc_permissionbar.cpp:
 
 /usr/include/qt6/QtCore/qtextstream.h:
 
+/usr/include/qt6/QtCore/qtimer.h:
+
 /usr/include/c++/16/bits/nested_exception.h:
 
 /usr/include/qt6/QtCore/qtpreprocessorsupport.h:
@@ -6624,13 +6644,3 @@ src/kateai_autogen/EWIEGA46WW/moc_permissionbar.cpp:
 /usr/include/bits/libc-header-start.h:
 
 /usr/include/qt6/QtCore/qtresource.h:
-
-/usr/include/c++/16/list:
-
-/usr/include/qt6/QtCore/qttranslation.h:
-
-/usr/include/qt6/QtCore/qttypetraits.h:
-
-/usr/include/qt6/QtCore/qtversion.h:
-
-/usr/include/qt6/QtCore/qtversionchecks.h:
