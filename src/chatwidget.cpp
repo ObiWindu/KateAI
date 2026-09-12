@@ -34,18 +34,19 @@ ChatWidget::ChatWidget(QWidget *parent)
     m_provider = new QComboBox(this);
     m_model = new QComboBox(this);
     m_model->setEditable(true);
-    m_model->lineEdit()->setPlaceholderText(i18n("Filter models..."));
-    m_model->view()->setMinimumWidth(420);
     m_model->setInsertPolicy(QComboBox::NoInsert);
-    
-    // Connect model filter changes to refresh the model list
-    connect(m_model->lineEdit(), &QLineEdit::textChanged, this, [this](const QString &filter) {
-        if (m_updatingCombos) {
-            return;
-        }
-        m_modelFilter = filter.trimmed();
-        refreshModels();
-    });
+    if (auto *le = m_model->lineEdit()) {
+        le->setPlaceholderText(i18n("Filter models..."));
+        // Connect model filter changes to refresh the model list
+        connect(le, &QLineEdit::textChanged, this, [this](const QString &filter) {
+            if (m_updatingCombos) {
+                return;
+            }
+            m_modelFilter = filter.trimmed();
+            refreshModels();
+        });
+    }
+    m_model->view()->setMinimumWidth(420);
     m_permission = new QComboBox(this);
     m_sandbox = new QComboBox(this);
     m_mode = new QComboBox(this);
@@ -340,7 +341,9 @@ void ChatWidget::refreshModels()
     m_model->addItems(models);
     m_model->setEnabled(!allModels.isEmpty());
     if (m_modelFilter.isEmpty()) {
-        m_model->lineEdit()->setText(QString());
+        if (auto *le = m_model->lineEdit()) {
+            le->setText(QString());
+        }
     }
     const int index = m_model->findText(modelFor(m_settings));
     const int selectedIndex = index >= 0 ? index : (models.isEmpty() ? -1 : 0);

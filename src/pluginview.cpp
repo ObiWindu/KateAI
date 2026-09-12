@@ -35,87 +35,128 @@ KateAiView::KateAiView(KateAiPlugin *plugin, KTextEditor::MainWindow *mainWindow
     setXMLFile(u"ui.rc"_s);
 
     // Create the tool view panel on the right side of the main window
-    m_toolView = m_mainWindow->createToolView(plugin,
-                                              u"kateai"_s,
-                                              KTextEditor::MainWindow::Right,
-                                              QIcon::fromTheme(u"help-hint"_s),
-                                              i18n("Kate AI"));
+    if (m_mainWindow) {
+        m_toolView = m_mainWindow->createToolView(plugin,
+                                                  u"kateai"_s,
+                                                  KTextEditor::MainWindow::Right,
+                                                  QIcon::fromTheme(u"help-hint"_s),
+                                                  i18n("Kate AI"));
+    }
     
     // Create the chat widget that will contain the AI interface
-    m_chat = new ChatWidget(m_toolView);
+    if (m_toolView) {
+        m_chat = new ChatWidget(m_toolView);
+    }
     
     // Ensure the tool view has a layout and add our chat widget to it
-    if (!m_toolView->layout()) {
-        auto *layout = new QVBoxLayout(m_toolView);
-        layout->setContentsMargins(0, 0, 0, 0);
+    // Configure the chat widget with plugin settings and set up document bridging
+    if (m_toolView && m_chat) {
+        if (!m_toolView->layout()) {
+            auto *layout = new QVBoxLayout(m_toolView);
+            layout->setContentsMargins(0, 0, 0, 0);
+        }
+        m_toolView->layout()->addWidget(m_chat);
     }
-    m_toolView->layout()->addWidget(m_chat);
 
     // Configure the chat widget with plugin settings and set up document bridging
-    m_chat->setSettings(plugin->settings());
-    m_chat->agent()->setDocumentBridge(&m_bridge);
+    if (m_chat) {
+        m_chat->setSettings(plugin->settings());
+        if (m_chat->agent()) {
+            m_chat->agent()->setDocumentBridge(&m_bridge);
+        }
+    }
     refreshWorkspace();
 
-    connect(plugin, &KateAiPlugin::settingsChanged, this, [this](const Settings &settings) {
-        m_chat->setSettings(settings);
-        refreshWorkspace();
-    });
-    connect(m_chat, &ChatWidget::settingsChanged, plugin, &KateAiPlugin::setSettings);
-    connect(m_chat, &ChatWidget::configureRequested, this, &KateAiView::showConfiguration);
-    connect(m_mainWindow, &KTextEditor::MainWindow::viewChanged, this, [this](KTextEditor::View *) {
-        refreshWorkspace();
-    });
+    if (plugin && m_mainWindow) {
+        connect(plugin, &KateAiPlugin::settingsChanged, this, [this](const Settings &settings) {
+            if (m_chat) {
+                m_chat->setSettings(settings);
+            }
+            refreshWorkspace();
+        });
+    }
+    if (m_chat) {
+        connect(m_chat, &ChatWidget::settingsChanged, plugin, &KateAiPlugin::setSettings);
+        connect(m_chat, &ChatWidget::configureRequested, this, &KateAiView::showConfiguration);
+    }
+    if (m_mainWindow) {
+        connect(m_mainWindow, &KTextEditor::MainWindow::viewChanged, this, [this](KTextEditor::View *) {
+            refreshWorkspace();
+        });
+    }
 
     auto *ac = actionCollection();
-    auto *toggle = ac->addAction(u"kateai_toggle"_s);
-    toggle->setText(i18n("Show Kate AI"));
-    toggle->setIcon(QIcon::fromTheme(u"help-hint"_s));
-    KActionCollection::setDefaultShortcut(toggle, QKeySequence(Qt::CTRL | Qt::ALT | Qt::Key_A));
-    connect(toggle, &QAction::triggered, this, &KateAiView::showPanel);
+    QPointer<QAction> toggle, fresh, ask, fix, refactor, tests, configure;
+    
+    if (ac) {
+        toggle = ac->addAction(u"kateai_toggle"_s);
+        if (toggle) {
+            toggle->setText(i18n("Show Kate AI"));
+            toggle->setIcon(QIcon::fromTheme(u"help-hint"_s));
+            KActionCollection::setDefaultShortcut(toggle, QKeySequence(Qt::CTRL | Qt::ALT | Qt::Key_A));
+            connect(toggle, &QAction::triggered, this, &KateAiView::showPanel);
+        }
 
-    auto *fresh = ac->addAction(u"kateai_new_chat"_s);
-    fresh->setText(i18n("Kate AI: New Chat"));
-    KActionCollection::setDefaultShortcut(fresh, QKeySequence(Qt::CTRL | Qt::ALT | Qt::Key_N));
-    connect(fresh, &QAction::triggered, this, &KateAiView::newChat);
+        fresh = ac->addAction(u"kateai_new_chat"_s);
+        if (fresh) {
+            fresh->setText(i18n("Kate AI: New Chat"));
+            KActionCollection::setDefaultShortcut(fresh, QKeySequence(Qt::CTRL | Qt::ALT | Qt::Key_N));
+            connect(fresh, &QAction::triggered, this, &KateAiView::newChat);
+        }
 
-    auto *ask = ac->addAction(u"kateai_ask_selection"_s);
-    ask->setText(i18n("Ask Kate AI About This"));
-    connect(ask, &QAction::triggered, this, &KateAiView::askSelection);
+        ask = ac->addAction(u"kateai_ask_selection"_s);
+        if (ask) {
+            ask->setText(i18n("Ask Kate AI About This"));
+            connect(ask, &QAction::triggered, this, &KateAiView::askSelection);
+        }
 
-    auto *fix = ac->addAction(u"kateai_fix_selection"_s);
-    fix->setText(i18n("Fix Selection"));
-    connect(fix, &QAction::triggered, this, [this]() {
-        askSelectionWithInstruction(i18n("Find and fix problems in this code. Explain the change, then apply it."));
-    });
+        fix = ac->addAction(u"kateai_fix_selection"_s);
+        if (fix) {
+            fix->setText(i18n("Fix Selection"));
+            connect(fix, &QAction::triggered, this, [this]() {
+                askSelectionWithInstruction(i18n("Find and fix problems in this code. Explain the change, then apply it."));
+            });
+        }
 
-    auto *refactor = ac->addAction(u"kateai_refactor_selection"_s);
-    refactor->setText(i18n("Refactor Selection"));
-    connect(refactor, &QAction::triggered, this, [this]() {
-        askSelectionWithInstruction(i18n("Refactor this code for clarity and maintainability. Explain the change, then apply it."));
-    });
+        refactor = ac->addAction(u"kateai_refactor_selection"_s);
+        if (refactor) {
+            refactor->setText(i18n("Refactor Selection"));
+            connect(refactor, &QAction::triggered, this, [this]() {
+                askSelectionWithInstruction(i18n("Refactor this code for clarity and maintainability. Explain the change, then apply it."));
+            });
+        }
 
-    auto *tests = ac->addAction(u"kateai_test_selection"_s);
-    tests->setText(i18n("Add Tests for Selection"));
-    connect(tests, &QAction::triggered, this, [this]() {
-        askSelectionWithInstruction(i18n("Add or improve focused tests for this code. Explain the proposed coverage first."));
-    });
+        tests = ac->addAction(u"kateai_test_selection"_s);
+        if (tests) {
+            tests->setText(i18n("Add Tests for Selection"));
+            connect(tests, &QAction::triggered, this, [this]() {
+                askSelectionWithInstruction(i18n("Add or improve focused tests for this code. Explain the proposed coverage first."));
+            });
+        }
 
-    auto *configure = ac->addAction(u"kateai_configure"_s);
-    configure->setText(i18n("Configure Kate AI…"));
-    configure->setIcon(QIcon::fromTheme(u"settings-configure"_s));
-    connect(configure, &QAction::triggered, this, &KateAiView::showConfiguration);
+        configure = ac->addAction(u"kateai_configure"_s);
+        if (configure) {
+            configure->setText(i18n("Configure Kate AI…"));
+            configure->setIcon(QIcon::fromTheme(u"settings-configure"_s));
+            connect(configure, &QAction::triggered, this, &KateAiView::showConfiguration);
+        }
+    }
 
     // KTextEditor does not merge plugin XML clients into a view whose context
     // menu was supplied by another plugin. Add this action at show time so it
     // is consistently available in every editor tab.
-    for (auto *view : m_mainWindow->views()) {
-        addEditorContextActions(view, {ask, fix, refactor, tests});
+    if (m_mainWindow) {
+        for (auto *view : m_mainWindow->views()) {
+            addEditorContextActions(view, {ask, fix, refactor, tests});
+        }
+        connect(m_mainWindow, &KTextEditor::MainWindow::viewCreated, this, [this, ask, fix, refactor, tests](KTextEditor::View *view) {
+            addEditorContextActions(view, {ask, fix, refactor, tests});
+        });
     }
-    connect(m_mainWindow, &KTextEditor::MainWindow::viewCreated, this, [this, ask, fix, refactor, tests](KTextEditor::View *view) {
-        addEditorContextActions(view, {ask, fix, refactor, tests});
-    });
 
-    m_mainWindow->guiFactory()->addClient(this);
+    if (m_mainWindow && m_mainWindow->guiFactory()) {
+        m_mainWindow->guiFactory()->addClient(this);
+    }
 }
 
 KateAiView::~KateAiView()
@@ -128,27 +169,36 @@ KateAiView::~KateAiView()
 
 void KateAiView::showPanel()
 {
-    if (m_toolView) {
+    if (m_toolView && m_mainWindow) {
         m_mainWindow->showToolView(m_toolView);
-        m_chat->focusPrompt();
+        if (m_chat) {
+            m_chat->focusPrompt();
+        }
     }
 }
 
 void KateAiView::newChat()
 {
     showPanel();
-    m_chat->newChat();
+    if (m_chat) {
+        m_chat->newChat();
+    }
 }
 
 void KateAiView::askSelection()
 {
-    askSelectionWithInstruction(i18n("Explain this code."));
+    if (m_mainWindow) {
+        askSelectionWithInstruction(i18n("Explain this code."));
+    }
 }
 
 void KateAiView::askSelectionWithInstruction(const QString &instruction)
 {
     // Show the AI panel and get the currently active editor view
     showPanel();
+    if (!m_mainWindow) {
+        return;
+    }
     auto *view = m_mainWindow->activeView();
     if (!view) {
         return;
@@ -170,11 +220,16 @@ void KateAiView::askSelectionWithInstruction(const QString &instruction)
                                 snippet);
     
     // Send the prompt to the AI for analysis
-    m_chat->ask(prompt);
+    if (m_chat) {
+        m_chat->ask(prompt);
+    }
 }
 
 void KateAiView::showConfiguration()
 {
+    if (!m_mainWindow) {
+        return;
+    }
     // If configuration dialog already exists, bring it to the front
     if (m_configDialog) {
         m_configDialog->raise();
@@ -232,7 +287,7 @@ QString KateAiView::editorContext() const
 {
     QStringList lines;
     auto *view = m_mainWindow->activeView();
-    if (view) {
+    if (view && m_mainWindow) {
         const QString path = view->document()->url().toLocalFile();
         lines.append(u"Active file: %1"_s.arg(path.isEmpty() ? view->document()->documentName() : path));
         lines.append(u"Cursor: line %1"_s.arg(view->cursorPosition().line() + 1));
@@ -253,6 +308,9 @@ QString KateAiView::editorContext() const
 
 void KateAiView::refreshWorkspace()
 {
+    if (!m_mainWindow || !m_chat || !m_chat->agent()) {
+        return;
+    }
     const QString workspace = detectWorkspace(m_mainWindow);
     m_chat->agent()->setWorkspace(workspace);
     m_chat->agent()->setDocumentBridge(&m_bridge);
