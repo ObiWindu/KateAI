@@ -201,7 +201,7 @@ ChatWidget::ChatWidget(QWidget *parent)
     connect(&m_agent, &AgentLoop::userMessage, this, [this](const QString &text) {
         freezeStreaming();
         m_streamText.clear();
-        appendHtml(u"<div style=\"background-color:#2a2f3a; color:#e8e8e8; padding:12px 16px; border-radius:8px; margin:8px 0 8px 0; max-width:85%; text-align:left; font-family:sans-serif; font-size:13px; line-height:1.5; border:2px solid #3a3f4a; box-shadow:0 2px 8px rgba(0,0,0,0.3);\"><b style=\"color:#7aa2f7; font-size:11px; text-transform:uppercase; letter-spacing:0.5px;\">You:</b><br>%1</div>"_s.arg(escape(text).replace(u"\n"_s, u"<br>"_s)));
+        appendHtml(u"<div style=\"background-color:#2a2f3a; color:#e8e8e8; padding:12px 16px; border-radius:8px; margin:8px 0 8px 0; max-width:85%; text-align:left; font-family:sans-serif; font-size:13px; line-height:1.5; border:2px solid #3a3f4a; box-shadow:0 2px 8px rgba(0,0,0,0.3);\">%1</div>"_s.arg(escape(text).replace(u"\n"_s, u"<br>"_s)));
     });
     connect(&m_agent, &AgentLoop::assistantDelta, this, [this](const QString &delta) {
         setStreaming(m_streamText + delta);
@@ -213,7 +213,7 @@ ChatWidget::ChatWidget(QWidget *parent)
     // Keep implementation details such as individual tool calls out of the transcript.
     // AgentLoop emits one human-readable activity update per coherent batch instead.
     connect(&m_agent, &AgentLoop::activityUpdated, this, [this](const QString &text) {
-        appendHtml(u"<div style=\"color:#a9b1c6; font-size:12px; padding:8px 10px; margin:5px 0; border-left:2px solid #565f73; font-family:sans-serif; line-height:1.45;\"><b style=\"color:#7aa2f7; font-size:11px; text-transform:uppercase; letter-spacing:0.5px;\">Kate AI:</b><br>%1</div>"_s.arg(escape(text)));
+        appendHtml(u"<div style=\"color:#a9b1c6; font-size:12px; padding:8px 10px; margin:5px 0; border-left:2px solid #565f73; font-family:sans-serif; line-height:1.45;\">%1</div>"_s.arg(escape(text)));
     });
 
     // Tool-level signals are intentionally not rendered. They remain available for
@@ -420,7 +420,7 @@ void ChatWidget::appendHtml(const QString &html)
 void ChatWidget::setStreaming(const QString &text)
 {
     m_streamText = text;
-    m_transcript->setHtml(m_historyHtml + QStringLiteral("<div style=\"background-color:#1e222d; color:#e8e8e8; padding:12px 16px; border-radius:8px; margin:8px 0; border:1px solid #3a3f4a; font-family:sans-serif; font-size:13px; line-height:1.6;\"><b style=\"color:#7aa2f7; font-size:11px; text-transform:uppercase; letter-spacing:0.5px;\">Kate AI:</b><br><div style=\"white-space:pre-wrap;\">") + markdownToHtml(m_streamText) + QStringLiteral("</div></div>"));
+    m_transcript->setHtml(m_historyHtml + QStringLiteral("<div style=\"background-color:#1e222d; color:#e8e8e8; padding:12px 16px; border-radius:8px; margin:8px 0; border:1px solid #3a3f4a; font-family:sans-serif; font-size:13px; line-height:1.6;\"><div style=\"white-space:pre-wrap;\">") + markdownToHtml(m_streamText) + QStringLiteral("</div></div>"));
     m_transcript->verticalScrollBar()->setValue(m_transcript->verticalScrollBar()->maximum());
 }
 
