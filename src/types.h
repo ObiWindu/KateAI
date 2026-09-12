@@ -113,6 +113,7 @@ struct Settings {
     int maxProjectInstructionsLength = 2048; // Maximum characters for project instructions
     bool compressSystemPrompt = true; // Whether to compress system prompt
     int maxSystemPromptLength = 1024; // Maximum characters for system prompt
+    int messageSpeed = 2; // 0=slow, 1=medium, 2=fast (default fast)
 };
 
 QString providerId(Provider provider);

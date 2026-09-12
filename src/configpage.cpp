@@ -112,6 +112,13 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     m_deny->setMaximumHeight(80);
     form->addRow(i18n("Extra deny globs:"), m_deny);
 
+    // Message writing speed
+    m_speed = new QComboBox(this);
+    m_speed->addItem(i18n("Slow"), 0);
+    m_speed->addItem(i18n("Medium"), 1);
+    m_speed->addItem(i18n("Fast"), 2);
+    form->addRow(i18n("Message speed:"), m_speed);
+
     // Create separator line for context compression settings
     auto *compressionSeparator = new QLabel(i18n("--- Context Compression ---"), this);
     compressionSeparator->setStyleSheet(u"font-weight: bold; margin-top: 10px;"_s);
@@ -231,6 +238,7 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     connect(m_maxProjectInstructionsLength, &QSpinBox::valueChanged, this, markChanged);
     connect(m_compressSystemPrompt, &QCheckBox::toggled, this, markChanged);
     connect(m_maxSystemPromptLength, &QSpinBox::valueChanged, this, markChanged);
+    connect(m_speed, &QComboBox::currentIndexChanged, this, markChanged);
 
     // Load current settings into the configuration form
     reset();
@@ -286,6 +294,7 @@ void KateAiConfigPage::apply()
     s.maxProjectInstructionsLength = m_maxProjectInstructionsLength->value();
     s.compressSystemPrompt = m_compressSystemPrompt->isChecked();
     s.maxSystemPromptLength = m_maxSystemPromptLength->value();
+    s.messageSpeed = m_speed->currentData().toInt();
     
     m_plugin->setSettings(s);
 }
@@ -324,6 +333,7 @@ void KateAiConfigPage::reset()
     m_maxProjectInstructionsLength->setValue(s.maxProjectInstructionsLength);
     m_compressSystemPrompt->setChecked(s.compressSystemPrompt);
     m_maxSystemPromptLength->setValue(s.maxSystemPromptLength);
+    m_speed->setCurrentIndex(m_speed->findData(s.messageSpeed));
 }
 
 void KateAiConfigPage::defaults()

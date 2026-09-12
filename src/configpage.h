@@ -61,6 +61,7 @@ private:
     QSpinBox *m_maxProjectInstructionsLength = nullptr;
     QCheckBox *m_compressSystemPrompt = nullptr;
     QSpinBox *m_maxSystemPromptLength = nullptr;
+    QComboBox *m_speed = nullptr;
 };
 
 } // namespace KateAi

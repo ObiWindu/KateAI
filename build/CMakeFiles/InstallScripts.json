@@ -1,9 +1,0 @@
-{
-	"InstallScripts" : 
-	[
-		"/home/macewindu/ai-dev/KateAI/build/cmake_install.cmake",
-		"/home/macewindu/ai-dev/KateAI/build/src/cmake_install.cmake",
-		"/home/macewindu/ai-dev/KateAI/build/tests/cmake_install.cmake"
-	],
-	"Parallel" : false
-}
