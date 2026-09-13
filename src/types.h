@@ -12,6 +12,8 @@ enum class Provider {
     Grok,
     OpenAI,
     OpenRouter,
+    OpenAICompatible,
+    ClaudeCompatible,
 };
 
 enum class PermissionMode {
@@ -84,9 +86,15 @@ struct Settings {
     QString grokApiKey;
     QString openaiApiKey;
     QString openrouterApiKey;
+    QString openaiCompatibleApiKey;
+    QString claudeCompatibleApiKey;
     QString grokModel = QStringLiteral("grok-4.5");
     QString openaiModel = QStringLiteral("gpt-4.1");
     QString openrouterModel = QStringLiteral("x-ai/grok-4");
+    QString openaiCompatibleModel;
+    QString claudeCompatibleModel;
+    QString openaiCompatibleUrl = QStringLiteral("http://localhost:11434/v1");
+    QString claudeCompatibleUrl = QStringLiteral("https://api.anthropic.com/v1");
     PermissionMode permissionMode = PermissionMode::Ask;
     SandboxProfile sandbox = SandboxProfile::Workspace;
     // Agent budgets are intentionally separate: API model turns, tool calls, and provider rate.
@@ -120,6 +128,7 @@ QString providerId(Provider provider);
 QString providerLabel(Provider provider);
 Provider providerFromId(const QString &id);
 QString providerBaseUrl(Provider provider);
+QString providerBaseUrl(const Settings &settings);
 QStringList defaultModels(Provider provider);
 
 QString permissionModeId(PermissionMode mode);

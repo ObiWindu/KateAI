@@ -6,6 +6,7 @@
 
 class QLabel;
 class QPlainTextEdit;
+class QPushButton;
 
 namespace KateAi
 {
@@ -24,8 +25,14 @@ Q_SIGNALS:
     void decided(PermissionDecision decision);
 
 private:
+    void updateStyle(ToolRisk risk);
+
+    QLabel *m_riskBadge = nullptr;
     QLabel *m_title = nullptr;
     QPlainTextEdit *m_details = nullptr;
+    QPushButton *m_allowBtn = nullptr;
+    QPushButton *m_sessionBtn = nullptr;
+    QPushButton *m_denyBtn = nullptr;
 };
 
 } // namespace KateAi

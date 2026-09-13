@@ -14,6 +14,10 @@ QString providerId(Provider provider)
         return u"openai"_s;
     case Provider::OpenRouter:
         return u"openrouter"_s;
+    case Provider::OpenAICompatible:
+        return u"openai-compatible"_s;
+    case Provider::ClaudeCompatible:
+        return u"claude-compatible"_s;
     case Provider::Grok:
     default:
         return u"grok"_s;
@@ -27,6 +31,10 @@ QString providerLabel(Provider provider)
         return i18n("OpenAI");
     case Provider::OpenRouter:
         return i18n("OpenRouter");
+    case Provider::OpenAICompatible:
+        return i18n("OpenAI Compatible");
+    case Provider::ClaudeCompatible:
+        return i18n("Claude Compatible");
     case Provider::Grok:
     default:
         return i18n("Grok (xAI)");
@@ -41,6 +49,12 @@ Provider providerFromId(const QString &id)
     if (id == u"openrouter"_s) {
         return Provider::OpenRouter;
     }
+    if (id == u"openai-compatible"_s) {
+        return Provider::OpenAICompatible;
+    }
+    if (id == u"claude-compatible"_s) {
+        return Provider::ClaudeCompatible;
+    }
     return Provider::Grok;
 }
 
@@ -51,6 +65,27 @@ QString providerBaseUrl(Provider provider)
         return u"https://api.openai.com/v1"_s;
     case Provider::OpenRouter:
         return u"https://openrouter.ai/api/v1"_s;
+    case Provider::OpenAICompatible:
+        return u"http://localhost:11434/v1"_s;
+    case Provider::ClaudeCompatible:
+        return u"https://api.anthropic.com/v1"_s;
+    case Provider::Grok:
+    default:
+        return u"https://api.x.ai/v1"_s;
+    }
+}
+
+QString providerBaseUrl(const Settings &settings)
+{
+    switch (settings.provider) {
+    case Provider::OpenAI:
+        return u"https://api.openai.com/v1"_s;
+    case Provider::OpenRouter:
+        return u"https://openrouter.ai/api/v1"_s;
+    case Provider::OpenAICompatible:
+        return settings.openaiCompatibleUrl;
+    case Provider::ClaudeCompatible:
+        return settings.claudeCompatibleUrl;
     case Provider::Grok:
     default:
         return u"https://api.x.ai/v1"_s;
@@ -69,6 +104,10 @@ QStringList defaultModels(Provider provider)
                 u"openai/gpt-4o"_s,
                 u"anthropic/claude-sonnet-4"_s,
                 u"google/gemini-2.5-pro"_s};
+    case Provider::OpenAICompatible:
+        return {u"llama3"_s, u"mistral"_s};
+    case Provider::ClaudeCompatible:
+        return {u"claude-3-5-sonnet-20241022"_s, u"claude-3-opus-20240229"_s};
     case Provider::Grok:
     default:
         return {u"grok-4.5"_s, u"grok-4.6"_s, u"grok-4"_s, u"grok-3"_s};
@@ -163,6 +202,10 @@ QString apiKeyFor(const Settings &settings)
         return settings.openaiApiKey;
     case Provider::OpenRouter:
         return settings.openrouterApiKey;
+    case Provider::OpenAICompatible:
+        return settings.openaiCompatibleApiKey;
+    case Provider::ClaudeCompatible:
+        return settings.claudeCompatibleApiKey;
     case Provider::Grok:
     default:
         return settings.grokApiKey;
@@ -176,6 +219,10 @@ QString modelFor(const Settings &settings)
         return settings.openaiModel;
     case Provider::OpenRouter:
         return settings.openrouterModel;
+    case Provider::OpenAICompatible:
+        return settings.openaiCompatibleModel;
+    case Provider::ClaudeCompatible:
+        return settings.claudeCompatibleModel;
     case Provider::Grok:
     default:
         return settings.grokModel;
@@ -303,7 +350,7 @@ QString compressText(const QString &text, int maxLength, bool enabled)
     if (!enabled || text.length() <= maxLength) {
         return text;
     }
-    
+
     // Truncate and add indicator
     QString result = text.left(maxLength);
     result += u"... (truncated)"_s;

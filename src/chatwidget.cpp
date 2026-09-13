@@ -3,17 +3,23 @@
 #include "permissionbar.h"
 #include "promptedit.h"
 #include "settings.h"
+#include "toolcallwidget.h"
 
 #include <KLocalizedString>
 
+#include <QAction>
+#include <QActionGroup>
 #include <QComboBox>
-#include <QAbstractItemView>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QLineEdit>
+#include <QMenu>
 #include <QPushButton>
 #include <QScrollBar>
+#include <QScrollArea>
 #include <QTextBrowser>
 #include <QTextDocument>
+#include <QTimer>
 #include <QVBoxLayout>
 
 using namespace Qt::Literals::StringLiterals;
@@ -24,120 +30,260 @@ namespace KateAi
 ChatWidget::ChatWidget(QWidget *parent)
     : QWidget(parent)
 {
-    // Create the main vertical layout for the chat widget
     auto *root = new QVBoxLayout(this);
-    root->setContentsMargins(6, 6, 6, 6);
-    root->setSpacing(6);
+    root->setContentsMargins(0, 0, 0, 0);
+    root->setSpacing(0);
 
-    // Create the toolbar layout for provider and model selection
-    auto *toolbar = new QHBoxLayout;
+    // 1. Zed-style Header / Toolbar
+    auto *toolbar = new QWidget(this);
+    toolbar->setStyleSheet(
+        u"QWidget {"
+        u"  background-color: #1e1e1e;"
+        u"  border-bottom: 1px solid #2d2d2d;"
+        u"}"_s);
+    auto *toolbarLayout = new QHBoxLayout(toolbar);
+    toolbarLayout->setContentsMargins(10, 6, 10, 6);
+    toolbarLayout->setSpacing(8);
+
+    // Unified Model Selector button
+    m_modelSelector = new QPushButton(this);
+    m_modelSelector->setCursor(Qt::PointingHandCursor);
+    m_modelSelector->setStyleSheet(
+        u"QPushButton {"
+        u"  background-color: #262628;"
+        u"  color: #cccccc;"
+        u"  border: 1px solid #3c3c40;"
+        u"  border-radius: 4px;"
+        u"  padding: 4px 10px;"
+        u"  font-size: 12px;"
+        u"  font-weight: 500;"
+        u"  text-align: left;"
+        u"}"
+        u"QPushButton:hover {"
+        u"  background-color: #2e2e32;"
+        u"  border-color: #4a4a50;"
+        u"  color: #ffffff;"
+        u"}"_s);
+    toolbarLayout->addWidget(m_modelSelector);
+
+    // Thread title label
+    m_threadTitle = new QLabel(i18n("New Thread"), this);
+    m_threadTitle->setStyleSheet(u"QLabel { color: #888888; font-size: 12px; font-weight: 500; padding-left: 4px; }"_s);
+    toolbarLayout->addWidget(m_threadTitle);
+
+    toolbarLayout->addStretch();
+
+    // New Chat button
+    m_newChat = new QPushButton(QIcon::fromTheme(u"list-add"_s), QString(), this);
+    m_newChat->setToolTip(i18n("New Thread"));
+    m_newChat->setFixedSize(26, 26);
+    m_newChat->setCursor(Qt::PointingHandCursor);
+    m_newChat->setStyleSheet(
+        u"QPushButton {"
+        u"  background: transparent;"
+        u"  border: 1px solid transparent;"
+        u"  border-radius: 4px;"
+        u"}"
+        u"QPushButton:hover {"
+        u"  background-color: #2e2e32;"
+        u"  border-color: #3c3c40;"
+        u"}"_s);
+    toolbarLayout->addWidget(m_newChat);
+
+    // Settings / Configure button
+    m_configure = new QPushButton(QIcon::fromTheme(u"settings-configure"_s), QString(), this);
+    m_configure->setToolTip(i18n("Settings"));
+    m_configure->setFixedSize(26, 26);
+    m_configure->setCursor(Qt::PointingHandCursor);
+    m_configure->setStyleSheet(
+        u"QPushButton {"
+        u"  background: transparent;"
+        u"  border: 1px solid transparent;"
+        u"  border-radius: 4px;"
+        u"}"
+        u"QPushButton:hover {"
+        u"  background-color: #2e2e32;"
+        u"  border-color: #3c3c40;"
+        u"}"_s);
+    toolbarLayout->addWidget(m_configure);
+
+    root->addWidget(toolbar);
+
+    // Hidden controls retained for internal logic & backward compatibility
     m_provider = new QComboBox(this);
+    m_provider->setVisible(false);
     m_model = new QComboBox(this);
     m_model->setEditable(true);
     m_model->setInsertPolicy(QComboBox::NoInsert);
-    if (auto *le = m_model->lineEdit()) {
-        le->setPlaceholderText(i18n("Filter models..."));
-        // Connect model filter changes to refresh the model list
-        connect(le, &QLineEdit::textChanged, this, [this](const QString &filter) {
-            if (m_updatingCombos) {
-                return;
-            }
-            m_modelFilter = filter.trimmed();
-            refreshModels();
-        });
-    }
-    m_model->view()->setMinimumWidth(420);
+    m_model->setVisible(false);
+
     m_permission = new QComboBox(this);
-    m_sandbox = new QComboBox(this);
-    m_mode = new QComboBox(this);
-    m_newChat = new QPushButton(i18n("New chat"), this);
-    m_configure = new QPushButton(QIcon::fromTheme(u"settings-configure"_s), QString(), this);
-    m_configure->setToolTip(i18n("Configure Kate AI"));
-    m_configure->setAccessibleName(i18n("Configure Kate AI"));
-    m_send = new QPushButton(this);
-    m_send->setToolTip(i18n("Send message"));
-    m_send->setAccessibleName(i18n("Send message"));
-    m_send->setFixedSize(38, 38);
-    m_send->setStyleSheet(u"QPushButton { font-size: 22px; font-weight: bold; border-radius: 19px; }"_s);
-    updateSendButtonState();
-
-    m_stop = new QPushButton(this);
-    m_stop->setVisible(false);
-
+    m_permission->setVisible(false);
     m_permission->addItem(permissionModeLabel(PermissionMode::Ask), permissionModeId(PermissionMode::Ask));
     m_permission->addItem(permissionModeLabel(PermissionMode::AcceptEdits), permissionModeId(PermissionMode::AcceptEdits));
     m_permission->addItem(permissionModeLabel(PermissionMode::AlwaysApprove), permissionModeId(PermissionMode::AlwaysApprove));
 
+    m_sandbox = new QComboBox(this);
+    m_sandbox->setVisible(false);
     m_sandbox->addItem(sandboxProfileLabel(SandboxProfile::Workspace), sandboxProfileId(SandboxProfile::Workspace));
     m_sandbox->addItem(sandboxProfileLabel(SandboxProfile::ReadOnly), sandboxProfileId(SandboxProfile::ReadOnly));
     m_sandbox->addItem(sandboxProfileLabel(SandboxProfile::Strict), sandboxProfileId(SandboxProfile::Strict));
     m_sandbox->addItem(sandboxProfileLabel(SandboxProfile::Off), sandboxProfileId(SandboxProfile::Off));
+
+    m_mode = new QComboBox(this);
+    m_mode->setVisible(false);
     m_mode->addItem(i18n("Agent"), false);
     m_mode->addItem(i18n("Plan"), true);
-    m_mode->setToolTip(i18n("Plan mode only gives the AI read-only project tools."));
 
     m_thinking = new QPushButton(this);
-    m_thinking->setIcon(QIcon::fromTheme(u"view-refresh"_s));
-    m_thinking->setToolTip(i18n("Enable/disable thinking mode"));
+    m_thinking->setVisible(false);
     m_thinking->setCheckable(true);
-    m_thinking->setChecked(true);
-    m_thinking->setFixedSize(38, 38);
-    m_thinking->setStyleSheet(u"QPushButton { background-color: #4a5568; border-radius: 19px; } QPushButton:checked { background-color: #48bb78; }"_s);
 
-    toolbar->addWidget(m_provider, 1);
-    toolbar->addWidget(m_model, 2);
-    toolbar->addWidget(m_permission, 1);
-    toolbar->addWidget(m_sandbox, 1);
-    toolbar->addWidget(m_mode);
-    toolbar->addWidget(m_thinking);
-    toolbar->addWidget(m_newChat);
-    toolbar->addWidget(m_configure);
-    root->addLayout(toolbar);
+    m_stop = new QPushButton(this);
+    m_stop->setVisible(false);
+    m_stop->setEnabled(false);
 
-    m_transcript = new QTextBrowser(this);
-    m_transcript->setOpenExternalLinks(true);
-    m_transcript->setPlaceholderText(i18n("Kate AI — send a prompt to read and write project files with permission asks."));
-    m_transcript->setStyleSheet(u"QTextBrowser { background-color: #12141a; color: #e8e8e8; border: none; padding: 8px; }"_s);
-    root->addWidget(m_transcript, 1);
+    // 2. Zed-style Transcript Area (Scroll Area with Cards & Tool Widgets)
+    m_scrollArea = new QScrollArea(this);
+    m_scrollArea->setWidgetResizable(true);
+    m_scrollArea->setFrameShape(QFrame::NoFrame);
+    m_scrollArea->setStyleSheet(
+        u"QScrollArea {"
+        u"  background-color: #181818;"
+        u"  border: none;"
+        u"}"
+        u"QScrollBar:vertical {"
+        u"  background: transparent;"
+        u"  width: 8px;"
+        u"  margin: 0;"
+        u"}"
+        u"QScrollBar::handle:vertical {"
+        u"  background: #333338;"
+        u"  border-radius: 4px;"
+        u"  min-height: 24px;"
+        u"}"
+        u"QScrollBar::handle:vertical:hover {"
+        u"  background: #4a4a52;"
+        u"}"
+        u"QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {"
+        u"  height: 0;"
+        u"}"_s);
 
+    m_transcriptContainer = new QWidget(m_scrollArea);
+    m_transcriptContainer->setStyleSheet(u"background-color: #181818;"_s);
+    m_transcriptLayout = new QVBoxLayout(m_transcriptContainer);
+    m_transcriptLayout->setContentsMargins(14, 14, 14, 14);
+    m_transcriptLayout->setSpacing(10);
+
+    // Initial empty state welcome widget
+    auto *welcome = new QWidget(m_transcriptContainer);
+    welcome->setObjectName(u"welcomeWidget"_s);
+    auto *wLayout = new QVBoxLayout(welcome);
+    wLayout->setContentsMargins(20, 40, 20, 20);
+    wLayout->setAlignment(Qt::AlignCenter);
+
+    auto *wIcon = new QLabel(u"⚡"_s, welcome);
+    wIcon->setAlignment(Qt::AlignCenter);
+    wIcon->setStyleSheet(u"font-size: 26px; color: #3b82f6; margin-bottom: 6px;"_s);
+    wLayout->addWidget(wIcon);
+
+    auto *wTitle = new QLabel(i18n("Kate AI Agent"), welcome);
+    wTitle->setAlignment(Qt::AlignCenter);
+    wTitle->setStyleSheet(u"color: #e4e4e4; font-size: 15px; font-weight: bold;"_s);
+    wLayout->addWidget(wTitle);
+
+    auto *wSub = new QLabel(i18n("Ask questions, edit code, and explore your workspace."), welcome);
+    wSub->setAlignment(Qt::AlignCenter);
+    wSub->setStyleSheet(u"color: #777777; font-size: 12px; margin-top: 4px;"_s);
+    wLayout->addWidget(wSub);
+
+    m_transcriptLayout->addWidget(welcome);
+    m_transcriptLayout->addStretch();
+    m_scrollArea->setWidget(m_transcriptContainer);
+    root->addWidget(m_scrollArea, 1);
+
+    // 3. Permission Bar (Zed-style Inline Consent)
     m_permissionBar = new PermissionBar(this);
     root->addWidget(m_permissionBar);
 
-    m_prompt = new PromptEdit(this);
-    auto *composer = new QHBoxLayout;
-    composer->setContentsMargins(0, 0, 0, 0);
-    composer->setSpacing(4);
-    composer->addWidget(m_prompt, 1);
-    auto *composerActions = new QHBoxLayout;
-    composerActions->setContentsMargins(0, 0, 0, 0);
-    composerActions->setSpacing(4);
-    composerActions->addStretch();
-    composerActions->addWidget(m_send);
-    composerActions->addStretch();
-    composer->addLayout(composerActions);
-    root->addLayout(composer);
+    // 4. Composer Area (Zed-style Input Box)
+    auto *composerContainer = new QWidget(this);
+    composerContainer->setStyleSheet(
+        u"QWidget {"
+        u"  background-color: #1a1a1a;"
+        u"  border-top: 1px solid #282828;"
+        u"}"_s);
+    auto *composerLayout = new QVBoxLayout(composerContainer);
+    composerLayout->setContentsMargins(12, 8, 12, 8);
+    composerLayout->setSpacing(4);
 
-    m_status = new QLabel(i18n("Enter to send · Shift+Enter for a new line"), this);
-    m_status->setWordWrap(true);
-    root->addWidget(m_status);
+    auto *composerCard = new QWidget(composerContainer);
+    composerCard->setObjectName(u"composerCard"_s);
+    composerCard->setStyleSheet(
+        u"QWidget#composerCard {"
+        u"  background-color: #232326;"
+        u"  border: 1px solid #38383e;"
+        u"  border-radius: 8px;"
+        u"}"_s);
+    auto *composerCardLayout = new QVBoxLayout(composerCard);
+    composerCardLayout->setContentsMargins(10, 8, 10, 6);
+    composerCardLayout->setSpacing(4);
 
+    m_prompt = new PromptEdit(composerCard);
+    m_prompt->setStyleSheet(
+        u"QPlainTextEdit {"
+        u"  background: transparent;"
+        u"  color: #e4e4e4;"
+        u"  border: none;"
+        u"  padding: 2px;"
+        u"  font-size: 13px;"
+        u"}"_s);
+    composerCardLayout->addWidget(m_prompt);
+
+    auto *bottomRow = new QHBoxLayout;
+    bottomRow->setContentsMargins(2, 0, 2, 2);
+
+    m_tokenCount = new QLabel(composerCard);
+    m_tokenCount->setStyleSheet(u"QLabel { color: #666; font-size: 11px; }"_s);
+    bottomRow->addWidget(m_tokenCount);
+    bottomRow->addStretch();
+
+    m_send = new QPushButton(composerCard);
+    m_send->setFixedSize(28, 28);
+    m_send->setCursor(Qt::PointingHandCursor);
+    updateSendButtonState();
+    bottomRow->addWidget(m_send);
+
+    composerCardLayout->addLayout(bottomRow);
+    composerLayout->addWidget(composerCard);
+
+    m_status = new QLabel(i18n("Enter to send · Shift+Enter for a new line"), composerContainer);
+    m_status->setStyleSheet(u"QLabel { color: #555555; font-size: 11px; margin-left: 4px; }"_s);
+    composerLayout->addWidget(m_status);
+
+    root->addWidget(composerContainer);
+
+    // Signal connections
     connect(m_prompt, &PromptEdit::submitRequested, this, &ChatWidget::submit);
+    connect(m_prompt, &QPlainTextEdit::textChanged, this, [this]() {
+        if (!m_agent.isBusy()) {
+            updateSendButtonState();
+        }
+    });
+
     connect(m_send, &QPushButton::clicked, this, [this]() {
         if (m_agent.isBusy()) {
             m_permissionBar->hideBar();
             m_agent.abort();
+            updateSendButtonState();
         } else {
             submit();
         }
     });
-    connect(m_stop, &QPushButton::clicked, this, [this]() {
-        if (m_agent.isBusy()) {
-            m_permissionBar->hideBar();
-            m_agent.abort();
-        }
-    });
+
     connect(m_newChat, &QPushButton::clicked, this, &ChatWidget::newChat);
-    connect(m_configure, &QPushButton::clicked, this, &ChatWidget::configureRequested);
+    connect(m_configure, &QPushButton::clicked, this, &ChatWidget::showSettingsMenu);
+    connect(m_modelSelector, &QPushButton::clicked, this, &ChatWidget::showModelMenu);
     connect(m_permissionBar, &PermissionBar::decided, &m_agent, &AgentLoop::resolvePermission);
 
     connect(m_provider, &QComboBox::currentIndexChanged, this, [this]() {
@@ -147,9 +293,12 @@ ChatWidget::ChatWidget(QWidget *parent)
         m_settings.provider = providerFromId(m_provider->currentData().toString());
         m_preferredProvider = m_settings.provider;
         refreshModels();
+        updateModelSelectorLabel();
+        updateTokenDisplay();
         m_agent.setSettings(m_settings);
         Q_EMIT settingsChanged(m_settings);
     });
+
     connect(m_model, &QComboBox::currentTextChanged, this, [this](const QString &text) {
         if (m_updatingCombos) {
             return;
@@ -161,49 +310,52 @@ ChatWidget::ChatWidget(QWidget *parent)
         case Provider::OpenRouter:
             m_settings.openrouterModel = text.trimmed();
             break;
+        case Provider::OpenAICompatible:
+            m_settings.openaiCompatibleModel = text.trimmed();
+            break;
+        case Provider::ClaudeCompatible:
+            m_settings.claudeCompatibleModel = text.trimmed();
+            break;
         case Provider::Grok:
         default:
             m_settings.grokModel = text.trimmed();
             break;
         }
+        updateModelSelectorLabel();
+        updateTokenDisplay();
         m_agent.setSettings(m_settings);
         Q_EMIT settingsChanged(m_settings);
     });
+
     connect(m_permission, &QComboBox::currentIndexChanged, this, [this]() {
-        if (m_updatingCombos) {
-            return;
-        }
+        if (m_updatingCombos) return;
         m_settings.permissionMode = permissionModeFromId(m_permission->currentData().toString());
         m_agent.setSettings(m_settings);
         Q_EMIT settingsChanged(m_settings);
     });
+
     connect(m_sandbox, &QComboBox::currentIndexChanged, this, [this]() {
-        if (m_updatingCombos) {
-            return;
-        }
+        if (m_updatingCombos) return;
         m_settings.sandbox = sandboxProfileFromId(m_sandbox->currentData().toString());
         m_agent.setSettings(m_settings);
         Q_EMIT settingsChanged(m_settings);
     });
+
     connect(m_mode, &QComboBox::currentIndexChanged, this, [this]() {
-        if (m_updatingCombos) {
-            return;
-        }
+        if (m_updatingCombos) return;
         m_settings.planMode = m_mode->currentData().toBool();
         m_agent.setSettings(m_settings);
         Q_EMIT settingsChanged(m_settings);
     });
+
     connect(m_thinking, &QPushButton::toggled, this, [this](bool checked) {
         m_settings.thinkingMode = checked;
         m_agent.setSettings(m_settings);
         Q_EMIT settingsChanged(m_settings);
     });
 
-    connect(&m_agent, &AgentLoop::userMessage, this, [this](const QString &text) {
-        freezeStreaming();
-        m_streamText.clear();
-        appendHtml(u"<div style=\"background-color:#2a2f3a; color:#e8e8e8; padding:12px 16px; border-radius:8px; margin:8px 0 8px 0; max-width:85%; text-align:left; font-family:sans-serif; font-size:13px; line-height:1.5; border:2px solid #3a3f4a; box-shadow:0 2px 8px rgba(0,0,0,0.3);\">%1</div>"_s.arg(escape(text).replace(u"\n"_s, u"<br>"_s)));
-    });
+    // Agent signals
+    connect(&m_agent, &AgentLoop::userMessage, this, &ChatWidget::addUserMessage);
     connect(&m_agent, &AgentLoop::assistantDelta, this, [this](const QString &delta) {
         setStreaming(m_streamText + delta);
     });
@@ -211,53 +363,244 @@ ChatWidget::ChatWidget(QWidget *parent)
         Q_UNUSED(text);
         freezeStreaming();
     });
-    // Keep implementation details such as individual tool calls out of the transcript.
-    // AgentLoop emits one human-readable activity update per coherent batch instead.
-    connect(&m_agent, &AgentLoop::activityUpdated, this, [this](const QString &text) {
-        appendHtml(u"<div style=\"color:#a9b1c6; font-size:12px; padding:8px 10px; margin:5px 0; border-left:2px solid #565f73; font-family:sans-serif; line-height:1.45;\">%1</div>"_s.arg(escape(text)));
+    connect(&m_agent, &AgentLoop::activityUpdated, this, &ChatWidget::addActivityMessage);
+
+    // Tool visibility signals (Zed-style inline tool-call cards)
+    connect(&m_agent, &AgentLoop::toolStarted, this, [this](const PermissionRequest &request) {
+        freezeStreaming();
+        auto *toolWidget = new ToolCallWidget(request.toolCallId, m_transcriptContainer);
+        toolWidget->setToolInfo(request.toolName, request.summary, request.risk);
+        toolWidget->setRunning();
+        m_toolCallWidgets.insert(request.toolCallId, toolWidget);
+        m_transcriptLayout->insertWidget(m_transcriptLayout->count() - 1, toolWidget);
+        scrollToBottom();
     });
 
-    // Tool-level signals are intentionally not rendered. They remain available for
-    // the permission UI and future diagnostics, but the chat stays human-readable.
-    connect(&m_agent, &AgentLoop::toolStarted, this, [](const PermissionRequest &) {});
-    connect(&m_agent, &AgentLoop::toolFinished, this, [](const ToolResult &) {});
+    connect(&m_agent, &AgentLoop::toolFinished, this, [this](const ToolResult &result) {
+        if (auto *widget = m_toolCallWidgets.value(result.toolCallId)) {
+            widget->setFinished(result);
+        }
+        scrollToBottom();
+    });
+
     connect(&m_agent, &AgentLoop::permissionNeeded, this, [this](const PermissionRequest &request) {
         m_permissionBar->showRequest(request);
         m_prompt->setEnabled(false);
-        m_send->setEnabled(false);
+        updateSendButtonState();
+        scrollToBottom();
     });
-    connect(m_permissionBar, &PermissionBar::decided, &m_agent, &AgentLoop::resolvePermission);
 
     connect(&m_agent, &AgentLoop::statusChanged, this, [this](const QString &status) {
         m_status->setText(status.isEmpty() ? i18n("Enter to send · Shift+Enter for a new line") : status);
-        m_stop->setEnabled(m_agent.isBusy());
         m_prompt->setEnabled(!m_permissionBar->isVisible());
-        m_send->setEnabled(!m_agent.isBusy() && !m_permissionBar->isVisible());
         updateSendButtonState();
     });
+
     connect(&m_agent, &AgentLoop::failed, this, [this](const QString &error) {
-        appendHtml(u"<p style='color:#c0392b'><b>Error:</b> %1</p>"_s.arg(escape(error)));
-        m_stop->setEnabled(false);
-        m_send->setEnabled(true);
         freezeStreaming();
+        auto *errCard = new QWidget(m_transcriptContainer);
+        errCard->setStyleSheet(u"QWidget { background-color: #261b1b; border: 1px solid #5a2020; border-left: 4px solid #ef4444; border-radius: 6px; }"_s);
+        auto *l = new QVBoxLayout(errCard);
+        l->setContentsMargins(12, 10, 12, 10);
+        auto *errLabel = new QLabel(errCard);
+        errLabel->setWordWrap(true);
+        errLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        errLabel->setStyleSheet(u"color: #ff8888; font-size: 12px; font-weight: bold; background: transparent; border: none;"_s);
+        errLabel->setText(i18n("Error: %1", error));
+        l->addWidget(errLabel);
+        m_transcriptLayout->insertWidget(m_transcriptLayout->count() - 1, errCard);
+        scrollToBottom();
+        updateSendButtonState();
     });
+
     connect(&m_agent, &AgentLoop::turnFinished, this, [this]() {
-        m_stop->setEnabled(false);
         m_prompt->setEnabled(true);
-        m_send->setEnabled(true);
+        updateSendButtonState();
         m_prompt->setFocus();
     });
+
     connect(&m_agent, &AgentLoop::modelsReceived, this, [this](Provider provider, const QStringList &models) {
         m_modelCatalog.insert(provider, models);
         refreshProviders();
+        updateModelSelectorLabel();
+        updateTokenDisplay();
     });
+
     connect(&m_agent, &AgentLoop::modelsFailed, this, [this](Provider provider, const QString &error) {
         m_modelCatalog.remove(provider);
         refreshProviders();
+        updateModelSelectorLabel();
         if (provider == m_settings.provider) {
             m_status->setText(i18n("Model list unavailable: %1", error));
         }
     });
+
+    updateModelSelectorLabel();
+    updateTokenDisplay();
+}
+
+void ChatWidget::addUserMessage(const QString &text)
+{
+    // Remove welcome widget if present
+    if (auto *welcome = m_transcriptContainer->findChild<QWidget *>(u"welcomeWidget"_s)) {
+        welcome->deleteLater();
+    }
+
+    // Auto-update thread title on the first user message
+    if (m_threadTitle && m_threadTitle->text() == i18n("New Thread")) {
+        QString title = text.trimmed().split(u'\n').first();
+        if (title.length() > 32) {
+            title = title.left(30) + u"…";
+        }
+        m_threadTitle->setText(title);
+    }
+
+    auto *card = new QWidget(m_transcriptContainer);
+    card->setStyleSheet(
+        u"QWidget {"
+        u"  background-color: #232326;"
+        u"  border: 1px solid #333338;"
+        u"  border-radius: 6px;"
+        u"}"_s);
+    auto *cardLayout = new QVBoxLayout(card);
+    cardLayout->setContentsMargins(12, 10, 12, 10);
+    cardLayout->setSpacing(6);
+
+    auto *header = new QLabel(i18n("YOU"), card);
+    header->setStyleSheet(u"color: #888888; font-size: 10px; font-weight: bold; letter-spacing: 0.5px; border: none; background: transparent;"_s);
+    cardLayout->addWidget(header);
+
+    auto *msgLabel = new QLabel(card);
+    msgLabel->setWordWrap(true);
+    msgLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    msgLabel->setStyleSheet(u"color: #e4e4e4; font-size: 13px; line-height: 1.5; border: none; background: transparent;"_s);
+    msgLabel->setText(escape(text).replace(u"\n"_s, u"<br>"_s));
+    cardLayout->addWidget(msgLabel);
+
+    m_transcriptLayout->insertWidget(m_transcriptLayout->count() - 1, card);
+    scrollToBottom();
+}
+
+void ChatWidget::addActivityMessage(const QString &text)
+{
+    auto *pill = new QLabel(escape(text), m_transcriptContainer);
+    pill->setStyleSheet(u"color: #777777; font-size: 11px; font-style: italic; padding: 2px 4px;"_s);
+    m_transcriptLayout->insertWidget(m_transcriptLayout->count() - 1, pill);
+    scrollToBottom();
+}
+
+void ChatWidget::setStreaming(const QString &text)
+{
+    m_streamText = text;
+    if (!m_activeAssistantWidget) {
+        m_activeAssistantWidget = new QWidget(m_transcriptContainer);
+        auto *layout = new QVBoxLayout(m_activeAssistantWidget);
+        layout->setContentsMargins(4, 4, 4, 4);
+        layout->setSpacing(4);
+
+        auto *header = new QLabel(i18n("KATE AI"), m_activeAssistantWidget);
+        header->setStyleSheet(u"color: #3b82f6; font-size: 10px; font-weight: bold; letter-spacing: 0.5px;"_s);
+        layout->addWidget(header);
+
+        m_activeAssistantBrowser = new QTextBrowser(m_activeAssistantWidget);
+        m_activeAssistantBrowser->setOpenExternalLinks(true);
+        m_activeAssistantBrowser->setFrameShape(QFrame::NoFrame);
+        m_activeAssistantBrowser->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        m_activeAssistantBrowser->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        m_activeAssistantBrowser->setStyleSheet(u"background: transparent; color: #d4d4d4; border: none; padding: 0px;"_s);
+        m_activeAssistantBrowser->document()->setDefaultStyleSheet(
+            u"body { color: #d4d4d4; font-family: sans-serif; font-size: 13px; margin: 0; padding: 0; }"
+            u"pre { background-color: #222225; color: #e4e4e4; padding: 10px 12px; border-radius: 6px; border: 1px solid #333338; font-family: monospace; font-size: 12px; margin: 8px 0; }"
+            u"code { font-family: monospace; font-size: 12px; background-color: #28282d; color: #e4e4e4; padding: 2px 5px; border-radius: 3px; }"
+            u"p { margin-bottom: 8px; line-height: 1.5; }"
+            u"ul, ol { margin-bottom: 8px; padding-left: 20px; }"
+            u"li { margin-bottom: 4px; }"
+            u"blockquote { border-left: 3px solid #3b82f6; padding-left: 10px; color: #888; margin: 8px 0; }"
+            u"a { color: #3b82f6; text-decoration: none; }"_s);
+
+        layout->addWidget(m_activeAssistantBrowser);
+        m_transcriptLayout->insertWidget(m_transcriptLayout->count() - 1, m_activeAssistantWidget);
+    }
+
+    m_activeAssistantBrowser->setMarkdown(m_streamText);
+    const int docH = static_cast<int>(m_activeAssistantBrowser->document()->size().height()) + 16;
+    m_activeAssistantBrowser->setFixedHeight(std::max(30, docH));
+    scrollToBottom();
+}
+
+void ChatWidget::freezeStreaming()
+{
+    if (m_activeAssistantBrowser && !m_streamText.isEmpty()) {
+        m_activeAssistantBrowser->setMarkdown(m_streamText);
+        const int docH = static_cast<int>(m_activeAssistantBrowser->document()->size().height()) + 16;
+        m_activeAssistantBrowser->setFixedHeight(std::max(30, docH));
+    }
+    m_activeAssistantWidget = nullptr;
+    m_activeAssistantBrowser = nullptr;
+    m_streamText.clear();
+}
+
+void ChatWidget::scrollToBottom()
+{
+    QTimer::singleShot(10, this, [this]() {
+        if (m_scrollArea) {
+            m_scrollArea->verticalScrollBar()->setValue(m_scrollArea->verticalScrollBar()->maximum());
+        }
+    });
+}
+
+void ChatWidget::newChat()
+{
+    m_agent.abort();
+    m_agent.resetConversation();
+    m_permissionBar->hideBar();
+
+    // Clear transcript items except the bottom stretch
+    QLayoutItem *child;
+    while (m_transcriptLayout->count() > 1 && (child = m_transcriptLayout->takeAt(0))) {
+        if (child->widget()) {
+            child->widget()->deleteLater();
+        }
+        delete child;
+    }
+
+    m_toolCallWidgets.clear();
+    m_activeAssistantWidget = nullptr;
+    m_activeAssistantBrowser = nullptr;
+    m_streamText.clear();
+
+    // Recreate welcome widget
+    auto *welcome = new QWidget(m_transcriptContainer);
+    welcome->setObjectName(u"welcomeWidget"_s);
+    auto *wLayout = new QVBoxLayout(welcome);
+    wLayout->setContentsMargins(20, 40, 20, 20);
+    wLayout->setAlignment(Qt::AlignCenter);
+
+    auto *wIcon = new QLabel(u"⚡"_s, welcome);
+    wIcon->setAlignment(Qt::AlignCenter);
+    wIcon->setStyleSheet(u"font-size: 26px; color: #3b82f6; margin-bottom: 6px;"_s);
+    wLayout->addWidget(wIcon);
+
+    auto *wTitle = new QLabel(i18n("Kate AI Agent"), welcome);
+    wTitle->setAlignment(Qt::AlignCenter);
+    wTitle->setStyleSheet(u"color: #e4e4e4; font-size: 15px; font-weight: bold;"_s);
+    wLayout->addWidget(wTitle);
+
+    auto *wSub = new QLabel(i18n("Ask questions, edit code, and explore your workspace."), welcome);
+    wSub->setAlignment(Qt::AlignCenter);
+    wSub->setStyleSheet(u"color: #777777; font-size: 12px; margin-top: 4px;"_s);
+    wLayout->addWidget(wSub);
+
+    m_transcriptLayout->insertWidget(0, welcome);
+
+    if (m_threadTitle) {
+        m_threadTitle->setText(i18n("New Thread"));
+    }
+    m_prompt->clear();
+    m_prompt->setEnabled(true);
+    updateSendButtonState();
+    updateTokenDisplay();
+    m_prompt->setFocus();
 }
 
 void ChatWidget::setSettings(const Settings &settings)
@@ -266,6 +609,7 @@ void ChatWidget::setSettings(const Settings &settings)
     m_preferredProvider = settings.provider;
     m_modelCatalog.clear();
     m_updatingCombos = true;
+
     const int permIndex = m_permission->findData(permissionModeId(settings.permissionMode));
     if (permIndex >= 0) {
         m_permission->setCurrentIndex(permIndex);
@@ -280,12 +624,15 @@ void ChatWidget::setSettings(const Settings &settings)
     }
     m_thinking->setChecked(settings.thinkingMode);
     m_updatingCombos = false;
+
     refreshProviders();
-    for (Provider provider : {Provider::Grok, Provider::OpenAI, Provider::OpenRouter}) {
+    updateModelSelectorLabel();
+    updateTokenDisplay();
+
+    for (Provider provider : {Provider::Grok, Provider::OpenAI, Provider::OpenRouter, Provider::OpenAICompatible, Provider::ClaudeCompatible}) {
         Settings providerSettings = settings;
         providerSettings.provider = provider;
         if (!apiKeyFor(providerSettings).trimmed().isEmpty()) {
-            // LlmClient owns networking; it validates the key by loading its model catalog.
             m_agent.fetchModels(provider);
         }
     }
@@ -294,6 +641,8 @@ void ChatWidget::setSettings(const Settings &settings)
 void ChatWidget::applyProviderToCombos()
 {
     refreshModels();
+    updateModelSelectorLabel();
+    updateTokenDisplay();
 }
 
 void ChatWidget::refreshProviders()
@@ -301,8 +650,8 @@ void ChatWidget::refreshProviders()
     const bool wasUpdating = m_updatingCombos;
     m_updatingCombos = true;
     m_provider->clear();
-    for (Provider provider : {Provider::Grok, Provider::OpenAI, Provider::OpenRouter}) {
-        if (m_modelCatalog.contains(provider)) {
+    for (Provider provider : {Provider::Grok, Provider::OpenAI, Provider::OpenRouter, Provider::OpenAICompatible, Provider::ClaudeCompatible}) {
+        if (m_modelCatalog.contains(provider) || !apiKeyFor(m_settings).trimmed().isEmpty()) {
             m_provider->addItem(providerLabel(provider), providerId(provider));
         }
     }
@@ -320,6 +669,8 @@ void ChatWidget::refreshProviders()
     m_provider->setEnabled(!m_modelCatalog.isEmpty());
     m_updatingCombos = wasUpdating;
     refreshModels();
+    updateModelSelectorLabel();
+    updateTokenDisplay();
     m_agent.setSettings(m_settings);
 }
 
@@ -328,7 +679,7 @@ void ChatWidget::refreshModels()
     const bool wasUpdating = m_updatingCombos;
     m_updatingCombos = true;
     m_model->clear();
-    const QStringList allModels = m_modelCatalog.value(m_settings.provider);
+    const QStringList allModels = m_modelCatalog.value(m_settings.provider, defaultModels(m_settings.provider));
     QStringList models = allModels;
     if (!m_modelFilter.isEmpty()) {
         models.clear();
@@ -340,11 +691,7 @@ void ChatWidget::refreshModels()
     }
     m_model->addItems(models);
     m_model->setEnabled(!allModels.isEmpty());
-    if (m_modelFilter.isEmpty()) {
-        if (auto *le = m_model->lineEdit()) {
-            le->setText(QString());
-        }
-    }
+
     const int index = m_model->findText(modelFor(m_settings));
     const int selectedIndex = index >= 0 ? index : (models.isEmpty() ? -1 : 0);
     m_model->setCurrentIndex(selectedIndex);
@@ -357,6 +704,12 @@ void ChatWidget::refreshModels()
         case Provider::OpenRouter:
             m_settings.openrouterModel = selectedModel;
             break;
+        case Provider::OpenAICompatible:
+            m_settings.openaiCompatibleModel = selectedModel;
+            break;
+        case Provider::ClaudeCompatible:
+            m_settings.claudeCompatibleModel = selectedModel;
+            break;
         case Provider::Grok:
         default:
             m_settings.grokModel = selectedModel;
@@ -364,41 +717,181 @@ void ChatWidget::refreshModels()
         }
     }
     m_updatingCombos = wasUpdating;
+    updateModelSelectorLabel();
+    updateTokenDisplay();
 }
 
-void ChatWidget::focusPrompt()
+void ChatWidget::updateModelSelectorLabel()
 {
-    m_prompt->setFocus();
+    if (!m_modelSelector) return;
+    const QString pLabel = providerLabel(m_settings.provider);
+    const QString model = modelFor(m_settings);
+    m_modelSelector->setText(u"%1: %2  ▾"_s.arg(pLabel, model.isEmpty() ? i18n("Select model") : model));
 }
 
-void ChatWidget::updateSendButtonState()
+void ChatWidget::updateTokenDisplay()
 {
-    if (m_agent.isBusy()) {
-        m_send->setText(u"■"_s);
-        m_send->setStyleSheet(u"QPushButton { color: #e74c3c; font-size: 17px; font-weight: bold; border-radius: 19px; }"_s);
-        m_send->setToolTip(i18n("Stop response"));
-    } else {
-        m_send->setText(u"➤"_s);
-        m_send->setStyleSheet(u"QPushButton { color: #1d99f3; font-size: 22px; font-weight: bold; border-radius: 19px; }"_s);
-        m_send->setToolTip(i18n("Send message"));
+    if (!m_tokenCount) return;
+    const QString m = modelFor(m_settings);
+    m_tokenCount->setText(m.isEmpty() ? QString() : m);
+}
+
+void ChatWidget::showModelMenu()
+{
+    QMenu menu(this);
+    menu.setStyleSheet(
+        u"QMenu {"
+        u"  background-color: #252528;"
+        u"  color: #cccccc;"
+        u"  border: 1px solid #3c3c40;"
+        u"  border-radius: 6px;"
+        u"  padding: 4px;"
+        u"}"
+        u"QMenu::item {"
+        u"  padding: 6px 18px 6px 12px;"
+        u"  border-radius: 4px;"
+        u"}"
+        u"QMenu::item:selected {"
+        u"  background-color: #007acc;"
+        u"  color: #ffffff;"
+        u"}"
+        u"QMenu::separator {"
+        u"  height: 1px;"
+        u"  background-color: #38383e;"
+        u"  margin: 4px 0;"
+        u"}"_s);
+
+    const QList<Provider> providers = {
+        Provider::Grok,
+        Provider::OpenAI,
+        Provider::OpenRouter,
+        Provider::OpenAICompatible,
+        Provider::ClaudeCompatible
+    };
+
+    for (Provider p : providers) {
+        auto *pMenu = menu.addMenu(providerLabel(p));
+        pMenu->setStyleSheet(menu.styleSheet());
+        const QStringList models = m_modelCatalog.value(p, defaultModels(p));
+        const QString currentModel = modelFor(m_settings);
+
+        for (const QString &m : models) {
+            auto *act = pMenu->addAction(m);
+            act->setCheckable(true);
+            act->setChecked(m_settings.provider == p && currentModel == m);
+            connect(act, &QAction::triggered, this, [this, p, m]() {
+                m_settings.provider = p;
+                m_preferredProvider = p;
+                switch (p) {
+                case Provider::OpenAI:
+                    m_settings.openaiModel = m;
+                    break;
+                case Provider::OpenRouter:
+                    m_settings.openrouterModel = m;
+                    break;
+                case Provider::OpenAICompatible:
+                    m_settings.openaiCompatibleModel = m;
+                    break;
+                case Provider::ClaudeCompatible:
+                    m_settings.claudeCompatibleModel = m;
+                    break;
+                case Provider::Grok:
+                default:
+                    m_settings.grokModel = m;
+                    break;
+                }
+                updateModelSelectorLabel();
+                updateTokenDisplay();
+                applyProviderToCombos();
+                m_agent.setSettings(m_settings);
+                Q_EMIT settingsChanged(m_settings);
+            });
+        }
     }
+
+    menu.addSeparator();
+    auto *configAct = menu.addAction(i18n("Configure Providers & Models…"));
+    connect(configAct, &QAction::triggered, this, &ChatWidget::configureRequested);
+
+    menu.exec(m_modelSelector->mapToGlobal(QPoint(0, m_modelSelector->height() + 2)));
 }
 
-void ChatWidget::ask(const QString &text)
+void ChatWidget::showSettingsMenu()
 {
-    m_prompt->setPlainText(text);
-    submit();
-}
+    QMenu menu(this);
+    menu.setStyleSheet(
+        u"QMenu {"
+        u"  background-color: #252528;"
+        u"  color: #cccccc;"
+        u"  border: 1px solid #3c3c40;"
+        u"  border-radius: 6px;"
+        u"  padding: 4px;"
+        u"}"
+        u"QMenu::item {"
+        u"  padding: 6px 18px 6px 12px;"
+        u"  border-radius: 4px;"
+        u"}"
+        u"QMenu::item:selected {"
+        u"  background-color: #007acc;"
+        u"  color: #ffffff;"
+        u"}"
+        u"QMenu::separator {"
+        u"  height: 1px;"
+        u"  background-color: #38383e;"
+        u"  margin: 4px 0;"
+        u"}"_s);
 
-void ChatWidget::newChat()
-{
-    m_agent.resetConversation();
-    m_historyHtml.clear();
-    m_streamText.clear();
-    m_transcript->clear();
-    m_permissionBar->hideBar();
-    m_status->setText(i18n("New chat"));
-    m_prompt->setFocus();
+    // Permission Mode
+    auto *permMenu = menu.addMenu(i18n("Permission Mode"));
+    permMenu->setStyleSheet(menu.styleSheet());
+    auto *permGroup = new QActionGroup(this);
+    for (int i = 0; i < m_permission->count(); ++i) {
+        auto *action = permMenu->addAction(m_permission->itemText(i));
+        action->setCheckable(true);
+        action->setChecked(m_permission->currentIndex() == i);
+        action->setData(i);
+        permGroup->addAction(action);
+        connect(action, &QAction::triggered, this, [this, i]() {
+            m_permission->setCurrentIndex(i);
+        });
+    }
+
+    // Sandbox Profile
+    auto *sandboxMenu = menu.addMenu(i18n("Sandbox Profile"));
+    sandboxMenu->setStyleSheet(menu.styleSheet());
+    auto *sandboxGroup = new QActionGroup(this);
+    for (int i = 0; i < m_sandbox->count(); ++i) {
+        auto *action = sandboxMenu->addAction(m_sandbox->itemText(i));
+        action->setCheckable(true);
+        action->setChecked(m_sandbox->currentIndex() == i);
+        action->setData(i);
+        sandboxGroup->addAction(action);
+        connect(action, &QAction::triggered, this, [this, i]() {
+            m_sandbox->setCurrentIndex(i);
+        });
+    }
+
+    // Plan Mode
+    auto *planAction = menu.addAction(i18n("Plan Mode (Read-only)"));
+    planAction->setCheckable(true);
+    planAction->setChecked(m_settings.planMode);
+    connect(planAction, &QAction::triggered, this, [this](bool checked) {
+        m_mode->setCurrentIndex(checked ? 1 : 0);
+    });
+
+    // Thinking Mode
+    auto *thinkingAction = menu.addAction(i18n("Thinking Mode"));
+    thinkingAction->setCheckable(true);
+    thinkingAction->setChecked(m_settings.thinkingMode);
+    connect(thinkingAction, &QAction::triggered, this, [this](bool checked) {
+        m_thinking->setChecked(checked);
+    });
+
+    menu.addSeparator();
+    auto *fullSettingsAction = menu.addAction(i18n("Full Configuration…"));
+    connect(fullSettingsAction, &QAction::triggered, this, &ChatWidget::configureRequested);
+
+    menu.exec(m_configure->mapToGlobal(QPoint(0, m_configure->height() + 2)));
 }
 
 void ChatWidget::submit()
@@ -408,32 +901,66 @@ void ChatWidget::submit()
         return;
     }
     m_prompt->clear();
-    m_send->setEnabled(false);
-    m_stop->setEnabled(true);
+    updateSendButtonState();
     m_agent.start(text);
+    updateSendButtonState();
 }
 
-void ChatWidget::appendHtml(const QString &html)
+void ChatWidget::updateSendButtonState()
 {
-    m_historyHtml += html;
-    m_transcript->setHtml(m_historyHtml + (m_streamText.isEmpty() ? QString() : markdownToHtml(m_streamText)));
-    m_transcript->verticalScrollBar()->setValue(m_transcript->verticalScrollBar()->maximum());
-}
+    const bool busy = m_agent.isBusy();
+    const bool promptEmpty = m_prompt && m_prompt->toPlainText().trimmed().isEmpty();
+    const bool canClick = busy || !promptEmpty;
 
-void ChatWidget::setStreaming(const QString &text)
-{
-    m_streamText = text;
-    m_transcript->setHtml(m_historyHtml + QStringLiteral("<div style=\"background-color:#1e222d; color:#e8e8e8; padding:12px 16px; border-radius:8px; margin:8px 0; border:1px solid #3a3f4a; font-family:sans-serif; font-size:13px; line-height:1.6;\"><div style=\"white-space:pre-wrap;\">") + markdownToHtml(m_streamText) + QStringLiteral("</div></div>"));
-    m_transcript->verticalScrollBar()->setValue(m_transcript->verticalScrollBar()->maximum());
-}
+    m_send->setEnabled(canClick);
 
-void ChatWidget::freezeStreaming()
-{
-    if (!m_streamText.isEmpty()) {
-        m_historyHtml += QStringLiteral("<div style=\"background-color:#1e222d; color:#e8e8e8; padding:12px 16px; border-radius:8px; margin:8px 0; border:1px solid #3a3f4a; font-family:sans-serif; font-size:13px; line-height:1.6;\"><b style=\"color:#7aa2f7; font-size:11px; text-transform:uppercase; letter-spacing:0.5px;\">Kate AI:</b><br><div style=\"white-space:pre-wrap;\">") + markdownToHtml(m_streamText) + QStringLiteral("</div></div>");
-        m_streamText.clear();
-        m_transcript->setHtml(m_historyHtml);
+    if (busy) {
+        m_send->setText(u"■"_s);
+        m_send->setStyleSheet(
+            u"QPushButton {"
+            u"  color: #ffffff;"
+            u"  background-color: #e74c3c;"
+            u"  font-size: 13px;"
+            u"  border: none;"
+            u"  border-radius: 4px;"
+            u"}"
+            u"QPushButton:hover { background-color: #ff6b5a; }"_s);
+        m_send->setToolTip(i18n("Stop response"));
+    } else {
+        m_send->setText(u"▲"_s);
+        if (canClick) {
+            m_send->setStyleSheet(
+                u"QPushButton {"
+                u"  color: #ffffff;"
+                u"  background-color: #007acc;"
+                u"  font-size: 13px;"
+                u"  border: none;"
+                u"  border-radius: 4px;"
+                u"}"
+                u"QPushButton:hover { background-color: #0062a3; }"_s);
+        } else {
+            m_send->setStyleSheet(
+                u"QPushButton {"
+                u"  color: #555555;"
+                u"  background-color: #2e2e32;"
+                u"  font-size: 13px;"
+                u"  border: 1px solid #38383e;"
+                u"  border-radius: 4px;"
+                u"}"_s);
+        }
+        m_send->setToolTip(i18n("Send message"));
     }
+}
+
+void ChatWidget::focusPrompt()
+{
+    m_prompt->setFocus();
+}
+
+void ChatWidget::ask(const QString &text)
+{
+    m_prompt->setPlainText(text);
+    submit();
 }
 
 QString ChatWidget::escape(const QString &text)
