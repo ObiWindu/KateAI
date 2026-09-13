@@ -15,6 +15,9 @@ public:
     QSize sizeHint() const override;
     QSize minimumSizeHint() const override;
 
+public Q_SLOTS:
+    void autoGrow();
+
 Q_SIGNALS:
     void submitRequested();
 

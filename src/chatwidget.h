@@ -11,13 +11,16 @@
 class QComboBox;
 class QLabel;
 class QPushButton;
+class QScrollArea;
 class QTextBrowser;
+class QVBoxLayout;
 
 namespace KateAi
 {
 
 class PermissionBar;
 class PromptEdit;
+class ToolCallWidget;
 
 class ChatWidget : public QWidget
 {
@@ -46,16 +49,21 @@ Q_SIGNALS:
     void configureRequested();
 
 private:
-    void appendHtml(const QString &html);
-    void appendKateMessage(const QString &innerHtml);
+    void addUserMessage(const QString &text);
+    void addActivityMessage(const QString &text);
     void setStreaming(const QString &text);
     void freezeStreaming();
-    static QString kateBubbleHtml(const QString &innerHtml);
+    void scrollToBottom();
+    void showSettingsMenu();
+    void showModelMenu();
+    void updateModelSelectorLabel();
+    
     void submit();
     void applyProviderToCombos();
     void refreshProviders();
     void refreshModels();
     void updateSendButtonState();
+    void updateTokenDisplay();
     static QString escape(const QString &text);
     static QString markdownToHtml(const QString &text);
 
@@ -71,16 +79,27 @@ private:
     QPushButton *m_send = nullptr;
     QPushButton *m_stop = nullptr;
     QPushButton *m_thinking = nullptr;
-    QTextBrowser *m_transcript = nullptr;
+
+    QScrollArea *m_scrollArea = nullptr;
+    QWidget *m_transcriptContainer = nullptr;
+    QVBoxLayout *m_transcriptLayout = nullptr;
+    QWidget *m_activeAssistantWidget = nullptr;
+    QTextBrowser *m_activeAssistantBrowser = nullptr;
+
     PermissionBar *m_permissionBar = nullptr;
     PromptEdit *m_prompt = nullptr;
     QLabel *m_status = nullptr;
-    QString m_historyHtml;
+    QLabel *m_threadTitle = nullptr;
+    QLabel *m_tokenCount = nullptr;
+    QPushButton *m_modelSelector = nullptr;
     QString m_streamText;
     QHash<Provider, QStringList> m_modelCatalog;
     Provider m_preferredProvider = Provider::Grok;
     bool m_updatingCombos = false;
     QString m_modelFilter;
+
+    // Tool call tracking — maps toolCallId to its widget
+    QHash<QString, ToolCallWidget *> m_toolCallWidgets;
 };
 
 } // namespace KateAi

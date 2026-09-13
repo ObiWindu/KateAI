@@ -22,6 +22,8 @@ class KateAiConfigPage : public KTextEditor::ConfigPage
 public:
     KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin);
 
+    ~KateAiConfigPage() override;
+
     QString name() const override;
     QString fullName() const override;
     QIcon icon() const override;
@@ -32,23 +34,38 @@ public:
 
 private:
     KateAiPlugin *m_plugin = nullptr;
+
+    // Providers
     QComboBox *m_provider = nullptr;
     QLineEdit *m_grokKey = nullptr;
     QLineEdit *m_openaiKey = nullptr;
     QLineEdit *m_openrouterKey = nullptr;
+    QLineEdit *m_openaiCompatibleKey = nullptr;
+    QLineEdit *m_claudeCompatibleKey = nullptr;
     QLineEdit *m_grokModel = nullptr;
     QLineEdit *m_openaiModel = nullptr;
     QLineEdit *m_openrouterModel = nullptr;
+    QLineEdit *m_openaiCompatibleModel = nullptr;
+    QLineEdit *m_claudeCompatibleModel = nullptr;
+    QLineEdit *m_openaiCompatibleUrl = nullptr;
+    QLineEdit *m_claudeCompatibleUrl = nullptr;
+
+    // Security
     QComboBox *m_permission = nullptr;
     QComboBox *m_sandbox = nullptr;
+    QSpinBox *m_timeout = nullptr;
+    QPlainTextEdit *m_deny = nullptr;
+
+    // Agent
     QSpinBox *m_maxIter = nullptr;
     QSpinBox *m_maxModelRequests = nullptr;
     QSpinBox *m_requestsPerMinute = nullptr;
-    QSpinBox *m_timeout = nullptr;
     QCheckBox *m_planMode = nullptr;
     QCheckBox *m_projectInstructions = nullptr;
     QPlainTextEdit *m_system = nullptr;
-    QPlainTextEdit *m_deny = nullptr;
+    QComboBox *m_speed = nullptr;
+
+    // Compression
     QSpinBox *m_compressionLevel = nullptr;
     QSpinBox *m_maxGraphNodes = nullptr;
     QSpinBox *m_maxGraphEdges = nullptr;
@@ -61,7 +78,6 @@ private:
     QSpinBox *m_maxProjectInstructionsLength = nullptr;
     QCheckBox *m_compressSystemPrompt = nullptr;
     QSpinBox *m_maxSystemPromptLength = nullptr;
-    QComboBox *m_speed = nullptr;
 };
 
 } // namespace KateAi
