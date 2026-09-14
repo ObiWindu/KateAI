@@ -7,8 +7,10 @@
 #include <QJsonObject>
 #include <QFile>
 #include <QFileInfo>
+#include <QDir>
 #include <QDebug>
 #include <QDateTime>
+#include <QProcess>
 #include <utility>
 #include <algorithm>
 #include <QMap>
@@ -46,11 +48,11 @@ void AgentLoop::setSettings(const Settings &settings)
     m_client.setSettings(settings);
     m_policy.setMode(settings.permissionMode);
 
-    // Initialize sandbox and tool runner if workspace is set
     if (!m_workspace.isEmpty()) {
         m_sandbox = std::make_unique<Sandbox>(m_workspace, m_settings.sandbox, m_settings.extraDenyGlobs);
         m_tools = std::make_unique<ToolRunner>(*m_sandbox, m_bridge, this);
         m_tools->setTimeoutMs(m_settings.bashTimeoutMs);
+        m_tools->setProjectGraph(m_projectGraph.get());
     }
 
     // Persist graph to JSON after generation/update
@@ -70,6 +72,7 @@ void AgentLoop::setWorkspace(const QString &workspace)
         m_sandbox = std::make_unique<Sandbox>(m_workspace, m_settings.sandbox, m_settings.extraDenyGlobs);
         m_tools = std::make_unique<ToolRunner>(*m_sandbox, m_bridge, this);
         m_tools->setTimeoutMs(m_settings.bashTimeoutMs);
+        m_tools->setProjectGraph(m_projectGraph.get());
     }
 
     // Auto-generate or load project graph
@@ -96,6 +99,7 @@ void AgentLoop::setDocumentBridge(DocumentBridge *bridge)
     if (m_sandbox) {
         m_tools = std::make_unique<ToolRunner>(*m_sandbox, m_bridge, this);
         m_tools->setTimeoutMs(m_settings.bashTimeoutMs);
+        m_tools->setProjectGraph(m_projectGraph.get());
     }
 }
 
@@ -171,6 +175,42 @@ QString AgentLoop::systemPrompt() const
     }
     prompt += u"\nSandbox profile: "_s + sandboxProfileId(m_settings.sandbox);
     prompt += u"\nPermission mode: "_s + permissionModeId(m_settings.permissionMode);
+
+    if (!m_workspace.isEmpty()) {
+        QDir dir(m_workspace);
+        if (dir.exists()) {
+            const QFileInfoList entries = dir.entryInfoList(QDir::AllEntries | QDir::NoDotAndDotDot, QDir::DirsFirst | QDir::Name);
+            QStringList listing;
+            int shown = 0;
+            for (const QFileInfo &info : entries) {
+                if (info.fileName() == u".git"_s || info.fileName() == u".kateai"_s) {
+                    continue;
+                }
+                listing.append((info.isDir() ? u"dir  "_s : u"file "_s) + info.fileName());
+                if (++shown >= 40) {
+                    listing.append(u"..."_s);
+                    break;
+                }
+            }
+            if (!listing.isEmpty()) {
+                prompt += u"\n\n<workspace_root>\n"_s + listing.join(u'\n') + u"\n</workspace_root>"_s;
+            }
+        }
+        if (QDir(m_workspace + u"/.git"_s).exists()) {
+            QProcess git;
+            git.setWorkingDirectory(m_workspace);
+            git.start(u"git"_s, QStringList{u"status"_s, u"--short"_s, u"-uno"_s});
+            if (git.waitForFinished(1500)) {
+                QString status = QString::fromUtf8(git.readAllStandardOutput()).trimmed();
+                if (status.size() > 1200) {
+                    status = status.left(1200) + u"\n..."_s;
+                }
+                if (!status.isEmpty()) {
+                    prompt += u"\n\n<git_status>\n"_s + status + u"\n</git_status>"_s;
+                }
+            }
+        }
+    }
     if (m_settings.planMode) {
         prompt += u"\n\nPlan mode is active. Inspect the project and return a concise, ordered implementation plan. "
                   "Only read-only tools are available; do not claim to have changed files or run commands."_s;

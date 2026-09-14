@@ -21,6 +21,8 @@ private Q_SLOTS:
         QCOMPARE(policy.evaluate(u"read_file"_s, QJsonObject{{u"path"_s, u"a.cpp"_s}}, box, &reason), PermissionPolicy::Verdict::Allow);
         QCOMPARE(policy.evaluate(u"list_dir"_s, {}, box, &reason), PermissionPolicy::Verdict::Allow);
         QCOMPARE(policy.evaluate(u"grep"_s, QJsonObject{{u"pattern"_s, u"foo"_s}}, box, &reason), PermissionPolicy::Verdict::Allow);
+        QCOMPARE(policy.evaluate(u"query_project_graph"_s, QJsonObject{{u"query_type"_s, u"summary"_s}}, box, &reason),
+                 PermissionPolicy::Verdict::Allow);
     }
 
     void writesAskByDefault()

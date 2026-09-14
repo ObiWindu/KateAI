@@ -5,6 +5,7 @@
 #include "settings.h"
 #include "toolcallwidget.h"
 
+#include <KColorScheme>
 #include <KLocalizedString>
 
 #include <QAction>
@@ -29,19 +30,18 @@ namespace KateAi
 
 ChatWidget::ChatWidget(QWidget *parent)
     : QWidget(parent)
+    , m_colorScheme(new KColorScheme(KColorScheme::View, this))
 {
     auto *root = new QVBoxLayout(this);
     root->setContentsMargins(0, 0, 0, 0);
     root->setSpacing(0);
 
+    connect(m_colorScheme, &KColorScheme::changed, this, &ChatWidget::updateThemeColors);
+    updateThemeColors();
+
     // 1. Zed-style Header / Toolbar
-    auto *toolbar = new QWidget(this);
-    toolbar->setStyleSheet(
-        u"QWidget {"
-        u"  background-color: #1e1e1e;"
-        u"  border-bottom: 1px solid #2d2d2d;"
-        u"}"_s);
-    auto *toolbarLayout = new QHBoxLayout(toolbar);
+    m_toolbar = new QWidget(this);
+    auto *toolbarLayout = new QHBoxLayout(m_toolbar);
     toolbarLayout->setContentsMargins(10, 6, 10, 6);
     toolbarLayout->setSpacing(8);
 
@@ -692,35 +692,49 @@ void ChatWidget::refreshModels()
     m_model->addItems(models);
     m_model->setEnabled(!allModels.isEmpty());
 
-    const int index = m_model->findText(modelFor(m_settings));
-    const int selectedIndex = index >= 0 ? index : (models.isEmpty() ? -1 : 0);
-    m_model->setCurrentIndex(selectedIndex);
-    if (selectedIndex >= 0 && index < 0) {
-        const QString selectedModel = models.at(selectedIndex);
+    // Prefer the model already stored in settings. Only fall back to the first
+    // entry in the list when no model has been chosen yet. Overwriting a valid
+    // selection is wrong for providers like OpenRouter whose live catalog is
+    // much larger than the hard-coded defaults — otherwise picking a model
+    // from the menu gets reset as soon as the catalog is cleared and
+    // re-fetched (settingsChanged → setSettings → refreshModels).
+    const QString currentModel = modelFor(m_settings).trimmed();
+    const int index = currentModel.isEmpty() ? -1 : m_model->findText(currentModel);
+    if (index >= 0) {
+        m_model->setCurrentIndex(index);
+    } else if (currentModel.isEmpty() && !models.isEmpty()) {
+        m_model->setCurrentIndex(0);
+        const QString selectedModel = models.at(0);
         switch (m_settings.provider) {
-        case Provider::OpenAI:
-            m_settings.openaiModel = selectedModel;
-            break;
-        case Provider::OpenRouter:
-            m_settings.openrouterModel = selectedModel;
-            break;
-        case Provider::OpenAICompatible:
-            m_settings.openaiCompatibleModel = selectedModel;
-            break;
-        case Provider::ClaudeCompatible:
-            m_settings.claudeCompatibleModel = selectedModel;
-            break;
-        case Provider::Grok:
-        default:
-            m_settings.grokModel = selectedModel;
-            break;
+            case Provider::OpenAI:
+                m_settings.openaiModel = selectedModel;
+                break;
+            case Provider::OpenRouter:
+                m_settings.openrouterModel = selectedModel;
+                break;
+            case Provider::OpenAICompatible:
+                m_settings.openaiCompatibleModel = selectedModel;
+                break;
+            case Provider::ClaudeCompatible:
+                m_settings.claudeCompatibleModel = selectedModel;
+                break;
+            case Provider::Grok:
+            default:
+                m_settings.grokModel = selectedModel;
+                break;
+        }
+    } else {
+        // Keep the stored model even if it is not in the (possibly incomplete)
+        // list yet — e.g. right after catalog clear while fetchModels is in flight.
+        m_model->setCurrentIndex(-1);
+        if (!currentModel.isEmpty() && m_model->isEditable()) {
+            m_model->setEditText(currentModel);
         }
     }
     m_updatingCombos = wasUpdating;
     updateModelSelectorLabel();
     updateTokenDisplay();
 }
-
 void ChatWidget::updateModelSelectorLabel()
 {
     if (!m_modelSelector) return;

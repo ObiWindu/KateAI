@@ -271,11 +271,13 @@ QJsonArray toolDefinitions(bool readOnlyOnly)
                          {u"path"_s, u"content"_s}));
 
     tools.append(toolDef(u"edit_file"_s,
-                         u"Replace one exact occurrence of old_string with new_string in a file."_s,
+                         u"Replace exact text in a file. old_string must match exactly, including whitespace. "
+                         u"By default it must occur once; set replace_all to true to replace every occurrence."_s,
                          QJsonObject{
                              {u"path"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"Path relative to the workspace or absolute."_s}}},
-                             {u"old_string"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"Exact text to find. Must be unique in the file."_s}}},
+                             {u"old_string"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"Exact text to find."_s}}},
                              {u"new_string"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"Replacement text."_s}}},
+                             {u"replace_all"_s, QJsonObject{{u"type"_s, u"boolean"_s}, {u"description"_s, u"If true, replace every occurrence instead of requiring a unique match."_s}}},
                          },
                          {u"path"_s, u"old_string"_s, u"new_string"_s}));
 
@@ -287,11 +289,13 @@ QJsonArray toolDefinitions(bool readOnlyOnly)
                          {}));
 
     tools.append(toolDef(u"grep"_s,
-                         u"Search file contents with a regular expression."_s,
+                         u"Search file contents with a regular expression. Returns path:line:content."_s,
                          QJsonObject{
                              {u"pattern"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"Regular expression to search for."_s}}},
                              {u"path"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"File or directory to search. Defaults to the workspace."_s}}},
                              {u"glob"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"Optional filename glob such as *.cpp."_s}}},
+                             {u"case_insensitive"_s, QJsonObject{{u"type"_s, u"boolean"_s}, {u"description"_s, u"If true, match without regard to case."_s}}},
+                             {u"context"_s, QJsonObject{{u"type"_s, u"integer"_s}, {u"description"_s, u"Number of context lines to include before and after each match."_s}}},
                          },
                          {u"pattern"_s}));
 
@@ -310,13 +314,14 @@ QJsonArray toolDefinitions(bool readOnlyOnly)
                          {u"command"_s}));
 
     tools.append(toolDef(u"query_project_graph"_s,
-                         u"Query the project graph for nodes, edges, dependencies, and relationships."_s,
+                         u"Query the indexed project graph: files, symbols, imports, and relationships. "
+                         u"Use this before blindly searching when you need structure or dependencies."_s,
                          QJsonObject{
-                             {u"query_type"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"Type of query: summary, nodes, edges, dependencies, dependents, find_related, find_path, dependency_chain"_s}}},
-                             {u"node_id"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"Node ID for queries that require a specific node"_s}}},
-                             {u"relationship"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"Relationship type for filtering edges"_s}}},
-                             {u"source_id"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"Source node ID for path finding"_s}}},
-                             {u"target_id"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"Target node ID for path finding"_s}}},
+                             {u"query_type"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"summary, nodes, edges, dependencies, dependents, find_related, find_path, dependency_chain"_s}}},
+                             {u"node_id"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"Node id, path, or name for node-scoped queries"_s}}},
+                             {u"relationship"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"Optional relationship filter: imports, calls, extends, contains, references"_s}}},
+                             {u"source_id"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"Source node for path finding"_s}}},
+                             {u"target_id"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"Target node for path finding"_s}}},
                          },
                          {}));
 
@@ -327,7 +332,8 @@ QJsonArray toolDefinitions(bool readOnlyOnly)
     QJsonArray readOnlyTools;
     for (const QJsonValue &tool : tools) {
         const QString name = tool.toObject().value(u"function"_s).toObject().value(u"name"_s).toString();
-        if (name == u"read_file"_s || name == u"list_dir"_s || name == u"grep"_s || name == u"glob"_s) {
+        if (name == u"read_file"_s || name == u"list_dir"_s || name == u"grep"_s || name == u"glob"_s
+            || name == u"query_project_graph"_s) {
             readOnlyTools.append(tool);
         }
     }
@@ -336,11 +342,20 @@ QJsonArray toolDefinitions(bool readOnlyOnly)
 
 QString defaultSystemPrompt(const QString &workspace)
 {
-    return u"You are Kate AI, a coding assistant inside the Kate text editor.\n"
-           "Use tools to inspect and change the user's project. Prefer edit_file for small changes "
-           "and write_file only for new files or full rewrites.\n"
-           "Match existing code style. Do not invent files outside the workspace.\n"
-           "When you run bash, prefer non-interactive commands.\n"
+    return u"You are Kate AI, a coding agent inside the Kate text editor.\n"
+           "You solve the user's request by inspecting the workspace with tools, making focused edits, and verifying the result.\n"
+           "\n"
+           "How to work:\n"
+           "- Start by locating the relevant code (query_project_graph, glob, grep, list_dir) before guessing paths.\n"
+           "- Read only the files and ranges you need. Prefer offset/limit on large files.\n"
+           "- Prefer edit_file for surgical changes. Use replace_all when the same unique snippet should change everywhere.\n"
+           "- Use write_file only for new files or complete rewrites. Do not invent files outside the workspace.\n"
+           "- Match existing style, naming, imports, and architecture. Do not add unrelated refactors or comments.\n"
+           "- After edits, verify with a focused read, test, build, or lint. Treat tool output as evidence.\n"
+           "- If a tool fails, diagnose the actual error and change approach; do not retry the identical call.\n"
+           "- Prefer one purposeful batch of tools over speculative exploration.\n"
+           "- Shell commands must be non-interactive. Do not request secrets or write credential files.\n"
+           "\n"
            "Workspace root: "_s
         + workspace;
 }
