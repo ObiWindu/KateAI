@@ -356,6 +356,11 @@ QString defaultSystemPrompt(const QString &workspace)
            "- Prefer one purposeful batch of tools over speculative exploration.\n"
            "- Shell commands must be non-interactive. Do not request secrets or write credential files.\n"
            "\n"
+           "REASONING & PLANNING (required):\n"
+           "1. THINKING: Before every response, output your internal reasoning in a <thinking> block. This is your private chain-of-thought: analyze the request, consider alternatives, plan steps, and anticipate issues. The user will NOT see this block - it is collapsed by default. Be thorough."
+           "2. PLAN: After thinking, output a structured implementation plan as a numbered list under a 'Plan:' or 'Implementation Plan:' heading. Each step should be a concrete, verifiable action. This plan IS visible to the user as a checklist."
+           "3. EXECUTION: Follow your plan step by step. After completing each step, you may update the plan by marking steps complete."
+           "\n"
            "Workspace root: "_s
         + workspace;
 }
@@ -373,3 +378,105 @@ QString compressText(const QString &text, int maxLength, bool enabled)
 }
 
 } // namespace KateAi
+
+QJsonArray parsePlanFromText(const QString &text)
+{
+    QJsonArray plan;
+    const QString lower = text.toLower();
+    int start = -1;
+    const QStringList markers = QStringList() << u"plan:"_s << u"implementation plan:"_s << u"steps:"_s << u"action plan:"_s;
+    for (const QString &m : markers) {
+        start = lower.indexOf(m);
+        if (start >= 0) {
+            break;
+        }
+    }
+    if (start < 0) {
+        return plan;
+    }
+    int i = start;
+    while (i < text.size() && text[i] != u'\n') {
+        ++i;
+    }
+    ++i;
+    int lineStart = i;
+    while (i <= text.size() && plan.size() < 12) {
+        if (i == text.size() || text[i] == u'\n') {
+            const QString line = text.mid(lineStart, i - lineStart).trimmed();
+            if (!line.isEmpty()) {
+                QString step = line;
+                int s = 0;
+                while (s < step.size() && (step[s].isDigit() || step[s] == u'.' || step[s] == u')')) {
+                    ++s;
+                }
+                if (s > 0 && s < step.size() && (step[s] == u' ' || step[s] == u'.')) {
+                    step = step.mid(s).trimmed();
+                } else if (step.startsWith(u"- "_s) || step.startsWith(u"* "_s)) {
+                    step = step.mid(2);
+                }
+                if (!step.isEmpty()) {
+                    QJsonObject obj;
+                    obj.insert(u"id"_s, u"step%1"_s.arg(plan.size() + 1));
+                    obj.insert(u"description"_s, step);
+                    obj.insert(u"completed"_s, false);
+                    obj.insert(u"inProgress"_s, false);
+                    plan.append(obj);
+                }
+            }
+            if (i < text.size()) {
+                ++i;
+            }
+            lineStart = i;
+        } else {
+            ++i;
+        }
+    }
+    return plan;
+}
+
+QJsonArray mergePlanIntoAssistantMessage(const QJsonArray &existingPlan,
+                                         const QString &assistantText)
+{
+    const QJsonArray fresh = parsePlanFromText(assistantText);
+    if (fresh.isEmpty()) {
+        return existingPlan;
+    }
+    QHash<QString, bool> completedByDesc;
+    for (const QJsonValue &v : existingPlan) {
+        const QJsonObject o = v.toObject();
+        completedByDesc.insert(o.value(u"description"_s).toString().toLower(),
+                              o.value(u"completed"_s).toBool());
+    }
+    QJsonArray merged;
+    for (const QJsonValue &v : fresh) {
+        QJsonObject o = v.toObject();
+        const QString desc = o.value(u"description"_s).toString();
+        o.insert(u"completed"_s, completedByDesc.value(desc.toLower(), false));
+        merged.append(o);
+    }
+    return merged;
+}
+
+QJsonArray markPlanStepCompleted(const QJsonArray &plan, const QString &stepId)
+{
+    QJsonArray out;
+    for (const QJsonValue &v : plan) {
+        QJsonObject o = v.toObject();
+        if (o.value(u"id"_s).toString() == stepId) {
+            o.insert(u"completed"_s, true);
+            o.insert(u"inProgress"_s, false);
+        }
+        out.append(o);
+    }
+    return out;
+}
+
+bool planIsComplete(const QJsonArray &plan)
+{
+    for (const QJsonValue &v : plan) {
+        if (!v.toObject().value(u"completed"_s).toBool()) {
+            return false;
+        }
+    }
+    return !plan.isEmpty();
+}

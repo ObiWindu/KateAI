@@ -40,6 +40,14 @@ QJsonArray LlmClient::messagesToJson(const QList<ChatMessage> &messages)
         case ChatMessage::Role::Assistant:
             obj.insert(u"role"_s, u"assistant"_s);
             obj.insert(u"content"_s, msg.content);
+            // Hidden reasoning is sent back to the model so it can reference
+            // its own earlier analysis without re-deriving it.
+            if (!msg.thinking.isEmpty()) {
+                obj.insert(u"reasoning_content"_s, msg.thinking);
+            }
+            if (!msg.plan.isEmpty()) {
+                obj.insert(u"plan"_s, msg.plan);
+            }
             if (!msg.toolCalls.isEmpty()) {
                 obj.insert(u"tool_calls"_s, msg.toolCalls);
             }
@@ -139,6 +147,10 @@ CompletionChunk LlmClient::parseSseLine(const QByteArray &line, QHash<int, ToolC
         ? choice.value(u"delta"_s).toObject()
         : choice.value(u"message"_s).toObject();
     chunk.contentDelta = delta.value(u"content"_s).toString();
+    chunk.thinkingDelta = delta.value(u"reasoning_content"_s).toString();
+    if (chunk.thinkingDelta.isEmpty()) {
+        chunk.thinkingDelta = delta.value(u"reasoning"_s).toString();
+    }
     chunk.finishReason = choice.value(u"finish_reason"_s).toString();
 
     if (acc) {
@@ -220,9 +232,22 @@ void LlmClient::complete(const QList<ChatMessage> &messages)
     body.insert(u"model"_s, model);
     body.insert(u"messages"_s, messagesToJson(messages));
     body.insert(u"tools"_s, toolDefinitions(m_settings.planMode));
-    body.insert(u"tool_choice"_s, u"auto"_s);
+    body.insert(u"tool_choice"_s, m_settings.parallelToolCalls ? u"auto"_s : u"none"_s);
     body.insert(u"stream"_s, true);
-    body.insert(u"temperature"_s, 0.2);
+    body.insert(u"temperature"_s, m_settings.temperature);
+    body.insert(u"top_p"_s, m_settings.topP);
+    if (m_settings.maxTokens > 0) {
+        body.insert(u"max_tokens"_s, m_settings.maxTokens);
+    }
+    if (m_settings.frequencyPenalty != 0.0) {
+        body.insert(u"frequency_penalty"_s, m_settings.frequencyPenalty);
+    }
+    if (m_settings.presencePenalty != 0.0) {
+        body.insert(u"presence_penalty"_s, m_settings.presencePenalty);
+    }
+    if (!m_settings.reasoningEffort.trimmed().isEmpty()) {
+        body.insert(u"reasoning_effort"_s, m_settings.reasoningEffort.trimmed());
+    }
 
     QNetworkRequest request{QUrl(providerBaseUrl(m_settings.provider) + u"/chat/completions"_s)};
     request.setHeader(QNetworkRequest::ContentTypeHeader, u"application/json"_s);
@@ -363,6 +388,9 @@ void LlmClient::handleReadyRead()
         if (!chunk.contentDelta.isEmpty()) {
             m_text += chunk.contentDelta;
             Q_EMIT textDelta(chunk.contentDelta);
+        }
+        if (!chunk.thinkingDelta.isEmpty()) {
+            Q_EMIT thinkingDelta(chunk.thinkingDelta);
         }
         if (!chunk.completedTools.isEmpty()) {
             m_completedTools.append(chunk.completedTools);

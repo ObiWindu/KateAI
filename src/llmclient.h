@@ -38,6 +38,7 @@ public:
 
 Q_SIGNALS:
     void textDelta(const QString &delta);
+    void thinkingDelta(const QString &delta);
     void finished(const QString &fullText, const QList<ToolCall> &toolCalls);
     void failed(const QString &error);
     void modelsReceived(Provider provider, const QStringList &models);

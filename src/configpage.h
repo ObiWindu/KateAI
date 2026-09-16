@@ -9,6 +9,7 @@ class QCheckBox;
 class QLineEdit;
 class QPlainTextEdit;
 class QSpinBox;
+class QDoubleSpinBox;
 
 namespace KateAi
 {
@@ -64,6 +65,7 @@ private:
     QCheckBox *m_projectInstructions = nullptr;
     QPlainTextEdit *m_system = nullptr;
     QComboBox *m_speed = nullptr;
+    QCheckBox *m_thinkingMode = nullptr;
 
     // Compression
     QSpinBox *m_compressionLevel = nullptr;
@@ -78,6 +80,15 @@ private:
     QSpinBox *m_maxProjectInstructionsLength = nullptr;
     QCheckBox *m_compressSystemPrompt = nullptr;
     QSpinBox *m_maxSystemPromptLength = nullptr;
+
+    // Optimal Intelligence Parameters
+    QDoubleSpinBox *m_temperature = nullptr;
+    QDoubleSpinBox *m_topP = nullptr;
+    QSpinBox *m_maxTokens = nullptr;
+    QComboBox *m_reasoningEffort = nullptr;
+    QCheckBox *m_selfCritique = nullptr;
+    QCheckBox *m_parallelToolCalls = nullptr;
+    QComboBox *m_verbosity = nullptr;
 };
 
 } // namespace KateAi

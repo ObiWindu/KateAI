@@ -134,7 +134,6 @@ ChatWidget::ChatWidget(QWidget *parent)
     m_mode->addItem(i18n("Plan"), true);
 
     m_thinking = new QPushButton(this);
-    m_thinking->setVisible(false);
     m_thinking->setCheckable(true);
 
     m_stop = new QPushButton(this);
@@ -246,6 +245,16 @@ ChatWidget::ChatWidget(QWidget *parent)
     bottomRow->addWidget(m_tokenCount);
     bottomRow->addStretch();
 
+    // Thinking mode toggle button
+    m_thinking->setParent(composerCard);
+    m_thinking->setVisible(true);
+    m_thinking->setCheckable(true);
+    m_thinking->setFixedSize(28, 28);
+    m_thinking->setCursor(Qt::PointingHandCursor);
+    m_thinking->setToolTip(i18n("Toggle thinking mode"));
+    updateThinkingButtonStyle();
+    bottomRow->addWidget(m_thinking);
+
     m_send = new QPushButton(composerCard);
     m_send->setFixedSize(28, 28);
     m_send->setCursor(Qt::PointingHandCursor);
@@ -350,10 +359,27 @@ ChatWidget::ChatWidget(QWidget *parent)
         m_settings.thinkingMode = checked;
         m_agent.setSettings(m_settings);
         Q_EMIT settingsChanged(m_settings);
+        updateThinkingButtonStyle();
     });
 
     // Agent signals
     connect(&m_agent, &AgentLoop::userMessage, this, &ChatWidget::addUserMessage);
+    connect(&m_agent, &AgentLoop::thinkingDelta, this, [this](const QString &delta) {
+        if (!m_activeAssistantWidget) {
+            setStreaming(m_streamText);
+        }
+        if (m_thinkingBrowser) {
+            m_thinkingBrowser->setMarkdown(escape(m_thinkingBrowser->toPlainText() + delta));
+            const int h = static_cast<int>(m_thinkingBrowser->document()->size().height()) + 12;
+            m_thinkingBrowser->setFixedHeight(std::max(20, h));
+            if (m_thinkingBlock) {
+                m_thinkingBlock->setMaximumHeight(std::max(20, h));
+            }
+            scrollToBottom();
+        }
+    });
+    connect(&m_agent, &AgentLoop::thinkingFinished, this, &ChatWidget::addThinkingBlock);
+    connect(&m_agent, &AgentLoop::planUpdated, this, &ChatWidget::addPlanChecklist);
     connect(&m_agent, &AgentLoop::assistantDelta, this, [this](const QString &delta) {
         setStreaming(m_streamText + delta);
     });
@@ -368,6 +394,7 @@ ChatWidget::ChatWidget(QWidget *parent)
         freezeStreaming();
         auto *toolWidget = new ToolCallWidget(request.toolCallId, m_transcriptContainer);
         toolWidget->setToolInfo(request.toolName, request.summary, request.risk);
+        toolWidget->setDescribeDiff(request.describeDiff);
         toolWidget->setRunning();
         m_toolCallWidgets.insert(request.toolCallId, toolWidget);
         m_transcriptLayout->insertWidget(m_transcriptLayout->count() - 1, toolWidget);
@@ -500,6 +527,51 @@ void ChatWidget::setStreaming(const QString &text)
         header->setStyleSheet(u"color: #3b82f6; font-size: 10px; font-weight: bold; letter-spacing: 0.5px;"_s);
         layout->addWidget(header);
 
+        // Collapsible hidden-reasoning block. Collapsed by default: the user
+        // sees the visible answer, not the internal chain-of-thought.
+        m_thinkingBlock = new QWidget(m_activeAssistantWidget);
+        m_thinkingBlock->setMaximumHeight(0);
+        auto *tbLayout = new QVBoxLayout(m_thinkingBlock);
+        tbLayout->setContentsMargins(0, 0, 0, 0);
+        tbLayout->setSpacing(0);
+
+        auto *tbHeader = new QHBoxLayout;
+        m_thinkingToggle = new QPushButton(u"\u25b4 "_s + i18n("Reasoning"), m_thinkingBlock);
+        m_thinkingToggle->setFlat(true);
+        m_thinkingToggle->setCursor(Qt::PointingHandCursor);
+        m_thinkingToggle->setStyleSheet(
+            u"QPushButton { color: #888888; font-size: 11px; font-style: italic; border: none; text-align: left; }"
+            u"QPushButton:hover { color: #aaaaaa; }"_s);
+        connect(m_thinkingToggle, &QPushButton::clicked, this, &ChatWidget::toggleThinking);
+        tbHeader->addWidget(m_thinkingToggle);
+        tbHeader->addStretch();
+        tbLayout->addLayout(tbHeader);
+
+        m_thinkingBrowser = new QTextBrowser(m_thinkingBlock);
+        m_thinkingBrowser->setReadOnly(true);
+        m_thinkingBrowser->setFrameShape(QFrame::NoFrame);
+        m_thinkingBrowser->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        m_thinkingBrowser->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        m_thinkingBrowser->setStyleSheet(
+            u"QTextBrowser { background: transparent; color: #888888; border: none;"
+            u"  font-style: italic; font-size: 12px; padding: 0 4px; }"_s);
+        m_thinkingBrowser->document()->setDefaultStyleSheet(
+            u"body { color: #888888; font-style: italic; font-size: 12px; margin: 0; padding: 0; }"
+            u"p { margin-bottom: 4px; }"_s);
+        tbLayout->addWidget(m_thinkingBrowser);
+        layout->addWidget(m_thinkingBlock);
+
+        // Structured plan checklist, rendered below the thinking block.
+        m_planBlock = new QWidget(m_activeAssistantWidget);
+        m_planBlock->hide();
+        m_planLayout = new QVBoxLayout(m_planBlock);
+        m_planLayout->setContentsMargins(4, 2, 4, 2);
+        m_planLayout->setSpacing(2);
+        auto *planLabel = new QLabel(i18n("Plan"), m_planBlock);
+        planLabel->setStyleSheet(u"color: #888888; font-size: 10px; font-weight: bold; letter-spacing: 0.5px;"_s);
+        m_planLayout->addWidget(planLabel);
+        layout->addWidget(m_planBlock);
+
         m_activeAssistantBrowser = new QTextBrowser(m_activeAssistantWidget);
         m_activeAssistantBrowser->setOpenExternalLinks(true);
         m_activeAssistantBrowser->setFrameShape(QFrame::NoFrame);
@@ -526,6 +598,87 @@ void ChatWidget::setStreaming(const QString &text)
     scrollToBottom();
 }
 
+void ChatWidget::addThinkingBlock(const QString &text)
+{
+    // Hidden reasoning may arrive before the first visible text delta, so
+    // ensure the active assistant widget (and its thinking/plan blocks) exist.
+    if (!m_activeAssistantWidget) {
+        setStreaming(m_streamText);
+    }
+    if (!m_thinkingBrowser) {
+        return;
+    }
+    m_thinkingBrowser->setMarkdown(escape(text));
+    const int h = static_cast<int>(m_thinkingBrowser->document()->size().height()) + 12;
+    m_thinkingBrowser->setFixedHeight(std::max(20, h));
+    m_thinkingBlock->setMaximumHeight(std::max(20, h));
+    m_thinkingExpanded = true;
+    m_thinkingToggle->setText(u"\u25be "_s + i18n("Reasoning"));
+    scrollToBottom();
+}
+
+void ChatWidget::collapseThinkingBlock()
+{
+    if (!m_thinkingBlock) {
+        return;
+    }
+    // Collapse the hidden reasoning once the visible answer starts streaming,
+    // so the user is not forced to wade through chain-of-thought.
+    m_thinkingBlock->setMaximumHeight(0);
+    m_thinkingExpanded = false;
+    if (m_thinkingToggle) {
+        m_thinkingToggle->setText(u"\u25b4 "_s + i18n("Reasoning"));
+    }
+}
+
+void ChatWidget::toggleThinking()
+{
+    if (!m_thinkingBlock) {
+        return;
+    }
+    m_thinkingExpanded = !m_thinkingExpanded;
+    if (m_thinkingExpanded) {
+        const int h = static_cast<int>(m_thinkingBrowser->document()->size().height()) + 12;
+        m_thinkingBlock->setMaximumHeight(std::max(20, h));
+        m_thinkingToggle->setText(u"\u25be "_s + i18n("Reasoning"));
+    } else {
+        m_thinkingBlock->setMaximumHeight(0);
+        m_thinkingToggle->setText(u"\u25b4 "_s + i18n("Reasoning"));
+    }
+}
+
+void ChatWidget::addPlanChecklist(const QJsonArray &plan)
+{
+    if (!m_planBlock || !m_planLayout) {
+        return;
+    }
+    m_planSteps.clear();
+    for (const QJsonValue &v : plan) {
+        const QJsonObject o = v.toObject();
+        const QString desc = o.value(u"description"_s).toString();
+        const bool completed = o.value(u"completed"_s).toBool();
+        auto *cb = new QCheckBox(desc, m_planBlock);
+        cb->setChecked(completed);
+        cb->setDisabled(true);
+        cb->setStyleSheet(u"QCheckBox { color: #b0b0b0; font-size: 12px; }"
+                          u"QCheckBox::indicator { width: 14px; height: 14px; }"_s);
+        m_planLayout->addWidget(cb);
+        m_planSteps.insert(cb, o.value(u"id"_s).toString());
+    }
+    m_planBlock->show();
+    scrollToBottom();
+}
+
+void ChatWidget::markPlanStepCompleted(const QString &stepId)
+{
+    for (QCheckBox *cb : m_planSteps.keys()) {
+        if (m_planSteps.value(cb) == stepId) {
+            cb->setChecked(true);
+            break;
+        }
+    }
+}
+
 void ChatWidget::freezeStreaming()
 {
     if (m_activeAssistantBrowser && !m_streamText.isEmpty()) {
@@ -533,8 +686,14 @@ void ChatWidget::freezeStreaming()
         const int docH = static_cast<int>(m_activeAssistantBrowser->document()->size().height()) + 16;
         m_activeAssistantBrowser->setFixedHeight(std::max(30, docH));
     }
+    collapseThinkingBlock();
     m_activeAssistantWidget = nullptr;
     m_activeAssistantBrowser = nullptr;
+    m_thinkingBlock = nullptr;
+    m_thinkingBrowser = nullptr;
+    m_thinkingToggle = nullptr;
+    m_planBlock = nullptr;
+    m_planLayout = nullptr;
     m_streamText.clear();
 }
 
@@ -621,6 +780,7 @@ void ChatWidget::setSettings(const Settings &settings)
         m_mode->setCurrentIndex(modeIndex);
     }
     m_thinking->setChecked(settings.thinkingMode);
+    updateThinkingButtonStyle();
     m_updatingCombos = false;
 
     refreshProviders();
@@ -746,6 +906,41 @@ void ChatWidget::updateTokenDisplay()
     if (!m_tokenCount) return;
     const QString m = modelFor(m_settings);
     m_tokenCount->setText(m.isEmpty() ? QString() : m);
+}
+
+void ChatWidget::updateThinkingButtonStyle()
+{
+    if (!m_thinking) return;
+    if (m_thinking->isChecked()) {
+        m_thinking->setText(u"💡"_s);
+        m_thinking->setStyleSheet(
+            u"QPushButton {"
+            u"  color: #fbbf24;"
+            u"  background-color: #2e2e32;"
+            u"  border: 1px solid #3c3c40;"
+            u"  border-radius: 4px;"
+            u"  font-size: 14px;"
+            u"}"
+            u"QPushButton:hover {"
+            u"  background-color: #3a3a3e;"
+            u"  border-color: #4a4a50;"
+            u"}"_s);
+    } else {
+        m_thinking->setText(u"💭"_s);
+        m_thinking->setStyleSheet(
+            u"QPushButton {"
+            u"  color: #888888;"
+            u"  background-color: #2e2e32;"
+            u"  border: 1px solid #3c3c40;"
+            u"  border-radius: 4px;"
+            u"  font-size: 14px;"
+            u"}"
+            u"QPushButton:hover {"
+            u"  background-color: #3a3a3e;"
+            u"  border-color: #4a4a50;"
+            u"  color: #aaaaaa;"
+            u"}"_s);
+    }
 }
 
 void ChatWidget::showModelMenu()

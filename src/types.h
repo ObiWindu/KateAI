@@ -45,9 +45,22 @@ struct ChatMessage {
     enum class Role { System, User, Assistant, Tool };
     Role role = Role::User;
     QString content;
+    // Hidden reasoning emitted by the model before the visible answer. Kept
+    // separate so it can be collapsed in the transcript without losing context.
+    QString thinking;
+    // Optional structured plan attached to an assistant message. Rendered as a
+    // checklist that is checked off as each step is completed.
+    QJsonArray plan;
     QString toolCallId;
     QString name;
     QJsonArray toolCalls;
+};
+
+struct PlanStep {
+    QString id;
+    QString description;
+    bool completed = false;
+    bool inProgress = false;
 };
 
 struct ToolCall {
@@ -59,6 +72,7 @@ struct ToolCall {
 
 struct CompletionChunk {
     QString contentDelta;
+    QString thinkingDelta;
     QList<ToolCall> completedTools;
     bool finished = false;
     QString finishReason;
@@ -71,6 +85,9 @@ struct PermissionRequest {
     QString summary;
     QString details;
     QString path;
+    // Pre-formatted unified diff for write_file, or the old/new strings for
+    // edit_file. Rendered inline by the tool-call card in the chat transcript.
+    QString describeDiff;
     ToolRisk risk = ToolRisk::Write;
 };
 
@@ -122,6 +139,26 @@ struct Settings {
     bool compressSystemPrompt = true; // Whether to compress system prompt
     int maxSystemPromptLength = 1024; // Maximum characters for system prompt
     int messageSpeed = 2; // 0=slow, 1=medium, 2=fast (default fast)
+
+    // --- Optimal-intelligence generation parameters -----------------------
+    // These are sent to the model per request and tuned for coding tasks:
+    // deterministic enough to be repeatable, creative enough to solve novel
+    // problems, and bounded so the agent terminates instead of rambling.
+    double temperature = 0.2;
+    double topP = 0.95;
+    int maxTokens = 0; // 0 = let the provider choose
+    double frequencyPenalty = 0.0;
+    double presencePenalty = 0.0;
+    // Reasoning effort for models that expose it (e.g. xAI grok-reasoning).
+    // Empty = do not send the field. "minimal" | "low" | "medium" | "high".
+    QString reasoningEffort;
+    int contextWindow = 0; // 0 = unknown; used for budgeting the history window
+    bool selfCritique = true; // ask the model to check its own work before finishing
+    bool parallelToolCalls = true; // let the model batch independent tool calls
+    int toolCallTimeoutMs = 120000; // per-tool-call wall-clock budget
+    int maxContextMessages = 0; // 0 = keep full history; else sliding window size
+    bool compactOnFailure = true; // summarise history after a failed tool call
+    int verbosity = 1; // 0= terse, 1= normal, 2= detailed narration
 };
 
 QString providerId(Provider provider);
@@ -145,5 +182,12 @@ QString modelFor(const Settings &settings);
 QJsonArray toolDefinitions(bool readOnlyOnly = false);
 QString defaultSystemPrompt(const QString &workspace);
 QString compressText(const QString &text, int maxLength, bool enabled);
+
+// Structured planning helpers ------------------------------------------------
+QJsonArray parsePlanFromText(const QString &text);
+QJsonArray mergePlanIntoAssistantMessage(const QJsonArray &existingPlan,
+                                         const QString &assistantText);
+QJsonArray markPlanStepCompleted(const QJsonArray &plan, const QString &stepId);
+bool planIsComplete(const QJsonArray &plan);
 
 } // namespace KateAi

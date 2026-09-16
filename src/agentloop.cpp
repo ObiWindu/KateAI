@@ -157,6 +157,33 @@ QString AgentLoop::systemPrompt() const
               u"11. The user sees your streamed text while you work. Use that text for progress narration, not hidden internal reasoning. Never expose chain-of-thought, hidden reasoning, controller messages, or raw tool protocol.\n"_s
               u"12. When no further action is needed, give the user a concise final summary of what you changed and how you verified it.\n"_s
               u"13. Do not output raw tool names, tool-call JSON, controller messages, or operation logs as user-facing prose.\n"_s;
+
+    // Add thinking and planning instructions based on settings
+    if (m_settings.thinkingMode) {
+        prompt += u"\n\nTHINKING PROTOCOL:\n"_s
+                  u"- You MUST output a <thinking>...</thinking> block BEFORE your visible response.\n"_s
+                  u"- This block contains your private analysis, reasoning, and step-by-step planning.\n"_s
+                  u"- The user will NOT see this block (it is collapsed by default). Be thorough and honest.\n"_s
+                  u"- Include: problem analysis, alternative approaches considered, risk assessment, and detailed step plan.\n"_s;
+    }
+    if (m_settings.planMode || m_settings.thinkingMode) {
+        prompt += u"\nPLAN FORMAT:\n"_s
+                  u"- After your thinking block, output a structured plan under a 'Plan:' or 'Implementation Plan:' heading.\n"_s
+                  u"- Use a numbered list (1., 2., 3.) with concrete, verifiable steps.\n"_s
+                  u"- Each step should be a single action you will take (e.g., 'Read file X', 'Edit function Y', 'Run test Z').\n"_s
+                  u"- This plan is rendered as a user-visible checklist that gets checked off as you complete steps.\n"_s
+                  u"- Update the plan by marking completed steps when you finish them.\n"_s;
+    }
+    if (m_settings.selfCritique) {
+        prompt += u"\nSELF-CRITIQUE:\n"_s
+                  u"- Before finishing, review your work for correctness, completeness, and potential issues.\n"_s
+                  u"- If you find problems, fix them before responding to the user.\n"_s;
+    }
+    if (m_settings.verbosity == 0) {
+        prompt += u"\nVERBOSITY: Terse. Give minimal, concise responses.\n"_s;
+    } else if (m_settings.verbosity == 2) {
+        prompt += u"\nVERBOSITY: Detailed. Provide thorough explanations and context.\n"_s;
+    }
     if (!m_settings.extraSystemPrompt.trimmed().isEmpty() && m_settings.compressSystemPrompt) {
         // Apply compression to extra system prompt if enabled
         prompt += u"\n\n"_s + compressText(m_settings.extraSystemPrompt.trimmed(), m_settings.maxSystemPromptLength, true);

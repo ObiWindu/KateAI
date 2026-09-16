@@ -50,7 +50,10 @@ public:
 Q_SIGNALS:
     void userMessage(const QString &text);
     void assistantDelta(const QString &delta);
+    void thinkingDelta(const QString &delta);
+    void thinkingFinished(const QString &text);
     void assistantFinished(const QString &text);
+    void planUpdated(const QJsonArray &plan);
     void toolStarted(const PermissionRequest &request);
     void toolFinished(const ToolResult &result);
     void permissionNeeded(const PermissionRequest &request);
@@ -88,6 +91,7 @@ private:
     void appendToolResultsToConversation();
     void addBudgetFailureResults(const QString &reason);
     void requestVerificationTurn();
+    void emitPlanUpdate();
     void onFinished(const QString &text, const QList<ToolCall> &toolCalls);
     void onFailed(const QString &error);
     void processQueue();
@@ -127,6 +131,11 @@ private:
     bool m_changesNeedVerification = false;
     bool m_verificationAttempted = false;
     int m_verificationPromptCount = 0;
+
+    // Hidden reasoning and structured plan for the current turn.
+    QString m_currentThinking;
+    QJsonArray m_currentPlan;
+    bool m_planShown = false;
 
     QString m_currentAssistant;
 };

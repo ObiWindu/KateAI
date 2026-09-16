@@ -162,12 +162,15 @@ PermissionRequest ToolRunner::describe(const ToolCall &call) const
         if (!resolved.isEmpty() && m_bridge) {
             m_bridge->readDocument(resolved, &existing);
         }
-        req.details = unifiedDiff(req.path, existing, args.value(u"content"_s).toString());
+        req.describeDiff = unifiedDiff(req.path, existing, args.value(u"content"_s).toString());
+        req.details = req.describeDiff;
     } else if (call.name == u"edit_file"_s) {
         req.risk = ToolRisk::Write;
         req.summary = u"Edit %1"_s.arg(req.path);
-        req.details = u"Replace:\n%1\n\nWith:\n%2"_s.arg(args.value(u"old_string"_s).toString(),
-                                                         args.value(u"new_string"_s).toString());
+        const QString oldString = args.value(u"old_string"_s).toString();
+        const QString newString = args.value(u"new_string"_s).toString();
+        req.describeDiff = unifiedDiff(req.path, oldString, newString);
+        req.details = u"Replace:\n%1\n\nWith:\n%2"_s.arg(oldString, newString);
     } else if (call.name == u"bash"_s) {
         req.risk = ToolRisk::Execute;
         const QString command = args.value(u"command"_s).toString();

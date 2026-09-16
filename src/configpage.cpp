@@ -158,6 +158,9 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     m_speed->addItem(i18n("Fast"), 2);
     agentForm->addRow(i18n("Message speed:"), m_speed);
 
+    m_thinkingMode = new QCheckBox(i18n("Enable thinking mode (model outputs reasoning before answer)"), agentWidget);
+    agentForm->addRow(i18n("Thinking mode:"), m_thinkingMode);
+
     m_maxIter = new QSpinBox(agentWidget);
     m_maxIter->setRange(1, 500);
     agentForm->addRow(i18n("Max tool calls per turn:"), m_maxIter);
@@ -228,6 +231,48 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     m_maxSystemPromptLength->setSuffix(i18n(" chars"));
     agentForm->addRow(i18n("Max system prompt length:"), m_maxSystemPromptLength);
 
+    // Optimal Intelligence Parameters
+    auto *intelligenceSeparator = new QLabel(i18n("--- Optimal Intelligence Parameters ---"), agentWidget);
+    intelligenceSeparator->setStyleSheet(u"font-weight: bold; margin-top: 10px;"_s);
+    agentForm->addRow(intelligenceSeparator);
+
+    m_temperature = new QDoubleSpinBox(agentWidget);
+    m_temperature->setRange(0.0, 2.0);
+    m_temperature->setSingleStep(0.05);
+    m_temperature->setDecimals(2);
+    agentForm->addRow(i18n("Temperature (0.0-2.0):"), m_temperature);
+
+    m_topP = new QDoubleSpinBox(agentWidget);
+    m_topP->setRange(0.0, 1.0);
+    m_topP->setSingleStep(0.05);
+    m_topP->setDecimals(2);
+    agentForm->addRow(i18n("Top-p (0.0-1.0):"), m_topP);
+
+    m_maxTokens = new QSpinBox(agentWidget);
+    m_maxTokens->setRange(0, 100000);
+    m_maxTokens->setSpecialValueText(i18n("Auto (provider default)"));
+    agentForm->addRow(i18n("Max tokens (0=auto):"), m_maxTokens);
+
+    m_reasoningEffort = new QComboBox(agentWidget);
+    m_reasoningEffort->addItem(i18n("Auto (provider default)"), QString());
+    m_reasoningEffort->addItem(i18n("Minimal"), u"minimal"_s);
+    m_reasoningEffort->addItem(i18n("Low"), u"low"_s);
+    m_reasoningEffort->addItem(i18n("Medium"), u"medium"_s);
+    m_reasoningEffort->addItem(i18n("High"), u"high"_s);
+    agentForm->addRow(i18n("Reasoning effort:"), m_reasoningEffort);
+
+    m_selfCritique = new QCheckBox(i18n("Ask model to self-critique before finishing"), agentWidget);
+    agentForm->addRow(m_selfCritique);
+
+    m_parallelToolCalls = new QCheckBox(i18n("Allow parallel tool calls"), agentWidget);
+    agentForm->addRow(m_parallelToolCalls);
+
+    m_verbosity = new QComboBox(agentWidget);
+    m_verbosity->addItem(i18n("Terse"), 0);
+    m_verbosity->addItem(i18n("Normal"), 1);
+    m_verbosity->addItem(i18n("Detailed"), 2);
+    agentForm->addRow(i18n("Verbosity:"), m_verbosity);
+
     agentScroll->setWidget(agentWidget);
     tabs->addTab(agentScroll, i18n("Agent & Context"));
 
@@ -276,6 +321,15 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     connect(m_compressSystemPrompt, &QCheckBox::toggled, this, markChanged);
     connect(m_maxSystemPromptLength, &QSpinBox::valueChanged, this, markChanged);
 
+    connect(m_thinkingMode, &QCheckBox::toggled, this, markChanged);
+    connect(m_temperature, &QDoubleSpinBox::valueChanged, this, markChanged);
+    connect(m_topP, &QDoubleSpinBox::valueChanged, this, markChanged);
+    connect(m_maxTokens, &QSpinBox::valueChanged, this, markChanged);
+    connect(m_reasoningEffort, &QComboBox::currentIndexChanged, this, markChanged);
+    connect(m_selfCritique, &QCheckBox::toggled, this, markChanged);
+    connect(m_parallelToolCalls, &QCheckBox::toggled, this, markChanged);
+    connect(m_verbosity, &QComboBox::currentIndexChanged, this, markChanged);
+
     reset();
 }
 
@@ -322,8 +376,10 @@ void KateAiConfigPage::apply()
     s.bashTimeoutMs = m_timeout->value() * 1000;
     s.planMode = m_planMode->isChecked();
     s.loadProjectInstructions = m_projectInstructions->isChecked();
+    s.thinkingMode = m_thinkingMode->isChecked();
     s.extraSystemPrompt = m_system->toPlainText();
     s.extraDenyGlobs = m_deny->toPlainText().split(u'\n', Qt::SkipEmptyParts);
+    s.messageSpeed = m_speed->currentData().toInt();
 
     s.contextCompressionLevel = m_compressionLevel->value();
     s.maxGraphNodes = m_maxGraphNodes->value();
@@ -338,6 +394,15 @@ void KateAiConfigPage::apply()
     s.compressSystemPrompt = m_compressSystemPrompt->isChecked();
     s.maxSystemPromptLength = m_maxSystemPromptLength->value();
     s.messageSpeed = m_speed->currentData().toInt();
+
+    // Optimal Intelligence Parameters
+    s.temperature = m_temperature->value();
+    s.topP = m_topP->value();
+    s.maxTokens = m_maxTokens->value();
+    s.reasoningEffort = m_reasoningEffort->currentData().toString();
+    s.selfCritique = m_selfCritique->isChecked();
+    s.parallelToolCalls = m_parallelToolCalls->isChecked();
+    s.verbosity = m_verbosity->currentData().toInt();
 
     m_plugin->setSettings(s);
 }
@@ -369,6 +434,7 @@ void KateAiConfigPage::reset()
     m_requestsPerMinute->setValue(s.requestsPerMinute);
     m_planMode->setChecked(s.planMode);
     m_projectInstructions->setChecked(s.loadProjectInstructions);
+    m_thinkingMode->setChecked(s.thinkingMode);
     m_system->setPlainText(s.extraSystemPrompt);
     m_speed->setCurrentIndex(m_speed->findData(s.messageSpeed));
 
@@ -384,6 +450,16 @@ void KateAiConfigPage::reset()
     m_maxProjectInstructionsLength->setValue(s.maxProjectInstructionsLength);
     m_compressSystemPrompt->setChecked(s.compressSystemPrompt);
     m_maxSystemPromptLength->setValue(s.maxSystemPromptLength);
+
+    // Optimal Intelligence Parameters
+    m_temperature->setValue(s.temperature);
+    m_topP->setValue(s.topP);
+    m_maxTokens->setValue(s.maxTokens);
+    int reasoningIdx = m_reasoningEffort->findData(s.reasoningEffort);
+    m_reasoningEffort->setCurrentIndex(std::max(0, reasoningIdx));
+    m_selfCritique->setChecked(s.selfCritique);
+    m_parallelToolCalls->setChecked(s.parallelToolCalls);
+    m_verbosity->setCurrentIndex(m_verbosity->findData(s.verbosity));
 }
 
 void KateAiConfigPage::defaults()

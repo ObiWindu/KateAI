@@ -8,7 +8,9 @@
 #include <QPlainTextEdit>
 #include <QPropertyAnimation>
 #include <QPushButton>
+#include <QTextBrowser>
 #include <QVBoxLayout>
+#include <algorithm>
 
 using namespace Qt::Literals::StringLiterals;
 
@@ -64,6 +66,34 @@ ToolCallWidget::ToolCallWidget(const QString &toolCallId, QWidget *parent)
     detailsLayout->setContentsMargins(10, 0, 10, 8);
     detailsLayout->setSpacing(0);
 
+    // Proposed edit diff — shown above the raw tool output so the code change
+    // is visible in the chat transcript even before the permission bar is shown.
+    m_describeDiff = new QTextBrowser(this);
+    m_describeDiff->setReadOnly(true);
+    m_describeDiff->setOpenExternalLinks(false);
+    m_describeDiff->setMaximumHeight(220);
+    m_describeDiff->setPlaceholderText(i18n("No proposed change to display."));
+    m_describeDiff->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_describeDiff->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_describeDiff->setStyleSheet(
+        u"QTextBrowser {"
+        u"  background-color: #11131a;"
+        u"  color: #d4d4d4;"
+        u"  border: 1px solid #2a3a22;"
+        u"  border-radius: 4px;"
+        u"  padding: 8px;"
+        u"  font-family: monospace;"
+        u"  font-size: 11px;"
+        u"  line-height: 1.4;"
+        u"}"_s);
+    m_describeDiff->document()->setDefaultStyleSheet(
+        u"body { color: #d4d4d4; font-family: monospace; font-size: 11px; margin: 0; padding: 0; }"
+        u".removed { color: #ef9999; background-color: #3a1a1a; }"
+        u".added { color: #9ed36a; background-color: #1a3a1a; }"
+        u".hunk { color: #888; }"
+        u"p { margin: 0; }"_s);
+    detailsLayout->addWidget(m_describeDiff);
+
     m_details = new QPlainTextEdit(this);
     m_details->setReadOnly(true);
     m_details->setMaximumHeight(200);
@@ -110,6 +140,48 @@ void ToolCallWidget::setRunning()
     m_finished = false;
     m_status->setText(u"⟳"_s);
     m_status->setStyleSheet(u"QLabel { color: #3b82f6; font-size: 14px; }"_s);
+}
+
+void ToolCallWidget::setDescribeDiff(const QString &diff)
+{
+    if (!m_describeDiff) {
+        return;
+    }
+    if (diff.trimmed().isEmpty()) {
+        m_describeDiff->setPlainText(i18n("No proposed change to display."));
+        m_describeDiff->setStyleSheet(u"QTextBrowser { color: #666; }"_s);
+        return;
+    }
+    m_describeDiff->setHtml(diffToHtml(diff));
+    const int h = static_cast<int>(m_describeDiff->document()->size().height()) + 16;
+    m_describeDiff->setFixedHeight(std::min(220, std::max(30, h)));
+}
+
+QString ToolCallWidget::diffToHtml(const QString &diff) const
+{
+    QString out = u"<body>"_s;
+    for (const QString &line : diff.split(u'\n')) {
+        if (line.startsWith(u"---"_s) || line.startsWith(u"+++"_s)) {
+            out += u"<p class='hunk'>%1</p>"_s.arg(escapeHtml(line));
+        } else if (line.startsWith(u"+"_s)) {
+            out += u"<p class='added'>%1</p>"_s.arg(escapeHtml(line));
+        } else if (line.startsWith(u"-"_s)) {
+            out += u"<p class='removed'>%1</p>"_s.arg(escapeHtml(line));
+        } else {
+            out += u"<p>%1</p>"_s.arg(escapeHtml(line));
+        }
+    }
+    out += u"</body>"_s;
+    return out;
+}
+
+QString ToolCallWidget::escapeHtml(const QString &s) const
+{
+    QString out = s;
+    out.replace(u"&"_s, u"&amp;"_s);
+    out.replace(u"<"_s, u"&lt;"_s);
+    out.replace(u">"_s, u"&gt;"_s);
+    return out;
 }
 
 void ToolCallWidget::setFinished(const ToolResult &result)
