@@ -1,6 +1,7 @@
 #pragma once
 
 #include "documentbridge.h"
+#include "graph.h"
 #include "permissions.h"
 #include "sandbox.h"
 #include "types.h"
@@ -25,6 +26,10 @@ public:
     {
         m_timeoutMs = timeoutMs;
     }
+    void setProjectGraph(ProjectGraph *graph)
+    {
+        m_projectGraph = graph;
+    }
 
     ToolResult run(const ToolCall &call);
     PermissionRequest describe(const ToolCall &call) const;
@@ -44,6 +49,7 @@ private:
 
     Sandbox m_sandbox;
     DocumentBridge *m_bridge = nullptr;
+    ProjectGraph *m_projectGraph = nullptr;
     int m_timeoutMs = 60000;
 };
 

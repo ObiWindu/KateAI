@@ -8,6 +8,7 @@ class QLabel;
 class QPlainTextEdit;
 class QPropertyAnimation;
 class QPushButton;
+class QTextBrowser;
 
 namespace KateAi
 {
@@ -33,6 +34,13 @@ public:
     void setRunning();
     void setFinished(const ToolResult &result);
 
+    /**
+     * Attach the pre-formatted unified diff (write_file / edit_file) so the
+     * proposed change is visible in the chat transcript before the user
+     * approves it. Empty when the tool is not a mutation.
+     */
+    void setDescribeDiff(const QString &diff);
+
     QString toolCallId() const { return m_toolCallId; }
     int expandedHeight() const { return m_expandedHeight; }
     void setExpandedHeight(int h);
@@ -43,6 +51,8 @@ protected:
 private:
     void toggleExpand();
     void updateStyle();
+    QString diffToHtml(const QString &diff) const;
+    QString escapeHtml(const QString &s) const;
     QString iconForTool(const QString &toolName) const;
     QString colorForRisk(ToolRisk risk) const;
 
@@ -60,6 +70,7 @@ private:
     QPushButton *m_expandBtn = nullptr;
     QWidget *m_detailsContainer = nullptr;
     QPlainTextEdit *m_details = nullptr;
+    QTextBrowser *m_describeDiff = nullptr;
     QPropertyAnimation *m_animation = nullptr;
 };
 

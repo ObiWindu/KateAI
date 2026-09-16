@@ -49,6 +49,14 @@ Settings SettingsStore::load()
     s.maxProjectInstructionsLength = g.readEntry(u"MaxProjectInstructionsLength"_s, 2048);
     s.compressSystemPrompt = g.readEntry(u"CompressSystemPrompt"_s, true);
     s.maxSystemPromptLength = g.readEntry(u"MaxSystemPromptLength"_s, 1024);
+    // Optimal Intelligence Parameters
+    s.temperature = g.readEntry(u"Temperature"_s, 0.2);
+    s.topP = g.readEntry(u"TopP"_s, 0.95);
+    s.maxTokens = g.readEntry(u"MaxTokens"_s, 0);
+    s.reasoningEffort = g.readEntry(u"ReasoningEffort"_s, QString());
+    s.selfCritique = g.readEntry(u"SelfCritique"_s, true);
+    s.parallelToolCalls = g.readEntry(u"ParallelToolCalls"_s, true);
+    s.verbosity = g.readEntry(u"Verbosity"_s, 1);
     if (s.maxModelRequests < 1) {
         s.maxModelRequests = 1;
     }
@@ -106,6 +114,14 @@ void SettingsStore::save(const Settings &settings)
     g.writeEntry(u"MaxProjectInstructionsLength"_s, settings.maxProjectInstructionsLength);
     g.writeEntry(u"CompressSystemPrompt"_s, settings.compressSystemPrompt);
     g.writeEntry(u"MaxSystemPromptLength"_s, settings.maxSystemPromptLength);
+    // Save optimal intelligence parameters
+    g.writeEntry(u"Temperature"_s, settings.temperature);
+    g.writeEntry(u"TopP"_s, settings.topP);
+    g.writeEntry(u"MaxTokens"_s, settings.maxTokens);
+    g.writeEntry(u"ReasoningEffort"_s, settings.reasoningEffort);
+    g.writeEntry(u"SelfCritique"_s, settings.selfCritique);
+    g.writeEntry(u"ParallelToolCalls"_s, settings.parallelToolCalls);
+    g.writeEntry(u"Verbosity"_s, settings.verbosity);
     
     g.sync();
 }

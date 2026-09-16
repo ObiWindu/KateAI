@@ -29,7 +29,8 @@ bool PermissionPolicy::sessionGranted(const QString &toolName) const
 
 bool PermissionPolicy::isReadTool(const QString &toolName) const
 {
-    return toolName == u"read_file"_s || toolName == u"list_dir"_s || toolName == u"grep"_s || toolName == u"glob"_s;
+    return toolName == u"read_file"_s || toolName == u"list_dir"_s || toolName == u"grep"_s
+        || toolName == u"glob"_s || toolName == u"query_project_graph"_s;
 }
 
 ToolRisk PermissionPolicy::riskFor(const QString &toolName) const

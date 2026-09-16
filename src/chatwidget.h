@@ -7,6 +7,8 @@
 #include <QHash>
 #include <QLineEdit>
 #include <QIcon>
+#include <QColor>
+#include <QCheckBox>
 
 class QComboBox;
 class QLabel;
@@ -53,17 +55,23 @@ private:
     void addActivityMessage(const QString &text);
     void setStreaming(const QString &text);
     void freezeStreaming();
+    void addThinkingBlock(const QString &text);
+    void collapseThinkingBlock();
+    void toggleThinking();
+    void addPlanChecklist(const QJsonArray &plan);
+    void markPlanStepCompleted(const QString &stepId);
     void scrollToBottom();
     void showSettingsMenu();
     void showModelMenu();
     void updateModelSelectorLabel();
-    
+
     void submit();
     void applyProviderToCombos();
     void refreshProviders();
     void refreshModels();
     void updateSendButtonState();
     void updateTokenDisplay();
+    void updateThinkingButtonStyle();
     static QString escape(const QString &text);
     static QString markdownToHtml(const QString &text);
 
@@ -98,7 +106,22 @@ private:
     bool m_updatingCombos = false;
     QString m_modelFilter;
 
-    // Tool call tracking — maps toolCallId to its widget
+    QWidget *m_toolbar = nullptr;
+    QWidget *m_composerContainer = nullptr;
+    QWidget *m_composerCard = nullptr;
+
+    // Collapsible hidden-reasoning block rendered at the top of the active
+    // assistant turn. Collapsed once the visible answer starts streaming.
+    QWidget *m_thinkingBlock = nullptr;
+    QTextBrowser *m_thinkingBrowser = nullptr;
+    QPushButton *m_thinkingToggle = nullptr;
+    bool m_thinkingExpanded = false;
+
+    // Structured plan checklist rendered below the thinking block.
+    QWidget *m_planBlock = nullptr;
+    QVBoxLayout *m_planLayout = nullptr;
+    QHash<QCheckBox *, QString> m_planSteps;
+
     QHash<QString, ToolCallWidget *> m_toolCallWidgets;
 };
 

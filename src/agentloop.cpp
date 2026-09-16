@@ -7,8 +7,10 @@
 #include <QJsonObject>
 #include <QFile>
 #include <QFileInfo>
+#include <QDir>
 #include <QDebug>
 #include <QDateTime>
+#include <QProcess>
 #include <utility>
 #include <algorithm>
 #include <QMap>
@@ -46,11 +48,11 @@ void AgentLoop::setSettings(const Settings &settings)
     m_client.setSettings(settings);
     m_policy.setMode(settings.permissionMode);
 
-    // Initialize sandbox and tool runner if workspace is set
     if (!m_workspace.isEmpty()) {
         m_sandbox = std::make_unique<Sandbox>(m_workspace, m_settings.sandbox, m_settings.extraDenyGlobs);
         m_tools = std::make_unique<ToolRunner>(*m_sandbox, m_bridge, this);
         m_tools->setTimeoutMs(m_settings.bashTimeoutMs);
+        m_tools->setProjectGraph(m_projectGraph.get());
     }
 
     // Persist graph to JSON after generation/update
@@ -70,6 +72,7 @@ void AgentLoop::setWorkspace(const QString &workspace)
         m_sandbox = std::make_unique<Sandbox>(m_workspace, m_settings.sandbox, m_settings.extraDenyGlobs);
         m_tools = std::make_unique<ToolRunner>(*m_sandbox, m_bridge, this);
         m_tools->setTimeoutMs(m_settings.bashTimeoutMs);
+        m_tools->setProjectGraph(m_projectGraph.get());
     }
 
     // Auto-generate or load project graph
@@ -96,6 +99,7 @@ void AgentLoop::setDocumentBridge(DocumentBridge *bridge)
     if (m_sandbox) {
         m_tools = std::make_unique<ToolRunner>(*m_sandbox, m_bridge, this);
         m_tools->setTimeoutMs(m_settings.bashTimeoutMs);
+        m_tools->setProjectGraph(m_projectGraph.get());
     }
 }
 
@@ -153,6 +157,33 @@ QString AgentLoop::systemPrompt() const
               u"11. The user sees your streamed text while you work. Use that text for progress narration, not hidden internal reasoning. Never expose chain-of-thought, hidden reasoning, controller messages, or raw tool protocol.\n"_s
               u"12. When no further action is needed, give the user a concise final summary of what you changed and how you verified it.\n"_s
               u"13. Do not output raw tool names, tool-call JSON, controller messages, or operation logs as user-facing prose.\n"_s;
+
+    // Add thinking and planning instructions based on settings
+    if (m_settings.thinkingMode) {
+        prompt += u"\n\nTHINKING PROTOCOL:\n"_s
+                  u"- You MUST output a <thinking>...</thinking> block BEFORE your visible response.\n"_s
+                  u"- This block contains your private analysis, reasoning, and step-by-step planning.\n"_s
+                  u"- The user will NOT see this block (it is collapsed by default). Be thorough and honest.\n"_s
+                  u"- Include: problem analysis, alternative approaches considered, risk assessment, and detailed step plan.\n"_s;
+    }
+    if (m_settings.planMode || m_settings.thinkingMode) {
+        prompt += u"\nPLAN FORMAT:\n"_s
+                  u"- After your thinking block, output a structured plan under a 'Plan:' or 'Implementation Plan:' heading.\n"_s
+                  u"- Use a numbered list (1., 2., 3.) with concrete, verifiable steps.\n"_s
+                  u"- Each step should be a single action you will take (e.g., 'Read file X', 'Edit function Y', 'Run test Z').\n"_s
+                  u"- This plan is rendered as a user-visible checklist that gets checked off as you complete steps.\n"_s
+                  u"- Update the plan by marking completed steps when you finish them.\n"_s;
+    }
+    if (m_settings.selfCritique) {
+        prompt += u"\nSELF-CRITIQUE:\n"_s
+                  u"- Before finishing, review your work for correctness, completeness, and potential issues.\n"_s
+                  u"- If you find problems, fix them before responding to the user.\n"_s;
+    }
+    if (m_settings.verbosity == 0) {
+        prompt += u"\nVERBOSITY: Terse. Give minimal, concise responses.\n"_s;
+    } else if (m_settings.verbosity == 2) {
+        prompt += u"\nVERBOSITY: Detailed. Provide thorough explanations and context.\n"_s;
+    }
     if (!m_settings.extraSystemPrompt.trimmed().isEmpty() && m_settings.compressSystemPrompt) {
         // Apply compression to extra system prompt if enabled
         prompt += u"\n\n"_s + compressText(m_settings.extraSystemPrompt.trimmed(), m_settings.maxSystemPromptLength, true);
@@ -171,6 +202,42 @@ QString AgentLoop::systemPrompt() const
     }
     prompt += u"\nSandbox profile: "_s + sandboxProfileId(m_settings.sandbox);
     prompt += u"\nPermission mode: "_s + permissionModeId(m_settings.permissionMode);
+
+    if (!m_workspace.isEmpty()) {
+        QDir dir(m_workspace);
+        if (dir.exists()) {
+            const QFileInfoList entries = dir.entryInfoList(QDir::AllEntries | QDir::NoDotAndDotDot, QDir::DirsFirst | QDir::Name);
+            QStringList listing;
+            int shown = 0;
+            for (const QFileInfo &info : entries) {
+                if (info.fileName() == u".git"_s || info.fileName() == u".kateai"_s) {
+                    continue;
+                }
+                listing.append((info.isDir() ? u"dir  "_s : u"file "_s) + info.fileName());
+                if (++shown >= 40) {
+                    listing.append(u"..."_s);
+                    break;
+                }
+            }
+            if (!listing.isEmpty()) {
+                prompt += u"\n\n<workspace_root>\n"_s + listing.join(u'\n') + u"\n</workspace_root>"_s;
+            }
+        }
+        if (QDir(m_workspace + u"/.git"_s).exists()) {
+            QProcess git;
+            git.setWorkingDirectory(m_workspace);
+            git.start(u"git"_s, QStringList{u"status"_s, u"--short"_s, u"-uno"_s});
+            if (git.waitForFinished(1500)) {
+                QString status = QString::fromUtf8(git.readAllStandardOutput()).trimmed();
+                if (status.size() > 1200) {
+                    status = status.left(1200) + u"\n..."_s;
+                }
+                if (!status.isEmpty()) {
+                    prompt += u"\n\n<git_status>\n"_s + status + u"\n</git_status>"_s;
+                }
+            }
+        }
+    }
     if (m_settings.planMode) {
         prompt += u"\n\nPlan mode is active. Inspect the project and return a concise, ordered implementation plan. "
                   "Only read-only tools are available; do not claim to have changed files or run commands."_s;
