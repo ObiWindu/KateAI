@@ -647,7 +647,7 @@ ToolResult ToolRunner::queryProjectGraph(const QJsonObject &args) const
 
     if (!m_projectGraph || m_projectGraph->getNodeCount() == 0) {
         result.ok = false;
-        result.output = u"Project graph is not available yet. Use glob/list_dir/grep instead.";
+        result.output = u"Project graph is not available yet. Use glob/list_dir/grep instead."_s;
         return result;
     }
 
@@ -758,7 +758,7 @@ ToolResult ToolRunner::queryProjectGraph(const QJsonObject &args) const
         }
     } else {
         result.ok = false;
-        result.output = u"Unknown query_type. Use summary, nodes, edges, dependencies, dependents, find_related, find_path, or dependency_chain.";
+        result.output = u"Unknown query_type. Use summary, nodes, edges, dependencies, dependents, find_related, find_path, or dependency_chain."_s;
         return result;
     }
 

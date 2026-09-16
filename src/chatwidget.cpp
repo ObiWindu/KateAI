@@ -5,7 +5,6 @@
 #include "settings.h"
 #include "toolcallwidget.h"
 
-#include <KColorScheme>
 #include <KLocalizedString>
 
 #include <QAction>
@@ -15,6 +14,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QMenu>
+#include <QPlainTextEdit>
 #include <QPushButton>
 #include <QScrollBar>
 #include <QScrollArea>
@@ -23,6 +23,8 @@
 #include <QTimer>
 #include <QVBoxLayout>
 
+#include <algorithm>
+
 using namespace Qt::Literals::StringLiterals;
 
 namespace KateAi
@@ -30,14 +32,10 @@ namespace KateAi
 
 ChatWidget::ChatWidget(QWidget *parent)
     : QWidget(parent)
-    , m_colorScheme(new KColorScheme(KColorScheme::View, this))
 {
     auto *root = new QVBoxLayout(this);
     root->setContentsMargins(0, 0, 0, 0);
     root->setSpacing(0);
-
-    connect(m_colorScheme, &KColorScheme::changed, this, &ChatWidget::updateThemeColors);
-    updateThemeColors();
 
     // 1. Zed-style Header / Toolbar
     m_toolbar = new QWidget(this);
@@ -107,7 +105,7 @@ ChatWidget::ChatWidget(QWidget *parent)
         u"}"_s);
     toolbarLayout->addWidget(m_configure);
 
-    root->addWidget(toolbar);
+    root->addWidget(m_toolbar);
 
     // Hidden controls retained for internal logic & backward compatibility
     m_provider = new QComboBox(this);

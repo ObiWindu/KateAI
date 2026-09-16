@@ -8,7 +8,6 @@
 #include <QLineEdit>
 #include <QIcon>
 #include <QColor>
-#include <KColorScheme>
 
 class QComboBox;
 class QLabel;
@@ -50,9 +49,6 @@ Q_SIGNALS:
     void settingsChanged(const Settings &settings);
     void configureRequested();
 
-public slots:
-    void updateThemeColors();
-
 private:
     void addUserMessage(const QString &text);
     void addActivityMessage(const QString &text);
@@ -62,7 +58,7 @@ private:
     void showSettingsMenu();
     void showModelMenu();
     void updateModelSelectorLabel();
-    
+
     void submit();
     void applyProviderToCombos();
     void refreshProviders();
@@ -103,15 +99,10 @@ private:
     bool m_updatingCombos = false;
     QString m_modelFilter;
 
-    // Toolbar and composer container for theme updates
     QWidget *m_toolbar = nullptr;
     QWidget *m_composerContainer = nullptr;
     QWidget *m_composerCard = nullptr;
 
-    // Color scheme for theme updates
-    KColorScheme *m_colorScheme = nullptr;
-
-    // Tool call tracking — maps toolCallId to its widget
     QHash<QString, ToolCallWidget *> m_toolCallWidgets;
 };
 
