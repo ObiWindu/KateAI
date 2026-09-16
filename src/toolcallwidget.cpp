@@ -68,11 +68,10 @@ ToolCallWidget::ToolCallWidget(const QString &toolCallId, QWidget *parent)
 
     // Proposed edit diff — shown above the raw tool output so the code change
     // is visible in the chat transcript even before the permission bar is shown.
+    // Only shown for edit_file and write_file tools.
     m_describeDiff = new QTextBrowser(this);
     m_describeDiff->setReadOnly(true);
     m_describeDiff->setOpenExternalLinks(false);
-    m_describeDiff->setMaximumHeight(220);
-    m_describeDiff->setPlaceholderText(i18n("No proposed change to display."));
     m_describeDiff->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_describeDiff->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_describeDiff->setStyleSheet(
@@ -92,6 +91,8 @@ ToolCallWidget::ToolCallWidget(const QString &toolCallId, QWidget *parent)
         u".added { color: #9ed36a; background-color: #1a3a1a; }"
         u".hunk { color: #888; }"
         u"p { margin: 0; }"_s);
+    // Initially hidden - will be shown only for diff tools
+    m_describeDiff->hide();
     detailsLayout->addWidget(m_describeDiff);
 
     m_details = new QPlainTextEdit(this);
@@ -129,6 +130,7 @@ ToolCallWidget::ToolCallWidget(const QString &toolCallId, QWidget *parent)
 
 void ToolCallWidget::setToolInfo(const QString &toolName, const QString &summary, ToolRisk risk)
 {
+    m_toolName = toolName;
     m_risk = risk;
     m_icon->setText(iconForTool(toolName));
     m_title->setText(u"<b>%1</b> — %2"_s.arg(toolName, summary.isEmpty() ? i18n("Running…") : summary));
@@ -147,14 +149,22 @@ void ToolCallWidget::setDescribeDiff(const QString &diff)
     if (!m_describeDiff) {
         return;
     }
-    if (diff.trimmed().isEmpty()) {
-        m_describeDiff->setPlainText(i18n("No proposed change to display."));
-        m_describeDiff->setStyleSheet(u"QTextBrowser { color: #666; }"_s);
+
+    // Only show diff box for edit_file and write_file tools
+    if (!isDiffTool(m_toolName)) {
+        m_describeDiff->hide();
         return;
     }
+
+    if (diff.trimmed().isEmpty()) {
+        m_describeDiff->hide();
+        return;
+    }
+
     m_describeDiff->setHtml(diffToHtml(diff));
     const int h = static_cast<int>(m_describeDiff->document()->size().height()) + 16;
-    m_describeDiff->setFixedHeight(std::min(220, std::max(30, h)));
+    m_describeDiff->setFixedHeight(std::min(300, std::max(30, h)));
+    m_describeDiff->show();
 }
 
 QString ToolCallWidget::diffToHtml(const QString &diff) const
@@ -266,6 +276,11 @@ QString ToolCallWidget::colorForRisk(ToolRisk risk) const
         return u"#ef4444"_s;    // red
     }
     return u"#888"_s;
+}
+
+bool ToolCallWidget::isDiffTool(const QString &toolName) const
+{
+    return toolName == u"edit_file"_s || toolName == u"write_file"_s;
 }
 
 bool ToolCallWidget::eventFilter(QObject *watched, QEvent *event)
