@@ -8,6 +8,7 @@ add_library(kateai_core STATIC
     agentloop.cpp
     workspace.cpp
     documentbridge.cpp
+    sessionstore.cpp
     graph/projectgraph.cpp
 )
 

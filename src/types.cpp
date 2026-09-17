@@ -357,9 +357,42 @@ QString defaultSystemPrompt(const QString &workspace)
            "- Shell commands must be non-interactive. Do not request secrets or write credential files.\n"
            "\n"
            "REASONING & PLANNING (required):\n"
-           "1. THINKING: Before every response, output your internal reasoning in a <thinking> block. This is your private chain-of-thought: analyze the request, consider alternatives, plan steps, and anticipate issues. The user will NOT see this block - it is collapsed by default. Be thorough."
-           "2. PLAN: After thinking, output a structured implementation plan as a numbered list under a 'Plan:' or 'Implementation Plan:' heading. Each step should be a concrete, verifiable action. This plan IS visible to the user as a checklist."
-           "3. EXECUTION: Follow your plan step by step. After completing each step, you may update the plan by marking steps complete."
+           "1. THINKING: Before every response, output your internal reasoning in a <thinking> block. This is your private chain-of-thought: analyze the request, consider alternatives, plan steps, and anticipate issues. The user will NOT see this block - it is collapsed by default. Be thorough.\n"
+           "2. PLAN: After thinking, output a structured implementation plan as a numbered list under a 'Plan:' or 'Implementation Plan:' heading. Each step should be a concrete, verifiable action. This plan IS visible to the user as a checklist.\n"
+           "3. EXECUTION: Follow your plan step by step. After completing each step, you may update the plan by marking steps complete.\n"
+           "\n"
+           "THINKING PROTOCOL (detailed):\n"
+           "- Your <thinking> block MUST come FIRST, before any visible text.\n"
+           "- Include in thinking: problem analysis, root cause hypotheses, alternative approaches considered, risk assessment, file/dependency mapping, and a detailed step-by-step plan.\n"
+           "- Be honest about uncertainty. If you don't know something, say so in thinking and plan to investigate.\n"
+           "- The thinking block is your private workspace - use it fully. There is no penalty for thorough reasoning.\n"
+           "\n"
+           "PLAN FORMAT (structured):\n"
+           "- After </thinking>, output a plan under '## Plan' or '## Implementation Plan' heading.\n"
+           "- Use numbered steps (1., 2., 3.) with concrete, verifiable actions.\n"
+           "- Each step = ONE tool call or a small batch of related calls.\n"
+           "- Good: 'Read auth/login.cpp lines 40-80 to understand token handling'\n"
+           "- Good: 'Edit auth/login.cpp to fix token refresh logic'\n"
+           "- Good: 'Run tests for auth module to verify fix'\n"
+           "- Bad: 'Fix the login bug' (too vague)\n"
+           "- Bad: 'Explore the codebase' (not actionable)\n"
+           "\n"
+           "EXECUTION DISCIPLINE:\n"
+           "- Execute ONE plan step per model turn when possible.\n"
+           "- After each step, briefly narrate what you learned/changed and what's next (1-2 sentences).\n"
+           "- If a step fails, diagnose in thinking, then adapt the plan - don't blindly retry.\n"
+           "- Mark completed steps in the plan by outputting an updated plan with 'completed: true'.\n"
+           "\n"
+           "VERIFICATION REQUIREMENT:\n"
+           "- After ANY file mutation, you MUST verify with a focused read, test, build, or lint.\n"
+           "- Verification is not optional - it's part of the step.\n"
+           "- If verification fails, thinking must analyze the failure and plan a targeted fix.\n"
+           "\n"
+           "COLLABORATION STYLE:\n"
+           "- Your visible response should be conversational and useful to the user.\n"
+           "- Narrate progress naturally: 'I'll check the auth module first, then apply the fix and run tests.'\n"
+           "- Never expose tool names, JSON, or internal protocol in visible text.\n"
+           "- When done, give a concise summary: what changed, how verified, any follow-ups.\n"
            "\n"
            "Workspace root: "_s
         + workspace;
@@ -377,8 +410,81 @@ QString compressText(const QString &text, int maxLength, bool enabled)
     return result;
 }
 
-} // namespace KateAi
+// Smart context compression - preserves important parts while reducing size
+QString smartCompressContext(const QString &text, int maxLength, bool enabled)
+{
+    if (!enabled || text.length() <= maxLength) {
+        return text;
+    }
 
+    // Strategy: Keep first 30% (context/setup), last 50% (recent/important), summarize middle
+    int keepStart = maxLength * 30 / 100;
+    int keepEnd = maxLength * 50 / 100;
+    int summaryBudget = maxLength - keepStart - keepEnd - 50; // 50 for summary marker
+    
+    if (summaryBudget < 100) {
+        // Fall back to simple truncation if budget too small
+        return compressText(text, maxLength, true);
+    }
+
+    QString start = text.left(keepStart);
+    QString end = text.right(keepEnd);
+    
+    // Create a summary of what was in the middle
+    QString middle = text.mid(keepStart, text.length() - keepStart - keepEnd);
+    int middleLines = middle.count(u'\n');
+    int middleChars = middle.length();
+    
+    QString summary = u"\n[... %1 lines, %2 chars compressed ...]\n"_s.arg(middleLines).arg(middleChars);
+    
+    return start + summary + end;
+}
+
+// Compress a list of messages intelligently
+QList<ChatMessage> compressMessageHistory(const QList<ChatMessage> &messages,
+                                           int maxMessages,
+                                           int maxTotalChars,
+                                           bool enabled)
+{
+    if (!enabled || messages.size() <= maxMessages) {
+        return messages;
+    }
+
+    QList<ChatMessage> result;
+    // Always keep system message
+    if (!messages.isEmpty() && messages.first().role == ChatMessage::Role::System) {
+        result.append(messages.first());
+    }
+
+    // Keep last N messages
+    int keepCount = qMin(maxMessages - result.size(), messages.size() - result.size());
+    for (int i = messages.size() - keepCount; i < messages.size(); ++i) {
+        result.append(messages[i]);
+    }
+
+    // If still over char budget, compress older messages
+    int totalChars = 0;
+    for (const auto &msg : result) {
+        totalChars += msg.content.length() + msg.thinking.length();
+    }
+
+    if (totalChars > maxTotalChars && result.size() > 2) {
+        // Compress the oldest non-system message
+        for (int i = 1; i < result.size() - 1; ++i) {
+            ChatMessage &msg = result[i];
+            if (msg.content.length() > 500) {
+                msg.content = smartCompressContext(msg.content, 500, true);
+            }
+            if (msg.thinking.length() > 1000) {
+                msg.thinking = smartCompressContext(msg.thinking, 1000, true);
+            }
+        }
+    }
+
+    return result;
+}
+
+// Structured planning helpers ------------------------------------------------
 QJsonArray parsePlanFromText(const QString &text)
 {
     QJsonArray plan;
@@ -480,3 +586,5 @@ bool planIsComplete(const QJsonArray &plan)
     }
     return !plan.isEmpty();
 }
+
+} // namespace KateAi

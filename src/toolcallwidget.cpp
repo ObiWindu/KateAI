@@ -162,9 +162,18 @@ void ToolCallWidget::setDescribeDiff(const QString &diff)
     }
 
     m_describeDiff->setHtml(diffToHtml(diff));
+
+    // Ensure the document is laid out before measuring
+    m_describeDiff->document()->adjustSize();
     const int h = static_cast<int>(m_describeDiff->document()->size().height()) + 16;
-    m_describeDiff->setFixedHeight(std::min(300, std::max(30, h)));
+    m_describeDiff->setFixedHeight(std::min(400, std::max(50, h)));
     m_describeDiff->show();
+
+    // Trigger a layout update on the container to account for the new height
+    m_detailsContainer->updateGeometry();
+    if (m_expanded) {
+        m_detailsContainer->setMaximumHeight(m_details->sizeHint().height() + m_describeDiff->height() + 16);
+    }
 }
 
 QString ToolCallWidget::diffToHtml(const QString &diff) const
@@ -212,6 +221,13 @@ void ToolCallWidget::setFinished(const ToolResult &result)
         ? result.output.left(4000) + i18n("\n\n… (truncated)")
         : result.output;
     m_details->setPlainText(output);
+
+    // Update expanded height if currently expanded
+    if (m_expanded) {
+        int detailsHeight = m_details->sizeHint().height();
+        int diffHeight = m_describeDiff->isVisible() ? m_describeDiff->height() : 0;
+        m_detailsContainer->setMaximumHeight(detailsHeight + diffHeight + 16);
+    }
     updateStyle();
 }
 
@@ -228,8 +244,10 @@ void ToolCallWidget::toggleExpand()
 
     m_animation->stop();
     if (m_expanded) {
+        int detailsHeight = m_details->sizeHint().height();
+        int diffHeight = m_describeDiff->isVisible() ? m_describeDiff->height() : 0;
         m_animation->setStartValue(0);
-        m_animation->setEndValue(m_details->sizeHint().height() + 16);
+        m_animation->setEndValue(detailsHeight + diffHeight + 16);
     } else {
         m_animation->setStartValue(m_detailsContainer->height());
         m_animation->setEndValue(0);

@@ -89,6 +89,27 @@ private:
     QCheckBox *m_selfCritique = nullptr;
     QCheckBox *m_parallelToolCalls = nullptr;
     QComboBox *m_verbosity = nullptr;
+
+    // Enhanced Intelligence Parameters
+    QCheckBox *m_structuredThinking = nullptr;
+    QCheckBox *m_structuredPlanning = nullptr;
+    QCheckBox *m_autoCollapseThinking = nullptr;
+    QCheckBox *m_showPlanAsChecklist = nullptr;
+    QSpinBox *m_maxThinkingTokens = nullptr;
+    QSpinBox *m_maxPlanSteps = nullptr;
+    QCheckBox *m_requireVerification = nullptr;
+    QSpinBox *m_maxVerificationAttempts = nullptr;
+    QCheckBox *m_adaptiveTemperature = nullptr;
+    QDoubleSpinBox *m_explorationTemperature = nullptr;
+    QDoubleSpinBox *m_exploitationTemperature = nullptr;
+    QCheckBox *m_enablePlanUpdates = nullptr;
+    QCheckBox *m_narrativeProgress = nullptr;
+
+    // Context Management
+    QCheckBox *m_smartContextTruncation = nullptr;
+    QSpinBox *m_contextWindowReserve = nullptr;
+    QCheckBox *m_compressOldMessages = nullptr;
+    QSpinBox *m_compressionThreshold = nullptr;
 };
 
 } // namespace KateAi

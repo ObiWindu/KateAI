@@ -1,5 +1,6 @@
 #include "agentloop.h"
 #include "graph.h"
+#include "sessionstore.h"
 #include "types.h"
 
 #include <QJsonArray>
@@ -35,10 +36,25 @@ AgentLoop::AgentLoop(QObject *parent)
         m_currentAssistant += delta;
         Q_EMIT assistantDelta(delta);
     });
+    connect(&m_client, &LlmClient::thinkingDelta, this, [this](const QString &delta) {
+        m_currentThinking += delta;
+        Q_EMIT thinkingDelta(delta);
+    });
     connect(&m_client, &LlmClient::finished, this, &AgentLoop::onFinished);
     connect(&m_client, &LlmClient::failed, this, &AgentLoop::onFailed);
     connect(&m_client, &LlmClient::modelsReceived, this, &AgentLoop::modelsReceived);
     connect(&m_client, &LlmClient::modelsFailed, this, &AgentLoop::modelsFailed);
+    // Retry status signals
+    connect(&m_client, &LlmClient::retryStatus, this, [this](const QString &message, int attempt, int maxAttempts, int delaySeconds) {
+        Q_EMIT statusChanged(message);
+        Q_EMIT activityUpdated(u"Retrying in %1s (attempt %2/%3)..."_s.arg(delaySeconds).arg(attempt).arg(maxAttempts));
+    });
+    connect(&m_client, &LlmClient::retryScheduled, this, [this](int attempt, int maxAttempts, int delaySeconds) {
+        Q_UNUSED(attempt);
+        Q_UNUSED(maxAttempts);
+        Q_UNUSED(delaySeconds);
+        // Could add additional UI feedback here if needed
+    });
 }
 
 void AgentLoop::setSettings(const Settings &settings)
@@ -159,20 +175,37 @@ QString AgentLoop::systemPrompt() const
               u"13. Do not output raw tool names, tool-call JSON, controller messages, or operation logs as user-facing prose.\n"_s;
 
     // Add thinking and planning instructions based on settings
-    if (m_settings.thinkingMode) {
-        prompt += u"\n\nTHINKING PROTOCOL:\n"_s
+    if (m_settings.structuredThinking) {
+        prompt += u"\n\nTHINKING PROTOCOL (MANDATORY):\n"_s
                   u"- You MUST output a <thinking>...</thinking> block BEFORE your visible response.\n"_s
                   u"- This block contains your private analysis, reasoning, and step-by-step planning.\n"_s
                   u"- The user will NOT see this block (it is collapsed by default). Be thorough and honest.\n"_s
-                  u"- Include: problem analysis, alternative approaches considered, risk assessment, and detailed step plan.\n"_s;
+                  u"- Include: problem analysis, root cause hypotheses, alternative approaches considered, risk assessment, file/dependency mapping, and detailed step plan.\n"_s
+                  u"- Max thinking tokens: "_s + QString::number(m_settings.maxThinkingTokens) + u"\n"_s;
     }
-    if (m_settings.planMode || m_settings.thinkingMode) {
-        prompt += u"\nPLAN FORMAT:\n"_s
-                  u"- After your thinking block, output a structured plan under a 'Plan:' or 'Implementation Plan:' heading.\n"_s
-                  u"- Use a numbered list (1., 2., 3.) with concrete, verifiable steps.\n"_s
-                  u"- Each step should be a single action you will take (e.g., 'Read file X', 'Edit function Y', 'Run test Z').\n"_s
+    if (m_settings.structuredPlanning) {
+        prompt += u"\nPLAN FORMAT (MANDATORY):\n"_s
+                  u"- After </thinking>, output a structured plan under '## Plan' or '## Implementation Plan' heading.\n"_s
+                  u"- Use numbered steps (1., 2., 3.) with concrete, verifiable actions.\n"_s
+                  u"- Each step = ONE tool call or a small batch of related calls.\n"_s
+                  u"- Good: 'Read auth/login.cpp lines 40-80 to understand token handling'\n"_s
+                  u"- Good: 'Edit auth/login.cpp to fix token refresh logic'\n"_s
+                  u"- Good: 'Run tests for auth module to verify fix'\n"_s
+                  u"- Bad: 'Fix the login bug' (too vague)\n"_s
+                  u"- Bad: 'Explore the codebase' (not actionable)\n"_s
+                  u"- Max plan steps: "_s + QString::number(m_settings.maxPlanSteps) + u"\n"_s
                   u"- This plan is rendered as a user-visible checklist that gets checked off as you complete steps.\n"_s
                   u"- Update the plan by marking completed steps when you finish them.\n"_s;
+    }
+    if (m_settings.autoCollapseThinking) {
+        prompt += u"\nAUTO-COLLAPSE: The thinking block will be auto-collapsed once your visible answer starts streaming.\n"_s;
+    }
+    if (m_settings.requireVerification) {
+        prompt += u"\nVERIFICATION REQUIREMENT:\n"_s
+                  u"- After ANY file mutation, you MUST verify with a focused read, test, build, or lint.\n"_s
+                  u"- Verification is not optional - it's part of the step.\n"_s
+                  u"- If verification fails, thinking must analyze the failure and plan a targeted fix.\n"_s
+                  u"- Max verification attempts: "_s + QString::number(m_settings.maxVerificationAttempts) + u"\n"_s;
     }
     if (m_settings.selfCritique) {
         prompt += u"\nSELF-CRITIQUE:\n"_s
@@ -357,10 +390,10 @@ void AgentLoop::resetConversation()
     m_changesNeedVerification = false;
     m_verificationAttempted = false;
     m_verificationPromptCount = 0;
-    m_changedPaths.clear();
-    m_changesNeedVerification = false;
-    m_verificationAttempted = false;
-    m_verificationPromptCount = 0;
+    m_currentThinking.clear();
+    m_currentPlan = QJsonArray();
+    m_planShown = false;
+    m_currentAssistant.clear();
 }
 
 void AgentLoop::abort()
@@ -514,9 +547,14 @@ void AgentLoop::sendToModel()
     ++m_modelRequests;
     m_modelRequestTimes.enqueue(now);
     m_currentAssistant.clear();
+    m_currentThinking.clear();
+    m_currentPlan = QJsonArray();
+    m_planShown = false;
     m_state = State::WaitingForModel;
 
-    if (m_settings.thinkingMode) {
+    if (m_settings.structuredThinking) {
+        Q_EMIT statusChanged(u"Thinking…"_s);
+    } else if (m_settings.thinkingMode) {
         Q_EMIT statusChanged(u"Working on it…"_s);
     }
 
@@ -774,6 +812,18 @@ void AgentLoop::onFinished(const QString &text, const QList<ToolCall> &toolCalls
     ChatMessage assistant;
     assistant.role = ChatMessage::Role::Assistant;
     assistant.content = text;
+    assistant.thinking = m_currentThinking;
+
+    // Parse structured plan from the response text
+    if (m_settings.structuredPlanning && !text.isEmpty()) {
+        QJsonArray parsedPlan = parsePlanFromText(text);
+        if (!parsedPlan.isEmpty()) {
+            assistant.plan = parsedPlan;
+            m_currentPlan = parsedPlan;
+            m_planShown = false;
+            Q_EMIT planUpdated(parsedPlan);
+        }
+    }
 
     if (!toolCalls.isEmpty()) {
         QJsonArray encoded;
@@ -795,6 +845,11 @@ void AgentLoop::onFinished(const QString &text, const QList<ToolCall> &toolCalls
 
     m_messages.append(assistant);
     Q_EMIT assistantFinished(text);
+
+    // Emit plan if we have one
+    if (!assistant.plan.isEmpty()) {
+        Q_EMIT planUpdated(assistant.plan);
+    }
 
     // The model is responsible for natural progress narration. If it returned
     // tool calls without any user-facing text, provide a planned-work update
@@ -1061,6 +1116,58 @@ void AgentLoop::resolvePermission(PermissionDecision decision)
 void AgentLoop::fetchModels(Provider provider)
 {
     m_client.fetchModels(provider);
+}
+
+SessionStore::SessionData AgentLoop::sessionData() const
+{
+    SessionStore::SessionData data;
+    data.messages = m_messages;
+    data.currentThinking = m_currentThinking;
+    data.currentPlan = m_currentPlan;
+    data.planShown = m_planShown;
+    data.currentAssistant = m_currentAssistant;
+    data.stateEpoch = m_stateEpoch;
+    data.actionSignatures = m_actionSignatures.values();
+    data.actionRepeatCounts = m_actionRepeatCounts;
+    data.changedPaths = m_changedPaths.values();
+    data.changesNeedVerification = m_changesNeedVerification;
+    data.verificationAttempted = m_verificationAttempted;
+    data.verificationPromptCount = m_verificationPromptCount;
+    data.modelRequests = m_modelRequests;
+    data.toolCalls = m_toolCalls;
+    return data;
+}
+
+void AgentLoop::restoreSession(const SessionStore::SessionData &data)
+{
+    // Clear current state first
+    resetConversation();
+
+    // Restore messages
+    m_messages = data.messages;
+
+    // Restore turn state
+    m_currentThinking = data.currentThinking;
+    m_currentPlan = data.currentPlan;
+    m_planShown = data.planShown;
+    m_currentAssistant = data.currentAssistant;
+
+    // Restore tracking state
+    m_stateEpoch = data.stateEpoch;
+    m_actionSignatures = QSet<QString>(data.actionSignatures.constBegin(), data.actionSignatures.constEnd());
+    m_actionRepeatCounts = data.actionRepeatCounts;
+    m_changedPaths = QSet<QString>(data.changedPaths.constBegin(), data.changedPaths.constEnd());
+    m_changesNeedVerification = data.changesNeedVerification;
+    m_verificationAttempted = data.verificationAttempted;
+    m_verificationPromptCount = data.verificationPromptCount;
+    m_modelRequests = data.modelRequests;
+    m_toolCalls = data.toolCalls;
+}
+
+void AgentLoop::clearSession()
+{
+    resetConversation();
+    SessionStore::clear();
 }
 
 } // namespace KateAi

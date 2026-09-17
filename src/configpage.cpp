@@ -273,6 +273,81 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     m_verbosity->addItem(i18n("Detailed"), 2);
     agentForm->addRow(i18n("Verbosity:"), m_verbosity);
 
+    // Enhanced Intelligence Parameters
+    auto *enhancedSeparator = new QLabel(i18n("--- Enhanced Intelligence ---"), agentWidget);
+    enhancedSeparator->setStyleSheet(u"font-weight: bold; margin-top: 10px;"_s);
+    agentForm->addRow(enhancedSeparator);
+
+    m_structuredThinking = new QCheckBox(i18n("Require structured thinking block before response"), agentWidget);
+    agentForm->addRow(i18n("Structured thinking:"), m_structuredThinking);
+
+    m_structuredPlanning = new QCheckBox(i18n("Require structured plan after thinking"), agentWidget);
+    agentForm->addRow(i18n("Structured planning:"), m_structuredPlanning);
+
+    m_autoCollapseThinking = new QCheckBox(i18n("Auto-collapse thinking once answer starts"), agentWidget);
+    agentForm->addRow(i18n("Auto-collapse thinking:"), m_autoCollapseThinking);
+
+    m_showPlanAsChecklist = new QCheckBox(i18n("Show plan as interactive checklist"), agentWidget);
+    agentForm->addRow(i18n("Show plan checklist:"), m_showPlanAsChecklist);
+
+    m_maxThinkingTokens = new QSpinBox(agentWidget);
+    m_maxThinkingTokens->setRange(512, 32768);
+    m_maxThinkingTokens->setSuffix(i18n(" tokens"));
+    agentForm->addRow(i18n("Max thinking tokens:"), m_maxThinkingTokens);
+
+    m_maxPlanSteps = new QSpinBox(agentWidget);
+    m_maxPlanSteps->setRange(5, 30);
+    agentForm->addRow(i18n("Max plan steps:"), m_maxPlanSteps);
+
+    m_requireVerification = new QCheckBox(i18n("Require verification after file mutations"), agentWidget);
+    agentForm->addRow(i18n("Require verification:"), m_requireVerification);
+
+    m_maxVerificationAttempts = new QSpinBox(agentWidget);
+    m_maxVerificationAttempts->setRange(1, 5);
+    agentForm->addRow(i18n("Max verification attempts:"), m_maxVerificationAttempts);
+
+    m_adaptiveTemperature = new QCheckBox(i18n("Adjust temperature based on task phase"), agentWidget);
+    agentForm->addRow(i18n("Adaptive temperature:"), m_adaptiveTemperature);
+
+    m_explorationTemperature = new QDoubleSpinBox(agentWidget);
+    m_explorationTemperature->setRange(0.0, 2.0);
+    m_explorationTemperature->setSingleStep(0.05);
+    m_explorationTemperature->setDecimals(2);
+    agentForm->addRow(i18n("Exploration temperature:"), m_explorationTemperature);
+
+    m_exploitationTemperature = new QDoubleSpinBox(agentWidget);
+    m_exploitationTemperature->setRange(0.0, 2.0);
+    m_exploitationTemperature->setSingleStep(0.05);
+    m_exploitationTemperature->setDecimals(2);
+    agentForm->addRow(i18n("Exploitation temperature:"), m_exploitationTemperature);
+
+    m_enablePlanUpdates = new QCheckBox(i18n("Allow plan updates during execution"), agentWidget);
+    agentForm->addRow(i18n("Enable plan updates:"), m_enablePlanUpdates);
+
+    m_narrativeProgress = new QCheckBox(i18n("Natural language progress narration"), agentWidget);
+    agentForm->addRow(i18n("Narrative progress:"), m_narrativeProgress);
+
+    // Context management for performance
+    auto *contextSeparator = new QLabel(i18n("--- Context Management ---"), agentWidget);
+    contextSeparator->setStyleSheet(u"font-weight: bold; margin-top: 10px;"_s);
+    agentForm->addRow(contextSeparator);
+
+    m_smartContextTruncation = new QCheckBox(i18n("Intelligently truncate old context"), agentWidget);
+    agentForm->addRow(i18n("Smart context truncation:"), m_smartContextTruncation);
+
+    m_contextWindowReserve = new QSpinBox(agentWidget);
+    m_contextWindowReserve->setRange(1024, 32768);
+    m_contextWindowReserve->setSuffix(i18n(" tokens"));
+    agentForm->addRow(i18n("Context window reserve:"), m_contextWindowReserve);
+
+    m_compressOldMessages = new QCheckBox(i18n("Compress messages beyond window"), agentWidget);
+    agentForm->addRow(i18n("Compress old messages:"), m_compressOldMessages);
+
+    m_compressionThreshold = new QSpinBox(agentWidget);
+    m_compressionThreshold->setRange(512, 16384);
+    m_compressionThreshold->setSuffix(i18n(" chars"));
+    agentForm->addRow(i18n("Compression threshold:"), m_compressionThreshold);
+
     agentScroll->setWidget(agentWidget);
     tabs->addTab(agentScroll, i18n("Agent & Context"));
 
@@ -329,6 +404,27 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     connect(m_selfCritique, &QCheckBox::toggled, this, markChanged);
     connect(m_parallelToolCalls, &QCheckBox::toggled, this, markChanged);
     connect(m_verbosity, &QComboBox::currentIndexChanged, this, markChanged);
+
+    // Enhanced Intelligence Parameters
+    connect(m_structuredThinking, &QCheckBox::toggled, this, markChanged);
+    connect(m_structuredPlanning, &QCheckBox::toggled, this, markChanged);
+    connect(m_autoCollapseThinking, &QCheckBox::toggled, this, markChanged);
+    connect(m_showPlanAsChecklist, &QCheckBox::toggled, this, markChanged);
+    connect(m_maxThinkingTokens, &QSpinBox::valueChanged, this, markChanged);
+    connect(m_maxPlanSteps, &QSpinBox::valueChanged, this, markChanged);
+    connect(m_requireVerification, &QCheckBox::toggled, this, markChanged);
+    connect(m_maxVerificationAttempts, &QSpinBox::valueChanged, this, markChanged);
+    connect(m_adaptiveTemperature, &QCheckBox::toggled, this, markChanged);
+    connect(m_explorationTemperature, &QDoubleSpinBox::valueChanged, this, markChanged);
+    connect(m_exploitationTemperature, &QDoubleSpinBox::valueChanged, this, markChanged);
+    connect(m_enablePlanUpdates, &QCheckBox::toggled, this, markChanged);
+    connect(m_narrativeProgress, &QCheckBox::toggled, this, markChanged);
+
+    // Context Management
+    connect(m_smartContextTruncation, &QCheckBox::toggled, this, markChanged);
+    connect(m_contextWindowReserve, &QSpinBox::valueChanged, this, markChanged);
+    connect(m_compressOldMessages, &QCheckBox::toggled, this, markChanged);
+    connect(m_compressionThreshold, &QSpinBox::valueChanged, this, markChanged);
 
     reset();
 }
@@ -404,6 +500,27 @@ void KateAiConfigPage::apply()
     s.parallelToolCalls = m_parallelToolCalls->isChecked();
     s.verbosity = m_verbosity->currentData().toInt();
 
+    // Enhanced Intelligence Parameters
+    s.structuredThinking = m_structuredThinking->isChecked();
+    s.structuredPlanning = m_structuredPlanning->isChecked();
+    s.autoCollapseThinking = m_autoCollapseThinking->isChecked();
+    s.showPlanAsChecklist = m_showPlanAsChecklist->isChecked();
+    s.maxThinkingTokens = m_maxThinkingTokens->value();
+    s.maxPlanSteps = m_maxPlanSteps->value();
+    s.requireVerification = m_requireVerification->isChecked();
+    s.maxVerificationAttempts = m_maxVerificationAttempts->value();
+    s.adaptiveTemperature = m_adaptiveTemperature->isChecked();
+    s.explorationTemperature = m_explorationTemperature->value();
+    s.exploitationTemperature = m_exploitationTemperature->value();
+    s.enablePlanUpdates = m_enablePlanUpdates->isChecked();
+    s.narrativeProgress = m_narrativeProgress->isChecked();
+
+    // Context Management
+    s.smartContextTruncation = m_smartContextTruncation->isChecked();
+    s.contextWindowReserve = m_contextWindowReserve->value();
+    s.compressOldMessages = m_compressOldMessages->isChecked();
+    s.compressionThreshold = m_compressionThreshold->value();
+
     m_plugin->setSettings(s);
 }
 
@@ -460,6 +577,27 @@ void KateAiConfigPage::reset()
     m_selfCritique->setChecked(s.selfCritique);
     m_parallelToolCalls->setChecked(s.parallelToolCalls);
     m_verbosity->setCurrentIndex(m_verbosity->findData(s.verbosity));
+
+    // Enhanced Intelligence Parameters
+    m_structuredThinking->setChecked(s.structuredThinking);
+    m_structuredPlanning->setChecked(s.structuredPlanning);
+    m_autoCollapseThinking->setChecked(s.autoCollapseThinking);
+    m_showPlanAsChecklist->setChecked(s.showPlanAsChecklist);
+    m_maxThinkingTokens->setValue(s.maxThinkingTokens);
+    m_maxPlanSteps->setValue(s.maxPlanSteps);
+    m_requireVerification->setChecked(s.requireVerification);
+    m_maxVerificationAttempts->setValue(s.maxVerificationAttempts);
+    m_adaptiveTemperature->setChecked(s.adaptiveTemperature);
+    m_explorationTemperature->setValue(s.explorationTemperature);
+    m_exploitationTemperature->setValue(s.exploitationTemperature);
+    m_enablePlanUpdates->setChecked(s.enablePlanUpdates);
+    m_narrativeProgress->setChecked(s.narrativeProgress);
+
+    // Context Management
+    m_smartContextTruncation->setChecked(s.smartContextTruncation);
+    m_contextWindowReserve->setValue(s.contextWindowReserve);
+    m_compressOldMessages->setChecked(s.compressOldMessages);
+    m_compressionThreshold->setValue(s.compressionThreshold);
 }
 
 void KateAiConfigPage::defaults()

@@ -5,6 +5,8 @@
 #include <QString>
 #include <QStringList>
 
+using namespace Qt::Literals::StringLiterals;
+
 namespace KateAi
 {
 
@@ -159,6 +161,42 @@ struct Settings {
     int maxContextMessages = 0; // 0 = keep full history; else sliding window size
     bool compactOnFailure = true; // summarise history after a failed tool call
     int verbosity = 1; // 0= terse, 1= normal, 2= detailed narration
+
+    // --- Enhanced Intelligence Parameters ---------------------------------
+    // Structured thinking and planning
+    bool structuredThinking = true;  // Require <thinking> block before response
+    bool structuredPlanning = true;  // Require structured plan after thinking
+    bool autoCollapseThinking = true; // Auto-collapse thinking once answer starts
+    bool showPlanAsChecklist = true;  // Render plan as interactive checklist
+    int maxThinkingTokens = 4096;    // Max tokens for thinking block
+    int maxPlanSteps = 15;           // Max steps in structured plan
+    
+    // Context management for performance
+    bool smartContextTruncation = true; // Intelligently truncate old context
+    int contextWindowReserve = 8192;    // Reserve tokens for response
+    bool compressOldMessages = true;    // Compress messages beyond window
+    int compressionThreshold = 2048;    // Start compressing after this many chars
+    
+    // Agent behavior tuning
+    bool requireVerification = true;    // Require verification after mutations
+    int maxVerificationAttempts = 2;    // Max verification retries
+    bool adaptiveTemperature = true;    // Adjust temperature based on task phase
+    double explorationTemperature = 0.4; // Higher temp for exploration phase
+    double exploitationTemperature = 0.1; // Lower temp for execution phase
+    bool enablePlanUpdates = true;      // Allow plan updates during execution
+    bool narrativeProgress = true;      // Natural language progress updates
+
+    // --- Retry Configuration -----------------------------------------------
+    // Automatic retry for transient API errors (rate limits, server errors, network issues)
+    bool enableAutoRetry = true;
+    // Maximum retry attempts (total attempts = 1 initial + retries)
+    int maxRetryAttempts = 4;
+    // Base delay for exponential backoff in seconds
+    int baseRetryDelaySeconds = 5;
+    // Maximum single retry delay cap in seconds (0 = no cap)
+    int maxRetryDelaySeconds = 300;
+    // Retry strategy: "exponential" or "fixed"
+    QString retryStrategy = u"exponential"_s;
 };
 
 QString providerId(Provider provider);
@@ -182,6 +220,13 @@ QString modelFor(const Settings &settings);
 QJsonArray toolDefinitions(bool readOnlyOnly = false);
 QString defaultSystemPrompt(const QString &workspace);
 QString compressText(const QString &text, int maxLength, bool enabled);
+// Smart context compression - preserves important parts while reducing size
+QString smartCompressContext(const QString &text, int maxLength, bool enabled);
+// Compress a list of messages intelligently
+QList<ChatMessage> compressMessageHistory(const QList<ChatMessage> &messages,
+                                           int maxMessages,
+                                           int maxTotalChars,
+                                           bool enabled);
 
 // Structured planning helpers ------------------------------------------------
 QJsonArray parsePlanFromText(const QString &text);

@@ -2,6 +2,7 @@
 #include "chatwidget.h"
 #include "configpage.h"
 #include "plugin.h"
+#include "sessionstore.h"
 #include "workspace.h"
 
 #include <KActionCollection>
@@ -63,6 +64,12 @@ namespace KateAi
             m_chat->setSettings(plugin->settings());
             if (m_chat->agent()) {
                 m_chat->agent()->setDocumentBridge(&m_bridge);
+                // Restore session data
+                const auto sessionData = SessionStore::load();
+                if (!sessionData.messages.isEmpty()) {
+                    m_chat->agent()->restoreSession(sessionData);
+                    m_chat->rebuildTranscript();
+                }
             }
         }
         refreshWorkspace();
@@ -161,6 +168,14 @@ namespace KateAi
 
     KateAiView::~KateAiView()
     {
+        // Save session data before cleanup
+        if (m_chat && m_chat->agent()) {
+            const auto sessionData = m_chat->agent()->sessionData();
+            if (!sessionData.messages.isEmpty()) {
+                SessionStore::save(sessionData);
+            }
+        }
+
         if (m_mainWindow && m_mainWindow->guiFactory()) {
             m_mainWindow->guiFactory()->removeClient(this);
         }

@@ -4,6 +4,7 @@
 #include "llmclient.h"
 #include "permissions.h"
 #include "sandbox.h"
+#include "sessionstore.h"
 #include "tools.h"
 #include "types.h"
 #include "graph.h"
@@ -44,6 +45,11 @@ public:
     void fetchModels(Provider provider);
 
     const QList<ChatMessage> &messages() const { return m_messages; }
+
+    // Session persistence
+    SessionStore::SessionData sessionData() const;
+    void restoreSession(const SessionStore::SessionData &data);
+    void clearSession();
 
     PermissionPolicy &policy() { return m_policy; }
 

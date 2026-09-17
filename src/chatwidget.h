@@ -45,6 +45,7 @@ public:
     void focusPrompt();
     void ask(const QString &text);
     void newChat();
+    void rebuildTranscript();
 
 Q_SIGNALS:
     void settingsChanged(const Settings &settings);
@@ -72,6 +73,9 @@ private:
     void updateSendButtonState();
     void updateTokenDisplay();
     void updateThinkingButtonStyle();
+    void updateReasoningEffortButton();
+    bool modelSupportsReasoningEffort() const;
+    void showReasoningEffortMenu();
     static QString escape(const QString &text);
     static QString markdownToHtml(const QString &text);
 
@@ -87,6 +91,7 @@ private:
     QPushButton *m_send = nullptr;
     QPushButton *m_stop = nullptr;
     QPushButton *m_thinking = nullptr;
+    QPushButton *m_reasoningEffort = nullptr;
 
     QScrollArea *m_scrollArea = nullptr;
     QWidget *m_transcriptContainer = nullptr;
