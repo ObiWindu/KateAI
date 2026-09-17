@@ -55,8 +55,10 @@ private:
     QString escapeHtml(const QString &s) const;
     QString iconForTool(const QString &toolName) const;
     QString colorForRisk(ToolRisk risk) const;
+    bool isDiffTool(const QString &toolName) const;
 
     QString m_toolCallId;
+    QString m_toolName;
     ToolRisk m_risk = ToolRisk::Read;
     bool m_expanded = false;
     bool m_finished = false;

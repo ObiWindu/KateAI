@@ -898,7 +898,11 @@ void ChatWidget::updateModelSelectorLabel()
     if (!m_modelSelector) return;
     const QString pLabel = providerLabel(m_settings.provider);
     const QString model = modelFor(m_settings);
-    m_modelSelector->setText(u"%1: %2  ▾"_s.arg(pLabel, model.isEmpty() ? i18n("Select model") : model));
+    QString label = u"%1: %2"_s.arg(pLabel, model.isEmpty() ? i18n("Select model") : model);
+    if (!m_settings.reasoningEffort.isEmpty()) {
+        label += u" · %1"_s.arg(m_settings.reasoningEffort);
+    }
+    m_modelSelector->setText(label + u"  ▾"_s);
 }
 
 void ChatWidget::updateTokenDisplay()
@@ -915,15 +919,15 @@ void ChatWidget::updateThinkingButtonStyle()
         m_thinking->setText(u"💡"_s);
         m_thinking->setStyleSheet(
             u"QPushButton {"
-            u"  color: #fbbf24;"
-            u"  background-color: #2e2e32;"
-            u"  border: 1px solid #3c3c40;"
+            u"  color: #ffffff;"
+            u"  background-color: #1e7e34;"
+            u"  border: 1px solid #2d9f42;"
             u"  border-radius: 4px;"
             u"  font-size: 14px;"
             u"}"
             u"QPushButton:hover {"
-            u"  background-color: #3a3a3e;"
-            u"  border-color: #4a4a50;"
+            u"  background-color: #2d9f42;"
+            u"  border-color: #3ecf52;"
             u"}"_s);
     } else {
         m_thinking->setText(u"💭"_s);
@@ -1017,6 +1021,27 @@ void ChatWidget::showModelMenu()
     }
 
     menu.addSeparator();
+
+    // Reasoning Effort submenu
+    auto *reasoningMenu = menu.addMenu(i18n("Reasoning Effort"));
+    reasoningMenu->setStyleSheet(menu.styleSheet());
+    auto *reasoningGroup = new QActionGroup(this);
+    const QStringList reasoningLevels = {QString(), QStringLiteral("minimal"), QStringLiteral("low"), QStringLiteral("medium"), QStringLiteral("high")};
+    const QStringList reasoningLabels = {i18n("Default (Auto)"), i18n("Minimal"), i18n("Low"), i18n("Medium"), i18n("High")};
+    for (int i = 0; i < reasoningLevels.size(); ++i) {
+        auto *action = reasoningMenu->addAction(reasoningLabels[i]);
+        action->setCheckable(true);
+        action->setChecked(m_settings.reasoningEffort == reasoningLevels[i]);
+        action->setData(reasoningLevels[i]);
+        reasoningGroup->addAction(action);
+        connect(action, &QAction::triggered, this, [this, effort = reasoningLevels[i]]() {
+            m_settings.reasoningEffort = effort;
+            updateModelSelectorLabel();
+            m_agent.setSettings(m_settings);
+            Q_EMIT settingsChanged(m_settings);
+        });
+    }
+
     auto *configAct = menu.addAction(i18n("Configure Providers & Models…"));
     connect(configAct, &QAction::triggered, this, &ChatWidget::configureRequested);
 
