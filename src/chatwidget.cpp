@@ -69,6 +69,16 @@ ChatWidget::ChatWidget(QWidget *parent)
         u"}"_s);
     toolbarLayout->addWidget(m_modelSelector);
 
+    // Reasoning effort chooser button — sits right next to the model label
+    // in the chat input area so the user can pick an effort level at a glance.
+    m_reasoningEffort = new QPushButton(this);
+    m_reasoningEffort->setFixedSize(28, 28);
+    m_reasoningEffort->setCursor(Qt::PointingHandCursor);
+    m_reasoningEffort->setToolTip(i18n("Reasoning effort"));
+    m_reasoningEffort->setVisible(true);
+    connect(m_reasoningEffort, &QPushButton::clicked, this, &ChatWidget::showReasoningEffortMenu);
+    toolbarLayout->addWidget(m_reasoningEffort);
+
     // Thread title label
     m_threadTitle = new QLabel(i18n("New Thread"), this);
     m_threadTitle->setStyleSheet(u"QLabel { color: #888888; font-size: 12px; font-weight: 500; padding-left: 4px; }"_s);
@@ -200,7 +210,7 @@ ChatWidget::ChatWidget(QWidget *parent)
     wLayout->addWidget(wSub);
 
     m_transcriptLayout->addWidget(welcome);
-    m_transcriptLayout->addStretch();
+    m_transcriptLayout->addStretch(); // Push content to top, keep consistent spacing
     m_scrollArea->setWidget(m_transcriptContainer);
     root->addWidget(m_scrollArea, 1);
 
@@ -256,15 +266,6 @@ ChatWidget::ChatWidget(QWidget *parent)
     m_tokenCount = new QLabel(composerCard);
     m_tokenCount->setStyleSheet(u"QLabel { color: #666; font-size: 11px; }"_s);
     bottomRow->addWidget(m_tokenCount);
-
-    // Reasoning effort selector button
-    m_reasoningEffort = new QPushButton(composerCard);
-    m_reasoningEffort->setFixedSize(28, 28);
-    m_reasoningEffort->setCursor(Qt::PointingHandCursor);
-    m_reasoningEffort->setToolTip(i18n("Select reasoning effort"));
-    m_reasoningEffort->setVisible(false);
-    connect(m_reasoningEffort, &QPushButton::clicked, this, &ChatWidget::showReasoningEffortMenu);
-    bottomRow->addWidget(m_reasoningEffort);
 
     bottomRow->addStretch();
 
@@ -394,12 +395,7 @@ ChatWidget::ChatWidget(QWidget *parent)
             setStreaming(m_streamText);
         }
         if (m_thinkingBrowser) {
-            m_thinkingBrowser->setMarkdown(escape(m_thinkingBrowser->toPlainText() + delta));
-            const int h = static_cast<int>(m_thinkingBrowser->document()->size().height()) + 12;
-            m_thinkingBrowser->setFixedHeight(std::max(20, h));
-            if (m_thinkingBlock) {
-                m_thinkingBlock->setMaximumHeight(std::max(20, h));
-            }
+            appendThinkingDelta(delta);
             scrollToBottom();
         }
     });
@@ -643,13 +639,52 @@ void ChatWidget::addThinkingBlock(const QString &text)
     if (!m_thinkingBrowser) {
         return;
     }
-    m_thinkingBrowser->setMarkdown(escape(text));
-    const int h = static_cast<int>(m_thinkingBrowser->document()->size().height()) + 12;
-    m_thinkingBrowser->setFixedHeight(std::max(20, h));
-    m_thinkingBlock->setMaximumHeight(std::max(20, h));
+    m_thinkingBuffer = text;
+    renderThinkingHtml();
     m_thinkingExpanded = true;
     m_thinkingToggle->setText(u"\u25be "_s + i18n("Reasoning"));
     scrollToBottom();
+}
+
+void ChatWidget::appendThinkingDelta(const QString &delta)
+{
+    m_thinkingBuffer += delta;
+    renderThinkingHtml();
+}
+
+void ChatWidget::renderThinkingHtml()
+{
+    if (!m_thinkingBrowser) {
+        return;
+    }
+    // Apply a 25-line FIFO limit: keep only the last 25 lines so the
+    // reasoning block stays bounded as the model streams its chain-of-thought.
+    constexpr int kMaxLines = 25;
+    const QString html = markdownToFifoHtml(m_thinkingBuffer, kMaxLines);
+    m_thinkingBrowser->setHtml(html);
+    const int h = static_cast<int>(m_thinkingBrowser->document()->size().height()) + 12;
+    m_thinkingBrowser->setFixedHeight(std::max(20, h));
+    if (m_thinkingBlock) {
+        m_thinkingBlock->setMaximumHeight(std::max(20, h));
+    }
+}
+
+QString ChatWidget::markdownToFifoHtml(const QString &text, int maxLines)
+{
+    // Split on newlines, keep only the last maxLines, then render the result
+    // as HTML (markdown + escaped text) so the reasoning block displays
+    // formatted content rather than raw markdown/HTML source.
+    const QStringList lines = text.split(u'\n');
+    QString kept;
+    if (lines.size() <= maxLines) {
+        kept = text;
+    } else {
+        kept = lines.mid(lines.size() - maxLines).join(u'\n');
+    }
+
+    QTextDocument doc;
+    doc.setMarkdown(kept);
+    return doc.toHtml();
 }
 
 void ChatWidget::collapseThinkingBlock()
@@ -729,6 +764,7 @@ void ChatWidget::freezeStreaming()
     m_thinkingToggle = nullptr;
     m_planBlock = nullptr;
     m_planLayout = nullptr;
+    m_thinkingBuffer.clear();
     m_streamText.clear();
 }
 
@@ -1020,17 +1056,12 @@ void ChatWidget::updateReasoningEffortButton()
     if (!m_reasoningEffort) return;
 
     const bool supports = modelSupportsReasoningEffort();
-    m_reasoningEffort->setVisible(supports);
-
-    if (!supports) {
-        return;
-    }
 
     QString text;
     QString toolTip;
     if (m_settings.reasoningEffort.isEmpty()) {
         text = u"🧠"_s;
-        toolTip = i18n("Reasoning effort: Auto (provider default)");
+        toolTip = supports ? i18n("Reasoning effort: Auto (provider default)") : i18n("Reasoning effort: not supported by this model");
     } else if (m_settings.reasoningEffort == u"minimal"_s) {
         text = u"1"_s;
         toolTip = i18n("Reasoning effort: Minimal");
@@ -1051,8 +1082,24 @@ void ChatWidget::updateReasoningEffortButton()
     m_reasoningEffort->setText(text);
     m_reasoningEffort->setToolTip(toolTip);
 
-    // Style based on whether a specific effort is set
-    if (m_settings.reasoningEffort.isEmpty()) {
+    // Always visible next to the model label. Greyed out when the current
+    // model does not expose a reasoning_effort parameter.
+    if (!supports) {
+        m_reasoningEffort->setStyleSheet(
+            u"QPushButton {"
+            u"  color: #666666;"
+            u"  background-color: #1f1f22;"
+            u"  border: 1px solid #333338;"
+            u"  border-radius: 4px;"
+            u"  font-size: 12px;"
+            u"  font-weight: bold;"
+            u"}"
+            u"QPushButton:hover {"
+            u"  background-color: #2a2a2e;"
+            u"  border-color: #3c3c40;"
+            u"  color: #888888;"
+            u"}"_s);
+    } else if (m_settings.reasoningEffort.isEmpty()) {
         m_reasoningEffort->setStyleSheet(
             u"QPushButton {"
             u"  color: #888888;"

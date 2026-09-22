@@ -62,6 +62,9 @@ private:
     void setStreaming(const QString &text);
     void freezeStreaming();
     void addThinkingBlock(const QString &text);
+    void appendThinkingDelta(const QString &delta);
+    void renderThinkingHtml();
+    static QString markdownToFifoHtml(const QString &text, int maxLines);
     void collapseThinkingBlock();
     void toggleThinking();
     void addPlanChecklist(const QJsonArray &plan);
@@ -128,6 +131,10 @@ private:
     QTextBrowser *m_thinkingBrowser = nullptr;
     QPushButton *m_thinkingToggle = nullptr;
     bool m_thinkingExpanded = false;
+
+    // Raw thinking text buffer, used to apply FIFO line limiting and render
+    // markdown/HTML instead of escaped plain text.
+    QString m_thinkingBuffer;
 
     // Structured plan checklist rendered below the thinking block.
     QWidget *m_planBlock = nullptr;

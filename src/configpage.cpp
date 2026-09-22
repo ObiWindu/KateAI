@@ -144,6 +144,12 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
         u"QMenu::separator { height: 1px; background-color: #38383e; margin: 4px 0; }"_s);
     securityForm->addRow(i18n("Extra deny globs:"), m_deny);
 
+    m_maxExpandedToolCards = new QSpinBox(securityWidget);
+    m_maxExpandedToolCards->setRange(0, 200);
+    m_maxExpandedToolCards->setSpecialValueText(i18n("Always expand all"));
+    m_maxExpandedToolCards->setSuffix(i18n(" cards"));
+    securityForm->addRow(i18n("Expanded tool cards before auto-collapse:"), m_maxExpandedToolCards);
+
     tabs->addTab(securityWidget, i18n("Security & Permissions"));
 
     // ==========================================
@@ -391,6 +397,7 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     connect(m_sandbox, &QComboBox::currentIndexChanged, this, markChanged);
     connect(m_timeout, &QSpinBox::valueChanged, this, markChanged);
     connect(m_deny, &QPlainTextEdit::textChanged, this, markChanged);
+    connect(m_maxExpandedToolCards, &QSpinBox::valueChanged, this, markChanged);
 
     connect(m_planMode, &QCheckBox::toggled, this, markChanged);
     connect(m_projectInstructions, &QCheckBox::toggled, this, markChanged);
@@ -487,6 +494,7 @@ void KateAiConfigPage::apply()
     s.maxModelRequests = m_maxModelRequests->value();
     s.requestsPerMinute = m_requestsPerMinute->value();
     s.bashTimeoutMs = m_timeout->value() * 1000;
+    s.maxExpandedToolCards = m_maxExpandedToolCards->value();
     s.planMode = m_planMode->isChecked();
     s.loadProjectInstructions = m_projectInstructions->isChecked();
     s.thinkingMode = m_thinkingMode->isChecked();
@@ -562,6 +570,7 @@ void KateAiConfigPage::reset()
     m_sandbox->setCurrentIndex(std::max(0, m_sandbox->findData(sandboxProfileId(s.sandbox))));
     m_timeout->setValue(std::max(1, s.bashTimeoutMs / 1000));
     m_deny->setPlainText(s.extraDenyGlobs.join(u'\n'));
+    m_maxExpandedToolCards->setValue(s.maxExpandedToolCards);
 
     m_maxIter->setValue(s.maxToolCalls);
     m_maxModelRequests->setValue(s.maxModelRequests);

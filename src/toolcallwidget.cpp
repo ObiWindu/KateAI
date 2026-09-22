@@ -64,16 +64,9 @@ ToolCallWidget::ToolCallWidget(const QString &toolCallId, QWidget *parent)
 
     root->addWidget(m_header);
 
-    // Details container — initially hidden
-    m_detailsContainer = new QWidget(this);
-    m_detailsContainer->setMaximumHeight(0);
-    auto *detailsLayout = new QVBoxLayout(m_detailsContainer);
-    detailsLayout->setContentsMargins(10, 0, 10, 8);
-    detailsLayout->setSpacing(0);
-
-    // Proposed edit diff — shown above the raw tool output so the code change
-    // is visible in the chat transcript even before the permission bar is shown.
-    // Only shown for edit_file and write_file tools.
+    // Proposed edit diff — always shown in a highlighted box so the edited
+    // code is visible in the chat transcript without needing to expand the
+    // tool card. Only populated for edit_file / write_file tools.
     m_describeDiff = new QTextBrowser(this);
     m_describeDiff->setReadOnly(true);
     m_describeDiff->setOpenExternalLinks(false);
@@ -100,9 +93,15 @@ ToolCallWidget::ToolCallWidget(const QString &toolCallId, QWidget *parent)
         u".added { color: #9ed36a; background-color: #1a3a1a; }"
         u".hunk { color: #888; }"
         u"p { margin: 0; }"_s);
-    // Initially hidden - will be shown only for diff tools
     m_describeDiff->hide();
-    detailsLayout->addWidget(m_describeDiff);
+    root->addWidget(m_describeDiff);
+
+    // Details container — initially hidden, holds the raw tool output
+    m_detailsContainer = new QWidget(this);
+    m_detailsContainer->setMaximumHeight(0);
+    auto *detailsLayout = new QVBoxLayout(m_detailsContainer);
+    detailsLayout->setContentsMargins(10, 0, 10, 8);
+    detailsLayout->setSpacing(0);
 
     m_details = new QPlainTextEdit(this);
     m_details->setReadOnly(true);
@@ -182,10 +181,11 @@ void ToolCallWidget::setDescribeDiff(const QString &diff)
     m_describeDiff->setFixedHeight(std::min(400, std::max(50, h)));
     m_describeDiff->show();
 
-    // Trigger a layout update on the container to account for the new height
-    m_detailsContainer->updateGeometry();
+    // The diff box now lives outside the collapsible details container, so it
+    // is always visible. Just update the expanded height if the details are
+    // currently shown.
     if (m_expanded) {
-        m_detailsContainer->setMaximumHeight(m_details->sizeHint().height() + m_describeDiff->height() + 16);
+        m_detailsContainer->setMaximumHeight(m_details->sizeHint().height() + 16);
     }
 }
 
@@ -237,9 +237,7 @@ void ToolCallWidget::setFinished(const ToolResult &result)
 
     // Update expanded height if currently expanded
     if (m_expanded) {
-        int detailsHeight = m_details->sizeHint().height();
-        int diffHeight = m_describeDiff->isVisible() ? m_describeDiff->height() : 0;
-        m_detailsContainer->setMaximumHeight(detailsHeight + diffHeight + 16);
+        m_detailsContainer->setMaximumHeight(m_details->sizeHint().height() + 16);
     }
     updateStyle();
 }
@@ -257,10 +255,8 @@ void ToolCallWidget::toggleExpand()
 
     m_animation->stop();
     if (m_expanded) {
-        int detailsHeight = m_details->sizeHint().height();
-        int diffHeight = m_describeDiff->isVisible() ? m_describeDiff->height() : 0;
         m_animation->setStartValue(0);
-        m_animation->setEndValue(detailsHeight + diffHeight + 16);
+        m_animation->setEndValue(m_details->sizeHint().height() + 16);
     } else {
         m_animation->setStartValue(m_detailsContainer->height());
         m_animation->setEndValue(0);

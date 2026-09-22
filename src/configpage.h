@@ -60,6 +60,7 @@ private:
     QComboBox *m_permission = nullptr;
     QComboBox *m_sandbox = nullptr;
     QSpinBox *m_timeout = nullptr;
+    QSpinBox *m_maxExpandedToolCards = nullptr;
     QPlainTextEdit *m_deny = nullptr;
 
     // Agent

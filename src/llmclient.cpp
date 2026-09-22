@@ -577,8 +577,15 @@ void LlmClient::handleFinished()
         }
         finalError = u"HTTP %1: %2"_s.arg(status).arg(message);
     } else {
+        // If the streaming response already delivered content, tool calls, or
+        // the [DONE] marker, the request succeeded -- complete normally instead
+        // of falling through to the "no content" error below.
+        if (m_sawDone || !m_text.isEmpty() || !m_completedTools.isEmpty()) {
+            emitCompletedOnce();
+            return;
+        }
         // Some compatible providers may ignore streaming and return ordinary JSON.
-        if (!m_sawDone && m_text.isEmpty() && m_completedTools.isEmpty() && !leftover.trimmed().isEmpty()) {
+        if (!leftover.trimmed().isEmpty()) {
             QJsonParseError parseError;
             const QJsonDocument doc = QJsonDocument::fromJson(leftover, &parseError);
             if (parseError.error == QJsonParseError::NoError && doc.isObject()) {
