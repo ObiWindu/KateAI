@@ -17,11 +17,13 @@
 #include <QClipboard>
 #include <QComboBox>
 #include <QGuiApplication>
+#include <QGraphicsOpacityEffect>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMenu>
 #include <QPlainTextEdit>
+#include <QPropertyAnimation>
 #include <QPushButton>
 #include <QResizeEvent>
 #include <QScrollBar>
@@ -217,10 +219,10 @@ ChatWidget::ChatWidget(QWidget *parent)
 
     connect(m_scrollArea->verticalScrollBar(), &QScrollBar::valueChanged, this, [this](int value) {
         auto *sb = m_scrollArea->verticalScrollBar();
-        if (sb->maximum() - value <= 50) {
+        if (sb->maximum() - value <= 40) {
             m_userScrolledUp = false;
             if (m_scrollToBottomBtn && m_scrollToBottomBtn->isVisible()) {
-                m_scrollToBottomBtn->hide();
+                animateScrollButtonHide();
             }
         } else {
             m_userScrolledUp = true;
@@ -232,9 +234,10 @@ ChatWidget::ChatWidget(QWidget *parent)
         auto *sb = m_scrollArea->verticalScrollBar();
         if (!m_userScrolledUp) {
             sb->setValue(max);
-        } else if (m_agent.isBusy() && m_scrollToBottomBtn) {
+        } else if (m_scrollToBottomBtn) {
+            // Show button when scrolled up and there's new content (agent busy or new messages)
             updateScrollButtonPosition();
-            m_scrollToBottomBtn->show();
+            animateScrollButtonShow();
             m_scrollToBottomBtn->raise();
         }
     });
@@ -876,6 +879,62 @@ void ChatWidget::updateScrollButtonPosition()
     const int y = m_scrollArea->height() - btnH - 12;
     m_scrollToBottomBtn->setGeometry(x, y, btnW, btnH);
     m_scrollToBottomBtn->raise();
+}
+
+void ChatWidget::animateScrollButtonShow()
+{
+    if (!m_scrollToBottomBtn) {
+        return;
+    }
+    if (m_scrollToBottomBtn->isVisible()) {
+        return;
+    }
+    m_scrollToBottomBtn->show();
+    updateScrollButtonPosition();
+
+    // Fade-in animation using QGraphicsOpacityEffect
+    auto *effect = new QGraphicsOpacityEffect(m_scrollToBottomBtn);
+    m_scrollToBottomBtn->setGraphicsEffect(effect);
+    effect->setOpacity(0.0);
+
+    auto *anim = new QPropertyAnimation(effect, "opacity", m_scrollToBottomBtn);
+    anim->setDuration(150);
+    anim->setStartValue(0.0);
+    anim->setEndValue(1.0);
+    anim->setEasingCurve(QEasingCurve::OutCubic);
+    connect(anim, &QPropertyAnimation::finished, effect, &QObject::deleteLater);
+    connect(anim, &QPropertyAnimation::finished, anim, &QObject::deleteLater);
+    anim->start(QAbstractAnimation::DeleteWhenStopped);
+}
+
+void ChatWidget::animateScrollButtonHide()
+{
+    if (!m_scrollToBottomBtn || !m_scrollToBottomBtn->isVisible()) {
+        return;
+    }
+
+    // Fade-out animation
+    auto *effect = qobject_cast<QGraphicsOpacityEffect *>(m_scrollToBottomBtn->graphicsEffect());
+    if (!effect) {
+        effect = new QGraphicsOpacityEffect(m_scrollToBottomBtn);
+        m_scrollToBottomBtn->setGraphicsEffect(effect);
+    }
+    effect->setOpacity(1.0);
+
+    auto *anim = new QPropertyAnimation(effect, "opacity", m_scrollToBottomBtn);
+    anim->setDuration(150);
+    anim->setStartValue(1.0);
+    anim->setEndValue(0.0);
+    anim->setEasingCurve(QEasingCurve::InCubic);
+    connect(anim, &QPropertyAnimation::finished, this, [this, effect, anim]() {
+        if (m_scrollToBottomBtn) {
+            m_scrollToBottomBtn->hide();
+            m_scrollToBottomBtn->setGraphicsEffect(nullptr);
+        }
+        effect->deleteLater();
+        anim->deleteLater();
+    });
+    anim->start(QAbstractAnimation::DeleteWhenStopped);
 }
 
 void ChatWidget::resizeEvent(QResizeEvent *event)

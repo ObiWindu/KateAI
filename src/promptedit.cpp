@@ -193,7 +193,8 @@ void PromptEdit::keyPressEvent(QKeyEvent *event)
     if (event->key() == Qt::Key_Up && !(event->modifiers() & Qt::ShiftModifier)) {
         const QTextCursor tc = textCursor();
         const bool isFirstLine = tc.blockNumber() == 0;
-        if (isFirstLine && !m_history.isEmpty()) {
+        const bool isEmpty = toPlainText().trimmed().isEmpty();
+        if ((isFirstLine || isEmpty) && !m_history.isEmpty()) {
             if (m_historyIndex == -1) {
                 m_draft = toPlainText();
                 m_historyIndex = m_history.size() - 1;

@@ -79,6 +79,8 @@ private:
     void scrollToBottom();
     void forceScrollToBottom();
     void updateScrollButtonPosition();
+    void animateScrollButtonShow();
+    void animateScrollButtonHide();
     QPushButton *createCopyButton(const QString &textToCopy, QWidget *parent);
     QWidget *createWelcomeWidget();
     void showSettingsMenu();
