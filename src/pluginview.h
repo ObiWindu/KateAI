@@ -38,6 +38,7 @@ private:
     void askSelectionWithInstruction(const QString &instruction);
     QString editorContext() const;
     void refreshWorkspace();
+    void updateCompletions();
 
     KateAiPlugin *m_plugin = nullptr;
     KTextEditor::MainWindow *m_mainWindow = nullptr;

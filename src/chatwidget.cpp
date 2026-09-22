@@ -14,13 +14,16 @@
 
 #include <QAction>
 #include <QActionGroup>
+#include <QClipboard>
 #include <QComboBox>
+#include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMenu>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QResizeEvent>
 #include <QScrollBar>
 #include <QScrollArea>
 #include <QTextBrowser>
@@ -188,31 +191,53 @@ ChatWidget::ChatWidget(QWidget *parent)
     m_transcriptLayout->setSpacing(10);
 
     // Initial empty state welcome widget
-    auto *welcome = new QWidget(m_transcriptContainer);
-    welcome->setObjectName(u"welcomeWidget"_s);
-    auto *wLayout = new QVBoxLayout(welcome);
-    wLayout->setContentsMargins(20, 40, 20, 20);
-    wLayout->setAlignment(Qt::AlignHCenter | Qt::AlignTop);
-
-    auto *wIcon = new QLabel(u"⚡"_s, welcome);
-    wIcon->setAlignment(Qt::AlignCenter);
-    wIcon->setStyleSheet(u"font-size: 26px; color: #3b82f6; margin-bottom: 6px;"_s);
-    wLayout->addWidget(wIcon);
-
-    auto *wTitle = new QLabel(i18n("Kate AI Agent"), welcome);
-    wTitle->setAlignment(Qt::AlignCenter);
-    wTitle->setStyleSheet(u"color: #e4e4e4; font-size: 15px; font-weight: bold;"_s);
-    wLayout->addWidget(wTitle);
-
-    auto *wSub = new QLabel(i18n("Ask questions, edit code, and explore your workspace."), welcome);
-    wSub->setAlignment(Qt::AlignCenter);
-    wSub->setStyleSheet(u"color: #777777; font-size: 12px; margin-top: 4px;"_s);
-    wLayout->addWidget(wSub);
-
-    m_transcriptLayout->addWidget(welcome);
+    m_transcriptLayout->addWidget(createWelcomeWidget());
     m_transcriptLayout->addStretch(); // Push content to top, keep consistent spacing
     m_scrollArea->setWidget(m_transcriptContainer);
     root->addWidget(m_scrollArea, 1);
+
+    m_scrollToBottomBtn = new QPushButton(u"↓  Jump to latest"_s, m_scrollArea);
+    m_scrollToBottomBtn->setCursor(Qt::PointingHandCursor);
+    m_scrollToBottomBtn->setStyleSheet(
+        u"QPushButton {"
+        u"  background-color: #2563eb;"
+        u"  color: #ffffff;"
+        u"  border: 1px solid #3b82f6;"
+        u"  border-radius: 14px;"
+        u"  padding: 5px 12px;"
+        u"  font-size: 11px;"
+        u"  font-weight: 600;"
+        u"}"
+        u"QPushButton:hover {"
+        u"  background-color: #1d4ed8;"
+        u"  border-color: #60a5fa;"
+        u"}"_s);
+    m_scrollToBottomBtn->hide();
+    connect(m_scrollToBottomBtn, &QPushButton::clicked, this, &ChatWidget::forceScrollToBottom);
+
+    connect(m_scrollArea->verticalScrollBar(), &QScrollBar::valueChanged, this, [this](int value) {
+        auto *sb = m_scrollArea->verticalScrollBar();
+        if (sb->maximum() - value <= 50) {
+            m_userScrolledUp = false;
+            if (m_scrollToBottomBtn && m_scrollToBottomBtn->isVisible()) {
+                m_scrollToBottomBtn->hide();
+            }
+        } else {
+            m_userScrolledUp = true;
+        }
+    });
+
+    connect(m_scrollArea->verticalScrollBar(), &QScrollBar::rangeChanged, this, [this](int min, int max) {
+        Q_UNUSED(min);
+        auto *sb = m_scrollArea->verticalScrollBar();
+        if (!m_userScrolledUp) {
+            sb->setValue(max);
+        } else if (m_agent.isBusy() && m_scrollToBottomBtn) {
+            updateScrollButtonPosition();
+            m_scrollToBottomBtn->show();
+            m_scrollToBottomBtn->raise();
+        }
+    });
 
     // 3. Permission Bar (Zed-style Inline Consent)
     m_permissionBar = new PermissionBar(this);
@@ -296,6 +321,13 @@ ChatWidget::ChatWidget(QWidget *parent)
 
     // Signal connections
     connect(m_prompt, &PromptEdit::submitRequested, this, &ChatWidget::submit);
+    connect(m_prompt, &PromptEdit::escapePressed, this, [this]() {
+        if (m_agent.isBusy()) {
+            m_permissionBar->hideBar();
+            m_agent.abort();
+            updateSendButtonState();
+        }
+    });
     connect(m_prompt, &QPlainTextEdit::textChanged, this, [this]() {
         if (!m_agent.isBusy()) {
             updateSendButtonState();
@@ -454,6 +486,7 @@ ChatWidget::ChatWidget(QWidget *parent)
 
     // Retry status from LlmClient - show in info bar with bright brown/orange
     connect(m_agent.client(), &LlmClient::retryStatus, this, [this](const QString &message, int attempt, int maxAttempts, int delaySeconds) {
+        Q_UNUSED(message);
         showInfoMessage(i18n("Retrying in %1s (attempt %2/%3)...", delaySeconds, attempt, maxAttempts), false);
     });
 
@@ -518,9 +551,17 @@ void ChatWidget::addUserMessage(const QString &text)
     cardLayout->setContentsMargins(12, 10, 12, 10);
     cardLayout->setSpacing(6);
 
+    auto *headerLayout = new QHBoxLayout;
+    headerLayout->setContentsMargins(0, 0, 0, 0);
+
     auto *header = new QLabel(i18n("YOU"), card);
     header->setStyleSheet(u"color: #888888; font-size: 10px; font-weight: bold; letter-spacing: 0.5px; border: none; background: transparent;"_s);
-    cardLayout->addWidget(header);
+    headerLayout->addWidget(header);
+    headerLayout->addStretch();
+
+    auto *copyBtn = createCopyButton(text, card);
+    headerLayout->addWidget(copyBtn);
+    cardLayout->addLayout(headerLayout);
 
     auto *msgLabel = new QLabel(card);
     msgLabel->setWordWrap(true);
@@ -530,7 +571,7 @@ void ChatWidget::addUserMessage(const QString &text)
     cardLayout->addWidget(msgLabel);
 
     m_transcriptLayout->insertWidget(m_transcriptLayout->count() - 1, card);
-    scrollToBottom();
+    forceScrollToBottom();
 }
 
 void ChatWidget::addActivityMessage(const QString &text)
@@ -554,9 +595,21 @@ void ChatWidget::setStreaming(const QString &text)
         layout->setContentsMargins(4, 4, 4, 4);
         layout->setSpacing(4);
 
+        auto *headerLayout = new QHBoxLayout;
+        headerLayout->setContentsMargins(0, 0, 0, 0);
+
+        auto *icon = new QLabel(u"⚡"_s, m_activeAssistantWidget);
+        icon->setStyleSheet(u"color: #3b82f6; font-size: 12px;"_s);
+        headerLayout->addWidget(icon);
+
         auto *header = new QLabel(i18n("KATE AI"), m_activeAssistantWidget);
         header->setStyleSheet(u"color: #3b82f6; font-size: 10px; font-weight: bold; letter-spacing: 0.5px;"_s);
-        layout->addWidget(header);
+        headerLayout->addWidget(header);
+        headerLayout->addStretch();
+
+        m_activeAssistantCopyBtn = createCopyButton(QString(), m_activeAssistantWidget);
+        headerLayout->addWidget(m_activeAssistantCopyBtn);
+        layout->addLayout(headerLayout);
 
         // Collapsible hidden-reasoning block. Collapsed by default: the user
         // sees the visible answer, not the internal chain-of-thought.
@@ -607,7 +660,7 @@ void ChatWidget::setStreaming(const QString &text)
         m_activeAssistantBrowser->setOpenExternalLinks(true);
         m_activeAssistantBrowser->setFrameShape(QFrame::NoFrame);
         m_activeAssistantBrowser->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-        m_activeAssistantBrowser->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        m_activeAssistantBrowser->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
         m_activeAssistantBrowser->setStyleSheet(u"background: transparent; color: #d4d4d4; border: none; padding: 0px;"_s);
         m_activeAssistantBrowser->document()->setDefaultStyleSheet(
             u"body { color: #d4d4d4; font-family: sans-serif; font-size: 13px; margin: 0; padding: 0; }"
@@ -756,6 +809,10 @@ void ChatWidget::freezeStreaming()
         const int docH = static_cast<int>(m_activeAssistantBrowser->document()->size().height()) + 16;
         m_activeAssistantBrowser->setFixedHeight(std::max(30, docH));
     }
+    if (m_activeAssistantCopyBtn) {
+        m_activeAssistantCopyBtn->setProperty("copyText", m_streamText);
+        m_activeAssistantCopyBtn = nullptr;
+    }
     collapseThinkingBlock();
     m_activeAssistantWidget = nullptr;
     m_activeAssistantBrowser = nullptr;
@@ -770,11 +827,180 @@ void ChatWidget::freezeStreaming()
 
 void ChatWidget::scrollToBottom()
 {
+    if (m_userScrolledUp) {
+        if (m_scrollToBottomBtn) {
+            updateScrollButtonPosition();
+            m_scrollToBottomBtn->show();
+            m_scrollToBottomBtn->raise();
+        }
+        return;
+    }
+    forceScrollToBottom();
+}
+
+void ChatWidget::forceScrollToBottom()
+{
+    m_userScrolledUp = false;
+    if (m_scrollToBottomBtn) {
+        m_scrollToBottomBtn->hide();
+    }
     QTimer::singleShot(10, this, [this]() {
         if (m_scrollArea) {
-            m_scrollArea->verticalScrollBar()->setValue(m_scrollArea->verticalScrollBar()->maximum());
+            auto *sb = m_scrollArea->verticalScrollBar();
+            sb->setValue(sb->maximum());
         }
     });
+}
+
+void ChatWidget::updateScrollButtonPosition()
+{
+    if (!m_scrollToBottomBtn || !m_scrollArea) {
+        return;
+    }
+    const int btnW = m_scrollToBottomBtn->sizeHint().width() + 16;
+    const int btnH = 28;
+    const int x = (m_scrollArea->width() - btnW) / 2;
+    const int y = m_scrollArea->height() - btnH - 12;
+    m_scrollToBottomBtn->setGeometry(x, y, btnW, btnH);
+    m_scrollToBottomBtn->raise();
+}
+
+void ChatWidget::resizeEvent(QResizeEvent *event)
+{
+    QWidget::resizeEvent(event);
+    updateScrollButtonPosition();
+}
+
+void ChatWidget::setCompletionWords(const QStringList &words)
+{
+    if (m_prompt) {
+        m_prompt->setCompletionWords(words);
+    }
+}
+
+QPushButton *ChatWidget::createCopyButton(const QString &textToCopy, QWidget *parent)
+{
+    auto *btn = new QPushButton(i18n("Copy"), parent);
+    btn->setProperty("copyText", textToCopy);
+    btn->setCursor(Qt::PointingHandCursor);
+    btn->setFixedHeight(22);
+    btn->setStyleSheet(
+        u"QPushButton {"
+        u"  color: #888888;"
+        u"  background-color: transparent;"
+        u"  border: 1px solid #38383e;"
+        u"  border-radius: 4px;"
+        u"  padding: 2px 8px;"
+        u"  font-size: 11px;"
+        u"}"
+        u"QPushButton:hover {"
+        u"  color: #ffffff;"
+        u"  background-color: #2a2a2e;"
+        u"  border-color: #4a4a52;"
+        u"}"_s);
+
+    connect(btn, &QPushButton::clicked, this, [btn, this]() {
+        QString text = btn->property("copyText").toString();
+        if (text.isEmpty()) {
+            text = m_streamText;
+        }
+        QGuiApplication::clipboard()->setText(text);
+        btn->setText(i18n("✓ Copied"));
+        btn->setStyleSheet(
+            u"QPushButton {"
+            u"  color: #22c55e;"
+            u"  background-color: #1a3320;"
+            u"  border: 1px solid #22c55e;"
+            u"  border-radius: 4px;"
+            u"  padding: 2px 8px;"
+            u"  font-size: 11px;"
+            u"}"_s);
+        QTimer::singleShot(2000, btn, [btn]() {
+            if (btn) {
+                btn->setText(i18n("Copy"));
+                btn->setStyleSheet(
+                    u"QPushButton {"
+                    u"  color: #888888;"
+                    u"  background-color: transparent;"
+                    u"  border: 1px solid #38383e;"
+                    u"  border-radius: 4px;"
+                    u"  padding: 2px 8px;"
+                    u"  font-size: 11px;"
+                    u"}"
+                    u"QPushButton:hover {"
+                    u"  color: #ffffff;"
+                    u"  background-color: #2a2a2e;"
+                    u"  border-color: #4a4a52;"
+                    u"}"_s);
+            }
+        });
+    });
+    return btn;
+}
+
+QWidget *ChatWidget::createWelcomeWidget()
+{
+    auto *welcome = new QWidget(m_transcriptContainer);
+    welcome->setObjectName(u"welcomeWidget"_s);
+    auto *wLayout = new QVBoxLayout(welcome);
+    wLayout->setContentsMargins(20, 24, 20, 16);
+    wLayout->setAlignment(Qt::AlignHCenter | Qt::AlignTop);
+
+    auto *wIcon = new QLabel(u"⚡"_s, welcome);
+    wIcon->setAlignment(Qt::AlignCenter);
+    wIcon->setStyleSheet(u"font-size: 26px; color: #3b82f6; margin-bottom: 6px;"_s);
+    wLayout->addWidget(wIcon);
+
+    auto *wTitle = new QLabel(i18n("Kate AI Agent"), welcome);
+    wTitle->setAlignment(Qt::AlignCenter);
+    wTitle->setStyleSheet(u"color: #e4e4e4; font-size: 15px; font-weight: bold;"_s);
+    wLayout->addWidget(wTitle);
+
+    auto *wSub = new QLabel(i18n("Ask questions, edit code, and explore your workspace."), welcome);
+    wSub->setAlignment(Qt::AlignCenter);
+    wSub->setStyleSheet(u"color: #777777; font-size: 12px; margin-top: 4px; margin-bottom: 14px;"_s);
+    wLayout->addWidget(wSub);
+
+    // Starter suggestion chips
+    auto *chipsLayout = new QVBoxLayout;
+    chipsLayout->setSpacing(8);
+
+    const struct Suggestion {
+        QString icon;
+        QString title;
+        QString prompt;
+    } suggestions[] = {
+        {u"🔍"_s, i18n("Explain active file"), i18n("Explain the active file and its architecture.")},
+        {u"🐛"_s, i18n("Find bugs & edge cases"), i18n("Inspect the current code for bugs, edge cases, and potential improvements.")},
+        {u"🧪"_s, i18n("Generate tests"), i18n("Write comprehensive unit tests for the code in this file.")}
+    };
+
+    for (const auto &s : suggestions) {
+        auto *btn = new QPushButton(u"%1  %2"_s.arg(s.icon, s.title), welcome);
+        btn->setCursor(Qt::PointingHandCursor);
+        btn->setStyleSheet(
+            u"QPushButton {"
+            u"  background-color: #202024;"
+            u"  color: #cccccc;"
+            u"  border: 1px solid #333338;"
+            u"  border-radius: 6px;"
+            u"  padding: 8px 12px;"
+            u"  font-size: 12px;"
+            u"  text-align: left;"
+            u"}"
+            u"QPushButton:hover {"
+            u"  background-color: #2a2a30;"
+            u"  border-color: #4a4a52;"
+            u"  color: #ffffff;"
+            u"}"_s);
+        connect(btn, &QPushButton::clicked, this, [this, prompt = s.prompt]() {
+            ask(prompt);
+        });
+        chipsLayout->addWidget(btn);
+    }
+
+    wLayout->addLayout(chipsLayout);
+    return welcome;
 }
 
 void ChatWidget::showInfoMessage(const QString &message, bool isError)
@@ -826,28 +1052,7 @@ void ChatWidget::newChat()
     m_streamText.clear();
 
     // Recreate welcome widget
-    auto *welcome = new QWidget(m_transcriptContainer);
-    welcome->setObjectName(u"welcomeWidget"_s);
-    auto *wLayout = new QVBoxLayout(welcome);
-    wLayout->setContentsMargins(20, 40, 20, 20);
-    wLayout->setAlignment(Qt::AlignHCenter | Qt::AlignTop);
-
-    auto *wIcon = new QLabel(u"⚡"_s, welcome);
-    wIcon->setAlignment(Qt::AlignCenter);
-    wIcon->setStyleSheet(u"font-size: 26px; color: #3b82f6; margin-bottom: 6px;"_s);
-    wLayout->addWidget(wIcon);
-
-    auto *wTitle = new QLabel(i18n("Kate AI Agent"), welcome);
-    wTitle->setAlignment(Qt::AlignCenter);
-    wTitle->setStyleSheet(u"color: #e4e4e4; font-size: 15px; font-weight: bold;"_s);
-    wLayout->addWidget(wTitle);
-
-    auto *wSub = new QLabel(i18n("Ask questions, edit code, and explore your workspace."), welcome);
-    wSub->setAlignment(Qt::AlignCenter);
-    wSub->setStyleSheet(u"color: #777777; font-size: 12px; margin-top: 4px;"_s);
-    wLayout->addWidget(wSub);
-
-    m_transcriptLayout->insertWidget(0, welcome);
+    m_transcriptLayout->insertWidget(0, createWelcomeWidget());
 
     if (m_threadTitle) {
         m_threadTitle->setText(i18n("New Thread"));
@@ -856,6 +1061,7 @@ void ChatWidget::newChat()
     m_prompt->setEnabled(true);
     updateSendButtonState();
     updateTokenDisplay();
+    forceScrollToBottom();
     m_prompt->setFocus();
 }
 
@@ -1401,10 +1607,13 @@ void ChatWidget::submit()
     if (text.isEmpty() || m_agent.isBusy()) {
         return;
     }
+    m_prompt->addHistory(text);
+    Q_EMIT aboutToSubmit();
     m_prompt->clear();
     if (m_infoBar) {
         m_infoBar->hide();
     }
+    forceScrollToBottom();
     updateSendButtonState();
     m_agent.start(text);
     updateSendButtonState();
@@ -1504,32 +1713,11 @@ void ChatWidget::rebuildTranscript()
 
     const auto &messages = m_agent.messages();
     if (messages.isEmpty()) {
-        // Show welcome widget if no messages
-        auto *welcome = new QWidget(m_transcriptContainer);
-        welcome->setObjectName(u"welcomeWidget"_s);
-        auto *wLayout = new QVBoxLayout(welcome);
-        wLayout->setContentsMargins(20, 40, 20, 20);
-        wLayout->setAlignment(Qt::AlignHCenter | Qt::AlignTop);
-
-        auto *wIcon = new QLabel(u"⚡"_s, welcome);
-        wIcon->setAlignment(Qt::AlignCenter);
-        wIcon->setStyleSheet(u"font-size: 26px; color: #3b82f6; margin-bottom: 6px;"_s);
-        wLayout->addWidget(wIcon);
-
-        auto *wTitle = new QLabel(i18n("Kate AI Agent"), welcome);
-        wTitle->setAlignment(Qt::AlignCenter);
-        wTitle->setStyleSheet(u"color: #e4e4e4; font-size: 15px; font-weight: bold;"_s);
-        wLayout->addWidget(wTitle);
-
-        auto *wSub = new QLabel(i18n("Ask questions, edit code, and explore your workspace."), welcome);
-        wSub->setAlignment(Qt::AlignCenter);
-        wSub->setStyleSheet(u"color: #777777; font-size: 12px; margin-top: 4px;"_s);
-        wLayout->addWidget(wSub);
-
-        m_transcriptLayout->insertWidget(0, welcome);
+        m_transcriptLayout->insertWidget(0, createWelcomeWidget());
         if (m_threadTitle) {
             m_threadTitle->setText(i18n("New Thread"));
         }
+        forceScrollToBottom();
         return;
     }
 
@@ -1544,29 +1732,24 @@ void ChatWidget::rebuildTranscript()
                 {
                     auto *assistantWidget = new QWidget(m_transcriptContainer);
                     auto *layout = new QVBoxLayout(assistantWidget);
-                    layout->setContentsMargins(0, 0, 0, 0);
+                    layout->setContentsMargins(4, 4, 4, 4);
                     layout->setSpacing(4);
 
-                    auto *header = new QWidget(assistantWidget);
-                    header->setObjectName(u"assistantHeader"_s);
-                    auto *hLayout = new QHBoxLayout(header);
-                    hLayout->setContentsMargins(8, 6, 8, 6);
-                    auto *icon = new QLabel(u"⚡"_s, header);
-                    icon->setStyleSheet(u"color: #3b82f6; font-size: 13px;"_s);
-                    hLayout->addWidget(icon);
-                    auto *label = new QLabel(i18n("Assistant"), header);
-                    label->setStyleSheet(u"color: #b0b0b0; font-size: 11px; font-weight: bold;"_s);
-                    hLayout->addWidget(label);
-                    hLayout->addStretch();
-                    layout->addWidget(header);
+                    auto *headerLayout = new QHBoxLayout;
+                    headerLayout->setContentsMargins(0, 0, 0, 0);
 
-                    auto *browser = new QTextBrowser(assistantWidget);
-                    browser->setOpenExternalLinks(true);
-                    browser->setFrameShape(QFrame::NoFrame);
-                    browser->setStyleSheet(u"QTextBrowser { background: transparent; color: #e4e4e4; font-size: 13px; border: none; }"_s);
-                    browser->setHtml(markdownToHtml(msg.content));
-                    browser->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum);
-                    layout->addWidget(browser);
+                    auto *icon = new QLabel(u"⚡"_s, assistantWidget);
+                    icon->setStyleSheet(u"color: #3b82f6; font-size: 12px;"_s);
+                    headerLayout->addWidget(icon);
+
+                    auto *label = new QLabel(i18n("KATE AI"), assistantWidget);
+                    label->setStyleSheet(u"color: #3b82f6; font-size: 10px; font-weight: bold; letter-spacing: 0.5px;"_s);
+                    headerLayout->addWidget(label);
+                    headerLayout->addStretch();
+
+                    auto *copyBtn = createCopyButton(msg.content, assistantWidget);
+                    headerLayout->addWidget(copyBtn);
+                    layout->addLayout(headerLayout);
 
                     // Add thinking block if present
                     if (!msg.thinking.isEmpty()) {
@@ -1578,6 +1761,26 @@ void ChatWidget::rebuildTranscript()
                     if (!msg.plan.isEmpty()) {
                         addPlanChecklist(msg.plan);
                     }
+
+                    auto *browser = new QTextBrowser(assistantWidget);
+                    browser->setOpenExternalLinks(true);
+                    browser->setFrameShape(QFrame::NoFrame);
+                    browser->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+                    browser->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+                    browser->setStyleSheet(u"background: transparent; color: #d4d4d4; border: none; padding: 0px;"_s);
+                    browser->document()->setDefaultStyleSheet(
+                        u"body { color: #d4d4d4; font-family: sans-serif; font-size: 13px; margin: 0; padding: 0; }"
+                        u"pre { background-color: #222225; color: #e4e4e4; padding: 10px 12px; border-radius: 6px; border: 1px solid #333338; font-family: monospace; font-size: 12px; margin: 8px 0; }"
+                        u"code { font-family: monospace; font-size: 12px; background-color: #28282d; color: #e4e4e4; padding: 2px 5px; border-radius: 3px; }"
+                        u"p { margin-bottom: 8px; line-height: 1.5; }"
+                        u"ul, ol { margin-bottom: 8px; padding-left: 20px; }"
+                        u"li { margin-bottom: 4px; }"
+                        u"blockquote { border-left: 3px solid #3b82f6; padding-left: 10px; color: #888; margin: 8px 0; }"
+                        u"a { color: #3b82f6; text-decoration: none; }"_s);
+                    browser->setMarkdown(msg.content);
+                    const int docH = static_cast<int>(browser->document()->size().height()) + 16;
+                    browser->setFixedHeight(std::max(30, docH));
+                    layout->addWidget(browser);
 
                     m_transcriptLayout->insertWidget(m_transcriptLayout->count() - 1, assistantWidget);
                     m_activeAssistantWidget = assistantWidget;
@@ -1605,7 +1808,7 @@ void ChatWidget::rebuildTranscript()
         addPlanChecklist(sessionData.currentPlan);
     }
 
-    scrollToBottom();
+    forceScrollToBottom();
     updateTokenDisplay();
 }
 

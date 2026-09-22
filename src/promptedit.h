@@ -6,6 +6,10 @@
 #pragma once
 
 #include <QPlainTextEdit>
+#include <QStringList>
+
+class QCompleter;
+class QStringListModel;
 
 namespace KateAi
 {
@@ -20,14 +24,33 @@ public:
     QSize sizeHint() const override;
     QSize minimumSizeHint() const override;
 
+    void setCompletionWords(const QStringList &words);
+    void addHistory(const QString &text);
+
 public Q_SLOTS:
     void autoGrow();
 
 Q_SIGNALS:
     void submitRequested();
+    void escapePressed();
 
 protected:
     void keyPressEvent(QKeyEvent *event) override;
+    void focusInEvent(QFocusEvent *event) override;
+
+private Q_SLOTS:
+    void insertCompletion(const QString &completion);
+
+private:
+    QString wordUnderCursor() const;
+    int atSymbolPosition() const;
+
+    QCompleter *m_completer = nullptr;
+    QStringListModel *m_completionModel = nullptr;
+
+    QStringList m_history;
+    int m_historyIndex = -1;
+    QString m_draft;
 };
 
 } // namespace KateAi

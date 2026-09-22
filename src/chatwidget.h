@@ -52,9 +52,16 @@ public:
     void newChat();
     void rebuildTranscript();
 
+    PromptEdit *promptEdit() const { return m_prompt; }
+    void setCompletionWords(const QStringList &words);
+
 Q_SIGNALS:
     void settingsChanged(const Settings &settings);
     void configureRequested();
+    void aboutToSubmit();
+
+protected:
+    void resizeEvent(QResizeEvent *event) override;
 
 private:
     void addUserMessage(const QString &text);
@@ -70,6 +77,10 @@ private:
     void addPlanChecklist(const QJsonArray &plan);
     void markPlanStepCompleted(const QString &stepId);
     void scrollToBottom();
+    void forceScrollToBottom();
+    void updateScrollButtonPosition();
+    QPushButton *createCopyButton(const QString &textToCopy, QWidget *parent);
+    QWidget *createWelcomeWidget();
     void showSettingsMenu();
     void showModelMenu();
     void updateModelSelectorLabel();
@@ -142,6 +153,9 @@ private:
     QHash<QCheckBox *, QString> m_planSteps;
 
     QHash<QString, ToolCallWidget *> m_toolCallWidgets;
+    QPushButton *m_scrollToBottomBtn = nullptr;
+    QPushButton *m_activeAssistantCopyBtn = nullptr;
+    bool m_userScrolledUp = false;
 };
 
 } // namespace KateAi

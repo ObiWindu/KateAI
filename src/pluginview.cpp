@@ -90,6 +90,9 @@ namespace KateAi
         if (m_chat) {
             connect(m_chat, &ChatWidget::settingsChanged, plugin, &KateAiPlugin::setSettings);
             connect(m_chat, &ChatWidget::configureRequested, this, &KateAiView::showConfiguration);
+            connect(m_chat, &ChatWidget::aboutToSubmit, this, [this]() {
+                refreshWorkspace();
+            });
         }
         if (m_mainWindow) {
             connect(m_mainWindow, &KTextEditor::MainWindow::viewChanged, this, [this](KTextEditor::View *) {
@@ -343,6 +346,37 @@ namespace KateAi
         m_chat->agent()->setWorkspace(workspace);
         m_chat->agent()->setDocumentBridge(&m_bridge);
         m_chat->agent()->setEditorContext(editorContext());
+        updateCompletions();
+    }
+
+    void KateAiView::updateCompletions()
+    {
+        if (!m_chat || !m_mainWindow) {
+            return;
+        }
+        QStringList words = {u"active"_s, u"selection"_s, u"workspace"_s};
+        const QString workspace = detectWorkspace(m_mainWindow);
+
+        for (auto *view : m_mainWindow->views()) {
+            if (!view || !view->document()) {
+                continue;
+            }
+            const QString fullPath = view->document()->url().toLocalFile();
+            const QString docName = view->document()->documentName();
+            if (!docName.isEmpty() && !words.contains(docName)) {
+                words.append(docName);
+            }
+            if (!fullPath.isEmpty() && !workspace.isEmpty() && fullPath.startsWith(workspace)) {
+                QString relPath = fullPath.mid(workspace.length());
+                if (relPath.startsWith(u'/')) {
+                    relPath = relPath.mid(1);
+                }
+                if (!relPath.isEmpty() && !words.contains(relPath)) {
+                    words.append(relPath);
+                }
+            }
+        }
+        m_chat->setCompletionWords(words);
     }
 
 } // namespace KateAi

@@ -9,3 +9,7 @@ kateai_test(test_permissions)
 kateai_test(test_llmparse)
 kateai_test(test_session)
 kateai_test(test_retry)
+
+add_executable(test_promptedit test_promptedit.cpp ../src/promptedit.cpp)
+target_link_libraries(test_promptedit PRIVATE kateai_core Qt6::Test)
+add_test(NAME test_promptedit COMMAND test_promptedit)
