@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: 2026 ObiWindu <Obi.wandu@proton.me>
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ */
+
 #pragma once
 
 #include "documentbridge.h"
@@ -7,7 +12,7 @@
 #include "sessionstore.h"
 #include "tools.h"
 #include "types.h"
-#include "graph.h"
+#include "graph/projectgraph.h"
 
 #include <QObject>
 #include <QQueue>
@@ -37,6 +42,8 @@ public:
     QList<GraphEdge *> getProjectEdges() const;
 
     bool isBusy() const { return m_busy; }
+
+    LlmClient *client() { return &m_client; }
 
     void start(const QString &userText);
     void abort();

@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: 2026 ObiWindu <Obi.wandu@proton.me>
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ */
+
 #include "toolcallwidget.h"
 
 #include <KLocalizedString>
@@ -84,7 +89,11 @@ ToolCallWidget::ToolCallWidget(const QString &toolCallId, QWidget *parent)
         u"  font-family: monospace;"
         u"  font-size: 11px;"
         u"  line-height: 1.4;"
-        u"}"_s);
+        u"}"
+        u"QMenu { background-color: #252528; color: #cccccc; border: 1px solid #3c3c40; border-radius: 6px; padding: 4px; }"
+        u"QMenu::item { padding: 6px 18px 6px 12px; border-radius: 4px; }"
+        u"QMenu::item:selected { background-color: #007acc; color: #ffffff; }"
+        u"QMenu::separator { height: 1px; background-color: #38383e; margin: 4px 0; }"_s);
     m_describeDiff->document()->setDefaultStyleSheet(
         u"body { color: #d4d4d4; font-family: monospace; font-size: 11px; margin: 0; padding: 0; }"
         u".removed { color: #ef9999; background-color: #3a1a1a; }"
@@ -107,7 +116,11 @@ ToolCallWidget::ToolCallWidget(const QString &toolCallId, QWidget *parent)
         u"  padding: 8px;"
         u"  font-family: monospace;"
         u"  font-size: 11px;"
-        u"}"_s);
+        u"}"
+        u"QMenu { background-color: #252528; color: #cccccc; border: 1px solid #3c3c40; border-radius: 6px; padding: 4px; }"
+        u"QMenu::item { padding: 6px 18px 6px 12px; border-radius: 4px; }"
+        u"QMenu::item:selected { background-color: #007acc; color: #ffffff; }"
+        u"QMenu::separator { height: 1px; background-color: #38383e; margin: 4px 0; }"_s);
     detailsLayout->addWidget(m_details);
 
     root->addWidget(m_detailsContainer);

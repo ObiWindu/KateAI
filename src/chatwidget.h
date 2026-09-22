@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: 2026 ObiWindu <Obi.wandu@proton.me>
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ */
+
 #pragma once
 
 #include "agentloop.h"
@@ -65,6 +70,7 @@ private:
     void showSettingsMenu();
     void showModelMenu();
     void updateModelSelectorLabel();
+    void showInfoMessage(const QString &message, bool isError);
 
     void submit();
     void applyProviderToCombos();
@@ -102,6 +108,7 @@ private:
     PermissionBar *m_permissionBar = nullptr;
     PromptEdit *m_prompt = nullptr;
     QLabel *m_status = nullptr;
+    QLabel *m_infoBar = nullptr;
     QLabel *m_threadTitle = nullptr;
     QLabel *m_tokenCount = nullptr;
     QPushButton *m_modelSelector = nullptr;

@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: 2026 ObiWindu <Obi.wandu@proton.me>
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ */
+
 #include "chatwidget.h"
 
 #include "permissionbar.h"
@@ -177,7 +182,7 @@ ChatWidget::ChatWidget(QWidget *parent)
     welcome->setObjectName(u"welcomeWidget"_s);
     auto *wLayout = new QVBoxLayout(welcome);
     wLayout->setContentsMargins(20, 40, 20, 20);
-    wLayout->setAlignment(Qt::AlignCenter);
+    wLayout->setAlignment(Qt::AlignHCenter | Qt::AlignTop);
 
     auto *wIcon = new QLabel(u"⚡"_s, welcome);
     wIcon->setAlignment(Qt::AlignCenter);
@@ -213,6 +218,14 @@ ChatWidget::ChatWidget(QWidget *parent)
     auto *composerLayout = new QVBoxLayout(composerContainer);
     composerLayout->setContentsMargins(12, 8, 12, 8);
     composerLayout->setSpacing(4);
+
+    // Info bar for API messages (retries, errors) - shown above composer
+    m_infoBar = new QLabel(composerContainer);
+    m_infoBar->setWordWrap(true);
+    m_infoBar->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    m_infoBar->setStyleSheet(u"QLabel { color: #ff8888; font-size: 12px; font-weight: bold; padding: 8px 12px; background: transparent; border: none; }"_s);
+    m_infoBar->hide();
+    composerLayout->addWidget(m_infoBar);
 
     auto *composerCard = new QWidget(composerContainer);
     composerCard->setObjectName(u"composerCard"_s);
@@ -439,19 +452,20 @@ ChatWidget::ChatWidget(QWidget *parent)
 
     connect(&m_agent, &AgentLoop::failed, this, [this](const QString &error) {
         freezeStreaming();
-        auto *errCard = new QWidget(m_transcriptContainer);
-        errCard->setStyleSheet(u"QWidget { background-color: #261b1b; border: 1px solid #5a2020; border-left: 4px solid #ef4444; border-radius: 6px; }"_s);
-        auto *l = new QVBoxLayout(errCard);
-        l->setContentsMargins(12, 10, 12, 10);
-        auto *errLabel = new QLabel(errCard);
-        errLabel->setWordWrap(true);
-        errLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
-        errLabel->setStyleSheet(u"color: #ff8888; font-size: 12px; font-weight: bold; background: transparent; border: none;"_s);
-        errLabel->setText(i18n("Error: %1", error));
-        l->addWidget(errLabel);
-        m_transcriptLayout->insertWidget(m_transcriptLayout->count() - 1, errCard);
-        scrollToBottom();
+        showInfoMessage(i18n("Error: %1", error), true);
         updateSendButtonState();
+    });
+
+    // Retry status from LlmClient - show in info bar with bright brown/orange
+    connect(m_agent.client(), &LlmClient::retryStatus, this, [this](const QString &message, int attempt, int maxAttempts, int delaySeconds) {
+        showInfoMessage(i18n("Retrying in %1s (attempt %2/%3)...", delaySeconds, attempt, maxAttempts), false);
+    });
+
+    connect(m_agent.client(), &LlmClient::retryScheduled, this, [this](int attempt, int maxAttempts, int delaySeconds) {
+        Q_UNUSED(attempt);
+        Q_UNUSED(maxAttempts);
+        Q_UNUSED(delaySeconds);
+        // Could show a persistent retry indicator if needed
     });
 
     connect(&m_agent, &AgentLoop::turnFinished, this, [this]() {
@@ -525,6 +539,10 @@ void ChatWidget::addUserMessage(const QString &text)
 
 void ChatWidget::addActivityMessage(const QString &text)
 {
+    // Skip retry messages - they are shown in the info bar above the composer
+    if (text.startsWith(u"Retrying in "_s)) {
+        return;
+    }
     auto *pill = new QLabel(escape(text), m_transcriptContainer);
     pill->setStyleSheet(u"color: #777777; font-size: 11px; font-style: italic; padding: 2px 4px;"_s);
     m_transcriptLayout->insertWidget(m_transcriptLayout->count() - 1, pill);
@@ -723,12 +741,39 @@ void ChatWidget::scrollToBottom()
     });
 }
 
+void ChatWidget::showInfoMessage(const QString &message, bool isError)
+{
+    if (!m_infoBar) {
+        return;
+    }
+    if (isError) {
+        m_infoBar->setStyleSheet(u"QLabel { color: #ff8888; font-size: 12px; font-weight: bold; padding: 8px 12px; background: transparent; border: none; }"_s);
+    } else {
+        // Bright brown/orange for retries
+        m_infoBar->setStyleSheet(u"QLabel { color: #ffaa00; font-size: 12px; font-weight: bold; padding: 8px 12px; background: transparent; border: none; }"_s);
+    }
+    m_infoBar->setText(message);
+    m_infoBar->show();
+
+    // Auto-hide after 10 seconds for retries, keep errors visible until dismissed
+    if (!isError) {
+        QTimer::singleShot(10000, this, [this, message]() {
+            if (m_infoBar && m_infoBar->text() == message) {
+                m_infoBar->hide();
+            }
+        });
+    }
+}
+
 void ChatWidget::newChat()
 {
     m_agent.abort();
     m_agent.resetConversation();
     m_agent.clearSession();
     m_permissionBar->hideBar();
+    if (m_infoBar) {
+        m_infoBar->hide();
+    }
 
     // Clear transcript items except the bottom stretch
     QLayoutItem *child;
@@ -749,7 +794,7 @@ void ChatWidget::newChat()
     welcome->setObjectName(u"welcomeWidget"_s);
     auto *wLayout = new QVBoxLayout(welcome);
     wLayout->setContentsMargins(20, 40, 20, 20);
-    wLayout->setAlignment(Qt::AlignCenter);
+    wLayout->setAlignment(Qt::AlignHCenter | Qt::AlignTop);
 
     auto *wIcon = new QLabel(u"⚡"_s, welcome);
     wIcon->setAlignment(Qt::AlignCenter);
@@ -1302,6 +1347,7 @@ void ChatWidget::showSettingsMenu()
     menu.exec(m_configure->mapToGlobal(QPoint(0, m_configure->height() + 2)));
 }
 
+
 void ChatWidget::submit()
 {
     const QString text = m_prompt->toPlainText().trimmed();
@@ -1309,11 +1355,13 @@ void ChatWidget::submit()
         return;
     }
     m_prompt->clear();
+    if (m_infoBar) {
+        m_infoBar->hide();
+    }
     updateSendButtonState();
     m_agent.start(text);
     updateSendButtonState();
 }
-
 void ChatWidget::updateSendButtonState()
 {
     const bool busy = m_agent.isBusy();
@@ -1414,7 +1462,7 @@ void ChatWidget::rebuildTranscript()
         welcome->setObjectName(u"welcomeWidget"_s);
         auto *wLayout = new QVBoxLayout(welcome);
         wLayout->setContentsMargins(20, 40, 20, 20);
-        wLayout->setAlignment(Qt::AlignCenter);
+        wLayout->setAlignment(Qt::AlignHCenter | Qt::AlignTop);
 
         auto *wIcon = new QLabel(u"⚡"_s, welcome);
         wIcon->setAlignment(Qt::AlignCenter);

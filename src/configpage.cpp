@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: 2026 ObiWindu <Obi.wandu@proton.me>
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ */
+
 #include "configpage.h"
 #include "plugin.h"
 #include "settings.h"
@@ -131,6 +136,12 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     m_deny = new QPlainTextEdit(securityWidget);
     m_deny->setPlaceholderText(i18n("One glob per line, e.g. **/secrets/**"));
     m_deny->setMaximumHeight(100);
+    m_deny->setStyleSheet(
+        u"QPlainTextEdit { background: transparent; color: #e4e4e4; border: 1px solid #38383e; border-radius: 4px; padding: 4px; font-size: 13px; }"
+        u"QMenu { background-color: #252528; color: #cccccc; border: 1px solid #3c3c40; border-radius: 6px; padding: 4px; }"
+        u"QMenu::item { padding: 6px 18px 6px 12px; border-radius: 4px; }"
+        u"QMenu::item:selected { background-color: #007acc; color: #ffffff; }"
+        u"QMenu::separator { height: 1px; background-color: #38383e; margin: 4px 0; }"_s);
     securityForm->addRow(i18n("Extra deny globs:"), m_deny);
 
     tabs->addTab(securityWidget, i18n("Security & Permissions"));
@@ -176,6 +187,12 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     m_system = new QPlainTextEdit(agentWidget);
     m_system->setPlaceholderText(i18n("Extra system prompt (optional)"));
     m_system->setMaximumHeight(80);
+    m_system->setStyleSheet(
+        u"QPlainTextEdit { background: transparent; color: #e4e4e4; border: 1px solid #38383e; border-radius: 4px; padding: 4px; font-size: 13px; }"
+        u"QMenu { background-color: #252528; color: #cccccc; border: 1px solid #3c3c40; border-radius: 6px; padding: 4px; }"
+        u"QMenu::item { padding: 6px 18px 6px 12px; border-radius: 4px; }"
+        u"QMenu::item:selected { background-color: #007acc; color: #ffffff; }"
+        u"QMenu::separator { height: 1px; background-color: #38383e; margin: 4px 0; }"_s);
     agentForm->addRow(i18n("Extra instructions:"), m_system);
 
     // Context compression settings

@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: 2026 ObiWindu <Obi.wandu@proton.me>
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ */
+
 #include "llmclient.h"
 
 #include <QJsonArray>
@@ -542,10 +547,22 @@ void LlmClient::handleFinished()
     QString finalError;
     if (!m_completionError.isEmpty()) {
         finalError = u"HTTP %1: %2"_s.arg(status).arg(m_completionError);
-    } else if (networkError != QNetworkReply::NoError) {
+    } else if (networkError != QNetworkReply::NoError || status >= 400) {
         QString message = errorString;
         if (message.isEmpty()) {
-            message = u"Network request failed."_s;
+            if (status == 401) {
+                message = u"Invalid API key."_s;
+            } else if (status == 403) {
+                message = u"Access forbidden. Check your API key permissions."_s;
+            } else if (status == 404) {
+                message = u"Model not found."_s;
+            } else if (status == 429) {
+                message = u"Rate limit exceeded."_s;
+            } else if (status >= 500) {
+                message = u"Provider server error."_s;
+            } else {
+                message = u"Request failed."_s;
+            }
         }
         if (!leftover.trimmed().isEmpty()) {
             QJsonParseError parseError;
