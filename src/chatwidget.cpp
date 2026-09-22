@@ -775,7 +775,20 @@ void ChatWidget::addPlanChecklist(const QJsonArray &plan)
     if (!m_planBlock || !m_planLayout) {
         return;
     }
+    // Remove and delete all existing plan step widgets before rebuilding.
+    // m_planSteps.clear() only drops the QCheckBox* keys from the hash; it
+    // does not delete the widgets themselves, so omitting this loop causes
+    // QCheckBox children to accumulate in m_planLayout on every plan update.
     m_planSteps.clear();
+    while (m_planLayout->count() > 1) { // keep the "Plan" header label (index 0)
+        QLayoutItem *item = m_planLayout->takeAt(1);
+        if (item) {
+            if (item->widget()) {
+                item->widget()->deleteLater();
+            }
+            delete item;
+        }
+    }
     for (const QJsonValue &v : plan) {
         const QJsonObject o = v.toObject();
         const QString desc = o.value(u"description"_s).toString();
@@ -1049,6 +1062,18 @@ void ChatWidget::newChat()
     m_toolCallWidgets.clear();
     m_activeAssistantWidget = nullptr;
     m_activeAssistantBrowser = nullptr;
+    // Null out all thinking/plan pointers — the widgets are owned by
+    // m_activeAssistantWidget and were already queued for deletion above.
+    // Leaving these dangling would cause crashes if any signal fires between
+    // now and the next streaming turn creating fresh widgets.
+    m_thinkingBlock = nullptr;
+    m_thinkingBrowser = nullptr;
+    m_thinkingToggle = nullptr;
+    m_thinkingExpanded = false;
+    m_planBlock = nullptr;
+    m_planLayout = nullptr;
+    m_planSteps.clear();
+    m_thinkingBuffer.clear();
     m_streamText.clear();
 
     // Recreate welcome widget
@@ -1783,8 +1808,6 @@ void ChatWidget::rebuildTranscript()
                     layout->addWidget(browser);
 
                     m_transcriptLayout->insertWidget(m_transcriptLayout->count() - 1, assistantWidget);
-                    m_activeAssistantWidget = assistantWidget;
-                    m_activeAssistantBrowser = browser;
                 }
                 break;
             case ChatMessage::Role::Tool:
@@ -1795,6 +1818,13 @@ void ChatWidget::rebuildTranscript()
                 break;
         }
     }
+
+    // Clear streaming-turn pointers after the history loop. rebuildTranscript
+    // reconstructs finished messages, not a live streaming turn. Leaving these
+    // non-null would make setStreaming() skip creating a fresh widget for the
+    // next turn, appending new text into a completed historical message instead.
+    m_activeAssistantWidget = nullptr;
+    m_activeAssistantBrowser = nullptr;
 
     // Restore current thinking/plan state if there's an active turn
     const auto sessionData = m_agent.sessionData();

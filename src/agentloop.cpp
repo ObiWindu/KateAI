@@ -64,7 +64,7 @@ AgentLoop::AgentLoop(QObject *parent)
 
 void AgentLoop::setSettings(const Settings &settings)
 {
-    // Update internal settings and propagate to dependent components
+    // Update internal settings and propagate to dependent components.
     m_settings = settings;
     m_client.setSettings(settings);
     m_policy.setMode(settings.permissionMode);
@@ -76,13 +76,12 @@ void AgentLoop::setSettings(const Settings &settings)
         m_tools->setProjectGraph(m_projectGraph.get());
     }
 
-    // Persist graph to JSON after generation/update
-    m_projectGraph->saveToFile(m_workspace + u"/.kateai/project_graph.json"_s);
-
-    // Regenerate project graph with new settings
-    if (!m_workspace.isEmpty()) {
-        m_projectGraph->generateGraph(m_workspace);
-    }
+    // Do NOT regenerate or re-save the project graph here. The graph is built
+    // once in setWorkspace (or loaded from the cached JSON) and updated
+    // incrementally via updateProjectGraph. Calling generateGraph on every
+    // settings change (model swap, permission toggle, reasoning effort, etc.)
+    // wastefully re-reads the entire workspace from disk and throws away any
+    // in-flight incremental updates.
 }
 
 void AgentLoop::setWorkspace(const QString &workspace)
