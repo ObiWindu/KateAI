@@ -20,14 +20,22 @@ namespace KateAi
 
 KateAiPlugin::KateAiPlugin(QObject *parent, const QVariantList &)
     : KTextEditor::Plugin(parent)
-    , m_settings(SettingsStore::load())
 {
-    // Initialize the plugin with default settings loaded from persistent storage
+    // Keep plugin construction cheap. Persistent settings are loaded when Kate
+    // actually requests a plugin view or configuration page.
+}
+
+void KateAiPlugin::ensureSettingsLoaded()
+{
+    if (!m_settingsLoaded) {
+        m_settings = SettingsStore::load();
+        m_settingsLoaded = true;
+    }
 }
 
 QObject *KateAiPlugin::createView(KTextEditor::MainWindow *mainWindow)
 {
-    // Create and return a new Kate AI view for the given main window
+    ensureSettingsLoaded();
     return new KateAiView(this, mainWindow);
 }
 
@@ -39,10 +47,10 @@ int KateAiPlugin::configPages() const
 
 KTextEditor::ConfigPage *KateAiPlugin::configPage(int number, QWidget *parent)
 {
-    // Return the configuration page for the given page number, or nullptr if invalid
     if (number != 0) {
         return nullptr;
     }
+    ensureSettingsLoaded();
     return new KateAiConfigPage(parent, this);
 }
 
@@ -50,6 +58,7 @@ void KateAiPlugin::setSettings(const Settings &settings)
 {
     // Update plugin settings, save them persistently, and notify listeners
     m_settings = settings;
+    m_settingsLoaded = true;
     SettingsStore::save(m_settings);
     Q_EMIT settingsChanged(m_settings);
 }

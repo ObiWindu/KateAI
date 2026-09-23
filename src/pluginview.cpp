@@ -24,6 +24,7 @@
 #include <QFileInfo>
 #include <QIcon>
 #include <QSet>
+#include <QTimer>
 #include <QKeySequence>
 #include <QLayout>
 #include <QMenu>
@@ -41,77 +42,39 @@ namespace KateAi
     , m_plugin(plugin)
     , m_mainWindow(mainWindow)
     {
-        // Initialize the plugin with its component name and UI resource file
+        // Keep plugin-view construction side-effect free. Kate may construct
+        // plugin views while it is still restoring its GUI. XMLGUI merging,
+        // action creation, view enumeration, and context-menu wiring are all
+        // deferred until the event loop is running.
+        QTimer::singleShot(0, this, [this]() {
+            initializeGui();
+        });
+    }
+
+    void KateAiView::initializeGui()
+    {
+        if (m_guiInitialized || !m_mainWindow || !m_plugin) {
+            return;
+        }
+        m_guiInitialized = true;
+
         setComponentName(u"kateai"_s, i18n("Kate AI"));
         setXMLFile(u"ui.rc"_s);
 
-        // Create the tool view panel on the right side of the main window
-        if (m_mainWindow) {
-            m_toolView = m_mainWindow->createToolView(plugin,
-                                                      u"kateai"_s,
-                                                      KTextEditor::MainWindow::Right,
-                                                      QIcon::fromTheme(u"help-hint"_s),
-                                                      i18n("Kate AI"));
-        }
-
-        // Create the chat widget that will contain the AI interface
-        if (m_toolView) {
-            m_chat = new ChatWidget(m_toolView);
-        }
-
-        // Ensure the tool view has a layout and add our chat widget to it
-        // Configure the chat widget with plugin settings and set up document bridging
-        if (m_toolView && m_chat) {
-            if (!m_toolView->layout()) {
-                auto *layout = new QVBoxLayout(m_toolView);
-                layout->setContentsMargins(0, 0, 0, 0);
-            }
-            m_toolView->layout()->addWidget(m_chat);
-        }
-
-        // Configure the chat widget with plugin settings and set up document bridging
-        if (m_chat) {
-            m_chat->setSettings(plugin->settings());
-            if (m_chat->agent()) {
-                // Restore session data
-                const auto sessionData = SessionStore::load();
-                if (!sessionData.messages.isEmpty()) {
-                    m_chat->agent()->restoreSession(sessionData);
-                    m_chat->rebuildTranscript();
-                }
-            }
-        }
-        refreshWorkspace();
-
-        if (plugin && m_mainWindow) {
-            connect(plugin, &KateAiPlugin::settingsChanged, this, [this](const Settings &settings) {
+        if (m_plugin) {
+            connect(m_plugin, &KateAiPlugin::settingsChanged, this, [this](const Settings &settings) {
                 if (m_chat) {
                     m_chat->setSettings(settings);
                 }
                 refreshWorkspace();
             });
         }
-        if (m_chat) {
-            connect(m_chat, &ChatWidget::settingsChanged, plugin, &KateAiPlugin::setSettings);
-            connect(m_chat, &ChatWidget::configureRequested, this, &KateAiView::showConfiguration);
-            connect(m_chat, &ChatWidget::aboutToSubmit, this, [this]() {
-                // Submission needs the latest editor state, but should not kick
-                // off a workspace scan or project-graph refresh. Those are
-                // maintained by refreshWorkspace() on view/workspace changes.
-                if (m_mainWindow && m_chat && m_chat->agent()) {
-                    m_chat->agent()->setEditorContext(editorContext());
-                }
-            });
-        }
-        if (m_mainWindow) {
-            connect(m_mainWindow, &KTextEditor::MainWindow::viewChanged, this, [this](KTextEditor::View *) {
-                refreshWorkspace();
-            });
-        }
+        connect(m_mainWindow, &KTextEditor::MainWindow::viewChanged, this, [this](KTextEditor::View *) {
+            refreshWorkspace();
+        });
 
         auto *ac = actionCollection();
         QPointer<QAction> toggle, fresh, ask, fix, refactor, tests, configure;
-
         if (ac) {
             toggle = ac->addAction(u"kateai_toggle"_s);
             if (toggle) {
@@ -166,21 +129,21 @@ namespace KateAi
             }
         }
 
-        // KTextEditor does not merge plugin XML clients into a view whose context
-        // menu was supplied by another plugin. Add this action at show time so it
-        // is consistently available in every editor tab.
-        if (m_mainWindow) {
-            for (auto *view : m_mainWindow->views()) {
-                addEditorContextActions(view, {ask, fix, refactor, tests});
-            }
-            connect(m_mainWindow, &KTextEditor::MainWindow::viewCreated, this, [this, ask, fix, refactor, tests](KTextEditor::View *view) {
-                addEditorContextActions(view, {ask, fix, refactor, tests});
-                updateCompletions();
-            });
+        for (auto *view : m_mainWindow->views()) {
+            addEditorContextActions(view, {ask, fix, refactor, tests});
         }
+        connect(m_mainWindow, &KTextEditor::MainWindow::viewCreated, this, [this, ask, fix, refactor, tests](KTextEditor::View *view) {
+            addEditorContextActions(view, {ask, fix, refactor, tests});
+            QTimer::singleShot(0, this, [this]() {
+                if (m_toolView && m_toolView->isVisible()) {
+                    updateCompletions();
+                }
+            });
+        });
 
-        if (m_mainWindow && m_mainWindow->guiFactory()) {
+        if (m_mainWindow->guiFactory()) {
             m_mainWindow->guiFactory()->addClient(this);
+            m_guiClientRegistered = true;
         }
     }
 
@@ -189,16 +152,85 @@ namespace KateAi
         // Session is saved in ChatWidget destructor before AgentLoop is destroyed
         // m_toolView is owned by the main window, do not delete it here
 
-        if (m_mainWindow && m_mainWindow->guiFactory()) {
+        if (m_guiClientRegistered && m_mainWindow && m_mainWindow->guiFactory()) {
             m_mainWindow->guiFactory()->removeClient(this);
         }
     }
 
+    void KateAiView::ensureUiCreated()
+    {
+        if (m_uiInitialized || !m_mainWindow || !m_plugin) {
+            return;
+        }
+
+        m_uiInitialized = true;
+
+        m_toolView = m_mainWindow->createToolView(m_plugin,
+                                                  u"kateai"_s,
+                                                  KTextEditor::MainWindow::Right,
+                                                  QIcon::fromTheme(u"help-hint"_s),
+                                                  i18n("Kate AI"));
+        if (!m_toolView) {
+            m_uiInitialized = false;
+            return;
+        }
+
+        m_chat = new ChatWidget(m_toolView);
+        if (!m_chat) {
+            m_uiInitialized = false;
+            return;
+        }
+
+        if (!m_toolView->layout()) {
+            auto *layout = new QVBoxLayout(m_toolView);
+            layout->setContentsMargins(0, 0, 0, 0);
+        }
+        m_toolView->layout()->addWidget(m_chat);
+
+        // These connections used to be made in the eager constructor. Keep
+        // them here because ChatWidget itself is now lazy-created.
+        connect(m_chat, &ChatWidget::settingsChanged, m_plugin, &KateAiPlugin::setSettings);
+        connect(m_chat, &ChatWidget::configureRequested, this, &KateAiView::showConfiguration);
+        connect(m_chat, &ChatWidget::aboutToSubmit, this, [this]() {
+            if (m_mainWindow && m_chat && m_chat->agent()) {
+                // Submission gets a fresh editor snapshot, but does not start
+                // a project scan merely because the user pressed Send.
+                m_chat->agent()->setEditorContext(editorContext());
+            }
+        });
+
+        m_chat->setSettings(m_plugin->settings());
+        if (m_chat->agent()) {
+            const auto sessionData = SessionStore::load();
+            if (!sessionData.messages.isEmpty()) {
+                m_chat->agent()->restoreSession(sessionData);
+                m_chat->rebuildTranscript();
+            }
+            m_chat->agent()->setEditorContext(editorContext());
+            const QString workspace = detectWorkspace(m_mainWindow);
+            if (!workspace.isEmpty()) {
+                m_chat->agent()->setWorkspace(workspace);
+            }
+        }
+
+        updateCompletions();
+    }
+
     void KateAiView::showPanel()
     {
+        initializeGui();
+        ensureUiCreated();
         if (m_toolView && m_mainWindow) {
             m_mainWindow->showToolView(m_toolView);
             if (m_chat) {
+                if (m_chat->agent()) {
+                    m_chat->agent()->setEditorContext(editorContext());
+                    const QString workspace = detectWorkspace(m_mainWindow);
+                    if (!workspace.isEmpty()) {
+                        m_chat->agent()->setWorkspace(workspace);
+                    }
+                }
+                updateCompletions();
                 m_chat->focusPrompt();
             }
         }
@@ -350,9 +382,15 @@ namespace KateAi
             return;
         }
         const QString workspace = detectWorkspace(m_mainWindow);
-        m_chat->agent()->setWorkspace(workspace);
+        if (!workspace.isEmpty()) {
+            m_chat->agent()->setWorkspace(workspace);
+        } else {
+            m_chat->agent()->setWorkspace({});
+        }
         m_chat->agent()->setEditorContext(editorContext());
-        updateCompletions();
+        if (m_toolView && m_toolView->isVisible()) {
+            updateCompletions();
+        }
     }
 
     void KateAiView::updateCompletions()
@@ -385,7 +423,7 @@ namespace KateAi
             }
             const QString fullPath = QDir::cleanPath(view->document()->url().toLocalFile());
             appendWord(view->document()->documentName());
-            if (!fullPath.isEmpty() && fullPath != "." && !workspace.isEmpty()) {
+            if (!fullPath.isEmpty() && fullPath != u"."_s && !workspace.isEmpty()) {
                 const QString relative = workspaceDir.relativeFilePath(fullPath);
                 if (relative != u"."_s && !relative.startsWith(u"../"_s) && relative != u".."_s) {
                     appendWord(relative);

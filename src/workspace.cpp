@@ -20,7 +20,7 @@ namespace KateAi
 QString detectWorkspaceFromPath(const QString &filePath)
 {
     if (filePath.isEmpty()) {
-        return QDir::currentPath();
+        return {};
     }
 
     QDir dir = QFileInfo(filePath).isDir() ? QDir(filePath) : QFileInfo(filePath).absoluteDir();
@@ -51,7 +51,7 @@ QString detectWorkspace(KTextEditor::MainWindow *mainWindow)
             }
         }
     }
-    return QDir::currentPath();
+    return {};
 }
 
 } // namespace KateAi

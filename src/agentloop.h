@@ -114,6 +114,7 @@ private:
     QString systemPrompt() const;
     QList<ToolCall> bundleSimilarTools(const QList<ToolCall> &calls);
     QList<ChatMessage> modelMessagesForRequest() const;
+    void ensureProjectGraph();
 
     Settings m_settings;
     QString m_workspace;

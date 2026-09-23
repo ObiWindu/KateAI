@@ -87,8 +87,10 @@ private Q_SLOTS:
         QCOMPARE(edit.toPlainText(), u"second prompt"_s);
         edit.setPlainText(u"line one\nline two"_s);
         edit.moveCursor(QTextCursor::End);
-        edit.movePosition(QTextCursor::StartOfLine);
-        QApplication::sendEvent(&upEvent);
+        QTextCursor lineStart = edit.textCursor();
+        lineStart.movePosition(QTextCursor::StartOfLine);
+        edit.setTextCursor(lineStart);
+        QApplication::sendEvent(&edit, &upEvent);
         QCOMPARE(edit.toPlainText(), u"line one\nline two"_s);
 
         edit.clear();
