@@ -147,6 +147,89 @@ ToolRunner::ToolRunner(Sandbox sandbox, DocumentBridge *bridge, QObject *parent)
     , m_bridge(bridge)
 {
     // Initialize the tool runner with a sandbox for security and a document bridge for file operations
+    m_bashProcess.setProcessChannelMode(QProcess::MergedChannels);
+    m_bashTimeoutTimer.setSingleShot(true);
+
+    connect(&m_bashTimeoutTimer, &QTimer::timeout, this, [this]() {
+        if (!m_bashRunning) {
+            return;
+        }
+        m_bashTimedOut = true;
+        m_bashProcess.kill();
+    });
+
+    connect(&m_bashProcess, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
+        if (!m_bashRunning || error != QProcess::FailedToStart) {
+            return;
+        }
+        m_bashTimeoutTimer.stop();
+        ToolResult result;
+        result.name = u"bash"_s;
+        result.ok = false;
+        result.output = u"Failed to start command: %1"_s.arg(m_bashProcess.errorString());
+        finishAsyncBash(result);
+    });
+
+    connect(&m_bashProcess, &QProcess::readyRead, this, [this]() {
+        if (!m_bashRunning) {
+            return;
+        }
+        constexpr qsizetype kMaxBufferedOutput = 32 * 1024;
+        const qsizetype remaining = kMaxBufferedOutput - m_bashOutput.size();
+        if (remaining > 0) {
+            m_bashOutput += m_bashProcess.read(remaining);
+            if (m_bashOutput.size() >= kMaxBufferedOutput) {
+                m_bashOutputTruncated = true;
+            }
+        }
+        if (m_bashProcess.bytesAvailable() > 0) {
+            m_bashProcess.readAll();
+            m_bashOutputTruncated = true;
+        }
+    });
+
+    connect(&m_bashProcess, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this,
+            [this](int exitCode, QProcess::ExitStatus exitStatus) {
+                if (!m_bashRunning) {
+                    return;
+                }
+
+                constexpr qsizetype kMaxBufferedOutput = 32 * 1024;
+                if (!m_bashOutputTruncated && m_bashOutput.size() < kMaxBufferedOutput) {
+                    const qsizetype remaining = kMaxBufferedOutput - m_bashOutput.size();
+                    m_bashOutput += m_bashProcess.read(remaining);
+                    if (m_bashOutput.size() >= kMaxBufferedOutput) {
+                        m_bashOutputTruncated = true;
+                    }
+                }
+                if (m_bashProcess.bytesAvailable() > 0) {
+                    m_bashProcess.readAll();
+                    m_bashOutputTruncated = true;
+                }
+                ToolResult result;
+                result.name = u"bash"_s;
+                if (m_bashTimedOut) {
+                    result.ok = false;
+                    result.output = u"Command timed out after %1 ms."_s.arg(m_timeoutMs);
+                } else {
+                    QString output = QString::fromUtf8(m_bashOutput);
+                    if (m_bashOutputTruncated) {
+                        output += u"\n... output truncated to 32 KiB"_s;
+                    }
+                    result.ok = exitStatus == QProcess::NormalExit && exitCode == 0;
+                    result.output = clip(output.isEmpty() ? u"(no output, exit %1)"_s.arg(exitCode) : output);
+                    if (!result.ok) {
+                        result.output += u"\nexit code %1"_s.arg(exitCode);
+                    }
+                }
+                m_bashTimeoutTimer.stop();
+                finishAsyncBash(result);
+            });
+}
+
+ToolRunner::~ToolRunner()
+{
+    cancelAsyncBash();
 }
 
 PermissionRequest ToolRunner::describe(const ToolCall &call) const
@@ -646,6 +729,86 @@ ToolResult ToolRunner::bash(const QJsonObject &args)
         result.output += u"\nexit code %1"_s.arg(process.exitCode());
     }
     return result;
+}
+
+void ToolRunner::runBashAsync(const ToolCall &call)
+{
+    if (m_bashRunning) {
+        ToolResult result;
+        result.name = u"bash"_s;
+        result.ok = false;
+        result.output = u"Another shell command is already running."_s;
+        QMetaObject::invokeMethod(this, [this, call, result]() mutable {
+            Q_EMIT bashFinished(call.id, result);
+        }, Qt::QueuedConnection);
+        return;
+    }
+
+    QString error;
+    const QJsonObject args = parseArgs(call, &error);
+    if (args.isEmpty() && !error.isEmpty()) {
+        ToolResult result;
+        result.name = u"bash"_s;
+        result.ok = false;
+        result.output = error;
+        QMetaObject::invokeMethod(this, [this, call, result]() mutable {
+            Q_EMIT bashFinished(call.id, result);
+        }, Qt::QueuedConnection);
+        return;
+    }
+
+    const QString command = args.value(u"command"_s).toString();
+    const QStringList wrapped = m_sandbox.wrapCommand(command, &error);
+    if (wrapped.isEmpty()) {
+        ToolResult result;
+        result.name = u"bash"_s;
+        result.ok = false;
+        result.output = error;
+        QMetaObject::invokeMethod(this, [this, call, result]() mutable {
+            Q_EMIT bashFinished(call.id, result);
+        }, Qt::QueuedConnection);
+        return;
+    }
+
+    m_bashCall = call;
+    m_bashRunning = true;
+    m_bashTimedOut = false;
+    m_bashOutput.clear();
+    m_bashOutputTruncated = false;
+    m_bashProcess.setWorkingDirectory(m_sandbox.workspaceRoot());
+    m_bashProcess.start(wrapped.first(), wrapped.mid(1));
+    m_bashTimeoutTimer.start(m_timeoutMs);
+}
+
+void ToolRunner::cancelAsyncBash()
+{
+    m_bashTimeoutTimer.stop();
+    if (!m_bashRunning) {
+        return;
+    }
+    m_bashRunning = false;
+    m_bashCall = {};
+    m_bashTimedOut = false;
+    m_bashOutput.clear();
+    m_bashOutputTruncated = false;
+    m_bashProcess.kill();
+    m_bashProcess.close();
+}
+
+void ToolRunner::finishAsyncBash(ToolResult result)
+{
+    if (!m_bashRunning) {
+        return;
+    }
+
+    const QString callId = m_bashCall.id;
+    m_bashTimeoutTimer.stop();
+    m_bashRunning = false;
+    m_bashCall = {};
+    m_bashTimedOut = false;
+    m_bashOutput.clear();
+    m_bashOutputTruncated = false;
+    Q_EMIT bashFinished(callId, result);
 }
 
 ToolResult ToolRunner::queryProjectGraph(const QJsonObject &args) const

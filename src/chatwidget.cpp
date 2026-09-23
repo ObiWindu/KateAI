@@ -7,6 +7,7 @@
 
 #include "permissionbar.h"
 #include "promptedit.h"
+#include "sessionstore.h"
 #include "settings.h"
 #include "toolcallwidget.h"
 
@@ -24,6 +25,7 @@
 #include <QMenu>
 #include <QPlainTextEdit>
 #include <QPropertyAnimation>
+#include <QPointer>
 #include <QPushButton>
 #include <QResizeEvent>
 #include <QScrollBar>
@@ -42,7 +44,37 @@ namespace KateAi
 
 ChatWidget::ChatWidget(QWidget *parent)
     : QWidget(parent)
+    , m_userScrolledUp(true)
 {
+    m_agent.setDocumentBridge(&m_documentBridge);
+
+    // Coalesce the very high-frequency streaming/UI updates into one pending
+    // event each.  The previous implementation created a queued singleShot
+    // timer for every streamed token, which could leave thousands of timer
+    // events in Kate's event queue during fast responses.
+    m_streamRenderTimer.setSingleShot(true);
+    connect(&m_streamRenderTimer, &QTimer::timeout, this, [this]() {
+        if (m_thinkingBrowser && !m_thinkingBuffer.isEmpty()) {
+            renderThinkingHtml();
+        }
+        if (m_activeAssistantBrowser) {
+            m_activeAssistantBrowser->setMarkdown(m_streamText);
+            const int docH = static_cast<int>(m_activeAssistantBrowser->document()->size().height()) + 16;
+            m_activeAssistantBrowser->setFixedHeight(std::max(30, docH));
+            scrollToBottom();
+        } else if (m_thinkingBrowser) {
+            scrollToBottom();
+        }
+    });
+
+    m_scrollTimer.setSingleShot(true);
+    connect(&m_scrollTimer, &QTimer::timeout, this, [this]() {
+        if (m_scrollArea) {
+            auto *sb = m_scrollArea->verticalScrollBar();
+            sb->setValue(sb->maximum());
+        }
+    });
+
     auto *root = new QVBoxLayout(this);
     root->setContentsMargins(0, 0, 0, 0);
     root->setSpacing(0);
@@ -189,14 +221,61 @@ ChatWidget::ChatWidget(QWidget *parent)
     m_transcriptContainer = new QWidget(m_scrollArea);
     m_transcriptContainer->setStyleSheet(u"background-color: #181818;"_s);
     m_transcriptLayout = new QVBoxLayout(m_transcriptContainer);
-    m_transcriptLayout->setContentsMargins(14, 14, 14, 14);
-    m_transcriptLayout->setSpacing(10);
+    m_transcriptLayout->setContentsMargins(12, 12, 12, 12);
+    m_transcriptLayout->setSpacing(6);
 
     // Initial empty state welcome widget
     m_transcriptLayout->addWidget(createWelcomeWidget());
     m_transcriptLayout->addStretch(); // Push content to top, keep consistent spacing
+
+    // Dynamic status indicators (thinking/working) - always at bottom of transcript
+    auto *indicatorsContainer = new QWidget(m_transcriptContainer);
+    indicatorsContainer->setObjectName(u"indicatorsContainer"_s);
+    auto *indicatorsLayout = new QHBoxLayout(indicatorsContainer);
+    indicatorsLayout->setContentsMargins(0, 4, 0, 4);
+    indicatorsLayout->setSpacing(8);
+    indicatorsLayout->addStretch();
+
+    // Thinking indicator (shows when AI is reasoning)
+    m_thinkingIndicator = new QLabel(u"💭  Thinking…"_s, indicatorsContainer);
+    m_thinkingIndicator->setStyleSheet(
+        u"QLabel {"
+        u"  color: #3b82f6;"
+        u"  font-size: 11px;"
+        u"  font-style: italic;"
+        u"  padding: 2px 8px;"
+        u"  background-color: #1e3a5f;"
+        u"  border: 1px solid #3b82f6;"
+        u"  border-radius: 10px;"
+        u"}"_s);
+    m_thinkingIndicator->hide();
+    indicatorsLayout->addWidget(m_thinkingIndicator);
+
+    // Working indicator (shows when AI is running tools/reading/editing)
+    m_workingIndicator = new QLabel(u"⚙️  Working…"_s, indicatorsContainer);
+    m_workingIndicator->setStyleSheet(
+        u"QLabel {"
+        u"  color: #f59e0b;"
+        u"  font-size: 11px;"
+        u"  font-style: italic;"
+        u"  padding: 2px 8px;"
+        u"  background-color: #3d2e0e;"
+        u"  border: 1px solid #f59e0b;"
+        u"  border-radius: 10px;"
+        u"}"_s);
+    m_workingIndicator->hide();
+    indicatorsLayout->addWidget(m_workingIndicator);
+
+    m_transcriptLayout->addWidget(indicatorsContainer);
     m_scrollArea->setWidget(m_transcriptContainer);
     root->addWidget(m_scrollArea, 1);
+
+    // Ensure chat starts at the top (welcome widget visible)
+    QTimer::singleShot(0, this, [thisWeak = QPointer<ChatWidget>(this)]() {
+        if (thisWeak && thisWeak->m_scrollArea) {
+            thisWeak->m_scrollArea->verticalScrollBar()->setValue(0);
+        }
+    });
 
     m_scrollToBottomBtn = new QPushButton(u"↓  Jump to latest"_s, m_scrollArea);
     m_scrollToBottomBtn->setCursor(Qt::PointingHandCursor);
@@ -217,15 +296,36 @@ ChatWidget::ChatWidget(QWidget *parent)
     m_scrollToBottomBtn->hide();
     connect(m_scrollToBottomBtn, &QPushButton::clicked, this, &ChatWidget::forceScrollToBottom);
 
+    // Use one long-lived effect/animation pair instead of allocating an
+    // effect + animation on every show/hide transition.  Both are owned by
+    // the button, so their lifetime is tied to the widget tree.
+    m_scrollOpacityEffect = new QGraphicsOpacityEffect(m_scrollToBottomBtn);
+    m_scrollOpacityEffect->setOpacity(0.0);
+    m_scrollToBottomBtn->setGraphicsEffect(m_scrollOpacityEffect);
+    m_scrollButtonAnimation = new QPropertyAnimation(m_scrollOpacityEffect, "opacity", m_scrollToBottomBtn);
+    m_scrollButtonAnimation->setDuration(150);
+    m_scrollButtonAnimation->setEasingCurve(QEasingCurve::OutCubic);
+    connect(m_scrollButtonAnimation, &QPropertyAnimation::finished, this, [this]() {
+        if (m_scrollOpacityEffect && qFuzzyIsNull(m_scrollOpacityEffect->opacity()) && m_scrollToBottomBtn) {
+            m_scrollToBottomBtn->hide();
+        }
+    });
+
     connect(m_scrollArea->verticalScrollBar(), &QScrollBar::valueChanged, this, [this](int value) {
+        if (m_programmaticScrollChange) {
+            return;
+        }
         auto *sb = m_scrollArea->verticalScrollBar();
         if (sb->maximum() - value <= 40) {
             m_userScrolledUp = false;
+            m_hasUnseenContent = false;
             if (m_scrollToBottomBtn && m_scrollToBottomBtn->isVisible()) {
                 animateScrollButtonHide();
             }
         } else {
             m_userScrolledUp = true;
+            // Do not show the button merely because the user scrolled up; it
+            // becomes visible only after content arrives below their position.
         }
     });
 
@@ -233,9 +333,10 @@ ChatWidget::ChatWidget(QWidget *parent)
         Q_UNUSED(min);
         auto *sb = m_scrollArea->verticalScrollBar();
         if (!m_userScrolledUp) {
+            m_programmaticScrollChange = true;
             sb->setValue(max);
-        } else if (m_scrollToBottomBtn) {
-            // Show button when scrolled up and there's new content (agent busy or new messages)
+            m_programmaticScrollChange = false;
+        } else if (m_hasUnseenContent && m_scrollToBottomBtn) {
             updateScrollButtonPosition();
             animateScrollButtonShow();
             m_scrollToBottomBtn->raise();
@@ -433,25 +534,33 @@ ChatWidget::ChatWidget(QWidget *parent)
             appendThinkingDelta(delta);
             scrollToBottom();
         }
+        setThinkingIndicator(true);
     });
-    connect(&m_agent, &AgentLoop::thinkingFinished, this, &ChatWidget::addThinkingBlock);
+    connect(&m_agent, &AgentLoop::thinkingFinished, this, [this](const QString &text) {
+        Q_UNUSED(text);
+        addThinkingBlock(text);
+        setThinkingIndicator(false);
+    });
     connect(&m_agent, &AgentLoop::planUpdated, this, &ChatWidget::addPlanChecklist);
     connect(&m_agent, &AgentLoop::assistantDelta, this, [this](const QString &delta) {
         // Auto-collapse thinking when visible answer starts streaming
         if (m_settings.autoCollapseThinking && m_thinkingExpanded && !m_streamText.isEmpty()) {
             collapseThinkingBlock();
         }
+        setThinkingIndicator(false);
         setStreaming(m_streamText + delta);
     });
     connect(&m_agent, &AgentLoop::assistantFinished, this, [this](const QString &text) {
         Q_UNUSED(text);
         freezeStreaming();
+        setWorkingIndicator(false);
     });
     connect(&m_agent, &AgentLoop::activityUpdated, this, &ChatWidget::addActivityMessage);
 
     // Tool visibility signals (Zed-style inline tool-call cards)
     connect(&m_agent, &AgentLoop::toolStarted, this, [this](const PermissionRequest &request) {
         freezeStreaming();
+        setWorkingIndicator(true);
         auto *toolWidget = new ToolCallWidget(request.toolCallId, m_transcriptContainer);
         toolWidget->setToolInfo(request.toolName, request.summary, request.risk);
         toolWidget->setDescribeDiff(request.describeDiff);
@@ -464,6 +573,17 @@ ChatWidget::ChatWidget(QWidget *parent)
     connect(&m_agent, &AgentLoop::toolFinished, this, [this](const ToolResult &result) {
         if (auto *widget = m_toolCallWidgets.value(result.toolCallId)) {
             widget->setFinished(result);
+        }
+        // Hide working indicator if no more tools are running
+        bool anyRunning = false;
+        for (auto *widget : m_toolCallWidgets) {
+            if (widget->isRunning()) {
+                anyRunning = true;
+                break;
+            }
+        }
+        if (!anyRunning) {
+            setWorkingIndicator(false);
         }
         scrollToBottom();
     });
@@ -504,6 +624,8 @@ ChatWidget::ChatWidget(QWidget *parent)
         m_prompt->setEnabled(true);
         updateSendButtonState();
         m_prompt->setFocus();
+        setThinkingIndicator(false);
+        setWorkingIndicator(false);
     });
 
     connect(&m_agent, &AgentLoop::modelsReceived, this, [this](Provider provider, const QStringList &models) {
@@ -527,6 +649,37 @@ ChatWidget::ChatWidget(QWidget *parent)
     updateTokenDisplay();
 }
 
+ChatWidget::~ChatWidget()
+{
+    // Stop queued UI work before tearing down children. AgentLoop::abort also
+    // cancels the network reply and any asynchronous shell command.
+    m_streamRenderTimer.stop();
+    m_scrollTimer.stop();
+    disconnect(&m_agent, nullptr, this, nullptr);
+    m_agent.abort();
+
+    // Save session before AgentLoop member is destroyed
+    if (!m_agent.messages().isEmpty()) {
+        const auto sessionData = m_agent.sessionData();
+        if (!sessionData.messages.isEmpty()) {
+            SessionStore::save(sessionData);
+        }
+    }
+
+    // Disconnect all signals to prevent callbacks after destruction
+    disconnect(m_scrollArea->verticalScrollBar(), nullptr, this, nullptr);
+    if (m_scrollToBottomBtn) {
+        disconnect(m_scrollToBottomBtn, nullptr, this, nullptr);
+    }
+    if (m_prompt) {
+        disconnect(m_prompt, nullptr, this, nullptr);
+    }
+
+    if (m_scrollButtonAnimation) {
+        m_scrollButtonAnimation->stop();
+    }
+}
+
 void ChatWidget::addUserMessage(const QString &text)
 {
     // Remove welcome widget if present
@@ -544,15 +697,16 @@ void ChatWidget::addUserMessage(const QString &text)
     }
 
     auto *card = new QWidget(m_transcriptContainer);
+    card->setObjectName(u"userMessageCard"_s);
     card->setStyleSheet(
-        u"QWidget {"
+        u"QWidget#userMessageCard {"
         u"  background-color: #232326;"
         u"  border: 1px solid #333338;"
-        u"  border-radius: 6px;"
+        u"  border-radius: 8px;"
         u"}"_s);
     auto *cardLayout = new QVBoxLayout(card);
-    cardLayout->setContentsMargins(12, 10, 12, 10);
-    cardLayout->setSpacing(6);
+    cardLayout->setContentsMargins(10, 8, 10, 8);
+    cardLayout->setSpacing(4);
 
     auto *headerLayout = new QHBoxLayout;
     headerLayout->setContentsMargins(0, 0, 0, 0);
@@ -569,6 +723,7 @@ void ChatWidget::addUserMessage(const QString &text)
     auto *msgLabel = new QLabel(card);
     msgLabel->setWordWrap(true);
     msgLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    msgLabel->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::MinimumExpanding);
     msgLabel->setStyleSheet(u"color: #e4e4e4; font-size: 13px; line-height: 1.5; border: none; background: transparent;"_s);
     msgLabel->setText(escape(text).replace(u"\n"_s, u"<br>"_s));
     cardLayout->addWidget(msgLabel);
@@ -594,6 +749,13 @@ void ChatWidget::setStreaming(const QString &text)
     m_streamText = text;
     if (!m_activeAssistantWidget) {
         m_activeAssistantWidget = new QWidget(m_transcriptContainer);
+        m_activeAssistantWidget->setObjectName(u"assistantMessageCard"_s);
+        m_activeAssistantWidget->setStyleSheet(
+            u"QWidget#assistantMessageCard {"
+            u"  background-color: #202024;"
+            u"  border: 1px solid #333338;"
+            u"  border-radius: 8px;"
+            u"}"_s);
         auto *layout = new QVBoxLayout(m_activeAssistantWidget);
         layout->setContentsMargins(4, 4, 4, 4);
         layout->setSpacing(4);
@@ -679,10 +841,9 @@ void ChatWidget::setStreaming(const QString &text)
         m_transcriptLayout->insertWidget(m_transcriptLayout->count() - 1, m_activeAssistantWidget);
     }
 
-    m_activeAssistantBrowser->setMarkdown(m_streamText);
-    const int docH = static_cast<int>(m_activeAssistantBrowser->document()->size().height()) + 16;
-    m_activeAssistantBrowser->setFixedHeight(std::max(30, docH));
-    scrollToBottom();
+    // Markdown rendering and size recalculation are coalesced onto one event
+    // so a fast token stream cannot monopolize Kate's GUI thread.
+    m_streamRenderTimer.start(0);
 }
 
 void ChatWidget::addThinkingBlock(const QString &text)
@@ -705,7 +866,7 @@ void ChatWidget::addThinkingBlock(const QString &text)
 void ChatWidget::appendThinkingDelta(const QString &delta)
 {
     m_thinkingBuffer += delta;
-    renderThinkingHtml();
+    m_streamRenderTimer.start(0);
 }
 
 void ChatWidget::renderThinkingHtml()
@@ -822,8 +983,13 @@ void ChatWidget::freezeStreaming()
 {
     if (m_activeAssistantBrowser && !m_streamText.isEmpty()) {
         m_activeAssistantBrowser->setMarkdown(m_streamText);
-        const int docH = static_cast<int>(m_activeAssistantBrowser->document()->size().height()) + 16;
-        m_activeAssistantBrowser->setFixedHeight(std::max(30, docH));
+        // Defer height calculation to allow layout to settle
+        QTimer::singleShot(0, this, [thisWeak = QPointer<ChatWidget>(this)]() {
+            if (thisWeak && thisWeak->m_activeAssistantBrowser) {
+                const int docH = static_cast<int>(thisWeak->m_activeAssistantBrowser->document()->size().height()) + 16;
+                thisWeak->m_activeAssistantBrowser->setFixedHeight(std::max(30, docH));
+            }
+        });
     }
     if (m_activeAssistantCopyBtn) {
         m_activeAssistantCopyBtn->setProperty("copyText", m_streamText);
@@ -844,9 +1010,10 @@ void ChatWidget::freezeStreaming()
 void ChatWidget::scrollToBottom()
 {
     if (m_userScrolledUp) {
+        m_hasUnseenContent = true;
         if (m_scrollToBottomBtn) {
             updateScrollButtonPosition();
-            m_scrollToBottomBtn->show();
+            animateScrollButtonShow();
             m_scrollToBottomBtn->raise();
         }
         return;
@@ -857,15 +1024,39 @@ void ChatWidget::scrollToBottom()
 void ChatWidget::forceScrollToBottom()
 {
     m_userScrolledUp = false;
+    m_hasUnseenContent = false;
     if (m_scrollToBottomBtn) {
-        m_scrollToBottomBtn->hide();
+        animateScrollButtonHide();
     }
-    QTimer::singleShot(10, this, [this]() {
-        if (m_scrollArea) {
-            auto *sb = m_scrollArea->verticalScrollBar();
-            sb->setValue(sb->maximum());
-        }
-    });
+    m_scrollTimer.start(10);
+}
+
+void ChatWidget::setThinkingIndicator(bool show)
+{
+    if (!m_thinkingIndicator) {
+        return;
+    }
+    if (show && !m_isThinking) {
+        m_isThinking = true;
+        m_thinkingIndicator->show();
+    } else if (!show && m_isThinking) {
+        m_isThinking = false;
+        m_thinkingIndicator->hide();
+    }
+}
+
+void ChatWidget::setWorkingIndicator(bool show)
+{
+    if (!m_workingIndicator) {
+        return;
+    }
+    if (show && !m_isWorking) {
+        m_isWorking = true;
+        m_workingIndicator->show();
+    } else if (!show && m_isWorking) {
+        m_isWorking = false;
+        m_workingIndicator->hide();
+    }
 }
 
 void ChatWidget::updateScrollButtonPosition()
@@ -886,25 +1077,19 @@ void ChatWidget::animateScrollButtonShow()
     if (!m_scrollToBottomBtn) {
         return;
     }
-    if (m_scrollToBottomBtn->isVisible()) {
-        return;
-    }
+    const bool alreadyVisible = m_scrollToBottomBtn->isVisible();
     m_scrollToBottomBtn->show();
     updateScrollButtonPosition();
 
-    // Fade-in animation using QGraphicsOpacityEffect
-    auto *effect = new QGraphicsOpacityEffect(m_scrollToBottomBtn);
-    m_scrollToBottomBtn->setGraphicsEffect(effect);
-    effect->setOpacity(0.0);
-
-    auto *anim = new QPropertyAnimation(effect, "opacity", m_scrollToBottomBtn);
-    anim->setDuration(150);
-    anim->setStartValue(0.0);
-    anim->setEndValue(1.0);
-    anim->setEasingCurve(QEasingCurve::OutCubic);
-    connect(anim, &QPropertyAnimation::finished, effect, &QObject::deleteLater);
-    connect(anim, &QPropertyAnimation::finished, anim, &QObject::deleteLater);
-    anim->start(QAbstractAnimation::DeleteWhenStopped);
+    if (!m_scrollOpacityEffect || !m_scrollButtonAnimation) {
+        return;
+    }
+    m_scrollButtonAnimation->stop();
+    m_scrollOpacityEffect->setOpacity(alreadyVisible ? m_scrollOpacityEffect->opacity() : 0.0);
+    m_scrollButtonAnimation->setEasingCurve(QEasingCurve::OutCubic);
+    m_scrollButtonAnimation->setStartValue(0.0);
+    m_scrollButtonAnimation->setEndValue(1.0);
+    m_scrollButtonAnimation->start();
 }
 
 void ChatWidget::animateScrollButtonHide()
@@ -913,28 +1098,17 @@ void ChatWidget::animateScrollButtonHide()
         return;
     }
 
-    // Fade-out animation
-    auto *effect = qobject_cast<QGraphicsOpacityEffect *>(m_scrollToBottomBtn->graphicsEffect());
-    if (!effect) {
-        effect = new QGraphicsOpacityEffect(m_scrollToBottomBtn);
-        m_scrollToBottomBtn->setGraphicsEffect(effect);
+    if (!m_scrollOpacityEffect || !m_scrollButtonAnimation) {
+        m_scrollToBottomBtn->hide();
+        return;
     }
-    effect->setOpacity(1.0);
 
-    auto *anim = new QPropertyAnimation(effect, "opacity", m_scrollToBottomBtn);
-    anim->setDuration(150);
-    anim->setStartValue(1.0);
-    anim->setEndValue(0.0);
-    anim->setEasingCurve(QEasingCurve::InCubic);
-    connect(anim, &QPropertyAnimation::finished, this, [this, effect, anim]() {
-        if (m_scrollToBottomBtn) {
-            m_scrollToBottomBtn->hide();
-            m_scrollToBottomBtn->setGraphicsEffect(nullptr);
-        }
-        effect->deleteLater();
-        anim->deleteLater();
-    });
-    anim->start(QAbstractAnimation::DeleteWhenStopped);
+    m_scrollButtonAnimation->stop();
+    m_scrollOpacityEffect->setOpacity(1.0);
+    m_scrollButtonAnimation->setStartValue(1.0);
+    m_scrollButtonAnimation->setEndValue(0.0);
+    m_scrollButtonAnimation->setEasingCurve(QEasingCurve::InCubic);
+    m_scrollButtonAnimation->start();
 }
 
 void ChatWidget::resizeEvent(QResizeEvent *event)
@@ -987,10 +1161,10 @@ QPushButton *ChatWidget::createCopyButton(const QString &textToCopy, QWidget *pa
             u"  padding: 2px 8px;"
             u"  font-size: 11px;"
             u"}"_s);
-        QTimer::singleShot(2000, btn, [btn]() {
-            if (btn) {
-                btn->setText(i18n("Copy"));
-                btn->setStyleSheet(
+        QTimer::singleShot(2000, btn, [btnWeak = QPointer<QPushButton>(btn)]() {
+            if (btnWeak) {
+                btnWeak->setText(i18n("Copy"));
+                btnWeak->setStyleSheet(
                     u"QPushButton {"
                     u"  color: #888888;"
                     u"  background-color: transparent;"
@@ -1015,27 +1189,28 @@ QWidget *ChatWidget::createWelcomeWidget()
     auto *welcome = new QWidget(m_transcriptContainer);
     welcome->setObjectName(u"welcomeWidget"_s);
     auto *wLayout = new QVBoxLayout(welcome);
-    wLayout->setContentsMargins(20, 24, 20, 16);
+    wLayout->setContentsMargins(16, 16, 16, 12);
+    wLayout->setSpacing(8);
     wLayout->setAlignment(Qt::AlignHCenter | Qt::AlignTop);
 
     auto *wIcon = new QLabel(u"⚡"_s, welcome);
     wIcon->setAlignment(Qt::AlignCenter);
-    wIcon->setStyleSheet(u"font-size: 26px; color: #3b82f6; margin-bottom: 6px;"_s);
+    wIcon->setStyleSheet(u"font-size: 24px; color: #3b82f6;"_s);
     wLayout->addWidget(wIcon);
 
     auto *wTitle = new QLabel(i18n("Kate AI Agent"), welcome);
     wTitle->setAlignment(Qt::AlignCenter);
-    wTitle->setStyleSheet(u"color: #e4e4e4; font-size: 15px; font-weight: bold;"_s);
+    wTitle->setStyleSheet(u"color: #e4e4e4; font-size: 14px; font-weight: bold;"_s);
     wLayout->addWidget(wTitle);
 
     auto *wSub = new QLabel(i18n("Ask questions, edit code, and explore your workspace."), welcome);
     wSub->setAlignment(Qt::AlignCenter);
-    wSub->setStyleSheet(u"color: #777777; font-size: 12px; margin-top: 4px; margin-bottom: 14px;"_s);
+    wSub->setStyleSheet(u"color: #777777; font-size: 11px; margin-bottom: 8px;"_s);
     wLayout->addWidget(wSub);
 
     // Starter suggestion chips
-    auto *chipsLayout = new QVBoxLayout;
-    chipsLayout->setSpacing(8);
+    auto *chipsLayout = new QHBoxLayout;
+    chipsLayout->setSpacing(6);
 
     const struct Suggestion {
         QString icon;
@@ -1043,22 +1218,23 @@ QWidget *ChatWidget::createWelcomeWidget()
         QString prompt;
     } suggestions[] = {
         {u"🔍"_s, i18n("Explain active file"), i18n("Explain the active file and its architecture.")},
-        {u"🐛"_s, i18n("Find bugs & edge cases"), i18n("Inspect the current code for bugs, edge cases, and potential improvements.")},
-        {u"🧪"_s, i18n("Generate tests"), i18n("Write comprehensive unit tests for the code in this file.")}
+        {u"🐛"_s, i18n("Find bugs in selection"), i18n("Find bugs and edge cases in the current selection. If there is no selection, inspect the active file.")},
+        {u"🧪"_s, i18n("Generate tests"), i18n("Generate focused unit tests for the active file and explain the important cases.")}
     };
 
     for (const auto &s : suggestions) {
         auto *btn = new QPushButton(u"%1  %2"_s.arg(s.icon, s.title), welcome);
         btn->setCursor(Qt::PointingHandCursor);
+        btn->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+        btn->setMinimumHeight(30);
         btn->setStyleSheet(
             u"QPushButton {"
             u"  background-color: #202024;"
             u"  color: #cccccc;"
             u"  border: 1px solid #333338;"
-            u"  border-radius: 6px;"
-            u"  padding: 8px 12px;"
-            u"  font-size: 12px;"
-            u"  text-align: left;"
+            u"  border-radius: 15px;"
+            u"  padding: 6px 10px;"
+            u"  font-size: 11px;"
             u"}"
             u"QPushButton:hover {"
             u"  background-color: #2a2a30;"
@@ -1091,9 +1267,9 @@ void ChatWidget::showInfoMessage(const QString &message, bool isError)
 
     // Auto-hide after 10 seconds for retries, keep errors visible until dismissed
     if (!isError) {
-        QTimer::singleShot(10000, this, [this, message]() {
-            if (m_infoBar && m_infoBar->text() == message) {
-                m_infoBar->hide();
+        QTimer::singleShot(10000, this, [thisWeak = QPointer<ChatWidget>(this), message]() {
+            if (thisWeak && thisWeak->m_infoBar && thisWeak->m_infoBar->text() == message) {
+                thisWeak->m_infoBar->hide();
             }
         });
     }
@@ -1109,9 +1285,9 @@ void ChatWidget::newChat()
         m_infoBar->hide();
     }
 
-    // Clear transcript items except the bottom stretch
+    // Clear transcript items except the bottom stretch and indicators
     QLayoutItem *child;
-    while (m_transcriptLayout->count() > 1 && (child = m_transcriptLayout->takeAt(0))) {
+    while (m_transcriptLayout->count() > 2 && (child = m_transcriptLayout->takeAt(0))) {
         if (child->widget()) {
             child->widget()->deleteLater();
         }
@@ -1134,8 +1310,13 @@ void ChatWidget::newChat()
     m_planSteps.clear();
     m_thinkingBuffer.clear();
     m_streamText.clear();
+    m_hasUnseenContent = false;
+    m_userScrolledUp = true;
+    if (m_scrollToBottomBtn) {
+        animateScrollButtonHide();
+    }
 
-    // Recreate welcome widget
+    // Recreate welcome widget at the top
     m_transcriptLayout->insertWidget(0, createWelcomeWidget());
 
     if (m_threadTitle) {
@@ -1145,7 +1326,10 @@ void ChatWidget::newChat()
     m_prompt->setEnabled(true);
     updateSendButtonState();
     updateTokenDisplay();
-    forceScrollToBottom();
+    // Scroll to TOP to show welcome widget for new chat
+    if (m_scrollArea) {
+        m_scrollArea->verticalScrollBar()->setValue(0);
+    }
     m_prompt->setFocus();
 }
 
@@ -1773,14 +1957,54 @@ QString ChatWidget::markdownToHtml(const QString &text)
 
 void ChatWidget::rebuildTranscript()
 {
-    // Clear existing transcript (except stretch at the end)
+    // Clear existing transcript (except stretch and indicators at the end)
     m_permissionBar->hideBar();
     QLayoutItem *child;
-    while (m_transcriptLayout->count() > 1 && (child = m_transcriptLayout->takeAt(0))) {
+    while (m_transcriptLayout->count() > 2 && (child = m_transcriptLayout->takeAt(0))) {
         if (child->widget()) {
             child->widget()->deleteLater();
         }
         delete child;
+    }
+
+    // Recreate indicators container if it was removed
+    if (!m_thinkingIndicator || !m_workingIndicator) {
+        auto *indicatorsContainer = new QWidget(m_transcriptContainer);
+        indicatorsContainer->setObjectName(u"indicatorsContainer"_s);
+        auto *indicatorsLayout = new QHBoxLayout(indicatorsContainer);
+        indicatorsLayout->setContentsMargins(0, 4, 0, 4);
+        indicatorsLayout->setSpacing(8);
+        indicatorsLayout->addStretch();
+
+        m_thinkingIndicator = new QLabel(u"💭  Thinking…"_s, indicatorsContainer);
+        m_thinkingIndicator->setStyleSheet(
+            u"QLabel {"
+            u"  color: #3b82f6;"
+            u"  font-size: 11px;"
+            u"  font-style: italic;"
+            u"  padding: 2px 8px;"
+            u"  background-color: #1e3a5f;"
+            u"  border: 1px solid #3b82f6;"
+            u"  border-radius: 10px;"
+            u"}"_s);
+        m_thinkingIndicator->hide();
+        indicatorsLayout->addWidget(m_thinkingIndicator);
+
+        m_workingIndicator = new QLabel(u"⚙️  Working…"_s, indicatorsContainer);
+        m_workingIndicator->setStyleSheet(
+            u"QLabel {"
+            u"  color: #f59e0b;"
+            u"  font-size: 11px;"
+            u"  font-style: italic;"
+            u"  padding: 2px 8px;"
+            u"  background-color: #3d2e0e;"
+            u"  border: 1px solid #f59e0b;"
+            u"  border-radius: 10px;"
+            u"}"_s);
+        m_workingIndicator->hide();
+        indicatorsLayout->addWidget(m_workingIndicator);
+
+        m_transcriptLayout->addWidget(indicatorsContainer);
     }
 
     m_toolCallWidgets.clear();
@@ -1806,6 +2030,9 @@ void ChatWidget::rebuildTranscript()
     }
 
     // Rebuild transcript from messages
+    // Track tool call widgets by toolCallId to connect Role::Tool results
+    QHash<QString, ToolCallWidget *> rebuiltToolWidgets;
+
     for (const auto &msg : messages) {
         switch (msg.role) {
             case ChatMessage::Role::User:
@@ -1815,6 +2042,13 @@ void ChatWidget::rebuildTranscript()
                 // For assistant messages, recreate the widget with full content
                 {
                     auto *assistantWidget = new QWidget(m_transcriptContainer);
+                    assistantWidget->setObjectName(u"assistantMessageCard"_s);
+                    assistantWidget->setStyleSheet(
+                        u"QWidget#assistantMessageCard {"
+                        u"  background-color: #202024;"
+                        u"  border: 1px solid #333338;"
+                        u"  border-radius: 8px;"
+                        u"}"_s);
                     auto *layout = new QVBoxLayout(assistantWidget);
                     layout->setContentsMargins(4, 4, 4, 4);
                     layout->setSpacing(4);
@@ -1836,14 +2070,73 @@ void ChatWidget::rebuildTranscript()
                     layout->addLayout(headerLayout);
 
                     // Add thinking block if present
+                    QWidget *thinkingBlock = nullptr;
+                    QTextBrowser *thinkingBrowser = nullptr;
+                    QPushButton *thinkingToggle = nullptr;
                     if (!msg.thinking.isEmpty()) {
-                        addThinkingBlock(msg.thinking);
-                        collapseThinkingBlock();
+                        thinkingBlock = new QWidget(assistantWidget);
+                        thinkingBlock->setMaximumHeight(0);
+                        auto *tbLayout = new QVBoxLayout(thinkingBlock);
+                        tbLayout->setContentsMargins(0, 0, 0, 0);
+                        tbLayout->setSpacing(0);
+
+                        auto *tbHeader = new QHBoxLayout;
+                        thinkingToggle = new QPushButton(u"\u25b4 "_s + i18n("Reasoning"), thinkingBlock);
+                        thinkingToggle->setFlat(true);
+                        thinkingToggle->setStyleSheet(
+                            u"QPushButton { color: #888888; font-size: 11px; font-style: italic; border: none; text-align: left; }"
+                            u"QPushButton:hover { color: #aaaaaa; }"_s);
+                        tbHeader->addWidget(thinkingToggle);
+                        tbHeader->addStretch();
+                        tbLayout->addLayout(tbHeader);
+
+                        thinkingBrowser = new QTextBrowser(thinkingBlock);
+                        thinkingBrowser->setReadOnly(true);
+                        thinkingBrowser->setFrameShape(QFrame::NoFrame);
+                        thinkingBrowser->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+                        thinkingBrowser->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+                        thinkingBrowser->setStyleSheet(
+                            u"QTextBrowser { background: transparent; color: #888888; border: none;"
+                            u" font-style: italic; font-size: 12px; padding: 0 4px; }"_s);
+                        thinkingBrowser->document()->setDefaultStyleSheet(
+                            u"body { color: #888888; font-style: italic; font-size: 12px; margin: 0; padding: 0; }"
+                            u"p { margin-bottom: 4px; }"_s);
+                        thinkingBrowser->setHtml(markdownToFifoHtml(msg.thinking, 25));
+                        tbLayout->addWidget(thinkingBrowser);
+                        layout->addWidget(thinkingBlock);
+
+                        const int h = static_cast<int>(thinkingBrowser->document()->size().height()) + 12;
+                        thinkingBlock->setMaximumHeight(std::max(20, h));
+                        connect(thinkingToggle, &QPushButton::clicked, this, [thinkingBlock, thinkingBrowser, thinkingToggle]() {
+                            const bool collapsed = thinkingBlock->maximumHeight() == 0;
+                            if (collapsed) {
+                                const int height = static_cast<int>(thinkingBrowser->document()->size().height()) + 12;
+                                thinkingBlock->setMaximumHeight(std::max(20, height));
+                                thinkingToggle->setText(u"\u25be "_s + i18n("Reasoning"));
+                            } else {
+                                thinkingBlock->setMaximumHeight(0);
+                                thinkingToggle->setText(u"\u25b4 "_s + i18n("Reasoning"));
+                            }
+                        });
+                        thinkingBlock->setMaximumHeight(0);
                     }
 
-                    // Add plan checklist if present
                     if (!msg.plan.isEmpty()) {
-                        addPlanChecklist(msg.plan);
+                        auto *planBlock = new QWidget(assistantWidget);
+                        auto *planLayout = new QVBoxLayout(planBlock);
+                        planLayout->setContentsMargins(4, 2, 4, 2);
+                        planLayout->setSpacing(2);
+                        auto *planLabel = new QLabel(i18n("Plan"), planBlock);
+                        planLabel->setStyleSheet(u"color: #888888; font-size: 10px; font-weight: bold; letter-spacing: 0.5px;"_s);
+                        planLayout->addWidget(planLabel);
+                        for (const QJsonValue &v : msg.plan) {
+                            const QJsonObject o = v.toObject();
+                            auto *cb = new QCheckBox(o.value(u"description"_s).toString(), planBlock);
+                            cb->setChecked(o.value(u"completed"_s).toBool());
+                            cb->setDisabled(true);
+                            planLayout->addWidget(cb);
+                        }
+                        layout->addWidget(planBlock);
                     }
 
                     auto *browser = new QTextBrowser(assistantWidget);
@@ -1862,15 +2155,110 @@ void ChatWidget::rebuildTranscript()
                         u"blockquote { border-left: 3px solid #3b82f6; padding-left: 10px; color: #888; margin: 8px 0; }"
                         u"a { color: #3b82f6; text-decoration: none; }"_s);
                     browser->setMarkdown(msg.content);
-                    const int docH = static_cast<int>(browser->document()->size().height()) + 16;
-                    browser->setFixedHeight(std::max(30, docH));
+                    // Defer height calculation to allow layout to settle
+                    QTimer::singleShot(0, this, [browserWeak = QPointer<QTextBrowser>(browser)]() {
+                        if (browserWeak) {
+                            const int docH = static_cast<int>(browserWeak->document()->size().height()) + 16;
+                            browserWeak->setFixedHeight(std::max(30, docH));
+                        }
+                    });
                     layout->addWidget(browser);
 
                     m_transcriptLayout->insertWidget(m_transcriptLayout->count() - 1, assistantWidget);
                 }
+
+                // Recreate tool call widgets for tool calls made by this assistant message
+                if (!msg.toolCalls.isEmpty()) {
+                    for (const auto &toolCallVal : msg.toolCalls) {
+                        const QJsonObject toolCallObj = toolCallVal.toObject();
+                        const QString toolCallId = toolCallObj.value(u"id"_s).toString();
+                        const QJsonObject functionObj = toolCallObj.value(u"function"_s).toObject();
+                        const QString toolName = functionObj.value(u"name"_s).toString();
+                        const QString argumentsJson = functionObj.value(u"arguments"_s).toString();
+
+                        // Create tool call widget in finished state (will be updated with result if available)
+                        auto *toolWidget = new ToolCallWidget(toolCallId, m_transcriptContainer);
+
+                        // Determine risk and summary from tool name and arguments
+                        ToolRisk risk = ToolRisk::Read;
+                        QString summary = QString();
+                        if (toolName == u"write_file"_s || toolName == u"edit_file"_s) {
+                            risk = ToolRisk::Write;
+                            // Extract path from arguments for summary
+                            QJsonDocument argsDoc = QJsonDocument::fromJson(argumentsJson.toUtf8());
+                            if (!argsDoc.isNull() && argsDoc.isObject()) {
+                                const QString path = argsDoc.object().value(u"path"_s).toString();
+                                if (!path.isEmpty()) {
+                                    summary = path;
+                                }
+                            }
+                        } else if (toolName == u"bash"_s) {
+                            risk = ToolRisk::Execute;
+                            QJsonDocument argsDoc = QJsonDocument::fromJson(argumentsJson.toUtf8());
+                            if (!argsDoc.isNull() && argsDoc.isObject()) {
+                                const QString cmd = argsDoc.object().value(u"command"_s).toString();
+                                if (!cmd.isEmpty()) {
+                                    summary = cmd.left(60);
+                                }
+                            }
+                        } else if (toolName == u"read_file"_s || toolName == u"list_dir"_s || toolName == u"glob"_s) {
+                            risk = ToolRisk::Read;
+                            QJsonDocument argsDoc = QJsonDocument::fromJson(argumentsJson.toUtf8());
+                            if (!argsDoc.isNull() && argsDoc.isObject()) {
+                                const QString path = argsDoc.object().value(u"path"_s).toString();
+                                if (!path.isEmpty()) {
+                                    summary = path;
+                                }
+                            }
+                        } else if (toolName == u"grep"_s) {
+                            risk = ToolRisk::Read;
+                            QJsonDocument argsDoc = QJsonDocument::fromJson(argumentsJson.toUtf8());
+                            if (!argsDoc.isNull() && argsDoc.isObject()) {
+                                const QString pattern = argsDoc.object().value(u"pattern"_s).toString();
+                                if (!pattern.isEmpty()) {
+                                    summary = pattern.left(60);
+                                }
+                            }
+                        }
+
+                        toolWidget->setToolInfo(toolName, summary, risk);
+
+                        // Set describe diff for edit_file/write_file if we can extract it from arguments
+                        if (toolName == u"edit_file"_s || toolName == u"write_file"_s) {
+                            QJsonDocument argsDoc = QJsonDocument::fromJson(argumentsJson.toUtf8());
+                            if (!argsDoc.isNull() && argsDoc.isObject()) {
+                                const QString diff = argsDoc.object().value(u"describeDiff"_s).toString();
+                                if (!diff.isEmpty()) {
+                                    toolWidget->setDescribeDiff(diff);
+                                }
+                            }
+                        }
+
+                        // Mark as finished (result will be filled in by Role::Tool message if available)
+                        ToolResult dummyResult;
+                        dummyResult.toolCallId = toolCallId;
+                        dummyResult.name = toolName;
+                        dummyResult.output = QString(); // Will be filled by Role::Tool message
+                        dummyResult.ok = true;
+                        toolWidget->setFinished(dummyResult);
+
+                        m_toolCallWidgets.insert(toolCallId, toolWidget);
+                        rebuiltToolWidgets.insert(toolCallId, toolWidget);
+                        m_transcriptLayout->insertWidget(m_transcriptLayout->count() - 1, toolWidget);
+                    }
+                }
                 break;
             case ChatMessage::Role::Tool:
-                // Tool messages are handled via tool call widgets - skip for now
+                // Tool result message - update the corresponding tool call widget with the actual result
+                if (!msg.toolCallId.isEmpty() && rebuiltToolWidgets.contains(msg.toolCallId)) {
+                    auto *toolWidget = rebuiltToolWidgets.value(msg.toolCallId);
+                    ToolResult result;
+                    result.toolCallId = msg.toolCallId;
+                    result.name = msg.name;
+                    result.output = msg.content;
+                    result.ok = true; // Assume success; the content contains formatted result
+                    toolWidget->setFinished(result);
+                }
                 break;
             case ChatMessage::Role::System:
                 // System messages are not shown in transcript

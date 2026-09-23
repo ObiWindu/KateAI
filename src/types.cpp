@@ -451,20 +451,32 @@ QList<ChatMessage> compressMessageHistory(const QList<ChatMessage> &messages,
                                            int maxTotalChars,
                                            bool enabled)
 {
-    if (!enabled || messages.size() <= maxMessages) {
+    if (!enabled) {
         return messages;
     }
 
-    QList<ChatMessage> result;
+    QList<ChatMessage> result = messages;
+
+    if (result.size() <= maxMessages) {
+        // Keep the complete sequence, but still honor the character budget.
+        // This is useful when the caller already selected a protocol-safe
+        // message window and only wants to reduce its memory/payload size.
+        maxMessages = result.size();
+    } else {
+        result.clear();
+    }
+
     // Always keep system message
-    if (!messages.isEmpty() && messages.first().role == ChatMessage::Role::System) {
+    if (result.isEmpty() && !messages.isEmpty() && messages.first().role == ChatMessage::Role::System) {
         result.append(messages.first());
     }
 
-    // Keep last N messages
-    int keepCount = qMin(maxMessages - result.size(), messages.size() - result.size());
-    for (int i = messages.size() - keepCount; i < messages.size(); ++i) {
-        result.append(messages[i]);
+    if (result.size() != messages.size()) {
+        // Keep last N messages
+        const int keepCount = qMax(0, qMin(maxMessages - result.size(), messages.size() - result.size()));
+        for (int i = messages.size() - keepCount; i < messages.size(); ++i) {
+            result.append(messages[i]);
+        }
     }
 
     // If still over char budget, compress older messages

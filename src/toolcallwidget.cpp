@@ -96,16 +96,16 @@ ToolCallWidget::ToolCallWidget(const QString &toolCallId, QWidget *parent)
     m_describeDiff->hide();
     root->addWidget(m_describeDiff);
 
-    // Details container — initially hidden, holds the raw tool output
+    // Details container — expanded by default to show full tool output
     m_detailsContainer = new QWidget(this);
-    m_detailsContainer->setMaximumHeight(0);
     auto *detailsLayout = new QVBoxLayout(m_detailsContainer);
     detailsLayout->setContentsMargins(10, 0, 10, 8);
     detailsLayout->setSpacing(0);
 
     m_details = new QPlainTextEdit(this);
     m_details->setReadOnly(true);
-    m_details->setMaximumHeight(200);
+    m_details->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_details->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_details->setStyleSheet(
         u"QPlainTextEdit {"
         u"  background-color: #1a1a1a;"
@@ -136,6 +136,8 @@ ToolCallWidget::ToolCallWidget(const QString &toolCallId, QWidget *parent)
     m_header->installEventFilter(this);
 
     // Default state
+    m_expanded = true;
+    m_expandBtn->setText(u"▾"_s);
     setRunning();
     updateStyle();
 }
@@ -185,7 +187,7 @@ void ToolCallWidget::setDescribeDiff(const QString &diff)
     // is always visible. Just update the expanded height if the details are
     // currently shown.
     if (m_expanded) {
-        m_detailsContainer->setMaximumHeight(m_details->sizeHint().height() + 16);
+        m_detailsContainer->setMaximumHeight(m_details->document()->size().height() + 32);
     }
 }
 
@@ -235,10 +237,8 @@ void ToolCallWidget::setFinished(const ToolResult &result)
         : result.output;
     m_details->setPlainText(output);
 
-    // Update expanded height if currently expanded
-    if (m_expanded) {
-        m_detailsContainer->setMaximumHeight(m_details->sizeHint().height() + 16);
-    }
+    // Ensure details container is expanded to show full content
+    m_detailsContainer->setMaximumHeight(m_details->document()->size().height() + 32);
     updateStyle();
 }
 
@@ -256,7 +256,7 @@ void ToolCallWidget::toggleExpand()
     m_animation->stop();
     if (m_expanded) {
         m_animation->setStartValue(0);
-        m_animation->setEndValue(m_details->sizeHint().height() + 16);
+        m_animation->setEndValue(m_details->document()->size().height() + 32);
     } else {
         m_animation->setStartValue(m_detailsContainer->height());
         m_animation->setEndValue(0);

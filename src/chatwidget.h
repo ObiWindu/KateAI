@@ -14,6 +14,7 @@
 #include <QIcon>
 #include <QColor>
 #include <QCheckBox>
+#include <QTimer>
 
 class QComboBox;
 class QLabel;
@@ -21,6 +22,8 @@ class QPushButton;
 class QScrollArea;
 class QTextBrowser;
 class QVBoxLayout;
+class QGraphicsOpacityEffect;
+class QPropertyAnimation;
 
 namespace KateAi
 {
@@ -35,6 +38,7 @@ class ChatWidget : public QWidget
 
 public:
     explicit ChatWidget(QWidget *parent = nullptr);
+    ~ChatWidget() override;
 
     AgentLoop *agent()
     {
@@ -98,10 +102,16 @@ private:
     void updateReasoningEffortButton();
     bool modelSupportsReasoningEffort() const;
     void showReasoningEffortMenu();
+    void setThinkingIndicator(bool show);
+    void setWorkingIndicator(bool show);
     static QString escape(const QString &text);
     static QString markdownToHtml(const QString &text);
 
     Settings m_settings;
+    // Keep the document bridge alive with the UI/agent that uses it.  It must
+    // outlive m_agent because tool calls may still be queued while the Kate
+    // tool view is being torn down.
+    DiskDocumentBridge m_documentBridge;
     AgentLoop m_agent;
     QComboBox *m_provider = nullptr;
     QComboBox *m_model = nullptr;
@@ -157,7 +167,19 @@ private:
     QHash<QString, ToolCallWidget *> m_toolCallWidgets;
     QPushButton *m_scrollToBottomBtn = nullptr;
     QPushButton *m_activeAssistantCopyBtn = nullptr;
-    bool m_userScrolledUp = false;
+    QGraphicsOpacityEffect *m_scrollOpacityEffect = nullptr;
+    QPropertyAnimation *m_scrollButtonAnimation = nullptr;
+    QTimer m_streamRenderTimer;
+    QTimer m_scrollTimer;
+    bool m_userScrolledUp = true;
+    bool m_hasUnseenContent = false;
+    bool m_programmaticScrollChange = false;
+
+    // Dynamic status indicators at bottom of chat
+    QLabel *m_thinkingIndicator = nullptr;
+    QLabel *m_workingIndicator = nullptr;
+    bool m_isThinking = false;
+    bool m_isWorking = false;
 };
 
 } // namespace KateAi

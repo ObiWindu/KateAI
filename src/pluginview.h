@@ -5,8 +5,6 @@
 
 #pragma once
 
-#include "documentbridge.h"
-
 #include <KTextEditor/MainWindow>
 #include <KXMLGUIClient>
 
@@ -41,11 +39,10 @@ private:
     void updateCompletions();
 
     KateAiPlugin *m_plugin = nullptr;
-    KTextEditor::MainWindow *m_mainWindow = nullptr;
+    QPointer<KTextEditor::MainWindow> m_mainWindow;
     QPointer<QWidget> m_toolView;
     QPointer<QDialog> m_configDialog;
-    ChatWidget *m_chat = nullptr;
-    DiskDocumentBridge m_bridge;
+    QPointer<ChatWidget> m_chat;
 };
 
 } // namespace KateAi

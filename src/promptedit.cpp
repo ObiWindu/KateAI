@@ -32,6 +32,7 @@ PromptEdit::PromptEdit(QWidget *parent)
     m_completer->setWidget(this);
     m_completer->setCompletionMode(QCompleter::PopupCompletion);
     m_completer->setCaseSensitivity(Qt::CaseInsensitive);
+    m_completer->setMaxVisibleItems(8);
 
     if (m_completer->popup()) {
         m_completer->popup()->setStyleSheet(
@@ -57,14 +58,35 @@ PromptEdit::PromptEdit(QWidget *parent)
             this, &PromptEdit::insertCompletion);
 
     connect(this, &QPlainTextEdit::textChanged, this, &PromptEdit::autoGrow);
+    connect(this, &QPlainTextEdit::textChanged, this, [this]() {
+        if (!m_navigatingHistory && m_historyIndex >= 0) {
+            // Programmatic changes (for example a quick-start prompt) and
+            // normal edits both leave history-navigation mode.
+            m_historyIndex = -1;
+            m_draft.clear();
+        }
+    });
     autoGrow();
 }
 
 void PromptEdit::setCompletionWords(const QStringList &words)
 {
-    if (m_completionModel) {
-        m_completionModel->setStringList(words);
+    if (!m_completionModel) {
+        return;
     }
+
+    QStringList normalized;
+    normalized.reserve(words.size());
+    for (QString word : words) {
+        word = word.trimmed();
+        if (word.startsWith(u'@')) {
+            word.remove(0, 1);
+        }
+        if (!word.isEmpty() && !normalized.contains(word)) {
+            normalized.append(word);
+        }
+    }
+    m_completionModel->setStringList(normalized);
 }
 
 void PromptEdit::addHistory(const QString &text)
@@ -73,11 +95,28 @@ void PromptEdit::addHistory(const QString &text)
     if (trimmed.isEmpty()) {
         return;
     }
-    if (m_history.isEmpty() || m_history.last() != trimmed) {
-        m_history.append(trimmed);
+
+    // Keep history useful and bounded. Reusing a prompt moves it to the most
+    // recent position instead of allowing repeated entries to grow forever.
+    m_history.removeAll(trimmed);
+    m_history.append(trimmed);
+    constexpr qsizetype kMaxHistoryEntries = 100;
+    if (m_history.size() > kMaxHistoryEntries) {
+        m_history.remove(0, m_history.size() - kMaxHistoryEntries);
     }
+
     m_historyIndex = -1;
     m_draft.clear();
+}
+
+void PromptEdit::resetHistoryNavigation()
+{
+    if (m_historyIndex < 0) {
+        return;
+    }
+    // Once the user edits a recalled prompt, it becomes a normal draft again.
+    m_draft = toPlainText();
+    m_historyIndex = -1;
 }
 
 void PromptEdit::autoGrow()
@@ -119,21 +158,23 @@ int PromptEdit::atSymbolPosition() const
         return -1;
     }
 
-    // Look backwards from cursor position
-    for (int i = curPos - 1; i >= 0; --i) {
-        const QChar ch = fullText.at(i);
-        if (ch == u'@') {
-            return i;
-        }
-        if (ch.isSpace()) {
-            return -1;
-        }
+    // The mention token must begin the current whitespace-delimited word.
+    int tokenStart = curPos - 1;
+    while (tokenStart >= 0 && !fullText.at(tokenStart).isSpace()) {
+        --tokenStart;
+    }
+    ++tokenStart;
+    if (tokenStart < curPos && fullText.at(tokenStart) == u'@') {
+        return tokenStart;
     }
     return -1;
 }
 
 void PromptEdit::insertCompletion(const QString &completion)
 {
+    if (completion.isEmpty()) {
+        return;
+    }
     const int atPos = atSymbolPosition();
     if (atPos < 0) {
         return;
@@ -142,7 +183,8 @@ void PromptEdit::insertCompletion(const QString &completion)
     QTextCursor tc = textCursor();
     tc.setPosition(atPos);
     tc.setPosition(textCursor().position(), QTextCursor::KeepAnchor);
-    tc.insertText(u"@"_s + completion + u" "_s);
+    tc.insertText(u"@"_s + completion);
+    tc.insertText(u" "_s);
     setTextCursor(tc);
 }
 
@@ -153,9 +195,23 @@ void PromptEdit::keyPressEvent(QKeyEvent *event)
         switch (event->key()) {
         case Qt::Key_Enter:
         case Qt::Key_Return:
-        case Qt::Key_Tab:
-            event->ignore();
-            return;
+        case Qt::Key_Tab: {
+            const QString completion = m_completer->currentCompletion();
+            if (!completion.isEmpty()) {
+                insertCompletion(completion);
+                m_completer->popup()->hide();
+                event->accept();
+                return;
+            }
+            m_completer->popup()->hide();
+            // A Return with no completion falls through to normal submit
+            // behavior; Tab simply dismisses an empty popup.
+            if (event->key() == Qt::Key_Tab) {
+                event->accept();
+                return;
+            }
+            break;
+        }
         case Qt::Key_Escape:
             m_completer->popup()->hide();
             event->accept();
@@ -189,12 +245,12 @@ void PromptEdit::keyPressEvent(QKeyEvent *event)
         return;
     }
 
-    // History navigation with Up/Down arrow keys
+    // History navigation with Up/Down arrow keys. Only navigate when the
+    // caret is at the logical boundary so multi-line prompts remain editable.
     if (event->key() == Qt::Key_Up && !(event->modifiers() & Qt::ShiftModifier)) {
         const QTextCursor tc = textCursor();
-        const bool isFirstLine = tc.blockNumber() == 0;
         const bool isEmpty = toPlainText().trimmed().isEmpty();
-        if ((isFirstLine || isEmpty) && !m_history.isEmpty()) {
+        if ((tc.atStart() || isEmpty) && !m_history.isEmpty()) {
             if (m_historyIndex == -1) {
                 m_draft = toPlainText();
                 m_historyIndex = m_history.size() - 1;
@@ -202,15 +258,20 @@ void PromptEdit::keyPressEvent(QKeyEvent *event)
                 --m_historyIndex;
             }
             if (m_historyIndex >= 0 && m_historyIndex < m_history.size()) {
+                m_navigatingHistory = true;
                 setPlainText(m_history.at(m_historyIndex));
                 moveCursor(QTextCursor::End);
+                m_navigatingHistory = false;
             }
             event->accept();
             return;
         }
     } else if (event->key() == Qt::Key_Down && !(event->modifiers() & Qt::ShiftModifier)) {
-        if (m_historyIndex >= 0) {
+        const QTextCursor tc = textCursor();
+        const bool isEmpty = toPlainText().trimmed().isEmpty();
+        if (m_historyIndex >= 0 && (tc.atEnd() || isEmpty)) {
             ++m_historyIndex;
+            m_navigatingHistory = true;
             if (m_historyIndex < m_history.size()) {
                 setPlainText(m_history.at(m_historyIndex));
             } else {
@@ -218,8 +279,18 @@ void PromptEdit::keyPressEvent(QKeyEvent *event)
                 setPlainText(m_draft);
             }
             moveCursor(QTextCursor::End);
+            m_navigatingHistory = false;
             event->accept();
             return;
+        }
+    }
+
+    // Typing, deleting, or pasting after a history recall starts a new draft.
+    if (m_historyIndex >= 0 && !m_navigatingHistory) {
+        const bool editsText = !event->text().isEmpty() || event->key() == Qt::Key_Backspace
+            || event->key() == Qt::Key_Delete || event->key() == Qt::Key_V || event->key() == Qt::Key_X;
+        if (editsText) {
+            resetHistoryNavigation();
         }
     }
 

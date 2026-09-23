@@ -109,8 +109,11 @@ private:
     void onFailed(const QString &error);
     void processQueue();
     void executeOne(const ToolCall &call);
+    void onBashFinished(const QString &toolCallId, const ToolResult &result);
+    void ensureToolRunner();
     QString systemPrompt() const;
     QList<ToolCall> bundleSimilarTools(const QList<ToolCall> &calls);
+    QList<ChatMessage> modelMessagesForRequest() const;
 
     Settings m_settings;
     QString m_workspace;
@@ -127,6 +130,7 @@ private:
     QList<ToolResult> m_pendingResults;
     ToolCall m_waitingCall;
     PermissionRequest m_waitingRequest;
+    ToolCall m_runningBashCall;
 
     bool m_busy = false;
     State m_state = State::Idle;

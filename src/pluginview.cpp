@@ -18,13 +18,18 @@
 
 #include <QAction>
 #include <QDialog>
+#include <QDir>
 #include <QDialogButtonBox>
+#include <QDirIterator>
+#include <QFileInfo>
 #include <QIcon>
+#include <QSet>
 #include <QKeySequence>
 #include <QLayout>
 #include <QMenu>
 #include <QPushButton>
 #include <QVBoxLayout>
+
 
 using namespace Qt::Literals::StringLiterals;
 
@@ -68,7 +73,6 @@ namespace KateAi
         if (m_chat) {
             m_chat->setSettings(plugin->settings());
             if (m_chat->agent()) {
-                m_chat->agent()->setDocumentBridge(&m_bridge);
                 // Restore session data
                 const auto sessionData = SessionStore::load();
                 if (!sessionData.messages.isEmpty()) {
@@ -91,7 +95,12 @@ namespace KateAi
             connect(m_chat, &ChatWidget::settingsChanged, plugin, &KateAiPlugin::setSettings);
             connect(m_chat, &ChatWidget::configureRequested, this, &KateAiView::showConfiguration);
             connect(m_chat, &ChatWidget::aboutToSubmit, this, [this]() {
-                refreshWorkspace();
+                // Submission needs the latest editor state, but should not kick
+                // off a workspace scan or project-graph refresh. Those are
+                // maintained by refreshWorkspace() on view/workspace changes.
+                if (m_mainWindow && m_chat && m_chat->agent()) {
+                    m_chat->agent()->setEditorContext(editorContext());
+                }
             });
         }
         if (m_mainWindow) {
@@ -166,6 +175,7 @@ namespace KateAi
             }
             connect(m_mainWindow, &KTextEditor::MainWindow::viewCreated, this, [this, ask, fix, refactor, tests](KTextEditor::View *view) {
                 addEditorContextActions(view, {ask, fix, refactor, tests});
+                updateCompletions();
             });
         }
 
@@ -176,18 +186,12 @@ namespace KateAi
 
     KateAiView::~KateAiView()
     {
-        // Save session data before cleanup
-        if (m_chat && m_chat->agent()) {
-            const auto sessionData = m_chat->agent()->sessionData();
-            if (!sessionData.messages.isEmpty()) {
-                SessionStore::save(sessionData);
-            }
-        }
+        // Session is saved in ChatWidget destructor before AgentLoop is destroyed
+        // m_toolView is owned by the main window, do not delete it here
 
         if (m_mainWindow && m_mainWindow->guiFactory()) {
             m_mainWindow->guiFactory()->removeClient(this);
         }
-        delete m_toolView;
     }
 
     void KateAiView::showPanel()
@@ -317,8 +321,11 @@ namespace KateAi
     QString KateAiView::editorContext() const
     {
         QStringList lines;
+        if (!m_mainWindow) {
+            return {};
+        }
         auto *view = m_mainWindow->activeView();
-        if (view && m_mainWindow) {
+        if (view) {
             const QString path = view->document()->url().toLocalFile();
             lines.append(u"Active file: %1"_s.arg(path.isEmpty() ? view->document()->documentName() : path));
             lines.append(u"Cursor: line %1"_s.arg(view->cursorPosition().line() + 1));
@@ -344,7 +351,6 @@ namespace KateAi
         }
         const QString workspace = detectWorkspace(m_mainWindow);
         m_chat->agent()->setWorkspace(workspace);
-        m_chat->agent()->setDocumentBridge(&m_bridge);
         m_chat->agent()->setEditorContext(editorContext());
         updateCompletions();
     }
@@ -354,28 +360,84 @@ namespace KateAi
         if (!m_chat || !m_mainWindow) {
             return;
         }
-        QStringList words = {u"active"_s, u"selection"_s, u"workspace"_s};
-        const QString workspace = detectWorkspace(m_mainWindow);
 
+        QStringList words = {u"active"_s, u"selection"_s, u"workspace"_s};
+        QSet<QString> seen;
+        for (const QString &word : words) {
+            seen.insert(word);
+        }
+        const QString workspace = QDir::cleanPath(detectWorkspace(m_mainWindow));
+        const QDir workspaceDir(workspace);
+
+        auto appendWord = [&words, &seen](const QString &word) {
+            const QString normalized = word.trimmed();
+            if (normalized.isEmpty() || seen.contains(normalized)) {
+                return;
+            }
+            seen.insert(normalized);
+            words.append(normalized);
+        };
+
+        // Always include all currently open documents.
         for (auto *view : m_mainWindow->views()) {
             if (!view || !view->document()) {
                 continue;
             }
-            const QString fullPath = view->document()->url().toLocalFile();
-            const QString docName = view->document()->documentName();
-            if (!docName.isEmpty() && !words.contains(docName)) {
-                words.append(docName);
-            }
-            if (!fullPath.isEmpty() && !workspace.isEmpty() && fullPath.startsWith(workspace)) {
-                QString relPath = fullPath.mid(workspace.length());
-                if (relPath.startsWith(u'/')) {
-                    relPath = relPath.mid(1);
-                }
-                if (!relPath.isEmpty() && !words.contains(relPath)) {
-                    words.append(relPath);
+            const QString fullPath = QDir::cleanPath(view->document()->url().toLocalFile());
+            appendWord(view->document()->documentName());
+            if (!fullPath.isEmpty() && fullPath != "." && !workspace.isEmpty()) {
+                const QString relative = workspaceDir.relativeFilePath(fullPath);
+                if (relative != u"."_s && !relative.startsWith(u"../"_s) && relative != u".."_s) {
+                    appendWord(relative);
                 }
             }
         }
+
+        // Add a bounded, source-oriented workspace index. This keeps @mention
+        // useful for files that are not currently open without making typing
+        // block on very large generated trees.
+        if (!workspace.isEmpty() && QFileInfo::exists(workspace) && words.size() < 600) {
+            static const QSet<QString> ignoredDirs = {
+                u".git"_s, u".hg"_s, u".svn"_s, u"build"_s, u"node_modules"_s, u".cache"_s, u"dist"_s
+            };
+            static const QSet<QString> sourceSuffixes = {
+                u"c"_s, u"cc"_s, u"cpp"_s, u"cxx"_s, u"h"_s, u"hh"_s, u"hpp"_s, u"hxx"_s,
+                u"py"_s, u"js"_s, u"ts"_s, u"tsx"_s, u"jsx"_s, u"rs"_s, u"go"_s, u"java"_s,
+                u"kt"_s, u"kts"_s, u"swift"_s, u"rb"_s, u"php"_s, u"qml"_s, u"ui"_s,
+                u"json"_s, u"yaml"_s, u"yml"_s, u"toml"_s, u"md"_s, u"txt"_s, u"cmake"_s
+            };
+
+            QDirIterator it(workspace, QDir::Files | QDir::NoSymLinks, QDirIterator::Subdirectories);
+            constexpr int kMaxWorkspaceFiles = 500;
+            int added = 0;
+            while (it.hasNext() && added < kMaxWorkspaceFiles && words.size() < 600) {
+                const QString path = it.next();
+                const QFileInfo info(path);
+                const QStringList parts = info.absolutePath().mid(workspace.size()).split(u'/', Qt::SkipEmptyParts);
+                bool ignored = false;
+                for (const QString &part : parts) {
+                    if (ignoredDirs.contains(part) || part.startsWith(u'.')) {
+                        ignored = true;
+                        break;
+                    }
+                }
+                if (ignored) {
+                    continue;
+                }
+
+                const QString fileName = info.fileName();
+                if (!sourceSuffixes.contains(info.suffix().toLower()) && fileName != u"CMakeLists.txt"_s) {
+                    continue;
+                }
+                QString relative = QDir(workspace).relativeFilePath(path);
+                if (relative.startsWith(u"./"_s)) {
+                    relative.remove(0, 2);
+                }
+                appendWord(relative);
+                ++added;
+            }
+        }
+
         m_chat->setCompletionWords(words);
     }
 

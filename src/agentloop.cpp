@@ -28,6 +28,17 @@ using namespace Qt::Literals::StringLiterals;
 namespace KateAi
 {
 
+void AgentLoop::ensureToolRunner()
+{
+    if (m_tools || !m_sandbox) {
+        return;
+    }
+    m_tools = std::make_unique<ToolRunner>(*m_sandbox, m_bridge, this);
+    m_tools->setTimeoutMs(m_settings.bashTimeoutMs);
+    m_tools->setProjectGraph(m_projectGraph.get());
+    connect(m_tools.get(), &ToolRunner::bashFinished, this, &AgentLoop::onBashFinished);
+}
+
 AgentLoop::AgentLoop(QObject *parent)
     : QObject(parent)
 {
@@ -71,7 +82,8 @@ void AgentLoop::setSettings(const Settings &settings)
 
     if (!m_workspace.isEmpty()) {
         m_sandbox = std::make_unique<Sandbox>(m_workspace, m_settings.sandbox, m_settings.extraDenyGlobs);
-        m_tools = std::make_unique<ToolRunner>(*m_sandbox, m_bridge, this);
+        ensureToolRunner();
+        m_tools->setSandbox(*m_sandbox);
         m_tools->setTimeoutMs(m_settings.bashTimeoutMs);
         m_tools->setProjectGraph(m_projectGraph.get());
     }
@@ -86,11 +98,35 @@ void AgentLoop::setSettings(const Settings &settings)
 
 void AgentLoop::setWorkspace(const QString &workspace)
 {
+    if (workspace == m_workspace) {
+        return;
+    }
+
+    // A view change can arrive while a shell tool is still running. Cancel it
+    // before swapping the sandbox so its result cannot be applied to a new
+    // workspace. Rebuilding the graph is also intentionally limited to actual
+    // workspace changes; refreshWorkspace() may be called frequently.
+    if (m_tools) {
+        m_tools->cancelAsyncBash();
+    }
+    m_runningBashCall = {};
+
     m_workspace = workspace;
+
+    if (m_workspace.isEmpty()) {
+        m_tools.reset();
+        m_sandbox.reset();
+        if (m_projectGraph) {
+            m_projectGraph->clear();
+            m_projectGraph->setWorkspacePath({});
+        }
+        return;
+    }
 
     if (!m_workspace.isEmpty()) {
         m_sandbox = std::make_unique<Sandbox>(m_workspace, m_settings.sandbox, m_settings.extraDenyGlobs);
-        m_tools = std::make_unique<ToolRunner>(*m_sandbox, m_bridge, this);
+        ensureToolRunner();
+        m_tools->setSandbox(*m_sandbox);
         m_tools->setTimeoutMs(m_settings.bashTimeoutMs);
         m_tools->setProjectGraph(m_projectGraph.get());
     }
@@ -117,9 +153,8 @@ void AgentLoop::setDocumentBridge(DocumentBridge *bridge)
     // Set the document bridge for file operations and reinitialize tools if sandbox exists
     m_bridge = bridge;
     if (m_sandbox) {
-        m_tools = std::make_unique<ToolRunner>(*m_sandbox, m_bridge, this);
-        m_tools->setTimeoutMs(m_settings.bashTimeoutMs);
-        m_tools->setProjectGraph(m_projectGraph.get());
+        ensureToolRunner();
+        m_tools->setDocumentBridge(m_bridge);
     }
 }
 
@@ -407,10 +442,14 @@ void AgentLoop::abort()
 
     m_nextModelTimer.stop();
     m_client.abort();
+    if (m_tools) {
+        m_tools->cancelAsyncBash();
+    }
     m_queue.clear();
     m_pendingResults.clear();
     m_waitingCall = {};
     m_waitingRequest = {};
+    m_runningBashCall = {};
     m_busy = false;
     m_state = State::Idle;
 
@@ -442,6 +481,7 @@ void AgentLoop::start(const QString &userText)
     m_pendingResults.clear();
     m_waitingCall = {};
     m_waitingRequest = {};
+    m_runningBashCall = {};
     m_currentAssistant.clear();
     m_actionSignatures.clear();
     m_actionRepeatCounts.clear();
@@ -562,7 +602,81 @@ void AgentLoop::sendToModel()
         Q_EMIT statusChanged(u"Working on it…"_s);
     }
 
-    m_client.complete(m_messages);
+    m_client.complete(modelMessagesForRequest());
+}
+
+QList<ChatMessage> AgentLoop::modelMessagesForRequest() const
+{
+    if (m_messages.isEmpty()) {
+        return {};
+    }
+
+    QList<ChatMessage> result = m_messages;
+
+    // Preserve the API's assistant-tool/tool-result ordering when applying the
+    // optional message-count limit. Never cut a turn in the middle of a tool
+    // call sequence, and never remove the system message.
+    if (m_settings.maxContextMessages > 0 && result.size() > m_settings.maxContextMessages) {
+        const int keepMessages = qMax(4, m_settings.maxContextMessages);
+        int firstKept = qMax(1, result.size() - keepMessages);
+
+        if (firstKept < result.size() && result.at(firstKept).role == ChatMessage::Role::Tool) {
+            while (firstKept > 1 && result.at(firstKept).role == ChatMessage::Role::Tool) {
+                --firstKept;
+            }
+            if (firstKept > 1 && result.at(firstKept).role == ChatMessage::Role::Assistant
+                && !result.at(firstKept).toolCalls.isEmpty()) {
+                --firstKept;
+            }
+        } else if (firstKept < result.size() && result.at(firstKept).role == ChatMessage::Role::Assistant) {
+            if (firstKept > 1 && result.at(firstKept - 1).role == ChatMessage::Role::User) {
+                --firstKept;
+            }
+        }
+
+        QList<ChatMessage> window;
+        window.reserve(result.size() - firstKept + 1);
+        window.append(result.first());
+        for (int i = firstKept; i < result.size(); ++i) {
+            window.append(result.at(i));
+        }
+        result = std::move(window);
+    }
+
+    if (!m_settings.smartContextTruncation && !m_settings.compressOldMessages) {
+        return result;
+    }
+
+    int maxChars = 131'072;
+    if (m_settings.contextWindow > 0) {
+        const int availableTokens = qMax(1, m_settings.contextWindow - m_settings.contextWindowReserve);
+        const qint64 estimatedChars = static_cast<qint64>(availableTokens) * 4;
+        maxChars = static_cast<int>(qBound<qint64>(32'768, estimatedChars, 524'288));
+    } else {
+        maxChars = qBound(32'768, m_settings.compressionThreshold * 64, 262'144);
+    }
+
+    // Keep the newest part verbatim and compact older message payloads. This
+    // reduces peak request memory while preserving tool call/result protocol.
+    const int recentMessages = qMin(12, result.size());
+    const int compressionLimit = qMax(500, m_settings.compressionThreshold);
+    for (int i = 1; i < result.size() - recentMessages; ++i) {
+        ChatMessage &message = result[i];
+        if (message.role == ChatMessage::Role::User || message.role == ChatMessage::Role::Assistant) {
+            if (message.toolCalls.isEmpty()) {
+                message.content = smartCompressContext(message.content, compressionLimit, true);
+            }
+            if (!message.thinking.isEmpty()) {
+                message.thinking = smartCompressContext(message.thinking, compressionLimit, true);
+            }
+        } else if (message.role == ChatMessage::Role::Tool) {
+            message.content = smartCompressContext(message.content, compressionLimit, true);
+        }
+    }
+
+    // Run the existing character-budget compressor without another message
+    // slicing pass, so tool call sequences remain intact.
+    return compressMessageHistory(result, static_cast<int>(result.size()), maxChars, true);
 }
 
 QList<ToolCall> AgentLoop::bundleSimilarTools(const QList<ToolCall> &calls)
@@ -1065,7 +1179,23 @@ void AgentLoop::executeOne(const ToolCall &call)
     ++m_toolCalls;
     Q_EMIT toolStarted(request);
     Q_EMIT statusChanged(u"Working on the next step…"_s);
+    if (call.name == u"bash"_s) {
+        m_runningBashCall = call;
+        m_tools->runBashAsync(call);
+        return;
+    }
     ToolResult result = m_tools->run(call);
+    appendToolResult(call, result);
+    processQueue();
+}
+
+void AgentLoop::onBashFinished(const QString &toolCallId, const ToolResult &result)
+{
+    if (!m_busy || m_state != State::ExecutingTools || m_runningBashCall.id != toolCallId) {
+        return;
+    }
+    const ToolCall call = m_runningBashCall;
+    m_runningBashCall = {};
     appendToolResult(call, result);
     processQueue();
 }
@@ -1111,6 +1241,12 @@ void AgentLoop::resolvePermission(PermissionDecision decision)
     ++m_toolCalls;
     Q_EMIT toolStarted(request);
     Q_EMIT statusChanged(u"Working on the next step…"_s);
+    if (call.name == u"bash"_s) {
+        m_runningBashCall = call;
+        m_tools->runBashAsync(call);
+        m_state = State::ExecutingTools;
+        return;
+    }
     ToolResult result = m_tools->run(call);
     appendToolResult(call, result);
     m_state = State::ExecutingTools;

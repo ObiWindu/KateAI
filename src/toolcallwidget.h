@@ -49,6 +49,7 @@ public:
     QString toolCallId() const { return m_toolCallId; }
     int expandedHeight() const { return m_expandedHeight; }
     void setExpandedHeight(int h);
+    bool isRunning() const { return !m_finished; }
 
 protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
@@ -65,7 +66,7 @@ private:
     QString m_toolCallId;
     QString m_toolName;
     ToolRisk m_risk = ToolRisk::Read;
-    bool m_expanded = false;
+    bool m_expanded = true;
     bool m_finished = false;
     bool m_ok = true;
     int m_expandedHeight = 0;
