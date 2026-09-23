@@ -33,7 +33,10 @@ Q_SIGNALS:
     void settingsChanged(const Settings &settings);
 
 private:
+    void ensureSettingsLoaded();
+
     Settings m_settings;
+    bool m_settingsLoaded = false;
 };
 
 } // namespace KateAi

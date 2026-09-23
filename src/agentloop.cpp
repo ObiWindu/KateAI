@@ -88,12 +88,8 @@ void AgentLoop::setSettings(const Settings &settings)
         m_tools->setProjectGraph(m_projectGraph.get());
     }
 
-    // Do NOT regenerate or re-save the project graph here. The graph is built
-    // once in setWorkspace (or loaded from the cached JSON) and updated
-    // incrementally via updateProjectGraph. Calling generateGraph on every
-    // settings change (model swap, permission toggle, reasoning effort, etc.)
-    // wastefully re-reads the entire workspace from disk and throws away any
-    // in-flight incremental updates.
+    // Do not regenerate or re-save the project graph on settings changes.
+    // Graph loading/generation is deferred to the first agent turn.
 }
 
 void AgentLoop::setWorkspace(const QString &workspace)
@@ -104,8 +100,7 @@ void AgentLoop::setWorkspace(const QString &workspace)
 
     // A view change can arrive while a shell tool is still running. Cancel it
     // before swapping the sandbox so its result cannot be applied to a new
-    // workspace. Rebuilding the graph is also intentionally limited to actual
-    // workspace changes; refreshWorkspace() may be called frequently.
+    // workspace. Workspace changes must stay cheap on Kate's UI/startup path.
     if (m_tools) {
         m_tools->cancelAsyncBash();
     }
@@ -123,29 +118,30 @@ void AgentLoop::setWorkspace(const QString &workspace)
         return;
     }
 
-    if (!m_workspace.isEmpty()) {
-        m_sandbox = std::make_unique<Sandbox>(m_workspace, m_settings.sandbox, m_settings.extraDenyGlobs);
-        ensureToolRunner();
-        m_tools->setSandbox(*m_sandbox);
-        m_tools->setTimeoutMs(m_settings.bashTimeoutMs);
-        m_tools->setProjectGraph(m_projectGraph.get());
+    m_sandbox = std::make_unique<Sandbox>(m_workspace, m_settings.sandbox, m_settings.extraDenyGlobs);
+    ensureToolRunner();
+    m_tools->setSandbox(*m_sandbox);
+    m_tools->setTimeoutMs(m_settings.bashTimeoutMs);
+    m_tools->setProjectGraph(m_projectGraph.get());
+}
+
+void AgentLoop::ensureProjectGraph()
+{
+    if (m_workspace.isEmpty() || !m_projectGraph) {
+        return;
+    }
+    if (m_projectGraph->getWorkspacePath() == m_workspace && m_projectGraph->getNodeCount() > 0) {
+        return;
     }
 
-    // Auto-generate or load project graph
-    if (m_projectGraph) {
-        QString graphFilePath = m_workspace + u"/.kateai/project_graph.json"_s;
-        if (QFile::exists(graphFilePath)) {
-            // Load existing graph
-            if (!m_projectGraph->loadFromFile(graphFilePath)) {
-                qWarning() << "Failed to load existing graph from" << graphFilePath;
-                // Fall back to generating a new graph
-                m_projectGraph->generateGraph(m_workspace);
-            }
-        } else {
-            // Generate new graph
-            m_projectGraph->generateGraph(m_workspace);
-        }
+    const QString graphFilePath = m_workspace + u"/.kateai/project_graph.json"_s;
+    if (QFile::exists(graphFilePath) && m_projectGraph->loadFromFile(graphFilePath)) {
+        return;
     }
+
+    // Project graph generation is intentionally lazy: never run it while Kate
+    // is constructing a plugin view. It only runs when the user submits a turn.
+    m_projectGraph->generateGraph(m_workspace);
 }
 
 void AgentLoop::setDocumentBridge(DocumentBridge *bridge)
@@ -166,11 +162,11 @@ void AgentLoop::setEditorContext(const QString &context)
 
 void AgentLoop::updateProjectGraph(const QString &filePath, const QString &content)
 {
-    // Update the project graph with changes to a file
-    if (m_projectGraph) {
-        m_projectGraph->updateGraph(filePath, content);
-        m_projectGraph->saveToFile(m_workspace + u"/.kateai/project_graph.json"_s);
+    if (!m_projectGraph || m_workspace.isEmpty() || filePath.isEmpty()) {
+        return;
     }
+    m_projectGraph->updateGraph(filePath, content);
+    m_projectGraph->saveToFile(m_workspace + u"/.kateai/project_graph.json"_s);
 }
 
 QList<GraphNode*> AgentLoop::getProjectNodes() const
@@ -331,32 +327,32 @@ QString AgentLoop::systemPrompt() const
             }
         }
     }
-    
+
     // Add project graph information to help the agent understand the project structure
     if (m_projectGraph && m_projectGraph->getNodeCount() > 0 && m_settings.compressProjectGraph) {
         prompt += u"\n\n<project_graph>\n"_s;
-        
+
         // Apply context compression based on settings
         int maxNodes = m_settings.maxGraphNodes;
         int maxEdges = m_settings.maxGraphEdges;
-        
+
         if (m_settings.contextCompressionLevel == 0) {
             // Full context - include all nodes and edges
-            prompt += u"Project contains "_s + QString::number(m_projectGraph->getNodeCount()) + u" nodes and "_s + 
+            prompt += u"Project contains "_s + QString::number(m_projectGraph->getNodeCount()) + u" nodes and "_s +
                       QString::number(m_projectGraph->getEdgeCount()) + u" edges.\n"_s;
-            
+
             // Include node types for full context
             QMap<QString, int> typeCount;
             for (auto it = m_projectGraph->getNodes().begin(); it != m_projectGraph->getNodes().end(); ++it) {
                 const GraphNode *node = it.value();
                 typeCount[node->type]++;
             }
-            
+
             prompt += u"Node types:\n"_s;
             for (auto it = typeCount.begin(); it != typeCount.end(); ++it) {
                 prompt += u"  - "_s + it.key() + u": "_s + QString::number(it.value()) + u"\n"_s;
             }
-            
+
             // Include key dependencies for full context
             prompt += u"\nKey dependencies:\n"_s;
             for (auto it = m_projectGraph->getEdges().begin(); it != m_projectGraph->getEdges().end(); ++it) {
@@ -368,9 +364,9 @@ QString AgentLoop::systemPrompt() const
             }
         } else {
             // Compressed context - include limited information
-            prompt += u"Project contains "_s + QString::number(qMin(m_projectGraph->getNodeCount(), maxNodes)) + u" nodes and "_s + 
+            prompt += u"Project contains "_s + QString::number(qMin(m_projectGraph->getNodeCount(), maxNodes)) + u" nodes and "_s +
                       QString::number(qMin(m_projectGraph->getEdgeCount(), maxEdges)) + u" edges.\n"_s;
-            
+
             if (m_settings.contextCompressionLevel == 1) {
                 // Summary level - include node types and key dependencies
                 QMap<QString, int> typeCount;
@@ -378,12 +374,12 @@ QString AgentLoop::systemPrompt() const
                     const GraphNode *node = it.value();
                     typeCount[node->type]++;
                 }
-                
+
                 prompt += u"Node types:\n"_s;
                 for (auto it = typeCount.begin(); it != typeCount.end(); ++it) {
                     prompt += u"  - "_s + it.key() + u": "_s + QString::number(it.value()) + u"\n"_s;
                 }
-                
+
                 // Add key dependencies (limited to most important relationships)
                 prompt += u"\nKey dependencies:\n"_s;
                 int edgeCount = 0;
@@ -406,10 +402,10 @@ QString AgentLoop::systemPrompt() const
                 prompt += u"Project overview available. Use tools to explore specific files as needed.\n"_s;
             }
         }
-        
+
         prompt += u"</project_graph>\n"_s;
     }
-    
+
     return prompt;
 }
 
@@ -471,6 +467,7 @@ void AgentLoop::start(const QString &userText)
     if (!m_tools) {
         setWorkspace(m_workspace);
     }
+    ensureProjectGraph();
 
     m_busy = true;
     m_state = State::WaitingForNextModel;
@@ -651,8 +648,7 @@ QList<ChatMessage> AgentLoop::modelMessagesForRequest() const
     if (m_settings.contextWindow > 0) {
         const int availableTokens = qMax(1, m_settings.contextWindow - m_settings.contextWindowReserve);
         const qint64 estimatedChars = static_cast<qint64>(availableTokens) * 4;
-        maxChars = static_cast<int>(qBound<qint64>(32'768, estimatedChars, 524'288));
-    } else {
+        maxChars = static_cast<int>(qBound<qint64>(static_cast<qint64>(32'768), estimatedChars, static_cast<qint64>(524'288)));    } else {
         maxChars = qBound(32'768, m_settings.compressionThreshold * 64, 262'144);
     }
 

@@ -62,6 +62,11 @@ find_package(KF6 ${KF6_DEP_VERSION} REQUIRED COMPONENTS
 
 add_subdirectory(src)
 
+# KXMLGUIClient::setXMLFile("ui.rc") searches the KDE XDG data tree.
+# Keep the file installed alongside the plugin instead of relying solely on
+# the Qt resource bundle.
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/src/ui.rc" DESTINATION "${KXMLGUI_INSTALL_DIR}/kateai")
+
 if(BUILD_TESTING)
     find_package(Qt6 ${QT_MIN_VERSION} CONFIG REQUIRED COMPONENTS Test)
     add_subdirectory(tests)

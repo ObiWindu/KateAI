@@ -75,6 +75,23 @@ if [[ "${MODE}" == "user" ]]; then
     cp -f scripts/50-kate-ai.conf "${HOME}/.config/environment.d/50-kate-ai.conf"
     chmod 600 "${HOME}/.config/environment.d/50-kate-ai.conf"
 
+    # Make the plugin visible to applications launched in the current KDE
+    # session as well. environment.d / Plasma startup files only take effect
+    # on a refreshed session, while Kate uses Qt's libraryPaths() when it
+    # discovers KTextEditor plugins.
+    CURRENT_QT_PLUGIN_PATH="${USER_PLUGIN_DIR}${QT_PLUGIN_PATH:+:${QT_PLUGIN_PATH}}"
+    if command -v systemctl >/dev/null 2>&1 && systemctl --user is-system-running >/dev/null 2>&1; then
+        # KDE 6 launches many applications from the user/systemd session
+        # environment. Set this immediately so a newly launched Kate inherits
+        # the user plugin path without requiring a logout/login.
+        systemctl --user set-environment "QT_PLUGIN_PATH=${CURRENT_QT_PLUGIN_PATH}" || true
+    fi
+    if command -v dbus-update-activation-environment >/dev/null 2>&1; then
+        # Also update the D-Bus activation environment used by applications
+        # launched through the desktop/session services.
+        dbus-update-activation-environment --systemd "QT_PLUGIN_PATH=${CURRENT_QT_PLUGIN_PATH}" || true
+    fi
+
     echo
     echo "Installed: ${USER_PLUGIN_SO}"
     ls -l "${USER_PLUGIN_SO}"
@@ -83,12 +100,15 @@ if [[ "${MODE}" == "user" ]]; then
     echo "  ~/.config/plasma-workspace/env/kate-ai.sh"
     echo "  ~/.config/environment.d/50-kate-ai.conf"
     echo
-    echo "To use it in this session (no logout):"
-    echo "  export QT_PLUGIN_PATH=\"${USER_PLUGIN_DIR}\${QT_PLUGIN_PATH:+:\$QT_PLUGIN_PATH}\""
-    echo "  kate"
+    if pgrep -x kate >/dev/null 2>&1; then
+        echo
+        echo "Kate is currently running. Fully quit every Kate window before checking the Plugins list."
+        echo "(A running Kate process keeps its existing Qt plugin search paths.)"
+    fi
+    echo "For a shell-launched Kate, use this explicit path if needed:"
+    echo "  QT_PLUGIN_PATH=\"${USER_PLUGIN_DIR}\${QT_PLUGIN_PATH:+:\$QT_PLUGIN_PATH}\" kate"
     echo
-    echo "From the application menu, log out and back in once (or reboot) so the"
-    echo "session picks up QT_PLUGIN_PATH. Then:"
+    echo "Fully quit Kate and start it again from the application menu. Then:"
     echo "  1. Settings → Configure Kate → Plugins → enable Kate AI"
     echo "  2. Settings → Configure Kate → Kate AI  (paste API keys)"
     echo "  3. Ctrl+Alt+A opens the panel"

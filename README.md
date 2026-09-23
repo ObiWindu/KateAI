@@ -61,6 +61,9 @@ The current implementation also includes a reliability/performance pass aimed at
 
 ### Crash and lifetime hardening
 
+- Workspace/project-graph initialization is **lazy**: opening Kate or restoring the Kate AI panel no longer recursively scans the workspace. The graph is loaded/generated only when the first agent turn actually needs it.
+- Kate with no local document no longer guesses `$PWD`/`$HOME` as an AI workspace, avoiding accidental scans of the user's home tree during startup.
+- Persisted chat history is bounded during restore (newest messages are kept, with oversized message/reasoning bodies truncated), preventing a pathological session from allocating an unbounded transcript when Kate launches.
 - The editor-backed `DiskDocumentBridge` is owned by `ChatWidget`, so it remains alive for the complete lifetime of agent/tool execution in the tool view.
 - Vulnerable widget references use guarded Qt pointer semantics where appropriate, reducing use-after-free risk during Kate view teardown.
 - Deferred UI callbacks capture guarded object references rather than assuming the widget still exists when the event fires.
