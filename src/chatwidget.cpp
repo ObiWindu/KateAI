@@ -1,0 +1,2185 @@
+/*
+ * SPDX-FileCopyrightText: 2026 ObiWindu <Obi.wandu@proton.me>
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ */
+
+#include "chatwidget.h"
+
+#include "permissionbar.h"
+#include "promptedit.h"
+#include "sessionstore.h"
+#include "settings.h"
+#include "toolcallwidget.h"
+
+#include <KLocalizedString>
+
+#include <QAction>
+#include <QActionGroup>
+#include <QClipboard>
+#include <QComboBox>
+#include <QGuiApplication>
+#include <QGraphicsOpacityEffect>
+#include <QHBoxLayout>
+#include <QLabel>
+#include <QLineEdit>
+#include <QMenu>
+#include <QPlainTextEdit>
+#include <QPropertyAnimation>
+#include <QPointer>
+#include <QPushButton>
+#include <QResizeEvent>
+#include <QScrollBar>
+#include <QScrollArea>
+#include <QTextBrowser>
+#include <QTextDocument>
+#include <QTimer>
+#include <QVBoxLayout>
+
+#include <algorithm>
+
+using namespace Qt::Literals::StringLiterals;
+
+namespace KateAi
+{
+
+ChatWidget::ChatWidget(QWidget *parent)
+    : QWidget(parent)
+    , m_userScrolledUp(true)
+{
+    auto *root = new QVBoxLayout(this);
+    root->setContentsMargins(0, 0, 0, 0);
+    root->setSpacing(0);
+
+    // 1. Zed-style Header / Toolbar
+    m_toolbar = new QWidget(this);
+    auto *toolbarLayout = new QHBoxLayout(m_toolbar);
+    toolbarLayout->setContentsMargins(10, 6, 10, 6);
+    toolbarLayout->setSpacing(8);
+
+    // Unified Model Selector button
+    m_modelSelector = new QPushButton(this);
+    m_modelSelector->setCursor(Qt::PointingHandCursor);
+    m_modelSelector->setStyleSheet(
+        u"QPushButton {"
+        u"  background-color: #262628;"
+        u"  color: #cccccc;"
+        u"  border: 1px solid #3c3c40;"
+        u"  border-radius: 4px;"
+        u"  padding: 4px 10px;"
+        u"  font-size: 12px;"
+        u"  font-weight: 500;"
+        u"  text-align: left;"
+        u"}"
+        u"QPushButton:hover {"
+        u"  background-color: #2e2e32;"
+        u"  border-color: #4a4a50;"
+        u"  color: #ffffff;"
+        u"}"_s);
+    toolbarLayout->addWidget(m_modelSelector);
+
+    // Reasoning effort chooser button — sits right next to the model label
+    // in the chat input area so the user can pick an effort level at a glance.
+    m_reasoningEffort = new QPushButton(this);
+    m_reasoningEffort->setFixedSize(28, 28);
+    m_reasoningEffort->setCursor(Qt::PointingHandCursor);
+    m_reasoningEffort->setToolTip(i18n("Reasoning effort"));
+    m_reasoningEffort->setVisible(true);
+    connect(m_reasoningEffort, &QPushButton::clicked, this, &ChatWidget::showReasoningEffortMenu);
+    toolbarLayout->addWidget(m_reasoningEffort);
+
+    // Thread title label
+    m_threadTitle = new QLabel(i18n("New Thread"), this);
+    m_threadTitle->setStyleSheet(u"QLabel { color: #888888; font-size: 12px; font-weight: 500; padding-left: 4px; }"_s);
+    toolbarLayout->addWidget(m_threadTitle);
+
+    toolbarLayout->addStretch();
+
+    // New Chat button
+    m_newChat = new QPushButton(QIcon::fromTheme(u"list-add"_s), QString(), this);
+    m_newChat->setToolTip(i18n("New Thread"));
+    m_newChat->setFixedSize(26, 26);
+    m_newChat->setCursor(Qt::PointingHandCursor);
+    m_newChat->setStyleSheet(
+        u"QPushButton {"
+        u"  background: transparent;"
+        u"  border: 1px solid transparent;"
+        u"  border-radius: 4px;"
+        u"}"
+        u"QPushButton:hover {"
+        u"  background-color: #2e2e32;"
+        u"  border-color: #3c3c40;"
+        u"}"_s);
+    toolbarLayout->addWidget(m_newChat);
+
+    // Settings / Configure button
+    m_configure = new QPushButton(QIcon::fromTheme(u"settings-configure"_s), QString(), this);
+    m_configure->setToolTip(i18n("Settings"));
+    m_configure->setFixedSize(26, 26);
+    m_configure->setCursor(Qt::PointingHandCursor);
+    m_configure->setStyleSheet(
+        u"QPushButton {"
+        u"  background: transparent;"
+        u"  border: 1px solid transparent;"
+        u"  border-radius: 4px;"
+        u"}"
+        u"QPushButton:hover {"
+        u"  background-color: #2e2e32;"
+        u"  border-color: #3c3c40;"
+        u"}"_s);
+    toolbarLayout->addWidget(m_configure);
+
+    root->addWidget(m_toolbar);
+
+    // Hidden controls retained for internal logic & backward compatibility
+    m_provider = new QComboBox(this);
+    m_provider->setVisible(false);
+    m_model = new QComboBox(this);
+    m_model->setEditable(true);
+    m_model->setInsertPolicy(QComboBox::NoInsert);
+    m_model->setVisible(false);
+
+    m_permission = new QComboBox(this);
+    m_permission->setVisible(false);
+    m_permission->addItem(permissionModeLabel(PermissionMode::Ask), permissionModeId(PermissionMode::Ask));
+    m_permission->addItem(permissionModeLabel(PermissionMode::AcceptEdits), permissionModeId(PermissionMode::AcceptEdits));
+    m_permission->addItem(permissionModeLabel(PermissionMode::AlwaysApprove), permissionModeId(PermissionMode::AlwaysApprove));
+
+    m_sandbox = new QComboBox(this);
+    m_sandbox->setVisible(false);
+    m_sandbox->addItem(sandboxProfileLabel(SandboxProfile::Workspace), sandboxProfileId(SandboxProfile::Workspace));
+    m_sandbox->addItem(sandboxProfileLabel(SandboxProfile::ReadOnly), sandboxProfileId(SandboxProfile::ReadOnly));
+    m_sandbox->addItem(sandboxProfileLabel(SandboxProfile::Strict), sandboxProfileId(SandboxProfile::Strict));
+    m_sandbox->addItem(sandboxProfileLabel(SandboxProfile::Off), sandboxProfileId(SandboxProfile::Off));
+
+    m_mode = new QComboBox(this);
+    m_mode->setVisible(false);
+    m_mode->addItem(i18n("Agent"), false);
+    m_mode->addItem(i18n("Plan"), true);
+
+    m_thinking = new QPushButton(this);
+    m_thinking->setCheckable(true);
+
+    m_stop = new QPushButton(this);
+    m_stop->setVisible(false);
+    m_stop->setEnabled(false);
+
+    // 2. Zed-style Transcript Area (Scroll Area with Cards & Tool Widgets)
+    m_scrollArea = new QScrollArea(this);
+    m_scrollArea->setWidgetResizable(true);
+    m_scrollArea->setFrameShape(QFrame::NoFrame);
+    m_scrollArea->setStyleSheet(
+        u"QScrollArea {"
+        u"  background-color: #181818;"
+        u"  border: none;"
+        u"}"
+        u"QScrollBar:vertical {"
+        u"  background: transparent;"
+        u"  width: 8px;"
+        u"  margin: 0;"
+        u"}"
+        u"QScrollBar::handle:vertical {"
+        u"  background: #333338;"
+        u"  border-radius: 4px;"
+        u"  min-height: 24px;"
+        u"}"
+        u"QScrollBar::handle:vertical:hover {"
+        u"  background: #4a4a52;"
+        u"}"
+        u"QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {"
+        u"  height: 0;"
+        u"}"_s);
+
+    m_transcriptContainer = new QWidget(m_scrollArea);
+    m_transcriptContainer->setStyleSheet(u"background-color: #181818;"_s);
+    m_transcriptLayout = new QVBoxLayout(m_transcriptContainer);
+    m_transcriptLayout->setContentsMargins(12, 12, 12, 12);
+    m_transcriptLayout->setSpacing(6);
+
+    // Initial empty state welcome widget
+    m_transcriptLayout->addWidget(createWelcomeWidget());
+    m_transcriptLayout->addStretch(); // Push content to top, keep consistent spacing
+
+    // Dynamic status indicators (thinking/working) - always at bottom of transcript
+    auto *indicatorsContainer = new QWidget(m_transcriptContainer);
+    indicatorsContainer->setObjectName(u"indicatorsContainer"_s);
+    auto *indicatorsLayout = new QHBoxLayout(indicatorsContainer);
+    indicatorsLayout->setContentsMargins(0, 4, 0, 4);
+    indicatorsLayout->setSpacing(8);
+    indicatorsLayout->addStretch();
+
+    // Thinking indicator (shows when AI is reasoning)
+    m_thinkingIndicator = new QLabel(u"💭  Thinking…"_s, indicatorsContainer);
+    m_thinkingIndicator->setStyleSheet(
+        u"QLabel {"
+        u"  color: #3b82f6;"
+        u"  font-size: 11px;"
+        u"  font-style: italic;"
+        u"  padding: 2px 8px;"
+        u"  background-color: #1e3a5f;"
+        u"  border: 1px solid #3b82f6;"
+        u"  border-radius: 10px;"
+        u"}"_s);
+    m_thinkingIndicator->hide();
+    indicatorsLayout->addWidget(m_thinkingIndicator);
+
+    // Working indicator (shows when AI is running tools/reading/editing)
+    m_workingIndicator = new QLabel(u"⚙️  Working…"_s, indicatorsContainer);
+    m_workingIndicator->setStyleSheet(
+        u"QLabel {"
+        u"  color: #f59e0b;"
+        u"  font-size: 11px;"
+        u"  font-style: italic;"
+        u"  padding: 2px 8px;"
+        u"  background-color: #3d2e0e;"
+        u"  border: 1px solid #f59e0b;"
+        u"  border-radius: 10px;"
+        u"}"_s);
+    m_workingIndicator->hide();
+    indicatorsLayout->addWidget(m_workingIndicator);
+
+    m_transcriptLayout->addWidget(indicatorsContainer);
+    m_scrollArea->setWidget(m_transcriptContainer);
+    root->addWidget(m_scrollArea, 1);
+
+    // Ensure chat starts at the top (welcome widget visible)
+    QTimer::singleShot(0, this, [thisWeak = QPointer<ChatWidget>(this)]() {
+        if (thisWeak && thisWeak->m_scrollArea) {
+            thisWeak->m_scrollArea->verticalScrollBar()->setValue(0);
+        }
+    });
+
+    m_scrollToBottomBtn = new QPushButton(u"↓  Jump to latest"_s, m_scrollArea);
+    m_scrollToBottomBtn->setCursor(Qt::PointingHandCursor);
+    m_scrollToBottomBtn->setStyleSheet(
+        u"QPushButton {"
+        u"  background-color: #2563eb;"
+        u"  color: #ffffff;"
+        u"  border: 1px solid #3b82f6;"
+        u"  border-radius: 14px;"
+        u"  padding: 5px 12px;"
+        u"  font-size: 11px;"
+        u"  font-weight: 600;"
+        u"}"
+        u"QPushButton:hover {"
+        u"  background-color: #1d4ed8;"
+        u"  border-color: #60a5fa;"
+        u"}"_s);
+    m_scrollToBottomBtn->hide();
+    connect(m_scrollToBottomBtn, &QPushButton::clicked, this, &ChatWidget::forceScrollToBottom);
+
+    connect(m_scrollArea->verticalScrollBar(), &QScrollBar::valueChanged, this, [this](int value) {
+        auto *sb = m_scrollArea->verticalScrollBar();
+        if (sb->maximum() - value <= 40) {
+            m_userScrolledUp = false;
+            if (m_scrollToBottomBtn && m_scrollToBottomBtn->isVisible()) {
+                animateScrollButtonHide();
+            }
+        } else {
+            m_userScrolledUp = true;
+        }
+    });
+
+    connect(m_scrollArea->verticalScrollBar(), &QScrollBar::rangeChanged, this, [this](int min, int max) {
+        Q_UNUSED(min);
+        auto *sb = m_scrollArea->verticalScrollBar();
+        if (!m_userScrolledUp) {
+            sb->setValue(max);
+        } else if (m_scrollToBottomBtn) {
+            // Show button when scrolled up and there's new content (agent busy or new messages)
+            updateScrollButtonPosition();
+            animateScrollButtonShow();
+            m_scrollToBottomBtn->raise();
+        }
+    });
+
+    // 3. Permission Bar (Zed-style Inline Consent)
+    m_permissionBar = new PermissionBar(this);
+    root->addWidget(m_permissionBar);
+
+    // 4. Composer Area (Zed-style Input Box)
+    auto *composerContainer = new QWidget(this);
+    composerContainer->setStyleSheet(
+        u"QWidget {"
+        u"  background-color: #1a1a1a;"
+        u"  border-top: 1px solid #282828;"
+        u"}"_s);
+    auto *composerLayout = new QVBoxLayout(composerContainer);
+    composerLayout->setContentsMargins(12, 8, 12, 8);
+    composerLayout->setSpacing(4);
+
+    // Info bar for API messages (retries, errors) - shown above composer
+    m_infoBar = new QLabel(composerContainer);
+    m_infoBar->setWordWrap(true);
+    m_infoBar->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    m_infoBar->setStyleSheet(u"QLabel { color: #ff8888; font-size: 12px; font-weight: bold; padding: 8px 12px; background: transparent; border: none; }"_s);
+    m_infoBar->hide();
+    composerLayout->addWidget(m_infoBar);
+
+    auto *composerCard = new QWidget(composerContainer);
+    composerCard->setObjectName(u"composerCard"_s);
+    composerCard->setStyleSheet(
+        u"QWidget#composerCard {"
+        u"  background-color: #232326;"
+        u"  border: 1px solid #38383e;"
+        u"  border-radius: 8px;"
+        u"}"_s);
+    auto *composerCardLayout = new QVBoxLayout(composerCard);
+    composerCardLayout->setContentsMargins(10, 8, 10, 6);
+    composerCardLayout->setSpacing(4);
+
+    m_prompt = new PromptEdit(composerCard);
+    m_prompt->setStyleSheet(
+        u"QPlainTextEdit {"
+        u"  background: transparent;"
+        u"  color: #e4e4e4;"
+        u"  border: none;"
+        u"  padding: 2px;"
+        u"  font-size: 13px;"
+        u"}"_s);
+    composerCardLayout->addWidget(m_prompt);
+
+    auto *bottomRow = new QHBoxLayout;
+    bottomRow->setContentsMargins(2, 0, 2, 2);
+
+    m_tokenCount = new QLabel(composerCard);
+    m_tokenCount->setStyleSheet(u"QLabel { color: #666; font-size: 11px; }"_s);
+    bottomRow->addWidget(m_tokenCount);
+
+    bottomRow->addStretch();
+
+    // Thinking mode toggle button
+    m_thinking->setParent(composerCard);
+    m_thinking->setVisible(true);
+    m_thinking->setCheckable(true);
+    m_thinking->setFixedSize(28, 28);
+    m_thinking->setCursor(Qt::PointingHandCursor);
+    m_thinking->setToolTip(i18n("Toggle thinking mode"));
+    updateThinkingButtonStyle();
+    bottomRow->addWidget(m_thinking);
+
+    m_send = new QPushButton(composerCard);
+    m_send->setFixedSize(28, 28);
+    m_send->setCursor(Qt::PointingHandCursor);
+    updateSendButtonState();
+    bottomRow->addWidget(m_send);
+
+    composerCardLayout->addLayout(bottomRow);
+    composerLayout->addWidget(composerCard);
+
+    m_status = new QLabel(i18n("Enter to send · Shift+Enter for a new line"), composerContainer);
+    m_status->setStyleSheet(u"QLabel { color: #555555; font-size: 11px; margin-left: 4px; }"_s);
+    composerLayout->addWidget(m_status);
+
+    root->addWidget(composerContainer);
+
+    // Signal connections
+    connect(m_prompt, &PromptEdit::submitRequested, this, &ChatWidget::submit);
+    connect(m_prompt, &PromptEdit::escapePressed, this, [this]() {
+        if (m_agent.isBusy()) {
+            m_permissionBar->hideBar();
+            m_agent.abort();
+            updateSendButtonState();
+        }
+    });
+    connect(m_prompt, &QPlainTextEdit::textChanged, this, [this]() {
+        if (!m_agent.isBusy()) {
+            updateSendButtonState();
+        }
+    });
+
+    connect(m_send, &QPushButton::clicked, this, [this]() {
+        if (m_agent.isBusy()) {
+            m_permissionBar->hideBar();
+            m_agent.abort();
+            updateSendButtonState();
+        } else {
+            submit();
+        }
+    });
+
+    connect(m_newChat, &QPushButton::clicked, this, &ChatWidget::newChat);
+    connect(m_configure, &QPushButton::clicked, this, &ChatWidget::showSettingsMenu);
+    connect(m_modelSelector, &QPushButton::clicked, this, &ChatWidget::showModelMenu);
+    connect(m_permissionBar, &PermissionBar::decided, &m_agent, &AgentLoop::resolvePermission);
+
+    connect(m_provider, &QComboBox::currentIndexChanged, this, [this]() {
+        if (m_updatingCombos || m_provider->currentData().isNull()) {
+            return;
+        }
+        m_settings.provider = providerFromId(m_provider->currentData().toString());
+        m_preferredProvider = m_settings.provider;
+        refreshModels();
+        updateModelSelectorLabel();
+        updateTokenDisplay();
+        updateReasoningEffortButton();
+        m_agent.setSettings(m_settings);
+        Q_EMIT settingsChanged(m_settings);
+    });
+
+    connect(m_model, &QComboBox::currentTextChanged, this, [this](const QString &text) {
+        if (m_updatingCombos) {
+            return;
+        }
+        switch (m_settings.provider) {
+        case Provider::OpenAI:
+            m_settings.openaiModel = text.trimmed();
+            break;
+        case Provider::OpenRouter:
+            m_settings.openrouterModel = text.trimmed();
+            break;
+        case Provider::OpenAICompatible:
+            m_settings.openaiCompatibleModel = text.trimmed();
+            break;
+        case Provider::ClaudeCompatible:
+            m_settings.claudeCompatibleModel = text.trimmed();
+            break;
+        case Provider::Grok:
+        default:
+            m_settings.grokModel = text.trimmed();
+            break;
+        }
+        updateModelSelectorLabel();
+        updateTokenDisplay();
+        updateReasoningEffortButton();
+        m_agent.setSettings(m_settings);
+        Q_EMIT settingsChanged(m_settings);
+    });
+
+    connect(m_permission, &QComboBox::currentIndexChanged, this, [this]() {
+        if (m_updatingCombos) return;
+        m_settings.permissionMode = permissionModeFromId(m_permission->currentData().toString());
+        m_agent.setSettings(m_settings);
+        Q_EMIT settingsChanged(m_settings);
+    });
+
+    connect(m_sandbox, &QComboBox::currentIndexChanged, this, [this]() {
+        if (m_updatingCombos) return;
+        m_settings.sandbox = sandboxProfileFromId(m_sandbox->currentData().toString());
+        m_agent.setSettings(m_settings);
+        Q_EMIT settingsChanged(m_settings);
+    });
+
+    connect(m_mode, &QComboBox::currentIndexChanged, this, [this]() {
+        if (m_updatingCombos) return;
+        m_settings.planMode = m_mode->currentData().toBool();
+        m_agent.setSettings(m_settings);
+        Q_EMIT settingsChanged(m_settings);
+    });
+
+    connect(m_thinking, &QPushButton::toggled, this, [this](bool checked) {
+        m_settings.thinkingMode = checked;
+        m_agent.setSettings(m_settings);
+        Q_EMIT settingsChanged(m_settings);
+        updateThinkingButtonStyle();
+    });
+
+    // Agent signals
+    connect(&m_agent, &AgentLoop::userMessage, this, &ChatWidget::addUserMessage);
+    connect(&m_agent, &AgentLoop::thinkingDelta, this, [this](const QString &delta) {
+        if (!m_activeAssistantWidget) {
+            setStreaming(m_streamText);
+        }
+        if (m_thinkingBrowser) {
+            appendThinkingDelta(delta);
+            scrollToBottom();
+        }
+        setThinkingIndicator(true);
+    });
+    connect(&m_agent, &AgentLoop::thinkingFinished, this, [this](const QString &text) {
+        Q_UNUSED(text);
+        addThinkingBlock(text);
+        setThinkingIndicator(false);
+    });
+    connect(&m_agent, &AgentLoop::planUpdated, this, &ChatWidget::addPlanChecklist);
+    connect(&m_agent, &AgentLoop::assistantDelta, this, [this](const QString &delta) {
+        // Auto-collapse thinking when visible answer starts streaming
+        if (m_settings.autoCollapseThinking && m_thinkingExpanded && !m_streamText.isEmpty()) {
+            collapseThinkingBlock();
+        }
+        setThinkingIndicator(false);
+        setStreaming(m_streamText + delta);
+    });
+    connect(&m_agent, &AgentLoop::assistantFinished, this, [this](const QString &text) {
+        Q_UNUSED(text);
+        freezeStreaming();
+        setWorkingIndicator(false);
+    });
+    connect(&m_agent, &AgentLoop::activityUpdated, this, &ChatWidget::addActivityMessage);
+
+    // Tool visibility signals (Zed-style inline tool-call cards)
+    connect(&m_agent, &AgentLoop::toolStarted, this, [this](const PermissionRequest &request) {
+        freezeStreaming();
+        setWorkingIndicator(true);
+        auto *toolWidget = new ToolCallWidget(request.toolCallId, m_transcriptContainer);
+        toolWidget->setToolInfo(request.toolName, request.summary, request.risk);
+        toolWidget->setDescribeDiff(request.describeDiff);
+        toolWidget->setRunning();
+        m_toolCallWidgets.insert(request.toolCallId, toolWidget);
+        m_transcriptLayout->insertWidget(m_transcriptLayout->count() - 1, toolWidget);
+        scrollToBottom();
+    });
+
+    connect(&m_agent, &AgentLoop::toolFinished, this, [this](const ToolResult &result) {
+        if (auto *widget = m_toolCallWidgets.value(result.toolCallId)) {
+            widget->setFinished(result);
+        }
+        // Hide working indicator if no more tools are running
+        bool anyRunning = false;
+        for (auto *widget : m_toolCallWidgets) {
+            if (widget->isRunning()) {
+                anyRunning = true;
+                break;
+            }
+        }
+        if (!anyRunning) {
+            setWorkingIndicator(false);
+        }
+        scrollToBottom();
+    });
+
+    connect(&m_agent, &AgentLoop::permissionNeeded, this, [this](const PermissionRequest &request) {
+        m_permissionBar->showRequest(request);
+        m_prompt->setEnabled(false);
+        updateSendButtonState();
+        scrollToBottom();
+    });
+
+    connect(&m_agent, &AgentLoop::statusChanged, this, [this](const QString &status) {
+        m_status->setText(status.isEmpty() ? i18n("Enter to send · Shift+Enter for a new line") : status);
+        m_prompt->setEnabled(!m_permissionBar->isVisible());
+        updateSendButtonState();
+    });
+
+    connect(&m_agent, &AgentLoop::failed, this, [this](const QString &error) {
+        freezeStreaming();
+        showInfoMessage(i18n("Error: %1", error), true);
+        updateSendButtonState();
+    });
+
+    // Retry status from LlmClient - show in info bar with bright brown/orange
+    connect(m_agent.client(), &LlmClient::retryStatus, this, [this](const QString &message, int attempt, int maxAttempts, int delaySeconds) {
+        Q_UNUSED(message);
+        showInfoMessage(i18n("Retrying in %1s (attempt %2/%3)...", delaySeconds, attempt, maxAttempts), false);
+    });
+
+    connect(m_agent.client(), &LlmClient::retryScheduled, this, [this](int attempt, int maxAttempts, int delaySeconds) {
+        Q_UNUSED(attempt);
+        Q_UNUSED(maxAttempts);
+        Q_UNUSED(delaySeconds);
+        // Could show a persistent retry indicator if needed
+    });
+
+    connect(&m_agent, &AgentLoop::turnFinished, this, [this]() {
+        m_prompt->setEnabled(true);
+        updateSendButtonState();
+        m_prompt->setFocus();
+        setThinkingIndicator(false);
+        setWorkingIndicator(false);
+    });
+
+    connect(&m_agent, &AgentLoop::modelsReceived, this, [this](Provider provider, const QStringList &models) {
+        m_modelCatalog.insert(provider, models);
+        refreshProviders();
+        updateModelSelectorLabel();
+        updateTokenDisplay();
+        updateReasoningEffortButton();
+    });
+
+    connect(&m_agent, &AgentLoop::modelsFailed, this, [this](Provider provider, const QString &error) {
+        m_modelCatalog.remove(provider);
+        refreshProviders();
+        updateModelSelectorLabel();
+        if (provider == m_settings.provider) {
+            m_status->setText(i18n("Model list unavailable: %1", error));
+        }
+    });
+
+    updateModelSelectorLabel();
+    updateTokenDisplay();
+}
+
+ChatWidget::~ChatWidget()
+{
+    // Save session before AgentLoop member is destroyed
+    if (!m_agent.messages().isEmpty()) {
+        const auto sessionData = m_agent.sessionData();
+        if (!sessionData.messages.isEmpty()) {
+            SessionStore::save(sessionData);
+        }
+    }
+
+    // Disconnect all signals to prevent callbacks after destruction
+    disconnect(&m_agent, nullptr, this, nullptr);
+    disconnect(m_scrollArea->verticalScrollBar(), nullptr, this, nullptr);
+    if (m_scrollToBottomBtn) {
+        disconnect(m_scrollToBottomBtn, nullptr, this, nullptr);
+    }
+    if (m_prompt) {
+        disconnect(m_prompt, nullptr, this, nullptr);
+    }
+
+    // Clean up any running animations on scroll button
+    if (m_scrollToBottomBtn) {
+        if (auto *effect = qobject_cast<QGraphicsOpacityEffect *>(m_scrollToBottomBtn->graphicsEffect())) {
+            effect->deleteLater();
+        }
+        m_scrollToBottomBtn->setGraphicsEffect(nullptr);
+    }
+}
+
+void ChatWidget::addUserMessage(const QString &text)
+{
+    // Remove welcome widget if present
+    if (auto *welcome = m_transcriptContainer->findChild<QWidget *>(u"welcomeWidget"_s)) {
+        welcome->deleteLater();
+    }
+
+    // Auto-update thread title on the first user message
+    if (m_threadTitle && m_threadTitle->text() == i18n("New Thread")) {
+        QString title = text.trimmed().split(u'\n').first();
+        if (title.length() > 32) {
+            title = title.left(30) + u"…";
+        }
+        m_threadTitle->setText(title);
+    }
+
+    auto *card = new QWidget(m_transcriptContainer);
+    card->setStyleSheet(
+        u"QWidget {"
+        u"  background-color: #232326;"
+        u"  border: 1px solid #333338;"
+        u"  border-radius: 6px;"
+        u"}"_s);
+    auto *cardLayout = new QVBoxLayout(card);
+    cardLayout->setContentsMargins(10, 8, 10, 8);
+    cardLayout->setSpacing(4);
+
+    auto *headerLayout = new QHBoxLayout;
+    headerLayout->setContentsMargins(0, 0, 0, 0);
+
+    auto *header = new QLabel(i18n("YOU"), card);
+    header->setStyleSheet(u"color: #888888; font-size: 10px; font-weight: bold; letter-spacing: 0.5px; border: none; background: transparent;"_s);
+    headerLayout->addWidget(header);
+    headerLayout->addStretch();
+
+    auto *copyBtn = createCopyButton(text, card);
+    headerLayout->addWidget(copyBtn);
+    cardLayout->addLayout(headerLayout);
+
+    auto *msgLabel = new QLabel(card);
+    msgLabel->setWordWrap(true);
+    msgLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    msgLabel->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::MinimumExpanding);
+    msgLabel->setStyleSheet(u"color: #e4e4e4; font-size: 13px; line-height: 1.5; border: none; background: transparent;"_s);
+    msgLabel->setText(escape(text).replace(u"\n"_s, u"<br>"_s));
+    cardLayout->addWidget(msgLabel);
+
+    m_transcriptLayout->insertWidget(m_transcriptLayout->count() - 1, card);
+    forceScrollToBottom();
+}
+
+void ChatWidget::addActivityMessage(const QString &text)
+{
+    // Skip retry messages - they are shown in the info bar above the composer
+    if (text.startsWith(u"Retrying in "_s)) {
+        return;
+    }
+    auto *pill = new QLabel(escape(text), m_transcriptContainer);
+    pill->setStyleSheet(u"color: #777777; font-size: 11px; font-style: italic; padding: 2px 4px;"_s);
+    m_transcriptLayout->insertWidget(m_transcriptLayout->count() - 1, pill);
+    scrollToBottom();
+}
+
+void ChatWidget::setStreaming(const QString &text)
+{
+    m_streamText = text;
+    if (!m_activeAssistantWidget) {
+        m_activeAssistantWidget = new QWidget(m_transcriptContainer);
+        auto *layout = new QVBoxLayout(m_activeAssistantWidget);
+        layout->setContentsMargins(4, 4, 4, 4);
+        layout->setSpacing(4);
+
+        auto *headerLayout = new QHBoxLayout;
+        headerLayout->setContentsMargins(0, 0, 0, 0);
+
+        auto *icon = new QLabel(u"⚡"_s, m_activeAssistantWidget);
+        icon->setStyleSheet(u"color: #3b82f6; font-size: 12px;"_s);
+        headerLayout->addWidget(icon);
+
+        auto *header = new QLabel(i18n("KATE AI"), m_activeAssistantWidget);
+        header->setStyleSheet(u"color: #3b82f6; font-size: 10px; font-weight: bold; letter-spacing: 0.5px;"_s);
+        headerLayout->addWidget(header);
+        headerLayout->addStretch();
+
+        m_activeAssistantCopyBtn = createCopyButton(QString(), m_activeAssistantWidget);
+        headerLayout->addWidget(m_activeAssistantCopyBtn);
+        layout->addLayout(headerLayout);
+
+        // Collapsible hidden-reasoning block. Collapsed by default: the user
+        // sees the visible answer, not the internal chain-of-thought.
+        m_thinkingBlock = new QWidget(m_activeAssistantWidget);
+        m_thinkingBlock->setMaximumHeight(0);
+        auto *tbLayout = new QVBoxLayout(m_thinkingBlock);
+        tbLayout->setContentsMargins(0, 0, 0, 0);
+        tbLayout->setSpacing(0);
+
+        auto *tbHeader = new QHBoxLayout;
+        m_thinkingToggle = new QPushButton(u"\u25b4 "_s + i18n("Reasoning"), m_thinkingBlock);
+        m_thinkingToggle->setFlat(true);
+        m_thinkingToggle->setCursor(Qt::PointingHandCursor);
+        m_thinkingToggle->setStyleSheet(
+            u"QPushButton { color: #888888; font-size: 11px; font-style: italic; border: none; text-align: left; }"
+            u"QPushButton:hover { color: #aaaaaa; }"_s);
+        connect(m_thinkingToggle, &QPushButton::clicked, this, &ChatWidget::toggleThinking);
+        tbHeader->addWidget(m_thinkingToggle);
+        tbHeader->addStretch();
+        tbLayout->addLayout(tbHeader);
+
+        m_thinkingBrowser = new QTextBrowser(m_thinkingBlock);
+        m_thinkingBrowser->setReadOnly(true);
+        m_thinkingBrowser->setFrameShape(QFrame::NoFrame);
+        m_thinkingBrowser->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        m_thinkingBrowser->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        m_thinkingBrowser->setStyleSheet(
+            u"QTextBrowser { background: transparent; color: #888888; border: none;"
+            u"  font-style: italic; font-size: 12px; padding: 0 4px; }"_s);
+        m_thinkingBrowser->document()->setDefaultStyleSheet(
+            u"body { color: #888888; font-style: italic; font-size: 12px; margin: 0; padding: 0; }"
+            u"p { margin-bottom: 4px; }"_s);
+        tbLayout->addWidget(m_thinkingBrowser);
+        layout->addWidget(m_thinkingBlock);
+
+        // Structured plan checklist, rendered below the thinking block.
+        m_planBlock = new QWidget(m_activeAssistantWidget);
+        m_planBlock->hide();
+        m_planLayout = new QVBoxLayout(m_planBlock);
+        m_planLayout->setContentsMargins(4, 2, 4, 2);
+        m_planLayout->setSpacing(2);
+        auto *planLabel = new QLabel(i18n("Plan"), m_planBlock);
+        planLabel->setStyleSheet(u"color: #888888; font-size: 10px; font-weight: bold; letter-spacing: 0.5px;"_s);
+        m_planLayout->addWidget(planLabel);
+        layout->addWidget(m_planBlock);
+
+        m_activeAssistantBrowser = new QTextBrowser(m_activeAssistantWidget);
+        m_activeAssistantBrowser->setOpenExternalLinks(true);
+        m_activeAssistantBrowser->setFrameShape(QFrame::NoFrame);
+        m_activeAssistantBrowser->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        m_activeAssistantBrowser->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+        m_activeAssistantBrowser->setStyleSheet(u"background: transparent; color: #d4d4d4; border: none; padding: 0px;"_s);
+        m_activeAssistantBrowser->document()->setDefaultStyleSheet(
+            u"body { color: #d4d4d4; font-family: sans-serif; font-size: 13px; margin: 0; padding: 0; }"
+            u"pre { background-color: #222225; color: #e4e4e4; padding: 10px 12px; border-radius: 6px; border: 1px solid #333338; font-family: monospace; font-size: 12px; margin: 8px 0; }"
+            u"code { font-family: monospace; font-size: 12px; background-color: #28282d; color: #e4e4e4; padding: 2px 5px; border-radius: 3px; }"
+            u"p { margin-bottom: 8px; line-height: 1.5; }"
+            u"ul, ol { margin-bottom: 8px; padding-left: 20px; }"
+            u"li { margin-bottom: 4px; }"
+            u"blockquote { border-left: 3px solid #3b82f6; padding-left: 10px; color: #888; margin: 8px 0; }"
+            u"a { color: #3b82f6; text-decoration: none; }"_s);
+
+        layout->addWidget(m_activeAssistantBrowser);
+        m_transcriptLayout->insertWidget(m_transcriptLayout->count() - 1, m_activeAssistantWidget);
+    }
+
+    m_activeAssistantBrowser->setMarkdown(m_streamText);
+    // Defer height calculation to allow layout to settle and browser to get proper width
+    QTimer::singleShot(0, this, [thisWeak = QPointer<ChatWidget>(this)]() {
+        if (thisWeak && thisWeak->m_activeAssistantBrowser) {
+            const int docH = static_cast<int>(thisWeak->m_activeAssistantBrowser->document()->size().height()) + 16;
+            thisWeak->m_activeAssistantBrowser->setFixedHeight(std::max(30, docH));
+            thisWeak->scrollToBottom();
+        }
+    });
+}
+
+void ChatWidget::addThinkingBlock(const QString &text)
+{
+    // Hidden reasoning may arrive before the first visible text delta, so
+    // ensure the active assistant widget (and its thinking/plan blocks) exist.
+    if (!m_activeAssistantWidget) {
+        setStreaming(m_streamText);
+    }
+    if (!m_thinkingBrowser) {
+        return;
+    }
+    m_thinkingBuffer = text;
+    renderThinkingHtml();
+    m_thinkingExpanded = true;
+    m_thinkingToggle->setText(u"\u25be "_s + i18n("Reasoning"));
+    scrollToBottom();
+}
+
+void ChatWidget::appendThinkingDelta(const QString &delta)
+{
+    m_thinkingBuffer += delta;
+    renderThinkingHtml();
+}
+
+void ChatWidget::renderThinkingHtml()
+{
+    if (!m_thinkingBrowser) {
+        return;
+    }
+    // Apply a 25-line FIFO limit: keep only the last 25 lines so the
+    // reasoning block stays bounded as the model streams its chain-of-thought.
+    constexpr int kMaxLines = 25;
+    const QString html = markdownToFifoHtml(m_thinkingBuffer, kMaxLines);
+    m_thinkingBrowser->setHtml(html);
+    const int h = static_cast<int>(m_thinkingBrowser->document()->size().height()) + 12;
+    m_thinkingBrowser->setFixedHeight(std::max(20, h));
+    if (m_thinkingBlock) {
+        m_thinkingBlock->setMaximumHeight(std::max(20, h));
+    }
+}
+
+QString ChatWidget::markdownToFifoHtml(const QString &text, int maxLines)
+{
+    // Split on newlines, keep only the last maxLines, then render the result
+    // as HTML (markdown + escaped text) so the reasoning block displays
+    // formatted content rather than raw markdown/HTML source.
+    const QStringList lines = text.split(u'\n');
+    QString kept;
+    if (lines.size() <= maxLines) {
+        kept = text;
+    } else {
+        kept = lines.mid(lines.size() - maxLines).join(u'\n');
+    }
+
+    QTextDocument doc;
+    doc.setMarkdown(kept);
+    return doc.toHtml();
+}
+
+void ChatWidget::collapseThinkingBlock()
+{
+    if (!m_thinkingBlock) {
+        return;
+    }
+    // Collapse the hidden reasoning once the visible answer starts streaming,
+    // so the user is not forced to wade through chain-of-thought.
+    m_thinkingBlock->setMaximumHeight(0);
+    m_thinkingExpanded = false;
+    if (m_thinkingToggle) {
+        m_thinkingToggle->setText(u"\u25b4 "_s + i18n("Reasoning"));
+    }
+}
+
+void ChatWidget::toggleThinking()
+{
+    if (!m_thinkingBlock) {
+        return;
+    }
+    m_thinkingExpanded = !m_thinkingExpanded;
+    if (m_thinkingExpanded) {
+        const int h = static_cast<int>(m_thinkingBrowser->document()->size().height()) + 12;
+        m_thinkingBlock->setMaximumHeight(std::max(20, h));
+        m_thinkingToggle->setText(u"\u25be "_s + i18n("Reasoning"));
+    } else {
+        m_thinkingBlock->setMaximumHeight(0);
+        m_thinkingToggle->setText(u"\u25b4 "_s + i18n("Reasoning"));
+    }
+}
+
+void ChatWidget::addPlanChecklist(const QJsonArray &plan)
+{
+    if (!m_planBlock || !m_planLayout) {
+        return;
+    }
+    // Remove and delete all existing plan step widgets before rebuilding.
+    // m_planSteps.clear() only drops the QCheckBox* keys from the hash; it
+    // does not delete the widgets themselves, so omitting this loop causes
+    // QCheckBox children to accumulate in m_planLayout on every plan update.
+    m_planSteps.clear();
+    while (m_planLayout->count() > 1) { // keep the "Plan" header label (index 0)
+        QLayoutItem *item = m_planLayout->takeAt(1);
+        if (item) {
+            if (item->widget()) {
+                item->widget()->deleteLater();
+            }
+            delete item;
+        }
+    }
+    for (const QJsonValue &v : plan) {
+        const QJsonObject o = v.toObject();
+        const QString desc = o.value(u"description"_s).toString();
+        const bool completed = o.value(u"completed"_s).toBool();
+        auto *cb = new QCheckBox(desc, m_planBlock);
+        cb->setChecked(completed);
+        cb->setDisabled(true);
+        cb->setStyleSheet(u"QCheckBox { color: #b0b0b0; font-size: 12px; }"
+                          u"QCheckBox::indicator { width: 14px; height: 14px; }"_s);
+        m_planLayout->addWidget(cb);
+        m_planSteps.insert(cb, o.value(u"id"_s).toString());
+    }
+    m_planBlock->show();
+    scrollToBottom();
+}
+
+void ChatWidget::markPlanStepCompleted(const QString &stepId)
+{
+    for (QCheckBox *cb : m_planSteps.keys()) {
+        if (m_planSteps.value(cb) == stepId) {
+            cb->setChecked(true);
+            break;
+        }
+    }
+}
+
+void ChatWidget::freezeStreaming()
+{
+    if (m_activeAssistantBrowser && !m_streamText.isEmpty()) {
+        m_activeAssistantBrowser->setMarkdown(m_streamText);
+        // Defer height calculation to allow layout to settle
+        QTimer::singleShot(0, this, [thisWeak = QPointer<ChatWidget>(this)]() {
+            if (thisWeak && thisWeak->m_activeAssistantBrowser) {
+                const int docH = static_cast<int>(thisWeak->m_activeAssistantBrowser->document()->size().height()) + 16;
+                thisWeak->m_activeAssistantBrowser->setFixedHeight(std::max(30, docH));
+            }
+        });
+    }
+    if (m_activeAssistantCopyBtn) {
+        m_activeAssistantCopyBtn->setProperty("copyText", m_streamText);
+        m_activeAssistantCopyBtn = nullptr;
+    }
+    collapseThinkingBlock();
+    m_activeAssistantWidget = nullptr;
+    m_activeAssistantBrowser = nullptr;
+    m_thinkingBlock = nullptr;
+    m_thinkingBrowser = nullptr;
+    m_thinkingToggle = nullptr;
+    m_planBlock = nullptr;
+    m_planLayout = nullptr;
+    m_thinkingBuffer.clear();
+    m_streamText.clear();
+}
+
+void ChatWidget::scrollToBottom()
+{
+    if (m_userScrolledUp) {
+        if (m_scrollToBottomBtn) {
+            updateScrollButtonPosition();
+            m_scrollToBottomBtn->show();
+            m_scrollToBottomBtn->raise();
+        }
+        return;
+    }
+    forceScrollToBottom();
+}
+
+void ChatWidget::forceScrollToBottom()
+{
+    m_userScrolledUp = false;
+    if (m_scrollToBottomBtn) {
+        m_scrollToBottomBtn->hide();
+    }
+    QTimer::singleShot(10, this, [thisWeak = QPointer<ChatWidget>(this)]() {
+        if (thisWeak && thisWeak->m_scrollArea) {
+            auto *sb = thisWeak->m_scrollArea->verticalScrollBar();
+            sb->setValue(sb->maximum());
+        }
+    });
+}
+
+void ChatWidget::setThinkingIndicator(bool show)
+{
+    if (!m_thinkingIndicator) {
+        return;
+    }
+    if (show && !m_isThinking) {
+        m_isThinking = true;
+        m_thinkingIndicator->show();
+    } else if (!show && m_isThinking) {
+        m_isThinking = false;
+        m_thinkingIndicator->hide();
+    }
+}
+
+void ChatWidget::setWorkingIndicator(bool show)
+{
+    if (!m_workingIndicator) {
+        return;
+    }
+    if (show && !m_isWorking) {
+        m_isWorking = true;
+        m_workingIndicator->show();
+    } else if (!show && m_isWorking) {
+        m_isWorking = false;
+        m_workingIndicator->hide();
+    }
+}
+
+void ChatWidget::updateScrollButtonPosition()
+{
+    if (!m_scrollToBottomBtn || !m_scrollArea) {
+        return;
+    }
+    const int btnW = m_scrollToBottomBtn->sizeHint().width() + 16;
+    const int btnH = 28;
+    const int x = (m_scrollArea->width() - btnW) / 2;
+    const int y = m_scrollArea->height() - btnH - 12;
+    m_scrollToBottomBtn->setGeometry(x, y, btnW, btnH);
+    m_scrollToBottomBtn->raise();
+}
+
+void ChatWidget::animateScrollButtonShow()
+{
+    if (!m_scrollToBottomBtn) {
+        return;
+    }
+    if (m_scrollToBottomBtn->isVisible()) {
+        return;
+    }
+    m_scrollToBottomBtn->show();
+    updateScrollButtonPosition();
+
+    // Fade-in animation using QGraphicsOpacityEffect
+    auto *effect = new QGraphicsOpacityEffect(m_scrollToBottomBtn);
+    m_scrollToBottomBtn->setGraphicsEffect(effect);
+    effect->setOpacity(0.0);
+
+    auto *anim = new QPropertyAnimation(effect, "opacity", m_scrollToBottomBtn);
+    anim->setDuration(150);
+    anim->setStartValue(0.0);
+    anim->setEndValue(1.0);
+    anim->setEasingCurve(QEasingCurve::OutCubic);
+    connect(anim, &QPropertyAnimation::finished, effect, &QObject::deleteLater);
+    connect(anim, &QPropertyAnimation::finished, anim, &QObject::deleteLater);
+    anim->start(QAbstractAnimation::DeleteWhenStopped);
+}
+
+void ChatWidget::animateScrollButtonHide()
+{
+    if (!m_scrollToBottomBtn || !m_scrollToBottomBtn->isVisible()) {
+        return;
+    }
+
+    // Fade-out animation
+    auto *effect = qobject_cast<QGraphicsOpacityEffect *>(m_scrollToBottomBtn->graphicsEffect());
+    if (!effect) {
+        effect = new QGraphicsOpacityEffect(m_scrollToBottomBtn);
+        m_scrollToBottomBtn->setGraphicsEffect(effect);
+    }
+    effect->setOpacity(1.0);
+
+    auto *anim = new QPropertyAnimation(effect, "opacity", m_scrollToBottomBtn);
+    anim->setDuration(150);
+    anim->setStartValue(1.0);
+    anim->setEndValue(0.0);
+    anim->setEasingCurve(QEasingCurve::InCubic);
+    connect(anim, &QPropertyAnimation::finished, this, [this, effect, anim]() {
+        if (m_scrollToBottomBtn) {
+            m_scrollToBottomBtn->hide();
+            m_scrollToBottomBtn->setGraphicsEffect(nullptr);
+        }
+        effect->deleteLater();
+        anim->deleteLater();
+    });
+    anim->start(QAbstractAnimation::DeleteWhenStopped);
+}
+
+void ChatWidget::resizeEvent(QResizeEvent *event)
+{
+    QWidget::resizeEvent(event);
+    updateScrollButtonPosition();
+}
+
+void ChatWidget::setCompletionWords(const QStringList &words)
+{
+    if (m_prompt) {
+        m_prompt->setCompletionWords(words);
+    }
+}
+
+QPushButton *ChatWidget::createCopyButton(const QString &textToCopy, QWidget *parent)
+{
+    auto *btn = new QPushButton(i18n("Copy"), parent);
+    btn->setProperty("copyText", textToCopy);
+    btn->setCursor(Qt::PointingHandCursor);
+    btn->setFixedHeight(22);
+    btn->setStyleSheet(
+        u"QPushButton {"
+        u"  color: #888888;"
+        u"  background-color: transparent;"
+        u"  border: 1px solid #38383e;"
+        u"  border-radius: 4px;"
+        u"  padding: 2px 8px;"
+        u"  font-size: 11px;"
+        u"}"
+        u"QPushButton:hover {"
+        u"  color: #ffffff;"
+        u"  background-color: #2a2a2e;"
+        u"  border-color: #4a4a52;"
+        u"}"_s);
+
+    connect(btn, &QPushButton::clicked, this, [btn, this]() {
+        QString text = btn->property("copyText").toString();
+        if (text.isEmpty()) {
+            text = m_streamText;
+        }
+        QGuiApplication::clipboard()->setText(text);
+        btn->setText(i18n("✓ Copied"));
+        btn->setStyleSheet(
+            u"QPushButton {"
+            u"  color: #22c55e;"
+            u"  background-color: #1a3320;"
+            u"  border: 1px solid #22c55e;"
+            u"  border-radius: 4px;"
+            u"  padding: 2px 8px;"
+            u"  font-size: 11px;"
+            u"}"_s);
+        QTimer::singleShot(2000, btn, [btnWeak = QPointer<QPushButton>(btn)]() {
+            if (btnWeak) {
+                btnWeak->setText(i18n("Copy"));
+                btnWeak->setStyleSheet(
+                    u"QPushButton {"
+                    u"  color: #888888;"
+                    u"  background-color: transparent;"
+                    u"  border: 1px solid #38383e;"
+                    u"  border-radius: 4px;"
+                    u"  padding: 2px 8px;"
+                    u"  font-size: 11px;"
+                    u"}"
+                    u"QPushButton:hover {"
+                    u"  color: #ffffff;"
+                    u"  background-color: #2a2a2e;"
+                    u"  border-color: #4a4a52;"
+                    u"}"_s);
+            }
+        });
+    });
+    return btn;
+}
+
+QWidget *ChatWidget::createWelcomeWidget()
+{
+    auto *welcome = new QWidget(m_transcriptContainer);
+    welcome->setObjectName(u"welcomeWidget"_s);
+    auto *wLayout = new QVBoxLayout(welcome);
+    wLayout->setContentsMargins(16, 16, 16, 12);
+    wLayout->setSpacing(8);
+    wLayout->setAlignment(Qt::AlignHCenter | Qt::AlignTop);
+
+    auto *wIcon = new QLabel(u"⚡"_s, welcome);
+    wIcon->setAlignment(Qt::AlignCenter);
+    wIcon->setStyleSheet(u"font-size: 24px; color: #3b82f6;"_s);
+    wLayout->addWidget(wIcon);
+
+    auto *wTitle = new QLabel(i18n("Kate AI Agent"), welcome);
+    wTitle->setAlignment(Qt::AlignCenter);
+    wTitle->setStyleSheet(u"color: #e4e4e4; font-size: 14px; font-weight: bold;"_s);
+    wLayout->addWidget(wTitle);
+
+    auto *wSub = new QLabel(i18n("Ask questions, edit code, and explore your workspace."), welcome);
+    wSub->setAlignment(Qt::AlignCenter);
+    wSub->setStyleSheet(u"color: #777777; font-size: 11px; margin-bottom: 8px;"_s);
+    wLayout->addWidget(wSub);
+
+    // Starter suggestion chips
+    auto *chipsLayout = new QVBoxLayout;
+    chipsLayout->setSpacing(6);
+
+    const struct Suggestion {
+        QString icon;
+        QString title;
+        QString prompt;
+    } suggestions[] = {
+        {u"🔍"_s, i18n("Explain active file"), i18n("Explain the active file and its architecture.")},
+        {u"🐛"_s, i18n("Find bugs & edge cases"), i18n("Inspect the current code for bugs, edge cases, and potential improvements.")},
+        {u"🧪"_s, i18n("Generate tests"), i18n("Write comprehensive unit tests for the code in this file.")}
+    };
+
+    for (const auto &s : suggestions) {
+        auto *btn = new QPushButton(u"%1  %2"_s.arg(s.icon, s.title), welcome);
+        btn->setCursor(Qt::PointingHandCursor);
+        btn->setStyleSheet(
+            u"QPushButton {"
+            u"  background-color: #202024;"
+            u"  color: #cccccc;"
+            u"  border: 1px solid #333338;"
+            u"  border-radius: 6px;"
+            u"  padding: 6px 10px;"
+            u"  font-size: 11px;"
+            u"  text-align: left;"
+            u"}"
+            u"QPushButton:hover {"
+            u"  background-color: #2a2a30;"
+            u"  border-color: #4a4a52;"
+            u"  color: #ffffff;"
+            u"}"_s);
+        connect(btn, &QPushButton::clicked, this, [this, prompt = s.prompt]() {
+            ask(prompt);
+        });
+        chipsLayout->addWidget(btn);
+    }
+
+    wLayout->addLayout(chipsLayout);
+    return welcome;
+}
+
+void ChatWidget::showInfoMessage(const QString &message, bool isError)
+{
+    if (!m_infoBar) {
+        return;
+    }
+    if (isError) {
+        m_infoBar->setStyleSheet(u"QLabel { color: #ff8888; font-size: 12px; font-weight: bold; padding: 8px 12px; background: transparent; border: none; }"_s);
+    } else {
+        // Bright brown/orange for retries
+        m_infoBar->setStyleSheet(u"QLabel { color: #ffaa00; font-size: 12px; font-weight: bold; padding: 8px 12px; background: transparent; border: none; }"_s);
+    }
+    m_infoBar->setText(message);
+    m_infoBar->show();
+
+    // Auto-hide after 10 seconds for retries, keep errors visible until dismissed
+    if (!isError) {
+        QTimer::singleShot(10000, this, [thisWeak = QPointer<ChatWidget>(this), message]() {
+            if (thisWeak && thisWeak->m_infoBar && thisWeak->m_infoBar->text() == message) {
+                thisWeak->m_infoBar->hide();
+            }
+        });
+    }
+}
+
+void ChatWidget::newChat()
+{
+    m_agent.abort();
+    m_agent.resetConversation();
+    m_agent.clearSession();
+    m_permissionBar->hideBar();
+    if (m_infoBar) {
+        m_infoBar->hide();
+    }
+
+    // Clear transcript items except the bottom stretch and indicators
+    QLayoutItem *child;
+    while (m_transcriptLayout->count() > 2 && (child = m_transcriptLayout->takeAt(0))) {
+        if (child->widget()) {
+            child->widget()->deleteLater();
+        }
+        delete child;
+    }
+
+    m_toolCallWidgets.clear();
+    m_activeAssistantWidget = nullptr;
+    m_activeAssistantBrowser = nullptr;
+    // Null out all thinking/plan pointers — the widgets are owned by
+    // m_activeAssistantWidget and were already queued for deletion above.
+    // Leaving these dangling would cause crashes if any signal fires between
+    // now and the next streaming turn creating fresh widgets.
+    m_thinkingBlock = nullptr;
+    m_thinkingBrowser = nullptr;
+    m_thinkingToggle = nullptr;
+    m_thinkingExpanded = false;
+    m_planBlock = nullptr;
+    m_planLayout = nullptr;
+    m_planSteps.clear();
+    m_thinkingBuffer.clear();
+    m_streamText.clear();
+
+    // Recreate welcome widget at the top
+    m_transcriptLayout->insertWidget(0, createWelcomeWidget());
+
+    if (m_threadTitle) {
+        m_threadTitle->setText(i18n("New Thread"));
+    }
+    m_prompt->clear();
+    m_prompt->setEnabled(true);
+    updateSendButtonState();
+    updateTokenDisplay();
+    // Scroll to TOP to show welcome widget for new chat
+    if (m_scrollArea) {
+        m_scrollArea->verticalScrollBar()->setValue(0);
+    }
+    m_prompt->setFocus();
+}
+
+void ChatWidget::setSettings(const Settings &settings)
+{
+    m_settings = settings;
+    m_preferredProvider = settings.provider;
+    m_modelCatalog.clear();
+    m_updatingCombos = true;
+
+    const int permIndex = m_permission->findData(permissionModeId(settings.permissionMode));
+    if (permIndex >= 0) {
+        m_permission->setCurrentIndex(permIndex);
+    }
+    const int sandboxIndex = m_sandbox->findData(sandboxProfileId(settings.sandbox));
+    if (sandboxIndex >= 0) {
+        m_sandbox->setCurrentIndex(sandboxIndex);
+    }
+    const int modeIndex = m_mode->findData(settings.planMode);
+    if (modeIndex >= 0) {
+        m_mode->setCurrentIndex(modeIndex);
+    }
+    m_thinking->setChecked(settings.thinkingMode);
+    updateThinkingButtonStyle();
+    updateReasoningEffortButton();
+    m_updatingCombos = false;
+
+    // Propagate settings to agent
+    m_agent.setSettings(settings);
+
+    refreshProviders();
+    updateModelSelectorLabel();
+    updateTokenDisplay();
+    updateReasoningEffortButton();
+
+    for (Provider provider : {Provider::Grok, Provider::OpenAI, Provider::OpenRouter, Provider::OpenAICompatible, Provider::ClaudeCompatible}) {
+        Settings providerSettings = settings;
+        providerSettings.provider = provider;
+        if (!apiKeyFor(providerSettings).trimmed().isEmpty()) {
+            m_agent.fetchModels(provider);
+        }
+    }
+}
+
+void ChatWidget::applyProviderToCombos()
+{
+    refreshModels();
+    updateModelSelectorLabel();
+    updateTokenDisplay();
+}
+
+void ChatWidget::refreshProviders()
+{
+    const bool wasUpdating = m_updatingCombos;
+    m_updatingCombos = true;
+    m_provider->clear();
+    for (Provider provider : {Provider::Grok, Provider::OpenAI, Provider::OpenRouter, Provider::OpenAICompatible, Provider::ClaudeCompatible}) {
+        if (m_modelCatalog.contains(provider) || !apiKeyFor(m_settings).trimmed().isEmpty()) {
+            m_provider->addItem(providerLabel(provider), providerId(provider));
+        }
+    }
+    const int index = m_provider->findData(providerId(m_preferredProvider));
+    if (index >= 0) {
+        m_provider->setCurrentIndex(index);
+        m_settings.provider = m_preferredProvider;
+    } else if (m_provider->count() > 0) {
+        m_provider->setCurrentIndex(0);
+        m_settings.provider = providerFromId(m_provider->currentData().toString());
+    } else {
+        m_provider->addItem(i18n("Configure an API key…"), QVariant());
+        m_provider->setCurrentIndex(0);
+    }
+    m_provider->setEnabled(!m_modelCatalog.isEmpty());
+    m_updatingCombos = wasUpdating;
+    refreshModels();
+    updateModelSelectorLabel();
+    updateTokenDisplay();
+    m_agent.setSettings(m_settings);
+}
+
+void ChatWidget::refreshModels()
+{
+    const bool wasUpdating = m_updatingCombos;
+    m_updatingCombos = true;
+    m_model->clear();
+    const QStringList allModels = m_modelCatalog.value(m_settings.provider, defaultModels(m_settings.provider));
+    QStringList models = allModels;
+    if (!m_modelFilter.isEmpty()) {
+        models.clear();
+        for (const QString &m : allModels) {
+            if (m.contains(m_modelFilter, Qt::CaseInsensitive)) {
+                models.append(m);
+            }
+        }
+    }
+    m_model->addItems(models);
+    m_model->setEnabled(!allModels.isEmpty());
+
+    // Prefer the model already stored in settings. Only fall back to the first
+    // entry in the list when no model has been chosen yet. Overwriting a valid
+    // selection is wrong for providers like OpenRouter whose live catalog is
+    // much larger than the hard-coded defaults — otherwise picking a model
+    // from the menu gets reset as soon as the catalog is cleared and
+    // re-fetched (settingsChanged → setSettings → refreshModels).
+    const QString currentModel = modelFor(m_settings).trimmed();
+    const int index = currentModel.isEmpty() ? -1 : m_model->findText(currentModel);
+    if (index >= 0) {
+        m_model->setCurrentIndex(index);
+    } else if (currentModel.isEmpty() && !models.isEmpty()) {
+        m_model->setCurrentIndex(0);
+        const QString selectedModel = models.at(0);
+        switch (m_settings.provider) {
+            case Provider::OpenAI:
+                m_settings.openaiModel = selectedModel;
+                break;
+            case Provider::OpenRouter:
+                m_settings.openrouterModel = selectedModel;
+                break;
+            case Provider::OpenAICompatible:
+                m_settings.openaiCompatibleModel = selectedModel;
+                break;
+            case Provider::ClaudeCompatible:
+                m_settings.claudeCompatibleModel = selectedModel;
+                break;
+            case Provider::Grok:
+            default:
+                m_settings.grokModel = selectedModel;
+                break;
+        }
+    } else {
+        // Keep the stored model even if it is not in the (possibly incomplete)
+        // list yet — e.g. right after catalog clear while fetchModels is in flight.
+        m_model->setCurrentIndex(-1);
+        if (!currentModel.isEmpty() && m_model->isEditable()) {
+            m_model->setEditText(currentModel);
+        }
+    }
+    m_updatingCombos = wasUpdating;
+    updateModelSelectorLabel();
+    updateTokenDisplay();
+}
+void ChatWidget::updateModelSelectorLabel()
+{
+    if (!m_modelSelector) return;
+    const QString pLabel = providerLabel(m_settings.provider);
+    const QString model = modelFor(m_settings);
+    QString label = u"%1: %2"_s.arg(pLabel, model.isEmpty() ? i18n("Select model") : model);
+    if (!m_settings.reasoningEffort.isEmpty()) {
+        label += u" · %1"_s.arg(m_settings.reasoningEffort);
+    }
+    m_modelSelector->setText(label + u"  ▾"_s);
+}
+
+void ChatWidget::updateTokenDisplay()
+{
+    if (!m_tokenCount) return;
+    const QString m = modelFor(m_settings);
+    m_tokenCount->setText(m.isEmpty() ? QString() : m);
+}
+
+void ChatWidget::updateThinkingButtonStyle()
+{
+    if (!m_thinking) return;
+    if (m_thinking->isChecked()) {
+        m_thinking->setText(u"💡"_s);
+        m_thinking->setStyleSheet(
+            u"QPushButton {"
+            u"  color: #ffffff;"
+            u"  background-color: #1e7e34;"
+            u"  border: 1px solid #2d9f42;"
+            u"  border-radius: 4px;"
+            u"  font-size: 14px;"
+            u"}"
+            u"QPushButton:hover {"
+            u"  background-color: #2d9f42;"
+            u"  border-color: #3ecf52;"
+            u"}"_s);
+    } else {
+        m_thinking->setText(u"💭"_s);
+        m_thinking->setStyleSheet(
+            u"QPushButton {"
+            u"  color: #888888;"
+            u"  background-color: #2e2e32;"
+            u"  border: 1px solid #3c3c40;"
+            u"  border-radius: 4px;"
+            u"  font-size: 14px;"
+            u"}"
+            u"QPushButton:hover {"
+            u"  background-color: #3a3a3e;"
+            u"  border-color: #4a4a50;"
+            u"  color: #aaaaaa;"
+            u"}"_s);
+    }
+}
+
+void ChatWidget::updateReasoningEffortButton()
+{
+    if (!m_reasoningEffort) return;
+
+    const bool supports = modelSupportsReasoningEffort();
+
+    QString text;
+    QString toolTip;
+    if (m_settings.reasoningEffort.isEmpty()) {
+        text = u"🧠"_s;
+        toolTip = supports ? i18n("Reasoning effort: Auto (provider default)") : i18n("Reasoning effort: not supported by this model");
+    } else if (m_settings.reasoningEffort == u"minimal"_s) {
+        text = u"1"_s;
+        toolTip = i18n("Reasoning effort: Minimal");
+    } else if (m_settings.reasoningEffort == u"low"_s) {
+        text = u"2"_s;
+        toolTip = i18n("Reasoning effort: Low");
+    } else if (m_settings.reasoningEffort == u"medium"_s) {
+        text = u"3"_s;
+        toolTip = i18n("Reasoning effort: Medium");
+    } else if (m_settings.reasoningEffort == u"high"_s) {
+        text = u"4"_s;
+        toolTip = i18n("Reasoning effort: High");
+    } else {
+        text = u"🧠"_s;
+        toolTip = i18n("Reasoning effort: %1", m_settings.reasoningEffort);
+    }
+
+    m_reasoningEffort->setText(text);
+    m_reasoningEffort->setToolTip(toolTip);
+
+    // Always visible next to the model label. Greyed out when the current
+    // model does not expose a reasoning_effort parameter.
+    if (!supports) {
+        m_reasoningEffort->setStyleSheet(
+            u"QPushButton {"
+            u"  color: #666666;"
+            u"  background-color: #1f1f22;"
+            u"  border: 1px solid #333338;"
+            u"  border-radius: 4px;"
+            u"  font-size: 12px;"
+            u"  font-weight: bold;"
+            u"}"
+            u"QPushButton:hover {"
+            u"  background-color: #2a2a2e;"
+            u"  border-color: #3c3c40;"
+            u"  color: #888888;"
+            u"}"_s);
+    } else if (m_settings.reasoningEffort.isEmpty()) {
+        m_reasoningEffort->setStyleSheet(
+            u"QPushButton {"
+            u"  color: #888888;"
+            u"  background-color: #2e2e32;"
+            u"  border: 1px solid #3c3c40;"
+            u"  border-radius: 4px;"
+            u"  font-size: 12px;"
+            u"  font-weight: bold;"
+            u"}"
+            u"QPushButton:hover {"
+            u"  background-color: #3a3a3e;"
+            u"  border-color: #4a4a50;"
+            u"  color: #cccccc;"
+            u"}"_s);
+    } else {
+        m_reasoningEffort->setStyleSheet(
+            u"QPushButton {"
+            u"  color: #ffffff;"
+            u"  background-color: #007acc;"
+            u"  border: 1px solid #0099ff;"
+            u"  border-radius: 4px;"
+            u"  font-size: 12px;"
+            u"  font-weight: bold;"
+            u"}"
+            u"QPushButton:hover {"
+            u"  background-color: #0099ff;"
+            u"  border-color: #33bbff;"
+            u"}"_s);
+    }
+}
+
+bool ChatWidget::modelSupportsReasoningEffort() const
+{
+    const QString model = modelFor(m_settings).toLower();
+    const Provider provider = m_settings.provider;
+
+    // Grok models with "reasoning" in the name
+    if (provider == Provider::Grok || provider == Provider::OpenRouter) {
+        if (model.contains(u"reasoning"_s)) {
+            return true;
+        }
+    }
+
+    // OpenAI o1, o3, o4 models support reasoning effort
+    if (provider == Provider::OpenAI || provider == Provider::OpenRouter) {
+        if (model.startsWith(u"o1"_s) || model.startsWith(u"o3"_s) || model.startsWith(u"o4"_s)) {
+            return true;
+        }
+    }
+
+    // Check for known reasoning models in the catalog
+    const QStringList models = m_modelCatalog.value(provider, defaultModels(provider));
+    for (const QString &m : models) {
+        if (m.toLower() == model && (m.toLower().contains(u"reasoning"_s) || m.toLower().startsWith(u"o1"_s) || m.toLower().startsWith(u"o3"_s) || m.toLower().startsWith(u"o4"_s))) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+void ChatWidget::showReasoningEffortMenu()
+{
+    if (!m_reasoningEffort || !modelSupportsReasoningEffort()) {
+        return;
+    }
+
+    QMenu menu(this);
+    menu.setStyleSheet(
+        u"QMenu {"
+        u"  background-color: #252528;"
+        u"  color: #cccccc;"
+        u"  border: 1px solid #3c3c40;"
+        u"  border-radius: 6px;"
+        u"  padding: 4px;"
+        u"}"
+        u"QMenu::item {"
+        u"  padding: 6px 18px 6px 12px;"
+        u"  border-radius: 4px;"
+        u"}"
+        u"QMenu::item:selected {"
+        u"  background-color: #007acc;"
+        u"  color: #ffffff;"
+        u"}"
+        u"QMenu::separator {"
+        u"  height: 1px;"
+        u"  background-color: #38383e;"
+        u"  margin: 4px 0;"
+        u"}"_s);
+
+    auto *reasoningGroup = new QActionGroup(this);
+    const QStringList reasoningLevels = {QString(), QStringLiteral("minimal"), QStringLiteral("low"), QStringLiteral("medium"), QStringLiteral("high")};
+    const QStringList reasoningLabels = {i18n("Auto (provider default)"), i18n("Minimal"), i18n("Low"), i18n("Medium"), i18n("High")};
+    const QStringList reasoningIcons = {u"🧠"_s, u"1"_s, u"2"_s, u"3"_s, u"4"_s};
+
+    for (int i = 0; i < reasoningLevels.size(); ++i) {
+        auto *action = menu.addAction(reasoningIcons[i] + u"  "_s + reasoningLabels[i]);
+        action->setCheckable(true);
+        action->setChecked(m_settings.reasoningEffort == reasoningLevels[i]);
+        action->setData(reasoningLevels[i]);
+        reasoningGroup->addAction(action);
+        connect(action, &QAction::triggered, this, [this, effort = reasoningLevels[i]]() {
+            m_settings.reasoningEffort = effort;
+            updateReasoningEffortButton();
+            updateModelSelectorLabel();
+            m_agent.setSettings(m_settings);
+            Q_EMIT settingsChanged(m_settings);
+        });
+    }
+
+    menu.exec(m_reasoningEffort->mapToGlobal(QPoint(0, m_reasoningEffort->height() + 2)));
+}
+
+void ChatWidget::showModelMenu()
+{
+    QMenu menu(this);
+    menu.setStyleSheet(
+        u"QMenu {"
+        u"  background-color: #252528;"
+        u"  color: #cccccc;"
+        u"  border: 1px solid #3c3c40;"
+        u"  border-radius: 6px;"
+        u"  padding: 4px;"
+        u"}"
+        u"QMenu::item {"
+        u"  padding: 6px 18px 6px 12px;"
+        u"  border-radius: 4px;"
+        u"}"
+        u"QMenu::item:selected {"
+        u"  background-color: #007acc;"
+        u"  color: #ffffff;"
+        u"}"
+        u"QMenu::separator {"
+        u"  height: 1px;"
+        u"  background-color: #38383e;"
+        u"  margin: 4px 0;"
+        u"}"_s);
+
+    const QList<Provider> providers = {
+        Provider::Grok,
+        Provider::OpenAI,
+        Provider::OpenRouter,
+        Provider::OpenAICompatible,
+        Provider::ClaudeCompatible
+    };
+
+    for (Provider p : providers) {
+        auto *pMenu = menu.addMenu(providerLabel(p));
+        pMenu->setStyleSheet(menu.styleSheet());
+        const QStringList models = m_modelCatalog.value(p, defaultModels(p));
+        const QString currentModel = modelFor(m_settings);
+
+        for (const QString &m : models) {
+            auto *act = pMenu->addAction(m);
+            act->setCheckable(true);
+            act->setChecked(m_settings.provider == p && currentModel == m);
+            connect(act, &QAction::triggered, this, [this, p, m]() {
+                m_settings.provider = p;
+                m_preferredProvider = p;
+                switch (p) {
+                case Provider::OpenAI:
+                    m_settings.openaiModel = m;
+                    break;
+                case Provider::OpenRouter:
+                    m_settings.openrouterModel = m;
+                    break;
+                case Provider::OpenAICompatible:
+                    m_settings.openaiCompatibleModel = m;
+                    break;
+                case Provider::ClaudeCompatible:
+                    m_settings.claudeCompatibleModel = m;
+                    break;
+                case Provider::Grok:
+                default:
+                    m_settings.grokModel = m;
+                    break;
+                }
+                updateModelSelectorLabel();
+                updateTokenDisplay();
+                applyProviderToCombos();
+                updateReasoningEffortButton();
+                m_agent.setSettings(m_settings);
+                Q_EMIT settingsChanged(m_settings);
+            });
+        }
+    }
+
+    menu.addSeparator();
+
+    // Reasoning Effort submenu
+    auto *reasoningMenu = menu.addMenu(i18n("Reasoning Effort"));
+    reasoningMenu->setStyleSheet(menu.styleSheet());
+    auto *reasoningGroup = new QActionGroup(this);
+    const QStringList reasoningLevels = {QString(), QStringLiteral("minimal"), QStringLiteral("low"), QStringLiteral("medium"), QStringLiteral("high")};
+    const QStringList reasoningLabels = {i18n("Default (Auto)"), i18n("Minimal"), i18n("Low"), i18n("Medium"), i18n("High")};
+    for (int i = 0; i < reasoningLevels.size(); ++i) {
+        auto *action = reasoningMenu->addAction(reasoningLabels[i]);
+        action->setCheckable(true);
+        action->setChecked(m_settings.reasoningEffort == reasoningLevels[i]);
+        action->setData(reasoningLevels[i]);
+        reasoningGroup->addAction(action);
+        connect(action, &QAction::triggered, this, [this, effort = reasoningLevels[i]]() {
+            m_settings.reasoningEffort = effort;
+            updateModelSelectorLabel();
+            updateReasoningEffortButton();
+            m_agent.setSettings(m_settings);
+            Q_EMIT settingsChanged(m_settings);
+        });
+    }
+
+    auto *configAct = menu.addAction(i18n("Configure Providers & Models…"));
+    connect(configAct, &QAction::triggered, this, &ChatWidget::configureRequested);
+
+    menu.exec(m_modelSelector->mapToGlobal(QPoint(0, m_modelSelector->height() + 2)));
+}
+
+void ChatWidget::showSettingsMenu()
+{
+    QMenu menu(this);
+    menu.setStyleSheet(
+        u"QMenu {"
+        u"  background-color: #252528;"
+        u"  color: #cccccc;"
+        u"  border: 1px solid #3c3c40;"
+        u"  border-radius: 6px;"
+        u"  padding: 4px;"
+        u"}"
+        u"QMenu::item {"
+        u"  padding: 6px 18px 6px 12px;"
+        u"  border-radius: 4px;"
+        u"}"
+        u"QMenu::item:selected {"
+        u"  background-color: #007acc;"
+        u"  color: #ffffff;"
+        u"}"
+        u"QMenu::separator {"
+        u"  height: 1px;"
+        u"  background-color: #38383e;"
+        u"  margin: 4px 0;"
+        u"}"_s);
+
+    // Permission Mode
+    auto *permMenu = menu.addMenu(i18n("Permission Mode"));
+    permMenu->setStyleSheet(menu.styleSheet());
+    auto *permGroup = new QActionGroup(this);
+    for (int i = 0; i < m_permission->count(); ++i) {
+        auto *action = permMenu->addAction(m_permission->itemText(i));
+        action->setCheckable(true);
+        action->setChecked(m_permission->currentIndex() == i);
+        action->setData(i);
+        permGroup->addAction(action);
+        connect(action, &QAction::triggered, this, [this, i]() {
+            m_permission->setCurrentIndex(i);
+        });
+    }
+
+    // Sandbox Profile
+    auto *sandboxMenu = menu.addMenu(i18n("Sandbox Profile"));
+    sandboxMenu->setStyleSheet(menu.styleSheet());
+    auto *sandboxGroup = new QActionGroup(this);
+    for (int i = 0; i < m_sandbox->count(); ++i) {
+        auto *action = sandboxMenu->addAction(m_sandbox->itemText(i));
+        action->setCheckable(true);
+        action->setChecked(m_sandbox->currentIndex() == i);
+        action->setData(i);
+        sandboxGroup->addAction(action);
+        connect(action, &QAction::triggered, this, [this, i]() {
+            m_sandbox->setCurrentIndex(i);
+        });
+    }
+
+    // Plan Mode
+    auto *planAction = menu.addAction(i18n("Plan Mode (Read-only)"));
+    planAction->setCheckable(true);
+    planAction->setChecked(m_settings.planMode);
+    connect(planAction, &QAction::triggered, this, [this](bool checked) {
+        m_mode->setCurrentIndex(checked ? 1 : 0);
+    });
+
+    // Thinking Mode
+    auto *thinkingAction = menu.addAction(i18n("Thinking Mode"));
+    thinkingAction->setCheckable(true);
+    thinkingAction->setChecked(m_settings.thinkingMode);
+    connect(thinkingAction, &QAction::triggered, this, [this](bool checked) {
+        m_thinking->setChecked(checked);
+    });
+
+    menu.addSeparator();
+    auto *fullSettingsAction = menu.addAction(i18n("Full Configuration…"));
+    connect(fullSettingsAction, &QAction::triggered, this, &ChatWidget::configureRequested);
+
+    menu.exec(m_configure->mapToGlobal(QPoint(0, m_configure->height() + 2)));
+}
+
+
+void ChatWidget::submit()
+{
+    const QString text = m_prompt->toPlainText().trimmed();
+    if (text.isEmpty() || m_agent.isBusy()) {
+        return;
+    }
+    m_prompt->addHistory(text);
+    Q_EMIT aboutToSubmit();
+    m_prompt->clear();
+    if (m_infoBar) {
+        m_infoBar->hide();
+    }
+    forceScrollToBottom();
+    updateSendButtonState();
+    m_agent.start(text);
+    updateSendButtonState();
+}
+void ChatWidget::updateSendButtonState()
+{
+    const bool busy = m_agent.isBusy();
+    const bool promptEmpty = m_prompt && m_prompt->toPlainText().trimmed().isEmpty();
+    const bool canClick = busy || !promptEmpty;
+
+    m_send->setEnabled(canClick);
+
+    if (busy) {
+        m_send->setText(u"■"_s);
+        m_send->setStyleSheet(
+            u"QPushButton {"
+            u"  color: #ffffff;"
+            u"  background-color: #e74c3c;"
+            u"  font-size: 13px;"
+            u"  border: none;"
+            u"  border-radius: 4px;"
+            u"}"
+            u"QPushButton:hover { background-color: #ff6b5a; }"_s);
+        m_send->setToolTip(i18n("Stop response"));
+    } else {
+        m_send->setText(u"▲"_s);
+        if (canClick) {
+            m_send->setStyleSheet(
+                u"QPushButton {"
+                u"  color: #ffffff;"
+                u"  background-color: #007acc;"
+                u"  font-size: 13px;"
+                u"  border: none;"
+                u"  border-radius: 4px;"
+                u"}"
+                u"QPushButton:hover { background-color: #0062a3; }"_s);
+        } else {
+            m_send->setStyleSheet(
+                u"QPushButton {"
+                u"  color: #555555;"
+                u"  background-color: #2e2e32;"
+                u"  font-size: 13px;"
+                u"  border: 1px solid #38383e;"
+                u"  border-radius: 4px;"
+                u"}"_s);
+        }
+        m_send->setToolTip(i18n("Send message"));
+    }
+}
+
+void ChatWidget::focusPrompt()
+{
+    m_prompt->setFocus();
+}
+
+void ChatWidget::ask(const QString &text)
+{
+    m_prompt->setPlainText(text);
+    submit();
+}
+
+QString ChatWidget::escape(const QString &text)
+{
+    return text.toHtmlEscaped();
+}
+
+QString ChatWidget::markdownToHtml(const QString &text)
+{
+    QTextDocument doc;
+    doc.setMarkdown(text);
+    return doc.toHtml();
+}
+
+void ChatWidget::rebuildTranscript()
+{
+    // Clear existing transcript (except stretch and indicators at the end)
+    m_permissionBar->hideBar();
+    QLayoutItem *child;
+    while (m_transcriptLayout->count() > 2 && (child = m_transcriptLayout->takeAt(0))) {
+        if (child->widget()) {
+            child->widget()->deleteLater();
+        }
+        delete child;
+    }
+
+    // Recreate indicators container if it was removed
+    if (!m_thinkingIndicator || !m_workingIndicator) {
+        auto *indicatorsContainer = new QWidget(m_transcriptContainer);
+        indicatorsContainer->setObjectName(u"indicatorsContainer"_s);
+        auto *indicatorsLayout = new QHBoxLayout(indicatorsContainer);
+        indicatorsLayout->setContentsMargins(0, 4, 0, 4);
+        indicatorsLayout->setSpacing(8);
+        indicatorsLayout->addStretch();
+
+        m_thinkingIndicator = new QLabel(u"💭  Thinking…"_s, indicatorsContainer);
+        m_thinkingIndicator->setStyleSheet(
+            u"QLabel {"
+            u"  color: #3b82f6;"
+            u"  font-size: 11px;"
+            u"  font-style: italic;"
+            u"  padding: 2px 8px;"
+            u"  background-color: #1e3a5f;"
+            u"  border: 1px solid #3b82f6;"
+            u"  border-radius: 10px;"
+            u"}"_s);
+        m_thinkingIndicator->hide();
+        indicatorsLayout->addWidget(m_thinkingIndicator);
+
+        m_workingIndicator = new QLabel(u"⚙️  Working…"_s, indicatorsContainer);
+        m_workingIndicator->setStyleSheet(
+            u"QLabel {"
+            u"  color: #f59e0b;"
+            u"  font-size: 11px;"
+            u"  font-style: italic;"
+            u"  padding: 2px 8px;"
+            u"  background-color: #3d2e0e;"
+            u"  border: 1px solid #f59e0b;"
+            u"  border-radius: 10px;"
+            u"}"_s);
+        m_workingIndicator->hide();
+        indicatorsLayout->addWidget(m_workingIndicator);
+
+        m_transcriptLayout->addWidget(indicatorsContainer);
+    }
+
+    m_toolCallWidgets.clear();
+    m_activeAssistantWidget = nullptr;
+    m_activeAssistantBrowser = nullptr;
+    m_streamText.clear();
+    m_thinkingBlock = nullptr;
+    m_thinkingBrowser = nullptr;
+    m_thinkingToggle = nullptr;
+    m_thinkingExpanded = false;
+    m_planBlock = nullptr;
+    m_planLayout = nullptr;
+    m_planSteps.clear();
+
+    const auto &messages = m_agent.messages();
+    if (messages.isEmpty()) {
+        m_transcriptLayout->insertWidget(0, createWelcomeWidget());
+        if (m_threadTitle) {
+            m_threadTitle->setText(i18n("New Thread"));
+        }
+        forceScrollToBottom();
+        return;
+    }
+
+    // Rebuild transcript from messages
+    // Track tool call widgets by toolCallId to connect Role::Tool results
+    QHash<QString, ToolCallWidget *> rebuiltToolWidgets;
+
+    for (const auto &msg : messages) {
+        switch (msg.role) {
+            case ChatMessage::Role::User:
+                addUserMessage(msg.content);
+                break;
+            case ChatMessage::Role::Assistant:
+                // For assistant messages, recreate the widget with full content
+                {
+                    auto *assistantWidget = new QWidget(m_transcriptContainer);
+                    auto *layout = new QVBoxLayout(assistantWidget);
+                    layout->setContentsMargins(4, 4, 4, 4);
+                    layout->setSpacing(4);
+
+                    auto *headerLayout = new QHBoxLayout;
+                    headerLayout->setContentsMargins(0, 0, 0, 0);
+
+                    auto *icon = new QLabel(u"⚡"_s, assistantWidget);
+                    icon->setStyleSheet(u"color: #3b82f6; font-size: 12px;"_s);
+                    headerLayout->addWidget(icon);
+
+                    auto *label = new QLabel(i18n("KATE AI"), assistantWidget);
+                    label->setStyleSheet(u"color: #3b82f6; font-size: 10px; font-weight: bold; letter-spacing: 0.5px;"_s);
+                    headerLayout->addWidget(label);
+                    headerLayout->addStretch();
+
+                    auto *copyBtn = createCopyButton(msg.content, assistantWidget);
+                    headerLayout->addWidget(copyBtn);
+                    layout->addLayout(headerLayout);
+
+                    // Add thinking block if present
+                    if (!msg.thinking.isEmpty()) {
+                        addThinkingBlock(msg.thinking);
+                        collapseThinkingBlock();
+                    }
+
+                    // Add plan checklist if present
+                    if (!msg.plan.isEmpty()) {
+                        addPlanChecklist(msg.plan);
+                    }
+
+                    auto *browser = new QTextBrowser(assistantWidget);
+                    browser->setOpenExternalLinks(true);
+                    browser->setFrameShape(QFrame::NoFrame);
+                    browser->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+                    browser->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+                    browser->setStyleSheet(u"background: transparent; color: #d4d4d4; border: none; padding: 0px;"_s);
+                    browser->document()->setDefaultStyleSheet(
+                        u"body { color: #d4d4d4; font-family: sans-serif; font-size: 13px; margin: 0; padding: 0; }"
+                        u"pre { background-color: #222225; color: #e4e4e4; padding: 10px 12px; border-radius: 6px; border: 1px solid #333338; font-family: monospace; font-size: 12px; margin: 8px 0; }"
+                        u"code { font-family: monospace; font-size: 12px; background-color: #28282d; color: #e4e4e4; padding: 2px 5px; border-radius: 3px; }"
+                        u"p { margin-bottom: 8px; line-height: 1.5; }"
+                        u"ul, ol { margin-bottom: 8px; padding-left: 20px; }"
+                        u"li { margin-bottom: 4px; }"
+                        u"blockquote { border-left: 3px solid #3b82f6; padding-left: 10px; color: #888; margin: 8px 0; }"
+                        u"a { color: #3b82f6; text-decoration: none; }"_s);
+                    browser->setMarkdown(msg.content);
+                    // Defer height calculation to allow layout to settle
+                    QTimer::singleShot(0, this, [browserWeak = QPointer<QTextBrowser>(browser)]() {
+                        if (browserWeak) {
+                            const int docH = static_cast<int>(browserWeak->document()->size().height()) + 16;
+                            browserWeak->setFixedHeight(std::max(30, docH));
+                        }
+                    });
+                    layout->addWidget(browser);
+
+                    m_transcriptLayout->insertWidget(m_transcriptLayout->count() - 1, assistantWidget);
+                }
+
+                // Recreate tool call widgets for tool calls made by this assistant message
+                if (!msg.toolCalls.isEmpty()) {
+                    for (const auto &toolCallVal : msg.toolCalls) {
+                        const QJsonObject toolCallObj = toolCallVal.toObject();
+                        const QString toolCallId = toolCallObj.value(u"id"_s).toString();
+                        const QJsonObject functionObj = toolCallObj.value(u"function"_s).toObject();
+                        const QString toolName = functionObj.value(u"name"_s).toString();
+                        const QString argumentsJson = functionObj.value(u"arguments"_s).toString();
+
+                        // Create tool call widget in finished state (will be updated with result if available)
+                        auto *toolWidget = new ToolCallWidget(toolCallId, m_transcriptContainer);
+
+                        // Determine risk and summary from tool name and arguments
+                        ToolRisk risk = ToolRisk::Read;
+                        QString summary = QString();
+                        if (toolName == u"write_file"_s || toolName == u"edit_file"_s) {
+                            risk = ToolRisk::Write;
+                            // Extract path from arguments for summary
+                            QJsonDocument argsDoc = QJsonDocument::fromJson(argumentsJson.toUtf8());
+                            if (!argsDoc.isNull() && argsDoc.isObject()) {
+                                const QString path = argsDoc.object().value(u"path"_s).toString();
+                                if (!path.isEmpty()) {
+                                    summary = path;
+                                }
+                            }
+                        } else if (toolName == u"bash"_s) {
+                            risk = ToolRisk::Execute;
+                            QJsonDocument argsDoc = QJsonDocument::fromJson(argumentsJson.toUtf8());
+                            if (!argsDoc.isNull() && argsDoc.isObject()) {
+                                const QString cmd = argsDoc.object().value(u"command"_s).toString();
+                                if (!cmd.isEmpty()) {
+                                    summary = cmd.left(60);
+                                }
+                            }
+                        } else if (toolName == u"read_file"_s || toolName == u"list_dir"_s || toolName == u"glob"_s) {
+                            risk = ToolRisk::Read;
+                            QJsonDocument argsDoc = QJsonDocument::fromJson(argumentsJson.toUtf8());
+                            if (!argsDoc.isNull() && argsDoc.isObject()) {
+                                const QString path = argsDoc.object().value(u"path"_s).toString();
+                                if (!path.isEmpty()) {
+                                    summary = path;
+                                }
+                            }
+                        } else if (toolName == u"grep"_s) {
+                            risk = ToolRisk::Read;
+                            QJsonDocument argsDoc = QJsonDocument::fromJson(argumentsJson.toUtf8());
+                            if (!argsDoc.isNull() && argsDoc.isObject()) {
+                                const QString pattern = argsDoc.object().value(u"pattern"_s).toString();
+                                if (!pattern.isEmpty()) {
+                                    summary = pattern.left(60);
+                                }
+                            }
+                        }
+
+                        toolWidget->setToolInfo(toolName, summary, risk);
+
+                        // Set describe diff for edit_file/write_file if we can extract it from arguments
+                        if (toolName == u"edit_file"_s || toolName == u"write_file"_s) {
+                            QJsonDocument argsDoc = QJsonDocument::fromJson(argumentsJson.toUtf8());
+                            if (!argsDoc.isNull() && argsDoc.isObject()) {
+                                const QString diff = argsDoc.object().value(u"describeDiff"_s).toString();
+                                if (!diff.isEmpty()) {
+                                    toolWidget->setDescribeDiff(diff);
+                                }
+                            }
+                        }
+
+                        // Mark as finished (result will be filled in by Role::Tool message if available)
+                        ToolResult dummyResult;
+                        dummyResult.toolCallId = toolCallId;
+                        dummyResult.name = toolName;
+                        dummyResult.output = QString(); // Will be filled by Role::Tool message
+                        dummyResult.ok = true;
+                        toolWidget->setFinished(dummyResult);
+
+                        m_toolCallWidgets.insert(toolCallId, toolWidget);
+                        rebuiltToolWidgets.insert(toolCallId, toolWidget);
+                        m_transcriptLayout->insertWidget(m_transcriptLayout->count() - 1, toolWidget);
+                    }
+                }
+                break;
+            case ChatMessage::Role::Tool:
+                // Tool result message - update the corresponding tool call widget with the actual result
+                if (!msg.toolCallId.isEmpty() && rebuiltToolWidgets.contains(msg.toolCallId)) {
+                    auto *toolWidget = rebuiltToolWidgets.value(msg.toolCallId);
+                    ToolResult result;
+                    result.toolCallId = msg.toolCallId;
+                    result.name = msg.name;
+                    result.output = msg.content;
+                    result.ok = true; // Assume success; the content contains formatted result
+                    toolWidget->setFinished(result);
+                }
+                break;
+            case ChatMessage::Role::System:
+                // System messages are not shown in transcript
+                break;
+        }
+    }
+
+    // Clear streaming-turn pointers after the history loop. rebuildTranscript
+    // reconstructs finished messages, not a live streaming turn. Leaving these
+    // non-null would make setStreaming() skip creating a fresh widget for the
+    // next turn, appending new text into a completed historical message instead.
+    m_activeAssistantWidget = nullptr;
+    m_activeAssistantBrowser = nullptr;
+
+    // Restore current thinking/plan state if there's an active turn
+    const auto sessionData = m_agent.sessionData();
+    if (!sessionData.currentThinking.isEmpty()) {
+        addThinkingBlock(sessionData.currentThinking);
+        if (!sessionData.planShown) {
+            collapseThinkingBlock();
+        }
+    }
+    if (!sessionData.currentPlan.isEmpty() && sessionData.planShown) {
+        addPlanChecklist(sessionData.currentPlan);
+    }
+
+    forceScrollToBottom();
+    updateTokenDisplay();
+}
+
+} // namespace KateAi
