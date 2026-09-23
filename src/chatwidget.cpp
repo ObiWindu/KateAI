@@ -512,7 +512,11 @@ ChatWidget::ChatWidget(QWidget *parent)
         setWorkingIndicator(true);
         auto *toolWidget = new ToolCallWidget(request.toolCallId, m_transcriptContainer);
         toolWidget->setToolInfo(request.toolName, request.summary, request.risk);
-        toolWidget->setDescribeDiff(request.describeDiff);
+        if (!request.describeDiff.isEmpty()) {
+            toolWidget->setDescribeDiff(request.describeDiff);
+        } else if (!request.details.isEmpty()) {
+            toolWidget->setToolDetails(request.details);
+        }
         toolWidget->setRunning();
         m_toolCallWidgets.insert(request.toolCallId, toolWidget);
         m_transcriptLayout->insertWidget(m_transcriptLayout->count() - 1, toolWidget);
