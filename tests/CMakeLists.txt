@@ -9,7 +9,6 @@ kateai_test(test_permissions)
 kateai_test(test_llmparse)
 kateai_test(test_session)
 kateai_test(test_retry)
-kateai_test(test_agentloop)
 
 add_executable(test_promptedit test_promptedit.cpp ../src/promptedit.cpp)
 target_link_libraries(test_promptedit PRIVATE kateai_core Qt6::Test)

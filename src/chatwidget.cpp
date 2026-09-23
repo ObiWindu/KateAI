@@ -54,17 +54,12 @@ ChatWidget::ChatWidget(QWidget *parent)
     // events in Kate's event queue during fast responses.
     m_streamRenderTimer.setSingleShot(true);
     connect(&m_streamRenderTimer, &QTimer::timeout, this, [this]() {
-        if (m_thinkingBrowser && !m_thinkingBuffer.isEmpty()) {
-            renderThinkingHtml();
+        if (!m_activeAssistantBrowser) {
+            return;
         }
-        if (m_activeAssistantBrowser) {
-            m_activeAssistantBrowser->setMarkdown(m_streamText);
-            const int docH = static_cast<int>(m_activeAssistantBrowser->document()->size().height()) + 16;
-            m_activeAssistantBrowser->setFixedHeight(std::max(30, docH));
-            scrollToBottom();
-        } else if (m_thinkingBrowser) {
-            scrollToBottom();
-        }
+        const int docH = static_cast<int>(m_activeAssistantBrowser->document()->size().height()) + 16;
+        m_activeAssistantBrowser->setFixedHeight(std::max(30, docH));
+        scrollToBottom();
     });
 
     m_scrollTimer.setSingleShot(true);
@@ -312,20 +307,14 @@ ChatWidget::ChatWidget(QWidget *parent)
     });
 
     connect(m_scrollArea->verticalScrollBar(), &QScrollBar::valueChanged, this, [this](int value) {
-        if (m_programmaticScrollChange) {
-            return;
-        }
         auto *sb = m_scrollArea->verticalScrollBar();
         if (sb->maximum() - value <= 40) {
             m_userScrolledUp = false;
-            m_hasUnseenContent = false;
             if (m_scrollToBottomBtn && m_scrollToBottomBtn->isVisible()) {
                 animateScrollButtonHide();
             }
         } else {
             m_userScrolledUp = true;
-            // Do not show the button merely because the user scrolled up; it
-            // becomes visible only after content arrives below their position.
         }
     });
 
@@ -333,10 +322,9 @@ ChatWidget::ChatWidget(QWidget *parent)
         Q_UNUSED(min);
         auto *sb = m_scrollArea->verticalScrollBar();
         if (!m_userScrolledUp) {
-            m_programmaticScrollChange = true;
             sb->setValue(max);
-            m_programmaticScrollChange = false;
-        } else if (m_hasUnseenContent && m_scrollToBottomBtn) {
+        } else if (m_scrollToBottomBtn) {
+            // Show button when scrolled up and there's new content (agent busy or new messages)
             updateScrollButtonPosition();
             animateScrollButtonShow();
             m_scrollToBottomBtn->raise();
@@ -697,12 +685,11 @@ void ChatWidget::addUserMessage(const QString &text)
     }
 
     auto *card = new QWidget(m_transcriptContainer);
-    card->setObjectName(u"userMessageCard"_s);
     card->setStyleSheet(
-        u"QWidget#userMessageCard {"
+        u"QWidget {"
         u"  background-color: #232326;"
         u"  border: 1px solid #333338;"
-        u"  border-radius: 8px;"
+        u"  border-radius: 6px;"
         u"}"_s);
     auto *cardLayout = new QVBoxLayout(card);
     cardLayout->setContentsMargins(10, 8, 10, 8);
@@ -749,13 +736,6 @@ void ChatWidget::setStreaming(const QString &text)
     m_streamText = text;
     if (!m_activeAssistantWidget) {
         m_activeAssistantWidget = new QWidget(m_transcriptContainer);
-        m_activeAssistantWidget->setObjectName(u"assistantMessageCard"_s);
-        m_activeAssistantWidget->setStyleSheet(
-            u"QWidget#assistantMessageCard {"
-            u"  background-color: #202024;"
-            u"  border: 1px solid #333338;"
-            u"  border-radius: 8px;"
-            u"}"_s);
         auto *layout = new QVBoxLayout(m_activeAssistantWidget);
         layout->setContentsMargins(4, 4, 4, 4);
         layout->setSpacing(4);
@@ -841,8 +821,7 @@ void ChatWidget::setStreaming(const QString &text)
         m_transcriptLayout->insertWidget(m_transcriptLayout->count() - 1, m_activeAssistantWidget);
     }
 
-    // Markdown rendering and size recalculation are coalesced onto one event
-    // so a fast token stream cannot monopolize Kate's GUI thread.
+    m_activeAssistantBrowser->setMarkdown(m_streamText);
     m_streamRenderTimer.start(0);
 }
 
@@ -866,7 +845,7 @@ void ChatWidget::addThinkingBlock(const QString &text)
 void ChatWidget::appendThinkingDelta(const QString &delta)
 {
     m_thinkingBuffer += delta;
-    m_streamRenderTimer.start(0);
+    renderThinkingHtml();
 }
 
 void ChatWidget::renderThinkingHtml()
@@ -1010,10 +989,9 @@ void ChatWidget::freezeStreaming()
 void ChatWidget::scrollToBottom()
 {
     if (m_userScrolledUp) {
-        m_hasUnseenContent = true;
         if (m_scrollToBottomBtn) {
             updateScrollButtonPosition();
-            animateScrollButtonShow();
+            m_scrollToBottomBtn->show();
             m_scrollToBottomBtn->raise();
         }
         return;
@@ -1024,9 +1002,8 @@ void ChatWidget::scrollToBottom()
 void ChatWidget::forceScrollToBottom()
 {
     m_userScrolledUp = false;
-    m_hasUnseenContent = false;
     if (m_scrollToBottomBtn) {
-        animateScrollButtonHide();
+        m_scrollToBottomBtn->hide();
     }
     m_scrollTimer.start(10);
 }
@@ -1077,7 +1054,9 @@ void ChatWidget::animateScrollButtonShow()
     if (!m_scrollToBottomBtn) {
         return;
     }
-    const bool alreadyVisible = m_scrollToBottomBtn->isVisible();
+    if (m_scrollToBottomBtn->isVisible()) {
+        return;
+    }
     m_scrollToBottomBtn->show();
     updateScrollButtonPosition();
 
@@ -1085,8 +1064,7 @@ void ChatWidget::animateScrollButtonShow()
         return;
     }
     m_scrollButtonAnimation->stop();
-    m_scrollOpacityEffect->setOpacity(alreadyVisible ? m_scrollOpacityEffect->opacity() : 0.0);
-    m_scrollButtonAnimation->setEasingCurve(QEasingCurve::OutCubic);
+    m_scrollOpacityEffect->setOpacity(0.0);
     m_scrollButtonAnimation->setStartValue(0.0);
     m_scrollButtonAnimation->setEndValue(1.0);
     m_scrollButtonAnimation->start();
@@ -1209,7 +1187,7 @@ QWidget *ChatWidget::createWelcomeWidget()
     wLayout->addWidget(wSub);
 
     // Starter suggestion chips
-    auto *chipsLayout = new QHBoxLayout;
+    auto *chipsLayout = new QVBoxLayout;
     chipsLayout->setSpacing(6);
 
     const struct Suggestion {
@@ -1218,23 +1196,22 @@ QWidget *ChatWidget::createWelcomeWidget()
         QString prompt;
     } suggestions[] = {
         {u"🔍"_s, i18n("Explain active file"), i18n("Explain the active file and its architecture.")},
-        {u"🐛"_s, i18n("Find bugs in selection"), i18n("Find bugs and edge cases in the current selection. If there is no selection, inspect the active file.")},
-        {u"🧪"_s, i18n("Generate tests"), i18n("Generate focused unit tests for the active file and explain the important cases.")}
+        {u"🐛"_s, i18n("Find bugs & edge cases"), i18n("Inspect the current code for bugs, edge cases, and potential improvements.")},
+        {u"🧪"_s, i18n("Generate tests"), i18n("Write comprehensive unit tests for the code in this file.")}
     };
 
     for (const auto &s : suggestions) {
         auto *btn = new QPushButton(u"%1  %2"_s.arg(s.icon, s.title), welcome);
         btn->setCursor(Qt::PointingHandCursor);
-        btn->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
-        btn->setMinimumHeight(30);
         btn->setStyleSheet(
             u"QPushButton {"
             u"  background-color: #202024;"
             u"  color: #cccccc;"
             u"  border: 1px solid #333338;"
-            u"  border-radius: 15px;"
+            u"  border-radius: 6px;"
             u"  padding: 6px 10px;"
             u"  font-size: 11px;"
+            u"  text-align: left;"
             u"}"
             u"QPushButton:hover {"
             u"  background-color: #2a2a30;"
@@ -1310,11 +1287,6 @@ void ChatWidget::newChat()
     m_planSteps.clear();
     m_thinkingBuffer.clear();
     m_streamText.clear();
-    m_hasUnseenContent = false;
-    m_userScrolledUp = true;
-    if (m_scrollToBottomBtn) {
-        animateScrollButtonHide();
-    }
 
     // Recreate welcome widget at the top
     m_transcriptLayout->insertWidget(0, createWelcomeWidget());
@@ -2042,13 +2014,6 @@ void ChatWidget::rebuildTranscript()
                 // For assistant messages, recreate the widget with full content
                 {
                     auto *assistantWidget = new QWidget(m_transcriptContainer);
-                    assistantWidget->setObjectName(u"assistantMessageCard"_s);
-                    assistantWidget->setStyleSheet(
-                        u"QWidget#assistantMessageCard {"
-                        u"  background-color: #202024;"
-                        u"  border: 1px solid #333338;"
-                        u"  border-radius: 8px;"
-                        u"}"_s);
                     auto *layout = new QVBoxLayout(assistantWidget);
                     layout->setContentsMargins(4, 4, 4, 4);
                     layout->setSpacing(4);

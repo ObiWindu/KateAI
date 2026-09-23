@@ -6,7 +6,6 @@
 #include "projectgraph.h"
 
 #include <QFile>
-#include <QHash>
 #include <QDir>
 #include <QTextStream>
 #include <QJsonDocument>
@@ -982,6 +981,7 @@ namespace KateAi
 
 QString ProjectGraph::generateNodeId(const QString &path, const QString &type)
 {
+    // Generate a unique ID for a node based on its path and type
     QString id = path;
     id.replace(QLatin1Char('/'), QLatin1Char('_'));
     id.replace(QLatin1Char(':'), QLatin1Char('_'));
@@ -994,26 +994,127 @@ QString ProjectGraph::generateNodeId(const QString &path, const QString &type)
 
 QString ProjectGraph::getNodeTypeFromPath(const QString &path)
 {
-    const QString ext = QFileInfo(path).suffix().toLower();
-    static const QHash<QString, QString> types = {
-        {u"cpp"_s, u"cpp"_s}, {u"cxx"_s, u"cpp"_s}, {u"cc"_s, u"cpp"_s}, {u"c"_s, u"cpp"_s},
-        {u"h"_s, u"header"_s}, {u"hpp"_s, u"header"_s}, {u"hxx"_s, u"header"_s},
-        {u"py"_s, u"python"_s},
-        {u"js"_s, u"javascript"_s}, {u"jsx"_s, u"javascript"_s}, {u"ts"_s, u"typescript"_s},
-        {u"tsx"_s, u"tsx"_s}, {u"json"_s, u"json"_s}, {u"md"_s, u"markdown"_s},
-        {u"txt"_s, u"text"_s}, {u"java"_s, u"java"_s}, {u"php"_s, u"php"_s},
-        {u"rb"_s, u"ruby"_s}, {u"go"_s, u"go"_s}, {u"rs"_s, u"rust"_s},
-        {u"html"_s, u"html"_s}, {u"htm"_s, u"html"_s}, {u"css"_s, u"css"_s},
-        {u"xml"_s, u"xml"_s}, {u"sql"_s, u"sql"_s}, {u"sh"_s, u"shell"_s},
-        {u"yml"_s, u"yaml"_s}, {u"yaml"_s, u"yaml"_s}, {u"toml"_s, u"toml"_s},
-        {u"ini"_s, u"ini"_s}, {u"cfg"_s, u"config"_s}, {u"conf"_s, u"config"_s},
-        {u"bat"_s, u"batch"_s}, {u"cmd"_s, u"batch"_s}, {u"pl"_s, u"perl"_s},
-        {u"r"_s, u"r"_s}, {u"m"_s, u"matlab"_s}, {u"scala"_s, u"scala"_s},
-        {u"kt"_s, u"kotlin"_s}, {u"swift"_s, u"swift"_s}, {u"vue"_s, u"vue"_s},
-        {u"svelte"_s, u"svelte"_s}, {u"astro"_s, u"astro"_s}, {u"solid"_s, u"solid"_s},
-        {u"qml"_s, u"qml"_s},
-    };
-    return types.value(ext, u"unknown"_s);
+    // Determine node type based on file extension
+    QFileInfo info(path);
+    QString ext = info.suffix().toLower();
+
+    if (ext == QStringLiteral("cpp") || ext == QStringLiteral("cxx") || ext == QStringLiteral("cc") || ext == QStringLiteral("c")) {
+        return u"cpp"_s;
+    } else if (ext == QStringLiteral("h") || ext == QStringLiteral("hpp") || ext == QStringLiteral("hxx")) {
+        return u"header"_s;
+    } else if (ext == QStringLiteral("py")) {
+        return u"python"_s;
+    } else if (ext == QStringLiteral("js") || ext == QStringLiteral("jsx") || ext == QStringLiteral("ts")) {
+        return u"javascript"_s;
+    } else if (ext == QStringLiteral("json")) {
+        return u"json"_s;
+    } else if (ext == QStringLiteral("md")) {
+        return u"markdown"_s;
+    } else if (ext == QStringLiteral("txt")) {
+        return u"text"_s;
+    } else if (ext == QStringLiteral("java")) {
+        return u"java"_s;
+    } else if (ext == QStringLiteral("php")) {
+        return u"php"_s;
+    } else if (ext == QStringLiteral("rb")) {
+        return u"ruby"_s;
+    } else if (ext == QStringLiteral("go")) {
+        return u"go"_s;
+    } else if (ext == QStringLiteral("rs")) {
+        return u"rust"_s;
+    } else if (ext == QStringLiteral("html") || ext == QStringLiteral("htm")) {
+        return u"html"_s;
+    } else if (ext == QStringLiteral("css")) {
+        return u"css"_s;
+    } else if (ext == QStringLiteral("xml")) {
+        return u"xml"_s;
+    } else if (ext == QStringLiteral("sql")) {
+        return u"sql"_s;
+    } else if (ext == QStringLiteral("sh")) {
+        return u"shell"_s;
+    } else if (ext == QStringLiteral("yml") || ext == QStringLiteral("yaml")) {
+        return u"yaml"_s;
+    } else if (ext == QStringLiteral("toml")) {
+        return u"toml"_s;
+    } else if (ext == QStringLiteral("ini")) {
+        return u"ini"_s;
+    } else if (ext == QStringLiteral("cfg") || ext == QStringLiteral("conf")) {
+        return u"config"_s;
+    } else if (ext == QStringLiteral("bat") || ext == QStringLiteral("cmd")) {
+        return u"batch"_s;
+    } else if (ext == QStringLiteral("pl")) {
+        return u"perl"_s;
+    } else if (ext == QStringLiteral("r")) {
+        return u"r"_s;
+    } else if (ext == QStringLiteral("m")) {
+        return u"matlab"_s;
+    } else if (ext == QStringLiteral("scala")) {
+        return u"scala"_s;
+    } else if (ext == QStringLiteral("kt")) {
+        return u"kotlin"_s;
+    } else if (ext == QStringLiteral("swift")) {
+        return u"swift"_s;
+    } else if (ext == QStringLiteral("ts")) {
+        return u"typescript"_s;
+    } else if (ext == QStringLiteral("tsx")) {
+        return u"tsx"_s;
+    } else if (ext == QStringLiteral("jsx")) {
+        return u"jsx"_s;
+    } else if (ext == QStringLiteral("vue")) {
+        return u"vue"_s;
+    } else if (ext == QStringLiteral("svelte")) {
+        return u"svelte"_s;
+    } else if (ext == QStringLiteral("astro")) {
+        return u"astro"_s;
+    } else if (ext == QStringLiteral("solid")) {
+        return u"solid"_s;
+    } else if (ext == QStringLiteral("qml")) {
+        return u"qml"_s;
+    } else if (ext == QStringLiteral("yaml")) {
+        return u"yaml"_s;
+    } else if (ext == QStringLiteral("yml")) {
+        return u"yaml"_s;
+    } else if (ext == QStringLiteral("toml")) {
+        return u"toml"_s;
+    } else if (ext == QStringLiteral("ini")) {
+        return u"ini"_s;
+    } else if (ext == QStringLiteral("cfg") || ext == QStringLiteral("conf")) {
+        return u"config"_s;
+    } else if (ext == QStringLiteral("bat") || ext == QStringLiteral("cmd")) {
+        return u"batch"_s;
+    } else if (ext == QStringLiteral("pl")) {
+        return u"perl"_s;
+    } else if (ext == QStringLiteral("r")) {
+        return u"r"_s;
+    } else if (ext == QStringLiteral("m")) {
+        return u"matlab"_s;
+    } else if (ext == QStringLiteral("scala")) {
+        return u"scala"_s;
+    } else if (ext == QStringLiteral("kt")) {
+        return u"kotlin"_s;
+    } else if (ext == QStringLiteral("swift")) {
+        return u"swift"_s;
+    } else if (ext == QStringLiteral("ts")) {
+        return u"typescript"_s;
+    } else if (ext == QStringLiteral("tsx")) {
+        return u"tsx"_s;
+    } else if (ext == QStringLiteral("jsx")) {
+        return u"jsx"_s;
+    } else if (ext == QStringLiteral("vue")) {
+        return u"vue"_s;
+    } else if (ext == QStringLiteral("svelte")) {
+        return u"svelte"_s;
+    } else if (ext == QStringLiteral("astro")) {
+        return u"astro"_s;
+    } else if (ext == QStringLiteral("solid")) {
+        return u"solid"_s;
+    } else if (ext == QStringLiteral("qml")) {
+        return u"qml"_s;
+    } else {
+        return u"unknown"_s;
+    }
 }
 
-} // namespace KateAi
+}
+
+

@@ -172,8 +172,6 @@ private:
     QTimer m_streamRenderTimer;
     QTimer m_scrollTimer;
     bool m_userScrolledUp = true;
-    bool m_hasUnseenContent = false;
-    bool m_programmaticScrollChange = false;
 
     // Dynamic status indicators at bottom of chat
     QLabel *m_thinkingIndicator = nullptr;

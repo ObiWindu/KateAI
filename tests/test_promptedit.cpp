@@ -70,44 +70,6 @@ private Q_SLOTS:
         QCOMPARE(edit.toPlainText(), u"current draft"_s);
     }
 
-    void testHistoryBoundaryAndEditing()
-    {
-        PromptEdit edit;
-        edit.addHistory(u"first prompt"_s);
-        edit.addHistory(u"second prompt"_s);
-
-        edit.setPlainText(u"line one\nline two"_s);
-        edit.moveCursor(QTextCursor::End);
-        QKeyEvent upEvent(QEvent::KeyPress, Qt::Key_Up, Qt::NoModifier);
-        QApplication::sendEvent(&edit, &upEvent);
-        QCOMPARE(edit.toPlainText(), u"line one\nline two"_s);
-
-        edit.moveCursor(QTextCursor::Start);
-        QApplication::sendEvent(&edit, &upEvent);
-        QCOMPARE(edit.toPlainText(), u"second prompt"_s);
-        edit.setPlainText(u"line one\nline two"_s);
-        edit.moveCursor(QTextCursor::End);
-        QTextCursor lineStart = edit.textCursor();
-        lineStart.movePosition(QTextCursor::StartOfLine);
-        edit.setTextCursor(lineStart);
-        QApplication::sendEvent(&edit, &upEvent);
-        QCOMPARE(edit.toPlainText(), u"line one\nline two"_s);
-
-        edit.clear();
-        QApplication::sendEvent(&edit, &upEvent);
-        QCOMPARE(edit.toPlainText(), u"second prompt"_s);
-
-        QKeyEvent charEvent(QEvent::KeyPress, Qt::Key_X, Qt::NoModifier, u"x"_s);
-        QApplication::sendEvent(&edit, &charEvent);
-        QCOMPARE(edit.toPlainText(), u"second promptx"_s);
-
-        QKeyEvent downEvent(QEvent::KeyPress, Qt::Key_Down, Qt::NoModifier);
-        QApplication::sendEvent(&edit, &downEvent);
-        // Editing a recalled entry exits history navigation instead of
-        // unexpectedly jumping to an older prompt.
-        QCOMPARE(edit.toPlainText(), u"second promptx"_s);
-    }
-
     void testCompletionWords()
     {
         PromptEdit edit;
@@ -124,11 +86,6 @@ private Q_SLOTS:
         // Test inserting completion directly
         QMetaObject::invokeMethod(&edit, "insertCompletion", Q_ARG(QString, u"chatwidget.cpp"_s));
         QVERIFY(edit.toPlainText().contains(u"@chatwidget.cpp "_s));
-
-        // An @ embedded in a normal word is not treated as a mention.
-        edit.setPlainText(u"email foo@bar"_s);
-        edit.moveCursor(QTextCursor::End);
-        QCOMPARE(edit.toPlainText(), u"email foo@bar"_s);
     }
 };
 

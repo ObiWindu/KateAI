@@ -32,8 +32,6 @@ public:
     void showConfiguration();
 
 private:
-    void initializeGui();
-    void ensureUiCreated();
     void addEditorContextActions(KTextEditor::View *view, const QList<QAction *> &actions);
     void askSelectionWithInstruction(const QString &instruction);
     QString editorContext() const;
@@ -45,9 +43,6 @@ private:
     QPointer<QWidget> m_toolView;
     QPointer<QDialog> m_configDialog;
     QPointer<ChatWidget> m_chat;
-    bool m_guiInitialized = false;
-    bool m_guiClientRegistered = false;
-    bool m_uiInitialized = false;
 };
 
 } // namespace KateAi

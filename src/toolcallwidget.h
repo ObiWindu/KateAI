@@ -66,7 +66,7 @@ private:
     QString m_toolCallId;
     QString m_toolName;
     ToolRisk m_risk = ToolRisk::Read;
-    bool m_expanded = true;
+    bool m_expanded = false;
     bool m_finished = false;
     bool m_ok = true;
     int m_expandedHeight = 0;

@@ -40,40 +40,20 @@ static QJsonArray messagesToJson(const QList<ChatMessage> &messages)
 
 static QList<ChatMessage> messagesFromJson(const QJsonArray &arr)
 {
-    constexpr int kMaxMessages = 200;
-    constexpr qsizetype kMaxTextSize = 1024 * 1024;
-
     QList<ChatMessage> messages;
-    messages.reserve(qMin(arr.size(), kMaxMessages));
     for (const auto &val : arr) {
         const QJsonObject obj = val.toObject();
         ChatMessage msg;
         msg.role = static_cast<ChatMessage::Role>(obj[u"role"_s].toInt(static_cast<int>(ChatMessage::Role::User)));
-        msg.content = obj[u"content"_s].toString().left(kMaxTextSize);
-        msg.thinking = obj[u"thinking"_s].toString().left(kMaxTextSize);
+        msg.content = obj[u"content"_s].toString();
+        msg.thinking = obj[u"thinking"_s].toString();
         msg.plan = obj[u"plan"_s].toArray();
-        msg.toolCallId = obj[u"toolCallId"_s].toString().left(4096);
-        msg.name = obj[u"name"_s].toString().left(4096);
+        msg.toolCallId = obj[u"toolCallId"_s].toString();
+        msg.name = obj[u"name"_s].toString();
         msg.toolCalls = obj[u"toolCalls"_s].toArray();
         messages.append(msg);
     }
-
-    if (messages.size() <= kMaxMessages) {
-        return messages;
-    }
-
-    QList<ChatMessage> bounded;
-    bounded.reserve(kMaxMessages);
-    const bool hasSystem = !messages.isEmpty() && messages.first().role == ChatMessage::Role::System;
-    if (hasSystem) {
-        bounded.append(messages.first());
-    }
-    const int remaining = kMaxMessages - bounded.size();
-    const int firstRecent = qMax(hasSystem ? 1 : 0, messages.size() - remaining);
-    for (int i = firstRecent; i < messages.size(); ++i) {
-        bounded.append(messages.at(i));
-    }
-    return bounded;
+    return messages;
 }
 
 static QJsonArray stringListToJson(const QList<QString> &list)
@@ -119,8 +99,7 @@ SessionStore::SessionData SessionStore::load()
 
     // Load messages
     const QByteArray messagesData = g.readEntry(u"Messages"_s, QByteArray());
-    constexpr qsizetype kMaxPersistedMessagesBytes = 16 * 1024 * 1024;
-    if (!messagesData.isEmpty() && messagesData.size() <= kMaxPersistedMessagesBytes) {
+    if (!messagesData.isEmpty()) {
         const QJsonDocument doc = QJsonDocument::fromJson(messagesData);
         if (!doc.isNull() && doc.isArray()) {
             data.messages = messagesFromJson(doc.array());
@@ -128,7 +107,7 @@ SessionStore::SessionData SessionStore::load()
     }
 
     // Load other session state
-    data.currentThinking = g.readEntry(u"CurrentThinking"_s, QString()).left(1024 * 1024);
+    data.currentThinking = g.readEntry(u"CurrentThinking"_s, QString());
     const QByteArray planData = g.readEntry(u"CurrentPlan"_s, QByteArray());
     if (!planData.isEmpty()) {
         const QJsonDocument doc = QJsonDocument::fromJson(planData);
@@ -137,7 +116,7 @@ SessionStore::SessionData SessionStore::load()
         }
     }
     data.planShown = g.readEntry(u"PlanShown"_s, false);
-    data.currentAssistant = g.readEntry(u"CurrentAssistant"_s, QString()).left(1024 * 1024);
+    data.currentAssistant = g.readEntry(u"CurrentAssistant"_s, QString());
     data.stateEpoch = g.readEntry(u"StateEpoch"_s, quint64(0));
 
     const QByteArray actionSigsData = g.readEntry(u"ActionSignatures"_s, QByteArray());

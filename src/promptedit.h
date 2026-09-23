@@ -44,7 +44,6 @@ private Q_SLOTS:
 private:
     QString wordUnderCursor() const;
     int atSymbolPosition() const;
-    void resetHistoryNavigation();
 
     QCompleter *m_completer = nullptr;
     QStringListModel *m_completionModel = nullptr;
@@ -52,7 +51,6 @@ private:
     QStringList m_history;
     int m_historyIndex = -1;
     QString m_draft;
-    bool m_navigatingHistory = false;
 };
 
 } // namespace KateAi
