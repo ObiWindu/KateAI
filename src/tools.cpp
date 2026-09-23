@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: 2026 ObiWindu <Obi.wandu@proton.me>
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ */
+
 #include "tools.h"
 
 #include <QDir>
@@ -5,6 +10,7 @@
 #include <QFileInfo>
 #include <QJsonDocument>
 #include <QJsonParseError>
+#include <QMap>
 #include <QProcess>
 #include <QRegularExpression>
 
@@ -47,6 +53,66 @@ static QString clip(const QString &text, int maxChars = 80000)
     return text.left(maxChars) + u"\n... truncated %1 characters"_s.arg(text.size() - maxChars);
 }
 
+static bool jsonBool(const QJsonValue &value, bool fallback = false)
+{
+    if (value.isBool()) {
+        return value.toBool();
+    }
+    if (value.isDouble()) {
+        return value.toInt() != 0;
+    }
+    if (value.isString()) {
+        const QString s = value.toString().trimmed().toLower();
+        if (s == u"true"_s || s == u"1"_s || s == u"yes"_s) {
+            return true;
+        }
+        if (s == u"false"_s || s == u"0"_s || s == u"no"_s) {
+            return false;
+        }
+    }
+    return fallback;
+}
+
+static bool isNoisySearchPath(const QString &relativePath)
+{
+    const QStringList noisy = {
+        u"/.git/"_s, u".git/"_s, u"/node_modules/"_s, u"node_modules/"_s,
+        u"/build/"_s, u"build/"_s, u"/CMakeFiles/"_s, u"/.kateai/"_s,
+        u"/.cache/"_s, u"/__pycache__/"_s,
+    };
+    for (const QString &part : noisy) {
+        if (relativePath.contains(part) || relativePath.startsWith(part.mid(1))) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static GraphNode *resolveGraphNode(ProjectGraph *graph, const QString &key)
+{
+    if (!graph || key.isEmpty()) {
+        return nullptr;
+    }
+    if (GraphNode *direct = graph->getNode(key)) {
+        return direct;
+    }
+    GraphNode *byName = nullptr;
+    int nameHits = 0;
+    for (GraphNode *node : graph->getAllNodes()) {
+        if (!node) {
+            continue;
+        }
+        if (node->path == key || node->id.endsWith(key)) {
+            return node;
+        }
+        if (node->name == key) {
+            byName = node;
+            ++nameHits;
+        }
+    }
+    return nameHits == 1 ? byName : nullptr;
+}
+
 QString unifiedDiff(const QString &path, const QString &before, const QString &after)
 {
     const QStringList oldLines = before.split(u'\n');
@@ -81,6 +147,89 @@ ToolRunner::ToolRunner(Sandbox sandbox, DocumentBridge *bridge, QObject *parent)
     , m_bridge(bridge)
 {
     // Initialize the tool runner with a sandbox for security and a document bridge for file operations
+    m_bashProcess.setProcessChannelMode(QProcess::MergedChannels);
+    m_bashTimeoutTimer.setSingleShot(true);
+
+    connect(&m_bashTimeoutTimer, &QTimer::timeout, this, [this]() {
+        if (!m_bashRunning) {
+            return;
+        }
+        m_bashTimedOut = true;
+        m_bashProcess.kill();
+    });
+
+    connect(&m_bashProcess, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
+        if (!m_bashRunning || error != QProcess::FailedToStart) {
+            return;
+        }
+        m_bashTimeoutTimer.stop();
+        ToolResult result;
+        result.name = u"bash"_s;
+        result.ok = false;
+        result.output = u"Failed to start command: %1"_s.arg(m_bashProcess.errorString());
+        finishAsyncBash(result);
+    });
+
+    connect(&m_bashProcess, &QProcess::readyRead, this, [this]() {
+        if (!m_bashRunning) {
+            return;
+        }
+        constexpr qsizetype kMaxBufferedOutput = 32 * 1024;
+        const qsizetype remaining = kMaxBufferedOutput - m_bashOutput.size();
+        if (remaining > 0) {
+            m_bashOutput += m_bashProcess.read(remaining);
+            if (m_bashOutput.size() >= kMaxBufferedOutput) {
+                m_bashOutputTruncated = true;
+            }
+        }
+        if (m_bashProcess.bytesAvailable() > 0) {
+            m_bashProcess.readAll();
+            m_bashOutputTruncated = true;
+        }
+    });
+
+    connect(&m_bashProcess, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this,
+            [this](int exitCode, QProcess::ExitStatus exitStatus) {
+                if (!m_bashRunning) {
+                    return;
+                }
+
+                constexpr qsizetype kMaxBufferedOutput = 32 * 1024;
+                if (!m_bashOutputTruncated && m_bashOutput.size() < kMaxBufferedOutput) {
+                    const qsizetype remaining = kMaxBufferedOutput - m_bashOutput.size();
+                    m_bashOutput += m_bashProcess.read(remaining);
+                    if (m_bashOutput.size() >= kMaxBufferedOutput) {
+                        m_bashOutputTruncated = true;
+                    }
+                }
+                if (m_bashProcess.bytesAvailable() > 0) {
+                    m_bashProcess.readAll();
+                    m_bashOutputTruncated = true;
+                }
+                ToolResult result;
+                result.name = u"bash"_s;
+                if (m_bashTimedOut) {
+                    result.ok = false;
+                    result.output = u"Command timed out after %1 ms."_s.arg(m_timeoutMs);
+                } else {
+                    QString output = QString::fromUtf8(m_bashOutput);
+                    if (m_bashOutputTruncated) {
+                        output += u"\n... output truncated to 32 KiB"_s;
+                    }
+                    result.ok = exitStatus == QProcess::NormalExit && exitCode == 0;
+                    result.output = clip(output.isEmpty() ? u"(no output, exit %1)"_s.arg(exitCode) : output);
+                    if (!result.ok) {
+                        result.output += u"\nexit code %1"_s.arg(exitCode);
+                    }
+                }
+                m_bashTimeoutTimer.stop();
+                finishAsyncBash(result);
+            });
+}
+
+ToolRunner::~ToolRunner()
+{
+    cancelAsyncBash();
 }
 
 PermissionRequest ToolRunner::describe(const ToolCall &call) const
@@ -101,12 +250,15 @@ PermissionRequest ToolRunner::describe(const ToolCall &call) const
         if (!resolved.isEmpty() && m_bridge) {
             m_bridge->readDocument(resolved, &existing);
         }
-        req.details = unifiedDiff(req.path, existing, args.value(u"content"_s).toString());
+        req.describeDiff = unifiedDiff(req.path, existing, args.value(u"content"_s).toString());
+        req.details = req.describeDiff;
     } else if (call.name == u"edit_file"_s) {
         req.risk = ToolRisk::Write;
         req.summary = u"Edit %1"_s.arg(req.path);
-        req.details = u"Replace:\n%1\n\nWith:\n%2"_s.arg(args.value(u"old_string"_s).toString(),
-                                                         args.value(u"new_string"_s).toString());
+        const QString oldString = args.value(u"old_string"_s).toString();
+        const QString newString = args.value(u"new_string"_s).toString();
+        req.describeDiff = unifiedDiff(req.path, oldString, newString);
+        req.details = u"Replace:\n%1\n\nWith:\n%2"_s.arg(oldString, newString);
     } else if (call.name == u"bash"_s) {
         req.risk = ToolRisk::Execute;
         const QString command = args.value(u"command"_s).toString();
@@ -153,6 +305,9 @@ ToolResult ToolRunner::run(const ToolCall &call)
     }
     if (call.name == u"bash"_s) {
         return bash(args);
+    }
+    if (call.name == u"query_project_graph"_s) {
+        return queryProjectGraph(args);
     }
 
     result.ok = false;
@@ -290,42 +445,53 @@ ToolResult ToolRunner::editFile(const QJsonObject &args)
         return result;
     }
 
-    // Extract the old and new strings from the tool arguments
     const QString oldString = args.value(u"old_string"_s).toString();
     const QString newString = args.value(u"new_string"_s).toString();
-    
-    // Validate that the old string is not empty
+    const bool replaceAll = jsonBool(args.value(u"replace_all"_s));
+
     if (oldString.isEmpty()) {
         result.ok = false;
         result.output = u"old_string must not be empty."_s;
         return result;
     }
-    
-    // Count occurrences of the old string to ensure uniqueness
+
     const int count = contents.count(oldString);
     if (count == 0) {
         result.ok = false;
-        result.output = u"old_string was not found in %1."_s.arg(resolved);
+        QString hint;
+        const QString needle = oldString.section(u'\n', 0, 0).trimmed();
+        if (!needle.isEmpty()) {
+            const QStringList lines = contents.split(u'\n');
+            QStringList nearby;
+            for (int i = 0; i < lines.size() && nearby.size() < 5; ++i) {
+                if (lines.at(i).contains(needle)) {
+                    nearby.append(u"%1:%2"_s.arg(i + 1).arg(lines.at(i).left(200)));
+                }
+            }
+            if (!nearby.isEmpty()) {
+                hint = u" Nearby lines:\n"_s + nearby.join(u'\n');
+            }
+        }
+        result.output = u"old_string was not found in %1. Read the file and copy the exact text, including whitespace."_s.arg(resolved) + hint;
         return result;
     }
-    if (count > 1) {
+    if (count > 1 && !replaceAll) {
         result.ok = false;
-        result.output = u"old_string matched %1 times; it must be unique."_s.arg(count);
+        result.output = u"old_string matched %1 times; it must be unique, or set replace_all=true."_s.arg(count);
         return result;
     }
-    
-    // Perform the replacement in the file contents
+
     contents.replace(oldString, newString);
-    
-    // Write the updated contents back to the file
+
     if (!m_bridge->writeDocument(resolved, contents, &error)) {
         result.ok = false;
         result.output = error;
         return result;
     }
-    
-    // Report successful file update
-    result.output = u"Updated %1"_s.arg(resolved);
+
+    result.output = replaceAll && count > 1
+        ? u"Updated %1 (%2 replacements)"_s.arg(resolved).arg(count)
+        : u"Updated %1"_s.arg(resolved);
     return result;
 }
 
@@ -391,8 +557,9 @@ ToolResult ToolRunner::grep(const QJsonObject &args) const
     // Extract search parameters from the tool arguments
     const QString pattern = args.value(u"pattern"_s).toString();
     const QString globFilter = args.value(u"glob"_s).toString();
-    
-    // Determine the search directory and resolve it
+    const bool caseInsensitive = jsonBool(args.value(u"case_insensitive"_s));
+    const int context = qBound(0, args.value(u"context"_s).toInt(0), 5);
+
     QString error;
     const QString path = args.value(u"path"_s).toString();
     const QString resolved = m_sandbox.resolve(path.isEmpty() ? m_sandbox.workspaceRoot() : path, &error);
@@ -402,45 +569,54 @@ ToolResult ToolRunner::grep(const QJsonObject &args) const
         return result;
     }
 
-    // Validate the regular expression pattern
-    QRegularExpression re(pattern);
+    QRegularExpression::PatternOptions options = QRegularExpression::NoPatternOption;
+    if (caseInsensitive) {
+        options |= QRegularExpression::CaseInsensitiveOption;
+    }
+    QRegularExpression re(pattern, options);
     if (!re.isValid()) {
         result.ok = false;
         result.output = u"Invalid regular expression: %1"_s.arg(re.errorString());
         return result;
     }
 
-    // Collect all matching lines from files
     QStringList hits;
     auto searchFile = [&](const QString &filePath) {
-        // Skip files that are denied or not readable
         if (m_sandbox.isDenied(filePath) || !m_sandbox.allowsRead(filePath, nullptr)) {
             return;
         }
-        
-        // Apply glob filter if specified
-        if (!globFilter.isEmpty() && !QDir::match(globFilter, QFileInfo(filePath).fileName())
-            && !Sandbox::globMatch(globFilter, filePath)) {
+        const QString rel = QDir(m_sandbox.workspaceRoot()).relativeFilePath(filePath);
+        if (isNoisySearchPath(rel)) {
             return;
         }
-        
-        // Read file contents and search for pattern matches
+        if (!globFilter.isEmpty() && !QDir::match(globFilter, QFileInfo(filePath).fileName())
+            && !Sandbox::globMatch(globFilter, filePath) && !Sandbox::globMatch(globFilter, rel)) {
+            return;
+        }
+
         QString contents;
         if (!m_bridge || !m_bridge->readDocument(filePath, &contents)) {
             return;
         }
-        
+
         const QStringList lines = contents.split(u'\n');
         for (int i = 0; i < lines.size(); ++i) {
-            if (re.match(lines.at(i)).hasMatch()) {
-                // Record the match with file path, line number, and content
-                const QString rel = QDir(m_sandbox.workspaceRoot()).relativeFilePath(filePath);
+            if (!re.match(lines.at(i)).hasMatch()) {
+                continue;
+            }
+            if (context == 0) {
                 hits.append(u"%1:%2:%3"_s.arg(rel).arg(i + 1).arg(lines.at(i)));
-                
-                // Limit the number of results to prevent excessive output
-                if (hits.size() >= 200) {
-                    return;
+            } else {
+                const int from = qMax(0, i - context);
+                const int to = qMin(lines.size() - 1, i + context);
+                for (int j = from; j <= to; ++j) {
+                    const QChar mark = (j == i) ? u':' : u'-';
+                    hits.append(u"%1%2%3%4%5"_s.arg(rel).arg(mark).arg(j + 1).arg(mark).arg(lines.at(j)));
                 }
+                hits.append(u"--"_s);
+            }
+            if (hits.size() >= 200) {
+                return;
             }
         }
     };
@@ -483,8 +659,10 @@ ToolResult ToolRunner::glob(const QJsonObject &args) const
         
         // Get the relative path from the workspace root for user-friendly display
         const QString rel = QDir(m_sandbox.workspaceRoot()).relativeFilePath(filePath);
-        
-        // Check if the file matches the pattern using glob matching, directory matching, or filename matching
+        if (isNoisySearchPath(rel)) {
+            continue;
+        }
+
         if (Sandbox::globMatch(pattern, rel) || QDir::match(pattern, rel) || QDir::match(pattern, QFileInfo(rel).fileName())) {
             matches.append(rel);
         }
@@ -553,44 +731,210 @@ ToolResult ToolRunner::bash(const QJsonObject &args)
     return result;
 }
 
+void ToolRunner::runBashAsync(const ToolCall &call)
+{
+    if (m_bashRunning) {
+        ToolResult result;
+        result.name = u"bash"_s;
+        result.ok = false;
+        result.output = u"Another shell command is already running."_s;
+        QMetaObject::invokeMethod(this, [this, call, result]() mutable {
+            Q_EMIT bashFinished(call.id, result);
+        }, Qt::QueuedConnection);
+        return;
+    }
+
+    QString error;
+    const QJsonObject args = parseArgs(call, &error);
+    if (args.isEmpty() && !error.isEmpty()) {
+        ToolResult result;
+        result.name = u"bash"_s;
+        result.ok = false;
+        result.output = error;
+        QMetaObject::invokeMethod(this, [this, call, result]() mutable {
+            Q_EMIT bashFinished(call.id, result);
+        }, Qt::QueuedConnection);
+        return;
+    }
+
+    const QString command = args.value(u"command"_s).toString();
+    const QStringList wrapped = m_sandbox.wrapCommand(command, &error);
+    if (wrapped.isEmpty()) {
+        ToolResult result;
+        result.name = u"bash"_s;
+        result.ok = false;
+        result.output = error;
+        QMetaObject::invokeMethod(this, [this, call, result]() mutable {
+            Q_EMIT bashFinished(call.id, result);
+        }, Qt::QueuedConnection);
+        return;
+    }
+
+    m_bashCall = call;
+    m_bashRunning = true;
+    m_bashTimedOut = false;
+    m_bashOutput.clear();
+    m_bashOutputTruncated = false;
+    m_bashProcess.setWorkingDirectory(m_sandbox.workspaceRoot());
+    m_bashProcess.start(wrapped.first(), wrapped.mid(1));
+    m_bashTimeoutTimer.start(m_timeoutMs);
+}
+
+void ToolRunner::cancelAsyncBash()
+{
+    m_bashTimeoutTimer.stop();
+    if (!m_bashRunning) {
+        return;
+    }
+    m_bashRunning = false;
+    m_bashCall = {};
+    m_bashTimedOut = false;
+    m_bashOutput.clear();
+    m_bashOutputTruncated = false;
+    m_bashProcess.kill();
+    m_bashProcess.close();
+}
+
+void ToolRunner::finishAsyncBash(ToolResult result)
+{
+    if (!m_bashRunning) {
+        return;
+    }
+
+    const QString callId = m_bashCall.id;
+    m_bashTimeoutTimer.stop();
+    m_bashRunning = false;
+    m_bashCall = {};
+    m_bashTimedOut = false;
+    m_bashOutput.clear();
+    m_bashOutputTruncated = false;
+    Q_EMIT bashFinished(callId, result);
+}
+
 ToolResult ToolRunner::queryProjectGraph(const QJsonObject &args) const
 {
-    // Initialize the result structure to track success/failure
     ToolResult result;
     result.name = u"query_project_graph"_s;
-    
-    // Extract query parameters from arguments
-    const QString queryType = args.value(u"query_type"_s).toString();
+
+    if (!m_projectGraph || m_projectGraph->getNodeCount() == 0) {
+        result.ok = false;
+        result.output = u"Project graph is not available yet. Use glob/list_dir/grep instead."_s;
+        return result;
+    }
+
+    const QString queryType = args.value(u"query_type"_s).toString().trimmed();
     const QString nodeId = args.value(u"node_id"_s).toString();
     const QString relationship = args.value(u"relationship"_s).toString();
     const QString sourceId = args.value(u"source_id"_s).toString();
     const QString targetId = args.value(u"target_id"_s).toString();
-    
-    // Build a response based on the query type
-    QString output = u"Project Graph Query Results:\n\n"_s;
-    
-    if (queryType == u"summary") {
-        output += u"Project graph query functionality is available.\n"_s;
-        output += u"Use query_type: 'nodes' to get all nodes\n"_s;
-        output += u"Use query_type: 'edges' to get all edges\n"_s;
-        output += u"Use query_type: 'dependencies' to get dependency relationships\n"_s;
-        output += u"Use query_type: 'dependents' to get dependent relationships\n"_s;
-        output += u"Use query_type: 'find_related' with node_id to find related nodes\n"_s;
-        output += u"Use query_type: 'find_path' with source_id and target_id to find import paths\n"_s;
-        output += u"Use query_type: 'dependency_chain' with start_id and end_id to find dependency chain\n"_s;
-    } else if (queryType == u"nodes") {
-        output += u"Available nodes in the project graph:\n"_s;
-        output += u"(Project graph data would be retrieved from the AgentLoop's project graph instance)\n"_s;
-    } else if (queryType == u"edges") {
-        output += u"Available edges in the project graph:\n"_s;
-        output += u"(Project graph data would be retrieved from the AgentLoop's project graph instance)\n"_s;
+
+    auto formatNode = [](const GraphNode *node) {
+        if (!node) {
+            return QString();
+        }
+        return u"%1 [%2] %3 loc=%4"_s.arg(node->id, node->type, node->path.isEmpty() ? node->name : node->path)
+            .arg(node->linesOfCode);
+    };
+
+    QStringList lines;
+    const QString type = queryType.isEmpty() ? u"summary"_s : queryType;
+
+    if (type == u"summary"_s) {
+        lines.append(u"nodes: %1"_s.arg(m_projectGraph->getNodeCount()));
+        lines.append(u"edges: %1"_s.arg(m_projectGraph->getEdgeCount()));
+        QMap<QString, int> typeCount;
+        for (GraphNode *node : m_projectGraph->getAllNodes()) {
+            if (node) {
+                typeCount[node->type]++;
+            }
+        }
+        for (auto it = typeCount.begin(); it != typeCount.end(); ++it) {
+            lines.append(u"  %1: %2"_s.arg(it.key()).arg(it.value()));
+        }
+    } else if (type == u"nodes"_s) {
+        int shown = 0;
+        for (GraphNode *node : m_projectGraph->getAllNodes()) {
+            if (!node) {
+                continue;
+            }
+            lines.append(formatNode(node));
+            if (++shown >= 150) {
+                lines.append(u"... truncated"_s);
+                break;
+            }
+        }
+    } else if (type == u"edges"_s) {
+        int shown = 0;
+        for (auto it = m_projectGraph->getEdges().begin(); it != m_projectGraph->getEdges().end(); ++it) {
+            const GraphEdge *edge = it.value();
+            if (!edge) {
+                continue;
+            }
+            if (!relationship.isEmpty() && edge->relationship != relationship) {
+                continue;
+            }
+            lines.append(u"%1 -> %2 (%3)"_s.arg(edge->sourceId, edge->targetId, edge->relationship));
+            if (++shown >= 150) {
+                lines.append(u"... truncated"_s);
+                break;
+            }
+        }
+    } else if (type == u"dependencies"_s || type == u"dependents"_s || type == u"find_related"_s) {
+        GraphNode *node = resolveGraphNode(m_projectGraph, nodeId);
+        if (!node) {
+            result.ok = false;
+            result.output = u"Unknown node: %1"_s.arg(nodeId);
+            return result;
+        }
+        lines.append(formatNode(node));
+        if (type == u"dependencies"_s) {
+            for (const QString &dep : node->dependencies) {
+                lines.append(u"depends on: %1"_s.arg(dep));
+            }
+        } else if (type == u"dependents"_s) {
+            for (const QString &dep : node->dependents) {
+                lines.append(u"used by: %1"_s.arg(dep));
+            }
+        } else {
+            for (GraphNode *related : m_projectGraph->findRelatedNodes(node->id, 2)) {
+                if (related && related != node) {
+                    lines.append(u"related: %1"_s.arg(formatNode(related)));
+                }
+            }
+        }
+    } else if (type == u"find_path"_s || type == u"dependency_chain"_s) {
+        GraphNode *source = resolveGraphNode(m_projectGraph, sourceId);
+        GraphNode *target = resolveGraphNode(m_projectGraph, targetId);
+        if (!source || !target) {
+            result.ok = false;
+            result.output = u"Need valid source_id and target_id."_s;
+            return result;
+        }
+        if (type == u"find_path"_s) {
+            const QList<QString> path = m_projectGraph->findImportPaths(source->id, target->id);
+            if (path.isEmpty()) {
+                lines.append(u"No import path found."_s);
+            } else {
+                lines.append(path.join(u" -> "_s));
+            }
+        } else {
+            const QList<GraphNode *> chain = m_projectGraph->getDependencyChain(source->id, target->id);
+            if (chain.isEmpty()) {
+                lines.append(u"No dependency chain found."_s);
+            } else {
+                for (GraphNode *node : chain) {
+                    lines.append(formatNode(node));
+                }
+            }
+        }
     } else {
-        output += u"Unknown query type: "_s + queryType + u"\n"_s;
-        output += u"Available query types: summary, nodes, edges, dependencies, dependents, find_related, find_path, dependency_chain\n"_s;
+        result.ok = false;
+        result.output = u"Unknown query_type. Use summary, nodes, edges, dependencies, dependents, find_related, find_path, or dependency_chain."_s;
+        return result;
     }
-    
+
     result.ok = true;
-    result.output = output;
+    result.output = clip(lines.isEmpty() ? u"(no results)"_s : lines.join(u'\n'));
     return result;
 }
 

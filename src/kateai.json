@@ -8,7 +8,7 @@
         "Category": "Editor",
         "Description": "AI coding assistant with Grok, OpenAI, and OpenRouter",
         "EnabledByDefault": false,
-        "Id": "kateai",
+
         "License": "LGPL-2.1-or-later",
         "Name": "Kate AI",
         "Version": "0.1.0"

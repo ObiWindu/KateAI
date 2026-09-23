@@ -1,6 +1,9 @@
-#pragma once
+/*
+ * SPDX-FileCopyrightText: 2026 ObiWindu <Obi.wandu@proton.me>
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ */
 
-#include "documentbridge.h"
+#pragma once
 
 #include <KTextEditor/MainWindow>
 #include <KXMLGUIClient>
@@ -33,13 +36,13 @@ private:
     void askSelectionWithInstruction(const QString &instruction);
     QString editorContext() const;
     void refreshWorkspace();
+    void updateCompletions();
 
     KateAiPlugin *m_plugin = nullptr;
-    KTextEditor::MainWindow *m_mainWindow = nullptr;
+    QPointer<KTextEditor::MainWindow> m_mainWindow;
     QPointer<QWidget> m_toolView;
     QPointer<QDialog> m_configDialog;
-    ChatWidget *m_chat = nullptr;
-    DiskDocumentBridge m_bridge;
+    QPointer<ChatWidget> m_chat;
 };
 
 } // namespace KateAi

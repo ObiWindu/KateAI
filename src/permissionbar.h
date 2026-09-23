@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: 2026 ObiWindu <Obi.wandu@proton.me>
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ */
+
 #pragma once
 
 #include "types.h"
@@ -6,6 +11,7 @@
 
 class QLabel;
 class QPlainTextEdit;
+class QPushButton;
 
 namespace KateAi
 {
@@ -24,8 +30,14 @@ Q_SIGNALS:
     void decided(PermissionDecision decision);
 
 private:
+    void updateStyle(ToolRisk risk);
+
+    QLabel *m_riskBadge = nullptr;
     QLabel *m_title = nullptr;
     QPlainTextEdit *m_details = nullptr;
+    QPushButton *m_allowBtn = nullptr;
+    QPushButton *m_sessionBtn = nullptr;
+    QPushButton *m_denyBtn = nullptr;
 };
 
 } // namespace KateAi

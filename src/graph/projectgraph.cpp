@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: 2026 ObiWindu <Obi.wandu@proton.me>
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ */
+
 #include "projectgraph.h"
 
 #include <QFile>
@@ -57,27 +62,79 @@ void ProjectGraph::generateGraph(const QString &workspacePath)
 
 void ProjectGraph::scanDirectory(const QString &dirPath, const QString &parentNodeId)
 {
+    if (m_nodes.size() >= 300) {
+        return;
+    }
+
     QDir dir(dirPath);
     const QFileInfoList entries = dir.entryInfoList(QDir::AllEntries | QDir::NoDotAndDotDot);
 
     for (const QFileInfo &entry : entries) {
-        GraphNode node;
-        node.id = generateNodeId(entry.absoluteFilePath(), entry.isDir() ? u"directory"_s : u"file"_s);
-        node.name = entry.fileName();
-        node.type = entry.isDir() ? u"directory"_s : getNodeTypeFromPath(entry.absoluteFilePath());
-        node.path = entry.absoluteFilePath();
-        node.isReadOnly = false;
-        node.lastModified = entry.lastModified().toSecsSinceEpoch();
+        if (m_nodes.size() >= 300) {
+            break;
+        }
+
+        const QString fileName = entry.fileName();
 
         if (entry.isDir()) {
+            // Ignore hidden and heavy build/dependency directories
+            if (fileName.startsWith(u'.') ||
+                fileName == u"build"_s ||
+                fileName == u"node_modules"_s ||
+                fileName == u"dist"_s ||
+                fileName == u"target"_s ||
+                fileName == u"venv"_s ||
+                fileName == u"__pycache__"_s) {
+                continue;
+            }
+
+            GraphNode node;
+            node.id = generateNodeId(entry.absoluteFilePath(), u"directory"_s);
+            node.name = fileName;
+            node.type = u"directory"_s;
+            node.path = entry.absoluteFilePath();
+            node.isReadOnly = false;
+            node.lastModified = entry.lastModified().toSecsSinceEpoch();
+            addNode(node);
+
+            GraphEdge edge;
+            edge.sourceId = parentNodeId;
+            edge.targetId = node.id;
+            edge.relationship = u"contains"_s;
+            edge.isSafe = true;
+            addEdge(edge);
+
             // Recursively scan subdirectories
             scanDirectory(entry.absoluteFilePath(), node.id);
         } else {
-            // Read file content for analysis
+            // Skip files over 64 KB
+            if (entry.size() > 64 * 1024) {
+                continue;
+            }
+
+            // Skip common binary/media extensions
+            const QString ext = entry.suffix().toLower();
+            if (ext == u"o"_s || ext == u"so"_s || ext == u"a"_s || ext == u"dll"_s ||
+                ext == u"exe"_s || ext == u"bin"_s || ext == u"png"_s || ext == u"jpg"_s ||
+                ext == u"jpeg"_s || ext == u"gif"_s || ext == u"ico"_s || ext == u"pdf"_s ||
+                ext == u"zip"_s || ext == u"tar"_s || ext == u"gz"_s || ext == u"xz"_s) {
+                continue;
+            }
+
+            GraphNode node;
+            node.id = generateNodeId(entry.absoluteFilePath(), u"file"_s);
+            node.name = fileName;
+            node.type = getNodeTypeFromPath(entry.absoluteFilePath());
+            node.path = entry.absoluteFilePath();
+            node.isReadOnly = false;
+            node.lastModified = entry.lastModified().toSecsSinceEpoch();
+
+            // Read bounded file content for analysis
             QFile file(entry.absoluteFilePath());
             if (file.open(QIODevice::ReadOnly | QIODevice::Text)) {
-                node.content = QString::fromUtf8(file.readAll());
+                node.content = QString::fromUtf8(file.read(16 * 1024));
             }
+            addNode(node);
 
             // Create edge from parent to child
             GraphEdge edge;
@@ -926,9 +983,9 @@ QString ProjectGraph::generateNodeId(const QString &path, const QString &type)
 {
     // Generate a unique ID for a node based on its path and type
     QString id = path;
-    id.replace(u'/', u'_');
-    id.replace(u':', u'_');
-    id.replace(u'\\', u'_');
+    id.replace(QLatin1Char('/'), QLatin1Char('_'));
+    id.replace(QLatin1Char(':'), QLatin1Char('_'));
+    id.replace(QLatin1Char('\\'), QLatin1Char('_'));
     if (!type.isEmpty()) {
         id += u"_"_s + type;
     }

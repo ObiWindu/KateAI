@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: 2026 ObiWindu <Obi.wandu@proton.me>
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ */
+
 #include "settings.h"
 
 #include <KConfigGroup>
@@ -26,7 +31,11 @@ Settings SettingsStore::load()
     s.openrouterModel = g.readEntry(u"OpenRouterModel"_s, u"x-ai/grok-4"_s);
     s.permissionMode = permissionModeFromId(g.readEntry(u"PermissionMode"_s, permissionModeId(PermissionMode::Ask)));
     s.sandbox = sandboxProfileFromId(g.readEntry(u"Sandbox"_s, sandboxProfileId(SandboxProfile::Workspace)));
-    s.maxIterations = g.readEntry(u"MaxIterations"_s, 20);
+    const int legacyMaxIterations = g.readEntry(u"MaxIterations"_s, 20);
+    s.maxModelRequests = g.readEntry(u"MaxModelRequests"_s, 40);
+    s.maxToolCalls = g.readEntry(u"MaxToolCalls"_s, legacyMaxIterations);
+    s.requestsPerMinute = g.readEntry(u"RequestsPerMinute"_s, 15);
+    s.maxIterations = legacyMaxIterations;
     s.bashTimeoutMs = g.readEntry(u"BashTimeoutMs"_s, 60000);
     s.planMode = g.readEntry(u"PlanMode"_s, false);
     s.loadProjectInstructions = g.readEntry(u"LoadProjectInstructions"_s, true);
@@ -45,9 +54,28 @@ Settings SettingsStore::load()
     s.maxProjectInstructionsLength = g.readEntry(u"MaxProjectInstructionsLength"_s, 2048);
     s.compressSystemPrompt = g.readEntry(u"CompressSystemPrompt"_s, true);
     s.maxSystemPromptLength = g.readEntry(u"MaxSystemPromptLength"_s, 1024);
-    if (s.maxIterations < 1) {
-        s.maxIterations = 1;
+    // Optimal Intelligence Parameters
+    s.temperature = g.readEntry(u"Temperature"_s, 0.2);
+    s.topP = g.readEntry(u"TopP"_s, 0.95);
+    s.maxTokens = g.readEntry(u"MaxTokens"_s, 0);
+    s.reasoningEffort = g.readEntry(u"ReasoningEffort"_s, QString());
+    s.selfCritique = g.readEntry(u"SelfCritique"_s, true);
+    s.parallelToolCalls = g.readEntry(u"ParallelToolCalls"_s, true);
+    s.verbosity = g.readEntry(u"Verbosity"_s, 1);
+    if (s.maxModelRequests < 1) {
+        s.maxModelRequests = 1;
     }
+    if (s.maxToolCalls < 1) {
+        s.maxToolCalls = 1;
+    }
+    if (s.requestsPerMinute < 1) {
+        s.requestsPerMinute = 1;
+    }
+    if (s.requestsPerMinute > 60) {
+        s.requestsPerMinute = 60;
+    }
+    // Keep the legacy field coherent for older callers.
+    s.maxIterations = s.maxToolCalls;
     if (s.bashTimeoutMs < 1000) {
         s.bashTimeoutMs = 1000;
     }
@@ -66,7 +94,11 @@ void SettingsStore::save(const Settings &settings)
     g.writeEntry(u"OpenRouterModel"_s, settings.openrouterModel);
     g.writeEntry(u"PermissionMode"_s, permissionModeId(settings.permissionMode));
     g.writeEntry(u"Sandbox"_s, sandboxProfileId(settings.sandbox));
-    g.writeEntry(u"MaxIterations"_s, settings.maxIterations);
+    g.writeEntry(u"MaxModelRequests"_s, settings.maxModelRequests);
+    g.writeEntry(u"MaxToolCalls"_s, settings.maxToolCalls);
+    g.writeEntry(u"RequestsPerMinute"_s, settings.requestsPerMinute);
+    // Preserve the old key for existing versions/UI.
+    g.writeEntry(u"MaxIterations"_s, settings.maxToolCalls);
     g.writeEntry(u"BashTimeoutMs"_s, settings.bashTimeoutMs);
     g.writeEntry(u"PlanMode"_s, settings.planMode);
     g.writeEntry(u"LoadProjectInstructions"_s, settings.loadProjectInstructions);
@@ -87,6 +119,14 @@ void SettingsStore::save(const Settings &settings)
     g.writeEntry(u"MaxProjectInstructionsLength"_s, settings.maxProjectInstructionsLength);
     g.writeEntry(u"CompressSystemPrompt"_s, settings.compressSystemPrompt);
     g.writeEntry(u"MaxSystemPromptLength"_s, settings.maxSystemPromptLength);
+    // Save optimal intelligence parameters
+    g.writeEntry(u"Temperature"_s, settings.temperature);
+    g.writeEntry(u"TopP"_s, settings.topP);
+    g.writeEntry(u"MaxTokens"_s, settings.maxTokens);
+    g.writeEntry(u"ReasoningEffort"_s, settings.reasoningEffort);
+    g.writeEntry(u"SelfCritique"_s, settings.selfCritique);
+    g.writeEntry(u"ParallelToolCalls"_s, settings.parallelToolCalls);
+    g.writeEntry(u"Verbosity"_s, settings.verbosity);
     
     g.sync();
 }

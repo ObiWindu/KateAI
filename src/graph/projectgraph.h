@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: 2026 ObiWindu <Obi.wandu@proton.me>
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ */
+
 #pragma once
 
 #include <QString>
@@ -26,11 +31,11 @@ struct GraphNode {
     QString content; // For files, the content preview
     QSet<QString> dependencies; // Other nodes this depends on
     QSet<QString> dependents; // Nodes that depend on this
-    int complexity; // Cyclomatic complexity for functions/classes
-    int linesOfCode;
+    int complexity = 0; // Cyclomatic complexity for functions/classes
+    int linesOfCode = 0;
     QJsonObject metadata;
-    bool isReadOnly; // For security tracking
-    qint64 lastModified;
+    bool isReadOnly = false; // For security tracking
+    qint64 lastModified = 0;
 };
 
 struct GraphEdge {
@@ -38,7 +43,7 @@ struct GraphEdge {
     QString targetId;
     QString relationship; // "imports", "calls", "extends", "contains", "references"
     QString details;
-    bool isSafe; // For permission evaluation
+    bool isSafe = true; // For permission evaluation
 };
 
 class ProjectGraph {

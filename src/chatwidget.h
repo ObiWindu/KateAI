@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: 2026 ObiWindu <Obi.wandu@proton.me>
+ * SPDX-License-Identifier: LGPL-2.1-or-later
+ */
+
 #pragma once
 
 #include "agentloop.h"
@@ -7,17 +12,25 @@
 #include <QHash>
 #include <QLineEdit>
 #include <QIcon>
+#include <QColor>
+#include <QCheckBox>
+#include <QTimer>
 
 class QComboBox;
 class QLabel;
 class QPushButton;
+class QScrollArea;
 class QTextBrowser;
+class QVBoxLayout;
+class QGraphicsOpacityEffect;
+class QPropertyAnimation;
 
 namespace KateAi
 {
 
 class PermissionBar;
 class PromptEdit;
+class ToolCallWidget;
 
 class ChatWidget : public QWidget
 {
@@ -25,6 +38,7 @@ class ChatWidget : public QWidget
 
 public:
     explicit ChatWidget(QWidget *parent = nullptr);
+    ~ChatWidget() override;
 
     AgentLoop *agent()
     {
@@ -40,24 +54,64 @@ public:
     void focusPrompt();
     void ask(const QString &text);
     void newChat();
+    void rebuildTranscript();
+
+    PromptEdit *promptEdit() const { return m_prompt; }
+    void setCompletionWords(const QStringList &words);
 
 Q_SIGNALS:
     void settingsChanged(const Settings &settings);
     void configureRequested();
+    void aboutToSubmit();
+
+protected:
+    void resizeEvent(QResizeEvent *event) override;
 
 private:
-    void appendHtml(const QString &html);
+    void addUserMessage(const QString &text);
+    void addActivityMessage(const QString &text);
     void setStreaming(const QString &text);
     void freezeStreaming();
+    void addThinkingBlock(const QString &text);
+    void appendThinkingDelta(const QString &delta);
+    void renderThinkingHtml();
+    static QString markdownToFifoHtml(const QString &text, int maxLines);
+    void collapseThinkingBlock();
+    void toggleThinking();
+    void addPlanChecklist(const QJsonArray &plan);
+    void markPlanStepCompleted(const QString &stepId);
+    void scrollToBottom();
+    void forceScrollToBottom();
+    void updateScrollButtonPosition();
+    void animateScrollButtonShow();
+    void animateScrollButtonHide();
+    QPushButton *createCopyButton(const QString &textToCopy, QWidget *parent);
+    QWidget *createWelcomeWidget();
+    void showSettingsMenu();
+    void showModelMenu();
+    void updateModelSelectorLabel();
+    void showInfoMessage(const QString &message, bool isError);
+
     void submit();
     void applyProviderToCombos();
     void refreshProviders();
     void refreshModels();
     void updateSendButtonState();
+    void updateTokenDisplay();
+    void updateThinkingButtonStyle();
+    void updateReasoningEffortButton();
+    bool modelSupportsReasoningEffort() const;
+    void showReasoningEffortMenu();
+    void setThinkingIndicator(bool show);
+    void setWorkingIndicator(bool show);
     static QString escape(const QString &text);
     static QString markdownToHtml(const QString &text);
 
     Settings m_settings;
+    // Keep the document bridge alive with the UI/agent that uses it.  It must
+    // outlive m_agent because tool calls may still be queued while the Kate
+    // tool view is being torn down.
+    DiskDocumentBridge m_documentBridge;
     AgentLoop m_agent;
     QComboBox *m_provider = nullptr;
     QComboBox *m_model = nullptr;
@@ -69,16 +123,61 @@ private:
     QPushButton *m_send = nullptr;
     QPushButton *m_stop = nullptr;
     QPushButton *m_thinking = nullptr;
-    QTextBrowser *m_transcript = nullptr;
+    QPushButton *m_reasoningEffort = nullptr;
+
+    QScrollArea *m_scrollArea = nullptr;
+    QWidget *m_transcriptContainer = nullptr;
+    QVBoxLayout *m_transcriptLayout = nullptr;
+    QWidget *m_activeAssistantWidget = nullptr;
+    QTextBrowser *m_activeAssistantBrowser = nullptr;
+
     PermissionBar *m_permissionBar = nullptr;
     PromptEdit *m_prompt = nullptr;
     QLabel *m_status = nullptr;
-    QString m_historyHtml;
+    QLabel *m_infoBar = nullptr;
+    QLabel *m_threadTitle = nullptr;
+    QLabel *m_tokenCount = nullptr;
+    QPushButton *m_modelSelector = nullptr;
     QString m_streamText;
     QHash<Provider, QStringList> m_modelCatalog;
     Provider m_preferredProvider = Provider::Grok;
     bool m_updatingCombos = false;
     QString m_modelFilter;
+
+    QWidget *m_toolbar = nullptr;
+    QWidget *m_composerContainer = nullptr;
+    QWidget *m_composerCard = nullptr;
+
+    // Collapsible hidden-reasoning block rendered at the top of the active
+    // assistant turn. Collapsed once the visible answer starts streaming.
+    QWidget *m_thinkingBlock = nullptr;
+    QTextBrowser *m_thinkingBrowser = nullptr;
+    QPushButton *m_thinkingToggle = nullptr;
+    bool m_thinkingExpanded = false;
+
+    // Raw thinking text buffer, used to apply FIFO line limiting and render
+    // markdown/HTML instead of escaped plain text.
+    QString m_thinkingBuffer;
+
+    // Structured plan checklist rendered below the thinking block.
+    QWidget *m_planBlock = nullptr;
+    QVBoxLayout *m_planLayout = nullptr;
+    QHash<QCheckBox *, QString> m_planSteps;
+
+    QHash<QString, ToolCallWidget *> m_toolCallWidgets;
+    QPushButton *m_scrollToBottomBtn = nullptr;
+    QPushButton *m_activeAssistantCopyBtn = nullptr;
+    QGraphicsOpacityEffect *m_scrollOpacityEffect = nullptr;
+    QPropertyAnimation *m_scrollButtonAnimation = nullptr;
+    QTimer m_streamRenderTimer;
+    QTimer m_scrollTimer;
+    bool m_userScrolledUp = true;
+
+    // Dynamic status indicators at bottom of chat
+    QLabel *m_thinkingIndicator = nullptr;
+    QLabel *m_workingIndicator = nullptr;
+    bool m_isThinking = false;
+    bool m_isWorking = false;
 };
 
 } // namespace KateAi
