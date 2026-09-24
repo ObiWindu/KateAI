@@ -10,17 +10,16 @@
 #include <QJsonDocument>
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QUuid>
+#include <QDateTime>
+#include <QDir>
 
 using namespace Qt::Literals::StringLiterals;
 
 namespace KateAi
 {
 
-static KConfigGroup sessionGroup()
-{
-    return KConfigGroup(KSharedConfig::openConfig(), u"KateAISession"_s);
-}
-
+// Helper functions (defined first so they can be used by static methods)
 static QJsonArray messagesToJson(const QList<ChatMessage> &messages)
 {
     QJsonArray arr;
@@ -92,10 +91,116 @@ static QHash<QString, int> hashFromJson(const QJsonObject &obj)
     return hash;
 }
 
+static QString generateConversationId()
+{
+    return QUuid::createUuid().toString(QUuid::WithoutBraces);
+}
+
+static QString generateTitleFromMessages(const QList<ChatMessage> &messages)
+{
+    for (const auto &msg : messages) {
+        if (msg.role == ChatMessage::Role::User && !msg.content.isEmpty()) {
+            QString title = msg.content.trimmed().split(u'\n').first();
+            if (title.length() > 50) {
+                title = title.left(47) + u"...";
+            }
+            return title;
+        }
+    }
+    return QDateTime::currentDateTime().toString(u"yyyy-MM-dd hh:mm"_s);
+}
+
+static KConfigGroup conversationsGroup()
+{
+    return KConfigGroup(KSharedConfig::openConfig(), u"KateAIConversations"_s);
+}
+
+static KConfigGroup conversationGroup(const QString &id)
+{
+    return KConfigGroup(KSharedConfig::openConfig(), u"KateAIConversation_"_s + id);
+}
+
+QString SessionStore::conversationsGroupName()
+{
+    return u"KateAIConversations"_s;
+}
+
+QString SessionStore::conversationGroupName(const QString &id)
+{
+    return u"KateAIConversation_"_s + id;
+}
+
 SessionStore::SessionData SessionStore::load()
 {
+    // Load the active conversation
+    const QString activeId = getActiveConversationId();
+    if (!activeId.isEmpty()) {
+        return loadConversation(activeId);
+    }
+    return SessionData();
+}
+
+void SessionStore::save(const SessionData &data)
+{
+    const QString activeId = getActiveConversationId();
+    if (!activeId.isEmpty()) {
+        saveConversation(activeId, data);
+    } else {
+        // Create a new conversation if none active
+        const QString newId = createNewConversation();
+        saveConversation(newId, data);
+    }
+}
+
+void SessionStore::clear()
+{
+    const QString activeId = getActiveConversationId();
+    if (!activeId.isEmpty()) {
+        deleteConversation(activeId);
+    }
+}
+
+QList<SessionStore::ConversationInfo> SessionStore::listConversations(int maxConversations)
+{
+    QList<ConversationInfo> conversations;
+    const KConfigGroup group = conversationsGroup();
+    const QStringList keys = group.keyList();
+
+    for (const QString &key : keys) {
+        if (key.startsWith(u"conv_"_s)) {
+            const QString id = key.mid(5); // Remove "conv_" prefix
+            const KConfigGroup convGroup = conversationGroup(id);
+
+            ConversationInfo info;
+            info.id = id;
+            info.title = convGroup.readEntry(u"Title"_s, u"Untitled"_s);
+            info.createdAt = QDateTime::fromString(convGroup.readEntry(u"CreatedAt"_s, QString()), Qt::ISODate);
+            info.updatedAt = QDateTime::fromString(convGroup.readEntry(u"UpdatedAt"_s, QString()), Qt::ISODate);
+            info.messageCount = convGroup.readEntry(u"MessageCount"_s, 0);
+            info.isActive = (id == getActiveConversationId());
+
+            conversations.append(info);
+        }
+    }
+
+    // Sort by updatedAt descending (most recent first)
+    std::sort(conversations.begin(), conversations.end(),
+              [](const ConversationInfo &a, const ConversationInfo &b) {
+                  return a.updatedAt > b.updatedAt;
+              });
+
+    // Limit to maxConversations
+    if (maxConversations > 0 && conversations.size() > maxConversations) {
+        conversations = conversations.mid(0, maxConversations);
+    }
+
+    return conversations;
+}
+
+SessionStore::SessionData SessionStore::loadConversation(const QString &conversationId)
+{
     SessionData data;
-    const KConfigGroup g = sessionGroup();
+    const KConfigGroup g = conversationGroup(conversationId);
 
     // Load messages
     const QByteArray messagesData = g.readEntry(u"Messages"_s, QByteArray());
@@ -152,33 +257,122 @@ SessionStore::SessionData SessionStore::load()
     return data;
 }
 
-void SessionStore::save(const SessionData &data)
+void SessionStore::saveConversation(const QString &conversationId, const SessionData &data, const QString &title)
 {
-    KConfigGroup g = sessionGroup();
+    KConfigGroup convGroup = conversationGroup(conversationId);
+    KConfigGroup listGroup = conversationsGroup();
 
-    g.writeEntry(u"Messages"_s, QJsonDocument(messagesToJson(data.messages)).toJson(QJsonDocument::Compact));
-    g.writeEntry(u"CurrentThinking"_s, data.currentThinking);
-    g.writeEntry(u"CurrentPlan"_s, QJsonDocument(data.currentPlan).toJson(QJsonDocument::Compact));
-    g.writeEntry(u"PlanShown"_s, data.planShown);
-    g.writeEntry(u"CurrentAssistant"_s, data.currentAssistant);
-    g.writeEntry(u"StateEpoch"_s, data.stateEpoch);
-    g.writeEntry(u"ActionSignatures"_s, QJsonDocument(stringListToJson(data.actionSignatures)).toJson(QJsonDocument::Compact));
-    g.writeEntry(u"ActionRepeatCounts"_s, QJsonDocument(hashToJson(data.actionRepeatCounts)).toJson(QJsonDocument::Compact));
-    g.writeEntry(u"ChangedPaths"_s, QJsonDocument(stringListToJson(data.changedPaths)).toJson(QJsonDocument::Compact));
-    g.writeEntry(u"ChangesNeedVerification"_s, data.changesNeedVerification);
-    g.writeEntry(u"VerificationAttempted"_s, data.verificationAttempted);
-    g.writeEntry(u"VerificationPromptCount"_s, data.verificationPromptCount);
-    g.writeEntry(u"ModelRequests"_s, data.modelRequests);
-    g.writeEntry(u"ToolCalls"_s, data.toolCalls);
+    // Generate title if not provided
+    QString convTitle = title;
+    if (convTitle.isEmpty()) {
+        convTitle = generateTitleFromMessages(data.messages);
+    }
 
-    g.sync();
+    // Save conversation data
+    convGroup.writeEntry(u"Title"_s, convTitle);
+    convGroup.writeEntry(u"UpdatedAt"_s, QDateTime::currentDateTime().toString(Qt::ISODate));
+    convGroup.writeEntry(u"MessageCount"_s, data.messages.size());
+
+    // Preserve creation time
+    if (convGroup.readEntry(u"CreatedAt"_s, QString()).isEmpty()) {
+        convGroup.writeEntry(u"CreatedAt"_s, QDateTime::currentDateTime().toString(Qt::ISODate));
+    }
+
+    // Save session data
+    convGroup.writeEntry(u"Messages"_s, QJsonDocument(messagesToJson(data.messages)).toJson(QJsonDocument::Compact));
+    convGroup.writeEntry(u"CurrentThinking"_s, data.currentThinking);
+    convGroup.writeEntry(u"CurrentPlan"_s, QJsonDocument(data.currentPlan).toJson(QJsonDocument::Compact));
+    convGroup.writeEntry(u"PlanShown"_s, data.planShown);
+    convGroup.writeEntry(u"CurrentAssistant"_s, data.currentAssistant);
+    convGroup.writeEntry(u"StateEpoch"_s, data.stateEpoch);
+    convGroup.writeEntry(u"ActionSignatures"_s, QJsonDocument(stringListToJson(data.actionSignatures)).toJson(QJsonDocument::Compact));
+    convGroup.writeEntry(u"ActionRepeatCounts"_s, QJsonDocument(hashToJson(data.actionRepeatCounts)).toJson(QJsonDocument::Compact));
+    convGroup.writeEntry(u"ChangedPaths"_s, QJsonDocument(stringListToJson(data.changedPaths)).toJson(QJsonDocument::Compact));
+    convGroup.writeEntry(u"ChangesNeedVerification"_s, data.changesNeedVerification);
+    convGroup.writeEntry(u"VerificationAttempted"_s, data.verificationAttempted);
+    convGroup.writeEntry(u"VerificationPromptCount"_s, data.verificationPromptCount);
+    convGroup.writeEntry(u"ModelRequests"_s, data.modelRequests);
+    convGroup.writeEntry(u"ToolCalls"_s, data.toolCalls);
+
+    convGroup.sync();
+
+    // Update conversation list
+    listGroup.writeEntry(u"conv_"_s + conversationId, true);
+    listGroup.sync();
+
+    // Prune old conversations if needed
+    pruneOldConversations(50); // Default, will be overridden by config
 }
 
-void SessionStore::clear()
+void SessionStore::deleteConversation(const QString &conversationId)
 {
-    KConfigGroup g = sessionGroup();
-    g.deleteGroup();
-    g.sync();
+    KConfigGroup convGroup = conversationGroup(conversationId);
+    KConfigGroup listGroup = conversationsGroup();
+
+    convGroup.deleteGroup();
+    listGroup.deleteEntry(u"conv_"_s + conversationId);
+
+    // If this was the active conversation, clear active
+    if (getActiveConversationId() == conversationId) {
+        KConfigGroup activeGroup = conversationsGroup();
+        activeGroup.deleteEntry(u"ActiveConversation"_s);
+        activeGroup.sync();
+    }
+
+    convGroup.sync();
+    listGroup.sync();
+}
+
+QString SessionStore::createNewConversation()
+{
+    const QString newId = generateConversationId();
+
+    // Create empty conversation
+    SessionData emptyData;
+    saveConversation(newId, emptyData, u"New Conversation"_s);
+
+    // Set as active
+    setActiveConversation(newId);
+
+    return newId;
+}
+
+void SessionStore::setActiveConversation(const QString &conversationId)
+{
+    KConfigGroup group = conversationsGroup();
+    group.writeEntry(u"ActiveConversation"_s, conversationId);
+    group.sync();
+}
+
+QString SessionStore::getActiveConversationId()
+{
+    const KConfigGroup group = conversationsGroup();
+    return group.readEntry(u"ActiveConversation"_s, QString());
+}
+
+void SessionStore::pruneOldConversations(int maxConversations)
+{
+    if (maxConversations <= 0) {
+        return; // Unlimited
+    }
+
+    auto conversations = listConversations(0); // Get all without limit
+    if (conversations.size() <= maxConversations) {
+        return;
+    }
+
+    // Delete oldest conversations beyond the limit
+    for (int i = maxConversations; i < conversations.size(); ++i) {
+        deleteConversation(conversations[i].id);
+    }
+}
+
+void SessionStore::clearAllConversations()
+{
+    auto conversations = listConversations(0);
+    for (const auto &conv : conversations) {
+        deleteConversation(conv.id);
+    }
 }
 
 } // namespace KateAi

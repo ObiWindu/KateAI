@@ -190,6 +190,11 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     m_requestsPerMinute->setRange(1, 60);
     agentForm->addRow(i18n("Model requests per minute:"), m_requestsPerMinute);
 
+    m_maxSavedConversations = new QSpinBox(agentWidget);
+    m_maxSavedConversations->setRange(0, 1000);
+    m_maxSavedConversations->setSpecialValueText(i18n("Unlimited"));
+    agentForm->addRow(i18n("Max saved conversations:"), m_maxSavedConversations);
+
     m_system = new QPlainTextEdit(agentWidget);
     m_system->setPlaceholderText(i18n("Extra system prompt (optional)"));
     m_system->setMaximumHeight(80);
@@ -493,6 +498,7 @@ void KateAiConfigPage::apply()
     s.maxIterations = s.maxToolCalls;
     s.maxModelRequests = m_maxModelRequests->value();
     s.requestsPerMinute = m_requestsPerMinute->value();
+    s.maxSavedConversations = m_maxSavedConversations->value();
     s.bashTimeoutMs = m_timeout->value() * 1000;
     s.maxExpandedToolCards = m_maxExpandedToolCards->value();
     s.planMode = m_planMode->isChecked();
@@ -575,6 +581,7 @@ void KateAiConfigPage::reset()
     m_maxIter->setValue(s.maxToolCalls);
     m_maxModelRequests->setValue(s.maxModelRequests);
     m_requestsPerMinute->setValue(s.requestsPerMinute);
+    m_maxSavedConversations->setValue(s.maxSavedConversations);
     m_planMode->setChecked(s.planMode);
     m_projectInstructions->setChecked(s.loadProjectInstructions);
     m_thinkingMode->setChecked(s.thinkingMode);

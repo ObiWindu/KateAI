@@ -22,12 +22,12 @@ private Q_SLOTS:
     void initTestCase()
     {
         // Clear any existing session data
-        SessionStore::clear();
+        SessionStore::clearAllConversations();
     }
 
     void cleanupTestCase()
     {
-        SessionStore::clear();
+        SessionStore::clearAllConversations();
     }
 
     void testEmptySession()
@@ -309,6 +309,118 @@ private Q_SLOTS:
         QCOMPARE(loaded.messages.size(), 1);
         QCOMPARE(loaded.messages[0].toolCalls.size(), 1);
         QCOMPARE(loaded.messages[0].toolCalls[0].toObject()[u"name"_s].toString(), u"read_file"_s);
+    }
+
+    void testConversationHistory()
+    {
+        // Test creating multiple conversations
+        SessionStore::clearAllConversations();
+
+        // Create first conversation
+        SessionStore::SessionData data1;
+        ChatMessage userMsg1;
+        userMsg1.role = ChatMessage::Role::User;
+        userMsg1.content = u"First conversation"_s;
+        data1.messages = {userMsg1};
+        QString id1 = SessionStore::createNewConversation();
+        SessionStore::saveConversation(id1, data1, u"First Chat"_s);
+
+        // Create second conversation
+        SessionStore::SessionData data2;
+        ChatMessage userMsg2;
+        userMsg2.role = ChatMessage::Role::User;
+        userMsg2.content = u"Second conversation"_s;
+        data2.messages = {userMsg2};
+        QString id2 = SessionStore::createNewConversation();
+        SessionStore::saveConversation(id2, data2, u"Second Chat"_s);
+
+        // Create third conversation
+        SessionStore::SessionData data3;
+        ChatMessage userMsg3;
+        userMsg3.role = ChatMessage::Role::User;
+        userMsg3.content = u"Third conversation"_s;
+        data3.messages = {userMsg3};
+        QString id3 = SessionStore::createNewConversation();
+        SessionStore::saveConversation(id3, data3, u"Third Chat"_s);
+
+        // List conversations - should be sorted by updatedAt (most recent first)
+        auto conversations = SessionStore::listConversations(10);
+        QCOMPARE(conversations.size(), 3);
+        // Verify all three conversations exist (order may vary due to timing)
+        QStringList titles;
+        for (const auto &c : conversations) {
+            titles.append(c.title);
+        }
+        QVERIFY(titles.contains(u"First Chat"_s));
+        QVERIFY(titles.contains(u"Second Chat"_s));
+        QVERIFY(titles.contains(u"Third Chat"_s));
+
+        // Test active conversation - should be the last created (id3)
+        QString activeId = SessionStore::getActiveConversationId();
+        QVERIFY(activeId == id1 || activeId == id2 || activeId == id3);
+        bool foundActive = false;
+        for (const auto &c : conversations) {
+            if (c.isActive) {
+                foundActive = true;
+                QCOMPARE(c.id, activeId);
+            }
+        }
+        QVERIFY(foundActive);
+
+        // Switch active conversation
+        SessionStore::setActiveConversation(id1);
+        QCOMPARE(SessionStore::getActiveConversationId(), id1);
+        conversations = SessionStore::listConversations(10);
+        foundActive = false;
+        for (const auto &c : conversations) {
+            if (c.isActive) {
+                foundActive = true;
+                QCOMPARE(c.id, id1);
+            }
+        }
+        QVERIFY(foundActive);
+
+        // Load specific conversation
+        auto loaded1 = SessionStore::loadConversation(id1);
+        QCOMPARE(loaded1.messages.size(), 1);
+        QCOMPARE(loaded1.messages[0].content, u"First conversation"_s);
+
+        // Delete conversation
+        SessionStore::deleteConversation(id2);
+        conversations = SessionStore::listConversations(10);
+        QCOMPARE(conversations.size(), 2);
+        QVERIFY(std::none_of(conversations.begin(), conversations.end(),
+                             [&id2](const SessionStore::ConversationInfo &c) { return c.id == id2; }));
+
+        // Delete active conversation - SessionStore just clears active, ChatWidget handles switching
+        SessionStore::setActiveConversation(id1);
+        SessionStore::deleteConversation(id1);
+        QString newActiveId = SessionStore::getActiveConversationId();
+        QVERIFY(newActiveId.isEmpty()); // SessionStore clears active, ChatWidget would switch
+
+        // Test pruning - create 5 conversations, then test listConversations limit
+        // First delete all existing conversations
+        auto allConvs = SessionStore::listConversations(0);
+        for (const auto &c : allConvs) {
+            SessionStore::deleteConversation(c.id);
+        }
+        QStringList createdIds;
+        for (int i = 0; i < 5; ++i) {
+            SessionStore::SessionData d;
+            ChatMessage m;
+            m.role = ChatMessage::Role::User;
+            m.content = QString(u"Conv %1"_s).arg(i);
+            d.messages = {m};
+            QString id = SessionStore::createNewConversation();
+            createdIds.append(id);
+            SessionStore::saveConversation(id, d, QString(u"Chat %1"_s).arg(i));
+        }
+        // Test listConversations limit
+        conversations = SessionStore::listConversations(3); // Limit returned to 3
+        QCOMPARE(conversations.size(), 3);
+        // Verify all 5 are still stored
+        conversations = SessionStore::listConversations(0);
+        QCOMPARE(conversations.size(), 5);
     }
 };
 

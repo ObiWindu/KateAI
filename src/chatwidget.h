@@ -21,6 +21,7 @@ class QPushButton;
 class QScrollArea;
 class QTextBrowser;
 class QVBoxLayout;
+class QMenu;
 
 namespace KateAi
 {
@@ -28,6 +29,7 @@ namespace KateAi
 class PermissionBar;
 class PromptEdit;
 class ToolCallWidget;
+class EditTracker;
 
 class ChatWidget : public QWidget
 {
@@ -52,6 +54,12 @@ public:
     void ask(const QString &text);
     void newChat();
     void rebuildTranscript();
+    void restoreCurrentTurn(const SessionStore::SessionData &sessionData);
+
+    // Conversation history
+    void showConversationHistory();
+    void switchToConversation(const QString &conversationId);
+    void deleteConversation(const QString &conversationId);
 
     PromptEdit *promptEdit() const { return m_prompt; }
     void setCompletionWords(const QStringList &words);
@@ -60,6 +68,7 @@ Q_SIGNALS:
     void settingsChanged(const Settings &settings);
     void configureRequested();
     void aboutToSubmit();
+    void conversationChanged(const QString &conversationId);
 
 protected:
     void resizeEvent(QResizeEvent *event) override;
@@ -167,6 +176,18 @@ private:
     QLabel *m_workingIndicator = nullptr;
     bool m_isThinking = false;
     bool m_isWorking = false;
+
+    // Edit tracker for AcceptEdits permission mode
+    EditTracker *m_editTracker = nullptr;
+
+    // Track pending write/edit tool calls for edit tracking
+    QHash<QString, PermissionRequest> m_pendingToolCalls;
+
+    // Conversation history
+    QPushButton *m_historyButton = nullptr;
+    QMenu *m_historyMenu = nullptr;
+    QString m_currentConversationId;
+    bool m_loadingConversation = false;
 };
 
 } // namespace KateAi

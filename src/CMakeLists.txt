@@ -37,6 +37,7 @@ target_sources(kateai PRIVATE
     toolcallwidget.cpp
     promptedit.cpp
     permissionbar.cpp
+    edittracker.cpp
     kateai.qrc
 )
 target_link_libraries(kateai PRIVATE

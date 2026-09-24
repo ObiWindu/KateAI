@@ -44,6 +44,7 @@ public:
     bool isBusy() const { return m_busy; }
 
     LlmClient *client() { return &m_client; }
+    DocumentBridge *documentBridge() { return m_bridge; }
 
     void start(const QString &userText);
     void abort();

@@ -67,6 +67,7 @@ private:
     QSpinBox *m_maxIter = nullptr;
     QSpinBox *m_maxModelRequests = nullptr;
     QSpinBox *m_requestsPerMinute = nullptr;
+    QSpinBox *m_maxSavedConversations = nullptr;
     QCheckBox *m_planMode = nullptr;
     QCheckBox *m_projectInstructions = nullptr;
     QPlainTextEdit *m_system = nullptr;

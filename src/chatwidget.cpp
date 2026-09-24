@@ -10,6 +10,7 @@
 #include "sessionstore.h"
 #include "settings.h"
 #include "toolcallwidget.h"
+#include "edittracker.h"
 
 #include <KLocalizedString>
 
@@ -91,6 +92,24 @@ ChatWidget::ChatWidget(QWidget *parent)
     m_threadTitle = new QLabel(i18n("New Thread"), this);
     m_threadTitle->setStyleSheet(u"QLabel { color: #888888; font-size: 12px; font-weight: 500; padding-left: 4px; }"_s);
     toolbarLayout->addWidget(m_threadTitle);
+
+    // Conversation History button
+    m_historyButton = new QPushButton(QIcon::fromTheme(u"view-history"_s), QString(), this);
+    m_historyButton->setToolTip(i18n("Conversation History"));
+    m_historyButton->setFixedSize(26, 26);
+    m_historyButton->setCursor(Qt::PointingHandCursor);
+    m_historyButton->setStyleSheet(
+        u"QPushButton {"
+        u"  background: transparent;"
+        u"  border: 1px solid transparent;"
+        u"  border-radius: 4px;"
+        u"}"
+        u"QPushButton:hover {"
+        u"  background-color: #2e2e32;"
+        u"  border-color: #3c3c40;"
+        u"}"_s);
+    connect(m_historyButton, &QPushButton::clicked, this, &ChatWidget::showConversationHistory);
+    toolbarLayout->addWidget(m_historyButton);
 
     toolbarLayout->addStretch();
 
@@ -295,6 +314,10 @@ ChatWidget::ChatWidget(QWidget *parent)
     // 3. Permission Bar (Zed-style Inline Consent)
     m_permissionBar = new PermissionBar(this);
     root->addWidget(m_permissionBar);
+
+    // 3b. Edit Tracker (for AcceptEdits permission mode)
+    m_editTracker = new EditTracker(this);
+    root->addWidget(m_editTracker);
 
     // 4. Composer Area (Zed-style Input Box)
     auto *composerContainer = new QWidget(this);
@@ -516,6 +539,21 @@ ChatWidget::ChatWidget(QWidget *parent)
         toolWidget->setRunning();
         m_toolCallWidgets.insert(request.toolCallId, toolWidget);
         m_transcriptLayout->insertWidget(m_transcriptLayout->count() - 1, toolWidget);
+
+        // Track write/edit tool calls for edit tracking in AcceptEdits mode
+        if ((request.toolName == u"write_file"_s || request.toolName == u"edit_file"_s) &&
+            m_settings.permissionMode == PermissionMode::AcceptEdits) {
+            // Read the old content before the edit
+            PermissionRequest trackedRequest = request;
+            QString oldContent;
+            QString error;
+            if (m_agent.documentBridge()) {
+                m_agent.documentBridge()->readDocument(request.path, &oldContent);
+            }
+            trackedRequest.details = oldContent; // Store old content in details field temporarily
+            m_pendingToolCalls.insert(request.toolCallId, trackedRequest);
+        }
+
         scrollToBottom();
     });
 
@@ -523,6 +561,27 @@ ChatWidget::ChatWidget(QWidget *parent)
         if (auto *widget = m_toolCallWidgets.value(result.toolCallId)) {
             widget->setFinished(result);
         }
+
+        // Handle edit tracking for AcceptEdits mode
+        if (m_settings.permissionMode == PermissionMode::AcceptEdits) {
+            auto it = m_pendingToolCalls.find(result.toolCallId);
+            if (it != m_pendingToolCalls.end()) {
+                const PermissionRequest &request = it.value();
+                if ((request.toolName == u"write_file"_s || request.toolName == u"edit_file"_s) && result.ok) {
+                    // Read the new content from the file
+                    QString newContent;
+                    if (m_agent.documentBridge()) {
+                        m_agent.documentBridge()->readDocument(request.path, &newContent);
+                    }
+                    // Get old content from details field (stored in toolStarted)
+                    QString oldContent = request.details;
+                    // Add to edit tracker with diff, old content, and new content
+                    m_editTracker->addEdit(request.path, request.toolName, request.describeDiff, oldContent, newContent);
+                }
+                m_pendingToolCalls.erase(it);
+            }
+        }
+
         // Hide working indicator if no more tools are running
         bool anyRunning = false;
         for (auto *widget : m_toolCallWidgets) {
@@ -575,6 +634,32 @@ ChatWidget::ChatWidget(QWidget *parent)
         m_prompt->setFocus();
         setThinkingIndicator(false);
         setWorkingIndicator(false);
+    });
+
+    // Edit tracker signals
+    connect(m_editTracker, &EditTracker::editAccepted, this, [this](const QString &path, const QString &toolName, const QString &newContent) {
+        Q_UNUSED(path);
+        Q_UNUSED(toolName);
+        Q_UNUSED(newContent);
+        // Edit is already applied, just acknowledge
+        // Could show a brief confirmation message
+    });
+    connect(m_editTracker, &EditTracker::editRejected, this, [this](const QString &path, const QString &toolName, const QString &oldContent) {
+        // Revert the edit by writing the old content back
+        if (m_agent.documentBridge()) {
+            QString error;
+            if (m_agent.documentBridge()->writeDocument(path, oldContent, &error)) {
+                showInfoMessage(i18n("Edit reverted for %1", path), false);
+            } else {
+                showInfoMessage(i18n("Failed to revert edit for %1: %2", path, error), true);
+            }
+        } else {
+            showInfoMessage(i18n("Cannot revert edit for %1: document bridge not available", path), true);
+        }
+    });
+    connect(m_editTracker, &EditTracker::editsChanged, this, [this](bool hasEdits) {
+        Q_UNUSED(hasEdits);
+        // Could update UI state based on pending edits
     });
 
     connect(&m_agent, &AgentLoop::modelsReceived, this, [this](Provider provider, const QStringList &models) {
@@ -1239,66 +1324,8 @@ void ChatWidget::showInfoMessage(const QString &message, bool isError)
     }
 }
 
-void ChatWidget::newChat()
-{
-    m_agent.abort();
-    m_agent.resetConversation();
-    m_agent.clearSession();
-    m_permissionBar->hideBar();
-    if (m_infoBar) {
-        m_infoBar->hide();
-    }
-
-    // Clear transcript items except the bottom stretch and indicators
-    QLayoutItem *child;
-    while (m_transcriptLayout->count() > 2 && (child = m_transcriptLayout->takeAt(0))) {
-        if (child->widget()) {
-            child->widget()->deleteLater();
-        }
-        delete child;
-    }
-
-    m_toolCallWidgets.clear();
-    m_activeAssistantWidget = nullptr;
-    m_activeAssistantBrowser = nullptr;
-    // Null out all thinking/plan pointers — the widgets are owned by
-    // m_activeAssistantWidget and were already queued for deletion above.
-    // Leaving these dangling would cause crashes if any signal fires between
-    // now and the next streaming turn creating fresh widgets.
-    m_thinkingBlock = nullptr;
-    m_thinkingBrowser = nullptr;
-    m_thinkingToggle = nullptr;
-    m_thinkingExpanded = false;
-    m_planBlock = nullptr;
-    m_planLayout = nullptr;
-    m_planSteps.clear();
-    m_thinkingBuffer.clear();
-    m_streamText.clear();
-
-    // Recreate welcome widget at the top
-    m_transcriptLayout->insertWidget(0, createWelcomeWidget());
-
-    if (m_threadTitle) {
-        m_threadTitle->setText(i18n("New Thread"));
-    }
-    m_prompt->clear();
-    m_prompt->setEnabled(true);
-    updateSendButtonState();
-    updateTokenDisplay();
-    // Scroll to TOP to show welcome widget for new chat
-    if (m_scrollArea) {
-        m_scrollArea->verticalScrollBar()->setValue(0);
-    }
-    m_prompt->setFocus();
-}
-
 void ChatWidget::setSettings(const Settings &settings)
 {
-    m_settings = settings;
-    m_preferredProvider = settings.provider;
-    m_modelCatalog.clear();
-    m_updatingCombos = true;
-
     const int permIndex = m_permission->findData(permissionModeId(settings.permissionMode));
     if (permIndex >= 0) {
         m_permission->setCurrentIndex(permIndex);
@@ -1324,7 +1351,7 @@ void ChatWidget::setSettings(const Settings &settings)
     updateTokenDisplay();
     updateReasoningEffortButton();
 
-    for (Provider provider : {Provider::Grok, Provider::OpenAI, Provider::OpenRouter, Provider::OpenAICompatible, Provider::ClaudeCompatible}) {
+    for (Provider provider : {Provider::Grok, Provider::OpenAI, Provider::OpenRouter, Provider::OpenAICompatible, Provider::ClaudeCompatible, Provider::Kilo}) {
         Settings providerSettings = settings;
         providerSettings.provider = provider;
         if (!apiKeyFor(providerSettings).trimmed().isEmpty()) {
@@ -1345,8 +1372,11 @@ void ChatWidget::refreshProviders()
     const bool wasUpdating = m_updatingCombos;
     m_updatingCombos = true;
     m_provider->clear();
-    for (Provider provider : {Provider::Grok, Provider::OpenAI, Provider::OpenRouter, Provider::OpenAICompatible, Provider::ClaudeCompatible}) {
-        if (m_modelCatalog.contains(provider) || !apiKeyFor(m_settings).trimmed().isEmpty()) {
+    for (Provider provider : {Provider::Grok, Provider::OpenAI, Provider::OpenRouter, Provider::OpenAICompatible, Provider::ClaudeCompatible, Provider::Kilo}) {
+        // Only show provider if it has a valid API key configured
+        Settings providerSettings = m_settings;
+        providerSettings.provider = provider;
+        if (!apiKeyFor(providerSettings).trimmed().isEmpty()) {
             m_provider->addItem(providerLabel(provider), providerId(provider));
         }
     }
@@ -1361,7 +1391,7 @@ void ChatWidget::refreshProviders()
         m_provider->addItem(i18n("Configure an API key…"), QVariant());
         m_provider->setCurrentIndex(0);
     }
-    m_provider->setEnabled(!m_modelCatalog.isEmpty());
+    m_provider->setEnabled(m_provider->count() > 0);
     m_updatingCombos = wasUpdating;
     refreshModels();
     updateModelSelectorLabel();
@@ -1374,7 +1404,8 @@ void ChatWidget::refreshModels()
     const bool wasUpdating = m_updatingCombos;
     m_updatingCombos = true;
     m_model->clear();
-    const QStringList allModels = m_modelCatalog.value(m_settings.provider, defaultModels(m_settings.provider));
+    // Only show models fetched from the API (no placeholder/default models)
+    const QStringList allModels = m_modelCatalog.value(m_settings.provider);
     QStringList models = allModels;
     if (!m_modelFilter.isEmpty()) {
         models.clear();
@@ -1671,22 +1702,61 @@ void ChatWidget::showModelMenu()
         u"  margin: 4px 0;"
         u"}"_s);
 
+    // Model filter input
+    auto *filterEdit = new QLineEdit(&menu);
+    filterEdit->setPlaceholderText(i18n("Filter models..."));
+    filterEdit->setStyleSheet(
+        u"QLineEdit {"
+        u"  background-color: #1a1a1a;"
+        u"  color: #e4e4e4;"
+        u"  border: 1px solid #38383e;"
+        u"  border-radius: 4px;"
+        u"  padding: 6px 10px;"
+        u"  font-size: 12px;"
+        u"}"
+        u"QLineEdit:focus {"
+        u"  border-color: #007acc;"
+        u"}"_s);
+    filterEdit->setText(m_modelFilter);
+    connect(filterEdit, &QLineEdit::textChanged, this, [this, filterEdit](const QString &text) {
+        m_modelFilter = text;
+        refreshModels();
+    });
+    auto *filterAction = new QWidgetAction(&menu);
+    filterAction->setDefaultWidget(filterEdit);
+    menu.addAction(filterAction);
+    menu.addSeparator();
+
     const QList<Provider> providers = {
         Provider::Grok,
         Provider::OpenAI,
         Provider::OpenRouter,
         Provider::OpenAICompatible,
-        Provider::ClaudeCompatible
+        Provider::ClaudeCompatible,
+        Provider::Kilo
     };
 
     for (Provider p : providers) {
+        // Only show provider if it has a valid API key configured
+        Settings providerSettings = m_settings;
+        providerSettings.provider = p;
+        if (apiKeyFor(providerSettings).trimmed().isEmpty()) {
+            continue;
+        }
+        
         auto *pMenu = menu.addMenu(providerLabel(p));
         pMenu->setStyleSheet(menu.styleSheet());
-        const QStringList models = m_modelCatalog.value(p, defaultModels(p));
+        // Only show models fetched from the API (no placeholder/default models)
+        const QStringList models = m_modelCatalog.value(p);
         const QString currentModel = modelFor(m_settings);
 
-        for (const QString &m : models) {
-            auto *act = pMenu->addAction(m);
+        if (models.isEmpty()) {
+            // Show a placeholder indicating models are being fetched
+            auto *act = pMenu->addAction(i18n("Fetching models..."));
+            act->setEnabled(false);
+        } else {
+            for (const QString &m : models) {
+                auto *act = pMenu->addAction(m);
             act->setCheckable(true);
             act->setChecked(m_settings.provider == p && currentModel == m);
             connect(act, &QAction::triggered, this, [this, p, m]() {
@@ -1705,6 +1775,9 @@ void ChatWidget::showModelMenu()
                 case Provider::ClaudeCompatible:
                     m_settings.claudeCompatibleModel = m;
                     break;
+                case Provider::Kilo:
+                    m_settings.kiloModel = m;
+                    break;
                 case Provider::Grok:
                 default:
                     m_settings.grokModel = m;
@@ -1717,6 +1790,7 @@ void ChatWidget::showModelMenu()
                 m_agent.setSettings(m_settings);
                 Q_EMIT settingsChanged(m_settings);
             });
+        }
         }
     }
 
@@ -2168,18 +2242,220 @@ void ChatWidget::rebuildTranscript()
 
     // Restore current thinking/plan state if there's an active turn
     const auto sessionData = m_agent.sessionData();
-    if (!sessionData.currentThinking.isEmpty()) {
-        addThinkingBlock(sessionData.currentThinking);
-        if (!sessionData.planShown) {
-            collapseThinkingBlock();
-        }
-    }
-    if (!sessionData.currentPlan.isEmpty() && sessionData.planShown) {
-        addPlanChecklist(sessionData.currentPlan);
-    }
+    restoreCurrentTurn(sessionData);
 
     forceScrollToBottom();
     updateTokenDisplay();
+}
+
+void ChatWidget::restoreCurrentTurn(const SessionStore::SessionData &sessionData)
+{
+    // Restore the current turn's thinking/plan state without using streaming infrastructure
+    // This is for the active (unfinished) turn that was in progress when Kate was closed
+    if (!sessionData.currentThinking.isEmpty()) {
+        // Create a thinking block widget directly (not via addThinkingBlock which is for streaming)
+        if (!m_thinkingBlock) {
+            m_thinkingBlock = new QWidget(m_transcriptContainer);
+            m_thinkingBlock->setMaximumHeight(0);
+            auto *tbLayout = new QVBoxLayout(m_thinkingBlock);
+            tbLayout->setContentsMargins(0, 0, 0, 0);
+            tbLayout->setSpacing(0);
+
+            auto *tbHeader = new QHBoxLayout;
+            m_thinkingToggle = new QPushButton(u"\u25b4 "_s + i18n("Reasoning"), m_thinkingBlock);
+            m_thinkingToggle->setFlat(true);
+            m_thinkingToggle->setCursor(Qt::PointingHandCursor);
+            m_thinkingToggle->setStyleSheet(
+                u"QPushButton { color: #888888; font-size: 11px; font-style: italic; border: none; text-align: left; }"
+                u"QPushButton:hover { color: #aaaaaa; }"_s);
+            connect(m_thinkingToggle, &QPushButton::clicked, this, &ChatWidget::toggleThinking);
+            tbHeader->addWidget(m_thinkingToggle);
+            tbHeader->addStretch();
+            tbLayout->addLayout(tbHeader);
+
+            m_thinkingBrowser = new QTextBrowser(m_thinkingBlock);
+            m_thinkingBrowser->setReadOnly(true);
+            m_thinkingBrowser->setFrameShape(QFrame::NoFrame);
+            m_thinkingBrowser->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+            m_thinkingBrowser->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+            m_thinkingBrowser->setStyleSheet(
+                u"QTextBrowser { background: transparent; color: #888888; border: none;"
+                u"  font-style: italic; font-size: 12px; padding: 0 4px; }"_s);
+            m_thinkingBrowser->document()->setDefaultStyleSheet(
+                u"body { color: #888888; font-style: italic; font-size: 12px; margin: 0; padding: 0; }"
+                u"p { margin-bottom: 4px; }"_s);
+            tbLayout->addWidget(m_thinkingBrowser);
+
+            // Insert at the end of transcript (before indicators)
+            m_transcriptLayout->insertWidget(m_transcriptLayout->count() - 1, m_thinkingBlock);
+        }
+        m_thinkingBuffer = sessionData.currentThinking;
+        renderThinkingHtml();
+        m_thinkingExpanded = sessionData.planShown; // planShown means thinking was expanded
+        if (m_thinkingExpanded) {
+            const int h = static_cast<int>(m_thinkingBrowser->document()->size().height()) + 12;
+            m_thinkingBlock->setMaximumHeight(std::max(20, h));
+            m_thinkingToggle->setText(u"\u25be "_s + i18n("Reasoning"));
+        } else {
+            m_thinkingBlock->setMaximumHeight(0);
+            m_thinkingToggle->setText(u"\u25b4 "_s + i18n("Reasoning"));
+        }
+    }
+
+    if (!sessionData.currentPlan.isEmpty() && sessionData.planShown) {
+        if (!m_planBlock) {
+            m_planBlock = new QWidget(m_transcriptContainer);
+            m_planBlock->hide();
+            m_planLayout = new QVBoxLayout(m_planBlock);
+            m_planLayout->setContentsMargins(4, 2, 4, 2);
+            m_planLayout->setSpacing(2);
+            auto *planLabel = new QLabel(i18n("Plan"), m_planBlock);
+            planLabel->setStyleSheet(u"color: #888888; font-size: 10px; font-weight: bold; letter-spacing: 0.5px;"_s);
+            m_planLayout->addWidget(planLabel);
+            m_transcriptLayout->insertWidget(m_transcriptLayout->count() - 1, m_planBlock);
+        }
+        addPlanChecklist(sessionData.currentPlan);
+        m_planBlock->show();
+    }
+}
+
+void ChatWidget::showConversationHistory()
+{
+    if (!m_historyMenu) {
+        m_historyMenu = new QMenu(this);
+    } else {
+        m_historyMenu->clear();
+    }
+
+    const int maxConversations = m_settings.maxSavedConversations > 0 ? m_settings.maxSavedConversations : 50;
+    const auto conversations = SessionStore::listConversations(maxConversations);
+
+    if (conversations.isEmpty()) {
+        auto *emptyAction = m_historyMenu->addAction(i18n("No conversations yet"));
+        emptyAction->setEnabled(false);
+    } else {
+        for (const auto &conv : conversations) {
+            QString displayText = conv.title;
+            if (conv.isActive) {
+                displayText = u"\u2713 "_s + displayText + u" "_s + i18n("(current)");
+            }
+            auto *action = m_historyMenu->addAction(displayText);
+            action->setData(conv.id);
+            action->setCheckable(true);
+            action->setChecked(conv.isActive);
+            connect(action, &QAction::triggered, this, [this, convId = conv.id](bool checked) {
+                if (checked) {
+                    switchToConversation(convId);
+                }
+            });
+        }
+
+        m_historyMenu->addSeparator();
+
+        auto *newConvAction = m_historyMenu->addAction(QIcon::fromTheme(u"list-add"_s), i18n("New Conversation"));
+        connect(newConvAction, &QAction::triggered, this, &ChatWidget::newChat);
+
+        auto *clearAllAction = m_historyMenu->addAction(QIcon::fromTheme(u"edit-clear"_s), i18n("Clear All History"));
+        connect(clearAllAction, &QAction::triggered, this, [this]() {
+            const auto allConvs = SessionStore::listConversations(0);
+            for (const auto &conv : allConvs) {
+                SessionStore::deleteConversation(conv.id);
+            }
+            newChat();
+        });
+    }
+
+    // Show menu below the history button
+    if (m_historyButton) {
+        m_historyMenu->exec(m_historyButton->mapToGlobal(QPoint(0, m_historyButton->height())));
+    }
+}
+
+void ChatWidget::switchToConversation(const QString &conversationId)
+{
+    if (m_loadingConversation || conversationId == m_currentConversationId) {
+        return;
+    }
+
+    // Save current conversation before switching
+    if (!m_agent.messages().isEmpty()) {
+        const auto sessionData = m_agent.sessionData();
+        if (!sessionData.messages.isEmpty()) {
+            SessionStore::saveConversation(m_currentConversationId, sessionData);
+        }
+    }
+
+    m_loadingConversation = true;
+
+    // Load the new conversation
+    const auto sessionData = SessionStore::loadConversation(conversationId);
+    m_agent.restoreSession(sessionData);
+    m_currentConversationId = conversationId;
+    SessionStore::setActiveConversation(conversationId);
+
+    // Rebuild transcript
+    rebuildTranscript();
+
+    // Update thread title
+    const auto conversations = SessionStore::listConversations(0);
+    for (const auto &conv : conversations) {
+        if (conv.id == conversationId) {
+            if (m_threadTitle) {
+                m_threadTitle->setText(conv.title);
+            }
+            break;
+        }
+    }
+
+    m_loadingConversation = false;
+    Q_EMIT conversationChanged(conversationId);
+}
+
+void ChatWidget::deleteConversation(const QString &conversationId)
+{
+    const bool wasActive = (conversationId == m_currentConversationId);
+    SessionStore::deleteConversation(conversationId);
+
+    if (wasActive) {
+        // Switch to most recent conversation or create new
+        const auto conversations = SessionStore::listConversations(1);
+        if (!conversations.isEmpty()) {
+            switchToConversation(conversations.first().id);
+        } else {
+            newChat();
+        }
+    }
+}
+
+// Override newChat to create a new conversation in history
+void ChatWidget::newChat()
+{
+    m_agent.abort();
+    m_agent.resetConversation();
+    m_agent.clearSession();
+    m_permissionBar->hideBar();
+    if (m_infoBar) {
+        m_infoBar->hide();
+    }
+
+    // Create new conversation in history
+    m_currentConversationId = SessionStore::createNewConversation();
+
+    // Rebuild transcript from scratch to ensure it matches the cleared agent state
+    rebuildTranscript();
+
+    if (m_threadTitle) {
+        m_threadTitle->setText(i18n("New Thread"));
+    }
+    m_prompt->clear();
+    m_prompt->setEnabled(true);
+    updateSendButtonState();
+    updateTokenDisplay();
+    // Scroll to TOP to show welcome widget for new chat
+    if (m_scrollArea) {
+        m_scrollArea->verticalScrollBar()->setValue(0);
+    }
+    m_prompt->setFocus();
 }
 
 } // namespace KateAi

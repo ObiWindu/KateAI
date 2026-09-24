@@ -23,6 +23,8 @@ QString providerId(Provider provider)
         return u"openai-compatible"_s;
     case Provider::ClaudeCompatible:
         return u"claude-compatible"_s;
+    case Provider::Kilo:
+        return u"kilo"_s;
     case Provider::Grok:
     default:
         return u"grok"_s;
@@ -40,6 +42,8 @@ QString providerLabel(Provider provider)
         return i18n("OpenAI Compatible");
     case Provider::ClaudeCompatible:
         return i18n("Claude Compatible");
+    case Provider::Kilo:
+        return i18n("Kilo.ai");
     case Provider::Grok:
     default:
         return i18n("Grok (xAI)");
@@ -60,6 +64,9 @@ Provider providerFromId(const QString &id)
     if (id == u"claude-compatible"_s) {
         return Provider::ClaudeCompatible;
     }
+    if (id == u"kilo"_s) {
+        return Provider::Kilo;
+    }
     return Provider::Grok;
 }
 
@@ -74,6 +81,8 @@ QString providerBaseUrl(Provider provider)
         return u"http://localhost:11434/v1"_s;
     case Provider::ClaudeCompatible:
         return u"https://api.anthropic.com/v1"_s;
+    case Provider::Kilo:
+        return u"https://api.kilo.ai/v1"_s;
     case Provider::Grok:
     default:
         return u"https://api.x.ai/v1"_s;
@@ -91,6 +100,8 @@ QString providerBaseUrl(const Settings &settings)
         return settings.openaiCompatibleUrl;
     case Provider::ClaudeCompatible:
         return settings.claudeCompatibleUrl;
+    case Provider::Kilo:
+        return u"https://api.kilo.ai/v1"_s;
     case Provider::Grok:
     default:
         return u"https://api.x.ai/v1"_s;
@@ -113,6 +124,8 @@ QStringList defaultModels(Provider provider)
         return {u"llama3"_s, u"mistral"_s};
     case Provider::ClaudeCompatible:
         return {u"claude-3-5-sonnet-20241022"_s, u"claude-3-opus-20240229"_s};
+    case Provider::Kilo:
+        return {u"kilo-code"_s, u"kilo-code-fast"_s};
     case Provider::Grok:
     default:
         return {u"grok-4.5"_s, u"grok-4.6"_s, u"grok-4"_s, u"grok-3"_s};
@@ -211,6 +224,8 @@ QString apiKeyFor(const Settings &settings)
         return settings.openaiCompatibleApiKey;
     case Provider::ClaudeCompatible:
         return settings.claudeCompatibleApiKey;
+    case Provider::Kilo:
+        return settings.kiloApiKey;
     case Provider::Grok:
     default:
         return settings.grokApiKey;
@@ -228,6 +243,8 @@ QString modelFor(const Settings &settings)
         return settings.openaiCompatibleModel;
     case Provider::ClaudeCompatible:
         return settings.claudeCompatibleModel;
+    case Provider::Kilo:
+        return settings.kiloModel;
     case Provider::Grok:
     default:
         return settings.grokModel;

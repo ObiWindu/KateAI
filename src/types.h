@@ -21,6 +21,7 @@ enum class Provider {
     OpenRouter,
     OpenAICompatible,
     ClaudeCompatible,
+    Kilo,
 };
 
 enum class PermissionMode {
@@ -112,11 +113,13 @@ struct Settings {
     QString openrouterApiKey;
     QString openaiCompatibleApiKey;
     QString claudeCompatibleApiKey;
+    QString kiloApiKey;
     QString grokModel = QStringLiteral("grok-4.5");
     QString openaiModel = QStringLiteral("gpt-4.1");
     QString openrouterModel = QStringLiteral("x-ai/grok-4");
     QString openaiCompatibleModel;
     QString claudeCompatibleModel;
+    QString kiloModel = QStringLiteral("kilo-code");
     QString openaiCompatibleUrl = QStringLiteral("http://localhost:11434/v1");
     QString claudeCompatibleUrl = QStringLiteral("https://api.anthropic.com/v1");
     PermissionMode permissionMode = PermissionMode::Ask;
@@ -205,6 +208,10 @@ struct Settings {
     int maxRetryDelaySeconds = 300;
     // Retry strategy: "exponential" or "fixed"
     QString retryStrategy = u"exponential"_s;
+
+    // --- Conversation History ----------------------------------------------
+    // Maximum number of conversations to keep in history (0 = unlimited)
+    int maxSavedConversations = 50;
 };
 
 QString providerId(Provider provider);
