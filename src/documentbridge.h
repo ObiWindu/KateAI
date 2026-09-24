@@ -6,13 +6,16 @@
 #pragma once
 
 #include <QString>
+#include <QObject>
 
 namespace KateAi
 {
 
-class DocumentBridge
+class DocumentBridge : public QObject
 {
+    Q_OBJECT
 public:
+    explicit DocumentBridge(QObject *parent = nullptr) : QObject(parent) {}
     virtual ~DocumentBridge() = default;
     virtual bool readDocument(const QString &path, QString *contents) const = 0;
     virtual bool writeDocument(const QString &path, const QString &contents, QString *error) = 0;
@@ -20,7 +23,9 @@ public:
 
 class DiskDocumentBridge : public DocumentBridge
 {
+    Q_OBJECT
 public:
+    explicit DiskDocumentBridge(QObject *parent = nullptr) : DocumentBridge(parent) {}
     bool readDocument(const QString &path, QString *contents) const override;
     bool writeDocument(const QString &path, const QString &contents, QString *error) override;
 };

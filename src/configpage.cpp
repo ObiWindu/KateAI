@@ -65,6 +65,7 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     m_provider->addItem(providerLabel(Provider::OpenRouter), providerId(Provider::OpenRouter));
     m_provider->addItem(providerLabel(Provider::OpenAICompatible), providerId(Provider::OpenAICompatible));
     m_provider->addItem(providerLabel(Provider::ClaudeCompatible), providerId(Provider::ClaudeCompatible));
+    m_provider->addItem(providerLabel(Provider::Kilo), providerId(Provider::Kilo));
     defaultProviderForm->addRow(i18n("Default Provider:"), m_provider);
     providersLayout->addLayout(defaultProviderForm);
 
@@ -102,6 +103,12 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     m_claudeCompatibleUrl = new QLineEdit(this);
     m_claudeCompatibleUrl->setPlaceholderText(u"https://api.anthropic.com/v1"_s);
     addProviderGroup(i18n("Claude Compatible (Anthropic, Bedrock)"), m_claudeCompatibleKey, m_claudeCompatibleModel, m_claudeCompatibleUrl);
+
+    m_kiloKey = makeKey();
+    m_kiloModel = new QLineEdit(this);
+    m_kiloUrl = new QLineEdit(this);
+    m_kiloUrl->setPlaceholderText(u"https://api.kilo.ai/v1"_s);
+    addProviderGroup(i18n("Kilo"), m_kiloKey, m_kiloModel, m_kiloUrl);
 
     providersLayout->addStretch();
     providersScroll->setWidget(providersWidget);
@@ -479,13 +486,16 @@ void KateAiConfigPage::apply()
     s.openrouterApiKey = m_openrouterKey->text();
     s.openaiCompatibleApiKey = m_openaiCompatibleKey->text();
     s.claudeCompatibleApiKey = m_claudeCompatibleKey->text();
+    s.kiloApiKey = m_kiloKey->text();
     s.grokModel = m_grokModel->text().trimmed();
     s.openaiModel = m_openaiModel->text().trimmed();
     s.openrouterModel = m_openrouterModel->text().trimmed();
     s.openaiCompatibleModel = m_openaiCompatibleModel->text().trimmed();
     s.claudeCompatibleModel = m_claudeCompatibleModel->text().trimmed();
+    s.kiloModel = m_kiloModel->text().trimmed();
     s.openaiCompatibleUrl = m_openaiCompatibleUrl->text().trimmed();
     s.claudeCompatibleUrl = m_claudeCompatibleUrl->text().trimmed();
+    s.kiloUrl = m_kiloUrl->text().trimmed();
 
     s.permissionMode = permissionModeFromId(m_permission->currentData().toString());
     s.sandbox = sandboxProfileFromId(m_sandbox->currentData().toString());
@@ -558,13 +568,16 @@ void KateAiConfigPage::reset()
     m_openrouterKey->setText(s.openrouterApiKey);
     m_openaiCompatibleKey->setText(s.openaiCompatibleApiKey);
     m_claudeCompatibleKey->setText(s.claudeCompatibleApiKey);
+    m_kiloKey->setText(s.kiloApiKey);
     m_grokModel->setText(s.grokModel);
     m_openaiModel->setText(s.openaiModel);
     m_openrouterModel->setText(s.openrouterModel);
     m_openaiCompatibleModel->setText(s.openaiCompatibleModel);
     m_claudeCompatibleModel->setText(s.claudeCompatibleModel);
+    m_kiloModel->setText(s.kiloModel);
     m_openaiCompatibleUrl->setText(s.openaiCompatibleUrl);
     m_claudeCompatibleUrl->setText(s.claudeCompatibleUrl);
+    m_kiloUrl->setText(s.kiloUrl);
 
     m_permission->setCurrentIndex(std::max(0, m_permission->findData(permissionModeId(s.permissionMode))));
     m_sandbox->setCurrentIndex(std::max(0, m_sandbox->findData(sandboxProfileId(s.sandbox))));

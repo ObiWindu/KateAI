@@ -86,6 +86,9 @@ private:
     QPlainTextEdit *m_details = nullptr;
     QTextBrowser *m_describeDiff = nullptr;
     QPropertyAnimation *m_animation = nullptr;
+
+public:
+    ~ToolCallWidget() override;
 };
 
 } // namespace KateAi

@@ -19,6 +19,7 @@
 #include <QSet>
 #include <QHash>
 #include <QTimer>
+#include <QPointer>
 #include <memory>
 
 namespace KateAi
@@ -30,6 +31,7 @@ class AgentLoop : public QObject
 
 public:
     explicit AgentLoop(QObject *parent = nullptr);
+    ~AgentLoop() override;
 
     void setSettings(const Settings &settings);
     void setWorkspace(const QString &workspace);
@@ -115,7 +117,7 @@ private:
     Settings m_settings;
     QString m_workspace;
     QString m_editorContext;
-    DocumentBridge *m_bridge = nullptr;
+    QPointer<DocumentBridge> m_bridge;
     LlmClient m_client;
     PermissionPolicy m_policy;
     std::unique_ptr<Sandbox> m_sandbox;

@@ -194,7 +194,8 @@ void ToolCallWidget::setToolDetails(const QString &details)
         return;
     }
 
-    // Format tool arguments/parameters as a simple monospace block
+    // Format tool arguments/parameters using the same styled box as diffs
+        // (monospace, dark background, consistent padding) but without diff markup
     QString html = u"<body><pre style='margin:0; white-space:pre-wrap; word-wrap:break-word;'>%1</pre></body>"_s
                        .arg(escapeHtml(details));
     m_describeDiff->setHtml(html);
@@ -341,6 +342,13 @@ bool ToolCallWidget::eventFilter(QObject *watched, QEvent *event)
         }
     }
     return QWidget::eventFilter(watched, event);
+}
+
+ToolCallWidget::~ToolCallWidget()
+{
+    if (m_animation) {
+        m_animation->stop();
+    }
 }
 
 } // namespace KateAi
