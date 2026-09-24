@@ -48,13 +48,16 @@ private:
     QLineEdit *m_openrouterKey = nullptr;
     QLineEdit *m_openaiCompatibleKey = nullptr;
     QLineEdit *m_claudeCompatibleKey = nullptr;
+    QLineEdit *m_kiloKey = nullptr;
     QLineEdit *m_grokModel = nullptr;
     QLineEdit *m_openaiModel = nullptr;
     QLineEdit *m_openrouterModel = nullptr;
     QLineEdit *m_openaiCompatibleModel = nullptr;
     QLineEdit *m_claudeCompatibleModel = nullptr;
+    QLineEdit *m_kiloModel = nullptr;
     QLineEdit *m_openaiCompatibleUrl = nullptr;
     QLineEdit *m_claudeCompatibleUrl = nullptr;
+    QLineEdit *m_kiloUrl = nullptr;
 
     // Security
     QComboBox *m_permission = nullptr;

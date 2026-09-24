@@ -162,12 +162,6 @@ void ToolCallWidget::setDescribeDiff(const QString &diff)
         return;
     }
 
-    // Only show diff box for edit_file and write_file tools
-    if (!isDiffTool(m_toolName)) {
-        m_describeDiff->hide();
-        return;
-    }
-
     if (diff.trimmed().isEmpty()) {
         m_describeDiff->hide();
         return;
@@ -184,6 +178,34 @@ void ToolCallWidget::setDescribeDiff(const QString &diff)
     // The diff box now lives outside the collapsible details container, so it
     // is always visible. Just update the expanded height if the details are
     // currently shown.
+    if (m_expanded) {
+        m_detailsContainer->setMaximumHeight(m_details->sizeHint().height() + 16);
+    }
+}
+
+void ToolCallWidget::setToolDetails(const QString &details)
+{
+    if (!m_describeDiff) {
+        return;
+    }
+
+    if (details.trimmed().isEmpty()) {
+        m_describeDiff->hide();
+        return;
+    }
+
+    // Format tool arguments/parameters using the same styled box as diffs
+        // (monospace, dark background, consistent padding) but without diff markup
+    QString html = u"<body><pre style='margin:0; white-space:pre-wrap; word-wrap:break-word;'>%1</pre></body>"_s
+                       .arg(escapeHtml(details));
+    m_describeDiff->setHtml(html);
+
+    // Ensure the document is laid out before measuring
+    m_describeDiff->document()->adjustSize();
+    const int h = static_cast<int>(m_describeDiff->document()->size().height()) + 16;
+    m_describeDiff->setFixedHeight(std::min(400, std::max(50, h)));
+    m_describeDiff->show();
+
     if (m_expanded) {
         m_detailsContainer->setMaximumHeight(m_details->sizeHint().height() + 16);
     }
@@ -320,6 +342,13 @@ bool ToolCallWidget::eventFilter(QObject *watched, QEvent *event)
         }
     }
     return QWidget::eventFilter(watched, event);
+}
+
+ToolCallWidget::~ToolCallWidget()
+{
+    if (m_animation) {
+        m_animation->stop();
+    }
 }
 
 } // namespace KateAi

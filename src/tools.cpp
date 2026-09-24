@@ -397,12 +397,11 @@ ToolResult ToolRunner::editFile(const QJsonObject &args)
         result.output = u"old_string matched %1 times; it must be unique, or set replace_all=true."_s.arg(count);
         return result;
     }
-
     contents.replace(oldString, newString);
 
-    if (!m_bridge->writeDocument(resolved, contents, &error)) {
+    if (!m_bridge || !m_bridge->writeDocument(resolved, contents, &error)) {
         result.ok = false;
-        result.output = error;
+        result.output = error.isEmpty() ? u"Write failed."_s : error;
         return result;
     }
 

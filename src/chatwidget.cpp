@@ -23,6 +23,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QMenu>
+#include <QWidgetAction>
 #include <QPlainTextEdit>
 #include <QPropertyAnimation>
 #include <QPointer>
@@ -433,6 +434,9 @@ ChatWidget::ChatWidget(QWidget *parent)
         case Provider::ClaudeCompatible:
             m_settings.claudeCompatibleModel = text.trimmed();
             break;
+        case Provider::Kilo:
+            m_settings.kiloModel = text.trimmed();
+            break;
         case Provider::Grok:
         default:
             m_settings.grokModel = text.trimmed();
@@ -512,7 +516,11 @@ ChatWidget::ChatWidget(QWidget *parent)
         setWorkingIndicator(true);
         auto *toolWidget = new ToolCallWidget(request.toolCallId, m_transcriptContainer);
         toolWidget->setToolInfo(request.toolName, request.summary, request.risk);
-        toolWidget->setDescribeDiff(request.describeDiff);
+        if (!request.describeDiff.isEmpty()) {
+            toolWidget->setDescribeDiff(request.describeDiff);
+        } else if (!request.details.isEmpty()) {
+            toolWidget->setToolDetails(request.details);
+        }
         toolWidget->setRunning();
         m_toolCallWidgets.insert(request.toolCallId, toolWidget);
         m_transcriptLayout->insertWidget(m_transcriptLayout->count() - 1, toolWidget);
@@ -1249,34 +1257,8 @@ void ChatWidget::newChat()
         m_infoBar->hide();
     }
 
-    // Clear transcript items except the bottom stretch and indicators
-    QLayoutItem *child;
-    while (m_transcriptLayout->count() > 2 && (child = m_transcriptLayout->takeAt(0))) {
-        if (child->widget()) {
-            child->widget()->deleteLater();
-        }
-        delete child;
-    }
-
-    m_toolCallWidgets.clear();
-    m_activeAssistantWidget = nullptr;
-    m_activeAssistantBrowser = nullptr;
-    // Null out all thinking/plan pointers — the widgets are owned by
-    // m_activeAssistantWidget and were already queued for deletion above.
-    // Leaving these dangling would cause crashes if any signal fires between
-    // now and the next streaming turn creating fresh widgets.
-    m_thinkingBlock = nullptr;
-    m_thinkingBrowser = nullptr;
-    m_thinkingToggle = nullptr;
-    m_thinkingExpanded = false;
-    m_planBlock = nullptr;
-    m_planLayout = nullptr;
-    m_planSteps.clear();
-    m_thinkingBuffer.clear();
-    m_streamText.clear();
-
-    // Recreate welcome widget at the top
-    m_transcriptLayout->insertWidget(0, createWelcomeWidget());
+    // Rebuild transcript from scratch to ensure it matches the cleared agent state
+    rebuildTranscript();
 
     if (m_threadTitle) {
         m_threadTitle->setText(i18n("New Thread"));
@@ -1324,7 +1306,7 @@ void ChatWidget::setSettings(const Settings &settings)
     updateTokenDisplay();
     updateReasoningEffortButton();
 
-    for (Provider provider : {Provider::Grok, Provider::OpenAI, Provider::OpenRouter, Provider::OpenAICompatible, Provider::ClaudeCompatible}) {
+    for (Provider provider : {Provider::Grok, Provider::OpenAI, Provider::OpenRouter, Provider::OpenAICompatible, Provider::ClaudeCompatible, Provider::Kilo}) {
         Settings providerSettings = settings;
         providerSettings.provider = provider;
         if (!apiKeyFor(providerSettings).trimmed().isEmpty()) {
@@ -1345,8 +1327,11 @@ void ChatWidget::refreshProviders()
     const bool wasUpdating = m_updatingCombos;
     m_updatingCombos = true;
     m_provider->clear();
-    for (Provider provider : {Provider::Grok, Provider::OpenAI, Provider::OpenRouter, Provider::OpenAICompatible, Provider::ClaudeCompatible}) {
-        if (m_modelCatalog.contains(provider) || !apiKeyFor(m_settings).trimmed().isEmpty()) {
+    for (Provider provider : {Provider::Grok, Provider::OpenAI, Provider::OpenRouter, Provider::OpenAICompatible, Provider::ClaudeCompatible, Provider::Kilo}) {
+        // Only show providers that have a valid API key configured
+        Settings providerSettings = m_settings;
+        providerSettings.provider = provider;
+        if (!apiKeyFor(providerSettings).trimmed().isEmpty()) {
             m_provider->addItem(providerLabel(provider), providerId(provider));
         }
     }
@@ -1361,7 +1346,17 @@ void ChatWidget::refreshProviders()
         m_provider->addItem(i18n("Configure an API key…"), QVariant());
         m_provider->setCurrentIndex(0);
     }
-    m_provider->setEnabled(!m_modelCatalog.isEmpty());
+    // Enable provider dropdown if any provider has a valid API key
+    bool anyProviderHasKey = false;
+    for (Provider p : {Provider::Grok, Provider::OpenAI, Provider::OpenRouter, Provider::OpenAICompatible, Provider::ClaudeCompatible, Provider::Kilo}) {
+        Settings providerSettings = m_settings;
+        providerSettings.provider = p;
+        if (!apiKeyFor(providerSettings).trimmed().isEmpty()) {
+            anyProviderHasKey = true;
+            break;
+        }
+    }
+    m_provider->setEnabled(anyProviderHasKey);
     m_updatingCombos = wasUpdating;
     refreshModels();
     updateModelSelectorLabel();
@@ -1374,7 +1369,9 @@ void ChatWidget::refreshModels()
     const bool wasUpdating = m_updatingCombos;
     m_updatingCombos = true;
     m_model->clear();
-    const QStringList allModels = m_modelCatalog.value(m_settings.provider, defaultModels(m_settings.provider));
+
+    // Only show models from the catalog (fetched from the API), not placeholder defaults
+    const QStringList allModels = m_modelCatalog.value(m_settings.provider);
     QStringList models = allModels;
     if (!m_modelFilter.isEmpty()) {
         models.clear();
@@ -1412,6 +1409,9 @@ void ChatWidget::refreshModels()
                 break;
             case Provider::ClaudeCompatible:
                 m_settings.claudeCompatibleModel = selectedModel;
+                break;
+            case Provider::Kilo:
+                m_settings.kiloModel = selectedModel;
                 break;
             case Provider::Grok:
             default:
@@ -1671,19 +1671,83 @@ void ChatWidget::showModelMenu()
         u"  margin: 4px 0;"
         u"}"_s);
 
+    // Filter input at the top of the menu
+    auto *filterEdit = new QLineEdit(&menu);
+    filterEdit->setPlaceholderText(i18n("Filter models..."));
+    filterEdit->setText(m_modelFilter);
+    filterEdit->setStyleSheet(
+        u"QLineEdit {"
+        u"  background-color: #1e1e1e;"
+        u"  color: #cccccc;"
+        u"  border: 1px solid #3c3c40;"
+        u"  border-radius: 4px;"
+        u"  padding: 6px 8px;"
+        u"  font-size: 13px;"
+        u"}"
+        u"QLineEdit:focus {"
+        u"  border-color: #007acc;"
+        u"}"_s);
+    filterEdit->setMinimumWidth(250);
+    auto *filterAction = new QWidgetAction(&menu);
+    filterAction->setDefaultWidget(filterEdit);
+    menu.addAction(filterAction);
+    menu.addSeparator();
+
+    connect(filterEdit, &QLineEdit::textChanged, this, [this, &menu, filterEdit](const QString &text) {
+        m_modelFilter = text;
+        // Filter items in place without closing the menu to keep focus
+        for (QAction *providerAction : menu.actions()) {
+            if (QMenu *pMenu = providerAction->menu()) {
+                for (QAction *modelAction : pMenu->actions()) {
+                    const QString modelName = modelAction->text();
+                    const bool matches = text.isEmpty() || modelName.contains(text, Qt::CaseInsensitive);
+                    modelAction->setVisible(matches);
+                }
+                // Hide provider submenu if no models match
+                bool anyVisible = false;
+                for (QAction *modelAction : pMenu->actions()) {
+                    if (modelAction->isVisible()) {
+                        anyVisible = true;
+                        break;
+                    }
+                }
+                providerAction->setVisible(anyVisible);
+            }
+        }
+    });
+
     const QList<Provider> providers = {
         Provider::Grok,
         Provider::OpenAI,
         Provider::OpenRouter,
         Provider::OpenAICompatible,
-        Provider::ClaudeCompatible
+        Provider::ClaudeCompatible,
+        Provider::Kilo
     };
 
     for (Provider p : providers) {
+        // Only show providers that have a valid API key configured
+        Settings providerSettings = m_settings;
+        providerSettings.provider = p;
+        if (apiKeyFor(providerSettings).trimmed().isEmpty()) {
+            continue;
+        }
+
         auto *pMenu = menu.addMenu(providerLabel(p));
         pMenu->setStyleSheet(menu.styleSheet());
-        const QStringList models = m_modelCatalog.value(p, defaultModels(p));
+        // Only show models from the catalog (fetched from the API), not placeholder defaults
+        const QStringList allModels = m_modelCatalog.value(p);
         const QString currentModel = modelFor(m_settings);
+
+        QStringList models = allModels;
+        if (!m_modelFilter.isEmpty()) {
+            models.clear();
+            for (const QString &m : allModels) {
+                if (m.contains(m_modelFilter, Qt::CaseInsensitive)) {
+                    models.append(m);
+                }
+            }
+        }
 
         for (const QString &m : models) {
             auto *act = pMenu->addAction(m);

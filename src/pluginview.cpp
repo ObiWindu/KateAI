@@ -35,6 +35,7 @@ namespace KateAi
     : QObject(plugin)
     , m_plugin(plugin)
     , m_mainWindow(mainWindow)
+    , m_bridge(this)
     {
         // Initialize the plugin with its component name and UI resource file
         setComponentName(u"kateai"_s, i18n("Kate AI"));
@@ -42,7 +43,7 @@ namespace KateAi
 
         // Create the tool view panel on the right side of the main window
         if (m_mainWindow) {
-            m_toolView = m_mainWindow->createToolView(plugin,
+            m_toolView = m_mainWindow->createToolView(m_plugin,
                                                       u"kateai"_s,
                                                       KTextEditor::MainWindow::Right,
                                                       QIcon::fromTheme(u"help-hint"_s),
@@ -52,6 +53,7 @@ namespace KateAi
         // Create the chat widget that will contain the AI interface
         if (m_toolView) {
             m_chat = new ChatWidget(m_toolView);
+            m_chat->setParent(m_toolView); // Ensure proper parentage
         }
 
         // Ensure the tool view has a layout and add our chat widget to it
@@ -66,7 +68,7 @@ namespace KateAi
 
         // Configure the chat widget with plugin settings and set up document bridging
         if (m_chat) {
-            m_chat->setSettings(plugin->settings());
+            m_chat->setSettings(m_plugin->settings());
             if (m_chat->agent()) {
                 m_chat->agent()->setDocumentBridge(&m_bridge);
                 // Restore session data
@@ -79,8 +81,8 @@ namespace KateAi
         }
         refreshWorkspace();
 
-        if (plugin && m_mainWindow) {
-            connect(plugin, &KateAiPlugin::settingsChanged, this, [this](const Settings &settings) {
+        if (m_plugin && m_mainWindow) {
+            connect(m_plugin, &KateAiPlugin::settingsChanged, this, [this](const Settings &settings) {
                 if (m_chat) {
                     m_chat->setSettings(settings);
                 }
@@ -88,7 +90,7 @@ namespace KateAi
             });
         }
         if (m_chat) {
-            connect(m_chat, &ChatWidget::settingsChanged, plugin, &KateAiPlugin::setSettings);
+            connect(m_chat, &ChatWidget::settingsChanged, m_plugin, &KateAiPlugin::setSettings);
             connect(m_chat, &ChatWidget::configureRequested, this, &KateAiView::showConfiguration);
             connect(m_chat, &ChatWidget::aboutToSubmit, this, [this]() {
                 refreshWorkspace();
@@ -160,12 +162,15 @@ namespace KateAi
         // KTextEditor does not merge plugin XML clients into a view whose context
         // menu was supplied by another plugin. Add this action at show time so it
         // is consistently available in every editor tab.
+        // Store context actions for safe access in lambdas
+        m_contextActions = {ask, fix, refactor, tests};
+
         if (m_mainWindow) {
             for (auto *view : m_mainWindow->views()) {
-                addEditorContextActions(view, {ask, fix, refactor, tests});
+                addEditorContextActions(view, m_contextActions);
             }
-            connect(m_mainWindow, &KTextEditor::MainWindow::viewCreated, this, [this, ask, fix, refactor, tests](KTextEditor::View *view) {
-                addEditorContextActions(view, {ask, fix, refactor, tests});
+            connect(m_mainWindow, &KTextEditor::MainWindow::viewCreated, this, [this](KTextEditor::View *view) {
+                addEditorContextActions(view, m_contextActions);
             });
         }
 
@@ -178,6 +183,29 @@ namespace KateAi
     {
         // Session is saved in ChatWidget destructor before AgentLoop is destroyed
         // m_toolView is owned by the main window, do not delete it here
+
+        // Disconnect ALL signals where this is the receiver to prevent callbacks
+        // during or after destruction. This includes signals from plugin, mainWindow,
+        // actions, and any other senders that may outlive this view.
+        disconnect(this);
+
+        // Also explicitly disconnect from known senders for clarity and safety
+        if (m_plugin) {
+            disconnect(m_plugin, nullptr, this, nullptr);
+        }
+        if (m_mainWindow) {
+            disconnect(m_mainWindow, nullptr, this, nullptr);
+        }
+        if (m_chat) {
+            disconnect(m_chat, nullptr, this, nullptr);
+        }
+
+        // Disconnect action signals (actions are children of this, but be safe)
+        if (auto *ac = actionCollection()) {
+            for (auto *action : ac->actions()) {
+                disconnect(action, nullptr, this, nullptr);
+            }
+        }
 
         if (m_mainWindow && m_mainWindow->guiFactory()) {
             m_mainWindow->guiFactory()->removeClient(this);
@@ -279,12 +307,12 @@ namespace KateAi
         dialog->show();
     }
 
-    void KateAiView::addEditorContextActions(KTextEditor::View *view, const QList<QAction *> &actions)
+    void KateAiView::addEditorContextActions(KTextEditor::View *view, const QList<QPointer<QAction>> &actions)
     {
         if (!view) {
             return;
         }
-        connect(view, &KTextEditor::View::contextMenuAboutToShow, this, [actions](KTextEditor::View *, QMenu *menu) {
+        connect(view, &KTextEditor::View::contextMenuAboutToShow, this, [this, actions](KTextEditor::View *, QMenu *menu) {
             if (!menu) {
                 return;
             }
@@ -302,8 +330,10 @@ namespace KateAi
             }
             auto *aiMenu = menu->addMenu(menuTitle);
             aiMenu->setObjectName(menuObjectName);
-            for (QAction *action : actions) {
-                aiMenu->addAction(action);
+            for (const auto &action : actions) {
+                if (action) {
+                    aiMenu->addAction(action);
+                }
             }
         });
     }

@@ -46,6 +46,12 @@ public:
      */
     void setDescribeDiff(const QString &diff);
 
+    /**
+     * Attach tool arguments/parameters for non-diff tools (read_file, list_dir,
+     * grep, glob, bash, etc.) so they are displayed in the same styled box.
+     */
+    void setToolDetails(const QString &details);
+
     QString toolCallId() const { return m_toolCallId; }
     int expandedHeight() const { return m_expandedHeight; }
     void setExpandedHeight(int h);
@@ -80,6 +86,9 @@ private:
     QPlainTextEdit *m_details = nullptr;
     QTextBrowser *m_describeDiff = nullptr;
     QPropertyAnimation *m_animation = nullptr;
+
+public:
+    ~ToolCallWidget() override;
 };
 
 } // namespace KateAi

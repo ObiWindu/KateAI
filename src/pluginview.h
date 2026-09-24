@@ -12,6 +12,7 @@
 
 #include <QObject>
 #include <QPointer>
+#include <QAction>
 
 class QDialog;
 
@@ -34,18 +35,19 @@ public:
     void showConfiguration();
 
 private:
-    void addEditorContextActions(KTextEditor::View *view, const QList<QAction *> &actions);
+    void addEditorContextActions(KTextEditor::View *view, const QList<QPointer<QAction>> &actions);
     void askSelectionWithInstruction(const QString &instruction);
     QString editorContext() const;
     void refreshWorkspace();
     void updateCompletions();
 
-    KateAiPlugin *m_plugin = nullptr;
-    KTextEditor::MainWindow *m_mainWindow = nullptr;
+    QPointer<KateAiPlugin> m_plugin;
+    QPointer<KTextEditor::MainWindow> m_mainWindow;
     QPointer<QWidget> m_toolView;
     QPointer<QDialog> m_configDialog;
-    ChatWidget *m_chat = nullptr;
+    QPointer<ChatWidget> m_chat;
     DiskDocumentBridge m_bridge;
+    QList<QPointer<QAction>> m_contextActions;
 };
 
 } // namespace KateAi

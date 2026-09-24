@@ -62,14 +62,21 @@ AgentLoop::AgentLoop(QObject *parent)
     });
 }
 
+AgentLoop::~AgentLoop()
+{
+    // Stop the timer to prevent callbacks after destruction
+    m_nextModelTimer.stop();
+    // Disconnect all signals to prevent callbacks during destruction
+    disconnect(this);
+}
+
 void AgentLoop::setSettings(const Settings &settings)
 {
     // Update internal settings and propagate to dependent components.
     m_settings = settings;
     m_client.setSettings(settings);
     m_policy.setMode(settings.permissionMode);
-
-    if (!m_workspace.isEmpty()) {
+    if (!m_workspace.isEmpty() && m_bridge) {
         m_sandbox = std::make_unique<Sandbox>(m_workspace, m_settings.sandbox, m_settings.extraDenyGlobs);
         m_tools = std::make_unique<ToolRunner>(*m_sandbox, m_bridge, this);
         m_tools->setTimeoutMs(m_settings.bashTimeoutMs);
@@ -88,7 +95,7 @@ void AgentLoop::setWorkspace(const QString &workspace)
 {
     m_workspace = workspace;
 
-    if (!m_workspace.isEmpty()) {
+    if (!m_workspace.isEmpty() && m_bridge) {
         m_sandbox = std::make_unique<Sandbox>(m_workspace, m_settings.sandbox, m_settings.extraDenyGlobs);
         m_tools = std::make_unique<ToolRunner>(*m_sandbox, m_bridge, this);
         m_tools->setTimeoutMs(m_settings.bashTimeoutMs);
@@ -116,7 +123,7 @@ void AgentLoop::setDocumentBridge(DocumentBridge *bridge)
 {
     // Set the document bridge for file operations and reinitialize tools if sandbox exists
     m_bridge = bridge;
-    if (m_sandbox) {
+    if (m_sandbox && m_bridge) {
         m_tools = std::make_unique<ToolRunner>(*m_sandbox, m_bridge, this);
         m_tools->setTimeoutMs(m_settings.bashTimeoutMs);
         m_tools->setProjectGraph(m_projectGraph.get());
