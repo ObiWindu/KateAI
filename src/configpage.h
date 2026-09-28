@@ -6,6 +6,7 @@
 #pragma once
 
 #include "types.h"
+#include "llmclient.h"
 
 #include <KTextEditor/ConfigPage>
 
@@ -48,13 +49,19 @@ private:
     QLineEdit *m_openrouterKey = nullptr;
     QLineEdit *m_openaiCompatibleKey = nullptr;
     QLineEdit *m_claudeCompatibleKey = nullptr;
-    QLineEdit *m_grokModel = nullptr;
-    QLineEdit *m_openaiModel = nullptr;
-    QLineEdit *m_openrouterModel = nullptr;
-    QLineEdit *m_openaiCompatibleModel = nullptr;
-    QLineEdit *m_claudeCompatibleModel = nullptr;
+    QComboBox *m_grokModel = nullptr;
+    QComboBox *m_openaiModel = nullptr;
+    QComboBox *m_openrouterModel = nullptr;
+    QComboBox *m_openaiCompatibleModel = nullptr;
+    QComboBox *m_claudeCompatibleModel = nullptr;
     QLineEdit *m_openaiCompatibleUrl = nullptr;
     QLineEdit *m_claudeCompatibleUrl = nullptr;
+
+    // Model fetching
+    LlmClient *m_modelFetcher = nullptr;
+    QHash<Provider, QStringList> m_modelCatalog;
+
+    void updateModelCombo(Provider provider);
 
     // Security
     QComboBox *m_permission = nullptr;

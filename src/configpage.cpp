@@ -6,6 +6,7 @@
 #include "configpage.h"
 #include "plugin.h"
 #include "settings.h"
+#include "llmclient.h"
 
 #include <KLocalizedString>
 
@@ -68,7 +69,7 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     defaultProviderForm->addRow(i18n("Default Provider:"), m_provider);
     providersLayout->addLayout(defaultProviderForm);
 
-    auto addProviderGroup = [&](const QString &title, QLineEdit *key, QLineEdit *model, QLineEdit *url = nullptr) {
+    auto addProviderGroup = [&](const QString &title, QLineEdit *key, QComboBox *model, QLineEdit *url = nullptr) {
         auto *group = new QGroupBox(title, providersWidget);
         auto *gForm = new QFormLayout(group);
         gForm->addRow(i18n("API Key:"), key);
@@ -79,26 +80,33 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
         providersLayout->addWidget(group);
     };
 
+    auto makeModelCombo = [this, providersWidget]() {
+        auto *combo = new QComboBox(providersWidget);
+        combo->setEditable(true);
+        combo->setInsertPolicy(QComboBox::NoInsert);
+        return combo;
+    };
+
     m_grokKey = makeKey();
-    m_grokModel = new QLineEdit(this);
+    m_grokModel = makeModelCombo();
     addProviderGroup(i18n("xAI (Grok)"), m_grokKey, m_grokModel);
 
     m_openaiKey = makeKey();
-    m_openaiModel = new QLineEdit(this);
+    m_openaiModel = makeModelCombo();
     addProviderGroup(i18n("OpenAI"), m_openaiKey, m_openaiModel);
 
     m_openrouterKey = makeKey();
-    m_openrouterModel = new QLineEdit(this);
+    m_openrouterModel = makeModelCombo();
     addProviderGroup(i18n("OpenRouter"), m_openrouterKey, m_openrouterModel);
 
     m_openaiCompatibleKey = makeKey();
-    m_openaiCompatibleModel = new QLineEdit(this);
+    m_openaiCompatibleModel = makeModelCombo();
     m_openaiCompatibleUrl = new QLineEdit(this);
     m_openaiCompatibleUrl->setPlaceholderText(u"http://localhost:11434/v1"_s);
     addProviderGroup(i18n("OpenAI Compatible (Ollama, LocalAI, vLLM)"), m_openaiCompatibleKey, m_openaiCompatibleModel, m_openaiCompatibleUrl);
 
     m_claudeCompatibleKey = makeKey();
-    m_claudeCompatibleModel = new QLineEdit(this);
+    m_claudeCompatibleModel = makeModelCombo();
     m_claudeCompatibleUrl = new QLineEdit(this);
     m_claudeCompatibleUrl->setPlaceholderText(u"https://api.anthropic.com/v1"_s);
     addProviderGroup(i18n("Claude Compatible (Anthropic, Bedrock)"), m_claudeCompatibleKey, m_claudeCompatibleModel, m_claudeCompatibleUrl);
@@ -379,6 +387,19 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     agentScroll->setWidget(agentWidget);
     tabs->addTab(agentScroll, i18n("Agent & Context"));
 
+    // Initialize model fetcher
+    m_modelFetcher = new LlmClient(this);
+    m_modelFetcher->setSettings(m_plugin->settings());
+    connect(m_modelFetcher, &LlmClient::modelsReceived, this, [this](Provider provider, const QStringList &models) {
+        m_modelCatalog[provider] = models;
+        updateModelCombo(provider);
+    });
+    connect(m_modelFetcher, &LlmClient::modelsFailed, this, [this](Provider provider, const QString &error) {
+        // Silently ignore model fetch failures - user can still type manually
+        Q_UNUSED(provider);
+        Q_UNUSED(error);
+    });
+
     // Connect markChanged
     const auto markChanged = [this]() {
         Q_EMIT changed();
@@ -390,13 +411,34 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     connect(m_openrouterKey, &QLineEdit::textChanged, this, markChanged);
     connect(m_openaiCompatibleKey, &QLineEdit::textChanged, this, markChanged);
     connect(m_claudeCompatibleKey, &QLineEdit::textChanged, this, markChanged);
-    connect(m_grokModel, &QLineEdit::textChanged, this, markChanged);
-    connect(m_openaiModel, &QLineEdit::textChanged, this, markChanged);
-    connect(m_openrouterModel, &QLineEdit::textChanged, this, markChanged);
-    connect(m_openaiCompatibleModel, &QLineEdit::textChanged, this, markChanged);
-    connect(m_claudeCompatibleModel, &QLineEdit::textChanged, this, markChanged);
+    connect(m_grokModel, QOverload<int>::of(&QComboBox::currentIndexChanged), this, markChanged);
+    connect(m_openaiModel, QOverload<int>::of(&QComboBox::currentIndexChanged), this, markChanged);
+    connect(m_openrouterModel, QOverload<int>::of(&QComboBox::currentIndexChanged), this, markChanged);
+    connect(m_openaiCompatibleModel, QOverload<int>::of(&QComboBox::currentIndexChanged), this, markChanged);
+    connect(m_claudeCompatibleModel, QOverload<int>::of(&QComboBox::currentIndexChanged), this, markChanged);
     connect(m_openaiCompatibleUrl, &QLineEdit::textChanged, this, markChanged);
     connect(m_claudeCompatibleUrl, &QLineEdit::textChanged, this, markChanged);
+
+    // Connect API key changes to fetch models
+    auto fetchModelsForProvider = [this](Provider provider, QLineEdit *keyEdit, QComboBox *modelCombo) {
+        connect(keyEdit, &QLineEdit::textChanged, this, [this, provider, keyEdit, modelCombo]() {
+            QString key = keyEdit->text().trimmed();
+            if (!key.isEmpty()) {
+                Settings s = m_plugin->settings();
+                s.provider = provider;
+                m_modelFetcher->setSettings(s);
+                m_modelFetcher->fetchModels(provider);
+            } else {
+                modelCombo->clear();
+                m_modelCatalog.remove(provider);
+            }
+        });
+    };
+    fetchModelsForProvider(Provider::Grok, m_grokKey, m_grokModel);
+    fetchModelsForProvider(Provider::OpenAI, m_openaiKey, m_openaiModel);
+    fetchModelsForProvider(Provider::OpenRouter, m_openrouterKey, m_openrouterModel);
+    fetchModelsForProvider(Provider::OpenAICompatible, m_openaiCompatibleKey, m_openaiCompatibleModel);
+    fetchModelsForProvider(Provider::ClaudeCompatible, m_claudeCompatibleKey, m_claudeCompatibleModel);
 
     connect(m_permission, &QComboBox::currentIndexChanged, this, markChanged);
     connect(m_sandbox, &QComboBox::currentIndexChanged, this, markChanged);
@@ -484,11 +526,11 @@ void KateAiConfigPage::apply()
     s.openrouterApiKey = m_openrouterKey->text();
     s.openaiCompatibleApiKey = m_openaiCompatibleKey->text();
     s.claudeCompatibleApiKey = m_claudeCompatibleKey->text();
-    s.grokModel = m_grokModel->text().trimmed();
-    s.openaiModel = m_openaiModel->text().trimmed();
-    s.openrouterModel = m_openrouterModel->text().trimmed();
-    s.openaiCompatibleModel = m_openaiCompatibleModel->text().trimmed();
-    s.claudeCompatibleModel = m_claudeCompatibleModel->text().trimmed();
+    s.grokModel = m_grokModel->currentText().trimmed();
+    s.openaiModel = m_openaiModel->currentText().trimmed();
+    s.openrouterModel = m_openrouterModel->currentText().trimmed();
+    s.openaiCompatibleModel = m_openaiCompatibleModel->currentText().trimmed();
+    s.claudeCompatibleModel = m_claudeCompatibleModel->currentText().trimmed();
     s.openaiCompatibleUrl = m_openaiCompatibleUrl->text().trimmed();
     s.claudeCompatibleUrl = m_claudeCompatibleUrl->text().trimmed();
 
@@ -564,13 +606,39 @@ void KateAiConfigPage::reset()
     m_openrouterKey->setText(s.openrouterApiKey);
     m_openaiCompatibleKey->setText(s.openaiCompatibleApiKey);
     m_claudeCompatibleKey->setText(s.claudeCompatibleApiKey);
-    m_grokModel->setText(s.grokModel);
-    m_openaiModel->setText(s.openaiModel);
-    m_openrouterModel->setText(s.openrouterModel);
-    m_openaiCompatibleModel->setText(s.openaiCompatibleModel);
-    m_claudeCompatibleModel->setText(s.claudeCompatibleModel);
+
+    // Update model combos with catalog and set current model
+    updateModelCombo(Provider::Grok);
+    updateModelCombo(Provider::OpenAI);
+    updateModelCombo(Provider::OpenRouter);
+    updateModelCombo(Provider::OpenAICompatible);
+    updateModelCombo(Provider::ClaudeCompatible);
+
+    m_grokModel->setCurrentText(s.grokModel);
+    m_openaiModel->setCurrentText(s.openaiModel);
+    m_openrouterModel->setCurrentText(s.openrouterModel);
+    m_openaiCompatibleModel->setCurrentText(s.openaiCompatibleModel);
+    m_claudeCompatibleModel->setCurrentText(s.claudeCompatibleModel);
+
     m_openaiCompatibleUrl->setText(s.openaiCompatibleUrl);
     m_claudeCompatibleUrl->setText(s.claudeCompatibleUrl);
+
+    // Fetch models for providers that have API keys configured
+    if (m_modelFetcher) {
+        auto fetchIfKey = [this, &s](Provider provider, const QString &key) {
+            if (!key.trimmed().isEmpty()) {
+                Settings providerSettings = s;
+                providerSettings.provider = provider;
+                m_modelFetcher->setSettings(providerSettings);
+                m_modelFetcher->fetchModels(provider);
+            }
+        };
+        fetchIfKey(Provider::Grok, s.grokApiKey);
+        fetchIfKey(Provider::OpenAI, s.openaiApiKey);
+        fetchIfKey(Provider::OpenRouter, s.openrouterApiKey);
+        fetchIfKey(Provider::OpenAICompatible, s.openaiCompatibleApiKey);
+        fetchIfKey(Provider::ClaudeCompatible, s.claudeCompatibleApiKey);
+    }
 
     m_permission->setCurrentIndex(std::max(0, m_permission->findData(permissionModeId(s.permissionMode))));
     m_sandbox->setCurrentIndex(std::max(0, m_sandbox->findData(sandboxProfileId(s.sandbox))));
@@ -631,6 +699,49 @@ void KateAiConfigPage::reset()
     m_contextWindowReserve->setValue(s.contextWindowReserve);
     m_compressOldMessages->setChecked(s.compressOldMessages);
     m_compressionThreshold->setValue(s.compressionThreshold);
+}
+
+void KateAiConfigPage::updateModelCombo(Provider provider)
+{
+    QComboBox *combo = nullptr;
+    switch (provider) {
+        case Provider::Grok:
+            combo = m_grokModel;
+            break;
+        case Provider::OpenAI:
+            combo = m_openaiModel;
+            break;
+        case Provider::OpenRouter:
+            combo = m_openrouterModel;
+            break;
+        case Provider::OpenAICompatible:
+            combo = m_openaiCompatibleModel;
+            break;
+        case Provider::ClaudeCompatible:
+            combo = m_claudeCompatibleModel;
+            break;
+        default:
+            return;
+    }
+    
+    if (!combo) return;
+    
+    const QString currentText = combo->currentText();
+    combo->clear();
+    
+    // Add models from catalog
+    const QStringList models = m_modelCatalog.value(provider);
+    if (!models.isEmpty()) {
+        combo->addItems(models);
+    } else {
+        // Fallback to default models if catalog is empty
+        combo->addItems(defaultModels(provider));
+    }
+    
+    // Restore current text if it was set
+    if (!currentText.isEmpty()) {
+        combo->setCurrentText(currentText);
+    }
 }
 
 void KateAiConfigPage::defaults()

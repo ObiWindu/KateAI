@@ -16,6 +16,7 @@
 
 #include <QAction>
 #include <QActionGroup>
+#include <QWidgetAction>
 #include <QClipboard>
 #include <QComboBox>
 #include <QGuiApplication>
