@@ -19,6 +19,7 @@
 #include <QActionGroup>
 #include <QWidgetAction>
 #include <QClipboard>
+#include <QColor>
 #include <QComboBox>
 #include <QGuiApplication>
 #include <QGraphicsOpacityEffect>
@@ -885,9 +886,15 @@ void ChatWidget::renderThinkingHtml()
     // Apply a 25-line FIFO limit: keep only the last 25 lines so the
     // reasoning block stays bounded as the model streams its chain-of-thought.
     constexpr int kMaxLines = 25;
-    const QString html = markdownToFifoHtml(m_thinkingBuffer, kMaxLines);
-    m_thinkingBrowser->setHtml(html);
-    applyThinkingState(m_thinkingBlock, m_thinkingBrowser, m_thinkingToggle, m_thinkingExpanded);
+    const QStringList lines = m_thinkingBuffer.split(u'\n');
+    const QString kept = lines.size() <= kMaxLines
+        ? m_thinkingBuffer
+        : lines.mid(lines.size() - kMaxLines).join(u'\n');
+    m_thinkingBrowser->setMarkdown(kept);
+    if (m_thinkingBlock && !m_thinkingBuffer.isEmpty()) {
+        m_thinkingBlock->show();
+    }
+    applyThinkingState(m_thinkingBlock, m_thinkingBrowser, m_thinkingToggle, m_thinkingExpanded || !m_thinkingBuffer.isEmpty());
 }
 
 QString ChatWidget::markdownToFifoHtml(const QString &text, int maxLines)
@@ -949,11 +956,15 @@ QWidget *ChatWidget::createThinkingBlock(QWidget *parent, QTextBrowser *&browser
     browser->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     browser->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     browser->setStyleSheet(
-        u"QTextBrowser { background: transparent; color: #888888; border: none;"
-        u"  font-style: italic; font-size: 12px; padding: 0 4px; }"_s);
+        u"QTextBrowser { background-color: #141418; color: #c8c8c8; border: none;"
+        u"  font-style: italic; font-size: 12px; padding: 4px; }"_s);
     browser->document()->setDefaultStyleSheet(
-        u"body { color: #888888; font-style: italic; font-size: 12px; margin: 0; padding: 0; }"
-        u"p { margin-bottom: 4px; }"_s);
+        u"body { color: #c8c8c8; font-style: italic; font-size: 12px; margin: 0; padding: 0; background: transparent; }"
+        u"p { color: #c8c8c8; margin-bottom: 4px; }"_s);
+    QPalette pal = browser->palette();
+    pal.setColor(QPalette::Text, QColor(u"#c8c8c8"_s));
+    pal.setColor(QPalette::Base, QColor(u"#141418"_s));
+    browser->setPalette(pal);
     tbLayout->addWidget(browser);
 
     connect(toggle, &QPushButton::clicked, this, [this, block, browser, toggle]() {
@@ -980,20 +991,38 @@ void ChatWidget::applyThinkingState(QWidget *block, QTextBrowser *browser, QPush
         toggle->setText((expanded ? u"\u25be "_s : u"\u25b4 "_s) + i18n("Reasoning"));
         toggle->show();
     }
-    if (browser) {
-        if (expanded) {
-            const int h = static_cast<int>(browser->document()->size().height()) + 12;
-            browser->setFixedHeight(std::max(20, h));
-            browser->show();
-        } else {
-            browser->hide();
-        }
-    }
     const int headerH = toggle ? std::max(22, toggle->sizeHint().height()) : 22;
     if (expanded) {
         block->setMinimumHeight(0);
         block->setMaximumHeight(QWIDGETSIZE_MAX);
-    } else {
+    }
+    if (browser) {
+        if (expanded) {
+            browser->show();
+            const int width = browser->viewport()->width() > 40
+                ? browser->viewport()->width()
+                : std::max(160, block->width() - 8);
+            browser->document()->setTextWidth(width);
+            const int h = static_cast<int>(browser->document()->size().height()) + 20;
+            browser->setFixedHeight(std::max(48, h));
+            QPointer<QTextBrowser> browserWeak(browser);
+            QPointer<QWidget> blockWeak(block);
+            QTimer::singleShot(0, browser, [browserWeak, blockWeak]() {
+                if (!browserWeak || !browserWeak->isVisible()) {
+                    return;
+                }
+                const int laidOutWidth = browserWeak->viewport()->width() > 40
+                    ? browserWeak->viewport()->width()
+                    : std::max(160, blockWeak ? blockWeak->width() - 8 : 240);
+                browserWeak->document()->setTextWidth(laidOutWidth);
+                const int laidOutH = static_cast<int>(browserWeak->document()->size().height()) + 20;
+                browserWeak->setFixedHeight(std::max(48, laidOutH));
+            });
+        } else {
+            browser->hide();
+        }
+    }
+    if (!expanded) {
         block->setMinimumHeight(headerH);
         block->setMaximumHeight(headerH);
     }
@@ -2158,9 +2187,12 @@ void ChatWidget::rebuildTranscript()
                         QTextBrowser *thinkingBrowser = nullptr;
                         QPushButton *thinkingToggle = nullptr;
                         auto *thinkingBlock = createThinkingBlock(assistantWidget, thinkingBrowser, thinkingToggle);
-                        m_thinkingBuffer = msg.thinking;
                         if (thinkingBrowser) {
-                            thinkingBrowser->setHtml(markdownToFifoHtml(msg.thinking, 25));
+                            const QStringList lines = msg.thinking.split(u'\n');
+                            const QString kept = lines.size() <= 25
+                                ? msg.thinking
+                                : lines.mid(lines.size() - 25).join(u'\n');
+                            thinkingBrowser->setMarkdown(kept);
                         }
                         applyThinkingState(thinkingBlock, thinkingBrowser, thinkingToggle, false);
                         thinkingBlock->show();
