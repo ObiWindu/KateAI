@@ -1825,8 +1825,12 @@ void ChatWidget::showReasoningEffortMenu()
 
 void ChatWidget::showModelMenu()
 {
-    QMenu menu(this);
-    menu.setStyleSheet(
+    // Clean up any existing menu
+    if (m_modelMenu) {
+        m_modelMenu->deleteLater();
+    }
+    m_modelMenu = new QMenu(this);
+    m_modelMenu->setStyleSheet(
         u"QMenu {"
         u"  background-color: #252528;"
         u"  color: #cccccc;"
@@ -1849,7 +1853,7 @@ void ChatWidget::showModelMenu()
         u"}"_s);
 
     // Model filter input
-    auto *filterEdit = new QLineEdit(&menu);
+    auto *filterEdit = new QLineEdit(m_modelMenu);
     filterEdit->setPlaceholderText(i18n("Filter models..."));
     filterEdit->setStyleSheet(
         u"QLineEdit {"
@@ -1867,88 +1871,21 @@ void ChatWidget::showModelMenu()
     connect(filterEdit, &QLineEdit::textChanged, this, [this, filterEdit](const QString &text) {
         m_modelFilter = text;
         refreshModels();
+        rebuildModelMenuProviderSubmenus(filterEdit);
     });
-    auto *filterAction = new QWidgetAction(&menu);
+    auto *filterAction = new QWidgetAction(m_modelMenu);
     filterAction->setDefaultWidget(filterEdit);
-    menu.addAction(filterAction);
-    menu.addSeparator();
+    m_modelMenu->addAction(filterAction);
+    m_modelMenu->addSeparator();
 
-    const QList<Provider> providers = {
-        Provider::Grok,
-        Provider::OpenAI,
-        Provider::OpenRouter,
-        Provider::OpenAICompatible,
-        Provider::ClaudeCompatible,
-        Provider::Kilo,
-        Provider::Acp
-    };
+    // Build provider submenus
+    rebuildModelMenuProviderSubmenus(filterEdit);
 
-    for (Provider p : providers) {
-        // Only show provider if it has a valid API key configured
-        Settings providerSettings = m_settings;
-        providerSettings.provider = p;
-        if (apiKeyFor(providerSettings).trimmed().isEmpty()) {
-            continue;
-        }
-        
-        auto *pMenu = menu.addMenu(providerLabel(p));
-        pMenu->setStyleSheet(menu.styleSheet());
-        // Only show models fetched from the API (no placeholder/default models)
-        const QStringList models = m_modelCatalog.value(p);
-        const QString currentModel = modelFor(m_settings);
-
-        if (models.isEmpty()) {
-            // Show a placeholder indicating models are being fetched
-            auto *act = pMenu->addAction(i18n("Fetching models..."));
-            act->setEnabled(false);
-        } else {
-            for (const QString &m : models) {
-                auto *act = pMenu->addAction(m);
-            act->setCheckable(true);
-            act->setChecked(m_settings.provider == p && currentModel == m);
-            connect(act, &QAction::triggered, this, [this, p, m]() {
-                m_settings.provider = p;
-                m_preferredProvider = p;
-                switch (p) {
-                case Provider::OpenAI:
-                    m_settings.openaiModel = m;
-                    break;
-                case Provider::OpenRouter:
-                    m_settings.openrouterModel = m;
-                    break;
-                case Provider::OpenAICompatible:
-                    m_settings.openaiCompatibleModel = m;
-                    break;
-                case Provider::ClaudeCompatible:
-                    m_settings.claudeCompatibleModel = m;
-                    break;
-                case Provider::Kilo:
-                    m_settings.kiloModel = m;
-                    break;
-                case Provider::Acp:
-                    m_settings.acpModel = m;
-                    break;
-                case Provider::Grok:
-                default:
-                    m_settings.grokModel = m;
-                    break;
-                }
-                updateModelSelectorLabel();
-                updateTokenDisplay();
-                applyProviderToCombos();
-                updateReasoningEffortButton();
-                m_agent.setSettings(m_settings);
-                Q_EMIT settingsChanged(m_settings);
-            });
-        }
-        }
-    }
-
-    menu.addSeparator();
+    m_modelMenu->addSeparator();
 
     // Reasoning Effort submenu
-    auto *reasoningMenu = menu.addMenu(i18n("Reasoning Effort"));
-    reasoningMenu->setStyleSheet(menu.styleSheet());
+    auto *reasoningMenu = m_modelMenu->addMenu(i18n("Reasoning Effort"));
+    reasoningMenu->setStyleSheet(m_modelMenu->styleSheet());
     auto *reasoningGroup = new QActionGroup(this);
     const QStringList reasoningLevels = {QString(), QStringLiteral("minimal"), QStringLiteral("low"), QStringLiteral("medium"), QStringLiteral("high")};
     const QStringList reasoningLabels = {i18n("Default (Auto)"), i18n("Minimal"), i18n("Low"), i18n("Medium"), i18n("High")};
@@ -1967,10 +1904,158 @@ void ChatWidget::showModelMenu()
         });
     }
 
-    auto *configAct = menu.addAction(i18n("Configure Providers & Models…"));
+    auto *configAct = m_modelMenu->addAction(i18n("Configure Providers & Models…"));
     connect(configAct, &QAction::triggered, this, &ChatWidget::configureRequested);
 
-    menu.exec(m_modelSelector->mapToGlobal(QPoint(0, m_modelSelector->height() + 2)));
+    // Clean up menu when it's closed
+    connect(m_modelMenu, &QMenu::aboutToHide, this, [this]() {
+        m_modelMenu->deleteLater();
+        m_modelMenu = nullptr;
+    });
+
+    m_modelMenu->exec(m_modelSelector->mapToGlobal(QPoint(0, m_modelSelector->height() + 2)));
+}
+
+void ChatWidget::rebuildModelMenuProviderSubmenus(QLineEdit *filterEdit)
+{
+    if (!m_modelMenu) {
+        return;
+    }
+
+    // Remove all provider submenus and everything after the filter separator
+    // Keep the filter edit (first action) and the first separator (second action)
+    QList<QAction *> actions = m_modelMenu->actions();
+    // Find the index of the first separator after the filter
+    int separatorIndex = -1;
+    for (int i = 0; i < actions.size(); ++i) {
+        if (actions[i]->isSeparator()) {
+            separatorIndex = i;
+            break;
+        }
+    }
+    // Remove all actions after the first separator (which are the provider submenus and beyond)
+    if (separatorIndex >= 0) {
+        for (int i = actions.size() - 1; i > separatorIndex; --i) {
+            m_modelMenu->removeAction(actions[i]);
+            // Don't delete the reasoning menu and config action yet, we'll re-add them
+        }
+    }
+
+    const QList<Provider> providers = {
+        Provider::Grok,
+        Provider::OpenAI,
+        Provider::OpenRouter,
+        Provider::OpenAICompatible,
+        Provider::ClaudeCompatible,
+        Provider::Kilo,
+        Provider::Acp
+    };
+
+    const QString currentModel = modelFor(m_settings);
+
+    for (Provider p : providers) {
+        // Only show provider if it has a valid API key configured
+        Settings providerSettings = m_settings;
+        providerSettings.provider = p;
+        if (apiKeyFor(providerSettings).trimmed().isEmpty()) {
+            continue;
+        }
+
+        auto *pMenu = m_modelMenu->addMenu(providerLabel(p));
+        pMenu->setStyleSheet(m_modelMenu->styleSheet());
+        // Only show models fetched from the API (no placeholder/default models)
+        const QStringList allModels = m_modelCatalog.value(p);
+        QStringList models = allModels;
+        if (!m_modelFilter.isEmpty()) {
+            models.clear();
+            for (const QString &m : allModels) {
+                if (m.contains(m_modelFilter, Qt::CaseInsensitive)) {
+                    models.append(m);
+                }
+            }
+        }
+
+        if (models.isEmpty()) {
+            // Show a placeholder indicating models are being fetched
+            auto *act = pMenu->addAction(i18n("Fetching models..."));
+            act->setEnabled(false);
+        } else {
+            for (const QString &m : models) {
+                auto *act = pMenu->addAction(m);
+                act->setCheckable(true);
+                act->setChecked(m_settings.provider == p && currentModel == m);
+                connect(act, &QAction::triggered, this, [this, p, m]() {
+                    m_settings.provider = p;
+                    m_preferredProvider = p;
+                    switch (p) {
+                    case Provider::OpenAI:
+                        m_settings.openaiModel = m;
+                        break;
+                    case Provider::OpenRouter:
+                        m_settings.openrouterModel = m;
+                        break;
+                    case Provider::OpenAICompatible:
+                        m_settings.openaiCompatibleModel = m;
+                        break;
+                    case Provider::ClaudeCompatible:
+                        m_settings.claudeCompatibleModel = m;
+                        break;
+                    case Provider::Kilo:
+                        m_settings.kiloModel = m;
+                        break;
+                    case Provider::Acp:
+                        m_settings.acpModel = m;
+                        break;
+                    case Provider::Grok:
+                    default:
+                        m_settings.grokModel = m;
+                        break;
+                    }
+                    updateModelSelectorLabel();
+                    updateTokenDisplay();
+                    applyProviderToCombos();
+                    updateReasoningEffortButton();
+                    m_agent.setSettings(m_settings);
+                    Q_EMIT settingsChanged(m_settings);
+                    // Close the menu after selection
+                    if (m_modelMenu) {
+                        m_modelMenu->close();
+                    }
+                });
+            }
+        }
+    }
+
+    // Re-add the separator, reasoning menu, and config action
+    m_modelMenu->addSeparator();
+
+    // Reasoning Effort submenu
+    auto *reasoningMenu = m_modelMenu->addMenu(i18n("Reasoning Effort"));
+    reasoningMenu->setStyleSheet(m_modelMenu->styleSheet());
+    auto *reasoningGroup = new QActionGroup(this);
+    const QStringList reasoningLevels = {QString(), QStringLiteral("minimal"), QStringLiteral("low"), QStringLiteral("medium"), QStringLiteral("high")};
+    const QStringList reasoningLabels = {i18n("Default (Auto)"), i18n("Minimal"), i18n("Low"), i18n("Medium"), i18n("High")};
+    for (int i = 0; i < reasoningLevels.size(); ++i) {
+        auto *action = reasoningMenu->addAction(reasoningLabels[i]);
+        action->setCheckable(true);
+        action->setChecked(m_settings.reasoningEffort == reasoningLevels[i]);
+        action->setData(reasoningLevels[i]);
+        reasoningGroup->addAction(action);
+        connect(action, &QAction::triggered, this, [this, effort = reasoningLevels[i]]() {
+            m_settings.reasoningEffort = effort;
+            updateModelSelectorLabel();
+            updateReasoningEffortButton();
+            m_agent.setSettings(m_settings);
+            Q_EMIT settingsChanged(m_settings);
+        });
+    }
+
+    auto *configAct = m_modelMenu->addAction(i18n("Configure Providers & Models…"));
+    connect(configAct, &QAction::triggered, this, &ChatWidget::configureRequested);
+
+    // Force the menu to relayout and repaint since it's already open via exec()
+    m_modelMenu->layout()->activate();
+    m_modelMenu->update();
 }
 
 void ChatWidget::showSettingsMenu()

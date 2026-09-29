@@ -99,6 +99,7 @@ private:
     void appendTranscriptWidget(QWidget *widget);
     void showSettingsMenu();
     void showModelMenu();
+    void rebuildModelMenuProviderSubmenus(QLineEdit *filterEdit);
     void updateModelSelectorLabel();
     void showInfoMessage(const QString &message, bool isError);
 
@@ -149,6 +150,7 @@ private:
     Provider m_preferredProvider = Provider::Grok;
     bool m_updatingCombos = false;
     QString m_modelFilter;
+    QMenu *m_modelMenu = nullptr;
 
     QWidget *m_toolbar = nullptr;
     QWidget *m_composerContainer = nullptr;
