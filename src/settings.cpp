@@ -26,9 +26,13 @@ Settings SettingsStore::load()
     s.grokApiKey = g.readEntry(u"GrokApiKey"_s, QString());
     s.openaiApiKey = g.readEntry(u"OpenAIApiKey"_s, QString());
     s.openrouterApiKey = g.readEntry(u"OpenRouterApiKey"_s, QString());
+    s.acpApiKey = g.readEntry(u"AcpApiKey"_s, QString());
     s.grokModel = g.readEntry(u"GrokModel"_s, u"grok-4.5"_s);
     s.openaiModel = g.readEntry(u"OpenAIModel"_s, u"gpt-4.1"_s);
     s.openrouterModel = g.readEntry(u"OpenRouterModel"_s, u"x-ai/grok-4"_s);
+    s.acpModel = g.readEntry(u"AcpModel"_s, u"acp-agent"_s);
+    s.acpUrl = g.readEntry(u"AcpUrl"_s, u"http://localhost:8080"_s);
+    s.apiFormat = apiFormatFromId(g.readEntry(u"ApiFormat"_s, apiFormatId(ApiFormat::OpenAICompatible)));
     s.permissionMode = permissionModeFromId(g.readEntry(u"PermissionMode"_s, permissionModeId(PermissionMode::Ask)));
     s.sandbox = sandboxProfileFromId(g.readEntry(u"Sandbox"_s, sandboxProfileId(SandboxProfile::Workspace)));
     const int legacyMaxIterations = g.readEntry(u"MaxIterations"_s, 20);
@@ -90,9 +94,13 @@ void SettingsStore::save(const Settings &settings)
     g.writeEntry(u"GrokApiKey"_s, settings.grokApiKey);
     g.writeEntry(u"OpenAIApiKey"_s, settings.openaiApiKey);
     g.writeEntry(u"OpenRouterApiKey"_s, settings.openrouterApiKey);
+    g.writeEntry(u"AcpApiKey"_s, settings.acpApiKey);
     g.writeEntry(u"GrokModel"_s, settings.grokModel);
     g.writeEntry(u"OpenAIModel"_s, settings.openaiModel);
     g.writeEntry(u"OpenRouterModel"_s, settings.openrouterModel);
+    g.writeEntry(u"AcpModel"_s, settings.acpModel);
+    g.writeEntry(u"AcpUrl"_s, settings.acpUrl);
+    g.writeEntry(u"ApiFormat"_s, apiFormatId(settings.apiFormat));
     g.writeEntry(u"PermissionMode"_s, permissionModeId(settings.permissionMode));
     g.writeEntry(u"Sandbox"_s, sandboxProfileId(settings.sandbox));
     g.writeEntry(u"MaxModelRequests"_s, settings.maxModelRequests);

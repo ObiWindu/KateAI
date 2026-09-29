@@ -463,6 +463,9 @@ ChatWidget::ChatWidget(QWidget *parent)
         case Provider::ClaudeCompatible:
             m_settings.claudeCompatibleModel = text.trimmed();
             break;
+        case Provider::Acp:
+            m_settings.acpModel = text.trimmed();
+            break;
         case Provider::Grok:
         default:
             m_settings.grokModel = text.trimmed();
@@ -717,6 +720,11 @@ ChatWidget::~ChatWidget()
         }
         m_scrollToBottomBtn->setGraphicsEffect(nullptr);
     }
+    
+    // Stop thinking typing timer
+    if (m_thinkingTypingTimer) {
+        m_thinkingTypingTimer->stop();
+    }
 }
 
 void ChatWidget::addUserMessage(const QString &text)
@@ -891,7 +899,48 @@ void ChatWidget::renderThinkingHtml()
     const QString kept = lines.size() <= kMaxLines
         ? m_thinkingBuffer
         : lines.mid(lines.size() - kMaxLines).join(u'\n');
-    m_thinkingBrowser->setMarkdown(kept);
+
+    // Store the full text for typing animation
+    m_thinkingFullText = kept;
+    
+    // If we're not already typing, start the typing animation
+    if (!m_thinkingIsTyping) {
+        m_thinkingTypingPos = 0;
+        m_thinkingIsTyping = true;
+        
+        if (!m_thinkingTypingTimer) {
+            m_thinkingTypingTimer = new QTimer(this);
+            m_thinkingTypingTimer->setSingleShot(false);
+            connect(m_thinkingTypingTimer, &QTimer::timeout, this, [this]() {
+                if (!m_thinkingBrowser || !m_thinkingIsTyping) {
+                    return;
+                }
+                
+                // Type ~3 characters per tick for comfortable reading speed
+                constexpr int charsPerTick = 3;
+                m_thinkingTypingPos = qMin(m_thinkingTypingPos + charsPerTick, m_thinkingFullText.length());
+                
+                const QString displayedText = m_thinkingFullText.left(m_thinkingTypingPos);
+                m_thinkingBrowser->setMarkdown(displayedText);
+                
+                // Adjust height as text grows
+                const int width = m_thinkingBrowser->viewport()->width() > 40
+                    ? m_thinkingBrowser->viewport()->width()
+                    : std::max(160, m_thinkingBlock->width() - 8);
+                m_thinkingBrowser->document()->setTextWidth(width);
+                const int h = static_cast<int>(m_thinkingBrowser->document()->size().height()) + 20;
+                m_thinkingBrowser->setFixedHeight(std::max(48, h));
+                
+                if (m_thinkingTypingPos >= m_thinkingFullText.length()) {
+                    m_thinkingIsTyping = false;
+                    m_thinkingTypingTimer->stop();
+                }
+            });
+        }
+        // ~33ms per tick = ~30 chars/sec, comfortable reading speed
+        m_thinkingTypingTimer->start(33);
+    }
+    
     if (m_thinkingBlock && !m_thinkingBuffer.isEmpty()) {
         m_thinkingBlock->show();
     }
@@ -957,14 +1006,13 @@ QWidget *ChatWidget::createThinkingBlock(QWidget *parent, QTextBrowser *&browser
     browser->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     browser->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     browser->setStyleSheet(
-        u"QTextBrowser { background-color: #141418; color: #c8c8c8; border: none;"
-        u"  font-style: italic; font-size: 12px; padding: 4px; }"_s);
+        u"QTextBrowser { background: transparent; color: #c8c8c8; border: none; font-style: italic; font-size: 12px; padding: 4px; }"_s);
     browser->document()->setDefaultStyleSheet(
         u"body { color: #c8c8c8; font-style: italic; font-size: 12px; margin: 0; padding: 0; background: transparent; }"
         u"p { color: #c8c8c8; margin-bottom: 4px; }"_s);
     QPalette pal = browser->palette();
     pal.setColor(QPalette::Text, QColor(u"#c8c8c8"_s));
-    pal.setColor(QPalette::Base, QColor(u"#141418"_s));
+    pal.setColor(QPalette::Base, Qt::transparent);
     browser->setPalette(pal);
     tbLayout->addWidget(browser);
 
@@ -989,7 +1037,7 @@ void ChatWidget::applyThinkingState(QWidget *block, QTextBrowser *browser, QPush
         m_thinkingExpanded = expanded;
     }
     if (toggle) {
-        toggle->setText((expanded ? u"\u25be "_s : u"\u25b4 "_s) + i18n("Reasoning"));
+        toggle->setText((expanded ? u"\u25b4 "_s : u"\u25be "_s) + i18n("Reasoning"));
         toggle->show();
     }
     const int headerH = toggle ? std::max(22, toggle->sizeHint().height()) : 22;
@@ -1099,6 +1147,12 @@ void ChatWidget::freezeStreaming()
     m_planBlock = nullptr;
     m_planLayout = nullptr;
     m_thinkingBuffer.clear();
+    m_thinkingFullText.clear();
+    m_thinkingTypingPos = 0;
+    m_thinkingIsTyping = false;
+    if (m_thinkingTypingTimer) {
+        m_thinkingTypingTimer->stop();
+    }
     m_streamText.clear();
 }
 
@@ -1440,7 +1494,7 @@ void ChatWidget::setSettings(const Settings &settings)
     updateTokenDisplay();
     updateReasoningEffortButton();
 
-    for (Provider provider : {Provider::Grok, Provider::OpenAI, Provider::OpenRouter, Provider::OpenAICompatible, Provider::ClaudeCompatible, Provider::Kilo}) {
+    for (Provider provider : {Provider::Grok, Provider::OpenAI, Provider::OpenRouter, Provider::OpenAICompatible, Provider::ClaudeCompatible, Provider::Kilo, Provider::Acp}) {
         Settings providerSettings = settings;
         providerSettings.provider = provider;
         if (!apiKeyFor(providerSettings).trimmed().isEmpty()) {
@@ -1461,7 +1515,7 @@ void ChatWidget::refreshProviders()
     const bool wasUpdating = m_updatingCombos;
     m_updatingCombos = true;
     m_provider->clear();
-    for (Provider provider : {Provider::Grok, Provider::OpenAI, Provider::OpenRouter, Provider::OpenAICompatible, Provider::ClaudeCompatible, Provider::Kilo}) {
+    for (Provider provider : {Provider::Grok, Provider::OpenAI, Provider::OpenRouter, Provider::OpenAICompatible, Provider::ClaudeCompatible, Provider::Kilo, Provider::Acp}) {
         // Only show provider if it has a valid API key configured
         Settings providerSettings = m_settings;
         providerSettings.provider = provider;
@@ -1532,6 +1586,9 @@ void ChatWidget::refreshModels()
                 break;
             case Provider::ClaudeCompatible:
                 m_settings.claudeCompatibleModel = selectedModel;
+                break;
+            case Provider::Acp:
+                m_settings.acpModel = selectedModel;
                 break;
             case Provider::Grok:
             default:
@@ -1822,7 +1879,8 @@ void ChatWidget::showModelMenu()
         Provider::OpenRouter,
         Provider::OpenAICompatible,
         Provider::ClaudeCompatible,
-        Provider::Kilo
+        Provider::Kilo,
+        Provider::Acp
     };
 
     for (Provider p : providers) {
@@ -1866,6 +1924,9 @@ void ChatWidget::showModelMenu()
                     break;
                 case Provider::Kilo:
                     m_settings.kiloModel = m;
+                    break;
+                case Provider::Acp:
+                    m_settings.acpModel = m;
                     break;
                 case Provider::Grok:
                 default:

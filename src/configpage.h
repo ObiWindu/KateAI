@@ -49,13 +49,17 @@ private:
     QLineEdit *m_openrouterKey = nullptr;
     QLineEdit *m_openaiCompatibleKey = nullptr;
     QLineEdit *m_claudeCompatibleKey = nullptr;
+    QLineEdit *m_acpKey = nullptr;
     QComboBox *m_grokModel = nullptr;
     QComboBox *m_openaiModel = nullptr;
     QComboBox *m_openrouterModel = nullptr;
     QComboBox *m_openaiCompatibleModel = nullptr;
     QComboBox *m_claudeCompatibleModel = nullptr;
+    QComboBox *m_acpModel = nullptr;
     QLineEdit *m_openaiCompatibleUrl = nullptr;
     QLineEdit *m_claudeCompatibleUrl = nullptr;
+    QLineEdit *m_acpUrl = nullptr;
+    QComboBox *m_apiFormat = nullptr;
 
     // Model fetching
     LlmClient *m_modelFetcher = nullptr;

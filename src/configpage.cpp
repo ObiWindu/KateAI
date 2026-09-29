@@ -66,6 +66,7 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     m_provider->addItem(providerLabel(Provider::OpenRouter), providerId(Provider::OpenRouter));
     m_provider->addItem(providerLabel(Provider::OpenAICompatible), providerId(Provider::OpenAICompatible));
     m_provider->addItem(providerLabel(Provider::ClaudeCompatible), providerId(Provider::ClaudeCompatible));
+    m_provider->addItem(providerLabel(Provider::Acp), providerId(Provider::Acp));
     defaultProviderForm->addRow(i18n("Default Provider:"), m_provider);
     providersLayout->addLayout(defaultProviderForm);
 
@@ -110,6 +111,22 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     m_claudeCompatibleUrl = new QLineEdit(this);
     m_claudeCompatibleUrl->setPlaceholderText(u"https://api.anthropic.com/v1"_s);
     addProviderGroup(i18n("Claude Compatible (Anthropic, Bedrock)"), m_claudeCompatibleKey, m_claudeCompatibleModel, m_claudeCompatibleUrl);
+
+    m_acpKey = makeKey();
+    m_acpModel = makeModelCombo();
+    m_acpUrl = new QLineEdit(this);
+    m_acpUrl->setPlaceholderText(u"http://localhost:8080"_s);
+    m_apiFormat = new QComboBox(providersWidget);
+    m_apiFormat->addItem(apiFormatLabel(ApiFormat::OpenAICompatible), apiFormatId(ApiFormat::OpenAICompatible));
+    m_apiFormat->addItem(apiFormatLabel(ApiFormat::AnthropicCompatible), apiFormatId(ApiFormat::AnthropicCompatible));
+    m_apiFormat->addItem(apiFormatLabel(ApiFormat::AcpNative), apiFormatId(ApiFormat::AcpNative));
+    auto *acpGroup = new QGroupBox(i18n("ACP (Agent Communication Protocol)"), providersWidget);
+    auto *acpForm = new QFormLayout(acpGroup);
+    acpForm->addRow(i18n("API Key:"), m_acpKey);
+    acpForm->addRow(i18n("Default Model:"), m_acpModel);
+    acpForm->addRow(i18n("Endpoint URL:"), m_acpUrl);
+    acpForm->addRow(i18n("API Format:"), m_apiFormat);
+    providersLayout->addWidget(acpGroup);
 
     providersLayout->addStretch();
     providersScroll->setWidget(providersWidget);
@@ -416,8 +433,11 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     connect(m_openrouterModel, QOverload<int>::of(&QComboBox::currentIndexChanged), this, markChanged);
     connect(m_openaiCompatibleModel, QOverload<int>::of(&QComboBox::currentIndexChanged), this, markChanged);
     connect(m_claudeCompatibleModel, QOverload<int>::of(&QComboBox::currentIndexChanged), this, markChanged);
+    connect(m_acpModel, QOverload<int>::of(&QComboBox::currentIndexChanged), this, markChanged);
     connect(m_openaiCompatibleUrl, &QLineEdit::textChanged, this, markChanged);
     connect(m_claudeCompatibleUrl, &QLineEdit::textChanged, this, markChanged);
+    connect(m_acpUrl, &QLineEdit::textChanged, this, markChanged);
+    connect(m_apiFormat, &QComboBox::currentIndexChanged, this, markChanged);
 
     // Connect API key changes to fetch models
     auto fetchModelsForProvider = [this](Provider provider, QLineEdit *keyEdit, QComboBox *modelCombo) {
@@ -442,6 +462,9 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
                     case Provider::ClaudeCompatible:
                         s.claudeCompatibleApiKey = key;
                         break;
+                    case Provider::Acp:
+                        s.acpApiKey = key;
+                        break;
                     default:
                         break;
                 }
@@ -459,6 +482,7 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     fetchModelsForProvider(Provider::OpenRouter, m_openrouterKey, m_openrouterModel);
     fetchModelsForProvider(Provider::OpenAICompatible, m_openaiCompatibleKey, m_openaiCompatibleModel);
     fetchModelsForProvider(Provider::ClaudeCompatible, m_claudeCompatibleKey, m_claudeCompatibleModel);
+    fetchModelsForProvider(Provider::Acp, m_acpKey, m_acpModel);
 
     connect(m_permission, &QComboBox::currentIndexChanged, this, markChanged);
     connect(m_sandbox, &QComboBox::currentIndexChanged, this, markChanged);
@@ -546,13 +570,17 @@ void KateAiConfigPage::apply()
     s.openrouterApiKey = m_openrouterKey->text();
     s.openaiCompatibleApiKey = m_openaiCompatibleKey->text();
     s.claudeCompatibleApiKey = m_claudeCompatibleKey->text();
+    s.acpApiKey = m_acpKey->text();
     s.grokModel = m_grokModel->currentText().trimmed();
     s.openaiModel = m_openaiModel->currentText().trimmed();
     s.openrouterModel = m_openrouterModel->currentText().trimmed();
     s.openaiCompatibleModel = m_openaiCompatibleModel->currentText().trimmed();
     s.claudeCompatibleModel = m_claudeCompatibleModel->currentText().trimmed();
+    s.acpModel = m_acpModel->currentText().trimmed();
     s.openaiCompatibleUrl = m_openaiCompatibleUrl->text().trimmed();
     s.claudeCompatibleUrl = m_claudeCompatibleUrl->text().trimmed();
+    s.acpUrl = m_acpUrl->text().trimmed();
+    s.apiFormat = apiFormatFromId(m_apiFormat->currentData().toString());
 
     s.permissionMode = permissionModeFromId(m_permission->currentData().toString());
     s.sandbox = sandboxProfileFromId(m_sandbox->currentData().toString());
@@ -625,6 +653,7 @@ void KateAiConfigPage::reset()
     m_openrouterKey->setText(s.openrouterApiKey);
     m_openaiCompatibleKey->setText(s.openaiCompatibleApiKey);
     m_claudeCompatibleKey->setText(s.claudeCompatibleApiKey);
+    m_acpKey->setText(s.acpApiKey);
 
     // Update model combos with catalog and set current model
     updateModelCombo(Provider::Grok);
@@ -632,15 +661,19 @@ void KateAiConfigPage::reset()
     updateModelCombo(Provider::OpenRouter);
     updateModelCombo(Provider::OpenAICompatible);
     updateModelCombo(Provider::ClaudeCompatible);
+    updateModelCombo(Provider::Acp);
 
     m_grokModel->setCurrentText(s.grokModel);
     m_openaiModel->setCurrentText(s.openaiModel);
     m_openrouterModel->setCurrentText(s.openrouterModel);
     m_openaiCompatibleModel->setCurrentText(s.openaiCompatibleModel);
     m_claudeCompatibleModel->setCurrentText(s.claudeCompatibleModel);
+    m_acpModel->setCurrentText(s.acpModel);
 
     m_openaiCompatibleUrl->setText(s.openaiCompatibleUrl);
     m_claudeCompatibleUrl->setText(s.claudeCompatibleUrl);
+    m_acpUrl->setText(s.acpUrl);
+    m_apiFormat->setCurrentIndex(std::max(0, m_apiFormat->findData(apiFormatId(s.apiFormat))));
 
     // Fetch models for providers that have API keys configured
     if (m_modelFetcher) {
@@ -657,6 +690,7 @@ void KateAiConfigPage::reset()
         fetchIfKey(Provider::OpenRouter, s.openrouterApiKey);
         fetchIfKey(Provider::OpenAICompatible, s.openaiCompatibleApiKey);
         fetchIfKey(Provider::ClaudeCompatible, s.claudeCompatibleApiKey);
+        fetchIfKey(Provider::Acp, s.acpApiKey);
     }
 
     m_permission->setCurrentIndex(std::max(0, m_permission->findData(permissionModeId(s.permissionMode))));
@@ -738,6 +772,9 @@ void KateAiConfigPage::updateModelCombo(Provider provider)
             break;
         case Provider::ClaudeCompatible:
             combo = m_claudeCompatibleModel;
+            break;
+        case Provider::Acp:
+            combo = m_acpModel;
             break;
         default:
             return;
