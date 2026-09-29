@@ -775,6 +775,12 @@ void AgentLoop::appendToolResult(const ToolCall &call, ToolResult result)
     m_pendingResults.append(result);
     Q_EMIT toolFinished(result);
 
+    if (result.ok) {
+        // Reset recovery prompt count on any successful tool execution,
+        // since the agent is making progress with a different action.
+        m_recoveryPromptCount = 0;
+    }
+
     if (result.ok && isMutationTool(call.name)) {
         ++m_stateEpoch;
         m_actionRepeatCounts.clear();
@@ -1019,15 +1025,35 @@ void AgentLoop::executeOne(const ToolCall &call)
                             u"Do not issue it again. Inspect the previous observation, choose a different action, or verify a different aspect of the task."_s.arg(call.name);
             appendToolResult(call, result);
             const int repeats = ++m_actionRepeatCounts[stateSignature];
+            constexpr int MaxRecoveryPrompts = 3;
             if (repeats >= 2) {
-                if (m_recoveryPromptCount == 0) {
+                if (m_recoveryPromptCount < MaxRecoveryPrompts) {
                     ++m_recoveryPromptCount;
-                    appendControllerMessage(QString(u"The model has repeated the same mutating/execute action after it was already blocked. "
-                                            u"Stop repeating it. Use the previous tool result and take a materially different action. "
-                                            u"Do not call the same tool with the same arguments again unless the project state changes first."));
+                    QString recoveryMessage;
+                    switch (m_recoveryPromptCount) {
+                    case 1:
+                        recoveryMessage = u"The model has repeated the same mutating/execute action after it was already blocked. "
+                                          u"Stop repeating it. Use the previous tool result and take a materially different action. "
+                                          u"Do not call the same tool with the same arguments again unless the project state changes first."_s;
+                        break;
+                    case 2:
+                        recoveryMessage = u"This is the second warning: you have repeated the same blocked action again. "
+                                          u"You MUST choose a different tool or different arguments. "
+                                          u"Consider: reading a different file, searching for related code, running a test, or examining the error output from the previous attempt."_s;
+                        break;
+                    case 3:
+                        recoveryMessage = u"Final warning: you have ignored previous guidance and repeated the same failing action. "
+                                          u"The next repetition will terminate this agent turn. "
+                                          u"You must now take a fundamentally different approach - try a different tool, explore a different file, or reconsider the task strategy."_s;
+                        break;
+                    default:
+                        recoveryMessage = u"Repeated the same blocked action. Choose a different action immediately."_s;
+                        break;
+                    }
+                    appendControllerMessage(recoveryMessage);
                 } else {
                     appendToolResultsToConversation();
-                    finishWithFailure(QString(u"Stopped because the agent repeatedly issued the same action without making progress."));
+                    finishWithFailure(QString(u"Stopped because the agent repeatedly issued the same action without making progress after %1 recovery prompts.").arg(MaxRecoveryPrompts));
                     return;
                 }
             }

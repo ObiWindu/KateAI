@@ -165,6 +165,12 @@ private:
     // markdown/HTML instead of escaped plain text.
     QString m_thinkingBuffer;
 
+    // Typing animation for thinking block
+    QTimer *m_thinkingTypingTimer = nullptr;
+    QString m_thinkingFullText;
+    int m_thinkingTypingPos = 0;
+    bool m_thinkingIsTyping = false;
+
     // Structured plan checklist rendered below the thinking block.
     QWidget *m_planBlock = nullptr;
     QVBoxLayout *m_planLayout = nullptr;
