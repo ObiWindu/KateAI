@@ -13,9 +13,6 @@
 
 class QLabel;
 class QPushButton;
-class QVBoxLayout;
-class QHBoxLayout;
-class QScrollArea;
 
 namespace KateAi
 {
@@ -54,20 +51,15 @@ Q_SIGNALS:
     void editsChanged(bool hasEdits);
 
 private:
-    void rebuildUI();
-    void createEditWidget(const EditEntry &entry);
-    void updateGlobalButtons();
+    void updateUI();
 
     QHash<QString, EditEntry> m_edits; // key = path
-    QWidget *m_container = nullptr;
-    QVBoxLayout *m_layout = nullptr;
-    QScrollArea *m_scrollArea = nullptr;
 
-    // Global buttons
-    QWidget *m_globalBar = nullptr;
+    // UI elements
+    QLabel *m_iconLabel = nullptr;
+    QLabel *m_countLabel = nullptr;
     QPushButton *m_acceptAllBtn = nullptr;
     QPushButton *m_rejectAllBtn = nullptr;
-    QLabel *m_countLabel = nullptr;
 };
 
 } // namespace KateAi

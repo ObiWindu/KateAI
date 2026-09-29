@@ -316,7 +316,7 @@ ChatWidget::ChatWidget(QWidget *parent)
     m_permissionBar = new PermissionBar(this);
     root->addWidget(m_permissionBar);
 
-    // 3b. Edit Tracker (for AcceptEdits permission mode)
+    // 3b. Edit Tracker (for AcceptEdits permission mode) - compact bar at bottom of chat
     m_editTracker = new EditTracker(this);
     root->addWidget(m_editTracker);
 
@@ -1327,6 +1327,8 @@ void ChatWidget::showInfoMessage(const QString &message, bool isError)
 
 void ChatWidget::setSettings(const Settings &settings)
 {
+    m_settings = settings;
+
     const int permIndex = m_permission->findData(permissionModeId(settings.permissionMode));
     if (permIndex >= 0) {
         m_permission->setCurrentIndex(permIndex);
@@ -2247,6 +2249,7 @@ void ChatWidget::rebuildTranscript()
 
     forceScrollToBottom();
     updateTokenDisplay();
+    updateModelSelectorLabel();
 }
 
 void ChatWidget::restoreCurrentTurn(const SessionStore::SessionData &sessionData)
@@ -2452,6 +2455,7 @@ void ChatWidget::newChat()
     m_prompt->setEnabled(true);
     updateSendButtonState();
     updateTokenDisplay();
+    updateModelSelectorLabel();
     // Scroll to TOP to show welcome widget for new chat
     if (m_scrollArea) {
         m_scrollArea->verticalScrollBar()->setValue(0);

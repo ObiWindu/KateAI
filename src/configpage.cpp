@@ -425,6 +425,26 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
             QString key = keyEdit->text().trimmed();
             if (!key.isEmpty()) {
                 Settings s = m_plugin->settings();
+                // Update the correct API key field for the provider
+                switch (provider) {
+                    case Provider::Grok:
+                        s.grokApiKey = key;
+                        break;
+                    case Provider::OpenAI:
+                        s.openaiApiKey = key;
+                        break;
+                    case Provider::OpenRouter:
+                        s.openrouterApiKey = key;
+                        break;
+                    case Provider::OpenAICompatible:
+                        s.openaiCompatibleApiKey = key;
+                        break;
+                    case Provider::ClaudeCompatible:
+                        s.claudeCompatibleApiKey = key;
+                        break;
+                    default:
+                        break;
+                }
                 s.provider = provider;
                 m_modelFetcher->setSettings(s);
                 m_modelFetcher->fetchModels(provider);
