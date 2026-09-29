@@ -92,6 +92,7 @@ ToolCallWidget::ToolCallWidget(const QString &toolCallId, QWidget *parent)
         u".removed { color: #ef9999; background-color: #3a1a1a; }"
         u".added { color: #9ed36a; background-color: #1a3a1a; }"
         u".hunk { color: #888; }"
+        u"pre { margin: 0; white-space: pre-wrap; font-family: monospace; font-size: 11px; }"
         u"p { margin: 0; }"_s);
     m_describeDiff->hide();
     root->addWidget(m_describeDiff);
@@ -145,7 +146,11 @@ void ToolCallWidget::setToolInfo(const QString &toolName, const QString &summary
     m_toolName = toolName;
     m_risk = risk;
     m_icon->setText(iconForTool(toolName));
-    m_title->setText(u"<b>%1</b> — %2"_s.arg(toolName, summary.isEmpty() ? i18n("Running…") : summary));
+    const QString cmd = summary.isEmpty() ? i18n("Running…") : summary;
+    m_title->setText(u"<b>%1</b> - %2"_s.arg(escapeHtml(toolName), escapeHtml(cmd)));
+    if (!isDiffTool(toolName) && !summary.isEmpty()) {
+        setPreviewText(summary);
+    }
     updateStyle();
 }
 
@@ -158,35 +163,44 @@ void ToolCallWidget::setRunning()
 
 void ToolCallWidget::setDescribeDiff(const QString &diff)
 {
+    if (diff.trimmed().isEmpty() || !isDiffTool(m_toolName)) {
+        return;
+    }
+    m_hasDiffPreview = true;
+    showPreviewHtml(diffToHtml(diff));
+}
+
+void ToolCallWidget::setPreviewText(const QString &text)
+{
+    if (m_hasDiffPreview) {
+        return;
+    }
+    if (text.trimmed().isEmpty()) {
+        return;
+    }
+    showPreviewHtml(plainToHtml(text));
+}
+
+void ToolCallWidget::showPreviewHtml(const QString &html)
+{
     if (!m_describeDiff) {
         return;
     }
 
-    // Only show diff box for edit_file and write_file tools
-    if (!isDiffTool(m_toolName)) {
-        m_describeDiff->hide();
-        return;
-    }
-
-    if (diff.trimmed().isEmpty()) {
-        m_describeDiff->hide();
-        return;
-    }
-
-    m_describeDiff->setHtml(diffToHtml(diff));
-
-    // Ensure the document is laid out before measuring
+    m_describeDiff->setHtml(html);
     m_describeDiff->document()->adjustSize();
     const int h = static_cast<int>(m_describeDiff->document()->size().height()) + 16;
     m_describeDiff->setFixedHeight(std::min(400, std::max(50, h)));
     m_describeDiff->show();
 
-    // The diff box now lives outside the collapsible details container, so it
-    // is always visible. Just update the expanded height if the details are
-    // currently shown.
     if (m_expanded) {
         m_detailsContainer->setMaximumHeight(m_details->sizeHint().height() + 16);
     }
+}
+
+QString ToolCallWidget::plainToHtml(const QString &text) const
+{
+    return u"<body><pre>%1</pre></body>"_s.arg(escapeHtml(text));
 }
 
 QString ToolCallWidget::diffToHtml(const QString &diff) const
@@ -234,6 +248,10 @@ void ToolCallWidget::setFinished(const ToolResult &result)
         ? result.output.left(4000) + i18n("\n\n… (truncated)")
         : result.output;
     m_details->setPlainText(output);
+
+    if (!m_hasDiffPreview && !output.trimmed().isEmpty()) {
+        setPreviewText(output);
+    }
 
     // Update expanded height if currently expanded
     if (m_expanded) {

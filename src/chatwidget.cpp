@@ -11,6 +11,7 @@
 #include "settings.h"
 #include "toolcallwidget.h"
 #include "edittracker.h"
+#include "tools.h"
 
 #include <KLocalizedString>
 
@@ -34,6 +35,7 @@
 #include <QScrollArea>
 #include <QTextBrowser>
 #include <QTextDocument>
+#include <QJsonDocument>
 #include <QTimer>
 #include <QVBoxLayout>
 
@@ -214,6 +216,8 @@ ChatWidget::ChatWidget(QWidget *parent)
     m_transcriptLayout = new QVBoxLayout(m_transcriptContainer);
     m_transcriptLayout->setContentsMargins(12, 12, 12, 12);
     m_transcriptLayout->setSpacing(6);
+    m_transcriptLayout->setAlignment(Qt::AlignTop);
+    m_scrollArea->setAlignment(Qt::AlignLeft | Qt::AlignTop);
 
     // Initial empty state welcome widget
     m_transcriptLayout->addWidget(createWelcomeWidget());
@@ -539,7 +543,7 @@ ChatWidget::ChatWidget(QWidget *parent)
         toolWidget->setDescribeDiff(request.describeDiff);
         toolWidget->setRunning();
         m_toolCallWidgets.insert(request.toolCallId, toolWidget);
-        m_transcriptLayout->insertWidget(m_transcriptLayout->count() - 1, toolWidget);
+        appendTranscriptWidget(toolWidget);
 
         // Track write/edit tool calls for edit tracking in AcceptEdits mode
         if ((request.toolName == u"write_file"_s || request.toolName == u"edit_file"_s) &&
@@ -755,12 +759,14 @@ void ChatWidget::addUserMessage(const QString &text)
     auto *msgLabel = new QLabel(card);
     msgLabel->setWordWrap(true);
     msgLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    msgLabel->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::MinimumExpanding);
+    msgLabel->setAlignment(Qt::AlignLeft | Qt::AlignTop);
+    msgLabel->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum);
     msgLabel->setStyleSheet(u"color: #e4e4e4; font-size: 13px; line-height: 1.5; border: none; background: transparent;"_s);
     msgLabel->setText(escape(text).replace(u"\n"_s, u"<br>"_s));
     cardLayout->addWidget(msgLabel);
 
-    m_transcriptLayout->insertWidget(m_transcriptLayout->count() - 1, card);
+    card->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum);
+    appendTranscriptWidget(card);
     forceScrollToBottom();
 }
 
@@ -772,7 +778,7 @@ void ChatWidget::addActivityMessage(const QString &text)
     }
     auto *pill = new QLabel(escape(text), m_transcriptContainer);
     pill->setStyleSheet(u"color: #777777; font-size: 11px; font-style: italic; padding: 2px 4px;"_s);
-    m_transcriptLayout->insertWidget(m_transcriptLayout->count() - 1, pill);
+    appendTranscriptWidget(pill);
     scrollToBottom();
 }
 
@@ -801,38 +807,8 @@ void ChatWidget::setStreaming(const QString &text)
         headerLayout->addWidget(m_activeAssistantCopyBtn);
         layout->addLayout(headerLayout);
 
-        // Collapsible hidden-reasoning block. Collapsed by default: the user
-        // sees the visible answer, not the internal chain-of-thought.
-        m_thinkingBlock = new QWidget(m_activeAssistantWidget);
-        m_thinkingBlock->setMaximumHeight(0);
-        auto *tbLayout = new QVBoxLayout(m_thinkingBlock);
-        tbLayout->setContentsMargins(0, 0, 0, 0);
-        tbLayout->setSpacing(0);
-
-        auto *tbHeader = new QHBoxLayout;
-        m_thinkingToggle = new QPushButton(u"\u25b4 "_s + i18n("Reasoning"), m_thinkingBlock);
-        m_thinkingToggle->setFlat(true);
-        m_thinkingToggle->setCursor(Qt::PointingHandCursor);
-        m_thinkingToggle->setStyleSheet(
-            u"QPushButton { color: #888888; font-size: 11px; font-style: italic; border: none; text-align: left; }"
-            u"QPushButton:hover { color: #aaaaaa; }"_s);
-        connect(m_thinkingToggle, &QPushButton::clicked, this, &ChatWidget::toggleThinking);
-        tbHeader->addWidget(m_thinkingToggle);
-        tbHeader->addStretch();
-        tbLayout->addLayout(tbHeader);
-
-        m_thinkingBrowser = new QTextBrowser(m_thinkingBlock);
-        m_thinkingBrowser->setReadOnly(true);
-        m_thinkingBrowser->setFrameShape(QFrame::NoFrame);
-        m_thinkingBrowser->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-        m_thinkingBrowser->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-        m_thinkingBrowser->setStyleSheet(
-            u"QTextBrowser { background: transparent; color: #888888; border: none;"
-            u"  font-style: italic; font-size: 12px; padding: 0 4px; }"_s);
-        m_thinkingBrowser->document()->setDefaultStyleSheet(
-            u"body { color: #888888; font-style: italic; font-size: 12px; margin: 0; padding: 0; }"
-            u"p { margin-bottom: 4px; }"_s);
-        tbLayout->addWidget(m_thinkingBrowser);
+        m_thinkingBlock = createThinkingBlock(m_activeAssistantWidget, m_thinkingBrowser, m_thinkingToggle);
+        m_thinkingBlock->hide();
         layout->addWidget(m_thinkingBlock);
 
         // Structured plan checklist, rendered below the thinking block.
@@ -863,7 +839,8 @@ void ChatWidget::setStreaming(const QString &text)
             u"a { color: #3b82f6; text-decoration: none; }"_s);
 
         layout->addWidget(m_activeAssistantBrowser);
-        m_transcriptLayout->insertWidget(m_transcriptLayout->count() - 1, m_activeAssistantWidget);
+        m_activeAssistantWidget->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum);
+        appendTranscriptWidget(m_activeAssistantWidget);
     }
 
     m_activeAssistantBrowser->setMarkdown(m_streamText);
@@ -884,13 +861,13 @@ void ChatWidget::addThinkingBlock(const QString &text)
     if (!m_activeAssistantWidget) {
         setStreaming(m_streamText);
     }
-    if (!m_thinkingBrowser) {
+    if (!m_thinkingBrowser || !m_thinkingBlock) {
         return;
     }
     m_thinkingBuffer = text;
+    m_thinkingBlock->show();
     renderThinkingHtml();
-    m_thinkingExpanded = true;
-    m_thinkingToggle->setText(u"\u25be "_s + i18n("Reasoning"));
+    applyThinkingState(m_thinkingBlock, m_thinkingBrowser, m_thinkingToggle, true);
     scrollToBottom();
 }
 
@@ -910,11 +887,7 @@ void ChatWidget::renderThinkingHtml()
     constexpr int kMaxLines = 25;
     const QString html = markdownToFifoHtml(m_thinkingBuffer, kMaxLines);
     m_thinkingBrowser->setHtml(html);
-    const int h = static_cast<int>(m_thinkingBrowser->document()->size().height()) + 12;
-    m_thinkingBrowser->setFixedHeight(std::max(20, h));
-    if (m_thinkingBlock) {
-        m_thinkingBlock->setMaximumHeight(std::max(20, h));
-    }
+    applyThinkingState(m_thinkingBlock, m_thinkingBrowser, m_thinkingToggle, m_thinkingExpanded);
 }
 
 QString ChatWidget::markdownToFifoHtml(const QString &text, int maxLines)
@@ -940,13 +913,8 @@ void ChatWidget::collapseThinkingBlock()
     if (!m_thinkingBlock) {
         return;
     }
-    // Collapse the hidden reasoning once the visible answer starts streaming,
-    // so the user is not forced to wade through chain-of-thought.
-    m_thinkingBlock->setMaximumHeight(0);
-    m_thinkingExpanded = false;
-    if (m_thinkingToggle) {
-        m_thinkingToggle->setText(u"\u25b4 "_s + i18n("Reasoning"));
-    }
+    m_thinkingBlock->show();
+    applyThinkingState(m_thinkingBlock, m_thinkingBrowser, m_thinkingToggle, false);
 }
 
 void ChatWidget::toggleThinking()
@@ -954,14 +922,80 @@ void ChatWidget::toggleThinking()
     if (!m_thinkingBlock) {
         return;
     }
-    m_thinkingExpanded = !m_thinkingExpanded;
-    if (m_thinkingExpanded) {
-        const int h = static_cast<int>(m_thinkingBrowser->document()->size().height()) + 12;
-        m_thinkingBlock->setMaximumHeight(std::max(20, h));
-        m_thinkingToggle->setText(u"\u25be "_s + i18n("Reasoning"));
+    applyThinkingState(m_thinkingBlock, m_thinkingBrowser, m_thinkingToggle, !m_thinkingExpanded);
+}
+
+QWidget *ChatWidget::createThinkingBlock(QWidget *parent, QTextBrowser *&browser, QPushButton *&toggle)
+{
+    auto *block = new QWidget(parent);
+    auto *tbLayout = new QVBoxLayout(block);
+    tbLayout->setContentsMargins(0, 0, 0, 0);
+    tbLayout->setSpacing(0);
+
+    auto *tbHeader = new QHBoxLayout;
+    toggle = new QPushButton(u"\u25b4 "_s + i18n("Reasoning"), block);
+    toggle->setFlat(true);
+    toggle->setCursor(Qt::PointingHandCursor);
+    toggle->setStyleSheet(
+        u"QPushButton { color: #888888; font-size: 11px; font-style: italic; border: none; text-align: left; }"
+        u"QPushButton:hover { color: #aaaaaa; }"_s);
+    tbHeader->addWidget(toggle);
+    tbHeader->addStretch();
+    tbLayout->addLayout(tbHeader);
+
+    browser = new QTextBrowser(block);
+    browser->setReadOnly(true);
+    browser->setFrameShape(QFrame::NoFrame);
+    browser->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    browser->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    browser->setStyleSheet(
+        u"QTextBrowser { background: transparent; color: #888888; border: none;"
+        u"  font-style: italic; font-size: 12px; padding: 0 4px; }"_s);
+    browser->document()->setDefaultStyleSheet(
+        u"body { color: #888888; font-style: italic; font-size: 12px; margin: 0; padding: 0; }"
+        u"p { margin-bottom: 4px; }"_s);
+    tbLayout->addWidget(browser);
+
+    connect(toggle, &QPushButton::clicked, this, [this, block, browser, toggle]() {
+        const bool expanding = browser && !browser->isVisible();
+        applyThinkingState(block, browser, toggle, expanding);
+        if (m_thinkingBlock == block) {
+            m_thinkingExpanded = expanding;
+        }
+    });
+
+    applyThinkingState(block, browser, toggle, false);
+    return block;
+}
+
+void ChatWidget::applyThinkingState(QWidget *block, QTextBrowser *browser, QPushButton *toggle, bool expanded)
+{
+    if (!block) {
+        return;
+    }
+    if (m_thinkingBlock == block) {
+        m_thinkingExpanded = expanded;
+    }
+    if (toggle) {
+        toggle->setText((expanded ? u"\u25be "_s : u"\u25b4 "_s) + i18n("Reasoning"));
+        toggle->show();
+    }
+    if (browser) {
+        if (expanded) {
+            const int h = static_cast<int>(browser->document()->size().height()) + 12;
+            browser->setFixedHeight(std::max(20, h));
+            browser->show();
+        } else {
+            browser->hide();
+        }
+    }
+    const int headerH = toggle ? std::max(22, toggle->sizeHint().height()) : 22;
+    if (expanded) {
+        block->setMinimumHeight(0);
+        block->setMaximumHeight(QWIDGETSIZE_MAX);
     } else {
-        m_thinkingBlock->setMaximumHeight(0);
-        m_thinkingToggle->setText(u"\u25b4 "_s + i18n("Reasoning"));
+        block->setMinimumHeight(headerH);
+        block->setMaximumHeight(headerH);
     }
 }
 
@@ -1298,7 +1332,29 @@ QWidget *ChatWidget::createWelcomeWidget()
     }
 
     wLayout->addLayout(chipsLayout);
+    welcome->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum);
     return welcome;
+}
+
+int ChatWidget::transcriptInsertIndex() const
+{
+    if (!m_transcriptLayout) {
+        return 0;
+    }
+    for (int i = 0; i < m_transcriptLayout->count(); ++i) {
+        if (m_transcriptLayout->itemAt(i) && m_transcriptLayout->itemAt(i)->spacerItem()) {
+            return i;
+        }
+    }
+    return qMax(0, m_transcriptLayout->count() - 1);
+}
+
+void ChatWidget::appendTranscriptWidget(QWidget *widget)
+{
+    if (!m_transcriptLayout || !widget) {
+        return;
+    }
+    m_transcriptLayout->insertWidget(transcriptInsertIndex(), widget);
 }
 
 void ChatWidget::showInfoMessage(const QString &message, bool isError)
@@ -2057,7 +2113,7 @@ void ChatWidget::rebuildTranscript()
 
     const auto &messages = m_agent.messages();
     if (messages.isEmpty()) {
-        m_transcriptLayout->insertWidget(0, createWelcomeWidget());
+        m_transcriptLayout->insertWidget(transcriptInsertIndex(), createWelcomeWidget());
         if (m_threadTitle) {
             m_threadTitle->setText(i18n("New Thread"));
         }
@@ -2098,10 +2154,17 @@ void ChatWidget::rebuildTranscript()
                     headerLayout->addWidget(copyBtn);
                     layout->addLayout(headerLayout);
 
-                    // Add thinking block if present
                     if (!msg.thinking.isEmpty()) {
-                        addThinkingBlock(msg.thinking);
-                        collapseThinkingBlock();
+                        QTextBrowser *thinkingBrowser = nullptr;
+                        QPushButton *thinkingToggle = nullptr;
+                        auto *thinkingBlock = createThinkingBlock(assistantWidget, thinkingBrowser, thinkingToggle);
+                        m_thinkingBuffer = msg.thinking;
+                        if (thinkingBrowser) {
+                            thinkingBrowser->setHtml(markdownToFifoHtml(msg.thinking, 25));
+                        }
+                        applyThinkingState(thinkingBlock, thinkingBrowser, thinkingToggle, false);
+                        thinkingBlock->show();
+                        layout->addWidget(thinkingBlock);
                     }
 
                     // Add plan checklist if present
@@ -2134,7 +2197,8 @@ void ChatWidget::rebuildTranscript()
                     });
                     layout->addWidget(browser);
 
-                    m_transcriptLayout->insertWidget(m_transcriptLayout->count() - 1, assistantWidget);
+                    assistantWidget->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum);
+                    appendTranscriptWidget(assistantWidget);
                 }
 
                 // Recreate tool call widgets for tool calls made by this assistant message
@@ -2149,59 +2213,31 @@ void ChatWidget::rebuildTranscript()
                         // Create tool call widget in finished state (will be updated with result if available)
                         auto *toolWidget = new ToolCallWidget(toolCallId, m_transcriptContainer);
 
-                        // Determine risk and summary from tool name and arguments
                         ToolRisk risk = ToolRisk::Read;
-                        QString summary = QString();
                         if (toolName == u"write_file"_s || toolName == u"edit_file"_s) {
                             risk = ToolRisk::Write;
-                            // Extract path from arguments for summary
-                            QJsonDocument argsDoc = QJsonDocument::fromJson(argumentsJson.toUtf8());
-                            if (!argsDoc.isNull() && argsDoc.isObject()) {
-                                const QString path = argsDoc.object().value(u"path"_s).toString();
-                                if (!path.isEmpty()) {
-                                    summary = path;
-                                }
-                            }
                         } else if (toolName == u"bash"_s) {
                             risk = ToolRisk::Execute;
-                            QJsonDocument argsDoc = QJsonDocument::fromJson(argumentsJson.toUtf8());
-                            if (!argsDoc.isNull() && argsDoc.isObject()) {
-                                const QString cmd = argsDoc.object().value(u"command"_s).toString();
-                                if (!cmd.isEmpty()) {
-                                    summary = cmd.left(60);
-                                }
-                            }
-                        } else if (toolName == u"read_file"_s || toolName == u"list_dir"_s || toolName == u"glob"_s) {
-                            risk = ToolRisk::Read;
-                            QJsonDocument argsDoc = QJsonDocument::fromJson(argumentsJson.toUtf8());
-                            if (!argsDoc.isNull() && argsDoc.isObject()) {
-                                const QString path = argsDoc.object().value(u"path"_s).toString();
-                                if (!path.isEmpty()) {
-                                    summary = path;
-                                }
-                            }
-                        } else if (toolName == u"grep"_s) {
-                            risk = ToolRisk::Read;
-                            QJsonDocument argsDoc = QJsonDocument::fromJson(argumentsJson.toUtf8());
-                            if (!argsDoc.isNull() && argsDoc.isObject()) {
-                                const QString pattern = argsDoc.object().value(u"pattern"_s).toString();
-                                if (!pattern.isEmpty()) {
-                                    summary = pattern.left(60);
-                                }
-                            }
                         }
+
+                        QJsonObject argsObj;
+                        const QJsonDocument argsDoc = QJsonDocument::fromJson(argumentsJson.toUtf8());
+                        if (!argsDoc.isNull() && argsDoc.isObject()) {
+                            argsObj = argsDoc.object();
+                        }
+                        const QString summary = shellCommandFor(toolName, argsObj);
 
                         toolWidget->setToolInfo(toolName, summary, risk);
 
-                        // Set describe diff for edit_file/write_file if we can extract it from arguments
-                        if (toolName == u"edit_file"_s || toolName == u"write_file"_s) {
-                            QJsonDocument argsDoc = QJsonDocument::fromJson(argumentsJson.toUtf8());
-                            if (!argsDoc.isNull() && argsDoc.isObject()) {
-                                const QString diff = argsDoc.object().value(u"describeDiff"_s).toString();
-                                if (!diff.isEmpty()) {
-                                    toolWidget->setDescribeDiff(diff);
-                                }
-                            }
+                        if (toolName == u"edit_file"_s) {
+                            const QString path = argsObj.value(u"path"_s).toString();
+                            toolWidget->setDescribeDiff(unifiedDiff(path,
+                                argsObj.value(u"old_string"_s).toString(),
+                                argsObj.value(u"new_string"_s).toString()));
+                        } else if (toolName == u"write_file"_s) {
+                            const QString path = argsObj.value(u"path"_s).toString();
+                            toolWidget->setDescribeDiff(unifiedDiff(path, QString(),
+                                argsObj.value(u"content"_s).toString()));
                         }
 
                         // Mark as finished (result will be filled in by Role::Tool message if available)
@@ -2214,7 +2250,7 @@ void ChatWidget::rebuildTranscript()
 
                         m_toolCallWidgets.insert(toolCallId, toolWidget);
                         rebuiltToolWidgets.insert(toolCallId, toolWidget);
-                        m_transcriptLayout->insertWidget(m_transcriptLayout->count() - 1, toolWidget);
+                        appendTranscriptWidget(toolWidget);
                     }
                 }
                 break;
@@ -2259,51 +2295,13 @@ void ChatWidget::restoreCurrentTurn(const SessionStore::SessionData &sessionData
     if (!sessionData.currentThinking.isEmpty()) {
         // Create a thinking block widget directly (not via addThinkingBlock which is for streaming)
         if (!m_thinkingBlock) {
-            m_thinkingBlock = new QWidget(m_transcriptContainer);
-            m_thinkingBlock->setMaximumHeight(0);
-            auto *tbLayout = new QVBoxLayout(m_thinkingBlock);
-            tbLayout->setContentsMargins(0, 0, 0, 0);
-            tbLayout->setSpacing(0);
-
-            auto *tbHeader = new QHBoxLayout;
-            m_thinkingToggle = new QPushButton(u"\u25b4 "_s + i18n("Reasoning"), m_thinkingBlock);
-            m_thinkingToggle->setFlat(true);
-            m_thinkingToggle->setCursor(Qt::PointingHandCursor);
-            m_thinkingToggle->setStyleSheet(
-                u"QPushButton { color: #888888; font-size: 11px; font-style: italic; border: none; text-align: left; }"
-                u"QPushButton:hover { color: #aaaaaa; }"_s);
-            connect(m_thinkingToggle, &QPushButton::clicked, this, &ChatWidget::toggleThinking);
-            tbHeader->addWidget(m_thinkingToggle);
-            tbHeader->addStretch();
-            tbLayout->addLayout(tbHeader);
-
-            m_thinkingBrowser = new QTextBrowser(m_thinkingBlock);
-            m_thinkingBrowser->setReadOnly(true);
-            m_thinkingBrowser->setFrameShape(QFrame::NoFrame);
-            m_thinkingBrowser->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-            m_thinkingBrowser->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-            m_thinkingBrowser->setStyleSheet(
-                u"QTextBrowser { background: transparent; color: #888888; border: none;"
-                u"  font-style: italic; font-size: 12px; padding: 0 4px; }"_s);
-            m_thinkingBrowser->document()->setDefaultStyleSheet(
-                u"body { color: #888888; font-style: italic; font-size: 12px; margin: 0; padding: 0; }"
-                u"p { margin-bottom: 4px; }"_s);
-            tbLayout->addWidget(m_thinkingBrowser);
-
-            // Insert at the end of transcript (before indicators)
-            m_transcriptLayout->insertWidget(m_transcriptLayout->count() - 1, m_thinkingBlock);
+            m_thinkingBlock = createThinkingBlock(m_transcriptContainer, m_thinkingBrowser, m_thinkingToggle);
+            appendTranscriptWidget(m_thinkingBlock);
         }
         m_thinkingBuffer = sessionData.currentThinking;
         renderThinkingHtml();
-        m_thinkingExpanded = sessionData.planShown; // planShown means thinking was expanded
-        if (m_thinkingExpanded) {
-            const int h = static_cast<int>(m_thinkingBrowser->document()->size().height()) + 12;
-            m_thinkingBlock->setMaximumHeight(std::max(20, h));
-            m_thinkingToggle->setText(u"\u25be "_s + i18n("Reasoning"));
-        } else {
-            m_thinkingBlock->setMaximumHeight(0);
-            m_thinkingToggle->setText(u"\u25b4 "_s + i18n("Reasoning"));
-        }
+        m_thinkingBlock->show();
+        applyThinkingState(m_thinkingBlock, m_thinkingBrowser, m_thinkingToggle, sessionData.planShown);
     }
 
     if (!sessionData.currentPlan.isEmpty() && sessionData.planShown) {
@@ -2316,7 +2314,7 @@ void ChatWidget::restoreCurrentTurn(const SessionStore::SessionData &sessionData
             auto *planLabel = new QLabel(i18n("Plan"), m_planBlock);
             planLabel->setStyleSheet(u"color: #888888; font-size: 10px; font-weight: bold; letter-spacing: 0.5px;"_s);
             m_planLayout->addWidget(planLabel);
-            m_transcriptLayout->insertWidget(m_transcriptLayout->count() - 1, m_planBlock);
+            appendTranscriptWidget(m_planBlock);
         }
         addPlanChecklist(sessionData.currentPlan);
         m_planBlock->show();

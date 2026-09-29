@@ -84,6 +84,8 @@ private:
     static QString markdownToFifoHtml(const QString &text, int maxLines);
     void collapseThinkingBlock();
     void toggleThinking();
+    QWidget *createThinkingBlock(QWidget *parent, QTextBrowser *&browser, QPushButton *&toggle);
+    void applyThinkingState(QWidget *block, QTextBrowser *browser, QPushButton *toggle, bool expanded);
     void addPlanChecklist(const QJsonArray &plan);
     void markPlanStepCompleted(const QString &stepId);
     void scrollToBottom();
@@ -93,6 +95,8 @@ private:
     void animateScrollButtonHide();
     QPushButton *createCopyButton(const QString &textToCopy, QWidget *parent);
     QWidget *createWelcomeWidget();
+    int transcriptInsertIndex() const;
+    void appendTranscriptWidget(QWidget *widget);
     void showSettingsMenu();
     void showModelMenu();
     void updateModelSelectorLabel();

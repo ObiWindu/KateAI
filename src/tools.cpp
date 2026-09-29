@@ -73,6 +73,87 @@ static bool jsonBool(const QJsonValue &value, bool fallback = false)
     return fallback;
 }
 
+static QString quoteShellArg(const QString &s)
+{
+    if (s.isEmpty()) {
+        return {};
+    }
+    static const QRegularExpression safe(u"^[A-Za-z0-9_./:@%+=,-]+$"_s);
+    if (safe.match(s).hasMatch()) {
+        return s;
+    }
+    QString escaped = s;
+    escaped.replace(u"'"_s, u"'\\''"_s);
+    return u"'%1'"_s.arg(escaped);
+}
+
+QString shellCommandFor(const QString &toolName, const QJsonObject &args)
+{
+    if (toolName == u"read_file"_s) {
+        const QString path = quoteShellArg(args.value(u"path"_s).toString());
+        const int offset = args.value(u"offset"_s).toInt(1);
+        const int limit = args.value(u"limit"_s).toInt(0);
+        if (limit > 0) {
+            const int end = offset + limit - 1;
+            return u"sed -n '%1,%2p' %3"_s.arg(offset).arg(end).arg(path);
+        }
+        if (offset > 1) {
+            return u"tail -n +%1 %2"_s.arg(offset).arg(path);
+        }
+        return u"cat %1"_s.arg(path);
+    }
+    if (toolName == u"write_file"_s) {
+        return u"cat > %1"_s.arg(quoteShellArg(args.value(u"path"_s).toString()));
+    }
+    if (toolName == u"edit_file"_s) {
+        return u"patch %1"_s.arg(quoteShellArg(args.value(u"path"_s).toString()));
+    }
+    if (toolName == u"list_dir"_s) {
+        const QString path = args.value(u"path"_s).toString();
+        return path.isEmpty() ? u"ls"_s : u"ls %1"_s.arg(quoteShellArg(path));
+    }
+    if (toolName == u"grep"_s) {
+        QString cmd = u"grep -n"_s;
+        if (jsonBool(args.value(u"case_insensitive"_s))) {
+            cmd += u" -i"_s;
+        }
+        const int context = args.value(u"context"_s).toInt(0);
+        if (context > 0) {
+            cmd += u" -C %1"_s.arg(context);
+        }
+        cmd += u" %1"_s.arg(quoteShellArg(args.value(u"pattern"_s).toString()));
+        const QString path = args.value(u"path"_s).toString();
+        if (!path.isEmpty()) {
+            cmd += u" %1"_s.arg(quoteShellArg(path));
+        }
+        const QString glob = args.value(u"glob"_s).toString();
+        if (!glob.isEmpty()) {
+            cmd += u" --include=%1"_s.arg(quoteShellArg(glob));
+        }
+        return cmd;
+    }
+    if (toolName == u"glob"_s) {
+        const QString pattern = args.value(u"pattern"_s).toString();
+        return u"find . -name %1"_s.arg(quoteShellArg(pattern));
+    }
+    if (toolName == u"bash"_s) {
+        return args.value(u"command"_s).toString();
+    }
+    if (toolName == u"query_project_graph"_s) {
+        const QString type = args.value(u"query_type"_s).toString();
+        QString cmd = u"query_project_graph"_s;
+        if (!type.isEmpty()) {
+            cmd += u" %1"_s.arg(type);
+        }
+        const QString target = args.value(u"target"_s).toString();
+        if (!target.isEmpty()) {
+            cmd += u" %1"_s.arg(quoteShellArg(target));
+        }
+        return cmd;
+    }
+    return toolName;
+}
+
 static bool isNoisySearchPath(const QString &relativePath)
 {
     const QStringList noisy = {
@@ -158,9 +239,10 @@ PermissionRequest ToolRunner::describe(const ToolCall &call) const
     req.toolCallId = call.id;
     req.path = args.value(u"path"_s).toString();
 
+    req.summary = shellCommandFor(call.name, args);
+
     if (call.name == u"write_file"_s) {
         req.risk = ToolRisk::Write;
-        req.summary = u"Write %1"_s.arg(req.path);
         QString existing;
         QString error;
         const QString resolved = m_sandbox.resolve(req.path, &error, true);
@@ -171,19 +253,15 @@ PermissionRequest ToolRunner::describe(const ToolCall &call) const
         req.details = req.describeDiff;
     } else if (call.name == u"edit_file"_s) {
         req.risk = ToolRisk::Write;
-        req.summary = u"Edit %1"_s.arg(req.path);
         const QString oldString = args.value(u"old_string"_s).toString();
         const QString newString = args.value(u"new_string"_s).toString();
         req.describeDiff = unifiedDiff(req.path, oldString, newString);
         req.details = u"Replace:\n%1\n\nWith:\n%2"_s.arg(oldString, newString);
     } else if (call.name == u"bash"_s) {
         req.risk = ToolRisk::Execute;
-        const QString command = args.value(u"command"_s).toString();
-        req.summary = u"Run command"_s;
-        req.details = command;
+        req.details = args.value(u"command"_s).toString();
     } else {
         req.risk = ToolRisk::Read;
-        req.summary = call.name;
         req.details = QString::fromUtf8(QJsonDocument(args).toJson(QJsonDocument::Compact));
     }
     return req;

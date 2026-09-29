@@ -45,6 +45,7 @@ public:
      * approves it. Empty when the tool is not a mutation.
      */
     void setDescribeDiff(const QString &diff);
+    void setPreviewText(const QString &text);
 
     QString toolCallId() const { return m_toolCallId; }
     int expandedHeight() const { return m_expandedHeight; }
@@ -58,10 +59,12 @@ private:
     void toggleExpand();
     void updateStyle();
     QString diffToHtml(const QString &diff) const;
+    QString plainToHtml(const QString &text) const;
     QString escapeHtml(const QString &s) const;
     QString iconForTool(const QString &toolName) const;
     QString colorForRisk(ToolRisk risk) const;
     bool isDiffTool(const QString &toolName) const;
+    void showPreviewHtml(const QString &html);
 
     QString m_toolCallId;
     QString m_toolName;
@@ -69,6 +72,7 @@ private:
     bool m_expanded = false;
     bool m_finished = false;
     bool m_ok = true;
+    bool m_hasDiffPreview = false;
     int m_expandedHeight = 0;
 
     QWidget *m_header = nullptr;

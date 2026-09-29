@@ -59,5 +59,6 @@ private:
 };
 
 QString unifiedDiff(const QString &path, const QString &before, const QString &after);
+QString shellCommandFor(const QString &toolName, const QJsonObject &args);
 
 } // namespace KateAi
