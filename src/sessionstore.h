@@ -47,7 +47,7 @@ public:
     static SessionData load();
 
     // Save the active conversation
-    static void save(const SessionData &data);
+    static void save(const SessionData &data, int maxConversations = 50);
 
     // Clear the active conversation
     static void clear();
@@ -55,7 +55,7 @@ public:
     // Conversation history management
     static QList<ConversationInfo> listConversations(int maxConversations = 50);
     static SessionData loadConversation(const QString &conversationId);
-    static void saveConversation(const QString &conversationId, const SessionData &data, const QString &title = QString());
+    static void saveConversation(const QString &conversationId, const SessionData &data, const QString &title = QString(), int maxConversations = 50);
     static void deleteConversation(const QString &conversationId);
     static QString createNewConversation();
     static void setActiveConversation(const QString &conversationId);

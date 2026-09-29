@@ -582,7 +582,6 @@ void KateAiConfigPage::apply()
     s.maxProjectInstructionsLength = m_maxProjectInstructionsLength->value();
     s.compressSystemPrompt = m_compressSystemPrompt->isChecked();
     s.maxSystemPromptLength = m_maxSystemPromptLength->value();
-    s.messageSpeed = m_speed->currentData().toInt();
 
     // Optimal Intelligence Parameters
     s.temperature = m_temperature->value();
