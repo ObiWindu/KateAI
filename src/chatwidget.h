@@ -64,6 +64,7 @@ public:
     void showConversationHistory();
     void switchToConversation(const QString &conversationId);
     void deleteConversation(const QString &conversationId);
+    void setCurrentConversationId(const QString &conversationId);
 
     PromptEdit *promptEdit() const { return m_prompt; }
     void setCompletionWords(const QStringList &words);

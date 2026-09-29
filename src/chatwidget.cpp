@@ -39,6 +39,7 @@
 #include <QJsonDocument>
 #include <QTimer>
 #include <QVBoxLayout>
+#include <QUuid>
 
 #include <algorithm>
 
@@ -2672,10 +2673,28 @@ void ChatWidget::deleteConversation(const QString &conversationId)
     }
 }
 
+void ChatWidget::setCurrentConversationId(const QString &conversationId)
+{
+    m_currentConversationId = conversationId;
+}
+
 // Override newChat to create a new conversation in history
 void ChatWidget::newChat()
 {
     m_agent.abort();
+
+    // Save current conversation before clearing (so it appears in history)
+    if (!m_agent.messages().isEmpty()) {
+        const auto sessionData = m_agent.sessionData();
+        if (!sessionData.messages.isEmpty()) {
+            // Ensure we have a conversation ID for the current conversation
+            if (m_currentConversationId.isEmpty()) {
+                m_currentConversationId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+            }
+            SessionStore::saveConversation(m_currentConversationId, sessionData, QString(), m_settings.maxSavedConversations > 0 ? m_settings.maxSavedConversations : 50);
+        }
+    }
+
     m_agent.resetConversation();
     m_agent.clearSession();
     m_permissionBar->hideBar();

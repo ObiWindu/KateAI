@@ -74,6 +74,8 @@ namespace KateAi
                 if (!sessionData.messages.isEmpty()) {
                     m_chat->agent()->restoreSession(sessionData);
                     m_chat->rebuildTranscript();
+                    // Set the current conversation ID so newChat() can save it properly
+                    m_chat->setCurrentConversationId(SessionStore::getActiveConversationId());
                 }
             }
         }
