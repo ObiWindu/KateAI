@@ -7,13 +7,18 @@
 
 #include <KLocalizedString>
 
+#include <QFontMetrics>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QMouseEvent>
 #include <QPlainTextEdit>
 #include <QPropertyAnimation>
 #include <QPushButton>
+#include <QResizeEvent>
+#include <QSizePolicy>
+#include <QStringList>
 #include <QTextBrowser>
+#include <QTextOption>
 #include <QVBoxLayout>
 #include <algorithm>
 
@@ -27,6 +32,8 @@ ToolCallWidget::ToolCallWidget(const QString &toolCallId, QWidget *parent)
     , m_toolCallId(toolCallId)
 {
     setObjectName(u"ToolCallWidget_%1"_s.arg(toolCallId));
+    setMinimumWidth(0);
+    setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Maximum);
 
     auto *root = new QVBoxLayout(this);
     root->setContentsMargins(0, 4, 0, 4);
@@ -34,6 +41,7 @@ ToolCallWidget::ToolCallWidget(const QString &toolCallId, QWidget *parent)
 
     // Header row: icon + title + status + expand button
     m_header = new QWidget(this);
+    m_header->setMinimumWidth(0);
     m_header->setCursor(Qt::PointingHandCursor);
     auto *headerLayout = new QHBoxLayout(m_header);
     headerLayout->setContentsMargins(10, 6, 10, 6);
@@ -46,6 +54,8 @@ ToolCallWidget::ToolCallWidget(const QString &toolCallId, QWidget *parent)
 
     m_title = new QLabel(this);
     m_title->setWordWrap(false);
+    m_title->setMinimumWidth(0);
+    m_title->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     headerLayout->addWidget(m_title, 1);
 
     m_status = new QLabel(this);
@@ -70,6 +80,10 @@ ToolCallWidget::ToolCallWidget(const QString &toolCallId, QWidget *parent)
     m_describeDiff = new QTextBrowser(this);
     m_describeDiff->setReadOnly(true);
     m_describeDiff->setOpenExternalLinks(false);
+    m_describeDiff->setMinimumWidth(0);
+    m_describeDiff->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+    m_describeDiff->setLineWrapMode(QTextEdit::WidgetWidth);
+    m_describeDiff->setWordWrapMode(QTextOption::WrapAnywhere);
     m_describeDiff->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_describeDiff->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_describeDiff->setStyleSheet(
@@ -93,7 +107,7 @@ ToolCallWidget::ToolCallWidget(const QString &toolCallId, QWidget *parent)
         u".added { color: #9ed36a; background-color: #1a3a1a; }"
         u".hunk { color: #888; }"
         u"pre { margin: 0; white-space: pre-wrap; font-family: monospace; font-size: 11px; }"
-        u"p { margin: 0; }"_s);
+        u"p { margin: 0; white-space: pre-wrap; }"_s);
     m_describeDiff->hide();
     root->addWidget(m_describeDiff);
 
@@ -107,6 +121,10 @@ ToolCallWidget::ToolCallWidget(const QString &toolCallId, QWidget *parent)
     m_details = new QPlainTextEdit(this);
     m_details->setReadOnly(true);
     m_details->setMaximumHeight(200);
+    m_details->setMinimumWidth(0);
+    m_details->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    m_details->setLineWrapMode(QPlainTextEdit::WidgetWidth);
+    m_details->setWordWrapMode(QTextOption::WrapAnywhere);
     m_details->setStyleSheet(
         u"QPlainTextEdit {"
         u"  background-color: #1a1a1a;"
@@ -146,8 +164,9 @@ void ToolCallWidget::setToolInfo(const QString &toolName, const QString &summary
     m_toolName = toolName;
     m_risk = risk;
     m_icon->setText(iconForTool(toolName));
-    const QString cmd = summary.isEmpty() ? i18n("Running…") : summary;
-    m_title->setText(u"<b>%1</b> - %2"_s.arg(escapeHtml(toolName), escapeHtml(cmd)));
+    m_titleText = summary.isEmpty() ? i18n("Running…") : summary;
+    m_title->setToolTip(u"%1 - %2"_s.arg(toolName, m_titleText));
+    updateTitleElide();
     if (!isDiffTool(toolName) && !summary.isEmpty()) {
         setPreviewText(summary);
     }
@@ -188,10 +207,8 @@ void ToolCallWidget::showPreviewHtml(const QString &html)
     }
 
     m_describeDiff->setHtml(html);
-    m_describeDiff->document()->adjustSize();
-    const int h = static_cast<int>(m_describeDiff->document()->size().height()) + 16;
-    m_describeDiff->setFixedHeight(std::min(400, std::max(50, h)));
     m_describeDiff->show();
+    reflowPreview();
 
     if (m_expanded) {
         m_detailsContainer->setMaximumHeight(m_details->sizeHint().height() + 16);
@@ -200,7 +217,16 @@ void ToolCallWidget::showPreviewHtml(const QString &html)
 
 QString ToolCallWidget::plainToHtml(const QString &text) const
 {
-    return u"<body><pre>%1</pre></body>"_s.arg(escapeHtml(text));
+    QString out = u"<body>"_s;
+    const QStringList lines = text.split(u'\n');
+    if (lines.isEmpty()) {
+        return u"<body><p> </p></body>"_s;
+    }
+    for (const QString &line : lines) {
+        out += u"<p>%1</p>"_s.arg(line.isEmpty() ? u"&nbsp;"_s : escapeHtml(line));
+    }
+    out += u"</body>"_s;
+    return out;
 }
 
 QString ToolCallWidget::diffToHtml(const QString &diff) const
@@ -292,7 +318,7 @@ void ToolCallWidget::updateStyle()
         u"  background-color: %1;"
         u"  border-left: 3px solid %2;"
         u"  border-radius: 6px;"
-        u"  margin: 4px 8px;"
+        u"  margin: 4px 0;"
         u"}"_s.arg(bgColor, borderColor));
 
     m_title->setStyleSheet(u"QLabel { color: #ccc; font-size: 12px; }"_s);
@@ -326,6 +352,50 @@ QString ToolCallWidget::colorForRisk(ToolRisk risk) const
 bool ToolCallWidget::isDiffTool(const QString &toolName) const
 {
     return toolName == u"edit_file"_s || toolName == u"write_file"_s;
+}
+
+QSize ToolCallWidget::minimumSizeHint() const
+{
+    const QSize hint = QWidget::minimumSizeHint();
+    return QSize(0, hint.height());
+}
+
+QSize ToolCallWidget::sizeHint() const
+{
+    const QSize hint = QWidget::sizeHint();
+    return QSize(0, hint.height());
+}
+
+void ToolCallWidget::resizeEvent(QResizeEvent *event)
+{
+    QWidget::resizeEvent(event);
+    if (event->size().width() == event->oldSize().width()) {
+        return;
+    }
+    updateTitleElide();
+    reflowPreview();
+}
+
+void ToolCallWidget::updateTitleElide()
+{
+    if (!m_title) {
+        return;
+    }
+    const int avail = std::max(48, width() - 86);
+    const QFontMetrics fm(m_title->font());
+    const QString shown = fm.elidedText(m_titleText, Qt::ElideMiddle, avail);
+    m_title->setText(u"<b>%1</b> - %2"_s.arg(escapeHtml(m_toolName), escapeHtml(shown)));
+}
+
+void ToolCallWidget::reflowPreview()
+{
+    if (!m_describeDiff || m_describeDiff->isHidden()) {
+        return;
+    }
+    const int width = std::max(40, m_describeDiff->viewport()->width());
+    m_describeDiff->document()->setTextWidth(width);
+    const int h = static_cast<int>(m_describeDiff->document()->size().height()) + 16;
+    m_describeDiff->setFixedHeight(std::min(400, std::max(50, h)));
 }
 
 bool ToolCallWidget::eventFilter(QObject *watched, QEvent *event)

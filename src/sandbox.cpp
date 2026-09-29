@@ -84,9 +84,13 @@ namespace KateAi
         if (re.match(haystack).hasMatch()) {
             return true;
         }
-        const QString name = QFileInfo(haystack).fileName();
-        if (re.match(name).hasMatch()) {
-            return true;
+        // Only match against filename if pattern is a simple filename pattern (no path separators)
+        // This prevents false positives like "**/.env" matching "/home/user/.env" when checking filename only
+        if (!pattern.contains(u'/') && !pattern.contains(u"**"_s)) {
+            const QString name = QFileInfo(haystack).fileName();
+            if (re.match(name).hasMatch()) {
+                return true;
+            }
         }
         if (!pattern.startsWith(u'/') && !pattern.startsWith(u"**"_s)) {
             QRegularExpression nested(globToRegex(u"**/"_s + pattern));
@@ -321,7 +325,8 @@ QStringList Sandbox::wrapCommand(const QString &command, QString *error) const
     }
 
     if (m_profile == SandboxProfile::Off) {
-        return {u"/bin/sh"_s, u"-lc"_s, command};
+        const QString shell = QStandardPaths::findExecutable(u"sh"_s).isEmpty() ? u"/bin/sh"_s : QStandardPaths::findExecutable(u"sh"_s);
+        return {shell, u"-lc"_s, command};
     }
 
     const QString bwrap = QStandardPaths::findExecutable(u"bwrap"_s);
@@ -382,7 +387,21 @@ QStringList Sandbox::wrapCommand(const QString &command, QString *error) const
         }
     }
 
-    const QString shell = m_profile == SandboxProfile::Strict ? u"/usr/bin/sh"_s : u"/bin/sh"_s;
+    // Use QStandardPaths to find the shell executable instead of hardcoded paths
+    QString shell = QStandardPaths::findExecutable(u"sh"_s);
+    if (shell.isEmpty()) {
+        // Fallback to common locations
+        const QStringList fallbackShells = {u"/bin/sh"_s, u"/usr/bin/sh"_s, u"/usr/local/bin/sh"_s};
+        for (const QString &fallback : fallbackShells) {
+            if (QFileInfo(fallback).exists() && QFileInfo(fallback).isExecutable()) {
+                shell = fallback;
+                break;
+            }
+        }
+    }
+    if (shell.isEmpty()) {
+        shell = u"/bin/sh"_s; // Last resort
+    }
     args << u"--"_s << shell << u"-lc"_s << command;
     return args;
 }

@@ -190,6 +190,7 @@ ChatWidget::ChatWidget(QWidget *parent)
     m_scrollArea = new QScrollArea(this);
     m_scrollArea->setWidgetResizable(true);
     m_scrollArea->setFrameShape(QFrame::NoFrame);
+    m_scrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_scrollArea->setStyleSheet(
         u"QScrollArea {"
         u"  background-color: #181818;"
@@ -695,7 +696,7 @@ ChatWidget::~ChatWidget()
     if (!m_agent.messages().isEmpty()) {
         const auto sessionData = m_agent.sessionData();
         if (!sessionData.messages.isEmpty()) {
-            SessionStore::save(sessionData);
+            SessionStore::save(sessionData, m_settings.maxSavedConversations > 0 ? m_settings.maxSavedConversations : 50);
         }
     }
 
@@ -2415,7 +2416,7 @@ void ChatWidget::switchToConversation(const QString &conversationId)
     if (!m_agent.messages().isEmpty()) {
         const auto sessionData = m_agent.sessionData();
         if (!sessionData.messages.isEmpty()) {
-            SessionStore::saveConversation(m_currentConversationId, sessionData);
+            SessionStore::saveConversation(m_currentConversationId, sessionData, QString(), m_settings.maxSavedConversations > 0 ? m_settings.maxSavedConversations : 50);
         }
     }
 

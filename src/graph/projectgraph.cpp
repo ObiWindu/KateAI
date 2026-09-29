@@ -12,6 +12,7 @@
 #include <QRegularExpression>
 #include <QStack>
 #include <QQueue>
+#include <QCryptographicHash>
 #include <algorithm>
 #include <cmath>
 
@@ -235,12 +236,14 @@ void ProjectGraph::removeNode(const QString &nodeId)
     QSet<QString> connectedNodes;
     for (auto it = m_edges.begin(); it != m_edges.end(); ) {
         const QString &edgeKey = it.key();
-        // Parse edgeKey to get sourceId and targetId
+        // Parse edgeKey to get sourceId, targetId, and relationship
+        // Format: sourceId->targetId->relationship
         int arrow1 = edgeKey.indexOf(u"->"_s);
         int arrow2 = edgeKey.indexOf(u"->"_s, arrow1 + 2);
         if (arrow1 != -1 && arrow2 != -1) {
             QString sourceId = edgeKey.mid(0, arrow1);
             QString targetId = edgeKey.mid(arrow1 + 2, arrow2 - arrow1 - 2);
+            // relationship = edgeKey.mid(arrow2 + 2); // Not needed for removal
             if (sourceId == nodeId || targetId == nodeId) {
                 connectedNodes.insert(sourceId);
                 connectedNodes.insert(targetId);
@@ -982,10 +985,10 @@ namespace KateAi
 QString ProjectGraph::generateNodeId(const QString &path, const QString &type)
 {
     // Generate a unique ID for a node based on its path and type
-    QString id = path;
-    id.replace(QLatin1Char('/'), QLatin1Char('_'));
-    id.replace(QLatin1Char(':'), QLatin1Char('_'));
-    id.replace(QLatin1Char('\\'), QLatin1Char('_'));
+    // Use a hash of the full path to avoid collisions (e.g., src/foo.cpp vs src_foo.cpp)
+    QCryptographicHash hash(QCryptographicHash::Sha256);
+    hash.addData(path.toUtf8());
+    QString id = QString::fromLatin1(hash.result().toHex().left(16));
     if (!type.isEmpty()) {
         id += u"_"_s + type;
     }

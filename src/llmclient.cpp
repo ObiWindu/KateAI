@@ -366,8 +366,14 @@ void LlmClient::retryLastRequest()
         return;
     }
 
-    // Reset retry context for manual retry
+    // Reset retry context for manual retry - use current settings
+    m_retryContext = RetryContext{};
     m_retryContext.attempt = 0;
+    m_retryContext.maxAttempts = qMax(1, m_settings.maxRetryAttempts);
+    m_retryContext.baseDelaySeconds = qMax(1, m_settings.baseRetryDelaySeconds);
+    m_retryContext.maxDelaySeconds = m_settings.maxRetryDelaySeconds;
+    m_retryContext.strategy = m_settings.retryStrategy;
+    m_retryContext.providerName = providerLabel(m_settings.provider);
     m_retryContext.lastErrorCategory = RetryErrorCategory::None;
     m_retryContext.lastErrorMessage.clear();
     m_retryContext.retryAfter = QDateTime();

@@ -140,15 +140,15 @@ SessionStore::SessionData SessionStore::load()
     return SessionData();
 }
 
-void SessionStore::save(const SessionData &data)
+void SessionStore::save(const SessionData &data, int maxConversations)
 {
     const QString activeId = getActiveConversationId();
     if (!activeId.isEmpty()) {
-        saveConversation(activeId, data);
+        saveConversation(activeId, data, QString(), maxConversations);
     } else {
         // Create a new conversation if none active
         const QString newId = createNewConversation();
-        saveConversation(newId, data);
+        saveConversation(newId, data, QString(), maxConversations);
     }
 }
 
@@ -257,7 +257,7 @@ SessionStore::SessionData SessionStore::loadConversation(const QString &conversa
     return data;
 }
 
-void SessionStore::saveConversation(const QString &conversationId, const SessionData &data, const QString &title)
+void SessionStore::saveConversation(const QString &conversationId, const SessionData &data, const QString &title, int maxConversations)
 {
     KConfigGroup convGroup = conversationGroup(conversationId);
     KConfigGroup listGroup = conversationsGroup();
@@ -301,7 +301,7 @@ void SessionStore::saveConversation(const QString &conversationId, const Session
     listGroup.sync();
 
     // Prune old conversations if needed
-    pruneOldConversations(50); // Default, will be overridden by config
+    pruneOldConversations(maxConversations);
 }
 
 void SessionStore::deleteConversation(const QString &conversationId)

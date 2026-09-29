@@ -54,10 +54,15 @@ public:
 
 protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
+    void resizeEvent(QResizeEvent *event) override;
+    QSize minimumSizeHint() const override;
+    QSize sizeHint() const override;
 
 private:
     void toggleExpand();
     void updateStyle();
+    void updateTitleElide();
+    void reflowPreview();
     QString diffToHtml(const QString &diff) const;
     QString plainToHtml(const QString &text) const;
     QString escapeHtml(const QString &s) const;
@@ -68,6 +73,7 @@ private:
 
     QString m_toolCallId;
     QString m_toolName;
+    QString m_titleText;
     ToolRisk m_risk = ToolRisk::Read;
     bool m_expanded = false;
     bool m_finished = false;
