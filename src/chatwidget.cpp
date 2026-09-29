@@ -1548,18 +1548,9 @@ void ChatWidget::refreshModels()
     m_updatingCombos = true;
     m_model->clear();
     // Only show models fetched from the API (no placeholder/default models)
-    const QStringList allModels = m_modelCatalog.value(m_settings.provider);
-    QStringList models = allModels;
-    if (!m_modelFilter.isEmpty()) {
-        models.clear();
-        for (const QString &m : allModels) {
-            if (m.contains(m_modelFilter, Qt::CaseInsensitive)) {
-                models.append(m);
-            }
-        }
-    }
+    const QStringList models = m_modelCatalog.value(m_settings.provider);
     m_model->addItems(models);
-    m_model->setEnabled(!allModels.isEmpty());
+    m_model->setEnabled(!models.isEmpty());
 
     // Prefer the model already stored in settings. Only fall back to the first
     // entry in the list when no model has been chosen yet. Overwriting a valid
@@ -1825,8 +1816,16 @@ void ChatWidget::showReasoningEffortMenu()
 
 void ChatWidget::showModelMenu()
 {
-    QMenu menu(this);
-    menu.setStyleSheet(
+    if (m_modelMenu) {
+        m_modelMenu->deleteLater();
+    }
+    m_modelMenuProviderMenus.clear();
+    m_modelMenuFlatActions.clear();
+    m_modelMenuNoMatchAction = nullptr;
+    m_modelFilter.clear();
+
+    m_modelMenu = new QMenu(this);
+    m_modelMenu->setStyleSheet(
         u"QMenu {"
         u"  background-color: #252528;"
         u"  color: #cccccc;"
@@ -1848,9 +1847,10 @@ void ChatWidget::showModelMenu()
         u"  margin: 4px 0;"
         u"}"_s);
 
-    // Model filter input
-    auto *filterEdit = new QLineEdit(&menu);
+    auto *filterEdit = new QLineEdit(m_modelMenu);
     filterEdit->setPlaceholderText(i18n("Filter models..."));
+    filterEdit->setClearButtonEnabled(true);
+    filterEdit->setMinimumWidth(240);
     filterEdit->setStyleSheet(
         u"QLineEdit {"
         u"  background-color: #1a1a1a;"
@@ -1863,15 +1863,59 @@ void ChatWidget::showModelMenu()
         u"QLineEdit:focus {"
         u"  border-color: #007acc;"
         u"}"_s);
-    filterEdit->setText(m_modelFilter);
-    connect(filterEdit, &QLineEdit::textChanged, this, [this, filterEdit](const QString &text) {
+    connect(filterEdit, &QLineEdit::textChanged, this, [this](const QString &text) {
         m_modelFilter = text;
-        refreshModels();
+        applyModelMenuFilter();
     });
-    auto *filterAction = new QWidgetAction(&menu);
+    connect(filterEdit, &QLineEdit::returnPressed, this, [this]() {
+        for (QAction *act : m_modelMenuFlatActions) {
+            if (act->isVisible() && act->isEnabled()) {
+                act->trigger();
+                return;
+            }
+        }
+        for (QMenu *pMenu : m_modelMenuProviderMenus) {
+            if (!pMenu->menuAction()->isVisible()) {
+                continue;
+            }
+            for (QAction *act : pMenu->actions()) {
+                if (act->isVisible() && act->isEnabled() && act->isCheckable()) {
+                    act->trigger();
+                    return;
+                }
+            }
+        }
+    });
+    auto *filterAction = new QWidgetAction(m_modelMenu);
     filterAction->setDefaultWidget(filterEdit);
-    menu.addAction(filterAction);
-    menu.addSeparator();
+    m_modelMenu->addAction(filterAction);
+    m_modelMenu->addSeparator();
+
+    rebuildModelMenuProviderSubmenus();
+    applyModelMenuFilter();
+
+    connect(m_modelMenu, &QMenu::aboutToHide, this, [this]() {
+        m_modelFilter.clear();
+        m_modelMenuProviderMenus.clear();
+        m_modelMenuFlatActions.clear();
+        m_modelMenuNoMatchAction = nullptr;
+        m_modelMenu->deleteLater();
+        m_modelMenu = nullptr;
+    });
+
+    filterEdit->setFocus(Qt::ActiveWindowFocusReason);
+    m_modelMenu->exec(m_modelSelector->mapToGlobal(QPoint(0, m_modelSelector->height() + 2)));
+}
+
+void ChatWidget::rebuildModelMenuProviderSubmenus()
+{
+    if (!m_modelMenu) {
+        return;
+    }
+
+    m_modelMenuProviderMenus.clear();
+    m_modelMenuFlatActions.clear();
+    m_modelMenuNoMatchAction = nullptr;
 
     const QList<Provider> providers = {
         Provider::Grok,
@@ -1883,72 +1927,58 @@ void ChatWidget::showModelMenu()
         Provider::Acp
     };
 
+    const QString currentModel = modelFor(m_settings);
+
     for (Provider p : providers) {
-        // Only show provider if it has a valid API key configured
         Settings providerSettings = m_settings;
         providerSettings.provider = p;
         if (apiKeyFor(providerSettings).trimmed().isEmpty()) {
             continue;
         }
-        
-        auto *pMenu = menu.addMenu(providerLabel(p));
-        pMenu->setStyleSheet(menu.styleSheet());
-        // Only show models fetched from the API (no placeholder/default models)
-        const QStringList models = m_modelCatalog.value(p);
-        const QString currentModel = modelFor(m_settings);
 
+        auto *pMenu = m_modelMenu->addMenu(providerLabel(p));
+        pMenu->setStyleSheet(m_modelMenu->styleSheet());
+        m_modelMenuProviderMenus.append(pMenu);
+
+        const QStringList models = m_modelCatalog.value(p);
         if (models.isEmpty()) {
-            // Show a placeholder indicating models are being fetched
             auto *act = pMenu->addAction(i18n("Fetching models..."));
             act->setEnabled(false);
+            act->setData(QStringLiteral("__placeholder__"));
         } else {
             for (const QString &m : models) {
                 auto *act = pMenu->addAction(m);
-            act->setCheckable(true);
-            act->setChecked(m_settings.provider == p && currentModel == m);
-            connect(act, &QAction::triggered, this, [this, p, m]() {
-                m_settings.provider = p;
-                m_preferredProvider = p;
-                switch (p) {
-                case Provider::OpenAI:
-                    m_settings.openaiModel = m;
-                    break;
-                case Provider::OpenRouter:
-                    m_settings.openrouterModel = m;
-                    break;
-                case Provider::OpenAICompatible:
-                    m_settings.openaiCompatibleModel = m;
-                    break;
-                case Provider::ClaudeCompatible:
-                    m_settings.claudeCompatibleModel = m;
-                    break;
-                case Provider::Kilo:
-                    m_settings.kiloModel = m;
-                    break;
-                case Provider::Acp:
-                    m_settings.acpModel = m;
-                    break;
-                case Provider::Grok:
-                default:
-                    m_settings.grokModel = m;
-                    break;
-                }
-                updateModelSelectorLabel();
-                updateTokenDisplay();
-                applyProviderToCombos();
-                updateReasoningEffortButton();
-                m_agent.setSettings(m_settings);
-                Q_EMIT settingsChanged(m_settings);
-            });
-        }
+                act->setCheckable(true);
+                act->setChecked(m_settings.provider == p && currentModel == m);
+                connect(act, &QAction::triggered, this, [this, p, m]() {
+                    selectModel(p, m);
+                });
+
+                auto *flat = new QAction(u"%1  ·  %2"_s.arg(providerLabel(p), m), m_modelMenu);
+                flat->setCheckable(true);
+                flat->setChecked(m_settings.provider == p && currentModel == m);
+                flat->setVisible(false);
+                flat->setProperty("kateai_model", m);
+                connect(flat, &QAction::triggered, this, [this, p, m]() {
+                    selectModel(p, m);
+                });
+                m_modelMenuFlatActions.append(flat);
+            }
         }
     }
 
-    menu.addSeparator();
+    for (QAction *flat : m_modelMenuFlatActions) {
+        m_modelMenu->addAction(flat);
+    }
 
-    // Reasoning Effort submenu
-    auto *reasoningMenu = menu.addMenu(i18n("Reasoning Effort"));
-    reasoningMenu->setStyleSheet(menu.styleSheet());
+    m_modelMenuNoMatchAction = m_modelMenu->addAction(i18n("No matching models"));
+    m_modelMenuNoMatchAction->setEnabled(false);
+    m_modelMenuNoMatchAction->setVisible(false);
+
+    m_modelMenu->addSeparator();
+
+    auto *reasoningMenu = m_modelMenu->addMenu(i18n("Reasoning Effort"));
+    reasoningMenu->setStyleSheet(m_modelMenu->styleSheet());
     auto *reasoningGroup = new QActionGroup(this);
     const QStringList reasoningLevels = {QString(), QStringLiteral("minimal"), QStringLiteral("low"), QStringLiteral("medium"), QStringLiteral("high")};
     const QStringList reasoningLabels = {i18n("Default (Auto)"), i18n("Minimal"), i18n("Low"), i18n("Medium"), i18n("High")};
@@ -1967,10 +1997,80 @@ void ChatWidget::showModelMenu()
         });
     }
 
-    auto *configAct = menu.addAction(i18n("Configure Providers & Models…"));
+    auto *configAct = m_modelMenu->addAction(i18n("Configure Providers & Models…"));
     connect(configAct, &QAction::triggered, this, &ChatWidget::configureRequested);
+}
 
-    menu.exec(m_modelSelector->mapToGlobal(QPoint(0, m_modelSelector->height() + 2)));
+void ChatWidget::applyModelMenuFilter()
+{
+    if (!m_modelMenu) {
+        return;
+    }
+
+    const QString filter = m_modelFilter.trimmed();
+    const bool filtering = !filter.isEmpty();
+    int visibleMatches = 0;
+
+    for (QMenu *pMenu : m_modelMenuProviderMenus) {
+        pMenu->menuAction()->setVisible(!filtering);
+    }
+
+    for (QAction *act : m_modelMenuFlatActions) {
+        if (!filtering) {
+            act->setVisible(false);
+            continue;
+        }
+        const QString model = act->property("kateai_model").toString();
+        const bool match = act->text().contains(filter, Qt::CaseInsensitive)
+            || model.contains(filter, Qt::CaseInsensitive);
+        act->setVisible(match);
+        if (match) {
+            ++visibleMatches;
+        }
+    }
+
+    if (m_modelMenuNoMatchAction) {
+        m_modelMenuNoMatchAction->setVisible(filtering && visibleMatches == 0);
+    }
+}
+
+void ChatWidget::selectModel(Provider provider, const QString &model)
+{
+    m_settings.provider = provider;
+    m_preferredProvider = provider;
+    switch (provider) {
+    case Provider::OpenAI:
+        m_settings.openaiModel = model;
+        break;
+    case Provider::OpenRouter:
+        m_settings.openrouterModel = model;
+        break;
+    case Provider::OpenAICompatible:
+        m_settings.openaiCompatibleModel = model;
+        break;
+    case Provider::ClaudeCompatible:
+        m_settings.claudeCompatibleModel = model;
+        break;
+    case Provider::Kilo:
+        m_settings.kiloModel = model;
+        break;
+    case Provider::Acp:
+        m_settings.acpModel = model;
+        break;
+    case Provider::Grok:
+    default:
+        m_settings.grokModel = model;
+        break;
+    }
+    updateModelSelectorLabel();
+    updateTokenDisplay();
+    applyProviderToCombos();
+    updateReasoningEffortButton();
+    m_agent.setSettings(m_settings);
+    Q_EMIT settingsChanged(m_settings);
+    if (m_modelMenu) {
+        m_modelMenu->close();
+    }
 }
 
 void ChatWidget::showSettingsMenu()

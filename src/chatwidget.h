@@ -10,11 +10,13 @@
 
 #include <QWidget>
 #include <QHash>
+#include <QList>
 #include <QLineEdit>
 #include <QIcon>
 #include <QColor>
 #include <QCheckBox>
 
+class QAction;
 class QComboBox;
 class QLabel;
 class QPushButton;
@@ -99,6 +101,9 @@ private:
     void appendTranscriptWidget(QWidget *widget);
     void showSettingsMenu();
     void showModelMenu();
+    void rebuildModelMenuProviderSubmenus();
+    void applyModelMenuFilter();
+    void selectModel(Provider provider, const QString &model);
     void updateModelSelectorLabel();
     void showInfoMessage(const QString &message, bool isError);
 
@@ -149,6 +154,10 @@ private:
     Provider m_preferredProvider = Provider::Grok;
     bool m_updatingCombos = false;
     QString m_modelFilter;
+    QMenu *m_modelMenu = nullptr;
+    QList<QMenu *> m_modelMenuProviderMenus;
+    QList<QAction *> m_modelMenuFlatActions;
+    QAction *m_modelMenuNoMatchAction = nullptr;
 
     QWidget *m_toolbar = nullptr;
     QWidget *m_composerContainer = nullptr;
