@@ -463,6 +463,9 @@ ChatWidget::ChatWidget(QWidget *parent)
         case Provider::ClaudeCompatible:
             m_settings.claudeCompatibleModel = text.trimmed();
             break;
+        case Provider::Acp:
+            m_settings.acpModel = text.trimmed();
+            break;
         case Provider::Grok:
         default:
             m_settings.grokModel = text.trimmed();
@@ -1491,7 +1494,7 @@ void ChatWidget::setSettings(const Settings &settings)
     updateTokenDisplay();
     updateReasoningEffortButton();
 
-    for (Provider provider : {Provider::Grok, Provider::OpenAI, Provider::OpenRouter, Provider::OpenAICompatible, Provider::ClaudeCompatible, Provider::Kilo}) {
+    for (Provider provider : {Provider::Grok, Provider::OpenAI, Provider::OpenRouter, Provider::OpenAICompatible, Provider::ClaudeCompatible, Provider::Kilo, Provider::Acp}) {
         Settings providerSettings = settings;
         providerSettings.provider = provider;
         if (!apiKeyFor(providerSettings).trimmed().isEmpty()) {
@@ -1512,7 +1515,7 @@ void ChatWidget::refreshProviders()
     const bool wasUpdating = m_updatingCombos;
     m_updatingCombos = true;
     m_provider->clear();
-    for (Provider provider : {Provider::Grok, Provider::OpenAI, Provider::OpenRouter, Provider::OpenAICompatible, Provider::ClaudeCompatible, Provider::Kilo}) {
+    for (Provider provider : {Provider::Grok, Provider::OpenAI, Provider::OpenRouter, Provider::OpenAICompatible, Provider::ClaudeCompatible, Provider::Kilo, Provider::Acp}) {
         // Only show provider if it has a valid API key configured
         Settings providerSettings = m_settings;
         providerSettings.provider = provider;
@@ -1583,6 +1586,9 @@ void ChatWidget::refreshModels()
                 break;
             case Provider::ClaudeCompatible:
                 m_settings.claudeCompatibleModel = selectedModel;
+                break;
+            case Provider::Acp:
+                m_settings.acpModel = selectedModel;
                 break;
             case Provider::Grok:
             default:
@@ -1873,7 +1879,8 @@ void ChatWidget::showModelMenu()
         Provider::OpenRouter,
         Provider::OpenAICompatible,
         Provider::ClaudeCompatible,
-        Provider::Kilo
+        Provider::Kilo,
+        Provider::Acp
     };
 
     for (Provider p : providers) {
@@ -1917,6 +1924,9 @@ void ChatWidget::showModelMenu()
                     break;
                 case Provider::Kilo:
                     m_settings.kiloModel = m;
+                    break;
+                case Provider::Acp:
+                    m_settings.acpModel = m;
                     break;
                 case Provider::Grok:
                 default:

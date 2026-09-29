@@ -263,6 +263,61 @@ void LlmClient::doComplete(const QList<ChatMessage> &messages)
         return;
     }
 
+    // Determine API format
+    ApiFormat apiFormat = ApiFormat::OpenAICompatible;
+    if (m_settings.provider == Provider::Acp) {
+        apiFormat = m_settings.apiFormat;
+    } else if (m_settings.provider == Provider::ClaudeCompatible) {
+        apiFormat = ApiFormat::AnthropicCompatible;
+    }
+
+    QJsonObject body;
+    QString endpoint;
+    QByteArray requestBody;
+    QString authHeader;
+    QString acceptHeader = u"text/event-stream"_s;
+
+    switch (apiFormat) {
+    case ApiFormat::AnthropicCompatible:
+        body = buildAnthropicRequest(messages, model);
+        endpoint = u"/v1/messages"_s;
+        requestBody = QJsonDocument(body).toJson(QJsonDocument::Compact);
+        authHeader = QString(u"x-api-key: "_s) + key;
+        acceptHeader = u"text/event-stream"_s;
+        break;
+    case ApiFormat::AcpNative:
+        body = buildAcpNativeRequest(messages, model);
+        endpoint = u"/acp/v1/chat/completions"_s;
+        requestBody = QJsonDocument(body).toJson(QJsonDocument::Compact);
+        authHeader = QString(u"Bearer "_s) + key;
+        acceptHeader = u"text/event-stream"_s;
+        break;
+    case ApiFormat::OpenAICompatible:
+    default:
+        body = buildOpenAIRequest(messages, model);
+        endpoint = u"/chat/completions"_s;
+        requestBody = QJsonDocument(body).toJson(QJsonDocument::Compact);
+        authHeader = QString(u"Bearer "_s) + key;
+        acceptHeader = u"text/event-stream"_s;
+        break;
+    }
+
+    QNetworkRequest request{QUrl(providerBaseUrl(m_settings.provider) + endpoint)};
+    request.setHeader(QNetworkRequest::ContentTypeHeader, u"application/json"_s);
+    request.setRawHeader("Authorization", authHeader.toUtf8());
+    request.setRawHeader("Accept", acceptHeader.toUtf8());
+    if (m_settings.provider == Provider::OpenRouter) {
+        request.setRawHeader("HTTP-Referer", "https://kate-editor.org");
+        request.setRawHeader("X-Title", "Kate AI");
+    }
+
+    m_reply = m_nam.post(request, requestBody);
+    connect(m_reply, &QNetworkReply::readyRead, this, &LlmClient::handleReadyRead);
+    connect(m_reply, &QNetworkReply::finished, this, &LlmClient::handleFinished);
+}
+
+QJsonObject LlmClient::buildOpenAIRequest(const QList<ChatMessage> &messages, const QString &model)
+{
     QJsonObject body;
     body.insert(u"model"_s, model);
     body.insert(u"messages"_s, messagesToJson(messages));
@@ -290,19 +345,98 @@ void LlmClient::doComplete(const QList<ChatMessage> &messages)
     if (m_settings.maxThinkingTokens > 0) {
         body.insert(u"max_reasoning_tokens"_s, m_settings.maxThinkingTokens);
     }
+    return body;
+}
 
-    QNetworkRequest request{QUrl(providerBaseUrl(m_settings.provider) + u"/chat/completions"_s)};
-    request.setHeader(QNetworkRequest::ContentTypeHeader, u"application/json"_s);
-    request.setRawHeader("Authorization", "Bearer " + key.toUtf8());
-    request.setRawHeader("Accept", "text/event-stream");
-    if (m_settings.provider == Provider::OpenRouter) {
-        request.setRawHeader("HTTP-Referer", "https://kate-editor.org");
-        request.setRawHeader("X-Title", "Kate AI");
+QJsonObject LlmClient::buildAnthropicRequest(const QList<ChatMessage> &messages, const QString &model)
+{
+    QJsonObject body;
+    body.insert(u"model"_s, model);
+    body.insert(u"messages"_s, messagesToAnthropicJson(messages));
+    body.insert(u"stream"_s, true);
+    body.insert(u"temperature"_s, m_settings.temperature);
+    body.insert(u"top_p"_s, m_settings.topP);
+    if (m_settings.maxTokens > 0) {
+        body.insert(u"max_tokens"_s, m_settings.maxTokens);
     }
+    // Anthropic uses tools array directly
+    body.insert(u"tools"_s, toolDefinitions(m_settings.planMode));
+    if (m_settings.parallelToolCalls) {
+        body.insert(u"tool_choice"_s, u"auto"_s);
+    } else {
+        body.insert(u"tool_choice"_s, u"none"_s);
+    }
+    return body;
+}
 
-    m_reply = m_nam.post(request, QJsonDocument(body).toJson(QJsonDocument::Compact));
-    connect(m_reply, &QNetworkReply::readyRead, this, &LlmClient::handleReadyRead);
-    connect(m_reply, &QNetworkReply::finished, this, &LlmClient::handleFinished);
+QJsonObject LlmClient::buildAcpNativeRequest(const QList<ChatMessage> &messages, const QString &model)
+{
+    // ACP Native format - similar to OpenAI but with ACP-specific extensions
+    QJsonObject body;
+    body.insert(u"model"_s, model);
+    body.insert(u"messages"_s, messagesToJson(messages));
+    body.insert(u"tools"_s, toolDefinitions(m_settings.planMode));
+    body.insert(u"tool_choice"_s, m_settings.parallelToolCalls ? u"auto"_s : u"none"_s);
+    body.insert(u"stream"_s, true);
+    body.insert(u"temperature"_s, m_settings.temperature);
+    body.insert(u"top_p"_s, m_settings.topP);
+    if (m_settings.maxTokens > 0) {
+        body.insert(u"max_tokens"_s, m_settings.maxTokens);
+    }
+    // ACP-specific fields
+    body.insert(u"acp_version"_s, u"1.0"_s);
+    return body;
+}
+
+QJsonArray LlmClient::messagesToAnthropicJson(const QList<ChatMessage> &messages)
+{
+    QJsonArray out;
+    for (const ChatMessage &msg : messages) {
+        QJsonObject obj;
+        switch (msg.role) {
+        case ChatMessage::Role::System:
+            // Anthropic uses system parameter separately, but we'll include as user with system prefix
+            obj.insert(u"role"_s, u"user"_s);
+            obj.insert(u"content"_s, QString(u"[System] "_s + msg.content));
+            break;
+        case ChatMessage::Role::User:
+            obj.insert(u"role"_s, u"user"_s);
+            obj.insert(u"content"_s, msg.content);
+            break;
+        case ChatMessage::Role::Assistant:
+            obj.insert(u"role"_s, u"assistant"_s);
+            obj.insert(u"content"_s, msg.content);
+            if (!msg.thinking.isEmpty()) {
+                // Anthropic uses thinking blocks
+                QJsonArray content;
+                QJsonObject thinkingBlock;
+                thinkingBlock.insert(u"type"_s, u"thinking"_s);
+                thinkingBlock.insert(u"thinking"_s, msg.thinking);
+                content.append(thinkingBlock);
+                QJsonObject textBlock;
+                textBlock.insert(u"type"_s, u"text"_s);
+                textBlock.insert(u"text"_s, msg.content);
+                content.append(textBlock);
+                obj.insert(u"content"_s, content);
+            }
+            if (!msg.toolCalls.isEmpty()) {
+                obj.insert(u"tool_calls"_s, msg.toolCalls);
+            }
+            break;
+        case ChatMessage::Role::Tool:
+            obj.insert(u"role"_s, u"user"_s);
+            QJsonArray toolResult;
+            QJsonObject toolResultBlock;
+            toolResultBlock.insert(u"type"_s, u"tool_result"_s);
+            toolResultBlock.insert(u"tool_use_id"_s, msg.toolCallId);
+            toolResultBlock.insert(u"content"_s, msg.content);
+            toolResult.append(toolResultBlock);
+            obj.insert(u"content"_s, toolResult);
+            break;
+        }
+        out.append(obj);
+    }
+    return out;
 }
 
 void LlmClient::fetchModels(Provider provider)
@@ -315,8 +449,34 @@ void LlmClient::fetchModels(Provider provider)
         return;
     }
 
-    QNetworkRequest request{QUrl(providerBaseUrl(provider) + u"/models"_s)};
-    request.setRawHeader("Authorization", "Bearer " + key.toUtf8());
+    // Determine API format for model fetching
+    ApiFormat apiFormat = ApiFormat::OpenAICompatible;
+    if (provider == Provider::Acp) {
+        apiFormat = providerSettings.apiFormat;
+    } else if (provider == Provider::ClaudeCompatible) {
+        apiFormat = ApiFormat::AnthropicCompatible;
+    }
+
+    QString modelsEndpoint;
+    QString authHeader;
+    switch (apiFormat) {
+    case ApiFormat::AnthropicCompatible:
+        modelsEndpoint = u"/v1/models"_s;
+        authHeader = QString(u"x-api-key: "_s) + key;
+        break;
+    case ApiFormat::AcpNative:
+        modelsEndpoint = u"/acp/v1/models"_s;
+        authHeader = QString(u"Bearer "_s) + key;
+        break;
+    case ApiFormat::OpenAICompatible:
+    default:
+        modelsEndpoint = u"/models"_s;
+        authHeader = QString(u"Bearer "_s) + key;
+        break;
+    }
+
+    QNetworkRequest request{QUrl(providerBaseUrl(provider) + modelsEndpoint)};
+    request.setRawHeader("Authorization", authHeader.toUtf8());
     request.setHeader(QNetworkRequest::UserAgentHeader, u"Kate AI"_s);
     if (provider == Provider::OpenRouter) {
         request.setRawHeader("HTTP-Referer", "https://kate-editor.org");
@@ -417,12 +577,46 @@ void LlmClient::handleModelsFinished(QNetworkReply *reply, Provider provider)
     }
 
     QStringList models;
-    for (const QJsonValue &value : root.value(u"data"_s).toArray()) {
-        const QString id = value.toObject().value(u"id"_s).toString().trimmed();
-        if (!id.isEmpty() && !models.contains(id)) {
-            models.append(id);
-        }
+    
+    // Determine API format for parsing models response
+    ApiFormat apiFormat = ApiFormat::OpenAICompatible;
+    if (provider == Provider::Acp) {
+        apiFormat = m_settings.apiFormat;
+    } else if (provider == Provider::ClaudeCompatible) {
+        apiFormat = ApiFormat::AnthropicCompatible;
     }
+
+    switch (apiFormat) {
+    case ApiFormat::AnthropicCompatible:
+        // Anthropic returns models in a different format
+        for (const QJsonValue &value : root.value(u"data"_s).toArray()) {
+            const QString id = value.toObject().value(u"id"_s).toString().trimmed();
+            if (!id.isEmpty() && !models.contains(id)) {
+                models.append(id);
+            }
+        }
+        break;
+    case ApiFormat::AcpNative:
+        // ACP Native format - similar to OpenAI
+        for (const QJsonValue &value : root.value(u"data"_s).toArray()) {
+            const QString id = value.toObject().value(u"id"_s).toString().trimmed();
+            if (!id.isEmpty() && !models.contains(id)) {
+                models.append(id);
+            }
+        }
+        break;
+    case ApiFormat::OpenAICompatible:
+    default:
+        // OpenAI format
+        for (const QJsonValue &value : root.value(u"data"_s).toArray()) {
+            const QString id = value.toObject().value(u"id"_s).toString().trimmed();
+            if (!id.isEmpty() && !models.contains(id)) {
+                models.append(id);
+            }
+        }
+        break;
+    }
+
     models.sort(Qt::CaseInsensitive);
     if (models.isEmpty()) {
         Q_EMIT modelsFailed(provider, u"The provider did not return any available models."_s);

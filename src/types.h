@@ -22,6 +22,13 @@ enum class Provider {
     OpenAICompatible,
     ClaudeCompatible,
     Kilo,
+    Acp,
+};
+
+enum class ApiFormat {
+    OpenAICompatible,
+    AnthropicCompatible,
+    AcpNative,
 };
 
 enum class PermissionMode {
@@ -114,14 +121,18 @@ struct Settings {
     QString openaiCompatibleApiKey;
     QString claudeCompatibleApiKey;
     QString kiloApiKey;
+    QString acpApiKey;
     QString grokModel = QStringLiteral("grok-4.5");
     QString openaiModel = QStringLiteral("gpt-4.1");
     QString openrouterModel = QStringLiteral("x-ai/grok-4");
     QString openaiCompatibleModel;
     QString claudeCompatibleModel;
     QString kiloModel = QStringLiteral("kilo-code");
+    QString acpModel = QStringLiteral("acp-agent");
     QString openaiCompatibleUrl = QStringLiteral("http://localhost:11434/v1");
     QString claudeCompatibleUrl = QStringLiteral("https://api.anthropic.com/v1");
+    QString acpUrl = QStringLiteral("http://localhost:8080");
+    ApiFormat apiFormat = ApiFormat::OpenAICompatible;
     PermissionMode permissionMode = PermissionMode::Ask;
     SandboxProfile sandbox = SandboxProfile::Workspace;
     // Agent budgets are intentionally separate: API model turns, tool calls, and provider rate.
@@ -249,5 +260,10 @@ QJsonArray mergePlanIntoAssistantMessage(const QJsonArray &existingPlan,
                                          const QString &assistantText);
 QJsonArray markPlanStepCompleted(const QJsonArray &plan, const QString &stepId);
 bool planIsComplete(const QJsonArray &plan);
+
+// API Format helpers --------------------------------------------------------
+QString apiFormatId(ApiFormat format);
+QString apiFormatLabel(ApiFormat format);
+ApiFormat apiFormatFromId(const QString &id);
 
 } // namespace KateAi

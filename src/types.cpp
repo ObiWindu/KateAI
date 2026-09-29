@@ -25,6 +25,8 @@ QString providerId(Provider provider)
         return u"claude-compatible"_s;
     case Provider::Kilo:
         return u"kilo"_s;
+    case Provider::Acp:
+        return u"acp"_s;
     case Provider::Grok:
     default:
         return u"grok"_s;
@@ -44,6 +46,8 @@ QString providerLabel(Provider provider)
         return i18n("Claude Compatible");
     case Provider::Kilo:
         return i18n("Kilo.ai");
+    case Provider::Acp:
+        return i18n("ACP (Agent Communication Protocol)");
     case Provider::Grok:
     default:
         return i18n("Grok (xAI)");
@@ -67,6 +71,9 @@ Provider providerFromId(const QString &id)
     if (id == u"kilo"_s) {
         return Provider::Kilo;
     }
+    if (id == u"acp"_s) {
+        return Provider::Acp;
+    }
     return Provider::Grok;
 }
 
@@ -83,6 +90,8 @@ QString providerBaseUrl(Provider provider)
         return u"https://api.anthropic.com/v1"_s;
     case Provider::Kilo:
         return u"https://api.kilo.ai/v1"_s;
+    case Provider::Acp:
+        return u"http://localhost:8080"_s;
     case Provider::Grok:
     default:
         return u"https://api.x.ai/v1"_s;
@@ -102,6 +111,8 @@ QString providerBaseUrl(const Settings &settings)
         return settings.claudeCompatibleUrl;
     case Provider::Kilo:
         return u"https://api.kilo.ai/v1"_s;
+    case Provider::Acp:
+        return settings.acpUrl;
     case Provider::Grok:
     default:
         return u"https://api.x.ai/v1"_s;
@@ -126,6 +137,8 @@ QStringList defaultModels(Provider provider)
         return {u"claude-3-5-sonnet-20241022"_s, u"claude-3-opus-20240229"_s};
     case Provider::Kilo:
         return {u"kilo-code"_s, u"kilo-code-fast"_s};
+    case Provider::Acp:
+        return {u"acp-agent"_s, u"acp-agent-fast"_s};
     case Provider::Grok:
     default:
         return {u"grok-4.5"_s, u"grok-4.6"_s, u"grok-4"_s, u"grok-3"_s};
@@ -226,6 +239,8 @@ QString apiKeyFor(const Settings &settings)
         return settings.claudeCompatibleApiKey;
     case Provider::Kilo:
         return settings.kiloApiKey;
+    case Provider::Acp:
+        return settings.acpApiKey;
     case Provider::Grok:
     default:
         return settings.grokApiKey;
@@ -245,6 +260,8 @@ QString modelFor(const Settings &settings)
         return settings.claudeCompatibleModel;
     case Provider::Kilo:
         return settings.kiloModel;
+    case Provider::Acp:
+        return settings.acpModel;
     case Provider::Grok:
     default:
         return settings.grokModel;
@@ -607,6 +624,43 @@ bool planIsComplete(const QJsonArray &plan)
         }
     }
     return !plan.isEmpty();
+}
+
+QString apiFormatId(ApiFormat format)
+{
+    switch (format) {
+    case ApiFormat::AnthropicCompatible:
+        return u"anthropic-compatible"_s;
+    case ApiFormat::AcpNative:
+        return u"acp-native"_s;
+    case ApiFormat::OpenAICompatible:
+    default:
+        return u"openai-compatible"_s;
+    }
+}
+
+QString apiFormatLabel(ApiFormat format)
+{
+    switch (format) {
+    case ApiFormat::AnthropicCompatible:
+        return i18n("Anthropic/Claude Compatible");
+    case ApiFormat::AcpNative:
+        return i18n("ACP Native");
+    case ApiFormat::OpenAICompatible:
+    default:
+        return i18n("OpenAI Compatible");
+    }
+}
+
+ApiFormat apiFormatFromId(const QString &id)
+{
+    if (id == u"anthropic-compatible"_s) {
+        return ApiFormat::AnthropicCompatible;
+    }
+    if (id == u"acp-native"_s) {
+        return ApiFormat::AcpNative;
+    }
+    return ApiFormat::OpenAICompatible;
 }
 
 } // namespace KateAi

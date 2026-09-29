@@ -91,7 +91,7 @@ Needs **Kate ≥ 24.08** (KF6), **Qt ≥ 6.5**, **CMake ≥ 3.25**, and `bwrap` 
 - **Chat panel** on the right — multi-line prompt, Enter to send, Shift+Enter for a new line
 - **Plan mode** — gives the AI only read-only project tools, so it can inspect and propose a plan without changing files
 - **Streaming** replies and an agent loop (model → tools → model, up to 20 iterations)
-- **Providers via API keys:** Grok (xAI), OpenAI, OpenRouter
+- **Providers via API keys:** Grok (xAI), OpenAI, OpenRouter, ACP (Agent Communication Protocol)
 - **Tools:** `read_file`, `write_file`, `edit_file`, `list_dir`, `grep`, `glob`, `bash`
 - **Permission asks** before writes and non-read-only commands — Allow / Allow for session / Deny
 - **Sandbox profiles** — workspace, read-only, strict, or off; shell runs under [bubblewrap](https://github.com/containers/bubblewrap)
@@ -101,7 +101,7 @@ Needs **Kate ≥ 24.08** (KF6), **Qt ≥ 6.5**, **CMake ≥ 3.25**, and `bwrap` 
 - **Project instructions** — optional workspace-root `KATEAI.md` is included as project context
 
 ```text
-You ──► LLM (Grok / OpenAI / OpenRouter)
+You ──► LLM (Grok / OpenAI / OpenRouter / ACP)
           │
           ├── stream text into the panel
           └── tool calls
@@ -144,12 +144,26 @@ For repository-specific guidance, create a `KATEAI.md` at the workspace root. It
 | Grok model | `grok-4.5` |
 | OpenAI | `https://api.openai.com/v1` · `gpt-4.1` |
 | OpenRouter | `https://openrouter.ai/api/v1` · `x-ai/grok-4` |
+| ACP | `http://localhost:8080` · `acp-agent` |
 
 API keys:
 
 - [Grok / xAI](https://console.x.ai)
 - [OpenAI](https://platform.openai.com/api-keys)
 - [OpenRouter](https://openrouter.ai/keys)
+- ACP — configure your ACP server endpoint and API key
+
+### ACP API Formats
+
+When using the ACP provider, you can select from multiple API formats:
+
+| Format | Description | Endpoint | Auth Header |
+| --- | --- | --- | --- |
+| **OpenAI Compatible** | Standard OpenAI-compatible API (default) | `/chat/completions` | `Bearer <key>` |
+| **Anthropic/Claude Compatible** | Anthropic Messages API format | `/v1/messages` | `x-api-key: <key>` |
+| **ACP Native** | ACP-specific extensions | `/acp/v1/chat/completions` | `Bearer <key>` |
+
+The API format can be configured in **Settings → Configure Kate → Kate AI → AI Providers → ACP → API Format**.
 
 Keys are stored in Kate’s config (`KateAI` group). Only the selected provider receives its key.
 

@@ -91,6 +91,12 @@ private:
     void emitCompletedOnce();
     QList<ToolCall> completedToolsFromAccumulator();
     
+    // API format handling
+    QJsonObject buildOpenAIRequest(const QList<ChatMessage> &messages, const QString &model);
+    QJsonObject buildAnthropicRequest(const QList<ChatMessage> &messages, const QString &model);
+    QJsonObject buildAcpNativeRequest(const QList<ChatMessage> &messages, const QString &model);
+    QJsonArray messagesToAnthropicJson(const QList<ChatMessage> &messages);
+    
     // Retry logic
     void scheduleRetry(const RetryContext &ctx);
     void executeRetry();
