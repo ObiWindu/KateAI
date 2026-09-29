@@ -8,9 +8,11 @@
 #include "types.h"
 
 #include <QHash>
+#include <QList>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QObject>
+#include <QPointer>
 #include <QTimer>
 
 namespace KateAi
@@ -118,9 +120,12 @@ protected:
     RetryContext &testRetryContext() { return m_retryContext; }
 
 private:
+    void abortModelFetches();
+
     Settings m_settings;
     QNetworkAccessManager m_nam;
     QNetworkReply *m_reply = nullptr;
+    QList<QPointer<QNetworkReply>> m_modelReplies;
     QByteArray m_buffer;
     QString m_text;
     QHash<int, ToolCall> m_toolAcc;

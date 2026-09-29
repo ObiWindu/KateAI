@@ -150,6 +150,7 @@ private:
     QString m_currentThinking;
     QJsonArray m_currentPlan;
     bool m_planShown = false;
+    bool m_thinkingFinishedEmitted = false;
 
     QString m_currentAssistant;
 };

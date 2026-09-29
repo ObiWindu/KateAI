@@ -308,10 +308,12 @@ ChatWidget::ChatWidget(QWidget *parent)
     connect(m_scrollArea->verticalScrollBar(), &QScrollBar::rangeChanged, this, [this](int min, int max) {
         Q_UNUSED(min);
         auto *sb = m_scrollArea->verticalScrollBar();
+        if (!sb) {
+            return;
+        }
         if (!m_userScrolledUp) {
             sb->setValue(max);
-        } else if (m_scrollToBottomBtn) {
-            // Show button when scrolled up and there's new content (agent busy or new messages)
+        } else if (m_scrollToBottomBtn && max - sb->value() > 40) {
             updateScrollButtonPosition();
             animateScrollButtonShow();
             m_scrollToBottomBtn->raise();
@@ -447,7 +449,7 @@ ChatWidget::ChatWidget(QWidget *parent)
     });
 
     connect(m_model, &QComboBox::currentTextChanged, this, [this](const QString &text) {
-        if (m_updatingCombos) {
+        if (m_updatingCombos || text.trimmed().isEmpty()) {
             return;
         }
         switch (m_settings.provider) {
@@ -519,7 +521,6 @@ ChatWidget::ChatWidget(QWidget *parent)
         setThinkingIndicator(true);
     });
     connect(&m_agent, &AgentLoop::thinkingFinished, this, [this](const QString &text) {
-        Q_UNUSED(text);
         addThinkingBlock(text);
         setThinkingIndicator(false);
     });
@@ -695,6 +696,11 @@ ChatWidget::ChatWidget(QWidget *parent)
 
 ChatWidget::~ChatWidget()
 {
+    stopThinkingTyping();
+    if (m_streamHeightTimer) {
+        m_streamHeightTimer->stop();
+    }
+
     // Save session before AgentLoop member is destroyed
     if (!m_agent.messages().isEmpty()) {
         const auto sessionData = m_agent.sessionData();
@@ -703,27 +709,18 @@ ChatWidget::~ChatWidget()
         }
     }
 
-    // Disconnect all signals to prevent callbacks after destruction
+    m_agent.abort();
     disconnect(&m_agent, nullptr, this, nullptr);
-    disconnect(m_scrollArea->verticalScrollBar(), nullptr, this, nullptr);
+    disconnect(m_agent.client(), nullptr, this, nullptr);
+    if (m_scrollArea && m_scrollArea->verticalScrollBar()) {
+        disconnect(m_scrollArea->verticalScrollBar(), nullptr, this, nullptr);
+    }
     if (m_scrollToBottomBtn) {
         disconnect(m_scrollToBottomBtn, nullptr, this, nullptr);
+        m_scrollToBottomBtn->setGraphicsEffect(nullptr);
     }
     if (m_prompt) {
         disconnect(m_prompt, nullptr, this, nullptr);
-    }
-
-    // Clean up any running animations on scroll button
-    if (m_scrollToBottomBtn) {
-        if (auto *effect = qobject_cast<QGraphicsOpacityEffect *>(m_scrollToBottomBtn->graphicsEffect())) {
-            effect->deleteLater();
-        }
-        m_scrollToBottomBtn->setGraphicsEffect(nullptr);
-    }
-    
-    // Stop thinking typing timer
-    if (m_thinkingTypingTimer) {
-        m_thinkingTypingTimer->stop();
     }
 }
 
@@ -795,6 +792,9 @@ void ChatWidget::addActivityMessage(const QString &text)
 void ChatWidget::setStreaming(const QString &text)
 {
     m_streamText = text;
+    if (m_activeAssistantWidget && !m_activeAssistantBrowser) {
+        m_activeAssistantWidget = nullptr;
+    }
     if (!m_activeAssistantWidget) {
         m_activeAssistantWidget = new QWidget(m_transcriptContainer);
         auto *layout = new QVBoxLayout(m_activeAssistantWidget);
@@ -817,7 +817,11 @@ void ChatWidget::setStreaming(const QString &text)
         headerLayout->addWidget(m_activeAssistantCopyBtn);
         layout->addLayout(headerLayout);
 
-        m_thinkingBlock = createThinkingBlock(m_activeAssistantWidget, m_thinkingBrowser, m_thinkingToggle);
+        QTextBrowser *thinkingBrowser = nullptr;
+        QPushButton *thinkingToggle = nullptr;
+        m_thinkingBlock = createThinkingBlock(m_activeAssistantWidget, thinkingBrowser, thinkingToggle);
+        m_thinkingBrowser = thinkingBrowser;
+        m_thinkingToggle = thinkingToggle;
         m_thinkingBlock->hide();
         layout->addWidget(m_thinkingBlock);
 
@@ -853,15 +857,14 @@ void ChatWidget::setStreaming(const QString &text)
         appendTranscriptWidget(m_activeAssistantWidget);
     }
 
-    m_activeAssistantBrowser->setMarkdown(m_streamText);
-    // Defer height calculation to allow layout to settle and browser to get proper width
-    QTimer::singleShot(0, this, [thisWeak = QPointer<ChatWidget>(this)]() {
-        if (thisWeak && thisWeak->m_activeAssistantBrowser) {
-            const int docH = static_cast<int>(thisWeak->m_activeAssistantBrowser->document()->size().height()) + 16;
-            thisWeak->m_activeAssistantBrowser->setFixedHeight(std::max(30, docH));
-            thisWeak->scrollToBottom();
-        }
-    });
+    if (!m_activeAssistantBrowser) {
+        return;
+    }
+    m_activeAssistantBrowser->setMarkdown(closedMarkdown(m_streamText));
+    if (!m_activeAssistantBrowser) {
+        return;
+    }
+    scheduleStreamHeightUpdate();
 }
 
 void ChatWidget::addThinkingBlock(const QString &text)
@@ -913,6 +916,7 @@ void ChatWidget::renderThinkingHtml()
             m_thinkingTypingTimer->setSingleShot(false);
             connect(m_thinkingTypingTimer, &QTimer::timeout, this, [this]() {
                 if (!m_thinkingBrowser || !m_thinkingIsTyping) {
+                    stopThinkingTyping();
                     return;
                 }
                 
@@ -921,19 +925,23 @@ void ChatWidget::renderThinkingHtml()
                 m_thinkingTypingPos = qMin(m_thinkingTypingPos + charsPerTick, m_thinkingFullText.length());
                 
                 const QString displayedText = m_thinkingFullText.left(m_thinkingTypingPos);
-                m_thinkingBrowser->setMarkdown(displayedText);
+                m_thinkingBrowser->setMarkdown(closedMarkdown(displayedText));
+                if (!m_thinkingBrowser) {
+                    stopThinkingTyping();
+                    return;
+                }
                 
                 // Adjust height as text grows
+                const int blockWidth = m_thinkingBlock ? m_thinkingBlock->width() : 240;
                 const int width = m_thinkingBrowser->viewport()->width() > 40
                     ? m_thinkingBrowser->viewport()->width()
-                    : std::max(160, m_thinkingBlock->width() - 8);
+                    : std::max(160, blockWidth - 8);
                 m_thinkingBrowser->document()->setTextWidth(width);
                 const int h = static_cast<int>(m_thinkingBrowser->document()->size().height()) + 20;
                 m_thinkingBrowser->setFixedHeight(std::max(48, h));
                 
                 if (m_thinkingTypingPos >= m_thinkingFullText.length()) {
-                    m_thinkingIsTyping = false;
-                    m_thinkingTypingTimer->stop();
+                    stopThinkingTyping();
                 }
             });
         }
@@ -976,7 +984,7 @@ void ChatWidget::collapseThinkingBlock()
 
 void ChatWidget::toggleThinking()
 {
-    if (!m_thinkingBlock) {
+    if (!m_thinkingBlock || !m_thinkingBrowser) {
         return;
     }
     applyThinkingState(m_thinkingBlock, m_thinkingBrowser, m_thinkingToggle, !m_thinkingExpanded);
@@ -1124,36 +1132,22 @@ void ChatWidget::markPlanStepCompleted(const QString &stepId)
 
 void ChatWidget::freezeStreaming()
 {
+    if (m_streamHeightTimer) {
+        m_streamHeightTimer->stop();
+    }
     if (m_activeAssistantBrowser && !m_streamText.isEmpty()) {
         m_activeAssistantBrowser->setMarkdown(m_streamText);
-        // Defer height calculation to allow layout to settle
-        QTimer::singleShot(0, this, [thisWeak = QPointer<ChatWidget>(this)]() {
-            if (thisWeak && thisWeak->m_activeAssistantBrowser) {
-                const int docH = static_cast<int>(thisWeak->m_activeAssistantBrowser->document()->size().height()) + 16;
-                thisWeak->m_activeAssistantBrowser->setFixedHeight(std::max(30, docH));
-            }
-        });
+        if (m_activeAssistantBrowser) {
+            const int docH = static_cast<int>(m_activeAssistantBrowser->document()->size().height()) + 16;
+            m_activeAssistantBrowser->setFixedHeight(std::max(30, docH));
+        }
     }
     if (m_activeAssistantCopyBtn) {
         m_activeAssistantCopyBtn->setProperty("copyText", m_streamText);
         m_activeAssistantCopyBtn = nullptr;
     }
     collapseThinkingBlock();
-    m_activeAssistantWidget = nullptr;
-    m_activeAssistantBrowser = nullptr;
-    m_thinkingBlock = nullptr;
-    m_thinkingBrowser = nullptr;
-    m_thinkingToggle = nullptr;
-    m_planBlock = nullptr;
-    m_planLayout = nullptr;
-    m_thinkingBuffer.clear();
-    m_thinkingFullText.clear();
-    m_thinkingTypingPos = 0;
-    m_thinkingIsTyping = false;
-    if (m_thinkingTypingTimer) {
-        m_thinkingTypingTimer->stop();
-    }
-    m_streamText.clear();
+    clearStreamingPointers();
 }
 
 void ChatWidget::scrollToBottom()
@@ -1229,24 +1223,25 @@ void ChatWidget::animateScrollButtonShow()
     if (!m_scrollToBottomBtn) {
         return;
     }
-    if (m_scrollToBottomBtn->isVisible()) {
-        return;
-    }
     m_scrollToBottomBtn->show();
     updateScrollButtonPosition();
+    m_scrollToBottomBtn->raise();
 
-    // Fade-in animation using QGraphicsOpacityEffect
-    auto *effect = new QGraphicsOpacityEffect(m_scrollToBottomBtn);
-    m_scrollToBottomBtn->setGraphicsEffect(effect);
+    auto *effect = qobject_cast<QGraphicsOpacityEffect *>(m_scrollToBottomBtn->graphicsEffect());
+    if (!effect) {
+        effect = new QGraphicsOpacityEffect(m_scrollToBottomBtn);
+        m_scrollToBottomBtn->setGraphicsEffect(effect);
+    }
+    if (effect->opacity() >= 0.99) {
+        return;
+    }
     effect->setOpacity(0.0);
 
-    auto *anim = new QPropertyAnimation(effect, "opacity", m_scrollToBottomBtn);
+    auto *anim = new QPropertyAnimation(effect, "opacity", effect);
     anim->setDuration(150);
     anim->setStartValue(0.0);
     anim->setEndValue(1.0);
     anim->setEasingCurve(QEasingCurve::OutCubic);
-    connect(anim, &QPropertyAnimation::finished, effect, &QObject::deleteLater);
-    connect(anim, &QPropertyAnimation::finished, anim, &QObject::deleteLater);
     anim->start(QAbstractAnimation::DeleteWhenStopped);
 }
 
@@ -1256,26 +1251,22 @@ void ChatWidget::animateScrollButtonHide()
         return;
     }
 
-    // Fade-out animation
     auto *effect = qobject_cast<QGraphicsOpacityEffect *>(m_scrollToBottomBtn->graphicsEffect());
     if (!effect) {
-        effect = new QGraphicsOpacityEffect(m_scrollToBottomBtn);
-        m_scrollToBottomBtn->setGraphicsEffect(effect);
+        m_scrollToBottomBtn->hide();
+        return;
     }
-    effect->setOpacity(1.0);
 
-    auto *anim = new QPropertyAnimation(effect, "opacity", m_scrollToBottomBtn);
+    auto *anim = new QPropertyAnimation(effect, "opacity", effect);
     anim->setDuration(150);
-    anim->setStartValue(1.0);
+    anim->setStartValue(effect->opacity());
     anim->setEndValue(0.0);
     anim->setEasingCurve(QEasingCurve::InCubic);
-    connect(anim, &QPropertyAnimation::finished, this, [this, effect, anim]() {
-        if (m_scrollToBottomBtn) {
-            m_scrollToBottomBtn->hide();
-            m_scrollToBottomBtn->setGraphicsEffect(nullptr);
+    QPointer<QPushButton> btn = m_scrollToBottomBtn;
+    connect(anim, &QPropertyAnimation::finished, effect, [btn]() {
+        if (btn) {
+            btn->hide();
         }
-        effect->deleteLater();
-        anim->deleteLater();
     });
     anim->start(QAbstractAnimation::DeleteWhenStopped);
 }
@@ -1497,7 +1488,7 @@ void ChatWidget::setSettings(const Settings &settings)
     for (Provider provider : {Provider::Grok, Provider::OpenAI, Provider::OpenRouter, Provider::OpenAICompatible, Provider::ClaudeCompatible, Provider::Kilo, Provider::Acp}) {
         Settings providerSettings = settings;
         providerSettings.provider = provider;
-        if (!apiKeyFor(providerSettings).trimmed().isEmpty()) {
+        if (!apiKeyFor(providerSettings).trimmed().isEmpty() && !m_modelCatalog.contains(provider)) {
             m_agent.fetchModels(provider);
         }
     }
@@ -2238,8 +2229,69 @@ QString ChatWidget::markdownToHtml(const QString &text)
     return doc.toHtml();
 }
 
+QString ChatWidget::closedMarkdown(const QString &text)
+{
+    if (text.count(u"```"_s) % 2 == 1) {
+        return text + u"\n```"_s;
+    }
+    return text;
+}
+
+void ChatWidget::scheduleStreamHeightUpdate()
+{
+    if (!m_streamHeightTimer) {
+        m_streamHeightTimer = new QTimer(this);
+        m_streamHeightTimer->setSingleShot(true);
+        m_streamHeightTimer->setInterval(50);
+        connect(m_streamHeightTimer, &QTimer::timeout, this, [this]() {
+            if (!m_activeAssistantBrowser) {
+                return;
+            }
+            const int docH = static_cast<int>(m_activeAssistantBrowser->document()->size().height()) + 16;
+            m_activeAssistantBrowser->setFixedHeight(std::max(30, docH));
+            scrollToBottom();
+        });
+    }
+    if (!m_streamHeightTimer->isActive()) {
+        m_streamHeightTimer->start();
+    }
+}
+
+void ChatWidget::stopThinkingTyping()
+{
+    m_thinkingIsTyping = false;
+    if (m_thinkingTypingTimer) {
+        m_thinkingTypingTimer->stop();
+    }
+}
+
+void ChatWidget::clearStreamingPointers()
+{
+    stopThinkingTyping();
+    m_activeAssistantWidget = nullptr;
+    m_activeAssistantBrowser = nullptr;
+    m_thinkingBlock = nullptr;
+    m_thinkingBrowser = nullptr;
+    m_thinkingToggle = nullptr;
+    m_planBlock = nullptr;
+    m_planLayout = nullptr;
+    m_thinkingBuffer.clear();
+    m_thinkingFullText.clear();
+    m_thinkingTypingPos = 0;
+    m_streamText.clear();
+}
+
 void ChatWidget::rebuildTranscript()
 {
+    stopThinkingTyping();
+    if (m_streamHeightTimer) {
+        m_streamHeightTimer->stop();
+    }
+    m_toolCallWidgets.clear();
+    m_planSteps.clear();
+    clearStreamingPointers();
+    m_thinkingExpanded = false;
+
     // Clear existing transcript (except stretch and indicators at the end)
     m_permissionBar->hideBar();
     QLayoutItem *child;
@@ -2289,18 +2341,6 @@ void ChatWidget::rebuildTranscript()
 
         m_transcriptLayout->addWidget(indicatorsContainer);
     }
-
-    m_toolCallWidgets.clear();
-    m_activeAssistantWidget = nullptr;
-    m_activeAssistantBrowser = nullptr;
-    m_streamText.clear();
-    m_thinkingBlock = nullptr;
-    m_thinkingBrowser = nullptr;
-    m_thinkingToggle = nullptr;
-    m_thinkingExpanded = false;
-    m_planBlock = nullptr;
-    m_planLayout = nullptr;
-    m_planSteps.clear();
 
     const auto &messages = m_agent.messages();
     if (messages.isEmpty()) {
@@ -2489,7 +2529,11 @@ void ChatWidget::restoreCurrentTurn(const SessionStore::SessionData &sessionData
     if (!sessionData.currentThinking.isEmpty()) {
         // Create a thinking block widget directly (not via addThinkingBlock which is for streaming)
         if (!m_thinkingBlock) {
-            m_thinkingBlock = createThinkingBlock(m_transcriptContainer, m_thinkingBrowser, m_thinkingToggle);
+            QTextBrowser *thinkingBrowser = nullptr;
+            QPushButton *thinkingToggle = nullptr;
+            m_thinkingBlock = createThinkingBlock(m_transcriptContainer, thinkingBrowser, thinkingToggle);
+            m_thinkingBrowser = thinkingBrowser;
+            m_thinkingToggle = thinkingToggle;
             appendTranscriptWidget(m_thinkingBlock);
         }
         m_thinkingBuffer = sessionData.currentThinking;

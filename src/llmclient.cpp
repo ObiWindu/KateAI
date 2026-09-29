@@ -10,6 +10,7 @@
 #include <QJsonObject>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#include <QPointer>
 #include <QDateTime>
 #include <QTimer>
 #include <QUrlQuery>
@@ -33,6 +34,20 @@ LlmClient::~LlmClient()
 {
     abort();
     m_retryTimer.stop();
+}
+
+void LlmClient::abortModelFetches()
+{
+    const auto replies = m_modelReplies;
+    m_modelReplies.clear();
+    for (const QPointer<QNetworkReply> &reply : replies) {
+        if (!reply) {
+            continue;
+        }
+        reply->disconnect(this);
+        reply->abort();
+        reply->deleteLater();
+    }
 }
 
 QJsonArray LlmClient::messagesToJson(const QList<ChatMessage> &messages)
@@ -484,7 +499,10 @@ void LlmClient::fetchModels(Provider provider)
     }
 
     QNetworkReply *reply = m_nam.get(request);
+    reply->setParent(this);
+    m_modelReplies.append(reply);
     connect(reply, &QNetworkReply::finished, this, [this, reply, provider]() {
+        m_modelReplies.removeAll(reply);
         handleModelsFinished(reply, provider);
     });
 }
@@ -493,6 +511,7 @@ void LlmClient::abort()
 {
     m_retryTimer.stop();
     m_retryScheduled = false;
+    abortModelFetches();
 
     QNetworkReply *reply = m_reply;
     if (!reply) {

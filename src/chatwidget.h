@@ -15,6 +15,7 @@
 #include <QIcon>
 #include <QColor>
 #include <QCheckBox>
+#include <QPointer>
 
 class QAction;
 class QComboBox;
@@ -22,6 +23,7 @@ class QLabel;
 class QPushButton;
 class QScrollArea;
 class QTextBrowser;
+class QTimer;
 class QVBoxLayout;
 class QMenu;
 
@@ -119,8 +121,12 @@ private:
     void showReasoningEffortMenu();
     void setThinkingIndicator(bool show);
     void setWorkingIndicator(bool show);
+    void scheduleStreamHeightUpdate();
+    void stopThinkingTyping();
+    void clearStreamingPointers();
     static QString escape(const QString &text);
     static QString markdownToHtml(const QString &text);
+    static QString closedMarkdown(const QString &text);
 
     Settings m_settings;
     AgentLoop m_agent;
@@ -139,8 +145,8 @@ private:
     QScrollArea *m_scrollArea = nullptr;
     QWidget *m_transcriptContainer = nullptr;
     QVBoxLayout *m_transcriptLayout = nullptr;
-    QWidget *m_activeAssistantWidget = nullptr;
-    QTextBrowser *m_activeAssistantBrowser = nullptr;
+    QPointer<QWidget> m_activeAssistantWidget;
+    QPointer<QTextBrowser> m_activeAssistantBrowser;
 
     PermissionBar *m_permissionBar = nullptr;
     PromptEdit *m_prompt = nullptr;
@@ -165,9 +171,9 @@ private:
 
     // Collapsible hidden-reasoning block rendered at the top of the active
     // assistant turn. Collapsed once the visible answer starts streaming.
-    QWidget *m_thinkingBlock = nullptr;
-    QTextBrowser *m_thinkingBrowser = nullptr;
-    QPushButton *m_thinkingToggle = nullptr;
+    QPointer<QWidget> m_thinkingBlock;
+    QPointer<QTextBrowser> m_thinkingBrowser;
+    QPointer<QPushButton> m_thinkingToggle;
     bool m_thinkingExpanded = false;
 
     // Raw thinking text buffer, used to apply FIFO line limiting and render
@@ -181,14 +187,15 @@ private:
     bool m_thinkingIsTyping = false;
 
     // Structured plan checklist rendered below the thinking block.
-    QWidget *m_planBlock = nullptr;
-    QVBoxLayout *m_planLayout = nullptr;
+    QPointer<QWidget> m_planBlock;
+    QPointer<QVBoxLayout> m_planLayout;
     QHash<QCheckBox *, QString> m_planSteps;
 
     QHash<QString, ToolCallWidget *> m_toolCallWidgets;
-    QPushButton *m_scrollToBottomBtn = nullptr;
-    QPushButton *m_activeAssistantCopyBtn = nullptr;
+    QPointer<QPushButton> m_scrollToBottomBtn;
+    QPointer<QPushButton> m_activeAssistantCopyBtn;
     bool m_userScrolledUp = true;
+    QTimer *m_streamHeightTimer = nullptr;
 
     // Dynamic status indicators at bottom of chat
     QLabel *m_thinkingIndicator = nullptr;

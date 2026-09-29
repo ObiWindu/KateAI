@@ -38,6 +38,10 @@ AgentLoop::AgentLoop(QObject *parent)
     connect(&m_nextModelTimer, &QTimer::timeout, this, &AgentLoop::sendToModel);
 
     connect(&m_client, &LlmClient::textDelta, this, [this](const QString &delta) {
+        if (!m_thinkingFinishedEmitted && !m_currentThinking.isEmpty()) {
+            m_thinkingFinishedEmitted = true;
+            Q_EMIT thinkingFinished(m_currentThinking);
+        }
         m_currentAssistant += delta;
         Q_EMIT assistantDelta(delta);
     });
@@ -64,24 +68,34 @@ AgentLoop::AgentLoop(QObject *parent)
 
 void AgentLoop::setSettings(const Settings &settings)
 {
-    // Update internal settings and propagate to dependent components.
+    const bool sandboxChanged = m_settings.sandbox != settings.sandbox
+        || m_settings.extraDenyGlobs != settings.extraDenyGlobs;
+    const bool timeoutChanged = m_settings.bashTimeoutMs != settings.bashTimeoutMs;
+
     m_settings = settings;
     m_client.setSettings(settings);
     m_policy.setMode(settings.permissionMode);
 
-    if (!m_workspace.isEmpty()) {
+    if (m_workspace.isEmpty()) {
+        return;
+    }
+
+    if (m_tools && timeoutChanged) {
+        m_tools->setTimeoutMs(m_settings.bashTimeoutMs);
+    }
+
+    // Recreating ToolRunner destroys any in-flight bash process. Only rebuild
+    // the sandbox/tools when the sandbox config actually changed, or when they
+    // have not been created yet.
+    if (!m_tools || sandboxChanged) {
+        if (m_busy && m_tools) {
+            return;
+        }
         m_sandbox = std::make_unique<Sandbox>(m_workspace, m_settings.sandbox, m_settings.extraDenyGlobs);
         m_tools = std::make_unique<ToolRunner>(*m_sandbox, m_bridge, this);
         m_tools->setTimeoutMs(m_settings.bashTimeoutMs);
         m_tools->setProjectGraph(m_projectGraph.get());
     }
-
-    // Do NOT regenerate or re-save the project graph here. The graph is built
-    // once in setWorkspace (or loaded from the cached JSON) and updated
-    // incrementally via updateProjectGraph. Calling generateGraph on every
-    // settings change (model swap, permission toggle, reasoning effort, etc.)
-    // wastefully re-reads the entire workspace from disk and throws away any
-    // in-flight incremental updates.
 }
 
 void AgentLoop::setWorkspace(const QString &workspace)
@@ -552,6 +566,7 @@ void AgentLoop::sendToModel()
     m_modelRequestTimes.enqueue(now);
     m_currentAssistant.clear();
     m_currentThinking.clear();
+    m_thinkingFinishedEmitted = false;
     m_currentPlan = QJsonArray();
     m_planShown = false;
     m_state = State::WaitingForModel;
@@ -854,6 +869,10 @@ void AgentLoop::onFinished(const QString &text, const QList<ToolCall> &toolCalls
     }
 
     m_messages.append(assistant);
+    if (!m_thinkingFinishedEmitted && !m_currentThinking.isEmpty()) {
+        m_thinkingFinishedEmitted = true;
+        Q_EMIT thinkingFinished(m_currentThinking);
+    }
     Q_EMIT assistantFinished(text);
 
     // Emit plan if we have one
