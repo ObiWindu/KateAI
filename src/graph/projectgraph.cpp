@@ -986,9 +986,10 @@ QString ProjectGraph::generateNodeId(const QString &path, const QString &type)
 {
     // Generate a unique ID for a node based on its path and type
     // Use a hash of the full path to avoid collisions (e.g., src/foo.cpp vs src_foo.cpp)
+    // Use full SHA256 hash (64 hex chars) to eliminate collision risk
     QCryptographicHash hash(QCryptographicHash::Sha256);
     hash.addData(path.toUtf8());
-    QString id = QString::fromLatin1(hash.result().toHex().left(16));
+    QString id = QString::fromLatin1(hash.result().toHex());
     if (!type.isEmpty()) {
         id += u"_"_s + type;
     }

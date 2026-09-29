@@ -422,7 +422,17 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
         Q_EMIT changed();
     };
 
-    connect(m_provider, &QComboBox::currentIndexChanged, this, markChanged);
+    connect(m_provider, &QComboBox::currentIndexChanged, this, [this, markChanged]() {
+        markChanged();
+        // Refresh models for the newly selected provider
+        const Provider provider = providerFromId(m_provider->currentData().toString());
+        if (m_modelFetcher) {
+            Settings s = m_plugin->settings();
+            s.provider = provider;
+            m_modelFetcher->setSettings(s);
+            m_modelFetcher->fetchModels(provider);
+        }
+    });
     connect(m_grokKey, &QLineEdit::textChanged, this, markChanged);
     connect(m_openaiKey, &QLineEdit::textChanged, this, markChanged);
     connect(m_openrouterKey, &QLineEdit::textChanged, this, markChanged);

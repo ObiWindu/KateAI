@@ -656,6 +656,7 @@ ChatWidget::ChatWidget(QWidget *parent)
         // Could show a brief confirmation message
     });
     connect(m_editTracker, &EditTracker::editRejected, this, [this](const QString &path, const QString &toolName, const QString &oldContent) {
+        Q_UNUSED(toolName);
         // Revert the edit by writing the old content back
         if (m_agent.documentBridge()) {
             QString error;
@@ -877,6 +878,8 @@ void ChatWidget::addThinkingBlock(const QString &text)
     if (!m_thinkingBrowser || !m_thinkingBlock) {
         return;
     }
+    // Stop any previous typing animation before starting a new thinking block
+    stopThinkingTyping();
     m_thinkingBuffer = text;
     m_thinkingBlock->show();
     renderThinkingHtml();
@@ -2287,6 +2290,8 @@ void ChatWidget::rebuildTranscript()
     if (m_streamHeightTimer) {
         m_streamHeightTimer->stop();
     }
+    // Delete old tool call widgets before clearing the hash
+    qDeleteAll(m_toolCallWidgets);
     m_toolCallWidgets.clear();
     m_planSteps.clear();
     clearStreamingPointers();

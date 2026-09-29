@@ -149,18 +149,19 @@ namespace KateAi
         const QFileInfo info(QDir(m_workspaceRoot), candidate);
         QString absolute = QDir::cleanPath(info.absoluteFilePath());
 
-        if (QFileInfo::exists(absolute)) {
-            const QString canonical = QFileInfo(absolute).canonicalFilePath();
-            if (!canonical.isEmpty()) {
-                absolute = canonical;
-            }
-        } else {
-            const QString parent = QFileInfo(absolute).absolutePath();
-            if (QFileInfo::exists(parent)) {
-                const QString parentCanon = QFileInfo(parent).canonicalFilePath();
-                if (!parentCanon.isEmpty()) {
-                    absolute = QDir::cleanPath(parentCanon + u'/' + QFileInfo(absolute).fileName());
-                }
+        // Resolve symlinks safely - use canonicalFilePath which resolves all symlinks
+        // This avoids TOCTOU by doing the resolution atomically where possible
+        QFileInfo fileInfo(absolute);
+        QString canonical = fileInfo.canonicalFilePath();
+        if (!canonical.isEmpty()) {
+            absolute = canonical;
+        } else if (!fileInfo.exists()) {
+            // File doesn't exist yet - resolve parent directory
+            QString parent = fileInfo.absolutePath();
+            QFileInfo parentInfo(parent);
+            QString parentCanon = parentInfo.canonicalFilePath();
+            if (!parentCanon.isEmpty()) {
+                absolute = QDir::cleanPath(parentCanon + u'/' + fileInfo.fileName());
             }
         }
 

@@ -17,7 +17,10 @@ namespace KateAi
 class SessionStore
 {
 public:
+    static constexpr int CURRENT_VERSION = 2;
+
     struct SessionData {
+        int version = CURRENT_VERSION;
         QList<ChatMessage> messages;
         QString currentThinking;
         QJsonArray currentPlan;

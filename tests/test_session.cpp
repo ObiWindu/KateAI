@@ -129,7 +129,10 @@ private Q_SLOTS:
     void testClearSession()
     {
         SessionStore::SessionData data;
-        data.messages.append(ChatMessage{ChatMessage::Role::User, u"Test"_s});
+        ChatMessage msg;
+        msg.role = ChatMessage::Role::User;
+        msg.content = u"Test"_s;
+        data.messages.append(msg);
         SessionStore::save(data);
         
         QVERIFY(!SessionStore::load().messages.isEmpty());

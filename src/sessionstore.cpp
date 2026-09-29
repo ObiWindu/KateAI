@@ -202,6 +202,9 @@ SessionStore::SessionData SessionStore::loadConversation(const QString &conversa
     SessionData data;
     const KConfigGroup g = conversationGroup(conversationId);
 
+    // Load version for migration
+    data.version = g.readEntry(u"Version"_s, 1);
+
     // Load messages
     const QByteArray messagesData = g.readEntry(u"Messages"_s, QByteArray());
     if (!messagesData.isEmpty()) {
@@ -254,6 +257,12 @@ SessionStore::SessionData SessionStore::loadConversation(const QString &conversa
     data.modelRequests = g.readEntry(u"ModelRequests"_s, 0);
     data.toolCalls = g.readEntry(u"ToolCalls"_s, 0);
 
+    // Migration from version 1 to 2
+    if (data.version < 2) {
+        // Version 2 adds version field - no data migration needed, just ensure version is set
+        data.version = CURRENT_VERSION;
+    }
+
     return data;
 }
 
@@ -272,6 +281,7 @@ void SessionStore::saveConversation(const QString &conversationId, const Session
     convGroup.writeEntry(u"Title"_s, convTitle);
     convGroup.writeEntry(u"UpdatedAt"_s, QDateTime::currentDateTime().toString(Qt::ISODate));
     convGroup.writeEntry(u"MessageCount"_s, data.messages.size());
+    convGroup.writeEntry(u"Version"_s, CURRENT_VERSION);
 
     // Preserve creation time
     if (convGroup.readEntry(u"CreatedAt"_s, QString()).isEmpty()) {

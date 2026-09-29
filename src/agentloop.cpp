@@ -1036,14 +1036,16 @@ void AgentLoop::executeOne(const ToolCall &call)
     }
 
     if (repeatSensitive) {
-        const int priorCount = m_actionRepeatCounts.value(stateSignature, 0);
+        // Check cross-turn repeats using signature without epoch (to detect
+        // repeated actions across model turns when project state hasn't changed)
+        const int priorCount = m_actionRepeatCounts.value(signature, 0);
         if (priorCount >= 1) {
             ToolResult result;
             result.ok = false;
             result.output = u"REPEATED ACTION BLOCKED: this exact %1 action was already executed without a project-state change. "
                             u"Do not issue it again. Inspect the previous observation, choose a different action, or verify a different aspect of the task."_s.arg(call.name);
             appendToolResult(call, result);
-            const int repeats = ++m_actionRepeatCounts[stateSignature];
+            const int repeats = ++m_actionRepeatCounts[signature];
             constexpr int MaxRecoveryPrompts = 3;
             if (repeats >= 2) {
                 if (m_recoveryPromptCount < MaxRecoveryPrompts) {
@@ -1079,7 +1081,7 @@ void AgentLoop::executeOne(const ToolCall &call)
             processQueue();
             return;
         }
-        m_actionRepeatCounts.insert(stateSignature, 1);
+        m_actionRepeatCounts.insert(signature, 1);
     }
 
     m_actionsThisModelTurn.insert(signature);
