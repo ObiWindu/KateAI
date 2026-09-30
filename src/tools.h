@@ -46,6 +46,7 @@ private:
     ToolResult readFile(const QJsonObject &args) const;
     ToolResult writeFile(const QJsonObject &args);
     ToolResult editFile(const QJsonObject &args);
+    ToolResult multiEditFile(const QJsonObject &args);
     ToolResult listDir(const QJsonObject &args) const;
     ToolResult grep(const QJsonObject &args) const;
     ToolResult glob(const QJsonObject &args) const;

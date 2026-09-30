@@ -39,6 +39,7 @@
 #include <QJsonDocument>
 #include <QTimer>
 #include <QVBoxLayout>
+#include <QUuid>
 
 #include <algorithm>
 
@@ -552,7 +553,8 @@ ChatWidget::ChatWidget(QWidget *parent)
         appendTranscriptWidget(toolWidget);
 
         // Track write/edit tool calls for edit tracking in AcceptEdits mode
-        if ((request.toolName == u"write_file"_s || request.toolName == u"edit_file"_s) &&
+        if ((request.toolName == u"write_file"_s || request.toolName == u"edit_file"_s
+             || request.toolName == u"multi_edit_file"_s || request.toolName == u"multi_replace_file_content"_s) &&
             m_settings.permissionMode == PermissionMode::AcceptEdits) {
             // Read the old content before the edit
             PermissionRequest trackedRequest = request;
@@ -578,7 +580,8 @@ ChatWidget::ChatWidget(QWidget *parent)
             auto it = m_pendingToolCalls.find(result.toolCallId);
             if (it != m_pendingToolCalls.end()) {
                 const PermissionRequest &request = it.value();
-                if ((request.toolName == u"write_file"_s || request.toolName == u"edit_file"_s) && result.ok) {
+                if ((request.toolName == u"write_file"_s || request.toolName == u"edit_file"_s
+                     || request.toolName == u"multi_edit_file"_s || request.toolName == u"multi_replace_file_content"_s) && result.ok) {
                     // Read the new content from the file
                     QString newContent;
                     if (m_agent.documentBridge()) {
@@ -645,6 +648,16 @@ ChatWidget::ChatWidget(QWidget *parent)
         m_prompt->setFocus();
         setThinkingIndicator(false);
         setWorkingIndicator(false);
+        // Auto-save conversation after each completed turn so it always
+        // appears up-to-date in the history menu.
+        if (!m_currentConversationId.isEmpty()) {
+            const auto sessionData = m_agent.sessionData();
+            if (!sessionData.messages.isEmpty()) {
+                SessionStore::saveConversation(m_currentConversationId, sessionData, QString(),
+                                              m_settings.maxSavedConversations > 0 ? m_settings.maxSavedConversations : 50);
+                updateHistoryButton();
+            }
+        }
     });
 
     // Edit tracker signals
@@ -697,16 +710,22 @@ ChatWidget::ChatWidget(QWidget *parent)
 
 ChatWidget::~ChatWidget()
 {
-    stopThinkingTyping();
     if (m_streamHeightTimer) {
         m_streamHeightTimer->stop();
     }
 
-    // Save session before AgentLoop member is destroyed
+    // Save session before AgentLoop member is destroyed, using the tracked
+    // conversation ID so we never silently create a duplicate active record.
     if (!m_agent.messages().isEmpty()) {
         const auto sessionData = m_agent.sessionData();
         if (!sessionData.messages.isEmpty()) {
-            SessionStore::save(sessionData, m_settings.maxSavedConversations > 0 ? m_settings.maxSavedConversations : 50);
+            if (!m_currentConversationId.isEmpty()) {
+                SessionStore::saveConversation(m_currentConversationId, sessionData, QString(),
+                                              m_settings.maxSavedConversations > 0 ? m_settings.maxSavedConversations : 50);
+            } else {
+                // Fallback: create a new entry via the legacy path
+                SessionStore::save(sessionData, m_settings.maxSavedConversations > 0 ? m_settings.maxSavedConversations : 50);
+            }
         }
     }
 
@@ -878,18 +897,17 @@ void ChatWidget::addThinkingBlock(const QString &text)
     if (!m_thinkingBrowser || !m_thinkingBlock) {
         return;
     }
-    // Stop any previous typing animation before starting a new thinking block
-    stopThinkingTyping();
     m_thinkingBuffer = text;
     m_thinkingBlock->show();
     renderThinkingHtml();
-    applyThinkingState(m_thinkingBlock, m_thinkingBrowser, m_thinkingToggle, true);
+    applyThinkingState(m_thinkingBlock, m_thinkingBrowser, m_thinkingToggle, m_thinkingExpanded);
     scrollToBottom();
 }
 
 void ChatWidget::appendThinkingDelta(const QString &delta)
 {
     m_thinkingBuffer += delta;
+    m_thinkingExpanded = true;
     renderThinkingHtml();
 }
 
@@ -898,82 +916,11 @@ void ChatWidget::renderThinkingHtml()
     if (!m_thinkingBrowser) {
         return;
     }
-    // Apply a 25-line FIFO limit: keep only the last 25 lines so the
-    // reasoning block stays bounded as the model streams its chain-of-thought.
-    constexpr int kMaxLines = 25;
-    const QStringList lines = m_thinkingBuffer.split(u'\n');
-    const QString kept = lines.size() <= kMaxLines
-        ? m_thinkingBuffer
-        : lines.mid(lines.size() - kMaxLines).join(u'\n');
-
-    // Store the full text for typing animation
-    m_thinkingFullText = kept;
-    
-    // If we're not already typing, start the typing animation
-    if (!m_thinkingIsTyping) {
-        m_thinkingTypingPos = 0;
-        m_thinkingIsTyping = true;
-        
-        if (!m_thinkingTypingTimer) {
-            m_thinkingTypingTimer = new QTimer(this);
-            m_thinkingTypingTimer->setSingleShot(false);
-            connect(m_thinkingTypingTimer, &QTimer::timeout, this, [this]() {
-                if (!m_thinkingBrowser || !m_thinkingIsTyping) {
-                    stopThinkingTyping();
-                    return;
-                }
-                
-                // Type ~3 characters per tick for comfortable reading speed
-                constexpr int charsPerTick = 3;
-                m_thinkingTypingPos = qMin(m_thinkingTypingPos + charsPerTick, m_thinkingFullText.length());
-                
-                const QString displayedText = m_thinkingFullText.left(m_thinkingTypingPos);
-                m_thinkingBrowser->setMarkdown(closedMarkdown(displayedText));
-                if (!m_thinkingBrowser) {
-                    stopThinkingTyping();
-                    return;
-                }
-                
-                // Adjust height as text grows
-                const int blockWidth = m_thinkingBlock ? m_thinkingBlock->width() : 240;
-                const int width = m_thinkingBrowser->viewport()->width() > 40
-                    ? m_thinkingBrowser->viewport()->width()
-                    : std::max(160, blockWidth - 8);
-                m_thinkingBrowser->document()->setTextWidth(width);
-                const int h = static_cast<int>(m_thinkingBrowser->document()->size().height()) + 20;
-                m_thinkingBrowser->setFixedHeight(std::max(48, h));
-                
-                if (m_thinkingTypingPos >= m_thinkingFullText.length()) {
-                    stopThinkingTyping();
-                }
-            });
-        }
-        // ~33ms per tick = ~30 chars/sec, comfortable reading speed
-        m_thinkingTypingTimer->start(33);
-    }
-    
+    m_thinkingBrowser->setMarkdown(closedMarkdown(m_thinkingBuffer));
     if (m_thinkingBlock && !m_thinkingBuffer.isEmpty()) {
         m_thinkingBlock->show();
     }
-    applyThinkingState(m_thinkingBlock, m_thinkingBrowser, m_thinkingToggle, m_thinkingExpanded || !m_thinkingBuffer.isEmpty());
-}
-
-QString ChatWidget::markdownToFifoHtml(const QString &text, int maxLines)
-{
-    // Split on newlines, keep only the last maxLines, then render the result
-    // as HTML (markdown + escaped text) so the reasoning block displays
-    // formatted content rather than raw markdown/HTML source.
-    const QStringList lines = text.split(u'\n');
-    QString kept;
-    if (lines.size() <= maxLines) {
-        kept = text;
-    } else {
-        kept = lines.mid(lines.size() - maxLines).join(u'\n');
-    }
-
-    QTextDocument doc;
-    doc.setMarkdown(kept);
-    return doc.toHtml();
+    applyThinkingState(m_thinkingBlock, m_thinkingBrowser, m_thinkingToggle, m_thinkingExpanded);
 }
 
 void ChatWidget::collapseThinkingBlock()
@@ -2260,17 +2207,8 @@ void ChatWidget::scheduleStreamHeightUpdate()
     }
 }
 
-void ChatWidget::stopThinkingTyping()
-{
-    m_thinkingIsTyping = false;
-    if (m_thinkingTypingTimer) {
-        m_thinkingTypingTimer->stop();
-    }
-}
-
 void ChatWidget::clearStreamingPointers()
 {
-    stopThinkingTyping();
     m_activeAssistantWidget = nullptr;
     m_activeAssistantBrowser = nullptr;
     m_thinkingBlock = nullptr;
@@ -2279,14 +2217,12 @@ void ChatWidget::clearStreamingPointers()
     m_planBlock = nullptr;
     m_planLayout = nullptr;
     m_thinkingBuffer.clear();
-    m_thinkingFullText.clear();
-    m_thinkingTypingPos = 0;
+    m_thinkingExpanded = false;
     m_streamText.clear();
 }
 
 void ChatWidget::rebuildTranscript()
 {
-    stopThinkingTyping();
     if (m_streamHeightTimer) {
         m_streamHeightTimer->stop();
     }
@@ -2395,11 +2331,7 @@ void ChatWidget::rebuildTranscript()
                         QPushButton *thinkingToggle = nullptr;
                         auto *thinkingBlock = createThinkingBlock(assistantWidget, thinkingBrowser, thinkingToggle);
                         if (thinkingBrowser) {
-                            const QStringList lines = msg.thinking.split(u'\n');
-                            const QString kept = lines.size() <= 25
-                                ? msg.thinking
-                                : lines.mid(lines.size() - 25).join(u'\n');
-                            thinkingBrowser->setMarkdown(kept);
+                            thinkingBrowser->setMarkdown(closedMarkdown(msg.thinking));
                         }
                         applyThinkingState(thinkingBlock, thinkingBrowser, thinkingToggle, false);
                         thinkingBlock->show();
@@ -2453,7 +2385,8 @@ void ChatWidget::rebuildTranscript()
                         auto *toolWidget = new ToolCallWidget(toolCallId, m_transcriptContainer);
 
                         ToolRisk risk = ToolRisk::Read;
-                        if (toolName == u"write_file"_s || toolName == u"edit_file"_s) {
+                        if (toolName == u"write_file"_s || toolName == u"edit_file"_s
+                            || toolName == u"multi_edit_file"_s || toolName == u"multi_replace_file_content"_s) {
                             risk = ToolRisk::Write;
                         } else if (toolName == u"bash"_s) {
                             risk = ToolRisk::Execute;
@@ -2473,6 +2406,32 @@ void ChatWidget::rebuildTranscript()
                             toolWidget->setDescribeDiff(unifiedDiff(path,
                                 argsObj.value(u"old_string"_s).toString(),
                                 argsObj.value(u"new_string"_s).toString()));
+                        } else if (toolName == u"multi_edit_file"_s || toolName == u"multi_replace_file_content"_s) {
+                            QString path = argsObj.value(u"path"_s).toString();
+                            if (path.isEmpty()) {
+                                path = argsObj.value(u"TargetFile"_s).toString();
+                            }
+                            QJsonArray edits = argsObj.value(u"edits"_s).toArray();
+                            if (edits.isEmpty()) {
+                                edits = argsObj.value(u"chunks"_s).toArray();
+                            }
+                            if (edits.isEmpty()) {
+                                edits = argsObj.value(u"ReplacementChunks"_s).toArray();
+                            }
+                            QString oldCombined;
+                            QString newCombined;
+                            for (const QJsonValue &v : edits) {
+                                const QJsonObject c = v.toObject();
+                                const QString o = c.value(u"old_string"_s).toString().isEmpty() ? c.value(u"TargetContent"_s).toString() : c.value(u"old_string"_s).toString();
+                                const QString n = c.value(u"new_string"_s).toString().isEmpty() ? c.value(u"ReplacementContent"_s).toString() : c.value(u"new_string"_s).toString();
+                                if (!oldCombined.isEmpty()) {
+                                    oldCombined += u"\n---\n"_s;
+                                    newCombined += u"\n---\n"_s;
+                                }
+                                oldCombined += o;
+                                newCombined += n;
+                            }
+                            toolWidget->setDescribeDiff(unifiedDiff(path, oldCombined, newCombined));
                         } else if (toolName == u"write_file"_s) {
                             const QString path = argsObj.value(u"path"_s).toString();
                             toolWidget->setDescribeDiff(unifiedDiff(path, QString(),
@@ -2564,8 +2523,26 @@ void ChatWidget::restoreCurrentTurn(const SessionStore::SessionData &sessionData
     }
 }
 
+void ChatWidget::updateHistoryButton()
+{
+    if (!m_historyButton) {
+        return;
+    }
+    const int maxConversations = m_settings.maxSavedConversations > 0 ? m_settings.maxSavedConversations : 50;
+    const int count = SessionStore::listConversations(maxConversations).size();
+    if (count > 0) {
+        m_historyButton->setToolTip(i18n("Conversation History (%1)", count));
+        // Show count as a small overlay text on the button when > 1
+        m_historyButton->setText(count > 1 ? QString::number(count) : QString());
+    } else {
+        m_historyButton->setToolTip(i18n("Conversation History"));
+        m_historyButton->setText(QString());
+    }
+}
+
 void ChatWidget::showConversationHistory()
 {
+    // Always rebuild the menu so it reflects the current state.
     if (!m_historyMenu) {
         m_historyMenu = new QMenu(this);
     } else {
@@ -2578,20 +2555,23 @@ void ChatWidget::showConversationHistory()
     if (conversations.isEmpty()) {
         auto *emptyAction = m_historyMenu->addAction(i18n("No conversations yet"));
         emptyAction->setEnabled(false);
+
+        m_historyMenu->addSeparator();
+        auto *newConvAction = m_historyMenu->addAction(QIcon::fromTheme(u"list-add"_s), i18n("New Conversation"));
+        connect(newConvAction, &QAction::triggered, this, &ChatWidget::newChat);
     } else {
         for (const auto &conv : conversations) {
             QString displayText = conv.title;
-            if (conv.isActive) {
-                displayText = u"\u2713 "_s + displayText + u" "_s + i18n("(current)");
+            if (conv.isActive || conv.id == m_currentConversationId) {
+                displayText = u"\u2713 "_s + displayText;
             }
             auto *action = m_historyMenu->addAction(displayText);
             action->setData(conv.id);
-            action->setCheckable(true);
-            action->setChecked(conv.isActive);
-            connect(action, &QAction::triggered, this, [this, convId = conv.id](bool checked) {
-                if (checked) {
-                    switchToConversation(convId);
-                }
+            // Use a non-checkable action with a triggered() connection so the
+            // switch always fires regardless of the checked-state parity.
+            const QString convId = conv.id;
+            connect(action, &QAction::triggered, this, [this, convId]() {
+                switchToConversation(convId);
             });
         }
 
@@ -2602,10 +2582,8 @@ void ChatWidget::showConversationHistory()
 
         auto *clearAllAction = m_historyMenu->addAction(QIcon::fromTheme(u"edit-clear"_s), i18n("Clear All History"));
         connect(clearAllAction, &QAction::triggered, this, [this]() {
-            const auto allConvs = SessionStore::listConversations(0);
-            for (const auto &conv : allConvs) {
-                SessionStore::deleteConversation(conv.id);
-            }
+            SessionStore::clearAllConversations();
+            m_currentConversationId.clear();
             newChat();
         });
     }
@@ -2653,6 +2631,7 @@ void ChatWidget::switchToConversation(const QString &conversationId)
     }
 
     m_loadingConversation = false;
+    updateHistoryButton();
     Q_EMIT conversationChanged(conversationId);
 }
 
@@ -2672,10 +2651,29 @@ void ChatWidget::deleteConversation(const QString &conversationId)
     }
 }
 
-// Override newChat to create a new conversation in history
+void ChatWidget::setCurrentConversationId(const QString &conversationId)
+{
+    m_currentConversationId = conversationId;
+}
+
+// Create a new blank conversation and reset the chat UI.
 void ChatWidget::newChat()
 {
     m_agent.abort();
+
+    // Save the current conversation before clearing so it remains in history.
+    if (!m_agent.messages().isEmpty()) {
+        const auto sessionData = m_agent.sessionData();
+        if (!sessionData.messages.isEmpty()) {
+            // Allocate an ID if we somehow still don't have one.
+            if (m_currentConversationId.isEmpty()) {
+                m_currentConversationId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+            }
+            SessionStore::saveConversation(m_currentConversationId, sessionData, QString(),
+                                          m_settings.maxSavedConversations > 0 ? m_settings.maxSavedConversations : 50);
+        }
+    }
+
     m_agent.resetConversation();
     m_agent.clearSession();
     m_permissionBar->hideBar();
@@ -2683,8 +2681,13 @@ void ChatWidget::newChat()
         m_infoBar->hide();
     }
 
-    // Create new conversation in history
+    // Allocate a fresh conversation ID.  The new conversation will only be
+    // registered in the history list once saveConversation() is called with
+    // real messages, so no empty ghost entry appears immediately.
     m_currentConversationId = SessionStore::createNewConversation();
+
+    // Update history button to reflect any newly saved previous conversation.
+    updateHistoryButton();
 
     // Rebuild transcript from scratch to ensure it matches the cleared agent state
     rebuildTranscript();

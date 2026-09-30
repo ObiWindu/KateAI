@@ -601,7 +601,8 @@ QString AgentLoop::actionSignature(const ToolCall &call) const
 
 bool AgentLoop::isMutationTool(const QString &toolName) const
 {
-    return toolName == u"write_file"_s || toolName == u"edit_file"_s;
+    return toolName == u"write_file"_s || toolName == u"edit_file"_s
+        || toolName == u"multi_edit_file"_s || toolName == u"multi_replace_file_content"_s;
 }
 
 bool AgentLoop::isRepeatSensitiveTool(const QString &toolName) const
@@ -630,8 +631,11 @@ bool AgentLoop::isVerificationForChangedFiles(const ToolCall &call) const
     if (!m_changesNeedVerification) {
         return false;
     }
-    if (call.name == u"read_file"_s || call.name == u"write_file"_s || call.name == u"edit_file"_s) {
-        const QString path = call.arguments.value(u"path"_s).toString();
+    if (call.name == u"read_file"_s || isMutationTool(call.name)) {
+        QString path = call.arguments.value(u"path"_s).toString();
+        if (path.isEmpty()) {
+            path = call.arguments.value(u"TargetFile"_s).toString();
+        }
         return !path.isEmpty() && m_changedPaths.contains(path);
     }
     // grep/bash can be a real verification when the command/search is not
@@ -649,7 +653,7 @@ QString AgentLoop::describePlannedWork(const QList<ToolCall> &calls) const
     for (const ToolCall &call : calls) {
         if (call.name == u"read_file"_s || call.name == u"list_dir"_s || call.name == u"query_project_graph"_s) {
             ++reads;
-        } else if (call.name == u"write_file"_s || call.name == u"edit_file"_s) {
+        } else if (isMutationTool(call.name)) {
             ++mutations;
         } else if (call.name == u"bash"_s) {
             ++commands;
@@ -710,7 +714,7 @@ QString AgentLoop::summarizeCompletedWork() const
 
         if (result.name == u"read_file"_s || result.name == u"list_dir"_s || result.name == u"query_project_graph"_s) {
             ++reads;
-        } else if (result.name == u"write_file"_s || result.name == u"edit_file"_s) {
+        } else if (isMutationTool(result.name)) {
             ++mutations;
         } else if (result.name == u"bash"_s) {
             ++commands;
@@ -720,7 +724,7 @@ QString AgentLoop::summarizeCompletedWork() const
     }
 
     for (const ToolResult &result : m_pendingResults) {
-        if (!result.ok || (result.name != u"write_file"_s && result.name != u"edit_file"_s)) {
+        if (!result.ok || !isMutationTool(result.name)) {
             continue;
         }
         // Keep this intentionally compact; detailed diffs remain in the model context,
@@ -799,7 +803,10 @@ void AgentLoop::appendToolResult(const ToolCall &call, ToolResult result)
     if (result.ok && isMutationTool(call.name)) {
         ++m_stateEpoch;
         m_actionRepeatCounts.clear();
-        const QString path = call.arguments.value(u"path"_s).toString();
+        QString path = call.arguments.value(u"path"_s).toString();
+        if (path.isEmpty()) {
+            path = call.arguments.value(u"TargetFile"_s).toString();
+        }
         if (!path.isEmpty()) {
             m_changedPaths.insert(path);
         }

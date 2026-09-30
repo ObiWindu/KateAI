@@ -10,9 +10,13 @@
 #include <QWidget>
 #include <QHash>
 #include <QString>
+#include <QList>
 
 class QLabel;
 class QPushButton;
+class QScrollArea;
+class QVBoxLayout;
+class QWidget;
 
 namespace KateAi
 {
@@ -45,6 +49,10 @@ public:
     void acceptAll();
     void rejectAll();
 
+    // Apply or revert a single edit
+    void acceptEdit(const QString &path);
+    void rejectEdit(const QString &path);
+
 Q_SIGNALS:
     void editAccepted(const QString &path, const QString &toolName, const QString &newContent);
     void editRejected(const QString &path, const QString &toolName, const QString &oldContent);
@@ -52,14 +60,25 @@ Q_SIGNALS:
 
 private:
     void updateUI();
+    void rebuildEditList();
+    void setExpanded(bool expanded);
 
     QHash<QString, EditEntry> m_edits; // key = path
+    bool m_expanded = false;
 
-    // UI elements
+    // UI elements - compact bar
+    QWidget *m_barWidget = nullptr;
     QLabel *m_iconLabel = nullptr;
     QLabel *m_countLabel = nullptr;
     QPushButton *m_acceptAllBtn = nullptr;
     QPushButton *m_rejectAllBtn = nullptr;
+    QPushButton *m_expandBtn = nullptr;
+
+    // UI elements - expanded list
+    QWidget *m_listContainer = nullptr;
+    QVBoxLayout *m_listLayout = nullptr;
+    QScrollArea *m_scrollArea = nullptr;
+    QVBoxLayout *m_editListLayout = nullptr;
 };
 
 } // namespace KateAi

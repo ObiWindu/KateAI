@@ -32,6 +32,7 @@ private Q_SLOTS:
         QString reason;
         QCOMPARE(policy.evaluate(u"write_file"_s, QJsonObject{{u"path"_s, u"a.cpp"_s}}, box, &reason), PermissionPolicy::Verdict::Ask);
         QCOMPARE(policy.evaluate(u"edit_file"_s, QJsonObject{{u"path"_s, u"a.cpp"_s}}, box, &reason), PermissionPolicy::Verdict::Ask);
+        QCOMPARE(policy.evaluate(u"multi_edit_file"_s, QJsonObject{{u"path"_s, u"a.cpp"_s}}, box, &reason), PermissionPolicy::Verdict::Ask);
         QCOMPARE(policy.evaluate(u"bash"_s, QJsonObject{{u"command"_s, u"make"_s}}, box, &reason), PermissionPolicy::Verdict::Ask);
     }
 
@@ -41,6 +42,8 @@ private Q_SLOTS:
         Sandbox box(QDir::tempPath(), SandboxProfile::Workspace);
         QString reason;
         QCOMPARE(policy.evaluate(u"write_file"_s, QJsonObject{{u"path"_s, u"a.cpp"_s}}, box, &reason), PermissionPolicy::Verdict::Allow);
+        QCOMPARE(policy.evaluate(u"edit_file"_s, QJsonObject{{u"path"_s, u"a.cpp"_s}}, box, &reason), PermissionPolicy::Verdict::Allow);
+        QCOMPARE(policy.evaluate(u"multi_edit_file"_s, QJsonObject{{u"path"_s, u"a.cpp"_s}}, box, &reason), PermissionPolicy::Verdict::Allow);
         QCOMPARE(policy.evaluate(u"bash"_s, QJsonObject{{u"command"_s, u"make"_s}}, box, &reason), PermissionPolicy::Verdict::Ask);
         QCOMPARE(policy.evaluate(u"bash"_s, QJsonObject{{u"command"_s, u"ls"_s}}, box, &reason), PermissionPolicy::Verdict::Allow);
     }
