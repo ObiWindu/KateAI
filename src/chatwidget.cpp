@@ -646,6 +646,16 @@ ChatWidget::ChatWidget(QWidget *parent)
         m_prompt->setFocus();
         setThinkingIndicator(false);
         setWorkingIndicator(false);
+        // Auto-save conversation after each completed turn so it always
+        // appears up-to-date in the history menu.
+        if (!m_currentConversationId.isEmpty()) {
+            const auto sessionData = m_agent.sessionData();
+            if (!sessionData.messages.isEmpty()) {
+                SessionStore::saveConversation(m_currentConversationId, sessionData, QString(),
+                                              m_settings.maxSavedConversations > 0 ? m_settings.maxSavedConversations : 50);
+                updateHistoryButton();
+            }
+        }
     });
 
     // Edit tracker signals
@@ -703,11 +713,18 @@ ChatWidget::~ChatWidget()
         m_streamHeightTimer->stop();
     }
 
-    // Save session before AgentLoop member is destroyed
+    // Save session before AgentLoop member is destroyed, using the tracked
+    // conversation ID so we never silently create a duplicate active record.
     if (!m_agent.messages().isEmpty()) {
         const auto sessionData = m_agent.sessionData();
         if (!sessionData.messages.isEmpty()) {
-            SessionStore::save(sessionData, m_settings.maxSavedConversations > 0 ? m_settings.maxSavedConversations : 50);
+            if (!m_currentConversationId.isEmpty()) {
+                SessionStore::saveConversation(m_currentConversationId, sessionData, QString(),
+                                              m_settings.maxSavedConversations > 0 ? m_settings.maxSavedConversations : 50);
+            } else {
+                // Fallback: create a new entry via the legacy path
+                SessionStore::save(sessionData, m_settings.maxSavedConversations > 0 ? m_settings.maxSavedConversations : 50);
+            }
         }
     }
 
@@ -2565,8 +2582,26 @@ void ChatWidget::restoreCurrentTurn(const SessionStore::SessionData &sessionData
     }
 }
 
+void ChatWidget::updateHistoryButton()
+{
+    if (!m_historyButton) {
+        return;
+    }
+    const int maxConversations = m_settings.maxSavedConversations > 0 ? m_settings.maxSavedConversations : 50;
+    const int count = SessionStore::listConversations(maxConversations).size();
+    if (count > 0) {
+        m_historyButton->setToolTip(i18n("Conversation History (%1)", count));
+        // Show count as a small overlay text on the button when > 1
+        m_historyButton->setText(count > 1 ? QString::number(count) : QString());
+    } else {
+        m_historyButton->setToolTip(i18n("Conversation History"));
+        m_historyButton->setText(QString());
+    }
+}
+
 void ChatWidget::showConversationHistory()
 {
+    // Always rebuild the menu so it reflects the current state.
     if (!m_historyMenu) {
         m_historyMenu = new QMenu(this);
     } else {
@@ -2579,20 +2614,23 @@ void ChatWidget::showConversationHistory()
     if (conversations.isEmpty()) {
         auto *emptyAction = m_historyMenu->addAction(i18n("No conversations yet"));
         emptyAction->setEnabled(false);
+
+        m_historyMenu->addSeparator();
+        auto *newConvAction = m_historyMenu->addAction(QIcon::fromTheme(u"list-add"_s), i18n("New Conversation"));
+        connect(newConvAction, &QAction::triggered, this, &ChatWidget::newChat);
     } else {
         for (const auto &conv : conversations) {
             QString displayText = conv.title;
-            if (conv.isActive) {
-                displayText = u"\u2713 "_s + displayText + u" "_s + i18n("(current)");
+            if (conv.isActive || conv.id == m_currentConversationId) {
+                displayText = u"\u2713 "_s + displayText;
             }
             auto *action = m_historyMenu->addAction(displayText);
             action->setData(conv.id);
-            action->setCheckable(true);
-            action->setChecked(conv.isActive);
-            connect(action, &QAction::triggered, this, [this, convId = conv.id](bool checked) {
-                if (checked) {
-                    switchToConversation(convId);
-                }
+            // Use a non-checkable action with a triggered() connection so the
+            // switch always fires regardless of the checked-state parity.
+            const QString convId = conv.id;
+            connect(action, &QAction::triggered, this, [this, convId]() {
+                switchToConversation(convId);
             });
         }
 
@@ -2603,10 +2641,8 @@ void ChatWidget::showConversationHistory()
 
         auto *clearAllAction = m_historyMenu->addAction(QIcon::fromTheme(u"edit-clear"_s), i18n("Clear All History"));
         connect(clearAllAction, &QAction::triggered, this, [this]() {
-            const auto allConvs = SessionStore::listConversations(0);
-            for (const auto &conv : allConvs) {
-                SessionStore::deleteConversation(conv.id);
-            }
+            SessionStore::clearAllConversations();
+            m_currentConversationId.clear();
             newChat();
         });
     }
@@ -2654,6 +2690,7 @@ void ChatWidget::switchToConversation(const QString &conversationId)
     }
 
     m_loadingConversation = false;
+    updateHistoryButton();
     Q_EMIT conversationChanged(conversationId);
 }
 
@@ -2678,20 +2715,21 @@ void ChatWidget::setCurrentConversationId(const QString &conversationId)
     m_currentConversationId = conversationId;
 }
 
-// Override newChat to create a new conversation in history
+// Create a new blank conversation and reset the chat UI.
 void ChatWidget::newChat()
 {
     m_agent.abort();
 
-    // Save current conversation before clearing (so it appears in history)
+    // Save the current conversation before clearing so it remains in history.
     if (!m_agent.messages().isEmpty()) {
         const auto sessionData = m_agent.sessionData();
         if (!sessionData.messages.isEmpty()) {
-            // Ensure we have a conversation ID for the current conversation
+            // Allocate an ID if we somehow still don't have one.
             if (m_currentConversationId.isEmpty()) {
                 m_currentConversationId = QUuid::createUuid().toString(QUuid::WithoutBraces);
             }
-            SessionStore::saveConversation(m_currentConversationId, sessionData, QString(), m_settings.maxSavedConversations > 0 ? m_settings.maxSavedConversations : 50);
+            SessionStore::saveConversation(m_currentConversationId, sessionData, QString(),
+                                          m_settings.maxSavedConversations > 0 ? m_settings.maxSavedConversations : 50);
         }
     }
 
@@ -2702,8 +2740,13 @@ void ChatWidget::newChat()
         m_infoBar->hide();
     }
 
-    // Create new conversation in history
+    // Allocate a fresh conversation ID.  The new conversation will only be
+    // registered in the history list once saveConversation() is called with
+    // real messages, so no empty ghost entry appears immediately.
     m_currentConversationId = SessionStore::createNewConversation();
+
+    // Update history button to reflect any newly saved previous conversation.
+    updateHistoryButton();
 
     // Rebuild transcript from scratch to ensure it matches the cleared agent state
     rebuildTranscript();

@@ -59,6 +59,7 @@ public:
     void newChat();
     void rebuildTranscript();
     void restoreCurrentTurn(const SessionStore::SessionData &sessionData);
+    void updateHistoryButton();
 
     // Conversation history
     void showConversationHistory();
