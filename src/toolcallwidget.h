@@ -13,7 +13,9 @@ class QLabel;
 class QPlainTextEdit;
 class QPropertyAnimation;
 class QPushButton;
+class QShowEvent;
 class QTextBrowser;
+class QTimer;
 
 namespace KateAi
 {
@@ -48,21 +50,35 @@ public:
     void setPreviewText(const QString &text);
 
     QString toolCallId() const { return m_toolCallId; }
+    QString toolName() const { return m_toolName; }
     int expandedHeight() const { return m_expandedHeight; }
     void setExpandedHeight(int h);
+    void setExpanded(bool expanded);
+    bool isExpanded() const { return m_expanded; }
     bool isRunning() const { return !m_finished; }
+    bool hasDiffPreview() const { return m_hasDiffPreview; }
+    bool isFileEditTool() const;
+    void setActivityFrame(int frame);
+    void reflowNow();
 
 protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
     void resizeEvent(QResizeEvent *event) override;
+    void showEvent(QShowEvent *event) override;
     QSize minimumSizeHint() const override;
     QSize sizeHint() const override;
 
 private:
     void toggleExpand();
     void updateStyle();
-    void updateTitleElide();
+    void updateTitleText();
+    void syncPreviewVisibility();
+    void scheduleReflow();
     void reflowPreview();
+    void reflowDetails();
+    void applyDetailsHeight();
+    int previewFitHeight() const;
+    int detailsFitHeight() const;
     QString diffToHtml(const QString &diff) const;
     QString plainToHtml(const QString &text) const;
     QString escapeHtml(const QString &s) const;
@@ -90,6 +106,7 @@ private:
     QPlainTextEdit *m_details = nullptr;
     QTextBrowser *m_describeDiff = nullptr;
     QPropertyAnimation *m_animation = nullptr;
+    QTimer *m_reflowTimer = nullptr;
 };
 
 } // namespace KateAi

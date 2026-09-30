@@ -933,6 +933,10 @@ void AgentLoop::finishWithFailure(const QString &error)
     m_pendingResults.clear();
     m_waitingCall = {};
     m_waitingRequest = {};
+    m_currentThinking.clear();
+    m_currentPlan = QJsonArray();
+    m_planShown = false;
+    m_currentAssistant.clear();
     Q_EMIT failed(error);
     Q_EMIT turnFinished();
 }
@@ -959,6 +963,10 @@ void AgentLoop::finishTurn()
     m_pendingResults.clear();
     m_waitingCall = {};
     m_waitingRequest = {};
+    m_currentThinking.clear();
+    m_currentPlan = QJsonArray();
+    m_planShown = false;
+    m_currentAssistant.clear();
     Q_EMIT statusChanged(QString());
     Q_EMIT turnFinished();
 }

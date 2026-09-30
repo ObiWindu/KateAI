@@ -71,6 +71,7 @@ Settings SettingsStore::load()
     s.verbosity = g.readEntry(u"Verbosity"_s, 1);
     s.autoCollapseThinking = g.readEntry(u"AutoCollapseThinking"_s, false);
     s.maxSavedConversations = g.readEntry(u"MaxSavedConversations"_s, 50);
+    s.maxExpandedToolCards = g.readEntry(u"MaxExpandedToolCards"_s, 10);
     if (s.maxModelRequests < 1) {
         s.maxModelRequests = 1;
     }
@@ -145,6 +146,7 @@ void SettingsStore::save(const Settings &settings)
     g.writeEntry(u"Verbosity"_s, settings.verbosity);
     g.writeEntry(u"AutoCollapseThinking"_s, settings.autoCollapseThinking);
     g.writeEntry(u"MaxSavedConversations"_s, settings.maxSavedConversations);
+    g.writeEntry(u"MaxExpandedToolCards"_s, settings.maxExpandedToolCards);
     
     g.sync();
 }

@@ -7,11 +7,13 @@
 
 #include "types.h"
 
-#include <QWidget>
 #include <QHash>
-#include <QString>
 #include <QList>
+#include <QPointer>
+#include <QString>
+#include <QWidget>
 
+class QDialog;
 class QLabel;
 class QPushButton;
 class QScrollArea;
@@ -45,11 +47,9 @@ public:
     bool hasPendingEdits() const;
     QList<EditEntry> pendingEdits() const;
 
-    // Apply or revert all pending edits
     void acceptAll();
     void rejectAll();
 
-    // Apply or revert a single edit
     void acceptEdit(const QString &path);
     void rejectEdit(const QString &path);
 
@@ -61,22 +61,21 @@ Q_SIGNALS:
 private:
     void updateUI();
     void rebuildEditList();
-    void setExpanded(bool expanded);
+    void openReview(const QString &path);
+    void closeReview(const QString &path);
+    void closeAllReviews();
+    void finishEdit(const QString &path);
 
     QHash<QString, EditEntry> m_edits; // key = path
-    bool m_expanded = false;
+    QHash<QString, QPointer<QDialog>> m_reviewDialogs;
+    QHash<QString, QString> m_reviewFiles;
 
-    // UI elements - compact bar
     QWidget *m_barWidget = nullptr;
-    QLabel *m_iconLabel = nullptr;
     QLabel *m_countLabel = nullptr;
     QPushButton *m_acceptAllBtn = nullptr;
     QPushButton *m_rejectAllBtn = nullptr;
-    QPushButton *m_expandBtn = nullptr;
 
-    // UI elements - expanded list
     QWidget *m_listContainer = nullptr;
-    QVBoxLayout *m_listLayout = nullptr;
     QScrollArea *m_scrollArea = nullptr;
     QVBoxLayout *m_editListLayout = nullptr;
 };

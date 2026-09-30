@@ -143,9 +143,9 @@ struct Settings {
     int maxModelRequests = 40;
     int maxToolCalls = 80;
     int requestsPerMinute = 15;
-    // Number of recent tool-call cards to keep expanded in the chat transcript.
-    // Older cards are collapsed to keep the UI responsive during long runs.
-    int maxExpandedToolCards = 20;
+    // Number of recent Kate AI chats (thinking blocks and tool cards) to keep
+    // expanded in the transcript. Older cards collapse; file-edit diffs stay open.
+    int maxExpandedToolCards = 10;
     // Legacy compatibility with older KateAI settings/UI. Internally maxToolCalls is used.
     int maxIterations = 20;
     int bashTimeoutMs = 60000;
