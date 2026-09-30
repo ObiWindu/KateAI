@@ -281,7 +281,12 @@ void EditTracker::rebuildEditList()
         pathLabel->setWordWrap(true);
         headerLayout->addWidget(pathLabel, 1);
 
-        QLabel *toolLabel = new QLabel(entry.toolName == u"write_file"_s ? i18n("New File") : i18n("Edited"), editWidget);
+        const QString labelText = entry.toolName == u"write_file"_s
+            ? i18n("New File")
+            : ((entry.toolName == u"multi_edit_file"_s || entry.toolName == u"multi_replace_file_content"_s)
+                   ? i18n("Multi-Edit")
+                   : i18n("Edited"));
+        QLabel *toolLabel = new QLabel(labelText, editWidget);
         toolLabel->setStyleSheet(
             u"QLabel {"
             u"  color: #888;"

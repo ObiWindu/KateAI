@@ -87,7 +87,6 @@ private:
     void addThinkingBlock(const QString &text);
     void appendThinkingDelta(const QString &delta);
     void renderThinkingHtml();
-    static QString markdownToFifoHtml(const QString &text, int maxLines);
     void collapseThinkingBlock();
     void toggleThinking();
     QWidget *createThinkingBlock(QWidget *parent, QTextBrowser *&browser, QPushButton *&toggle);
@@ -124,7 +123,6 @@ private:
     void setThinkingIndicator(bool show);
     void setWorkingIndicator(bool show);
     void scheduleStreamHeightUpdate();
-    void stopThinkingTyping();
     void clearStreamingPointers();
     static QString escape(const QString &text);
     static QString markdownToHtml(const QString &text);
@@ -178,15 +176,8 @@ private:
     QPointer<QPushButton> m_thinkingToggle;
     bool m_thinkingExpanded = false;
 
-    // Raw thinking text buffer, used to apply FIFO line limiting and render
-    // markdown/HTML instead of escaped plain text.
+    // Raw thinking text buffer for the current turn.
     QString m_thinkingBuffer;
-
-    // Typing animation for thinking block
-    QTimer *m_thinkingTypingTimer = nullptr;
-    QString m_thinkingFullText;
-    int m_thinkingTypingPos = 0;
-    bool m_thinkingIsTyping = false;
 
     // Structured plan checklist rendered below the thinking block.
     QPointer<QWidget> m_planBlock;

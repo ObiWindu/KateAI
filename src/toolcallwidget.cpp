@@ -328,7 +328,7 @@ QString ToolCallWidget::iconForTool(const QString &toolName) const
 {
     if (toolName == u"read_file"_s) return u"📄"_s;
     if (toolName == u"write_file"_s) return u"📝"_s;
-    if (toolName == u"edit_file"_s) return u"✏️"_s;
+    if (toolName == u"edit_file"_s || toolName == u"multi_edit_file"_s || toolName == u"multi_replace_file_content"_s) return u"✏️"_s;
     if (toolName == u"list_dir"_s) return u"📁"_s;
     if (toolName == u"grep"_s) return u"🔍"_s;
     if (toolName == u"glob"_s) return u"🔎"_s;
@@ -351,7 +351,8 @@ QString ToolCallWidget::colorForRisk(ToolRisk risk) const
 
 bool ToolCallWidget::isDiffTool(const QString &toolName) const
 {
-    return toolName == u"edit_file"_s || toolName == u"write_file"_s;
+    return toolName == u"edit_file"_s || toolName == u"write_file"_s
+        || toolName == u"multi_edit_file"_s || toolName == u"multi_replace_file_content"_s;
 }
 
 QSize ToolCallWidget::minimumSizeHint() const

@@ -87,6 +87,7 @@ You ──► LLM (Grok / OpenAI / OpenRouter / local / ACP)
 | `read_file` | Read a UTF-8 file; `offset` / `limit` for large files |
 | `write_file` | Create or overwrite a file (open Kate buffer if the file is already open) |
 | `edit_file` | Exact-string replace; optional `replace_all` |
+| `multi_edit_file` | Apply multiple non-contiguous edits to a file in a single tool call |
 | `list_dir` | List a directory |
 | `grep` | Regex search with optional glob, case-insensitivity, and context lines |
 | `glob` | Find paths (`**/*.h`, `src/**/*.cpp`, …) |
@@ -99,7 +100,7 @@ In **Plan mode** the model only receives `read_file`, `list_dir`, `grep`, `glob`
 
 Each tool call appears as a compact card in the transcript (icon, name, shell-style summary). Expand it for arguments and output.
 
-- `write_file` / `edit_file` show a **unified diff** in the card before you approve
+- `write_file` / `edit_file` / `multi_edit_file` show a **unified diff** in the card before you approve
 - Other tools show a text preview (command, grep hits, graph summary)
 - Older cards auto-collapse after a configurable count so long runs stay responsive
 - **Accept edits** mode collects pending writes in an edit tracker: accept all or reject all
@@ -119,7 +120,7 @@ Kate AI is a first-class KTextEditor plugin, so it sees the same documents you d
 
 ### Thinking and plan mode
 
-- **Thinking mode** captures model reasoning in a collapsible “Reasoning” block (markdown, last 25 lines while streaming)
+- **Thinking mode** captures model reasoning in a collapsible “Reasoning” block (markdown, full reasoning block expandable in chat)
 - Auto-collapse when the visible answer starts; click to expand later
 - **Plan mode** (toolbar): read-only tools only, for inspection and an implementation plan
 - Structured plans render as an interactive checklist; steps can be marked complete as the agent works

@@ -553,7 +553,8 @@ ChatWidget::ChatWidget(QWidget *parent)
         appendTranscriptWidget(toolWidget);
 
         // Track write/edit tool calls for edit tracking in AcceptEdits mode
-        if ((request.toolName == u"write_file"_s || request.toolName == u"edit_file"_s) &&
+        if ((request.toolName == u"write_file"_s || request.toolName == u"edit_file"_s
+             || request.toolName == u"multi_edit_file"_s || request.toolName == u"multi_replace_file_content"_s) &&
             m_settings.permissionMode == PermissionMode::AcceptEdits) {
             // Read the old content before the edit
             PermissionRequest trackedRequest = request;
@@ -579,7 +580,8 @@ ChatWidget::ChatWidget(QWidget *parent)
             auto it = m_pendingToolCalls.find(result.toolCallId);
             if (it != m_pendingToolCalls.end()) {
                 const PermissionRequest &request = it.value();
-                if ((request.toolName == u"write_file"_s || request.toolName == u"edit_file"_s) && result.ok) {
+                if ((request.toolName == u"write_file"_s || request.toolName == u"edit_file"_s
+                     || request.toolName == u"multi_edit_file"_s || request.toolName == u"multi_replace_file_content"_s) && result.ok) {
                     // Read the new content from the file
                     QString newContent;
                     if (m_agent.documentBridge()) {
@@ -708,7 +710,6 @@ ChatWidget::ChatWidget(QWidget *parent)
 
 ChatWidget::~ChatWidget()
 {
-    stopThinkingTyping();
     if (m_streamHeightTimer) {
         m_streamHeightTimer->stop();
     }
@@ -896,18 +897,17 @@ void ChatWidget::addThinkingBlock(const QString &text)
     if (!m_thinkingBrowser || !m_thinkingBlock) {
         return;
     }
-    // Stop any previous typing animation before starting a new thinking block
-    stopThinkingTyping();
     m_thinkingBuffer = text;
     m_thinkingBlock->show();
     renderThinkingHtml();
-    applyThinkingState(m_thinkingBlock, m_thinkingBrowser, m_thinkingToggle, true);
+    applyThinkingState(m_thinkingBlock, m_thinkingBrowser, m_thinkingToggle, m_thinkingExpanded);
     scrollToBottom();
 }
 
 void ChatWidget::appendThinkingDelta(const QString &delta)
 {
     m_thinkingBuffer += delta;
+    m_thinkingExpanded = true;
     renderThinkingHtml();
 }
 
@@ -916,82 +916,11 @@ void ChatWidget::renderThinkingHtml()
     if (!m_thinkingBrowser) {
         return;
     }
-    // Apply a 25-line FIFO limit: keep only the last 25 lines so the
-    // reasoning block stays bounded as the model streams its chain-of-thought.
-    constexpr int kMaxLines = 25;
-    const QStringList lines = m_thinkingBuffer.split(u'\n');
-    const QString kept = lines.size() <= kMaxLines
-        ? m_thinkingBuffer
-        : lines.mid(lines.size() - kMaxLines).join(u'\n');
-
-    // Store the full text for typing animation
-    m_thinkingFullText = kept;
-    
-    // If we're not already typing, start the typing animation
-    if (!m_thinkingIsTyping) {
-        m_thinkingTypingPos = 0;
-        m_thinkingIsTyping = true;
-        
-        if (!m_thinkingTypingTimer) {
-            m_thinkingTypingTimer = new QTimer(this);
-            m_thinkingTypingTimer->setSingleShot(false);
-            connect(m_thinkingTypingTimer, &QTimer::timeout, this, [this]() {
-                if (!m_thinkingBrowser || !m_thinkingIsTyping) {
-                    stopThinkingTyping();
-                    return;
-                }
-                
-                // Type ~3 characters per tick for comfortable reading speed
-                constexpr int charsPerTick = 3;
-                m_thinkingTypingPos = qMin(m_thinkingTypingPos + charsPerTick, m_thinkingFullText.length());
-                
-                const QString displayedText = m_thinkingFullText.left(m_thinkingTypingPos);
-                m_thinkingBrowser->setMarkdown(closedMarkdown(displayedText));
-                if (!m_thinkingBrowser) {
-                    stopThinkingTyping();
-                    return;
-                }
-                
-                // Adjust height as text grows
-                const int blockWidth = m_thinkingBlock ? m_thinkingBlock->width() : 240;
-                const int width = m_thinkingBrowser->viewport()->width() > 40
-                    ? m_thinkingBrowser->viewport()->width()
-                    : std::max(160, blockWidth - 8);
-                m_thinkingBrowser->document()->setTextWidth(width);
-                const int h = static_cast<int>(m_thinkingBrowser->document()->size().height()) + 20;
-                m_thinkingBrowser->setFixedHeight(std::max(48, h));
-                
-                if (m_thinkingTypingPos >= m_thinkingFullText.length()) {
-                    stopThinkingTyping();
-                }
-            });
-        }
-        // ~33ms per tick = ~30 chars/sec, comfortable reading speed
-        m_thinkingTypingTimer->start(33);
-    }
-    
+    m_thinkingBrowser->setMarkdown(closedMarkdown(m_thinkingBuffer));
     if (m_thinkingBlock && !m_thinkingBuffer.isEmpty()) {
         m_thinkingBlock->show();
     }
-    applyThinkingState(m_thinkingBlock, m_thinkingBrowser, m_thinkingToggle, m_thinkingExpanded || !m_thinkingBuffer.isEmpty());
-}
-
-QString ChatWidget::markdownToFifoHtml(const QString &text, int maxLines)
-{
-    // Split on newlines, keep only the last maxLines, then render the result
-    // as HTML (markdown + escaped text) so the reasoning block displays
-    // formatted content rather than raw markdown/HTML source.
-    const QStringList lines = text.split(u'\n');
-    QString kept;
-    if (lines.size() <= maxLines) {
-        kept = text;
-    } else {
-        kept = lines.mid(lines.size() - maxLines).join(u'\n');
-    }
-
-    QTextDocument doc;
-    doc.setMarkdown(kept);
-    return doc.toHtml();
+    applyThinkingState(m_thinkingBlock, m_thinkingBrowser, m_thinkingToggle, m_thinkingExpanded);
 }
 
 void ChatWidget::collapseThinkingBlock()
@@ -2278,17 +2207,8 @@ void ChatWidget::scheduleStreamHeightUpdate()
     }
 }
 
-void ChatWidget::stopThinkingTyping()
-{
-    m_thinkingIsTyping = false;
-    if (m_thinkingTypingTimer) {
-        m_thinkingTypingTimer->stop();
-    }
-}
-
 void ChatWidget::clearStreamingPointers()
 {
-    stopThinkingTyping();
     m_activeAssistantWidget = nullptr;
     m_activeAssistantBrowser = nullptr;
     m_thinkingBlock = nullptr;
@@ -2297,14 +2217,12 @@ void ChatWidget::clearStreamingPointers()
     m_planBlock = nullptr;
     m_planLayout = nullptr;
     m_thinkingBuffer.clear();
-    m_thinkingFullText.clear();
-    m_thinkingTypingPos = 0;
+    m_thinkingExpanded = false;
     m_streamText.clear();
 }
 
 void ChatWidget::rebuildTranscript()
 {
-    stopThinkingTyping();
     if (m_streamHeightTimer) {
         m_streamHeightTimer->stop();
     }
@@ -2413,11 +2331,7 @@ void ChatWidget::rebuildTranscript()
                         QPushButton *thinkingToggle = nullptr;
                         auto *thinkingBlock = createThinkingBlock(assistantWidget, thinkingBrowser, thinkingToggle);
                         if (thinkingBrowser) {
-                            const QStringList lines = msg.thinking.split(u'\n');
-                            const QString kept = lines.size() <= 25
-                                ? msg.thinking
-                                : lines.mid(lines.size() - 25).join(u'\n');
-                            thinkingBrowser->setMarkdown(kept);
+                            thinkingBrowser->setMarkdown(closedMarkdown(msg.thinking));
                         }
                         applyThinkingState(thinkingBlock, thinkingBrowser, thinkingToggle, false);
                         thinkingBlock->show();
@@ -2471,7 +2385,8 @@ void ChatWidget::rebuildTranscript()
                         auto *toolWidget = new ToolCallWidget(toolCallId, m_transcriptContainer);
 
                         ToolRisk risk = ToolRisk::Read;
-                        if (toolName == u"write_file"_s || toolName == u"edit_file"_s) {
+                        if (toolName == u"write_file"_s || toolName == u"edit_file"_s
+                            || toolName == u"multi_edit_file"_s || toolName == u"multi_replace_file_content"_s) {
                             risk = ToolRisk::Write;
                         } else if (toolName == u"bash"_s) {
                             risk = ToolRisk::Execute;
@@ -2491,6 +2406,32 @@ void ChatWidget::rebuildTranscript()
                             toolWidget->setDescribeDiff(unifiedDiff(path,
                                 argsObj.value(u"old_string"_s).toString(),
                                 argsObj.value(u"new_string"_s).toString()));
+                        } else if (toolName == u"multi_edit_file"_s || toolName == u"multi_replace_file_content"_s) {
+                            QString path = argsObj.value(u"path"_s).toString();
+                            if (path.isEmpty()) {
+                                path = argsObj.value(u"TargetFile"_s).toString();
+                            }
+                            QJsonArray edits = argsObj.value(u"edits"_s).toArray();
+                            if (edits.isEmpty()) {
+                                edits = argsObj.value(u"chunks"_s).toArray();
+                            }
+                            if (edits.isEmpty()) {
+                                edits = argsObj.value(u"ReplacementChunks"_s).toArray();
+                            }
+                            QString oldCombined;
+                            QString newCombined;
+                            for (const QJsonValue &v : edits) {
+                                const QJsonObject c = v.toObject();
+                                const QString o = c.value(u"old_string"_s).toString().isEmpty() ? c.value(u"TargetContent"_s).toString() : c.value(u"old_string"_s).toString();
+                                const QString n = c.value(u"new_string"_s).toString().isEmpty() ? c.value(u"ReplacementContent"_s).toString() : c.value(u"new_string"_s).toString();
+                                if (!oldCombined.isEmpty()) {
+                                    oldCombined += u"\n---\n"_s;
+                                    newCombined += u"\n---\n"_s;
+                                }
+                                oldCombined += o;
+                                newCombined += n;
+                            }
+                            toolWidget->setDescribeDiff(unifiedDiff(path, oldCombined, newCombined));
                         } else if (toolName == u"write_file"_s) {
                             const QString path = argsObj.value(u"path"_s).toString();
                             toolWidget->setDescribeDiff(unifiedDiff(path, QString(),

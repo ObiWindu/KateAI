@@ -108,6 +108,20 @@ QString shellCommandFor(const QString &toolName, const QJsonObject &args)
     if (toolName == u"edit_file"_s) {
         return u"patch %1"_s.arg(quoteShellArg(args.value(u"path"_s).toString()));
     }
+    if (toolName == u"multi_edit_file"_s || toolName == u"multi_replace_file_content"_s) {
+        const QString rawPath = args.value(u"path"_s).toString().isEmpty()
+            ? args.value(u"TargetFile"_s).toString()
+            : args.value(u"path"_s).toString();
+        const QString path = quoteShellArg(rawPath);
+        QJsonArray edits = args.value(u"edits"_s).toArray();
+        if (edits.isEmpty()) {
+            edits = args.value(u"chunks"_s).toArray();
+        }
+        if (edits.isEmpty()) {
+            edits = args.value(u"ReplacementChunks"_s).toArray();
+        }
+        return u"patch %1 (%2 edits)"_s.arg(path).arg(edits.size());
+    }
     if (toolName == u"list_dir"_s) {
         const QString path = args.value(u"path"_s).toString();
         return path.isEmpty() ? u"ls"_s : u"ls %1"_s.arg(quoteShellArg(path));
@@ -257,6 +271,39 @@ PermissionRequest ToolRunner::describe(const ToolCall &call) const
         const QString newString = args.value(u"new_string"_s).toString();
         req.describeDiff = unifiedDiff(req.path, oldString, newString);
         req.details = u"Replace:\n%1\n\nWith:\n%2"_s.arg(oldString, newString);
+    } else if (call.name == u"multi_edit_file"_s || call.name == u"multi_replace_file_content"_s) {
+        req.risk = ToolRisk::Write;
+        if (req.path.isEmpty()) {
+            req.path = args.value(u"TargetFile"_s).toString();
+        }
+        QString existing;
+        QString error;
+        const QString resolved = m_sandbox.resolve(req.path, &error, true);
+        if (!resolved.isEmpty() && m_bridge) {
+            m_bridge->readDocument(resolved, &existing);
+        }
+        QJsonArray edits = args.value(u"edits"_s).toArray();
+        if (edits.isEmpty()) {
+            edits = args.value(u"chunks"_s).toArray();
+        }
+        if (edits.isEmpty()) {
+            edits = args.value(u"ReplacementChunks"_s).toArray();
+        }
+        QString simulated = existing;
+        for (const QJsonValue &val : edits) {
+            const QJsonObject chunk = val.toObject();
+            const QString oldStr = chunk.value(u"old_string"_s).toString().isEmpty()
+                ? (chunk.value(u"TargetContent"_s).toString().isEmpty() ? chunk.value(u"targetContent"_s).toString() : chunk.value(u"TargetContent"_s).toString())
+                : chunk.value(u"old_string"_s).toString();
+            const QString newStr = chunk.value(u"new_string"_s).toString().isEmpty()
+                ? (chunk.value(u"ReplacementContent"_s).toString().isEmpty() ? chunk.value(u"replacementContent"_s).toString() : chunk.value(u"ReplacementContent"_s).toString())
+                : chunk.value(u"new_string"_s).toString();
+            if (!oldStr.isEmpty()) {
+                simulated.replace(oldStr, newStr);
+            }
+        }
+        req.describeDiff = unifiedDiff(req.path, existing, simulated);
+        req.details = req.describeDiff;
     } else if (call.name == u"bash"_s) {
         req.risk = ToolRisk::Execute;
         req.details = args.value(u"command"_s).toString();
@@ -288,6 +335,9 @@ ToolResult ToolRunner::run(const ToolCall &call)
     }
     if (call.name == u"edit_file"_s) {
         return editFile(args);
+    }
+    if (call.name == u"multi_edit_file"_s || call.name == u"multi_replace_file_content"_s) {
+        return multiEditFile(args);
     }
     if (call.name == u"list_dir"_s) {
         return listDir(args);
@@ -487,6 +537,137 @@ ToolResult ToolRunner::editFile(const QJsonObject &args)
     result.output = replaceAll && count > 1
         ? u"Updated %1 (%2 replacements)"_s.arg(resolved).arg(count)
         : u"Updated %1"_s.arg(resolved);
+    return result;
+}
+
+ToolResult ToolRunner::multiEditFile(const QJsonObject &args)
+{
+    ToolResult result;
+    result.name = u"multi_edit_file"_s;
+
+    QString error;
+    QString path = args.value(u"path"_s).toString();
+    if (path.isEmpty()) {
+        path = args.value(u"TargetFile"_s).toString();
+    }
+
+    if (path.isEmpty()) {
+        result.ok = false;
+        result.output = u"File path is required."_s;
+        return result;
+    }
+
+    if (!m_sandbox.allowsWrite(path, &error)) {
+        result.ok = false;
+        result.output = error;
+        return result;
+    }
+
+    const QString resolved = m_sandbox.resolve(path, &error, true);
+    if (resolved.isEmpty()) {
+        result.ok = false;
+        result.output = error;
+        return result;
+    }
+
+    QJsonArray edits = args.value(u"edits"_s).toArray();
+    if (edits.isEmpty()) {
+        edits = args.value(u"chunks"_s).toArray();
+    }
+    if (edits.isEmpty()) {
+        edits = args.value(u"ReplacementChunks"_s).toArray();
+    }
+
+    if (edits.isEmpty()) {
+        result.ok = false;
+        result.output = u"No edit chunks provided in 'edits'."_s;
+        return result;
+    }
+
+    QString contents;
+    if (!m_bridge || !m_bridge->readDocument(resolved, &contents)) {
+        result.ok = false;
+        result.output = u"Failed to read %1"_s.arg(resolved);
+        return result;
+    }
+
+    QString workingContents = contents;
+    int totalReplacements = 0;
+    const int numChunks = edits.size();
+
+    for (int i = 0; i < numChunks; ++i) {
+        const QJsonObject chunk = edits.at(i).toObject();
+        QString oldStr = chunk.value(u"old_string"_s).toString();
+        if (oldStr.isEmpty()) {
+            oldStr = chunk.value(u"TargetContent"_s).toString().isEmpty()
+                ? chunk.value(u"targetContent"_s).toString()
+                : chunk.value(u"TargetContent"_s).toString();
+        }
+
+        QString newStr = chunk.value(u"new_string"_s).toString();
+        if (newStr.isEmpty() && !chunk.contains(u"new_string"_s)) {
+            newStr = chunk.value(u"ReplacementContent"_s).toString().isEmpty()
+                ? chunk.value(u"replacementContent"_s).toString()
+                : chunk.value(u"ReplacementContent"_s).toString();
+        }
+
+        bool replaceAll = false;
+        if (chunk.contains(u"replace_all"_s)) {
+            replaceAll = jsonBool(chunk.value(u"replace_all"_s));
+        } else if (chunk.contains(u"AllowMultiple"_s)) {
+            replaceAll = jsonBool(chunk.value(u"AllowMultiple"_s));
+        } else if (chunk.contains(u"allowMultiple"_s)) {
+            replaceAll = jsonBool(chunk.value(u"allowMultiple"_s));
+        }
+
+        if (oldStr.isEmpty()) {
+            result.ok = false;
+            result.output = u"Chunk %1 of %2: old_string must not be empty. No edits were applied."_s
+                .arg(i + 1).arg(numChunks);
+            return result;
+        }
+
+        const int count = workingContents.count(oldStr);
+        if (count == 0) {
+            result.ok = false;
+            QString hint;
+            const QString needle = oldStr.section(u'\n', 0, 0).trimmed();
+            if (!needle.isEmpty()) {
+                const QStringList lines = workingContents.split(u'\n');
+                QStringList nearby;
+                for (int l = 0; l < lines.size() && nearby.size() < 5; ++l) {
+                    if (lines.at(l).contains(needle)) {
+                        nearby.append(u"%1:%2"_s.arg(l + 1).arg(lines.at(l).left(200)));
+                    }
+                }
+                if (!nearby.isEmpty()) {
+                    hint = u" Nearby lines:\n"_s + nearby.join(u'\n');
+                }
+            }
+            result.output = u"Chunk %1 of %2: old_string was not found in %3. No edits were applied. Read the file again and copy the exact text including whitespace."_s
+                .arg(i + 1).arg(numChunks).arg(resolved) + hint;
+            return result;
+        }
+
+        if (count > 1 && !replaceAll) {
+            result.ok = false;
+            result.output = u"Chunk %1 of %2: old_string matched %3 times; it must be unique, or set replace_all=true. No edits were applied."_s
+                .arg(i + 1).arg(numChunks).arg(count);
+            return result;
+        }
+
+        workingContents.replace(oldStr, newStr);
+        totalReplacements += count;
+    }
+
+    if (!m_bridge->writeDocument(resolved, workingContents, &error)) {
+        result.ok = false;
+        result.output = error.isEmpty() ? u"Failed to write modified content."_s : error;
+        return result;
+    }
+
+    result.output = u"Updated %1 (%2 edit chunks applied, %3 total replacements)"_s
+        .arg(resolved).arg(numChunks).arg(totalReplacements);
     return result;
 }
 

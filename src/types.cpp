@@ -320,6 +320,25 @@ QJsonArray toolDefinitions(bool readOnlyOnly)
                          },
                          {u"path"_s, u"old_string"_s, u"new_string"_s}));
 
+    QJsonObject chunkProperties{
+        {u"old_string"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"Exact text to find in the file."_s}}},
+        {u"new_string"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"Replacement text."_s}}},
+        {u"replace_all"_s, QJsonObject{{u"type"_s, u"boolean"_s}, {u"description"_s, u"If true, replace every occurrence instead of requiring a unique match."_s}}},
+    };
+    QJsonObject chunkItem{
+        {u"type"_s, u"object"_s},
+        {u"properties"_s, chunkProperties},
+        {u"required"_s, QJsonArray{u"old_string"_s, u"new_string"_s}},
+    };
+    tools.append(toolDef(u"multi_edit_file"_s,
+                         u"Perform multiple non-contiguous edits to the same file in a single tool call. "
+                         u"Each edit specifies an exact old_string to replace with new_string."_s,
+                         QJsonObject{
+                             {u"path"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"Path relative to the workspace or absolute."_s}}},
+                             {u"edits"_s, QJsonObject{{u"type"_s, u"array"_s}, {u"items"_s, chunkItem}, {u"description"_s, u"Array of edit chunks to apply in order."_s}}},
+                         },
+                         {u"path"_s, u"edits"_s}));
+
     tools.append(toolDef(u"list_dir"_s,
                          u"List files and directories in a folder."_s,
                          QJsonObject{
@@ -387,7 +406,7 @@ QString defaultSystemPrompt(const QString &workspace)
            "How to work:\n"
            "- Start by locating the relevant code (query_project_graph, glob, grep, list_dir) before guessing paths.\n"
            "- Read only the files and ranges you need. Prefer offset/limit on large files.\n"
-           "- Prefer edit_file for surgical changes. Use replace_all when the same unique snippet should change everywhere.\n"
+           "- Prefer edit_file or multi_edit_file for surgical changes. Use multi_edit_file when modifying multiple non-contiguous locations in the same file. Use replace_all when the same unique snippet should change everywhere.\n"
            "- Use write_file only for new files or complete rewrites. Do not invent files outside the workspace.\n"
            "- Match existing style, naming, imports, and architecture. Do not add unrelated refactors or comments.\n"
            "- After edits, verify with a focused read, test, build, or lint. Treat tool output as evidence.\n"
