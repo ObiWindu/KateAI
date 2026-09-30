@@ -69,6 +69,7 @@ Settings SettingsStore::load()
     s.selfCritique = g.readEntry(u"SelfCritique"_s, true);
     s.parallelToolCalls = g.readEntry(u"ParallelToolCalls"_s, true);
     s.verbosity = g.readEntry(u"Verbosity"_s, 1);
+    s.autoCollapseThinking = g.readEntry(u"AutoCollapseThinking"_s, false);
     s.maxSavedConversations = g.readEntry(u"MaxSavedConversations"_s, 50);
     if (s.maxModelRequests < 1) {
         s.maxModelRequests = 1;
@@ -142,6 +143,7 @@ void SettingsStore::save(const Settings &settings)
     g.writeEntry(u"SelfCritique"_s, settings.selfCritique);
     g.writeEntry(u"ParallelToolCalls"_s, settings.parallelToolCalls);
     g.writeEntry(u"Verbosity"_s, settings.verbosity);
+    g.writeEntry(u"AutoCollapseThinking"_s, settings.autoCollapseThinking);
     g.writeEntry(u"MaxSavedConversations"_s, settings.maxSavedConversations);
     
     g.sync();

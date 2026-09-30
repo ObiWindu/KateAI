@@ -89,7 +89,7 @@ private:
     void renderThinkingHtml();
     void collapseThinkingBlock();
     void toggleThinking();
-    QWidget *createThinkingBlock(QWidget *parent, QTextBrowser *&browser, QPushButton *&toggle);
+    QWidget *createThinkingBlock(QWidget *parent, QTextBrowser *&browser, QPushButton *&toggle, bool initiallyExpanded);
     void applyThinkingState(QWidget *block, QTextBrowser *browser, QPushButton *toggle, bool expanded);
     void addPlanChecklist(const QJsonArray &plan);
     void markPlanStepCompleted(const QString &stepId);
@@ -123,6 +123,11 @@ private:
     void setThinkingIndicator(bool show);
     void setWorkingIndicator(bool show);
     void scheduleStreamHeightUpdate();
+    void startThinkingPacer();
+    void stopThinkingPacer();
+    void flushThinkingPacer();
+    void updateThinkingDisplay();
+    void resetThinkingState();
     void clearStreamingPointers();
     static QString escape(const QString &text);
     static QString markdownToHtml(const QString &text);
@@ -174,10 +179,12 @@ private:
     QPointer<QWidget> m_thinkingBlock;
     QPointer<QTextBrowser> m_thinkingBrowser;
     QPointer<QPushButton> m_thinkingToggle;
-    bool m_thinkingExpanded = false;
+    bool m_thinkingExpanded = true;
 
     // Raw thinking text buffer for the current turn.
     QString m_thinkingBuffer;
+    int m_thinkingPacedLength = 0;
+    QTimer *m_thinkingPacerTimer = nullptr;
 
     // Structured plan checklist rendered below the thinking block.
     QPointer<QWidget> m_planBlock;
