@@ -188,7 +188,7 @@ struct Settings {
     // Structured thinking and planning
     bool structuredThinking = true;  // Require <thinking> block before response
     bool structuredPlanning = true;  // Require structured plan after thinking
-    bool autoCollapseThinking = true; // Auto-collapse thinking once answer starts
+    bool autoCollapseThinking = false; // Auto-collapse thinking once answer starts (default false: stay visible)
     bool showPlanAsChecklist = true;  // Render plan as interactive checklist
     int maxThinkingTokens = 4096;    // Max tokens for thinking block
     int maxPlanSteps = 15;           // Max steps in structured plan

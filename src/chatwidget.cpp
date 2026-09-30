@@ -522,15 +522,19 @@ ChatWidget::ChatWidget(QWidget *parent)
         setThinkingIndicator(true);
     });
     connect(&m_agent, &AgentLoop::thinkingFinished, this, [this](const QString &text) {
-        addThinkingBlock(text);
+        // Stop thinking indicator BEFORE adding thinking block so that
+        // addThinkingBlock sees m_isThinking == false and flushes the pacer
+        // instead of starting a new pacing animation.
         setThinkingIndicator(false);
+        addThinkingBlock(text);
     });
     connect(&m_agent, &AgentLoop::planUpdated, this, &ChatWidget::addPlanChecklist);
     connect(&m_agent, &AgentLoop::assistantDelta, this, [this](const QString &delta) {
-        // Auto-collapse thinking when visible answer starts streaming
+        // Auto-collapse thinking when visible answer starts streaming only if configured
         if (m_settings.autoCollapseThinking && m_thinkingExpanded && !m_streamText.isEmpty()) {
             collapseThinkingBlock();
         }
+        flushThinkingPacer();
         setThinkingIndicator(false);
         setStreaming(m_streamText + delta);
     });
@@ -710,6 +714,7 @@ ChatWidget::ChatWidget(QWidget *parent)
 
 ChatWidget::~ChatWidget()
 {
+    stopThinkingPacer();
     if (m_streamHeightTimer) {
         m_streamHeightTimer->stop();
     }
@@ -839,7 +844,7 @@ void ChatWidget::setStreaming(const QString &text)
 
         QTextBrowser *thinkingBrowser = nullptr;
         QPushButton *thinkingToggle = nullptr;
-        m_thinkingBlock = createThinkingBlock(m_activeAssistantWidget, thinkingBrowser, thinkingToggle);
+        m_thinkingBlock = createThinkingBlock(m_activeAssistantWidget, thinkingBrowser, thinkingToggle, !m_settings.autoCollapseThinking);
         m_thinkingBrowser = thinkingBrowser;
         m_thinkingToggle = thinkingToggle;
         m_thinkingBlock->hide();
@@ -887,6 +892,72 @@ void ChatWidget::setStreaming(const QString &text)
     scheduleStreamHeightUpdate();
 }
 
+void ChatWidget::startThinkingPacer()
+{
+    if (!m_thinkingPacerTimer) {
+        m_thinkingPacerTimer = new QTimer(this);
+        m_thinkingPacerTimer->setInterval(50);
+        connect(m_thinkingPacerTimer, &QTimer::timeout, this, [this]() {
+            if (!m_thinkingBrowser || m_thinkingBuffer.isEmpty()) {
+                stopThinkingPacer();
+                return;
+            }
+            const int targetLen = m_thinkingBuffer.length();
+            if (m_thinkingPacedLength >= targetLen) {
+                if (!m_isThinking) {
+                    stopThinkingPacer();
+                }
+                return;
+            }
+
+            const int remaining = targetLen - m_thinkingPacedLength;
+            int step = 1;
+            if (remaining > 300) {
+                step = std::max(10, remaining / 12);
+            } else if (remaining > 100) {
+                step = std::max(4, remaining / 20);
+            } else if (remaining > 30) {
+                step = std::max(2, remaining / 25);
+            } else {
+                step = 1;
+            }
+
+            m_thinkingPacedLength = std::min(m_thinkingPacedLength + step, targetLen);
+            updateThinkingDisplay();
+        });
+    }
+    if (!m_thinkingPacerTimer->isActive()) {
+        m_thinkingPacerTimer->start();
+    }
+}
+
+void ChatWidget::stopThinkingPacer()
+{
+    if (m_thinkingPacerTimer && m_thinkingPacerTimer->isActive()) {
+        m_thinkingPacerTimer->stop();
+    }
+}
+
+void ChatWidget::flushThinkingPacer()
+{
+    stopThinkingPacer();
+    m_thinkingPacedLength = m_thinkingBuffer.length();
+    updateThinkingDisplay();
+}
+
+void ChatWidget::updateThinkingDisplay()
+{
+    if (!m_thinkingBrowser) {
+        return;
+    }
+    const QString displayed = m_thinkingBuffer.left(m_thinkingPacedLength);
+    m_thinkingBrowser->setMarkdown(closedMarkdown(displayed));
+    if (m_thinkingBlock && !m_thinkingBuffer.isEmpty()) {
+        m_thinkingBlock->show();
+    }
+    applyThinkingState(m_thinkingBlock, m_thinkingBrowser, m_thinkingToggle, m_thinkingExpanded);
+}
+
 void ChatWidget::addThinkingBlock(const QString &text)
 {
     // Hidden reasoning may arrive before the first visible text delta, so
@@ -899,7 +970,11 @@ void ChatWidget::addThinkingBlock(const QString &text)
     }
     m_thinkingBuffer = text;
     m_thinkingBlock->show();
-    renderThinkingHtml();
+    if (!m_isThinking) {
+        flushThinkingPacer();
+    } else {
+        startThinkingPacer();
+    }
     applyThinkingState(m_thinkingBlock, m_thinkingBrowser, m_thinkingToggle, m_thinkingExpanded);
     scrollToBottom();
 }
@@ -907,20 +982,16 @@ void ChatWidget::addThinkingBlock(const QString &text)
 void ChatWidget::appendThinkingDelta(const QString &delta)
 {
     m_thinkingBuffer += delta;
-    m_thinkingExpanded = true;
-    renderThinkingHtml();
+    // Only auto-expand if the user hasn't manually collapsed the thinking block.
+    // We track this via m_thinkingExpanded - if it's false, the user explicitly collapsed.
+    if (m_thinkingExpanded) {
+        startThinkingPacer();
+    }
 }
 
 void ChatWidget::renderThinkingHtml()
 {
-    if (!m_thinkingBrowser) {
-        return;
-    }
-    m_thinkingBrowser->setMarkdown(closedMarkdown(m_thinkingBuffer));
-    if (m_thinkingBlock && !m_thinkingBuffer.isEmpty()) {
-        m_thinkingBlock->show();
-    }
-    applyThinkingState(m_thinkingBlock, m_thinkingBrowser, m_thinkingToggle, m_thinkingExpanded);
+    flushThinkingPacer();
 }
 
 void ChatWidget::collapseThinkingBlock()
@@ -940,7 +1011,7 @@ void ChatWidget::toggleThinking()
     applyThinkingState(m_thinkingBlock, m_thinkingBrowser, m_thinkingToggle, !m_thinkingExpanded);
 }
 
-QWidget *ChatWidget::createThinkingBlock(QWidget *parent, QTextBrowser *&browser, QPushButton *&toggle)
+QWidget *ChatWidget::createThinkingBlock(QWidget *parent, QTextBrowser *&browser, QPushButton *&toggle, bool initiallyExpanded)
 {
     auto *block = new QWidget(parent);
     auto *tbLayout = new QVBoxLayout(block);
@@ -982,7 +1053,7 @@ QWidget *ChatWidget::createThinkingBlock(QWidget *parent, QTextBrowser *&browser
         }
     });
 
-    applyThinkingState(block, browser, toggle, false);
+    applyThinkingState(block, browser, toggle, initiallyExpanded);
     return block;
 }
 
@@ -1096,7 +1167,10 @@ void ChatWidget::freezeStreaming()
         m_activeAssistantCopyBtn->setProperty("copyText", m_streamText);
         m_activeAssistantCopyBtn = nullptr;
     }
-    collapseThinkingBlock();
+    flushThinkingPacer();
+    if (m_settings.autoCollapseThinking) {
+        collapseThinkingBlock();
+    }
     clearStreamingPointers();
 }
 
@@ -2181,10 +2255,49 @@ QString ChatWidget::markdownToHtml(const QString &text)
 
 QString ChatWidget::closedMarkdown(const QString &text)
 {
-    if (text.count(u"```"_s) % 2 == 1) {
-        return text + u"\n```"_s;
+    QString result = text;
+    // Close unclosed triple backticks (code blocks)
+    if (result.count(u"```"_s) % 2 == 1) {
+        result += u"\n```"_s;
     }
-    return text;
+    // Close unclosed single backticks (inline code)
+    if (result.count(u"`"_s) % 2 == 1) {
+        result += u"`"_s;
+    }
+    // Close unclosed bold markers (**)
+    if (result.count(u"**"_s) % 2 == 1) {
+        result += u"**"_s;
+    }
+    // Close unclosed italic markers (*) - but not part of **
+    // Count * that are not part of **
+    int singleAsterisk = 0;
+    for (int i = 0; i < result.length(); ++i) {
+        if (result[i] == u'*') {
+            bool isDouble = (i + 1 < result.length() && result[i + 1] == u'*')
+                         || (i > 0 && result[i - 1] == u'*');
+            if (!isDouble) {
+                singleAsterisk++;
+            }
+        }
+    }
+    if (singleAsterisk % 2 == 1) {
+        result += u"*"_s;
+    }
+    // Close unclosed underscore italic markers (_) - but not part of __
+    int singleUnderscore = 0;
+    for (int i = 0; i < result.length(); ++i) {
+        if (result[i] == u'_') {
+            bool isDouble = (i + 1 < result.length() && result[i + 1] == u'_')
+                         || (i > 0 && result[i - 1] == u'_');
+            if (!isDouble) {
+                singleUnderscore++;
+            }
+        }
+    }
+    if (singleUnderscore % 2 == 1) {
+        result += u"_"_s;
+    }
+    return result;
 }
 
 void ChatWidget::scheduleStreamHeightUpdate()
@@ -2209,6 +2322,7 @@ void ChatWidget::scheduleStreamHeightUpdate()
 
 void ChatWidget::clearStreamingPointers()
 {
+    stopThinkingPacer();
     m_activeAssistantWidget = nullptr;
     m_activeAssistantBrowser = nullptr;
     m_thinkingBlock = nullptr;
@@ -2217,8 +2331,17 @@ void ChatWidget::clearStreamingPointers()
     m_planBlock = nullptr;
     m_planLayout = nullptr;
     m_thinkingBuffer.clear();
-    m_thinkingExpanded = false;
+    m_thinkingPacedLength = 0;
+    m_thinkingExpanded = !m_settings.autoCollapseThinking;
     m_streamText.clear();
+}
+
+void ChatWidget::resetThinkingState()
+{
+    m_thinkingBuffer.clear();
+    m_thinkingPacedLength = 0;
+    m_thinkingExpanded = !m_settings.autoCollapseThinking;
+    stopThinkingPacer();
 }
 
 void ChatWidget::rebuildTranscript()
@@ -2231,6 +2354,8 @@ void ChatWidget::rebuildTranscript()
     m_toolCallWidgets.clear();
     m_planSteps.clear();
     clearStreamingPointers();
+    resetThinkingState();
+    // For transcript rebuild, we want thinking collapsed by default for historical messages
     m_thinkingExpanded = false;
 
     // Clear existing transcript (except stretch and indicators at the end)
@@ -2329,11 +2454,11 @@ void ChatWidget::rebuildTranscript()
                     if (!msg.thinking.isEmpty()) {
                         QTextBrowser *thinkingBrowser = nullptr;
                         QPushButton *thinkingToggle = nullptr;
-                        auto *thinkingBlock = createThinkingBlock(assistantWidget, thinkingBrowser, thinkingToggle);
+                        // Historical messages: thinking collapsed by default
+                        auto *thinkingBlock = createThinkingBlock(assistantWidget, thinkingBrowser, thinkingToggle, false);
                         if (thinkingBrowser) {
                             thinkingBrowser->setMarkdown(closedMarkdown(msg.thinking));
                         }
-                        applyThinkingState(thinkingBlock, thinkingBrowser, thinkingToggle, false);
                         thinkingBlock->show();
                         layout->addWidget(thinkingBlock);
                     }
@@ -2495,15 +2620,17 @@ void ChatWidget::restoreCurrentTurn(const SessionStore::SessionData &sessionData
         if (!m_thinkingBlock) {
             QTextBrowser *thinkingBrowser = nullptr;
             QPushButton *thinkingToggle = nullptr;
-            m_thinkingBlock = createThinkingBlock(m_transcriptContainer, thinkingBrowser, thinkingToggle);
+            // Active turn being restored: respect autoCollapseThinking setting
+            m_thinkingBlock = createThinkingBlock(m_transcriptContainer, thinkingBrowser, thinkingToggle, !m_settings.autoCollapseThinking);
             m_thinkingBrowser = thinkingBrowser;
             m_thinkingToggle = thinkingToggle;
             appendTranscriptWidget(m_thinkingBlock);
         }
         m_thinkingBuffer = sessionData.currentThinking;
-        renderThinkingHtml();
+        m_thinkingPacedLength = m_thinkingBuffer.length();
+        updateThinkingDisplay();
         m_thinkingBlock->show();
-        applyThinkingState(m_thinkingBlock, m_thinkingBrowser, m_thinkingToggle, sessionData.planShown);
+        // applyThinkingState already called by createThinkingBlock with correct initial state
     }
 
     if (!sessionData.currentPlan.isEmpty() && sessionData.planShown) {
