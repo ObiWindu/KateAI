@@ -10,6 +10,10 @@ kateai_test(test_llmparse)
 kateai_test(test_session)
 kateai_test(test_retry)
 
+add_executable(test_tools test_tools.cpp)
+target_link_libraries(test_tools PRIVATE kateai_core Qt6::Test)
+add_test(NAME test_tools COMMAND test_tools -platform offscreen)
+
 add_executable(test_promptedit test_promptedit.cpp ../src/promptedit.cpp)
 target_link_libraries(test_promptedit PRIVATE kateai_core Qt6::Test)
-add_test(NAME test_promptedit COMMAND test_promptedit)
+add_test(NAME test_promptedit COMMAND test_promptedit -platform offscreen)

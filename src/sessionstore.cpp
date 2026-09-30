@@ -337,11 +337,10 @@ QString SessionStore::createNewConversation()
 {
     const QString newId = generateConversationId();
 
-    // Create empty conversation
-    SessionData emptyData;
-    saveConversation(newId, emptyData, u"New Conversation"_s);
-
-    // Set as active
+    // Only set this ID as active — do NOT save an empty conversation record yet.
+    // The conversation will be registered in the list the first time
+    // saveConversation() is called with real messages, preventing ghost entries
+    // from appearing in the history menu.
     setActiveConversation(newId);
 
     return newId;

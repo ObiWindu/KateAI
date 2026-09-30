@@ -429,5 +429,5 @@ private Q_SLOTS:
 
 } // namespace KateAi
 
-QTEST_MAIN(KateAi::TestSession)
+QTEST_GUILESS_MAIN(KateAi::TestSession)
 #include "test_session.moc"
