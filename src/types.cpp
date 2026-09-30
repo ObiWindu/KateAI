@@ -19,6 +19,8 @@ QString providerId(Provider provider)
         return u"openai"_s;
     case Provider::OpenRouter:
         return u"openrouter"_s;
+    case Provider::DeepSeek:
+        return u"deepseek"_s;
     case Provider::OpenAICompatible:
         return u"openai-compatible"_s;
     case Provider::ClaudeCompatible:
@@ -40,6 +42,8 @@ QString providerLabel(Provider provider)
         return i18n("OpenAI");
     case Provider::OpenRouter:
         return i18n("OpenRouter");
+    case Provider::DeepSeek:
+        return i18n("DeepSeek");
     case Provider::OpenAICompatible:
         return i18n("OpenAI Compatible");
     case Provider::ClaudeCompatible:
@@ -61,6 +65,9 @@ Provider providerFromId(const QString &id)
     }
     if (id == u"openrouter"_s) {
         return Provider::OpenRouter;
+    }
+    if (id == u"deepseek"_s) {
+        return Provider::DeepSeek;
     }
     if (id == u"openai-compatible"_s) {
         return Provider::OpenAICompatible;
@@ -84,6 +91,8 @@ QString providerBaseUrl(Provider provider)
         return u"https://api.openai.com/v1"_s;
     case Provider::OpenRouter:
         return u"https://openrouter.ai/api/v1"_s;
+    case Provider::DeepSeek:
+        return u"https://api.deepseek.com"_s;
     case Provider::OpenAICompatible:
         return u"http://localhost:11434/v1"_s;
     case Provider::ClaudeCompatible:
@@ -105,6 +114,8 @@ QString providerBaseUrl(const Settings &settings)
         return u"https://api.openai.com/v1"_s;
     case Provider::OpenRouter:
         return u"https://openrouter.ai/api/v1"_s;
+    case Provider::DeepSeek:
+        return settings.deepseekUrl.isEmpty() ? u"https://api.deepseek.com"_s : settings.deepseekUrl;
     case Provider::OpenAICompatible:
         return settings.openaiCompatibleUrl;
     case Provider::ClaudeCompatible:
@@ -131,6 +142,11 @@ QStringList defaultModels(Provider provider)
                 u"openai/gpt-4o"_s,
                 u"anthropic/claude-sonnet-4"_s,
                 u"google/gemini-2.5-pro"_s};
+    case Provider::DeepSeek:
+        return {u"deepseek-flash"_s,
+                u"deepseek-v4-pro"_s,
+                u"deepseek-chat"_s,
+                u"deepseek-reasoner"_s};
     case Provider::OpenAICompatible:
         return {u"llama3"_s, u"mistral"_s};
     case Provider::ClaudeCompatible:
@@ -233,6 +249,8 @@ QString apiKeyFor(const Settings &settings)
         return settings.openaiApiKey;
     case Provider::OpenRouter:
         return settings.openrouterApiKey;
+    case Provider::DeepSeek:
+        return settings.deepseekApiKey;
     case Provider::OpenAICompatible:
         return settings.openaiCompatibleApiKey;
     case Provider::ClaudeCompatible:
@@ -254,6 +272,8 @@ QString modelFor(const Settings &settings)
         return settings.openaiModel;
     case Provider::OpenRouter:
         return settings.openrouterModel;
+    case Provider::DeepSeek:
+        return settings.deepseekModel;
     case Provider::OpenAICompatible:
         return settings.openaiCompatibleModel;
     case Provider::ClaudeCompatible:

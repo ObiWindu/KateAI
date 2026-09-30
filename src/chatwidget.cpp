@@ -460,6 +460,9 @@ ChatWidget::ChatWidget(QWidget *parent)
         case Provider::OpenRouter:
             m_settings.openrouterModel = text.trimmed();
             break;
+        case Provider::DeepSeek:
+            m_settings.deepseekModel = text.trimmed();
+            break;
         case Provider::OpenAICompatible:
             m_settings.openaiCompatibleModel = text.trimmed();
             break;
@@ -1435,7 +1438,7 @@ void ChatWidget::setSettings(const Settings &settings)
     updateTokenDisplay();
     updateReasoningEffortButton();
 
-    for (Provider provider : {Provider::Grok, Provider::OpenAI, Provider::OpenRouter, Provider::OpenAICompatible, Provider::ClaudeCompatible, Provider::Kilo, Provider::Acp}) {
+    for (Provider provider : {Provider::Grok, Provider::OpenAI, Provider::OpenRouter, Provider::DeepSeek, Provider::OpenAICompatible, Provider::ClaudeCompatible, Provider::Kilo, Provider::Acp}) {
         Settings providerSettings = settings;
         providerSettings.provider = provider;
         if (!apiKeyFor(providerSettings).trimmed().isEmpty() && !m_modelCatalog.contains(provider)) {
@@ -1456,7 +1459,7 @@ void ChatWidget::refreshProviders()
     const bool wasUpdating = m_updatingCombos;
     m_updatingCombos = true;
     m_provider->clear();
-    for (Provider provider : {Provider::Grok, Provider::OpenAI, Provider::OpenRouter, Provider::OpenAICompatible, Provider::ClaudeCompatible, Provider::Kilo, Provider::Acp}) {
+    for (Provider provider : {Provider::Grok, Provider::OpenAI, Provider::OpenRouter, Provider::DeepSeek, Provider::OpenAICompatible, Provider::ClaudeCompatible, Provider::Kilo, Provider::Acp}) {
         // Only show provider if it has a valid API key configured
         Settings providerSettings = m_settings;
         providerSettings.provider = provider;
@@ -1512,6 +1515,9 @@ void ChatWidget::refreshModels()
                 break;
             case Provider::OpenRouter:
                 m_settings.openrouterModel = selectedModel;
+                break;
+            case Provider::DeepSeek:
+                m_settings.deepseekModel = selectedModel;
                 break;
             case Provider::OpenAICompatible:
                 m_settings.openaiCompatibleModel = selectedModel;
@@ -1681,6 +1687,13 @@ bool ChatWidget::modelSupportsReasoningEffort() const
     // Grok models with "reasoning" in the name
     if (provider == Provider::Grok || provider == Provider::OpenRouter) {
         if (model.contains(u"reasoning"_s)) {
+            return true;
+        }
+    }
+
+    // DeepSeek reasoning models (e.g. deepseek-reasoner)
+    if (provider == Provider::DeepSeek) {
+        if (model.contains(u"reasoner"_s) || model.contains(u"reasoning"_s)) {
             return true;
         }
     }
@@ -1862,6 +1875,7 @@ void ChatWidget::rebuildModelMenuProviderSubmenus()
         Provider::Grok,
         Provider::OpenAI,
         Provider::OpenRouter,
+        Provider::DeepSeek,
         Provider::OpenAICompatible,
         Provider::ClaudeCompatible,
         Provider::Kilo,
@@ -1985,6 +1999,9 @@ void ChatWidget::selectModel(Provider provider, const QString &model)
         break;
     case Provider::OpenRouter:
         m_settings.openrouterModel = model;
+        break;
+    case Provider::DeepSeek:
+        m_settings.deepseekModel = model;
         break;
     case Provider::OpenAICompatible:
         m_settings.openaiCompatibleModel = model;

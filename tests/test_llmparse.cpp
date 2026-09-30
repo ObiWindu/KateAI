@@ -48,6 +48,7 @@ private Q_SLOTS:
         QCOMPARE(providerBaseUrl(Provider::Grok), u"https://api.x.ai/v1"_s);
         QCOMPARE(providerBaseUrl(Provider::OpenAI), u"https://api.openai.com/v1"_s);
         QCOMPARE(providerBaseUrl(Provider::OpenRouter), u"https://openrouter.ai/api/v1"_s);
+        QCOMPARE(providerBaseUrl(Provider::DeepSeek), u"https://api.deepseek.com"_s);
     }
 
     void settingsKeys()
@@ -56,12 +57,15 @@ private Q_SLOTS:
         s.grokApiKey = u"xai-test"_s;
         s.openaiApiKey = u"sk-test"_s;
         s.openrouterApiKey = u"or-test"_s;
+        s.deepseekApiKey = u"ds-test"_s;
         s.provider = Provider::Grok;
         QCOMPARE(apiKeyFor(s), u"xai-test"_s);
         s.provider = Provider::OpenAI;
         QCOMPARE(apiKeyFor(s), u"sk-test"_s);
         s.provider = Provider::OpenRouter;
         QCOMPARE(apiKeyFor(s), u"or-test"_s);
+        s.provider = Provider::DeepSeek;
+        QCOMPARE(apiKeyFor(s), u"ds-test"_s);
     }
 
     void planModeOnlyAdvertisesReadTools()

@@ -19,6 +19,7 @@ enum class Provider {
     Grok,
     OpenAI,
     OpenRouter,
+    DeepSeek,
     OpenAICompatible,
     ClaudeCompatible,
     Kilo,
@@ -118,6 +119,7 @@ struct Settings {
     QString grokApiKey;
     QString openaiApiKey;
     QString openrouterApiKey;
+    QString deepseekApiKey;
     QString openaiCompatibleApiKey;
     QString claudeCompatibleApiKey;
     QString kiloApiKey;
@@ -125,10 +127,12 @@ struct Settings {
     QString grokModel = QStringLiteral("grok-4.5");
     QString openaiModel = QStringLiteral("gpt-4.1");
     QString openrouterModel = QStringLiteral("x-ai/grok-4");
+    QString deepseekModel = QStringLiteral("deepseek-flash");
     QString openaiCompatibleModel;
     QString claudeCompatibleModel;
     QString kiloModel = QStringLiteral("kilo-code");
     QString acpModel = QStringLiteral("acp-agent");
+    QString deepseekUrl = QStringLiteral("https://api.deepseek.com");
     QString openaiCompatibleUrl = QStringLiteral("http://localhost:11434/v1");
     QString claudeCompatibleUrl = QStringLiteral("https://api.anthropic.com/v1");
     QString acpUrl = QStringLiteral("http://localhost:8080");
