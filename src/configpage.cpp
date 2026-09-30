@@ -64,6 +64,7 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     m_provider->addItem(providerLabel(Provider::Grok), providerId(Provider::Grok));
     m_provider->addItem(providerLabel(Provider::OpenAI), providerId(Provider::OpenAI));
     m_provider->addItem(providerLabel(Provider::OpenRouter), providerId(Provider::OpenRouter));
+    m_provider->addItem(providerLabel(Provider::DeepSeek), providerId(Provider::DeepSeek));
     m_provider->addItem(providerLabel(Provider::OpenAICompatible), providerId(Provider::OpenAICompatible));
     m_provider->addItem(providerLabel(Provider::ClaudeCompatible), providerId(Provider::ClaudeCompatible));
     m_provider->addItem(providerLabel(Provider::Acp), providerId(Provider::Acp));
@@ -99,6 +100,12 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     m_openrouterKey = makeKey();
     m_openrouterModel = makeModelCombo();
     addProviderGroup(i18n("OpenRouter"), m_openrouterKey, m_openrouterModel);
+
+    m_deepseekKey = makeKey();
+    m_deepseekModel = makeModelCombo();
+    m_deepseekUrl = new QLineEdit(this);
+    m_deepseekUrl->setPlaceholderText(u"https://api.deepseek.com"_s);
+    addProviderGroup(i18n("DeepSeek"), m_deepseekKey, m_deepseekModel, m_deepseekUrl);
 
     m_openaiCompatibleKey = makeKey();
     m_openaiCompatibleModel = makeModelCombo();
@@ -436,14 +443,17 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     connect(m_grokKey, &QLineEdit::textChanged, this, markChanged);
     connect(m_openaiKey, &QLineEdit::textChanged, this, markChanged);
     connect(m_openrouterKey, &QLineEdit::textChanged, this, markChanged);
+    connect(m_deepseekKey, &QLineEdit::textChanged, this, markChanged);
     connect(m_openaiCompatibleKey, &QLineEdit::textChanged, this, markChanged);
     connect(m_claudeCompatibleKey, &QLineEdit::textChanged, this, markChanged);
     connect(m_grokModel, QOverload<int>::of(&QComboBox::currentIndexChanged), this, markChanged);
     connect(m_openaiModel, QOverload<int>::of(&QComboBox::currentIndexChanged), this, markChanged);
     connect(m_openrouterModel, QOverload<int>::of(&QComboBox::currentIndexChanged), this, markChanged);
+    connect(m_deepseekModel, QOverload<int>::of(&QComboBox::currentIndexChanged), this, markChanged);
     connect(m_openaiCompatibleModel, QOverload<int>::of(&QComboBox::currentIndexChanged), this, markChanged);
     connect(m_claudeCompatibleModel, QOverload<int>::of(&QComboBox::currentIndexChanged), this, markChanged);
     connect(m_acpModel, QOverload<int>::of(&QComboBox::currentIndexChanged), this, markChanged);
+    connect(m_deepseekUrl, &QLineEdit::textChanged, this, markChanged);
     connect(m_openaiCompatibleUrl, &QLineEdit::textChanged, this, markChanged);
     connect(m_claudeCompatibleUrl, &QLineEdit::textChanged, this, markChanged);
     connect(m_acpUrl, &QLineEdit::textChanged, this, markChanged);
@@ -465,6 +475,9 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
                         break;
                     case Provider::OpenRouter:
                         s.openrouterApiKey = key;
+                        break;
+                    case Provider::DeepSeek:
+                        s.deepseekApiKey = key;
                         break;
                     case Provider::OpenAICompatible:
                         s.openaiCompatibleApiKey = key;
@@ -490,6 +503,7 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     fetchModelsForProvider(Provider::Grok, m_grokKey, m_grokModel);
     fetchModelsForProvider(Provider::OpenAI, m_openaiKey, m_openaiModel);
     fetchModelsForProvider(Provider::OpenRouter, m_openrouterKey, m_openrouterModel);
+    fetchModelsForProvider(Provider::DeepSeek, m_deepseekKey, m_deepseekModel);
     fetchModelsForProvider(Provider::OpenAICompatible, m_openaiCompatibleKey, m_openaiCompatibleModel);
     fetchModelsForProvider(Provider::ClaudeCompatible, m_claudeCompatibleKey, m_claudeCompatibleModel);
     fetchModelsForProvider(Provider::Acp, m_acpKey, m_acpModel);
@@ -578,15 +592,18 @@ void KateAiConfigPage::apply()
     s.grokApiKey = m_grokKey->text();
     s.openaiApiKey = m_openaiKey->text();
     s.openrouterApiKey = m_openrouterKey->text();
+    s.deepseekApiKey = m_deepseekKey->text();
     s.openaiCompatibleApiKey = m_openaiCompatibleKey->text();
     s.claudeCompatibleApiKey = m_claudeCompatibleKey->text();
     s.acpApiKey = m_acpKey->text();
     s.grokModel = m_grokModel->currentText().trimmed();
     s.openaiModel = m_openaiModel->currentText().trimmed();
     s.openrouterModel = m_openrouterModel->currentText().trimmed();
+    s.deepseekModel = m_deepseekModel->currentText().trimmed();
     s.openaiCompatibleModel = m_openaiCompatibleModel->currentText().trimmed();
     s.claudeCompatibleModel = m_claudeCompatibleModel->currentText().trimmed();
     s.acpModel = m_acpModel->currentText().trimmed();
+    s.deepseekUrl = m_deepseekUrl->text().trimmed();
     s.openaiCompatibleUrl = m_openaiCompatibleUrl->text().trimmed();
     s.claudeCompatibleUrl = m_claudeCompatibleUrl->text().trimmed();
     s.acpUrl = m_acpUrl->text().trimmed();
@@ -661,6 +678,7 @@ void KateAiConfigPage::reset()
     m_grokKey->setText(s.grokApiKey);
     m_openaiKey->setText(s.openaiApiKey);
     m_openrouterKey->setText(s.openrouterApiKey);
+    m_deepseekKey->setText(s.deepseekApiKey);
     m_openaiCompatibleKey->setText(s.openaiCompatibleApiKey);
     m_claudeCompatibleKey->setText(s.claudeCompatibleApiKey);
     m_acpKey->setText(s.acpApiKey);
@@ -669,6 +687,7 @@ void KateAiConfigPage::reset()
     updateModelCombo(Provider::Grok);
     updateModelCombo(Provider::OpenAI);
     updateModelCombo(Provider::OpenRouter);
+    updateModelCombo(Provider::DeepSeek);
     updateModelCombo(Provider::OpenAICompatible);
     updateModelCombo(Provider::ClaudeCompatible);
     updateModelCombo(Provider::Acp);
@@ -676,10 +695,12 @@ void KateAiConfigPage::reset()
     m_grokModel->setCurrentText(s.grokModel);
     m_openaiModel->setCurrentText(s.openaiModel);
     m_openrouterModel->setCurrentText(s.openrouterModel);
+    m_deepseekModel->setCurrentText(s.deepseekModel);
     m_openaiCompatibleModel->setCurrentText(s.openaiCompatibleModel);
     m_claudeCompatibleModel->setCurrentText(s.claudeCompatibleModel);
     m_acpModel->setCurrentText(s.acpModel);
 
+    m_deepseekUrl->setText(s.deepseekUrl);
     m_openaiCompatibleUrl->setText(s.openaiCompatibleUrl);
     m_claudeCompatibleUrl->setText(s.claudeCompatibleUrl);
     m_acpUrl->setText(s.acpUrl);
@@ -698,6 +719,7 @@ void KateAiConfigPage::reset()
         fetchIfKey(Provider::Grok, s.grokApiKey);
         fetchIfKey(Provider::OpenAI, s.openaiApiKey);
         fetchIfKey(Provider::OpenRouter, s.openrouterApiKey);
+        fetchIfKey(Provider::DeepSeek, s.deepseekApiKey);
         fetchIfKey(Provider::OpenAICompatible, s.openaiCompatibleApiKey);
         fetchIfKey(Provider::ClaudeCompatible, s.claudeCompatibleApiKey);
         fetchIfKey(Provider::Acp, s.acpApiKey);
@@ -776,6 +798,9 @@ void KateAiConfigPage::updateModelCombo(Provider provider)
             break;
         case Provider::OpenRouter:
             combo = m_openrouterModel;
+            break;
+        case Provider::DeepSeek:
+            combo = m_deepseekModel;
             break;
         case Provider::OpenAICompatible:
             combo = m_openaiCompatibleModel;
