@@ -180,7 +180,7 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     m_maxExpandedToolCards->setRange(0, 200);
     m_maxExpandedToolCards->setSpecialValueText(i18n("Always expand all"));
     m_maxExpandedToolCards->setSuffix(i18n(" cards"));
-    securityForm->addRow(i18n("Expanded tool cards before auto-collapse:"), m_maxExpandedToolCards);
+    securityForm->addRow(i18n("Recent Kate AI chats kept expanded:"), m_maxExpandedToolCards);
 
     tabs->addTab(securityWidget, i18n("Security & Permissions"));
 

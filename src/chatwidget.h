@@ -122,7 +122,14 @@ private:
     void showReasoningEffortMenu();
     void setThinkingIndicator(bool show);
     void setWorkingIndicator(bool show);
+    void tickIndicators();
+    void syncIndicatorAnimation();
+    bool registerThinkingBlock(QWidget *block, QTextBrowser *browser, QPushButton *toggle);
+    void applyTranscriptCollapse();
+    void clearTranscriptContents();
+    void reflowTranscriptMedia();
     void scheduleStreamHeightUpdate();
+    static bool isInternalUserMessage(const QString &text);
     void startThinkingPacer();
     void stopThinkingPacer();
     void flushThinkingPacer();
@@ -192,16 +199,29 @@ private:
     QHash<QCheckBox *, QString> m_planSteps;
 
     QHash<QString, ToolCallWidget *> m_toolCallWidgets;
+    QList<QPointer<ToolCallWidget>> m_toolCallOrder;
     QPointer<QPushButton> m_scrollToBottomBtn;
     QPointer<QPushButton> m_activeAssistantCopyBtn;
+    QPointer<QLabel> m_activeAssistantPulse;
     bool m_userScrolledUp = true;
     QTimer *m_streamHeightTimer = nullptr;
+
+    struct ThinkingBlockRef {
+        QPointer<QWidget> block;
+        QPointer<QTextBrowser> browser;
+        QPointer<QPushButton> toggle;
+    };
+    QList<ThinkingBlockRef> m_thinkingBlocks;
 
     // Dynamic status indicators at bottom of chat
     QLabel *m_thinkingIndicator = nullptr;
     QLabel *m_workingIndicator = nullptr;
+    QTimer *m_indicatorTimer = nullptr;
+    int m_indicatorTick = 0;
+    QString m_workingLabelBase;
     bool m_isThinking = false;
     bool m_isWorking = false;
+    bool m_isStreaming = false;
 
     // Edit tracker for AcceptEdits permission mode
     EditTracker *m_editTracker = nullptr;

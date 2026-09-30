@@ -15,14 +15,68 @@
 #include <QPropertyAnimation>
 #include <QPushButton>
 #include <QResizeEvent>
+#include <QShowEvent>
 #include <QSizePolicy>
 #include <QStringList>
 #include <QTextBrowser>
+#include <QTextDocument>
 #include <QTextOption>
+#include <QTimer>
 #include <QVBoxLayout>
 #include <algorithm>
 
 using namespace Qt::Literals::StringLiterals;
+
+namespace
+{
+
+// Wrap at spaces when possible, otherwise at the character that would overflow.
+QString wrapToWidth(const QString &text, const QFontMetrics &fm, int firstWidth, int nextWidth)
+{
+    QString result;
+    QString line;
+    int maxW = std::max(8, firstWidth);
+
+    for (int i = 0; i < text.size(); ++i) {
+        const QChar ch = text.at(i);
+        if (ch == u'\n') {
+            result += line;
+            result += u'\n';
+            line.clear();
+            maxW = std::max(8, nextWidth);
+            continue;
+        }
+        const QString trial = line + ch;
+        if (fm.horizontalAdvance(trial) <= maxW || line.isEmpty()) {
+            line = trial;
+            continue;
+        }
+        const int sp = line.lastIndexOf(u' ');
+        if (sp > 0) {
+            result += line.left(sp);
+            result += u'\n';
+            line = line.mid(sp + 1) + ch;
+        } else {
+            result += line;
+            result += u'\n';
+            line = QString(ch);
+        }
+        maxW = std::max(8, nextWidth);
+    }
+    result += line;
+    return result;
+}
+
+int fittedDocumentHeight(QTextDocument *doc, int viewportWidth, int extra)
+{
+    if (!doc) {
+        return extra;
+    }
+    doc->setTextWidth(std::max(40, viewportWidth));
+    return std::max(1, static_cast<int>(doc->size().height()) + extra);
+}
+
+} // namespace
 
 namespace KateAi
 {
@@ -53,9 +107,11 @@ ToolCallWidget::ToolCallWidget(const QString &toolCallId, QWidget *parent)
     headerLayout->addWidget(m_icon);
 
     m_title = new QLabel(this);
-    m_title->setWordWrap(false);
+    m_title->setWordWrap(true);
+    m_title->setTextFormat(Qt::RichText);
     m_title->setMinimumWidth(0);
     m_title->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    m_title->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
     headerLayout->addWidget(m_title, 1);
 
     m_status = new QLabel(this);
@@ -120,11 +176,12 @@ ToolCallWidget::ToolCallWidget(const QString &toolCallId, QWidget *parent)
 
     m_details = new QPlainTextEdit(this);
     m_details->setReadOnly(true);
-    m_details->setMaximumHeight(200);
     m_details->setMinimumWidth(0);
     m_details->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     m_details->setLineWrapMode(QPlainTextEdit::WidgetWidth);
     m_details->setWordWrapMode(QTextOption::WrapAnywhere);
+    m_details->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_details->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_details->setStyleSheet(
         u"QPlainTextEdit {"
         u"  background-color: #1a1a1a;"
@@ -166,7 +223,7 @@ void ToolCallWidget::setToolInfo(const QString &toolName, const QString &summary
     m_icon->setText(iconForTool(toolName));
     m_titleText = summary.isEmpty() ? i18n("Running…") : summary;
     m_title->setToolTip(u"%1 - %2"_s.arg(toolName, m_titleText));
-    updateTitleElide();
+    updateTitleText();
     if (!isDiffTool(toolName) && !summary.isEmpty()) {
         setPreviewText(summary);
     }
@@ -207,12 +264,8 @@ void ToolCallWidget::showPreviewHtml(const QString &html)
     }
 
     m_describeDiff->setHtml(html);
-    m_describeDiff->show();
-    reflowPreview();
-
-    if (m_expanded) {
-        m_detailsContainer->setMaximumHeight(m_details->sizeHint().height() + 16);
-    }
+    syncPreviewVisibility();
+    scheduleReflow();
 }
 
 QString ToolCallWidget::plainToHtml(const QString &text) const
@@ -256,6 +309,15 @@ QString ToolCallWidget::escapeHtml(const QString &s) const
     return out;
 }
 
+void ToolCallWidget::setActivityFrame(int frame)
+{
+    if (m_finished || !m_status) {
+        return;
+    }
+    static const QChar kFrames[] = {u'◐', u'◓', u'◑', u'◒'};
+    m_status->setText(QString(kFrames[frame & 3]));
+}
+
 void ToolCallWidget::setFinished(const ToolResult &result)
 {
     m_finished = true;
@@ -269,20 +331,23 @@ void ToolCallWidget::setFinished(const ToolResult &result)
         m_status->setStyleSheet(u"QLabel { color: #ef4444; font-size: 14px; }"_s);
     }
 
-    // Populate details with the output (truncated for very long outputs)
+    // Truncate very long outputs. File-edit cards keep the diff in the marine
+    // preview and put the tool result in details. Other tools put output only
+    // in the preview so expanding does not stack a duplicate copy.
     const QString output = result.output.length() > 4000
         ? result.output.left(4000) + i18n("\n\n… (truncated)")
         : result.output;
-    m_details->setPlainText(output);
-
-    if (!m_hasDiffPreview && !output.trimmed().isEmpty()) {
-        setPreviewText(output);
+    if (m_hasDiffPreview) {
+        m_details->setPlainText(output);
+    } else {
+        m_details->clear();
+        if (!output.trimmed().isEmpty()) {
+            setPreviewText(output);
+        }
     }
 
-    // Update expanded height if currently expanded
-    if (m_expanded) {
-        m_detailsContainer->setMaximumHeight(m_details->sizeHint().height() + 16);
-    }
+    applyDetailsHeight();
+    scheduleReflow();
     updateStyle();
 }
 
@@ -292,15 +357,61 @@ void ToolCallWidget::setExpandedHeight(int h)
     m_detailsContainer->setMaximumHeight(h);
 }
 
+void ToolCallWidget::setExpanded(bool expanded)
+{
+    if (m_expanded == expanded) {
+        syncPreviewVisibility();
+        return;
+    }
+    m_expanded = expanded;
+    if (m_expandBtn) {
+        m_expandBtn->setText(m_expanded ? u"▾"_s : u"▸"_s);
+    }
+    if (m_animation) {
+        m_animation->stop();
+    }
+    applyDetailsHeight();
+    syncPreviewVisibility();
+    scheduleReflow();
+}
+
+bool ToolCallWidget::isFileEditTool() const
+{
+    return isDiffTool(m_toolName) || m_hasDiffPreview;
+}
+
+void ToolCallWidget::syncPreviewVisibility()
+{
+    if (!m_describeDiff) {
+        return;
+    }
+    // File-edit diffs stay visible even when the card is collapsed.
+    const bool show = m_hasDiffPreview || m_expanded;
+    if (show && !m_describeDiff->toPlainText().isEmpty()) {
+        m_describeDiff->show();
+        reflowPreview();
+    } else if (!m_hasDiffPreview) {
+        m_describeDiff->hide();
+    }
+}
+
 void ToolCallWidget::toggleExpand()
 {
     m_expanded = !m_expanded;
     m_expandBtn->setText(m_expanded ? u"▾"_s : u"▸"_s);
+    syncPreviewVisibility();
+
+    if (!m_details || m_details->toPlainText().isEmpty()) {
+        applyDetailsHeight();
+        scheduleReflow();
+        return;
+    }
 
     m_animation->stop();
     if (m_expanded) {
+        reflowDetails();
         m_animation->setStartValue(0);
-        m_animation->setEndValue(m_details->sizeHint().height() + 16);
+        m_animation->setEndValue(detailsFitHeight());
     } else {
         m_animation->setStartValue(m_detailsContainer->height());
         m_animation->setEndValue(0);
@@ -370,22 +481,96 @@ QSize ToolCallWidget::sizeHint() const
 void ToolCallWidget::resizeEvent(QResizeEvent *event)
 {
     QWidget::resizeEvent(event);
-    if (event->size().width() == event->oldSize().width()) {
+    if (event->oldSize().width() > 0 && event->size().width() == event->oldSize().width()) {
         return;
     }
-    updateTitleElide();
-    reflowPreview();
+    scheduleReflow();
 }
 
-void ToolCallWidget::updateTitleElide()
+void ToolCallWidget::showEvent(QShowEvent *event)
+{
+    QWidget::showEvent(event);
+    scheduleReflow();
+}
+
+void ToolCallWidget::scheduleReflow()
+{
+    if (!m_reflowTimer) {
+        m_reflowTimer = new QTimer(this);
+        m_reflowTimer->setSingleShot(true);
+        m_reflowTimer->setInterval(0);
+        connect(m_reflowTimer, &QTimer::timeout, this, &ToolCallWidget::reflowNow);
+    }
+    m_reflowTimer->start();
+}
+
+void ToolCallWidget::reflowNow()
+{
+    updateTitleText();
+    reflowPreview();
+    applyDetailsHeight();
+    updateGeometry();
+}
+
+void ToolCallWidget::applyDetailsHeight()
+{
+    if (!m_detailsContainer) {
+        return;
+    }
+    if (m_animation) {
+        m_animation->stop();
+    }
+    if (m_expanded && m_details && !m_details->toPlainText().isEmpty()) {
+        reflowDetails();
+        m_detailsContainer->setMaximumHeight(detailsFitHeight());
+    } else {
+        m_detailsContainer->setMaximumHeight(0);
+    }
+}
+
+void ToolCallWidget::updateTitleText()
 {
     if (!m_title) {
         return;
     }
-    const int avail = std::max(48, width() - 86);
+
+    // Icon 16 + status 20 + expand 20 + 3× spacing 8 + header margins 20.
+    const int chrome = 100;
+    const int avail = std::max(48, width() - chrome);
     const QFontMetrics fm(m_title->font());
-    const QString shown = fm.elidedText(m_titleText, Qt::ElideMiddle, avail);
-    m_title->setText(u"<b>%1</b> - %2"_s.arg(escapeHtml(m_toolName), escapeHtml(shown)));
+    const int prefixW = fm.horizontalAdvance(m_toolName + u" - "_s) + 8;
+    const int firstW = std::max(24, avail - prefixW);
+    const QString wrapped = wrapToWidth(m_titleText, fm, firstW, avail);
+    QString cmdHtml = escapeHtml(wrapped);
+    cmdHtml.replace(u'\n', u"<br>"_s);
+    m_title->setText(u"<b>%1</b> - %2"_s.arg(escapeHtml(m_toolName), cmdHtml));
+
+    const int lines = std::max(1, static_cast<int>(wrapped.count(u'\n')) + 1);
+    m_title->setMinimumHeight(fm.lineSpacing() * lines + 2);
+}
+
+int ToolCallWidget::previewFitHeight() const
+{
+    if (!m_describeDiff) {
+        return 0;
+    }
+    int vw = m_describeDiff->viewport()->width();
+    if (vw < 40) {
+        vw = std::max(40, width() - 8);
+    }
+    return fittedDocumentHeight(m_describeDiff->document(), vw, 20);
+}
+
+int ToolCallWidget::detailsFitHeight() const
+{
+    if (!m_details) {
+        return 16;
+    }
+    int vw = m_details->viewport()->width();
+    if (vw < 40) {
+        vw = std::max(40, width() - 28);
+    }
+    return fittedDocumentHeight(m_details->document(), vw, 16) + 16;
 }
 
 void ToolCallWidget::reflowPreview()
@@ -393,10 +578,21 @@ void ToolCallWidget::reflowPreview()
     if (!m_describeDiff || m_describeDiff->isHidden()) {
         return;
     }
-    const int width = std::max(40, m_describeDiff->viewport()->width());
-    m_describeDiff->document()->setTextWidth(width);
-    const int h = static_cast<int>(m_describeDiff->document()->size().height()) + 16;
-    m_describeDiff->setFixedHeight(std::min(400, std::max(50, h)));
+    m_describeDiff->setFixedHeight(previewFitHeight());
+    updateGeometry();
+}
+
+void ToolCallWidget::reflowDetails()
+{
+    if (!m_details) {
+        return;
+    }
+    const int containerH = detailsFitHeight();
+    m_details->setFixedHeight(std::max(1, containerH - 16));
+    if (m_expanded) {
+        m_detailsContainer->setMaximumHeight(containerH);
+    }
+    updateGeometry();
 }
 
 bool ToolCallWidget::eventFilter(QObject *watched, QEvent *event)
