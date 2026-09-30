@@ -252,10 +252,20 @@ namespace KateAi
     } else {
         token = rest.section(u' ', 0, 0);
     }
-    const int slash = token.lastIndexOf(u'/');
+    int slash = token.lastIndexOf(u'/');
+    const int backslash = token.lastIndexOf(u'\\');
+    if (backslash > slash) {
+        slash = backslash;
+    }
     if (slash >= 0) {
         token = token.mid(slash + 1);
     }
+#ifdef Q_OS_WIN
+    if (token.endsWith(u".exe"_s, Qt::CaseInsensitive) || token.endsWith(u".bat"_s, Qt::CaseInsensitive)
+        || token.endsWith(u".cmd"_s, Qt::CaseInsensitive) || token.endsWith(u".com"_s, Qt::CaseInsensitive)) {
+        token = token.left(token.lastIndexOf(u'.'));
+    }
+#endif
     return token;
     }
 
@@ -265,11 +275,13 @@ bool Sandbox::isReadOnlyCommand(const QString &command) const
         u"ls"_s,     u"cat"_s,     u"pwd"_s,     u"date"_s,      u"whoami"_s, u"hostname"_s, u"uptime"_s, u"ps"_s,
         u"head"_s,   u"tail"_s,    u"wc"_s,      u"sort"_s,      u"uniq"_s,   u"tr"_s,       u"cut"_s,    u"grep"_s,
         u"rg"_s,     u"find"_s,    u"file"_s,    u"stat"_s,      u"diff"_s,   u"echo"_s,     u"printf"_s, u"which"_s,
-        u"type"_s,   u"env"_s,     u"printenv"_s,
+        u"type"_s,   u"env"_s,     u"printenv"_s, u"dir"_s,      u"where"_s,  u"where.exe"_s,
+        u"Get-ChildItem"_s, u"Get-Content"_s, u"Get-Location"_s, u"Get-Date"_s, u"Get-Process"_s,
     };
 
     const QString cmd = command.trimmed();
-    static const QRegularExpression writers(uR"(\b(?:tee|rm|mv|cp|chmod|chown|mkdir|touch|dd)\b)"_s);
+    static const QRegularExpression writers(
+        uR"(\b(?:tee|rm|mv|cp|chmod|chown|mkdir|touch|dd|del|erase|rd|rmdir|copy|move|ren|rename|New-Item|Set-Content|Out-File|Remove-Item|Move-Item|Copy-Item)\b)"_s);
     if (writers.match(cmd).hasMatch()) {
         return false;
     }
@@ -299,7 +311,8 @@ bool Sandbox::isDangerousCommand(const QString &command) const
 {
     const QString cmd = command.trimmed();
     static const QRegularExpression dangerous(
-        uR"(\b(?:sudo|su|chmod\s+-R|chown\s+-R|mkfs|shutdown|reboot|systemctl|useradd|userdel|passwd)\b)"_s);
+        uR"(\b(?:sudo|su|chmod\s+-R|chown\s+-R|mkfs|shutdown|reboot|systemctl|useradd|userdel|passwd|diskpart|format|cipher|reg\s+delete|Remove-Item\s+(-Recurse|-Force)|rmdir\s+/s|del\s+/s)\b)"_s,
+        QRegularExpression::CaseInsensitiveOption);
     return dangerous.match(cmd).hasMatch() || isAlwaysDeniedCommand(cmd);
 }
 
@@ -307,13 +320,192 @@ bool Sandbox::isAlwaysDeniedCommand(const QString &command) const
 {
     const QString cmd = command.trimmed();
     static const QRegularExpression denied(
-        uR"((rm\s+(-[a-zA-Z]*f[a-zA-Z]*\s+)?(--no-preserve-root\s+)?/(\s|$))|(\bmkfs\b)|(\bdd\s+.*\bof=/dev/)|(:\(\)\s*\{\s*:\|:&\s*;\s*\})|(\b(curl|wget)\b.*\|\s*(sh|bash|zsh)))"_s);
+        uR"((rm\s+(-[a-zA-Z]*f[a-zA-Z]*\s+)?(--no-preserve-root\s+)?/(\s|$))|(\bmkfs\b)|(\bdd\s+.*\bof=/dev/)|(:\(\)\s*\{\s*:\|:&\s*;\s*\})|(\b(curl|wget)\b.*\|\s*(sh|bash|zsh|cmd|powershell|pwsh))|(\bformat\s+[a-zA-Z]:)|(\bdiskpart\b)|(\brmdir\s+/s\s+/q\s+[a-zA-Z]:\\)|(\bRemove-Item\s+.*-Recurse.*[A-Z]:\\))"_s,
+        QRegularExpression::CaseInsensitiveOption);
     return denied.match(cmd).hasMatch();
 }
+
+static QString firstExisting(const QStringList &candidates)
+{
+    for (const QString &path : candidates) {
+        if (path.isEmpty()) {
+            continue;
+        }
+        const QFileInfo info(path);
+        if (info.exists() && info.isExecutable()) {
+            return path;
+        }
+    }
+    return {};
+}
+
+static QString findShellExecutable()
+{
+#ifdef Q_OS_WIN
+    const QStringList names = {u"bash"_s, u"sh"_s, u"pwsh"_s, u"powershell"_s, u"cmd"_s};
+    for (const QString &name : names) {
+        const QString found = QStandardPaths::findExecutable(name);
+        if (!found.isEmpty()) {
+            return found;
+        }
+    }
+    const QString extra = firstExisting({
+        u"C:/Program Files/Git/bin/bash.exe"_s,
+        u"C:/Program Files (x86)/Git/bin/bash.exe"_s,
+        u"C:/Windows/System32/WindowsPowerShell/v1.0/powershell.exe"_s,
+        u"C:/Windows/System32/cmd.exe"_s,
+    });
+    return extra.isEmpty() ? u"cmd.exe"_s : extra;
+#else
+    QString shell = QStandardPaths::findExecutable(u"sh"_s);
+    if (shell.isEmpty()) {
+        shell = firstExisting({u"/bin/sh"_s, u"/usr/bin/sh"_s, u"/usr/local/bin/sh"_s});
+    }
+    return shell.isEmpty() ? u"/bin/sh"_s : shell;
+#endif
+}
+
+static QStringList unsandboxedArgv(const QString &command)
+{
+    const QString shell = findShellExecutable();
+#ifdef Q_OS_WIN
+    const QString base = QFileInfo(shell).completeBaseName();
+    if (base.compare(u"cmd"_s, Qt::CaseInsensitive) == 0) {
+        return {shell, u"/S"_s, u"/C"_s, command};
+    }
+    if (base.compare(u"powershell"_s, Qt::CaseInsensitive) == 0 || base.compare(u"pwsh"_s, Qt::CaseInsensitive) == 0) {
+        return {shell, u"-NoProfile"_s, u"-NonInteractive"_s, u"-Command"_s, command};
+    }
+#endif
+    return {shell, u"-lc"_s, command};
+}
+
+#if defined(Q_OS_MACOS)
+static QString seatbeltQuote(const QString &path)
+{
+    QString quoted = path;
+    quoted.replace(u'\\', u"\\\\"_s);
+    quoted.replace(u'"', u"\\\""_s);
+    return quoted;
+}
+#endif
+
+#if defined(Q_OS_LINUX)
+static QStringList wrapLinuxBubblewrap(const QString &workspaceRoot, SandboxProfile profile, const QString &command, QString *error)
+{
+    const QString bwrap = QStandardPaths::findExecutable(u"bwrap"_s);
+    if (bwrap.isEmpty()) {
+        if (error) {
+            *error = u"bubblewrap (bwrap) is required for sandboxed commands and was not found."_s;
+        }
+        return {};
+    }
+
+    const bool readOnlyFs = profile == SandboxProfile::ReadOnly;
+
+    // Never use the host absolute path as a bwrap destination. Intermediate
+    // symlinks (common for /home) or special mounts make bwrap fail with
+    // "Can't mkdir parents … Permission denied". Zed and other working
+    // sandboxes always mount the project at a fixed shallow path instead.
+    //
+    // Strict              → /workspace under a clean tmpfs root
+    // Workspace/ReadOnly  → /tmp/kateai-workspace (under a re-bound writable /tmp)
+    const QString sandboxWorkspace =
+        (profile == SandboxProfile::Strict) ? u"/workspace"_s : u"/tmp/kateai-workspace"_s;
+
+    QStringList args;
+    args << bwrap << u"--die-with-parent"_s << u"--unshare-pid"_s << u"--unshare-ipc"_s << u"--unshare-uts"_s;
+
+    if (profile == SandboxProfile::Strict) {
+        args << u"--tmpfs"_s << u"/"_s;
+        const QStringList runtimeDirectories = {
+            u"/usr"_s, u"/lib"_s, u"/lib64"_s, u"/bin"_s, u"/sbin"_s,
+        };
+        for (const QString &directory : runtimeDirectories) {
+            const QFileInfo info(directory);
+            if (info.exists() && info.isDir() && !info.isSymLink()) {
+                args << u"--ro-bind"_s << directory << directory;
+            }
+        }
+        args << u"--bind"_s << workspaceRoot << sandboxWorkspace;
+        args << u"--bind"_s << u"/tmp"_s << u"/tmp"_s;
+        args << u"--proc"_s << u"/proc"_s << u"--dev"_s << u"/dev"_s;
+        args << u"--chdir"_s << sandboxWorkspace;
+        args << u"--unshare-net"_s;
+    } else {
+        args << u"--ro-bind"_s << u"/"_s << u"/"_s;
+        args << u"--proc"_s << u"/proc"_s << u"--dev"_s << u"/dev"_s;
+        args << u"--bind"_s << u"/tmp"_s << u"/tmp"_s;
+        args << (readOnlyFs ? u"--ro-bind"_s : u"--bind"_s) << workspaceRoot << sandboxWorkspace;
+        args << u"--chdir"_s << sandboxWorkspace;
+        if (readOnlyFs) {
+            args << u"--unshare-net"_s;
+        }
+    }
+
+    args << u"--"_s << findShellExecutable() << u"-lc"_s << command;
+    return args;
+}
+#endif
+
+#if defined(Q_OS_MACOS)
+static QStringList wrapMacSandboxExec(const QString &workspaceRoot, SandboxProfile profile, const QString &command, QString *error)
+{
+    QString sandboxExec = QStandardPaths::findExecutable(u"sandbox-exec"_s);
+    if (sandboxExec.isEmpty()) {
+        sandboxExec = u"/usr/bin/sandbox-exec"_s;
+    }
+    if (!QFileInfo(sandboxExec).isExecutable()) {
+        if (error) {
+            *error = u"sandbox-exec is required for sandboxed commands on macOS and was not found."_s;
+        }
+        return {};
+    }
+
+    const QString ws = seatbeltQuote(QDir::cleanPath(workspaceRoot));
+    QString profileText = u"(version 1)\n(allow default)\n"_s;
+    if (profile == SandboxProfile::ReadOnly) {
+        profileText += u"(deny file-write*)\n"
+                       "(allow file-write* (subpath \"/tmp\") (subpath \"/private/tmp\") "
+                       "(subpath \"/private/var/folders\") (subpath \"/var/folders\") (subpath \"/dev\"))\n"
+                       "(deny network*)\n"_s;
+    } else if (profile == SandboxProfile::Strict) {
+        profileText = u"(version 1)\n(deny default)\n"
+                      "(allow process*)\n(allow signal)\n(allow sysctl-read)\n(allow mach-lookup)\n"
+                      "(allow ipc-posix-shm)\n(allow file-read-metadata)\n"_s;
+        profileText += u"(allow file-read* (subpath \"/usr\") (subpath \"/bin\") (subpath \"/sbin\") "
+                       "(subpath \"/opt\") (subpath \"/Library\") (subpath \"/System\") "
+                       "(subpath \"/private/tmp\") (subpath \"/tmp\") (subpath \"/dev\") (subpath \""_s
+            + ws + u"\"))\n"_s;
+        profileText += u"(allow file-write* (subpath \""_s + ws
+            + u"\") (subpath \"/tmp\") (subpath \"/private/tmp\") "
+              "(subpath \"/private/var/folders\") (subpath \"/var/folders\") (subpath \"/dev\"))\n"
+              "(deny network*)\n"_s;
+    } else {
+        profileText += u"(deny file-write*)\n(allow file-write* (subpath \""_s + ws
+            + u"\") (subpath \"/tmp\") (subpath \"/private/tmp\") "
+              "(subpath \"/private/var/folders\") (subpath \"/var/folders\") (subpath \"/dev\"))\n"_s;
+    }
+
+    return {sandboxExec, u"-p"_s, profileText, findShellExecutable(), u"-lc"_s, command};
+}
+#endif
 
 bool Sandbox::bubblewrapAvailable() const
 {
     return !QStandardPaths::findExecutable(u"bwrap"_s).isEmpty();
+}
+
+bool Sandbox::isolationAvailable() const
+{
+#if defined(Q_OS_LINUX)
+    return bubblewrapAvailable();
+#elif defined(Q_OS_MACOS)
+    return QFileInfo(u"/usr/bin/sandbox-exec"_s).isExecutable()
+        || !QStandardPaths::findExecutable(u"sandbox-exec"_s).isEmpty();
+#else
+    return false;
+#endif
 }
 
 QStringList Sandbox::wrapCommand(const QString &command, QString *error) const
@@ -326,85 +518,16 @@ QStringList Sandbox::wrapCommand(const QString &command, QString *error) const
     }
 
     if (m_profile == SandboxProfile::Off) {
-        const QString shell = QStandardPaths::findExecutable(u"sh"_s).isEmpty() ? u"/bin/sh"_s : QStandardPaths::findExecutable(u"sh"_s);
-        return {shell, u"-lc"_s, command};
+        return unsandboxedArgv(command);
     }
 
-    const QString bwrap = QStandardPaths::findExecutable(u"bwrap"_s);
-    if (bwrap.isEmpty()) {
-        if (error) {
-            *error = u"bubblewrap (bwrap) is required for sandboxed commands and was not found."_s;
-        }
-        return {};
-    }
-
-    const bool readOnlyFs = m_profile == SandboxProfile::ReadOnly;
-
-    // Never use the host absolute path as a bwrap destination. Intermediate
-    // symlinks (common for /home) or special mounts make bwrap fail with
-    // "Can't mkdir parents … Permission denied". Zed and other working
-    // sandboxes always mount the project at a fixed shallow path instead.
-    //
-    // Strict              → /workspace under a clean tmpfs root
-    // Workspace/ReadOnly  → /tmp/kateai-workspace (under a re-bound writable /tmp)
-    const QString sandboxWorkspace =
-    (m_profile == SandboxProfile::Strict) ? u"/workspace"_s : u"/tmp/kateai-workspace"_s;
-
-    QStringList args;
-    args << bwrap << u"--die-with-parent"_s << u"--unshare-pid"_s << u"--unshare-ipc"_s << u"--unshare-uts"_s;
-
-    if (m_profile == SandboxProfile::Strict) {
-        // Minimal root: only the runtime needed for a shell + the project.
-        args << u"--tmpfs"_s << u"/"_s;
-        const QStringList runtimeDirectories = {
-            u"/usr"_s, u"/lib"_s, u"/lib64"_s, u"/bin"_s, u"/sbin"_s,
-        };
-        for (const QString &directory : runtimeDirectories) {
-            // Skip symlinks (e.g. /bin → /usr/bin) so we do not leave a
-            // dangling link under the tmpfs root.
-            const QFileInfo info(directory);
-            if (info.exists() && info.isDir() && !info.isSymLink()) {
-                args << u"--ro-bind"_s << directory << directory;
-            }
-        }
-        args << u"--bind"_s << m_workspaceRoot << sandboxWorkspace;
-        args << u"--bind"_s << u"/tmp"_s << u"/tmp"_s;
-        args << u"--proc"_s << u"/proc"_s << u"--dev"_s << u"/dev"_s;
-        args << u"--chdir"_s << sandboxWorkspace;
-        args << u"--unshare-net"_s;
-    } else {
-        // Workspace / ReadOnly: host root visible (read-only).
-        // Re-bind /tmp first so it is writable, then mount the project at a
-        // fixed shallow path under it. bwrap can create that destination;
-        // it cannot create deep parents of the original host path when any
-        // intermediate component is a symlink.
-        args << u"--ro-bind"_s << u"/"_s << u"/"_s;
-        args << u"--proc"_s << u"/proc"_s << u"--dev"_s << u"/dev"_s;
-        args << u"--bind"_s << u"/tmp"_s << u"/tmp"_s; // must come before the project bind
-        args << (readOnlyFs ? u"--ro-bind"_s : u"--bind"_s) << m_workspaceRoot << sandboxWorkspace;
-        args << u"--chdir"_s << sandboxWorkspace;
-        if (readOnlyFs) {
-            args << u"--unshare-net"_s;
-        }
-    }
-
-    // Use QStandardPaths to find the shell executable instead of hardcoded paths
-    QString shell = QStandardPaths::findExecutable(u"sh"_s);
-    if (shell.isEmpty()) {
-        // Fallback to common locations
-        const QStringList fallbackShells = {u"/bin/sh"_s, u"/usr/bin/sh"_s, u"/usr/local/bin/sh"_s};
-        for (const QString &fallback : fallbackShells) {
-            if (QFileInfo(fallback).exists() && QFileInfo(fallback).isExecutable()) {
-                shell = fallback;
-                break;
-            }
-        }
-    }
-    if (shell.isEmpty()) {
-        shell = u"/bin/sh"_s; // Last resort
-    }
-    args << u"--"_s << shell << u"-lc"_s << command;
-    return args;
+#if defined(Q_OS_LINUX)
+    return wrapLinuxBubblewrap(m_workspaceRoot, m_profile, command, error);
+#elif defined(Q_OS_MACOS)
+    return wrapMacSandboxExec(m_workspaceRoot, m_profile, command, error);
+#else
+    return unsandboxedArgv(command);
+#endif
 }
 
 } // namespace KateAi

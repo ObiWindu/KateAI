@@ -58,6 +58,7 @@ public:
 
     QStringList wrapCommand(const QString &command, QString *error) const;
     bool bubblewrapAvailable() const;
+    bool isolationAvailable() const;
 
     static QStringList defaultDenyGlobs();
     static bool globMatch(const QString &pattern, const QString &path);

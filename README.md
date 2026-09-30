@@ -145,7 +145,7 @@ Hard-denied commands (`rm -rf /`, `mkfs`, `dd` to devices, curl-piped-to-shell) 
 | **Strict** | Workspace only | Workspace only | Blocked |
 | **Off** | Deny globs only | Deny globs only | Unsandboxed |
 
-Shell runs under [bubblewrap](https://github.com/containers/bubblewrap) when the profile is not Off. File tools still work if `bwrap` is missing.
+Shell isolation depends on the OS: [bubblewrap](https://github.com/containers/bubblewrap) on Linux, `sandbox-exec` on macOS, and workspace-cwd plus command policy on Windows. File tools still work if the OS sandbox helper is missing.
 
 **Always blocked paths:** `.env`, `.env.*`, `*.pem`, `*.key`, `id_rsa` / `id_ecdsa` / `id_ed25519`, `.ssh/**`, AWS credentials, GnuPG, `.netrc`, `*.p12`, `*.pfx`. Extra deny globs can be added in settings.
 
@@ -193,15 +193,22 @@ On workspace load the plugin indexes files, symbols, imports, and relationships.
 
 ## Install from git
 
-Kate does not need a world-readable system plugin. The **default** install is per-user: the `.so` lives in your home directory, owned by you, mode `700`. Other accounts on the machine cannot read it. No `sudo`.
+Kate does not need a world-readable system plugin. The **default** install is per-user: the plugin lives in your home directory, owned by you, mode `700` on Unix. Other accounts on the machine cannot read it. No `sudo`.
 
 ```bash
 git clone https://github.com/KateAI/kate-ai.git
 cd kate-ai
+./install.sh --deps   # distro / Homebrew packages
 ./install.sh          # same as ./install.sh --user
 ```
 
-That installs:
+On Windows:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+That installs (Linux):
 
 | Path | Mode | Why |
 | --- | --- | --- |
@@ -226,17 +233,55 @@ Uninstall:
 ./uninstall.sh
 ```
 
+On Windows: `.\install.ps1 -Uninstall`.
+
 ### System-wide (every user on the machine)
 
-This is the only case that needs world-readable `755`: the file is owned by root, and Kate runs as a normal user, so “other” must be able to `mmap` it.
+This is the only case that needs world-readable `755` on Unix: the file is owned by root, and Kate runs as a normal user, so “other” must be able to `mmap` it.
 
 ```bash
 ./install.sh --system
 ```
 
+### Distro packages
+
+`./install.sh --package` builds a native package from this tree. Recipes live under `packaging/`.
+
+| Family | How |
+| --- | --- |
+| Arch / CachyOS / Manjaro | `./install.sh --deps && ./install.sh --package` (or `cd packaging/arch && makepkg -si` after placing `kateai-<ver>.tar.gz` from `packaging/mk-source-tarball.sh`) |
+| Fedora / Asahi Remix | `./install.sh --deps && ./install.sh --package` → RPM under `packaging/dist/` |
+| Debian / Ubuntu 25.04+ | `./install.sh --deps && ./install.sh --package` → `.deb` under `packaging/dist/` |
+
+Then install the artifact with `pacman -U`, `dnf install`, or `apt install ./kateai_*.deb`.
+
+### macOS
+
+Install Kate from Homebrew (`brew install --cask kate`) and the KF6/Qt build stack, then:
+
+```bash
+./install.sh --deps
+./install.sh
+```
+
+The script copies `kateai.so` into `~/Library/Application Support/kate/lib/qt6/plugins/kf6/ktexteditor/` and, when the app bundle is writable, next to Kate.app’s other ktexteditor plugins. A LaunchAgent prepends `QT_PLUGIN_PATH` for GUI Kate.
+
+A Homebrew-built plugin may not load in the Craft-built Kate.app. For a matching ABI, build with [KDE Craft](https://develop.kde.org/docs/getting-started/building/craft/) using `packaging/craft/kateai.py`.
+
+### Windows
+
+Kate for Windows is a Craft/MSVC build. The plugin has to use the same toolchain.
+
+1. Install [KDE Craft](https://develop.kde.org/docs/getting-started/building/craft/) and Kate.
+2. Copy `packaging/craft/kateai.py` into your Craft blueprints tree (for example `extragear/kateai/kateai.py`).
+3. In the Craft shell: `craft kateai`
+4. Or from a Craft shell in this repo: `powershell -ExecutionPolicy Bypass -File .\install.ps1`
+
+`install.ps1` copies `kateai.dll` into Kate’s `kf6\ktexteditor` directory when it can write there, otherwise into `%LOCALAPPDATA%\KateAI\plugins` and sets the user `QT_PLUGIN_PATH`. The Microsoft Store Kate is not supported.
+
 ### Manual user install
 
-Prefer `./install.sh`. CMake’s relative `PATH` cache can otherwise install into the source tree. The script copies the built `.so` itself:
+Prefer `./install.sh`. CMake’s relative `PATH` cache can otherwise install into the source tree. The script copies the built plugin itself:
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -247,13 +292,15 @@ install -m 700 build/bin/kf6/ktexteditor/kateai.so ~/.local/lib/qt6/plugins/kf6/
 
 ### Dependencies
 
-| Distro | Packages |
+| Platform | Packages |
 | --- | --- |
-| Arch / CachyOS / Manjaro | `kate extra-cmake-modules qt6-base kf6-ktexteditor kf6-kcoreaddons kf6-ki18n kf6-kxmlgui kf6-kconfigwidgets bubblewrap` |
-| Fedora | `kate extra-cmake-modules qt6-qtbase-devel kf6-ktexteditor-devel kf6-kcoreaddons-devel kf6-ki18n-devel bubblewrap` |
-| Debian / Ubuntu (25.04+) | `kate cmake extra-cmake-modules qt6-base-dev libkf6texteditor-dev libkf6coreaddons-dev libkf6i18n-dev libkf6xmlgui-dev libkf6configwidgets-dev bubblewrap` |
+| Arch / CachyOS / Manjaro | `kate extra-cmake-modules cmake ninja qt6-base ktexteditor kcoreaddons ki18n kxmlgui kconfigwidgets kconfig kwidgetsaddons bubblewrap` |
+| Fedora / Asahi | `kate extra-cmake-modules cmake gcc-c++ ninja-build qt6-qtbase-devel kf6-ktexteditor-devel kf6-kcoreaddons-devel kf6-ki18n-devel kf6-kxmlgui-devel kf6-kconfigwidgets-devel bubblewrap` |
+| Debian / Ubuntu (25.04+) | `kate cmake extra-cmake-modules ninja-build qt6-base-dev libkf6texteditor-dev libkf6coreaddons-dev libkf6i18n-dev libkf6xmlgui-dev libkf6configwidgets-dev libkf6config-dev libkf6widgetaddons-dev bubblewrap` |
+| macOS | Homebrew: `cmake extra-cmake-modules ninja qtbase kcoreaddons ki18n kconfig kconfigwidgets kxmlgui kwidgetsaddons` and cask `kate`; Craft recommended to match Kate.app |
+| Windows | KDE Craft + Kate (MSVC). See `packaging/windows/install.ps1` |
 
-Needs **Kate ≥ 24.08** (KF6), **Qt ≥ 6.5**, **CMake ≥ 3.25**, and `bwrap` for sandboxed shell.
+Needs **Kate ≥ 24.08** (KF6), **Qt ≥ 6.5**, **CMake ≥ 3.25**. Sandboxed shell uses `bwrap` on Linux and `sandbox-exec` on macOS.
 
 ---
 
@@ -333,11 +380,11 @@ Always configure out-of-source (`-B build`, not `cmake .`). Do not copy a `build
 
 | Problem | Fix |
 | --- | --- |
-| Plugin missing after **user** install | Start Kate from a shell with `export QT_PLUGIN_PATH="$HOME/.local/lib/qt6/plugins${QT_PLUGIN_PATH:+:$QT_PLUGIN_PATH}"`. For the app menu, log out/in once. Check `ls -l ~/.local/lib/qt6/plugins/kf6/ktexteditor/kateai.so` is `-rwx------`. |
+| Plugin missing after **user** install | Start Kate from a shell with `export QT_PLUGIN_PATH="$HOME/.local/lib/qt6/plugins${QT_PLUGIN_PATH:+:$QT_PLUGIN_PATH}"`. For the app menu, log out/in once. Check `ls -l ~/.local/lib/qt6/plugins/kf6/ktexteditor/kateai.so` is `-rwx------`. On macOS, confirm the LaunchAgent and/or a copy inside Kate.app. On Windows, confirm `kateai.dll` next to Kate or `%LOCALAPPDATA%\KateAI\plugins`. |
 | Plugin missing after **system** install | Fully quit Kate. Confirm `ls -l $(qtpaths --plugin-dir)/kf6/ktexteditor/kateai.so` is `-rwxr-xr-x`. If it is `--x`, run `sudo chmod 755` on that file. |
 | `cmake` complains about a foreign `/home/…` path or `CMakeCache.txt` | Leftover `build/` from another user or machine. `rm -rf build` and run `./install.sh` again. |
 | `cmake` *Operation not permitted* on `prefix.sh` | Stale files in `build/` from another user. `rm -rf build` and configure again. |
-| Sandboxed `bash` fails | Install `bubblewrap` (`bwrap`). File tools still work without it. |
+| Sandboxed `bash` fails | On Linux install `bubblewrap` (`bwrap`). On macOS `sandbox-exec` is part of the OS. File tools still work without OS isolation. |
 | No API key error | Open **Settings → Configure Kate → Kate AI** and paste a key for the selected provider. |
 
 ---

@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
+cd "$(dirname "$0")"
+# shellcheck source=scripts/kateai-platform.sh
+source "$(dirname "$0")/scripts/kateai-platform.sh"
+
+PLUGIN_NAME="$(kateai_plugin_name)"
+USER_PLUGIN_DIR="$(kateai_user_plugin_dir)"
 
 qtpaths_bin="$(command -v qtpaths6 || command -v qtpaths || true)"
 if [[ -z "${qtpaths_bin}" && -x /usr/lib/qt6/bin/qtpaths ]]; then
@@ -8,14 +14,22 @@ fi
 
 candidates=()
 if [[ -n "${qtpaths_bin}" ]]; then
-    candidates+=("$("${qtpaths_bin}" --plugin-dir)/kf6/ktexteditor/kateai.so")
+    candidates+=("$("${qtpaths_bin}" --plugin-dir)/kf6/ktexteditor/${PLUGIN_NAME}")
 fi
 candidates+=(
-    "${HOME}/.local/lib/qt6/plugins/kf6/ktexteditor/kateai.so"
-    /usr/lib/qt6/plugins/kf6/ktexteditor/kateai.so
-    /usr/lib64/qt6/plugins/kf6/ktexteditor/kateai.so
-    /usr/lib/x86_64-linux-gnu/qt6/plugins/kf6/ktexteditor/kateai.so
+    "${USER_PLUGIN_DIR}/kf6/ktexteditor/${PLUGIN_NAME}"
+    "${HOME}/.local/lib/qt6/plugins/kf6/ktexteditor/${PLUGIN_NAME}"
+    /usr/lib/qt6/plugins/kf6/ktexteditor/${PLUGIN_NAME}
+    /usr/lib64/qt6/plugins/kf6/ktexteditor/${PLUGIN_NAME}
+    /usr/lib/x86_64-linux-gnu/qt6/plugins/kf6/ktexteditor/${PLUGIN_NAME}
+    /usr/lib/aarch64-linux-gnu/qt6/plugins/kf6/ktexteditor/${PLUGIN_NAME}
 )
+
+if [[ "$(kateai_family)" == "macos" ]]; then
+    while IFS= read -r kdir; do
+        [[ -n "${kdir}" ]] && candidates+=("${kdir}/${PLUGIN_NAME}")
+    done < <(kateai_macos_kate_plugin_dirs)
+fi
 
 removed=0
 for so in "${candidates[@]}"; do
@@ -32,8 +46,12 @@ done
 
 for extra in \
     "${HOME}/.config/plasma-workspace/env/kate-ai.sh" \
-    "${HOME}/.config/environment.d/50-kate-ai.conf"; do
+    "${HOME}/.config/environment.d/50-kate-ai.conf" \
+    "${HOME}/Library/LaunchAgents/org.kateai.qtpluginpath.plist"; do
     if [[ -e "${extra}" ]]; then
+        if [[ "${extra}" == *LaunchAgents* ]]; then
+            launchctl unload "${extra}" 2>/dev/null || true
+        fi
         rm -f "${extra}"
         echo "Removed ${extra}"
         removed=1

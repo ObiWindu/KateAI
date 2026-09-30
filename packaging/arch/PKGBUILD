@@ -1,0 +1,42 @@
+# Maintainer: ObiWindu <Obi.wandu@proton.me>
+pkgname=kateai
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="AI coding agent plugin for the Kate text editor"
+arch=('x86_64' 'aarch64')
+url="https://github.com/KateAI/kate-ai"
+license=('LGPL-2.1-or-later')
+depends=(
+    kate
+    ktexteditor
+    kcoreaddons
+    ki18n
+    kxmlgui
+    kconfigwidgets
+    kconfig
+    kwidgetsaddons
+    qt6-base
+    bubblewrap
+)
+makedepends=(
+    cmake
+    extra-cmake-modules
+    ninja
+)
+source=("${pkgname}-${pkgver}.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+    cmake -S "${srcdir}/${pkgname}-${pkgver}" -B build \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/usr \
+        -DKATEAI_USER_INSTALL=OFF \
+        -DKDE_INSTALL_USE_QT_SYS_PATHS=ON \
+        -DBUILD_TESTING=OFF \
+        -G Ninja
+    cmake --build build
+}
+
+package() {
+    DESTDIR="${pkgdir}" cmake --install build
+}

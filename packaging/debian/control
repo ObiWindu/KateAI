@@ -1,0 +1,33 @@
+Source: kateai
+Section: editors
+Priority: optional
+Maintainer: ObiWindu <Obi.wandu@proton.me>
+Build-Depends: debhelper-compat (= 13),
+               cmake,
+               extra-cmake-modules,
+               ninja-build,
+               pkg-config,
+               qt6-base-dev,
+               qt6-base-dev-tools,
+               libkf6texteditor-dev,
+               libkf6coreaddons-dev,
+               libkf6i18n-dev,
+               libkf6xmlgui-dev,
+               libkf6configwidgets-dev,
+               libkf6config-dev,
+               libkf6widgetaddons-dev
+Standards-Version: 4.7.0
+Homepage: https://github.com/KateAI/kate-ai
+Rules-Requires-Root: no
+
+Package: kateai
+Architecture: any
+Depends: ${misc:Depends},
+         ${shlibs:Depends},
+         kate,
+         bubblewrap
+Description: AI coding agent plugin for the Kate text editor
+ Kate AI is a KTextEditor plugin that adds an agent chat tool view to Kate.
+ It reads the workspace, edits open documents, runs sandboxed commands, and
+ asks before destructive actions. Requires Ubuntu 25.04 or later, or Debian
+ with KF6.

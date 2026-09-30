@@ -49,8 +49,10 @@ target_link_libraries(kateai PRIVATE
     KF6::WidgetsAddons
 )
 
-# Workspace ACLs default other::--- ; Kate must be able to read the .so to list it.
-add_custom_command(TARGET kateai POST_BUILD
-    COMMAND chmod a+rX "$<TARGET_FILE:kateai>"
-    VERBATIM
-)
+# Workspace ACLs default other::--- ; Kate must be able to read the plugin to list it.
+if(UNIX)
+    add_custom_command(TARGET kateai POST_BUILD
+        COMMAND chmod a+rX "$<TARGET_FILE:kateai>"
+        VERBATIM
+    )
+endif()
