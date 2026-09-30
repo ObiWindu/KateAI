@@ -90,11 +90,18 @@ private Q_SLOTS:
         if (command.isEmpty()) {
             QSKIP(qPrintable(error));
         }
+#if defined(Q_OS_LINUX)
         QVERIFY(command.contains(u"--tmpfs"_s));
         QVERIFY(!command.contains(u"/bin/sh"_s));
         for (int i = 0; i + 2 < command.size(); ++i) {
             QVERIFY(!(command.at(i) == u"--ro-bind"_s && command.at(i + 1) == u"/"_s && command.at(i + 2) == u"/"_s));
         }
+#elif defined(Q_OS_MACOS)
+        QVERIFY(command.contains(u"-p"_s));
+        QVERIFY(command.join(u' ').contains(u"(deny default)"_s));
+#else
+        QVERIFY(!command.isEmpty());
+#endif
     }
 };
 
