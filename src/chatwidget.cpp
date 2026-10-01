@@ -39,7 +39,6 @@
 #include <QJsonDocument>
 #include <QTimer>
 #include <QVBoxLayout>
-#include <QUuid>
 
 #include <algorithm>
 
@@ -709,14 +708,19 @@ ChatWidget::ChatWidget(QWidget *parent)
         setThinkingIndicator(false);
         setWorkingIndicator(false);
         // Auto-save conversation after each completed turn so it always
-        // appears up-to-date in the history menu.
-        if (!m_currentConversationId.isEmpty()) {
-            const auto sessionData = m_agent.sessionData();
-            if (!sessionData.messages.isEmpty()) {
-                SessionStore::saveConversation(m_currentConversationId, sessionData, QString(),
-                                              m_settings.maxSavedConversations > 0 ? m_settings.maxSavedConversations : 50);
-                updateHistoryButton();
+        // appears up-to-date in the history menu.  The id is claimed on the
+        // first turn (see submit()); should it still be missing, fall back to
+        // the id tracked in the config so the turn is never dropped silently.
+        const auto sessionData = m_agent.sessionData();
+        if (!sessionData.messages.isEmpty()) {
+            const int maxSaved = m_settings.maxSavedConversations > 0 ? m_settings.maxSavedConversations : 50;
+            if (!m_currentConversationId.isEmpty()) {
+                SessionStore::saveConversation(m_currentConversationId, sessionData, QString(), maxSaved);
+            } else {
+                SessionStore::save(sessionData, maxSaved);
+                m_currentConversationId = SessionStore::getActiveConversationId();
             }
+            updateHistoryButton();
         }
     });
 
@@ -2411,6 +2415,15 @@ void ChatWidget::submit()
         m_infoBar->hide();
     }
     forceScrollToBottom();
+
+    // Claim a conversation id before the turn runs: turnFinished() persists
+    // under this id, and without it the first conversation of a session stayed
+    // in memory only - invisible in the history menu and lost on "New Thread".
+    // Allocated lazily, so an empty chat still creates no ghost entry.
+    if (m_currentConversationId.isEmpty()) {
+        m_currentConversationId = SessionStore::createNewConversation();
+    }
+
     updateSendButtonState();
     m_agent.start(text);
     updateSendButtonState();
@@ -3124,17 +3137,21 @@ void ChatWidget::newChat()
     if (!m_agent.messages().isEmpty()) {
         const auto sessionData = m_agent.sessionData();
         if (!sessionData.messages.isEmpty()) {
-            // Allocate an ID if we somehow still don't have one.
+            // Allocate an ID if we somehow still don't have one, in the same
+            // form the store generates so it is treated as a normal record.
             if (m_currentConversationId.isEmpty()) {
-                m_currentConversationId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+                m_currentConversationId = SessionStore::createNewConversation();
             }
             SessionStore::saveConversation(m_currentConversationId, sessionData, QString(),
                                           m_settings.maxSavedConversations > 0 ? m_settings.maxSavedConversations : 50);
         }
     }
 
+    // Reset the in-memory turn only.  AgentLoop::clearSession() calls
+    // SessionStore::clear(), which deletes the *active* conversation from disk -
+    // destroying the record saved just above and making "New Thread" silently
+    // wipe the previous conversation.
     m_agent.resetConversation();
-    m_agent.clearSession();
     m_permissionBar->hideBar();
     if (m_infoBar) {
         m_infoBar->hide();
