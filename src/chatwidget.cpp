@@ -266,9 +266,14 @@ ChatWidget::ChatWidget(QWidget *parent)
     m_transcriptLayout->setAlignment(Qt::AlignTop);
     m_scrollArea->setAlignment(Qt::AlignLeft | Qt::AlignTop);
 
+    // Leading stretch: the transcript is bottom-anchored, so when the
+    // conversation is shorter than the viewport the slack is absorbed above the
+    // content. This keeps the newest message pinned to the composer instead of
+    // stranding it at the top of the viewport behind an empty gap.
+    m_transcriptLayout->addStretch();
+
     // Initial empty state welcome widget
     m_transcriptLayout->addWidget(createWelcomeWidget());
-    m_transcriptLayout->addStretch(); // Push content to top, keep consistent spacing
 
     // Dynamic status indicators (thinking/working) - always at bottom of transcript
     auto *indicatorsContainer = new QWidget(m_transcriptContainer);
@@ -1336,10 +1341,23 @@ void ChatWidget::forceScrollToBottom()
     if (m_scrollToBottomBtn) {
         m_scrollToBottomBtn->hide();
     }
-    QTimer::singleShot(10, this, [thisWeak = QPointer<ChatWidget>(this)]() {
+    if (!m_scrollArea) {
+        return;
+    }
+    auto *sb = m_scrollArea->verticalScrollBar();
+    if (!sb) {
+        return;
+    }
+    // Move now instead of relying only on a deferred timer: this runs many times
+    // per second while a response streams in, and leaving the viewport on stale
+    // geometry until the timer fires is what makes the transcript jump.
+    sb->setValue(sb->maximum());
+    // Re-pin once Qt has flushed the pending layout, so the range read above is
+    // the post-relayout one rather than the pre-grow one.
+    QTimer::singleShot(0, this, [thisWeak = QPointer<ChatWidget>(this)]() {
         if (thisWeak && thisWeak->m_scrollArea) {
-            auto *sb = thisWeak->m_scrollArea->verticalScrollBar();
-            sb->setValue(sb->maximum());
+            auto *bar = thisWeak->m_scrollArea->verticalScrollBar();
+            bar->setValue(bar->maximum());
         }
     });
 }
@@ -1725,12 +1743,28 @@ int ChatWidget::transcriptInsertIndex() const
     if (!m_transcriptLayout) {
         return 0;
     }
+    // Messages are appended at the end of the message area: after the leading
+    // stretch spacer (which absorbs the slack and bottom-anchors the content)
+    // and always before the pinned status-indicator row.
+    int index = 0;
     for (int i = 0; i < m_transcriptLayout->count(); ++i) {
-        if (m_transcriptLayout->itemAt(i) && m_transcriptLayout->itemAt(i)->spacerItem()) {
-            return i;
+        QLayoutItem *item = m_transcriptLayout->itemAt(i);
+        if (item && item->spacerItem()) {
+            index = i + 1;
+            break;
         }
     }
-    return qMax(0, m_transcriptLayout->count() - 1);
+    const QWidget *indicators =
+        m_thinkingIndicator ? m_thinkingIndicator->parentWidget() : nullptr;
+    if (indicators) {
+        for (int i = 0; i < m_transcriptLayout->count(); ++i) {
+            QLayoutItem *item = m_transcriptLayout->itemAt(i);
+            if (item && item->widget() == indicators) {
+                return qMin(index, i);
+            }
+        }
+    }
+    return qMin(index, m_transcriptLayout->count());
 }
 
 void ChatWidget::appendTranscriptWidget(QWidget *widget)
@@ -3042,8 +3076,14 @@ void ChatWidget::scheduleStreamHeightUpdate()
             if (!m_activeAssistantBrowser) {
                 return;
             }
-            const int docH = static_cast<int>(m_activeAssistantBrowser->document()->size().height()) + 16;
-            m_activeAssistantBrowser->setFixedHeight(std::max(30, docH));
+            const int docH = std::max(30, static_cast<int>(m_activeAssistantBrowser->document()->size().height()) + 16);
+            // Only resize when the height actually moved. An unconditional
+            // setFixedHeight() re-pins the size constraint, which invalidates the
+            // whole transcript layout and repaints it - up to 20 times a second
+            // while streaming, which reads as a flicker.
+            if (m_activeAssistantBrowser->height() != docH) {
+                m_activeAssistantBrowser->setFixedHeight(docH);
+            }
             scrollToBottom();
         });
     }
