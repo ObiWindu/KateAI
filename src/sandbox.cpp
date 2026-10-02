@@ -7,9 +7,15 @@
 
 #include <QDir>
 #include <QFileInfo>
+#include <QHash>
 #include <QProcess>
 #include <QRegularExpression>
 #include <QStandardPaths>
+
+#ifdef Q_OS_UNIX
+#include <signal.h>
+#include <unistd.h>
+#endif
 
 using namespace Qt::Literals::StringLiterals;
 
@@ -269,6 +275,53 @@ namespace KateAi
     return token;
     }
 
+// True when the command can send output into a file. "2>&1" only duplicates a
+// descriptor and is left alone, but ">", ">>" and "&>" all end bytes in a file,
+// so the command is not read-only however harmless its executable looks.
+static bool hasOutputRedirection(const QString &command)
+{
+    for (int i = 0; i < command.size(); ++i) {
+        const QChar c = command.at(i);
+        if (c == u'&' && i + 1 < command.size() && command.at(i + 1) == u'>') {
+            return true; // &>file redirects both streams into a file
+        }
+        if (c != u'>') {
+            continue;
+        }
+        const bool descriptorDuplication = i > 0 && command.at(i - 1).isDigit() && i + 1 < command.size()
+            && command.at(i + 1) == u'&';
+        if (!descriptorDuplication) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Flags that make an otherwise read-only command write to disk. Only commands
+// already on the read-only list are checked against this, so a flag can never
+// pull a new command onto the allowlist - it can only take one off it.
+static bool hasWriteFlag(const QString &primary, const QString &command)
+{
+    static const QHash<QString, QStringList> writeFlags = {
+        {u"find"_s,
+         {u"-delete"_s, u"-exec"_s, u"-execdir"_s, u"-ok"_s, u"-okdir"_s,
+          u"-fls"_s, u"-fprint"_s, u"-fprint0"_s, u"-fprintf"_s}},
+        {u"sort"_s, {u"-o"_s, u"--output"_s}},
+        {u"date"_s, {u"-f"_s, u"--file"_s}},
+    };
+    const QStringList flags = writeFlags.value(primary);
+    if (flags.isEmpty()) {
+        return false;
+    }
+    const QStringList tokens = command.split(QRegularExpression(uR"(\s+)"_s), Qt::SkipEmptyParts);
+    for (const QString &token : tokens) {
+        if (flags.contains(token)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool Sandbox::isReadOnlyCommand(const QString &command) const
 {
     static const QStringList readOnly = {
@@ -283,6 +336,11 @@ bool Sandbox::isReadOnlyCommand(const QString &command) const
     static const QRegularExpression writers(
         uR"(\b(?:tee|rm|mv|cp|chmod|chown|mkdir|touch|dd|del|erase|rd|rmdir|copy|move|ren|rename|New-Item|Set-Content|Out-File|Remove-Item|Move-Item|Copy-Item)\b)"_s);
     if (writers.match(cmd).hasMatch()) {
+        return false;
+    }
+    // The writers list only knows command names. "cat notes > ~/.bashrc" has a
+    // read-only executable but still writes, so redirection decides as well.
+    if (hasOutputRedirection(cmd)) {
         return false;
     }
     if (cmd.contains(u"&&"_s) || cmd.contains(u"||"_s) || cmd.contains(u';') || cmd.contains(u'|')) {
@@ -304,7 +362,13 @@ bool Sandbox::isReadOnlyCommand(const QString &command) const
         };
         return gitRead.contains(sub);
     }
-    return readOnly.contains(primary);
+    if (!readOnly.contains(primary)) {
+        return false;
+    }
+    // The executable only reads, but a flag can still tell it to write:
+    // "find . -delete" and "sort -o out.txt" both modify files, so Ask mode
+    // must not treat them as read-only and auto-approve them.
+    return !hasWriteFlag(primary, cmd);
 }
 
 bool Sandbox::isDangerousCommand(const QString &command) const
@@ -323,6 +387,45 @@ bool Sandbox::isAlwaysDeniedCommand(const QString &command) const
         uR"((rm\s+(-[a-zA-Z]*f[a-zA-Z]*\s+)?(--no-preserve-root\s+)?/(\s|$))|(\bmkfs\b)|(\bdd\s+.*\bof=/dev/)|(:\(\)\s*\{\s*:\|:&\s*;\s*\})|(\b(curl|wget)\b.*\|\s*(sh|bash|zsh|cmd|powershell|pwsh))|(\bformat\s+[a-zA-Z]:)|(\bdiskpart\b)|(\brmdir\s+/s\s+/q\s+[a-zA-Z]:\\)|(\bRemove-Item\s+.*-Recurse.*[A-Z]:\\))"_s,
         QRegularExpression::CaseInsensitiveOption);
     return denied.match(cmd).hasMatch();
+}
+
+bool Sandbox::commandTouchesDeniedPath(const QString &command) const
+{
+    if (m_workspaceRoot.isEmpty()) {
+        return false;
+    }
+    // This is not a shell parser. It scans tokens and asks the deny rules about
+    // each one, which is enough to stop "cat ~/.ssh/id_rsa" and "cat .env" from
+    // walking around the guard the file tools apply.
+    //
+    // Bare words are checked against the workspace root too, because that is the
+    // working directory of every sandboxed command: "cat backup.pem" is a real
+    // deny-glob hit. Over-blocking is the safe direction here — the agent has the
+    // glob tool for pattern searches, and a blocked call reports why.
+    static const QRegularExpression separators(uR"([\s;&|<>()\$`"'])"_s);
+    const QStringList tokens = command.split(separators, Qt::SkipEmptyParts);
+    for (const QString &token : tokens) {
+        if (token.startsWith(u'-')) {
+            continue; // a flag is not a path
+        }
+        QString candidate = token;
+        if (candidate == u"~"_s) {
+            candidate = QDir::homePath();
+        } else if (candidate.startsWith(u"~/"_s)) {
+            candidate = QDir::homePath() + candidate.mid(1);
+        }
+        // Check the path as written, then the symlink-resolved form, so a denied
+        // name is caught even when the file does not exist yet.
+        const QString literal = QDir::cleanPath(QFileInfo(QDir(m_workspaceRoot), candidate).absoluteFilePath());
+        if (isDenied(literal)) {
+            return true;
+        }
+        const QString resolved = normalizePath(candidate, nullptr, false);
+        if (!resolved.isEmpty() && resolved != literal && isDenied(resolved)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 static QString firstExisting(const QStringList &candidates)
@@ -513,6 +616,15 @@ QStringList Sandbox::wrapCommand(const QString &command, QString *error) const
     if (isAlwaysDeniedCommand(command)) {
         if (error) {
             *error = u"Command is blocked by the safety policy."_s;
+        }
+        return {};
+    }
+
+    // Deny globs are documented as always blocked, so a command that names a
+    // denied path is refused here rather than left to the permission prompt.
+    if (commandTouchesDeniedPath(command)) {
+        if (error) {
+            *error = u"Command touches a path blocked by the deny rules."_s;
         }
         return {};
     }

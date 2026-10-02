@@ -7,6 +7,7 @@
 
 #include "types.h"
 
+#include <QElapsedTimer>
 #include <QWidget>
 
 class QLabel;
@@ -15,6 +16,7 @@ class QPropertyAnimation;
 class QPushButton;
 class QShowEvent;
 class QTextBrowser;
+class QTimer;
 class QTimer;
 
 namespace KateAi
@@ -41,6 +43,23 @@ public:
     void setRunning();
     void setFinished(const ToolResult &result);
 
+    // --- Inline approval -----------------------------------------------------
+    // The card that triggered the permission request shows the decision here,
+    // at the point of the action, instead of in a bar below the transcript.
+    // The card is created by the permissionNeeded signal, which fires before
+    // toolStarted, so approval and execution share one widget.
+    void showApproval();
+    void setApprovalResolved(PermissionDecision decision);
+    bool isAwaitingApproval() const
+    {
+        return m_awaitingApproval;
+    }
+
+    // --- Live timing ---------------------------------------------------------
+    // Elapsed time per call, shown while running and frozen afterwards so a
+    // slow tool is obvious in the transcript without opening it.
+    void setDurationVisible(bool visible);
+
     /**
      * Attach the pre-formatted unified diff (write_file / edit_file) so the
      * proposed change is visible in the chat transcript before the user
@@ -50,16 +69,19 @@ public:
     void setPreviewText(const QString &text);
 
     QString toolCallId() const { return m_toolCallId; }
-    QString toolName() const { return m_toolName; }
+        QString toolName() const { return m_toolName; }
     int expandedHeight() const { return m_expandedHeight; }
     void setExpandedHeight(int h);
     void setExpanded(bool expanded);
     bool isExpanded() const { return m_expanded; }
-    bool isRunning() const { return !m_finished; }
+    bool isRunning() const { return !m_finished && !m_denied; }
     bool hasDiffPreview() const { return m_hasDiffPreview; }
     bool isFileEditTool() const;
     void setActivityFrame(int frame);
     void reflowNow();
+
+Q_SIGNALS:
+    void approvalChosen(PermissionDecision decision);
 
 protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
@@ -73,6 +95,7 @@ private:
     void updateStyle();
     void updateTitleText();
     void syncPreviewVisibility();
+    void updateDuration();
     void scheduleReflow();
     void reflowPreview();
     void reflowDetails();
@@ -96,12 +119,23 @@ private:
     bool m_ok = true;
     bool m_hasDiffPreview = false;
     int m_expandedHeight = 0;
+    bool m_denied = false;
+    bool m_awaitingApproval = false;
+    bool m_durationEnabled = false;
+    qint64 m_diffAdded = 0;
+    qint64 m_diffRemoved = 0;
+
+    QElapsedTimer m_elapsed;
+    QTimer *m_durationTimer = nullptr;
 
     QWidget *m_header = nullptr;
     QLabel *m_icon = nullptr;
     QLabel *m_title = nullptr;
     QLabel *m_status = nullptr;
+    QLabel *m_diffStat = nullptr;
+    QLabel *m_duration = nullptr;
     QPushButton *m_expandBtn = nullptr;
+    QWidget *m_approvalRow = nullptr;
     QWidget *m_detailsContainer = nullptr;
     QPlainTextEdit *m_details = nullptr;
     QTextBrowser *m_describeDiff = nullptr;

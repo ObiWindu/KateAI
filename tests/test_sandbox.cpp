@@ -80,6 +80,66 @@ private Q_SLOTS:
         QVERIFY(Sandbox::globMatch(u"**/.ssh/**"_s, u"/home/me/.ssh/id_rsa"_s));
     }
 
+    void redirectionIsNotReadOnly()
+    {
+        Sandbox box(QDir::tempPath(), SandboxProfile::Workspace);
+        // A read-only executable still writes when its output is redirected.
+        QVERIFY(!box.isReadOnlyCommand(u"cat notes.txt > out.txt"_s));
+        QVERIFY(!box.isReadOnlyCommand(u"echo hi >> ~/.bashrc"_s));
+        QVERIFY(!box.isReadOnlyCommand(u"git status > report.md"_s));
+        QVERIFY(!box.isReadOnlyCommand(u"ls &> all.txt"_s));
+        QVERIFY(!box.isReadOnlyCommand(u"cat a > b && cat c"_s));
+        // Descriptor duplication writes to a stream, not a file.
+        QVERIFY(box.isReadOnlyCommand(u"ls 2>&1"_s));
+        QVERIFY(box.isReadOnlyCommand(u"ls -la /etc 2>&1"_s));
+        QVERIFY(box.isReadOnlyCommand(u"cat notes.txt"_s));
+    }
+
+    void writeFlagsAreNotReadOnly()
+    {
+        Sandbox box(QDir::tempPath(), SandboxProfile::Workspace);
+        // These read the tree but delete or rewrite files, so Ask mode must
+        // not auto-approve them just because the executable looks harmless.
+        QVERIFY(!box.isReadOnlyCommand(u"find . -name '*.o' -delete"_s));
+        QVERIFY(!box.isReadOnlyCommand(u"find . -name '*.c' -fprintf out.h 'x'"_s));
+        QVERIFY(!box.isReadOnlyCommand(u"sort -o sorted.txt list.txt"_s));
+        QVERIFY(!box.isReadOnlyCommand(u"date -s '2020-01-01' -f stamp.txt"_s));
+        // A plain traversal stays read-only.
+        QVERIFY(box.isReadOnlyCommand(u"find . -name '*.cpp' -print"_s));
+    }
+
+    void shellCannotReachDeniedPaths()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        Sandbox box(dir.path(), SandboxProfile::Workspace);
+
+        // Deny globs are enforced for file tools; the shell must not route around them.
+        QVERIFY(box.commandTouchesDeniedPath(u"cat ~/.ssh/id_rsa"_s));
+        QVERIFY(box.commandTouchesDeniedPath(u"cat .env"_s));
+        QVERIFY(box.commandTouchesDeniedPath(u"cat backup.pem"_s));
+        QVERIFY(box.commandTouchesDeniedPath(u"head -n 5 server.key"_s));
+        QVERIFY(box.commandTouchesDeniedPath(u"grep -rn token /home/me/.netrc"_s));
+        // Ordinary work must keep running.
+        QVERIFY(!box.commandTouchesDeniedPath(u"ls -la"_s));
+        QVERIFY(!box.commandTouchesDeniedPath(u"cat src/main.cpp"_s));
+        QVERIFY(!box.commandTouchesDeniedPath(u"git status"_s));
+        QVERIFY(!box.commandTouchesDeniedPath(u"cat CMakeLists.txt | grep Qt"_s));
+        QVERIFY(!box.commandTouchesDeniedPath(u"git commit -m 'handle redirect'"_s));
+    }
+
+    void wrapCommandRefusesDeniedPaths()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        Sandbox box(dir.path(), SandboxProfile::Workspace);
+        QString error;
+        QVERIFY(box.wrapCommand(u"echo x"_s, &error).size() > 1); // sanity: a normal command wraps
+        error.clear();
+        QVERIFY(box.wrapCommand(u"cat .env"_s, &error).isEmpty());
+        QVERIFY(error.contains(u"deny"_s));
+    }
+
     void strictCommandsDoNotMountTheHostRoot()
     {
         QTemporaryDir dir;

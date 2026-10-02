@@ -5,13 +5,20 @@
 
 #include "chatwidget.h"
 
+#include "agenttext.h"
+#include "chattheme.h"
 #include "permissionbar.h"
 #include "promptedit.h"
+#include "turnstatus.h"
 #include "sessionstore.h"
 #include "settings.h"
 #include "toolcallwidget.h"
+#include "subtaskwidget.h"
 #include "edittracker.h"
 #include "tools.h"
+#include "checkpoint.h"
+#include "mcp.h"
+#include "modes.h"
 
 #include <KLocalizedString>
 
@@ -27,6 +34,8 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QMenu>
+#include <QMessageBox>
+#include <QCursor>
 #include <QPlainTextEdit>
 #include <QPropertyAnimation>
 #include <QPointer>
@@ -65,23 +74,25 @@ void attachPulseEffect(QLabel *label)
 
 QString workingLabelForTool(const QString &toolName)
 {
+    // Plain verbs, no emoji: this line re-renders on every tool call and sits
+    // at the very bottom of the transcript, where pictograms read as noise.
     if (toolName == u"write_file"_s || toolName == u"edit_file"_s
         || toolName == u"multi_edit_file"_s || toolName == u"multi_replace_file_content"_s) {
-        return u"✏️  "_s + i18n("Editing");
+        return i18n("Editing");
     }
     if (toolName == u"read_file"_s) {
-        return u"📄  "_s + i18n("Reading");
+        return i18n("Reading");
     }
     if (toolName == u"grep"_s || toolName == u"glob"_s) {
-        return u"🔍  "_s + i18n("Searching");
+        return i18n("Searching");
     }
     if (toolName == u"list_dir"_s) {
-        return u"📁  "_s + i18n("Listing");
+        return i18n("Listing");
     }
     if (toolName == u"bash"_s) {
-        return u"⚡  "_s + i18n("Running");
+        return i18n("Running");
     }
-    return u"⚙️  "_s + i18n("Working");
+    return i18n("Working");
 }
 
 } // namespace
@@ -97,100 +108,112 @@ ChatWidget::ChatWidget(QWidget *parent)
     root->setContentsMargins(0, 0, 0, 0);
     root->setSpacing(0);
 
-    // 1. Zed-style Header / Toolbar
+    // 1. Header. Deliberately thin: a title, then the actions that apply to the
+    // whole thread. The controls that shape the next turn (mode, model,
+    // reasoning effort) live with the composer instead, next to the input.
     m_toolbar = new QWidget(this);
+    m_toolbar->setObjectName(u"headerBar"_s);
     auto *toolbarLayout = new QHBoxLayout(m_toolbar);
-    toolbarLayout->setContentsMargins(10, 6, 10, 6);
-    toolbarLayout->setSpacing(8);
+    toolbarLayout->setContentsMargins(12, 8, 12, 8);
+    toolbarLayout->setSpacing(6);
 
-    // Unified Model Selector button
+    m_threadTitle = new QLabel(i18n("New Thread"), this);
+    m_threadTitle->setStyleSheet(ChatTheme::sectionLabel());
+    toolbarLayout->addWidget(m_threadTitle);
+
+    toolbarLayout->addStretch();
+
+    // Unified Model Selector button. Created here so its menu is wired in one
+    // place, but added to the composer further down.
     m_modelSelector = new QPushButton(this);
     m_modelSelector->setCursor(Qt::PointingHandCursor);
-    m_modelSelector->setStyleSheet(
-        u"QPushButton {"
-        u"  background-color: #262628;"
-        u"  color: #cccccc;"
-        u"  border: 1px solid #3c3c40;"
-        u"  border-radius: 4px;"
-        u"  padding: 4px 10px;"
-        u"  font-size: 12px;"
-        u"  font-weight: 500;"
-        u"  text-align: left;"
-        u"}"
-        u"QPushButton:hover {"
-        u"  background-color: #2e2e32;"
-        u"  border-color: #4a4a50;"
-        u"  color: #ffffff;"
-        u"}"_s);
-    toolbarLayout->addWidget(m_modelSelector);
+    m_modelSelector->setStyleSheet(ChatTheme::chipButton());
+    m_modelSelector->setFixedHeight(26);
+    m_modelSelector->setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Fixed);
+    // Long provider or model names must not push the send button off the row.
+    m_modelSelector->setMaximumWidth(190);
+
+        // Mode selector — Code / Ask / Architect / Debug / Orchestrator + custom.
+        m_modeButton = new QPushButton(this);
+            m_modeButton->setCursor(Qt::PointingHandCursor);
+            m_modeButton->setToolTip(i18n("Agent mode"));
+            m_modeButton->setStyleSheet(ChatTheme::chipButton());
+                // A fixed height is what makes the pill radius land exactly on the
+                // cap height; left to the layout the chips ended up subtly squared.
+                m_modeButton->setFixedHeight(26);
+                connect(m_modeButton, &QPushButton::clicked, this, &ChatWidget::showModeMenu);
+
+        // Permission mode. The edit tracker that follows a file change only exists
+        // in "Accept edits", so this has to be reachable from the composer: buried
+        // two levels down in the settings menu it read as a feature that had
+        // stopped working.
+        m_permissionButton = new QPushButton(this);
+        m_permissionButton->setCursor(Qt::PointingHandCursor);
+        m_permissionButton->setStyleSheet(ChatTheme::chipButton());
+        m_permissionButton->setFixedHeight(26);
+        m_permissionButton->setToolTip(i18n("Permission mode"));
+        connect(m_permissionButton, &QPushButton::clicked, this, &ChatWidget::showPermissionMenu);
+        refreshPermissionButton();
+
+            // MCP servers status button.
+        m_mcpButton = new QPushButton(this);
+        m_mcpButton->setCursor(Qt::PointingHandCursor);
+        m_mcpButton->setFixedSize(28, 28);
+        m_mcpButton->setToolTip(i18n("MCP servers"));
+        m_mcpButton->setStyleSheet(ChatTheme::iconButton());
+        connect(m_mcpButton, &QPushButton::clicked, this, &ChatWidget::showMcpMenu);
+        toolbarLayout->addWidget(m_mcpButton);
+
+        // Checkpoints button.
+        m_checkpointButton = new QPushButton(QIcon::fromTheme(u"document-save"_s), QString(), this);
+        m_checkpointButton->setCursor(Qt::PointingHandCursor);
+        m_checkpointButton->setFixedSize(28, 28);
+        m_checkpointButton->setToolTip(i18n("Checkpoints"));
+        m_checkpointButton->setStyleSheet(ChatTheme::iconButton());
+        connect(m_checkpointButton, &QPushButton::clicked, this, &ChatWidget::showCheckpointMenu);
+        toolbarLayout->addWidget(m_checkpointButton);
+
+        // Agent team: shows how many sub-agents are running right now.
+        m_teamButton = new QPushButton(this);
+        m_teamButton->setCursor(Qt::PointingHandCursor);
+        m_teamButton->setToolTip(i18n("Agent team"));
+        m_teamButton->setStyleSheet(ChatTheme::iconButton());
+        connect(m_teamButton, &QPushButton::clicked, this, &ChatWidget::showTeamMenu);
+        toolbarLayout->addWidget(m_teamButton);
 
     // Reasoning effort chooser button — sits right next to the model label
     // in the chat input area so the user can pick an effort level at a glance.
     m_reasoningEffort = new QPushButton(this);
-    m_reasoningEffort->setFixedSize(28, 28);
+    // Height only: a fixed width clipped the label ("Auto" rendered as "Au").
+    m_reasoningEffort->setFixedHeight(26);
     m_reasoningEffort->setCursor(Qt::PointingHandCursor);
     m_reasoningEffort->setToolTip(i18n("Reasoning effort"));
     m_reasoningEffort->setVisible(true);
     connect(m_reasoningEffort, &QPushButton::clicked, this, &ChatWidget::showReasoningEffortMenu);
-    toolbarLayout->addWidget(m_reasoningEffort);
-
-    // Thread title label
-    m_threadTitle = new QLabel(i18n("New Thread"), this);
-    m_threadTitle->setStyleSheet(u"QLabel { color: #888888; font-size: 12px; font-weight: 500; padding-left: 4px; }"_s);
-    toolbarLayout->addWidget(m_threadTitle);
 
     // Conversation History button
     m_historyButton = new QPushButton(QIcon::fromTheme(u"view-history"_s), QString(), this);
     m_historyButton->setToolTip(i18n("Conversation History"));
-    m_historyButton->setFixedSize(26, 26);
+    m_historyButton->setFixedSize(28, 28);
     m_historyButton->setCursor(Qt::PointingHandCursor);
-    m_historyButton->setStyleSheet(
-        u"QPushButton {"
-        u"  background: transparent;"
-        u"  border: 1px solid transparent;"
-        u"  border-radius: 4px;"
-        u"}"
-        u"QPushButton:hover {"
-        u"  background-color: #2e2e32;"
-        u"  border-color: #3c3c40;"
-        u"}"_s);
+    m_historyButton->setStyleSheet(ChatTheme::iconButton());
     connect(m_historyButton, &QPushButton::clicked, this, &ChatWidget::showConversationHistory);
     toolbarLayout->addWidget(m_historyButton);
-
-    toolbarLayout->addStretch();
 
     // New Chat button
     m_newChat = new QPushButton(QIcon::fromTheme(u"list-add"_s), QString(), this);
     m_newChat->setToolTip(i18n("New Thread"));
-    m_newChat->setFixedSize(26, 26);
+    m_newChat->setFixedSize(28, 28);
     m_newChat->setCursor(Qt::PointingHandCursor);
-    m_newChat->setStyleSheet(
-        u"QPushButton {"
-        u"  background: transparent;"
-        u"  border: 1px solid transparent;"
-        u"  border-radius: 4px;"
-        u"}"
-        u"QPushButton:hover {"
-        u"  background-color: #2e2e32;"
-        u"  border-color: #3c3c40;"
-        u"}"_s);
+    m_newChat->setStyleSheet(ChatTheme::iconButton());
     toolbarLayout->addWidget(m_newChat);
 
     // Settings / Configure button
     m_configure = new QPushButton(QIcon::fromTheme(u"settings-configure"_s), QString(), this);
     m_configure->setToolTip(i18n("Settings"));
-    m_configure->setFixedSize(26, 26);
+    m_configure->setFixedSize(28, 28);
     m_configure->setCursor(Qt::PointingHandCursor);
-    m_configure->setStyleSheet(
-        u"QPushButton {"
-        u"  background: transparent;"
-        u"  border: 1px solid transparent;"
-        u"  border-radius: 4px;"
-        u"}"
-        u"QPushButton:hover {"
-        u"  background-color: #2e2e32;"
-        u"  border-color: #3c3c40;"
-        u"}"_s);
+    m_configure->setStyleSheet(ChatTheme::iconButton());
     toolbarLayout->addWidget(m_configure);
 
     root->addWidget(m_toolbar);
@@ -218,8 +241,7 @@ ChatWidget::ChatWidget(QWidget *parent)
 
     m_mode = new QComboBox(this);
     m_mode->setVisible(false);
-    m_mode->addItem(i18n("Agent"), false);
-    m_mode->addItem(i18n("Plan"), true);
+    populateModes();
 
     m_thinking = new QPushButton(this);
     m_thinking->setCheckable(true);
@@ -233,33 +255,14 @@ ChatWidget::ChatWidget(QWidget *parent)
     m_scrollArea->setWidgetResizable(true);
     m_scrollArea->setFrameShape(QFrame::NoFrame);
     m_scrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    m_scrollArea->setStyleSheet(
-        u"QScrollArea {"
-        u"  background-color: #181818;"
-        u"  border: none;"
-        u"}"
-        u"QScrollBar:vertical {"
-        u"  background: transparent;"
-        u"  width: 8px;"
-        u"  margin: 0;"
-        u"}"
-        u"QScrollBar::handle:vertical {"
-        u"  background: #333338;"
-        u"  border-radius: 4px;"
-        u"  min-height: 24px;"
-        u"}"
-        u"QScrollBar::handle:vertical:hover {"
-        u"  background: #4a4a52;"
-        u"}"
-        u"QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {"
-        u"  height: 0;"
-        u"}"_s);
+    m_scrollArea->setStyleSheet(ChatTheme::scrollArea());
 
     m_transcriptContainer = new QWidget(m_scrollArea);
-    m_transcriptContainer->setStyleSheet(u"background-color: #181818;"_s);
+    m_transcriptContainer->setObjectName(u"transcript"_s);
+    m_transcriptContainer->setStyleSheet(ChatTheme::transcript());
     m_transcriptLayout = new QVBoxLayout(m_transcriptContainer);
-    m_transcriptLayout->setContentsMargins(12, 12, 12, 12);
-    m_transcriptLayout->setSpacing(6);
+    m_transcriptLayout->setContentsMargins(14, 14, 14, 14);
+    m_transcriptLayout->setSpacing(10);
     m_transcriptLayout->setAlignment(Qt::AlignTop);
     m_scrollArea->setAlignment(Qt::AlignLeft | Qt::AlignTop);
 
@@ -275,37 +278,19 @@ ChatWidget::ChatWidget(QWidget *parent)
     indicatorsLayout->setSpacing(8);
     indicatorsLayout->addStretch();
 
-    // Thinking indicator (shows when AI is reasoning)
-    m_thinkingIndicator = new QLabel(u"💭  Thinking..."_s, indicatorsContainer);
-    m_thinkingIndicator->setStyleSheet(
-        u"QLabel {"
-        u"  color: #3b82f6;"
-        u"  font-size: 11px;"
-        u"  font-style: italic;"
-        u"  padding: 2px 10px;"
-        u"  background-color: #1e3a5f;"
-        u"  border: 1px solid #3b82f6;"
-        u"  border-radius: 10px;"
-        u"  min-width: 108px;"
-        u"}"_s);
+    // Thinking indicator. Plain text rather than an emoji badge: it re-renders
+    // on every tick at the end of the transcript, so it stays low contrast and
+    // lets the tool cards above it carry the actual signal.
+    m_thinkingIndicator = new QLabel(i18n("Thinking") + u"..."_s, indicatorsContainer);
+    m_thinkingIndicator->setStyleSheet(ChatTheme::activityPill());
     attachPulseEffect(m_thinkingIndicator);
     m_thinkingIndicator->hide();
     indicatorsLayout->addWidget(m_thinkingIndicator);
 
     // Working indicator (shows when AI is running tools/reading/editing)
-    m_workingLabelBase = u"⚙️  "_s + i18n("Working");
+    m_workingLabelBase = i18n("Working");
     m_workingIndicator = new QLabel(m_workingLabelBase + u"..."_s, indicatorsContainer);
-    m_workingIndicator->setStyleSheet(
-        u"QLabel {"
-        u"  color: #f59e0b;"
-        u"  font-size: 11px;"
-        u"  font-style: italic;"
-        u"  padding: 2px 10px;"
-        u"  background-color: #3d2e0e;"
-        u"  border: 1px solid #f59e0b;"
-        u"  border-radius: 10px;"
-        u"  min-width: 108px;"
-        u"}"_s);
+    m_workingIndicator->setStyleSheet(ChatTheme::activityPill());
     attachPulseEffect(m_workingIndicator);
     m_workingIndicator->hide();
     indicatorsLayout->addWidget(m_workingIndicator);
@@ -321,22 +306,9 @@ ChatWidget::ChatWidget(QWidget *parent)
         }
     });
 
-    m_scrollToBottomBtn = new QPushButton(u"↓  Jump to latest"_s, m_scrollArea);
+    m_scrollToBottomBtn = new QPushButton(QIcon::fromTheme(u"go-down"_s), i18n("Jump to latest"), m_scrollArea);
     m_scrollToBottomBtn->setCursor(Qt::PointingHandCursor);
-    m_scrollToBottomBtn->setStyleSheet(
-        u"QPushButton {"
-        u"  background-color: #2563eb;"
-        u"  color: #ffffff;"
-        u"  border: 1px solid #3b82f6;"
-        u"  border-radius: 14px;"
-        u"  padding: 5px 12px;"
-        u"  font-size: 11px;"
-        u"  font-weight: 600;"
-        u"}"
-        u"QPushButton:hover {"
-        u"  background-color: #1d4ed8;"
-        u"  border-color: #60a5fa;"
-        u"}"_s);
+    m_scrollToBottomBtn->setStyleSheet(ChatTheme::jumpToLatest());
     m_scrollToBottomBtn->hide();
     connect(m_scrollToBottomBtn, &QPushButton::clicked, this, &ChatWidget::forceScrollToBottom);
 
@@ -375,69 +347,69 @@ ChatWidget::ChatWidget(QWidget *parent)
     m_editTracker = new EditTracker(this);
     root->addWidget(m_editTracker);
 
-    // 4. Composer Area (Zed-style Input Box)
+    // 4. Composer
     auto *composerContainer = new QWidget(this);
+    composerContainer->setObjectName(u"composerContainer"_s);
     composerContainer->setStyleSheet(
-        u"QWidget {"
-        u"  background-color: #1a1a1a;"
-        u"  border-top: 1px solid #282828;"
-        u"}"_s);
+        QStringLiteral("QWidget#composerContainer { background-color: %1; border-top: 1px solid %2; }")
+            .arg(ChatTheme::panelBg(), ChatTheme::border()));
     auto *composerLayout = new QVBoxLayout(composerContainer);
-    composerLayout->setContentsMargins(12, 8, 12, 8);
-    composerLayout->setSpacing(4);
+    composerLayout->setContentsMargins(12, 10, 12, 10);
+    composerLayout->setSpacing(6);
 
     // Info bar for API messages (retries, errors) - shown above composer
     m_infoBar = new QLabel(composerContainer);
     m_infoBar->setWordWrap(true);
     m_infoBar->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    m_infoBar->setStyleSheet(u"QLabel { color: #ff8888; font-size: 12px; font-weight: bold; padding: 8px 12px; background: transparent; border: none; }"_s);
+    m_infoBar->setStyleSheet(ChatTheme::infoBar());
     m_infoBar->hide();
     composerLayout->addWidget(m_infoBar);
 
     auto *composerCard = new QWidget(composerContainer);
     composerCard->setObjectName(u"composerCard"_s);
-    composerCard->setStyleSheet(
-        u"QWidget#composerCard {"
-        u"  background-color: #232326;"
-        u"  border: 1px solid #38383e;"
-        u"  border-radius: 8px;"
-        u"}"_s);
+    composerCard->setStyleSheet(ChatTheme::composerCard());
     auto *composerCardLayout = new QVBoxLayout(composerCard);
-    composerCardLayout->setContentsMargins(10, 8, 10, 6);
-    composerCardLayout->setSpacing(4);
+    composerCardLayout->setContentsMargins(10, 8, 8, 8);
+    composerCardLayout->setSpacing(2);
 
     m_prompt = new PromptEdit(composerCard);
-    m_prompt->setStyleSheet(
-        u"QPlainTextEdit {"
-        u"  background: transparent;"
-        u"  color: #e4e4e4;"
-        u"  border: none;"
-        u"  padding: 2px;"
-        u"  font-size: 13px;"
-        u"}"_s);
+    m_prompt->setStyleSheet(ChatTheme::promptInput());
     composerCardLayout->addWidget(m_prompt);
 
     auto *bottomRow = new QHBoxLayout;
-    bottomRow->setContentsMargins(2, 0, 2, 2);
+    bottomRow->setContentsMargins(4, 2, 2, 0);
+    bottomRow->setSpacing(6);
 
-    m_tokenCount = new QLabel(composerCard);
-    m_tokenCount->setStyleSheet(u"QLabel { color: #666; font-size: 11px; }"_s);
-    bottomRow->addWidget(m_tokenCount);
+    // Mode and model live with the input rather than in the thread header.
+    // They decide what happens to the text about to be typed, so they belong
+    // next to it; up in the header they read as thread-wide settings.
+    bottomRow->addWidget(m_modeButton);
+    bottomRow->addWidget(m_permissionButton);
+    bottomRow->addWidget(m_modelSelector);
+    bottomRow->addWidget(m_reasoningEffort);
+    // Thinking mode is a mode, not an action, so it groups with the other
+    // settings on the left. Parked beside send it read as a second, competing
+    // call to action.
+    bottomRow->addWidget(m_thinking);
 
     bottomRow->addStretch();
+
+    m_tokenCount = new QLabel(composerCard);
+    m_tokenCount->setStyleSheet(ChatTheme::tokenLabel());
+    m_tokenCount->hide();
+    bottomRow->addWidget(m_tokenCount);
 
     // Thinking mode toggle button
     m_thinking->setParent(composerCard);
     m_thinking->setVisible(true);
     m_thinking->setCheckable(true);
-    m_thinking->setFixedSize(28, 28);
+    m_thinking->setFixedSize(26, 26);
     m_thinking->setCursor(Qt::PointingHandCursor);
     m_thinking->setToolTip(i18n("Toggle thinking mode"));
     updateThinkingButtonStyle();
-    bottomRow->addWidget(m_thinking);
 
     m_send = new QPushButton(composerCard);
-    m_send->setFixedSize(28, 28);
+    m_send->setFixedSize(30, 30);
     m_send->setCursor(Qt::PointingHandCursor);
     updateSendButtonState();
     bottomRow->addWidget(m_send);
@@ -445,9 +417,13 @@ ChatWidget::ChatWidget(QWidget *parent)
     composerCardLayout->addLayout(bottomRow);
     composerLayout->addWidget(composerCard);
 
-    m_status = new QLabel(i18n("Enter to send · Shift+Enter for a new line"), composerContainer);
-    m_status->setStyleSheet(u"QLabel { color: #555555; font-size: 11px; margin-left: 4px; }"_s);
-    composerLayout->addWidget(m_status);
+    // The status strip is now a live widget: keyboard hint while idle, elapsed
+    // time and current activity while a turn runs.
+    m_turnStatus = new TurnStatus(composerContainer);
+    m_turnStatus->setIdleText(i18n("Enter to send · Shift+Enter for a new line"));
+    m_turnStatus->setMinimumHeight(18);
+    composerLayout->addWidget(m_turnStatus);
+    connect(m_turnStatus, &TurnStatus::scrollToLatestRequested, this, &ChatWidget::forceScrollToBottom);
 
     root->addWidget(composerContainer);
 
@@ -515,6 +491,9 @@ ChatWidget::ChatWidget(QWidget *parent)
         case Provider::ClaudeCompatible:
             m_settings.claudeCompatibleModel = text.trimmed();
             break;
+        case Provider::OpenCode:
+            m_settings.opencodeModel = text.trimmed();
+            break;
         case Provider::Acp:
             m_settings.acpModel = text.trimmed();
             break;
@@ -534,6 +513,7 @@ ChatWidget::ChatWidget(QWidget *parent)
         if (m_updatingCombos) return;
         m_settings.permissionMode = permissionModeFromId(m_permission->currentData().toString());
         m_agent.setSettings(m_settings);
+        refreshPermissionButton();
         Q_EMIT settingsChanged(m_settings);
     });
 
@@ -546,9 +526,7 @@ ChatWidget::ChatWidget(QWidget *parent)
 
     connect(m_mode, &QComboBox::currentIndexChanged, this, [this]() {
         if (m_updatingCombos) return;
-        m_settings.planMode = m_mode->currentData().toBool();
-        m_agent.setSettings(m_settings);
-        Q_EMIT settingsChanged(m_settings);
+        applyMode(m_mode->currentData().toString());
     });
 
     connect(m_thinking, &QPushButton::toggled, this, [this](bool checked) {
@@ -599,12 +577,30 @@ ChatWidget::ChatWidget(QWidget *parent)
         freezeStreaming();
         m_workingLabelBase = workingLabelForTool(request.toolName);
         setWorkingIndicator(true);
+        m_turnStatus->setActivity(m_workingLabelBase);
         if (m_workingIndicator && m_isWorking) {
             m_workingIndicator->setText(m_workingLabelBase + progressiveDots(m_indicatorTick));
         }
+
+        // A sub-agent is a long-running operation with its own live status, so
+        // it gets a dedicated card instead of the flat tool-call card.
+        if (request.toolName == subtaskToolName()) {
+            auto *subtaskWidget = new SubtaskWidget(request.toolCallId, m_transcriptContainer);
+            connect(subtaskWidget, &SubtaskWidget::cancelRequested, this, [this](const QString &taskId) {
+                m_agent.cancelSubtask(taskId);
+            });
+            m_subtaskWidgets.insert(request.toolCallId, subtaskWidget);
+            m_subtaskOrder.append(subtaskWidget);
+            appendTranscriptWidget(subtaskWidget);
+            applyTranscriptCollapse();
+            scrollToBottom();
+            return;
+        }
+
         auto *toolWidget = new ToolCallWidget(request.toolCallId, m_transcriptContainer);
         toolWidget->setToolInfo(request.toolName, request.summary, request.risk);
         toolWidget->setDescribeDiff(request.describeDiff);
+        toolWidget->setDurationVisible(true);
         toolWidget->setRunning();
         m_toolCallWidgets.insert(request.toolCallId, toolWidget);
         m_toolCallOrder.append(toolWidget);
@@ -630,9 +626,14 @@ ChatWidget::ChatWidget(QWidget *parent)
     });
 
     connect(&m_agent, &AgentLoop::toolFinished, this, [this](const ToolResult &result) {
+        if (auto *subtaskWidget = m_subtaskWidgets.value(result.toolCallId)) {
+            subtaskWidget->finishAgent(result);
+        }
         if (auto *widget = m_toolCallWidgets.value(result.toolCallId)) {
             widget->setFinished(result);
         }
+        ++m_completedToolCount;
+        m_turnStatus->setCompletedToolCount(m_completedToolCount);
 
         // Handle edit tracking for AcceptEdits mode
         if (m_settings.permissionMode == PermissionMode::AcceptEdits) {
@@ -658,7 +659,7 @@ ChatWidget::ChatWidget(QWidget *parent)
         // Hide working indicator if no more tools are running
         bool anyRunning = false;
         for (auto *widget : m_toolCallWidgets) {
-            if (widget->isRunning()) {
+            if (widget && widget->isRunning()) {
                 anyRunning = true;
                 break;
             }
@@ -670,17 +671,37 @@ ChatWidget::ChatWidget(QWidget *parent)
         scrollToBottom();
     });
 
+    // Approval now happens on the card that triggered it. permissionNeeded fires
+    // before toolStarted, so the card is created here and later reused by the
+    // toolStarted handler instead of a second card appearing.
     connect(&m_agent, &AgentLoop::permissionNeeded, this, [this](const PermissionRequest &request) {
-        m_permissionBar->showRequest(request);
+        ToolCallWidget *widget = m_toolCallWidgets.value(request.toolCallId);
+        if (!widget) {
+            widget = new ToolCallWidget(request.toolCallId, m_transcriptContainer);
+            widget->setToolInfo(request.toolName, request.summary, request.risk);
+            widget->setDescribeDiff(request.describeDiff);
+            widget->setDurationVisible(true);
+            m_toolCallWidgets.insert(request.toolCallId, widget);
+            m_toolCallOrder.append(widget);
+            appendTranscriptWidget(widget);
+            applyTranscriptCollapse();
+        }
+        widget->showApproval();
+        connect(widget, &ToolCallWidget::approvalChosen, this, [this, widget, request](PermissionDecision decision) {
+            widget->setApprovalResolved(decision);
+            m_agent.resolvePermission(decision);
+        }, Qt::SingleShotConnection);
+        m_turnStatus->setActivity(i18n("Waiting for approval"));
         m_prompt->setEnabled(false);
         updateSendButtonState();
         scrollToBottom();
     });
 
     connect(&m_agent, &AgentLoop::statusChanged, this, [this](const QString &status) {
-        m_status->setText(status.isEmpty() ? i18n("Enter to send · Shift+Enter for a new line") : status);
-        m_prompt->setEnabled(!m_permissionBar->isVisible());
+        m_turnStatus->setIdleText(i18n("Enter to send · Shift+Enter for a new line"));
+        m_prompt->setEnabled(!m_approvalPending());
         updateSendButtonState();
+        Q_UNUSED(status)
     });
 
     connect(&m_agent, &AgentLoop::failed, this, [this](const QString &error) {
@@ -708,6 +729,8 @@ ChatWidget::ChatWidget(QWidget *parent)
         m_prompt->setFocus();
         setThinkingIndicator(false);
         setWorkingIndicator(false);
+        // Settle the status strip back to its idle hint now the turn is over.
+        m_turnStatus->setBusy(false);
         // Auto-save conversation after each completed turn so it always
         // appears up-to-date in the history menu.
         if (!m_currentConversationId.isEmpty()) {
@@ -719,6 +742,56 @@ ChatWidget::ChatWidget(QWidget *parent)
             }
         }
     });
+
+    // Modes, MCP and checkpoints
+    connect(&m_agent, &AgentLoop::modesChanged, this, [this] {
+        populateModes();
+        refreshModeButton();
+    });
+    connect(&m_agent, &AgentLoop::mcpStatusChanged, this, [this](const QString &summary) {
+        Q_UNUSED(summary)
+        updateMcpButton();
+    });
+    connect(&m_agent, &AgentLoop::mcpToolsChanged, this, [this] {
+        updateMcpButton();
+    });
+    connect(&m_agent, &AgentLoop::mcpLogMessage, this, [this](const QString &message) {
+        qWarning().noquote() << u"Kate AI MCP:"_s << message;
+    });
+    connect(&m_agent, &AgentLoop::checkpointCreated, this, [this](const QString &id, const QString &label) {
+        Q_UNUSED(id)
+        showInfoMessage(i18n("Checkpoint saved: %1", label.isEmpty() ? i18n("auto") : label), false);
+    });
+    connect(&m_agent, &AgentLoop::checkpointFailed, this, [this](const QString &error) {
+        qWarning().noquote() << u"Kate AI checkpoint:"_s << error;
+    });
+    connect(&m_agent, &AgentLoop::checkpointRestored, this, [this](const QString &id) {
+        showInfoMessage(i18n("Restored checkpoint %1.", id.left(8)), false);
+        Q_EMIT aboutToSubmit(); // Re-read the workspace so Kate sees the rollback.
+    });
+    connect(&m_agent, &AgentLoop::subtaskStarted, this, [this](const QString &taskId, const QString &agentId, const QString &agentName, const QString &modeId, const QString &description) {
+        Q_UNUSED(agentId)
+        // The card already exists: it was created on toolStarted, which fires
+        // before subtaskStarted for this tool.
+        if (auto *widget = m_subtaskWidgets.value(taskId)) {
+            widget->startAgent(agentName, modeId, description);
+        }
+        m_turnStatus->setSubtaskCount(m_agent.runningSubtaskCount());
+        updateTeamButton();
+        forceScrollToBottom();
+    });
+    connect(&m_agent, &AgentLoop::subtaskActivity, this, [this](const QString &taskId, const QString &line, bool isError) {
+        if (auto *widget = m_subtaskWidgets.value(taskId)) {
+            widget->appendActivity(line, isError);
+        }
+    });
+    connect(&m_agent, &AgentLoop::subtaskFinished, this, [this](const QString &taskId, bool ok) {
+        Q_UNUSED(taskId)
+        Q_UNUSED(ok)
+        m_turnStatus->setSubtaskCount(m_agent.runningSubtaskCount());
+        updateTeamButton();
+    });
+    connect(&m_agent, &AgentLoop::turnFinished, this, &ChatWidget::markRunningSubtasksAbandoned);
 
     // Edit tracker signals
     connect(m_editTracker, &EditTracker::editAccepted, this, [this](const QString &path, const QString &toolName, const QString &newContent) {
@@ -760,7 +833,7 @@ ChatWidget::ChatWidget(QWidget *parent)
         refreshProviders();
         updateModelSelectorLabel();
         if (provider == m_settings.provider) {
-            m_status->setText(i18n("Model list unavailable: %1", error));
+            m_turnStatus->flash(i18n("Model list unavailable: %1", error), true);
         }
     });
 
@@ -825,21 +898,17 @@ void ChatWidget::addUserMessage(const QString &text)
     }
 
     auto *card = new QWidget(m_transcriptContainer);
-    card->setStyleSheet(
-        u"QWidget {"
-        u"  background-color: #232326;"
-        u"  border: 1px solid #333338;"
-        u"  border-radius: 6px;"
-        u"}"_s);
+    card->setObjectName(u"userCard"_s);
+    card->setStyleSheet(ChatTheme::userCard());
     auto *cardLayout = new QVBoxLayout(card);
-    cardLayout->setContentsMargins(10, 8, 10, 8);
+    cardLayout->setContentsMargins(12, 9, 12, 9);
     cardLayout->setSpacing(4);
 
     auto *headerLayout = new QHBoxLayout;
     headerLayout->setContentsMargins(0, 0, 0, 0);
 
-    auto *header = new QLabel(i18n("YOU"), card);
-    header->setStyleSheet(u"color: #888888; font-size: 10px; font-weight: bold; letter-spacing: 0.5px; border: none; background: transparent;"_s);
+    auto *header = new QLabel(i18n("You"), card);
+    header->setStyleSheet(ChatTheme::roleHeader());
     headerLayout->addWidget(header);
     headerLayout->addStretch();
 
@@ -852,7 +921,7 @@ void ChatWidget::addUserMessage(const QString &text)
     msgLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
     msgLabel->setAlignment(Qt::AlignLeft | Qt::AlignTop);
     msgLabel->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum);
-    msgLabel->setStyleSheet(u"color: #e4e4e4; font-size: 13px; line-height: 1.5; border: none; background: transparent;"_s);
+    msgLabel->setStyleSheet(ChatTheme::messageText());
     msgLabel->setText(escape(text).replace(u"\n"_s, u"<br>"_s));
     cardLayout->addWidget(msgLabel);
 
@@ -870,7 +939,7 @@ void ChatWidget::addActivityMessage(const QString &text)
         return;
     }
     auto *pill = new QLabel(escape(text), m_transcriptContainer);
-    pill->setStyleSheet(u"color: #777777; font-size: 11px; font-style: italic; padding: 2px 4px;"_s);
+    pill->setStyleSheet(ChatTheme::hintLabel());
     appendTranscriptWidget(pill);
     scrollToBottom();
 }
@@ -884,23 +953,26 @@ void ChatWidget::setStreaming(const QString &text)
     }
     if (!m_activeAssistantWidget) {
         m_activeAssistantWidget = new QWidget(m_transcriptContainer);
+        m_activeAssistantWidget->setObjectName(u"assistantCard"_s);
+        m_activeAssistantWidget->setStyleSheet(ChatTheme::assistantCard());
         auto *layout = new QVBoxLayout(m_activeAssistantWidget);
-        layout->setContentsMargins(4, 4, 4, 4);
-        layout->setSpacing(4);
+        layout->setContentsMargins(2, 2, 2, 2);
+        layout->setSpacing(6);
 
         auto *headerLayout = new QHBoxLayout;
         headerLayout->setContentsMargins(0, 0, 0, 0);
 
-        auto *icon = new QLabel(u"⚡"_s, m_activeAssistantWidget);
-        icon->setStyleSheet(u"color: #3b82f6; font-size: 12px;"_s);
-        headerLayout->addWidget(icon);
-
-        auto *header = new QLabel(i18n("KATE AI"), m_activeAssistantWidget);
-        header->setStyleSheet(u"color: #3b82f6; font-size: 10px; font-weight: bold; letter-spacing: 0.5px;"_s);
+        // A caption plus a single live dot. Two icons here competed for attention;
+        // the dot alone already answers "is this still running?".
+        auto *header = new QLabel(i18n("Kate AI"), m_activeAssistantWidget.data());
+        header->setStyleSheet(ChatTheme::roleHeader());
         headerLayout->addWidget(header);
 
-        m_activeAssistantPulse = new QLabel(u"●"_s, m_activeAssistantWidget);
-        m_activeAssistantPulse->setStyleSheet(u"color: #3b82f6; font-size: 9px; padding-left: 4px;"_s);
+        // The pulse is the only moving part in an assistant turn, so it marks
+        // "still streaming" without the whole block flickering.
+        m_activeAssistantPulse = new QLabel(QStringLiteral("●"), m_activeAssistantWidget);
+        m_activeAssistantPulse->setStyleSheet(QStringLiteral("QLabel { color: %1; font-size: 9px; padding-left: 4px; }")
+                                                 .arg(ChatTheme::accent()));
         headerLayout->addWidget(m_activeAssistantPulse);
         headerLayout->addStretch();
 
@@ -923,7 +995,7 @@ void ChatWidget::setStreaming(const QString &text)
         m_planLayout->setContentsMargins(4, 2, 4, 2);
         m_planLayout->setSpacing(2);
         auto *planLabel = new QLabel(i18n("Plan"), m_planBlock);
-        planLabel->setStyleSheet(u"color: #888888; font-size: 10px; font-weight: bold; letter-spacing: 0.5px;"_s);
+        planLabel->setStyleSheet(ChatTheme::sectionLabel());
         m_planLayout->addWidget(planLabel);
         layout->addWidget(m_planBlock);
 
@@ -933,16 +1005,9 @@ void ChatWidget::setStreaming(const QString &text)
         m_activeAssistantBrowser->setFrameShape(QFrame::NoFrame);
         m_activeAssistantBrowser->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
         m_activeAssistantBrowser->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
-        m_activeAssistantBrowser->setStyleSheet(u"background: transparent; color: #d4d4d4; border: none; padding: 0px;"_s);
-        m_activeAssistantBrowser->document()->setDefaultStyleSheet(
-            u"body { color: #d4d4d4; font-family: sans-serif; font-size: 13px; margin: 0; padding: 0; }"
-            u"pre { background-color: #222225; color: #e4e4e4; padding: 10px 12px; border-radius: 6px; border: 1px solid #333338; font-family: monospace; font-size: 12px; margin: 8px 0; }"
-            u"code { font-family: monospace; font-size: 12px; background-color: #28282d; color: #e4e4e4; padding: 2px 5px; border-radius: 3px; }"
-            u"p { margin-bottom: 8px; line-height: 1.5; }"
-            u"ul, ol { margin-bottom: 8px; padding-left: 20px; }"
-            u"li { margin-bottom: 4px; }"
-            u"blockquote { border-left: 3px solid #3b82f6; padding-left: 10px; color: #888; margin: 8px 0; }"
-            u"a { color: #3b82f6; text-decoration: none; }"_s);
+        m_activeAssistantBrowser->setStyleSheet(
+            QStringLiteral("background: transparent; color: %1; border: none; padding: 0px;").arg(ChatTheme::textPrimary()));
+        m_activeAssistantBrowser->document()->setDefaultStyleSheet(ChatTheme::messageCss());
 
         layout->addWidget(m_activeAssistantBrowser);
         m_activeAssistantWidget->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum);
@@ -954,7 +1019,7 @@ void ChatWidget::setStreaming(const QString &text)
     if (!m_activeAssistantBrowser) {
         return;
     }
-    m_activeAssistantBrowser->setMarkdown(closedMarkdown(m_streamText));
+    m_activeAssistantBrowser->setDocument(makeMarkdownDocument(closedMarkdown(m_streamText)));
     if (!m_activeAssistantBrowser) {
         return;
     }
@@ -1020,7 +1085,7 @@ void ChatWidget::updateThinkingDisplay()
         return;
     }
     const QString displayed = m_thinkingBuffer.left(m_thinkingPacedLength);
-    m_thinkingBrowser->setMarkdown(closedMarkdown(displayed));
+    m_thinkingBrowser->setDocument(makeMarkdownDocument(closedMarkdown(displayed)));
     if (m_thinkingBlock && !m_thinkingBuffer.isEmpty()) {
         m_thinkingBlock->show();
     }
@@ -1096,9 +1161,7 @@ QWidget *ChatWidget::createThinkingBlock(QWidget *parent, QTextBrowser *&browser
     toggle = new QPushButton(u"\u25b4 "_s + i18n("Reasoning"), block);
     toggle->setFlat(true);
     toggle->setCursor(Qt::PointingHandCursor);
-    toggle->setStyleSheet(
-        u"QPushButton { color: #888888; font-size: 11px; font-style: italic; border: none; text-align: left; }"
-        u"QPushButton:hover { color: #aaaaaa; }"_s);
+    toggle->setStyleSheet(ChatTheme::toggleLink());
     tbHeader->addWidget(toggle);
     tbHeader->addStretch();
     tbLayout->addLayout(tbHeader);
@@ -1108,13 +1171,13 @@ QWidget *ChatWidget::createThinkingBlock(QWidget *parent, QTextBrowser *&browser
     browser->setFrameShape(QFrame::NoFrame);
     browser->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     browser->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    browser->setStyleSheet(
-        u"QTextBrowser { background: transparent; color: #c8c8c8; border: none; font-style: italic; font-size: 12px; padding: 4px; }"_s);
-    browser->document()->setDefaultStyleSheet(
-        u"body { color: #c8c8c8; font-style: italic; font-size: 12px; margin: 0; padding: 0; background: transparent; }"
-        u"p { color: #c8c8c8; margin-bottom: 4px; }"_s);
+    browser->setStyleSheet(QStringLiteral("QTextBrowser { background: transparent; color: %1; border: none;"
+                                        " font-style: italic; font-size: 12px; padding: 4px; }")
+                            .arg(ChatTheme::textMuted()));
+
+    browser->document()->setDefaultStyleSheet(ChatTheme::thinkingCss());
     QPalette pal = browser->palette();
-    pal.setColor(QPalette::Text, QColor(u"#c8c8c8"_s));
+    pal.setColor(QPalette::Text, QColor(ChatTheme::textMuted()));
     pal.setColor(QPalette::Base, Qt::transparent);
     browser->setPalette(pal);
     tbLayout->addWidget(browser);
@@ -1206,8 +1269,7 @@ void ChatWidget::addPlanChecklist(const QJsonArray &plan)
         auto *cb = new QCheckBox(desc, m_planBlock);
         cb->setChecked(completed);
         cb->setDisabled(true);
-        cb->setStyleSheet(u"QCheckBox { color: #b0b0b0; font-size: 12px; }"
-                          u"QCheckBox::indicator { width: 14px; height: 14px; }"_s);
+        cb->setStyleSheet(ChatTheme::planChecklist());
         m_planLayout->addWidget(cb);
         m_planSteps.insert(cb, o.value(u"id"_s).toString());
     }
@@ -1231,7 +1293,7 @@ void ChatWidget::freezeStreaming()
         m_streamHeightTimer->stop();
     }
     if (m_activeAssistantBrowser && !m_streamText.isEmpty()) {
-        m_activeAssistantBrowser->setMarkdown(m_streamText);
+        m_activeAssistantBrowser->setDocument(makeMarkdownDocument(m_streamText));
         if (m_activeAssistantBrowser) {
             const int docH = static_cast<int>(m_activeAssistantBrowser->document()->size().height()) + 16;
             m_activeAssistantBrowser->setFixedHeight(std::max(30, docH));
@@ -1290,7 +1352,7 @@ void ChatWidget::setThinkingIndicator(bool show)
     if (show && !m_isThinking) {
         m_isThinking = true;
         m_indicatorTick = 0;
-        m_thinkingIndicator->setText(u"💭  Thinking"_s + progressiveDots(0));
+        m_thinkingIndicator->setText(i18n("Thinking") + progressiveDots(0));
         m_thinkingIndicator->show();
         tickIndicators();
     } else if (!show && m_isThinking) {
@@ -1311,7 +1373,7 @@ void ChatWidget::setWorkingIndicator(bool show)
     if (show && !m_isWorking) {
         m_isWorking = true;
         if (m_workingLabelBase.isEmpty()) {
-            m_workingLabelBase = u"⚙️  "_s + i18n("Working");
+            m_workingLabelBase = i18n("Working");
         }
         m_workingIndicator->setText(m_workingLabelBase + progressiveDots(0));
         m_workingIndicator->show();
@@ -1346,7 +1408,7 @@ void ChatWidget::tickIndicators()
     const QString dots = progressiveDots(m_indicatorTick);
 
     if (m_isThinking && m_thinkingIndicator) {
-        m_thinkingIndicator->setText(u"💭  Thinking"_s + dots);
+        m_thinkingIndicator->setText(i18n("Thinking") + dots);
         if (auto *effect = qobject_cast<QGraphicsOpacityEffect *>(m_thinkingIndicator->graphicsEffect())) {
             effect->setOpacity(0.62 + 0.38 * ((m_indicatorTick % 2 == 0) ? 1.0 : 0.0));
         }
@@ -1594,53 +1656,59 @@ QWidget *ChatWidget::createWelcomeWidget()
     wLayout->setSpacing(8);
     wLayout->setAlignment(Qt::AlignHCenter | Qt::AlignTop);
 
-    auto *wIcon = new QLabel(u"⚡"_s, welcome);
+    auto *wIcon = new QLabel(welcome);
     wIcon->setAlignment(Qt::AlignCenter);
-    wIcon->setStyleSheet(u"font-size: 24px; color: #3b82f6;"_s);
+    wIcon->setPixmap(QIcon::fromTheme(u"dialog-information"_s).pixmap(26, 26));
     wLayout->addWidget(wIcon);
 
     auto *wTitle = new QLabel(i18n("Kate AI Agent"), welcome);
     wTitle->setAlignment(Qt::AlignCenter);
-    wTitle->setStyleSheet(u"color: #e4e4e4; font-size: 14px; font-weight: bold;"_s);
+    wTitle->setStyleSheet(QStringLiteral("QLabel { color: %1; font-size: 15px; font-weight: 600; }")
+                              .arg(ChatTheme::textPrimary()));
     wLayout->addWidget(wTitle);
 
     auto *wSub = new QLabel(i18n("Ask questions, edit code, and explore your workspace."), welcome);
     wSub->setAlignment(Qt::AlignCenter);
-    wSub->setStyleSheet(u"color: #777777; font-size: 11px; margin-bottom: 8px;"_s);
+    wSub->setStyleSheet(QStringLiteral("QLabel { color: %1; font-size: 12px; margin-bottom: 8px; }")
+                            .arg(ChatTheme::textMuted()));
     wLayout->addWidget(wSub);
 
     // Starter suggestion chips
     auto *chipsLayout = new QVBoxLayout;
     chipsLayout->setSpacing(6);
 
+    // Suggestion chips. Deliberately unadorned: the wording is the affordance, and
+    // a row of coloured pictograms competed with the transcript below it.
     const struct Suggestion {
-        QString icon;
         QString title;
         QString prompt;
     } suggestions[] = {
-        {u"🔍"_s, i18n("Explain active file"), i18n("Explain the active file and its architecture.")},
-        {u"🐛"_s, i18n("Find bugs & edge cases"), i18n("Inspect the current code for bugs, edge cases, and potential improvements.")},
-        {u"🧪"_s, i18n("Generate tests"), i18n("Write comprehensive unit tests for the code in this file.")}
+        {i18n("Explain active file"), i18n("Explain the active file and its architecture.")},
+        {i18n("Find bugs & edge cases"), i18n("Inspect the current code for bugs, edge cases, and potential improvements.")},
+        {i18n("Generate tests"), i18n("Write comprehensive unit tests for the code in this file.")}
     };
 
     for (const auto &s : suggestions) {
-        auto *btn = new QPushButton(u"%1  %2"_s.arg(s.icon, s.title), welcome);
+        auto *btn = new QPushButton(s.title, welcome);
         btn->setCursor(Qt::PointingHandCursor);
         btn->setStyleSheet(
-            u"QPushButton {"
-            u"  background-color: #202024;"
-            u"  color: #cccccc;"
-            u"  border: 1px solid #333338;"
-            u"  border-radius: 6px;"
-            u"  padding: 6px 10px;"
-            u"  font-size: 11px;"
-            u"  text-align: left;"
-            u"}"
-            u"QPushButton:hover {"
-            u"  background-color: #2a2a30;"
-            u"  border-color: #4a4a52;"
-            u"  color: #ffffff;"
-            u"}"_s);
+            QStringLiteral(
+                "QPushButton {"
+                "  background-color: %1;"
+                "  color: %2;"
+                "  border: 1px solid %3;"
+                "  border-radius: 8px;"
+                "  padding: 8px 12px;"
+                "  font-size: 12px;"
+                "  text-align: left;"
+                "}"
+                "QPushButton:hover {"
+                "  background-color: %4;"
+                "  border-color: %5;"
+                "  color: #ffffff;"
+                "}")
+                .arg(ChatTheme::surfaceBg(), ChatTheme::textPrimary(), ChatTheme::border(), ChatTheme::hoverBg(),
+                     ChatTheme::borderStrong()));
         connect(btn, &QPushButton::clicked, this, [this, prompt = s.prompt]() {
             ask(prompt);
         });
@@ -1709,10 +1777,12 @@ void ChatWidget::setSettings(const Settings &settings)
     if (sandboxIndex >= 0) {
         m_sandbox->setCurrentIndex(sandboxIndex);
     }
-    const int modeIndex = m_mode->findData(settings.planMode);
+    const int modeIndex = m_mode->findData(settings.agentMode);
     if (modeIndex >= 0) {
         m_mode->setCurrentIndex(modeIndex);
     }
+    refreshModeButton();
+    refreshPermissionButton();
     m_thinking->setChecked(settings.thinkingMode);
     updateThinkingButtonStyle();
     updateReasoningEffortButton();
@@ -1725,11 +1795,13 @@ void ChatWidget::setSettings(const Settings &settings)
     updateModelSelectorLabel();
     updateTokenDisplay();
     updateReasoningEffortButton();
+    updateMcpButton();
 
-    for (Provider provider : {Provider::Grok, Provider::OpenAI, Provider::OpenRouter, Provider::DeepSeek, Provider::OpenAICompatible, Provider::ClaudeCompatible, Provider::Kilo, Provider::Acp}) {
+    for (Provider provider : {Provider::Grok, Provider::OpenAI, Provider::OpenRouter, Provider::DeepSeek, Provider::OpenAICompatible, Provider::ClaudeCompatible, Provider::Kilo, Provider::Acp, Provider::OpenCode}) {
         Settings providerSettings = settings;
         providerSettings.provider = provider;
-        if (!apiKeyFor(providerSettings).trimmed().isEmpty() && !m_modelCatalog.contains(provider)) {
+        // Only fetch from providers that both have a key and expose a catalogue.
+        if (!apiKeyFor(providerSettings).trimmed().isEmpty() && providerSupportsModelListing(provider) && !m_modelCatalog.contains(provider)) {
             m_agent.fetchModels(provider);
         }
     }
@@ -1747,7 +1819,7 @@ void ChatWidget::refreshProviders()
     const bool wasUpdating = m_updatingCombos;
     m_updatingCombos = true;
     m_provider->clear();
-    for (Provider provider : {Provider::Grok, Provider::OpenAI, Provider::OpenRouter, Provider::DeepSeek, Provider::OpenAICompatible, Provider::ClaudeCompatible, Provider::Kilo, Provider::Acp}) {
+    for (Provider provider : {Provider::Grok, Provider::OpenAI, Provider::OpenRouter, Provider::DeepSeek, Provider::OpenAICompatible, Provider::ClaudeCompatible, Provider::Kilo, Provider::Acp, Provider::OpenCode}) {
         // Only show provider if it has a valid API key configured
         Settings providerSettings = m_settings;
         providerSettings.provider = provider;
@@ -1813,6 +1885,9 @@ void ChatWidget::refreshModels()
             case Provider::ClaudeCompatible:
                 m_settings.claudeCompatibleModel = selectedModel;
                 break;
+            case Provider::OpenCode:
+                m_settings.opencodeModel = selectedModel;
+                break;
             case Provider::Acp:
                 m_settings.acpModel = selectedModel;
                 break;
@@ -1836,54 +1911,52 @@ void ChatWidget::refreshModels()
 void ChatWidget::updateModelSelectorLabel()
 {
     if (!m_modelSelector) return;
-    const QString pLabel = providerLabel(m_settings.provider);
+    // The chip sits in a narrow row next to the mode chip, so it carries the
+    // model alone. The provider (and the raw reasoning level) move into the
+    // tooltip, where there is room for them and nobody has to read them twice.
     const QString model = modelFor(m_settings);
-    QString label = u"%1: %2"_s.arg(pLabel, model.isEmpty() ? i18n("Select model") : model);
-    if (!m_settings.reasoningEffort.isEmpty()) {
-        label += u" · %1"_s.arg(m_settings.reasoningEffort);
+    const QString label = model.isEmpty() ? i18n("Select model") : model;
+    m_modelSelector->setText(label + QStringLiteral("  ▾"));
+
+    QStringList parts{providerLabel(m_settings.provider)};
+    if (!model.isEmpty()) {
+        parts.append(model);
     }
-    m_modelSelector->setText(label + u"  ▾"_s);
+    if (!m_settings.reasoningEffort.isEmpty()) {
+        parts.append(i18n("Reasoning: %1", m_settings.reasoningEffort));
+    }
+    m_modelSelector->setToolTip(parts.join(QStringLiteral("  ·  ")));
 }
 
 void ChatWidget::updateTokenDisplay()
 {
     if (!m_tokenCount) return;
-    const QString m = modelFor(m_settings);
-    m_tokenCount->setText(m.isEmpty() ? QString() : m);
+    // This used to print the model name, which duplicated the model chip sitting
+    // two buttons to its left. There is no token accounting from the provider to
+    // show, so it stays empty rather than repeating what is already visible.
+    m_tokenCount->setText(QString());
 }
 
 void ChatWidget::updateThinkingButtonStyle()
 {
     if (!m_thinking) return;
+    // An on/off toggle, not a status light. The earlier version filled the
+    // button with solid green, which made it the loudest thing in the composer
+    // and pulled the eye away from the send button it sits next to.
+    m_thinking->setIcon(QIcon());
     if (m_thinking->isChecked()) {
-        m_thinking->setText(u"💡"_s);
+        m_thinking->setText(QStringLiteral("\u{2726}")); // filled diamond
+        m_thinking->setToolTip(i18n("Thinking mode is on"));
         m_thinking->setStyleSheet(
-            u"QPushButton {"
-            u"  color: #ffffff;"
-            u"  background-color: #1e7e34;"
-            u"  border: 1px solid #2d9f42;"
-            u"  border-radius: 4px;"
-            u"  font-size: 14px;"
-            u"}"
-            u"QPushButton:hover {"
-            u"  background-color: #2d9f42;"
-            u"  border-color: #3ecf52;"
-            u"}"_s);
+            QStringLiteral(
+                "QPushButton { color: #ffffff; background-color: %1; border: none;"
+                " border-radius: 13px; padding: 0; }"
+                "QPushButton:hover { background-color: %2; }")
+            .arg(ChatTheme::accent(), ChatTheme::accentHover()));
     } else {
-        m_thinking->setText(u"💭"_s);
-        m_thinking->setStyleSheet(
-            u"QPushButton {"
-            u"  color: #888888;"
-            u"  background-color: #2e2e32;"
-            u"  border: 1px solid #3c3c40;"
-            u"  border-radius: 4px;"
-            u"  font-size: 14px;"
-            u"}"
-            u"QPushButton:hover {"
-            u"  background-color: #3a3a3e;"
-            u"  border-color: #4a4a50;"
-            u"  color: #aaaaaa;"
-            u"}"_s);
+        m_thinking->setText(QStringLiteral("\u{2727}")); // hollow diamond
+        m_thinking->setToolTip(i18n("Toggle thinking mode"));
+        m_thinking->setStyleSheet(ChatTheme::iconButton());
     }
 }
 
@@ -1896,74 +1969,73 @@ void ChatWidget::updateReasoningEffortButton()
     QString text;
     QString toolTip;
     if (m_settings.reasoningEffort.isEmpty()) {
-        text = u"🧠"_s;
+        text = QStringLiteral("Auto");
         toolTip = supports ? i18n("Reasoning effort: Auto (provider default)") : i18n("Reasoning effort: not supported by this model");
     } else if (m_settings.reasoningEffort == u"minimal"_s) {
-        text = u"1"_s;
+        text = i18n("Minimal");
         toolTip = i18n("Reasoning effort: Minimal");
     } else if (m_settings.reasoningEffort == u"low"_s) {
-        text = u"2"_s;
+        text = i18n("Low");
         toolTip = i18n("Reasoning effort: Low");
     } else if (m_settings.reasoningEffort == u"medium"_s) {
-        text = u"3"_s;
+        text = i18n("Medium");
         toolTip = i18n("Reasoning effort: Medium");
     } else if (m_settings.reasoningEffort == u"high"_s) {
-        text = u"4"_s;
+        text = i18n("High");
         toolTip = i18n("Reasoning effort: High");
     } else {
-        text = u"🧠"_s;
+        text = m_settings.reasoningEffort;
         toolTip = i18n("Reasoning effort: %1", m_settings.reasoningEffort);
     }
 
     m_reasoningEffort->setText(text);
     m_reasoningEffort->setToolTip(toolTip);
 
-    // Always visible next to the model label. Greyed out when the current
-    // model does not expose a reasoning_effort parameter.
+    // Same pill as the mode and model chips, so the three read as one control
+    // group. An unsupported model is dimmed rather than hidden: hiding it moved
+    // the send button sideways every time the model changed.
     if (!supports) {
         m_reasoningEffort->setStyleSheet(
-            u"QPushButton {"
-            u"  color: #666666;"
-            u"  background-color: #1f1f22;"
-            u"  border: 1px solid #333338;"
-            u"  border-radius: 4px;"
-            u"  font-size: 12px;"
-            u"  font-weight: bold;"
-            u"}"
-            u"QPushButton:hover {"
-            u"  background-color: #2a2a2e;"
-            u"  border-color: #3c3c40;"
-            u"  color: #888888;"
-            u"}"_s);
-    } else if (m_settings.reasoningEffort.isEmpty()) {
+            QStringLiteral(
+                "QPushButton {"
+                "  background-color: transparent;"
+                "  color: #5a5a62;"
+                "  border: 1px solid %1;"
+                "  border-radius: 13px;"
+                "  padding: 3px 10px;"
+                "  font-size: 11px;"
+                "}"
+                "QPushButton:hover { border-color: %2; color: %3; }")
+            .arg(ChatTheme::border(), ChatTheme::borderStrong(), ChatTheme::textMuted()));
+        return;
+    }
+    if (m_settings.reasoningEffort.isEmpty()) {
         m_reasoningEffort->setStyleSheet(
-            u"QPushButton {"
-            u"  color: #888888;"
-            u"  background-color: #2e2e32;"
-            u"  border: 1px solid #3c3c40;"
-            u"  border-radius: 4px;"
-            u"  font-size: 12px;"
-            u"  font-weight: bold;"
-            u"}"
-            u"QPushButton:hover {"
-            u"  background-color: #3a3a3e;"
-            u"  border-color: #4a4a50;"
-            u"  color: #cccccc;"
-            u"}"_s);
+            QStringLiteral(
+                "QPushButton {"
+                "  background-color: %1;"
+                "  color: %2;"
+                "  border: 1px solid %3;"
+                "  border-radius: 13px;"
+                "  padding: 3px 10px;"
+                "  font-size: 11px;"
+                "}"
+                "QPushButton:hover { background-color: %4; }")
+            .arg(ChatTheme::cardBg(), ChatTheme::textMuted(), ChatTheme::border(), ChatTheme::hoverBg()));
     } else {
         m_reasoningEffort->setStyleSheet(
-            u"QPushButton {"
-            u"  color: #ffffff;"
-            u"  background-color: #007acc;"
-            u"  border: 1px solid #0099ff;"
-            u"  border-radius: 4px;"
-            u"  font-size: 12px;"
-            u"  font-weight: bold;"
-            u"}"
-            u"QPushButton:hover {"
-            u"  background-color: #0099ff;"
-            u"  border-color: #33bbff;"
-            u"}"_s);
+            QStringLiteral(
+                "QPushButton {"
+                "  background-color: %1;"
+                "  color: #ffffff;"
+                "  border: 1px solid %2;"
+                "  border-radius: 13px;"
+                "  padding: 3px 10px;"
+                "  font-size: 11px;"
+                "  font-weight: 600;"
+                "}"
+                "QPushButton:hover { background-color: %2; }")
+            .arg(ChatTheme::accent(), ChatTheme::accentHover()));
     }
 }
 
@@ -1972,33 +2044,20 @@ bool ChatWidget::modelSupportsReasoningEffort() const
     const QString model = modelFor(m_settings).toLower();
     const Provider provider = m_settings.provider;
 
-    // Grok models with "reasoning" in the name
-    if (provider == Provider::Grok || provider == Provider::OpenRouter) {
-        if (model.contains(u"reasoning"_s)) {
-            return true;
+    // Model names are no longer matched against a hard-coded list. The only
+    // signal used here is the fetched catalogue: if the provider listed the
+    // model, and its name advertises reasoning, offer the control. A model the
+    // catalogue has not returned simply does not get the menu, which is the
+    // honest answer rather than a guess from a stale list.
+    const QStringList models = m_modelCatalog.value(provider);
+    const QString wanted = model.toLower();
+    for (const QString &candidate : models) {
+        if (candidate.toLower() != wanted) {
+            continue;
         }
-    }
-
-    // DeepSeek reasoning models (e.g. deepseek-reasoner)
-    if (provider == Provider::DeepSeek) {
-        if (model.contains(u"reasoner"_s) || model.contains(u"reasoning"_s)) {
-            return true;
-        }
-    }
-
-    // OpenAI o1, o3, o4 models support reasoning effort
-    if (provider == Provider::OpenAI || provider == Provider::OpenRouter) {
-        if (model.startsWith(u"o1"_s) || model.startsWith(u"o3"_s) || model.startsWith(u"o4"_s)) {
-            return true;
-        }
-    }
-
-    // Check for known reasoning models in the catalog
-    const QStringList models = m_modelCatalog.value(provider, defaultModels(provider));
-    for (const QString &m : models) {
-        if (m.toLower() == model && (m.toLower().contains(u"reasoning"_s) || m.toLower().startsWith(u"o1"_s) || m.toLower().startsWith(u"o3"_s) || m.toLower().startsWith(u"o4"_s))) {
-            return true;
-        }
+        const QString lower = candidate.toLower();
+        return lower.contains(u"reason"_s) || lower.startsWith(u"o1"_s) || lower.startsWith(u"o3"_s)
+            || lower.startsWith(u"o4"_s) || lower.contains(u"think"_s);
     }
 
     return false;
@@ -2167,7 +2226,8 @@ void ChatWidget::rebuildModelMenuProviderSubmenus()
         Provider::OpenAICompatible,
         Provider::ClaudeCompatible,
         Provider::Kilo,
-        Provider::Acp
+        Provider::Acp,
+        Provider::OpenCode
     };
 
     const QString currentModel = modelFor(m_settings);
@@ -2297,6 +2357,9 @@ void ChatWidget::selectModel(Provider provider, const QString &model)
     case Provider::ClaudeCompatible:
         m_settings.claudeCompatibleModel = model;
         break;
+    case Provider::OpenCode:
+        m_settings.opencodeModel = model;
+        break;
     case Provider::Kilo:
         m_settings.kiloModel = model;
         break;
@@ -2379,8 +2442,66 @@ void ChatWidget::showSettingsMenu()
     planAction->setCheckable(true);
     planAction->setChecked(m_settings.planMode);
     connect(planAction, &QAction::triggered, this, [this](bool checked) {
-        m_mode->setCurrentIndex(checked ? 1 : 0);
+        m_settings.planMode = checked;
+        m_agent.setSettings(m_settings);
+        Q_EMIT settingsChanged(m_settings);
+        refreshModeButton();
     });
+
+    // Agent Mode
+    auto *modeMenu = menu.addMenu(i18n("Mode"));
+    modeMenu->setStyleSheet(menu.styleSheet());
+    auto *modeGroup = new QActionGroup(this);
+    for (int i = 0; i < m_mode->count(); ++i) {
+        auto *action = modeMenu->addAction(m_mode->itemText(i));
+        action->setCheckable(true);
+        action->setChecked(m_mode->currentIndex() == i);
+        modeGroup->addAction(action);
+        connect(action, &QAction::triggered, this, [this, i]() {
+            m_mode->setCurrentIndex(i);
+        });
+    }
+    const QStringList customModes = m_agent.modeRegistry()->customModeIds();
+    if (!customModes.isEmpty()) {
+        modeMenu->addSeparator();
+        for (const QString &id : customModes) {
+            const int index = m_mode->findData(id);
+            if (index < 0) {
+                continue;
+            }
+            auto *action = modeMenu->addAction(m_mode->itemText(index));
+            action->setCheckable(true);
+            action->setChecked(m_mode->currentIndex() == index);
+            modeGroup->addAction(action);
+            connect(action, &QAction::triggered, this, [this, index]() {
+                m_mode->setCurrentIndex(index);
+            });
+        }
+    }
+
+    // Auto-approve tools that still prompt
+    auto *autoApproveMenu = menu.addMenu(i18n("Auto-approve tools"));
+    autoApproveMenu->setStyleSheet(menu.styleSheet());
+    for (const QString &tool : allBuiltInToolNames()) {
+        auto *action = autoApproveMenu->addAction(tool);
+        action->setCheckable(true);
+        action->setChecked(m_settings.autoApproveTools.contains(tool));
+        connect(action, &QAction::triggered, this, [this, tool, action]() {
+            applyAutoApproveTool(tool, action->isChecked());
+        });
+    }
+    autoApproveMenu->addSeparator();
+    if (m_agent.mcpManager()) {
+        for (const McpTool &tool : m_agent.mcpManager()->tools()) {
+            const QString qualified = tool.qualifiedName();
+            auto *action = autoApproveMenu->addAction(qualified);
+            action->setCheckable(true);
+            action->setChecked(m_agent.mcpManager()->autoApprovedTools().contains(qualified));
+            connect(action, &QAction::triggered, this, [this, action, tool] {
+                setMcpToolAutoApproved(tool, action->isChecked());
+            });
+        }
+    }
 
     // Thinking Mode
     auto *thinkingAction = menu.addAction(i18n("Thinking Mode"));
@@ -2397,6 +2518,422 @@ void ChatWidget::showSettingsMenu()
     menu.exec(m_configure->mapToGlobal(QPoint(0, m_configure->height() + 2)));
 }
 
+void ChatWidget::populateModes()
+{
+    const QString previous = m_mode->currentData().toString();
+    m_updatingCombos = true;
+    m_mode->clear();
+    for (const ModeDefinition &mode : m_agent.modeRegistry()->modes()) {
+        m_mode->addItem(mode.name, mode.id);
+    }
+    int index = previous.isEmpty() ? -1 : m_mode->findData(previous);
+    if (index < 0) {
+        index = m_mode->findData(m_settings.agentMode);
+    }
+    if (index < 0) {
+        index = m_mode->findData(QStringLiteral("code"));
+    }
+    m_mode->setCurrentIndex(qMax(0, index));
+    m_updatingCombos = false;
+}
+
+void ChatWidget::refreshModeButton()
+{
+    const ModeDefinition mode = m_agent.modeRegistry()->modeOrDefault(m_settings.agentMode);
+    QString label = mode.name;
+    if (m_settings.planMode) {
+        label += i18n(" · Plan");
+    }
+    m_modeButton->setText(label);
+    m_modeButton->setToolTip(mode.description.isEmpty() ? i18n("Agent mode") : mode.description);
+}
+
+void ChatWidget::refreshPermissionButton()
+{
+    if (!m_permissionButton) {
+        return;
+    }
+    m_permissionButton->setText(permissionModeLabel(m_settings.permissionMode));
+}
+
+void ChatWidget::showPermissionMenu()
+{
+    QMenu menu(this);
+    menu.setStyleSheet(
+        u"QMenu { background-color: #252528; color: #cccccc; border: 1px solid #3c3c40; border-radius: 6px; padding: 4px; }"
+        u"QMenu::item { padding: 6px 18px 6px 12px; border-radius: 4px; }"
+        u"QMenu::item:selected { background-color: #007acc; color: #ffffff; }"_s);
+
+    auto *group = new QActionGroup(&menu);
+    for (int i = 0; i < m_permission->count(); ++i) {
+        QAction *action = menu.addAction(m_permission->itemText(i));
+        action->setCheckable(true);
+        action->setChecked(m_permission->currentIndex() == i);
+        group->addAction(action);
+        connect(action, &QAction::triggered, this, [this, i]() {
+            m_permission->setCurrentIndex(i);
+        });
+    }
+    menu.exec(m_permissionButton->mapToGlobal(QPoint(0, -m_permissionButton->height())));
+}
+
+void ChatWidget::applyMode(const QString &modeId)
+{
+    if (modeId.isEmpty() || modeId == m_settings.agentMode) {
+        return;
+    }
+    m_settings.agentMode = modeId;
+    m_agent.setMode(modeId);
+    m_agent.setSettings(m_settings);
+    refreshModeButton();
+    Q_EMIT settingsChanged(m_settings);
+    showInfoMessage(i18n("Mode: %1", m_agent.activeMode().name), false);
+}
+
+void ChatWidget::applyAutoApproveTool(const QString &toolName, bool enabled)
+{
+    if (enabled) {
+        if (!m_settings.autoApproveTools.contains(toolName)) {
+            m_settings.autoApproveTools.append(toolName);
+        }
+    } else {
+        m_settings.autoApproveTools.removeAll(toolName);
+    }
+    m_agent.setSettings(m_settings);
+    Q_EMIT settingsChanged(m_settings);
+}
+
+void ChatWidget::setMcpToolAutoApproved(const McpTool &tool, bool enabled)
+{
+    McpManager *manager = m_agent.mcpManager();
+    if (!manager) {
+        return;
+    }
+    QList<McpServerConfig> updated = manager->servers();
+    for (McpServerConfig &config : updated) {
+        if (config.name != tool.server) {
+            continue;
+        }
+        if (enabled) {
+            if (!config.alwaysAllow.contains(tool.name)) {
+                config.alwaysAllow.append(tool.name);
+            }
+        } else {
+            config.alwaysAllow.removeAll(tool.name);
+        }
+    }
+    manager->saveToDisk();
+    manager->setServers(updated);
+}
+
+void ChatWidget::showModeMenu()
+{
+    QMenu menu(this);
+    menu.setStyleSheet(
+        u"QMenu { background-color: #252528; color: #cccccc; border: 1px solid #3c3c40; border-radius: 6px; padding: 4px; }"
+        u"QMenu::item { padding: 6px 18px 6px 12px; border-radius: 4px; }"
+        u"QMenu::item:selected { background-color: #007acc; color: #ffffff; }"
+        u"QMenu::separator { height: 1px; background-color: #38383e; margin: 4px 0; }"_s);
+
+    auto *group = new QActionGroup(&menu);
+    const QList<ModeDefinition> modes = m_agent.modeRegistry()->modes();
+    bool addedSeparator = false;
+    for (const ModeDefinition &mode : modes) {
+        if (!mode.builtIn && !addedSeparator) {
+            menu.addSeparator();
+            addedSeparator = true;
+        }
+        QAction *action = menu.addAction(mode.icon.isEmpty() ? mode.name : QStringLiteral("%1  %2").arg(mode.icon, mode.name));
+        action->setCheckable(true);
+        action->setChecked(mode.id == m_settings.agentMode);
+        action->setToolTip(mode.description);
+        group->addAction(action);
+        connect(action, &QAction::triggered, this, [this, id = mode.id] {
+            applyMode(id);
+        });
+    }
+
+    menu.addSeparator();
+    QAction *planAction = menu.addAction(i18n("Plan Mode (Read-only)"));
+    planAction->setCheckable(true);
+    planAction->setChecked(m_settings.planMode);
+    connect(planAction, &QAction::triggered, this, [this](bool checked) {
+        m_settings.planMode = checked;
+        m_agent.setSettings(m_settings);
+        Q_EMIT settingsChanged(m_settings);
+        refreshModeButton();
+    });
+
+    const QStringList customModes = m_agent.modeRegistry()->customModeIds();
+    if (!customModes.isEmpty()) {
+        menu.addSeparator();
+        QAction *manage = menu.addAction(i18n("Custom modes live in .kateai/modes/"));
+        manage->setEnabled(false);
+    }
+
+    menu.exec(m_modeButton->mapToGlobal(QPoint(0, m_modeButton->height() + 2)));
+}
+
+void ChatWidget::updateTeamButton()
+{
+    const int running = m_agent.runningSubtaskCount();
+    m_teamButton->setText(running > 0 ? QStringLiteral("%1 running").arg(running) : QString());
+    m_teamButton->setToolTip(running > 0 ? i18np("%1 sub-agent running", "%1 sub-agents running", running) : i18n("Agent team"));
+    // Only lit while something is actually running, so a badge that is always
+    // on stops meaning anything.
+    m_teamButton->setStyleSheet(
+        running > 0
+            ? QStringLiteral(
+                  "QPushButton { background: transparent; border: 1px solid transparent; border-radius: 6px;"
+                  " color: %1; padding: 0 7px; font-size: 11px; }"
+                  "QPushButton:hover { background-color: %2; border-color: %3; }")
+                  .arg(ChatTheme::accent(), ChatTheme::hoverBg(), ChatTheme::border())
+            : ChatTheme::iconButton());
+}
+
+void ChatWidget::markRunningSubtasksAbandoned()
+{
+    // A turn can end with sub-agents still in flight (abort, budget stop).
+    // Their cards must not be left showing a running spinner forever.
+    bool changed = false;
+    const QStringList ids = m_agent.runningSubtaskIds();
+    for (const QString &taskId : ids) {
+        if (auto *widget = m_subtaskWidgets.value(taskId)) {
+            widget->markAbandoned(i18n("Stopped when the turn ended."));
+            changed = true;
+        }
+    }
+    if (changed) {
+        updateTeamButton();
+    }
+}
+
+void ChatWidget::showTeamMenu()
+{
+    QMenu menu(this);
+    menu.setStyleSheet(
+        u"QMenu { background-color: #252528; color: #cccccc; border: 1px solid #3c3c40; border-radius: 6px; padding: 4px; }"
+        u"QMenu::item { padding: 6px 18px 6px 12px; border-radius: 4px; }"
+        u"QMenu::item:selected { background-color: #007acc; color: #ffffff; }"
+        u"QMenu::separator { height: 1px; background-color: #38383e; margin: 4px 0; }"_s);
+
+    const int limit = qMax(1, m_settings.maxParallelSubtasks);
+    QAction *header = menu.addAction(i18n("Sub-agents: %1 of %2 slots in use", m_agent.runningSubtaskCount(), limit));
+    header->setEnabled(false);
+
+    // A slot is free only when no card is currently marked running.
+    int busyCards = 0;
+    for (auto it = m_subtaskWidgets.constBegin(); it != m_subtaskWidgets.constEnd(); ++it) {
+        if (it.value() && it.value()->isRunning()) {
+            ++busyCards;
+        }
+    }
+    if (busyCards > 0) {
+        menu.addSeparator();
+        QAction *cancelAll = menu.addAction(i18n("Cancel all running sub-agents"));
+        connect(cancelAll, &QAction::triggered, this, [this] {
+            m_agent.cancelSubtask();
+            markRunningSubtasksAbandoned();
+            updateTeamButton();
+        });
+    }
+
+    menu.addSeparator();
+    const AgentTeam *team = m_agent.agentTeam();
+    QAction *rosterHeader = menu.addAction(i18n("Roster"));
+    rosterHeader->setEnabled(false);
+    for (const AgentProfile &profile : team->agents()) {
+        QAction *action = menu.addAction(QStringLiteral("  %1  ·  %2").arg(profile.name, profile.modeId));
+        action->setEnabled(false);
+        action->setToolTip(profile.description);
+    }
+
+    menu.addSeparator();
+    QAction *configure = menu.addAction(i18n("Configure team…"));
+    connect(configure, &QAction::triggered, this, &ChatWidget::configureRequested);
+
+    menu.exec(m_teamButton->mapToGlobal(QPoint(0, m_teamButton->height() + 2)));
+}
+
+void ChatWidget::showMcpMenu()
+{
+    QMenu menu(this);
+    menu.setStyleSheet(
+        u"QMenu { background-color: #252528; color: #cccccc; border: 1px solid #3c3c40; border-radius: 6px; padding: 4px; }"
+        u"QMenu::item { padding: 6px 18px 6px 12px; border-radius: 4px; }"
+        u"QMenu::item:selected { background-color: #007acc; color: #ffffff; }"
+        u"QMenu::separator { height: 1px; background-color: #38383e; margin: 4px 0; }"_s);
+
+    McpManager *manager = m_agent.mcpManager();
+    if (!manager) {
+        menu.exec(m_mcpButton->mapToGlobal(QPoint(0, m_mcpButton->height() + 2)));
+        return;
+    }
+
+    QAction *enableAction = menu.addAction(i18n("MCP enabled"));
+    enableAction->setCheckable(true);
+    enableAction->setChecked(manager->isEnabled());
+    connect(enableAction, &QAction::triggered, this, [this, manager](bool checked) {
+        m_settings.mcpEnabled = checked;
+        manager->setEnabled(checked);
+        m_agent.setSettings(m_settings);
+        Q_EMIT settingsChanged(m_settings);
+        updateMcpButton();
+    });
+
+    const QList<McpServerConfig> servers = manager->servers();
+    if (servers.isEmpty()) {
+        QAction *empty = menu.addAction(i18n("No MCP servers configured"));
+        empty->setEnabled(false);
+    } else {
+        menu.addSeparator();
+        for (const McpServerConfig &config : servers) {
+            QAction *action = menu.addAction(QStringLiteral("%1  ·  %2").arg(config.name, config.transportId()));
+            action->setCheckable(true);
+            action->setChecked(config.enabled);
+            action->setToolTip(config.command.isEmpty() ? config.url : config.command);
+            connect(action, &QAction::triggered, this, [this, manager, name = config.name](bool checked) {
+                QList<McpServerConfig> updated = manager->servers();
+                for (McpServerConfig &entry : updated) {
+                    if (entry.name == name) {
+                        entry.enabled = checked;
+                    }
+                }
+                manager->setServers(updated);
+            });
+        }
+    }
+
+    menu.addSeparator();
+    QAction *reload = menu.addAction(i18n("Reconnect all servers"));
+    connect(reload, &QAction::triggered, this, [manager] {
+        manager->disconnectAll();
+        manager->connectAll();
+    });
+    QAction *configure = menu.addAction(i18n("Configure servers…"));
+    connect(configure, &QAction::triggered, this, &ChatWidget::configureRequested);
+
+    menu.exec(m_mcpButton->mapToGlobal(QPoint(0, m_mcpButton->height() + 2)));
+}
+
+void ChatWidget::updateMcpButton()
+{
+    McpManager *manager = m_agent.mcpManager();
+    if (!manager) {
+        m_mcpButton->setText(QString());
+        return;
+    }
+    const QString summary = manager->statusSummary();
+    m_mcpButton->setText(manager->readyServers().isEmpty() ? QString() : QStringLiteral("●"));
+    m_mcpButton->setToolTip(summary);
+    m_mcpButton->setStyleSheet(
+        manager->readyServers().isEmpty()
+            ? u"QPushButton { background: transparent; border: 1px solid transparent; border-radius: 4px; color: #888888; }"
+              u"QPushButton:hover { background-color: #2e2e32; border-color: #3c3c40; }"_s
+            : u"QPushButton { background: transparent; border: 1px solid transparent; border-radius: 4px; color: #22c55e; }"
+              u"QPushButton:hover { background-color: #2e2e32; border-color: #3c3c40; }"_s);
+}
+
+void ChatWidget::showCheckpointMenu()
+{
+    QMenu menu(this);
+    menu.setStyleSheet(
+        u"QMenu { background-color: #252528; color: #cccccc; border: 1px solid #3c3c40; border-radius: 6px; padding: 4px; }"
+        u"QMenu::item { padding: 6px 18px 6px 12px; border-radius: 4px; }"
+        u"QMenu::item:selected { background-color: #007acc; color: #ffffff; }"
+        u"QMenu::separator { height: 1px; background-color: #38383e; margin: 4px 0; }"_s);
+
+    if (!m_settings.checkpointsEnabled) {
+        QAction *off = menu.addAction(i18n("Checkpoints are disabled"));
+        off->setEnabled(false);
+        QAction *enable = menu.addAction(i18n("Enable checkpoints"));
+        connect(enable, &QAction::triggered, this, [this] {
+            m_settings.checkpointsEnabled = true;
+            m_agent.setSettings(m_settings);
+            Q_EMIT settingsChanged(m_settings);
+        });
+        menu.exec(m_checkpointButton->mapToGlobal(QPoint(0, m_checkpointButton->height() + 2)));
+        return;
+    }
+
+    QAction *create = menu.addAction(i18n("Create checkpoint now"));
+    connect(create, &QAction::triggered, this, [this] {
+        const QString label = i18n("Manual checkpoint");
+        QString error;
+        const QString id = m_agent.createCheckpoint(label);
+        if (id.isEmpty()) {
+            showInfoMessage(i18n("Could not create a checkpoint: %1", error.isEmpty() ? i18n("git is unavailable") : error), true);
+        } else {
+            showInfoMessage(i18n("Checkpoint created."), false);
+        }
+    });
+
+    const QList<CheckpointInfo> checkpoints = m_agent.checkpoints();
+    if (checkpoints.isEmpty()) {
+        QAction *empty = menu.addAction(i18n("No checkpoints yet"));
+        empty->setEnabled(false);
+    } else {
+        menu.addSeparator();
+        for (const CheckpointInfo &info : checkpoints) {
+            const QString stamp = info.createdAt.isValid()
+                ? info.createdAt.toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"))
+                : info.shortId;
+            QAction *action = menu.addAction(QStringLiteral("%1  ·  %2").arg(info.shortId, stamp));
+            action->setToolTip(info.label);
+            connect(action, &QAction::triggered, this, [this, info] {
+                showCheckpointMenuFor(info);
+            });
+        }
+    }
+
+    menu.exec(m_checkpointButton->mapToGlobal(QPoint(0, m_checkpointButton->height() + 2)));
+}
+
+void ChatWidget::showCheckpointMenuFor(const CheckpointInfo &info)
+{
+    QMenu menu(this);
+    menu.setStyleSheet(
+        u"QMenu { background-color: #252528; color: #cccccc; border: 1px solid #3c3c40; border-radius: 6px; padding: 4px; }"
+        u"QMenu::item { padding: 6px 18px 6px 12px; border-radius: 4px; }"
+        u"QMenu::item:selected { background-color: #007acc; color: #ffffff; }"_s);
+
+    QAction *viewDiff = menu.addAction(i18n("Show changes since this checkpoint"));
+    connect(viewDiff, &QAction::triggered, this, [this, info] {
+        const QString diff = m_agent.diffAgainstCheckpoint(info.id);
+        if (diff.trimmed().isEmpty()) {
+            showInfoMessage(i18n("No changes since this checkpoint."), false);
+        } else {
+            addActivityMessage(diff);
+            forceScrollToBottom();
+        }
+    });
+
+    QAction *restore = menu.addAction(i18n("Restore files to this checkpoint…"));
+    restore->setEnabled(!m_agent.isBusy());
+    connect(restore, &QAction::triggered, this, [this, info] {
+        QMessageBox::StandardButton answer = QMessageBox::question(this,
+                                                                   i18n("Restore checkpoint"),
+                                                                   i18n("Restore the workspace to checkpoint %1?\n\n"
+                                                                       "Files changed since then will be overwritten and files "
+                                                                       "added afterwards will be removed. Your own git "
+                                                                       "history is not touched.")
+                                                                       .arg(info.shortId),
+                                                                   QMessageBox::Yes | QMessageBox::No,
+                                                                   QMessageBox::No);
+        if (answer != QMessageBox::Yes) {
+            return;
+        }
+        QString error;
+        if (m_agent.restoreCheckpoint(info.id, &error)) {
+            showInfoMessage(i18n("Restored checkpoint %1.", info.shortId), false);
+        } else {
+            showInfoMessage(i18n("Restore failed: %1", error), true);
+        }
+    });
+
+    menu.exec(QCursor::pos());
+}
+
 
 void ChatWidget::submit()
 {
@@ -2410,11 +2947,26 @@ void ChatWidget::submit()
     if (m_infoBar) {
         m_infoBar->hide();
     }
+    // Start the live counters for this turn.
+    m_completedToolCount = 0;
+    m_turnStatus->reset();
+    m_turnStatus->setBusy(true);
     forceScrollToBottom();
     updateSendButtonState();
     m_agent.start(text);
     updateSendButtonState();
 }
+
+bool ChatWidget::m_approvalPending() const
+{
+    for (auto *widget : m_toolCallWidgets) {
+        if (widget && widget->isAwaitingApproval()) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void ChatWidget::updateSendButtonState()
 {
     const bool busy = m_agent.isBusy();
@@ -2423,39 +2975,32 @@ void ChatWidget::updateSendButtonState()
 
     m_send->setEnabled(canClick);
 
+    // One round button that morphs between send and stop, the way an inline
+    // chat composer does: the position never moves, so the target is learned
+    // once. Glyphs are drawn rather than emoji so they stay centred at any DPI.
+    const QString glyph = busy ? QStringLiteral("■") : QStringLiteral("▲");
+    const int glyphSize = busy ? 11 : 13;
+    const QString radius = QStringLiteral("border-radius: 15px;");
+
     if (busy) {
-        m_send->setText(u"■"_s);
+        m_send->setText(glyph);
         m_send->setStyleSheet(
-            u"QPushButton {"
-            u"  color: #ffffff;"
-            u"  background-color: #e74c3c;"
-            u"  font-size: 13px;"
-            u"  border: none;"
-            u"  border-radius: 4px;"
-            u"}"
-            u"QPushButton:hover { background-color: #ff6b5a; }"_s);
+            QStringLiteral("QPushButton { color: #ffffff; background-color: %1; font-size: %2px; border: none; %3 }"
+                           "QPushButton:hover { background-color: %4; }")
+                .arg(ChatTheme::danger(), QString::number(glyphSize), radius, ChatTheme::accentHover()));
         m_send->setToolTip(i18n("Stop response"));
     } else {
-        m_send->setText(u"▲"_s);
+        m_send->setText(glyph);
         if (canClick) {
             m_send->setStyleSheet(
-                u"QPushButton {"
-                u"  color: #ffffff;"
-                u"  background-color: #007acc;"
-                u"  font-size: 13px;"
-                u"  border: none;"
-                u"  border-radius: 4px;"
-                u"}"
-                u"QPushButton:hover { background-color: #0062a3; }"_s);
+                QStringLiteral("QPushButton { color: #ffffff; background-color: %1; font-size: %2px; border: none; %3 }"
+                               "QPushButton:hover { background-color: %4; }")
+                    .arg(ChatTheme::accent(), QString::number(glyphSize), radius, ChatTheme::accentHover()));
         } else {
             m_send->setStyleSheet(
-                u"QPushButton {"
-                u"  color: #555555;"
-                u"  background-color: #2e2e32;"
-                u"  font-size: 13px;"
-                u"  border: 1px solid #38383e;"
-                u"  border-radius: 4px;"
-                u"}"_s);
+                QStringLiteral("QPushButton { color: #55555c; background-color: %1; font-size: %2px;"
+                               " border: 1px solid %3; %4 }")
+                    .arg(ChatTheme::hoverBg(), QString::number(glyphSize), ChatTheme::border(), radius));
         }
         m_send->setToolTip(i18n("Send message"));
     }
@@ -2479,56 +3024,12 @@ QString ChatWidget::escape(const QString &text)
 
 QString ChatWidget::markdownToHtml(const QString &text)
 {
-    QTextDocument doc;
-    doc.setMarkdown(text);
-    return doc.toHtml();
+    return makeMarkdownDocument(text)->toHtml();
 }
 
 QString ChatWidget::closedMarkdown(const QString &text)
 {
-    QString result = text;
-    // Close unclosed triple backticks (code blocks)
-    if (result.count(u"```"_s) % 2 == 1) {
-        result += u"\n```"_s;
-    }
-    // Close unclosed single backticks (inline code)
-    if (result.count(u"`"_s) % 2 == 1) {
-        result += u"`"_s;
-    }
-    // Close unclosed bold markers (**)
-    if (result.count(u"**"_s) % 2 == 1) {
-        result += u"**"_s;
-    }
-    // Close unclosed italic markers (*) - but not part of **
-    // Count * that are not part of **
-    int singleAsterisk = 0;
-    for (int i = 0; i < result.length(); ++i) {
-        if (result[i] == u'*') {
-            bool isDouble = (i + 1 < result.length() && result[i + 1] == u'*')
-                         || (i > 0 && result[i - 1] == u'*');
-            if (!isDouble) {
-                singleAsterisk++;
-            }
-        }
-    }
-    if (singleAsterisk % 2 == 1) {
-        result += u"*"_s;
-    }
-    // Close unclosed underscore italic markers (_) - but not part of __
-    int singleUnderscore = 0;
-    for (int i = 0; i < result.length(); ++i) {
-        if (result[i] == u'_') {
-            bool isDouble = (i + 1 < result.length() && result[i + 1] == u'_')
-                         || (i > 0 && result[i - 1] == u'_');
-            if (!isDouble) {
-                singleUnderscore++;
-            }
-        }
-    }
-    if (singleUnderscore % 2 == 1) {
-        result += u"_"_s;
-    }
-    return result;
+    return closeMarkdown(text);
 }
 
 void ChatWidget::scheduleStreamHeightUpdate()
@@ -2595,6 +3096,11 @@ void ChatWidget::clearTranscriptContents()
     qDeleteAll(m_toolCallWidgets);
     m_toolCallWidgets.clear();
     m_toolCallOrder.clear();
+    for (auto it = m_subtaskWidgets.begin(); it != m_subtaskWidgets.end(); ++it) {
+        delete it.value();
+    }
+    m_subtaskWidgets.clear();
+    m_subtaskOrder.clear();
     m_thinkingBlocks.clear();
     m_planSteps.clear();
     clearStreamingPointers();
@@ -2677,35 +3183,15 @@ void ChatWidget::rebuildTranscript()
         indicatorsLayout->setSpacing(8);
         indicatorsLayout->addStretch();
 
-        m_thinkingIndicator = new QLabel(u"💭  Thinking..."_s, indicatorsContainer);
-        m_thinkingIndicator->setStyleSheet(
-            u"QLabel {"
-            u"  color: #3b82f6;"
-            u"  font-size: 11px;"
-            u"  font-style: italic;"
-            u"  padding: 2px 10px;"
-            u"  background-color: #1e3a5f;"
-            u"  border: 1px solid #3b82f6;"
-            u"  border-radius: 10px;"
-            u"  min-width: 108px;"
-            u"}"_s);
+        m_workingIndicator = new QLabel(i18n("Thinking") + u"..."_s, indicatorsContainer);
+        m_thinkingIndicator->setStyleSheet(ChatTheme::activityPill());
         attachPulseEffect(m_thinkingIndicator);
         m_thinkingIndicator->hide();
         indicatorsLayout->addWidget(m_thinkingIndicator);
 
-        m_workingLabelBase = u"⚙️  "_s + i18n("Working");
+        m_workingLabelBase = i18n("Working");
         m_workingIndicator = new QLabel(m_workingLabelBase + u"..."_s, indicatorsContainer);
-        m_workingIndicator->setStyleSheet(
-            u"QLabel {"
-            u"  color: #f59e0b;"
-            u"  font-size: 11px;"
-            u"  font-style: italic;"
-            u"  padding: 2px 10px;"
-            u"  background-color: #3d2e0e;"
-            u"  border: 1px solid #f59e0b;"
-            u"  border-radius: 10px;"
-            u"  min-width: 108px;"
-            u"}"_s);
+        m_workingIndicator->setStyleSheet(ChatTheme::activityPill());
         attachPulseEffect(m_workingIndicator);
         m_workingIndicator->hide();
         indicatorsLayout->addWidget(m_workingIndicator);
@@ -2768,7 +3254,7 @@ void ChatWidget::rebuildTranscript()
                         QPushButton *thinkingToggle = nullptr;
                         auto *thinkingBlock = createThinkingBlock(assistantWidget, thinkingBrowser, thinkingToggle, false);
                         if (thinkingBrowser) {
-                            thinkingBrowser->setMarkdown(closedMarkdown(msg.thinking));
+                            thinkingBrowser->setDocument(makeMarkdownDocument(closedMarkdown(msg.thinking)));
                         }
                         thinkingBlock->show();
                         layout->addWidget(thinkingBlock);
@@ -2797,7 +3283,7 @@ void ChatWidget::rebuildTranscript()
                         u"blockquote { border-left: 3px solid #3b82f6; padding-left: 10px; color: #888; margin: 8px 0; }"
                         u"a { color: #3b82f6; text-decoration: none; }"_s);
                     if (hasVisibleText) {
-                        browser->setMarkdown(msg.content);
+                        browser->setDocument(makeMarkdownDocument(msg.content));
                     } else {
                         browser->hide();
                     }
@@ -2819,6 +3305,29 @@ void ChatWidget::rebuildTranscript()
                         const QJsonObject functionObj = toolCallObj.value(u"function"_s).toObject();
                         const QString toolName = functionObj.value(u"name"_s).toString();
                         const QString argumentsJson = functionObj.value(u"arguments"_s).toString();
+
+                        // A restored sub-task keeps its own card, matching what
+                        // the live transcript shows.
+                        if (toolName == subtaskToolName()) {
+                            QJsonObject restoredArgs;
+                            const QJsonDocument restoredDoc = QJsonDocument::fromJson(argumentsJson.toUtf8());
+                            if (!restoredDoc.isNull() && restoredDoc.isObject()) {
+                                restoredArgs = restoredDoc.object();
+                            }
+                            auto *subtaskWidget = new SubtaskWidget(toolCallId, m_transcriptContainer);
+                            connect(subtaskWidget, &SubtaskWidget::cancelRequested, this, [this](const QString &taskId) {
+                                m_agent.cancelSubtask(taskId);
+                            });
+                            const QString agentName = restoredArgs.value(u"agent"_s).toString();
+                            subtaskWidget->startAgent(agentName.isEmpty() ? i18n("Sub-agent") : agentName,
+                                                      restoredArgs.value(u"mode"_s).toString(),
+                                                      restoredArgs.value(u"description"_s).toString());
+                            m_subtaskWidgets.insert(toolCallId, subtaskWidget);
+                            m_subtaskOrder.append(subtaskWidget);
+                            appendTranscriptWidget(subtaskWidget);
+                            rebuiltToolWidgets.insert(toolCallId, nullptr);
+                            continue;
+                        }
 
                         // Create tool call widget in finished state (will be updated with result if available)
                         auto *toolWidget = new ToolCallWidget(toolCallId, m_transcriptContainer);
@@ -2894,14 +3403,24 @@ void ChatWidget::rebuildTranscript()
                 break;
             case ChatMessage::Role::Tool:
                 // Tool result message - update the corresponding tool call widget with the actual result
-                if (!msg.toolCallId.isEmpty() && rebuiltToolWidgets.contains(msg.toolCallId)) {
-                    auto *toolWidget = rebuiltToolWidgets.value(msg.toolCallId);
+                if (!msg.toolCallId.isEmpty()
+                                    && (rebuiltToolWidgets.contains(msg.toolCallId) || m_subtaskWidgets.contains(msg.toolCallId))) {
                     ToolResult result;
                     result.toolCallId = msg.toolCallId;
                     result.name = msg.name;
                     result.output = msg.content;
                     result.ok = true; // Assume success; the content contains formatted result
-                    toolWidget->setFinished(result);
+                    if (auto *subtaskWidget = m_subtaskWidgets.value(msg.toolCallId)) {
+                        subtaskWidget->finishAgent(result);
+                        break;
+                    }
+                    auto *toolWidget = rebuiltToolWidgets.value(msg.toolCallId);
+                    // A restored sub-task is registered with a nullptr value to
+                    // mark "this id is accounted for", so this can legitimately
+                    // be null here.
+                    if (toolWidget) {
+                        toolWidget->setFinished(result);
+                    }
                 }
                 break;
             case ChatMessage::Role::System:

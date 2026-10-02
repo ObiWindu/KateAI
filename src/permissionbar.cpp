@@ -5,6 +5,8 @@
 
 #include "permissionbar.h"
 
+#include "chattheme.h"
+
 #include <KLocalizedString>
 
 #include <QHBoxLayout>
@@ -36,7 +38,8 @@ PermissionBar::PermissionBar(QWidget *parent)
 
     m_title = new QLabel(this);
     m_title->setWordWrap(true);
-    m_title->setStyleSheet(u"QLabel { color: #e4e4e4; font-size: 12px; font-weight: bold; }"_s);
+    m_title->setStyleSheet(QStringLiteral("QLabel { color: %1; font-size: 13px; font-weight: 600; }")
+                               .arg(ChatTheme::textPrimary()));
     headerLayout->addWidget(m_title, 1);
 
     root->addLayout(headerLayout);
@@ -46,66 +49,73 @@ PermissionBar::PermissionBar(QWidget *parent)
     m_details->setMaximumHeight(140);
     m_details->setPlaceholderText(i18n("Details"));
     m_details->setStyleSheet(
-        u"QPlainTextEdit {"
-        u"  background-color: #161616;"
-        u"  color: #ccc;"
-        u"  border: 1px solid #2e2e2e;"
-        u"  border-radius: 4px;"
-        u"  padding: 8px;"
-        u"  font-family: monospace;"
-        u"  font-size: 11px;"
-        u"}"
-        u"QMenu { background-color: #252528; color: #cccccc; border: 1px solid #3c3c40; border-radius: 6px; padding: 4px; }"
-        u"QMenu::item { padding: 6px 18px 6px 12px; border-radius: 4px; }"
-        u"QMenu::item:selected { background-color: #007acc; color: #ffffff; }"
-        u"QMenu::separator { height: 1px; background-color: #38383e; margin: 4px 0; }"_s);
+        QStringLiteral(
+            "QPlainTextEdit {"
+            "  background-color: %1;"
+            "  color: %2;"
+            "  border: 1px solid %3;"
+            "  border-radius: 6px;"
+            "  padding: 8px;"
+            "  font-family: monospace;"
+            "  font-size: 11px;"
+            "}")
+        .arg(ChatTheme::panelBg(), ChatTheme::textMuted(), ChatTheme::border()));
     root->addWidget(m_details);
 
     auto *buttons = new QHBoxLayout;
     buttons->setContentsMargins(0, 4, 0, 0);
     buttons->setSpacing(8);
 
+    // Primary action first, then the durable variant, then the escape hatch.
+    // Approving is the expected response, so it is the filled button.
     m_allowBtn = new QPushButton(i18n("Allow"), this);
     m_allowBtn->setCursor(Qt::PointingHandCursor);
+    m_allowBtn->setDefault(true);
     m_allowBtn->setStyleSheet(
-        u"QPushButton {"
-        u"  background-color: #007acc;"
-        u"  color: #ffffff;"
-        u"  border: none;"
-        u"  border-radius: 4px;"
-        u"  padding: 5px 14px;"
-        u"  font-weight: bold;"
-        u"  font-size: 12px;"
-        u"}"
-        u"QPushButton:hover { background-color: #0062a3; }"
-        u"QPushButton:pressed { background-color: #004d80; }"_s);
+        QStringLiteral(
+            "QPushButton {"
+            "  background-color: %1;"
+            "  color: #ffffff;"
+            "  border: none;"
+            "  border-radius: 6px;"
+            "  padding: 6px 16px;"
+            "  font-weight: 600;"
+            "  font-size: 12px;"
+            "}"
+            "QPushButton:hover { background-color: %2; }"
+            "QPushButton:pressed { background-color: %2; }")
+            .arg(ChatTheme::accent(), ChatTheme::accentHover()));
 
-    m_sessionBtn = new QPushButton(i18n("Allow for Session"), this);
+    m_sessionBtn = new QPushButton(i18n("Always"), this);
     m_sessionBtn->setCursor(Qt::PointingHandCursor);
+    m_sessionBtn->setToolTip(i18n("Approve this tool for the rest of the session"));
     m_sessionBtn->setStyleSheet(
-        u"QPushButton {"
-        u"  background-color: #2a2a2a;"
-        u"  color: #ccc;"
-        u"  border: 1px solid #3c3c3c;"
-        u"  border-radius: 4px;"
-        u"  padding: 5px 12px;"
-        u"  font-size: 12px;"
-        u"}"
-        u"QPushButton:hover { background-color: #333; color: #fff; border-color: #555; }"
-        u"QPushButton:pressed { background-color: #222; }"_s);
+        QStringLiteral(
+            "QPushButton {"
+            "  background-color: %1;"
+            "  color: %2;"
+            "  border: 1px solid %3;"
+            "  border-radius: 6px;"
+            "  padding: 6px 14px;"
+            "  font-size: 12px;"
+            "}"
+            "QPushButton:hover { background-color: %3; color: #ffffff; }")
+            .arg(ChatTheme::cardBg(), ChatTheme::textPrimary(), ChatTheme::hoverBg()));
 
     m_denyBtn = new QPushButton(i18n("Deny"), this);
     m_denyBtn->setCursor(Qt::PointingHandCursor);
     m_denyBtn->setStyleSheet(
-        u"QPushButton {"
-        u"  background-color: transparent;"
-        u"  color: #888;"
-        u"  border: 1px solid #333;"
-        u"  border-radius: 4px;"
-        u"  padding: 5px 12px;"
-        u"  font-size: 12px;"
-        u"}"
-        u"QPushButton:hover { background-color: #2e1a1a; color: #ef4444; border-color: #ef4444; }"_s);
+        QStringLiteral(
+            "QPushButton {"
+            "  background-color: transparent;"
+            "  color: %1;"
+            "  border: 1px solid %2;"
+            "  border-radius: 6px;"
+            "  padding: 6px 14px;"
+            "  font-size: 12px;"
+            "}"
+            "QPushButton:hover { color: #ffffff; border-color: %1; }")
+            .arg(ChatTheme::danger(), ChatTheme::danger()));
 
     buttons->addWidget(m_allowBtn);
     buttons->addWidget(m_sessionBtn);
@@ -137,49 +147,57 @@ void PermissionBar::updateStyle(ToolRisk risk)
 
     switch (risk) {
     case ToolRisk::Read:
-        riskColor = u"#22c55e"_s;
-        riskText = i18n("READ");
-        badgeBg = u"rgba(34, 197, 94, 0.15)"_s;
+        riskColor = ChatTheme::success();
+        riskText = i18n("Read");
+        badgeBg = QStringLiteral("rgba(78, 201, 160, 0.15)");
         break;
     case ToolRisk::Write:
-        riskColor = u"#eab308"_s;
-        riskText = i18n("EDIT");
-        badgeBg = u"rgba(234, 179, 8, 0.15)"_s;
+        riskColor = ChatTheme::warning();
+        riskText = i18n("Edit");
+        badgeBg = QStringLiteral("rgba(226, 179, 65, 0.15)");
         break;
     case ToolRisk::Execute:
-        riskColor = u"#ef4444"_s;
-        riskText = i18n("EXECUTE");
-        badgeBg = u"rgba(239, 68, 68, 0.15)"_s;
+        riskColor = ChatTheme::danger();
+        riskText = i18n("Execute");
+        badgeBg = QStringLiteral("rgba(242, 109, 109, 0.15)");
         break;
     }
 
     m_riskBadge->setText(riskText);
     m_riskBadge->setStyleSheet(
-        u"QLabel {"
-        u"  background-color: %1;"
-        u"  color: %2;"
-        u"  font-size: 10px;"
-        u"  font-weight: bold;"
-        u"  padding: 2px 6px;"
-        u"  border-radius: 3px;"
-        u"  border: 1px solid %2;"
-        u"}"_s.arg(badgeBg, riskColor));
+        QStringLiteral(
+            "QLabel {"
+            "  background-color: %1;"
+            "  color: %2;"
+            "  font-size: 10px;"
+            "  font-weight: 700;"
+            "  letter-spacing: 0.5px;"
+            "  padding: 2px 7px;"
+            "  border-radius: 4px;"
+            "  border: 1px solid %2;"
+            "}")
+        .arg(badgeBg, riskColor));
 
     setStyleSheet(
-        u"#PermissionBar {"
-        u"  background-color: #1f1f23;"
-        u"  border: 1px solid #333338;"
-        u"  border-left: 4px solid %1;"
-        u"  border-radius: 6px;"
-        u"  margin: 6px 8px;"
-        u"}"_s.arg(riskColor));
+        QStringLiteral(
+            "#PermissionBar {"
+            "  background-color: %1;"
+            "  border: 1px solid %2;"
+            "  border-left: 3px solid %3;"
+            "  border-radius: 8px;"
+            "}")
+        .arg(ChatTheme::cardBg(), ChatTheme::border(), riskColor));
 }
 
 void PermissionBar::showRequest(const PermissionRequest &request)
 {
     updateStyle(request.risk);
-    m_title->setText(request.summary.isEmpty() ? i18n("Permission needed for %1", request.toolName) : request.summary);
+    m_title->setText(request.summary.isEmpty()
+                         ? i18n("Permission needed for %1", ChatTheme::toolLabel(request.toolName))
+                         : request.summary);
     m_details->setPlainText(request.details);
+    // Empty details should not leave a dead box in the card.
+    m_details->setVisible(!request.details.trimmed().isEmpty());
     show();
 }
 

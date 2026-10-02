@@ -5,6 +5,8 @@
 
 #include "toolcallwidget.h"
 
+#include "chattheme.h"
+
 #include <KLocalizedString>
 
 #include <QFontMetrics>
@@ -95,6 +97,11 @@ ToolCallWidget::ToolCallWidget(const QString &toolCallId, QWidget *parent)
 
     // Header row: icon + title + status + expand button
     m_header = new QWidget(this);
+    m_header->setObjectName(u"toolHeader"_s);
+    // A plain QWidget only paints a stylesheet background once styled-background
+    // is set; without this the head box stays transparent and the card looks
+    // bodyless while collapsed.
+    m_header->setAttribute(Qt::WA_StyledBackground, true);
     m_header->setMinimumWidth(0);
     m_header->setCursor(Qt::PointingHandCursor);
     auto *headerLayout = new QHBoxLayout(m_header);
@@ -119,16 +126,91 @@ ToolCallWidget::ToolCallWidget(const QString &toolCallId, QWidget *parent)
     m_status->setAlignment(Qt::AlignCenter);
     headerLayout->addWidget(m_status);
 
+    // Per-call diff stat. Empty until a diff is attached, so a read-only tool
+    // card does not carry a meaningless "+0 −0".
+    m_diffStat = new QLabel(this);
+    m_diffStat->setVisible(false);
+    m_diffStat->setStyleSheet(
+        QStringLiteral("QLabel { color: %1; font-size: 11px; font-family: monospace; }")
+        .arg(ChatTheme::success()));
+    headerLayout->addWidget(m_diffStat);
+
+    // Elapsed time. Hidden until show() is called for it, so short calls do
+    // not add visual noise; a call that takes seconds earns the space.
+    m_duration = new QLabel(this);
+    m_duration->setVisible(false);
+    m_duration->setStyleSheet(
+        QStringLiteral("QLabel { color: %1; font-size: 11px; }").arg(ChatTheme::textMuted()));
+    headerLayout->addWidget(m_duration);
+
     m_expandBtn = new QPushButton(u"▸"_s, this);
     m_expandBtn->setFixedSize(20, 20);
     m_expandBtn->setFlat(true);
     m_expandBtn->setCursor(Qt::PointingHandCursor);
     m_expandBtn->setStyleSheet(
-        u"QPushButton { color: #888; background: transparent; border: none; font-size: 11px; }"
-        u"QPushButton:hover { color: #ccc; }"_s);
+        QStringLiteral("QPushButton { color: %1; background: transparent; border: none; font-size: 11px; }"
+                       "QPushButton:hover { color: #ffffff; }")
+            .arg(ChatTheme::textMuted()));
     headerLayout->addWidget(m_expandBtn);
 
     root->addWidget(m_header);
+
+        // --- Inline approval row -----------------------------------------------
+        // Hidden until the agent asks for permission. Placed inside the card so the
+        // decision sits next to the diff that is being approved.
+        m_approvalRow = new QWidget(this);
+        m_approvalRow->setObjectName(u"approvalRow"_s);
+        auto *approvalLayout = new QHBoxLayout(m_approvalRow);
+        approvalLayout->setContentsMargins(10, 4, 10, 10);
+        approvalLayout->setSpacing(7);
+
+        auto *approvalHint = new QLabel(i18n("Needs approval"), m_approvalRow);
+        approvalHint->setStyleSheet(QStringLiteral("QLabel { color: %1; font-size: 11px; }").arg(ChatTheme::warning()));
+        approvalLayout->addWidget(approvalHint);
+        approvalLayout->addStretch();
+
+        auto *allowBtn = new QPushButton(i18n("Allow"), m_approvalRow);
+        allowBtn->setCursor(Qt::PointingHandCursor);
+        allowBtn->setStyleSheet(
+            QStringLiteral(
+                "QPushButton { background-color: %1; color: #ffffff; border: none;"
+                " border-radius: 6px; padding: 4px 14px; font-size: 11px; font-weight: 600; }"
+                "QPushButton:hover { background-color: %2; }")
+            .arg(ChatTheme::accent(), ChatTheme::accentHover()));
+        connect(allowBtn, &QPushButton::clicked, this, [this] {
+            Q_EMIT approvalChosen(PermissionDecision::AllowOnce);
+        });
+
+        auto *alwaysBtn = new QPushButton(i18n("Always"), m_approvalRow);
+        alwaysBtn->setCursor(Qt::PointingHandCursor);
+        alwaysBtn->setToolTip(i18n("Allow this tool for the rest of the session"));
+        alwaysBtn->setStyleSheet(
+            QStringLiteral(
+                "QPushButton { background-color: %1; color: %2; border: 1px solid %3;"
+                " border-radius: 6px; padding: 4px 12px; font-size: 11px; }"
+                "QPushButton:hover { background-color: %3; color: #ffffff; }")
+            .arg(ChatTheme::cardBg(), ChatTheme::textPrimary(), ChatTheme::hoverBg()));
+        connect(alwaysBtn, &QPushButton::clicked, this, [this] {
+            Q_EMIT approvalChosen(PermissionDecision::AllowSession);
+        });
+
+        auto *denyBtn = new QPushButton(i18n("Deny"), m_approvalRow);
+        denyBtn->setCursor(Qt::PointingHandCursor);
+        denyBtn->setStyleSheet(
+            QStringLiteral(
+                "QPushButton { background-color: transparent; color: %1; border: 1px solid %2;"
+                " border-radius: 6px; padding: 4px 12px; font-size: 11px; }"
+                "QPushButton:hover { color: #ffffff; border-color: %1; }")
+            .arg(ChatTheme::danger(), ChatTheme::danger()));
+        connect(denyBtn, &QPushButton::clicked, this, [this] {
+            Q_EMIT approvalChosen(PermissionDecision::Deny);
+        });
+
+        approvalLayout->addWidget(allowBtn);
+        approvalLayout->addWidget(alwaysBtn);
+        approvalLayout->addWidget(denyBtn);
+        root->addWidget(m_approvalRow);
+        m_approvalRow->hide();
 
     // Proposed edit diff — always shown in a highlighted box so the edited
     // code is visible in the chat transcript without needing to expand the
@@ -143,27 +225,30 @@ ToolCallWidget::ToolCallWidget(const QString &toolCallId, QWidget *parent)
     m_describeDiff->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_describeDiff->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_describeDiff->setStyleSheet(
-        u"QTextBrowser {"
-        u"  background-color: #11131a;"
-        u"  color: #d4d4d4;"
-        u"  border: 1px solid #2a3a22;"
-        u"  border-radius: 4px;"
-        u"  padding: 8px;"
-        u"  font-family: monospace;"
-        u"  font-size: 11px;"
-        u"  line-height: 1.4;"
-        u"}"
-        u"QMenu { background-color: #252528; color: #cccccc; border: 1px solid #3c3c40; border-radius: 6px; padding: 4px; }"
-        u"QMenu::item { padding: 6px 18px 6px 12px; border-radius: 4px; }"
-        u"QMenu::item:selected { background-color: #007acc; color: #ffffff; }"
-        u"QMenu::separator { height: 1px; background-color: #38383e; margin: 4px 0; }"_s);
+        QStringLiteral(
+            "QTextBrowser {"
+            "  background-color: %1;"
+            "  color: %2;"
+            "  border: 1px solid %3;"
+            "  border-radius: 6px;"
+            "  padding: 8px;"
+            "  font-family: monospace;"
+            "  font-size: 11px;"
+            "  line-height: 1.4;"
+            "}")
+        .arg(ChatTheme::codeBlockBg(), ChatTheme::textPrimary(), ChatTheme::border()));
     m_describeDiff->document()->setDefaultStyleSheet(
-        u"body { color: #d4d4d4; font-family: monospace; font-size: 11px; margin: 0; padding: 0; }"
-        u".removed { color: #ef9999; background-color: #3a1a1a; }"
-        u".added { color: #9ed36a; background-color: #1a3a1a; }"
-        u".hunk { color: #888; }"
-        u"pre { margin: 0; white-space: pre-wrap; font-family: monospace; font-size: 11px; }"
-        u"p { margin: 0; white-space: pre-wrap; }"_s);
+        QStringLiteral(
+            "body { color: %1; font-family: monospace; font-size: 11px; margin: 0; padding: 0; }"
+            ".removed { color: %2; }"
+            ".added { color: %3; }"
+            ".hunk { color: %4; }"
+            "pre { margin: 0; white-space: pre-wrap; font-family: monospace; font-size: 11px; }"
+            "p { margin: 0; white-space: pre-wrap; }")
+            .arg(ChatTheme::textPrimary(),
+                 QStringLiteral("#ff9a9a"),
+                 QStringLiteral("#8ddb7a"),
+                 ChatTheme::textMuted()));
     m_describeDiff->hide();
     root->addWidget(m_describeDiff);
 
@@ -183,19 +268,16 @@ ToolCallWidget::ToolCallWidget(const QString &toolCallId, QWidget *parent)
     m_details->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_details->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_details->setStyleSheet(
-        u"QPlainTextEdit {"
-        u"  background-color: #1a1a1a;"
-        u"  color: #aaa;"
-        u"  border: none;"
-        u"  border-radius: 4px;"
-        u"  padding: 8px;"
-        u"  font-family: monospace;"
-        u"  font-size: 11px;"
-        u"}"
-        u"QMenu { background-color: #252528; color: #cccccc; border: 1px solid #3c3c40; border-radius: 6px; padding: 4px; }"
-        u"QMenu::item { padding: 6px 18px 6px 12px; border-radius: 4px; }"
-        u"QMenu::item:selected { background-color: #007acc; color: #ffffff; }"
-        u"QMenu::separator { height: 1px; background-color: #38383e; margin: 4px 0; }"_s);
+        QStringLiteral(
+            "QPlainTextEdit {"
+            "  background-color: %1;"
+            "  color: %2;"
+            "  border: none;"
+            "  padding: 8px;"
+            "  font-family: monospace;"
+            "  font-size: 11px;"
+            "}")
+        .arg(ChatTheme::codeBlockBg(), ChatTheme::textMuted()));
     detailsLayout->addWidget(m_details);
 
     root->addWidget(m_detailsContainer);
@@ -222,7 +304,7 @@ void ToolCallWidget::setToolInfo(const QString &toolName, const QString &summary
     m_risk = risk;
     m_icon->setText(iconForTool(toolName));
     m_titleText = summary.isEmpty() ? i18n("Running…") : summary;
-    m_title->setToolTip(u"%1 - %2"_s.arg(toolName, m_titleText));
+    m_title->setToolTip(ChatTheme::toolLabel(m_toolName) + u"  ·  "_s + m_toolName);
     updateTitleText();
     if (!isDiffTool(toolName) && !summary.isEmpty()) {
         setPreviewText(summary);
@@ -230,11 +312,79 @@ void ToolCallWidget::setToolInfo(const QString &toolName, const QString &summary
     updateStyle();
 }
 
+void ToolCallWidget::showApproval()
+{
+    m_awaitingApproval = true;
+    m_approvalRow->show();
+    // The diff is the thing being judged, so it has to be on screen when the
+    // buttons are, whatever the user expanded before.
+    setExpanded(true);
+    syncPreviewVisibility();
+    updateStyle();
+}
+
+void ToolCallWidget::setApprovalResolved(PermissionDecision decision)
+{
+    m_awaitingApproval = false;
+    m_approvalRow->hide();
+    if (decision == PermissionDecision::Deny) {
+        m_denied = true;
+        m_status->setText(u"✗"_s);
+        m_status->setStyleSheet(QStringLiteral("QLabel { color: %1; font-size: 14px; }").arg(ChatTheme::danger()));
+    }
+    updateStyle();
+}
+
+void ToolCallWidget::setDurationVisible(bool visible)
+{
+    // Track the intent in a flag rather than asking isVisible(): a card is
+    // often configured before its parent is shown, and isVisible() lies then.
+    m_durationEnabled = visible;
+    m_duration->setVisible(visible);
+    if (visible) {
+        updateDuration();
+    }
+}
+
+void ToolCallWidget::updateDuration()
+{
+    if (!m_durationEnabled) {
+        return;
+    }
+    const qint64 ms = m_elapsed.isValid() ? m_elapsed.elapsed() : 0;
+    if (ms < 1000) {
+        m_duration->setText(QStringLiteral("%1ms").arg(ms));
+        return;
+    }
+    if (ms < 60000) {
+        m_duration->setText(QStringLiteral("%1s").arg(ms / 1000));
+        return;
+    }
+    m_duration->setText(QStringLiteral("%1m").arg(ms / 60000));
+}
+
 void ToolCallWidget::setRunning()
 {
     m_finished = false;
+    m_denied = false;
     m_status->setText(u"⟳"_s);
-    m_status->setStyleSheet(u"QLabel { color: #3b82f6; font-size: 14px; }"_s);
+    m_status->setStyleSheet(QStringLiteral("QLabel { color: %1; font-size: 14px; }").arg(ChatTheme::accent()));
+
+    // A running call is worth timing. The label stays hidden for the first
+    // second so instant calls do not flicker a duration into the transcript.
+    m_elapsed.start();
+    if (!m_durationTimer) {
+        m_durationTimer = new QTimer(this);
+        m_durationTimer->setInterval(100);
+        connect(m_durationTimer, &QTimer::timeout, this, [this] {
+            if (m_elapsed.elapsed() > 1000) {
+                m_duration->setVisible(true);
+            }
+            updateDuration();
+        });
+    }
+    m_durationTimer->start();
+    updateStyle();
 }
 
 void ToolCallWidget::setDescribeDiff(const QString &diff)
@@ -243,6 +393,22 @@ void ToolCallWidget::setDescribeDiff(const QString &diff)
         return;
     }
     m_hasDiffPreview = true;
+    // Count the hunks so the header can carry a one-glance size. A diff is the
+    // single most useful thing to know before deciding whether to expand.
+    m_diffAdded = 0;
+    m_diffRemoved = 0;
+    for (const QString &line : diff.split(u'\n')) {
+        if (line.startsWith(u"+++"_s) || line.startsWith(u"---"_s)) {
+            continue;
+        }
+        if (line.startsWith(u"+"_s)) {
+            ++m_diffAdded;
+        } else if (line.startsWith(u"-"_s)) {
+            ++m_diffRemoved;
+        }
+    }
+    m_diffStat->setText(QStringLiteral("+%1 −%2").arg(m_diffAdded).arg(m_diffRemoved));
+    m_diffStat->setVisible(true);
     showPreviewHtml(diffToHtml(diff));
 }
 
@@ -322,13 +488,29 @@ void ToolCallWidget::setFinished(const ToolResult &result)
 {
     m_finished = true;
     m_ok = result.ok;
+    if (m_durationTimer) {
+        m_durationTimer->stop();
+    }
+    updateDuration();
+    // Anything over a tenth of a second is worth reporting; below that the
+    // timing is noise.
+    if (m_elapsed.isValid() && m_elapsed.elapsed() >= 100) {
+        m_duration->setVisible(true);
+        updateDuration();
+    }
+
+    if (m_awaitingApproval) {
+        // Finished without an answer: the turn was aborted mid-approval.
+        m_awaitingApproval = false;
+        m_approvalRow->hide();
+    }
 
     if (result.ok) {
         m_status->setText(u"✓"_s);
-        m_status->setStyleSheet(u"QLabel { color: #22c55e; font-size: 14px; }"_s);
+        m_status->setStyleSheet(QStringLiteral("QLabel { color: %1; font-size: 14px; }").arg(ChatTheme::success()));
     } else {
         m_status->setText(u"✗"_s);
-        m_status->setStyleSheet(u"QLabel { color: #ef4444; font-size: 14px; }"_s);
+        m_status->setStyleSheet(QStringLiteral("QLabel { color: %1; font-size: 14px; }").arg(ChatTheme::danger()));
     }
 
     // Truncate very long outputs. File-edit cards keep the diff in the marine
@@ -421,43 +603,57 @@ void ToolCallWidget::toggleExpand()
 
 void ToolCallWidget::updateStyle()
 {
-    const QString borderColor = colorForRisk(m_risk);
-    const QString bgColor = m_finished ? (m_ok ? u"#1a1f1a"_s : u"#1f1a1a"_s) : u"#1a1a2e"_s;
+    // One accent rail on the left, carrying both the risk and the outcome, so
+    // the card reads the same whether it is running, done or failed. The body
+    // stays on a single surface: tinting the whole card by risk made a long
+    // transcript read as stripes. The card sits on its own surface rather than
+    // the panel backdrop, so a collapsed tool call is still findable.
+    const QString rail = colorForRisk(m_risk);
 
     setStyleSheet(
-        u"ToolCallWidget {"
-        u"  background-color: %1;"
-        u"  border-left: 3px solid %2;"
-        u"  border-radius: 6px;"
-        u"  margin: 4px 0;"
-        u"}"_s.arg(bgColor, borderColor));
+        QStringLiteral(
+            "ToolCallWidget {"
+            "  background-color: %1;"
+            "  border-left: 2px solid %2;"
+            "  border-radius: 6px;"
+            "  margin: 2px 0;"
+            "}")
+        .arg(ChatTheme::toolBg(), rail));
 
-    m_title->setStyleSheet(u"QLabel { color: #ccc; font-size: 12px; }"_s);
+    m_header->setStyleSheet(ChatTheme::toolHeader());
+    m_title->setStyleSheet(QStringLiteral("QLabel { color: %1; font-size: 12px; }").arg(ChatTheme::textPrimary()));
 }
 
 QString ToolCallWidget::iconForTool(const QString &toolName) const
 {
-    if (toolName == u"read_file"_s) return u"📄"_s;
-    if (toolName == u"write_file"_s) return u"📝"_s;
-    if (toolName == u"edit_file"_s || toolName == u"multi_edit_file"_s || toolName == u"multi_replace_file_content"_s) return u"✏️"_s;
-    if (toolName == u"list_dir"_s) return u"📁"_s;
-    if (toolName == u"grep"_s) return u"🔍"_s;
-    if (toolName == u"glob"_s) return u"🔎"_s;
-    if (toolName == u"bash"_s) return u"⚡"_s;
-    return u"🔧"_s;
+    // Short glyphs rather than emoji: emoji render at wildly different sizes
+    // and baselines across themes, which is what made the column ragged.
+    if (toolName == u"read_file"_s) return u"\u{1F4C4}"_s;
+    if (toolName == u"write_file"_s) return u"\u{1F4DD}"_s;
+    if (toolName == u"edit_file"_s || toolName == u"multi_edit_file"_s || toolName == u"multi_replace_file_content"_s) return u"\u{270F}"_s;
+    if (toolName == u"list_dir"_s) return u"\u{1F4C1}"_s;
+    if (toolName == u"grep"_s) return u"\u{1F50D}"_s;
+    if (toolName == u"glob"_s) return u"\u{1F50E}"_s;
+    if (toolName == u"bash"_s) return u"\u{26A1}"_s;
+        if (toolName == u"web_search"_s) return u"\u{1F310}"_s;
+        if (toolName == u"web_fetch"_s) return u"\u{1F4D6}"_s;
+    if (toolName == u"query_project_graph"_s) return u"\u{1F578}"_s;
+    if (toolName == u"new_task"_s) return u"\u{1F9E9}"_s;
+    if (toolName.startsWith(u"mcp__"_s)) return u"\u{1F50C}"_s;
+    return u"\u{2699}"_s;
 }
 
 QString ToolCallWidget::colorForRisk(ToolRisk risk) const
 {
     switch (risk) {
     case ToolRisk::Read:
-        return u"#22c55e"_s;    // green
+        return ChatTheme::success();
     case ToolRisk::Write:
-        return u"#eab308"_s;    // yellow
+        return ChatTheme::warning();
     case ToolRisk::Execute:
-        return u"#ef4444"_s;    // red
+        return ChatTheme::danger();
     }
-    return u"#888"_s;
+    return ChatTheme::textMuted();
 }
 
 bool ToolCallWidget::isDiffTool(const QString &toolName) const
@@ -538,12 +734,17 @@ void ToolCallWidget::updateTitleText()
     const int chrome = 100;
     const int avail = std::max(48, width() - chrome);
     const QFontMetrics fm(m_title->font());
-    const int prefixW = fm.horizontalAdvance(m_toolName + u" - "_s) + 8;
+    // "multi_replace_file_content" is 27 characters of snake_case. The
+    // transcript should read "Edit file", with the raw tool name kept in the
+    // tooltip for anyone who needs it.
+    const QString label = ChatTheme::toolLabel(m_toolName);
+    const int prefixW = fm.horizontalAdvance(label + u" "_s) + 8;
     const int firstW = std::max(24, avail - prefixW);
     const QString wrapped = wrapToWidth(m_titleText, fm, firstW, avail);
     QString cmdHtml = escapeHtml(wrapped);
     cmdHtml.replace(u'\n', u"<br>"_s);
-    m_title->setText(u"<b>%1</b> - %2"_s.arg(escapeHtml(m_toolName), cmdHtml));
+    m_title->setText(QStringLiteral("<span style=\"color:%1\"><b>%2</b></span>&nbsp; %3")
+                         .arg(ChatTheme::textMuted(), escapeHtml(label), cmdHtml));
 
     const int lines = std::max(1, static_cast<int>(wrapped.count(u'\n')) + 1);
     m_title->setMinimumHeight(fm.lineSpacing() * lines + 2);

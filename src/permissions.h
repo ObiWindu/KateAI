@@ -30,6 +30,26 @@ public:
     void revokeSession();
     bool sessionGranted(const QString &toolName) const;
 
+    // Tools that never prompt, whatever the permission mode is. This is the
+    // auto-approve list from settings plus each MCP server's alwaysAllow.
+    void setAutoApproveTools(const QSet<QString> &tools)
+    {
+        m_autoApprove = tools;
+    }
+    void autoApproveTool(const QString &toolName)
+    {
+        m_autoApprove.insert(toolName);
+    }
+    bool isAutoApproved(const QString &toolName) const
+    {
+        return m_autoApprove.contains(toolName);
+    }
+    // Tools an MCP server marked with readOnlyHint.
+    void setReadOnlyTools(const QSet<QString> &tools)
+    {
+        m_extraReadTools = tools;
+    }
+
     ToolRisk riskFor(const QString &toolName) const;
     bool isReadTool(const QString &toolName) const;
 
@@ -44,6 +64,8 @@ public:
 private:
     PermissionMode m_mode = PermissionMode::Ask;
     QStringList m_sessionGrants;
+    QSet<QString> m_autoApprove;
+    QSet<QString> m_extraReadTools;
 };
 
 } // namespace KateAi

@@ -6,6 +6,12 @@
 #pragma once
 
 #include "types.h"
+#include "mcp.h"
+#include "agentteam.h"
+
+#include <QHash>
+#include <QList>
+#include <QWidget>
 #include "llmclient.h"
 
 #include <KTextEditor/ConfigPage>
@@ -14,8 +20,11 @@ class QComboBox;
 class QCheckBox;
 class QLineEdit;
 class QPlainTextEdit;
+class QPushButton;
 class QSpinBox;
 class QDoubleSpinBox;
+class QTableWidget;
+class QTreeWidget;
 
 namespace KateAi
 {
@@ -39,6 +48,10 @@ public:
     void reset() override;
     void defaults() override;
 
+    // The MCP server list lives in the workspace, so the view tells the page
+    // which workspace is open before the dialog is shown.
+    void setWorkspace(const QString &workspace);
+
 private:
     KateAiPlugin *m_plugin = nullptr;
 
@@ -50,6 +63,7 @@ private:
     QLineEdit *m_deepseekKey = nullptr;
     QLineEdit *m_openaiCompatibleKey = nullptr;
     QLineEdit *m_claudeCompatibleKey = nullptr;
+    QLineEdit *m_opencodeKey = nullptr;
     QLineEdit *m_acpKey = nullptr;
     QComboBox *m_grokModel = nullptr;
     QComboBox *m_openaiModel = nullptr;
@@ -57,10 +71,12 @@ private:
     QComboBox *m_deepseekModel = nullptr;
     QComboBox *m_openaiCompatibleModel = nullptr;
     QComboBox *m_claudeCompatibleModel = nullptr;
+    QComboBox *m_opencodeModel = nullptr;
     QComboBox *m_acpModel = nullptr;
     QLineEdit *m_deepseekUrl = nullptr;
     QLineEdit *m_openaiCompatibleUrl = nullptr;
     QLineEdit *m_claudeCompatibleUrl = nullptr;
+    QLineEdit *m_opencodeUrl = nullptr;
     QLineEdit *m_acpUrl = nullptr;
     QComboBox *m_apiFormat = nullptr;
 
@@ -131,6 +147,49 @@ private:
     QSpinBox *m_contextWindowReserve = nullptr;
     QCheckBox *m_compressOldMessages = nullptr;
     QSpinBox *m_compressionThreshold = nullptr;
+
+    // Modes & Tools
+    QComboBox *m_agentMode = nullptr;
+    QWidget *m_autoApproveTools = nullptr;
+    QHash<QString, QCheckBox *> m_autoApproveBoxes;
+    QCheckBox *m_loadAgentRules = nullptr;
+    QPlainTextEdit *m_globalRules = nullptr;
+
+    // MCP Servers
+    QCheckBox *m_mcpEnabled = nullptr;
+    QCheckBox *m_mcpAutoConnect = nullptr;
+    QSpinBox *m_mcpTimeout = nullptr;
+    QTableWidget *m_mcpServers = nullptr;
+    QList<McpServerConfig> m_mcpServerConfigs;
+
+    // Web search
+    QComboBox *m_webProvider = nullptr;
+    QLineEdit *m_webApiKey = nullptr;
+    QLineEdit *m_webEndpoint = nullptr;
+    QSpinBox *m_webMaxResults = nullptr;
+    QSpinBox *m_webTimeout = nullptr;
+    QString m_workspace;
+
+    // Checkpoints & Subtasks
+    QCheckBox *m_checkpointsEnabled = nullptr;
+    QSpinBox *m_checkpointRetention = nullptr;
+    QSpinBox *m_maxSubtaskDepth = nullptr;
+    QSpinBox *m_maxParallelSubtasks = nullptr;
+    QSpinBox *m_subtaskTimeout = nullptr;
+
+    // Agent Team
+    QTreeWidget *m_builtinRoster = nullptr;
+    QTableWidget *m_customAgents = nullptr;
+    QList<AgentProfile> m_customAgentList;
+    void refreshCustomAgentTable();
+    void addCustomAgent();
+    void editCustomAgent();
+    void removeCustomAgent();
+
+    void editMcpServer();
+    void addMcpServer();
+    void removeMcpServer();
+    void refreshMcpServerTable();
 };
 
 } // namespace KateAi

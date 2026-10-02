@@ -210,9 +210,38 @@ private Q_SLOTS:
         QVERIFY(cleared.messages.isEmpty());
         QCOMPARE(cleared.modelRequests, 0);
         QCOMPARE(cleared.toolCalls, 0);
-        
-        // Also verify SessionStore was cleared
-        QVERIFY(SessionStore::load().messages.isEmpty());
+    }
+
+    // Regression: ChatWidget::newChat() saves the current conversation and then
+    // calls clearSession(). clearSession() used to call SessionStore::clear(),
+    // which deletes the active conversation, so pressing "+" made the thread
+    // you had just been working in disappear from the history list.
+    void testNewChatKeepsThePreviousConversationInHistory()
+    {
+        SessionStore::clearAllConversations();
+
+        const QString firstId = SessionStore::createNewConversation();
+        SessionStore::SessionData data;
+        ChatMessage msg;
+        msg.role = ChatMessage::Role::User;
+        msg.content = u"First thread"_s;
+        data.messages = {msg};
+        SessionStore::saveConversation(firstId, data, QString(), 50);
+        QCOMPARE(SessionStore::listConversations(10).size(), 1);
+
+        // Exactly what newChat() does.
+        AgentLoop agent;
+        agent.restoreSession(data);
+        agent.abort();
+        agent.resetConversation();
+        agent.clearSession();
+        const QString secondId = SessionStore::createNewConversation();
+        QVERIFY(secondId != firstId);
+
+        const auto conversations = SessionStore::listConversations(10);
+        QCOMPARE(conversations.size(), 1);
+        QCOMPARE(conversations.first().id, firstId);
+        QCOMPARE(SessionStore::loadConversation(firstId).messages.size(), 1);
     }
 
     void testSessionPersistenceRoundTrip()

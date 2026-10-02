@@ -10,6 +10,17 @@ add_library(kateai_core STATIC
     documentbridge.cpp
     sessionstore.cpp
     graph/projectgraph.cpp
+    modes.cpp
+    rules.cpp
+    mcp.cpp
+    checkpoint.cpp
+    agentteam.cpp
+    agentlocks.cpp
+    agenttext.cpp
+    chattheme.cpp
+    codehighlight.cpp
+    contextmanager.cpp
+    websearch.cpp
 )
 
 set_target_properties(kateai_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
@@ -21,10 +32,12 @@ target_link_libraries(kateai_core
         Qt6::Gui
         Qt6::Widgets
         Qt6::Network
+        Qt6::Sql
         KF6::CoreAddons
         KF6::ConfigCore
         KF6::I18n
         KF6::TextEditor
+        KF6::SyntaxHighlighting
 )
 
 kcoreaddons_add_plugin(kateai INSTALL_NAMESPACE "kf6/ktexteditor")
@@ -33,11 +46,13 @@ target_sources(kateai PRIVATE
     plugin.cpp
     pluginview.cpp
     configpage.cpp
+    turnstatus.cpp
     chatwidget.cpp
     toolcallwidget.cpp
     promptedit.cpp
     permissionbar.cpp
     edittracker.cpp
+    subtaskwidget.cpp
     kateai.qrc
 )
 target_link_libraries(kateai PRIVATE

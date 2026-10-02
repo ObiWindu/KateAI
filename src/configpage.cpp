@@ -7,21 +7,36 @@
 #include "plugin.h"
 #include "settings.h"
 #include "llmclient.h"
+#include "mcp.h"
+#include "modes.h"
+#include "agentteam.h"
+
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QTreeWidget>
 
 #include <KLocalizedString>
 
 #include <QComboBox>
 #include <QCheckBox>
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QFormLayout>
 #include <QGroupBox>
+#include <QHBoxLayout>
+#include <QHeaderView>
 #include <QIcon>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMessageBox>
 #include <QPlainTextEdit>
+#include <QPushButton>
 #include <QScrollArea>
 #include <QSpinBox>
+#include <QTableWidget>
 #include <QTabWidget>
 #include <QVBoxLayout>
+#include <QDebug>
 
 #include <algorithm>
 
@@ -67,6 +82,7 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     m_provider->addItem(providerLabel(Provider::DeepSeek), providerId(Provider::DeepSeek));
     m_provider->addItem(providerLabel(Provider::OpenAICompatible), providerId(Provider::OpenAICompatible));
     m_provider->addItem(providerLabel(Provider::ClaudeCompatible), providerId(Provider::ClaudeCompatible));
+        m_provider->addItem(providerLabel(Provider::OpenCode), providerId(Provider::OpenCode));
     m_provider->addItem(providerLabel(Provider::Acp), providerId(Provider::Acp));
     defaultProviderForm->addRow(i18n("Default Provider:"), m_provider);
     providersLayout->addLayout(defaultProviderForm);
@@ -118,6 +134,12 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     m_claudeCompatibleUrl = new QLineEdit(this);
     m_claudeCompatibleUrl->setPlaceholderText(u"https://api.anthropic.com/v1"_s);
     addProviderGroup(i18n("Claude Compatible (Anthropic, Bedrock)"), m_claudeCompatibleKey, m_claudeCompatibleModel, m_claudeCompatibleUrl);
+
+        m_opencodeKey = makeKey();
+        m_opencodeModel = makeModelCombo();
+        m_opencodeUrl = new QLineEdit(this);
+        m_opencodeUrl->setPlaceholderText(u"https://opencode.ai/zen/v1"_s);
+        addProviderGroup(i18n("OpenCode Zen (curated coding models)"), m_opencodeKey, m_opencodeModel, m_opencodeUrl);
 
     m_acpKey = makeKey();
     m_acpModel = makeModelCombo();
@@ -411,6 +433,289 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     agentScroll->setWidget(agentWidget);
     tabs->addTab(agentScroll, i18n("Agent & Context"));
 
+    // --- Modes, auto-approve, and rules ---------------------------------------
+    auto *modesScroll = new QScrollArea(tabs);
+    modesScroll->setWidgetResizable(true);
+    auto *modesWidget = new QWidget(modesScroll);
+    auto *modesForm = new QFormLayout(modesWidget);
+    modesForm->setContentsMargins(12, 12, 12, 12);
+    modesForm->setSpacing(8);
+
+    auto *modesSeparator = new QLabel(i18n("--- Default mode ---"), modesWidget);
+    modesSeparator->setStyleSheet(u"font-weight: bold; margin-top: 10px;"_s);
+    modesForm->addRow(modesSeparator);
+
+    m_agentMode = new QComboBox(modesWidget);
+    for (const ModeDefinition &mode : ModeRegistry::builtInModes()) {
+        m_agentMode->addItem(mode.name, mode.id);
+    }
+    modesForm->addRow(i18n("Mode used when a chat starts:"), m_agentMode);
+
+    auto *modeHelp = new QLabel(i18n("Ask and Architect are read-only. Orchestrator delegates all work to sub-agents. "
+                                     "Add your own modes as Markdown files in <b>.kateai/modes/</b>."),
+                                modesWidget);
+    modeHelp->setWordWrap(true);
+    modeHelp->setStyleSheet(u"color: #888888;"_s);
+    modesForm->addRow(modeHelp);
+
+    auto *approveSeparator = new QLabel(i18n("--- Auto-approve (never prompt) ---"), modesWidget);
+    approveSeparator->setStyleSheet(u"font-weight: bold; margin-top: 10px;"_s);
+    modesForm->addRow(approveSeparator);
+
+    m_autoApproveTools = new QWidget(modesWidget);
+    auto *approveLayout = new QVBoxLayout(m_autoApproveTools);
+    approveLayout->setContentsMargins(0, 0, 0, 0);
+    for (const QString &tool : allBuiltInToolNames()) {
+        auto *box = new QCheckBox(tool, m_autoApproveTools);
+        m_autoApproveBoxes.insert(tool, box);
+        approveLayout->addWidget(box);
+    }
+    modesForm->addRow(i18n("Tools:"), m_autoApproveTools);
+
+    auto *rulesSeparator = new QLabel(i18n("--- Rules ---"), modesWidget);
+    rulesSeparator->setStyleSheet(u"font-weight: bold; margin-top: 10px;"_s);
+    modesForm->addRow(rulesSeparator);
+
+    m_loadAgentRules = new QCheckBox(i18n("Load project rules (.kateai/rules, .clinerules, AGENTS.md)"), modesWidget);
+    modesForm->addRow(i18n("Project rules:"), m_loadAgentRules);
+
+    m_globalRules = new QPlainTextEdit(modesWidget);
+    m_globalRules->setPlaceholderText(i18n("Rules applied to every workspace before the project rules."));
+    m_globalRules->setMaximumHeight(90);
+    modesForm->addRow(i18n("Global rules:"), m_globalRules);
+
+    modesScroll->setWidget(modesWidget);
+    tabs->addTab(modesScroll, i18n("Modes & Tools"));
+
+    // --- MCP servers ----------------------------------------------------------
+    auto *mcpScroll = new QScrollArea(tabs);
+    mcpScroll->setWidgetResizable(true);
+    auto *mcpWidget = new QWidget(mcpScroll);
+    auto *mcpForm = new QFormLayout(mcpWidget);
+    mcpForm->setContentsMargins(12, 12, 12, 12);
+    mcpForm->setSpacing(8);
+
+    m_mcpEnabled = new QCheckBox(i18n("Enable MCP servers"), mcpWidget);
+    mcpForm->addRow(i18n("MCP:"), m_mcpEnabled);
+
+    m_mcpAutoConnect = new QCheckBox(i18n("Connect configured servers when a workspace opens"), mcpWidget);
+    mcpForm->addRow(i18n("Startup:"), m_mcpAutoConnect);
+
+    m_mcpTimeout = new QSpinBox(mcpWidget);
+    m_mcpTimeout->setRange(1000, 1800000);
+    m_mcpTimeout->setSingleStep(1000);
+    m_mcpTimeout->setSuffix(i18n(" ms"));
+    mcpForm->addRow(i18n("Tool timeout:"), m_mcpTimeout);
+
+    auto *mcpServersSeparator = new QLabel(i18n("--- Servers ---"), mcpWidget);
+    mcpServersSeparator->setStyleSheet(u"font-weight: bold; margin-top: 10px;"_s);
+    mcpForm->addRow(mcpServersSeparator);
+
+    m_mcpServers = new QTableWidget(mcpWidget);
+    m_mcpServers->setColumnCount(3);
+    m_mcpServers->setHorizontalHeaderLabels({i18n("Name"), i18n("Transport"), i18n("Endpoint")});
+    m_mcpServers->horizontalHeader()->setStretchLastSection(true);
+    m_mcpServers->verticalHeader()->setVisible(false);
+    m_mcpServers->setSelectionBehavior(QAbstractItemView::SelectRows);
+    m_mcpServers->setMinimumHeight(180);
+    mcpForm->addRow(m_mcpServers);
+
+    auto *mcpButtons = new QWidget(mcpWidget);
+    auto *mcpButtonLayout = new QHBoxLayout(mcpButtons);
+    mcpButtonLayout->setContentsMargins(0, 0, 0, 0);
+    auto *mcpAdd = new QPushButton(i18n("Add…"), mcpButtons);
+    auto *mcpEdit = new QPushButton(i18n("Edit…"), mcpButtons);
+    auto *mcpRemove = new QPushButton(i18n("Remove"), mcpButtons);
+    mcpButtonLayout->addWidget(mcpAdd);
+    mcpButtonLayout->addWidget(mcpEdit);
+    mcpButtonLayout->addWidget(mcpRemove);
+    mcpButtonLayout->addStretch();
+    mcpForm->addRow(mcpButtons);
+
+    auto *mcpPathHint = new QLabel(i18n("Servers are read from <b>&lt;workspace&gt;/.kateai/mcp.json</b> and written back "
+                                       "when you save here. The <b>alwaysAllow</b> list per server auto-approves "
+                                       "its tools; <b>*</b> and <b>prefix*</b> patterns are supported."),
+                                  mcpWidget);
+    mcpPathHint->setWordWrap(true);
+    mcpPathHint->setStyleSheet(u"color: #888888;"_s);
+    mcpForm->addRow(mcpPathHint);
+
+    mcpScroll->setWidget(mcpWidget);
+    tabs->addTab(mcpScroll, i18n("MCP Servers"));
+
+    // --- Web search -----------------------------------------------------------
+    auto *webScroll = new QScrollArea(tabs);
+    webScroll->setWidgetResizable(true);
+    auto *webWidget = new QWidget(webScroll);
+    auto *webForm = new QFormLayout(webWidget);
+    webForm->setContentsMargins(12, 12, 12, 12);
+    webForm->setSpacing(8);
+
+    m_webProvider = new QComboBox(webWidget);
+    m_webProvider->addItem(i18n("DuckDuckGo (no key required)"), QStringLiteral("duckduckgo"));
+    m_webProvider->addItem(i18n("Tavily"), QStringLiteral("tavily"));
+    m_webProvider->addItem(i18n("Brave Search"), QStringLiteral("brave"));
+    m_webProvider->addItem(i18n("SearXNG (self-hosted)"), QStringLiteral("searxng"));
+    m_webProvider->addItem(i18n("Disabled"), QStringLiteral("disabled"));
+    webForm->addRow(i18n("Provider:"), m_webProvider);
+
+    m_webApiKey = new QLineEdit(webWidget);
+    m_webApiKey->setEchoMode(QLineEdit::PasswordEchoOnEdit);
+    m_webApiKey->setPlaceholderText(i18n("Required by Tavily and Brave"));
+    webForm->addRow(i18n("API key:"), m_webApiKey);
+
+    m_webEndpoint = new QLineEdit(webWidget);
+    m_webEndpoint->setPlaceholderText(QStringLiteral("http://localhost:8888"));
+    webForm->addRow(i18n("SearXNG URL:"), m_webEndpoint);
+
+    m_webMaxResults = new QSpinBox(webWidget);
+    m_webMaxResults->setRange(1, 20);
+    webForm->addRow(i18n("Results per search:"), m_webMaxResults);
+
+    m_webTimeout = new QSpinBox(webWidget);
+    m_webTimeout->setRange(1, 120);
+    m_webTimeout->setSuffix(i18n(" s"));
+    webForm->addRow(i18n("Timeout:"), m_webTimeout);
+
+    auto *webHint = new QLabel(i18n("web_search finds pages; web_fetch reads one and returns its text. "
+                                    "Both are read-only: they cannot modify your workspace. "
+                                    "Only the query text is sent to the provider, never file contents."),
+                               webWidget);
+    webHint->setWordWrap(true);
+    webHint->setStyleSheet(u"color: #888888;"_s);
+    webForm->addRow(webHint);
+
+    // The API key and SearXNG URL only matter for some providers; hiding the
+    // irrelevant rows keeps the tab to the choices that actually apply.
+    auto syncWebRows = [this, webForm] {
+        const QString provider = m_webProvider->currentData().toString();
+        const bool needsKey = provider == QStringLiteral("tavily") || provider == QStringLiteral("brave");
+        const bool needsEndpoint = provider == QStringLiteral("searxng");
+        for (QWidget *widget : {static_cast<QWidget *>(m_webApiKey), static_cast<QWidget *>(m_webEndpoint)}) {
+            if (widget->parentWidget()) {
+                const int index = webForm->indexOf(widget);
+                if (index >= 0) {
+                    webForm->setRowVisible(index, (widget == m_webApiKey) ? needsKey : needsEndpoint);
+                }
+            }
+        }
+    };
+    connect(m_webProvider, &QComboBox::currentIndexChanged, this, syncWebRows);
+    syncWebRows();
+
+    webScroll->setWidget(webWidget);
+    tabs->addTab(webScroll, i18n("Web Search"));
+
+    // --- Checkpoints and subtasks ---------------------------------------------
+    auto *safetyScroll = new QScrollArea(tabs);
+    safetyScroll->setWidgetResizable(true);
+    auto *safetyWidget = new QWidget(safetyScroll);
+    auto *safetyForm = new QFormLayout(safetyWidget);
+    safetyForm->setContentsMargins(12, 12, 12, 12);
+    safetyForm->setSpacing(8);
+
+    auto *cpSeparator = new QLabel(i18n("--- Checkpoints ---"), safetyWidget);
+    cpSeparator->setStyleSheet(u"font-weight: bold; margin-top: 10px;"_s);
+    safetyForm->addRow(cpSeparator);
+
+    m_checkpointsEnabled = new QCheckBox(i18n("Snapshot the workspace before the agent changes files"), safetyWidget);
+    safetyForm->addRow(i18n("Checkpoints:"), m_checkpointsEnabled);
+
+    m_checkpointRetention = new QSpinBox(safetyWidget);
+    m_checkpointRetention->setRange(2, 200);
+    safetyForm->addRow(i18n("Checkpoints to keep:"), m_checkpointRetention);
+
+    auto *cpHelp = new QLabel(i18n("Snapshots are stored in a private git repository in the cache directory, so your own "
+                                   "history is never touched. Restore or diff any snapshot from the toolbar menu."),
+                              safetyWidget);
+    cpHelp->setWordWrap(true);
+    cpHelp->setStyleSheet(u"color: #888888;"_s);
+    safetyForm->addRow(cpHelp);
+
+    auto *subSeparator = new QLabel(i18n("--- Sub-agents ---"), safetyWidget);
+    subSeparator->setStyleSheet(u"font-weight: bold; margin-top: 10px;"_s);
+    safetyForm->addRow(subSeparator);
+
+    m_maxSubtaskDepth = new QSpinBox(safetyWidget);
+    m_maxSubtaskDepth->setRange(0, 5);
+    safetyForm->addRow(i18n("Max subtask depth:"), m_maxSubtaskDepth);
+
+    m_maxParallelSubtasks = new QSpinBox(safetyWidget);
+    m_maxParallelSubtasks->setRange(1, 12);
+    safetyForm->addRow(i18n("Parallel sub-agents:"), m_maxParallelSubtasks);
+
+    m_subtaskTimeout = new QSpinBox(safetyWidget);
+    m_subtaskTimeout->setRange(10000, 1800000);
+    m_subtaskTimeout->setSingleStep(10000);
+    m_subtaskTimeout->setSuffix(i18n(" ms"));
+    safetyForm->addRow(i18n("Subtask timeout:"), m_subtaskTimeout);
+
+    safetyScroll->setWidget(safetyWidget);
+    tabs->addTab(safetyScroll, i18n("Checkpoints & Subtasks"));
+
+    // --- Agent team --------------------------------------------------------------
+    auto *teamScroll = new QScrollArea(tabs);
+    teamScroll->setWidgetResizable(true);
+    auto *teamWidget = new QWidget(teamScroll);
+    auto *teamForm = new QFormLayout(teamWidget);
+    teamForm->setContentsMargins(12, 12, 12, 12);
+    teamForm->setSpacing(8);
+
+    auto *rosterSeparator = new QLabel(i18n("--- Built-in agents ---"), teamWidget);
+    rosterSeparator->setStyleSheet(u"font-weight: bold; margin-top: 10px;"_s);
+    teamForm->addRow(rosterSeparator);
+
+    m_builtinRoster = new QTreeWidget(teamWidget);
+    m_builtinRoster->setColumnCount(3);
+    m_builtinRoster->setHeaderLabels({i18n("Agent"), i18n("Mode"), i18n("Use it for")});
+    m_builtinRoster->setRootIsDecorated(false);
+    m_builtinRoster->header()->setStretchLastSection(true);
+    for (const AgentProfile &profile : AgentTeam::builtinAgents()) {
+        auto *item = new QTreeWidgetItem(m_builtinRoster);
+        item->setText(0, profile.name);
+        item->setText(1, profile.modeId);
+        item->setText(2, profile.description);
+        item->setToolTip(2, profile.description);
+    }
+    m_builtinRoster->setMinimumHeight(140);
+    teamForm->addRow(m_builtinRoster);
+
+    auto *customSeparator = new QLabel(i18n("--- Custom agents ---"), teamWidget);
+    customSeparator->setStyleSheet(u"font-weight: bold; margin-top: 10px;"_s);
+    teamForm->addRow(customSeparator);
+
+    m_customAgents = new QTableWidget(teamWidget);
+    m_customAgents->setColumnCount(4);
+    m_customAgents->setHorizontalHeaderLabels({i18n("Id"), i18n("Name"), i18n("Mode"), i18n("Description")});
+    m_customAgents->horizontalHeader()->setStretchLastSection(true);
+    m_customAgents->verticalHeader()->setVisible(false);
+    m_customAgents->setSelectionBehavior(QAbstractItemView::SelectRows);
+    m_customAgents->setMinimumHeight(120);
+    teamForm->addRow(m_customAgents);
+
+    auto *agentButtons = new QWidget(teamWidget);
+    auto *agentButtonLayout = new QHBoxLayout(agentButtons);
+    agentButtonLayout->setContentsMargins(0, 0, 0, 0);
+    auto *agentAdd = new QPushButton(i18n("Add…"), agentButtons);
+    auto *agentEdit = new QPushButton(i18n("Edit…"), agentButtons);
+    auto *agentRemove = new QPushButton(i18n("Remove"), agentButtons);
+    agentButtonLayout->addWidget(agentAdd);
+    agentButtonLayout->addWidget(agentEdit);
+    agentButtonLayout->addWidget(agentRemove);
+    agentButtonLayout->addStretch();
+    teamForm->addRow(agentButtons);
+
+    auto *agentHint = new QLabel(i18n("Custom agents can also be shared with the project as Markdown files in "
+                                      "<b>&lt;workspace&gt;/.kateai/agents/</b> with <b>id</b>, <b>name</b>, "
+                                      "<b>mode</b>, and <b>description</b> frontmatter."),
+                                   teamWidget);
+    agentHint->setWordWrap(true);
+    agentHint->setStyleSheet(u"color: #888888;"_s);
+    teamForm->addRow(agentHint);
+
+    teamScroll->setWidget(teamWidget);
+    tabs->addTab(teamScroll, i18n("Agent Team"));
+
     // Initialize model fetcher
     m_modelFetcher = new LlmClient(this);
     m_modelFetcher->setSettings(m_plugin->settings());
@@ -446,6 +751,9 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     connect(m_deepseekKey, &QLineEdit::textChanged, this, markChanged);
     connect(m_openaiCompatibleKey, &QLineEdit::textChanged, this, markChanged);
     connect(m_claudeCompatibleKey, &QLineEdit::textChanged, this, markChanged);
+        connect(m_opencodeKey, &QLineEdit::textChanged, this, markChanged);
+        connect(m_opencodeUrl, &QLineEdit::textChanged, this, markChanged);
+        connect(m_opencodeModel, QOverload<int>::of(&QComboBox::currentIndexChanged), this, markChanged);
     connect(m_grokModel, QOverload<int>::of(&QComboBox::currentIndexChanged), this, markChanged);
     connect(m_openaiModel, QOverload<int>::of(&QComboBox::currentIndexChanged), this, markChanged);
     connect(m_openrouterModel, QOverload<int>::of(&QComboBox::currentIndexChanged), this, markChanged);
@@ -506,6 +814,7 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     fetchModelsForProvider(Provider::DeepSeek, m_deepseekKey, m_deepseekModel);
     fetchModelsForProvider(Provider::OpenAICompatible, m_openaiCompatibleKey, m_openaiCompatibleModel);
     fetchModelsForProvider(Provider::ClaudeCompatible, m_claudeCompatibleKey, m_claudeCompatibleModel);
+        fetchModelsForProvider(Provider::OpenCode, m_opencodeKey, m_opencodeModel);
     fetchModelsForProvider(Provider::Acp, m_acpKey, m_acpModel);
 
     connect(m_permission, &QComboBox::currentIndexChanged, this, markChanged);
@@ -565,10 +874,308 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     connect(m_compressOldMessages, &QCheckBox::toggled, this, markChanged);
     connect(m_compressionThreshold, &QSpinBox::valueChanged, this, markChanged);
 
+    // Modes, auto-approve and rules
+    connect(m_agentMode, &QComboBox::currentIndexChanged, this, markChanged);
+    for (auto it = m_autoApproveBoxes.constBegin(); it != m_autoApproveBoxes.constEnd(); ++it) {
+        connect(it.value(), &QCheckBox::toggled, this, markChanged);
+    }
+    connect(m_loadAgentRules, &QCheckBox::toggled, this, markChanged);
+    connect(m_globalRules, &QPlainTextEdit::textChanged, this, markChanged);
+
+    // MCP
+    connect(m_mcpEnabled, &QCheckBox::toggled, this, markChanged);
+    connect(m_mcpAutoConnect, &QCheckBox::toggled, this, markChanged);
+    connect(m_mcpTimeout, &QSpinBox::valueChanged, this, markChanged);
+
+    // Web search
+    connect(m_webProvider, &QComboBox::currentIndexChanged, this, markChanged);
+    connect(m_webApiKey, &QLineEdit::textChanged, this, markChanged);
+    connect(m_webEndpoint, &QLineEdit::textChanged, this, markChanged);
+    connect(m_webMaxResults, &QSpinBox::valueChanged, this, markChanged);
+    connect(m_webTimeout, &QSpinBox::valueChanged, this, markChanged);
+
+    // Checkpoints and subtasks
+    connect(m_checkpointsEnabled, &QCheckBox::toggled, this, markChanged);
+    connect(m_checkpointRetention, &QSpinBox::valueChanged, this, markChanged);
+    connect(m_maxSubtaskDepth, &QSpinBox::valueChanged, this, markChanged);
+    connect(m_maxParallelSubtasks, &QSpinBox::valueChanged, this, markChanged);
+    connect(m_subtaskTimeout, &QSpinBox::valueChanged, this, markChanged);
+
+    connect(agentAdd, &QPushButton::clicked, this, &KateAiConfigPage::addCustomAgent);
+    connect(agentEdit, &QPushButton::clicked, this, &KateAiConfigPage::editCustomAgent);
+    connect(agentRemove, &QPushButton::clicked, this, &KateAiConfigPage::removeCustomAgent);
+    connect(m_customAgents, &QTableWidget::itemDoubleClicked, this, [this] {
+        editCustomAgent();
+    });
+
+    connect(mcpAdd, &QPushButton::clicked, this, &KateAiConfigPage::addMcpServer);
+    connect(mcpEdit, &QPushButton::clicked, this, &KateAiConfigPage::editMcpServer);
+    connect(mcpRemove, &QPushButton::clicked, this, &KateAiConfigPage::removeMcpServer);
+    connect(m_mcpServers, &QTableWidget::itemDoubleClicked, this, [this] {
+        editMcpServer();
+    });
+
     reset();
 }
 
 KateAiConfigPage::~KateAiConfigPage() = default;
+
+void KateAiConfigPage::refreshCustomAgentTable()
+{
+    m_customAgents->setRowCount(0);
+    for (const AgentProfile &profile : m_customAgentList) {
+        const int row = m_customAgents->rowCount();
+        m_customAgents->insertRow(row);
+        m_customAgents->setItem(row, 0, new QTableWidgetItem(profile.id));
+        m_customAgents->setItem(row, 1, new QTableWidgetItem(profile.name));
+        m_customAgents->setItem(row, 2, new QTableWidgetItem(profile.modeId));
+        m_customAgents->setItem(row, 3, new QTableWidgetItem(profile.description));
+    }
+}
+
+void KateAiConfigPage::addCustomAgent()
+{
+    AgentProfile profile;
+    profile.id = i18n("my-agent");
+    profile.name = profile.id;
+    profile.modeId = u"code"_s;
+    m_customAgentList.append(profile);
+    refreshCustomAgentTable();
+    m_customAgents->selectRow(m_customAgents->rowCount() - 1);
+    editCustomAgent();
+}
+
+void KateAiConfigPage::removeCustomAgent()
+{
+    const int row = m_customAgents->currentRow();
+    if (row < 0 || row >= m_customAgentList.size()) {
+        return;
+    }
+    m_customAgentList.removeAt(row);
+    refreshCustomAgentTable();
+    Q_EMIT changed();
+}
+
+void KateAiConfigPage::editCustomAgent()
+{
+    const int row = m_customAgents->currentRow();
+    if (row < 0 || row >= m_customAgentList.size()) {
+        return;
+    }
+    const AgentProfile existing = m_customAgentList.at(row);
+
+    QDialog dialog(this);
+    dialog.setWindowTitle(i18n("Custom Agent"));
+    dialog.setMinimumWidth(560);
+    auto *form = new QFormLayout(&dialog);
+
+    auto *idEdit = new QLineEdit(existing.id, &dialog);
+    form->addRow(i18n("Id:"), idEdit);
+
+    auto *nameEdit = new QLineEdit(existing.name, &dialog);
+    form->addRow(i18n("Name:"), nameEdit);
+
+    auto *modeCombo = new QComboBox(&dialog);
+    for (const ModeDefinition &mode : ModeRegistry::builtInModes()) {
+        modeCombo->addItem(QStringLiteral("%1 (%2)").arg(mode.name, mode.id), mode.id);
+    }
+    const int existingIndex = modeCombo->findData(existing.modeId);
+    modeCombo->setCurrentIndex(existingIndex >= 0 ? existingIndex : 0);
+    form->addRow(i18n("Mode:"), modeCombo);
+
+    auto *descriptionEdit = new QPlainTextEdit(existing.description, &dialog);
+    descriptionEdit->setMaximumHeight(90);
+    descriptionEdit->setPlaceholderText(i18n("Shown to the orchestrator when it decides who to delegate to."));
+    form->addRow(i18n("Description:"), descriptionEdit);
+
+    QDialogButtonBox *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    form->addRow(buttons);
+
+    if (dialog.exec() != QDialog::Accepted) {
+        return;
+    }
+
+    AgentProfile profile;
+    profile.id = ModeRegistry::slugify(idEdit->text().trimmed());
+    profile.name = nameEdit->text().trimmed().isEmpty() ? profile.id : nameEdit->text().trimmed();
+    profile.modeId = modeCombo->currentData().toString();
+    profile.description = descriptionEdit->toPlainText().trimmed();
+    profile.enabled = true;
+
+    if (profile.id.isEmpty()) {
+        QMessageBox::warning(this, i18n("Custom Agent"), i18n("The agent needs an id made of letters, digits, or dashes."));
+        return;
+    }
+    // A custom agent must not shadow a built-in one.
+    for (const AgentProfile &builtin : AgentTeam::builtinAgents()) {
+        if (builtin.id == profile.id) {
+            QMessageBox::warning(this, i18n("Custom Agent"), i18n("'%1' is a built-in agent. Choose another id.", profile.id));
+            return;
+        }
+    }
+
+    m_customAgentList.removeAt(row);
+    m_customAgentList.append(profile);
+    refreshCustomAgentTable();
+    m_customAgents->selectRow(m_customAgents->rowCount() - 1);
+    Q_EMIT changed();
+}
+
+void KateAiConfigPage::refreshMcpServerTable()
+{
+    m_mcpServers->setRowCount(0);
+    for (const McpServerConfig &config : m_mcpServerConfigs) {
+        const int row = m_mcpServers->rowCount();
+        m_mcpServers->insertRow(row);
+        QString endpoint = config.url;
+        if (config.transport != McpTransport::Http) {
+            endpoint = config.command;
+            for (const QString &arg : config.args) {
+                endpoint += QLatin1Char(' ') + arg;
+            }
+        }
+        m_mcpServers->setItem(row, 0, new QTableWidgetItem(config.enabled ? config.name : config.name + i18n(" (disabled)")));
+        m_mcpServers->setItem(row, 1, new QTableWidgetItem(config.transportId()));
+        m_mcpServers->setItem(row, 2, new QTableWidgetItem(endpoint));
+    }
+}
+
+void KateAiConfigPage::addMcpServer()
+{
+    McpServerConfig config;
+    config.name = i18n("new-server");
+    m_mcpServerConfigs.append(config);
+    refreshMcpServerTable();
+    m_mcpServers->selectRow(m_mcpServers->rowCount() - 1);
+    editMcpServer();
+}
+
+void KateAiConfigPage::removeMcpServer()
+{
+    const int row = m_mcpServers->currentRow();
+    if (row < 0 || row >= m_mcpServerConfigs.size()) {
+        return;
+    }
+    m_mcpServerConfigs.removeAt(row);
+    refreshMcpServerTable();
+    Q_EMIT changed();
+}
+
+void KateAiConfigPage::editMcpServer()
+{
+    const int row = m_mcpServers->currentRow();
+    if (row < 0 || row >= m_mcpServerConfigs.size()) {
+        return;
+    }
+    McpServerConfig config = m_mcpServerConfigs.at(row);
+
+    QDialog dialog(this);
+    dialog.setWindowTitle(i18n("MCP Server"));
+    dialog.setMinimumWidth(560);
+    auto *form = new QFormLayout(&dialog);
+
+    auto *nameEdit = new QLineEdit(config.name, &dialog);
+    form->addRow(i18n("Name:"), nameEdit);
+
+    auto *transportCombo = new QComboBox(&dialog);
+    transportCombo->addItem(i18n("stdio (local process)"), QStringLiteral("stdio"));
+    transportCombo->addItem(i18n("HTTP (remote server)"), QStringLiteral("http"));
+    transportCombo->setCurrentIndex(config.transport == McpTransport::Http ? 1 : 0);
+    form->addRow(i18n("Transport:"), transportCombo);
+
+    auto *commandEdit = new QLineEdit(config.command, &dialog);
+    commandEdit->setPlaceholderText(i18n("npx"));
+    form->addRow(i18n("Command:"), commandEdit);
+
+    auto *argsEdit = new QLineEdit(config.args.join(u' '), &dialog);
+    argsEdit->setPlaceholderText(i18n("-y @modelcontextprotocol/server-filesystem /path"));
+    form->addRow(i18n("Arguments:"), argsEdit);
+
+    auto *urlEdit = new QLineEdit(config.url, &dialog);
+    urlEdit->setPlaceholderText(QStringLiteral("https://example.com/mcp"));
+    form->addRow(i18n("URL:"), urlEdit);
+
+    auto *cwdEdit = new QLineEdit(config.cwd, &dialog);
+    form->addRow(i18n("Working directory:"), cwdEdit);
+
+    auto *allowEdit = new QLineEdit(config.alwaysAllow.join(u", "_s), &dialog);
+    allowEdit->setPlaceholderText(i18n("tool_name, prefix*, *"));
+    form->addRow(i18n("Always allow:"), allowEdit);
+
+    auto *timeoutSpin = new QSpinBox(&dialog);
+    timeoutSpin->setRange(1000, 1800000);
+    timeoutSpin->setSingleStep(1000);
+    timeoutSpin->setSuffix(i18n(" ms"));
+    timeoutSpin->setValue(config.timeoutMs);
+    form->addRow(i18n("Timeout:"), timeoutSpin);
+
+    auto *enabledBox = new QCheckBox(i18n("Enabled"), &dialog);
+    enabledBox->setChecked(config.enabled);
+    form->addRow(enabledBox);
+
+    auto syncVisibility = [&dialog, transportCombo, commandEdit, argsEdit, urlEdit, cwdEdit]() {
+        const bool http = transportCombo->currentData().toString() == QStringLiteral("http");
+        commandEdit->setEnabled(!http);
+        argsEdit->setEnabled(!http);
+        cwdEdit->setEnabled(!http);
+        urlEdit->setEnabled(http);
+    };
+    connect(transportCombo, &QComboBox::currentIndexChanged, &dialog, syncVisibility);
+    syncVisibility();
+
+    QDialogButtonBox *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    form->addRow(buttons);
+
+    if (dialog.exec() != QDialog::Accepted) {
+        return;
+    }
+
+    const QString name = nameEdit->text().trimmed();
+    if (name.isEmpty()) {
+        QMessageBox::warning(this, i18n("MCP Server"), i18n("The server needs a name."));
+        return;
+    }
+    QStringList args;
+    const QStringList rawArgs = argsEdit->text().split(u' ', Qt::SkipEmptyParts);
+    for (const QString &arg : rawArgs) {
+        args.append(arg);
+    }
+    QStringList alwaysAllow;
+    const QStringList rawAllow = allowEdit->text().split(u',', Qt::SkipEmptyParts);
+    for (const QString &entry : rawAllow) {
+        const QString trimmed = entry.trimmed();
+        if (!trimmed.isEmpty()) {
+            alwaysAllow.append(trimmed);
+        }
+    }
+
+    McpServerConfig updated;
+    updated.name = name;
+    updated.transport = transportCombo->currentData().toString() == QStringLiteral("http") ? McpTransport::Http : McpTransport::Stdio;
+    updated.command = commandEdit->text().trimmed();
+    updated.args = args;
+    updated.cwd = cwdEdit->text().trimmed();
+    updated.url = urlEdit->text().trimmed();
+    updated.alwaysAllow = alwaysAllow;
+    updated.timeoutMs = timeoutSpin->value();
+    updated.enabled = enabledBox->isChecked();
+
+    QString error;
+    if (!updated.isValid(&error)) {
+        QMessageBox::warning(this, i18n("MCP Server"), error);
+        return;
+    }
+    // Renaming a server must not leave the old entry behind.
+    m_mcpServerConfigs.removeAt(row);
+    m_mcpServerConfigs.append(updated);
+    refreshMcpServerTable();
+    m_mcpServers->selectRow(m_mcpServers->rowCount() - 1);
+    Q_EMIT changed();
+}
 
 QString KateAiConfigPage::name() const
 {
@@ -595,6 +1202,7 @@ void KateAiConfigPage::apply()
     s.deepseekApiKey = m_deepseekKey->text();
     s.openaiCompatibleApiKey = m_openaiCompatibleKey->text();
     s.claudeCompatibleApiKey = m_claudeCompatibleKey->text();
+        s.opencodeApiKey = m_opencodeKey->text();
     s.acpApiKey = m_acpKey->text();
     s.grokModel = m_grokModel->currentText().trimmed();
     s.openaiModel = m_openaiModel->currentText().trimmed();
@@ -602,6 +1210,8 @@ void KateAiConfigPage::apply()
     s.deepseekModel = m_deepseekModel->currentText().trimmed();
     s.openaiCompatibleModel = m_openaiCompatibleModel->currentText().trimmed();
     s.claudeCompatibleModel = m_claudeCompatibleModel->currentText().trimmed();
+        s.opencodeModel = m_opencodeModel->currentText().trimmed();
+        s.opencodeUrl = m_opencodeUrl->text().trimmed();
     s.acpModel = m_acpModel->currentText().trimmed();
     s.deepseekUrl = m_deepseekUrl->text().trimmed();
     s.openaiCompatibleUrl = m_openaiCompatibleUrl->text().trimmed();
@@ -668,6 +1278,50 @@ void KateAiConfigPage::apply()
     s.compressOldMessages = m_compressOldMessages->isChecked();
     s.compressionThreshold = m_compressionThreshold->value();
 
+    // Modes, auto-approve and rules
+    s.agentMode = m_agentMode->currentData().toString();
+    s.autoApproveTools.clear();
+    for (auto it = m_autoApproveBoxes.constBegin(); it != m_autoApproveBoxes.constEnd(); ++it) {
+        if (it.value()->isChecked()) {
+            s.autoApproveTools.append(it.key());
+        }
+    }
+    s.loadAgentRules = m_loadAgentRules->isChecked();
+    s.globalRules = m_globalRules->toPlainText();
+
+    // MCP
+    s.mcpEnabled = m_mcpEnabled->isChecked();
+    s.mcpAutoConnect = m_mcpAutoConnect->isChecked();
+    s.mcpTimeoutMs = m_mcpTimeout->value();
+        // Web search
+        s.webSearchProvider = m_webProvider->currentData().toString();
+        s.webSearchApiKey = m_webApiKey->text().trimmed();
+        s.webSearchEndpoint = m_webEndpoint->text().trimmed();
+        s.webSearchMaxResults = m_webMaxResults->value();
+        s.webSearchTimeoutMs = m_webTimeout->value() * 1000;
+
+    // Checkpoints and subtasks
+    s.checkpointsEnabled = m_checkpointsEnabled->isChecked();
+    s.checkpointRetention = m_checkpointRetention->value();
+    s.maxSubtaskDepth = m_maxSubtaskDepth->value();
+    s.maxParallelSubtasks = m_maxParallelSubtasks->value();
+    s.subtaskTimeoutMs = m_subtaskTimeout->value();
+
+    // The roster is stored as a JSON array so it stays readable in the config
+    // file and can be copied between machines.
+    QJsonArray rosterArray;
+    for (const AgentProfile &profile : m_customAgentList) {
+        rosterArray.append(profile.toJson());
+    }
+    s.agentRoster = rosterArray.isEmpty() ? QString() : QString::fromUtf8(QJsonDocument(rosterArray).toJson(QJsonDocument::Compact));
+
+    if (!m_workspace.isEmpty()) {
+        QString error;
+        if (!McpConfigStore::save(m_workspace, m_mcpServerConfigs, &error)) {
+            qWarning().noquote() << u"Kate AI could not save MCP servers:"_s << error;
+        }
+    }
+
     m_plugin->setSettings(s);
 }
 
@@ -681,6 +1335,8 @@ void KateAiConfigPage::reset()
     m_deepseekKey->setText(s.deepseekApiKey);
     m_openaiCompatibleKey->setText(s.openaiCompatibleApiKey);
     m_claudeCompatibleKey->setText(s.claudeCompatibleApiKey);
+        m_opencodeKey->setText(s.opencodeApiKey);
+        m_opencodeUrl->setText(s.opencodeUrl);
     m_acpKey->setText(s.acpApiKey);
 
     // Update model combos with catalog and set current model
@@ -698,6 +1354,7 @@ void KateAiConfigPage::reset()
     m_deepseekModel->setCurrentText(s.deepseekModel);
     m_openaiCompatibleModel->setCurrentText(s.openaiCompatibleModel);
     m_claudeCompatibleModel->setCurrentText(s.claudeCompatibleModel);
+        m_opencodeModel->setCurrentText(s.opencodeModel);
     m_acpModel->setCurrentText(s.acpModel);
 
     m_deepseekUrl->setText(s.deepseekUrl);
@@ -784,6 +1441,68 @@ void KateAiConfigPage::reset()
     m_contextWindowReserve->setValue(s.contextWindowReserve);
     m_compressOldMessages->setChecked(s.compressOldMessages);
     m_compressionThreshold->setValue(s.compressionThreshold);
+
+    // Modes, auto-approve and rules
+    int modeIndex = m_agentMode->findData(s.agentMode);
+    if (modeIndex < 0) {
+        modeIndex = m_agentMode->findData(QStringLiteral("code"));
+    }
+    m_agentMode->setCurrentIndex(std::max(0, modeIndex));
+    for (auto it = m_autoApproveBoxes.constBegin(); it != m_autoApproveBoxes.constEnd(); ++it) {
+        it.value()->setChecked(s.autoApproveTools.contains(it.key()));
+    }
+    m_loadAgentRules->setChecked(s.loadAgentRules);
+    m_globalRules->setPlainText(s.globalRules);
+
+    // MCP
+    m_mcpEnabled->setChecked(s.mcpEnabled);
+    m_mcpAutoConnect->setChecked(s.mcpAutoConnect);
+    m_mcpTimeout->setValue(s.mcpTimeoutMs);
+        // Web search
+        {
+            const int index = m_webProvider->findData(s.webSearchProvider);
+            m_webProvider->setCurrentIndex(index >= 0 ? index : 0);
+            m_webApiKey->setText(s.webSearchApiKey);
+            m_webEndpoint->setText(s.webSearchEndpoint);
+            m_webMaxResults->setValue(qBound(1, s.webSearchMaxResults, 20));
+            m_webTimeout->setValue(qBound(1, s.webSearchTimeoutMs / 1000, 120));
+        }
+    if (!m_mcpServerConfigs.isEmpty()) {
+        refreshMcpServerTable();
+    }
+
+    // Checkpoints and subtasks
+    m_checkpointsEnabled->setChecked(s.checkpointsEnabled);
+    m_checkpointRetention->setValue(s.checkpointRetention);
+
+    m_customAgentList.clear();
+    const QString roster = s.agentRoster.trimmed();
+    if (!roster.isEmpty()) {
+        const QJsonDocument document = QJsonDocument::fromJson(roster.toUtf8());
+        if (document.isArray()) {
+            const QJsonArray array = document.array();
+            for (const QJsonValue &value : array) {
+                const AgentProfile profile = AgentProfile::fromJson(value.toObject());
+                if (profile.isValid()) {
+                    m_customAgentList.append(profile);
+                }
+            }
+        }
+    }
+    refreshCustomAgentTable();
+    m_maxSubtaskDepth->setValue(s.maxSubtaskDepth);
+    m_maxParallelSubtasks->setValue(s.maxParallelSubtasks);
+    m_subtaskTimeout->setValue(s.subtaskTimeoutMs);
+}
+
+void KateAiConfigPage::setWorkspace(const QString &workspace)
+{
+    if (m_workspace == workspace) {
+        return;
+    }
+    m_workspace = workspace;
+    m_mcpServerConfigs = McpConfigStore::load(workspace);
+    refreshMcpServerTable();
 }
 
 void KateAiConfigPage::updateModelCombo(Provider provider)

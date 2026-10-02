@@ -28,11 +28,16 @@ Settings SettingsStore::load()
     s.openrouterApiKey = g.readEntry(u"OpenRouterApiKey"_s, QString());
     s.deepseekApiKey = g.readEntry(u"DeepSeekApiKey"_s, QString());
     s.acpApiKey = g.readEntry(u"AcpApiKey"_s, QString());
-    s.grokModel = g.readEntry(u"GrokModel"_s, u"grok-4.5"_s);
-    s.openaiModel = g.readEntry(u"OpenAIModel"_s, u"gpt-4.1"_s);
-    s.openrouterModel = g.readEntry(u"OpenRouterModel"_s, u"x-ai/grok-4"_s);
-    s.deepseekModel = g.readEntry(u"DeepSeekModel"_s, u"deepseek-flash"_s);
-    s.acpModel = g.readEntry(u"AcpModel"_s, u"acp-agent"_s);
+    // Models are read from the provider, not hard-coded here; an empty entry
+    // simply means "not chosen yet" and the fetched catalogue fills it in.
+    s.grokModel = g.readEntry(u"GrokModel"_s, QString());
+    s.openaiModel = g.readEntry(u"OpenAIModel"_s, QString());
+    s.openrouterModel = g.readEntry(u"OpenRouterModel"_s, QString());
+    s.deepseekModel = g.readEntry(u"DeepSeekModel"_s, QString());
+    s.acpModel = g.readEntry(u"AcpModel"_s, QString());
+    s.opencodeApiKey = g.readEntry(u"OpenCodeApiKey"_s, QString());
+    s.opencodeModel = g.readEntry(u"OpenCodeModel"_s, QString());
+    s.opencodeUrl = g.readEntry(u"OpenCodeUrl"_s, u"https://opencode.ai/zen/v1"_s);
     s.deepseekUrl = g.readEntry(u"DeepSeekUrl"_s, u"https://api.deepseek.com"_s);
     s.acpUrl = g.readEntry(u"AcpUrl"_s, u"http://localhost:8080"_s);
     s.apiFormat = apiFormatFromId(g.readEntry(u"ApiFormat"_s, apiFormatId(ApiFormat::OpenAICompatible)));
@@ -45,6 +50,10 @@ Settings SettingsStore::load()
     s.maxIterations = legacyMaxIterations;
     s.bashTimeoutMs = g.readEntry(u"BashTimeoutMs"_s, 60000);
     s.planMode = g.readEntry(u"PlanMode"_s, false);
+        s.agentMode = g.readEntry(u"AgentMode"_s, QStringLiteral("code"));
+        s.autoApproveTools = g.readEntry(u"AutoApproveTools"_s, QStringList());
+        s.loadAgentRules = g.readEntry(u"LoadAgentRules"_s, true);
+        s.globalRules = g.readEntry(u"GlobalRules"_s, QString());
     s.loadProjectInstructions = g.readEntry(u"LoadProjectInstructions"_s, true);
     s.thinkingMode = g.readEntry(u"ThinkingMode"_s, true);
     s.extraSystemPrompt = g.readEntry(u"ExtraSystemPrompt"_s, QString());
@@ -72,6 +81,24 @@ Settings SettingsStore::load()
     s.autoCollapseThinking = g.readEntry(u"AutoCollapseThinking"_s, false);
     s.maxSavedConversations = g.readEntry(u"MaxSavedConversations"_s, 50);
     s.maxExpandedToolCards = g.readEntry(u"MaxExpandedToolCards"_s, 10);
+    // MCP
+    s.mcpEnabled = g.readEntry(u"McpEnabled"_s, true);
+    s.mcpAutoConnect = g.readEntry(u"McpAutoConnect"_s, true);
+    s.mcpTimeoutMs = g.readEntry(u"McpTimeoutMs"_s, 60000);
+        // Web search
+        s.webSearchProvider = g.readEntry(u"WebSearchProvider"_s, QStringLiteral("duckduckgo"));
+        s.webSearchApiKey = g.readEntry(u"WebSearchApiKey"_s);
+        s.webSearchEndpoint = g.readEntry(u"WebSearchEndpoint"_s);
+        s.webSearchMaxResults = g.readEntry(u"WebSearchMaxResults"_s, 5);
+        s.webSearchTimeoutMs = g.readEntry(u"WebSearchTimeoutMs"_s, 20000);
+    // Checkpoints
+    s.checkpointsEnabled = g.readEntry(u"CheckpointsEnabled"_s, true);
+    s.checkpointRetention = g.readEntry(u"CheckpointRetention"_s, 20);
+    // Subtasks
+    s.maxSubtaskDepth = g.readEntry(u"MaxSubtaskDepth"_s, 2);
+    s.maxParallelSubtasks = g.readEntry(u"MaxParallelSubtasks"_s, 3);
+    s.agentRoster = g.readEntry(u"AgentRoster"_s, QString());
+    s.subtaskTimeoutMs = g.readEntry(u"SubtaskTimeoutMs"_s, 300000);
     if (s.maxModelRequests < 1) {
         s.maxModelRequests = 1;
     }
@@ -89,6 +116,13 @@ Settings SettingsStore::load()
     if (s.bashTimeoutMs < 1000) {
         s.bashTimeoutMs = 1000;
     }
+    s.checkpointRetention = qBound(2, s.checkpointRetention, 500);
+    s.maxSubtaskDepth = qBound(0, s.maxSubtaskDepth, 5);
+        s.maxParallelSubtasks = qBound(1, s.maxParallelSubtasks, 12);
+    s.subtaskTimeoutMs = qBound(10000, s.subtaskTimeoutMs, 30 * 60 * 1000);
+    s.mcpTimeoutMs = qBound(1000, s.mcpTimeoutMs, 30 * 60 * 1000);
+    s.webSearchMaxResults = qBound(1, s.webSearchMaxResults, 20);
+    s.webSearchTimeoutMs = qBound(1000, s.webSearchTimeoutMs, 120000);
     return s;
 }
 
@@ -101,6 +135,9 @@ void SettingsStore::save(const Settings &settings)
     g.writeEntry(u"OpenRouterApiKey"_s, settings.openrouterApiKey);
     g.writeEntry(u"DeepSeekApiKey"_s, settings.deepseekApiKey);
     g.writeEntry(u"AcpApiKey"_s, settings.acpApiKey);
+        g.writeEntry(u"OpenCodeApiKey"_s, settings.opencodeApiKey);
+        g.writeEntry(u"OpenCodeModel"_s, settings.opencodeModel);
+        g.writeEntry(u"OpenCodeUrl"_s, settings.opencodeUrl);
     g.writeEntry(u"GrokModel"_s, settings.grokModel);
     g.writeEntry(u"OpenAIModel"_s, settings.openaiModel);
     g.writeEntry(u"OpenRouterModel"_s, settings.openrouterModel);
@@ -118,6 +155,10 @@ void SettingsStore::save(const Settings &settings)
     g.writeEntry(u"MaxIterations"_s, settings.maxToolCalls);
     g.writeEntry(u"BashTimeoutMs"_s, settings.bashTimeoutMs);
     g.writeEntry(u"PlanMode"_s, settings.planMode);
+        g.writeEntry(u"AgentMode"_s, settings.agentMode);
+        g.writeEntry(u"AutoApproveTools"_s, settings.autoApproveTools);
+        g.writeEntry(u"LoadAgentRules"_s, settings.loadAgentRules);
+        g.writeEntry(u"GlobalRules"_s, settings.globalRules);
     g.writeEntry(u"LoadProjectInstructions"_s, settings.loadProjectInstructions);
     g.writeEntry(u"ThinkingMode"_s, settings.thinkingMode);
     g.writeEntry(u"ExtraSystemPrompt"_s, settings.extraSystemPrompt);
@@ -147,6 +188,23 @@ void SettingsStore::save(const Settings &settings)
     g.writeEntry(u"AutoCollapseThinking"_s, settings.autoCollapseThinking);
     g.writeEntry(u"MaxSavedConversations"_s, settings.maxSavedConversations);
     g.writeEntry(u"MaxExpandedToolCards"_s, settings.maxExpandedToolCards);
+    // MCP
+    g.writeEntry(u"McpEnabled"_s, settings.mcpEnabled);
+    g.writeEntry(u"McpAutoConnect"_s, settings.mcpAutoConnect);
+    g.writeEntry(u"McpTimeoutMs"_s, settings.mcpTimeoutMs);
+        g.writeEntry(u"WebSearchProvider"_s, settings.webSearchProvider);
+        g.writeEntry(u"WebSearchApiKey"_s, settings.webSearchApiKey);
+        g.writeEntry(u"WebSearchEndpoint"_s, settings.webSearchEndpoint);
+        g.writeEntry(u"WebSearchMaxResults"_s, settings.webSearchMaxResults);
+        g.writeEntry(u"WebSearchTimeoutMs"_s, settings.webSearchTimeoutMs);
+    // Checkpoints
+    g.writeEntry(u"CheckpointsEnabled"_s, settings.checkpointsEnabled);
+    g.writeEntry(u"CheckpointRetention"_s, settings.checkpointRetention);
+    // Subtasks
+    g.writeEntry(u"MaxSubtaskDepth"_s, settings.maxSubtaskDepth);
+    g.writeEntry(u"MaxParallelSubtasks"_s, settings.maxParallelSubtasks);
+    g.writeEntry(u"AgentRoster"_s, settings.agentRoster);
+    g.writeEntry(u"SubtaskTimeoutMs"_s, settings.subtaskTimeoutMs);
     
     g.sync();
 }

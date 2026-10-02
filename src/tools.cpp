@@ -16,6 +16,12 @@
 
 #include <algorithm>
 
+#ifdef Q_OS_UNIX
+#include <signal.h>
+#include <sys/types.h>
+#include <unistd.h>
+#endif
+
 using namespace Qt::Literals::StringLiterals;
 
 namespace KateAi
@@ -164,6 +170,14 @@ QString shellCommandFor(const QString &toolName, const QJsonObject &args)
             cmd += u" %1"_s.arg(quoteShellArg(target));
         }
         return cmd;
+    }
+    if (toolName == u"new_task"_s) {
+        const QString mode = args.value(u"mode"_s).toString();
+        return u"[%1] %2"_s.arg(mode.isEmpty() ? QStringLiteral("code") : mode, args.value(u"description"_s).toString());
+    }
+    if (toolName.startsWith(u"mcp__"_s)) {
+        // MCP tools carry their own argument shapes, so show them verbatim.
+        return QString::fromUtf8(QJsonDocument(args).toJson(QJsonDocument::Compact));
     }
     return toolName;
 }
@@ -871,6 +885,14 @@ ToolResult ToolRunner::bash(const QJsonObject &args)
     QProcess process;
     process.setWorkingDirectory(m_sandbox.workspaceRoot());
     process.setProcessChannelMode(QProcess::MergedChannels);
+#ifdef Q_OS_UNIX
+    // Give the command its own session so a timeout can take down everything it
+    // started. Otherwise kill() only reaps the shell we launched and whatever it
+    // backgrounded keeps running and writing after the turn was cancelled.
+    process.setChildProcessModifier([]() {
+        ::setsid();
+    });
+#endif
 
     // Start the process with the wrapped command
     const QString program = wrapped.first();
@@ -886,6 +908,12 @@ ToolResult ToolRunner::bash(const QJsonObject &args)
     // Wait for the process to complete with a timeout
     if (!process.waitForFinished(m_timeoutMs)) {
         // Kill the process if it times out
+#ifdef Q_OS_UNIX
+        // The child leads its own session, so the negative pid reaches the whole
+        // tree. If setsid() failed there is no such group and this is a no-op,
+        // leaving the plain kill() below to reap the shell itself.
+        ::kill(-static_cast<pid_t>(process.processId()), SIGKILL);
+#endif
         process.kill();
         process.waitForFinished(2000);
         result.ok = false;

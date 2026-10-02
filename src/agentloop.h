@@ -5,16 +5,23 @@
 
 #pragma once
 
+#include "agentlocks.h"
+#include "agentteam.h"
+#include "checkpoint.h"
 #include "documentbridge.h"
 #include "llmclient.h"
+#include "mcp.h"
+#include "modes.h"
 #include "permissions.h"
 #include "sandbox.h"
 #include "sessionstore.h"
 #include "tools.h"
 #include "types.h"
+#include "websearch.h"
 #include "graph/projectgraph.h"
 
 #include <QObject>
+#include <QPointer>
 #include <QQueue>
 #include <QSet>
 #include <QHash>
@@ -30,6 +37,7 @@ class AgentLoop : public QObject
 
 public:
     explicit AgentLoop(QObject *parent = nullptr);
+        ~AgentLoop() override;
 
     void setSettings(const Settings &settings);
     void setWorkspace(const QString &workspace);
@@ -51,6 +59,76 @@ public:
     void resetConversation();
     void resolvePermission(PermissionDecision decision);
     void fetchModels(Provider provider);
+
+    // --- Modes ----------------------------------------------------------------
+    ModeRegistry *modeRegistry()
+    {
+        return &m_modes;
+    }
+    ModeDefinition activeMode() const
+    {
+        return m_modes.modeOrDefault(m_settings.agentMode);
+    }
+    // Tools the model may call right now, from the mode and plan mode.
+    ToolAccess activeToolAccess() const;
+    void setMode(const QString &modeId);
+
+    // --- MCP ------------------------------------------------------------------
+    McpManager *mcpManager() const
+    {
+        return m_mcp;
+    }
+    // Sub-agents borrow the pointer; ownership stays with the root loop.
+    void setMcpManager(McpManager *manager);
+
+    // --- Agent team -------------------------------------------------------------
+    AgentTeam *agentTeam()
+    {
+        return &m_team;
+    }
+    // Shared with sub-agents so parallel edits cannot collide.
+    void setLocks(WorkspaceLocks *locks);
+    WorkspaceLocks *locks() const
+    {
+        return m_locks;
+    }
+    // Task ids of the sub-agents currently running.
+    QStringList runningSubtaskIds() const;
+    int runningSubtaskCount() const
+    {
+        return m_activeSubtasks.size();
+    }
+    // Stops one sub-agent, or every sub-agent when taskId is empty.
+    void cancelSubtask(const QString &taskId = QString());
+    // Identity used for the shared edit locks; unique per sub-agent.
+    QString selfId() const
+    {
+        return m_selfId;
+    }
+    void setSelfId(const QString &id)
+    {
+        m_selfId = id;
+    }
+    // Marks this loop as deliberately stopped, so a turn that unwinds through
+    // cancelSubtask() reports "cancelled" instead of a bogus success.
+    void requestCancel()
+    {
+        m_cancelRequested = true;
+    }
+    bool cancelRequested() const
+    {
+        return m_cancelRequested;
+    }
+
+    // --- Checkpoints -----------------------------------------------------------
+    CheckpointManager *checkpointManager()
+    {
+        return &m_checkpoints;
+    }
+    QList<CheckpointInfo> checkpoints() const;
+    QString createCheckpoint(const QString &label);
+    bool restoreCheckpoint(const QString &id, QString *error);
+    QString diffAgainstCheckpoint(const QString &id) const;
 
     const QList<ChatMessage> &messages() const { return m_messages; }
 
@@ -77,6 +155,16 @@ Q_SIGNALS:
     void turnFinished();
     void modelsReceived(Provider provider, const QStringList &models);
     void modelsFailed(Provider provider, const QString &error);
+    void modesChanged();
+    void mcpToolsChanged();
+    void mcpStatusChanged(const QString &summary);
+    void mcpLogMessage(const QString &message);
+    void checkpointCreated(const QString &id, const QString &label);
+    void checkpointFailed(const QString &error);
+    void checkpointRestored(const QString &id);
+    void subtaskStarted(const QString &taskId, const QString &agentId, const QString &agentName, const QString &modeId, const QString &description);
+    void subtaskActivity(const QString &taskId, const QString &line, bool isError);
+    void subtaskFinished(const QString &taskId, bool ok);
 
 private:
     enum class State {
@@ -88,10 +176,16 @@ private:
     };
 
     void scheduleNextModelStep();
+        // Milliseconds to wait before the next provider call, or 0 when the
+        // requests-per-minute budget allows it now.
+        qint64 rateLimitDelayMs(qint64 now) const;
     void sendToModel();
     void finishTurn();
     void finishWithFailure(const QString &error);
-    bool canStartModelRequest(QString *error = nullptr) const;
+    bool canStartModelRequest(QString *error) const;
+        // The history as it should be sent: budgeted and compacted to fit the
+        // model's context window.
+        QList<ChatMessage> m_messagesForRequest() const;
     QString actionSignature(const ToolCall &call) const;
     bool isRepeatSensitiveTool(const QString &toolName) const;
     void appendControllerMessage(const QString &content);
@@ -113,15 +207,68 @@ private:
     QString systemPrompt() const;
     QList<ToolCall> bundleSimilarTools(const QList<ToolCall> &calls);
 
+    // Routes a tool call to MCP, a sub-agent, or the built-in runner.
+    PermissionRequest describeTool(const ToolCall &call) const;
+    // Comma-separated tool names the model may call right now.
+    QString accessList() const;
+    bool isAsyncTool(const QString &toolName) const;
+    void dispatchAsyncTool(const ToolCall &call);
+    void dispatchSubtask(const ToolCall &call);
+    void finishAsyncTool(const ToolCall &call, const ToolResult &result);
+    bool isSubtaskTool(const QString &toolName) const;
+        bool isWebTool(const QString &toolName) const;
+        // Issues a web_search / web_fetch and reports back through finishAsyncTool.
+        void startWebTool(const ToolCall &call);
+    // Takes the shared edit lock for a mutating tool, if the team has one.
+    bool acquireEditLock(const ToolCall &call, QString *deniedBy);
+    void releaseEditLocksFor(const ToolCall &call);
+    // Pushes the active mode's tool set (and the MCP tools) to the client.
+    void syncToolAccess();
+    // Snapshots the workspace before the first mutation of a turn.
+    void maybeCheckpoint(const QString &label);
+    void syncPermissionPolicy();
+    void setSubtaskDepth(int depth)
+    {
+        m_subtaskDepth = depth;
+    }
+
     Settings m_settings;
     QString m_workspace;
     QString m_editorContext;
     DocumentBridge *m_bridge = nullptr;
     LlmClient m_client;
+        // Shared by every loop in a turn, so the in-flight replies can be cancelled
+        // as a unit when the turn is aborted.
+        WebSearch m_web;
     PermissionPolicy m_policy;
     std::unique_ptr<Sandbox> m_sandbox;
     std::unique_ptr<ToolRunner> m_tools;
     std::unique_ptr<ProjectGraph> m_projectGraph;
+
+    ModeRegistry m_modes;
+    AgentTeam m_team;
+    // Owned by the root loop only; sub-agents borrow the pointer. QPointer so
+    // a sub-agent that outlives its parent sees null instead of a dangling one.
+    QPointer<McpManager> m_mcp;
+    bool m_ownsMcp = false;
+    // Shared with sub-agents so parallel edits to one file cannot collide.
+    // Borrowed, so it must be a QPointer for the same reason as m_mcp.
+    QPointer<WorkspaceLocks> m_locks;
+    CheckpointManager m_checkpoints;
+    // taskId -> child loop, for every sub-agent running right now.
+    QHash<QString, AgentLoop *> m_activeSubtasks;
+    // How many async tools (MCP or sub-agent) have been dispatched but have
+    // not reported back yet. The queue is held open while this is non-zero.
+    int m_inFlight = 0;
+    // Identity used for the shared edit locks.
+    QString m_selfId = QStringLiteral("main");
+    bool m_cancelRequested = false;
+    // Paths this loop currently holds a lock on.
+    QStringList m_owedPaths;
+    int m_subtaskDepth = 0;
+    quint64 m_asyncCounter = 0;
+    bool m_checkpointTaken = false;
+    QString m_taskSummary;
 
     QList<ChatMessage> m_messages;
     QList<ToolCall> m_queue;

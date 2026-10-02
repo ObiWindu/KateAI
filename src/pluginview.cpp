@@ -263,11 +263,13 @@ namespace KateAi
         auto *dialog = new QDialog(m_mainWindow->window());
         dialog->setAttribute(Qt::WA_DeleteOnClose);
         dialog->setWindowTitle(i18n("Configure Kate AI"));
-        dialog->resize(640, 520);
+        dialog->resize(760, 620);
 
         // Set up the dialog layout with configuration page and buttons
         auto *layout = new QVBoxLayout(dialog);
         auto *page = new KateAiConfigPage(dialog, m_plugin);
+        // MCP servers are stored per workspace, so tell the page which one.
+        page->setWorkspace(detectWorkspace(m_mainWindow));
         layout->addWidget(page);
         auto *buttons = new QDialogButtonBox(QDialogButtonBox::Apply | QDialogButtonBox::Close, dialog);
         layout->addWidget(buttons);
