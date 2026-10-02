@@ -12,7 +12,17 @@
 #include <QJsonObject>
 #include <QUuid>
 #include <QDateTime>
+#include <QDebug>
 #include <QDir>
+#include <QFileInfo>
+#include <QHash>
+#include <QMutex>
+#include <QMutexLocker>
+#include <QSqlDatabase>
+#include <QSqlError>
+#include <QSqlQuery>
+#include <QStandardPaths>
+#include <QThread>
 
 using namespace Qt::Literals::StringLiterals;
 
@@ -110,102 +120,258 @@ static QString generateTitleFromMessages(const QList<ChatMessage> &messages)
     return QDateTime::currentDateTime().toString(u"yyyy-MM-dd hh:mm"_s);
 }
 
-static KConfigGroup conversationsGroup()
+// The whole session state lives in a single JSON blob: it is always read and
+// written as one unit, so there is nothing to gain from splitting it up.
+static QByteArray sessionDataToJson(const SessionStore::SessionData &data)
 {
-    return KConfigGroup(KSharedConfig::openConfig(), u"KateAIConversations"_s);
+    QJsonObject obj;
+    obj[u"version"_s] = data.version;
+    obj[u"messages"_s] = messagesToJson(data.messages);
+    obj[u"currentThinking"_s] = data.currentThinking;
+    obj[u"currentPlan"_s] = data.currentPlan;
+    obj[u"planShown"_s] = data.planShown;
+    obj[u"currentAssistant"_s] = data.currentAssistant;
+    obj[u"stateEpoch"_s] = static_cast<qint64>(data.stateEpoch);
+    obj[u"actionSignatures"_s] = stringListToJson(data.actionSignatures);
+    obj[u"actionRepeatCounts"_s] = hashToJson(data.actionRepeatCounts);
+    obj[u"changedPaths"_s] = stringListToJson(data.changedPaths);
+    obj[u"changesNeedVerification"_s] = data.changesNeedVerification;
+    obj[u"verificationAttempted"_s] = data.verificationAttempted;
+    obj[u"verificationPromptCount"_s] = data.verificationPromptCount;
+    obj[u"modelRequests"_s] = data.modelRequests;
+    obj[u"toolCalls"_s] = data.toolCalls;
+    return QJsonDocument(obj).toJson(QJsonDocument::Compact);
 }
 
-static KConfigGroup conversationGroup(const QString &id)
+static SessionStore::SessionData sessionDataFromJson(const QByteArray &payload)
 {
-    return KConfigGroup(KSharedConfig::openConfig(), u"KateAIConversation_"_s + id);
-}
-
-QString SessionStore::conversationsGroupName()
-{
-    return u"KateAIConversations"_s;
-}
-
-QString SessionStore::conversationGroupName(const QString &id)
-{
-    return u"KateAIConversation_"_s + id;
-}
-
-SessionStore::SessionData SessionStore::load()
-{
-    // Load the active conversation
-    const QString activeId = getActiveConversationId();
-    if (!activeId.isEmpty()) {
-        return loadConversation(activeId);
+    SessionStore::SessionData data;
+    const QJsonDocument doc = QJsonDocument::fromJson(payload);
+    if (doc.isNull() || !doc.isObject()) {
+        return data;
     }
-    return SessionData();
-}
 
-void SessionStore::save(const SessionData &data, int maxConversations)
-{
-    const QString activeId = getActiveConversationId();
-    if (!activeId.isEmpty()) {
-        saveConversation(activeId, data, QString(), maxConversations);
-    } else {
-        // Create a new conversation if none active
-        const QString newId = createNewConversation();
-        saveConversation(newId, data, QString(), maxConversations);
+    const QJsonObject obj = doc.object();
+    data.version = obj[u"version"_s].toInt(SessionStore::CURRENT_VERSION);
+    data.messages = messagesFromJson(obj[u"messages"_s].toArray());
+    data.currentThinking = obj[u"currentThinking"_s].toString();
+    data.currentPlan = obj[u"currentPlan"_s].toArray();
+    data.planShown = obj[u"planShown"_s].toBool();
+    data.currentAssistant = obj[u"currentAssistant"_s].toString();
+    data.stateEpoch = static_cast<quint64>(obj[u"stateEpoch"_s].toInteger());
+    data.actionSignatures = stringListFromJson(obj[u"actionSignatures"_s].toArray());
+    data.actionRepeatCounts = hashFromJson(obj[u"actionRepeatCounts"_s].toObject());
+    data.changedPaths = stringListFromJson(obj[u"changedPaths"_s].toArray());
+    data.changesNeedVerification = obj[u"changesNeedVerification"_s].toBool();
+    data.verificationAttempted = obj[u"verificationAttempted"_s].toBool();
+    data.verificationPromptCount = obj[u"verificationPromptCount"_s].toInt();
+    data.modelRequests = obj[u"modelRequests"_s].toInt();
+    data.toolCalls = obj[u"toolCalls"_s].toInt();
+
+    // Version 2 adds the version field - no data migration needed, just ensure version is set
+    if (data.version < SessionStore::CURRENT_VERSION) {
+        data.version = SessionStore::CURRENT_VERSION;
     }
+
+    return data;
 }
 
-void SessionStore::clear()
+// --- session database ---------------------------------------------------
+
+static const QString ACTIVE_CONVERSATION_KEY = u"active_conversation"_s;
+static const QString LEGACY_IMPORT_KEY = u"legacy_kconfig_imported"_s;
+
+// Guards the database handle and every read-modify-write sequence below.
+// Recursive because the public helpers call each other (save() -> saveConversation(),
+// clear() -> deleteConversation(), ...).
+static QRecursiveMutex &storeMutex()
 {
-    const QString activeId = getActiveConversationId();
-    if (!activeId.isEmpty()) {
-        deleteConversation(activeId);
+    static QRecursiveMutex mutex;
+    return mutex;
+}
+
+static QString databaseFilePath()
+{
+    const QByteArray overridePath = qgetenv("KATEAI_SESSION_DB");
+    if (!overridePath.isEmpty()) {
+        return QString::fromLocal8Bit(overridePath);
     }
+
+    QString dataDir = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation);
+    if (dataDir.isEmpty()) {
+        dataDir = QDir::home().filePath(u".local/share"_s);
+    }
+    return dataDir + u"/kateai/sessions.sqlite"_s;
 }
 
-QList<SessionStore::ConversationInfo> SessionStore::listConversations(int maxConversations)
+// WAL keeps readers from blocking on a write, which is what makes restoring the
+// last session fast even while a request is streaming in.
+static bool applySchema(QSqlDatabase &db)
 {
-    QList<ConversationInfo> conversations;
-    const KConfigGroup group = conversationsGroup();
-    const QStringList keys = group.keyList();
+    QSqlQuery pragmas(db);
+    pragmas.exec(u"PRAGMA journal_mode=WAL"_s);
+    pragmas.exec(u"PRAGMA synchronous=NORMAL"_s);
 
-    for (const QString &key : keys) {
-        if (key.startsWith(u"conv_"_s)) {
-            const QString id = key.mid(5); // Remove "conv_" prefix
-            const KConfigGroup convGroup = conversationGroup(id);
+    static const char *const statements[] = {
+        "CREATE TABLE IF NOT EXISTS meta ("
+        "key TEXT PRIMARY KEY,"
+        "value TEXT NOT NULL)",
 
-            ConversationInfo info;
-            info.id = id;
-            info.title = convGroup.readEntry(u"Title"_s, u"Untitled"_s);
-            info.createdAt = QDateTime::fromString(convGroup.readEntry(u"CreatedAt"_s, QString()), Qt::ISODate);
-            info.updatedAt = QDateTime::fromString(convGroup.readEntry(u"UpdatedAt"_s, QString()), Qt::ISODate);
-            info.messageCount = convGroup.readEntry(u"MessageCount"_s, 0);
-            info.isActive = (id == getActiveConversationId());
+        // The payload holds the full SessionData; the remaining columns mirror the
+        // metadata the history menu needs so listing conversations never reads it.
+        "CREATE TABLE IF NOT EXISTS conversations ("
+        "id TEXT PRIMARY KEY,"
+        "title TEXT NOT NULL DEFAULT '',"
+        "created_at INTEGER NOT NULL DEFAULT 0,"
+        "updated_at INTEGER NOT NULL DEFAULT 0,"
+        "message_count INTEGER NOT NULL DEFAULT 0,"
+        "version INTEGER NOT NULL DEFAULT 0,"
+        "payload BLOB NOT NULL)",
 
-            conversations.append(info);
+        "CREATE INDEX IF NOT EXISTS conversations_updated_at ON conversations (updated_at DESC)",
+    };
+
+    for (const char *statement : statements) {
+        QSqlQuery query(db);
+        if (!query.exec(QString::fromLatin1(statement))) {
+            qWarning() << "KateAI: cannot create the session database schema:" << query.lastError().text();
+            return false;
         }
     }
 
-    // Sort by updatedAt descending (most recent first)
-    std::sort(conversations.begin(), conversations.end(),
-              [](const ConversationInfo &a, const ConversationInfo &b) {
-                  return a.updatedAt > b.updatedAt;
-              });
-
-    // Limit to maxConversations
-    if (maxConversations > 0 && conversations.size() > maxConversations) {
-        conversations = conversations.mid(0, maxConversations);
-    }
-
-    return conversations;
+    return true;
 }
 
-SessionStore::SessionData SessionStore::loadConversation(const QString &conversationId)
-{
-    SessionData data;
-    const KConfigGroup g = conversationGroup(conversationId);
+// Reads the pre-database (KConfig) history into the given connection.
+static void importLegacyConversations(QSqlDatabase db);
 
-    // Load version for migration
+// Opens (once per thread) the database backing the session store. Returns an
+// invalid handle and sets *ok to false when the store is unavailable; callers
+// then degrade to "no history" instead of losing the session.
+static QSqlDatabase openStore(bool *ok)
+{
+    static QHash<QThread *, QString> connectionNames; // guarded by storeMutex()
+
+    *ok = false;
+
+    if (!QSqlDatabase::isDriverAvailable(u"QSQLITE"_s)) {
+        qWarning() << "KateAI: the QSQLITE driver is missing, session history is unavailable.";
+        return {};
+    }
+
+    QThread *thread = QThread::currentThread();
+
+    const auto cached = connectionNames.constFind(thread);
+    if (cached != connectionNames.constEnd()) {
+        QSqlDatabase db = QSqlDatabase::database(cached.value(), false);
+        if (db.isValid() && db.isOpen()) {
+            *ok = true;
+            return db;
+        }
+        connectionNames.erase(cached);
+    }
+
+    const QString path = databaseFilePath();
+    const QString directory = QFileInfo(path).absolutePath();
+    if (!QDir().mkpath(directory)) {
+        qWarning() << "KateAI: cannot create the session database directory:" << directory;
+    }
+
+    const QString connectionName = u"kateai_sessions_%1"_s.arg(reinterpret_cast<quintptr>(thread));
+    QString error;
+
+    {
+        // The handle must be destroyed before removeDatabase() runs.
+        QSqlDatabase db = QSqlDatabase::addDatabase(u"QSQLITE"_s, connectionName);
+        db.setDatabaseName(path);
+        if (!db.open()) {
+            error = db.lastError().text();
+        } else if (!applySchema(db)) {
+            error = u"cannot create the schema"_s;
+            db.close();
+        }
+    }
+
+    if (!error.isEmpty()) {
+        qWarning() << "KateAI: cannot open the session database" << path << error;
+        QSqlDatabase::removeDatabase(connectionName);
+        return {};
+    }
+
+    QSqlDatabase db = QSqlDatabase::database(connectionName, true);
+    importLegacyConversations(db);
+
+    connectionNames.insert(thread, connectionName);
+    *ok = true;
+    return db;
+}
+
+static QString readMeta(const QSqlDatabase &db, const QString &key)
+{
+    QSqlQuery query(db);
+    query.prepare(u"SELECT value FROM meta WHERE key = ?"_s);
+    query.addBindValue(key);
+    if (!query.exec() || !query.next()) {
+        return QString();
+    }
+    return query.value(0).toString();
+}
+
+static void writeMeta(QSqlDatabase db, const QString &key, const QString &value)
+{
+    if (value.isEmpty()) {
+        return;
+    }
+    QSqlQuery query(db);
+    query.prepare(u"INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value"_s);
+    query.addBindValue(key);
+    query.addBindValue(value);
+    if (!query.exec()) {
+        qWarning() << "KateAI: cannot store" << key << "in the session database:" << query.lastError().text();
+    }
+}
+
+static void clearMeta(QSqlDatabase db, const QString &key)
+{
+    QSqlQuery query(db);
+    query.prepare(u"DELETE FROM meta WHERE key = ?"_s);
+    query.addBindValue(key);
+    if (!query.exec()) {
+        qWarning() << "KateAI: cannot clear" << key << "in the session database:" << query.lastError().text();
+    }
+}
+
+// A session is saved several times per turn, often within the same millisecond.
+// Strictly increasing timestamps keep "most recent first" ordering stable.
+static qint64 nextTimestamp()
+{
+    static qint64 lastIssued = 0; // guarded by storeMutex()
+    lastIssued = qMax(QDateTime::currentMSecsSinceEpoch(), lastIssued + 1);
+    return lastIssued;
+}
+
+static bool conversationExists(const QSqlDatabase &db, const QString &conversationId)
+{
+    QSqlQuery query(db);
+    query.prepare(u"SELECT 1 FROM conversations WHERE id = ?"_s);
+    query.addBindValue(conversationId);
+    return query.exec() && query.next();
+}
+
+// --- one-time import of the legacy KConfig history -----------------------
+
+static const QString LEGACY_LIST_GROUP = u"KateAIConversations"_s;
+static const QString LEGACY_CONVERSATION_GROUP_PREFIX = u"KateAIConversation_"_s;
+static const QString LEGACY_LIST_ENTRY_PREFIX = u"conv_"_s;
+static const QString LEGACY_ACTIVE_ENTRY = u"ActiveConversation"_s;
+
+static SessionStore::SessionData legacyConversationData(const QString &id)
+{
+    SessionStore::SessionData data;
+    const KConfigGroup g(KSharedConfig::openConfig(), LEGACY_CONVERSATION_GROUP_PREFIX + id);
+
     data.version = g.readEntry(u"Version"_s, 1);
 
-    // Load messages
     const QByteArray messagesData = g.readEntry(u"Messages"_s, QByteArray());
     if (!messagesData.isEmpty()) {
         const QJsonDocument doc = QJsonDocument::fromJson(messagesData);
@@ -214,7 +380,6 @@ SessionStore::SessionData SessionStore::loadConversation(const QString &conversa
         }
     }
 
-    // Load other session state
     data.currentThinking = g.readEntry(u"CurrentThinking"_s, QString());
     const QByteArray planData = g.readEntry(u"CurrentPlan"_s, QByteArray());
     if (!planData.isEmpty()) {
@@ -257,58 +422,247 @@ SessionStore::SessionData SessionStore::loadConversation(const QString &conversa
     data.modelRequests = g.readEntry(u"ModelRequests"_s, 0);
     data.toolCalls = g.readEntry(u"ToolCalls"_s, 0);
 
-    // Migration from version 1 to 2
-    if (data.version < 2) {
-        // Version 2 adds version field - no data migration needed, just ensure version is set
-        data.version = CURRENT_VERSION;
+    if (data.version < SessionStore::CURRENT_VERSION) {
+        data.version = SessionStore::CURRENT_VERSION;
     }
 
     return data;
 }
 
+// Releases before this version stored the history as KConfig groups. Importing
+// them once keeps existing conversations reachable after the upgrade; the legacy
+// entries are only dropped once every conversation is readable from the database.
+static void importLegacyConversations(QSqlDatabase db)
+{
+    if (!readMeta(db, LEGACY_IMPORT_KEY).isEmpty()) {
+        return;
+    }
+
+    KSharedConfig::Ptr config = KSharedConfig::openConfig();
+    KConfigGroup listGroup(config, LEGACY_LIST_GROUP);
+
+    QStringList conversationIds;
+    for (const QString &key : listGroup.keyList()) {
+        if (key.startsWith(LEGACY_LIST_ENTRY_PREFIX)) {
+            conversationIds.append(key.mid(LEGACY_LIST_ENTRY_PREFIX.size()));
+        }
+    }
+    const QString activeId = listGroup.readEntry(LEGACY_ACTIVE_ENTRY, QString());
+
+    if (conversationIds.isEmpty()) {
+        writeMeta(db, LEGACY_IMPORT_KEY, u"1"_s);
+        return;
+    }
+
+    if (!db.transaction()) {
+        qWarning() << "KateAI: cannot start the session history import:" << db.lastError().text();
+        return;
+    }
+
+    const qint64 now = nextTimestamp();
+    bool complete = true;
+
+    for (const QString &id : conversationIds) {
+        const SessionStore::SessionData data = legacyConversationData(id);
+        const KConfigGroup convGroup(config, LEGACY_CONVERSATION_GROUP_PREFIX + id);
+        const QDateTime createdAt = QDateTime::fromString(convGroup.readEntry(u"CreatedAt"_s, QString()), Qt::ISODate);
+        const QDateTime updatedAt = QDateTime::fromString(convGroup.readEntry(u"UpdatedAt"_s, QString()), Qt::ISODate);
+
+        QSqlQuery insert(db);
+        insert.prepare(u"INSERT OR IGNORE INTO conversations (id, title, created_at, updated_at, message_count, version, payload) VALUES (?, ?, ?, ?, ?, ?, ?)"_s);
+        insert.addBindValue(id);
+        insert.addBindValue(convGroup.readEntry(u"Title"_s, generateTitleFromMessages(data.messages)));
+        insert.addBindValue(createdAt.isValid() ? createdAt.toMSecsSinceEpoch() : now);
+        insert.addBindValue(updatedAt.isValid() ? updatedAt.toMSecsSinceEpoch() : now);
+        insert.addBindValue(data.messages.size());
+        insert.addBindValue(SessionStore::CURRENT_VERSION);
+        insert.addBindValue(sessionDataToJson(data));
+
+        if (!insert.exec()) {
+            qWarning() << "KateAI: cannot import conversation" << id << insert.lastError().text();
+            complete = false;
+            break;
+        }
+
+        if (id == activeId && conversationExists(db, id)) {
+            writeMeta(db, ACTIVE_CONVERSATION_KEY, id);
+        }
+    }
+
+    if (complete) {
+        for (const QString &id : conversationIds) {
+            if (!conversationExists(db, id)) {
+                complete = false;
+                break;
+            }
+        }
+    }
+
+    if (!complete) {
+        db.rollback();
+        return; // Keep the legacy entries, the next start retries the import.
+    }
+
+    if (!db.commit()) {
+        qWarning() << "KateAI: cannot commit the session history import:" << db.lastError().text();
+        return;
+    }
+
+    for (const QString &id : conversationIds) {
+        KConfigGroup(config, LEGACY_CONVERSATION_GROUP_PREFIX + id).deleteGroup();
+    }
+    listGroup.deleteGroup();
+    config->sync();
+
+    writeMeta(db, LEGACY_IMPORT_KEY, u"1"_s);
+}
+
+SessionStore::SessionData SessionStore::load()
+{
+    // Load the active conversation
+    const QString activeId = getActiveConversationId();
+    if (!activeId.isEmpty()) {
+        return loadConversation(activeId);
+    }
+    return SessionData();
+}
+
+void SessionStore::save(const SessionData &data, int maxConversations)
+{
+    const QString activeId = getActiveConversationId();
+    if (!activeId.isEmpty()) {
+        saveConversation(activeId, data, QString(), maxConversations);
+    } else {
+        // Create a new conversation if none active
+        const QString newId = createNewConversation();
+        saveConversation(newId, data, QString(), maxConversations);
+    }
+}
+
+void SessionStore::clear()
+{
+    const QString activeId = getActiveConversationId();
+    if (!activeId.isEmpty()) {
+        deleteConversation(activeId);
+    }
+}
+
+QList<SessionStore::ConversationInfo> SessionStore::listConversations(int maxConversations)
+{
+    QList<ConversationInfo> conversations;
+
+    QMutexLocker locker(&storeMutex());
+    bool ok = false;
+    QSqlDatabase db = openStore(&ok);
+    if (!ok) {
+        return conversations;
+    }
+
+    const QString activeId = readMeta(db, ACTIVE_CONVERSATION_KEY);
+
+    // A LIMIT placeholder cannot be left unbound, so build the query for the
+    // requested bound (0 means "no limit").
+    QSqlQuery query(db);
+    if (maxConversations > 0) {
+        query.prepare(u"SELECT id, title, created_at, updated_at, message_count FROM conversations ORDER BY updated_at DESC LIMIT ?"_s);
+        query.addBindValue(maxConversations);
+    } else {
+        query.prepare(u"SELECT id, title, created_at, updated_at, message_count FROM conversations ORDER BY updated_at DESC"_s);
+    }
+    if (!query.exec()) {
+        qWarning() << "KateAI: cannot list conversations:" << query.lastError().text();
+        return conversations;
+    }
+
+    while (query.next()) {
+        ConversationInfo info;
+        info.id = query.value(0).toString();
+        info.title = query.value(1).toString();
+        info.createdAt = QDateTime::fromMSecsSinceEpoch(query.value(2).toLongLong());
+        info.updatedAt = QDateTime::fromMSecsSinceEpoch(query.value(3).toLongLong());
+        info.messageCount = query.value(4).toInt();
+        info.isActive = (info.id == activeId);
+        conversations.append(info);
+    }
+
+    return conversations;
+}
+
+SessionStore::SessionData SessionStore::loadConversation(const QString &conversationId)
+{
+    QMutexLocker locker(&storeMutex());
+
+    bool ok = false;
+    QSqlDatabase db = openStore(&ok);
+    if (!ok) {
+        return SessionData();
+    }
+
+    QSqlQuery query(db);
+    query.prepare(u"SELECT payload FROM conversations WHERE id = ?"_s);
+    query.addBindValue(conversationId);
+    if (!query.exec() || !query.next()) {
+        return SessionData();
+    }
+
+    return sessionDataFromJson(query.value(0).toByteArray());
+}
+
 void SessionStore::saveConversation(const QString &conversationId, const SessionData &data, const QString &title, int maxConversations)
 {
-    KConfigGroup convGroup = conversationGroup(conversationId);
-    KConfigGroup listGroup = conversationsGroup();
+    QMutexLocker locker(&storeMutex());
+
+    bool ok = false;
+    QSqlDatabase db = openStore(&ok);
+    if (!ok) {
+        return;
+    }
 
     // Generate title if not provided
-    QString convTitle = title;
-    if (convTitle.isEmpty()) {
-        convTitle = generateTitleFromMessages(data.messages);
+    const QString convTitle = title.isEmpty() ? generateTitleFromMessages(data.messages) : title;
+    const qint64 now = nextTimestamp();
+
+    if (!db.transaction()) {
+        qWarning() << "KateAI: cannot save conversation" << conversationId << db.lastError().text();
+        return;
     }
 
-    // Save conversation data
-    convGroup.writeEntry(u"Title"_s, convTitle);
-    convGroup.writeEntry(u"UpdatedAt"_s, QDateTime::currentDateTime().toString(Qt::ISODate));
-    convGroup.writeEntry(u"MessageCount"_s, data.messages.size());
-    convGroup.writeEntry(u"Version"_s, CURRENT_VERSION);
+    bool stored = false;
 
-    // Preserve creation time
-    if (convGroup.readEntry(u"CreatedAt"_s, QString()).isEmpty()) {
-        convGroup.writeEntry(u"CreatedAt"_s, QDateTime::currentDateTime().toString(Qt::ISODate));
+    if (conversationExists(db, conversationId)) {
+        QSqlQuery update(db);
+        update.prepare(u"UPDATE conversations SET title = ?, updated_at = ?, message_count = ?, version = ?, payload = ? WHERE id = ?"_s);
+        update.addBindValue(convTitle);
+        update.addBindValue(now);
+        update.addBindValue(data.messages.size());
+        update.addBindValue(CURRENT_VERSION);
+        update.addBindValue(sessionDataToJson(data));
+        update.addBindValue(conversationId);
+        stored = update.exec();
+        if (!stored) {
+            qWarning() << "KateAI: cannot update conversation" << conversationId << update.lastError().text();
+        }
+    } else {
+        QSqlQuery insert(db);
+        insert.prepare(u"INSERT INTO conversations (id, title, created_at, updated_at, message_count, version, payload) VALUES (?, ?, ?, ?, ?, ?, ?)"_s);
+        insert.addBindValue(conversationId);
+        insert.addBindValue(convTitle);
+        insert.addBindValue(now);
+        insert.addBindValue(now);
+        insert.addBindValue(data.messages.size());
+        insert.addBindValue(CURRENT_VERSION);
+        insert.addBindValue(sessionDataToJson(data));
+        stored = insert.exec();
+        if (!stored) {
+            qWarning() << "KateAI: cannot store conversation" << conversationId << insert.lastError().text();
+        }
     }
 
-    // Save session data
-    convGroup.writeEntry(u"Messages"_s, QJsonDocument(messagesToJson(data.messages)).toJson(QJsonDocument::Compact));
-    convGroup.writeEntry(u"CurrentThinking"_s, data.currentThinking);
-    convGroup.writeEntry(u"CurrentPlan"_s, QJsonDocument(data.currentPlan).toJson(QJsonDocument::Compact));
-    convGroup.writeEntry(u"PlanShown"_s, data.planShown);
-    convGroup.writeEntry(u"CurrentAssistant"_s, data.currentAssistant);
-    convGroup.writeEntry(u"StateEpoch"_s, data.stateEpoch);
-    convGroup.writeEntry(u"ActionSignatures"_s, QJsonDocument(stringListToJson(data.actionSignatures)).toJson(QJsonDocument::Compact));
-    convGroup.writeEntry(u"ActionRepeatCounts"_s, QJsonDocument(hashToJson(data.actionRepeatCounts)).toJson(QJsonDocument::Compact));
-    convGroup.writeEntry(u"ChangedPaths"_s, QJsonDocument(stringListToJson(data.changedPaths)).toJson(QJsonDocument::Compact));
-    convGroup.writeEntry(u"ChangesNeedVerification"_s, data.changesNeedVerification);
-    convGroup.writeEntry(u"VerificationAttempted"_s, data.verificationAttempted);
-    convGroup.writeEntry(u"VerificationPromptCount"_s, data.verificationPromptCount);
-    convGroup.writeEntry(u"ModelRequests"_s, data.modelRequests);
-    convGroup.writeEntry(u"ToolCalls"_s, data.toolCalls);
-
-    convGroup.sync();
-
-    // Update conversation list
-    listGroup.writeEntry(u"conv_"_s + conversationId, true);
-    listGroup.sync();
+    if (!stored || !db.commit()) {
+        db.rollback();
+        qWarning() << "KateAI: cannot commit conversation" << conversationId << db.lastError().text();
+        return;
+    }
 
     // Prune old conversations if needed
     pruneOldConversations(maxConversations);
@@ -316,21 +670,34 @@ void SessionStore::saveConversation(const QString &conversationId, const Session
 
 void SessionStore::deleteConversation(const QString &conversationId)
 {
-    KConfigGroup convGroup = conversationGroup(conversationId);
-    KConfigGroup listGroup = conversationsGroup();
+    QMutexLocker locker(&storeMutex());
 
-    convGroup.deleteGroup();
-    listGroup.deleteEntry(u"conv_"_s + conversationId);
-
-    // If this was the active conversation, clear active
-    if (getActiveConversationId() == conversationId) {
-        KConfigGroup activeGroup = conversationsGroup();
-        activeGroup.deleteEntry(u"ActiveConversation"_s);
-        activeGroup.sync();
+    bool ok = false;
+    QSqlDatabase db = openStore(&ok);
+    if (!ok) {
+        return;
     }
 
-    convGroup.sync();
-    listGroup.sync();
+    if (!db.transaction()) {
+        qWarning() << "KateAI: cannot delete conversation" << conversationId << db.lastError().text();
+        return;
+    }
+
+    QSqlQuery query(db);
+    query.prepare(u"DELETE FROM conversations WHERE id = ?"_s);
+    query.addBindValue(conversationId);
+    if (!query.exec()) {
+        db.rollback();
+        qWarning() << "KateAI: cannot delete conversation" << conversationId << query.lastError().text();
+        return;
+    }
+
+    // If this was the active conversation, clear active
+    if (readMeta(db, ACTIVE_CONVERSATION_KEY) == conversationId) {
+        clearMeta(db, ACTIVE_CONVERSATION_KEY);
+    }
+
+    db.commit();
 }
 
 QString SessionStore::createNewConversation()
@@ -348,15 +715,33 @@ QString SessionStore::createNewConversation()
 
 void SessionStore::setActiveConversation(const QString &conversationId)
 {
-    KConfigGroup group = conversationsGroup();
-    group.writeEntry(u"ActiveConversation"_s, conversationId);
-    group.sync();
+    QMutexLocker locker(&storeMutex());
+
+    bool ok = false;
+    QSqlDatabase db = openStore(&ok);
+    if (!ok) {
+        return;
+    }
+
+    if (conversationId.isEmpty()) {
+        clearMeta(db, ACTIVE_CONVERSATION_KEY);
+        return;
+    }
+
+    writeMeta(db, ACTIVE_CONVERSATION_KEY, conversationId);
 }
 
 QString SessionStore::getActiveConversationId()
 {
-    const KConfigGroup group = conversationsGroup();
-    return group.readEntry(u"ActiveConversation"_s, QString());
+    QMutexLocker locker(&storeMutex());
+
+    bool ok = false;
+    QSqlDatabase db = openStore(&ok);
+    if (!ok) {
+        return QString();
+    }
+
+    return readMeta(db, ACTIVE_CONVERSATION_KEY);
 }
 
 void SessionStore::pruneOldConversations(int maxConversations)
@@ -365,23 +750,47 @@ void SessionStore::pruneOldConversations(int maxConversations)
         return; // Unlimited
     }
 
-    auto conversations = listConversations(0); // Get all without limit
-    if (conversations.size() <= maxConversations) {
+    QMutexLocker locker(&storeMutex());
+
+    bool ok = false;
+    QSqlDatabase db = openStore(&ok);
+    if (!ok) {
         return;
     }
 
-    // Delete oldest conversations beyond the limit
-    for (int i = maxConversations; i < conversations.size(); ++i) {
-        deleteConversation(conversations[i].id);
+    // Delete the oldest conversations beyond the limit
+    QSqlQuery query(db);
+    query.prepare(u"DELETE FROM conversations WHERE id NOT IN (SELECT id FROM conversations ORDER BY updated_at DESC LIMIT ?)"_s);
+    query.addBindValue(maxConversations);
+    if (!query.exec()) {
+        qWarning() << "KateAI: cannot prune old conversations:" << query.lastError().text();
     }
 }
 
 void SessionStore::clearAllConversations()
 {
-    auto conversations = listConversations(0);
-    for (const auto &conv : conversations) {
-        deleteConversation(conv.id);
+    QMutexLocker locker(&storeMutex());
+
+    bool ok = false;
+    QSqlDatabase db = openStore(&ok);
+    if (!ok) {
+        return;
     }
+
+    if (!db.transaction()) {
+        qWarning() << "KateAI: cannot clear the conversation history:" << db.lastError().text();
+        return;
+    }
+
+    QSqlQuery query(db);
+    if (!query.exec(u"DELETE FROM conversations"_s)) {
+        db.rollback();
+        qWarning() << "KateAI: cannot clear the conversation history:" << query.lastError().text();
+        return;
+    }
+
+    clearMeta(db, ACTIVE_CONVERSATION_KEY);
+    db.commit();
 }
 
 } // namespace KateAi

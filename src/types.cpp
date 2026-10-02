@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: LGPL-2.1-or-later
  */
 
+#include "modes.h"
 #include "types.h"
 
 #include <KLocalizedString>
@@ -29,6 +30,8 @@ QString providerId(Provider provider)
         return u"kilo"_s;
     case Provider::Acp:
         return u"acp"_s;
+    case Provider::OpenCode:
+        return u"opencode"_s;
     case Provider::Grok:
     default:
         return u"grok"_s;
@@ -52,6 +55,8 @@ QString providerLabel(Provider provider)
         return i18n("Kilo.ai");
     case Provider::Acp:
         return i18n("ACP (Agent Communication Protocol)");
+    case Provider::OpenCode:
+        return i18n("OpenCode Zen");
     case Provider::Grok:
     default:
         return i18n("Grok (xAI)");
@@ -81,6 +86,9 @@ Provider providerFromId(const QString &id)
     if (id == u"acp"_s) {
         return Provider::Acp;
     }
+    if (id == u"opencode"_s) {
+        return Provider::OpenCode;
+    }
     return Provider::Grok;
 }
 
@@ -101,6 +109,8 @@ QString providerBaseUrl(Provider provider)
         return u"https://api.kilo.ai/v1"_s;
     case Provider::Acp:
         return u"http://localhost:8080"_s;
+    case Provider::OpenCode:
+        return u"https://opencode.ai/zen/v1"_s;
     case Provider::Grok:
     default:
         return u"https://api.x.ai/v1"_s;
@@ -120,6 +130,8 @@ QString providerBaseUrl(const Settings &settings)
         return settings.openaiCompatibleUrl;
     case Provider::ClaudeCompatible:
         return settings.claudeCompatibleUrl;
+    case Provider::OpenCode:
+        return settings.opencodeUrl.isEmpty() ? u"https://opencode.ai/zen/v1"_s : settings.opencodeUrl;
     case Provider::Kilo:
         return u"https://api.kilo.ai/v1"_s;
     case Provider::Acp:
@@ -132,33 +144,32 @@ QString providerBaseUrl(const Settings &settings)
 
 QStringList defaultModels(Provider provider)
 {
+    // Intentionally empty. Model names used to be hard-coded here, which went
+    // stale the moment a provider shipped a model, and offered users models
+    // their key cannot reach. The list now comes from the provider itself via
+    // LlmClient::fetchModels(); this function remains so callers have one place
+    // to ask, and it reports "nothing known yet" honestly.
+    Q_UNUSED(provider)
+    return {};
+}
+
+bool providerSupportsModelListing(Provider provider)
+{
     switch (provider) {
     case Provider::OpenAI:
-        return {u"gpt-4.1"_s, u"gpt-4o"_s, u"o3"_s, u"o4-mini"_s, u"gpt-4.1-mini"_s};
     case Provider::OpenRouter:
-        return {u"x-ai/grok-4"_s,
-                u"x-ai/grok-4.5"_s,
-                u"openai/gpt-4.1"_s,
-                u"openai/gpt-4o"_s,
-                u"anthropic/claude-sonnet-4"_s,
-                u"google/gemini-2.5-pro"_s};
     case Provider::DeepSeek:
-        return {u"deepseek-flash"_s,
-                u"deepseek-v4-pro"_s,
-                u"deepseek-chat"_s,
-                u"deepseek-reasoner"_s};
     case Provider::OpenAICompatible:
-        return {u"llama3"_s, u"mistral"_s};
     case Provider::ClaudeCompatible:
-        return {u"claude-3-5-sonnet-20241022"_s, u"claude-3-opus-20240229"_s};
     case Provider::Kilo:
-        return {u"kilo-code"_s, u"kilo-code-fast"_s};
-    case Provider::Acp:
-        return {u"acp-agent"_s, u"acp-agent-fast"_s};
     case Provider::Grok:
-    default:
-        return {u"grok-4.5"_s, u"grok-4.6"_s, u"grok-4"_s, u"grok-3"_s};
+    case Provider::OpenCode:
+        return true;
+    case Provider::Acp:
+        break;
     }
+    // ACP agents advertise themselves; there is no catalogue endpoint.
+    return false;
 }
 
 QString permissionModeId(PermissionMode mode)
@@ -259,6 +270,8 @@ QString apiKeyFor(const Settings &settings)
         return settings.kiloApiKey;
     case Provider::Acp:
         return settings.acpApiKey;
+    case Provider::OpenCode:
+        return settings.opencodeApiKey;
     case Provider::Grok:
     default:
         return settings.grokApiKey;
@@ -282,6 +295,8 @@ QString modelFor(const Settings &settings)
         return settings.kiloModel;
     case Provider::Acp:
         return settings.acpModel;
+    case Provider::OpenCode:
+        return settings.opencodeModel;
     case Provider::Grok:
     default:
         return settings.grokModel;
@@ -308,7 +323,7 @@ static QJsonObject toolDef(const QString &name, const QString &description, cons
     return tool;
 }
 
-QJsonArray toolDefinitions(bool readOnlyOnly)
+QJsonArray toolDefinitions(const ToolAccess &access)
 {
     QJsonArray tools;
 
@@ -403,19 +418,51 @@ QJsonArray toolDefinitions(bool readOnlyOnly)
                          },
                          {}));
 
-    if (!readOnlyOnly) {
+    tools.append(toolDef(u"web_search"_s,
+                             u"Search the public web and return ranked results with titles, URLs and snippets. "
+                             u"Use it for library documentation, error messages, API references, or anything outside "
+                             u"this workspace. Prefer a specific query over a broad one; cite the URL when you use a result."_s,
+                             QJsonObject{
+                                 {u"query"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"The search query."_s}}},
+                                 {u"max_results"_s, QJsonObject{{u"type"_s, u"integer"_s}, {u"description"_s, u"How many results to return (1-20). Defaults to 5."_s}}},
+                             },
+                             {u"query"_s}));
+
+        tools.append(toolDef(u"web_fetch"_s,
+                             u"Fetch a web page and return its readable text, with scripts and navigation stripped. "
+                             u"Use it after web_search to read a specific result instead of relying on the snippet. "
+                             u"Only http and https URLs are fetched."_s,
+                             QJsonObject{
+                                 {u"url"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"The absolute http(s) URL to fetch."_s}}},
+                             },
+                             {u"url"_s}));
+
+        tools.append(toolDef(subtaskToolName(),
+                         u"Spawn a sub-agent to handle a self-contained piece of work, then return its result to you. "
+                         u"Give it a complete task description with all context it needs, since it cannot see this "
+                         u"conversation. Independent subtasks requested in the same response run in parallel, so batch "
+                         u"them. Pick an agent by name when one fits, or a mode when you need a specific tool set. "
+                         u"Returns the sub-agent's final answer."_s,
+                         QJsonObject{
+                             {u"description"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"The full task for the sub-agent, including the goal, relevant files, and the expected output format."_s}}},
+                             {u"agent"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"A named agent that suits the work: scout (read-only questions), architect (design and plans), coder (implementation), debugger (root-cause fixes), reviewer (check someone else's work), or a custom agent."_s}}},
+                             {u"mode"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"Mode id to run the sub-agent in, overriding the agent's default: code, ask, architect, debug, orchestrator, or a custom mode. Defaults to the agent's mode, or code."_s}}},
+                             {u"include_transcript"_s, QJsonObject{{u"type"_s, u"boolean"_s}, {u"description"_s, u"If true, the result also includes the sub-agent's tool log, so you can see how it reached its answer. Use it when you need to verify the work."_s}}},
+                         },
+                         {u"description"_s}));
+
+    if (access.allowAll) {
         return tools;
     }
 
-    QJsonArray readOnlyTools;
+    QJsonArray allowedTools;
     for (const QJsonValue &tool : tools) {
         const QString name = tool.toObject().value(u"function"_s).toObject().value(u"name"_s).toString();
-        if (name == u"read_file"_s || name == u"list_dir"_s || name == u"grep"_s || name == u"glob"_s
-            || name == u"query_project_graph"_s) {
-            readOnlyTools.append(tool);
+        if (access.allows(name)) {
+            allowedTools.append(tool);
         }
     }
-    return readOnlyTools;
+    return allowedTools;
 }
 
 QString defaultSystemPrompt(const QString &workspace)
@@ -433,6 +480,14 @@ QString defaultSystemPrompt(const QString &workspace)
            "- If a tool fails, diagnose the actual error and change approach; do not retry the identical call.\n"
            "- Prefer one purposeful batch of tools over speculative exploration.\n"
            "- Shell commands must be non-interactive. Do not request secrets or write credential files.\n"
+                      "\n"
+                      "WEB RESEARCH:\n"
+                      "- Use web_search for anything outside this workspace: library and API documentation, error messages, "
+                      "release notes, or the current state of a dependency. Prefer it over answering from memory when a version "
+                      "or API could have changed.\n"
+                      "- Read a result with web_fetch before relying on it; snippets alone are often misleading.\n"
+                      "- Cite the URL when a web result informs your answer.\n"
+                      "- Never send workspace contents, file contents, secrets, or user code to a search provider. Queries only.\n"
            "\n"
            "REASONING & PLANNING (required):\n"
            "1. THINKING: Before every response, output your internal reasoning in a <thinking> block. This is your private chain-of-thought: analyze the request, consider alternatives, plan steps, and anticipate issues. The user will NOT see this block - it is collapsed by default. Be thorough.\n"
@@ -524,7 +579,9 @@ QList<ChatMessage> compressMessageHistory(const QList<ChatMessage> &messages,
                                            int maxTotalChars,
                                            bool enabled)
 {
-    if (!enabled || messages.size() <= maxMessages) {
+    // maxMessages <= 0 means "do not trim". Falling through with a
+    // non-positive keep count would return the system prompt and nothing else.
+    if (!enabled || maxMessages <= 0 || messages.size() <= maxMessages) {
         return messages;
     }
 
@@ -534,8 +591,8 @@ QList<ChatMessage> compressMessageHistory(const QList<ChatMessage> &messages,
         result.append(messages.first());
     }
 
-    // Keep last N messages
-    int keepCount = qMin(maxMessages - result.size(), messages.size() - result.size());
+    // Keep last N messages, but never drop every non-system message.
+    int keepCount = qBound(1, maxMessages - result.size(), messages.size() - result.size());
     for (int i = messages.size() - keepCount; i < messages.size(); ++i) {
         result.append(messages[i]);
     }

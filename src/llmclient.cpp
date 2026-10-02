@@ -317,7 +317,7 @@ void LlmClient::doComplete(const QList<ChatMessage> &messages)
         break;
     }
 
-    QNetworkRequest request{QUrl(providerBaseUrl(m_settings.provider) + endpoint)};
+    QNetworkRequest request{QUrl(providerBaseUrl(m_settings) + endpoint)};
     request.setHeader(QNetworkRequest::ContentTypeHeader, u"application/json"_s);
     request.setRawHeader("Authorization", authHeader.toUtf8());
     request.setRawHeader("Accept", acceptHeader.toUtf8());
@@ -331,12 +331,25 @@ void LlmClient::doComplete(const QList<ChatMessage> &messages)
     connect(m_reply, &QNetworkReply::finished, this, &LlmClient::handleFinished);
 }
 
+QJsonArray LlmClient::advertisedTools() const
+{
+    QJsonArray tools = toolDefinitions(m_toolAccess);
+    for (const QJsonValue &tool : m_extraTools) {
+        const QString name = tool.toObject().value(u"function"_s).toObject().value(u"name"_s).toString();
+        // An extra tool still has to be permitted by the active mode.
+        if (m_toolAccess.isEmpty() || m_toolAccess.allows(name)) {
+            tools.append(tool);
+        }
+    }
+    return tools;
+}
+
 QJsonObject LlmClient::buildOpenAIRequest(const QList<ChatMessage> &messages, const QString &model)
 {
     QJsonObject body;
     body.insert(u"model"_s, model);
     body.insert(u"messages"_s, messagesToJson(messages));
-    body.insert(u"tools"_s, toolDefinitions(m_settings.planMode));
+    body.insert(u"tools"_s, advertisedTools());
     body.insert(u"tool_choice"_s, m_settings.parallelToolCalls ? u"auto"_s : u"none"_s);
     body.insert(u"stream"_s, true);
     body.insert(u"temperature"_s, m_settings.temperature);
@@ -375,7 +388,7 @@ QJsonObject LlmClient::buildAnthropicRequest(const QList<ChatMessage> &messages,
         body.insert(u"max_tokens"_s, m_settings.maxTokens);
     }
     // Anthropic uses tools array directly
-    body.insert(u"tools"_s, toolDefinitions(m_settings.planMode));
+    body.insert(u"tools"_s, advertisedTools());
     if (m_settings.parallelToolCalls) {
         body.insert(u"tool_choice"_s, u"auto"_s);
     } else {
@@ -390,7 +403,7 @@ QJsonObject LlmClient::buildAcpNativeRequest(const QList<ChatMessage> &messages,
     QJsonObject body;
     body.insert(u"model"_s, model);
     body.insert(u"messages"_s, messagesToJson(messages));
-    body.insert(u"tools"_s, toolDefinitions(m_settings.planMode));
+    body.insert(u"tools"_s, advertisedTools());
     body.insert(u"tool_choice"_s, m_settings.parallelToolCalls ? u"auto"_s : u"none"_s);
     body.insert(u"stream"_s, true);
     body.insert(u"temperature"_s, m_settings.temperature);
@@ -490,7 +503,9 @@ void LlmClient::fetchModels(Provider provider)
         break;
     }
 
-    QNetworkRequest request{QUrl(providerBaseUrl(provider) + modelsEndpoint)};
+    // Respect the configured endpoint, not just the provider default, so a
+        // custom Ollama/LocalAI/ACP URL actually takes effect.
+        QNetworkRequest request{QUrl(providerBaseUrl(providerSettings) + modelsEndpoint)};
     request.setRawHeader("Authorization", authHeader.toUtf8());
     request.setHeader(QNetworkRequest::UserAgentHeader, u"Kate AI"_s);
     if (provider == Provider::OpenRouter) {

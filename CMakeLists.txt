@@ -62,12 +62,13 @@ include(KDECompilerSettings NO_POLICY_SCOPE)
 include(FeatureSummary)
 enable_testing()
 
-find_package(Qt6 ${QT_MIN_VERSION} CONFIG REQUIRED COMPONENTS Core Gui Widgets Network)
+find_package(Qt6 ${QT_MIN_VERSION} CONFIG REQUIRED COMPONENTS Core Gui Widgets Network Sql)
 find_package(KF6 ${KF6_DEP_VERSION} REQUIRED COMPONENTS
     CoreAddons
     I18n
     Config
     ConfigWidgets
+    SyntaxHighlighting
     TextEditor
     XmlGui
     WidgetsAddons

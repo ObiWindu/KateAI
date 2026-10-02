@@ -9,6 +9,31 @@ kateai_test(test_permissions)
 kateai_test(test_llmparse)
 kateai_test(test_session)
 kateai_test(test_retry)
+kateai_test(test_agentparity)
+kateai_test(test_checkpoints)
+kateai_test(test_multiagent)
+kateai_test(test_websearch)
+kateai_test(test_contextmanager)
+kateai_test(test_providers)
+
+# Renders through QTextDocument, which needs a QGuiApplication.
+add_executable(test_codehighlight test_codehighlight.cpp)
+target_link_libraries(test_codehighlight PRIVATE kateai_core Qt6::Test)
+add_test(NAME test_codehighlight COMMAND test_codehighlight -platform offscreen)
+
+# Drives a real AgentLoop against a mock LLM, so it needs an event loop.
+add_executable(test_subtaskparallel test_subtaskparallel.cpp)
+target_link_libraries(test_subtaskparallel PRIVATE kateai_core Qt6::Test)
+add_test(NAME test_subtaskparallel
+         COMMAND test_subtaskparallel -platform offscreen
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# Drives a real stdio MCP server, so it needs a QCoreApplication event loop.
+add_executable(test_mcpintegration test_mcpintegration.cpp)
+target_link_libraries(test_mcpintegration PRIVATE kateai_core Qt6::Test)
+add_test(NAME test_mcpintegration
+         COMMAND test_mcpintegration -platform offscreen
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 add_executable(test_tools test_tools.cpp)
 target_link_libraries(test_tools PRIVATE kateai_core Qt6::Test)

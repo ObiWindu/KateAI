@@ -1,4 +1,5 @@
 #include "llmclient.h"
+#include "modes.h"
 #include "types.h"
 
 #include <QHash>
@@ -70,7 +71,7 @@ private Q_SLOTS:
 
     void planModeOnlyAdvertisesReadTools()
     {
-        const QJsonArray tools = toolDefinitions(true);
+        const QJsonArray tools = toolDefinitions(ModeRegistry::toolAccessForGroups({ToolGroup::read()}));
         QCOMPARE(tools.size(), 5);
         for (const QJsonValue &tool : tools) {
             const QString name = tool.toObject().value(u"function"_s).toObject().value(u"name"_s).toString();
@@ -89,6 +90,31 @@ private Q_SLOTS:
         QCOMPARE(chunk.completedTools.size(), 1);
         QCOMPARE(chunk.completedTools.first().argumentsJson, u"not json"_s);
         QVERIFY(chunk.completedTools.first().arguments.isEmpty());
+    }
+
+    void historyCompressionKeepsTheSystemPrompt()
+    {
+        QList<ChatMessage> messages;
+        ChatMessage system;
+        system.role = ChatMessage::Role::System;
+        system.content = u"system prompt"_s;
+        messages.append(system);
+        for (int i = 0; i < 5; ++i) {
+            ChatMessage user;
+            user.role = ChatMessage::Role::User;
+            user.content = u"message %1"_s.arg(i);
+            messages.append(user);
+        }
+
+        // A window this small still has to leave a usable conversation.
+        const QList<ChatMessage> trimmed = compressMessageHistory(messages, 3, 1000000, true);
+        QVERIFY(!trimmed.isEmpty());
+        QCOMPARE(trimmed.first().role, ChatMessage::Role::System);
+        QVERIFY(trimmed.size() <= 3);
+
+        // 0 means "no trimming" and must never collapse the history.
+        const QList<ChatMessage> untouched = compressMessageHistory(messages, 0, 1000000, true);
+        QCOMPARE(untouched.size(), messages.size());
     }
 };
 

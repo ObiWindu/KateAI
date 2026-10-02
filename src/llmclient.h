@@ -8,6 +8,7 @@
 #include "types.h"
 
 #include <QHash>
+#include <QJsonArray>
 #include <QList>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
@@ -58,6 +59,20 @@ public:
     {
         m_settings = std::move(settings);
     }
+
+    // Restricts which built-in tools are advertised. An unrestricted access
+    // advertises every tool; the AgentLoop narrows it per mode and plan mode.
+    void setToolAccess(const ToolAccess &access)
+    {
+        m_toolAccess = access;
+    }
+    // Tool definitions contributed at runtime, currently MCP server tools.
+    void setExtraToolDefinitions(const QJsonArray &tools)
+    {
+        m_extraTools = tools;
+    }
+    // Built-in tools filtered by the active access, plus the runtime tools.
+    QJsonArray advertisedTools() const;
 
     bool isBusy() const
     {
@@ -123,6 +138,8 @@ private:
     void abortModelFetches();
 
     Settings m_settings;
+    ToolAccess m_toolAccess = ToolAccess::unrestricted();
+    QJsonArray m_extraTools;
     QNetworkAccessManager m_nam;
     QNetworkReply *m_reply = nullptr;
     QList<QPointer<QNetworkReply>> m_modelReplies;

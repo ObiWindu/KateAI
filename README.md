@@ -53,7 +53,124 @@ Typical uses: explain a selection, fix a bug in the current file, refactor with 
 - Token estimate on the composer
 - Stop the current turn at any time
 - Scroll-to-bottom control when you leave the live stream
-- Toolbar: provider, model (searchable menu), permission mode, sandbox, Agent/Plan, thinking, reasoning effort, new chat, history, settings
+- Toolbar: provider, model (searchable menu), mode, permission mode, sandbox, MCP servers, checkpoints, thinking, reasoning effort, new chat, history, settings
+
+### Modes
+
+The agent works in one mode at a time, picked from the toolbar or the settings menu. Each mode has its own persona and its own set of tool groups, so a mode cannot quietly do something it was not given.
+
+| Mode | Tool groups | What it is for |
+| --- | --- | --- |
+| **Code** | read, edit, command, mcp, web, orchestrate | The default: inspect, edit, and run commands. May delegate a self-contained piece of work to a sub-agent. |
+| **Ask** | read, mcp, web | Answer questions about the code. Cannot change anything. |
+| **Architect** | read, mcp, web | Design a solution and return a plan. Cannot change anything. |
+| **Debug** | read, edit, command, mcp, web, orchestrate | Reproduce, form a hypothesis, then make the smallest fix. May delegate a self-contained piece of work. |
+| **Orchestrator** | read, mcp, web, orchestrate | Split the work up and delegate every edit to a sub-agent. |
+
+`orchestrate` is the group that carries `new_task`. Code and Debug get it so the agent can hand off when it judges it worthwhile; Ask and Architect do not, because they promise they cannot change anything and spawning a `coder` would break that promise. The tool schema itself is only sent to the model when the active mode actually grants it.
+
+**Plan mode** stays orthogonal to the mode above it: it hard-restricts the model to read-only tools no matter which mode is active.
+
+#### Custom modes
+
+Drop a Markdown file in `<workspace>/.kateai/modes/`. The frontmatter sets the identity and the tool groups; the body is appended to the system prompt. `.kilocodemodes/` and `.roomodes/` are read too, so existing Kilo Code / Roo Code setups work unchanged.
+
+```markdown
+---
+id: security-reviewer
+name: Security Reviewer
+description: Reviews changes for security defects
+groups: [read, mcp]        # read | edit | command | mcp | orchestrate
+roleDefinition: |
+  You review code. You never edit it and never soften a finding.
+customInstructions: |
+  Cite the CWE for every issue and give a concrete fix.
+---
+Anything after the frontmatter counts as extra instructions.
+```
+
+Unknown tool groups are dropped rather than silently widening access, and a custom mode cannot shadow a built-in one.
+
+### MCP servers
+
+Kate AI speaks the [Model Context Protocol](https://modelcontextprotocol.io), so the agent can use any MCP server over **stdio** (a local process) or **Streamable HTTP**. Discovered tools appear as `mcp__<server>__<tool>` and respect the active mode's `mcp` group.
+
+Servers are read from `<workspace>/.kateai/mcp.json` in the standard shape, and are edited under **Settings → Kate AI → MCP Servers**:
+
+```json
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/srv/project"],
+      "alwaysAllow": ["read_file", "list_*"]
+    },
+    "docs": {
+      "type": "http",
+      "url": "https://example.com/mcp",
+      "headers": { "Authorization": "Bearer …" },
+      "alwaysAllow": ["*"]
+    }
+  }
+}
+```
+
+- `alwaysAllow` auto-approves a server's tools; `*` and `prefix*` patterns are supported
+- Servers that annotate a tool with `readOnlyHint` are treated as read-only and never prompt
+- An MCP tool without an auto-approval always prompts, in **every** permission mode — including *Accept edits*, because an MCP tool can do anything its server offers
+- Servers can be toggled per-entry from the toolbar menu; the status dot turns green when a server is ready
+- A server that fails to start is reported and skipped; it never blocks a turn
+
+### Checkpoints
+
+Every turn snapshots the workspace into a private git repository in the cache directory **before** the agent changes anything, so any run can be reviewed or rolled back. Your own `.git` history is never touched.
+
+- Toolbar → checkpoint button: create one manually, or pick any snapshot to diff or restore
+- A restore overwrites files that changed after the snapshot and deletes files that were added afterwards; `.git` and the generated project graph are left alone
+- Retention is configurable (default 20 snapshots) and old snapshots are garbage-collected
+- Needs `git` on `PATH`; without it every checkpoint call becomes a no-op instead of an error
+
+### Sub-agents and the agent team
+
+`new_task` spawns a child agent with its own conversation and returns its answer to the parent turn. This is what makes **Orchestrator** mode work: it cannot edit files itself and must delegate.
+
+**Parallel by default.** Independent subtasks requested in the same model response run at the same time — the turn does not wait for one to finish before starting the next. Concurrency is capped (default 3, *Checkpoints & Subtasks* tab); when the slots are full the model is told so rather than being left to retry.
+
+#### The roster
+
+The orchestrator picks a sub-agent by name, and each name comes with a mode and a description of what it is good at:
+
+| Agent | Mode | Use it for |
+| --- | --- | --- |
+| **scout** | ask | Read-only reconnaissance: "where is X defined", "what calls this" |
+| **architect** | architect | Designing a solution and returning a plan |
+| **coder** | code | Implementing a change end to end |
+| **debugger** | debug | Reproducing a failure and making the smallest fix |
+| **reviewer** | ask | Checking another agent's work before accepting it |
+
+Only **coder** can edit. Define your own under **Settings → Agent Team**, or share them with the project in `<workspace>/.kateai/agents/*.md`:
+
+```markdown
+---
+id: db-migrator
+name: DB Migrator
+description: Writes and reviews database migrations
+mode: code
+---
+Anything after the frontmatter is extra guidance for the agent.
+```
+
+#### What the team shares
+
+- **One MCP connection.** Sub-agents borrow the parent's, instead of dialing every server again.
+- **One edit-lock table.** Two agents editing one file would silently overwrite each other, so the second one is refused with a clear message until the first reports back. Give each agent its own files.
+- **Separate budgets.** A sub-agent gets half the parent's tool-call and model-request budget so a runaway child cannot starve its siblings.
+- **Auditable.** `new_task` takes `include_transcript: true`, which returns the sub-agent's tool log alongside its answer so the orchestrator can check how it got there.
+- **Cancelable.** Each sub-agent can be stopped on its own from the chat card, or all at once from the team menu.
+
+### Chat panel
+
+Sub-agents get a card of their own rather than a generic tool row: agent name and mode, a live `running · 12s · 5 steps` status, a **Cancel** button, the answer when it lands, and an expandable activity log of everything it ran. The toolbar shows how many agents are in flight and opens a menu with the roster and *Cancel all*.
 
 ### Agent loop
 
@@ -93,8 +210,11 @@ You ──► LLM (Grok / OpenAI / OpenRouter / local / ACP)
 | `glob` | Find paths (`**/*.h`, `src/**/*.cpp`, …) |
 | `bash` | Run a command in the workspace under the active sandbox |
 | `query_project_graph` | Query indexed files, symbols, imports, dependents, and paths |
+| `new_task` | Spawn a sub-agent by name or mode and return its answer |
 
-In **Plan mode** the model only receives `read_file`, `list_dir`, `grep`, `glob`, and `query_project_graph`.
+Plus every tool discovered from the connected MCP servers, as `mcp__<server>__<tool>`.
+
+In **Plan mode**, **Ask**, **Architect**, and **Orchestrator** the model only receives the read-only group (`read_file`, `list_dir`, `grep`, `glob`, `query_project_graph`) plus MCP tools. Tool availability is enforced twice — once in the request that advertises the tools, and again when a call arrives — so a model that hallucinates a write gets a clear rejection instead of a silent one.
 
 ### Tool cards and diffs
 
@@ -122,9 +242,21 @@ Kate AI is a first-class KTextEditor plugin, so it sees the same documents you d
 
 - **Thinking mode** captures model reasoning in a collapsible “Reasoning” block (markdown, full reasoning block expandable in chat)
 - Auto-collapse when the visible answer starts; click to expand later
-- **Plan mode** (toolbar): read-only tools only, for inspection and an implementation plan
+- **Plan mode** (toolbar): read-only tools only, for inspection and an implementation plan, on top of whichever mode is active
 - Structured plans render as an interactive checklist; steps can be marked complete as the agent works
 - Reasoning effort (`minimal` / `low` / `medium` / `high`) for models that expose it (e.g. Grok reasoning)
+
+### Project rules
+
+Alongside `KATEAI.md`, the agent picks up rules files the same way Kilo Code does, and folds them into the system prompt in this order:
+
+1. **Global rules** from Settings → Kate AI → Modes & Tools
+2. `<workspace>/.kateai/rules/*.md`
+3. `<workspace>/.clinerules/*.md` and `.kilocoderules/*.md`
+4. `<workspace>/AGENTS.md` and `CLAUDE.md`
+5. The mode's own rule file last, so `<workspace>/.kateai/rules/<modeId>.md` wins
+
+Each rule file is wrapped in a `<rules source="…">` block. Nothing outside those directories is ever read as instructions — `mcp.json` and other configuration are excluded.
 
 ### Permissions and sandbox
 
@@ -132,9 +264,13 @@ Nothing destructive runs silently.
 
 | Permission mode | What runs without asking |
 | --- | --- |
-| **Ask** (default) | Read-only tools and read-only shell (`ls`, `git status`, …) |
+| **Ask** (default) | Read-only tools, read-only shell (`ls`, `git status`, …), and `new_task` |
 | **Accept edits** | File writes too; shell still prompts; pending edits can be accepted or rejected as a batch |
 | **Always approve** | Tools run without a prompt |
+
+Delegation itself never prompts: spawning a sub-agent is consent to spend, not a mutation. Every tool the sub-agent actually runs is still judged by this policy, so allowing the spawn does not let it edit unattended.
+
+On top of the mode, individual tools can be auto-approved so they never prompt — from **Settings → Modes & Tools** for the built-in tools, and from the settings menu for MCP tools (which is the same thing as a server's `alwaysAllow`). Auto-approval sits below *Always approve* and above everything else, but it still never overrides the hard-deny list.
 
 Hard-denied commands (`rm -rf /`, `mkfs`, `dd` to devices, curl-piped-to-shell) are blocked in every mode.
 
@@ -188,6 +324,23 @@ On workspace load the plugin indexes files, symbols, imports, and relationships.
 - **AI Providers** — keys, default models, custom endpoints, ACP format
 - **Security & Permissions** — permission mode, sandbox, command timeout, extra deny globs, tool-card collapse
 - **Agent & Context** — plan mode, thinking, budgets, `KATEAI.md`, extra instructions, compression, temperature / top-p / max tokens, reasoning effort, self-critique, parallel tools, verbosity, structured thinking/planning, verification, adaptive temperature, context window reserve, saved-conversation cap
+- **Modes & Tools** — default mode, per-tool auto-approval, project rules toggle, global rules
+- **MCP Servers** — server list editor, enable/auto-connect, tool timeout
+- **Checkpoints & Subtasks** — checkpoint toggle and retention, subtask depth, parallel sub-agents, subtask timeout
+- **Agent Team** — the built-in roster and a custom agent editor
+
+### Workspace files
+
+Everything a team shares lives next to the code:
+
+```text
+<workspace>/.kateai/
+├── mcp.json          # MCP server definitions
+├── modes/            # custom mode definitions (*.md)
+├── agents/           # custom sub-agent definitions (*.md)
+├── rules/            # project rules (*.md)
+└── project_graph.json  # generated, excluded from checkpoints
+```
 
 ---
 
@@ -382,6 +535,7 @@ Always configure out-of-source (`-B build`, not `cmake .`). Do not copy a `build
 | --- | --- |
 | Plugin missing after **user** install | Start Kate from a shell with `export QT_PLUGIN_PATH="$HOME/.local/lib/qt6/plugins${QT_PLUGIN_PATH:+:$QT_PLUGIN_PATH}"`. For the app menu, log out/in once. Check `ls -l ~/.local/lib/qt6/plugins/kf6/ktexteditor/kateai.so` is `-rwx------`. On macOS, confirm the LaunchAgent and/or a copy inside Kate.app. On Windows, confirm `kateai.dll` next to Kate or `%LOCALAPPDATA%\KateAI\plugins`. |
 | Plugin missing after **system** install | Fully quit Kate. Confirm `ls -l $(qtpaths --plugin-dir)/kf6/ktexteditor/kateai.so` is `-rwxr-xr-x`. If it is `--x`, run `sudo chmod 755` on that file. |
+| Kate aborts at startup with `SIGABRT` and a `QGuiApplicationPrivate::createEventDispatcher` backtrace | **Not a plugin problem** — the abort happens inside the `QApplication` constructor in `main()`, before Kate loads any plugin. Qt could not initialize a QPA platform plugin, i.e. Kate cannot reach the display. Check `journalctl --user \| grep -i "platform plugin"`; `Failed to create wl_display (Permission denied)` plus `could not connect to display :N` means the running uid cannot access the session (e.g. a different user than the one who owns the graphical session, or `XAUTHORITY` is unset/unreadable). Grant X11 access (`xhost +SI:localuser:<user>` from inside the session) and force `QT_QPA_PLATFORM=xcb`, or launch Kate as the session owner. |
 | `cmake` complains about a foreign `/home/…` path or `CMakeCache.txt` | Leftover `build/` from another user or machine. `rm -rf build` and run `./install.sh` again. |
 | `cmake` *Operation not permitted* on `prefix.sh` | Stale files in `build/` from another user. `rm -rf build` and configure again. |
 | Sandboxed `bash` fails | On Linux install `bubblewrap` (`bwrap`). On macOS `sandbox-exec` is part of the OS. File tools still work without OS isolation. |

@@ -55,6 +55,10 @@ public:
     bool isReadOnlyCommand(const QString &command) const;
     bool isDangerousCommand(const QString &command) const;
     bool isAlwaysDeniedCommand(const QString &command) const;
+    // True when a shell command names a path the deny rules cover, e.g.
+    // "cat ~/.ssh/id_rsa". Deny globs apply to file tools already; the shell
+    // needs the same guard or a read-only command sidesteps them entirely.
+    bool commandTouchesDeniedPath(const QString &command) const;
 
     QStringList wrapCommand(const QString &command, QString *error) const;
     bool bubblewrapAvailable() const;

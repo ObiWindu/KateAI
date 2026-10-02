@@ -33,7 +33,9 @@ namespace KateAi
 class PermissionBar;
 class PromptEdit;
 class ToolCallWidget;
+class SubtaskWidget;
 class EditTracker;
+class TurnStatus;
 
 class ChatWidget : public QWidget
 {
@@ -70,6 +72,17 @@ public:
     PromptEdit *promptEdit() const { return m_prompt; }
     void setCompletionWords(const QStringList &words);
 
+    // Modes / MCP / checkpoints, exposed so the view can drive them too.
+    void showModeMenu();
+    void showMcpMenu();
+    void showTeamMenu();
+    void updateTeamButton();
+    void markRunningSubtasksAbandoned();
+    void showCheckpointMenu();
+    void showCheckpointMenuFor(const CheckpointInfo &info);
+    void setMcpToolAutoApproved(const McpTool &tool, bool enabled);
+    void applyMode(const QString &modeId);
+
 Q_SIGNALS:
     void settingsChanged(const Settings &settings);
     void configureRequested();
@@ -104,6 +117,12 @@ private:
     void appendTranscriptWidget(QWidget *widget);
     void showSettingsMenu();
     void showModelMenu();
+    void refreshModeButton();
+    void showPermissionMenu();
+    void refreshPermissionButton();
+    void populateModes();
+    void updateMcpButton();
+    void applyAutoApproveTool(const QString &toolName, bool enabled);
     void rebuildModelMenuProviderSubmenus();
     void applyModelMenuFilter();
     void selectModel(Provider provider, const QString &model);
@@ -111,6 +130,8 @@ private:
     void showInfoMessage(const QString &message, bool isError);
 
     void submit();
+        // True while a tool card is showing its inline approval row.
+        bool m_approvalPending() const;
     void applyProviderToCombos();
     void refreshProviders();
     void refreshModels();
@@ -153,6 +174,11 @@ private:
     QPushButton *m_stop = nullptr;
     QPushButton *m_thinking = nullptr;
     QPushButton *m_reasoningEffort = nullptr;
+    QPushButton *m_modeButton = nullptr;
+    QPushButton *m_permissionButton = nullptr;
+    QPushButton *m_mcpButton = nullptr;
+    QPushButton *m_checkpointButton = nullptr;
+        QPushButton *m_teamButton = nullptr;
 
     QScrollArea *m_scrollArea = nullptr;
     QWidget *m_transcriptContainer = nullptr;
@@ -162,7 +188,9 @@ private:
 
     PermissionBar *m_permissionBar = nullptr;
     PromptEdit *m_prompt = nullptr;
-    QLabel *m_status = nullptr;
+    TurnStatus *m_turnStatus = nullptr;
+    // Tool calls completed in the current turn, shown live in the status strip.
+    int m_completedToolCount = 0;
     QLabel *m_infoBar = nullptr;
     QLabel *m_threadTitle = nullptr;
     QLabel *m_tokenCount = nullptr;
@@ -200,6 +228,9 @@ private:
 
     QHash<QString, ToolCallWidget *> m_toolCallWidgets;
     QList<QPointer<ToolCallWidget>> m_toolCallOrder;
+    // One live card per running sub-agent, keyed by task id.
+    QHash<QString, SubtaskWidget *> m_subtaskWidgets;
+    QList<QPointer<SubtaskWidget>> m_subtaskOrder;
     QPointer<QPushButton> m_scrollToBottomBtn;
     QPointer<QPushButton> m_activeAssistantCopyBtn;
     QPointer<QLabel> m_activeAssistantPulse;

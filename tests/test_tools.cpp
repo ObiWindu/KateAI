@@ -247,6 +247,81 @@ private Q_SLOTS:
         QVERIFY(req.describeDiff.contains(u"-Line 3: old"_s));
         QVERIFY(req.describeDiff.contains(u"+Line 3: new"_s));
     }
+
+    void bashLargeOutputIsCaptured()
+    {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+
+        // "Off" keeps the command out of bubblewrap so the test needs no helper.
+        Sandbox sandbox(tempDir.path(), SandboxProfile::Off);
+        DiskDocumentBridge bridge;
+        ToolRunner runner(sandbox, &bridge);
+        runner.setTimeoutMs(20000);
+
+        ToolCall call;
+        call.id = u"bash-large"_s;
+        call.name = u"bash"_s;
+        // 1 MiB of output is far more than a pipe buffer holds. If the runner
+        // does not drain the child while it runs, the command blocks on write
+        // and is reported as a timeout instead of completing.
+        call.arguments = QJsonObject{{u"command"_s, u"head -c 1048576 /dev/zero | tr '\\0' 'x'"_s}};
+
+        ToolResult res = runner.run(call);
+        QVERIFY2(res.ok, qPrintable(res.output));
+        // clip() keeps the first 80000 characters and reports what it dropped,
+        // so the truncation marker proves the whole stream arrived.
+        QVERIFY2(res.output.contains(u"truncated"_s), qPrintable(res.output.left(200)));
+    }
+
+    void bashReportsFailingExitCode()
+    {
+        QTemporaryDir tempDir;
+        Sandbox sandbox(tempDir.path(), SandboxProfile::Off);
+        DiskDocumentBridge bridge;
+        ToolRunner runner(sandbox, &bridge);
+        runner.setTimeoutMs(10000);
+
+        ToolCall call;
+        call.id = u"bash-fail"_s;
+        call.name = u"bash"_s;
+        call.arguments = QJsonObject{{u"command"_s, u"echo boom >&2; exit 3"_s}};
+
+        ToolResult res = runner.run(call);
+        QVERIFY(!res.ok);
+        QVERIFY(res.output.contains(u"boom"_s));
+        QVERIFY(res.output.contains(u"exit code 3"_s));
+    }
+
+#ifdef Q_OS_UNIX
+    void bashTimeoutStopsBackgroundChildren()
+    {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+
+        Sandbox sandbox(tempDir.path(), SandboxProfile::Off);
+        DiskDocumentBridge bridge;
+        ToolRunner runner(sandbox, &bridge);
+        runner.setTimeoutMs(1500);
+
+        ToolCall call;
+        call.id = u"bash-timeout"_s;
+        call.name = u"bash"_s;
+        // The shell backgrounds a writer and then blocks. Killing the shell on
+        // timeout must not leave the writer behind to touch the workspace.
+        call.arguments = QJsonObject{
+            {u"command"_s, u"sh -c 'sleep 2; echo survived > marker.txt' & sleep 30"_s}
+        };
+
+        const ToolResult res = runner.run(call);
+        QVERIFY(!res.ok);
+        QVERIFY(res.output.contains(u"timed out"_s));
+
+        const QString marker = tempDir.path() + u"/marker.txt"_s;
+        QTest::qWait(3500);
+        QVERIFY2(!QFile::exists(marker), "a background child survived the timeout and kept writing");
+    }
+#endif
 };
 
 QTEST_MAIN(TestTools)

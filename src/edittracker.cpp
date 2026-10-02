@@ -380,7 +380,12 @@ void EditTracker::rebuildEditList()
     QLayoutItem *item;
     while ((item = m_editListLayout->takeAt(0)) != nullptr) {
         if (item->widget()) {
-            item->widget()->deleteLater();
+            // deleteLater() leaves the row alive, parented to the scroll
+            // content but no longer in the layout, so it kept painting over
+            // the top of the list until the event loop ran. A turn that lands
+            // several edits at once rebuilt the list several times before any
+            // of those deletions fired, stacking ghosts over the real rows.
+            delete item->widget();
         }
         delete item;
     }
@@ -467,10 +472,20 @@ void EditTracker::rebuildEditList()
 
     m_editListLayout->addStretch();
 
-    const int rowCount = static_cast<int>(paths.size());
-    const int visibleRows = qMin(rowCount, 6);
-    const int listHeight = visibleRows > 0 ? (visibleRows * 40 + 4) : 0;
-    m_scrollArea->setFixedHeight(listHeight);
+    // Size the viewport from the rows that actually got built. The old constant
+    // of 40px a row was two short of the real pitch, which clipped the sixth
+    // row and raised a scrollbar on a list meant to fit.
+    const int visibleRows = qMin(static_cast<int>(paths.size()), 6);
+    int contentHeight = 0;
+    for (int i = 0; i < visibleRows; ++i) {
+        if (auto *item = m_editListLayout->itemAt(i)) {
+            if (QWidget *row = item->widget()) {
+                contentHeight += row->sizeHint().height();
+            }
+        }
+    }
+    contentHeight += qMax(0, visibleRows - 1) * m_editListLayout->spacing();
+    m_scrollArea->setFixedHeight(contentHeight > 0 ? contentHeight + 2 : 0);
 }
 
 void EditTracker::openReview(const QString &path)

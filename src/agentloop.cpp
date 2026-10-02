@@ -4,9 +4,14 @@
  */
 
 #include "agentloop.h"
+#include "contextmanager.h"
 #include "graph/projectgraph.h"
+#include "rules.h"
+
+#include <KLocalizedString>
 #include "sessionstore.h"
 #include "types.h"
+#include "websearch.h"
 
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -16,7 +21,10 @@
 #include <QDir>
 #include <QDebug>
 #include <QDateTime>
+#include <QElapsedTimer>
 #include <QProcess>
+#include <QTimer>
+#include <QUuid>
 #include <utility>
 #include <algorithm>
 #include <QMap>
@@ -33,6 +41,9 @@ AgentLoop::AgentLoop(QObject *parent)
 {
     // Initialize the project graph for understanding and tracking the project
     m_projectGraph = std::make_unique<ProjectGraph>();
+
+    m_mcp = new McpManager(this);
+        m_locks = new WorkspaceLocks(this);
 
     m_nextModelTimer.setSingleShot(true);
     connect(&m_nextModelTimer, &QTimer::timeout, this, &AgentLoop::sendToModel);
@@ -64,6 +75,47 @@ AgentLoop::AgentLoop(QObject *parent)
         Q_UNUSED(delaySeconds);
         // Could add additional UI feedback here if needed
     });
+
+    // --- Modes ----------------------------------------------------------------
+    connect(&m_modes, &ModeRegistry::modesChanged, this, [this] {
+        syncToolAccess();
+        Q_EMIT modesChanged();
+    });
+
+    // --- MCP ------------------------------------------------------------------
+    connect(m_mcp, &McpManager::toolsChanged, this, [this] {
+        // Newly discovered MCP tools change what may be auto-approved.
+        syncPermissionPolicy();
+        syncToolAccess();
+        Q_EMIT mcpToolsChanged();
+        Q_EMIT mcpStatusChanged(m_mcp->statusSummary());
+    });
+    connect(m_mcp, &McpManager::serversChanged, this, [this] {
+        syncToolAccess();
+        Q_EMIT mcpStatusChanged(m_mcp->statusSummary());
+    });
+    connect(m_mcp, &McpManager::serverStatusChanged, this, [this] {
+        Q_EMIT mcpStatusChanged(m_mcp->statusSummary());
+    });
+    connect(m_mcp, &McpManager::logMessage, this, &AgentLoop::mcpLogMessage);
+
+    // --- Checkpoints -----------------------------------------------------------
+    connect(&m_checkpoints, &CheckpointManager::checkpointCreated, this, [this](const QString &id, const QString &label) {
+        Q_EMIT checkpointCreated(id, label);
+    });
+    connect(&m_checkpoints, &CheckpointManager::failed, this, [this](const QString &error) {
+        Q_EMIT checkpointFailed(error);
+    });
+}
+
+AgentLoop::~AgentLoop()
+{
+    // A running sub-agent owns its own network client and is not parented to
+    // this object, so it has to be stopped explicitly or it outlives us.
+    cancelSubtask();
+    if (m_locks) {
+        m_locks->releaseAll(m_selfId);
+    }
 }
 
 void AgentLoop::setSettings(const Settings &settings)
@@ -71,10 +123,47 @@ void AgentLoop::setSettings(const Settings &settings)
     const bool sandboxChanged = m_settings.sandbox != settings.sandbox
         || m_settings.extraDenyGlobs != settings.extraDenyGlobs;
     const bool timeoutChanged = m_settings.bashTimeoutMs != settings.bashTimeoutMs;
+    const bool checkpointsChanged = m_settings.checkpointsEnabled != settings.checkpointsEnabled
+        || m_settings.checkpointRetention != settings.checkpointRetention;
 
     m_settings = settings;
     m_client.setSettings(settings);
-    m_policy.setMode(settings.permissionMode);
+    // Keep the shared web client in step with the settings.
+    m_web.setProvider(WebSearch::providerFromId(settings.webSearchProvider));
+    m_web.setApiKey(settings.webSearchApiKey);
+    m_web.setEndpoint(settings.webSearchEndpoint);
+    m_web.setMaxResults(settings.webSearchMaxResults);
+    m_web.setTimeoutMs(settings.webSearchTimeoutMs);
+    syncPermissionPolicy();
+    // The user roster is stored as JSON so it can be edited in the config page.
+    QList<AgentProfile> customAgents;
+    const QString roster = settings.agentRoster.trimmed();
+    if (!roster.isEmpty()) {
+        const QJsonDocument document = QJsonDocument::fromJson(roster.toUtf8());
+        if (document.isArray()) {
+            const QJsonArray array = document.array();
+            for (const QJsonValue &value : array) {
+                const AgentProfile profile = AgentProfile::fromJson(value.toObject());
+                if (profile.isValid()) {
+                    customAgents.append(profile);
+                }
+            }
+        }
+    }
+    m_team.setCustomAgents(customAgents);
+
+    m_checkpoints.setEnabled(settings.checkpointsEnabled);
+    if (checkpointsChanged) {
+        m_checkpoints.setRetention(settings.checkpointRetention);
+    }
+
+    if (m_mcp) {
+        m_mcp->setEnabled(settings.mcpEnabled);
+        m_mcp->setAutoConnect(settings.mcpAutoConnect);
+        m_mcp->setTimeoutMs(settings.mcpTimeoutMs);
+    }
+
+    syncToolAccess();
 
     if (m_workspace.isEmpty()) {
         return;
@@ -101,6 +190,19 @@ void AgentLoop::setSettings(const Settings &settings)
 void AgentLoop::setWorkspace(const QString &workspace)
 {
     m_workspace = workspace;
+
+    m_modes.setWorkspace(m_workspace);
+    m_team.setWorkspace(m_workspace);
+    m_checkpoints.setWorkspace(m_workspace);
+    m_checkpoints.setRetention(m_settings.checkpointRetention);
+    if (m_mcp) {
+        m_mcp->setWorkspace(m_workspace);
+        m_mcp->setEnabled(m_settings.mcpEnabled);
+        m_mcp->setAutoConnect(m_settings.mcpAutoConnect);
+        m_mcp->setTimeoutMs(m_settings.mcpTimeoutMs);
+    }
+    syncPermissionPolicy();
+    syncToolAccess();
 
     if (!m_workspace.isEmpty()) {
         m_sandbox = std::make_unique<Sandbox>(m_workspace, m_settings.sandbox, m_settings.extraDenyGlobs);
@@ -143,6 +245,134 @@ void AgentLoop::setEditorContext(const QString &context)
     m_editorContext = context;
 }
 
+ToolAccess AgentLoop::activeToolAccess() const
+{
+    return ModeRegistry::toolAccessFor(activeMode(), m_settings.planMode);
+}
+
+void AgentLoop::setMode(const QString &modeId)
+{
+    if (m_settings.agentMode == modeId) {
+        return;
+    }
+    m_settings.agentMode = modeId;
+    syncToolAccess();
+    Q_EMIT modesChanged();
+}
+
+void AgentLoop::setLocks(WorkspaceLocks *locks)
+{
+    if (m_locks == locks) {
+        return;
+    }
+    if (m_locks) {
+        m_locks->releaseAll(m_selfId);
+    }
+    m_locks = locks;
+}
+
+QStringList AgentLoop::runningSubtaskIds() const
+{
+    return m_activeSubtasks.keys();
+}
+
+void AgentLoop::setMcpManager(McpManager *manager)
+{
+    if (m_ownsMcp && m_mcp) {
+        m_mcp->deleteLater();
+    }
+    m_mcp = manager;
+    m_ownsMcp = false;
+    syncPermissionPolicy();
+    syncToolAccess();
+}
+
+void AgentLoop::syncPermissionPolicy()
+{
+    m_policy.setMode(m_settings.permissionMode);
+
+    QSet<QString> autoApproved(m_settings.autoApproveTools.cbegin(), m_settings.autoApproveTools.cend());
+    QSet<QString> readOnly;
+    if (m_mcp) {
+        const QStringList approved = m_mcp->autoApprovedTools();
+        autoApproved.unite(QSet<QString>(approved.cbegin(), approved.cend()));
+        const QStringList readOnlyTools = m_mcp->readOnlyTools();
+        readOnly = QSet<QString>(readOnlyTools.cbegin(), readOnlyTools.cend());
+    }
+    m_policy.setAutoApproveTools(autoApproved);
+    m_policy.setReadOnlyTools(readOnly);
+}
+
+void AgentLoop::syncToolAccess()
+{
+    m_client.setToolAccess(activeToolAccess());
+    m_client.setExtraToolDefinitions(m_mcp ? m_mcp->toolDefinitions() : QJsonArray());
+}
+
+QList<CheckpointInfo> AgentLoop::checkpoints() const
+{
+    return m_checkpoints.checkpoints();
+}
+
+QString AgentLoop::createCheckpoint(const QString &label)
+{
+    if (m_subtaskDepth > 0) {
+        return {};
+    }
+    QString error;
+    const QString id = m_checkpoints.createCheckpoint(label, &error);
+    if (id.isEmpty() && !error.isEmpty()) {
+        Q_EMIT checkpointFailed(error);
+    }
+    return id;
+}
+
+bool AgentLoop::restoreCheckpoint(const QString &id, QString *error)
+{
+    if (m_busy) {
+        if (error) {
+            *error = u"Stop the current turn before restoring a checkpoint."_s;
+        }
+        return false;
+    }
+    if (!m_checkpoints.restoreCheckpoint(id, error)) {
+        return false;
+    }
+    // The workspace moved under the model, so the plan and the change set are
+    // no longer trustworthy.
+    m_changedPaths.clear();
+    m_changesNeedVerification = false;
+    Q_EMIT checkpointRestored(id);
+    return true;
+}
+
+QString AgentLoop::diffAgainstCheckpoint(const QString &id) const
+{
+    return m_checkpoints.diffAgainstCheckpoint(id);
+}
+
+void AgentLoop::maybeCheckpoint(const QString &label)
+{
+    if (m_subtaskDepth > 0 || m_checkpointTaken) {
+        return;
+    }
+    if (!m_settings.checkpointsEnabled) {
+        return;
+    }
+    if (!m_checkpoints.isAvailable()) {
+        return;
+    }
+    // Name the snapshot after the request so the history reads sensibly.
+    QString fullLabel = label;
+    if (!m_taskSummary.isEmpty()) {
+        fullLabel += QStringLiteral(" during: %1").arg(m_taskSummary.left(80));
+    }
+    const QString id = createCheckpoint(fullLabel);
+    if (!id.isEmpty()) {
+        m_checkpointTaken = true;
+    }
+}
+
 void AgentLoop::updateProjectGraph(const QString &filePath, const QString &content)
 {
     // Update the project graph with changes to a file
@@ -175,7 +405,40 @@ QList<GraphEdge*> AgentLoop::getProjectEdges() const
 
 QString AgentLoop::systemPrompt() const
 {
+    const ModeDefinition mode = m_modes.modeOrDefault(m_settings.agentMode);
     QString prompt = defaultSystemPrompt(m_workspace);
+
+    // The active mode replaces the persona; the generic coding protocol below
+    // still applies on top of it.
+    prompt += u"\n\nACTIVE MODE: "_s + mode.name.toUpper() + u" ("_s + mode.id + u")\n"_s;
+    if (!mode.roleDefinition.trimmed().isEmpty()) {
+        prompt += mode.roleDefinition.trimmed() + u"\n"_s;
+    }
+    for (const QString &instruction : mode.customInstructions) {
+        if (!instruction.trimmed().isEmpty()) {
+            prompt += instruction.trimmed() + u"\n"_s;
+        }
+    }
+    if (mode.readOnly && !m_settings.planMode) {
+        prompt += u"This mode is read-only: you cannot modify files or run commands, and you must not claim to have done so.\n"_s;
+    }
+    prompt += u"Your available tools: "_s + accessList() + u"\n"_s;
+
+        // In a mode that can spawn sub-agents, tell the orchestrator who it can
+        // hire and what the concurrency limit actually is.
+        if (activeToolAccess().allows(subtaskToolName())) {
+            prompt += u"\nSUB-AGENTS:\n"_s;
+            prompt += u"You can delegate with new_task. Available agents:\n"_s + m_team.describeRoster() + u"\n"_s;
+            prompt += u"At most %1 sub-agents may run at once, so ask for independent subtasks in the SAME response and they "
+                      u"will run in parallel. Do not start a dependent task before its input is ready.\n"_s
+                          .arg(qMax(1, m_settings.maxParallelSubtasks));
+            prompt += u"A sub-agent cannot see this conversation: restate everything it needs. Read its returned answer "
+                      u"before you rely on it, and pass include_transcript when you need to verify how it worked.\n"_s;
+            prompt += u"Delegate only when it genuinely helps: a self-contained piece of work, or something needing a "
+                      u"specialist role. Small edits and work tightly coupled to what you already know are faster and more "
+                      u"reliable done by you. You remain responsible for whatever a sub-agent returns.\n"_s;
+            prompt += u"Two agents editing the same file at once is refused. Give each agent its own files.\n"_s;
+        }
     prompt += u"\n\nAgent execution protocol:\n"_s
               u"1. Understand the requested outcome and inspect the relevant project before editing.\n"_s
               u"2. Work incrementally: make the smallest coherent change, then observe the result before choosing another action.\n"_s
@@ -253,6 +516,7 @@ QString AgentLoop::systemPrompt() const
     }
     prompt += u"\nSandbox profile: "_s + sandboxProfileId(m_settings.sandbox);
     prompt += u"\nPermission mode: "_s + permissionModeId(m_settings.permissionMode);
+    prompt += u"\nAgent mode: "_s + mode.id;
 
     if (!m_workspace.isEmpty()) {
         QDir dir(m_workspace);
@@ -308,6 +572,16 @@ QString AgentLoop::systemPrompt() const
                 prompt += u"\n\n<project_instructions path=\"KATEAI.md\">\n"_s
                     + QString::fromUtf8(contents) + u"\n</project_instructions>"_s;
             }
+        }
+    }
+
+    // Layered rules: user-wide rules, then .kateai/rules (and the Kilo/Cline
+    // equivalents), then AGENTS.md.
+    if (m_settings.loadAgentRules) {
+        const QList<RulesLoader::Block> ruleBlocks = RulesLoader::load(m_workspace, mode.id);
+        const QString rendered = RulesLoader::render(ruleBlocks, m_settings.globalRules);
+        if (!rendered.trimmed().isEmpty()) {
+            prompt += u"\n\nProject rules to follow:\n"_s + rendered;
         }
     }
     
@@ -395,6 +669,7 @@ QString AgentLoop::systemPrompt() const
 void AgentLoop::resetConversation()
 {
     abort();
+    cancelSubtask();
     m_messages.clear();
     m_policy.revokeSession();
     m_modelRequests = 0;
@@ -417,16 +692,23 @@ void AgentLoop::resetConversation()
 void AgentLoop::abort()
 {
     const bool hadActiveTurn = m_busy || m_client.isBusy() || !m_queue.isEmpty() || !m_pendingResults.isEmpty()
-        || !m_waitingCall.name.isEmpty() || m_nextModelTimer.isActive();
+        || !m_waitingCall.name.isEmpty() || m_nextModelTimer.isActive() || !m_activeSubtasks.isEmpty();
 
     m_nextModelTimer.stop();
     m_client.abort();
+    m_web.abort();
+    cancelSubtask();
+    m_inFlight = 0;
     m_queue.clear();
     m_pendingResults.clear();
     m_waitingCall = {};
     m_waitingRequest = {};
     m_busy = false;
     m_state = State::Idle;
+    if (m_locks) {
+        m_locks->releaseAll(m_selfId);
+    }
+    m_owedPaths.clear();
 
     if (hadActiveTurn) {
         Q_EMIT statusChanged(u"Stopped"_s);
@@ -461,6 +743,8 @@ void AgentLoop::start(const QString &userText)
     m_actionRepeatCounts.clear();
     m_actionsThisModelTurn.clear();
     m_recoveryPromptCount = 0;
+    m_checkpointTaken = false;
+    m_taskSummary = userText.simplified().left(80);
 
     if (m_messages.isEmpty()) {
         ChatMessage system;
@@ -479,6 +763,35 @@ void AgentLoop::start(const QString &userText)
     Q_EMIT activityUpdated(u"I’ll inspect the relevant parts of the project and work through the task step by step."_s);
 
     scheduleNextModelStep();
+}
+
+QList<ChatMessage> AgentLoop::m_messagesForRequest() const
+{
+    // The conversation is budgeted here rather than sent whole. Previously the
+    // entire history went out on every request, so a long session grew until
+    // the provider rejected it or silently dropped the beginning.
+    ContextManager::Options options;
+    options.contextWindow = m_settings.contextWindow > 0
+        ? m_settings.contextWindow
+        : ContextManager::contextWindowFor(modelFor(m_settings));
+    options.reserveForResponse = qMax(512, m_settings.contextWindowReserve);
+
+    if (!m_settings.compressOldMessages) {
+        // The user explicitly turned compaction off; only the hard message cap
+        // still applies, because an unbounded history cannot be honoured.
+        options.maxMessages = m_settings.maxContextMessages;
+        return ContextManager::build(m_messages, options);
+    }
+
+    if (m_settings.smartContextTruncation) {
+        // Keep the recent tail verbatim and compact everything older.
+        options.keepRecentTokens = qMax(1000, options.reserveForResponse);
+    } else {
+        // The threshold is a character budget for the tail; convert it.
+        options.keepRecentTokens = qMax(500, m_settings.compressionThreshold / 4);
+    }
+    options.maxMessages = m_settings.maxContextMessages;
+    return ContextManager::build(m_messages, options);
 }
 
 bool AgentLoop::canStartModelRequest(QString *error) const
@@ -510,33 +823,54 @@ void AgentLoop::scheduleNextModelStep()
         return;
     }
 
+    // Exhausting the request budget is not a failure. Ending the turn as an
+    // error threw away the work already done and left the user with a red
+    // banner instead of the answer they had already paid for.
+    if (m_modelRequests >= qMax(1, m_settings.maxModelRequests)) {
+        Q_EMIT statusChanged(i18n("Finishing: the model-request budget for this turn is spent."));
+        finishTurn();
+        return;
+    }
+
     QString error;
     if (!canStartModelRequest(&error)) {
         finishWithFailure(error);
         return;
     }
 
-    const qint64 now = QDateTime::currentMSecsSinceEpoch();
-    const qint64 windowMs = 60'000;
-    const int rpm = qBound(1, m_settings.requestsPerMinute, 60);
-    while (!m_modelRequestTimes.isEmpty() && now - m_modelRequestTimes.head() >= windowMs) {
-        m_modelRequestTimes.dequeue();
-    }
-
-    qint64 delay = 0;
-    if (m_modelRequestTimes.size() >= rpm) {
-        delay = qMax<qint64>(1, windowMs - (now - m_modelRequestTimes.head()) + 25);
-    }
-
+    const qint64 delay = rateLimitDelayMs(QDateTime::currentMSecsSinceEpoch());
     m_state = State::WaitingForNextModel;
     if (delay == 0) {
         QMetaObject::invokeMethod(this, &AgentLoop::sendToModel, Qt::QueuedConnection);
         return;
     }
 
-    Q_EMIT statusChanged(u"I’m pacing the next step to stay within the provider limit…"_s);
+    Q_EMIT statusChanged(i18n("Pacing the next step to stay within the provider limit…"));
     m_nextModelTimer.stop();
     m_nextModelTimer.start(static_cast<int>(qMin<qint64>(delay, std::numeric_limits<int>::max())));
+}
+
+qint64 AgentLoop::rateLimitDelayMs(qint64 now) const
+{
+    // A fixed one-minute window rather than a true sliding log: the window only
+    // needs to be good enough to keep a burst from tripping the provider.
+    constexpr qint64 kWindowMs = 60'000;
+    const int rpm = qMax(1, m_settings.requestsPerMinute);
+    qint64 oldest = 0;
+    int used = 0;
+    for (const qint64 stamp : m_modelRequestTimes) {
+        if (now - stamp >= kWindowMs) {
+            continue;
+        }
+        if (used == 0) {
+            oldest = stamp;
+        }
+        ++used;
+    }
+    if (used < rpm) {
+        return 0;
+    }
+    return qMax<qint64>(1, kWindowMs - (now - oldest) + 25);
 }
 
 void AgentLoop::sendToModel()
@@ -552,18 +886,14 @@ void AgentLoop::sendToModel()
     }
 
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
-    const qint64 windowMs = 60'000;
-    const int rpm = qBound(1, m_settings.requestsPerMinute, 60);
-    while (!m_modelRequestTimes.isEmpty() && now - m_modelRequestTimes.head() >= windowMs) {
-        m_modelRequestTimes.dequeue();
-    }
-    if (m_modelRequestTimes.size() >= rpm) {
+    if (rateLimitDelayMs(now) > 0) {
+        // Reschedule rather than send; the queued call has not consumed a slot.
         scheduleNextModelStep();
         return;
     }
+    m_modelRequestTimes.enqueue(now);
 
     ++m_modelRequests;
-    m_modelRequestTimes.enqueue(now);
     m_currentAssistant.clear();
     m_currentThinking.clear();
     m_thinkingFinishedEmitted = false;
@@ -577,7 +907,7 @@ void AgentLoop::sendToModel()
         Q_EMIT statusChanged(u"Working on it…"_s);
     }
 
-    m_client.complete(m_messages);
+    m_client.complete(m_messagesForRequest());
 }
 
 QList<ToolCall> AgentLoop::bundleSimilarTools(const QList<ToolCall> &calls)
@@ -978,6 +1308,20 @@ void AgentLoop::processQueue()
     }
 
     if (m_queue.isEmpty()) {
+        // Async tools (MCP calls, sub-agents) are still running; the turn is
+        // only finished once every one of them has reported back.
+        if (m_inFlight > 0) {
+            return;
+        }
+        // A permission request is holding one call out of the queue, so the
+        // batch is not finished yet either.
+        if (!m_waitingCall.name.isEmpty()) {
+            return;
+        }
+        if (m_state != State::ExecutingTools) {
+            // A previous entry already closed this batch out.
+            return;
+        }
         if (!m_pendingResults.isEmpty()) {
             Q_EMIT activityUpdated(summarizeCompletedWork());
         }
@@ -1000,17 +1344,27 @@ void AgentLoop::executeOne(const ToolCall &call)
     if (m_toolCalls >= qMax(1, m_settings.maxToolCalls)) {
         ToolResult result;
         result.ok = false;
-        result.output = u"Tool-call budget exhausted (%1 calls). No further tool execution is permitted in this turn."_s.arg(m_settings.maxToolCalls);
+        result.output = i18n("Tool-call budget exhausted (%1 calls). No further tool execution is permitted in this turn.", m_settings.maxToolCalls);
         appendToolResult(call, result);
         while (!m_queue.isEmpty()) {
             const ToolCall skipped = m_queue.takeFirst();
             ToolResult skippedResult;
             skippedResult.ok = false;
-            skippedResult.output = u"Skipped because the tool-call budget was exhausted."_s;
+            skippedResult.output = i18n("Skipped because the tool-call budget was exhausted.");
             appendToolResult(skipped, skippedResult);
         }
         appendToolResultsToConversation();
-        finishWithFailure(u"Stopped after reaching the tool-call budget (%1)."_s.arg(m_settings.maxToolCalls));
+        // Previously this ended the turn as a failure, so a run that had
+        // already made most of the edits was thrown away with an error. Instead
+        // the model gets one more turn to summarise what it has, which is what
+        // the user actually wants at this point. The request budget still bounds
+        // it, so a model that ignores the nudge cannot loop.
+        Q_EMIT statusChanged(i18n("Tool budget reached — summarising."));
+        appendControllerMessage(i18n("The tool-call budget for this turn is now spent, so no further tools will run. "
+                                     "Summarise what you completed, what you did not, and what the user should do next. "
+                                     "Do not request any more tools."));
+        m_state = State::WaitingForNextModel;
+        processQueue();
         return;
     }
 
@@ -1023,10 +1377,22 @@ void AgentLoop::executeOne(const ToolCall &call)
         return;
     }
 
-    if (m_settings.planMode && !m_policy.isReadTool(call.name)) {
+    // The mode (and plan mode) decide which tools exist at all. Rejecting here
+    // is the runtime half of the same rule the request advertises.
+    const ToolAccess access = activeToolAccess();
+    if (!access.allows(call.name)) {
         ToolResult result;
         result.ok = false;
-        result.output = u"Tool rejected: plan mode only permits read-only tools. Choose a read-only tool."_s;
+        if (m_settings.planMode && !m_policy.isReadTool(call.name)) {
+            result.output = u"Tool rejected: plan mode only permits read-only tools. Choose a read-only tool."_s;
+        } else if (m_mcp && isMcpToolName(call.name) && !m_mcp->hasTool(call.name)) {
+            result.output = u"Tool rejected: no MCP server named '%1' is currently connected, so '%2' is unavailable."_s
+                                .arg(call.name.mid(mcpToolPrefix().size()).section(u"__"_s, 0, 0), call.name);
+        } else {
+            result.output = u"Tool rejected: the %1 mode does not provide the '%2' tool. Available tools: %3. "_s
+                                u"Use one of those, or switch modes."_s
+                                    .arg(activeMode().name, call.name, accessList());
+        }
         appendToolResult(call, result);
         processQueue();
         return;
@@ -1102,7 +1468,7 @@ void AgentLoop::executeOne(const ToolCall &call)
     m_actionsThisModelTurn.insert(signature);
     m_actionSignatures.insert(signature);
 
-    const PermissionRequest request = m_tools->describe(call);
+    const PermissionRequest request = describeTool(call);
     QString reason;
     const auto verdict = m_policy.evaluate(call.name, call.arguments, *m_sandbox, &reason);
 
@@ -1126,10 +1492,513 @@ void AgentLoop::executeOne(const ToolCall &call)
 
     ++m_toolCalls;
     Q_EMIT toolStarted(request);
+
+    // MCP calls and sub-agents answer later; the queue keeps pumping so
+    // independent calls in the same model turn actually run in parallel.
+    if (isAsyncTool(call.name)) {
+        ++m_inFlight;
+        Q_EMIT statusChanged(u"Working on the next step…"_s);
+        dispatchAsyncTool(call);
+        processQueue();
+        return;
+    }
+
+    if (!m_policy.isReadTool(call.name)) {
+        maybeCheckpoint(u"Before %1"_s.arg(call.name));
+        // Two agents editing one file would silently overwrite each other,
+        // because each reads it once and writes the whole result back.
+        QString deniedBy;
+        if (!acquireEditLock(call, &deniedBy)) {
+            ToolResult result;
+            result.ok = false;
+            result.output = u"Tool rejected: another agent (%1) is already editing this file. Do not retry until that "
+                            u"agent reports back, and do not try to work around it."_s.arg(deniedBy);
+            appendToolResult(call, result);
+            processQueue();
+            return;
+        }
+    }
+
     Q_EMIT statusChanged(u"Working on the next step…"_s);
     ToolResult result = m_tools->run(call);
+    releaseEditLocksFor(call);
     appendToolResult(call, result);
     processQueue();
+}
+
+QString AgentLoop::accessList() const
+{
+    QStringList names;
+    const ToolAccess access = activeToolAccess();
+    for (const QString &name : allBuiltInToolNames()) {
+        if (access.allows(name)) {
+            names.append(name);
+        }
+    }
+    if (m_mcp) {
+        for (const McpTool &tool : m_mcp->tools()) {
+            if (access.allows(tool.qualifiedName())) {
+                names.append(tool.qualifiedName());
+            }
+        }
+    }
+    return names.isEmpty() ? QStringLiteral("none") : names.join(u", "_s);
+}
+
+PermissionRequest AgentLoop::describeTool(const ToolCall &call) const
+{
+    if (m_mcp && isMcpToolName(call.name)) {
+        PermissionRequest request;
+        request.toolName = call.name;
+        request.toolCallId = call.id;
+        request.summary = u"%1 %2"_s
+                              .arg(call.name, QString::fromUtf8(QJsonDocument(call.arguments).toJson(QJsonDocument::Compact)));
+        request.details = QString::fromUtf8(QJsonDocument(call.arguments).toJson(QJsonDocument::Indented));
+        request.risk = m_policy.isReadTool(call.name) ? ToolRisk::Read : ToolRisk::Execute;
+        return request;
+    }
+
+    if (isSubtaskTool(call.name)) {
+        PermissionRequest request;
+        request.toolName = call.name;
+        request.toolCallId = call.id;
+        const QString description = call.arguments.value(u"description"_s).toString();
+        const QString mode = call.arguments.value(u"mode"_s).toString(QStringLiteral("code"));
+        request.summary = u"sub-agent (%1): %2"_s.arg(mode, description.left(200));
+        request.details = QString::fromUtf8(QJsonDocument(call.arguments).toJson(QJsonDocument::Indented));
+        request.risk = ToolRisk::Execute;
+        return request;
+    }
+
+    if (isWebTool(call.name)) {
+        PermissionRequest request;
+        request.toolName = call.name;
+        request.toolCallId = call.id;
+        if (call.name == u"web_search"_s) {
+            request.summary = u"Search the web: %1"_s.arg(call.arguments.value(u"query"_s).toString());
+        } else {
+            request.summary = u"Fetch page: %1"_s.arg(call.arguments.value(u"url"_s).toString());
+        }
+        request.details = QString::fromUtf8(QJsonDocument(call.arguments).toJson(QJsonDocument::Indented));
+        // Reading the public web cannot touch the workspace.
+        request.risk = ToolRisk::Read;
+        return request;
+    }
+
+    return m_tools->describe(call);
+}
+
+bool AgentLoop::isSubtaskTool(const QString &toolName) const
+{
+    return toolName == subtaskToolName();
+}
+
+bool AgentLoop::isWebTool(const QString &toolName) const
+{
+    return toolName == u"web_search"_s || toolName == u"web_fetch"_s;
+}
+
+bool AgentLoop::isAsyncTool(const QString &toolName) const
+{
+    if (isSubtaskTool(toolName)) {
+        return true;
+    }
+    // A search or a page fetch takes seconds. Running it inline would block
+    // the loop and freeze the transcript until the network answers.
+    if (isWebTool(toolName)) {
+        return true;
+    }
+    return m_mcp && m_mcp->isAvailable(toolName);
+}
+
+void AgentLoop::startWebTool(const ToolCall &call)
+{
+    const QString query = call.arguments.value(u"query"_s).toString().trimmed();
+    const QString url = call.arguments.value(u"url"_s).toString().trimmed();
+
+    if (!m_web.isConfigured()) {
+        ToolResult blocked;
+        blocked.toolCallId = call.id;
+        blocked.name = call.name;
+        blocked.ok = false;
+        blocked.output = m_web.configurationError();
+        finishAsyncTool(call, blocked);
+        return;
+    }
+
+    if (call.name == u"web_search"_s) {
+        const int wanted = call.arguments.value(u"max_results"_s).toInt(0);
+        if (wanted > 0) {
+            m_web.setMaxResults(wanted);
+        }
+        connect(&m_web, &WebSearch::searchFinished, this,
+                [this, call, query](const QString &callId, const QList<WebSearchResult> &results, const QString &error) {
+                    // m_web is shared by every loop, and the agent may have
+                    // several searches in flight at once. Without this guard the
+                    // first reply completes every waiting call, which double
+                    // decrements m_inFlight and corrupts the turn accounting.
+                    if (callId != call.id) {
+                        return;
+                    }
+                    ToolResult out;
+                    out.toolCallId = callId;
+                    out.name = call.name;
+                    if (!error.isEmpty()) {
+                        out.ok = false;
+                        out.output = error;
+                        finishAsyncTool(call, out);
+                        return;
+                    }
+                    QStringList lines;
+                    lines << u"Results for \"%1\":\n"_s.arg(query);
+                    for (int i = 0; i < results.size(); ++i) {
+                        lines << results.at(i).toMarkdown(i + 1);
+                    }
+                    lines << QString();
+                    lines << i18n("Fetch a page with web_fetch before relying on a result.");
+                    out.ok = true;
+                    out.output = lines.join(u"\n"_s);
+                    finishAsyncTool(call, out);
+                },
+                Qt::SingleShotConnection);
+        m_web.search(query, call.id);
+        return;
+    }
+
+    connect(&m_web, &WebSearch::fetchFinished, this,
+            [this, call](const QString &callId, const QString &title, const QString &text, const QString &error) {
+                if (callId != call.id) {
+                    return;
+                }
+                ToolResult out;
+                out.toolCallId = callId;
+                out.name = call.name;
+                if (!error.isEmpty()) {
+                    out.ok = false;
+                    out.output = error;
+                    finishAsyncTool(call, out);
+                    return;
+                }
+                out.ok = true;
+                out.output = title.isEmpty() ? text : (u"# "_s + title + u"\n\n"_s + text);
+                finishAsyncTool(call, out);
+            },
+            Qt::SingleShotConnection);
+    m_web.fetchPage(url, call.id);
+}
+
+void AgentLoop::finishAsyncTool(const ToolCall &call, const ToolResult &result)
+{
+    if (m_inFlight > 0) {
+        --m_inFlight;
+    }
+    if (!m_busy) {
+        // The turn was aborted or replaced while the tool was in flight.
+        releaseEditLocksFor(call);
+        return;
+    }
+    // Do not clobber a pending permission request: the user may still be
+    // looking at it while this result lands.
+    if (m_waitingCall.name.isEmpty()) {
+        m_state = State::ExecutingTools;
+    }
+    releaseEditLocksFor(call);
+    appendToolResult(call, result);
+    processQueue();
+}
+
+void AgentLoop::releaseEditLocksFor(const ToolCall &call)
+{
+    if (!m_locks || !isMutationTool(call.name)) {
+        return;
+    }
+    for (const QString &path : std::as_const(m_owedPaths)) {
+        m_locks->release(path, m_selfId);
+    }
+    m_owedPaths.clear();
+}
+
+bool AgentLoop::acquireEditLock(const ToolCall &call, QString *deniedBy)
+{
+    if (!m_locks || !isMutationTool(call.name)) {
+        return true;
+    }
+    QString path = call.arguments.value(u"path"_s).toString();
+    if (path.isEmpty()) {
+        path = call.arguments.value(u"targetFile"_s).toString();
+    }
+    if (path.isEmpty()) {
+        return true;
+    }
+    if (!m_workspace.isEmpty() && QDir::isRelativePath(path)) {
+        path = m_workspace + QLatin1Char('/') + path;
+    }
+    if (!m_locks->tryAcquire(path, m_selfId)) {
+        if (deniedBy) {
+            *deniedBy = m_locks->holder(path);
+        }
+        return false;
+    }
+    m_owedPaths.append(path);
+    return true;
+}
+
+void AgentLoop::dispatchAsyncTool(const ToolCall &call)
+{
+    if (isSubtaskTool(call.name)) {
+        dispatchSubtask(call);
+        return;
+    }
+    if (isWebTool(call.name)) {
+        startWebTool(call);
+        return;
+    }
+    if (!m_mcp) {
+        ToolResult result;
+        result.ok = false;
+        result.output = u"MCP is not available."_s;
+        finishAsyncTool(call, result);
+        return;
+    }
+
+    const QString token = QStringLiteral("mcp-%1").arg(++m_asyncCounter);
+    connect(
+        m_mcp,
+        &McpManager::toolResult,
+        this,
+        [this, call, token](const QString &id, bool ok, const QString &output, const QString &error) {
+            if (id != token) {
+                return;
+            }
+            ToolResult result;
+            result.toolCallId = call.id;
+            result.name = call.name;
+            result.ok = ok;
+            // On failure the manager puts the message in `error`; the agent
+            // reads tool output, so it has to travel in `output`.
+            result.output = ok ? output : error;
+            finishAsyncTool(call, result);
+        },
+        Qt::SingleShotConnection);
+    m_mcp->callTool(token, call.name, call.arguments);
+}
+
+// Renders the sub-agent's tool log so the orchestrator can audit its answer.
+static QString subtaskLog(const QStringList &log, int toolCount)
+{
+    if (log.isEmpty()) {
+        return QString();
+    }
+    return QStringLiteral("\n\n<subtask_log tools=\"%1\">\n%2\n</subtask_log>").arg(toolCount).arg(log.join(u'\n'));
+}
+
+void AgentLoop::dispatchSubtask(const ToolCall &call)
+{
+    const QString description = call.arguments.value(u"description"_s).toString().trimmed();
+    const QString requestedMode = call.arguments.value(u"mode"_s).toString().trimmed();
+    const QString requestedAgent = call.arguments.value(u"agent"_s).toString().trimmed();
+    const bool includeTranscript = call.arguments.value(u"include_transcript"_s).toBool(false);
+
+    if (description.isEmpty()) {
+        ToolResult result;
+        result.ok = false;
+        result.output = u"The subtask needs a description of the work to perform."_s;
+        finishAsyncTool(call, result);
+        return;
+    }
+    if (m_subtaskDepth >= qMax(0, m_settings.maxSubtaskDepth)) {
+        ToolResult result;
+        result.ok = false;
+        result.output = u"Subtask nesting limit reached (%1 levels). Do the remaining work yourself."_s.arg(m_settings.maxSubtaskDepth);
+        finishAsyncTool(call, result);
+        return;
+    }
+
+    const int limit = qMax(1, m_settings.maxParallelSubtasks);
+    if (m_activeSubtasks.size() >= limit) {
+        ToolResult result;
+        result.ok = false;
+        result.output = u"Too many sub-agents are already running (%1 of %2). Wait for one to finish before starting another; "
+                        u"do not retry immediately."_s.arg(m_activeSubtasks.size()).arg(limit);
+        finishAsyncTool(call, result);
+        return;
+    }
+
+    // An agent name wins over a raw mode: the roster entry already knows which
+    // mode it wants, and the orchestrator thinks in names.
+    const QString lookupId = requestedAgent.isEmpty() ? requestedMode : requestedAgent;
+    const AgentProfile profile = m_team.resolve(lookupId);
+    // resolve() falls back to a generic agent for ids it does not know, so hold
+    // on to whether this really was a roster entry: the fallback's placeholder
+    // description must not be handed to the child as if it were a real role.
+    const bool knownAgent = m_team.byId(lookupId).has_value();
+    QString modeId = profile.modeId;
+    if (m_modes.modeById(requestedMode)) {
+        // An explicit mode id overrides the agent's default, which is what the
+        // tool schema promises. It used to be gated on an empty agent argument,
+        // so passing both silently dropped the mode.
+        modeId = requestedMode;
+    }
+
+    auto *child = new AgentLoop();
+    child->setMcpManager(m_mcp);
+    child->setLocks(m_locks);
+    child->setSubtaskDepth(m_subtaskDepth + 1);
+
+    // Use the tool call id so the chat card, the activity log and the tool
+    // result all key off the same string.
+    const QString taskId = call.id.isEmpty() ? QStringLiteral("sub-%1").arg(++m_asyncCounter) : call.id;
+    child->setSelfId(taskId);
+
+    Settings childSettings = m_settings;
+    // A subtask must never narrow itself: plan mode belongs to the parent turn.
+    childSettings.planMode = false;
+    childSettings.agentMode = m_modes.modeById(modeId) ? modeId : m_settings.agentMode;
+    childSettings.checkpointsEnabled = false;
+    childSettings.maxSubtaskDepth = 0;
+    // Sub-agents keep their own model budget so a runaway child cannot starve
+    // the siblings sharing this turn.
+    childSettings.maxToolCalls = qMax(4, m_settings.maxToolCalls / 2);
+    childSettings.maxModelRequests = qMax(4, m_settings.maxModelRequests / 2);
+
+    child->setSettings(childSettings);
+    child->setWorkspace(m_workspace);
+    child->setDocumentBridge(m_bridge);
+    child->setEditorContext(m_editorContext);
+
+    struct SubtaskState {
+        ToolCall call;
+        QString taskId;
+        QString answer;
+        QString error;
+        QStringList log;
+        int toolCount = 0;
+        bool ok = true;
+        bool includeTranscript = false;
+        qint64 startedAt = 0;
+        QElapsedTimer elapsed;
+        QTimer *timer = nullptr;
+    };
+    auto *state = new SubtaskState;
+    state->call = call;
+    state->taskId = taskId;
+    state->includeTranscript = includeTranscript;
+    state->startedAt = QDateTime::currentMSecsSinceEpoch();
+    state->elapsed.start();
+
+    connect(child, &AgentLoop::assistantFinished, child, [state](const QString &text) {
+        state->answer = text;
+    });
+    connect(child, &AgentLoop::failed, child, [state](const QString &error) {
+        state->ok = false;
+        state->error = error;
+    });
+
+    // Stream the child's progress so the transcript card can show it live.
+    connect(child, &AgentLoop::toolStarted, child, [this, state](const PermissionRequest &request) {
+        ++state->toolCount;
+        const QString line = request.summary.isEmpty() ? request.toolName : QStringLiteral("%1 %2").arg(request.toolName, request.summary);
+        state->log.append(QStringLiteral("→ %1").arg(line.left(400)));
+        Q_EMIT subtaskActivity(state->taskId, QStringLiteral("→ %1").arg(line.left(200)), false);
+    });
+    connect(child, &AgentLoop::toolFinished, child, [this, state](const ToolResult &result) {
+        const QString marker = result.ok ? QStringLiteral("✓") : QStringLiteral("✗");
+        const QString detail = result.ok ? QString() : QStringLiteral(" — %1").arg(result.output.left(160));
+        state->log.append(QStringLiteral("  %1 %2%3").arg(marker, result.name, detail));
+        Q_EMIT subtaskActivity(state->taskId, QStringLiteral("  %1 %2").arg(marker, result.name), !result.ok);
+    });
+
+    state->timer = new QTimer(child);
+    state->timer->setSingleShot(true);
+    state->timer->setInterval(qBound(10000, m_settings.subtaskTimeoutMs, 30 * 60 * 1000));
+    connect(state->timer, &QTimer::timeout, this, [this, child, state] {
+        child->abort();
+        state->ok = false;
+        state->error = u"The subtask exceeded its time budget."_s;
+    });
+
+    connect(
+        child,
+        &AgentLoop::turnFinished,
+        this,
+        [this, child, state] {
+            if (state->timer) {
+                state->timer->stop();
+            }
+            m_activeSubtasks.remove(state->taskId);
+            if (m_locks) {
+                m_locks->releaseAll(child->selfId());
+            }
+
+            ToolResult result;
+            result.toolCallId = state->call.id;
+            result.name = state->call.name;
+            result.ok = state->ok && !child->cancelRequested();
+                        result.cancelled = child->cancelRequested();
+            if (child->cancelRequested()) {
+                result.output = u"Subtask cancelled by the user before it finished."_s;
+            } else if (state->ok) {
+                QString answer = state->answer.isEmpty() ? u"The sub-agent finished without producing a visible answer."_s
+                                                         : state->answer;
+                if (state->includeTranscript) {
+                    answer += subtaskLog(state->log, state->toolCount);
+                }
+                result.output = answer;
+            } else {
+                result.output = u"Sub-agent failed: %1"_s.arg(state->error);
+                if (state->includeTranscript) {
+                    result.output += subtaskLog(state->log, state->toolCount);
+                }
+            }
+
+            const ToolCall pendingCall = state->call;
+            const QString finishedId = state->taskId;
+            delete state;
+            child->deleteLater();
+            Q_EMIT subtaskFinished(finishedId, result.ok);
+            finishAsyncTool(pendingCall, result);
+        },
+        Qt::SingleShotConnection);
+
+    m_activeSubtasks.insert(taskId, child);
+    Q_EMIT subtaskStarted(taskId, profile.id, profile.name, childSettings.agentMode, description);
+    state->timer->start();
+    // Without this the child only ever sees its mode's generic persona, so a
+    // Reviewer runs as a plain read-only question and has no idea it was picked
+    // to check somebody else's work.
+    const QString task = (knownAgent && !profile.description.isEmpty())
+        ? u"You are the '%1' agent on the team. Your role: %2\n\nTask:\n%3"_s.arg(profile.name, profile.description, description)
+        : description;
+    child->start(task);
+}
+
+void AgentLoop::cancelSubtask(const QString &taskId)
+{
+    if (taskId.isEmpty()) {
+        const QList<AgentLoop *> children = m_activeSubtasks.values();
+        m_activeSubtasks.clear();
+        for (AgentLoop *child : children) {
+            if (m_locks) {
+                m_locks->releaseAll(child->selfId());
+            }
+            child->requestCancel();
+            child->abort();
+            child->deleteLater();
+        }
+        return;
+    }
+
+    AgentLoop *child = m_activeSubtasks.value(taskId);
+    if (!child) {
+        return;
+    }
+    m_activeSubtasks.remove(taskId);
+    if (m_locks) {
+        m_locks->releaseAll(child->selfId());
+    }
+    child->requestCancel();
+    child->abort();
+    child->deleteLater();
 }
 
 void AgentLoop::resolvePermission(PermissionDecision decision)
@@ -1173,7 +2042,28 @@ void AgentLoop::resolvePermission(PermissionDecision decision)
     ++m_toolCalls;
     Q_EMIT toolStarted(request);
     Q_EMIT statusChanged(u"Working on the next step…"_s);
+    if (isAsyncTool(call.name)) {
+        ++m_inFlight;
+        dispatchAsyncTool(call);
+        m_state = State::ExecutingTools;
+        processQueue();
+        return;
+    }
+    QString deniedBy;
+    if (!acquireEditLock(call, &deniedBy)) {
+        ToolResult blocked;
+        blocked.toolCallId = call.id;
+        blocked.name = call.name;
+        blocked.ok = false;
+        blocked.output = u"Tool rejected: another agent (%1) is already editing this file."_s.arg(deniedBy);
+        m_pendingResults.append(blocked);
+        Q_EMIT toolFinished(blocked);
+        m_state = State::ExecutingTools;
+        processQueue();
+        return;
+    }
     ToolResult result = m_tools->run(call);
+    releaseEditLocksFor(call);
     appendToolResult(call, result);
     m_state = State::ExecutingTools;
     processQueue();
@@ -1232,8 +2122,12 @@ void AgentLoop::restoreSession(const SessionStore::SessionData &data)
 
 void AgentLoop::clearSession()
 {
+    // In-memory reset only. This must NOT touch stored history: ChatWidget's
+    // newChat() calls clearSession() immediately after saving the current
+    // conversation, and SessionStore::clear() deletes the active conversation
+    // from disk. The net effect was that pressing "+" made the thread you had
+    // just been working in vanish from the history list.
     resetConversation();
-    SessionStore::clear();
 }
 
 } // namespace KateAi

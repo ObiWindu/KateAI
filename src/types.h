@@ -7,6 +7,7 @@
 
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QSet>
 #include <QString>
 #include <QStringList>
 
@@ -24,6 +25,9 @@ enum class Provider {
     ClaudeCompatible,
     Kilo,
     Acp,
+    // OpenCode Zen, the gateway at opencode.ai that curates models for coding
+    // agents. OpenAI-compatible, with the catalogue served from /zen/v1/models.
+    OpenCode,
 };
 
 enum class ApiFormat {
@@ -55,6 +59,51 @@ enum class ToolRisk {
     Read,
     Write,
     Execute,
+};
+
+// Which tools the model may call. MCP tools are discovered at runtime, so they
+// are matched by name prefix rather than by exact name.
+struct ToolAccess {
+    QSet<QString> exact;
+    QStringList prefixes;
+    bool allowAll = false;
+
+    // Every tool, current and future.
+    static ToolAccess unrestricted()
+    {
+        ToolAccess access;
+        access.allowAll = true;
+        return access;
+    }
+    bool isEmpty() const
+    {
+        return !allowAll && exact.isEmpty() && prefixes.isEmpty();
+    }
+    void allow(const QString &toolName)
+    {
+        exact.insert(toolName);
+    }
+    void allowPrefix(const QString &prefix)
+    {
+        if (!prefixes.contains(prefix)) {
+            prefixes.append(prefix);
+        }
+    }
+    bool allows(const QString &toolName) const
+    {
+        if (allowAll) {
+            return true;
+        }
+        if (exact.contains(toolName)) {
+            return true;
+        }
+        for (const QString &prefix : prefixes) {
+            if (toolName.startsWith(prefix)) {
+                return true;
+            }
+        }
+        return false;
+    }
 };
 
 struct ChatMessage {
@@ -112,6 +161,8 @@ struct ToolResult {
     QString name;
     QString output;
     bool ok = true;
+    // True when the operation was stopped deliberately rather than failing.
+    bool cancelled = false;
 };
 
 struct Settings {
@@ -124,14 +175,19 @@ struct Settings {
     QString claudeCompatibleApiKey;
     QString kiloApiKey;
     QString acpApiKey;
-    QString grokModel = QStringLiteral("grok-4.5");
-    QString openaiModel = QStringLiteral("gpt-4.1");
-    QString openrouterModel = QStringLiteral("x-ai/grok-4");
-    QString deepseekModel = QStringLiteral("deepseek-flash");
+    QString grokModel;
+    QString openaiModel;
+    QString openrouterModel;
+    QString deepseekModel;
     QString openaiCompatibleModel;
     QString claudeCompatibleModel;
-    QString kiloModel = QStringLiteral("kilo-code");
-    QString acpModel = QStringLiteral("acp-agent");
+    QString kiloModel;
+    QString acpModel;
+    QString opencodeModel;
+    // Model names are no longer hard-coded: they are fetched from whichever
+    // providers have a valid key. These stay empty until then.
+    QString opencodeApiKey;
+    QString opencodeUrl = QStringLiteral("https://opencode.ai/zen/v1");
     QString deepseekUrl = QStringLiteral("https://api.deepseek.com");
     QString openaiCompatibleUrl = QStringLiteral("http://localhost:11434/v1");
     QString claudeCompatibleUrl = QStringLiteral("https://api.anthropic.com/v1");
@@ -150,6 +206,15 @@ struct Settings {
     int maxIterations = 20;
     int bashTimeoutMs = 60000;
     bool planMode = false;
+    // Active agent mode: a built-in id ("code", "ask", "architect", "debug",
+    // "orchestrator") or the slug of a custom mode from .kateai/modes/.
+    QString agentMode = QStringLiteral("code");
+    // Tools that never prompt, regardless of permission mode (Kilo Code's
+    // auto-approve checkboxes). MCP tools can be auto-approved per server too.
+    QStringList autoApproveTools;
+    bool loadAgentRules = true;
+    // User-wide rules applied to every workspace before the project rules.
+    QString globalRules;
     bool loadProjectInstructions = true;
     bool thinkingMode = true;
     QString extraSystemPrompt;
@@ -227,6 +292,43 @@ struct Settings {
     // --- Conversation History ----------------------------------------------
     // Maximum number of conversations to keep in history (0 = unlimited)
     int maxSavedConversations = 50;
+
+    // --- MCP (Model Context Protocol) servers --------------------------------
+    bool mcpEnabled = true;
+    // Connect configured servers automatically when a workspace opens.
+    bool mcpAutoConnect = true;
+    int mcpTimeoutMs = 60000;
+
+    // --- Web search -----------------------------------------------------------
+    // Provider id: "duckduckgo" (no key), "tavily", "brave", "searxng",
+    // or "disabled". DuckDuckGo is the default so the feature works with no
+    // setup at all; the others are better or needed on an isolated network.
+    QString webSearchProvider = QStringLiteral("duckduckgo");
+    // API key for providers that need one (Tavily, Brave). Only ever used to
+    // build a request header or body, never logged.
+    QString webSearchApiKey;
+    // Base URL for SearXNG, e.g. http://localhost:8888.
+    QString webSearchEndpoint;
+    // Results per search, clamped to 1..20.
+    int webSearchMaxResults = 5;
+    int webSearchTimeoutMs = 20000;
+
+    // --- Checkpoints ---------------------------------------------------------
+    // Snapshot the workspace into a shadow git repository before the agent
+    // changes anything, so a turn can be rolled back.
+    bool checkpointsEnabled = true;
+    // How many snapshots to keep in the shadow repository.
+    int checkpointRetention = 20;
+
+    // --- Subtasks ------------------------------------------------------------
+    // How deep new_task may nest before it is refused.
+    int maxSubtaskDepth = 2;
+    // How many sub-agents may run at the same time.
+    int maxParallelSubtasks = 3;
+    // User-defined agents as a JSON array; merged with the built-in roster.
+    QString agentRoster;
+    // Wall-clock budget for a single subtask.
+    int subtaskTimeoutMs = 300000;
 };
 
 QString providerId(Provider provider);
@@ -235,6 +337,9 @@ Provider providerFromId(const QString &id);
 QString providerBaseUrl(Provider provider);
 QString providerBaseUrl(const Settings &settings);
 QStringList defaultModels(Provider provider);
+// True when the provider can be listed: it has a key and speaks an API we can
+// query a model catalogue on. Used to decide which providers to fetch from.
+bool providerSupportsModelListing(Provider provider);
 
 QString permissionModeId(PermissionMode mode);
 QString permissionModeLabel(PermissionMode mode);
@@ -247,7 +352,9 @@ SandboxProfile sandboxProfileFromId(const QString &id);
 QString apiKeyFor(const Settings &settings);
 QString modelFor(const Settings &settings);
 
-QJsonArray toolDefinitions(bool readOnlyOnly = false);
+// Tool definitions advertised to the model. `access` restricts the set; an
+// empty access advertises every built-in tool.
+QJsonArray toolDefinitions(const ToolAccess &access);
 QString defaultSystemPrompt(const QString &workspace);
 QString compressText(const QString &text, int maxLength, bool enabled);
 // Smart context compression - preserves important parts while reducing size

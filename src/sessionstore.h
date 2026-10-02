@@ -52,7 +52,8 @@ public:
     // Save the active conversation
     static void save(const SessionData &data, int maxConversations = 50);
 
-    // Clear the active conversation
+    // Deletes the active conversation from storage, history included.
+    // Callers that only mean "forget the current state" should not use this.
     static void clear();
 
     // Conversation history management
@@ -65,10 +66,6 @@ public:
     static QString getActiveConversationId();
     static void pruneOldConversations(int maxConversations);
     static void clearAllConversations();
-
-private:
-    static QString conversationsGroupName();
-    static QString conversationGroupName(const QString &id);
 };
 
 } // namespace KateAi
