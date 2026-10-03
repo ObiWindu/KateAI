@@ -16,6 +16,7 @@
 #include <QColor>
 #include <QCheckBox>
 #include <QPointer>
+#include <QShortcut>
 
 class QAction;
 class QComboBox;
@@ -113,6 +114,7 @@ private:
     void animateScrollButtonHide();
     QPushButton *createCopyButton(const QString &textToCopy, QWidget *parent);
     QWidget *createWelcomeWidget();
+    QWidget *createIndicatorsRow();
     int transcriptInsertIndex() const;
     void appendTranscriptWidget(QWidget *widget);
     void showSettingsMenu();
@@ -125,6 +127,7 @@ private:
     void applyAutoApproveTool(const QString &toolName, bool enabled);
     void rebuildModelMenuProviderSubmenus();
     void applyModelMenuFilter();
+    void moveModelMenuSelection(int delta);
     void selectModel(Provider provider, const QString &model);
     void updateModelSelectorLabel();
     void showInfoMessage(const QString &message, bool isError);
@@ -204,6 +207,10 @@ private:
     QList<QMenu *> m_modelMenuProviderMenus;
     QList<QAction *> m_modelMenuFlatActions;
     QAction *m_modelMenuNoMatchAction = nullptr;
+    QPointer<QLineEdit> m_modelFilterEdit;
+    // Index into the currently visible candidate actions, -1 for none. Only
+    // meaningful while m_modelMenu is alive.
+    int m_modelMenuSelection = -1;
 
     QWidget *m_toolbar = nullptr;
     QWidget *m_composerContainer = nullptr;
@@ -245,8 +252,9 @@ private:
     QList<ThinkingBlockRef> m_thinkingBlocks;
 
     // Dynamic status indicators at bottom of chat
-    QLabel *m_thinkingIndicator = nullptr;
-    QLabel *m_workingIndicator = nullptr;
+    QPointer<QWidget> m_indicatorsRow;
+    QPointer<QLabel> m_thinkingIndicator;
+    QPointer<QLabel> m_workingIndicator;
     QTimer *m_indicatorTimer = nullptr;
     int m_indicatorTick = 0;
     QString m_workingLabelBase;
@@ -257,8 +265,18 @@ private:
     // Edit tracker for AcceptEdits permission mode
     EditTracker *m_editTracker = nullptr;
 
-    // Track pending write/edit tool calls for edit tracking
-    QHash<QString, PermissionRequest> m_pendingToolCalls;
+    // Snapshot of one in-flight write/edit tool call, taken at toolStarted before
+    // the tool ran. Kept as a struct rather than a PermissionRequest because the
+    // tracker needs facts a request does not carry: whether the file existed at
+    // all, and the tool's own name rather than one borrowed from `details`.
+    struct PendingEdit {
+        QString path;
+        QString toolName;
+        QString diff;
+        QString oldContent;
+        bool existed = false;
+    };
+    QHash<QString, PendingEdit> m_pendingToolCalls;
 
     // Conversation history
     QPushButton *m_historyButton = nullptr;

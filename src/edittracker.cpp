@@ -5,26 +5,27 @@
 
 #include "edittracker.h"
 
-#include <KLocalizedString>
-#include <KTextEditor/Application>
-#include <KTextEditor/Editor>
-#include <KTextEditor/MainWindow>
+#include "chattheme.h"
 
+#include <KLocalizedString>
+
+#include <QClipboard>
+#include <QColor>
 #include <QDialog>
-#include <QDir>
-#include <QFile>
 #include <QFileInfo>
 #include <QFrame>
+#include <QGuiApplication>
 #include <QHBoxLayout>
+#include <QKeySequence>
 #include <QLabel>
 #include <QPushButton>
 #include <QScrollArea>
-#include <QStandardPaths>
+#include <QShortcut>
 #include <QTextBrowser>
-#include <QTextStream>
-#include <QUrl>
 #include <QVBoxLayout>
 #include <QWidget>
+
+#include <algorithm>
 
 using namespace Qt::Literals::StringLiterals;
 
@@ -36,158 +37,161 @@ namespace
 
 QString keepAllStyle()
 {
-    return u"QPushButton {"
-           u"  background-color: #16a34a;"
-           u"  color: #ffffff;"
-           u"  border: none;"
-           u"  border-radius: 16px;"
-           u"  padding: 0 14px;"
-           u"  font-weight: 600;"
-           u"  font-size: 12px;"
-           u"}"
-           u"QPushButton:hover { background-color: #22c55e; }"
-           u"QPushButton:pressed { background-color: #15803d; }"
-           u"QPushButton:disabled { background-color: #1f3d2a; color: #6b7280; }"_s;
+    // Derived from the theme's success colour at varying alpha rather than a
+    // second hard-coded green, so retheming the panel does not leave this one
+    // button behind. The previous literal #16a34a was a third green.
+    return QStringLiteral(
+               "QPushButton {"
+               "  background-color: %1;"
+               "  color: %2;"
+               "  border: none;"
+               "  border-radius: 16px;"
+               "  padding: 0 14px;"
+               "  font-weight: 600;"
+               "  font-size: 12px;"
+               "}"
+               "QPushButton:hover { background-color: %3; }"
+               "QPushButton:pressed { background-color: %4; }"
+               "QPushButton:disabled { background-color: %5; color: %6; }")
+        .arg(ChatTheme::success(), QColor(0x08, 0x12, 0x0e).name(), ChatTheme::accent(), ChatTheme::danger(),
+             QColor(0x1f, 0x3d, 0x2a).name(), ChatTheme::textMuted());
 }
 
 QString rejectAllStyle()
 {
-    return u"QPushButton {"
-           u"  background-color: transparent;"
-           u"  color: #f87171;"
-           u"  border: 1px solid #7f1d1d;"
-           u"  border-radius: 16px;"
-           u"  padding: 0 14px;"
-           u"  font-weight: 600;"
-           u"  font-size: 12px;"
-           u"}"
-           u"QPushButton:hover { background-color: #3f1212; border-color: #ef4444; color: #fecaca; }"
-           u"QPushButton:pressed { background-color: #7f1d1d; }"
-           u"QPushButton:disabled { color: #6b7280; border-color: #333; }"_s;
+    return QStringLiteral(
+               "QPushButton {"
+               "  background-color: transparent;"
+               "  color: %1;"
+               "  border: 1px solid %1;"
+               "  border-radius: 16px;"
+               "  padding: 0 14px;"
+               "  font-weight: 600;"
+               "  font-size: 12px;"
+               "}"
+               "QPushButton:hover { background-color: %2; border-color: %1; color: #fecaca; }"
+               "QPushButton:pressed { background-color: %1; }"
+               "QPushButton:disabled { color: %3; border-color: %4; }")
+        .arg(ChatTheme::danger(), QColor(0x3f, 0x12, 0x12).name(), ChatTheme::textMuted(), ChatTheme::border());
 }
 
 QString keepStyle()
 {
-    return u"QPushButton {"
-           u"  background-color: #166534;"
-           u"  color: #bbf7d0;"
-           u"  border: none;"
-           u"  border-radius: 12px;"
-           u"  padding: 0 10px;"
-           u"  font-weight: 600;"
-           u"  font-size: 11px;"
-           u"}"
-           u"QPushButton:hover { background-color: #16a34a; color: #ffffff; }"
-           u"QPushButton:pressed { background-color: #15803d; }"_s;
+    return QStringLiteral(
+               "QPushButton {"
+               "  background-color: transparent;"
+               "  color: %1;"
+               "  border: 1px solid %1;"
+               "  border-radius: 12px;"
+               "  padding: 0 10px;"
+               "  font-weight: 600;"
+               "  font-size: 11px;"
+               "}"
+               "QPushButton:hover { background-color: %1; color: %2; }"
+               "QPushButton:pressed { background-color: %3; }")
+        .arg(ChatTheme::success(), QColor(0x08, 0x12, 0x0e).name(), ChatTheme::danger());
 }
 
 QString rejectStyle()
 {
-    return u"QPushButton {"
-           u"  background-color: transparent;"
-           u"  color: #fca5a5;"
-           u"  border: 1px solid #7f1d1d;"
-           u"  border-radius: 12px;"
-           u"  padding: 0 10px;"
-           u"  font-weight: 600;"
-           u"  font-size: 11px;"
-           u"}"
-           u"QPushButton:hover { background-color: #3f1212; color: #fecaca; border-color: #ef4444; }"
-           u"QPushButton:pressed { background-color: #7f1d1d; }"_s;
+    return QStringLiteral(
+               "QPushButton {"
+               "  background-color: transparent;"
+               "  color: %1;"
+               "  border: 1px solid %1;"
+               "  border-radius: 12px;"
+               "  padding: 0 10px;"
+               "  font-weight: 600;"
+               "  font-size: 11px;"
+               "}"
+               "QPushButton:hover { background-color: %1; color: #fecaca; }"
+               "QPushButton:pressed { background-color: %1; }")
+        .arg(ChatTheme::danger());
 }
 
 QString reviewStyle()
 {
-    return u"QPushButton {"
-           u"  background-color: #27272a;"
-           u"  color: #e4e4e7;"
-           u"  border: 1px solid #3f3f46;"
-           u"  border-radius: 12px;"
-           u"  padding: 0 10px;"
-           u"  font-weight: 600;"
-           u"  font-size: 11px;"
-           u"}"
-           u"QPushButton:hover { background-color: #3f3f46; color: #ffffff; border-color: #52525b; }"
-           u"QPushButton:pressed { background-color: #18181b; }"_s;
+    return QStringLiteral(
+               "QPushButton {"
+               "  background-color: %1;"
+               "  color: %2;"
+               "  border: 1px solid %3;"
+               "  border-radius: 12px;"
+               "  padding: 0 10px;"
+               "  font-weight: 600;"
+               "  font-size: 11px;"
+               "}"
+               "QPushButton:hover { background-color: %4; color: #ffffff; border-color: %5; }"
+               "QPushButton:pressed { background-color: %1; }")
+        .arg(ChatTheme::hoverBg(), ChatTheme::textPrimary(), ChatTheme::border(), ChatTheme::surfaceBg(),
+             ChatTheme::borderStrong());
 }
 
-void diffStats(const QString &diff, int *added, int *removed)
+QString undoStyle()
 {
-    int plus = 0;
-    int minus = 0;
+    return QStringLiteral(
+               "QPushButton {"
+               "  background-color: transparent;"
+               "  color: %1;"
+               "  border: 1px solid %2;"
+               "  border-radius: 16px;"
+               "  padding: 0 12px;"
+               "  font-weight: 600;"
+               "  font-size: 12px;"
+               "}"
+               "QPushButton:hover { background-color: %3; color: #ffffff; }"
+               "QPushButton:disabled { color: #6b7280; border-color: #333333; }")
+        .arg(ChatTheme::textMuted(), ChatTheme::border(), ChatTheme::hoverBg());
+}
+
+int countDiffLines(const QString &diff, QChar marker)
+{
+    int count = 0;
     const QStringList lines = diff.split(u'\n');
     for (const QString &line : lines) {
-        if (line.startsWith(u"+++"_s) || line.startsWith(u"---"_s) || line.startsWith(u"@@"_s)) {
+        // The ---/+++ file headers are metadata, not content changes.
+        if (line.startsWith(u"---"_s) || line.startsWith(u"+++"_s) || line.startsWith(u'@')) {
             continue;
         }
-        if (line.startsWith(u'+')) {
-            ++plus;
-        } else if (line.startsWith(u'-')) {
-            ++minus;
+        if (line.startsWith(marker)) {
+            ++count;
         }
     }
-    if (added) {
-        *added = plus;
-    }
-    if (removed) {
-        *removed = minus;
-    }
+    return count;
 }
 
 QString diffToHtml(const QString &diff)
 {
-    QString html = u"<body>"_s;
-    const QStringList lines = diff.split(u'\n');
-    if (lines.isEmpty()) {
-        return u"<body><p> </p></body>"_s;
+    if (diff.isEmpty()) {
+        return QStringLiteral("<body><p>&nbsp;</p></body>");
     }
+    QString html = QStringLiteral("<body>");
+    const QStringList lines = diff.split(u'\n');
     for (const QString &line : lines) {
-        const QString escaped = line.isEmpty() ? u"&nbsp;"_s : line.toHtmlEscaped();
-        if (line.startsWith(u"---"_s) || line.startsWith(u"+++"_s) || line.startsWith(u"@@"_s)) {
-            html += u"<p class='hunk'>%1</p>"_s.arg(escaped);
+        const QString escaped = line.isEmpty() ? QStringLiteral("&nbsp;") : line.toHtmlEscaped();
+        if (line.startsWith(u"---"_s) || line.startsWith(u"+++"_s) || line.startsWith(u'@')) {
+            html += QStringLiteral("<p class='hunk'>%1</p>").arg(escaped);
         } else if (line.startsWith(u'+')) {
-            html += u"<p class='added'>%1</p>"_s.arg(escaped);
+            html += QStringLiteral("<p class='added'>%1</p>").arg(escaped);
         } else if (line.startsWith(u'-')) {
-            html += u"<p class='removed'>%1</p>"_s.arg(escaped);
+            html += QStringLiteral("<p class='removed'>%1</p>").arg(escaped);
         } else {
-            html += u"<p>%1</p>"_s.arg(escaped);
+            html += QStringLiteral("<p>%1</p>").arg(escaped);
         }
     }
-    html += u"</body>"_s;
+    html += QStringLiteral("</body>");
     return html;
 }
 
-QString reviewFilePath(const QString &path)
+QString diffStylesheet()
 {
-    const QString tmpRoot = QStandardPaths::writableLocation(QStandardPaths::TempLocation) + u"/kateai-review"_s;
-    QDir().mkpath(tmpRoot);
-    const QString fileName = QFileInfo(path).fileName();
-    const QString unique = QString::number(qHash(path), 16);
-    return tmpRoot + u'/' + unique + u'-' + fileName + u".diff"_s;
-}
-
-bool writeReviewFile(const QString &tmpPath, const QString &diff)
-{
-    QFile file(tmpPath);
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
-        return false;
-    }
-    QTextStream out(&file);
-    out.setEncoding(QStringConverter::Utf8);
-    out << diff;
-    if (!diff.endsWith(u'\n')) {
-        out << u'\n';
-    }
-    return true;
-}
-
-KTextEditor::MainWindow *activeEditorWindow()
-{
-    auto *editor = KTextEditor::Editor::instance();
-    if (!editor || !editor->application()) {
-        return nullptr;
-    }
-    return editor->application()->activeMainWindow();
+    return QStringLiteral(
+               "body { color: %1; font-family: monospace; font-size: 12px; margin: 0; padding: 0; }"
+               ".removed { color: #fca5a5; background-color: #3f1212; }"
+               ".added { color: #86efac; background-color: #14532d; }"
+               ".hunk { color: #71717a; }"
+               "p { margin: 0; padding: 1px 6px; white-space: pre-wrap; }")
+        .arg(ChatTheme::textPrimary());
 }
 
 } // namespace
@@ -209,14 +213,24 @@ EditTracker::EditTracker(QWidget *parent)
     barLayout->setSpacing(8);
 
     m_countLabel = new QLabel(m_barWidget);
-    m_countLabel->setStyleSheet(u"QLabel { color: #e4e4e7; font-size: 12px; font-weight: 600; letter-spacing: 0.2px; }"_s);
+    m_countLabel->setStyleSheet(
+        QStringLiteral("QLabel { color: %1; font-size: 12px; font-weight: 600; }").arg(ChatTheme::textPrimary()));
     barLayout->addWidget(m_countLabel);
     barLayout->addStretch();
+
+    m_undoBtn = new QPushButton(i18n("Undo"), m_barWidget);
+    m_undoBtn->setCursor(Qt::PointingHandCursor);
+    m_undoBtn->setFixedHeight(30);
+    m_undoBtn->setStyleSheet(undoStyle());
+    m_undoBtn->setToolTip(i18n("Undo the last keep/reject decision"));
+    connect(m_undoBtn, &QPushButton::clicked, this, &EditTracker::undoLast);
+    barLayout->addWidget(m_undoBtn);
 
     m_acceptAllBtn = new QPushButton(i18n("Keep All"), m_barWidget);
     m_acceptAllBtn->setCursor(Qt::PointingHandCursor);
     m_acceptAllBtn->setFixedHeight(30);
     m_acceptAllBtn->setStyleSheet(keepAllStyle());
+    m_acceptAllBtn->setToolTip(i18n("Accept every pending change"));
     connect(m_acceptAllBtn, &QPushButton::clicked, this, &EditTracker::acceptAll);
     barLayout->addWidget(m_acceptAllBtn);
 
@@ -224,14 +238,13 @@ EditTracker::EditTracker(QWidget *parent)
     m_rejectAllBtn->setCursor(Qt::PointingHandCursor);
     m_rejectAllBtn->setFixedHeight(30);
     m_rejectAllBtn->setStyleSheet(rejectAllStyle());
+    m_rejectAllBtn->setToolTip(i18n("Revert every pending change to its pre-edit content"));
     connect(m_rejectAllBtn, &QPushButton::clicked, this, &EditTracker::rejectAll);
     barLayout->addWidget(m_rejectAllBtn);
 
-    m_barWidget->setStyleSheet(
-        u"#EditTrackerBar {"
-        u"  background-color: #18181b;"
-        u"  border-top: 1px solid #27272a;"
-        u"}"_s);
+    m_barWidget->setStyleSheet(QStringLiteral(
+                                    "#EditTrackerBar { background-color: %1; border-top: 1px solid %2; }")
+                                    .arg(ChatTheme::panelBg(), ChatTheme::border()));
 
     root->addWidget(m_barWidget);
 
@@ -245,14 +258,9 @@ EditTracker::EditTracker(QWidget *parent)
     m_scrollArea->setWidgetResizable(true);
     m_scrollArea->setFrameShape(QFrame::NoFrame);
     m_scrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    m_scrollArea->setStyleSheet(
-        u"QScrollArea { background: transparent; border: none; }"
-        u"QScrollBar:vertical { background: transparent; width: 8px; margin: 0; }"
-        u"QScrollBar::handle:vertical { background: #3f3f46; border-radius: 4px; min-height: 24px; }"
-        u"QScrollBar::handle:vertical:hover { background: #52525b; }"
-        u"QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"_s);
+    m_scrollArea->setStyleSheet(ChatTheme::scrollArea());
 
-    QWidget *scrollContent = new QWidget(m_scrollArea);
+    auto *scrollContent = new QWidget(m_scrollArea);
     scrollContent->setObjectName(u"EditTrackerScrollContent"_s);
     m_scrollArea->setWidget(scrollContent);
     listLayout->addWidget(m_scrollArea);
@@ -262,24 +270,40 @@ EditTracker::EditTracker(QWidget *parent)
     m_editListLayout->setSpacing(6);
     m_editListLayout->setAlignment(Qt::AlignTop);
 
-    m_listContainer->setStyleSheet(
-        u"#EditTrackerList { background-color: #141416; }"_s);
+    m_listContainer->setStyleSheet(QStringLiteral("#EditTrackerList { background-color: %1; }").arg(ChatTheme::panelBg()));
 
     root->addWidget(m_listContainer);
 
-    setStyleSheet(
-        u"#EditTracker {"
-        u"  background-color: #141416;"
-        u"  border-top: 1px solid #27272a;"
-        u"}"_s);
+    setStyleSheet(QStringLiteral(
+                      "#EditTracker { background-color: %1; border-top: 1px solid %2; }")
+                      .arg(ChatTheme::panelBg(), ChatTheme::border()));
+
+    // Ctrl+Z undoes the last keep/reject. Scoped to the tracker rather than the
+    // window so it cannot shadow the editor's own undo while the panel has focus.
+    auto *undoShortcut = new QShortcut(QKeySequence(QKeySequence::Undo), this);
+    undoShortcut->setContext(Qt::WidgetWithChildrenShortcut);
+    connect(undoShortcut, &QShortcut::activated, this, &EditTracker::undoLast);
 
     m_barWidget->hide();
     m_listContainer->hide();
 }
 
-void EditTracker::addEdit(const QString &path, const QString &toolName, const QString &diff,
-                          const QString &oldContent, const QString &newContent)
+int EditTracker::addedLines(const QString &diff)
 {
+    return countDiffLines(diff, u'+');
+}
+
+int EditTracker::removedLines(const QString &diff)
+{
+    return countDiffLines(diff, u'-');
+}
+
+void EditTracker::addEdit(const QString &path, const QString &toolName, const QString &diff,
+                          const QString &oldContent, const QString &newContent, bool createdFile)
+{
+    if (path.isEmpty()) {
+        return;
+    }
     closeReview(path);
 
     EditEntry entry;
@@ -288,10 +312,37 @@ void EditTracker::addEdit(const QString &path, const QString &toolName, const QS
     entry.diff = diff;
     entry.oldContent = oldContent;
     entry.newContent = newContent;
-    entry.accepted = false;
-    entry.rejected = false;
+    entry.createdFile = createdFile;
 
-    m_edits[path] = entry;
+    Group *group = nullptr;
+    for (auto &candidate : m_groups) {
+        if (candidate.path == path) {
+            group = &candidate;
+            break;
+        }
+    }
+    if (!group) {
+        Group fresh;
+        fresh.path = path;
+        // The baseline a rejection restores: the file as it looked before the
+        // first pending edit, which for a brand-new file is nothing at all.
+        fresh.lastKnownContent = oldContent;
+        fresh.createdFile = createdFile;
+        m_groups.append(fresh);
+        group = &m_groups.last();
+    }
+
+    // A file the agent created cannot become "pre-existing" partway through, but
+    // a file that already existed must never be treated as created just because
+    // the first edit we saw for it happened to be a write.
+    group->createdFile = group->createdFile && createdFile;
+    group->pending.append(entry);
+    refreshTotals(*group);
+
+    // New edits invalidate the record of earlier decisions: they were made
+    // against a state that no longer exists.
+    m_undoStack.clear();
+
     updateUI();
     Q_EMIT editsChanged(true);
 }
@@ -299,7 +350,8 @@ void EditTracker::addEdit(const QString &path, const QString &toolName, const QS
 void EditTracker::clear()
 {
     closeAllReviews();
-    m_edits.clear();
+    m_groups.clear();
+    m_undoStack.clear();
     updateUI();
     m_barWidget->hide();
     m_listContainer->hide();
@@ -308,66 +360,167 @@ void EditTracker::clear()
 
 bool EditTracker::hasPendingEdits() const
 {
-    for (const auto &entry : m_edits) {
-        if (!entry.accepted && !entry.rejected) {
+    for (const auto &group : m_groups) {
+        if (!group.pending.isEmpty()) {
             return true;
         }
     }
     return false;
 }
 
+int EditTracker::pendingEditCount() const
+{
+    int count = 0;
+    for (const auto &group : m_groups) {
+        count += group.pending.size();
+    }
+    return count;
+}
+
+QStringList EditTracker::pendingPaths() const
+{
+    QStringList paths;
+    for (const auto &group : m_groups) {
+        if (!group.pending.isEmpty()) {
+            paths.append(group.path);
+        }
+    }
+    return paths;
+}
+
 QList<EditEntry> EditTracker::pendingEdits() const
 {
     QList<EditEntry> result;
-    for (const auto &entry : m_edits) {
-        if (!entry.accepted && !entry.rejected) {
-            result.append(entry);
+    for (const auto &group : m_groups) {
+        result.append(group.pending);
+    }
+    return result;
+}
+
+void EditTracker::refreshTotals(Group &group) const
+{
+    int added = 0;
+    int removed = 0;
+    for (const EditEntry &entry : group.pending) {
+        added += addedLines(entry.diff);
+        removed += removedLines(entry.diff);
+    }
+    group.added = added;
+    group.removed = removed;
+}
+
+EditTracker::Group EditTracker::makeGroup(const QString &path) const
+{
+    Group result;
+    result.path = path;
+    for (const auto &group : m_groups) {
+        if (group.path == path) {
+            return group;
         }
     }
     return result;
 }
 
+void EditTracker::pruneGroups()
+{
+    m_groups.erase(std::remove_if(m_groups.begin(), m_groups.end(), [](const Group &group) {
+                       return group.pending.isEmpty();
+                   }),
+                   m_groups.end());
+}
+
 void EditTracker::acceptAll()
 {
-    for (auto it = m_edits.begin(); it != m_edits.end(); ++it) {
-        if (!it->accepted && !it->rejected) {
-            it->accepted = true;
-            Q_EMIT editAccepted(it->path, it->toolName, it->newContent);
-        }
+    // Snapshot the paths first: settle() prunes m_groups as it goes, so
+    // iterating the container while emitting would invalidate the iterator.
+    const QStringList paths = pendingPaths();
+    for (const QString &path : paths) {
+        acceptEdit(path);
     }
     clear();
 }
 
 void EditTracker::rejectAll()
 {
-    for (auto it = m_edits.begin(); it != m_edits.end(); ++it) {
-        if (!it->accepted && !it->rejected) {
-            it->rejected = true;
-            Q_EMIT editRejected(it->path, it->toolName, it->oldContent);
-        }
+    const QStringList paths = pendingPaths();
+    for (const QString &path : paths) {
+        rejectEdit(path);
     }
     clear();
 }
 
-void EditTracker::updateUI()
+bool EditTracker::canUndo() const
 {
-    int pendingCount = 0;
-    for (const auto &entry : m_edits) {
-        if (!entry.accepted && !entry.rejected) {
-            ++pendingCount;
+    return !m_undoStack.isEmpty();
+}
+
+void EditTracker::undoLast()
+{
+    if (m_undoStack.isEmpty()) {
+        return;
+    }
+    const Decision decision = m_undoStack.takeLast();
+    if (decision.path.isEmpty()) {
+        return;
+    }
+
+    // Put the edits back exactly as they were, so the user can decide again
+    // rather than having to reconstruct what happened.
+    Group restored;
+    restored.path = decision.path;
+    restored.pending = decision.pending;
+    restored.createdFile = decision.createdFile;
+    restored.lastKnownContent = decision.previousContent;
+    refreshTotals(restored);
+
+    bool replaced = false;
+    for (auto it = m_groups.begin(); it != m_groups.end(); ++it) {
+        if (it->path == decision.path) {
+            *it = restored;
+            replaced = true;
+            break;
+        }
+    }
+    if (!replaced) {
+        m_groups.append(restored);
+    }
+
+    // Undoing an acceptance has to undo the file too. Restoring the pre-edit
+    // content for a file the agent created means deleting it again, otherwise
+    // "undo" would leave behind exactly the file the user said to undo.
+    if (decision.kind == Decision::Accepted) {
+        if (decision.createdFile) {
+            Q_EMIT fileCreatedThenRejected(decision.path);
+        } else if (!decision.previousContent.isNull()) {
+            Q_EMIT editRejected(decision.path, decision.toolName, decision.previousContent);
         }
     }
 
+    closeReview(decision.path);
+    updateUI();
+    Q_EMIT editsChanged(true);
+    Q_EMIT statusMessage(i18n("Undid the last decision for %1", QFileInfo(decision.path).fileName()), false);
+}
+
+void EditTracker::updateUI()
+{
+    const int pendingCount = pendingEditCount();
+
     if (pendingCount > 0) {
-        m_countLabel->setText(i18np("1 file", "%n files", pendingCount));
+        const int fileCount = pendingPaths().size();
+        // Both numbers, because they answer different questions: "how many
+        // files do I still have to look at" and "how much did the agent do".
+        m_countLabel->setText(i18n("%1 pending in %2", pendingCount, i18np("1 file", "%n files", fileCount)));
         m_acceptAllBtn->setEnabled(true);
         m_rejectAllBtn->setEnabled(true);
+        m_undoBtn->setEnabled(canUndo());
         m_barWidget->show();
         m_listContainer->show();
     } else {
         m_countLabel->clear();
         m_acceptAllBtn->setEnabled(false);
         m_rejectAllBtn->setEnabled(false);
+        m_undoBtn->setEnabled(false);
         m_barWidget->hide();
         m_listContainer->hide();
     }
@@ -375,135 +528,155 @@ void EditTracker::updateUI()
     rebuildEditList();
 }
 
+QWidget *EditTracker::createRow(const Group &group)
+{
+    auto *row = new QWidget(m_scrollArea->widget());
+    row->setObjectName(u"EditFileRow"_s);
+    row->setStyleSheet(QStringLiteral(
+                           "#EditFileRow { background-color: %1; border: 1px solid %2; border-radius: 10px; }")
+                           .arg(ChatTheme::surfaceBg(), ChatTheme::border()));
+    auto *layout = new QHBoxLayout(row);
+    layout->setContentsMargins(10, 6, 8, 6);
+    layout->setSpacing(8);
+
+    auto *nameLabel = new QLabel(QFileInfo(group.path).fileName(), row);
+    nameLabel->setStyleSheet(QStringLiteral(
+                                  "QLabel { color: %1; font-size: 12px; font-weight: 600; background: transparent; border: none; }")
+                                  .arg(ChatTheme::textPrimary()));
+    // The bare filename is ambiguous the moment a turn touches two files with the
+    // same name; the full path is what makes the row actionable.
+    nameLabel->setToolTip(group.path);
+    nameLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    nameLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    nameLabel->setMinimumWidth(40);
+    layout->addWidget(nameLabel, 1);
+
+    if (group.pending.size() > 1) {
+        auto *countLabel = new QLabel(i18np("1 edit", "%n edits", group.pending.size()), row);
+        countLabel->setStyleSheet(QStringLiteral(
+                                      "QLabel { color: %1; font-size: 11px; background: transparent; border: none; }")
+                                      .arg(ChatTheme::textMuted()));
+        countLabel->setToolTip(i18n("The agent edited this file %n time(s) in this turn", group.pending.size()));
+        layout->addWidget(countLabel);
+    }
+
+    if (group.createdFile) {
+        auto *newLabel = new QLabel(i18n("new"), row);
+        newLabel->setStyleSheet(QStringLiteral(
+                                   "QLabel { color: %1; font-size: 10px; font-weight: 700; background: transparent; border: none; }")
+                                   .arg(ChatTheme::accent()));
+        newLabel->setToolTip(i18n("This file did not exist before the agent created it. Rejecting deletes it."));
+        layout->addWidget(newLabel);
+    }
+
+    auto *addedLabel = new QLabel(row);
+    addedLabel->setStyleSheet(QStringLiteral(
+                                  "QLabel { color: %1; font-size: 12px; font-weight: 700; font-family: monospace; background: transparent; border: none; }")
+                                  .arg(ChatTheme::success()));
+    addedLabel->setText(group.added > 0 ? QStringLiteral("+%1").arg(group.added) : QString());
+    addedLabel->setVisible(group.added > 0);
+    layout->addWidget(addedLabel);
+
+    auto *removedLabel = new QLabel(row);
+    removedLabel->setStyleSheet(QStringLiteral(
+                                    "QLabel { color: %1; font-size: 12px; font-weight: 700; font-family: monospace; background: transparent; border: none; }")
+                                    .arg(ChatTheme::danger()));
+    removedLabel->setText(group.removed > 0 ? QStringLiteral("-%1").arg(group.removed) : QString());
+    removedLabel->setVisible(group.removed > 0);
+    layout->addWidget(removedLabel);
+
+    auto *reviewBtn = new QPushButton(i18n("Review"), row);
+    reviewBtn->setCursor(Qt::PointingHandCursor);
+    reviewBtn->setFixedHeight(24);
+    reviewBtn->setStyleSheet(reviewStyle());
+    const QString path = group.path;
+    connect(reviewBtn, &QPushButton::clicked, this, [this, path]() {
+        openReview(path);
+    });
+    layout->addWidget(reviewBtn);
+
+    auto *keepBtn = new QPushButton(i18n("Keep"), row);
+    keepBtn->setCursor(Qt::PointingHandCursor);
+    keepBtn->setFixedHeight(24);
+    keepBtn->setStyleSheet(keepStyle());
+    connect(keepBtn, &QPushButton::clicked, this, [this, path]() {
+        acceptEdit(path);
+    });
+    layout->addWidget(keepBtn);
+
+    auto *rejectBtn = new QPushButton(i18n("Reject"), row);
+    rejectBtn->setCursor(Qt::PointingHandCursor);
+    rejectBtn->setFixedHeight(24);
+    rejectBtn->setStyleSheet(rejectStyle());
+    rejectBtn->setToolTip(group.createdFile ? i18n("Delete this file") : i18n("Restore the pre-edit content"));
+    connect(rejectBtn, &QPushButton::clicked, this, [this, path]() {
+        rejectEdit(path);
+    });
+    layout->addWidget(rejectBtn);
+
+    return row;
+}
+
+void EditTracker::appendRow(const Group &group)
+{
+    m_editListLayout->addWidget(createRow(group));
+}
+
 void EditTracker::rebuildEditList()
 {
-    QLayoutItem *item;
+    // Delete rather than deleteLater(): a turn that lands several edits at once
+    // rebuilt the list once per edit, and the deferred deletions all queued up
+    // behind each other, so ghost rows painted over the real ones until the
+    // event loop finally ran.
+    QLayoutItem *item = nullptr;
     while ((item = m_editListLayout->takeAt(0)) != nullptr) {
         if (item->widget()) {
-            // deleteLater() leaves the row alive, parented to the scroll
-            // content but no longer in the layout, so it kept painting over
-            // the top of the list until the event loop ran. A turn that lands
-            // several edits at once rebuilt the list several times before any
-            // of those deletions fired, stacking ghosts over the real rows.
             delete item->widget();
         }
         delete item;
     }
 
-    QStringList paths;
-    for (auto it = m_edits.begin(); it != m_edits.end(); ++it) {
-        if (!it->accepted && !it->rejected) {
-            paths.append(it.key());
+    int rows = 0;
+    for (const auto &group : m_groups) {
+        if (group.pending.isEmpty()) {
+            continue;
         }
-    }
-    paths.sort(Qt::CaseInsensitive);
-
-    for (const QString &path : paths) {
-        const EditEntry &entry = m_edits[path];
-
-        QWidget *editWidget = new QWidget(m_scrollArea->widget());
-        editWidget->setObjectName(u"EditFileRow"_s);
-        editWidget->setStyleSheet(
-            u"#EditFileRow {"
-            u"  background-color: #1c1c20;"
-            u"  border: 1px solid #2a2a2e;"
-            u"  border-radius: 10px;"
-            u"}"_s);
-        auto *editLayout = new QHBoxLayout(editWidget);
-        editLayout->setContentsMargins(10, 6, 8, 6);
-        editLayout->setSpacing(8);
-
-        QLabel *nameLabel = new QLabel(QFileInfo(entry.path).fileName(), editWidget);
-        nameLabel->setStyleSheet(
-            u"QLabel { color: #f4f4f5; font-size: 12px; font-weight: 600; background: transparent; border: none; }"_s);
-        nameLabel->setToolTip(entry.path);
-        nameLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
-        nameLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-        nameLabel->setMinimumWidth(40);
-        editLayout->addWidget(nameLabel, 1);
-
-        int added = 0;
-        int removed = 0;
-        diffStats(entry.diff, &added, &removed);
-
-        QLabel *addedLabel = new QLabel(editWidget);
-        addedLabel->setStyleSheet(
-            u"QLabel { color: #4ade80; font-size: 12px; font-weight: 700; font-family: monospace; background: transparent; border: none; }"_s);
-        addedLabel->setText(added > 0 ? u"+%1"_s.arg(added) : QString());
-        addedLabel->setVisible(added > 0);
-        editLayout->addWidget(addedLabel);
-
-        QLabel *removedLabel = new QLabel(editWidget);
-        removedLabel->setStyleSheet(
-            u"QLabel { color: #f87171; font-size: 12px; font-weight: 700; font-family: monospace; background: transparent; border: none; }"_s);
-        removedLabel->setText(removed > 0 ? u"-%1"_s.arg(removed) : QString());
-        removedLabel->setVisible(removed > 0);
-        editLayout->addWidget(removedLabel);
-
-        QPushButton *reviewBtn = new QPushButton(i18n("Review"), editWidget);
-        reviewBtn->setCursor(Qt::PointingHandCursor);
-        reviewBtn->setFixedHeight(24);
-        reviewBtn->setStyleSheet(reviewStyle());
-        connect(reviewBtn, &QPushButton::clicked, this, [this, path = entry.path]() {
-            openReview(path);
-        });
-        editLayout->addWidget(reviewBtn);
-
-        QPushButton *acceptBtn = new QPushButton(i18n("Keep"), editWidget);
-        acceptBtn->setCursor(Qt::PointingHandCursor);
-        acceptBtn->setFixedHeight(24);
-        acceptBtn->setStyleSheet(keepStyle());
-        connect(acceptBtn, &QPushButton::clicked, this, [this, path = entry.path]() {
-            acceptEdit(path);
-        });
-        editLayout->addWidget(acceptBtn);
-
-        QPushButton *rejectBtn = new QPushButton(i18n("Reject"), editWidget);
-        rejectBtn->setCursor(Qt::PointingHandCursor);
-        rejectBtn->setFixedHeight(24);
-        rejectBtn->setStyleSheet(rejectStyle());
-        connect(rejectBtn, &QPushButton::clicked, this, [this, path = entry.path]() {
-            rejectEdit(path);
-        });
-        editLayout->addWidget(rejectBtn);
-
-        m_editListLayout->addWidget(editWidget);
+        appendRow(group);
+        ++rows;
     }
 
     m_editListLayout->addStretch();
 
-    // Size the viewport from the rows that actually got built. The old constant
-    // of 40px a row was two short of the real pitch, which clipped the sixth
-    // row and raised a scrollbar on a list meant to fit.
-    const int visibleRows = qMin(static_cast<int>(paths.size()), 6);
+    // Size the viewport from the rows that actually got built rather than from a
+    // guessed row height: a wrong constant either clipped the last row or raised
+    // a scrollbar on a list meant to fit.
+    const int visibleRows = std::min(rows, 6);
     int contentHeight = 0;
     for (int i = 0; i < visibleRows; ++i) {
-        if (auto *item = m_editListLayout->itemAt(i)) {
-            if (QWidget *row = item->widget()) {
+        if (auto *layoutItem = m_editListLayout->itemAt(i)) {
+            if (QWidget *row = layoutItem->widget()) {
                 contentHeight += row->sizeHint().height();
             }
         }
     }
-    contentHeight += qMax(0, visibleRows - 1) * m_editListLayout->spacing();
+    contentHeight += std::max(0, visibleRows - 1) * m_editListLayout->spacing();
     m_scrollArea->setFixedHeight(contentHeight > 0 ? contentHeight + 2 : 0);
 }
 
 void EditTracker::openReview(const QString &path)
 {
-    auto it = m_edits.find(path);
-    if (it == m_edits.end() || it->accepted || it->rejected) {
+    const Group group = makeGroup(path);
+    if (group.pending.isEmpty()) {
         return;
     }
+    showDiffDialog(path, group);
+}
 
-    const QString tmpPath = reviewFilePath(path);
-    if (writeReviewFile(tmpPath, it->diff)) {
-        m_reviewFiles[path] = tmpPath;
-        if (auto *mainWindow = activeEditorWindow()) {
-            mainWindow->openUrl(QUrl::fromLocalFile(tmpPath));
-            return;
-        }
-    }
-
+void EditTracker::showDiffDialog(const QString &path, const Group &group)
+{
+    // One dialog per path. Opening a second one for a file that is already being
+    // reviewed used to stack a duplicate window behind the first, each with its
+    // own Keep/Reject buttons deciding the same thing.
     if (auto existing = m_reviewDialogs.value(path)) {
         existing->raise();
         existing->activateWindow();
@@ -514,61 +687,64 @@ void EditTracker::openReview(const QString &path)
     dialog->setAttribute(Qt::WA_DeleteOnClose);
     dialog->setWindowTitle(i18n("Review %1", QFileInfo(path).fileName()));
     dialog->setModal(false);
-    dialog->resize(720, 520);
+    dialog->resize(760, 560);
     dialog->setStyleSheet(
-        u"QDialog { background-color: #121214; }"
-        u"QLabel { background: transparent; }"_s);
+        QStringLiteral("QDialog { background-color: %1; } QLabel { background: transparent; }").arg(ChatTheme::panelBg()));
 
     auto *root = new QVBoxLayout(dialog);
     root->setContentsMargins(16, 16, 16, 16);
     root->setSpacing(12);
 
-    QLabel *title = new QLabel(QFileInfo(path).fileName(), dialog);
-    title->setStyleSheet(u"QLabel { color: #f4f4f5; font-size: 16px; font-weight: 700; }"_s);
+    auto *title = new QLabel(QFileInfo(path).fileName(), dialog);
+    title->setStyleSheet(QStringLiteral("QLabel { color: %1; font-size: 16px; font-weight: 700; }")
+                             .arg(ChatTheme::textPrimary()));
     root->addWidget(title);
 
-    QLabel *subtitle = new QLabel(path, dialog);
-    subtitle->setStyleSheet(u"QLabel { color: #a1a1aa; font-size: 11px; font-family: monospace; }"_s);
+    auto *subtitle = new QLabel(path, dialog);
+    subtitle->setStyleSheet(QStringLiteral("QLabel { color: %1; font-size: 11px; font-family: monospace; }")
+                                .arg(ChatTheme::textMuted()));
     subtitle->setTextInteractionFlags(Qt::TextSelectableByMouse);
     subtitle->setWordWrap(true);
     root->addWidget(subtitle);
+
+    // One combined diff for the whole file rather than a tab per edit: the
+    // question the review answers is "what does this file look like now versus
+    // before the turn", which is a single comparison.
+    QString combined;
+    for (const EditEntry &entry : group.pending) {
+        if (!combined.isEmpty()) {
+            combined += u'\n';
+        }
+        combined += entry.diff;
+    }
 
     auto *diffBrowser = new QTextBrowser(dialog);
     diffBrowser->setReadOnly(true);
     diffBrowser->setOpenExternalLinks(false);
     diffBrowser->setFrameShape(QFrame::NoFrame);
-    diffBrowser->setStyleSheet(
-        u"QTextBrowser {"
-        u"  background-color: #09090b;"
-        u"  color: #d4d4d8;"
-        u"  border: 1px solid #27272a;"
-        u"  border-radius: 10px;"
-        u"  padding: 8px;"
-        u"  font-family: monospace;"
-        u"  font-size: 12px;"
-        u"}"_s);
-    diffBrowser->document()->setDefaultStyleSheet(
-        u"body { color: #d4d4d8; font-family: monospace; font-size: 12px; margin: 0; padding: 0; }"
-        u".removed { color: #fca5a5; background-color: #3f1212; }"
-        u".added { color: #86efac; background-color: #14532d; }"
-        u".hunk { color: #71717a; }"
-        u"p { margin: 0; padding: 1px 6px; white-space: pre-wrap; }"_s);
-    diffBrowser->setHtml(diffToHtml(it->diff));
+    diffBrowser->setStyleSheet(QStringLiteral(
+                                   "QTextBrowser { background-color: %1; color: %2; border: 1px solid %3; border-radius: 10px; padding: 8px; font-family: monospace; font-size: 12px; }")
+                                   .arg(ChatTheme::codeBlockBg(), ChatTheme::textPrimary(), ChatTheme::border()));
+    diffBrowser->document()->setDefaultStyleSheet(diffStylesheet());
+    diffBrowser->setHtml(diffToHtml(combined));
     root->addWidget(diffBrowser, 1);
 
     auto *btnLayout = new QHBoxLayout;
     btnLayout->setContentsMargins(0, 4, 0, 0);
     btnLayout->setSpacing(8);
 
-    QPushButton *closeBtn = new QPushButton(i18n("Close"), dialog);
-    closeBtn->setCursor(Qt::PointingHandCursor);
-    closeBtn->setFixedHeight(32);
-    closeBtn->setStyleSheet(reviewStyle());
-    connect(closeBtn, &QPushButton::clicked, dialog, &QDialog::close);
-    btnLayout->addWidget(closeBtn);
+    auto *copyBtn = new QPushButton(i18n("Copy Diff"), dialog);
+    copyBtn->setCursor(Qt::PointingHandCursor);
+    copyBtn->setFixedHeight(32);
+    copyBtn->setStyleSheet(reviewStyle());
+    connect(copyBtn, &QPushButton::clicked, this, [combined]() {
+        QGuiApplication::clipboard()->setText(combined);
+    });
+    btnLayout->addWidget(copyBtn);
+
     btnLayout->addStretch();
 
-    QPushButton *rejectBtn = new QPushButton(i18n("Reject"), dialog);
+    auto *rejectBtn = new QPushButton(group.createdFile ? i18n("Delete File") : i18n("Reject"), dialog);
     rejectBtn->setCursor(Qt::PointingHandCursor);
     rejectBtn->setFixedHeight(32);
     rejectBtn->setStyleSheet(rejectStyle());
@@ -578,10 +754,11 @@ void EditTracker::openReview(const QString &path)
     });
     btnLayout->addWidget(rejectBtn);
 
-    QPushButton *keepBtn = new QPushButton(i18n("Keep"), dialog);
+    auto *keepBtn = new QPushButton(i18n("Keep"), dialog);
     keepBtn->setCursor(Qt::PointingHandCursor);
     keepBtn->setFixedHeight(32);
-    keepBtn->setStyleSheet(keepAllStyle());
+    keepBtn->setStyleSheet(keepStyle());
+    keepBtn->setDefault(true);
     connect(keepBtn, &QPushButton::clicked, this, [this, path, dialog]() {
         dialog->close();
         acceptEdit(path);
@@ -589,6 +766,12 @@ void EditTracker::openReview(const QString &path)
     btnLayout->addWidget(keepBtn);
 
     root->addLayout(btnLayout);
+
+    // Escape closes without deciding, so a review opened by accident cannot
+    // silently accept or reject the change it was showing.
+    auto *esc = new QShortcut(QKeySequence(Qt::Key_Escape), dialog);
+    esc->setContext(Qt::WidgetWithChildrenShortcut);
+    connect(esc, &QShortcut::activated, dialog, &QDialog::close);
 
     m_reviewDialogs[path] = dialog;
     connect(dialog, &QDialog::destroyed, this, [this, path]() {
@@ -601,6 +784,10 @@ void EditTracker::openReview(const QString &path)
 
 void EditTracker::closeReview(const QString &path)
 {
+    // Take the pointer out of the map first: closing triggers destroyed(), whose
+    // handler removes the entry, so removing it here too would be redundant, but
+    // leaving it in place until the deferred delete ran would let a re-open
+    // during that window find a dangling dialog.
     if (auto dialog = m_reviewDialogs.take(path)) {
         dialog->close();
     }
@@ -614,34 +801,65 @@ void EditTracker::closeAllReviews()
     }
 }
 
-void EditTracker::finishEdit(const QString &path)
+void EditTracker::settle(const QString &path, bool accepted)
 {
-    closeReview(path);
-    if (!hasPendingEdits()) {
-        clear();
+    auto it = std::find_if(m_groups.begin(), m_groups.end(), [&path](const Group &group) {
+        return group.path == path;
+    });
+    if (it == m_groups.end() || it->pending.isEmpty()) {
         return;
     }
+
+    Group &group = *it;
+
+    // Everything still pending for this file is settled together, and the restore
+    // target is the state before the FIRST of them. Restoring before the last one
+    // instead would leave the file holding the intermediate result of an edit the
+    // user just said no to.
+    Decision decision;
+    decision.kind = accepted ? Decision::Accepted : Decision::Rejected;
+    decision.path = path;
+    decision.toolName = group.pending.first().toolName;
+    decision.pending = group.pending;
+    decision.createdFile = group.createdFile;
+    decision.previousContent = group.lastKnownContent;
+
+    // Mutate our own state before emitting anything. The slots write files and
+    // show messages, and a slot is free to call back into the tracker; settling
+    // afterwards would leave it observing a queue that still claims the edit is
+    // pending.
+    const bool createdFile = group.createdFile;
+    const QString toolName = decision.toolName;
+    const QString restoreTo = group.lastKnownContent;
+    const QString settledTo = group.pending.last().newContent;
+    group.pending.clear();
+    if (accepted) {
+        // The file is already in this state, so accepting only settles the queue.
+        group.lastKnownContent = settledTo;
+    }
+    m_undoStack.append(decision);
+    closeReview(path);
+    pruneGroups();
     updateUI();
+
+    if (accepted) {
+        Q_EMIT editAccepted(path, toolName, settledTo);
+    } else if (createdFile) {
+        Q_EMIT fileCreatedThenRejected(path);
+    } else {
+        Q_EMIT editRejected(path, toolName, restoreTo);
+    }
+    Q_EMIT editsChanged(hasPendingEdits());
 }
 
 void EditTracker::acceptEdit(const QString &path)
 {
-    auto it = m_edits.find(path);
-    if (it != m_edits.end() && !it->accepted && !it->rejected) {
-        it->accepted = true;
-        Q_EMIT editAccepted(it->path, it->toolName, it->newContent);
-        finishEdit(path);
-    }
+    settle(path, true);
 }
 
 void EditTracker::rejectEdit(const QString &path)
 {
-    auto it = m_edits.find(path);
-    if (it != m_edits.end() && !it->accepted && !it->rejected) {
-        it->rejected = true;
-        Q_EMIT editRejected(it->path, it->toolName, it->oldContent);
-        finishEdit(path);
-    }
+    settle(path, false);
 }
 
 } // namespace KateAi

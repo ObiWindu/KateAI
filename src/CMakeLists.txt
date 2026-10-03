@@ -20,6 +20,7 @@ add_library(kateai_core STATIC
     chattheme.cpp
     codehighlight.cpp
     contextmanager.cpp
+    transcriptlayout.cpp
     websearch.cpp
 )
 
