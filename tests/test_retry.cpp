@@ -27,6 +27,7 @@ public:
     using LlmClient::storeRequestForRetry;
     using LlmClient::clearStoredRequest;
     using LlmClient::testStoredMessages;
+    using LlmClient::secondsUntilHttpDate;
 };
 
 } // namespace KateAi
@@ -534,6 +535,81 @@ private Q_SLOTS:
 
         msg = client.formatRetryExhaustedMessage(RetryErrorCategory::NetworkError, QString());
         QVERIFY(msg.contains(u"Network connection failed"_s));
+    }
+
+    void testCalculateDelay_NeverOverflowsForLargeAttempts()
+    {
+        TestableLlmClient client;
+        Settings settings;
+        settings.baseRetryDelaySeconds = 5;
+        settings.maxRetryDelaySeconds = 0; // no cap
+        settings.retryStrategy = u"exponential"_s;
+        client.setSettings(settings);
+
+        RetryContext ctx;
+        ctx.baseDelaySeconds = 5;
+        ctx.maxDelaySeconds = 0;
+        ctx.strategy = u"exponential"_s;
+
+        // The old expression was `baseDelaySeconds * (1 << (attempt - 1))`.
+        // That shift is undefined past attempt 31, and even a well-defined
+        // result wrapped negative once multiplied by 1000 for
+        // QTimer::start(int) -- QTimer refuses a negative interval outright,
+        // which left m_retryScheduled stuck true and wedged the client: the UI
+        // looked idle while every further request was refused as "already in
+        // progress". A delay must always be a positive number of seconds.
+        for (const int attempt : {1, 2, 19, 20, 31, 32, 40, 64, 1000, 100000}) {
+            ctx.attempt = attempt;
+            const int delay = client.calculateDelay(ctx, std::nullopt);
+            QVERIFY2(delay > 0,
+                     qPrintable(QStringLiteral("attempt %1 produced %2 s").arg(attempt).arg(delay)));
+        }
+
+        // Saturates instead of wrapping: further attempts do not grow it.
+        ctx.attempt = 40;
+        const int saturated = client.calculateDelay(ctx, std::nullopt);
+        ctx.attempt = 41;
+        QCOMPARE(client.calculateDelay(ctx, std::nullopt), saturated);
+    }
+
+    void testSecondsUntilHttpDate_ParsesImfFixdate()
+    {
+        // RFC 9110 mandates this exact shape, zone name and all. Qt's
+        // RFC2822Date parser rejects the "GMT" name outright and its ISODate
+        // fallback rejects the shape, so this returned nothing and the
+        // provider's backoff instruction was silently discarded.
+        const QDateTime target = QDateTime::currentDateTime().toUTC().addSecs(90);
+        QString header = target.toString(Qt::RFC2822Date);
+        header.replace(u"+0000"_s, u"GMT"_s);
+        QVERIFY(header.endsWith(u" GMT"_s));
+
+        const std::optional<qint64> secs = TestableLlmClient::secondsUntilHttpDate(header.toLatin1());
+        QVERIFY(secs.has_value());
+        QVERIFY2(*secs >= 85 && *secs <= 95, qPrintable(QStringLiteral("parsed %1 s").arg(*secs)));
+    }
+
+    void testSecondsUntilHttpDate_AcceptsOtherZoneForms()
+    {
+        const QDateTime target = QDateTime::currentDateTime().toUTC().addSecs(45);
+        const QString rfc = target.toString(Qt::RFC2822Date);   // "... +0000"
+        const QString zulu = target.toString(Qt::ISODate);       // "...Z"
+
+        const std::optional<qint64> numericOffset = TestableLlmClient::secondsUntilHttpDate(rfc.toLatin1());
+        const std::optional<qint64> zuluZone = TestableLlmClient::secondsUntilHttpDate(zulu.toLatin1());
+        QVERIFY(numericOffset.has_value());
+        QVERIFY(zuluZone.has_value());
+        QVERIFY(*numericOffset >= 40 && *numericOffset <= 50);
+        QVERIFY(*zuluZone >= 40 && *zuluZone <= 50);
+    }
+
+    void testSecondsUntilHttpDate_RejectsUnusableValues()
+    {
+        QVERIFY(!TestableLlmClient::secondsUntilHttpDate(QByteArray()).has_value());
+        QVERIFY(!TestableLlmClient::secondsUntilHttpDate(QByteArray("not a date")).has_value());
+        // A date already in the past must not yield a negative delay.
+        const QString past =
+            QDateTime::currentDateTime().toUTC().addSecs(-120).toString(Qt::RFC2822Date);
+        QVERIFY(!TestableLlmClient::secondsUntilHttpDate(past.toLatin1()).has_value());
     }
 
     void testStoreAndClearRequest()

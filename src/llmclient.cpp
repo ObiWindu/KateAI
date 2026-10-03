@@ -16,12 +16,36 @@
 #include <QUrlQuery>
 
 #include <algorithm>
+#include <limits>
 #include <optional>
 
 using namespace Qt::Literals::StringLiterals;
 
 namespace KateAi
 {
+
+namespace
+{
+
+// Idle watchdog for an in-flight completion. Qt treats this as an *idle*
+// timeout -- it only fires when no bytes arrive -- so a long generation that
+// keeps streaming is never cut short, while a half-open connection (captive
+// portal, proxy black hole, sleeping laptop) still ends the turn with a
+// retryable TimeoutError instead of hanging forever.
+constexpr int kRequestIdleTimeoutMs = 180000;
+
+// Ceiling for backoff saturation, in seconds. Keeps the 64-bit multiply below
+// well inside range and is far beyond any sane wait.
+constexpr qint64 kRetryDelaySaturation = 1000000000;
+
+// Upper bound on the response bytes retained for error reporting. Error payloads
+// are small and sit at the end of the stream (a failed request *is* its error
+// body; a mid-stream error is already lifted into m_completionError by the SSE
+// parser), so keeping only the tail is enough and bounds memory for long
+// generations.
+constexpr qsizetype kMaxRetainedResponseBytes = 256 * 1024;
+
+} // namespace
 
 LlmClient::LlmClient(QObject *parent)
     : QObject(parent)
@@ -223,6 +247,7 @@ CompletionChunk LlmClient::parseSseLine(const QByteArray &line, QHash<int, ToolC
 void LlmClient::resetCompletionState()
 {
     m_buffer.clear();
+    m_responseBody.clear();
     m_text.clear();
     m_toolAcc.clear();
     m_completedTools.clear();
@@ -246,7 +271,8 @@ void LlmClient::complete(const QList<ChatMessage> &messages)
     m_retryContext.attempt = 0;
     m_retryContext.maxAttempts = qMax(1, m_settings.maxRetryAttempts);
     m_retryContext.baseDelaySeconds = qMax(1, m_settings.baseRetryDelaySeconds);
-    m_retryContext.maxDelaySeconds = m_settings.maxRetryDelaySeconds;
+    // A negative cap would disable capping entirely, so normalise it to "no cap".
+    m_retryContext.maxDelaySeconds = qMax(0, m_settings.maxRetryDelaySeconds);
     m_retryContext.strategy = m_settings.retryStrategy;
     m_retryContext.providerName = providerLabel(m_settings.provider);
     m_retryContext.lastErrorCategory = RetryErrorCategory::None;
@@ -319,6 +345,12 @@ void LlmClient::doComplete(const QList<ChatMessage> &messages)
 
     QNetworkRequest request{QUrl(providerBaseUrl(m_settings) + endpoint)};
     request.setHeader(QNetworkRequest::ContentTypeHeader, u"application/json"_s);
+    // Idle watchdog: a provider that accepts the connection and then goes quiet
+    // would otherwise leave the turn pending forever, because nothing else here
+    // sets a deadline. Qt treats this as an *idle* timeout -- it only fires when
+    // no bytes arrive -- so a long generation that keeps streaming is never cut
+    // short, while a half-open connection still ends with a retryable error.
+    request.setTransferTimeout(kRequestIdleTimeoutMs);
     request.setRawHeader("Authorization", authHeader.toUtf8());
     request.setRawHeader("Accept", acceptHeader.toUtf8());
     if (m_settings.provider == Provider::OpenRouter) {
@@ -327,8 +359,53 @@ void LlmClient::doComplete(const QList<ChatMessage> &messages)
     }
 
     m_reply = m_nam.post(request, requestBody);
+
+    // Watchdog: mirrors the request-level transfer timeout above. On expiry Qt
+    // reports TimeoutError, which classifyError() already maps to a retryable
+    // NetworkError.
+    auto *idleTimer = new QTimer(this);
+    idleTimer->setSingleShot(true);
+    m_requestTimers.insert(m_reply, idleTimer);
+    connect(idleTimer, &QTimer::timeout, this, [this, reply = m_reply] {
+        if (!reply || !reply->isRunning()) {
+            return;
+        }
+        stopTimerFor(reply);
+        // Detach before aborting: abort() emits finished() synchronously, which
+        // would run handleFinished() and report the stall twice. After aborting
+        // we re-enter handleFinished() by hand, so the existing classify/retry
+        // logic sees a plain network failure and the turn is never left pending.
+        reply->disconnect(this);
+        reply->abort();
+        m_completionError = u"No data received from the provider."_s;
+        handleFinished();
+    });
+    idleTimer->start(kRequestIdleTimeoutMs);
+
     connect(m_reply, &QNetworkReply::readyRead, this, &LlmClient::handleReadyRead);
     connect(m_reply, &QNetworkReply::finished, this, &LlmClient::handleFinished);
+}
+
+void LlmClient::appendResponseBody(const QByteArray &chunk)
+{
+    m_responseBody.append(chunk);
+    if (m_responseBody.size() > kMaxRetainedResponseBytes) {
+        m_responseBody.remove(0, m_responseBody.size() - kMaxRetainedResponseBytes);
+    }
+}
+
+void LlmClient::stopTimerFor(QNetworkReply *reply)
+{
+    const auto it = m_requestTimers.constFind(reply);
+    if (it == m_requestTimers.constEnd()) {
+        return;
+    }
+    const QPointer<QTimer> timer = it.value();
+    m_requestTimers.erase(it);
+    if (timer) {
+        timer->stop();
+        timer->deleteLater();
+    }
 }
 
 QJsonArray LlmClient::advertisedTools() const
@@ -504,10 +581,13 @@ void LlmClient::fetchModels(Provider provider)
     }
 
     // Respect the configured endpoint, not just the provider default, so a
-        // custom Ollama/LocalAI/ACP URL actually takes effect.
-        QNetworkRequest request{QUrl(providerBaseUrl(providerSettings) + modelsEndpoint)};
+    // custom Ollama/LocalAI/ACP URL actually takes effect.
+    QNetworkRequest request{QUrl(providerBaseUrl(providerSettings) + modelsEndpoint)};
     request.setRawHeader("Authorization", authHeader.toUtf8());
     request.setHeader(QNetworkRequest::UserAgentHeader, u"Kate AI"_s);
+    // A models listing is a single short response; it gets the same idle
+    // watchdog so a stalled endpoint cannot hang the settings dialog.
+    request.setTransferTimeout(kRequestIdleTimeoutMs);
     if (provider == Provider::OpenRouter) {
         request.setRawHeader("HTTP-Referer", "https://kate-editor.org");
         request.setRawHeader("X-Title", "Kate AI");
@@ -527,6 +607,15 @@ void LlmClient::abort()
     m_retryTimer.stop();
     m_retryScheduled = false;
     abortModelFetches();
+
+    const auto timers = m_requestTimers;
+    m_requestTimers.clear();
+    for (const QPointer<QTimer> &timer : timers) {
+        if (timer) {
+            timer->stop();
+            timer->deleteLater();
+        }
+    }
 
     QNetworkReply *reply = m_reply;
     if (!reply) {
@@ -565,7 +654,7 @@ void LlmClient::retryLastRequest()
     m_retryContext.attempt = 0;
     m_retryContext.maxAttempts = qMax(1, m_settings.maxRetryAttempts);
     m_retryContext.baseDelaySeconds = qMax(1, m_settings.baseRetryDelaySeconds);
-    m_retryContext.maxDelaySeconds = m_settings.maxRetryDelaySeconds;
+    m_retryContext.maxDelaySeconds = qMax(0, m_settings.maxRetryDelaySeconds);
     m_retryContext.strategy = m_settings.retryStrategy;
     m_retryContext.providerName = providerLabel(m_settings.provider);
     m_retryContext.lastErrorCategory = RetryErrorCategory::None;
@@ -665,7 +754,12 @@ void LlmClient::handleReadyRead()
         return;
     }
 
-    m_buffer.append(m_reply->readAll());
+    const QByteArray incoming = m_reply->readAll();
+    // Keep the tail, not just what is still buffered: a provider error is
+    // reported at the end of the response, long after the trailing
+    // unterminated line that `leftover` holds.
+    appendResponseBody(incoming);
+    m_buffer.append(incoming);
     while (true) {
         const int idx = m_buffer.indexOf('\n');
         if (idx < 0) {
@@ -714,11 +808,18 @@ void LlmClient::handleFinished()
     // schedule the next turn, and complete() must observe a fully idle client.
     m_reply = nullptr;
     reply->disconnect(this);
+    stopTimerFor(reply);
 
-    const QByteArray leftover = m_buffer + reply->readAll();
+    const QByteArray tail = reply->readAll();
+    appendResponseBody(tail);
+    const QByteArray leftover = m_buffer + tail;
     const QNetworkReply::NetworkError networkError = reply->error();
     const QString errorString = reply->errorString();
     const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    // Read the provider's backoff hint while the reply is still alive. It is
+    // deleted at the end of this block, and rawHeader() on a deleted reply is a
+    // use-after-free.
+    const std::optional<int> headerRetryAfter = parseRetryAfterHeader(reply);
     reply->deleteLater();
 
     if (m_abortRequested) {
@@ -754,16 +855,21 @@ void LlmClient::handleFinished()
         m_completedTools.append(completedToolsFromAccumulator());
     }
 
-    // Classify the error
-    RetryErrorCategory errorCategory = classifyError(status, m_completionError, leftover, networkError);
+    // Classify the error. Only trust the body as provider error text when the
+    // request actually failed: on a 200 the body is the model's own output, and
+    // an answer mentioning "blocked" or "safety" must not read as an error.
+    const bool requestFailed = networkError != QNetworkReply::NoError || status >= 400
+        || !m_completionError.isEmpty();
+    const QByteArray errorBody = requestFailed ? m_responseBody : QByteArray();
+    RetryErrorCategory errorCategory = classifyError(status, m_completionError, errorBody, networkError);
     m_retryContext.lastErrorCategory = errorCategory;
 
     // Check if we should retry
     if (errorCategory != RetryErrorCategory::NonRetryable && errorCategory != RetryErrorCategory::None) {
         // Extract provider-suggested retry delay
-        std::optional<int> providerDelaySeconds = parseRetryAfterHeader(reply);
+        std::optional<int> providerDelaySeconds = headerRetryAfter;
         if (!providerDelaySeconds.has_value()) {
-            providerDelaySeconds = parseRetryAfterFromBody(leftover);
+            providerDelaySeconds = parseRetryAfterFromBody(m_responseBody);
         }
 
         if (providerDelaySeconds.has_value()) {
@@ -779,8 +885,13 @@ void LlmClient::handleFinished()
 
     // No retry - emit final error
     QString finalError;
+    // A pure network failure never carries a status code, and "HTTP 0: ..." is
+    // noise that hides the real cause.
+    const auto describe = [status](const QString &message) {
+        return status > 0 ? u"HTTP %1: %2"_s.arg(status).arg(message) : message;
+    };
     if (!m_completionError.isEmpty()) {
-        finalError = u"HTTP %1: %2"_s.arg(status).arg(m_completionError);
+        finalError = describe(m_completionError);
     } else if (networkError != QNetworkReply::NoError || status >= 400) {
         QString message = errorString;
         if (message.isEmpty()) {
@@ -798,9 +909,9 @@ void LlmClient::handleFinished()
                 message = u"Request failed."_s;
             }
         }
-        if (!leftover.trimmed().isEmpty()) {
+        if (!m_responseBody.trimmed().isEmpty()) {
             QJsonParseError parseError;
-            const QJsonDocument doc = QJsonDocument::fromJson(leftover, &parseError);
+            const QJsonDocument doc = QJsonDocument::fromJson(m_responseBody, &parseError);
             if (parseError.error == QJsonParseError::NoError && doc.isObject()) {
                 const QJsonObject apiError = doc.object().value(u"error"_s).toObject();
                 const QString apiMessage = apiError.value(u"message"_s).toString();
@@ -809,7 +920,7 @@ void LlmClient::handleFinished()
                 }
             }
         }
-        finalError = u"HTTP %1: %2"_s.arg(status).arg(message);
+        finalError = describe(message);
     } else {
         // If the streaming response already delivered content, tool calls, or
         // the [DONE] marker, the request succeeded -- complete normally instead
@@ -819,9 +930,12 @@ void LlmClient::handleFinished()
             return;
         }
         // Some compatible providers may ignore streaming and return ordinary JSON.
-        if (!leftover.trimmed().isEmpty()) {
+        // Read the accumulated body, not just the trailing line: a pretty-printed
+        // response is spread over many lines and would otherwise be discarded by
+        // the SSE splitter above.
+        if (!m_responseBody.trimmed().isEmpty()) {
             QJsonParseError parseError;
-            const QJsonDocument doc = QJsonDocument::fromJson(leftover, &parseError);
+            const QJsonDocument doc = QJsonDocument::fromJson(m_responseBody, &parseError);
             if (parseError.error == QJsonParseError::NoError && doc.isObject()) {
                 const QJsonObject root = doc.object();
                 const QJsonValue apiError = root.value(u"error"_s);
@@ -1016,6 +1130,53 @@ RetryErrorCategory LlmClient::classifyError(int httpStatus, const QString &error
     return RetryErrorCategory::None;
 }
 
+std::optional<qint64> LlmClient::secondsUntilHttpDate(const QByteArray &header)
+{
+    // RFC 9110 requires the IMF-fixdate form, whose zone is the name "GMT":
+    //   Wed, 21 Oct 2099 07:28:00 GMT
+    // Qt's RFC2822Date parser rejects that name outright and its ISODate
+    // fallback does not accept the shape at all, so both used to fail and the
+    // caller's backoff hint was silently discarded -- the client then retried
+    // on exponential backoff while the provider had explicitly asked it to wait.
+    QString text = QString::fromLatin1(header).trimmed();
+    if (text.isEmpty()) {
+        return std::nullopt;
+    }
+
+    const int zonePos = text.lastIndexOf(u' ');
+    if (zonePos > 0) {
+        const QString zone = text.mid(zonePos + 1).toUpper();
+        if (zone == u"GMT"_s || zone == u"UT"_s || zone == u"UTC"_s || zone == u"Z"_s) {
+            text = text.left(zonePos) + u" +0000"_s;
+        }
+    }
+
+    QDateTime parsed = QDateTime::fromString(text, Qt::RFC2822Date);
+    if (!parsed.isValid()) {
+        parsed = QDateTime::fromString(text, Qt::ISODate);
+    }
+    if (!parsed.isValid()) {
+        return std::nullopt;
+    }
+
+    // qint64: secsTo() returns seconds, and a date more than ~68 years out
+    // overflows an int and wraps into a negative delay.
+    const qint64 secs = QDateTime::currentDateTime().toUTC().secsTo(parsed.toUTC());
+    if (secs <= 0) {
+        return std::nullopt;
+    }
+    return secs;
+}
+
+std::optional<int> LlmClient::clampProviderDelay(qint64 seconds) const
+{
+    if (seconds <= 0) {
+        return std::nullopt;
+    }
+    const qint64 cap = m_retryContext.maxDelaySeconds > 0 ? m_retryContext.maxDelaySeconds : 300;
+    return static_cast<int>(qMin(seconds, cap));
+}
+
 std::optional<int> LlmClient::parseRetryAfterHeader(const QNetworkReply *reply) const
 {
     if (!reply) {
@@ -1034,16 +1195,9 @@ std::optional<int> LlmClient::parseRetryAfterHeader(const QNetworkReply *reply) 
             // Cap at reasonable maximum
             return std::min(seconds, m_retryContext.maxDelaySeconds > 0 ? m_retryContext.maxDelaySeconds : 300);
         }
-        // Try parsing as HTTP-date
-        QDateTime retryDate = QDateTime::fromString(QString::fromLatin1(retryAfterHeader), Qt::RFC2822Date);
-        if (!retryDate.isValid()) {
-            retryDate = QDateTime::fromString(QString::fromLatin1(retryAfterHeader), Qt::ISODate);
-        }
-        if (retryDate.isValid()) {
-            int secs = QDateTime::currentDateTime().secsTo(retryDate);
-            if (secs > 0) {
-                return std::min(secs, m_retryContext.maxDelaySeconds > 0 ? m_retryContext.maxDelaySeconds : 300);
-            }
+        // Try parsing as HTTP-date.
+        if (const std::optional<qint64> secs = secondsUntilHttpDate(retryAfterHeader)) {
+            return clampProviderDelay(*secs);
         }
     }
 
@@ -1063,9 +1217,9 @@ std::optional<int> LlmClient::parseRetryAfterHeader(const QNetworkReply *reply) 
         qint64 resetTime = resetHeader.toLongLong(&ok);
         if (ok && resetTime > 0) {
             QDateTime resetDateTime = QDateTime::fromSecsSinceEpoch(resetTime);
-            int secs = QDateTime::currentDateTime().secsTo(resetDateTime);
+            const qint64 secs = QDateTime::currentDateTime().toUTC().secsTo(resetDateTime.toUTC());
             if (secs > 0) {
-                return std::min(secs, m_retryContext.maxDelaySeconds > 0 ? m_retryContext.maxDelaySeconds : 300);
+                return clampProviderDelay(secs);
             }
         }
     }
@@ -1166,14 +1320,26 @@ int LlmClient::calculateDelay(const RetryContext &ctx, std::optional<int> provid
     }
 
     // Fall back to configured strategy
-    int attempt = ctx.attempt; // 1-based for first retry
-    int delay = 0;
+    qint64 delay = 0;
 
     if (ctx.strategy.compare(u"fixed"_s, Qt::CaseInsensitive) == 0) {
         delay = ctx.baseDelaySeconds;
     } else {
-        // Exponential backoff: base * 2^(attempt-1)
-        delay = ctx.baseDelaySeconds * (1 << (attempt - 1));
+        // Exponential backoff: base * 2^(attempt-1).
+        //
+        // Computed by repeated doubling in 64-bit and saturating. The previous
+        // `base * (1 << (attempt - 1))` overflowed twice over: the shift is
+        // undefined once attempt exceeds 31, and even a well-defined result
+        // wraps negative once it is multiplied by 1000 for QTimer::start(int).
+        // A negative interval makes QTimer refuse to start at all, which left
+        // m_retryScheduled stuck true -- the UI showed an idle client while
+        // every subsequent request was rejected as "already in progress".
+        delay = qMax(1, ctx.baseDelaySeconds);
+        const int doublings = qBound(0, ctx.attempt - 1, 62);
+        for (int i = 0; i < doublings && delay < kRetryDelaySaturation; ++i) {
+            delay *= 2;
+        }
+        delay = qMin(delay, kRetryDelaySaturation);
     }
 
     // Cap at max delay if configured
@@ -1181,7 +1347,7 @@ int LlmClient::calculateDelay(const RetryContext &ctx, std::optional<int> provid
         delay = ctx.maxDelaySeconds;
     }
 
-    return qMax(1, delay);
+    return static_cast<int>(qMin<qint64>(qMax<qint64>(1, delay), std::numeric_limits<int>::max()));
 }
 
 QString LlmClient::formatRetryMessage(const RetryContext &ctx, int delaySeconds) const
@@ -1305,8 +1471,19 @@ void LlmClient::scheduleRetry(const RetryContext &ctx)
     // Update stored context
     m_retryContext = nextCtx;
 
-    // Start timer
-    m_retryTimer.start(delaySeconds * 1000);
+    // QTimer::start() takes an int millisecond interval. Clamp the seconds into
+    // a range that survives the *1000, so the timer always actually starts.
+    const int intervalMs = static_cast<int>(
+        qMin<qint64>(qMax<qint64>(1, qint64(delaySeconds) * 1000), std::numeric_limits<int>::max()));
+    m_retryTimer.start(intervalMs);
+    if (!m_retryTimer.isActive()) {
+        // Unreachable while the interval is clamped, but a refused timer would
+        // strand m_retryScheduled and wedge the client, so fail loudly instead.
+        m_retryScheduled = false;
+        clearStoredRequest();
+        Q_EMIT failed(u"Could not schedule the retry."_s);
+        return;
+    }
 }
 
 void LlmClient::executeRetry()

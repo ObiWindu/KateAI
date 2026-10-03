@@ -6,6 +6,7 @@
 #pragma once
 
 #include <QByteArray>
+#include <QHash>
 #include <QJsonObject>
 #include <QList>
 #include <QObject>
@@ -115,7 +116,10 @@ Q_SIGNALS:
 private:
     void finishSearch(const QString &callId, const QList<WebSearchResult> &results, const QString &error);
     void finishFetch(const QString &callId, const QString &title, const QString &text, const QString &error);
-    void onReplyFinished(QNetworkReply *reply, const QString &callId, bool isFetch);
+    void onReplyFinished(QNetworkReply *reply, const QString &callId, bool isFetch, const QString &query);
+    // Stops and removes the watchdog timer belonging to `reply`. Must run
+    // before the reply is deleted: the timer lambda holds a pointer to it.
+    void stopTimerFor(QNetworkReply *reply);
 
     Provider m_provider = Provider::DuckDuckGo;
     QString m_apiKey;
@@ -126,7 +130,10 @@ private:
     // In-flight replies, so abort() can cancel them and the destructor does
     // not leave sockets running against a destroyed object.
     QList<QPointer<QNetworkReply>> m_replies;
-    QList<QPointer<QTimer>> m_timers;
+    // Watchdog timers keyed by the reply they guard. Keyed rather than listed
+    // so a completed request can drop its timer, which is what stops a timer
+    // from dereferencing a reply that has already been deleted.
+    QHash<QNetworkReply *, QPointer<QTimer>> m_timers;
 };
 
 } // namespace KateAi

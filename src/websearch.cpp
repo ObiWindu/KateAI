@@ -7,8 +7,6 @@
 
 #include <KLocalizedString>
 
-#include <KLocalizedString>
-
 #include <QHash>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -32,13 +30,15 @@ namespace
 // obviously automated client.
 const char *kUserAgent = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
 
-QNetworkRequest makeRequest(const QUrl &url)
+QNetworkRequest makeRequest(const QUrl &url, int transferTimeoutMs)
 {
     QNetworkRequest request(url);
     request.setRawHeader("User-Agent", QByteArray(kUserAgent));
     request.setRawHeader("Accept-Language", "en-US,en;q=0.9");
     request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
-    request.setTransferTimeout(20000);
+    // Honour the configured budget rather than a hardcoded constant, so raising
+    // the timeout in Settings actually affects the transfer.
+    request.setTransferTimeout(transferTimeoutMs);
     return request;
 }
 
@@ -80,12 +80,28 @@ WebSearch::~WebSearch()
             reply->abort();
         }
     }
+    // Stop the watchdogs so none of them can fire against a reply that the
+    // destructor is about to tear down.
     const auto timers = m_timers;
     m_timers.clear();
     for (const QPointer<QTimer> &timer : timers) {
         if (timer) {
             timer->stop();
         }
+    }
+}
+
+void WebSearch::stopTimerFor(QNetworkReply *reply)
+{
+    const auto it = m_timers.constFind(reply);
+    if (it == m_timers.constEnd()) {
+        return;
+    }
+    const QPointer<QTimer> timer = it.value();
+    m_timers.erase(it);
+    if (timer) {
+        timer->stop();
+        timer->deleteLater();
     }
 }
 
@@ -197,18 +213,21 @@ bool WebSearch::isFetchableUrl(const QString &url)
 
 void WebSearch::abort()
 {
-    const auto replies = m_replies;
-    m_replies.clear();
-    for (const QPointer<QNetworkReply> &reply : replies) {
-        if (reply) {
-            reply->abort();
-        }
-    }
+    // Drop the watchdogs first: a timer that survives its reply would later
+    // dereference freed memory.
     const auto timers = m_timers;
     m_timers.clear();
     for (const QPointer<QTimer> &timer : timers) {
         if (timer) {
             timer->stop();
+            timer->deleteLater();
+        }
+    }
+    const auto replies = m_replies;
+    m_replies.clear();
+    for (const QPointer<QNetworkReply> &reply : replies) {
+        if (reply) {
+            reply->abort();
         }
     }
 }
@@ -235,11 +254,11 @@ void WebSearch::search(const QString &query, const QString &callId)
         queryItems.addQueryItem(QStringLiteral("q"), trimmed);
         queryItems.addQueryItem(QStringLiteral("kl"), QStringLiteral("wt-wt"));
         url.setQuery(queryItems);
-        reply = m_nam->get(makeRequest(url));
+        reply = m_nam->get(makeRequest(url, m_timeoutMs));
         break;
     }
     case Provider::Tavily: {
-        QNetworkRequest request = makeRequest(QUrl(QStringLiteral("https://api.tavily.com/search")));
+        QNetworkRequest request = makeRequest(QUrl(QStringLiteral("https://api.tavily.com/search")), m_timeoutMs);
         request.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
         const QJsonObject payload{{QStringLiteral("api_key"), m_apiKey},
                                   {QStringLiteral("query"), trimmed},
@@ -254,7 +273,7 @@ void WebSearch::search(const QString &query, const QString &callId)
         braveItems.addQueryItem(QStringLiteral("q"), trimmed);
         braveItems.addQueryItem(QStringLiteral("count"), QString::number(m_maxResults));
         url.setQuery(braveItems);
-        QNetworkRequest request = makeRequest(url);
+        QNetworkRequest request = makeRequest(url, m_timeoutMs);
         request.setRawHeader("X-Subscription-Token", m_apiKey.toUtf8());
         request.setRawHeader("Accept", "application/json");
         reply = m_nam->get(request);
@@ -266,7 +285,7 @@ void WebSearch::search(const QString &query, const QString &callId)
         searxItems.addQueryItem(QStringLiteral("q"), trimmed);
         searxItems.addQueryItem(QStringLiteral("format"), QStringLiteral("json"));
         url.setQuery(searxItems);
-        reply = m_nam->get(makeRequest(url));
+        reply = m_nam->get(makeRequest(url, m_timeoutMs));
         break;
     }
     case Provider::Disabled:
@@ -280,17 +299,26 @@ void WebSearch::search(const QString &query, const QString &callId)
     auto *timer = new QTimer(this);
     timer->setSingleShot(true);
     timer->setInterval(m_timeoutMs);
-    connect(timer, &QTimer::timeout, this, [this, reply, callId] {
-        if (reply->isRunning()) {
-            reply->abort();
-            finishSearch(callId, {}, i18n("The search request timed out after %1 seconds.", m_timeoutMs / 1000));
+    m_timers.insert(reply, timer);
+    connect(timer, &QTimer::timeout, this, [this, reply, callId, trimmed] {
+        if (!reply || !reply->isRunning()) {
+            return;
         }
+        stopTimerFor(reply);
+        // Detach before aborting: abort() emits finished() synchronously, which
+        // would run onReplyFinished() and report this call a second time. The
+        // agent loop matches replies by callId, so a duplicate would pass its
+        // guard and double-count the completion.
+        reply->disconnect(this);
+        m_replies.removeAll(reply);
+        reply->abort();
+        reply->deleteLater();
+        finishSearch(callId, {}, i18n("The search for '%1' timed out after %2 seconds.", trimmed, m_timeoutMs / 1000));
     });
-    m_timers.append(timer);
     timer->start();
 
-    connect(reply, &QNetworkReply::finished, this, [this, reply, callId] {
-        onReplyFinished(reply, callId, false);
+    connect(reply, &QNetworkReply::finished, this, [this, reply, callId, trimmed] {
+        onReplyFinished(reply, callId, false, trimmed);
     });
 }
 
@@ -307,28 +335,38 @@ void WebSearch::fetchPage(const QString &url, const QString &callId)
         return;
     }
 
-    QNetworkReply *reply = m_nam->get(makeRequest(QUrl(url.trimmed())));
+    QNetworkReply *reply = m_nam->get(makeRequest(QUrl(url.trimmed()), m_timeoutMs));
     m_replies.append(reply);
 
     auto *timer = new QTimer(this);
     timer->setSingleShot(true);
     timer->setInterval(m_timeoutMs);
+    m_timers.insert(reply, timer);
     connect(timer, &QTimer::timeout, this, [this, reply, callId] {
-        if (reply->isRunning()) {
-            reply->abort();
-            finishFetch(callId, QString(), QString(), i18n("The page did not load within %1 seconds.", m_timeoutMs / 1000));
+        if (!reply || !reply->isRunning()) {
+            return;
         }
+        stopTimerFor(reply);
+        // Detach first, so the abort below cannot reach onReplyFinished() and
+        // report this fetch twice.
+        reply->disconnect(this);
+        m_replies.removeAll(reply);
+        reply->abort();
+        reply->deleteLater();
+        finishFetch(callId, QString(), QString(), i18n("The page did not load within %1 seconds.", m_timeoutMs / 1000));
     });
-    m_timers.append(timer);
     timer->start();
 
     connect(reply, &QNetworkReply::finished, this, [this, reply, callId] {
-        onReplyFinished(reply, callId, true);
+        onReplyFinished(reply, callId, true, QString());
     });
 }
 
-void WebSearch::onReplyFinished(QNetworkReply *reply, const QString &callId, bool isFetch)
+void WebSearch::onReplyFinished(QNetworkReply *reply, const QString &callId, bool isFetch, const QString &query)
 {
+    // Stop the watchdog before the reply goes away: its lambda holds a pointer
+    // to this reply and would dereference freed memory when it fired.
+    stopTimerFor(reply);
     m_replies.removeAll(reply);
     reply->deleteLater();
 
@@ -385,7 +423,7 @@ void WebSearch::onReplyFinished(QNetworkReply *reply, const QString &callId, boo
     }
 
     if (results.isEmpty()) {
-        finishSearch(callId, {}, i18n("The search returned no results for '%1'.").arg(QString()));
+        finishSearch(callId, {}, i18n("The search returned no results for '%1'.").arg(query));
         return;
     }
     finishSearch(callId, results, QString());
