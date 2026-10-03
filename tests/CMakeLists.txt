@@ -15,6 +15,7 @@ kateai_test(test_multiagent)
 kateai_test(test_websearch)
 kateai_test(test_contextmanager)
 kateai_test(test_providers)
+kateai_test(test_transcriptlayout)
 
 # Renders through QTextDocument, which needs a QGuiApplication.
 add_executable(test_codehighlight test_codehighlight.cpp)
@@ -38,6 +39,13 @@ add_test(NAME test_mcpintegration
 add_executable(test_tools test_tools.cpp)
 target_link_libraries(test_tools PRIVATE kateai_core Qt6::Test)
 add_test(NAME test_tools COMMAND test_tools -platform offscreen)
+
+# Drives a QWidget queue, so it needs the Qt Widgets library and a QApplication.
+# chattheme.cpp is included because the tracker paints through it, and the real
+# build gets it from the kateai plugin target rather than kateai_core.
+add_executable(test_edittracker test_edittracker.cpp ../src/edittracker.cpp ../src/chattheme.cpp)
+target_link_libraries(test_edittracker PRIVATE kateai_core Qt6::Test Qt6::Widgets)
+add_test(NAME test_edittracker COMMAND test_edittracker -platform offscreen)
 
 add_executable(test_promptedit test_promptedit.cpp ../src/promptedit.cpp)
 target_link_libraries(test_promptedit PRIVATE kateai_core Qt6::Test)

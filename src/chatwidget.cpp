@@ -7,6 +7,7 @@
 
 #include "agenttext.h"
 #include "chattheme.h"
+#include "contextmanager.h"
 #include "permissionbar.h"
 #include "promptedit.h"
 #include "turnstatus.h"
@@ -16,6 +17,7 @@
 #include "subtaskwidget.h"
 #include "edittracker.h"
 #include "tools.h"
+#include "transcriptlayout.h"
 #include "checkpoint.h"
 #include "mcp.h"
 #include "modes.h"
@@ -28,6 +30,8 @@
 #include <QClipboard>
 #include <QColor>
 #include <QComboBox>
+#include <QFile>
+#include <QFileInfo>
 #include <QGuiApplication>
 #include <QGraphicsOpacityEffect>
 #include <QHBoxLayout>
@@ -36,6 +40,7 @@
 #include <QMenu>
 #include <QMessageBox>
 #include <QCursor>
+#include <QFontMetrics>
 #include <QPlainTextEdit>
 #include <QPropertyAnimation>
 #include <QPointer>
@@ -72,12 +77,22 @@ void attachPulseEffect(QLabel *label)
     label->setGraphicsEffect(effect);
 }
 
+// Tools whose effects land in a file, and therefore the ones the edit tracker
+// needs to know about. The mutating-tool list was open-coded in four separate
+// places (working label, tool tracking, transcript rebuild, risk colouring) and
+// had already drifted: an unlisted mutator meant a silent gap in the review
+// queue.
+bool isFileMutatingTool(const QString &toolName)
+{
+    return toolName == u"write_file"_s || toolName == u"edit_file"_s || toolName == u"multi_edit_file"_s
+        || toolName == u"multi_replace_file_content"_s;
+}
+
 QString workingLabelForTool(const QString &toolName)
 {
     // Plain verbs, no emoji: this line re-renders on every tool call and sits
     // at the very bottom of the transcript, where pictograms read as noise.
-    if (toolName == u"write_file"_s || toolName == u"edit_file"_s
-        || toolName == u"multi_edit_file"_s || toolName == u"multi_replace_file_content"_s) {
+    if (isFileMutatingTool(toolName)) {
         return i18n("Editing");
     }
     if (toolName == u"read_file"_s) {
@@ -102,7 +117,11 @@ namespace KateAi
 
 ChatWidget::ChatWidget(QWidget *parent)
     : QWidget(parent)
-    , m_userScrolledUp(true)
+    // Start pinned to the bottom. The scrollbar only reports valueChanged once
+    // it actually moves, so a `true` here survived until the user's first scroll
+    // and made the opening tool cards and thinking blocks of the very first turn
+    // show a "jump to latest" button instead of following along.
+    , m_userScrolledUp(false)
 {
     auto *root = new QVBoxLayout(this);
     root->setContentsMargins(0, 0, 0, 0);
@@ -276,38 +295,15 @@ ChatWidget::ChatWidget(QWidget *parent)
     m_transcriptLayout->addWidget(createWelcomeWidget());
 
     // Dynamic status indicators (thinking/working) - always at bottom of transcript
-    auto *indicatorsContainer = new QWidget(m_transcriptContainer);
-    indicatorsContainer->setObjectName(u"indicatorsContainer"_s);
-    auto *indicatorsLayout = new QHBoxLayout(indicatorsContainer);
-    indicatorsLayout->setContentsMargins(0, 4, 0, 4);
-    indicatorsLayout->setSpacing(8);
-    indicatorsLayout->addStretch();
-
-    // Thinking indicator. Plain text rather than an emoji badge: it re-renders
-    // on every tick at the end of the transcript, so it stays low contrast and
-    // lets the tool cards above it carry the actual signal.
-    m_thinkingIndicator = new QLabel(i18n("Thinking") + u"..."_s, indicatorsContainer);
-    m_thinkingIndicator->setStyleSheet(ChatTheme::activityPill());
-    attachPulseEffect(m_thinkingIndicator);
-    m_thinkingIndicator->hide();
-    indicatorsLayout->addWidget(m_thinkingIndicator);
-
-    // Working indicator (shows when AI is running tools/reading/editing)
-    m_workingLabelBase = i18n("Working");
-    m_workingIndicator = new QLabel(m_workingLabelBase + u"..."_s, indicatorsContainer);
-    m_workingIndicator->setStyleSheet(ChatTheme::activityPill());
-    attachPulseEffect(m_workingIndicator);
-    m_workingIndicator->hide();
-    indicatorsLayout->addWidget(m_workingIndicator);
-
-    m_transcriptLayout->addWidget(indicatorsContainer);
+    m_indicatorsRow = createIndicatorsRow();
+    m_transcriptLayout->addWidget(m_indicatorsRow);
     m_scrollArea->setWidget(m_transcriptContainer);
     root->addWidget(m_scrollArea, 1);
 
-    // Ensure chat starts at the top (welcome widget visible)
+    // Bottom-anchored: start pinned to the newest content, not the oldest.
     QTimer::singleShot(0, this, [thisWeak = QPointer<ChatWidget>(this)]() {
-        if (thisWeak && thisWeak->m_scrollArea) {
-            thisWeak->m_scrollArea->verticalScrollBar()->setValue(0);
+        if (thisWeak) {
+            thisWeak->forceScrollToBottom();
         }
     });
 
@@ -319,7 +315,8 @@ ChatWidget::ChatWidget(QWidget *parent)
 
     connect(m_scrollArea->verticalScrollBar(), &QScrollBar::valueChanged, this, [this](int value) {
         auto *sb = m_scrollArea->verticalScrollBar();
-        if (sb->maximum() - value <= 40) {
+        const bool following = transcriptShouldFollowTail(value, sb->maximum());
+        if (following) {
             m_userScrolledUp = false;
             if (m_scrollToBottomBtn && m_scrollToBottomBtn->isVisible()) {
                 animateScrollButtonHide();
@@ -337,10 +334,16 @@ ChatWidget::ChatWidget(QWidget *parent)
         }
         if (!m_userScrolledUp) {
             sb->setValue(max);
-        } else if (m_scrollToBottomBtn && max - sb->value() > 40) {
-            updateScrollButtonPosition();
-            animateScrollButtonShow();
-            m_scrollToBottomBtn->raise();
+        } else if (!transcriptShouldFollowTail(sb->value(), max)) {
+            if (m_scrollToBottomBtn) {
+                animateScrollButtonShow();
+                m_scrollToBottomBtn->raise();
+            }
+        } else if (m_scrollToBottomBtn && m_scrollToBottomBtn->isVisible()) {
+            // The tail grew back into view under the user (a collapsed card, a
+            // narrower panel). Nothing is hidden any more, so retire the button.
+            m_userScrolledUp = false;
+            animateScrollButtonHide();
         }
     });
 
@@ -612,19 +615,20 @@ ChatWidget::ChatWidget(QWidget *parent)
         appendTranscriptWidget(toolWidget);
         applyTranscriptCollapse();
 
-        // Track write/edit tool calls for edit tracking in AcceptEdits mode
-        if ((request.toolName == u"write_file"_s || request.toolName == u"edit_file"_s
-             || request.toolName == u"multi_edit_file"_s || request.toolName == u"multi_replace_file_content"_s) &&
-            m_settings.permissionMode == PermissionMode::AcceptEdits) {
-            // Read the old content before the edit
-            PermissionRequest trackedRequest = request;
-            QString oldContent;
-            QString error;
-            if (m_agent.documentBridge()) {
-                m_agent.documentBridge()->readDocument(request.path, &oldContent);
-            }
-            trackedRequest.details = oldContent; // Store old content in details field temporarily
-            m_pendingToolCalls.insert(request.toolCallId, trackedRequest);
+        // Track write/edit tool calls for edit tracking in AcceptEdits mode.
+        // The pre-edit snapshot has to be taken here, at toolStarted, because
+        // that is the last moment before the tool runs: by toolFinished the file
+        // on disk already holds the new content.
+        if (isFileMutatingTool(request.toolName) && m_settings.permissionMode == PermissionMode::AcceptEdits) {
+            PendingEdit pending;
+            pending.toolName = request.toolName;
+            pending.path = request.path;
+            pending.diff = request.describeDiff;
+            // existed == false means write_file just created the file, which is
+            // the one case where rejecting has to delete rather than restore.
+            pending.existed = m_agent.documentBridge()
+                && m_agent.documentBridge()->readDocument(request.path, &pending.oldContent);
+            m_pendingToolCalls.insert(request.toolCallId, pending);
         }
 
         scrollToBottom();
@@ -640,22 +644,21 @@ ChatWidget::ChatWidget(QWidget *parent)
         ++m_completedToolCount;
         m_turnStatus->setCompletedToolCount(m_completedToolCount);
 
-        // Handle edit tracking for AcceptEdits mode
+        // Handle edit tracking for AcceptEdits mode. A tool that did not succeed
+        // must not enter the queue: there is nothing to keep or revert, and
+        // showing a "pending" row for a failed write invited the user to approve
+        // a change that never landed.
         if (m_settings.permissionMode == PermissionMode::AcceptEdits) {
             auto it = m_pendingToolCalls.find(result.toolCallId);
             if (it != m_pendingToolCalls.end()) {
-                const PermissionRequest &request = it.value();
-                if ((request.toolName == u"write_file"_s || request.toolName == u"edit_file"_s
-                     || request.toolName == u"multi_edit_file"_s || request.toolName == u"multi_replace_file_content"_s) && result.ok) {
-                    // Read the new content from the file
+                const PendingEdit pending = it.value();
+                if (result.ok) {
                     QString newContent;
                     if (m_agent.documentBridge()) {
-                        m_agent.documentBridge()->readDocument(request.path, &newContent);
+                        m_agent.documentBridge()->readDocument(pending.path, &newContent);
                     }
-                    // Get old content from details field (stored in toolStarted)
-                    QString oldContent = request.details;
-                    // Add to edit tracker with diff, old content, and new content
-                    m_editTracker->addEdit(request.path, request.toolName, request.describeDiff, oldContent, newContent);
+                    m_editTracker->addEdit(pending.path, pending.toolName, pending.diff,
+                                           pending.oldContent, newContent, !pending.existed);
                 }
                 m_pendingToolCalls.erase(it);
             }
@@ -734,6 +737,10 @@ ChatWidget::ChatWidget(QWidget *parent)
         m_prompt->setFocus();
         setThinkingIndicator(false);
         setWorkingIndicator(false);
+        // Refresh the context readout at the end of a turn: during one it would
+        // recompute an estimate over a history that is still growing, and the
+        // number the user acts on is the one for the next request.
+        updateTokenDisplay();
         // Settle the status strip back to its idle hint now the turn is over.
         m_turnStatus->setBusy(false);
         // Auto-save conversation after each completed turn so it always
@@ -799,31 +806,41 @@ ChatWidget::ChatWidget(QWidget *parent)
     connect(&m_agent, &AgentLoop::turnFinished, this, &ChatWidget::markRunningSubtasksAbandoned);
 
     // Edit tracker signals
-    connect(m_editTracker, &EditTracker::editAccepted, this, [this](const QString &path, const QString &toolName, const QString &newContent) {
-        Q_UNUSED(path);
+    connect(m_editTracker, &EditTracker::editAccepted, this, [this](const QString &path, const QString &toolName,
+                                                                     const QString &newContent) {
         Q_UNUSED(toolName);
         Q_UNUSED(newContent);
-        // Edit is already applied, just acknowledge
-        // Could show a brief confirmation message
+        // Nothing to write: in AcceptEdits the file was already written when the
+        // tool ran, so accepting only settles it in the queue. Say so, because
+        // the button gives no other feedback.
+        showInfoMessage(i18n("Kept changes to %1", QFileInfo(path).fileName()), false);
     });
-    connect(m_editTracker, &EditTracker::editRejected, this, [this](const QString &path, const QString &toolName, const QString &oldContent) {
+    connect(m_editTracker, &EditTracker::editRejected, this, [this](const QString &path, const QString &toolName,
+                                                                    const QString &oldContent) {
         Q_UNUSED(toolName);
-        // Revert the edit by writing the old content back
-        if (m_agent.documentBridge()) {
-            QString error;
-            if (m_agent.documentBridge()->writeDocument(path, oldContent, &error)) {
-                showInfoMessage(i18n("Edit reverted for %1", path), false);
-            } else {
-                showInfoMessage(i18n("Failed to revert edit for %1: %2", path, error), true);
-            }
-        } else {
+        if (!m_agent.documentBridge()) {
             showInfoMessage(i18n("Cannot revert edit for %1: document bridge not available", path), true);
+            return;
+        }
+        QString error;
+        if (m_agent.documentBridge()->writeDocument(path, oldContent, &error)) {
+            showInfoMessage(i18n("Edit reverted for %1", QFileInfo(path).fileName()), false);
+        } else {
+            showInfoMessage(i18n("Failed to revert edit for %1: %2", QFileInfo(path).fileName(), error), true);
         }
     });
-    connect(m_editTracker, &EditTracker::editsChanged, this, [this](bool hasEdits) {
-        Q_UNUSED(hasEdits);
-        // Could update UI state based on pending edits
+    // Rejecting an edit to a file the agent created has to remove the file.
+    // Writing the empty pre-edit content back instead would leave a zero-byte
+    // file behind, which is worse than the file never having existed.
+    connect(m_editTracker, &EditTracker::fileCreatedThenRejected, this, [this](const QString &path) {
+        if (!QFile::remove(path)) {
+            showInfoMessage(i18n("Failed to delete %1", QFileInfo(path).fileName()), true);
+            return;
+        }
+        showInfoMessage(i18n("Deleted %1", QFileInfo(path).fileName()), false);
+        Q_EMIT aboutToSubmit(); // Let Kate reload so the buffer matches the disk again.
     });
+    connect(m_editTracker, &EditTracker::statusMessage, this, &ChatWidget::showInfoMessage);
 
     connect(&m_agent, &AgentLoop::modelsReceived, this, [this](Provider provider, const QStringList &models) {
         m_modelCatalog.insert(provider, models);
@@ -888,9 +905,13 @@ ChatWidget::~ChatWidget()
 
 void ChatWidget::addUserMessage(const QString &text)
 {
-    // Remove welcome widget if present
+    // Drop the welcome widget. deleteLater() left it parented and in the layout
+    // until the event loop ran, so for a frame the empty-state hero sat directly
+    // above the first real message with its suggestion chips still clickable;
+    // clicking one of those fired a second prompt out of a dead widget.
     if (auto *welcome = m_transcriptContainer->findChild<QWidget *>(u"welcomeWidget"_s)) {
-        welcome->deleteLater();
+        m_transcriptLayout->removeWidget(welcome);
+        delete welcome;
     }
 
     // Auto-update thread title on the first user message
@@ -935,6 +956,7 @@ void ChatWidget::addUserMessage(const QString &text)
     if (!m_loadingConversation) {
         forceScrollToBottom();
     }
+    updateTokenDisplay();
 }
 
 void ChatWidget::addActivityMessage(const QString &text)
@@ -1025,9 +1047,6 @@ void ChatWidget::setStreaming(const QString &text)
         return;
     }
     m_activeAssistantBrowser->setDocument(makeMarkdownDocument(closedMarkdown(m_streamText)));
-    if (!m_activeAssistantBrowser) {
-        return;
-    }
     scheduleStreamHeightUpdate();
 }
 
@@ -1262,7 +1281,11 @@ void ChatWidget::addPlanChecklist(const QJsonArray &plan)
         QLayoutItem *item = m_planLayout->takeAt(1);
         if (item) {
             if (item->widget()) {
-                item->widget()->deleteLater();
+                // delete(), not deleteLater(): a deferred deletion leaves the row
+                // parented and painting over the top of the list until the event
+                // loop runs, and a plan update can rebuild several times in one
+                // turn, stacking ghosts over the real steps.
+                delete item->widget();
             }
             delete item;
         }
@@ -1284,10 +1307,30 @@ void ChatWidget::addPlanChecklist(const QJsonArray &plan)
 
 void ChatWidget::markPlanStepCompleted(const QString &stepId)
 {
-    for (QCheckBox *cb : m_planSteps.keys()) {
-        if (m_planSteps.value(cb) == stepId) {
-            cb->setChecked(true);
+    bool matched = false;
+    for (auto it = m_planSteps.cbegin(); it != m_planSteps.cend(); ++it) {
+        if (it.value() == stepId) {
+            if (it.key()) {
+                it.key()->setChecked(true);
+            }
+            matched = true;
             break;
+        }
+    }
+    // Completing the last outstanding step finishes the plan, so tick the rest
+    // too. The checklist is what the user reads afterwards as a record of what
+    // the run actually did; leaving the tail unchecked after a plan that is
+    // demonstrably complete made it look like the agent stopped part-way.
+    if (matched) {
+        for (auto it = m_planSteps.cbegin(); it != m_planSteps.cend(); ++it) {
+            if (it.key() && !it.key()->isChecked()) {
+                return;
+            }
+        }
+        for (auto it = m_planSteps.cbegin(); it != m_planSteps.cend(); ++it) {
+            if (it.key()) {
+                it.key()->setChecked(true);
+            }
         }
     }
 }
@@ -1299,9 +1342,9 @@ void ChatWidget::freezeStreaming()
     }
     if (m_activeAssistantBrowser && !m_streamText.isEmpty()) {
         m_activeAssistantBrowser->setDocument(makeMarkdownDocument(m_streamText));
-        if (m_activeAssistantBrowser) {
-            const int docH = static_cast<int>(m_activeAssistantBrowser->document()->size().height()) + 16;
-            m_activeAssistantBrowser->setFixedHeight(std::max(30, docH));
+        const int docH = std::max(30, static_cast<int>(m_activeAssistantBrowser->document()->size().height()) + 16);
+        if (m_activeAssistantBrowser->height() != docH) {
+            m_activeAssistantBrowser->setFixedHeight(docH);
         }
     }
     if (m_activeAssistantCopyBtn) {
@@ -1324,13 +1367,25 @@ void ChatWidget::freezeStreaming()
 
 void ChatWidget::scrollToBottom()
 {
-    if (m_userScrolledUp) {
+    if (!m_scrollArea) {
+        return;
+    }
+    auto *sb = m_scrollArea->verticalScrollBar();
+    const bool canScroll = sb && !transcriptShouldFollowTail(sb->value(), sb->maximum());
+    if (m_userScrolledUp && canScroll) {
         if (m_scrollToBottomBtn) {
-            updateScrollButtonPosition();
-            m_scrollToBottomBtn->show();
+            animateScrollButtonShow();
             m_scrollToBottomBtn->raise();
         }
         return;
+    }
+    if (m_userScrolledUp && !canScroll) {
+        // Nothing left below, so the "jump to latest" affordance has nothing to
+        // offer. Leaving it up parked the button over the newest message.
+        m_userScrolledUp = false;
+        if (m_scrollToBottomBtn && m_scrollToBottomBtn->isVisible()) {
+            animateScrollButtonHide();
+        }
     }
     forceScrollToBottom();
 }
@@ -1353,7 +1408,7 @@ void ChatWidget::forceScrollToBottom()
     // geometry until the timer fires is what makes the transcript jump.
     sb->setValue(sb->maximum());
     // Re-pin once Qt has flushed the pending layout, so the range read above is
-    // the post-relayout one rather than the pre-grow one.
+    // the post-relayout one rather than a pre-grow one.
     QTimer::singleShot(0, this, [thisWeak = QPointer<ChatWidget>(this)]() {
         if (thisWeak && thisWeak->m_scrollArea) {
             auto *bar = thisWeak->m_scrollArea->verticalScrollBar();
@@ -1438,7 +1493,7 @@ void ChatWidget::tickIndicators()
 
     if (m_isWorking && m_workingIndicator) {
         if (m_workingLabelBase.isEmpty()) {
-            m_workingLabelBase = u"⚙️  "_s + i18n("Working");
+            m_workingLabelBase = i18n("Working");
         }
         m_workingIndicator->setText(m_workingLabelBase + dots);
         if (auto *effect = qobject_cast<QGraphicsOpacityEffect *>(m_workingIndicator->graphicsEffect())) {
@@ -1738,6 +1793,37 @@ QWidget *ChatWidget::createWelcomeWidget()
     return welcome;
 }
 
+// The live "Thinking" / "Working" row that always sits at the bottom of the
+// transcript. Built through a helper because it has to be recreated in two
+// places, and the two copies had already drifted apart.
+QWidget *ChatWidget::createIndicatorsRow()
+{
+    auto *row = new QWidget(m_transcriptContainer);
+    row->setObjectName(u"indicatorsContainer"_s);
+    auto *layout = new QHBoxLayout(row);
+    layout->setContentsMargins(0, 4, 0, 4);
+    layout->setSpacing(8);
+    layout->addStretch();
+
+    // Plain text rather than an emoji badge: it re-renders on every tick at the
+    // end of the transcript, so it stays low contrast and lets the tool cards
+    // above it carry the actual signal.
+    m_thinkingIndicator = new QLabel(i18n("Thinking") + progressiveDots(0), row);
+    m_thinkingIndicator->setStyleSheet(ChatTheme::activityPill());
+    attachPulseEffect(m_thinkingIndicator);
+    m_thinkingIndicator->hide();
+    layout->addWidget(m_thinkingIndicator);
+
+    m_workingLabelBase = i18n("Working");
+    m_workingIndicator = new QLabel(m_workingLabelBase + progressiveDots(0), row);
+    m_workingIndicator->setStyleSheet(ChatTheme::activityPill());
+    attachPulseEffect(m_workingIndicator);
+    m_workingIndicator->hide();
+    layout->addWidget(m_workingIndicator);
+
+    return row;
+}
+
 int ChatWidget::transcriptInsertIndex() const
 {
     if (!m_transcriptLayout) {
@@ -1746,25 +1832,24 @@ int ChatWidget::transcriptInsertIndex() const
     // Messages are appended at the end of the message area: after the leading
     // stretch spacer (which absorbs the slack and bottom-anchors the content)
     // and always before the pinned status-indicator row.
-    int index = 0;
+    int spacerIndex = -1;
+    int indicatorsIndex = -1;
+    const QWidget *indicators =
+        m_indicatorsRow ? m_indicatorsRow.data() : m_thinkingIndicator ? m_thinkingIndicator->parentWidget() : nullptr;
     for (int i = 0; i < m_transcriptLayout->count(); ++i) {
         QLayoutItem *item = m_transcriptLayout->itemAt(i);
-        if (item && item->spacerItem()) {
-            index = i + 1;
-            break;
+        if (!item) {
+            continue;
+        }
+        if (item->spacerItem() && spacerIndex < 0) {
+            spacerIndex = i;
+        }
+        if (indicators && item->widget() == indicators) {
+            indicatorsIndex = i;
         }
     }
-    const QWidget *indicators =
-        m_thinkingIndicator ? m_thinkingIndicator->parentWidget() : nullptr;
-    if (indicators) {
-        for (int i = 0; i < m_transcriptLayout->count(); ++i) {
-            QLayoutItem *item = m_transcriptLayout->itemAt(i);
-            if (item && item->widget() == indicators) {
-                return qMin(index, i);
-            }
-        }
-    }
-    return qMin(index, m_transcriptLayout->count());
+    return transcriptInsertIndexFor(TranscriptAnchor::Bottom, spacerIndex, indicatorsIndex,
+                                    m_transcriptLayout->count());
 }
 
 void ChatWidget::appendTranscriptWidget(QWidget *widget)
@@ -1964,11 +2049,34 @@ void ChatWidget::updateModelSelectorLabel()
 
 void ChatWidget::updateTokenDisplay()
 {
-    if (!m_tokenCount) return;
-    // This used to print the model name, which duplicated the model chip sitting
-    // two buttons to its left. There is no token accounting from the provider to
-    // show, so it stays empty rather than repeating what is already visible.
-    m_tokenCount->setText(QString());
+    if (!m_tokenCount) {
+        return;
+    }
+    // What belongs here is how full the context window is, not the model name
+    // (which duplicates the chip two buttons to the left) and not the raw token
+    // count (which means nothing without the denominator). Both are already
+    // computed for the request that is actually sent, so reuse them rather than
+    // keeping a second estimate that can disagree with the real budget.
+    const int tokens = ContextManager::estimateTokens(m_agent.messages());
+    const int window = m_settings.contextWindow > 0
+        ? m_settings.contextWindow
+        : ContextManager::contextWindowFor(modelFor(m_settings));
+    if (window <= 0) {
+        m_tokenCount->setText(QString());
+        m_tokenCount->hide();
+        return;
+    }
+
+    const int percent = qBound(0, (tokens * 100) / window, 100);
+    m_tokenCount->setText(i18n("%1% ctx", percent));
+    m_tokenCount->setToolTip(i18n("Context: about %1 of %2 tokens used (%3%)", tokens, window, percent));
+    // Colour follows how close the limit is, so the number alone carries the
+    // warning without needing to be read closely.
+    const QString colour = percent >= 90 ? ChatTheme::danger() : (percent >= 70 ? ChatTheme::warning() : ChatTheme::textMuted());
+    m_tokenCount->setStyleSheet(
+        QStringLiteral("QLabel { color: %1; font-size: 11px; font-family: monospace; background: transparent; border: none; }")
+            .arg(colour));
+    m_tokenCount->show();
 }
 
 void ChatWidget::updateThinkingButtonStyle()
@@ -2160,6 +2268,7 @@ void ChatWidget::showModelMenu()
     m_modelFilter.clear();
 
     m_modelMenu = new QMenu(this);
+    m_modelFilterEdit = nullptr;
     m_modelMenu->setStyleSheet(
         u"QMenu {"
         u"  background-color: #252528;"
@@ -2183,9 +2292,18 @@ void ChatWidget::showModelMenu()
         u"}"_s);
 
     auto *filterEdit = new QLineEdit(m_modelMenu);
+    m_modelFilterEdit = filterEdit;
+    // Reset the keyboard cursor: each time the menu is opened it starts at "no
+    // entry highlighted", so Down always starts from the top of the list rather
+    // than resuming wherever the last selection was.
+    m_modelMenuSelection = -1;
     filterEdit->setPlaceholderText(i18n("Filter models..."));
     filterEdit->setClearButtonEnabled(true);
-    filterEdit->setMinimumWidth(240);
+    // Width is left to the menu's own size hint plus the fixed minimum applied in
+    // rebuildModelMenuProviderSubmenus(). A hard 300px here fought that minimum:
+    // with a short provider list the box overflowed the popup, and with a long one
+    // it capped the width the menu was trying to grow to.
+    filterEdit->setMinimumWidth(220);
     filterEdit->setStyleSheet(
         u"QLineEdit {"
         u"  background-color: #1a1a1a;"
@@ -2221,6 +2339,19 @@ void ChatWidget::showModelMenu()
             }
         }
     });
+    // Up/Down walks the matches without leaving the filter box. The QLineEdit
+    // swallows arrow keys, so without this a long model list could only be
+    // walked by retyping a filter after every selection.
+    auto *nextModel = new QShortcut(QKeySequence(Qt::Key_Down), m_modelMenu);
+    nextModel->setContext(Qt::WidgetWithChildrenShortcut);
+    connect(nextModel, &QShortcut::activated, this, [this]() {
+        moveModelMenuSelection(1);
+    });
+    auto *prevModel = new QShortcut(QKeySequence(Qt::Key_Up), m_modelMenu);
+    prevModel->setContext(Qt::WidgetWithChildrenShortcut);
+    connect(prevModel, &QShortcut::activated, this, [this]() {
+        moveModelMenuSelection(-1);
+    });
     auto *filterAction = new QWidgetAction(m_modelMenu);
     filterAction->setDefaultWidget(filterEdit);
     m_modelMenu->addAction(filterAction);
@@ -2234,6 +2365,7 @@ void ChatWidget::showModelMenu()
         m_modelMenuProviderMenus.clear();
         m_modelMenuFlatActions.clear();
         m_modelMenuNoMatchAction = nullptr;
+        m_modelFilterEdit = nullptr;
         m_modelMenu->deleteLater();
         m_modelMenu = nullptr;
     });
@@ -2336,6 +2468,17 @@ void ChatWidget::rebuildModelMenuProviderSubmenus()
 
     auto *configAct = m_modelMenu->addAction(i18n("Configure Providers & Models…"));
     connect(configAct, &QAction::triggered, this, &ChatWidget::configureRequested);
+
+    // Hidden flat actions do not contribute to QMenu's size hint, so pin the
+    // popup width to the widest entry once. Without this the menu resizes on
+    // every keystroke and the filter box visibly jumps around. The floor is the
+    // filter box's own minimum so it can never be clipped by a narrow catalogue.
+    int widest = m_modelFilterEdit ? m_modelFilterEdit->minimumSizeHint().width() : 0;
+    const QFontMetrics fm(m_modelMenu->font());
+    for (QAction *act : m_modelMenu->actions()) {
+        widest = qMax(widest, fm.horizontalAdvance(act->text()));
+    }
+    m_modelMenu->setMinimumWidth(qBound(240, widest + 24, 560));
 }
 
 void ChatWidget::applyModelMenuFilter()
@@ -2347,6 +2490,11 @@ void ChatWidget::applyModelMenuFilter()
     const QString filter = m_modelFilter.trimmed();
     const bool filtering = !filter.isEmpty();
     int visibleMatches = 0;
+
+    // Every visibility toggle makes QMenu recalculate its action rects and
+    // repaint; batching them behind frozen updates stops the filter box from
+    // flickering while typing.
+    m_modelMenu->setUpdatesEnabled(false);
 
     for (QMenu *pMenu : m_modelMenuProviderMenus) {
         pMenu->menuAction()->setVisible(!filtering);
@@ -2369,6 +2517,50 @@ void ChatWidget::applyModelMenuFilter()
     if (m_modelMenuNoMatchAction) {
         m_modelMenuNoMatchAction->setVisible(filtering && visibleMatches == 0);
     }
+
+    m_modelMenu->setUpdatesEnabled(true);
+    m_modelMenu->update();
+
+    // QMenu hands focus back to itself when the action set changes; keep the
+    // caret in the filter box so typing is never interrupted. Only while the
+    // user is actually filtering: once they have arrowed onto an entry, taking
+    // the caret back would fight the selection they are making.
+    if (m_modelFilterEdit && !m_modelFilterEdit->hasFocus() && m_modelMenu->isVisible()
+        && m_modelMenuSelection < 0) {
+        m_modelFilterEdit->setFocus(Qt::OtherFocusReason);
+    }
+}
+
+void ChatWidget::moveModelMenuSelection(int delta)
+{
+    if (!m_modelMenu) {
+        return;
+    }
+    // The candidate list depends on whether a filter is active: unfiltered, the
+    // entries are the provider submenus; filtered, they are the flat actions.
+    QList<QAction *> candidates;
+    if (!m_modelFilter.trimmed().isEmpty()) {
+        for (QAction *act : m_modelMenuFlatActions) {
+            if (act->isVisible()) {
+                candidates.append(act);
+            }
+        }
+    } else {
+        for (QMenu *pMenu : m_modelMenuProviderMenus) {
+            if (pMenu->menuAction()->isVisible()) {
+                candidates.append(pMenu->menuAction());
+            }
+        }
+    }
+    if (candidates.isEmpty()) {
+        return;
+    }
+
+    const int count = candidates.size();
+    m_modelMenuSelection = m_modelMenuSelection < 0
+        ? (delta > 0 ? 0 : count - 1)
+        : (m_modelMenuSelection + delta + count) % count;
+    m_modelMenu->setActiveAction(candidates.at(m_modelMenuSelection));
 }
 
 void ChatWidget::selectModel(Provider provider, const QString &model)
@@ -2981,6 +3173,7 @@ void ChatWidget::submit()
     if (m_infoBar) {
         m_infoBar->hide();
     }
+
     // Start the live counters for this turn.
     m_completedToolCount = 0;
     m_turnStatus->reset();
@@ -3150,8 +3343,8 @@ void ChatWidget::clearTranscriptContents()
         return;
     }
 
-    QWidget *indicators = nullptr;
-    if (m_thinkingIndicator) {
+    QWidget *indicators = m_indicatorsRow ? m_indicatorsRow.data() : nullptr;
+    if (!indicators && m_thinkingIndicator) {
         indicators = m_thinkingIndicator->parentWidget();
     }
     QList<QLayoutItem *> kept;
@@ -3197,8 +3390,13 @@ void ChatWidget::reflowTranscriptMedia()
             continue;
         }
         browser->document()->setTextWidth(contentWidth);
-        const int docH = static_cast<int>(browser->document()->size().height()) + 16;
-        browser->setFixedHeight(std::max(30, docH));
+        const int docH = std::max(30, static_cast<int>(browser->document()->size().height()) + 16);
+        // Only re-pin the size constraint when the height actually moved. An
+        // unconditional setFixedHeight() invalidates the transcript layout and
+        // repaints it, so every panel resize flickered the whole conversation.
+        if (browser->height() != docH) {
+            browser->setFixedHeight(docH);
+        }
     }
 
     for (const auto &widget : m_toolCallOrder) {
@@ -3214,29 +3412,14 @@ void ChatWidget::rebuildTranscript()
     clearTranscriptContents();
     m_thinkingExpanded = false;
 
-    // Recreate indicators container if it was removed
+    // Recreate the indicator row if it was ever removed. clearTranscriptContents()
+    // keeps it, so this is a safety net rather than the normal path, but it has to
+    // be correct: the previous version assigned the new "Thinking" label to
+    // m_workingIndicator and then dereferenced the still-null m_thinkingIndicator,
+    // which is a null-pointer write on the one path that exists to recover from a
+    // broken state.
     if (!m_thinkingIndicator || !m_workingIndicator) {
-        auto *indicatorsContainer = new QWidget(m_transcriptContainer);
-        indicatorsContainer->setObjectName(u"indicatorsContainer"_s);
-        auto *indicatorsLayout = new QHBoxLayout(indicatorsContainer);
-        indicatorsLayout->setContentsMargins(0, 4, 0, 4);
-        indicatorsLayout->setSpacing(8);
-        indicatorsLayout->addStretch();
-
-        m_workingIndicator = new QLabel(i18n("Thinking") + u"..."_s, indicatorsContainer);
-        m_thinkingIndicator->setStyleSheet(ChatTheme::activityPill());
-        attachPulseEffect(m_thinkingIndicator);
-        m_thinkingIndicator->hide();
-        indicatorsLayout->addWidget(m_thinkingIndicator);
-
-        m_workingLabelBase = i18n("Working");
-        m_workingIndicator = new QLabel(m_workingLabelBase + u"..."_s, indicatorsContainer);
-        m_workingIndicator->setStyleSheet(ChatTheme::activityPill());
-        attachPulseEffect(m_workingIndicator);
-        m_workingIndicator->hide();
-        indicatorsLayout->addWidget(m_workingIndicator);
-
-        m_transcriptLayout->addWidget(indicatorsContainer);
+        m_indicatorsRow = createIndicatorsRow();
     }
 
     const auto &messages = m_agent.messages();
@@ -3373,8 +3556,7 @@ void ChatWidget::rebuildTranscript()
                         auto *toolWidget = new ToolCallWidget(toolCallId, m_transcriptContainer);
 
                         ToolRisk risk = ToolRisk::Read;
-                        if (toolName == u"write_file"_s || toolName == u"edit_file"_s
-                            || toolName == u"multi_edit_file"_s || toolName == u"multi_replace_file_content"_s) {
+                        if (isFileMutatingTool(toolName)) {
                             risk = ToolRisk::Write;
                         } else if (toolName == u"bash"_s) {
                             risk = ToolRisk::Execute;
@@ -3631,6 +3813,11 @@ void ChatWidget::switchToConversation(const QString &conversationId)
     // Load the new conversation
     const auto sessionData = SessionStore::loadConversation(conversationId);
     m_agent.restoreSession(sessionData);
+    // Pending edits belong to the turn that produced them. Carrying them into a
+    // different conversation meant "Reject All" could revert files that thread
+    // never touched, on the strength of a decision made about another one.
+    m_pendingToolCalls.clear();
+    m_editTracker->clear();
     m_currentConversationId = conversationId;
     SessionStore::setActiveConversation(conversationId);
 
@@ -3695,6 +3882,11 @@ void ChatWidget::newChat()
     m_agent.resetConversation();
     m_agent.clearSession();
     m_permissionBar->hideBar();
+    // Drop half-recorded edits from the aborted turn: their tool calls will
+    // never report a result, so leaving them queued would strand a row in the
+    // tracker that no button could act on.
+    m_pendingToolCalls.clear();
+    m_editTracker->clear();
     if (m_infoBar) {
         m_infoBar->hide();
     }
@@ -3718,10 +3910,7 @@ void ChatWidget::newChat()
     updateSendButtonState();
     updateTokenDisplay();
     updateModelSelectorLabel();
-    // Scroll to TOP to show welcome widget for new chat
-    if (m_scrollArea) {
-        m_scrollArea->verticalScrollBar()->setValue(0);
-    }
+    forceScrollToBottom();
     m_prompt->setFocus();
 }
 

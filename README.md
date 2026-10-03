@@ -223,7 +223,19 @@ Each tool call appears as a compact card in the transcript (icon, name, shell-st
 - `write_file` / `edit_file` / `multi_edit_file` show a **unified diff** in the card before you approve
 - Other tools show a text preview (command, grep hits, graph summary)
 - Older cards auto-collapse after a configurable count so long runs stay responsive
-- **Accept edits** mode collects pending writes in an edit tracker: accept all or reject all
+
+### Edit tracker
+
+**Accept edits** mode lets the agent write without stopping to ask, then hands you the bill afterwards. Pending changes collect in a review queue under the transcript, one row per file:
+
+- **Keep** accepts a file, **Reject** reverts it to the content it had before the turn started that file
+- A file the agent created is labelled `new`, and rejecting it **deletes** the file rather than leaving a zero-byte one behind
+- Several edits to the same file collapse into one row showing how many were made, with the counts totalled across all of them
+- **Review** opens the combined diff for that file; Escape closes it without deciding anything
+- **Undo** (or `Ctrl+Z` with the queue focused) reverses the last decision, restoring the file too
+- **Keep All** / **Reject All** settle every pending file; the queue clears when you switch conversations, so a decision about one thread can never revert another thread's files
+
+The composer shows context-window usage as a percentage, turning amber at 70% and red at 90%, so a turn that is about to compact its own history is visible before it happens.
 
 ### Editor integration
 
