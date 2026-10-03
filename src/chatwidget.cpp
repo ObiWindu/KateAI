@@ -347,15 +347,29 @@ ChatWidget::ChatWidget(QWidget *parent)
         }
     });
 
-    // 3. Permission Bar (Zed-style Inline Consent)
+    // 3. Intent dock. Everything that requires the user to press something --
+    // sub-agent cards with their Cancel, and the Allow / Deny strip -- is
+    // pinned here, directly above the input. In the transcript these scrolled
+    // away from the controls and left the agent apparently stuck while the
+    // decision sat off-screen.
+    m_intentDock = new QWidget(this);
+    m_intentDock->setObjectName(u"intentDock"_s);
+    m_intentDock->setStyleSheet(ChatTheme::intentDock());
+    m_intentDockLayout = new QVBoxLayout(m_intentDock);
+    m_intentDockLayout->setContentsMargins(10, 6, 10, 0);
+    m_intentDockLayout->setSpacing(6);
+    m_intentDock->hide();
+    root->addWidget(m_intentDock);
+
+    // 4. Permission Bar (Zed-style Inline Consent)
     m_permissionBar = new PermissionBar(this);
     root->addWidget(m_permissionBar);
 
-    // 3b. Edit Tracker (for AcceptEdits permission mode) - compact bar at bottom of chat
+    // 4b. Edit Tracker (for AcceptEdits permission mode) - compact bar at bottom of chat
     m_editTracker = new EditTracker(this);
     root->addWidget(m_editTracker);
 
-    // 4. Composer
+    // 5. Composer
     auto *composerContainer = new QWidget(this);
     composerContainer->setObjectName(u"composerContainer"_s);
     composerContainer->setStyleSheet(
@@ -591,17 +605,18 @@ ChatWidget::ChatWidget(QWidget *parent)
         }
 
         // A sub-agent is a long-running operation with its own live status, so
-        // it gets a dedicated card instead of the flat tool-call card.
+        // it gets a dedicated card instead of the flat tool-call card. The card
+        // carries a Cancel button, which makes it something the user may need
+        // to act on, so it lives in the intent dock above the input rather than
+        // down in the transcript.
         if (request.toolName == subtaskToolName()) {
-            auto *subtaskWidget = new SubtaskWidget(request.toolCallId, m_transcriptContainer);
+            auto *subtaskWidget = new SubtaskWidget(request.toolCallId, m_intentDock);
             connect(subtaskWidget, &SubtaskWidget::cancelRequested, this, [this](const QString &taskId) {
                 m_agent.cancelSubtask(taskId);
             });
             m_subtaskWidgets.insert(request.toolCallId, subtaskWidget);
             m_subtaskOrder.append(subtaskWidget);
-            appendTranscriptWidget(subtaskWidget);
-            applyTranscriptCollapse();
-            scrollToBottom();
+            addIntentWidget(subtaskWidget);
             return;
         }
 
@@ -637,6 +652,9 @@ ChatWidget::ChatWidget(QWidget *parent)
     connect(&m_agent, &AgentLoop::toolFinished, this, [this](const ToolResult &result) {
         if (auto *subtaskWidget = m_subtaskWidgets.value(result.toolCallId)) {
             subtaskWidget->finishAgent(result);
+            // Done: the card no longer needs the user's attention, so hand it
+            // back to the transcript instead of letting it sit above the input.
+            retireIntentWidget(subtaskWidget);
         }
         if (auto *widget = m_toolCallWidgets.value(result.toolCallId)) {
             widget->setFinished(result);
@@ -695,8 +713,24 @@ ChatWidget::ChatWidget(QWidget *parent)
             applyTranscriptCollapse();
         }
         widget->showApproval();
+        // Name the target in the docked strip. The card (and its diff) can be
+        // far up the transcript, so the buttons alone do not say what they are
+        // allowing.
+        {
+            const QString label = ChatTheme::toolLabel(request.toolName);
+            const QString subject = request.path.isEmpty() ? label
+                                                           : label + u"  ·  "_s + request.path;
+            widget->setApprovalSubject(subject);
+        }
+        // Lift the Allow / Deny strip out of the card and into the dock, so the
+        // decision is always on screen next to the input. The card stays
+        // expanded underneath, so the diff being judged is still one scroll away.
+        if (QWidget *approvalRow = widget->approvalRow()) {
+            moveToIntentDock(approvalRow);
+        }
         connect(widget, &ToolCallWidget::approvalChosen, this, [this, widget, request](PermissionDecision decision) {
             widget->setApprovalResolved(decision);
+            updateIntentDockVisibility();
             m_agent.resolvePermission(decision);
         }, Qt::SingleShotConnection);
         m_turnStatus->setActivity(i18n("Waiting for approval"));
@@ -1046,6 +1080,38 @@ void ChatWidget::setStreaming(const QString &text)
     if (!m_activeAssistantBrowser) {
         return;
     }
+    // Do not rebuild the document here. Doing so on every chunk made a long
+    // answer quadratic -- once the context window was full each chunk cost
+    // >100 ms of markdown + syntax-highlight on the UI thread, which starved
+    // the event loop and froze the panel. scheduleStreamRender() coalesces the
+    // rebuild onto a timer instead.
+    scheduleStreamRender();
+}
+
+void ChatWidget::scheduleStreamRender()
+{
+    if (!m_streamRenderTimer) {
+        m_streamRenderTimer = new QTimer(this);
+        m_streamRenderTimer->setSingleShot(true);
+        m_streamRenderTimer->setInterval(50);
+        connect(m_streamRenderTimer, &QTimer::timeout, this, &ChatWidget::flushStreamRender);
+    }
+    // Restarting is safe because it is single-shot: a burst of chunks collapses
+    // into one rebuild, while a steady stream still renders ~20 times a second,
+    // which is well past the eye's ability to notice on text arriving.
+    if (!m_streamRenderTimer->isActive()) {
+        m_streamRenderTimer->start();
+    }
+}
+
+void ChatWidget::flushStreamRender()
+{
+    if (m_streamRenderTimer) {
+        m_streamRenderTimer->stop();
+    }
+    if (!m_activeAssistantBrowser) {
+        return;
+    }
     m_activeAssistantBrowser->setDocument(makeMarkdownDocument(closedMarkdown(m_streamText)));
     scheduleStreamHeightUpdate();
 }
@@ -1339,6 +1405,11 @@ void ChatWidget::freezeStreaming()
 {
     if (m_streamHeightTimer) {
         m_streamHeightTimer->stop();
+    }
+    // Drop any coalesced rebuild; the block below renders the final text
+    // synchronously, so a pending one would only duplicate the work.
+    if (m_streamRenderTimer) {
+        m_streamRenderTimer->stop();
     }
     if (m_activeAssistantBrowser && !m_streamText.isEmpty()) {
         m_activeAssistantBrowser->setDocument(makeMarkdownDocument(m_streamText));
@@ -1858,6 +1929,83 @@ void ChatWidget::appendTranscriptWidget(QWidget *widget)
         return;
     }
     m_transcriptLayout->insertWidget(transcriptInsertIndex(), widget);
+}
+
+void ChatWidget::addIntentWidget(QWidget *widget)
+{
+    if (!m_intentDockLayout || !widget) {
+        return;
+    }
+    m_intentDockLayout->addWidget(widget);
+    updateIntentDockVisibility();
+}
+
+void ChatWidget::moveToIntentDock(QWidget *widget, int index)
+{
+    if (!m_intentDockLayout || !widget) {
+        return;
+    }
+    // insertWidget() reparents, so the widget keeps its identity, styling and
+    // signal connections; only its position changes.
+    if (index < 0 || index > m_intentDockLayout->count()) {
+        index = m_intentDockLayout->count();
+    }
+    m_intentDockLayout->insertWidget(index, widget);
+    widget->show();
+    updateIntentDockVisibility();
+}
+
+void ChatWidget::retireIntentWidget(QWidget *widget)
+{
+    if (!widget) {
+        return;
+    }
+    if (m_intentDockLayout) {
+        m_intentDockLayout->removeWidget(widget);
+    }
+    // Back into the transcript, reparented as a normal message so the finished
+    // result stays part of the thread.
+    appendTranscriptWidget(widget);
+    updateIntentDockVisibility();
+}
+
+void ChatWidget::updateIntentDockVisibility()
+{
+    if (!m_intentDock || !m_intentDockLayout) {
+        return;
+    }
+    // Driven by whether anything is actually on screen, not by whether the
+    // layout is merely non-empty: a resolved approval hides its row but leaves
+    // it parented here.
+    //
+    // isHidden() rather than isVisible(): a child of a hidden dock reports
+    // isVisible() == false, so testing visibility here would mean the dock could
+    // never bring itself back.
+    for (int i = 0; i < m_intentDockLayout->count(); ++i) {
+        QLayoutItem *item = m_intentDockLayout->itemAt(i);
+        if (item && item->widget() && !item->widget()->isHidden()) {
+            m_intentDock->show();
+            return;
+        }
+    }
+    m_intentDock->hide();
+}
+
+void ChatWidget::clearIntentDock()
+{
+    if (!m_intentDockLayout) {
+        return;
+    }
+    while (QLayoutItem *item = m_intentDockLayout->takeAt(0)) {
+        if (QWidget *widget = item->widget()) {
+            // Delete rather than unparent: an approval row was reparented into
+            // the dock, so it is no longer a child of its tool card and would
+            // simply leak. Callers must clear their own bookkeeping first.
+            delete widget;
+        }
+        delete item;
+    }
+    updateIntentDockVisibility();
 }
 
 void ChatWidget::showInfoMessage(const QString &message, bool isError)
@@ -2926,6 +3074,8 @@ void ChatWidget::markRunningSubtasksAbandoned()
     for (const QString &taskId : ids) {
         if (auto *widget = m_subtaskWidgets.value(taskId)) {
             widget->markAbandoned(i18n("Stopped when the turn ended."));
+            // Abandoned means over; the card belongs back in the transcript.
+            retireIntentWidget(widget);
             changed = true;
         }
     }
@@ -3288,6 +3438,9 @@ void ChatWidget::scheduleStreamHeightUpdate()
 void ChatWidget::clearStreamingPointers()
 {
     stopThinkingPacer();
+    if (m_streamRenderTimer) {
+        m_streamRenderTimer->stop();
+    }
     m_activeAssistantWidget = nullptr;
     m_activeAssistantBrowser = nullptr;
     m_activeAssistantPulse = nullptr;
@@ -3321,6 +3474,9 @@ void ChatWidget::clearTranscriptContents()
     if (m_streamHeightTimer) {
         m_streamHeightTimer->stop();
     }
+    if (m_streamRenderTimer) {
+        m_streamRenderTimer->stop();
+    }
     stopThinkingPacer();
     if (m_indicatorTimer) {
         m_indicatorTimer->stop();
@@ -3334,6 +3490,9 @@ void ChatWidget::clearTranscriptContents()
     }
     m_subtaskWidgets.clear();
     m_subtaskOrder.clear();
+    // Detach any approval rows still docked; they belong to the cards deleted
+    // above and must not be left parented to the dock.
+    clearIntentDock();
     m_thinkingBlocks.clear();
     m_planSteps.clear();
     clearStreamingPointers();
@@ -3537,7 +3696,7 @@ void ChatWidget::rebuildTranscript()
                             if (!restoredDoc.isNull() && restoredDoc.isObject()) {
                                 restoredArgs = restoredDoc.object();
                             }
-                            auto *subtaskWidget = new SubtaskWidget(toolCallId, m_transcriptContainer);
+                            auto *subtaskWidget = new SubtaskWidget(toolCallId, m_intentDock);
                             connect(subtaskWidget, &SubtaskWidget::cancelRequested, this, [this](const QString &taskId) {
                                 m_agent.cancelSubtask(taskId);
                             });
@@ -3547,7 +3706,7 @@ void ChatWidget::rebuildTranscript()
                                                       restoredArgs.value(u"description"_s).toString());
                             m_subtaskWidgets.insert(toolCallId, subtaskWidget);
                             m_subtaskOrder.append(subtaskWidget);
-                            appendTranscriptWidget(subtaskWidget);
+                            addIntentWidget(subtaskWidget);
                             rebuiltToolWidgets.insert(toolCallId, nullptr);
                             continue;
                         }

@@ -35,6 +35,12 @@ QString kHoverBg = QStringLiteral("#323236");
 QString kToolBg = QStringLiteral("#26262b");
 QString kToolHeaderBg = QStringLiteral("#33333a");
 
+// Agent-task cards. One step above the tool-card surface and ringed on all four
+// sides, so a delegated sub-agent reads as its own object rather than as
+// another tool row in the log.
+QString kAgentTaskBg = QStringLiteral("#2b2b32");
+QString kIntentRowBg = QStringLiteral("#3a3020");
+
 QString kBorder = QStringLiteral("#37373b");
 QString kBorderStrong = QStringLiteral("#4a4a50");
 
@@ -84,6 +90,43 @@ QString toolBg()
 QString toolHeaderBg()
 {
     return kToolHeaderBg;
+}
+
+QString intentDock()
+{
+    // Chrome, not a card: no border and no fill of its own, so the rows inside
+    // it are what read as boxes. Deliberately no descendant rule here -- a rule
+    // matching the dock's children would flatten the borders on the very cards
+    // the dock exists to frame.
+    return QStringLiteral(
+           "QWidget#intentDock {"
+           "  background: transparent;"
+           "  border: none;"
+           "}");
+}
+
+QString agentTaskCard()
+{
+    return QStringLiteral(
+           "QWidget#subtaskWidget {"
+           "  background-color: %1;"
+           "  border: 1px solid %2;"
+           "  border-radius: 8px;"
+           "}")
+        .arg(kAgentTaskBg, kBorder);
+}
+
+QString intentApprovalRow()
+{
+    // Warm, high-contrast box: this is the one thing in the strip that stops the
+    // agent, so it must not be mistakable for a status line.
+    return QStringLiteral(
+           "QWidget#approvalRow {"
+           "  background-color: %1;"
+           "  border: 1px solid %2;"
+           "  border-radius: 8px;"
+           "}")
+        .arg(kIntentRowBg, kWarning);
 }
 
 QString border()

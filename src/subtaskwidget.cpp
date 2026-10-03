@@ -38,37 +38,44 @@ SubtaskWidget::SubtaskWidget(const QString &taskId, QWidget *parent)
     , m_taskId(taskId)
 {
     setObjectName(u"subtaskWidget"_s);
+    // Without this, a plain QWidget subclass silently ignores a stylesheet
+    // background-color and the card renders fully transparent -- the border and
+    // background in ChatTheme::agentTaskCard() never reach the screen.
+    setAttribute(Qt::WA_StyledBackground, true);
 
+    // Compact: this card now sits in the intent dock above the input, and the
+    // dock also carries approvals. Tighter padding and smaller type let several
+    // live sub-agents plus an approval fit without stealing transcript space.
     auto *root = new QVBoxLayout(this);
-    root->setContentsMargins(10, 8, 10, 8);
-    root->setSpacing(6);
+    root->setContentsMargins(8, 6, 8, 6);
+    root->setSpacing(4);
 
     // Header: icon, "Agent · mode", live status, cancel.
     auto *header = new QHBoxLayout;
-    header->setSpacing(8);
+    header->setSpacing(6);
 
     m_icon = new QLabel(u"◐"_s, this);
-    m_icon->setStyleSheet(u"font-size: 14px;"_s);
+    m_icon->setStyleSheet(u"font-size: 12px;"_s);
     header->addWidget(m_icon);
 
     m_title = new QLabel(this);
     m_title->setTextFormat(Qt::RichText);
-    m_title->setStyleSheet(QStringLiteral("QLabel { color: %1; font-size: 12px; font-weight: 600; }")
+    m_title->setStyleSheet(QStringLiteral("QLabel { color: %1; font-size: 11px; font-weight: 600; }")
                                   .arg(ChatTheme::textPrimary()));
     header->addWidget(m_title);
 
     m_status = new QLabel(this);
-    m_status->setStyleSheet(QStringLiteral("color: %1; font-size: 11px;").arg(ChatTheme::textMuted()));
+    m_status->setStyleSheet(QStringLiteral("color: %1; font-size: 10px;").arg(ChatTheme::textMuted()));
     header->addWidget(m_status);
     header->addStretch();
 
     m_cancel = new QPushButton(i18n("Cancel"), this);
     m_cancel->setCursor(Qt::PointingHandCursor);
-    m_cancel->setFixedHeight(22);
+    m_cancel->setFixedHeight(20);
     m_cancel->setStyleSheet(
         QStringLiteral(
             "QPushButton { background: transparent; color: %1; border: 1px solid %2;"
-            " border-radius: 6px; padding: 0 10px; font-size: 11px; }"
+            " border-radius: 5px; padding: 0 8px; font-size: 10px; }"
             "QPushButton:hover { background-color: %3; border-color: %1; }")
         .arg(ChatTheme::danger(), ChatTheme::border(), ChatTheme::hoverBg()));
     connect(m_cancel, &QPushButton::clicked, this, [this] {
@@ -84,7 +91,7 @@ SubtaskWidget::SubtaskWidget(const QString &taskId, QWidget *parent)
     m_answer->setOpenExternalLinks(true);
     m_answer->setFrameShape(QFrame::NoFrame);
     m_answer->setStyleSheet(
-        QStringLiteral("QTextBrowser { background: transparent; border: none; color: %1; font-size: 12px; padding: 0; }")
+        QStringLiteral("QTextBrowser { background: transparent; border: none; color: %1; font-size: 11px; padding: 0; }")
             .arg(ChatTheme::textPrimary()));
     m_answer->setMinimumHeight(0);
     root->addWidget(m_answer);
@@ -92,14 +99,14 @@ SubtaskWidget::SubtaskWidget(const QString &taskId, QWidget *parent)
     // Live activity log, hidden until the user asks for it.
     m_activityContainer = new QWidget(this);
     auto *activityLayout = new QVBoxLayout(m_activityContainer);
-    activityLayout->setContentsMargins(0, 4, 0, 0);
-    activityLayout->setSpacing(4);
+    activityLayout->setContentsMargins(0, 3, 0, 0);
+    activityLayout->setSpacing(3);
 
     m_toggle = new QPushButton(i18n("Show activity"), m_activityContainer);
     m_toggle->setCursor(Qt::PointingHandCursor);
     m_toggle->setStyleSheet(
         QStringLiteral("QPushButton { background: transparent; color: %1; border: none; text-align: left;"
-                       " padding: 2px 0; font-size: 11px; }"
+                       " padding: 1px 0; font-size: 10px; }"
                        "QPushButton:hover { color: #ffffff; }")
             .arg(ChatTheme::accent()));
     activityLayout->addWidget(m_toggle);
@@ -108,8 +115,8 @@ SubtaskWidget::SubtaskWidget(const QString &taskId, QWidget *parent)
     m_activity->setOpenExternalLinks(false);
     m_activity->setFrameShape(QFrame::NoFrame);
     m_activity->setStyleSheet(
-        QStringLiteral("QTextBrowser { background: %1; border: 1px solid %2; border-radius: 6px;"
-                       " color: %3; font-size: 11px; padding: 6px; }")
+        QStringLiteral("QTextBrowser { background: %1; border: 1px solid %2; border-radius: 5px;"
+                       " color: %3; font-size: 10px; padding: 4px; }")
             .arg(ChatTheme::panelBg(), ChatTheme::border(), ChatTheme::textMuted()));
     m_activity->setVisible(false);
     activityLayout->addWidget(m_activity);
@@ -238,8 +245,10 @@ void SubtaskWidget::updateElapsed()
 
 void SubtaskWidget::applyStyle()
 {
-    // The left rail carries the outcome. A sub-agent card sits inside an
-    // assistant turn, so it is one step flatter than a top-level card.
+    // A delegated agent task is a distinct kind of thing from a tool the
+    // orchestrator ran itself, so it gets a full box: a raised background plus
+    // a border on all four sides. The border colour still carries the outcome,
+    // so state stays readable at a glance.
     QString border = ChatTheme::border();
     if (m_running) {
         border = ChatTheme::accent();
@@ -253,13 +262,14 @@ void SubtaskWidget::applyStyle()
 
     const QString glyph = m_running ? u"◐"_s : (m_failed ? u"✗"_s : (m_cancelled ? u"⊘"_s : u"✓"_s));
     m_icon->setText(glyph);
-    m_icon->setStyleSheet(QStringLiteral("font-size: 14px; color:%1;").arg(border));
+    m_icon->setStyleSheet(QStringLiteral("font-size: 12px; color:%1;").arg(border));
 
-    setStyleSheet(
-        QStringLiteral("QWidget#subtaskWidget { background-color: %1; border: 1px solid %2; border-left-width: 3px;"
-                       " border-radius: 8px; }"
-                       "QWidget#subtaskWidget QLabel { background: transparent; }")
-        .arg(ChatTheme::surfaceBg(), border));
+    // Background from the theme, border tinted by state.
+    QString sheet = ChatTheme::agentTaskCard();
+    sheet += QStringLiteral("QWidget#subtaskWidget { border-color: %1; }"
+                            "QWidget#subtaskWidget QLabel { background: transparent; }")
+                 .arg(border);
+    setStyleSheet(sheet);
 }
 
 void SubtaskWidget::setActivityVisible(bool visible)

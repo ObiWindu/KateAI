@@ -55,6 +55,18 @@ public:
         return m_awaitingApproval;
     }
 
+    // Labels the docked strip with the target of the request, so the buttons
+    // carry enough context to decide on without scrolling back to the card.
+    void setApprovalSubject(const QString &subject);
+
+    // The Allow / Always / Deny strip. ChatWidget reparents this into the
+    // intent dock so the buttons sit above the input instead of wherever the
+    // card happens to be scrolled to; the card keeps the diff being judged.
+    QWidget *approvalRow() const
+    {
+        return m_approvalRow;
+    }
+
     // --- Live timing ---------------------------------------------------------
     // Elapsed time per call, shown while running and frozen afterwards so a
     // slow tool is obvious in the transcript without opening it.
@@ -136,6 +148,7 @@ private:
     QLabel *m_duration = nullptr;
     QPushButton *m_expandBtn = nullptr;
     QWidget *m_approvalRow = nullptr;
+    QLabel *m_approvalSubject = nullptr;
     QWidget *m_detailsContainer = nullptr;
     QPlainTextEdit *m_details = nullptr;
     QTextBrowser *m_describeDiff = nullptr;
