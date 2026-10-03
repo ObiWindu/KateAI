@@ -35,13 +35,25 @@ QString codeBlockBg();
 QString inputBg();
 QString hoverBg();
 
-// --- Tool surfaces. ----------------------------------------------------------
+// Tool surfaces. ----------------------------------------------------------
 // Tool cards sit in the transcript, so they must not reuse the transcript
 // backdrop: a read_file / grep / bash card has to read as a distinct object at
 // a glance rather than dissolve into the prose around it. The body and the
 // head box are two steps apart so the header reads as a header.
 QString toolBg();
 QString toolHeaderBg();
+
+// --- The intent dock. ------------------------------------------------------
+// Everything that needs the user to press something lives in one strip pinned
+// directly above the input, so the call to action is never scrolled away in the
+// transcript. The dock itself is chrome and stays flat; only its cards are
+// boxed.
+QString intentDock();
+
+// Agent-task cards (sub-agents). A full border plus a raised background, one
+// step above a tool card: a delegated task is a different *kind* of thing than
+// a tool the orchestrator ran itself.
+QString agentTaskCard();
 
 // --- Lines. ------------------------------------------------------------------
 QString border();
@@ -79,6 +91,7 @@ QString assistantCard();
 QString sectionLabel();
 QString scrollBar();
 QString toolHeader();    // solid head box on every tool card
+QString intentApprovalRow();  // docked "needs approval" strip
 
 // Rich-text bodies. These go into QTextDocument::setDefaultStyleSheet(), so
 // they are CSS rather than Qt widget selectors.

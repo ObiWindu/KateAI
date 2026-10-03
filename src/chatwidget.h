@@ -132,6 +132,23 @@ private:
     void updateModelSelectorLabel();
     void showInfoMessage(const QString &message, bool isError);
 
+    // --- Intent dock ---------------------------------------------------------
+    // A strip pinned directly above the composer holding everything that needs
+    // the user to act: sub-agent cards (cancel) and approval rows
+    // (allow / deny). Anything in here stays reachable without scrolling the
+    // transcript. Newest item goes on top so the live card is nearest the input.
+    void addIntentWidget(QWidget *widget);
+    // Moves an existing widget into the dock without rebuilding it, so the
+    // approval strip stays the single instance the tool card owns.
+    void moveToIntentDock(QWidget *widget, int index = -1);
+    void updateIntentDockVisibility();
+    // Drops every docked widget; used when the transcript is cleared.
+    void clearIntentDock();
+    // Moves a docked widget back into the transcript once it stops needing
+    // attention, so the dock only ever holds live work and the finished card
+    // rejoins the conversation.
+    void retireIntentWidget(QWidget *widget);
+
     void submit();
         // True while a tool card is showing its inline approval row.
         bool m_approvalPending() const;
@@ -190,6 +207,9 @@ private:
     QPointer<QTextBrowser> m_activeAssistantBrowser;
 
     PermissionBar *m_permissionBar = nullptr;
+    // Intent dock: sits between the transcript and the permission bar.
+    QWidget *m_intentDock = nullptr;
+    QVBoxLayout *m_intentDockLayout = nullptr;
     PromptEdit *m_prompt = nullptr;
     TurnStatus *m_turnStatus = nullptr;
     // Tool calls completed in the current turn, shown live in the status strip.

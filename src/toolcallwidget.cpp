@@ -155,17 +155,22 @@ ToolCallWidget::ToolCallWidget(const QString &toolCallId, QWidget *parent)
 
     root->addWidget(m_header);
 
-        // --- Inline approval row -----------------------------------------------
-        // Hidden until the agent asks for permission. Placed inside the card so the
-        // decision sits next to the diff that is being approved.
+        // --- Approval row ---------------------------------------------------------
+        // Hidden until the agent asks for permission. ChatWidget reparents this
+        // row into the intent dock above the input, so the buttons never scroll
+        // away from the user; the card keeps the diff being judged.
         m_approvalRow = new QWidget(this);
         m_approvalRow->setObjectName(u"approvalRow"_s);
+        // Plain QWidget subclasses ignore a stylesheet background unless this is
+        // set, which would leave the docked approval strip invisible.
+        m_approvalRow->setAttribute(Qt::WA_StyledBackground, true);
+        m_approvalRow->setStyleSheet(ChatTheme::intentApprovalRow());
         auto *approvalLayout = new QHBoxLayout(m_approvalRow);
-        approvalLayout->setContentsMargins(10, 4, 10, 10);
-        approvalLayout->setSpacing(7);
+        approvalLayout->setContentsMargins(9, 5, 9, 5);
+        approvalLayout->setSpacing(6);
 
         auto *approvalHint = new QLabel(i18n("Needs approval"), m_approvalRow);
-        approvalHint->setStyleSheet(QStringLiteral("QLabel { color: %1; font-size: 11px; }").arg(ChatTheme::warning()));
+        approvalHint->setStyleSheet(QStringLiteral("QLabel { color: %1; font-size: 11px; font-weight: 600; background: transparent; }").arg(ChatTheme::warning()));
         approvalLayout->addWidget(approvalHint);
         approvalLayout->addStretch();
 
@@ -174,7 +179,7 @@ ToolCallWidget::ToolCallWidget(const QString &toolCallId, QWidget *parent)
         allowBtn->setStyleSheet(
             QStringLiteral(
                 "QPushButton { background-color: %1; color: #ffffff; border: none;"
-                " border-radius: 6px; padding: 4px 14px; font-size: 11px; font-weight: 600; }"
+                " border-radius: 5px; padding: 3px 12px; font-size: 11px; font-weight: 600; }"
                 "QPushButton:hover { background-color: %2; }")
             .arg(ChatTheme::accent(), ChatTheme::accentHover()));
         connect(allowBtn, &QPushButton::clicked, this, [this] {
@@ -187,7 +192,7 @@ ToolCallWidget::ToolCallWidget(const QString &toolCallId, QWidget *parent)
         alwaysBtn->setStyleSheet(
             QStringLiteral(
                 "QPushButton { background-color: %1; color: %2; border: 1px solid %3;"
-                " border-radius: 6px; padding: 4px 12px; font-size: 11px; }"
+                " border-radius: 5px; padding: 3px 10px; font-size: 11px; }"
                 "QPushButton:hover { background-color: %3; color: #ffffff; }")
             .arg(ChatTheme::cardBg(), ChatTheme::textPrimary(), ChatTheme::hoverBg()));
         connect(alwaysBtn, &QPushButton::clicked, this, [this] {
@@ -198,8 +203,8 @@ ToolCallWidget::ToolCallWidget(const QString &toolCallId, QWidget *parent)
         denyBtn->setCursor(Qt::PointingHandCursor);
         denyBtn->setStyleSheet(
             QStringLiteral(
-                "QPushButton { background-color: transparent; color: %1; border: 1px solid %2;"
-                " border-radius: 6px; padding: 4px 12px; font-size: 11px; }"
+                "QPushButton { background: transparent; color: %1; border: 1px solid %2;"
+                " border-radius: 5px; padding: 3px 10px; font-size: 11px; }"
                 "QPushButton:hover { color: #ffffff; border-color: %1; }")
             .arg(ChatTheme::danger(), ChatTheme::danger()));
         connect(denyBtn, &QPushButton::clicked, this, [this] {

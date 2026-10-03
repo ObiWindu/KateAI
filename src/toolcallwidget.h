@@ -55,6 +55,14 @@ public:
         return m_awaitingApproval;
     }
 
+    // The Allow / Always / Deny strip. ChatWidget reparents this into the
+    // intent dock so the buttons sit above the input instead of wherever the
+    // card happens to be scrolled to; the card keeps the diff being judged.
+    QWidget *approvalRow() const
+    {
+        return m_approvalRow;
+    }
+
     // --- Live timing ---------------------------------------------------------
     // Elapsed time per call, shown while running and frozen afterwards so a
     // slow tool is obvious in the transcript without opening it.
