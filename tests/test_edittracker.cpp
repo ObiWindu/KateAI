@@ -97,6 +97,47 @@ private Q_SLOTS:
         QCOMPARE(rejected.count(), 0);
     }
 
+    void testSecondEditToACreatedFileStillDeletesOnReject()
+    {
+        EditTracker tracker;
+        QSignalSpy rejected(&tracker, &EditTracker::editRejected);
+        QSignalSpy deleted(&tracker, &EditTracker::fileCreatedThenRejected);
+
+        // The first write creates the file, so there is no pre-edit content to
+        // read and ChatWidget passes createdFile = true.
+        tracker.addEdit(u"/tmp/new.cpp"_s, u"write_file"_s, diffFor(5, 0), QString(), u"contents"_s, true);
+        // The agent edits that file again. By toolStarted it exists on disk, so
+        // the read succeeds and ChatWidget passes createdFile = false.
+        tracker.addEdit(u"/tmp/new.cpp"_s, u"edit_file"_s, diffFor(6, 1), u"contents"_s, u"contents2"_s, false);
+
+        tracker.rejectEdit(u"/tmp/new.cpp"_s);
+
+        // The file is still one the agent made up: rejecting deletes it. Were
+        // the second edit allowed to clear the flag, this would restore a null
+        // baseline and leave a zero-byte file behind.
+        QCOMPARE(deleted.count(), 1);
+        QCOMPARE(deleted.at(0).at(0).toString(), u"/tmp/new.cpp"_s);
+        QCOMPARE(rejected.count(), 0);
+    }
+
+    void testRepeatedWritesToAPreExistingFileRestoreInsteadOfDelete()
+    {
+        EditTracker tracker;
+        QSignalSpy rejected(&tracker, &EditTracker::editRejected);
+        QSignalSpy deleted(&tracker, &EditTracker::fileCreatedThenRejected);
+
+        // write_file over an existing file: it exists before and after, so it is
+        // never "created" and rejecting restores the original content.
+        tracker.addEdit(u"/tmp/old.cpp"_s, u"write_file"_s, diffFor(5, 0), u"original"_s, u"contents"_s, false);
+        tracker.addEdit(u"/tmp/old.cpp"_s, u"write_file"_s, diffFor(6, 1), u"contents"_s, u"contents2"_s, false);
+
+        tracker.rejectEdit(u"/tmp/old.cpp"_s);
+
+        QCOMPARE(rejected.count(), 1);
+        QCOMPARE(rejected.at(0).at(2).toString(), u"original"_s);
+        QCOMPARE(deleted.count(), 0);
+    }
+
     void testAcceptEmitsNewContentAndClearsQueue()
     {
         EditTracker tracker;

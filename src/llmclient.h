@@ -104,6 +104,11 @@ private:
     void handleReadyRead();
     void handleFinished();
     void handleModelsFinished(QNetworkReply *reply, Provider provider);
+    // Detaches the watchdog timer owned by `reply`. Must run before the reply is
+    // deleted, because the timer lambda holds a pointer to it.
+    void stopTimerFor(QNetworkReply *reply);
+    // Appends to the bounded response-body tail used for error reporting.
+    void appendResponseBody(const QByteArray &chunk);
     void resetCompletionState();
     void emitCompletedOnce();
     QList<ToolCall> completedToolsFromAccumulator();
@@ -121,6 +126,13 @@ private:
     RetryErrorCategory classifyError(int httpStatus, const QString &errorMessage, const QByteArray &responseBody, QNetworkReply::NetworkError networkError);
     std::optional<int> parseRetryAfterHeader(const QNetworkReply *reply) const;
     std::optional<int> parseRetryAfterFromBody(const QByteArray &body) const;
+    // Narrows a provider-supplied delay in seconds to the configured cap. Takes
+    // qint64 because secsTo() on a distant date overflows an int.
+    std::optional<int> clampProviderDelay(qint64 seconds) const;
+    // Seconds from now until an HTTP-date (IMF-fixdate) value, or nothing if
+    // it is unparseable or already in the past. Static so it is testable
+    // without a live QNetworkReply.
+    static std::optional<qint64> secondsUntilHttpDate(const QByteArray &header);
     int calculateDelay(const RetryContext &ctx, std::optional<int> providerDelaySeconds) const;
     QString formatRetryMessage(const RetryContext &ctx, int delaySeconds) const;
     QString formatRetryExhaustedMessage(RetryErrorCategory category, const QString &providerName) const;
@@ -144,6 +156,14 @@ private:
     QNetworkReply *m_reply = nullptr;
     QList<QPointer<QNetworkReply>> m_modelReplies;
     QByteArray m_buffer;
+    // Every byte received for the in-flight request. Error classification and
+    // the provider backoff hint both need the whole body, not just the trailing
+    // unterminated SSE line.
+    QByteArray m_responseBody;
+    // Idle watchdog for the in-flight request, keyed by reply. A streaming
+    // completion has no natural deadline, but a half-open connection must not
+    // keep the client busy forever.
+    QHash<QNetworkReply *, QPointer<QTimer>> m_requestTimers;
     QString m_text;
     QHash<int, ToolCall> m_toolAcc;
     QList<ToolCall> m_completedTools;

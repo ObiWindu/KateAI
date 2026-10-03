@@ -551,6 +551,8 @@ Always configure out-of-source (`-B build`, not `cmake .`). Do not copy a `build
 | `cmake` complains about a foreign `/home/…` path or `CMakeCache.txt` | Leftover `build/` from another user or machine. `rm -rf build` and run `./install.sh` again. |
 | `cmake` *Operation not permitted* on `prefix.sh` | Stale files in `build/` from another user. `rm -rf build` and configure again. |
 | Sandboxed `bash` fails | On Linux install `bubblewrap` (`bwrap`). On macOS `sandbox-exec` is part of the OS. File tools still work without OS isolation. |
+| A request never finishes and the transcript just sits there | A connection that is accepted but then goes silent is now cut off after 3 minutes of no data and reported as a network error, then retried with backoff. A stream that keeps sending tokens is never interrupted. If retries keep failing, check for a proxy, VPN, or captive portal intercepting the provider endpoint. |
+| "A model request is already in progress" after a failed retry | Retry state was stranded by a backoff delay that overflowed into a negative timer interval. Fixed in `LlmClient::calculateDelay`; restart Kate if you are on an older build. |
 | No API key error | Open **Settings → Configure Kate → Kate AI** and paste a key for the selected provider. |
 
 ---

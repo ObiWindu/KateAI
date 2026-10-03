@@ -332,10 +332,14 @@ void EditTracker::addEdit(const QString &path, const QString &toolName, const QS
         group = &m_groups.last();
     }
 
-    // A file the agent created cannot become "pre-existing" partway through, but
-    // a file that already existed must never be treated as created just because
-    // the first edit we saw for it happened to be a write.
-    group->createdFile = group->createdFile && createdFile;
+    // createdFile is sticky. At toolStarted the flag is derived from whether the
+    // file could be read, so a second edit to a file the agent created itself
+    // arrives with createdFile == false: the file exists by then. Folding that in
+    // with && would downgrade the group, and rejecting it would restore the
+    // group's baseline -- a null QString for a created file, since it was never
+    // read -- leaving a zero-byte file behind instead of deleting it. A file that
+    // already existed reports false for every entry, so || keeps it false.
+    group->createdFile = group->createdFile || createdFile;
     group->pending.append(entry);
     refreshTotals(*group);
 
