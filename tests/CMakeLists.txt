@@ -54,6 +54,11 @@ add_executable(test_intentdock test_intentdock.cpp ../src/subtaskwidget.cpp ../s
 target_link_libraries(test_intentdock PRIVATE kateai_core Qt6::Test Qt6::Widgets)
 add_test(NAME test_intentdock COMMAND test_intentdock -platform offscreen)
 
+# Tool-card headers and command previews, which are capped at three lines.
+add_executable(test_toolcard test_toolcard.cpp ../src/toolcallwidget.cpp ../src/chattheme.cpp)
+target_link_libraries(test_toolcard PRIVATE kateai_core Qt6::Test Qt6::Widgets)
+add_test(NAME test_toolcard COMMAND test_toolcard -platform offscreen)
+
 add_executable(test_promptedit test_promptedit.cpp ../src/promptedit.cpp)
 target_link_libraries(test_promptedit PRIVATE kateai_core Qt6::Test)
 add_test(NAME test_promptedit COMMAND test_promptedit -platform offscreen)

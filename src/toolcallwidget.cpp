@@ -32,6 +32,47 @@ using namespace Qt::Literals::StringLiterals;
 namespace
 {
 
+// How many lines a tool header, and a command preview, may occupy. A `bash`
+// card carries the whole command line, and a multi-line script can run to
+// hundreds of characters; left unbounded, one card grew tall enough to bury the
+// conversation around it. Three lines is enough to recognise what ran.
+constexpr int kMaxTitleLines = 3;
+constexpr int kMaxPreviewLines = 3;
+
+// Keeps at most `maxLines` of already-wrapped text, marking that some was
+// dropped.
+//
+// The marker is appended first and the result elided, rather than eliding to a
+// reduced width: eliding to a narrower budget makes the line *more* likely to
+// fit whole, which silently drops the "…" and leaves the user with text that
+// stops mid-word for no visible reason. Appending then eliding to the real width
+// guarantees the marker and still respects the width.
+QString clampToLines(const QString &text, int maxLines, const QFontMetrics &fm, int lineWidth)
+{
+    const QStringList lines = text.split(u'\n');
+    if (lines.size() <= maxLines) {
+        return text;
+    }
+    QStringList kept = lines.mid(0, maxLines);
+    kept.last() = fm.elidedText(kept.last().trimmed() + QStringLiteral(" …"),
+                                Qt::ElideRight,
+                                std::max(24, lineWidth));
+    return kept.join(u'\n');
+}
+
+// Same idea for unwrapped source text, where a "line" is a newline.
+QString clampSourceLines(const QString &text, int maxLines)
+{
+    const QStringList lines = text.split(u'\n');
+    if (lines.size() <= maxLines) {
+        return text;
+    }
+    QStringList kept = lines.mid(0, maxLines);
+    kept.last() = kept.last().trimmed();
+    kept << i18n("… %1 more lines", lines.size() - maxLines);
+    return kept.join(u'\n');
+}
+
 // Wrap at spaces when possible, otherwise at the character that would overflow.
 QString wrapToWidth(const QString &text, const QFontMetrics &fm, int firstWidth, int nextWidth)
 {
@@ -114,6 +155,9 @@ ToolCallWidget::ToolCallWidget(const QString &toolCallId, QWidget *parent)
     headerLayout->addWidget(m_icon);
 
     m_title = new QLabel(this);
+    // Named so the line cap can be asserted from a test without reaching into
+    // private members.
+    m_title->setObjectName(u"toolTitle"_s);
     m_title->setWordWrap(true);
     m_title->setTextFormat(Qt::RichText);
     m_title->setMinimumWidth(0);
@@ -172,6 +216,17 @@ ToolCallWidget::ToolCallWidget(const QString &toolCallId, QWidget *parent)
         auto *approvalHint = new QLabel(i18n("Needs approval"), m_approvalRow);
         approvalHint->setStyleSheet(QStringLiteral("QLabel { color: %1; font-size: 11px; font-weight: 600; background: transparent; }").arg(ChatTheme::warning()));
         approvalLayout->addWidget(approvalHint);
+
+        // What is being approved. This strip is docked at the bottom of the panel
+        // while the diff it refers to sits up in the transcript, possibly
+        // scrolled out of sight, so the decision must not depend on going to
+        // find it.
+        m_approvalSubject = new QLabel(m_approvalRow);
+        m_approvalSubject->setStyleSheet(
+            QStringLiteral("QLabel { color: %1; font-size: 11px; background: transparent; }")
+                .arg(ChatTheme::textPrimary()));
+        approvalLayout->addWidget(m_approvalSubject, 1);
+
         approvalLayout->addStretch();
 
         auto *allowBtn = new QPushButton(i18n("Allow"), m_approvalRow);
@@ -309,12 +364,22 @@ void ToolCallWidget::setToolInfo(const QString &toolName, const QString &summary
     m_risk = risk;
     m_icon->setText(iconForTool(toolName));
     m_titleText = summary.isEmpty() ? i18n("Running…") : summary;
-    m_title->setToolTip(ChatTheme::toolLabel(m_toolName) + u"  ·  "_s + m_toolName);
+    // The header now clamps to three lines, so the untruncated summary and the
+    // raw tool name both live in the tooltip.
+    m_title->setToolTip(ChatTheme::toolLabel(m_toolName) + u"  ·  "_s + m_toolName
+                        + (m_titleText.isEmpty() ? QString() : u"\n"_s + m_titleText));
     updateTitleText();
     if (!isDiffTool(toolName) && !summary.isEmpty()) {
         setPreviewText(summary);
     }
     updateStyle();
+}
+
+void ToolCallWidget::setApprovalSubject(const QString &subject)
+{
+    if (m_approvalSubject) {
+        m_approvalSubject->setText(subject);
+    }
 }
 
 void ToolCallWidget::showApproval()
@@ -425,7 +490,10 @@ void ToolCallWidget::setPreviewText(const QString &text)
     if (text.trimmed().isEmpty()) {
         return;
     }
-    showPreviewHtml(plainToHtml(text));
+    // Only ever a command or a path: setToolInfo routes diffs to
+    // setDescribeDiff instead, and a diff is left whole because it is the thing
+    // being judged when an edit is approved.
+    showPreviewHtml(plainToHtml(clampSourceLines(text, kMaxPreviewLines)));
 }
 
 void ToolCallWidget::showPreviewHtml(const QString &html)
@@ -745,13 +813,15 @@ void ToolCallWidget::updateTitleText()
     const QString label = ChatTheme::toolLabel(m_toolName);
     const int prefixW = fm.horizontalAdvance(label + u" "_s) + 8;
     const int firstW = std::max(24, avail - prefixW);
-    const QString wrapped = wrapToWidth(m_titleText, fm, firstW, avail);
+    // Clamp before measuring, so the height below matches what is drawn.
+    const QString wrapped = clampToLines(wrapToWidth(m_titleText, fm, firstW, avail), kMaxTitleLines, fm, avail);
     QString cmdHtml = escapeHtml(wrapped);
     cmdHtml.replace(u'\n', u"<br>"_s);
     m_title->setText(QStringLiteral("<span style=\"color:%1\"><b>%2</b></span>&nbsp; %3")
                          .arg(ChatTheme::textMuted(), escapeHtml(label), cmdHtml));
 
     const int lines = std::max(1, static_cast<int>(wrapped.count(u'\n')) + 1);
+    m_title->setMaximumHeight(fm.lineSpacing() * lines + 2);
     m_title->setMinimumHeight(fm.lineSpacing() * lines + 2);
 }
 
@@ -764,7 +834,14 @@ int ToolCallWidget::previewFitHeight() const
     if (vw < 40) {
         vw = std::max(40, width() - 8);
     }
-    return fittedDocumentHeight(m_describeDiff->document(), vw, 20);
+    const int fitted = fittedDocumentHeight(m_describeDiff->document(), vw, 20);
+    if (m_hasDiffPreview) {
+        return fitted;
+    }
+    // Command preview: hard-cap the box as well as the text, because a long
+    // line that the panel wraps could still push past three visual rows.
+    const QFontMetrics fm(m_describeDiff->font());
+    return std::min(fitted, fm.lineSpacing() * kMaxPreviewLines + 20);
 }
 
 int ToolCallWidget::detailsFitHeight() const

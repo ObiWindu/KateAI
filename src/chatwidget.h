@@ -170,6 +170,12 @@ private:
     void clearTranscriptContents();
     void reflowTranscriptMedia();
     void scheduleStreamHeightUpdate();
+    // Streaming renders the whole accumulated answer on every chunk, which is
+    // quadratic and saturates the UI thread once the answer (or the surrounding
+    // context) gets large. These coalesce the rebuild onto a timer so the number
+    // of full re-renders is bounded by wall-clock rate rather than token count.
+    void scheduleStreamRender();
+    void flushStreamRender();
     static bool isInternalUserMessage(const QString &text);
     void startThinkingPacer();
     void stopThinkingPacer();
@@ -263,6 +269,7 @@ private:
     QPointer<QLabel> m_activeAssistantPulse;
     bool m_userScrolledUp = true;
     QTimer *m_streamHeightTimer = nullptr;
+    QTimer *m_streamRenderTimer = nullptr;
 
     struct ThinkingBlockRef {
         QPointer<QWidget> block;

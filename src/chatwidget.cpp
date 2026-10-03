@@ -713,6 +713,15 @@ ChatWidget::ChatWidget(QWidget *parent)
             applyTranscriptCollapse();
         }
         widget->showApproval();
+        // Name the target in the docked strip. The card (and its diff) can be
+        // far up the transcript, so the buttons alone do not say what they are
+        // allowing.
+        {
+            const QString label = ChatTheme::toolLabel(request.toolName);
+            const QString subject = request.path.isEmpty() ? label
+                                                           : label + u"  ·  "_s + request.path;
+            widget->setApprovalSubject(subject);
+        }
         // Lift the Allow / Deny strip out of the card and into the dock, so the
         // decision is always on screen next to the input. The card stays
         // expanded underneath, so the diff being judged is still one scroll away.
@@ -1071,6 +1080,38 @@ void ChatWidget::setStreaming(const QString &text)
     if (!m_activeAssistantBrowser) {
         return;
     }
+    // Do not rebuild the document here. Doing so on every chunk made a long
+    // answer quadratic -- once the context window was full each chunk cost
+    // >100 ms of markdown + syntax-highlight on the UI thread, which starved
+    // the event loop and froze the panel. scheduleStreamRender() coalesces the
+    // rebuild onto a timer instead.
+    scheduleStreamRender();
+}
+
+void ChatWidget::scheduleStreamRender()
+{
+    if (!m_streamRenderTimer) {
+        m_streamRenderTimer = new QTimer(this);
+        m_streamRenderTimer->setSingleShot(true);
+        m_streamRenderTimer->setInterval(50);
+        connect(m_streamRenderTimer, &QTimer::timeout, this, &ChatWidget::flushStreamRender);
+    }
+    // Restarting is safe because it is single-shot: a burst of chunks collapses
+    // into one rebuild, while a steady stream still renders ~20 times a second,
+    // which is well past the eye's ability to notice on text arriving.
+    if (!m_streamRenderTimer->isActive()) {
+        m_streamRenderTimer->start();
+    }
+}
+
+void ChatWidget::flushStreamRender()
+{
+    if (m_streamRenderTimer) {
+        m_streamRenderTimer->stop();
+    }
+    if (!m_activeAssistantBrowser) {
+        return;
+    }
     m_activeAssistantBrowser->setDocument(makeMarkdownDocument(closedMarkdown(m_streamText)));
     scheduleStreamHeightUpdate();
 }
@@ -1364,6 +1405,11 @@ void ChatWidget::freezeStreaming()
 {
     if (m_streamHeightTimer) {
         m_streamHeightTimer->stop();
+    }
+    // Drop any coalesced rebuild; the block below renders the final text
+    // synchronously, so a pending one would only duplicate the work.
+    if (m_streamRenderTimer) {
+        m_streamRenderTimer->stop();
     }
     if (m_activeAssistantBrowser && !m_streamText.isEmpty()) {
         m_activeAssistantBrowser->setDocument(makeMarkdownDocument(m_streamText));
@@ -3392,6 +3438,9 @@ void ChatWidget::scheduleStreamHeightUpdate()
 void ChatWidget::clearStreamingPointers()
 {
     stopThinkingPacer();
+    if (m_streamRenderTimer) {
+        m_streamRenderTimer->stop();
+    }
     m_activeAssistantWidget = nullptr;
     m_activeAssistantBrowser = nullptr;
     m_activeAssistantPulse = nullptr;
@@ -3424,6 +3473,9 @@ void ChatWidget::clearTranscriptContents()
 {
     if (m_streamHeightTimer) {
         m_streamHeightTimer->stop();
+    }
+    if (m_streamRenderTimer) {
+        m_streamRenderTimer->stop();
     }
     stopThinkingPacer();
     if (m_indicatorTimer) {
