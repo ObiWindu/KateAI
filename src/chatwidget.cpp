@@ -361,14 +361,6 @@ ChatWidget::ChatWidget(QWidget *parent)
     m_intentDock->hide();
     root->addWidget(m_intentDock);
 
-    // 4. Permission Bar (Zed-style Inline Consent)
-    m_permissionBar = new PermissionBar(this);
-    root->addWidget(m_permissionBar);
-
-    // 4b. Edit Tracker (for AcceptEdits permission mode) - compact bar at bottom of chat
-    m_editTracker = new EditTracker(this);
-    root->addWidget(m_editTracker);
-
     // 5. Composer
     auto *composerContainer = new QWidget(this);
     composerContainer->setObjectName(u"composerContainer"_s);
@@ -386,6 +378,15 @@ ChatWidget::ChatWidget(QWidget *parent)
     m_infoBar->setStyleSheet(ChatTheme::infoBar());
     m_infoBar->hide();
     composerLayout->addWidget(m_infoBar);
+
+    // Permission Bar (Zed-style Inline Consent) - positioned right above the input
+    m_permissionBar = new PermissionBar(composerContainer);
+    m_permissionBar->setObjectName(u"PermissionBar"_s);
+    composerLayout->addWidget(m_permissionBar);
+
+    // Edit Tracker (for AcceptEdits permission mode) - compact bar above input
+    m_editTracker = new EditTracker(composerContainer);
+    composerLayout->addWidget(m_editTracker);
 
     auto *composerCard = new QWidget(composerContainer);
     composerCard->setObjectName(u"composerCard"_s);

@@ -4,8 +4,6 @@
  */
 
 #include "llmclient.h"
-#include "contextmanager.h"
-#include <KLocalizedString>
 
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -896,19 +894,6 @@ void LlmClient::handleFinished()
         finalError = describe(m_completionError);
     } else if (networkError != QNetworkReply::NoError || status >= 400) {
         QString message = errorString;
-        // If a network error occurred (e.g., connection closed) and the request
-        // was large, it may be due to exceeding the provider's context window.
-        // Provide a more actionable error message in that case.
-        if (networkError != QNetworkReply::NoError && status == 0 && !m_storedMessages.isEmpty()) {
-            const int requestTokens = ContextManager::estimateTokens(m_storedMessages);
-            // Heuristic: if the request is very large, the provider may have
-            // closed the connection rather than returning a proper 413/400.
-            if (requestTokens > 100000) {
-                message = i18n("Request too large (%1 tokens). The provider closed the connection. "
-                             "Try reducing the conversation length or increasing the context window.",
-                             requestTokens);
-            }
-        }
         if (message.isEmpty()) {
             if (status == 401) {
                 message = u"Invalid API key."_s;

@@ -201,6 +201,18 @@ QList<ChatMessage> build(const QList<ChatMessage> &history, const Options &optio
         return history;
     }
 
+    // If contextWindow is 0 (unknown/unlimited) and no reserve is set,
+    // send the full history without compaction.
+    if (options.contextWindow == 0 && options.reserveForResponse <= 0) {
+        auto applyMessageCap = [&options](QList<ChatMessage> list) {
+            if (options.maxMessages > 0 && list.size() > options.maxMessages) {
+                list = list.mid(list.size() - options.maxMessages);
+            }
+            return list;
+        };
+        return applyMessageCap(history);
+    }
+
     const int window = options.contextWindow > 0 ? options.contextWindow : kDefaultContextWindow;
     const int budget = qMax(1024, window - qMax(0, options.reserveForResponse));
 

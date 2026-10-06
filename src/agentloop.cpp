@@ -893,22 +893,7 @@ void AgentLoop::sendToModel()
     }
     m_modelRequestTimes.enqueue(now);
 
-    // Pre-flight check: verify the compacted request fits within the context window.
-    // This prevents sending oversized requests that cause the provider to close
-    // the connection, which would be misclassified as a generic network error.
     const QList<ChatMessage> requestMessages = m_messagesForRequest();
-    const int requestTokens = ContextManager::estimateTokens(requestMessages);
-    const int contextWindow = m_settings.contextWindow > 0
-        ? m_settings.contextWindow
-        : ContextManager::contextWindowFor(modelFor(m_settings));
-    const int reserveForResponse = qMax(512, m_settings.contextWindowReserve);
-    const int budget = qMax(1024, contextWindow - reserveForResponse);
-    if (requestTokens > budget) {
-        finishWithFailure(i18n("Request too large: %1 tokens exceed the context budget of %2 tokens. "
-                             "Try reducing the conversation length or increasing the context window.",
-                             requestTokens, budget));
-        return;
-    }
 
     ++m_modelRequests;
     m_currentAssistant.clear();
