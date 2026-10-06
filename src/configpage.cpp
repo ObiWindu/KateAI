@@ -418,8 +418,9 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     agentForm->addRow(i18n("Smart context truncation:"), m_smartContextTruncation);
 
     m_contextWindowReserve = new QSpinBox(agentWidget);
-    m_contextWindowReserve->setRange(1024, 32768);
+    m_contextWindowReserve->setRange(0, 32768);
     m_contextWindowReserve->setSuffix(i18n(" tokens"));
+    m_contextWindowReserve->setSpecialValueText(i18n("None"));
     agentForm->addRow(i18n("Context window reserve:"), m_contextWindowReserve);
 
     m_compressOldMessages = new QCheckBox(i18n("Compress messages beyond window"), agentWidget);

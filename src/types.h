@@ -263,10 +263,10 @@ struct Settings {
     int maxPlanSteps = 15;           // Max steps in structured plan
     
     // Context management for performance
-    bool smartContextTruncation = true; // Intelligently truncate old context
-    int contextWindowReserve = 8192;    // Reserve tokens for response
-    bool compressOldMessages = true;    // Compress messages beyond window
-    int compressionThreshold = 2048;    // Start compressing after this many chars
+    bool smartContextTruncation = false; // Intelligently truncate old context
+    int contextWindowReserve = 0;        // Reserve tokens for response (0 = no reserve)
+    bool compressOldMessages = false;    // Compress messages beyond window
+    int compressionThreshold = 2048;     // Start compressing after this many chars
     
     // Agent behavior tuning
     bool requireVerification = true;    // Require verification after mutations
