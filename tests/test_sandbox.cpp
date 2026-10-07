@@ -163,6 +163,32 @@ private Q_SLOTS:
         QVERIFY(!command.isEmpty());
 #endif
     }
+
+    void wrapArgvDoesNotRequoteThroughBashDashC()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        Sandbox box(dir.path(), SandboxProfile::Off);
+        QString error;
+        const QString script = u"printf %s 'quoted ok'"_s;
+        const QStringList wrapped = box.wrapArgv(u"/bin/bash"_s, {u"-c"_s, script}, &error);
+        QVERIFY(error.isEmpty());
+        QCOMPARE(wrapped, (QStringList{u"/bin/bash"_s, u"-c"_s, script}));
+    }
+
+    void wrapCommandPassesShellLineAsOneArgument()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        Sandbox box(dir.path(), SandboxProfile::Off);
+        QString error;
+        const QString line = u"/bin/bash -c 'printf %s quoted-ok'"_s;
+        const QStringList wrapped = box.wrapCommand(line, &error);
+        QVERIFY(error.isEmpty());
+        QVERIFY(wrapped.size() >= 3);
+        QCOMPARE(wrapped.last(), line);
+        QCOMPARE(wrapped.at(wrapped.size() - 2), u"-lc"_s);
+    }
 };
 
 QTEST_GUILESS_MAIN(TestSandbox)

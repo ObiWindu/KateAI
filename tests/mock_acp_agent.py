@@ -124,6 +124,28 @@ def handle_prompt(request_id, params):
         result(request_id, {"stopReason": "end_turn"})
         return
 
+    if SCENARIO == "quoted":
+        created = call_client(
+            "terminal/create",
+            {
+                "sessionId": SESSION_ID,
+                "command": "/bin/bash -c 'printf %s quoted-ok'",
+            },
+        )
+        terminal_id = ((created or {}).get("result") or {}).get("terminalId")
+        call_client("terminal/wait_for_exit", {"sessionId": SESSION_ID, "terminalId": terminal_id})
+        output = call_client("terminal/output", {"sessionId": SESSION_ID, "terminalId": terminal_id})
+        call_client("terminal/release", {"sessionId": SESSION_ID, "terminalId": terminal_id})
+        body = ((output or {}).get("result") or {}).get("output", "")
+        session_update(
+            {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": body.strip()},
+            }
+        )
+        result(request_id, {"stopReason": "end_turn"})
+        return
+
     if SCENARIO == "terminal":
         created = call_client(
             "terminal/create",

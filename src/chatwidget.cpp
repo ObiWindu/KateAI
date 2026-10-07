@@ -1283,14 +1283,13 @@ QWidget *ChatWidget::createThinkingBlock(QWidget *parent, QTextBrowser *&browser
     browser->setFrameShape(QFrame::NoFrame);
     browser->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     browser->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    browser->setStyleSheet(QStringLiteral("QTextBrowser { background: rgba(61, 126, 255, 0.08); color: #9ec1ff; border: none;"
-                                        " border-left: 2px solid %1; border-radius: 6px;"
-                                        " font-style: italic; font-size: 12px; padding: 6px 8px; }")
-                            .arg(ChatTheme::accent()));
+    browser->setStyleSheet(QStringLiteral("QTextBrowser { background: transparent; color: %1; border: none;"
+                                        " font-size: 12px; padding: 6px 8px; }")
+                            .arg(ChatTheme::textPrimary()));
 
     browser->document()->setDefaultStyleSheet(ChatTheme::thinkingCss());
     QPalette pal = browser->palette();
-    pal.setColor(QPalette::Text, QColor(QStringLiteral("#9ec1ff")));
+    pal.setColor(QPalette::Text, QColor(ChatTheme::textPrimary()));
     pal.setColor(QPalette::Base, Qt::transparent);
     browser->setPalette(pal);
     tbLayout->addWidget(browser);
@@ -1535,10 +1534,11 @@ void ChatWidget::forceScrollToBottom()
     // per second while a response streams in, and leaving the viewport on stale
     // geometry until the timer fires is what makes the transcript jump.
     sb->setValue(sb->maximum());
-    // Re-pin once Qt has flushed the pending layout, so the range read above is
-    // the post-relayout one rather than a pre-grow one.
+    // Re-pin once Qt has flushed the pending layout. A user may scroll away
+    // before this deferred callback runs, so do not apply a stale request then.
     QTimer::singleShot(0, this, [thisWeak = QPointer<ChatWidget>(this)]() {
-        if (thisWeak && thisWeak->m_scrollArea) {
+        if (thisWeak && thisWeak->m_scrollArea && !thisWeak->m_userScrolledUp
+            && !thisWeak->m_pinnedViewportWidget) {
             auto *bar = thisWeak->m_scrollArea->verticalScrollBar();
             bar->setValue(bar->maximum());
         }

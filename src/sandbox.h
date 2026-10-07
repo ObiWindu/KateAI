@@ -61,6 +61,9 @@ public:
     bool commandTouchesDeniedPath(const QString &command) const;
 
     QStringList wrapCommand(const QString &command, QString *error) const;
+    // Wrap an argv vector (ACP terminal/create). The program and each argument
+    // stay separate; nothing is re-quoted into `bash -c`.
+    QStringList wrapArgv(const QString &program, const QStringList &args, QString *error) const;
     bool bubblewrapAvailable() const;
     bool isolationAvailable() const;
 

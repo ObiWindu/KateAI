@@ -1166,8 +1166,21 @@ void AcpClient::handleTerminalCreate(const QJsonValue &id, const QJsonObject &pa
         replyError(id, kServerError, u"Terminals are disabled in the read-only sandbox."_s);
         return;
     }
-    QString command = params.value(u"command"_s).toString();
+    QString command;
     QStringList args;
+    const QJsonValue rawCommand = params.value(u"command"_s);
+    if (rawCommand.isArray()) {
+        const QJsonArray argv = rawCommand.toArray();
+        for (const QJsonValue &value : argv) {
+            if (command.isEmpty()) {
+                command = value.toString();
+            } else {
+                args.append(value.toString());
+            }
+        }
+    } else {
+        command = rawCommand.toString();
+    }
     const QJsonArray rawArgs = params.value(u"args"_s).toArray();
     for (const QJsonValue &value : rawArgs) {
         args.append(value.toString());
@@ -1175,13 +1188,6 @@ void AcpClient::handleTerminalCreate(const QJsonValue &id, const QJsonObject &pa
     if (command.trimmed().isEmpty()) {
         replyError(id, kInvalidParams, u"terminal/create requires a command."_s);
         return;
-    }
-    if (args.isEmpty() && command.contains(QLatin1Char(' '))) {
-        const QStringList split = QProcess::splitCommand(command);
-        if (!split.isEmpty()) {
-            command = split.first();
-            args = split.mid(1);
-        }
     }
 
     QString cwd = params.value(u"cwd"_s).toString();
@@ -1219,8 +1225,25 @@ void AcpClient::handleTerminalCreate(const QJsonValue &id, const QJsonObject &pa
         }
     });
 
+    QString wrapError;
+    QStringList wrapped;
+    if (args.isEmpty()) {
+        // A lone command string is a shell line. Pass it as one `-c` argument
+        // so inner quotes stay part of the script.
+        wrapped = currentSandbox().wrapCommand(command, &wrapError);
+    } else {
+        // ACP argv stays argv. wrapArgv never rewrites this into `bash -c '…'`.
+        wrapped = currentSandbox().wrapArgv(command, args, &wrapError);
+    }
+    if (wrapped.isEmpty()) {
+        replyError(id, kServerError, wrapError.isEmpty() ? u"Failed to wrap the terminal command."_s : wrapError);
+        delete term->process;
+        delete term;
+        return;
+    }
+
     m_terminals.insert(term->id, term);
-    term->process->start(command, args);
+    term->process->start(wrapped.first(), wrapped.mid(1));
     QJsonObject result;
     result.insert(u"terminalId"_s, term->id);
     replyResult(id, result);

@@ -492,22 +492,24 @@ QString messageCss()
 QString thinkingCss()
 {
     return QStringLiteral(
-           "body { color: #9ec1ff; font-style: italic; font-size: 12px; margin: 0; padding: 0; background: transparent; }"
-           "p { color: #9ec1ff; margin-bottom: 4px; }");
+           "body { color: %1; font-weight: 600; font-size: 12px; margin: 0; padding: 0; background: transparent; }"
+           "p { color: %1; font-weight: 600; margin-bottom: 4px; }")
+        .arg(kTextPrimary);
 }
 
 QString toggleLink()
 {
     return QStringLiteral(
            "QPushButton {"
-           "  color: #8fb6ff;"
+           "  color: %1;"
            "  font-size: 11px;"
-           "  font-weight: 600;"
+           "  font-weight: 700;"
            "  border: none;"
            "  text-align: left;"
            "  padding: 2px 0;"
            "}"
-           "QPushButton:hover { color: #d6e6ff; }");
+           "QPushButton:hover { color: %1; }")
+        .arg(kTextPrimary);
 }
 
 QString roleHeader()

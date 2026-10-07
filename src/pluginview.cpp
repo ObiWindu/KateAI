@@ -69,17 +69,24 @@ namespace KateAi
             m_chat->setSettings(plugin->settings());
             if (m_chat->agent()) {
                 m_chat->agent()->setDocumentBridge(&m_bridge);
+                // Every chat needs an ID before its first turn. Otherwise the
+                // turn-finished autosave is skipped, and switching to another
+                // conversation can save the new messages under an empty ID.
+                QString activeId = SessionStore::getActiveConversationId();
+                if (activeId.isEmpty()) {
+                    activeId = SessionStore::createNewConversation();
+                }
+                m_chat->setCurrentConversationId(activeId);
+
                 // Restore session data
                 const auto sessionData = SessionStore::load();
                 if (!sessionData.messages.isEmpty()) {
                     m_chat->agent()->restoreSession(sessionData);
                     m_chat->rebuildTranscript();
-                    // Set the current conversation ID so newChat() can save it properly
-                    const QString activeId = SessionStore::getActiveConversationId();
-                    m_chat->setCurrentConversationId(activeId);
-                    // Ensure the history button reflects existing conversations on startup
-                    m_chat->updateHistoryButton();
                 }
+                // The active conversation may be new and not yet listed, but
+                // history should still reflect any previously saved threads.
+                m_chat->updateHistoryButton();
             }
         }
         refreshWorkspace();

@@ -468,6 +468,29 @@ static QString findShellExecutable()
 #endif
 }
 
+static QString posixShellQuote(const QString &value)
+{
+    if (value.isEmpty()) {
+        return u"''"_s;
+    }
+    static const QRegularExpression safe(u"^[A-Za-z0-9_./:@%+=,-]+$"_s);
+    if (safe.match(value).hasMatch()) {
+        return value;
+    }
+    QString escaped = value;
+    escaped.replace(u"'"_s, u"'\\''"_s);
+    return u"'"_s + escaped + u"'"_s;
+}
+
+static QString argvAsShellLine(const QString &program, const QStringList &args)
+{
+    QStringList parts{posixShellQuote(program)};
+    for (const QString &arg : args) {
+        parts.append(posixShellQuote(arg));
+    }
+    return parts.join(u' ');
+}
+
 static QStringList unsandboxedArgv(const QString &command)
 {
     const QString shell = findShellExecutable();
@@ -494,7 +517,7 @@ static QString seatbeltQuote(const QString &path)
 #endif
 
 #if defined(Q_OS_LINUX)
-static QStringList wrapLinuxBubblewrap(const QString &workspaceRoot, SandboxProfile profile, const QString &command, QString *error)
+static QStringList linuxBubblewrapPrefix(const QString &workspaceRoot, SandboxProfile profile, QString *error)
 {
     const QString bwrap = QStandardPaths::findExecutable(u"bwrap"_s);
     if (bwrap.isEmpty()) {
@@ -545,8 +568,28 @@ static QStringList wrapLinuxBubblewrap(const QString &workspaceRoot, SandboxProf
             args << u"--unshare-net"_s;
         }
     }
+    return args;
+}
 
+static QStringList wrapLinuxBubblewrap(const QString &workspaceRoot, SandboxProfile profile, const QString &command, QString *error)
+{
+    QStringList args = linuxBubblewrapPrefix(workspaceRoot, profile, error);
+    if (args.isEmpty()) {
+        return {};
+    }
     args << u"--"_s << findShellExecutable() << u"-lc"_s << command;
+    return args;
+}
+
+static QStringList wrapLinuxBubblewrapArgv(const QString &workspaceRoot, SandboxProfile profile,
+                                          const QString &program, const QStringList &argv, QString *error)
+{
+    QStringList args = linuxBubblewrapPrefix(workspaceRoot, profile, error);
+    if (args.isEmpty()) {
+        return {};
+    }
+    args << u"--"_s << program;
+    args += argv;
     return args;
 }
 #endif
@@ -591,6 +634,25 @@ static QStringList wrapMacSandboxExec(const QString &workspaceRoot, SandboxProfi
     }
 
     return {sandboxExec, u"-p"_s, profileText, findShellExecutable(), u"-lc"_s, command};
+}
+
+static QStringList wrapMacSandboxExecArgv(const QString &workspaceRoot, SandboxProfile profile,
+                                         const QString &program, const QStringList &argv, QString *error)
+{
+    QStringList wrapped = wrapMacSandboxExec(workspaceRoot, profile, QString(), error);
+    if (wrapped.isEmpty()) {
+        return {};
+    }
+    // Replace the trailing `shell -lc command` with the raw argv so quotes in
+    // arguments are never re-parsed by a nested bash -c.
+    if (wrapped.size() >= 3) {
+        wrapped.removeLast(); // command
+        wrapped.removeLast(); // -lc
+        wrapped.removeLast(); // shell
+    }
+    wrapped << program;
+    wrapped += argv;
+    return wrapped;
 }
 #endif
 
@@ -639,6 +701,39 @@ QStringList Sandbox::wrapCommand(const QString &command, QString *error) const
     return wrapMacSandboxExec(m_workspaceRoot, m_profile, command, error);
 #else
     return unsandboxedArgv(command);
+#endif
+}
+
+QStringList Sandbox::wrapArgv(const QString &program, const QStringList &args, QString *error) const
+{
+    const QString reconstructed = argvAsShellLine(program, args);
+    if (isAlwaysDeniedCommand(reconstructed)) {
+        if (error) {
+            *error = u"Command is blocked by the safety policy."_s;
+        }
+        return {};
+    }
+    if (commandTouchesDeniedPath(reconstructed)) {
+        if (error) {
+            *error = u"Command touches a path blocked by the deny rules."_s;
+        }
+        return {};
+    }
+
+    if (m_profile == SandboxProfile::Off) {
+        QStringList out{program};
+        out += args;
+        return out;
+    }
+
+#if defined(Q_OS_LINUX)
+    return wrapLinuxBubblewrapArgv(m_workspaceRoot, m_profile, program, args, error);
+#elif defined(Q_OS_MACOS)
+    return wrapMacSandboxExecArgv(m_workspaceRoot, m_profile, program, args, error);
+#else
+    QStringList out{program};
+    out += args;
+    return out;
 #endif
 }
 
