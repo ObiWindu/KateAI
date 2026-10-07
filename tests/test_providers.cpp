@@ -139,7 +139,7 @@ private Q_SLOTS:
         QVERIFY(pickerModelsFor(settings, Provider::Acp, {}).isEmpty());
     }
 
-    void acpNativeIsTheGrokBuildTransport()
+    void acpNativeIsStdioTransport()
     {
         Settings settings;
         settings.provider = Provider::Acp;
@@ -147,12 +147,19 @@ private Q_SLOTS:
         QVERIFY(usesAcpNative(settings));
         QVERIFY(!providerRequiresApiKey(settings, Provider::Acp));
         QVERIFY(providerIsSelectable(settings, Provider::Acp));
+        QCOMPARE(settings.acpAgentId, u"grok-build"_s);
         QCOMPARE(settings.acpCommand, u"grok"_s);
         QCOMPARE(settings.acpArgs, u"agent stdio"_s);
+        QCOMPARE(providerLabel(Provider::Acp), u"ACP"_s);
+        QCOMPARE(acpAgentDisplayName(settings), u"Grok Build"_s);
+        QCOMPARE(acpAgentPreset(u"gemini"_s).args, u"--acp"_s);
+        QCOMPARE(acpAgentIdMatching(u"goose"_s, u"acp"_s), u"goose"_s);
+        QCOMPARE(acpAgentIdMatching(u"python3"_s, u"agent.py"_s), u"custom"_s);
 
         settings.apiFormat = ApiFormat::OpenAICompatible;
         QVERIFY(!usesAcpNative(settings));
         QVERIFY(providerRequiresApiKey(settings, Provider::Acp));
+        QCOMPARE(acpAgentDisplayName(settings), u"ACP"_s);
     }
 };
 

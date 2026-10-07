@@ -999,7 +999,7 @@ void AgentLoop::startAcpTurn(const QString &userText)
     user.content = userText;
     m_messages.append(user);
     Q_EMIT userMessage(userText);
-    Q_EMIT activityUpdated(u"Talking to Grok Build over ACP…"_s);
+    Q_EMIT activityUpdated(i18n("Talking to %1 over ACP…", acpAgentDisplayName(m_settings)));
     Q_EMIT statusChanged(u"Working on it…"_s);
 
     syncAcpClient();

@@ -32,6 +32,7 @@
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QScrollArea>
+#include <QSignalBlocker>
 #include <QSpinBox>
 #include <QTableWidget>
 #include <QTabWidget>
@@ -142,23 +143,31 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
         addProviderGroup(i18n("OpenCode Zen (curated coding models)"), m_opencodeKey, m_opencodeModel, m_opencodeUrl);
 
     m_acpKey = makeKey();
-    m_acpKey->setPlaceholderText(i18n("Optional — Grok Build uses `grok` login"));
+    m_acpKey->setPlaceholderText(i18n("Optional — most agents use their own CLI login"));
     m_acpModel = makeModelCombo();
     m_acpUrl = new QLineEdit(this);
     m_acpUrl->setPlaceholderText(u"http://localhost:8080"_s);
+    m_acpAgent = new QComboBox(this);
+    for (const AcpAgentPreset &preset : acpAgentPresets()) {
+        m_acpAgent->addItem(preset.label, preset.id);
+    }
     m_acpCommand = new QLineEdit(this);
     m_acpCommand->setPlaceholderText(u"grok"_s);
     m_acpArgs = new QLineEdit(this);
     m_acpArgs->setPlaceholderText(u"agent stdio"_s);
+    m_acpApiKeyEnv = new QLineEdit(this);
+    m_acpApiKeyEnv->setPlaceholderText(u"XAI_API_KEY"_s);
     m_apiFormat = new QComboBox(providersWidget);
     m_apiFormat->addItem(apiFormatLabel(ApiFormat::AcpNative), apiFormatId(ApiFormat::AcpNative));
     m_apiFormat->addItem(apiFormatLabel(ApiFormat::OpenAICompatible), apiFormatId(ApiFormat::OpenAICompatible));
     m_apiFormat->addItem(apiFormatLabel(ApiFormat::AnthropicCompatible), apiFormatId(ApiFormat::AnthropicCompatible));
-    auto *acpGroup = new QGroupBox(i18n("ACP / Grok Build"), providersWidget);
+    auto *acpGroup = new QGroupBox(i18n("ACP Agent"), providersWidget);
     auto *acpForm = new QFormLayout(acpGroup);
     acpForm->addRow(i18n("API Format:"), m_apiFormat);
+    acpForm->addRow(i18n("Agent:"), m_acpAgent);
     acpForm->addRow(i18n("Command:"), m_acpCommand);
     acpForm->addRow(i18n("Arguments:"), m_acpArgs);
+    acpForm->addRow(i18n("API Key env:"), m_acpApiKeyEnv);
     acpForm->addRow(i18n("API Key:"), m_acpKey);
     acpForm->addRow(i18n("Default Model:"), m_acpModel);
     acpForm->addRow(i18n("Endpoint URL:"), m_acpUrl);
@@ -790,7 +799,15 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     connect(m_acpUrl, &QLineEdit::textChanged, this, markChanged);
     connect(m_acpCommand, &QLineEdit::textChanged, this, markChanged);
     connect(m_acpArgs, &QLineEdit::textChanged, this, markChanged);
-    connect(m_apiFormat, &QComboBox::currentIndexChanged, this, markChanged);
+    connect(m_acpApiKeyEnv, &QLineEdit::textChanged, this, markChanged);
+    connect(m_acpAgent, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this]() {
+        applySelectedAcpPreset();
+        Q_EMIT changed();
+    });
+    connect(m_apiFormat, &QComboBox::currentIndexChanged, this, [this]() {
+        updateAcpNativeEnabled();
+        Q_EMIT changed();
+    });
 
     // Connect API key changes to fetch models
     auto fetchModelsForProvider = [this](Provider provider, QLineEdit *keyEdit, QComboBox *modelCombo) {
@@ -1244,8 +1261,10 @@ void KateAiConfigPage::apply()
     s.openaiCompatibleUrl = m_openaiCompatibleUrl->text().trimmed();
     s.claudeCompatibleUrl = m_claudeCompatibleUrl->text().trimmed();
     s.acpUrl = m_acpUrl->text().trimmed();
+    s.acpAgentId = m_acpAgent->currentData().toString();
     s.acpCommand = m_acpCommand->text().trimmed();
     s.acpArgs = m_acpArgs->text().trimmed();
+    s.acpApiKeyEnv = m_acpApiKeyEnv->text().trimmed();
     s.apiFormat = apiFormatFromId(m_apiFormat->currentData().toString());
 
     s.permissionMode = permissionModeFromId(m_permission->currentData().toString());
@@ -1392,9 +1411,22 @@ void KateAiConfigPage::reset()
     m_openaiCompatibleUrl->setText(s.openaiCompatibleUrl);
     m_claudeCompatibleUrl->setText(s.claudeCompatibleUrl);
     m_acpUrl->setText(s.acpUrl);
+    {
+        const QSignalBlocker blockAgent(m_acpAgent);
+        int agentIndex = m_acpAgent->findData(s.acpAgentId);
+        if (agentIndex < 0) {
+            agentIndex = m_acpAgent->findData(u"custom"_s);
+        }
+        m_acpAgent->setCurrentIndex(std::max(0, agentIndex));
+    }
     m_acpCommand->setText(s.acpCommand);
     m_acpArgs->setText(s.acpArgs);
-    m_apiFormat->setCurrentIndex(std::max(0, m_apiFormat->findData(apiFormatId(s.apiFormat))));
+    m_acpApiKeyEnv->setText(s.acpApiKeyEnv);
+    {
+        const QSignalBlocker blockFormat(m_apiFormat);
+        m_apiFormat->setCurrentIndex(std::max(0, m_apiFormat->findData(apiFormatId(s.apiFormat))));
+    }
+    updateAcpNativeEnabled();
 
     // Fetch models for providers that have API keys configured
     if (m_modelFetcher) {
@@ -1593,6 +1625,37 @@ void KateAiConfigPage::defaults()
 {
     m_plugin->setSettings(Settings{});
     reset();
+}
+
+void KateAiConfigPage::applySelectedAcpPreset()
+{
+    const AcpAgentPreset preset = acpAgentPreset(m_acpAgent->currentData().toString());
+    if (preset.id == u"custom"_s) {
+        m_acpCommand->setPlaceholderText(i18n("agent binary or npx"));
+        m_acpArgs->setPlaceholderText(i18n("stdio / --acp / acp"));
+        m_acpApiKeyEnv->setPlaceholderText(i18n("optional env var for the API key"));
+        m_acpKey->setPlaceholderText(i18n("Optional — most agents use their own CLI login"));
+        return;
+    }
+    m_acpCommand->setText(preset.command);
+    m_acpArgs->setText(preset.args);
+    m_acpApiKeyEnv->setText(preset.apiKeyEnv);
+    m_acpCommand->setPlaceholderText(preset.command);
+    m_acpArgs->setPlaceholderText(preset.args);
+    m_acpApiKeyEnv->setPlaceholderText(preset.apiKeyEnv);
+    m_acpKey->setPlaceholderText(preset.apiKeyEnv.isEmpty()
+                                     ? i18n("Optional — this agent uses its own CLI login")
+                                     : i18n("Optional — also set as %1", preset.apiKeyEnv));
+}
+
+void KateAiConfigPage::updateAcpNativeEnabled()
+{
+    const bool native = apiFormatFromId(m_apiFormat->currentData().toString()) == ApiFormat::AcpNative;
+    m_acpAgent->setEnabled(native);
+    m_acpCommand->setEnabled(native);
+    m_acpArgs->setEnabled(native);
+    m_acpApiKeyEnv->setEnabled(native);
+    m_acpUrl->setEnabled(!native);
 }
 
 } // namespace KateAi

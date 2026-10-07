@@ -29,7 +29,8 @@ namespace KateAi
 {
 
 // Client for the Agent Client Protocol (JSON-RPC over a stdio subprocess).
-// Kate is the ACP client; Grok Build (`grok agent stdio`) is the agent.
+// Kate is the ACP client; the agent is any stdio ACP implementation
+// configured in Settings (Grok Build, Claude Agent, Gemini CLI, …).
 class AcpClient : public QObject
 {
     Q_OBJECT
@@ -80,7 +81,8 @@ public:
     void prompt(const QString &text);
     void resolvePermission(PermissionDecision decision);
 
-    // Command used to launch the agent, including model / always-approve flags.
+    // Command used to launch the agent. Grok Build also receives --model /
+    // --always-approve; other agents get the configured args unchanged.
     static QString resolvedCommand(const Settings &settings);
     static QStringList agentArguments(const Settings &settings);
 

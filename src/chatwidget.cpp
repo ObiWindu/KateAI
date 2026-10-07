@@ -2247,7 +2247,7 @@ void ChatWidget::updateModelSelectorLabel()
         // ACP has no catalogue, so the configured provider itself is the
         // selection until a model id is typed in settings.
         label = m_settings.provider == Provider::Acp
-            ? (usesAcpNative(m_settings) ? i18n("Grok Build") : i18n("ACP"))
+            ? acpAgentDisplayName(m_settings)
             : providerLabel(m_settings.provider);
     }
     if (label.isEmpty()) {
@@ -2717,7 +2717,7 @@ void ChatWidget::fillModelResultList()
                 // ACP (and any other agent without a catalogue) is still a
                 // real selection: the endpoint + key are the model.
                 auto *item = new QListWidgetItem(p == Provider::Acp && m_settings.apiFormat == ApiFormat::AcpNative
-                    ? i18n("Grok Build")
+                    ? acpAgentDisplayName(m_settings)
                     : i18n("Configured endpoint"));
                 item->setData(Qt::UserRole, static_cast<int>(p));
                 item->setData(Qt::UserRole + 1, modelFor(providerSettings).trimmed());

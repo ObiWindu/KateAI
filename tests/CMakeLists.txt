@@ -36,7 +36,7 @@ add_test(NAME test_mcpintegration
          COMMAND test_mcpintegration -platform offscreen
          WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
-# Drives a mock ACP agent over stdio (Grok Build's transport).
+# Drives a mock ACP agent over stdio JSON-RPC.
 add_executable(test_acpclient test_acpclient.cpp)
 target_link_libraries(test_acpclient PRIVATE kateai_core Qt6::Test)
 add_test(NAME test_acpclient

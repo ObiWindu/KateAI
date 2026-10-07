@@ -42,6 +42,14 @@ Settings SettingsStore::load()
     s.acpUrl = g.readEntry(u"AcpUrl"_s, u"http://localhost:8080"_s);
     s.acpCommand = g.readEntry(u"AcpCommand"_s, u"grok"_s);
     s.acpArgs = g.readEntry(u"AcpArgs"_s, u"agent stdio"_s);
+    s.acpAgentId = g.readEntry(u"AcpAgentId"_s, QString());
+    if (s.acpAgentId.trimmed().isEmpty()) {
+        s.acpAgentId = acpAgentIdMatching(s.acpCommand, s.acpArgs);
+    }
+    s.acpApiKeyEnv = g.readEntry(u"AcpApiKeyEnv"_s, QString());
+    if (s.acpApiKeyEnv.trimmed().isEmpty()) {
+        s.acpApiKeyEnv = acpAgentPreset(s.acpAgentId).apiKeyEnv;
+    }
     s.apiFormat = apiFormatFromId(g.readEntry(u"ApiFormat"_s, apiFormatId(ApiFormat::AcpNative)));
     s.permissionMode = permissionModeFromId(g.readEntry(u"PermissionMode"_s, permissionModeId(PermissionMode::Ask)));
     s.sandbox = sandboxProfileFromId(g.readEntry(u"Sandbox"_s, sandboxProfileId(SandboxProfile::Workspace)));
@@ -164,6 +172,8 @@ void SettingsStore::save(const Settings &settings)
     g.writeEntry(u"AcpUrl"_s, settings.acpUrl);
     g.writeEntry(u"AcpCommand"_s, settings.acpCommand);
     g.writeEntry(u"AcpArgs"_s, settings.acpArgs);
+    g.writeEntry(u"AcpAgentId"_s, settings.acpAgentId);
+    g.writeEntry(u"AcpApiKeyEnv"_s, settings.acpApiKeyEnv);
     g.writeEntry(u"ApiFormat"_s, apiFormatId(settings.apiFormat));
     g.writeEntry(u"PermissionMode"_s, permissionModeId(settings.permissionMode));
     g.writeEntry(u"Sandbox"_s, sandboxProfileId(settings.sandbox));

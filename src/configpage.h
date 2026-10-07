@@ -78,9 +78,13 @@ private:
     QLineEdit *m_claudeCompatibleUrl = nullptr;
     QLineEdit *m_opencodeUrl = nullptr;
     QLineEdit *m_acpUrl = nullptr;
+    QComboBox *m_acpAgent = nullptr;
     QLineEdit *m_acpCommand = nullptr;
     QLineEdit *m_acpArgs = nullptr;
+    QLineEdit *m_acpApiKeyEnv = nullptr;
     QComboBox *m_apiFormat = nullptr;
+    void applySelectedAcpPreset();
+    void updateAcpNativeEnabled();
 
     // Model fetching
     LlmClient *m_modelFetcher = nullptr;

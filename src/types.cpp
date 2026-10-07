@@ -8,6 +8,8 @@
 
 #include <KLocalizedString>
 
+#include <QFileInfo>
+
 using namespace Qt::Literals::StringLiterals;
 
 namespace KateAi
@@ -54,7 +56,7 @@ QString providerLabel(Provider provider)
     case Provider::Kilo:
         return i18n("Kilo.ai");
     case Provider::Acp:
-        return i18n("ACP / Grok Build");
+        return i18n("ACP");
     case Provider::OpenCode:
         return i18n("OpenCode Zen");
     case Provider::Grok:
@@ -782,7 +784,7 @@ QString apiFormatLabel(ApiFormat format)
     case ApiFormat::AnthropicCompatible:
         return i18n("Anthropic/Claude Compatible");
     case ApiFormat::AcpNative:
-        return i18n("ACP native (Grok Build stdio)");
+        return i18n("ACP native (stdio JSON-RPC)");
     case ApiFormat::OpenAICompatible:
     default:
         return i18n("OpenAI Compatible");
@@ -798,6 +800,101 @@ ApiFormat apiFormatFromId(const QString &id)
         return ApiFormat::AcpNative;
     }
     return ApiFormat::OpenAICompatible;
+}
+
+QList<AcpAgentPreset> acpAgentPresets()
+{
+    return {
+        {u"grok-build"_s, i18n("Grok Build"), u"grok"_s, u"agent stdio"_s, u"XAI_API_KEY"_s},
+        {u"claude-acp"_s, i18n("Claude Agent"), u"npx"_s, u"-y @agentclientprotocol/claude-agent-acp"_s, u"ANTHROPIC_API_KEY"_s},
+        {u"codex-acp"_s, i18n("Codex"), u"npx"_s, u"-y @agentclientprotocol/codex-acp"_s, u"OPENAI_API_KEY"_s},
+        {u"gemini"_s, i18n("Gemini CLI"), u"gemini"_s, u"--acp"_s, u"GEMINI_API_KEY"_s},
+        {u"github-copilot-cli"_s, i18n("GitHub Copilot"), u"copilot"_s, u"--acp"_s, {}},
+        {u"goose"_s, i18n("goose"), u"goose"_s, u"acp"_s, {}},
+        {u"opencode"_s, i18n("OpenCode"), u"opencode"_s, u"acp"_s, {}},
+        {u"cline"_s, i18n("Cline"), u"npx"_s, u"-y cline --acp"_s, {}},
+        {u"qwen-code"_s, i18n("Qwen Code"), u"npx"_s, u"-y @qwen-code/qwen-code --acp"_s, {}},
+        {u"auggie"_s, i18n("Auggie CLI"), u"npx"_s, u"-y @augmentcode/auggie --acp"_s, {}},
+        {u"cursor"_s, i18n("Cursor"), u"cursor-agent"_s, u"acp"_s, {}},
+        {u"custom"_s, i18n("Custom"), {}, {}, {}},
+    };
+}
+
+AcpAgentPreset acpAgentPreset(const QString &id)
+{
+    for (const AcpAgentPreset &preset : acpAgentPresets()) {
+        if (preset.id == id) {
+            return preset;
+        }
+    }
+    return {u"custom"_s, i18n("Custom"), {}, {}, {}};
+}
+
+QString acpEffectiveCommand(const Settings &settings)
+{
+    const QString command = settings.acpCommand.trimmed();
+    if (!command.isEmpty()) {
+        return command;
+    }
+    return acpAgentPreset(settings.acpAgentId).command;
+}
+
+QString acpEffectiveArgs(const Settings &settings)
+{
+    const QString args = settings.acpArgs.trimmed();
+    if (!args.isEmpty()) {
+        return args;
+    }
+    return acpAgentPreset(settings.acpAgentId).args;
+}
+
+QString acpEffectiveApiKeyEnv(const Settings &settings)
+{
+    const QString env = settings.acpApiKeyEnv.trimmed();
+    if (!env.isEmpty()) {
+        return env;
+    }
+    return acpAgentPreset(settings.acpAgentId).apiKeyEnv;
+}
+
+bool acpAgentIsGrok(const Settings &settings)
+{
+    return QFileInfo(acpEffectiveCommand(settings)).fileName() == u"grok"_s;
+}
+
+QString acpAgentDisplayName(const Settings &settings)
+{
+    if (!usesAcpNative(settings)) {
+        return i18n("ACP");
+    }
+    const AcpAgentPreset preset = acpAgentPreset(settings.acpAgentId);
+    if (preset.id != u"custom"_s && !preset.label.isEmpty()) {
+        return preset.label;
+    }
+    const QString command = acpEffectiveCommand(settings);
+    if (!command.isEmpty()) {
+        return QFileInfo(command).fileName();
+    }
+    return i18n("ACP agent");
+}
+
+QString acpAgentIdMatching(const QString &command, const QString &args)
+{
+    const QString trimmedCommand = command.trimmed();
+    const QString trimmedArgs = args.trimmed();
+    const QList<AcpAgentPreset> presets = acpAgentPresets();
+    for (const AcpAgentPreset &preset : presets) {
+        if (preset.id == u"custom"_s) {
+            continue;
+        }
+        if (trimmedCommand == preset.command && trimmedArgs == preset.args) {
+            return preset.id;
+        }
+    }
+    if (trimmedCommand.isEmpty() || (trimmedCommand == u"grok"_s && (trimmedArgs.isEmpty() || trimmedArgs == u"agent stdio"_s))) {
+        return u"grok-build"_s;
+    }
+    return u"custom"_s;
 }
 
 } // namespace KateAi

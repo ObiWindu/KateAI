@@ -55,6 +55,7 @@ private:
         Settings settings;
         settings.provider = Provider::Acp;
         settings.apiFormat = ApiFormat::AcpNative;
+        settings.acpAgentId = u"custom"_s;
         settings.acpCommand = u"python3"_s;
         settings.acpArgs = u'"' + m_agent + u"\" "_s + scenario;
         settings.permissionMode = PermissionMode::Ask;
@@ -72,6 +73,7 @@ private Q_SLOTS:
     void resolvedCommandFindsGrokFallbacksAndFlags()
     {
         Settings settings;
+        settings.acpAgentId = u"grok-build"_s;
         settings.acpCommand = u"grok"_s;
         settings.acpArgs = u"agent stdio"_s;
         settings.acpModel = u"grok-4.6"_s;
@@ -81,11 +83,44 @@ private Q_SLOTS:
         QVERIFY(args.contains(u"grok-4.6"_s));
         QVERIFY(args.contains(u"--always-approve"_s));
         QCOMPARE(args.last(), u"stdio"_s);
+        QVERIFY(acpAgentIsGrok(settings));
         QVERIFY(usesAcpNative(settings) == false);
         settings.provider = Provider::Acp;
         QVERIFY(usesAcpNative(settings));
         QVERIFY(!providerRequiresApiKey(settings, Provider::Acp));
         QVERIFY(providerIsSelectable(settings, Provider::Acp));
+    }
+
+    void genericAgentsKeepTheirOwnArguments()
+    {
+        Settings settings;
+        settings.provider = Provider::Acp;
+        settings.apiFormat = ApiFormat::AcpNative;
+        settings.acpAgentId = u"gemini"_s;
+        settings.acpCommand = u"gemini"_s;
+        settings.acpArgs = u"--acp"_s;
+        settings.acpModel = u"gemini-2.5-pro"_s;
+        settings.permissionMode = PermissionMode::AlwaysApprove;
+        QCOMPARE(AcpClient::agentArguments(settings), QStringList{u"--acp"_s});
+        QVERIFY(!acpAgentIsGrok(settings));
+
+        settings.acpAgentId = u"custom"_s;
+        settings.acpCommand = u"python3"_s;
+        settings.acpArgs = u"/tmp/mock_acp_agent.py echo"_s;
+        QCOMPARE(AcpClient::agentArguments(settings),
+                 (QStringList{u"/tmp/mock_acp_agent.py"_s, u"echo"_s}));
+
+        settings.acpCommand.clear();
+        settings.acpArgs.clear();
+        settings.acpAgentId = u"custom"_s;
+        QVERIFY(AcpClient::resolvedCommand(settings).isEmpty());
+        QVERIFY(AcpClient::agentArguments(settings).isEmpty());
+
+        settings.acpAgentId = u"claude-acp"_s;
+        QCOMPARE(acpEffectiveCommand(settings), u"npx"_s);
+        QCOMPARE(AcpClient::agentArguments(settings),
+                 (QStringList{u"-y"_s, u"@agentclientprotocol/claude-agent-acp"_s}));
+        QVERIFY(!acpAgentIsGrok(settings));
     }
 
     void echoStreamsThoughtToolsAndText()

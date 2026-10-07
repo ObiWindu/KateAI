@@ -163,11 +163,8 @@ void AcpClient::setResumeSessionId(const QString &sessionId)
 
 QString AcpClient::resolvedCommand(const Settings &settings)
 {
-    QString command = settings.acpCommand.trimmed();
-    if (command.isEmpty()) {
-        command = u"grok"_s;
-    }
-    if (QFileInfo(command).isAbsolute()) {
+    const QString command = acpEffectiveCommand(settings);
+    if (command.isEmpty() || QFileInfo(command).isAbsolute()) {
         return command;
     }
     const QString found = QStandardPaths::findExecutable(command);
@@ -175,10 +172,12 @@ QString AcpClient::resolvedCommand(const Settings &settings)
         return found;
     }
     const QString home = QDir::homePath();
-    const QStringList fallbacks = {
-        home + u"/.grok/bin/"_s + command,
-        home + u"/.local/bin/"_s + command,
-    };
+    const QString baseName = QFileInfo(command).fileName();
+    QStringList fallbacks;
+    if (baseName == u"grok"_s) {
+        fallbacks.append(home + u"/.grok/bin/"_s + baseName);
+    }
+    fallbacks.append(home + u"/.local/bin/"_s + baseName);
     for (const QString &candidate : fallbacks) {
         const QFileInfo info(candidate);
         if (info.exists() && info.isExecutable()) {
@@ -190,8 +189,11 @@ QString AcpClient::resolvedCommand(const Settings &settings)
 
 QStringList AcpClient::agentArguments(const Settings &settings)
 {
-    const QString raw = settings.acpArgs.trimmed().isEmpty() ? u"agent stdio"_s : settings.acpArgs.trimmed();
-    QStringList args = QProcess::splitCommand(raw);
+    const QString raw = acpEffectiveArgs(settings);
+    QStringList args = raw.isEmpty() ? QStringList() : QProcess::splitCommand(raw);
+    if (!acpAgentIsGrok(settings)) {
+        return args;
+    }
     if (args.isEmpty()) {
         args = QStringList{u"agent"_s, u"stdio"_s};
     }
@@ -408,6 +410,12 @@ void AcpClient::spawnProcess()
 
     const QString command = resolvedCommand(m_settings);
     const QStringList args = agentArguments(m_settings);
+    if (command.isEmpty()) {
+        const QString message = u"ACP agent command is empty. Pick an agent in Settings or set a command."_s;
+        setState(State::Failed, message);
+        Q_EMIT failed(message);
+        return;
+    }
     m_process->start(command, args);
     if (!m_process->waitForStarted(10000)) {
         const QString message = u"Could not start ACP agent '%1': %2"_s.arg(command, m_process->errorString());
@@ -437,8 +445,14 @@ QProcessEnvironment AcpClient::processEnvironment() const
     QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
     const QString key = m_settings.acpApiKey.trimmed();
     if (!key.isEmpty()) {
-        env.insert(u"XAI_API_KEY"_s, key);
-        env.insert(u"GROK_CODE_XAI_API_KEY"_s, key);
+        const QString envName = acpEffectiveApiKeyEnv(m_settings);
+        if (!envName.isEmpty()) {
+            env.insert(envName, key);
+        }
+        if (acpAgentIsGrok(m_settings)) {
+            env.insert(u"XAI_API_KEY"_s, key);
+            env.insert(u"GROK_CODE_XAI_API_KEY"_s, key);
+        }
     }
     return env;
 }
@@ -506,7 +520,7 @@ void AcpClient::maybeAuthenticate(const QJsonArray &authMethods)
     params.insert(u"methodId"_s, methodId);
     sendRequest(u"authenticate"_s, params, [this, methodId](const QJsonObject &, const QString &error) {
         if (!error.isEmpty()) {
-            const QString message = u"ACP authentication (%1) failed: %2. Run `grok` once to log in."_s.arg(methodId, error);
+            const QString message = u"ACP authentication (%1) failed: %2. Complete the agent's CLI login, then try again."_s.arg(methodId, error);
             setState(State::Failed, message);
             Q_EMIT failed(message);
             return;
@@ -529,7 +543,10 @@ void AcpClient::sendSessionNew()
     QJsonObject params;
     params.insert(u"cwd"_s, m_workspace);
     params.insert(u"mcpServers"_s, mcpServersPayload());
-    params.insert(u"_meta"_s, sessionMeta());
+    const QJsonObject meta = sessionMeta();
+    if (!meta.isEmpty()) {
+        params.insert(u"_meta"_s, meta);
+    }
     sendRequest(u"session/new"_s, params, [this](const QJsonObject &result, const QString &error) {
         if (!error.isEmpty()) {
             setState(State::Failed, error);
@@ -624,6 +641,11 @@ QJsonArray AcpClient::promptBlocks(const QString &text) const
 QJsonObject AcpClient::sessionMeta() const
 {
     QJsonObject meta;
+    // Grok Build reads yoloMode / autoMode / rules from session _meta.
+    // Other agents may reject unknown _meta, so only Grok gets it.
+    if (!acpAgentIsGrok(m_settings)) {
+        return meta;
+    }
     if (m_settings.permissionMode == PermissionMode::AlwaysApprove) {
         meta.insert(u"yoloMode"_s, true);
     } else if (m_settings.permissionMode == PermissionMode::AcceptEdits) {

@@ -6,7 +6,7 @@
 
 <p align="center">
   <strong>An AI coding agent that lives inside <a href="https://kate-editor.org/">Kate</a></strong><br>
-  Chat, project tools, sandboxed shell, and permission asks — Grok, OpenAI, OpenRouter, local models, and Grok Build over ACP.
+  Chat, project tools, sandboxed shell, and permission asks — Grok, OpenAI, OpenRouter, local models, and any ACP agent over stdio.
 </p>
 
 <p align="center">
@@ -34,7 +34,7 @@ Kate is a serious editor for C++, Qt, KDE, and systems work. Kate AI keeps that 
 | Inspect before changing | **Plan mode** is read-only: the model can search and propose a plan, and cannot write or run shell. |
 | See what the agent is doing | Streaming replies, collapsible reasoning, a live plan checklist, and tool cards with diffs. |
 | Stay in control | Permission bar (Allow / Allow for session / Deny), sandbox profiles, deny globs for secrets. |
-| Pick a model | Grok, OpenAI, OpenRouter, OpenAI-compatible (Ollama, vLLM, LocalAI), Claude-compatible, Grok Build (ACP). |
+| Pick a model | Grok, OpenAI, OpenRouter, OpenAI-compatible (Ollama, vLLM, LocalAI), Claude-compatible, ACP agents (Grok Build, Claude Agent, Gemini CLI, …). |
 | Teach the repo | Optional `KATEAI.md` at the workspace root is loaded as project instructions. |
 
 Typical uses: explain a selection, fix a bug in the current file, refactor with a visible diff, add tests, explore an unfamiliar tree via the project graph, then apply focused patches after you approve them.
@@ -186,7 +186,7 @@ The model can call tools, read the results, and continue until the task is done 
 - Context compression and smart truncation so long sessions stay within the window
 
 ```text
-You ──► LLM (Grok / OpenAI / OpenRouter / local) or Grok Build over ACP
+You ──► LLM (Grok / OpenAI / OpenRouter / local) or any ACP agent over stdio
           │
           ├── thinking (collapsible) + plan checklist
           ├── stream the answer into the panel
@@ -306,17 +306,36 @@ Shell isolation depends on the OS: [bubblewrap](https://github.com/containers/bu
 | **OpenRouter** | `https://openrouter.ai/api/v1` | `x-ai/grok-4` |
 | **OpenAI compatible** | `http://localhost:11434/v1` | Ollama, LocalAI, vLLM, … |
 | **Claude compatible** | `https://api.anthropic.com/v1` | Anthropic Messages API / Bedrock-style |
-| **ACP / Grok Build** | `grok agent stdio` | Agent Client Protocol (JSON-RPC) |
+| **ACP** | stdio JSON-RPC (or HTTP) | Any [Agent Client Protocol](https://agentclientprotocol.com) agent |
 
-ACP API formats (Settings → Kate AI → AI Providers → ACP / Grok Build):
+ACP API formats (Settings → Kate AI → AI Providers → ACP Agent):
 
 | Format | How it talks | Auth |
 | --- | --- | --- |
-| ACP native (default) | Spawns `grok agent stdio` and speaks [Agent Client Protocol](https://agentclientprotocol.com) JSON-RPC | `grok` CLI login (`~/.grok/auth.json`); optional `XAI_API_KEY` |
+| ACP native (default) | Spawns a stdio subprocess and speaks [ACP](https://agentclientprotocol.com) JSON-RPC | The agent's own CLI login; optional API key copied into a per-agent env var |
 | OpenAI compatible | HTTP `POST /chat/completions` at the endpoint URL | `Bearer` |
 | Anthropic / Claude compatible | HTTP `POST /v1/messages` | `x-api-key` |
 
-To use Grok Build inside Kate: install the Grok CLI, run `grok` once to log in, then set the provider to **ACP / Grok Build** with format **ACP native**. Command defaults to `grok`, arguments to `agent stdio`. An optional model id is passed as `--model`. Always-approve permission mode adds `--always-approve`.
+Native ACP works with any stdio agent. Pick a preset (command/args are filled in) or choose **Custom** and type your own launch line:
+
+| Agent | Default command | Default arguments |
+| --- | --- | --- |
+| Grok Build | `grok` | `agent stdio` |
+| Claude Agent | `npx` | `-y @agentclientprotocol/claude-agent-acp` |
+| Codex | `npx` | `-y @agentclientprotocol/codex-acp` |
+| Gemini CLI | `gemini` | `--acp` |
+| GitHub Copilot | `copilot` | `--acp` |
+| goose | `goose` | `acp` |
+| OpenCode | `opencode` | `acp` |
+| Cline | `npx` | `-y cline --acp` |
+| Qwen Code | `npx` | `-y @qwen-code/qwen-code --acp` |
+| Auggie CLI | `npx` | `-y @augmentcode/auggie --acp` |
+| Cursor | `cursor-agent` | `acp` |
+| Custom | (yours) | (yours) |
+
+Kate is the ACP client: `session/prompt`, `session/update`, `session/request_permission`, `fs/read_text_file`, `fs/write_text_file`, `terminal/*`. Always-approve is handled in Kate for every agent. Grok Build also receives `--model` / `--always-approve` and Grok `_meta` (`yoloMode`).
+
+To use Grok Build: install the Grok CLI, run `grok` once to log in, then set the provider to **ACP** with format **ACP native** and agent **Grok Build**. Other agents: install their CLI (or have `npx` on PATH), complete that agent's login, and pick the matching preset.
 
 The model menu fetches live catalogs when the provider supports it; you can still type a model id. Only the selected provider’s key is sent. Keys live in Kate’s config (`KateAI` group).
 
@@ -533,7 +552,7 @@ Always configure out-of-source (`-B build`, not `cmake .`). Do not copy a `build
 | `src/edittracker.cpp` | Accept / reject pending writes |
 | `src/agentloop.cpp` | LLM ↔ tool loop, verification, budgets |
 | `src/llmclient.cpp` | Streaming (`/v1/chat/completions`, Anthropic, HTTP ACP), retries |
-| `src/acpclient.cpp` | Native ACP client (`grok agent stdio`, JSON-RPC, Grok Build) |
+| `src/acpclient.cpp` | Native ACP client (stdio JSON-RPC, any ACP agent) |
 | `src/tools.cpp` | File, grep, glob, bash, project-graph tools |
 | `src/graph/` | Project graph index and queries |
 | `src/sandbox.cpp` | Path jail, deny globs, bubblewrap |
