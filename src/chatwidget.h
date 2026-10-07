@@ -135,6 +135,7 @@ private:
     void selectModel(Provider provider, const QString &model);
     void updateModelSelectorLabel();
     void showInfoMessage(const QString &message, bool isError);
+    void saveCurrentConversation();
 
     // --- Intent dock ---------------------------------------------------------
     // A strip pinned directly above the composer holding everything that needs
