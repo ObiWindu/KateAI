@@ -865,7 +865,8 @@ void LlmClient::handleFinished()
     m_retryContext.lastErrorCategory = errorCategory;
 
     // Check if we should retry
-    if (errorCategory != RetryErrorCategory::NonRetryable && errorCategory != RetryErrorCategory::None) {
+    if (errorCategory != RetryErrorCategory::NonRetryable && errorCategory != RetryErrorCategory::None
+        && errorCategory != RetryErrorCategory::ContextOverflow) {
         // Extract provider-suggested retry delay
         std::optional<int> providerDelaySeconds = headerRetryAfter;
         if (!providerDelaySeconds.has_value()) {
@@ -982,8 +983,13 @@ void LlmClient::handleFinished()
 
     if (!finalError.isEmpty()) {
         // Add friendly retry-exhausted message for retryable errors
-        if (errorCategory != RetryErrorCategory::NonRetryable && errorCategory != RetryErrorCategory::None) {
+        if (errorCategory != RetryErrorCategory::NonRetryable && errorCategory != RetryErrorCategory::None
+        && errorCategory != RetryErrorCategory::ContextOverflow) {
             finalError = formatRetryExhaustedMessage(errorCategory, m_retryContext.providerName);
+        }
+        if (errorCategory == RetryErrorCategory::ContextOverflow
+            && !finalError.contains(u"context_window_exceeded"_s, Qt::CaseInsensitive)) {
+            finalError = u"context_window_exceeded: "_s + finalError;
         }
         Q_EMIT failed(finalError);
     }
@@ -1034,8 +1040,9 @@ RetryErrorCategory LlmClient::classifyError(int httpStatus, const QString &error
             return RetryErrorCategory::RateLimitExceeded;
         }
         if (lowerBody.contains(u"context window") || lowerBody.contains(u"too many tokens") ||
-            lowerBody.contains(u"prompt too large") || lowerBody.contains(u"maximum context")) {
-            return RetryErrorCategory::NonRetryable;
+            lowerBody.contains(u"prompt too large") || lowerBody.contains(u"maximum context") ||
+            lowerBody.contains(u"context_length_exceeded") || lowerBody.contains(u"context too long")) {
+            return RetryErrorCategory::ContextOverflow;
         }
         return RetryErrorCategory::NonRetryable;
 
@@ -1050,7 +1057,7 @@ RetryErrorCategory LlmClient::classifyError(int httpStatus, const QString &error
         return RetryErrorCategory::Timeout;
 
     case 413: // Payload Too Large
-        return RetryErrorCategory::NonRetryable;
+        return RetryErrorCategory::ContextOverflow;
 
     default:
         if (httpStatus >= 500 && httpStatus < 600) {
@@ -1078,8 +1085,9 @@ RetryErrorCategory LlmClient::classifyError(int httpStatus, const QString &error
     if (lowerBody.contains(u"insufficient_quota") || lowerBody.contains(u"quota exceeded")) {
         return RetryErrorCategory::QuotaExceeded;
     }
-    if (lowerBody.contains(u"context_length_exceeded") || lowerBody.contains(u"maximum context length")) {
-        return RetryErrorCategory::NonRetryable;
+    if (lowerBody.contains(u"context_length_exceeded") || lowerBody.contains(u"maximum context length")
+        || lowerBody.contains(u"context_window_exceeded")) {
+        return RetryErrorCategory::ContextOverflow;
     }
     if (lowerBody.contains(u"model_not_found") || lowerBody.contains(u"does not exist")) {
         return RetryErrorCategory::NonRetryable;
@@ -1420,7 +1428,8 @@ bool LlmClient::shouldRetry(const RetryContext &ctx) const
     }
 
     // Don't retry non-retryable errors
-    if (ctx.lastErrorCategory == RetryErrorCategory::NonRetryable) {
+    if (ctx.lastErrorCategory == RetryErrorCategory::NonRetryable
+        || ctx.lastErrorCategory == RetryErrorCategory::ContextOverflow) {
         return false;
     }
 

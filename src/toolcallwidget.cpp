@@ -625,6 +625,7 @@ void ToolCallWidget::setExpanded(bool expanded)
     if (m_animation) {
         m_animation->stop();
     }
+    Q_EMIT expandedChanged(m_expanded);
     applyDetailsHeight();
     syncPreviewVisibility();
     scheduleReflow();
@@ -654,6 +655,7 @@ void ToolCallWidget::toggleExpand()
 {
     m_expanded = !m_expanded;
     m_expandBtn->setText(m_expanded ? u"▾"_s : u"▸"_s);
+    Q_EMIT expandedChanged(m_expanded);
     syncPreviewVisibility();
 
     if (!m_details || m_details->toPlainText().isEmpty()) {

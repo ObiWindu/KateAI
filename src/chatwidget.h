@@ -27,6 +27,7 @@ class QTextBrowser;
 class QTimer;
 class QVBoxLayout;
 class QMenu;
+class QListWidget;
 
 namespace KateAi
 {
@@ -109,6 +110,8 @@ private:
     void markPlanStepCompleted(const QString &stepId);
     void scrollToBottom();
     void forceScrollToBottom();
+    void pinWidgetInViewport(QWidget *widget);
+    void applyPinnedViewport();
     void updateScrollButtonPosition();
     void animateScrollButtonShow();
     void animateScrollButtonHide();
@@ -119,13 +122,14 @@ private:
     void appendTranscriptWidget(QWidget *widget);
     void showSettingsMenu();
     void showModelMenu();
+    void positionModelMenu();
+    void fillModelResultList();
     void refreshModeButton();
     void showPermissionMenu();
     void refreshPermissionButton();
     void populateModes();
     void updateMcpButton();
     void applyAutoApproveTool(const QString &toolName, bool enabled);
-    void rebuildModelMenuProviderSubmenus();
     void applyModelMenuFilter();
     void moveModelMenuSelection(int delta);
     void selectModel(Provider provider, const QString &model);
@@ -229,13 +233,12 @@ private:
     Provider m_preferredProvider = Provider::Grok;
     bool m_updatingCombos = false;
     QString m_modelFilter;
-    QMenu *m_modelMenu = nullptr;
-    QList<QMenu *> m_modelMenuProviderMenus;
-    QList<QAction *> m_modelMenuFlatActions;
-    QAction *m_modelMenuNoMatchAction = nullptr;
+    // Custom popup rather than QMenu: a QLineEdit inside QMenu::exec() plus
+    // setVisible() on hundreds of model QActions is what made typing hang, and
+    // exec() below the chip opened the list off the bottom of the panel.
+    QPointer<QWidget> m_modelPopup;
+    QPointer<QListWidget> m_modelResultList;
     QPointer<QLineEdit> m_modelFilterEdit;
-    // Index into the currently visible candidate actions, -1 for none. Only
-    // meaningful while m_modelMenu is alive.
     int m_modelMenuSelection = -1;
 
     QWidget *m_toolbar = nullptr;
@@ -268,6 +271,11 @@ private:
     QPointer<QPushButton> m_activeAssistantCopyBtn;
     QPointer<QLabel> m_activeAssistantPulse;
     bool m_userScrolledUp = true;
+    // While a disclosure (tool card, thinking block) is opening, keep this
+    // widget's top edge glued to the viewport so the body grows downward
+    // instead of the follow-tail scroller yanking the header up.
+    QPointer<QWidget> m_pinnedViewportWidget;
+    int m_pinnedViewportOffset = 0;
     QTimer *m_streamHeightTimer = nullptr;
     QTimer *m_streamRenderTimer = nullptr;
 

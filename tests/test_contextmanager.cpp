@@ -218,13 +218,56 @@ private Q_SLOTS:
         QCOMPARE(one.size(), 1);
     }
 
-    void messageCapIsHonoured()
+    void noMessageCountCapDropsHistoryThatFits()
+    {
+        // A conversation that fits the window is sent whole. There is no
+        // parallel "max messages" cutoff that would drop prompting mid-task.
+        ContextManager::Options options;
+        options.contextWindow = 200000;
+        options.reserveForResponse = 1024;
+        const auto history = longHistory(8);
+        const auto result = ContextManager::build(history, options);
+        QCOMPARE(result.size(), history.size());
+        QCOMPARE(result.last().content, QStringLiteral("And finally, summarise everything."));
+    }
+
+    void tinyWindowStillKeepsTheLatestUser()
     {
         ContextManager::Options options;
-        options.contextWindow = 200000; // fits, so only the cap applies
-        options.maxMessages = 4;
-        const auto result = ContextManager::build(longHistory(20), options);
-        QCOMPARE(result.size(), 4);
+        options.contextWindow = 2048;
+        options.reserveForResponse = 512;
+        options.keepRecentTokens = 200;
+        options.compactionLevel = 3;
+        const auto result = ContextManager::build(longHistory(40), options);
+        QVERIFY(!result.isEmpty());
+        QVERIFY(ContextManager::estimateTokens(result)
+                <= options.contextWindow - options.reserveForResponse);
+        bool sawLatest = false;
+        for (const ChatMessage &m : result) {
+            if (m.content.contains(QStringLiteral("And finally, summarise everything."))) {
+                sawLatest = true;
+                break;
+            }
+        }
+        QVERIFY2(sawLatest, "compaction must not drop the live user request");
+    }
+
+    void extraCompactionPressureShrinksFurther()
+    {
+        ContextManager::Options mild;
+        mild.contextWindow = 8192;
+        mild.reserveForResponse = 2048;
+        mild.keepRecentTokens = 4000;
+        mild.compactionLevel = 0;
+        ContextManager::Options hard = mild;
+        hard.compactionLevel = 4;
+        const auto history = longHistory(40);
+        const auto mildResult = ContextManager::build(history, mild);
+        const auto hardResult = ContextManager::build(history, hard);
+        QVERIFY(ContextManager::estimateTokens(hardResult)
+                <= ContextManager::estimateTokens(mildResult));
+        QVERIFY(ContextManager::estimateTokens(hardResult)
+                <= hard.contextWindow - hard.reserveForResponse);
     }
 };
 

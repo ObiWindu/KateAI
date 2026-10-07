@@ -20,15 +20,12 @@ namespace ContextManager
 namespace
 {
 
-// ~4 characters per token is the usual English-text approximation, plus a few
-// tokens of framing per message. A real per-model tokenizer is not worth the
-// dependency for a budget that only has to be roughly right.
 constexpr int kCharsPerToken = 4;
 constexpr int kTokensPerMessageOverhead = 4;
-
-// Used when the model is unknown. Deliberately modest: overshooting fails the
-// request outright, while undershooting merely compacts a little early.
 constexpr int kDefaultContextWindow = 32768;
+constexpr int kDefaultReserve = 4096;
+constexpr int kDefaultSummaryRequestChars = 280;
+constexpr int kMinBudget = 512;
 
 int tokensOf(const ChatMessage &message)
 {
@@ -39,8 +36,6 @@ int tokensOf(const ChatMessage &message)
     return total;
 }
 
-// A tool result without the call that produced it makes providers reject the
-// request, so the tail never starts inside a tool group.
 bool startsToolGroup(const QList<ChatMessage> &history, int index)
 {
     if (index <= 0 || index >= history.size()) {
@@ -74,6 +69,22 @@ QString oneLine(const QString &text, int limit)
     return flat;
 }
 
+QString shrinkText(const QString &text, int keepChars)
+{
+    if (keepChars <= 0) {
+        return QString();
+    }
+    if (text.length() <= keepChars) {
+        return text;
+    }
+    const int head = qMax(24, keepChars * 55 / 100);
+    const int tail = qMax(24, keepChars - head - 40);
+    if (head + tail + 40 >= text.length()) {
+        return text.left(keepChars) + QStringLiteral("…");
+    }
+    return text.left(head) + QStringLiteral("\n[… compacted …]\n") + text.right(tail);
+}
+
 } // namespace
 
 int estimateTokens(const QString &text)
@@ -95,11 +106,6 @@ int estimateTokens(const QList<ChatMessage> &messages)
 
 int contextWindowFor(const QString &model)
 {
-    // No model-name table on purpose. Hard-coding windows per model goes stale
-    // every time a provider ships one, and a wrong guess here either overflows
-    // the window or compacts needlessly. The window comes from settings
-    // (user-supplied) or from the provider's catalogue; this only supplies a
-    // safe default for the case where neither has told us.
     Q_UNUSED(model)
     return kDefaultContextWindow;
 }
@@ -113,7 +119,6 @@ QString summaryHeader()
 namespace
 {
 
-// Builds the compacted replacement for the dropped span.
 QString buildSummary(const QList<ChatMessage> &dropped, int requestChars)
 {
     QStringList userRequests;
@@ -124,7 +129,6 @@ QString buildSummary(const QList<ChatMessage> &dropped, int requestChars)
     for (const ChatMessage &message : dropped) {
         switch (message.role) {
         case ChatMessage::Role::User: {
-            // Controller messages are our own scaffolding, not user intent.
             if (message.content.startsWith(QLatin1String("[KateAI agent controller]"))) {
                 break;
             }
@@ -181,7 +185,6 @@ QString buildSummary(const QList<ChatMessage> &dropped, int requestChars)
         lines << QStringLiteral("\nTools used: %1").arg(tools.join(QStringLiteral(", ")));
     }
     if (rejected > 0) {
-        // Saying so explicitly stops the model assuming a rejected edit landed.
         lines << QStringLiteral("%1 tool call(s) were rejected or denied; do not assume they ran.")
                      .arg(rejected);
     }
@@ -193,6 +196,65 @@ bool isSummary(const ChatMessage &message)
     return message.role == ChatMessage::Role::User && message.content.startsWith(summaryHeader());
 }
 
+int lastUserIndex(const QList<ChatMessage> &history, int bodyStart)
+{
+    for (int i = history.size() - 1; i >= bodyStart; --i) {
+        if (history.at(i).role == ChatMessage::Role::User) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+void shrinkToBudget(QList<ChatMessage> &result, int budget, int lastProtected)
+{
+    int excess = estimateTokens(result) - budget;
+    if (excess <= 0) {
+        return;
+    }
+
+    for (int i = 0; i < result.size(); ++i) {
+        if (!isSummary(result.at(i))) {
+            continue;
+        }
+        ChatMessage trimmed = result.at(i);
+        const int keepChars = qMax(summaryHeader().length() + 8,
+                                   trimmed.content.length() - excess * kCharsPerToken);
+        trimmed.content = trimmed.content.left(keepChars);
+        result[i] = trimmed;
+        break;
+    }
+
+    excess = estimateTokens(result) - budget;
+    if (excess <= 0) {
+        return;
+    }
+
+    // Drop hidden reasoning on everything except the protected tail, then
+    // shrink bulky tool output. This is how a still-oversized request keeps
+    // being sendable instead of aborting the turn.
+    for (int pass = 0; pass < 3 && estimateTokens(result) > budget; ++pass) {
+        const int keepChars = pass == 0 ? 1200 : (pass == 1 ? 400 : 160);
+        for (int i = 0; i < result.size(); ++i) {
+            if (i >= lastProtected) {
+                continue;
+            }
+            ChatMessage &message = result[i];
+            if (message.role == ChatMessage::Role::System || isSummary(message)) {
+                continue;
+            }
+            if (!message.thinking.isEmpty()) {
+                message.thinking.clear();
+            }
+            if (message.role == ChatMessage::Role::Tool && message.content.length() > keepChars) {
+                message.content = shrinkText(message.content, keepChars);
+            } else if (message.role == ChatMessage::Role::Assistant && message.content.length() > keepChars * 2) {
+                message.content = shrinkText(message.content, keepChars * 2);
+            }
+        }
+    }
+}
+
 } // namespace
 
 QList<ChatMessage> build(const QList<ChatMessage> &history, const Options &options)
@@ -201,47 +263,37 @@ QList<ChatMessage> build(const QList<ChatMessage> &history, const Options &optio
         return history;
     }
 
-    // If contextWindow is 0 (unknown/unlimited) and no reserve is set,
-    // send the full history without compaction.
-    if (options.contextWindow == 0 && options.reserveForResponse <= 0) {
-        auto applyMessageCap = [&options](QList<ChatMessage> list) {
-            if (options.maxMessages > 0 && list.size() > options.maxMessages) {
-                list = list.mid(list.size() - options.maxMessages);
-            }
-            return list;
-        };
-        return applyMessageCap(history);
-    }
-
     const int window = options.contextWindow > 0 ? options.contextWindow : kDefaultContextWindow;
-    const int budget = qMax(1024, window - qMax(0, options.reserveForResponse));
+    const int reserve = options.reserveForResponse > 0 ? options.reserveForResponse : kDefaultReserve;
+    const int budget = qMax(kMinBudget, window - reserve);
+    const int requestChars = options.summaryRequestChars > 0 ? options.summaryRequestChars
+                                                             : kDefaultSummaryRequestChars;
 
-    auto applyMessageCap = [&options](QList<ChatMessage> list) {
-        if (options.maxMessages > 0 && list.size() > options.maxMessages) {
-            list = list.mid(list.size() - options.maxMessages);
-        }
-        return list;
-    };
-
-    // A conversation that already fits is sent untouched: compacting it would
-    // throw away detail for nothing.
-    if (estimateTokens(history) <= budget) {
-        return applyMessageCap(history);
+    if (estimateTokens(history) <= budget && options.compactionLevel <= 0) {
+        return history;
     }
 
-    // Leading system messages are the instructions the turn depends on and are
-    // never compacted.
     int bodyStart = 0;
     while (bodyStart < history.size() && history.at(bodyStart).role == ChatMessage::Role::System) {
         ++bodyStart;
     }
 
-    // Keep the newest tail verbatim until the verbatim budget is spent.
+    const int newestUser = lastUserIndex(history, bodyStart);
+
+    int keepTokens = options.keepRecentTokens;
+    if (keepTokens <= 0) {
+        keepTokens = qMax(800, budget / 2);
+    }
+    const int pressure = qBound(0, options.compactionLevel, 6);
+    if (pressure > 0) {
+        keepTokens = qMax(400, keepTokens / (1 << qMin(pressure, 4)));
+    }
+
     int keepFrom = history.size();
     int running = 0;
     for (int i = history.size() - 1; i >= bodyStart; --i) {
         const int cost = tokensOf(history.at(i));
-        if (running + cost > options.keepRecentTokens) {
+        if (running + cost > keepTokens && i < history.size() - 1) {
             keepFrom = i + 1;
             break;
         }
@@ -250,38 +302,53 @@ QList<ChatMessage> build(const QList<ChatMessage> &history, const Options &optio
     }
     keepFrom = qBound(bodyStart, safeBoundary(history, keepFrom), history.size());
 
+    // The latest user turn is the live request; never fold it into the summary.
+    if (newestUser >= bodyStart && keepFrom > newestUser) {
+        keepFrom = safeBoundary(history, newestUser);
+    }
+
     QList<ChatMessage> result;
     for (int i = 0; i < bodyStart; ++i) {
         result.append(history.at(i));
     }
     if (keepFrom > bodyStart) {
         ChatMessage summary;
-        // A user turn, because providers reject unknown roles in some positions
-        // and the model reads it as history rather than as a new request.
         summary.role = ChatMessage::Role::User;
-        summary.content = buildSummary(history.mid(bodyStart, keepFrom - bodyStart), options.summaryRequestChars);
+        summary.content = buildSummary(history.mid(bodyStart, keepFrom - bodyStart), requestChars);
         result.append(summary);
     }
     for (int i = keepFrom; i < history.size(); ++i) {
         result.append(history.at(i));
     }
 
-    // The summary still has to fit; shrink it rather than overflow.
-    const int excess = estimateTokens(result) - budget;
-    if (excess > 0) {
+    const int protectedFrom = result.size() - (history.size() - keepFrom);
+    shrinkToBudget(result, budget, qMax(bodyStart, protectedFrom));
+
+    // Last resort: if the protected tail alone still overflows, shrink it too
+    // rather than fail the request. Keep the newest user message readable.
+    if (estimateTokens(result) > budget) {
+        int latestUserInResult = -1;
+        for (int i = result.size() - 1; i >= 0; --i) {
+            if (result.at(i).role == ChatMessage::Role::User && !isSummary(result.at(i))) {
+                latestUserInResult = i;
+                break;
+            }
+        }
         for (int i = 0; i < result.size(); ++i) {
-            if (!isSummary(result.at(i))) {
+            if (result.at(i).role == ChatMessage::Role::System) {
                 continue;
             }
-            ChatMessage trimmed = result.at(i);
-            const int keepChars = qMax(0, trimmed.content.length() - excess * kCharsPerToken);
-            trimmed.content = trimmed.content.left(keepChars);
-            result[i] = trimmed;
-            break;
+            ChatMessage &message = result[i];
+            message.thinking.clear();
+            const int cap = (i == latestUserInResult) ? qMax(400, budget * kCharsPerToken / 4) : 240;
+            if (message.content.length() > cap) {
+                message.content = shrinkText(message.content, cap);
+            }
         }
     }
 
-    return applyMessageCap(result);
+    Q_UNUSED(options.autoCompact)
+    return result;
 }
 
 } // namespace ContextManager

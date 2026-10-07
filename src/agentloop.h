@@ -280,6 +280,11 @@ private:
     State m_state = State::Idle;
     int m_modelRequests = 0;
     int m_toolCalls = 0;
+    // Extra compaction pressure after a context-window rejection. Reset at
+    // the start of each user turn so a later overflow can compact further
+    // instead of aborting the prompt.
+    int m_compactionLevel = 0;
+    int m_contextOverflowRetries = 0;
     QQueue<qint64> m_modelRequestTimes;
     QTimer m_nextModelTimer;
 

@@ -102,9 +102,9 @@ private Q_SLOTS:
         QCOMPARE(client.classifyError(404, QString(), QByteArray(), QNetworkReply::NoError),
                  RetryErrorCategory::NonRetryable);
 
-        // 413 - Payload too large
+        // 413 - Payload too large: compact and resend rather than retry the same body
         QCOMPARE(client.classifyError(413, QString(), QByteArray(), QNetworkReply::NoError),
-                 RetryErrorCategory::NonRetryable);
+                 RetryErrorCategory::ContextOverflow);
     }
 
     void testClassifyError_ProviderSpecificErrors()
@@ -140,7 +140,7 @@ private Q_SLOTS:
 
         QByteArray openaiContextLength = "{\"error\":{\"type\":\"context_length_exceeded\",\"message\":\"Context too long\"}}";
         QCOMPARE(client.classifyError(400, QString(), openaiContextLength, QNetworkReply::NoError),
-                 RetryErrorCategory::NonRetryable);
+                 RetryErrorCategory::ContextOverflow);
 
         QByteArray openaiModelNotFound = "{\"error\":{\"type\":\"model_not_found\",\"message\":\"Model not found\"}}";
         QCOMPARE(client.classifyError(404, QString(), openaiModelNotFound, QNetworkReply::NoError),
@@ -203,22 +203,23 @@ private Q_SLOTS:
         QCOMPARE(client.classifyError(400, QString(), body4, QNetworkReply::NoError),
                  RetryErrorCategory::RateLimitExceeded);
 
-        // 400 with context window errors should be non-retryable
+        // Context overflow is not retried with the same payload; the agent
+        // compacts history and resends.
         QByteArray body5 = "{\"error\":\"Context window exceeded\"}";
         QCOMPARE(client.classifyError(400, QString(), body5, QNetworkReply::NoError),
-                 RetryErrorCategory::NonRetryable);
+                 RetryErrorCategory::ContextOverflow);
 
         QByteArray body6 = "{\"error\":\"Too many tokens\"}";
         QCOMPARE(client.classifyError(400, QString(), body6, QNetworkReply::NoError),
-                 RetryErrorCategory::NonRetryable);
+                 RetryErrorCategory::ContextOverflow);
 
         QByteArray body7 = "{\"error\":\"Prompt too large\"}";
         QCOMPARE(client.classifyError(400, QString(), body7, QNetworkReply::NoError),
-                 RetryErrorCategory::NonRetryable);
+                 RetryErrorCategory::ContextOverflow);
 
         QByteArray body8 = "{\"error\":\"Maximum context length exceeded\"}";
         QCOMPARE(client.classifyError(400, QString(), body8, QNetworkReply::NoError),
-                 RetryErrorCategory::NonRetryable);
+                 RetryErrorCategory::ContextOverflow);
     }
 
     void testCalculateDelay_ExponentialBackoff()
@@ -473,6 +474,10 @@ private Q_SLOTS:
         // Should not retry non-retryable errors
         ctx.attempt = 1;
         ctx.lastErrorCategory = RetryErrorCategory::NonRetryable;
+        QVERIFY(!client.shouldRetry(ctx));
+
+        // Context overflow is compacted by the agent, not retried as-is.
+        ctx.lastErrorCategory = RetryErrorCategory::ContextOverflow;
         QVERIFY(!client.shouldRetry(ctx));
 
         // Should not retry if auto-retry disabled

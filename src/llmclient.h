@@ -28,7 +28,9 @@ enum class RetryErrorCategory {
     ProviderOverloaded,
     QuotaExceeded,
     UnknownTransient,
-    NonRetryable
+    NonRetryable,
+    // Same payload would fail again; AgentLoop compacts history and resends.
+    ContextOverflow
 };
 
 struct RetryContext {

@@ -26,8 +26,8 @@ class TestTranscriptLayout : public QObject
 
 private Q_SLOTS:
     // Bottom-anchored: [stretch, msg1, msg2, indicators]. The next message goes
-    // after the stretch, so the slack stays above and the newest message stays
-    // against the composer.
+    // after the stretch. ChatWidget uses Top instead, because inserting here
+    // repeatedly would put each new turn *above* the previous one.
     void testBottomAnchorInsertsAfterTheStretch()
     {
         QCOMPARE(transcriptInsertIndexFor(TranscriptAnchor::Bottom, 0, 3, 4), 1);
@@ -35,8 +35,8 @@ private Q_SLOTS:
     }
 
     // Top-anchored: [msg1, msg2, stretch, indicators]. The next message goes
-    // before the stretch. This is the case that regressed: inserting after it
-    // instead put every new message at the bottom of the viewport, below the gap.
+    // before the stretch, so turns stay chronological (oldest at the top) and
+    // expanding a card grows downward into the slack.
     void testTopAnchorInsertsBeforeTheStretch()
     {
         QCOMPARE(transcriptInsertIndexFor(TranscriptAnchor::Top, 2, 3, 4), 2);
