@@ -192,7 +192,13 @@ struct Settings {
     QString openaiCompatibleUrl = QStringLiteral("http://localhost:11434/v1");
     QString claudeCompatibleUrl = QStringLiteral("https://api.anthropic.com/v1");
     QString acpUrl = QStringLiteral("http://localhost:8080");
-    ApiFormat apiFormat = ApiFormat::OpenAICompatible;
+    // Native ACP: spawn a stdio JSON-RPC agent. HTTP formats still use acpUrl.
+    // acpAgentId selects a known command/args/env preset; Custom leaves them as-is.
+    QString acpAgentId = QStringLiteral("grok-build");
+    QString acpCommand = QStringLiteral("grok");
+    QString acpArgs = QStringLiteral("agent stdio");
+    QString acpApiKeyEnv = QStringLiteral("XAI_API_KEY");
+    ApiFormat apiFormat = ApiFormat::AcpNative;
     PermissionMode permissionMode = PermissionMode::Ask;
     SandboxProfile sandbox = SandboxProfile::Workspace;
     // Agent budgets are intentionally separate: API model turns, tool calls, and provider rate.
@@ -342,6 +348,32 @@ QStringList defaultModels(Provider provider);
 // True when the provider can be listed: it has a key and speaks an API we can
 // query a model catalogue on. Used to decide which providers to fetch from.
 bool providerSupportsModelListing(Provider provider);
+// True when Kate talks to an ACP agent over stdio JSON-RPC.
+bool usesAcpNative(const Settings &settings);
+// False for ACP native: agents typically authenticate through their own CLI login.
+bool providerRequiresApiKey(const Settings &settings, Provider provider);
+bool providerIsSelectable(const Settings &settings, Provider provider);
+
+// Known stdio ACP agents. Command/args match the official ACP registry launch
+// lines; users can still override them, or pick Custom and type anything.
+struct AcpAgentPreset {
+    QString id;
+    QString label;
+    QString command;
+    QString args;
+    QString apiKeyEnv;
+};
+
+QList<AcpAgentPreset> acpAgentPresets();
+AcpAgentPreset acpAgentPreset(const QString &id);
+QString acpAgentDisplayName(const Settings &settings);
+QString acpEffectiveCommand(const Settings &settings);
+QString acpEffectiveArgs(const Settings &settings);
+QString acpEffectiveApiKeyEnv(const Settings &settings);
+// True when the resolved launch command is Grok Build (`grok`). Only then do
+// we inject `--model` / `--always-approve` and Grok `_meta`.
+bool acpAgentIsGrok(const Settings &settings);
+QString acpAgentIdMatching(const QString &command, const QString &args);
 
 QString permissionModeId(PermissionMode mode);
 QString permissionModeLabel(PermissionMode mode);
@@ -353,6 +385,10 @@ SandboxProfile sandboxProfileFromId(const QString &id);
 
 QString apiKeyFor(const Settings &settings);
 QString modelFor(const Settings &settings);
+// Models the picker should offer for a provider: the live catalogue, plus the
+// configured model when it is missing from that list. Providers with no
+// catalogue (ACP) still surface the configured model so they can be selected.
+QStringList pickerModelsFor(const Settings &settings, Provider provider, const QStringList &catalog);
 
 // Tool definitions advertised to the model. `access` restricts the set; an
 // empty access advertises every built-in tool.

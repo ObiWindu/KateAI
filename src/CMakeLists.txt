@@ -5,6 +5,7 @@ add_library(kateai_core STATIC
     permissions.cpp
     tools.cpp
     llmclient.cpp
+    acpclient.cpp
     agentloop.cpp
     workspace.cpp
     documentbridge.cpp

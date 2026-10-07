@@ -2087,6 +2087,7 @@ void ChatWidget::showInfoMessage(const QString &message, bool isError)
 void ChatWidget::setSettings(const Settings &settings)
 {
     m_settings = settings;
+    m_preferredProvider = settings.provider;
 
     const int permIndex = m_permission->findData(permissionModeId(settings.permissionMode));
     if (permIndex >= 0) {
@@ -2142,17 +2143,22 @@ void ChatWidget::refreshProviders()
         // Only show provider if it has a valid API key configured
         Settings providerSettings = m_settings;
         providerSettings.provider = provider;
-        if (!apiKeyFor(providerSettings).trimmed().isEmpty()) {
+        if (providerIsSelectable(m_settings, provider)) {
             m_provider->addItem(providerLabel(provider), providerId(provider));
         }
     }
-    const int index = m_provider->findData(providerId(m_preferredProvider));
+    int index = m_provider->findData(providerId(m_preferredProvider));
+    if (index < 0) {
+        index = m_provider->findData(providerId(m_settings.provider));
+    }
     if (index >= 0) {
         m_provider->setCurrentIndex(index);
-        m_settings.provider = m_preferredProvider;
+        m_settings.provider = providerFromId(m_provider->currentData().toString());
+        m_preferredProvider = m_settings.provider;
     } else if (m_provider->count() > 0) {
         m_provider->setCurrentIndex(0);
         m_settings.provider = providerFromId(m_provider->currentData().toString());
+        m_preferredProvider = m_settings.provider;
     } else {
         m_provider->addItem(i18n("Configure an API key…"), QVariant());
         m_provider->setCurrentIndex(0);
@@ -2170,10 +2176,12 @@ void ChatWidget::refreshModels()
     const bool wasUpdating = m_updatingCombos;
     m_updatingCombos = true;
     m_model->clear();
-    // Only show models fetched from the API (no placeholder/default models)
-    const QStringList models = m_modelCatalog.value(m_settings.provider);
+    // Live catalogue plus the configured model, so ACP (no listing endpoint)
+    // and a model that has not landed in the fetch yet still appear selected.
+    const QStringList models = pickerModelsFor(m_settings, m_settings.provider,
+                                               m_modelCatalog.value(m_settings.provider));
     m_model->addItems(models);
-    m_model->setEnabled(!models.isEmpty());
+    m_model->setEnabled(!models.isEmpty() || !providerSupportsModelListing(m_settings.provider));
 
     // Prefer the model already stored in settings. Only fall back to the first
     // entry in the list when no model has been chosen yet. Overwriting a valid
@@ -2233,8 +2241,18 @@ void ChatWidget::updateModelSelectorLabel()
     // The chip sits in a narrow row next to the mode chip, so it carries the
     // model alone. The provider (and the raw reasoning level) move into the
     // tooltip, where there is room for them and nobody has to read them twice.
-    const QString model = modelFor(m_settings);
-    const QString label = model.isEmpty() ? i18n("Select model") : model;
+    const QString model = modelFor(m_settings).trimmed();
+    QString label = model;
+    if (label.isEmpty() && providerIsSelectable(m_settings, m_settings.provider)) {
+        // ACP has no catalogue, so the configured provider itself is the
+        // selection until a model id is typed in settings.
+        label = m_settings.provider == Provider::Acp
+            ? acpAgentDisplayName(m_settings)
+            : providerLabel(m_settings.provider);
+    }
+    if (label.isEmpty()) {
+        label = i18n("Select model");
+    }
     m_modelSelector->setText(label + QStringLiteral("  ▾"));
 
     QStringList parts{providerLabel(m_settings.provider)};
@@ -2663,7 +2681,7 @@ void ChatWidget::fillModelResultList()
 
     const QString filter = m_modelFilter.trimmed();
     const bool filtering = !filter.isEmpty();
-    const QString currentModel = modelFor(m_settings);
+    const QString currentModel = modelFor(m_settings).trimmed();
     const QList<Provider> providers = {
         Provider::Grok, Provider::OpenAI, Provider::OpenRouter, Provider::DeepSeek,
         Provider::OpenAICompatible, Provider::ClaudeCompatible, Provider::Kilo,
@@ -2680,11 +2698,12 @@ void ChatWidget::fillModelResultList()
     for (Provider p : providers) {
         Settings providerSettings = m_settings;
         providerSettings.provider = p;
-        if (apiKeyFor(providerSettings).trimmed().isEmpty()) {
+        if (!providerIsSelectable(m_settings, p)) {
             continue;
         }
 
-        const QStringList models = m_modelCatalog.value(p);
+        QStringList models = pickerModelsFor(m_settings, p, m_modelCatalog.value(p));
+        const bool listing = providerSupportsModelListing(p);
         if (!filtering) {
             auto *header = new QListWidgetItem(providerLabel(p));
             header->setFlags(Qt::NoItemFlags);
@@ -2694,6 +2713,20 @@ void ChatWidget::fillModelResultList()
             header->setFont(font);
             header->setForeground(QColor(QStringLiteral("#8b8b92")));
             m_modelResultList->addItem(header);
+            if (models.isEmpty() && !listing) {
+                // ACP (and any other agent without a catalogue) is still a
+                // real selection: the endpoint + key are the model.
+                auto *item = new QListWidgetItem(p == Provider::Acp && m_settings.apiFormat == ApiFormat::AcpNative
+                    ? acpAgentDisplayName(m_settings)
+                    : i18n("Configured endpoint"));
+                item->setData(Qt::UserRole, static_cast<int>(p));
+                item->setData(Qt::UserRole + 1, modelFor(providerSettings).trimmed());
+                if (m_settings.provider == p) {
+                    select = item;
+                }
+                m_modelResultList->addItem(item);
+                continue;
+            }
             if (models.isEmpty()) {
                 auto *pending = new QListWidgetItem(i18n("Fetching models..."));
                 pending->setFlags(Qt::NoItemFlags);
@@ -2706,7 +2739,7 @@ void ChatWidget::fillModelResultList()
                 auto *item = new QListWidgetItem(model);
                 item->setData(Qt::UserRole, static_cast<int>(p));
                 item->setData(Qt::UserRole + 1, model);
-                if (m_settings.provider == p && currentModel == model) {
+                if (m_settings.provider == p && (currentModel == model || (currentModel.isEmpty() && select == nullptr))) {
                     select = item;
                 }
                 m_modelResultList->addItem(item);
@@ -2714,18 +2747,22 @@ void ChatWidget::fillModelResultList()
             continue;
         }
 
+        if (models.isEmpty() && !listing) {
+            models.append(modelFor(providerSettings).trimmed());
+        }
         for (const QString &model : models) {
             if (matches >= kMaxVisibleMatches) {
                 break;
             }
-            if (!model.contains(filter, Qt::CaseInsensitive)
+            const QString display = model.isEmpty() ? i18n("Configured endpoint") : model;
+            if (!display.contains(filter, Qt::CaseInsensitive)
                 && !providerLabel(p).contains(filter, Qt::CaseInsensitive)) {
                 continue;
             }
-            auto *item = new QListWidgetItem(u"%1  ·  %2"_s.arg(providerLabel(p), model));
+            auto *item = new QListWidgetItem(u"%1  ·  %2"_s.arg(providerLabel(p), display));
             item->setData(Qt::UserRole, static_cast<int>(p));
             item->setData(Qt::UserRole + 1, model);
-            if (m_settings.provider == p && currentModel == model) {
+            if (m_settings.provider == p && (currentModel == model || (currentModel.isEmpty() && select == nullptr))) {
                 select = item;
             }
             m_modelResultList->addItem(item);
