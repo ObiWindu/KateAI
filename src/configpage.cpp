@@ -142,19 +142,26 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
         addProviderGroup(i18n("OpenCode Zen (curated coding models)"), m_opencodeKey, m_opencodeModel, m_opencodeUrl);
 
     m_acpKey = makeKey();
+    m_acpKey->setPlaceholderText(i18n("Optional — Grok Build uses `grok` login"));
     m_acpModel = makeModelCombo();
     m_acpUrl = new QLineEdit(this);
     m_acpUrl->setPlaceholderText(u"http://localhost:8080"_s);
+    m_acpCommand = new QLineEdit(this);
+    m_acpCommand->setPlaceholderText(u"grok"_s);
+    m_acpArgs = new QLineEdit(this);
+    m_acpArgs->setPlaceholderText(u"agent stdio"_s);
     m_apiFormat = new QComboBox(providersWidget);
+    m_apiFormat->addItem(apiFormatLabel(ApiFormat::AcpNative), apiFormatId(ApiFormat::AcpNative));
     m_apiFormat->addItem(apiFormatLabel(ApiFormat::OpenAICompatible), apiFormatId(ApiFormat::OpenAICompatible));
     m_apiFormat->addItem(apiFormatLabel(ApiFormat::AnthropicCompatible), apiFormatId(ApiFormat::AnthropicCompatible));
-    m_apiFormat->addItem(apiFormatLabel(ApiFormat::AcpNative), apiFormatId(ApiFormat::AcpNative));
-    auto *acpGroup = new QGroupBox(i18n("ACP (Agent Communication Protocol)"), providersWidget);
+    auto *acpGroup = new QGroupBox(i18n("ACP / Grok Build"), providersWidget);
     auto *acpForm = new QFormLayout(acpGroup);
+    acpForm->addRow(i18n("API Format:"), m_apiFormat);
+    acpForm->addRow(i18n("Command:"), m_acpCommand);
+    acpForm->addRow(i18n("Arguments:"), m_acpArgs);
     acpForm->addRow(i18n("API Key:"), m_acpKey);
     acpForm->addRow(i18n("Default Model:"), m_acpModel);
     acpForm->addRow(i18n("Endpoint URL:"), m_acpUrl);
-    acpForm->addRow(i18n("API Format:"), m_apiFormat);
     providersLayout->addWidget(acpGroup);
 
     providersLayout->addStretch();
@@ -754,7 +761,7 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
         markChanged();
         // Refresh models for the newly selected provider
         const Provider provider = providerFromId(m_provider->currentData().toString());
-        if (m_modelFetcher) {
+        if (m_modelFetcher && providerSupportsModelListing(provider)) {
             Settings s = m_plugin->settings();
             s.provider = provider;
             m_modelFetcher->setSettings(s);
@@ -781,6 +788,8 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     connect(m_openaiCompatibleUrl, &QLineEdit::textChanged, this, markChanged);
     connect(m_claudeCompatibleUrl, &QLineEdit::textChanged, this, markChanged);
     connect(m_acpUrl, &QLineEdit::textChanged, this, markChanged);
+    connect(m_acpCommand, &QLineEdit::textChanged, this, markChanged);
+    connect(m_acpArgs, &QLineEdit::textChanged, this, markChanged);
     connect(m_apiFormat, &QComboBox::currentIndexChanged, this, markChanged);
 
     // Connect API key changes to fetch models
@@ -831,7 +840,7 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     fetchModelsForProvider(Provider::OpenAICompatible, m_openaiCompatibleKey, m_openaiCompatibleModel);
     fetchModelsForProvider(Provider::ClaudeCompatible, m_claudeCompatibleKey, m_claudeCompatibleModel);
         fetchModelsForProvider(Provider::OpenCode, m_opencodeKey, m_opencodeModel);
-    fetchModelsForProvider(Provider::Acp, m_acpKey, m_acpModel);
+    // ACP has no catalogue endpoint; the default model is typed by the user.
 
     connect(m_permission, &QComboBox::currentIndexChanged, this, markChanged);
     connect(m_sandbox, &QComboBox::currentIndexChanged, this, markChanged);
@@ -1235,6 +1244,8 @@ void KateAiConfigPage::apply()
     s.openaiCompatibleUrl = m_openaiCompatibleUrl->text().trimmed();
     s.claudeCompatibleUrl = m_claudeCompatibleUrl->text().trimmed();
     s.acpUrl = m_acpUrl->text().trimmed();
+    s.acpCommand = m_acpCommand->text().trimmed();
+    s.acpArgs = m_acpArgs->text().trimmed();
     s.apiFormat = apiFormatFromId(m_apiFormat->currentData().toString());
 
     s.permissionMode = permissionModeFromId(m_permission->currentData().toString());
@@ -1381,6 +1392,8 @@ void KateAiConfigPage::reset()
     m_openaiCompatibleUrl->setText(s.openaiCompatibleUrl);
     m_claudeCompatibleUrl->setText(s.claudeCompatibleUrl);
     m_acpUrl->setText(s.acpUrl);
+    m_acpCommand->setText(s.acpCommand);
+    m_acpArgs->setText(s.acpArgs);
     m_apiFormat->setCurrentIndex(std::max(0, m_apiFormat->findData(apiFormatId(s.apiFormat))));
 
     // Fetch models for providers that have API keys configured
@@ -1399,7 +1412,7 @@ void KateAiConfigPage::reset()
         fetchIfKey(Provider::DeepSeek, s.deepseekApiKey);
         fetchIfKey(Provider::OpenAICompatible, s.openaiCompatibleApiKey);
         fetchIfKey(Provider::ClaudeCompatible, s.claudeCompatibleApiKey);
-        fetchIfKey(Provider::Acp, s.acpApiKey);
+        // ACP has no catalogue; keep the typed default model as-is.
     }
 
     m_permission->setCurrentIndex(std::max(0, m_permission->findData(permissionModeId(s.permissionMode))));

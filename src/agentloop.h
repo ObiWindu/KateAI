@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include "acpclient.h"
 #include "agentlocks.h"
 #include "agentteam.h"
 #include "checkpoint.h"
@@ -52,6 +53,7 @@ public:
     bool isBusy() const { return m_busy; }
 
     LlmClient *client() { return &m_client; }
+    AcpClient *acpClient() { return &m_acp; }
     DocumentBridge *documentBridge() { return m_bridge; }
 
     void start(const QString &userText);
@@ -180,6 +182,9 @@ private:
         // requests-per-minute budget allows it now.
         qint64 rateLimitDelayMs(qint64 now) const;
     void sendToModel();
+    void startAcpTurn(const QString &userText);
+    void onAcpPromptFinished(const QString &stopReason, const QString &text, const QJsonArray &toolCalls);
+    void syncAcpClient();
     void finishTurn();
     void finishWithFailure(const QString &error);
     bool canStartModelRequest(QString *error) const;
@@ -237,6 +242,7 @@ private:
     QString m_editorContext;
     DocumentBridge *m_bridge = nullptr;
     LlmClient m_client;
+    AcpClient m_acp;
         // Shared by every loop in a turn, so the in-flight replies can be cancelled
         // as a unit when the turn is aborted.
         WebSearch m_web;

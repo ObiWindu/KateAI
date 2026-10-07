@@ -6,7 +6,7 @@
 
 <p align="center">
   <strong>An AI coding agent that lives inside <a href="https://kate-editor.org/">Kate</a></strong><br>
-  Chat, project tools, sandboxed shell, and permission asks — Grok, OpenAI, OpenRouter, local models, and ACP.
+  Chat, project tools, sandboxed shell, and permission asks — Grok, OpenAI, OpenRouter, local models, and Grok Build over ACP.
 </p>
 
 <p align="center">
@@ -34,7 +34,7 @@ Kate is a serious editor for C++, Qt, KDE, and systems work. Kate AI keeps that 
 | Inspect before changing | **Plan mode** is read-only: the model can search and propose a plan, and cannot write or run shell. |
 | See what the agent is doing | Streaming replies, collapsible reasoning, a live plan checklist, and tool cards with diffs. |
 | Stay in control | Permission bar (Allow / Allow for session / Deny), sandbox profiles, deny globs for secrets. |
-| Pick a model | Grok, OpenAI, OpenRouter, OpenAI-compatible (Ollama, vLLM, LocalAI), Claude-compatible, ACP. |
+| Pick a model | Grok, OpenAI, OpenRouter, OpenAI-compatible (Ollama, vLLM, LocalAI), Claude-compatible, Grok Build (ACP). |
 | Teach the repo | Optional `KATEAI.md` at the workspace root is loaded as project instructions. |
 
 Typical uses: explain a selection, fix a bug in the current file, refactor with a visible diff, add tests, explore an unfamiliar tree via the project graph, then apply focused patches after you approve them.
@@ -186,7 +186,7 @@ The model can call tools, read the results, and continue until the task is done 
 - Context compression and smart truncation so long sessions stay within the window
 
 ```text
-You ──► LLM (Grok / OpenAI / OpenRouter / local / ACP)
+You ──► LLM (Grok / OpenAI / OpenRouter / local) or Grok Build over ACP
           │
           ├── thinking (collapsible) + plan checklist
           ├── stream the answer into the panel
@@ -306,15 +306,17 @@ Shell isolation depends on the OS: [bubblewrap](https://github.com/containers/bu
 | **OpenRouter** | `https://openrouter.ai/api/v1` | `x-ai/grok-4` |
 | **OpenAI compatible** | `http://localhost:11434/v1` | Ollama, LocalAI, vLLM, … |
 | **Claude compatible** | `https://api.anthropic.com/v1` | Anthropic Messages API / Bedrock-style |
-| **ACP** | `http://localhost:8080` | Agent Communication Protocol |
+| **ACP / Grok Build** | `grok agent stdio` | Agent Client Protocol (JSON-RPC) |
 
-ACP API formats (Settings → Kate AI → AI Providers → ACP):
+ACP API formats (Settings → Kate AI → AI Providers → ACP / Grok Build):
 
-| Format | Endpoint | Auth |
+| Format | How it talks | Auth |
 | --- | --- | --- |
-| OpenAI compatible (default) | `/chat/completions` | `Bearer` |
-| Anthropic / Claude compatible | `/v1/messages` | `x-api-key` |
-| ACP native | `/acp/v1/chat/completions` | `Bearer` |
+| ACP native (default) | Spawns `grok agent stdio` and speaks [Agent Client Protocol](https://agentclientprotocol.com) JSON-RPC | `grok` CLI login (`~/.grok/auth.json`); optional `XAI_API_KEY` |
+| OpenAI compatible | HTTP `POST /chat/completions` at the endpoint URL | `Bearer` |
+| Anthropic / Claude compatible | HTTP `POST /v1/messages` | `x-api-key` |
+
+To use Grok Build inside Kate: install the Grok CLI, run `grok` once to log in, then set the provider to **ACP / Grok Build** with format **ACP native**. Command defaults to `grok`, arguments to `agent stdio`. An optional model id is passed as `--model`. Always-approve permission mode adds `--always-approve`.
 
 The model menu fetches live catalogs when the provider supports it; you can still type a model id. Only the selected provider’s key is sent. Keys live in Kate’s config (`KateAI` group).
 
@@ -530,7 +532,8 @@ Always configure out-of-source (`-B build`, not `cmake .`). Do not copy a `build
 | `src/promptedit.cpp` | Composer, @ completion, prompt history |
 | `src/edittracker.cpp` | Accept / reject pending writes |
 | `src/agentloop.cpp` | LLM ↔ tool loop, verification, budgets |
-| `src/llmclient.cpp` | Streaming (`/v1/chat/completions`, Anthropic, ACP), retries |
+| `src/llmclient.cpp` | Streaming (`/v1/chat/completions`, Anthropic, HTTP ACP), retries |
+| `src/acpclient.cpp` | Native ACP client (`grok agent stdio`, JSON-RPC, Grok Build) |
 | `src/tools.cpp` | File, grep, glob, bash, project-graph tools |
 | `src/graph/` | Project graph index and queries |
 | `src/sandbox.cpp` | Path jail, deny globs, bubblewrap |

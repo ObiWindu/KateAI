@@ -117,6 +117,43 @@ private Q_SLOTS:
         QVERIFY(providerSupportsModelListing(Provider::OpenAI));
         QVERIFY(providerSupportsModelListing(Provider::OpenRouter));
     }
+
+    void pickerSurfacesConfiguredAcpModelWithoutCatalogue()
+    {
+        Settings settings;
+        settings.provider = Provider::Acp;
+        settings.acpApiKey = u"acp-key"_s;
+        settings.acpModel = u"workspace-agent"_s;
+
+        QCOMPARE(pickerModelsFor(settings, Provider::Acp, {}),
+                 QStringList{u"workspace-agent"_s});
+
+        const QStringList catalog{u"other"_s, u"workspace-agent"_s};
+        QCOMPARE(pickerModelsFor(settings, Provider::Acp, catalog), catalog);
+
+        const QStringList withoutConfigured{u"alpha"_s, u"beta"_s};
+        QCOMPARE(pickerModelsFor(settings, Provider::Acp, withoutConfigured),
+                 (QStringList{u"workspace-agent"_s, u"alpha"_s, u"beta"_s}));
+
+        settings.acpModel.clear();
+        QVERIFY(pickerModelsFor(settings, Provider::Acp, {}).isEmpty());
+    }
+
+    void acpNativeIsTheGrokBuildTransport()
+    {
+        Settings settings;
+        settings.provider = Provider::Acp;
+        QCOMPARE(settings.apiFormat, ApiFormat::AcpNative);
+        QVERIFY(usesAcpNative(settings));
+        QVERIFY(!providerRequiresApiKey(settings, Provider::Acp));
+        QVERIFY(providerIsSelectable(settings, Provider::Acp));
+        QCOMPARE(settings.acpCommand, u"grok"_s);
+        QCOMPARE(settings.acpArgs, u"agent stdio"_s);
+
+        settings.apiFormat = ApiFormat::OpenAICompatible;
+        QVERIFY(!usesAcpNative(settings));
+        QVERIFY(providerRequiresApiKey(settings, Provider::Acp));
+    }
 };
 
 QTEST_GUILESS_MAIN(TestProviders)

@@ -35,6 +35,8 @@ public:
         int verificationPromptCount = 0;
         int modelRequests = 0;
         int toolCalls = 0;
+        // ACP (Grok Build) session id, used to resume the agent conversation.
+        QString acpSessionId;
     };
 
     struct ConversationInfo {

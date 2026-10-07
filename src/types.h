@@ -192,7 +192,10 @@ struct Settings {
     QString openaiCompatibleUrl = QStringLiteral("http://localhost:11434/v1");
     QString claudeCompatibleUrl = QStringLiteral("https://api.anthropic.com/v1");
     QString acpUrl = QStringLiteral("http://localhost:8080");
-    ApiFormat apiFormat = ApiFormat::OpenAICompatible;
+    // Native ACP (Grok Build): `grok agent stdio`. HTTP formats still use acpUrl.
+    QString acpCommand = QStringLiteral("grok");
+    QString acpArgs = QStringLiteral("agent stdio");
+    ApiFormat apiFormat = ApiFormat::AcpNative;
     PermissionMode permissionMode = PermissionMode::Ask;
     SandboxProfile sandbox = SandboxProfile::Workspace;
     // Agent budgets are intentionally separate: API model turns, tool calls, and provider rate.
@@ -342,6 +345,11 @@ QStringList defaultModels(Provider provider);
 // True when the provider can be listed: it has a key and speaks an API we can
 // query a model catalogue on. Used to decide which providers to fetch from.
 bool providerSupportsModelListing(Provider provider);
+// True when Kate talks to an ACP agent over stdio JSON-RPC (Grok Build).
+bool usesAcpNative(const Settings &settings);
+// False for ACP native: Grok Build authenticates through the CLI login.
+bool providerRequiresApiKey(const Settings &settings, Provider provider);
+bool providerIsSelectable(const Settings &settings, Provider provider);
 
 QString permissionModeId(PermissionMode mode);
 QString permissionModeLabel(PermissionMode mode);
@@ -353,6 +361,10 @@ SandboxProfile sandboxProfileFromId(const QString &id);
 
 QString apiKeyFor(const Settings &settings);
 QString modelFor(const Settings &settings);
+// Models the picker should offer for a provider: the live catalogue, plus the
+// configured model when it is missing from that list. Providers with no
+// catalogue (ACP) still surface the configured model so they can be selected.
+QStringList pickerModelsFor(const Settings &settings, Provider provider, const QStringList &catalog);
 
 // Tool definitions advertised to the model. `access` restricts the set; an
 // empty access advertises every built-in tool.

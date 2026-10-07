@@ -54,7 +54,7 @@ QString providerLabel(Provider provider)
     case Provider::Kilo:
         return i18n("Kilo.ai");
     case Provider::Acp:
-        return i18n("ACP (Agent Communication Protocol)");
+        return i18n("ACP / Grok Build");
     case Provider::OpenCode:
         return i18n("OpenCode Zen");
     case Provider::Grok:
@@ -170,6 +170,29 @@ bool providerSupportsModelListing(Provider provider)
     }
     // ACP agents advertise themselves; there is no catalogue endpoint.
     return false;
+}
+
+bool usesAcpNative(const Settings &settings)
+{
+    return settings.provider == Provider::Acp && settings.apiFormat == ApiFormat::AcpNative;
+}
+
+bool providerRequiresApiKey(const Settings &settings, Provider provider)
+{
+    if (provider == Provider::Acp && settings.apiFormat == ApiFormat::AcpNative) {
+        return false;
+    }
+    return true;
+}
+
+bool providerIsSelectable(const Settings &settings, Provider provider)
+{
+    if (provider == Provider::Acp) {
+        return true;
+    }
+    Settings copy = settings;
+    copy.provider = provider;
+    return !apiKeyFor(copy).trimmed().isEmpty();
 }
 
 QString permissionModeId(PermissionMode mode)
@@ -301,6 +324,24 @@ QString modelFor(const Settings &settings)
     default:
         return settings.grokModel;
     }
+}
+
+QStringList pickerModelsFor(const Settings &settings, Provider provider, const QStringList &catalog)
+{
+    QStringList models;
+    for (const QString &model : catalog) {
+        const QString trimmed = model.trimmed();
+        if (!trimmed.isEmpty() && !models.contains(trimmed)) {
+            models.append(trimmed);
+        }
+    }
+    Settings slot = settings;
+    slot.provider = provider;
+    const QString configured = modelFor(slot).trimmed();
+    if (!configured.isEmpty() && !models.contains(configured)) {
+        models.prepend(configured);
+    }
+    return models;
 }
 
 static QJsonObject toolDef(const QString &name, const QString &description, const QJsonObject &properties, const QStringList &required)
@@ -741,7 +782,7 @@ QString apiFormatLabel(ApiFormat format)
     case ApiFormat::AnthropicCompatible:
         return i18n("Anthropic/Claude Compatible");
     case ApiFormat::AcpNative:
-        return i18n("ACP Native");
+        return i18n("ACP native (Grok Build stdio)");
     case ApiFormat::OpenAICompatible:
     default:
         return i18n("OpenAI Compatible");

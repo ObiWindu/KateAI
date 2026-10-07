@@ -40,7 +40,9 @@ Settings SettingsStore::load()
     s.opencodeUrl = g.readEntry(u"OpenCodeUrl"_s, u"https://opencode.ai/zen/v1"_s);
     s.deepseekUrl = g.readEntry(u"DeepSeekUrl"_s, u"https://api.deepseek.com"_s);
     s.acpUrl = g.readEntry(u"AcpUrl"_s, u"http://localhost:8080"_s);
-    s.apiFormat = apiFormatFromId(g.readEntry(u"ApiFormat"_s, apiFormatId(ApiFormat::OpenAICompatible)));
+    s.acpCommand = g.readEntry(u"AcpCommand"_s, u"grok"_s);
+    s.acpArgs = g.readEntry(u"AcpArgs"_s, u"agent stdio"_s);
+    s.apiFormat = apiFormatFromId(g.readEntry(u"ApiFormat"_s, apiFormatId(ApiFormat::AcpNative)));
     s.permissionMode = permissionModeFromId(g.readEntry(u"PermissionMode"_s, permissionModeId(PermissionMode::Ask)));
     s.sandbox = sandboxProfileFromId(g.readEntry(u"Sandbox"_s, sandboxProfileId(SandboxProfile::Workspace)));
     const int legacyMaxIterations = g.readEntry(u"MaxIterations"_s, 0);
@@ -160,6 +162,8 @@ void SettingsStore::save(const Settings &settings)
     g.writeEntry(u"AcpModel"_s, settings.acpModel);
     g.writeEntry(u"DeepSeekUrl"_s, settings.deepseekUrl);
     g.writeEntry(u"AcpUrl"_s, settings.acpUrl);
+    g.writeEntry(u"AcpCommand"_s, settings.acpCommand);
+    g.writeEntry(u"AcpArgs"_s, settings.acpArgs);
     g.writeEntry(u"ApiFormat"_s, apiFormatId(settings.apiFormat));
     g.writeEntry(u"PermissionMode"_s, permissionModeId(settings.permissionMode));
     g.writeEntry(u"Sandbox"_s, sandboxProfileId(settings.sandbox));

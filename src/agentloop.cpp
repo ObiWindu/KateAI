@@ -64,6 +64,51 @@ AgentLoop::AgentLoop(QObject *parent)
     connect(&m_client, &LlmClient::failed, this, &AgentLoop::onFailed);
     connect(&m_client, &LlmClient::modelsReceived, this, &AgentLoop::modelsReceived);
     connect(&m_client, &LlmClient::modelsFailed, this, &AgentLoop::modelsFailed);
+
+    connect(&m_acp, &AcpClient::textDelta, this, [this](const QString &delta) {
+        if (!m_thinkingFinishedEmitted && !m_currentThinking.isEmpty()) {
+            m_thinkingFinishedEmitted = true;
+            Q_EMIT thinkingFinished(m_currentThinking);
+        }
+        m_currentAssistant += delta;
+        Q_EMIT assistantDelta(delta);
+    });
+    connect(&m_acp, &AcpClient::thinkingDelta, this, [this](const QString &delta) {
+        m_currentThinking += delta;
+        Q_EMIT thinkingDelta(delta);
+    });
+    connect(&m_acp, &AcpClient::planUpdated, this, [this](const QJsonArray &plan) {
+        m_currentPlan = plan;
+        m_planShown = true;
+        Q_EMIT planUpdated(plan);
+    });
+    connect(&m_acp, &AcpClient::toolStarted, this, [this](const PermissionRequest &request) {
+        ++m_toolCalls;
+        Q_EMIT toolStarted(request);
+        Q_EMIT statusChanged(u"Working on the next step…"_s);
+    });
+    connect(&m_acp, &AcpClient::toolFinished, this, [this](const ToolResult &result) {
+        ChatMessage toolMsg;
+        toolMsg.role = ChatMessage::Role::Tool;
+        toolMsg.toolCallId = result.toolCallId;
+        toolMsg.name = result.name;
+        toolMsg.content = result.output;
+        m_messages.append(toolMsg);
+        Q_EMIT toolFinished(result);
+    });
+    connect(&m_acp, &AcpClient::permissionNeeded, this, [this](const PermissionRequest &request) {
+        m_waitingCall.id = request.toolCallId;
+        m_waitingCall.name = request.toolName;
+        m_waitingRequest = request;
+        m_state = State::WaitingForPermission;
+        Q_EMIT permissionNeeded(request);
+    });
+    connect(&m_acp, &AcpClient::promptFinished, this, &AgentLoop::onAcpPromptFinished);
+    connect(&m_acp, &AcpClient::failed, this, &AgentLoop::onFailed);
+    connect(&m_acp, &AcpClient::logMessage, this, &AgentLoop::mcpLogMessage);
+    connect(&m_acp, &AcpClient::sessionIdChanged, this, [this](const QString &) {
+        Q_EMIT statusChanged(m_acp.statusText());
+    });
     // Retry status signals
     connect(&m_client, &LlmClient::retryStatus, this, [this](const QString &message, int attempt, int maxAttempts, int delaySeconds) {
         Q_EMIT statusChanged(message);
@@ -128,6 +173,7 @@ void AgentLoop::setSettings(const Settings &settings)
 
     m_settings = settings;
     m_client.setSettings(settings);
+    syncAcpClient();
     // Keep the shared web client in step with the settings.
     m_web.setProvider(WebSearch::providerFromId(settings.webSearchProvider));
     m_web.setApiKey(settings.webSearchApiKey);
@@ -190,6 +236,7 @@ void AgentLoop::setSettings(const Settings &settings)
 void AgentLoop::setWorkspace(const QString &workspace)
 {
     m_workspace = workspace;
+    m_acp.setWorkspace(workspace);
 
     m_modes.setWorkspace(m_workspace);
     m_team.setWorkspace(m_workspace);
@@ -232,6 +279,7 @@ void AgentLoop::setDocumentBridge(DocumentBridge *bridge)
 {
     // Set the document bridge for file operations and reinitialize tools if sandbox exists
     m_bridge = bridge;
+    m_acp.setDocumentBridge(bridge);
     if (m_sandbox) {
         m_tools = std::make_unique<ToolRunner>(*m_sandbox, m_bridge, this);
         m_tools->setTimeoutMs(m_settings.bashTimeoutMs);
@@ -243,6 +291,7 @@ void AgentLoop::setEditorContext(const QString &context)
 {
     // Update the editor context with information about the current document and cursor position
     m_editorContext = context;
+    m_acp.setEditorContext(context);
 }
 
 ToolAccess AgentLoop::activeToolAccess() const
@@ -670,6 +719,7 @@ void AgentLoop::resetConversation()
 {
     abort();
     cancelSubtask();
+    m_acp.resetSession();
     m_messages.clear();
     m_policy.revokeSession();
     m_modelRequests = 0;
@@ -691,11 +741,12 @@ void AgentLoop::resetConversation()
 
 void AgentLoop::abort()
 {
-    const bool hadActiveTurn = m_busy || m_client.isBusy() || !m_queue.isEmpty() || !m_pendingResults.isEmpty()
+    const bool hadActiveTurn = m_busy || m_client.isBusy() || m_acp.isBusy() || !m_queue.isEmpty() || !m_pendingResults.isEmpty()
         || !m_waitingCall.name.isEmpty() || m_nextModelTimer.isActive() || !m_activeSubtasks.isEmpty();
 
     m_nextModelTimer.stop();
     m_client.abort();
+    m_acp.cancel();
     m_web.abort();
     cancelSubtask();
     m_inFlight = 0;
@@ -727,6 +778,11 @@ void AgentLoop::start(const QString &userText)
     }
     if (!m_tools) {
         setWorkspace(m_workspace);
+    }
+
+    if (usesAcpNative(m_settings)) {
+        startAcpTurn(userText);
+        return;
     }
 
     m_busy = true;
@@ -904,6 +960,81 @@ void AgentLoop::sendToModel()
     }
 
     m_client.complete(requestMessages);
+}
+
+void AgentLoop::syncAcpClient()
+{
+    m_acp.setSettings(m_settings);
+    m_acp.setWorkspace(m_workspace);
+    m_acp.setDocumentBridge(m_bridge);
+    m_acp.setEditorContext(m_editorContext);
+    if (m_mcp) {
+        m_acp.setMcpServers(m_mcp->servers());
+    }
+    if (!usesAcpNative(m_settings) && !m_acp.isBusy()) {
+        m_acp.stop();
+    }
+}
+
+void AgentLoop::startAcpTurn(const QString &userText)
+{
+    m_busy = true;
+    m_state = State::WaitingForModel;
+    m_modelRequests = 0;
+    m_toolCalls = 0;
+    m_queue.clear();
+    m_pendingResults.clear();
+    m_waitingCall = {};
+    m_waitingRequest = {};
+    m_currentAssistant.clear();
+    m_currentThinking.clear();
+    m_thinkingFinishedEmitted = false;
+    m_currentPlan = QJsonArray();
+    m_planShown = false;
+    m_checkpointTaken = false;
+    m_taskSummary = userText.simplified().left(80);
+
+    ChatMessage user;
+    user.role = ChatMessage::Role::User;
+    user.content = userText;
+    m_messages.append(user);
+    Q_EMIT userMessage(userText);
+    Q_EMIT activityUpdated(u"Talking to Grok Build over ACP…"_s);
+    Q_EMIT statusChanged(u"Working on it…"_s);
+
+    syncAcpClient();
+    ++m_modelRequests;
+    m_acp.prompt(userText);
+}
+
+void AgentLoop::onAcpPromptFinished(const QString &stopReason, const QString &text, const QJsonArray &toolCalls)
+{
+    if (!m_busy) {
+        return;
+    }
+
+    ChatMessage assistant;
+    assistant.role = ChatMessage::Role::Assistant;
+    assistant.content = text;
+    assistant.thinking = m_currentThinking;
+    assistant.plan = m_currentPlan;
+    assistant.toolCalls = toolCalls;
+    m_messages.append(assistant);
+
+    if (!m_thinkingFinishedEmitted && !m_currentThinking.isEmpty()) {
+        m_thinkingFinishedEmitted = true;
+        Q_EMIT thinkingFinished(m_currentThinking);
+    }
+    Q_EMIT assistantFinished(text);
+
+    if (stopReason == u"refusal"_s) {
+        finishWithFailure(u"The ACP agent refused to continue."_s);
+        return;
+    }
+    if (stopReason == u"max_tokens"_s) {
+        Q_EMIT statusChanged(i18n("The agent stopped because it hit the token limit."));
+    }
+    finishTurn();
 }
 
 QList<ToolCall> AgentLoop::bundleSimilarTools(const QList<ToolCall> &calls)
@@ -2027,6 +2158,17 @@ void AgentLoop::resolvePermission(PermissionDecision decision)
         return;
     }
 
+    if (usesAcpNative(m_settings)) {
+        if (decision == PermissionDecision::AllowSession) {
+            m_policy.grantSession(m_waitingCall.name);
+        }
+        m_waitingCall = {};
+        m_waitingRequest = {};
+        m_state = State::WaitingForModel;
+        m_acp.resolvePermission(decision);
+        return;
+    }
+
     const ToolCall call = m_waitingCall;
     const PermissionRequest request = m_waitingRequest;
     m_waitingCall = {};
@@ -2111,6 +2253,7 @@ SessionStore::SessionData AgentLoop::sessionData() const
     data.verificationPromptCount = m_verificationPromptCount;
     data.modelRequests = m_modelRequests;
     data.toolCalls = m_toolCalls;
+    data.acpSessionId = m_acp.sessionId();
     return data;
 }
 
@@ -2137,6 +2280,9 @@ void AgentLoop::restoreSession(const SessionStore::SessionData &data)
     m_verificationAttempted = data.verificationAttempted;
     m_verificationPromptCount = data.verificationPromptCount;
     m_modelRequests = data.modelRequests;
+    if (!data.acpSessionId.isEmpty()) {
+        m_acp.setResumeSessionId(data.acpSessionId);
+    }
     m_toolCalls = data.toolCalls;
 }
 

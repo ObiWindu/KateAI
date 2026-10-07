@@ -78,6 +78,8 @@ private:
     QLineEdit *m_claudeCompatibleUrl = nullptr;
     QLineEdit *m_opencodeUrl = nullptr;
     QLineEdit *m_acpUrl = nullptr;
+    QLineEdit *m_acpCommand = nullptr;
+    QLineEdit *m_acpArgs = nullptr;
     QComboBox *m_apiFormat = nullptr;
 
     // Model fetching
