@@ -524,8 +524,22 @@ SessionStore::SessionData SessionStore::load()
     // Load the active conversation
     const QString activeId = getActiveConversationId();
     if (!activeId.isEmpty()) {
-        return loadConversation(activeId);
+        const SessionData activeData = loadConversation(activeId);
+        if (!activeData.messages.isEmpty()) {
+            return activeData;
+        }
     }
+
+    // The active pointer can refer to a new, not-yet-saved chat (or a row that
+    // was lost before its transaction completed). Resume the newest persisted
+    // conversation instead of presenting an empty transcript while history is
+    // still available.
+    const QList<ConversationInfo> latest = listConversations(1);
+    if (!latest.isEmpty()) {
+        setActiveConversation(latest.first().id);
+        return loadConversation(latest.first().id);
+    }
+
     return SessionData();
 }
 
@@ -612,6 +626,11 @@ SessionStore::SessionData SessionStore::loadConversation(const QString &conversa
 
 void SessionStore::saveConversation(const QString &conversationId, const SessionData &data, const QString &title, int maxConversations)
 {
+    if (conversationId.isEmpty()) {
+        qWarning() << "KateAI: refusing to save a conversation with an empty ID";
+        return;
+    }
+
     QMutexLocker locker(&storeMutex());
 
     bool ok = false;
@@ -658,6 +677,12 @@ void SessionStore::saveConversation(const QString &conversationId, const Session
         if (!stored) {
             qWarning() << "KateAI: cannot store conversation" << conversationId << insert.lastError().text();
         }
+    }
+
+    if (stored) {
+        // Keep the restore pointer in the same transaction as the transcript.
+        // A crash must not leave SQLite pointing at an unpersisted blank chat.
+        writeMeta(db, ACTIVE_CONVERSATION_KEY, conversationId);
     }
 
     if (!stored || !db.commit()) {

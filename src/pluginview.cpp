@@ -72,6 +72,9 @@ namespace KateAi
                 // Every chat needs an ID before its first turn. Otherwise the
                 // turn-finished autosave is skipped, and switching to another
                 // conversation can save the new messages under an empty ID.
+                // Load first: SessionStore may repair a stale active pointer by
+                // falling back to the newest persisted transcript.
+                const auto sessionData = SessionStore::load();
                 QString activeId = SessionStore::getActiveConversationId();
                 if (activeId.isEmpty()) {
                     activeId = SessionStore::createNewConversation();
@@ -79,7 +82,6 @@ namespace KateAi
                 m_chat->setCurrentConversationId(activeId);
 
                 // Restore session data
-                const auto sessionData = SessionStore::load();
                 if (!sessionData.messages.isEmpty()) {
                     m_chat->agent()->restoreSession(sessionData);
                     m_chat->rebuildTranscript();

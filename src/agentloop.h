@@ -299,6 +299,7 @@ private:
     QHash<QString, int> m_actionRepeatCounts;
     QSet<QString> m_actionsThisModelTurn;
     int m_recoveryPromptCount = 0;
+    int m_repeatedTruncatedObservationCount = 0;
     QSet<QString> m_changedPaths;
     bool m_changesNeedVerification = false;
     bool m_verificationAttempted = false;

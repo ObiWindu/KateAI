@@ -494,8 +494,9 @@ QString AgentLoop::systemPrompt() const
               u"3. Never assume an edit worked merely because the tool returned; use the tool output as evidence.\n"_s
               u"4. After any mutation, verify the affected file or behavior with a focused read, test, build, lint, or equivalent check.\n"_s
               u"5. When verification fails, diagnose the actual failure and make a targeted repair; do not repeat the same failing action unchanged.\n"_s
-              u"6. Do not repeat an identical tool action while the project state is unchanged. If an action has already produced the needed observation, use that observation.\n"_s
-              u"7. Prefer one purposeful tool step over speculative exploration. Avoid reading the same large file repeatedly when a focused range or search is sufficient.\n"_s
+              u"6. Every successful tool result is an observation. Use it before choosing the next action; do not rerun a command just to obtain the same output.\n"_s
+              u"6a. If output is truncated, do not rerun the same unbounded command or switch through equivalent commands. Request a specific file range, offset, search pattern, or output filter, then continue from the returned excerpt.\n"_s
+              u"7. Do not repeat an identical tool action while the project state is unchanged. Prefer one purposeful tool step over speculative exploration.\n"_s
               u"8. Treat permission denials, sandbox failures, and tool errors as real constraints. Choose a safe alternative rather than looping.\n"_s
               u"9. Before each tool batch, briefly tell the user in natural language what you are about to inspect, change, or verify (one short sentence; do not mention tool names, APIs, or internal controller mechanics).\n"_s
               u"10. After each tool batch, briefly explain what you learned or changed and what you will do next. Keep it conversational and useful; do not narrate every individual file operation.\n"_s
@@ -729,6 +730,7 @@ void AgentLoop::resetConversation()
     m_actionRepeatCounts.clear();
     m_actionsThisModelTurn.clear();
     m_recoveryPromptCount = 0;
+    m_repeatedTruncatedObservationCount = 0;
     m_changedPaths.clear();
     m_changesNeedVerification = false;
     m_verificationAttempted = false;
@@ -799,6 +801,7 @@ void AgentLoop::start(const QString &userText)
     m_actionRepeatCounts.clear();
     m_actionsThisModelTurn.clear();
     m_recoveryPromptCount = 0;
+    m_repeatedTruncatedObservationCount = 0;
     m_checkpointTaken = false;
     m_compactionLevel = 0;
     m_contextOverflowRetries = 0;
@@ -1046,9 +1049,16 @@ QList<ToolCall> AgentLoop::bundleSimilarTools(const QList<ToolCall> &calls)
 
 QString AgentLoop::actionSignature(const ToolCall &call) const
 {
-    const QByteArray args = call.argumentsJson.isEmpty()
-        ? QJsonDocument(call.arguments).toJson(QJsonDocument::Compact)
-        : call.argumentsJson.toUtf8();
+    QJsonObject arguments = call.arguments;
+    if (!call.argumentsJson.isEmpty()) {
+        const QJsonDocument parsed = QJsonDocument::fromJson(call.argumentsJson.toUtf8());
+        if (parsed.isObject()) {
+            arguments = parsed.object();
+        }
+    }
+    // Serialize the parsed object rather than preserving the model's original
+    // key order, so reordering JSON fields cannot bypass repeat detection.
+    const QByteArray args = QJsonDocument(arguments).toJson(QJsonDocument::Compact);
     // Keep this independent of stateEpoch so duplicate calls emitted in the
     // same model response remain duplicates even if the first call mutates the
     // project. The epoch is added separately when checking repetition across
@@ -1064,10 +1074,10 @@ bool AgentLoop::isMutationTool(const QString &toolName) const
 
 bool AgentLoop::isRepeatSensitiveTool(const QString &toolName) const
 {
-    // Reads are intentionally not hard-blocked: agents may legitimately re-read
-    // a file or directory after an observation. Mutations and shell actions are
-    // the operations where repeating the exact same call can become a hot loop.
-    return isMutationTool(toolName) || toolName == u"bash"_s;
+    // Any identical call can become a hot loop if the model ignores its prior
+    // observation. The state epoch lets a read/search be repeated after a
+    // successful mutation changes the project.
+    return !toolName.isEmpty();
 }
 
 void AgentLoop::appendControllerMessage(const QString &content)
@@ -1235,6 +1245,8 @@ QString AgentLoop::formatToolResult(const ToolCall &call, const ToolResult &resu
         out += u"NEXT: Diagnose the reported failure; do not repeat the identical action blindly.\n"_s;
     } else if (isMutationTool(call.name)) {
         out += u"NEXT: The mutation succeeded. Verify the changed behavior/file before declaring the task complete.\n"_s;
+    } else if (result.output.contains(u"truncated"_s, Qt::CaseInsensitive)) {
+        out += u"NEXT: Do not repeat the unbounded command. Use a specific file range, offset, search pattern, or output filter, then proceed from that excerpt.\n"_s;
     } else if (isVerificationTool(call.name)) {
         out += u"NEXT: Treat this output as evidence and choose the next necessary action; stop when the task is verified complete.\n"_s;
     } else {
@@ -1247,17 +1259,22 @@ void AgentLoop::appendToolResult(const ToolCall &call, ToolResult result)
 {
     result.toolCallId = call.id;
     result.name = call.name;
+
+    if (result.ok && (call.name == u"bash"_s || call.name == u"read_file"_s)
+        && result.output.contains(u"truncated"_s, Qt::CaseInsensitive)) {
+        ++m_repeatedTruncatedObservationCount;
+    }
+
     result.output = formatToolResult(call, result);
     m_pendingResults.append(result);
     Q_EMIT toolFinished(result);
 
-    if (result.ok) {
-        // Reset recovery prompt count on any successful tool execution,
-        // since the agent is making progress with a different action.
-        m_recoveryPromptCount = 0;
-    }
-
     if (result.ok && isMutationTool(call.name)) {
+        // Only a project mutation is definite progress. A successful read or
+        // command can still be part of an infinite retry loop, so it must not
+        // reset the repeated-call recovery/termination counter.
+        m_recoveryPromptCount = 0;
+        m_repeatedTruncatedObservationCount = 0;
         ++m_stateEpoch;
         m_actionRepeatCounts.clear();
         QString path = call.arguments.value(u"path"_s).toString();
@@ -1473,6 +1490,10 @@ void AgentLoop::processQueue()
             Q_EMIT activityUpdated(summarizeCompletedWork());
         }
         appendToolResultsToConversation();
+        if (m_repeatedTruncatedObservationCount >= 4) {
+            finishWithFailure(u"Stopped after repeated successful tool calls returned truncated output. Use a bounded file range or focused search, then continue from that observation."_s);
+            return;
+        }
         m_state = State::WaitingForNextModel;
         scheduleNextModelStep();
         return;
@@ -1564,16 +1585,17 @@ void AgentLoop::executeOne(const ToolCall &call)
     }
 
     if (repeatSensitive) {
-        // Check cross-turn repeats using signature without epoch (to detect
-        // repeated actions across model turns when project state hasn't changed)
-        const int priorCount = m_actionRepeatCounts.value(signature, 0);
+        // A repeated call is only blocked while the project remains in the same
+        // state. Successful mutations advance m_stateEpoch, allowing fresh
+        // observations of files changed by the agent.
+        const int priorCount = m_actionRepeatCounts.value(stateSignature, 0);
         if (priorCount >= 1) {
             ToolResult result;
             result.ok = false;
             result.output = u"REPEATED ACTION BLOCKED: this exact %1 action was already executed without a project-state change. "
                             u"Do not issue it again. Inspect the previous observation, choose a different action, or verify a different aspect of the task."_s.arg(call.name);
             appendToolResult(call, result);
-            const int repeats = ++m_actionRepeatCounts[signature];
+            const int repeats = ++m_actionRepeatCounts[stateSignature];
             constexpr int MaxRecoveryPrompts = 3;
             if (repeats >= 2) {
                 if (m_recoveryPromptCount < MaxRecoveryPrompts) {
@@ -1581,17 +1603,17 @@ void AgentLoop::executeOne(const ToolCall &call)
                     QString recoveryMessage;
                     switch (m_recoveryPromptCount) {
                     case 1:
-                        recoveryMessage = u"The model has repeated the same mutating/execute action after it was already blocked. "
-                                          u"Stop repeating it. Use the previous tool result and take a materially different action. "
+                        recoveryMessage = u"The model has repeated the same tool call after it was already blocked. "
+                                          u"Stop repeating it. Use the previous observation and take a materially different action. "
                                           u"Do not call the same tool with the same arguments again unless the project state changes first."_s;
                         break;
                     case 2:
-                        recoveryMessage = u"This is the second warning: you have repeated the same blocked action again. "
+                        recoveryMessage = u"This is the second warning: you have repeated the same blocked tool call again. "
                                           u"You MUST choose a different tool or different arguments. "
                                           u"Consider: reading a different file, searching for related code, running a test, or examining the error output from the previous attempt."_s;
                         break;
                     case 3:
-                        recoveryMessage = u"Final warning: you have ignored previous guidance and repeated the same failing action. "
+                        recoveryMessage = u"Final warning: you have ignored previous guidance and repeated the same blocked tool call. "
                                           u"The next repetition will terminate this agent turn. "
                                           u"You must now take a fundamentally different approach - try a different tool, explore a different file, or reconsider the task strategy."_s;
                         break;
@@ -1609,7 +1631,7 @@ void AgentLoop::executeOne(const ToolCall &call)
             processQueue();
             return;
         }
-        m_actionRepeatCounts.insert(signature, 1);
+        m_actionRepeatCounts.insert(stateSignature, 1);
     }
 
     m_actionsThisModelTurn.insert(signature);

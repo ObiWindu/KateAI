@@ -29,6 +29,7 @@
 #include <QClipboard>
 #include <QColor>
 #include <QComboBox>
+#include <QCoreApplication>
 #include <QFile>
 #include <QFileInfo>
 #include <QGuiApplication>
@@ -799,16 +800,8 @@ ChatWidget::ChatWidget(QWidget *parent)
         updateTokenDisplay();
         // Settle the status strip back to its idle hint now the turn is over.
         m_turnStatus->setBusy(false);
-        // Auto-save conversation after each completed turn so it always
-        // appears up-to-date in the history menu.
-        if (!m_currentConversationId.isEmpty()) {
-            const auto sessionData = m_agent.sessionData();
-            if (!sessionData.messages.isEmpty()) {
-                SessionStore::saveConversation(m_currentConversationId, sessionData, QString(),
-                                              m_settings.maxSavedConversations > 0 ? m_settings.maxSavedConversations : 50);
-                updateHistoryButton();
-            }
-        }
+        // Save the completed conversation as the active restore point.
+        saveCurrentConversation();
     });
 
     // Modes, MCP and checkpoints
@@ -917,6 +910,11 @@ ChatWidget::ChatWidget(QWidget *parent)
 
     updateModelSelectorLabel();
     updateTokenDisplay();
+
+    if (QCoreApplication::instance()) {
+        connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit,
+                this, &ChatWidget::saveCurrentConversation);
+    }
 }
 
 ChatWidget::~ChatWidget()
@@ -929,20 +927,8 @@ ChatWidget::~ChatWidget()
         m_streamHeightTimer->stop();
     }
 
-    // Save session before AgentLoop member is destroyed, using the tracked
-    // conversation ID so we never silently create a duplicate active record.
-    if (!m_agent.messages().isEmpty()) {
-        const auto sessionData = m_agent.sessionData();
-        if (!sessionData.messages.isEmpty()) {
-            if (!m_currentConversationId.isEmpty()) {
-                SessionStore::saveConversation(m_currentConversationId, sessionData, QString(),
-                                              m_settings.maxSavedConversations > 0 ? m_settings.maxSavedConversations : 50);
-            } else {
-                // Fallback: create a new entry via the legacy path
-                SessionStore::save(sessionData, m_settings.maxSavedConversations > 0 ? m_settings.maxSavedConversations : 50);
-            }
-        }
-    }
+    // Also save here for widget teardown paths that do not close the app.
+    saveCurrentConversation();
 
     m_agent.abort();
     disconnect(&m_agent, nullptr, this, nullptr);
@@ -957,6 +943,25 @@ ChatWidget::~ChatWidget()
     if (m_prompt) {
         disconnect(m_prompt, nullptr, this, nullptr);
     }
+}
+
+void ChatWidget::saveCurrentConversation()
+{
+    const SessionStore::SessionData sessionData = m_agent.sessionData();
+    if (sessionData.messages.isEmpty()) {
+        return;
+    }
+
+    if (m_currentConversationId.isEmpty()) {
+        m_currentConversationId = SessionStore::getActiveConversationId();
+        if (m_currentConversationId.isEmpty()) {
+            m_currentConversationId = SessionStore::createNewConversation();
+        }
+    }
+
+    SessionStore::saveConversation(m_currentConversationId, sessionData, QString(),
+                                  m_settings.maxSavedConversations > 0 ? m_settings.maxSavedConversations : 50);
+    updateHistoryButton();
 }
 
 void ChatWidget::addUserMessage(const QString &text)
