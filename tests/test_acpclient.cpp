@@ -298,6 +298,40 @@ private Q_SLOTS:
         client.stop();
     }
 
+    void terminalShellLineKeepsInnerQuotes()
+    {
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+
+        DiskDocumentBridge bridge;
+        AcpClient client;
+        client.setSettings(mockSettings(u"quoted"_s));
+        client.setWorkspace(workspace.path());
+        client.setDocumentBridge(&bridge);
+
+        QString text;
+        QString stopReason;
+        QString error;
+        connect(&client, &AcpClient::textDelta, this, [&](const QString &delta) {
+            text += delta;
+        });
+        connect(&client, &AcpClient::promptFinished, this, [&](const QString &reason, const QString &, const QJsonArray &) {
+            stopReason = reason;
+        });
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+
+        client.prompt(u"run"_s);
+        QVERIFY2(waitFor([&] {
+            return !stopReason.isEmpty() || !error.isEmpty();
+        }, 20000), qPrintable(error.isEmpty() ? u"timed out"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QVERIFY2(!text.contains(u"unexpected EOF"_s), qPrintable(text));
+        QVERIFY2(text.contains(u"quoted-ok"_s), qPrintable(text));
+        client.stop();
+    }
+
     void cancelReturnsCancelledStopReason()
     {
         QTemporaryDir workspace;
