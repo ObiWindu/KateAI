@@ -85,7 +85,9 @@ QString hintLabel();
 QString tokenLabel();
 QString infoBar();
 QString jumpToLatest();
-QString activityPill();   // the live "Working" / "Thinking" line
+QString activityPill();   // generic live status pill
+QString thinkingPill();   // blue brain pill for hidden reasoning
+QString workingPill();    // amber live-tool pill
 QString userCard();
 QString assistantCard();
 QString sectionLabel();

@@ -744,6 +744,8 @@ void AgentLoop::start(const QString &userText)
     m_actionsThisModelTurn.clear();
     m_recoveryPromptCount = 0;
     m_checkpointTaken = false;
+    m_compactionLevel = 0;
+    m_contextOverflowRetries = 0;
     m_taskSummary = userText.simplified().left(80);
 
     if (m_messages.isEmpty()) {
@@ -767,30 +769,22 @@ void AgentLoop::start(const QString &userText)
 
 QList<ChatMessage> AgentLoop::m_messagesForRequest() const
 {
-    // The conversation is budgeted here rather than sent whole. Previously the
-    // entire history went out on every request, so a long session grew until
-    // the provider rejected it or silently dropped the beginning.
     ContextManager::Options options;
     options.contextWindow = m_settings.contextWindow > 0
         ? m_settings.contextWindow
         : ContextManager::contextWindowFor(modelFor(m_settings));
-    options.reserveForResponse = qMax(512, m_settings.contextWindowReserve);
-
-    if (!m_settings.compressOldMessages) {
-        // The user explicitly turned compaction off; only the hard message cap
-        // still applies, because an unbounded history cannot be honoured.
-        options.maxMessages = m_settings.maxContextMessages;
-        return ContextManager::build(m_messages, options);
-    }
-
-    if (m_settings.smartContextTruncation) {
-        // Keep the recent tail verbatim and compact everything older.
-        options.keepRecentTokens = qMax(1000, options.reserveForResponse);
+    options.reserveForResponse = m_settings.contextWindowReserve > 0
+        ? m_settings.contextWindowReserve
+        : 8192;
+    options.autoCompact = m_settings.compressOldMessages;
+    options.compactionLevel = m_compactionLevel;
+    if (m_settings.keepRecentTokens > 0) {
+        options.keepRecentTokens = m_settings.keepRecentTokens;
+    } else if (m_settings.smartContextTruncation) {
+        options.keepRecentTokens = qMax(2000, options.reserveForResponse * 2);
     } else {
-        // The threshold is a character budget for the tail; convert it.
-        options.keepRecentTokens = qMax(500, m_settings.compressionThreshold / 4);
+        options.keepRecentTokens = qMax(800, m_settings.compressionThreshold / 4);
     }
-    options.maxMessages = m_settings.maxContextMessages;
     return ContextManager::build(m_messages, options);
 }
 
@@ -808,7 +802,7 @@ bool AgentLoop::canStartModelRequest(QString *error) const
         if (error) *error = u"A model request is already in progress."_s;
         return false;
     }
-    if (m_modelRequests >= qMax(1, m_settings.maxModelRequests)) {
+    if (m_settings.maxModelRequests > 0 && m_modelRequests >= m_settings.maxModelRequests) {
         if (error) {
             *error = u"Model-request budget exhausted (%1 requests)."_s.arg(m_settings.maxModelRequests);
         }
@@ -826,7 +820,7 @@ void AgentLoop::scheduleNextModelStep()
     // Exhausting the request budget is not a failure. Ending the turn as an
     // error threw away the work already done and left the user with a red
     // banner instead of the answer they had already paid for.
-    if (m_modelRequests >= qMax(1, m_settings.maxModelRequests)) {
+    if (m_settings.maxModelRequests > 0 && m_modelRequests >= m_settings.maxModelRequests) {
         Q_EMIT statusChanged(i18n("Finishing: the model-request budget for this turn is spent."));
         finishTurn();
         return;
@@ -1164,6 +1158,26 @@ void AgentLoop::appendToolResultsToConversation()
 
 void AgentLoop::onFailed(const QString &error)
 {
+    const QString lower = error.toLower();
+    const bool overflow = lower.contains(u"context_window_exceeded"_s)
+        || lower.contains(u"context_length_exceeded"_s)
+        || lower.contains(u"maximum context length"_s)
+        || lower.contains(u"context window exceeded"_s)
+        || lower.contains(u"prompt too large"_s)
+        || lower.contains(u"too many tokens"_s)
+        || lower.contains(u"payload too large"_s);
+    if (overflow && m_busy && m_contextOverflowRetries < 6) {
+        ++m_contextOverflowRetries;
+        ++m_compactionLevel;
+        if (m_modelRequests > 0) {
+            --m_modelRequests;
+        }
+        m_state = State::WaitingForNextModel;
+        Q_EMIT statusChanged(i18n("Compacting conversation to fit the context window…"));
+        Q_EMIT activityUpdated(i18n("Context filled up; compacting earlier turns and continuing."));
+        scheduleNextModelStep();
+        return;
+    }
     finishWithFailure(error);
 }
 
@@ -1343,7 +1357,7 @@ void AgentLoop::executeOne(const ToolCall &call)
         return;
     }
 
-    if (m_toolCalls >= qMax(1, m_settings.maxToolCalls)) {
+    if (m_settings.maxToolCalls > 0 && m_toolCalls >= m_settings.maxToolCalls) {
         ToolResult result;
         result.ok = false;
         result.output = i18n("Tool-call budget exhausted (%1 calls). No further tool execution is permitted in this turn.", m_settings.maxToolCalls);
@@ -1860,8 +1874,12 @@ void AgentLoop::dispatchSubtask(const ToolCall &call)
     childSettings.maxSubtaskDepth = 0;
     // Sub-agents keep their own model budget so a runaway child cannot starve
     // the siblings sharing this turn.
-    childSettings.maxToolCalls = qMax(4, m_settings.maxToolCalls / 2);
-    childSettings.maxModelRequests = qMax(4, m_settings.maxModelRequests / 2);
+    if (m_settings.maxToolCalls > 0) {
+        childSettings.maxToolCalls = qMax(4, m_settings.maxToolCalls / 2);
+    }
+    if (m_settings.maxModelRequests > 0) {
+        childSettings.maxModelRequests = qMax(4, m_settings.maxModelRequests / 2);
+    }
 
     child->setSettings(childSettings);
     child->setWorkspace(m_workspace);
@@ -2031,7 +2049,7 @@ void AgentLoop::resolvePermission(PermissionDecision decision)
         m_policy.grantSession(call.name);
     }
 
-    if (m_toolCalls >= qMax(1, m_settings.maxToolCalls)) {
+    if (m_settings.maxToolCalls > 0 && m_toolCalls >= m_settings.maxToolCalls) {
         ToolResult result;
         result.ok = false;
         result.output = u"Tool-call budget exhausted before permission was resolved."_s;

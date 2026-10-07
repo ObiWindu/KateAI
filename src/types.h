@@ -196,8 +196,9 @@ struct Settings {
     PermissionMode permissionMode = PermissionMode::Ask;
     SandboxProfile sandbox = SandboxProfile::Workspace;
     // Agent budgets are intentionally separate: API model turns, tool calls, and provider rate.
-    int maxModelRequests = 40;
-    int maxToolCalls = 80;
+    // 0 = unlimited. A positive value is a safety ceiling, not a required cap.
+    int maxModelRequests = 0;
+    int maxToolCalls = 0;
     int requestsPerMinute = 15;
     // Number of recent Kate AI chats (thinking blocks and tool cards) to keep
     // expanded in the transcript. Older cards collapse; file-edit diffs stay open.
@@ -226,7 +227,7 @@ struct Settings {
     bool includeFileContents = true; // Whether to include file content in project graph
     int maxFileContentLength = 500; // Maximum characters per file content preview
     bool compressEditorContext = true; // Whether to compress editor context
-    int maxEditorContextLength = 200; // Maximum characters for editor context
+    int maxEditorContextLength = 4000; // Maximum characters for editor context
     bool compressProjectInstructions = true; // Whether to compress project instructions
     int maxProjectInstructionsLength = 2048; // Maximum characters for project instructions
     bool compressSystemPrompt = true; // Whether to compress system prompt
@@ -245,7 +246,8 @@ struct Settings {
     // Reasoning effort for models that expose it (e.g. xAI grok-reasoning).
     // Empty = do not send the field. "minimal" | "low" | "medium" | "high".
     QString reasoningEffort;
-    int contextWindow = 0; // 0 = unknown; used for budgeting the history window
+    int contextWindow = 0; // 0 = auto from a conservative default
+    int keepRecentTokens = 0; // 0 = auto (half the remaining window)
     bool selfCritique = true; // ask the model to check its own work before finishing
     bool parallelToolCalls = true; // let the model batch independent tool calls
     int toolCallTimeoutMs = 120000; // per-tool-call wall-clock budget
@@ -263,10 +265,10 @@ struct Settings {
     int maxPlanSteps = 15;           // Max steps in structured plan
     
     // Context management for performance
-    bool smartContextTruncation = false; // Intelligently truncate old context
-    int contextWindowReserve = 0;        // Reserve tokens for response (0 = no reserve)
-    bool compressOldMessages = false;    // Compress messages beyond window
-    int compressionThreshold = 2048;     // Start compressing after this many chars
+    bool smartContextTruncation = true;  // Keep a recent tail verbatim when compacting
+    int contextWindowReserve = 8192;     // Reserve tokens for the model's reply
+    bool compressOldMessages = true;     // Auto-compact older turns to fit the window
+    int compressionThreshold = 2048;     // Soft hint for how much recent text to keep
     
     // Agent behavior tuning
     bool requireVerification = true;    // Require verification after mutations

@@ -43,8 +43,8 @@ Settings SettingsStore::load()
     s.apiFormat = apiFormatFromId(g.readEntry(u"ApiFormat"_s, apiFormatId(ApiFormat::OpenAICompatible)));
     s.permissionMode = permissionModeFromId(g.readEntry(u"PermissionMode"_s, permissionModeId(PermissionMode::Ask)));
     s.sandbox = sandboxProfileFromId(g.readEntry(u"Sandbox"_s, sandboxProfileId(SandboxProfile::Workspace)));
-    const int legacyMaxIterations = g.readEntry(u"MaxIterations"_s, 20);
-    s.maxModelRequests = g.readEntry(u"MaxModelRequests"_s, 40);
+    const int legacyMaxIterations = g.readEntry(u"MaxIterations"_s, 0);
+    s.maxModelRequests = g.readEntry(u"MaxModelRequests"_s, 0);
     s.maxToolCalls = g.readEntry(u"MaxToolCalls"_s, legacyMaxIterations);
     s.requestsPerMinute = g.readEntry(u"RequestsPerMinute"_s, 15);
     s.maxIterations = legacyMaxIterations;
@@ -65,7 +65,7 @@ Settings SettingsStore::load()
     s.includeFileContents = g.readEntry(u"IncludeFileContents"_s, true);
     s.maxFileContentLength = g.readEntry(u"MaxFileContentLength"_s, 500);
     s.compressEditorContext = g.readEntry(u"CompressEditorContext"_s, true);
-    s.maxEditorContextLength = g.readEntry(u"MaxEditorContextLength"_s, 200);
+    s.maxEditorContextLength = g.readEntry(u"MaxEditorContextLength"_s, 4000);
     s.compressProjectInstructions = g.readEntry(u"CompressProjectInstructions"_s, true);
     s.maxProjectInstructionsLength = g.readEntry(u"MaxProjectInstructionsLength"_s, 2048);
     s.compressSystemPrompt = g.readEntry(u"CompressSystemPrompt"_s, true);
@@ -99,11 +99,11 @@ Settings SettingsStore::load()
     s.maxParallelSubtasks = g.readEntry(u"MaxParallelSubtasks"_s, 3);
     s.agentRoster = g.readEntry(u"AgentRoster"_s, QString());
     s.subtaskTimeoutMs = g.readEntry(u"SubtaskTimeoutMs"_s, 300000);
-    if (s.maxModelRequests < 1) {
-        s.maxModelRequests = 1;
+    if (s.maxModelRequests < 0) {
+        s.maxModelRequests = 0;
     }
-    if (s.maxToolCalls < 1) {
-        s.maxToolCalls = 1;
+    if (s.maxToolCalls < 0) {
+        s.maxToolCalls = 0;
     }
     if (s.requestsPerMinute < 1) {
         s.requestsPerMinute = 1;
@@ -123,6 +123,21 @@ Settings SettingsStore::load()
     s.mcpTimeoutMs = qBound(1000, s.mcpTimeoutMs, 30 * 60 * 1000);
     s.webSearchMaxResults = qBound(1, s.webSearchMaxResults, 20);
     s.webSearchTimeoutMs = qBound(1000, s.webSearchTimeoutMs, 120000);
+    s.contextWindow = g.readEntry(u"ContextWindow"_s, 0);
+    s.keepRecentTokens = g.readEntry(u"KeepRecentTokens"_s, 0);
+    s.contextWindowReserve = g.readEntry(u"ContextWindowReserve"_s, 8192);
+    s.compressOldMessages = g.readEntry(u"CompressOldMessages"_s, true);
+    s.smartContextTruncation = g.readEntry(u"SmartContextTruncation"_s, true);
+    s.compressionThreshold = g.readEntry(u"CompressionThreshold"_s, 2048);
+    if (s.contextWindow < 0) {
+        s.contextWindow = 0;
+    }
+    if (s.keepRecentTokens < 0) {
+        s.keepRecentTokens = 0;
+    }
+    if (s.contextWindowReserve < 0) {
+        s.contextWindowReserve = 0;
+    }
     return s;
 }
 
@@ -205,6 +220,12 @@ void SettingsStore::save(const Settings &settings)
     g.writeEntry(u"MaxParallelSubtasks"_s, settings.maxParallelSubtasks);
     g.writeEntry(u"AgentRoster"_s, settings.agentRoster);
     g.writeEntry(u"SubtaskTimeoutMs"_s, settings.subtaskTimeoutMs);
+    g.writeEntry(u"ContextWindow"_s, settings.contextWindow);
+    g.writeEntry(u"KeepRecentTokens"_s, settings.keepRecentTokens);
+    g.writeEntry(u"ContextWindowReserve"_s, settings.contextWindowReserve);
+    g.writeEntry(u"CompressOldMessages"_s, settings.compressOldMessages);
+    g.writeEntry(u"SmartContextTruncation"_s, settings.smartContextTruncation);
+    g.writeEntry(u"CompressionThreshold"_s, settings.compressionThreshold);
     
     g.sync();
 }

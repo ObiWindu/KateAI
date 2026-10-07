@@ -233,11 +233,13 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     agentForm->addRow(i18n("Thinking mode:"), m_thinkingMode);
 
     m_maxIter = new QSpinBox(agentWidget);
-    m_maxIter->setRange(1, 500);
+    m_maxIter->setRange(0, 10000);
+    m_maxIter->setSpecialValueText(i18n("Unlimited"));
     agentForm->addRow(i18n("Max tool calls per turn:"), m_maxIter);
 
     m_maxModelRequests = new QSpinBox(agentWidget);
-    m_maxModelRequests->setRange(1, 500);
+    m_maxModelRequests->setRange(0, 10000);
+    m_maxModelRequests->setSpecialValueText(i18n("Unlimited"));
     agentForm->addRow(i18n("Max model requests per task:"), m_maxModelRequests);
 
     m_requestsPerMinute = new QSpinBox(agentWidget);
@@ -293,7 +295,7 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     agentForm->addRow(m_compressEditorContext);
 
     m_maxEditorContextLength = new QSpinBox(agentWidget);
-    m_maxEditorContextLength->setRange(50, 500);
+    m_maxEditorContextLength->setRange(50, 100000);
     m_maxEditorContextLength->setSuffix(i18n(" chars"));
     agentForm->addRow(i18n("Max editor context length:"), m_maxEditorContextLength);
 
@@ -309,7 +311,7 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     agentForm->addRow(m_compressSystemPrompt);
 
     m_maxSystemPromptLength = new QSpinBox(agentWidget);
-    m_maxSystemPromptLength->setRange(256, 2048);
+    m_maxSystemPromptLength->setRange(256, 100000);
     m_maxSystemPromptLength->setSuffix(i18n(" chars"));
     agentForm->addRow(i18n("Max system prompt length:"), m_maxSystemPromptLength);
 
@@ -409,27 +411,40 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     m_narrativeProgress = new QCheckBox(i18n("Natural language progress narration"), agentWidget);
     agentForm->addRow(i18n("Narrative progress:"), m_narrativeProgress);
 
-    // Context management for performance
-    auto *contextSeparator = new QLabel(i18n("--- Context Management ---"), agentWidget);
+    // Context management: compact older turns to fit the model window so a
+    // long chat never stops prompting on a hard message cap.
+    auto *contextSeparator = new QLabel(i18n("--- Context ---"), agentWidget);
     contextSeparator->setStyleSheet(u"font-weight: bold; margin-top: 10px;"_s);
     agentForm->addRow(contextSeparator);
 
-    m_smartContextTruncation = new QCheckBox(i18n("Intelligently truncate old context"), agentWidget);
-    agentForm->addRow(i18n("Smart context truncation:"), m_smartContextTruncation);
+    m_compressOldMessages = new QCheckBox(i18n("Auto-compact older turns as the window fills"), agentWidget);
+    agentForm->addRow(i18n("Auto-compact:"), m_compressOldMessages);
+
+    m_smartContextTruncation = new QCheckBox(i18n("Keep a recent tail verbatim when compacting"), agentWidget);
+    agentForm->addRow(i18n("Keep recent tail:"), m_smartContextTruncation);
+
+    m_contextWindow = new QSpinBox(agentWidget);
+    m_contextWindow->setRange(0, 2000000);
+    m_contextWindow->setSuffix(i18n(" tokens"));
+    m_contextWindow->setSpecialValueText(i18n("Auto"));
+    agentForm->addRow(i18n("Context window:"), m_contextWindow);
 
     m_contextWindowReserve = new QSpinBox(agentWidget);
-    m_contextWindowReserve->setRange(0, 32768);
+    m_contextWindowReserve->setRange(0, 128000);
     m_contextWindowReserve->setSuffix(i18n(" tokens"));
-    m_contextWindowReserve->setSpecialValueText(i18n("None"));
-    agentForm->addRow(i18n("Context window reserve:"), m_contextWindowReserve);
+    m_contextWindowReserve->setSpecialValueText(i18n("Auto"));
+    agentForm->addRow(i18n("Reserve for reply:"), m_contextWindowReserve);
 
-    m_compressOldMessages = new QCheckBox(i18n("Compress messages beyond window"), agentWidget);
-    agentForm->addRow(i18n("Compress old messages:"), m_compressOldMessages);
+    m_keepRecentTokens = new QSpinBox(agentWidget);
+    m_keepRecentTokens->setRange(0, 500000);
+    m_keepRecentTokens->setSuffix(i18n(" tokens"));
+    m_keepRecentTokens->setSpecialValueText(i18n("Auto"));
+    agentForm->addRow(i18n("Keep recent context:"), m_keepRecentTokens);
 
     m_compressionThreshold = new QSpinBox(agentWidget);
-    m_compressionThreshold->setRange(512, 16384);
+    m_compressionThreshold->setRange(256, 100000);
     m_compressionThreshold->setSuffix(i18n(" chars"));
-    agentForm->addRow(i18n("Compression threshold:"), m_compressionThreshold);
+    agentForm->addRow(i18n("Recent-tail hint:"), m_compressionThreshold);
 
     agentScroll->setWidget(agentWidget);
     tabs->addTab(agentScroll, i18n("Agent & Context"));
@@ -871,6 +886,8 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
 
     // Context Management
     connect(m_smartContextTruncation, &QCheckBox::toggled, this, markChanged);
+    connect(m_contextWindow, &QSpinBox::valueChanged, this, markChanged);
+    connect(m_keepRecentTokens, &QSpinBox::valueChanged, this, markChanged);
     connect(m_contextWindowReserve, &QSpinBox::valueChanged, this, markChanged);
     connect(m_compressOldMessages, &QCheckBox::toggled, this, markChanged);
     connect(m_compressionThreshold, &QSpinBox::valueChanged, this, markChanged);
@@ -1275,6 +1292,8 @@ void KateAiConfigPage::apply()
 
     // Context Management
     s.smartContextTruncation = m_smartContextTruncation->isChecked();
+    s.contextWindow = m_contextWindow->value();
+    s.keepRecentTokens = m_keepRecentTokens->value();
     s.contextWindowReserve = m_contextWindowReserve->value();
     s.compressOldMessages = m_compressOldMessages->isChecked();
     s.compressionThreshold = m_compressionThreshold->value();
@@ -1439,6 +1458,8 @@ void KateAiConfigPage::reset()
 
     // Context Management
     m_smartContextTruncation->setChecked(s.smartContextTruncation);
+    m_contextWindow->setValue(s.contextWindow);
+    m_keepRecentTokens->setValue(s.keepRecentTokens);
     m_contextWindowReserve->setValue(s.contextWindowReserve);
     m_compressOldMessages->setChecked(s.compressOldMessages);
     m_compressionThreshold->setValue(s.compressionThreshold);

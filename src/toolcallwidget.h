@@ -94,6 +94,7 @@ public:
 
 Q_SIGNALS:
     void approvalChosen(PermissionDecision decision);
+    void expandedChanged(bool expanded);
 
 protected:
     bool eventFilter(QObject *watched, QEvent *event) override;

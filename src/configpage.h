@@ -144,6 +144,8 @@ private:
 
     // Context Management
     QCheckBox *m_smartContextTruncation = nullptr;
+    QSpinBox *m_contextWindow = nullptr;
+    QSpinBox *m_keepRecentTokens = nullptr;
     QSpinBox *m_contextWindowReserve = nullptr;
     QCheckBox *m_compressOldMessages = nullptr;
     QSpinBox *m_compressionThreshold = nullptr;

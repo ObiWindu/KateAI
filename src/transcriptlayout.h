@@ -17,22 +17,18 @@ namespace KateAi
  * How a transcript is anchored within its viewport when the conversation is
  * shorter than the panel.
  *
- * Bottom is what a chat wants: the newest message sits against the composer and
- * the slack collects above the conversation, so the thread reads as a
- * conversation that continues upward. Top is what a document wants: the first
- * message is flush against the top and the slack falls away below.
+ * Top is a document: the first message is flush against the top and the slack
+ * falls away below, so the thread reads oldest-to-newest downward. Bottom is a
+ * composer-pinned chat: the newest message sits against the input and the slack
+ * collects above.
  *
- * This was a free choice in the transcript layout and flipping it broke two
- * things at once, because everything else assumed Bottom:
- *
- *  - the "jump to latest" affordance, which only means anything when the newest
- *    content is the content you want to reach;
- *  - the insert index for new messages, which has to land after the stretch
- *    under Bottom and before it under Top. Getting that backwards put every new
- *    message below the slack, at the far end of the viewport.
+ * The insert index for a new message has to land on the growing side of the
+ * stretch: before it under Top, after it under Bottom. Getting that backwards
+ * puts every new message on the far side of the slack, so user turns pile up
+ * at the bottom of the viewport instead of in chronological order.
  *
  * Naming the two states keeps the choice explicit at the call sites that depend
- * on it, instead of leaving it to be re-derived from the layout.
+ * on it.
  */
 enum class TranscriptAnchor {
     Bottom,
@@ -47,7 +43,8 @@ enum class TranscriptAnchor {
  * is absent). The result is always in [0, count].
  *
  * The rule: land on the far side of the stretch from the anchor, and always
- * before the indicator row, which has to stay pinned at the bottom.
+ * before the indicator row, which stays last so live status sits under the
+ * newest turn.
  */
 int transcriptInsertIndexFor(TranscriptAnchor anchor, int spacerIndex, int indicatorsIndex, int count);
 

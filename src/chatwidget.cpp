@@ -26,7 +26,6 @@
 
 #include <QAction>
 #include <QActionGroup>
-#include <QWidgetAction>
 #include <QClipboard>
 #include <QColor>
 #include <QComboBox>
@@ -37,8 +36,12 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
+#include <QListWidget>
 #include <QMenu>
 #include <QMessageBox>
+#include <QScreen>
+#include <QFrame>
+#include <QShortcut>
 #include <QCursor>
 #include <QFontMetrics>
 #include <QPlainTextEdit>
@@ -285,22 +288,19 @@ ChatWidget::ChatWidget(QWidget *parent)
     m_transcriptLayout->setAlignment(Qt::AlignTop);
     m_scrollArea->setAlignment(Qt::AlignLeft | Qt::AlignTop);
 
-    // Leading stretch: the transcript is bottom-anchored, so when the
-    // conversation is shorter than the viewport the slack is absorbed above the
-    // content. This keeps the newest message pinned to the composer instead of
-    // stranding it at the top of the viewport behind an empty gap.
+    // Top-down transcript: oldest at the top, newest above the live status
+    // row, slack collected below the conversation. Inserting after a leading
+    // stretch put every new user turn at the bottom of the viewport and made
+    // tool-card disclosures appear to open upward.
+    m_transcriptLayout->addWidget(createWelcomeWidget());
     m_transcriptLayout->addStretch();
 
-    // Initial empty state welcome widget
-    m_transcriptLayout->addWidget(createWelcomeWidget());
-
-    // Dynamic status indicators (thinking/working) - always at bottom of transcript
+    // Live thinking/working pills sit under the newest turn, left-aligned.
     m_indicatorsRow = createIndicatorsRow();
     m_transcriptLayout->addWidget(m_indicatorsRow);
     m_scrollArea->setWidget(m_transcriptContainer);
     root->addWidget(m_scrollArea, 1);
 
-    // Bottom-anchored: start pinned to the newest content, not the oldest.
     QTimer::singleShot(0, this, [thisWeak = QPointer<ChatWidget>(this)]() {
         if (thisWeak) {
             thisWeak->forceScrollToBottom();
@@ -332,7 +332,9 @@ ChatWidget::ChatWidget(QWidget *parent)
         if (!sb) {
             return;
         }
-        if (!m_userScrolledUp) {
+        if (m_pinnedViewportWidget) {
+            applyPinnedViewport();
+        } else if (!m_userScrolledUp) {
             sb->setValue(max);
         } else if (!transcriptShouldFollowTail(sb->value(), max)) {
             if (m_scrollToBottomBtn) {
@@ -602,7 +604,7 @@ ChatWidget::ChatWidget(QWidget *parent)
         setWorkingIndicator(true);
         m_turnStatus->setActivity(m_workingLabelBase);
         if (m_workingIndicator && m_isWorking) {
-            m_workingIndicator->setText(m_workingLabelBase + progressiveDots(m_indicatorTick));
+            m_workingIndicator->setText(QStringLiteral("\u26A1  ") + m_workingLabelBase + progressiveDots(m_indicatorTick));
         }
 
         // A sub-agent is a long-running operation with its own live status, so
@@ -621,14 +623,25 @@ ChatWidget::ChatWidget(QWidget *parent)
             return;
         }
 
-        auto *toolWidget = new ToolCallWidget(request.toolCallId, m_transcriptContainer);
-        toolWidget->setToolInfo(request.toolName, request.summary, request.risk);
-        toolWidget->setDescribeDiff(request.describeDiff);
-        toolWidget->setDurationVisible(true);
+        ToolCallWidget *toolWidget = m_toolCallWidgets.value(request.toolCallId);
+        if (!toolWidget) {
+            toolWidget = new ToolCallWidget(request.toolCallId, m_transcriptContainer);
+            toolWidget->setToolInfo(request.toolName, request.summary, request.risk);
+            toolWidget->setDescribeDiff(request.describeDiff);
+            toolWidget->setDurationVisible(true);
+            m_toolCallWidgets.insert(request.toolCallId, toolWidget);
+            m_toolCallOrder.append(toolWidget);
+            connect(toolWidget, &ToolCallWidget::expandedChanged, this, [this, toolWidget](bool) {
+                pinWidgetInViewport(toolWidget);
+                QTimer::singleShot(240, this, [thisWeak = QPointer<ChatWidget>(this)]() {
+                    if (thisWeak) {
+                        thisWeak->m_pinnedViewportWidget = nullptr;
+                    }
+                });
+            });
+            appendTranscriptWidget(toolWidget);
+        }
         toolWidget->setRunning();
-        m_toolCallWidgets.insert(request.toolCallId, toolWidget);
-        m_toolCallOrder.append(toolWidget);
-        appendTranscriptWidget(toolWidget);
         applyTranscriptCollapse();
 
         // Track write/edit tool calls for edit tracking in AcceptEdits mode.
@@ -708,6 +721,14 @@ ChatWidget::ChatWidget(QWidget *parent)
             widget->setToolInfo(request.toolName, request.summary, request.risk);
             widget->setDescribeDiff(request.describeDiff);
             widget->setDurationVisible(true);
+            connect(widget, &ToolCallWidget::expandedChanged, this, [this, widget](bool) {
+                pinWidgetInViewport(widget);
+                QTimer::singleShot(240, this, [thisWeak = QPointer<ChatWidget>(this)]() {
+                    if (thisWeak) {
+                        thisWeak->m_pinnedViewportWidget = nullptr;
+                    }
+                });
+            });
             m_toolCallWidgets.insert(request.toolCallId, widget);
             m_toolCallOrder.append(widget);
             appendTranscriptWidget(widget);
@@ -1249,7 +1270,7 @@ QWidget *ChatWidget::createThinkingBlock(QWidget *parent, QTextBrowser *&browser
     tbLayout->setSpacing(0);
 
     auto *tbHeader = new QHBoxLayout;
-    toggle = new QPushButton(u"\u25b4 "_s + i18n("Reasoning"), block);
+    toggle = new QPushButton(u"\u25b8 "_s + i18n("Reasoning"), block);
     toggle->setFlat(true);
     toggle->setCursor(Qt::PointingHandCursor);
     toggle->setStyleSheet(ChatTheme::toggleLink());
@@ -1262,23 +1283,30 @@ QWidget *ChatWidget::createThinkingBlock(QWidget *parent, QTextBrowser *&browser
     browser->setFrameShape(QFrame::NoFrame);
     browser->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     browser->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    browser->setStyleSheet(QStringLiteral("QTextBrowser { background: transparent; color: %1; border: none;"
-                                        " font-style: italic; font-size: 12px; padding: 4px; }")
-                            .arg(ChatTheme::textMuted()));
+    browser->setStyleSheet(QStringLiteral("QTextBrowser { background: rgba(61, 126, 255, 0.08); color: #9ec1ff; border: none;"
+                                        " border-left: 2px solid %1; border-radius: 6px;"
+                                        " font-style: italic; font-size: 12px; padding: 6px 8px; }")
+                            .arg(ChatTheme::accent()));
 
     browser->document()->setDefaultStyleSheet(ChatTheme::thinkingCss());
     QPalette pal = browser->palette();
-    pal.setColor(QPalette::Text, QColor(ChatTheme::textMuted()));
+    pal.setColor(QPalette::Text, QColor(QStringLiteral("#9ec1ff")));
     pal.setColor(QPalette::Base, Qt::transparent);
     browser->setPalette(pal);
     tbLayout->addWidget(browser);
 
     connect(toggle, &QPushButton::clicked, this, [this, block, browser, toggle]() {
         const bool expanding = browser && !browser->isVisible();
+        pinWidgetInViewport(block);
         applyThinkingState(block, browser, toggle, expanding);
         if (m_thinkingBlock == block) {
             m_thinkingExpanded = expanding;
         }
+        QTimer::singleShot(240, this, [thisWeak = QPointer<ChatWidget>(this)]() {
+            if (thisWeak) {
+                thisWeak->m_pinnedViewportWidget = nullptr;
+            }
+        });
     });
 
     applyThinkingState(block, browser, toggle, initiallyExpanded);
@@ -1294,7 +1322,7 @@ void ChatWidget::applyThinkingState(QWidget *block, QTextBrowser *browser, QPush
         m_thinkingExpanded = expanded;
     }
     if (toggle) {
-        toggle->setText((expanded ? u"\u25b4 "_s : u"\u25be "_s) + i18n("Reasoning"));
+        toggle->setText((expanded ? u"\u25be "_s : u"\u25b8 "_s) + i18n("Reasoning"));
         toggle->show();
     }
     const int headerH = toggle ? std::max(22, toggle->sizeHint().height()) : 22;
@@ -1462,8 +1490,36 @@ void ChatWidget::scrollToBottom()
     forceScrollToBottom();
 }
 
+void ChatWidget::pinWidgetInViewport(QWidget *widget)
+{
+    m_pinnedViewportWidget = widget;
+    m_pinnedViewportOffset = 0;
+    if (!widget || !m_scrollArea || !m_scrollArea->viewport()) {
+        return;
+    }
+    m_pinnedViewportOffset = widget->mapTo(m_scrollArea->viewport(), QPoint(0, 0)).y();
+}
+
+void ChatWidget::applyPinnedViewport()
+{
+    if (!m_pinnedViewportWidget || !m_scrollArea || !m_scrollArea->viewport()) {
+        return;
+    }
+    auto *sb = m_scrollArea->verticalScrollBar();
+    if (!sb) {
+        return;
+    }
+    const int newY = m_pinnedViewportWidget->mapTo(m_scrollArea->viewport(), QPoint(0, 0)).y();
+    sb->setValue(sb->value() + (newY - m_pinnedViewportOffset));
+    m_pinnedViewportOffset = m_pinnedViewportWidget->mapTo(m_scrollArea->viewport(), QPoint(0, 0)).y();
+}
+
 void ChatWidget::forceScrollToBottom()
 {
+    if (m_pinnedViewportWidget) {
+        applyPinnedViewport();
+        return;
+    }
     m_userScrolledUp = false;
     if (m_scrollToBottomBtn) {
         m_scrollToBottomBtn->hide();
@@ -1497,7 +1553,7 @@ void ChatWidget::setThinkingIndicator(bool show)
     if (show && !m_isThinking) {
         m_isThinking = true;
         m_indicatorTick = 0;
-        m_thinkingIndicator->setText(i18n("Thinking") + progressiveDots(0));
+        m_thinkingIndicator->setText(QStringLiteral("\u{1F9E0}  ") + i18n("Thinking") + progressiveDots(0));
         m_thinkingIndicator->show();
         tickIndicators();
     } else if (!show && m_isThinking) {
@@ -1520,7 +1576,7 @@ void ChatWidget::setWorkingIndicator(bool show)
         if (m_workingLabelBase.isEmpty()) {
             m_workingLabelBase = i18n("Working");
         }
-        m_workingIndicator->setText(m_workingLabelBase + progressiveDots(0));
+        m_workingIndicator->setText(QStringLiteral("\u26A1  ") + m_workingLabelBase + progressiveDots(0));
         m_workingIndicator->show();
         tickIndicators();
     } else if (!show && m_isWorking) {
@@ -1553,12 +1609,12 @@ void ChatWidget::tickIndicators()
     const QString dots = progressiveDots(m_indicatorTick);
 
     if (m_isThinking && m_thinkingIndicator) {
-        m_thinkingIndicator->setText(i18n("Thinking") + dots);
+        m_thinkingIndicator->setText(QStringLiteral("\u{1F9E0}  ") + i18n("Thinking") + dots);
         if (auto *effect = qobject_cast<QGraphicsOpacityEffect *>(m_thinkingIndicator->graphicsEffect())) {
             effect->setOpacity(0.62 + 0.38 * ((m_indicatorTick % 2 == 0) ? 1.0 : 0.0));
         }
         if (m_thinkingToggle && m_thinkingBlock) {
-            const QString arrow = m_thinkingExpanded ? u"\u25b4 "_s : u"\u25be "_s;
+            const QString arrow = m_thinkingExpanded ? u"\u25be "_s : u"\u25b8 "_s;
             m_thinkingToggle->setText(arrow + i18n("Reasoning") + dots);
         }
     }
@@ -1567,7 +1623,7 @@ void ChatWidget::tickIndicators()
         if (m_workingLabelBase.isEmpty()) {
             m_workingLabelBase = i18n("Working");
         }
-        m_workingIndicator->setText(m_workingLabelBase + dots);
+        m_workingIndicator->setText(QStringLiteral("\u26A1  ") + m_workingLabelBase + dots);
         if (auto *effect = qobject_cast<QGraphicsOpacityEffect *>(m_workingIndicator->graphicsEffect())) {
             effect->setOpacity(0.62 + 0.38 * ((m_indicatorTick % 2 == 1) ? 1.0 : 0.0));
         }
@@ -1865,34 +1921,30 @@ QWidget *ChatWidget::createWelcomeWidget()
     return welcome;
 }
 
-// The live "Thinking" / "Working" row that always sits at the bottom of the
-// transcript. Built through a helper because it has to be recreated in two
-// places, and the two copies had already drifted apart.
+// The live "Thinking" / "Working" row that sits under the newest turn, left
+// aligned so the brain pill is at the bottom-left of the transcript.
 QWidget *ChatWidget::createIndicatorsRow()
 {
     auto *row = new QWidget(m_transcriptContainer);
     row->setObjectName(u"indicatorsContainer"_s);
     auto *layout = new QHBoxLayout(row);
-    layout->setContentsMargins(0, 4, 0, 4);
+    layout->setContentsMargins(0, 6, 0, 2);
     layout->setSpacing(8);
-    layout->addStretch();
 
-    // Plain text rather than an emoji badge: it re-renders on every tick at the
-    // end of the transcript, so it stays low contrast and lets the tool cards
-    // above it carry the actual signal.
-    m_thinkingIndicator = new QLabel(i18n("Thinking") + progressiveDots(0), row);
-    m_thinkingIndicator->setStyleSheet(ChatTheme::activityPill());
+    m_thinkingIndicator = new QLabel(QStringLiteral("\u{1F9E0}  ") + i18n("Thinking") + progressiveDots(0), row);
+    m_thinkingIndicator->setStyleSheet(ChatTheme::thinkingPill());
     attachPulseEffect(m_thinkingIndicator);
     m_thinkingIndicator->hide();
-    layout->addWidget(m_thinkingIndicator);
+    layout->addWidget(m_thinkingIndicator, 0, Qt::AlignLeft | Qt::AlignVCenter);
 
     m_workingLabelBase = i18n("Working");
-    m_workingIndicator = new QLabel(m_workingLabelBase + progressiveDots(0), row);
-    m_workingIndicator->setStyleSheet(ChatTheme::activityPill());
+    m_workingIndicator = new QLabel(QStringLiteral("\u26A1  ") + m_workingLabelBase + progressiveDots(0), row);
+    m_workingIndicator->setStyleSheet(ChatTheme::workingPill());
     attachPulseEffect(m_workingIndicator);
     m_workingIndicator->hide();
-    layout->addWidget(m_workingIndicator);
+    layout->addWidget(m_workingIndicator, 0, Qt::AlignLeft | Qt::AlignVCenter);
 
+    layout->addStretch();
     return row;
 }
 
@@ -1901,9 +1953,8 @@ int ChatWidget::transcriptInsertIndex() const
     if (!m_transcriptLayout) {
         return 0;
     }
-    // Messages are appended at the end of the message area: after the leading
-    // stretch spacer (which absorbs the slack and bottom-anchors the content)
-    // and always before the pinned status-indicator row.
+    // Messages grow downward: before the trailing stretch (slack below the
+    // conversation) and always before the pinned status-indicator row.
     int spacerIndex = -1;
     int indicatorsIndex = -1;
     const QWidget *indicators =
@@ -1920,7 +1971,7 @@ int ChatWidget::transcriptInsertIndex() const
             indicatorsIndex = i;
         }
     }
-    return transcriptInsertIndexFor(TranscriptAnchor::Bottom, spacerIndex, indicatorsIndex,
+    return transcriptInsertIndexFor(TranscriptAnchor::Top, spacerIndex, indicatorsIndex,
                                     m_transcriptLayout->count());
 }
 
@@ -2218,13 +2269,23 @@ void ChatWidget::updateTokenDisplay()
 
     const int percent = qBound(0, (tokens * 100) / window, 100);
     m_tokenCount->setText(i18n("%1% ctx", percent));
-    m_tokenCount->setToolTip(i18n("Context: about %1 of %2 tokens used (%3%)", tokens, window, percent));
-    // Colour follows how close the limit is, so the number alone carries the
-    // warning without needing to be read closely.
-    const QString colour = percent >= 90 ? ChatTheme::danger() : (percent >= 70 ? ChatTheme::warning() : ChatTheme::textMuted());
+    m_tokenCount->setToolTip(i18n("Context: about %1 of %2 tokens used (%3%). Older turns compact automatically so prompting continues.", tokens, window, percent));
+    QString colour = ChatTheme::success();
+    QString bg = QStringLiteral("rgba(78, 201, 160, 0.16)");
+    if (percent >= 90) {
+        colour = ChatTheme::danger();
+        bg = QStringLiteral("rgba(242, 109, 109, 0.18)");
+    } else if (percent >= 70) {
+        colour = ChatTheme::warning();
+        bg = QStringLiteral("rgba(226, 179, 65, 0.18)");
+    } else if (percent >= 40) {
+        colour = ChatTheme::accent();
+        bg = QStringLiteral("rgba(61, 126, 255, 0.16)");
+    }
     m_tokenCount->setStyleSheet(
-        QStringLiteral("QLabel { color: %1; font-size: 11px; font-family: monospace; background: transparent; border: none; }")
-            .arg(colour));
+        QStringLiteral("QLabel { color: %1; font-size: 11px; font-family: monospace; font-weight: 600;"
+                       " background-color: %2; border: 1px solid %1; border-radius: 10px; padding: 2px 8px; }")
+            .arg(colour, bg));
     m_tokenCount->show();
 }
 
@@ -2408,51 +2469,66 @@ void ChatWidget::showReasoningEffortMenu()
 
 void ChatWidget::showModelMenu()
 {
-    if (m_modelMenu) {
-        m_modelMenu->deleteLater();
+    if (m_modelPopup) {
+        m_modelPopup->close();
+        m_modelPopup = nullptr;
     }
-    m_modelMenuProviderMenus.clear();
-    m_modelMenuFlatActions.clear();
-    m_modelMenuNoMatchAction = nullptr;
     m_modelFilter.clear();
-
-    m_modelMenu = new QMenu(this);
-    m_modelFilterEdit = nullptr;
-    m_modelMenu->setStyleSheet(
-        u"QMenu {"
-        u"  background-color: #252528;"
-        u"  color: #cccccc;"
-        u"  border: 1px solid #3c3c40;"
-        u"  border-radius: 6px;"
-        u"  padding: 4px;"
-        u"}"
-        u"QMenu::item {"
-        u"  padding: 6px 18px 6px 12px;"
-        u"  border-radius: 4px;"
-        u"}"
-        u"QMenu::item:selected {"
-        u"  background-color: #007acc;"
-        u"  color: #ffffff;"
-        u"}"
-        u"QMenu::separator {"
-        u"  height: 1px;"
-        u"  background-color: #38383e;"
-        u"  margin: 4px 0;"
-        u"}"_s);
-
-    auto *filterEdit = new QLineEdit(m_modelMenu);
-    m_modelFilterEdit = filterEdit;
-    // Reset the keyboard cursor: each time the menu is opened it starts at "no
-    // entry highlighted", so Down always starts from the top of the list rather
-    // than resuming wherever the last selection was.
     m_modelMenuSelection = -1;
+
+    auto *popup = new QFrame(this, Qt::Popup | Qt::FramelessWindowHint);
+    popup->setObjectName(u"modelPopup"_s);
+    popup->setAttribute(Qt::WA_DeleteOnClose);
+    popup->setFocusPolicy(Qt::NoFocus);
+    popup->setStyleSheet(
+        QStringLiteral(
+            "QFrame#modelPopup {"
+            "  background-color: #252528;"
+            "  color: #cccccc;"
+            "  border: 1px solid #3c3c40;"
+            "  border-radius: 8px;"
+            "}"
+            "QListWidget {"
+            "  background-color: #252528;"
+            "  color: #cccccc;"
+            "  border: none;"
+            "  outline: none;"
+            "  padding: 2px;"
+            "}"
+            "QListWidget::item {"
+            "  padding: 5px 10px;"
+            "  border-radius: 4px;"
+            "}"
+            "QListWidget::item:selected {"
+            "  background-color: #007acc;"
+            "  color: #ffffff;"
+            "}"
+            "QListWidget::item:hover:!selected {"
+            "  background-color: #323236;"
+            "}"
+            "QPushButton#modelPopupConfig {"
+            "  background: transparent;"
+            "  color: #8b8b92;"
+            "  border: none;"
+            "  text-align: left;"
+            "  padding: 6px 10px;"
+            "}"
+            "QPushButton#modelPopupConfig:hover {"
+            "  color: #ffffff;"
+            "  background-color: #323236;"
+            "  border-radius: 4px;"
+            "}"));
+    m_modelPopup = popup;
+
+    auto *root = new QVBoxLayout(popup);
+    root->setContentsMargins(8, 8, 8, 8);
+    root->setSpacing(6);
+
+    auto *filterEdit = new QLineEdit(popup);
+    m_modelFilterEdit = filterEdit;
     filterEdit->setPlaceholderText(i18n("Filter models..."));
     filterEdit->setClearButtonEnabled(true);
-    // Width is left to the menu's own size hint plus the fixed minimum applied in
-    // rebuildModelMenuProviderSubmenus(). A hard 300px here fought that minimum:
-    // with a short provider list the box overflowed the popup, and with a long one
-    // it capped the width the menu was trying to grow to.
-    filterEdit->setMinimumWidth(220);
+    filterEdit->setMinimumWidth(400);
     filterEdit->setStyleSheet(
         u"QLineEdit {"
         u"  background-color: #1a1a1a;"
@@ -2465,87 +2541,141 @@ void ChatWidget::showModelMenu()
         u"QLineEdit:focus {"
         u"  border-color: #007acc;"
         u"}"_s);
+    root->addWidget(filterEdit);
+
+    auto *list = new QListWidget(popup);
+    m_modelResultList = list;
+    list->setUniformItemSizes(true);
+    list->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    list->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
+    list->setSelectionMode(QAbstractItemView::SingleSelection);
+    list->setFocusPolicy(Qt::NoFocus);
+    list->setMinimumHeight(140);
+    root->addWidget(list, 1);
+
     connect(filterEdit, &QLineEdit::textChanged, this, [this](const QString &text) {
         m_modelFilter = text;
         applyModelMenuFilter();
     });
-    connect(filterEdit, &QLineEdit::returnPressed, this, [this]() {
-        for (QAction *act : m_modelMenuFlatActions) {
-            if (act->isVisible() && act->isEnabled()) {
-                act->trigger();
-                return;
-            }
+    const auto activateCurrent = [this]() {
+        if (!m_modelResultList) {
+            return;
         }
-        for (QMenu *pMenu : m_modelMenuProviderMenus) {
-            if (!pMenu->menuAction()->isVisible()) {
-                continue;
-            }
-            for (QAction *act : pMenu->actions()) {
-                if (act->isVisible() && act->isEnabled() && act->isCheckable()) {
-                    act->trigger();
-                    return;
+        QListWidgetItem *item = m_modelResultList->currentItem();
+        if (!item) {
+            for (int i = 0; i < m_modelResultList->count(); ++i) {
+                auto *candidate = m_modelResultList->item(i);
+                if (candidate && candidate->flags().testFlag(Qt::ItemIsEnabled)
+                    && candidate->data(Qt::UserRole).isValid()
+                    && candidate->data(Qt::UserRole).toInt() >= 0) {
+                    item = candidate;
+                    break;
                 }
             }
         }
+        if (!item || item->data(Qt::UserRole).toInt() < 0) {
+            return;
+        }
+        selectModel(static_cast<Provider>(item->data(Qt::UserRole).toInt()),
+                    item->data(Qt::UserRole + 1).toString());
+    };
+    connect(filterEdit, &QLineEdit::returnPressed, this, activateCurrent);
+    connect(list, &QListWidget::itemClicked, this, [this](QListWidgetItem *item) {
+        if (!item || item->data(Qt::UserRole).toInt() < 0) {
+            return;
+        }
+        selectModel(static_cast<Provider>(item->data(Qt::UserRole).toInt()),
+                    item->data(Qt::UserRole + 1).toString());
     });
-    // Up/Down walks the matches without leaving the filter box. The QLineEdit
-    // swallows arrow keys, so without this a long model list could only be
-    // walked by retyping a filter after every selection.
-    auto *nextModel = new QShortcut(QKeySequence(Qt::Key_Down), m_modelMenu);
+
+    auto *nextModel = new QShortcut(QKeySequence(Qt::Key_Down), popup);
     nextModel->setContext(Qt::WidgetWithChildrenShortcut);
     connect(nextModel, &QShortcut::activated, this, [this]() {
         moveModelMenuSelection(1);
     });
-    auto *prevModel = new QShortcut(QKeySequence(Qt::Key_Up), m_modelMenu);
+    auto *prevModel = new QShortcut(QKeySequence(Qt::Key_Up), popup);
     prevModel->setContext(Qt::WidgetWithChildrenShortcut);
     connect(prevModel, &QShortcut::activated, this, [this]() {
         moveModelMenuSelection(-1);
     });
-    auto *filterAction = new QWidgetAction(m_modelMenu);
-    filterAction->setDefaultWidget(filterEdit);
-    m_modelMenu->addAction(filterAction);
-    m_modelMenu->addSeparator();
 
-    rebuildModelMenuProviderSubmenus();
-    applyModelMenuFilter();
+    auto *configBtn = new QPushButton(i18n("Configure Providers & Models…"), popup);
+    configBtn->setObjectName(u"modelPopupConfig"_s);
+    configBtn->setCursor(Qt::PointingHandCursor);
+    configBtn->setFlat(true);
+    connect(configBtn, &QPushButton::clicked, this, [this]() {
+        if (m_modelPopup) {
+            m_modelPopup->close();
+        }
+        Q_EMIT configureRequested();
+    });
+    root->addWidget(configBtn);
 
-    connect(m_modelMenu, &QMenu::aboutToHide, this, [this]() {
+    connect(popup, &QWidget::destroyed, this, [this]() {
         m_modelFilter.clear();
-        m_modelMenuProviderMenus.clear();
-        m_modelMenuFlatActions.clear();
-        m_modelMenuNoMatchAction = nullptr;
         m_modelFilterEdit = nullptr;
-        m_modelMenu->deleteLater();
-        m_modelMenu = nullptr;
+        m_modelResultList = nullptr;
+        m_modelPopup = nullptr;
+        m_modelMenuSelection = -1;
     });
 
+    fillModelResultList();
+    positionModelMenu();
+    popup->show();
     filterEdit->setFocus(Qt::ActiveWindowFocusReason);
-    m_modelMenu->exec(m_modelSelector->mapToGlobal(QPoint(0, m_modelSelector->height() + 2)));
 }
 
-void ChatWidget::rebuildModelMenuProviderSubmenus()
+void ChatWidget::positionModelMenu()
 {
-    if (!m_modelMenu) {
+    if (!m_modelPopup || !m_modelSelector) {
         return;
     }
 
-    m_modelMenuProviderMenus.clear();
-    m_modelMenuFlatActions.clear();
-    m_modelMenuNoMatchAction = nullptr;
+    const QRect screen = m_modelSelector->screen()
+        ? m_modelSelector->screen()->availableGeometry()
+        : QRect(0, 0, 1280, 800);
+    const QPoint btnTopLeft = m_modelSelector->mapToGlobal(QPoint(0, 0));
+    constexpr int gap = 4;
+    const int panelWidth = qMax(width() - 16, m_modelSelector->width() + 80);
+    const int width = qBound(420, qMax(m_modelPopup->sizeHint().width(), panelWidth), 760);
+    const int availableAbove = qMax(160, btnTopLeft.y() - screen.top() - gap);
+    const int height = qMin(qMax(m_modelPopup->sizeHint().height(), 220), qMin(420, availableAbove));
+    m_modelPopup->resize(width, height);
 
+    QPoint pos(btnTopLeft.x(), btnTopLeft.y() - m_modelPopup->height() - gap);
+    if (pos.x() + width > screen.right()) {
+        pos.setX(screen.right() - width);
+    }
+    if (pos.x() < screen.left()) {
+        pos.setX(screen.left());
+    }
+    if (pos.y() < screen.top()) {
+        pos.setY(screen.top());
+    }
+    m_modelPopup->move(pos);
+}
+
+void ChatWidget::fillModelResultList()
+{
+    if (!m_modelResultList) {
+        return;
+    }
+
+    const QString filter = m_modelFilter.trimmed();
+    const bool filtering = !filter.isEmpty();
+    const QString currentModel = modelFor(m_settings);
     const QList<Provider> providers = {
-        Provider::Grok,
-        Provider::OpenAI,
-        Provider::OpenRouter,
-        Provider::DeepSeek,
-        Provider::OpenAICompatible,
-        Provider::ClaudeCompatible,
-        Provider::Kilo,
-        Provider::Acp,
-        Provider::OpenCode
+        Provider::Grok, Provider::OpenAI, Provider::OpenRouter, Provider::DeepSeek,
+        Provider::OpenAICompatible, Provider::ClaudeCompatible, Provider::Kilo,
+        Provider::Acp, Provider::OpenCode
     };
 
-    const QString currentModel = modelFor(m_settings);
+    QSignalBlocker blocker(m_modelResultList);
+    m_modelResultList->clear();
+
+    int matches = 0;
+    QListWidgetItem *select = nullptr;
+    constexpr int kMaxVisibleMatches = 250;
 
     for (Provider p : providers) {
         Settings providerSettings = m_settings;
@@ -2554,162 +2684,118 @@ void ChatWidget::rebuildModelMenuProviderSubmenus()
             continue;
         }
 
-        auto *pMenu = m_modelMenu->addMenu(providerLabel(p));
-        pMenu->setStyleSheet(m_modelMenu->styleSheet());
-        m_modelMenuProviderMenus.append(pMenu);
-
         const QStringList models = m_modelCatalog.value(p);
-        if (models.isEmpty()) {
-            auto *act = pMenu->addAction(i18n("Fetching models..."));
-            act->setEnabled(false);
-            act->setData(QStringLiteral("__placeholder__"));
-        } else {
-            for (const QString &m : models) {
-                auto *act = pMenu->addAction(m);
-                act->setCheckable(true);
-                act->setChecked(m_settings.provider == p && currentModel == m);
-                connect(act, &QAction::triggered, this, [this, p, m]() {
-                    selectModel(p, m);
-                });
-
-                auto *flat = new QAction(u"%1  ·  %2"_s.arg(providerLabel(p), m), m_modelMenu);
-                flat->setCheckable(true);
-                flat->setChecked(m_settings.provider == p && currentModel == m);
-                flat->setVisible(false);
-                flat->setProperty("kateai_model", m);
-                connect(flat, &QAction::triggered, this, [this, p, m]() {
-                    selectModel(p, m);
-                });
-                m_modelMenuFlatActions.append(flat);
+        if (!filtering) {
+            auto *header = new QListWidgetItem(providerLabel(p));
+            header->setFlags(Qt::NoItemFlags);
+            header->setData(Qt::UserRole, -1);
+            QFont font = header->font();
+            font.setBold(true);
+            header->setFont(font);
+            header->setForeground(QColor(QStringLiteral("#8b8b92")));
+            m_modelResultList->addItem(header);
+            if (models.isEmpty()) {
+                auto *pending = new QListWidgetItem(i18n("Fetching models..."));
+                pending->setFlags(Qt::NoItemFlags);
+                pending->setData(Qt::UserRole, -1);
+                pending->setForeground(QColor(QStringLiteral("#8b8b92")));
+                m_modelResultList->addItem(pending);
+                continue;
             }
+            for (const QString &model : models) {
+                auto *item = new QListWidgetItem(model);
+                item->setData(Qt::UserRole, static_cast<int>(p));
+                item->setData(Qt::UserRole + 1, model);
+                if (m_settings.provider == p && currentModel == model) {
+                    select = item;
+                }
+                m_modelResultList->addItem(item);
+            }
+            continue;
+        }
+
+        for (const QString &model : models) {
+            if (matches >= kMaxVisibleMatches) {
+                break;
+            }
+            if (!model.contains(filter, Qt::CaseInsensitive)
+                && !providerLabel(p).contains(filter, Qt::CaseInsensitive)) {
+                continue;
+            }
+            auto *item = new QListWidgetItem(u"%1  ·  %2"_s.arg(providerLabel(p), model));
+            item->setData(Qt::UserRole, static_cast<int>(p));
+            item->setData(Qt::UserRole + 1, model);
+            if (m_settings.provider == p && currentModel == model) {
+                select = item;
+            }
+            m_modelResultList->addItem(item);
+            ++matches;
+        }
+        if (matches >= kMaxVisibleMatches) {
+            break;
         }
     }
 
-    for (QAction *flat : m_modelMenuFlatActions) {
-        m_modelMenu->addAction(flat);
+    if (filtering && matches == 0) {
+        auto *empty = new QListWidgetItem(i18n("No matching models"));
+        empty->setFlags(Qt::NoItemFlags);
+        empty->setData(Qt::UserRole, -1);
+        empty->setForeground(QColor(QStringLiteral("#8b8b92")));
+        m_modelResultList->addItem(empty);
+    } else if (filtering && matches >= kMaxVisibleMatches) {
+        auto *more = new QListWidgetItem(i18n("Type more to narrow the list"));
+        more->setFlags(Qt::NoItemFlags);
+        more->setData(Qt::UserRole, -1);
+        more->setForeground(QColor(QStringLiteral("#8b8b92")));
+        m_modelResultList->addItem(more);
     }
 
-    m_modelMenuNoMatchAction = m_modelMenu->addAction(i18n("No matching models"));
-    m_modelMenuNoMatchAction->setEnabled(false);
-    m_modelMenuNoMatchAction->setVisible(false);
-
-    m_modelMenu->addSeparator();
-
-    auto *reasoningMenu = m_modelMenu->addMenu(i18n("Reasoning Effort"));
-    reasoningMenu->setStyleSheet(m_modelMenu->styleSheet());
-    auto *reasoningGroup = new QActionGroup(this);
-    const QStringList reasoningLevels = {QString(), QStringLiteral("minimal"), QStringLiteral("low"), QStringLiteral("medium"), QStringLiteral("high")};
-    const QStringList reasoningLabels = {i18n("Default (Auto)"), i18n("Minimal"), i18n("Low"), i18n("Medium"), i18n("High")};
-    for (int i = 0; i < reasoningLevels.size(); ++i) {
-        auto *action = reasoningMenu->addAction(reasoningLabels[i]);
-        action->setCheckable(true);
-        action->setChecked(m_settings.reasoningEffort == reasoningLevels[i]);
-        action->setData(reasoningLevels[i]);
-        reasoningGroup->addAction(action);
-        connect(action, &QAction::triggered, this, [this, effort = reasoningLevels[i]]() {
-            m_settings.reasoningEffort = effort;
-            updateModelSelectorLabel();
-            updateReasoningEffortButton();
-            m_agent.setSettings(m_settings);
-            Q_EMIT settingsChanged(m_settings);
-        });
+    if (select) {
+        m_modelResultList->setCurrentItem(select);
+        m_modelMenuSelection = m_modelResultList->row(select);
+    } else {
+        m_modelMenuSelection = -1;
     }
-
-    auto *configAct = m_modelMenu->addAction(i18n("Configure Providers & Models…"));
-    connect(configAct, &QAction::triggered, this, &ChatWidget::configureRequested);
-
-    // Hidden flat actions do not contribute to QMenu's size hint, so pin the
-    // popup width to the widest entry once. Without this the menu resizes on
-    // every keystroke and the filter box visibly jumps around. The floor is the
-    // filter box's own minimum so it can never be clipped by a narrow catalogue.
-    int widest = m_modelFilterEdit ? m_modelFilterEdit->minimumSizeHint().width() : 0;
-    const QFontMetrics fm(m_modelMenu->font());
-    for (QAction *act : m_modelMenu->actions()) {
-        widest = qMax(widest, fm.horizontalAdvance(act->text()));
-    }
-    m_modelMenu->setMinimumWidth(qBound(240, widest + 24, 560));
 }
 
 void ChatWidget::applyModelMenuFilter()
 {
-    if (!m_modelMenu) {
-        return;
-    }
-
-    const QString filter = m_modelFilter.trimmed();
-    const bool filtering = !filter.isEmpty();
-    int visibleMatches = 0;
-
-    // Every visibility toggle makes QMenu recalculate its action rects and
-    // repaint; batching them behind frozen updates stops the filter box from
-    // flickering while typing.
-    m_modelMenu->setUpdatesEnabled(false);
-
-    for (QMenu *pMenu : m_modelMenuProviderMenus) {
-        pMenu->menuAction()->setVisible(!filtering);
-    }
-
-    for (QAction *act : m_modelMenuFlatActions) {
-        if (!filtering) {
-            act->setVisible(false);
-            continue;
-        }
-        const QString model = act->property("kateai_model").toString();
-        const bool match = act->text().contains(filter, Qt::CaseInsensitive)
-            || model.contains(filter, Qt::CaseInsensitive);
-        act->setVisible(match);
-        if (match) {
-            ++visibleMatches;
-        }
-    }
-
-    if (m_modelMenuNoMatchAction) {
-        m_modelMenuNoMatchAction->setVisible(filtering && visibleMatches == 0);
-    }
-
-    m_modelMenu->setUpdatesEnabled(true);
-    m_modelMenu->update();
-
-    // QMenu hands focus back to itself when the action set changes; keep the
-    // caret in the filter box so typing is never interrupted. Only while the
-    // user is actually filtering: once they have arrowed onto an entry, taking
-    // the caret back would fight the selection they are making.
-    if (m_modelFilterEdit && !m_modelFilterEdit->hasFocus() && m_modelMenu->isVisible()
-        && m_modelMenuSelection < 0) {
-        m_modelFilterEdit->setFocus(Qt::OtherFocusReason);
-    }
+    // Keep the popup geometry still while typing: rebuilding the list into a
+    // shrinking window would walk the filter box down toward the chip on every
+    // keystroke.
+    fillModelResultList();
 }
 
 void ChatWidget::moveModelMenuSelection(int delta)
 {
-    if (!m_modelMenu) {
+    if (!m_modelResultList || m_modelResultList->count() == 0) {
         return;
     }
-    // The candidate list depends on whether a filter is active: unfiltered, the
-    // entries are the provider submenus; filtered, they are the flat actions.
-    QList<QAction *> candidates;
-    if (!m_modelFilter.trimmed().isEmpty()) {
-        for (QAction *act : m_modelMenuFlatActions) {
-            if (act->isVisible()) {
-                candidates.append(act);
-            }
-        }
-    } else {
-        for (QMenu *pMenu : m_modelMenuProviderMenus) {
-            if (pMenu->menuAction()->isVisible()) {
-                candidates.append(pMenu->menuAction());
-            }
+
+    QList<int> candidates;
+    for (int i = 0; i < m_modelResultList->count(); ++i) {
+        QListWidgetItem *item = m_modelResultList->item(i);
+        if (item && item->flags().testFlag(Qt::ItemIsEnabled) && item->data(Qt::UserRole).toInt() >= 0) {
+            candidates.append(i);
         }
     }
     if (candidates.isEmpty()) {
         return;
     }
 
-    const int count = candidates.size();
-    m_modelMenuSelection = m_modelMenuSelection < 0
-        ? (delta > 0 ? 0 : count - 1)
-        : (m_modelMenuSelection + delta + count) % count;
-    m_modelMenu->setActiveAction(candidates.at(m_modelMenuSelection));
+    int idx = 0;
+    const int current = m_modelResultList->currentRow();
+    const int pos = candidates.indexOf(current);
+    if (pos < 0) {
+        idx = delta > 0 ? 0 : candidates.size() - 1;
+    } else {
+        idx = (pos + delta + candidates.size()) % candidates.size();
+    }
+    m_modelMenuSelection = candidates.at(idx);
+    m_modelResultList->setCurrentRow(m_modelMenuSelection);
+    if (QListWidgetItem *item = m_modelResultList->item(m_modelMenuSelection)) {
+        m_modelResultList->scrollToItem(item, QAbstractItemView::EnsureVisible);
+    }
 }
 
 void ChatWidget::selectModel(Provider provider, const QString &model)
@@ -2752,8 +2838,8 @@ void ChatWidget::selectModel(Provider provider, const QString &model)
     updateReasoningEffortButton();
     m_agent.setSettings(m_settings);
     Q_EMIT settingsChanged(m_settings);
-    if (m_modelMenu) {
-        m_modelMenu->close();
+    if (m_modelPopup) {
+        m_modelPopup->close();
     }
 }
 
@@ -3730,6 +3816,14 @@ void ChatWidget::rebuildTranscript()
                         const QString summary = shellCommandFor(toolName, argsObj);
 
                         toolWidget->setToolInfo(toolName, summary, risk);
+                        connect(toolWidget, &ToolCallWidget::expandedChanged, this, [this, toolWidget](bool) {
+                            pinWidgetInViewport(toolWidget);
+                            QTimer::singleShot(240, this, [thisWeak = QPointer<ChatWidget>(this)]() {
+                                if (thisWeak) {
+                                    thisWeak->m_pinnedViewportWidget = nullptr;
+                                }
+                            });
+                        });
 
                         if (toolName == u"edit_file"_s) {
                             const QString path = argsObj.value(u"path"_s).toString();

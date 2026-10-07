@@ -356,9 +356,6 @@ QString jumpToLatest()
 
 QString activityPill()
 {
-    // Deliberately not a coloured badge: this line changes constantly while a
-    // turn runs, so it stays low-contrast and lets the tool cards below it
-    // carry the actual signal.
     return QStringLiteral(
            "QLabel {"
            "  color: %1;"
@@ -371,18 +368,46 @@ QString activityPill()
         .arg(kTextMuted, kSurfaceBg, kBorder);
 }
 
+QString thinkingPill()
+{
+    return QStringLiteral(
+           "QLabel {"
+           "  color: #b4d0ff;"
+           "  font-size: 12px;"
+           "  font-weight: 600;"
+           "  padding: 5px 12px;"
+           "  background-color: rgba(61, 126, 255, 0.22);"
+           "  border: 1px solid %1;"
+           "  border-radius: 13px;"
+           "}")
+        .arg(kAccent);
+}
+
+QString workingPill()
+{
+    return QStringLiteral(
+           "QLabel {"
+           "  color: #f3d48a;"
+           "  font-size: 12px;"
+           "  font-weight: 600;"
+           "  padding: 5px 12px;"
+           "  background-color: rgba(226, 179, 65, 0.20);"
+           "  border: 1px solid %1;"
+           "  border-radius: 13px;"
+           "}")
+        .arg(kWarning);
+}
+
 QString userCard()
 {
-    // A left accent rail instead of a full border: it marks the turn boundary
-    // without boxing the text in.
     return QStringLiteral(
            "QWidget#userCard {"
-           "  background-color: %1;"
-           "  border: none;"
-           "  border-left: 2px solid %2;"
-           "  border-radius: 4px;"
+           "  background-color: rgba(61, 126, 255, 0.14);"
+           "  border: 1px solid rgba(61, 126, 255, 0.35);"
+           "  border-left: 3px solid %1;"
+           "  border-radius: 8px;"
            "}")
-        .arg(kCardBg, kAccent);
+        .arg(kAccent);
 }
 
 QString assistantCard()
@@ -467,24 +492,22 @@ QString messageCss()
 QString thinkingCss()
 {
     return QStringLiteral(
-           "body { color: %1; font-style: italic; font-size: 12px; margin: 0; padding: 0; background: transparent; }"
-           "p { color: %1; margin-bottom: 4px; }")
-        .arg(kTextMuted);
+           "body { color: #9ec1ff; font-style: italic; font-size: 12px; margin: 0; padding: 0; background: transparent; }"
+           "p { color: #9ec1ff; margin-bottom: 4px; }");
 }
 
 QString toggleLink()
 {
     return QStringLiteral(
            "QPushButton {"
-           "  color: %1;"
+           "  color: #8fb6ff;"
            "  font-size: 11px;"
            "  font-weight: 600;"
            "  border: none;"
            "  text-align: left;"
            "  padding: 2px 0;"
            "}"
-           "QPushButton:hover { color: #ffffff; }")
-        .arg(kTextMuted);
+           "QPushButton:hover { color: #d6e6ff; }");
 }
 
 QString roleHeader()
