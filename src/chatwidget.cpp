@@ -3070,16 +3070,40 @@ void ChatWidget::showSettingsMenu()
         }
     }
 
-    // ACP does not expose a common model catalogue. This editable submenu lets
-    // users select the identifier supported by their chosen ACP agent without
-    // forcing an incomplete list of provider-specific model names.
+    // ACP does not expose a common model catalogue. Show available models for the current
+    // ACP agent, with a custom input option for models not in the list.
     auto *acpMenu = menu.addMenu(i18n("ACP Agent"));
     acpMenu->setStyleSheet(menu.styleSheet());
     auto *acpModelMenu = acpMenu->addMenu(i18n("Model"));
     acpModelMenu->setStyleSheet(menu.styleSheet());
+    
+    // Get available models for the current ACP agent
+    QStringList availableModels = acpAgentAvailableModels(m_settings);
+    
+    // Add each available model as a selectable action
+    for (const QString &model : availableModels) {
+        auto *modelAction = acpModelMenu->addAction(model);
+        modelAction->setData(model);
+        connect(modelAction, &QAction::triggered, this, [this, model, &menu]() {
+            m_settings.provider = Provider::Acp;
+            m_preferredProvider = Provider::Acp;
+            m_settings.acpModel = model;
+            updateModelSelectorLabel();
+            updateTokenDisplay();
+            m_agent.setSettings(m_settings);
+            Q_EMIT settingsChanged(m_settings);
+            menu.close();
+        });
+    }
+    
+    // Add separator and custom input for models not in the list
+    if (!availableModels.isEmpty()) {
+        acpModelMenu->addSeparator();
+    }
+    
     auto *modelInputAction = new QWidgetAction(acpModelMenu);
     auto *modelInput = new QLineEdit(acpModelMenu);
-    modelInput->setPlaceholderText(i18n("Provider default"));
+    modelInput->setPlaceholderText(i18n("Custom model identifier..."));
     modelInput->setText(m_settings.acpModel);
     modelInput->setMinimumWidth(240);
     modelInputAction->setDefaultWidget(modelInput);

@@ -203,6 +203,9 @@ struct Settings {
     // command, args, package, distribution). Kept in user settings so the
     // registry selection is available in every chat.
     QString acpInstalledAgents;
+    // ACP agent models broadcasted as available by running agents.
+    // Stores a JSON object mapping agent IDs to arrays of model names.
+    QString acpAgentModels;
     ApiFormat apiFormat = ApiFormat::AcpNative;
     PermissionMode permissionMode = PermissionMode::Ask;
     SandboxProfile sandbox = SandboxProfile::Workspace;
@@ -379,6 +382,11 @@ QString acpEffectiveApiKeyEnv(const Settings &settings);
 // we inject `--model` / `--always-approve` and Grok `_meta`.
 bool acpAgentIsGrok(const Settings &settings);
 QString acpAgentIdMatching(const QString &command, const QString &args);
+// Get available models for an ACP agent. Returns models from acpAgentModels if available,
+// otherwise returns a default list based on the agent type.
+QStringList acpAgentAvailableModels(const Settings &settings, const QString &agentId = QString());
+// Discover models from an ACP agent using heuristics and agent-specific knowledge
+QStringList discoverAcpAgentModels(const QString &agentId, const QString &command);
 
 QString permissionModeId(PermissionMode mode);
 QString permissionModeLabel(PermissionMode mode);

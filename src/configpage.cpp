@@ -45,6 +45,7 @@
 #include <QTabWidget>
 #include <QVBoxLayout>
 #include <QDebug>
+#include <QSysInfo>
 
 #include <algorithm>
 
@@ -52,6 +53,27 @@ using namespace Qt::Literals::StringLiterals;
 
 namespace KateAi
 {
+QString KateAiConfigPage::getBinaryPlatformKey() const
+{
+#if defined(Q_OS_WIN)
+    return u"windows-x86_64"_s;
+#elif defined(Q_OS_MAC)
+    if (QSysInfo::currentCpuArchitecture().startsWith(u"arm"_s) || QSysInfo::currentCpuArchitecture().startsWith(u"aarch64"_s)) {
+        return u"darwin-aarch64"_s;
+    } else {
+        return u"darwin-x86_64"_s;
+    }
+#elif defined(Q_OS_LINUX)
+    if (QSysInfo::currentCpuArchitecture().startsWith(u"arm"_s) || 
+        QSysInfo::currentCpuArchitecture().startsWith(u"aarch64"_s)) {
+        return u"linux-aarch64"_s;
+    } else {
+        return u"linux-x86_64"_s;
+    }
+#else
+    return u"unknown"_s;
+#endif
+}
 
 KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     : KTextEditor::ConfigPage(parent)
@@ -254,14 +276,27 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
             const QJsonObject distribution = agent.value(u"distribution"_s).toObject();
             QString kind;
             QString package;
+            bool installable = false;
+            QString installType;
+            QJsonObject installInfo;
+            
             if (distribution.value(u"npx"_s).isObject()) {
-                kind = u"npx"_s; package = distribution.value(u"npx"_s).toObject().value(u"package"_s).toString();
+                kind = u"npx"_s; 
+                package = distribution.value(u"npx"_s).toObject().value(u"package"_s).toString();
+                installable = !package.isEmpty();
+                installType = u"npx"_s;
+                installInfo = distribution.value(u"npx"_s).toObject();
             } else if (distribution.value(u"uvx"_s).isObject()) {
-                kind = u"uvx"_s; package = distribution.value(u"uvx"_s).toObject().value(u"package"_s).toString();
-            }
-            const bool packageInstallable = !kind.isEmpty() && !package.isEmpty();
-            if (kind.isEmpty() && distribution.value(u"binary"_s).isObject()) {
-                kind = i18n("binary (manual install)");
+                kind = u"uvx"_s; 
+                package = distribution.value(u"uvx"_s).toObject().value(u"package"_s).toString();
+                installable = !package.isEmpty();
+                installType = u"uvx"_s;
+                installInfo = distribution.value(u"uvx"_s).toObject();
+            } else if (distribution.value(u"binary"_s).isObject()) {
+                kind = i18n("binary");
+                installable = true;
+                installType = u"binary"_s;
+                installInfo = distribution.value(u"binary"_s).toObject();
             }
             if (kind.isEmpty()) {
                 kind = i18n("manual install");
@@ -280,7 +315,9 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
                                              m_acpRegistryResults);
             item->setData(Qt::UserRole, agent);
             item->setData(Qt::UserRole + 1, isInstalled);
-            item->setData(Qt::UserRole + 2, packageInstallable);
+            item->setData(Qt::UserRole + 2, installable);
+            item->setData(Qt::UserRole + 3, installType);
+            item->setData(Qt::UserRole + 4, installInfo);
             item->setToolTip(agent.value(u"license_url"_s).toString());
             if (isInstalled) item->setForeground(QColor(QStringLiteral("#75c991")));
         }
@@ -298,36 +335,81 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
         QListWidgetItem *item = m_acpRegistryResults->currentItem();
         if (!item || item->data(Qt::UserRole).toJsonObject().isEmpty()) return;
         const QJsonObject agent = item->data(Qt::UserRole).toJsonObject();
-        const QJsonObject dist = agent.value(u"distribution"_s).toObject();
-        const bool npm = dist.value(u"npx"_s).isObject();
-        const QJsonObject packageInfo = dist.value(npm ? u"npx"_s : u"uvx"_s).toObject();
-        const QString package = packageInfo.value(u"package"_s).toString();
-        if (package.isEmpty()) return;
-        auto *process = new QProcess(this);
-        const QString program = npm ? u"npm"_s : u"uv"_s;
-        const QStringList args = npm ? QStringList{u"install"_s, u"--global"_s, package}
-                                     : QStringList{u"tool"_s, u"install"_s, package};
-        m_acpRegistryStatus->setText(i18n("Installing %1…", agent.value(u"name"_s).toString()));
-        connect(process, &QProcess::finished, this, [this, process, agent, packageInfo, package, npm, showRegistryResults](int code, QProcess::ExitStatus status) {
-            const QString output = QString::fromLocal8Bit(process->readAllStandardError()).trimmed();
-            if (code != 0 || status != QProcess::NormalExit) {
-                m_acpRegistryStatus->setText(i18n("Install failed: %1", output));
+        const QString installType = item->data(Qt::UserRole + 3).toString();
+        const QJsonObject installInfo = item->data(Qt::UserRole + 4).toJsonObject();
+        
+        if (installType == u"npx"_s || installType == u"uvx"_s) {
+            const bool npm = installType == u"npx"_s;
+            const QString package = installInfo.value(u"package"_s).toString();
+            if (package.isEmpty()) return;
+            auto *process = new QProcess(this);
+            const QString program = npm ? u"npm"_s : u"uv"_s;
+            const QStringList args = npm ? QStringList{u"install"_s, u"--global"_s, package}
+                                         : QStringList{u"tool"_s, u"install"_s, package};
+            m_acpRegistryStatus->setText(i18n("Installing %1…", agent.value(u"name"_s).toString()));
+            connect(process, &QProcess::finished, this, [this, process, agent, installInfo, package, npm, showRegistryResults](int code, QProcess::ExitStatus status) {
+                const QString output = QString::fromLocal8Bit(process->readAllStandardError()).trimmed();
+                if (code != 0 || status != QProcess::NormalExit) {
+                    m_acpRegistryStatus->setText(i18n("Install failed: %1", output));
+                    process->deleteLater();
+                    return;
+                }
+                QJsonObject installed = agent;
+                QStringList argsList;
+                for (const QJsonValue &arg : installInfo.value(u"args"_s).toArray()) argsList.append(arg.toString());
+                QJsonArray launchArgs;
+                for (const QString &arg : argsList) launchArgs.append(arg);
+                installed.insert(u"command"_s, npm ? u"npx"_s : u"uvx"_s);
+                QJsonArray fullArgs;
+                if (npm) { fullArgs.append(u"--yes"_s); fullArgs.append(package); }
+                else fullArgs.append(package);
+                for (const QJsonValue &arg : launchArgs) fullArgs.append(arg);
+                installed.insert(u"args"_s, fullArgs);
+                installed.insert(u"package"_s, package);
+                installed.insert(u"distributionType"_s, npm ? u"npx"_s : u"uvx"_s);
+                QJsonArray agents = QJsonDocument::fromJson(m_plugin->settings().acpInstalledAgents.toUtf8()).array();
+                const QString id = agent.value(u"id"_s).toString();
+                for (qsizetype i = agents.size() - 1; i >= 0; --i) if (agents.at(i).toObject().value(u"id"_s).toString() == id) agents.removeAt(i);
+                agents.append(installed);
+                Settings settings = m_plugin->settings();
+                settings.acpInstalledAgents = QString::fromUtf8(QJsonDocument(agents).toJson(QJsonDocument::Compact));
+                m_plugin->setSettings(settings);
+                m_acpRegistryStatus->setText(i18n("Installed %1. Select it under ACP in the model selector.", agent.value(u"name"_s).toString()));
+                showRegistryResults(m_acpRegistrySearch->text());
                 process->deleteLater();
+            });
+            connect(process, &QProcess::errorOccurred, this, [this, process](QProcess::ProcessError) {
+                m_acpRegistryStatus->setText(i18n("Install failed: package manager not found or could not start."));
+                process->deleteLater();
+            });
+            process->start(program, args);
+        } else if (installType == u"binary"_s) {
+            // Handle binary installation
+            const QString platformKey = this->getBinaryPlatformKey();
+            const QJsonObject platformDist = installInfo.value(platformKey).toObject();
+            if (platformDist.isEmpty()) {
+                m_acpRegistryStatus->setText(i18n("No binary available for this platform."));
                 return;
             }
+            
+            const QString archiveUrl = platformDist.value(u"archive"_s).toString();
+            const QString cmd = platformDist.value(u"cmd"_s).toString();
+            if (archiveUrl.isEmpty()) {
+                m_acpRegistryStatus->setText(i18n("No download URL available for this binary."));
+                return;
+            }
+            
+            m_acpRegistryStatus->setText(i18n("Downloading and installing %1…", agent.value(u"name"_s).toString()));
+            
+            // For now, show a message that binary installation needs to be done manually
+            // TODO: Implement actual binary download and installation
             QJsonObject installed = agent;
-            QStringList args;
-            for (const QJsonValue &arg : packageInfo.value(u"args"_s).toArray()) args.append(arg.toString());
-            QJsonArray launchArgs;
-            for (const QString &arg : args) launchArgs.append(arg);
-            installed.insert(u"command"_s, npm ? u"npx"_s : u"uvx"_s);
-            QJsonArray fullArgs;
-            if (npm) { fullArgs.append(u"--yes"_s); fullArgs.append(package); }
-            else fullArgs.append(package);
-            for (const QJsonValue &arg : launchArgs) fullArgs.append(arg);
-            installed.insert(u"args"_s, fullArgs);
-            installed.insert(u"package"_s, package);
-            installed.insert(u"distributionType"_s, npm ? u"npx"_s : u"uvx"_s);
+            installed.insert(u"command"_s, cmd);
+            installed.insert(u"args"_s, QJsonArray());
+            installed.insert(u"distributionType"_s, u"binary"_s);
+            installed.insert(u"binaryArchiveUrl"_s, archiveUrl);
+            installed.insert(u"binaryPlatform"_s, platformKey);
+            
             QJsonArray agents = QJsonDocument::fromJson(m_plugin->settings().acpInstalledAgents.toUtf8()).array();
             const QString id = agent.value(u"id"_s).toString();
             for (qsizetype i = agents.size() - 1; i >= 0; --i) if (agents.at(i).toObject().value(u"id"_s).toString() == id) agents.removeAt(i);
@@ -335,15 +417,9 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
             Settings settings = m_plugin->settings();
             settings.acpInstalledAgents = QString::fromUtf8(QJsonDocument(agents).toJson(QJsonDocument::Compact));
             m_plugin->setSettings(settings);
-            m_acpRegistryStatus->setText(i18n("Installed %1. Select it under ACP in the model selector.", agent.value(u"name"_s).toString()));
+            m_acpRegistryStatus->setText(i18n("Added %1 to installed agents. Please install the binary manually and ensure it's in your PATH.", agent.value(u"name"_s).toString()));
             showRegistryResults(m_acpRegistrySearch->text());
-            process->deleteLater();
-        });
-        connect(process, &QProcess::errorOccurred, this, [this, process](QProcess::ProcessError) {
-            m_acpRegistryStatus->setText(i18n("Install failed: package manager not found or could not start."));
-            process->deleteLater();
-        });
-        process->start(program, args);
+        }
     });
     refreshRegistry();
 

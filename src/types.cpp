@@ -6,6 +6,7 @@
 #include "modes.h"
 #include "types.h"
 
+#include <QFileInfo>
 #include <KLocalizedString>
 
 #include <QFileInfo>
@@ -346,7 +347,7 @@ QStringList pickerModelsFor(const Settings &settings, Provider provider, const Q
     return models;
 }
 
-static QJsonObject toolDef(const QString &name, const QString &description, const QJsonObject &properties, const QStringList &required)
+static QJsonObject toolDef(const QString &name, const QString &description, const QJsonObject &properties, const QStringList &required, bool strict = false)
 {
     QJsonObject fn;
     fn.insert(u"name"_s, name);
@@ -360,6 +361,7 @@ static QJsonObject toolDef(const QString &name, const QString &description, cons
     }
     params.insert(u"required"_s, req);
     fn.insert(u"parameters"_s, params);
+    fn.insert(u"strict"_s, strict);
     QJsonObject tool;
     tool.insert(u"type"_s, u"function"_s);
     tool.insert(u"function"_s, fn);
@@ -377,7 +379,8 @@ QJsonArray toolDefinitions(const ToolAccess &access)
                              {u"offset"_s, QJsonObject{{u"type"_s, u"integer"_s}, {u"description"_s, u"First line to return (1-based)."_s}}},
                              {u"limit"_s, QJsonObject{{u"type"_s, u"integer"_s}, {u"description"_s, u"Maximum number of lines to return."_s}}},
                          },
-                         {u"path"_s}));
+                         {u"path"_s},
+                         false));
 
     tools.append(toolDef(u"write_file"_s,
                          u"Create or overwrite a UTF-8 text file with the given contents."_s,
@@ -385,7 +388,8 @@ QJsonArray toolDefinitions(const ToolAccess &access)
                              {u"path"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"Path relative to the workspace or absolute."_s}}},
                              {u"content"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"Full file contents to write."_s}}},
                          },
-                         {u"path"_s, u"content"_s}));
+                         {u"path"_s, u"content"_s},
+                         false));
 
     tools.append(toolDef(u"edit_file"_s,
                          u"Replace exact text in a file. old_string must match exactly, including whitespace. "
@@ -396,7 +400,9 @@ QJsonArray toolDefinitions(const ToolAccess &access)
                              {u"new_string"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"Replacement text."_s}}},
                              {u"replace_all"_s, QJsonObject{{u"type"_s, u"boolean"_s}, {u"description"_s, u"If true, replace every occurrence instead of requiring a unique match."_s}}},
                          },
-                         {u"path"_s, u"old_string"_s, u"new_string"_s}));
+                         {u"path"_s, u"old_string"_s, u"new_string"_s},
+                         false));
+
 
     QJsonObject chunkProperties{
         {u"old_string"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"Exact text to find in the file."_s}}},
@@ -415,14 +421,17 @@ QJsonArray toolDefinitions(const ToolAccess &access)
                              {u"path"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"Path relative to the workspace or absolute."_s}}},
                              {u"edits"_s, QJsonObject{{u"type"_s, u"array"_s}, {u"items"_s, chunkItem}, {u"description"_s, u"Array of edit chunks to apply in order."_s}}},
                          },
-                         {u"path"_s, u"edits"_s}));
+                         {u"path"_s, u"edits"_s},
+                         false));
+
 
     tools.append(toolDef(u"list_dir"_s,
                          u"List files and directories in a folder."_s,
                          QJsonObject{
                              {u"path"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"Directory to list. Defaults to the workspace root."_s}}},
                          },
-                         {}));
+                         {},
+                         false));
 
     tools.append(toolDef(u"grep"_s,
                          u"Search file contents with a regular expression. Returns path:line:content."_s,
@@ -433,21 +442,25 @@ QJsonArray toolDefinitions(const ToolAccess &access)
                              {u"case_insensitive"_s, QJsonObject{{u"type"_s, u"boolean"_s}, {u"description"_s, u"If true, match without regard to case."_s}}},
                              {u"context"_s, QJsonObject{{u"type"_s, u"integer"_s}, {u"description"_s, u"Number of context lines to include before and after each match."_s}}},
                          },
-                         {u"pattern"_s}));
+                         {u"pattern"_s},
+                         false));
 
     tools.append(toolDef(u"glob"_s,
                          u"Find files whose paths match a glob pattern."_s,
                          QJsonObject{
                              {u"pattern"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"Glob such as **/*.h or src/**/*.cpp."_s}}},
                          },
-                         {u"pattern"_s}));
+                         {u"pattern"_s},
+                         false));
 
     tools.append(toolDef(u"bash"_s,
                          u"Run a shell command in the workspace. Commands are sandboxed according to the active profile."_s,
                          QJsonObject{
                              {u"command"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"Shell command to execute."_s}}},
                          },
-                         {u"command"_s}));
+                         {u"command"_s},
+                         false));
+
 
     tools.append(toolDef(u"query_project_graph"_s,
                          u"Query the indexed project graph: files, symbols, imports, and relationships. "
@@ -459,7 +472,8 @@ QJsonArray toolDefinitions(const ToolAccess &access)
                              {u"source_id"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"Source node for path finding"_s}}},
                              {u"target_id"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"Target node for path finding"_s}}},
                          },
-                         {}));
+                         {},
+                         false));
 
     tools.append(toolDef(u"web_search"_s,
                              u"Search the public web and return ranked results with titles, URLs and snippets. "
@@ -469,16 +483,19 @@ QJsonArray toolDefinitions(const ToolAccess &access)
                                  {u"query"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"The search query."_s}}},
                                  {u"max_results"_s, QJsonObject{{u"type"_s, u"integer"_s}, {u"description"_s, u"How many results to return (1-20). Defaults to 5."_s}}},
                              },
-                             {u"query"_s}));
+                             {u"query"_s},
+                             false));
 
-        tools.append(toolDef(u"web_fetch"_s,
+    tools.append(toolDef(u"web_fetch"_s,
                              u"Fetch a web page and return its readable text, with scripts and navigation stripped. "
                              u"Use it after web_search to read a specific result instead of relying on the snippet. "
                              u"Only http and https URLs are fetched."_s,
                              QJsonObject{
                                  {u"url"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"The absolute http(s) URL to fetch."_s}}},
                              },
-                             {u"url"_s}));
+                             {u"url"_s},
+                             false));
+
 
         tools.append(toolDef(subtaskToolName(),
                          u"Spawn a sub-agent to handle a self-contained piece of work, then return its result to you. "
@@ -492,7 +509,9 @@ QJsonArray toolDefinitions(const ToolAccess &access)
                              {u"mode"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"Mode id to run the sub-agent in, overriding the agent's default: code, ask, architect, debug, orchestrator, or a custom mode. Defaults to the agent's mode, or code."_s}}},
                              {u"include_transcript"_s, QJsonObject{{u"type"_s, u"boolean"_s}, {u"description"_s, u"If true, the result also includes the sub-agent's tool log, so you can see how it reached its answer. Use it when you need to verify the work."_s}}},
                          },
-                         {u"description"_s}));
+                         {u"description"_s},
+                         false));
+
 
     if (access.allowAll) {
         return tools;
@@ -903,6 +922,67 @@ QString acpAgentIdMatching(const QString &command, const QString &args)
         return u"grok-build"_s;
     }
     return u"custom"_s;
+}
+
+QStringList discoverAcpAgentModels(const QString &agentId, const QString &command)
+{
+    QStringList models;
+    
+    // Try agent-specific model discovery based on known agents
+    if (agentId == u"grok-build"_s || QFileInfo(command).fileName() == u"grok"_s) {
+        // Grok Build supports these models
+        models = {u"grok-2"_s, u"grok-2-beta"_s, u"grok-2-mini"_s, u"grok-1.5"_s, u"grok-1.5-mini"_s};
+    } else if (agentId == u"claude-acp"_s || command.contains(u"claude-agent-acp"_s)) {
+        // Claude Agent supports these models
+        models = {u"claude-3-5-sonnet-20250620"_s, u"claude-3-haiku-20240307"_s, u"claude-3-sonnet-20240229"_s, u"claude-3-opus-20240229"_s};
+    } else if (agentId == u"codex-acp"_s || command.contains(u"codex-acp"_s)) {
+        // Codex supports these models
+        models = {u"codex-pro"_s, u"codex-plus"_s, u"codex"_s};
+    } else if (agentId == u"gemini"_s || command.contains(u"gemini"_s)) {
+        // Gemini CLI supports these models
+        models = {u"gemini-2.0-pro-exp"_s, u"gemini-2.0-pro"_s, u"gemini-1.5-pro"_s, u"gemini-1.5-flash"_s};
+    } else if (agentId == u"opencode"_s || command.contains(u"opencode"_s)) {
+        // OpenCode supports various models
+        models = {u"gpt-4o-mini"_s, u"gpt-4o"_s, u"claude-3-5-sonnet-20250620"_s, u"claude-3-haiku-20240307"_s};
+    }
+    
+    return models;
+}
+
+QStringList acpAgentAvailableModels(const Settings &settings, const QString &agentId)
+{
+    QStringList models;
+    
+    // If we have stored agent models in settings, use them
+    const QJsonDocument doc = QJsonDocument::fromJson(settings.acpAgentModels.toUtf8());
+    if (doc.isObject()) {
+        const QJsonObject agentModels = doc.object();
+        const QString effectiveAgentId = agentId.isEmpty() ? settings.acpAgentId : agentId;
+        const QJsonValue modelsValue = agentModels.value(effectiveAgentId);
+        if (modelsValue.isArray()) {
+            const QJsonArray modelsArray = modelsValue.toArray();
+            for (const QJsonValue &modelValue : modelsArray) {
+                const QString model = modelValue.toString();
+                if (!model.isEmpty()) {
+                    models.append(model);
+                }
+            }
+        }
+    }
+    
+    // If no models are stored, try to discover them from the agent
+    if (models.isEmpty()) {
+        const QString effectiveAgentId = agentId.isEmpty() ? settings.acpAgentId : agentId;
+        const QString effectiveCommand = acpEffectiveCommand(settings);
+        models = discoverAcpAgentModels(effectiveAgentId, effectiveCommand);
+    }
+    
+    // Always include the currently configured model if it's not already there
+    if (!settings.acpModel.isEmpty() && !models.contains(settings.acpModel)) {
+        models.prepend(settings.acpModel);
+    }
+    
+    return models;
 }
 
 } // namespace KateAi

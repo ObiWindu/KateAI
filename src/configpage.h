@@ -208,6 +208,8 @@ private:
     void addMcpServer();
     void removeMcpServer();
     void refreshMcpServerTable();
+
+    QString getBinaryPlatformKey() const;
 };
 
 } // namespace KateAi
