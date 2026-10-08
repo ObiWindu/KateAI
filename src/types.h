@@ -198,6 +198,10 @@ struct Settings {
     QString acpCommand = QStringLiteral("grok");
     QString acpArgs = QStringLiteral("agent stdio");
     QString acpApiKeyEnv = QStringLiteral("XAI_API_KEY");
+    // Installed ACP registry entries as compact JSON objects (id, name,
+    // command, args, package, distribution). Kept in user settings so the
+    // registry selection is available in every chat.
+    QString acpInstalledAgents;
     ApiFormat apiFormat = ApiFormat::AcpNative;
     PermissionMode permissionMode = PermissionMode::Ask;
     SandboxProfile sandbox = SandboxProfile::Workspace;

@@ -11,6 +11,7 @@
 
 #include <QHash>
 #include <QList>
+#include <QJsonArray>
 #include <QWidget>
 #include "llmclient.h"
 
@@ -19,12 +20,16 @@
 class QComboBox;
 class QCheckBox;
 class QLineEdit;
+class QLabel;
 class QPlainTextEdit;
 class QPushButton;
 class QSpinBox;
 class QDoubleSpinBox;
 class QTableWidget;
 class QTreeWidget;
+class QListWidget;
+class QNetworkAccessManager;
+class QProcess;
 
 namespace KateAi
 {
@@ -82,6 +87,11 @@ private:
     QLineEdit *m_acpCommand = nullptr;
     QLineEdit *m_acpArgs = nullptr;
     QLineEdit *m_acpApiKeyEnv = nullptr;
+    QLineEdit *m_acpRegistrySearch = nullptr;
+    QListWidget *m_acpRegistryResults = nullptr;
+    QLabel *m_acpRegistryStatus = nullptr;
+    QNetworkAccessManager *m_acpRegistryNetwork = nullptr;
+    QJsonArray m_acpRegistryAgents;
     QComboBox *m_apiFormat = nullptr;
     void applySelectedAcpPreset();
     void updateAcpNativeEnabled();
