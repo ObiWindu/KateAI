@@ -235,14 +235,6 @@ EditTracker::EditTracker(QWidget *parent)
     barLayout->addWidget(m_countLabel);
     barLayout->addStretch();
 
-    m_undoBtn = new QPushButton(i18n("Undo"), m_barWidget);
-    m_undoBtn->setCursor(Qt::PointingHandCursor);
-    m_undoBtn->setFixedHeight(30);
-    m_undoBtn->setStyleSheet(undoStyle());
-    m_undoBtn->setToolTip(i18n("Undo the last keep/reject decision"));
-    connect(m_undoBtn, &QPushButton::clicked, this, &EditTracker::undoLast);
-    barLayout->addWidget(m_undoBtn);
-
     m_acceptAllBtn = new QPushButton(i18n("Keep All"), m_barWidget);
     m_acceptAllBtn->setCursor(Qt::PointingHandCursor);
     m_acceptAllBtn->setFixedHeight(30);
@@ -258,6 +250,16 @@ EditTracker::EditTracker(QWidget *parent)
     m_rejectAllBtn->setToolTip(i18n("Revert every pending change to its pre-edit content"));
     connect(m_rejectAllBtn, &QPushButton::clicked, this, &EditTracker::rejectAll);
     barLayout->addWidget(m_rejectAllBtn);
+
+    m_toggleListBtn = new QPushButton(i18n("Show files"), m_barWidget);
+    m_toggleListBtn->setCursor(Qt::PointingHandCursor);
+    m_toggleListBtn->setFixedHeight(30);
+    m_toggleListBtn->setStyleSheet(undoStyle());
+    m_toggleListBtn->setToolTip(i18n("Show or hide the pending file list"));
+    connect(m_toggleListBtn, &QPushButton::clicked, this, [this]() {
+        setFileListVisible(!m_fileListVisible);
+    });
+    barLayout->addWidget(m_toggleListBtn);
 
     m_barWidget->setStyleSheet(QStringLiteral(
                                     "#EditTrackerBar { background-color: %1; border-top: 1px solid %2; }")
@@ -373,6 +375,7 @@ void EditTracker::clear()
     closeAllReviews();
     m_groups.clear();
     m_undoStack.clear();
+    m_fileListVisible = false;
     updateUI();
     m_barWidget->hide();
     m_listContainer->hide();
@@ -534,19 +537,26 @@ void EditTracker::updateUI()
         m_countLabel->setText(i18n("%1 pending in %2", pendingCount, i18np("1 file", "%n files", fileCount)));
         m_acceptAllBtn->setEnabled(true);
         m_rejectAllBtn->setEnabled(true);
-        m_undoBtn->setEnabled(canUndo());
         m_barWidget->show();
-        m_listContainer->show();
+        setFileListVisible(m_fileListVisible);
     } else {
         m_countLabel->clear();
         m_acceptAllBtn->setEnabled(false);
         m_rejectAllBtn->setEnabled(false);
-        m_undoBtn->setEnabled(false);
         m_barWidget->hide();
-        m_listContainer->hide();
+        setFileListVisible(false);
     }
 
     rebuildEditList();
+}
+
+void EditTracker::setFileListVisible(bool visible)
+{
+    m_fileListVisible = visible && hasPendingEdits();
+    m_listContainer->setVisible(m_fileListVisible);
+    if (m_toggleListBtn) {
+        m_toggleListBtn->setText(m_fileListVisible ? i18n("Hide files") : i18n("Show files"));
+    }
 }
 
 QWidget *EditTracker::createRow(const Group &group)

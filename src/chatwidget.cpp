@@ -58,6 +58,7 @@
 #include <QJsonDocument>
 #include <QTimer>
 #include <QVBoxLayout>
+#include <QWidgetAction>
 #include <QUuid>
 
 #include <algorithm>
@@ -673,7 +674,12 @@ ChatWidget::ChatWidget(QWidget *parent)
             retireIntentWidget(subtaskWidget);
         }
         if (auto *widget = m_toolCallWidgets.value(result.toolCallId)) {
-            widget->setFinished(result);
+            // Use rawOutput for UI display (clean execution output), fall back to output for compatibility
+            ToolResult displayResult = result;
+            if (!result.rawOutput.isEmpty()) {
+                displayResult.output = result.rawOutput;
+            }
+            widget->setFinished(displayResult);
         }
         ++m_completedToolCount;
         m_turnStatus->setCompletedToolCount(m_completedToolCount);
@@ -996,9 +1002,7 @@ void ChatWidget::addUserMessage(const QString &text)
     headerLayout->setContentsMargins(0, 0, 0, 0);
 
     auto *header = new QLabel(i18n("You"), card);
-    // The user card is light, unlike the rest of the dark panel, so its text
-    // needs an explicit dark foreground for accessible contrast.
-    header->setStyleSheet(QStringLiteral("QLabel { color: #4b4b52; font-size: 10px; font-weight: 600; "
+    header->setStyleSheet(QStringLiteral("QLabel { color: #ffffff; font-size: 10px; font-weight: 600; "
                                          "letter-spacing: 0.6px; border: none; background: transparent; }"));
     headerLayout->addWidget(header);
     headerLayout->addStretch();
@@ -1012,7 +1016,7 @@ void ChatWidget::addUserMessage(const QString &text)
     msgLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
     msgLabel->setAlignment(Qt::AlignLeft | Qt::AlignTop);
     msgLabel->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum);
-    msgLabel->setStyleSheet(QStringLiteral("QLabel { color: #242429; font-size: 13px; border: none; background: transparent; }"));
+    msgLabel->setStyleSheet(QStringLiteral("QLabel { color: #ffffff; font-size: 13px; border: none; background: transparent; }"));
     msgLabel->setText(escape(text).replace(u"\n"_s, u"<br>"_s));
     cardLayout->addWidget(msgLabel);
 
@@ -1054,9 +1058,10 @@ void ChatWidget::setStreaming(const QString &text)
         auto *headerLayout = new QHBoxLayout;
         headerLayout->setContentsMargins(0, 0, 0, 0);
 
-        // A caption plus a single live dot. Two icons here competed for attention;
-        // the dot alone already answers "is this still running?".
-        auto *header = new QLabel(i18n("Kate AI"), m_activeAssistantWidget.data());
+        // A persistent badge distinguishes the primary Kate AI turn from
+        // delegated-agent cards, while the adjacent dot still carries the live
+        // streaming state.
+        auto *header = new QLabel(i18n("✦  Kate AI"), m_activeAssistantWidget.data());
         header->setStyleSheet(ChatTheme::roleHeader());
         headerLayout->addWidget(header);
 
@@ -3064,6 +3069,31 @@ void ChatWidget::showSettingsMenu()
             });
         }
     }
+
+    // ACP does not expose a common model catalogue. This editable submenu lets
+    // users select the identifier supported by their chosen ACP agent without
+    // forcing an incomplete list of provider-specific model names.
+    auto *acpMenu = menu.addMenu(i18n("ACP Agent"));
+    acpMenu->setStyleSheet(menu.styleSheet());
+    auto *acpModelMenu = acpMenu->addMenu(i18n("Model"));
+    acpModelMenu->setStyleSheet(menu.styleSheet());
+    auto *modelInputAction = new QWidgetAction(acpModelMenu);
+    auto *modelInput = new QLineEdit(acpModelMenu);
+    modelInput->setPlaceholderText(i18n("Provider default"));
+    modelInput->setText(m_settings.acpModel);
+    modelInput->setMinimumWidth(240);
+    modelInputAction->setDefaultWidget(modelInput);
+    acpModelMenu->addAction(modelInputAction);
+    connect(modelInput, &QLineEdit::returnPressed, this, [this, modelInput, &menu]() {
+        m_settings.provider = Provider::Acp;
+        m_preferredProvider = Provider::Acp;
+        m_settings.acpModel = modelInput->text().trimmed();
+        updateModelSelectorLabel();
+        updateTokenDisplay();
+        m_agent.setSettings(m_settings);
+        Q_EMIT settingsChanged(m_settings);
+        menu.close();
+    });
 
     // Auto-approve tools that still prompt
     auto *autoApproveMenu = menu.addMenu(i18n("Auto-approve tools"));

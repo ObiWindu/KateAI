@@ -61,16 +61,32 @@ static QString contentBlockText(const QJsonValue &content)
     return obj.value(u"text"_s).toString();
 }
 
-static QString toolContentText(const QJsonArray &content)
+// ACP agents use both the standard content-block array and shorthand output
+// shapes. Preserve useful results even when an agent uses the latter.
+static QString toolContentText(const QJsonValue &content)
 {
     QStringList parts;
-    for (const QJsonValue &item : content) {
+    const QJsonArray blocks = content.isArray() ? content.toArray() : QJsonArray{content};
+    for (const QJsonValue &item : blocks) {
+        if (item.isString()) {
+            parts.append(item.toString());
+            continue;
+        }
         const QJsonObject obj = item.toObject();
+        if (obj.isEmpty()) {
+            continue;
+        }
         const QString type = obj.value(u"type"_s).toString();
         if (type == u"content"_s || type.isEmpty()) {
             const QString text = contentBlockText(obj.contains(u"content"_s) ? obj.value(u"content"_s) : item);
             if (!text.isEmpty()) {
                 parts.append(text);
+            } else if (obj.contains(u"output"_s)) {
+                parts.append(toolContentText(obj.value(u"output"_s)));
+            } else if (obj.contains(u"result"_s)) {
+                parts.append(toolContentText(obj.value(u"result"_s)));
+            } else {
+                parts.append(jsonText(item));
             }
         } else if (type == u"diff"_s) {
             parts.append(unifiedDiff(obj.value(u"path"_s).toString(),
@@ -78,6 +94,14 @@ static QString toolContentText(const QJsonArray &content)
                                      obj.value(u"newText"_s).toString()));
         } else if (type == u"text"_s) {
             parts.append(obj.value(u"text"_s).toString());
+        } else if (obj.contains(u"content"_s)) {
+            parts.append(toolContentText(obj.value(u"content"_s)));
+        } else if (obj.contains(u"output"_s)) {
+            parts.append(toolContentText(obj.value(u"output"_s)));
+        } else if (obj.contains(u"result"_s)) {
+            parts.append(toolContentText(obj.value(u"result"_s)));
+        } else {
+            parts.append(jsonText(item));
         }
     }
     return parts.join(u"\n"_s);
@@ -507,6 +531,16 @@ void AcpClient::maybeAuthenticate(const QJsonArray &authMethods)
         openSession();
         return;
     }
+
+    // If no API key is configured, skip authentication and let the agent use
+    // its existing CLI login session. Most ACP agents (Grok Build, Claude Agent,
+    // Codex, Gemini CLI, etc.) support this workflow.
+    const bool hasApiKey = !m_settings.acpApiKey.trimmed().isEmpty();
+    if (!hasApiKey) {
+        openSession();
+        return;
+    }
+
     const QString effectiveArgs = acpEffectiveArgs(m_settings);
     const bool codexAgent = m_settings.acpAgentId == u"codex-acp"_s
         || effectiveArgs.contains(u"@agentclientprotocol/codex-acp"_s);
@@ -978,9 +1012,15 @@ void AcpClient::handleSessionUpdate(const QJsonObject &update)
             result.toolCallId = toolCallId;
             result.name = existing.toolName;
             result.ok = status == u"completed"_s;
-            result.output = toolContentText(update.value(u"content"_s).toArray());
+            result.output = toolContentText(update.value(u"content"_s));
             if (result.output.isEmpty()) {
                 result.output = jsonText(update.value(u"rawOutput"_s));
+            }
+            if (result.output.isEmpty()) {
+                result.output = jsonText(update.value(u"output"_s));
+            }
+            if (result.output.isEmpty()) {
+                result.output = jsonText(update.value(u"result"_s));
             }
             m_liveTools.remove(toolCallId);
             Q_EMIT toolFinished(result);

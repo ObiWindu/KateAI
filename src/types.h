@@ -159,7 +159,8 @@ struct PermissionRequest {
 struct ToolResult {
     QString toolCallId;
     QString name;
-    QString output;
+    QString output;          // Formatted output for conversation history (with metadata)
+    QString rawOutput;       // Raw output from tool execution (for UI display)
     bool ok = true;
     // True when the operation was stopped deliberately rather than failing.
     bool cancelled = false;

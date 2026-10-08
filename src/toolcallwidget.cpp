@@ -32,12 +32,11 @@ using namespace Qt::Literals::StringLiterals;
 namespace
 {
 
-// How many lines a tool header, and a command preview, may occupy. A `bash`
-// card carries the whole command line, and a multi-line script can run to
+// How many lines a tool header may occupy. A `bash` card carries the whole
+// command line, and a multi-line script can run to
 // hundreds of characters; left unbounded, one card grew tall enough to bury the
 // conversation around it. Three lines is enough to recognise what ran.
 constexpr int kMaxTitleLines = 3;
-constexpr int kMaxPreviewLines = 3;
 
 // Keeps at most `maxLines` of already-wrapped text, marking that some was
 // dropped.
@@ -57,19 +56,6 @@ QString clampToLines(const QString &text, int maxLines, const QFontMetrics &fm, 
     kept.last() = fm.elidedText(kept.last().trimmed() + QStringLiteral(" …"),
                                 Qt::ElideRight,
                                 std::max(24, lineWidth));
-    return kept.join(u'\n');
-}
-
-// Same idea for unwrapped source text, where a "line" is a newline.
-QString clampSourceLines(const QString &text, int maxLines)
-{
-    const QStringList lines = text.split(u'\n');
-    if (lines.size() <= maxLines) {
-        return text;
-    }
-    QStringList kept = lines.mid(0, maxLines);
-    kept.last() = kept.last().trimmed();
-    kept << i18n("… %1 more lines", lines.size() - maxLines);
     return kept.join(u'\n');
 }
 
@@ -272,47 +258,9 @@ ToolCallWidget::ToolCallWidget(const QString &toolCallId, QWidget *parent)
         root->addWidget(m_approvalRow);
         m_approvalRow->hide();
 
-    // Proposed edit diff — always shown in a highlighted box so the edited
-    // code is visible in the chat transcript without needing to expand the
-    // tool card. Only populated for edit_file / write_file tools.
-    m_describeDiff = new QTextBrowser(this);
-    m_describeDiff->setReadOnly(true);
-    m_describeDiff->setOpenExternalLinks(false);
-    m_describeDiff->setMinimumWidth(0);
-    m_describeDiff->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
-    m_describeDiff->setLineWrapMode(QTextEdit::WidgetWidth);
-    m_describeDiff->setWordWrapMode(QTextOption::WrapAnywhere);
-    m_describeDiff->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    m_describeDiff->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    m_describeDiff->setStyleSheet(
-        QStringLiteral(
-            "QTextBrowser {"
-            "  background-color: %1;"
-            "  color: %2;"
-            "  border: 1px solid %3;"
-            "  border-radius: 6px;"
-            "  padding: 8px;"
-            "  font-family: monospace;"
-            "  font-size: 11px;"
-            "  line-height: 1.4;"
-            "}")
-        .arg(ChatTheme::codeBlockBg(), ChatTheme::textPrimary(), ChatTheme::border()));
-    m_describeDiff->document()->setDefaultStyleSheet(
-        QStringLiteral(
-            "body { color: %1; font-family: monospace; font-size: 11px; margin: 0; padding: 0; }"
-            ".removed { color: %2; }"
-            ".added { color: %3; }"
-            ".hunk { color: %4; }"
-            "pre { margin: 0; white-space: pre-wrap; font-family: monospace; font-size: 11px; }"
-            "p { margin: 0; white-space: pre-wrap; }")
-            .arg(ChatTheme::textPrimary(),
-                 QStringLiteral("#ff9a9a"),
-                 QStringLiteral("#8ddb7a"),
-                 ChatTheme::textMuted()));
-    m_describeDiff->hide();
-    root->addWidget(m_describeDiff);
-
-    // Details container — initially hidden, holds the raw tool output
+    // A tool has one result surface. Keeping a second preview box below the
+    // card duplicated information and made completed calls harder to scan.
+    // The result itself is expanded when it arrives.
     m_detailsContainer = new QWidget(this);
     m_detailsContainer->setMaximumHeight(0);
     auto *detailsLayout = new QVBoxLayout(m_detailsContainer);
@@ -338,13 +286,13 @@ ToolCallWidget::ToolCallWidget(const QString &toolCallId, QWidget *parent)
             "  font-family: monospace;"
             "  font-size: 11px;"
             "}")
-        .arg(ChatTheme::codeBlockBg(), ChatTheme::textMuted()));
+        .arg(ChatTheme::codeBlockBg(), QStringLiteral("#ffffff")));
     m_details->document()->setDefaultStyleSheet(
         QStringLiteral(
             "body { color: %1; font-family: monospace; font-size: 11px; margin: 0; padding: 0; }"
             "pre { margin: 0; white-space: pre-wrap; font-family: monospace; font-size: 11px; }"
             "p { margin: 0; white-space: pre-wrap; }")
-            .arg(ChatTheme::textPrimary()));
+            .arg(QStringLiteral("#ffffff")));
     detailsLayout->addWidget(m_details);
 
     root->addWidget(m_detailsContainer);
@@ -376,9 +324,6 @@ void ToolCallWidget::setToolInfo(const QString &toolName, const QString &summary
     m_title->setToolTip(ChatTheme::toolLabel(m_toolName) + u"  ·  "_s + m_toolName
                         + (m_titleText.isEmpty() ? QString() : u"\n"_s + m_titleText));
     updateTitleText();
-    if (!isDiffTool(toolName) && !summary.isEmpty()) {
-        setPreviewText(summary);
-    }
     updateStyle();
 }
 
@@ -486,34 +431,16 @@ void ToolCallWidget::setDescribeDiff(const QString &diff)
     }
     m_diffStat->setText(QStringLiteral("+%1 −%2").arg(m_diffAdded).arg(m_diffRemoved));
     m_diffStat->setVisible(true);
-    showPreviewHtml(diffToHtml(diff));
 }
 
 void ToolCallWidget::setPreviewText(const QString &text)
 {
-    if (m_hasDiffPreview) {
-        return;
-    }
-    if (text.trimmed().isEmpty()) {
-        return;
-    }
-    // Only ever a command or a path: setToolInfo routes diffs to
-    // setDescribeDiff instead, and a diff is left whole because it is the thing
-    // being judged when an edit is approved.
-    const QString language = languageForTool(m_toolName);
-    const QString html = CodeHighlight::htmlForCode(clampSourceLines(text, kMaxPreviewLines), language);
-    showPreviewHtml(html);
+    Q_UNUSED(text);
 }
 
 void ToolCallWidget::showPreviewHtml(const QString &html)
 {
-    if (!m_describeDiff) {
-        return;
-    }
-
-    m_describeDiff->setHtml(html);
-    syncPreviewVisibility();
-    scheduleReflow();
+    Q_UNUSED(html);
 }
 
 QString ToolCallWidget::plainToHtml(const QString &text) const
@@ -601,19 +528,21 @@ void ToolCallWidget::setFinished(const ToolResult &result)
         m_status->setStyleSheet(QStringLiteral("QLabel { color: %1; font-size: 14px; }").arg(ChatTheme::danger()));
     }
 
-    // Truncate very long outputs. Every tool gets the same highlighted full
-    // result in its expanded view; the collapsed preview remains deliberately
-    // short, so a command, search, MCP response, or file edit is readable
-    // without making the transcript into a wall of logs.
-    const QString output = result.output.length() > 4000
-        ? result.output.left(4000) + i18n("\n\n… (truncated)")
-        : result.output;
+    // Keep the complete result for normal commands and reads, bounded by lines
+    // rather than characters so a long but meaningful line is never silently
+    // cut in half. The card opens on completion: output belongs in the tool
+    // call itself, not in a second preview box below it.
+    QStringList lines = result.output.split(u'\n');
+    constexpr int maxResultLines = 200;
+    if (lines.size() > maxResultLines) {
+        const int hidden = lines.size() - maxResultLines;
+        lines = lines.mid(0, maxResultLines);
+        lines.append(i18n("… %1 more lines", hidden));
+    }
+    const QString output = lines.join(u'\n');
     const QString language = languageForTool(m_toolName);
     m_details->setHtml(CodeHighlight::htmlForCode(output, language));
-    if (!m_hasDiffPreview && !output.trimmed().isEmpty()) {
-        setPreviewText(output);
-    }
-
+    setExpanded(!output.trimmed().isEmpty());
     applyDetailsHeight();
     scheduleReflow();
     updateStyle();
@@ -651,17 +580,6 @@ bool ToolCallWidget::isFileEditTool() const
 
 void ToolCallWidget::syncPreviewVisibility()
 {
-    if (!m_describeDiff) {
-        return;
-    }
-    // File-edit diffs stay visible even when the card is collapsed.
-    const bool show = m_hasDiffPreview || m_expanded;
-    if (show && !m_describeDiff->toPlainText().isEmpty()) {
-        m_describeDiff->show();
-        reflowPreview();
-    } else if (!m_hasDiffPreview) {
-        m_describeDiff->hide();
-    }
 }
 
 void ToolCallWidget::toggleExpand()
@@ -815,7 +733,6 @@ void ToolCallWidget::scheduleReflow()
 void ToolCallWidget::reflowNow()
 {
     updateTitleText();
-    reflowPreview();
     applyDetailsHeight();
     updateGeometry();
 }
@@ -866,21 +783,7 @@ void ToolCallWidget::updateTitleText()
 
 int ToolCallWidget::previewFitHeight() const
 {
-    if (!m_describeDiff) {
-        return 0;
-    }
-    int vw = m_describeDiff->viewport()->width();
-    if (vw < 40) {
-        vw = std::max(40, width() - 8);
-    }
-    const int fitted = fittedDocumentHeight(m_describeDiff->document(), vw, 20);
-    if (m_hasDiffPreview) {
-        return fitted;
-    }
-    // Command preview: hard-cap the box as well as the text, because a long
-    // line that the panel wraps could still push past three visual rows.
-    const QFontMetrics fm(m_describeDiff->font());
-    return std::min(fitted, fm.lineSpacing() * kMaxPreviewLines + 20);
+    return 0;
 }
 
 int ToolCallWidget::detailsFitHeight() const
@@ -897,11 +800,6 @@ int ToolCallWidget::detailsFitHeight() const
 
 void ToolCallWidget::reflowPreview()
 {
-    if (!m_describeDiff || m_describeDiff->isHidden()) {
-        return;
-    }
-    m_describeDiff->setFixedHeight(previewFitHeight());
-    updateGeometry();
 }
 
 void ToolCallWidget::reflowDetails()

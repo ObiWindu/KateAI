@@ -139,6 +139,7 @@ private Q_SLOTS:
         QJsonArray plan;
         int toolsStarted = 0;
         int toolsFinished = 0;
+        QString toolOutput;
         QString stopReason;
         QString finishedText;
         QString error;
@@ -158,6 +159,7 @@ private Q_SLOTS:
         connect(&client, &AcpClient::toolFinished, this, [&](const ToolResult &result) {
             ++toolsFinished;
             QVERIFY(result.ok);
+            toolOutput = result.output;
         });
         connect(&client, &AcpClient::promptFinished, this, [&](const QString &reason, const QString &full, const QJsonArray &) {
             stopReason = reason;
@@ -178,6 +180,7 @@ private Q_SLOTS:
         QCOMPARE(finishedText, u"hello world"_s);
         QCOMPARE(toolsStarted, 1);
         QCOMPARE(toolsFinished, 1);
+        QCOMPARE(toolOutput, u"ok"_s);
         QCOMPARE(plan.size(), 1);
         QCOMPARE(client.sessionId(), u"sess_kateai_test"_s);
         client.stop();

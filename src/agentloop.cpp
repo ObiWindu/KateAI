@@ -1259,6 +1259,7 @@ void AgentLoop::appendToolResult(const ToolCall &call, ToolResult result)
 {
     result.toolCallId = call.id;
     result.name = call.name;
+    result.rawOutput = result.output;  // Preserve raw output for UI display
 
     if (result.ok && (call.name == u"bash"_s || call.name == u"read_file"_s)
         && result.output.contains(u"truncated"_s, Qt::CaseInsensitive)) {
