@@ -6,6 +6,7 @@
 #include "toolcallwidget.h"
 
 #include "chattheme.h"
+#include "codehighlight.h"
 
 #include <KLocalizedString>
 
@@ -13,7 +14,6 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QMouseEvent>
-#include <QPlainTextEdit>
 #include <QPropertyAnimation>
 #include <QPushButton>
 #include <QResizeEvent>
@@ -319,17 +319,18 @@ ToolCallWidget::ToolCallWidget(const QString &toolCallId, QWidget *parent)
     detailsLayout->setContentsMargins(10, 0, 10, 8);
     detailsLayout->setSpacing(0);
 
-    m_details = new QPlainTextEdit(this);
+    m_details = new QTextBrowser(this);
     m_details->setReadOnly(true);
+    m_details->setOpenExternalLinks(false);
     m_details->setMinimumWidth(0);
     m_details->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-    m_details->setLineWrapMode(QPlainTextEdit::WidgetWidth);
+    m_details->setLineWrapMode(QTextEdit::WidgetWidth);
     m_details->setWordWrapMode(QTextOption::WrapAnywhere);
     m_details->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_details->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_details->setStyleSheet(
         QStringLiteral(
-            "QPlainTextEdit {"
+            "QTextBrowser {"
             "  background-color: %1;"
             "  color: %2;"
             "  border: none;"
@@ -338,6 +339,12 @@ ToolCallWidget::ToolCallWidget(const QString &toolCallId, QWidget *parent)
             "  font-size: 11px;"
             "}")
         .arg(ChatTheme::codeBlockBg(), ChatTheme::textMuted()));
+    m_details->document()->setDefaultStyleSheet(
+        QStringLiteral(
+            "body { color: %1; font-family: monospace; font-size: 11px; margin: 0; padding: 0; }"
+            "pre { margin: 0; white-space: pre-wrap; font-family: monospace; font-size: 11px; }"
+            "p { margin: 0; white-space: pre-wrap; }")
+            .arg(ChatTheme::textPrimary()));
     detailsLayout->addWidget(m_details);
 
     root->addWidget(m_detailsContainer);
@@ -493,7 +500,9 @@ void ToolCallWidget::setPreviewText(const QString &text)
     // Only ever a command or a path: setToolInfo routes diffs to
     // setDescribeDiff instead, and a diff is left whole because it is the thing
     // being judged when an edit is approved.
-    showPreviewHtml(plainToHtml(clampSourceLines(text, kMaxPreviewLines)));
+    const QString language = languageForTool(m_toolName);
+    const QString html = CodeHighlight::htmlForCode(clampSourceLines(text, kMaxPreviewLines), language);
+    showPreviewHtml(html);
 }
 
 void ToolCallWidget::showPreviewHtml(const QString &html)
@@ -523,6 +532,12 @@ QString ToolCallWidget::plainToHtml(const QString &text) const
 
 QString ToolCallWidget::diffToHtml(const QString &diff) const
 {
+    // Use Kate's syntax highlighting for diffs to get proper token colours.
+    const QString highlighted = CodeHighlight::htmlBodyForCode(diff, u"diff"_s);
+    if (!highlighted.isEmpty()) {
+        return u"<body>"_s + highlighted + u"</body>"_s;
+    }
+    // Fallback to the simple line-by-line rendering if highlighting is unavailable.
     QString out = u"<body>"_s;
     for (const QString &line : diff.split(u'\n')) {
         if (line.startsWith(u"---"_s) || line.startsWith(u"+++"_s)) {
@@ -586,19 +601,17 @@ void ToolCallWidget::setFinished(const ToolResult &result)
         m_status->setStyleSheet(QStringLiteral("QLabel { color: %1; font-size: 14px; }").arg(ChatTheme::danger()));
     }
 
-    // Truncate very long outputs. File-edit cards keep the diff in the marine
-    // preview and put the tool result in details. Other tools put output only
-    // in the preview so expanding does not stack a duplicate copy.
+    // Truncate very long outputs. Every tool gets the same highlighted full
+    // result in its expanded view; the collapsed preview remains deliberately
+    // short, so a command, search, MCP response, or file edit is readable
+    // without making the transcript into a wall of logs.
     const QString output = result.output.length() > 4000
         ? result.output.left(4000) + i18n("\n\n… (truncated)")
         : result.output;
-    if (m_hasDiffPreview) {
-        m_details->setPlainText(output);
-    } else {
-        m_details->clear();
-        if (!output.trimmed().isEmpty()) {
-            setPreviewText(output);
-        }
+    const QString language = languageForTool(m_toolName);
+    m_details->setHtml(CodeHighlight::htmlForCode(output, language));
+    if (!m_hasDiffPreview && !output.trimmed().isEmpty()) {
+        setPreviewText(output);
     }
 
     applyDetailsHeight();
@@ -716,6 +729,30 @@ QString ToolCallWidget::iconForTool(const QString &toolName) const
     if (toolName == u"new_task"_s) return u"\u{1F9E9}"_s;
     if (toolName.startsWith(u"mcp__"_s)) return u"\u{1F50C}"_s;
     return u"\u{2699}"_s;
+}
+
+QString ToolCallWidget::languageForTool(const QString &toolName) const
+{
+    // Map tool names to syntax highlighting languages
+    if (toolName == u"bash"_s) return u"Bash"_s;
+    if (toolName == u"read_file"_s || toolName == u"write_file"_s
+        || toolName == u"edit_file"_s || toolName == u"multi_edit_file"_s
+        || toolName == u"multi_replace_file_content"_s || toolName == u"list_dir"_s
+        || toolName == u"glob"_s) {
+        // File operations can return a mix of paths, code and metadata. JSON
+        // is a useful neutral definition for structured output; unknown text
+        // still keeps the consistently styled code-block treatment.
+        return u"JSON"_s;
+    }
+    if (toolName == u"grep"_s) return u"Text"_s;
+    if (toolName == u"web_search"_s || toolName == u"web_fetch"_s) return u"JSON"_s;
+    if (toolName == u"query_project_graph"_s) return u"JSON"_s;
+    if (toolName == u"new_task"_s) return u"JSON"_s;
+    if (toolName.startsWith(u"mcp__"_s)) return u"JSON"_s;
+    // Tool protocols commonly return key/value text even when they are not a
+    // built-in tool. Give those calls a real definition too instead of leaving
+    // them as uncoloured plain text.
+    return u"JSON"_s;
 }
 
 QString ToolCallWidget::colorForRisk(ToolRisk risk) const

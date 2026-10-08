@@ -37,6 +37,10 @@ bool isAvailable();
 // back to its own rendering.
 QString htmlForCode(const QString &code, const QString &language);
 
+// HTML body only (no wrapper table, no language label). Returns an empty string
+// when the language is unknown, so the caller can fall back to its own rendering.
+QString htmlBodyForCode(const QString &code, const QString &language);
+
 // Maps the many spellings models emit ("js", "c++", "sh") onto definition
 // names KSyntaxHighlighting knows. Returns the input unchanged when there is no
 // better match.

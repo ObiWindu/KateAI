@@ -996,7 +996,10 @@ void ChatWidget::addUserMessage(const QString &text)
     headerLayout->setContentsMargins(0, 0, 0, 0);
 
     auto *header = new QLabel(i18n("You"), card);
-    header->setStyleSheet(ChatTheme::roleHeader());
+    // The user card is light, unlike the rest of the dark panel, so its text
+    // needs an explicit dark foreground for accessible contrast.
+    header->setStyleSheet(QStringLiteral("QLabel { color: #4b4b52; font-size: 10px; font-weight: 600; "
+                                         "letter-spacing: 0.6px; border: none; background: transparent; }"));
     headerLayout->addWidget(header);
     headerLayout->addStretch();
 
@@ -1009,7 +1012,7 @@ void ChatWidget::addUserMessage(const QString &text)
     msgLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
     msgLabel->setAlignment(Qt::AlignLeft | Qt::AlignTop);
     msgLabel->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum);
-    msgLabel->setStyleSheet(ChatTheme::messageText());
+    msgLabel->setStyleSheet(QStringLiteral("QLabel { color: #242429; font-size: 13px; border: none; background: transparent; }"));
     msgLabel->setText(escape(text).replace(u"\n"_s, u"<br>"_s));
     cardLayout->addWidget(msgLabel);
 

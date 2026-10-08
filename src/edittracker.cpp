@@ -6,6 +6,7 @@
 #include "edittracker.h"
 
 #include "chattheme.h"
+#include "codehighlight.h"
 
 #include <KLocalizedString>
 
@@ -35,6 +36,16 @@ namespace KateAi
 namespace
 {
 
+// The tracker is deliberately compact: it is a review control, not the main
+// transcript. Keep every size in one place so the bar, rows and review dialog
+// stay at half the chat's usual type scale.
+constexpr qreal kTrackerFontScale = 0.5;
+
+QString trackerFontSize(int pixels)
+{
+    return QString::number(pixels * kTrackerFontScale) + u"px"_s;
+}
+
 QString keepAllStyle()
 {
     // Derived from the theme's success colour at varying alpha rather than a
@@ -48,13 +59,13 @@ QString keepAllStyle()
                "  border-radius: 16px;"
                "  padding: 0 14px;"
                "  font-weight: 600;"
-               "  font-size: 12px;"
+               "  font-size: %7;"
                "}"
                "QPushButton:hover { background-color: %3; }"
                "QPushButton:pressed { background-color: %4; }"
                "QPushButton:disabled { background-color: %5; color: %6; }")
         .arg(ChatTheme::success(), QColor(0x08, 0x12, 0x0e).name(), ChatTheme::accent(), ChatTheme::danger(),
-             QColor(0x1f, 0x3d, 0x2a).name(), ChatTheme::textMuted());
+             QColor(0x1f, 0x3d, 0x2a).name(), ChatTheme::textMuted(), trackerFontSize(12));
 }
 
 QString rejectAllStyle()
@@ -67,12 +78,12 @@ QString rejectAllStyle()
                "  border-radius: 16px;"
                "  padding: 0 14px;"
                "  font-weight: 600;"
-               "  font-size: 12px;"
+               "  font-size: %5;"
                "}"
                "QPushButton:hover { background-color: %2; border-color: %1; color: #fecaca; }"
                "QPushButton:pressed { background-color: %1; }"
                "QPushButton:disabled { color: %3; border-color: %4; }")
-        .arg(ChatTheme::danger(), QColor(0x3f, 0x12, 0x12).name(), ChatTheme::textMuted(), ChatTheme::border());
+        .arg(ChatTheme::danger(), QColor(0x3f, 0x12, 0x12).name(), ChatTheme::textMuted(), ChatTheme::border(), trackerFontSize(12));
 }
 
 QString keepStyle()
@@ -85,11 +96,11 @@ QString keepStyle()
                "  border-radius: 12px;"
                "  padding: 0 10px;"
                "  font-weight: 600;"
-               "  font-size: 11px;"
+               "  font-size: %4;"
                "}"
                "QPushButton:hover { background-color: %1; color: %2; }"
                "QPushButton:pressed { background-color: %3; }")
-        .arg(ChatTheme::success(), QColor(0x08, 0x12, 0x0e).name(), ChatTheme::danger());
+        .arg(ChatTheme::success(), QColor(0x08, 0x12, 0x0e).name(), ChatTheme::danger(), trackerFontSize(11));
 }
 
 QString rejectStyle()
@@ -102,11 +113,11 @@ QString rejectStyle()
                "  border-radius: 12px;"
                "  padding: 0 10px;"
                "  font-weight: 600;"
-               "  font-size: 11px;"
+               "  font-size: %2;"
                "}"
                "QPushButton:hover { background-color: %1; color: #fecaca; }"
                "QPushButton:pressed { background-color: %1; }")
-        .arg(ChatTheme::danger());
+        .arg(ChatTheme::danger(), trackerFontSize(11));
 }
 
 QString reviewStyle()
@@ -119,12 +130,12 @@ QString reviewStyle()
                "  border-radius: 12px;"
                "  padding: 0 10px;"
                "  font-weight: 600;"
-               "  font-size: 11px;"
+               "  font-size: %6;"
                "}"
                "QPushButton:hover { background-color: %4; color: #ffffff; border-color: %5; }"
                "QPushButton:pressed { background-color: %1; }")
         .arg(ChatTheme::hoverBg(), ChatTheme::textPrimary(), ChatTheme::border(), ChatTheme::surfaceBg(),
-             ChatTheme::borderStrong());
+             ChatTheme::borderStrong(), trackerFontSize(11));
 }
 
 QString undoStyle()
@@ -137,11 +148,11 @@ QString undoStyle()
                "  border-radius: 16px;"
                "  padding: 0 12px;"
                "  font-weight: 600;"
-               "  font-size: 12px;"
+               "  font-size: %4;"
                "}"
                "QPushButton:hover { background-color: %3; color: #ffffff; }"
                "QPushButton:disabled { color: #6b7280; border-color: #333333; }")
-        .arg(ChatTheme::textMuted(), ChatTheme::border(), ChatTheme::hoverBg());
+        .arg(ChatTheme::textMuted(), ChatTheme::border(), ChatTheme::hoverBg(), trackerFontSize(12));
 }
 
 int countDiffLines(const QString &diff, QChar marker)
@@ -165,6 +176,12 @@ QString diffToHtml(const QString &diff)
     if (diff.isEmpty()) {
         return QStringLiteral("<body><p>&nbsp;</p></body>");
     }
+    // Use Kate's syntax highlighting for diffs to get proper token colours.
+    const QString highlighted = CodeHighlight::htmlBodyForCode(diff, u"diff"_s);
+    if (!highlighted.isEmpty()) {
+        return u"<body>"_s + highlighted + u"</body>"_s;
+    }
+    // Fallback to the simple line-by-line rendering if highlighting is unavailable.
     QString html = QStringLiteral("<body>");
     const QStringList lines = diff.split(u'\n');
     for (const QString &line : lines) {
@@ -186,12 +203,12 @@ QString diffToHtml(const QString &diff)
 QString diffStylesheet()
 {
     return QStringLiteral(
-               "body { color: %1; font-family: monospace; font-size: 12px; margin: 0; padding: 0; }"
+               "body { color: %1; font-family: monospace; font-size: %2; margin: 0; padding: 0; }"
                ".removed { color: #fca5a5; background-color: #3f1212; }"
                ".added { color: #86efac; background-color: #14532d; }"
                ".hunk { color: #71717a; }"
                "p { margin: 0; padding: 1px 6px; white-space: pre-wrap; }")
-        .arg(ChatTheme::textPrimary());
+        .arg(ChatTheme::textPrimary(), trackerFontSize(12));
 }
 
 } // namespace
@@ -214,7 +231,7 @@ EditTracker::EditTracker(QWidget *parent)
 
     m_countLabel = new QLabel(m_barWidget);
     m_countLabel->setStyleSheet(
-        QStringLiteral("QLabel { color: %1; font-size: 12px; font-weight: 600; }").arg(ChatTheme::textPrimary()));
+        QStringLiteral("QLabel { color: %1; font-size: %2; font-weight: 600; }").arg(ChatTheme::textPrimary(), trackerFontSize(12)));
     barLayout->addWidget(m_countLabel);
     barLayout->addStretch();
 
@@ -545,8 +562,8 @@ QWidget *EditTracker::createRow(const Group &group)
 
     auto *nameLabel = new QLabel(QFileInfo(group.path).fileName(), row);
     nameLabel->setStyleSheet(QStringLiteral(
-                                  "QLabel { color: %1; font-size: 12px; font-weight: 600; background: transparent; border: none; }")
-                                  .arg(ChatTheme::textPrimary()));
+                                  "QLabel { color: %1; font-size: %2; font-weight: 600; background: transparent; border: none; }")
+                                  .arg(ChatTheme::textPrimary(), trackerFontSize(12)));
     // The bare filename is ambiguous the moment a turn touches two files with the
     // same name; the full path is what makes the row actionable.
     nameLabel->setToolTip(group.path);
@@ -558,33 +575,35 @@ QWidget *EditTracker::createRow(const Group &group)
     if (group.pending.size() > 1) {
         auto *countLabel = new QLabel(i18np("1 edit", "%n edits", group.pending.size()), row);
         countLabel->setStyleSheet(QStringLiteral(
-                                      "QLabel { color: %1; font-size: 11px; background: transparent; border: none; }")
-                                      .arg(ChatTheme::textMuted()));
-        countLabel->setToolTip(i18n("The agent edited this file %n time(s) in this turn", group.pending.size()));
+                                      "QLabel { color: %1; font-size: %2; background: transparent; border: none; }")
+                                      .arg(ChatTheme::textMuted(), trackerFontSize(11)));
+        countLabel->setToolTip(i18np("The agent edited this file once in this turn",
+                                     "The agent edited this file %n times in this turn",
+                                     group.pending.size()));
         layout->addWidget(countLabel);
     }
 
     if (group.createdFile) {
         auto *newLabel = new QLabel(i18n("new"), row);
         newLabel->setStyleSheet(QStringLiteral(
-                                   "QLabel { color: %1; font-size: 10px; font-weight: 700; background: transparent; border: none; }")
-                                   .arg(ChatTheme::accent()));
+                                   "QLabel { color: %1; font-size: %2; font-weight: 700; background: transparent; border: none; }")
+                                   .arg(ChatTheme::accent(), trackerFontSize(10)));
         newLabel->setToolTip(i18n("This file did not exist before the agent created it. Rejecting deletes it."));
         layout->addWidget(newLabel);
     }
 
     auto *addedLabel = new QLabel(row);
     addedLabel->setStyleSheet(QStringLiteral(
-                                  "QLabel { color: %1; font-size: 12px; font-weight: 700; font-family: monospace; background: transparent; border: none; }")
-                                  .arg(ChatTheme::success()));
+                                  "QLabel { color: %1; font-size: %2; font-weight: 700; font-family: monospace; background: transparent; border: none; }")
+                                  .arg(ChatTheme::success(), trackerFontSize(12)));
     addedLabel->setText(group.added > 0 ? QStringLiteral("+%1").arg(group.added) : QString());
     addedLabel->setVisible(group.added > 0);
     layout->addWidget(addedLabel);
 
     auto *removedLabel = new QLabel(row);
     removedLabel->setStyleSheet(QStringLiteral(
-                                    "QLabel { color: %1; font-size: 12px; font-weight: 700; font-family: monospace; background: transparent; border: none; }")
-                                    .arg(ChatTheme::danger()));
+                                    "QLabel { color: %1; font-size: %2; font-weight: 700; font-family: monospace; background: transparent; border: none; }")
+                                    .arg(ChatTheme::danger(), trackerFontSize(12)));
     removedLabel->setText(group.removed > 0 ? QStringLiteral("-%1").arg(group.removed) : QString());
     removedLabel->setVisible(group.removed > 0);
     layout->addWidget(removedLabel);
@@ -700,13 +719,13 @@ void EditTracker::showDiffDialog(const QString &path, const Group &group)
     root->setSpacing(12);
 
     auto *title = new QLabel(QFileInfo(path).fileName(), dialog);
-    title->setStyleSheet(QStringLiteral("QLabel { color: %1; font-size: 16px; font-weight: 700; }")
-                             .arg(ChatTheme::textPrimary()));
+    title->setStyleSheet(QStringLiteral("QLabel { color: %1; font-size: %2; font-weight: 700; }")
+                             .arg(ChatTheme::textPrimary(), trackerFontSize(16)));
     root->addWidget(title);
 
     auto *subtitle = new QLabel(path, dialog);
-    subtitle->setStyleSheet(QStringLiteral("QLabel { color: %1; font-size: 11px; font-family: monospace; }")
-                                .arg(ChatTheme::textMuted()));
+    subtitle->setStyleSheet(QStringLiteral("QLabel { color: %1; font-size: %2; font-family: monospace; }")
+                                .arg(ChatTheme::textMuted(), trackerFontSize(11)));
     subtitle->setTextInteractionFlags(Qt::TextSelectableByMouse);
     subtitle->setWordWrap(true);
     root->addWidget(subtitle);
@@ -727,8 +746,8 @@ void EditTracker::showDiffDialog(const QString &path, const Group &group)
     diffBrowser->setOpenExternalLinks(false);
     diffBrowser->setFrameShape(QFrame::NoFrame);
     diffBrowser->setStyleSheet(QStringLiteral(
-                                   "QTextBrowser { background-color: %1; color: %2; border: 1px solid %3; border-radius: 10px; padding: 8px; font-family: monospace; font-size: 12px; }")
-                                   .arg(ChatTheme::codeBlockBg(), ChatTheme::textPrimary(), ChatTheme::border()));
+                                   "QTextBrowser { background-color: %1; color: %2; border: 1px solid %3; border-radius: 10px; padding: 8px; font-family: monospace; font-size: %4; }")
+                                   .arg(ChatTheme::codeBlockBg(), ChatTheme::textPrimary(), ChatTheme::border(), trackerFontSize(12)));
     diffBrowser->document()->setDefaultStyleSheet(diffStylesheet());
     diffBrowser->setHtml(diffToHtml(combined));
     root->addWidget(diffBrowser, 1);
