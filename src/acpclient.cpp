@@ -507,11 +507,23 @@ void AcpClient::maybeAuthenticate(const QJsonArray &authMethods)
         openSession();
         return;
     }
-    const QJsonObject first = authMethods.first().toObject();
-    QString methodId = first.value(u"id"_s).toString();
-    if (methodId.isEmpty()) {
-        methodId = first.value(u"methodId"_s).toString();
+    const QString effectiveArgs = acpEffectiveArgs(m_settings);
+    const bool codexAgent = m_settings.acpAgentId == u"codex-acp"_s
+        || effectiveArgs.contains(u"@agentclientprotocol/codex-acp"_s);
+    const QString preferredMethod = codexAgent && m_settings.acpApiKey.trimmed().isEmpty()
+        ? u"chat-gpt"_s : QString();
+    QJsonObject selectedMethod;
+    for (const QJsonValue &value : authMethods) {
+        const QJsonObject method = value.toObject();
+        QString id = method.value(u"id"_s).toString();
+        if (id.isEmpty()) id = method.value(u"methodId"_s).toString();
+        if (selectedMethod.isEmpty() || (!preferredMethod.isEmpty() && id == preferredMethod)) {
+            selectedMethod = method;
+        }
+        if (!preferredMethod.isEmpty() && id == preferredMethod) break;
     }
+    QString methodId = selectedMethod.value(u"id"_s).toString();
+    if (methodId.isEmpty()) methodId = selectedMethod.value(u"methodId"_s).toString();
     if (methodId.isEmpty()) {
         openSession();
         return;

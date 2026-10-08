@@ -53,6 +53,7 @@
 #include <QScrollBar>
 #include <QScrollArea>
 #include <QTextBrowser>
+#include <QTabWidget>
 #include <QTextDocument>
 #include <QJsonDocument>
 #include <QTimer>
@@ -2566,7 +2567,12 @@ void ChatWidget::showModelMenu()
         u"}"_s);
     root->addWidget(filterEdit);
 
-    auto *list = new QListWidget(popup);
+    auto *pickerTabs = new QTabWidget(popup);
+    m_modelPickerTabs = pickerTabs;
+    auto *modelsPage = new QWidget(pickerTabs);
+    auto *modelsLayout = new QVBoxLayout(modelsPage);
+    modelsLayout->setContentsMargins(0, 0, 0, 0);
+    auto *list = new QListWidget(modelsPage);
     m_modelResultList = list;
     list->setUniformItemSizes(true);
     list->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
@@ -2574,20 +2580,36 @@ void ChatWidget::showModelMenu()
     list->setSelectionMode(QAbstractItemView::SingleSelection);
     list->setFocusPolicy(Qt::NoFocus);
     list->setMinimumHeight(140);
-    root->addWidget(list, 1);
+    modelsLayout->addWidget(list);
+    pickerTabs->addTab(modelsPage, i18n("Models"));
+    auto *acpPage = new QWidget(pickerTabs);
+    auto *acpLayout = new QVBoxLayout(acpPage);
+    acpLayout->setContentsMargins(0, 0, 0, 0);
+    auto *acpList = new QListWidget(acpPage);
+    m_acpAgentResultList = acpList;
+    acpList->setUniformItemSizes(true);
+    acpList->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    acpList->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
+    acpList->setSelectionMode(QAbstractItemView::SingleSelection);
+    acpList->setFocusPolicy(Qt::NoFocus);
+    acpLayout->addWidget(acpList);
+    pickerTabs->addTab(acpPage, i18n("ACP Agents"));
+    root->addWidget(pickerTabs, 1);
 
     connect(filterEdit, &QLineEdit::textChanged, this, [this](const QString &text) {
         m_modelFilter = text;
         applyModelMenuFilter();
     });
     const auto activateCurrent = [this]() {
-        if (!m_modelResultList) {
+        QListWidget *activeList = m_modelPickerTabs && m_modelPickerTabs->currentIndex() == 1
+            ? m_acpAgentResultList.data() : m_modelResultList.data();
+        if (!activeList) {
             return;
         }
-        QListWidgetItem *item = m_modelResultList->currentItem();
+        QListWidgetItem *item = activeList->currentItem();
         if (!item) {
-            for (int i = 0; i < m_modelResultList->count(); ++i) {
-                auto *candidate = m_modelResultList->item(i);
+            for (int i = 0; i < activeList->count(); ++i) {
+                auto *candidate = activeList->item(i);
                 if (candidate && candidate->flags().testFlag(Qt::ItemIsEnabled)
                     && candidate->data(Qt::UserRole).isValid()
                     && candidate->data(Qt::UserRole).toInt() >= 0) {
@@ -2599,8 +2621,12 @@ void ChatWidget::showModelMenu()
         if (!item || item->data(Qt::UserRole).toInt() < 0) {
             return;
         }
-        selectModel(static_cast<Provider>(item->data(Qt::UserRole).toInt()),
-                    item->data(Qt::UserRole + 1).toString());
+        if (m_modelPickerTabs && m_modelPickerTabs->currentIndex() == 1) {
+            selectModel(Provider::Acp, item->data(Qt::UserRole + 1).toString());
+        } else {
+            selectModel(static_cast<Provider>(item->data(Qt::UserRole).toInt()),
+                        item->data(Qt::UserRole + 1).toString());
+        }
     };
     connect(filterEdit, &QLineEdit::returnPressed, this, activateCurrent);
     connect(list, &QListWidget::itemClicked, this, [this](QListWidgetItem *item) {
@@ -2609,6 +2635,10 @@ void ChatWidget::showModelMenu()
         }
         selectModel(static_cast<Provider>(item->data(Qt::UserRole).toInt()),
                     item->data(Qt::UserRole + 1).toString());
+    });
+    connect(acpList, &QListWidget::itemClicked, this, [this](QListWidgetItem *item) {
+        if (!item || item->data(Qt::UserRole).toInt() < 0) return;
+        selectModel(Provider::Acp, item->data(Qt::UserRole + 1).toString());
     });
 
     auto *nextModel = new QShortcut(QKeySequence(Qt::Key_Down), popup);
@@ -2638,6 +2668,8 @@ void ChatWidget::showModelMenu()
         m_modelFilter.clear();
         m_modelFilterEdit = nullptr;
         m_modelResultList = nullptr;
+        m_acpAgentResultList = nullptr;
+        m_modelPickerTabs = nullptr;
         m_modelPopup = nullptr;
         m_modelMenuSelection = -1;
     });
@@ -2695,6 +2727,32 @@ void ChatWidget::fillModelResultList()
 
     QSignalBlocker blocker(m_modelResultList);
     m_modelResultList->clear();
+    if (m_acpAgentResultList) {
+        QSignalBlocker acpBlocker(m_acpAgentResultList);
+        m_acpAgentResultList->clear();
+        const QJsonArray installed = QJsonDocument::fromJson(m_settings.acpInstalledAgents.toUtf8()).array();
+        QListWidgetItem *selectedAgent = nullptr;
+        for (const QJsonValue &value : installed) {
+            const QJsonObject agent = value.toObject();
+            const QString name = agent.value(u"name"_s).toString();
+            const QString description = agent.value(u"description"_s).toString();
+            if (filtering && !name.contains(filter, Qt::CaseInsensitive)
+                && !description.contains(filter, Qt::CaseInsensitive)) continue;
+            auto *item = new QListWidgetItem(u"%1  ·  %2\n%3"_s.arg(name, agent.value(u"version"_s).toString(), description));
+            item->setData(Qt::UserRole, static_cast<int>(Provider::Acp));
+            item->setData(Qt::UserRole + 1, name);
+            m_acpAgentResultList->addItem(item);
+            if (agent.value(u"id"_s).toString() == m_settings.acpAgentId) selectedAgent = item;
+        }
+        if (m_acpAgentResultList->count() == 0) {
+            auto *empty = new QListWidgetItem(i18n("No ACP agents installed. Find agents in Kate AI Configuration → ACP Registry."));
+            empty->setFlags(Qt::NoItemFlags);
+            empty->setData(Qt::UserRole, -1);
+            m_acpAgentResultList->addItem(empty);
+        } else if (selectedAgent) {
+            m_acpAgentResultList->setCurrentItem(selectedAgent);
+        }
+    }
 
     int matches = 0;
     QListWidgetItem *select = nullptr;
@@ -2810,13 +2868,15 @@ void ChatWidget::applyModelMenuFilter()
 
 void ChatWidget::moveModelMenuSelection(int delta)
 {
-    if (!m_modelResultList || m_modelResultList->count() == 0) {
+    QListWidget *activeList = m_modelPickerTabs && m_modelPickerTabs->currentIndex() == 1
+        ? m_acpAgentResultList.data() : m_modelResultList.data();
+    if (!activeList || activeList->count() == 0) {
         return;
     }
 
     QList<int> candidates;
-    for (int i = 0; i < m_modelResultList->count(); ++i) {
-        QListWidgetItem *item = m_modelResultList->item(i);
+    for (int i = 0; i < activeList->count(); ++i) {
+        QListWidgetItem *item = activeList->item(i);
         if (item && item->flags().testFlag(Qt::ItemIsEnabled) && item->data(Qt::UserRole).toInt() >= 0) {
             candidates.append(i);
         }
@@ -2826,7 +2886,7 @@ void ChatWidget::moveModelMenuSelection(int delta)
     }
 
     int idx = 0;
-    const int current = m_modelResultList->currentRow();
+    const int current = activeList->currentRow();
     const int pos = candidates.indexOf(current);
     if (pos < 0) {
         idx = delta > 0 ? 0 : candidates.size() - 1;
@@ -2834,9 +2894,9 @@ void ChatWidget::moveModelMenuSelection(int delta)
         idx = (pos + delta + candidates.size()) % candidates.size();
     }
     m_modelMenuSelection = candidates.at(idx);
-    m_modelResultList->setCurrentRow(m_modelMenuSelection);
-    if (QListWidgetItem *item = m_modelResultList->item(m_modelMenuSelection)) {
-        m_modelResultList->scrollToItem(item, QAbstractItemView::EnsureVisible);
+    activeList->setCurrentRow(m_modelMenuSelection);
+    if (QListWidgetItem *item = activeList->item(m_modelMenuSelection)) {
+        activeList->scrollToItem(item, QAbstractItemView::EnsureVisible);
     }
 }
 
@@ -2867,8 +2927,28 @@ void ChatWidget::selectModel(Provider provider, const QString &model)
         m_settings.kiloModel = model;
         break;
     case Provider::Acp:
-        m_settings.acpModel = model;
+        {
+        bool selectedInstalledAgent = false;
+        if (m_settings.apiFormat == ApiFormat::AcpNative) {
+            const QJsonArray installed = QJsonDocument::fromJson(m_settings.acpInstalledAgents.toUtf8()).array();
+            for (const QJsonValue &value : installed) {
+                const QJsonObject agent = value.toObject();
+                if (agent.value(u"name"_s).toString() != model) continue;
+                selectedInstalledAgent = true;
+                // Registry agents speak native ACP over the child process's
+                // stdio streams; selecting one must not retain an HTTP mode.
+                m_settings.apiFormat = ApiFormat::AcpNative;
+                m_settings.acpAgentId = agent.value(u"id"_s).toString();
+                m_settings.acpCommand = agent.value(u"command"_s).toString();
+                QStringList args;
+                for (const QJsonValue &arg : agent.value(u"args"_s).toArray()) args.append(arg.toString());
+                m_settings.acpArgs = args.join(u" "_s);
+                break;
+            }
+        }
+        if (!selectedInstalledAgent) m_settings.acpModel = model;
         break;
+        }
     case Provider::Grok:
     default:
         m_settings.grokModel = model;

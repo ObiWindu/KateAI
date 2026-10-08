@@ -28,6 +28,7 @@ Settings SettingsStore::load()
     s.openrouterApiKey = g.readEntry(u"OpenRouterApiKey"_s, QString());
     s.deepseekApiKey = g.readEntry(u"DeepSeekApiKey"_s, QString());
     s.acpApiKey = g.readEntry(u"AcpApiKey"_s, QString());
+    s.acpInstalledAgents = g.readEntry(u"AcpInstalledAgents"_s, QString());
     // Models are read from the provider, not hard-coded here; an empty entry
     // simply means "not chosen yet" and the fetched catalogue fills it in.
     s.grokModel = g.readEntry(u"GrokModel"_s, QString());
@@ -160,6 +161,7 @@ void SettingsStore::save(const Settings &settings)
     g.writeEntry(u"OpenRouterApiKey"_s, settings.openrouterApiKey);
     g.writeEntry(u"DeepSeekApiKey"_s, settings.deepseekApiKey);
     g.writeEntry(u"AcpApiKey"_s, settings.acpApiKey);
+    g.writeEntry(u"AcpInstalledAgents"_s, settings.acpInstalledAgents);
         g.writeEntry(u"OpenCodeApiKey"_s, settings.opencodeApiKey);
         g.writeEntry(u"OpenCodeModel"_s, settings.opencodeModel);
         g.writeEntry(u"OpenCodeUrl"_s, settings.opencodeUrl);

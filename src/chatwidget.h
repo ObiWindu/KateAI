@@ -28,6 +28,7 @@ class QTimer;
 class QVBoxLayout;
 class QMenu;
 class QListWidget;
+class QTabWidget;
 
 namespace KateAi
 {
@@ -239,6 +240,8 @@ private:
     // exec() below the chip opened the list off the bottom of the panel.
     QPointer<QWidget> m_modelPopup;
     QPointer<QListWidget> m_modelResultList;
+    QPointer<QListWidget> m_acpAgentResultList;
+    QPointer<QTabWidget> m_modelPickerTabs;
     QPointer<QLineEdit> m_modelFilterEdit;
     int m_modelMenuSelection = -1;
 

@@ -13,6 +13,13 @@
 
 #include <QJsonArray>
 #include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonValue>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <QNetworkRequest>
+#include <QProcess>
+#include <QListWidget>
 #include <QTreeWidget>
 
 #include <KLocalizedString>
@@ -176,6 +183,147 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     providersLayout->addStretch();
     providersScroll->setWidget(providersWidget);
     tabs->addTab(providersScroll, i18n("AI Providers"));
+
+    // ==========================================
+    // ACP Registry
+    // ==========================================
+    auto *registryWidget = new QWidget(tabs);
+    auto *registryLayout = new QVBoxLayout(registryWidget);
+    auto *registryIntro = new QLabel(i18n("Find ACP agents in the official registry and install package based agents."), registryWidget);
+    registryIntro->setWordWrap(true);
+    registryLayout->addWidget(registryIntro);
+    auto *registrySearchRow = new QHBoxLayout;
+    m_acpRegistrySearch = new QLineEdit(registryWidget);
+    m_acpRegistrySearch->setPlaceholderText(i18n("Search agents..."));
+    auto *registryRefresh = new QPushButton(i18n("Refresh"), registryWidget);
+    registrySearchRow->addWidget(m_acpRegistrySearch, 1);
+    registrySearchRow->addWidget(registryRefresh);
+    registryLayout->addLayout(registrySearchRow);
+    m_acpRegistryResults = new QListWidget(registryWidget);
+    registryLayout->addWidget(m_acpRegistryResults, 1);
+    m_acpRegistryStatus = new QLabel(registryWidget);
+    registryLayout->addWidget(m_acpRegistryStatus);
+    auto *registryInstall = new QPushButton(i18n("Install selected agent"), registryWidget);
+    registryInstall->setEnabled(false);
+    registryLayout->addWidget(registryInstall);
+    tabs->addTab(registryWidget, i18n("ACP Registry"));
+    m_acpRegistryNetwork = new QNetworkAccessManager(this);
+
+    auto refreshRegistry = [this]() {
+        m_acpRegistryStatus->setText(i18n("Loading ACP registry…"));
+        QNetworkRequest request(QUrl(u"https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json"_s));
+        request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+        QNetworkReply *reply = m_acpRegistryNetwork->get(request);
+        connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+            const QByteArray body = reply->readAll();
+            const QString error = reply->errorString();
+            const bool ok = reply->error() == QNetworkReply::NoError;
+            reply->deleteLater();
+            QJsonParseError parseError;
+            const QJsonDocument document = QJsonDocument::fromJson(body, &parseError);
+            if (!ok || !document.isObject() || !document.object().value(u"agents"_s).isArray()) {
+                m_acpRegistryStatus->setText(i18n("Could not load registry: %1", ok ? parseError.errorString() : error));
+                return;
+            }
+            m_acpRegistryAgents = document.object().value(u"agents"_s).toArray();
+            m_acpRegistryStatus->setText(i18n("Loaded %1 agents.", m_acpRegistryAgents.size()));
+            m_acpRegistrySearch->textChanged(m_acpRegistrySearch->text());
+        });
+    };
+    auto showRegistryResults = [this](const QString &query) {
+        m_acpRegistryResults->clear();
+        const QJsonArray installedAgents = QJsonDocument::fromJson(m_plugin->settings().acpInstalledAgents.toUtf8()).array();
+        for (const QJsonValue &value : m_acpRegistryAgents) {
+            const QJsonObject agent = value.toObject();
+            const QString name = agent.value(u"name"_s).toString();
+            const QString description = agent.value(u"description"_s).toString();
+            if (!query.isEmpty() && !name.contains(query, Qt::CaseInsensitive)
+                && !description.contains(query, Qt::CaseInsensitive)
+                && !agent.value(u"id"_s).toString().contains(query, Qt::CaseInsensitive)) continue;
+            const QJsonObject distribution = agent.value(u"distribution"_s).toObject();
+            QString kind;
+            QString package;
+            if (distribution.value(u"npx"_s).isObject()) {
+                kind = u"npx"_s; package = distribution.value(u"npx"_s).toObject().value(u"package"_s).toString();
+            } else if (distribution.value(u"uvx"_s).isObject()) {
+                kind = u"uvx"_s; package = distribution.value(u"uvx"_s).toObject().value(u"package"_s).toString();
+            }
+            if (kind.isEmpty() || package.isEmpty()) continue;
+            bool isInstalled = false;
+            for (const QJsonValue &installedValue : installedAgents) {
+                if (installedValue.toObject().value(u"id"_s).toString() == agent.value(u"id"_s).toString()) {
+                    isInstalled = true;
+                    break;
+                }
+            }
+            const QString marker = isInstalled ? i18n("  ✓ Installed") : QString();
+            auto *item = new QListWidgetItem(u"%1%2  ·  %3\n%4"_s.arg(name, marker, agent.value(u"version"_s).toString(), description), m_acpRegistryResults);
+            item->setData(Qt::UserRole, agent);
+            item->setData(Qt::UserRole + 1, isInstalled);
+            item->setToolTip(agent.value(u"license_url"_s).toString());
+            if (isInstalled) item->setForeground(QColor(QStringLiteral("#75c991")));
+        }
+        if (m_acpRegistryResults->count() == 0) m_acpRegistryResults->addItem(i18n("No matching package based agents."));
+    };
+    connect(registryRefresh, &QPushButton::clicked, this, refreshRegistry);
+    connect(m_acpRegistrySearch, &QLineEdit::textChanged, this, showRegistryResults);
+    connect(m_acpRegistryResults, &QListWidget::currentRowChanged, this, [this, registryInstall](int) {
+        const QListWidgetItem *item = m_acpRegistryResults->currentItem();
+        registryInstall->setEnabled(item && !item->data(Qt::UserRole).toJsonObject().isEmpty()
+                                    && !item->data(Qt::UserRole + 1).toBool());
+    });
+    connect(registryInstall, &QPushButton::clicked, this, [this, showRegistryResults]() {
+        QListWidgetItem *item = m_acpRegistryResults->currentItem();
+        if (!item || item->data(Qt::UserRole).toJsonObject().isEmpty()) return;
+        const QJsonObject agent = item->data(Qt::UserRole).toJsonObject();
+        const QJsonObject dist = agent.value(u"distribution"_s).toObject();
+        const bool npm = dist.value(u"npx"_s).isObject();
+        const QJsonObject packageInfo = dist.value(npm ? u"npx"_s : u"uvx"_s).toObject();
+        const QString package = packageInfo.value(u"package"_s).toString();
+        if (package.isEmpty()) return;
+        auto *process = new QProcess(this);
+        const QString program = npm ? u"npm"_s : u"uv"_s;
+        const QStringList args = npm ? QStringList{u"install"_s, u"--global"_s, package}
+                                     : QStringList{u"tool"_s, u"install"_s, package};
+        m_acpRegistryStatus->setText(i18n("Installing %1…", agent.value(u"name"_s).toString()));
+        connect(process, &QProcess::finished, this, [this, process, agent, packageInfo, package, npm, showRegistryResults](int code, QProcess::ExitStatus status) {
+            const QString output = QString::fromLocal8Bit(process->readAllStandardError()).trimmed();
+            if (code != 0 || status != QProcess::NormalExit) {
+                m_acpRegistryStatus->setText(i18n("Install failed: %1", output));
+                process->deleteLater();
+                return;
+            }
+            QJsonObject installed = agent;
+            QStringList args;
+            for (const QJsonValue &arg : packageInfo.value(u"args"_s).toArray()) args.append(arg.toString());
+            QJsonArray launchArgs;
+            for (const QString &arg : args) launchArgs.append(arg);
+            installed.insert(u"command"_s, npm ? u"npx"_s : u"uvx"_s);
+            QJsonArray fullArgs;
+            if (npm) { fullArgs.append(u"--yes"_s); fullArgs.append(package); }
+            else fullArgs.append(package);
+            for (const QJsonValue &arg : launchArgs) fullArgs.append(arg);
+            installed.insert(u"args"_s, fullArgs);
+            installed.insert(u"package"_s, package);
+            installed.insert(u"distributionType"_s, npm ? u"npx"_s : u"uvx"_s);
+            QJsonArray agents = QJsonDocument::fromJson(m_plugin->settings().acpInstalledAgents.toUtf8()).array();
+            const QString id = agent.value(u"id"_s).toString();
+            for (qsizetype i = agents.size() - 1; i >= 0; --i) if (agents.at(i).toObject().value(u"id"_s).toString() == id) agents.removeAt(i);
+            agents.append(installed);
+            Settings settings = m_plugin->settings();
+            settings.acpInstalledAgents = QString::fromUtf8(QJsonDocument(agents).toJson(QJsonDocument::Compact));
+            m_plugin->setSettings(settings);
+            m_acpRegistryStatus->setText(i18n("Installed %1. Select it under ACP in the model selector.", agent.value(u"name"_s).toString()));
+            showRegistryResults(m_acpRegistrySearch->text());
+            process->deleteLater();
+        });
+        connect(process, &QProcess::errorOccurred, this, [this, process](QProcess::ProcessError) {
+            m_acpRegistryStatus->setText(i18n("Install failed: package manager not found or could not start."));
+            process->deleteLater();
+        });
+        process->start(program, args);
+    });
+    refreshRegistry();
 
     // ==========================================
     // TAB 2: Security & Permissions
@@ -1623,7 +1771,9 @@ void KateAiConfigPage::updateModelCombo(Provider provider)
 
 void KateAiConfigPage::defaults()
 {
-    m_plugin->setSettings(Settings{});
+    Settings defaults;
+    defaults.acpInstalledAgents = m_plugin->settings().acpInstalledAgents;
+    m_plugin->setSettings(defaults);
     reset();
 }
 
@@ -1643,9 +1793,13 @@ void KateAiConfigPage::applySelectedAcpPreset()
     m_acpCommand->setPlaceholderText(preset.command);
     m_acpArgs->setPlaceholderText(preset.args);
     m_acpApiKeyEnv->setPlaceholderText(preset.apiKeyEnv);
-    m_acpKey->setPlaceholderText(preset.apiKeyEnv.isEmpty()
-                                     ? i18n("Optional — this agent uses its own CLI login")
-                                     : i18n("Optional — also set as %1", preset.apiKeyEnv));
+    if (preset.id == u"codex-acp"_s) {
+        m_acpKey->setPlaceholderText(i18n("Optional — uses ChatGPT sign-in when empty"));
+    } else {
+        m_acpKey->setPlaceholderText(preset.apiKeyEnv.isEmpty()
+                                         ? i18n("Optional — this agent uses its own CLI login")
+                                         : i18n("Optional — also set as %1", preset.apiKeyEnv));
+    }
 }
 
 void KateAiConfigPage::updateAcpNativeEnabled()

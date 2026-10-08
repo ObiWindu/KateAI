@@ -867,6 +867,14 @@ QString acpAgentDisplayName(const Settings &settings)
     if (!usesAcpNative(settings)) {
         return i18n("ACP");
     }
+    const QJsonArray installed = QJsonDocument::fromJson(settings.acpInstalledAgents.toUtf8()).array();
+    for (const QJsonValue &value : installed) {
+        const QJsonObject agent = value.toObject();
+        if (agent.value(u"id"_s).toString() == settings.acpAgentId) {
+            const QString name = agent.value(u"name"_s).toString().trimmed();
+            if (!name.isEmpty()) return name;
+        }
+    }
     const AcpAgentPreset preset = acpAgentPreset(settings.acpAgentId);
     if (preset.id != u"custom"_s && !preset.label.isEmpty()) {
         return preset.label;
