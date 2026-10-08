@@ -11,7 +11,6 @@
 #include <QWidget>
 
 class QLabel;
-class QPlainTextEdit;
 class QPropertyAnimation;
 class QPushButton;
 class QShowEvent;
@@ -121,6 +120,7 @@ private:
     QString iconForTool(const QString &toolName) const;
     QString colorForRisk(ToolRisk risk) const;
     bool isDiffTool(const QString &toolName) const;
+    QString languageForTool(const QString &toolName) const;
     void showPreviewHtml(const QString &html);
 
     QString m_toolCallId;
@@ -151,7 +151,7 @@ private:
     QWidget *m_approvalRow = nullptr;
     QLabel *m_approvalSubject = nullptr;
     QWidget *m_detailsContainer = nullptr;
-    QPlainTextEdit *m_details = nullptr;
+    QTextBrowser *m_details = nullptr;
     QTextBrowser *m_describeDiff = nullptr;
     QPropertyAnimation *m_animation = nullptr;
     QTimer *m_reflowTimer = nullptr;

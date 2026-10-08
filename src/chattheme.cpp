@@ -400,14 +400,16 @@ QString workingPill()
 
 QString userCard()
 {
+    // User turns are deliberately neutral. Blue is reserved for actions and
+    // focus elsewhere in the panel, so it should not make every prompt look
+    // like an actionable control.
     return QStringLiteral(
            "QWidget#userCard {"
-           "  background-color: rgba(61, 126, 255, 0.14);"
-           "  border: 1px solid rgba(61, 126, 255, 0.35);"
-           "  border-left: 3px solid %1;"
+           "  background-color: #d6d6da;"
+           "  border: 1px solid #b8b8be;"
+           "  border-left: 3px solid #929299;"
            "  border-radius: 8px;"
-           "}")
-        .arg(kAccent);
+           "}");
 }
 
 QString assistantCard()

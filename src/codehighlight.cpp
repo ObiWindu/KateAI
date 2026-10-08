@@ -357,5 +357,23 @@ QString htmlForCode(const QString &code, const QString &language)
         .arg(ChatTheme::codeBlockBg(), ChatTheme::textMuted(), shown.toHtmlEscaped(), body);
 }
 
+QString htmlBodyForCode(const QString &code, const QString &language)
+{
+    const KSyntaxHighlighting::Definition def = definitionFor(language);
+    const KSyntaxHighlighting::Theme t = theme();
+
+    QString body;
+    if (def.isValid() && t.isValid()) {
+        HtmlHighlighter highlighter;
+        highlighter.setTheme(t);
+        highlighter.setDefinition(def);
+        body = highlighter.highlightToHtmlBody(code, t);
+    }
+    if (body.isEmpty()) {
+        body = code.toHtmlEscaped();
+    }
+    return body;
+}
+
 } // namespace CodeHighlight
 } // namespace KateAi

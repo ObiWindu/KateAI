@@ -203,7 +203,7 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     registryLayout->addWidget(m_acpRegistryResults, 1);
     m_acpRegistryStatus = new QLabel(registryWidget);
     registryLayout->addWidget(m_acpRegistryStatus);
-    auto *registryInstall = new QPushButton(i18n("Install selected agent"), registryWidget);
+    auto *registryInstall = new QPushButton(i18n("Install selected package agent"), registryWidget);
     registryInstall->setEnabled(false);
     registryLayout->addWidget(registryInstall);
     tabs->addTab(registryWidget, i18n("ACP Registry"));
@@ -226,7 +226,18 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
                 return;
             }
             m_acpRegistryAgents = document.object().value(u"agents"_s).toArray();
-            m_acpRegistryStatus->setText(i18n("Loaded %1 agents.", m_acpRegistryAgents.size()));
+            int packageAgents = 0;
+            for (const QJsonValue &value : m_acpRegistryAgents) {
+                const QJsonObject distribution = value.toObject().value(u"distribution"_s).toObject();
+                if (distribution.value(u"npx"_s).isObject() || distribution.value(u"uvx"_s).isObject()) {
+                    ++packageAgents;
+                }
+            }
+            // Do not hide binary-distributed ACP agents: the registry is the
+            // catalogue of every available agent, not only the subset that npm
+            // or uv can install on our behalf.
+            m_acpRegistryStatus->setText(i18n("Loaded %1 ACP agents (%2 package-installable).",
+                                               m_acpRegistryAgents.size(), packageAgents));
             m_acpRegistrySearch->textChanged(m_acpRegistrySearch->text());
         });
     };
@@ -248,7 +259,13 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
             } else if (distribution.value(u"uvx"_s).isObject()) {
                 kind = u"uvx"_s; package = distribution.value(u"uvx"_s).toObject().value(u"package"_s).toString();
             }
-            if (kind.isEmpty() || package.isEmpty()) continue;
+            const bool packageInstallable = !kind.isEmpty() && !package.isEmpty();
+            if (kind.isEmpty() && distribution.value(u"binary"_s).isObject()) {
+                kind = i18n("binary (manual install)");
+            }
+            if (kind.isEmpty()) {
+                kind = i18n("manual install");
+            }
             bool isInstalled = false;
             for (const QJsonValue &installedValue : installedAgents) {
                 if (installedValue.toObject().value(u"id"_s).toString() == agent.value(u"id"_s).toString()) {
@@ -257,20 +274,25 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
                 }
             }
             const QString marker = isInstalled ? i18n("  ✓ Installed") : QString();
-            auto *item = new QListWidgetItem(u"%1%2  ·  %3\n%4"_s.arg(name, marker, agent.value(u"version"_s).toString(), description), m_acpRegistryResults);
+            auto *item = new QListWidgetItem(u"%1%2  ·  %3  ·  %4\n%5"_s.arg(name, marker,
+                                                                                      agent.value(u"version"_s).toString(),
+                                                                                      kind, description),
+                                             m_acpRegistryResults);
             item->setData(Qt::UserRole, agent);
             item->setData(Qt::UserRole + 1, isInstalled);
+            item->setData(Qt::UserRole + 2, packageInstallable);
             item->setToolTip(agent.value(u"license_url"_s).toString());
             if (isInstalled) item->setForeground(QColor(QStringLiteral("#75c991")));
         }
-        if (m_acpRegistryResults->count() == 0) m_acpRegistryResults->addItem(i18n("No matching package based agents."));
+        if (m_acpRegistryResults->count() == 0) m_acpRegistryResults->addItem(i18n("No matching ACP agents."));
     };
     connect(registryRefresh, &QPushButton::clicked, this, refreshRegistry);
     connect(m_acpRegistrySearch, &QLineEdit::textChanged, this, showRegistryResults);
     connect(m_acpRegistryResults, &QListWidget::currentRowChanged, this, [this, registryInstall](int) {
         const QListWidgetItem *item = m_acpRegistryResults->currentItem();
         registryInstall->setEnabled(item && !item->data(Qt::UserRole).toJsonObject().isEmpty()
-                                    && !item->data(Qt::UserRole + 1).toBool());
+                                    && !item->data(Qt::UserRole + 1).toBool()
+                                    && item->data(Qt::UserRole + 2).toBool());
     });
     connect(registryInstall, &QPushButton::clicked, this, [this, showRegistryResults]() {
         QListWidgetItem *item = m_acpRegistryResults->currentItem();
