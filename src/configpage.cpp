@@ -171,9 +171,19 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
         m_opencodeUrl->setPlaceholderText(u"https://opencode.ai/zen/v1"_s);
         addProviderGroup(i18n("OpenCode Zen (curated coding models)"), m_opencodeKey, m_opencodeModel, m_opencodeUrl);
 
+    m_telegramKey = makeKey();
+    m_telegramModel = makeModelCombo();
+    addProviderGroup(i18n("Telegram Bot"), m_telegramKey, m_telegramModel);
+    
+    // Telegram-specific broadcast settings
+    m_telegramBroadcastEnabled = new QCheckBox(i18n("Enable Broadcast Messages"), this);
+    m_telegramBroadcastRecipients = new QLineEdit(this);
+    m_telegramBroadcastRecipients->setPlaceholderText(i18n("Comma-separated chat IDs (e.g., 12345678,98765432)"));
+
     m_acpKey = makeKey();
     m_acpKey->setPlaceholderText(i18n("Optional — most agents use their own CLI login"));
     m_acpModel = makeModelCombo();
+    m_acpModel->setPlaceholderText(i18n("Model name (e.g., mistral-large, mistral-small)"));
     m_acpUrl = new QLineEdit(this);
     m_acpUrl->setPlaceholderText(u"http://localhost:8080"_s);
     m_acpAgent = new QComboBox(this);
@@ -1032,6 +1042,10 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
         connect(m_opencodeKey, &QLineEdit::textChanged, this, markChanged);
         connect(m_opencodeUrl, &QLineEdit::textChanged, this, markChanged);
         connect(m_opencodeModel, QOverload<int>::of(&QComboBox::currentIndexChanged), this, markChanged);
+    connect(m_telegramKey, &QLineEdit::textChanged, this, markChanged);
+    connect(m_telegramModel, QOverload<int>::of(&QComboBox::currentIndexChanged), this, markChanged);
+    connect(m_telegramBroadcastEnabled, &QCheckBox::stateChanged, this, markChanged);
+    connect(m_telegramBroadcastRecipients, &QLineEdit::textChanged, this, markChanged);
     connect(m_grokModel, QOverload<int>::of(&QComboBox::currentIndexChanged), this, markChanged);
     connect(m_openaiModel, QOverload<int>::of(&QComboBox::currentIndexChanged), this, markChanged);
     connect(m_openrouterModel, QOverload<int>::of(&QComboBox::currentIndexChanged), this, markChanged);
@@ -1502,7 +1516,21 @@ void KateAiConfigPage::apply()
     s.claudeCompatibleModel = m_claudeCompatibleModel->currentText().trimmed();
         s.opencodeModel = m_opencodeModel->currentText().trimmed();
         s.opencodeUrl = m_opencodeUrl->text().trimmed();
+    
+    // Telegram settings
+    s.telegramBotToken = m_telegramKey->text().trimmed();
     s.acpModel = m_acpModel->currentText().trimmed();
+    s.telegramBroadcastEnabled = m_telegramBroadcastEnabled->isChecked();
+    s.telegramBroadcastRecipients = m_telegramBroadcastRecipients->text().split(u',');
+    // Trim whitespace from each recipient
+    for (QString &recipient : s.telegramBroadcastRecipients) {
+        recipient = recipient.trimmed();
+    }
+    // Remove empty entries
+    s.telegramBroadcastRecipients.erase(std::remove_if(s.telegramBroadcastRecipients.begin(), 
+                                                        s.telegramBroadcastRecipients.end(), 
+                                                        [](const QString &s) { return s.isEmpty(); }), 
+                                    s.telegramBroadcastRecipients.end());
     s.deepseekUrl = m_deepseekUrl->text().trimmed();
     s.openaiCompatibleUrl = m_openaiCompatibleUrl->text().trimmed();
     s.claudeCompatibleUrl = m_claudeCompatibleUrl->text().trimmed();
@@ -1633,6 +1661,11 @@ void KateAiConfigPage::reset()
     m_claudeCompatibleKey->setText(s.claudeCompatibleApiKey);
         m_opencodeKey->setText(s.opencodeApiKey);
         m_opencodeUrl->setText(s.opencodeUrl);
+    
+    // Telegram settings
+    m_telegramKey->setText(s.telegramBotToken);
+    m_telegramBroadcastEnabled->setChecked(s.telegramBroadcastEnabled);
+    m_telegramBroadcastRecipients->setText(s.telegramBroadcastRecipients.join(u", "_s));
     m_acpKey->setText(s.acpApiKey);
 
     // Update model combos with catalog and set current model
@@ -1651,6 +1684,7 @@ void KateAiConfigPage::reset()
     m_openaiCompatibleModel->setCurrentText(s.openaiCompatibleModel);
     m_claudeCompatibleModel->setCurrentText(s.claudeCompatibleModel);
         m_opencodeModel->setCurrentText(s.opencodeModel);
+    m_telegramModel->setCurrentText(s.acpModel); // Telegram uses the same model field
     m_acpModel->setCurrentText(s.acpModel);
 
     m_deepseekUrl->setText(s.deepseekUrl);

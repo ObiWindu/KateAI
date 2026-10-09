@@ -8,6 +8,7 @@
 #include "types.h"
 #include "mcp.h"
 #include "agentteam.h"
+#include "telegramclient.h"
 
 #include <QHash>
 #include <QList>
@@ -68,16 +69,22 @@ private:
     QLineEdit *m_deepseekKey = nullptr;
     QLineEdit *m_openaiCompatibleKey = nullptr;
     QLineEdit *m_claudeCompatibleKey = nullptr;
+    QLineEdit *m_kiloKey = nullptr;
     QLineEdit *m_opencodeKey = nullptr;
     QLineEdit *m_acpKey = nullptr;
+    QLineEdit *m_telegramKey = nullptr;
+    QLineEdit *m_telegramBroadcastRecipients = nullptr;
+    QCheckBox *m_telegramBroadcastEnabled = nullptr;
     QComboBox *m_grokModel = nullptr;
     QComboBox *m_openaiModel = nullptr;
     QComboBox *m_openrouterModel = nullptr;
     QComboBox *m_deepseekModel = nullptr;
     QComboBox *m_openaiCompatibleModel = nullptr;
     QComboBox *m_claudeCompatibleModel = nullptr;
+    QComboBox *m_kiloModel = nullptr;
     QComboBox *m_opencodeModel = nullptr;
     QComboBox *m_acpModel = nullptr;
+    QComboBox *m_telegramModel = nullptr;
     QLineEdit *m_deepseekUrl = nullptr;
     QLineEdit *m_openaiCompatibleUrl = nullptr;
     QLineEdit *m_claudeCompatibleUrl = nullptr;

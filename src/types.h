@@ -28,6 +28,7 @@ enum class Provider {
     // OpenCode Zen, the gateway at opencode.ai that curates models for coding
     // agents. OpenAI-compatible, with the catalogue served from /zen/v1/models.
     OpenCode,
+    Telegram,
 };
 
 enum class ApiFormat {
@@ -185,6 +186,9 @@ struct Settings {
     QString kiloModel;
     QString acpModel;
     QString opencodeModel;
+    QString telegramBotToken;
+    QStringList telegramBroadcastRecipients;
+    bool telegramBroadcastEnabled = false;
     // Model names are no longer hard-coded: they are fetched from whichever
     // providers have a valid key. These stay empty until then.
     QString opencodeApiKey;

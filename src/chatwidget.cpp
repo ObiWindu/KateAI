@@ -2124,6 +2124,13 @@ void ChatWidget::setSettings(const Settings &settings)
 
     // Propagate settings to agent
     m_agent.setSettings(settings);
+    
+    // Start Telegram polling if bot token is configured
+    if (!settings.telegramBotToken.isEmpty()) {
+        m_agent.startTelegramPolling();
+    } else {
+        m_agent.stopTelegramPolling();
+    }
 
     refreshProviders();
     updateModelSelectorLabel();

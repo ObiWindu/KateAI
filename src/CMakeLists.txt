@@ -6,6 +6,7 @@ add_library(kateai_core STATIC
     tools.cpp
     llmclient.cpp
     acpclient.cpp
+    telegramclient.cpp
     agentloop.cpp
     workspace.cpp
     documentbridge.cpp

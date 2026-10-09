@@ -215,37 +215,72 @@ QStringList AcpClient::agentArguments(const Settings &settings)
 {
     const QString raw = acpEffectiveArgs(settings);
     QStringList args = raw.isEmpty() ? QStringList() : QProcess::splitCommand(raw);
-    if (!acpAgentIsGrok(settings)) {
-        return args;
-    }
-    if (args.isEmpty()) {
-        args = QStringList{u"agent"_s, u"stdio"_s};
-    }
-
-    int transport = args.lastIndexOf(u"stdio"_s);
-    if (transport < 0) {
-        transport = args.size();
-    }
-
-    QStringList flags;
+    const QString command = acpEffectiveCommand(settings);
+    const QString agentId = settings.acpAgentId;
     const QString model = settings.acpModel.trimmed();
-    if (!model.isEmpty() && !args.contains(u"--model"_s) && !args.contains(u"-m"_s)) {
-        flags << u"--model"_s << model;
-    }
-    if (settings.permissionMode == PermissionMode::AlwaysApprove
-        && !args.contains(u"--always-approve"_s) && !args.contains(u"--yolo"_s)) {
-        flags << u"--always-approve"_s;
-    }
+    
+    // Handle arguments for different ACP agents
+    if (acpAgentIsGrok(settings)) {
+        // Grok Build: grok agent stdio --model <model> --always-approve
+        if (args.isEmpty()) {
+            args = QStringList{u"agent"_s, u"stdio"_s};
+        }
+        int transport = args.lastIndexOf(u"stdio"_s);
+        if (transport < 0) {
+            transport = args.size();
+        }
 
-    QStringList out;
-    for (int i = 0; i < transport; ++i) {
-        out.append(args.at(i));
+        QStringList flags;
+        if (!model.isEmpty() && !args.contains(u"--model"_s) && !args.contains(u"-m"_s)) {
+            flags << u"--model"_s << model;
+        }
+        if (settings.permissionMode == PermissionMode::AlwaysApprove
+            && !args.contains(u"--always-approve"_s) && !args.contains(u"--yolo"_s)) {
+            flags << u"--always-approve"_s;
+        }
+
+        QStringList out;
+        for (int i = 0; i < transport; ++i) {
+            out.append(args.at(i));
+        }
+        out += flags;
+        for (int i = transport; i < args.size(); ++i) {
+            out.append(args.at(i));
+        }
+        return out;
     }
-    out += flags;
-    for (int i = transport; i < args.size(); ++i) {
-        out.append(args.at(i));
+    
+    // Handle model arguments for other ACP agents that support --model
+    if (!model.isEmpty()) {
+        if (agentId == u"mistral-vibe"_s || command == u"vibe-acp"_s) {
+            // Mistral Vibe: vibe-acp --model <model>
+            if (!args.contains(u"--model"_s) && !args.contains(u"-m"_s)) {
+                args << u"--model"_s << model;
+            }
+        }
+        else if (agentId == u"claude-acp"_s || command.contains(u"claude-agent-acp"_s) || raw.contains(u"claude-agent-acp"_s)) {
+            // Claude Agent: npx -y @agentclientprotocol/claude-agent-acp --model <model>
+            if (!args.contains(u"--model"_s) && !args.contains(u"-m"_s)) {
+                args << u"--model"_s << model;
+            }
+        }
+        else if (agentId == u"gemini"_s || command == u"gemini"_s) {
+            // Gemini CLI: gemini --acp --model <model>
+            if (!args.contains(u"--model"_s) && !args.contains(u"-m"_s)) {
+                // Insert --model before --acp if it exists, otherwise at the end
+                int acpIndex = args.indexOf(u"--acp"_s);
+                if (acpIndex >= 0) {
+                    args.insert(acpIndex, u"--model"_s);
+                    args.insert(acpIndex + 1, model);
+                } else {
+                    args << u"--model"_s << model;
+                }
+            }
+        }
+        // Add more agent-specific model handling here as needed
     }
-    return out;
+    
+    return args;
 }
 
 void AcpClient::start()
@@ -687,26 +722,38 @@ QJsonArray AcpClient::promptBlocks(const QString &text) const
 QJsonObject AcpClient::sessionMeta() const
 {
     QJsonObject meta;
+    const QString agentId = m_settings.acpAgentId;
+    const QString command = acpEffectiveCommand(m_settings);
+    
     // Grok Build reads yoloMode / autoMode / rules from session _meta.
-    // Other agents may reject unknown _meta, so only Grok gets it.
-    if (!acpAgentIsGrok(m_settings)) {
-        return meta;
+    if (acpAgentIsGrok(m_settings)) {
+        if (m_settings.permissionMode == PermissionMode::AlwaysApprove) {
+            meta.insert(u"yoloMode"_s, true);
+        } else if (m_settings.permissionMode == PermissionMode::AcceptEdits) {
+            meta.insert(u"autoMode"_s, true);
+        }
+        QStringList rules;
+        if (!m_settings.globalRules.trimmed().isEmpty()) {
+            rules.append(m_settings.globalRules.trimmed());
+        }
+        if (!m_settings.extraSystemPrompt.trimmed().isEmpty()) {
+            rules.append(m_settings.extraSystemPrompt.trimmed());
+        }
+        if (!rules.isEmpty()) {
+            meta.insert(u"rules"_s, rules.join(u"\n\n"_s));
+        }
     }
-    if (m_settings.permissionMode == PermissionMode::AlwaysApprove) {
-        meta.insert(u"yoloMode"_s, true);
-    } else if (m_settings.permissionMode == PermissionMode::AcceptEdits) {
-        meta.insert(u"autoMode"_s, true);
+    
+    // Add model information for agents that support it in _meta
+    const QString model = m_settings.acpModel.trimmed();
+    if (!model.isEmpty()) {
+        // Mistral Vibe and other agents may accept model in _meta
+        if (agentId == u"mistral-vibe"_s || command == u"vibe-acp"_s) {
+            meta.insert(u"model"_s, model);
+        }
+        // Add other agents that support model in _meta here
     }
-    QStringList rules;
-    if (!m_settings.globalRules.trimmed().isEmpty()) {
-        rules.append(m_settings.globalRules.trimmed());
-    }
-    if (!m_settings.extraSystemPrompt.trimmed().isEmpty()) {
-        rules.append(m_settings.extraSystemPrompt.trimmed());
-    }
-    if (!rules.isEmpty()) {
-        meta.insert(u"rules"_s, rules.join(u"\n\n"_s));
-    }
+    
     return meta;
 }
 

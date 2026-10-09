@@ -101,7 +101,8 @@ private Q_SLOTS:
         settings.acpArgs = u"--acp"_s;
         settings.acpModel = u"gemini-2.5-pro"_s;
         settings.permissionMode = PermissionMode::AlwaysApprove;
-        QCOMPARE(AcpClient::agentArguments(settings), QStringList{u"--acp"_s});
+        QCOMPARE(AcpClient::agentArguments(settings),
+                 (QStringList{u"--model"_s, u"gemini-2.5-pro"_s, u"--acp"_s}));
         QVERIFY(!acpAgentIsGrok(settings));
 
         settings.acpAgentId = u"custom"_s;
@@ -112,6 +113,7 @@ private Q_SLOTS:
 
         settings.acpCommand.clear();
         settings.acpArgs.clear();
+        settings.acpModel.clear();
         settings.acpAgentId = u"custom"_s;
         QVERIFY(AcpClient::resolvedCommand(settings).isEmpty());
         QVERIFY(AcpClient::agentArguments(settings).isEmpty());

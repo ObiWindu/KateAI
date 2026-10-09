@@ -634,8 +634,10 @@ QString ToolCallWidget::iconForTool(const QString &toolName) const
 {
     // Short glyphs rather than emoji: emoji render at wildly different sizes
     // and baselines across themes, which is what made the column ragged.
-    if (toolName == u"read_file"_s) return u"\u{1F4C4}"_s;
-    if (toolName == u"write_file"_s) return u"\u{1F4DD}"_s;
+    
+    // File operations - both KateAI and ACP tool names
+    if (toolName == u"read_file"_s || toolName == u"fs/read_text_file"_s) return u"\u{1F4C4}"_s;
+    if (toolName == u"write_file"_s || toolName == u"fs/write_text_file"_s) return u"\u{1F4DD}"_s;
     if (toolName == u"edit_file"_s || toolName == u"multi_edit_file"_s || toolName == u"multi_replace_file_content"_s) return u"\u{270F}"_s;
     if (toolName == u"list_dir"_s) return u"\u{1F4C1}"_s;
     if (toolName == u"grep"_s) return u"\u{1F50D}"_s;
@@ -646,6 +648,7 @@ QString ToolCallWidget::iconForTool(const QString &toolName) const
     if (toolName == u"query_project_graph"_s) return u"\u{1F578}"_s;
     if (toolName == u"new_task"_s) return u"\u{1F9E9}"_s;
     if (toolName.startsWith(u"mcp__"_s)) return u"\u{1F50C}"_s;
+    if (toolName.startsWith(u"terminal/"_s) || toolName == u"terminal"_s) return u"\u{1F5A3}"_s;
     return u"\u{2699}"_s;
 }
 
@@ -653,24 +656,36 @@ QString ToolCallWidget::languageForTool(const QString &toolName) const
 {
     // Map tool names to syntax highlighting languages
     if (toolName == u"bash"_s) return u"Bash"_s;
+    
+    // Text-based tools - file operations, search, etc.
     if (toolName == u"read_file"_s || toolName == u"write_file"_s
         || toolName == u"edit_file"_s || toolName == u"multi_edit_file"_s
         || toolName == u"multi_replace_file_content"_s || toolName == u"list_dir"_s
-        || toolName == u"glob"_s) {
-        // File operations can return a mix of paths, code and metadata. JSON
-        // is a useful neutral definition for structured output; unknown text
-        // still keeps the consistently styled code-block treatment.
-        return u"JSON"_s;
+        || toolName == u"glob"_s || toolName == u"grep"_s
+        || toolName == u"fs/read_text_file"_s || toolName == u"fs/write_text_file"_s) {
+        // File operations and search return text content, not JSON
+        return u"Text"_s;
     }
-    if (toolName == u"grep"_s) return u"Text"_s;
+    
+    // JSON data tools
     if (toolName == u"web_search"_s || toolName == u"web_fetch"_s) return u"JSON"_s;
     if (toolName == u"query_project_graph"_s) return u"JSON"_s;
-    if (toolName == u"new_task"_s) return u"JSON"_s;
+    if (toolName == u"new_task"_s) return u"Text"_s;  // Sub-agent results are typically text
     if (toolName.startsWith(u"mcp__"_s)) return u"JSON"_s;
+    
+    // Terminal tools
+    if (toolName.startsWith(u"terminal/"_s) || toolName == u"terminal"_s) return u"Text"_s;
+    
+    // ACP tools that don't match specific patterns - default to Text for readability
+    // ACP agents often return human-readable results, not raw JSON
+    if (toolName.contains(u"/"_s) || toolName.startsWith(u"fs/"_s)) {
+        return u"Text"_s;
+    }
+    
     // Tool protocols commonly return key/value text even when they are not a
     // built-in tool. Give those calls a real definition too instead of leaving
     // them as uncoloured plain text.
-    return u"JSON"_s;
+    return u"Text"_s;
 }
 
 QString ToolCallWidget::colorForRisk(ToolRisk risk) const
