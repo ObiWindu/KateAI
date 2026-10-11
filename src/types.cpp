@@ -35,8 +35,6 @@ QString providerId(Provider provider)
         return u"acp"_s;
     case Provider::OpenCode:
         return u"opencode"_s;
-    case Provider::Telegram:
-        return u"telegram"_s;
     case Provider::Grok:
     default:
         return u"grok"_s;
@@ -62,8 +60,6 @@ QString providerLabel(Provider provider)
         return i18n("ACP");
     case Provider::OpenCode:
         return i18n("OpenCode Zen");
-    case Provider::Telegram:
-        return i18n("Telegram Bot");
     case Provider::Grok:
     default:
         return i18n("Grok (xAI)");
@@ -96,9 +92,6 @@ Provider providerFromId(const QString &id)
     if (id == u"opencode"_s) {
         return Provider::OpenCode;
     }
-    if (id == u"telegram"_s) {
-        return Provider::Telegram;
-    }
     return Provider::Grok;
 }
 
@@ -121,8 +114,6 @@ QString providerBaseUrl(Provider provider)
         return u"http://localhost:8080"_s;
     case Provider::OpenCode:
         return u"https://opencode.ai/zen/v1"_s;
-    case Provider::Telegram:
-        return u"https://api.telegram.org/bot"_s;
     case Provider::Grok:
     default:
         return u"https://api.x.ai/v1"_s;
@@ -148,8 +139,6 @@ QString providerBaseUrl(const Settings &settings)
         return u"https://api.kilo.ai/v1"_s;
     case Provider::Acp:
         return settings.acpUrl;
-    case Provider::Telegram:
-        return u"https://api.telegram.org/bot"_s + settings.telegramBotToken;
     case Provider::Grok:
     default:
         return u"https://api.x.ai/v1"_s;
@@ -197,9 +186,6 @@ bool providerRequiresApiKey(const Settings &settings, Provider provider)
     if (provider == Provider::Acp && settings.apiFormat == ApiFormat::AcpNative) {
         return false;
     }
-    if (provider == Provider::Telegram) {
-        return !settings.telegramBotToken.isEmpty();
-    }
     return true;
 }
 
@@ -207,9 +193,6 @@ bool providerIsSelectable(const Settings &settings, Provider provider)
 {
     if (provider == Provider::Acp) {
         return true;
-    }
-    if (provider == Provider::Telegram) {
-        return !settings.telegramBotToken.isEmpty();
     }
     Settings copy = settings;
     copy.provider = provider;
@@ -316,8 +299,6 @@ QString apiKeyFor(const Settings &settings)
         return settings.acpApiKey;
     case Provider::OpenCode:
         return settings.opencodeApiKey;
-    case Provider::Telegram:
-        return settings.telegramBotToken;
     case Provider::Grok:
     default:
         return settings.grokApiKey;
@@ -343,8 +324,6 @@ QString modelFor(const Settings &settings)
         return settings.acpModel;
     case Provider::OpenCode:
         return settings.opencodeModel;
-    case Provider::Telegram:
-        return settings.acpModel; // Telegram uses model field for agent selection
     case Provider::Grok:
     default:
         return settings.grokModel;

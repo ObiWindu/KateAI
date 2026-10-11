@@ -16,7 +16,6 @@
 #include "permissions.h"
 #include "sandbox.h"
 #include "sessionstore.h"
-#include "telegramclient.h"
 #include "tools.h"
 #include "types.h"
 #include "websearch.h"
@@ -55,7 +54,6 @@ public:
 
     LlmClient *client() { return &m_client; }
     AcpClient *acpClient() { return &m_acp; }
-    TelegramClient *telegramClient() { return &m_telegram; }
     DocumentBridge *documentBridge() { return m_bridge; }
 
     void start(const QString &userText);
@@ -63,10 +61,7 @@ public:
     void resetConversation();
     void resolvePermission(PermissionDecision decision);
     void fetchModels(Provider provider);
-    
-    // Telegram integration
-    void startTelegramPolling();
-    void stopTelegramPolling();
+    void fetchAcpModels();
 
     // --- Modes ----------------------------------------------------------------
     ModeRegistry *modeRegistry()
@@ -173,8 +168,6 @@ Q_SIGNALS:
     void subtaskStarted(const QString &taskId, const QString &agentId, const QString &agentName, const QString &modeId, const QString &description);
     void subtaskActivity(const QString &taskId, const QString &line, bool isError);
     void subtaskFinished(const QString &taskId, bool ok);
-    void telegramMessageReceived(qint64 chatId, qint64 messageId, const QString &text, const QString &sender);
-    void telegramStatusChanged(bool active);
 
 private:
     enum class State {
@@ -249,12 +242,11 @@ private:
     QString m_workspace;
     QString m_editorContext;
     DocumentBridge *m_bridge = nullptr;
-    LlmClient m_client;
+LlmClient m_client;
     AcpClient m_acp;
-    TelegramClient m_telegram;
-        // Shared by every loop in a turn, so the in-flight replies can be cancelled
-        // as a unit when the turn is aborted.
-        WebSearch m_web;
+    // Shared by every loop in a turn, so the in-flight replies can be cancelled
+    // as a unit when the turn is aborted.
+    WebSearch m_web;
     PermissionPolicy m_policy;
     std::unique_ptr<Sandbox> m_sandbox;
     std::unique_ptr<ToolRunner> m_tools;
@@ -277,10 +269,6 @@ private:
     int m_inFlight = 0;
     // Identity used for the shared edit locks.
     QString m_selfId = QStringLiteral("main");
-    bool m_cancelRequested = false;
-    // Telegram integration
-    qint64 m_telegramChatId = 0;
-    bool m_telegramConversation = false;
     // Paths this loop currently holds a lock on.
     QStringList m_owedPaths;
     int m_subtaskDepth = 0;
@@ -298,6 +286,7 @@ private:
     State m_state = State::Idle;
     int m_modelRequests = 0;
     int m_toolCalls = 0;
+    bool m_cancelRequested = false;
     // Extra compaction pressure after a context-window rejection. Reset at
     // the start of each user turn so a later overflow can compact further
     // instead of aborting the prompt.

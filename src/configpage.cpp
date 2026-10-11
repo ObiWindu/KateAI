@@ -10,6 +10,7 @@
 #include "mcp.h"
 #include "modes.h"
 #include "agentteam.h"
+#include "acpclient.h"
 
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -43,6 +44,7 @@
 #include <QSpinBox>
 #include <QTableWidget>
 #include <QTabWidget>
+#include <QTimer>
 #include <QVBoxLayout>
 #include <QDebug>
 #include <QSysInfo>
@@ -171,15 +173,6 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
         m_opencodeUrl->setPlaceholderText(u"https://opencode.ai/zen/v1"_s);
         addProviderGroup(i18n("OpenCode Zen (curated coding models)"), m_opencodeKey, m_opencodeModel, m_opencodeUrl);
 
-    m_telegramKey = makeKey();
-    m_telegramModel = makeModelCombo();
-    addProviderGroup(i18n("Telegram Bot"), m_telegramKey, m_telegramModel);
-    
-    // Telegram-specific broadcast settings
-    m_telegramBroadcastEnabled = new QCheckBox(i18n("Enable Broadcast Messages"), this);
-    m_telegramBroadcastRecipients = new QLineEdit(this);
-    m_telegramBroadcastRecipients->setPlaceholderText(i18n("Comma-separated chat IDs (e.g., 12345678,98765432)"));
-
     m_acpKey = makeKey();
     m_acpKey->setPlaceholderText(i18n("Optional — most agents use their own CLI login"));
     m_acpModel = makeModelCombo();
@@ -196,6 +189,14 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     m_acpArgs->setPlaceholderText(u"agent stdio"_s);
     m_acpApiKeyEnv = new QLineEdit(this);
     m_acpApiKeyEnv->setPlaceholderText(u"XAI_API_KEY"_s);
+    auto *fetchModelsBtn = new QPushButton(i18n("Fetch Models"), this);
+    fetchModelsBtn->setToolTip(i18n("Start the agent temporarily to query available models"));
+    connect(fetchModelsBtn, &QPushButton::clicked, this, &KateAiConfigPage::fetchAcpModels);
+    auto *modelRow = new QWidget(this);
+    auto *modelLayout = new QHBoxLayout(modelRow);
+    modelLayout->setContentsMargins(0, 0, 0, 0);
+    modelLayout->addWidget(m_acpModel, 1);
+    modelLayout->addWidget(fetchModelsBtn);
     m_apiFormat = new QComboBox(providersWidget);
     m_apiFormat->addItem(apiFormatLabel(ApiFormat::AcpNative), apiFormatId(ApiFormat::AcpNative));
     m_apiFormat->addItem(apiFormatLabel(ApiFormat::OpenAICompatible), apiFormatId(ApiFormat::OpenAICompatible));
@@ -208,7 +209,7 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     acpForm->addRow(i18n("Arguments:"), m_acpArgs);
     acpForm->addRow(i18n("API Key env:"), m_acpApiKeyEnv);
     acpForm->addRow(i18n("API Key:"), m_acpKey);
-    acpForm->addRow(i18n("Default Model:"), m_acpModel);
+    acpForm->addRow(i18n("Default Model:"), modelRow);
     acpForm->addRow(i18n("Endpoint URL:"), m_acpUrl);
     providersLayout->addWidget(acpGroup);
 
@@ -1042,10 +1043,6 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
         connect(m_opencodeKey, &QLineEdit::textChanged, this, markChanged);
         connect(m_opencodeUrl, &QLineEdit::textChanged, this, markChanged);
         connect(m_opencodeModel, QOverload<int>::of(&QComboBox::currentIndexChanged), this, markChanged);
-    connect(m_telegramKey, &QLineEdit::textChanged, this, markChanged);
-    connect(m_telegramModel, QOverload<int>::of(&QComboBox::currentIndexChanged), this, markChanged);
-    connect(m_telegramBroadcastEnabled, &QCheckBox::stateChanged, this, markChanged);
-    connect(m_telegramBroadcastRecipients, &QLineEdit::textChanged, this, markChanged);
     connect(m_grokModel, QOverload<int>::of(&QComboBox::currentIndexChanged), this, markChanged);
     connect(m_openaiModel, QOverload<int>::of(&QComboBox::currentIndexChanged), this, markChanged);
     connect(m_openrouterModel, QOverload<int>::of(&QComboBox::currentIndexChanged), this, markChanged);
@@ -1062,6 +1059,7 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     connect(m_acpApiKeyEnv, &QLineEdit::textChanged, this, markChanged);
     connect(m_acpAgent, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this]() {
         applySelectedAcpPreset();
+        updateAcpModelCombo();
         Q_EMIT changed();
     });
     connect(m_apiFormat, &QComboBox::currentIndexChanged, this, [this]() {
@@ -1514,23 +1512,9 @@ void KateAiConfigPage::apply()
     s.deepseekModel = m_deepseekModel->currentText().trimmed();
     s.openaiCompatibleModel = m_openaiCompatibleModel->currentText().trimmed();
     s.claudeCompatibleModel = m_claudeCompatibleModel->currentText().trimmed();
-        s.opencodeModel = m_opencodeModel->currentText().trimmed();
-        s.opencodeUrl = m_opencodeUrl->text().trimmed();
-    
-    // Telegram settings
-    s.telegramBotToken = m_telegramKey->text().trimmed();
+s.opencodeModel = m_opencodeModel->currentText().trimmed();
+    s.opencodeUrl = m_opencodeUrl->text().trimmed();
     s.acpModel = m_acpModel->currentText().trimmed();
-    s.telegramBroadcastEnabled = m_telegramBroadcastEnabled->isChecked();
-    s.telegramBroadcastRecipients = m_telegramBroadcastRecipients->text().split(u',');
-    // Trim whitespace from each recipient
-    for (QString &recipient : s.telegramBroadcastRecipients) {
-        recipient = recipient.trimmed();
-    }
-    // Remove empty entries
-    s.telegramBroadcastRecipients.erase(std::remove_if(s.telegramBroadcastRecipients.begin(), 
-                                                        s.telegramBroadcastRecipients.end(), 
-                                                        [](const QString &s) { return s.isEmpty(); }), 
-                                    s.telegramBroadcastRecipients.end());
     s.deepseekUrl = m_deepseekUrl->text().trimmed();
     s.openaiCompatibleUrl = m_openaiCompatibleUrl->text().trimmed();
     s.claudeCompatibleUrl = m_claudeCompatibleUrl->text().trimmed();
@@ -1661,11 +1645,6 @@ void KateAiConfigPage::reset()
     m_claudeCompatibleKey->setText(s.claudeCompatibleApiKey);
         m_opencodeKey->setText(s.opencodeApiKey);
         m_opencodeUrl->setText(s.opencodeUrl);
-    
-    // Telegram settings
-    m_telegramKey->setText(s.telegramBotToken);
-    m_telegramBroadcastEnabled->setChecked(s.telegramBroadcastEnabled);
-    m_telegramBroadcastRecipients->setText(s.telegramBroadcastRecipients.join(u", "_s));
     m_acpKey->setText(s.acpApiKey);
 
     // Update model combos with catalog and set current model
@@ -1684,7 +1663,6 @@ void KateAiConfigPage::reset()
     m_openaiCompatibleModel->setCurrentText(s.openaiCompatibleModel);
     m_claudeCompatibleModel->setCurrentText(s.claudeCompatibleModel);
         m_opencodeModel->setCurrentText(s.opencodeModel);
-    m_telegramModel->setCurrentText(s.acpModel); // Telegram uses the same model field
     m_acpModel->setCurrentText(s.acpModel);
 
     m_deepseekUrl->setText(s.deepseekUrl);
@@ -1707,6 +1685,7 @@ void KateAiConfigPage::reset()
         m_apiFormat->setCurrentIndex(std::max(0, m_apiFormat->findData(apiFormatId(s.apiFormat))));
     }
     updateAcpNativeEnabled();
+    updateAcpModelCombo();
 
     // Fetch models for providers that have API keys configured
     if (m_modelFetcher) {
@@ -1942,6 +1921,96 @@ void KateAiConfigPage::updateAcpNativeEnabled()
     m_acpArgs->setEnabled(native);
     m_acpApiKeyEnv->setEnabled(native);
     m_acpUrl->setEnabled(!native);
+}
+
+void KateAiConfigPage::updateAcpModelCombo()
+{
+    if (!usesAcpNative(m_plugin->settings())) {
+        return;
+    }
+    
+    const QString agentId = m_acpAgent->currentData().toString();
+    const Settings settings = m_plugin->settings();
+    QStringList models = acpAgentAvailableModels(settings, agentId);
+    
+    const QString currentText = m_acpModel->currentText();
+    m_acpModel->clear();
+    
+    if (!models.isEmpty()) {
+        m_acpModel->addItems(models);
+    }
+    
+    // Restore current text if it was set
+    if (!currentText.isEmpty()) {
+        m_acpModel->setCurrentText(currentText);
+    }
+}
+
+void KateAiConfigPage::fetchAcpModels()
+{
+    if (!usesAcpNative(m_plugin->settings())) {
+        return;
+    }
+
+    // Disable the button while fetching
+    QPushButton *btn = qobject_cast<QPushButton *>(sender());
+    if (btn) {
+        btn->setEnabled(false);
+        btn->setText(i18n("Fetching..."));
+    }
+
+    // Create a temporary AcpClient to fetch models
+    auto *client = new AcpClient(this);
+    client->setSettings(m_plugin->settings());
+    client->setWorkspace(m_workspace);
+
+    connect(client, &AcpClient::modelsReceived, this, [this, client, btn](const QStringList &models) {
+        if (btn) {
+            btn->setEnabled(true);
+            btn->setText(i18n("Fetch Models"));
+        }
+
+        if (!models.isEmpty()) {
+            // Update the combo box
+            const QString currentText = m_acpModel->currentText();
+            m_acpModel->clear();
+            m_acpModel->addItems(models);
+            if (!currentText.isEmpty()) {
+                m_acpModel->setCurrentText(currentText);
+            }
+
+            // Save to settings
+            Settings s = m_plugin->settings();
+            const QString agentId = m_acpAgent->currentData().toString();
+            QJsonDocument doc = QJsonDocument::fromJson(s.acpAgentModels.toUtf8());
+            QJsonObject agentModels = doc.isObject() ? doc.object() : QJsonObject();
+            QJsonArray modelsArray;
+            for (const QString &model : models) {
+                modelsArray.append(model);
+            }
+            agentModels[agentId] = modelsArray;
+            s.acpAgentModels = QString::fromUtf8(QJsonDocument(agentModels).toJson(QJsonDocument::Compact));
+            m_plugin->setSettings(s);
+
+            Q_EMIT changed();
+        }
+
+        client->stop();
+        client->deleteLater();
+    });
+
+    connect(client, &AcpClient::failed, this, [this, client, btn](const QString &error) {
+        if (btn) {
+            btn->setEnabled(true);
+            btn->setText(i18n("Fetch Models"));
+        }
+        qDebug() << "Failed to fetch ACP models:" << error;
+        client->deleteLater();
+    });
+
+    // Start the client to trigger initialization and session creation
+    // Models will be fetched via configOptions in session/new response
+    client->start();
 }
 
 } // namespace KateAi

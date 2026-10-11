@@ -185,6 +185,40 @@ void AcpClient::setResumeSessionId(const QString &sessionId)
     m_resumeSessionId = sessionId;
 }
 
+void AcpClient::parseConfigOptions(const QJsonArray &configOptions)
+{
+    QStringList models;
+    for (const QJsonValue &optionValue : configOptions) {
+        const QJsonObject option = optionValue.toObject();
+        // Look for model configuration option (type: "select" with category "model" or id containing "model")
+        if (option.contains(u"type"_s) && option.value(u"type"_s).toString() == u"select"_s) {
+            const QString id = option.value(u"id"_s).toString();
+            const QString category = option.value(u"category"_s).toString();
+            if (id.contains(u"model"_s, Qt::CaseInsensitive) || category == u"model"_s) {
+                // This is a model selector - extract the options
+                if (option.contains(u"options"_s)) {
+                    const QJsonArray options = option.value(u"options"_s).toArray();
+                    for (const QJsonValue &optValue : options) {
+                        const QJsonObject opt = optValue.toObject();
+                        if (opt.contains(u"value"_s)) {
+                            const QString modelId = opt.value(u"value"_s).toString();
+                            if (!modelId.isEmpty()) {
+                                models.append(modelId);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if (!models.isEmpty()) {
+        // Remove duplicates
+        models.removeDuplicates();
+        Q_EMIT modelsReceived(models);
+        m_agentModels = models;
+    }
+}
+
 QString AcpClient::resolvedCommand(const Settings &settings)
 {
     const QString command = acpEffectiveCommand(settings);
@@ -524,6 +558,12 @@ void AcpClient::sendInitialize()
     QJsonObject capabilities;
     capabilities.insert(u"fs"_s, fs);
     capabilities.insert(u"terminal"_s, true);
+    // Advertise support for session config options (used for model selection)
+    QJsonObject sessionCapabilities;
+    QJsonObject configOptionsCaps;
+    configOptionsCaps.insert(u"boolean"_s, QJsonObject());
+    sessionCapabilities.insert(u"configOptions"_s, configOptionsCaps);
+    capabilities.insert(u"session"_s, sessionCapabilities);
 
     QJsonObject clientInfo;
     clientInfo.insert(u"name"_s, u"kateai"_s);
@@ -551,12 +591,123 @@ void AcpClient::sendInitialize()
             return;
         }
         const QJsonObject caps = result.value(u"agentCapabilities"_s).toObject();
+        
+        // Check if models are advertised in agentCapabilities
+        if (caps.contains(u"models"_s)) {
+            const QJsonArray modelsArray = caps.value(u"models"_s).toArray();
+            QStringList models;
+            for (const QJsonValue &value : modelsArray) {
+                if (value.isString()) {
+                    models.append(value.toString());
+                } else if (value.isObject()) {
+                    const QJsonObject modelObj = value.toObject();
+                    const QString id = modelObj.value(u"id"_s).toString();
+                    if (!id.isEmpty()) {
+                        models.append(id);
+                    }
+                }
+            }
+            if (!models.isEmpty()) {
+                Q_EMIT modelsReceived(models);
+                // Store for later use
+                m_agentModels = models;
+            }
+        }
+        
         m_loadSession = caps.value(u"loadSession"_s).toBool();
         m_embeddedContext = caps.value(u"promptCapabilities"_s).toObject().value(u"embeddedContext"_s).toBool();
         const QJsonObject sessionCaps = caps.value(u"sessionCapabilities"_s).toObject();
         m_resumeSession = sessionCaps.contains(u"resume"_s);
         m_closeSession = sessionCaps.contains(u"close"_s);
         maybeAuthenticate(result.value(u"authMethods"_s).toArray());
+    });
+}
+
+void AcpClient::fetchModels()
+{
+    // If we already have models from initialize, emit them
+    if (!m_agentModels.isEmpty()) {
+        Q_EMIT modelsReceived(m_agentModels);
+        return;
+    }
+    
+    // Try to call agent/listModels (non-standard, but some agents might support it)
+    sendRequest(u"agent/listModels"_s, QJsonObject(), [this](const QJsonObject &result, const QString &error) {
+        if (!error.isEmpty()) {
+            // Try alternative method names
+            sendRequest(u"models/list"_s, QJsonObject(), [this](const QJsonObject &result2, const QString &error2) {
+                if (!error2.isEmpty()) {
+                    // Fall back to discovering from the agent type
+                    QStringList models = discoverAcpAgentModels(m_settings.acpAgentId, acpEffectiveCommand(m_settings));
+                    if (!models.isEmpty()) {
+                        m_agentModels = models;
+                        Q_EMIT modelsReceived(models);
+                    }
+                    return;
+                }
+                const QJsonArray modelsArray = result2.value(u"models"_s).toArray();
+                QStringList models;
+                for (const QJsonValue &value : modelsArray) {
+                    if (value.isString()) {
+                        models.append(value.toString());
+                    } else if (value.isObject()) {
+                        const QJsonObject modelObj = value.toObject();
+                        const QString id = modelObj.value(u"id"_s).toString();
+                        if (!id.isEmpty()) {
+                            models.append(id);
+                        }
+                    }
+                }
+                if (!models.isEmpty()) {
+                    m_agentModels = models;
+                    Q_EMIT modelsReceived(models);
+                }
+            });
+            return;
+        }
+        const QJsonArray modelsArray = result.value(u"models"_s).toArray();
+        QStringList models;
+        for (const QJsonValue &value : modelsArray) {
+            if (value.isString()) {
+                models.append(value.toString());
+            } else if (value.isObject()) {
+                const QJsonObject modelObj = value.toObject();
+                const QString id = modelObj.value(u"id"_s).toString();
+                if (!id.isEmpty()) {
+                    models.append(id);
+                }
+            }
+        }
+        if (!models.isEmpty()) {
+            m_agentModels = models;
+            Q_EMIT modelsReceived(models);
+        }
+    });
+}
+
+void AcpClient::setModel(const QString &modelId)
+{
+    if (m_sessionId.isEmpty()) {
+        return;
+    }
+    // Use session/set_config_option to change the model
+    // The config option ID is typically "model" for model selection
+    QJsonObject params;
+    params.insert(u"sessionId"_s, m_sessionId);
+    params.insert(u"configId"_s, u"model"_s);
+    QJsonObject value;
+    value.insert(u"type"_s, u"value_id"_s);
+    value.insert(u"value"_s, modelId);
+    params.insert(u"value"_s, value);
+    
+    sendRequest(u"session/set_config_option"_s, params, [this, modelId](const QJsonObject &result, const QString &error) {
+        if (!error.isEmpty()) {
+            Q_EMIT logMessage(u"Failed to set model: %1"_s.arg(error));
+        } else {
+            // Update settings with the new model
+            m_settings.acpModel = modelId;
+            Q_EMIT logMessage(u"Model changed to: %1"_s.arg(modelId));
+        }
     });
 }
 
@@ -641,6 +792,11 @@ void AcpClient::sendSessionNew()
             Q_EMIT failed(message);
             return;
         }
+        // Extract configOptions (e.g., model list) from session response
+        if (result.contains(u"configOptions"_s)) {
+            const QJsonArray configOptions = result.value(u"configOptions"_s).toArray();
+            parseConfigOptions(configOptions);
+        }
         if (m_startupTimer) {
             m_startupTimer->stop();
         }
@@ -661,13 +817,18 @@ void AcpClient::sendSessionLoadOrResume()
     params.insert(u"sessionId"_s, m_resumeSessionId);
     params.insert(u"cwd"_s, m_workspace);
     params.insert(u"mcpServers"_s, mcpServersPayload());
-    sendRequest(method, params, [this](const QJsonObject &, const QString &error) {
+    sendRequest(method, params, [this](const QJsonObject &result, const QString &error) {
         if (!error.isEmpty()) {
             m_resumeSessionId.clear();
             sendSessionNew();
             return;
         }
         m_sessionId = m_resumeSessionId;
+        // Extract configOptions (e.g., model list) from session response
+        if (result.contains(u"configOptions"_s)) {
+            const QJsonArray configOptions = result.value(u"configOptions"_s).toArray();
+            parseConfigOptions(configOptions);
+        }
         if (m_startupTimer) {
             m_startupTimer->stop();
         }
@@ -991,6 +1152,12 @@ void AcpClient::handleNotification(const QJsonObject &message)
             update = params;
         }
         handleSessionUpdate(update);
+    } else if (method == u"config_option_update"_s) {
+        // Agent notifies about config option changes (e.g., model list updated)
+        if (params.contains(u"configOptions"_s)) {
+            const QJsonArray configOptions = params.value(u"configOptions"_s).toArray();
+            parseConfigOptions(configOptions);
+        }
     }
 }
 

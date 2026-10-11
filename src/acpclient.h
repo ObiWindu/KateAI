@@ -86,6 +86,12 @@ public:
     static QString resolvedCommand(const Settings &settings);
     static QStringList agentArguments(const Settings &settings);
 
+    // Fetch available models from the ACP agent (if supported)
+    void fetchModels();
+    
+    // Set the model via session/set_config_option
+    void setModel(const QString &modelId);
+
 Q_SIGNALS:
     void ready();
     void failed(const QString &error);
@@ -98,6 +104,7 @@ Q_SIGNALS:
     void promptFinished(const QString &stopReason, const QString &text, const QJsonArray &toolCalls);
     void logMessage(const QString &message);
     void sessionIdChanged(const QString &sessionId);
+    void modelsReceived(const QStringList &models);
 
 private:
     enum class State {
@@ -181,6 +188,9 @@ private:
     Sandbox currentSandbox() const;
     QProcessEnvironment processEnvironment() const;
 
+    // Parse configOptions from session response to extract model list
+    void parseConfigOptions(const QJsonArray &configOptions);
+
     Settings m_settings;
     QString m_workspace;
     QString m_editorContext;
@@ -221,6 +231,7 @@ private:
     int m_nextTerminal = 1;
 
     QPointer<QTimer> m_startupTimer;
+    QStringList m_agentModels;
 };
 
 } // namespace KateAi

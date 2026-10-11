@@ -10,7 +10,6 @@
 
 #include <KLocalizedString>
 #include "sessionstore.h"
-#include "telegramclient.h"
 #include "types.h"
 #include "websearch.h"
 
@@ -110,29 +109,8 @@ AgentLoop::AgentLoop(QObject *parent)
     connect(&m_acp, &AcpClient::sessionIdChanged, this, [this](const QString &) {
         Q_EMIT statusChanged(m_acp.statusText());
     });
-
-    // --- Telegram -----------------------------------------------------------
-    connect(&m_telegram, &TelegramClient::messageReceived, this, [this](qint64 chatId, qint64 messageId, const QString &text, const QString &sender) {
-        // Forward Telegram messages to start a new AI turn
-        Q_EMIT telegramMessageReceived(chatId, messageId, text, sender);
-        
-        // Only process if we have a configured bot token
-        if (!m_settings.telegramBotToken.isEmpty()) {
-            // Store the chat ID for response
-            m_telegramChatId = chatId;
-            m_telegramConversation = true;
-            // Start the AI with the received message
-            start(text);
-        }
-    });
-    connect(&m_telegram, &TelegramClient::pollingStarted, this, [this] {
-        Q_EMIT telegramStatusChanged(true);
-    });
-    connect(&m_telegram, &TelegramClient::pollingStopped, this, [this] {
-        Q_EMIT telegramStatusChanged(false);
-    });
-    connect(&m_telegram, &TelegramClient::pollingError, this, [this](const QString &error) {
-        Q_EMIT activityUpdated(u"Telegram error: %1"_s.arg(error));
+    connect(&m_acp, &AcpClient::modelsReceived, this, [this](const QStringList &models) {
+        Q_EMIT modelsReceived(Provider::Acp, models);
     });
 
     // Retry status signals
@@ -199,7 +177,6 @@ void AgentLoop::setSettings(const Settings &settings)
 
     m_settings = settings;
     m_client.setSettings(settings);
-    m_telegram.setSettings(settings);
     syncAcpClient();
     // Keep the shared web client in step with the settings.
     m_web.setProvider(WebSearch::providerFromId(settings.webSearchProvider));
@@ -285,12 +262,6 @@ void AgentLoop::setWorkspace(const QString &workspace)
         m_tools->setProjectGraph(m_projectGraph.get());
     }
 
-    // Auto-generate or load project graph
-    // Initialize Telegram client with workspace if configured
-    if (m_telegram.isConfigured()) {
-        m_telegram.setSettings(m_settings);
-    }
-
     if (m_projectGraph) {
         QString graphFilePath = m_workspace + u"/.kateai/project_graph.json"_s;
         if (QFile::exists(graphFilePath)) {
@@ -324,20 +295,6 @@ void AgentLoop::setEditorContext(const QString &context)
     // Update the editor context with information about the current document and cursor position
     m_editorContext = context;
     m_acp.setEditorContext(context);
-}
-
-void AgentLoop::startTelegramPolling()
-{
-    if (m_telegram.isConfigured() && m_settings.telegramBroadcastEnabled) {
-        m_telegram.startPollingUpdates(10); // Poll every 10 seconds
-        Q_EMIT activityUpdated(u"Telegram polling started"_s);
-    }
-}
-
-void AgentLoop::stopTelegramPolling()
-{
-    m_telegram.stopPollingUpdates();
-    Q_EMIT activityUpdated(u"Telegram polling stopped"_s);
 }
 
 ToolAccess AgentLoop::activeToolAccess() const
@@ -797,14 +754,11 @@ void AgentLoop::abort()
     m_acp.cancel();
     m_web.abort();
     cancelSubtask();
-    m_telegram.stopPollingUpdates();
     m_inFlight = 0;
     m_queue.clear();
     m_pendingResults.clear();
     m_waitingCall = {};
     m_waitingRequest = {};
-    m_telegramConversation = false;
-    m_telegramChatId = 0;
     m_busy = false;
     m_state = State::Idle;
     if (m_locks) {
@@ -855,10 +809,6 @@ void AgentLoop::start(const QString &userText)
     m_compactionLevel = 0;
     m_contextOverflowRetries = 0;
     m_taskSummary = userText.simplified().left(80);
-    
-    // Reset Telegram conversation flag at start of each turn
-    // It will be set to true if this turn was triggered by Telegram
-    m_telegramConversation = false;
 
     if (m_messages.isEmpty()) {
         ChatMessage system;
@@ -1504,16 +1454,6 @@ void AgentLoop::requestVerificationTurn()
 
 void AgentLoop::finishTurn()
 {
-    // If this was a Telegram conversation, send the response back
-    if (m_telegramConversation && m_telegramChatId != 0 && m_telegram.isConfigured()) {
-        // Send the accumulated assistant response to Telegram
-        if (!m_currentAssistant.isEmpty()) {
-            m_telegram.sendMessage(m_telegramChatId, m_currentAssistant);
-        }
-        m_telegramConversation = false;
-        m_telegramChatId = 0;
-    }
-
     m_nextModelTimer.stop();
     m_busy = false;
     m_state = State::Idle;
@@ -2320,6 +2260,11 @@ void AgentLoop::resolvePermission(PermissionDecision decision)
 void AgentLoop::fetchModels(Provider provider)
 {
     m_client.fetchModels(provider);
+}
+
+void AgentLoop::fetchAcpModels()
+{
+    m_acp.fetchModels();
 }
 
 SessionStore::SessionData AgentLoop::sessionData() const

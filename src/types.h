@@ -186,9 +186,6 @@ struct Settings {
     QString kiloModel;
     QString acpModel;
     QString opencodeModel;
-    QString telegramBotToken;
-    QStringList telegramBroadcastRecipients;
-    bool telegramBroadcastEnabled = false;
     // Model names are no longer hard-coded: they are fetched from whichever
     // providers have a valid key. These stay empty until then.
     QString opencodeApiKey;

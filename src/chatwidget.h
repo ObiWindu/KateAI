@@ -134,6 +134,7 @@ private:
     void applyModelMenuFilter();
     void moveModelMenuSelection(int delta);
     void selectModel(Provider provider, const QString &model);
+    void selectAcpAgentAndModel(const QString &agentId, const QString &model);
     void updateModelSelectorLabel();
     void showInfoMessage(const QString &message, bool isError);
     void saveCurrentConversation();
@@ -235,6 +236,8 @@ private:
     Provider m_preferredProvider = Provider::Grok;
     bool m_updatingCombos = false;
     QString m_modelFilter;
+    QString m_acpAgentModelViewAgentId;
+    QString m_acpAgentModelViewAgentName;
     // Custom popup rather than QMenu: a QLineEdit inside QMenu::exec() plus
     // setVisible() on hundreds of model QActions is what made typing hang, and
     // exec() below the chip opened the list off the bottom of the panel.

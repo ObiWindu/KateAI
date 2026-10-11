@@ -21,6 +21,7 @@
 #include "checkpoint.h"
 #include "mcp.h"
 #include "modes.h"
+#include "types.h"
 
 #include <KLocalizedString>
 
@@ -904,6 +905,20 @@ ChatWidget::ChatWidget(QWidget *parent)
         updateModelSelectorLabel();
         updateTokenDisplay();
         updateReasoningEffortButton();
+
+        // For ACP, also save models to settings so they persist and appear in the model menu
+        if (provider == Provider::Acp && !models.isEmpty()) {
+            QJsonDocument doc = QJsonDocument::fromJson(m_settings.acpAgentModels.toUtf8());
+            QJsonObject agentModels = doc.isObject() ? doc.object() : QJsonObject();
+            QJsonArray modelsArray;
+            for (const QString &model : models) {
+                modelsArray.append(model);
+            }
+            agentModels[m_settings.acpAgentId] = modelsArray;
+            m_settings.acpAgentModels = QString::fromUtf8(QJsonDocument(agentModels).toJson(QJsonDocument::Compact));
+            // Emit settings changed to persist
+            Q_EMIT settingsChanged(m_settings);
+        }
     });
 
     connect(&m_agent, &AgentLoop::modelsFailed, this, [this](Provider provider, const QString &error) {
@@ -2124,14 +2139,6 @@ void ChatWidget::setSettings(const Settings &settings)
 
     // Propagate settings to agent
     m_agent.setSettings(settings);
-    
-    // Start Telegram polling if bot token is configured
-    if (!settings.telegramBotToken.isEmpty()) {
-        m_agent.startTelegramPolling();
-    } else {
-        m_agent.stopTelegramPolling();
-    }
-
     refreshProviders();
     updateModelSelectorLabel();
     updateTokenDisplay();
@@ -2611,6 +2618,16 @@ void ChatWidget::showModelMenu()
     pickerTabs->addTab(acpPage, i18n("ACP Agents"));
     root->addWidget(pickerTabs, 1);
 
+    // Clear model view mode when switching tabs
+    connect(pickerTabs, &QTabWidget::currentChanged, this, [this](int index) {
+        if (index == 1) {
+            // Switched to ACP Agents tab - clear model view mode
+            m_acpAgentModelViewAgentId.clear();
+            m_acpAgentModelViewAgentName.clear();
+            fillModelResultList();
+        }
+    });
+
     connect(filterEdit, &QLineEdit::textChanged, this, [this](const QString &text) {
         m_modelFilter = text;
         applyModelMenuFilter();
@@ -2633,27 +2650,92 @@ void ChatWidget::showModelMenu()
                 }
             }
         }
-        if (!item || item->data(Qt::UserRole).toInt() < 0) {
+        if (!item) {
+            return;
+        }
+        int userRole = item->data(Qt::UserRole).toInt();
+        if (userRole == -2) {
+            // Back button clicked - return to ACP agents list
+            m_acpAgentModelViewAgentId.clear();
+            m_acpAgentModelViewAgentName.clear();
+            if (m_modelPickerTabs) {
+                m_modelPickerTabs->setCurrentIndex(1); // Switch to ACP Agents tab
+            }
+            fillModelResultList();
+            return;
+        }
+        if (userRole < 0) {
             return;
         }
         if (m_modelPickerTabs && m_modelPickerTabs->currentIndex() == 1) {
             selectModel(Provider::Acp, item->data(Qt::UserRole + 1).toString());
         } else {
-            selectModel(static_cast<Provider>(item->data(Qt::UserRole).toInt()),
-                        item->data(Qt::UserRole + 1).toString());
+            // Check if this is an ACP agent model selection (has agentId in UserRole+2)
+            QString agentId = item->data(Qt::UserRole + 2).toString();
+            if (!agentId.isEmpty() && userRole == static_cast<int>(Provider::Acp)) {
+                // Select the ACP agent and its model
+                selectAcpAgentAndModel(agentId, item->data(Qt::UserRole + 1).toString());
+            } else {
+                selectModel(static_cast<Provider>(userRole),
+                            item->data(Qt::UserRole + 1).toString());
+            }
         }
     };
     connect(filterEdit, &QLineEdit::returnPressed, this, activateCurrent);
     connect(list, &QListWidget::itemClicked, this, [this](QListWidgetItem *item) {
-        if (!item || item->data(Qt::UserRole).toInt() < 0) {
+        if (!item) {
             return;
         }
-        selectModel(static_cast<Provider>(item->data(Qt::UserRole).toInt()),
-                    item->data(Qt::UserRole + 1).toString());
+        int userRole = item->data(Qt::UserRole).toInt();
+        if (userRole == -2) {
+            // Back button clicked - return to ACP agents list
+            m_acpAgentModelViewAgentId.clear();
+            m_acpAgentModelViewAgentName.clear();
+            if (m_modelPickerTabs) {
+                m_modelPickerTabs->setCurrentIndex(1); // Switch to ACP Agents tab
+            }
+            fillModelResultList();
+            return;
+        }
+        if (userRole < 0) {
+            return;
+        }
+        // Check if this is an ACP agent model selection (has agentId in UserRole+2)
+        QString agentId = item->data(Qt::UserRole + 2).toString();
+        if (!agentId.isEmpty() && userRole == static_cast<int>(Provider::Acp)) {
+            // Select the ACP agent and its model
+            selectAcpAgentAndModel(agentId, item->data(Qt::UserRole + 1).toString());
+        } else {
+            selectModel(static_cast<Provider>(userRole),
+                        item->data(Qt::UserRole + 1).toString());
+        }
     });
     connect(acpList, &QListWidget::itemClicked, this, [this](QListWidgetItem *item) {
         if (!item || item->data(Qt::UserRole).toInt() < 0) return;
-        selectModel(Provider::Acp, item->data(Qt::UserRole + 1).toString());
+        // Get the agent name and ID from the installed agents list
+        const QJsonArray installed = QJsonDocument::fromJson(m_settings.acpInstalledAgents.toUtf8()).array();
+        QString agentName = item->data(Qt::UserRole + 1).toString();
+        QString agentId;
+        for (const QJsonValue &value : installed) {
+            const QJsonObject agent = value.toObject();
+            if (agent.value(u"name"_s).toString() == agentName) {
+                agentId = agent.value(u"id"_s).toString();
+                break;
+            }
+        }
+        if (!agentId.isEmpty()) {
+            // Switch to model view mode for this agent
+            m_acpAgentModelViewAgentId = agentId;
+            m_acpAgentModelViewAgentName = agentName;
+            // Switch to Models tab
+            if (m_modelPickerTabs) {
+                m_modelPickerTabs->setCurrentIndex(0);
+            }
+            fillModelResultList();
+        } else {
+            // Fallback to old behavior
+            selectModel(Provider::Acp, agentName);
+        }
     });
 
     auto *nextModel = new QShortcut(QKeySequence(Qt::Key_Down), popup);
@@ -2681,6 +2763,8 @@ void ChatWidget::showModelMenu()
 
     connect(popup, &QWidget::destroyed, this, [this]() {
         m_modelFilter.clear();
+        m_acpAgentModelViewAgentId.clear();
+        m_acpAgentModelViewAgentName.clear();
         m_modelFilterEdit = nullptr;
         m_modelResultList = nullptr;
         m_acpAgentResultList = nullptr;
@@ -2734,14 +2818,126 @@ void ChatWidget::fillModelResultList()
     const QString filter = m_modelFilter.trimmed();
     const bool filtering = !filter.isEmpty();
     const QString currentModel = modelFor(m_settings).trimmed();
-    const QList<Provider> providers = {
-        Provider::Grok, Provider::OpenAI, Provider::OpenRouter, Provider::DeepSeek,
-        Provider::OpenAICompatible, Provider::ClaudeCompatible, Provider::Kilo,
-        Provider::Acp, Provider::OpenCode
-    };
 
     QSignalBlocker blocker(m_modelResultList);
     m_modelResultList->clear();
+
+    // If we're viewing models for a specific ACP agent, show only those models
+    if (!m_acpAgentModelViewAgentId.isEmpty()) {
+        // Add a back button to return to agent list
+        auto *backItem = new QListWidgetItem(i18n("← Back to ACP Agents"));
+        backItem->setData(Qt::UserRole, -2); // Special value for back navigation
+        backItem->setForeground(QColor(QStringLiteral("#007acc")));
+        QFont backFont = backItem->font();
+        backFont.setItalic(true);
+        backItem->setFont(backFont);
+        m_modelResultList->addItem(backItem);
+
+        // Add header showing which agent's models we're viewing
+        auto *header = new QListWidgetItem(i18n("Models for %1", m_acpAgentModelViewAgentName));
+        header->setFlags(Qt::NoItemFlags);
+        header->setData(Qt::UserRole, -1);
+        QFont font = header->font();
+        font.setBold(true);
+        header->setFont(font);
+        header->setForeground(QColor(QStringLiteral("#8b8b92")));
+        m_modelResultList->addItem(header);
+
+        // Get models for this specific ACP agent
+        Settings agentSettings = m_settings;
+        agentSettings.acpAgentId = m_acpAgentModelViewAgentId;
+        // Get the command for this agent from installed agents
+        const QJsonArray installed = QJsonDocument::fromJson(m_settings.acpInstalledAgents.toUtf8()).array();
+        for (const QJsonValue &value : installed) {
+            const QJsonObject agent = value.toObject();
+            if (agent.value(u"id"_s).toString() == m_acpAgentModelViewAgentId) {
+                agentSettings.acpCommand = agent.value(u"command"_s).toString();
+                QStringList args;
+                for (const QJsonValue &arg : agent.value(u"args"_s).toArray()) {
+                    args.append(arg.toString());
+                }
+                agentSettings.acpArgs = args.join(u" "_s);
+                break;
+            }
+        }
+        QStringList models = acpAgentAvailableModels(agentSettings, m_acpAgentModelViewAgentId);
+
+        int matches = 0;
+        QListWidgetItem *select = nullptr;
+        constexpr int kMaxVisibleMatches = 250;
+
+        if (!filtering) {
+            if (models.isEmpty()) {
+                auto *empty = new QListWidgetItem(i18n("No models available for this agent"));
+                empty->setFlags(Qt::NoItemFlags);
+                empty->setData(Qt::UserRole, -1);
+                empty->setForeground(QColor(QStringLiteral("#8b8b92")));
+                m_modelResultList->addItem(empty);
+            } else {
+                for (const QString &model : models) {
+                    auto *item = new QListWidgetItem(model);
+                    item->setData(Qt::UserRole, static_cast<int>(Provider::Acp));
+                    item->setData(Qt::UserRole + 1, model);
+                    item->setData(Qt::UserRole + 2, m_acpAgentModelViewAgentId); // Store agent ID
+                    if (m_settings.provider == Provider::Acp && m_settings.acpAgentId == m_acpAgentModelViewAgentId && (currentModel == model || (currentModel.isEmpty() && select == nullptr))) {
+                        select = item;
+                    }
+                    m_modelResultList->addItem(item);
+                }
+            }
+        } else {
+            for (const QString &model : models) {
+                if (matches >= kMaxVisibleMatches) {
+                    break;
+                }
+                const QString display = model.isEmpty() ? i18n("Configured endpoint") : model;
+                if (!display.contains(filter, Qt::CaseInsensitive)
+                    && !m_acpAgentModelViewAgentName.contains(filter, Qt::CaseInsensitive)) {
+                    continue;
+                }
+                auto *item = new QListWidgetItem(u"%1  ·  %2"_s.arg(m_acpAgentModelViewAgentName, display));
+                item->setData(Qt::UserRole, static_cast<int>(Provider::Acp));
+                item->setData(Qt::UserRole + 1, model);
+                item->setData(Qt::UserRole + 2, m_acpAgentModelViewAgentId); // Store agent ID
+                if (m_settings.provider == Provider::Acp && m_settings.acpAgentId == m_acpAgentModelViewAgentId && (currentModel == model || (currentModel.isEmpty() && select == nullptr))) {
+                    select = item;
+                }
+                m_modelResultList->addItem(item);
+                ++matches;
+            }
+            if (matches >= kMaxVisibleMatches) {
+                auto *more = new QListWidgetItem(i18n("Type more to narrow the list"));
+                more->setFlags(Qt::NoItemFlags);
+                more->setData(Qt::UserRole, -1);
+                more->setForeground(QColor(QStringLiteral("#8b8b92")));
+                m_modelResultList->addItem(more);
+            }
+        }
+
+        if (filtering && matches == 0 && models.isEmpty()) {
+            auto *empty = new QListWidgetItem(i18n("No matching models"));
+            empty->setFlags(Qt::NoItemFlags);
+            empty->setData(Qt::UserRole, -1);
+            empty->setForeground(QColor(QStringLiteral("#8b8b92")));
+            m_modelResultList->addItem(empty);
+        }
+
+        if (select) {
+            m_modelResultList->setCurrentItem(select);
+            m_modelMenuSelection = m_modelResultList->row(select);
+        } else {
+            m_modelMenuSelection = -1;
+        }
+
+        // Also clear the ACP agents list when in model view mode
+        if (m_acpAgentResultList) {
+            QSignalBlocker acpBlocker(m_acpAgentResultList);
+            m_acpAgentResultList->clear();
+        }
+        return;
+    }
+
+    // Normal mode: show all providers and their models
     if (m_acpAgentResultList) {
         QSignalBlocker acpBlocker(m_acpAgentResultList);
         m_acpAgentResultList->clear();
@@ -2768,6 +2964,12 @@ void ChatWidget::fillModelResultList()
             m_acpAgentResultList->setCurrentItem(selectedAgent);
         }
     }
+
+    const QList<Provider> providers = {
+        Provider::Grok, Provider::OpenAI, Provider::OpenRouter, Provider::DeepSeek,
+        Provider::OpenAICompatible, Provider::ClaudeCompatible, Provider::Kilo,
+        Provider::Acp, Provider::OpenCode
+    };
 
     int matches = 0;
     QListWidgetItem *select = nullptr;
@@ -2980,6 +3182,43 @@ void ChatWidget::selectModel(Provider provider, const QString &model)
     }
 }
 
+void ChatWidget::selectAcpAgentAndModel(const QString &agentId, const QString &model)
+{
+    // First select the agent (sets up command, args, etc.)
+    const QJsonArray installed = QJsonDocument::fromJson(m_settings.acpInstalledAgents.toUtf8()).array();
+    for (const QJsonValue &value : installed) {
+        const QJsonObject agent = value.toObject();
+        if (agent.value(u"id"_s).toString() != agentId) continue;
+        // Registry agents speak native ACP over the child process's
+        // stdio streams; selecting one must not retain an HTTP mode.
+        m_settings.apiFormat = ApiFormat::AcpNative;
+        m_settings.acpAgentId = agent.value(u"id"_s).toString();
+        m_settings.acpCommand = agent.value(u"command"_s).toString();
+        QStringList args;
+        for (const QJsonValue &arg : agent.value(u"args"_s).toArray()) args.append(arg.toString());
+        m_settings.acpArgs = args.join(u" "_s);
+        break;
+    }
+    // Then set the model for this agent
+    m_settings.acpModel = model;
+    m_settings.provider = Provider::Acp;
+    m_preferredProvider = Provider::Acp;
+
+    // Clear the model view mode
+    m_acpAgentModelViewAgentId.clear();
+    m_acpAgentModelViewAgentName.clear();
+
+    updateModelSelectorLabel();
+    updateTokenDisplay();
+    applyProviderToCombos();
+    updateReasoningEffortButton();
+    m_agent.setSettings(m_settings);
+    Q_EMIT settingsChanged(m_settings);
+    if (m_modelPopup) {
+        m_modelPopup->close();
+    }
+}
+
 void ChatWidget::showSettingsMenu()
 {
     QMenu menu(this);
@@ -3077,24 +3316,51 @@ void ChatWidget::showSettingsMenu()
         }
     }
 
-    // ACP does not expose a common model catalogue. Show available models for the current
-    // ACP agent, with a custom input option for models not in the list.
-    auto *acpMenu = menu.addMenu(i18n("ACP Agent"));
-    acpMenu->setStyleSheet(menu.styleSheet());
-    auto *acpModelMenu = acpMenu->addMenu(i18n("Model"));
-    acpModelMenu->setStyleSheet(menu.styleSheet());
-    
-    // Get available models for the current ACP agent
-    QStringList availableModels = acpAgentAvailableModels(m_settings);
-    
-    // Add each available model as a selectable action
-    for (const QString &model : availableModels) {
-        auto *modelAction = acpModelMenu->addAction(model);
-        modelAction->setData(model);
-        connect(modelAction, &QAction::triggered, this, [this, model, &menu]() {
+    // ACP Model Selection (top-level when using ACP provider)
+    if (m_settings.provider == Provider::Acp || m_preferredProvider == Provider::Acp) {
+        auto *acpModelMenu = menu.addMenu(i18n("ACP Model"));
+        acpModelMenu->setStyleSheet(menu.styleSheet());
+        
+        QStringList availableModels = acpAgentAvailableModels(m_settings);
+        
+        for (const QString &model : availableModels) {
+            auto *modelAction = acpModelMenu->addAction(model);
+            modelAction->setData(model);
+            connect(modelAction, &QAction::triggered, this, [this, model, &menu]() {
+                m_settings.provider = Provider::Acp;
+                m_preferredProvider = Provider::Acp;
+                m_settings.acpModel = model;
+                updateModelSelectorLabel();
+                updateTokenDisplay();
+                m_agent.setSettings(m_settings);
+                Q_EMIT settingsChanged(m_settings);
+                menu.close();
+            });
+        }
+        
+        if (!availableModels.isEmpty()) {
+            acpModelMenu->addSeparator();
+        }
+        
+        // Refresh models from running ACP agent
+        auto *refreshModelsAction = acpModelMenu->addAction(i18n("Refresh from Agent…"));
+        connect(refreshModelsAction, &QAction::triggered, this, [this, &menu]() {
+            m_agent.fetchAcpModels();
+            showInfoMessage(i18n("Fetching models from ACP agent…"), false);
+            menu.close();
+        });
+        
+        auto *modelInputAction = new QWidgetAction(acpModelMenu);
+        auto *modelInput = new QLineEdit(acpModelMenu);
+        modelInput->setPlaceholderText(i18n("Custom model identifier..."));
+        modelInput->setText(m_settings.acpModel);
+        modelInput->setMinimumWidth(240);
+        modelInputAction->setDefaultWidget(modelInput);
+        acpModelMenu->addAction(modelInputAction);
+        connect(modelInput, &QLineEdit::returnPressed, this, [this, modelInput, &menu]() {
             m_settings.provider = Provider::Acp;
             m_preferredProvider = Provider::Acp;
-            m_settings.acpModel = model;
+            m_settings.acpModel = modelInput->text().trimmed();
             updateModelSelectorLabel();
             updateTokenDisplay();
             m_agent.setSettings(m_settings);
@@ -3102,30 +3368,39 @@ void ChatWidget::showSettingsMenu()
             menu.close();
         });
     }
+
+    // ACP Agent configuration
+    auto *acpMenu = menu.addMenu(i18n("ACP Agent"));
+    acpMenu->setStyleSheet(menu.styleSheet());
     
-    // Add separator and custom input for models not in the list
-    if (!availableModels.isEmpty()) {
-        acpModelMenu->addSeparator();
+    // Agent selection
+    const QStringList acpAgentIds = {u"grok-build"_s, u"claude-acp"_s, u"codex-acp"_s, u"gemini"_s, u"mistral-vibe"_s, u"custom"_s};
+    const QStringList acpAgentLabels = {
+        i18n("Grok Build"),
+        i18n("Claude Agent"),
+        i18n("Codex"),
+        i18n("Gemini CLI"),
+        i18n("Mistral Vibe"),
+        i18n("Custom…")
+    };
+    
+    for (int i = 0; i < acpAgentIds.size(); ++i) {
+        auto *action = acpMenu->addAction(acpAgentLabels[i]);
+        action->setData(acpAgentIds[i]);
+        action->setCheckable(true);
+        action->setChecked(m_settings.acpAgentId == acpAgentIds[i]);
+        connect(action, &QAction::triggered, this, [this, id = acpAgentIds[i], &menu]() {
+            m_settings.acpAgentId = id;
+            m_settings.provider = Provider::Acp;
+            m_preferredProvider = Provider::Acp;
+            m_agent.setSettings(m_settings);
+            Q_EMIT settingsChanged(m_settings);
+            menu.close();
+        });
     }
     
-    auto *modelInputAction = new QWidgetAction(acpModelMenu);
-    auto *modelInput = new QLineEdit(acpModelMenu);
-    modelInput->setPlaceholderText(i18n("Custom model identifier..."));
-    modelInput->setText(m_settings.acpModel);
-    modelInput->setMinimumWidth(240);
-    modelInputAction->setDefaultWidget(modelInput);
-    acpModelMenu->addAction(modelInputAction);
-    connect(modelInput, &QLineEdit::returnPressed, this, [this, modelInput, &menu]() {
-        m_settings.provider = Provider::Acp;
-        m_preferredProvider = Provider::Acp;
-        m_settings.acpModel = modelInput->text().trimmed();
-        updateModelSelectorLabel();
-        updateTokenDisplay();
-        m_agent.setSettings(m_settings);
-        Q_EMIT settingsChanged(m_settings);
-        menu.close();
-    });
-
+    acpMenu->addSeparator();
+    
     // Auto-approve tools that still prompt
     auto *autoApproveMenu = menu.addMenu(i18n("Auto-approve tools"));
     autoApproveMenu->setStyleSheet(menu.styleSheet());
@@ -3149,7 +3424,7 @@ void ChatWidget::showSettingsMenu()
             });
         }
     }
-
+    
     // Thinking Mode
     auto *thinkingAction = menu.addAction(i18n("Thinking Mode"));
     thinkingAction->setCheckable(true);
