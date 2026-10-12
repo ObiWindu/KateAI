@@ -617,7 +617,7 @@ QString smartCompressContext(const QString &text, int maxLength, bool enabled)
     int keepStart = maxLength * 30 / 100;
     int keepEnd = maxLength * 50 / 100;
     int summaryBudget = maxLength - keepStart - keepEnd - 50; // 50 for summary marker
-    
+
     if (summaryBudget < 100) {
         // Fall back to simple truncation if budget too small
         return compressText(text, maxLength, true);
@@ -625,14 +625,14 @@ QString smartCompressContext(const QString &text, int maxLength, bool enabled)
 
     QString start = text.left(keepStart);
     QString end = text.right(keepEnd);
-    
+
     // Create a summary of what was in the middle
     QString middle = text.mid(keepStart, text.length() - keepStart - keepEnd);
     int middleLines = middle.count(u'\n');
     int middleChars = middle.length();
-    
+
     QString summary = u"\n[... %1 lines, %2 chars compressed ...]\n"_s.arg(middleLines).arg(middleChars);
-    
+
     return start + summary + end;
 }
 
@@ -836,6 +836,7 @@ QList<AcpAgentPreset> acpAgentPresets()
         {u"qwen-code"_s, i18n("Qwen Code"), u"npx"_s, u"-y @qwen-code/qwen-code --acp"_s, {}},
         {u"auggie"_s, i18n("Auggie CLI"), u"npx"_s, u"-y @augmentcode/auggie --acp"_s, {}},
         {u"cursor"_s, i18n("Cursor"), u"cursor-agent"_s, u"acp"_s, {}},
+        {u"mistral-vibe"_s, i18n("Mistral Vibe"), u"vibe-acp"_s, u""_s, u"MISTRAL_API_KEY"_s},
         {u"custom"_s, i18n("Custom"), {}, {}, {}},
     };
 }
@@ -925,64 +926,29 @@ QString acpAgentIdMatching(const QString &command, const QString &args)
     return u"custom"_s;
 }
 
-QStringList discoverAcpAgentModels(const QString &agentId, const QString &command)
-{
-    QStringList models;
-    
-    // Try agent-specific model discovery based on known agents
-    if (agentId == u"grok-build"_s || QFileInfo(command).fileName() == u"grok"_s) {
-        // Grok Build supports these models
-        models = {u"grok-2"_s, u"grok-2-beta"_s, u"grok-2-mini"_s, u"grok-1.5"_s, u"grok-1.5-mini"_s};
-    } else if (agentId == u"claude-acp"_s || command.contains(u"claude-agent-acp"_s)) {
-        // Claude Agent supports these models
-        models = {u"claude-3-5-sonnet-20250620"_s, u"claude-3-haiku-20240307"_s, u"claude-3-sonnet-20240229"_s, u"claude-3-opus-20240229"_s};
-    } else if (agentId == u"codex-acp"_s || command.contains(u"codex-acp"_s)) {
-        // Codex supports these models
-        models = {u"codex-pro"_s, u"codex-plus"_s, u"codex"_s};
-    } else if (agentId == u"gemini"_s || command.contains(u"gemini"_s)) {
-        // Gemini CLI supports these models
-        models = {u"gemini-2.0-pro-exp"_s, u"gemini-2.0-pro"_s, u"gemini-1.5-pro"_s, u"gemini-1.5-flash"_s};
-    } else if (agentId == u"opencode"_s || command.contains(u"opencode"_s)) {
-        // OpenCode supports various models
-        models = {u"gpt-4o-mini"_s, u"gpt-4o"_s, u"claude-3-5-sonnet-20250620"_s, u"claude-3-haiku-20240307"_s};
-    }
-    
-    return models;
-}
-
 QStringList acpAgentAvailableModels(const Settings &settings, const QString &agentId)
 {
     QStringList models;
-    
-    // If we have stored agent models in settings, use them
+    const QString effectiveAgentId = agentId.isEmpty() ? settings.acpAgentId : agentId;
+
+    // Populated when a session reports configOptions or the legacy models field.
     const QJsonDocument doc = QJsonDocument::fromJson(settings.acpAgentModels.toUtf8());
     if (doc.isObject()) {
-        const QJsonObject agentModels = doc.object();
-        const QString effectiveAgentId = agentId.isEmpty() ? settings.acpAgentId : agentId;
-        const QJsonValue modelsValue = agentModels.value(effectiveAgentId);
+        const QJsonValue modelsValue = doc.object().value(effectiveAgentId);
         if (modelsValue.isArray()) {
-            const QJsonArray modelsArray = modelsValue.toArray();
-            for (const QJsonValue &modelValue : modelsArray) {
-                const QString model = modelValue.toString();
-                if (!model.isEmpty()) {
+            for (const QJsonValue &modelValue : modelsValue.toArray()) {
+                const QString model = modelValue.toString().trimmed();
+                if (!model.isEmpty() && !models.contains(model)) {
                     models.append(model);
                 }
             }
         }
     }
-    
-    // If no models are stored, try to discover them from the agent
-    if (models.isEmpty()) {
-        const QString effectiveAgentId = agentId.isEmpty() ? settings.acpAgentId : agentId;
-        const QString effectiveCommand = acpEffectiveCommand(settings);
-        models = discoverAcpAgentModels(effectiveAgentId, effectiveCommand);
-    }
-    
-    // Always include the currently configured model if it's not already there
-    if (!settings.acpModel.isEmpty() && !models.contains(settings.acpModel)) {
+
+    if (effectiveAgentId == settings.acpAgentId && !settings.acpModel.isEmpty() && !models.contains(settings.acpModel)) {
         models.prepend(settings.acpModel);
     }
-    
+
     return models;
 }
 

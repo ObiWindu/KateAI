@@ -86,11 +86,25 @@ public:
     static QString resolvedCommand(const Settings &settings);
     static QStringList agentArguments(const Settings &settings);
 
-    // Fetch available models from the ACP agent (if supported)
+    // Model id the agent last reported as selected.
+    QString currentModelId() const
+    {
+        return m_currentModelId;
+    }
+    // True while session/set_config_option or session/set_model is in flight.
+    bool modelChangePending() const
+    {
+        return m_modelSetInFlight;
+    }
+
+    // Read the model list from the live session. Starts the agent when it
+    // is not running so the list can arrive with session/new.
     void fetchModels();
-    
-    // Set the model via session/set_config_option
-    void setModel(const QString &modelId);
+
+    // Switch the session model. Prefers session/set_config_option (Zed's
+    // path) and falls back to session/set_model. Returns false when this
+    // process cannot apply the change and the caller should relaunch it.
+    bool setModel(const QString &modelId);
 
 Q_SIGNALS:
     void ready();
@@ -188,8 +202,11 @@ private:
     Sandbox currentSandbox() const;
     QProcessEnvironment processEnvironment() const;
 
-    // Parse configOptions from session response to extract model list
-    void parseConfigOptions(const QJsonArray &configOptions);
+    // Pull the model selector out of a session/new, session/load, or
+    // config_option_update payload and emit modelsReceived.
+    void ingestSessionModels(const QJsonObject &result, bool applyPreferred);
+    void sendSetConfigOption(const QString &modelId);
+    void sendSetSessionModel(const QString &modelId);
 
     Settings m_settings;
     QString m_workspace;
@@ -232,6 +249,10 @@ private:
 
     QPointer<QTimer> m_startupTimer;
     QStringList m_agentModels;
+    QString m_currentModelId;
+    QString m_modelConfigId;
+    bool m_legacySetModel = false;
+    bool m_modelSetInFlight = false;
 };
 
 } // namespace KateAi

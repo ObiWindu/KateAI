@@ -66,7 +66,7 @@ QString KateAiConfigPage::getBinaryPlatformKey() const
         return u"darwin-x86_64"_s;
     }
 #elif defined(Q_OS_LINUX)
-    if (QSysInfo::currentCpuArchitecture().startsWith(u"arm"_s) || 
+    if (QSysInfo::currentCpuArchitecture().startsWith(u"arm"_s) ||
         QSysInfo::currentCpuArchitecture().startsWith(u"aarch64"_s)) {
         return u"linux-aarch64"_s;
     } else {
@@ -192,11 +192,15 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     auto *fetchModelsBtn = new QPushButton(i18n("Fetch Models"), this);
     fetchModelsBtn->setToolTip(i18n("Start the agent temporarily to query available models"));
     connect(fetchModelsBtn, &QPushButton::clicked, this, &KateAiConfigPage::fetchAcpModels);
+    m_acpModelStatus = new QLabel(this);
+    m_acpModelStatus->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    m_acpModelStatus->setStyleSheet(u"color: #888; font-size: 11px;"_s);
     auto *modelRow = new QWidget(this);
     auto *modelLayout = new QHBoxLayout(modelRow);
     modelLayout->setContentsMargins(0, 0, 0, 0);
     modelLayout->addWidget(m_acpModel, 1);
     modelLayout->addWidget(fetchModelsBtn);
+    modelLayout->addWidget(m_acpModelStatus);
     m_apiFormat = new QComboBox(providersWidget);
     m_apiFormat->addItem(apiFormatLabel(ApiFormat::AcpNative), apiFormatId(ApiFormat::AcpNative));
     m_apiFormat->addItem(apiFormatLabel(ApiFormat::OpenAICompatible), apiFormatId(ApiFormat::OpenAICompatible));
@@ -290,15 +294,15 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
             bool installable = false;
             QString installType;
             QJsonObject installInfo;
-            
+
             if (distribution.value(u"npx"_s).isObject()) {
-                kind = u"npx"_s; 
+                kind = u"npx"_s;
                 package = distribution.value(u"npx"_s).toObject().value(u"package"_s).toString();
                 installable = !package.isEmpty();
                 installType = u"npx"_s;
                 installInfo = distribution.value(u"npx"_s).toObject();
             } else if (distribution.value(u"uvx"_s).isObject()) {
-                kind = u"uvx"_s; 
+                kind = u"uvx"_s;
                 package = distribution.value(u"uvx"_s).toObject().value(u"package"_s).toString();
                 installable = !package.isEmpty();
                 installType = u"uvx"_s;
@@ -348,7 +352,7 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
         const QJsonObject agent = item->data(Qt::UserRole).toJsonObject();
         const QString installType = item->data(Qt::UserRole + 3).toString();
         const QJsonObject installInfo = item->data(Qt::UserRole + 4).toJsonObject();
-        
+
         if (installType == u"npx"_s || installType == u"uvx"_s) {
             const bool npm = installType == u"npx"_s;
             const QString package = installInfo.value(u"package"_s).toString();
@@ -402,16 +406,16 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
                 m_acpRegistryStatus->setText(i18n("No binary available for this platform."));
                 return;
             }
-            
+
             const QString archiveUrl = platformDist.value(u"archive"_s).toString();
             const QString cmd = platformDist.value(u"cmd"_s).toString();
             if (archiveUrl.isEmpty()) {
                 m_acpRegistryStatus->setText(i18n("No download URL available for this binary."));
                 return;
             }
-            
+
             m_acpRegistryStatus->setText(i18n("Downloading and installing %1…", agent.value(u"name"_s).toString()));
-            
+
             // For now, show a message that binary installation needs to be done manually
             // TODO: Implement actual binary download and installation
             QJsonObject installed = agent;
@@ -420,7 +424,7 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
             installed.insert(u"distributionType"_s, u"binary"_s);
             installed.insert(u"binaryArchiveUrl"_s, archiveUrl);
             installed.insert(u"binaryPlatform"_s, platformKey);
-            
+
             QJsonArray agents = QJsonDocument::fromJson(m_plugin->settings().acpInstalledAgents.toUtf8()).array();
             const QString id = agent.value(u"id"_s).toString();
             for (qsizetype i = agents.size() - 1; i >= 0; --i) if (agents.at(i).toObject().value(u"id"_s).toString() == id) agents.removeAt(i);
@@ -1066,6 +1070,11 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
         updateAcpNativeEnabled();
         Q_EMIT changed();
     });
+
+    // Auto-fetch ACP models when the agent command/args/env change (Zed-style)
+    connect(m_acpCommand, &QLineEdit::textChanged, this, &KateAiConfigPage::autoFetchAcpModels);
+    connect(m_acpArgs, &QLineEdit::textChanged, this, &KateAiConfigPage::autoFetchAcpModels);
+    connect(m_acpApiKeyEnv, &QLineEdit::textChanged, this, &KateAiConfigPage::autoFetchAcpModels);
 
     // Connect API key changes to fetch models
     auto fetchModelsForProvider = [this](Provider provider, QLineEdit *keyEdit, QComboBox *modelCombo) {
@@ -1859,12 +1868,12 @@ void KateAiConfigPage::updateModelCombo(Provider provider)
         default:
             return;
     }
-    
+
     if (!combo) return;
-    
+
     const QString currentText = combo->currentText();
     combo->clear();
-    
+
     // Add models from catalog
     const QStringList models = m_modelCatalog.value(provider);
     if (!models.isEmpty()) {
@@ -1873,7 +1882,7 @@ void KateAiConfigPage::updateModelCombo(Provider provider)
         // Fallback to default models if catalog is empty
         combo->addItems(defaultModels(provider));
     }
-    
+
     // Restore current text if it was set
     if (!currentText.isEmpty()) {
         combo->setCurrentText(currentText);
@@ -1911,6 +1920,10 @@ void KateAiConfigPage::applySelectedAcpPreset()
                                          ? i18n("Optional — this agent uses its own CLI login")
                                          : i18n("Optional — also set as %1", preset.apiKeyEnv));
     }
+    // Auto-fetch models when the preset changes the command/args
+    if (usesAcpNative(m_plugin->settings())) {
+        autoFetchAcpModels();
+    }
 }
 
 void KateAiConfigPage::updateAcpNativeEnabled()
@@ -1928,22 +1941,59 @@ void KateAiConfigPage::updateAcpModelCombo()
     if (!usesAcpNative(m_plugin->settings())) {
         return;
     }
-    
+
     const QString agentId = m_acpAgent->currentData().toString();
-    const Settings settings = m_plugin->settings();
-    QStringList models = acpAgentAvailableModels(settings, agentId);
-    
+    Settings tempSettings = m_plugin->settings();
+    tempSettings.acpAgentId = agentId;
+    tempSettings.acpCommand = m_acpCommand->text().trimmed();
+    tempSettings.acpArgs = m_acpArgs->text().trimmed();
+    QStringList models = acpAgentAvailableModels(tempSettings, agentId);
+
     const QString currentText = m_acpModel->currentText();
     m_acpModel->clear();
-    
+
     if (!models.isEmpty()) {
         m_acpModel->addItems(models);
     }
-    
+
     // Restore current text if it was set
     if (!currentText.isEmpty()) {
         m_acpModel->setCurrentText(currentText);
     }
+}
+
+void KateAiConfigPage::invalidateAcpModelCache()
+{
+    const QString agentId = m_acpAgent->currentData().toString();
+    if (agentId.isEmpty()) {
+        return;
+    }
+    Settings s = m_plugin->settings();
+    QJsonDocument doc = QJsonDocument::fromJson(s.acpAgentModels.toUtf8());
+    QJsonObject agentModels = doc.isObject() ? doc.object() : QJsonObject();
+    if (agentModels.contains(agentId)) {
+        agentModels.remove(agentId);
+        s.acpAgentModels = QString::fromUtf8(QJsonDocument(agentModels).toJson(QJsonDocument::Compact));
+        m_plugin->setSettings(s);
+    }
+    m_lastAcpFetchSignature.clear();
+}
+
+void KateAiConfigPage::autoFetchAcpModels()
+{
+    if (!usesAcpNative(m_plugin->settings()) || !m_acpAutoFetchEnabled) {
+        return;
+    }
+    const QString agentId = m_acpAgent->currentData().toString();
+    const QString command = m_acpCommand->text().trimmed();
+    const QString args = m_acpArgs->text().trimmed();
+    const QString keyEnv = m_acpApiKeyEnv->text().trimmed();
+    const QString signature = u"%1|%2|%3|%4"_s.arg(agentId, command, args, keyEnv);
+    if (signature == m_lastAcpFetchSignature) {
+        return;
+    }
+    m_lastAcpFetchSignature = signature;
+    fetchAcpModels();
 }
 
 void KateAiConfigPage::fetchAcpModels()
@@ -1958,10 +2008,21 @@ void KateAiConfigPage::fetchAcpModels()
         btn->setEnabled(false);
         btn->setText(i18n("Fetching..."));
     }
+    if (m_acpModelStatus) {
+        m_acpModelStatus->setText(i18n("Loading models from agent..."));
+    }
+
+    // Use the selected agent ID and current UI values
+    const QString agentId = m_acpAgent->currentData().toString();
 
     // Create a temporary AcpClient to fetch models
     auto *client = new AcpClient(this);
-    client->setSettings(m_plugin->settings());
+    Settings tempSettings = m_plugin->settings();
+    tempSettings.acpAgentId = agentId;
+    tempSettings.acpCommand = m_acpCommand->text().trimmed();
+    tempSettings.acpArgs = m_acpArgs->text().trimmed();
+    tempSettings.acpApiKeyEnv = m_acpApiKeyEnv->text().trimmed();
+    client->setSettings(tempSettings);
     client->setWorkspace(m_workspace);
 
     connect(client, &AcpClient::modelsReceived, this, [this, client, btn](const QStringList &models) {
@@ -1992,7 +2053,14 @@ void KateAiConfigPage::fetchAcpModels()
             s.acpAgentModels = QString::fromUtf8(QJsonDocument(agentModels).toJson(QJsonDocument::Compact));
             m_plugin->setSettings(s);
 
+            if (m_acpModelStatus) {
+                m_acpModelStatus->setText(i18n("%1 models", models.size()));
+            }
             Q_EMIT changed();
+        } else {
+            if (m_acpModelStatus) {
+                m_acpModelStatus->setText(i18n("No models advertised"));
+            }
         }
 
         client->stop();
@@ -2004,7 +2072,10 @@ void KateAiConfigPage::fetchAcpModels()
             btn->setEnabled(true);
             btn->setText(i18n("Fetch Models"));
         }
-        qDebug() << "Failed to fetch ACP models:" << error;
+        if (m_acpModelStatus) {
+            m_acpModelStatus->setText(i18n("Failed to load models"));
+        }
+        //qDebug() << "Failed to fetch ACP models:" << error;
         client->deleteLater();
     });
 
@@ -2012,5 +2083,6 @@ void KateAiConfigPage::fetchAcpModels()
     // Models will be fetched via configOptions in session/new response
     client->start();
 }
+
 
 } // namespace KateAi
