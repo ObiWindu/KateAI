@@ -192,11 +192,15 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     auto *fetchModelsBtn = new QPushButton(i18n("Fetch Models"), this);
     fetchModelsBtn->setToolTip(i18n("Start the agent temporarily to query available models"));
     connect(fetchModelsBtn, &QPushButton::clicked, this, &KateAiConfigPage::fetchAcpModels);
+    m_acpModelStatus = new QLabel(this);
+    m_acpModelStatus->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    m_acpModelStatus->setStyleSheet(u"color: #888; font-size: 11px;"_s);
     auto *modelRow = new QWidget(this);
     auto *modelLayout = new QHBoxLayout(modelRow);
     modelLayout->setContentsMargins(0, 0, 0, 0);
     modelLayout->addWidget(m_acpModel, 1);
     modelLayout->addWidget(fetchModelsBtn);
+    modelLayout->addWidget(m_acpModelStatus);
     m_apiFormat = new QComboBox(providersWidget);
     m_apiFormat->addItem(apiFormatLabel(ApiFormat::AcpNative), apiFormatId(ApiFormat::AcpNative));
     m_apiFormat->addItem(apiFormatLabel(ApiFormat::OpenAICompatible), apiFormatId(ApiFormat::OpenAICompatible));
@@ -1067,6 +1071,11 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
         Q_EMIT changed();
     });
 
+    // Auto-fetch ACP models when the agent command/args/env change (Zed-style)
+    connect(m_acpCommand, &QLineEdit::textChanged, this, &KateAiConfigPage::autoFetchAcpModels);
+    connect(m_acpArgs, &QLineEdit::textChanged, this, &KateAiConfigPage::autoFetchAcpModels);
+    connect(m_acpApiKeyEnv, &QLineEdit::textChanged, this, &KateAiConfigPage::autoFetchAcpModels);
+
     // Connect API key changes to fetch models
     auto fetchModelsForProvider = [this](Provider provider, QLineEdit *keyEdit, QComboBox *modelCombo) {
         connect(keyEdit, &QLineEdit::textChanged, this, [this, provider, keyEdit, modelCombo]() {
@@ -1911,6 +1920,10 @@ void KateAiConfigPage::applySelectedAcpPreset()
                                          ? i18n("Optional — this agent uses its own CLI login")
                                          : i18n("Optional — also set as %1", preset.apiKeyEnv));
     }
+    // Auto-fetch models when the preset changes the command/args
+    if (usesAcpNative(m_plugin->settings())) {
+        autoFetchAcpModels();
+    }
 }
 
 void KateAiConfigPage::updateAcpNativeEnabled()
@@ -1949,6 +1962,40 @@ void KateAiConfigPage::updateAcpModelCombo()
     }
 }
 
+void KateAiConfigPage::invalidateAcpModelCache()
+{
+    const QString agentId = m_acpAgent->currentData().toString();
+    if (agentId.isEmpty()) {
+        return;
+    }
+    Settings s = m_plugin->settings();
+    QJsonDocument doc = QJsonDocument::fromJson(s.acpAgentModels.toUtf8());
+    QJsonObject agentModels = doc.isObject() ? doc.object() : QJsonObject();
+    if (agentModels.contains(agentId)) {
+        agentModels.remove(agentId);
+        s.acpAgentModels = QString::fromUtf8(QJsonDocument(agentModels).toJson(QJsonDocument::Compact));
+        m_plugin->setSettings(s);
+    }
+    m_lastAcpFetchSignature.clear();
+}
+
+void KateAiConfigPage::autoFetchAcpModels()
+{
+    if (!usesAcpNative(m_plugin->settings()) || !m_acpAutoFetchEnabled) {
+        return;
+    }
+    const QString agentId = m_acpAgent->currentData().toString();
+    const QString command = m_acpCommand->text().trimmed();
+    const QString args = m_acpArgs->text().trimmed();
+    const QString keyEnv = m_acpApiKeyEnv->text().trimmed();
+    const QString signature = u"%1|%2|%3|%4"_s.arg(agentId, command, args, keyEnv);
+    if (signature == m_lastAcpFetchSignature) {
+        return;
+    }
+    m_lastAcpFetchSignature = signature;
+    fetchAcpModels();
+}
+
 void KateAiConfigPage::fetchAcpModels()
 {
     if (!usesAcpNative(m_plugin->settings())) {
@@ -1960,6 +2007,9 @@ void KateAiConfigPage::fetchAcpModels()
     if (btn) {
         btn->setEnabled(false);
         btn->setText(i18n("Fetching..."));
+    }
+    if (m_acpModelStatus) {
+        m_acpModelStatus->setText(i18n("Loading models from agent..."));
     }
 
     // Use the selected agent ID and current UI values
@@ -2003,7 +2053,14 @@ void KateAiConfigPage::fetchAcpModels()
             s.acpAgentModels = QString::fromUtf8(QJsonDocument(agentModels).toJson(QJsonDocument::Compact));
             m_plugin->setSettings(s);
 
+            if (m_acpModelStatus) {
+                m_acpModelStatus->setText(i18n("%1 models", models.size()));
+            }
             Q_EMIT changed();
+        } else {
+            if (m_acpModelStatus) {
+                m_acpModelStatus->setText(i18n("No models advertised"));
+            }
         }
 
         client->stop();
@@ -2015,7 +2072,10 @@ void KateAiConfigPage::fetchAcpModels()
             btn->setEnabled(true);
             btn->setText(i18n("Fetch Models"));
         }
-        qDebug() << "Failed to fetch ACP models:" << error;
+        if (m_acpModelStatus) {
+            m_acpModelStatus->setText(i18n("Failed to load models"));
+        }
+        //qDebug() << "Failed to fetch ACP models:" << error;
         client->deleteLater();
     });
 
@@ -2023,5 +2083,6 @@ void KateAiConfigPage::fetchAcpModels()
     // Models will be fetched via configOptions in session/new response
     client->start();
 }
+
 
 } // namespace KateAi

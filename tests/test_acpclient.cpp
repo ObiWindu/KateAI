@@ -369,6 +369,73 @@ private Q_SLOTS:
         client.stop();
     }
 
+    void sessionConfigOptionsLoadModelsLikeZed()
+    {
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+
+        AcpClient client;
+        Settings settings = mockSettings(u"models"_s);
+        settings.acpModel = u"grok-4"_s;
+        client.setSettings(settings);
+        client.setWorkspace(workspace.path());
+
+        QStringList models;
+        QString error;
+        connect(&client, &AcpClient::modelsReceived, this, [&](const QStringList &next) {
+            models = next;
+        });
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+
+        client.fetchModels();
+        QVERIFY2(waitFor([&] {
+            return error.isEmpty() == false || (models.contains(u"grok-4.7"_s) && client.currentModelId() == u"grok-4"_s);
+        }), qPrintable(error.isEmpty() ? u"timed out waiting for config option models"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(models, (QStringList{u"grok-4"_s, u"grok-4.5"_s, u"grok-4.7"_s}));
+        QVERIFY(!models.contains(u"code"_s));
+        QVERIFY(!models.contains(u"stale-model"_s));
+        QCOMPARE(client.currentModelId(), u"grok-4"_s);
+        client.stop();
+    }
+
+    void legacySessionModelsUseSetModel()
+    {
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+
+        AcpClient client;
+        client.setSettings(mockSettings(u"legacy-models"_s));
+        client.setWorkspace(workspace.path());
+
+        QStringList models;
+        QString error;
+        connect(&client, &AcpClient::modelsReceived, this, [&](const QStringList &next) {
+            models = next;
+        });
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+
+        client.fetchModels();
+        QVERIFY2(waitFor([&] {
+            return !models.isEmpty() || !error.isEmpty();
+        }), qPrintable(error.isEmpty() ? u"timed out"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(models, (QStringList{u"gemini-2.5-pro"_s, u"gemini-2.5-flash"_s}));
+        QCOMPARE(client.currentModelId(), u"gemini-2.5-pro"_s);
+
+        client.setModel(u"gemini-2.5-flash"_s);
+        QVERIFY2(waitFor([&] {
+            return client.currentModelId() == u"gemini-2.5-flash"_s || !error.isEmpty();
+        }), qPrintable(error.isEmpty() ? u"timed out setting legacy model"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(client.currentModelId(), u"gemini-2.5-flash"_s);
+        client.stop();
+    }
+
 private:
     QString m_agent;
 };

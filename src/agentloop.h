@@ -42,6 +42,7 @@ public:
 
     void setSettings(const Settings &settings);
     void setWorkspace(const QString &workspace);
+    QString workspace() const { return m_workspace; }
     void setDocumentBridge(DocumentBridge *bridge);
     void setEditorContext(const QString &context);
 

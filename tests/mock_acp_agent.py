@@ -11,6 +11,41 @@ import sys
 SCENARIO = sys.argv[1] if len(sys.argv) > 1 else "echo"
 NEXT_ID = 1000
 SESSION_ID = "sess_kateai_test"
+CURRENT_MODEL = "grok-4.5"
+
+
+def model_config(current, extra=False):
+    options = [
+        {
+            "group": "grok",
+            "name": "Grok",
+            "options": [
+                {"name": "Grok 4", "value": "grok-4"},
+                {"name": "Grok 4.5", "value": "grok-4.5"},
+            ],
+        }
+    ]
+    if extra:
+        options[0]["options"].append({"name": "Grok 4.7", "value": "grok-4.7"})
+    return {
+        "id": "model",
+        "name": "Model",
+        "category": "model",
+        "type": "select",
+        "currentValue": current,
+        "options": options,
+    }
+
+
+def mode_config():
+    return {
+        "id": "mode",
+        "name": "Mode",
+        "category": "mode",
+        "type": "select",
+        "currentValue": "code",
+        "options": [{"name": "Code", "value": "code"}],
+    }
 
 
 def send(message):
@@ -231,6 +266,7 @@ def handle_prompt(request_id, params):
 
 
 def handle(message):
+    global CURRENT_MODEL
     method = message.get("method")
     request_id = message.get("id")
     params = message.get("params") or {}
@@ -252,7 +288,42 @@ def handle(message):
     elif method == "authenticate":
         result(request_id, {})
     elif method == "session/new":
-        result(request_id, {"sessionId": SESSION_ID})
+        if SCENARIO == "models":
+            result(
+                request_id,
+                {
+                    "sessionId": SESSION_ID,
+                    "configOptions": [model_config(CURRENT_MODEL), mode_config()],
+                    # Older clients read this. Kate must prefer configOptions.
+                    "models": {
+                        "currentModelId": "stale-model",
+                        "availableModels": [{"modelId": "stale-model", "name": "Stale"}],
+                    },
+                },
+            )
+        elif SCENARIO == "legacy-models":
+            result(
+                request_id,
+                {
+                    "sessionId": SESSION_ID,
+                    "models": {
+                        "currentModelId": "gemini-2.5-pro",
+                        "availableModels": [
+                            {"modelId": "gemini-2.5-pro", "name": "Gemini 2.5 Pro"},
+                            {"modelId": "gemini-2.5-flash", "name": "Gemini 2.5 Flash"},
+                        ],
+                    },
+                },
+            )
+        else:
+            result(request_id, {"sessionId": SESSION_ID})
+    elif method == "session/set_config_option":
+        CURRENT_MODEL = params.get("value") or CURRENT_MODEL
+        options = [model_config(CURRENT_MODEL, extra=True), mode_config()]
+        session_update({"sessionUpdate": "config_option_update", "configOptions": options})
+        result(request_id, {"configOptions": options})
+    elif method == "session/set_model":
+        result(request_id, {})
     elif method == "session/load" or method == "session/resume":
         result(request_id, {})
     elif method == "session/close":

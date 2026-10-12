@@ -90,6 +90,7 @@ private:
     QLineEdit *m_acpArgs = nullptr;
     QLineEdit *m_acpApiKeyEnv = nullptr;
     QLineEdit *m_acpRegistrySearch = nullptr;
+    QLabel *m_acpModelStatus = nullptr;
     QListWidget *m_acpRegistryResults = nullptr;
     QLabel *m_acpRegistryStatus = nullptr;
     QNetworkAccessManager *m_acpRegistryNetwork = nullptr;
@@ -99,10 +100,14 @@ private:
     void updateAcpNativeEnabled();
     void updateAcpModelCombo();
     void fetchAcpModels();
+    void autoFetchAcpModels();
+    void invalidateAcpModelCache();
 
     // Model fetching
     LlmClient *m_modelFetcher = nullptr;
     QHash<Provider, QStringList> m_modelCatalog;
+    bool m_acpAutoFetchEnabled = true;
+    QString m_lastAcpFetchSignature;
 
     void updateModelCombo(Provider provider);
 

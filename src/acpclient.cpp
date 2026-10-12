@@ -141,15 +141,37 @@ AcpClient::~AcpClient()
     stop();
 }
 
+static QStringList argsWithoutModelFlag(const QStringList &args)
+{
+    QStringList out;
+    for (int i = 0; i < args.size(); ++i) {
+        if ((args.at(i) == u"--model"_s || args.at(i) == u"-m"_s) && i + 1 < args.size()) {
+            ++i;
+            continue;
+        }
+        out.append(args.at(i));
+    }
+    return out;
+}
+
 void AcpClient::setSettings(const Settings &settings)
 {
     const QString oldCommand = resolvedCommand(m_settings);
     const QStringList oldArgs = agentArguments(m_settings);
+    const QString oldModel = m_settings.acpModel;
     m_settings = settings;
     if (m_state == State::Stopped || m_state == State::Failed) {
         return;
     }
-    if (oldCommand != resolvedCommand(m_settings) || oldArgs != agentArguments(m_settings)) {
+    const QStringList newArgs = agentArguments(m_settings);
+    const bool commandChanged = oldCommand != resolvedCommand(m_settings);
+    if (commandChanged || argsWithoutModelFlag(oldArgs) != argsWithoutModelFlag(newArgs)) {
+        stop();
+        return;
+    }
+    // Same process. A model change is applied on the live session, the way
+    // Zed does, instead of restarting the agent so a --model flag is reread.
+    if (oldModel != m_settings.acpModel && !setModel(m_settings.acpModel)) {
         stop();
     }
 }
@@ -185,65 +207,142 @@ void AcpClient::setResumeSessionId(const QString &sessionId)
     m_resumeSessionId = sessionId;
 }
 
-void AcpClient::parseConfigOptions(const QJsonArray &configOptions)
+static void appendModelId(QStringList *models, const QString &id)
 {
-    QStringList models;
+    const QString trimmed = id.trimmed();
+    if (!trimmed.isEmpty() && !models->contains(trimmed)) {
+        models->append(trimmed);
+    }
+}
+
+static void appendModelEntry(QStringList *models, const QJsonValue &value)
+{
+    if (value.isString()) {
+        appendModelId(models, value.toString());
+        return;
+    }
+    if (!value.isObject()) {
+        return;
+    }
+    const QJsonObject obj = value.toObject();
+    // Grouped SessionConfigSelectOptions nest the real values under "options".
+    if (obj.contains(u"options"_s) && !obj.contains(u"value"_s) && !obj.contains(u"modelId"_s)) {
+        const QJsonArray nested = obj.value(u"options"_s).toArray();
+        for (const QJsonValue &child : nested) {
+            appendModelEntry(models, child);
+        }
+        return;
+    }
+    QString id = obj.value(u"value"_s).toString();
+    if (id.isEmpty()) {
+        id = obj.value(u"modelId"_s).toString();
+    }
+    if (id.isEmpty()) {
+        id = obj.value(u"id"_s).toString();
+    }
+    appendModelId(models, id);
+}
+
+static bool isModelConfigOption(const QJsonObject &option)
+{
+    const QString category = option.value(u"category"_s).toString();
+    if (category == u"model_config"_s || category == u"mode"_s || category == u"thought_level"_s) {
+        return false;
+    }
+    if (category == u"model"_s) {
+        return true;
+    }
+    return option.value(u"id"_s).toString().compare(u"model"_s, Qt::CaseInsensitive) == 0;
+}
+
+// Returns true when a model selector was present, even if it had no values.
+static bool collectModelConfig(const QJsonArray &configOptions, QStringList *models, QString *current, QString *configId)
+{
+    bool found = false;
     for (const QJsonValue &optionValue : configOptions) {
         const QJsonObject option = optionValue.toObject();
-        // Look for model configuration option (type: "select" with category "model" or id containing "model")
-        if (option.contains(u"type"_s)) {
-            const QString type = option.value(u"type"_s).toString();
-            const QString id = option.value(u"id"_s).toString();
-            const QString category = option.value(u"category"_s).toString();
-            const QString label = option.value(u"label"_s).toString();
-
-            // Check if this option is related to model selection
-            bool isModelOption = false;
-            if (type == u"select"_s) {
-                // For select type, check id, category, or label
-                isModelOption = id.contains(u"model"_s, Qt::CaseInsensitive)
-                    || category == u"model"_s
-                    || label.contains(u"model"_s, Qt::CaseInsensitive);
-            } else if (type == u"string"_s && (id.contains(u"model"_s, Qt::CaseInsensitive)
-                      || label.contains(u"model"_s, Qt::CaseInsensitive))) {
-                // For string type that contains "model", try to extract default value
-                if (option.contains(u"default"_s)) {
-                    const QString defaultValue = option.value(u"default"_s).toString();
-                    if (!defaultValue.isEmpty()) {
-                        models.append(defaultValue);
-                    }
-                }
-                isModelOption = true;
-            }
-
-            if (isModelOption && option.contains(u"options"_s) && type == u"select"_s) {
-                // This is a model selector - extract the options
-                const QJsonArray options = option.value(u"options"_s).toArray();
-                for (const QJsonValue &optValue : options) {
-                    if (optValue.isObject()) {
-                        const QJsonObject opt = optValue.toObject();
-                        if (opt.contains(u"value"_s)) {
-                            const QString modelId = opt.value(u"value"_s).toString();
-                            if (!modelId.isEmpty()) {
-                                models.append(modelId);
-                            }
-                        }
-                    } else if (optValue.isString()) {
-                        const QString modelId = optValue.toString();
-                        if (!modelId.isEmpty()) {
-                            models.append(modelId);
-                        }
-                    }
-                }
-            }
+        if (!isModelConfigOption(option)) {
+            continue;
+        }
+        const QString type = option.value(u"type"_s).toString();
+        if (!type.isEmpty() && type != u"select"_s) {
+            continue;
+        }
+        found = true;
+        *configId = option.value(u"id"_s).toString();
+        *current = option.value(u"currentValue"_s).toString();
+        models->clear();
+        const QJsonArray options = option.value(u"options"_s).toArray();
+        for (const QJsonValue &optValue : options) {
+            appendModelEntry(models, optValue);
         }
     }
-    if (!models.isEmpty()) {
-        // Remove duplicates
-        models.removeDuplicates();
-        Q_EMIT modelsReceived(models);
+    return found;
+}
+
+void AcpClient::ingestSessionModels(const QJsonObject &result, bool applyPreferred)
+{
+    QStringList models;
+    QString current;
+    QString configId;
+    bool fromConfig = false;
+    if (result.contains(u"configOptions"_s)) {
+        fromConfig = collectModelConfig(result.value(u"configOptions"_s).toArray(), &models, &current, &configId);
+    }
+
+    bool legacy = false;
+    if (!fromConfig && result.contains(u"models"_s)) {
+        const QJsonValue modelsValue = result.value(u"models"_s);
+        if (modelsValue.isObject()) {
+            const QJsonObject state = modelsValue.toObject();
+            current = state.value(u"currentModelId"_s).toString();
+            const QJsonArray available = state.value(u"availableModels"_s).toArray();
+            for (const QJsonValue &entry : available) {
+                appendModelEntry(&models, entry);
+            }
+            legacy = !models.isEmpty() || !current.isEmpty();
+        } else if (modelsValue.isArray()) {
+            for (const QJsonValue &entry : modelsValue.toArray()) {
+                appendModelEntry(&models, entry);
+            }
+            legacy = !models.isEmpty();
+        }
+    } else if (result.contains(u"availableModels"_s)) {
+        for (const QJsonValue &entry : result.value(u"availableModels"_s).toArray()) {
+            appendModelEntry(&models, entry);
+        }
+        if (current.isEmpty()) {
+            current = result.value(u"currentModelId"_s).toString();
+        }
+        legacy = !models.isEmpty();
+    }
+
+    if (fromConfig) {
+        m_modelConfigId = configId.isEmpty() ? u"model"_s : configId;
+        m_legacySetModel = false;
+    } else if (legacy) {
+        m_modelConfigId.clear();
+        m_legacySetModel = true;
+    }
+    if (!current.isEmpty()) {
+        m_currentModelId = current;
+    }
+    // A current_model_update carries only the id. Don't drop the list we already have.
+    if (fromConfig || legacy) {
         m_agentModels = models;
     }
+
+    if (applyPreferred) {
+        const QString preferred = m_settings.acpModel.trimmed();
+        if (!preferred.isEmpty() && preferred != m_currentModelId
+            && (m_agentModels.isEmpty() || m_agentModels.contains(preferred))) {
+            setModel(preferred);
+        } else if (preferred.isEmpty() && !m_currentModelId.isEmpty()) {
+            m_settings.acpModel = m_currentModelId;
+        }
+    }
+
+    Q_EMIT modelsReceived(m_agentModels);
 }
 
 QString AcpClient::resolvedCommand(const Settings &settings)
@@ -400,6 +499,11 @@ void AcpClient::stop()
     m_promptId = 0;
     m_permissionRpcId = QJsonValue();
     m_queued.clear();
+    m_agentModels.clear();
+    m_currentModelId.clear();
+    m_modelConfigId.clear();
+    m_legacySetModel = false;
+    m_modelSetInFlight = false;
     m_shuttingDown = false;
     if (m_state != State::Stopped) {
         setState(State::Stopped, u"Disconnected"_s);
@@ -618,29 +722,6 @@ void AcpClient::sendInitialize()
             return;
         }
         const QJsonObject caps = result.value(u"agentCapabilities"_s).toObject();
-
-        // Check if models are advertised in agentCapabilities
-        if (caps.contains(u"models"_s)) {
-            const QJsonArray modelsArray = caps.value(u"models"_s).toArray();
-            QStringList models;
-            for (const QJsonValue &value : modelsArray) {
-                if (value.isString()) {
-                    models.append(value.toString());
-                } else if (value.isObject()) {
-                    const QJsonObject modelObj = value.toObject();
-                    const QString id = modelObj.value(u"id"_s).toString();
-                    if (!id.isEmpty()) {
-                        models.append(id);
-                    }
-                }
-            }
-            if (!models.isEmpty()) {
-                Q_EMIT modelsReceived(models);
-                // Store for later use
-                m_agentModels = models;
-            }
-        }
-
         m_loadSession = caps.value(u"loadSession"_s).toBool();
         m_embeddedContext = caps.value(u"promptCapabilities"_s).toObject().value(u"embeddedContext"_s).toBool();
         const QJsonObject sessionCaps = caps.value(u"sessionCapabilities"_s).toObject();
@@ -652,88 +733,81 @@ void AcpClient::sendInitialize()
 
 void AcpClient::fetchModels()
 {
-    // If we already have models from initialize, emit them
-    if (!m_agentModels.isEmpty()) {
+    if (m_state == State::Ready) {
         Q_EMIT modelsReceived(m_agentModels);
         return;
     }
+    if (m_state == State::Starting) {
+        return;
+    }
+    start();
+}
 
-    // Try to call agent/listModels (non-standard, but some agents might support it)
-    sendRequest(u"agent/listModels"_s, QJsonObject(), [this](const QJsonObject &result, const QString &error) {
+bool AcpClient::setModel(const QString &modelId)
+{
+    const QString id = modelId.trimmed();
+    if (id.isEmpty() || id == m_currentModelId) {
+        return true;
+    }
+    if (m_sessionId.isEmpty()) {
+        return false;
+    }
+    if (!m_modelConfigId.isEmpty()) {
+        sendSetConfigOption(id);
+        return true;
+    }
+    if (m_legacySetModel) {
+        sendSetSessionModel(id);
+        return true;
+    }
+    return false;
+}
+
+void AcpClient::sendSetConfigOption(const QString &modelId)
+{
+    m_modelSetInFlight = true;
+    QJsonObject params;
+    params.insert(u"sessionId"_s, m_sessionId);
+    params.insert(u"configId"_s, m_modelConfigId.isEmpty() ? u"model"_s : m_modelConfigId);
+    // value_id variant: `value` is the option id. `type` is omitted.
+    params.insert(u"value"_s, modelId);
+    sendRequest(u"session/set_config_option"_s, params, [this, modelId](const QJsonObject &result, const QString &error) {
+        m_modelSetInFlight = false;
         if (!error.isEmpty()) {
-            // Try alternative method names
-            sendRequest(u"models/list"_s, QJsonObject(), [this](const QJsonObject &result2, const QString &error2) {
-                if (!error2.isEmpty()) {
-                    // Fall back to discovering from the agent type
-                    QStringList models = discoverAcpAgentModels(m_settings.acpAgentId, acpEffectiveCommand(m_settings));
-                    if (!models.isEmpty()) {
-                        m_agentModels = models;
-                        Q_EMIT modelsReceived(models);
-                    }
-                    return;
-                }
-                const QJsonArray modelsArray = result2.value(u"models"_s).toArray();
-                QStringList models;
-                for (const QJsonValue &value : modelsArray) {
-                    if (value.isString()) {
-                        models.append(value.toString());
-                    } else if (value.isObject()) {
-                        const QJsonObject modelObj = value.toObject();
-                        const QString id = modelObj.value(u"id"_s).toString();
-                        if (!id.isEmpty()) {
-                            models.append(id);
-                        }
-                    }
-                }
-                if (!models.isEmpty()) {
-                    m_agentModels = models;
-                    Q_EMIT modelsReceived(models);
-                }
-            });
+            Q_EMIT logMessage(u"Failed to set model: %1"_s.arg(error));
+            if (m_legacySetModel) {
+                sendSetSessionModel(modelId);
+            }
             return;
         }
-        const QJsonArray modelsArray = result.value(u"models"_s).toArray();
-        QStringList models;
-        for (const QJsonValue &value : modelsArray) {
-            if (value.isString()) {
-                models.append(value.toString());
-            } else if (value.isObject()) {
-                const QJsonObject modelObj = value.toObject();
-                const QString id = modelObj.value(u"id"_s).toString();
-                if (!id.isEmpty()) {
-                    models.append(id);
-                }
-            }
-        }
-        if (!models.isEmpty()) {
-            m_agentModels = models;
-            Q_EMIT modelsReceived(models);
+        m_settings.acpModel = modelId;
+        if (result.contains(u"configOptions"_s) || result.contains(u"models"_s)) {
+            ingestSessionModels(result, false);
+        } else {
+            m_currentModelId = modelId;
+            Q_EMIT modelsReceived(m_agentModels);
         }
     });
 }
 
-void AcpClient::setModel(const QString &modelId)
+void AcpClient::sendSetSessionModel(const QString &modelId)
 {
-    if (m_sessionId.isEmpty()) {
-        return;
-    }
-    // Use session/set_config_option to change the model
-    // The config option ID is typically "model" for model selection
+    m_modelSetInFlight = true;
     QJsonObject params;
     params.insert(u"sessionId"_s, m_sessionId);
-    params.insert(u"configId"_s, u"model"_s);
-    QJsonObject value;
-    value.insert(u"type"_s, u"value_id"_s);
-    value.insert(u"value"_s, modelId);
-    params.insert(u"value"_s, value);
-
-    sendRequest(u"session/set_config_option"_s, params, [this, modelId](const QJsonObject &, const QString &error) {
+    params.insert(u"modelId"_s, modelId);
+    sendRequest(u"session/set_model"_s, params, [this, modelId](const QJsonObject &result, const QString &error) {
+        m_modelSetInFlight = false;
         if (!error.isEmpty()) {
             Q_EMIT logMessage(u"Failed to set model: %1"_s.arg(error));
+            return;
+        }
+        m_settings.acpModel = modelId;
+        if (result.contains(u"models"_s) || result.contains(u"configOptions"_s)) {
+            ingestSessionModels(result, false);
         } else {
-            // Update settings with the new model
-            m_settings.acpModel = modelId;
-            Q_EMIT logMessage(u"Model changed to: %1"_s.arg(modelId));
+            m_currentModelId = modelId;
+            Q_EMIT modelsReceived(m_agentModels);
         }
     });
 }
@@ -819,11 +893,7 @@ void AcpClient::sendSessionNew()
             Q_EMIT failed(message);
             return;
         }
-        // Extract configOptions (e.g., model list) from session response
-        if (result.contains(u"configOptions"_s)) {
-            const QJsonArray configOptions = result.value(u"configOptions"_s).toArray();
-            parseConfigOptions(configOptions);
-        }
+        ingestSessionModels(result, true);
         if (m_startupTimer) {
             m_startupTimer->stop();
         }
@@ -851,11 +921,7 @@ void AcpClient::sendSessionLoadOrResume()
             return;
         }
         m_sessionId = m_resumeSessionId;
-        // Extract configOptions (e.g., model list) from session response
-        if (result.contains(u"configOptions"_s)) {
-            const QJsonArray configOptions = result.value(u"configOptions"_s).toArray();
-            parseConfigOptions(configOptions);
-        }
+        ingestSessionModels(result, true);
         if (m_startupTimer) {
             m_startupTimer->stop();
         }
@@ -1176,17 +1242,17 @@ void AcpClient::handleNotification(const QJsonObject &message)
         }
         handleSessionUpdate(update);
     } else if (method == u"config_option_update"_s) {
-        // Agent notifies about config option changes (e.g., model list updated)
-        if (params.contains(u"configOptions"_s)) {
-            const QJsonArray configOptions = params.value(u"configOptions"_s).toArray();
-            parseConfigOptions(configOptions);
-        }
+        ingestSessionModels(params, false);
     }
 }
 
 void AcpClient::handleSessionUpdate(const QJsonObject &update)
 {
     const QString kind = update.value(u"sessionUpdate"_s).toString();
+    if (kind == u"config_option_update"_s || kind == u"available_models_update"_s || kind == u"current_model_update"_s) {
+        ingestSessionModels(update, false);
+        return;
+    }
     if (kind == u"agent_message_chunk"_s) {
         const QString delta = contentBlockText(update.value(u"content"_s));
         if (!delta.isEmpty()) {
