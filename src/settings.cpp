@@ -54,11 +54,17 @@ Settings SettingsStore::load()
     s.apiFormat = apiFormatFromId(g.readEntry(u"ApiFormat"_s, apiFormatId(ApiFormat::AcpNative)));
     s.permissionMode = permissionModeFromId(g.readEntry(u"PermissionMode"_s, permissionModeId(PermissionMode::Ask)));
     s.sandbox = sandboxProfileFromId(g.readEntry(u"Sandbox"_s, sandboxProfileId(SandboxProfile::Workspace)));
-    const int legacyMaxIterations = g.readEntry(u"MaxIterations"_s, 0);
+
+    // Read new fields first, then fall back to legacy MaxIterations for maxToolCalls
     s.maxModelRequests = g.readEntry(u"MaxModelRequests"_s, 0);
-    s.maxToolCalls = g.readEntry(u"MaxToolCalls"_s, legacyMaxIterations);
+    s.maxToolCalls = g.readEntry(u"MaxToolCalls"_s, 0);
+    const int legacyMaxIterations = g.readEntry(u"MaxIterations"_s, 0);
+    if (s.maxToolCalls == 0 && legacyMaxIterations > 0) {
+        s.maxToolCalls = legacyMaxIterations;
+    }
     s.requestsPerMinute = g.readEntry(u"RequestsPerMinute"_s, 15);
-    s.maxIterations = legacyMaxIterations;
+    // Keep legacy field in sync for older callers.
+    s.maxIterations = s.maxToolCalls;
     s.bashTimeoutMs = g.readEntry(u"BashTimeoutMs"_s, 60000);
     s.planMode = g.readEntry(u"PlanMode"_s, false);
         s.agentMode = g.readEntry(u"AgentMode"_s, QStringLiteral("code"));

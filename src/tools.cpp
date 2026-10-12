@@ -413,13 +413,15 @@ ToolResult ToolRunner::readFile(const QJsonObject &args) const
     // Apply offset and limit parameters to paginate the file contents
     const int offset = args.value(u"offset"_s).toInt(1);
     const int limit = args.value(u"limit"_s).toInt(0);
+    constexpr int kMaxReadLines = 10000;
+    const int cappedLimit = limit > 0 ? qMin(limit, kMaxReadLines) : 0;
     QStringList lines = contents.split(u'\n');
     int start = std::max(0, offset - 1);
     if (start >= lines.size()) {
         result.output = u"File has %1 lines; offset is past the end."_s.arg(lines.size());
         return result;
     }
-    int count = limit > 0 ? limit : lines.size() - start;
+    int count = cappedLimit > 0 ? cappedLimit : lines.size() - start;
     QStringList slice = lines.mid(start, count);
     
     // Format the output with line numbers for easier reading
@@ -790,6 +792,7 @@ ToolResult ToolRunner::grep(const QJsonObject &args) const
         }
 
         const QStringList lines = contents.split(u'\n');
+        int lastMatchEnd = -1; // Track end of last context block to avoid duplicate separators
         for (int i = 0; i < lines.size(); ++i) {
             if (!re.match(lines.at(i)).hasMatch()) {
                 continue;
@@ -799,11 +802,15 @@ ToolResult ToolRunner::grep(const QJsonObject &args) const
             } else {
                 const int from = qMax(0, i - context);
                 const int to = qMin(lines.size() - 1, i + context);
+                // Only add separator if this match group doesn't overlap with the previous one
+                if (lastMatchEnd >= 0 && from > lastMatchEnd) {
+                    hits.append(u"--"_s);
+                }
                 for (int j = from; j <= to; ++j) {
                     const QChar mark = (j == i) ? u':' : u'-';
                     hits.append(u"%1%2%3%4%5"_s.arg(rel).arg(mark).arg(j + 1).arg(mark).arg(lines.at(j)));
                 }
-                hits.append(u"--"_s);
+                lastMatchEnd = to;
             }
             if (hits.size() >= 200) {
                 return;

@@ -1885,10 +1885,18 @@ void AgentLoop::releaseEditLocksFor(const ToolCall &call)
     if (!m_locks || !isMutationTool(call.name)) {
         return;
     }
-    for (const QString &path : std::as_const(m_owedPaths)) {
-        m_locks->release(path, m_selfId);
+    QString path = call.arguments.value(u"path"_s).toString();
+    if (path.isEmpty()) {
+        path = call.arguments.value(u"targetFile"_s).toString();
     }
-    m_owedPaths.clear();
+    if (path.isEmpty()) {
+        return;
+    }
+    if (!m_workspace.isEmpty() && QDir::isRelativePath(path)) {
+        path = m_workspace + QLatin1Char('/') + path;
+    }
+    m_locks->release(path, m_selfId);
+    m_owedPaths.removeAll(path);
 }
 
 bool AgentLoop::acquireEditLock(const ToolCall &call, QString *deniedBy)
@@ -2030,12 +2038,17 @@ void AgentLoop::dispatchSubtask(const ToolCall &call)
     childSettings.checkpointsEnabled = false;
     childSettings.maxSubtaskDepth = 0;
     // Sub-agents keep their own model budget so a runaway child cannot starve
-    // the siblings sharing this turn.
+    // the siblings sharing this turn. If parent has unlimited (0), child is also
+    // unlimited. If parent has a budget, give child ~50% with a minimum of 4.
     if (m_settings.maxToolCalls > 0) {
-        childSettings.maxToolCalls = qMax(4, m_settings.maxToolCalls / 2);
+        const int parentBudget = m_settings.maxToolCalls;
+        const int childBudget = qMax(4, parentBudget / 2);
+        childSettings.maxToolCalls = qMin(childBudget, parentBudget);
     }
     if (m_settings.maxModelRequests > 0) {
-        childSettings.maxModelRequests = qMax(4, m_settings.maxModelRequests / 2);
+        const int parentBudget = m_settings.maxModelRequests;
+        const int childBudget = qMax(4, parentBudget / 2);
+        childSettings.maxModelRequests = qMin(childBudget, parentBudget);
     }
 
     child->setSettings(childSettings);
