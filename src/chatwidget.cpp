@@ -3425,6 +3425,13 @@ void ChatWidget::showSettingsMenu()
             m_settings.acpAgentId = id;
             m_settings.provider = Provider::Acp;
             m_preferredProvider = Provider::Acp;
+            // Update command, args, and env from preset
+            const AcpAgentPreset preset = acpAgentPreset(id);
+            if (preset.id != u"custom"_s) {
+                m_settings.acpCommand = preset.command;
+                m_settings.acpArgs = preset.args;
+                m_settings.acpApiKeyEnv = preset.apiKeyEnv;
+            }
             m_agent.setSettings(m_settings);
             Q_EMIT settingsChanged(m_settings);
             menu.close();
