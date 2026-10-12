@@ -220,14 +220,16 @@ void AcpClient::parseConfigOptions(const QJsonArray &configOptions)
                 // This is a model selector - extract the options
                 const QJsonArray options = option.value(u"options"_s).toArray();
                 for (const QJsonValue &optValue : options) {
-                    const QJsonObject opt = optValue.toObject();
-                    if (opt.contains(u"value"_s)) {
-                        const QString modelId = opt.value(u"value"_s).toString();
-                        if (!modelId.isEmpty()) {
-                            models.append(modelId);
+                    if (optValue.isObject()) {
+                        const QJsonObject opt = optValue.toObject();
+                        if (opt.contains(u"value"_s)) {
+                            const QString modelId = opt.value(u"value"_s).toString();
+                            if (!modelId.isEmpty()) {
+                                models.append(modelId);
+                            }
                         }
-                    } else if (opt.isString()) {
-                        const QString modelId = opt.toString();
+                    } else if (optValue.isString()) {
+                        const QString modelId = optValue.toString();
                         if (!modelId.isEmpty()) {
                             models.append(modelId);
                         }
@@ -725,7 +727,7 @@ void AcpClient::setModel(const QString &modelId)
     value.insert(u"value"_s, modelId);
     params.insert(u"value"_s, value);
 
-    sendRequest(u"session/set_config_option"_s, params, [this, modelId](const QJsonObject &result, const QString &error) {
+    sendRequest(u"session/set_config_option"_s, params, [this, modelId](const QJsonObject &, const QString &error) {
         if (!error.isEmpty()) {
             Q_EMIT logMessage(u"Failed to set model: %1"_s.arg(error));
         } else {
