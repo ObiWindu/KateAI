@@ -191,20 +191,45 @@ void AcpClient::parseConfigOptions(const QJsonArray &configOptions)
     for (const QJsonValue &optionValue : configOptions) {
         const QJsonObject option = optionValue.toObject();
         // Look for model configuration option (type: "select" with category "model" or id containing "model")
-        if (option.contains(u"type"_s) && option.value(u"type"_s).toString() == u"select"_s) {
+        if (option.contains(u"type"_s)) {
+            const QString type = option.value(u"type"_s).toString();
             const QString id = option.value(u"id"_s).toString();
             const QString category = option.value(u"category"_s).toString();
-            if (id.contains(u"model"_s, Qt::CaseInsensitive) || category == u"model"_s) {
+            const QString label = option.value(u"label"_s).toString();
+
+            // Check if this option is related to model selection
+            bool isModelOption = false;
+            if (type == u"select"_s) {
+                // For select type, check id, category, or label
+                isModelOption = id.contains(u"model"_s, Qt::CaseInsensitive)
+                    || category == u"model"_s
+                    || label.contains(u"model"_s, Qt::CaseInsensitive);
+            } else if (type == u"string"_s && (id.contains(u"model"_s, Qt::CaseInsensitive)
+                      || label.contains(u"model"_s, Qt::CaseInsensitive))) {
+                // For string type that contains "model", try to extract default value
+                if (option.contains(u"default"_s)) {
+                    const QString defaultValue = option.value(u"default"_s).toString();
+                    if (!defaultValue.isEmpty()) {
+                        models.append(defaultValue);
+                    }
+                }
+                isModelOption = true;
+            }
+
+            if (isModelOption && option.contains(u"options"_s) && type == u"select"_s) {
                 // This is a model selector - extract the options
-                if (option.contains(u"options"_s)) {
-                    const QJsonArray options = option.value(u"options"_s).toArray();
-                    for (const QJsonValue &optValue : options) {
-                        const QJsonObject opt = optValue.toObject();
-                        if (opt.contains(u"value"_s)) {
-                            const QString modelId = opt.value(u"value"_s).toString();
-                            if (!modelId.isEmpty()) {
-                                models.append(modelId);
-                            }
+                const QJsonArray options = option.value(u"options"_s).toArray();
+                for (const QJsonValue &optValue : options) {
+                    const QJsonObject opt = optValue.toObject();
+                    if (opt.contains(u"value"_s)) {
+                        const QString modelId = opt.value(u"value"_s).toString();
+                        if (!modelId.isEmpty()) {
+                            models.append(modelId);
+                        }
+                    } else if (opt.isString()) {
+                        const QString modelId = opt.toString();
+                        if (!modelId.isEmpty()) {
+                            models.append(modelId);
                         }
                     }
                 }
@@ -252,7 +277,7 @@ QStringList AcpClient::agentArguments(const Settings &settings)
     const QString command = acpEffectiveCommand(settings);
     const QString agentId = settings.acpAgentId;
     const QString model = settings.acpModel.trimmed();
-    
+
     // Handle arguments for different ACP agents
     if (acpAgentIsGrok(settings)) {
         // Grok Build: grok agent stdio --model <model> --always-approve
@@ -283,7 +308,7 @@ QStringList AcpClient::agentArguments(const Settings &settings)
         }
         return out;
     }
-    
+
     // Handle model arguments for other ACP agents that support --model
     if (!model.isEmpty()) {
         if (agentId == u"mistral-vibe"_s || command == u"vibe-acp"_s) {
@@ -313,7 +338,7 @@ QStringList AcpClient::agentArguments(const Settings &settings)
         }
         // Add more agent-specific model handling here as needed
     }
-    
+
     return args;
 }
 
@@ -591,7 +616,7 @@ void AcpClient::sendInitialize()
             return;
         }
         const QJsonObject caps = result.value(u"agentCapabilities"_s).toObject();
-        
+
         // Check if models are advertised in agentCapabilities
         if (caps.contains(u"models"_s)) {
             const QJsonArray modelsArray = caps.value(u"models"_s).toArray();
@@ -613,7 +638,7 @@ void AcpClient::sendInitialize()
                 m_agentModels = models;
             }
         }
-        
+
         m_loadSession = caps.value(u"loadSession"_s).toBool();
         m_embeddedContext = caps.value(u"promptCapabilities"_s).toObject().value(u"embeddedContext"_s).toBool();
         const QJsonObject sessionCaps = caps.value(u"sessionCapabilities"_s).toObject();
@@ -630,7 +655,7 @@ void AcpClient::fetchModels()
         Q_EMIT modelsReceived(m_agentModels);
         return;
     }
-    
+
     // Try to call agent/listModels (non-standard, but some agents might support it)
     sendRequest(u"agent/listModels"_s, QJsonObject(), [this](const QJsonObject &result, const QString &error) {
         if (!error.isEmpty()) {
@@ -699,7 +724,7 @@ void AcpClient::setModel(const QString &modelId)
     value.insert(u"type"_s, u"value_id"_s);
     value.insert(u"value"_s, modelId);
     params.insert(u"value"_s, value);
-    
+
     sendRequest(u"session/set_config_option"_s, params, [this, modelId](const QJsonObject &result, const QString &error) {
         if (!error.isEmpty()) {
             Q_EMIT logMessage(u"Failed to set model: %1"_s.arg(error));
@@ -885,7 +910,7 @@ QJsonObject AcpClient::sessionMeta() const
     QJsonObject meta;
     const QString agentId = m_settings.acpAgentId;
     const QString command = acpEffectiveCommand(m_settings);
-    
+
     // Grok Build reads yoloMode / autoMode / rules from session _meta.
     if (acpAgentIsGrok(m_settings)) {
         if (m_settings.permissionMode == PermissionMode::AlwaysApprove) {
@@ -904,7 +929,7 @@ QJsonObject AcpClient::sessionMeta() const
             meta.insert(u"rules"_s, rules.join(u"\n\n"_s));
         }
     }
-    
+
     // Add model information for agents that support it in _meta
     const QString model = m_settings.acpModel.trimmed();
     if (!model.isEmpty()) {
@@ -914,7 +939,7 @@ QJsonObject AcpClient::sessionMeta() const
         }
         // Add other agents that support model in _meta here
     }
-    
+
     return meta;
 }
 

@@ -66,7 +66,7 @@ QString KateAiConfigPage::getBinaryPlatformKey() const
         return u"darwin-x86_64"_s;
     }
 #elif defined(Q_OS_LINUX)
-    if (QSysInfo::currentCpuArchitecture().startsWith(u"arm"_s) || 
+    if (QSysInfo::currentCpuArchitecture().startsWith(u"arm"_s) ||
         QSysInfo::currentCpuArchitecture().startsWith(u"aarch64"_s)) {
         return u"linux-aarch64"_s;
     } else {
@@ -290,15 +290,15 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
             bool installable = false;
             QString installType;
             QJsonObject installInfo;
-            
+
             if (distribution.value(u"npx"_s).isObject()) {
-                kind = u"npx"_s; 
+                kind = u"npx"_s;
                 package = distribution.value(u"npx"_s).toObject().value(u"package"_s).toString();
                 installable = !package.isEmpty();
                 installType = u"npx"_s;
                 installInfo = distribution.value(u"npx"_s).toObject();
             } else if (distribution.value(u"uvx"_s).isObject()) {
-                kind = u"uvx"_s; 
+                kind = u"uvx"_s;
                 package = distribution.value(u"uvx"_s).toObject().value(u"package"_s).toString();
                 installable = !package.isEmpty();
                 installType = u"uvx"_s;
@@ -348,7 +348,7 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
         const QJsonObject agent = item->data(Qt::UserRole).toJsonObject();
         const QString installType = item->data(Qt::UserRole + 3).toString();
         const QJsonObject installInfo = item->data(Qt::UserRole + 4).toJsonObject();
-        
+
         if (installType == u"npx"_s || installType == u"uvx"_s) {
             const bool npm = installType == u"npx"_s;
             const QString package = installInfo.value(u"package"_s).toString();
@@ -402,16 +402,16 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
                 m_acpRegistryStatus->setText(i18n("No binary available for this platform."));
                 return;
             }
-            
+
             const QString archiveUrl = platformDist.value(u"archive"_s).toString();
             const QString cmd = platformDist.value(u"cmd"_s).toString();
             if (archiveUrl.isEmpty()) {
                 m_acpRegistryStatus->setText(i18n("No download URL available for this binary."));
                 return;
             }
-            
+
             m_acpRegistryStatus->setText(i18n("Downloading and installing %1…", agent.value(u"name"_s).toString()));
-            
+
             // For now, show a message that binary installation needs to be done manually
             // TODO: Implement actual binary download and installation
             QJsonObject installed = agent;
@@ -420,7 +420,7 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
             installed.insert(u"distributionType"_s, u"binary"_s);
             installed.insert(u"binaryArchiveUrl"_s, archiveUrl);
             installed.insert(u"binaryPlatform"_s, platformKey);
-            
+
             QJsonArray agents = QJsonDocument::fromJson(m_plugin->settings().acpInstalledAgents.toUtf8()).array();
             const QString id = agent.value(u"id"_s).toString();
             for (qsizetype i = agents.size() - 1; i >= 0; --i) if (agents.at(i).toObject().value(u"id"_s).toString() == id) agents.removeAt(i);
@@ -1859,12 +1859,12 @@ void KateAiConfigPage::updateModelCombo(Provider provider)
         default:
             return;
     }
-    
+
     if (!combo) return;
-    
+
     const QString currentText = combo->currentText();
     combo->clear();
-    
+
     // Add models from catalog
     const QStringList models = m_modelCatalog.value(provider);
     if (!models.isEmpty()) {
@@ -1873,7 +1873,7 @@ void KateAiConfigPage::updateModelCombo(Provider provider)
         // Fallback to default models if catalog is empty
         combo->addItems(defaultModels(provider));
     }
-    
+
     // Restore current text if it was set
     if (!currentText.isEmpty()) {
         combo->setCurrentText(currentText);
@@ -1928,18 +1928,21 @@ void KateAiConfigPage::updateAcpModelCombo()
     if (!usesAcpNative(m_plugin->settings())) {
         return;
     }
-    
+
     const QString agentId = m_acpAgent->currentData().toString();
-    const Settings settings = m_plugin->settings();
-    QStringList models = acpAgentAvailableModels(settings, agentId);
-    
+    Settings tempSettings = m_plugin->settings();
+    tempSettings.acpAgentId = agentId;
+    tempSettings.acpCommand = m_acpCommand->text().trimmed();
+    tempSettings.acpArgs = m_acpArgs->text().trimmed();
+    QStringList models = acpAgentAvailableModels(tempSettings, agentId);
+
     const QString currentText = m_acpModel->currentText();
     m_acpModel->clear();
-    
+
     if (!models.isEmpty()) {
         m_acpModel->addItems(models);
     }
-    
+
     // Restore current text if it was set
     if (!currentText.isEmpty()) {
         m_acpModel->setCurrentText(currentText);
@@ -1959,9 +1962,17 @@ void KateAiConfigPage::fetchAcpModels()
         btn->setText(i18n("Fetching..."));
     }
 
+    // Use the selected agent ID and current UI values
+    const QString agentId = m_acpAgent->currentData().toString();
+
     // Create a temporary AcpClient to fetch models
     auto *client = new AcpClient(this);
-    client->setSettings(m_plugin->settings());
+    Settings tempSettings = m_plugin->settings();
+    tempSettings.acpAgentId = agentId;
+    tempSettings.acpCommand = m_acpCommand->text().trimmed();
+    tempSettings.acpArgs = m_acpArgs->text().trimmed();
+    tempSettings.acpApiKeyEnv = m_acpApiKeyEnv->text().trimmed();
+    client->setSettings(tempSettings);
     client->setWorkspace(m_workspace);
 
     connect(client, &AcpClient::modelsReceived, this, [this, client, btn](const QStringList &models) {

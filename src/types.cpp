@@ -617,7 +617,7 @@ QString smartCompressContext(const QString &text, int maxLength, bool enabled)
     int keepStart = maxLength * 30 / 100;
     int keepEnd = maxLength * 50 / 100;
     int summaryBudget = maxLength - keepStart - keepEnd - 50; // 50 for summary marker
-    
+
     if (summaryBudget < 100) {
         // Fall back to simple truncation if budget too small
         return compressText(text, maxLength, true);
@@ -625,14 +625,14 @@ QString smartCompressContext(const QString &text, int maxLength, bool enabled)
 
     QString start = text.left(keepStart);
     QString end = text.right(keepEnd);
-    
+
     // Create a summary of what was in the middle
     QString middle = text.mid(keepStart, text.length() - keepStart - keepEnd);
     int middleLines = middle.count(u'\n');
     int middleChars = middle.length();
-    
+
     QString summary = u"\n[... %1 lines, %2 chars compressed ...]\n"_s.arg(middleLines).arg(middleChars);
-    
+
     return start + summary + end;
 }
 
@@ -928,32 +928,52 @@ QString acpAgentIdMatching(const QString &command, const QString &args)
 QStringList discoverAcpAgentModels(const QString &agentId, const QString &command)
 {
     QStringList models;
-    
+
     // Try agent-specific model discovery based on known agents
-    if (agentId == u"grok-build"_s || QFileInfo(command).fileName() == u"grok"_s) {
+    const QString baseName = QFileInfo(command).fileName();
+
+    if (agentId == u"grok-build"_s || baseName == u"grok"_s) {
         // Grok Build supports these models
         models = {u"grok-2"_s, u"grok-2-beta"_s, u"grok-2-mini"_s, u"grok-1.5"_s, u"grok-1.5-mini"_s};
-    } else if (agentId == u"claude-acp"_s || command.contains(u"claude-agent-acp"_s)) {
+    } else if (agentId == u"claude-acp"_s || command.contains(u"claude-agent-acp"_s) || baseName == u"claude"_s) {
         // Claude Agent supports these models
         models = {u"claude-3-5-sonnet-20250620"_s, u"claude-3-haiku-20240307"_s, u"claude-3-sonnet-20240229"_s, u"claude-3-opus-20240229"_s};
-    } else if (agentId == u"codex-acp"_s || command.contains(u"codex-acp"_s)) {
+    } else if (agentId == u"codex-acp"_s || command.contains(u"codex-acp"_s) || baseName == u"codex"_s) {
         // Codex supports these models
         models = {u"codex-pro"_s, u"codex-plus"_s, u"codex"_s};
-    } else if (agentId == u"gemini"_s || command.contains(u"gemini"_s)) {
+    } else if (agentId == u"gemini"_s || command.contains(u"gemini"_s) || baseName == u"gemini"_s) {
         // Gemini CLI supports these models
         models = {u"gemini-2.0-pro-exp"_s, u"gemini-2.0-pro"_s, u"gemini-1.5-pro"_s, u"gemini-1.5-flash"_s};
-    } else if (agentId == u"opencode"_s || command.contains(u"opencode"_s)) {
+    } else if (agentId == u"opencode"_s || command.contains(u"opencode"_s) || baseName == u"opencode"_s) {
         // OpenCode supports various models
         models = {u"gpt-4o-mini"_s, u"gpt-4o"_s, u"claude-3-5-sonnet-20250620"_s, u"claude-3-haiku-20240307"_s};
+    } else if (agentId == u"github-copilot-cli"_s || command.contains(u"copilot"_s) || baseName == u"copilot"_s) {
+        // GitHub Copilot CLI
+        models = {u"gpt-4"_s, u"gpt-4o"_s, u"gpt-3.5-turbo"_s};
+    } else if (agentId == u"goose"_s || command.contains(u"goose"_s) || baseName == u"goose"_s) {
+        // Goose agent
+        models = {u"gpt-4o-mini"_s, u"gpt-4o"_s, u"claude-3-5-sonnet-20250620"_s};
+    } else if (agentId == u"cline"_s || command.contains(u"cline"_s) || baseName == u"cline"_s) {
+        // Cline agent
+        models = {u"gpt-4o-mini"_s, u"gpt-4o"_s, u"claude-3-5-sonnet-20250620"_s};
+    } else if (agentId == u"qwen-code"_s || command.contains(u"qwen-code"_s) || baseName == u"qwen-code"_s) {
+        // Qwen Code
+        models = {u"qwen2.5-coder-7b"_s, u"qwen2.5-coder-14b"_s, u"qwen2.5-coder-32b"_s};
+    } else if (agentId == u"auggie"_s || command.contains(u"auggie"_s) || baseName == u"auggie"_s) {
+        // Auggie CLI
+        models = {u"gpt-4o-mini"_s, u"gpt-4o"_s, u"claude-3-5-sonnet-20250620"_s};
+    } else if (agentId == u"cursor"_s || command.contains(u"cursor"_s) || baseName == u"cursor-agent"_s || baseName == u"cursor"_s) {
+        // Cursor agent
+        models = {u"gpt-4o-mini"_s, u"gpt-4o"_s, u"claude-3-5-sonnet-20250620"_s};
     }
-    
+
     return models;
 }
 
 QStringList acpAgentAvailableModels(const Settings &settings, const QString &agentId)
 {
     QStringList models;
-    
+
     // If we have stored agent models in settings, use them
     const QJsonDocument doc = QJsonDocument::fromJson(settings.acpAgentModels.toUtf8());
     if (doc.isObject()) {
@@ -970,19 +990,19 @@ QStringList acpAgentAvailableModels(const Settings &settings, const QString &age
             }
         }
     }
-    
+
     // If no models are stored, try to discover them from the agent
     if (models.isEmpty()) {
         const QString effectiveAgentId = agentId.isEmpty() ? settings.acpAgentId : agentId;
         const QString effectiveCommand = acpEffectiveCommand(settings);
         models = discoverAcpAgentModels(effectiveAgentId, effectiveCommand);
     }
-    
+
     // Always include the currently configured model if it's not already there
     if (!settings.acpModel.isEmpty() && !models.contains(settings.acpModel)) {
         models.prepend(settings.acpModel);
     }
-    
+
     return models;
 }
 

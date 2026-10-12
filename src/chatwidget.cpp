@@ -2846,8 +2846,9 @@ void ChatWidget::fillModelResultList()
         // Get models for this specific ACP agent
         Settings agentSettings = m_settings;
         agentSettings.acpAgentId = m_acpAgentModelViewAgentId;
-        // Get the command for this agent from installed agents
+        // Get the command for this agent from installed agents or presets
         const QJsonArray installed = QJsonDocument::fromJson(m_settings.acpInstalledAgents.toUtf8()).array();
+        bool foundInInstalled = false;
         for (const QJsonValue &value : installed) {
             const QJsonObject agent = value.toObject();
             if (agent.value(u"id"_s).toString() == m_acpAgentModelViewAgentId) {
@@ -2857,7 +2858,16 @@ void ChatWidget::fillModelResultList()
                     args.append(arg.toString());
                 }
                 agentSettings.acpArgs = args.join(u" "_s);
+                foundInInstalled = true;
                 break;
+            }
+        }
+        // If not found in installed agents, try presets
+        if (!foundInInstalled) {
+            const AcpAgentPreset preset = acpAgentPreset(m_acpAgentModelViewAgentId);
+            if (preset.id != u"custom"_s && !preset.command.isEmpty()) {
+                agentSettings.acpCommand = preset.command;
+                agentSettings.acpArgs = preset.args;
             }
         }
         QStringList models = acpAgentAvailableModels(agentSettings, m_acpAgentModelViewAgentId);
@@ -3185,7 +3195,9 @@ void ChatWidget::selectModel(Provider provider, const QString &model)
 void ChatWidget::selectAcpAgentAndModel(const QString &agentId, const QString &model)
 {
     // First select the agent (sets up command, args, etc.)
+    // Try installed agents first
     const QJsonArray installed = QJsonDocument::fromJson(m_settings.acpInstalledAgents.toUtf8()).array();
+    bool foundInInstalled = false;
     for (const QJsonValue &value : installed) {
         const QJsonObject agent = value.toObject();
         if (agent.value(u"id"_s).toString() != agentId) continue;
@@ -3197,8 +3209,28 @@ void ChatWidget::selectAcpAgentAndModel(const QString &agentId, const QString &m
         QStringList args;
         for (const QJsonValue &arg : agent.value(u"args"_s).toArray()) args.append(arg.toString());
         m_settings.acpArgs = args.join(u" "_s);
+        m_settings.acpApiKeyEnv = agent.value(u"apiKeyEnv"_s).toString();
+        foundInInstalled = true;
         break;
     }
+
+    // If not found in installed agents, try presets
+    if (!foundInInstalled) {
+        const AcpAgentPreset preset = acpAgentPreset(agentId);
+        if (preset.id != u"custom"_s) {
+            m_settings.apiFormat = ApiFormat::AcpNative;
+            m_settings.acpAgentId = preset.id;
+            m_settings.acpCommand = preset.command;
+            m_settings.acpArgs = preset.args;
+            m_settings.acpApiKeyEnv = preset.apiKeyEnv;
+        } else {
+            // Custom agent - use the provided agentId
+            m_settings.apiFormat = ApiFormat::AcpNative;
+            m_settings.acpAgentId = agentId;
+            // Keep existing command and args from settings
+        }
+    }
+
     // Then set the model for this agent
     m_settings.acpModel = model;
     m_settings.provider = Provider::Acp;
@@ -3320,9 +3352,9 @@ void ChatWidget::showSettingsMenu()
     if (m_settings.provider == Provider::Acp || m_preferredProvider == Provider::Acp) {
         auto *acpModelMenu = menu.addMenu(i18n("ACP Model"));
         acpModelMenu->setStyleSheet(menu.styleSheet());
-        
+
         QStringList availableModels = acpAgentAvailableModels(m_settings);
-        
+
         for (const QString &model : availableModels) {
             auto *modelAction = acpModelMenu->addAction(model);
             modelAction->setData(model);
@@ -3337,11 +3369,11 @@ void ChatWidget::showSettingsMenu()
                 menu.close();
             });
         }
-        
+
         if (!availableModels.isEmpty()) {
             acpModelMenu->addSeparator();
         }
-        
+
         // Refresh models from running ACP agent
         auto *refreshModelsAction = acpModelMenu->addAction(i18n("Refresh from Agent…"));
         connect(refreshModelsAction, &QAction::triggered, this, [this, &menu]() {
@@ -3349,7 +3381,7 @@ void ChatWidget::showSettingsMenu()
             showInfoMessage(i18n("Fetching models from ACP agent…"), false);
             menu.close();
         });
-        
+
         auto *modelInputAction = new QWidgetAction(acpModelMenu);
         auto *modelInput = new QLineEdit(acpModelMenu);
         modelInput->setPlaceholderText(i18n("Custom model identifier..."));
@@ -3372,7 +3404,7 @@ void ChatWidget::showSettingsMenu()
     // ACP Agent configuration
     auto *acpMenu = menu.addMenu(i18n("ACP Agent"));
     acpMenu->setStyleSheet(menu.styleSheet());
-    
+
     // Agent selection
     const QStringList acpAgentIds = {u"grok-build"_s, u"claude-acp"_s, u"codex-acp"_s, u"gemini"_s, u"mistral-vibe"_s, u"custom"_s};
     const QStringList acpAgentLabels = {
@@ -3383,7 +3415,7 @@ void ChatWidget::showSettingsMenu()
         i18n("Mistral Vibe"),
         i18n("Custom…")
     };
-    
+
     for (int i = 0; i < acpAgentIds.size(); ++i) {
         auto *action = acpMenu->addAction(acpAgentLabels[i]);
         action->setData(acpAgentIds[i]);
@@ -3398,9 +3430,9 @@ void ChatWidget::showSettingsMenu()
             menu.close();
         });
     }
-    
+
     acpMenu->addSeparator();
-    
+
     // Auto-approve tools that still prompt
     auto *autoApproveMenu = menu.addMenu(i18n("Auto-approve tools"));
     autoApproveMenu->setStyleSheet(menu.styleSheet());
@@ -3424,7 +3456,7 @@ void ChatWidget::showSettingsMenu()
             });
         }
     }
-    
+
     // Thinking Mode
     auto *thinkingAction = menu.addAction(i18n("Thinking Mode"));
     thinkingAction->setCheckable(true);
