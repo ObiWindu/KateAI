@@ -435,6 +435,12 @@ void AcpClient::prompt(const QString &text)
         m_queued.append(QueuedPrompt{text});
         return;
     }
+    // If session was reset but process is still ready, create a new session
+    if (m_sessionId.isEmpty()) {
+        openSession();
+        m_queued.append(QueuedPrompt{text});
+        return;
+    }
     sendPromptNow(text);
 }
 

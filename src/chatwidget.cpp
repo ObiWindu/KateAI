@@ -321,9 +321,13 @@ ChatWidget::ChatWidget(QWidget *parent)
         auto *sb = m_scrollArea->verticalScrollBar();
         const bool following = transcriptShouldFollowTail(value, sb->maximum());
         if (following) {
-            m_userScrolledUp = false;
-            if (m_scrollToBottomBtn && m_scrollToBottomBtn->isVisible()) {
-                animateScrollButtonHide();
+            // Only update if we were previously scrolled up
+            // This prevents flickering when we're already at the bottom
+            if (m_userScrolledUp) {
+                m_userScrolledUp = false;
+                if (m_scrollToBottomBtn && m_scrollToBottomBtn->isVisible()) {
+                    animateScrollButtonHide();
+                }
             }
         } else {
             m_userScrolledUp = true;
@@ -339,7 +343,13 @@ ChatWidget::ChatWidget(QWidget *parent)
         if (m_pinnedViewportWidget) {
             applyPinnedViewport();
         } else if (!m_userScrolledUp) {
+            // Keep scrollbar fixed at bottom - set immediately and also schedule after layout
             sb->setValue(max);
+            QTimer::singleShot(0, this, [thisWeak = QPointer<ChatWidget>(this), sb]() {
+                if (thisWeak && sb && !thisWeak->m_userScrolledUp && !thisWeak->m_pinnedViewportWidget) {
+                    sb->setValue(sb->maximum());
+                }
+            });
         } else if (!transcriptShouldFollowTail(sb->value(), max)) {
             if (m_scrollToBottomBtn) {
                 animateScrollButtonShow();
