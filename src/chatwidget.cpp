@@ -3353,7 +3353,7 @@ void ChatWidget::showSettingsMenu()
         auto *acpModelMenu = menu.addMenu(i18n("ACP Model"));
         acpModelMenu->setStyleSheet(menu.styleSheet());
 
-        QStringList availableModels = acpAgentAvailableModels(m_settings);
+        QStringList availableModels = acpAgentAvailableModels(m_settings, QString());
 
         for (const QString &model : availableModels) {
             auto *modelAction = acpModelMenu->addAction(model);
