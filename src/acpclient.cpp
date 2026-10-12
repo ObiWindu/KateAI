@@ -313,13 +313,7 @@ QStringList AcpClient::agentArguments(const Settings &settings)
 
     // Handle model arguments for other ACP agents that support --model
     if (!model.isEmpty()) {
-        if (agentId == u"mistral-vibe"_s || command == u"vibe-acp"_s) {
-            // Mistral Vibe: vibe-acp --model <model>
-            if (!args.contains(u"--model"_s) && !args.contains(u"-m"_s)) {
-                args << u"--model"_s << model;
-            }
-        }
-        else if (agentId == u"claude-acp"_s || command.contains(u"claude-agent-acp"_s) || raw.contains(u"claude-agent-acp"_s)) {
+        if (agentId == u"claude-acp"_s || command.contains(u"claude-agent-acp"_s) || raw.contains(u"claude-agent-acp"_s)) {
             // Claude Agent: npx -y @agentclientprotocol/claude-agent-acp --model <model>
             if (!args.contains(u"--model"_s) && !args.contains(u"-m"_s)) {
                 args << u"--model"_s << model;
@@ -935,10 +929,6 @@ QJsonObject AcpClient::sessionMeta() const
     // Add model information for agents that support it in _meta
     const QString model = m_settings.acpModel.trimmed();
     if (!model.isEmpty()) {
-        // Mistral Vibe and other agents may accept model in _meta
-        if (agentId == u"mistral-vibe"_s || command == u"vibe-acp"_s) {
-            meta.insert(u"model"_s, model);
-        }
         // Add other agents that support model in _meta here
     }
 
