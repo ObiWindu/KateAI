@@ -2153,11 +2153,12 @@ void ChatWidget::setSettings(const Settings &settings)
     // Detect ACP agent configuration changes and invalidate the cached model list
     // so the next model picker opens a fresh fetch (Zed-style dynamic loading).
     if (usesAcpNative(settings) && usesAcpNative(m_settings)) {
-        const quint64 oldSig = qHash(m_settings.acpAgentId) ^ qHash(m_settings.acpCommand)
-            ^ qHash(m_settings.acpArgs) ^ qHash(m_settings.acpApiKeyEnv);
-        const quint64 newSig = qHash(settings.acpAgentId) ^ qHash(settings.acpCommand)
-            ^ qHash(settings.acpArgs) ^ qHash(settings.acpApiKeyEnv);
-        if (oldSig != newSig) {
+        // Compare fields directly instead of XORing hashes to avoid collisions
+        const bool agentChanged = m_settings.acpAgentId != settings.acpAgentId
+            || m_settings.acpCommand != settings.acpCommand
+            || m_settings.acpArgs != settings.acpArgs
+            || m_settings.acpApiKeyEnv != settings.acpApiKeyEnv;
+        if (agentChanged) {
             QJsonDocument doc = QJsonDocument::fromJson(settings.acpAgentModels.toUtf8());
             QJsonObject agentModels = doc.isObject() ? doc.object() : QJsonObject();
             agentModels.remove(settings.acpAgentId);

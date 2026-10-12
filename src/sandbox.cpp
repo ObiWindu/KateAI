@@ -138,56 +138,58 @@ namespace KateAi
         return path.startsWith(root + u'/');
     }
 
-    QString Sandbox::normalizePath(const QString &path, QString *error, bool forWrite) const
-    {
-        if (m_workspaceRoot.isEmpty()) {
-            if (error) {
-                *error = u"Workspace root is not set."_s;
-            }
-            return {};
+QString Sandbox::normalizePath(const QString &path, QString *error, bool forWrite) const
+{
+    if (m_workspaceRoot.isEmpty()) {
+        if (error) {
+            *error = u"Workspace root is not set."_s;
         }
-
-        QString candidate = path.trimmed();
-        if (candidate.isEmpty()) {
-            candidate = m_workspaceRoot;
-        }
-
-        const QFileInfo info(QDir(m_workspaceRoot), candidate);
-        QString absolute = QDir::cleanPath(info.absoluteFilePath());
-
-        // Resolve symlinks safely - use canonicalFilePath which resolves all symlinks
-        // This avoids TOCTOU by doing the resolution atomically where possible
-        QFileInfo fileInfo(absolute);
-        QString canonical = fileInfo.canonicalFilePath();
-        if (!canonical.isEmpty()) {
-            absolute = canonical;
-        } else if (!fileInfo.exists()) {
-            // File doesn't exist yet - resolve parent directory
-            QString parent = fileInfo.absolutePath();
-            QFileInfo parentInfo(parent);
-            QString parentCanon = parentInfo.canonicalFilePath();
-            if (!parentCanon.isEmpty()) {
-                absolute = QDir::cleanPath(parentCanon + u'/' + fileInfo.fileName());
-            }
-        }
-
-        const bool mustStayInWorkspace = m_profile == SandboxProfile::Strict || (m_profile != SandboxProfile::Off && forWrite);
-        if (mustStayInWorkspace && !pathInsideWorkspace(absolute)) {
-            if (error) {
-                *error = u"Path is outside the workspace: %1"_s.arg(absolute);
-            }
-            return {};
-        }
-
-        if (isDenied(absolute)) {
-            if (error) {
-                *error = u"Access to this path is blocked by a deny rule: %1"_s.arg(absolute);
-            }
-            return {};
-        }
-
-        return absolute;
+        return {};
     }
+
+    QString candidate = path.trimmed();
+    if (candidate.isEmpty()) {
+        candidate = m_workspaceRoot;
+    }
+
+    const QFileInfo info(QDir(m_workspaceRoot), candidate);
+    QString absolute = QDir::cleanPath(info.absoluteFilePath());
+
+    // Resolve symlinks safely - use canonicalFilePath which resolves all symlinks
+    // To mitigate TOCTOU, we verify the path is still within workspace after resolution.
+    QFileInfo fileInfo(absolute);
+    QString canonical = fileInfo.canonicalFilePath();
+    if (!canonical.isEmpty()) {
+        absolute = canonical;
+    } else if (!fileInfo.exists()) {
+        // File doesn't exist yet - resolve parent directory
+        QString parent = fileInfo.absolutePath();
+        QFileInfo parentInfo(parent);
+        QString parentCanon = parentInfo.canonicalFilePath();
+        if (!parentCanon.isEmpty()) {
+            absolute = QDir::cleanPath(parentCanon + u'/' + fileInfo.fileName());
+        }
+    }
+
+    // After symlink resolution, re-verify the path is still inside workspace
+    // This mitigates TOCTOU where a symlink could be swapped to point outside.
+    const bool mustStayInWorkspace = m_profile == SandboxProfile::Strict || (m_profile != SandboxProfile::Off && forWrite);
+    if (mustStayInWorkspace && !pathInsideWorkspace(absolute)) {
+        if (error) {
+            *error = u"Path is outside the workspace: %1"_s.arg(absolute);
+        }
+        return {};
+    }
+
+    if (isDenied(absolute)) {
+        if (error) {
+            *error = u"Access to this path is blocked by a deny rule: %1"_s.arg(absolute);
+        }
+        return {};
+    }
+
+    return absolute;
+}
 
     QString Sandbox::resolve(const QString &path, QString *error, bool forWrite) const
     {
@@ -420,8 +422,14 @@ bool Sandbox::commandTouchesDeniedPath(const QString &command) const
         if (isDenied(literal)) {
             return true;
         }
-        const QString resolved = normalizePath(candidate, nullptr, false);
-        if (!resolved.isEmpty() && resolved != literal && isDenied(resolved)) {
+        // Check both read and write resolution - shell commands can write via
+        // redirections (>, >>, &>) even if the command itself is read-only.
+        const QString resolvedRead = normalizePath(candidate, nullptr, false);
+        if (!resolvedRead.isEmpty() && resolvedRead != literal && isDenied(resolvedRead)) {
+            return true;
+        }
+        const QString resolvedWrite = normalizePath(candidate, nullptr, true);
+        if (!resolvedWrite.isEmpty() && resolvedWrite != literal && resolvedWrite != resolvedRead && isDenied(resolvedWrite)) {
             return true;
         }
     }

@@ -286,7 +286,9 @@ QList<ChatMessage> build(const QList<ChatMessage> &history, const Options &optio
     }
     const int pressure = qBound(0, options.compactionLevel, 6);
     if (pressure > 0) {
-        keepTokens = qMax(400, keepTokens / (1 << qMin(pressure, 4)));
+        // Ensure minimum keepTokens is at least 10% of budget or 800 tokens, whichever is larger
+        const int minKeepTokens = qMax(800, budget / 10);
+        keepTokens = qMax(minKeepTokens, keepTokens / (1 << qMin(pressure, 4)));
     }
 
     int keepFrom = history.size();

@@ -1335,8 +1335,8 @@ int LlmClient::calculateDelay(const RetryContext &ctx, std::optional<int> provid
     } else {
         // Exponential backoff: base * 2^(attempt-1).
         //
-        // Computed by repeated doubling in 64-bit and saturating. The previous
-        // `base * (1 << (attempt - 1))` overflowed twice over: the shift is
+        // Computed by repeated doubling in 64-bit with checked multiplication.
+        // The previous `base * (1 << (attempt - 1))` overflowed twice over: the shift is
         // undefined once attempt exceeds 31, and even a well-defined result
         // wraps negative once it is multiplied by 1000 for QTimer::start(int).
         // A negative interval makes QTimer refuse to start at all, which left
@@ -1345,7 +1345,12 @@ int LlmClient::calculateDelay(const RetryContext &ctx, std::optional<int> provid
         delay = qMax(1, ctx.baseDelaySeconds);
         const int doublings = qBound(0, ctx.attempt - 1, 62);
         for (int i = 0; i < doublings && delay < kRetryDelaySaturation; ++i) {
-            delay *= 2;
+            const qint64 nextDelay = delay * 2;
+            if (nextDelay > kRetryDelaySaturation || nextDelay < delay) {
+                delay = kRetryDelaySaturation;
+                break;
+            }
+            delay = nextDelay;
         }
         delay = qMin(delay, kRetryDelaySaturation);
     }
@@ -1482,8 +1487,10 @@ void LlmClient::scheduleRetry(const RetryContext &ctx)
 
     // QTimer::start() takes an int millisecond interval. Clamp the seconds into
     // a range that survives the *1000, so the timer always actually starts.
-    const int intervalMs = static_cast<int>(
-        qMin<qint64>(qMax<qint64>(1, qint64(delaySeconds) * 1000), std::numeric_limits<int>::max()));
+    // Also cap at a reasonable maximum (24 hours) to avoid absurdly long waits.
+    constexpr qint64 kMaxRetryIntervalMs = 24 * 60 * 60 * 1000; // 24 hours
+    const qint64 intervalMs64 = qMin<qint64>(qMax<qint64>(1, qint64(delaySeconds) * 1000), kMaxRetryIntervalMs);
+    const int intervalMs = static_cast<int>(intervalMs64);
     m_retryTimer.start(intervalMs);
     if (!m_retryTimer.isActive()) {
         // Unreachable while the interval is clamped, but a refused timer would
