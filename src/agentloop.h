@@ -61,6 +61,7 @@ public:
     void resetConversation();
     void resolvePermission(PermissionDecision decision);
     void fetchModels(Provider provider);
+    void fetchAcpModels();
 
     // --- Modes ----------------------------------------------------------------
     ModeRegistry *modeRegistry()
@@ -241,11 +242,11 @@ private:
     QString m_workspace;
     QString m_editorContext;
     DocumentBridge *m_bridge = nullptr;
-    LlmClient m_client;
+LlmClient m_client;
     AcpClient m_acp;
-        // Shared by every loop in a turn, so the in-flight replies can be cancelled
-        // as a unit when the turn is aborted.
-        WebSearch m_web;
+    // Shared by every loop in a turn, so the in-flight replies can be cancelled
+    // as a unit when the turn is aborted.
+    WebSearch m_web;
     PermissionPolicy m_policy;
     std::unique_ptr<Sandbox> m_sandbox;
     std::unique_ptr<ToolRunner> m_tools;
@@ -268,7 +269,6 @@ private:
     int m_inFlight = 0;
     // Identity used for the shared edit locks.
     QString m_selfId = QStringLiteral("main");
-    bool m_cancelRequested = false;
     // Paths this loop currently holds a lock on.
     QStringList m_owedPaths;
     int m_subtaskDepth = 0;
@@ -286,6 +286,7 @@ private:
     State m_state = State::Idle;
     int m_modelRequests = 0;
     int m_toolCalls = 0;
+    bool m_cancelRequested = false;
     // Extra compaction pressure after a context-window rejection. Reset at
     // the start of each user turn so a later overflow can compact further
     // instead of aborting the prompt.

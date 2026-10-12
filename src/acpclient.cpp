@@ -61,16 +61,32 @@ static QString contentBlockText(const QJsonValue &content)
     return obj.value(u"text"_s).toString();
 }
 
-static QString toolContentText(const QJsonArray &content)
+// ACP agents use both the standard content-block array and shorthand output
+// shapes. Preserve useful results even when an agent uses the latter.
+static QString toolContentText(const QJsonValue &content)
 {
     QStringList parts;
-    for (const QJsonValue &item : content) {
+    const QJsonArray blocks = content.isArray() ? content.toArray() : QJsonArray{content};
+    for (const QJsonValue &item : blocks) {
+        if (item.isString()) {
+            parts.append(item.toString());
+            continue;
+        }
         const QJsonObject obj = item.toObject();
+        if (obj.isEmpty()) {
+            continue;
+        }
         const QString type = obj.value(u"type"_s).toString();
         if (type == u"content"_s || type.isEmpty()) {
             const QString text = contentBlockText(obj.contains(u"content"_s) ? obj.value(u"content"_s) : item);
             if (!text.isEmpty()) {
                 parts.append(text);
+            } else if (obj.contains(u"output"_s)) {
+                parts.append(toolContentText(obj.value(u"output"_s)));
+            } else if (obj.contains(u"result"_s)) {
+                parts.append(toolContentText(obj.value(u"result"_s)));
+            } else {
+                parts.append(jsonText(item));
             }
         } else if (type == u"diff"_s) {
             parts.append(unifiedDiff(obj.value(u"path"_s).toString(),
@@ -78,6 +94,14 @@ static QString toolContentText(const QJsonArray &content)
                                      obj.value(u"newText"_s).toString()));
         } else if (type == u"text"_s) {
             parts.append(obj.value(u"text"_s).toString());
+        } else if (obj.contains(u"content"_s)) {
+            parts.append(toolContentText(obj.value(u"content"_s)));
+        } else if (obj.contains(u"output"_s)) {
+            parts.append(toolContentText(obj.value(u"output"_s)));
+        } else if (obj.contains(u"result"_s)) {
+            parts.append(toolContentText(obj.value(u"result"_s)));
+        } else {
+            parts.append(jsonText(item));
         }
     }
     return parts.join(u"\n"_s);
@@ -161,6 +185,40 @@ void AcpClient::setResumeSessionId(const QString &sessionId)
     m_resumeSessionId = sessionId;
 }
 
+void AcpClient::parseConfigOptions(const QJsonArray &configOptions)
+{
+    QStringList models;
+    for (const QJsonValue &optionValue : configOptions) {
+        const QJsonObject option = optionValue.toObject();
+        // Look for model configuration option (type: "select" with category "model" or id containing "model")
+        if (option.contains(u"type"_s) && option.value(u"type"_s).toString() == u"select"_s) {
+            const QString id = option.value(u"id"_s).toString();
+            const QString category = option.value(u"category"_s).toString();
+            if (id.contains(u"model"_s, Qt::CaseInsensitive) || category == u"model"_s) {
+                // This is a model selector - extract the options
+                if (option.contains(u"options"_s)) {
+                    const QJsonArray options = option.value(u"options"_s).toArray();
+                    for (const QJsonValue &optValue : options) {
+                        const QJsonObject opt = optValue.toObject();
+                        if (opt.contains(u"value"_s)) {
+                            const QString modelId = opt.value(u"value"_s).toString();
+                            if (!modelId.isEmpty()) {
+                                models.append(modelId);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if (!models.isEmpty()) {
+        // Remove duplicates
+        models.removeDuplicates();
+        Q_EMIT modelsReceived(models);
+        m_agentModels = models;
+    }
+}
+
 QString AcpClient::resolvedCommand(const Settings &settings)
 {
     const QString command = acpEffectiveCommand(settings);
@@ -191,37 +249,72 @@ QStringList AcpClient::agentArguments(const Settings &settings)
 {
     const QString raw = acpEffectiveArgs(settings);
     QStringList args = raw.isEmpty() ? QStringList() : QProcess::splitCommand(raw);
-    if (!acpAgentIsGrok(settings)) {
-        return args;
-    }
-    if (args.isEmpty()) {
-        args = QStringList{u"agent"_s, u"stdio"_s};
-    }
-
-    int transport = args.lastIndexOf(u"stdio"_s);
-    if (transport < 0) {
-        transport = args.size();
-    }
-
-    QStringList flags;
+    const QString command = acpEffectiveCommand(settings);
+    const QString agentId = settings.acpAgentId;
     const QString model = settings.acpModel.trimmed();
-    if (!model.isEmpty() && !args.contains(u"--model"_s) && !args.contains(u"-m"_s)) {
-        flags << u"--model"_s << model;
-    }
-    if (settings.permissionMode == PermissionMode::AlwaysApprove
-        && !args.contains(u"--always-approve"_s) && !args.contains(u"--yolo"_s)) {
-        flags << u"--always-approve"_s;
-    }
+    
+    // Handle arguments for different ACP agents
+    if (acpAgentIsGrok(settings)) {
+        // Grok Build: grok agent stdio --model <model> --always-approve
+        if (args.isEmpty()) {
+            args = QStringList{u"agent"_s, u"stdio"_s};
+        }
+        int transport = args.lastIndexOf(u"stdio"_s);
+        if (transport < 0) {
+            transport = args.size();
+        }
 
-    QStringList out;
-    for (int i = 0; i < transport; ++i) {
-        out.append(args.at(i));
+        QStringList flags;
+        if (!model.isEmpty() && !args.contains(u"--model"_s) && !args.contains(u"-m"_s)) {
+            flags << u"--model"_s << model;
+        }
+        if (settings.permissionMode == PermissionMode::AlwaysApprove
+            && !args.contains(u"--always-approve"_s) && !args.contains(u"--yolo"_s)) {
+            flags << u"--always-approve"_s;
+        }
+
+        QStringList out;
+        for (int i = 0; i < transport; ++i) {
+            out.append(args.at(i));
+        }
+        out += flags;
+        for (int i = transport; i < args.size(); ++i) {
+            out.append(args.at(i));
+        }
+        return out;
     }
-    out += flags;
-    for (int i = transport; i < args.size(); ++i) {
-        out.append(args.at(i));
+    
+    // Handle model arguments for other ACP agents that support --model
+    if (!model.isEmpty()) {
+        if (agentId == u"mistral-vibe"_s || command == u"vibe-acp"_s) {
+            // Mistral Vibe: vibe-acp --model <model>
+            if (!args.contains(u"--model"_s) && !args.contains(u"-m"_s)) {
+                args << u"--model"_s << model;
+            }
+        }
+        else if (agentId == u"claude-acp"_s || command.contains(u"claude-agent-acp"_s) || raw.contains(u"claude-agent-acp"_s)) {
+            // Claude Agent: npx -y @agentclientprotocol/claude-agent-acp --model <model>
+            if (!args.contains(u"--model"_s) && !args.contains(u"-m"_s)) {
+                args << u"--model"_s << model;
+            }
+        }
+        else if (agentId == u"gemini"_s || command == u"gemini"_s) {
+            // Gemini CLI: gemini --acp --model <model>
+            if (!args.contains(u"--model"_s) && !args.contains(u"-m"_s)) {
+                // Insert --model before --acp if it exists, otherwise at the end
+                int acpIndex = args.indexOf(u"--acp"_s);
+                if (acpIndex >= 0) {
+                    args.insert(acpIndex, u"--model"_s);
+                    args.insert(acpIndex + 1, model);
+                } else {
+                    args << u"--model"_s << model;
+                }
+            }
+        }
+        // Add more agent-specific model handling here as needed
     }
-    return out;
+    
+    return args;
 }
 
 void AcpClient::start()
@@ -465,6 +558,12 @@ void AcpClient::sendInitialize()
     QJsonObject capabilities;
     capabilities.insert(u"fs"_s, fs);
     capabilities.insert(u"terminal"_s, true);
+    // Advertise support for session config options (used for model selection)
+    QJsonObject sessionCapabilities;
+    QJsonObject configOptionsCaps;
+    configOptionsCaps.insert(u"boolean"_s, QJsonObject());
+    sessionCapabilities.insert(u"configOptions"_s, configOptionsCaps);
+    capabilities.insert(u"session"_s, sessionCapabilities);
 
     QJsonObject clientInfo;
     clientInfo.insert(u"name"_s, u"kateai"_s);
@@ -492,6 +591,29 @@ void AcpClient::sendInitialize()
             return;
         }
         const QJsonObject caps = result.value(u"agentCapabilities"_s).toObject();
+        
+        // Check if models are advertised in agentCapabilities
+        if (caps.contains(u"models"_s)) {
+            const QJsonArray modelsArray = caps.value(u"models"_s).toArray();
+            QStringList models;
+            for (const QJsonValue &value : modelsArray) {
+                if (value.isString()) {
+                    models.append(value.toString());
+                } else if (value.isObject()) {
+                    const QJsonObject modelObj = value.toObject();
+                    const QString id = modelObj.value(u"id"_s).toString();
+                    if (!id.isEmpty()) {
+                        models.append(id);
+                    }
+                }
+            }
+            if (!models.isEmpty()) {
+                Q_EMIT modelsReceived(models);
+                // Store for later use
+                m_agentModels = models;
+            }
+        }
+        
         m_loadSession = caps.value(u"loadSession"_s).toBool();
         m_embeddedContext = caps.value(u"promptCapabilities"_s).toObject().value(u"embeddedContext"_s).toBool();
         const QJsonObject sessionCaps = caps.value(u"sessionCapabilities"_s).toObject();
@@ -501,12 +623,110 @@ void AcpClient::sendInitialize()
     });
 }
 
+void AcpClient::fetchModels()
+{
+    // If we already have models from initialize, emit them
+    if (!m_agentModels.isEmpty()) {
+        Q_EMIT modelsReceived(m_agentModels);
+        return;
+    }
+    
+    // Try to call agent/listModels (non-standard, but some agents might support it)
+    sendRequest(u"agent/listModels"_s, QJsonObject(), [this](const QJsonObject &result, const QString &error) {
+        if (!error.isEmpty()) {
+            // Try alternative method names
+            sendRequest(u"models/list"_s, QJsonObject(), [this](const QJsonObject &result2, const QString &error2) {
+                if (!error2.isEmpty()) {
+                    // Fall back to discovering from the agent type
+                    QStringList models = discoverAcpAgentModels(m_settings.acpAgentId, acpEffectiveCommand(m_settings));
+                    if (!models.isEmpty()) {
+                        m_agentModels = models;
+                        Q_EMIT modelsReceived(models);
+                    }
+                    return;
+                }
+                const QJsonArray modelsArray = result2.value(u"models"_s).toArray();
+                QStringList models;
+                for (const QJsonValue &value : modelsArray) {
+                    if (value.isString()) {
+                        models.append(value.toString());
+                    } else if (value.isObject()) {
+                        const QJsonObject modelObj = value.toObject();
+                        const QString id = modelObj.value(u"id"_s).toString();
+                        if (!id.isEmpty()) {
+                            models.append(id);
+                        }
+                    }
+                }
+                if (!models.isEmpty()) {
+                    m_agentModels = models;
+                    Q_EMIT modelsReceived(models);
+                }
+            });
+            return;
+        }
+        const QJsonArray modelsArray = result.value(u"models"_s).toArray();
+        QStringList models;
+        for (const QJsonValue &value : modelsArray) {
+            if (value.isString()) {
+                models.append(value.toString());
+            } else if (value.isObject()) {
+                const QJsonObject modelObj = value.toObject();
+                const QString id = modelObj.value(u"id"_s).toString();
+                if (!id.isEmpty()) {
+                    models.append(id);
+                }
+            }
+        }
+        if (!models.isEmpty()) {
+            m_agentModels = models;
+            Q_EMIT modelsReceived(models);
+        }
+    });
+}
+
+void AcpClient::setModel(const QString &modelId)
+{
+    if (m_sessionId.isEmpty()) {
+        return;
+    }
+    // Use session/set_config_option to change the model
+    // The config option ID is typically "model" for model selection
+    QJsonObject params;
+    params.insert(u"sessionId"_s, m_sessionId);
+    params.insert(u"configId"_s, u"model"_s);
+    QJsonObject value;
+    value.insert(u"type"_s, u"value_id"_s);
+    value.insert(u"value"_s, modelId);
+    params.insert(u"value"_s, value);
+    
+    sendRequest(u"session/set_config_option"_s, params, [this, modelId](const QJsonObject &result, const QString &error) {
+        if (!error.isEmpty()) {
+            Q_EMIT logMessage(u"Failed to set model: %1"_s.arg(error));
+        } else {
+            // Update settings with the new model
+            m_settings.acpModel = modelId;
+            Q_EMIT logMessage(u"Model changed to: %1"_s.arg(modelId));
+        }
+    });
+}
+
 void AcpClient::maybeAuthenticate(const QJsonArray &authMethods)
 {
     if (authMethods.isEmpty()) {
         openSession();
         return;
     }
+
+    // If no API key is configured, skip authentication and let the agent use
+    // its existing CLI login session. Most ACP agents (Grok Build, Claude Agent,
+    // Codex, Gemini CLI, etc.) support this workflow.
+    const bool hasApiKey = !m_settings.acpApiKey.trimmed().isEmpty();
+    if (!hasApiKey) {
+        openSession();
+        return;
+    }
+
     const QString effectiveArgs = acpEffectiveArgs(m_settings);
     const bool codexAgent = m_settings.acpAgentId == u"codex-acp"_s
         || effectiveArgs.contains(u"@agentclientprotocol/codex-acp"_s);
@@ -572,6 +792,11 @@ void AcpClient::sendSessionNew()
             Q_EMIT failed(message);
             return;
         }
+        // Extract configOptions (e.g., model list) from session response
+        if (result.contains(u"configOptions"_s)) {
+            const QJsonArray configOptions = result.value(u"configOptions"_s).toArray();
+            parseConfigOptions(configOptions);
+        }
         if (m_startupTimer) {
             m_startupTimer->stop();
         }
@@ -592,13 +817,18 @@ void AcpClient::sendSessionLoadOrResume()
     params.insert(u"sessionId"_s, m_resumeSessionId);
     params.insert(u"cwd"_s, m_workspace);
     params.insert(u"mcpServers"_s, mcpServersPayload());
-    sendRequest(method, params, [this](const QJsonObject &, const QString &error) {
+    sendRequest(method, params, [this](const QJsonObject &result, const QString &error) {
         if (!error.isEmpty()) {
             m_resumeSessionId.clear();
             sendSessionNew();
             return;
         }
         m_sessionId = m_resumeSessionId;
+        // Extract configOptions (e.g., model list) from session response
+        if (result.contains(u"configOptions"_s)) {
+            const QJsonArray configOptions = result.value(u"configOptions"_s).toArray();
+            parseConfigOptions(configOptions);
+        }
         if (m_startupTimer) {
             m_startupTimer->stop();
         }
@@ -653,26 +883,38 @@ QJsonArray AcpClient::promptBlocks(const QString &text) const
 QJsonObject AcpClient::sessionMeta() const
 {
     QJsonObject meta;
+    const QString agentId = m_settings.acpAgentId;
+    const QString command = acpEffectiveCommand(m_settings);
+    
     // Grok Build reads yoloMode / autoMode / rules from session _meta.
-    // Other agents may reject unknown _meta, so only Grok gets it.
-    if (!acpAgentIsGrok(m_settings)) {
-        return meta;
+    if (acpAgentIsGrok(m_settings)) {
+        if (m_settings.permissionMode == PermissionMode::AlwaysApprove) {
+            meta.insert(u"yoloMode"_s, true);
+        } else if (m_settings.permissionMode == PermissionMode::AcceptEdits) {
+            meta.insert(u"autoMode"_s, true);
+        }
+        QStringList rules;
+        if (!m_settings.globalRules.trimmed().isEmpty()) {
+            rules.append(m_settings.globalRules.trimmed());
+        }
+        if (!m_settings.extraSystemPrompt.trimmed().isEmpty()) {
+            rules.append(m_settings.extraSystemPrompt.trimmed());
+        }
+        if (!rules.isEmpty()) {
+            meta.insert(u"rules"_s, rules.join(u"\n\n"_s));
+        }
     }
-    if (m_settings.permissionMode == PermissionMode::AlwaysApprove) {
-        meta.insert(u"yoloMode"_s, true);
-    } else if (m_settings.permissionMode == PermissionMode::AcceptEdits) {
-        meta.insert(u"autoMode"_s, true);
+    
+    // Add model information for agents that support it in _meta
+    const QString model = m_settings.acpModel.trimmed();
+    if (!model.isEmpty()) {
+        // Mistral Vibe and other agents may accept model in _meta
+        if (agentId == u"mistral-vibe"_s || command == u"vibe-acp"_s) {
+            meta.insert(u"model"_s, model);
+        }
+        // Add other agents that support model in _meta here
     }
-    QStringList rules;
-    if (!m_settings.globalRules.trimmed().isEmpty()) {
-        rules.append(m_settings.globalRules.trimmed());
-    }
-    if (!m_settings.extraSystemPrompt.trimmed().isEmpty()) {
-        rules.append(m_settings.extraSystemPrompt.trimmed());
-    }
-    if (!rules.isEmpty()) {
-        meta.insert(u"rules"_s, rules.join(u"\n\n"_s));
-    }
+    
     return meta;
 }
 
@@ -910,6 +1152,12 @@ void AcpClient::handleNotification(const QJsonObject &message)
             update = params;
         }
         handleSessionUpdate(update);
+    } else if (method == u"config_option_update"_s) {
+        // Agent notifies about config option changes (e.g., model list updated)
+        if (params.contains(u"configOptions"_s)) {
+            const QJsonArray configOptions = params.value(u"configOptions"_s).toArray();
+            parseConfigOptions(configOptions);
+        }
     }
 }
 
@@ -978,9 +1226,15 @@ void AcpClient::handleSessionUpdate(const QJsonObject &update)
             result.toolCallId = toolCallId;
             result.name = existing.toolName;
             result.ok = status == u"completed"_s;
-            result.output = toolContentText(update.value(u"content"_s).toArray());
+            result.output = toolContentText(update.value(u"content"_s));
             if (result.output.isEmpty()) {
                 result.output = jsonText(update.value(u"rawOutput"_s));
+            }
+            if (result.output.isEmpty()) {
+                result.output = jsonText(update.value(u"output"_s));
+            }
+            if (result.output.isEmpty()) {
+                result.output = jsonText(update.value(u"result"_s));
             }
             m_liveTools.remove(toolCallId);
             Q_EMIT toolFinished(result);

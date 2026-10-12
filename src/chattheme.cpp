@@ -402,12 +402,13 @@ QString userCard()
 {
     // User turns are deliberately neutral. Blue is reserved for actions and
     // focus elsewhere in the panel, so it should not make every prompt look
-    // like an actionable control.
+    // like an actionable control. Keep the surface dark enough that its white
+    // text has the same contrast as the rest of the transcript.
     return QStringLiteral(
            "QWidget#userCard {"
-           "  background-color: #d6d6da;"
-           "  border: 1px solid #b8b8be;"
-           "  border-left: 3px solid #929299;"
+           "  background-color: #3a3a3d;"
+           "  border: 1px solid #505055;"
+           "  border-left: 3px solid #686870;"
            "  border-radius: 8px;"
            "}");
 }

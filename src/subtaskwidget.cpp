@@ -50,9 +50,16 @@ SubtaskWidget::SubtaskWidget(const QString &taskId, QWidget *parent)
     root->setContentsMargins(8, 6, 8, 6);
     root->setSpacing(4);
 
-    // Header: icon, "Agent · mode", live status, cancel.
+    // Header: a fixed delegation badge, state icon, "Agent · mode", status,
+    // cancel. The fixed badge remains meaningful after the state icon becomes
+    // a checkmark or failure mark.
     auto *header = new QHBoxLayout;
     header->setSpacing(6);
+
+    auto *agentBadge = new QLabel(u"↳"_s, this);
+    agentBadge->setToolTip(i18n("Delegated sub-agent"));
+    agentBadge->setStyleSheet(QStringLiteral("font-size: 15px; font-weight: 700; color: %1;").arg(ChatTheme::accent()));
+    header->addWidget(agentBadge);
 
     m_icon = new QLabel(u"◐"_s, this);
     m_icon->setStyleSheet(u"font-size: 12px;"_s);
@@ -215,9 +222,11 @@ void SubtaskWidget::markAbandoned(const QString &reason)
 void SubtaskWidget::updateHeader()
 {
     const QString escapedName = m_agentName.toHtmlEscaped();
-    m_title->setText(m_modeId.isEmpty() ? escapedName
-                                        : QStringLiteral("<span style=\"color:#7aa2f7\">%1</span> <span style=\"color:#666;\">·</span> %2")
-                                              .arg(m_modeId.toHtmlEscaped(), escapedName));
+    const QString name = QStringLiteral("<span style=\"color:#b9b9c0\">%1</span>").arg(escapedName);
+    m_title->setText(m_modeId.isEmpty()
+                         ? i18n("Sub-agent · %1", name)
+                         : QStringLiteral("<span style=\"color:#7aa2f7\">%1</span> <span style=\"color:#666;\">·</span> %2")
+                               .arg(m_modeId.toHtmlEscaped(), i18n("Sub-agent · %1", name)));
     updateElapsed();
 }
 

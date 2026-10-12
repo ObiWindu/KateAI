@@ -68,6 +68,7 @@ private:
     QLineEdit *m_deepseekKey = nullptr;
     QLineEdit *m_openaiCompatibleKey = nullptr;
     QLineEdit *m_claudeCompatibleKey = nullptr;
+    QLineEdit *m_kiloKey = nullptr;
     QLineEdit *m_opencodeKey = nullptr;
     QLineEdit *m_acpKey = nullptr;
     QComboBox *m_grokModel = nullptr;
@@ -76,6 +77,7 @@ private:
     QComboBox *m_deepseekModel = nullptr;
     QComboBox *m_openaiCompatibleModel = nullptr;
     QComboBox *m_claudeCompatibleModel = nullptr;
+    QComboBox *m_kiloModel = nullptr;
     QComboBox *m_opencodeModel = nullptr;
     QComboBox *m_acpModel = nullptr;
     QLineEdit *m_deepseekUrl = nullptr;
@@ -95,6 +97,8 @@ private:
     QComboBox *m_apiFormat = nullptr;
     void applySelectedAcpPreset();
     void updateAcpNativeEnabled();
+    void updateAcpModelCombo();
+    void fetchAcpModels();
 
     // Model fetching
     LlmClient *m_modelFetcher = nullptr;
@@ -208,6 +212,8 @@ private:
     void addMcpServer();
     void removeMcpServer();
     void refreshMcpServerTable();
+
+    QString getBinaryPlatformKey() const;
 };
 
 } // namespace KateAi

@@ -101,7 +101,8 @@ private Q_SLOTS:
         settings.acpArgs = u"--acp"_s;
         settings.acpModel = u"gemini-2.5-pro"_s;
         settings.permissionMode = PermissionMode::AlwaysApprove;
-        QCOMPARE(AcpClient::agentArguments(settings), QStringList{u"--acp"_s});
+        QCOMPARE(AcpClient::agentArguments(settings),
+                 (QStringList{u"--model"_s, u"gemini-2.5-pro"_s, u"--acp"_s}));
         QVERIFY(!acpAgentIsGrok(settings));
 
         settings.acpAgentId = u"custom"_s;
@@ -112,6 +113,7 @@ private Q_SLOTS:
 
         settings.acpCommand.clear();
         settings.acpArgs.clear();
+        settings.acpModel.clear();
         settings.acpAgentId = u"custom"_s;
         QVERIFY(AcpClient::resolvedCommand(settings).isEmpty());
         QVERIFY(AcpClient::agentArguments(settings).isEmpty());
@@ -139,6 +141,7 @@ private Q_SLOTS:
         QJsonArray plan;
         int toolsStarted = 0;
         int toolsFinished = 0;
+        QString toolOutput;
         QString stopReason;
         QString finishedText;
         QString error;
@@ -158,6 +161,7 @@ private Q_SLOTS:
         connect(&client, &AcpClient::toolFinished, this, [&](const ToolResult &result) {
             ++toolsFinished;
             QVERIFY(result.ok);
+            toolOutput = result.output;
         });
         connect(&client, &AcpClient::promptFinished, this, [&](const QString &reason, const QString &full, const QJsonArray &) {
             stopReason = reason;
@@ -178,6 +182,7 @@ private Q_SLOTS:
         QCOMPARE(finishedText, u"hello world"_s);
         QCOMPARE(toolsStarted, 1);
         QCOMPARE(toolsFinished, 1);
+        QCOMPARE(toolOutput, u"ok"_s);
         QCOMPARE(plan.size(), 1);
         QCOMPARE(client.sessionId(), u"sess_kateai_test"_s);
         client.stop();

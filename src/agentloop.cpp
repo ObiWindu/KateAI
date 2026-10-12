@@ -109,6 +109,10 @@ AgentLoop::AgentLoop(QObject *parent)
     connect(&m_acp, &AcpClient::sessionIdChanged, this, [this](const QString &) {
         Q_EMIT statusChanged(m_acp.statusText());
     });
+    connect(&m_acp, &AcpClient::modelsReceived, this, [this](const QStringList &models) {
+        Q_EMIT modelsReceived(Provider::Acp, models);
+    });
+
     // Retry status signals
     connect(&m_client, &LlmClient::retryStatus, this, [this](const QString &message, int attempt, int maxAttempts, int delaySeconds) {
         Q_EMIT statusChanged(message);
@@ -258,7 +262,6 @@ void AgentLoop::setWorkspace(const QString &workspace)
         m_tools->setProjectGraph(m_projectGraph.get());
     }
 
-    // Auto-generate or load project graph
     if (m_projectGraph) {
         QString graphFilePath = m_workspace + u"/.kateai/project_graph.json"_s;
         if (QFile::exists(graphFilePath)) {
@@ -1259,6 +1262,7 @@ void AgentLoop::appendToolResult(const ToolCall &call, ToolResult result)
 {
     result.toolCallId = call.id;
     result.name = call.name;
+    result.rawOutput = result.output;  // Preserve raw output for UI display
 
     if (result.ok && (call.name == u"bash"_s || call.name == u"read_file"_s)
         && result.output.contains(u"truncated"_s, Qt::CaseInsensitive)) {
@@ -2256,6 +2260,11 @@ void AgentLoop::resolvePermission(PermissionDecision decision)
 void AgentLoop::fetchModels(Provider provider)
 {
     m_client.fetchModels(provider);
+}
+
+void AgentLoop::fetchAcpModels()
+{
+    m_acp.fetchModels();
 }
 
 SessionStore::SessionData AgentLoop::sessionData() const

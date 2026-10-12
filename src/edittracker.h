@@ -115,6 +115,7 @@ private:
     };
 
     void updateUI();
+    void setFileListVisible(bool visible);
     void rebuildEditList();
     void appendRow(const Group &group);
     QWidget *createRow(const Group &group);
@@ -141,11 +142,12 @@ private:
     QLabel *m_countLabel = nullptr;
     QPushButton *m_acceptAllBtn = nullptr;
     QPushButton *m_rejectAllBtn = nullptr;
-    QPushButton *m_undoBtn = nullptr;
+    QPushButton *m_toggleListBtn = nullptr;
 
     QWidget *m_listContainer = nullptr;
     QScrollArea *m_scrollArea = nullptr;
     QVBoxLayout *m_editListLayout = nullptr;
+    bool m_fileListVisible = false;
 };
 
 } // namespace KateAi
