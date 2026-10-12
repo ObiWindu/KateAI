@@ -3405,13 +3405,14 @@ void ChatWidget::showSettingsMenu()
     auto *acpMenu = menu.addMenu(i18n("ACP Agent"));
     acpMenu->setStyleSheet(menu.styleSheet());
 
-    // Agent selection - only include stdio-compatible agents
-    const QStringList acpAgentIds = {u"grok-build"_s, u"claude-acp"_s, u"codex-acp"_s, u"gemini"_s, u"custom"_s};
+    // Agent selection
+    const QStringList acpAgentIds = {u"grok-build"_s, u"claude-acp"_s, u"codex-acp"_s, u"gemini"_s, u"mistral-vibe"_s, u"custom"_s};
     const QStringList acpAgentLabels = {
         i18n("Grok Build"),
         i18n("Claude Agent"),
         i18n("Codex"),
         i18n("Gemini CLI"),
+        i18n("Mistral Vibe"),
         i18n("Custom…")
     };
 

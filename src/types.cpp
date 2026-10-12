@@ -836,6 +836,7 @@ QList<AcpAgentPreset> acpAgentPresets()
         {u"qwen-code"_s, i18n("Qwen Code"), u"npx"_s, u"-y @qwen-code/qwen-code --acp"_s, {}},
         {u"auggie"_s, i18n("Auggie CLI"), u"npx"_s, u"-y @augmentcode/auggie --acp"_s, {}},
         {u"cursor"_s, i18n("Cursor"), u"cursor-agent"_s, u"acp"_s, {}},
+        {u"mistral-vibe"_s, i18n("Mistral Vibe"), u"vibe-acp"_s, u""_s, u"MISTRAL_API_KEY"_s},
         {u"custom"_s, i18n("Custom"), {}, {}, {}},
     };
 }
@@ -965,6 +966,9 @@ QStringList discoverAcpAgentModels(const QString &agentId, const QString &comman
     } else if (agentId == u"cursor"_s || command.contains(u"cursor"_s) || baseName == u"cursor-agent"_s || baseName == u"cursor"_s) {
         // Cursor agent
         models = {u"gpt-4o-mini"_s, u"gpt-4o"_s, u"claude-3-5-sonnet-20250620"_s};
+    } else if (agentId == u"mistral-vibe"_s || command.contains(u"vibe-acp"_s) || baseName == u"vibe-acp"_s) {
+        // Mistral Vibe agent
+        models = {u"mistral-large"_s, u"mistral-small"_s, u"mistral-tiny"_s, u"codestral-latest"_s, u"codestral-mistral"_s};
     }
 
     return models;
