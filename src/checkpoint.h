@@ -7,6 +7,7 @@
 
 #include <QDateTime>
 #include <QList>
+#include <QMutex>
 #include <QObject>
 #include <QString>
 
@@ -81,6 +82,8 @@ private:
     // Snapshot tag refs, newest first.
     QStringList checkpointRefs() const;
     void prune();
+    // Mutex for thread-safe checkpoint operations (recursive to allow prune() from createCheckpoint())
+    mutable QRecursiveMutex m_checkpointMutex;
 
     QString m_workspace;
     bool m_enabled = true;

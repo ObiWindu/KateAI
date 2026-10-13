@@ -1,5 +1,6 @@
 #include "acpclient.h"
 #include "documentbridge.h"
+#include "tools.h"
 #include "types.h"
 
 #include <QCoreApplication>
@@ -267,6 +268,91 @@ private Q_SLOTS:
         QString written;
         QVERIFY(bridge.readDocument(writePath, &written));
         QCOMPARE(written, u"from-agent:payload"_s);
+        client.stop();
+    }
+
+    void writePlanFileClientMethodFilesThePlanOutsideTheWorkspace()
+    {
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+
+        DiskDocumentBridge bridge;
+        AcpClient client;
+        client.setSettings(mockSettings(u"plan"_s));
+        client.setWorkspace(workspace.path());
+        client.setDocumentBridge(&bridge);
+
+        QString text;
+        QString stopReason;
+        QString error;
+        connect(&client, &AcpClient::textDelta, this, [&](const QString &delta) {
+            text += delta;
+        });
+        connect(&client, &AcpClient::promptFinished, this, [&](const QString &reason, const QString &, const QJsonArray &) {
+            stopReason = reason;
+        });
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+
+        client.prompt(u"plan this"_s);
+        QVERIFY2(waitFor([&] {
+            return !stopReason.isEmpty() || !error.isEmpty();
+        }), qPrintable(error.isEmpty() ? u"timed out"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(stopReason, u"end_turn"_s);
+
+        // The agent is told where the plan landed, and the file itself lives
+        // in the temp directory rather than in the user's project.
+        const QString planPath = planFilePath(workspace.path());
+        QCOMPARE(text, u"plan:"_s + planPath);
+        QString written;
+        QVERIFY(bridge.readDocument(planPath, &written));
+        QCOMPARE(written, u"# Plan\n\n1. Inspect the code\n2. Change it\n"_s);
+        QCOMPARE(QDir(workspace.path()).entryList(QDir::Files), QStringList());
+        client.stop();
+    }
+
+    void suggestClientMethodPostsAdviceTouchingNothing()
+    {
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+
+        DiskDocumentBridge bridge;
+        AcpClient client;
+        client.setSettings(mockSettings(u"suggest"_s));
+        client.setWorkspace(workspace.path());
+        client.setDocumentBridge(&bridge);
+
+        QList<Suggestion> posted;
+        QString stopReason;
+        QString error;
+        connect(&client, &AcpClient::suggestionPosted, this, [&](const Suggestion &suggestion) {
+            posted.append(suggestion);
+        });
+        connect(&client, &AcpClient::promptFinished, this, [&](const QString &reason, const QString &, const QJsonArray &) {
+            stopReason = reason;
+        });
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+
+        client.prompt(u"suggest something"_s);
+        QVERIFY2(waitFor([&] {
+            return !stopReason.isEmpty() || !error.isEmpty();
+        }), qPrintable(error.isEmpty() ? u"timed out"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(stopReason, u"end_turn"_s);
+
+        QCOMPARE(posted.size(), 1);
+        const Suggestion suggestion = posted.first();
+        QVERIFY(suggestion.text.contains(u"std::string_view"_s));
+        QCOMPARE(suggestion.path, u"src/main.cpp"_s);
+        QCOMPARE(suggestion.line, 7);
+
+        // Advice only: the workspace is untouched, exactly as with the native
+        // tool, so the card is safe to show without a checkpoint.
+        QCOMPARE(QDir(workspace.path()).entryList(QDir::Files), QStringList());
         client.stop();
     }
 

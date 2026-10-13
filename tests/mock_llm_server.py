@@ -4,7 +4,9 @@
 The first request (the orchestrator) gets two new_task tool calls in a single
 response. Requests whose last user message carries the CHILD marker are treated
 as sub-agents and answered with plain text after a deliberate delay, so the test
-can observe both sub-agents in flight at the same time.
+can observe both sub-agents in flight at the same time. A request whose last
+user message carries the QUESTION marker is answered with a single question tool
+call, which the test must answer before the turn can finish.
 
 Usage: mock_llm_server.py <port-file>
 """
@@ -15,6 +17,11 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 CHILD_MARKER = "CHILD-TASK"
+# What a question-flow test sends to make the mock ask something.
+QUESTION_MARKER = "Ask the user something."
+# Sent to make the mock ask a question with no text in it, which the loop must
+# refuse rather than park the turn waiting for an answer to nothing.
+EMPTY_QUESTION_MARKER = "Ask nothing at all."
 # The orchestrator's own prompt; only the first request looks like this.
 PARENT_MARKER = "Split this across two agents."
 # Long enough that two sequential dispatches would visibly not overlap.
@@ -22,6 +29,9 @@ CHILD_DELAY_SECONDS = 1.5
 # The orchestrator delegates exactly once; every later turn gets prose. Without
 # this the parent would spawn sub-agents forever.
 DELEGATED = False
+# The question is asked once per server, for the same reason.
+ASKED = False
+ASKED_EMPTY = False
 
 
 def sse(payload):
@@ -60,7 +70,7 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     def do_POST(self):
-        global DELEGATED
+        global DELEGATED, ASKED, ASKED_EMPTY
         length = int(self.headers.get("Content-Length", "0"))
         try:
             body = json.loads(self.rfile.read(length) or b"{}")
@@ -75,6 +85,8 @@ class Handler(BaseHTTPRequestHandler):
                 last_user = message.get("content", "")
         is_child = CHILD_MARKER in last_user
         is_orchestrator_first_turn = PARENT_MARKER in last_user and not DELEGATED
+        is_question = QUESTION_MARKER in last_user and not ASKED
+        is_empty_question = EMPTY_QUESTION_MARKER in last_user and not ASKED_EMPTY
 
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
@@ -109,6 +121,26 @@ class Handler(BaseHTTPRequestHandler):
                     {"description": f"{CHILD_MARKER} agent-b: handle the writer", "agent": "coder"},
                 )
             )
+            emit(sse({"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]}))
+        elif is_question:
+            ASKED = True
+            # One question with two offered answers: the turn cannot finish
+            # until the user picks or types one.
+            emit(
+                tool_call(
+                    0,
+                    "call_q",
+                    "question",
+                    {
+                        "question": "Rewrite the file, or patch it in place?",
+                        "options": ["Rewrite", "Patch"],
+                    },
+                )
+            )
+            emit(sse({"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]}))
+        elif is_empty_question:
+            ASKED_EMPTY = True
+            emit(tool_call(0, "call_qe", "question", {"question": ""}))
             emit(sse({"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]}))
         else:
             # The orchestrator's follow-up turn: summarise in prose.

@@ -61,6 +61,13 @@ public:
     void abort();
     void resetConversation();
     void resolvePermission(PermissionDecision decision);
+    // Answers the blocking `question` tool with the user's text; the agent loop
+    // resumes from the answer.
+    void answerQuestion(const QString &answer);
+    // Reclaims a full context window by folding the whole conversation into a
+    // summary that keeps the live user turn. Returns false (and does nothing)
+    // while a turn is running or when there is nothing worth compacting.
+    bool compactContext();
     void fetchModels(Provider provider);
     void fetchAcpModels();
 
@@ -150,9 +157,21 @@ Q_SIGNALS:
     void thinkingFinished(const QString &text);
     void assistantFinished(const QString &text);
     void planUpdated(const QJsonArray &plan);
+    // An ACP agent posted a suggestion through the Kate client method; the
+    // native suggest tool reaches the same card through toolStarted instead.
+    void suggestionPosted(const Suggestion &suggestion);
     void toolStarted(const PermissionRequest &request);
     void toolFinished(const ToolResult &result);
     void permissionNeeded(const PermissionRequest &request);
+    // The agent asked the user something with the `question` tool and is
+    // waiting. The request carries the question and the suggested answers.
+    void questionAsked(const PermissionRequest &request);
+    // Partial output from a running tool, so its card can stream instead of
+    // waiting for the final result.
+    void toolProgress(const QString &toolCallId, const QString &partialOutput);
+    // The context was reset to a summary: carries the token count before and
+    // after, so the caller can report what was reclaimed.
+    void contextCompacted(int beforeTokens, int afterTokens);
     void statusChanged(const QString &status);
     void activityUpdated(const QString &text);
     void failed(const QString &error);
@@ -177,6 +196,7 @@ private:
         WaitingForModel,
         ExecutingTools,
         WaitingForPermission,
+        WaitingForQuestion,
     };
 
     void scheduleNextModelStep();
@@ -223,6 +243,12 @@ private:
     void dispatchSubtask(const ToolCall &call);
     void finishAsyncTool(const ToolCall &call, const ToolResult &result);
     bool isSubtaskTool(const QString &toolName) const;
+    // The one tool that stops the turn and waits for the user to type.
+    bool isQuestionTool(const QString &toolName) const;
+    // Issues a `bash` and reports back through finishAsyncTool. The queue holds
+    // while it runs, so only one command is ever in flight; unlike the other
+    // async tools it streams its output through toolProgress.
+    void startBashTool(const ToolCall &call);
         bool isWebTool(const QString &toolName) const;
         // Issues a web_search / web_fetch and reports back through finishAsyncTool.
         void startWebTool(const ToolCall &call);
@@ -282,6 +308,9 @@ LlmClient m_client;
     QList<ToolResult> m_pendingResults;
     ToolCall m_waitingCall;
     PermissionRequest m_waitingRequest;
+    // The `bash` call currently streaming, if any. One at a time: the queue
+    // waits for it, so nothing else is executing while it is set.
+    QString m_runningBashId;
 
     bool m_busy = false;
     State m_state = State::Idle;

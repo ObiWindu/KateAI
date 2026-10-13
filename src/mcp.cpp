@@ -338,8 +338,13 @@ QJsonArray parseHttpBody(const QByteArray &body, const QString &contentType)
         }
         return messages;
     }
+    QString currentEvent;
     for (const QByteArray &line : body.split('\n')) {
         const QString text = QString::fromUtf8(line).trimmed();
+        if (text.startsWith(u"event:"_s)) {
+            currentEvent = text.mid(6).trimmed();
+            continue;
+        }
         if (!text.startsWith(u"data:"_s)) {
             continue;
         }
@@ -350,7 +355,12 @@ QJsonArray parseHttpBody(const QByteArray &body, const QString &contentType)
         QJsonParseError parseError{};
         const QJsonDocument document = QJsonDocument::fromJson(payload.toUtf8(), &parseError);
         if (parseError.error == QJsonParseError::NoError && document.isObject()) {
-            messages.append(document.object());
+            QJsonObject obj = document.object();
+            if (!currentEvent.isEmpty()) {
+                obj.insert(u"_event"_s, currentEvent);
+                currentEvent.clear();
+            }
+            messages.append(obj);
         }
     }
     return messages;
@@ -584,6 +594,16 @@ void McpClient::sendRequestForId(const QString &method, const QJsonObject &param
         for (auto it = m_config.headers.constBegin(); it != m_config.headers.constEnd(); ++it) {
             request.setRawHeader(it.key().toUtf8(), it.value().toUtf8());
         }
+
+        // Enforce TLS certificate validation for HTTPS URLs
+        QUrl url(m_config.url);
+        if (url.scheme() == u"https"_s) {
+            QSslConfiguration sslConfig = request.sslConfiguration();
+            sslConfig.setPeerVerifyMode(QSslSocket::VerifyPeer);
+            sslConfig.setProtocol(QSsl::TlsV1_2OrLater);
+            request.setSslConfiguration(sslConfig);
+        }
+
         QNetworkReply *reply = m_nam->post(request, QJsonDocument(message).toJson(QJsonDocument::Compact));
         if (auto it = m_pending.find(id); it != m_pending.end()) {
             it.value().reply = reply;
@@ -626,6 +646,16 @@ void McpClient::writeMessage(const QJsonObject &message)
         for (auto it = m_config.headers.constBegin(); it != m_config.headers.constEnd(); ++it) {
             request.setRawHeader(it.key().toUtf8(), it.value().toUtf8());
         }
+
+        // Enforce TLS certificate validation for HTTPS URLs
+        QUrl url(m_config.url);
+        if (url.scheme() == u"https"_s) {
+            QSslConfiguration sslConfig = request.sslConfiguration();
+            sslConfig.setPeerVerifyMode(QSslSocket::VerifyPeer);
+            sslConfig.setProtocol(QSsl::TlsV1_2OrLater);
+            request.setSslConfiguration(sslConfig);
+        }
+
         QNetworkReply *reply = m_nam->post(request, QJsonDocument(message).toJson(QJsonDocument::Compact));
         connect(reply, &QNetworkReply::finished, reply, &QNetworkReply::deleteLater);
         return;

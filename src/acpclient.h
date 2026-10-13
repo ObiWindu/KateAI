@@ -116,6 +116,9 @@ Q_SIGNALS:
     void textDelta(const QString &delta);
     void thinkingDelta(const QString &delta);
     void planUpdated(const QJsonArray &plan);
+    // An ACP agent called the Kate-specific suggest client method. ChatWidget
+    // turns this into the same suggestion card the native tool produces.
+    void suggestionPosted(const KateAi::Suggestion &suggestion);
     void toolStarted(const PermissionRequest &request);
     void toolFinished(const ToolResult &result);
     void permissionNeeded(const PermissionRequest &request);
@@ -184,6 +187,8 @@ private:
 
     void handleFsRead(const QJsonValue &id, const QJsonObject &params);
     void handleFsWrite(const QJsonValue &id, const QJsonObject &params);
+    void handleWritePlanFile(const QJsonValue &id, const QJsonObject &params);
+    void handleSuggest(const QJsonValue &id, const QJsonObject &params);
     void handleQueryProjectGraph(const QJsonValue &id, const QJsonObject &params);
     void handleRequestPermission(const QJsonValue &id, const QJsonObject &params);
     void handleTerminalCreate(const QJsonValue &id, const QJsonObject &params);

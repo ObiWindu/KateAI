@@ -83,27 +83,30 @@ namespace KateAi
         return defaultDenyGlobs() + m_extraDenyGlobs;
     }
 
-    bool Sandbox::globMatch(const QString &pattern, const QString &path)
-    {
-        const QString haystack = QDir::fromNativeSeparators(path);
-        QRegularExpression re(globToRegex(pattern));
-        if (re.match(haystack).hasMatch()) {
+bool Sandbox::globMatch(const QString &pattern, const QString &path)
+{
+    const QString haystack = QDir::fromNativeSeparators(path);
+    QRegularExpression re(globToRegex(pattern));
+    if (re.match(haystack).hasMatch()) {
+        return true;
+    }
+    // Only match against filename if pattern is a simple filename pattern (no path separators)
+    // This prevents false positives like "**/.env" matching "/home/user/.env" when checking filename only
+    if (!pattern.contains(u'/') && !pattern.contains(u"**"_s)) {
+        const QString name = QFileInfo(haystack).fileName();
+        if (re.match(name).hasMatch()) {
             return true;
         }
-        // Only match against filename if pattern is a simple filename pattern (no path separators)
-        // This prevents false positives like "**/.env" matching "/home/user/.env" when checking filename only
-        if (!pattern.contains(u'/') && !pattern.contains(u"**"_s)) {
-            const QString name = QFileInfo(haystack).fileName();
-            if (re.match(name).hasMatch()) {
-                return true;
-            }
-        }
-        if (!pattern.startsWith(u'/') && !pattern.startsWith(u"**"_s)) {
-            QRegularExpression nested(globToRegex(u"**/"_s + pattern));
-            return nested.match(haystack).hasMatch();
-        }
-        return false;
     }
+    // Also check against relative path from workspace root
+    if (!pattern.startsWith(u'/') && !pattern.startsWith(u"**"_s)) {
+        QRegularExpression nested(globToRegex(u"**/"_s + pattern));
+        if (nested.match(haystack).hasMatch()) {
+            return true;
+        }
+    }
+    return false;
+}
 
     bool Sandbox::isDenied(const QString &path) const
     {
@@ -161,6 +164,14 @@ QString Sandbox::normalizePath(const QString &path, QString *error, bool forWrit
     QString canonical = fileInfo.canonicalFilePath();
     if (!canonical.isEmpty()) {
         absolute = canonical;
+        // Re-check workspace containment AFTER symlink resolution
+        const bool mustStayInWorkspace = m_profile == SandboxProfile::Strict || (m_profile != SandboxProfile::Off && forWrite);
+        if (mustStayInWorkspace && !pathInsideWorkspace(absolute)) {
+            if (error) {
+                *error = u"Path resolves outside the workspace: %1"_s.arg(absolute);
+            }
+            return {};
+        }
     } else if (!fileInfo.exists()) {
         // File doesn't exist yet - resolve parent directory
         QString parent = fileInfo.absolutePath();
@@ -168,17 +179,15 @@ QString Sandbox::normalizePath(const QString &path, QString *error, bool forWrit
         QString parentCanon = parentInfo.canonicalFilePath();
         if (!parentCanon.isEmpty()) {
             absolute = QDir::cleanPath(parentCanon + u'/' + fileInfo.fileName());
+            // Re-check workspace containment for new file path
+            const bool mustStayInWorkspace = m_profile == SandboxProfile::Strict || (m_profile != SandboxProfile::Off && forWrite);
+            if (mustStayInWorkspace && !pathInsideWorkspace(absolute)) {
+                if (error) {
+                    *error = u"Path resolves outside the workspace: %1"_s.arg(absolute);
+                }
+                return {};
+            }
         }
-    }
-
-    // After symlink resolution, re-verify the path is still inside workspace
-    // This mitigates TOCTOU where a symlink could be swapped to point outside.
-    const bool mustStayInWorkspace = m_profile == SandboxProfile::Strict || (m_profile != SandboxProfile::Off && forWrite);
-    if (mustStayInWorkspace && !pathInsideWorkspace(absolute)) {
-        if (error) {
-            *error = u"Path is outside the workspace: %1"_s.arg(absolute);
-        }
-        return {};
     }
 
     if (isDenied(absolute)) {
@@ -404,13 +413,52 @@ bool Sandbox::commandTouchesDeniedPath(const QString &command) const
     // working directory of every sandboxed command: "cat backup.pem" is a real
     // deny-glob hit. Over-blocking is the safe direction here — the agent has the
     // glob tool for pattern searches, and a blocked call reports why.
-    static const QRegularExpression separators(uR"([\s;&|<>()\$`"'])"_s);
-    const QStringList tokens = command.split(separators, Qt::SkipEmptyParts);
+    
+    // Parse command respecting quoted strings
+    QStringList tokens;
+    bool inSingleQuote = false;
+    bool inDoubleQuote = false;
+    QString currentToken;
+    
+    for (int i = 0; i < command.size(); ++i) {
+        QChar c = command.at(i);
+        
+        if (c == u'\'' && !inDoubleQuote) {
+            inSingleQuote = !inSingleQuote;
+            currentToken.append(c);
+        } else if (c == u'"' && !inSingleQuote) {
+            inDoubleQuote = !inDoubleQuote;
+            currentToken.append(c);
+        } else if ((c.isSpace() || c == u';' || c == u'|' || c == u'&' || c == u'<') && !inSingleQuote && !inDoubleQuote) {
+            if (!currentToken.isEmpty()) {
+                tokens.append(currentToken);
+                currentToken.clear();
+            }
+            if (c == u'|' && i + 1 < command.size() && command.at(i + 1) == u'|') {
+                tokens.append(QString(u"||"));
+                ++i;
+            } else if (c == u'&' && i + 1 < command.size() && command.at(i + 1) == u'&') {
+                tokens.append(QString(u"&&"));
+                ++i;
+            }
+        } else {
+            currentToken.append(c);
+        }
+    }
+    if (!currentToken.isEmpty()) {
+        tokens.append(currentToken);
+    }
+    
     for (const QString &token : tokens) {
         if (token.startsWith(u'-')) {
             continue; // a flag is not a path
         }
         QString candidate = token;
+        // Strip surrounding quotes
+        if ((candidate.startsWith(u'\'') && candidate.endsWith(u'\'')) ||
+            (candidate.startsWith(u'"') && candidate.endsWith(u'"'))) {
+            candidate = candidate.mid(1, candidate.size() - 2);
+        }
         if (candidate == u"~"_s) {
             candidate = QDir::homePath();
         } else if (candidate.startsWith(u"~/"_s)) {

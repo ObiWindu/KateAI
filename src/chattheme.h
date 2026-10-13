@@ -92,7 +92,8 @@ QString userCard();
 QString assistantCard();
 QString sectionLabel();
 QString scrollBar();
-QString toolHeader();    // solid head box on every tool card
+// Solid head box on every tool card, tinted with the tool's hue.
+QString toolHeader(const QString &toolName);
 QString intentApprovalRow();  // docked "needs approval" strip
 
 // Rich-text bodies. These go into QTextDocument::setDefaultStyleSheet(), so
@@ -110,6 +111,20 @@ QString planChecklist();  // structured plan steps
 QString toolLabel(const QString &toolName);
 // Colour for a tool's status dot, given how the call ended.
 QString toolAccent(const QString &toolName, bool running, bool ok);
+
+// --- Per-tool colour identity -------------------------------------------------
+// Every tool family carries its own hue, so a transcript full of cards can be
+// scanned by colour as well as by label: reads are cool, writes are green,
+// edits violet, commands warm. railColor is the saturated hue (card rail, icon,
+// tool-name prefix); the two surfaces are that hue blended down onto the tool
+// card surfaces so the tint never fights the text on top of it.
+QString toolColor(const QString &toolName);
+// The card body surface, tinted with the tool's hue.
+QString toolCardBg(const QString &toolName);
+// Stylesheet for the header row of a tool card, tinted by tool.
+QString toolHeader(const QString &toolName);
+// Blends a hex colour onto another at the given percentage (0-100).
+QString mixColors(const QString &hex, const QString &onto, int percent);
 
 } // namespace ChatTheme
 

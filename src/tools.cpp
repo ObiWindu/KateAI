@@ -13,6 +13,8 @@
 #include <QMap>
 #include <QProcess>
 #include <QRegularExpression>
+#include <QCryptographicHash>
+#include <QTimer>
 
 #include <algorithm>
 
@@ -175,11 +177,35 @@ QString shellCommandFor(const QString &toolName, const QJsonObject &args)
         const QString mode = args.value(u"mode"_s).toString();
         return u"[%1] %2"_s.arg(mode.isEmpty() ? QStringLiteral("code") : mode, args.value(u"description"_s).toString());
     }
+    if (toolName == u"write_plan_file"_s) {
+        return u"write plan file"_s;
+    }
+    if (toolName == u"suggest"_s) {
+        // The first line of the advice reads better in a card header than a
+        // bare tool name, so show that, capped.
+        const QString firstLine = args.value(u"suggestion"_s).toString().section(u'\n', 0, 0).trimmed();
+        return firstLine.isEmpty() ? u"suggest"_s : u"suggest %1"_s.arg(quoteShellArg(firstLine.left(80)));
+    }
+    if (toolName == u"question"_s) {
+        // The question is the whole point of the call, so it goes in the
+        // header verbatim (capped) rather than being summarised as "question".
+        const QString asked = args.value(u"question"_s).toString().section(u'\n', 0, 0).trimmed();
+        return asked.isEmpty() ? u"question"_s : u"question %1"_s.arg(quoteShellArg(asked.left(120)));
+    }
     if (toolName.startsWith(u"mcp__"_s)) {
         // MCP tools carry their own argument shapes, so show them verbatim.
         return QString::fromUtf8(QJsonDocument(args).toJson(QJsonDocument::Compact));
     }
     return toolName;
+}
+
+QString planFilePath(const QString &workspaceRoot)
+{
+    // A digest rather than the raw path: the temp name must be stable across
+    // runs, must not leak the user's directory layout, and must be a legal
+    // filename on every platform. qHash is not stable enough to build on.
+    const QByteArray digest = QCryptographicHash::hash(workspaceRoot.toUtf8(), QCryptographicHash::Sha1).toHex();
+    return QDir::tempPath() + u"/kateai-plan-"_s + QString::fromUtf8(digest.left(12)) + u".md"_s;
 }
 
 static bool isNoisySearchPath(const QString &relativePath)
@@ -271,6 +297,7 @@ PermissionRequest ToolRunner::describe(const ToolCall &call) const
 
     if (call.name == u"write_file"_s) {
         req.risk = ToolRisk::Write;
+        req.mutatesFiles = true;
         QString existing;
         QString error;
         const QString resolved = m_sandbox.resolve(req.path, &error, true);
@@ -281,12 +308,14 @@ PermissionRequest ToolRunner::describe(const ToolCall &call) const
         req.details = req.describeDiff;
     } else if (call.name == u"edit_file"_s) {
         req.risk = ToolRisk::Write;
+        req.mutatesFiles = true;
         const QString oldString = args.value(u"old_string"_s).toString();
         const QString newString = args.value(u"new_string"_s).toString();
         req.describeDiff = unifiedDiff(req.path, oldString, newString);
         req.details = u"Replace:\n%1\n\nWith:\n%2"_s.arg(oldString, newString);
     } else if (call.name == u"multi_edit_file"_s || call.name == u"multi_replace_file_content"_s) {
         req.risk = ToolRisk::Write;
+        req.mutatesFiles = true;
         if (req.path.isEmpty()) {
             req.path = args.value(u"TargetFile"_s).toString();
         }
@@ -321,6 +350,24 @@ PermissionRequest ToolRunner::describe(const ToolCall &call) const
     } else if (call.name == u"bash"_s) {
         req.risk = ToolRisk::Execute;
         req.details = args.value(u"command"_s).toString();
+    } else if (call.name == u"write_plan_file"_s) {
+        // Read risk on purpose: the plan file is a Kate-chosen temp file, not a
+        // workspace mutation, so it never prompts and never enters the tracker.
+        req.risk = ToolRisk::Read;
+        req.details = args.value(u"content"_s).toString();
+    } else if (call.name == u"question"_s) {
+        // Read risk for the same reason: asking the user something neither
+        // reads the workspace nor changes it.
+        req.risk = ToolRisk::Read;
+        req.questionText = args.value(u"question"_s).toString();
+        for (const QJsonValue &value : args.value(u"options"_s).toArray()) {
+            const QString option = value.toString().trimmed();
+            if (!option.isEmpty()) {
+                req.questionOptions.append(option);
+            }
+        }
+        req.allowFreeform = jsonBool(args.value(u"allow_freeform"_s), true);
+        req.details = QString::fromUtf8(QJsonDocument(args).toJson(QJsonDocument::Compact));
     } else {
         req.risk = ToolRisk::Read;
         req.details = QString::fromUtf8(QJsonDocument(args).toJson(QJsonDocument::Compact));
@@ -370,6 +417,15 @@ ToolResult ToolRunner::run(const ToolCall &call)
     }
     if (call.name == u"goal_report"_s) {
         return goalReport(args);
+    }
+    if (call.name == u"write_plan_file"_s) {
+        return writePlanFile(args);
+    }
+    if (call.name == u"suggest"_s) {
+        return suggest(args);
+    }
+    if (call.name == u"question"_s) {
+        return question(args);
     }
 
     result.ok = false;
@@ -610,10 +666,12 @@ ToolResult ToolRunner::multiEditFile(const QJsonObject &args)
         return result;
     }
 
-    QString workingContents = contents;
-    int totalReplacements = 0;
+    // Validate all edits before applying any (atomicity)
+    QStringList allOldStrings;
+    QStringList allNewStrings;
+    QList<bool> allReplaceAll;
+    
     const int numChunks = edits.size();
-
     for (int i = 0; i < numChunks; ++i) {
         const QJsonObject chunk = edits.at(i).toObject();
         QString oldStr = chunk.value(u"old_string"_s).toString();
@@ -646,13 +704,13 @@ ToolResult ToolRunner::multiEditFile(const QJsonObject &args)
             return result;
         }
 
-        const int count = workingContents.count(oldStr);
+        const int count = contents.count(oldStr);
         if (count == 0) {
             result.ok = false;
             QString hint;
             const QString needle = oldStr.section(u'\n', 0, 0).trimmed();
             if (!needle.isEmpty()) {
-                const QStringList lines = workingContents.split(u'\n');
+                const QStringList lines = contents.split(u'\n');
                 QStringList nearby;
                 for (int l = 0; l < lines.size() && nearby.size() < 5; ++l) {
                     if (lines.at(l).contains(needle)) {
@@ -671,6 +729,34 @@ ToolResult ToolRunner::multiEditFile(const QJsonObject &args)
         if (count > 1 && !replaceAll) {
             result.ok = false;
             result.output = u"Chunk %1 of %2: old_string matched %3 times; it must be unique, or set replace_all=true. No edits were applied."_s
+                .arg(i + 1).arg(numChunks).arg(count);
+            return result;
+        }
+
+        allOldStrings.append(oldStr);
+        allNewStrings.append(newStr);
+        allReplaceAll.append(replaceAll);
+    }
+
+    // Apply all edits atomically
+    QString workingContents = contents;
+    int totalReplacements = 0;
+    for (int i = 0; i < numChunks; ++i) {
+        const QString &oldStr = allOldStrings[i];
+        const QString &newStr = allNewStrings[i];
+        const bool replaceAll = allReplaceAll[i];
+        
+        const int count = workingContents.count(oldStr);
+        if (count == 0) {
+            // This shouldn't happen since we validated, but check anyway
+            result.ok = false;
+            result.output = u"Chunk %1 of %2: old_string no longer matches after previous edits. No edits were applied."_s
+                .arg(i + 1).arg(numChunks);
+            return result;
+        }
+        if (count > 1 && !replaceAll) {
+            result.ok = false;
+            result.output = u"Chunk %1 of %2: old_string matched %3 times after previous edits; it must be unique, or set replace_all=true. No edits were applied."_s
                 .arg(i + 1).arg(numChunks).arg(count);
             return result;
         }
@@ -873,25 +959,58 @@ ToolResult ToolRunner::glob(const QJsonObject &args) const
     return result;
 }
 
-ToolResult ToolRunner::bash(const QJsonObject &args)
+bool ToolRunner::startBashProcess(const QJsonObject &args, QString *program, QStringList *programArgs, QString *error) const
 {
-    // Initialize the result structure to track success/failure
-    ToolResult result;
-    result.name = u"bash"_s;
-
     // Extract the command to execute from the tool arguments
     const QString command = args.value(u"command"_s).toString();
 
     // Wrap the command with sandbox security restrictions
-    QString error;
-    const QStringList wrapped = m_sandbox.wrapCommand(command, &error);
+    const QStringList wrapped = m_sandbox.wrapCommand(command, error);
     if (wrapped.isEmpty()) {
-        result.ok = false;
-        result.output = error;
-        return result;
+        return false;
     }
+    *program = wrapped.first();
+    *programArgs = wrapped.mid(1);
+    return true;
+}
+
+ToolResult ToolRunner::finishBashOutput(const QString &output, int exitCode, bool normalExit) const
+{
+    ToolResult result;
+    result.name = u"bash"_s;
+    result.ok = normalExit && exitCode == 0;
+    // Format the output with appropriate truncation and exit code information
+    result.output = clip(output.isEmpty() ? u"(no output, exit %1)"_s.arg(exitCode) : output);
+    if (!result.ok) {
+        result.output += u"\nexit code %1"_s.arg(exitCode);
+    }
+    return result;
+}
+
+ToolResult ToolRunner::finishBash(QProcess &process) const
+{
+    // The synchronous path never streams, so everything the command wrote is
+    // still waiting in the pipe.
+    return finishBashOutput(QString::fromUtf8(process.readAll()), process.exitCode(),
+                            process.exitStatus() == QProcess::NormalExit);
+}
+
+ToolResult ToolRunner::bash(const QJsonObject &args)
+{
+    // Initialize the result structure to track success/failure
 
     // Create and configure the process for command execution
+    QString program;
+    QStringList programArgs;
+    QString error;
+    if (!startBashProcess(args, &program, &programArgs, &error)) {
+        ToolResult failed;
+        failed.name = u"bash"_s;
+        failed.ok = false;
+        failed.output = error;
+        return failed;
+    }
+
     QProcess process;
     process.setWorkingDirectory(m_sandbox.workspaceRoot());
     process.setProcessChannelMode(QProcess::MergedChannels);
@@ -905,14 +1024,15 @@ ToolResult ToolRunner::bash(const QJsonObject &args)
 #endif
 
     // Start the process with the wrapped command
-    const QString program = wrapped.first();
-    process.start(program, wrapped.mid(1));
+    process.start(program, programArgs);
 
     // Check if the process started successfully
     if (!process.waitForStarted(5000)) {
-        result.ok = false;
-        result.output = u"Failed to start command: %1"_s.arg(process.errorString());
-        return result;
+        ToolResult failed;
+        failed.name = u"bash"_s;
+        failed.ok = false;
+        failed.output = u"Failed to start command: %1"_s.arg(process.errorString());
+        return failed;
     }
 
     // Wait for the process to complete with a timeout
@@ -922,27 +1042,130 @@ ToolResult ToolRunner::bash(const QJsonObject &args)
         // The child leads its own session, so the negative pid reaches the whole
         // tree. If setsid() failed there is no such group and this is a no-op,
         // leaving the plain kill() below to reap the shell itself.
-        ::kill(-static_cast<pid_t>(process.processId()), SIGKILL);
+        if (process.processId() > 0) {
+            ::kill(-static_cast<pid_t>(process.processId()), SIGKILL);
+        }
 #endif
         process.kill();
         process.waitForFinished(2000);
-        result.ok = false;
-        result.output = u"Command timed out after %1 ms."_s.arg(m_timeoutMs);
-        return result;
+        ToolResult failed;
+        failed.name = u"bash"_s;
+        failed.ok = false;
+        failed.output = u"Command timed out after %1 ms."_s.arg(m_timeoutMs);
+        return failed;
     }
 
-    // Capture the command output
-    const QString output = QString::fromUtf8(process.readAll());
+    return finishBash(process);
+}
 
-    // Determine if the command executed successfully
-    result.ok = process.exitStatus() == QProcess::NormalExit && process.exitCode() == 0;
-
-    // Format the output with appropriate truncation and exit code information
-    result.output = clip(output.isEmpty() ? u"(no output, exit %1)"_s.arg(process.exitCode()) : output);
-    if (!result.ok) {
-        result.output += u"\nexit code %1"_s.arg(process.exitCode());
+void ToolRunner::runBashAsync(const ToolCall &call)
+{
+    const QString callId = call.id;
+    QString program;
+    QStringList programArgs;
+    QString error;
+    if (!startBashProcess(call.arguments, &program, &programArgs, &error)) {
+        ToolResult failed;
+        failed.toolCallId = callId;
+        failed.name = u"bash"_s;
+        failed.ok = false;
+        failed.output = error;
+        Q_EMIT bashFinished(failed);
+        return;
     }
-    return result;
+
+    auto *process = new QProcess(this);
+    process->setWorkingDirectory(m_sandbox.workspaceRoot());
+    process->setProcessChannelMode(QProcess::MergedChannels);
+#ifdef Q_OS_UNIX
+    // Same session trick as the synchronous path: a timeout must be able to
+    // reap the command and anything it started, not just the shell.
+    process->setChildProcessModifier([]() {
+        ::setsid();
+    });
+#endif
+    m_bashProcesses.insert(callId, process);
+
+    // Reads whatever has arrived since the last visit and returns it, so both
+    // the progress and the timeout path drain the pipe exactly once.
+    auto drain = [this, callId]() -> QString {
+        auto *process = m_bashProcesses.value(callId);
+        if (!process) {
+            return {};
+        }
+        const QString chunk = QString::fromUtf8(process->readAll());
+        if (chunk.isEmpty()) {
+            return {};
+        }
+        m_bashAccumulated[callId] += chunk;
+        return m_bashAccumulated.value(callId);
+    };
+
+    connect(process, &QProcess::readyReadStandardOutput, this, [this, callId, drain] {
+        const QString soFar = drain();
+        if (!soFar.isEmpty()) {
+            Q_EMIT bashProgress(callId, soFar);
+        }
+    });
+
+    // Same timeout the synchronous path honours, on a timer rather than a
+    // blocking wait, so the UI thread stays free to render the stream.
+    QTimer *timeout = new QTimer(process);
+    timeout->setSingleShot(true);
+    timeout->setInterval(qMax(1000, m_timeoutMs));
+    connect(timeout, &QTimer::timeout, this, [this, callId, timeout, drain] {
+        timeout->deleteLater();
+        auto *process = m_bashProcesses.value(callId);
+        if (!process) {
+            return;
+        }
+        const QString soFar = drain();
+        if (!soFar.isEmpty()) {
+            Q_EMIT bashProgress(callId, soFar);
+        }
+#ifdef Q_OS_UNIX
+        if (process->processId() > 0) {
+            ::kill(-static_cast<pid_t>(process->processId()), SIGKILL);
+        }
+#endif
+        process->kill();
+    });
+
+    connect(process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this, [this, callId, drain](int, QProcess::ExitStatus) {
+        auto *process = m_bashProcesses.take(callId);
+        if (!process) {
+            return;
+        }
+        const QString soFar = drain();
+        if (!soFar.isEmpty()) {
+            // A final progress emission, so the live text in the card is exactly
+            // what the finished result reports.
+            Q_EMIT bashProgress(callId, soFar);
+        }
+        ToolResult result = finishBashOutput(m_bashAccumulated.take(callId), process->exitCode(),
+                                             process->exitStatus() == QProcess::NormalExit);
+        result.toolCallId = callId;
+        process->deleteLater();
+        Q_EMIT bashFinished(result);
+    });
+
+    process->start(program, programArgs);
+    timeout->start();
+}
+
+void ToolRunner::cancelBash(const QString &toolCallId)
+{
+    auto *process = m_bashProcesses.take(toolCallId);
+    if (!process) {
+        return;
+    }
+#ifdef Q_OS_UNIX
+    if (process->processId() > 0) {
+        ::kill(-static_cast<pid_t>(process->processId()), SIGKILL);
+    }
+#endif
+    process->kill();
+    process->deleteLater();
 }
 
 ToolResult ToolRunner::queryProjectGraph(const QJsonObject &args) const
@@ -1100,6 +1323,91 @@ ToolResult ToolRunner::goalReport(const QJsonObject &args)
 
     result.ok = true;
     result.output = u"Goal reported as %1: %2"_s.arg(status, reason);
+    return result;
+}
+
+ToolResult ToolRunner::question(const QJsonObject &args)
+{
+    Q_UNUSED(args)
+    ToolResult result;
+    result.name = u"question"_s;
+    result.ok = false;
+    result.output = u"The question tool needs an interactive user to answer it. "
+                    u"Choose your next action from what you already know, or explain what you need and stop."_s;
+    return result;
+}
+
+ToolResult ToolRunner::suggest(const QJsonObject &args)
+{
+    ToolResult result;
+    result.name = u"suggest"_s;
+
+    const QString text = args.value(u"suggestion"_s).toString().trimmed();
+    if (text.isEmpty()) {
+        result.ok = false;
+        result.output = u"suggestion must not be empty: describe what you are suggesting."_s;
+        return result;
+    }
+
+    // The anchor is optional: advice without a place to look is still valid.
+    // It is carried through as given rather than resolved, because a
+    // suggestion may point at a file the work has not created yet.
+    const QString path = args.value(u"path"_s).toString().trimmed();
+    int line = 0;
+    const QJsonValue lineValue = args.value(u"line"_s);
+    if (lineValue.isDouble()) {
+        line = lineValue.toInt();
+        if (line < 1) {
+            result.ok = false;
+            result.output = u"line must be a 1-based line number, or leave it out."_s;
+            return result;
+        }
+    } else if (!lineValue.isUndefined() && !lineValue.isNull()) {
+        result.ok = false;
+        result.output = u"line must be a 1-based line number, or leave it out."_s;
+        return result;
+    }
+
+    // Nothing is executed here: the card the user sees is built from the tool
+    // call itself, and this confirmation is what goes back to the model.
+    result.ok = true;
+    result.output = u"Suggestion posted for the user to accept or dismiss."_s;
+    return result;
+}
+
+ToolResult ToolRunner::writePlanFile(const QJsonObject &args)
+{
+    ToolResult result;
+    result.name = u"write_plan_file"_s;
+
+    const QString content = args.value(u"content"_s).toString();
+    if (content.trimmed().isEmpty()) {
+        result.ok = false;
+        result.output = u"content must not be empty: pass the full plan as markdown."_s;
+        return result;
+    }
+    if (!m_bridge) {
+        result.ok = false;
+        result.output = u"No document bridge is available."_s;
+        return result;
+    }
+
+    // Kate owns the destination, so the sandbox is deliberately not consulted:
+    // a read-only or strict profile must not stop the agent from writing down
+    // its plan, and the model never chooses the path.
+    const QString path = planFilePath(m_sandbox.workspaceRoot());
+    QString error;
+    if (!m_bridge->writeDocument(path, content, &error)) {
+        result.ok = false;
+        result.output = error.isEmpty() ? u"Could not write the plan file."_s : error;
+        return result;
+    }
+
+    result.ok = true;
+    result.output = u"Plan written to %1 (%2 bytes). The user can open that file to follow the implementation; "
+                      "later calls overwrite it, so keep it current as the work moves."_s
+                      .arg(path)
+                      .arg(content.toUtf8().size());
     return result;
 }
 

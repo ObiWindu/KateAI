@@ -24,6 +24,7 @@
 #include <QLayout>
 #include <QMenu>
 #include <QPushButton>
+#include <QUrl>
 #include <QVBoxLayout>
 
 using namespace Qt::Literals::StringLiterals;
@@ -104,6 +105,7 @@ namespace KateAi
         if (m_chat) {
             connect(m_chat, &ChatWidget::settingsChanged, plugin, &KateAiPlugin::setSettings);
             connect(m_chat, &ChatWidget::configureRequested, this, &KateAiView::showConfiguration);
+            connect(m_chat, &ChatWidget::openFileAtLineRequested, this, &KateAiView::openFileAtLine);
             connect(m_chat, &ChatWidget::aboutToSubmit, this, [this]() {
                 refreshWorkspace();
             });
@@ -195,6 +197,22 @@ namespace KateAi
 
         if (m_mainWindow && m_mainWindow->guiFactory()) {
             m_mainWindow->guiFactory()->removeClient(this);
+        }
+    }
+
+    void KateAiView::openFileAtLine(const QString &path, int line)
+    {
+        if (!m_mainWindow || path.isEmpty()) {
+            return;
+        }
+        // openUrl reuses the view already showing the document and opens a new
+        // one otherwise, which is what "show me" should mean either way.
+        m_mainWindow->openUrl(QUrl::fromLocalFile(path));
+        KTextEditor::View *view = m_mainWindow->activeView();
+        if (view && line > 0) {
+            // Cursors are 0-based; the suggestion line is 1-based.
+            view->setCursorPosition(KTextEditor::Cursor(qMax(0, line - 1), 0));
+            view->setFocus();
         }
     }
 

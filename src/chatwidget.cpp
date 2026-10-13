@@ -15,6 +15,8 @@
 #include "settings.h"
 #include "toolcallwidget.h"
 #include "subtaskwidget.h"
+#include "suggestionwidget.h"
+#include "questionwidget.h"
 #include "edittracker.h"
 #include "tools.h"
 #include "transcriptlayout.h"
@@ -115,9 +117,13 @@ QString workingLabelForTool(const QString &toolName)
     if (toolName == u"bash"_s) {
         return i18n("Running");
     }
+
+    if (toolName == u"question"_s) {
+        return i18n("Waiting for your answer");
+    }
+
     return i18n("Working");
 }
-
 } // namespace
 
 namespace KateAi
@@ -439,6 +445,28 @@ ChatWidget::ChatWidget(QWidget *parent)
     m_tokenCount->hide();
     bottomRow->addWidget(m_tokenCount);
 
+    // Reset context. A full window is the only state this exists for, so it
+    // stays hidden until the readout says the window is nearly spent: an
+    // affordance that is always there invites a reset nobody needed.
+    m_resetContext = new QPushButton(i18n("Reset ctx"), composerCard);
+    m_resetContext->setCursor(Qt::PointingHandCursor);
+    m_resetContext->setToolTip(i18n("Fold the conversation so far into a summary and start the context fresh. "
+                                    "Your requests, the files touched and where the work got to are kept; the full "
+                                    "history stays visible in the transcript."));
+    m_resetContext->setStyleSheet(
+        QStringLiteral(
+            "QPushButton { background-color: %1; color: %2; border: 1px solid %3;"
+            " border-radius: 10px; padding: 2px 9px; font-size: 11px; font-weight: 600; }"
+            "QPushButton:hover { background-color: %4; color: #ffffff; }")
+            .arg(ChatTheme::cardBg(), ChatTheme::warning(), ChatTheme::warning(), ChatTheme::warning()));
+    m_resetContext->hide();
+    bottomRow->addWidget(m_resetContext);
+    connect(m_resetContext, &QPushButton::clicked, this, [this] {
+        if (!m_agent.compactContext()) {
+            showInfoMessage(i18n("Nothing to reset: the context is already small."), false);
+        }
+    });
+
     // Thinking mode toggle button
     m_thinking->setParent(composerCard);
     m_thinking->setVisible(true);
@@ -612,6 +640,13 @@ ChatWidget::ChatWidget(QWidget *parent)
     });
     connect(&m_agent, &AgentLoop::activityUpdated, this, &ChatWidget::addActivityMessage);
 
+    // An ACP agent suggested something through Kate's client method. There is no
+    // tool call to key the card on, so the id is generated here; the card is
+    // identical to the one the native suggest tool produces.
+    connect(&m_agent, &AgentLoop::suggestionPosted, this, [this](const Suggestion &suggestion) {
+        addSuggestionCard(QUuid::createUuid().toString(QUuid::WithoutBraces), suggestion);
+    });
+
     // Tool visibility signals (Zed-style inline tool-call cards)
     connect(&m_agent, &AgentLoop::toolStarted, this, [this](const PermissionRequest &request) {
         freezeStreaming();
@@ -638,6 +673,25 @@ ChatWidget::ChatWidget(QWidget *parent)
             return;
         }
 
+        // A suggestion is advice, not work, so it must not get the generic tool
+        // card: that would render its arguments as a JSON blob. The arguments
+        // are stashed here, where they are still carried on the request, and
+        // the card is built once the tool has reported its result -- by which
+        // point a failure is known and a suggestion that never arrived must not
+        // be offered for acceptance.
+        if (request.toolName == u"suggest"_s) {
+            Suggestion suggestion;
+            const QJsonDocument argsDoc = QJsonDocument::fromJson(request.details.toUtf8());
+            if (!argsDoc.isNull() && argsDoc.isObject()) {
+                const QJsonObject args = argsDoc.object();
+                suggestion.text = args.value(u"suggestion"_s).toString();
+                suggestion.path = args.value(u"path"_s).toString();
+                suggestion.line = args.value(u"line"_s).toInt();
+            }
+            m_pendingSuggestions.insert(request.toolCallId, suggestion);
+            return;
+        }
+
         ToolCallWidget *toolWidget = m_toolCallWidgets.value(request.toolCallId);
         if (!toolWidget) {
             toolWidget = new ToolCallWidget(request.toolCallId, m_transcriptContainer);
@@ -660,11 +714,21 @@ ChatWidget::ChatWidget(QWidget *parent)
         toolWidget->setRunning();
         applyTranscriptCollapse();
 
-        // Track write/edit tool calls for edit tracking in AcceptEdits mode.
-        // The pre-edit snapshot has to be taken here, at toolStarted, because
-        // that is the last moment before the tool runs: by toolFinished the file
-        // on disk already holds the new content.
-        if (isFileMutatingTool(request.toolName) && m_settings.permissionMode == PermissionMode::AcceptEdits) {
+        // Track write/edit tool calls for edit tracking. The pre-edit snapshot
+        // has to be taken here, at toolStarted, because that is the last moment
+        // before the tool runs: by toolFinished the file on disk already holds
+        // the new content.
+        //
+        // Native turns are tracked in AcceptEdits mode, where per-call approval
+        // was traded for a review queue. ACP turns are tracked in every mode:
+        // the agent runs as its own process and its tool calls are only gated
+        // when it chooses to ask, so without this an agent that never calls
+        // session/request_permission edits the workspace with no review
+        // surface at all. ACP tool names vary per agent, so that half is
+        // recognised by the mutatesFiles flag rather than by name.
+        const bool editTracking = m_settings.permissionMode == PermissionMode::AcceptEdits
+            || usesAcpNative(m_settings);
+        if (editTracking && (isFileMutatingTool(request.toolName) || request.mutatesFiles)) {
             PendingEdit pending;
             pending.toolName = request.toolName;
             pending.path = request.path;
@@ -680,6 +744,16 @@ ChatWidget::ChatWidget(QWidget *parent)
     });
 
     connect(&m_agent, &AgentLoop::toolFinished, this, [this](const ToolResult &result) {
+        // Build the suggestion card now that the tool has reported: a failure
+        // becomes an error card instead of advice the user could act on.
+        if (m_pendingSuggestions.contains(result.toolCallId)) {
+            const Suggestion suggestion = m_pendingSuggestions.take(result.toolCallId);
+            if (result.ok) {
+                addSuggestionCard(result.toolCallId, suggestion);
+            } else {
+                addSuggestionErrorCard(result.toolCallId, result.output);
+            }
+        }
         if (auto *subtaskWidget = m_subtaskWidgets.value(result.toolCallId)) {
             subtaskWidget->finishAgent(result);
             // Done: the card no longer needs the user's attention, so hand it
@@ -697,11 +771,12 @@ ChatWidget::ChatWidget(QWidget *parent)
         ++m_completedToolCount;
         m_turnStatus->setCompletedToolCount(m_completedToolCount);
 
-        // Handle edit tracking for AcceptEdits mode. A tool that did not succeed
-        // must not enter the queue: there is nothing to keep or revert, and
-        // showing a "pending" row for a failed write invited the user to approve
-        // a change that never landed.
-        if (m_settings.permissionMode == PermissionMode::AcceptEdits) {
+        // Handle edit tracking for AcceptEdits mode, and for every mode while
+        // an ACP agent drives the turn. A tool that did not succeed must not
+        // enter the queue: there is nothing to keep or revert, and showing a
+        // "pending" row for a failed write invited the user to approve a
+        // change that never landed.
+        if (m_settings.permissionMode == PermissionMode::AcceptEdits || usesAcpNative(m_settings)) {
             auto it = m_pendingToolCalls.find(result.toolCallId);
             if (it != m_pendingToolCalls.end()) {
                 const PendingEdit pending = it.value();
@@ -790,6 +865,46 @@ ChatWidget::ChatWidget(QWidget *parent)
         Q_UNUSED(status)
     });
 
+    // The question tool stops the turn until the user answers, so its card goes
+    // straight into the intent dock: an answer typed into a card that scrolled
+    // out of sight is an answer nobody gives.
+    connect(&m_agent, &AgentLoop::questionAsked, this, [this](const PermissionRequest &request) {
+        showQuestionCard(request);
+    });
+
+    // Live tool output. Every chunk is forwarded to the card, so a long command
+    // reads as it runs; a chatty one is coalesced onto a timer, because
+    // re-rendering the whole accumulated text on every chunk is quadratic in
+    // output size and the final result replaces the stream anyway.
+    connect(&m_agent, &AgentLoop::toolProgress, this, [this](const QString &toolCallId, const QString &partial) {
+        m_pendingProgress.insert(toolCallId, partial);
+        if (!m_progressTimer) {
+            m_progressTimer = new QTimer(this);
+            m_progressTimer->setSingleShot(true);
+            m_progressTimer->setInterval(200);
+            connect(m_progressTimer, &QTimer::timeout, this, [this] {
+                const QHash<QString, QString> pending = m_pendingProgress;
+                m_pendingProgress.clear();
+                for (auto it = pending.cbegin(); it != pending.cend(); ++it) {
+                    if (auto *widget = m_toolCallWidgets.value(it.key())) {
+                        widget->setPartialOutput(it.value());
+                    }
+                }
+                scrollToBottom();
+            });
+        }
+        m_progressTimer->start();
+    });
+
+    connect(&m_agent, &AgentLoop::contextCompacted, this, [this](int before, int after) {
+        updateTokenDisplay();
+        // The transcript is left alone: it is the user's record of the thread.
+        // Only what the next request is built from has been reclaimed.
+        showInfoMessage(i18n("Context reset: about %1 of %2 tokens reclaimed. Earlier turns are now carried as a summary.",
+                             before - after, before),
+                        false);
+    });
+
     connect(&m_agent, &AgentLoop::failed, this, [this](const QString &error) {
         freezeStreaming();
         if (!m_acpModelsLoading.isEmpty()) {
@@ -821,6 +936,9 @@ ChatWidget::ChatWidget(QWidget *parent)
         m_prompt->setFocus();
         setThinkingIndicator(false);
         setWorkingIndicator(false);
+        // A turn that ended with a question still on screen (abort, budget stop)
+        // must not leave it docked: nothing can answer it now.
+        clearQuestionCards();
         // Refresh the context readout at the end of a turn: during one it would
         // recompute an estimate over a history that is still growing, and the
         // number the user acts on is the one for the next request.
@@ -2389,12 +2507,20 @@ void ChatWidget::updateTokenDisplay()
     if (window <= 0) {
         m_tokenCount->setText(QString());
         m_tokenCount->hide();
+        if (m_resetContext) {
+            m_resetContext->hide();
+        }
         return;
     }
 
     const int percent = qBound(0, (tokens * 100) / window, 100);
     m_tokenCount->setText(i18n("%1% ctx", percent));
     m_tokenCount->setToolTip(i18n("Context: about %1 of %2 tokens used (%3%). Older turns compact automatically so prompting continues.", tokens, window, percent));
+    // The reset affordance appears as the window runs out, which is the only
+    // moment it is useful: the chip stays a readout the rest of the time.
+    if (m_resetContext) {
+        m_resetContext->setVisible(percent >= 95);
+    }
     QString colour = ChatTheme::success();
     QString bg = QStringLiteral("rgba(78, 201, 160, 0.16)");
     if (percent >= 90) {
@@ -3824,6 +3950,113 @@ void ChatWidget::updateTeamButton()
             : ChatTheme::iconButton());
 }
 
+void ChatWidget::addSuggestionCard(const QString &id, const Suggestion &suggestion)
+{
+    if (m_suggestionWidgets.contains(id)) {
+        return;
+    }
+    auto *card = new SuggestionWidget(id, m_transcriptContainer);
+    card->setSuggestion(suggestion.text, suggestion.path, suggestion.line);
+    connect(card, &SuggestionWidget::accepted, this, [this](const QString &, const QString &path, int line) {
+        // Accept means "show me": jump to the anchored line when there is one.
+        // The card itself records the decision, so there is nothing to do here
+        // besides taking the user there.
+        if (!path.isEmpty()) {
+            Q_EMIT openFileAtLineRequested(path, line);
+        }
+    });
+    connect(card, &SuggestionWidget::dismissed, this, [this](const QString &cardId) {
+        removeSuggestionCard(cardId);
+    });
+    m_suggestionWidgets.insert(id, card);
+    m_suggestionOrder.append(card);
+    appendTranscriptWidget(card);
+    applyTranscriptCollapse();
+    scrollToBottom();
+}
+
+void ChatWidget::addSuggestionErrorCard(const QString &id, const QString &message)
+{
+    if (m_suggestionWidgets.contains(id)) {
+        return;
+    }
+    auto *card = new SuggestionWidget(id, m_transcriptContainer);
+    card->setError(message);
+    m_suggestionWidgets.insert(id, card);
+    m_suggestionOrder.append(card);
+    appendTranscriptWidget(card);
+    applyTranscriptCollapse();
+    scrollToBottom();
+}
+
+void ChatWidget::removeSuggestionCard(const QString &id)
+{
+    auto *card = m_suggestionWidgets.take(id);
+    if (!card) {
+        return;
+    }
+    m_suggestionOrder.removeAll(card);
+    if (m_transcriptLayout) {
+        m_transcriptLayout->removeWidget(card);
+    }
+    card->deleteLater();
+    applyTranscriptCollapse();
+}
+
+void ChatWidget::clearSuggestionCards()
+{
+    // The generic transcript teardown deletes the widgets, but the hashes would
+    // keep pointing at freed cards unless they are emptied here.
+    const QList<SuggestionWidget *> cards = m_suggestionWidgets.values();
+    for (auto *card : cards) {
+        m_suggestionOrder.removeAll(card);
+        if (m_transcriptLayout) {
+            m_transcriptLayout->removeWidget(card);
+        }
+        card->deleteLater();
+    }
+    m_suggestionWidgets.clear();
+    m_suggestionOrder.clear();
+}
+
+void ChatWidget::showQuestionCard(const PermissionRequest &request)
+{
+    if (m_questionWidgets.contains(request.toolCallId)) {
+        return;
+    }
+    auto *card = new QuestionWidget(request.toolCallId, m_intentDock);
+    card->setQuestion(request.questionText, request.questionOptions, request.allowFreeform);
+    connect(card, &QuestionWidget::answered, this, [this, card](const QString &, const QString &answer) {
+        // The agent resumes from the answer: the tool result *is* the user's
+        // words, so there is nothing else to hand back.
+        m_agent.answerQuestion(answer);
+        retireIntentWidget(card);
+        updateSendButtonState();
+        m_prompt->setFocus();
+    });
+    m_questionWidgets.insert(request.toolCallId, card);
+    m_questionOrder.append(card);
+    addIntentWidget(card);
+    m_turnStatus->setActivity(i18n("Waiting for your answer"));
+    setWorkingIndicator(false);
+    scrollToBottom();
+}
+
+void ChatWidget::clearQuestionCards()
+{
+    // Called when a turn ends: a question that was never answered must not sit
+    // in the dock offering buttons that can no longer resume anything.
+    for (auto *card : std::as_const(m_questionWidgets)) {
+        m_questionOrder.removeAll(card);
+        if (m_intentDockLayout) {
+            m_intentDockLayout->removeWidget(card);
+        }
+        card->deleteLater();
+    }
+    m_questionWidgets.clear();
+    m_questionOrder.clear();
+}
+
 void ChatWidget::markRunningSubtasksAbandoned()
 {
     // A turn can end with sub-agents still in flight (abort, budget stop).
@@ -4233,6 +4466,10 @@ void ChatWidget::clearTranscriptContents()
     if (m_streamHeightTimer) {
         m_streamHeightTimer->stop();
     }
+    if (m_progressTimer) {
+        m_progressTimer->stop();
+    }
+    m_pendingProgress.clear();
     if (m_streamRenderTimer) {
         m_streamRenderTimer->stop();
     }
@@ -4249,6 +4486,13 @@ void ChatWidget::clearTranscriptContents()
     }
     m_subtaskWidgets.clear();
     m_subtaskOrder.clear();
+    // Suggestion cards are transcript widgets too; without this the hashes
+    // would dangle once the generic teardown below deletes them.
+    clearSuggestionCards();
+    m_pendingSuggestions.clear();
+    // Question cards live in the intent dock while they wait for an answer, so
+    // they have to be dropped explicitly rather than by the transcript sweep.
+    clearQuestionCards();
     // Detach any approval rows still docked; they belong to the cards deleted
     // above and must not be left parented to the dock.
     clearIntentDock();
@@ -4466,6 +4710,33 @@ void ChatWidget::rebuildTranscript()
                             m_subtaskWidgets.insert(toolCallId, subtaskWidget);
                             m_subtaskOrder.append(subtaskWidget);
                             addIntentWidget(subtaskWidget);
+                            rebuiltToolWidgets.insert(toolCallId, nullptr);
+                            continue;
+                        }
+
+                        // A restored suggestion keeps its card, but as a record:
+                        // the turn is over, so offering Accept again would ask
+                        // for a decision about work that has already moved on.
+                        if (toolName == u"suggest"_s) {
+                            QJsonObject restoredArgs;
+                            const QJsonDocument restoredDoc = QJsonDocument::fromJson(argumentsJson.toUtf8());
+                            if (!restoredDoc.isNull() && restoredDoc.isObject()) {
+                                restoredArgs = restoredDoc.object();
+                            }
+                            Suggestion suggestion;
+                            suggestion.text = restoredArgs.value(u"suggestion"_s).toString();
+                            suggestion.path = restoredArgs.value(u"path"_s).toString();
+                            suggestion.line = restoredArgs.value(u"line"_s).toInt();
+                            if (suggestion.text.isEmpty()) {
+                                rebuiltToolWidgets.insert(toolCallId, nullptr);
+                                continue;
+                            }
+                            auto *card = new SuggestionWidget(toolCallId, m_transcriptContainer);
+                            card->setSuggestion(suggestion.text, suggestion.path, suggestion.line);
+                            card->markDecided();
+                            m_suggestionWidgets.insert(toolCallId, card);
+                            m_suggestionOrder.append(card);
+                            appendTranscriptWidget(card);
                             rebuiltToolWidgets.insert(toolCallId, nullptr);
                             continue;
                         }
@@ -4743,6 +5014,11 @@ void ChatWidget::switchToConversation(const QString &conversationId)
     // different conversation meant "Reject All" could revert files that thread
     // never touched, on the strength of a decision made about another one.
     m_pendingToolCalls.clear();
+    // A suggestion posted mid-turn must not decide itself once the user has
+    // switched away: the same reasoning as the tracker above. Cards from the
+    // new conversation's history are rebuilt below.
+    m_pendingSuggestions.clear();
+    clearSuggestionCards();
     m_editTracker->clear();
     m_currentConversationId = conversationId;
     SessionStore::setActiveConversation(conversationId);
@@ -4812,6 +5088,12 @@ void ChatWidget::newChat()
     // never report a result, so leaving them queued would strand a row in the
     // tracker that no button could act on.
     m_pendingToolCalls.clear();
+    // Same for suggestions stashed at toolStarted that never finished.
+    m_pendingSuggestions.clear();
+    clearSuggestionCards();
+    // The question being asked belongs to the turn just aborted, so its card
+    // cannot resume anything and must go.
+    clearQuestionCards();
     m_editTracker->clear();
     if (m_infoBar) {
         m_infoBar->hide();

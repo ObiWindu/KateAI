@@ -159,6 +159,40 @@ def handle_prompt(request_id, params):
         result(request_id, {"stopReason": "end_turn"})
         return
 
+    if SCENARIO == "plan":
+        written = call_client(
+            "write_plan_file",
+            {"sessionId": SESSION_ID, "content": "# Plan\n\n1. Inspect the code\n2. Change it\n"},
+        )
+        path = ((written or {}).get("result") or {}).get("path", "")
+        session_update(
+            {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "plan:" + path},
+            }
+        )
+        result(request_id, {"stopReason": "end_turn"})
+        return
+
+    if SCENARIO == "suggest":
+        call_client(
+            "suggest",
+            {
+                "sessionId": SESSION_ID,
+                "suggestion": "Use std::string_view here instead of a const reference",
+                "path": "src/main.cpp",
+                "line": 7,
+            },
+        )
+        session_update(
+            {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "suggested"},
+            }
+        )
+        result(request_id, {"stopReason": "end_turn"})
+        return
+
     if SCENARIO == "quoted":
         created = call_client(
             "terminal/create",

@@ -269,6 +269,77 @@ private Q_SLOTS:
         QVERIFY(ContextManager::estimateTokens(hardResult)
                 <= hard.contextWindow - hard.reserveForResponse);
     }
+
+    // --- reset ---------------------------------------------------------------
+
+    void resetFoldsEverythingIntoOneSummary()
+    {
+        ContextManager::Options options;
+        options.contextWindow = 8192;
+        options.reserveForResponse = 2048;
+        options.keepRecentTokens = 4000;
+        const auto history = longHistory(40);
+        const auto result = ContextManager::resetContext(history, options);
+
+        // Everything but the system prompt, the summary and the live turn is
+        // gone: a reset that leaves 40 turns behind has reclaimed nothing.
+        QVERIFY(result.size() < history.size() / 3);
+        QCOMPARE(result.first().role, ChatMessage::Role::System);
+        QCOMPARE(result.last().content, QStringLiteral("And finally, summarise everything."));
+
+        bool sawSummary = false;
+        for (const ChatMessage &m : result) {
+            if (m.content.startsWith(ContextManager::summaryHeader())) {
+                sawSummary = true;
+                break;
+            }
+        }
+        QVERIFY2(sawSummary, "the reset must be marked, or the model reads it as real history");
+    }
+
+    void resetKeepsWhatMattered()
+    {
+        ContextManager::Options options;
+        options.contextWindow = 8192;
+        options.reserveForResponse = 2048;
+        const auto result = ContextManager::resetContext(longHistory(40), options);
+
+        QString joined;
+        for (const ChatMessage &m : result) {
+            joined += m.content + QLatin1Char('\n');
+        }
+        // The requests, the files touched and the tools used all have to
+        // survive the fold: they are what makes the summary worth keeping.
+        QVERIFY(joined.contains(QStringLiteral("Request number 0")));
+        QVERIFY(joined.contains(QStringLiteral("src/file0.cpp")));
+        QVERIFY(joined.contains(QStringLiteral("edit_file")));
+    }
+
+    void resetIsSmallerThanTheHistoryItReplaces()
+    {
+        ContextManager::Options options;
+        options.contextWindow = 8192;
+        options.reserveForResponse = 2048;
+        const auto history = longHistory(40);
+        const auto result = ContextManager::resetContext(history, options);
+        // A window this full only needs a fraction of it back; otherwise the
+        // reset does not do the one job it exists for.
+        QVERIFY(ContextManager::estimateTokens(result)
+                < ContextManager::estimateTokens(history) / 2);
+        QVERIFY(ContextManager::estimateTokens(result) <= options.contextWindow - options.reserveForResponse);
+    }
+
+    void resetLeavesAConversationItCannotShrink()
+    {
+        ContextManager::Options options;
+        options.contextWindow = 8192;
+        QList<ChatMessage> history;
+        history << system(QStringLiteral("sys"));
+        history << user(QStringLiteral("hello"));
+        const auto result = ContextManager::resetContext(history, options);
+        QCOMPARE(result.size(), history.size());
+        QCOMPARE(result.at(1).content, QStringLiteral("hello"));
+    }
 };
 
 QTEST_GUILESS_MAIN(TestContextManager)

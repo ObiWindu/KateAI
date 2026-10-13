@@ -45,6 +45,26 @@ constexpr qint64 kRetryDelaySaturation = 1000000000;
 // generations.
 constexpr qsizetype kMaxRetainedResponseBytes = 256 * 1024;
 
+// Patterns that may indicate sensitive data in response bodies
+static const QStringList sensitivePatterns = {
+    u"api_key"_s, u"apikey"_s, u"api-key"_s, u"access_token"_s,
+    u"access-token"_s, u"secret"_s, u"password"_s, u"authorization"_s,
+    u"bearer "_s, u"x-api-key"_s, u"x-auth"_s
+};
+
+static QString sanitizeResponseBody(const QByteArray &body)
+{
+    QString text = QString::fromUtf8(body);
+    for (const QString &pattern : sensitivePatterns) {
+        // Simple redaction - replace values after sensitive keys
+        QRegularExpression re(QString(u"(\"%1\"\\s*:\\s*\")([^\"]+)(\")").arg(pattern), QRegularExpression::CaseInsensitiveOption);
+        text.replace(re, QString(u"\\1[REDACTED]\\3"));
+        re = QRegularExpression(QString(u"('%1'\\s*:\\s*')([^']+)(')").arg(pattern), QRegularExpression::CaseInsensitiveOption);
+        text.replace(re, QString(u"\\1[REDACTED]\\3"));
+    }
+    return text;
+}
+
 } // namespace
 
 LlmClient::LlmClient(QObject *parent)

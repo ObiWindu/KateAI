@@ -82,6 +82,11 @@ AgentLoop::AgentLoop(QObject *parent)
         m_planShown = true;
         Q_EMIT planUpdated(plan);
     });
+    connect(&m_acp, &AcpClient::suggestionPosted, this, [this](const Suggestion &suggestion) {
+        // The card is pure UI: it is not a tool call, so it does not enter the
+        // message history or the tool counters. Only the widget reacts.
+        Q_EMIT suggestionPosted(suggestion);
+    });
     connect(&m_acp, &AcpClient::toolStarted, this, [this](const PermissionRequest &request) {
         ++m_toolCalls;
         Q_EMIT toolStarted(request);
@@ -162,6 +167,12 @@ AgentLoop::~AgentLoop()
     // A running sub-agent owns its own network client and is not parented to
     // this object, so it has to be stopped explicitly or it outlives us.
     cancelSubtask();
+    // A streaming command is parented to the ToolRunner, which dies with us;
+    // kill it here rather than leaving it writing to a pipe nobody reads.
+    if (m_tools && !m_runningBashId.isEmpty()) {
+        m_tools->cancelBash(m_runningBashId);
+        m_runningBashId.clear();
+    }
     if (m_locks) {
         m_locks->releaseAll(m_selfId);
     }
@@ -595,7 +606,8 @@ QString AgentLoop::systemPrompt() const
                 prompt += u"\n\n<workspace_root>\n"_s + listing.join(u'\n') + u"\n</workspace_root>"_s;
             }
         }
-        if (QDir(m_workspace + u"/.git"_s).exists()) {
+        QDir gitDir(m_workspace + u"/.git"_s);
+        if (gitDir.exists()) {
             QProcess git;
             git.setWorkingDirectory(m_workspace);
             git.start(u"git"_s, QStringList{u"status"_s, u"--short"_s, u"-uno"_s});
@@ -607,6 +619,9 @@ QString AgentLoop::systemPrompt() const
                 if (!status.isEmpty()) {
                     prompt += u"\n\n<git_status>\n"_s + status + u"\n</git_status>"_s;
                 }
+            } else {
+                // Git command failed or timed out - silently skip git status
+                qDebug() << "Git status command failed or timed out";
             }
         }
     }
@@ -757,7 +772,25 @@ void AgentLoop::abort()
     m_client.abort();
     m_acp.cancel();
     m_web.abort();
-    cancelSubtask();
+    // A command left streaming when the turn stops would keep writing into a
+    // card that no longer has a turn behind it.
+    if (!m_runningBashId.isEmpty() && m_tools) {
+        m_tools->cancelBash(m_runningBashId);
+        m_runningBashId.clear();
+    }
+
+    // Cancel all subtasks synchronously to avoid use-after-free
+    const QList<AgentLoop *> children = m_activeSubtasks.values();
+    m_activeSubtasks.clear();
+    for (AgentLoop *child : children) {
+        if (m_locks) {
+            m_locks->releaseAll(child->selfId());
+        }
+        child->requestCancel();
+        child->abort();
+        child->deleteLater();
+    }
+
     m_inFlight = 0;
     m_queue.clear();
     m_pendingResults.clear();
@@ -918,10 +951,14 @@ qint64 AgentLoop::rateLimitDelayMs(qint64 now) const
     const int rpm = qMax(1, m_settings.requestsPerMinute);
     qint64 oldest = 0;
     int used = 0;
-    for (const qint64 stamp : m_modelRequestTimes) {
-        if (now - stamp >= kWindowMs) {
-            continue;
-        }
+
+    // Remove expired entries from the front to prevent unbounded growth
+    QQueue<qint64> &times = const_cast<QQueue<qint64>&>(m_modelRequestTimes);
+    while (!times.isEmpty() && now - times.head() >= kWindowMs) {
+        times.dequeue();
+    }
+
+    for (const qint64 stamp : times) {
         if (used == 0) {
             oldest = stamp;
         }
@@ -1064,9 +1101,16 @@ QString AgentLoop::actionSignature(const ToolCall &call) const
             arguments = parsed.object();
         }
     }
-    // Serialize the parsed object rather than preserving the model's original
-    // key order, so reordering JSON fields cannot bypass repeat detection.
-    const QByteArray args = QJsonDocument(arguments).toJson(QJsonDocument::Compact);
+    // Serialize the parsed object with sorted keys to ensure canonical form,
+    // so reordering JSON fields cannot bypass repeat detection.
+    // Note: QJsonDocument doesn't have SortKeys flag in Qt6, we manually sort
+    QJsonObject sortedArgs;
+    QStringList keys = arguments.keys();
+    std::sort(keys.begin(), keys.end());
+    for (const QString &key : keys) {
+        sortedArgs.insert(key, arguments.value(key));
+    }
+    const QByteArray args = QJsonDocument(sortedArgs).toJson(QJsonDocument::Compact);
     // Keep this independent of stateEpoch so duplicate calls emitted in the
     // same model response remain duplicates even if the first call mutates the
     // project. The epoch is added separately when checking repetition across
@@ -1251,6 +1295,10 @@ QString AgentLoop::formatToolResult(const ToolCall &call, const ToolResult &resu
 
     if (!result.ok) {
         out += u"NEXT: Diagnose the reported failure; do not repeat the identical action blindly.\n"_s;
+    } else if (isQuestionTool(call.name)) {
+        // The observation is the user's own words, so the model must treat it
+        // as the answer to what it asked rather than as another tool result.
+        out += u"NEXT: This is the user's answer to your question. Use it to choose the next action; do not ask the same question again.\n"_s;
     } else if (isMutationTool(call.name)) {
         out += u"NEXT: The mutation succeeded. Verify the changed behavior/file before declaring the task complete.\n"_s;
     } else if (result.output.contains(u"truncated"_s, Qt::CaseInsensitive)) {
@@ -1284,7 +1332,14 @@ void AgentLoop::appendToolResult(const ToolCall &call, ToolResult result)
         // reset the repeated-call recovery/termination counter.
         m_recoveryPromptCount = 0;
         m_repeatedTruncatedObservationCount = 0;
-        ++m_stateEpoch;
+        // Prevent potential overflow (extremely unlikely in practice)
+        if (m_stateEpoch == std::numeric_limits<quint64>::max()) {
+            m_stateEpoch = 0;
+            m_actionRepeatCounts.clear();
+            m_actionSignatures.clear();
+        } else {
+            ++m_stateEpoch;
+        }
         m_actionRepeatCounts.clear();
         QString path = call.arguments.value(u"path"_s).toString();
         if (path.isEmpty()) {
@@ -1668,6 +1723,44 @@ void AgentLoop::executeOne(const ToolCall &call)
         return;
     }
 
+    // The question tool is the one call whose result is the user's own words,
+    // so the turn stops here until they answer. It never touches the sandbox:
+    // the answer is captured by the UI and handed back through answerQuestion.
+    if (isQuestionTool(call.name)) {
+        const QString asked = call.arguments.value(u"question"_s).toString().trimmed();
+        if (asked.isEmpty()) {
+            ToolResult result;
+            result.ok = false;
+            result.output = u"question must not be empty: state what you are asking the user."_s;
+            appendToolResult(call, result);
+            m_state = State::ExecutingTools;
+            processQueue();
+            return;
+        }
+        m_waitingCall = call;
+        m_waitingRequest = request;
+        m_state = State::WaitingForQuestion;
+        ++m_toolCalls;
+        Q_EMIT toolStarted(request);
+        Q_EMIT statusChanged(i18n("Waiting for your answer…"));
+        Q_EMIT questionAsked(request);
+        return;
+    }
+
+    // A command's output is the thing most worth watching arrive, so it streams
+    // into its card as the process writes it instead of landing as one lump at
+    // the end. It is still serialised against the rest of the queue: the next
+    // tool waits for the command, and only one command ever runs at a time.
+    if (call.name == u"bash"_s) {
+        ++m_toolCalls;
+        Q_EMIT toolStarted(request);
+        maybeCheckpoint(u"Before %1"_s.arg(call.name));
+        Q_EMIT statusChanged(u"Working on the next step…"_s);
+        ++m_inFlight;
+        startBashTool(call);
+        return;
+    }
+
     ++m_toolCalls;
     Q_EMIT toolStarted(request);
 
@@ -1736,6 +1829,32 @@ PermissionRequest AgentLoop::describeTool(const ToolCall &call) const
         return request;
     }
 
+    if (isQuestionTool(call.name)) {
+        // The question itself is the summary: a card that reads "question" and
+        // nothing else tells the user nothing about what they are being asked.
+        const QString text = call.arguments.value(u"question"_s).toString().trimmed();
+        const QJsonArray options = call.arguments.value(u"options"_s).toArray();
+        PermissionRequest request;
+        request.toolName = call.name;
+        request.toolCallId = call.id;
+        request.risk = ToolRisk::Read;
+        request.details = QString::fromUtf8(QJsonDocument(call.arguments).toJson(QJsonDocument::Indented));
+        request.questionText = text;
+        request.allowFreeform = call.arguments.value(u"allow_freeform"_s).toBool(true);
+        for (const QJsonValue &value : options) {
+            const QString option = value.toString().trimmed();
+            if (!option.isEmpty()) {
+                request.questionOptions.append(option);
+            }
+        }
+        if (request.questionText.isEmpty()) {
+            request.summary = i18n("asked a question");
+        } else {
+            request.summary = request.questionText.left(200);
+        }
+        return request;
+    }
+
     if (isSubtaskTool(call.name)) {
         PermissionRequest request;
         request.toolName = call.name;
@@ -1764,6 +1883,11 @@ PermissionRequest AgentLoop::describeTool(const ToolCall &call) const
     }
 
     return m_tools->describe(call);
+}
+
+bool AgentLoop::isQuestionTool(const QString &toolName) const
+{
+    return toolName == u"question"_s;
 }
 
 bool AgentLoop::isSubtaskTool(const QString &toolName) const
@@ -1865,6 +1989,37 @@ void AgentLoop::startWebTool(const ToolCall &call)
     m_web.fetchPage(url, call.id);
 }
 
+void AgentLoop::startBashTool(const ToolCall &call)
+{
+    m_runningBashId = call.id;
+
+    // Progress is forwarded with a normal connection (not single-shot): it
+    // fires many times per command, and a single-shot connection would be
+    // consumed by the first chunk. The id guard keeps sub-agents sharing the
+    // runner from completing each other's cards.
+    QMetaObject::Connection progress = connect(m_tools.get(), &ToolRunner::bashProgress, this,
+        [this, call](const QString &id, const QString &partial) {
+            if (id != call.id) {
+                return;
+            }
+            Q_EMIT toolProgress(id, partial);
+        });
+
+    connect(m_tools.get(), &ToolRunner::bashFinished, this,
+        [this, call, progress](const ToolResult &result) {
+            if (result.toolCallId != call.id) {
+                return;
+            }
+            disconnect(progress);
+            if (m_runningBashId == call.id) {
+                m_runningBashId.clear();
+            }
+            finishAsyncTool(call, result);
+        });
+
+    m_tools->runBashAsync(call);
+}
+
 void AgentLoop::finishAsyncTool(const ToolCall &call, const ToolResult &result)
 {
     if (m_inFlight > 0) {
@@ -1937,6 +2092,11 @@ void AgentLoop::dispatchAsyncTool(const ToolCall &call)
     }
     if (isWebTool(call.name)) {
         startWebTool(call);
+        return;
+    }
+    if (call.name == u"bash"_s) {
+        maybeCheckpoint(u"Before %1"_s.arg(call.name));
+        startBashTool(call);
         return;
     }
     if (!m_mcp) {
@@ -2196,6 +2356,62 @@ void AgentLoop::cancelSubtask(const QString &taskId)
     child->deleteLater();
 }
 
+bool AgentLoop::compactContext()
+{
+    if (m_busy) {
+        return false;
+    }
+    if (m_messages.isEmpty()) {
+        return false;
+    }
+
+    ContextManager::Options options;
+    options.contextWindow = m_settings.contextWindow > 0
+        ? m_settings.contextWindow
+        : ContextManager::contextWindowFor(modelFor(m_settings));
+    options.reserveForResponse = m_settings.contextWindowReserve > 0
+        ? m_settings.contextWindowReserve
+        : 8192;
+    if (m_settings.keepRecentTokens > 0) {
+        options.keepRecentTokens = m_settings.keepRecentTokens;
+    }
+
+    const int before = ContextManager::estimateTokens(m_messages);
+    const QList<ChatMessage> compacted = ContextManager::resetContext(m_messages, options);
+    // A summary can only grow the message list when the conversation was short;
+    // then there was nothing to reclaim, so leave the history alone.
+    if (compacted.size() >= m_messages.size()) {
+        return false;
+    }
+    m_messages = compacted;
+    m_compactionLevel = 0;
+    m_contextOverflowRetries = 0;
+
+    const int after = ContextManager::estimateTokens(m_messages);
+    Q_EMIT contextCompacted(before, after);
+    Q_EMIT statusChanged(i18n("Context reset to a summary."));
+    return true;
+}
+
+void AgentLoop::answerQuestion(const QString &answer)
+{
+    if (!m_busy || m_state != State::WaitingForQuestion || m_waitingCall.name.isEmpty()) {
+        return;
+    }
+
+    const ToolCall call = m_waitingCall;
+    m_waitingCall = {};
+    m_waitingRequest = {};
+
+    ToolResult result;
+    result.toolCallId = call.id;
+    result.name = call.name;
+    result.output = answer;
+    appendToolResult(call, result);
+    m_state = State::ExecutingTools;
+    processQueue();
+}
+
 void AgentLoop::resolvePermission(PermissionDecision decision)
 {
     if (!m_busy || m_state != State::WaitingForPermission || m_waitingCall.name.isEmpty()) {
@@ -2248,11 +2464,15 @@ void AgentLoop::resolvePermission(PermissionDecision decision)
     ++m_toolCalls;
     Q_EMIT toolStarted(request);
     Q_EMIT statusChanged(u"Working on the next step…"_s);
-    if (isAsyncTool(call.name)) {
+    if (isAsyncTool(call.name) || call.name == u"bash"_s) {
         ++m_inFlight;
         dispatchAsyncTool(call);
         m_state = State::ExecutingTools;
-        processQueue();
+        // A streaming command holds the queue: the next tool runs once it
+        // reports, exactly as it did when commands ran synchronously.
+        if (m_runningBashId.isEmpty()) {
+            processQueue();
+        }
         return;
     }
     QString deniedBy;

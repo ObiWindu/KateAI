@@ -476,6 +476,47 @@ QJsonArray toolDefinitions(const ToolAccess &access)
                          {},
                          false));
 
+    tools.append(toolDef(u"write_plan_file"_s,
+                         u"Write the implementation plan for a complicated, multi-step task to a temporary file "
+                         u"the user can open and follow while you work. Pass the full plan as markdown: the goal, "
+                         u"the ordered steps, the files each step touches, and how it will be verified. Repeated "
+                         u"calls overwrite the same file, so keep it current as the work moves. The file lives "
+                         u"outside the workspace and is never part of the project."_s,
+                         QJsonObject{
+                             {u"content"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"Full plan as markdown: goal, ordered steps, files touched per step, verification."_s}}},
+                         },
+                         {u"content"_s},
+                         false));
+
+    tools.append(toolDef(u"suggest"_s,
+                         u"Post a suggestion for the user to accept or dismiss, instead of changing anything yourself. "
+                         u"Use it for improvements the user did not ask for: a refactor you noticed, a bug nearby, a "
+                         u"cleaner way to do something, or a follow-up worth considering. The suggestion appears as a "
+                         u"card in the transcript with Accept and Dismiss buttons; Accept opens the anchored line when "
+                         u"a path is given. Never suggest something you have already made."_s,
+                         QJsonObject{
+                             {u"suggestion"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"What you are suggesting, as markdown. Be concrete: what to change, where, and why it helps."_s}}},
+                             {u"path"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"Optional file the suggestion is about, relative to the workspace or absolute."_s}}},
+                             {u"line"_s, QJsonObject{{u"type"_s, u"integer"_s}, {u"description"_s, u"Optional 1-based line in that file the suggestion is about."_s}}},
+                         },
+                         {u"suggestion"_s},
+                         false));
+
+    tools.append(toolDef(u"question"_s,
+                         u"Ask the user a question and wait for their answer before continuing. Use it when the next "
+                         u"step genuinely depends on something only they can decide: a choice between approaches, a "
+                         u"missing requirement, an ambiguous instruction, or a destructive action you want confirmed. "
+                         u"Offer the likely answers as options so they can reply with one tap; the user may always "
+                         u"type their own answer as well. The answer arrives as this tool's result, so do not ask the "
+                         u"same question twice. Do not use it for anything you can work out yourself."_s,
+                         QJsonObject{
+                             {u"question"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"What you are asking the user, as a complete question."_s}}},
+                             {u"options"_s, QJsonObject{{u"type"_s, u"array"_s}, {u"items"_s, QJsonObject{{u"type"_s, u"string"_s}}}, {u"description"_s, u"Two to four short, mutually exclusive answers the user is likely to pick. Omit when there is nothing to choose between."_s}}},
+                             {u"allow_freeform"_s, QJsonObject{{u"type"_s, u"boolean"_s}, {u"description"_s, u"If false, the user must pick one of the options. Defaults to true."_s}}},
+                         },
+                         {u"question"_s},
+                         false));
+
     tools.append(toolDef(u"web_search"_s,
                              u"Search the public web and return ranked results with titles, URLs and snippets. "
                              u"Use it for library documentation, error messages, API references, or anything outside "
@@ -565,8 +606,11 @@ QString defaultSystemPrompt(const QString &workspace)
            "REASONING & PLANNING (required):\n"
            "1. THINKING: Before every response, output your internal reasoning in a <thinking> block. This is your private chain-of-thought: analyze the request, consider alternatives, plan steps, and anticipate issues. The user will NOT see this block - it is collapsed by default. Be thorough.\n"
            "2. PLAN: After thinking, output a structured implementation plan as a numbered list under a 'Plan:' or 'Implementation Plan:' heading. Each step should be a concrete, verifiable action. This plan IS visible to the user as a checklist.\n"
-           "3. EXECUTION: Follow your plan step by step. After completing each step, you may update the plan by marking steps complete.\n"
-           "\n"
+            "3. EXECUTION: Follow your plan step by step. After completing each step, you may update the plan by marking steps complete.\n"
+            "- For a complicated, multi-step task, write the plan to the plan file with write_plan_file and keep it current as steps complete. The user can open that file and follow the implementation as it happens.\n"
+             "- When you notice an improvement the user did not ask for, post it with suggest instead of making the change: it becomes a card the user can accept or dismiss.\n"
+             "- When the next step depends on a decision only the user can make, stop and ask with question instead of guessing: it pauses the turn and shows them your question with the likely answers.\n"
+            "\n"
            "THINKING PROTOCOL (detailed):\n"
            "- Your <thinking> block MUST come FIRST, before any visible text.\n"
            "- Include in thinking: problem analysis, root cause hypotheses, alternative approaches considered, risk assessment, file/dependency mapping, and a detailed step-by-step plan.\n"
@@ -698,7 +742,9 @@ QJsonArray parsePlanFromText(const QString &text)
     QJsonArray plan;
     const QString lower = text.toLower();
     int start = -1;
-    const QStringList markers = QStringList() << u"plan:"_s << u"implementation plan:"_s << u"steps:"_s << u"action plan:"_s;
+    const QStringList markers = QStringList() 
+        << u"## plan"_s << u"## implementation plan"_s << u"## plan (structured)"_s
+        << u"plan:"_s << u"implementation plan:"_s << u"steps:"_s << u"action plan:"_s;
     for (const QString &m : markers) {
         start = lower.indexOf(m);
         if (start >= 0) {
@@ -714,19 +760,23 @@ QJsonArray parsePlanFromText(const QString &text)
     }
     ++i;
     int lineStart = i;
-    while (i <= text.size() && plan.size() < 12) {
+    while (i <= text.size() && plan.size() < 20) {
         if (i == text.size() || text[i] == u'\n') {
             const QString line = text.mid(lineStart, i - lineStart).trimmed();
             if (!line.isEmpty()) {
                 QString step = line;
+                // Handle various list formats: "1. ", "1) ", "- ", "* ", "Step 1: "
                 int s = 0;
-                while (s < step.size() && (step[s].isDigit() || step[s] == u'.' || step[s] == u')')) {
+                while (s < step.size() && (step[s].isDigit() || step[s] == u'.' || step[s] == u')' || step[s] == u'(')) {
                     ++s;
                 }
-                if (s > 0 && s < step.size() && (step[s] == u' ' || step[s] == u'.')) {
+                if (s > 0 && s < step.size() && (step[s] == u' ' || step[s] == u'.' || step[s] == u')')) {
                     step = step.mid(s).trimmed();
-                } else if (step.startsWith(u"- "_s) || step.startsWith(u"* "_s)) {
-                    step = step.mid(2);
+                } else if (step.startsWith(u"- "_s) || step.startsWith(u"* "_s) || step.startsWith(u"• "_s)) {
+                    step = step.mid(2).trimmed();
+                } else if (step.startsWith(u"step "_s, Qt::CaseInsensitive)) {
+                    step = step.mid(5).trimmed();
+                    if (step.startsWith(u":"_s)) step = step.mid(1).trimmed();
                 }
                 if (!step.isEmpty()) {
                     QJsonObject obj;

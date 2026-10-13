@@ -5,6 +5,7 @@
 
 #include "chattheme.h"
 
+#include <QColor>
 #include <QHash>
 
 using namespace Qt::Literals::StringLiterals;
@@ -435,11 +436,29 @@ QString sectionLabel()
         .arg(kTextMuted);
 }
 
-QString toolHeader()
+QString mixColors(const QString &hex, const QString &onto, int percent)
 {
-    // The head box is a solid slab, not a tint: it is the only part of a tool
-    // card visible while collapsed, so it has to carry the tool's identity on
-    // its own. The top radii match the card's so the two read as one object.
+    const QColor top(hex);
+    QColor base(onto);
+    if (!top.isValid() || !base.isValid()) {
+        return onto;
+    }
+    const qreal t = qBound(0, percent, 100) / 100.0;
+    const QColor mixed(
+        qRound(base.red() + (top.red() - base.red()) * t),
+        qRound(base.green() + (top.green() - base.green()) * t),
+        qRound(base.blue() + (top.blue() - base.blue()) * t));
+    return mixed.name();
+}
+
+QString toolHeader(const QString &toolName)
+{
+    // The head box carries the tool's identity, because it is the only part of
+    // the card visible while collapsed: the hue is blended into the surface
+    // rather than painted on it, so the label on top stays readable. The top
+    // radii match the card's so the two read as one object.
+    const QString headBg = mixColors(toolColor(toolName), kToolHeaderBg, 16);
+    const QString hoverBg = mixColors(toolColor(toolName), kToolHeaderBg, 30);
     return QStringLiteral(
            "QWidget#toolHeader {"
            "  background-color: %1;"
@@ -451,7 +470,7 @@ QString toolHeader()
            "QWidget#toolHeader:hover {"
            "  background-color: %3;"
            "}")
-        .arg(kToolHeaderBg, kBorder, kHoverBg);
+        .arg(headBg, kBorder, hoverBg);
 }
 
 QString messageCss()
@@ -549,6 +568,9 @@ QString toolLabel(const QString &toolName)
         {QStringLiteral("glob"), QStringLiteral("Find files")},
         {QStringLiteral("bash"), QStringLiteral("Run command")},
         {QStringLiteral("new_task"), QStringLiteral("Delegate")},
+        {QStringLiteral("write_plan_file"), QStringLiteral("Write plan file")},
+        {QStringLiteral("suggest"), QStringLiteral("Suggestion")},
+        {QStringLiteral("question"), QStringLiteral("Question")},
         {QStringLiteral("attempt_completion"), QStringLiteral("Finish")},
         {QStringLiteral("ask_followup_question"), QStringLiteral("Ask")},
         {QStringLiteral("fetch_rules"), QStringLiteral("Load rules")},
@@ -587,6 +609,55 @@ QString toolAccent(const QString &toolName, bool running, bool ok)
         return kAccent;
     }
     return kSuccess;
+}
+
+QString toolColor(const QString &toolName)
+{
+    // One hue per tool family. Reads are cool and quiet, writes green, edits
+    // violet, and anything that runs or delegates warm -- the card rail, icon
+    // and tool-name prefix all take this, so a long transcript of cards can be
+    // scanned by colour before a single word is read.
+    static const QHash<QString, QString> colors = {
+        {QStringLiteral("read_file"), QStringLiteral("#56b6c2")},
+        {QStringLiteral("fs/read_text_file"), QStringLiteral("#56b6c2")},
+        {QStringLiteral("write_file"), QStringLiteral("#98c379")},
+        {QStringLiteral("fs/write_text_file"), QStringLiteral("#98c379")},
+        {QStringLiteral("edit_file"), QStringLiteral("#c678dd")},
+        {QStringLiteral("multi_edit_file"), QStringLiteral("#c678dd")},
+        {QStringLiteral("multi_replace_file_content"), QStringLiteral("#c678dd")},
+        {QStringLiteral("list_dir"), QStringLiteral("#d19a66")},
+        {QStringLiteral("grep"), QStringLiteral("#e5c07b")},
+        {QStringLiteral("glob"), QStringLiteral("#61afef")},
+        {QStringLiteral("bash"), QStringLiteral("#e06c75")},
+        {QStringLiteral("web_search"), QStringLiteral("#5ab0d8")},
+        {QStringLiteral("web_fetch"), QStringLiteral("#5ab0d8")},
+        {QStringLiteral("query_project_graph"), QStringLiteral("#a3be8c")},
+        {QStringLiteral("write_plan_file"), QStringLiteral("#ebcb8b")},
+        {QStringLiteral("suggest"), QStringLiteral("#b48ead")},
+        {QStringLiteral("question"), QStringLiteral("#3d7eff")},
+        {QStringLiteral("goal_report"), QStringLiteral("#98c379")},
+        {QStringLiteral("new_task"), QStringLiteral("#88c0d0")},
+        {QStringLiteral("fetch_rules"), QStringLiteral("#a3be8c")},
+    };
+
+    const auto it = colors.constFind(toolName);
+    if (it != colors.constEnd()) {
+        return it.value();
+    }
+    if (toolName.startsWith(QLatin1String("mcp__"))) {
+        // MCP tools are a different kind of thing: a server the user configured,
+        // not a built-in. One shared colour marks them as such.
+        return QStringLiteral("#8fbcbb");
+    }
+    if (toolName.startsWith(QLatin1String("terminal"))) {
+        return QStringLiteral("#e06c75");
+    }
+    return kTextMuted;
+}
+
+QString toolCardBg(const QString &toolName)
+{
+    return mixColors(toolColor(toolName), kToolBg, 10);
 }
 
 } // namespace ChatTheme

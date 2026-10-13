@@ -210,11 +210,20 @@ You ──► LLM (Grok / OpenAI / OpenRouter / local) or any ACP agent over std
 | `glob` | Find paths (`**/*.h`, `src/**/*.cpp`, …) |
 | `bash` | Run a command in the workspace under the active sandbox |
 | `query_project_graph` | Query indexed files, symbols, imports, dependents, and paths |
+| `write_plan_file` | Write the implementation plan for a complicated task to a temp file the user can open and follow |
+| `suggest` | Post a suggestion card for the user to accept or dismiss instead of making an unrequested change |
+| `question` | Ask the user something and wait for the answer before continuing |
 | `new_task` | Spawn a sub-agent by name or mode and return its answer |
 
 Plus every tool discovered from the connected MCP servers, as `mcp__<server>__<tool>`.
 
-In **Plan mode**, **Ask**, **Architect**, and **Orchestrator** the model only receives the read-only group (`read_file`, `list_dir`, `grep`, `glob`, `query_project_graph`) plus MCP tools. Tool availability is enforced twice — once in the request that advertises the tools, and again when a call arrives — so a model that hallucinates a write gets a clear rejection instead of a silent one.
+In **Plan mode**, **Ask**, **Architect**, and **Orchestrator** the model only receives the read-only group (`read_file`, `list_dir`, `grep`, `glob`, `query_project_graph`, `write_plan_file`, `suggest`, `question`) plus MCP tools. Tool availability is enforced twice — once in the request that advertises the tools, and again when a call arrives — so a model that hallucinates a write gets a clear rejection instead of a silent one.
+
+`write_plan_file` is the one tool that writes a file without touching the project: the destination is a per-workspace temp file Kate picks itself, so it is safe in read-only modes and plan mode, never prompts, and never enters the edit tracker. Agents are told to keep it current as the work moves, which gives the user a running plan they can open next to the code.
+
+`suggest` is how the agent raises something the user did not ask for. It posts a card into the transcript with the suggestion as markdown, an optional `path:line` anchor, and **Accept** / **Dismiss** buttons. Accept opens the anchored file at that line in the editor; Dismiss removes the card. Suggestions touch nothing, so they are safe in read-only modes and never create a checkpoint. ACP agents reach the same card through the `suggest` client method.
+
+`question` is how the agent asks instead of guessing. The turn stops, and a card appears in the intent dock above the input with the question, the likely answers as one-tap chips, and a line to type anything else. The answer becomes the tool result and the agent resumes from it — so a decision only the user can make (this approach or that one, a missing requirement, a destructive action) never turns into a guess. `allow_freeform: false` removes the typing line and leaves only the offered answers. Asking has no effect on the workspace, so it is safe in read-only modes and never prompts for permission.
 
 ### Tool cards and diffs
 
@@ -222,6 +231,8 @@ Each tool call appears as a compact card in the transcript (icon, name, shell-st
 
 - `write_file` / `edit_file` / `multi_edit_file` show a **unified diff** in the card before you approve
 - Other tools show a text preview (command, grep hits, graph summary)
+- `bash` output **streams into its card as the command writes it**, dimmed while the call is still running and replaced by the final result when it exits
+- Each tool family carries its own colour — on the card rail, the icon and the tool name — so a long run can be scanned by colour before a single word is read; a failed card goes red regardless
 - Older cards auto-collapse after a configurable count so long runs stay responsive
 
 ### Edit tracker
@@ -235,7 +246,9 @@ Each tool call appears as a compact card in the transcript (icon, name, shell-st
 - **Undo** (or `Ctrl+Z` with the queue focused) reverses the last decision, restoring the file too
 - **Keep All** / **Reject All** settle every pending file; the queue clears when you switch conversations, so a decision about one thread can never revert another thread's files
 
-The composer shows context-window usage as a percentage, turning amber at 70% and red at 90%, so a turn that is about to compact its own history is visible before it happens.
+File-mutating tool calls from **ACP agents** feed the same queue in every permission mode. An ACP agent is a separate process whose tool calls Kate only gates when the agent chooses to ask, so tracking its edits unconditionally is the only way its changes stay reviewable. Because every agent names its own tools, the ACP side is recognised by protocol kind (`edit`, `write`, `delete`, or a diff block) rather than by tool name.
+
+The composer shows context-window usage as a percentage, turning amber at 70% and red at 90%, so a turn that is about to compact its own history is visible before it happens. Older turns are compacted automatically, so prompting never stops on a full window; and once the readout reaches 95% a **Reset ctx** button appears next to it, which reclaims the whole window at once instead of waiting for the next request to trigger it. A reset folds the conversation into a summary that keeps the leading system prompt, every request that was made, the files touched, the tools used, and where the work had got to — the transcript itself is untouched, so the thread stays readable.
 
 ### Editor integration
 
@@ -334,6 +347,8 @@ Native ACP works with any stdio agent. Pick a preset (command/args are filled in
 | Custom | (yours) | (yours) |
 
 Kate is the ACP client: `session/prompt`, `session/update`, `session/request_permission`, `fs/read_text_file`, `fs/write_text_file`, `terminal/*`. Always-approve is handled in Kate for every agent. Grok Build also receives `--model` / `--always-approve` and Grok `_meta` (`yoloMode`).
+
+Kate also answers three of its own client methods, advertised in the `initialize` capabilities so agents can discover them: `query_project_graph` (the same graph the native agent queries), `write_plan_file` (files the implementation plan in a per-workspace temp file and returns its path, so the agent can point the user at a plan they can follow), and `suggest` (posts a suggestion card with an optional file anchor, so an agent can raise an idea without changing anything).
 
 To use Grok Build: install the Grok CLI, run `grok` once to log in, then set the provider to **ACP** with format **ACP native** and agent **Grok Build**. Other agents: install their CLI (or have `npx` on PATH), complete that agent's login, and pick the matching preset.
 
@@ -547,8 +562,9 @@ Always configure out-of-source (`-B build`, not `cmake .`). Do not copy a `build
 | --- | --- |
 | `src/plugin*.cpp` | Kate / KTextEditor glue, tool view, actions |
 | `src/chatwidget.cpp` | Prompt window, transcript, thinking, plan checklist |
-| `src/toolcallwidget.cpp` | Inline tool cards and diff preview |
+| `src/toolcallwidget.cpp` | Inline tool cards, live output, diff preview |
 | `src/promptedit.cpp` | Composer, @ completion, prompt history |
+| `src/questionwidget.cpp` | Question card: offered answers plus a line to type one |
 | `src/edittracker.cpp` | Accept / reject pending writes |
 | `src/agentloop.cpp` | LLM ↔ tool loop, verification, budgets |
 | `src/llmclient.cpp` | Streaming (`/v1/chat/completions`, Anthropic, HTTP ACP), retries |

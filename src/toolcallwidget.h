@@ -41,6 +41,10 @@ public:
     void setToolInfo(const QString &toolName, const QString &summary, ToolRisk risk);
     void setRunning();
     void setFinished(const ToolResult &result);
+    // Streams the output of a running tool into the card as it arrives, so a
+    // long command shows its progress instead of one lump at the end. Ignored
+    // once the tool has finished: then setFinished's text is the truth.
+    void setPartialOutput(const QString &partialOutput);
 
     // --- Inline approval -----------------------------------------------------
     // The card that triggered the permission request shows the decision here,
@@ -120,6 +124,10 @@ private:
     QString escapeHtml(const QString &s) const;
     QString iconForTool(const QString &toolName) const;
     QString colorForRisk(ToolRisk risk) const;
+    // Colours the in-flight glyph with the tool's own hue; called again once
+    // setToolInfo has supplied the name, because cards are created before it.
+    void applyRunningStatusColor();
+    QString partialToHtml(const QString &text) const;
     bool isDiffTool(const QString &toolName) const;
     QString languageForTool(const QString &toolName) const;
     void showPreviewHtml(const QString &html);
@@ -142,6 +150,9 @@ private:
 
     QElapsedTimer m_elapsed;
     QTimer *m_durationTimer = nullptr;
+    // Output captured from the running tool so far. Cleared by setFinished,
+    // which replaces it with the final result.
+    QString m_partialOutput;
 
     QWidget *m_header = nullptr;
     QLabel *m_icon = nullptr;

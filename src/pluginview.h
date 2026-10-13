@@ -35,6 +35,8 @@ public:
 
 private:
     void addEditorContextActions(KTextEditor::View *view, const QList<QAction *> &actions);
+    // Takes the user to the file and line a suggestion was anchored to.
+    void openFileAtLine(const QString &path, int line);
     void askSelectionWithInstruction(const QString &instruction);
     QString editorContext() const;
     void refreshWorkspace();

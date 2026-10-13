@@ -695,6 +695,14 @@ void AcpClient::sendInitialize()
     QJsonObject capabilities;
     capabilities.insert(u"fs"_s, fs);
     capabilities.insert(u"terminal"_s, true);
+    // Kate-specific client methods agents may call. Advertised so agents can
+    // discover them the way they discover fs/terminal support instead of
+    // having to hard-code Kate's extensions.
+    QJsonObject kateai;
+    kateai.insert(u"queryProjectGraph"_s, true);
+    kateai.insert(u"writePlanFile"_s, true);
+    kateai.insert(u"suggest"_s, true);
+    capabilities.insert(u"kateai"_s, kateai);
     // Advertise support for session config options (used for model selection)
     QJsonObject sessionCapabilities;
     QJsonObject configOptionsCaps;
@@ -1214,6 +1222,14 @@ void AcpClient::handleIncomingRequest(const QJsonObject &message)
         handleFsWrite(id, params);
         return;
     }
+    if (method == u"write_plan_file"_s) {
+        handleWritePlanFile(id, params);
+        return;
+    }
+    if (method == u"suggest"_s) {
+        handleSuggest(id, params);
+        return;
+    }
     if (method == u"terminal/create"_s) {
         handleTerminalCreate(id, params);
         return;
@@ -1357,7 +1373,12 @@ PermissionRequest AcpClient::permissionFromToolCall(const QJsonObject &toolCall)
     if (request.summary.isEmpty()) {
         request.summary = request.toolName;
     }
-    request.risk = riskForKind(toolCall.value(u"kind"_s).toString(), request.toolName);
+    const QString kind = toolCall.value(u"kind"_s).toString();
+    request.risk = riskForKind(kind, request.toolName);
+    // Every agent names its own tools, so the edit tracker cannot rely on
+    // tool names here. The ACP kind is the protocol-level statement of what
+    // the call does, and a diff content block proves the agent edited text.
+    request.mutatesFiles = kind == u"edit"_s || kind == u"write"_s || kind == u"delete"_s;
     request.details = jsonText(toolCall.value(u"rawInput"_s));
 
     const QJsonArray locations = toolCall.value(u"locations"_s).toArray();
@@ -1369,6 +1390,7 @@ PermissionRequest AcpClient::permissionFromToolCall(const QJsonObject &toolCall)
         const QJsonObject obj = item.toObject();
         if (obj.value(u"type"_s).toString() == u"diff"_s) {
             request.path = obj.value(u"path"_s).toString();
+            request.mutatesFiles = true;
             request.describeDiff = unifiedDiff(request.path,
                                                obj.value(u"oldText"_s).toString(),
                                                obj.value(u"newText"_s).toString());
@@ -1485,6 +1507,64 @@ void AcpClient::handleFsWrite(const QJsonValue &id, const QJsonObject &params)
         replyError(id, kServerError, error.isEmpty() ? u"Could not write %1."_s.arg(path) : error);
         return;
     }
+    replyResult(id, QJsonObject());
+}
+
+// Kate-specific client method, mirroring the native write_plan_file tool: the
+// agent hands over the plan as markdown and Kate files it under its own
+// per-workspace temp path, returned in the result so the agent can tell the
+// user where to follow along. No sandbox check and no permission prompt — the
+// destination is chosen by Kate, not by the agent.
+void AcpClient::handleWritePlanFile(const QJsonValue &id, const QJsonObject &params)
+{
+    const QString content = params.value(u"content"_s).toString();
+    if (content.trimmed().isEmpty()) {
+        replyError(id, kInvalidParams, u"content must not be empty: pass the full plan as markdown."_s);
+        return;
+    }
+    if (!m_bridge) {
+        replyError(id, kInternalError, u"No document bridge is available."_s);
+        return;
+    }
+    const QString path = planFilePath(m_workspace);
+    QString error;
+    if (!m_bridge->writeDocument(path, content, &error)) {
+        replyError(id, kServerError, error.isEmpty() ? u"Could not write the plan file."_s : error);
+        return;
+    }
+    QJsonObject result;
+    result.insert(u"path"_s, path);
+    replyResult(id, result);
+}
+
+// Kate-specific client method, mirroring the native suggest tool: the agent
+// hands over advice instead of making a change, and Kate posts it as a card
+// the user can accept or dismiss. Nothing touches the workspace, so there is
+// no sandbox check and no permission prompt.
+void AcpClient::handleSuggest(const QJsonValue &id, const QJsonObject &params)
+{
+    const QString text = params.value(u"suggestion"_s).toString().trimmed();
+    if (text.isEmpty()) {
+        replyError(id, kInvalidParams, u"suggestion must not be empty: describe what you are suggesting."_s);
+        return;
+    }
+
+    Suggestion suggestion;
+    suggestion.text = text;
+    suggestion.path = params.value(u"path"_s).toString().trimmed();
+    const QJsonValue lineValue = params.value(u"line"_s);
+    if (lineValue.isDouble()) {
+        suggestion.line = lineValue.toInt();
+        if (suggestion.line < 1) {
+            replyError(id, kInvalidParams, u"line must be a 1-based line number, or leave it out."_s);
+            return;
+        }
+    } else if (!lineValue.isUndefined() && !lineValue.isNull()) {
+        replyError(id, kInvalidParams, u"line must be a 1-based line number, or leave it out."_s);
+        return;
+    }
+
+    Q_EMIT suggestionPosted(suggestion);
     replyResult(id, QJsonObject());
 }
 

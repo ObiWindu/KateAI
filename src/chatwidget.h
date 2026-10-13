@@ -37,6 +37,8 @@ class PermissionBar;
 class PromptEdit;
 class ToolCallWidget;
 class SubtaskWidget;
+class SuggestionWidget;
+class QuestionWidget;
 class EditTracker;
 class TurnStatus;
 
@@ -91,6 +93,9 @@ Q_SIGNALS:
     void configureRequested();
     void aboutToSubmit();
     void conversationChanged(const QString &conversationId);
+    // A suggestion card was accepted and carries a file anchor. The view opens
+    // the file at that line; Kate core only owns the card.
+    void openFileAtLineRequested(const QString &path, int line);
 
 protected:
     void resizeEvent(QResizeEvent *event) override;
@@ -157,6 +162,23 @@ private:
     // attention, so the dock only ever holds live work and the finished card
     // rejoins the conversation.
     void retireIntentWidget(QWidget *widget);
+
+    // --- Suggestion cards ------------------------------------------------------
+    // One card per suggestion the agent posted, keyed by the tool call id that
+    // produced it (or a generated id on the ACP path). Pending entries exist
+    // between toolStarted and toolFinished, because that is the only window in
+    // which the arguments are visible before the card is built.
+    void addSuggestionCard(const QString &id, const Suggestion &suggestion);
+    void addSuggestionErrorCard(const QString &id, const QString &message);
+    void removeSuggestionCard(const QString &id);
+    void clearSuggestionCards();
+
+    // --- Question cards --------------------------------------------------------
+    // The `question` tool stops the turn until the user answers, so its card
+    // lives in the intent dock while it waits and is retired into the
+    // transcript once it does. Keyed by tool call id, like the tool cards.
+    void showQuestionCard(const PermissionRequest &request);
+    void clearQuestionCards();
 
     void submit();
         // True while a tool card is showing its inline approval row.
@@ -323,6 +345,22 @@ private:
         bool existed = false;
     };
     QHash<QString, PendingEdit> m_pendingToolCalls;
+
+    // Suggestions the suggest tool has started but not finished, plus the live
+    // cards and their order in the transcript.
+    QHash<QString, Suggestion> m_pendingSuggestions;
+    QHash<QString, SuggestionWidget *> m_suggestionWidgets;
+    QList<SuggestionWidget *> m_suggestionOrder;
+
+    // Live question cards, keyed by the tool call id that asked them.
+    QHash<QString, QuestionWidget *> m_questionWidgets;
+    QList<QPointer<QuestionWidget>> m_questionOrder;
+    // Latest live output per running tool, flushed on a timer so a chatty
+    // command does not re-render its card once per chunk.
+    QHash<QString, QString> m_pendingProgress;
+    QTimer *m_progressTimer = nullptr;
+    // Resets a full context window to a summary, keeping the live turn.
+    QPushButton *m_resetContext = nullptr;
 
     // Conversation history
     QPushButton *m_historyButton = nullptr;

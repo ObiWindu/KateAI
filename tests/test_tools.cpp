@@ -12,8 +12,10 @@
 #include <QFile>
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QTest>
+#include <QTimer>
 
 using namespace Qt::Literals::StringLiterals;
 using namespace KateAi;
@@ -293,6 +295,115 @@ private Q_SLOTS:
         QVERIFY(res.output.contains(u"exit code 3"_s));
     }
 
+    void writePlanFileWritesTempFileTheUserCanFollow()
+    {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+
+        // Read-only on purpose: the plan file is Kate's own temp file, so even
+        // a sandbox that blocks every workspace write must not stop the agent
+        // from writing its plan down.
+        Sandbox sandbox(tempDir.path(), SandboxProfile::ReadOnly);
+        DiskDocumentBridge bridge;
+        ToolRunner runner(sandbox, &bridge);
+
+        ToolCall call;
+        call.id = u"plan-1"_s;
+        call.name = u"write_plan_file"_s;
+        call.arguments = QJsonObject{{u"content"_s, u"# Plan\n\n1. Read the code\n2. Change it\n"_s}};
+
+        const ToolResult res = runner.run(call);
+        QVERIFY2(res.ok, qPrintable(res.output));
+
+        const QString planPath = planFilePath(tempDir.path());
+        QVERIFY2(planPath.startsWith(QDir::tempPath()), qPrintable(planPath));
+        QString written;
+        QVERIFY(bridge.readDocument(planPath, &written));
+        QCOMPARE(written, u"# Plan\n\n1. Read the code\n2. Change it\n"_s);
+
+        // The plan is the agent's notes, not a project file: nothing may land
+        // inside the workspace.
+        QCOMPARE(QDir(tempDir.path()).entryList(QDir::Files), QStringList());
+
+        // A second call updates the same file the user already has open.
+        call.arguments = QJsonObject{{u"content"_s, u"# Plan\n\n1. Read the code (done)\n"_s}};
+        const ToolResult second = runner.run(call);
+        QVERIFY2(second.ok, qPrintable(second.output));
+        QVERIFY(bridge.readDocument(planPath, &written));
+        QCOMPARE(written, u"# Plan\n\n1. Read the code (done)\n"_s);
+    }
+
+    void writePlanFileRejectsEmptyContentAndStaysReadRisk()
+    {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        Sandbox sandbox(tempDir.path(), SandboxProfile::Workspace);
+        DiskDocumentBridge bridge;
+        ToolRunner runner(sandbox, &bridge);
+
+        ToolCall call;
+        call.id = u"plan-empty"_s;
+        call.name = u"write_plan_file"_s;
+        call.arguments = QJsonObject{{u"content"_s, u"   "_s}};
+
+        const ToolResult res = runner.run(call);
+        QVERIFY(!res.ok);
+
+        // Read risk: it never prompts, and it must not be mistaken for a
+        // workspace write the edit tracker should queue.
+        call.arguments = QJsonObject{{u"content"_s, u"notes"_s}};
+        const PermissionRequest req = runner.describe(call);
+        QCOMPARE(req.risk, ToolRisk::Read);
+        QVERIFY(!req.mutatesFiles);
+    }
+
+    void suggestPostsAdviceWithoutTouchingTheWorkspace()
+    {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        Sandbox sandbox(tempDir.path(), SandboxProfile::Workspace);
+        DiskDocumentBridge bridge;
+        ToolRunner runner(sandbox, &bridge);
+
+        ToolCall call;
+        call.id = u"suggest-1"_s;
+        call.name = u"suggest"_s;
+        call.arguments = QJsonObject{
+            {u"suggestion"_s, u"Use string_view here instead of a const reference"_s},
+            {u"path"_s, u"main.cpp"_s},
+            {u"line"_s, 12},
+        };
+
+        const ToolResult res = runner.run(call);
+        QVERIFY2(res.ok, qPrintable(res.output));
+
+        // Advice is not a change: nothing is written anywhere, and the anchored
+        // file is not created -- a suggestion may point at a file the work has
+        // not made yet.
+        QCOMPARE(QDir(tempDir.path()).entryList(QDir::Files), QStringList());
+        QCOMPARE(QDir(tempDir.path()).entryList(QDir::Dirs | QDir::NoDotAndDotDot), QStringList());
+    }
+
+    void suggestRejectsEmptyTextAndBadLines()
+    {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        Sandbox sandbox(tempDir.path(), SandboxProfile::Workspace);
+        DiskDocumentBridge bridge;
+        ToolRunner runner(sandbox, &bridge);
+
+        ToolCall call;
+        call.id = u"suggest-empty"_s;
+        call.name = u"suggest"_s;
+        call.arguments = QJsonObject{{u"suggestion"_s, u"   "_s}};
+        QVERIFY(!runner.run(call).ok);
+
+        call.arguments = QJsonObject{{u"suggestion"_s, u"Do the thing"_s}, {u"line"_s, 0}};
+        const ToolResult badLine = runner.run(call);
+        QVERIFY2(!badLine.ok, qPrintable(badLine.output));
+        QVERIFY2(badLine.output.contains(u"1-based"_s), qPrintable(badLine.output));
+    }
+
 #ifdef Q_OS_UNIX
     void bashTimeoutStopsBackgroundChildren()
     {
@@ -320,6 +431,103 @@ private Q_SLOTS:
         const QString marker = tempDir.path() + u"/marker.txt"_s;
         QTest::qWait(3500);
         QVERIFY2(!QFile::exists(marker), "a background child survived the timeout and kept writing");
+    }
+#endif
+
+    void questionIsReadRiskAndCarriesItsPrompt()
+    {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        Sandbox sandbox(tempDir.path(), SandboxProfile::ReadOnly);
+        DiskDocumentBridge bridge;
+        ToolRunner runner(sandbox, &bridge);
+
+        ToolCall call;
+        call.id = u"question-1"_s;
+        call.name = u"question"_s;
+        call.arguments = QJsonObject{
+            {u"question"_s, u"Rewrite the file, or patch it in place?"_s},
+            {u"options"_s, QJsonArray{u"Rewrite"_s, u"Patch in place"_s}},
+        };
+
+        const PermissionRequest req = runner.describe(call);
+        // Asking the user something touches the workspace in no way at all, so
+        // it must never prompt and never look like a mutation.
+        QCOMPARE(req.risk, ToolRisk::Read);
+        QVERIFY(!req.mutatesFiles);
+        QCOMPARE(req.questionText, u"Rewrite the file, or patch it in place?"_s);
+        QCOMPARE(req.questionOptions, QStringList({u"Rewrite"_s, u"Patch in place"_s}));
+        QVERIFY(req.allowFreeform);
+        QVERIFY(req.summary.contains(u"Rewrite the file"_s));
+
+        // The runner itself can never answer a question: only the user can, so
+        // reaching it means the loop failed to intercept, which must say so
+        // rather than fabricate an answer.
+        const ToolResult res = runner.run(call);
+        QVERIFY2(!res.ok, qPrintable(res.output));
+        QVERIFY2(res.output.contains(u"user"_s), qPrintable(res.output));
+    }
+
+    void questionRequiresAnInteractiveUser()
+    {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        Sandbox sandbox(tempDir.path(), SandboxProfile::Workspace);
+        DiskDocumentBridge bridge;
+        ToolRunner runner(sandbox, &bridge);
+
+        ToolCall call;
+        call.id = u"question-2"_s;
+        call.name = u"question"_s;
+        call.arguments = QJsonObject{{u"question"_s, u"Which approach?"_s}, {u"allow_freeform"_s, false}};
+        const PermissionRequest req = runner.describe(call);
+        QVERIFY(!req.allowFreeform);
+    }
+
+#ifdef Q_OS_UNIX
+    void bashStreamsItsOutputAsItRuns()
+    {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+
+        Sandbox sandbox(tempDir.path(), SandboxProfile::Off);
+        DiskDocumentBridge bridge;
+        ToolRunner runner(sandbox, &bridge);
+
+        ToolCall call;
+        call.id = u"bash-stream"_s;
+        call.name = u"bash"_s;
+        call.arguments = QJsonObject{{u"command"_s, u"echo one; sleep 0.4; echo two; sleep 0.4; echo three"_s}};
+
+        QStringList progress;
+        bool finished = false;
+        ToolResult finalResult;
+        connect(&runner, &ToolRunner::bashProgress, this, [&](const QString &id, const QString &partial) {
+            if (id == call.id) {
+                progress << partial;
+            }
+        });
+        connect(&runner, &ToolRunner::bashFinished, this, [&](const ToolResult &result) {
+            finished = true;
+            finalResult = result;
+        });
+
+        runner.runBashAsync(call);
+        // The first chunk has to arrive well before the command finishes: that
+        // is the whole point of streaming it.
+        QTRY_VERIFY(!progress.isEmpty() && !finished);
+        QTRY_VERIFY(finished);
+        QVERIFY2(finalResult.ok, qPrintable(finalResult.output));
+        QVERIFY(finalResult.output.contains(u"one"_s));
+        QVERIFY(finalResult.output.contains(u"three"_s));
+        // Every emission is the output so far, never a bare delta.
+        QVERIFY(!progress.isEmpty());
+        int previousSize = 0;
+        for (const QString &partial : progress) {
+            QVERIFY2(partial.size() >= previousSize, "a later chunk lost output");
+            previousSize = partial.size();
+        }
+        QVERIFY(progress.last().trimmed() == finalResult.output.trimmed());
     }
 #endif
 };

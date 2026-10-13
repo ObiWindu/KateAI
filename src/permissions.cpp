@@ -39,9 +39,16 @@ bool PermissionPolicy::isReadTool(const QString &toolName) const
     }
     // Web tools are read-only: they cannot touch the workspace, so they are
     // safe to run without an edit checkpoint or an edit lock.
+    // write_plan_file joins them: it writes only a Kate-chosen temp file, so
+    // it never mutates the project and must not prompt just to take notes.
+    // suggest joins them for the same reason: it only posts a card for the
+    // user to accept or dismiss.
+    // question joins them for the same reason again: it neither reads the
+    // workspace nor changes it -- it asks the user something.
     return toolName == u"read_file"_s || toolName == u"list_dir"_s || toolName == u"grep"_s
         || toolName == u"glob"_s || toolName == u"query_project_graph"_s
-        || toolName == u"web_search"_s || toolName == u"web_fetch"_s;
+        || toolName == u"web_search"_s || toolName == u"web_fetch"_s
+        || toolName == u"write_plan_file"_s || toolName == u"suggest"_s || toolName == u"question"_s;
 }
 
 ToolRisk PermissionPolicy::riskFor(const QString &toolName) const

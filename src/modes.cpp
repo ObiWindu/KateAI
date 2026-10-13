@@ -24,7 +24,13 @@ QString subtaskToolName()
 QStringList builtInToolsForGroup(const QString &group)
 {
     if (group == ToolGroup::read()) {
-        return {u"read_file"_s, u"list_dir"_s, u"grep"_s, u"glob"_s, u"query_project_graph"_s};
+        // write_plan_file and suggest are read-group tools: the plan file is a
+        // Kate-chosen temp file and suggest only posts a card, so neither
+        // touches the workspace. question joins them: it reads nothing and
+        // writes nothing, it just puts a question to the user, which is
+        // exactly when a read-only turn most needs an answer.
+        return {u"read_file"_s, u"list_dir"_s, u"grep"_s, u"glob"_s, u"query_project_graph"_s,
+                u"write_plan_file"_s, u"suggest"_s, u"question"_s};
     }
     if (group == ToolGroup::edit()) {
         return {u"write_file"_s, u"edit_file"_s, u"multi_edit_file"_s};
@@ -55,6 +61,9 @@ QStringList allBuiltInToolNames()
             u"web_search"_s,
             u"web_fetch"_s,
             u"query_project_graph"_s,
+            u"write_plan_file"_s,
+            u"suggest"_s,
+            u"question"_s,
             subtaskToolName()};
 }
 
