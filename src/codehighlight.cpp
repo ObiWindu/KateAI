@@ -343,18 +343,25 @@ QString htmlForCode(const QString &code, const QString &language)
 
     const QString shown = language.trimmed().isEmpty() ? def.name() : language.trimmed();
     // A table is used as the container because QTextDocument honours cell
-    // backgrounds reliably, while <pre> backgrounds and borders are largely
-    // ignored by its CSS subset. Two stacked rows give one continuous block
+    // backgrounds and table borders, while the CSS it would take on a bare
+    // <pre> is only partly supported. Two stacked rows give one continuous block
     // with the language label as a header strip.
+    //
+    // The colour on <pre> is inline rather than left to a stylesheet on purpose:
+    // the token colours in `body` are inline spans, but everything the
+    // highlighter leaves plain inherits the block colour. A document with no
+    // stylesheet defaults that to black, which renders invisible on this dark
+    // block, so the foreground is pinned here.
     return QStringLiteral(
                "<table class=\"codeblock\" width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" "
                "style=\"margin-top:6px; margin-bottom:6px;\">"
                "<tr><td class=\"codeblock-lang\" bgcolor=\"%1\" "
                "style=\"color:%2; font-size:10px; font-weight:600; padding:5px 10px;\">%3</td></tr>"
                "<tr><td bgcolor=\"%1\" style=\"padding:2px 10px 8px 10px;\">"
-               "<pre style=\"margin:0;\">%4</pre></td></tr>"
+               "<pre class=\"codeblock\" style=\"margin:0; color:%4;\">%5</pre></td></tr>"
                "</table>")
-        .arg(ChatTheme::codeBlockBg(), ChatTheme::textMuted(), shown.toHtmlEscaped(), body);
+        .arg(ChatTheme::codeBlockBg(), ChatTheme::textMuted(), shown.toHtmlEscaped(),
+             ChatTheme::textPrimary(), body);
 }
 
 QString htmlBodyForCode(const QString &code, const QString &language)

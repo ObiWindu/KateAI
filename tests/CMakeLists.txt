@@ -91,3 +91,11 @@ add_test(NAME test_toolcard COMMAND test_toolcard -platform offscreen)
 add_executable(test_promptedit test_promptedit.cpp ../src/promptedit.cpp)
 target_link_libraries(test_promptedit PRIVATE kateai_core Qt6::Test)
 add_test(NAME test_promptedit COMMAND test_promptedit -platform offscreen)
+
+add_executable(test_overflow test_overflow.cpp ../src/chatwidget.cpp ../src/toolcallwidget.cpp
+    ../src/promptedit.cpp ../src/permissionbar.cpp ../src/subtaskwidget.cpp
+    ../src/suggestionwidget.cpp ../src/questionwidget.cpp ../src/edittracker.cpp
+    ../src/turnstatus.cpp ../src/chattheme.cpp)
+target_link_libraries(test_overflow PRIVATE kateai_core Qt6::Test Qt6::Widgets)
+target_compile_definitions(test_overflow PRIVATE TRANSLATION_DOMAIN="kateai")
+add_test(NAME test_overflow COMMAND test_overflow -platform offscreen)

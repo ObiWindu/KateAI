@@ -15,6 +15,7 @@
 #include <QRegularExpression>
 #include <QCryptographicHash>
 #include <QTimer>
+#include <QVector>
 
 #include <algorithm>
 
@@ -248,30 +249,135 @@ static GraphNode *resolveGraphNode(ProjectGraph *graph, const QString &key)
     return nameHits == 1 ? byName : nullptr;
 }
 
+namespace
+{
+struct DiffOp {
+    QChar kind; // ' ' equal, '-' removed (from before), '+' added (in after)
+    int oldNo;  // 1-based line number in `before`, or 0
+    int newNo;  // 1-based line number in `after`, or 0
+    QString text;
+};
+
+// Longest-common-subsequence line diff, equivalent output to a Myers diff.
+// Returns an edit script with 1-based line numbers so callers can render real
+// unified hunks instead of a misleading positional comparison.
+QList<DiffOp> computeLineDiff(const QStringList &a, const QStringList &b)
+{
+    const int n = a.size();
+    const int m = b.size();
+    QVector<QVector<int>> lcs(n + 1, QVector<int>(m + 1, 0));
+    for (int i = n - 1; i >= 0; --i) {
+        for (int j = m - 1; j >= 0; --j) {
+            lcs[i][j] = (a.at(i) == b.at(j)) ? lcs[i + 1][j + 1] + 1
+                                             : qMax(lcs[i + 1][j], lcs[i][j + 1]);
+        }
+    }
+    QList<DiffOp> ops;
+    ops.reserve(n + m);
+    int i = 0;
+    int j = 0;
+    while (i < n && j < m) {
+        if (a.at(i) == b.at(j)) {
+            ops.append({u' ', i + 1, j + 1, a.at(i)});
+            ++i;
+            ++j;
+        } else if (lcs[i + 1][j] >= lcs[i][j + 1]) {
+            ops.append({u'-', i + 1, 0, a.at(i)});
+            ++i;
+        } else {
+            ops.append({u'+', 0, j + 1, b.at(j)});
+            ++j;
+        }
+    }
+    while (i < n) {
+        ops.append({u'-', i + 1, 0, a.at(i)});
+        ++i;
+    }
+    while (j < m) {
+        ops.append({u'+', 0, j + 1, b.at(j)});
+        ++j;
+    }
+    return ops;
+}
+} // namespace
+
 QString unifiedDiff(const QString &path, const QString &before, const QString &after)
 {
     const QStringList oldLines = before.split(u'\n');
     const QStringList newLines = after.split(u'\n');
-    QString out;
-    out += u"--- a/%1\n+++ b/%1\n"_s.arg(path);
-    const int max = std::max(oldLines.size(), newLines.size());
-    int shown = 0;
-    for (int i = 0; i < max && shown < 200; ++i) {
-        const QString a = i < oldLines.size() ? oldLines.at(i) : QString();
-        const QString b = i < newLines.size() ? newLines.at(i) : QString();
-        if (a == b) {
-            continue;
-        }
-        if (i < oldLines.size()) {
-            out += u"-%1\n"_s.arg(a);
-        }
-        if (i < newLines.size()) {
-            out += u"+%1\n"_s.arg(b);
-        }
-        ++shown;
+    QString out = u"--- a/%1\n+++ b/%1\n"_s.arg(path);
+
+    // The diff is O(n*m) in time and memory; a whole-file comparison of two
+    // large files would allocate a huge matrix, so fall back to a summary.
+    const qint64 cells = qint64(oldLines.size() + 1) * qint64(newLines.size() + 1);
+    if (cells > 1000000) {
+        out += u"@@ (file changed: %1 -> %2 lines) @@\n"_s.arg(oldLines.size()).arg(newLines.size());
+        return out;
     }
-    if (shown == 0) {
+
+    const QList<DiffOp> ops = computeLineDiff(oldLines, newLines);
+
+    QList<int> changed;
+    for (int k = 0; k < ops.size(); ++k) {
+        if (ops.at(k).kind != u' ') {
+            changed.append(k);
+        }
+    }
+    if (changed.isEmpty()) {
         out += u"(no line-level changes)\n"_s;
+        return out;
+    }
+
+    const int context = 3;
+    const int maxOutputLines = 600;
+    int emitted = 0;
+    int idx = 0;
+    while (idx < changed.size() && emitted < maxOutputLines) {
+        // One hunk spans changes separated by no more than 2*context equal lines.
+        const int first = changed.at(idx);
+        int last = changed.at(idx);
+        int nxt = idx + 1;
+        while (nxt < changed.size() && changed.at(nxt) - last - 1 <= 2 * context) {
+            last = changed.at(nxt);
+            ++nxt;
+        }
+        const int from = qMax(0, first - context);
+        const int to = qMin(ops.size(), last + context + 1);
+
+        int oldStart = 0;
+        int newStart = 0;
+        int oldCount = 0;
+        int newCount = 0;
+        for (int k = from; k < to; ++k) {
+            const DiffOp &op = ops.at(k);
+            if (op.oldNo > 0) {
+                if (oldStart == 0) {
+                    oldStart = op.oldNo;
+                }
+                ++oldCount;
+            }
+            if (op.newNo > 0) {
+                if (newStart == 0) {
+                    newStart = op.newNo;
+                }
+                ++newCount;
+            }
+        }
+        auto range = [](int start, int count) {
+            start = qMax(1, start);
+            return count == 1 ? QString::number(start) : u"%1,%2"_s.arg(start).arg(count);
+        };
+        out += u"@@ -%1 +%2 @@\n"_s.arg(range(oldStart, oldCount), range(newStart, newCount));
+        ++emitted;
+        for (int k = from; k < to && emitted < maxOutputLines; ++k) {
+            const DiffOp &op = ops.at(k);
+            out += QString(op.kind) + op.text + u"\n"_s;
+            ++emitted;
+        }
+        idx = nxt;
+    }
+    if (emitted >= maxOutputLines) {
+        out += u"... (diff truncated)\n"_s;
     }
     return out;
 }
@@ -489,6 +595,16 @@ ToolResult ToolRunner::readFile(const QJsonObject &args) const
         numbered += u"%1|%2\n"_s.arg(start + i + 1, 6).arg(slice.at(i));
     }
     result.output = clip(numbered);
+    const int remaining = lines.size() - (start + slice.size());
+    if (remaining > 0) {
+        if (limit > 0 && limit > cappedLimit) {
+            result.output += u"\n[Requested %1 line(s) but a read is capped at %2; %3 line(s) remain. Call again with offset=%4 to continue.]"_s
+                                 .arg(limit).arg(cappedLimit).arg(remaining).arg(start + slice.size() + 1);
+        } else {
+            result.output += u"\n[%1 more line(s) not shown. Call again with offset=%2 to continue.]"_s
+                                 .arg(remaining).arg(start + slice.size() + 1);
+        }
+    }
     return result;
 }
 
@@ -875,6 +991,14 @@ ToolResult ToolRunner::grep(const QJsonObject &args) const
             return;
         }
 
+        // Searching reads each candidate fully into memory; skip pathologically
+        // large files (build artifacts, bundles, minified output) so one of them
+        // cannot blow up the turn's memory.
+        constexpr qint64 kMaxSearchBytes = 4 * 1024 * 1024;
+        if (QFileInfo(filePath).size() > kMaxSearchBytes) {
+            return;
+        }
+
         QString contents;
         if (!m_bridge || !m_bridge->readDocument(filePath, &contents)) {
             return;
@@ -928,21 +1052,42 @@ ToolResult ToolRunner::glob(const QJsonObject &args) const
     // Initialize the result structure to track success/failure
     ToolResult result;
     result.name = u"glob"_s;
-    
+
     // Extract the file pattern from the tool arguments
     const QString pattern = args.value(u"pattern"_s).toString();
-    
-    // Collect all matching files in the workspace by recursively searching directories
+
+    // Optional directory to search; defaults to the workspace root. Resolved
+    // through the sandbox so the active profile is still honoured.
+    QString base = m_sandbox.workspaceRoot();
+    const QString dirArg = args.value(u"path"_s).toString().trimmed();
+    if (!dirArg.isEmpty()) {
+        QString error;
+        const QString resolved = m_sandbox.resolve(dirArg, &error);
+        if (resolved.isEmpty()) {
+            result.ok = false;
+            result.output = error;
+            return result;
+        }
+        QDir baseDir(resolved);
+        if (!baseDir.exists()) {
+            result.ok = false;
+            result.output = u"Directory does not exist: %1"_s.arg(resolved);
+            return result;
+        }
+        base = resolved;
+    }
+
+    // Collect all matching files by recursively searching from `base`
     QStringList matches;
-    QDirIterator it(m_sandbox.workspaceRoot(), QDir::Files, QDirIterator::Subdirectories);
+    QDirIterator it(base, QDir::Files, QDirIterator::Subdirectories);
     while (it.hasNext() && matches.size() < 400) {
         const QString filePath = it.next();
-        
+
         // Skip files that are denied by the sandbox for security
         if (m_sandbox.isDenied(filePath)) {
             continue;
         }
-        
+
         // Get the relative path from the workspace root for user-friendly display
         const QString rel = QDir(m_sandbox.workspaceRoot()).relativeFilePath(filePath);
         if (isNoisySearchPath(rel)) {
@@ -953,7 +1098,10 @@ ToolResult ToolRunner::glob(const QJsonObject &args) const
             matches.append(rel);
         }
     }
-    
+
+    // Deterministic order so results are comparable across identical calls.
+    matches.sort();
+
     // Format the output with either the matched files or a "no matches" message
     result.output = matches.isEmpty() ? u"No files matched."_s : matches.join(u'\n');
     return result;

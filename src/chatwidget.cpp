@@ -441,31 +441,10 @@ ChatWidget::ChatWidget(QWidget *parent)
     bottomRow->addStretch();
 
     m_tokenCount = new QLabel(composerCard);
+    m_tokenCount->setObjectName(u"tokenCount"_s);
     m_tokenCount->setStyleSheet(ChatTheme::tokenLabel());
     m_tokenCount->hide();
     bottomRow->addWidget(m_tokenCount);
-
-    // Reset context. A full window is the only state this exists for, so it
-    // stays hidden until the readout says the window is nearly spent: an
-    // affordance that is always there invites a reset nobody needed.
-    m_resetContext = new QPushButton(i18n("Reset ctx"), composerCard);
-    m_resetContext->setCursor(Qt::PointingHandCursor);
-    m_resetContext->setToolTip(i18n("Fold the conversation so far into a summary and start the context fresh. "
-                                    "Your requests, the files touched and where the work got to are kept; the full "
-                                    "history stays visible in the transcript."));
-    m_resetContext->setStyleSheet(
-        QStringLiteral(
-            "QPushButton { background-color: %1; color: %2; border: 1px solid %3;"
-            " border-radius: 10px; padding: 2px 9px; font-size: 11px; font-weight: 600; }"
-            "QPushButton:hover { background-color: %4; color: #ffffff; }")
-            .arg(ChatTheme::cardBg(), ChatTheme::warning(), ChatTheme::warning(), ChatTheme::warning()));
-    m_resetContext->hide();
-    bottomRow->addWidget(m_resetContext);
-    connect(m_resetContext, &QPushButton::clicked, this, [this] {
-        if (!m_agent.compactContext()) {
-            showInfoMessage(i18n("Nothing to reset: the context is already small."), false);
-        }
-    });
 
     // Thinking mode toggle button
     m_thinking->setParent(composerCard);
@@ -1105,6 +1084,15 @@ ChatWidget::~ChatWidget()
         m_streamHeightTimer->stop();
     }
 
+    // Tear the model popup down here, while the members it resets still live.
+    // QObject deletes child widgets only once the members are gone (the base
+    // class destructor runs last), so a popup left to that point runs its
+    // destroyed() handler on freed members and corrupts the heap.
+    if (m_modelPopup) {
+        delete m_modelPopup;
+        m_modelPopup = nullptr;
+    }
+
     // Also save here for widget teardown paths that do not close the app.
     saveCurrentConversation();
 
@@ -1275,7 +1263,8 @@ void ChatWidget::setStreaming(const QString &text)
         m_activeAssistantBrowser->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
         m_activeAssistantBrowser->setStyleSheet(
             QStringLiteral("background: transparent; color: %1; border: none; padding: 0px;").arg(ChatTheme::textPrimary()));
-        m_activeAssistantBrowser->document()->setDefaultStyleSheet(ChatTheme::messageCss());
+        // The stylesheet rides on the rendered document (see makeMarkdownDocument),
+        // not on the browser: setDocument() replaces the browser's own document.
 
         layout->addWidget(m_activeAssistantBrowser);
         m_activeAssistantWidget->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum);
@@ -1319,7 +1308,7 @@ void ChatWidget::flushStreamRender()
     if (!m_activeAssistantBrowser) {
         return;
     }
-    m_activeAssistantBrowser->setDocument(makeMarkdownDocument(closedMarkdown(m_streamText)));
+    m_activeAssistantBrowser->setDocument(makeMarkdownDocument(closedMarkdown(m_streamText), ChatTheme::messageCss()));
     scheduleStreamHeightUpdate();
 }
 
@@ -1382,7 +1371,7 @@ void ChatWidget::updateThinkingDisplay()
         return;
     }
     const QString displayed = m_thinkingBuffer.left(m_thinkingPacedLength);
-    m_thinkingBrowser->setDocument(makeMarkdownDocument(closedMarkdown(displayed)));
+    m_thinkingBrowser->setDocument(makeMarkdownDocument(closedMarkdown(displayed), ChatTheme::thinkingCss()));
     if (m_thinkingBlock && !m_thinkingBuffer.isEmpty()) {
         m_thinkingBlock->show();
     }
@@ -1469,10 +1458,11 @@ QWidget *ChatWidget::createThinkingBlock(QWidget *parent, QTextBrowser *&browser
     browser->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     browser->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     browser->setStyleSheet(QStringLiteral("QTextBrowser { background: transparent; color: %1; border: none;"
-                                        " font-size: 12px; padding: 6px 8px; }")
-                            .arg(ChatTheme::textPrimary()));
+                                         " font-size: 12px; padding: 6px 8px; }")
+                             .arg(ChatTheme::textPrimary()));
 
-    browser->document()->setDefaultStyleSheet(ChatTheme::thinkingCss());
+    // Passed with the rendered document below; a stylesheet set here would be
+    // discarded by setDocument().
     QPalette pal = browser->palette();
     pal.setColor(QPalette::Text, QColor(ChatTheme::textPrimary()));
     pal.setColor(QPalette::Base, Qt::transparent);
@@ -1625,7 +1615,7 @@ void ChatWidget::freezeStreaming()
         m_streamRenderTimer->stop();
     }
     if (m_activeAssistantBrowser && !m_streamText.isEmpty()) {
-        m_activeAssistantBrowser->setDocument(makeMarkdownDocument(m_streamText));
+        m_activeAssistantBrowser->setDocument(makeMarkdownDocument(m_streamText, ChatTheme::messageCss()));
         const int docH = std::max(30, static_cast<int>(m_activeAssistantBrowser->document()->size().height()) + 16);
         if (m_activeAssistantBrowser->height() != docH) {
             m_activeAssistantBrowser->setFixedHeight(docH);
@@ -2500,27 +2490,32 @@ void ChatWidget::updateTokenDisplay()
     // count (which means nothing without the denominator). Both are already
     // computed for the request that is actually sent, so reuse them rather than
     // keeping a second estimate that can disagree with the real budget.
-    const int tokens = ContextManager::estimateTokens(m_agent.messages());
     const int window = m_settings.contextWindow > 0
         ? m_settings.contextWindow
         : ContextManager::contextWindowFor(modelFor(m_settings));
     if (window <= 0) {
         m_tokenCount->setText(QString());
         m_tokenCount->hide();
-        if (m_resetContext) {
-            m_resetContext->hide();
-        }
         return;
+    }
+
+    int tokens = ContextManager::estimateTokens(m_agent.messages());
+    // A full window resets itself: fold the history into a summary as soon as
+    // the readout would reach 100%, so the next request is never built from a
+    // spent window. Mid-turn the agent already compacts on its own when the
+    // provider rejects the request, so leave a busy turn alone; compactContext()
+    // also declines when there is nothing worth reclaiming.
+    if ((tokens * 100) / window >= 100 && !m_agent.isBusy() && m_agent.compactContext()) {
+        // compactContext() emits contextCompacted synchronously, which re-enters
+        // here with the shorter history; recompute so the label settles on the
+        // new figure rather than the full window this pass started from.
+        tokens = ContextManager::estimateTokens(m_agent.messages());
     }
 
     const int percent = qBound(0, (tokens * 100) / window, 100);
     m_tokenCount->setText(i18n("%1% ctx", percent));
-    m_tokenCount->setToolTip(i18n("Context: about %1 of %2 tokens used (%3%). Older turns compact automatically so prompting continues.", tokens, window, percent));
-    // The reset affordance appears as the window runs out, which is the only
-    // moment it is useful: the chip stays a readout the rest of the time.
-    if (m_resetContext) {
-        m_resetContext->setVisible(percent >= 95);
-    }
+    m_tokenCount->setToolTip(i18n("Context: about %1 of %2 tokens used (%3%). Older turns compact automatically so prompting continues.",
+                                  tokens, window, percent));
     QString colour = ChatTheme::success();
     QString bg = QStringLiteral("rgba(78, 201, 160, 0.16)");
     if (percent >= 90) {
@@ -2801,6 +2796,7 @@ void ChatWidget::showModelMenu()
     modelsLayout->setContentsMargins(0, 0, 0, 0);
     auto *list = new QListWidget(modelsPage);
     m_modelResultList = list;
+    list->setObjectName(u"modelResults"_s);
     list->setUniformItemSizes(true);
     list->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     list->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
@@ -2814,6 +2810,7 @@ void ChatWidget::showModelMenu()
     acpLayout->setContentsMargins(0, 0, 0, 0);
     auto *acpList = new QListWidget(acpPage);
     m_acpAgentResultList = acpList;
+    acpList->setObjectName(u"acpAgents"_s);
     acpList->setUniformItemSizes(true);
     acpList->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     acpList->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
@@ -3402,6 +3399,12 @@ Settings ChatWidget::settingsForAcpAgent(const QString &agentId) const
     agentSettings.provider = Provider::Acp;
     agentSettings.apiFormat = ApiFormat::AcpNative;
     agentSettings.acpAgentId = agentId;
+    if (agentId != m_settings.acpAgentId) {
+        // The configured model belongs to the agent the settings point at.
+        // Carrying it over would make this other agent look like it already
+        // advertises a catalogue, and its live models are never fetched.
+        agentSettings.acpModel.clear();
+    }
     const QJsonArray installed = QJsonDocument::fromJson(m_settings.acpInstalledAgents.toUtf8()).array();
     for (const QJsonValue &value : installed) {
         const QJsonObject agent = value.toObject();
@@ -4393,7 +4396,7 @@ QString ChatWidget::escape(const QString &text)
 
 QString ChatWidget::markdownToHtml(const QString &text)
 {
-    return makeMarkdownDocument(text)->toHtml();
+    return makeMarkdownDocument(text, ChatTheme::messageCss())->toHtml();
 }
 
 QString ChatWidget::closedMarkdown(const QString &text)
@@ -4639,7 +4642,7 @@ void ChatWidget::rebuildTranscript()
                         QPushButton *thinkingToggle = nullptr;
                         auto *thinkingBlock = createThinkingBlock(assistantWidget, thinkingBrowser, thinkingToggle, false);
                         if (thinkingBrowser) {
-                            thinkingBrowser->setDocument(makeMarkdownDocument(closedMarkdown(msg.thinking)));
+                            thinkingBrowser->setDocument(makeMarkdownDocument(closedMarkdown(msg.thinking), ChatTheme::thinkingCss()));
                         }
                         thinkingBlock->show();
                         layout->addWidget(thinkingBlock);
@@ -4658,17 +4661,11 @@ void ChatWidget::rebuildTranscript()
                     browser->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
                     browser->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
                     browser->setStyleSheet(u"background: transparent; color: #d4d4d4; border: none; padding: 0px;"_s);
-                    browser->document()->setDefaultStyleSheet(
-                        u"body { color: #d4d4d4; font-family: sans-serif; font-size: 13px; margin: 0; padding: 0; }"
-                        u"pre { background-color: #222225; color: #e4e4e4; padding: 10px 12px; border-radius: 6px; border: 1px solid #333338; font-family: monospace; font-size: 12px; margin: 8px 0; }"
-                        u"code { font-family: monospace; font-size: 12px; background-color: #28282d; color: #e4e4e4; padding: 2px 5px; border-radius: 3px; }"
-                        u"p { margin-bottom: 8px; line-height: 1.5; }"
-                        u"ul, ol { margin-bottom: 8px; padding-left: 20px; }"
-                        u"li { margin-bottom: 4px; }"
-                        u"blockquote { border-left: 3px solid #3b82f6; padding-left: 10px; color: #888; margin: 8px 0; }"
-                        u"a { color: #3b82f6; text-decoration: none; }"_s);
                     if (hasVisibleText) {
-                        browser->setDocument(makeMarkdownDocument(msg.content));
+                        // The stylesheet is carried by the document itself: the
+                        // setDocument() below replaces this browser's document,
+                        // so a stylesheet installed on it would never apply.
+                        browser->setDocument(makeMarkdownDocument(msg.content, ChatTheme::messageCss()));
                     } else {
                         browser->hide();
                     }

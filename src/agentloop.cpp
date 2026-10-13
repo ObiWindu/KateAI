@@ -22,7 +22,9 @@
 #include <QDebug>
 #include <QDateTime>
 #include <QElapsedTimer>
+#include <QMetaObject>
 #include <QProcess>
+#include <QSharedPointer>
 #include <QTimer>
 #include <QUuid>
 #include <utility>
@@ -1933,15 +1935,19 @@ void AgentLoop::startWebTool(const ToolCall &call)
         if (wanted > 0) {
             m_web.setMaxResults(wanted);
         }
-        connect(&m_web, &WebSearch::searchFinished, this,
-                [this, call, query](const QString &callId, const QList<WebSearchResult> &results, const QString &error) {
-                    // m_web is shared by every loop, and the agent may have
-                    // several searches in flight at once. Without this guard the
-                    // first reply completes every waiting call, which double
-                    // decrements m_inFlight and corrupts the turn accounting.
+        // m_web is shared for the lifetime of this loop, and several web calls
+        // can be in flight at once. Each call owns its own connection and tears
+        // it down when it completes, so a completion never consumes or wakes a
+        // sibling's handler. A Qt::SingleShotConnection would break here: one
+        // emission wakes every connected lambda, so the first completion would
+        // fire (and discard) every sibling's handler and drop their result.
+        auto conn = QSharedPointer<QMetaObject::Connection>::create();
+        *conn = connect(&m_web, &WebSearch::searchFinished, this,
+                [this, call, query, conn](const QString &callId, const QList<WebSearchResult> &results, const QString &error) {
                     if (callId != call.id) {
                         return;
                     }
+                    disconnect(*conn);
                     ToolResult out;
                     out.toolCallId = callId;
                     out.name = call.name;
@@ -1961,17 +1967,18 @@ void AgentLoop::startWebTool(const ToolCall &call)
                     out.ok = true;
                     out.output = lines.join(u"\n"_s);
                     finishAsyncTool(call, out);
-                },
-                Qt::SingleShotConnection);
+                });
         m_web.search(query, call.id);
         return;
     }
 
-    connect(&m_web, &WebSearch::fetchFinished, this,
-            [this, call](const QString &callId, const QString &title, const QString &text, const QString &error) {
+    auto conn = QSharedPointer<QMetaObject::Connection>::create();
+    *conn = connect(&m_web, &WebSearch::fetchFinished, this,
+            [this, call, conn](const QString &callId, const QString &title, const QString &text, const QString &error) {
                 if (callId != call.id) {
                     return;
                 }
+                disconnect(*conn);
                 ToolResult out;
                 out.toolCallId = callId;
                 out.name = call.name;
@@ -1984,8 +1991,7 @@ void AgentLoop::startWebTool(const ToolCall &call)
                 out.ok = true;
                 out.output = title.isEmpty() ? text : (u"# "_s + title + u"\n\n"_s + text);
                 finishAsyncTool(call, out);
-            },
-            Qt::SingleShotConnection);
+            });
     m_web.fetchPage(url, call.id);
 }
 
@@ -2266,10 +2272,21 @@ void AgentLoop::dispatchSubtask(const ToolCall &call)
     state->timer = new QTimer(child);
     state->timer->setSingleShot(true);
     state->timer->setInterval(qBound(10000, m_settings.subtaskTimeoutMs, 30 * 60 * 1000));
-    connect(state->timer, &QTimer::timeout, this, [this, child, state] {
-        child->abort();
+    connect(state->timer, &QTimer::timeout, this, [this, child, state, taskId] {
+        // A normal finish removes the child from m_activeSubtasks and deletes
+        // the shared state. If this timer fires after that (its timeout was
+        // already queued when stop() was called), bail out rather than touch
+        // freed memory.
+        if (!m_activeSubtasks.contains(taskId)) {
+            return;
+        }
+        // Set the failure on the shared state BEFORE aborting: abort() emits
+        // turnFinished synchronously (same thread) and its cleanup lambda reads
+        // this state and then deletes it. Writing afterwards would be a
+        // use-after-free and the timeout reason would never reach the result.
         state->ok = false;
         state->error = u"The subtask exceeded its time budget."_s;
+        child->abort();
     });
 
     connect(
@@ -2466,8 +2483,15 @@ void AgentLoop::resolvePermission(PermissionDecision decision)
     Q_EMIT statusChanged(u"Working on the next step…"_s);
     if (isAsyncTool(call.name) || call.name == u"bash"_s) {
         ++m_inFlight;
-        dispatchAsyncTool(call);
+        // Enter ExecutingTools BEFORE dispatch. A tool that can finish inline
+        // (an unconfigured web tool, a sub-agent refused for depth/parallelism)
+        // runs finishAsyncTool() synchronously, which advances the state and
+        // pumps the queue on its own. Setting the state first makes that inline
+        // completion the single source of truth; the guard in processQueue()
+        // discards this trailing attempt instead of scheduling the next model
+        // step twice.
         m_state = State::ExecutingTools;
+        dispatchAsyncTool(call);
         // A streaming command holds the queue: the next tool runs once it
         // reports, exactly as it did when commands ran synchronously.
         if (m_runningBashId.isEmpty()) {

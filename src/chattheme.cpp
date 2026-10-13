@@ -480,30 +480,17 @@ QString messageCss()
            "p { margin-bottom: 8px; line-height: 1.5; }"
            "ul, ol { margin-bottom: 8px; padding-left: 20px; }"
            "li { margin-bottom: 4px; }"
-           // Code blocks get their own surface: a step darker than the card and
-           // distinct from the panel behind it, so a long sample reads as a
-           // separate object rather than as more prose.
-           "pre.codeblock {"
-           "  background-color: %2;"
-           "  color: %1;"
-           "  padding: 10px 12px;"
-           "  margin: 10px 0;"
-           "  border: 1px solid %3;"
-           "  border-left: 3px solid %4;"
-           "  border-radius: 8px;"
-           "  font-family: monospace;"
-           "  font-size: 12px;"
-           "  white-space: pre-wrap;"
-           "}"
-           "span.codeblock-lang {"
-           "  display: block;"
-           "  color: %5;"
-           "  font-family: sans-serif;"
-           "  font-size: 10px;"
-           "  font-weight: 600;"
-           "  letter-spacing: 0.5px;"
-           "  margin-bottom: 6px;"
-           "}"
+           // Fenced code is emitted by CodeHighlight as a two-row table -- a
+           // language strip over a <pre class="codeblock">. Qt's rich text
+           // engine honours cell backgrounds and table borders but ignores most
+           // block-level CSS, so these selectors match that markup. Rules that
+           // name only `pre.codeblock`/`span.codeblock-lang` never match and
+           // leave the block unboxed and the code uncoloured.
+           "table.codeblock { border: 1px solid %3; border-radius: 6px; margin: 8px 0; background-color: %2; }"
+           "td.codeblock-lang { color: %5; font-family: sans-serif; font-size: 10px; font-weight: 600;"
+           "                    background-color: %2; padding: 4px 10px; }"
+           "pre.codeblock { color: %1; font-family: monospace; font-size: 12px; white-space: pre-wrap;"
+           "                 background-color: %2; margin: 6px 10px; }"
            "code { font-family: monospace; font-size: 12px; background-color: %6; color: %1;"
            "       padding: 2px 5px; border-radius: 3px; }"
            "blockquote { border-left: 3px solid %4; padding-left: 10px; color: %5; margin: 8px 0; }"

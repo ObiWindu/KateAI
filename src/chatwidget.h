@@ -359,8 +359,6 @@ private:
     // command does not re-render its card once per chunk.
     QHash<QString, QString> m_pendingProgress;
     QTimer *m_progressTimer = nullptr;
-    // Resets a full context window to a summary, keeping the live turn.
-    QPushButton *m_resetContext = nullptr;
 
     // Conversation history
     QPushButton *m_historyButton = nullptr;
