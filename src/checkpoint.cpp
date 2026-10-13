@@ -9,9 +9,11 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QMutex>
 #include <QProcess>
 #include <QProcessEnvironment>
 #include <QStandardPaths>
+#include <QRecursiveMutex>
 
 using namespace Qt::Literals::StringLiterals;
 
@@ -259,6 +261,8 @@ bool CheckpointManager::stageWorktree(QString *error) const
 
 int CheckpointManager::nextSequence() const
 {
+    QMutexLocker locker(&m_checkpointMutex);
+
     QString output;
     if (!runGit({u"for-each-ref"_s, u"--format=%(refname)"_s, TagNamespace}, &output, nullptr)) {
         return 1;
@@ -294,6 +298,8 @@ QStringList CheckpointManager::checkpointHashes() const
 
 QStringList CheckpointManager::checkpointRefs() const
 {
+    QMutexLocker locker(&m_checkpointMutex);
+
     QString output;
     if (!runGit({u"for-each-ref"_s, u"--sort=-refname"_s, u"--format=%(refname)"_s, TagNamespace}, &output, nullptr)) {
         return {};
@@ -303,6 +309,8 @@ QStringList CheckpointManager::checkpointRefs() const
 
 QString CheckpointManager::createCheckpoint(const QString &label, QString *error)
 {
+    QMutexLocker locker(&m_checkpointMutex);
+
     if (!isAvailable()) {
         if (error && m_unavailableReason.isEmpty()) {
             *error = u"Checkpoints are unavailable."_s;
@@ -339,6 +347,8 @@ QString CheckpointManager::createCheckpoint(const QString &label, QString *error
 
 void CheckpointManager::prune()
 {
+    QMutexLocker locker(&m_checkpointMutex);
+
     if (checkpointHashes().size() <= m_retention) {
         return;
     }
@@ -420,6 +430,8 @@ QString CheckpointManager::diffAgainstCheckpoint(const QString &id, int maxLines
 
 bool CheckpointManager::restoreCheckpoint(const QString &id, QString *error)
 {
+    QMutexLocker locker(&m_checkpointMutex);
+
     if (!isAvailable()) {
         if (error) {
             *error = m_unavailableReason.isEmpty() ? u"Checkpoints are unavailable."_s : m_unavailableReason;
@@ -439,7 +451,7 @@ bool CheckpointManager::restoreCheckpoint(const QString &id, QString *error)
         return false;
     }
     const QStringList currentList = listed.split(u'\n', Qt::SkipEmptyParts);
-        const QSet<QString> currentFiles(currentList.cbegin(), currentList.cend());
+    const QSet<QString> currentFiles(currentList.cbegin(), currentList.cend());
 
     if (!runGit({u"read-tree"_s, id}, nullptr, error)) {
         return false;
@@ -453,7 +465,7 @@ bool CheckpointManager::restoreCheckpoint(const QString &id, QString *error)
         return true;
     }
     const QStringList restoredList = restored.split(u'\n', Qt::SkipEmptyParts);
-        const QSet<QString> restoredFiles(restoredList.cbegin(), restoredList.cend());
+    const QSet<QString> restoredFiles(restoredList.cbegin(), restoredList.cend());
 
     // Files that existed in the snapshot we rolled back from but are absent in
     // the checkpoint were added after it, so they must be removed.

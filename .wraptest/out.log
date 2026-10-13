@@ -1,0 +1,30 @@
+********* Start testing of TestOverflow *********
+Config: Using QtTest library 6.11.2, Qt 6.11.2 (arm64-little_endian-lp64 shared (dynamic) release build; by GCC 16.2.1 20260819 (Red Hat 16.2.1-2)), fedora-asahi-remix 44
+PASS   : TestOverflow::initTestCase()
+QWARN  : TestOverflow::installedAgentClickShowsModels() This plugin does not support propagateSizeHints()
+QWARN  : TestOverflow::installedAgentClickShowsModels() This plugin does not support propagateSizeHints()
+QWARN  : TestOverflow::installedAgentClickShowsModels() This plugin does not support raise()
+QWARN  : TestOverflow::installedAgentClickShowsModels() This plugin does not support grabbing the keyboard
+QWARN  : TestOverflow::installedAgentClickShowsModels() This plugin does not support propagateSizeHints()
+QWARN  : TestOverflow::installedAgentClickShowsModels() This plugin does not support propagateSizeHints()
+tick 0: <none>
+tick 1: <none>
+tick 2: <none>
+tick 3: <none>
+tick 4: <none>
+tick 5: <none>
+tick 6: <none>
+tick 7: <none>
+tick 8: <none>
+tick 9: <none>
+FAIL!  : TestOverflow::installedAgentClickShowsModels() 'other' returned FALSE. (Mock Two not listed in the ACP Agents tab)
+   Loc: [/home/macewindu/ai-dev/KateAI/tests/test_overflow.cpp(208)]
+corrupted double-linked list
+Received signal 6 (SIGABRT)
+         installedAgentClickShowsModels function time: 2603ms, total time: 2603ms
+
+=== Stack trace ===
+Received signal 15 (SIGTERM) sent by PID 1669368 UID 1001
+         installedAgentClickShowsModels function time: 149943ms, total time: 149944ms
+
+=== Stack trace ===

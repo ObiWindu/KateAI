@@ -82,23 +82,26 @@ void PromptEdit::addHistory(const QString &text)
 
 void PromptEdit::autoGrow()
 {
+    // The composer is half again as tall as it used to be: three lines of
+    // head-room when empty (a pasted stack trace stays readable) and twelve
+    // lines of growth before scrolling, which is half again the old eight.
     const int docH = static_cast<int>(document()->size().height());
     const int lineH = fontMetrics().lineSpacing();
-    const int minH = lineH * 2 + 16;
-    const int maxH = lineH * 8 + 16;
+    const int minH = lineH * 3 + 16;
+    const int maxH = lineH * 12 + 16;
     const int targetH = std::clamp(docH + 16, minH, maxH);
     setFixedHeight(targetH);
 }
 
 QSize PromptEdit::sizeHint() const
 {
-    const int h = fontMetrics().lineSpacing() * 2 + 16;
+    const int h = fontMetrics().lineSpacing() * 3 + 16;
     return {QPlainTextEdit::sizeHint().width(), h};
 }
 
 QSize PromptEdit::minimumSizeHint() const
 {
-    const int h = fontMetrics().lineSpacing() * 2 + 16;
+    const int h = fontMetrics().lineSpacing() * 3 + 16;
     return {QPlainTextEdit::minimumSizeHint().width(), h};
 }
 

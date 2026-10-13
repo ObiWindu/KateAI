@@ -55,6 +55,8 @@ target_sources(kateai PRIVATE
     permissionbar.cpp
     edittracker.cpp
     subtaskwidget.cpp
+    suggestionwidget.cpp
+    questionwidget.cpp
     kateai.qrc
 )
 target_link_libraries(kateai PRIVATE

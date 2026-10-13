@@ -162,9 +162,17 @@ void renderMarkdown(QTextDocument *doc, const QString &markdown)
     doc->setHtml(html);
 }
 
-QTextDocument *makeMarkdownDocument(const QString &markdown)
+QTextDocument *makeMarkdownDocument(const QString &markdown, const QString &styleSheet)
 {
     auto *doc = new QTextDocument;
+    // The stylesheet must be set BEFORE the markdown is parsed:
+    // QTextDocument::setDefaultStyleSheet() only affects content that is parsed
+    // afterwards, and nothing re-applies it. Setting it here (rather than on the
+    // QTextBrowser's own document) is what makes it survive setDocument(), which
+    // swaps in this document and discards the browser's.
+    if (!styleSheet.isEmpty()) {
+        doc->setDefaultStyleSheet(styleSheet);
+    }
     renderMarkdown(doc, markdown);
     return doc;
 }

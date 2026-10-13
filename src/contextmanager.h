@@ -47,6 +47,11 @@ struct Options {
     // Per-request cap on how much of an old user request survives into the
     // summary. 0 means a sensible default.
     int summaryRequestChars = 0;
+    // When true, the entire conversation except the system prompt and the live
+    // user turn is folded into the summary. This is what the user-facing
+    // "reset context" action uses: it is how a full context window is reclaimed
+    // without losing what the work so far was about.
+    bool summarizeEverything = false;
 };
 
 int estimateTokens(const QString &text);
@@ -63,6 +68,16 @@ int contextWindowFor(const QString &model);
  * "max messages" cutoff.
  */
 QList<ChatMessage> build(const QList<ChatMessage> &history, const Options &options);
+
+/**
+ * Folds the whole conversation into one summary, keeping only the system prompt
+ * and the most recent user turn verbatim. This is the user-driven counterpart
+ * to build(): when the context window has filled up, it reclaims all of it at
+ * once instead of waiting for a request to fail, while retaining what the work
+ * so far was about — the requests, the files touched, the tools used and where
+ * the conversation had got to.
+ */
+QList<ChatMessage> resetContext(const QList<ChatMessage> &history, const Options &options);
 
 QString summaryHeader();
 

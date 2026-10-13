@@ -53,7 +53,14 @@ private Q_SLOTS:
         QVERIFY(!codeTools.contains(u"new_task"_s));
 
         const QStringList askTools = toolNames(toolDefinitions(ModeRegistry::toolAccessForGroups({ToolGroup::read(), ToolGroup::mcp()})));
-        QCOMPARE(askTools.size(), 5);
+        QCOMPARE(askTools.size(), 8);
+        // The plan file lives outside the workspace and suggest only posts a
+        // card, so read-only modes and plan mode keep both.
+        QVERIFY(askTools.contains(u"write_plan_file"_s));
+        QVERIFY(askTools.contains(u"suggest"_s));
+        // A question touches nothing, so a read-only turn may ask one -- which
+        // is exactly when the turn is otherwise stuck on the user.
+        QVERIFY(askTools.contains(u"question"_s));
         QVERIFY(!askTools.contains(u"write_file"_s));
         QVERIFY(!askTools.contains(u"bash"_s));
 
@@ -76,6 +83,10 @@ private Q_SLOTS:
         QVERIFY(!planned.allows(u"bash"_s));
         QVERIFY(!planned.allows(u"new_task"_s));
         QVERIFY(planned.allows(u"read_file"_s));
+        // Planning is exactly when the plan file matters, so the read-only
+        // clamp must keep it -- and with it suggest, which is just a card.
+        QVERIFY(planned.allows(u"write_plan_file"_s));
+        QVERIFY(planned.allows(u"suggest"_s));
         Q_UNUSED(access)
     }
 

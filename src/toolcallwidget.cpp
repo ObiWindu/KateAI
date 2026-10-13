@@ -269,6 +269,9 @@ ToolCallWidget::ToolCallWidget(const QString &toolCallId, QWidget *parent)
     detailsLayout->setSpacing(0);
 
     m_details = new QTextBrowser(this);
+    // Named so the result surface can be found from a test without reaching
+    // into private members.
+    m_details->setObjectName(u"toolDetails"_s);
     m_details->setReadOnly(true);
     m_details->setOpenExternalLinks(false);
     m_details->setMinimumWidth(0);
@@ -326,6 +329,23 @@ void ToolCallWidget::setToolInfo(const QString &toolName, const QString &summary
                         + (m_titleText.isEmpty() ? QString() : u"\n"_s + m_titleText));
     updateTitleText();
     updateStyle();
+    if (!m_finished) {
+        // The in-flight glyph was coloured before the tool name was known, so
+        // give it the tool's hue now that it is.
+        applyRunningStatusColor();
+    }
+}
+
+void ToolCallWidget::applyRunningStatusColor()
+{
+    if (!m_status) {
+        return;
+    }
+    QString running = ChatTheme::toolColor(m_toolName);
+    if (running == ChatTheme::textMuted()) {
+        running = colorForRisk(m_risk);
+    }
+    m_status->setStyleSheet(QStringLiteral("QLabel { color: %1; font-size: 14px; }").arg(running));
 }
 
 void ToolCallWidget::setApprovalSubject(const QString &subject)
@@ -390,8 +410,11 @@ void ToolCallWidget::setRunning()
 {
     m_finished = false;
     m_denied = false;
+    m_ok = true;
     m_status->setText(u"⟳"_s);
-    m_status->setStyleSheet(QStringLiteral("QLabel { color: %1; font-size: 14px; }").arg(ChatTheme::accent()));
+    // The running glyph takes the tool's own hue, so a card in flight is easy
+    // to pick out of a wall of finished ones without a second colour system.
+    applyRunningStatusColor();
 
     // A running call is worth timing. The label stays hidden for the first
     // second so instant calls do not flicker a duration into the transcript.
@@ -496,6 +519,47 @@ QString ToolCallWidget::escapeHtml(const QString &s) const
     return out;
 }
 
+void ToolCallWidget::setPartialOutput(const QString &partialOutput)
+{
+    if (m_finished || partialOutput.isEmpty()) {
+        return;
+    }
+    m_partialOutput = partialOutput;
+
+    // The stream is rendered in the muted colour so the card reads as "this is
+    // still arriving" while it runs, and setFinished's white text is clearly
+    // the final answer. Capped by lines like the finished text, so a chatty
+    // command cannot grow the card without bound either.
+    QStringList lines = partialOutput.split(u'\n');
+    constexpr int maxResultLines = 200;
+    if (lines.size() > maxResultLines) {
+        const int hidden = lines.size() - maxResultLines;
+        lines = lines.mid(0, maxResultLines);
+        lines.append(i18n("… %1 more lines", hidden));
+    }
+
+    m_details->setHtml(partialToHtml(lines.join(u'\n')));
+    // A stream is worth watching, so it opens itself; a card the user collapsed
+    // themselves stays collapsed, because setExpanded tracks their choice.
+    if (!m_details->toPlainText().isEmpty()) {
+        setExpanded(true);
+    }
+    applyDetailsHeight();
+    scheduleReflow();
+}
+
+QString ToolCallWidget::partialToHtml(const QString &text) const
+{
+    QString out = u"<body style=\"color: %1; font-family: monospace; font-size: 11px;\">"_s
+                      .arg(ChatTheme::textMuted());
+    const QStringList lines = text.split(u'\n');
+    for (const QString &line : lines) {
+        out += u"<p style=\"margin: 0; white-space: pre-wrap;\">%1</p>"_s.arg(line.isEmpty() ? u"&nbsp;"_s : escapeHtml(line));
+    }
+    out += u"</body>"_s;
+    return out;
+}
+
 void ToolCallWidget::setActivityFrame(int frame)
 {
     if (m_finished || !m_status) {
@@ -509,6 +573,8 @@ void ToolCallWidget::setFinished(const ToolResult &result)
 {
     m_finished = true;
     m_ok = result.ok;
+    // The live stream is over: whatever it showed is now history.
+    m_partialOutput.clear();
     if (m_durationTimer) {
         m_durationTimer->stop();
     }
@@ -615,12 +681,21 @@ void ToolCallWidget::toggleExpand()
 
 void ToolCallWidget::updateStyle()
 {
-    // One accent rail on the left, carrying both the risk and the outcome, so
-    // the card reads the same whether it is running, done or failed. The body
-    // stays on a single surface: tinting the whole card by risk made a long
-    // transcript read as stripes. The card sits on its own surface rather than
-    // the panel backdrop, so a collapsed tool call is still findable.
-    const QString rail = colorForRisk(m_risk);
+    // One accent rail on the left, plus the tool's own hue blended into the
+    // card and header surfaces. The colour is per tool rather than per risk:
+    // scans down a long transcript are by tool (what ran, what changed), and a
+    // transcript of cards all the same shade gives the eye nothing to hold on
+    // to. Failure still overrides everything in red, because that is the one
+    // state that must never be missed.
+    QString rail = ChatTheme::toolColor(m_toolName);
+    if (rail == ChatTheme::textMuted()) {
+        // An unknown tool (an MCP or ACP call with no built-in colour) still
+        // needs a rail, so fall back to the risk.
+        rail = colorForRisk(m_risk);
+    }
+    if ((m_finished && !m_ok) || m_denied) {
+        rail = ChatTheme::danger();
+    }
 
     setStyleSheet(
         QStringLiteral(
@@ -630,10 +705,14 @@ void ToolCallWidget::updateStyle()
             "  border-radius: 6px;"
             "  margin: 2px 0;"
             "}")
-        .arg(ChatTheme::toolBg(), rail));
+        .arg(ChatTheme::toolCardBg(m_toolName), rail));
 
-    m_header->setStyleSheet(ChatTheme::toolHeader());
+    m_header->setStyleSheet(ChatTheme::toolHeader(m_toolName));
     m_title->setStyleSheet(QStringLiteral("QLabel { color: %1; font-size: 12px; }").arg(ChatTheme::textPrimary()));
+    if (m_icon) {
+        m_icon->setStyleSheet(QStringLiteral("QLabel { color: %1; font-size: 13px; background: transparent; }")
+                                  .arg(rail));
+    }
 }
 
 QString ToolCallWidget::iconForTool(const QString &toolName) const
@@ -652,6 +731,10 @@ QString ToolCallWidget::iconForTool(const QString &toolName) const
         if (toolName == u"web_search"_s) return u"\u{1F310}"_s;
         if (toolName == u"web_fetch"_s) return u"\u{1F4D6}"_s;
     if (toolName == u"query_project_graph"_s) return u"\u{1F578}"_s;
+    if (toolName == u"write_plan_file"_s) return u"\u{1F4CB}"_s;
+    if (toolName == u"suggest"_s) return u"\u{1F4A1}"_s;
+    if (toolName == u"question"_s) return u"\u{2753}"_s;
+    if (toolName == u"goal_report"_s) return u"\u{1F3AF}"_s;
     if (toolName == u"new_task"_s) return u"\u{1F9E9}"_s;
     if (toolName.startsWith(u"mcp__"_s)) return u"\u{1F50C}"_s;
     if (toolName.startsWith(u"terminal/"_s) || toolName == u"terminal"_s) return u"\u{1F5A3}"_s;
@@ -825,8 +908,9 @@ void ToolCallWidget::updateTitleText()
     const QString wrapped = clampToLines(wrapToWidth(m_titleText, fm, firstW, avail), kMaxTitleLines, fm, avail);
     QString cmdHtml = escapeHtml(wrapped);
     cmdHtml.replace(u'\n', u"<br>"_s);
-    m_title->setText(QStringLiteral("<span style=\"color:%1\"><b>%2</b></span>&nbsp; %3")
-                         .arg(ChatTheme::textMuted(), escapeHtml(label), cmdHtml));
+    m_title->setText(QStringLiteral("<span style=\"color:%1\"><b>%2</b></span>&nbsp; <span style=\"color:%3\">%4</span>")
+                         .arg(ChatTheme::toolColor(m_toolName), escapeHtml(label),
+                              ChatTheme::textPrimary(), cmdHtml));
 
     const int lines = std::max(1, static_cast<int>(wrapped.count(u'\n')) + 1);
     m_title->setMaximumHeight(fm.lineSpacing() * lines + 2);

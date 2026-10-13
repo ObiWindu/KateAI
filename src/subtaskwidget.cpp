@@ -197,7 +197,9 @@ void SubtaskWidget::finishAgent(const ToolResult &result)
         m_ticker->stop();
     }
     m_cancel->setVisible(false);
-    m_answer->setDocument(makeMarkdownDocument(closeMarkdown(result.output)));
+    // A sub-agent's answer is markdown like any assistant turn, so it gets the
+    // same body table styling for any fenced code it contains.
+    m_answer->setDocument(makeMarkdownDocument(closeMarkdown(result.output), ChatTheme::messageCss()));
     m_answer->setVisible(true);
     updateHeader();
     applyStyle();
@@ -212,7 +214,7 @@ void SubtaskWidget::markAbandoned(const QString &reason)
         m_ticker->stop();
     }
     m_cancel->setVisible(false);
-    m_answer->setDocument(makeMarkdownDocument(closeMarkdown(reason)));
+    m_answer->setDocument(makeMarkdownDocument(closeMarkdown(reason), ChatTheme::messageCss()));
     m_answer->setVisible(true);
     updateHeader();
     applyStyle();

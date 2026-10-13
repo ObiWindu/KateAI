@@ -116,6 +116,8 @@ Settings SettingsStore::load()
     s.maxParallelSubtasks = g.readEntry(u"MaxParallelSubtasks"_s, 3);
     s.agentRoster = g.readEntry(u"AgentRoster"_s, QString());
     s.subtaskTimeoutMs = g.readEntry(u"SubtaskTimeoutMs"_s, 300000);
+    // Validate contextCompressionLevel (0=full, 1=summary, 2=minimal, 3=ultra-minimal)
+    s.contextCompressionLevel = qBound(0, s.contextCompressionLevel, 3);
     if (s.maxModelRequests < 0) {
         s.maxModelRequests = 0;
     }

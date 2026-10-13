@@ -33,6 +33,10 @@ QString closeMarkdown(const QString &text);
 void renderMarkdown(QTextDocument *doc, const QString &markdown);
 
 // Renders markdown into a document owned by the caller, ready for a QTextBrowser.
-QTextDocument *makeMarkdownDocument(const QString &markdown);
+// `styleSheet`, when given, becomes the document's default stylesheet. It must be
+// set before the markdown is parsed: callers that hand the document to a
+// QTextBrowser via setDocument() lose the browser's own stylesheet, because
+// setDocument() replaces that document wholesale.
+QTextDocument *makeMarkdownDocument(const QString &markdown, const QString &styleSheet = QString());
 
 } // namespace KateAi

@@ -25,6 +25,20 @@ private Q_SLOTS:
                  PermissionPolicy::Verdict::Allow);
     }
 
+    void questionNeverPromptsOrMutates()
+    {
+        PermissionPolicy ask(PermissionMode::Ask);
+        Sandbox box(QDir::tempPath(), SandboxProfile::Workspace);
+        QString reason;
+        // Asking the user something is not an action on the workspace, so it
+        // must not be held up for a permission decision in any mode.
+        QCOMPARE(ask.evaluate(u"question"_s, QJsonObject{{u"question"_s, u"Which one?"_s}}, box, &reason),
+                 PermissionPolicy::Verdict::Allow);
+        QVERIFY(ask.isReadTool(u"question"_s));
+        QCOMPARE(ask.riskFor(u"question"_s), ToolRisk::Read);
+        QCOMPARE(PermissionPolicy(PermissionMode::AlwaysApprove).riskFor(u"question"_s), ToolRisk::Read);
+    }
+
     void writesAskByDefault()
     {
         PermissionPolicy policy(PermissionMode::Ask);

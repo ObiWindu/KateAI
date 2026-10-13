@@ -92,7 +92,16 @@ int estimateTokens(const QString &text)
     if (text.isEmpty()) {
         return 0;
     }
-    return qMax(1, text.length() / kCharsPerToken);
+    // Better token estimation: use UTF-8 byte count / 4 for non-ASCII, chars / 4 for ASCII
+    // This is more accurate for mixed content
+    const QByteArray utf8 = text.toUtf8();
+    const int byteCount = utf8.size();
+    const int charCount = text.length();
+    // If mostly ASCII (1 byte per char), use char count. If multibyte, use byte count.
+    if (byteCount <= charCount * 1.2) {
+        return qMax(1, charCount / 4);
+    }
+    return qMax(1, byteCount / 4);
 }
 
 int estimateTokens(const QList<ChatMessage> &messages)
@@ -124,6 +133,7 @@ QString buildSummary(const QList<ChatMessage> &dropped, int requestChars)
     QStringList userRequests;
     QStringList files;
     QStringList tools;
+    QStringList outcomes;
     int rejected = 0;
 
     for (const ChatMessage &message : dropped) {
@@ -150,6 +160,12 @@ QString buildSummary(const QList<ChatMessage> &dropped, int requestChars)
                 if (!toolName.isEmpty() && !tools.contains(toolName)) {
                     tools << toolName;
                 }
+            }
+            // The last thing the agent said before the span was dropped is the
+            // other half of "where did this get to": the files tell the next
+            // turn what was touched, the closing words tell it what was found.
+            if (!message.content.trimmed().isEmpty() && outcomes.size() < 2) {
+                outcomes.prepend(oneLine(message.content, 400));
             }
             break;
         case ChatMessage::Role::Tool:
@@ -183,6 +199,12 @@ QString buildSummary(const QList<ChatMessage> &dropped, int requestChars)
     }
     if (!tools.isEmpty()) {
         lines << QStringLiteral("\nTools used: %1").arg(tools.join(QStringLiteral(", ")));
+    }
+    if (!outcomes.isEmpty()) {
+        lines << QStringLiteral("\nWhere it got to:");
+        for (int i = 0; i < outcomes.size(); ++i) {
+            lines << QStringLiteral("  %1. %2").arg(i + 1).arg(outcomes.at(i));
+        }
     }
     if (rejected > 0) {
         lines << QStringLiteral("%1 tool call(s) were rejected or denied; do not assume they ran.")
@@ -257,6 +279,16 @@ void shrinkToBudget(QList<ChatMessage> &result, int budget, int lastProtected)
 
 } // namespace
 
+QList<ChatMessage> resetContext(const QList<ChatMessage> &history, const Options &options)
+{
+    if (history.isEmpty()) {
+        return history;
+    }
+    Options reset = options;
+    reset.summarizeEverything = true;
+    return build(history, reset);
+}
+
 QList<ChatMessage> build(const QList<ChatMessage> &history, const Options &options)
 {
     if (history.isEmpty()) {
@@ -269,7 +301,7 @@ QList<ChatMessage> build(const QList<ChatMessage> &history, const Options &optio
     const int requestChars = options.summaryRequestChars > 0 ? options.summaryRequestChars
                                                              : kDefaultSummaryRequestChars;
 
-    if (estimateTokens(history) <= budget && options.compactionLevel <= 0) {
+    if (estimateTokens(history) <= budget && options.compactionLevel <= 0 && !options.summarizeEverything) {
         return history;
     }
 
@@ -283,6 +315,11 @@ QList<ChatMessage> build(const QList<ChatMessage> &history, const Options &optio
     int keepTokens = options.keepRecentTokens;
     if (keepTokens <= 0) {
         keepTokens = qMax(800, budget / 2);
+    }
+    if (options.summarizeEverything) {
+        // Only the live user turn survives verbatim: everything older is
+        // information the summary carries instead.
+        keepTokens = 0;
     }
     const int pressure = qBound(0, options.compactionLevel, 6);
     if (pressure > 0) {

@@ -155,6 +155,19 @@ struct PermissionRequest {
     // edit_file. Rendered inline by the tool-call card in the chat transcript.
     QString describeDiff;
     ToolRisk risk = ToolRisk::Write;
+
+    // True when the call lands its result in a file. ToolRunner::describe sets
+    // it for the mutating tools, and AcpClient::permissionFromToolCall sets it
+    // for ACP tool calls of kind edit/write/delete, so the edit tracker can
+    // review ACP edits whose tool names Kate does not know.
+    bool mutatesFiles = false;
+
+    // Filled only for the `question` tool: what is being asked, the answers
+    // offered as one-tap chips, and whether the user may type their own. The
+    // agent loop stops the turn until an answer arrives.
+    QString questionText;
+    QStringList questionOptions;
+    bool allowFreeform = true;
 };
 
 struct ToolResult {
@@ -165,6 +178,17 @@ struct ToolResult {
     bool ok = true;
     // True when the operation was stopped deliberately rather than failing.
     bool cancelled = false;
+};
+
+// One suggestion the agent wants the user to see, optionally anchored to a
+// file and line so Accept can take the user straight to the code it is about.
+// Reachable from the native suggest tool and from the ACP client method of
+// the same name.
+struct Suggestion {
+    QString text;
+    QString path;
+    // 1-based line number; 0 means no anchor.
+    int line = 0;
 };
 
 struct Settings {

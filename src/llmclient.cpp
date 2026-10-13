@@ -45,6 +45,71 @@ constexpr qint64 kRetryDelaySaturation = 1000000000;
 // generations.
 constexpr qsizetype kMaxRetainedResponseBytes = 256 * 1024;
 
+// Patterns that may indicate sensitive data in response bodies
+static const QStringList sensitivePatterns = {
+    u"api_key"_s, u"apikey"_s, u"api-key"_s, u"access_token"_s,
+    u"access-token"_s, u"secret"_s, u"password"_s, u"authorization"_s,
+    u"bearer "_s, u"x-api-key"_s, u"x-auth"_s
+};
+
+static QString sanitizeResponseBody(const QByteArray &body)
+{
+    QString text = QString::fromUtf8(body);
+    for (const QString &pattern : sensitivePatterns) {
+        // Simple redaction - replace values after sensitive keys
+        QRegularExpression re(QString(u"(\"%1\"\\s*:\\s*\")([^\"]+)(\")").arg(pattern), QRegularExpression::CaseInsensitiveOption);
+        text.replace(re, QString(u"\\1[REDACTED]\\3"));
+        re = QRegularExpression(QString(u"('%1'\\s*:\\s*')([^']+)(')").arg(pattern), QRegularExpression::CaseInsensitiveOption);
+        text.replace(re, QString(u"\\1[REDACTED]\\3"));
+    }
+    return text;
+}
+
+    // The system prompt for the Anthropic Messages API must be the top-level
+    // `system` parameter, never a system-role message: the API only accepts
+    // user/assistant turns and requires them to alternate starting with user.
+    static QStringList anthropicSystemParts(const QList<ChatMessage> &messages)
+    {
+        QStringList parts;
+        for (const ChatMessage &message : messages) {
+            if (message.role == ChatMessage::Role::System && !message.content.trimmed().isEmpty()) {
+                parts << message.content;
+            }
+        }
+        return parts;
+    }
+
+    // Convert OpenAI-shaped tool definitions
+    // ({type:function, function:{name,description,parameters}}) into Anthropic's
+    // shape ({name,description,input_schema}), which the Messages API requires.
+    static QJsonArray anthropicTools(const QJsonArray &openAiTools)
+    {
+        QJsonArray tools;
+        for (const QJsonValue &value : openAiTools) {
+            const QJsonObject fn = value.toObject().value(u"function"_s).toObject();
+            const QString name = fn.value(u"name"_s).toString();
+            if (name.isEmpty()) {
+                continue;
+            }
+            QJsonObject tool;
+            tool.insert(u"name"_s, name);
+            const QString description = fn.value(u"description"_s).toString();
+            if (!description.isEmpty()) {
+                tool.insert(u"description"_s, description);
+            }
+            QJsonValue schema = fn.value(u"parameters"_s);
+            if (!schema.isObject() || schema.toObject().isEmpty()) {
+                QJsonObject fallback;
+                fallback.insert(u"type"_s, u"object"_s);
+                fallback.insert(u"properties"_s, QJsonObject());
+                schema = fallback;
+            }
+            tool.insert(u"input_schema"_s, schema);
+            tools.append(tool);
+        }
+        return tools;
+    }
+
 } // namespace
 
 LlmClient::LlmClient(QObject *parent)
@@ -457,19 +522,29 @@ QJsonObject LlmClient::buildAnthropicRequest(const QList<ChatMessage> &messages,
 {
     QJsonObject body;
     body.insert(u"model"_s, model);
+
+    // The system prompt is a top-level parameter, never a system-role message.
+    const QStringList systemParts = anthropicSystemParts(messages);
+    if (!systemParts.isEmpty()) {
+        body.insert(u"system"_s, systemParts.join(u"\n\n"_s));
+    }
+
     body.insert(u"messages"_s, messagesToAnthropicJson(messages));
     body.insert(u"stream"_s, true);
-    body.insert(u"temperature"_s, m_settings.temperature);
-    body.insert(u"top_p"_s, m_settings.topP);
-    if (m_settings.maxTokens > 0) {
-        body.insert(u"max_tokens"_s, m_settings.maxTokens);
+    // max_tokens is required by the Messages API; fall back to a sane default.
+    body.insert(u"max_tokens"_s, m_settings.maxTokens > 0 ? m_settings.maxTokens : 4096);
+    // Anthropic constrains these to [0, 1]; a value carried over from a local
+    // model would otherwise be rejected outright.
+    body.insert(u"temperature"_s, qBound(0.0, m_settings.temperature, 1.0));
+    if (m_settings.topP > 0.0) {
+        body.insert(u"top_p"_s, qBound(0.0, m_settings.topP, 1.0));
     }
-    // Anthropic uses tools array directly
-    body.insert(u"tools"_s, advertisedTools());
-    if (m_settings.parallelToolCalls) {
-        body.insert(u"tool_choice"_s, u"auto"_s);
-    } else {
-        body.insert(u"tool_choice"_s, u"none"_s);
+
+    // Tools must be in Anthropic's {name, input_schema} shape, not OpenAI's.
+    const QJsonArray tools = anthropicTools(advertisedTools());
+    if (!tools.isEmpty()) {
+        body.insert(u"tools"_s, tools);
+        body.insert(u"tool_choice"_s, m_settings.parallelToolCalls ? u"auto"_s : u"none"_s);
     }
     return body;
 }
@@ -495,53 +570,106 @@ QJsonObject LlmClient::buildAcpNativeRequest(const QList<ChatMessage> &messages,
 
 QJsonArray LlmClient::messagesToAnthropicJson(const QList<ChatMessage> &messages)
 {
-    QJsonArray out;
-    for (const ChatMessage &msg : messages) {
-        QJsonObject obj;
-        switch (msg.role) {
+    QJsonArray turns;
+
+    // Merge a run of same-role content into a single turn so the Messages API
+    // never sees two consecutive turns with the same role (it requires strict
+    // user/assistant alternation).
+    auto lastRoleIs = [&turns](const QString &role) {
+        return !turns.isEmpty() && turns.last().toObject().value(u"role"_s).toString() == role;
+    };
+    auto appendBlock = [&turns](const QJsonObject &block) {
+        if (turns.isEmpty()) {
+            return;
+        }
+        QJsonObject turn = turns.last().toObject();
+        QJsonArray content = turn.value(u"content"_s).toArray();
+        content.append(block);
+        turn.insert(u"content"_s, content);
+        turns.replace(turns.size() - 1, turn);
+    };
+    auto ensureTurn = [&turns, &lastRoleIs](const QString &role) {
+        if (lastRoleIs(role)) {
+            return;
+        }
+        QJsonObject turn;
+        turn.insert(u"role"_s, role);
+        turn.insert(u"content"_s, QJsonArray());
+        turns.append(turn);
+    };
+
+    for (const ChatMessage &message : messages) {
+        switch (message.role) {
         case ChatMessage::Role::System:
-            // Anthropic uses system parameter separately, but we'll include as user with system prefix
-            obj.insert(u"role"_s, u"user"_s);
-            obj.insert(u"content"_s, QString(u"[System] "_s + msg.content));
+            // Emitted as the top-level `system` parameter, not a turn here.
             break;
-        case ChatMessage::Role::User:
-            obj.insert(u"role"_s, u"user"_s);
-            obj.insert(u"content"_s, msg.content);
-            break;
-        case ChatMessage::Role::Assistant:
-            obj.insert(u"role"_s, u"assistant"_s);
-            obj.insert(u"content"_s, msg.content);
-            if (!msg.thinking.isEmpty()) {
-                // Anthropic uses thinking blocks
-                QJsonArray content;
-                QJsonObject thinkingBlock;
-                thinkingBlock.insert(u"type"_s, u"thinking"_s);
-                thinkingBlock.insert(u"thinking"_s, msg.thinking);
-                content.append(thinkingBlock);
-                QJsonObject textBlock;
-                textBlock.insert(u"type"_s, u"text"_s);
-                textBlock.insert(u"text"_s, msg.content);
-                content.append(textBlock);
-                obj.insert(u"content"_s, content);
-            }
-            if (!msg.toolCalls.isEmpty()) {
-                obj.insert(u"tool_calls"_s, msg.toolCalls);
-            }
-            break;
-        case ChatMessage::Role::Tool:
-            obj.insert(u"role"_s, u"user"_s);
-            QJsonArray toolResult;
-            QJsonObject toolResultBlock;
-            toolResultBlock.insert(u"type"_s, u"tool_result"_s);
-            toolResultBlock.insert(u"tool_use_id"_s, msg.toolCallId);
-            toolResultBlock.insert(u"content"_s, msg.content);
-            toolResult.append(toolResultBlock);
-            obj.insert(u"content"_s, toolResult);
+        case ChatMessage::Role::User: {
+            ensureTurn(u"user"_s);
+            QJsonObject block;
+            block.insert(u"type"_s, u"text"_s);
+            block.insert(u"text"_s, message.content);
+            appendBlock(block);
             break;
         }
-        out.append(obj);
+        case ChatMessage::Role::Assistant: {
+            ensureTurn(u"assistant"_s);
+            // Hidden reasoning is intentionally dropped: Anthropic requires
+            // thinking blocks to round-trip with a signature, which we do not
+            // retain, so replaying them would be rejected.
+            if (!message.content.trimmed().isEmpty()) {
+                QJsonObject block;
+                block.insert(u"type"_s, u"text"_s);
+                block.insert(u"text"_s, message.content);
+                appendBlock(block);
+            }
+            for (const QJsonValue &value : message.toolCalls) {
+                const QJsonObject call = value.toObject();
+                const QJsonObject fn = call.value(u"function"_s).toObject();
+                QJsonObject block;
+                block.insert(u"type"_s, u"tool_use"_s);
+                block.insert(u"id"_s, call.value(u"id"_s).toString());
+                block.insert(u"name"_s, fn.value(u"name"_s).toString());
+                QJsonParseError parseError;
+                const QJsonDocument argsDoc = QJsonDocument::fromJson(fn.value(u"arguments"_s).toString().toUtf8(), &parseError);
+                block.insert(u"input"_s, parseError.error == QJsonParseError::NoError && argsDoc.isObject()
+                        ? QJsonValue(argsDoc.object()) : QJsonValue(QJsonObject()));
+                appendBlock(block);
+            }
+            break;
+        }
+        case ChatMessage::Role::Tool: {
+            ensureTurn(u"user"_s);
+            QJsonObject block;
+            block.insert(u"type"_s, u"tool_result"_s);
+            block.insert(u"tool_use_id"_s, message.toolCallId);
+            block.insert(u"content"_s, message.content);
+            appendBlock(block);
+            break;
+        }
+        }
     }
-    return out;
+
+    // The Messages API requires the first turn to be a user turn. If the
+    // conversation happened to begin with assistant content (e.g. a restored
+    // session), put a short continuation prompt in front instead.
+    if (!turns.isEmpty() && turns.first().toObject().value(u"role"_s).toString() == u"assistant"_s) {
+        QJsonObject lead;
+        lead.insert(u"role"_s, u"user"_s);
+        QJsonArray content;
+        QJsonObject block;
+        block.insert(u"type"_s, u"text"_s);
+        block.insert(u"text"_s, QStringLiteral("Please continue."));
+        content.append(block);
+        lead.insert(u"content"_s, content);
+        QJsonArray shifted;
+        shifted.append(lead);
+        for (const QJsonValue &value : turns) {
+            shifted.append(value);
+        }
+        turns = shifted;
+    }
+
+    return turns;
 }
 
 void LlmClient::fetchModels(Provider provider)
