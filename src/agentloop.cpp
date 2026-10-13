@@ -275,6 +275,8 @@ void AgentLoop::setWorkspace(const QString &workspace)
             // Generate new graph
             m_projectGraph->generateGraph(m_workspace);
         }
+        // Update ACP client with the project graph
+        m_acp.setProjectGraph(m_projectGraph.get());
     }
 }
 
@@ -283,6 +285,7 @@ void AgentLoop::setDocumentBridge(DocumentBridge *bridge)
     // Set the document bridge for file operations and reinitialize tools if sandbox exists
     m_bridge = bridge;
     m_acp.setDocumentBridge(bridge);
+    m_acp.setProjectGraph(m_projectGraph.get());
     if (m_sandbox) {
         m_tools = std::make_unique<ToolRunner>(*m_sandbox, m_bridge, this);
         m_tools->setTimeoutMs(m_settings.bashTimeoutMs);
@@ -431,6 +434,7 @@ void AgentLoop::updateProjectGraph(const QString &filePath, const QString &conte
     if (m_projectGraph) {
         m_projectGraph->updateGraph(filePath, content);
         m_projectGraph->saveToFile(m_workspace + u"/.kateai/project_graph.json"_s);
+        m_acp.setProjectGraph(m_projectGraph.get());
     }
 }
 
@@ -974,6 +978,7 @@ void AgentLoop::syncAcpClient()
     m_acp.setWorkspace(m_workspace);
     m_acp.setDocumentBridge(m_bridge);
     m_acp.setEditorContext(m_editorContext);
+    m_acp.setProjectGraph(m_projectGraph.get());
     if (m_mcp) {
         m_acp.setMcpServers(m_mcp->servers());
     }

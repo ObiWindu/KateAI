@@ -78,6 +78,7 @@ public:
      */
     void setDescribeDiff(const QString &diff);
     void setPreviewText(const QString &text);
+    void setFilePath(const QString &path);
 
     QString toolCallId() const { return m_toolCallId; }
         QString toolName() const { return m_toolName; }
@@ -137,6 +138,7 @@ private:
     bool m_durationEnabled = false;
     qint64 m_diffAdded = 0;
     qint64 m_diffRemoved = 0;
+    QString m_filePath;
 
     QElapsedTimer m_elapsed;
     QTimer *m_durationTimer = nullptr;

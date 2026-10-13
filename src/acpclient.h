@@ -23,6 +23,9 @@
 #include <functional>
 #include <memory>
 
+namespace KateAi {
+class ProjectGraph;
+}
 class QTimer;
 
 namespace KateAi
@@ -44,6 +47,7 @@ public:
     void setDocumentBridge(DocumentBridge *bridge);
     void setMcpServers(const QList<McpServerConfig> &servers);
     void setEditorContext(const QString &context);
+    void setProjectGraph(ProjectGraph *graph);
     // Session id from a previous Kate conversation, used with session/load
     // or session/resume when the agent advertises those capabilities.
     void setResumeSessionId(const QString &sessionId);
@@ -180,6 +184,7 @@ private:
 
     void handleFsRead(const QJsonValue &id, const QJsonObject &params);
     void handleFsWrite(const QJsonValue &id, const QJsonObject &params);
+    void handleQueryProjectGraph(const QJsonValue &id, const QJsonObject &params);
     void handleRequestPermission(const QJsonValue &id, const QJsonObject &params);
     void handleTerminalCreate(const QJsonValue &id, const QJsonObject &params);
     void handleTerminalOutput(const QJsonValue &id, const QJsonObject &params);
@@ -214,6 +219,8 @@ private:
     QString m_resumeSessionId;
     DocumentBridge *m_bridge = nullptr;
     QList<McpServerConfig> m_mcpServers;
+
+    ProjectGraph *m_projectGraph = nullptr;
 
     State m_state = State::Stopped;
     QString m_status;
