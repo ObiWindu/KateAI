@@ -92,7 +92,8 @@ void attachPulseEffect(QLabel *label)
 bool isFileMutatingTool(const QString &toolName)
 {
     return toolName == u"write_file"_s || toolName == u"edit_file"_s || toolName == u"multi_edit_file"_s
-        || toolName == u"multi_replace_file_content"_s;
+        || toolName == u"multi_replace_file_content"_s
+        || toolName == u"fs/write_text_file"_s;
 }
 
 QString workingLabelForTool(const QString &toolName)
@@ -642,6 +643,7 @@ ChatWidget::ChatWidget(QWidget *parent)
             toolWidget = new ToolCallWidget(request.toolCallId, m_transcriptContainer);
             toolWidget->setToolInfo(request.toolName, request.summary, request.risk);
             toolWidget->setDescribeDiff(request.describeDiff);
+            toolWidget->setFilePath(request.path);
             toolWidget->setDurationVisible(true);
             m_toolCallWidgets.insert(request.toolCallId, toolWidget);
             m_toolCallOrder.append(toolWidget);
@@ -739,6 +741,7 @@ ChatWidget::ChatWidget(QWidget *parent)
             widget = new ToolCallWidget(request.toolCallId, m_transcriptContainer);
             widget->setToolInfo(request.toolName, request.summary, request.risk);
             widget->setDescribeDiff(request.describeDiff);
+            widget->setFilePath(request.path);
             widget->setDurationVisible(true);
             connect(widget, &ToolCallWidget::expandedChanged, this, [this, widget](bool) {
                 pinWidgetInViewport(widget);
@@ -1555,6 +1558,11 @@ void ChatWidget::scrollToBottom()
 
 void ChatWidget::pinWidgetInViewport(QWidget *widget)
 {
+    // Only pin if user has scrolled up. If they're at the bottom, let the
+    // normal follow-tail behavior keep them there.
+    if (!m_userScrolledUp) {
+        return;
+    }
     m_pinnedViewportWidget = widget;
     m_pinnedViewportOffset = 0;
     if (!widget || !m_scrollArea || !m_scrollArea->viewport()) {
@@ -1572,6 +1580,11 @@ void ChatWidget::applyPinnedViewport()
     if (!sb) {
         return;
     }
+    // Only apply pinned viewport if user has scrolled up. If they're at the bottom,
+    // let the normal follow-tail behavior keep them there.
+    if (!m_userScrolledUp) {
+        return;
+    }
     const int newY = m_pinnedViewportWidget->mapTo(m_scrollArea->viewport(), QPoint(0, 0)).y();
     sb->setValue(sb->value() + (newY - m_pinnedViewportOffset));
     m_pinnedViewportOffset = m_pinnedViewportWidget->mapTo(m_scrollArea->viewport(), QPoint(0, 0)).y();
@@ -1580,8 +1593,9 @@ void ChatWidget::applyPinnedViewport()
 void ChatWidget::forceScrollToBottom()
 {
     if (m_pinnedViewportWidget) {
-        applyPinnedViewport();
-        return;
+        // If user explicitly requests scroll to bottom, clear the pinned widget
+        // and scroll to bottom normally
+        m_pinnedViewportWidget = nullptr;
     }
     m_userScrolledUp = false;
     if (m_scrollToBottomBtn) {

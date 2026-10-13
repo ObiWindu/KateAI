@@ -10,6 +10,7 @@
 
 #include <KLocalizedString>
 
+#include <QFileInfo>
 #include <QFontMetrics>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -438,6 +439,11 @@ void ToolCallWidget::setPreviewText(const QString &text)
     Q_UNUSED(text);
 }
 
+void ToolCallWidget::setFilePath(const QString &path)
+{
+    m_filePath = path;
+}
+
 void ToolCallWidget::showPreviewHtml(const QString &html)
 {
     Q_UNUSED(html);
@@ -654,6 +660,37 @@ QString ToolCallWidget::iconForTool(const QString &toolName) const
 
 QString ToolCallWidget::languageForTool(const QString &toolName) const
 {
+    // If we have a file path, try to determine the language from the extension
+    if (!m_filePath.isEmpty()) {
+        const QString extension = QFileInfo(m_filePath).suffix().toLower();
+        if (!extension.isEmpty()) {
+            // Map common extensions to KSyntaxHighlighting language names
+            static const QHash<QString, QString> extensionMap = {
+                {u"cpp"_s, u"C++"_s}, {u"cc"_s, u"C++"_s}, {u"cxx"_s, u"C++"_s}, {u"c"_s, u"C"_s}, {u"h"_s, u"C"_s},
+                {u"hpp"_s, u"C++"_s}, {u"hxx"_s, u"C++"_s},
+                {u"py"_s, u"Python"_s}, {u"pyw"_s, u"Python"_s},
+                {u"js"_s, u"JavaScript"_s}, {u"ts"_s, u"TypeScript"_s}, {u"jsx"_s, u"JavaScript"_s}, {u"tsx"_s, u"TypeScript"_s},
+                {u"java"_s, u"Java"_s}, {u"kt"_s, u"Kotlin"_s}, {u"rs"_s, u"Rust"_s}, {u"go"_s, u"Go"_s},
+                {u"cs"_s, u"C#"_s}, {u"php"_s, u"PHP"_s}, {u"rb"_s, u"Ruby"_s}, {u"swift"_s, u"Swift"_s},
+                {u"sh"_s, u"Bash"_s}, {u"bash"_s, u"Bash"_s}, {u"zsh"_s, u"Bash"_s}, {u"fish"_s, u"Bash"_s},
+                {u"html"_s, u"HTML"_s}, {u"htm"_s, u"HTML"_s}, {u"css"_s, u"CSS"_s}, {u"scss"_s, u"CSS"_s}, {u"sass"_s, u"CSS"_s},
+                {u"xml"_s, u"XML"_s}, {u"json"_s, u"JSON"_s}, {u"yaml"_s, u"YAML"_s}, {u"yml"_s, u"YAML"_s},
+                {u"toml"_s, u"TOML"_s}, {u"ini"_s, u"INI"_s}, {u"cfg"_s, u"INI"_s}, {u"conf"_s, u"INI"_s},
+                {u"md"_s, u"Markdown"_s}, {u"markdown"_s, u"Markdown"_s}, {u"txt"_s, u"Text"_s},
+                {u"sql"_s, u"SQL"_s}, {u"lua"_s, u"Lua"_s}, {u"pl"_s, u"Perl"_s}, {u"pm"_s, u"Perl"_s},
+                {u"r"_s, u"R"_s}, {u"m"_s, u"Objective-C"_s}, {u"mm"_s, u"Objective-C++"_s},
+                {u"vue"_s, u"Vue"_s}, {u"svelte"_s, u"Svelte"_s}, {u"dart"_s, u"Dart"_s},
+                {u"fs"_s, u"F#"_s}, {u"ml"_s, u"OCaml"_s}, {u"clj"_s, u"Clojure"_s}, {u"scala"_s, u"Scala"_s},
+                {u"groovy"_s, u"Groovy"_s}, {u"gradle"_s, u"Groovy"_s},
+                {u"dockerfile"_s, u"Dockerfile"_s}, {u"makefile"_s, u"Makefile"_s}, {u"cmake"_s, u"CMake"_s},
+            };
+            
+            if (extensionMap.contains(extension)) {
+                return extensionMap.value(extension);
+            }
+        }
+    }
+    
     // Map tool names to syntax highlighting languages
     if (toolName == u"bash"_s) return u"Bash"_s;
     

@@ -95,10 +95,10 @@ static QString quoteShellArg(const QString &s)
 
 QString shellCommandFor(const QString &toolName, const QJsonObject &args)
 {
-    if (toolName == u"read_file"_s) {
+    if (toolName == u"read_file"_s || toolName == u"fs/read_text_file"_s) {
         const QString path = quoteShellArg(args.value(u"path"_s).toString());
-        const int offset = args.value(u"offset"_s).toInt(1);
-        const int limit = args.value(u"limit"_s).toInt(0);
+        const int offset = args.value(u"offset"_s).toInt(args.value(u"line"_s).toInt(1));
+        const int limit = args.value(u"limit"_s).toInt(args.value(u"limit"_s).toInt(0));
         if (limit > 0) {
             const int end = offset + limit - 1;
             return u"sed -n '%1,%2p' %3"_s.arg(offset).arg(end).arg(path);
@@ -108,7 +108,7 @@ QString shellCommandFor(const QString &toolName, const QJsonObject &args)
         }
         return u"cat %1"_s.arg(path);
     }
-    if (toolName == u"write_file"_s) {
+    if (toolName == u"write_file"_s || toolName == u"fs/write_text_file"_s) {
         return u"cat > %1"_s.arg(quoteShellArg(args.value(u"path"_s).toString()));
     }
     if (toolName == u"edit_file"_s) {
@@ -367,6 +367,9 @@ ToolResult ToolRunner::run(const ToolCall &call)
     }
     if (call.name == u"query_project_graph"_s) {
         return queryProjectGraph(args);
+    }
+    if (call.name == u"goal_report"_s) {
+        return goalReport(args);
     }
 
     result.ok = false;
@@ -1066,6 +1069,37 @@ ToolResult ToolRunner::queryProjectGraph(const QJsonObject &args) const
 
     result.ok = true;
     result.output = clip(lines.isEmpty() ? u"(no results)"_s : lines.join(u'\n'));
+    return result;
+}
+
+ToolResult ToolRunner::goalReport(const QJsonObject &args)
+{
+    ToolResult result;
+    result.name = u"goal_report"_s;
+
+    const QString status = args.value(u"status"_s).toString();
+    const QString reason = args.value(u"reason"_s).toString();
+
+    if (status.isEmpty()) {
+        result.ok = false;
+        result.output = u"Goal report requires a status (complete, failed, or blocked)."_s;
+        return result;
+    }
+
+    if (status != u"complete"_s && status != u"failed"_s && status != u"blocked"_s) {
+        result.ok = false;
+        result.output = u"Invalid status: %1. Must be 'complete', 'failed', or 'blocked'."_s.arg(status);
+        return result;
+    }
+
+    if (reason.isEmpty()) {
+        result.ok = false;
+        result.output = u"Goal report requires a reason explaining the outcome."_s;
+        return result;
+    }
+
+    result.ok = true;
+    result.output = u"Goal reported as %1: %2"_s.arg(status, reason);
     return result;
 }
 

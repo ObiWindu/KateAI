@@ -498,20 +498,30 @@ QJsonArray toolDefinitions(const ToolAccess &access)
                              false));
 
 
-        tools.append(toolDef(subtaskToolName(),
-                         u"Spawn a sub-agent to handle a self-contained piece of work, then return its result to you. "
-                         u"Give it a complete task description with all context it needs, since it cannot see this "
-                         u"conversation. Independent subtasks requested in the same response run in parallel, so batch "
-                         u"them. Pick an agent by name when one fits, or a mode when you need a specific tool set. "
-                         u"Returns the sub-agent's final answer."_s,
-                         QJsonObject{
-                             {u"description"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"The full task for the sub-agent, including the goal, relevant files, and the expected output format."_s}}},
-                             {u"agent"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"A named agent that suits the work: scout (read-only questions), architect (design and plans), coder (implementation), debugger (root-cause fixes), reviewer (check someone else's work), or a custom agent."_s}}},
-                             {u"mode"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"Mode id to run the sub-agent in, overriding the agent's default: code, ask, architect, debug, orchestrator, or a custom mode. Defaults to the agent's mode, or code."_s}}},
-                             {u"include_transcript"_s, QJsonObject{{u"type"_s, u"boolean"_s}, {u"description"_s, u"If true, the result also includes the sub-agent's tool log, so you can see how it reached its answer. Use it when you need to verify the work."_s}}},
-                         },
-                         {u"description"_s},
-                         false));
+tools.append(toolDef(subtaskToolName(),
+                          u"Spawn a sub-agent to handle a self-contained piece of work, then return its result to you. "
+                          u"Give it a complete task description with all context it needs, since it cannot see this "
+                          u"conversation. Independent subtasks requested in the same response run in parallel, so batch "
+                          u"them. Pick an agent by name when one fits, or a mode when you need a specific tool set. "
+                          u"Returns the sub-agent's final answer."_s,
+                          QJsonObject{
+                              {u"description"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"The full task for the sub-agent, including the goal, relevant files, and the expected output format."_s}}},
+                              {u"agent"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"A named agent that suits the work: scout (read-only questions), architect (design and plans), coder (implementation), debugger (root-cause fixes), reviewer (check someone else's work), or a custom agent."_s}}},
+                              {u"mode"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"Mode id to run the sub-agent in, overriding the agent's default: code, ask, architect, debug, orchestrator, or a custom mode. Defaults to the agent's mode, or code."_s}}},
+                              {u"include_transcript"_s, QJsonObject{{u"type"_s, u"boolean"_s}, {u"description"_s, u"If true, the result also includes the sub-agent's tool log, so you can see how it reached its answer. Use it when you need to verify the work."_s}}},
+                          },
+                          {u"description"_s},
+                          false));
+
+    tools.append(toolDef(u"goal_report"_s,
+                          u"Report the completion status of a goal or task. Use this to explicitly mark a goal as complete, failed, or blocked with a reason. "
+                          u"This helps track progress and provides clear feedback on task outcomes."_s,
+                          QJsonObject{
+                              {u"status"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"Goal status: complete, failed, or blocked."_s}, {u"enum"_s, QJsonArray{u"complete"_s, u"failed"_s, u"blocked"_s}}}},
+                              {u"reason"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"Explanation of the outcome or why the goal is blocked/failed."_s}}},
+                          },
+                          {u"status"_s, u"reason"_s},
+                          false));
 
 
     if (access.allowAll) {

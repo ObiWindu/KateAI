@@ -52,6 +52,7 @@ private:
     ToolResult glob(const QJsonObject &args) const;
     ToolResult bash(const QJsonObject &args);
     ToolResult queryProjectGraph(const QJsonObject &args) const;
+    ToolResult goalReport(const QJsonObject &args);
 
     Sandbox m_sandbox;
     DocumentBridge *m_bridge = nullptr;
