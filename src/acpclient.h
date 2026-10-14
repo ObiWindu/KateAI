@@ -174,6 +174,14 @@ private:
     void writeMessage(const QJsonObject &message);
     void replyResult(const QJsonValue &id, const QJsonObject &result);
     void replyError(const QJsonValue &id, int code, const QString &message);
+    // Answers whichever permission request is waiting with a "cancelled" outcome
+    // and clears the request state. An agent that asks twice must never leave the
+    // first reply unsent, because an unanswered session/request_permission blocks
+    // that agent until the whole session is gone.
+    void cancelPendingPermission();
+    // Emits toolFinished for every tool still open and forgets them, so a card is
+    // never left spinning because the turn it belonged to is gone.
+    void finishLiveTools(const QString &message);
 
     void onStdioReadyRead();
     void handleBuffer();
@@ -260,6 +268,10 @@ private:
     int m_nextTerminal = 1;
 
     QPointer<QTimer> m_startupTimer;
+    // Bounded wait for an agent to answer session/cancel. One per attempt: a
+    // repeated Stop must not leave a second live timer behind, and the timer
+    // must die when the prompt ends for any other reason.
+    QPointer<QTimer> m_cancelGraceTimer;
     QStringList m_agentModels;
     QString m_currentModelId;
     QString m_modelConfigId;

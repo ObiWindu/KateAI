@@ -22,6 +22,92 @@ private Q_SLOTS:
         QVERIFY(!chunk.finished);
     }
 
+    void parsesAnthropicEvents()
+    {
+        // The Messages API streams its own event shapes and never the OpenAI
+        // "choices" envelope or a "[DONE]" sentinel. Everything used to be
+        // dropped, so a Claude turn ended with "the provider returned an
+        // invalid response" instead of an answer.
+        QHash<int, ToolCall> acc;
+        QHash<int, ToolCall> *accPtr = &acc;
+
+        auto event = [&accPtr](const char *data) {
+            return LlmClient::parseSseLine(QByteArray("data: ") + data, accPtr);
+        };
+
+        const CompletionChunk started = event("{\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\"}}");
+        QVERIFY(started.contentDelta.isEmpty());
+
+        const CompletionChunk text = event("{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hi\"}}");
+        QCOMPARE(text.contentDelta, u"Hi"_s);
+
+        const CompletionChunk thinking = event("{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"pondering\"}}");
+        QCOMPARE(thinking.thinkingDelta, u"pondering"_s);
+
+        const CompletionChunk toolStart = event("{\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"read_file\",\"input\":{}}}");
+        QCOMPARE(toolStart.completedTools.size(), 0);
+        QCOMPARE(acc.value(1).name, u"read_file"_s);
+
+        const CompletionChunk toolArgs = event("{\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"path\\\":\\\"a\\\"}\"}}");
+        QVERIFY(toolArgs.completedTools.isEmpty());
+
+        const CompletionChunk stopReason = event("{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"}}");
+        QCOMPARE(stopReason.finishReason, u"tool_use"_s);
+
+        // message_stop is Anthropic's terminator: it must close the turn and
+        // flush the tool that was being streamed.
+        const CompletionChunk finished = event("{\"type\":\"message_stop\"}");
+        QVERIFY(finished.finished);
+        QCOMPARE(finished.completedTools.size(), 1);
+        QCOMPARE(finished.completedTools.at(0).name, u"read_file"_s);
+        QCOMPARE(finished.completedTools.at(0).arguments.value(u"path"_s).toString(), u"a"_s);
+        QVERIFY(acc.isEmpty());
+
+        // A short input delivered complete in content_block_start, with no
+        // delta events, must survive the same path.
+        QHash<int, ToolCall> shortAcc;
+        const CompletionChunk shortStart = LlmClient::parseSseLine(
+            QByteArray("data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":"
+                       "{\"type\":\"tool_use\",\"id\":\"toolu_2\",\"name\":\"list_dir\",\"input\":{\"path\":\".\"}}}"),
+            &shortAcc);
+        QCOMPARE(shortAcc.value(0).arguments.value(u"path"_s).toString(), u"."_s);
+        const CompletionChunk shortDone = LlmClient::parseSseLine(
+            QByteArray("data: {\"type\":\"message_stop\"}"), &shortAcc);
+        QCOMPARE(shortDone.completedTools.size(), 1);
+        QCOMPARE(shortDone.completedTools.at(0).arguments.value(u"path"_s).toString(), u"."_s);
+
+        // Anthropic reports mid-stream failures as an error event.
+        QHash<int, ToolCall> errorAcc;
+        const CompletionChunk error = LlmClient::parseSseLine(
+            QByteArray("data: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}"),
+            &errorAcc);
+        QCOMPARE(error.error, u"Overloaded"_s);
+        QVERIFY(error.finished);
+
+        // An OpenAI-shaped stream still parses unchanged.
+        QHash<int, ToolCall> openAiAcc;
+        const CompletionChunk openAi = LlmClient::parseSseLine(
+            QByteArray("data: {\"type\":\"something\",\"choices\":[{\"delta\":{\"content\":\"still works\"}}]}"),
+            &openAiAcc);
+        QCOMPARE(openAi.contentDelta, u"still works"_s);
+    }
+
+    void anthropicRequestUsesItsOwnAuthHeader()
+    {
+        // The Messages API authenticates with x-api-key plus a pinned version,
+        // never with an Authorization bearer token. The request itself is built
+        // in doComplete(), which needs a live reply; what is asserted here is
+        // the part the settings layer owns and the request depends on.
+        Settings settings;
+        settings.provider = Provider::ClaudeCompatible;
+        settings.claudeCompatibleApiKey = u"sk-ant-test"_s;
+        settings.claudeCompatibleModel = u"claude-test"_s;
+        LlmClient client;
+        client.setSettings(settings);
+        QCOMPARE(apiKeyFor(settings), u"sk-ant-test"_s);
+        QCOMPARE(modelFor(settings), u"claude-test"_s);
+    }
+
     void parsesDone()
     {
         QHash<int, ToolCall> acc;

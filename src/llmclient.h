@@ -114,6 +114,7 @@ private:
     void resetCompletionState();
     void emitCompletedOnce();
     QList<ToolCall> completedToolsFromAccumulator();
+    static QList<ToolCall> drainToolAccumulator(QHash<int, ToolCall> *acc);
     
     // API format handling
     QJsonObject buildOpenAIRequest(const QList<ChatMessage> &messages, const QString &model);

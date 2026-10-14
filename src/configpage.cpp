@@ -2067,7 +2067,7 @@ void KateAiConfigPage::fetchAcpModels()
         client->deleteLater();
     });
 
-    connect(client, &AcpClient::failed, this, [this, client, btn](const QString &error) {
+    connect(client, &AcpClient::failed, this, [this, client, btn](const QString &) {
         if (btn) {
             btn->setEnabled(true);
             btn->setText(i18n("Fetch Models"));

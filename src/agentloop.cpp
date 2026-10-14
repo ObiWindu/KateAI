@@ -1932,9 +1932,6 @@ void AgentLoop::startWebTool(const ToolCall &call)
 
     if (call.name == u"web_search"_s) {
         const int wanted = call.arguments.value(u"max_results"_s).toInt(0);
-        if (wanted > 0) {
-            m_web.setMaxResults(wanted);
-        }
         // m_web is shared for the lifetime of this loop, and several web calls
         // can be in flight at once. Each call owns its own connection and tears
         // it down when it completes, so a completion never consumes or wakes a
@@ -1968,7 +1965,7 @@ void AgentLoop::startWebTool(const ToolCall &call)
                     out.output = lines.join(u"\n"_s);
                     finishAsyncTool(call, out);
                 });
-        m_web.search(query, call.id);
+        m_web.search(query, call.id, wanted);
         return;
     }
 
@@ -2053,7 +2050,7 @@ void AgentLoop::releaseEditLocksFor(const ToolCall &call)
     }
     QString path = call.arguments.value(u"path"_s).toString();
     if (path.isEmpty()) {
-        path = call.arguments.value(u"targetFile"_s).toString();
+        path = call.arguments.value(u"TargetFile"_s).toString();
     }
     if (path.isEmpty()) {
         return;
@@ -2072,7 +2069,7 @@ bool AgentLoop::acquireEditLock(const ToolCall &call, QString *deniedBy)
     }
     QString path = call.arguments.value(u"path"_s).toString();
     if (path.isEmpty()) {
-        path = call.arguments.value(u"targetFile"_s).toString();
+        path = call.arguments.value(u"TargetFile"_s).toString();
     }
     if (path.isEmpty()) {
         return true;

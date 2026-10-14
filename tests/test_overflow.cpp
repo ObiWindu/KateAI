@@ -1,6 +1,7 @@
 #include "acpclient.h"
 #include "agentloop.h"
 #include "chatwidget.h"
+#include "sessionstoreisolation.h"
 #include "types.h"
 
 #include <QApplication>
@@ -17,6 +18,7 @@
 #include <QMetaObject>
 #include <QRegularExpression>
 #include <QTabWidget>
+#include <QTcpServer>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QTimer>
@@ -122,6 +124,109 @@ private Q_SLOTS:
 
     // The composer's context readout is a percentage of the window, not an
     // empty chip: whatever the colours say, the number has to be there.
+    static QPushButton *sendButton(QWidget *root)
+    {
+        // The composer's single round button morphs between send and stop; it
+        // is the only one carrying either tooltip.
+        for (QPushButton *button : root->findChildren<QPushButton *>()) {
+            if (button->toolTip() == u"Send message"_s || button->toolTip() == u"Stop response"_s) {
+                return button;
+            }
+        }
+        return nullptr;
+    }
+
+    void sendButtonSwitchesToStopWhileTheAgentWorks()
+    {
+        ChatWidget widget;
+        widget.resize(900, 700);
+        widget.show();
+
+        Settings settings;
+        settings.provider = Provider::Acp;
+        settings.apiFormat = ApiFormat::AcpNative;
+        settings.acpAgentId = u"mock-perm"_s;
+        settings.acpCommand = u"python3"_s;
+        settings.acpArgs = u'"' + m_agent + u"\" permission"_s;
+        settings.permissionMode = PermissionMode::Ask;
+        settings.sandbox = SandboxProfile::Off;
+        widget.setSettings(settings);
+
+        // A turn cannot start without a workspace, and the widget's own view
+        // normally supplies one.
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+        widget.agent()->setWorkspace(workspace.path());
+
+        QPushButton *send = sendButton(&widget);
+        QVERIFY2(send, "composer send button not found");
+        QCOMPARE(send->text(), u"▲"_s);
+        QCOMPARE(send->toolTip(), u"Send message"_s);
+        QVERIFY(!send->isEnabled());
+
+        // The mock agent asks for a tool permission and waits for the answer, so
+        // the turn stays open for as long as this test needs.
+        widget.ask(u"write something"_s);
+        QVERIFY2(waitFor([&] { return widget.agent()->isBusy(); }), "agent never started working");
+
+        // While it works, the button has to be the stop button: red, filled and
+        // tappable. A composer that keeps offering "Send" leaves the user with
+        // no way to stop a turn that is already running.
+        QCOMPARE(send->text(), u"■"_s);
+        QCOMPARE(send->toolTip(), u"Stop response"_s);
+        QVERIFY2(send->isEnabled(), "stop button is disabled while the agent works");
+
+        QApplication::processEvents();
+        QTest::qWait(50);
+    }
+
+    void sendButtonSwitchesToStopWhileAnHttpTurnRuns()
+    {
+        ChatWidget widget;
+        widget.resize(900, 700);
+        widget.show();
+
+        // A server that accepts the request and answers nothing: the request
+        // stays in flight for as long as this check needs, which is exactly the
+        // window where the user has to be offered a stop button.
+        QTcpServer server;
+        QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+        const quint16 port = server.serverPort();
+
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+        widget.agent()->setWorkspace(workspace.path());
+
+        Settings settings;
+        settings.provider = Provider::OpenAICompatible;
+        settings.openaiCompatibleUrl = u"http://127.0.0.1:%1/v1"_s.arg(port);
+        settings.openaiCompatibleApiKey = u"test"_s;
+        settings.openaiCompatibleModel = u"mock"_s;
+        settings.permissionMode = PermissionMode::Ask;
+        settings.sandbox = SandboxProfile::Off;
+        settings.structuredThinking = false;
+        settings.structuredPlanning = false;
+        settings.enableAutoRetry = false;
+        settings.maxModelRequests = 5;
+        settings.maxToolCalls = 20;
+        widget.setSettings(settings);
+
+        QPushButton *send = sendButton(&widget);
+        QVERIFY2(send, "composer send button not found");
+        QCOMPARE(send->text(), u"▲"_s);
+        QCOMPARE(send->toolTip(), u"Send message"_s);
+
+        widget.ask(u"do something long"_s);
+        QVERIFY2(waitFor([&] { return widget.agent()->isBusy(); }, 10000), "the turn never started");
+
+        QCOMPARE(send->text(), u"■"_s);
+        QCOMPARE(send->toolTip(), u"Stop response"_s);
+        QVERIFY2(send->isEnabled(), "the stop button is disabled while the agent works");
+
+        QApplication::processEvents();
+        QTest::qWait(50);
+    }
+
     void contextPercentageIsShown()
     {
         ChatWidget widget;
@@ -240,5 +345,17 @@ private:
     QString m_agent;
 };
 
-QTEST_MAIN(TestOverflow)
+// Explicit main rather than QTEST_MAIN: the widgets built here autosave their
+// transcript into SessionStore while they are destroyed, and the store override
+// has to be in place before the first widget exists. Without it a test run
+// makes a mock prompt the active conversation, and Kate opens on that thread
+// instead of the welcome screen the next time the plugin starts.
+int main(int argc, char **argv)
+{
+    isolateSessionStore();
+
+    QApplication app(argc, argv);
+    TestOverflow tc;
+    return QTest::qExec(&tc, argc, argv);
+}
 #include "test_overflow.moc"

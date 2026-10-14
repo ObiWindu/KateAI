@@ -1739,7 +1739,7 @@ void ChatWidget::setThinkingIndicator(bool show)
     if (show && !m_isThinking) {
         m_isThinking = true;
         m_indicatorTick = 0;
-        m_thinkingIndicator->setText(QStringLiteral("\u{1F9E0}  ") + i18n("Thinking") + progressiveDots(0));
+        m_thinkingIndicator->setText(QStringLiteral("\u1F9E0  ") + i18n("Thinking") + progressiveDots(0));
         m_thinkingIndicator->show();
         tickIndicators();
     } else if (!show && m_isThinking) {
@@ -1795,7 +1795,7 @@ void ChatWidget::tickIndicators()
     const QString dots = progressiveDots(m_indicatorTick);
 
     if (m_isThinking && m_thinkingIndicator) {
-        m_thinkingIndicator->setText(QStringLiteral("\u{1F9E0}  ") + i18n("Thinking") + dots);
+        m_thinkingIndicator->setText(QStringLiteral("\u1F9E0  ") + i18n("Thinking") + dots);
         if (auto *effect = qobject_cast<QGraphicsOpacityEffect *>(m_thinkingIndicator->graphicsEffect())) {
             effect->setOpacity(0.62 + 0.38 * ((m_indicatorTick % 2 == 0) ? 1.0 : 0.0));
         }
@@ -2117,7 +2117,7 @@ QWidget *ChatWidget::createIndicatorsRow()
     layout->setContentsMargins(0, 6, 0, 2);
     layout->setSpacing(8);
 
-    m_thinkingIndicator = new QLabel(QStringLiteral("\u{1F9E0}  ") + i18n("Thinking") + progressiveDots(0), row);
+    m_thinkingIndicator = new QLabel(QStringLiteral("\u1F9E0  ") + i18n("Thinking") + progressiveDots(0), row);
     m_thinkingIndicator->setStyleSheet(ChatTheme::thinkingPill());
     attachPulseEffect(m_thinkingIndicator);
     m_thinkingIndicator->hide();
@@ -2543,7 +2543,7 @@ void ChatWidget::updateThinkingButtonStyle()
     // and pulled the eye away from the send button it sits next to.
     m_thinking->setIcon(QIcon());
     if (m_thinking->isChecked()) {
-        m_thinking->setText(QStringLiteral("\u{2726}")); // filled diamond
+        m_thinking->setText(QStringLiteral("\u2726")); // filled diamond
         m_thinking->setToolTip(i18n("Thinking mode is on"));
         m_thinking->setStyleSheet(
             QStringLiteral(
@@ -2552,7 +2552,7 @@ void ChatWidget::updateThinkingButtonStyle()
                 "QPushButton:hover { background-color: %2; }")
             .arg(ChatTheme::accent(), ChatTheme::accentHover()));
     } else {
-        m_thinking->setText(QStringLiteral("\u{2727}")); // hollow diamond
+        m_thinking->setText(QStringLiteral("\u2727")); // hollow diamond
         m_thinking->setToolTip(i18n("Toggle thinking mode"));
         m_thinking->setStyleSheet(ChatTheme::iconButton());
     }

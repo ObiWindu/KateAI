@@ -27,19 +27,28 @@ Settings SettingsStore::load()
     s.openaiApiKey = g.readEntry(u"OpenAIApiKey"_s, QString());
     s.openrouterApiKey = g.readEntry(u"OpenRouterApiKey"_s, QString());
     s.deepseekApiKey = g.readEntry(u"DeepSeekApiKey"_s, QString());
+    s.openaiCompatibleApiKey = g.readEntry(u"OpenAICompatibleApiKey"_s, QString());
+    s.claudeCompatibleApiKey = g.readEntry(u"ClaudeCompatibleApiKey"_s, QString());
+    s.kiloApiKey = g.readEntry(u"KiloApiKey"_s, QString());
     s.acpApiKey = g.readEntry(u"AcpApiKey"_s, QString());
     s.acpInstalledAgents = g.readEntry(u"AcpInstalledAgents"_s, QString());
+    s.acpAgentModels = g.readEntry(u"AcpAgentModels"_s, QString());
     // Models are read from the provider, not hard-coded here; an empty entry
     // simply means "not chosen yet" and the fetched catalogue fills it in.
     s.grokModel = g.readEntry(u"GrokModel"_s, QString());
     s.openaiModel = g.readEntry(u"OpenAIModel"_s, QString());
     s.openrouterModel = g.readEntry(u"OpenRouterModel"_s, QString());
     s.deepseekModel = g.readEntry(u"DeepSeekModel"_s, QString());
+    s.openaiCompatibleModel = g.readEntry(u"OpenAICompatibleModel"_s, QString());
+    s.claudeCompatibleModel = g.readEntry(u"ClaudeCompatibleModel"_s, QString());
+    s.kiloModel = g.readEntry(u"KiloModel"_s, QString());
     s.acpModel = g.readEntry(u"AcpModel"_s, QString());
     s.opencodeApiKey = g.readEntry(u"OpenCodeApiKey"_s, QString());
     s.opencodeModel = g.readEntry(u"OpenCodeModel"_s, QString());
     s.opencodeUrl = g.readEntry(u"OpenCodeUrl"_s, u"https://opencode.ai/zen/v1"_s);
     s.deepseekUrl = g.readEntry(u"DeepSeekUrl"_s, u"https://api.deepseek.com"_s);
+    s.openaiCompatibleUrl = g.readEntry(u"OpenAICompatibleUrl"_s, u"http://localhost:11434/v1"_s);
+    s.claudeCompatibleUrl = g.readEntry(u"ClaudeCompatibleUrl"_s, u"https://api.anthropic.com/v1"_s);
     s.acpUrl = g.readEntry(u"AcpUrl"_s, u"http://localhost:8080"_s);
     s.acpCommand = g.readEntry(u"AcpCommand"_s, u"grok"_s);
     s.acpArgs = g.readEntry(u"AcpArgs"_s, u"agent stdio"_s);
@@ -116,6 +125,31 @@ Settings SettingsStore::load()
     s.maxParallelSubtasks = g.readEntry(u"MaxParallelSubtasks"_s, 3);
     s.agentRoster = g.readEntry(u"AgentRoster"_s, QString());
     s.subtaskTimeoutMs = g.readEntry(u"SubtaskTimeoutMs"_s, 300000);
+    // Behavioural toggles and budgets. These used to be dropped by save(), so
+    // any value the UI wrote reverted to the struct default on the next start.
+    s.toolCallTimeoutMs = g.readEntry(u"ToolCallTimeoutMs"_s, 120000);
+    s.maxContextMessages = g.readEntry(u"MaxContextMessages"_s, 0);
+    s.compactOnFailure = g.readEntry(u"CompactOnFailure"_s, true);
+    s.structuredThinking = g.readEntry(u"StructuredThinking"_s, true);
+    s.structuredPlanning = g.readEntry(u"StructuredPlanning"_s, true);
+    s.showPlanAsChecklist = g.readEntry(u"ShowPlanAsChecklist"_s, true);
+    s.maxThinkingTokens = g.readEntry(u"MaxThinkingTokens"_s, 4096);
+    s.maxPlanSteps = g.readEntry(u"MaxPlanSteps"_s, 15);
+    s.enablePlanUpdates = g.readEntry(u"EnablePlanUpdates"_s, true);
+    s.narrativeProgress = g.readEntry(u"NarrativeProgress"_s, true);
+    s.messageSpeed = g.readEntry(u"MessageSpeed"_s, 2);
+    s.frequencyPenalty = g.readEntry(u"FrequencyPenalty"_s, 0.0);
+    s.presencePenalty = g.readEntry(u"PresencePenalty"_s, 0.0);
+    s.requireVerification = g.readEntry(u"RequireVerification"_s, true);
+    s.maxVerificationAttempts = g.readEntry(u"MaxVerificationAttempts"_s, 2);
+    s.adaptiveTemperature = g.readEntry(u"AdaptiveTemperature"_s, true);
+    s.explorationTemperature = g.readEntry(u"ExplorationTemperature"_s, 0.4);
+    s.exploitationTemperature = g.readEntry(u"ExploitationTemperature"_s, 0.1);
+    s.enableAutoRetry = g.readEntry(u"EnableAutoRetry"_s, true);
+    s.maxRetryAttempts = g.readEntry(u"MaxRetryAttempts"_s, 4);
+    s.baseRetryDelaySeconds = g.readEntry(u"BaseRetryDelaySeconds"_s, 5);
+    s.maxRetryDelaySeconds = g.readEntry(u"MaxRetryDelaySeconds"_s, 300);
+    s.retryStrategy = g.readEntry(u"RetryStrategy"_s, u"exponential"_s);
     // Validate contextCompressionLevel (0=full, 1=summary, 2=minimal, 3=ultra-minimal)
     s.contextCompressionLevel = qBound(0, s.contextCompressionLevel, 3);
     if (s.maxModelRequests < 0) {
@@ -168,17 +202,26 @@ void SettingsStore::save(const Settings &settings)
     g.writeEntry(u"OpenAIApiKey"_s, settings.openaiApiKey);
     g.writeEntry(u"OpenRouterApiKey"_s, settings.openrouterApiKey);
     g.writeEntry(u"DeepSeekApiKey"_s, settings.deepseekApiKey);
+    g.writeEntry(u"OpenAICompatibleApiKey"_s, settings.openaiCompatibleApiKey);
+    g.writeEntry(u"ClaudeCompatibleApiKey"_s, settings.claudeCompatibleApiKey);
+    g.writeEntry(u"KiloApiKey"_s, settings.kiloApiKey);
     g.writeEntry(u"AcpApiKey"_s, settings.acpApiKey);
     g.writeEntry(u"AcpInstalledAgents"_s, settings.acpInstalledAgents);
-        g.writeEntry(u"OpenCodeApiKey"_s, settings.opencodeApiKey);
-        g.writeEntry(u"OpenCodeModel"_s, settings.opencodeModel);
-        g.writeEntry(u"OpenCodeUrl"_s, settings.opencodeUrl);
+    g.writeEntry(u"AcpAgentModels"_s, settings.acpAgentModels);
+    g.writeEntry(u"OpenCodeApiKey"_s, settings.opencodeApiKey);
+    g.writeEntry(u"OpenCodeModel"_s, settings.opencodeModel);
+    g.writeEntry(u"OpenCodeUrl"_s, settings.opencodeUrl);
     g.writeEntry(u"GrokModel"_s, settings.grokModel);
     g.writeEntry(u"OpenAIModel"_s, settings.openaiModel);
     g.writeEntry(u"OpenRouterModel"_s, settings.openrouterModel);
     g.writeEntry(u"DeepSeekModel"_s, settings.deepseekModel);
+    g.writeEntry(u"OpenAICompatibleModel"_s, settings.openaiCompatibleModel);
+    g.writeEntry(u"ClaudeCompatibleModel"_s, settings.claudeCompatibleModel);
+    g.writeEntry(u"KiloModel"_s, settings.kiloModel);
     g.writeEntry(u"AcpModel"_s, settings.acpModel);
     g.writeEntry(u"DeepSeekUrl"_s, settings.deepseekUrl);
+    g.writeEntry(u"OpenAICompatibleUrl"_s, settings.openaiCompatibleUrl);
+    g.writeEntry(u"ClaudeCompatibleUrl"_s, settings.claudeCompatibleUrl);
     g.writeEntry(u"AcpUrl"_s, settings.acpUrl);
     g.writeEntry(u"AcpCommand"_s, settings.acpCommand);
     g.writeEntry(u"AcpArgs"_s, settings.acpArgs);
@@ -244,6 +287,31 @@ void SettingsStore::save(const Settings &settings)
     g.writeEntry(u"MaxParallelSubtasks"_s, settings.maxParallelSubtasks);
     g.writeEntry(u"AgentRoster"_s, settings.agentRoster);
     g.writeEntry(u"SubtaskTimeoutMs"_s, settings.subtaskTimeoutMs);
+    // Keep every field the UI can write, so a restart restores the same
+    // configuration instead of silently falling back to struct defaults.
+    g.writeEntry(u"ToolCallTimeoutMs"_s, settings.toolCallTimeoutMs);
+    g.writeEntry(u"MaxContextMessages"_s, settings.maxContextMessages);
+    g.writeEntry(u"CompactOnFailure"_s, settings.compactOnFailure);
+    g.writeEntry(u"StructuredThinking"_s, settings.structuredThinking);
+    g.writeEntry(u"StructuredPlanning"_s, settings.structuredPlanning);
+    g.writeEntry(u"ShowPlanAsChecklist"_s, settings.showPlanAsChecklist);
+    g.writeEntry(u"MaxThinkingTokens"_s, settings.maxThinkingTokens);
+    g.writeEntry(u"MaxPlanSteps"_s, settings.maxPlanSteps);
+    g.writeEntry(u"EnablePlanUpdates"_s, settings.enablePlanUpdates);
+    g.writeEntry(u"NarrativeProgress"_s, settings.narrativeProgress);
+    g.writeEntry(u"MessageSpeed"_s, settings.messageSpeed);
+    g.writeEntry(u"FrequencyPenalty"_s, settings.frequencyPenalty);
+    g.writeEntry(u"PresencePenalty"_s, settings.presencePenalty);
+    g.writeEntry(u"RequireVerification"_s, settings.requireVerification);
+    g.writeEntry(u"MaxVerificationAttempts"_s, settings.maxVerificationAttempts);
+    g.writeEntry(u"AdaptiveTemperature"_s, settings.adaptiveTemperature);
+    g.writeEntry(u"ExplorationTemperature"_s, settings.explorationTemperature);
+    g.writeEntry(u"ExploitationTemperature"_s, settings.exploitationTemperature);
+    g.writeEntry(u"EnableAutoRetry"_s, settings.enableAutoRetry);
+    g.writeEntry(u"MaxRetryAttempts"_s, settings.maxRetryAttempts);
+    g.writeEntry(u"BaseRetryDelaySeconds"_s, settings.baseRetryDelaySeconds);
+    g.writeEntry(u"MaxRetryDelaySeconds"_s, settings.maxRetryDelaySeconds);
+    g.writeEntry(u"RetryStrategy"_s, settings.retryStrategy);
     g.writeEntry(u"ContextWindow"_s, settings.contextWindow);
     g.writeEntry(u"KeepRecentTokens"_s, settings.keepRecentTokens);
     g.writeEntry(u"ContextWindowReserve"_s, settings.contextWindowReserve);

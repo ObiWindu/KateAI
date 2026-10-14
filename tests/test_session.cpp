@@ -1,4 +1,5 @@
 #include "sessionstore.h"
+#include "sessionstoreisolation.h"
 #include "agentloop.h"
 #include "types.h"
 
@@ -21,6 +22,10 @@ class TestSession : public QObject
 private Q_SLOTS:
     void initTestCase()
     {
+        // Work on a scratch database: clearAllConversations() below would
+        // otherwise delete the user's real conversation history.
+        isolateSessionStore();
+
         // Clear any existing session data
         SessionStore::clearAllConversations();
     }

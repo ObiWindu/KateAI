@@ -331,16 +331,11 @@ void ModeRegistry::setWorkspace(const QString &workspace)
 
 void ModeRegistry::reload()
 {
-    QList<ModeDefinition> previous;
-    for (const ModeDefinition &mode : m_modes) {
-        if (!mode.builtIn) {
-            previous.append(mode);
-        }
-    }
+    // Custom modes belong to the workspace that is about to be loaded. Keeping
+    // the previous workspace's modes (and re-reading) made them leak into the
+    // next workspace and kept stale copies of deleted files alive. loadBuiltIns()
+    // resets the list, so a plain reload is the correct reset.
     loadBuiltIns();
-    for (const ModeDefinition &mode : previous) {
-        m_modes.append(mode);
-    }
     loadCustomModes();
     Q_EMIT modesChanged();
 }

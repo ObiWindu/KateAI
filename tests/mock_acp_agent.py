@@ -95,11 +95,66 @@ def session_update(update):
     notify("session/update", {"sessionId": SESSION_ID, "update": update})
 
 
+def request_no_wait(method, params):
+    """Send a request without blocking for the reply, so the client can be put
+    into the position of having two questions outstanding at once."""
+    global NEXT_ID
+    request_id = NEXT_ID
+    NEXT_ID += 1
+    send({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params})
+    return request_id
+
+
+def ask_permission(tool_call_id):
+    session_update(
+        {
+            "sessionUpdate": "tool_call",
+            "toolCallId": tool_call_id,
+            "name": "write_file",
+            "title": "Write notes.txt",
+            "kind": "edit",
+            "status": "pending",
+        }
+    )
+    return request_no_wait(
+        "session/request_permission",
+        {
+            "sessionId": SESSION_ID,
+            "toolCall": {"toolCallId": tool_call_id, "title": "Write notes.txt", "kind": "edit"},
+            "options": [
+                {"optionId": "allow-once", "name": "Allow once", "kind": "allow_once"},
+                {"optionId": "reject-once", "name": "Reject", "kind": "reject_once"},
+            ],
+        },
+    )
+
+
+def outcome_summary(outcome):
+    if not outcome:
+        return "unanswered"
+    if outcome.get("outcome") == "cancelled":
+        return "cancelled"
+    return outcome.get("optionId") or "unknown"
+
+
 def handle_prompt(request_id, params):
     text = ""
     for block in params.get("prompt") or []:
         if isinstance(block, dict) and block.get("type") == "text":
             text += block.get("text") or ""
+
+    if SCENARIO == "stringid":
+        # JSON-RPC lets a reply quote the request id as a string. session/prompt
+        # has no timeout, so a client that cannot match the id never finishes the
+        # turn at all.
+        session_update(
+            {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "string-id-ok"},
+            }
+        )
+        result(str(request_id), {"stopReason": "end_turn"})
+        return
 
     if SCENARIO == "permission":
         session_update(
@@ -128,6 +183,71 @@ def handle_prompt(request_id, params):
             {
                 "sessionUpdate": "agent_message_chunk",
                 "content": {"type": "text", "text": f"permission:{option}"},
+            }
+        )
+        result(request_id, {"stopReason": "end_turn"})
+        return
+
+    if SCENARIO == "permission-double":
+        # Two questions outstanding at once. Only one can be answered at a time,
+        # so the first must be closed by the client rather than left unanswered.
+        first = ask_permission("call_a")
+        second = ask_permission("call_b")
+        outcomes = {}
+        while len(outcomes) < 2:
+            message = read_message()
+            if message is None:
+                break
+            if message.get("id") in (first, second):
+                outcomes[message["id"]] = ((message.get("result") or {}).get("outcome") or {})
+            else:
+                handle(message)
+        summary = "a=%s;b=%s" % (
+            outcome_summary(outcomes.get(first)),
+            outcome_summary(outcomes.get(second)),
+        )
+        session_update(
+            {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "permissions:" + summary},
+            }
+        )
+        result(request_id, {"stopReason": "end_turn"})
+        return
+
+    if SCENARIO == "permission-allowonly":
+        # An agent that advertises an allow option but no reject option. Refusing
+        # must never transmit that allow id back, because the agent would treat it
+        # as approval and run the tool the user just denied.
+        session_update(
+            {
+                "sessionUpdate": "tool_call",
+                "toolCallId": "call_perm",
+                "name": "write_file",
+                "title": "Write notes.txt",
+                "kind": "edit",
+                "status": "pending",
+            }
+        )
+        response = call_client(
+            "session/request_permission",
+            {
+                "sessionId": SESSION_ID,
+                "toolCall": {"toolCallId": "call_perm", "title": "Write notes.txt", "kind": "edit"},
+                "options": [
+                    {"optionId": "allow-once", "name": "Allow once", "kind": "allow_once"},
+                    {"optionId": "allow-always", "name": "Always allow", "kind": "allow_always"},
+                ],
+            },
+        )
+        outcome = ((response or {}).get("result") or {}).get("outcome") or {}
+        # "cancelled" (no optionId at all) is the safe refusal; anything naming an
+        # allow option means the agent would execute the denied tool.
+        summary = outcome.get("optionId") or ("cancelled" if outcome.get("outcome") == "cancelled" else "unknown")
+        session_update(
+            {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": f"refusal:{summary}"},
             }
         )
         result(request_id, {"stopReason": "end_turn"})

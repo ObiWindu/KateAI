@@ -451,32 +451,65 @@ void AcpClient::start()
     spawnProcess();
 }
 
+void AcpClient::cancelPendingPermission()
+{
+    if (!hasPendingPermission()) {
+        return;
+    }
+    QJsonObject outcome;
+    outcome.insert(u"outcome"_s, u"cancelled"_s);
+    QJsonObject result;
+    result.insert(u"outcome"_s, outcome);
+    replyResult(m_permissionRpcId, result);
+    m_permissionRpcId = QJsonValue();
+    m_permissionOptions = QJsonArray();
+    m_permissionRequest = {};
+}
+
+void AcpClient::finishLiveTools(const QString &message)
+{
+    for (auto it = m_liveTools.begin(); it != m_liveTools.end(); ++it) {
+        ToolResult result;
+        result.toolCallId = it.key();
+        result.name = it.value().toolName;
+        result.ok = false;
+        result.cancelled = true;
+        result.output = message;
+        Q_EMIT toolFinished(result);
+    }
+    m_liveTools.clear();
+}
+
 void AcpClient::cancel()
 {
-    if (hasPendingPermission()) {
-        QJsonObject outcome;
-        outcome.insert(u"outcome"_s, u"cancelled"_s);
-        QJsonObject result;
-        result.insert(u"outcome"_s, outcome);
-        replyResult(m_permissionRpcId, result);
-        m_permissionRpcId = QJsonValue();
-        m_permissionOptions = QJsonArray();
-        m_permissionRequest = {};
-    }
+    cancelPendingPermission();
     if (m_promptId != 0 && !m_sessionId.isEmpty()) {
         QJsonObject params;
         params.insert(u"sessionId"_s, m_sessionId);
         sendNotification(u"session/cancel"_s, params);
-        for (auto it = m_liveTools.begin(); it != m_liveTools.end(); ++it) {
-            ToolResult result;
-            result.toolCallId = it.key();
-            result.name = it.value().toolName;
-            result.ok = false;
-            result.cancelled = true;
-            result.output = u"Cancelled."_s;
-            Q_EMIT toolFinished(result);
+        finishLiveTools(u"Cancelled."_s);
+        // An agent that ignores session/cancel leaves the prompt pending
+        // forever, which keeps isBusy() true and makes every later prompt be
+        // queued instead of sent. Give it a bounded grace period to answer and
+        // then close the turn here.
+        const int promptId = m_promptId;
+        if (m_cancelGraceTimer) {
+            m_cancelGraceTimer->stop();
+            delete m_cancelGraceTimer;
         }
-        m_liveTools.clear();
+        auto *grace = new QTimer(this);
+        grace->setSingleShot(true);
+        grace->setInterval(qBound(5000, m_settings.toolCallTimeoutMs, 60000));
+        connect(grace, &QTimer::timeout, this, [this, promptId] {
+            if (m_promptId != promptId) {
+                return;
+            }
+            m_pending.remove(promptId);
+            m_promptId = 0;
+            finishPrompt(QString(), u"The agent did not answer the cancellation in time."_s);
+        });
+        grace->start();
+        m_cancelGraceTimer = grace;
     }
 }
 
@@ -485,6 +518,10 @@ void AcpClient::stop()
     m_shuttingDown = true;
     if (m_startupTimer) {
         m_startupTimer->stop();
+    }
+    if (m_cancelGraceTimer) {
+        m_cancelGraceTimer->stop();
+        delete m_cancelGraceTimer;
     }
     failAll(u"ACP agent disconnected."_s);
     releaseAllTerminals();
@@ -518,6 +555,9 @@ void AcpClient::stop()
 
 void AcpClient::resetSession()
 {
+    // Any permission question posed in the outgoing session must be closed
+    // before the session id goes away.
+    cancelPendingPermission();
     m_resumeSessionId.clear();
     m_queued.clear();
     if (m_closeSession && !m_sessionId.isEmpty() && m_state == State::Ready) {
@@ -571,10 +611,12 @@ void AcpClient::resolvePermission(PermissionDecision decision)
         outcome.insert(u"optionId"_s, pickPermissionOption(decision));
     }
     if (outcome.value(u"optionId"_s).toString().isEmpty()) {
-        outcome.insert(u"outcome"_s, decision == PermissionDecision::Deny ? u"cancelled"_s : u"selected"_s);
-        if (decision != PermissionDecision::Deny && !m_permissionOptions.isEmpty()) {
-            outcome.insert(u"optionId"_s, m_permissionOptions.first().toObject().value(u"optionId"_s).toString());
-        }
+        // No advertised option carried a matching kind. Picking the first one
+        // could transmit a reject id for an approval, which silently inverts
+        // the user's decision; cancelling keeps the tool call from running
+        // without telling the agent it was refused.
+        outcome.remove(u"optionId"_s);
+        outcome.insert(u"outcome"_s, u"cancelled"_s);
     }
     QJsonObject result;
     result.insert(u"outcome"_s, outcome);
@@ -654,6 +696,13 @@ void AcpClient::spawnProcess()
         return;
     }
 
+    // Retrying replaces the timer. The previous one must go first: it is still
+    // parented to this and still counting, and a retry started inside the first
+    // attempt's window would then be failed by that stale 30 s deadline.
+    if (m_startupTimer) {
+        m_startupTimer->stop();
+        delete m_startupTimer;
+    }
     m_startupTimer = new QTimer(this);
     m_startupTimer->setSingleShot(true);
     m_startupTimer->setInterval(30000);
@@ -845,13 +894,18 @@ void AcpClient::maybeAuthenticate(const QJsonArray &authMethods)
     const QString effectiveArgs = acpEffectiveArgs(m_settings);
     const bool codexAgent = m_settings.acpAgentId == u"codex-acp"_s
         || effectiveArgs.contains(u"@agentclientprotocol/codex-acp"_s);
-    const QString preferredMethod = codexAgent && m_settings.acpApiKey.trimmed().isEmpty()
-        ? u"chat-gpt"_s : QString();
+    // Reached only with a key configured (the no-key path returned above), so
+    // the preference must depend on the agent alone. Testing the key here as
+    // well made the condition always false and left the first advertised method
+    // selected, which is chat-gpt for codex and fails authentication.
+    const QString preferredMethod = codexAgent ? u"chat-gpt"_s : QString();
     QJsonObject selectedMethod;
     for (const QJsonValue &value : authMethods) {
         const QJsonObject method = value.toObject();
         QString id = method.value(u"id"_s).toString();
         if (id.isEmpty()) id = method.value(u"methodId"_s).toString();
+        // An agent advertising no id at all still has to authenticate with
+        // something, and the request carries a methodId.
         if (selectedMethod.isEmpty() || (!preferredMethod.isEmpty() && id == preferredMethod)) {
             selectedMethod = method;
         }
@@ -956,7 +1010,11 @@ void AcpClient::sendPromptNow(const QString &text)
     m_currentThinking.clear();
     m_currentPlan = QJsonArray();
     m_toolCalls = QJsonArray();
-    m_liveTools.clear();
+    // Tools may still be open if the previous turn was cancelled by force (an
+    // agent ignoring session/cancel keeps streaming updates until the grace
+    // window closes). Close their cards rather than dropping them silently, or
+    // they spin in the transcript for the rest of the session.
+    finishLiveTools(u"The previous turn was stopped before this finished."_s);
 
     QJsonObject params;
     params.insert(u"sessionId"_s, m_sessionId);
@@ -1182,7 +1240,20 @@ void AcpClient::handleMessage(const QJsonObject &message)
 
 void AcpClient::handleResponse(const QJsonObject &message)
 {
-    const int id = message.value(u"id"_s).toInt();
+    // Our request ids are always integers, but a reply that quotes the id as a
+    // string ("1000") would otherwise map to 0 here and be dropped, leaving the
+    // request to end only on its timeout -- and session/prompt has none, so the
+    // turn would hang. Accept a string only when it is wholly numeric, so a
+    // non-numeric id can never collide with a real request.
+    const QJsonValue idValue = message.value(u"id"_s);
+    int id = 0;
+    if (idValue.isDouble()) {
+        id = idValue.toInt();
+    } else if (idValue.isString()) {
+        id = idValue.toString().toInt();
+    } else {
+        return;
+    }
     const auto it = m_pending.find(id);
     if (it == m_pending.end()) {
         return;
@@ -1417,6 +1488,11 @@ void AcpClient::handleRequestPermission(const QJsonValue &id, const QJsonObject 
     if (request.toolCallId.isEmpty()) {
         request.toolCallId = QUuid::createUuid().toString(QUuid::WithoutBraces);
     }
+    // Only one permission can be shown at a time. If the agent pipelines a
+    // second request while the first is still waiting, the first has to be
+    // answered (as cancelled) before it is overwritten -- otherwise its id is
+    // never replied to and the agent blocks on it forever.
+    cancelPendingPermission();
     m_permissionRpcId = id;
     m_permissionOptions = params.value(u"options"_s).toArray();
     m_permissionRequest = request;
@@ -1450,14 +1526,10 @@ QString AcpClient::pickPermissionOption(PermissionDecision decision) const
         ? u"reject_once"_s
         : (decision == PermissionDecision::AllowSession ? u"allow_always"_s : u"allow_once"_s);
     const QString fallback = decision == PermissionDecision::Deny ? u"reject_always"_s : u"allow_once"_s;
-    QString first;
     for (const QJsonValue &value : m_permissionOptions) {
         const QJsonObject option = value.toObject();
         const QString kind = option.value(u"kind"_s).toString();
         const QString optionId = option.value(u"optionId"_s).toString();
-        if (first.isEmpty()) {
-            first = optionId;
-        }
         if (kind == wanted) {
             return optionId;
         }
@@ -1468,7 +1540,11 @@ QString AcpClient::pickPermissionOption(PermissionDecision decision) const
             return option.value(u"optionId"_s).toString();
         }
     }
-    return first;
+    // Guessing an option id for either decision can invert the user's choice:
+    // "first" may be an allow option, so approving could refuse and refusing
+    // could execute. Return nothing and let resolvePermission() cancel, which
+    // keeps the tool call from running without telling the agent it was refused.
+    return QString();
 }
 
 void AcpClient::handleFsRead(const QJsonValue &id, const QJsonObject &params)
@@ -1979,6 +2055,9 @@ void AcpClient::releaseAllTerminals()
 
 void AcpClient::failAll(const QString &error)
 {
+    // A permission request in flight must still be answered, or the agent waits
+    // on it for as long as the process lives.
+    cancelPendingPermission();
     const auto pending = m_pending;
     m_pending.clear();
     for (const Pending &item : pending) {
@@ -1998,6 +2077,11 @@ void AcpClient::failAll(const QString &error)
 void AcpClient::finishPrompt(const QString &stopReason, const QString &error)
 {
     m_promptId = 0;
+    // The turn is over, so a pending cancellation grace window must not fire.
+    if (m_cancelGraceTimer) {
+        m_cancelGraceTimer->stop();
+        delete m_cancelGraceTimer;
+    }
     if (!error.isEmpty()) {
         Q_EMIT failed(error);
         return;
