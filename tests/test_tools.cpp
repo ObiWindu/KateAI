@@ -529,6 +529,65 @@ private Q_SLOTS:
         }
         QVERIFY(progress.last().trimmed() == finalResult.output.trimmed());
     }
+    void readFilePaginationNoteMatchesWhatWasShown()
+    {
+        // The "N more line(s)" note is the model's only cue that it has to read
+        // on. It used to be computed from the slice the code *intended* to show
+        // while the body itself was clipped at 80000 characters, so a long file
+        // reported nothing left while most of it had never been displayed.
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+
+        const int totalLines = 5000;
+        QString body;
+        for (int i = 0; i < totalLines; ++i) {
+            body += u"%1 %2\n"_s.arg(i + 1).arg(QString(60, u'x'));
+        }
+        const QString filePath = tempDir.path() + u"/big.txt"_s;
+        {
+            QFile f(filePath);
+            QVERIFY(f.open(QIODevice::WriteOnly | QIODevice::Text));
+            f.write(body.toUtf8());
+        }
+
+        Sandbox sandbox(tempDir.path(), SandboxProfile::Workspace);
+        DiskDocumentBridge bridge;
+        ToolRunner runner(sandbox, &bridge);
+
+        ToolCall call;
+        call.id = u"read-1"_s;
+        call.name = u"read_file"_s;
+        call.arguments = QJsonObject{{u"path"_s, u"big.txt"_s}};
+
+        const ToolResult res = runner.run(call);
+        QVERIFY2(res.ok, qPrintable(res.output));
+
+        // Everything before the note is file content, so it must stay inside
+        // the observation budget and end on a line boundary.
+        const int noteAt = res.output.indexOf(u"\n["_s);
+        QVERIFY2(noteAt > 0, qPrintable(res.output.right(200)));
+        const QString bodyShown = res.output.left(noteAt);
+        QVERIFY2(bodyShown.size() <= 80000, qPrintable(QString::number(bodyShown.size())));
+
+        // Highest line number actually displayed.
+        int lastShown = 0;
+        for (const QString &line : bodyShown.split(u'\n')) {
+            const int pipe = line.indexOf(u'|');
+            if (pipe > 0) {
+                bool ok = false;
+                const int number = line.left(pipe).trimmed().toInt(&ok);
+                if (ok && number > lastShown) {
+                    lastShown = number;
+                }
+            }
+        }
+        QVERIFY(lastShown > 0 && lastShown < totalLines);
+
+        const QString note = res.output.mid(noteAt);
+        QVERIFY2(note.contains(u"more line(s) not shown"_s), qPrintable(note));
+        QVERIFY2(note.contains(u"%1 more line(s)"_s.arg(totalLines - lastShown)), qPrintable(note));
+        QVERIFY2(note.contains(u"offset=%1"_s.arg(lastShown + 1)), qPrintable(note));
+    }
 #endif
 };
 

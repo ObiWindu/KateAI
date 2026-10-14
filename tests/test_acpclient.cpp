@@ -230,6 +230,136 @@ private Q_SLOTS:
         client.stop();
     }
 
+    void refusingWithoutARejectOptionCancelsRatherThanApproving()
+    {
+        // The agent advertises only allow options, so there is no matching kind
+        // for a Deny. The client must fall back to "cancelled" instead of
+        // echoing the first option id, which would execute the denied tool.
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+
+        DiskDocumentBridge bridge;
+        AcpClient client;
+        client.setSettings(mockSettings(u"permission-allowonly"_s));
+        client.setWorkspace(workspace.path());
+        client.setDocumentBridge(&bridge);
+
+        QString text;
+        QString error;
+        QString stopReason;
+        bool asked = false;
+
+        connect(&client, &AcpClient::permissionNeeded, this, [&](const PermissionRequest &) {
+            asked = true;
+            client.resolvePermission(PermissionDecision::Deny);
+        });
+        connect(&client, &AcpClient::textDelta, this, [&](const QString &delta) {
+            text += delta;
+        });
+        connect(&client, &AcpClient::promptFinished, this, [&](const QString &reason, const QString &, const QJsonArray &) {
+            stopReason = reason;
+        });
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+
+        client.prompt(u"please write"_s);
+        QVERIFY2(waitFor([&] {
+            return !stopReason.isEmpty() || !error.isEmpty();
+        }), qPrintable(error.isEmpty() ? u"timed out"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QVERIFY(asked);
+        QCOMPARE(text, u"refusal:cancelled"_s);
+        client.stop();
+    }
+
+    void pipelinedPermissionRequestsBothGetAnswered()
+    {
+        // An agent that asks twice before the first answer arrives must not have
+        // the first question dropped: an unanswered session/request_permission
+        // blocks that agent for the rest of the session. The client shows one bar
+        // at a time, so it has to close the earlier question itself.
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+
+        DiskDocumentBridge bridge;
+        AcpClient client;
+        client.setSettings(mockSettings(u"permission-double"_s));
+        client.setWorkspace(workspace.path());
+        client.setDocumentBridge(&bridge);
+
+        QString text;
+        QString error;
+        QString stopReason;
+        int asks = 0;
+
+        connect(&client, &AcpClient::permissionNeeded, this, [&](const PermissionRequest &) {
+            ++asks;
+        });
+        connect(&client, &AcpClient::textDelta, this, [&](const QString &delta) {
+            text += delta;
+        });
+        connect(&client, &AcpClient::promptFinished, this, [&](const QString &reason, const QString &, const QJsonArray &) {
+            stopReason = reason;
+        });
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+
+        client.prompt(u"please write"_s);
+        // Let both questions arrive while nothing is answered, which is the
+        // overlapping case. Then settle whichever one is still on screen.
+        QVERIFY2(waitFor([&] { return asks >= 2; }, 10000),
+                 "the second permission request never reached the client");
+        client.resolvePermission(PermissionDecision::Deny);
+
+        QVERIFY2(waitFor([&] {
+            return !stopReason.isEmpty() || !error.isEmpty();
+        }), qPrintable(error.isEmpty() ? u"timed out"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(asks, 2);
+        // The earlier question is closed by the client as cancelled; the later
+        // one carries the user's decision.
+        QCOMPARE(text, u"permissions:a=cancelled;b=reject-once"_s);
+        client.stop();
+    }
+
+    void stringIdsInRepliesStillFinishTheTurn()
+    {
+        // session/prompt carries no timeout, so a reply that quotes the request
+        // id as a string used to be dropped and the turn never ended at all.
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+
+        DiskDocumentBridge bridge;
+        AcpClient client;
+        client.setSettings(mockSettings(u"stringid"_s));
+        client.setWorkspace(workspace.path());
+        client.setDocumentBridge(&bridge);
+
+        QString text;
+        QString error;
+        QString stopReason;
+        connect(&client, &AcpClient::textDelta, this, [&](const QString &delta) {
+            text += delta;
+        });
+        connect(&client, &AcpClient::promptFinished, this, [&](const QString &reason, const QString &, const QJsonArray &) {
+            stopReason = reason;
+        });
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+
+        client.prompt(u"hello"_s);
+        QVERIFY2(waitFor([&] {
+            return !stopReason.isEmpty() || !error.isEmpty();
+        }), "the turn never finished; the string id was dropped");
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(stopReason, u"end_turn"_s);
+        QCOMPARE(text, u"string-id-ok"_s);
+        client.stop();
+    }
+
     void fsReadAndWriteGoThroughDocumentBridge()
     {
         QTemporaryDir workspace;

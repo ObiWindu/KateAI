@@ -184,24 +184,38 @@ QJsonArray LlmClient::messagesToJson(const QList<ChatMessage> &messages)
 
 QList<ToolCall> LlmClient::completedToolsFromAccumulator()
 {
+    return drainToolAccumulator(&m_toolAcc);
+}
+
+// Turns the streamed tool-call accumulator into finished ToolCalls. The
+// accumulator is keyed by the provider's block/tool index and only ever holds
+// the raw JSON text of the arguments, so parsing is shared by the OpenAI
+// "[DONE]" and the Anthropic "message_stop" terminators.
+QList<ToolCall> LlmClient::drainToolAccumulator(QHash<int, ToolCall> *acc)
+{
     QList<ToolCall> tools;
-    tools.reserve(m_toolAcc.size());
-    for (auto it = m_toolAcc.cbegin(); it != m_toolAcc.cend(); ++it) {
+    if (!acc) {
+        return tools;
+    }
+    tools.reserve(acc->size());
+    for (auto it = acc->cbegin(); it != acc->cend(); ++it) {
         ToolCall tool = it.value();
         if (tool.id.isEmpty()) {
             tool.id = u"call_%1"_s.arg(it.key());
         }
-        QJsonParseError parseError;
-        const QJsonDocument argsDoc = QJsonDocument::fromJson(tool.argumentsJson.toUtf8(), &parseError);
-        if (parseError.error == QJsonParseError::NoError && argsDoc.isObject()) {
-            tool.arguments = argsDoc.object();
+        if (!tool.argumentsJson.isEmpty()) {
+            QJsonParseError parseError;
+            const QJsonDocument argsDoc = QJsonDocument::fromJson(tool.argumentsJson.toUtf8(), &parseError);
+            if (parseError.error == QJsonParseError::NoError && argsDoc.isObject()) {
+                tool.arguments = argsDoc.object();
+            }
         }
         tools.append(tool);
     }
     std::sort(tools.begin(), tools.end(), [](const ToolCall &a, const ToolCall &b) {
         return a.id < b.id;
     });
-    m_toolAcc.clear();
+    acc->clear();
     return tools;
 }
 
@@ -219,19 +233,7 @@ CompletionChunk LlmClient::parseSseLine(const QByteArray &line, QHash<int, ToolC
         chunk.finished = true;
         chunk.finishReason = u"stop"_s;
         if (acc) {
-            for (auto it = acc->cbegin(); it != acc->cend(); ++it) {
-                ToolCall tool = it.value();
-                if (tool.id.isEmpty()) {
-                    tool.id = u"call_%1"_s.arg(it.key());
-                }
-                QJsonParseError parseError;
-                const QJsonDocument argsDoc = QJsonDocument::fromJson(tool.argumentsJson.toUtf8(), &parseError);
-                if (parseError.error == QJsonParseError::NoError && argsDoc.isObject()) {
-                    tool.arguments = argsDoc.object();
-                }
-                chunk.completedTools.append(tool);
-            }
-            acc->clear();
+            chunk.completedTools.append(drainToolAccumulator(acc));
         }
         return chunk;
     }
@@ -250,6 +252,56 @@ CompletionChunk LlmClient::parseSseLine(const QByteArray &line, QHash<int, ToolC
             chunk.error = QString::fromUtf8(payload);
         }
         chunk.finished = true;
+        return chunk;
+    }
+
+    // Anthropic Messages API: every event carries its own "type" and there is no
+    // "choices" envelope, so the OpenAI branch below would silently drop the
+    // whole stream. Events arrive as "event: <name>\ndata: {...}", and only the
+    // data line is parsed here.
+    const QString anthropicType = root.value(u"type"_s).toString();
+    if (!anthropicType.isEmpty() && !root.contains(u"choices"_s)) {
+        if (anthropicType == u"content_block_delta"_s) {
+            const QJsonObject delta = root.value(u"delta"_s).toObject();
+            const QString kind = delta.value(u"type"_s).toString();
+            if (kind == u"text_delta"_s) {
+                chunk.contentDelta = delta.value(u"text"_s).toString();
+            } else if (kind == u"thinking_delta"_s || kind == u"signature_delta"_s) {
+                chunk.thinkingDelta = delta.value(u"thinking"_s).toString();
+            } else if (kind == u"input_json_delta"_s && acc) {
+                // Tool arguments are streamed as JSON fragments; keep them raw
+                // so drainToolAccumulator() can parse the assembled object.
+                ToolCall &tool = (*acc)[root.value(u"index"_s).toInt()];
+                tool.argumentsJson += delta.value(u"partial_json"_s).toString();
+            }
+        } else if (anthropicType == u"content_block_start"_s) {
+            const QJsonObject block = root.value(u"content_block"_s).toObject();
+            if (block.value(u"type"_s).toString() == u"tool_use"_s && acc) {
+                ToolCall &tool = (*acc)[root.value(u"index"_s).toInt()];
+                tool.id = block.value(u"id"_s).toString();
+                tool.name = block.value(u"name"_s).toString();
+                // A short input can arrive complete here, with no delta events.
+                tool.arguments = block.value(u"input"_s).toObject();
+            }
+        } else if (anthropicType == u"message_delta"_s) {
+            chunk.finishReason = root.value(u"delta"_s).toObject().value(u"stop_reason"_s).toString();
+        } else if (anthropicType == u"message_stop"_s) {
+            // Anthropic never sends "data: [DONE]".
+            chunk.finished = true;
+            if (chunk.finishReason.isEmpty()) {
+                chunk.finishReason = u"stop"_s;
+            }
+            if (acc) {
+                chunk.completedTools.append(drainToolAccumulator(acc));
+            }
+        } else if (anthropicType == u"error"_s) {
+            const QJsonValue error = root.value(u"error"_s);
+            chunk.error = error.isObject() ? error.toObject().value(u"message"_s).toString() : error.toString();
+            if (chunk.error.isEmpty()) {
+                chunk.error = QString::fromUtf8(payload);
+            }
+            chunk.finished = true;
+        }
         return chunk;
     }
 
@@ -382,13 +434,17 @@ void LlmClient::doComplete(const QList<ChatMessage> &messages)
     QByteArray requestBody;
     QString authHeader;
     QString acceptHeader = u"text/event-stream"_s;
+    // The Messages API authenticates with its own headers, not with a bearer
+    // token: sending "Authorization: x-api-key: <key>" (as this used to) leaves
+    // the key invisible to the server and every Claude call answered 401.
+    bool anthropicAuth = false;
 
     switch (apiFormat) {
     case ApiFormat::AnthropicCompatible:
         body = buildAnthropicRequest(messages, model);
         endpoint = u"/v1/messages"_s;
         requestBody = QJsonDocument(body).toJson(QJsonDocument::Compact);
-        authHeader = QString(u"x-api-key: "_s) + key;
+        anthropicAuth = true;
         acceptHeader = u"text/event-stream"_s;
         break;
     case ApiFormat::AcpNative:
@@ -416,7 +472,12 @@ void LlmClient::doComplete(const QList<ChatMessage> &messages)
     // no bytes arrive -- so a long generation that keeps streaming is never cut
     // short, while a half-open connection still ends with a retryable error.
     request.setTransferTimeout(kRequestIdleTimeoutMs);
-    request.setRawHeader("Authorization", authHeader.toUtf8());
+    if (anthropicAuth) {
+        request.setRawHeader("x-api-key", key.toUtf8());
+        request.setRawHeader("anthropic-version", "2023-06-01");
+    } else {
+        request.setRawHeader("Authorization", authHeader.toUtf8());
+    }
     request.setRawHeader("Accept", acceptHeader.toUtf8());
     if (m_settings.provider == Provider::OpenRouter) {
         request.setRawHeader("HTTP-Referer", "https://kate-editor.org");
@@ -492,7 +553,11 @@ QJsonObject LlmClient::buildOpenAIRequest(const QList<ChatMessage> &messages, co
     body.insert(u"model"_s, model);
     body.insert(u"messages"_s, messagesToJson(messages));
     body.insert(u"tools"_s, advertisedTools());
-    body.insert(u"tool_choice"_s, m_settings.parallelToolCalls ? u"auto"_s : u"none"_s);
+    // "none" is not "no parallelism": it forbids tool calls altogether, so the
+    // agent could not act at all when the user turned batching off. Batching is
+    // controlled by parallel_tool_calls instead.
+    body.insert(u"tool_choice"_s, u"auto"_s);
+    body.insert(u"parallel_tool_calls"_s, m_settings.parallelToolCalls);
     body.insert(u"stream"_s, true);
     body.insert(u"temperature"_s, m_settings.temperature);
     body.insert(u"top_p"_s, m_settings.topP);
@@ -541,10 +606,12 @@ QJsonObject LlmClient::buildAnthropicRequest(const QList<ChatMessage> &messages,
     }
 
     // Tools must be in Anthropic's {name, input_schema} shape, not OpenAI's.
+    // Anthropic has no parallel_tool_calls flag; it always decides on its own
+    // which tools to batch, and "none" would forbid tool calls entirely.
     const QJsonArray tools = anthropicTools(advertisedTools());
     if (!tools.isEmpty()) {
         body.insert(u"tools"_s, tools);
-        body.insert(u"tool_choice"_s, m_settings.parallelToolCalls ? u"auto"_s : u"none"_s);
+        body.insert(u"tool_choice"_s, u"auto"_s);
     }
     return body;
 }
@@ -556,7 +623,11 @@ QJsonObject LlmClient::buildAcpNativeRequest(const QList<ChatMessage> &messages,
     body.insert(u"model"_s, model);
     body.insert(u"messages"_s, messagesToJson(messages));
     body.insert(u"tools"_s, advertisedTools());
-    body.insert(u"tool_choice"_s, m_settings.parallelToolCalls ? u"auto"_s : u"none"_s);
+    // "none" is not "no parallelism": it forbids tool calls altogether, so the
+    // agent could not act at all when the user turned batching off. Batching is
+    // controlled by parallel_tool_calls instead.
+    body.insert(u"tool_choice"_s, u"auto"_s);
+    body.insert(u"parallel_tool_calls"_s, m_settings.parallelToolCalls);
     body.insert(u"stream"_s, true);
     body.insert(u"temperature"_s, m_settings.temperature);
     body.insert(u"top_p"_s, m_settings.topP);
@@ -612,6 +683,12 @@ QJsonArray LlmClient::messagesToAnthropicJson(const QList<ChatMessage> &messages
             break;
         }
         case ChatMessage::Role::Assistant: {
+            // An assistant turn with neither text nor tool calls (a cancelled or
+            // aborted response) would serialise as an empty content array, which
+            // the Messages API rejects. Skip it entirely.
+            if (message.content.trimmed().isEmpty() && message.toolCalls.isEmpty()) {
+                break;
+            }
             ensureTurn(u"assistant"_s);
             // Hidden reasoning is intentionally dropped: Anthropic requires
             // thinking blocks to round-trip with a signature, which we do not
@@ -638,6 +715,29 @@ QJsonArray LlmClient::messagesToAnthropicJson(const QList<ChatMessage> &messages
             break;
         }
         case ChatMessage::Role::Tool: {
+            // A tool result is only valid directly after the assistant turn that
+            // requested it (or as a later block of that same batch). Anything
+            // else -- history starting with a tool result, or one arriving after
+            // an unrelated user message -- would make the Messages API reject
+            // the whole request, and appendBlock() would drop it silently.
+            bool validPlacement = false;
+            if (!turns.isEmpty()) {
+                const QJsonObject last = turns.last().toObject();
+                if (last.value(u"role"_s).toString() == u"assistant"_s) {
+                    validPlacement = true;
+                } else if (last.value(u"role"_s).toString() == u"user"_s) {
+                    const QJsonArray blocks = last.value(u"content"_s).toArray();
+                    for (const QJsonValue &block : blocks) {
+                        if (block.toObject().value(u"type"_s).toString() == u"tool_result"_s) {
+                            validPlacement = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            if (!validPlacement) {
+                break;
+            }
             ensureTurn(u"user"_s);
             QJsonObject block;
             block.insert(u"type"_s, u"tool_result"_s);
@@ -692,10 +792,11 @@ void LlmClient::fetchModels(Provider provider)
 
     QString modelsEndpoint;
     QString authHeader;
+    bool anthropicAuth = false;
     switch (apiFormat) {
     case ApiFormat::AnthropicCompatible:
         modelsEndpoint = u"/v1/models"_s;
-        authHeader = QString(u"x-api-key: "_s) + key;
+        anthropicAuth = true;
         break;
     case ApiFormat::AcpNative:
         modelsEndpoint = u"/acp/v1/models"_s;
@@ -711,7 +812,12 @@ void LlmClient::fetchModels(Provider provider)
     // Respect the configured endpoint, not just the provider default, so a
     // custom Ollama/LocalAI/ACP URL actually takes effect.
     QNetworkRequest request{QUrl(providerBaseUrl(providerSettings) + modelsEndpoint)};
-    request.setRawHeader("Authorization", authHeader.toUtf8());
+    if (anthropicAuth) {
+        request.setRawHeader("x-api-key", key.toUtf8());
+        request.setRawHeader("anthropic-version", "2023-06-01");
+    } else {
+        request.setRawHeader("Authorization", authHeader.toUtf8());
+    }
     request.setHeader(QNetworkRequest::UserAgentHeader, u"Kate AI"_s);
     // A models listing is a single short response; it gets the same idle
     // watchdog so a stalled endpoint cannot hang the settings dialog.
@@ -888,6 +994,11 @@ void LlmClient::handleReadyRead()
     // unterminated line that `leftover` holds.
     appendResponseBody(incoming);
     m_buffer.append(incoming);
+    // The watchdog measures idleness, not total duration: restart it on every
+    // chunk so a long but healthy stream is never cut off.
+    if (QTimer *idleTimer = m_requestTimers.value(m_reply)) {
+        idleTimer->start(kRequestIdleTimeoutMs);
+    }
     while (true) {
         const int idx = m_buffer.indexOf('\n');
         if (idx < 0) {
@@ -903,9 +1014,14 @@ void LlmClient::handleReadyRead()
         if (!chunk.error.isEmpty()) {
             m_completionError = chunk.error;
             if (m_reply) {
-                // Do not emit failed() or call abort() from readyRead(). Keep
-                // lifecycle transitions inside handleFinished().
+                // Detach first: abort() emits finished() synchronously, which
+                // would re-enter handleFinished() *inside* this slot with the
+                // rest of the stream still in m_buffer. handleFinished() is then
+                // called by hand, and the remaining lines are dropped instead
+                // of being emitted after the failure was already recorded.
+                m_reply->disconnect(this);
                 m_reply->abort();
+                handleFinished();
             }
             return;
         }
@@ -956,8 +1072,10 @@ void LlmClient::handleFinished()
         return;
     }
 
-    // Consume a possible final SSE event without a trailing newline.
-    if (!leftover.trimmed().isEmpty()) {
+    // Consume a possible final SSE event without a trailing newline. Once the
+    // stream has already failed, anything still buffered belongs to that failed
+    // response and must not reach the transcript as if it were text.
+    if (m_completionError.isEmpty() && !leftover.trimmed().isEmpty()) {
         for (const QByteArray &line : leftover.split('\n')) {
             if (line.trimmed().isEmpty()) {
                 continue;
@@ -978,6 +1096,7 @@ void LlmClient::handleFinished()
             }
         }
     }
+    m_buffer.clear();
 
     if (!m_toolAcc.isEmpty()) {
         m_completedTools.append(completedToolsFromAccumulator());

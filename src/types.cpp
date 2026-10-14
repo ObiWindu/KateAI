@@ -787,9 +787,9 @@ QJsonArray parsePlanFromText(const QString &text)
                     plan.append(obj);
                 }
             }
-            if (i < text.size()) {
-                ++i;
-            }
+            // Always advance, including past the final line: stopping at
+            // text.size() would re-process the empty terminal segment forever.
+            ++i;
             lineStart = i;
         } else {
             ++i;

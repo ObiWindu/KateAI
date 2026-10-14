@@ -364,7 +364,12 @@ QString unifiedDiff(const QString &path, const QString &before, const QString &a
             }
         }
         auto range = [](int start, int count) {
-            start = qMax(1, start);
+            // A zero-length range is written "<line before>,0"; the line before
+            // an insertion at the very top of a file is 0, so the 1-based floor
+            // must not apply here.
+            if (count == 0) {
+                return QString::number(qMax(0, start));
+            }
             return count == 1 ? QString::number(start) : u"%1,%2"_s.arg(start).arg(count);
         };
         out += u"@@ -%1 +%2 @@\n"_s.arg(range(oldStart, oldCount), range(newStart, newCount));
@@ -581,28 +586,45 @@ ToolResult ToolRunner::readFile(const QJsonObject &args) const
     constexpr int kMaxReadLines = 10000;
     const int cappedLimit = limit > 0 ? qMin(limit, kMaxReadLines) : 0;
     QStringList lines = contents.split(u'\n');
+    // Text that ends with a newline splits into one extra empty element. That
+    // is the file terminator, not a line the model can read, and counting it
+    // made the "N more line(s)" note and the "File has N lines" reply both lie
+    // by one.
+    if (!lines.isEmpty() && lines.last().isEmpty()) {
+        lines.removeLast();
+    }
     int start = std::max(0, offset - 1);
     if (start >= lines.size()) {
+        result.ok = false;
         result.output = u"File has %1 lines; offset is past the end."_s.arg(lines.size());
         return result;
     }
     int count = cappedLimit > 0 ? cappedLimit : lines.size() - start;
     QStringList slice = lines.mid(start, count);
-    
-    // Format the output with line numbers for easier reading
+
+    // Format the output with line numbers for easier reading. Stop adding lines
+    // once the observation budget is reached: clip() would otherwise cut the
+    // body mid-way while the "N more line(s)" note below still claims that the
+    // whole slice was shown, which tells the model it saw a file it did not.
+    constexpr int kMaxReadOutputChars = 80000; // keep in sync with clip()
     QString numbered;
-    for (int i = 0; i < slice.size(); ++i) {
-        numbered += u"%1|%2\n"_s.arg(start + i + 1, 6).arg(slice.at(i));
+    int emitted = 0;
+    for (; emitted < slice.size(); ++emitted) {
+        const QString line = u"%1|%2\n"_s.arg(start + emitted + 1, 6).arg(slice.at(emitted));
+        if (emitted > 0 && numbered.size() + line.size() > kMaxReadOutputChars) {
+            break;
+        }
+        numbered += line;
     }
     result.output = clip(numbered);
-    const int remaining = lines.size() - (start + slice.size());
+    const int remaining = lines.size() - (start + emitted);
     if (remaining > 0) {
         if (limit > 0 && limit > cappedLimit) {
             result.output += u"\n[Requested %1 line(s) but a read is capped at %2; %3 line(s) remain. Call again with offset=%4 to continue.]"_s
-                                 .arg(limit).arg(cappedLimit).arg(remaining).arg(start + slice.size() + 1);
+                                 .arg(limit).arg(cappedLimit).arg(remaining).arg(start + emitted + 1);
         } else {
             result.output += u"\n[%1 more line(s) not shown. Call again with offset=%2 to continue.]"_s
-                                 .arg(remaining).arg(start + slice.size() + 1);
+                                 .arg(remaining).arg(start + emitted + 1);
         }
     }
     return result;

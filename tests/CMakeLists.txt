@@ -6,6 +6,7 @@ endfunction()
 
 kateai_test(test_sandbox)
 kateai_test(test_permissions)
+kateai_test(test_settings)
 kateai_test(test_llmparse)
 kateai_test(test_session)
 kateai_test(test_retry)

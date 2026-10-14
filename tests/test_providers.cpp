@@ -139,6 +139,44 @@ private Q_SLOTS:
         QVERIFY(pickerModelsFor(settings, Provider::Acp, {}).isEmpty());
     }
 
+    void planParsingTerminatesOnATrailingLine()
+    {
+        // parsePlanFromText() used to spin forever once the plan section ended:
+        // the final line was processed, `i` was never advanced past the end of
+        // the text, and the loop re-entered on the same empty segment for as
+        // long as fewer than 20 steps had been parsed.
+        const QJsonArray noNewline = parsePlanFromText(u"Plan:\n1. Read the file\n2. Fix the bug"_s);
+        QCOMPARE(noNewline.size(), 2);
+        QCOMPARE(noNewline.at(0).toObject().value(u"description"_s).toString(), u"Read the file"_s);
+        QCOMPARE(noNewline.at(1).toObject().value(u"description"_s).toString(), u"Fix the bug"_s);
+
+        const QJsonArray withNewline = parsePlanFromText(u"Plan:\n1. Read the file\n2. Fix the bug\n"_s);
+        QCOMPARE(withNewline.size(), 2);
+
+        // A single step is enough to trigger the hang.
+        const QJsonArray single = parsePlanFromText(u"Steps:\n- Do it"_s);
+        QCOMPARE(single.size(), 1);
+
+        // No plan heading means no plan, and no loop.
+        QVERIFY(parsePlanFromText(u"Here is the answer."_s).isEmpty());
+
+        // Steps stay capped so a runaway reply cannot grow the checklist.
+        QString many = u"Plan:\n"_s;
+        for (int i = 0; i < 40; ++i) {
+            many += u"%1. step %2\n"_s.arg(i + 1).arg(i);
+        }
+        QCOMPARE(parsePlanFromText(many).size(), 20);
+    }
+
+    void planMergeKeepsIdsStable()
+    {
+        const QJsonArray plan = parsePlanFromText(u"Plan:\n1. one\n2. two"_s);
+        const QJsonArray extended = mergePlanIntoAssistantMessage(plan, u"Plan:\n1. one\n2. two\n3. three"_s);
+        QCOMPARE(extended.size(), 3);
+        QCOMPARE(extended.at(0).toObject().value(u"id"_s).toString(), u"step1"_s);
+        QCOMPARE(extended.at(2).toObject().value(u"description"_s).toString(), u"three"_s);
+    }
+
     void acpNativeIsStdioTransport()
     {
         Settings settings;

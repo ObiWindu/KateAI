@@ -90,7 +90,10 @@ public:
     // A short description of the active provider for the system prompt.
     QString providerDescription() const;
 
-    void search(const QString &query, const QString &callId);
+    // `maxResults` > 0 applies to this call only. The object is shared by every
+    // loop and several searches can be in flight, so a per-call limit has to
+    // travel with the call instead of overriding the shared setting.
+    void search(const QString &query, const QString &callId, int maxResults = 0);
     void fetchPage(const QString &url, const QString &callId);
     void abort();
 
@@ -125,6 +128,8 @@ private:
     QString m_apiKey;
     QString m_endpoint;
     int m_maxResults = 5;
+    // Per-call overrides, keyed by call id; consumed when the reply arrives.
+    QHash<QString, int> m_callMaxResults;
     int m_timeoutMs = 20000;
     QNetworkAccessManager *m_nam = nullptr;
     // In-flight replies, so abort() can cancel them and the destructor does

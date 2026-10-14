@@ -227,13 +227,21 @@ void WebSearch::abort()
     m_replies.clear();
     for (const QPointer<QNetworkReply> &reply : replies) {
         if (reply) {
+            // Detach before aborting: abort() emits finished() synchronously,
+            // and an "aborted" reply must not be reported to the agent loop as
+            // a finished search that produces a tool result after a stop.
+            reply->disconnect(this);
             reply->abort();
         }
     }
+    m_callMaxResults.clear();
 }
 
-void WebSearch::search(const QString &query, const QString &callId)
+void WebSearch::search(const QString &query, const QString &callId, int maxResults)
 {
+    if (maxResults > 0) {
+        m_callMaxResults.insert(callId, qBound(1, maxResults, 20));
+    }
     if (!isConfigured()) {
         finishSearch(callId, {}, configurationError());
         return;
@@ -243,6 +251,11 @@ void WebSearch::search(const QString &query, const QString &callId)
         finishSearch(callId, {}, i18n("The search query was empty."));
         return;
     }
+
+    // The provider request and the reply parser must agree on the count, so
+    // both read this call's limit rather than the shared setting.
+    const int limit = maxResults > 0 ? qBound(1, maxResults, 20) : 0;
+    const int effectiveLimit = limit > 0 ? limit : m_maxResults;
 
     QNetworkReply *reply = nullptr;
     switch (m_provider) {
@@ -262,7 +275,7 @@ void WebSearch::search(const QString &query, const QString &callId)
         request.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
         const QJsonObject payload{{QStringLiteral("api_key"), m_apiKey},
                                   {QStringLiteral("query"), trimmed},
-                                  {QStringLiteral("max_results"), m_maxResults},
+                                  {QStringLiteral("max_results"), effectiveLimit},
                                   {QStringLiteral("search_depth"), QStringLiteral("basic")}};
         reply = m_nam->post(request, QJsonDocument(payload).toJson(QJsonDocument::Compact));
         break;
@@ -271,7 +284,7 @@ void WebSearch::search(const QString &query, const QString &callId)
         QUrl url(QStringLiteral("https://api.search.brave.com/res/v1/web/search"));
         QUrlQuery braveItems;
         braveItems.addQueryItem(QStringLiteral("q"), trimmed);
-        braveItems.addQueryItem(QStringLiteral("count"), QString::number(m_maxResults));
+        braveItems.addQueryItem(QStringLiteral("count"), QString::number(effectiveLimit));
         url.setQuery(braveItems);
         QNetworkRequest request = makeRequest(url, m_timeoutMs);
         request.setRawHeader("X-Subscription-Token", m_apiKey.toUtf8());
@@ -406,19 +419,24 @@ void WebSearch::onReplyFinished(QNetworkReply *reply, const QString &callId, boo
     }
 
     QList<WebSearchResult> results;
+    // The reply can arrive after a sibling call changed the shared setting, so
+    // the limit is taken from this call's own entry.
+    const int pendingLimit = m_callMaxResults.value(callId, 0);
+    const int maxResults = pendingLimit > 0 ? pendingLimit : m_maxResults;
+    m_callMaxResults.remove(callId);
     switch (m_provider) {
     case Provider::Tavily:
-        results = parseTavily(QJsonDocument::fromJson(body).object(), m_maxResults);
+        results = parseTavily(QJsonDocument::fromJson(body).object(), maxResults);
         break;
     case Provider::Brave:
-        results = parseBrave(QJsonDocument::fromJson(body).object(), m_maxResults);
+        results = parseBrave(QJsonDocument::fromJson(body).object(), maxResults);
         break;
     case Provider::SearXNG:
-        results = parseSearx(QJsonDocument::fromJson(body).object(), m_maxResults);
+        results = parseSearx(QJsonDocument::fromJson(body).object(), maxResults);
         break;
     case Provider::DuckDuckGo:
     case Provider::Disabled:
-        results = parseDuckDuckGo(body, m_maxResults);
+        results = parseDuckDuckGo(body, maxResults);
         break;
     }
 

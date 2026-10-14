@@ -31,8 +31,8 @@ struct GraphNode {
     QString content; // For files, the content preview
     QSet<QString> dependencies; // Other nodes this depends on
     QSet<QString> dependents; // Nodes that depend on this
-    int complexity; // Cyclomatic complexity for functions/classes
-    int linesOfCode;
+    int complexity = 0;      // Cyclomatic complexity for functions/classes
+    int linesOfCode = 0;
     QJsonObject metadata;
     bool isReadOnly; // For security tracking
     qint64 lastModified;
@@ -113,6 +113,9 @@ private:
     QMap<QString, GraphEdge*> m_edges;
     QMap<QString, QSet<QString>> m_adjacencyList;
     QString m_workspacePath;
+    // Directories already visited during the current scan, keyed by canonical
+    // path, so a symlink loop cannot re-enter a directory it resolved from.
+    QSet<QString> m_visitedDirs;
     qint64 m_lastUpdateTime;
     bool m_isDirty;
 
@@ -120,8 +123,11 @@ private:
     void cleanupDeletedNodes();
     void updateNodeMetrics(GraphNode *node);
     QString extractImportsFromContent(const QString &content, const QString &filePath) const;
-    QString extractClassDefinitions(const QString &content) const;
-    QString extractFunctionDefinitions(const QString &content) const;
+    // Both return the list of definitions, not a joined string: the only
+    // consumer needs the count, and QString::size() on the joined text measured
+    // characters instead of definitions.
+    QStringList extractClassDefinitions(const QString &content) const;
+    QStringList extractFunctionDefinitions(const QString &content) const;
     bool isSafeRelationship(const GraphNode *source, const GraphNode *target, const QString &relationship) const;
 
     // Helper functions for graph operations

@@ -37,6 +37,8 @@ void ProjectGraph::generateGraph(const QString &workspacePath)
 {
     setWorkspacePath(workspacePath);
     clear();
+    // A fresh walk: a directory visited by an earlier scan no longer counts.
+    m_visitedDirs.clear();
 
     // Add workspace root node
     GraphNode rootNode;
@@ -67,8 +69,25 @@ void ProjectGraph::scanDirectory(const QString &dirPath, const QString &parentNo
         return;
     }
 
+    // A symlinked directory that points back into (or above) the workspace would
+    // otherwise be re-scanned once per link level, adding a fresh duplicate node
+    // id for every file on every pass and reading each file again and again.
+    // Follow nothing, and never scan a directory that resolves outside the
+    // workspace root.
+    const QString resolvedDir = QFileInfo(dirPath).canonicalFilePath();
+    if (!m_visitedDirs.contains(resolvedDir)) {
+        if (!m_workspacePath.isEmpty() && QFileInfo(m_workspacePath).canonicalFilePath() != resolvedDir) {
+            // Reached only for the recursive calls: check containment.
+            if (!resolvedDir.startsWith(QFileInfo(m_workspacePath).canonicalFilePath() + u'/')) {
+                return;
+            }
+        }
+        m_visitedDirs.insert(resolvedDir);
+    }
+
     QDir dir(dirPath);
-    const QFileInfoList entries = dir.entryInfoList(QDir::AllEntries | QDir::NoDotAndDotDot);
+    // NoSymLinks keeps a link from being treated as a directory to descend into.
+    const QFileInfoList entries = dir.entryInfoList(QDir::AllEntries | QDir::NoDotAndDotDot | QDir::NoSymLinks);
 
     for (const QFileInfo &entry : entries) {
         if (m_nodes.size() >= 300) {
@@ -125,7 +144,12 @@ void ProjectGraph::scanDirectory(const QString &dirPath, const QString &parentNo
             GraphNode node;
             node.id = generateNodeId(entry.absoluteFilePath(), u"file"_s);
             node.name = fileName;
-            node.type = getNodeTypeFromPath(entry.absoluteFilePath());
+            // File nodes must report "file": the analysers, the directory listing
+            // and the graph tool all filter on it, and this used to hold the
+            // language, which hid every file from them. The language is kept in
+            // metadata instead.
+            node.type = u"file"_s;
+            node.metadata.insert(u"language"_s, getNodeTypeFromPath(entry.absoluteFilePath()));
             node.path = entry.absoluteFilePath();
             node.isReadOnly = false;
             node.lastModified = entry.lastModified().toSecsSinceEpoch();
@@ -134,6 +158,11 @@ void ProjectGraph::scanDirectory(const QString &dirPath, const QString &parentNo
             QFile file(entry.absoluteFilePath());
             if (file.open(QIODevice::ReadOnly | QIODevice::Text)) {
                 node.content = QString::fromUtf8(file.read(16 * 1024));
+                // Both metrics were left indeterminate here and serialised as
+                // garbage; derive them from what was actually read.
+                node.linesOfCode = node.content.count(u'\n');
+                node.complexity = extractClassDefinitions(node.content).count()
+                    + extractFunctionDefinitions(node.content).count();
             }
             addNode(node);
 
@@ -618,7 +647,7 @@ void ProjectGraph::analyzeCodeStructure()
     for (auto it = m_nodes.begin(); it != m_nodes.end(); ++it) {
         GraphNode *node = it.value();
         if (node->type == u"file"_s) {
-            node->complexity = extractClassDefinitions(node->content).size() + extractFunctionDefinitions(node->content).size();
+            node->complexity = extractClassDefinitions(node->content).count() + extractFunctionDefinitions(node->content).count();
         }
     }
 }
@@ -916,7 +945,7 @@ QString ProjectGraph::extractImportsFromContent(const QString &content, const QS
     it = pythonImportRegex.globalMatch(content);
     while (it.hasNext()) {
         QRegularExpressionMatch match = it.next();
-        imports += match.captured(0) + u"\\n"_s;
+        imports += match.captured(0) + u"\n"_s;
     }
 
     // Extract JavaScript imports
@@ -924,13 +953,13 @@ QString ProjectGraph::extractImportsFromContent(const QString &content, const QS
     it = jsImportRegex.globalMatch(content);
     while (it.hasNext()) {
         QRegularExpressionMatch match = it.next();
-        imports += match.captured(0) + u"\\n"_s;
+        imports += match.captured(0) + u"\n"_s;
     }
 
     return imports.trimmed();
 }
 
-QString ProjectGraph::extractClassDefinitions(const QString &content) const
+QStringList ProjectGraph::extractClassDefinitions(const QString &content) const
 {
     // Extract class definitions from C++ and Java
     QRegularExpression classRegex(u"class\\s+\\w+\\s*:\\s*public\\s+\\w+"_s);
@@ -940,10 +969,10 @@ QString ProjectGraph::extractClassDefinitions(const QString &content) const
         QRegularExpressionMatch match = it.next();
         matches.append(match.captured(0));
     }
-    return matches.join(u"\\n"_s);
+    return matches;
 }
 
-QString ProjectGraph::extractFunctionDefinitions(const QString &content) const
+QStringList ProjectGraph::extractFunctionDefinitions(const QString &content) const
 {
     // Extract function definitions
     QRegularExpression functionRegex(u"\\w+\\s+\\w+\\s*\\([^)]*\\)\\s*\\{?"_s);
@@ -953,7 +982,7 @@ QString ProjectGraph::extractFunctionDefinitions(const QString &content) const
         QRegularExpressionMatch match = it.next();
         matches.append(match.captured(0));
     }
-    return matches.join(u"\\n"_s);
+    return matches;
 }
 
 bool ProjectGraph::isSafeRelationship(const GraphNode *source, const GraphNode *target, const QString &relationship) const
