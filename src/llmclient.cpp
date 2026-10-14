@@ -187,6 +187,16 @@ QList<ToolCall> LlmClient::completedToolsFromAccumulator()
     return drainToolAccumulator(&m_toolAcc);
 }
 
+void LlmClient::applyAuthHeaders(QNetworkRequest &request, ApiFormat format, const QString &key)
+{
+    if (format == ApiFormat::AnthropicCompatible) {
+        request.setRawHeader("x-api-key", key.toUtf8());
+        request.setRawHeader("anthropic-version", "2023-06-01");
+        return;
+    }
+    request.setRawHeader("Authorization", QString(u"Bearer "_s + key).toUtf8());
+}
+
 // Turns the streamed tool-call accumulator into finished ToolCalls. The
 // accumulator is keyed by the provider's block/tool index and only ever holds
 // the raw JSON text of the arguments, so parsing is shared by the OpenAI
@@ -197,11 +207,16 @@ QList<ToolCall> LlmClient::drainToolAccumulator(QHash<int, ToolCall> *acc)
     if (!acc) {
         return tools;
     }
-    tools.reserve(acc->size());
-    for (auto it = acc->cbegin(); it != acc->cend(); ++it) {
-        ToolCall tool = it.value();
+    // Walk the accumulator in index order, not by tool id: ids are arbitrary
+    // strings ("call_2" sorts before "call_10"), and the order the provider
+    // streamed the calls in is the order the model meant them to run.
+    QList<int> keys = acc->keys();
+    std::sort(keys.begin(), keys.end());
+    tools.reserve(keys.size());
+    for (int key : keys) {
+        ToolCall tool = acc->value(key);
         if (tool.id.isEmpty()) {
-            tool.id = u"call_%1"_s.arg(it.key());
+            tool.id = u"call_%1"_s.arg(key);
         }
         if (!tool.argumentsJson.isEmpty()) {
             QJsonParseError parseError;
@@ -212,9 +227,6 @@ QList<ToolCall> LlmClient::drainToolAccumulator(QHash<int, ToolCall> *acc)
         }
         tools.append(tool);
     }
-    std::sort(tools.begin(), tools.end(), [](const ToolCall &a, const ToolCall &b) {
-        return a.id < b.id;
-    });
     acc->clear();
     return tools;
 }
@@ -343,19 +355,7 @@ CompletionChunk LlmClient::parseSseLine(const QByteArray &line, QHash<int, ToolC
     if (!chunk.finishReason.isEmpty() && chunk.finishReason != u"null"_s) {
         chunk.finished = true;
         if (acc) {
-            for (auto it = acc->cbegin(); it != acc->cend(); ++it) {
-                ToolCall tool = it.value();
-                if (tool.id.isEmpty()) {
-                    tool.id = u"call_%1"_s.arg(it.key());
-                }
-                QJsonParseError parseError;
-                const QJsonDocument argsDoc = QJsonDocument::fromJson(tool.argumentsJson.toUtf8(), &parseError);
-                if (parseError.error == QJsonParseError::NoError && argsDoc.isObject()) {
-                    tool.arguments = argsDoc.object();
-                }
-                chunk.completedTools.append(tool);
-            }
-            acc->clear();
+            chunk.completedTools.append(drainToolAccumulator(acc));
         }
     }
     return chunk;
@@ -432,26 +432,19 @@ void LlmClient::doComplete(const QList<ChatMessage> &messages)
     QJsonObject body;
     QString endpoint;
     QByteArray requestBody;
-    QString authHeader;
     QString acceptHeader = u"text/event-stream"_s;
-    // The Messages API authenticates with its own headers, not with a bearer
-    // token: sending "Authorization: x-api-key: <key>" (as this used to) leaves
-    // the key invisible to the server and every Claude call answered 401.
-    bool anthropicAuth = false;
 
     switch (apiFormat) {
     case ApiFormat::AnthropicCompatible:
         body = buildAnthropicRequest(messages, model);
         endpoint = u"/v1/messages"_s;
         requestBody = QJsonDocument(body).toJson(QJsonDocument::Compact);
-        anthropicAuth = true;
         acceptHeader = u"text/event-stream"_s;
         break;
     case ApiFormat::AcpNative:
         body = buildAcpNativeRequest(messages, model);
         endpoint = u"/acp/v1/chat/completions"_s;
         requestBody = QJsonDocument(body).toJson(QJsonDocument::Compact);
-        authHeader = QString(u"Bearer "_s) + key;
         acceptHeader = u"text/event-stream"_s;
         break;
     case ApiFormat::OpenAICompatible:
@@ -459,7 +452,6 @@ void LlmClient::doComplete(const QList<ChatMessage> &messages)
         body = buildOpenAIRequest(messages, model);
         endpoint = u"/chat/completions"_s;
         requestBody = QJsonDocument(body).toJson(QJsonDocument::Compact);
-        authHeader = QString(u"Bearer "_s) + key;
         acceptHeader = u"text/event-stream"_s;
         break;
     }
@@ -472,12 +464,7 @@ void LlmClient::doComplete(const QList<ChatMessage> &messages)
     // no bytes arrive -- so a long generation that keeps streaming is never cut
     // short, while a half-open connection still ends with a retryable error.
     request.setTransferTimeout(kRequestIdleTimeoutMs);
-    if (anthropicAuth) {
-        request.setRawHeader("x-api-key", key.toUtf8());
-        request.setRawHeader("anthropic-version", "2023-06-01");
-    } else {
-        request.setRawHeader("Authorization", authHeader.toUtf8());
-    }
+    applyAuthHeaders(request, apiFormat, key);
     request.setRawHeader("Accept", acceptHeader.toUtf8());
     if (m_settings.provider == Provider::OpenRouter) {
         request.setRawHeader("HTTP-Referer", "https://kate-editor.org");
@@ -597,12 +584,26 @@ QJsonObject LlmClient::buildAnthropicRequest(const QList<ChatMessage> &messages,
     body.insert(u"messages"_s, messagesToAnthropicJson(messages));
     body.insert(u"stream"_s, true);
     // max_tokens is required by the Messages API; fall back to a sane default.
-    body.insert(u"max_tokens"_s, m_settings.maxTokens > 0 ? m_settings.maxTokens : 4096);
-    // Anthropic constrains these to [0, 1]; a value carried over from a local
-    // model would otherwise be rejected outright.
-    body.insert(u"temperature"_s, qBound(0.0, m_settings.temperature, 1.0));
-    if (m_settings.topP > 0.0) {
+    const int maxTokens = m_settings.maxTokens > 0 ? m_settings.maxTokens : 4096;
+    body.insert(u"max_tokens"_s, maxTokens);
+
+    // Extended thinking is the Messages API counterpart of the OpenAI
+    // include_reasoning/max_reasoning_tokens pair; without it the thinking
+    // toggle is a no-op on this provider even though the stream parser already
+    // handles thinking_delta. While it is on the API requires a budget of at
+    // least 1024 tokens that stays below max_tokens, and it pins both sampling
+    // knobs to their defaults: a clamped or configured value is rejected.
+    const bool thinkingEnabled = m_settings.structuredThinking && m_settings.maxThinkingTokens > 0;
+    body.insert(u"temperature"_s, thinkingEnabled ? 1.0 : qBound(0.0, m_settings.temperature, 1.0));
+    if (!thinkingEnabled && m_settings.topP > 0.0) {
         body.insert(u"top_p"_s, qBound(0.0, m_settings.topP, 1.0));
+    }
+    if (thinkingEnabled) {
+        QJsonObject thinking;
+        thinking.insert(u"type"_s, u"enabled"_s);
+        const int ceiling = qMax(1024, maxTokens - 1024);
+        thinking.insert(u"budget_tokens"_s, qBound(1024, m_settings.maxThinkingTokens, ceiling));
+        body.insert(u"thinking"_s, thinking);
     }
 
     // Tools must be in Anthropic's {name, input_schema} shape, not OpenAI's.
@@ -791,33 +792,23 @@ void LlmClient::fetchModels(Provider provider)
     }
 
     QString modelsEndpoint;
-    QString authHeader;
-    bool anthropicAuth = false;
     switch (apiFormat) {
     case ApiFormat::AnthropicCompatible:
         modelsEndpoint = u"/v1/models"_s;
-        anthropicAuth = true;
         break;
     case ApiFormat::AcpNative:
         modelsEndpoint = u"/acp/v1/models"_s;
-        authHeader = QString(u"Bearer "_s) + key;
         break;
     case ApiFormat::OpenAICompatible:
     default:
         modelsEndpoint = u"/models"_s;
-        authHeader = QString(u"Bearer "_s) + key;
         break;
     }
 
     // Respect the configured endpoint, not just the provider default, so a
     // custom Ollama/LocalAI/ACP URL actually takes effect.
     QNetworkRequest request{QUrl(providerBaseUrl(providerSettings) + modelsEndpoint)};
-    if (anthropicAuth) {
-        request.setRawHeader("x-api-key", key.toUtf8());
-        request.setRawHeader("anthropic-version", "2023-06-01");
-    } else {
-        request.setRawHeader("Authorization", authHeader.toUtf8());
-    }
+    applyAuthHeaders(request, apiFormat, key);
     request.setHeader(QNetworkRequest::UserAgentHeader, u"Kate AI"_s);
     // A models listing is a single short response; it gets the same idle
     // watchdog so a stalled endpoint cannot hang the settings dialog.

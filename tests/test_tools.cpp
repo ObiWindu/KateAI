@@ -484,6 +484,51 @@ private Q_SLOTS:
         QVERIFY(!req.allowFreeform);
     }
 
+    void readingAnEmptyFileIsNotAFailure()
+    {
+        // The agent reads back files it just created, and a zero-byte file is a
+        // legitimate read. Reporting "offset is past the end" made a valid read
+        // look like a failed tool call.
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+
+        const QString filePath = tempDir.path() + u"/empty.txt"_s;
+        {
+            QFile f(filePath);
+            QVERIFY(f.open(QIODevice::WriteOnly | QIODevice::Text));
+        }
+
+        Sandbox sandbox(tempDir.path(), SandboxProfile::Workspace);
+        DiskDocumentBridge bridge;
+        ToolRunner runner(sandbox, &bridge);
+
+        ToolCall call;
+        call.id = u"read-empty"_s;
+        call.name = u"read_file"_s;
+        call.arguments = QJsonObject{{u"path"_s, u"empty.txt"_s}};
+        const ToolResult res = runner.run(call);
+        QVERIFY2(res.ok, qPrintable(res.output));
+        QVERIFY(!res.output.isEmpty());
+    }
+
+    void unifiedDiffNumbersAZeroLengthRange()
+    {
+        // A hunk with no old lines is an insertion, and the unified format
+        // writes its range as "<line before>,0". An omitted count means one
+        // line, which no zero-length range can claim, and the line before an
+        // insertion at the very top of a file is 0.
+        const QString created = unifiedDiff(u"a.txt"_s, QString(), u"X\nY\n"_s);
+        QVERIFY2(created.contains(u"@@ -0,0 +1,2 @@"_s), qPrintable(created));
+
+        const QString emptied = unifiedDiff(u"a.txt"_s, u"a\nb\n"_s, QString());
+        QVERIFY2(emptied.contains(u"@@ -1,2 +0,0 @@"_s), qPrintable(emptied));
+
+        // Context around the insertion keeps both ranges non-empty, so the
+        // ordinary "start" form still applies inside an existing file.
+        const QString inserted = unifiedDiff(u"a.txt"_s, u"a\nb\n"_s, u"X\na\nb\n"_s);
+        QVERIFY2(inserted.contains(u"@@ -1,2 +1,3 @@"_s), qPrintable(inserted));
+    }
+
 #ifdef Q_OS_UNIX
     void bashStreamsItsOutputAsItRuns()
     {

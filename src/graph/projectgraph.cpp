@@ -75,15 +75,17 @@ void ProjectGraph::scanDirectory(const QString &dirPath, const QString &parentNo
     // Follow nothing, and never scan a directory that resolves outside the
     // workspace root.
     const QString resolvedDir = QFileInfo(dirPath).canonicalFilePath();
-    if (!m_visitedDirs.contains(resolvedDir)) {
-        if (!m_workspacePath.isEmpty() && QFileInfo(m_workspacePath).canonicalFilePath() != resolvedDir) {
-            // Reached only for the recursive calls: check containment.
-            if (!resolvedDir.startsWith(QFileInfo(m_workspacePath).canonicalFilePath() + u'/')) {
-                return;
-            }
-        }
-        m_visitedDirs.insert(resolvedDir);
+    const QString resolvedWorkspace = m_workspacePath.isEmpty()
+        ? QString()
+        : QFileInfo(m_workspacePath).canonicalFilePath();
+    if (!resolvedWorkspace.isEmpty() && resolvedWorkspace != resolvedDir
+        && !resolvedDir.startsWith(resolvedWorkspace + u'/')) {
+        return;
     }
+    if (m_visitedDirs.contains(resolvedDir)) {
+        return;
+    }
+    m_visitedDirs.insert(resolvedDir);
 
     QDir dir(dirPath);
     // NoSymLinks keeps a link from being treated as a directory to descend into.
@@ -230,7 +232,11 @@ void ProjectGraph::updateGraph(const QString &filePath, const QString &content)
         GraphNode newNode;
         newNode.id = generateNodeId(filePath);
         newNode.name = QFileInfo(filePath).fileName();
-        newNode.type = getNodeTypeFromPath(filePath);
+        // Same convention as scanDirectory(): the node type is "file" and the
+        // language lives in metadata. A language here would hide the node from
+        // every analyser and query that filters on type == "file".
+        newNode.type = u"file"_s;
+        newNode.metadata.insert(u"language"_s, getNodeTypeFromPath(filePath));
         newNode.path = filePath;
         newNode.content = content;
         newNode.isReadOnly = false;

@@ -171,11 +171,35 @@ Settings SettingsStore::load()
     }
     s.checkpointRetention = qBound(2, s.checkpointRetention, 500);
     s.maxSubtaskDepth = qBound(0, s.maxSubtaskDepth, 5);
-        s.maxParallelSubtasks = qBound(1, s.maxParallelSubtasks, 12);
+    s.maxParallelSubtasks = qBound(1, s.maxParallelSubtasks, 12);
     s.subtaskTimeoutMs = qBound(10000, s.subtaskTimeoutMs, 30 * 60 * 1000);
     s.mcpTimeoutMs = qBound(1000, s.mcpTimeoutMs, 30 * 60 * 1000);
     s.webSearchMaxResults = qBound(1, s.webSearchMaxResults, 20);
     s.webSearchTimeoutMs = qBound(1000, s.webSearchTimeoutMs, 120000);
+    // The fields above are bounded, and the behavioural ones must be too: a
+    // hand-edited or migrated config must not be able to store a zero budget, a
+    // plan with no steps, or a temperature no provider accepts.
+    s.toolCallTimeoutMs = qBound(1000, s.toolCallTimeoutMs, 30 * 60 * 1000);
+    s.maxContextMessages = qMax(0, s.maxContextMessages);
+    s.maxThinkingTokens = qBound(0, s.maxThinkingTokens, 200000);
+    s.maxPlanSteps = qBound(1, s.maxPlanSteps, 50);
+    s.maxVerificationAttempts = qBound(0, s.maxVerificationAttempts, 10);
+    s.messageSpeed = qBound(0, s.messageSpeed, 5);
+    s.frequencyPenalty = qBound(-2.0, s.frequencyPenalty, 2.0);
+    s.presencePenalty = qBound(-2.0, s.presencePenalty, 2.0);
+    // Generation temperature, not the adaptive pair below.
+    if (s.temperature < 0.0) {
+        s.temperature = 0.0;
+    }
+    s.explorationTemperature = qBound(0.0, s.explorationTemperature, 2.0);
+    s.exploitationTemperature = qBound(0.0, s.exploitationTemperature, 2.0);
+    s.maxRetryAttempts = qBound(1, s.maxRetryAttempts, 10);
+    s.baseRetryDelaySeconds = qBound(1, s.baseRetryDelaySeconds, 60);
+    // 0 is the documented "no cap" value the retry maths keys off, so only the
+    // positive entries are bounded.
+    if (s.maxRetryDelaySeconds != 0) {
+        s.maxRetryDelaySeconds = qBound(1, s.maxRetryDelaySeconds, 3600);
+    }
     s.contextWindow = g.readEntry(u"ContextWindow"_s, 0);
     s.keepRecentTokens = g.readEntry(u"KeepRecentTokens"_s, 0);
     s.contextWindowReserve = g.readEntry(u"ContextWindowReserve"_s, 8192);

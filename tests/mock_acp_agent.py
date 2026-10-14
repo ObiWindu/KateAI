@@ -253,6 +253,42 @@ def handle_prompt(request_id, params):
         result(request_id, {"stopReason": "end_turn"})
         return
 
+    if SCENARIO == "permission-alwaysonly":
+        # An agent that advertises only the "always" kinds. A plain Allow has no
+        # allow_once to send, so the client must still transmit an allow option
+        # instead of cancelling a tool the user approved.
+        session_update(
+            {
+                "sessionUpdate": "tool_call",
+                "toolCallId": "call_perm",
+                "name": "write_file",
+                "title": "Write notes.txt",
+                "kind": "edit",
+                "status": "pending",
+            }
+        )
+        response = call_client(
+            "session/request_permission",
+            {
+                "sessionId": SESSION_ID,
+                "toolCall": {"toolCallId": "call_perm", "title": "Write notes.txt", "kind": "edit"},
+                "options": [
+                    {"optionId": "allow-always", "name": "Always allow", "kind": "allow_always"},
+                    {"optionId": "reject-always", "name": "Never allow", "kind": "reject_always"},
+                ],
+            },
+        )
+        outcome = ((response or {}).get("result") or {}).get("outcome") or {}
+        summary = outcome.get("optionId") or ("cancelled" if outcome.get("outcome") == "cancelled" else "unknown")
+        session_update(
+            {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": f"approval:{summary}"},
+            }
+        )
+        result(request_id, {"stopReason": "end_turn"})
+        return
+
     if SCENARIO == "fs":
         read_path = ""
         write_path = ""

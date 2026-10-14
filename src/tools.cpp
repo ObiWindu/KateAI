@@ -303,8 +303,26 @@ QList<DiffOp> computeLineDiff(const QStringList &a, const QStringList &b)
 
 QString unifiedDiff(const QString &path, const QString &before, const QString &after)
 {
-    const QStringList oldLines = before.split(u'\n');
-    const QStringList newLines = after.split(u'\n');
+    QStringList oldLines = before.split(u'\n');
+    QStringList newLines = after.split(u'\n');
+    // Text that ends with a newline splits into one extra empty element: that
+    // element is the line terminator, not a line. Keeping it inflates every
+    // count by one and appends an empty context line to each hunk.
+    if (!oldLines.isEmpty() && oldLines.last().isEmpty()) {
+        oldLines.removeLast();
+    }
+    if (!newLines.isEmpty() && newLines.last().isEmpty()) {
+        newLines.removeLast();
+    }
+    // "".split('\n') invents a phantom line 1, so a new file would render with a
+    // hunk header claiming the old file had one line. An empty side is zero
+    // lines, which is also what the "<line before>,0" range below describes.
+    if (before.isEmpty()) {
+        oldLines.clear();
+    }
+    if (after.isEmpty()) {
+        newLines.clear();
+    }
     QString out = u"--- a/%1\n+++ b/%1\n"_s.arg(path);
 
     // The diff is O(n*m) in time and memory; a whole-file comparison of two
@@ -364,11 +382,11 @@ QString unifiedDiff(const QString &path, const QString &before, const QString &a
             }
         }
         auto range = [](int start, int count) {
-            // A zero-length range is written "<line before>,0"; the line before
-            // an insertion at the very top of a file is 0, so the 1-based floor
-            // must not apply here.
+            // A zero-length range is written "<line before>,0": the count may
+            // only be dropped when it is 1, and the line before an insertion at
+            // the very top of a file is 0.
             if (count == 0) {
-                return QString::number(qMax(0, start));
+                return u"%1,0"_s.arg(qMax(0, start));
             }
             return count == 1 ? QString::number(start) : u"%1,%2"_s.arg(start).arg(count);
         };
@@ -594,6 +612,14 @@ ToolResult ToolRunner::readFile(const QJsonObject &args) const
         lines.removeLast();
     }
     int start = std::max(0, offset - 1);
+    if (lines.isEmpty()) {
+        // A zero-byte file is not an error: the agent reads files it just
+        // created. Saying "offset is past the end" would make a valid read
+        // look like a failed tool call.
+        result.ok = true;
+        result.output = u"(empty file)"_s;
+        return result;
+    }
     if (start >= lines.size()) {
         result.ok = false;
         result.output = u"File has %1 lines; offset is past the end."_s.arg(lines.size());
