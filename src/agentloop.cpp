@@ -1931,7 +1931,10 @@ void AgentLoop::startWebTool(const ToolCall &call)
     }
 
     if (call.name == u"web_search"_s) {
-        const int wanted = call.arguments.value(u"max_results"_s).toInt(0);
+        // Accept a string or a float too: QJsonValue::toInt() silently yields 0
+        // for "5", which would drop the call's own limit and fall back to the
+        // shared setting.
+        const int wanted = call.arguments.value(u"max_results"_s).toVariant().toInt();
         // m_web is shared for the lifetime of this loop, and several web calls
         // can be in flight at once. Each call owns its own connection and tears
         // it down when it completes, so a completion never consumes or wakes a

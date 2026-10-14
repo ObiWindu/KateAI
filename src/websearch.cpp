@@ -239,9 +239,6 @@ void WebSearch::abort()
 
 void WebSearch::search(const QString &query, const QString &callId, int maxResults)
 {
-    if (maxResults > 0) {
-        m_callMaxResults.insert(callId, qBound(1, maxResults, 20));
-    }
     if (!isConfigured()) {
         finishSearch(callId, {}, configurationError());
         return;
@@ -250,6 +247,13 @@ void WebSearch::search(const QString &query, const QString &callId, int maxResul
     if (trimmed.isEmpty()) {
         finishSearch(callId, {}, i18n("The search query was empty."));
         return;
+    }
+
+    // Register the per-call limit only once the request is actually going out:
+    // an early return above (unconfigured provider, empty query) never reaches
+    // onReplyFinished(), which is the only place the entry is removed.
+    if (maxResults > 0) {
+        m_callMaxResults.insert(callId, qBound(1, maxResults, 20));
     }
 
     // The provider request and the reply parser must agree on the count, so
@@ -381,6 +385,10 @@ void WebSearch::onReplyFinished(QNetworkReply *reply, const QString &callId, boo
     // to this reply and would dereference freed memory when it fired.
     stopTimerFor(reply);
     m_replies.removeAll(reply);
+    // Drop this call's limit whatever happens next, so a failed search cannot
+    // leave it behind. Keep the value: it belongs to this reply, which is about
+    // to be consumed below.
+    const int pendingLimit = m_callMaxResults.take(callId);
     reply->deleteLater();
 
     if (reply->error() != QNetworkReply::NoError) {
@@ -420,10 +428,8 @@ void WebSearch::onReplyFinished(QNetworkReply *reply, const QString &callId, boo
 
     QList<WebSearchResult> results;
     // The reply can arrive after a sibling call changed the shared setting, so
-    // the limit is taken from this call's own entry.
-    const int pendingLimit = m_callMaxResults.value(callId, 0);
+    // the limit is the one this call registered for itself.
     const int maxResults = pendingLimit > 0 ? pendingLimit : m_maxResults;
-    m_callMaxResults.remove(callId);
     switch (m_provider) {
     case Provider::Tavily:
         results = parseTavily(QJsonDocument::fromJson(body).object(), maxResults);

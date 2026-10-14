@@ -504,6 +504,10 @@ void AcpClient::cancel()
             if (m_promptId != promptId) {
                 return;
             }
+            // An agent that ignored session/cancel can still be streaming tool
+            // updates into this window; those cards must be closed too, or they
+            // spin in the transcript for the rest of the session.
+            finishLiveTools(u"The turn was stopped before this finished."_s);
             m_pending.remove(promptId);
             m_promptId = 0;
             finishPrompt(QString(), u"The agent did not answer the cancellation in time."_s);
@@ -1540,10 +1544,24 @@ QString AcpClient::pickPermissionOption(PermissionDecision decision) const
             return option.value(u"optionId"_s).toString();
         }
     }
-    // Guessing an option id for either decision can invert the user's choice:
-    // "first" may be an allow option, so approving could refuse and refusing
-    // could execute. Return nothing and let resolvePermission() cancel, which
-    // keeps the tool call from running without telling the agent it was refused.
+    // Last resort: an option whose kind points the same way as the decision.
+    // An agent that advertises only allow_always/reject_always has no
+    // allow_once/reject_once, and cancelling then would drop a tool the user
+    // explicitly approved. Matching by direction still never inverts the
+    // decision, unlike echoing an arbitrary option id.
+    const QString direction = decision == PermissionDecision::Deny ? u"reject"_s : u"allow"_s;
+    for (const QJsonValue &value : m_permissionOptions) {
+        const QJsonObject option = value.toObject();
+        const QString optionId = option.value(u"optionId"_s).toString();
+        if (!optionId.isEmpty() && option.value(u"kind"_s).toString().startsWith(direction)) {
+            return optionId;
+        }
+    }
+    // Nothing on offer points the right way. Guessing an option id for either
+    // decision can invert the user's choice: "first" may be an allow option, so
+    // approving could refuse and refusing could execute. Return nothing and let
+    // resolvePermission() cancel, which keeps the tool call from running
+    // without telling the agent it was refused.
     return QString();
 }
 
@@ -2058,6 +2076,9 @@ void AcpClient::failAll(const QString &error)
     // A permission request in flight must still be answered, or the agent waits
     // on it for as long as the process lives.
     cancelPendingPermission();
+    // Tool calls still open when the turn dies would otherwise sit in the
+    // transcript as cards that never finish.
+    finishLiveTools(error);
     const auto pending = m_pending;
     m_pending.clear();
     for (const Pending &item : pending) {

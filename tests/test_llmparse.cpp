@@ -3,6 +3,7 @@
 #include "types.h"
 
 #include <QHash>
+#include <QNetworkRequest>
 #include <QTest>
 
 using namespace Qt::Literals::StringLiterals;
@@ -95,17 +96,47 @@ private Q_SLOTS:
     void anthropicRequestUsesItsOwnAuthHeader()
     {
         // The Messages API authenticates with x-api-key plus a pinned version,
-        // never with an Authorization bearer token. The request itself is built
-        // in doComplete(), which needs a live reply; what is asserted here is
-        // the part the settings layer owns and the request depends on.
-        Settings settings;
-        settings.provider = Provider::ClaudeCompatible;
-        settings.claudeCompatibleApiKey = u"sk-ant-test"_s;
-        settings.claudeCompatibleModel = u"claude-test"_s;
-        LlmClient client;
-        client.setSettings(settings);
-        QCOMPARE(apiKeyFor(settings), u"sk-ant-test"_s);
-        QCOMPARE(modelFor(settings), u"claude-test"_s);
+        // never with an Authorization bearer token. "Authorization: x-api-key:
+        // <key>" is invisible to the server, so every Claude call answered 401.
+        QNetworkRequest anthropic;
+        LlmClient::applyAuthHeaders(anthropic, ApiFormat::AnthropicCompatible, u"sk-ant-test"_s);
+        QCOMPARE(anthropic.rawHeader("x-api-key"), QByteArray("sk-ant-test"));
+        QCOMPARE(anthropic.rawHeader("anthropic-version"), QByteArray("2023-06-01"));
+        QVERIFY(anthropic.rawHeader("Authorization").isEmpty());
+
+        QNetworkRequest openai;
+        LlmClient::applyAuthHeaders(openai, ApiFormat::OpenAICompatible, u"sk-oai-test"_s);
+        QCOMPARE(openai.rawHeader("Authorization"), QByteArray("Bearer sk-oai-test"));
+        QVERIFY(openai.rawHeader("x-api-key").isEmpty());
+
+        QNetworkRequest acp;
+        LlmClient::applyAuthHeaders(acp, ApiFormat::AcpNative, u"acp-test"_s);
+        QCOMPARE(acp.rawHeader("Authorization"), QByteArray("Bearer acp-test"));
+    }
+
+    void toolCallsAreDrainedInStreamOrder()
+    {
+        // Sorting the drained calls by id string reorders them ("call_10" sorts
+        // before "call_2"), so the model's own ordering of independent calls was
+        // lost. The accumulator index is the order the provider streamed.
+        QHash<int, ToolCall> acc;
+        for (int index = 0; index < 2; ++index) {
+            const QByteArray line = QStringLiteral(
+                                        "data: {\"choices\":[{\"delta\":{\"tool_calls\":"
+                                        "[{\"index\":%1,\"id\":\"call_%2\",\"function\":{\"name\":"
+                                        "\"read_file\",\"arguments\":\"{\\\"path\\\":\\\"f%3\\\"}\"}}]}}]}")
+                                        .arg(index)
+                                        // "call_10" sorts before "call_9", so a string
+                                        // sort inverts these two.
+                                        .arg(index + 9)
+                                        .arg(index)
+                                        .toUtf8();
+            LlmClient::parseSseLine(line, &acc);
+        }
+        const CompletionChunk chunk = LlmClient::parseSseLine(QByteArray("data: [DONE]"), &acc);
+        QCOMPARE(chunk.completedTools.size(), 2);
+        QCOMPARE(chunk.completedTools.at(0).arguments.value(u"path"_s).toString(), u"f0"_s);
+        QCOMPARE(chunk.completedTools.at(1).arguments.value(u"path"_s).toString(), u"f1"_s);
     }
 
     void parsesDone()

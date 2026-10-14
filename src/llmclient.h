@@ -86,6 +86,11 @@ public:
     void abort();
     void reset();
     static QJsonArray messagesToJson(const QList<ChatMessage> &messages);
+    // Applies the authentication headers for an API format. The Messages API
+    // authenticates with its own headers rather than a bearer token, and a
+    // "Authorization: x-api-key: …" value is invisible to it. Shared by the
+    // completion request and the model catalogue fetch.
+    static void applyAuthHeaders(QNetworkRequest &request, ApiFormat format, const QString &key);
     static CompletionChunk parseSseLine(const QByteArray &line, QHash<int, ToolCall> *acc);
 
     // Retry control

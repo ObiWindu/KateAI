@@ -360,6 +360,50 @@ private Q_SLOTS:
         client.stop();
     }
 
+    void approvingWithoutAnAllowOnceOptionStillAllows()
+    {
+        // An agent that advertises only allow_always/reject_always leaves no
+        // allow_once for a plain Allow. Falling back to "cancelled" would drop a
+        // tool the user approved; the safest option that still points the same
+        // way is the allow option the agent did advertise.
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+
+        DiskDocumentBridge bridge;
+        AcpClient client;
+        client.setSettings(mockSettings(u"permission-alwaysonly"_s));
+        client.setWorkspace(workspace.path());
+        client.setDocumentBridge(&bridge);
+
+        QString text;
+        QString error;
+        QString stopReason;
+        bool asked = false;
+
+        connect(&client, &AcpClient::permissionNeeded, this, [&](const PermissionRequest &) {
+            asked = true;
+            client.resolvePermission(PermissionDecision::AllowOnce);
+        });
+        connect(&client, &AcpClient::textDelta, this, [&](const QString &delta) {
+            text += delta;
+        });
+        connect(&client, &AcpClient::promptFinished, this, [&](const QString &reason, const QString &, const QJsonArray &) {
+            stopReason = reason;
+        });
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+
+        client.prompt(u"please write"_s);
+        QVERIFY2(waitFor([&] {
+            return !stopReason.isEmpty() || !error.isEmpty();
+        }), qPrintable(error.isEmpty() ? u"timed out"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QVERIFY(asked);
+        QCOMPARE(text, u"approval:allow-always"_s);
+        client.stop();
+    }
+
     void fsReadAndWriteGoThroughDocumentBridge()
     {
         QTemporaryDir workspace;
