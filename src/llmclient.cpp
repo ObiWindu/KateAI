@@ -187,6 +187,24 @@ QList<ToolCall> LlmClient::completedToolsFromAccumulator()
     return drainToolAccumulator(&m_toolAcc);
 }
 
+// The text form of a streamed tool call's "arguments". The OpenAI shape sends
+// it as a JSON string, but several OpenAI-compatible servers -- Ollama's /v1
+// endpoint, which this plugin points at by default, among them -- deliver it as
+// a JSON object instead. QJsonValue::toString() on an object is an empty
+// string, so reading it the same way for both shapes drops every argument the
+// model sent and hands the tool an empty object: the suggest card comes out
+// bodyless and the cards of every other tool show an "Input {}" body.
+static QString toolArgumentsText(const QJsonValue &value)
+{
+    if (value.isObject()) {
+        return QString::fromUtf8(QJsonDocument(value.toObject()).toJson(QJsonDocument::Compact));
+    }
+    if (value.isArray()) {
+        return QString::fromUtf8(QJsonDocument(value.toArray()).toJson(QJsonDocument::Compact));
+    }
+    return value.toString();
+}
+
 void LlmClient::applyAuthHeaders(QNetworkRequest &request, ApiFormat format, const QString &key)
 {
     if (format == ApiFormat::AnthropicCompatible) {
@@ -223,6 +241,12 @@ QList<ToolCall> LlmClient::drainToolAccumulator(QHash<int, ToolCall> *acc)
             const QJsonDocument argsDoc = QJsonDocument::fromJson(tool.argumentsJson.toUtf8(), &parseError);
             if (parseError.error == QJsonParseError::NoError && argsDoc.isObject()) {
                 tool.arguments = argsDoc.object();
+            } else {
+                // A truncated stream or a server that mixed the two argument
+                // shapes in one call. The message would reach the cards as an
+                // empty object, so say so rather than failing silently.
+                qWarning().noquote() << u"[LlmClient] unparseable tool arguments for"_s
+                                     << tool.name << u":"_s << tool.argumentsJson;
             }
         }
         tools.append(tool);
@@ -293,7 +317,15 @@ CompletionChunk LlmClient::parseSseLine(const QByteArray &line, QHash<int, ToolC
                 tool.id = block.value(u"id"_s).toString();
                 tool.name = block.value(u"name"_s).toString();
                 // A short input can arrive complete here, with no delta events.
-                tool.arguments = block.value(u"input"_s).toObject();
+                // The protocol makes it an object, but an agent that sends it as
+                // a JSON string would otherwise lose every argument to
+                // QJsonValue::toObject()'s empty result on a string.
+                const QJsonValue input = block.value(u"input"_s);
+                if (input.isString() && !input.toString().isEmpty()) {
+                    tool.argumentsJson += input.toString();
+                } else if (input.isObject()) {
+                    tool.arguments = input.toObject();
+                }
             }
         } else if (anthropicType == u"message_delta"_s) {
             chunk.finishReason = root.value(u"delta"_s).toObject().value(u"stop_reason"_s).toString();
@@ -347,7 +379,16 @@ CompletionChunk LlmClient::parseSseLine(const QByteArray &line, QHash<int, ToolC
                 tool.name = fn.value(u"name"_s).toString();
             }
             if (fn.contains(u"arguments"_s)) {
-                tool.argumentsJson += fn.value(u"arguments"_s).toString();
+                const QJsonValue arguments = fn.value(u"arguments"_s);
+                if (arguments.isObject() || arguments.isArray()) {
+                    // The whole call arrives in one delta. Replace rather than
+                    // append: a server that opens with an empty {} and follows
+                    // it with the real arguments would otherwise leave the
+                    // accumulated text unparseable.
+                    tool.argumentsJson = toolArgumentsText(arguments);
+                } else if (arguments.isString()) {
+                    tool.argumentsJson += arguments.toString();
+                }
             }
         }
     }
@@ -1194,7 +1235,10 @@ void LlmClient::handleFinished()
                             tool.id = obj.value(u"id"_s).toString();
                             const QJsonObject fn = obj.value(u"function"_s).toObject();
                             tool.name = fn.value(u"name"_s).toString();
-                            tool.argumentsJson = fn.value(u"arguments"_s).toString();
+                            // Same two shapes as the streaming path: some
+                            // servers answer a non-streaming request with the
+                            // arguments as a JSON object.
+                            tool.argumentsJson = toolArgumentsText(fn.value(u"arguments"_s));
                             const QJsonDocument argsDoc = QJsonDocument::fromJson(tool.argumentsJson.toUtf8());
                             if (argsDoc.isObject()) {
                                 tool.arguments = argsDoc.object();

@@ -161,6 +161,28 @@ private Q_SLOTS:
         QCOMPARE(chunk.completedTools.at(0).arguments.value(u"path"_s).toString(), u"a.cpp"_s);
     }
 
+    // Ollama's OpenAI-compatible endpoint (the default this plugin points at)
+    // streams the arguments as a JSON object rather than a string. Reading the
+    // object as a string yields nothing, and the call reached the cards as an
+    // empty object: the suggest card had no body and every other card showed
+    // "Input {}".
+    void parsesToolCallWithObjectArguments()
+    {
+        QHash<int, ToolCall> acc;
+        const CompletionChunk chunk = LlmClient::parseSseLine(
+            QByteArray("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":"
+                       "{\"name\":\"suggest\",\"arguments\":{\"suggestion\":\"use string_view\",\"path\":\"a.cpp\","
+                       "\"line\":42}}}]},\"finish_reason\":\"tool_calls\"}]}"),
+            &acc);
+        QVERIFY(chunk.finished);
+        QCOMPARE(chunk.completedTools.size(), 1);
+        const ToolCall tool = chunk.completedTools.first();
+        QCOMPARE(tool.name, u"suggest"_s);
+        QCOMPARE(tool.arguments.value(u"suggestion"_s).toString(), u"use string_view"_s);
+        QCOMPARE(tool.arguments.value(u"path"_s).toString(), u"a.cpp"_s);
+        QCOMPARE(tool.arguments.value(u"line"_s).toInt(), 42);
+    }
+
     void providerUrls()
     {
         QCOMPARE(providerBaseUrl(Provider::Grok), u"https://api.x.ai/v1"_s);

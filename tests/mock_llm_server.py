@@ -22,6 +22,11 @@ QUESTION_MARKER = "Ask the user something."
 # Sent to make the mock ask a question with no text in it, which the loop must
 # refuse rather than park the turn waiting for an answer to nothing.
 EMPTY_QUESTION_MARKER = "Ask nothing at all."
+# Sent to make the model post a suggestion with the suggest tool.
+SUGGEST_MARKER = "Suggest an improvement."
+# Same call, but the arguments arrive as a JSON object the way Ollama's
+# OpenAI-compatible endpoint delivers them.
+SUGGEST_OBJECT_ARGS_MARKER = "Suggest with object arguments."
 # The orchestrator's own prompt; only the first request looks like this.
 PARENT_MARKER = "Split this across two agents."
 # Long enough that two sequential dispatches would visibly not overlap.
@@ -32,6 +37,8 @@ DELEGATED = False
 # The question is asked once per server, for the same reason.
 ASKED = False
 ASKED_EMPTY = False
+# The suggestion is posted once per server, for the same reason.
+SUGGESTED = False
 
 
 def sse(payload):
@@ -65,12 +72,37 @@ def tool_call(index, call_id, name, arguments):
     )
 
 
+def tool_call_object_args(index, call_id, name, arguments):
+    # Ollama and other local servers deliver the arguments as a JSON object
+    # rather than a string. The client must cope with both shapes.
+    return sse(
+        {
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": index,
+                                "id": call_id,
+                                "type": "function",
+                                "function": {"name": name, "arguments": arguments},
+                            }
+                        ]
+                    },
+                    "finish_reason": None,
+                }
+            ]
+        }
+    )
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):  # keep the test output clean
         pass
 
     def do_POST(self):
-        global DELEGATED, ASKED, ASKED_EMPTY
+        global DELEGATED, ASKED, ASKED_EMPTY, SUGGESTED
         length = int(self.headers.get("Content-Length", "0"))
         try:
             body = json.loads(self.rfile.read(length) or b"{}")
@@ -82,11 +114,49 @@ class Handler(BaseHTTPRequestHandler):
         last_user = ""
         for message in messages:
             if message.get("role") == "user":
-                last_user = message.get("content", "")
+                content = message.get("content", "")
+                if isinstance(content, list):
+                    content = " ".join(
+                        block.get("text", "") for block in content if isinstance(block, dict)
+                    )
+                last_user = content
         is_child = CHILD_MARKER in last_user
         is_orchestrator_first_turn = PARENT_MARKER in last_user and not DELEGATED
         is_question = QUESTION_MARKER in last_user and not ASKED
         is_empty_question = EMPTY_QUESTION_MARKER in last_user and not ASKED_EMPTY
+        is_suggest = SUGGEST_MARKER in last_user and not SUGGESTED
+        is_suggest_object_args = SUGGEST_OBJECT_ARGS_MARKER in last_user and not SUGGESTED
+        # Anthropic puts the system prompt at the top level, so its requests are
+        # the ones without a system-role message in the array.
+        is_anthropic = "anthropic-version" in self.headers
+
+        def respond(tool_name, call_id, arguments, object_args=False):
+            if is_anthropic:
+                # Messages API: tool arguments stream as JSON fragments after a
+                # content_block_start that carries an empty input.
+                emit(
+                    "event: content_block_start\n"
+                    + sse({"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": call_id, "name": tool_name, "input": {}}})
+                )
+                emit(
+                    "event: content_block_delta\n"
+                    + sse(
+                        {
+                            "type": "content_block_delta",
+                            "index": 0,
+                            "delta": {"type": "input_json_delta", "partial_json": json.dumps(arguments)},
+                        }
+                    )
+                )
+                emit("event: message_delta\n" + sse({"type": "message_delta", "delta": {"stop_reason": "tool_use"}}))
+                emit("event: message_stop\n" + sse({"type": "message_stop"}))
+            else:
+                emit(
+                    tool_call_object_args(0, call_id, tool_name, arguments)
+                    if object_args
+                    else tool_call(0, call_id, tool_name, arguments)
+                )
+                emit(sse({"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]}))
 
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
@@ -126,22 +196,42 @@ class Handler(BaseHTTPRequestHandler):
             ASKED = True
             # One question with two offered answers: the turn cannot finish
             # until the user picks or types one.
-            emit(
-                tool_call(
-                    0,
-                    "call_q",
-                    "question",
-                    {
-                        "question": "Rewrite the file, or patch it in place?",
-                        "options": ["Rewrite", "Patch"],
-                    },
-                )
+            respond(
+                "question",
+                "call_q",
+                {
+                    "question": "Rewrite the file, or patch it in place?",
+                    "options": ["Rewrite", "Patch"],
+                },
             )
-            emit(sse({"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]}))
         elif is_empty_question:
             ASKED_EMPTY = True
-            emit(tool_call(0, "call_qe", "question", {"question": ""}))
-            emit(sse({"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]}))
+            respond("question", "call_qe", {"question": ""})
+        elif is_suggest_object_args:
+            SUGGESTED = True
+            respond(
+                "suggest",
+                "call_s",
+                {
+                    "suggestion": "Use std::string_view here instead of a const reference.",
+                    "path": "src/main.cpp",
+                    "line": 42,
+                },
+                object_args=True,
+            )
+        elif is_suggest:
+            SUGGESTED = True
+            # Advice the user never asked for: the suggestion tool is how the
+            # agent raises it instead of editing the file itself.
+            respond(
+                "suggest",
+                "call_s",
+                {
+                    "suggestion": "Use std::string_view here instead of a const reference.",
+                    "path": "src/main.cpp",
+                    "line": 42,
+                },
+            )
         else:
             # The orchestrator's follow-up turn: summarise in prose.
             emit(chunk_text("Both sub-agents reported back."))

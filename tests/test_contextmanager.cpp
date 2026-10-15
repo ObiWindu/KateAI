@@ -50,6 +50,20 @@ private:
         m.content = text;
         return m;
     }
+    // The shape the agent loop actually records: the arguments as they went
+    // over the wire, i.e. JSON text. Reading that text as an object always
+    // yields an empty one, which silently dropped the file from the summary.
+    static ChatMessage toolCallWithTextArguments(const QString &name, const QString &path)
+    {
+        ChatMessage m;
+        m.role = ChatMessage::Role::Assistant;
+        m.toolCalls.append(QJsonObject{{QStringLiteral("id"), QStringLiteral("c1")},
+                                       {QStringLiteral("function"),
+                                        QJsonObject{{QStringLiteral("name"), name},
+                                                    {QStringLiteral("arguments"),
+                                                     QStringLiteral("{\"path\":\"%1\"}").arg(path)}}}});
+        return m;
+    }
     // A conversation long enough to force compaction.
     static QList<ChatMessage> longHistory(int turns)
     {
@@ -133,6 +147,31 @@ private Q_SLOTS:
         // The oldest request and an early file must both survive.
         QVERIFY(joined.contains(QStringLiteral("Request number 0")));
         QVERIFY(joined.contains(QStringLiteral("src/file0.cpp")));
+    }
+
+    void summaryPreservesFilesWhenArgumentsAreJsonText()
+    {
+        QList<ChatMessage> history;
+        history << system(QStringLiteral("system"));
+        for (int i = 0; i < 40; ++i) {
+            history << user(QStringLiteral("Request number %1: please do the thing for component %1.").arg(i));
+            history << toolCallWithTextArguments(QStringLiteral("edit_file"), QStringLiteral("src/file%1.cpp").arg(i));
+            history << toolResult(QStringLiteral("Edited file%1. %1").arg(i).repeated(40));
+        }
+        history << user(QStringLiteral("And finally, summarise everything."));
+
+        ContextManager::Options options;
+        options.contextWindow = 8192;
+        options.reserveForResponse = 2048;
+        options.keepRecentTokens = 1200;
+        const auto result = ContextManager::build(history, options);
+
+        QString joined;
+        for (const ChatMessage &m : result) {
+            joined += m.content + QLatin1Char('\n');
+        }
+        QVERIFY2(joined.contains(QStringLiteral("src/file0.cpp")),
+                 "the tool call's arguments are JSON text; the path must still reach the summary");
     }
 
     void toolCallsAreNeverSplitFromResults()

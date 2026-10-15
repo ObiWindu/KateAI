@@ -88,18 +88,22 @@ private Q_SLOTS:
         QVERIFY(edit.toPlainText().contains(u"@chatwidget.cpp "_s));
     }
 
-    void testComposerIsHalfTallerAgain()
+    void testComposerIsAHalfTallerAgainAndATenthShorter()
     {
         PromptEdit edit;
         const int lineH = edit.fontMetrics().lineSpacing();
 
-        // Four and a half lines of head-room when empty, half again the three
-        // it used to carry, so a pasted stack trace stays readable.
+        // Four and a half lines of head-room when empty, a tenth less than it
+        // used to carry, so the transcript gets the room the box used to take.
         const int emptyHeight = edit.height();
-        QVERIFY2(emptyHeight >= lineH * 4 + 24,
+        QVERIFY2(emptyHeight >= lineH * 4,
                  qPrintable(QStringLiteral("empty composer is only %1px").arg(emptyHeight)));
-        QVERIFY2(edit.sizeHint().height() >= lineH * 4 + 24,
+        QVERIFY2(edit.sizeHint().height() >= lineH * 4,
                  qPrintable(QStringLiteral("size hint is only %1px").arg(edit.sizeHint().height())));
+        // ...but not the full old height, which was 24px of padding on top of
+        // those lines.
+        QVERIFY2(emptyHeight < lineH * 4 + 24,
+                 qPrintable(QStringLiteral("empty composer kept its old %1px height").arg(emptyHeight)));
     }
 
     void testShortTextNeverShrinksTheComposer()

@@ -153,7 +153,21 @@ QString buildSummary(const QList<ChatMessage> &dropped, int requestChars)
                 const QJsonObject call = value.toObject();
                 const QJsonObject function = call.value(u"function"_s).toObject();
                 const QString toolName = function.value(u"name"_s).toString();
-                const QString path = function.value(u"arguments"_s).toObject().value(u"path"_s).toString();
+                // The arguments go over the wire as JSON text, so they are
+                // stored as a string; reading that string as an object always
+                // yields an empty one and drops the path from the summary.
+                const QJsonValue rawArguments = function.value(u"arguments"_s);
+                QJsonObject arguments = rawArguments.toObject();
+                if (arguments.isEmpty() && rawArguments.isString()) {
+                    const QJsonDocument parsed = QJsonDocument::fromJson(rawArguments.toString().toUtf8());
+                    if (parsed.isObject()) {
+                        arguments = parsed.object();
+                    }
+                }
+                QString path = arguments.value(u"path"_s).toString();
+                if (path.isEmpty()) {
+                    path = arguments.value(u"TargetFile"_s).toString();
+                }
                 if (!path.isEmpty() && !files.contains(path)) {
                     files << path;
                 }

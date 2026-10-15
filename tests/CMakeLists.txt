@@ -56,6 +56,15 @@ add_executable(test_tools test_tools.cpp)
 target_link_libraries(test_tools PRIVATE kateai_core Qt6::Test)
 add_test(NAME test_tools COMMAND test_tools -platform offscreen)
 
+# The suggestion tool: the arguments must reach the card the UI builds, in
+# every shape a provider streams them in. Needs the same mock-endpoint harness
+# as the sub-agent test.
+add_executable(test_suggestflow test_suggestflow.cpp)
+target_link_libraries(test_suggestflow PRIVATE kateai_core Qt6::Test)
+add_test(NAME test_suggestflow
+         COMMAND test_suggestflow -platform offscreen
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
 # Drives a QWidget queue, so it needs the Qt Widgets library and a QApplication.
 # chattheme.cpp is included because the tracker paints through it, and the real
 # build gets it from the kateai plugin target rather than kateai_core.
