@@ -15,6 +15,7 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QPushButton>
+#include <QResizeEvent>
 #include <QTextBrowser>
 #include <QTextCursor>
 #include <QScrollBar>
@@ -31,6 +32,10 @@ namespace
 // Keeps very chatty sub-agents from growing the transcript without bound.
 constexpr int MaxActivityLines = 200;
 constexpr int MaxActivityChars = 12000;
+// How much of the delegated task is shown while the agent works. The answer
+// replaces this text at the end anyway, and an unbounded description would
+// push the dock (and the input with it) off the screen.
+constexpr int RunningDescriptionChars = 400;
 } // namespace
 
 SubtaskWidget::SubtaskWidget(const QString &taskId, QWidget *parent)
@@ -72,7 +77,9 @@ SubtaskWidget::SubtaskWidget(const QString &taskId, QWidget *parent)
     header->addWidget(m_title);
 
     m_status = new QLabel(this);
-    m_status->setStyleSheet(QStringLiteral("color: %1; font-size: 10px;").arg(ChatTheme::textMuted()));
+    // textPrimary rather than textMuted: the card surface is now a warm yellow,
+    // and a grey-on-gold status line drops under a readable contrast.
+    m_status->setStyleSheet(QStringLiteral("color: %1; font-size: 10px;").arg(ChatTheme::textPrimary()));
     header->addWidget(m_status);
     header->addStretch();
 
@@ -102,6 +109,16 @@ SubtaskWidget::SubtaskWidget(const QString &taskId, QWidget *parent)
             .arg(ChatTheme::textPrimary()));
     m_answer->setMinimumHeight(0);
     root->addWidget(m_answer);
+
+    // What the sub-agent is doing right now: the newest step it reported. The
+    // status line in the header says how long the run has taken and how many
+    // steps it has made, which is not the same thing as saying which step it is
+    // on -- without this the card reads as a spinner with no reason.
+    m_current = new QLabel(this);
+    m_current->setWordWrap(false);
+    m_current->setStyleSheet(QStringLiteral("color: %1; font-size: 10px;").arg(ChatTheme::accent()));
+    m_current->setVisible(false);
+    root->addWidget(m_current);
 
     // Live activity log, hidden until the user asks for it.
     m_activityContainer = new QWidget(this);
@@ -154,12 +171,21 @@ void SubtaskWidget::startAgent(const QString &agentName, const QString &modeId, 
 {
     m_agentName = agentName.isEmpty() ? i18n("Sub-agent") : agentName;
     m_modeId = modeId;
-    m_description = description;
+    m_description = description.trimmed();
     m_running = true;
     m_elapsed.restart();
     m_ticker->start();
-    m_answer->setMarkdown(QString());
-    m_answer->setVisible(false);
+    // The delegated task is what the card is about, so it stays on screen while
+    // the agent works and is replaced by the answer once it arrives. It used to
+    // be cleared here, which left the running card saying nothing at all about
+    // the work in flight.
+    m_answer->setDocument(makeMarkdownDocument(closeMarkdown(m_description.left(RunningDescriptionChars)),
+                                               ChatTheme::messageCss()));
+    m_answer->setToolTip(m_description);
+    m_answer->setVisible(!m_description.isEmpty());
+    m_currentLine.clear();
+    m_current->clear();
+    m_current->setVisible(false);
     updateHeader();
     updateElapsed();
     applyStyle();
@@ -183,6 +209,12 @@ void SubtaskWidget::appendActivity(const QString &line, bool isError)
         m_activity->setHtml(html);
     }
     m_activity->verticalScrollBar()->setValue(m_activity->verticalScrollBar()->maximum());
+    // Mirror the step onto the card itself: the log below is opt-in, so without
+    // this line a running card reported a step count and nothing else.
+    m_currentLine = line;
+    m_current->setStyleSheet(QStringLiteral("color: %1; font-size: 10px;")
+                                 .arg(isError ? ChatTheme::danger() : ChatTheme::accent()));
+    updateCurrentActivity();
     updateHeader();
     updateElapsed();
     reflowNow();
@@ -200,7 +232,10 @@ void SubtaskWidget::finishAgent(const ToolResult &result)
     // A sub-agent's answer is markdown like any assistant turn, so it gets the
     // same body table styling for any fenced code it contains.
     m_answer->setDocument(makeMarkdownDocument(closeMarkdown(result.output), ChatTheme::messageCss()));
+    m_answer->setToolTip(QString());
     m_answer->setVisible(true);
+    m_currentLine.clear();
+    m_current->setVisible(false);
     updateHeader();
     applyStyle();
     reflowNow();
@@ -215,10 +250,36 @@ void SubtaskWidget::markAbandoned(const QString &reason)
     }
     m_cancel->setVisible(false);
     m_answer->setDocument(makeMarkdownDocument(closeMarkdown(reason), ChatTheme::messageCss()));
+    m_answer->setToolTip(QString());
     m_answer->setVisible(true);
+    m_currentLine.clear();
+    m_current->setVisible(false);
     updateHeader();
     applyStyle();
     reflowNow();
+}
+
+void SubtaskWidget::updateCurrentActivity()
+{
+    if (m_currentLine.isEmpty()) {
+        m_current->setVisible(false);
+        return;
+    }
+    // Elided to the card's own width: a raw step line can be long (a summary of
+    // the arguments), and a label wider than the card would stretch the dock.
+    // The full text stays reachable through the tooltip.
+    const int available = qMax(80, width() - 24);
+    m_current->setText(m_current->fontMetrics().elidedText(m_currentLine, Qt::ElideRight, available));
+    m_current->setToolTip(m_currentLine);
+    m_current->setVisible(true);
+}
+
+void SubtaskWidget::resizeEvent(QResizeEvent *event)
+{
+    QWidget::resizeEvent(event);
+    // The live step is elided against the card width, so it has to be measured
+    // again whenever that width changes.
+    updateCurrentActivity();
 }
 
 void SubtaskWidget::updateHeader()

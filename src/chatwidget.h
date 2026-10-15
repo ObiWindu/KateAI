@@ -168,7 +168,9 @@ private:
     // produced it (or a generated id on the ACP path). Pending entries exist
     // between toolStarted and toolFinished, because that is the only window in
     // which the arguments are visible before the card is built.
-    void addSuggestionCard(const QString &id, const Suggestion &suggestion);
+    // Posts a suggestion card. `running` marks it as still in flight: the tool
+    // carrying the advice has not reported back yet.
+    void addSuggestionCard(const QString &id, const Suggestion &suggestion, bool running = false);
     void addSuggestionErrorCard(const QString &id, const QString &message);
     void removeSuggestionCard(const QString &id);
     void clearSuggestionCards();

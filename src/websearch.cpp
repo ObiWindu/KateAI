@@ -10,10 +10,12 @@
 #include <QHash>
 #include <QJsonArray>
 #include <QJsonDocument>
+#include <QElapsedTimer>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QRegularExpression>
+#include <QSharedPointer>
 #include <QTimer>
 #include <QUrl>
 #include <QUrlQuery>
@@ -354,6 +356,26 @@ void WebSearch::fetchPage(const QString &url, const QString &callId)
 
     QNetworkReply *reply = m_nam->get(makeRequest(QUrl(url.trimmed()), m_timeoutMs));
     m_replies.append(reply);
+
+    // Stream the fetch as it lands. Only the byte count is read, never the
+    // body itself: the reply is still consumed in one piece when it finishes,
+    // and draining it here would empty the buffer the extraction depends on.
+    auto lastEmit = QSharedPointer<QElapsedTimer>::create();
+    lastEmit->start();
+    connect(reply, &QNetworkReply::readyRead, this, [this, reply, callId, lastEmit] {
+        if (!reply || lastEmit->elapsed() < 200) {
+            return;
+        }
+        lastEmit->restart();
+        const qint64 available = reply->bytesAvailable();
+        if (available <= 0) {
+            return;
+        }
+        Q_EMIT requestProgress(callId,
+                               i18n("Downloading %1 — %2 KB",
+                                    reply->request().url().host(),
+                                    QString::number(available / 1024)));
+    });
 
     auto *timer = new QTimer(this);
     timer->setSingleShot(true);

@@ -27,6 +27,7 @@
 #include <QSharedPointer>
 #include <QTimer>
 #include <QUuid>
+#include <QUrl>
 #include <utility>
 #include <algorithm>
 #include <QMap>
@@ -93,6 +94,12 @@ AgentLoop::AgentLoop(QObject *parent)
         ++m_toolCalls;
         Q_EMIT toolStarted(request);
         Q_EMIT statusChanged(u"Working on the next step…"_s);
+    });
+    connect(&m_acp, &AcpClient::toolProgress, this, [this](const QString &toolCallId, const QString &partial) {
+        // An ACP agent's tool output arrives in pieces through tool_call_update;
+        // forward it untouched, exactly like the native bash stream, so the
+        // card fills in while the tool runs instead of when it ends.
+        Q_EMIT toolProgress(toolCallId, partial);
     });
     connect(&m_acp, &AcpClient::toolFinished, this, [this](const ToolResult &result) {
         ChatMessage toolMsg;
@@ -1930,7 +1937,23 @@ void AgentLoop::startWebTool(const ToolCall &call)
         return;
     }
 
+    // Live byte counts from a page fetch, forwarded to the card while the
+    // download runs. Torn down alongside the result connection below, so one
+    // lambda is not left per web call for the lifetime of the loop.
+    auto progressConn = QSharedPointer<QMetaObject::Connection>::create();
+    *progressConn = connect(&m_web, &WebSearch::requestProgress, this,
+            [this, call](const QString &callId, const QString &status) {
+                if (callId != call.id) {
+                    return;
+                }
+                Q_EMIT toolProgress(callId, status);
+            });
+
     if (call.name == u"web_search"_s) {
+        // The request is on the wire now and nothing else can be said about it,
+        // so the card shows that instead of an empty body until the provider
+        // answers.
+        Q_EMIT toolProgress(call.id, i18n("Waiting for %1…", WebSearch::providerId(m_web.provider())));
         // Accept a string or a float too: QJsonValue::toInt() silently yields 0
         // for "5", which would drop the call's own limit and fall back to the
         // shared setting.
@@ -1943,11 +1966,12 @@ void AgentLoop::startWebTool(const ToolCall &call)
         // fire (and discard) every sibling's handler and drop their result.
         auto conn = QSharedPointer<QMetaObject::Connection>::create();
         *conn = connect(&m_web, &WebSearch::searchFinished, this,
-                [this, call, query, conn](const QString &callId, const QList<WebSearchResult> &results, const QString &error) {
+                [this, call, query, conn, progressConn](const QString &callId, const QList<WebSearchResult> &results, const QString &error) {
                     if (callId != call.id) {
                         return;
                     }
                     disconnect(*conn);
+                    disconnect(*progressConn);
                     ToolResult out;
                     out.toolCallId = callId;
                     out.name = call.name;
@@ -1974,11 +1998,12 @@ void AgentLoop::startWebTool(const ToolCall &call)
 
     auto conn = QSharedPointer<QMetaObject::Connection>::create();
     *conn = connect(&m_web, &WebSearch::fetchFinished, this,
-            [this, call, conn](const QString &callId, const QString &title, const QString &text, const QString &error) {
+            [this, call, conn, progressConn](const QString &callId, const QString &title, const QString &text, const QString &error) {
                 if (callId != call.id) {
                     return;
                 }
                 disconnect(*conn);
+                disconnect(*progressConn);
                 ToolResult out;
                 out.toolCallId = callId;
                 out.name = call.name;
@@ -1992,6 +2017,11 @@ void AgentLoop::startWebTool(const ToolCall &call)
                 out.output = title.isEmpty() ? text : (u"# "_s + title + u"\n\n"_s + text);
                 finishAsyncTool(call, out);
             });
+    // The connection phase is the part a user waits through with nothing on
+    // screen, so say what is being contacted before the first byte lands. Emitted
+    // before the request because a fetch can fail inline and finish the call
+    // synchronously.
+    Q_EMIT toolProgress(call.id, i18n("Connecting to %1…", QUrl(url).host()));
     m_web.fetchPage(url, call.id);
 }
 

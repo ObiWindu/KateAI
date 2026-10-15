@@ -39,6 +39,16 @@ namespace
 // conversation around it. Three lines is enough to recognise what ran.
 constexpr int kMaxTitleLines = 3;
 
+// How much of a tool's own output a card keeps. A chatty command can print
+// thousands of lines, and left whole one card grew tall enough to bury the
+// conversation around it.
+constexpr int kMaxResultLines = 200;
+
+// How much of the arguments a card shows before the tool has produced anything.
+// An edit's old/new strings are long by nature, and this body is a placeholder
+// for the result rather than the thing worth reading.
+constexpr int kMaxInputLines = 12;
+
 // Keeps at most `maxLines` of already-wrapped text, marking that some was
 // dropped.
 //
@@ -104,6 +114,22 @@ int fittedDocumentHeight(QTextDocument *doc, int viewportWidth, int extra)
     }
     doc->setTextWidth(std::max(40, viewportWidth));
     return std::max(1, static_cast<int>(doc->size().height()) + extra);
+}
+
+// Bounded by lines rather than characters, so a long but meaningful line is
+// never cut in half and a chatty tool cannot grow a card without bound. The
+// tail is marked instead of being dropped silently, so the user can tell that
+// something was left out.
+QString clampToLines(const QString &text, int maxLines)
+{
+    QStringList lines = text.split(u'\n');
+    if (lines.size() <= maxLines) {
+        return text;
+    }
+    const int hidden = lines.size() - maxLines;
+    lines = lines.mid(0, maxLines);
+    lines.append(i18n("… %1 more lines", hidden));
+    return lines.join(u'\n');
 }
 
 } // namespace
@@ -268,6 +294,56 @@ ToolCallWidget::ToolCallWidget(const QString &toolCallId, QWidget *parent)
     detailsLayout->setContentsMargins(10, 0, 10, 8);
     detailsLayout->setSpacing(0);
 
+    // Names what the body below holds. Different tools produce different kinds
+    // of result and the caption is what separates a diff from file contents or
+    // a command's output without the user having to infer it from the header.
+    m_viewCaption = new QLabel(m_detailsContainer);
+    m_viewCaption->setObjectName(u"toolViewCaption"_s);
+    m_viewCaption->setStyleSheet(
+        QStringLiteral("QLabel { color: %1; font-size: 10px; font-weight: 600;"
+                       " letter-spacing: 0.4px; background: transparent; }")
+            .arg(ChatTheme::textMuted()));
+    m_viewCaption->hide();
+    detailsLayout->addWidget(m_viewCaption);
+
+    // The diff surface for file edits and writes. A change is not "output":
+    // pushed through the plain result view, the added and removed lines sat
+    // among the file text as flat monospace and the user had to read them to
+    // see what moved. Here each line carries a green or red background, which
+    // is the one thing that makes a long diff scannable.
+    m_describeDiff = new QTextBrowser(this);
+    // Named so the diff surface can be found from a test without reaching into
+    // private members.
+    m_describeDiff->setObjectName(u"toolDiff"_s);
+    m_describeDiff->setReadOnly(true);
+    m_describeDiff->setOpenExternalLinks(false);
+    m_describeDiff->setMinimumWidth(0);
+    m_describeDiff->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    m_describeDiff->setLineWrapMode(QTextEdit::WidgetWidth);
+    m_describeDiff->setWordWrapMode(QTextOption::WrapAnywhere);
+    m_describeDiff->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_describeDiff->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    m_describeDiff->setStyleSheet(
+        QStringLiteral(
+            "QTextBrowser {"
+            "  background-color: %1;"
+            "  color: %2;"
+            "  border: none;"
+            "  padding: 0;"
+            "  font-family: monospace;"
+            "  font-size: 11px;"
+            "}")
+        .arg(ChatTheme::codeBlockBg(), QStringLiteral("#ffffff")));
+    m_describeDiff->document()->setDefaultStyleSheet(
+        QStringLiteral(
+            "body { color: %1; font-family: monospace; font-size: 11px; margin: 0; padding: 0; }"
+            "table { width: 100%; }"
+            "td { padding: 0 8px; }"
+            "pre { margin: 0; white-space: pre-wrap; font-family: monospace; font-size: 11px; }")
+            .arg(QStringLiteral("#ffffff")));
+    m_describeDiff->hide();
+    detailsLayout->addWidget(m_describeDiff);
+
     m_details = new QTextBrowser(this);
     // Named so the result surface can be found from a test without reaching
     // into private members.
@@ -329,6 +405,10 @@ void ToolCallWidget::setToolInfo(const QString &toolName, const QString &summary
                         + (m_titleText.isEmpty() ? QString() : u"\n"_s + m_titleText));
     updateTitleText();
     updateStyle();
+    // The tool name is what decides the shape of the expanded body, so this is
+    // the earliest point the card can style itself for the kind of result it
+    // will hold.
+    applyDetailView();
     if (!m_finished) {
         // The in-flight glyph was coloured before the tool name was known, so
         // give it the tool's hue now that it is.
@@ -455,11 +535,16 @@ void ToolCallWidget::setDescribeDiff(const QString &diff)
     }
     m_diffStat->setText(QStringLiteral("+%1 −%2").arg(m_diffAdded).arg(m_diffRemoved));
     m_diffStat->setVisible(true);
-}
 
-void ToolCallWidget::setPreviewText(const QString &text)
-{
-    Q_UNUSED(text);
+    if (m_describeDiff) {
+        m_describeDiff->setHtml(diffToHtml(diff));
+        m_describeDiff->show();
+        applyDetailView();
+        // The change *is* the card's content, so it opens itself; otherwise a
+        // diff would sit inside a collapsed card that only ever showed the
+        // tool's one-line acknowledgement of the write.
+        setExpanded(true);
+    }
 }
 
 void ToolCallWidget::setFilePath(const QString &path)
@@ -467,9 +552,30 @@ void ToolCallWidget::setFilePath(const QString &path)
     m_filePath = path;
 }
 
-void ToolCallWidget::showPreviewHtml(const QString &html)
+void ToolCallWidget::setRunningInput(const QString &input)
 {
-    Q_UNUSED(html);
+    if (m_finished || input.trimmed().isEmpty()) {
+        return;
+    }
+    m_runningInput = input;
+    // A diff or a live stream is a better body than the arguments, so the input
+    // only fills the card while nothing else has arrived. hasDiffBody() rather
+    // than the diff surface's visibility: a card is built before it has ever
+    // been shown, so nothing about it is visible yet.
+    if (hasDiffBody()) {
+        return;
+    }
+    // The arguments are the card's own content, so they open it: a card in
+    // flight that says nothing but the tool name tells the user nothing about
+    // the work it is doing.
+    m_showingInput = true;
+    m_details->setHtml(partialToHtml(clampToLines(input, kMaxInputLines)));
+    applyDetailView();
+    if (!m_details->toPlainText().isEmpty()) {
+        setExpanded(true);
+    }
+    applyDetailsHeight();
+    scheduleReflow();
 }
 
 QString ToolCallWidget::plainToHtml(const QString &text) const
@@ -488,23 +594,49 @@ QString ToolCallWidget::plainToHtml(const QString &text) const
 
 QString ToolCallWidget::diffToHtml(const QString &diff) const
 {
-    // Use Kate's syntax highlighting for diffs to get proper token colours.
-    const QString highlighted = CodeHighlight::htmlBodyForCode(diff, u"diff"_s);
-    if (!highlighted.isEmpty()) {
-        return u"<body>"_s + highlighted + u"</body>"_s;
+    // One row per line, each cell carrying its own background: QTextDocument
+    // honours cell backgrounds (the `bgcolor` attribute), while the
+    // block-level CSS that would colour a bare <pre> is only partly supported
+    // and left the highlight out on every other line.
+    const QString addBg = ChatTheme::mixColors(ChatTheme::success(), ChatTheme::codeBlockBg(), 24);
+    const QString delBg = ChatTheme::mixColors(ChatTheme::danger(), ChatTheme::codeBlockBg(), 24);
+    const QString ctxBg = ChatTheme::codeBlockBg();
+    const QString addFg = ChatTheme::success();
+    const QString delFg = ChatTheme::danger();
+    const QString ctxFg = ChatTheme::textMuted();
+
+    // A write of a two-thousand-line file carries a two-thousand-line diff, and
+    // left whole it grew a card tall enough to bury the conversation around it.
+    // Bounded by lines like the result surface, with the marker in place of the
+    // tail rather than a silent cut.
+    constexpr int maxDiffLines = 400;
+    const QStringList all = diff.split(u'\n');
+    QStringList shown = all;
+    if (shown.size() > maxDiffLines) {
+        const int hidden = shown.size() - maxDiffLines;
+        shown = shown.mid(0, maxDiffLines);
+        shown.append(i18n("… %1 more lines", hidden));
     }
-    // Fallback to the simple line-by-line rendering if highlighting is unavailable.
+
     QString out = u"<body>"_s;
-    for (const QString &line : diff.split(u'\n')) {
-        if (line.startsWith(u"---"_s) || line.startsWith(u"+++"_s)) {
-            out += u"<p class='hunk'>%1</p>"_s.arg(escapeHtml(line));
+    for (const QString &line : shown) {
+        QString bg = ctxBg;
+        QString fg = ChatTheme::textPrimary();
+        if (line.startsWith(u"+++"_s) || line.startsWith(u"---"_s) || line.startsWith(u"@@"_s)) {
+            // File headers and hunk marks are navigation, not content.
+            fg = ctxFg;
         } else if (line.startsWith(u"+"_s)) {
-            out += u"<p class='added'>%1</p>"_s.arg(escapeHtml(line));
+            bg = addBg;
+            fg = addFg;
         } else if (line.startsWith(u"-"_s)) {
-            out += u"<p class='removed'>%1</p>"_s.arg(escapeHtml(line));
-        } else {
-            out += u"<p>%1</p>"_s.arg(escapeHtml(line));
+            bg = delBg;
+            fg = delFg;
         }
+        const QString text = line.isEmpty() ? QStringLiteral("&#160;") : escapeHtml(line);
+        out += QStringLiteral("<table width=\"100%\" cellpadding=\"0\" cellspacing=\"0\">"
+                              "<tr><td bgcolor=\"%1\"><pre style=\"color:%2;\">%3</pre></td></tr>"
+                              "</table>")
+                   .arg(bg, fg, text);
     }
     out += u"</body>"_s;
     return out;
@@ -512,10 +644,13 @@ QString ToolCallWidget::diffToHtml(const QString &diff) const
 
 QString ToolCallWidget::escapeHtml(const QString &s) const
 {
+    // Quotes too: the text goes inside HTML attributes (bgcolor, style) as well
+    // as element bodies, and a stray one would end the attribute early.
     QString out = s;
     out.replace(u"&"_s, u"&amp;"_s);
     out.replace(u"<"_s, u"&lt;"_s);
     out.replace(u">"_s, u"&gt;"_s);
+    out.replace(u"\""_s, u"&quot;"_s);
     return out;
 }
 
@@ -525,20 +660,15 @@ void ToolCallWidget::setPartialOutput(const QString &partialOutput)
         return;
     }
     m_partialOutput = partialOutput;
+    // The stream has arrived: it is the body from here on, not the arguments.
+    m_showingInput = false;
+    m_runningInput.clear();
 
     // The stream is rendered in the muted colour so the card reads as "this is
     // still arriving" while it runs, and setFinished's white text is clearly
     // the final answer. Capped by lines like the finished text, so a chatty
     // command cannot grow the card without bound either.
-    QStringList lines = partialOutput.split(u'\n');
-    constexpr int maxResultLines = 200;
-    if (lines.size() > maxResultLines) {
-        const int hidden = lines.size() - maxResultLines;
-        lines = lines.mid(0, maxResultLines);
-        lines.append(i18n("… %1 more lines", hidden));
-    }
-
-    m_details->setHtml(partialToHtml(lines.join(u'\n')));
+    m_details->setHtml(partialToHtml(clampToLines(partialOutput, kMaxResultLines)));
     // A stream is worth watching, so it opens itself; a card the user collapsed
     // themselves stays collapsed, because setExpanded tracks their choice.
     if (!m_details->toPlainText().isEmpty()) {
@@ -575,6 +705,8 @@ void ToolCallWidget::setFinished(const ToolResult &result)
     m_ok = result.ok;
     // The live stream is over: whatever it showed is now history.
     m_partialOutput.clear();
+    m_runningInput.clear();
+    m_showingInput = false;
     if (m_durationTimer) {
         m_durationTimer->stop();
     }
@@ -604,17 +736,11 @@ void ToolCallWidget::setFinished(const ToolResult &result)
     // rather than characters so a long but meaningful line is never silently
     // cut in half. The card opens on completion: output belongs in the tool
     // call itself, not in a second preview box below it.
-    QStringList lines = result.output.split(u'\n');
-    constexpr int maxResultLines = 200;
-    if (lines.size() > maxResultLines) {
-        const int hidden = lines.size() - maxResultLines;
-        lines = lines.mid(0, maxResultLines);
-        lines.append(i18n("… %1 more lines", hidden));
-    }
-    const QString output = lines.join(u'\n');
+    const QString output = clampToLines(result.output, kMaxResultLines);
     const QString language = languageForTool(m_toolName);
     m_details->setHtml(CodeHighlight::htmlForCode(output, language));
-    setExpanded(!output.trimmed().isEmpty());
+    setExpanded(!output.trimmed().isEmpty() || m_hasDiffPreview);
+    applyDetailView();
     applyDetailsHeight();
     scheduleReflow();
     updateStyle();
@@ -661,7 +787,7 @@ void ToolCallWidget::toggleExpand()
     Q_EMIT expandedChanged(m_expanded);
     syncPreviewVisibility();
 
-    if (!m_details || m_details->toPlainText().isEmpty()) {
+    if (!hasDetailsBody()) {
         applyDetailsHeight();
         scheduleReflow();
         return;
@@ -880,12 +1006,145 @@ void ToolCallWidget::applyDetailsHeight()
     if (m_animation) {
         m_animation->stop();
     }
-    if (m_expanded && m_details && !m_details->toPlainText().isEmpty()) {
+    if (m_expanded && hasDetailsBody()) {
         reflowDetails();
         m_detailsContainer->setMaximumHeight(detailsFitHeight());
     } else {
         m_detailsContainer->setMaximumHeight(0);
     }
+}
+
+ToolDetailView ToolCallWidget::detailViewForTool(const QString &toolName)
+{
+    // One shape per kind of work. A card that edits a file, one that reads it
+    // and one that runs a command produce different things, and the expanded
+    // body should say which without the header being read first.
+    if (toolName == u"edit_file"_s || toolName == u"multi_edit_file"_s
+        || toolName == u"multi_replace_file_content"_s
+        || toolName == u"write_file"_s || toolName == u"fs/write_text_file"_s) {
+        return ToolDetailView::Diff;
+    }
+    if (toolName == u"bash"_s || toolName.startsWith(u"terminal"_s)) {
+        return ToolDetailView::Terminal;
+    }
+    if (toolName == u"read_file"_s || toolName == u"fs/read_text_file"_s
+        || toolName == u"write_plan_file"_s || toolName == u"fetch_rules"_s
+        || toolName == u"project_graph"_s) {
+        return ToolDetailView::Code;
+    }
+    if (toolName == u"grep"_s || toolName == u"glob"_s) {
+        return ToolDetailView::Search;
+    }
+    return ToolDetailView::Plain;
+}
+
+QString ToolCallWidget::detailViewCaption() const
+{
+    switch (m_detailView) {
+    case ToolDetailView::Diff:
+        return m_hasDiffPreview ? i18n("Changes") : i18n("Output");
+    case ToolDetailView::Code:
+        return i18n("File contents");
+    case ToolDetailView::Terminal:
+        return i18n("Output");
+    case ToolDetailView::Search:
+        return i18n("Matches");
+    case ToolDetailView::Plain:
+        break;
+    }
+    return i18n("Output");
+}
+
+// What the body below holds right now. A card is one shape per tool, but the
+// same shape holds different things at different moments, and the caption is
+// what says which: the arguments while the tool runs, its output once it has
+// reported, the question and then the answer for the one tool that asks.
+QString ToolCallWidget::bodyCaption() const
+{
+    if (m_toolName == u"question"_s) {
+        return m_finished ? i18n("Answer") : i18n("Question");
+    }
+    if (m_showingInput) {
+        return i18n("Input");
+    }
+    return detailViewCaption();
+}
+
+void ToolCallWidget::applyDetailView()
+{
+    const ToolDetailView view = detailViewForTool(m_toolName);
+    if (view != m_detailView && m_details) {
+        m_detailView = view;
+        // A command's output is a terminal, not a code sample: one step darker
+        // than the inset used everywhere else, so running and reading are told
+        // apart at a glance.
+        const QString surface = view == ToolDetailView::Terminal ? QStringLiteral("#101014")
+                                                                 : ChatTheme::codeBlockBg();
+        m_details->setStyleSheet(
+            QStringLiteral(
+                "QTextBrowser {"
+                "  background-color: %1;"
+                "  color: %2;"
+                "  border: none;"
+                "  padding: 8px;"
+                "  font-family: monospace;"
+                "  font-size: 11px;"
+                "}")
+            .arg(surface, QStringLiteral("#ffffff")));
+        m_details->document()->setDefaultStyleSheet(
+            QStringLiteral(
+                "body { color: %1; font-family: monospace; font-size: 11px; margin: 0; padding: 0; }"
+                "pre { margin: 0; white-space: pre-wrap; font-family: monospace; font-size: 11px; }"
+                "p { margin: 0; white-space: pre-wrap; }")
+            .arg(QStringLiteral("#ffffff")));
+    }
+    if (m_viewCaption) {
+        const QString caption = bodyCaption();
+        if (caption.isEmpty()) {
+            m_viewCaption->hide();
+        } else {
+            m_viewCaption->setText(caption);
+            m_viewCaption->show();
+        }
+    }
+    applyDetailsHeight();
+    scheduleReflow();
+}
+
+bool ToolCallWidget::hasDetailsBody() const
+{
+    const bool result = m_details && !m_details->toPlainText().isEmpty();
+    return hasDiffBody() || result;
+}
+
+// Whether a diff is attached to the card at all. m_hasDiffPreview rather than
+// the diff surface's visibility: the card is created and filled before it is
+// ever shown, so visibility says nothing about the state of the body.
+bool ToolCallWidget::hasDiffBody() const
+{
+    return m_hasDiffPreview && m_describeDiff && !m_describeDiff->toPlainText().isEmpty();
+}
+
+int ToolCallWidget::captionHeight() const
+{
+    if (!m_viewCaption || !m_viewCaption->isVisible()) {
+        return 0;
+    }
+    return m_viewCaption->sizeHint().height() + 4;
+}
+
+int ToolCallWidget::browserFitHeight(QTextBrowser *browser, int padding) const
+{
+    if (!browser || !browser->isVisible() || browser->toPlainText().isEmpty()) {
+        return 0;
+    }
+    int vw = browser->viewport()->width();
+    if (vw < 40) {
+        vw = std::max(40, width() - 28);
+    }
+    // The browser's own padding has to be added to the document, or the last
+    // line of a result sits under the card's edge.
+    return fittedDocumentHeight(browser->document(), vw, padding);
 }
 
 void ToolCallWidget::updateTitleText()
@@ -917,36 +1176,33 @@ void ToolCallWidget::updateTitleText()
     m_title->setMinimumHeight(fm.lineSpacing() * lines + 2);
 }
 
-int ToolCallWidget::previewFitHeight() const
-{
-    return 0;
-}
-
 int ToolCallWidget::detailsFitHeight() const
 {
-    if (!m_details) {
-        return 16;
+    // Everything the card currently shows, plus the container's bottom margin:
+    // the diff of a file change, the tool's own result, or both.
+    int h = captionHeight();
+    if (hasDiffBody()) {
+        h += browserFitHeight(m_describeDiff, 4);
     }
-    int vw = m_details->viewport()->width();
-    if (vw < 40) {
-        vw = std::max(40, width() - 28);
+    if (m_details && !m_details->toPlainText().isEmpty()) {
+        h += browserFitHeight(m_details, 16);
     }
-    return fittedDocumentHeight(m_details->document(), vw, 16) + 16;
-}
-
-void ToolCallWidget::reflowPreview()
-{
+    return h + 8;
 }
 
 void ToolCallWidget::reflowDetails()
 {
-    if (!m_details) {
-        return;
+    if (hasDiffBody()) {
+        m_describeDiff->setFixedHeight(browserFitHeight(m_describeDiff, 4));
     }
-    const int containerH = detailsFitHeight();
-    m_details->setFixedHeight(std::max(1, containerH - 16));
-    if (m_expanded) {
-        m_detailsContainer->setMaximumHeight(containerH);
+    if (m_details) {
+        // The result surface owns the height it needs and no more: a browser
+        // left at its size hint grows the card to fill the panel on the first
+        // expand.
+        m_details->setFixedHeight(m_details->toPlainText().isEmpty() ? 0 : browserFitHeight(m_details, 16));
+    }
+    if (m_expanded && m_detailsContainer) {
+        m_detailsContainer->setMaximumHeight(detailsFitHeight());
     }
     updateGeometry();
 }

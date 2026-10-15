@@ -116,6 +116,11 @@ Q_SIGNALS:
     void searchFinished(const QString &callId, const QList<WebSearchResult> &results, const QString &error);
     void fetchFinished(const QString &callId, const QString &title, const QString &text, const QString &error);
 
+    // Live state of an in-flight request: what is being contacted and, for a
+    // page fetch, how much has arrived so far. A multi-second fetch would
+    // otherwise leave its card blank until the whole page lands.
+    void requestProgress(const QString &callId, const QString &status);
+
 private:
     void finishSearch(const QString &callId, const QList<WebSearchResult> &results, const QString &error);
     void finishFetch(const QString &callId, const QString &title, const QString &text, const QString &error);

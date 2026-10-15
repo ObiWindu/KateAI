@@ -1,5 +1,6 @@
 #include "acpclient.h"
 #include "agentloop.h"
+#include "chattheme.h"
 #include "chatwidget.h"
 #include "sessionstoreisolation.h"
 #include "types.h"
@@ -225,6 +226,74 @@ private Q_SLOTS:
 
         QApplication::processEvents();
         QTest::qWait(50);
+    }
+
+    // The thinking pill's brain glyph is a colour emoji, and Qt renders a widget
+    // that carries a QGraphicsOpacityEffect through an offscreen surface where
+    // those glyphs do not survive: the pill came out blank or hollow. The pulse
+    // now dims the stylesheet instead, so the pill must carry no graphics
+    // effect and the glyph must sit in a regular-weight span rather than the
+    // pill's 600 weight, which emoji fonts rarely have.
+    void thinkingIndicatorPaintsTheBrainWithoutAnOpacityEffect()
+    {
+        ChatWidget widget;
+        widget.resize(900, 700);
+        widget.show();
+
+        QLabel *pill = widget.findChild<QLabel *>(u"thinkingIndicator"_s);
+        QVERIFY2(pill, "the thinking pill was not found in the transcript");
+        QVERIFY2(pill->text().contains(QChar(0x1F9E0)), qPrintable(pill->text()));
+        QVERIFY2(pill->textFormat() == Qt::RichText, "the pill needs rich text to carry the span");
+        QVERIFY2(pill->text().contains(u"font-weight: 400"_s), qPrintable(pill->text()));
+        QVERIFY2(!pill->graphicsEffect(), "an opacity effect on the pill breaks the emoji glyph");
+        QVERIFY2(pill->styleSheet().contains(ChatTheme::accent()), qPrintable(pill->styleSheet()));
+    }
+
+    // An ACP agent reports a running tool through in-progress tool_call_update
+    // notifications. Before those were forwarded, the card sat empty for the
+    // whole command and filled in only once it ended.
+    void acpToolStreamsItsExecutionInsteadOfWaitingForTheEnd()
+    {
+        ChatWidget widget;
+        widget.resize(900, 700);
+        widget.show();
+
+        Settings settings;
+        settings.provider = Provider::Acp;
+        settings.apiFormat = ApiFormat::AcpNative;
+        settings.acpAgentId = u"mock-stream"_s;
+        settings.acpCommand = u"python3"_s;
+        settings.acpArgs = u'"' + m_agent + u"\" toolstream"_s;
+        settings.permissionMode = PermissionMode::AlwaysApprove;
+        settings.sandbox = SandboxProfile::Off;
+        widget.setSettings(settings);
+
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+        widget.agent()->setWorkspace(workspace.path());
+
+        QStringList order;
+        QString streamed;
+        connect(widget.agent(), &AgentLoop::toolProgress, &widget, [&](const QString &, const QString &partial) {
+            streamed = partial;
+            order << u"progress"_s;
+        });
+        bool finished = false;
+        connect(widget.agent(), &AgentLoop::toolFinished, &widget, [&](const ToolResult &) {
+            order << u"finished"_s;
+            finished = true;
+        });
+
+        widget.ask(u"build"_s);
+        QVERIFY2(waitFor([&] { return finished; }, 20000), "the tool never finished");
+        QApplication::processEvents();
+
+        // Live output has to reach the card before the result does, or the card
+        // shows nothing until the tool ends.
+        QVERIFY2(order.contains(u"progress"_s), "no live output reached the transcript");
+        QVERIFY2(order.indexOf(u"progress"_s) < order.indexOf(u"finished"_s),
+                 "the stream only arrived after the tool had already finished");
+        QVERIFY2(streamed.contains(u"scanning dependencies"_s), qPrintable(streamed));
     }
 
     void contextPercentageIsShown()

@@ -76,14 +76,34 @@ QString progressiveDots(int tick)
     return QString(n, u'.') + QString(3 - n, QChar(0x2007));
 }
 
-void attachPulseEffect(QLabel *label)
+// The two pills share one text builder. The brain glyph is lifted out of the
+// pill's 600 weight into its own regular-weight span: emoji fonts rarely carry
+// a bold face, and the synthesised bold Qt falls back to renders the glyph at
+// the wrong size, which is what made the thinking indicator read as broken.
+QString indicatorText(QChar glyph, const QString &label, const QString &dots)
 {
-    if (!label || label->graphicsEffect()) {
-        return;
+    return QStringLiteral("<span style=\"font-weight: 400;\">%1</span>  %2%3").arg(glyph, label, dots);
+}
+
+QString thinkingPillText(const QString &dots)
+{
+    return indicatorText(QChar(0x1F9E0), i18n("Thinking"), dots);
+}
+
+// Reads the suggest tool's arguments off a request. The card is built from this
+// while the tool is still running, so the parsing lives here rather than being
+// repeated in the handler that only sees the finished result.
+static KateAi::Suggestion suggestionFromRequest(const KateAi::PermissionRequest &request)
+{
+    KateAi::Suggestion suggestion;
+    const QJsonDocument argsDoc = QJsonDocument::fromJson(request.details.toUtf8());
+    if (!argsDoc.isNull() && argsDoc.isObject()) {
+        const QJsonObject args = argsDoc.object();
+        suggestion.text = args.value(u"suggestion"_s).toString();
+        suggestion.path = args.value(u"path"_s).toString();
+        suggestion.line = args.value(u"line"_s).toInt();
     }
-    auto *effect = new QGraphicsOpacityEffect(label);
-    effect->setOpacity(1.0);
-    label->setGraphicsEffect(effect);
+    return suggestion;
 }
 
 // Tools whose effects land in a file, and therefore the ones the edit tracker
@@ -633,7 +653,7 @@ ChatWidget::ChatWidget(QWidget *parent)
         setWorkingIndicator(true);
         m_turnStatus->setActivity(m_workingLabelBase);
         if (m_workingIndicator && m_isWorking) {
-            m_workingIndicator->setText(QStringLiteral("\u26A1  ") + m_workingLabelBase + progressiveDots(m_indicatorTick));
+            m_workingIndicator->setText(indicatorText(QChar(0x26A1), m_workingLabelBase, progressiveDots(m_indicatorTick)));
         }
 
         // A sub-agent is a long-running operation with its own live status, so
@@ -653,21 +673,17 @@ ChatWidget::ChatWidget(QWidget *parent)
         }
 
         // A suggestion is advice, not work, so it must not get the generic tool
-        // card: that would render its arguments as a JSON blob. The arguments
-        // are stashed here, where they are still carried on the request, and
-        // the card is built once the tool has reported its result -- by which
-        // point a failure is known and a suggestion that never arrived must not
-        // be offered for acceptance.
+        // card: that would render its arguments as a JSON blob. The card is
+        // still built now, while the tool runs, so the advice is on screen as
+        // it is posted rather than only once the call has reported back; the
+        // parsed arguments are stashed as well, so a failure can be reported
+        // against this same card instead of a second one appearing.
         if (request.toolName == u"suggest"_s) {
-            Suggestion suggestion;
-            const QJsonDocument argsDoc = QJsonDocument::fromJson(request.details.toUtf8());
-            if (!argsDoc.isNull() && argsDoc.isObject()) {
-                const QJsonObject args = argsDoc.object();
-                suggestion.text = args.value(u"suggestion"_s).toString();
-                suggestion.path = args.value(u"path"_s).toString();
-                suggestion.line = args.value(u"line"_s).toInt();
-            }
+            const Suggestion suggestion = suggestionFromRequest(request);
             m_pendingSuggestions.insert(request.toolCallId, suggestion);
+            if (!suggestion.text.isEmpty()) {
+                addSuggestionCard(request.toolCallId, suggestion, true);
+            }
             return;
         }
 
@@ -691,6 +707,14 @@ ChatWidget::ChatWidget(QWidget *parent)
             appendTranscriptWidget(toolWidget);
         }
         toolWidget->setRunning();
+        // What the call is working on, up in the body while it runs. A question
+        // is the one tool whose payload is prose rather than arguments, so its
+        // card carries the question instead of a JSON blob of it.
+        if (request.toolName == u"question"_s) {
+            toolWidget->setRunningInput(request.questionText.isEmpty() ? request.summary : request.questionText);
+        } else {
+            toolWidget->setRunningInput(request.details);
+        }
         applyTranscriptCollapse();
 
         // Track write/edit tool calls for edit tracking. The pre-edit snapshot
@@ -723,13 +747,22 @@ ChatWidget::ChatWidget(QWidget *parent)
     });
 
     connect(&m_agent, &AgentLoop::toolFinished, this, [this](const ToolResult &result) {
-        // Build the suggestion card now that the tool has reported: a failure
-        // becomes an error card instead of advice the user could act on.
+        // The suggestion card was posted while its tool ran, so it is already on
+        // screen: a success settles it, and a failure has to land on that same
+        // card rather than advise the user on something that never arrived.
         if (m_pendingSuggestions.contains(result.toolCallId)) {
             const Suggestion suggestion = m_pendingSuggestions.take(result.toolCallId);
-            if (result.ok) {
+            if (auto *card = m_suggestionWidgets.value(result.toolCallId)) {
+                if (result.ok) {
+                    card->setSuggestion(suggestion.text, suggestion.path, suggestion.line);
+                } else {
+                    card->setError(result.output);
+                }
+                applyTranscriptCollapse();
+                scrollToBottom();
+            } else if (result.ok && !suggestion.text.isEmpty()) {
                 addSuggestionCard(result.toolCallId, suggestion);
-            } else {
+            } else if (!result.ok) {
                 addSuggestionErrorCard(result.toolCallId, result.output);
             }
         }
@@ -1014,6 +1047,12 @@ ChatWidget::ChatWidget(QWidget *parent)
         Q_EMIT aboutToSubmit(); // Let Kate reload so the buffer matches the disk again.
     });
     connect(m_editTracker, &EditTracker::statusMessage, this, &ChatWidget::showInfoMessage);
+    // A review is read where the rest of the work is read: the .diff file the
+    // tracker lays out is opened as a document in the editor, with the editor's
+    // own diff highlighting, rather than in a separate window.
+    connect(m_editTracker, &EditTracker::previewDiffRequested, this, [this](const QString &previewPath) {
+        Q_EMIT openFileAtLineRequested(previewPath, 0);
+    });
 
     connect(&m_agent, &AgentLoop::modelsReceived, this, [this](Provider provider, const QStringList &models) {
         m_modelCatalog.insert(provider, models);
@@ -1739,7 +1778,8 @@ void ChatWidget::setThinkingIndicator(bool show)
     if (show && !m_isThinking) {
         m_isThinking = true;
         m_indicatorTick = 0;
-        m_thinkingIndicator->setText(QStringLiteral("\u1F9E0  ") + i18n("Thinking") + progressiveDots(0));
+        m_thinkingIndicator->setText(thinkingPillText(progressiveDots(0)));
+        m_thinkingIndicator->setStyleSheet(ChatTheme::thinkingPill());
         m_thinkingIndicator->show();
         tickIndicators();
     } else if (!show && m_isThinking) {
@@ -1762,7 +1802,7 @@ void ChatWidget::setWorkingIndicator(bool show)
         if (m_workingLabelBase.isEmpty()) {
             m_workingLabelBase = i18n("Working");
         }
-        m_workingIndicator->setText(QStringLiteral("\u26A1  ") + m_workingLabelBase + progressiveDots(0));
+        m_workingIndicator->setText(indicatorText(QChar(0x26A1), m_workingLabelBase, progressiveDots(0)));
         m_workingIndicator->show();
         tickIndicators();
     } else if (!show && m_isWorking) {
@@ -1795,10 +1835,11 @@ void ChatWidget::tickIndicators()
     const QString dots = progressiveDots(m_indicatorTick);
 
     if (m_isThinking && m_thinkingIndicator) {
-        m_thinkingIndicator->setText(QStringLiteral("\u1F9E0  ") + i18n("Thinking") + dots);
-        if (auto *effect = qobject_cast<QGraphicsOpacityEffect *>(m_thinkingIndicator->graphicsEffect())) {
-            effect->setOpacity(0.62 + 0.38 * ((m_indicatorTick % 2 == 0) ? 1.0 : 0.0));
-        }
+        m_thinkingIndicator->setText(thinkingPillText(dots));
+        // The pulse is a stylesheet swap, not an opacity effect: a graphics
+        // effect forces the pill through an offscreen surface, and colour-emoji
+        // glyphs (the brain) do not survive that trip.
+        m_thinkingIndicator->setStyleSheet(m_indicatorTick % 2 == 0 ? ChatTheme::thinkingPill() : ChatTheme::thinkingPillDim());
         if (m_thinkingToggle && m_thinkingBlock) {
             const QString arrow = m_thinkingExpanded ? u"\u25be "_s : u"\u25b8 "_s;
             m_thinkingToggle->setText(arrow + i18n("Reasoning") + dots);
@@ -1809,10 +1850,8 @@ void ChatWidget::tickIndicators()
         if (m_workingLabelBase.isEmpty()) {
             m_workingLabelBase = i18n("Working");
         }
-        m_workingIndicator->setText(QStringLiteral("\u26A1  ") + m_workingLabelBase + dots);
-        if (auto *effect = qobject_cast<QGraphicsOpacityEffect *>(m_workingIndicator->graphicsEffect())) {
-            effect->setOpacity(0.62 + 0.38 * ((m_indicatorTick % 2 == 1) ? 1.0 : 0.0));
-        }
+        m_workingIndicator->setText(indicatorText(QChar(0x26A1), m_workingLabelBase, dots));
+        m_workingIndicator->setStyleSheet(m_indicatorTick % 2 == 1 ? ChatTheme::workingPill() : ChatTheme::workingPillDim());
     }
 
     if (m_activeAssistantPulse) {
@@ -2117,16 +2156,18 @@ QWidget *ChatWidget::createIndicatorsRow()
     layout->setContentsMargins(0, 6, 0, 2);
     layout->setSpacing(8);
 
-    m_thinkingIndicator = new QLabel(QStringLiteral("\u1F9E0  ") + i18n("Thinking") + progressiveDots(0), row);
+    m_thinkingIndicator = new QLabel(thinkingPillText(progressiveDots(0)), row);
+    m_thinkingIndicator->setObjectName(u"thinkingIndicator"_s);
+    m_thinkingIndicator->setTextFormat(Qt::RichText);
     m_thinkingIndicator->setStyleSheet(ChatTheme::thinkingPill());
-    attachPulseEffect(m_thinkingIndicator);
     m_thinkingIndicator->hide();
     layout->addWidget(m_thinkingIndicator, 0, Qt::AlignLeft | Qt::AlignVCenter);
 
     m_workingLabelBase = i18n("Working");
-    m_workingIndicator = new QLabel(QStringLiteral("\u26A1  ") + m_workingLabelBase + progressiveDots(0), row);
+    m_workingIndicator = new QLabel(indicatorText(QChar(0x26A1), m_workingLabelBase, progressiveDots(0)), row);
+    m_workingIndicator->setObjectName(u"workingIndicator"_s);
+    m_workingIndicator->setTextFormat(Qt::RichText);
     m_workingIndicator->setStyleSheet(ChatTheme::workingPill());
-    attachPulseEffect(m_workingIndicator);
     m_workingIndicator->hide();
     layout->addWidget(m_workingIndicator, 0, Qt::AlignLeft | Qt::AlignVCenter);
 
@@ -3953,13 +3994,18 @@ void ChatWidget::updateTeamButton()
             : ChatTheme::iconButton());
 }
 
-void ChatWidget::addSuggestionCard(const QString &id, const Suggestion &suggestion)
+void ChatWidget::addSuggestionCard(const QString &id, const Suggestion &suggestion, bool running)
 {
     if (m_suggestionWidgets.contains(id)) {
         return;
     }
     auto *card = new SuggestionWidget(id, m_transcriptContainer);
     card->setSuggestion(suggestion.text, suggestion.path, suggestion.line);
+    // Live while its tool is still running: the advice is on screen already,
+    // but the call carrying it has not reported back yet.
+    if (running) {
+        card->setRunning();
+    }
     connect(card, &SuggestionWidget::accepted, this, [this](const QString &, const QString &path, int line) {
         // Accept means "show me": jump to the anchored line when there is one.
         // The card itself records the decision, so there is nothing to do here

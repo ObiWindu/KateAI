@@ -16,6 +16,20 @@
 
 using namespace Qt::Literals::StringLiterals;
 
+namespace
+{
+
+// How many lines of the composer are visible when it is empty, and how many
+// before a scrollbar takes over from the growth. Half again the heights the
+// composer settled at before: 4.5 against 3, and 18 against 12.
+constexpr qreal minLines = 4.5;
+constexpr qreal maxLines = 18.0;
+// Breathing room above and below the text, also half again the old 16, so the
+// empty box grows by half rather than only its text.
+constexpr int padding = 24;
+
+} // namespace
+
 namespace KateAi
 {
 
@@ -80,29 +94,36 @@ void PromptEdit::addHistory(const QString &text)
     m_draft.clear();
 }
 
+int PromptEdit::minHeight() const
+{
+    return qRound(fontMetrics().lineSpacing() * minLines + padding);
+}
+
+int PromptEdit::maxHeight() const
+{
+    return qRound(fontMetrics().lineSpacing() * maxLines + padding);
+}
+
 void PromptEdit::autoGrow()
 {
-    // The composer is half again as tall as it used to be: three lines of
-    // head-room when empty (a pasted stack trace stays readable) and twelve
-    // lines of growth before scrolling, which is half again the old eight.
+    // The composer is half again taller again: four and a half lines of
+    // head-room when empty (a pasted stack trace stays readable) and eighteen
+    // lines of growth before scrolling, half again the three and twelve it grew
+    // from. Both bounds move together, so raising the empty height does not
+    // quietly shrink how much may be typed before the scrollbar appears.
     const int docH = static_cast<int>(document()->size().height());
-    const int lineH = fontMetrics().lineSpacing();
-    const int minH = lineH * 3 + 16;
-    const int maxH = lineH * 12 + 16;
-    const int targetH = std::clamp(docH + 16, minH, maxH);
+    const int targetH = std::clamp(docH + padding, minHeight(), maxHeight());
     setFixedHeight(targetH);
 }
 
 QSize PromptEdit::sizeHint() const
 {
-    const int h = fontMetrics().lineSpacing() * 3 + 16;
-    return {QPlainTextEdit::sizeHint().width(), h};
+    return {QPlainTextEdit::sizeHint().width(), minHeight()};
 }
 
 QSize PromptEdit::minimumSizeHint() const
 {
-    const int h = fontMetrics().lineSpacing() * 3 + 16;
-    return {QPlainTextEdit::minimumSizeHint().width(), h};
+    return {QPlainTextEdit::minimumSizeHint().width(), minHeight()};
 }
 
 void PromptEdit::focusInEvent(QFocusEvent *event)

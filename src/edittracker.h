@@ -13,7 +13,6 @@
 #include <QString>
 #include <QWidget>
 
-class QDialog;
 class QLabel;
 class QLineEdit;
 class QPushButton;
@@ -89,6 +88,10 @@ Q_SIGNALS:
     void fileCreatedThenRejected(const QString &path);
     void editsChanged(bool hasEdits);
     void statusMessage(const QString &message, bool isError);
+    // The path of a .diff file holding this path's pending changes, laid out
+    // for the caller to open: the preview is a document in the editor rather
+    // than a window of the plugin's own.
+    void previewDiffRequested(const QString &previewPath);
 
 private:
     // One row per path, holding every still-unresolved edit to that file.
@@ -119,10 +122,11 @@ private:
     void rebuildEditList();
     void appendRow(const Group &group);
     QWidget *createRow(const Group &group);
-    void openReview(const QString &path);
-    void showDiffDialog(const QString &path, const Group &group);
-    void closeReview(const QString &path);
-    void closeAllReviews();
+    // Writes the group's combined diff to a .diff file in the temp directory and
+    // asks for it to be opened.
+    void previewDiff(const QString &path);
+    QString combinedDiff(const Group &group) const;
+    QString previewDiffPath(const QString &path) const;
     void settle(const QString &path, bool accepted);
     void pruneGroups();
     Group makeGroup(const QString &path) const;
@@ -135,7 +139,6 @@ private:
     // every path in that same order.
     QList<Group> m_groups;
 
-    QHash<QString, QPointer<QDialog>> m_reviewDialogs;
     QList<Decision> m_undoStack;
 
     QWidget *m_barWidget = nullptr;

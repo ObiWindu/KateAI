@@ -100,3 +100,11 @@ add_executable(test_overflow test_overflow.cpp ../src/chatwidget.cpp ../src/tool
 target_link_libraries(test_overflow PRIVATE kateai_core Qt6::Test Qt6::Widgets)
 target_compile_definitions(test_overflow PRIVATE TRANSLATION_DOMAIN="kateai")
 add_test(NAME test_overflow COMMAND test_overflow -platform offscreen)
+
+add_executable(test_livecards test_livecards.cpp ../src/chatwidget.cpp ../src/toolcallwidget.cpp
+    ../src/promptedit.cpp ../src/permissionbar.cpp ../src/subtaskwidget.cpp
+    ../src/suggestionwidget.cpp ../src/questionwidget.cpp ../src/edittracker.cpp
+    ../src/turnstatus.cpp ../src/chattheme.cpp)
+target_link_libraries(test_livecards PRIVATE kateai_core Qt6::Test Qt6::Widgets)
+target_compile_definitions(test_livecards PRIVATE TRANSLATION_DOMAIN="kateai")
+add_test(NAME test_livecards COMMAND test_livecards -platform offscreen)

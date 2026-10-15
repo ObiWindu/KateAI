@@ -29,7 +29,6 @@ public:
 
 public Q_SLOTS:
     void autoGrow();
-
 Q_SIGNALS:
     void submitRequested();
     void escapePressed();
@@ -44,6 +43,10 @@ private Q_SLOTS:
 private:
     QString wordUnderCursor() const;
     int atSymbolPosition() const;
+    // Heights of the composer, in lines of the current font. Kept as one pair
+    // of constants so the empty height and the growth cap move together.
+    int minHeight() const;
+    int maxHeight() const;
 
     QCompleter *m_completer = nullptr;
     QStringListModel *m_completionModel = nullptr;

@@ -87,6 +87,35 @@ private Q_SLOTS:
         QMetaObject::invokeMethod(&edit, "insertCompletion", Q_ARG(QString, u"chatwidget.cpp"_s));
         QVERIFY(edit.toPlainText().contains(u"@chatwidget.cpp "_s));
     }
+
+    void testComposerIsHalfTallerAgain()
+    {
+        PromptEdit edit;
+        const int lineH = edit.fontMetrics().lineSpacing();
+
+        // Four and a half lines of head-room when empty, half again the three
+        // it used to carry, so a pasted stack trace stays readable.
+        const int emptyHeight = edit.height();
+        QVERIFY2(emptyHeight >= lineH * 4 + 24,
+                 qPrintable(QStringLiteral("empty composer is only %1px").arg(emptyHeight)));
+        QVERIFY2(edit.sizeHint().height() >= lineH * 4 + 24,
+                 qPrintable(QStringLiteral("size hint is only %1px").arg(edit.sizeHint().height())));
+    }
+
+    void testShortTextNeverShrinksTheComposer()
+    {
+        PromptEdit edit;
+        // The head-room is the floor of the box, not only its empty state: a
+        // single short line must not collapse the composer back down.
+        const int floorHeight = edit.height();
+        edit.setPlainText(QStringLiteral("a single line is enough to see"));
+        QApplication::processEvents();
+
+        QVERIFY2(edit.height() >= floorHeight,
+                 qPrintable(QStringLiteral("composer shrank to %1px, below the %2px floor")
+                            .arg(edit.height())
+                            .arg(floorHeight)));
+    }
 };
 
 } // namespace KateAi
