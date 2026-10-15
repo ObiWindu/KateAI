@@ -59,7 +59,9 @@
 #include <QTabWidget>
 #include <QTextDocument>
 #include <QJsonDocument>
+#include <QSet>
 #include <QTimer>
+#include <QtMath>
 #include <QVBoxLayout>
 #include <QWidgetAction>
 #include <QUuid>
@@ -216,20 +218,21 @@ QString workingLabelForTool(const QString &toolName, const KateAi::PermissionReq
     // The verb names what is happening; the target names what it is happening
     // to, which is the half the user needs to tell two reads apart.
     const QString target = toolTargetLabel(toolName, request, workspace);
-    if (isFileMutatingTool(toolName)) {
+    if (isFileMutatingTool(toolName) || toolName == u"edit"_s || toolName == u"str_replace"_s
+        || toolName == u"write"_s || toolName == u"delete"_s) {
         return i18n("Editing") + target;
     }
-    if (toolName == u"read_file"_s || toolName == u"fs/read_text_file"_s) {
+    if (toolName == u"read_file"_s || toolName == u"fs/read_text_file"_s || toolName == u"read"_s) {
         return i18n("Reading") + target;
     }
     if (toolName == u"grep"_s || toolName == u"glob"_s || toolName == u"web_search"_s
-        || toolName == u"query_project_graph"_s) {
+        || toolName == u"query_project_graph"_s || toolName == u"search"_s) {
         return i18n("Searching") + target;
     }
     if (toolName == u"list_dir"_s) {
         return i18n("Listing") + target;
     }
-    if (toolName == u"bash"_s || toolName.startsWith(u"terminal/"_s)) {
+    if (toolName == u"bash"_s || toolName == u"execute"_s || toolName.startsWith(u"terminal/"_s)) {
         return i18n("Running") + target;
     }
 
@@ -238,6 +241,29 @@ QString workingLabelForTool(const QString &toolName, const KateAi::PermissionReq
     }
 
     return i18n("Working") + target;
+}
+
+// "+++ b//home/..." is an absolute path prefixed with "b/", so the path starts
+// at the slash. "+++ b/src/main.cpp" yields the relative path.
+QString diffPathFromOutput(const QString &output)
+{
+    const QStringList lines = output.split(u'\n');
+    QString fromOld;
+    for (const QString &line : lines) {
+        if (line.startsWith(u"+++ b/"_s)) {
+            const QString path = line.mid(6).trimmed();
+            if (!path.isEmpty() && path != u"/dev/null"_s) {
+                return path;
+            }
+        }
+        if (fromOld.isEmpty() && line.startsWith(u"--- a/"_s)) {
+            const QString path = line.mid(6).trimmed();
+            if (!path.isEmpty() && path != u"/dev/null"_s) {
+                fromOld = path;
+            }
+        }
+    }
+    return fromOld;
 }
 } // namespace
 
@@ -776,10 +802,8 @@ ChatWidget::ChatWidget(QWidget *parent)
     });
     connect(&m_agent, &AgentLoop::planUpdated, this, &ChatWidget::addPlanChecklist);
     connect(&m_agent, &AgentLoop::assistantDelta, this, [this](const QString &delta) {
-        // Auto-collapse thinking when visible answer starts streaming only if configured
-        if (m_settings.autoCollapseThinking && m_thinkingExpanded && !m_streamText.isEmpty()) {
-            collapseThinkingBlock();
-        }
+        // Reasoning stays open for the whole turn. Collapsing it when the answer
+        // started hid the only record of what the agent was doing.
         flushThinkingPacer();
         setThinkingIndicator(false);
         setStreaming(m_streamText + delta);
@@ -1047,24 +1071,24 @@ ChatWidget::ChatWidget(QWidget *parent)
     // reads as it runs; a chatty one is coalesced onto a timer, because
     // re-rendering the whole accumulated text on every chunk is quadratic in
     // output size and the final result replaces the stream anyway.
+    //
+    // The timer is started only while idle. QTimer::start() restarts an active
+    // single-shot timer, so a stream faster than the interval never painted
+    // until the tool paused — which, for a command that keeps printing, is
+    // when it finishes. The chunk already in hand is flushed immediately; the
+    // timer then absorbs the rest of the burst.
     connect(&m_agent, &AgentLoop::toolProgress, this, [this](const QString &toolCallId, const QString &partial) {
         m_pendingProgress.insert(toolCallId, partial);
         if (!m_progressTimer) {
             m_progressTimer = new QTimer(this);
             m_progressTimer->setSingleShot(true);
-            m_progressTimer->setInterval(200);
-            connect(m_progressTimer, &QTimer::timeout, this, [this] {
-                const QHash<QString, QString> pending = m_pendingProgress;
-                m_pendingProgress.clear();
-                for (auto it = pending.cbegin(); it != pending.cend(); ++it) {
-                    if (auto *widget = m_toolCallWidgets.value(it.key())) {
-                        widget->setPartialOutput(it.value());
-                    }
-                }
-                scrollToBottom();
-            });
+            m_progressTimer->setInterval(50);
+            connect(m_progressTimer, &QTimer::timeout, this, &ChatWidget::flushToolProgress);
         }
-        m_progressTimer->start();
+        if (!m_progressTimer->isActive()) {
+            flushToolProgress();
+            m_progressTimer->start();
+        }
     });
 
     connect(&m_agent, &AgentLoop::contextCompacted, this, [this](int before, int after) {
@@ -1214,8 +1238,23 @@ ChatWidget::ChatWidget(QWidget *parent)
     });
 
     connect(&m_agent, &AgentLoop::modelsReceived, this, [this](Provider provider, const QStringList &models) {
-        m_modelCatalog.insert(provider, models);
-        m_acpModelsLoading.clear();
+        if (!(provider == Provider::Acp && models.isEmpty() && m_modelCatalog.contains(Provider::Acp)
+              && !m_modelCatalog.value(Provider::Acp).isEmpty())) {
+            // An empty ACP report must not wipe a catalogue we already have.
+            // A session that simply didn't advertise models yet used to replace
+            // the list the user was looking at with nothing.
+            m_modelCatalog.insert(provider, models);
+        }
+        // The live client only knows the agent the settings point at. A click
+        // on a different installed agent probes that agent on its own, and this
+        // signal must not clear that probe's in-flight flag.
+        if (provider == Provider::Acp) {
+            if (m_acpModelsLoading == m_settings.acpAgentId && !m_acpModelProbe) {
+                m_acpModelsLoading.clear();
+            }
+        } else {
+            m_acpModelsLoading.clear();
+        }
         refreshProviders();
         updateModelSelectorLabel();
         updateTokenDisplay();
@@ -1386,8 +1425,19 @@ void ChatWidget::addUserMessage(const QString &text)
 
     card->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum);
     appendTranscriptWidget(card);
+    // QTextEdit's size hint is the scroll-area default (~192px) and does not
+    // follow the document, so a one-line prompt was a tall empty box and a long
+    // one was clipped. Hug the wrapped text. The viewport is often 0 until the
+    // layout runs, so a live message reflows once that width exists. A history
+    // rebuild fits every body in one pass instead of scheduling one per card.
+    fitUserMessageBody(msgLabel);
     if (!m_loadingConversation) {
         forceScrollToBottom();
+        QTimer::singleShot(0, this, [thisWeak = QPointer<ChatWidget>(this)]() {
+            if (thisWeak) {
+                thisWeak->reflowTranscriptMedia();
+            }
+        });
     }
     updateTokenDisplay();
 }
@@ -1443,7 +1493,7 @@ void ChatWidget::setStreaming(const QString &text)
 
         QTextBrowser *thinkingBrowser = nullptr;
         QPushButton *thinkingToggle = nullptr;
-        m_thinkingBlock = createThinkingBlock(m_activeAssistantWidget, thinkingBrowser, thinkingToggle, !m_settings.autoCollapseThinking);
+        m_thinkingBlock = createThinkingBlock(m_activeAssistantWidget, thinkingBrowser, thinkingToggle, true);
         m_thinkingBrowser = thinkingBrowser;
         m_thinkingToggle = thinkingToggle;
         m_thinkingBlock->hide();
@@ -1831,8 +1881,9 @@ void ChatWidget::freezeStreaming()
         m_activeAssistantCopyBtn = nullptr;
     }
     flushThinkingPacer();
-    if (m_settings.autoCollapseThinking) {
-        collapseThinkingBlock();
+    if (m_thinkingBlock && !m_thinkingBuffer.isEmpty()) {
+        m_thinkingBlock->show();
+        applyThinkingState(m_thinkingBlock, m_thinkingBrowser, m_thinkingToggle, true);
     }
     m_isStreaming = false;
     if (m_activeAssistantPulse) {
@@ -2056,22 +2107,11 @@ void ChatWidget::applyTranscriptCollapse()
             m_thinkingBlocks.removeAt(i);
         }
     }
-    int thinkingBudget = expandAll ? m_thinkingBlocks.size() : keep;
+    // Reasoning is part of the turn, not a disclosure the transcript budget
+    // is allowed to close. Every block stays expanded.
     for (int i = m_thinkingBlocks.size() - 1; i >= 0; --i) {
         const ThinkingBlockRef &entry = m_thinkingBlocks.at(i);
-        const bool live = (entry.block == m_thinkingBlock);
-        bool expanded = expandAll;
-        if (!expandAll) {
-            if (live && m_isThinking) {
-                expanded = m_thinkingExpanded;
-            } else if (thinkingBudget > 0) {
-                expanded = true;
-                --thinkingBudget;
-            } else {
-                expanded = false;
-            }
-        }
-        applyThinkingState(entry.block, entry.browser, entry.toggle, expanded);
+        applyThinkingState(entry.block, entry.browser, entry.toggle, true);
     }
 
     for (int i = m_toolCallOrder.size() - 1; i >= 0; --i) {
@@ -2310,6 +2350,7 @@ void ChatWidget::resizeEvent(QResizeEvent *event)
 {
     QWidget::resizeEvent(event);
     updateScrollButtonPosition();
+    reflowTranscriptMedia();
 }
 
 void ChatWidget::setCompletionWords(const QStringList &words)
@@ -3181,7 +3222,38 @@ void ChatWidget::showModelMenu()
         m_modelFilter = text;
         applyModelMenuFilter();
     });
-    const auto activateCurrent = [this]() {
+    // Show one installed agent's models. Deferred: the click that asked for
+    // this is still inside QListWidget::mouseReleaseEvent, and filling the
+    // model list deletes the item that release is holding.
+    const auto openAcpAgentModels = [this](QString agentName, QString agentId) {
+        if (agentId.isEmpty()) {
+            const QJsonArray installed = QJsonDocument::fromJson(m_settings.acpInstalledAgents.toUtf8()).array();
+            for (const QJsonValue &value : installed) {
+                const QJsonObject agent = value.toObject();
+                if (agent.value(u"name"_s).toString() == agentName) {
+                    agentId = agent.value(u"id"_s).toString();
+                    break;
+                }
+            }
+        }
+        QTimer::singleShot(0, this, [this, agentId, agentName]() {
+            if (!m_modelPopup) {
+                return;
+            }
+            if (agentId.isEmpty()) {
+                selectModel(Provider::Acp, agentName);
+                return;
+            }
+            m_acpAgentModelViewAgentId = agentId;
+            m_acpAgentModelViewAgentName = agentName;
+            if (m_modelPickerTabs) {
+                m_modelPickerTabs->setCurrentIndex(0);
+            }
+            requestAcpAgentModels(agentId);
+            fillModelResultList();
+        });
+    };
+    const auto activateCurrent = [this, openAcpAgentModels]() {
         QListWidget *activeList = m_modelPickerTabs && m_modelPickerTabs->currentIndex() == 1
             ? m_acpAgentResultList.data() : m_modelResultList.data();
         if (!activeList) {
@@ -3217,7 +3289,8 @@ void ChatWidget::showModelMenu()
             return;
         }
         if (m_modelPickerTabs && m_modelPickerTabs->currentIndex() == 1) {
-            selectModel(Provider::Acp, item->data(Qt::UserRole + 1).toString());
+            openAcpAgentModels(item->data(Qt::UserRole + 1).toString(),
+                               item->data(Qt::UserRole + 2).toString());
         } else {
             // Check if this is an ACP agent model selection (has agentId in UserRole+2)
             QString agentId = item->data(Qt::UserRole + 2).toString();
@@ -3259,33 +3332,15 @@ void ChatWidget::showModelMenu()
                         item->data(Qt::UserRole + 1).toString());
         }
     });
-    connect(acpList, &QListWidget::itemClicked, this, [this](QListWidgetItem *item) {
+    connect(acpList, &QListWidget::itemClicked, this, [this, openAcpAgentModels](QListWidgetItem *item) {
         if (!item || item->data(Qt::UserRole).toInt() < 0) return;
-        // Get the agent name and ID from the installed agents list
-        const QJsonArray installed = QJsonDocument::fromJson(m_settings.acpInstalledAgents.toUtf8()).array();
-        QString agentName = item->data(Qt::UserRole + 1).toString();
-        QString agentId;
-        for (const QJsonValue &value : installed) {
-            const QJsonObject agent = value.toObject();
-            if (agent.value(u"name"_s).toString() == agentName) {
-                agentId = agent.value(u"id"_s).toString();
-                break;
-            }
-        }
-        if (!agentId.isEmpty()) {
-            // Switch to model view mode for this agent
-            m_acpAgentModelViewAgentId = agentId;
-            m_acpAgentModelViewAgentName = agentName;
-            // Switch to Models tab
-            if (m_modelPickerTabs) {
-                m_modelPickerTabs->setCurrentIndex(0);
-            }
-            requestAcpAgentModels(agentId);
-            fillModelResultList();
-        } else {
-            // Fallback to old behavior
-            selectModel(Provider::Acp, agentName);
-        }
+        // Copy the identity off the item before doing any work. Rebuilding the
+        // list (or switching tabs) deletes the item, and QListWidget is still
+        // inside the mouse-release that emitted this click. Touching the item
+        // after that, or letting the release land on the models list that just
+        // replaced it, selected the wrong row and never asked the agent for models.
+        openAcpAgentModels(item->data(Qt::UserRole + 1).toString(),
+                           item->data(Qt::UserRole + 2).toString());
     });
 
     auto *nextModel = new QShortcut(QKeySequence(Qt::Key_Down), popup);
@@ -3396,14 +3451,19 @@ void ChatWidget::fillModelResultList()
         header->setForeground(QColor(QStringLiteral("#8b8b92")));
         m_modelResultList->addItem(header);
 
-        QStringList models;
-        if (m_acpAgentModelViewAgentId == m_settings.acpAgentId && m_modelCatalog.contains(Provider::Acp)) {
-            models = m_modelCatalog.value(Provider::Acp);
+        // The live catalogue wins only when it actually has models. An empty
+        // entry (a session that has not advertised any yet) used to hide the
+        // per-agent cache and the list the click had just fetched.
+        QStringList models = acpAgentAvailableModels(settingsForAcpAgent(m_acpAgentModelViewAgentId),
+                                                     m_acpAgentModelViewAgentId);
+        if (m_acpAgentModelViewAgentId == m_settings.acpAgentId) {
+            const QStringList live = m_modelCatalog.value(Provider::Acp);
+            if (!live.isEmpty()) {
+                models = live;
+            }
             if (!m_settings.acpModel.isEmpty() && !models.contains(m_settings.acpModel)) {
                 models.prepend(m_settings.acpModel);
             }
-        } else {
-            models = acpAgentAvailableModels(settingsForAcpAgent(m_acpAgentModelViewAgentId), m_acpAgentModelViewAgentId);
         }
 
         int matches = 0;
@@ -3499,6 +3559,7 @@ void ChatWidget::fillModelResultList()
             auto *item = new QListWidgetItem(u"%1  ·  %2\n%3"_s.arg(name, agent.value(u"version"_s).toString(), description));
             item->setData(Qt::UserRole, static_cast<int>(Provider::Acp));
             item->setData(Qt::UserRole + 1, name);
+            item->setData(Qt::UserRole + 2, agent.value(u"id"_s).toString());
             m_acpAgentResultList->addItem(item);
             if (agent.value(u"id"_s).toString() == m_settings.acpAgentId) selectedAgent = item;
         }
@@ -3781,10 +3842,26 @@ void ChatWidget::requestAcpAgentModels(const QString &agentId)
     if (agentId.isEmpty() || m_acpModelsLoading == agentId) {
         return;
     }
-    if (agentId == m_settings.acpAgentId) {
-        m_acpModelsLoading = agentId;
-        m_agent.fetchAcpModels();
-        return;
+    if (agentId == m_settings.acpAgentId && m_agent.acpClient()) {
+        AcpClient *live = m_agent.acpClient();
+        const bool liveHasModels = !m_modelCatalog.value(Provider::Acp).isEmpty();
+        if (live->isReady() && liveHasModels) {
+            // The running session already reported its catalogue. Re-read it
+            // instead of spawning a second copy of the agent.
+            m_acpModelsLoading = agentId;
+            m_agent.fetchAcpModels();
+            return;
+        }
+        if (!live->isReady()) {
+            // Stopped, failed, or still handshaking. start() (or the in-flight
+            // session/new) is what delivers this agent's models.
+            m_acpModelsLoading = agentId;
+            m_agent.fetchAcpModels();
+            return;
+        }
+        // Ready, but the session advertised nothing. Fall through and ask a
+        // fresh process; re-emitting the empty list is what left the menu on
+        // "No models" after the click.
     }
 
     if (!acpAgentAvailableModels(settingsForAcpAgent(agentId), agentId).isEmpty()) {
@@ -4792,7 +4869,7 @@ void ChatWidget::clearStreamingPointers()
     m_planLayout = nullptr;
     m_thinkingBuffer.clear();
     m_thinkingPacedLength = 0;
-    m_thinkingExpanded = !m_settings.autoCollapseThinking;
+    m_thinkingExpanded = true;
     m_streamText.clear();
     m_isStreaming = false;
 }
@@ -4801,7 +4878,7 @@ void ChatWidget::resetThinkingState()
 {
     m_thinkingBuffer.clear();
     m_thinkingPacedLength = 0;
-    m_thinkingExpanded = !m_settings.autoCollapseThinking;
+    m_thinkingExpanded = true;
     stopThinkingPacer();
 }
 
@@ -4889,6 +4966,42 @@ void ChatWidget::clearTranscriptContents()
     }
 }
 
+void ChatWidget::flushToolProgress()
+{
+    const QHash<QString, QString> pending = m_pendingProgress;
+    m_pendingProgress.clear();
+    if (pending.isEmpty()) {
+        return;
+    }
+    for (auto it = pending.cbegin(); it != pending.cend(); ++it) {
+        if (auto *widget = m_toolCallWidgets.value(it.key())) {
+            widget->setPartialOutput(it.value());
+        }
+    }
+    scrollToBottom();
+}
+
+void ChatWidget::fitUserMessageBody(QTextBrowser *browser)
+{
+    if (!browser || !browser->document()) {
+        return;
+    }
+    int width = 240;
+    if (m_scrollArea && m_scrollArea->viewport()) {
+        width = std::max(160, m_scrollArea->viewport()->width() - 32);
+    }
+    if (browser->viewport() && browser->viewport()->width() > 40) {
+        width = browser->viewport()->width();
+    }
+    browser->document()->setTextWidth(width);
+    // A few pixels under the document, not the assistant bubble's +16 / 30px
+    // floor: a user card should hug its text.
+    const int docH = std::max(1, qCeil(browser->document()->size().height()) + 4);
+    if (browser->height() != docH) {
+        browser->setFixedHeight(docH);
+    }
+}
+
 void ChatWidget::reflowTranscriptMedia()
 {
     if (!m_transcriptContainer) {
@@ -4897,6 +5010,11 @@ void ChatWidget::reflowTranscriptMedia()
     int contentWidth = 240;
     if (m_scrollArea && m_scrollArea->viewport()) {
         contentWidth = std::max(160, m_scrollArea->viewport()->width() - 32);
+    }
+
+    const auto userBodies = m_transcriptContainer->findChildren<QTextBrowser *>(u"userMessageBody"_s);
+    for (QTextBrowser *browser : userBodies) {
+        fitUserMessageBody(browser);
     }
 
     const auto browsers = m_transcriptContainer->findChildren<QTextBrowser *>(u"assistantBrowser"_s);
@@ -4921,11 +5039,160 @@ void ChatWidget::reflowTranscriptMedia()
     }
 }
 
+void ChatWidget::restoreHistoricalTool(const QString &toolCallId, const QString &toolName,
+                                       const QString &argumentsJson, const QString &output, bool hasResult)
+{
+    auto *toolWidget = new ToolCallWidget(toolCallId, m_transcriptContainer);
+
+    ToolRisk risk = ToolRisk::Read;
+    // ACP kinds are not in isFileMutatingTool on purpose: that list drives the
+    // edit tracker, which already learns about ACP writes from mutatesFiles.
+    if (isFileMutatingTool(toolName) || toolName == u"edit"_s || toolName == u"str_replace"_s
+        || toolName == u"write"_s || toolName == u"delete"_s) {
+        risk = ToolRisk::Write;
+    } else if (toolName == u"bash"_s || toolName == u"execute"_s) {
+        risk = ToolRisk::Execute;
+    }
+
+    QJsonObject argsObj;
+    const QString trimmedArgs = argumentsJson.trimmed();
+    if (!trimmedArgs.isEmpty() && trimmedArgs != u"{}"_s) {
+        const QJsonDocument argsDoc = QJsonDocument::fromJson(trimmedArgs.toUtf8());
+        if (!argsDoc.isNull() && argsDoc.isObject()) {
+            argsObj = argsDoc.object();
+        }
+    }
+    QString summary = shellCommandFor(toolName, argsObj);
+    // An unknown kind summarises as its own name ("edit"), and "{}" is not a
+    // command. A path from the arguments or from the diff header is what the
+    // card is about; failing that, the first line of the result.
+    if (summary.isEmpty() || summary == toolName || argsObj.isEmpty()) {
+        QString path = argsObj.value(u"path"_s).toString();
+        if (path.isEmpty()) {
+            path = argsObj.value(u"file_path"_s).toString();
+        }
+        if (path.isEmpty()) {
+            path = diffPathFromOutput(output);
+        }
+        if (!path.isEmpty()) {
+            summary = path;
+        } else {
+            for (const QString &line : output.split(u'\n')) {
+                const QString trimmed = line.trimmed();
+                if (!trimmed.isEmpty()) {
+                    summary = trimmed.left(120);
+                    break;
+                }
+            }
+        }
+    }
+
+    toolWidget->setToolInfo(toolName, summary, risk);
+    connect(toolWidget, &ToolCallWidget::expandedChanged, this, [this, toolWidget](bool) {
+        pinWidgetInViewport(toolWidget);
+        QTimer::singleShot(240, this, [thisWeak = QPointer<ChatWidget>(this)]() {
+            if (thisWeak) {
+                thisWeak->m_pinnedViewportWidget = nullptr;
+            }
+        });
+    });
+
+    if (toolName == u"edit_file"_s) {
+        const QString path = argsObj.value(u"path"_s).toString();
+        toolWidget->setDescribeDiff(unifiedDiff(path,
+            argsObj.value(u"old_string"_s).toString(),
+            argsObj.value(u"new_string"_s).toString()));
+    } else if (toolName == u"multi_edit_file"_s || toolName == u"multi_replace_file_content"_s) {
+        QString path = argsObj.value(u"path"_s).toString();
+        if (path.isEmpty()) {
+            path = argsObj.value(u"TargetFile"_s).toString();
+        }
+        QJsonArray edits = argsObj.value(u"edits"_s).toArray();
+        if (edits.isEmpty()) {
+            edits = argsObj.value(u"chunks"_s).toArray();
+        }
+        if (edits.isEmpty()) {
+            edits = argsObj.value(u"ReplacementChunks"_s).toArray();
+        }
+        QString oldCombined;
+        QString newCombined;
+        for (const QJsonValue &v : edits) {
+            const QJsonObject c = v.toObject();
+            const QString o = c.value(u"old_string"_s).toString().isEmpty() ? c.value(u"TargetContent"_s).toString() : c.value(u"old_string"_s).toString();
+            const QString n = c.value(u"new_string"_s).toString().isEmpty() ? c.value(u"ReplacementContent"_s).toString() : c.value(u"new_string"_s).toString();
+            if (!oldCombined.isEmpty()) {
+                oldCombined += u"\n---\n"_s;
+                newCombined += u"\n---\n"_s;
+            }
+            oldCombined += o;
+            newCombined += n;
+        }
+        toolWidget->setDescribeDiff(unifiedDiff(path, oldCombined, newCombined));
+    } else if (toolName == u"write_file"_s) {
+        const QString path = argsObj.value(u"path"_s).toString();
+        toolWidget->setDescribeDiff(unifiedDiff(path, QString(),
+            argsObj.value(u"content"_s).toString()));
+    } else if (ChatTheme::isEditToolName(toolName)) {
+        // ACP agents spell the same work "Edit", "Write", "StrReplace",
+        // "apply_patch". The arguments still carry the before/after text, and
+        // without a diff here the restored card is a grey acknowledgement.
+        QString path = argsObj.value(u"path"_s).toString();
+        if (path.isEmpty()) {
+            path = argsObj.value(u"file_path"_s).toString();
+        }
+        if (path.isEmpty()) {
+            path = argsObj.value(u"TargetFile"_s).toString();
+        }
+        const QString key = toolName.trimmed().toLower();
+        const bool writeOnly = key.contains(u"write"_s) && !key.contains(u"edit"_s)
+            && !key.contains(u"replace"_s) && !key.contains(u"patch"_s);
+        if (writeOnly) {
+            QString content = argsObj.value(u"content"_s).toString();
+            if (content.isEmpty()) {
+                content = argsObj.value(u"contents"_s).toString();
+            }
+            if (!content.isEmpty()) {
+                toolWidget->setDescribeDiff(unifiedDiff(path, QString(), content));
+            }
+        } else {
+            const QString oldText = argsObj.value(u"old_string"_s).toString().isEmpty()
+                ? argsObj.value(u"oldText"_s).toString()
+                : argsObj.value(u"old_string"_s).toString();
+            const QString newText = argsObj.value(u"new_string"_s).toString().isEmpty()
+                ? argsObj.value(u"newText"_s).toString()
+                : argsObj.value(u"new_string"_s).toString();
+            if (!oldText.isEmpty() || !newText.isEmpty()) {
+                toolWidget->setDescribeDiff(unifiedDiff(path, oldText, newText));
+            }
+        }
+    }
+
+    // No duration: the timer would have just started, so a restored card has
+    // nothing meaningful to time. setFinished also colours a diff that lives
+    // in the result text rather than in the arguments.
+    ToolResult result;
+    result.toolCallId = toolCallId;
+    result.name = toolName;
+    result.output = hasResult ? output : QString();
+    result.ok = !result.output.contains(u"STATUS: failure"_s);
+    toolWidget->setFinished(result);
+
+    m_toolCallWidgets.insert(toolCallId, toolWidget);
+    m_toolCallOrder.append(toolWidget);
+    appendTranscriptWidget(toolWidget);
+}
+
 void ChatWidget::rebuildTranscript()
 {
+    // addUserMessage schedules a reflow per card. Hold that off for the whole
+    // rebuild, including when a caller had already set the flag, and put the
+    // previous value back on every return.
+    const bool wasLoadingConversation = m_loadingConversation;
+    m_loadingConversation = true;
+
     m_permissionBar->hideBar();
     clearTranscriptContents();
-    m_thinkingExpanded = false;
+    m_thinkingExpanded = true;
 
     // Recreate the indicator row if it was ever removed. clearTranscriptContents()
     // keeps it, so this is a safety net rather than the normal path, but it has to
@@ -4944,12 +5211,123 @@ void ChatWidget::rebuildTranscript()
             m_threadTitle->setText(i18n("New Thread"));
         }
         forceScrollToBottom();
+        m_loadingConversation = wasLoadingConversation;
         return;
     }
 
-    // Rebuild transcript from messages
-    // Track tool call widgets by toolCallId to connect Role::Tool results
-    QHash<QString, ToolCallWidget *> rebuiltToolWidgets;
+    // Specs live on assistant messages and results on Role::Tool messages, and
+    // ACP writes the results first. Gather both before walking so a card can
+    // be created, already filled, at whichever message appears first. A later
+    // duplicate id keeps the last non-empty output. "{}" is not useful args.
+    struct HistoricalTool {
+        QString specName;
+        QString resultName;
+        QString argumentsJson;
+        QString output;
+        bool hasResult = false;
+    };
+    QHash<QString, HistoricalTool> catalog;
+    for (const auto &msg : messages) {
+        if (msg.role == ChatMessage::Role::Assistant) {
+            for (const QJsonValue &toolCallVal : msg.toolCalls) {
+                const QJsonObject toolCallObj = toolCallVal.toObject();
+                const QString toolCallId = toolCallObj.value(u"id"_s).toString();
+                if (toolCallId.isEmpty()) {
+                    continue;
+                }
+                HistoricalTool &slot = catalog[toolCallId];
+                const QJsonObject functionObj = toolCallObj.value(u"function"_s).toObject();
+                const QString name = functionObj.value(u"name"_s).toString();
+                if (!name.isEmpty()) {
+                    slot.specName = name;
+                }
+                const QString argumentsJson = functionObj.value(u"arguments"_s).toString().trimmed();
+                if (!argumentsJson.isEmpty() && argumentsJson != u"{}"_s) {
+                    slot.argumentsJson = argumentsJson;
+                }
+            }
+        } else if (msg.role == ChatMessage::Role::Tool) {
+            if (msg.toolCallId.isEmpty()) {
+                continue;
+            }
+            HistoricalTool &slot = catalog[msg.toolCallId];
+            if (!msg.name.isEmpty()) {
+                slot.resultName = msg.name;
+            }
+            slot.hasResult = true;
+            if (!msg.content.isEmpty()) {
+                slot.output = msg.content;
+            }
+        }
+    }
+
+    QSet<QString> placed;
+    // First sight of an id is where the card goes. A later sight (ACP's
+    // trailing assistant toolCalls, or a native tool message after the bubble)
+    // must not create a second, empty card.
+    auto place = [&](const QString &toolCallId) {
+        if (toolCallId.isEmpty() || placed.contains(toolCallId)) {
+            return;
+        }
+        const HistoricalTool spec = catalog.value(toolCallId);
+        const QString toolName = !spec.specName.isEmpty() ? spec.specName : spec.resultName;
+        const QString argumentsJson = spec.argumentsJson;
+
+        if (toolName == subtaskToolName()) {
+            QJsonObject restoredArgs;
+            const QJsonDocument restoredDoc = QJsonDocument::fromJson(argumentsJson.toUtf8());
+            if (!restoredDoc.isNull() && restoredDoc.isObject()) {
+                restoredArgs = restoredDoc.object();
+            }
+            auto *subtaskWidget = new SubtaskWidget(toolCallId, m_intentDock);
+            connect(subtaskWidget, &SubtaskWidget::cancelRequested, this, [this](const QString &taskId) {
+                m_agent.cancelSubtask(taskId);
+            });
+            const QString agentName = restoredArgs.value(u"agent"_s).toString();
+            subtaskWidget->startAgent(agentName.isEmpty() ? i18n("Sub-agent") : agentName,
+                                      restoredArgs.value(u"mode"_s).toString(),
+                                      restoredArgs.value(u"description"_s).toString());
+            m_subtaskWidgets.insert(toolCallId, subtaskWidget);
+            m_subtaskOrder.append(subtaskWidget);
+            addIntentWidget(subtaskWidget);
+            placed.insert(toolCallId);
+            if (spec.hasResult) {
+                ToolResult result;
+                result.toolCallId = toolCallId;
+                result.name = spec.resultName.isEmpty() ? toolName : spec.resultName;
+                result.output = spec.output;
+                result.ok = !spec.output.contains(u"STATUS: failure"_s);
+                subtaskWidget->finishAgent(result);
+            }
+            return;
+        }
+
+        if (toolName == u"suggest"_s) {
+            QJsonObject restoredArgs;
+            const QJsonDocument restoredDoc = QJsonDocument::fromJson(argumentsJson.toUtf8());
+            if (!restoredDoc.isNull() && restoredDoc.isObject()) {
+                restoredArgs = restoredDoc.object();
+            }
+            Suggestion suggestion;
+            suggestion.text = restoredArgs.value(u"suggestion"_s).toString();
+            suggestion.path = restoredArgs.value(u"path"_s).toString();
+            suggestion.line = restoredArgs.value(u"line"_s).toInt();
+            placed.insert(toolCallId);
+            if (suggestion.text.isEmpty()) {
+                return;
+            }
+            auto *card = new SuggestionWidget(toolCallId, m_transcriptContainer);
+            card->setSuggestion(suggestion.text, suggestion.path, suggestion.line);
+            card->markDecided();
+            m_suggestionWidgets.insert(toolCallId, card);
+            m_suggestionOrder.append(card);
+            appendTranscriptWidget(card);
+            return;
+        }
+
+        restoreHistoricalTool(toolCallId, toolName, argumentsJson, spec.output, spec.hasResult);
+        placed.insert(toolCallId);
+    };
 
     for (const auto &msg : messages) {
         switch (msg.role) {
@@ -4990,7 +5368,7 @@ void ChatWidget::rebuildTranscript()
                     if (!msg.thinking.isEmpty()) {
                         QTextBrowser *thinkingBrowser = nullptr;
                         QPushButton *thinkingToggle = nullptr;
-                        auto *thinkingBlock = createThinkingBlock(assistantWidget, thinkingBrowser, thinkingToggle, false);
+                        auto *thinkingBlock = createThinkingBlock(assistantWidget, thinkingBrowser, thinkingToggle, true);
                         if (thinkingBrowser) {
                             thinkingBrowser->setDocument(makeMarkdownDocument(closedMarkdown(msg.thinking), ChatTheme::thinkingCss()));
                         }
@@ -5026,168 +5404,18 @@ void ChatWidget::rebuildTranscript()
                     }
                 }
 
-                // Recreate tool call widgets for tool calls made by this assistant message
-                if (!msg.toolCalls.isEmpty()) {
-                    for (const auto &toolCallVal : msg.toolCalls) {
-                        const QJsonObject toolCallObj = toolCallVal.toObject();
-                        const QString toolCallId = toolCallObj.value(u"id"_s).toString();
-                        if (toolCallId.isEmpty() || rebuiltToolWidgets.contains(toolCallId)) {
-                            continue;
-                        }
-                        const QJsonObject functionObj = toolCallObj.value(u"function"_s).toObject();
-                        const QString toolName = functionObj.value(u"name"_s).toString();
-                        const QString argumentsJson = functionObj.value(u"arguments"_s).toString();
-
-                        // A restored sub-task keeps its own card, matching what
-                        // the live transcript shows.
-                        if (toolName == subtaskToolName()) {
-                            QJsonObject restoredArgs;
-                            const QJsonDocument restoredDoc = QJsonDocument::fromJson(argumentsJson.toUtf8());
-                            if (!restoredDoc.isNull() && restoredDoc.isObject()) {
-                                restoredArgs = restoredDoc.object();
-                            }
-                            auto *subtaskWidget = new SubtaskWidget(toolCallId, m_intentDock);
-                            connect(subtaskWidget, &SubtaskWidget::cancelRequested, this, [this](const QString &taskId) {
-                                m_agent.cancelSubtask(taskId);
-                            });
-                            const QString agentName = restoredArgs.value(u"agent"_s).toString();
-                            subtaskWidget->startAgent(agentName.isEmpty() ? i18n("Sub-agent") : agentName,
-                                                      restoredArgs.value(u"mode"_s).toString(),
-                                                      restoredArgs.value(u"description"_s).toString());
-                            m_subtaskWidgets.insert(toolCallId, subtaskWidget);
-                            m_subtaskOrder.append(subtaskWidget);
-                            addIntentWidget(subtaskWidget);
-                            rebuiltToolWidgets.insert(toolCallId, nullptr);
-                            continue;
-                        }
-
-                        // A restored suggestion keeps its card, but as a record:
-                        // the turn is over, so offering Accept again would ask
-                        // for a decision about work that has already moved on.
-                        if (toolName == u"suggest"_s) {
-                            QJsonObject restoredArgs;
-                            const QJsonDocument restoredDoc = QJsonDocument::fromJson(argumentsJson.toUtf8());
-                            if (!restoredDoc.isNull() && restoredDoc.isObject()) {
-                                restoredArgs = restoredDoc.object();
-                            }
-                            Suggestion suggestion;
-                            suggestion.text = restoredArgs.value(u"suggestion"_s).toString();
-                            suggestion.path = restoredArgs.value(u"path"_s).toString();
-                            suggestion.line = restoredArgs.value(u"line"_s).toInt();
-                            if (suggestion.text.isEmpty()) {
-                                rebuiltToolWidgets.insert(toolCallId, nullptr);
-                                continue;
-                            }
-                            auto *card = new SuggestionWidget(toolCallId, m_transcriptContainer);
-                            card->setSuggestion(suggestion.text, suggestion.path, suggestion.line);
-                            card->markDecided();
-                            m_suggestionWidgets.insert(toolCallId, card);
-                            m_suggestionOrder.append(card);
-                            appendTranscriptWidget(card);
-                            rebuiltToolWidgets.insert(toolCallId, nullptr);
-                            continue;
-                        }
-
-                        // Create tool call widget in finished state (will be updated with result if available)
-                        auto *toolWidget = new ToolCallWidget(toolCallId, m_transcriptContainer);
-
-                        ToolRisk risk = ToolRisk::Read;
-                        if (isFileMutatingTool(toolName)) {
-                            risk = ToolRisk::Write;
-                        } else if (toolName == u"bash"_s) {
-                            risk = ToolRisk::Execute;
-                        }
-
-                        QJsonObject argsObj;
-                        const QJsonDocument argsDoc = QJsonDocument::fromJson(argumentsJson.toUtf8());
-                        if (!argsDoc.isNull() && argsDoc.isObject()) {
-                            argsObj = argsDoc.object();
-                        }
-                        const QString summary = shellCommandFor(toolName, argsObj);
-
-                        toolWidget->setToolInfo(toolName, summary, risk);
-                        connect(toolWidget, &ToolCallWidget::expandedChanged, this, [this, toolWidget](bool) {
-                            pinWidgetInViewport(toolWidget);
-                            QTimer::singleShot(240, this, [thisWeak = QPointer<ChatWidget>(this)]() {
-                                if (thisWeak) {
-                                    thisWeak->m_pinnedViewportWidget = nullptr;
-                                }
-                            });
-                        });
-
-                        if (toolName == u"edit_file"_s) {
-                            const QString path = argsObj.value(u"path"_s).toString();
-                            toolWidget->setDescribeDiff(unifiedDiff(path,
-                                argsObj.value(u"old_string"_s).toString(),
-                                argsObj.value(u"new_string"_s).toString()));
-                        } else if (toolName == u"multi_edit_file"_s || toolName == u"multi_replace_file_content"_s) {
-                            QString path = argsObj.value(u"path"_s).toString();
-                            if (path.isEmpty()) {
-                                path = argsObj.value(u"TargetFile"_s).toString();
-                            }
-                            QJsonArray edits = argsObj.value(u"edits"_s).toArray();
-                            if (edits.isEmpty()) {
-                                edits = argsObj.value(u"chunks"_s).toArray();
-                            }
-                            if (edits.isEmpty()) {
-                                edits = argsObj.value(u"ReplacementChunks"_s).toArray();
-                            }
-                            QString oldCombined;
-                            QString newCombined;
-                            for (const QJsonValue &v : edits) {
-                                const QJsonObject c = v.toObject();
-                                const QString o = c.value(u"old_string"_s).toString().isEmpty() ? c.value(u"TargetContent"_s).toString() : c.value(u"old_string"_s).toString();
-                                const QString n = c.value(u"new_string"_s).toString().isEmpty() ? c.value(u"ReplacementContent"_s).toString() : c.value(u"new_string"_s).toString();
-                                if (!oldCombined.isEmpty()) {
-                                    oldCombined += u"\n---\n"_s;
-                                    newCombined += u"\n---\n"_s;
-                                }
-                                oldCombined += o;
-                                newCombined += n;
-                            }
-                            toolWidget->setDescribeDiff(unifiedDiff(path, oldCombined, newCombined));
-                        } else if (toolName == u"write_file"_s) {
-                            const QString path = argsObj.value(u"path"_s).toString();
-                            toolWidget->setDescribeDiff(unifiedDiff(path, QString(),
-                                argsObj.value(u"content"_s).toString()));
-                        }
-
-                        // Mark as finished (result will be filled in by Role::Tool message if available)
-                        ToolResult dummyResult;
-                        dummyResult.toolCallId = toolCallId;
-                        dummyResult.name = toolName;
-                        dummyResult.output = QString(); // Will be filled by Role::Tool message
-                        dummyResult.ok = true;
-                        toolWidget->setFinished(dummyResult);
-
-                        m_toolCallWidgets.insert(toolCallId, toolWidget);
-                        m_toolCallOrder.append(toolWidget);
-                        rebuiltToolWidgets.insert(toolCallId, toolWidget);
-                        appendTranscriptWidget(toolWidget);
-                    }
+                // Cards for calls this assistant message owns, unless a Role::Tool
+                // message earlier in the transcript already placed them (ACP
+                // stores the result before this bubble). Native order still
+                // lands the card here, already filled from the pre-scan.
+                for (const QJsonValue &toolCallVal : msg.toolCalls) {
+                    place(toolCallVal.toObject().value(u"id"_s).toString());
                 }
                 break;
             case ChatMessage::Role::Tool:
-                // Tool result message - update the corresponding tool call widget with the actual result
-                if (!msg.toolCallId.isEmpty()
-                                    && (rebuiltToolWidgets.contains(msg.toolCallId) || m_subtaskWidgets.contains(msg.toolCallId))) {
-                    ToolResult result;
-                    result.toolCallId = msg.toolCallId;
-                    result.name = msg.name;
-                    result.output = msg.content;
-                    result.ok = true; // Assume success; the content contains formatted result
-                    if (auto *subtaskWidget = m_subtaskWidgets.value(msg.toolCallId)) {
-                        subtaskWidget->finishAgent(result);
-                        break;
-                    }
-                    auto *toolWidget = rebuiltToolWidgets.value(msg.toolCallId);
-                    // A restored sub-task is registered with a nullptr value to
-                    // mark "this id is accounted for", so this can legitimately
-                    // be null here.
-                    if (toolWidget) {
-                        toolWidget->setFinished(result);
-                    }
-                }
+                // Place here when the result precedes the assistant message.
+                // An id already placed (native: card follows the bubble) is skipped.
+                place(msg.toolCallId);
                 break;
             case ChatMessage::Role::System:
                 // System messages are not shown in transcript
@@ -5217,6 +5445,7 @@ void ChatWidget::rebuildTranscript()
         thisWeak->forceScrollToBottom();
     });
     updateExpandAllButton();
+    m_loadingConversation = wasLoadingConversation;
 }
 
 void ChatWidget::restoreCurrentTurn(const SessionStore::SessionData &sessionData)
@@ -5237,8 +5466,7 @@ void ChatWidget::restoreCurrentTurn(const SessionStore::SessionData &sessionData
         if (!m_thinkingBlock) {
             QTextBrowser *thinkingBrowser = nullptr;
             QPushButton *thinkingToggle = nullptr;
-            // Active turn being restored: respect autoCollapseThinking setting
-            m_thinkingBlock = createThinkingBlock(m_transcriptContainer, thinkingBrowser, thinkingToggle, !m_settings.autoCollapseThinking);
+            m_thinkingBlock = createThinkingBlock(m_transcriptContainer, thinkingBrowser, thinkingToggle, true);
             m_thinkingBrowser = thinkingBrowser;
             m_thinkingToggle = thinkingToggle;
             appendTranscriptWidget(m_thinkingBlock);

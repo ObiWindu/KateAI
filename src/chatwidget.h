@@ -230,6 +230,13 @@ private:
     // of full re-renders is bounded by wall-clock rate rather than token count.
     void scheduleStreamRender();
     void flushStreamRender();
+    void flushToolProgress();
+    void fitUserMessageBody(QTextBrowser *browser);
+    // One finished card for a tool call already stored in the session. The
+    // caller decides where it goes: ACP records the result before the assistant
+    // message, native turns record it after.
+    void restoreHistoricalTool(const QString &toolCallId, const QString &toolName,
+                               const QString &argumentsJson, const QString &output, bool hasResult);
     static bool isInternalUserMessage(const QString &text);
     void startThinkingPacer();
     void stopThinkingPacer();

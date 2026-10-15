@@ -542,7 +542,7 @@ QString AgentLoop::systemPrompt() const
         prompt += u"\n\nTHINKING PROTOCOL (MANDATORY):\n"_s
                   u"- You MUST output a <thinking>...</thinking> block BEFORE your visible response.\n"_s
                   u"- This block contains your private analysis, reasoning, and step-by-step planning.\n"_s
-                  u"- The user will NOT see this block (it is collapsed by default). Be thorough and honest.\n"_s
+                  u"- The user sees this block. It stays open above your answer. Be thorough and honest.\n"_s
                   u"- Include: problem analysis, root cause hypotheses, alternative approaches considered, risk assessment, file/dependency mapping, and detailed step plan.\n"_s
                   u"- Max thinking tokens: "_s + QString::number(m_settings.maxThinkingTokens) + u"\n"_s;
     }
@@ -559,9 +559,6 @@ QString AgentLoop::systemPrompt() const
                   u"- Max plan steps: "_s + QString::number(m_settings.maxPlanSteps) + u"\n"_s
                   u"- This plan is rendered as a user-visible checklist that gets checked off as you complete steps.\n"_s
                   u"- Update the plan by marking completed steps when you finish them.\n"_s;
-    }
-    if (m_settings.autoCollapseThinking) {
-        prompt += u"\nAUTO-COLLAPSE: The thinking block will be auto-collapsed once your visible answer starts streaming.\n"_s;
     }
     if (m_settings.requireVerification) {
         prompt += u"\nVERIFICATION REQUIREMENT:\n"_s

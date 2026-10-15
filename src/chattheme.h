@@ -120,6 +120,11 @@ QString planChecklist();  // structured plan steps
 QString toolLabel(const QString &toolName);
 // Colour for a tool's status dot, given how the call ended.
 QString toolAccent(const QString &toolName, bool running, bool ok);
+// File edits and writes, including the names ACP agents invent for the same
+// work ("Edit", "Write", "apply_patch", "StrReplace"). Comparison is
+// case-insensitive: the protocol's kind is lowercase, the tool's own name
+// often is not, and a miss here is what left those cards uncoloured.
+bool isEditToolName(const QString &toolName);
 
 // --- Per-tool colour identity -------------------------------------------------
 // Every tool family carries its own hue, so a transcript full of cards can be

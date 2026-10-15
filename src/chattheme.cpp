@@ -581,16 +581,45 @@ QString planChecklist()
         .arg(kTextPrimary);
 }
 
+bool isEditToolName(const QString &toolName)
+{
+    const QString key = toolName.trimmed().toLower();
+    if (key.isEmpty() || key == u"write_plan_file"_s || key == u"read_file"_s || key == u"read"_s
+        || key == u"fs/read_text_file"_s || key == u"grep"_s || key == u"search"_s
+        || key == u"glob"_s || key == u"bash"_s || key == u"execute"_s || key == u"list_dir"_s
+        || key.startsWith(u"mcp__"_s) || key.startsWith(u"terminal"_s)) {
+        return false;
+    }
+    if (key == u"write_file"_s || key == u"fs/write_text_file"_s || key == u"write"_s
+        || key == u"edit_file"_s || key == u"edit"_s || key == u"str_replace"_s
+        || key == u"multi_edit_file"_s || key == u"multi_replace_file_content"_s
+        || key == u"delete"_s || key == u"apply_patch"_s || key == u"search_replace"_s
+        || key == u"replace"_s) {
+        return true;
+    }
+    // Agents name the same work however they like. The family is what the card
+    // colour and the diff highlight key off, not the exact identifier.
+    return key.contains(u"edit"_s) || key.contains(u"write"_s) || key.contains(u"replace"_s)
+        || key.contains(u"patch"_s) || key.contains(u"delete"_s) || key.contains(u"remove"_s);
+}
+
 QString toolLabel(const QString &toolName)
 {
     static const QHash<QString, QString> labels = {
         {QStringLiteral("read_file"), QStringLiteral("Read file")},
+        {QStringLiteral("read"), QStringLiteral("Read file")},
         {QStringLiteral("write_file"), QStringLiteral("Write file")},
+        {QStringLiteral("write"), QStringLiteral("Write file")},
         {QStringLiteral("edit_file"), QStringLiteral("Edit file")},
+        {QStringLiteral("edit"), QStringLiteral("Edit file")},
+        {QStringLiteral("str_replace"), QStringLiteral("Edit file")},
         {QStringLiteral("multi_edit_file"), QStringLiteral("Edit file")},
         {QStringLiteral("multi_replace_file_content"), QStringLiteral("Edit file")},
+        {QStringLiteral("delete"), QStringLiteral("Delete file")},
         {QStringLiteral("list_dir"), QStringLiteral("List directory")},
         {QStringLiteral("grep"), QStringLiteral("Search")},
+        {QStringLiteral("search"), QStringLiteral("Search")},
+        {QStringLiteral("execute"), QStringLiteral("Run command")},
         {QStringLiteral("glob"), QStringLiteral("Find files")},
         {QStringLiteral("bash"), QStringLiteral("Run command")},
         {QStringLiteral("new_task"), QStringLiteral("Delegate")},
@@ -604,9 +633,20 @@ QString toolLabel(const QString &toolName)
         {QStringLiteral("project_graph"), QStringLiteral("Read project map")},
     };
 
-    const auto it = labels.constFind(toolName);
+    const auto it = labels.constFind(toolName.trimmed().toLower());
     if (it != labels.constEnd()) {
         return it.value();
+    }
+    if (isEditToolName(toolName)) {
+        const QString key = toolName.trimmed().toLower();
+        if (key.contains(u"delete"_s) || key.contains(u"remove"_s)) {
+            return QStringLiteral("Delete file");
+        }
+        if (key.contains(u"write"_s) && !key.contains(u"edit"_s) && !key.contains(u"replace"_s)
+            && !key.contains(u"patch"_s)) {
+            return QStringLiteral("Write file");
+        }
+        return QStringLiteral("Edit file");
     }
     // MCP tools arrive as mcp__server__tool.
     if (toolName.startsWith(QLatin1String("mcp__"))) {
@@ -626,10 +666,7 @@ QString toolAccent(const QString &toolName, bool running, bool ok)
     if (!ok) {
         return kDanger;
     }
-    if (toolName == QLatin1String("write_file") || toolName == QLatin1String("edit_file")
-        || toolName == QLatin1String("multi_edit_file")
-        || toolName == QLatin1String("multi_replace_file_content")
-        || toolName == QLatin1String("bash")) {
+    if (isEditToolName(toolName) || toolName == QLatin1String("bash") || toolName == QLatin1String("execute")) {
         // Anything that changes the workspace stays visually distinct even on
         // success, so a glance at the transcript shows what was touched.
         return kAccent;
@@ -646,15 +683,22 @@ QString toolColor(const QString &toolName)
     static const QHash<QString, QString> colors = {
         {QStringLiteral("read_file"), QStringLiteral("#56b6c2")},
         {QStringLiteral("fs/read_text_file"), QStringLiteral("#56b6c2")},
+        {QStringLiteral("read"), QStringLiteral("#56b6c2")},
         {QStringLiteral("write_file"), QStringLiteral("#98c379")},
         {QStringLiteral("fs/write_text_file"), QStringLiteral("#98c379")},
+        {QStringLiteral("write"), QStringLiteral("#98c379")},
         {QStringLiteral("edit_file"), QStringLiteral("#c678dd")},
+        {QStringLiteral("edit"), QStringLiteral("#c678dd")},
+        {QStringLiteral("str_replace"), QStringLiteral("#c678dd")},
         {QStringLiteral("multi_edit_file"), QStringLiteral("#c678dd")},
         {QStringLiteral("multi_replace_file_content"), QStringLiteral("#c678dd")},
+        {QStringLiteral("delete"), QStringLiteral("#be5046")},
         {QStringLiteral("list_dir"), QStringLiteral("#d19a66")},
         {QStringLiteral("grep"), QStringLiteral("#e5c07b")},
+        {QStringLiteral("search"), QStringLiteral("#e5c07b")},
         {QStringLiteral("glob"), QStringLiteral("#61afef")},
         {QStringLiteral("bash"), QStringLiteral("#e06c75")},
+        {QStringLiteral("execute"), QStringLiteral("#e06c75")},
         {QStringLiteral("web_search"), QStringLiteral("#5ab0d8")},
         {QStringLiteral("web_fetch"), QStringLiteral("#5ab0d8")},
         {QStringLiteral("query_project_graph"), QStringLiteral("#a3be8c")},
@@ -666,16 +710,29 @@ QString toolColor(const QString &toolName)
         {QStringLiteral("fetch_rules"), QStringLiteral("#a3be8c")},
     };
 
-    const auto it = colors.constFind(toolName);
+    const QString key = toolName.trimmed().toLower();
+    const auto it = colors.constFind(key);
     if (it != colors.constEnd()) {
         return it.value();
     }
-    if (toolName.startsWith(QLatin1String("mcp__"))) {
+    if (isEditToolName(toolName)) {
+        // Same hues as the built-in edit and write tools, so an ACP card is
+        // scannable the same way instead of falling through to the muted rail.
+        if (key.contains(u"delete"_s) || key.contains(u"remove"_s)) {
+            return QStringLiteral("#be5046");
+        }
+        if (key.contains(u"write"_s) && !key.contains(u"edit"_s) && !key.contains(u"replace"_s)
+            && !key.contains(u"patch"_s)) {
+            return QStringLiteral("#98c379");
+        }
+        return QStringLiteral("#c678dd");
+    }
+    if (key.startsWith(QLatin1String("mcp__"))) {
         // MCP tools are a different kind of thing: a server the user configured,
         // not a built-in. One shared colour marks them as such.
         return QStringLiteral("#8fbcbb");
     }
-    if (toolName.startsWith(QLatin1String("terminal"))) {
+    if (key.startsWith(QLatin1String("terminal"))) {
         return QStringLiteral("#e06c75");
     }
     return kTextMuted;

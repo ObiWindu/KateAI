@@ -229,5 +229,5 @@ private Q_SLOTS:
     }
 };
 
-QTEST_MAIN(TestProjectGraph)
+QTEST_GUILESS_MAIN(TestProjectGraph)
 #include "test_projectgraph.moc"

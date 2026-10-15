@@ -149,5 +149,5 @@ private Q_SLOTS:
     }
 };
 
-QTEST_MAIN(TestModes)
+QTEST_GUILESS_MAIN(TestModes)
 #include "test_modes.moc"
