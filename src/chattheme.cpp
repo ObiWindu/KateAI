@@ -513,6 +513,30 @@ QString messageCss()
         .arg(kTextPrimary, kCodeBlockBg, kBorder, kAccent, kTextMuted, kHoverBg);
 }
 
+QString userMessageCss()
+{
+    // messageCss() with the body colour swapped for white: the user card is a
+    // near-black surface with white text, and a document stylesheet cannot
+    // inherit what the widget stylesheet painted. The code-block surfaces stay
+    // the shared inset colour so a pasted sample reads the same on either side
+    // of the conversation.
+    return QStringLiteral(
+               "body { color: #ffffff; font-family: sans-serif; font-size: 13px; margin: 0; padding: 0; }"
+               "p { margin-bottom: 8px; line-height: 1.5; }"
+               "ul, ol { margin-bottom: 8px; padding-left: 20px; }"
+               "li { margin-bottom: 4px; }"
+               "table.codeblock { border: 1px solid %1; border-radius: 6px; margin: 8px 0; background-color: %2; }"
+               "td.codeblock-lang { color: %3; font-family: sans-serif; font-size: 10px; font-weight: 600;"
+               "                    background-color: %2; padding: 4px 10px; }"
+               "pre.codeblock { color: #ffffff; font-family: monospace; font-size: 12px; white-space: pre-wrap;"
+               "                 background-color: %2; margin: 6px 10px; }"
+               "code { font-family: monospace; font-size: 12px; background-color: %4; color: #ffffff;"
+               "       padding: 2px 5px; border-radius: 3px; }"
+               "blockquote { border-left: 3px solid %5; padding-left: 10px; color: %3; margin: 8px 0; }"
+               "a { color: %5; text-decoration: none; }")
+        .arg(kBorder, kCodeBlockBg, kTextMuted, kHoverBg, kAccent);
+}
+
 QString thinkingCss()
 {
     return QStringLiteral(

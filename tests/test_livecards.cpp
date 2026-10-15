@@ -25,10 +25,13 @@
 #include "types.h"
 
 #include <QApplication>
+#include <QFont>
 #include <QSignalSpy>
 #include <QTest>
 #include <QTemporaryDir>
+#include <QTextBlock>
 #include <QTextBrowser>
+#include <QTextFragment>
 #include <QVBoxLayout>
 #include <QWidget>
 
@@ -257,6 +260,86 @@ private Q_SLOTS:
         QVERIFY2(failedBodies.first()->toPlainText().contains(QStringLiteral("must not be empty")),
                  qPrintable(failedBodies.first()->toPlainText()));
         QCOMPARE(m_widget->findChildren<SuggestionWidget *>().size(), 2);
+    }
+
+    // The user's own turn is markup too. It used to be escaped text run through
+    // a QLabel, so a pasted diff lost its fences, `grep` lost its backticks and
+    // **bold** stayed literal -- the same text rendering as markdown one card
+    // further up the conversation.
+    void testUserMessageRendersMarkdown()
+    {
+        setup();
+        Q_EMIT m_widget->agent()->userMessage(u"Compare **this** with `grep`:\n\n```cpp\nint x = 1;\n```\n"_s);
+        QTest::qWait(80);
+
+        QTextBrowser *body = m_widget->findChild<QTextBrowser *>(QStringLiteral("userMessageBody"));
+        QVERIFY2(body, "the user card has no markup body");
+        const QString plain = body->toPlainText();
+        QVERIFY2(plain.contains(QStringLiteral("this")), qPrintable(plain));
+        QVERIFY2(!plain.contains(QStringLiteral("**")), qPrintable(plain));
+        QVERIFY2(plain.contains(QStringLiteral("grep")), qPrintable(plain));
+        // A fenced block survives as a block, in order, behind the prose.
+        QVERIFY2(plain.contains(QStringLiteral("int x = 1;")), qPrintable(plain));
+        QVERIFY2(plain.indexOf(QStringLiteral("Compare")) < plain.indexOf(QStringLiteral("int x = 1;")),
+                 qPrintable(plain));
+        QVERIFY2(body->height() > 20, qPrintable(QStringLiteral("body collapsed to %1px").arg(body->height())));
+
+        // The markup parsed rather than being dropped: **this** really is bold
+        // and `grep` really is monospace, which is the whole point of rendering
+        // the prompt instead of escaping it.
+        bool sawBold = false;
+        bool sawCodeFont = false;
+        for (QTextBlock b = body->document()->begin(); b.isValid(); b = b.next()) {
+            for (QTextBlock::Iterator it = b.begin(); !it.atEnd(); ++it) {
+                const QTextFragment frag = it.fragment();
+                const QString text = frag.text();
+                if (text.startsWith(QStringLiteral("this")) && frag.charFormat().fontWeight() >= QFont::Bold) {
+                    sawBold = true;
+                }
+                if (text.startsWith(QStringLiteral("grep")) && frag.charFormat().fontFamily() == QStringLiteral("monospace")) {
+                    sawCodeFont = true;
+                }
+            }
+        }
+        QVERIFY2(sawBold, "bold text did not render as bold");
+        QVERIFY2(sawCodeFont, "inline code did not render in a monospace font");
+    }
+
+    // A long prompt must wrap and grow the card instead of being clipped by a
+    // fixed-height browser.
+    void testLongUserMessageGrowsTheCard()
+    {
+        setup();
+        const QString longText = QStringLiteral("line of prompt with **bold** and a fence\n").repeated(24)
+            + QStringLiteral("\n```text\nblock\n```\n");
+        Q_EMIT m_widget->agent()->userMessage(longText);
+        QTest::qWait(120);
+
+        QTextBrowser *body = m_widget->findChild<QTextBrowser *>(QStringLiteral("userMessageBody"));
+        QVERIFY2(body, "the user card has no markup body");
+        const int viewport = m_widget->width();
+        QVERIFY2(body->document()->size().width() <= viewport,
+                 qPrintable(QStringLiteral("document is %1px wide in a %2px panel")
+                                .arg(body->document()->size().width()).arg(viewport)));
+        QVERIFY2(body->height() > 100, qPrintable(QStringLiteral("body is only %1px tall").arg(body->height())));
+        const QString plain = body->toPlainText();
+        QVERIFY2(plain.count(QStringLiteral("line of prompt")) == 24, qPrintable(QStringLiteral("only %1 lines arrived").arg(plain.count(QStringLiteral("line of prompt")))));
+    }
+
+    // A prompt that only looks like markup -- a bare asterisk, a lone fence, a
+    // backtick -- must still read as what was typed rather than being eaten by
+    // the parser.
+    void testUserMessageKeepsTextThatOnlyLooksLikeMarkup()
+    {
+        setup();
+        Q_EMIT m_widget->agent()->userMessage(u"2 * 3 is 6, not a list\n\n```\nfence with no language\n"_s);
+        QTest::qWait(80);
+
+        QTextBrowser *body = m_widget->findChild<QTextBrowser *>(QStringLiteral("userMessageBody"));
+        QVERIFY2(body, "the user card has no markup body");
+        const QString plain = body->toPlainText();
+        QVERIFY2(plain.contains(QStringLiteral("2 * 3 is 6, not a list")), qPrintable(plain));
+        QVERIFY2(plain.contains(QStringLiteral("fence with no language")), qPrintable(plain));
     }
 };
 

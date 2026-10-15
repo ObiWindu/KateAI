@@ -17,6 +17,8 @@ kateai_test(test_websearch)
 kateai_test(test_contextmanager)
 kateai_test(test_providers)
 kateai_test(test_transcriptlayout)
+kateai_test(test_modes)
+kateai_test(test_projectgraph)
 
 # Renders through QTextDocument, which needs a QGuiApplication.
 add_executable(test_codehighlight test_codehighlight.cpp)

@@ -5,9 +5,10 @@
 #include <QTest>
 #include <QTextBlock>
 #include <QTextDocument>
-#include <QTextFrame>
 #include <QTextFragment>
+#include <QTextFrame>
 #include <QTextTable>
+#include <QFont>
 
 using namespace Qt::Literals::StringLiterals;
 using namespace KateAi;
@@ -119,6 +120,43 @@ private Q_SLOTS:
         const QString plain = doc.toPlainText();
         QVERIFY(plain.contains(QStringLiteral("grep")));
         QVERIFY(plain.contains(QStringLiteral("be careful")));
+    }
+
+    // Regression: the prose half of renderMarkdown() used to look for a literal
+    // "<body>" in QTextDocument::toHtml() output. Qt writes the tag with its
+    // attributes -- <body style="..."> -- so the match always failed and every
+    // prose run fell through to the toHtmlEscaped() fallback, which renders
+    // markdown *source*. A chat of "**bold**", "`code`" and bullet lists was
+    // the visible result.
+    void proseMarkupIsParsedNotShownAsSource()
+    {
+        const QString markdown = QStringLiteral("Use `grep` and **be careful**:\n\n- first\n- second\n\n## Section\n");
+        QTextDocument doc;
+        renderMarkdown(&doc, markdown);
+
+        const QString plain = doc.toPlainText();
+        // The markers are consumed, not quoted back.
+        QVERIFY2(!plain.contains(QStringLiteral("**")), qPrintable(plain));
+        QVERIFY2(!plain.contains(QStringLiteral("`")), qPrintable(plain));
+        QVERIFY2(!plain.contains(QStringLiteral("- first")), qPrintable(plain));
+        QVERIFY2(plain.contains(QStringLiteral("first")), qPrintable(plain));
+
+        // And the spans carry the formatting the markup asked for.
+        bool sawBold = false;
+        bool sawCodeFont = false;
+        for (QTextBlock b = doc.begin(); b.isValid(); b = b.next()) {
+            for (QTextBlock::Iterator it = b.begin(); !it.atEnd(); ++it) {
+                const QTextFragment frag = it.fragment();
+                if (frag.text().startsWith(QStringLiteral("be careful")) && frag.charFormat().fontWeight() >= QFont::Bold) {
+                    sawBold = true;
+                }
+                if (frag.text().startsWith(QStringLiteral("grep")) && frag.charFormat().fontFamily() == QStringLiteral("monospace")) {
+                    sawCodeFont = true;
+                }
+            }
+        }
+        QVERIFY2(sawBold, "bold markers did not produce bold text");
+        QVERIFY2(sawCodeFont, "inline code did not produce a monospace span");
     }
 
     void emptyInputIsSafe()

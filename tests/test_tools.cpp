@@ -267,13 +267,156 @@ private Q_SLOTS:
         // 1 MiB of output is far more than a pipe buffer holds. If the runner
         // does not drain the child while it runs, the command blocks on write
         // and is reported as a timeout instead of completing.
-        call.arguments = QJsonObject{{u"command"_s, u"head -c 1048576 /dev/zero | tr '\\0' 'x'"_s}};
+        call.arguments = QJsonObject{{u"command"_s, u"(echo HEAD_MARKER; head -c 1048576 /dev/zero | tr '\\0' 'x'; echo TAIL_MARKER)"_s}};
 
         ToolResult res = runner.run(call);
         QVERIFY2(res.ok, qPrintable(res.output));
-        // clip() keeps the first 80000 characters and reports what it dropped,
-        // so the truncation marker proves the whole stream arrived.
+        // clip() keeps the first and second halves of the 80000-character
+        // budget and reports what it dropped, so the markers at both ends of
+        // the stream prove the whole output arrived.
         QVERIFY2(res.output.contains(u"truncated"_s), qPrintable(res.output.left(200)));
+        QVERIFY2(res.output.contains(u"HEAD_MARKER"_s), qPrintable(res.output.left(200)));
+        QVERIFY2(res.output.contains(u"TAIL_MARKER"_s), qPrintable(res.output.right(200)));
+    }
+
+    void testMultiEditFileOverlapRejected()
+    {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+
+        const QString filePath = tempDir.path() + u"/overlap.txt"_s;
+        const QString original = QStringLiteral("one two\n");
+        {
+            QFile f(filePath);
+            QVERIFY(f.open(QIODevice::WriteOnly | QIODevice::Text));
+            f.write(original.toUtf8());
+        }
+
+        Sandbox sandbox(tempDir.path(), SandboxProfile::Workspace);
+        DiskDocumentBridge bridge;
+        ToolRunner runner(sandbox, &bridge);
+
+        // Both old_strings exist in the original file, so the pre-pass accepts
+        // them. But the first edit produces the text the second one matches,
+        // so the second edit would land inside text the first one just wrote.
+        QJsonObject chunk1{
+            {u"old_string"_s, u"two"_s},
+            {u"new_string"_s, u"one two"_s}
+        };
+        QJsonObject chunk2{
+            {u"old_string"_s, u"one two"_s},
+            {u"new_string"_s, u"X"_s}
+        };
+
+        ToolCall call;
+        call.id = u"call-overlap"_s;
+        call.name = u"multi_edit_file"_s;
+        call.arguments = QJsonObject{
+            {u"path"_s, u"overlap.txt"_s},
+            {u"edits"_s, QJsonArray{chunk1, chunk2}}
+        };
+
+        ToolResult res = runner.run(call);
+        QVERIFY2(!res.ok, qPrintable(res.output));
+        QVERIFY2(res.output.contains(u"overlaps text an earlier edit"_s), qPrintable(res.output));
+
+        // Nothing was written: the batch is all-or-nothing.
+        QString currentContent;
+        QVERIFY(bridge.readDocument(filePath, &currentContent));
+        QCOMPARE(currentContent, original);
+    }
+
+    void testMultiEditFileOverlapAcrossDeletion()
+    {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+
+        const QString filePath = tempDir.path() + u"/overlap_del.txt"_s;
+        const QString original = QStringLiteral("j;k\njk\n");
+        {
+            QFile f(filePath);
+            QVERIFY(f.open(QIODevice::WriteOnly | QIODevice::Text));
+            f.write(original.toUtf8());
+        }
+
+        Sandbox sandbox(tempDir.path(), SandboxProfile::Workspace);
+        DiskDocumentBridge bridge;
+        ToolRunner runner(sandbox, &bridge);
+
+        // The first edit deletes the separator, so the second edit's
+        // old_string would span the join the deletion created.
+        QJsonObject chunk1{
+            {u"old_string"_s, u";"_s},
+            {u"new_string"_s, QString()}
+        };
+        QJsonObject chunk2{
+            {u"old_string"_s, u"jk"_s},
+            {u"new_string"_s, u"joined"_s},
+            {u"replace_all"_s, true}
+        };
+
+        ToolCall call;
+        call.id = u"call-overlap-del"_s;
+        call.name = u"multi_edit_file"_s;
+        call.arguments = QJsonObject{
+            {u"path"_s, u"overlap_del.txt"_s},
+            {u"edits"_s, QJsonArray{chunk1, chunk2}}
+        };
+
+        ToolResult res = runner.run(call);
+        QVERIFY2(!res.ok, qPrintable(res.output));
+
+        QString currentContent;
+        QVERIFY(bridge.readDocument(filePath, &currentContent));
+        QCOMPARE(currentContent, original);
+    }
+
+    void testMultiEditFileDisjointEditsStillApply()
+    {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+
+        const QString filePath = tempDir.path() + u"/disjoint.txt"_s;
+        {
+            QFile f(filePath);
+            QVERIFY(f.open(QIODevice::WriteOnly | QIODevice::Text));
+            f.write("keep one two remove three\n");
+        }
+
+        Sandbox sandbox(tempDir.path(), SandboxProfile::Workspace);
+        DiskDocumentBridge bridge;
+        ToolRunner runner(sandbox, &bridge);
+
+        // Edits that change length in both directions and never touch each
+        // other must still apply; the overlap check must not over-reject.
+        QJsonObject chunk1{
+            {u"old_string"_s, u"one"_s},
+            {u"new_string"_s, u"1"_s}
+        };
+        QJsonObject chunk2{
+            {u"old_string"_s, u" two "_s},
+            {u"new_string"_s, QString()}
+        };
+        QJsonObject chunk3{
+            {u"old_string"_s, u"three"_s},
+            {u"new_string"_s, u"3 -> done"_s}
+        };
+
+        ToolCall call;
+        call.id = u"call-disjoint"_s;
+        call.name = u"multi_edit_file"_s;
+        call.arguments = QJsonObject{
+            {u"path"_s, u"disjoint.txt"_s},
+            {u"edits"_s, QJsonArray{chunk1, chunk2, chunk3}}
+        };
+
+        ToolResult res = runner.run(call);
+        QVERIFY2(res.ok, qPrintable(res.output));
+        QVERIFY(res.output.contains(u"3 edit chunks applied"_s));
+
+        QString updated;
+        QVERIFY(bridge.readDocument(filePath, &updated));
+        QCOMPARE(updated, u"keep 1remove 3 -> done\n"_s);
     }
 
     void bashReportsFailingExitCode()
@@ -634,6 +777,63 @@ private Q_SLOTS:
         QVERIFY2(note.contains(u"offset=%1"_s.arg(lastShown + 1)), qPrintable(note));
     }
 #endif
+
+    void testGoalReportValidation()
+    {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+
+        Sandbox sandbox(tempDir.path(), SandboxProfile::Workspace);
+        DiskDocumentBridge bridge;
+        ToolRunner runner(sandbox, &bridge);
+
+        // Missing status
+        ToolCall call1;
+        call1.id = u"g1"_s;
+        call1.name = u"goal_report"_s;
+        call1.arguments = QJsonObject{{u"reason"_s, u"done"_s}};
+        ToolResult res1 = runner.run(call1);
+        QVERIFY(!res1.ok);
+
+        // Invalid status
+        ToolCall call2;
+        call2.id = u"g2"_s;
+        call2.name = u"goal_report"_s;
+        call2.arguments = QJsonObject{{u"status"_s, u"invalid"_s}, {u"reason"_s, u"why"_s}};
+        ToolResult res2 = runner.run(call2);
+        QVERIFY(!res2.ok);
+
+        // Missing reason
+        ToolCall call3;
+        call3.id = u"g3"_s;
+        call3.name = u"goal_report"_s;
+        call3.arguments = QJsonObject{{u"status"_s, u"complete"_s}};
+        ToolResult res3 = runner.run(call3);
+        QVERIFY(!res3.ok);
+
+        // Valid cases
+        ToolCall call4;
+        call4.id = u"g4"_s;
+        call4.name = u"goal_report"_s;
+        call4.arguments = QJsonObject{{u"status"_s, u"complete"_s}, {u"reason"_s, u"Finished task"_s}};
+        ToolResult res4 = runner.run(call4);
+        QVERIFY(res4.ok);
+
+        ToolCall call5;
+        call5.id = u"g5"_s;
+        call5.name = u"goal_report"_s;
+        call5.arguments = QJsonObject{{u"status"_s, u"failed"_s}, {u"reason"_s, u"Error occurred"_s}};
+        ToolResult res5 = runner.run(call5);
+        QVERIFY(res5.ok);
+
+        ToolCall call6;
+        call6.id = u"g6"_s;
+        call6.name = u"goal_report"_s;
+        call6.arguments = QJsonObject{{u"status"_s, u"blocked"_s}, {u"reason"_s, u"Waiting for input"_s}};
+        ToolResult res6 = runner.run(call6);
+        QVERIFY(res6.ok);
+    }
+
 };
 
 QTEST_MAIN(TestTools)

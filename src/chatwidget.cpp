@@ -118,31 +118,126 @@ bool isFileMutatingTool(const QString &toolName)
         || toolName == u"fs/write_text_file"_s;
 }
 
-QString workingLabelForTool(const QString &toolName)
+// One string out of a tool's JSON arguments, from the first key that is
+// present and non-empty. Tools spell the same thing several ways ("path" in
+// KateAI, "file_path" in the ACP schema), so the caller passes its synonyms.
+QString jsonArg(const QString &details, const QStringList &keys)
+{
+    if (details.isEmpty()) {
+        return QString();
+    }
+    QJsonParseError parseError;
+    const QJsonDocument doc = QJsonDocument::fromJson(details.toUtf8(), &parseError);
+    if (parseError.error != QJsonParseError::NoError || !doc.isObject()) {
+        return QString();
+    }
+    const QJsonObject args = doc.object();
+    for (const QString &key : keys) {
+        const QString value = args.value(key).toString().trimmed();
+        if (!value.isEmpty()) {
+            return value;
+        }
+    }
+    return QString();
+}
+
+// Elides the middle of a long value, keeping the head that identifies it and
+// the tail that disambiguates it. A command or path cut at one end reads as a
+// different one entirely.
+QString elideMiddle(QString text, int max)
+{
+    text = text.simplified().replace(u'\n', u' ', Qt::CaseInsensitive);
+    text.replace(u"  "_s, u" "_s);
+    if (text.size() <= max) {
+        return text;
+    }
+    const int head = max / 2 - 1;
+    return text.left(head) + u"\u2026"_s + text.right(max - head - 1);
+}
+
+// Makes a path relative to the workspace when it sits inside it. The absolute
+// path starts with `/home/<user>/projects/...`, which pushes the actual
+// location off the end of a narrow status line.
+QString shortPath(const QString &path, const QString &workspace)
+{
+    if (path.isEmpty()) {
+        return QString();
+    }
+    if (!workspace.isEmpty() && path.startsWith(workspace + u'/')) {
+        return path.mid(workspace.size() + 1);
+    }
+    return path;
+}
+
+QString toolTargetLabel(const QString &toolName, const KateAi::PermissionRequest &request, const QString &workspace)
+{
+    // What the call is aimed at. The request's own `path` is the reliable one
+    // because ToolRunner fills it in; the arguments are the fallback for
+    // ACP calls, which Kate does not get to name itself.
+    QString path = request.path;
+    if (path.isEmpty()) {
+        path = jsonArg(request.details, {u"path"_s, u"file_path"_s, u"filePath"_s, u"file"_s,
+                                        u"dir_path"_s, u"directory"_s, u"root_path"_s});
+    }
+
+    const bool searches = toolName == u"grep"_s || toolName == u"glob"_s || toolName == u"web_search"_s
+        || toolName == u"query_project_graph"_s;
+    QString pattern = jsonArg(request.details, {u"pattern"_s, u"query"_s, u"regex"_s, u"question"_s});
+    if (pattern.isEmpty()) {
+        pattern = request.summary.trimmed();
+    }
+    if (searches && !pattern.isEmpty()) {
+        // The pattern is the useful half of a search; the scope qualifies it.
+        pattern = elideMiddle(pattern, 48);
+        const QString scope = path.isEmpty() ? QString() : u" " % i18n("in %1", shortPath(path, workspace));
+        return i18n("for \u201C%1\u201D%2", pattern, scope);
+    }
+
+    const QString command = jsonArg(request.details, {u"command"_s, u"cmd"_s, u"script"_s});
+    if (!command.isEmpty()) {
+        return u" " % elideMiddle(command, 64);
+    }
+
+    const QString url = jsonArg(request.details, {u"url"_s, u"link"_s});
+    if (!url.isEmpty()) {
+        return u" " % elideMiddle(url, 64);
+    }
+
+    if (!path.isEmpty()) {
+        return u" " % elideMiddle(shortPath(path, workspace), 64);
+    }
+    return QString();
+}
+
+QString workingLabelForTool(const QString &toolName, const KateAi::PermissionRequest &request, const QString &workspace)
 {
     // Plain verbs, no emoji: this line re-renders on every tool call and sits
     // at the very bottom of the transcript, where pictograms read as noise.
+    // The verb names what is happening; the target names what it is happening
+    // to, which is the half the user needs to tell two reads apart.
+    const QString target = toolTargetLabel(toolName, request, workspace);
     if (isFileMutatingTool(toolName)) {
-        return i18n("Editing");
+        return i18n("Editing") + target;
     }
-    if (toolName == u"read_file"_s) {
-        return i18n("Reading");
+    if (toolName == u"read_file"_s || toolName == u"fs/read_text_file"_s) {
+        return i18n("Reading") + target;
     }
-    if (toolName == u"grep"_s || toolName == u"glob"_s) {
-        return i18n("Searching");
+    if (toolName == u"grep"_s || toolName == u"glob"_s || toolName == u"web_search"_s
+        || toolName == u"query_project_graph"_s) {
+        return i18n("Searching") + target;
     }
     if (toolName == u"list_dir"_s) {
-        return i18n("Listing");
+        return i18n("Listing") + target;
     }
-    if (toolName == u"bash"_s) {
-        return i18n("Running");
+    if (toolName == u"bash"_s || toolName.startsWith(u"terminal/"_s)) {
+        return i18n("Running") + target;
     }
 
     if (toolName == u"question"_s) {
         return i18n("Waiting for your answer");
     }
 
-    return i18n("Working");
+    return i18n("Working") + target;
 }
 } // namespace
 
@@ -233,6 +328,21 @@ ChatWidget::ChatWidget(QWidget *parent)
         m_teamButton->setStyleSheet(ChatTheme::iconButton());
         connect(m_teamButton, &QPushButton::clicked, this, &ChatWidget::showTeamMenu);
         toolbarLayout->addWidget(m_teamButton);
+
+    // Expand / collapse every tool card in the transcript. Hidden until there
+    // are enough cards for a global control to say anything: on a transcript
+    // with one or two cards it is a button that does what clicking the card
+    // already does.
+    m_expandAllBtn = new QPushButton(this);
+    m_expandAllBtn->setObjectName(u"expandAllToolCards"_s);
+    m_expandAllBtn->setCursor(Qt::PointingHandCursor);
+    m_expandAllBtn->setStyleSheet(ChatTheme::chipButton());
+    m_expandAllBtn->setFixedHeight(26);
+    m_expandAllBtn->setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Fixed);
+    m_expandAllBtn->setMaximumWidth(140);
+    m_expandAllBtn->hide();
+    connect(m_expandAllBtn, &QPushButton::clicked, this, &ChatWidget::toggleAllToolCards);
+    toolbarLayout->addWidget(m_expandAllBtn);
 
     // Reasoning effort chooser button — sits right next to the model label
     // in the chat input area so the user can pick an effort level at a glance.
@@ -520,6 +630,48 @@ ChatWidget::ChatWidget(QWidget *parent)
     });
 
     connect(m_newChat, &QPushButton::clicked, this, &ChatWidget::newChat);
+
+    // Keyboard shortcuts for the transcript. These drive things a repeated
+    // turn produces a lot of -- tool cards to read through, disclosures to
+    // open and close -- which mouse work turns into a chore once a transcript
+    // holds a dozen cards. Window context, so they work wherever inside the
+    // panel focus happens to be (including the prompt).
+    auto *expandAllShortcut = new QShortcut(QKeySequence(Qt::CTRL | Qt::ALT | Qt::Key_E), this);
+    expandAllShortcut->setObjectName(u"shortcutExpandAll"_s);
+    connect(expandAllShortcut, &QShortcut::activated, this, &ChatWidget::toggleAllToolCards);
+
+    auto *prevCardShortcut = new QShortcut(QKeySequence(Qt::CTRL | Qt::ALT | Qt::Key_Up), this);
+    prevCardShortcut->setObjectName(u"shortcutPrevToolCard"_s);
+    connect(prevCardShortcut, &QShortcut::activated, this, [this]() {
+        focusToolCard(-1);
+    });
+
+    auto *nextCardShortcut = new QShortcut(QKeySequence(Qt::CTRL | Qt::ALT | Qt::Key_Down), this);
+    nextCardShortcut->setObjectName(u"shortcutNextToolCard"_s);
+    connect(nextCardShortcut, &QShortcut::activated, this, [this]() {
+        focusToolCard(1);
+    });
+
+    auto *thinkingShortcut = new QShortcut(QKeySequence(Qt::CTRL | Qt::ALT | Qt::Key_T), this);
+    thinkingShortcut->setObjectName(u"shortcutToggleThinking"_s);
+    connect(thinkingShortcut, &QShortcut::activated, this, &ChatWidget::toggleThinking);
+
+    auto *planModeShortcut = new QShortcut(QKeySequence(Qt::CTRL | Qt::ALT | Qt::Key_P), this);
+    planModeShortcut->setObjectName(u"shortcutTogglePlanMode"_s);
+    connect(planModeShortcut, &QShortcut::activated, this, &ChatWidget::togglePlanMode);
+
+    // Model cycling mirrors the ArrowUp/ArrowDown pair the model popup uses,
+    // so the same gesture that steps through tool cards steps through models.
+    auto *prevModelShortcut = new QShortcut(QKeySequence(Qt::CTRL | Qt::ALT | Qt::Key_Left), this);
+    prevModelShortcut->setObjectName(u"shortcutPrevModel"_s);
+    connect(prevModelShortcut, &QShortcut::activated, this, [this]() {
+        cycleModel(-1);
+    });
+    auto *nextModelShortcut = new QShortcut(QKeySequence(Qt::CTRL | Qt::ALT | Qt::Key_Right), this);
+    nextModelShortcut->setObjectName(u"shortcutNextModel"_s);
+    connect(nextModelShortcut, &QShortcut::activated, this, [this]() {
+        cycleModel(1);
+    });
     connect(m_configure, &QPushButton::clicked, this, &ChatWidget::showSettingsMenu);
     connect(m_modelSelector, &QPushButton::clicked, this, &ChatWidget::showModelMenu);
     connect(m_permissionBar, &PermissionBar::decided, &m_agent, &AgentLoop::resolvePermission);
@@ -649,7 +801,7 @@ ChatWidget::ChatWidget(QWidget *parent)
     // Tool visibility signals (Zed-style inline tool-call cards)
     connect(&m_agent, &AgentLoop::toolStarted, this, [this](const PermissionRequest &request) {
         freezeStreaming();
-        m_workingLabelBase = workingLabelForTool(request.toolName);
+        m_workingLabelBase = workingLabelForTool(request.toolName, request, m_agent.workspace());
         setWorkingIndicator(true);
         m_turnStatus->setActivity(m_workingLabelBase);
         if (m_workingIndicator && m_isWorking) {
@@ -704,8 +856,10 @@ ChatWidget::ChatWidget(QWidget *parent)
                     }
                 });
             });
+            connect(toolWidget, &ToolCallWidget::openFileRequested, this, [this](const QString &path, int line){ Q_EMIT openFileAtLineRequested(path, line); });
             appendTranscriptWidget(toolWidget);
         }
+        updateExpandAllButton();
         toolWidget->setRunning();
         // What the call is working on, up in the body while it runs. A question
         // is the one tool whose payload is prose rather than arguments, so its
@@ -782,6 +936,9 @@ ChatWidget::ChatWidget(QWidget *parent)
         }
         ++m_completedToolCount;
         m_turnStatus->setCompletedToolCount(m_completedToolCount);
+        // A finished card is one the global control now has something to say
+        // about (it can be collapsed), so the button's label may need to flip.
+        updateExpandAllButton();
 
         // Handle edit tracking for AcceptEdits mode, and for every mode while
         // an ACP agent drives the turn. A tool that did not succeed must not
@@ -838,9 +995,11 @@ ChatWidget::ChatWidget(QWidget *parent)
                     }
                 });
             });
+            connect(widget, &ToolCallWidget::openFileRequested, this, [this](const QString &path, int line){ Q_EMIT openFileAtLineRequested(path, line); });
             m_toolCallWidgets.insert(request.toolCallId, widget);
             m_toolCallOrder.append(widget);
             appendTranscriptWidget(widget);
+            updateExpandAllButton();
             applyTranscriptCollapse();
         }
         widget->showApproval();
@@ -1209,13 +1368,20 @@ void ChatWidget::addUserMessage(const QString &text)
     headerLayout->addWidget(copyBtn);
     cardLayout->addLayout(headerLayout);
 
-    auto *msgLabel = new QLabel(card);
-    msgLabel->setWordWrap(true);
-    msgLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    msgLabel->setAlignment(Qt::AlignLeft | Qt::AlignTop);
+    // The prompt is a markdown document too, not escaped text: a user pasting a
+    // diff, a log line in backticks or a list expects it to read the way it does
+    // on the assistant side of the same conversation. closeMarkdown() balances
+    // fences that are still open, so a half-typed prompt renders instead of
+    // swallowing the rest of the card.
+    auto *msgLabel = new QTextBrowser(card);
+    msgLabel->setObjectName(u"userMessageBody"_s);
+    msgLabel->setOpenExternalLinks(true);
+    msgLabel->setFrameShape(QFrame::NoFrame);
+    msgLabel->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    msgLabel->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     msgLabel->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum);
-    msgLabel->setStyleSheet(QStringLiteral("QLabel { color: #ffffff; font-size: 13px; border: none; background: transparent; }"));
-    msgLabel->setText(escape(text).replace(u"\n"_s, u"<br>"_s));
+    msgLabel->setStyleSheet(QStringLiteral("background: transparent; border: none; padding: 0px;"));
+    msgLabel->setDocument(makeMarkdownDocument(closeMarkdown(text), ChatTheme::userMessageCss()));
     cardLayout->addWidget(msgLabel);
 
     card->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum);
@@ -1919,6 +2085,14 @@ void ChatWidget::applyTranscriptCollapse()
         if (!widget) {
             continue;
         }
+        if (m_toolCardsOverride != ToolCardsOverride::Auto) {
+            // The user asked for all of them, or none of them. This wins over
+            // the budget and over the "an edit opens itself" rule, because a
+            // single stubborn card is exactly what someone pressing "collapse
+            // all" is trying to get rid of.
+            widget->setExpanded(m_toolCardsOverride == ToolCardsOverride::ExpandAll);
+            continue;
+        }
         if (widget->isFileEditTool() || widget->isRunning()) {
             widget->setExpanded(true);
             continue;
@@ -1931,6 +2105,138 @@ void ChatWidget::applyTranscriptCollapse()
         } else {
             widget->setExpanded(false);
         }
+    }
+}
+
+void ChatWidget::setAllToolCardsExpanded(bool expanded)
+{
+    m_toolCardsOverride = expanded ? ToolCardsOverride::ExpandAll : ToolCardsOverride::CollapseAll;
+    applyTranscriptCollapse();
+    updateExpandAllButton();
+}
+
+bool ChatWidget::allToolCardsExpanded() const
+{
+    if (m_toolCardsOverride == ToolCardsOverride::ExpandAll) {
+        return true;
+    }
+    if (m_toolCardsOverride == ToolCardsOverride::CollapseAll) {
+        return false;
+    }
+    // No override in force: the budget answers, and a budget of zero or less
+    // means "everything" in this codebase.
+    return m_settings.maxExpandedToolCards <= 0;
+}
+
+void ChatWidget::toggleAllToolCards()
+{
+    setAllToolCardsExpanded(!allToolCardsExpanded());
+}
+
+void ChatWidget::updateExpandAllButton()
+{
+    if (!m_expandAllBtn) {
+        return;
+    }
+    int finished = 0;
+    for (const QPointer<ToolCallWidget> &card : m_toolCallOrder) {
+        if (!card) {
+            continue;
+        }
+        if (!card->isRunning()) {
+            ++finished;
+        }
+    }
+    // Below two finished cards there is nothing for a global control to do.
+    if (finished < 2) {
+        m_expandAllBtn->hide();
+        return;
+    }
+    m_expandAllBtn->setVisible(true);
+    const bool expanded = allToolCardsExpanded();
+    m_expandAllBtn->setText(expanded ? i18n("Collapse all") : i18n("Expand all"));
+    m_expandAllBtn->setToolTip(expanded ? i18n("Collapse every tool card in this transcript")
+                                        : i18n("Expand every tool card in this transcript"));
+}
+
+int ChatWidget::focusedToolCardIndex() const
+{
+    return m_focusedToolCardIndex;
+}
+
+void ChatWidget::togglePlanMode()
+{
+    m_settings.planMode = !m_settings.planMode;
+    m_agent.setSettings(m_settings);
+    Q_EMIT settingsChanged(m_settings);
+    refreshModeButton();
+    // Plan mode is invisible until the next turn starts, so the strip has to
+    // say what just happened or the shortcut looks like a no-op.
+    if (m_turnStatus) {
+        m_turnStatus->flash(m_settings.planMode ? i18n("Plan mode on: read-only turn") : i18n("Plan mode off"),
+                            false);
+    }
+}
+
+bool ChatWidget::cycleModel(int delta)
+{
+    if (delta == 0) {
+        return false;
+    }
+    const QStringList models = pickerModelsFor(m_settings, m_settings.provider, m_modelCatalog.value(m_settings.provider));
+    if (models.size() < 2) {
+        if (m_turnStatus) {
+            m_turnStatus->flash(i18n("No other model to switch to"), false);
+        }
+        return false;
+    }
+    // The configured model is the only safe "where am I" mark: the combo box
+    // shows it, but its text is a display label that may differ from the id.
+    const QString current = modelFor(m_settings);
+    int index = models.indexOf(current);
+    if (index < 0) {
+        // Unknown model: treat it as just past the last entry so a forward
+        // step lands on the first model rather than skipping one.
+        index = delta > 0 ? -1 : 0;
+    }
+    const int next = (index + delta + models.size()) % models.size();
+    selectModel(m_settings.provider, models.at(next));
+    if (m_turnStatus) {
+        m_turnStatus->flash(i18n("Model: %1", models.at(next)), false);
+    }
+    return true;
+}
+
+void ChatWidget::focusToolCard(int delta)
+{
+    for (int i = m_toolCallOrder.size() - 1; i >= 0; --i) {
+        if (m_toolCallOrder.at(i).isNull()) {
+            m_toolCallOrder.removeAt(i);
+        }
+    }
+    const int count = m_toolCallOrder.size();
+    if (count == 0 || delta == 0) {
+        return;
+    }
+    int index = m_focusedToolCardIndex;
+    if (index < 0 || index >= count) {
+        // Nothing selected yet, or the selection pointed past the end after a
+        // rebuild: the first jump lands on an end rather than doing nothing.
+        index = delta > 0 ? -1 : count;
+    }
+    index += delta;
+    index = qBound(0, index, count - 1);
+    m_focusedToolCardIndex = index;
+    ToolCallWidget *card = m_toolCallOrder.at(index);
+    if (!card) {
+        return;
+    }
+    // The card being read through is open: a collapsed card among expanded
+    // ones shows nothing to land on.
+    card->setExpanded(true);
+    card->flashAttention();
+    if (m_scrollArea) {
+        m_scrollArea->ensureWidgetVisible(card, 24, 40);
     }
 }
 
@@ -3652,12 +3958,7 @@ void ChatWidget::showSettingsMenu()
     auto *planAction = menu.addAction(i18n("Plan Mode (Read-only)"));
     planAction->setCheckable(true);
     planAction->setChecked(m_settings.planMode);
-    connect(planAction, &QAction::triggered, this, [this](bool checked) {
-        m_settings.planMode = checked;
-        m_agent.setSettings(m_settings);
-        Q_EMIT settingsChanged(m_settings);
-        refreshModeButton();
-    });
+    connect(planAction, &QAction::triggered, this, &ChatWidget::togglePlanMode);
 
     // Agent Mode
     auto *modeMenu = menu.addMenu(i18n("Mode"));
@@ -3960,12 +4261,7 @@ void ChatWidget::showModeMenu()
     QAction *planAction = menu.addAction(i18n("Plan Mode (Read-only)"));
     planAction->setCheckable(true);
     planAction->setChecked(m_settings.planMode);
-    connect(planAction, &QAction::triggered, this, [this](bool checked) {
-        m_settings.planMode = checked;
-        m_agent.setSettings(m_settings);
-        Q_EMIT settingsChanged(m_settings);
-        refreshModeButton();
-    });
+    connect(planAction, &QAction::triggered, this, &ChatWidget::togglePlanMode);
 
     const QStringList customModes = m_agent.modeRegistry()->customModeIds();
     if (!customModes.isEmpty()) {
@@ -4367,6 +4663,10 @@ void ChatWidget::submit()
 
     // Start the live counters for this turn.
     m_completedToolCount = 0;
+    // A new turn means new cards; the previous turn's global override and
+    // navigation position do not carry over.
+    m_focusedToolCardIndex = -1;
+    m_toolCardsOverride = ToolCardsOverride::Auto;
     m_turnStatus->reset();
     m_turnStatus->setBusy(true);
     forceScrollToBottom();
@@ -4512,6 +4812,10 @@ bool ChatWidget::isInternalUserMessage(const QString &text)
 
 void ChatWidget::clearTranscriptContents()
 {
+    // Navigation is per transcript, and the global override with it: a fresh
+    // transcript starts on automatic behaviour.
+    m_focusedToolCardIndex = -1;
+    m_toolCardsOverride = ToolCardsOverride::Auto;
     if (m_streamHeightTimer) {
         m_streamHeightTimer->stop();
     }
@@ -4912,6 +5216,7 @@ void ChatWidget::rebuildTranscript()
         thisWeak->reflowTranscriptMedia();
         thisWeak->forceScrollToBottom();
     });
+    updateExpandAllButton();
 }
 
 void ChatWidget::restoreCurrentTurn(const SessionStore::SessionData &sessionData)

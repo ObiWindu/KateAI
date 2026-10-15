@@ -103,6 +103,11 @@ QString intentApprovalRow();  // docked "needs approval" strip
 // Rich-text bodies. These go into QTextDocument::setDefaultStyleSheet(), so
 // they are CSS rather than Qt widget selectors.
 QString messageCss();     // assistant markdown
+// The same markup for the user's own turns. The user card is a white-on-dark
+// surface rather than the muted prose of an assistant answer, so it repeats
+// the body rules with white instead of textPrimary(): a document stylesheet
+// cannot inherit the colour a widget stylesheet paints with.
+QString userMessageCss(); // user markdown
 QString thinkingCss();    // the collapsed reasoning block
 QString toggleLink();     // the "Reasoning" disclosure button
 QString roleHeader();     // the YOU / KATE AI captions above a message

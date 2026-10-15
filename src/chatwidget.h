@@ -68,6 +68,27 @@ public:
     void restoreCurrentTurn(const SessionStore::SessionData &sessionData);
     void updateHistoryButton();
 
+    // --- Global transcript controls ------------------------------------------
+    // The per-card budget (`maxExpandedToolCards`) decides what opens on its
+    // own; these are the user overriding it once for a whole transcript, the
+    // way a long log of tool cards needs. The override is dropped when a new
+    // turn starts, so the automatic behaviour comes back.
+    void setAllToolCardsExpanded(bool expanded);
+    bool allToolCardsExpanded() const;
+    void toggleAllToolCards();
+    // Walks the tool cards: +1 down, -1 up. Expands the card it lands on and
+    // scrolls it into view, so a transcript can be read card by card without
+    // hunting for the next one.
+    void focusToolCard(int delta);
+    int focusedToolCardIndex() const;
+
+    // Plan mode is a read-only turn restriction toggled from two menus and now
+    // a shortcut; the toggle lives here so all three stay in step.
+    void togglePlanMode();
+    // Steps the model list of the current provider, wrapping at both ends.
+    // Returns false when the provider offers fewer than two models.
+    bool cycleModel(int delta);
+
     // Conversation history
     void showConversationHistory();
     void switchToConversation(const QString &conversationId);
@@ -219,6 +240,7 @@ private:
     static QString escape(const QString &text);
     static QString markdownToHtml(const QString &text);
     static QString closedMarkdown(const QString &text);
+    void updateExpandAllButton();
 
     Settings m_settings;
     AgentLoop m_agent;
@@ -367,6 +389,17 @@ private:
     QMenu *m_historyMenu = nullptr;
     QString m_currentConversationId;
     bool m_loadingConversation = false;
+
+    // Global override of the tool-card budget. Auto means the budget decides;
+    // the other two are a deliberate "all of them" / "none of them".
+    enum class ToolCardsOverride {
+        Auto,
+        ExpandAll,
+        CollapseAll,
+    };
+    ToolCardsOverride m_toolCardsOverride = ToolCardsOverride::Auto;
+    int m_focusedToolCardIndex = -1;
+    QPushButton *m_expandAllBtn = nullptr;
 };
 
 } // namespace KateAi

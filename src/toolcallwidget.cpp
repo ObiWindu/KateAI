@@ -10,8 +10,11 @@
 
 #include <KLocalizedString>
 
+#include <QApplication>
+#include <QClipboard>
 #include <QFileInfo>
 #include <QFontMetrics>
+#include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QMouseEvent>
@@ -200,6 +203,40 @@ ToolCallWidget::ToolCallWidget(const QString &toolCallId, QWidget *parent)
         QStringLiteral("QLabel { color: %1; font-size: 11px; }").arg(ChatTheme::textMuted()));
     headerLayout->addWidget(m_duration);
 
+    // Copies what the card holds: the result once the tool finished, the live
+    // stream while it runs. The whole reply has its own copy button; a card is
+    // where a specific diff or command output lives, and that is the part a
+    // user actually wants on its own.
+    m_copyBtn = new QPushButton(u"⧉"_s, this);
+    m_copyBtn->setObjectName(u"toolCopyButton"_s);
+    m_copyBtn->setFixedSize(20, 20);
+    m_copyBtn->setFlat(true);
+    m_copyBtn->setCursor(Qt::PointingHandCursor);
+    m_copyBtn->setToolTip(i18n("Copy output"));
+    m_copyBtn->setStyleSheet(
+        QStringLiteral("QPushButton { color: %1; background: transparent; border: none; font-size: 11px; }"
+                       "QPushButton:hover { color: #ffffff; }")
+            .arg(ChatTheme::textMuted()));
+    m_copyBtn->hide();
+    connect(m_copyBtn, &QPushButton::clicked, this, [this]() {
+        const QString text = copyableText();
+        if (text.isEmpty()) {
+            return;
+        }
+        // The button itself is the only feedback available: a card has no room
+        // for a toast, and the clipboard is silent by nature.
+        if (QClipboard *clipboard = QGuiApplication::clipboard()) {
+            clipboard->setText(text);
+        }
+        m_copyBtn->setText(u"✓"_s);
+        QTimer::singleShot(900, this, [this]() {
+            if (m_copyBtn) {
+                m_copyBtn->setText(u"⧉"_s);
+            }
+        });
+    });
+    headerLayout->addWidget(m_copyBtn);
+
     m_expandBtn = new QPushButton(u"▸"_s, this);
     m_expandBtn->setFixedSize(20, 20);
     m_expandBtn->setFlat(true);
@@ -316,7 +353,8 @@ ToolCallWidget::ToolCallWidget(const QString &toolCallId, QWidget *parent)
     // private members.
     m_describeDiff->setObjectName(u"toolDiff"_s);
     m_describeDiff->setReadOnly(true);
-    m_describeDiff->setOpenExternalLinks(false);
+    m_describeDiff->setOpenExternalLinks(true);
+    connect(m_describeDiff, &QTextBrowser::anchorClicked, this, [this](const QUrl &url){ if(url.isLocalFile()) Q_EMIT openFileRequested(url.toLocalFile(), 0); else if(url.scheme()==u"file"_s) Q_EMIT openFileRequested(url.path(), 0); });
     m_describeDiff->setMinimumWidth(0);
     m_describeDiff->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     m_describeDiff->setLineWrapMode(QTextEdit::WidgetWidth);
@@ -349,7 +387,8 @@ ToolCallWidget::ToolCallWidget(const QString &toolCallId, QWidget *parent)
     // into private members.
     m_details->setObjectName(u"toolDetails"_s);
     m_details->setReadOnly(true);
-    m_details->setOpenExternalLinks(false);
+    m_details->setOpenExternalLinks(true);
+    connect(m_details, &QTextBrowser::anchorClicked, this, [this](const QUrl &url){ if(url.isLocalFile()) Q_EMIT openFileRequested(url.toLocalFile(), 0); else if(url.scheme()==u"file"_s) Q_EMIT openFileRequested(url.path(), 0); });
     m_details->setMinimumWidth(0);
     m_details->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     m_details->setLineWrapMode(QTextEdit::WidgetWidth);
@@ -578,6 +617,39 @@ void ToolCallWidget::setRunningInput(const QString &input)
     scheduleReflow();
 }
 
+QString ToolCallWidget::copyableText() const
+{
+    // The result is the truth once there is one; the live stream is the best
+    // there is while the tool runs.
+    return m_resultOutput.isEmpty() ? m_partialOutput : m_resultOutput;
+}
+
+void ToolCallWidget::updateCopyButton()
+{
+    if (!m_copyBtn) {
+        return;
+    }
+    m_copyBtn->setVisible(!copyableText().trimmed().isEmpty());
+}
+
+void ToolCallWidget::flashAttention()
+{
+    if (!m_header) {
+        return;
+    }
+    // Keyboard navigation lands on a card that may be far off screen, so the
+    // jump needs a marker that survives the scroll. An id-qualified rule beats
+    // the card's own, so the ring is visible until the timer drops it.
+    const QString ring = QStringLiteral("ToolCallWidget#%1 { border: 1px solid %2; border-radius: 6px; }")
+                             .arg(objectName(), ChatTheme::accent());
+    setStyleSheet(styleSheet() + u'\n' + ring);
+    QTimer::singleShot(800, this, [this]() {
+        if (this) {
+            updateStyle();
+        }
+    });
+}
+
 QString ToolCallWidget::plainToHtml(const QString &text) const
 {
     QString out = u"<body>"_s;
@@ -660,6 +732,7 @@ void ToolCallWidget::setPartialOutput(const QString &partialOutput)
         return;
     }
     m_partialOutput = partialOutput;
+    updateCopyButton();
     // The stream has arrived: it is the body from here on, not the arguments.
     m_showingInput = false;
     m_runningInput.clear();
@@ -707,6 +780,10 @@ void ToolCallWidget::setFinished(const ToolResult &result)
     m_partialOutput.clear();
     m_runningInput.clear();
     m_showingInput = false;
+    // Kept whole: the card clamps what it displays to 200 lines, but a copy of
+    // a truncated command output is a corrupted copy.
+    m_resultOutput = result.output;
+    updateCopyButton();
     if (m_durationTimer) {
         m_durationTimer->stop();
     }
@@ -847,24 +924,24 @@ QString ToolCallWidget::iconForTool(const QString &toolName) const
     // and baselines across themes, which is what made the column ragged.
     
     // File operations - both KateAI and ACP tool names
-    if (toolName == u"read_file"_s || toolName == u"fs/read_text_file"_s) return u"\u{1F4C4}"_s;
-    if (toolName == u"write_file"_s || toolName == u"fs/write_text_file"_s) return u"\u{1F4DD}"_s;
-    if (toolName == u"edit_file"_s || toolName == u"multi_edit_file"_s || toolName == u"multi_replace_file_content"_s) return u"\u{270F}"_s;
-    if (toolName == u"list_dir"_s) return u"\u{1F4C1}"_s;
-    if (toolName == u"grep"_s) return u"\u{1F50D}"_s;
-    if (toolName == u"glob"_s) return u"\u{1F50E}"_s;
-    if (toolName == u"bash"_s) return u"\u{26A1}"_s;
-        if (toolName == u"web_search"_s) return u"\u{1F310}"_s;
-        if (toolName == u"web_fetch"_s) return u"\u{1F4D6}"_s;
-    if (toolName == u"query_project_graph"_s) return u"\u{1F578}"_s;
-    if (toolName == u"write_plan_file"_s) return u"\u{1F4CB}"_s;
-    if (toolName == u"suggest"_s) return u"\u{1F4A1}"_s;
-    if (toolName == u"question"_s) return u"\u{2753}"_s;
-    if (toolName == u"goal_report"_s) return u"\u{1F3AF}"_s;
-    if (toolName == u"new_task"_s) return u"\u{1F9E9}"_s;
-    if (toolName.startsWith(u"mcp__"_s)) return u"\u{1F50C}"_s;
-    if (toolName.startsWith(u"terminal/"_s) || toolName == u"terminal"_s) return u"\u{1F5A3}"_s;
-    return u"\u{2699}"_s;
+    if (toolName == u"read_file"_s || toolName == u"fs/read_text_file"_s) return u"📄"_s;
+    if (toolName == u"write_file"_s || toolName == u"fs/write_text_file"_s) return u"📝"_s;
+    if (toolName == u"edit_file"_s || toolName == u"multi_edit_file"_s || toolName == u"multi_replace_file_content"_s) return u"✏"_s;
+    if (toolName == u"list_dir"_s) return u"📁"_s;
+    if (toolName == u"grep"_s) return u"🔍"_s;
+    if (toolName == u"glob"_s) return u"🔎"_s;
+    if (toolName == u"bash"_s) return u"⚡"_s;
+        if (toolName == u"web_search"_s) return u"🌐"_s;
+        if (toolName == u"web_fetch"_s) return u"📖"_s;
+    if (toolName == u"query_project_graph"_s) return u"🕸"_s;
+    if (toolName == u"write_plan_file"_s) return u"📋"_s;
+    if (toolName == u"suggest"_s) return u"💡"_s;
+    if (toolName == u"question"_s) return u"❓"_s;
+    if (toolName == u"goal_report"_s) return u"🎯"_s;
+    if (toolName == u"new_task"_s) return u"🧩"_s;
+    if (toolName.startsWith(u"mcp__"_s)) return u"🔌"_s;
+    if (toolName.startsWith(u"terminal/"_s) || toolName == u"terminal"_s) return u"🖳"_s;
+    return u"⚙"_s;
 }
 
 QString ToolCallWidget::languageForTool(const QString &toolName) const

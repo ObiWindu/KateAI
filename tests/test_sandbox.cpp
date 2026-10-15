@@ -80,6 +80,85 @@ private Q_SLOTS:
         QVERIFY(Sandbox::globMatch(u"**/.ssh/**"_s, u"/home/me/.ssh/id_rsa"_s));
     }
 
+    void symlinkEscapeIsBlocked()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        QTemporaryDir outside;
+        QVERIFY(outside.isValid());
+
+        // A directory link that points out of the workspace. The classic
+        // escape: the path as written stays inside, the target does not.
+        QVERIFY(QDir().mkpath(dir.path() + u"/inside"_s));
+        if (!QFile::link(outside.path(), dir.path() + u"/inside/escape"_s)) {
+            QSKIP("Symlinks unavailable on this filesystem");
+        }
+        QFile outsideFile(outside.filePath(u"secret.txt"_s));
+        QVERIFY(outsideFile.open(QIODevice::WriteOnly));
+        outsideFile.write("secret\n");
+        outsideFile.close();
+
+        Sandbox box(dir.path(), SandboxProfile::Workspace);
+        QString error;
+        // Writing through the link is refused, and says where it resolved to.
+        QVERIFY(!box.allowsWrite(u"inside/escape/secret.txt"_s, &error));
+        QVERIFY(error.contains(u"outside the workspace"_s));
+        QVERIFY(box.resolve(u"inside/escape/secret.txt"_s, &error, true).isEmpty());
+        error.clear();
+        // So is a brand new file that would land outside via the link.
+        QVERIFY(box.resolve(u"inside/escape/new.txt"_s, &error, true).isEmpty());
+        QVERIFY(error.contains(u"outside the workspace"_s));
+        // The real file inside the workspace is untouched by all of this.
+        QVERIFY(box.allowsWrite(u"inside/keep.txt"_s, &error));
+    }
+
+    void symlinkEscapeBlockedForReadInStrict()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        QTemporaryDir outside;
+        QVERIFY(outside.isValid());
+        QFile outsideFile(outside.filePath(u"secret.txt"_s));
+        QVERIFY(outsideFile.open(QIODevice::WriteOnly));
+        outsideFile.write("secret\n");
+        outsideFile.close();
+
+        QVERIFY(QDir().mkpath(dir.path() + u"/inside"_s));
+        if (!QFile::link(outside.path(), dir.path() + u"/inside/escape"_s)) {
+            QSKIP("Symlinks unavailable on this filesystem");
+        }
+
+        Sandbox box(dir.path(), SandboxProfile::Strict);
+        QString error;
+        QVERIFY(!box.allowsRead(u"inside/escape/secret.txt"_s, &error));
+        QVERIFY(error.contains(u"outside the workspace"_s));
+        QVERIFY(box.resolve(u"inside/escape/secret.txt"_s, &error).isEmpty());
+    }
+
+    void symlinkInsideWorkspaceStillWorks()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        QVERIFY(QDir().mkpath(dir.path() + u"/real"_s));
+        if (!QFile::link(dir.path() + u"/real"_s, dir.path() + u"/link"_s)) {
+            QSKIP("Symlinks unavailable on this filesystem");
+        }
+        QFile(dir.path() + u"/real/existing.txt"_s).open(QIODevice::WriteOnly);
+
+        Sandbox box(dir.path(), SandboxProfile::Workspace);
+        QString error;
+        // A link that stays inside the workspace must resolve and keep working.
+        const QString resolved = box.resolve(u"link/existing.txt"_s, &error, true);
+        QVERIFY2(!resolved.isEmpty(), qPrintable(error));
+        QVERIFY(resolved.startsWith(QDir(dir.path()).canonicalPath()));
+        QVERIFY(resolved.endsWith(u"/existing.txt"_s));
+        QVERIFY(box.allowsWrite(u"link/new.txt"_s, &error));
+        // A link that points at the workspace root itself resolves inside too.
+        if (QFile::link(dir.path(), dir.path() + u"/rootlink"_s)) {
+            QVERIFY(box.allowsRead(u"rootlink/existing.txt"_s, &error));
+        }
+    }
+
     void redirectionIsNotReadOnly()
     {
         Sandbox box(QDir::tempPath(), SandboxProfile::Workspace);

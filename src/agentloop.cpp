@@ -196,7 +196,10 @@ void AgentLoop::setSettings(const Settings &settings)
         || m_settings.checkpointRetention != settings.checkpointRetention;
 
     m_settings = settings;
-    m_client.setSettings(settings);
+    // The mode may override the sampling knobs; everything else reaches the
+    // client unchanged. Kept as a copy so the override never writes back into
+    // the settings the config page shows.
+    m_client.setSettings(ModeRegistry::settingsForMode(m_settings, activeMode()));
     syncAcpClient();
     // Keep the shared web client in step with the settings.
     m_web.setProvider(WebSearch::providerFromId(settings.webSearchProvider));
@@ -331,6 +334,8 @@ void AgentLoop::setMode(const QString &modeId)
         return;
     }
     m_settings.agentMode = modeId;
+    // A mode can change the sampling knobs, so the client's copy has to follow.
+    m_client.setSettings(ModeRegistry::settingsForMode(m_settings, activeMode()));
     syncToolAccess();
     Q_EMIT modesChanged();
 }

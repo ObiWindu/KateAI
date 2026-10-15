@@ -62,6 +62,22 @@ struct ModeDefinition {
     bool builtIn = false;
     // True when the mode must never mutate the workspace (Ask, Architect).
     bool readOnly = false;
+    // Per-mode generation overrides. A negative value means "not set": the
+    // global Settings value applies. A mode may run hotter than the global
+    // default when it is brainstorming (architect) and colder when it is
+    // re-reading code and repairing it (debug); one global number cannot be
+    // both, so the mode wins when it names a value.
+    double temperature = -1.0;
+    double topP = -1.0;
+
+    bool hasTemperature() const
+    {
+        return temperature >= 0.0;
+    }
+    bool hasTopP() const
+    {
+        return topP >= 0.0;
+    }
 };
 
 // Built-in tool names belonging to a group. The "mcp" group is dynamic and
@@ -114,13 +130,18 @@ public:
     // Tool access built from group ids alone.
     static ToolAccess toolAccessForGroups(const QStringList &groups);
 
-    // Parses a mode definition from a markdown file with a frontmatter block.
+        // Parses a mode definition from a markdown file with a frontmatter block.
     // The slug is derived from the file name when frontmatter has no "id".
     static ModeDefinition parseModeFile(const QString &path, bool *ok = nullptr);
     // Parses the frontmatter + body of a mode document.
     static ModeDefinition parseModeDocument(const QString &document, const QString &fallbackId, bool *ok = nullptr);
     // A commented starting point users can copy into .kateai/modes/.
     static QString modeFileTemplate(const QString &id);
+
+    // The settings a turn with this mode runs with: everything from `settings`
+    // except the generation knobs the mode names. Modes that name nothing
+    // return `settings` unchanged, which is what every built-in mode does.
+    static Settings settingsForMode(const Settings &settings, const ModeDefinition &mode);
 
     // Minimal YAML subset: "key: value", "key: [a, b]" and "key: |" block
     // scalars. Shared with the agent roster, which uses the same file shape.
