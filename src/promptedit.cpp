@@ -28,6 +28,13 @@ constexpr qreal maxLines = 18.0;
 // empty box grows by half rather than only its text.
 constexpr int padding = 24;
 
+// The empty composer took more of the panel than the transcript below it, so
+// the box is 10% shorter than the numbers above work out to: both the resting
+// height and the ceiling a pasted transcript grows to, so the two still agree.
+// One constant rather than shaved-off line counts, because the padding is part
+// of the height and only the text was not.
+constexpr qreal heightScale = 0.9;
+
 } // namespace
 
 namespace KateAi
@@ -96,21 +103,23 @@ void PromptEdit::addHistory(const QString &text)
 
 int PromptEdit::minHeight() const
 {
-    return qRound(fontMetrics().lineSpacing() * minLines + padding);
+    return qRound((fontMetrics().lineSpacing() * minLines + padding) * heightScale);
 }
 
 int PromptEdit::maxHeight() const
 {
-    return qRound(fontMetrics().lineSpacing() * maxLines + padding);
+    return qRound((fontMetrics().lineSpacing() * maxLines + padding) * heightScale);
 }
 
 void PromptEdit::autoGrow()
 {
-    // The composer is half again taller again: four and a half lines of
-    // head-room when empty (a pasted stack trace stays readable) and eighteen
-    // lines of growth before scrolling, half again the three and twelve it grew
-    // from. Both bounds move together, so raising the empty height does not
-    // quietly shrink how much may be typed before the scrollbar appears.
+    // The composer gives four and a half lines of head-room when empty (a
+    // pasted stack trace stays readable) and eighteen lines of growth before
+    // scrolling, a tenth less than it used to be in both bounds. Both bounds
+    // move together, so raising the empty height does not quietly shrink how
+    // much may be typed before the scrollbar appears. The text itself still
+    // gets its full height plus padding: only the empty and the maximal box
+    // shrank, so nothing the user typed is ever cropped.
     const int docH = static_cast<int>(document()->size().height());
     const int targetH = std::clamp(docH + padding, minHeight(), maxHeight());
     setFixedHeight(targetH);
