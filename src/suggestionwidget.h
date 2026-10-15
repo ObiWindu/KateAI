@@ -19,8 +19,9 @@ namespace KateAi
 // A transcript card carrying one suggestion from the agent, with Accept and
 // Dismiss buttons. Suggestions are advice rather than changes: the agent posts
 // one instead of editing something the user never asked it to touch, and the
-// user decides whether to act on it. The card therefore has no live state to
-// drive -- unlike SubtaskWidget it is created already posted.
+// user decides whether to act on it. The card is posted while its tool runs --
+// the advice itself is already in hand by then -- so it carries a live state
+// until the call reports back, unlike a record replayed from history.
 class SuggestionWidget : public QWidget
 {
     Q_OBJECT
@@ -37,6 +38,10 @@ public:
     // Fills the card. An empty path means the suggestion is not anchored to a
     // file, so Accept only records the decision.
     void setSuggestion(const QString &text, const QString &path, int line);
+    // Marks the card as in flight: the tool carrying the suggestion has not
+    // reported back yet, so the advice is on screen but still live. Either
+    // setSuggestion or setError settles it again.
+    void setRunning();
     // Called when the suggest tool failed, so the card can report why instead
     // of showing a suggestion that never arrived.
     void setError(const QString &message);
@@ -59,6 +64,9 @@ private:
     int m_line = 0;
     bool m_failed = false;
     bool m_decided = false;
+    // True while the tool that carries the suggestion is still running: the
+    // advice is already on screen, but it has not been confirmed.
+    bool m_running = false;
 
     QLabel *m_icon = nullptr;
     QLabel *m_title = nullptr;

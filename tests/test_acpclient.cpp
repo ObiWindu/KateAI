@@ -189,6 +189,61 @@ private Q_SLOTS:
         client.stop();
     }
 
+    void toolStreamsPartialOutputBeforeItFinishes()
+    {
+        // An ACP agent reports a running tool through repeated in-progress
+        // tool_call_update notifications. Dropping those meant the card stayed
+        // blank for the whole command and only filled in when it ended, which is
+        // exactly what the live stream is meant to avoid.
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+
+        DiskDocumentBridge bridge;
+        AcpClient client;
+        client.setSettings(mockSettings(u"toolstream"_s));
+        client.setWorkspace(workspace.path());
+        client.setDocumentBridge(&bridge);
+
+        QStringList streamed;
+        int toolsFinished = 0;
+        QString toolOutput;
+        QString error;
+        QString stopReason;
+        connect(&client, &AcpClient::toolProgress, this, [&](const QString &toolCallId, const QString &partial) {
+            QCOMPARE(toolCallId, u"call_stream"_s);
+            streamed << partial;
+        });
+        connect(&client, &AcpClient::toolFinished, this, [&](const ToolResult &result) {
+            ++toolsFinished;
+            toolOutput = result.output;
+        });
+        connect(&client, &AcpClient::promptFinished, this, [&](const QString &reason, const QString &, const QJsonArray &) {
+            stopReason = reason;
+        });
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+
+        client.prompt(u"build"_s);
+        QVERIFY2(waitFor([&] {
+            return !stopReason.isEmpty() || !error.isEmpty();
+        }), qPrintable(error.isEmpty() ? u"timed out"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(stopReason, u"end_turn"_s);
+
+        // Both in-progress updates arrived, and each one carried more than the
+        // last, so a card can grow rather than flicker.
+        QCOMPARE(streamed.size(), 2);
+        QVERIFY2(streamed.at(0).contains(u"scanning dependencies"_s), qPrintable(streamed.value(0)));
+        QVERIFY2(streamed.at(1).contains(u"scanning dependencies"_s), qPrintable(streamed.value(1)));
+        QVERIFY2(streamed.at(1).contains(u"building target"_s), qPrintable(streamed.value(1)));
+
+        // The stream is not the result: the finished call still reports once.
+        QCOMPARE(toolsFinished, 1);
+        QVERIFY2(toolOutput.contains(u"build finished"_s), qPrintable(toolOutput));
+        client.stop();
+    }
+
     void permissionRoundTripSelectsAllowOnce()
     {
         QTemporaryDir workspace;

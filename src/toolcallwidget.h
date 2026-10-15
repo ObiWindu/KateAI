@@ -16,10 +16,26 @@ class QPushButton;
 class QShowEvent;
 class QTextBrowser;
 class QTimer;
-class QTimer;
 
 namespace KateAi
 {
+
+/**
+ * Which surface a tool call expands into.
+ *
+ * A card is not one shape for every tool: an edit shows what changed, a read
+ * shows file contents, a command shows its output. The card picks one of these
+ * when the tool name is known, so the expanded body matches the kind of thing
+ * the call actually produced instead of dumping everything through the same
+ * flat text view.
+ */
+enum class ToolDetailView {
+    Plain,   ///< Anything without a dedicated surface.
+    Diff,    ///< File edit / write: added and removed lines, colour-coded.
+    Code,    ///< File reads and rule loads: the file itself.
+    Terminal, ///< Commands: output on a terminal-coloured surface.
+    Search,  ///< grep / glob: matches.
+};
 
 /**
  * A collapsible card that renders a single tool call inline in the chat transcript.
@@ -45,6 +61,10 @@ public:
     // long command shows its progress instead of one lump at the end. Ignored
     // once the tool has finished: then setFinished's text is the truth.
     void setPartialOutput(const QString &partialOutput);
+    // The call's own arguments, shown in the body while the tool runs so a card
+    // in flight says what it is working on instead of only naming the tool.
+    // Anything that arrives later -- a live stream or the result -- replaces it.
+    void setRunningInput(const QString &input);
 
     // --- Inline approval -----------------------------------------------------
     // The card that triggered the permission request shows the decision here,
@@ -78,10 +98,10 @@ public:
     /**
      * Attach the pre-formatted unified diff (write_file / edit_file) so the
      * proposed change is visible in the chat transcript before the user
-     * approves it. Empty when the tool is not a mutation.
+     * approves it. Empty when the tool is not a mutation. The diff is rendered
+     * on its own surface with added lines green and removed lines red.
      */
     void setDescribeDiff(const QString &diff);
-    void setPreviewText(const QString &text);
     void setFilePath(const QString &path);
 
     QString toolCallId() const { return m_toolCallId; }
@@ -114,10 +134,21 @@ private:
     void syncPreviewVisibility();
     void updateDuration();
     void scheduleReflow();
-    void reflowPreview();
     void reflowDetails();
     void applyDetailsHeight();
-    int previewFitHeight() const;
+    void applyDetailView();
+    bool hasDetailsBody() const;
+    // Whether a diff is attached to the card at all, independently of whether
+    // the diff surface has been shown yet: a card is filled before it is ever
+    // displayed, so its visibility says nothing about the state of its body.
+    bool hasDiffBody() const;
+    static ToolDetailView detailViewForTool(const QString &toolName);
+    QString detailViewCaption() const;
+    // What the body holds right now, as opposed to the shape the tool's results
+    // take: the arguments while it runs, its output once it has reported.
+    QString bodyCaption() const;
+    int captionHeight() const;
+    int browserFitHeight(QTextBrowser *browser, int padding) const;
     int detailsFitHeight() const;
     QString diffToHtml(const QString &diff) const;
     QString plainToHtml(const QString &text) const;
@@ -130,7 +161,6 @@ private:
     QString partialToHtml(const QString &text) const;
     bool isDiffTool(const QString &toolName) const;
     QString languageForTool(const QString &toolName) const;
-    void showPreviewHtml(const QString &html);
 
     QString m_toolCallId;
     QString m_toolName;
@@ -146,6 +176,7 @@ private:
     bool m_durationEnabled = false;
     qint64 m_diffAdded = 0;
     qint64 m_diffRemoved = 0;
+    ToolDetailView m_detailView = ToolDetailView::Plain;
     QString m_filePath;
 
     QElapsedTimer m_elapsed;
@@ -153,6 +184,11 @@ private:
     // Output captured from the running tool so far. Cleared by setFinished,
     // which replaces it with the final result.
     QString m_partialOutput;
+    // The arguments shown while the tool runs, and the body they are rendered
+    // on: bodyCaption() names what the body currently holds, so it reads
+    // "Input" while the arguments are up and "Output" once real output arrives.
+    QString m_runningInput;
+    bool m_showingInput = false;
 
     QWidget *m_header = nullptr;
     QLabel *m_icon = nullptr;
@@ -164,8 +200,14 @@ private:
     QWidget *m_approvalRow = nullptr;
     QLabel *m_approvalSubject = nullptr;
     QWidget *m_detailsContainer = nullptr;
-    QTextBrowser *m_details = nullptr;
+    // Names the surface the card expanded into, so a diff, file contents and
+    // command output are told apart before anything is read.
+    QLabel *m_viewCaption = nullptr;
+    // The diff of a file edit or write, on a surface of its own: the change is
+    // the whole point of the card, and rendering it through the plain result
+    // view left the added and removed lines as indistinguishable text.
     QTextBrowser *m_describeDiff = nullptr;
+    QTextBrowser *m_details = nullptr;
     QPropertyAnimation *m_animation = nullptr;
     QTimer *m_reflowTimer = nullptr;
 };

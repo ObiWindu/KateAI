@@ -50,9 +50,11 @@ QString toolHeaderBg();
 // boxed.
 QString intentDock();
 
-// Agent-task cards (sub-agents). A full border plus a raised background, one
-// step above a tool card: a delegated task is a different *kind* of thing than
-// a tool the orchestrator ran itself.
+// Agent-task cards (sub-agents). A full border plus a raised yellow
+// background, one step above a tool card: a delegated task is a different
+// *kind* of thing than a tool the orchestrator ran itself, and the warm surface
+// is what separates someone else's work from the agent's own tool rows at a
+// glance. The border colour still carries the outcome.
 QString agentTaskCard();
 
 // --- Lines. ------------------------------------------------------------------
@@ -87,7 +89,9 @@ QString infoBar();
 QString jumpToLatest();
 QString activityPill();   // generic live status pill
 QString thinkingPill();   // blue brain pill for hidden reasoning
+QString thinkingPillDim(); // the pulse phase of the thinking pill
 QString workingPill();    // amber live-tool pill
+QString workingPillDim(); // the pulse phase of the working pill
 QString userCard();
 QString assistantCard();
 QString sectionLabel();

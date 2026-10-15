@@ -122,6 +122,7 @@ void SuggestionWidget::setSuggestion(const QString &text, const QString &path, i
     m_path = path;
     m_line = line;
     m_failed = false;
+    m_running = false;
     m_body->setDocument(makeMarkdownDocument(closeMarkdown(text)));
     m_body->setVisible(true);
     applyStyle();
@@ -129,9 +130,20 @@ void SuggestionWidget::setSuggestion(const QString &text, const QString &path, i
     reflowNow();
 }
 
+void SuggestionWidget::setRunning()
+{
+    if (m_failed || m_decided) {
+        return;
+    }
+    m_running = true;
+    applyStyle();
+    updateHeader();
+}
+
 void SuggestionWidget::setError(const QString &message)
 {
     m_failed = true;
+    m_running = false;
     m_body->setDocument(makeMarkdownDocument(closeMarkdown(message)));
     m_body->setVisible(true);
     // A suggestion that never arrived cannot be accepted or dismissed.
@@ -161,6 +173,10 @@ void SuggestionWidget::updateHeader()
         m_status->setText(i18n("accepted"));
         return;
     }
+    if (m_running) {
+        m_status->setText(i18n("posting…"));
+        return;
+    }
     if (!m_path.isEmpty()) {
         m_anchor->setText(m_line > 0 ? u"%1:%2"_s.arg(m_path).arg(m_line) : m_path);
         m_anchor->setVisible(true);
@@ -177,6 +193,11 @@ void SuggestionWidget::applyStyle()
         glyph = u"\u{2717}"_s;
     } else if (m_decided) {
         border = ChatTheme::success();
+    } else if (m_running) {
+        // Live rather than settled: the same accent the running sub-agent card
+        // uses, so a card still waiting on its tool reads the same way.
+        border = ChatTheme::accent();
+        glyph = u"\u{25D0}"_s;
     } else {
         border = ChatTheme::warning();
     }

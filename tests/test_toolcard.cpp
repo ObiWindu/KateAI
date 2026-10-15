@@ -348,6 +348,383 @@ private Q_SLOTS:
 
         QVERIFY2(w.styleSheet().contains(ChatTheme::danger()), qPrintable(w.styleSheet()));
     }
+
+    // --- File edits ----------------------------------------------------------
+
+    QString editDiff() const
+    {
+        return QStringLiteral("--- a/src/main.cpp\n"
+                              "+++ b/src/main.cpp\n"
+                              "@@ -1,3 +1,3 @@\n"
+                              " keep this line\n"
+                              "-const int old = 1;\n"
+                              "+const int revised = 2;\n");
+    }
+
+    void testEditCardCarriesADiffSurface()
+    {
+        QWidget host;
+        auto *layout = new QVBoxLayout(&host);
+        host.resize(440, 400);
+
+        ToolCallWidget w(QStringLiteral("d1"), &host);
+        w.setToolInfo(QStringLiteral("edit_file"), QStringLiteral("src/main.cpp"), ToolRisk::Write);
+        w.setDescribeDiff(editDiff());
+        layout->addWidget(&w);
+        host.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&host));
+        QTest::qWait(60);
+
+        // The change is the point of an edit, so it must be on screen without
+        // the user hunting for it.
+        QVERIFY2(w.isExpanded(), qPrintable(w.toolName()));
+        QTextBrowser *diffView = w.findChild<QTextBrowser *>(QStringLiteral("toolDiff"));
+        QVERIFY2(diffView, qPrintable(QStringLiteral("no diff surface on an edit card")));
+        QVERIFY2(diffView->isVisible(), qPrintable(QStringLiteral("diff surface is hidden")));
+        QVERIFY2(diffView->height() > 0, qPrintable(QStringLiteral("diff surface has no height")));
+        QVERIFY2(diffView->toPlainText().contains(QStringLiteral("const int revised = 2;")),
+                 qPrintable(diffView->toPlainText()));
+    }
+
+    void testAddedLinesAreGreenAndRemovedRed()
+    {
+        QWidget host;
+        auto *layout = new QVBoxLayout(&host);
+        host.resize(440, 400);
+
+        ToolCallWidget w(QStringLiteral("d2"), &host);
+        w.setToolInfo(QStringLiteral("edit_file"), QStringLiteral("src/main.cpp"), ToolRisk::Write);
+        w.setDescribeDiff(editDiff());
+        layout->addWidget(&w);
+        host.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&host));
+        QTest::qWait(60);
+
+        QTextBrowser *diffView = w.findChild<QTextBrowser *>(QStringLiteral("toolDiff"));
+        QVERIFY(diffView);
+        const QString html = diffView->toHtml();
+        // Both hues have to reach the rendered HTML, as the line's own colour
+        // and as the background that marks the whole line as added or removed.
+        QVERIFY2(html.contains(ChatTheme::success()),
+                 qPrintable(QStringLiteral("no green in the diff:\n%1").arg(html)));
+        QVERIFY2(html.contains(ChatTheme::danger()),
+                 qPrintable(QStringLiteral("no red in the diff:\n%1").arg(html)));
+        // Green belongs to the added line only, red to the removed one.
+        const QString addBg = ChatTheme::mixColors(ChatTheme::success(), ChatTheme::codeBlockBg(), 24);
+        const QString delBg = ChatTheme::mixColors(ChatTheme::danger(), ChatTheme::codeBlockBg(), 24);
+        QVERIFY2(html.contains(addBg), qPrintable(QStringLiteral("no green highlight behind the added line:\n%1").arg(html)));
+        QVERIFY2(html.contains(delBg), qPrintable(QStringLiteral("no red highlight behind the removed line:\n%1").arg(html)));
+    }
+
+    void testHugeDiffIsCapped()
+    {
+        QWidget host;
+        auto *layout = new QVBoxLayout(&host);
+        host.resize(440, 400);
+
+        ToolCallWidget w(QStringLiteral("d5"), &host);
+        w.setToolInfo(QStringLiteral("write_file"), QStringLiteral("src/generated.cpp"), ToolRisk::Write);
+        // A write of a generated file carries a diff with a thousand lines.
+        QString big = QStringLiteral("--- a/src/generated.cpp\n+++ b/src/generated.cpp\n");
+        for (int i = 0; i < 1000; ++i) {
+            big += QStringLiteral("+line %1\n").arg(i);
+        }
+        w.setDescribeDiff(big);
+        layout->addWidget(&w);
+        host.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&host));
+        QTest::qWait(60);
+
+        QTextBrowser *diffView = w.findChild<QTextBrowser *>(QStringLiteral("toolDiff"));
+        QVERIFY(diffView);
+        // The stat still counts every changed line, so the header is honest.
+        QVERIFY2(w.hasDiffPreview(), qPrintable(QStringLiteral("huge diff not attached")));
+        // But the rendered diff is bounded and says what was dropped.
+        const QString shown = diffView->toPlainText();
+        QVERIFY2(shown.contains(QStringLiteral("more lines")),
+                 qPrintable(shown.left(200)));
+        QVERIFY2(shown.contains(QStringLiteral("line 0")), qPrintable(shown.left(200)));
+    }
+
+    void testReadOnlyToolsCarryNoDiffSurface()
+    {
+        QWidget host;
+        auto *layout = new QVBoxLayout(&host);
+        host.resize(440, 400);
+
+        ToolCallWidget w(QStringLiteral("d3"), &host);
+        w.setToolInfo(QStringLiteral("read_file"), QStringLiteral("src/main.cpp"), ToolRisk::Read);
+        w.setDescribeDiff(editDiff());
+        layout->addWidget(&w);
+        host.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&host));
+        QTest::qWait(60);
+
+        QTextBrowser *diffView = w.findChild<QTextBrowser *>(QStringLiteral("toolDiff"));
+        QVERIFY2(diffView && !diffView->isVisible(),
+                 qPrintable(QStringLiteral("a read showed a diff surface")));
+        // With nothing to change, no meaningless "+0 −0" either.
+        QLabel *stat = nullptr;
+        for (QLabel *label : w.findChildren<QLabel *>()) {
+            if (label->text().startsWith(QLatin1Char('+'))) {
+                stat = label;
+                break;
+            }
+        }
+        QVERIFY2(!stat, qPrintable(QStringLiteral("read tool carries a diff stat")));
+    }
+
+    void testDiffOpensEvenWhenTheToolReportsNothing()
+    {
+        QWidget host;
+        auto *layout = new QVBoxLayout(&host);
+        host.resize(440, 400);
+
+        ToolCallWidget w(QStringLiteral("d4"), &host);
+        w.setToolInfo(QStringLiteral("write_file"), QStringLiteral("src/new.cpp"), ToolRisk::Write);
+        w.setDescribeDiff(editDiff());
+        ToolResult result;
+        result.name = u"write_file"_s;
+        result.ok = true;
+        result.output = QString();
+        w.setFinished(result);
+        layout->addWidget(&w);
+        host.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&host));
+        QTest::qWait(60);
+
+        // A write that answers with an empty result still has a change to show,
+        // so the card must not collapse itself around nothing.
+        QVERIFY2(w.isExpanded(), qPrintable(QStringLiteral("collapsed")));
+        QVERIFY2(w.findChild<QTextBrowser *>(QStringLiteral("toolDiff"))->height() > 0,
+                 qPrintable(QStringLiteral("diff collapsed with the result")));
+    }
+
+    // --- Per-tool surfaces ---------------------------------------------------
+
+    void testDifferentToolsGetDifferentSurfaces()
+    {
+        QWidget host;
+        auto *layout = new QVBoxLayout(&host);
+        host.resize(440, 400);
+
+        ToolCallWidget read(QStringLiteral("v1"), &host);
+        read.setToolInfo(QStringLiteral("read_file"), QStringLiteral("src/main.cpp"), ToolRisk::Read);
+        ToolCallWidget run(QStringLiteral("v2"), &host);
+        run.setToolInfo(QStringLiteral("bash"), QStringLiteral("make -j8"), ToolRisk::Execute);
+        ToolCallWidget search(QStringLiteral("v3"), &host);
+        search.setToolInfo(QStringLiteral("grep"), QStringLiteral("ToolCallWidget"), ToolRisk::Read);
+        layout->addWidget(&read);
+        layout->addWidget(&run);
+        layout->addWidget(&search);
+        host.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&host));
+        QTest::qWait(60);
+
+        QLabel *readCaption = read.findChild<QLabel *>(QStringLiteral("toolViewCaption"));
+        QLabel *runCaption = run.findChild<QLabel *>(QStringLiteral("toolViewCaption"));
+        QLabel *searchCaption = search.findChild<QLabel *>(QStringLiteral("toolViewCaption"));
+        QVERIFY(readCaption && runCaption && searchCaption);
+        QVERIFY2(readCaption->isVisible() && runCaption->isVisible() && searchCaption->isVisible(),
+                 qPrintable(QStringLiteral("a caption went missing")));
+        // Each kind of call says what it holds, and the three are not the same
+        // thing said three times.
+        QVERIFY2(readCaption->text() != runCaption->text(), qPrintable(readCaption->text()));
+        QVERIFY2(readCaption->text() != searchCaption->text(), qPrintable(readCaption->text()));
+        QVERIFY2(runCaption->text() != searchCaption->text(), qPrintable(runCaption->text()));
+
+        // A command runs on its own, darker surface; a read sits on the inset
+        // every other card uses.
+        const QString runSheet = run.findChild<QTextBrowser *>(QStringLiteral("toolDetails"))->styleSheet();
+        QVERIFY2(runSheet.contains(QStringLiteral("#101014")), qPrintable(runSheet));
+        const QString readSheet = read.findChild<QTextBrowser *>(QStringLiteral("toolDetails"))->styleSheet();
+        QVERIFY2(readSheet.contains(ChatTheme::codeBlockBg()), qPrintable(readSheet));
+    }
+
+    // --- Live content --------------------------------------------------------
+    //
+    // A card in flight used to show its header and nothing else for every tool
+    // that does not stream: the user watched a row appear, sit there, and only
+    // learn what it had done once it was over. The card now carries the call's
+    // own arguments until something better arrives.
+
+    void testRunningToolShowsWhatItIsWorkingOn()
+    {
+        QWidget host;
+        auto *layout = new QVBoxLayout(&host);
+        host.resize(440, 400);
+
+        ToolCallWidget w(QStringLiteral("l1"), &host);
+        w.setToolInfo(QStringLiteral("read_file"), QStringLiteral("src/agentloop.cpp"), ToolRisk::Read);
+        w.setRunningInput(QStringLiteral("{\n    \"path\": \"src/agentloop.cpp\",\n    \"start_line\": 100\n}"));
+        layout->addWidget(&w);
+        host.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&host));
+        QTest::qWait(60);
+
+        // The arguments are the card's content while it runs, so the body is
+        // open and holding them rather than sitting at zero height.
+        QVERIFY2(w.isExpanded(), qPrintable(QStringLiteral("running card stayed collapsed")));
+        const QTextBrowser *details = w.findChild<QTextBrowser *>(QStringLiteral("toolDetails"));
+        QVERIFY(details);
+        QVERIFY2(details->toPlainText().contains(QStringLiteral("src/agentloop.cpp")),
+                 qPrintable(details->toPlainText()));
+        QVERIFY2(details->height() > 0, qPrintable(QStringLiteral("body has no height")));
+        QVERIFY2(w.height() > 60, qPrintable(QStringLiteral("card is header-only at %1px").arg(w.height())));
+        // The caption names what the body holds right now.
+        QLabel *caption = w.findChild<QLabel *>(QStringLiteral("toolViewCaption"));
+        QVERIFY2(caption && caption->isVisible(), qPrintable(QStringLiteral("caption hidden while running")));
+        QVERIFY2(caption->text() == QStringLiteral("Input"), qPrintable(caption->text()));
+    }
+    void testRunningInputGivesWayToOutput()
+    {
+        QWidget host;
+        auto *layout = new QVBoxLayout(&host);
+        host.resize(440, 400);
+
+        ToolCallWidget w(QStringLiteral("l2"), &host);
+        w.setToolInfo(QStringLiteral("grep"), QStringLiteral("ToolCallWidget in src/"), ToolRisk::Read);
+        w.setRunningInput(QStringLiteral("{\n    \"pattern\": \"ToolCallWidget\"\n}"));
+        layout->addWidget(&w);
+        host.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&host));
+        QTest::qWait(60);
+        QVERIFY2(w.findChild<QTextBrowser *>(QStringLiteral("toolDetails"))->toPlainText().contains(QStringLiteral("pattern")),
+                 qPrintable(QStringLiteral("arguments never reached the body")));
+
+        // A stream replaces them...
+        w.setPartialOutput(QStringLiteral("src/toolcallwidget.cpp:118\n"));
+        QTest::qWait(20);
+        const QString streamed = w.findChild<QTextBrowser *>(QStringLiteral("toolDetails"))->toPlainText();
+        QVERIFY2(streamed.contains(QStringLiteral("toolcallwidget.cpp")), qPrintable(streamed));
+        QVERIFY2(!streamed.contains(QStringLiteral("pattern")), qPrintable(streamed));
+
+        // ...and so does the result.
+        ToolResult result;
+        result.name = u"grep"_s;
+        result.ok = true;
+        result.output = u"src/toolcallwidget.cpp:118: class ToolCallWidget"_s;
+        w.setFinished(result);
+        QTest::qWait(20);
+        const QString final = w.findChild<QTextBrowser *>(QStringLiteral("toolDetails"))->toPlainText();
+        QVERIFY2(final.contains(QStringLiteral("class ToolCallWidget")), qPrintable(final));
+        QVERIFY2(!final.contains(QStringLiteral("pattern")), qPrintable(final));
+        QLabel *caption = w.findChild<QLabel *>(QStringLiteral("toolViewCaption"));
+        QVERIFY2(caption->text() == QStringLiteral("Matches"), qPrintable(caption->text()));
+    }
+
+    void testQuestionCaptionNamesTheBody()
+    {
+        QWidget host;
+        auto *layout = new QVBoxLayout(&host);
+        host.resize(440, 400);
+
+        ToolCallWidget w(QStringLiteral("l7"), &host);
+        w.setToolInfo(QStringLiteral("question"), QStringLiteral("Rewrite, or patch?"), ToolRisk::Read);
+        w.setRunningInput(QStringLiteral("Rewrite the file, or patch it in place?"));
+        layout->addWidget(&w);
+        host.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&host));
+        QTest::qWait(60);
+
+        // The body holds prose, not arguments, and the caption says so rather
+        // than calling the question an "Input".
+        QLabel *caption = w.findChild<QLabel *>(QStringLiteral("toolViewCaption"));
+        QVERIFY2(caption->text() == QStringLiteral("Question"), qPrintable(caption->text()));
+
+        ToolResult result;
+        result.name = u"question"_s;
+        result.ok = true;
+        result.output = u"Patch"_s;
+        w.setFinished(result);
+        QTest::qWait(20);
+        QLabel *answered = w.findChild<QLabel *>(QStringLiteral("toolViewCaption"));
+        QVERIFY2(answered->text() == QStringLiteral("Answer"), qPrintable(answered->text()));
+    }
+
+    void testLiveStreamAndDiffOutrankTheInput()
+    {
+        QWidget host;
+        auto *layout = new QVBoxLayout(&host);
+        host.resize(440, 400);
+
+        // An edit already shows the change, which says more than the arguments
+        // it was asked with; a command already shows its output.
+        ToolCallWidget edit(QStringLiteral("l3"), &host);
+        edit.setToolInfo(QStringLiteral("edit_file"), QStringLiteral("src/main.cpp"), ToolRisk::Write);
+        edit.setDescribeDiff(editDiff());
+        edit.setRunningInput(QStringLiteral("{\n    \"path\": \"src/main.cpp\",\n    \"old_string\": \"keep this line\"\n}"));
+        ToolCallWidget run(QStringLiteral("l4"), &host);
+        run.setToolInfo(QStringLiteral("bash"), QStringLiteral("make -j8"), ToolRisk::Execute);
+        run.setRunningInput(QStringLiteral("{\n    \"command\": \"make -j8\"\n}"));
+        run.setPartialOutput(QStringLiteral("[ 42%] Building\n"));
+        layout->addWidget(&edit);
+        layout->addWidget(&run);
+        host.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&host));
+        QTest::qWait(60);
+
+        QTextBrowser *diffView = edit.findChild<QTextBrowser *>(QStringLiteral("toolDiff"));
+        QVERIFY2(diffView->toPlainText().contains(QStringLiteral("const int revised = 2;")),
+                 qPrintable(diffView->toPlainText()));
+        const QString editBody = edit.findChild<QTextBrowser *>(QStringLiteral("toolDetails"))->toPlainText();
+        QVERIFY2(editBody.trimmed().isEmpty(), qPrintable(editBody));
+
+        const QString runBody = run.findChild<QTextBrowser *>(QStringLiteral("toolDetails"))->toPlainText();
+        QVERIFY2(runBody.contains(QStringLiteral("Building")), qPrintable(runBody));
+        QVERIFY2(!runBody.contains(QStringLiteral("make -j8")), qPrintable(runBody));
+    }
+
+    void testRunningInputIsIgnoredOnceTheToolEnds()
+    {
+        QWidget host;
+        auto *layout = new QVBoxLayout(&host);
+        host.resize(440, 400);
+
+        ToolCallWidget w(QStringLiteral("l5"), &host);
+        w.setToolInfo(QStringLiteral("read_file"), QStringLiteral("src/main.cpp"), ToolRisk::Read);
+        ToolResult result;
+        result.name = u"read_file"_s;
+        result.ok = true;
+        result.output = u"1: int main() {}"_s;
+        w.setFinished(result);
+        layout->addWidget(&w);
+        host.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&host));
+        QTest::qWait(60);
+
+        // A late stream of arguments arriving after the fact would be a lie
+        // about a run that is already over.
+        w.setRunningInput(QStringLiteral("{\n    \"path\": \"src/main.cpp\"\n}"));
+        QTest::qWait(20);
+        const QString text = w.findChild<QTextBrowser *>(QStringLiteral("toolDetails"))->toPlainText();
+        QVERIFY2(text.contains(QStringLiteral("int main()")), qPrintable(text));
+        QVERIFY2(!text.contains(QStringLiteral("path")), qPrintable(text));
+    }
+
+    void testHugeInputIsCapped()
+    {
+        QWidget host;
+        auto *layout = new QVBoxLayout(&host);
+        host.resize(440, 400);
+
+        ToolCallWidget w(QStringLiteral("l6"), &host);
+        w.setToolInfo(QStringLiteral("write_file"), QStringLiteral("src/generated.cpp"), ToolRisk::Write);
+        QStringList args;
+        for (int i = 0; i < 400; ++i) {
+            args << QStringLiteral("    \"line %1\": \"value\",").arg(i);
+        }
+        w.setRunningInput(QStringLiteral("{\n") + args.join(u'\n') + u"\n}"_s);
+        layout->addWidget(&w);
+        host.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&host));
+        QTest::qWait(60);
+
+        const QString shown = w.findChild<QTextBrowser *>(QStringLiteral("toolDetails"))->toPlainText();
+        QVERIFY2(shown.contains(QStringLiteral("more lines")), qPrintable(shown.left(200)));
+        // The card must not grow to the whole panel over a placeholder.
+        QVERIFY2(w.height() < 400, qPrintable(QStringLiteral("card grew to %1px").arg(w.height())));
+    }
 };
 
 QTEST_MAIN(TestToolCard)

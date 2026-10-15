@@ -14,9 +14,11 @@
 #include "subtaskwidget.h"
 
 #include <QApplication>
+#include <QColor>
 #include <QLabel>
 #include <QPushButton>
 #include <QTest>
+#include <QTextBrowser>
 
 using namespace Qt::Literals::StringLiterals;
 using namespace KateAi;
@@ -74,6 +76,81 @@ private Q_SLOTS:
                  "sub-agent card needs WA_StyledBackground to paint its box");
     }
 
+    void testAgentTaskCardIsYellow()
+    {
+        // A delegated sub-agent is someone else's work, so its card is warm and
+        // unmistakable next to the agent's own blue / green / violet tool cards.
+        const QString style = ChatTheme::agentTaskCard();
+        const int at = style.indexOf(u"background-color:"_s);
+        QVERIFY2(at >= 0, qPrintable(style));
+        const int valueStart = at + qstrlen("background-color:");
+        const QString value = style.mid(valueStart, style.indexOf(u";"_s, valueStart) - valueStart).trimmed();
+        const QColor colour(value);
+        QVERIFY2(colour.isValid(), qPrintable(value));
+        const int hue = colour.hue();
+        QVERIFY2(hue >= 30 && hue <= 70,
+                 qPrintable(QStringLiteral("card colour %1 has hue %2, which is not yellow")
+                                .arg(colour.name(), QString::number(hue))));
+        QVERIFY2(colour.saturation() > 40,
+                 qPrintable(QStringLiteral("card colour %1 is too grey to read as yellow").arg(colour.name())));
+    }
+
+    void testThinkingPillPulseKeepsBothPhases()
+    {
+        // The pulse dims the pill between beats through the stylesheet rather
+        // than through a QGraphicsOpacityEffect, which breaks colour-emoji
+        // glyphs. Both phases have to exist, differ, and keep the pill's shape.
+        const QString bright = ChatTheme::thinkingPill();
+        const QString dim = ChatTheme::thinkingPillDim();
+        QVERIFY2(bright != dim, "the pill needs a dim phase to pulse with");
+        for (const QString &sheet : {bright, dim}) {
+            QVERIFY2(sheet.contains(u"border-radius:"_s), qPrintable(sheet));
+            QVERIFY2(sheet.contains(ChatTheme::accent()), qPrintable(sheet));
+        }
+        const QString work = ChatTheme::workingPill();
+        const QString workDim = ChatTheme::workingPillDim();
+        QVERIFY2(work != workDim, "the working pill needs a dim phase too");
+        QVERIFY2(work.contains(ChatTheme::warning()), qPrintable(work));
+    }
+
+    void testRunningCardShowsTheDelegatedTask()
+    {
+        SubtaskWidget card(QStringLiteral("task-10"));
+        card.startAgent(QStringLiteral("Reviewer"), QStringLiteral("code"),
+                        QStringLiteral("Check the diff for the new parser"));
+
+        // The delegated task is what the card is about, so it has to stay on
+        // screen while the agent works. startAgent() used to clear it, which
+        // left a running card with nothing in it but a timer.
+        bool shown = false;
+        for (const QTextBrowser *browser : card.findChildren<QTextBrowser *>()) {
+            if (browser->isVisibleTo(&card) && browser->toPlainText().contains(u"Check the diff for the new parser")) {
+                shown = true;
+            }
+        }
+        QVERIFY2(shown, "a running sub-agent card must still name the work it was given");
+    }
+
+    void testRunningCardShowsWhatTheSubAgentIsDoing()
+    {
+        SubtaskWidget card(QStringLiteral("task-11"));
+        card.startAgent(QStringLiteral("Reviewer"), QStringLiteral("code"), QStringLiteral("Check the diff"));
+
+        // Before the sub-agent reports anything there is no step to show.
+        QVERIFY2(!hasVisibleLabelContaining(card, u"read_file"_s),
+                 "no live step should be on the card before the first one arrives");
+
+        card.appendActivity(QStringLiteral("→ read_file src/parser.cpp"), false);
+        QVERIFY2(hasVisibleLabelContaining(card, u"src/parser.cpp"_s),
+                 "the step the sub-agent is on has to be visible on the card itself, "
+                 "not only in the collapsed activity log");
+
+        // The answer takes over when the run ends.
+        card.finishAgent(ToolResult{});
+        QVERIFY2(!hasVisibleLabelContaining(card, u"src/parser.cpp"_s),
+                 "the finished card must not keep reporting a step from a run that is over");
+    }
+
     void testRunningAgentTaskKeepsStateColourInTheBorder()
     {
         SubtaskWidget running(QStringLiteral("task-3"));
@@ -117,6 +194,17 @@ private:
         const auto labels = root.findChildren<QLabel *>();
         for (const QLabel *label : labels) {
             if (label->styleSheet().contains(needle)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static bool hasVisibleLabelContaining(QWidget &root, const QString &needle)
+    {
+        const auto labels = root.findChildren<QLabel *>();
+        for (const QLabel *label : labels) {
+            if (label->isVisibleTo(&root) && label->text().contains(needle)) {
                 return true;
             }
         }

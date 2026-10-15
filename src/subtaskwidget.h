@@ -57,13 +57,20 @@ Q_SIGNALS:
 private:
     void updateHeader();
     void updateElapsed();
+    void updateCurrentActivity();
     void setActivityVisible(bool visible);
     void applyStyle();
+
+protected:
+    void resizeEvent(QResizeEvent *event) override;
 
     QString m_taskId;
     QString m_agentName;
     QString m_modeId;
     QString m_description;
+    // The most recent step the sub-agent reported, kept in full so it can be
+    // re-elided whenever the card is resized.
+    QString m_currentLine;
     bool m_running = false;
     bool m_failed = false;
     bool m_cancelled = false;
@@ -74,6 +81,9 @@ private:
     QLabel *m_icon = nullptr;
     QLabel *m_title = nullptr;
     QLabel *m_status = nullptr;
+    // The step the sub-agent is on right now, mirrored from its own tool
+    // activity so the card says what it is doing, not merely that it is.
+    QLabel *m_current = nullptr;
     QPushButton *m_cancel = nullptr;
     QPushButton *m_toggle = nullptr;
     QTextBrowser *m_answer = nullptr;

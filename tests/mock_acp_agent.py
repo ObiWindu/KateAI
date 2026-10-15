@@ -156,6 +156,63 @@ def handle_prompt(request_id, params):
         result(str(request_id), {"stopReason": "end_turn"})
         return
 
+    if SCENARIO == "toolstream":
+        # A tool that reports its execution in pieces. Real agents send
+        # tool_call_update with status "in_progress" and a growing content array
+        # long before the terminal update: those in-progress updates are what the
+        # card should stream, instead of showing nothing until the tool ends.
+        session_update(
+            {
+                "sessionUpdate": "tool_call",
+                "toolCallId": "call_stream",
+                "name": "bash",
+                "title": "Run build",
+                "kind": "execute",
+                "status": "pending",
+            }
+        )
+        session_update(
+            {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "call_stream",
+                "status": "in_progress",
+                "content": [
+                    {"type": "content", "content": {"type": "text", "text": "scanning dependencies"}}
+                ],
+            }
+        )
+        session_update(
+            {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "call_stream",
+                "status": "in_progress",
+                "content": [
+                    {"type": "content", "content": {"type": "text", "text": "scanning dependencies"}},
+                    {"type": "content", "content": {"type": "text", "text": "building target"}},
+                ],
+            }
+        )
+        session_update(
+            {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "call_stream",
+                "status": "completed",
+                "content": [
+                    {"type": "content", "content": {"type": "text", "text": "scanning dependencies"}},
+                    {"type": "content", "content": {"type": "text", "text": "building target"}},
+                    {"type": "content", "content": {"type": "text", "text": "build finished"}},
+                ],
+            }
+        )
+        session_update(
+            {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "streamed"},
+            }
+        )
+        result(request_id, {"stopReason": "end_turn"})
+        return
+
     if SCENARIO == "permission":
         session_update(
             {

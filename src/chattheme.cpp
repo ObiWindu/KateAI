@@ -36,10 +36,14 @@ QString kHoverBg = QStringLiteral("#323236");
 QString kToolBg = QStringLiteral("#26262b");
 QString kToolHeaderBg = QStringLiteral("#33333a");
 
-// Agent-task cards. One step above the tool-card surface and ringed on all four
-// sides, so a delegated sub-agent reads as its own object rather than as
+// Agent-task cards. A delegated sub-agent is the one thing in the transcript
+// that is *someone else's* work, so the card is yellow: a warm surface that
+// separates it from every blue/green/violet tool card at a glance, with the
+// border still carrying the outcome. One step above the tool-card surface and
+// ringed on all four sides, so it reads as its own object rather than as
 // another tool row in the log.
-QString kAgentTaskBg = QStringLiteral("#2b2b32");
+QString kAgentTaskBg = QStringLiteral("#463a10");
+QString kAgentTaskBorder = QStringLiteral("#7a6220");
 QString kIntentRowBg = QStringLiteral("#3a3020");
 
 QString kBorder = QStringLiteral("#37373b");
@@ -114,7 +118,7 @@ QString agentTaskCard()
            "  border: 1px solid %2;"
            "  border-radius: 8px;"
            "}")
-        .arg(kAgentTaskBg, kBorder);
+        .arg(kAgentTaskBg, kAgentTaskBorder);
 }
 
 QString intentApprovalRow()
@@ -369,34 +373,45 @@ QString activityPill()
         .arg(kTextMuted, kSurfaceBg, kBorder);
 }
 
-QString thinkingPill()
+// One pill sheet. The pulse dims the pill between beats instead of animating
+// its opacity through a QGraphicsOpacityEffect: Qt renders a widget that
+// carries a graphics effect into an offscreen surface, and colour-emoji glyphs
+// -- the brain on the thinking pill is one -- do not survive that trip, they
+// come out blank or hollow. Swapping between the bright and dim sheets keeps
+// the heartbeat and paints the glyph straight onto the screen.
+QString pillSheet(const QString &textColor, const QString &background, const QString &border)
 {
     return QStringLiteral(
            "QLabel {"
-           "  color: #b4d0ff;"
+           "  color: %1;"
            "  font-size: 12px;"
            "  font-weight: 600;"
            "  padding: 5px 12px;"
-           "  background-color: rgba(61, 126, 255, 0.22);"
-           "  border: 1px solid %1;"
+           "  background-color: %2;"
+           "  border: 1px solid %3;"
            "  border-radius: 13px;"
            "}")
-        .arg(kAccent);
+        .arg(textColor, background, border);
+}
+
+QString thinkingPill()
+{
+    return pillSheet(QStringLiteral("#b4d0ff"), QStringLiteral("rgba(61, 126, 255, 0.22)"), kAccent);
+}
+
+QString thinkingPillDim()
+{
+    return pillSheet(QStringLiteral("#8db0e8"), QStringLiteral("rgba(61, 126, 255, 0.10)"), kAccent);
 }
 
 QString workingPill()
 {
-    return QStringLiteral(
-           "QLabel {"
-           "  color: #f3d48a;"
-           "  font-size: 12px;"
-           "  font-weight: 600;"
-           "  padding: 5px 12px;"
-           "  background-color: rgba(226, 179, 65, 0.20);"
-           "  border: 1px solid %1;"
-           "  border-radius: 13px;"
-           "}")
-        .arg(kWarning);
+    return pillSheet(QStringLiteral("#f3d48a"), QStringLiteral("rgba(226, 179, 65, 0.20)"), kWarning);
+}
+
+QString workingPillDim()
+{
+    return pillSheet(QStringLiteral("#c5ab64"), QStringLiteral("rgba(226, 179, 65, 0.09)"), kWarning);
 }
 
 QString userCard()

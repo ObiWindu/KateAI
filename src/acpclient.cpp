@@ -478,6 +478,7 @@ void AcpClient::finishLiveTools(const QString &message)
         Q_EMIT toolFinished(result);
     }
     m_liveTools.clear();
+    m_toolStreamed.clear();
 }
 
 void AcpClient::cancel()
@@ -1427,8 +1428,33 @@ void AcpClient::handleSessionUpdate(const QJsonObject &update)
                 result.output = jsonText(update.value(u"result"_s));
             }
             m_liveTools.remove(toolCallId);
+            m_toolStreamed.remove(toolCallId);
             Q_EMIT toolFinished(result);
+            return;
         }
+        // Still running: the agent is telling us what the tool has done so far.
+        // The content array is the whole of what the agent knows, so the latest
+        // text replaces whatever was streamed before, exactly like bashProgress
+        // does for a native command.
+        const QString streamed = toolContentText(update.value(u"content"_s));
+        if (streamed.isEmpty()) {
+            // Some agents only refresh the title mid-flight ("Running tests…").
+            // Keep the card's summary current so the header never lies, but
+            // there is nothing to stream into the body yet.
+            const QString title = update.value(u"title"_s).toString();
+            if (!title.isEmpty() && title != existing.summary) {
+                existing.summary = title;
+                m_liveTools.insert(toolCallId, existing);
+            }
+            return;
+        }
+        // An agent that repeats the same content word for word must not force a
+        // re-render of the whole stream on every heartbeat.
+        if (m_toolStreamed.value(toolCallId) == streamed) {
+            return;
+        }
+        m_toolStreamed.insert(toolCallId, streamed);
+        Q_EMIT toolProgress(toolCallId, streamed);
         return;
     }
 }

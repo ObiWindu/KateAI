@@ -121,6 +121,13 @@ Q_SIGNALS:
     void suggestionPosted(const KateAi::Suggestion &suggestion);
     void toolStarted(const PermissionRequest &request);
     void toolFinished(const ToolResult &result);
+
+    // Partial output of a running tool call. An ACP agent reports execution
+    // through repeated tool_call_update notifications long before it reports a
+    // final status, and that incremental text is what lets a card stream
+    // instead of sitting blank until the command ends.
+    void toolProgress(const QString &toolCallId, const QString &partialOutput);
+
     void permissionNeeded(const PermissionRequest &request);
     void promptFinished(const QString &stopReason, const QString &text, const QJsonArray &toolCalls);
     void logMessage(const QString &message);
@@ -258,6 +265,11 @@ private:
     QJsonArray m_currentPlan;
     QJsonArray m_toolCalls;
     QHash<QString, PermissionRequest> m_liveTools;
+
+    // The last partial output streamed for each live tool call, so an agent that
+    // repeats identical content on a heartbeat does not force a re-render.
+    QHash<QString, QString> m_toolStreamed;
+
     QList<QueuedPrompt> m_queued;
 
     QJsonValue m_permissionRpcId;

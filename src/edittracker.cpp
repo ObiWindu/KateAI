@@ -6,15 +6,14 @@
 #include "edittracker.h"
 
 #include "chattheme.h"
-#include "codehighlight.h"
 
 #include <KLocalizedString>
 
 #include <QClipboard>
-#include <QColor>
-#include <QDialog>
+#include <QCryptographicHash>
+#include <QDir>
+#include <QFile>
 #include <QFileInfo>
-#include <QFrame>
 #include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QKeySequence>
@@ -22,8 +21,8 @@
 #include <QPushButton>
 #include <QScrollArea>
 #include <QShortcut>
-#include <QTextBrowser>
 #include <QVBoxLayout>
+#include <QStandardPaths>
 #include <QWidget>
 
 #include <algorithm>
@@ -37,9 +36,9 @@ namespace
 {
 
 // The tracker is deliberately compact: it is a review control, not the main
-// transcript. Keep every size in one place so the bar, rows and review dialog
-// stay at half the chat's usual type scale.
-constexpr qreal kTrackerFontScale = 0.5;
+// transcript. Keep every size in one place so the bar and the rows stay at
+// part of the chat's usual type scale.
+constexpr qreal kTrackerFontScale = 0.6;
 
 QString trackerFontSize(int pixels)
 {
@@ -171,46 +170,6 @@ int countDiffLines(const QString &diff, QChar marker)
     return count;
 }
 
-QString diffToHtml(const QString &diff)
-{
-    if (diff.isEmpty()) {
-        return QStringLiteral("<body><p>&nbsp;</p></body>");
-    }
-    // Use Kate's syntax highlighting for diffs to get proper token colours.
-    const QString highlighted = CodeHighlight::htmlBodyForCode(diff, u"diff"_s);
-    if (!highlighted.isEmpty()) {
-        return u"<body>"_s + highlighted + u"</body>"_s;
-    }
-    // Fallback to the simple line-by-line rendering if highlighting is unavailable.
-    QString html = QStringLiteral("<body>");
-    const QStringList lines = diff.split(u'\n');
-    for (const QString &line : lines) {
-        const QString escaped = line.isEmpty() ? QStringLiteral("&nbsp;") : line.toHtmlEscaped();
-        if (line.startsWith(u"---"_s) || line.startsWith(u"+++"_s) || line.startsWith(u'@')) {
-            html += QStringLiteral("<p class='hunk'>%1</p>").arg(escaped);
-        } else if (line.startsWith(u'+')) {
-            html += QStringLiteral("<p class='added'>%1</p>").arg(escaped);
-        } else if (line.startsWith(u'-')) {
-            html += QStringLiteral("<p class='removed'>%1</p>").arg(escaped);
-        } else {
-            html += QStringLiteral("<p>%1</p>").arg(escaped);
-        }
-    }
-    html += QStringLiteral("</body>");
-    return html;
-}
-
-QString diffStylesheet()
-{
-    return QStringLiteral(
-               "body { color: %1; font-family: monospace; font-size: %2; margin: 0; padding: 0; }"
-               ".removed { color: #fca5a5; background-color: #3f1212; }"
-               ".added { color: #86efac; background-color: #14532d; }"
-               ".hunk { color: #71717a; }"
-               "p { margin: 0; padding: 1px 6px; white-space: pre-wrap; }")
-        .arg(ChatTheme::textPrimary(), trackerFontSize(12));
-}
-
 } // namespace
 
 EditTracker::EditTracker(QWidget *parent)
@@ -323,7 +282,6 @@ void EditTracker::addEdit(const QString &path, const QString &toolName, const QS
     if (path.isEmpty()) {
         return;
     }
-    closeReview(path);
 
     EditEntry entry;
     entry.path = path;
@@ -372,7 +330,6 @@ void EditTracker::addEdit(const QString &path, const QString &toolName, const QS
 
 void EditTracker::clear()
 {
-    closeAllReviews();
     m_groups.clear();
     m_undoStack.clear();
     m_fileListVisible = false;
@@ -520,7 +477,6 @@ void EditTracker::undoLast()
         }
     }
 
-    closeReview(decision.path);
     updateUI();
     Q_EMIT editsChanged(true);
     Q_EMIT statusMessage(i18n("Undid the last decision for %1", QFileInfo(decision.path).fileName()), false);
@@ -622,9 +578,10 @@ QWidget *EditTracker::createRow(const Group &group)
     reviewBtn->setCursor(Qt::PointingHandCursor);
     reviewBtn->setFixedHeight(24);
     reviewBtn->setStyleSheet(reviewStyle());
+    reviewBtn->setToolTip(i18n("Preview this file's diff in the editor"));
     const QString path = group.path;
     connect(reviewBtn, &QPushButton::clicked, this, [this, path]() {
-        openReview(path);
+        previewDiff(path);
     });
     layout->addWidget(reviewBtn);
 
@@ -696,53 +653,11 @@ void EditTracker::rebuildEditList()
     m_scrollArea->setFixedHeight(contentHeight > 0 ? contentHeight + 2 : 0);
 }
 
-void EditTracker::openReview(const QString &path)
+// The whole question a review answers is "what does this file look like now
+// versus before the turn", which is one comparison no matter how many edits the
+// agent stacked on top of each other.
+QString EditTracker::combinedDiff(const Group &group) const
 {
-    const Group group = makeGroup(path);
-    if (group.pending.isEmpty()) {
-        return;
-    }
-    showDiffDialog(path, group);
-}
-
-void EditTracker::showDiffDialog(const QString &path, const Group &group)
-{
-    // One dialog per path. Opening a second one for a file that is already being
-    // reviewed used to stack a duplicate window behind the first, each with its
-    // own Keep/Reject buttons deciding the same thing.
-    if (auto existing = m_reviewDialogs.value(path)) {
-        existing->raise();
-        existing->activateWindow();
-        return;
-    }
-
-    auto *dialog = new QDialog(window());
-    dialog->setAttribute(Qt::WA_DeleteOnClose);
-    dialog->setWindowTitle(i18n("Review %1", QFileInfo(path).fileName()));
-    dialog->setModal(false);
-    dialog->resize(760, 560);
-    dialog->setStyleSheet(
-        QStringLiteral("QDialog { background-color: %1; } QLabel { background: transparent; }").arg(ChatTheme::panelBg()));
-
-    auto *root = new QVBoxLayout(dialog);
-    root->setContentsMargins(16, 16, 16, 16);
-    root->setSpacing(12);
-
-    auto *title = new QLabel(QFileInfo(path).fileName(), dialog);
-    title->setStyleSheet(QStringLiteral("QLabel { color: %1; font-size: %2; font-weight: 700; }")
-                             .arg(ChatTheme::textPrimary(), trackerFontSize(16)));
-    root->addWidget(title);
-
-    auto *subtitle = new QLabel(path, dialog);
-    subtitle->setStyleSheet(QStringLiteral("QLabel { color: %1; font-size: %2; font-family: monospace; }")
-                                .arg(ChatTheme::textMuted(), trackerFontSize(11)));
-    subtitle->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    subtitle->setWordWrap(true);
-    root->addWidget(subtitle);
-
-    // One combined diff for the whole file rather than a tab per edit: the
-    // question the review answers is "what does this file look like now versus
-    // before the turn", which is a single comparison.
     QString combined;
     for (const EditEntry &entry : group.pending) {
         if (!combined.isEmpty()) {
@@ -750,88 +665,44 @@ void EditTracker::showDiffDialog(const QString &path, const Group &group)
         }
         combined += entry.diff;
     }
-
-    auto *diffBrowser = new QTextBrowser(dialog);
-    diffBrowser->setReadOnly(true);
-    diffBrowser->setOpenExternalLinks(false);
-    diffBrowser->setFrameShape(QFrame::NoFrame);
-    diffBrowser->setStyleSheet(QStringLiteral(
-                                   "QTextBrowser { background-color: %1; color: %2; border: 1px solid %3; border-radius: 10px; padding: 8px; font-family: monospace; font-size: %4; }")
-                                   .arg(ChatTheme::codeBlockBg(), ChatTheme::textPrimary(), ChatTheme::border(), trackerFontSize(12)));
-    diffBrowser->document()->setDefaultStyleSheet(diffStylesheet());
-    diffBrowser->setHtml(diffToHtml(combined));
-    root->addWidget(diffBrowser, 1);
-
-    auto *btnLayout = new QHBoxLayout;
-    btnLayout->setContentsMargins(0, 4, 0, 0);
-    btnLayout->setSpacing(8);
-
-    auto *copyBtn = new QPushButton(i18n("Copy Diff"), dialog);
-    copyBtn->setCursor(Qt::PointingHandCursor);
-    copyBtn->setFixedHeight(32);
-    copyBtn->setStyleSheet(reviewStyle());
-    connect(copyBtn, &QPushButton::clicked, this, [combined]() {
-        QGuiApplication::clipboard()->setText(combined);
-    });
-    btnLayout->addWidget(copyBtn);
-
-    btnLayout->addStretch();
-
-    auto *rejectBtn = new QPushButton(group.createdFile ? i18n("Delete File") : i18n("Reject"), dialog);
-    rejectBtn->setCursor(Qt::PointingHandCursor);
-    rejectBtn->setFixedHeight(32);
-    rejectBtn->setStyleSheet(rejectStyle());
-    connect(rejectBtn, &QPushButton::clicked, this, [this, path, dialog]() {
-        dialog->close();
-        rejectEdit(path);
-    });
-    btnLayout->addWidget(rejectBtn);
-
-    auto *keepBtn = new QPushButton(i18n("Keep"), dialog);
-    keepBtn->setCursor(Qt::PointingHandCursor);
-    keepBtn->setFixedHeight(32);
-    keepBtn->setStyleSheet(keepStyle());
-    keepBtn->setDefault(true);
-    connect(keepBtn, &QPushButton::clicked, this, [this, path, dialog]() {
-        dialog->close();
-        acceptEdit(path);
-    });
-    btnLayout->addWidget(keepBtn);
-
-    root->addLayout(btnLayout);
-
-    // Escape closes without deciding, so a review opened by accident cannot
-    // silently accept or reject the change it was showing.
-    auto *esc = new QShortcut(QKeySequence(Qt::Key_Escape), dialog);
-    esc->setContext(Qt::WidgetWithChildrenShortcut);
-    connect(esc, &QShortcut::activated, dialog, &QDialog::close);
-
-    m_reviewDialogs[path] = dialog;
-    connect(dialog, &QDialog::destroyed, this, [this, path]() {
-        m_reviewDialogs.remove(path);
-    });
-    dialog->show();
-    dialog->raise();
-    dialog->activateWindow();
+    return combined;
 }
 
-void EditTracker::closeReview(const QString &path)
+QString EditTracker::previewDiffPath(const QString &path) const
 {
-    // Take the pointer out of the map first: closing triggers destroyed(), whose
-    // handler removes the entry, so removing it here too would be redundant, but
-    // leaving it in place until the deferred delete ran would let a re-open
-    // during that window find a dangling dialog.
-    if (auto dialog = m_reviewDialogs.take(path)) {
-        dialog->close();
-    }
+    // The preview is a file, so it lives outside the workspace: a .diff dropped
+    // next to the code would be something the agent's own tools trip over on the
+    // next turn. The name carries the file it came from, so several previews open
+    // in the editor are each identifiable, and the hash keeps two files that
+    // share a base name from overwriting each other's preview.
+    const QByteArray digest = QCryptographicHash::hash(path.toUtf8(), QCryptographicHash::Sha1).toHex().left(8);
+    const QString base = QFileInfo(path).completeBaseName();
+    return QDir(QStandardPaths::writableLocation(QStandardPaths::TempLocation))
+        .absoluteFilePath(u"kateai-%1-%2.diff"_s.arg(base, QString::fromUtf8(digest)));
 }
 
-void EditTracker::closeAllReviews()
+void EditTracker::previewDiff(const QString &path)
 {
-    const QList<QString> paths = m_reviewDialogs.keys();
-    for (const QString &path : paths) {
-        closeReview(path);
+    const Group group = makeGroup(path);
+    if (group.pending.isEmpty()) {
+        return;
     }
+
+    // Written as a .diff so the editor colours the added and removed lines with
+    // its own diff highlighting: the same reading experience as a diff anywhere
+    // else in the IDE, instead of a second window with its own idea of what a
+    // diff looks like. The path is stable per reviewed file, so previewing again
+    // after another edit lands in the same tab rather than piling up.
+    const QString previewPath = previewDiffPath(path);
+    QFile preview(previewPath);
+    if (!preview.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
+        Q_EMIT statusMessage(i18n("Could not write the diff preview for %1", QFileInfo(path).fileName()), true);
+        return;
+    }
+    preview.write(combinedDiff(group).toUtf8());
+    preview.close();
+
+    Q_EMIT previewDiffRequested(previewPath);
 }
 
 void EditTracker::settle(const QString &path, bool accepted)
@@ -871,7 +742,6 @@ void EditTracker::settle(const QString &path, bool accepted)
         group.lastKnownContent = settledTo;
     }
     m_undoStack.append(decision);
-    closeReview(path);
     pruneGroups();
     updateUI();
 
