@@ -1330,6 +1330,12 @@ ChatWidget::~ChatWidget()
         m_modelPopup = nullptr;
     }
 
+    if (m_acpModelProbe) {
+        m_acpModelProbe->disconnect(this);
+        m_acpModelProbe->stop();
+        m_acpModelProbe = nullptr;
+    }
+
     // Also save here for widget teardown paths that do not close the app.
     saveCurrentConversation();
 
@@ -3868,6 +3874,7 @@ void ChatWidget::requestAcpAgentModels(const QString &agentId)
         return;
     }
     if (m_acpModelProbe) {
+        m_acpModelProbe->disconnect(this);
         m_acpModelProbe->stop();
         m_acpModelProbe->deleteLater();
         m_acpModelProbe = nullptr;
@@ -3877,7 +3884,7 @@ void ChatWidget::requestAcpAgentModels(const QString &agentId)
     m_acpModelsLoading = agentId;
     client->setSettings(settingsForAcpAgent(agentId));
     client->setWorkspace(m_agent.workspace());
-    connect(client, &AcpClient::modelsReceived, this, [this, client, agentId](const QStringList &models) {
+    connect(client, &AcpClient::modelsReceived, this, [this, client, agentId, popupWeak = QPointer<QWidget>(m_modelPopup)](const QStringList &models) {
         if (m_acpModelsLoading == agentId) {
             m_acpModelsLoading.clear();
         }
@@ -3892,7 +3899,7 @@ void ChatWidget::requestAcpAgentModels(const QString &agentId)
             m_settings.acpAgentModels = QString::fromUtf8(QJsonDocument(agentModels).toJson(QJsonDocument::Compact));
             Q_EMIT settingsChanged(m_settings);
         }
-        if (m_modelPopup) {
+        if (popupWeak) {
             fillModelResultList();
         }
         client->stop();
@@ -3901,12 +3908,12 @@ void ChatWidget::requestAcpAgentModels(const QString &agentId)
             m_acpModelProbe = nullptr;
         }
     });
-    connect(client, &AcpClient::failed, this, [this, client, agentId](const QString &error) {
+    connect(client, &AcpClient::failed, this, [this, client, agentId, popupWeak = QPointer<QWidget>(m_modelPopup)](const QString &error) {
         if (m_acpModelsLoading == agentId) {
             m_acpModelsLoading.clear();
         }
         showInfoMessage(i18n("Could not load models: %1", error), true);
-        if (m_modelPopup) {
+        if (popupWeak) {
             fillModelResultList();
         }
         client->deleteLater();

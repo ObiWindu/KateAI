@@ -176,6 +176,7 @@ private:
 
     QProcess *m_process = nullptr;
     QByteArray m_stdoutBuffer;
+    bool m_discardingStdoutFrame = false;
 
     QNetworkAccessManager *m_nam = nullptr;
     QString m_sessionId;

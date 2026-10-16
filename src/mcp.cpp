@@ -405,6 +405,7 @@ void McpClient::start()
     }
 
     m_shuttingDown = false;
+    m_discardingStdoutFrame = false;
     setState(McpServerState::Starting, u"Connecting…"_s);
 
     m_startupTimer = new QTimer(this);
@@ -489,6 +490,7 @@ void McpClient::stop()
         m_process = nullptr;
     }
     m_stdoutBuffer.clear();
+    m_discardingStdoutFrame = false;
     m_tools.clear();
     m_nam = nullptr;
     if (m_state != McpServerState::Disabled) {
@@ -673,22 +675,47 @@ void McpClient::onStdioReadyRead()
     if (!m_process) {
         return;
     }
-    m_stdoutBuffer.append(m_process->readAllStandardOutput());
-    int newline = m_stdoutBuffer.indexOf('\n');
-    while (newline >= 0) {
-        const QByteArray line = m_stdoutBuffer.left(newline);
-        m_stdoutBuffer.remove(0, newline + 1);
-        const QByteArray trimmed = line.trimmed();
-        if (!trimmed.isEmpty()) {
-            QJsonParseError parseError{};
-            const QJsonDocument document = QJsonDocument::fromJson(trimmed, &parseError);
-            if (parseError.error != QJsonParseError::NoError || !document.isObject()) {
-                Q_EMIT logMessage(u"[%1] Ignoring non-JSON output: %2"_s.arg(m_config.name, QString::fromUtf8(trimmed.left(200))));
-            } else {
-                handleMessage(document.object());
+    constexpr qsizetype kMaxFrameBytes = 16 * 1024 * 1024;
+    const QByteArray output = m_process->readAllStandardOutput();
+    for (qsizetype offset = 0; offset < output.size();) {
+        const qsizetype chunkSize = qMin<qsizetype>(64 * 1024, output.size() - offset);
+        const QByteArray chunk = output.mid(offset, chunkSize);
+        offset += chunkSize;
+        if (m_discardingStdoutFrame) {
+            const qsizetype discarded = chunk.indexOf('\n');
+            if (discarded < 0) {
+                continue;
             }
+            m_discardingStdoutFrame = false;
+            m_stdoutBuffer.append(chunk.mid(discarded + 1));
+        } else {
+            m_stdoutBuffer.append(chunk);
         }
-        newline = m_stdoutBuffer.indexOf('\n');
+        int newline = m_stdoutBuffer.indexOf('\n');
+        while (newline >= 0) {
+            if (newline > kMaxFrameBytes) {
+                m_stdoutBuffer.remove(0, newline + 1);
+                newline = m_stdoutBuffer.indexOf('\n');
+                continue;
+            }
+            const QByteArray line = m_stdoutBuffer.left(newline);
+            m_stdoutBuffer.remove(0, newline + 1);
+            const QByteArray trimmed = line.trimmed();
+            if (!trimmed.isEmpty()) {
+                QJsonParseError parseError{};
+                const QJsonDocument document = QJsonDocument::fromJson(trimmed, &parseError);
+                if (parseError.error != QJsonParseError::NoError || !document.isObject()) {
+                    Q_EMIT logMessage(u"[%1] Ignoring non-JSON output: %2"_s.arg(m_config.name, QString::fromUtf8(trimmed.left(200))));
+                } else {
+                    handleMessage(document.object());
+                }
+            }
+            newline = m_stdoutBuffer.indexOf('\n');
+        }
+        if (m_stdoutBuffer.size() > kMaxFrameBytes) {
+            m_stdoutBuffer.clear();
+            m_discardingStdoutFrame = true;
+        }
     }
 }
 

@@ -596,29 +596,21 @@ ToolResult ToolRunner::readFile(const QJsonObject &args) const
         return result;
     }
 
-    // Read the file contents through the document bridge
-    QString contents;
-    if (!m_bridge || !m_bridge->readDocument(readPath, &contents)) {
-        result.ok = false;
-        result.output = u"Failed to read %1"_s.arg(readPath);
-        return result;
-    }
-
     // Apply offset and limit parameters to paginate the file contents
     const int offset = args.value(u"offset"_s).toInt(1);
     const int limit = args.value(u"limit"_s).toInt(0);
     constexpr int kMaxReadLines = 10000;
     const int cappedLimit = limit > 0 ? qMin(limit, kMaxReadLines) : 0;
-    QStringList lines = contents.split(u'\n');
-    // Text that ends with a newline splits into one extra empty element. That
-    // is the file terminator, not a line the model can read, and counting it
-    // made the "N more line(s)" note and the "File has N lines" reply both lie
-    // by one.
-    if (!lines.isEmpty() && lines.last().isEmpty()) {
-        lines.removeLast();
-    }
     int start = std::max(0, offset - 1);
-    if (lines.isEmpty()) {
+    QStringList slice;
+    int totalLines = 0;
+    if (!m_bridge || !m_bridge->readDocumentLines(readPath, start + 1, cappedLimit > 0 ? cappedLimit : kMaxReadLines,
+                                                  &slice, &totalLines)) {
+        result.ok = false;
+        result.output = u"Failed to read %1"_s.arg(readPath);
+        return result;
+    }
+    if (totalLines == 0) {
         // A zero-byte file is not an error: the agent reads files it just
         // created. Saying "offset is past the end" would make a valid read
         // look like a failed tool call.
@@ -626,13 +618,11 @@ ToolResult ToolRunner::readFile(const QJsonObject &args) const
         result.output = u"(empty file)"_s;
         return result;
     }
-    if (start >= lines.size()) {
+    if (start >= totalLines) {
         result.ok = false;
-        result.output = u"File has %1 lines; offset is past the end."_s.arg(lines.size());
+        result.output = u"File has %1 lines; offset is past the end."_s.arg(totalLines);
         return result;
     }
-    int count = cappedLimit > 0 ? cappedLimit : lines.size() - start;
-    QStringList slice = lines.mid(start, count);
 
     // Format the output with line numbers for easier reading. Stop adding lines
     // once the observation budget is reached: clip() would otherwise cut the
@@ -649,7 +639,7 @@ ToolResult ToolRunner::readFile(const QJsonObject &args) const
         numbered += line;
     }
     result.output = clip(numbered);
-    const int remaining = lines.size() - (start + emitted);
+    const int remaining = totalLines - (start + emitted);
     if (remaining > 0) {
         if (limit > 0 && limit > cappedLimit) {
             result.output += u"\n[Requested %1 line(s) but a read is capped at %2; %3 line(s) remain. Call again with offset=%4 to continue.]"_s
@@ -1045,20 +1035,41 @@ ToolResult ToolRunner::listDir(const QJsonObject &args) const
         return result;
     }
     
-    // Get all entries in the directory (files, subdirectories, hidden items)
-    const QFileInfoList entries = dir.entryInfoList(QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden, QDir::Name);
-    
-    // Build a formatted list of directory contents, filtering out denied paths
-    QStringList lines;
-    for (const QFileInfo &info : entries) {
+    constexpr int kMaxDirectoryEntries = 1000;
+    constexpr int kMaxDirectoryOutputChars = 80000;
+    QVector<QPair<QString, QString>> visibleEntries;
+    QDirIterator iterator(resolved, QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden);
+    bool truncated = false;
+    while (iterator.hasNext()) {
+        iterator.next();
+        const QFileInfo info = iterator.fileInfo();
         if (m_sandbox.isDenied(info.absoluteFilePath())) {
             continue;
         }
-        lines.append((info.isDir() ? u"dir  "_s : u"file "_s) + info.fileName());
+        if (visibleEntries.size() >= kMaxDirectoryEntries) {
+            truncated = true;
+            break;
+        }
+        visibleEntries.append({info.fileName(), (info.isDir() ? u"dir  "_s : u"file "_s) + info.fileName()});
     }
-    
-    // Format the output as a readable directory listing
+    std::sort(visibleEntries.begin(), visibleEntries.end(), [](const auto &left, const auto &right) {
+        return left.first < right.first;
+    });
+    QStringList lines;
+    int outputChars = 0;
+    for (const auto &entry : visibleEntries) {
+        const int addedChars = entry.second.size() + (lines.isEmpty() ? 0 : 1);
+        if (outputChars + addedChars > kMaxDirectoryOutputChars) {
+            truncated = true;
+            break;
+        }
+        lines.append(entry.second);
+        outputChars += addedChars;
+    }
     result.output = lines.isEmpty() ? u"(empty)"_s : lines.join(u'\n');
+    if (truncated) {
+        result.output += u"\n[Listing truncated; refine the directory path to see more entries.]"_s;
+    }
     return result;
 }
 
