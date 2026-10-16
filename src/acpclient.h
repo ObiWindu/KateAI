@@ -246,6 +246,7 @@ private:
     QString m_status;
     QProcess *m_process = nullptr;
     QByteArray m_stdoutBuffer;
+    bool m_discardingStdoutFrame = false;
     bool m_shuttingDown = false;
 
     int m_nextId = 1;

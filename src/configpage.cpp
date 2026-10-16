@@ -1229,7 +1229,15 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     reset();
 }
 
-KateAiConfigPage::~KateAiConfigPage() = default;
+KateAiConfigPage::~KateAiConfigPage()
+{
+    if (m_acpFetchClient) {
+        m_acpFetchClient->disconnect(this);
+        m_acpFetchClient->stop();
+        delete m_acpFetchClient;
+        m_acpFetchClient = nullptr;
+    }
+}
 
 void KateAiConfigPage::refreshCustomAgentTable()
 {
@@ -2002,6 +2010,13 @@ void KateAiConfigPage::fetchAcpModels()
         return;
     }
 
+    if (m_acpFetchClient) {
+        m_acpFetchClient->disconnect(this);
+        m_acpFetchClient->stop();
+        m_acpFetchClient->deleteLater();
+        m_acpFetchClient = nullptr;
+    }
+
     // Disable the button while fetching
     QPushButton *btn = qobject_cast<QPushButton *>(sender());
     if (btn) {
@@ -2017,6 +2032,7 @@ void KateAiConfigPage::fetchAcpModels()
 
     // Create a temporary AcpClient to fetch models
     auto *client = new AcpClient(this);
+    m_acpFetchClient = client;
     Settings tempSettings = m_plugin->settings();
     tempSettings.acpAgentId = agentId;
     tempSettings.acpCommand = m_acpCommand->text().trimmed();
@@ -2025,24 +2041,31 @@ void KateAiConfigPage::fetchAcpModels()
     client->setSettings(tempSettings);
     client->setWorkspace(m_workspace);
 
-    connect(client, &AcpClient::modelsReceived, this, [this, client, btn](const QStringList &models) {
-        if (btn) {
-            btn->setEnabled(true);
-            btn->setText(i18n("Fetch Models"));
+    QPointer<QPushButton> btnWeak(btn);
+    QPointer<QLabel> statusWeak(m_acpModelStatus);
+    QPointer<QComboBox> modelComboWeak(m_acpModel);
+    QPointer<QComboBox> agentComboWeak(m_acpAgent);
+
+    connect(client, &AcpClient::modelsReceived, this, [this, client, btnWeak, statusWeak, modelComboWeak, agentComboWeak](const QStringList &models) {
+        if (btnWeak) {
+            btnWeak->setEnabled(true);
+            btnWeak->setText(i18n("Fetch Models"));
         }
 
         if (!models.isEmpty()) {
             // Update the combo box
-            const QString currentText = m_acpModel->currentText();
-            m_acpModel->clear();
-            m_acpModel->addItems(models);
-            if (!currentText.isEmpty()) {
-                m_acpModel->setCurrentText(currentText);
+            if (modelComboWeak) {
+                const QString currentText = modelComboWeak->currentText();
+                modelComboWeak->clear();
+                modelComboWeak->addItems(models);
+                if (!currentText.isEmpty()) {
+                    modelComboWeak->setCurrentText(currentText);
+                }
             }
 
             // Save to settings
             Settings s = m_plugin->settings();
-            const QString agentId = m_acpAgent->currentData().toString();
+            const QString agentId = agentComboWeak ? agentComboWeak->currentData().toString() : QString();
             QJsonDocument doc = QJsonDocument::fromJson(s.acpAgentModels.toUtf8());
             QJsonObject agentModels = doc.isObject() ? doc.object() : QJsonObject();
             QJsonArray modelsArray;
@@ -2053,29 +2076,34 @@ void KateAiConfigPage::fetchAcpModels()
             s.acpAgentModels = QString::fromUtf8(QJsonDocument(agentModels).toJson(QJsonDocument::Compact));
             m_plugin->setSettings(s);
 
-            if (m_acpModelStatus) {
-                m_acpModelStatus->setText(i18n("%1 models", models.size()));
+            if (statusWeak) {
+                statusWeak->setText(i18n("%1 models", models.size()));
             }
             Q_EMIT changed();
         } else {
-            if (m_acpModelStatus) {
-                m_acpModelStatus->setText(i18n("No models advertised"));
+            if (statusWeak) {
+                statusWeak->setText(i18n("No models advertised"));
             }
         }
 
+        if (m_acpFetchClient == client) {
+            m_acpFetchClient = nullptr;
+        }
         client->stop();
         client->deleteLater();
     });
 
-    connect(client, &AcpClient::failed, this, [this, client, btn](const QString &) {
-        if (btn) {
-            btn->setEnabled(true);
-            btn->setText(i18n("Fetch Models"));
+    connect(client, &AcpClient::failed, this, [this, client, btnWeak, statusWeak](const QString &) {
+        if (btnWeak) {
+            btnWeak->setEnabled(true);
+            btnWeak->setText(i18n("Fetch Models"));
         }
-        if (m_acpModelStatus) {
-            m_acpModelStatus->setText(i18n("Failed to load models"));
+        if (statusWeak) {
+            statusWeak->setText(i18n("Failed to load models"));
         }
-        //qDebug() << "Failed to fetch ACP models:" << error;
+        if (m_acpFetchClient == client) {
+            m_acpFetchClient = nullptr;
+        }
         client->deleteLater();
     });
 

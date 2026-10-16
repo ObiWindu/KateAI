@@ -12,6 +12,7 @@
 #include <QHash>
 #include <QList>
 #include <QJsonArray>
+#include <QPointer>
 #include <QWidget>
 #include "llmclient.h"
 
@@ -35,6 +36,7 @@ namespace KateAi
 {
 
 class KateAiPlugin;
+class AcpClient;
 
 class KateAiConfigPage : public KTextEditor::ConfigPage
 {
@@ -105,6 +107,7 @@ private:
 
     // Model fetching
     LlmClient *m_modelFetcher = nullptr;
+    QPointer<AcpClient> m_acpFetchClient;
     QHash<Provider, QStringList> m_modelCatalog;
     bool m_acpAutoFetchEnabled = true;
     QString m_lastAcpFetchSignature;

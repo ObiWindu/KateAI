@@ -20,6 +20,27 @@ using namespace Qt::Literals::StringLiterals;
 namespace KateAi
 {
 
+bool DocumentBridge::readDocumentLines(const QString &path, int startLine, int maxLines,
+                                       QStringList *page, int *totalLines) const
+{
+    QString contents;
+    if (!readDocument(path, &contents)) {
+        return false;
+    }
+
+    QStringList lines = contents.split(u'\n');
+    if (!lines.isEmpty() && lines.last().isEmpty()) {
+        lines.removeLast();
+    }
+    if (totalLines) {
+        *totalLines = lines.size();
+    }
+    if (page) {
+        *page = lines.mid(qMax(0, startLine - 1), qMax(0, maxLines));
+    }
+    return true;
+}
+
 static KTextEditor::Document *openDocumentFor(const QString &path)
 {
     // Get the global KTextEditor instance to access open documents
@@ -68,6 +89,50 @@ bool DiskDocumentBridge::readDocument(const QString &path, QString *contents) co
     in.setEncoding(QStringConverter::Utf8);
     if (contents) {
         *contents = in.readAll();
+    }
+    return true;
+}
+
+bool DiskDocumentBridge::readDocumentLines(const QString &path, int startLine, int maxLines,
+                                           QStringList *page, int *totalLines) const
+{
+    QStringList requestedLines;
+    const int firstLine = qMax(0, startLine - 1);
+    const int lineLimit = qMax(0, maxLines);
+    int lineCount = 0;
+
+    if (auto *doc = openDocumentFor(path)) {
+        lineCount = doc->lines();
+        if (lineCount > 0 && doc->line(lineCount - 1).isEmpty()) {
+            --lineCount;
+        }
+        if (page) {
+            const int lastLine = qMin(lineCount, firstLine + lineLimit);
+            for (int index = firstLine; index < lastLine; ++index) {
+                requestedLines.append(doc->line(index));
+            }
+        }
+    } else {
+        QFile file(path);
+        if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            return false;
+        }
+        QTextStream in(&file);
+        in.setEncoding(QStringConverter::Utf8);
+        while (!in.atEnd()) {
+            const QString line = in.readLine();
+            if (page && lineCount >= firstLine && lineCount - firstLine < lineLimit) {
+                requestedLines.append(line);
+            }
+            ++lineCount;
+        }
+    }
+
+    if (page) {
+        *page = requestedLines;
+    }
+    if (totalLines) {
+        *totalLines = lineCount;
     }
     return true;
 }

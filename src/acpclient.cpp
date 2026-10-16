@@ -101,6 +101,15 @@ static QString toolContentText(const QJsonValue &content)
             parts.append(toolContentText(obj.value(u"output"_s)));
         } else if (obj.contains(u"result"_s)) {
             parts.append(toolContentText(obj.value(u"result"_s)));
+        } else if (obj.contains(u"stdout"_s) || obj.contains(u"stderr"_s)) {
+            const QString stdoutText = jsonText(obj.value(u"stdout"_s));
+            const QString stderrText = jsonText(obj.value(u"stderr"_s));
+            if (!stdoutText.isEmpty()) {
+                parts.append(stdoutText);
+            }
+            if (!stderrText.isEmpty()) {
+                parts.append(stderrText);
+            }
         } else {
             parts.append(jsonText(item));
         }
@@ -139,6 +148,8 @@ AcpClient::AcpClient(QObject *parent)
 
 AcpClient::~AcpClient()
 {
+    m_shuttingDown = true;
+    disconnect();
     stop();
 }
 
@@ -527,6 +538,7 @@ void AcpClient::stop()
     if (m_cancelGraceTimer) {
         m_cancelGraceTimer->stop();
         delete m_cancelGraceTimer;
+        m_cancelGraceTimer = nullptr;
     }
     failAll(u"ACP agent disconnected."_s);
     releaseAllTerminals();
@@ -543,6 +555,7 @@ void AcpClient::stop()
         m_process = nullptr;
     }
     m_stdoutBuffer.clear();
+    m_discardingStdoutFrame = false;
     m_sessionId.clear();
     m_promptId = 0;
     m_permissionRpcId = QJsonValue();
@@ -552,7 +565,6 @@ void AcpClient::stop()
     m_modelConfigId.clear();
     m_legacySetModel = false;
     m_modelSetInFlight = false;
-    m_shuttingDown = false;
     if (m_state != State::Stopped) {
         setState(State::Stopped, u"Disconnected"_s);
     }
@@ -649,6 +661,7 @@ void AcpClient::spawnProcess()
         m_process = nullptr;
     }
     m_shuttingDown = false;
+    m_discardingStdoutFrame = false;
     setState(State::Starting, u"Starting ACP agent…"_s);
 
     m_process = new QProcess(this);
@@ -775,6 +788,9 @@ void AcpClient::sendInitialize()
     params.insert(u"clientInfo"_s, clientInfo);
 
     sendRequest(u"initialize"_s, params, [this](const QJsonObject &result, const QString &error) {
+        if (m_shuttingDown) {
+            return;
+        }
         if (!error.isEmpty()) {
             setState(State::Failed, error);
             Q_EMIT failed(error);
@@ -925,6 +941,9 @@ void AcpClient::maybeAuthenticate(const QJsonArray &authMethods)
     QJsonObject params;
     params.insert(u"methodId"_s, methodId);
     sendRequest(u"authenticate"_s, params, [this, methodId](const QJsonObject &, const QString &error) {
+        if (m_shuttingDown) {
+            return;
+        }
         if (!error.isEmpty()) {
             const QString message = u"ACP authentication (%1) failed: %2. Complete the agent's CLI login, then try again."_s.arg(methodId, error);
             setState(State::Failed, message);
@@ -954,6 +973,9 @@ void AcpClient::sendSessionNew()
         params.insert(u"_meta"_s, meta);
     }
     sendRequest(u"session/new"_s, params, [this](const QJsonObject &result, const QString &error) {
+        if (m_shuttingDown) {
+            return;
+        }
         if (!error.isEmpty()) {
             setState(State::Failed, error);
             Q_EMIT failed(error);
@@ -988,6 +1010,9 @@ void AcpClient::sendSessionLoadOrResume()
     params.insert(u"cwd"_s, m_workspace);
     params.insert(u"mcpServers"_s, mcpServersPayload());
     sendRequest(method, params, [this](const QJsonObject &result, const QString &error) {
+        if (m_shuttingDown) {
+            return;
+        }
         if (!error.isEmpty()) {
             m_resumeSessionId.clear();
             sendSessionNew();
@@ -1025,6 +1050,9 @@ void AcpClient::sendPromptNow(const QString &text)
     params.insert(u"sessionId"_s, m_sessionId);
     params.insert(u"prompt"_s, promptBlocks(text));
     m_promptId = sendRequest(u"session/prompt"_s, params, [this](const QJsonObject &result, const QString &error) {
+        if (m_shuttingDown) {
+            return;
+        }
         if (!error.isEmpty()) {
             finishPrompt(QString(), error);
             return;
@@ -1204,14 +1232,40 @@ void AcpClient::onStdioReadyRead()
     if (!m_process) {
         return;
     }
-    m_stdoutBuffer.append(m_process->readAllStandardOutput());
-    handleBuffer();
+    constexpr qsizetype kMaxFrameBytes = 16 * 1024 * 1024;
+    const QByteArray output = m_process->readAllStandardOutput();
+    for (qsizetype offset = 0; offset < output.size();) {
+        const qsizetype chunkSize = qMin<qsizetype>(64 * 1024, output.size() - offset);
+        const QByteArray chunk = output.mid(offset, chunkSize);
+        offset += chunkSize;
+        if (m_discardingStdoutFrame) {
+            const qsizetype newline = chunk.indexOf('\n');
+            if (newline < 0) {
+                continue;
+            }
+            m_discardingStdoutFrame = false;
+            m_stdoutBuffer.append(chunk.mid(newline + 1));
+        } else {
+            m_stdoutBuffer.append(chunk);
+        }
+        handleBuffer();
+        if (m_stdoutBuffer.size() > kMaxFrameBytes) {
+            m_stdoutBuffer.clear();
+            m_discardingStdoutFrame = true;
+        }
+    }
 }
 
 void AcpClient::handleBuffer()
 {
+    constexpr qsizetype kMaxFrameBytes = 16 * 1024 * 1024;
     int newline = m_stdoutBuffer.indexOf('\n');
     while (newline >= 0) {
+        if (newline > kMaxFrameBytes) {
+            m_stdoutBuffer.remove(0, newline + 1);
+            newline = m_stdoutBuffer.indexOf('\n');
+            continue;
+        }
         QByteArray line = m_stdoutBuffer.left(newline);
         m_stdoutBuffer.remove(0, newline + 1);
         if (line.endsWith('\r')) {
@@ -1419,13 +1473,19 @@ void AcpClient::handleSessionUpdate(const QJsonObject &update)
             result.ok = status == u"completed"_s;
             result.output = toolContentText(update.value(u"content"_s));
             if (result.output.isEmpty()) {
-                result.output = jsonText(update.value(u"rawOutput"_s));
+                result.output = toolContentText(update.value(u"rawOutput"_s));
             }
             if (result.output.isEmpty()) {
-                result.output = jsonText(update.value(u"output"_s));
+                result.output = toolContentText(update.value(u"output"_s));
             }
             if (result.output.isEmpty()) {
-                result.output = jsonText(update.value(u"result"_s));
+                result.output = toolContentText(update.value(u"result"_s));
+            }
+            if (result.output.isEmpty()) {
+                // Some ACP agents stream command output while the tool runs,
+                // then send a terminal status update with no content at all.
+                // Keep that last complete stream as the final card output.
+                result.output = m_toolStreamed.value(toolCallId);
             }
             m_liveTools.remove(toolCallId);
             m_toolStreamed.remove(toolCallId);
