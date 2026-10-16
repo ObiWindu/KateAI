@@ -114,11 +114,16 @@ public:
     bool hasDiffPreview() const { return m_hasDiffPreview; }
     bool isFileEditTool() const;
     void setActivityFrame(int frame);
+    // Marks the card as the navigation target: a ring that fades after a
+    // moment, so a card jumped to with the keyboard can be found again after
+    // the scroll that carried it into view.
+    void flashAttention();
     void reflowNow();
 
 Q_SIGNALS:
     void approvalChosen(PermissionDecision decision);
     void expandedChanged(bool expanded);
+    void openFileRequested(const QString &path, int line);
 
 protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
@@ -138,6 +143,9 @@ private:
     void applyDetailsHeight();
     void applyDetailView();
     bool hasDetailsBody() const;
+    // What the copy button would put on the clipboard right now.
+    QString copyableText() const;
+    void updateCopyButton();
     // Whether a diff is attached to the card at all, independently of whether
     // the diff surface has been shown yet: a card is filled before it is ever
     // displayed, so its visibility says nothing about the state of its body.
@@ -197,9 +205,14 @@ private:
     QLabel *m_diffStat = nullptr;
     QLabel *m_duration = nullptr;
     QPushButton *m_expandBtn = nullptr;
+    QPushButton *m_copyBtn = nullptr;
     QWidget *m_approvalRow = nullptr;
     QLabel *m_approvalSubject = nullptr;
     QWidget *m_detailsContainer = nullptr;
+    // The complete result, clamped only by the card's display rules. Held
+    // separately from what is rendered so the copy button can hand over the
+    // whole output rather than the truncated view of it.
+    QString m_resultOutput;
     // Names the surface the card expanded into, so a diff, file contents and
     // command output are told apart before anything is read.
     QLabel *m_viewCaption = nullptr;

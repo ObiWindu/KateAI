@@ -59,7 +59,13 @@ static QString clip(const QString &text, int maxChars = 80000)
     if (text.size() <= maxChars) {
         return text;
     }
-    return text.left(maxChars) + u"\n... truncated %1 characters"_s.arg(text.size() - maxChars);
+    // Keep both ends: the head carries the beginning of the output (headers,
+    // first errors) and the tail carries what the command last said, which is
+    // where a failure summary or a final total lives. A head-only clip throws
+    // that half away, and it is the half the model most needs.
+    const int half = maxChars / 2;
+    return text.left(half) + u"\n... truncated %1 of %2 characters ...\n"_s.arg(text.size() - maxChars).arg(text.size())
+        + text.right(half);
 }
 
 static bool jsonBool(const QJsonValue &value, bool fallback = false)
@@ -902,31 +908,94 @@ ToolResult ToolRunner::multiEditFile(const QJsonObject &args)
         allReplaceAll.append(replaceAll);
     }
 
-    // Apply all edits atomically
+    // Apply all edits atomically. Each edit must target text none of the
+    // earlier edits consumed or produced: the matches are located in the
+    // working string after those edits, so an edit aimed at text an earlier
+    // one rewrote silently lands somewhere else than the caller meant (or
+    // matches twice where it used to match once). Rejecting the whole batch
+    // is the only behaviour the caller can reason about, so overlaps fail
+    // the same way a missing old_string does: nothing is written.
     QString workingContents = contents;
     int totalReplacements = 0;
+    // Ranges of the working string written or consumed by earlier edits, in
+    // ascending, disjoint order.
+    QList<QPair<int, int>> claimed;
     for (int i = 0; i < numChunks; ++i) {
         const QString &oldStr = allOldStrings[i];
         const QString &newStr = allNewStrings[i];
         const bool replaceAll = allReplaceAll[i];
-        
-        const int count = workingContents.count(oldStr);
-        if (count == 0) {
+
+        if (workingContents.count(oldStr) == 0) {
             // This shouldn't happen since we validated, but check anyway
             result.ok = false;
             result.output = u"Chunk %1 of %2: old_string no longer matches after previous edits. No edits were applied."_s
                 .arg(i + 1).arg(numChunks);
             return result;
         }
-        if (count > 1 && !replaceAll) {
+
+        // Walk the matches left to right, non-overlapping, the way
+        // QString::replace does, so span arithmetic stays in step with it.
+        int searchFrom = 0;
+        QList<QPair<int, int>> matches;
+        while (true) {
+            const int at = workingContents.indexOf(oldStr, searchFrom);
+            if (at < 0) {
+                break;
+            }
+            matches.append({at, at + oldStr.size()});
+            searchFrom = at + oldStr.size();
+        }
+
+        if (matches.size() > 1 && !replaceAll) {
             result.ok = false;
             result.output = u"Chunk %1 of %2: old_string matched %3 times after previous edits; it must be unique, or set replace_all=true. No edits were applied."_s
-                .arg(i + 1).arg(numChunks).arg(count);
+                .arg(i + 1).arg(numChunks).arg(matches.size());
             return result;
         }
 
-        workingContents.replace(oldStr, newStr);
-        totalReplacements += count;
+        for (const auto &match : matches) {
+            for (const auto &range : claimed) {
+                if (match.first < range.second && range.first < match.second) {
+                    result.ok = false;
+                    result.output = u"Chunk %1 of %2: old_string overlaps text an earlier edit already changed. No edits were applied. Split the edits so each one targets text untouched by the others, re-reading the file if needed."_s
+                        .arg(i + 1).arg(numChunks);
+                    return result;
+                }
+            }
+        }
+
+        // Rebuild with the new text in place of every match, tracking where
+        // each edit's output lands and where the untouched ranges moved to.
+        // Matches are ascending and disjoint and none of them overlap
+        // `claimed`, so a single left-to-right walk covers both.
+        QString rebuilt;
+        rebuilt.reserve(workingContents.size());
+        QList<QPair<int, int>> newClaimed;
+        int cursor = 0;
+        int shift = 0;
+        int ci = 0;
+        for (const auto &match : matches) {
+            // Claimed ranges that end at or before this match sit in the
+            // preserved gap ahead of it and move by the accumulated shift.
+            while (ci < claimed.size() && claimed[ci].second <= match.first) {
+                newClaimed.append({claimed[ci].first + shift, claimed[ci].second + shift});
+                ++ci;
+            }
+            rebuilt += workingContents.mid(cursor, match.first - cursor);
+            rebuilt += newStr;
+            newClaimed.append({rebuilt.size() - newStr.size(), rebuilt.size()});
+            cursor = match.second;
+            shift += newStr.size() - oldStr.size();
+        }
+        while (ci < claimed.size()) {
+            newClaimed.append({claimed[ci].first + shift, claimed[ci].second + shift});
+            ++ci;
+        }
+        rebuilt += workingContents.mid(cursor);
+        workingContents = rebuilt;
+        claimed = newClaimed;
+
+        totalReplacements += matches.size();
     }
 
     if (!m_bridge->writeDocument(resolved, workingContents, &error)) {

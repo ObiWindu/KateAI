@@ -134,12 +134,10 @@ void ProjectGraph::scanDirectory(const QString &dirPath, const QString &parentNo
                 continue;
             }
 
-            // Skip common binary/media extensions
-            const QString ext = entry.suffix().toLower();
-            if (ext == u"o"_s || ext == u"so"_s || ext == u"a"_s || ext == u"dll"_s ||
-                ext == u"exe"_s || ext == u"bin"_s || ext == u"png"_s || ext == u"jpg"_s ||
-                ext == u"jpeg"_s || ext == u"gif"_s || ext == u"ico"_s || ext == u"pdf"_s ||
-                ext == u"zip"_s || ext == u"tar"_s || ext == u"gz"_s || ext == u"xz"_s) {
+            // Skip binaries. The extension list used to be open-coded here and
+            // missed text-named files with binary content; isBinaryFile() checks
+            // the same extensions first and then sniffs the head of the file.
+            if (isBinaryFile(entry.absoluteFilePath())) {
                 continue;
             }
 
@@ -161,10 +159,10 @@ void ProjectGraph::scanDirectory(const QString &dirPath, const QString &parentNo
             if (file.open(QIODevice::ReadOnly | QIODevice::Text)) {
                 node.content = QString::fromUtf8(file.read(16 * 1024));
                 // Both metrics were left indeterminate here and serialised as
-                // garbage; derive them from what was actually read.
-                node.linesOfCode = node.content.count(u'\n');
-                node.complexity = extractClassDefinitions(node.content).count()
-                    + extractFunctionDefinitions(node.content).count();
+                // garbage; derive them from what was actually read, with the
+                // same helpers the incremental update path uses.
+                node.linesOfCode = lineCount(node.content);
+                node.complexity = definitionCount(*this, node.content);
             }
             addNode(node);
 
@@ -778,6 +776,14 @@ QJsonObject ProjectGraph::toJson() const
         nodeJson.insert(u"linesOfCode"_s, node->linesOfCode);
         nodeJson.insert(u"isReadOnly"_s, node->isReadOnly);
         nodeJson.insert(u"lastModified"_s, node->lastModified);
+        // metadata carries the language every file node is keyed on; dropping
+        // it made a reloaded graph lose the one field the graph tool filters
+        // and formats by, so a restored session came back with unknown files.
+        QJsonObject metadataJson;
+        for (auto it = node->metadata.begin(); it != node->metadata.end(); ++it) {
+            metadataJson.insert(it.key(), it.value());
+        }
+        nodeJson.insert(u"metadata"_s, metadataJson);
 
         nodesArray.append(nodeJson);
     }
@@ -835,6 +841,7 @@ bool ProjectGraph::fromJson(const QJsonObject &json)
 
         node.complexity = nodeJson.value(u"complexity"_s).toInteger();
         node.linesOfCode = nodeJson.value(u"linesOfCode"_s).toInteger();
+        node.metadata = nodeJson.value(u"metadata"_s).toObject();
 
         addNode(node);
     }
@@ -903,34 +910,25 @@ void ProjectGraph::cleanupDeletedNodes()
     }
 }
 
+int ProjectGraph::lineCount(const QString &content)
+{
+    return content.count(u'\n');
+}
+
+int ProjectGraph::definitionCount(ProjectGraph &analyser, const QString &content)
+{
+    return analyser.extractClassDefinitions(content).count()
+        + analyser.extractFunctionDefinitions(content).count();
+}
+
 void ProjectGraph::updateNodeMetrics(GraphNode *node)
 {
     if (!node) {
         return;
     }
 
-    node->linesOfCode = node->content.split(u"\n"_s).size();
-
-    // Calculate cyclomatic complexity based on control flow statements
-    int complexity = 1; // Base complexity
-    QRegularExpression ifRegex(u"if|else if|switch|case|for|while|do|catch|except|finally"_s);
-    QRegularExpression loopRegex(u"for|while|do"_s);
-    QRegularExpression conditionalRegex(u"if|else if|case|catch|except"_s);
-
-    QStringList lines = node->content.split(u"\n"_s);
-    for (const QString &line : lines) {
-        if (ifRegex.match(line).hasMatch()) {
-            complexity++;
-        }
-        if (loopRegex.match(line).hasMatch()) {
-            complexity++;
-        }
-        if (conditionalRegex.match(line).hasMatch()) {
-            complexity++;
-        }
-    }
-
-    node->complexity = complexity;
+    node->linesOfCode = lineCount(node->content);
+    node->complexity = definitionCount(*this, node->content);
 }
 
 QString ProjectGraph::extractImportsFromContent(const QString &content, const QString &filePath) const
@@ -1029,6 +1027,44 @@ QString ProjectGraph::generateNodeId(const QString &path, const QString &type)
         id += u"_"_s + type;
     }
     return id;
+}
+
+bool ProjectGraph::isBinaryFile(const QString &path)
+{
+    // Extension first: a known binary extension answers without reading, and
+    // reading a 4 GiB database or a video to sniff its first bytes is waste.
+    static const QSet<QString> binaryExtensions = {
+        u"o"_s, u"so"_s, u"a"_s, u"dll"_s, u"exe"_s, u"bin"_s, u"obj"_s, u"lib"_s,
+        u"png"_s, u"jpg"_s, u"jpeg"_s, u"gif"_s, u"ico"_s, u"bmp"_s, u"webp"_s,
+        u"pdf"_s, u"zip"_s, u"tar"_s, u"gz"_s, u"xz"_s, u"bz2"_s, u"7z"_s,
+        u"class"_s, u"jar"_s, u"pyc"_s, u"wasm"_s, u"db"_s, u"sqlite"_s,
+        u"mp3"_s, u"mp4"_s, u"avi"_s, u"mov"_s, u"wav"_s, u"woff"_s, u"woff2"_s, u"ttf"_s};
+    if (binaryExtensions.contains(QFileInfo(path).suffix().toLower())) {
+        return true;
+    }
+    // Then content: a NUL byte anywhere in the head is the practical test,
+    // because every text format we analyse stays printable there.
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) {
+        return false;
+    }
+    const QByteArray head = file.read(1024);
+    return head.contains('\0');
+}
+
+QString ProjectGraph::extractContentPreview(const QString &content, int maxLength)
+{
+    const int budget = qMax(0, maxLength);
+    // Headers and blank lines say nothing a preview needs, and the project
+    // graph is quoted back into the system prompt where space is scarce.
+    const QString flattened = content.simplified();
+    if (budget <= 0) {
+        return QString();
+    }
+    if (flattened.size() <= budget) {
+        return flattened;
+    }
+    return flattened.left(budget) + u"\u2026"_s;
 }
 
 QString ProjectGraph::getNodeTypeFromPath(const QString &path)

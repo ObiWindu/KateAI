@@ -10,8 +10,11 @@
 
 #include <KLocalizedString>
 
+#include <QApplication>
+#include <QClipboard>
 #include <QFileInfo>
 #include <QFontMetrics>
+#include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QMouseEvent>
@@ -132,6 +135,47 @@ QString clampToLines(const QString &text, int maxLines)
     return lines.join(u'\n');
 }
 
+// A unified diff starts with a "--- " file header and a "+++ " header within
+// the next few lines. Prose that merely contains dashes is not a diff.
+QString extractUnifiedDiff(const QString &text)
+{
+    const QStringList lines = text.split(u'\n');
+    const qsizetype count = lines.size();
+    qsizetype start = -1;
+    for (qsizetype i = 0; i < count; ++i) {
+        if (!lines.at(i).startsWith(u"--- "_s)) {
+            continue;
+        }
+        const qsizetype window = std::min(count, i + 6);
+        for (qsizetype j = i + 1; j < window; ++j) {
+            if (lines.at(j).startsWith(u"+++ "_s)) {
+                start = i;
+                break;
+            }
+        }
+        if (start >= 0) {
+            break;
+        }
+    }
+    if (start < 0) {
+        return QString();
+    }
+    return lines.mid(start).join(u'\n');
+}
+
+QString textBeforeDiff(const QString &text)
+{
+    const QString diff = extractUnifiedDiff(text);
+    if (diff.isEmpty()) {
+        return text;
+    }
+    const int at = text.indexOf(diff);
+    if (at <= 0) {
+        return QString();
+    }
+    return text.left(at).trimmed();
+}
+
 } // namespace
 
 namespace KateAi
@@ -142,6 +186,9 @@ ToolCallWidget::ToolCallWidget(const QString &toolCallId, QWidget *parent)
     , m_toolCallId(toolCallId)
 {
     setObjectName(u"ToolCallWidget_%1"_s.arg(toolCallId));
+    // A plain QWidget paints neither a stylesheet background nor a border
+    // until this is set, which left the coloured left rail invisible.
+    setAttribute(Qt::WA_StyledBackground, true);
     setMinimumWidth(0);
     setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Maximum);
 
@@ -199,6 +246,40 @@ ToolCallWidget::ToolCallWidget(const QString &toolCallId, QWidget *parent)
     m_duration->setStyleSheet(
         QStringLiteral("QLabel { color: %1; font-size: 11px; }").arg(ChatTheme::textMuted()));
     headerLayout->addWidget(m_duration);
+
+    // Copies what the card holds: the result once the tool finished, the live
+    // stream while it runs. The whole reply has its own copy button; a card is
+    // where a specific diff or command output lives, and that is the part a
+    // user actually wants on its own.
+    m_copyBtn = new QPushButton(u"⧉"_s, this);
+    m_copyBtn->setObjectName(u"toolCopyButton"_s);
+    m_copyBtn->setFixedSize(20, 20);
+    m_copyBtn->setFlat(true);
+    m_copyBtn->setCursor(Qt::PointingHandCursor);
+    m_copyBtn->setToolTip(i18n("Copy output"));
+    m_copyBtn->setStyleSheet(
+        QStringLiteral("QPushButton { color: %1; background: transparent; border: none; font-size: 11px; }"
+                       "QPushButton:hover { color: #ffffff; }")
+            .arg(ChatTheme::textMuted()));
+    m_copyBtn->hide();
+    connect(m_copyBtn, &QPushButton::clicked, this, [this]() {
+        const QString text = copyableText();
+        if (text.isEmpty()) {
+            return;
+        }
+        // The button itself is the only feedback available: a card has no room
+        // for a toast, and the clipboard is silent by nature.
+        if (QClipboard *clipboard = QGuiApplication::clipboard()) {
+            clipboard->setText(text);
+        }
+        m_copyBtn->setText(u"✓"_s);
+        QTimer::singleShot(900, this, [this]() {
+            if (m_copyBtn) {
+                m_copyBtn->setText(u"⧉"_s);
+            }
+        });
+    });
+    headerLayout->addWidget(m_copyBtn);
 
     m_expandBtn = new QPushButton(u"▸"_s, this);
     m_expandBtn->setFixedSize(20, 20);
@@ -316,7 +397,8 @@ ToolCallWidget::ToolCallWidget(const QString &toolCallId, QWidget *parent)
     // private members.
     m_describeDiff->setObjectName(u"toolDiff"_s);
     m_describeDiff->setReadOnly(true);
-    m_describeDiff->setOpenExternalLinks(false);
+    m_describeDiff->setOpenExternalLinks(true);
+    connect(m_describeDiff, &QTextBrowser::anchorClicked, this, [this](const QUrl &url){ if(url.isLocalFile()) Q_EMIT openFileRequested(url.toLocalFile(), 0); else if(url.scheme()==u"file"_s) Q_EMIT openFileRequested(url.path(), 0); });
     m_describeDiff->setMinimumWidth(0);
     m_describeDiff->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     m_describeDiff->setLineWrapMode(QTextEdit::WidgetWidth);
@@ -349,7 +431,8 @@ ToolCallWidget::ToolCallWidget(const QString &toolCallId, QWidget *parent)
     // into private members.
     m_details->setObjectName(u"toolDetails"_s);
     m_details->setReadOnly(true);
-    m_details->setOpenExternalLinks(false);
+    m_details->setOpenExternalLinks(true);
+    connect(m_details, &QTextBrowser::anchorClicked, this, [this](const QUrl &url){ if(url.isLocalFile()) Q_EMIT openFileRequested(url.toLocalFile(), 0); else if(url.scheme()==u"file"_s) Q_EMIT openFileRequested(url.path(), 0); });
     m_details->setMinimumWidth(0);
     m_details->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     m_details->setLineWrapMode(QTextEdit::WidgetWidth);
@@ -578,6 +661,39 @@ void ToolCallWidget::setRunningInput(const QString &input)
     scheduleReflow();
 }
 
+QString ToolCallWidget::copyableText() const
+{
+    // The result is the truth once there is one; the live stream is the best
+    // there is while the tool runs.
+    return m_resultOutput.isEmpty() ? m_partialOutput : m_resultOutput;
+}
+
+void ToolCallWidget::updateCopyButton()
+{
+    if (!m_copyBtn) {
+        return;
+    }
+    m_copyBtn->setVisible(!copyableText().trimmed().isEmpty());
+}
+
+void ToolCallWidget::flashAttention()
+{
+    if (!m_header) {
+        return;
+    }
+    // Keyboard navigation lands on a card that may be far off screen, so the
+    // jump needs a marker that survives the scroll. An id-qualified rule beats
+    // the card's own, so the ring is visible until the timer drops it.
+    const QString ring = QStringLiteral("ToolCallWidget#%1 { border: 1px solid %2; border-radius: 6px; }")
+                             .arg(objectName(), ChatTheme::accent());
+    setStyleSheet(styleSheet() + u'\n' + ring);
+    QTimer::singleShot(800, this, [this]() {
+        if (this) {
+            updateStyle();
+        }
+    });
+}
+
 QString ToolCallWidget::plainToHtml(const QString &text) const
 {
     QString out = u"<body>"_s;
@@ -660,18 +776,28 @@ void ToolCallWidget::setPartialOutput(const QString &partialOutput)
         return;
     }
     m_partialOutput = partialOutput;
+    updateCopyButton();
     // The stream has arrived: it is the body from here on, not the arguments.
     m_showingInput = false;
     m_runningInput.clear();
 
+    // An edit can stream its unified diff before the tool reports done. Colour
+    // that portion as it arrives, and keep only the preamble in the details so
+    // the change is not drawn twice. The full stream stays in m_partialOutput
+    // for the copy button.
+    const QString diff = isDiffTool(m_toolName) ? extractUnifiedDiff(partialOutput) : QString();
+    if (!diff.isEmpty()) {
+        setDescribeDiff(diff);
+    }
     // The stream is rendered in the muted colour so the card reads as "this is
     // still arriving" while it runs, and setFinished's white text is clearly
     // the final answer. Capped by lines like the finished text, so a chatty
     // command cannot grow the card without bound either.
-    m_details->setHtml(partialToHtml(clampToLines(partialOutput, kMaxResultLines)));
+    const QString body = diff.isEmpty() ? partialOutput : textBeforeDiff(partialOutput);
+    m_details->setHtml(partialToHtml(clampToLines(body, kMaxResultLines)));
     // A stream is worth watching, so it opens itself; a card the user collapsed
     // themselves stays collapsed, because setExpanded tracks their choice.
-    if (!m_details->toPlainText().isEmpty()) {
+    if (!m_details->toPlainText().isEmpty() || m_hasDiffPreview) {
         setExpanded(true);
     }
     applyDetailsHeight();
@@ -707,6 +833,10 @@ void ToolCallWidget::setFinished(const ToolResult &result)
     m_partialOutput.clear();
     m_runningInput.clear();
     m_showingInput = false;
+    // Kept whole: the card clamps what it displays to 200 lines, but a copy of
+    // a truncated command output is a corrupted copy.
+    m_resultOutput = result.output;
+    updateCopyButton();
     if (m_durationTimer) {
         m_durationTimer->stop();
     }
@@ -736,10 +866,20 @@ void ToolCallWidget::setFinished(const ToolResult &result)
     // rather than characters so a long but meaningful line is never silently
     // cut in half. The card opens on completion: output belongs in the tool
     // call itself, not in a second preview box below it.
-    const QString output = clampToLines(result.output, kMaxResultLines);
+    //
+    // ACP edits often carry the unified diff only in this result, not in the
+    // arguments. Colour that portion, and leave an args-built diff in place
+    // when the result has no "--- / +++" of its own. The copy button still
+    // hands over m_resultOutput, which is the whole result.
+    const QString diff = isDiffTool(m_toolName) ? extractUnifiedDiff(result.output) : QString();
+    if (!diff.isEmpty()) {
+        setDescribeDiff(diff);
+    }
+    const QString shownSource = diff.isEmpty() ? result.output : textBeforeDiff(result.output);
+    const QString shown = clampToLines(shownSource, kMaxResultLines);
     const QString language = languageForTool(m_toolName);
-    m_details->setHtml(CodeHighlight::htmlForCode(output, language));
-    setExpanded(!output.trimmed().isEmpty() || m_hasDiffPreview);
+    m_details->setHtml(CodeHighlight::htmlForCode(shown, language));
+    setExpanded(!shown.trimmed().isEmpty() || m_hasDiffPreview);
     applyDetailView();
     applyDetailsHeight();
     scheduleReflow();
@@ -845,26 +985,39 @@ QString ToolCallWidget::iconForTool(const QString &toolName) const
 {
     // Short glyphs rather than emoji: emoji render at wildly different sizes
     // and baselines across themes, which is what made the column ragged.
-    
-    // File operations - both KateAI and ACP tool names
-    if (toolName == u"read_file"_s || toolName == u"fs/read_text_file"_s) return u"\u{1F4C4}"_s;
-    if (toolName == u"write_file"_s || toolName == u"fs/write_text_file"_s) return u"\u{1F4DD}"_s;
-    if (toolName == u"edit_file"_s || toolName == u"multi_edit_file"_s || toolName == u"multi_replace_file_content"_s) return u"\u{270F}"_s;
-    if (toolName == u"list_dir"_s) return u"\u{1F4C1}"_s;
-    if (toolName == u"grep"_s) return u"\u{1F50D}"_s;
-    if (toolName == u"glob"_s) return u"\u{1F50E}"_s;
-    if (toolName == u"bash"_s) return u"\u{26A1}"_s;
-        if (toolName == u"web_search"_s) return u"\u{1F310}"_s;
-        if (toolName == u"web_fetch"_s) return u"\u{1F4D6}"_s;
-    if (toolName == u"query_project_graph"_s) return u"\u{1F578}"_s;
-    if (toolName == u"write_plan_file"_s) return u"\u{1F4CB}"_s;
-    if (toolName == u"suggest"_s) return u"\u{1F4A1}"_s;
-    if (toolName == u"question"_s) return u"\u{2753}"_s;
-    if (toolName == u"goal_report"_s) return u"\u{1F3AF}"_s;
-    if (toolName == u"new_task"_s) return u"\u{1F9E9}"_s;
-    if (toolName.startsWith(u"mcp__"_s)) return u"\u{1F50C}"_s;
-    if (toolName.startsWith(u"terminal/"_s) || toolName == u"terminal"_s) return u"\u{1F5A3}"_s;
-    return u"\u{2699}"_s;
+    const QString key = toolName.trimmed().toLower();
+
+    // File operations - both KateAI and ACP tool names. Agents capitalise
+    // these ("Edit", "Write") and also invent their own ("apply_patch").
+    if (key == u"read_file"_s || key == u"fs/read_text_file"_s || key == u"read"_s) return u"📄"_s;
+    if (key == u"write_file"_s || key == u"fs/write_text_file"_s || key == u"write"_s) return u"📝"_s;
+    if (key == u"edit_file"_s || key == u"multi_edit_file"_s || key == u"multi_replace_file_content"_s
+        || key == u"edit"_s || key == u"str_replace"_s || key == u"apply_patch"_s
+        || key == u"search_replace"_s || key == u"replace"_s) return u"✏"_s;
+    if (key == u"delete"_s) return u"✕"_s;
+    if (ChatTheme::isEditToolName(toolName)) {
+        if (key.contains(u"delete"_s) || key.contains(u"remove"_s)) return u"✕"_s;
+        if (key.contains(u"write"_s) && !key.contains(u"edit"_s) && !key.contains(u"replace"_s)
+            && !key.contains(u"patch"_s)) {
+            return u"📝"_s;
+        }
+        return u"✏"_s;
+    }
+    if (toolName == u"list_dir"_s) return u"📁"_s;
+    if (toolName == u"grep"_s || toolName == u"search"_s) return u"🔍"_s;
+    if (toolName == u"glob"_s) return u"🔎"_s;
+    if (toolName == u"bash"_s || toolName == u"execute"_s) return u"⚡"_s;
+        if (toolName == u"web_search"_s) return u"🌐"_s;
+        if (toolName == u"web_fetch"_s) return u"📖"_s;
+    if (toolName == u"query_project_graph"_s) return u"🕸"_s;
+    if (toolName == u"write_plan_file"_s) return u"📋"_s;
+    if (toolName == u"suggest"_s) return u"💡"_s;
+    if (toolName == u"question"_s) return u"❓"_s;
+    if (toolName == u"goal_report"_s) return u"🎯"_s;
+    if (toolName == u"new_task"_s) return u"🧩"_s;
+    if (toolName.startsWith(u"mcp__"_s)) return u"🔌"_s;
+    if (toolName.startsWith(u"terminal/"_s) || toolName == u"terminal"_s) return u"🖳"_s;
+    return u"⚙"_s;
 }
 
 QString ToolCallWidget::languageForTool(const QString &toolName) const
@@ -901,14 +1054,16 @@ QString ToolCallWidget::languageForTool(const QString &toolName) const
     }
     
     // Map tool names to syntax highlighting languages
-    if (toolName == u"bash"_s) return u"Bash"_s;
+    if (toolName == u"bash"_s || toolName == u"execute"_s) return u"Bash"_s;
     
     // Text-based tools - file operations, search, etc.
     if (toolName == u"read_file"_s || toolName == u"write_file"_s
         || toolName == u"edit_file"_s || toolName == u"multi_edit_file"_s
         || toolName == u"multi_replace_file_content"_s || toolName == u"list_dir"_s
         || toolName == u"glob"_s || toolName == u"grep"_s
-        || toolName == u"fs/read_text_file"_s || toolName == u"fs/write_text_file"_s) {
+        || toolName == u"fs/read_text_file"_s || toolName == u"fs/write_text_file"_s
+        || toolName == u"read"_s || toolName == u"write"_s || toolName == u"edit"_s
+        || toolName == u"str_replace"_s || toolName == u"delete"_s || toolName == u"search"_s) {
         // File operations and search return text content, not JSON
         return u"Text"_s;
     }
@@ -949,8 +1104,7 @@ QString ToolCallWidget::colorForRisk(ToolRisk risk) const
 
 bool ToolCallWidget::isDiffTool(const QString &toolName) const
 {
-    return toolName == u"edit_file"_s || toolName == u"write_file"_s
-        || toolName == u"multi_edit_file"_s || toolName == u"multi_replace_file_content"_s;
+    return ChatTheme::isEditToolName(toolName);
 }
 
 QSize ToolCallWidget::minimumSizeHint() const
@@ -1019,20 +1173,19 @@ ToolDetailView ToolCallWidget::detailViewForTool(const QString &toolName)
     // One shape per kind of work. A card that edits a file, one that reads it
     // and one that runs a command produce different things, and the expanded
     // body should say which without the header being read first.
-    if (toolName == u"edit_file"_s || toolName == u"multi_edit_file"_s
-        || toolName == u"multi_replace_file_content"_s
-        || toolName == u"write_file"_s || toolName == u"fs/write_text_file"_s) {
+    if (ChatTheme::isEditToolName(toolName)) {
         return ToolDetailView::Diff;
     }
-    if (toolName == u"bash"_s || toolName.startsWith(u"terminal"_s)) {
+    if (toolName == u"bash"_s || toolName == u"execute"_s || toolName.startsWith(u"terminal"_s)) {
         return ToolDetailView::Terminal;
     }
     if (toolName == u"read_file"_s || toolName == u"fs/read_text_file"_s
+        || toolName == u"read"_s
         || toolName == u"write_plan_file"_s || toolName == u"fetch_rules"_s
         || toolName == u"project_graph"_s) {
         return ToolDetailView::Code;
     }
-    if (toolName == u"grep"_s || toolName == u"glob"_s) {
+    if (toolName == u"grep"_s || toolName == u"glob"_s || toolName == u"search"_s) {
         return ToolDetailView::Search;
     }
     return ToolDetailView::Plain;

@@ -604,7 +604,7 @@ QString defaultSystemPrompt(const QString &workspace)
                       "- Never send workspace contents, file contents, secrets, or user code to a search provider. Queries only.\n"
            "\n"
            "REASONING & PLANNING (required):\n"
-           "1. THINKING: Before every response, output your internal reasoning in a <thinking> block. This is your private chain-of-thought: analyze the request, consider alternatives, plan steps, and anticipate issues. The user will NOT see this block - it is collapsed by default. Be thorough.\n"
+           "1. THINKING: Before every response, output your reasoning in a <thinking> block. Analyze the request, consider alternatives, plan steps, and anticipate issues. The user sees this block - it stays open above your answer. Be thorough.\n"
            "2. PLAN: After thinking, output a structured implementation plan as a numbered list under a 'Plan:' or 'Implementation Plan:' heading. Each step should be a concrete, verifiable action. This plan IS visible to the user as a checklist.\n"
             "3. EXECUTION: Follow your plan step by step. After completing each step, you may update the plan by marking steps complete.\n"
             "- For a complicated, multi-step task, write the plan to the plan file with write_plan_file and keep it current as steps complete. The user can open that file and follow the implementation as it happens.\n"

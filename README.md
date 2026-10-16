@@ -49,7 +49,7 @@ Typical uses: explain a selection, fix a bug in the current file, refactor with 
 - Multi-line prompt: **Enter** sends, **Shift+Enter** inserts a newline
 - Auto-growing composer, prompt history (Up/Down on an empty first line)
 - **@ mentions** for the active file, selection, workspace, open documents, and relative paths
-- Markdown replies with a copy button
+- Markdown in replies, in your own prompts, and in sub-agent cards — with syntax-highlighted code blocks and a copy button
 - Token estimate on the composer
 - Stop the current turn at any time
 - Scroll-to-bottom control when you leave the live stream

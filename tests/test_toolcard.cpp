@@ -725,6 +725,88 @@ private Q_SLOTS:
         // The card must not grow to the whole panel over a placeholder.
         QVERIFY2(w.height() < 400, qPrintable(QStringLiteral("card grew to %1px").arg(w.height())));
     }
+
+    // ACP reports the edit by kind ("edit"), and the unified diff arrives in
+    // the result rather than in the arguments. The card has to take the edit
+    // hue and colour the change as soon as that text is known, not after the
+    // tool has already finished and not as grey plain text.
+    void testAcpEditKindIsColouredAndShowsItsDiff()
+    {
+        QCOMPARE(ChatTheme::toolColor(QStringLiteral("edit")), ChatTheme::toolColor(QStringLiteral("edit_file")));
+        QCOMPARE(ChatTheme::toolColor(QStringLiteral("Edit")), ChatTheme::toolColor(QStringLiteral("edit_file")));
+        QCOMPARE(ChatTheme::toolColor(QStringLiteral("str_replace")), ChatTheme::toolColor(QStringLiteral("edit_file")));
+        QCOMPARE(ChatTheme::toolColor(QStringLiteral("StrReplace")), ChatTheme::toolColor(QStringLiteral("edit_file")));
+        QCOMPARE(ChatTheme::toolColor(QStringLiteral("apply_patch")), ChatTheme::toolColor(QStringLiteral("edit_file")));
+        QCOMPARE(ChatTheme::toolColor(QStringLiteral("Write")), ChatTheme::toolColor(QStringLiteral("write_file")));
+        QVERIFY(ChatTheme::toolColor(QStringLiteral("edit")) != ChatTheme::textMuted());
+
+        QWidget host;
+        auto *layout = new QVBoxLayout(&host);
+        host.resize(440, 400);
+
+        ToolCallWidget w(QStringLiteral("acp-edit"), &host);
+        w.setToolInfo(QStringLiteral("edit"), QStringLiteral("src/main.cpp"), ToolRisk::Write);
+        layout->addWidget(&w);
+        host.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&host));
+
+        const QString output = QStringLiteral("Edit applied successfully.\n"
+                                              "--- a/src/main.cpp\n"
+                                              "+++ b/src/main.cpp\n"
+                                              "@@ -1 +1 @@\n"
+                                              "-old\n"
+                                              "+new\n");
+        w.setPartialOutput(output);
+        QTest::qWait(40);
+        QVERIFY2(w.isRunning(), "the streamed diff waited for the tool to finish");
+        QVERIFY2(w.styleSheet().contains(ChatTheme::toolColor(QStringLiteral("edit_file"))),
+                 qPrintable(w.styleSheet()));
+        QTextBrowser *diffView = w.findChild<QTextBrowser *>(QStringLiteral("toolDiff"));
+        QVERIFY2(diffView && diffView->isVisible(), "no coloured diff while the edit is still running");
+        QVERIFY2(diffView->toPlainText().contains(QStringLiteral("+new")), qPrintable(diffView->toPlainText()));
+        QVERIFY2(diffView->toHtml().contains(ChatTheme::success()),
+                 qPrintable(diffView->toHtml()));
+        const QString streamedDetails = w.findChild<QTextBrowser *>(QStringLiteral("toolDetails"))->toPlainText();
+        QVERIFY2(streamedDetails.contains(QStringLiteral("Edit applied successfully")), qPrintable(streamedDetails));
+        QVERIFY2(!streamedDetails.contains(QStringLiteral("+new")), qPrintable(streamedDetails));
+
+        ToolResult result;
+        result.name = u"edit"_s;
+        result.ok = true;
+        result.output = output;
+        w.setFinished(result);
+        QTest::qWait(40);
+
+        QVERIFY2(w.styleSheet().contains(ChatTheme::toolColor(QStringLiteral("edit_file"))),
+                 qPrintable(w.styleSheet()));
+        QVERIFY2(diffView->isVisible(), "the diff disappeared once the edit finished");
+        QVERIFY2(diffView->toPlainText().contains(QStringLiteral("+new")), qPrintable(diffView->toPlainText()));
+        QVERIFY2(diffView->toHtml().contains(ChatTheme::success()), qPrintable(diffView->toHtml()));
+        const QString details = w.findChild<QTextBrowser *>(QStringLiteral("toolDetails"))->toPlainText();
+        QVERIFY2(details.contains(QStringLiteral("Edit applied successfully")), qPrintable(details));
+        QVERIFY2(!details.contains(QStringLiteral("+++")), qPrintable(details));
+
+        // Agents capitalise the write tool. Its card takes the write hue, and
+        // the added and removed lines are highlighted rather than left as plain
+        // text on the muted rail.
+        ToolCallWidget write(QStringLiteral("acp-write"), &host);
+        write.setToolInfo(QStringLiteral("Write"), QStringLiteral("src/main.cpp"), ToolRisk::Write);
+        layout->addWidget(&write);
+        const QString written = QStringLiteral("--- a/src/main.cpp\n"
+                                               "+++ b/src/main.cpp\n"
+                                               "@@ -1 +1 @@\n"
+                                               "-old\n"
+                                               "+new\n");
+        write.setDescribeDiff(written);
+        QTest::qWait(40);
+        QVERIFY2(write.styleSheet().contains(ChatTheme::toolColor(QStringLiteral("write_file"))),
+                 qPrintable(write.styleSheet()));
+        QTextBrowser *writeDiff = write.findChild<QTextBrowser *>(QStringLiteral("toolDiff"));
+        QVERIFY2(writeDiff && writeDiff->isVisible(), "the Write card did not open its diff");
+        const QString writeHtml = writeDiff->toHtml();
+        QVERIFY2(writeHtml.contains(ChatTheme::success()), qPrintable(writeHtml));
+        QVERIFY2(writeHtml.contains(ChatTheme::danger()), qPrintable(writeHtml));
+    }
 };
 
 QTEST_MAIN(TestToolCard)

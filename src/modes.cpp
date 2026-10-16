@@ -228,6 +228,25 @@ QStringList validGroups()
     return {ToolGroup::read(), ToolGroup::edit(), ToolGroup::command(), ToolGroup::mcp(), ToolGroup::web(), ToolGroup::orchestrate()};
 }
 
+// One sampling knob from frontmatter, or -1 when the key is absent or not a
+// number a provider would accept. Out-of-range values are clamped rather than
+// rejected: a mode file that says 7.0 asked for "as hot as possible", and
+// silently ignoring it would leave the global value in force, which is the
+// opposite of what the author wrote.
+double samplingKey(const DocumentFrontmatter &fm, const QString &key, double min, double max)
+{
+    const QString raw = fm.keys.value(key).trimmed();
+    if (raw.isEmpty()) {
+        return -1.0;
+    }
+    bool ok = false;
+    const double value = raw.toDouble(&ok);
+    if (!ok) {
+        return -1.0;
+    }
+    return qBound(min, value, max);
+}
+
 } // namespace
 
 // --- registry ----------------------------------------------------------------
@@ -477,6 +496,11 @@ ModeDefinition ModeRegistry::parseModeDocument(const QString &document, const QS
     mode.description = unquote(fm.keys.value(u"description"_s).trimmed());
     mode.roleDefinition = fm.keys.value(u"roleDefinition"_s).trimmed();
     mode.groups = parseList(fm.keys.value(u"groups"_s));
+    // Sampling overrides. "topP" is accepted alongside the snake_case spelling
+    // the rest of the settings use, because frontmatter authors reach for both.
+    mode.temperature = samplingKey(fm, u"temperature"_s, 0.0, 2.0);
+    const double topP = samplingKey(fm, u"top_p"_s, 0.0, 1.0);
+    mode.topP = topP >= 0.0 ? topP : samplingKey(fm, u"topP"_s, 0.0, 1.0);
 
     const QString custom = fm.keys.value(u"customInstructions"_s).trimmed();
     if (!custom.isEmpty()) {
@@ -495,6 +519,21 @@ ModeDefinition ModeRegistry::parseModeDocument(const QString &document, const QS
     return mode;
 }
 
+Settings ModeRegistry::settingsForMode(const Settings &settings, const ModeDefinition &mode)
+{
+    // The client is handed a copy, never the user's settings: a mode must be
+    // able to tune the request without the override leaking back into what the
+    // config page reads and saves.
+    Settings effective = settings;
+    if (mode.hasTemperature()) {
+        effective.temperature = qBound(0.0, mode.temperature, 2.0);
+    }
+    if (mode.hasTopP()) {
+        effective.topP = qBound(0.0, mode.topP, 1.0);
+    }
+    return effective;
+}
+
 QString ModeRegistry::modeFileTemplate(const QString &id)
 {
     return u"---\n"_s + u"id: "_s + id + u"\n"_s
@@ -502,6 +541,8 @@ QString ModeRegistry::modeFileTemplate(const QString &id)
         + u"description: What this mode is for\n"_s
         + u"icon: mode\n"_s
         + u"groups: [read, edit, command, mcp]\n"_s
+        + u"# temperature: 0.2   # sampling override; omit to use the global setting\n"_s
+        + u"# top_p: 0.95         # sampling override; omit to use the global setting\n"_s
         + u"roleDefinition: |\n"_s
         + u"  You are working in this mode. Describe the persona, the tools you\n"_s
         + u"  should reach for, and what a good result looks like.\n"_s

@@ -122,6 +122,10 @@ private:
     void buildAdjacencyList();
     void cleanupDeletedNodes();
     void updateNodeMetrics(GraphNode *node);
+    // Both counters live here so the scan and the update path agree on what a
+    // line and a definition are; they used to be computed two different ways.
+    static int lineCount(const QString &content);
+    static int definitionCount(ProjectGraph &analyser, const QString &content);
     QString extractImportsFromContent(const QString &content, const QString &filePath) const;
     // Both return the list of definitions, not a joined string: the only
     // consumer needs the count, and QString::size() on the joined text measured

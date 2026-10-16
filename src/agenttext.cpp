@@ -119,10 +119,17 @@ void renderMarkdown(QTextDocument *doc, const QString &markdown)
         QTextDocument scratch;
         scratch.setMarkdown(prose.join(u'\n'));
         const QString converted = scratch.toHtml();
-        const int bodyStart = converted.indexOf(u"<body>"_s);
+        // Qt emits the opening tag with attributes -- <body style="..."> -- so
+        // the body content is bounded by the tag's *start* and the '>' that
+        // closes it, not by a literal "<body>". Matching the literal string
+        // never hits: every prose run then fell through to the escaped-text
+        // fallback below, which is how a whole chat of **bold**, `code` and
+        // bullet lists rendered as raw markdown source.
+        const int bodyTagStart = converted.indexOf(u"<body"_s);
+        const int bodyTagEnd = bodyTagStart >= 0 ? converted.indexOf(u'>', bodyTagStart) : -1;
         const int bodyEnd = converted.lastIndexOf(u"</body>"_s);
-        if (bodyStart >= 0 && bodyEnd > bodyStart) {
-            html += converted.mid(bodyStart + 6, bodyEnd - bodyStart - 6);
+        if (bodyTagEnd >= 0 && bodyEnd > bodyTagEnd) {
+            html += converted.mid(bodyTagEnd + 1, bodyEnd - bodyTagEnd - 1);
         } else {
             html += QStringLiteral("<p>%1</p>")
                         .arg(prose.join(QStringLiteral("\n")).toHtmlEscaped().replace(QStringLiteral("\n"), QStringLiteral("<br>")));

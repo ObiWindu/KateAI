@@ -25,10 +25,16 @@
 #include "types.h"
 
 #include <QApplication>
+#include <QFont>
+#include <QFontMetrics>
+#include <QJsonArray>
+#include <QJsonObject>
 #include <QSignalSpy>
 #include <QTest>
 #include <QTemporaryDir>
+#include <QTextBlock>
 #include <QTextBrowser>
+#include <QTextFragment>
 #include <QVBoxLayout>
 #include <QWidget>
 
@@ -103,6 +109,23 @@ private:
             }
         }
         return nullptr;
+    }
+
+    QJsonObject functionCall(const QString &id, const QString &name, const QString &arguments) const
+    {
+        QJsonObject fn;
+        fn.insert(QStringLiteral("name"), name);
+        fn.insert(QStringLiteral("arguments"), arguments);
+        QJsonObject call;
+        call.insert(QStringLiteral("id"), id);
+        call.insert(QStringLiteral("type"), QStringLiteral("function"));
+        call.insert(QStringLiteral("function"), fn);
+        return call;
+    }
+
+    int mappedTop(QWidget *widget) const
+    {
+        return widget->mapTo(m_widget, QPoint(0, 0)).y();
     }
 
     void setup()
@@ -257,6 +280,237 @@ private Q_SLOTS:
         QVERIFY2(failedBodies.first()->toPlainText().contains(QStringLiteral("must not be empty")),
                  qPrintable(failedBodies.first()->toPlainText()));
         QCOMPARE(m_widget->findChildren<SuggestionWidget *>().size(), 2);
+    }
+
+    // The user's own turn is markup too. It used to be escaped text run through
+    // a QLabel, so a pasted diff lost its fences, `grep` lost its backticks and
+    // **bold** stayed literal -- the same text rendering as markdown one card
+    // further up the conversation.
+    void testUserMessageRendersMarkdown()
+    {
+        setup();
+        Q_EMIT m_widget->agent()->userMessage(u"Compare **this** with `grep`:\n\n```cpp\nint x = 1;\n```\n"_s);
+        QTest::qWait(80);
+
+        QTextBrowser *body = m_widget->findChild<QTextBrowser *>(QStringLiteral("userMessageBody"));
+        QVERIFY2(body, "the user card has no markup body");
+        const QString plain = body->toPlainText();
+        QVERIFY2(plain.contains(QStringLiteral("this")), qPrintable(plain));
+        QVERIFY2(!plain.contains(QStringLiteral("**")), qPrintable(plain));
+        QVERIFY2(plain.contains(QStringLiteral("grep")), qPrintable(plain));
+        // A fenced block survives as a block, in order, behind the prose.
+        QVERIFY2(plain.contains(QStringLiteral("int x = 1;")), qPrintable(plain));
+        QVERIFY2(plain.indexOf(QStringLiteral("Compare")) < plain.indexOf(QStringLiteral("int x = 1;")),
+                 qPrintable(plain));
+        QVERIFY2(body->height() > 20, qPrintable(QStringLiteral("body collapsed to %1px").arg(body->height())));
+
+        // The markup parsed rather than being dropped: **this** really is bold
+        // and `grep` really is monospace, which is the whole point of rendering
+        // the prompt instead of escaping it.
+        bool sawBold = false;
+        bool sawCodeFont = false;
+        for (QTextBlock b = body->document()->begin(); b.isValid(); b = b.next()) {
+            for (QTextBlock::Iterator it = b.begin(); !it.atEnd(); ++it) {
+                const QTextFragment frag = it.fragment();
+                const QString text = frag.text();
+                if (text.startsWith(QStringLiteral("this")) && frag.charFormat().fontWeight() >= QFont::Bold) {
+                    sawBold = true;
+                }
+                if (text.startsWith(QStringLiteral("grep")) && frag.charFormat().fontFamily() == QStringLiteral("monospace")) {
+                    sawCodeFont = true;
+                }
+            }
+        }
+        QVERIFY2(sawBold, "bold text did not render as bold");
+        QVERIFY2(sawCodeFont, "inline code did not render in a monospace font");
+    }
+
+    // A long prompt must wrap and grow the card instead of being clipped by a
+    // fixed-height browser.
+    void testLongUserMessageGrowsTheCard()
+    {
+        setup();
+        const QString longText = QStringLiteral("line of prompt with **bold** and a fence\n").repeated(24)
+            + QStringLiteral("\n```text\nblock\n```\n");
+        Q_EMIT m_widget->agent()->userMessage(longText);
+        QTest::qWait(120);
+
+        QTextBrowser *body = m_widget->findChild<QTextBrowser *>(QStringLiteral("userMessageBody"));
+        QVERIFY2(body, "the user card has no markup body");
+        const int viewport = m_widget->width();
+        QVERIFY2(body->document()->size().width() <= viewport,
+                 qPrintable(QStringLiteral("document is %1px wide in a %2px panel")
+                                .arg(body->document()->size().width()).arg(viewport)));
+        QVERIFY2(body->height() > 100, qPrintable(QStringLiteral("body is only %1px tall").arg(body->height())));
+        const QString plain = body->toPlainText();
+        QVERIFY2(plain.count(QStringLiteral("line of prompt")) == 24, qPrintable(QStringLiteral("only %1 lines arrived").arg(plain.count(QStringLiteral("line of prompt")))));
+    }
+
+    // A prompt that only looks like markup -- a bare asterisk, a lone fence, a
+    // backtick -- must still read as what was typed rather than being eaten by
+    // the parser.
+    void testUserMessageKeepsTextThatOnlyLooksLikeMarkup()
+    {
+        setup();
+        Q_EMIT m_widget->agent()->userMessage(u"2 * 3 is 6, not a list\n\n```\nfence with no language\n"_s);
+        QTest::qWait(80);
+
+        QTextBrowser *body = m_widget->findChild<QTextBrowser *>(QStringLiteral("userMessageBody"));
+        QVERIFY2(body, "the user card has no markup body");
+        const QString plain = body->toPlainText();
+        QVERIFY2(plain.contains(QStringLiteral("2 * 3 is 6, not a list")), qPrintable(plain));
+        QVERIFY2(plain.contains(QStringLiteral("fence with no language")), qPrintable(plain));
+    }
+
+    // A one-line prompt used to take the QTextEdit size hint (~192px) because
+    // nothing ever fitted the browser to its document.
+    void testShortUserMessageHugsItsText()
+    {
+        setup();
+        Q_EMIT m_widget->agent()->userMessage(u"hello"_s);
+        QTest::qWait(80);
+
+        QTextBrowser *body = m_widget->findChild<QTextBrowser *>(QStringLiteral("userMessageBody"));
+        QVERIFY2(body, "the user card has no markup body");
+        QVERIFY2(body->toPlainText().contains(QStringLiteral("hello")), qPrintable(body->toPlainText()));
+        const int line = std::max(1, QFontMetrics(body->font()).lineSpacing());
+        QVERIFY2(body->height() > line,
+                 qPrintable(QStringLiteral("body is %1px, one line is %2px").arg(body->height()).arg(line)));
+        QVERIFY2(body->height() < line * 4,
+                 qPrintable(QStringLiteral("body is %1px, four lines would be %2px").arg(body->height()).arg(line * 4)));
+    }
+
+    // Progress used to restart a 200ms single-shot timer on every chunk, so a
+    // command that never paused painted nothing until it exited.
+    void testToolProgressPaintsWhileTheCommandIsStillRunning()
+    {
+        setup();
+        Q_EMIT m_widget->agent()->toolStarted(request(u"bash"_s, u"tc-stream"_s, u"{\n    \"command\": \"make\"\n}"_s));
+        QString accumulated;
+        for (int i = 0; i < 30; ++i) {
+            accumulated += QStringLiteral("line %1 of the build\n").arg(i);
+            Q_EMIT m_widget->agent()->toolProgress(u"tc-stream"_s, accumulated);
+            QTest::qWait(20);
+        }
+
+        ToolCallWidget *card = cardOfClass<ToolCallWidget>(QStringLiteral("ToolCallWidget_tc-stream"));
+        QVERIFY2(card, "no card was created for the command");
+        QVERIFY2(card->isRunning(), "the card finished even though the command has not");
+        QTextBrowser *body = cardBody(card);
+        QVERIFY(body);
+        const QString plain = body->toPlainText();
+        QVERIFY2(plain.contains(QStringLiteral("line 0 of the build")), qPrintable(plain));
+        QVERIFY2(plain.contains(QStringLiteral("line 10 of the build")), qPrintable(plain));
+        QVERIFY2(!plain.contains(QStringLiteral("command")), qPrintable(plain));
+    }
+
+    // ACP stores every tool result before the assistant message that lists the
+    // calls, and those calls carry arguments "{}". Rebuilding used to drop the
+    // results and append empty cards after the answer.
+    void testAcpHistoryPlacesFilledToolCardsWhereTheToolsRan()
+    {
+        setup();
+        SessionStore::SessionData data;
+        ChatMessage user;
+        user.role = ChatMessage::Role::User;
+        user.content = u"please edit main"_s;
+        ChatMessage edit;
+        edit.role = ChatMessage::Role::Tool;
+        edit.name = u"edit"_s;
+        edit.toolCallId = u"call-edit"_s;
+        edit.content = u"Edit applied successfully.\n"
+                       "--- a/src/main.cpp\n"
+                       "+++ b/src/main.cpp\n"
+                       "@@ -1 +1 @@\n"
+                       "-old\n"
+                       "+new\n"_s;
+        ChatMessage read;
+        read.role = ChatMessage::Role::Tool;
+        read.name = u"read"_s;
+        read.toolCallId = u"call-read"_s;
+        read.content = u"int helper() { return 1; }"_s;
+        ChatMessage assistant;
+        assistant.role = ChatMessage::Role::Assistant;
+        assistant.content = u"Done editing main."_s;
+        assistant.toolCalls = QJsonArray{functionCall(u"call-edit"_s, u"edit"_s, u"{}"_s)};
+        data.messages = {user, edit, read, assistant};
+
+        m_widget->agent()->restoreSession(data);
+        m_widget->rebuildTranscript();
+        QTest::qWait(150);
+
+        QWidget *userCard = m_widget->findChild<QWidget *>(QStringLiteral("userCard"));
+        ToolCallWidget *editCard = cardOfClass<ToolCallWidget>(QStringLiteral("ToolCallWidget_call-edit"));
+        ToolCallWidget *readCard = cardOfClass<ToolCallWidget>(QStringLiteral("ToolCallWidget_call-read"));
+        QTextBrowser *assistantBody = m_widget->findChild<QTextBrowser *>(QStringLiteral("assistantBrowser"));
+        QVERIFY2(userCard && editCard && readCard && assistantBody, "history did not rebuild every part");
+        if (QLayout *layout = userCard->parentWidget() ? userCard->parentWidget()->layout() : nullptr) {
+            layout->activate();
+        }
+        const int userY = mappedTop(userCard);
+        const int editY = mappedTop(editCard);
+        const int readY = mappedTop(readCard);
+        const int assistantY = mappedTop(assistantBody);
+        QVERIFY2(userY < editY && editY < readY && readY < assistantY,
+                 qPrintable(QStringLiteral("order user=%1 edit=%2 read=%3 assistant=%4")
+                                .arg(userY).arg(editY).arg(readY).arg(assistantY)));
+        QCOMPARE(m_widget->findChildren<ToolCallWidget *>().size(), 2);
+
+        QTextBrowser *diffView = editCard->findChild<QTextBrowser *>(QStringLiteral("toolDiff"));
+        QVERIFY2(diffView, "the restored edit has no diff");
+        QVERIFY2(diffView->toPlainText().contains(QStringLiteral("+new")), qPrintable(diffView->toPlainText()));
+        QVERIFY2(diffView->toHtml().contains(ChatTheme::success()), qPrintable(diffView->toHtml()));
+        QVERIFY2(editCard->styleSheet().contains(ChatTheme::toolColor(QStringLiteral("edit_file"))),
+                 qPrintable(editCard->styleSheet()));
+        QTextBrowser *readBody = cardBody(readCard);
+        QVERIFY2(readBody && readBody->toPlainText().contains(QStringLiteral("int helper()")),
+                 qPrintable(readBody ? readBody->toPlainText() : QString()));
+    }
+
+    // Native turns record the assistant message (and its tool calls) first and
+    // the tool result afterwards. The card stays under that bubble and is
+    // filled from the result, once.
+    void testNativeHistoryKeepsTheToolCardAfterTheAssistant()
+    {
+        setup();
+        SessionStore::SessionData data;
+        ChatMessage user;
+        user.role = ChatMessage::Role::User;
+        user.content = u"fix main"_s;
+        ChatMessage assistant;
+        assistant.role = ChatMessage::Role::Assistant;
+        assistant.content = u"I will patch it."_s;
+        assistant.toolCalls = QJsonArray{
+            functionCall(u"call-native"_s, u"edit_file"_s,
+                         u"{\"path\":\"src/main.cpp\",\"old_string\":\"a\",\"new_string\":\"b\"}"_s)};
+        ChatMessage tool;
+        tool.role = ChatMessage::Role::Tool;
+        tool.name = u"edit_file"_s;
+        tool.toolCallId = u"call-native"_s;
+        tool.content = u"patched src/main.cpp"_s;
+        data.messages = {user, assistant, tool};
+
+        m_widget->agent()->restoreSession(data);
+        m_widget->rebuildTranscript();
+        QTest::qWait(150);
+
+        QWidget *userCard = m_widget->findChild<QWidget *>(QStringLiteral("userCard"));
+        ToolCallWidget *card = cardOfClass<ToolCallWidget>(QStringLiteral("ToolCallWidget_call-native"));
+        QTextBrowser *assistantBody = m_widget->findChild<QTextBrowser *>(QStringLiteral("assistantBrowser"));
+        QVERIFY2(userCard && card && assistantBody, "native history did not rebuild every part");
+        if (QLayout *layout = userCard->parentWidget() ? userCard->parentWidget()->layout() : nullptr) {
+            layout->activate();
+        }
+        const int userY = mappedTop(userCard);
+        const int assistantY = mappedTop(assistantBody);
+        const int toolY = mappedTop(card);
+        QVERIFY2(userY < assistantY && assistantY < toolY,
+                 qPrintable(QStringLiteral("order user=%1 assistant=%2 tool=%3")
+                                .arg(userY).arg(assistantY).arg(toolY)));
+        QCOMPARE(m_widget->findChildren<ToolCallWidget *>().size(), 1);
+        QTextBrowser *body = cardBody(card);
+        QVERIFY2(body && body->toPlainText().contains(QStringLiteral("patched src/main.cpp")),
+                 qPrintable(body ? body->toPlainText() : QString()));
     }
 };
 

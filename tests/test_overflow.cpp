@@ -367,16 +367,62 @@ private Q_SLOTS:
                  }),
                  "current agent models never appeared on the Models tab");
 
-        // Clicking the *current* agent in the ACP Agents tab must show its models.
-        QListWidgetItem *target = nullptr;
-        for (int i = 0; i < agentsList(&widget)->count(); ++i) {
-            if (agentsList(&widget)->item(i)->text().contains(u"Mock One"_s)) {
-                target = agentsList(&widget)->item(i);
-                break;
+        // A real click, not itemClicked invoked by hand: the release that
+        // delivers the click is still using the row, and rebuilding the list
+        // inside that release used to free it before the models were fetched.
+        QString clickDiag;
+        auto clickAgent = [&](const QString &name) -> bool {
+            QFrame *popup = widget.findChild<QFrame *>(u"modelPopup"_s);
+            QTabWidget *tabs = popup ? popup->findChild<QTabWidget *>() : nullptr;
+            if (!tabs) {
+                clickDiag = u"no tabs"_s;
+                return false;
             }
-        }
-        QVERIFY2(target, "Mock One not listed in the ACP Agents tab");
-        QMetaObject::invokeMethod(agentsList(&widget), "itemClicked", Q_ARG(QListWidgetItem *, target));
+            tabs->setCurrentIndex(1);
+            if (!waitFor([&] { return agentsList(&widget) && agentsList(&widget)->isVisible()
+                               && agentsList(&widget)->count() > 0; })) {
+                QListWidget *agents = agentsList(&widget);
+                clickDiag = u"agents not shown count=%1 visible=%2"_s
+                                .arg(agents ? agents->count() : -1)
+                                .arg(agents && agents->isVisible());
+                return false;
+            }
+            QListWidget *agents = agentsList(&widget);
+            QListWidgetItem *target = nullptr;
+            for (int i = 0; i < agents->count(); ++i) {
+                if (agents->item(i)->text().contains(name)) {
+                    target = agents->item(i);
+                    break;
+                }
+            }
+            if (!target) {
+                clickDiag = u"missing '%1' in:\n%2"_s.arg(name, listText(agents));
+                return false;
+            }
+            agents->scrollToItem(target);
+            const QRect rect = agents->visualItemRect(target);
+            if (!rect.isValid() || rect.isEmpty()) {
+                QString rows;
+                for (int i = 0; i < agents->count(); ++i) {
+                    const QRect r = agents->visualItemRect(agents->item(i));
+                    rows += u" [%1] hint=%2 rect=%3x%4@%5,%6 %7"_s
+                                .arg(i)
+                                .arg(agents->sizeHintForRow(i))
+                                .arg(r.width()).arg(r.height()).arg(r.x()).arg(r.y())
+                                .arg(agents->item(i)->text().left(40).replace(u'\n', u' '));
+                }
+                clickDiag = u"empty rect viewport %1x%2 hidden=%3 rows:%4"_s
+                                .arg(agents->viewport()->width())
+                                .arg(agents->viewport()->height())
+                                .arg(agents->isHidden())
+                                .arg(rows);
+                return false;
+            }
+            QTest::mouseClick(agents->viewport(), Qt::LeftButton, Qt::NoModifier, rect.center());
+            return true;
+        };
+
+        QVERIFY2(clickAgent(u"Mock One"_s), qPrintable(clickDiag));
 
         QVERIFY2(waitFor([&] {
                      return listText(modelsList(&widget)).contains(u"grok-4.7"_s);
@@ -393,15 +439,7 @@ private Q_SLOTS:
         QVERIFY2(waitFor([&] { return agentsList(&widget)->count() > 0; }),
                  "ACP Agents tab never came back after the model view");
 
-        QListWidgetItem *other = nullptr;
-        for (int i = 0; i < agentsList(&widget)->count(); ++i) {
-            if (agentsList(&widget)->item(i)->text().contains(u"Mock Two"_s)) {
-                other = agentsList(&widget)->item(i);
-                break;
-            }
-        }
-        QVERIFY2(other, "Mock Two not listed in the ACP Agents tab");
-        QMetaObject::invokeMethod(agentsList(&widget), "itemClicked", Q_ARG(QListWidgetItem *, other));
+        QVERIFY2(clickAgent(u"Mock Two"_s), qPrintable(clickDiag));
 
         QVERIFY2(waitFor([&] {
                      QListWidget *list = modelsList(&widget);

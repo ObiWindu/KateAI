@@ -677,8 +677,9 @@ QString EditTracker::previewDiffPath(const QString &path) const
     // share a base name from overwriting each other's preview.
     const QByteArray digest = QCryptographicHash::hash(path.toUtf8(), QCryptographicHash::Sha1).toHex().left(8);
     const QString base = QFileInfo(path).completeBaseName();
-    return QDir(QStandardPaths::writableLocation(QStandardPaths::TempLocation))
-        .absoluteFilePath(u"kateai-%1-%2.diff"_s.arg(base, QString::fromUtf8(digest)));
+    const QString fileName = u"kateai-%1-%2.diff"_s.arg(base.isEmpty() ? u"diff"_s : base, QString::fromUtf8(digest));
+    const QString temp = QStandardPaths::writableLocation(QStandardPaths::TempLocation);
+    return QDir(temp.isEmpty() ? QDir::tempPath() : temp).absoluteFilePath(fileName);
 }
 
 void EditTracker::previewDiff(const QString &path)
@@ -693,16 +694,53 @@ void EditTracker::previewDiff(const QString &path)
     // else in the IDE, instead of a second window with its own idea of what a
     // diff looks like. The path is stable per reviewed file, so previewing again
     // after another edit lands in the same tab rather than piling up.
+    //
+    // TempLocation is not always writable (a read-only bind of /tmp, or a TMPDIR
+    // the process cannot create files in). The review still has to open, so the
+    // same file name is tried in each candidate until one accepts the write.
     const QString previewPath = previewDiffPath(path);
-    QFile preview(previewPath);
-    if (!preview.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
-        Q_EMIT statusMessage(i18n("Could not write the diff preview for %1", QFileInfo(path).fileName()), true);
+    const QString fileName = QFileInfo(previewPath).fileName();
+    const QByteArray bytes = combinedDiff(group).toUtf8();
+    QStringList directories;
+    const auto addDirectory = [&directories](const QString &directory) {
+        if (!directory.isEmpty() && !directories.contains(directory)) {
+            directories.append(directory);
+        }
+    };
+    addDirectory(QFileInfo(previewPath).absolutePath());
+    addDirectory(QDir::tempPath());
+    // tempPath() follows TMPDIR even when that directory cannot take a file.
+    // /tmp and /dev/shm are separate from it, and from a home directory that
+    // is itself mounted read-only.
+    addDirectory(QStringLiteral("/tmp"));
+    addDirectory(QStringLiteral("/dev/shm"));
+    addDirectory(QStandardPaths::writableLocation(QStandardPaths::RuntimeLocation));
+    addDirectory(QStandardPaths::writableLocation(QStandardPaths::CacheLocation));
+    addDirectory(QStandardPaths::writableLocation(QStandardPaths::GenericCacheLocation));
+    addDirectory(QDir::homePath() + u"/.cache/kateai"_s);
+    addDirectory(QDir::homePath());
+    addDirectory(QDir::currentPath());
+
+    for (const QString &directory : directories) {
+        if (!QDir().mkpath(directory)) {
+            continue;
+        }
+        const QString candidate = QDir(directory).absoluteFilePath(fileName);
+        QFile preview(candidate);
+        if (!preview.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
+            continue;
+        }
+        const qint64 written = preview.write(bytes);
+        preview.close();
+        if (written != bytes.size()) {
+            QFile::remove(candidate);
+            continue;
+        }
+        Q_EMIT previewDiffRequested(candidate);
         return;
     }
-    preview.write(combinedDiff(group).toUtf8());
-    preview.close();
 
-    Q_EMIT previewDiffRequested(previewPath);
+    Q_EMIT statusMessage(i18n("Could not write the diff preview for %1", QFileInfo(path).fileName()), true);
 }
 
 void EditTracker::settle(const QString &path, bool accepted)
