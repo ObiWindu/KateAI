@@ -80,6 +80,10 @@ public:
     bool canUndo() const;
     void undoLast();
 
+    // Re-applies every theme-derived stylesheet and rebuilds the file rows, so
+    // a theme change repaints a tracker that is currently showing.
+    void applyStyle();
+
 Q_SIGNALS:
     void editAccepted(const QString &path, const QString &toolName, const QString &newContent);
     void editRejected(const QString &path, const QString &toolName, const QString &oldContent);

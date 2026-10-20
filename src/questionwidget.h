@@ -46,17 +46,20 @@ public:
     void markAnswered(const QString &answer);
 
     void reflowNow();
+    // Re-applies every theme-derived stylesheet, so a theme change repaints a
+    // card that is waiting in the intent dock.
+    void applyStyle();
 
 Q_SIGNALS:
     void answered(const QString &questionCallId, const QString &answer);
 
 private:
-    void applyStyle();
     void updateStatus();
 
     QString m_questionCallId;
     bool m_answered = false;
 
+    QLabel *m_badge = nullptr;
     QLabel *m_icon = nullptr;
     QLabel *m_title = nullptr;
     QLabel *m_status = nullptr;

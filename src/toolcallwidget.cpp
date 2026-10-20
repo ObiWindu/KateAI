@@ -210,6 +210,9 @@ ToolCallWidget::ToolCallWidget(const QString &toolCallId, QWidget *parent)
     headerLayout->setSpacing(8);
 
     m_icon = new QLabel(this);
+    // Named so the icon can be asserted from a test without reaching into
+    // private members.
+    m_icon->setObjectName(u"toolIcon"_s);
     m_icon->setFixedSize(16, 16);
     m_icon->setAlignment(Qt::AlignCenter);
     headerLayout->addWidget(m_icon);
@@ -233,18 +236,14 @@ ToolCallWidget::ToolCallWidget(const QString &toolCallId, QWidget *parent)
     // Per-call diff stat. Empty until a diff is attached, so a read-only tool
     // card does not carry a meaningless "+0 −0".
     m_diffStat = new QLabel(this);
+    m_diffStat->setObjectName(u"toolDiffStat"_s);
     m_diffStat->setVisible(false);
-    m_diffStat->setStyleSheet(
-        QStringLiteral("QLabel { color: %1; font-size: 11px; font-family: monospace; }")
-        .arg(ChatTheme::success()));
     headerLayout->addWidget(m_diffStat);
 
     // Elapsed time. Hidden until show() is called for it, so short calls do
     // not add visual noise; a call that takes seconds earns the space.
     m_duration = new QLabel(this);
     m_duration->setVisible(false);
-    m_duration->setStyleSheet(
-        QStringLiteral("QLabel { color: %1; font-size: 11px; }").arg(ChatTheme::textMuted()));
     headerLayout->addWidget(m_duration);
 
     // Copies what the card holds: the result once the tool finished, the live
@@ -285,10 +284,6 @@ ToolCallWidget::ToolCallWidget(const QString &toolCallId, QWidget *parent)
     m_expandBtn->setFixedSize(20, 20);
     m_expandBtn->setFlat(true);
     m_expandBtn->setCursor(Qt::PointingHandCursor);
-    m_expandBtn->setStyleSheet(
-        QStringLiteral("QPushButton { color: %1; background: transparent; border: none; font-size: 11px; }"
-                       "QPushButton:hover { color: #ffffff; }")
-            .arg(ChatTheme::textMuted()));
     headerLayout->addWidget(m_expandBtn);
 
     root->addWidget(m_header);
@@ -302,67 +297,44 @@ ToolCallWidget::ToolCallWidget(const QString &toolCallId, QWidget *parent)
         // Plain QWidget subclasses ignore a stylesheet background unless this is
         // set, which would leave the docked approval strip invisible.
         m_approvalRow->setAttribute(Qt::WA_StyledBackground, true);
-        m_approvalRow->setStyleSheet(ChatTheme::intentApprovalRow());
         auto *approvalLayout = new QHBoxLayout(m_approvalRow);
         approvalLayout->setContentsMargins(9, 5, 9, 5);
         approvalLayout->setSpacing(6);
 
-        auto *approvalHint = new QLabel(i18n("Needs approval"), m_approvalRow);
-        approvalHint->setStyleSheet(QStringLiteral("QLabel { color: %1; font-size: 11px; font-weight: 600; background: transparent; }").arg(ChatTheme::warning()));
-        approvalLayout->addWidget(approvalHint);
+        m_approvalHint = new QLabel(i18n("Needs approval"), m_approvalRow);
+        approvalLayout->addWidget(m_approvalHint);
 
         // What is being approved. This strip is docked at the bottom of the panel
         // while the diff it refers to sits up in the transcript, possibly
         // scrolled out of sight, so the decision must not depend on going to
         // find it.
         m_approvalSubject = new QLabel(m_approvalRow);
-        m_approvalSubject->setStyleSheet(
-            QStringLiteral("QLabel { color: %1; font-size: 11px; background: transparent; }")
-                .arg(ChatTheme::textPrimary()));
         approvalLayout->addWidget(m_approvalSubject, 1);
 
         approvalLayout->addStretch();
 
-        auto *allowBtn = new QPushButton(i18n("Allow"), m_approvalRow);
-        allowBtn->setCursor(Qt::PointingHandCursor);
-        allowBtn->setStyleSheet(
-            QStringLiteral(
-                "QPushButton { background-color: %1; color: #ffffff; border: none;"
-                " border-radius: 5px; padding: 3px 12px; font-size: 11px; font-weight: 600; }"
-                "QPushButton:hover { background-color: %2; }")
-            .arg(ChatTheme::accent(), ChatTheme::accentHover()));
-        connect(allowBtn, &QPushButton::clicked, this, [this] {
+        m_allowBtn = new QPushButton(i18n("Allow"), m_approvalRow);
+        m_allowBtn->setCursor(Qt::PointingHandCursor);
+        connect(m_allowBtn, &QPushButton::clicked, this, [this] {
             Q_EMIT approvalChosen(PermissionDecision::AllowOnce);
         });
 
-        auto *alwaysBtn = new QPushButton(i18n("Always"), m_approvalRow);
-        alwaysBtn->setCursor(Qt::PointingHandCursor);
-        alwaysBtn->setToolTip(i18n("Allow this tool for the rest of the session"));
-        alwaysBtn->setStyleSheet(
-            QStringLiteral(
-                "QPushButton { background-color: %1; color: %2; border: 1px solid %3;"
-                " border-radius: 5px; padding: 3px 10px; font-size: 11px; }"
-                "QPushButton:hover { background-color: %3; color: #ffffff; }")
-            .arg(ChatTheme::cardBg(), ChatTheme::textPrimary(), ChatTheme::hoverBg()));
-        connect(alwaysBtn, &QPushButton::clicked, this, [this] {
+        m_alwaysBtn = new QPushButton(i18n("Always"), m_approvalRow);
+        m_alwaysBtn->setCursor(Qt::PointingHandCursor);
+        m_alwaysBtn->setToolTip(i18n("Allow this tool for the rest of the session"));
+        connect(m_alwaysBtn, &QPushButton::clicked, this, [this] {
             Q_EMIT approvalChosen(PermissionDecision::AllowSession);
         });
 
-        auto *denyBtn = new QPushButton(i18n("Deny"), m_approvalRow);
-        denyBtn->setCursor(Qt::PointingHandCursor);
-        denyBtn->setStyleSheet(
-            QStringLiteral(
-                "QPushButton { background: transparent; color: %1; border: 1px solid %2;"
-                " border-radius: 5px; padding: 3px 10px; font-size: 11px; }"
-                "QPushButton:hover { color: #ffffff; border-color: %1; }")
-            .arg(ChatTheme::danger(), ChatTheme::danger()));
-        connect(denyBtn, &QPushButton::clicked, this, [this] {
+        m_denyBtn = new QPushButton(i18n("Deny"), m_approvalRow);
+        m_denyBtn->setCursor(Qt::PointingHandCursor);
+        connect(m_denyBtn, &QPushButton::clicked, this, [this] {
             Q_EMIT approvalChosen(PermissionDecision::Deny);
         });
 
-        approvalLayout->addWidget(allowBtn);
-        approvalLayout->addWidget(alwaysBtn);
-        approvalLayout->addWidget(denyBtn);
+        approvalLayout->addWidget(m_allowBtn);
+        approvalLayout->addWidget(m_alwaysBtn);
+        approvalLayout->addWidget(m_denyBtn);
         root->addWidget(m_approvalRow);
         m_approvalRow->hide();
 
@@ -380,10 +352,6 @@ ToolCallWidget::ToolCallWidget(const QString &toolCallId, QWidget *parent)
     // a command's output without the user having to infer it from the header.
     m_viewCaption = new QLabel(m_detailsContainer);
     m_viewCaption->setObjectName(u"toolViewCaption"_s);
-    m_viewCaption->setStyleSheet(
-        QStringLiteral("QLabel { color: %1; font-size: 10px; font-weight: 600;"
-                       " letter-spacing: 0.4px; background: transparent; }")
-            .arg(ChatTheme::textMuted()));
     m_viewCaption->hide();
     detailsLayout->addWidget(m_viewCaption);
 
@@ -405,24 +373,6 @@ ToolCallWidget::ToolCallWidget(const QString &toolCallId, QWidget *parent)
     m_describeDiff->setWordWrapMode(QTextOption::WrapAnywhere);
     m_describeDiff->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_describeDiff->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    m_describeDiff->setStyleSheet(
-        QStringLiteral(
-            "QTextBrowser {"
-            "  background-color: %1;"
-            "  color: %2;"
-            "  border: none;"
-            "  padding: 0;"
-            "  font-family: monospace;"
-            "  font-size: 11px;"
-            "}")
-        .arg(ChatTheme::codeBlockBg(), QStringLiteral("#ffffff")));
-    m_describeDiff->document()->setDefaultStyleSheet(
-        QStringLiteral(
-            "body { color: %1; font-family: monospace; font-size: 11px; margin: 0; padding: 0; }"
-            "table { width: 100%; }"
-            "td { padding: 0 8px; }"
-            "pre { margin: 0; white-space: pre-wrap; font-family: monospace; font-size: 11px; }")
-            .arg(QStringLiteral("#ffffff")));
     m_describeDiff->hide();
     detailsLayout->addWidget(m_describeDiff);
 
@@ -439,23 +389,6 @@ ToolCallWidget::ToolCallWidget(const QString &toolCallId, QWidget *parent)
     m_details->setWordWrapMode(QTextOption::WrapAnywhere);
     m_details->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_details->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    m_details->setStyleSheet(
-        QStringLiteral(
-            "QTextBrowser {"
-            "  background-color: %1;"
-            "  color: %2;"
-            "  border: none;"
-            "  padding: 8px;"
-            "  font-family: monospace;"
-            "  font-size: 11px;"
-            "}")
-        .arg(ChatTheme::codeBlockBg(), QStringLiteral("#ffffff")));
-    m_details->document()->setDefaultStyleSheet(
-        QStringLiteral(
-            "body { color: %1; font-family: monospace; font-size: 11px; margin: 0; padding: 0; }"
-            "pre { margin: 0; white-space: pre-wrap; font-family: monospace; font-size: 11px; }"
-            "p { margin: 0; white-space: pre-wrap; }")
-            .arg(QStringLiteral("#ffffff")));
     detailsLayout->addWidget(m_details);
 
     root->addWidget(m_detailsContainer);
@@ -474,6 +407,99 @@ ToolCallWidget::ToolCallWidget(const QString &toolCallId, QWidget *parent)
     // Default state
     setRunning();
     updateStyle();
+    applyStyle();
+}
+
+void ToolCallWidget::applyStyle()
+{
+    // Card chrome: rail, header box, title and icon, with the tool's hue
+    // blended in. Every colour here comes from ChatTheme::ToolCard or the
+    // tool's fixed hue, so a theme change re-runs this to the same look:
+    // the card never follows the theme palette.
+    updateStyle();
+
+    // The status glyph's colour is state-dependent: the tool's hue while
+    // running, the outcome colour once finished.
+    if (m_denied) {
+        m_status->setStyleSheet(QStringLiteral("QLabel { color: %1; font-size: 14px; }").arg(ChatTheme::ToolCard::danger()));
+    } else if (m_finished) {
+        m_status->setStyleSheet(QStringLiteral("QLabel { color: %1; font-size: 14px; }")
+                                    .arg(m_ok ? ChatTheme::ToolCard::success() : ChatTheme::ToolCard::danger()));
+    } else {
+        applyRunningStatusColor();
+    }
+
+    m_diffStat->setStyleSheet(
+        QStringLiteral("QLabel { color: %1; font-size: 11px; font-family: monospace; }")
+        .arg(ChatTheme::ToolCard::success()));
+    m_duration->setStyleSheet(
+        QStringLiteral("QLabel { color: %1; font-size: 11px; }").arg(ChatTheme::ToolCard::textMuted()));
+    m_expandBtn->setStyleSheet(
+        QStringLiteral("QPushButton { color: %1; background: transparent; border: none; font-size: 11px; }"
+                       "QPushButton:hover { color: #ffffff; }")
+            .arg(ChatTheme::ToolCard::textMuted()));
+    m_viewCaption->setStyleSheet(
+        QStringLiteral("QLabel { color: %1; font-size: 10px; font-weight: 600;"
+                       " letter-spacing: 0.4px; background: transparent; }")
+            .arg(ChatTheme::ToolCard::textMuted()));
+
+    m_approvalRow->setStyleSheet(ChatTheme::intentApprovalRow());
+    m_approvalHint->setStyleSheet(
+        QStringLiteral("QLabel { color: %1; font-size: 11px; font-weight: 600; background: transparent; }")
+            .arg(ChatTheme::ToolCard::warning()));
+    m_approvalSubject->setStyleSheet(
+        QStringLiteral("QLabel { color: %1; font-size: 11px; background: transparent; }")
+            .arg(ChatTheme::ToolCard::textPrimary()));
+    m_allowBtn->setStyleSheet(
+        QStringLiteral(
+            "QPushButton { background-color: %1; color: #ffffff; border: none;"
+            " border-radius: 5px; padding: 3px 12px; font-size: 11px; font-weight: 600; }"
+            "QPushButton:hover { background-color: %2; }")
+        .arg(ChatTheme::ToolCard::accent(), ChatTheme::ToolCard::accentHover()));
+    m_alwaysBtn->setStyleSheet(
+        QStringLiteral(
+            "QPushButton { background-color: %1; color: %2; border: 1px solid %3;"
+            " border-radius: 5px; padding: 3px 10px; font-size: 11px; }"
+            "QPushButton:hover { background-color: %3; color: #ffffff; }")
+        .arg(ChatTheme::ToolCard::cardBg(), ChatTheme::ToolCard::textPrimary(), ChatTheme::ToolCard::hoverBg()));
+    m_denyBtn->setStyleSheet(
+        QStringLiteral(
+            "QPushButton { background: transparent; color: %1; border: 1px solid %2;"
+            " border-radius: 5px; padding: 3px 10px; font-size: 11px; }"
+            "QPushButton:hover { color: #ffffff; border-color: %1; }")
+        .arg(ChatTheme::ToolCard::danger(), ChatTheme::ToolCard::danger()));
+
+    // The result surface, re-derived for the view the card is in: a terminal
+    // sheet for commands, the inset sheet for everything else.
+    applyDetailsSurface(m_detailView);
+
+    // The diff surface of a file change. The text colour is white because the
+    // surface is one of the card's fixed dark insets, in every theme.
+    m_describeDiff->setStyleSheet(
+        QStringLiteral(
+            "QTextBrowser {"
+            "  background-color: %1;"
+            "  color: #ffffff;"
+            "  border: none;"
+            "  padding: 0;"
+            "  font-family: monospace;"
+            "  font-size: 11px;"
+            "}")
+        .arg(ChatTheme::ToolCard::codeBlockBg()));
+    m_describeDiff->document()->setDefaultStyleSheet(
+        QStringLiteral(
+            "body { color: %1; font-family: monospace; font-size: 11px; margin: 0; padding: 0; }"
+            "table { width: 100%; }"
+            "td { padding: 0 8px; }"
+            "pre { margin: 0; white-space: pre-wrap; font-family: monospace; font-size: 11px; }")
+            .arg(QStringLiteral("#ffffff")));
+    // setDefaultStyleSheet() only reaches content parsed after it, so re-parse
+    // the surfaces that already hold a body: syntax spans keep their inline
+    // colours, the body colour updates.
+    if (!m_describeDiff->toPlainText().isEmpty()) {
+        m_describeDiff->setHtml(m_describeDiff->toHtml());
+        scheduleReflow();
+    }
 }
 
 void ToolCallWidget::setToolInfo(const QString &toolName, const QString &summary, ToolRisk risk)
@@ -505,7 +531,7 @@ void ToolCallWidget::applyRunningStatusColor()
         return;
     }
     QString running = ChatTheme::toolColor(m_toolName);
-    if (running == ChatTheme::textMuted()) {
+    if (running == ChatTheme::ToolCard::textMuted()) {
         running = colorForRisk(m_risk);
     }
     m_status->setStyleSheet(QStringLiteral("QLabel { color: %1; font-size: 14px; }").arg(running));
@@ -536,7 +562,7 @@ void ToolCallWidget::setApprovalResolved(PermissionDecision decision)
     if (decision == PermissionDecision::Deny) {
         m_denied = true;
         m_status->setText(u"✗"_s);
-        m_status->setStyleSheet(QStringLiteral("QLabel { color: %1; font-size: 14px; }").arg(ChatTheme::danger()));
+        m_status->setStyleSheet(QStringLiteral("QLabel { color: %1; font-size: 14px; }").arg(ChatTheme::ToolCard::danger()));
     }
     updateStyle();
 }
@@ -714,12 +740,12 @@ QString ToolCallWidget::diffToHtml(const QString &diff) const
     // honours cell backgrounds (the `bgcolor` attribute), while the
     // block-level CSS that would colour a bare <pre> is only partly supported
     // and left the highlight out on every other line.
-    const QString addBg = ChatTheme::mixColors(ChatTheme::success(), ChatTheme::codeBlockBg(), 24);
-    const QString delBg = ChatTheme::mixColors(ChatTheme::danger(), ChatTheme::codeBlockBg(), 24);
-    const QString ctxBg = ChatTheme::codeBlockBg();
-    const QString addFg = ChatTheme::success();
-    const QString delFg = ChatTheme::danger();
-    const QString ctxFg = ChatTheme::textMuted();
+    const QString addBg = ChatTheme::mixColors(ChatTheme::ToolCard::success(), ChatTheme::ToolCard::codeBlockBg(), 24);
+    const QString delBg = ChatTheme::mixColors(ChatTheme::ToolCard::danger(), ChatTheme::ToolCard::codeBlockBg(), 24);
+    const QString ctxBg = ChatTheme::ToolCard::codeBlockBg();
+    const QString addFg = ChatTheme::ToolCard::success();
+    const QString delFg = ChatTheme::ToolCard::danger();
+    const QString ctxFg = ChatTheme::ToolCard::textMuted();
 
     // A write of a two-thousand-line file carries a two-thousand-line diff, and
     // left whole it grew a card tall enough to bury the conversation around it.
@@ -737,8 +763,8 @@ QString ToolCallWidget::diffToHtml(const QString &diff) const
     QString out = u"<body>"_s;
     for (const QString &line : shown) {
         QString bg = ctxBg;
-        QString fg = ChatTheme::textPrimary();
-        if (line.startsWith(u"+++"_s) || line.startsWith(u"---"_s) || line.startsWith(u"@@"_s)) {
+        QString fg = ChatTheme::ToolCard::textPrimary();
+        if (line.startsWith(u"+++"_s) || line.startsWith(u"---"_s) || line.startsWith(u"@"_s)) {
             // File headers and hunk marks are navigation, not content.
             fg = ctxFg;
         } else if (line.startsWith(u"+"_s)) {
@@ -807,7 +833,7 @@ void ToolCallWidget::setPartialOutput(const QString &partialOutput)
 QString ToolCallWidget::partialToHtml(const QString &text) const
 {
     QString out = u"<body style=\"color: %1; font-family: monospace; font-size: 11px;\">"_s
-                      .arg(ChatTheme::textMuted());
+                      .arg(ChatTheme::ToolCard::textMuted());
     const QStringList lines = text.split(u'\n');
     for (const QString &line : lines) {
         out += u"<p style=\"margin: 0; white-space: pre-wrap;\">%1</p>"_s.arg(line.isEmpty() ? u"&nbsp;"_s : escapeHtml(line));
@@ -856,10 +882,10 @@ void ToolCallWidget::setFinished(const ToolResult &result)
 
     if (result.ok) {
         m_status->setText(u"✓"_s);
-        m_status->setStyleSheet(QStringLiteral("QLabel { color: %1; font-size: 14px; }").arg(ChatTheme::success()));
+        m_status->setStyleSheet(QStringLiteral("QLabel { color: %1; font-size: 14px; }").arg(ChatTheme::ToolCard::success()));
     } else {
         m_status->setText(u"✗"_s);
-        m_status->setStyleSheet(QStringLiteral("QLabel { color: %1; font-size: 14px; }").arg(ChatTheme::danger()));
+        m_status->setStyleSheet(QStringLiteral("QLabel { color: %1; font-size: 14px; }").arg(ChatTheme::ToolCard::danger()));
     }
 
     // Keep the complete result for normal commands and reads, bounded by lines
@@ -954,13 +980,13 @@ void ToolCallWidget::updateStyle()
     // to. Failure still overrides everything in red, because that is the one
     // state that must never be missed.
     QString rail = ChatTheme::toolColor(m_toolName);
-    if (rail == ChatTheme::textMuted()) {
+    if (rail == ChatTheme::ToolCard::textMuted()) {
         // An unknown tool (an MCP or ACP call with no built-in colour) still
         // needs a rail, so fall back to the risk.
         rail = colorForRisk(m_risk);
     }
     if ((m_finished && !m_ok) || m_denied) {
-        rail = ChatTheme::danger();
+        rail = ChatTheme::ToolCard::danger();
     }
 
     setStyleSheet(
@@ -974,7 +1000,7 @@ void ToolCallWidget::updateStyle()
         .arg(ChatTheme::toolCardBg(m_toolName), rail));
 
     m_header->setStyleSheet(ChatTheme::toolHeader(m_toolName));
-    m_title->setStyleSheet(QStringLiteral("QLabel { color: %1; font-size: 12px; }").arg(ChatTheme::textPrimary()));
+    m_title->setStyleSheet(QStringLiteral("QLabel { color: %1; font-size: 12px; }").arg(ChatTheme::ToolCard::textPrimary()));
     if (m_icon) {
         m_icon->setStyleSheet(QStringLiteral("QLabel { color: %1; font-size: 13px; background: transparent; }")
                                   .arg(rail));
@@ -1046,13 +1072,13 @@ QString ToolCallWidget::languageForTool(const QString &toolName) const
                 {u"groovy"_s, u"Groovy"_s}, {u"gradle"_s, u"Groovy"_s},
                 {u"dockerfile"_s, u"Dockerfile"_s}, {u"makefile"_s, u"Makefile"_s}, {u"cmake"_s, u"CMake"_s},
             };
-            
+
             if (extensionMap.contains(extension)) {
                 return extensionMap.value(extension);
             }
         }
     }
-    
+
     // Map tool names to syntax highlighting languages
     if (toolName == u"bash"_s || toolName == u"execute"_s) return u"Bash"_s;
     
@@ -1067,22 +1093,22 @@ QString ToolCallWidget::languageForTool(const QString &toolName) const
         // File operations and search return text content, not JSON
         return u"Text"_s;
     }
-    
+
     // JSON data tools
     if (toolName == u"web_search"_s || toolName == u"web_fetch"_s) return u"JSON"_s;
     if (toolName == u"query_project_graph"_s) return u"JSON"_s;
     if (toolName == u"new_task"_s) return u"Text"_s;  // Sub-agent results are typically text
     if (toolName.startsWith(u"mcp__"_s)) return u"JSON"_s;
-    
+
     // Terminal tools
     if (toolName.startsWith(u"terminal/"_s) || toolName == u"terminal"_s) return u"Text"_s;
-    
+
     // ACP tools that don't match specific patterns - default to Text for readability
     // ACP agents often return human-readable results, not raw JSON
     if (toolName.contains(u"/"_s) || toolName.startsWith(u"fs/"_s)) {
         return u"Text"_s;
     }
-    
+
     // Tool protocols commonly return key/value text even when they are not a
     // built-in tool. Give those calls a real definition too instead of leaving
     // them as uncoloured plain text.
@@ -1093,13 +1119,13 @@ QString ToolCallWidget::colorForRisk(ToolRisk risk) const
 {
     switch (risk) {
     case ToolRisk::Read:
-        return ChatTheme::success();
+        return ChatTheme::ToolCard::success();
     case ToolRisk::Write:
-        return ChatTheme::warning();
+        return ChatTheme::ToolCard::warning();
     case ToolRisk::Execute:
-        return ChatTheme::danger();
+        return ChatTheme::ToolCard::danger();
     }
-    return ChatTheme::textMuted();
+    return ChatTheme::ToolCard::textMuted();
 }
 
 bool ToolCallWidget::isDiffTool(const QString &toolName) const
@@ -1223,33 +1249,48 @@ QString ToolCallWidget::bodyCaption() const
     return detailViewCaption();
 }
 
+void ToolCallWidget::applyDetailsSurface(ToolDetailView view)
+{
+    if (!m_details) {
+        return;
+    }
+    // A command's output is a terminal, not a code sample: one step darker
+    // than the inset used everywhere else, so running and reading are told
+    // apart at a glance.
+    const QString surface = view == ToolDetailView::Terminal ? QStringLiteral("#101014")
+                                                             : ChatTheme::ToolCard::codeBlockBg();
+    m_details->setStyleSheet(
+        QStringLiteral(
+            "QTextBrowser {"
+            "  background-color: %1;"
+            "  color: %2;"
+            "  border: none;"
+            "  padding: 8px;"
+            "  font-family: monospace;"
+            "  font-size: 11px;"
+            "}")
+        .arg(surface, QStringLiteral("#ffffff")));
+    m_details->document()->setDefaultStyleSheet(
+        QStringLiteral(
+            "body { color: %1; font-family: monospace; font-size: 11px; margin: 0; padding: 0; }"
+            "pre { margin: 0; white-space: pre-wrap; font-family: monospace; font-size: 11px; }"
+            "p { margin: 0; white-space: pre-wrap; }")
+            .arg(QStringLiteral("#ffffff")));
+    // setDefaultStyleSheet() only reaches content parsed after it, so re-parse
+    // the current output: syntax spans keep their inline colours, the body
+    // colour updates.
+    if (!m_details->toPlainText().isEmpty()) {
+        m_details->setHtml(m_details->toHtml());
+        scheduleReflow();
+    }
+}
+
 void ToolCallWidget::applyDetailView()
 {
     const ToolDetailView view = detailViewForTool(m_toolName);
     if (view != m_detailView && m_details) {
         m_detailView = view;
-        // A command's output is a terminal, not a code sample: one step darker
-        // than the inset used everywhere else, so running and reading are told
-        // apart at a glance.
-        const QString surface = view == ToolDetailView::Terminal ? QStringLiteral("#101014")
-                                                                 : ChatTheme::codeBlockBg();
-        m_details->setStyleSheet(
-            QStringLiteral(
-                "QTextBrowser {"
-                "  background-color: %1;"
-                "  color: %2;"
-                "  border: none;"
-                "  padding: 8px;"
-                "  font-family: monospace;"
-                "  font-size: 11px;"
-                "}")
-            .arg(surface, QStringLiteral("#ffffff")));
-        m_details->document()->setDefaultStyleSheet(
-            QStringLiteral(
-                "body { color: %1; font-family: monospace; font-size: 11px; margin: 0; padding: 0; }"
-                "pre { margin: 0; white-space: pre-wrap; font-family: monospace; font-size: 11px; }"
-                "p { margin: 0; white-space: pre-wrap; }")
-            .arg(QStringLiteral("#ffffff")));
+        applyDetailsSurface(view);
     }
     if (m_viewCaption) {
         const QString caption = bodyCaption();
@@ -1322,7 +1363,7 @@ void ToolCallWidget::updateTitleText()
     cmdHtml.replace(u'\n', u"<br>"_s);
     m_title->setText(QStringLiteral("<span style=\"color:%1\"><b>%2</b></span>&nbsp; <span style=\"color:%3\">%4</span>")
                          .arg(ChatTheme::toolColor(m_toolName), escapeHtml(label),
-                              ChatTheme::textPrimary(), cmdHtml));
+                              ChatTheme::ToolCard::textPrimary(), cmdHtml));
 
     const int lines = std::max(1, static_cast<int>(wrapped.count(u'\n')) + 1);
     m_title->setMaximumHeight(fm.lineSpacing() * lines + 2);

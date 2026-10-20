@@ -5,8 +5,17 @@
 
 #include "chattheme.h"
 
+#include "codehighlight.h"
+
+#include <KLocalizedString>
+#include <KTextEditor/Editor>
+#include <KSyntaxHighlighting/Theme>
+
 #include <QColor>
 #include <QHash>
+#include <QJsonDocument>
+#include <QList>
+#include <QPair>
 
 using namespace Qt::Literals::StringLiterals;
 
@@ -30,20 +39,18 @@ QString kCodeBlockBg = QStringLiteral("#151517");
 QString kInputBg = QStringLiteral("#2d2d31");
 QString kHoverBg = QStringLiteral("#323236");
 
-// Tool cards. The body sits clearly above the panel backdrop, and the head box
-// one step above the body, so a tool call is legible as a box while you scroll
-// past a wall of assistant text.
+// Tool card surfaces. Fixed and independent of the theme palette: a tool card
+// is identified by its hue (rail, icon, header tint), and that identity must
+// survive a theme switch. The body sits clearly above the panel backdrop, and
+// the head box one step above the body, so a tool call is legible as a box
+// while you scroll past a wall of assistant text.
 QString kToolBg = QStringLiteral("#26262b");
 QString kToolHeaderBg = QStringLiteral("#33333a");
 
-// Agent-task cards. A delegated sub-agent is the one thing in the transcript
-// that is *someone else's* work, so the card is yellow: a warm surface that
-// separates it from every blue/green/violet tool card at a glance, with the
-// border still carrying the outcome. One step above the tool-card surface and
-// ringed on all four sides, so it reads as its own object rather than as
+// Agent-task cards. One step above the surrounding surface and ringed on all
+// four sides, so a delegated sub-agent reads as its own object rather than as
 // another tool row in the log.
 QString kAgentTaskBg = QStringLiteral("#463a10");
-QString kAgentTaskBorder = QStringLiteral("#7a6220");
 QString kIntentRowBg = QStringLiteral("#3a3020");
 
 QString kBorder = QStringLiteral("#37373b");
@@ -57,6 +64,81 @@ QString kAccentHover = QStringLiteral("#5590ff");
 QString kSuccess = QStringLiteral("#4ec9a0");
 QString kWarning = QStringLiteral("#e2b341");
 QString kDanger = QStringLiteral("#f26d6d");
+
+// Fixed snapshots of the defaults above, captured at static initialisation --
+// before loadTheme() can ever rewrite the globals. The tool card never
+// follows the theme palette: its rail, icon, status marks, text, result
+// surface and approval chrome keep the default look in every theme, so a
+// transcript can be scanned by colour whether the panel is dark or light.
+const QString kFixedCardBg = kCardBg;
+const QString kFixedHoverBg = kHoverBg;
+const QString kFixedCodeBlockBg = kCodeBlockBg;
+const QString kFixedToolBg = kToolBg;
+const QString kFixedToolHeaderBg = kToolHeaderBg;
+const QString kFixedIntentRowBg = kIntentRowBg;
+const QString kFixedBorder = kBorder;
+const QString kFixedTextPrimary = kTextPrimary;
+const QString kFixedTextMuted = kTextMuted;
+const QString kFixedAccent = kAccent;
+const QString kFixedAccentHover = kAccentHover;
+const QString kFixedSuccess = kSuccess;
+const QString kFixedWarning = kWarning;
+const QString kFixedDanger = kDanger;
+
+// True when the colour reads as a dark surface, which decides whether
+// surfaces step towards white (dark themes) or towards black (light themes)
+// and whether text on a surface is white or the theme's foreground.
+bool isDarkColor(const QString &hex)
+{
+    const QColor c(hex);
+    if (!c.isValid()) {
+        return true;
+    }
+    return c.lightnessF() < 0.5;
+}
+
+QString lighten(const QString &hex, int percent)
+{
+    return mixColors(QStringLiteral("#ffffff"), hex, percent);
+}
+
+QString darken(const QString &hex, int percent)
+{
+    return mixColors(QStringLiteral("#000000"), hex, percent);
+}
+
+// Installs a whole palette into the globals the accessors read.
+void setPalette(const ChatPalette &p)
+{
+    kPanelBg = p.panelBg;
+    kSurfaceBg = p.surfaceBg;
+    kCardBg = p.cardBg;
+    kCodeBlockBg = p.codeBlockBg;
+    kInputBg = p.inputBg;
+    kHoverBg = p.hoverBg;
+    kAgentTaskBg = p.agentTaskBg;
+    kIntentRowBg = p.intentRowBg;
+    kBorder = p.border;
+    kBorderStrong = p.borderStrong;
+    kTextPrimary = p.textPrimary;
+    kTextMuted = p.textMuted;
+    kAccent = p.accent;
+    kAccentHover = p.accentHover;
+    kSuccess = p.success;
+    kWarning = p.warning;
+    kDanger = p.danger;
+}
+
+// The Kate editor's current colour scheme, used when the panel inherits its
+// colours from the editor. Invalid when there is no editor instance.
+KSyntaxHighlighting::Theme editorTheme()
+{
+    auto *editor = KTextEditor::Editor::instance();
+    if (!editor) {
+        return KSyntaxHighlighting::Theme();
+    }
+    return editor->theme();
+}
 
 } // namespace
 
@@ -110,28 +192,30 @@ QString intentDock()
            "}");
 }
 
-QString agentTaskCard()
+QString agentTaskCard(const QString &objectName)
 {
     return QStringLiteral(
-           "QWidget#subtaskWidget {"
-           "  background-color: %1;"
-           "  border: 1px solid %2;"
+           "QWidget#%1 {"
+           "  background-color: %2;"
+           "  border: 1px solid %3;"
            "  border-radius: 8px;"
            "}")
-        .arg(kAgentTaskBg, kAgentTaskBorder);
+        .arg(objectName, kAgentTaskBg, kBorder);
 }
 
 QString intentApprovalRow()
 {
     // Warm, high-contrast box: this is the one thing in the strip that stops the
-    // agent, so it must not be mistakable for a status line.
+    // agent, so it must not be mistakable for a status line. Pinned to the
+    // defaults: the strip is part of a tool card, which never follows the
+    // theme palette.
     return QStringLiteral(
            "QWidget#approvalRow {"
            "  background-color: %1;"
            "  border: 1px solid %2;"
            "  border-radius: 8px;"
            "}")
-        .arg(kIntentRowBg, kWarning);
+        .arg(kFixedIntentRowBg, kFixedWarning);
 }
 
 QString border()
@@ -247,16 +331,16 @@ QString chipButton()
            "QPushButton:hover {"
            "  background-color: %4;"
            "  border-color: %5;"
-           "  color: #ffffff;"
+           "  color: %2;"
            "}"
            "QPushButton:pressed {"
            "  background-color: %5;"
            "}"
            "QPushButton:disabled {"
-           "  color: #6a6a72;"
+           "  color: %6;"
            "  border-color: %3;"
            "}")
-        .arg(kCardBg, kTextPrimary, kBorder, kHoverBg, kBorderStrong);
+        .arg(kCardBg, kTextPrimary, kBorder, kHoverBg, kBorderStrong, kTextMuted);
 }
 
 QString iconButton()
@@ -333,11 +417,11 @@ QString infoBar()
            "  font-size: 12px;"
            "  font-weight: 500;"
            "  padding: 7px 11px;"
-           "  background-color: rgba(242, 109, 109, 0.10);"
-           "  border: 1px solid rgba(242, 109, 109, 0.35);"
+           "  background-color: %2;"
+           "  border: 1px solid %3;"
            "  border-radius: 8px;"
            "}")
-        .arg(kDanger);
+        .arg(kDanger, tinted(kDanger, 0.10), tinted(kDanger, 0.35));
 }
 
 QString jumpToLatest()
@@ -414,29 +498,42 @@ QString workingPillDim()
     return pillSheet(QStringLiteral("#c5ab64"), QStringLiteral("rgba(226, 179, 65, 0.09)"), kWarning);
 }
 
+QString userCardBg()
+{
+    // A neutral step up from the panel, derived so a light theme gets a light
+    // card instead of the dark bubble the dark palette hard-coded.
+    return mixColors(kTextPrimary, kPanelBg, 12);
+}
+
+QString userCardText()
+{
+    return textOn(userCardBg());
+}
+
 QString userCard()
 {
     // User turns are deliberately neutral. Blue is reserved for actions and
     // focus elsewhere in the panel, so it should not make every prompt look
-    // like an actionable control. Keep the surface dark enough that its white
-    // text has the same contrast as the rest of the transcript.
+    // like an actionable control. The surface is derived from the panel and
+    // foreground, and the text colour follows the surface, so the card keeps
+    // its contrast in both dark and light themes.
     return QStringLiteral(
            "QWidget#userCard {"
-           "  background-color: #3a3a3d;"
-           "  border: 1px solid #505055;"
-           "  border-left: 3px solid #686870;"
+           "  background-color: %1;"
+           "  border: 1px solid %2;"
+           "  border-left: 3px solid %3;"
            "  border-radius: 8px;"
-           "}");
+           "}")
+        .arg(userCardBg(), mixColors(kTextPrimary, kPanelBg, 22), mixColors(kTextPrimary, kPanelBg, 32));
 }
 
 QString assistantCard()
 {
     return QStringLiteral(
-           "QWidget#assistantCard {"
-           "  background: transparent;"
-           "  border: none;"
-           "}")
-        .arg(kPanelBg);
+        "QWidget#assistantCard {"
+        "  background: transparent;"
+        "  border: none;"
+        "}");
 }
 
 QString sectionLabel()
@@ -466,14 +563,115 @@ QString mixColors(const QString &hex, const QString &onto, int percent)
     return mixed.name();
 }
 
+QString tinted(const QString &hex, double alpha)
+{
+    QColor c(hex);
+    if (!c.isValid()) {
+        return hex;
+    }
+    c.setAlphaF(qBound(0.0, alpha, 1.0));
+    return c.name(QColor::HexArgb);
+}
+
+QString textOn(const QString &surfaceBg)
+{
+    return isDarkColor(surfaceBg) ? QStringLiteral("#ffffff") : kTextPrimary;
+}
+
+QString menu()
+{
+    return QStringLiteral(
+           "QMenu {"
+           "  background-color: %1;"
+           "  color: %2;"
+           "  border: 1px solid %3;"
+           "  border-radius: 6px;"
+           "  padding: 4px;"
+           "}"
+           "QMenu::item {"
+           "  padding: 6px 18px 6px 12px;"
+           "  border-radius: 4px;"
+           "}"
+           "QMenu::item:selected {"
+           "  background-color: %4;"
+           "  color: #ffffff;"
+           "}"
+           "QMenu::separator {"
+           "  height: 1px;"
+           "  background-color: %3;"
+           "  margin: 4px 0;"
+           "}")
+        .arg(kSurfaceBg, kTextPrimary, kBorder, kAccent);
+}
+
+QString popupMenu()
+{
+    return QStringLiteral(
+           "QFrame#modelPopup {"
+           "  background-color: %1;"
+           "  color: %2;"
+           "  border: 1px solid %3;"
+           "  border-radius: 8px;"
+           "}"
+           "QListWidget {"
+           "  background-color: %1;"
+           "  color: %2;"
+           "  border: none;"
+           "  outline: none;"
+           "  padding: 2px;"
+           "}"
+           "QListWidget::item {"
+           "  padding: 5px 10px;"
+           "  border-radius: 4px;"
+           "}"
+           "QListWidget::item:selected {"
+           "  background-color: %4;"
+           "  color: #ffffff;"
+           "}"
+           "QListWidget::item:hover:!selected {"
+           "  background-color: %5;"
+           "}"
+           "QPushButton#modelPopupConfig {"
+           "  background: transparent;"
+           "  color: %6;"
+           "  border: none;"
+           "  text-align: left;"
+           "  padding: 6px 10px;"
+           "}"
+           "QPushButton#modelPopupConfig:hover {"
+           "  color: %2;"
+           "  background-color: %5;"
+           "  border-radius: 4px;"
+           "}")
+        .arg(kSurfaceBg, kTextPrimary, kBorder, kAccent, kHoverBg, kTextMuted);
+}
+
+QString lineEdit()
+{
+    return QStringLiteral(
+           "QLineEdit {"
+           "  background-color: %1;"
+           "  color: %2;"
+           "  border: 1px solid %3;"
+           "  border-radius: 4px;"
+           "  padding: 6px 10px;"
+           "  font-size: 12px;"
+           "}"
+           "QLineEdit:focus {"
+           "  border-color: %4;"
+           "}")
+        .arg(kInputBg, kTextPrimary, kBorder, kAccent);
+}
+
 QString toolHeader(const QString &toolName)
 {
     // The head box carries the tool's identity, because it is the only part of
     // the card visible while collapsed: the hue is blended into the surface
     // rather than painted on it, so the label on top stays readable. The top
     // radii match the card's so the two read as one object.
-    const QString headBg = mixColors(toolColor(toolName), kToolHeaderBg, 16);
-    const QString hoverBg = mixColors(toolColor(toolName), kToolHeaderBg, 30);
+    const QString toolHue = toolColor(toolName);
+    const QString headBg = mixColors(toolHue, kFixedToolHeaderBg, 16);
+    const QString hoverBg = mixColors(toolHue, kFixedToolHeaderBg, 30);
     return QStringLiteral(
            "QWidget#toolHeader {"
            "  background-color: %1;"
@@ -485,7 +683,7 @@ QString toolHeader(const QString &toolName)
            "QWidget#toolHeader:hover {"
            "  background-color: %3;"
            "}")
-        .arg(headBg, kBorder, hoverBg);
+        .arg(headBg, kFixedBorder, hoverBg);
 }
 
 QString messageCss()
@@ -735,12 +933,368 @@ QString toolColor(const QString &toolName)
     if (key.startsWith(QLatin1String("terminal"))) {
         return QStringLiteral("#e06c75");
     }
-    return kTextMuted;
+    // The fixed muted, not the theme's: this hue is the unknown-tool rail and
+    // icon, which must not change with the theme.
+    return kFixedTextMuted;
 }
 
 QString toolCardBg(const QString &toolName)
 {
-    return mixColors(toolColor(toolName), kToolBg, 10);
+    return mixColors(toolColor(toolName), kFixedToolBg, 10);
+}
+
+namespace ToolCard
+{
+
+QString textPrimary()
+{
+    return kFixedTextPrimary;
+}
+
+QString textMuted()
+{
+    return kFixedTextMuted;
+}
+
+QString success()
+{
+    return kFixedSuccess;
+}
+
+QString danger()
+{
+    return kFixedDanger;
+}
+
+QString warning()
+{
+    return kFixedWarning;
+}
+
+QString accent()
+{
+    return kFixedAccent;
+}
+
+QString accentHover()
+{
+    return kFixedAccentHover;
+}
+
+QString cardBg()
+{
+    return kFixedCardBg;
+}
+
+QString hoverBg()
+{
+    return kFixedHoverBg;
+}
+
+QString codeBlockBg()
+{
+    return kFixedCodeBlockBg;
+}
+
+} // namespace ToolCard
+
+
+// --- Themes. -----------------------------------------------------------------
+
+namespace
+{
+
+// The default palette: the values the globals are initialised with at the top
+// of this file. Used as the fallback for every preset and as the base for
+// editor-derived palettes.
+ChatPalette defaultPalette()
+{
+    ChatPalette p;
+    p.panelBg = QStringLiteral("#1e1e1e");
+    p.surfaceBg = QStringLiteral("#242426");
+    p.cardBg = QStringLiteral("#28282b");
+    p.codeBlockBg = QStringLiteral("#151517");
+    p.inputBg = QStringLiteral("#2d2d31");
+    p.hoverBg = QStringLiteral("#323236");
+    p.agentTaskBg = QStringLiteral("#463a10");
+    p.intentRowBg = QStringLiteral("#3a3020");
+    p.border = QStringLiteral("#37373b");
+    p.borderStrong = QStringLiteral("#4a4a50");
+    p.textPrimary = QStringLiteral("#d4d4d6");
+    p.textMuted = QStringLiteral("#8b8b92");
+    p.accent = QStringLiteral("#3d7eff");
+    p.accentHover = QStringLiteral("#5590ff");
+    p.success = QStringLiteral("#4ec9a0");
+    p.warning = QStringLiteral("#e2b341");
+    p.danger = QStringLiteral("#f26d6d");
+    return p;
+}
+
+// A light palette for users who prefer a bright panel.
+ChatPalette lightPalette()
+{
+    ChatPalette p;
+    p.panelBg = QStringLiteral("#f5f5f5");
+    p.surfaceBg = QStringLiteral("#ececee");
+    p.cardBg = QStringLiteral("#ffffff");
+    p.codeBlockBg = QStringLiteral("#e8e8ea");
+    p.inputBg = QStringLiteral("#ffffff");
+    p.hoverBg = QStringLiteral("#e0e0e3");
+    p.agentTaskBg = QStringLiteral("#ececf0");
+    p.intentRowBg = QStringLiteral("#fdf3d0");
+    p.border = QStringLiteral("#d0d0d4");
+    p.borderStrong = QStringLiteral("#b8b8bc");
+    p.textPrimary = QStringLiteral("#1a1a1c");
+    p.textMuted = QStringLiteral("#6e6e74");
+    p.accent = QStringLiteral("#2563eb");
+    p.accentHover = QStringLiteral("#1d4ed8");
+    p.success = QStringLiteral("#16a34a");
+    p.warning = QStringLiteral("#d97706");
+    p.danger = QStringLiteral("#dc2626");
+    return p;
+}
+
+// Ordered list of every overridable colour key, matching the ChatPalette fields.
+const QStringList &colorKeys()
+{
+    static const QStringList keys = {
+        QStringLiteral("panelBg"),
+        QStringLiteral("surfaceBg"),
+        QStringLiteral("cardBg"),
+        QStringLiteral("codeBlockBg"),
+        QStringLiteral("inputBg"),
+        QStringLiteral("hoverBg"),
+        QStringLiteral("agentTaskBg"),
+        QStringLiteral("intentRowBg"),
+        QStringLiteral("border"),
+        QStringLiteral("borderStrong"),
+        QStringLiteral("textPrimary"),
+        QStringLiteral("textMuted"),
+        QStringLiteral("accent"),
+        QStringLiteral("accentHover"),
+        QStringLiteral("success"),
+        QStringLiteral("warning"),
+        QStringLiteral("danger"),
+    };
+    return keys;
+}
+
+// Human-readable labels for each colour key, shown in the config page.
+QString colorKeyLabel(const QString &key)
+{
+    static const QHash<QString, QString> labels = {
+        {QStringLiteral("panelBg"), i18nc("theme colour", "Panel background")},
+        {QStringLiteral("surfaceBg"), i18nc("theme colour", "Surface background")},
+        {QStringLiteral("cardBg"), i18nc("theme colour", "Card background")},
+        {QStringLiteral("codeBlockBg"), i18nc("theme colour", "Code block background")},
+        {QStringLiteral("inputBg"), i18nc("theme colour", "Input background")},
+        {QStringLiteral("hoverBg"), i18nc("theme colour", "Hover background")},
+        {QStringLiteral("agentTaskBg"), i18nc("theme colour", "Agent task background")},
+        {QStringLiteral("intentRowBg"), i18nc("theme colour", "Approval row background")},
+        {QStringLiteral("border"), i18nc("theme colour", "Border")},
+        {QStringLiteral("borderStrong"), i18nc("theme colour", "Border (strong)")},
+        {QStringLiteral("textPrimary"), i18nc("theme colour", "Primary text")},
+        {QStringLiteral("textMuted"), i18nc("theme colour", "Muted text")},
+        {QStringLiteral("accent"), i18nc("theme colour", "Accent")},
+        {QStringLiteral("accentHover"), i18nc("theme colour", "Accent (hover)")},
+        {QStringLiteral("success"), i18nc("theme colour", "Success")},
+        {QStringLiteral("warning"), i18nc("theme colour", "Warning")},
+        {QStringLiteral("danger"), i18nc("theme colour", "Danger")},
+    };
+    return labels.value(key, key);
+}
+
+// Writes one colour from the palette into the key, if the key is known.
+void setPaletteColor(ChatPalette &palette, const QString &key, const QString &value)
+{
+    if (!QColor(value).isValid()) {
+        return;
+    }
+    if (key == u"panelBg"_s) palette.panelBg = value;
+    else if (key == u"surfaceBg"_s) palette.surfaceBg = value;
+    else if (key == u"cardBg"_s) palette.cardBg = value;
+    else if (key == u"codeBlockBg"_s) palette.codeBlockBg = value;
+    else if (key == u"inputBg"_s) palette.inputBg = value;
+    else if (key == u"hoverBg"_s) palette.hoverBg = value;
+    else if (key == u"agentTaskBg"_s) palette.agentTaskBg = value;
+    else if (key == u"intentRowBg"_s) palette.intentRowBg = value;
+    else if (key == u"border"_s) palette.border = value;
+    else if (key == u"borderStrong"_s) palette.borderStrong = value;
+    else if (key == u"textPrimary"_s) palette.textPrimary = value;
+    else if (key == u"textMuted"_s) palette.textMuted = value;
+    else if (key == u"accent"_s) palette.accent = value;
+    else if (key == u"accentHover"_s) palette.accentHover = value;
+    else if (key == u"success"_s) palette.success = value;
+    else if (key == u"warning"_s) palette.warning = value;
+    else if (key == u"danger"_s) palette.danger = value;
+}
+
+} // namespace
+
+QStringList themePresetIds()
+{
+    return {QStringLiteral("kateai-dark"), QStringLiteral("kateai-light")};
+}
+
+QString themePresetLabel(const QString &id)
+{
+    if (id == u"kateai-dark"_s) {
+        return i18nc("theme preset", "Kate AI Dark");
+    }
+    if (id == u"kateai-light"_s) {
+        return i18nc("theme preset", "Kate AI Light");
+    }
+    return id;
+}
+
+QStringList themeColorKeys()
+{
+    return colorKeys();
+}
+
+QString themeColorLabel(const QString &key)
+{
+    return colorKeyLabel(key);
+}
+
+QString paletteColor(const ChatPalette &palette, const QString &key)
+{
+    if (key == u"panelBg"_s) return palette.panelBg;
+    if (key == u"surfaceBg"_s) return palette.surfaceBg;
+    if (key == u"cardBg"_s) return palette.cardBg;
+    if (key == u"codeBlockBg"_s) return palette.codeBlockBg;
+    if (key == u"inputBg"_s) return palette.inputBg;
+    if (key == u"hoverBg"_s) return palette.hoverBg;
+    if (key == u"agentTaskBg"_s) return palette.agentTaskBg;
+    if (key == u"intentRowBg"_s) return palette.intentRowBg;
+    if (key == u"border"_s) return palette.border;
+    if (key == u"borderStrong"_s) return palette.borderStrong;
+    if (key == u"textPrimary"_s) return palette.textPrimary;
+    if (key == u"textMuted"_s) return palette.textMuted;
+    if (key == u"accent"_s) return palette.accent;
+    if (key == u"accentHover"_s) return palette.accentHover;
+    if (key == u"success"_s) return palette.success;
+    if (key == u"warning"_s) return palette.warning;
+    if (key == u"danger"_s) return palette.danger;
+    return QString();
+}
+
+ChatPalette paletteForPreset(const QString &id)
+{
+    if (id == u"kateai-light"_s) {
+        return lightPalette();
+    }
+    // Unknown ids and "kateai-dark" both give the default dark palette.
+    return defaultPalette();
+}
+
+ChatPalette paletteForEditorTheme(const KSyntaxHighlighting::Theme &theme)
+{
+    ChatPalette p = defaultPalette();
+    if (!theme.isValid()) {
+        return p;
+    }
+
+    // The editor's background and text become the panel's, and every surface
+    // is derived as a step away from them so contrast survives both dark and
+    // light editor schemes.
+    const QColor editorBg = theme.editorColor(KSyntaxHighlighting::Theme::EditorColorRole::BackgroundColor);
+    // textColor returns QRgb; 0 means "not set", fall back to a sensible default.
+    const QRgb fgRgb = theme.textColor(KSyntaxHighlighting::Theme::TextStyle::Normal);
+    const QColor editorFg = fgRgb != 0 ? QColor::fromRgb(fgRgb) : QColor(u"#d4d4d6"_s);
+    if (!editorBg.isValid() || !editorFg.isValid()) {
+        return p;
+    }
+
+    const bool dark = editorBg.lightnessF() < 0.5;
+    const QString bg = editorBg.name();
+    const QString fg = editorFg.name();
+
+    p.panelBg = bg;
+    p.textPrimary = fg;
+    // Muted text: blend the foreground towards the background.
+    p.textMuted = mixColors(fg, bg, 45);
+
+    if (dark) {
+        p.surfaceBg = lighten(bg, 4);
+        p.cardBg = lighten(bg, 8);
+        p.codeBlockBg = darken(bg, 8);
+        p.inputBg = lighten(bg, 12);
+        p.hoverBg = lighten(bg, 16);
+        p.agentTaskBg = lighten(bg, 10);
+        p.intentRowBg = mixColors(QStringLiteral("#e2b341"), bg, 18);
+        p.border = lighten(bg, 18);
+        p.borderStrong = lighten(bg, 26);
+    } else {
+        p.surfaceBg = darken(bg, 4);
+        p.cardBg = QStringLiteral("#ffffff");
+        p.codeBlockBg = darken(bg, 8);
+        p.inputBg = QStringLiteral("#ffffff");
+        p.hoverBg = darken(bg, 10);
+        p.agentTaskBg = darken(bg, 7);
+        p.intentRowBg = mixColors(QStringLiteral("#fdf3d0"), bg, 30);
+        p.border = darken(bg, 16);
+        p.borderStrong = darken(bg, 24);
+    }
+
+    // Accent: use the editor's selection colour when it reads as a usable
+    // accent, otherwise fall back to the default blue.
+    const QColor selectionBg = theme.editorColor(KSyntaxHighlighting::Theme::EditorColorRole::TextSelection);
+    if (selectionBg.isValid() && selectionBg.saturationF() > 0.2) {
+        p.accent = selectionBg.name();
+        p.accentHover = mixColors(selectionBg.name(), fg, 20);
+    }
+
+    return p;
+}
+
+ChatPalette applyThemeOverrides(ChatPalette palette, const QJsonObject &overrides)
+{
+    for (auto it = overrides.constBegin(); it != overrides.constEnd(); ++it) {
+        setPaletteColor(palette, it.key(), it.value().toString());
+    }
+    return palette;
+}
+
+ChatPalette paletteForSettings(const Settings &settings)
+{
+    ChatPalette palette;
+    if (settings.themeSource == u"editor"_s) {
+        palette = paletteForEditorTheme(editorTheme());
+    } else {
+        palette = paletteForPreset(settings.themePreset);
+    }
+
+    // Apply user overrides on top of the selected source.
+    if (!settings.themeOverrides.trimmed().isEmpty()) {
+        const QJsonDocument doc = QJsonDocument::fromJson(settings.themeOverrides.toUtf8());
+        if (doc.isObject()) {
+            palette = applyThemeOverrides(palette, doc.object());
+        }
+    }
+    return palette;
+}
+
+void loadTheme(const Settings &settings)
+{
+    const ChatPalette palette = paletteForSettings(settings);
+    setPalette(palette);
+
+    // Point code highlighting at the editor's scheme when inheriting, so code
+    // blocks in the transcript match the editor's syntax colours.
+    if (settings.themeSource == u"editor"_s) {
+        auto *editor = KTextEditor::Editor::instance();
+        if (editor) {
+            CodeHighlight::setThemeName(editor->theme().name());
+        }
+    } else {
+        // Built-in presets use Kate's default dark or light theme for code.
+        if (settings.themePreset == u"kateai-light"_s) {
+            CodeHighlight::setThemeName(QStringLiteral("Default"));
+        } else {
+            CodeHighlight::setThemeName(QString());
+        }
+    }
 }
 
 } // namespace ChatTheme

@@ -25,6 +25,9 @@ public:
 
     void showRequest(const PermissionRequest &request);
     void hideBar();
+    // Re-applies every theme-derived stylesheet, so a theme change repaints a
+    // bar that is currently showing, not just the next one.
+    void applyStyle();
 
 Q_SIGNALS:
     void decided(PermissionDecision decision);
@@ -38,6 +41,7 @@ private:
     QPushButton *m_allowBtn = nullptr;
     QPushButton *m_sessionBtn = nullptr;
     QPushButton *m_denyBtn = nullptr;
+    ToolRisk m_risk = ToolRisk::Read;
 };
 
 } // namespace KateAi

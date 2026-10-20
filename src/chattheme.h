@@ -5,7 +5,16 @@
 
 #pragma once
 
+#include "types.h"
+
+#include <QJsonObject>
 #include <QString>
+#include <QStringList>
+
+namespace KSyntaxHighlighting
+{
+class Theme;
+}
 
 namespace KateAi
 {
@@ -50,12 +59,14 @@ QString toolHeaderBg();
 // boxed.
 QString intentDock();
 
-// Agent-task cards (sub-agents). A full border plus a raised yellow
-// background, one step above a tool card: a delegated task is a different
-// *kind* of thing than a tool the orchestrator ran itself, and the warm surface
-// is what separates someone else's work from the agent's own tool rows at a
-// glance. The border colour still carries the outcome.
-QString agentTaskCard();
+// Agent-task cards (sub-agents, suggestions, questions). A full border plus a
+// raised background, one step above a tool card: a delegated task is a
+// different *kind* of thing than a tool the orchestrator ran itself. The
+// selector targets the card's objectName, which every caller passes in —
+// hard-coding one card's name here left the other cards without a surface.
+// The default is the sub-agent card, so callers that only know the kind of
+// card (not which one) can ask for the style directly.
+QString agentTaskCard(const QString &objectName = QStringLiteral("subtaskWidget"));
 
 // --- Lines. ------------------------------------------------------------------
 QString border();
@@ -93,6 +104,9 @@ QString thinkingPillDim(); // the pulse phase of the thinking pill
 QString workingPill();    // amber live-tool pill
 QString workingPillDim(); // the pulse phase of the working pill
 QString userCard();
+// The user card's surface and the text colour that stays readable on it.
+QString userCardBg();
+QString userCardText();
 QString assistantCard();
 QString sectionLabel();
 QString scrollBar();
@@ -135,10 +149,89 @@ bool isEditToolName(const QString &toolName);
 QString toolColor(const QString &toolName);
 // The card body surface, tinted with the tool's hue.
 QString toolCardBg(const QString &toolName);
-// Stylesheet for the header row of a tool card, tinted by tool.
-QString toolHeader(const QString &toolName);
+
+// --- Tool card chrome (theme-independent). -----------------------------------
+// The tool card never follows the theme palette: its text, status marks,
+// approval buttons and result surface are pinned to the default palette, so
+// a tool card keeps the same look in every theme and a transcript can be
+// scanned by colour whether the panel is dark or light.
+namespace ToolCard {
+QString textPrimary();
+QString textMuted();
+QString success();
+QString danger();
+QString warning();
+QString accent();
+QString accentHover();
+QString cardBg();
+QString hoverBg();
+QString codeBlockBg();
+}
+
 // Blends a hex colour onto another at the given percentage (0-100).
 QString mixColors(const QString &hex, const QString &onto, int percent);
+// A colour at the given opacity as #AARRGGBB, which Qt stylesheets accept.
+QString tinted(const QString &hex, double alpha);
+// The colour a label on the given surface should use: white on dark surfaces,
+// the theme's primary text colour on light ones.
+QString textOn(const QString &surfaceBg);
+
+// --- Popup chrome. -----------------------------------------------------------
+// Shared stylesheets for the panel's menus and the model-picker popup, so a
+// retheme does not leave a light popup floating over a dark panel.
+QString menu();
+QString popupMenu();
+QString lineEdit();
+
+// --- Themes. -----------------------------------------------------------------
+// The whole palette as one value. The accessors above read the process-wide
+// palette that loadTheme() installs; these functions compute palettes without
+// touching global state, which is what the config page previews with.
+struct ChatPalette {
+    QString panelBg;
+    QString surfaceBg;
+    QString cardBg;
+    QString codeBlockBg;
+    QString inputBg;
+    QString hoverBg;
+    QString agentTaskBg;
+    QString intentRowBg;
+    QString border;
+    QString borderStrong;
+    QString textPrimary;
+    QString textMuted;
+    QString accent;
+    QString accentHover;
+    QString success;
+    QString warning;
+    QString danger;
+};
+
+// Built-in palette ids for the config page ("kateai-dark", "kateai-light").
+QStringList themePresetIds();
+QString themePresetLabel(const QString &id);
+// Every colour a user can override, in display order, with a label for the UI.
+QStringList themeColorKeys();
+QString themeColorLabel(const QString &key);
+// The colour stored under one override key in a palette ("" when unknown).
+QString paletteColor(const ChatPalette &palette, const QString &key);
+// The palette for a built-in preset id; unknown ids give the default palette.
+ChatPalette paletteForPreset(const QString &id);
+// Derives a palette from a Kate editor colour scheme: the editor background
+// and text become the panel, and every surface is a step away from them so
+// contrast survives both dark and light schemes. Invalid themes fall back to
+// the default palette.
+ChatPalette paletteForEditorTheme(const KSyntaxHighlighting::Theme &theme);
+// Applies {key: hex} overrides on top of a palette; invalid colours and
+// unknown keys are ignored.
+ChatPalette applyThemeOverrides(ChatPalette palette, const QJsonObject &overrides);
+// The effective palette for a settings struct: the selected source plus the
+// user's overrides.
+ChatPalette paletteForSettings(const Settings &settings);
+// Installs the settings' palette into the process-wide palette the accessors
+// above read, and points code highlighting at the matching scheme. Call
+// whenever settings change or the editor theme may have changed.
+void loadTheme(const Settings &settings);
 
 } // namespace ChatTheme
 

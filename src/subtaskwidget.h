@@ -50,6 +50,9 @@ public:
     void markAbandoned(const QString &reason);
 
     void reflowNow();
+    // Re-applies every theme-derived stylesheet, so a theme change repaints a
+    // card that is live in the transcript or the intent dock.
+    void applyStyle();
 
 Q_SIGNALS:
     void cancelRequested(const QString &taskId);
@@ -59,7 +62,6 @@ private:
     void updateElapsed();
     void updateCurrentActivity();
     void setActivityVisible(bool visible);
-    void applyStyle();
 
 protected:
     void resizeEvent(QResizeEvent *event) override;
@@ -78,6 +80,7 @@ protected:
 
     QElapsedTimer m_elapsed;
 
+    QLabel *m_badge = nullptr;
     QLabel *m_icon = nullptr;
     QLabel *m_title = nullptr;
     QLabel *m_status = nullptr;

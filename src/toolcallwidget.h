@@ -119,6 +119,10 @@ public:
     // the scroll that carried it into view.
     void flashAttention();
     void reflowNow();
+    // Re-applies the card's stylesheets. The card's colours are fixed and
+    // theme-independent, so this exists to keep the restyle plumbing uniform
+    // with the other cards, not because the card's look changes.
+    void applyStyle();
 
 Q_SIGNALS:
     void approvalChosen(PermissionDecision decision);
@@ -142,6 +146,11 @@ private:
     void reflowDetails();
     void applyDetailsHeight();
     void applyDetailView();
+    // Styles the result surface for the view the card is in: the terminal
+    // surface for commands, the inset surface for everything else. Called by
+    // applyDetailView() when the view changes and by applyStyle() to re-derive
+    // the sheet in place.
+    void applyDetailsSurface(ToolDetailView view);
     bool hasDetailsBody() const;
     // What the copy button would put on the clipboard right now.
     QString copyableText() const;
@@ -207,7 +216,11 @@ private:
     QPushButton *m_expandBtn = nullptr;
     QPushButton *m_copyBtn = nullptr;
     QWidget *m_approvalRow = nullptr;
+    QLabel *m_approvalHint = nullptr;
     QLabel *m_approvalSubject = nullptr;
+    QPushButton *m_allowBtn = nullptr;
+    QPushButton *m_alwaysBtn = nullptr;
+    QPushButton *m_denyBtn = nullptr;
     QWidget *m_detailsContainer = nullptr;
     // The complete result, clamped only by the card's display rules. Held
     // separately from what is rendered so the copy button can hand over the

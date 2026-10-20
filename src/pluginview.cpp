@@ -5,6 +5,7 @@
 
 #include "pluginview.h"
 #include "chatwidget.h"
+#include "chattheme.h"
 #include "configpage.h"
 #include "plugin.h"
 #include "sessionstore.h"
@@ -13,6 +14,7 @@
 #include <KActionCollection>
 #include <KLocalizedString>
 #include <KTextEditor/Document>
+#include <KTextEditor/Editor>
 #include <KTextEditor/View>
 #include <KXMLGUIFactory>
 
@@ -49,6 +51,9 @@ namespace KateAi
                                                       QIcon::fromTheme(u"help-hint"_s),
                                                       i18n("Kate AI"));
         }
+
+        // Install the configured theme before any widget reads palette colours.
+        ChatTheme::loadTheme(plugin->settings());
 
         // Create the chat widget that will contain the AI interface
         if (m_toolView) {
@@ -96,10 +101,34 @@ namespace KateAi
 
         if (plugin && m_mainWindow) {
             connect(plugin, &KateAiPlugin::settingsChanged, this, [this](const Settings &settings) {
+                ChatTheme::loadTheme(settings);
                 if (m_chat) {
                     m_chat->setSettings(settings);
                 }
                 refreshWorkspace();
+            });
+        }
+        // Inheriting the Kate editor theme has to follow the editor live: the
+        // window repaints itself when its colour scheme changes, the chat UI
+        // inside it does not without this. configChanged fires for every editor
+        // setting, so compare the scheme name and only repaint on a real change.
+        if (auto *editor = KTextEditor::Editor::instance()) {
+            m_lastEditorThemeName = editor->theme().name();
+            connect(editor, &KTextEditor::Editor::configChanged, this, [this](KTextEditor::Editor *changed) {
+                if (!m_plugin || !m_chat || !changed) {
+                    return;
+                }
+                const QString themeName = changed->theme().name();
+                if (themeName == m_lastEditorThemeName) {
+                    return;
+                }
+                m_lastEditorThemeName = themeName;
+                const Settings settings = m_plugin->settings();
+                if (settings.themeSource != u"editor"_s) {
+                    return;
+                }
+                ChatTheme::loadTheme(settings);
+                m_chat->applyTheme();
             });
         }
         if (m_chat) {

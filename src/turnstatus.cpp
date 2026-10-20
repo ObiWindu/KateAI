@@ -53,28 +53,20 @@ TurnStatus::TurnStatus(QWidget *parent)
 
     m_spinner = new QLabel(this);
     m_spinner->setFixedWidth(10);
-    m_spinner->setStyleSheet(QStringLiteral("QLabel { color: %1; font-size: 12px; }").arg(ChatTheme::accent()));
     layout->addWidget(m_spinner);
 
     m_activity = new QLabel(this);
-    m_activity->setStyleSheet(QStringLiteral("QLabel { color: %1; font-size: 11px; }").arg(ChatTheme::textPrimary()));
     layout->addWidget(m_activity);
 
     m_stats = new QLabel(this);
-    m_stats->setStyleSheet(QStringLiteral("QLabel { color: %1; font-size: 11px; }").arg(ChatTheme::textMuted()));
     layout->addWidget(m_stats);
 
     // Idle hint shares the left edge with the running line, so the strip does
     // not appear to jump when a turn starts.
     m_idle = new QLabel(this);
-    m_idle->setStyleSheet(ChatTheme::hintLabel());
     layout->addWidget(m_idle);
 
     layout->addStretch();
-
-    m_spinner->hide();
-    m_activity->hide();
-    m_stats->hide();
 
     m_ticker = new QTimer(this);
     m_ticker->setInterval(120);
@@ -83,6 +75,18 @@ TurnStatus::TurnStatus(QWidget *parent)
         refresh();
     });
     m_spinner->setText(spinnerFrame(0));
+
+    applyStyle();
+}
+
+void TurnStatus::applyStyle()
+{
+    m_spinner->setStyleSheet(QStringLiteral("QLabel { color: %1; font-size: 12px; }").arg(ChatTheme::accent()));
+    m_activity->setStyleSheet(QStringLiteral("QLabel { color: %1; font-size: 11px; }").arg(ChatTheme::textPrimary()));
+    m_stats->setStyleSheet(QStringLiteral("QLabel { color: %1; font-size: 11px; }").arg(ChatTheme::textMuted()));
+    // refresh() re-derives the idle label's style from the current state and
+    // restores the busy/idle visibility of the running widgets.
+    refresh();
 }
 
 bool TurnStatus::eventFilter(QObject *watched, QEvent *event)

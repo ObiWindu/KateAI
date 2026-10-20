@@ -38,8 +38,6 @@ PermissionBar::PermissionBar(QWidget *parent)
 
     m_title = new QLabel(this);
     m_title->setWordWrap(true);
-    m_title->setStyleSheet(QStringLiteral("QLabel { color: %1; font-size: 13px; font-weight: 600; }")
-                               .arg(ChatTheme::textPrimary()));
     headerLayout->addWidget(m_title, 1);
 
     root->addLayout(headerLayout);
@@ -48,18 +46,6 @@ PermissionBar::PermissionBar(QWidget *parent)
     m_details->setReadOnly(true);
     m_details->setMaximumHeight(140);
     m_details->setPlaceholderText(i18n("Details"));
-    m_details->setStyleSheet(
-        QStringLiteral(
-            "QPlainTextEdit {"
-            "  background-color: %1;"
-            "  color: %2;"
-            "  border: 1px solid %3;"
-            "  border-radius: 6px;"
-            "  padding: 8px;"
-            "  font-family: monospace;"
-            "  font-size: 11px;"
-            "}")
-        .arg(ChatTheme::panelBg(), ChatTheme::textMuted(), ChatTheme::border()));
     root->addWidget(m_details);
 
     auto *buttons = new QHBoxLayout;
@@ -71,51 +57,13 @@ PermissionBar::PermissionBar(QWidget *parent)
     m_allowBtn = new QPushButton(i18n("Allow"), this);
     m_allowBtn->setCursor(Qt::PointingHandCursor);
     m_allowBtn->setDefault(true);
-    m_allowBtn->setStyleSheet(
-        QStringLiteral(
-            "QPushButton {"
-            "  background-color: %1;"
-            "  color: #ffffff;"
-            "  border: none;"
-            "  border-radius: 6px;"
-            "  padding: 6px 16px;"
-            "  font-weight: 600;"
-            "  font-size: 12px;"
-            "}"
-            "QPushButton:hover { background-color: %2; }"
-            "QPushButton:pressed { background-color: %2; }")
-            .arg(ChatTheme::accent(), ChatTheme::accentHover()));
 
     m_sessionBtn = new QPushButton(i18n("Always"), this);
     m_sessionBtn->setCursor(Qt::PointingHandCursor);
     m_sessionBtn->setToolTip(i18n("Approve this tool for the rest of the session"));
-    m_sessionBtn->setStyleSheet(
-        QStringLiteral(
-            "QPushButton {"
-            "  background-color: %1;"
-            "  color: %2;"
-            "  border: 1px solid %3;"
-            "  border-radius: 6px;"
-            "  padding: 6px 14px;"
-            "  font-size: 12px;"
-            "}"
-            "QPushButton:hover { background-color: %3; color: #ffffff; }")
-            .arg(ChatTheme::cardBg(), ChatTheme::textPrimary(), ChatTheme::hoverBg()));
 
     m_denyBtn = new QPushButton(i18n("Deny"), this);
     m_denyBtn->setCursor(Qt::PointingHandCursor);
-    m_denyBtn->setStyleSheet(
-        QStringLiteral(
-            "QPushButton {"
-            "  background-color: transparent;"
-            "  color: %1;"
-            "  border: 1px solid %2;"
-            "  border-radius: 6px;"
-            "  padding: 6px 14px;"
-            "  font-size: 12px;"
-            "}"
-            "QPushButton:hover { color: #ffffff; border-color: %1; }")
-            .arg(ChatTheme::danger(), ChatTheme::danger()));
 
     buttons->addWidget(m_allowBtn);
     buttons->addWidget(m_sessionBtn);
@@ -136,11 +84,74 @@ PermissionBar::PermissionBar(QWidget *parent)
         Q_EMIT decided(PermissionDecision::Deny);
     });
 
+    applyStyle();
     hide();
+}
+
+void PermissionBar::applyStyle()
+{
+    m_title->setStyleSheet(QStringLiteral("QLabel { color: %1; font-size: 13px; font-weight: 600; }")
+                               .arg(ChatTheme::textPrimary()));
+    m_details->setStyleSheet(
+        QStringLiteral(
+            "QPlainTextEdit {"
+            "  background-color: %1;"
+            "  color: %2;"
+            "  border: 1px solid %3;"
+            "  border-radius: 6px;"
+            "  padding: 8px;"
+            "  font-family: monospace;"
+            "  font-size: 11px;"
+            "}")
+        .arg(ChatTheme::panelBg(), ChatTheme::textMuted(), ChatTheme::border()));
+    m_allowBtn->setStyleSheet(
+        QStringLiteral(
+            "QPushButton {"
+            "  background-color: %1;"
+            "  color: #ffffff;"
+            "  border: none;"
+            "  border-radius: 6px;"
+            "  padding: 6px 16px;"
+            "  font-weight: 600;"
+            "  font-size: 12px;"
+            "}"
+            "QPushButton:hover { background-color: %2; }"
+            "QPushButton:pressed { background-color: %2; }")
+            .arg(ChatTheme::accent(), ChatTheme::accentHover()));
+    m_sessionBtn->setStyleSheet(
+        QStringLiteral(
+            "QPushButton {"
+            "  background-color: %1;"
+            "  color: %2;"
+            "  border: 1px solid %3;"
+            "  border-radius: 6px;"
+            "  padding: 6px 14px;"
+            "  font-size: 12px;"
+            "}"
+            "QPushButton:hover { background-color: %3; color: #ffffff; }")
+            .arg(ChatTheme::cardBg(), ChatTheme::textPrimary(), ChatTheme::hoverBg()));
+    m_denyBtn->setStyleSheet(
+        QStringLiteral(
+            "QPushButton {"
+            "  background-color: transparent;"
+            "  color: %1;"
+            "  border: 1px solid %2;"
+            "  border-radius: 6px;"
+            "  padding: 6px 14px;"
+            "  font-size: 12px;"
+            "}"
+            "QPushButton:hover { color: #ffffff; border-color: %1; }")
+            .arg(ChatTheme::danger(), ChatTheme::danger()));
+    // The risk-tinted box only exists while a request is showing; when hidden
+    // there is no badge state to re-apply.
+    if (isVisible()) {
+        updateStyle(m_risk);
+    }
 }
 
 void PermissionBar::updateStyle(ToolRisk risk)
 {
+    m_risk = risk;
     QString riskColor;
     QString riskText;
     QString badgeBg;

@@ -47,6 +47,9 @@ public:
     void flash(const QString &message, bool isError);
     // Resets every counter and returns to the idle hint.
     void reset();
+    // Re-applies every theme-derived stylesheet, including the state-dependent
+    // idle label, so a theme change repaints the strip.
+    void applyStyle();
 
 Q_SIGNALS:
     // The strip is also a status button: clicking it scrolls to the newest

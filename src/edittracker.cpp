@@ -189,15 +189,12 @@ EditTracker::EditTracker(QWidget *parent)
     barLayout->setSpacing(8);
 
     m_countLabel = new QLabel(m_barWidget);
-    m_countLabel->setStyleSheet(
-        QStringLiteral("QLabel { color: %1; font-size: %2; font-weight: 600; }").arg(ChatTheme::textPrimary(), trackerFontSize(12)));
     barLayout->addWidget(m_countLabel);
     barLayout->addStretch();
 
     m_acceptAllBtn = new QPushButton(i18n("Keep All"), m_barWidget);
     m_acceptAllBtn->setCursor(Qt::PointingHandCursor);
     m_acceptAllBtn->setFixedHeight(30);
-    m_acceptAllBtn->setStyleSheet(keepAllStyle());
     m_acceptAllBtn->setToolTip(i18n("Accept every pending change"));
     connect(m_acceptAllBtn, &QPushButton::clicked, this, &EditTracker::acceptAll);
     barLayout->addWidget(m_acceptAllBtn);
@@ -205,7 +202,6 @@ EditTracker::EditTracker(QWidget *parent)
     m_rejectAllBtn = new QPushButton(i18n("Reject All"), m_barWidget);
     m_rejectAllBtn->setCursor(Qt::PointingHandCursor);
     m_rejectAllBtn->setFixedHeight(30);
-    m_rejectAllBtn->setStyleSheet(rejectAllStyle());
     m_rejectAllBtn->setToolTip(i18n("Revert every pending change to its pre-edit content"));
     connect(m_rejectAllBtn, &QPushButton::clicked, this, &EditTracker::rejectAll);
     barLayout->addWidget(m_rejectAllBtn);
@@ -213,16 +209,11 @@ EditTracker::EditTracker(QWidget *parent)
     m_toggleListBtn = new QPushButton(i18n("Show files"), m_barWidget);
     m_toggleListBtn->setCursor(Qt::PointingHandCursor);
     m_toggleListBtn->setFixedHeight(30);
-    m_toggleListBtn->setStyleSheet(undoStyle());
     m_toggleListBtn->setToolTip(i18n("Show or hide the pending file list"));
     connect(m_toggleListBtn, &QPushButton::clicked, this, [this]() {
         setFileListVisible(!m_fileListVisible);
     });
     barLayout->addWidget(m_toggleListBtn);
-
-    m_barWidget->setStyleSheet(QStringLiteral(
-                                    "#EditTrackerBar { background-color: %1; border-top: 1px solid %2; }")
-                                    .arg(ChatTheme::panelBg(), ChatTheme::border()));
 
     root->addWidget(m_barWidget);
 
@@ -236,7 +227,6 @@ EditTracker::EditTracker(QWidget *parent)
     m_scrollArea->setWidgetResizable(true);
     m_scrollArea->setFrameShape(QFrame::NoFrame);
     m_scrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-    m_scrollArea->setStyleSheet(ChatTheme::scrollArea());
 
     auto *scrollContent = new QWidget(m_scrollArea);
     scrollContent->setObjectName(u"EditTrackerScrollContent"_s);
@@ -248,13 +238,7 @@ EditTracker::EditTracker(QWidget *parent)
     m_editListLayout->setSpacing(6);
     m_editListLayout->setAlignment(Qt::AlignTop);
 
-    m_listContainer->setStyleSheet(QStringLiteral("#EditTrackerList { background-color: %1; }").arg(ChatTheme::panelBg()));
-
     root->addWidget(m_listContainer);
-
-    setStyleSheet(QStringLiteral(
-                      "#EditTracker { background-color: %1; border-top: 1px solid %2; }")
-                      .arg(ChatTheme::panelBg(), ChatTheme::border()));
 
     // Ctrl+Z undoes the last keep/reject. Scoped to the tracker rather than the
     // window so it cannot shadow the editor's own undo while the panel has focus.
@@ -262,8 +246,28 @@ EditTracker::EditTracker(QWidget *parent)
     undoShortcut->setContext(Qt::WidgetWithChildrenShortcut);
     connect(undoShortcut, &QShortcut::activated, this, &EditTracker::undoLast);
 
+    applyStyle();
     m_barWidget->hide();
     m_listContainer->hide();
+}
+
+void EditTracker::applyStyle()
+{
+    m_countLabel->setStyleSheet(
+        QStringLiteral("QLabel { color: %1; font-size: %2; font-weight: 600; }").arg(ChatTheme::textPrimary(), trackerFontSize(12)));
+    m_acceptAllBtn->setStyleSheet(keepAllStyle());
+    m_rejectAllBtn->setStyleSheet(rejectAllStyle());
+    m_toggleListBtn->setStyleSheet(undoStyle());
+    m_barWidget->setStyleSheet(QStringLiteral(
+                                    "#EditTrackerBar { background-color: %1; border-top: 1px solid %2; }")
+                                    .arg(ChatTheme::panelBg(), ChatTheme::border()));
+    m_scrollArea->setStyleSheet(ChatTheme::scrollArea());
+    m_listContainer->setStyleSheet(QStringLiteral("#EditTrackerList { background-color: %1; }").arg(ChatTheme::panelBg()));
+    setStyleSheet(QStringLiteral(
+                      "#EditTracker { background-color: %1; border-top: 1px solid %2; }")
+                      .arg(ChatTheme::panelBg(), ChatTheme::border()));
+    // Rows bake their colours in at creation, so repaint them too.
+    rebuildEditList();
 }
 
 int EditTracker::addedLines(const QString &diff)

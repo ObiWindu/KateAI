@@ -221,6 +221,16 @@ private:
     void removeMcpServer();
     void refreshMcpServerTable();
 
+    // Appearance / Themes
+    QComboBox *m_themeSource = nullptr;
+    QComboBox *m_themePreset = nullptr;
+    QTableWidget *m_themeColors = nullptr;
+    QHash<QString, QString> m_themeOverrideValues;
+    void refreshThemeColorTable();
+    void pickThemeColor(const QString &key);
+    void resetThemeColor(const QString &key);
+    void updateThemePresetEnabled();
+
     QString getBinaryPlatformKey() const;
 };
 

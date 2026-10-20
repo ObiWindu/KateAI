@@ -48,6 +48,9 @@ private:
     QPointer<QDialog> m_configDialog;
     ChatWidget *m_chat = nullptr;
     DiskDocumentBridge m_bridge;
+    // Editor colour scheme name as of the last theme load, so configChanged
+    // (which fires for every editor setting) only repaints on a real change.
+    QString m_lastEditorThemeName;
 };
 
 } // namespace KateAi

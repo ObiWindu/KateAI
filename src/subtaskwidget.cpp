@@ -61,10 +61,9 @@ SubtaskWidget::SubtaskWidget(const QString &taskId, QWidget *parent)
     auto *header = new QHBoxLayout;
     header->setSpacing(6);
 
-    auto *agentBadge = new QLabel(u"↳"_s, this);
-    agentBadge->setToolTip(i18n("Delegated sub-agent"));
-    agentBadge->setStyleSheet(QStringLiteral("font-size: 15px; font-weight: 700; color: %1;").arg(ChatTheme::accent()));
-    header->addWidget(agentBadge);
+    m_badge = new QLabel(u"↳"_s, this);
+    m_badge->setToolTip(i18n("Delegated sub-agent"));
+    header->addWidget(m_badge);
 
     m_icon = new QLabel(u"◐"_s, this);
     m_icon->setStyleSheet(u"font-size: 12px;"_s);
@@ -72,11 +71,14 @@ SubtaskWidget::SubtaskWidget(const QString &taskId, QWidget *parent)
 
     m_title = new QLabel(this);
     m_title->setTextFormat(Qt::RichText);
-    m_title->setStyleSheet(QStringLiteral("QLabel { color: %1; font-size: 11px; font-weight: 600; }")
-                                  .arg(ChatTheme::textPrimary()));
+    m_title->setMinimumWidth(0);
+    m_title->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     header->addWidget(m_title);
 
     m_status = new QLabel(this);
+    m_status->setMinimumWidth(0);
+    m_status->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    m_status->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
     // textPrimary rather than textMuted: the card surface is now a warm yellow,
     // and a grey-on-gold status line drops under a readable contrast.
     m_status->setStyleSheet(QStringLiteral("color: %1; font-size: 10px;").arg(ChatTheme::textPrimary()));
@@ -86,12 +88,6 @@ SubtaskWidget::SubtaskWidget(const QString &taskId, QWidget *parent)
     m_cancel = new QPushButton(i18n("Cancel"), this);
     m_cancel->setCursor(Qt::PointingHandCursor);
     m_cancel->setFixedHeight(20);
-    m_cancel->setStyleSheet(
-        QStringLiteral(
-            "QPushButton { background: transparent; color: %1; border: 1px solid %2;"
-            " border-radius: 5px; padding: 0 8px; font-size: 10px; }"
-            "QPushButton:hover { background-color: %3; border-color: %1; }")
-        .arg(ChatTheme::danger(), ChatTheme::border(), ChatTheme::hoverBg()));
     connect(m_cancel, &QPushButton::clicked, this, [this] {
         Q_EMIT cancelRequested(m_taskId);
     });
@@ -104,9 +100,6 @@ SubtaskWidget::SubtaskWidget(const QString &taskId, QWidget *parent)
     m_answer = new QTextBrowser(this);
     m_answer->setOpenExternalLinks(true);
     m_answer->setFrameShape(QFrame::NoFrame);
-    m_answer->setStyleSheet(
-        QStringLiteral("QTextBrowser { background: transparent; border: none; color: %1; font-size: 11px; padding: 0; }")
-            .arg(ChatTheme::textPrimary()));
     m_answer->setMinimumHeight(0);
     root->addWidget(m_answer);
 
@@ -126,29 +119,23 @@ SubtaskWidget::SubtaskWidget(const QString &taskId, QWidget *parent)
     activityLayout->setContentsMargins(0, 3, 0, 0);
     activityLayout->setSpacing(3);
 
-    m_toggle = new QPushButton(i18n("Show activity"), m_activityContainer);
+    m_toggle = new QPushButton(i18n("Activity  ▸"), m_activityContainer);
     m_toggle->setCursor(Qt::PointingHandCursor);
-    m_toggle->setStyleSheet(
-        QStringLiteral("QPushButton { background: transparent; color: %1; border: none; text-align: left;"
-                       " padding: 1px 0; font-size: 10px; }"
-                       "QPushButton:hover { color: #ffffff; }")
-            .arg(ChatTheme::accent()));
+    m_toggle->setToolTip(i18n("Show the sub-agent's tool calls and progress"));
     activityLayout->addWidget(m_toggle);
 
     m_activity = new QTextBrowser(m_activityContainer);
     m_activity->setOpenExternalLinks(false);
     m_activity->setFrameShape(QFrame::NoFrame);
-    m_activity->setStyleSheet(
-        QStringLiteral("QTextBrowser { background: %1; border: 1px solid %2; border-radius: 5px;"
-                       " color: %3; font-size: 10px; padding: 4px; }")
-            .arg(ChatTheme::panelBg(), ChatTheme::border(), ChatTheme::textMuted()));
     m_activity->setVisible(false);
     activityLayout->addWidget(m_activity);
 
     connect(m_toggle, &QPushButton::clicked, this, [this] {
         const bool show = !m_activity->isVisible();
         m_activity->setVisible(show);
-        m_toggle->setText(show ? i18n("Hide activity") : i18n("Show activity"));
+        m_toggle->setText(show ? i18n("Activity  ▾") : i18n("Activity  ▸"));
+        m_toggle->setToolTip(show ? i18n("Hide the sub-agent's tool calls and progress")
+                                  : i18n("Show the sub-agent's tool calls and progress"));
         reflowNow();
     });
     m_expandedActivity = m_activityContainer;
@@ -195,7 +182,7 @@ void SubtaskWidget::startAgent(const QString &agentName, const QString &modeId, 
 void SubtaskWidget::appendActivity(const QString &line, bool isError)
 {
     ++m_stepCount;
-    const QString color = isError ? u"#ef4444"_s : u"#9a9a9e"_s;
+    const QString color = isError ? ChatTheme::danger() : ChatTheme::textMuted();
     QString html = QStringLiteral("<div style=\"color:%1\">%2</div>").arg(color, line.toHtmlEscaped());
     if (m_activity->document()->characterCount() > MaxActivityChars) {
         m_activity->setHtml(i18n("… earlier activity trimmed"));
@@ -285,11 +272,13 @@ void SubtaskWidget::resizeEvent(QResizeEvent *event)
 void SubtaskWidget::updateHeader()
 {
     const QString escapedName = m_agentName.toHtmlEscaped();
-    const QString name = QStringLiteral("<span style=\"color:#b9b9c0\">%1</span>").arg(escapedName);
+    const QString name = QStringLiteral("<span style=\"color:%1\">%2</span>")
+                             .arg(ChatTheme::textMuted(), escapedName);
     m_title->setText(m_modeId.isEmpty()
                          ? i18n("Sub-agent · %1", name)
-                         : QStringLiteral("<span style=\"color:#7aa2f7\">%1</span> <span style=\"color:#666;\">·</span> %2")
-                               .arg(m_modeId.toHtmlEscaped(), i18n("Sub-agent · %1", name)));
+                         : QStringLiteral("<span style=\"color:%1\">%2</span> <span style=\"color:%3;\">·</span> %4")
+                               .arg(ChatTheme::accent(), m_modeId.toHtmlEscaped(), ChatTheme::textMuted(),
+                                    i18n("Sub-agent · %1", name)));
     updateElapsed();
 }
 
@@ -337,11 +326,34 @@ void SubtaskWidget::applyStyle()
     m_icon->setStyleSheet(QStringLiteral("font-size: 12px; color:%1;").arg(border));
 
     // Background from the theme, border tinted by state.
-    QString sheet = ChatTheme::agentTaskCard();
+    QString sheet = ChatTheme::agentTaskCard(u"subtaskWidget"_s);
     sheet += QStringLiteral("QWidget#subtaskWidget { border-color: %1; }"
                             "QWidget#subtaskWidget QLabel { background: transparent; }")
                  .arg(border);
     setStyleSheet(sheet);
+
+    m_badge->setStyleSheet(QStringLiteral("font-size: 15px; font-weight: 700; color: %1;").arg(ChatTheme::accent()));
+    m_title->setStyleSheet(QStringLiteral("QLabel { color: %1; font-size: 11px; font-weight: 600; }")
+                               .arg(ChatTheme::textPrimary()));
+    m_status->setStyleSheet(QStringLiteral("color: %1; font-size: 10px;").arg(ChatTheme::textPrimary()));
+    m_cancel->setStyleSheet(
+        QStringLiteral(
+            "QPushButton { background: transparent; color: %1; border: 1px solid %2;"
+            " border-radius: 5px; padding: 0 8px; font-size: 10px; }"
+            "QPushButton:hover { background-color: %3; border-color: %1; }")
+        .arg(ChatTheme::danger(), ChatTheme::border(), ChatTheme::hoverBg()));
+    m_answer->setStyleSheet(
+        QStringLiteral("QTextBrowser { background: transparent; border: none; color: %1; font-size: 11px; padding: 0; }")
+            .arg(ChatTheme::textPrimary()));
+    m_toggle->setStyleSheet(
+        QStringLiteral("QPushButton { background: transparent; color: %1; border: 1px solid %2;"
+                       " border-radius: 5px; text-align: left; padding: 2px 7px; font-size: 10px; }"
+                       "QPushButton:hover { background-color: %3; }")
+            .arg(ChatTheme::accent(), ChatTheme::border(), ChatTheme::hoverBg()));
+    m_activity->setStyleSheet(
+        QStringLiteral("QTextBrowser { background: %1; border: 1px solid %2; border-radius: 5px;"
+                       " color: %3; font-size: 10px; padding: 4px; }")
+            .arg(ChatTheme::panelBg(), ChatTheme::border(), ChatTheme::textMuted()));
 }
 
 void SubtaskWidget::setActivityVisible(bool visible)
