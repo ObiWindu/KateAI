@@ -1198,15 +1198,29 @@ ChatPalette paletteForEditorTheme(const KSyntaxHighlighting::Theme &theme)
     // The editor's background and text become the panel's, and every surface
     // is derived as a step away from them so contrast survives both dark and
     // light editor schemes.
-    const QColor editorBg = theme.editorColor(KSyntaxHighlighting::Theme::EditorColorRole::BackgroundColor);
-    // textColor returns QRgb; 0 means "not set", fall back to a sensible default.
-    const QRgb fgRgb = theme.textColor(KSyntaxHighlighting::Theme::TextStyle::Normal);
-    const QColor editorFg = fgRgb != 0 ? QColor::fromRgb(fgRgb) : QColor(u"#d4d4d6"_s);
-    if (!editorBg.isValid() || !editorFg.isValid()) {
+    //
+    // editorColor() and textColor() return QRgb where 0 means "not set".
+    // Assigning 0 to QColor via the QRgb constructor yields a valid but
+    // transparent black, which silently produces a dark palette for a light
+    // theme like Breeze Light. Check for 0 explicitly and fall back through
+    // the text-style background before giving up.
+    const QRgb bgRgb = theme.editorColor(KSyntaxHighlighting::Theme::EditorColorRole::BackgroundColor);
+    const QRgb styleBgRgb = theme.backgroundColor(KSyntaxHighlighting::Theme::TextStyle::Normal);
+    const QColor editorBg = bgRgb != 0 ? QColor::fromRgb(bgRgb)
+                          : styleBgRgb != 0 ? QColor::fromRgb(styleBgRgb)
+                          : QColor();
+    if (!editorBg.isValid()) {
         return p;
     }
 
     const bool dark = editorBg.lightnessF() < 0.5;
+    // Text colour: fall back to a colour that contrasts with the background
+    // when the theme does not specify one, instead of a fixed light gray
+    // that is invisible on a light editor background.
+    const QRgb fgRgb = theme.textColor(KSyntaxHighlighting::Theme::TextStyle::Normal);
+    const QColor editorFg = fgRgb != 0 ? QColor::fromRgb(fgRgb)
+                                      : QColor(dark ? u"#d4d4d6"_s : u"#1a1a1c"_s);
+
     const QString bg = editorBg.name();
     const QString fg = editorFg.name();
 
@@ -1238,8 +1252,10 @@ ChatPalette paletteForEditorTheme(const KSyntaxHighlighting::Theme &theme)
     }
 
     // Accent: use the editor's selection colour when it reads as a usable
-    // accent, otherwise fall back to the default blue.
-    const QColor selectionBg = theme.editorColor(KSyntaxHighlighting::Theme::EditorColorRole::TextSelection);
+    // accent, otherwise fall back to the default blue. Same QRgb 0-check as
+    // the background above: QColor(0) is valid transparent black.
+    const QRgb selRgb = theme.editorColor(KSyntaxHighlighting::Theme::EditorColorRole::TextSelection);
+    const QColor selectionBg = selRgb != 0 ? QColor::fromRgb(selRgb) : QColor();
     if (selectionBg.isValid() && selectionBg.saturationF() > 0.2) {
         p.accent = selectionBg.name();
         p.accentHover = mixColors(selectionBg.name(), fg, 20);

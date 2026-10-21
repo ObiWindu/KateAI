@@ -13,19 +13,24 @@
 
 #include <KActionCollection>
 #include <KLocalizedString>
+#include <KSyntaxHighlighting/Theme>
 #include <KTextEditor/Document>
 #include <KTextEditor/Editor>
 #include <KTextEditor/View>
 #include <KXMLGUIFactory>
 
 #include <QAction>
+#include <QApplication>
+#include <QColor>
 #include <QDialog>
 #include <QDialogButtonBox>
+#include <QEvent>
 #include <QIcon>
 #include <QKeySequence>
 #include <QLayout>
 #include <QMenu>
 #include <QPushButton>
+#include <QTimer>
 #include <QUrl>
 #include <QVBoxLayout>
 
@@ -110,27 +115,38 @@ namespace KateAi
         }
         // Inheriting the Kate editor theme has to follow the editor live: the
         // window repaints itself when its colour scheme changes, the chat UI
-        // inside it does not without this. configChanged fires for every editor
-        // setting, so compare the scheme name and only repaint on a real change.
+        // inside it does not without this.
+        //
+        // Two paths can carry the change, and both need handling:
+        //  - Editor::configChanged fires when the editor's own configuration
+        //    changes, including a manual scheme switch in Kate's settings.
+        //  - QEvent::ApplicationPaletteChange (caught via eventFilter on qApp)
+        //    fires when KDE switches the system theme (dark <-> light); Kate
+        //    follows it and swaps the editor scheme, but configChanged does
+        //    not reliably fire for that path.
+        //
+        // Both can arrive before Editor::theme() reflects the new scheme, so
+        // the check is deferred to the next event-loop turn with
+        // QTimer::singleShot(0). The comparison uses the theme's background
+        // colour rather than only the name: KDE can swap the scheme under the
+        // same name, and a name-only check would miss the change.
         if (auto *editor = KTextEditor::Editor::instance()) {
-            m_lastEditorThemeName = editor->theme().name();
-            connect(editor, &KTextEditor::Editor::configChanged, this, [this](KTextEditor::Editor *changed) {
-                if (!m_plugin || !m_chat || !changed) {
-                    return;
-                }
-                const QString themeName = changed->theme().name();
-                if (themeName == m_lastEditorThemeName) {
-                    return;
-                }
-                m_lastEditorThemeName = themeName;
-                const Settings settings = m_plugin->settings();
-                if (settings.themeSource != u"editor"_s) {
-                    return;
-                }
-                ChatTheme::loadTheme(settings);
-                m_chat->applyTheme();
+            const auto theme = editor->theme();
+            m_lastEditorThemeName = theme.name();
+            const QRgb bgRgb = theme.editorColor(KSyntaxHighlighting::Theme::EditorColorRole::BackgroundColor);
+            const QRgb styleBgRgb = theme.backgroundColor(KSyntaxHighlighting::Theme::TextStyle::Normal);
+            const QColor bg = bgRgb != 0 ? QColor::fromRgb(bgRgb)
+                             : styleBgRgb != 0 ? QColor::fromRgb(styleBgRgb)
+                             : QColor();
+            m_lastEditorThemeBg = bg.isValid() ? bg.name() : QString();
+            connect(editor, &KTextEditor::Editor::configChanged, this, [this]() {
+                recheckEditorTheme();
             });
         }
+        // KDE system theme switch (dark <-> light): Kate follows it and swaps
+        // the editor scheme, but configChanged does not reliably fire for this
+        // path. ApplicationPaletteChange does.
+        qApp->installEventFilter(this);
         if (m_chat) {
             connect(m_chat, &ChatWidget::settingsChanged, plugin, &KateAiPlugin::setSettings);
             connect(m_chat, &ChatWidget::configureRequested, this, &KateAiView::showConfiguration);
@@ -227,6 +243,60 @@ namespace KateAi
         if (m_mainWindow && m_mainWindow->guiFactory()) {
             m_mainWindow->guiFactory()->removeClient(this);
         }
+    }
+
+    bool KateAiView::eventFilter(QObject *watched, QEvent *event)
+    {
+        // QEvent::ApplicationPaletteChange is how Qt 6 delivers a system
+        // palette switch (QGuiApplication::paletteChanged is deprecated).
+        // KDE dark <-> light lands here; Kate follows by swapping the editor
+        // scheme, which the chat panel must mirror when inheriting.
+        if (watched == qApp && event->type() == QEvent::ApplicationPaletteChange) {
+            recheckEditorTheme();
+        }
+        return QObject::eventFilter(watched, event);
+    }
+
+    void KateAiView::recheckEditorTheme()
+    {
+        // configChanged and ApplicationPaletteChange can both fire before
+        // Editor::theme() reflects the new scheme. Defer to the next
+        // event-loop turn so the theme is settled before we read it.
+        QTimer::singleShot(0, this, [this]() {
+            if (!m_plugin || !m_chat) {
+                return;
+            }
+            const Settings settings = m_plugin->settings();
+            if (settings.themeSource != u"editor"_s) {
+                return;
+            }
+            auto *editor = KTextEditor::Editor::instance();
+            if (!editor) {
+                return;
+            }
+            const auto theme = editor->theme();
+            if (!theme.isValid()) {
+                return;
+            }
+            // Derive the background the same way paletteForEditorTheme does,
+            // so the comparison matches what loadTheme will actually use.
+            const QRgb bgRgb = theme.editorColor(KSyntaxHighlighting::Theme::EditorColorRole::BackgroundColor);
+            const QRgb styleBgRgb = theme.backgroundColor(KSyntaxHighlighting::Theme::TextStyle::Normal);
+            const QColor bg = bgRgb != 0 ? QColor::fromRgb(bgRgb)
+                             : styleBgRgb != 0 ? QColor::fromRgb(styleBgRgb)
+                             : QColor();
+            const QString themeBg = bg.isValid() ? bg.name() : QString();
+            // Compare both the name and the background colour: KDE can swap
+            // the scheme under the same name, and a name-only check would
+            // miss the change.
+            if (theme.name() == m_lastEditorThemeName && themeBg == m_lastEditorThemeBg) {
+                return;
+            }
+            m_lastEditorThemeName = theme.name();
+            m_lastEditorThemeBg = themeBg;
+            ChatTheme::loadTheme(settings);
+            m_chat->applyTheme();
+        });
     }
 
     void KateAiView::openFileAtLine(const QString &path, int line)

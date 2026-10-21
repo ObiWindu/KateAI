@@ -20,7 +20,11 @@
 #include "toolcallwidget.h"
 #include "types.h"
 
+#include <KSyntaxHighlighting/Repository>
+#include <KSyntaxHighlighting/Theme>
+
 #include <QApplication>
+#include <QColor>
 #include <QElapsedTimer>
 #include <QEventLoop>
 #include <QLabel>
@@ -64,6 +68,59 @@ private:
     }
 
 private Q_SLOTS:
+    // The "inherit from Kate editor" path derives its palette from the editor's
+    // colour scheme. A light editor scheme must produce a light palette, and a
+    // dark one a dark palette: this is what makes the panel follow KDE when the
+    // system theme switches between dark and light.
+    void testEditorThemeDerivesMatchingPalette()
+    {
+        KSyntaxHighlighting::Repository repo;
+
+        const auto lightTheme = repo.defaultTheme(KSyntaxHighlighting::Repository::LightTheme);
+        QVERIFY2(lightTheme.isValid(), "no light default theme available");
+        const auto lightPal = ChatTheme::paletteForEditorTheme(lightTheme);
+        const QColor lightBg(lightPal.panelBg);
+        QVERIFY2(lightBg.isValid(), qPrintable(lightPal.panelBg));
+        QVERIFY2(lightBg.lightnessF() > 0.5,
+                 qPrintable(QStringLiteral("light editor theme produced a dark panel: %1").arg(lightPal.panelBg)));
+        // Text must contrast with the panel.
+        const QColor lightFg(lightPal.textPrimary);
+        QVERIFY2(lightFg.isValid(), qPrintable(lightPal.textPrimary));
+        QVERIFY2(lightFg.lightnessF() < 0.5,
+                 qPrintable(QStringLiteral("light panel got light text: %1 on %2")
+                                .arg(lightPal.textPrimary, lightPal.panelBg)));
+
+        const auto darkTheme = repo.defaultTheme(KSyntaxHighlighting::Repository::DarkTheme);
+        QVERIFY2(darkTheme.isValid(), "no dark default theme available");
+        const auto darkPal = ChatTheme::paletteForEditorTheme(darkTheme);
+        const QColor darkBg(darkPal.panelBg);
+        QVERIFY2(darkBg.isValid(), qPrintable(darkPal.panelBg));
+        QVERIFY2(darkBg.lightnessF() < 0.5,
+                 qPrintable(QStringLiteral("dark editor theme produced a light panel: %1").arg(darkPal.panelBg)));
+        // Text must contrast with the panel.
+        const QColor darkFg(darkPal.textPrimary);
+        QVERIFY2(darkFg.isValid(), qPrintable(darkPal.textPrimary));
+        QVERIFY2(darkFg.lightnessF() > 0.5,
+                 qPrintable(QStringLiteral("dark panel got dark text: %1 on %2")
+                                .arg(darkPal.textPrimary, darkPal.panelBg)));
+
+        // The two palettes must differ: switching the editor scheme must move
+        // every surface, not just the panel background.
+        QVERIFY2(lightPal.panelBg != darkPal.panelBg, "light and dark editor themes gave the same panel");
+        QVERIFY2(lightPal.textPrimary != darkPal.textPrimary, "light and dark editor themes gave the same text");
+    }
+
+    // An invalid editor theme falls back to the default dark palette rather
+    // than producing a broken (all-black or all-white) palette.
+    void testInvalidEditorThemeFallsBackToDefault()
+    {
+        const KSyntaxHighlighting::Theme invalid;
+        const auto pal = ChatTheme::paletteForEditorTheme(invalid);
+        const auto def = ChatTheme::paletteForPreset(u"kateai-dark"_s);
+        QCOMPARE(pal.panelBg, def.panelBg);
+        QCOMPARE(pal.textPrimary, def.textPrimary);
+    }
+
     void testPanelFollowsTheInstalledPalette()
     {
         ChatWidget widget;
