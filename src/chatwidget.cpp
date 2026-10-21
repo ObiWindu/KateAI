@@ -377,6 +377,7 @@ ChatWidget::ChatWidget(QWidget *parent)
         m_teamButton->setToolTip(i18n("Agent team"));
         connect(m_teamButton, &QPushButton::clicked, this, &ChatWidget::showTeamMenu);
         toolbarLayout->addWidget(m_teamButton);
+        updateTeamButton();
 
     // Expand / collapse every tool card in the transcript. Hidden until there
     // are enough cards for a global control to say anything: on a transcript
