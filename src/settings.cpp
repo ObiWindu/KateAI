@@ -125,6 +125,13 @@ Settings SettingsStore::load()
     s.maxParallelSubtasks = g.readEntry(u"MaxParallelSubtasks"_s, 3);
     s.agentRoster = g.readEntry(u"AgentRoster"_s, QString());
     s.subtaskTimeoutMs = g.readEntry(u"SubtaskTimeoutMs"_s, 300000);
+    // Appearance
+    s.themeSource = g.readEntry(u"ThemeSource"_s, QStringLiteral("preset"));
+    if (s.themeSource != u"editor"_s) {
+        s.themeSource = u"preset"_s;
+    }
+    s.themePreset = g.readEntry(u"ThemePreset"_s, QStringLiteral("kateai-dark"));
+    s.themeOverrides = g.readEntry(u"ThemeOverrides"_s, QString());
     // Behavioural toggles and budgets. These used to be dropped by save(), so
     // any value the UI wrote reverted to the struct default on the next start.
     s.toolCallTimeoutMs = g.readEntry(u"ToolCallTimeoutMs"_s, 120000);
@@ -311,6 +318,10 @@ void SettingsStore::save(const Settings &settings)
     g.writeEntry(u"MaxParallelSubtasks"_s, settings.maxParallelSubtasks);
     g.writeEntry(u"AgentRoster"_s, settings.agentRoster);
     g.writeEntry(u"SubtaskTimeoutMs"_s, settings.subtaskTimeoutMs);
+    // Appearance
+    g.writeEntry(u"ThemeSource"_s, settings.themeSource);
+    g.writeEntry(u"ThemePreset"_s, settings.themePreset);
+    g.writeEntry(u"ThemeOverrides"_s, settings.themeOverrides);
     // Keep every field the UI can write, so a restart restores the same
     // configuration instead of silently falling back to struct defaults.
     g.writeEntry(u"ToolCallTimeoutMs"_s, settings.toolCallTimeoutMs);

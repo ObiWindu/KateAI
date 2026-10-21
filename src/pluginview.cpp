@@ -5,6 +5,7 @@
 
 #include "pluginview.h"
 #include "chatwidget.h"
+#include "chattheme.h"
 #include "configpage.h"
 #include "plugin.h"
 #include "sessionstore.h"
@@ -12,18 +13,25 @@
 
 #include <KActionCollection>
 #include <KLocalizedString>
+#include <KSyntaxHighlighting/Theme>
 #include <KTextEditor/Document>
+#include <KTextEditor/Editor>
 #include <KTextEditor/View>
 #include <KXMLGUIFactory>
 
 #include <QAction>
+#include <QApplication>
+#include <QColor>
 #include <QDialog>
 #include <QDialogButtonBox>
+#include <QEvent>
 #include <QIcon>
 #include <QKeySequence>
 #include <QLayout>
 #include <QMenu>
+#include <QPalette>
 #include <QPushButton>
+#include <QTimer>
 #include <QUrl>
 #include <QVBoxLayout>
 
@@ -49,6 +57,18 @@ namespace KateAi
                                                       QIcon::fromTheme(u"help-hint"_s),
                                                       i18n("Kate AI"));
         }
+
+        // Install the configured theme before any widget reads palette colours.
+        ChatTheme::loadTheme(plugin->settings());
+
+        // The tool view is the KateAI window: paint it from the window-chrome
+        // colours, which follow the editor theme in inherit mode. The chat
+        // widget paints its own content on top of it.
+        if (m_toolView) {
+            m_toolView->setObjectName(u"kateaiToolView"_s);
+            m_toolView->setAttribute(Qt::WA_StyledBackground, true);
+        }
+        applyWindowChrome();
 
         // Create the chat widget that will contain the AI interface
         if (m_toolView) {
@@ -96,12 +116,52 @@ namespace KateAi
 
         if (plugin && m_mainWindow) {
             connect(plugin, &KateAiPlugin::settingsChanged, this, [this](const Settings &settings) {
+                ChatTheme::loadTheme(settings);
+                applyWindowChrome();
                 if (m_chat) {
                     m_chat->setSettings(settings);
                 }
                 refreshWorkspace();
             });
         }
+        // Inheriting the Kate editor theme has to follow the editor live: the
+        // window repaints itself when its colour scheme changes, the chat UI
+        // inside it does not without this.
+        //
+        // Two paths can carry the change, and both need handling:
+        //  - Editor::configChanged fires when the editor's own configuration
+        //    changes, including a manual scheme switch in Kate's settings.
+        //  - QEvent::ApplicationPaletteChange (caught via eventFilter on qApp)
+        //    fires when KDE switches the system theme (dark <-> light); Kate
+        //    follows it and swaps the editor scheme, but configChanged does
+        //    not reliably fire for that path.
+        //
+        // Both can arrive before Editor::theme() reflects the new scheme, so
+        // the check is deferred to the next event-loop turn with
+        // QTimer::singleShot(0). The comparison uses the theme's background
+        // colour rather than only the name: KDE can swap the scheme under the
+        // same name, and a name-only check would miss the change.
+        // Track the application palette's window colour too: a system theme
+        // switch can fire ApplicationPaletteChange without touching the editor
+        // scheme, and the tool view must repaint regardless.
+        m_lastWindowBg = QGuiApplication::palette().color(QPalette::Window).name();
+        if (auto *editor = KTextEditor::Editor::instance()) {
+            const auto theme = editor->theme();
+            m_lastEditorThemeName = theme.name();
+            const QRgb bgRgb = theme.editorColor(KSyntaxHighlighting::Theme::EditorColorRole::BackgroundColor);
+            const QRgb styleBgRgb = theme.backgroundColor(KSyntaxHighlighting::Theme::TextStyle::Normal);
+            const QColor bg = bgRgb != 0 ? QColor::fromRgb(bgRgb)
+                             : styleBgRgb != 0 ? QColor::fromRgb(styleBgRgb)
+                             : QColor();
+            m_lastEditorThemeBg = bg.isValid() ? bg.name() : QString();
+            connect(editor, &KTextEditor::Editor::configChanged, this, [this]() {
+                recheckEditorTheme();
+            });
+        }
+        // KDE system theme switch (dark <-> light): Kate follows it and swaps
+        // the editor scheme, but configChanged does not reliably fire for this
+        // path. ApplicationPaletteChange does.
+        qApp->installEventFilter(this);
         if (m_chat) {
             connect(m_chat, &ChatWidget::settingsChanged, plugin, &KateAiPlugin::setSettings);
             connect(m_chat, &ChatWidget::configureRequested, this, &KateAiView::showConfiguration);
@@ -198,6 +258,82 @@ namespace KateAi
         if (m_mainWindow && m_mainWindow->guiFactory()) {
             m_mainWindow->guiFactory()->removeClient(this);
         }
+    }
+
+    bool KateAiView::eventFilter(QObject *watched, QEvent *event)
+    {
+        // QEvent::ApplicationPaletteChange is how Qt 6 delivers a system
+        // palette switch (QGuiApplication::paletteChanged is deprecated).
+        // KDE dark <-> light lands here; Kate follows by swapping the editor
+        // scheme, which the chat panel must mirror when inheriting.
+        if (watched == qApp && event->type() == QEvent::ApplicationPaletteChange) {
+            recheckEditorTheme();
+        }
+        return QObject::eventFilter(watched, event);
+    }
+
+    void KateAiView::applyWindowChrome()
+    {
+        // The tool view is the KateAI window: it carries the window-chrome
+        // colours, which follow the editor theme in inherit mode. The chat
+        // widget paints its own content on top, so this is what keeps the
+        // window itself themed wherever it shows through.
+        if (!m_toolView) {
+            return;
+        }
+        m_toolView->setStyleSheet(ChatTheme::windowChrome());
+    }
+
+    void KateAiView::recheckEditorTheme()
+    {
+        // configChanged and ApplicationPaletteChange can both fire before
+        // Editor::theme() reflects the new scheme. Defer to the next
+        // event-loop turn so the theme is settled before we read it.
+        QTimer::singleShot(0, this, [this]() {
+            if (!m_plugin) {
+                return;
+            }
+            const Settings settings = m_plugin->settings();
+            if (settings.themeSource != u"editor"_s || !m_chat) {
+                return;
+            }
+            // In inherit mode both the chat content and the window chrome
+            // follow the editor colour scheme, so a scheme change repaints
+            // both. The window palette is still tracked: a system theme
+            // switch can fire ApplicationPaletteChange without touching the
+            // editor scheme, and the tool view must repaint regardless.
+            bool changed = QGuiApplication::palette().color(QPalette::Window).name() != m_lastWindowBg;
+            m_lastWindowBg = QGuiApplication::palette().color(QPalette::Window).name();
+            if (auto *editor = KTextEditor::Editor::instance()) {
+                const auto theme = editor->theme();
+                if (theme.isValid()) {
+                    // Derive the background the same way paletteForEditorTheme does,
+                    // so the comparison matches what loadTheme will actually use.
+                    const QRgb bgRgb = theme.editorColor(KSyntaxHighlighting::Theme::EditorColorRole::BackgroundColor);
+                    const QRgb styleBgRgb = theme.backgroundColor(KSyntaxHighlighting::Theme::TextStyle::Normal);
+                    const QColor bg = bgRgb != 0 ? QColor::fromRgb(bgRgb)
+                                     : styleBgRgb != 0 ? QColor::fromRgb(styleBgRgb)
+                                     : QColor();
+                    const QString themeBg = bg.isValid() ? bg.name() : QString();
+                    // Compare both the name and the background colour: KDE can swap
+                    // the scheme under the same name, and a name-only check would
+                    // miss the change.
+                    if (theme.name() != m_lastEditorThemeName || themeBg != m_lastEditorThemeBg) {
+                        changed = true;
+                    }
+                    m_lastEditorThemeName = theme.name();
+                    m_lastEditorThemeBg = themeBg;
+                }
+            }
+            if (!changed) {
+                return;
+            }
+            // loadTheme installs the new palette into the globals first, so
+            // both the tool view and the chat panel read the updated colours.
+            ChatTheme::loadTheme(settings);
+            applyWindowChrome();
+            m_chat->applyTheme();
+        });
     }
 
     void KateAiView::openFileAtLine(const QString &path, int line)

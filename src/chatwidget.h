@@ -60,6 +60,9 @@ public:
     {
         return m_settings;
     }
+    // Re-applies the theme palette to the whole panel and repaints the
+    // transcript. Call after ChatTheme::loadTheme() when the theme changes.
+    void applyTheme();
 
     void focusPrompt();
     void ask(const QString &text);
@@ -165,7 +168,13 @@ private:
     Settings settingsForAcpAgent(const QString &agentId) const;
     void updateModelSelectorLabel();
     void showInfoMessage(const QString &message, bool isError);
+    void applyInfoBarStyle();
     void saveCurrentConversation();
+    // Re-applies every theme-derived stylesheet on the panel chrome and the
+    // live transcript widgets, without rebuilding the transcript.
+    void restylePanel();
+    void restyleWelcomeWidget();
+    void restyleLiveCards();
 
     // --- Intent dock ---------------------------------------------------------
     // A strip pinned directly above the composer holding everything that needs
@@ -283,6 +292,16 @@ private:
     // Tool calls completed in the current turn, shown live in the status strip.
     int m_completedToolCount = 0;
     QLabel *m_infoBar = nullptr;
+    // What the info bar is currently showing, so a theme change can re-apply
+    // its state-dependent style instead of resetting it to the default box.
+    QString m_infoBarMessage;
+    bool m_infoBarIsError = false;
+    // The empty-state hero in the transcript; kept so a theme change can
+    // re-style it (it is deleted once the first message arrives).
+    QPointer<QWidget> m_welcomeWidget;
+    // Set when the theme changed mid-turn: the transcript rebuild that would
+    // repaint finished messages is deferred until the turn ends.
+    bool m_themeRefreshPending = false;
     QLabel *m_threadTitle = nullptr;
     QLabel *m_tokenCount = nullptr;
     QPushButton *m_modelSelector = nullptr;

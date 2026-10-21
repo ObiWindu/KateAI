@@ -22,6 +22,22 @@ using namespace Qt::Literals::StringLiterals;
 namespace KateAi
 {
 
+namespace
+{
+
+// The one-tap answer chips share one style; kept in a function so applyStyle()
+// can re-apply it to chips created before a theme change.
+QString optionChipStyle()
+{
+    return QStringLiteral(
+        "QPushButton { background-color: %1; color: %2; border: 1px solid %3;"
+        " border-radius: 11px; padding: 3px 12px; font-size: 11px; }"
+        "QPushButton:hover { background-color: %3; color: %2; }")
+        .arg(ChatTheme::cardBg(), ChatTheme::textPrimary(), ChatTheme::borderStrong());
+}
+
+} // namespace
+
 QuestionWidget::QuestionWidget(const QString &questionCallId, QWidget *parent)
     : QWidget(parent)
     , m_questionCallId(questionCallId)
@@ -39,10 +55,9 @@ QuestionWidget::QuestionWidget(const QString &questionCallId, QWidget *parent)
     header->setSpacing(6);
 
     // A fixed badge: the card stays recognisable after the state glyph changes.
-    auto *badge = new QLabel(u"\u{2753}"_s, this);
-    badge->setToolTip(i18n("Question from the agent"));
-    badge->setStyleSheet(QStringLiteral("font-size: 13px; color: %1;").arg(ChatTheme::accent()));
-    header->addWidget(badge);
+    m_badge = new QLabel(u"\u{2753}"_s, this);
+    m_badge->setToolTip(i18n("Question from the agent"));
+    header->addWidget(m_badge);
 
     m_icon = new QLabel(u"\u{25CF}"_s, this);
     m_icon->setStyleSheet(u"font-size: 11px;"_s);
@@ -50,13 +65,10 @@ QuestionWidget::QuestionWidget(const QString &questionCallId, QWidget *parent)
 
     m_title = new QLabel(i18n("Question"), this);
     m_title->setTextFormat(Qt::PlainText);
-    m_title->setStyleSheet(QStringLiteral("QLabel { color: %1; font-size: 11px; font-weight: 600; }")
-                               .arg(ChatTheme::textPrimary()));
     header->addWidget(m_title);
 
     m_status = new QLabel(this);
     m_status->setTextFormat(Qt::PlainText);
-    m_status->setStyleSheet(QStringLiteral("color: %1; font-size: 10px;").arg(ChatTheme::textMuted()));
     header->addWidget(m_status);
     header->addStretch();
 
@@ -67,9 +79,6 @@ QuestionWidget::QuestionWidget(const QString &questionCallId, QWidget *parent)
     m_question = new QTextBrowser(this);
     m_question->setOpenExternalLinks(true);
     m_question->setFrameShape(QFrame::NoFrame);
-    m_question->setStyleSheet(
-        QStringLiteral("QTextBrowser { background: transparent; border: none; color: %1; font-size: 12px; padding: 0; }")
-            .arg(ChatTheme::textPrimary()));
     m_question->setMinimumHeight(0);
     m_question->setVisible(false);
     root->addWidget(m_question);
@@ -89,22 +98,11 @@ QuestionWidget::QuestionWidget(const QString &questionCallId, QWidget *parent)
     m_freeform = new QLineEdit(this);
     m_freeform->setPlaceholderText(i18n("Type your answer…"));
     m_freeform->setClearButtonEnabled(true);
-    m_freeform->setStyleSheet(
-        QStringLiteral("QLineEdit { background-color: %1; color: %2; border: 1px solid %3;"
-                       " border-radius: 6px; padding: 4px 8px; font-size: 12px; }")
-            .arg(ChatTheme::inputBg(), ChatTheme::textPrimary(), ChatTheme::border()));
     root->addWidget(m_freeform);
 
     m_submit = new QPushButton(i18n("Answer"), this);
     m_submit->setCursor(Qt::PointingHandCursor);
     m_submit->setFixedHeight(24);
-    m_submit->setStyleSheet(
-        QStringLiteral(
-            "QPushButton { background-color: %1; color: #ffffff; border: none;"
-            " border-radius: 5px; padding: 2px 14px; font-size: 11px; font-weight: 600; }"
-            "QPushButton:hover { background-color: %2; }"
-            "QPushButton:disabled { background-color: %3; color: %4; }")
-            .arg(ChatTheme::accent(), ChatTheme::accentHover(), ChatTheme::hoverBg(), ChatTheme::textMuted()));
     root->addWidget(m_submit, 0, Qt::AlignRight);
 
     connect(m_submit, &QPushButton::clicked, this, [this] {
@@ -140,12 +138,7 @@ void QuestionWidget::setQuestion(const QString &questionText, const QStringList 
         auto *chip = new QPushButton(option, m_optionsRow);
         chip->setCursor(Qt::PointingHandCursor);
         chip->setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Fixed);
-        chip->setStyleSheet(
-            QStringLiteral(
-                "QPushButton { background-color: %1; color: %2; border: 1px solid %3;"
-                " border-radius: 11px; padding: 3px 12px; font-size: 11px; }"
-                "QPushButton:hover { background-color: %3; color: #ffffff; }")
-                .arg(ChatTheme::cardBg(), ChatTheme::textPrimary(), ChatTheme::borderStrong()));
+        chip->setStyleSheet(optionChipStyle());
         connect(chip, &QPushButton::clicked, this, [this, option] {
             markAnswered(option);
             Q_EMIT answered(m_questionCallId, option);
@@ -186,11 +179,35 @@ void QuestionWidget::applyStyle()
     m_icon->setText(m_answered ? u"\u{2713}"_s : u"\u{25CF}"_s);
     m_icon->setStyleSheet(QStringLiteral("font-size: 11px; color: %1;").arg(border));
 
-    QString sheet = ChatTheme::agentTaskCard();
+    QString sheet = ChatTheme::agentTaskCard(u"questionWidget"_s);
     sheet += QStringLiteral("QWidget#questionWidget { border-color: %1; }"
                             "QWidget#questionWidget QLabel { background: transparent; }")
                  .arg(border);
     setStyleSheet(sheet);
+
+    m_badge->setStyleSheet(QStringLiteral("font-size: 13px; color: %1;").arg(ChatTheme::accent()));
+    m_title->setStyleSheet(QStringLiteral("QLabel { color: %1; font-size: 11px; font-weight: 600; }")
+                               .arg(ChatTheme::textPrimary()));
+    m_status->setStyleSheet(QStringLiteral("color: %1; font-size: 10px;").arg(ChatTheme::textMuted()));
+    m_question->setStyleSheet(
+        QStringLiteral("QTextBrowser { background: transparent; border: none; color: %1; font-size: 12px; padding: 0; }")
+            .arg(ChatTheme::textPrimary()));
+    m_freeform->setStyleSheet(
+        QStringLiteral("QLineEdit { background-color: %1; color: %2; border: 1px solid %3;"
+                       " border-radius: 6px; padding: 4px 8px; font-size: 12px; }")
+            .arg(ChatTheme::inputBg(), ChatTheme::textPrimary(), ChatTheme::border()));
+    m_submit->setStyleSheet(
+        QStringLiteral(
+            "QPushButton { background-color: %1; color: %5; border: none;"
+            " border-radius: 5px; padding: 2px 14px; font-size: 11px; font-weight: 600; }"
+            "QPushButton:hover { background-color: %2; }"
+            "QPushButton:disabled { background-color: %3; color: %4; }")
+            .arg(ChatTheme::accent(), ChatTheme::accentHover(), ChatTheme::hoverBg(), ChatTheme::textMuted(),
+                 ChatTheme::textOn(ChatTheme::accent())));
+    // Answer chips are created per question; re-style the ones on screen.
+    for (auto *chip : m_optionsRow->findChildren<QPushButton *>()) {
+        chip->setStyleSheet(optionChipStyle());
+    }
 }
 
 void QuestionWidget::updateStatus()

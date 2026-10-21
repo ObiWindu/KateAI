@@ -370,6 +370,19 @@ struct Settings {
     QString agentRoster;
     // Wall-clock budget for a single subtask.
     int subtaskTimeoutMs = 300000;
+
+    // --- Appearance ----------------------------------------------------------
+    // "preset" paints the chat panel from a built-in palette (themePreset);
+    // "editor" derives both the chat colours and the window chrome from the
+    // Kate editor's current colour scheme, so the whole panel -- the KateAI
+    // plugin window and the chat inside it -- follows the editor theme
+    // (including code blocks).
+    QString themeSource = QStringLiteral("preset");
+    // Built-in palette id, used when themeSource is "preset".
+    QString themePreset = QStringLiteral("kateai-dark");
+    // JSON object mapping ChatTheme colour keys (panelBg, accent, ...) to hex
+    // values, applied on top of the selected source. Empty means no overrides.
+    QString themeOverrides;
 };
 
 QString providerId(Provider provider);

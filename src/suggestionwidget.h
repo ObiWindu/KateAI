@@ -50,13 +50,15 @@ public:
     void markDecided();
 
     void reflowNow();
+    // Re-applies every theme-derived stylesheet, so a theme change repaints a
+    // card that is live in the transcript.
+    void applyStyle();
 
 Q_SIGNALS:
     void accepted(const QString &suggestionId, const QString &path, int line);
     void dismissed(const QString &suggestionId);
 
 private:
-    void applyStyle();
     void updateHeader();
 
     QString m_suggestionId;
@@ -68,6 +70,7 @@ private:
     // advice is already on screen, but it has not been confirmed.
     bool m_running = false;
 
+    QLabel *m_badge = nullptr;
     QLabel *m_icon = nullptr;
     QLabel *m_title = nullptr;
     QLabel *m_anchor = nullptr;

@@ -5,6 +5,8 @@
 
 #include "promptedit.h"
 
+#include "chattheme.h"
+
 #include <KLocalizedString>
 #include <QAbstractItemView>
 #include <QApplication>
@@ -56,22 +58,25 @@ PromptEdit::PromptEdit(QWidget *parent)
 
     if (m_completer->popup()) {
         m_completer->popup()->setStyleSheet(
-            u"QListView {"
-            u"  background-color: #232326;"
-            u"  color: #e4e4e4;"
-            u"  border: 1px solid #38383e;"
-            u"  border-radius: 6px;"
-            u"  padding: 4px;"
-            u"  font-size: 12px;"
-            u"}"
-            u"QListView::item {"
-            u"  padding: 4px 8px;"
-            u"  border-radius: 4px;"
-            u"}"
-            u"QListView::item:selected {"
-            u"  background-color: #007acc;"
-            u"  color: #ffffff;"
-            u"}"_s);
+            QStringLiteral(
+                u"QListView {"
+                u"  background-color: %1;"
+                u"  color: %2;"
+                u"  border: 1px solid %3;"
+                u"  border-radius: 6px;"
+                u"  padding: 4px;"
+                u"  font-size: 12px;"
+                u"}"
+                u"QListView::item {"
+                u"  padding: 4px 8px;"
+                u"  border-radius: 4px;"
+                u"}"
+                u"QListView::item:selected {"
+                u"  background-color: %4;"
+                u"  color: %5;"
+                u"}")
+            .arg(ChatTheme::surfaceBg(), ChatTheme::textPrimary(), ChatTheme::border(), ChatTheme::accent(),
+                 ChatTheme::textOn(ChatTheme::accent())));
     }
 
     connect(m_completer, QOverload<const QString &>::of(&QCompleter::activated),

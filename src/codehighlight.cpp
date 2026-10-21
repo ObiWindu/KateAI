@@ -136,8 +136,15 @@ KSyntaxHighlighting::Theme theme()
         }
     }
     if (!selected.isValid()) {
-        // Dark, because the chat panel is dark; the light default would be
-        // unreadable on it.
+        // Fall back to the default theme matching the panel's brightness: a
+        // light panel needs a light highlighting theme, otherwise syntax
+        // colours designed for dark backgrounds render invisible on it.
+        const QColor blockBg(ChatTheme::codeBlockBg());
+        const bool darkPanel = !blockBg.isValid() || blockBg.lightnessF() < 0.5;
+        selected = repo->defaultTheme(darkPanel ? KSyntaxHighlighting::Repository::DarkTheme
+                                                 : KSyntaxHighlighting::Repository::LightTheme);
+    }
+    if (!selected.isValid()) {
         selected = repo->defaultTheme(KSyntaxHighlighting::Repository::DarkTheme);
     }
     if (!selected.isValid()) {

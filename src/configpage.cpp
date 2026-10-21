@@ -11,6 +11,7 @@
 #include "modes.h"
 #include "agentteam.h"
 #include "acpclient.h"
+#include "chattheme.h"
 
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -25,6 +26,8 @@
 
 #include <KLocalizedString>
 
+#include <QColor>
+#include <QColorDialog>
 #include <QComboBox>
 #include <QCheckBox>
 #include <QDialog>
@@ -194,7 +197,7 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     connect(fetchModelsBtn, &QPushButton::clicked, this, &KateAiConfigPage::fetchAcpModels);
     m_acpModelStatus = new QLabel(this);
     m_acpModelStatus->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-    m_acpModelStatus->setStyleSheet(u"color: #888; font-size: 11px;"_s);
+    m_acpModelStatus->setStyleSheet(QStringLiteral(u"color: %1; font-size: 11px;").arg(ChatTheme::textMuted()));
     auto *modelRow = new QWidget(this);
     auto *modelLayout = new QHBoxLayout(modelRow);
     modelLayout->setContentsMargins(0, 0, 0, 0);
@@ -468,11 +471,8 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     m_deny->setPlaceholderText(i18n("One glob per line, e.g. **/secrets/**"));
     m_deny->setMaximumHeight(100);
     m_deny->setStyleSheet(
-        u"QPlainTextEdit { background: transparent; color: #e4e4e4; border: 1px solid #38383e; border-radius: 4px; padding: 4px; font-size: 13px; }"
-        u"QMenu { background-color: #252528; color: #cccccc; border: 1px solid #3c3c40; border-radius: 6px; padding: 4px; }"
-        u"QMenu::item { padding: 6px 18px 6px 12px; border-radius: 4px; }"
-        u"QMenu::item:selected { background-color: #007acc; color: #ffffff; }"
-        u"QMenu::separator { height: 1px; background-color: #38383e; margin: 4px 0; }"_s);
+        QStringLiteral(u"QPlainTextEdit { background: transparent; color: %1; border: 1px solid %2; border-radius: 4px; padding: 4px; font-size: 13px; }")
+            .arg(ChatTheme::textPrimary(), ChatTheme::border()) + ChatTheme::menu());
     securityForm->addRow(i18n("Extra deny globs:"), m_deny);
 
     m_maxExpandedToolCards = new QSpinBox(securityWidget);
@@ -532,11 +532,8 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     m_system->setPlaceholderText(i18n("Extra system prompt (optional)"));
     m_system->setMaximumHeight(80);
     m_system->setStyleSheet(
-        u"QPlainTextEdit { background: transparent; color: #e4e4e4; border: 1px solid #38383e; border-radius: 4px; padding: 4px; font-size: 13px; }"
-        u"QMenu { background-color: #252528; color: #cccccc; border: 1px solid #3c3c40; border-radius: 6px; padding: 4px; }"
-        u"QMenu::item { padding: 6px 18px 6px 12px; border-radius: 4px; }"
-        u"QMenu::item:selected { background-color: #007acc; color: #ffffff; }"
-        u"QMenu::separator { height: 1px; background-color: #38383e; margin: 4px 0; }"_s);
+        QStringLiteral(u"QPlainTextEdit { background: transparent; color: %1; border: 1px solid %2; border-radius: 4px; padding: 4px; font-size: 13px; }")
+            .arg(ChatTheme::textPrimary(), ChatTheme::border()) + ChatTheme::menu());
     agentForm->addRow(i18n("Extra instructions:"), m_system);
 
     // Context compression settings
@@ -748,7 +745,7 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
                                      "Add your own modes as Markdown files in <b>.kateai/modes/</b>."),
                                 modesWidget);
     modeHelp->setWordWrap(true);
-    modeHelp->setStyleSheet(u"color: #888888;"_s);
+    modeHelp->setStyleSheet(QStringLiteral(u"color: %1;").arg(ChatTheme::textMuted()));
     modesForm->addRow(modeHelp);
 
     auto *approveSeparator = new QLabel(i18n("--- Auto-approve (never prompt) ---"), modesWidget);
@@ -830,7 +827,7 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
                                        "its tools; <b>*</b> and <b>prefix*</b> patterns are supported."),
                                   mcpWidget);
     mcpPathHint->setWordWrap(true);
-    mcpPathHint->setStyleSheet(u"color: #888888;"_s);
+    mcpPathHint->setStyleSheet(QStringLiteral(u"color: %1;").arg(ChatTheme::textMuted()));
     mcpForm->addRow(mcpPathHint);
 
     mcpScroll->setWidget(mcpWidget);
@@ -875,7 +872,7 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
                                     "Only the query text is sent to the provider, never file contents."),
                                webWidget);
     webHint->setWordWrap(true);
-    webHint->setStyleSheet(u"color: #888888;"_s);
+    webHint->setStyleSheet(QStringLiteral(u"color: %1;").arg(ChatTheme::textMuted()));
     webForm->addRow(webHint);
 
     // The API key and SearXNG URL only matter for some providers; hiding the
@@ -922,7 +919,7 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
                                    "history is never touched. Restore or diff any snapshot from the toolbar menu."),
                               safetyWidget);
     cpHelp->setWordWrap(true);
-    cpHelp->setStyleSheet(u"color: #888888;"_s);
+    cpHelp->setStyleSheet(QStringLiteral(u"color: %1;").arg(ChatTheme::textMuted()));
     safetyForm->addRow(cpHelp);
 
     auto *subSeparator = new QLabel(i18n("--- Sub-agents ---"), safetyWidget);
@@ -1003,11 +1000,82 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
                                       "<b>mode</b>, and <b>description</b> frontmatter."),
                                    teamWidget);
     agentHint->setWordWrap(true);
-    agentHint->setStyleSheet(u"color: #888888;"_s);
+    agentHint->setStyleSheet(QStringLiteral(u"color: %1;").arg(ChatTheme::textMuted()));
     teamForm->addRow(agentHint);
 
     teamScroll->setWidget(teamWidget);
     tabs->addTab(teamScroll, i18n("Agent Team"));
+
+    // ==========================================
+    // TAB 9: Themes
+    // ==========================================
+    auto *themeScroll = new QScrollArea(tabs);
+    themeScroll->setWidgetResizable(true);
+    themeScroll->setFrameShape(QFrame::NoFrame);
+    auto *themeWidget = new QWidget(themeScroll);
+    auto *themeLayout = new QVBoxLayout(themeWidget);
+    themeLayout->setContentsMargins(8, 8, 8, 8);
+    themeLayout->setSpacing(10);
+
+    // Theme source: built-in preset vs inherit from Kate editor
+    auto *sourceForm = new QFormLayout;
+    m_themeSource = new QComboBox(themeWidget);
+    m_themeSource->addItem(i18n("Built-in preset"), u"preset"_s);
+    m_themeSource->addItem(i18n("Inherit from Kate editor"), u"editor"_s);
+    sourceForm->addRow(i18n("Theme source:"), m_themeSource);
+    themeLayout->addLayout(sourceForm);
+
+    auto *sourceHint = new QLabel(
+        i18n("Inherit from Kate editor: both the chat panel and the window around it "
+             "follow the editor's colour scheme."),
+        themeWidget);
+    sourceHint->setWordWrap(true);
+    sourceHint->setStyleSheet(QStringLiteral(u"color: %1; font-size: 11px;").arg(ChatTheme::textMuted()));
+    themeLayout->addWidget(sourceHint);
+
+    // Preset selector (only enabled when source is "preset")
+    auto *presetForm = new QFormLayout;
+    m_themePreset = new QComboBox(themeWidget);
+    for (const QString &id : ChatTheme::themePresetIds()) {
+        m_themePreset->addItem(ChatTheme::themePresetLabel(id), id);
+    }
+    presetForm->addRow(i18n("Preset:"), m_themePreset);
+    themeLayout->addLayout(presetForm);
+
+    connect(m_themeSource, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this]() {
+        updateThemePresetEnabled();
+        Q_EMIT changed();
+    });
+    connect(m_themePreset, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this]() {
+        Q_EMIT changed();
+    });
+
+    // Color overrides section
+    auto *overridesGroup = new QGroupBox(i18n("Colour Overrides"), themeWidget);
+    auto *overridesLayout = new QVBoxLayout(overridesGroup);
+    overridesLayout->setContentsMargins(8, 8, 8, 8);
+
+    auto *overridesHint = new QLabel(i18n("Override individual colours on top of the selected theme source. "
+                                         "Leave a colour at its default to follow the source."),
+                                     overridesGroup);
+    overridesHint->setWordWrap(true);
+    overridesHint->setStyleSheet(QStringLiteral(u"color: %1; font-size: 11px;").arg(ChatTheme::textMuted()));
+    overridesLayout->addWidget(overridesHint);
+
+    m_themeColors = new QTableWidget(overridesGroup);
+    m_themeColors->setColumnCount(4);
+    m_themeColors->setHorizontalHeaderLabels({i18n("Colour"), i18n("Preview"), i18n("Value"), i18n("Actions")});
+    m_themeColors->horizontalHeader()->setStretchLastSection(true);
+    m_themeColors->verticalHeader()->setVisible(false);
+    m_themeColors->setSelectionMode(QAbstractItemView::NoSelection);
+    m_themeColors->setMinimumHeight(300);
+    overridesLayout->addWidget(m_themeColors);
+
+    themeLayout->addWidget(overridesGroup);
+    themeLayout->addStretch();
+
+    themeScroll->setWidget(themeWidget);
+    tabs->addTab(themeScroll, i18n("Themes"));
 
     // Initialize model fetcher
     m_modelFetcher = new LlmClient(this);
@@ -1640,6 +1708,23 @@ s.opencodeModel = m_opencodeModel->currentText().trimmed();
     }
     s.agentRoster = rosterArray.isEmpty() ? QString() : QString::fromUtf8(QJsonDocument(rosterArray).toJson(QJsonDocument::Compact));
 
+    // Appearance / Themes
+    s.themeSource = m_themeSource->currentData().toString();
+    s.themePreset = m_themePreset->currentData().toString();
+    if (m_themeOverrideValues.isEmpty()) {
+        s.themeOverrides.clear();
+    } else {
+        const QJsonObject overrides = QJsonObject::fromVariantMap(
+            [&]() {
+                QVariantMap map;
+                for (auto it = m_themeOverrideValues.constBegin(); it != m_themeOverrideValues.constEnd(); ++it) {
+                    map.insert(it.key(), it.value());
+                }
+                return map;
+            }());
+        s.themeOverrides = QString::fromUtf8(QJsonDocument(overrides).toJson(QJsonDocument::Compact));
+    }
+
     if (!m_workspace.isEmpty()) {
         QString error;
         if (!McpConfigStore::save(m_workspace, m_mcpServerConfigs, &error)) {
@@ -1836,6 +1921,34 @@ void KateAiConfigPage::reset()
     m_maxSubtaskDepth->setValue(s.maxSubtaskDepth);
     m_maxParallelSubtasks->setValue(s.maxParallelSubtasks);
     m_subtaskTimeout->setValue(s.subtaskTimeoutMs);
+
+    // Appearance / Themes
+    {
+        const QSignalBlocker blockSource(m_themeSource);
+        const int srcIdx = m_themeSource->findData(s.themeSource);
+        m_themeSource->setCurrentIndex(srcIdx >= 0 ? srcIdx : 0);
+    }
+    {
+        const QSignalBlocker blockPreset(m_themePreset);
+        const int presetIdx = m_themePreset->findData(s.themePreset);
+        m_themePreset->setCurrentIndex(presetIdx >= 0 ? presetIdx : 0);
+    }
+    updateThemePresetEnabled();
+
+    // Load overrides from settings
+    m_themeOverrideValues.clear();
+    if (!s.themeOverrides.trimmed().isEmpty()) {
+        const QJsonDocument doc = QJsonDocument::fromJson(s.themeOverrides.toUtf8());
+        if (doc.isObject()) {
+            const QJsonObject obj = doc.object();
+            for (auto it = obj.constBegin(); it != obj.constEnd(); ++it) {
+                if (QColor(it.value().toString()).isValid()) {
+                    m_themeOverrideValues.insert(it.key(), it.value().toString());
+                }
+            }
+        }
+    }
+    refreshThemeColorTable();
 }
 
 void KateAiConfigPage::setWorkspace(const QString &workspace)
@@ -2112,5 +2225,105 @@ void KateAiConfigPage::fetchAcpModels()
     client->start();
 }
 
+void KateAiConfigPage::updateThemePresetEnabled()
+{
+    const bool isPreset = m_themeSource->currentData().toString() == u"preset"_s;
+    m_themePreset->setEnabled(isPreset);
+}
+
+void KateAiConfigPage::refreshThemeColorTable()
+{
+    if (!m_themeColors) {
+        return;
+    }
+
+    // Compute the base palette from the current UI selection so the preview
+    // column shows what each colour would look like without overrides.
+    Settings previewSettings = m_plugin->settings();
+    previewSettings.themeSource = m_themeSource->currentData().toString();
+    previewSettings.themePreset = m_themePreset->currentData().toString();
+    previewSettings.themeOverrides.clear();
+    const ChatTheme::ChatPalette basePalette = ChatTheme::paletteForSettings(previewSettings);
+
+    const QStringList keys = ChatTheme::themeColorKeys();
+    m_themeColors->setRowCount(keys.size());
+
+    for (int row = 0; row < keys.size(); ++row) {
+        const QString &key = keys[row];
+
+        // Column 0: label
+        auto *labelItem = new QTableWidgetItem(ChatTheme::themeColorLabel(key));
+        labelItem->setFlags(labelItem->flags() & ~Qt::ItemIsEditable);
+        m_themeColors->setItem(row, 0, labelItem);
+
+        // Column 1: colour preview swatch
+        const QString effectiveColor = m_themeOverrideValues.value(key, ChatTheme::paletteColor(basePalette, key));
+        auto *previewItem = new QTableWidgetItem;
+        previewItem->setFlags(previewItem->flags() & ~Qt::ItemIsEditable);
+        previewItem->setBackground(QColor(effectiveColor));
+        m_themeColors->setItem(row, 1, previewItem);
+
+        // Column 2: hex value (or "default")
+        const bool isOverridden = m_themeOverrideValues.contains(key);
+        auto *valueItem = new QTableWidgetItem(isOverridden ? effectiveColor : i18n("(default)"));
+        valueItem->setFlags(valueItem->flags() & ~Qt::ItemIsEditable);
+        if (!isOverridden) {
+            valueItem->setForeground(QColor(ChatTheme::textMuted()));
+        }
+        m_themeColors->setItem(row, 2, valueItem);
+
+        // Column 3: action buttons (pick / reset)
+        auto *actionsWidget = new QWidget;
+        auto *actionsLayout = new QHBoxLayout(actionsWidget);
+        actionsLayout->setContentsMargins(4, 2, 4, 2);
+        actionsLayout->setSpacing(4);
+
+        auto *pickBtn = new QPushButton(i18n("Pick…"), actionsWidget);
+        pickBtn->setProperty("themeColorKey", key);
+        connect(pickBtn, &QPushButton::clicked, this, [this, key]() {
+            pickThemeColor(key);
+        });
+
+        auto *resetBtn = new QPushButton(i18n("Reset"), actionsWidget);
+        resetBtn->setProperty("themeColorKey", key);
+        resetBtn->setEnabled(isOverridden);
+        connect(resetBtn, &QPushButton::clicked, this, [this, key]() {
+            resetThemeColor(key);
+        });
+
+        actionsLayout->addWidget(pickBtn);
+        actionsLayout->addWidget(resetBtn);
+        actionsLayout->addStretch();
+        m_themeColors->setCellWidget(row, 3, actionsWidget);
+    }
+
+    m_themeColors->resizeColumnsToContents();
+    m_themeColors->horizontalHeader()->setStretchLastSection(true);
+}
+
+void KateAiConfigPage::pickThemeColor(const QString &key)
+{
+    // Start from the current override if set, otherwise the base palette colour.
+    Settings previewSettings = m_plugin->settings();
+    previewSettings.themeSource = m_themeSource->currentData().toString();
+    previewSettings.themePreset = m_themePreset->currentData().toString();
+    previewSettings.themeOverrides.clear();
+    const ChatTheme::ChatPalette basePalette = ChatTheme::paletteForSettings(previewSettings);
+
+    const QString initial = m_themeOverrideValues.value(key, ChatTheme::paletteColor(basePalette, key));
+    const QColor chosen = QColorDialog::getColor(QColor(initial), this, ChatTheme::themeColorLabel(key));
+    if (chosen.isValid()) {
+        m_themeOverrideValues[key] = chosen.name();
+        refreshThemeColorTable();
+        Q_EMIT changed();
+    }
+}
+
+void KateAiConfigPage::resetThemeColor(const QString &key)
+{
+    m_themeOverrideValues.remove(key);
+    refreshThemeColorTable();
+    Q_EMIT changed();
+}
 
 } // namespace KateAi

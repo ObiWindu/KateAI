@@ -39,10 +39,9 @@ SuggestionWidget::SuggestionWidget(const QString &suggestionId, QWidget *parent)
 
     // A fixed lightbulb badge: the card stays recognisable after the state
     // glyph changes.
-    auto *badge = new QLabel(u"\u{1F4A1}"_s, this);
-    badge->setToolTip(i18n("Suggestion from the agent"));
-    badge->setStyleSheet(QStringLiteral("font-size: 13px; color: %1;").arg(ChatTheme::warning()));
-    header->addWidget(badge);
+    m_badge = new QLabel(u"\u{1F4A1}"_s, this);
+    m_badge->setToolTip(i18n("Suggestion from the agent"));
+    header->addWidget(m_badge);
 
     m_icon = new QLabel(u"\u{2713}"_s, this);
     m_icon->setStyleSheet(u"font-size: 12px;"_s);
@@ -50,33 +49,23 @@ SuggestionWidget::SuggestionWidget(const QString &suggestionId, QWidget *parent)
 
     m_title = new QLabel(i18n("Suggestion"), this);
     m_title->setTextFormat(Qt::PlainText);
-    m_title->setStyleSheet(QStringLiteral("QLabel { color: %1; font-size: 11px; font-weight: 600; }")
-                               .arg(ChatTheme::textPrimary()));
     header->addWidget(m_title);
 
     // Where the suggestion points, so the user can tell at a glance whether it
     // is about the file they are looking at.
     m_anchor = new QLabel(this);
     m_anchor->setTextFormat(Qt::PlainText);
-    m_anchor->setStyleSheet(QStringLiteral("color: %1; font-size: 10px;").arg(ChatTheme::textMuted()));
     m_anchor->setVisible(false);
     header->addWidget(m_anchor);
 
     m_status = new QLabel(this);
     m_status->setTextFormat(Qt::PlainText);
-    m_status->setStyleSheet(QStringLiteral("color: %1; font-size: 10px;").arg(ChatTheme::textMuted()));
     header->addWidget(m_status);
     header->addStretch();
 
     m_dismiss = new QPushButton(i18n("Dismiss"), this);
     m_dismiss->setCursor(Qt::PointingHandCursor);
     m_dismiss->setFixedHeight(20);
-    m_dismiss->setStyleSheet(
-        QStringLiteral(
-            "QPushButton { background: transparent; color: %1; border: 1px solid %2;"
-            " border-radius: 5px; padding: 0 8px; font-size: 10px; }"
-            "QPushButton:hover { background-color: %3; }")
-        .arg(ChatTheme::textMuted(), ChatTheme::border(), ChatTheme::hoverBg()));
     connect(m_dismiss, &QPushButton::clicked, this, [this] {
         Q_EMIT dismissed(m_suggestionId);
     });
@@ -85,12 +74,6 @@ SuggestionWidget::SuggestionWidget(const QString &suggestionId, QWidget *parent)
     m_accept = new QPushButton(i18n("Accept"), this);
     m_accept->setCursor(Qt::PointingHandCursor);
     m_accept->setFixedHeight(20);
-    m_accept->setStyleSheet(
-        QStringLiteral(
-            "QPushButton { background: %1; color: #ffffff; border: none;"
-            " border-radius: 5px; padding: 0 10px; font-size: 10px; font-weight: 600; }"
-            "QPushButton:hover { background: %2; }")
-        .arg(ChatTheme::accent(), ChatTheme::accentHover()));
     connect(m_accept, &QPushButton::clicked, this, [this] {
         m_decided = true;
         Q_EMIT accepted(m_suggestionId, m_path, m_line);
@@ -104,9 +87,6 @@ SuggestionWidget::SuggestionWidget(const QString &suggestionId, QWidget *parent)
     m_body = new QTextBrowser(this);
     m_body->setOpenExternalLinks(true);
     m_body->setFrameShape(QFrame::NoFrame);
-    m_body->setStyleSheet(
-        QStringLiteral("QTextBrowser { background: transparent; border: none; color: %1; font-size: 11px; padding: 0; }")
-            .arg(ChatTheme::textPrimary()));
     m_body->setMinimumHeight(0);
     m_body->setVisible(false);
     root->addWidget(m_body);
@@ -205,11 +185,32 @@ void SuggestionWidget::applyStyle()
     m_icon->setText(glyph);
     m_icon->setStyleSheet(QStringLiteral("font-size: 12px; color:%1;").arg(border));
 
-    QString sheet = ChatTheme::agentTaskCard();
+    QString sheet = ChatTheme::agentTaskCard(u"suggestionWidget"_s);
     sheet += QStringLiteral("QWidget#suggestionWidget { border-color: %1; }"
                             "QWidget#suggestionWidget QLabel { background: transparent; }")
                  .arg(border);
     setStyleSheet(sheet);
+
+    m_badge->setStyleSheet(QStringLiteral("font-size: 13px; color: %1;").arg(ChatTheme::warning()));
+    m_title->setStyleSheet(QStringLiteral("QLabel { color: %1; font-size: 11px; font-weight: 600; }")
+                               .arg(ChatTheme::textPrimary()));
+    m_anchor->setStyleSheet(QStringLiteral("color: %1; font-size: 10px;").arg(ChatTheme::textMuted()));
+    m_status->setStyleSheet(QStringLiteral("color: %1; font-size: 10px;").arg(ChatTheme::textMuted()));
+    m_dismiss->setStyleSheet(
+        QStringLiteral(
+            "QPushButton { background: transparent; color: %1; border: 1px solid %2;"
+            " border-radius: 5px; padding: 0 8px; font-size: 10px; }"
+            "QPushButton:hover { background-color: %3; }")
+        .arg(ChatTheme::textMuted(), ChatTheme::border(), ChatTheme::hoverBg()));
+    m_accept->setStyleSheet(
+        QStringLiteral(
+            "QPushButton { background: %1; color: %3; border: none;"
+            " border-radius: 5px; padding: 0 10px; font-size: 10px; font-weight: 600; }"
+            "QPushButton:hover { background: %2; }")
+        .arg(ChatTheme::accent(), ChatTheme::accentHover(), ChatTheme::textOn(ChatTheme::accent())));
+    m_body->setStyleSheet(
+        QStringLiteral("QTextBrowser { background: transparent; border: none; color: %1; font-size: 11px; padding: 0; }")
+            .arg(ChatTheme::textPrimary()));
 }
 
 void SuggestionWidget::reflowNow()
