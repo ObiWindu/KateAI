@@ -493,7 +493,7 @@ void EditTracker::updateUI()
         const int fileCount = pendingPaths().size();
         // Both numbers, because they answer different questions: "how many
         // files do I still have to look at" and "how much did the agent do".
-        m_countLabel->setText(i18n("%1 pending in %2", pendingCount, i18np("1 file", "%n files", fileCount)));
+        m_countLabel->setText(i18n("%1 pending in %2", pendingCount, i18np("1 file", "%1 files", fileCount)));
         m_acceptAllBtn->setEnabled(true);
         m_rejectAllBtn->setEnabled(true);
         m_barWidget->show();
@@ -542,12 +542,12 @@ QWidget *EditTracker::createRow(const Group &group)
     layout->addWidget(nameLabel, 1);
 
     if (group.pending.size() > 1) {
-        auto *countLabel = new QLabel(i18np("1 edit", "%n edits", group.pending.size()), row);
+        auto *countLabel = new QLabel(i18np("1 edit", "%1 edits", group.pending.size()), row);
         countLabel->setStyleSheet(QStringLiteral(
                                       "QLabel { color: %1; font-size: %2; background: transparent; border: none; }")
                                       .arg(ChatTheme::textMuted(), trackerFontSize(11)));
         countLabel->setToolTip(i18np("The agent edited this file once in this turn",
-                                     "The agent edited this file %n times in this turn",
+                                     "The agent edited this file %1 times in this turn",
                                      group.pending.size()));
         layout->addWidget(countLabel);
     }

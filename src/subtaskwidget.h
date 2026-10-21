@@ -44,6 +44,8 @@ public:
     void startAgent(const QString &agentName, const QString &modeId, const QString &description);
     // One line of progress from the sub-agent's own tool activity.
     void appendActivity(const QString &line, bool isError);
+    // Incremental user-facing text from the sub-agent while it is running.
+    void appendMessageDelta(const QString &delta);
     // Finishes the card; `output` is the answer the orchestrator received.
     void finishAgent(const ToolResult &result);
     // Stops the card without a result, e.g. when the whole turn is aborted.
@@ -73,6 +75,7 @@ protected:
     // The most recent step the sub-agent reported, kept in full so it can be
     // re-elided whenever the card is resized.
     QString m_currentLine;
+    QString m_streamedMessage;
     bool m_currentIsError = false;
     bool m_running = false;
     bool m_failed = false;

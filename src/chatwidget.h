@@ -125,6 +125,7 @@ protected:
     void resizeEvent(QResizeEvent *event) override;
 
 private:
+    void scheduleSessionSave();
     void addUserMessage(const QString &text);
     void addActivityMessage(const QString &text);
     void setStreaming(const QString &text);
@@ -415,6 +416,7 @@ private:
     QMenu *m_historyMenu = nullptr;
     QString m_currentConversationId;
     bool m_loadingConversation = false;
+    QTimer *m_sessionSaveTimer = nullptr;
 
     // Global override of the tool-card budget. Auto means the budget decides;
     // the other two are a deliberate "all of them" / "none of them".

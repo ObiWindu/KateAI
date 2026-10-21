@@ -36,6 +36,8 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QGuiApplication>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QGraphicsOpacityEffect>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -302,6 +304,11 @@ ChatWidget::ChatWidget(QWidget *parent)
     // show a "jump to latest" button instead of following along.
     , m_userScrolledUp(false)
 {
+    m_sessionSaveTimer = new QTimer(this);
+    m_sessionSaveTimer->setSingleShot(true);
+    m_sessionSaveTimer->setInterval(500);
+    connect(m_sessionSaveTimer, &QTimer::timeout, this, &ChatWidget::saveCurrentConversation);
+
     // A stable name the panel stylesheet can select: a class selector like
     // `ChatWidget { ... }` never matches, because Qt compares it against the
     // qualified class name (KateAi::ChatWidget), so the panel background would
@@ -793,8 +800,12 @@ ChatWidget::ChatWidget(QWidget *parent)
     });
 
     // Agent signals
-    connect(&m_agent, &AgentLoop::userMessage, this, &ChatWidget::addUserMessage);
+    connect(&m_agent, &AgentLoop::userMessage, this, [this](const QString &text) {
+        addUserMessage(text);
+        saveCurrentConversation();
+    });
     connect(&m_agent, &AgentLoop::thinkingDelta, this, [this](const QString &delta) {
+        scheduleSessionSave();
         if (!m_activeAssistantWidget) {
             setStreaming(m_streamText);
         }
@@ -812,7 +823,11 @@ ChatWidget::ChatWidget(QWidget *parent)
         addThinkingBlock(text);
     });
     connect(&m_agent, &AgentLoop::planUpdated, this, &ChatWidget::addPlanChecklist);
+    connect(&m_agent, &AgentLoop::planUpdated, this, [this](const QJsonArray &) {
+        scheduleSessionSave();
+    });
     connect(&m_agent, &AgentLoop::assistantDelta, this, [this](const QString &delta) {
+        scheduleSessionSave();
         // Reasoning stays open for the whole turn. Collapsing it when the answer
         // started hid the only record of what the agent was doing.
         flushThinkingPacer();
@@ -835,6 +850,7 @@ ChatWidget::ChatWidget(QWidget *parent)
 
     // Tool visibility signals (Zed-style inline tool-call cards)
     connect(&m_agent, &AgentLoop::toolStarted, this, [this](const PermissionRequest &request) {
+        scheduleSessionSave();
         freezeStreaming();
         m_workingLabelBase = workingLabelForTool(request.toolName, request, m_agent.workspace());
         setWorkingIndicator(true);
@@ -936,6 +952,7 @@ ChatWidget::ChatWidget(QWidget *parent)
     });
 
     connect(&m_agent, &AgentLoop::toolFinished, this, [this](const ToolResult &result) {
+        scheduleSessionSave();
         // The suggestion card was posted while its tool ran, so it is already on
         // screen: a success settles it, and a failure has to land on that same
         // card rather than advise the user on something that never arrived.
@@ -1203,6 +1220,11 @@ ChatWidget::ChatWidget(QWidget *parent)
             widget->appendActivity(line, isError);
         }
     });
+    connect(&m_agent, &AgentLoop::subtaskMessageDelta, this, [this](const QString &taskId, const QString &delta) {
+        if (auto *widget = m_subtaskWidgets.value(taskId)) {
+            widget->appendMessageDelta(delta);
+        }
+    });
     connect(&m_agent, &AgentLoop::subtaskFinished, this, [this](const QString &taskId, bool ok) {
         Q_UNUSED(taskId)
         Q_UNUSED(ok)
@@ -1334,6 +1356,9 @@ ChatWidget::ChatWidget(QWidget *parent)
 
 ChatWidget::~ChatWidget()
 {
+    if (m_sessionSaveTimer) {
+        m_sessionSaveTimer->stop();
+    }
     stopThinkingPacer();
     if (m_indicatorTimer) {
         m_indicatorTimer->stop();
@@ -1392,6 +1417,13 @@ void ChatWidget::saveCurrentConversation()
     SessionStore::saveConversation(m_currentConversationId, sessionData, QString(),
                                   m_settings.maxSavedConversations > 0 ? m_settings.maxSavedConversations : 50);
     updateHistoryButton();
+}
+
+void ChatWidget::scheduleSessionSave()
+{
+    if (!m_loadingConversation && m_sessionSaveTimer) {
+        m_sessionSaveTimer->start();
+    }
 }
 
 void ChatWidget::addUserMessage(const QString &text)
@@ -1654,7 +1686,24 @@ void ChatWidget::updateThinkingDisplay()
         return;
     }
     const QString displayed = m_thinkingBuffer.left(m_thinkingPacedLength);
-    m_thinkingBrowser->setDocument(makeMarkdownDocument(closedMarkdown(displayed), ChatTheme::thinkingCss()));
+    QString markdown = displayed;
+    // Compatible endpoints sometimes wrap reasoning in a JSON envelope even
+    // though this view expects the reasoning text itself. Decode known text
+    // fields after a complete object arrives; preserve unrelated JSON verbatim.
+    QJsonParseError parseError;
+    const QJsonDocument json = QJsonDocument::fromJson(displayed.trimmed().toUtf8(), &parseError);
+    if (parseError.error == QJsonParseError::NoError && json.isObject()) {
+        const QJsonObject object = json.object();
+        for (const QString &key : {u"thinking"_s, u"reasoning"_s, u"analysis"_s, u"thought"_s,
+                                   u"content"_s, u"text"_s, u"message"_s, u"answer"_s, u"summary"_s}) {
+            const QJsonValue value = object.value(key);
+            if (value.isString()) {
+                markdown = value.toString();
+                break;
+            }
+        }
+    }
+    m_thinkingBrowser->setDocument(makeMarkdownDocument(closedMarkdown(markdown), ChatTheme::thinkingCss()));
     if (m_thinkingBlock && !m_thinkingBuffer.isEmpty()) {
         m_thinkingBlock->show();
     }
@@ -1736,6 +1785,7 @@ QWidget *ChatWidget::createThinkingBlock(QWidget *parent, QTextBrowser *&browser
     tbLayout->addLayout(tbHeader);
 
     browser = new QTextBrowser(block);
+    browser->setObjectName(u"reasoningBrowser"_s);
     browser->setReadOnly(true);
     browser->setFrameShape(QFrame::NoFrame);
     browser->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
@@ -5195,6 +5245,22 @@ void ChatWidget::reflowTranscriptMedia()
         }
     }
 
+    // Reasoning browsers also use a fixed height so their parent cards can
+    // size to the text. Recalculate after the transcript width changes;
+    // otherwise a height measured at the old width can leave a large blank
+    // area below a short wrapped block.
+    const auto reasoningBrowsers = m_transcriptContainer->findChildren<QTextBrowser *>(u"reasoningBrowser"_s);
+    for (QTextBrowser *browser : reasoningBrowsers) {
+        if (!browser || !browser->isVisible()) {
+            continue;
+        }
+        browser->document()->setTextWidth(contentWidth);
+        const int docH = std::max(48, qCeil(browser->document()->size().height()) + 20);
+        if (browser->height() != docH) {
+            browser->setFixedHeight(docH);
+        }
+    }
+
     for (const auto &widget : m_toolCallOrder) {
         if (widget) {
             widget->reflowNow();
@@ -5652,6 +5718,24 @@ void ChatWidget::restoreCurrentTurn(const SessionStore::SessionData &sessionData
             break;
         }
     }
+
+    // A process can close while the assistant is still streaming. Its text is
+    // persisted separately from completed messages, so restore it as a settled
+    // transcript card instead of making the in-progress response disappear.
+    if (!sessionData.currentAssistant.isEmpty()) {
+        setStreaming(sessionData.currentAssistant);
+        freezeStreaming();
+        // This reply is a snapshot from the previous process, not a live
+        // streaming turn. Keep its rendered card in the transcript, but detach
+        // the streaming pointers so the next reply starts in a new card instead
+        // of continuing inside this frozen one.
+        m_activeAssistantWidget = nullptr;
+        m_activeAssistantBrowser = nullptr;
+        m_activeAssistantPulse = nullptr;
+        m_streamText.clear();
+        m_isStreaming = false;
+    }
+
     if (!sessionData.currentThinking.isEmpty()
         && sessionData.currentThinking != lastAssistantThinking) {
         // Create a thinking block widget directly (not via addThinkingBlock which is for streaming)
@@ -5687,6 +5771,7 @@ void ChatWidget::restoreCurrentTurn(const SessionStore::SessionData &sessionData
         addPlanChecklist(sessionData.currentPlan);
         m_planBlock->show();
     }
+
 }
 
 void ChatWidget::updateHistoryButton()
@@ -5766,6 +5851,10 @@ void ChatWidget::switchToConversation(const QString &conversationId)
         return;
     }
 
+    if (m_sessionSaveTimer) {
+        m_sessionSaveTimer->stop();
+    }
+
     // Save current conversation before switching
     if (!m_agent.messages().isEmpty()) {
         const auto sessionData = m_agent.sessionData();
@@ -5830,11 +5919,25 @@ void ChatWidget::deleteConversation(const QString &conversationId)
 void ChatWidget::setCurrentConversationId(const QString &conversationId)
 {
     m_currentConversationId = conversationId;
+    if (m_threadTitle) {
+        const auto conversations = SessionStore::listConversations(0);
+        for (const auto &conversation : conversations) {
+            if (conversation.id == conversationId) {
+                m_threadTitle->setText(conversation.title);
+                return;
+            }
+        }
+        m_threadTitle->setText(i18n("New Thread"));
+    }
 }
 
 // Create a new blank conversation and reset the chat UI.
 void ChatWidget::newChat()
 {
+    if (m_sessionSaveTimer) {
+        m_sessionSaveTimer->stop();
+    }
+
     m_agent.abort();
 
     // Save the current conversation before clearing so it remains in history.

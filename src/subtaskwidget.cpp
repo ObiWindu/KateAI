@@ -195,6 +195,7 @@ void SubtaskWidget::startAgent(const QString &agentName, const QString &modeId, 
     m_bodyCaption->setText(i18n("Task"));
     m_bodyCaption->setVisible(!m_description.isEmpty());
     m_currentLine.clear();
+    m_streamedMessage.clear();
     m_currentIsError = false;
     m_current->clear();
     m_current->setVisible(false);
@@ -231,6 +232,20 @@ void SubtaskWidget::appendActivity(const QString &line, bool isError)
     reflowNow();
 }
 
+void SubtaskWidget::appendMessageDelta(const QString &delta)
+{
+    if (delta.isEmpty() || !m_running) {
+        return;
+    }
+    m_streamedMessage += delta;
+    m_answer->setDocument(makeMarkdownDocument(closeMarkdown(m_streamedMessage), ChatTheme::messageCss()));
+    m_answer->setToolTip(QString());
+    m_answer->setVisible(true);
+    m_bodyCaption->setText(i18n("Progress"));
+    m_bodyCaption->setVisible(true);
+    reflowNow();
+}
+
 void SubtaskWidget::finishAgent(const ToolResult &result)
 {
     m_running = false;
@@ -248,6 +263,7 @@ void SubtaskWidget::finishAgent(const ToolResult &result)
     m_bodyCaption->setText(result.ok ? i18n("Result") : i18n("Error"));
     m_bodyCaption->setVisible(true);
     m_currentLine.clear();
+    m_streamedMessage.clear();
     m_currentIsError = false;
     m_current->setVisible(false);
     updateHeader();
@@ -269,6 +285,7 @@ void SubtaskWidget::markAbandoned(const QString &reason)
     m_bodyCaption->setText(i18n("Cancelled"));
     m_bodyCaption->setVisible(true);
     m_currentLine.clear();
+    m_streamedMessage.clear();
     m_currentIsError = false;
     m_current->setVisible(false);
     updateHeader();

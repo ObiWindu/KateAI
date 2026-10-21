@@ -2282,6 +2282,10 @@ void AgentLoop::dispatchSubtask(const ToolCall &call)
     connect(child, &AgentLoop::assistantFinished, child, [state](const QString &text) {
         state->answer = text;
     });
+    connect(child, &AgentLoop::assistantDelta, child, [this, state](const QString &delta) {
+        state->answer += delta;
+        Q_EMIT subtaskMessageDelta(state->taskId, delta);
+    });
     connect(child, &AgentLoop::failed, child, [state](const QString &error) {
         state->ok = false;
         state->error = error;

@@ -187,6 +187,7 @@ Q_SIGNALS:
     void checkpointRestored(const QString &id);
     void subtaskStarted(const QString &taskId, const QString &agentId, const QString &agentName, const QString &modeId, const QString &description);
     void subtaskActivity(const QString &taskId, const QString &line, bool isError);
+    void subtaskMessageDelta(const QString &taskId, const QString &delta);
     void subtaskFinished(const QString &taskId, bool ok);
 
 private:
