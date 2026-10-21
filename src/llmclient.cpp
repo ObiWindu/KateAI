@@ -387,7 +387,18 @@ CompletionChunk LlmClient::parseSseLine(const QByteArray &line, QHash<int, ToolC
                     // accumulated text unparseable.
                     tool.argumentsJson = toolArgumentsText(arguments);
                 } else if (arguments.isString()) {
-                    tool.argumentsJson += arguments.toString();
+                    const QString fragment = arguments.toString();
+                    // A few compatible servers stream an empty object as a
+                    // placeholder before sending the real JSON as string
+                    // fragments. Treat that placeholder like an empty
+                    // accumulator; concatenating it with the first fragment
+                    // produces e.g. `{}{\"suggestion\":...}`, which silently
+                    // drops the arguments before suggest/question reach the UI.
+                    if (tool.argumentsJson.trimmed() == u"{}"_s) {
+                        tool.argumentsJson = fragment;
+                    } else {
+                        tool.argumentsJson += fragment;
+                    }
                 }
             }
         }
