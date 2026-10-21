@@ -237,6 +237,8 @@ ToolCallWidget::ToolCallWidget(const QString &toolCallId, QWidget *parent)
     // card does not carry a meaningless "+0 −0".
     m_diffStat = new QLabel(this);
     m_diffStat->setObjectName(u"toolDiffStat"_s);
+    // Rich text so the added count can be green and the removed count red.
+    m_diffStat->setTextFormat(Qt::RichText);
     m_diffStat->setVisible(false);
     headerLayout->addWidget(m_diffStat);
 
@@ -429,9 +431,10 @@ void ToolCallWidget::applyStyle()
         applyRunningStatusColor();
     }
 
+    // No colour in the stylesheet: the label uses rich text so the added count
+    // is green and the removed count is red, each in its own span.
     m_diffStat->setStyleSheet(
-        QStringLiteral("QLabel { color: %1; font-size: 11px; font-family: monospace; }")
-        .arg(ChatTheme::ToolCard::success()));
+        QStringLiteral("QLabel { font-size: 11px; font-family: monospace; background: transparent; }"));
     m_duration->setStyleSheet(
         QStringLiteral("QLabel { color: %1; font-size: 11px; }").arg(ChatTheme::ToolCard::textMuted()));
     m_expandBtn->setStyleSheet(
@@ -642,7 +645,12 @@ void ToolCallWidget::setDescribeDiff(const QString &diff)
             ++m_diffRemoved;
         }
     }
-    m_diffStat->setText(QStringLiteral("+%1 −%2").arg(m_diffAdded).arg(m_diffRemoved));
+    // The stat carries both counts in one label: additions in green, deletions
+    // in red, so the net change is readable at a glance without opening the card.
+    m_diffStat->setText(QStringLiteral("<span style=\"color:%1\">+%2</span>"
+                                       " <span style=\"color:%3\">−%4</span>")
+                            .arg(ChatTheme::ToolCard::success(), QString::number(m_diffAdded),
+                                 ChatTheme::ToolCard::danger(), QString::number(m_diffRemoved)));
     m_diffStat->setVisible(true);
 
     if (m_describeDiff) {

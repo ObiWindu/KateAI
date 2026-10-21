@@ -73,6 +73,7 @@ protected:
     // The most recent step the sub-agent reported, kept in full so it can be
     // re-elided whenever the card is resized.
     QString m_currentLine;
+    bool m_currentIsError = false;
     bool m_running = false;
     bool m_failed = false;
     bool m_cancelled = false;
@@ -83,7 +84,9 @@ protected:
     QLabel *m_badge = nullptr;
     QLabel *m_icon = nullptr;
     QLabel *m_title = nullptr;
+    QLabel *m_modeChip = nullptr;
     QLabel *m_status = nullptr;
+    QLabel *m_bodyCaption = nullptr;
     // The step the sub-agent is on right now, mirrored from its own tool
     // activity so the card says what it is doing, not merely that it is.
     QLabel *m_current = nullptr;

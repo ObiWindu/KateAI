@@ -354,10 +354,16 @@ private Q_SLOTS:
 
             QLabel *diffStat = card.findChild<QLabel *>(u"toolDiffStat"_s);
             QVERIFY2(diffStat->isVisible(), "diff stat must appear once a diff is attached");
-            QVERIFY2(diffStat->text() == u"+1 \u22121"_s,
-                     qPrintable(QStringLiteral("diff stat reads %1").arg(diffStat->text())));
-            QVERIFY2(diffStat->styleSheet().contains(QString::fromLatin1(kMainSuccess)),
-                     qPrintable(diffStat->styleSheet()));
+            // The stat uses rich text: additions in green, deletions in red.
+            const QString diffText = diffStat->text();
+            QVERIFY2(diffText.contains(u"+1"_s),
+                     qPrintable(QStringLiteral("diff stat reads %1").arg(diffText)));
+            QVERIFY2(diffText.contains(QStringLiteral("\u22121")),
+                     qPrintable(QStringLiteral("diff stat reads %1").arg(diffText)));
+            QVERIFY2(diffText.contains(QString::fromLatin1(kMainSuccess)),
+                     qPrintable(QStringLiteral("added count must be green: %1").arg(diffText)));
+            QVERIFY2(diffText.contains(QString::fromLatin1(kMainDanger)),
+                     qPrintable(QStringLiteral("removed count must be red: %1").arg(diffText)));
             QVERIFY2(diffStat->styleSheet().contains(u"monospace"_s),
                      "main's diff stat is monospace");
 

@@ -61,7 +61,9 @@ SubtaskWidget::SubtaskWidget(const QString &taskId, QWidget *parent)
     auto *header = new QHBoxLayout;
     header->setSpacing(6);
 
-    m_badge = new QLabel(u"↳"_s, this);
+    // The badge carries both the delegation glyph and a text label, so the card
+    // is identifiable as a sub-agent even when the glyph alone is ambiguous.
+    m_badge = new QLabel(i18n("↳ Agent"), this);
     m_badge->setToolTip(i18n("Delegated sub-agent"));
     header->addWidget(m_badge);
 
@@ -74,6 +76,15 @@ SubtaskWidget::SubtaskWidget(const QString &taskId, QWidget *parent)
     m_title->setMinimumWidth(0);
     m_title->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     header->addWidget(m_title);
+
+    // The mode the sub-agent runs in, shown as a small chip between the title
+    // and the status line. A delegated task is only meaningful with the mode
+    // that was chosen for it, and burying it in the title makes it easy to miss.
+    m_modeChip = new QLabel(this);
+    m_modeChip->setTextFormat(Qt::RichText);
+    m_modeChip->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Preferred);
+    m_modeChip->setVisible(false);
+    header->addWidget(m_modeChip);
 
     m_status = new QLabel(this);
     m_status->setMinimumWidth(0);
@@ -95,6 +106,15 @@ SubtaskWidget::SubtaskWidget(const QString &taskId, QWidget *parent)
 
     root->addLayout(header);
 
+    // A small caption above the body so the user knows whether they are reading
+    // the delegated task or the sub-agent's answer.
+    m_bodyCaption = new QLabel(this);
+    m_bodyCaption->setStyleSheet(QStringLiteral("color: %1; font-size: 9px; font-weight: 600;"
+                                                " text-transform: uppercase; letter-spacing: 0.5px;")
+                                     .arg(ChatTheme::textMuted()));
+    m_bodyCaption->setText(i18n("Task"));
+    root->addWidget(m_bodyCaption);
+
     // The task description the orchestrator wrote, so the user can see what
     // was actually delegated without expanding anything.
     m_answer = new QTextBrowser(this);
@@ -109,7 +129,9 @@ SubtaskWidget::SubtaskWidget(const QString &taskId, QWidget *parent)
     // on -- without this the card reads as a spinner with no reason.
     m_current = new QLabel(this);
     m_current->setWordWrap(false);
-    m_current->setStyleSheet(QStringLiteral("color: %1; font-size: 10px;").arg(ChatTheme::accent()));
+    // No colour in the stylesheet: the label uses rich text with inline spans
+    // so the "Doing:" prefix and the step text can carry different colours.
+    m_current->setStyleSheet(u"font-size: 10px;"_s);
     m_current->setVisible(false);
     root->addWidget(m_current);
 
@@ -170,7 +192,10 @@ void SubtaskWidget::startAgent(const QString &agentName, const QString &modeId, 
                                                ChatTheme::messageCss()));
     m_answer->setToolTip(m_description);
     m_answer->setVisible(!m_description.isEmpty());
+    m_bodyCaption->setText(i18n("Task"));
+    m_bodyCaption->setVisible(!m_description.isEmpty());
     m_currentLine.clear();
+    m_currentIsError = false;
     m_current->clear();
     m_current->setVisible(false);
     updateHeader();
@@ -199,8 +224,7 @@ void SubtaskWidget::appendActivity(const QString &line, bool isError)
     // Mirror the step onto the card itself: the log below is opt-in, so without
     // this line a running card reported a step count and nothing else.
     m_currentLine = line;
-    m_current->setStyleSheet(QStringLiteral("color: %1; font-size: 10px;")
-                                 .arg(isError ? ChatTheme::danger() : ChatTheme::accent()));
+    m_currentIsError = isError;
     updateCurrentActivity();
     updateHeader();
     updateElapsed();
@@ -221,7 +245,10 @@ void SubtaskWidget::finishAgent(const ToolResult &result)
     m_answer->setDocument(makeMarkdownDocument(closeMarkdown(result.output), ChatTheme::messageCss()));
     m_answer->setToolTip(QString());
     m_answer->setVisible(true);
+    m_bodyCaption->setText(result.ok ? i18n("Result") : i18n("Error"));
+    m_bodyCaption->setVisible(true);
     m_currentLine.clear();
+    m_currentIsError = false;
     m_current->setVisible(false);
     updateHeader();
     applyStyle();
@@ -239,7 +266,10 @@ void SubtaskWidget::markAbandoned(const QString &reason)
     m_answer->setDocument(makeMarkdownDocument(closeMarkdown(reason), ChatTheme::messageCss()));
     m_answer->setToolTip(QString());
     m_answer->setVisible(true);
+    m_bodyCaption->setText(i18n("Cancelled"));
+    m_bodyCaption->setVisible(true);
     m_currentLine.clear();
+    m_currentIsError = false;
     m_current->setVisible(false);
     updateHeader();
     applyStyle();
@@ -256,7 +286,15 @@ void SubtaskWidget::updateCurrentActivity()
     // the arguments), and a label wider than the card would stretch the dock.
     // The full text stays reachable through the tooltip.
     const int available = qMax(80, width() - 24);
-    m_current->setText(m_current->fontMetrics().elidedText(m_currentLine, Qt::ElideRight, available));
+    const QString elided = m_current->fontMetrics().elidedText(m_currentLine, Qt::ElideRight, available);
+    // A prefix label makes it clear this is the current step, not a status.
+    // The step text is coloured by whether it is an error or not.
+    const QString stepColor = m_currentIsError ? ChatTheme::danger() : ChatTheme::accent();
+    m_current->setTextFormat(Qt::RichText);
+    m_current->setText(QStringLiteral("<span style=\"color:%1; font-weight:600;\">%2</span>"
+                                      " <span style=\"color:%3;\">%4</span>")
+                           .arg(ChatTheme::textMuted(), i18n("Doing:"),
+                                stepColor, elided.toHtmlEscaped()));
     m_current->setToolTip(m_currentLine);
     m_current->setVisible(true);
 }
@@ -272,36 +310,69 @@ void SubtaskWidget::resizeEvent(QResizeEvent *event)
 void SubtaskWidget::updateHeader()
 {
     const QString escapedName = m_agentName.toHtmlEscaped();
-    const QString name = QStringLiteral("<span style=\"color:%1\">%2</span>")
-                             .arg(ChatTheme::textMuted(), escapedName);
-    m_title->setText(m_modeId.isEmpty()
-                         ? i18n("Sub-agent · %1", name)
-                         : QStringLiteral("<span style=\"color:%1\">%2</span> <span style=\"color:%3;\">·</span> %4")
-                               .arg(ChatTheme::accent(), m_modeId.toHtmlEscaped(), ChatTheme::textMuted(),
-                                    i18n("Sub-agent · %1", name)));
+    // The agent name is the primary identifier; "Sub-agent" is the role label
+    // shown in the badge, so the title no longer repeats it.
+    m_title->setText(QStringLiteral("<span style=\"color:%1\">%2</span>")
+                         .arg(ChatTheme::textPrimary(), escapedName));
+
+    // The mode chip shows which mode the sub-agent runs in. Hidden when no mode
+    // was given, so a modeless delegation stays compact.
+    if (m_modeId.isEmpty()) {
+        m_modeChip->setVisible(false);
+    } else {
+        m_modeChip->setText(QStringLiteral("<span style=\"color:%1; font-size:9px;"
+                                           " background:%2; border-radius:3px;"
+                                           " padding:1px 5px;\">%3</span>")
+                                .arg(ChatTheme::accent(), ChatTheme::mixColors(ChatTheme::accent(), ChatTheme::cardBg(), 18),
+                                     m_modeId.toHtmlEscaped()));
+        m_modeChip->setToolTip(i18n("Mode: %1", m_modeId));
+        m_modeChip->setVisible(true);
+    }
     updateElapsed();
 }
 
 void SubtaskWidget::updateElapsed()
 {
-    QStringList parts;
+    // The status line carries the state, the elapsed time and the step count.
+    // The state word is coloured so a finished, failed or cancelled card can be
+    // told apart from a running one without reading the text.
+    QString stateWord;
+    QString stateColor;
     if (m_running) {
-        parts << i18n("running %1s", m_elapsed.elapsed() / 1000);
+        stateWord = i18n("Running");
+        stateColor = ChatTheme::accent();
     } else if (m_cancelled) {
-        parts << i18n("cancelled after %1s", m_elapsed.elapsed() / 1000);
+        stateWord = i18n("Cancelled");
+        stateColor = ChatTheme::textMuted();
     } else if (m_failed) {
-        parts << i18n("failed after %1s", m_elapsed.elapsed() / 1000);
+        stateWord = i18n("Failed");
+        stateColor = ChatTheme::danger();
     } else {
-        parts << i18n("done in %1s", m_elapsed.elapsed() / 1000);
+        stateWord = i18n("Done");
+        stateColor = ChatTheme::success();
     }
+
+    const qint64 secs = m_elapsed.elapsed() / 1000;
+    QString timeStr;
+    if (secs < 60) {
+        timeStr = QStringLiteral("%1s").arg(secs);
+    } else {
+        const int mins = static_cast<int>(secs / 60);
+        const int remSecs = static_cast<int>(secs % 60);
+        timeStr = i18n("%1m %2s", mins, remSecs);
+    }
+
+    QStringList parts;
+    parts << timeStr;
     if (m_stepCount > 0) {
-        // i18np() is the plural-aware KLocalizedString helper. Note also that
-        // arguments are passed to i18n()/i18np() directly rather than chained
-        // with QString::arg(): KI18n substitutes %1 itself, and a chained
-        // .arg() leaves a raw N_ARGUMENT_MISSING error in the string.
         parts << i18np("%1 step", "%1 steps", m_stepCount);
     }
-    m_status->setText(parts.join(QStringLiteral(" \xC2\xB7 ")));
+
+    m_status->setTextFormat(Qt::RichText);
+    m_status->setText(QStringLiteral("<span style=\"color:%1; font-weight:600;\">%2</span>"
+                                     " <span style=\"color:%3;\">·</span> %4")
+                          .arg(stateColor, stateWord.toHtmlEscaped(), ChatTheme::textMuted(),
+                               parts.join(QStringLiteral(" \xC2\xB7 "))));
 }
 
 void SubtaskWidget::applyStyle()
@@ -332,10 +403,16 @@ void SubtaskWidget::applyStyle()
                  .arg(border);
     setStyleSheet(sheet);
 
-    m_badge->setStyleSheet(QStringLiteral("font-size: 15px; font-weight: 700; color: %1;").arg(ChatTheme::accent()));
+    m_badge->setStyleSheet(QStringLiteral("font-size: 11px; font-weight: 700; color: %1;"
+                                          " background: %2; border-radius: 4px; padding: 1px 6px;")
+                               .arg(ChatTheme::accent(), ChatTheme::mixColors(ChatTheme::accent(), ChatTheme::cardBg(), 18)));
     m_title->setStyleSheet(QStringLiteral("QLabel { color: %1; font-size: 11px; font-weight: 600; }")
                                .arg(ChatTheme::textPrimary()));
+    m_modeChip->setStyleSheet(QStringLiteral("QLabel { background: transparent; }"));
     m_status->setStyleSheet(QStringLiteral("color: %1; font-size: 10px;").arg(ChatTheme::textPrimary()));
+    m_bodyCaption->setStyleSheet(QStringLiteral("color: %1; font-size: 9px; font-weight: 600;"
+                                                " letter-spacing: 0.5px; background: transparent;")
+                                     .arg(ChatTheme::textMuted()));
     m_cancel->setStyleSheet(
         QStringLiteral(
             "QPushButton { background: transparent; color: %1; border: 1px solid %2;"
