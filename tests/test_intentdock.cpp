@@ -172,10 +172,13 @@ private Q_SLOTS:
     {
         // The dock itself must not draw a box, and must not restyle its
         // children -- a descendant rule would flatten the borders on the very
-        // cards the dock exists to frame.
+        // cards the dock exists to frame. It does fill with the window chrome
+        // colour: the dock is part of the window, pinned to the composer strip
+        // (and under a built-in preset that colour is the panel colour, so the
+        // dock still paints nothing of its own).
         const QString dock = ChatTheme::intentDock();
         QVERIFY(dock.contains(u"QWidget#intentDock"_s));
-        QVERIFY(dock.contains(u"background: transparent"_s));
+        QVERIFY2(dock.contains(ChatTheme::windowBg()), qPrintable(dock));
         QVERIFY2(!dock.contains(u"QWidget#intentDock QWidget"_s), qPrintable(dock));
         QVERIFY2(!dock.contains(u"border-radius"_s), qPrintable(dock));
     }

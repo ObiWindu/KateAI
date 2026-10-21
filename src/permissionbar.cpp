@@ -108,7 +108,7 @@ void PermissionBar::applyStyle()
         QStringLiteral(
             "QPushButton {"
             "  background-color: %1;"
-            "  color: #ffffff;"
+            "  color: %3;"
             "  border: none;"
             "  border-radius: 6px;"
             "  padding: 6px 16px;"
@@ -117,7 +117,7 @@ void PermissionBar::applyStyle()
             "}"
             "QPushButton:hover { background-color: %2; }"
             "QPushButton:pressed { background-color: %2; }")
-            .arg(ChatTheme::accent(), ChatTheme::accentHover()));
+            .arg(ChatTheme::accent(), ChatTheme::accentHover(), ChatTheme::textOn(ChatTheme::accent())));
     m_sessionBtn->setStyleSheet(
         QStringLiteral(
             "QPushButton {"
@@ -128,8 +128,8 @@ void PermissionBar::applyStyle()
             "  padding: 6px 14px;"
             "  font-size: 12px;"
             "}"
-            "QPushButton:hover { background-color: %3; color: #ffffff; }")
-            .arg(ChatTheme::cardBg(), ChatTheme::textPrimary(), ChatTheme::hoverBg()));
+            "QPushButton:hover { background-color: %4; color: %2; }")
+            .arg(ChatTheme::cardBg(), ChatTheme::textPrimary(), ChatTheme::border(), ChatTheme::hoverBg()));
     m_denyBtn->setStyleSheet(
         QStringLiteral(
             "QPushButton {"
@@ -140,8 +140,9 @@ void PermissionBar::applyStyle()
             "  padding: 6px 14px;"
             "  font-size: 12px;"
             "}"
-            "QPushButton:hover { color: #ffffff; border-color: %1; }")
-            .arg(ChatTheme::danger(), ChatTheme::danger()));
+            "QPushButton:hover { background-color: %3; color: %1; border-color: %1; }")
+            .arg(ChatTheme::danger(), ChatTheme::danger(),
+                 ChatTheme::tinted(ChatTheme::danger(), 0.10)));
     // The risk-tinted box only exists while a request is showing; when hidden
     // there is no badge state to re-apply.
     if (isVisible()) {

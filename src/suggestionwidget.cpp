@@ -204,10 +204,10 @@ void SuggestionWidget::applyStyle()
         .arg(ChatTheme::textMuted(), ChatTheme::border(), ChatTheme::hoverBg()));
     m_accept->setStyleSheet(
         QStringLiteral(
-            "QPushButton { background: %1; color: #ffffff; border: none;"
+            "QPushButton { background: %1; color: %3; border: none;"
             " border-radius: 5px; padding: 0 10px; font-size: 10px; font-weight: 600; }"
             "QPushButton:hover { background: %2; }")
-        .arg(ChatTheme::accent(), ChatTheme::accentHover()));
+        .arg(ChatTheme::accent(), ChatTheme::accentHover(), ChatTheme::textOn(ChatTheme::accent())));
     m_body->setStyleSheet(
         QStringLiteral("QTextBrowser { background: transparent; border: none; color: %1; font-size: 11px; padding: 0; }")
             .arg(ChatTheme::textPrimary()));

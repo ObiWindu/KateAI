@@ -47,9 +47,6 @@ QString trackerFontSize(int pixels)
 
 QString keepAllStyle()
 {
-    // Derived from the theme's success colour at varying alpha rather than a
-    // second hard-coded green, so retheming the panel does not leave this one
-    // button behind. The previous literal #16a34a was a third green.
     return QStringLiteral(
                "QPushButton {"
                "  background-color: %1;"
@@ -63,8 +60,8 @@ QString keepAllStyle()
                "QPushButton:hover { background-color: %3; }"
                "QPushButton:pressed { background-color: %4; }"
                "QPushButton:disabled { background-color: %5; color: %6; }")
-        .arg(ChatTheme::success(), QColor(0x08, 0x12, 0x0e).name(), ChatTheme::accent(), ChatTheme::danger(),
-             QColor(0x1f, 0x3d, 0x2a).name(), ChatTheme::textMuted(), trackerFontSize(12));
+        .arg(ChatTheme::success(), ChatTheme::textOn(ChatTheme::success()), ChatTheme::accent(), ChatTheme::danger(),
+             ChatTheme::tinted(ChatTheme::success(), 0.15), ChatTheme::textMuted(), trackerFontSize(12));
 }
 
 QString rejectAllStyle()
@@ -79,10 +76,11 @@ QString rejectAllStyle()
                "  font-weight: 600;"
                "  font-size: %5;"
                "}"
-               "QPushButton:hover { background-color: %2; border-color: %1; color: #fecaca; }"
+               "QPushButton:hover { background-color: %2; border-color: %1; color: %6; }"
                "QPushButton:pressed { background-color: %1; }"
                "QPushButton:disabled { color: %3; border-color: %4; }")
-        .arg(ChatTheme::danger(), QColor(0x3f, 0x12, 0x12).name(), ChatTheme::textMuted(), ChatTheme::border(), trackerFontSize(12));
+        .arg(ChatTheme::danger(), ChatTheme::tinted(ChatTheme::danger(), 0.15), ChatTheme::textMuted(),
+             ChatTheme::border(), trackerFontSize(12), ChatTheme::textOn(ChatTheme::danger()));
 }
 
 QString keepStyle()
@@ -99,7 +97,7 @@ QString keepStyle()
                "}"
                "QPushButton:hover { background-color: %1; color: %2; }"
                "QPushButton:pressed { background-color: %3; }")
-        .arg(ChatTheme::success(), QColor(0x08, 0x12, 0x0e).name(), ChatTheme::danger(), trackerFontSize(11));
+        .arg(ChatTheme::success(), ChatTheme::textOn(ChatTheme::success()), ChatTheme::danger(), trackerFontSize(11));
 }
 
 QString rejectStyle()
@@ -114,9 +112,9 @@ QString rejectStyle()
                "  font-weight: 600;"
                "  font-size: %2;"
                "}"
-               "QPushButton:hover { background-color: %1; color: #fecaca; }"
+               "QPushButton:hover { background-color: %1; color: %3; }"
                "QPushButton:pressed { background-color: %1; }")
-        .arg(ChatTheme::danger(), trackerFontSize(11));
+        .arg(ChatTheme::danger(), trackerFontSize(11), ChatTheme::textOn(ChatTheme::danger()));
 }
 
 QString reviewStyle()
@@ -131,7 +129,7 @@ QString reviewStyle()
                "  font-weight: 600;"
                "  font-size: %6;"
                "}"
-               "QPushButton:hover { background-color: %4; color: #ffffff; border-color: %5; }"
+               "QPushButton:hover { background-color: %4; color: %2; border-color: %5; }"
                "QPushButton:pressed { background-color: %1; }")
         .arg(ChatTheme::hoverBg(), ChatTheme::textPrimary(), ChatTheme::border(), ChatTheme::surfaceBg(),
              ChatTheme::borderStrong(), trackerFontSize(11));
@@ -149,9 +147,10 @@ QString undoStyle()
                "  font-weight: 600;"
                "  font-size: %4;"
                "}"
-               "QPushButton:hover { background-color: %3; color: #ffffff; }"
-               "QPushButton:disabled { color: #6b7280; border-color: #333333; }")
-        .arg(ChatTheme::textMuted(), ChatTheme::border(), ChatTheme::hoverBg(), trackerFontSize(12));
+               "QPushButton:hover { background-color: %3; color: %1; }"
+               "QPushButton:disabled { color: %5; border-color: %2; }")
+        .arg(ChatTheme::textMuted(), ChatTheme::border(), ChatTheme::hoverBg(), trackerFontSize(12),
+             ChatTheme::textMuted());
 }
 
 int countDiffLines(const QString &diff, QChar marker)

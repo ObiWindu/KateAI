@@ -32,7 +32,7 @@ QString optionChipStyle()
     return QStringLiteral(
         "QPushButton { background-color: %1; color: %2; border: 1px solid %3;"
         " border-radius: 11px; padding: 3px 12px; font-size: 11px; }"
-        "QPushButton:hover { background-color: %3; color: #ffffff; }")
+        "QPushButton:hover { background-color: %3; color: %2; }")
         .arg(ChatTheme::cardBg(), ChatTheme::textPrimary(), ChatTheme::borderStrong());
 }
 
@@ -198,11 +198,12 @@ void QuestionWidget::applyStyle()
             .arg(ChatTheme::inputBg(), ChatTheme::textPrimary(), ChatTheme::border()));
     m_submit->setStyleSheet(
         QStringLiteral(
-            "QPushButton { background-color: %1; color: #ffffff; border: none;"
+            "QPushButton { background-color: %1; color: %5; border: none;"
             " border-radius: 5px; padding: 2px 14px; font-size: 11px; font-weight: 600; }"
             "QPushButton:hover { background-color: %2; }"
             "QPushButton:disabled { background-color: %3; color: %4; }")
-            .arg(ChatTheme::accent(), ChatTheme::accentHover(), ChatTheme::hoverBg(), ChatTheme::textMuted()));
+            .arg(ChatTheme::accent(), ChatTheme::accentHover(), ChatTheme::hoverBg(), ChatTheme::textMuted(),
+                 ChatTheme::textOn(ChatTheme::accent())));
     // Answer chips are created per question; re-style the ones on screen.
     for (auto *chip : m_optionsRow->findChildren<QPushButton *>()) {
         chip->setStyleSheet(optionChipStyle());

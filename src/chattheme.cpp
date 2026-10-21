@@ -16,6 +16,7 @@
 #include <QJsonDocument>
 #include <QList>
 #include <QPair>
+#include <QPalette>
 
 using namespace Qt::Literals::StringLiterals;
 
@@ -64,6 +65,16 @@ QString kAccentHover = QStringLiteral("#5590ff");
 QString kSuccess = QStringLiteral("#4ec9a0");
 QString kWarning = QStringLiteral("#e2b341");
 QString kDanger = QStringLiteral("#f26d6d");
+
+// Window-chrome colours: the tool view, the header bar, the composer strip and
+// the intent dock. Initialised to the panel equivalents. In inherit mode they
+// mirror the editor-derived panel colours (both follow the Kate editor window
+// theme); under a built-in preset they mirror the preset's panel colours.
+QString kWindowBg = kPanelBg;
+QString kWindowText = kTextPrimary;
+QString kWindowTextMuted = kTextMuted;
+QString kWindowBorder = kBorder;
+QString kWindowHover = kHoverBg;
 
 // Fixed snapshots of the defaults above, captured at static initialisation --
 // before loadTheme() can ever rewrite the globals. The tool card never
@@ -127,6 +138,11 @@ void setPalette(const ChatPalette &p)
     kSuccess = p.success;
     kWarning = p.warning;
     kDanger = p.danger;
+    kWindowBg = p.windowBg;
+    kWindowText = p.windowText;
+    kWindowTextMuted = p.windowTextMuted;
+    kWindowBorder = p.windowBorder;
+    kWindowHover = p.windowHover;
 }
 
 // The Kate editor's current colour scheme, used when the panel inherits its
@@ -181,15 +197,18 @@ QString toolHeaderBg()
 
 QString intentDock()
 {
-    // Chrome, not a card: no border and no fill of its own, so the rows inside
-    // it are what read as boxes. Deliberately no descendant rule here -- a rule
-    // matching the dock's children would flatten the borders on the very cards
-    // the dock exists to frame.
+    // Chrome, not a card: no border, and the fill is the window chrome colour
+    // so the strip reads as an extension of the composer below it rather than
+    // as a slice of the transcript. The rows inside it are what read as boxes.
+    // Deliberately no descendant rule here -- a rule matching the dock's
+    // children would flatten the borders on the very cards the dock exists to
+    // frame.
     return QStringLiteral(
            "QWidget#intentDock {"
-           "  background: transparent;"
+           "  background-color: %1;"
            "  border: none;"
-           "}");
+           "}")
+        .arg(kWindowBg);
 }
 
 QString agentTaskCard(const QString &objectName)
@@ -257,6 +276,27 @@ QString danger()
     return kDanger;
 }
 
+QString windowBg()
+{
+    return kWindowBg;
+}
+QString windowText()
+{
+    return kWindowText;
+}
+QString windowTextMuted()
+{
+    return kWindowTextMuted;
+}
+QString windowBorder()
+{
+    return kWindowBorder;
+}
+QString windowHover()
+{
+    return kWindowHover;
+}
+
 QString panel()
 {
     return QStringLiteral("QWidget { background-color: %1; color: %2; }").arg(kPanelBg, kTextPrimary);
@@ -305,12 +345,28 @@ QString transcript()
 
 QString headerBar()
 {
+    // The header bar is window chrome: it carries the window-chrome colours,
+    // which in inherit mode follow the editor theme together with the panel.
     return QStringLiteral(
            "QWidget#headerBar {"
            "  background-color: %1;"
            "  border-bottom: 1px solid %2;"
            "}")
-        .arg(kPanelBg, kBorder);
+        .arg(kWindowBg, kWindowBorder);
+}
+
+QString headerTitle()
+{
+    // The thread title sits on the header bar, i.e. on window chrome, so its
+    // colour comes from the window-chrome muted text.
+    return QStringLiteral(
+           "QLabel {"
+           "  color: %1;"
+           "  font-size: 11px;"
+           "  font-weight: 600;"
+           "  letter-spacing: 0.4px;"
+           "}")
+        .arg(kWindowTextMuted);
 }
 
 QString chipButton()
@@ -345,6 +401,9 @@ QString chipButton()
 
 QString iconButton()
 {
+    // Disabled: the muted text blended halfway towards the panel, so the
+    // dimmed state reads in both dark and light themes instead of carrying
+    // a fixed dark gray that vanishes on light panels.
     return QStringLiteral(
            "QPushButton {"
            "  background: transparent;"
@@ -360,9 +419,49 @@ QString iconButton()
            "  background-color: %3;"
            "}"
            "QPushButton:disabled {"
-           "  color: #55555c;"
+           "  color: %4;"
            "}")
-        .arg(kTextMuted, kHoverBg, kCardBg);
+        .arg(kTextMuted, kHoverBg, kCardBg, mixColors(kTextMuted, kPanelBg, 50));
+}
+
+QString headerIconButton()
+{
+    // Icon buttons on the header bar sit on window chrome, so their text and
+    // hover use the window-chrome colours. Same shape as iconButton(): only
+    // the colour source differs.
+    return QStringLiteral(
+           "QPushButton {"
+           "  background: transparent;"
+           "  color: %1;"
+           "  border: 1px solid transparent;"
+           "  border-radius: 6px;"
+           "}"
+           "QPushButton:hover {"
+           "  background-color: %2;"
+           "  border-color: %3;"
+           "}"
+           "QPushButton:pressed {"
+           "  background-color: %3;"
+           "}"
+           "QPushButton:disabled {"
+           "  color: %4;"
+           "}")
+        .arg(kWindowTextMuted, kWindowHover, kWindowBorder, mixColors(kWindowTextMuted, kWindowBg, 50));
+}
+
+QString windowHintLabel()
+{
+    // Hint text that sits on window chrome (the status strip under the input).
+    return QStringLiteral("QLabel { color: %1; font-size: 11px; }").arg(kWindowTextMuted);
+}
+
+QString windowChrome()
+{
+    // The tool view that hosts the panel: the KateAI window itself. Painted
+    // from the window-chrome colours, which follow the editor theme in inherit
+    // mode; the chat widget paints its own content on top of it.
+    return QStringLiteral("QWidget#kateaiToolView { background-color: %1; color: %2; }")
+        .arg(kWindowBg, kWindowText);
 }
 
 QString composerCard()
@@ -391,12 +490,12 @@ QString promptInput()
            "  padding: 4px 6px;"
            "  font-size: 13px;"
            "  selection-background-color: %2;"
-           "  selection-color: #ffffff;"
+           "  selection-color: %3;"
            "}"
            "QPlainTextEdit:focus {"
            "  border: none;"
            "}")
-        .arg(kTextPrimary, kAccent);
+        .arg(kTextPrimary, kAccent, textOn(kAccent));
 }
 
 QString hintLabel()
@@ -429,7 +528,7 @@ QString jumpToLatest()
     return QStringLiteral(
            "QPushButton {"
            "  background-color: %1;"
-           "  color: #ffffff;"
+           "  color: %4;"
            "  border: 1px solid %2;"
            "  border-radius: 13px;"
            "  padding: 5px 13px;"
@@ -440,7 +539,7 @@ QString jumpToLatest()
            "  background-color: %2;"
            "  border-color: %3;"
            "}")
-        .arg(kAccent, kAccentHover, kBorderStrong);
+        .arg(kAccent, kAccentHover, kBorderStrong, textOn(kAccent));
 }
 
 QString activityPill()
@@ -478,24 +577,45 @@ QString pillSheet(const QString &textColor, const QString &background, const QSt
         .arg(textColor, background, border);
 }
 
+// Text for a pill built on the given hue. The pill's background is a
+// translucent wash of that hue over the panel, so the text must stay readable
+// on the wash in both directions: a white tint of a dark hue on dark panels
+// (the default blue, the default amber), and the hue itself when the hue is
+// light -- an accent inherited from a bright editor keyword (Tokyo Night's
+// #bb9af7) tinted towards white would be light text on a light wash. The dim
+// phase dims towards the panel instead of towards white.
+QString pillTextColor(const QString &hueHex, bool dim)
+{
+    if (!isDarkColor(kPanelBg)) {
+        return dim ? mixColors(hueHex, kPanelBg, 20) : hueHex;
+    }
+    const QColor hue(hueHex);
+    if (hue.isValid() && hue.lightnessF() > 0.65) {
+        return dim ? mixColors(hueHex, kPanelBg, 25) : hueHex;
+    }
+    return mixColors(QStringLiteral("#ffffff"), hueHex, dim ? 15 : 30);
+}
+
 QString thinkingPill()
 {
-    return pillSheet(QStringLiteral("#b4d0ff"), QStringLiteral("rgba(61, 126, 255, 0.22)"), kAccent);
+    // Background: a translucent wash of the theme's accent, not a hardcoded
+    // rgba() -- the pill must follow the palette when the theme changes.
+    return pillSheet(pillTextColor(kAccent, false), tinted(kAccent, 0.22), kAccent);
 }
 
 QString thinkingPillDim()
 {
-    return pillSheet(QStringLiteral("#8db0e8"), QStringLiteral("rgba(61, 126, 255, 0.10)"), kAccent);
+    return pillSheet(pillTextColor(kAccent, true), tinted(kAccent, 0.10), kAccent);
 }
 
 QString workingPill()
 {
-    return pillSheet(QStringLiteral("#f3d48a"), QStringLiteral("rgba(226, 179, 65, 0.20)"), kWarning);
+    return pillSheet(pillTextColor(kWarning, false), tinted(kWarning, 0.20), kWarning);
 }
 
 QString workingPillDim()
 {
-    return pillSheet(QStringLiteral("#c5ab64"), QStringLiteral("rgba(226, 179, 65, 0.09)"), kWarning);
+    return pillSheet(pillTextColor(kWarning, true), tinted(kWarning, 0.09), kWarning);
 }
 
 QString userCardBg()
@@ -575,7 +695,15 @@ QString tinted(const QString &hex, double alpha)
 
 QString textOn(const QString &surfaceBg)
 {
-    return isDarkColor(surfaceBg) ? QStringLiteral("#ffffff") : kTextPrimary;
+    if (isDarkColor(surfaceBg)) {
+        return QStringLiteral("#ffffff");
+    }
+    // Light surface. When the primary text is itself dark (light panels) it
+    // is the right colour. On a dark panel the primary text is light, so a
+    // light surface here is a light accent chip (an editor theme with a
+    // bright keyword colour, like Tokyo Night's #bb9af7): light-on-light
+    // would be unreadable, and the panel backdrop is the dark counterpart.
+    return isDarkColor(kTextPrimary) ? kTextPrimary : kPanelBg;
 }
 
 QString menu()
@@ -594,14 +722,14 @@ QString menu()
            "}"
            "QMenu::item:selected {"
            "  background-color: %4;"
-           "  color: #ffffff;"
+           "  color: %5;"
            "}"
            "QMenu::separator {"
            "  height: 1px;"
            "  background-color: %3;"
            "  margin: 4px 0;"
            "}")
-        .arg(kSurfaceBg, kTextPrimary, kBorder, kAccent);
+        .arg(kSurfaceBg, kTextPrimary, kBorder, kAccent, textOn(kAccent));
 }
 
 QString popupMenu()
@@ -626,7 +754,7 @@ QString popupMenu()
            "}"
            "QListWidget::item:selected {"
            "  background-color: %4;"
-           "  color: #ffffff;"
+           "  color: %7;"
            "}"
            "QListWidget::item:hover:!selected {"
            "  background-color: %5;"
@@ -643,7 +771,7 @@ QString popupMenu()
            "  background-color: %5;"
            "  border-radius: 4px;"
            "}")
-        .arg(kSurfaceBg, kTextPrimary, kBorder, kAccent, kHoverBg, kTextMuted);
+        .arg(kSurfaceBg, kTextPrimary, kBorder, kAccent, kHoverBg, kTextMuted, textOn(kAccent));
 }
 
 QString lineEdit()
@@ -713,26 +841,27 @@ QString messageCss()
 
 QString userMessageCss()
 {
-    // messageCss() with the body colour swapped for white: the user card is a
-    // near-black surface with white text, and a document stylesheet cannot
-    // inherit what the widget stylesheet painted. The code-block surfaces stay
-    // the shared inset colour so a pasted sample reads the same on either side
-    // of the conversation.
+    // messageCss() with the body colour taken from userCardText(): the user
+    // card's surface is derived from the palette (dark in dark themes, light
+    // in light ones), and a document stylesheet cannot inherit what the widget
+    // stylesheet painted, so the text colour must be derived the same way.
+    // The code-block surfaces stay the shared inset colour so a pasted sample
+    // reads the same on either side of the conversation.
     return QStringLiteral(
-               "body { color: #ffffff; font-family: sans-serif; font-size: 13px; margin: 0; padding: 0; }"
+               "body { color: %6; font-family: sans-serif; font-size: 13px; margin: 0; padding: 0; }"
                "p { margin-bottom: 8px; line-height: 1.5; }"
                "ul, ol { margin-bottom: 8px; padding-left: 20px; }"
                "li { margin-bottom: 4px; }"
                "table.codeblock { border: 1px solid %1; border-radius: 6px; margin: 8px 0; background-color: %2; }"
                "td.codeblock-lang { color: %3; font-family: sans-serif; font-size: 10px; font-weight: 600;"
                "                    background-color: %2; padding: 4px 10px; }"
-               "pre.codeblock { color: #ffffff; font-family: monospace; font-size: 12px; white-space: pre-wrap;"
+               "pre.codeblock { color: %6; font-family: monospace; font-size: 12px; white-space: pre-wrap;"
                "                 background-color: %2; margin: 6px 10px; }"
-               "code { font-family: monospace; font-size: 12px; background-color: %4; color: #ffffff;"
+               "code { font-family: monospace; font-size: 12px; background-color: %4; color: %6;"
                "       padding: 2px 5px; border-radius: 3px; }"
                "blockquote { border-left: 3px solid %5; padding-left: 10px; color: %3; margin: 8px 0; }"
                "a { color: %5; text-decoration: none; }")
-        .arg(kBorder, kCodeBlockBg, kTextMuted, kHoverBg, kAccent);
+        .arg(kBorder, kCodeBlockBg, kTextMuted, kHoverBg, kAccent, userCardText());
 }
 
 QString thinkingCss()
@@ -1027,6 +1156,13 @@ ChatPalette defaultPalette()
     p.success = QStringLiteral("#4ec9a0");
     p.warning = QStringLiteral("#e2b341");
     p.danger = QStringLiteral("#f26d6d");
+    // A preset is self-contained: the window chrome stays on the preset's own
+    // colours so the panel reads as one surface.
+    p.windowBg = p.panelBg;
+    p.windowText = p.textPrimary;
+    p.windowTextMuted = p.textMuted;
+    p.windowBorder = p.border;
+    p.windowHover = p.hoverBg;
     return p;
 }
 
@@ -1051,6 +1187,11 @@ ChatPalette lightPalette()
     p.success = QStringLiteral("#16a34a");
     p.warning = QStringLiteral("#d97706");
     p.danger = QStringLiteral("#dc2626");
+    p.windowBg = p.panelBg;
+    p.windowText = p.textPrimary;
+    p.windowTextMuted = p.textMuted;
+    p.windowBorder = p.border;
+    p.windowHover = p.hoverBg;
     return p;
 }
 
@@ -1075,6 +1216,11 @@ const QStringList &colorKeys()
         QStringLiteral("success"),
         QStringLiteral("warning"),
         QStringLiteral("danger"),
+        QStringLiteral("windowBg"),
+        QStringLiteral("windowText"),
+        QStringLiteral("windowTextMuted"),
+        QStringLiteral("windowBorder"),
+        QStringLiteral("windowHover"),
     };
     return keys;
 }
@@ -1100,6 +1246,11 @@ QString colorKeyLabel(const QString &key)
         {QStringLiteral("success"), i18nc("theme colour", "Success")},
         {QStringLiteral("warning"), i18nc("theme colour", "Warning")},
         {QStringLiteral("danger"), i18nc("theme colour", "Danger")},
+        {QStringLiteral("windowBg"), i18nc("theme colour", "Window background")},
+        {QStringLiteral("windowText"), i18nc("theme colour", "Window text")},
+        {QStringLiteral("windowTextMuted"), i18nc("theme colour", "Window text (muted)")},
+        {QStringLiteral("windowBorder"), i18nc("theme colour", "Window border")},
+        {QStringLiteral("windowHover"), i18nc("theme colour", "Window hover")},
     };
     return labels.value(key, key);
 }
@@ -1127,6 +1278,11 @@ void setPaletteColor(ChatPalette &palette, const QString &key, const QString &va
     else if (key == u"success"_s) palette.success = value;
     else if (key == u"warning"_s) palette.warning = value;
     else if (key == u"danger"_s) palette.danger = value;
+    else if (key == u"windowBg"_s) palette.windowBg = value;
+    else if (key == u"windowText"_s) palette.windowText = value;
+    else if (key == u"windowTextMuted"_s) palette.windowTextMuted = value;
+    else if (key == u"windowBorder"_s) palette.windowBorder = value;
+    else if (key == u"windowHover"_s) palette.windowHover = value;
 }
 
 } // namespace
@@ -1176,6 +1332,11 @@ QString paletteColor(const ChatPalette &palette, const QString &key)
     if (key == u"success"_s) return palette.success;
     if (key == u"warning"_s) return palette.warning;
     if (key == u"danger"_s) return palette.danger;
+    if (key == u"windowBg"_s) return palette.windowBg;
+    if (key == u"windowText"_s) return palette.windowText;
+    if (key == u"windowTextMuted"_s) return palette.windowTextMuted;
+    if (key == u"windowBorder"_s) return palette.windowBorder;
+    if (key == u"windowHover"_s) return palette.windowHover;
     return QString();
 }
 
@@ -1249,17 +1410,83 @@ ChatPalette paletteForEditorTheme(const KSyntaxHighlighting::Theme &theme)
         p.intentRowBg = mixColors(QStringLiteral("#fdf3d0"), bg, 30);
         p.border = darken(bg, 16);
         p.borderStrong = darken(bg, 24);
+        // Status colours: darker variants that keep their contrast on light
+        // surfaces, instead of the light tints designed for dark backgrounds
+        // (the dark defaults would be washed out or invisible on a light panel).
+        p.success = QStringLiteral("#16a34a");
+        p.warning = QStringLiteral("#d97706");
+        p.danger = QStringLiteral("#dc2626");
     }
 
-    // Accent: use the editor's selection colour when it reads as a usable
-    // accent, otherwise fall back to the default blue. Same QRgb 0-check as
-    // the background above: QColor(0) is valid transparent black.
-    const QRgb selRgb = theme.editorColor(KSyntaxHighlighting::Theme::EditorColorRole::TextSelection);
-    const QColor selectionBg = selRgb != 0 ? QColor::fromRgb(selRgb) : QColor();
-    if (selectionBg.isValid() && selectionBg.saturationF() > 0.2) {
-        p.accent = selectionBg.name();
-        p.accentHover = mixColors(selectionBg.name(), fg, 20);
+    // Accent: derive it from the editor theme's own colours, but only from a
+    // candidate that can actually carry the accent's job. The accent paints
+    // buttons, focus rings, selected items and pills, so it must be a visible
+    // hue with a clear lightness step from the panel. The selection colour of
+    // a dark editor theme is usually a translucent dark wash meant to sit
+    // *behind* text -- ayu Dark #273747 on #0a0e14, Dracula #44475a, Tokyo
+    // Night #27283e -- and inherited at face value it leaves every accent
+    // affordance invisible against the panel. The keyword colour is the
+    // fallback: it is designed to be read as text on this very background,
+    // which is exactly the contrast property the accent needs. Same QRgb
+    // 0-check as the background above: QColor(0) is valid transparent black.
+    const auto themeColor = [](QRgb rgb) {
+        return rgb != 0 ? QColor::fromRgb(rgb) : QColor();
+    };
+    // A gray is not an accent (Breeze Dark's keyword is the plain foreground),
+    // and a colour within a small lightness step of the panel is invisible no
+    // matter how saturated it is (Solarized Dark's selection #083d4a).
+    const auto usableAccent = [&editorBg](const QColor &candidate) {
+        if (!candidate.isValid() || candidate.saturationF() < 0.25) {
+            return false;
+        }
+        return qAbs(candidate.lightnessF() - editorBg.lightnessF()) >= 0.25;
+    };
+    // A candidate in the red family would be indistinguishable from the
+    // danger colour: approval buttons and error states must not share a look
+    // (GitHub Dark's keyword #f97583 sits within a few degrees of #f26d6d).
+    // Hues further than that are distinct to the eye even in the same warm
+    // family -- ayu's orange #ff8f40 stays an accent, not an error colour.
+    const auto clashesWithDanger = [&p](const QColor &candidate) {
+        const QColor danger(p.danger);
+        if (!danger.isValid() || candidate.hue() < 0) {
+            return false;
+        }
+        int hueDelta = qAbs(candidate.hue() - danger.hue());
+        if (hueDelta > 180) {
+            hueDelta = 360 - hueDelta;
+        }
+        return hueDelta < 15 && qAbs(candidate.lightnessF() - danger.lightnessF()) < 0.2;
+    };
+    const QColor selection = themeColor(theme.editorColor(KSyntaxHighlighting::Theme::EditorColorRole::TextSelection));
+    const QColor keyword = themeColor(theme.textColor(KSyntaxHighlighting::Theme::TextStyle::Keyword));
+
+    QColor accent;
+    if (usableAccent(selection) && !clashesWithDanger(selection)) {
+        accent = selection;
+    } else if (usableAccent(keyword) && !clashesWithDanger(keyword)) {
+        accent = keyword;
     }
+    if (accent.isValid()) {
+        p.accent = accent.name();
+        p.accentHover = mixColors(p.accent, fg, 20);
+    } else if (!dark) {
+        // A light editor theme starts from the dark palette's defaults, and
+        // the default blue is tuned for dark surfaces; use the light preset's
+        // darker blue, which stays readable on a light panel.
+        p.accent = lightPalette().accent;
+        p.accentHover = mixColors(p.accent, fg, 20);
+    }
+
+    // The window chrome (tool view, header bar, composer strip, intent dock)
+    // follows the editor theme too: both the KateAI window and the chat inside
+    // it inherit from the Kate editor window theme, so the whole panel reads
+    // as one surface in the editor's colours. The chrome mirrors the panel
+    // colours, the same way a built-in preset does.
+    p.windowBg = p.panelBg;
+    p.windowText = p.textPrimary;
+    p.windowTextMuted = p.textMuted;
+    p.windowBorder = p.border;
+    p.windowHover = p.hoverBg;
 
     return p;
 }
@@ -1272,21 +1499,74 @@ ChatPalette applyThemeOverrides(ChatPalette palette, const QJsonObject &override
     return palette;
 }
 
+ChatPalette applyWindowChrome(ChatPalette palette, const QPalette &windowPalette)
+{
+    // Fills the window-chrome colours from a window colour theme (the
+    // application palette's window roles): the window background, its text,
+    // and the borders and hover derived from them. Not used by
+    // paletteForSettings() in inherit mode -- there the window chrome follows
+    // the editor theme together with the chat content -- but kept as a public
+    // utility for callers that want to derive the chrome from the system
+    // palette instead.
+    const QColor window = windowPalette.color(QPalette::Window);
+    const QColor windowText = windowPalette.color(QPalette::WindowText);
+    if (!window.isValid() || !windowText.isValid()) {
+        // No usable window palette: keep the chrome on the palette's own
+        // panel colours rather than paint it with an invalid colour.
+        palette.windowBg = palette.panelBg;
+        palette.windowText = palette.textPrimary;
+        palette.windowTextMuted = palette.textMuted;
+        palette.windowBorder = palette.border;
+        palette.windowHover = palette.hoverBg;
+        return palette;
+    }
+
+    const bool dark = window.lightnessF() < 0.5;
+    palette.windowBg = window.name();
+    palette.windowText = windowText.name();
+    palette.windowTextMuted = mixColors(windowText.name(), window.name(), 45);
+    palette.windowBorder = dark ? lighten(window.name(), 18) : darken(window.name(), 16);
+    palette.windowHover = dark ? lighten(window.name(), 16) : darken(window.name(), 10);
+    return palette;
+}
+
 ChatPalette paletteForSettings(const Settings &settings)
 {
     ChatPalette palette;
-    if (settings.themeSource == u"editor"_s) {
+    const bool inherit = settings.themeSource == u"editor"_s;
+    if (inherit) {
+        // Inherit mode: both the chat content and the window chrome follow
+        // the Kate editor window theme (the editor colour scheme). The whole
+        // panel -- the KateAI window and the chat inside it -- reads as one
+        // surface in the editor's colours.
         palette = paletteForEditorTheme(editorTheme());
     } else {
         palette = paletteForPreset(settings.themePreset);
     }
 
     // Apply user overrides on top of the selected source.
+    QJsonObject overrides;
     if (!settings.themeOverrides.trimmed().isEmpty()) {
         const QJsonDocument doc = QJsonDocument::fromJson(settings.themeOverrides.toUtf8());
         if (doc.isObject()) {
-            palette = applyThemeOverrides(palette, doc.object());
+            overrides = doc.object();
         }
+    }
+    palette = applyThemeOverrides(palette, overrides);
+
+    if (!inherit) {
+        // A built-in preset is self-contained: the window chrome mirrors the
+        // preset's panel colours -- including panelBg/textPrimary/border/
+        // hoverBg overrides -- so the panel reads as one surface and a panel
+        // override reaches the header bar and the composer strip. Re-applying
+        // the overrides lets an explicit window colour win over the mirror.
+        ChatPalette mirrored = palette;
+        mirrored.windowBg = palette.panelBg;
+        mirrored.windowText = palette.textPrimary;
+        mirrored.windowTextMuted = palette.textMuted;
+        mirrored.windowBorder = palette.border;
+        mirrored.windowHover = palette.hoverBg;
+        palette = applyThemeOverrides(mirrored, overrides);
     }
     return palette;
 }

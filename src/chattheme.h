@@ -11,6 +11,8 @@
 #include <QString>
 #include <QStringList>
 
+class QPalette;
+
 namespace KSyntaxHighlighting
 {
 class Theme;
@@ -68,6 +70,20 @@ QString intentDock();
 // card (not which one) can ask for the style directly.
 QString agentTaskCard(const QString &objectName = QStringLiteral("subtaskWidget"));
 
+// --- The window around the chat. ---------------------------------------------
+// The KateAI window -- the tool view, the header bar, the composer strip and
+// the intent dock -- is chrome. In inherit mode it follows the editor colour
+// theme together with the chat content: both the KateAI plugin window and the
+// chatUI inherit from the Kate editor window theme, so the whole panel reads
+// as one surface in the editor's colours. With a built-in preset the window
+// colours equal the panel colours as well, so a preset panel also reads as
+// one surface.
+QString windowBg();
+QString windowText();
+QString windowTextMuted();
+QString windowBorder();
+QString windowHover();
+
 // --- Lines. ------------------------------------------------------------------
 QString border();
 QString borderStrong();
@@ -90,8 +106,19 @@ QString panel();
 QString scrollArea();
 QString transcript();
 QString headerBar();
+// The thread title in the header bar: chrome text, so it follows the window
+// colour theme rather than the chat palette's muted text.
+QString headerTitle();
 QString chipButton();     // model / mode selectors: text plus a caret affordance
 QString iconButton();     // square icon-only button
+// Icon buttons that sit on the window chrome (the header bar): their text and
+// hover use the window-chrome colours. iconButton() stays for buttons on chat
+// surfaces, where the chat palette's colours are the right ones.
+QString headerIconButton();
+// Small hint text on the window chrome (the status strip under the input).
+QString windowHintLabel();
+// The tool view that hosts the whole panel: the KateAI window itself.
+QString windowChrome();
 QString composerCard();
 QString promptInput();
 QString hintLabel();
@@ -173,7 +200,9 @@ QString mixColors(const QString &hex, const QString &onto, int percent);
 // A colour at the given opacity as #AARRGGBB, which Qt stylesheets accept.
 QString tinted(const QString &hex, double alpha);
 // The colour a label on the given surface should use: white on dark surfaces,
-// the theme's primary text colour on light ones.
+// the theme's primary text colour on light ones when that text is itself dark,
+// and the panel backdrop when the surface is a light accent chip on a dark
+// panel (light text would vanish on it).
 QString textOn(const QString &surfaceBg);
 
 // --- Popup chrome. -----------------------------------------------------------
@@ -205,6 +234,15 @@ struct ChatPalette {
     QString success;
     QString warning;
     QString danger;
+    // Window-chrome colours (tool view, header bar, composer strip). In
+    // inherit mode these mirror the panel colours, so the KateAI window and
+    // the chat inside it both follow the editor theme; under a built-in
+    // preset they mirror the preset's panel colours as well.
+    QString windowBg;
+    QString windowText;
+    QString windowTextMuted;
+    QString windowBorder;
+    QString windowHover;
 };
 
 // Built-in palette ids for the config page ("kateai-dark", "kateai-light").
@@ -219,12 +257,22 @@ QString paletteColor(const ChatPalette &palette, const QString &key);
 ChatPalette paletteForPreset(const QString &id);
 // Derives a palette from a Kate editor colour scheme: the editor background
 // and text become the panel, and every surface is a step away from them so
-// contrast survives both dark and light schemes. Invalid themes fall back to
-// the default palette.
+// contrast survives both dark and light schemes. The accent comes from the
+// scheme's selection or keyword colour, but only when the candidate is
+// actually visible against the panel. The window-chrome colours mirror the
+// panel colours, so the KateAI window and the chat inside it both inherit
+// from the editor theme. Invalid themes fall back to the default palette.
 ChatPalette paletteForEditorTheme(const KSyntaxHighlighting::Theme &theme);
 // Applies {key: hex} overrides on top of a palette; invalid colours and
 // unknown keys are ignored.
 ChatPalette applyThemeOverrides(ChatPalette palette, const QJsonObject &overrides);
+// Fills a palette's window-chrome colours from a window colour theme (the
+// application palette's window roles): the window background, its text, and
+// the borders and hover derived from them. When the palette carries no usable
+// window colours, the chrome falls back to the palette's own panel colours.
+// Not used by paletteForSettings() in inherit mode -- there the window chrome
+// follows the editor theme together with the chat content.
+ChatPalette applyWindowChrome(ChatPalette palette, const QPalette &windowPalette);
 // The effective palette for a settings struct: the selected source plus the
 // user's overrides.
 ChatPalette paletteForSettings(const Settings &settings);

@@ -81,9 +81,12 @@ TurnStatus::TurnStatus(QWidget *parent)
 
 void TurnStatus::applyStyle()
 {
+    // The status strip sits on the composer strip, which is window chrome, so
+    // its text uses the window-chrome colours. The spinner and the error
+    // message keep their status colours.
     m_spinner->setStyleSheet(QStringLiteral("QLabel { color: %1; font-size: 12px; }").arg(ChatTheme::accent()));
-    m_activity->setStyleSheet(QStringLiteral("QLabel { color: %1; font-size: 11px; }").arg(ChatTheme::textPrimary()));
-    m_stats->setStyleSheet(QStringLiteral("QLabel { color: %1; font-size: 11px; }").arg(ChatTheme::textMuted()));
+    m_activity->setStyleSheet(QStringLiteral("QLabel { color: %1; font-size: 11px; }").arg(ChatTheme::windowText()));
+    m_stats->setStyleSheet(QStringLiteral("QLabel { color: %1; font-size: 11px; }").arg(ChatTheme::windowTextMuted()));
     // refresh() re-derives the idle label's style from the current state and
     // restores the busy/idle visibility of the running widgets.
     refresh();
@@ -101,7 +104,7 @@ bool TurnStatus::eventFilter(QObject *watched, QEvent *event)
 void TurnStatus::setIdleText(const QString &text)
 {
     m_idle->setText(text);
-    m_idle->setStyleSheet(ChatTheme::hintLabel());
+    m_idle->setStyleSheet(ChatTheme::windowHintLabel());
     m_error = false;
 }
 
@@ -185,7 +188,7 @@ void TurnStatus::refresh()
     if (!m_message.isEmpty()) {
         m_idle->setText(m_message);
         m_idle->setStyleSheet(QStringLiteral("QLabel { color: %1; font-size: 11px; }")
-                                  .arg(m_error ? ChatTheme::danger() : ChatTheme::textPrimary()));
+                                  .arg(m_error ? ChatTheme::danger() : ChatTheme::windowText()));
         m_spinner->hide();
         m_activity->hide();
         m_stats->hide();
@@ -193,7 +196,7 @@ void TurnStatus::refresh()
     }
 
     if (!m_busy) {
-        m_idle->setStyleSheet(ChatTheme::hintLabel());
+        m_idle->setStyleSheet(ChatTheme::windowHintLabel());
         m_spinner->hide();
         m_activity->hide();
         m_stats->hide();

@@ -61,9 +61,7 @@ public:
         return m_settings;
     }
     // Re-applies the theme palette to the whole panel and repaints the
-    // transcript. Call after ChatTheme::loadTheme() when the theme changes --
-    // the window follows the Kate theme on its own, the chat UI does not
-    // without this.
+    // transcript. Call after ChatTheme::loadTheme() when the theme changes.
     void applyTheme();
 
     void focusPrompt();

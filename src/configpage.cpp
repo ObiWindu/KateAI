@@ -197,7 +197,7 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     connect(fetchModelsBtn, &QPushButton::clicked, this, &KateAiConfigPage::fetchAcpModels);
     m_acpModelStatus = new QLabel(this);
     m_acpModelStatus->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-    m_acpModelStatus->setStyleSheet(u"color: #888; font-size: 11px;"_s);
+    m_acpModelStatus->setStyleSheet(QStringLiteral(u"color: %1; font-size: 11px;").arg(ChatTheme::textMuted()));
     auto *modelRow = new QWidget(this);
     auto *modelLayout = new QHBoxLayout(modelRow);
     modelLayout->setContentsMargins(0, 0, 0, 0);
@@ -471,11 +471,8 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     m_deny->setPlaceholderText(i18n("One glob per line, e.g. **/secrets/**"));
     m_deny->setMaximumHeight(100);
     m_deny->setStyleSheet(
-        u"QPlainTextEdit { background: transparent; color: #e4e4e4; border: 1px solid #38383e; border-radius: 4px; padding: 4px; font-size: 13px; }"
-        u"QMenu { background-color: #252528; color: #cccccc; border: 1px solid #3c3c40; border-radius: 6px; padding: 4px; }"
-        u"QMenu::item { padding: 6px 18px 6px 12px; border-radius: 4px; }"
-        u"QMenu::item:selected { background-color: #007acc; color: #ffffff; }"
-        u"QMenu::separator { height: 1px; background-color: #38383e; margin: 4px 0; }"_s);
+        QStringLiteral(u"QPlainTextEdit { background: transparent; color: %1; border: 1px solid %2; border-radius: 4px; padding: 4px; font-size: 13px; }")
+            .arg(ChatTheme::textPrimary(), ChatTheme::border()) + ChatTheme::menu());
     securityForm->addRow(i18n("Extra deny globs:"), m_deny);
 
     m_maxExpandedToolCards = new QSpinBox(securityWidget);
@@ -535,11 +532,8 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     m_system->setPlaceholderText(i18n("Extra system prompt (optional)"));
     m_system->setMaximumHeight(80);
     m_system->setStyleSheet(
-        u"QPlainTextEdit { background: transparent; color: #e4e4e4; border: 1px solid #38383e; border-radius: 4px; padding: 4px; font-size: 13px; }"
-        u"QMenu { background-color: #252528; color: #cccccc; border: 1px solid #3c3c40; border-radius: 6px; padding: 4px; }"
-        u"QMenu::item { padding: 6px 18px 6px 12px; border-radius: 4px; }"
-        u"QMenu::item:selected { background-color: #007acc; color: #ffffff; }"
-        u"QMenu::separator { height: 1px; background-color: #38383e; margin: 4px 0; }"_s);
+        QStringLiteral(u"QPlainTextEdit { background: transparent; color: %1; border: 1px solid %2; border-radius: 4px; padding: 4px; font-size: 13px; }")
+            .arg(ChatTheme::textPrimary(), ChatTheme::border()) + ChatTheme::menu());
     agentForm->addRow(i18n("Extra instructions:"), m_system);
 
     // Context compression settings
@@ -751,7 +745,7 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
                                      "Add your own modes as Markdown files in <b>.kateai/modes/</b>."),
                                 modesWidget);
     modeHelp->setWordWrap(true);
-    modeHelp->setStyleSheet(u"color: #888888;"_s);
+    modeHelp->setStyleSheet(QStringLiteral(u"color: %1;").arg(ChatTheme::textMuted()));
     modesForm->addRow(modeHelp);
 
     auto *approveSeparator = new QLabel(i18n("--- Auto-approve (never prompt) ---"), modesWidget);
@@ -833,7 +827,7 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
                                        "its tools; <b>*</b> and <b>prefix*</b> patterns are supported."),
                                   mcpWidget);
     mcpPathHint->setWordWrap(true);
-    mcpPathHint->setStyleSheet(u"color: #888888;"_s);
+    mcpPathHint->setStyleSheet(QStringLiteral(u"color: %1;").arg(ChatTheme::textMuted()));
     mcpForm->addRow(mcpPathHint);
 
     mcpScroll->setWidget(mcpWidget);
@@ -878,7 +872,7 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
                                     "Only the query text is sent to the provider, never file contents."),
                                webWidget);
     webHint->setWordWrap(true);
-    webHint->setStyleSheet(u"color: #888888;"_s);
+    webHint->setStyleSheet(QStringLiteral(u"color: %1;").arg(ChatTheme::textMuted()));
     webForm->addRow(webHint);
 
     // The API key and SearXNG URL only matter for some providers; hiding the
@@ -925,7 +919,7 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
                                    "history is never touched. Restore or diff any snapshot from the toolbar menu."),
                               safetyWidget);
     cpHelp->setWordWrap(true);
-    cpHelp->setStyleSheet(u"color: #888888;"_s);
+    cpHelp->setStyleSheet(QStringLiteral(u"color: %1;").arg(ChatTheme::textMuted()));
     safetyForm->addRow(cpHelp);
 
     auto *subSeparator = new QLabel(i18n("--- Sub-agents ---"), safetyWidget);
@@ -1006,7 +1000,7 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
                                       "<b>mode</b>, and <b>description</b> frontmatter."),
                                    teamWidget);
     agentHint->setWordWrap(true);
-    agentHint->setStyleSheet(u"color: #888888;"_s);
+    agentHint->setStyleSheet(QStringLiteral(u"color: %1;").arg(ChatTheme::textMuted()));
     teamForm->addRow(agentHint);
 
     teamScroll->setWidget(teamWidget);
@@ -1030,6 +1024,14 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     m_themeSource->addItem(i18n("Inherit from Kate editor"), u"editor"_s);
     sourceForm->addRow(i18n("Theme source:"), m_themeSource);
     themeLayout->addLayout(sourceForm);
+
+    auto *sourceHint = new QLabel(
+        i18n("Inherit from Kate editor: both the chat panel and the window around it "
+             "follow the editor's colour scheme."),
+        themeWidget);
+    sourceHint->setWordWrap(true);
+    sourceHint->setStyleSheet(QStringLiteral(u"color: %1; font-size: 11px;").arg(ChatTheme::textMuted()));
+    themeLayout->addWidget(sourceHint);
 
     // Preset selector (only enabled when source is "preset")
     auto *presetForm = new QFormLayout;
@@ -1057,7 +1059,7 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
                                          "Leave a colour at its default to follow the source."),
                                      overridesGroup);
     overridesHint->setWordWrap(true);
-    overridesHint->setStyleSheet(u"color: #888888; font-size: 11px;"_s);
+    overridesHint->setStyleSheet(QStringLiteral(u"color: %1; font-size: 11px;").arg(ChatTheme::textMuted()));
     overridesLayout->addWidget(overridesHint);
 
     m_themeColors = new QTableWidget(overridesGroup);
@@ -2266,7 +2268,7 @@ void KateAiConfigPage::refreshThemeColorTable()
         auto *valueItem = new QTableWidgetItem(isOverridden ? effectiveColor : i18n("(default)"));
         valueItem->setFlags(valueItem->flags() & ~Qt::ItemIsEditable);
         if (!isOverridden) {
-            valueItem->setForeground(QColor(u"#888888"_s));
+            valueItem->setForeground(QColor(ChatTheme::textMuted()));
         }
         m_themeColors->setItem(row, 2, valueItem);
 

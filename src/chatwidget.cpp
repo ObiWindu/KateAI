@@ -138,7 +138,7 @@ QString welcomeChipStyle()
         "QPushButton:hover {"
         "  background-color: %4;"
         "  border-color: %5;"
-        "  color: #ffffff;"
+        "  color: %2;"
         "}")
         .arg(KateAi::ChatTheme::surfaceBg(), KateAi::ChatTheme::textPrimary(), KateAi::ChatTheme::border(),
              KateAi::ChatTheme::hoverBg(), KateAi::ChatTheme::borderStrong());
@@ -2394,22 +2394,25 @@ QPushButton *ChatWidget::createCopyButton(const QString &textToCopy, QWidget *pa
     btn->setProperty("copyText", textToCopy);
     btn->setCursor(Qt::PointingHandCursor);
     btn->setFixedHeight(22);
-    btn->setStyleSheet(
+    const QString normalStyle = QStringLiteral(
         u"QPushButton {"
-        u"  color: #888888;"
+        u"  color: %1;"
         u"  background-color: transparent;"
-        u"  border: 1px solid #38383e;"
+        u"  border: 1px solid %2;"
         u"  border-radius: 4px;"
         u"  padding: 2px 8px;"
         u"  font-size: 11px;"
         u"}"
         u"QPushButton:hover {"
-        u"  color: #ffffff;"
-        u"  background-color: #2a2a2e;"
-        u"  border-color: #4a4a52;"
-        u"}"_s);
+        u"  color: %3;"
+        u"  background-color: %4;"
+        u"  border-color: %5;"
+        u"}")
+        .arg(ChatTheme::textMuted(), ChatTheme::border(), ChatTheme::textPrimary(),
+             ChatTheme::hoverBg(), ChatTheme::borderStrong());
+    btn->setStyleSheet(normalStyle);
 
-    connect(btn, &QPushButton::clicked, this, [btn, this]() {
+    connect(btn, &QPushButton::clicked, this, [btn, normalStyle, this]() {
         QString text = btn->property("copyText").toString();
         if (text.isEmpty()) {
             text = m_streamText;
@@ -2417,31 +2420,20 @@ QPushButton *ChatWidget::createCopyButton(const QString &textToCopy, QWidget *pa
         QGuiApplication::clipboard()->setText(text);
         btn->setText(i18n("✓ Copied"));
         btn->setStyleSheet(
-            u"QPushButton {"
-            u"  color: #22c55e;"
-            u"  background-color: #1a3320;"
-            u"  border: 1px solid #22c55e;"
-            u"  border-radius: 4px;"
-            u"  padding: 2px 8px;"
-            u"  font-size: 11px;"
-            u"}"_s);
-        QTimer::singleShot(2000, btn, [btnWeak = QPointer<QPushButton>(btn)]() {
+            QStringLiteral(
+                u"QPushButton {"
+                u"  color: %1;"
+                u"  background-color: %2;"
+                u"  border: 1px solid %1;"
+                u"  border-radius: 4px;"
+                u"  padding: 2px 8px;"
+                u"  font-size: 11px;"
+                u"}")
+            .arg(ChatTheme::success(), ChatTheme::tinted(ChatTheme::success(), 0.10)));
+        QTimer::singleShot(2000, btn, [btnWeak = QPointer<QPushButton>(btn), normalStyle]() {
             if (btnWeak) {
                 btnWeak->setText(i18n("Copy"));
-                btnWeak->setStyleSheet(
-                    u"QPushButton {"
-                    u"  color: #888888;"
-                    u"  background-color: transparent;"
-                    u"  border: 1px solid #38383e;"
-                    u"  border-radius: 4px;"
-                    u"  padding: 2px 8px;"
-                    u"  font-size: 11px;"
-                    u"}"
-                    u"QPushButton:hover {"
-                    u"  color: #ffffff;"
-                    u"  background-color: #2a2a2e;"
-                    u"  border-color: #4a4a52;"
-                    u"}"_s);
+                btnWeak->setStyleSheet(normalStyle);
             }
         });
     });
@@ -2680,12 +2672,15 @@ void ChatWidget::applyInfoBarStyle()
     }
     if (!m_infoBarMessage.isEmpty()) {
         // Errors read in the theme's danger colour, transient notices (retries,
-        // checkpoint confirmations) in its warning colour.
+        // checkpoint confirmations) in its warning colour. The bar sits on the
+        // window chrome, so the message carries its own tinted surface -- plain
+        // coloured text would lose contrast on a window colour whose lightness
+        // differs from the chat palette's.
         const QString colour = m_infoBarIsError ? ChatTheme::danger() : ChatTheme::warning();
         m_infoBar->setStyleSheet(
             QStringLiteral("QLabel { color: %1; font-size: 12px; font-weight: bold; padding: 8px 12px;"
-                           " background: transparent; border: none; }")
-                .arg(colour));
+                           " background-color: %2; border: 1px solid %3; border-radius: 8px; }")
+                .arg(colour, ChatTheme::tinted(colour, 0.10), ChatTheme::tinted(colour, 0.35)));
     } else {
         m_infoBar->setStyleSheet(ChatTheme::infoBar());
     }
@@ -2723,16 +2718,18 @@ void ChatWidget::restylePanel()
         m_toolbar->setStyleSheet(ChatTheme::headerBar());
     }
     if (m_threadTitle) {
-        m_threadTitle->setStyleSheet(ChatTheme::sectionLabel());
+        m_threadTitle->setStyleSheet(ChatTheme::headerTitle());
     }
     for (auto *chip : {m_modelSelector, m_modeButton, m_permissionButton}) {
         if (chip) {
             chip->setStyleSheet(ChatTheme::chipButton());
         }
     }
+    // The header bar's icon buttons sit on window chrome, so they use the
+    // window-chrome colours, which follow the editor theme in inherit mode.
     for (auto *btn : {m_mcpButton, m_checkpointButton, m_teamButton, m_historyButton, m_newChat, m_configure}) {
         if (btn) {
-            btn->setStyleSheet(ChatTheme::iconButton());
+            btn->setStyleSheet(ChatTheme::headerIconButton());
         }
     }
     if (m_scrollArea) {
@@ -2748,9 +2745,12 @@ void ChatWidget::restylePanel()
         m_intentDock->setStyleSheet(ChatTheme::intentDock());
     }
     if (m_composerContainer) {
+        // The strip around the input is window chrome: it carries the
+        // window-chrome colours, while the input card inside it carries the
+        // chat palette surfaces.
         m_composerContainer->setStyleSheet(
             QStringLiteral("QWidget#composerContainer { background-color: %1; border-top: 1px solid %2; }")
-                .arg(ChatTheme::panelBg(), ChatTheme::border()));
+                .arg(ChatTheme::windowBg(), ChatTheme::windowBorder()));
     }
     applyInfoBarStyle();
     if (m_composerCard) {
@@ -3188,10 +3188,10 @@ void ChatWidget::updateThinkingButtonStyle()
         m_thinking->setToolTip(i18n("Thinking mode is on"));
         m_thinking->setStyleSheet(
             QStringLiteral(
-                "QPushButton { color: #ffffff; background-color: %1; border: none;"
+                "QPushButton { color: %3; background-color: %1; border: none;"
                 " border-radius: 13px; padding: 0; }"
                 "QPushButton:hover { background-color: %2; }")
-            .arg(ChatTheme::accent(), ChatTheme::accentHover()));
+            .arg(ChatTheme::accent(), ChatTheme::accentHover(), ChatTheme::textOn(ChatTheme::accent())));
     } else {
         m_thinking->setText(QStringLiteral("\u2727")); // hollow diamond
         m_thinking->setToolTip(i18n("Toggle thinking mode"));
@@ -3238,14 +3238,15 @@ void ChatWidget::updateReasoningEffortButton()
             QStringLiteral(
                 "QPushButton {"
                 "  background-color: transparent;"
-                "  color: #5a5a62;"
+                "  color: %4;"
                 "  border: 1px solid %1;"
                 "  border-radius: 13px;"
                 "  padding: 3px 10px;"
                 "  font-size: 11px;"
                 "}"
                 "QPushButton:hover { border-color: %2; color: %3; }")
-            .arg(ChatTheme::border(), ChatTheme::borderStrong(), ChatTheme::textMuted()));
+            .arg(ChatTheme::border(), ChatTheme::borderStrong(), ChatTheme::textMuted(),
+                 ChatTheme::mixColors(ChatTheme::textMuted(), ChatTheme::panelBg(), 50)));
         return;
     }
     if (m_settings.reasoningEffort.isEmpty()) {
@@ -3266,7 +3267,7 @@ void ChatWidget::updateReasoningEffortButton()
             QStringLiteral(
                 "QPushButton {"
                 "  background-color: %1;"
-                "  color: #ffffff;"
+                "  color: %3;"
                 "  border: 1px solid %2;"
                 "  border-radius: 13px;"
                 "  padding: 3px 10px;"
@@ -3274,7 +3275,7 @@ void ChatWidget::updateReasoningEffortButton()
                 "  font-weight: 600;"
                 "}"
                 "QPushButton:hover { background-color: %2; }")
-            .arg(ChatTheme::accent(), ChatTheme::accentHover()));
+            .arg(ChatTheme::accent(), ChatTheme::accentHover(), ChatTheme::textOn(ChatTheme::accent())));
     }
 }
 
@@ -3309,27 +3310,7 @@ void ChatWidget::showReasoningEffortMenu()
     }
 
     QMenu menu(this);
-    menu.setStyleSheet(
-        u"QMenu {"
-        u"  background-color: #252528;"
-        u"  color: #cccccc;"
-        u"  border: 1px solid #3c3c40;"
-        u"  border-radius: 6px;"
-        u"  padding: 4px;"
-        u"}"
-        u"QMenu::item {"
-        u"  padding: 6px 18px 6px 12px;"
-        u"  border-radius: 4px;"
-        u"}"
-        u"QMenu::item:selected {"
-        u"  background-color: #007acc;"
-        u"  color: #ffffff;"
-        u"}"
-        u"QMenu::separator {"
-        u"  height: 1px;"
-        u"  background-color: #38383e;"
-        u"  margin: 4px 0;"
-        u"}"_s);
+    menu.setStyleSheet(ChatTheme::menu());
 
     auto *reasoningGroup = new QActionGroup(this);
     const QStringList reasoningLevels = {QString(), QStringLiteral("minimal"), QStringLiteral("low"), QStringLiteral("medium"), QStringLiteral("high")};
@@ -3367,44 +3348,7 @@ void ChatWidget::showModelMenu()
     popup->setObjectName(u"modelPopup"_s);
     popup->setAttribute(Qt::WA_DeleteOnClose);
     popup->setFocusPolicy(Qt::NoFocus);
-    popup->setStyleSheet(
-        QStringLiteral(
-            "QFrame#modelPopup {"
-            "  background-color: #252528;"
-            "  color: #cccccc;"
-            "  border: 1px solid #3c3c40;"
-            "  border-radius: 8px;"
-            "}"
-            "QListWidget {"
-            "  background-color: #252528;"
-            "  color: #cccccc;"
-            "  border: none;"
-            "  outline: none;"
-            "  padding: 2px;"
-            "}"
-            "QListWidget::item {"
-            "  padding: 5px 10px;"
-            "  border-radius: 4px;"
-            "}"
-            "QListWidget::item:selected {"
-            "  background-color: #007acc;"
-            "  color: #ffffff;"
-            "}"
-            "QListWidget::item:hover:!selected {"
-            "  background-color: #323236;"
-            "}"
-            "QPushButton#modelPopupConfig {"
-            "  background: transparent;"
-            "  color: #8b8b92;"
-            "  border: none;"
-            "  text-align: left;"
-            "  padding: 6px 10px;"
-            "}"
-            "QPushButton#modelPopupConfig:hover {"
-            "  color: #ffffff;"
-            "  background-color: #323236;"
-            "  border-radius: 4px;"
-            "}"));
+    popup->setStyleSheet(ChatTheme::popupMenu());
     m_modelPopup = popup;
 
     auto *root = new QVBoxLayout(popup);
@@ -3416,18 +3360,7 @@ void ChatWidget::showModelMenu()
     filterEdit->setPlaceholderText(i18n("Filter models..."));
     filterEdit->setClearButtonEnabled(true);
     filterEdit->setMinimumWidth(400);
-    filterEdit->setStyleSheet(
-        u"QLineEdit {"
-        u"  background-color: #1a1a1a;"
-        u"  color: #e4e4e4;"
-        u"  border: 1px solid #38383e;"
-        u"  border-radius: 4px;"
-        u"  padding: 6px 10px;"
-        u"  font-size: 12px;"
-        u"}"
-        u"QLineEdit:focus {"
-        u"  border-color: #007acc;"
-        u"}"_s);
+    filterEdit->setStyleSheet(ChatTheme::lineEdit());
     root->addWidget(filterEdit);
 
     auto *pickerTabs = new QTabWidget(popup);
@@ -3688,7 +3621,7 @@ void ChatWidget::fillModelResultList()
         // Add a back button to return to agent list
         auto *backItem = new QListWidgetItem(i18n("← Back to ACP Agents"));
         backItem->setData(Qt::UserRole, -2); // Special value for back navigation
-        backItem->setForeground(QColor(QStringLiteral("#007acc")));
+        backItem->setForeground(QColor(ChatTheme::accent()));
         QFont backFont = backItem->font();
         backFont.setItalic(true);
         backItem->setFont(backFont);
@@ -3701,7 +3634,7 @@ void ChatWidget::fillModelResultList()
         QFont font = header->font();
         font.setBold(true);
         header->setFont(font);
-        header->setForeground(QColor(QStringLiteral("#8b8b92")));
+        header->setForeground(QColor(ChatTheme::textMuted()));
         m_modelResultList->addItem(header);
 
         // The live catalogue wins only when it actually has models. An empty
@@ -3731,7 +3664,7 @@ void ChatWidget::fillModelResultList()
                     : i18n("No models advertised by this agent"));
                 empty->setFlags(Qt::NoItemFlags);
                 empty->setData(Qt::UserRole, -1);
-                empty->setForeground(QColor(QStringLiteral("#8b8b92")));
+                empty->setForeground(QColor(ChatTheme::textMuted()));
                 m_modelResultList->addItem(empty);
             } else {
                 for (const QString &model : models) {
@@ -3769,7 +3702,7 @@ void ChatWidget::fillModelResultList()
                 auto *more = new QListWidgetItem(i18n("Type more to narrow the list"));
                 more->setFlags(Qt::NoItemFlags);
                 more->setData(Qt::UserRole, -1);
-                more->setForeground(QColor(QStringLiteral("#8b8b92")));
+                more->setForeground(QColor(ChatTheme::textMuted()));
                 m_modelResultList->addItem(more);
             }
         }
@@ -3778,7 +3711,7 @@ void ChatWidget::fillModelResultList()
             auto *empty = new QListWidgetItem(i18n("No matching models"));
             empty->setFlags(Qt::NoItemFlags);
             empty->setData(Qt::UserRole, -1);
-            empty->setForeground(QColor(QStringLiteral("#8b8b92")));
+            empty->setForeground(QColor(ChatTheme::textMuted()));
             m_modelResultList->addItem(empty);
         }
 
@@ -3859,7 +3792,7 @@ void ChatWidget::fillModelResultList()
             QFont font = header->font();
             font.setBold(true);
             header->setFont(font);
-            header->setForeground(QColor(QStringLiteral("#8b8b92")));
+            header->setForeground(QColor(ChatTheme::textMuted()));
             m_modelResultList->addItem(header);
             if (models.isEmpty() && !listing) {
                 // ACP (and any other agent without a catalogue) is still a
@@ -3883,7 +3816,7 @@ void ChatWidget::fillModelResultList()
                     : i18n("Fetching models..."));
                 pending->setFlags(Qt::NoItemFlags);
                 pending->setData(Qt::UserRole, -1);
-                pending->setForeground(QColor(QStringLiteral("#8b8b92")));
+                pending->setForeground(QColor(ChatTheme::textMuted()));
                 m_modelResultList->addItem(pending);
                 continue;
             }
@@ -3929,13 +3862,13 @@ void ChatWidget::fillModelResultList()
         auto *empty = new QListWidgetItem(i18n("No matching models"));
         empty->setFlags(Qt::NoItemFlags);
         empty->setData(Qt::UserRole, -1);
-        empty->setForeground(QColor(QStringLiteral("#8b8b92")));
+        empty->setForeground(QColor(ChatTheme::textMuted()));
         m_modelResultList->addItem(empty);
     } else if (filtering && matches >= kMaxVisibleMatches) {
         auto *more = new QListWidgetItem(i18n("Type more to narrow the list"));
         more->setFlags(Qt::NoItemFlags);
         more->setData(Qt::UserRole, -1);
-        more->setForeground(QColor(QStringLiteral("#8b8b92")));
+        more->setForeground(QColor(ChatTheme::textMuted()));
         m_modelResultList->addItem(more);
     }
 
@@ -4233,27 +4166,7 @@ void ChatWidget::selectAcpAgentAndModel(const QString &agentId, const QString &m
 void ChatWidget::showSettingsMenu()
 {
     QMenu menu(this);
-    menu.setStyleSheet(
-        u"QMenu {"
-        u"  background-color: #252528;"
-        u"  color: #cccccc;"
-        u"  border: 1px solid #3c3c40;"
-        u"  border-radius: 6px;"
-        u"  padding: 4px;"
-        u"}"
-        u"QMenu::item {"
-        u"  padding: 6px 18px 6px 12px;"
-        u"  border-radius: 4px;"
-        u"}"
-        u"QMenu::item:selected {"
-        u"  background-color: #007acc;"
-        u"  color: #ffffff;"
-        u"}"
-        u"QMenu::separator {"
-        u"  height: 1px;"
-        u"  background-color: #38383e;"
-        u"  margin: 4px 0;"
-        u"}"_s);
+    menu.setStyleSheet(ChatTheme::menu());
 
     // Permission Mode
     auto *permMenu = menu.addMenu(i18n("Permission Mode"));
@@ -4494,10 +4407,7 @@ void ChatWidget::refreshPermissionButton()
 void ChatWidget::showPermissionMenu()
 {
     QMenu menu(this);
-    menu.setStyleSheet(
-        u"QMenu { background-color: #252528; color: #cccccc; border: 1px solid #3c3c40; border-radius: 6px; padding: 4px; }"
-        u"QMenu::item { padding: 6px 18px 6px 12px; border-radius: 4px; }"
-        u"QMenu::item:selected { background-color: #007acc; color: #ffffff; }"_s);
+    menu.setStyleSheet(ChatTheme::menu());
 
     auto *group = new QActionGroup(&menu);
     for (int i = 0; i < m_permission->count(); ++i) {
@@ -4564,11 +4474,7 @@ void ChatWidget::setMcpToolAutoApproved(const McpTool &tool, bool enabled)
 void ChatWidget::showModeMenu()
 {
     QMenu menu(this);
-    menu.setStyleSheet(
-        u"QMenu { background-color: #252528; color: #cccccc; border: 1px solid #3c3c40; border-radius: 6px; padding: 4px; }"
-        u"QMenu::item { padding: 6px 18px 6px 12px; border-radius: 4px; }"
-        u"QMenu::item:selected { background-color: #007acc; color: #ffffff; }"
-        u"QMenu::separator { height: 1px; background-color: #38383e; margin: 4px 0; }"_s);
+    menu.setStyleSheet(ChatTheme::menu());
 
     auto *group = new QActionGroup(&menu);
     const QList<ModeDefinition> modes = m_agent.modeRegistry()->modes();
@@ -4616,15 +4522,17 @@ void ChatWidget::updateTeamButton()
                                                 : i18n("Agent team"));
     m_teamButton->setToolTip(running > 0 ? i18np("%1 sub-agent running", "%1 sub-agents running", running) : i18n("Agent team"));
     // Only lit while something is actually running, so a badge that is always
-    // on stops meaning anything.
+    // on stops meaning anything. The button lives on the header bar, so its
+    // chrome uses the window-chrome colours; the accent text marks the live
+    // state.
     m_teamButton->setStyleSheet(
         running > 0
             ? QStringLiteral(
                   "QPushButton { background: transparent; border: 1px solid transparent; border-radius: 6px;"
                   " color: %1; padding: 0 7px; font-size: 11px; }"
                   "QPushButton:hover { background-color: %2; border-color: %3; }")
-                  .arg(ChatTheme::accent(), ChatTheme::hoverBg(), ChatTheme::border())
-            : ChatTheme::iconButton());
+                  .arg(ChatTheme::accent(), ChatTheme::windowHover(), ChatTheme::windowBorder())
+            : ChatTheme::headerIconButton());
 }
 
 void ChatWidget::addSuggestionCard(const QString &id, const Suggestion &suggestion, bool running)
@@ -4804,11 +4712,7 @@ void ChatWidget::showTeamMenu()
 void ChatWidget::showMcpMenu()
 {
     QMenu menu(this);
-    menu.setStyleSheet(
-        u"QMenu { background-color: #252528; color: #cccccc; border: 1px solid #3c3c40; border-radius: 6px; padding: 4px; }"
-        u"QMenu::item { padding: 6px 18px 6px 12px; border-radius: 4px; }"
-        u"QMenu::item:selected { background-color: #007acc; color: #ffffff; }"
-        u"QMenu::separator { height: 1px; background-color: #38383e; margin: 4px 0; }"_s);
+    menu.setStyleSheet(ChatTheme::menu());
 
     McpManager *manager = m_agent.mcpManager();
     if (!manager) {
@@ -4872,22 +4776,25 @@ void ChatWidget::updateMcpButton()
     const QString summary = manager->statusSummary();
     m_mcpButton->setText(manager->readyServers().isEmpty() ? QString() : QStringLiteral("●"));
     m_mcpButton->setToolTip(summary);
+    // The MCP button sits on the header bar (window chrome): its idle text and
+    // hover use the window-chrome colours, while the ready state keeps the
+    // success colour.
     m_mcpButton->setStyleSheet(
         manager->readyServers().isEmpty()
-            ? u"QPushButton { background: transparent; border: 1px solid transparent; border-radius: 4px; color: #888888; }"
-              u"QPushButton:hover { background-color: #2e2e32; border-color: #3c3c40; }"_s
-            : u"QPushButton { background: transparent; border: 1px solid transparent; border-radius: 4px; color: #22c55e; }"
-              u"QPushButton:hover { background-color: #2e2e32; border-color: #3c3c40; }"_s);
+            ? QStringLiteral(
+                  u"QPushButton { background: transparent; border: 1px solid transparent; border-radius: 4px; color: %1; }"
+                  u"QPushButton:hover { background-color: %2; border-color: %3; }")
+                  .arg(ChatTheme::windowTextMuted(), ChatTheme::windowHover(), ChatTheme::windowBorder())
+            : QStringLiteral(
+                  u"QPushButton { background: transparent; border: 1px solid transparent; border-radius: 4px; color: %1; }"
+                  u"QPushButton:hover { background-color: %2; border-color: %3; }")
+                  .arg(ChatTheme::success(), ChatTheme::windowHover(), ChatTheme::windowBorder()));
 }
 
 void ChatWidget::showCheckpointMenu()
 {
     QMenu menu(this);
-    menu.setStyleSheet(
-        u"QMenu { background-color: #252528; color: #cccccc; border: 1px solid #3c3c40; border-radius: 6px; padding: 4px; }"
-        u"QMenu::item { padding: 6px 18px 6px 12px; border-radius: 4px; }"
-        u"QMenu::item:selected { background-color: #007acc; color: #ffffff; }"
-        u"QMenu::separator { height: 1px; background-color: #38383e; margin: 4px 0; }"_s);
+    menu.setStyleSheet(ChatTheme::menu());
 
     if (!m_settings.checkpointsEnabled) {
         QAction *off = menu.addAction(i18n("Checkpoints are disabled"));
@@ -4938,10 +4845,7 @@ void ChatWidget::showCheckpointMenu()
 void ChatWidget::showCheckpointMenuFor(const CheckpointInfo &info)
 {
     QMenu menu(this);
-    menu.setStyleSheet(
-        u"QMenu { background-color: #252528; color: #cccccc; border: 1px solid #3c3c40; border-radius: 6px; padding: 4px; }"
-        u"QMenu::item { padding: 6px 18px 6px 12px; border-radius: 4px; }"
-        u"QMenu::item:selected { background-color: #007acc; color: #ffffff; }"_s);
+    menu.setStyleSheet(ChatTheme::menu());
 
     QAction *viewDiff = menu.addAction(i18n("Show changes since this checkpoint"));
     connect(viewDiff, &QAction::triggered, this, [this, info] {
@@ -5036,22 +4940,25 @@ void ChatWidget::updateSendButtonState()
     if (busy) {
         m_send->setText(glyph);
         m_send->setStyleSheet(
-            QStringLiteral("QPushButton { color: #ffffff; background-color: %1; font-size: %2px; border: none; %3 }"
+            QStringLiteral("QPushButton { color: %5; background-color: %1; font-size: %2px; border: none; %3 }"
                            "QPushButton:hover { background-color: %4; }")
-                .arg(ChatTheme::danger(), QString::number(glyphSize), radius, ChatTheme::accentHover()));
+                .arg(ChatTheme::danger(), QString::number(glyphSize), radius, ChatTheme::accentHover(),
+                     ChatTheme::textOn(ChatTheme::danger())));
         m_send->setToolTip(i18n("Stop response"));
     } else {
         m_send->setText(glyph);
         if (canClick) {
             m_send->setStyleSheet(
-                QStringLiteral("QPushButton { color: #ffffff; background-color: %1; font-size: %2px; border: none; %3 }"
+                QStringLiteral("QPushButton { color: %5; background-color: %1; font-size: %2px; border: none; %3 }"
                                "QPushButton:hover { background-color: %4; }")
-                    .arg(ChatTheme::accent(), QString::number(glyphSize), radius, ChatTheme::accentHover()));
+                    .arg(ChatTheme::accent(), QString::number(glyphSize), radius, ChatTheme::accentHover(),
+                         ChatTheme::textOn(ChatTheme::accent())));
         } else {
             m_send->setStyleSheet(
-                QStringLiteral("QPushButton { color: #55555c; background-color: %1; font-size: %2px;"
+                QStringLiteral("QPushButton { color: %5; background-color: %1; font-size: %2px;"
                                " border: 1px solid %3; %4 }")
-                    .arg(ChatTheme::hoverBg(), QString::number(glyphSize), ChatTheme::border(), radius));
+                    .arg(ChatTheme::hoverBg(), QString::number(glyphSize), ChatTheme::border(), radius,
+                         ChatTheme::mixColors(ChatTheme::textMuted(), ChatTheme::panelBg(), 50)));
         }
         m_send->setToolTip(i18n("Send message"));
     }
@@ -5772,7 +5679,8 @@ void ChatWidget::restoreCurrentTurn(const SessionStore::SessionData &sessionData
             m_planLayout->setContentsMargins(4, 2, 4, 2);
             m_planLayout->setSpacing(2);
             auto *planLabel = new QLabel(i18n("Plan"), m_planBlock);
-            planLabel->setStyleSheet(u"color: #888888; font-size: 10px; font-weight: bold; letter-spacing: 0.5px;"_s);
+            planLabel->setStyleSheet(QStringLiteral(u"color: %1; font-size: 10px; font-weight: bold; letter-spacing: 0.5px;")
+                                         .arg(ChatTheme::textMuted()));
             m_planLayout->addWidget(planLabel);
             appendTranscriptWidget(m_planBlock);
         }

@@ -20,6 +20,7 @@
 #include "toolcallwidget.h"
 #include "types.h"
 
+#include <KTextEditor/Editor>
 #include <KSyntaxHighlighting/Repository>
 #include <KSyntaxHighlighting/Theme>
 
@@ -28,6 +29,7 @@
 #include <QElapsedTimer>
 #include <QEventLoop>
 #include <QLabel>
+#include <QPalette>
 #include <QPushButton>
 #include <QTemporaryDir>
 #include <QTest>
@@ -108,6 +110,286 @@ private Q_SLOTS:
         // every surface, not just the panel background.
         QVERIFY2(lightPal.panelBg != darkPal.panelBg, "light and dark editor themes gave the same panel");
         QVERIFY2(lightPal.textPrimary != darkPal.textPrimary, "light and dark editor themes gave the same text");
+    }
+
+    // A light editor theme must produce status colours that contrast with a
+    // light panel: the dark defaults (light teal, yellow, pink) are washed out
+    // or invisible on light surfaces, so the derivation darkens them.
+    void testEditorThemeLightStatusColorsContrast()
+    {
+        KSyntaxHighlighting::Repository repo;
+        const auto lightTheme = repo.defaultTheme(KSyntaxHighlighting::Repository::LightTheme);
+        QVERIFY2(lightTheme.isValid(), "no light default theme available");
+        const auto pal = ChatTheme::paletteForEditorTheme(lightTheme);
+
+        // Each status colour must be darker than the panel background so it
+        // stays readable on a light surface.
+        const QColor panel(pal.panelBg);
+        const QColor success(pal.success);
+        const QColor warning(pal.warning);
+        const QColor danger(pal.danger);
+        QVERIFY2(success.isValid(), qPrintable(pal.success));
+        QVERIFY2(warning.isValid(), qPrintable(pal.warning));
+        QVERIFY2(danger.isValid(), qPrintable(pal.danger));
+        QVERIFY2(success.lightnessF() < panel.lightnessF(),
+                 qPrintable(QStringLiteral("light theme success %1 is not darker than panel %2")
+                                .arg(pal.success, pal.panelBg)));
+        QVERIFY2(warning.lightnessF() < panel.lightnessF(),
+                 qPrintable(QStringLiteral("light theme warning %1 is not darker than panel %2")
+                                .arg(pal.warning, pal.panelBg)));
+        QVERIFY2(danger.lightnessF() < panel.lightnessF(),
+                 qPrintable(QStringLiteral("light theme danger %1 is not darker than panel %2")
+                                .arg(pal.danger, pal.panelBg)));
+    }
+
+    // The accent drives buttons, focus rings, selected items and pills, so an
+    // accent inherited from an editor theme must stay visible against the
+    // panel it is painted on. The dark selection washes many editor themes
+    // ship (ayu Dark's #273747 on #0a0e14) must not reach the palette
+    // unvalidated, and no accent may end up a twin of the danger colour.
+    void testEditorThemeAccentStaysVisible()
+    {
+        KSyntaxHighlighting::Repository repo;
+        QVERIFY2(repo.themes().size() > 0, "no syntax themes available");
+        for (const auto &theme : repo.themes()) {
+            const auto pal = ChatTheme::paletteForEditorTheme(theme);
+            const QColor accent(pal.accent);
+            const QColor panel(pal.panelBg);
+            const QColor danger(pal.danger);
+            QVERIFY2(accent.isValid(),
+                     qPrintable(QStringLiteral("%1: invalid accent").arg(theme.name())));
+            // A clear lightness step from the panel: an accent within a small
+            // step of the panel is invisible no matter how saturated it is.
+            QVERIFY2(qAbs(accent.lightnessF() - panel.lightnessF()) >= 0.2,
+                    qPrintable(QStringLiteral("%1: accent %2 vanishes on panel %3")
+                                   .arg(theme.name(), pal.accent, pal.panelBg)));
+            // A visible hue, or one of the tuned blues the derivation falls
+            // back to when the theme offers no usable colour.
+            const bool defaultBlue = accent == QColor(u"#3d7eff"_s) || accent == QColor(u"#2563eb"_s);
+            QVERIFY2(accent.saturationF() >= 0.25 || defaultBlue,
+                     qPrintable(QStringLiteral("%1: unsaturated accent %2").arg(theme.name(), pal.accent)));
+            // Not the danger colour in disguise: approval buttons and error
+            // states must not share a look.
+            int hueDelta = qAbs(accent.hue() - danger.hue());
+            if (hueDelta > 180) {
+                hueDelta = 360 - hueDelta;
+            }
+            QVERIFY2(accent.hue() < 0 || danger.hue() < 0 || hueDelta >= 15
+                         || qAbs(accent.lightnessF() - danger.lightnessF()) >= 0.2,
+                     qPrintable(QStringLiteral("%1: accent %2 collides with danger %3")
+                                   .arg(theme.name(), pal.accent, pal.danger)));
+        }
+    }
+
+    // A light accent chip on a dark panel (an accent inherited from a bright
+    // editor keyword colour, like Tokyo Night's #bb9af7) must carry dark
+    // text: the light primary text of a dark panel would vanish on it.
+    void testTextOnLightAccent()
+    {
+        ChatTheme::loadTheme(settingsWithPreset(u"kateai-dark"_s));
+        const QColor onLightAccent(ChatTheme::textOn(u"#bb9af7"_s));
+        QVERIFY2(onLightAccent.lightnessF() < 0.3,
+                 qPrintable(QStringLiteral("text on a light accent is not dark: %1")
+                                .arg(onLightAccent.name())));
+        const QColor onPanel(ChatTheme::textOn(ChatTheme::panelBg()));
+        QCOMPARE(onPanel, QColor(u"#ffffff"_s));
+
+        // On a light panel the primary text is itself dark, so light
+        // surfaces keep the primary text colour.
+        ChatTheme::loadTheme(settingsWithPreset(u"kateai-light"_s));
+        const QColor onCard(ChatTheme::textOn(ChatTheme::cardBg()));
+        QVERIFY2(onCard.lightnessF() < 0.5,
+                 qPrintable(QStringLiteral("light panel text on a card is not dark: %1").arg(onCard.name())));
+
+        ChatTheme::loadTheme(settingsWithPreset(u"kateai-dark"_s));
+    }
+
+    // Pills built on a light accent (inherited from a bright editor keyword
+    // colour) must use the accent itself as text on its own wash, and dim
+    // towards the panel in the pulse phase -- tinting a light accent towards
+    // white would leave light text on a light wash.
+    void testPillsWithLightAccent()
+    {
+        Settings settings = settingsWithPreset(u"kateai-dark"_s);
+        settings.themeOverrides = uR"({"accent": "#bb9af7"})"_s;
+        ChatTheme::loadTheme(settings);
+
+        const QString bright = ChatTheme::thinkingPill();
+        QVERIFY2(bright.contains(u"color: #bb9af7"_s),
+                 qPrintable(QStringLiteral("bright pill does not carry the light accent as text:\n%1").arg(bright)));
+
+        const QString dim = ChatTheme::thinkingPillDim();
+        const QString expectedDimText = ChatTheme::mixColors(ChatTheme::accent(), ChatTheme::panelBg(), 25);
+        QVERIFY2(dim.contains(expectedDimText),
+                 qPrintable(QStringLiteral("dim pill text is not the accent dimmed towards the panel:\n%1\nexpected %2")
+                                .arg(dim, expectedDimText)));
+
+        ChatTheme::loadTheme(settingsWithPreset(u"kateai-dark"_s));
+    }
+
+    // The thinking and working pills must derive their text colour from the
+    // palette, not carry a hardcoded light tint that is invisible on a light
+    // panel. In a light theme the text colour is the accent/warning itself
+    // (dark enough to read); in a dark theme it is a light tint of it.
+    void testPillsAdaptToLightTheme()
+    {
+        // Dark theme: the pill text is a light tint of the accent.
+        ChatTheme::loadTheme(settingsWithPreset(u"kateai-dark"_s));
+        const QString darkThinking = ChatTheme::thinkingPill();
+        const QString darkWorking = ChatTheme::workingPill();
+        // The hardcoded light tints must not appear: the text colour is derived.
+        QVERIFY2(!darkThinking.contains(u"#b4d0ff"_s),
+                 qPrintable(QStringLiteral("dark thinking pill carries a hardcoded light tint:\n%1").arg(darkThinking)));
+        QVERIFY2(!darkWorking.contains(u"#f3d48a"_s),
+                 qPrintable(QStringLiteral("dark working pill carries a hardcoded light tint:\n%1").arg(darkWorking)));
+
+        // Light theme: the pill text must not be a light tint either; it is
+        // the accent/warning colour itself, which is dark on a light panel.
+        ChatTheme::loadTheme(settingsWithPreset(u"kateai-light"_s));
+        const QString lightThinking = ChatTheme::thinkingPill();
+        const QString lightWorking = ChatTheme::workingPill();
+        QVERIFY2(!lightThinking.contains(u"#b4d0ff"_s),
+                 qPrintable(QStringLiteral("light thinking pill carries a hardcoded light tint:\n%1").arg(lightThinking)));
+        QVERIFY2(!lightWorking.contains(u"#f3d48a"_s),
+                 qPrintable(QStringLiteral("light working pill carries a hardcoded light tint:\n%1").arg(lightWorking)));
+        // The light pill must carry the light theme's accent colour as its text.
+        QVERIFY2(lightThinking.contains(ChatTheme::accent()),
+                 qPrintable(QStringLiteral("light thinking pill does not use the theme accent:\n%1").arg(lightThinking)));
+        QVERIFY2(lightWorking.contains(ChatTheme::warning()),
+                 qPrintable(QStringLiteral("light working pill does not use the theme warning:\n%1").arg(lightWorking)));
+
+        // Restore the default dark theme so later tests start from a known state.
+        ChatTheme::loadTheme(settingsWithPreset(u"kateai-dark"_s));
+    }
+
+    // The KateAI window (tool view, header bar, composer strip) follows the
+    // window colour theme: the chrome colours are derived from the application
+    // palette's window roles, with borders and hover stepping away from the
+    // window background the way the chat surfaces step away from the panel.
+    void testWindowChromeFollowsWindowPalette()
+    {
+        QPalette windowPalette;
+        windowPalette.setColor(QPalette::Window, QColor(u"#202124"_s));
+        windowPalette.setColor(QPalette::WindowText, QColor(u"#e8eaed"_s));
+
+        const auto base = ChatTheme::paletteForPreset(u"kateai-dark"_s);
+        const auto darkPal = ChatTheme::applyWindowChrome(base, windowPalette);
+        QCOMPARE(darkPal.windowBg, u"#202124"_s);
+        QCOMPARE(darkPal.windowText, u"#e8eaed"_s);
+        QCOMPARE(darkPal.windowTextMuted, ChatTheme::mixColors(u"#e8eaed"_s, u"#202124"_s, 45));
+        // A dark window theme steps towards white for its chrome lines.
+        QCOMPARE(darkPal.windowBorder, ChatTheme::mixColors(u"#ffffff"_s, u"#202124"_s, 18));
+        QCOMPARE(darkPal.windowHover, ChatTheme::mixColors(u"#ffffff"_s, u"#202124"_s, 16));
+        // The chat content colours are untouched by the window chrome.
+        QCOMPARE(darkPal.panelBg, base.panelBg);
+        QCOMPARE(darkPal.textPrimary, base.textPrimary);
+        QCOMPARE(darkPal.accent, base.accent);
+
+        // A light window theme steps towards black instead.
+        windowPalette.setColor(QPalette::Window, QColor(u"#f1f3f4"_s));
+        windowPalette.setColor(QPalette::WindowText, QColor(u"#1f1f1f"_s));
+        const auto lightPal = ChatTheme::applyWindowChrome(base, windowPalette);
+        QCOMPARE(lightPal.windowBg, u"#f1f3f4"_s);
+        QCOMPARE(lightPal.windowText, u"#1f1f1f"_s);
+        QCOMPARE(lightPal.windowBorder, ChatTheme::mixColors(u"#000000"_s, u"#f1f3f4"_s, 16));
+        QCOMPARE(lightPal.windowHover, ChatTheme::mixColors(u"#000000"_s, u"#f1f3f4"_s, 10));
+    }
+
+    // A built-in preset is self-contained: the window chrome stays on the
+    // preset's own colours, so the panel reads as one surface and the preset
+    // look is unchanged.
+    void testPresetKeepsWindowChromeOnPanelColors()
+    {
+        const auto pal = ChatTheme::paletteForSettings(settingsWithPreset(u"kateai-dark"_s));
+        QCOMPARE(pal.windowBg, pal.panelBg);
+        QCOMPARE(pal.windowText, pal.textPrimary);
+        QCOMPARE(pal.windowTextMuted, pal.textMuted);
+        QCOMPARE(pal.windowBorder, pal.border);
+        QCOMPARE(pal.windowHover, pal.hoverBg);
+
+        const auto light = ChatTheme::paletteForSettings(settingsWithPreset(u"kateai-light"_s));
+        QCOMPARE(light.windowBg, light.panelBg);
+        QCOMPARE(light.windowText, light.textPrimary);
+        QCOMPARE(light.windowBorder, light.border);
+        QCOMPARE(light.windowHover, light.hoverBg);
+    }
+
+    // In inherit mode both the window chrome and the chat content follow the
+    // Kate editor window theme (the editor colour scheme): the chrome mirrors
+    // the panel colours, so the whole panel reads as one surface in the
+    // editor's colours.
+    void testEditorSourceInheritsEditorThemeForWindowAndChat()
+    {
+        Settings settings = settingsWithPreset(u"kateai-dark"_s);
+        settings.themeSource = u"editor"_s;
+        const auto pal = ChatTheme::paletteForSettings(settings);
+        // The chat content follows the editor colour scheme.
+        auto *editor = KTextEditor::Editor::instance();
+        QVERIFY2(editor, "no editor instance available");
+        const auto expectedContent = ChatTheme::paletteForEditorTheme(editor->theme());
+        QCOMPARE(pal.panelBg, expectedContent.panelBg);
+        QCOMPARE(pal.textPrimary, expectedContent.textPrimary);
+        QCOMPARE(pal.accent, expectedContent.accent);
+        // The window chrome mirrors the panel colours, so the KateAI window
+        // and the chat inside it both inherit from the editor theme.
+        QCOMPARE(pal.windowBg, pal.panelBg);
+        QCOMPARE(pal.windowText, pal.textPrimary);
+        QCOMPARE(pal.windowTextMuted, pal.textMuted);
+        QCOMPARE(pal.windowBorder, pal.border);
+        QCOMPARE(pal.windowHover, pal.hoverBg);
+    }
+
+    // The chrome stylesheets read the window chrome colours, so installing a
+    // palette moves the header bar, the header title, the header icon buttons,
+    // the status strip hint, the tool view and the intent dock with it.
+    void testWindowChromeStylesFollowPalette()
+    {
+        ChatTheme::loadTheme(settingsWithPreset(u"kateai-dark"_s));
+        QVERIFY2(ChatTheme::headerBar().contains(ChatTheme::windowBg()), qPrintable(ChatTheme::headerBar()));
+        QVERIFY2(ChatTheme::headerBar().contains(ChatTheme::windowBorder()), qPrintable(ChatTheme::headerBar()));
+        QVERIFY2(ChatTheme::headerTitle().contains(ChatTheme::windowTextMuted()), qPrintable(ChatTheme::headerTitle()));
+        QVERIFY2(ChatTheme::headerIconButton().contains(ChatTheme::windowTextMuted()),
+                 qPrintable(ChatTheme::headerIconButton()));
+        QVERIFY2(ChatTheme::headerIconButton().contains(ChatTheme::windowHover()),
+                 qPrintable(ChatTheme::headerIconButton()));
+        QVERIFY2(ChatTheme::headerIconButton().contains(ChatTheme::windowBorder()),
+                 qPrintable(ChatTheme::headerIconButton()));
+        QVERIFY2(ChatTheme::windowHintLabel().contains(ChatTheme::windowTextMuted()),
+                 qPrintable(ChatTheme::windowHintLabel()));
+        QVERIFY2(ChatTheme::windowChrome().contains(ChatTheme::windowBg()), qPrintable(ChatTheme::windowChrome()));
+        QVERIFY2(ChatTheme::windowChrome().contains(ChatTheme::windowText()), qPrintable(ChatTheme::windowChrome()));
+        QVERIFY2(ChatTheme::intentDock().contains(ChatTheme::windowBg()), qPrintable(ChatTheme::intentDock()));
+    }
+
+    // A window-chrome colour override reaches the window: the header bar and
+    // the composer strip repaint with it, while the chat content keeps the
+    // preset panel colour.
+    void testWindowChromeOverrideReachesTheWindow()
+    {
+        ChatWidget widget;
+        widget.resize(900, 700);
+        widget.show();
+
+        Settings settings = settingsWithPreset(u"kateai-dark"_s);
+        settings.themeOverrides = QStringLiteral(R"({"windowBg": "#123456", "windowBorder": "#654321"})");
+        applySettings(widget, settings);
+
+        QCOMPARE(ChatTheme::windowBg(), u"#123456"_s);
+        QWidget *header = headerBar(widget);
+        QVERIFY2(header, "header bar not found");
+        QVERIFY2(header->styleSheet().contains(u"#123456"_s), qPrintable(header->styleSheet()));
+        QVERIFY2(header->styleSheet().contains(u"#654321"_s), qPrintable(header->styleSheet()));
+
+        QWidget *composer = widget.findChild<QWidget *>(u"composerContainer"_s);
+        QVERIFY2(composer, "composer container not found");
+        QVERIFY2(composer->styleSheet().contains(u"#123456"_s), qPrintable(composer->styleSheet()));
+        QVERIFY2(composer->styleSheet().contains(u"#654321"_s), qPrintable(composer->styleSheet()));
+
+        // The chat content keeps the preset panel colour.
+        QVERIFY2(widget.styleSheet().contains(ChatTheme::panelBg()), qPrintable(widget.styleSheet()));
+        QVERIFY2(!widget.styleSheet().contains(u"#123456"_s), qPrintable(widget.styleSheet()));
+
+        ChatTheme::loadTheme(settingsWithPreset(u"kateai-dark"_s));
     }
 
     // An invalid editor theme falls back to the default dark palette rather
