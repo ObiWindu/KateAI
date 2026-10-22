@@ -32,6 +32,7 @@
 #include <QPalette>
 #include <QPushButton>
 #include <QTemporaryDir>
+#include <QTcpServer>
 #include <QTest>
 #include <QTextBrowser>
 
@@ -492,7 +493,24 @@ private Q_SLOTS:
         QVERIFY(workspace.isValid());
         widget.agent()->setWorkspace(workspace.path());
 
-        applySettings(widget, settingsWithPreset(u"kateai-dark"_s));
+        // The turn has to end without touching the network. Without a
+        // provider of its own the widget falls back to the ACP provider,
+        // whose default command starts a real agent process, and the test
+        // then depends on the machine it runs on. A local port that nothing
+        // listens on answers with "connection refused" right away.
+        QTcpServer closed;
+        QVERIFY(closed.listen(QHostAddress::LocalHost, 0));
+        const quint16 closedPort = closed.serverPort();
+        closed.close();
+
+        Settings settings = settingsWithPreset(u"kateai-dark"_s);
+        settings.provider = Provider::OpenAICompatible;
+        settings.apiFormat = ApiFormat::OpenAICompatible;
+        settings.openaiCompatibleUrl = u"http://127.0.0.1:%1/v1"_s.arg(closedPort);
+        settings.openaiCompatibleApiKey = u"test"_s;
+        settings.openaiCompatibleModel = u"mock"_s;
+        settings.enableAutoRetry = false;
+        applySettings(widget, settings);
         widget.ask(u"hello theme"_s);
 
         // The turn fails without an API key, but the user card is already in

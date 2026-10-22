@@ -91,13 +91,17 @@ public:
     // "Authorization: x-api-key: …" value is invisible to it. Shared by the
     // completion request and the model catalogue fetch.
     static void applyAuthHeaders(QNetworkRequest &request, ApiFormat format, const QString &key);
-    static CompletionChunk parseSseLine(const QByteArray &line, QHash<int, ToolCall> *acc);
+    static CompletionChunk parseSseLine(const QByteArray &line, QHash<int, ToolCall> *acc, bool *parsed = nullptr);
 
     // Retry control
     void retryLastRequest();  // Manual retry from UI
 
 Q_SIGNALS:
     void textDelta(const QString &delta);
+    // Emitted when a retry replaces the answer that was streamed so far. The
+    // text already delivered belongs to the failed attempt and must not stay
+    // in front of the retried answer.
+    void textReset();
     void thinkingDelta(const QString &delta);
     void finished(const QString &fullText, const QList<ToolCall> &toolCalls);
     void failed(const QString &error);
@@ -109,6 +113,13 @@ Q_SIGNALS:
 
 private:
     void handleReadyRead();
+    // Feeds one line of the SSE stream into the parser. The data lines of one
+    // event are joined, as the SSE specification requires. Returns false when
+    // the stream must stop (a provider error was recorded).
+    bool feedSseLine(const QByteArray &line);
+    // Applies one parsed event to the client state. Returns false when the
+    // stream must stop.
+    bool applySseChunk(const CompletionChunk &chunk);
     void handleFinished();
     void handleModelsFinished(QNetworkReply *reply, Provider provider);
     // Detaches the watchdog timer owned by `reply`. Must run before the reply is
@@ -132,6 +143,9 @@ private:
     void executeRetry();
     void doComplete(const QList<ChatMessage> &messages);
     RetryErrorCategory classifyError(int httpStatus, const QString &errorMessage, const QByteArray &responseBody, QNetworkReply::NetworkError networkError);
+    // Classifies a provider error from its message and/or response body.
+    // Returns None when nothing matches, so the caller can keep looking.
+    static RetryErrorCategory classifyByMessage(const QString &lowerError, const QString &lowerBody);
     std::optional<int> parseRetryAfterHeader(const QNetworkReply *reply) const;
     std::optional<int> parseRetryAfterFromBody(const QByteArray &body) const;
     // Narrows a provider-supplied delay in seconds to the configured cap. Takes
@@ -164,6 +178,8 @@ private:
     QNetworkReply *m_reply = nullptr;
     QList<QPointer<QNetworkReply>> m_modelReplies;
     QByteArray m_buffer;
+    // The data lines of the SSE event that is currently being assembled.
+    QByteArray m_pendingEventData;
     // Every byte received for the in-flight request. Error classification and
     // the provider backoff hint both need the whole body, not just the trailing
     // unterminated SSE line.

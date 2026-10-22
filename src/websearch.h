@@ -111,6 +111,10 @@ public:
     // Rejects anything that is not plain http(s); guards against file:// and
     // other schemes reaching the network stack.
     static bool isFetchableUrl(const QString &url);
+    // True for hosts that must not be reached: the loopback interface, the
+    // private networks, the link-local range (which holds the cloud metadata
+    // endpoint) and the names that always point at them.
+    static bool isBlockedHost(const QString &host);
 
 Q_SIGNALS:
     void searchFinished(const QString &callId, const QList<WebSearchResult> &results, const QString &error);

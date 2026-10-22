@@ -5,6 +5,8 @@
 
 #include "mcp.h"
 
+#include <KLocalizedString>
+
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -415,6 +417,10 @@ void McpClient::start()
         if (m_state == McpServerState::Starting) {
             failAll(u"Timed out waiting for the server handshake."_s);
             setState(McpServerState::Failed, u"Handshake timed out"_s);
+            // The server process is still running. Leaving it behind would
+            // orphan it, and a later start() would read its output from a
+            // different process.
+            stopProcess();
         }
     });
     m_startupTimer->start();
@@ -422,6 +428,9 @@ void McpClient::start()
     if (m_config.transport == McpTransport::Http) {
         m_nam = new QNetworkAccessManager(this);
     } else {
+        // A previous run may still own a process: starting a new one next to
+        // it would mix their output.
+        stopProcess();
         m_process = new QProcess(this);
         m_process->setProcessChannelMode(QProcess::SeparateChannels);
         if (!m_config.cwd.trimmed().isEmpty() && QFileInfo(m_config.cwd).isDir()) {
@@ -463,6 +472,25 @@ void McpClient::start()
     sendRequest(u"initialize"_s, params);
 }
 
+void McpClient::stopProcess()
+{
+    if (!m_process) {
+        return;
+    }
+    if (m_process->state() != QProcess::NotRunning) {
+        m_process->disconnect(this);
+        m_process->terminate();
+        if (!m_process->waitForFinished(2000)) {
+            m_process->kill();
+            m_process->waitForFinished(1000);
+        }
+    }
+    m_process->deleteLater();
+    m_process = nullptr;
+    m_stdoutBuffer.clear();
+    m_discardingStdoutFrame = false;
+}
+
 void McpClient::stop()
 {
     m_shuttingDown = true;
@@ -477,20 +505,7 @@ void McpClient::stop()
     }
     m_pending.clear();
 
-    if (m_process) {
-        if (m_process->state() != QProcess::NotRunning) {
-            m_process->disconnect(this);
-            m_process->terminate();
-            if (!m_process->waitForFinished(2000)) {
-                m_process->kill();
-                m_process->waitForFinished(1000);
-            }
-        }
-        m_process->deleteLater();
-        m_process = nullptr;
-    }
-    m_stdoutBuffer.clear();
-    m_discardingStdoutFrame = false;
+    stopProcess();
     m_tools.clear();
     m_nam = nullptr;
     if (m_state != McpServerState::Disabled) {
@@ -544,7 +559,11 @@ bool McpClient::callTool(const QString &callToken, const QString &toolName, cons
 
     QTimer *timeout = new QTimer(this);
     timeout->setSingleShot(true);
-    const int budget = m_config.timeoutMs > 0 ? m_config.timeoutMs : 60000;
+    int budget = m_config.timeoutMs > 0 ? m_config.timeoutMs : 60000;
+    // The manager-wide timeout caps the per-server one.
+    if (m_timeoutMs > 0) {
+        budget = qMin(budget, m_timeoutMs);
+    }
     timeout->setInterval(budget);
     connect(timeout, &QTimer::timeout, this, [this, id, toolName, budget] {
         const auto it = m_pending.constFind(id);
@@ -753,16 +772,22 @@ void McpClient::onHttpFinished(QNetworkReply *reply, int id)
     const QString token = it == m_pending.constEnd() ? QString() : it.value().callToken;
     const QString method = it == m_pending.constEnd() ? QString() : it.value().method;
 
-    if (reply->error() != QNetworkReply::NoError && status <= 0) {
+    if (reply->error() != QNetworkReply::NoError) {
+        // Qt reports an error for every HTTP status >= 400. The status code
+        // says more than the generic error string, and the body often holds
+        // the reason ("invalid token"), so both are passed on.
+        const QString detail = status > 0
+            ? i18n("HTTP %1: %2").arg(status).arg(reply->errorString())
+            : reply->errorString();
         if (id > 0 && !token.isEmpty()) {
             m_pending.remove(id);
-            Q_EMIT toolResult(token, false, QString(), u"Request failed: %1"_s.arg(reply->errorString()));
+            Q_EMIT toolResult(token, false, QString(), u"Request failed: %1"_s.arg(detail));
             return;
         }
         if (id > 0) {
             m_pending.remove(id);
         }
-        setState(McpServerState::Failed, u"Request failed: %1"_s.arg(reply->errorString()));
+        setState(McpServerState::Failed, u"Request failed: %1"_s.arg(detail));
         return;
     }
 
@@ -794,6 +819,17 @@ void McpClient::onHttpFinished(QNetworkReply *reply, int id)
     }
 }
 
+void McpClient::refreshToolList()
+{
+    // The server announced that its tool list changed. Asking again is the
+    // only way to learn the new list.
+    if (m_state != McpServerState::Ready) {
+        return;
+    }
+    QJsonObject empty;
+    sendRequest(u"tools/list"_s, empty);
+}
+
 void McpClient::handleMessage(const QJsonObject &message)
 {
     const QJsonValue idValue = message.value(u"id"_s);
@@ -802,7 +838,12 @@ void McpClient::handleMessage(const QJsonObject &message)
 
     if (hasMethod && !hasId) {
         // Server-initiated notification. Kate AI requests no sampling or
-        // progress updates, so there is nothing to do with these.
+        // progress updates, so those are ignored. A changed tool list is
+        // not: the tools the server added would stay invisible and the ones it
+        // removed would stay callable.
+        if (message.value(u"method"_s).toString() == u"notifications/tools/list_changed"_s) {
+            refreshToolList();
+        }
         return;
     }
 
@@ -945,6 +986,11 @@ void McpManager::setWorkspace(const QString &workspace)
 
 void McpManager::reloadFromDisk()
 {
+    if (!m_loadWorkspaceConfig) {
+        // The server list of this workspace was not confirmed by the user, so
+        // it is not loaded. The servers that are already running stay.
+        return;
+    }
     const QList<McpServerConfig> loaded = McpConfigStore::load(m_workspace);
     setServers(loaded);
 }
@@ -1020,6 +1066,7 @@ void McpManager::rebuildClients()
             continue;
         }
         auto *client = new McpClient(config, this);
+        client->setTimeoutMs(m_timeoutMs);
         connect(client, &McpClient::toolsChanged, this, [this, name = config.name] {
             refreshDerived();
             Q_EMIT toolsChanged();

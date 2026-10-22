@@ -1920,7 +1920,7 @@ bool AcpClient::pathAllowed(const QString &path, bool forWrite, QString *error) 
 
 Sandbox AcpClient::currentSandbox() const
 {
-    return Sandbox(m_workspace, m_settings.sandbox, m_settings.extraDenyGlobs);
+    return Sandbox(m_workspace, m_settings.sandbox, m_settings.extraDenyGlobs, m_settings.allowReadsOutsideWorkspace);
 }
 
 void AcpClient::handleTerminalCreate(const QJsonValue &id, const QJsonObject &params)

@@ -478,6 +478,20 @@ void EditTracker::undoLast()
         } else if (!decision.previousContent.isNull()) {
             Q_EMIT editRejected(decision.path, decision.toolName, decision.previousContent);
         }
+    } else {
+        // Undoing a rejection has to put the edit back: the file on disk holds
+        // the reverted content, and the tracker now shows the edit as pending
+        // again. Without this the two disagree.
+        const EditEntry *last = decision.pending.isEmpty() ? nullptr : &decision.pending.last();
+        if (decision.createdFile) {
+            // The file was created by the agent and then deleted by the
+            // rejection. Putting it back means writing the content again.
+            if (last && !last->newContent.isNull()) {
+                Q_EMIT editAccepted(decision.path, decision.toolName, last->newContent);
+            }
+        } else if (last && !last->newContent.isNull()) {
+            Q_EMIT editAccepted(decision.path, decision.toolName, last->newContent);
+        }
     }
 
     updateUI();
@@ -778,8 +792,11 @@ void EditTracker::settle(const QString &path, bool accepted)
     const QString restoreTo = group.lastKnownContent;
     const QString settledTo = group.pending.last().newContent;
     group.pending.clear();
-    if (accepted) {
+    if (accepted && !settledTo.isNull()) {
         // The file is already in this state, so accepting only settles the queue.
+        // A null content means the post-edit read failed, so the state of the
+        // file is unknown: the previous baseline is kept, because a null
+        // baseline would be restored as an empty file later.
         group.lastKnownContent = settledTo;
     }
     m_undoStack.append(decision);

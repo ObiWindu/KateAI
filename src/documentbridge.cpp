@@ -12,6 +12,8 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QSaveFile>
+#include <QStringConverter>
+#include <QStringDecoder>
 #include <QTextStream>
 #include <QUrl>
 
@@ -19,6 +21,29 @@ using namespace Qt::Literals::StringLiterals;
 
 namespace KateAi
 {
+
+namespace
+{
+
+// The encoding of a file that is not valid UTF-8. Decoding it as UTF-8 would
+// replace every non-ASCII byte with U+FFFD, and writing it back would
+// destroy the file.
+QStringConverter::Encoding encodingFor(const QString &path)
+{
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) {
+        return QStringConverter::Utf8;
+    }
+    const QByteArray probe = file.read(65536);
+    QStringDecoder decoder(QStringConverter::Utf8);
+    decoder.decode(probe);
+    if (decoder.hasError()) {
+        return QStringConverter::System;
+    }
+    return QStringConverter::Utf8;
+}
+
+} // namespace
 
 bool DocumentBridge::readDocumentLines(const QString &path, int startLine, int maxLines,
                                        QStringList *page, int *totalLines) const
@@ -82,11 +107,13 @@ bool DiskDocumentBridge::readDocument(const QString &path, QString *contents) co
     }
 
     QFile file(path);
-    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+    // The file is opened in binary mode: the text mode translates the line
+    // endings on Windows, which would change the file just by reading it.
+    if (!file.open(QIODevice::ReadOnly)) {
         return false;
     }
     QTextStream in(&file);
-    in.setEncoding(QStringConverter::Utf8);
+    in.setEncoding(encodingFor(path));
     if (contents) {
         *contents = in.readAll();
     }
@@ -114,13 +141,19 @@ bool DiskDocumentBridge::readDocumentLines(const QString &path, int startLine, i
         }
     } else {
         QFile file(path);
-        if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        if (!file.open(QIODevice::ReadOnly)) {
             return false;
         }
         QTextStream in(&file);
-        in.setEncoding(QStringConverter::Utf8);
-        while (!in.atEnd()) {
+        in.setEncoding(encodingFor(path));
+        // The loop ends when readLine() returns a null string. atEnd() is
+        // unreliable on a buffered stream and can report the end too early,
+        // which would cut the file short.
+        for (;;) {
             const QString line = in.readLine();
+            if (line.isNull()) {
+                break;
+            }
             if (page && lineCount >= firstLine && lineCount - firstLine < lineLimit) {
                 requestedLines.append(line);
             }
@@ -140,6 +173,14 @@ bool DiskDocumentBridge::readDocumentLines(const QString &path, int startLine, i
 bool DiskDocumentBridge::writeDocument(const QString &path, const QString &contents, QString *error)
 {
     if (auto *doc = openDocumentFor(path)) {
+        // The document is open and the user has unsaved changes in it.
+        // Replacing the whole text would throw those changes away.
+        if (doc->isModified()) {
+            if (error) {
+                *error = u"The document has unsaved changes; save it before the agent writes to it."_s;
+            }
+            return false;
+        }
         if (!doc->setText(contents)) {
             if (error) {
                 *error = u"Failed to update the open document."_s;
@@ -164,14 +205,17 @@ bool DiskDocumentBridge::writeDocument(const QString &path, const QString &conte
     }
 
     QSaveFile file(path);
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+    // Binary mode again: the text mode would translate the line endings of
+    // the content, which already carries the line endings of the file.
+    if (!file.open(QIODevice::WriteOnly)) {
         if (error) {
             *error = u"Failed to open file for writing: %1"_s.arg(file.errorString());
         }
         return false;
     }
     QTextStream out(&file);
-    out.setEncoding(QStringConverter::Utf8);
+    // A file that was not UTF-8 is written back in the encoding it had.
+    out.setEncoding(encodingFor(path));
     out << contents;
     if (!file.commit()) {
         if (error) {

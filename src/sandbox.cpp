@@ -25,7 +25,15 @@ namespace KateAi
     static QString globToRegex(const QString &pattern)
     {
         QString regex = u"^"_s;
-        const QString normalized = QDir::fromNativeSeparators(pattern);
+        QString normalized = QDir::fromNativeSeparators(pattern);
+        // A trailing "/**" means "everything below this directory". The
+        // directory itself has to match as well, otherwise "tar ~/.ssh" is not
+        // covered by the "**/.ssh/**" rule.
+        bool directoryContents = false;
+        if (normalized.endsWith(u"/**"_s)) {
+            normalized = normalized.left(normalized.size() - 3);
+            directoryContents = true;
+        }
         for (int i = 0; i < normalized.size(); ++i) {
             const QChar c = normalized.at(i);
             if (c == u'*' && i + 1 < normalized.size() && normalized.at(i + 1) == u'*') {
@@ -46,14 +54,19 @@ namespace KateAi
                 regex += c;
             }
         }
-        regex += u'$';
+        if (directoryContents) {
+            regex += QStringLiteral(u"(/.*)?$");
+        } else {
+            regex += QLatin1Char('$');
+        }
         return regex;
     }
 
-    Sandbox::Sandbox(QString workspaceRoot, SandboxProfile profile, QStringList extraDenyGlobs)
+    Sandbox::Sandbox(QString workspaceRoot, SandboxProfile profile, QStringList extraDenyGlobs, bool allowOutsideReads)
     : m_workspaceRoot(QDir(workspaceRoot).absolutePath())
     , m_profile(profile)
     , m_extraDenyGlobs(std::move(extraDenyGlobs))
+    , m_allowOutsideReads(allowOutsideReads)
     {
         m_workspaceRoot = QDir::cleanPath(m_workspaceRoot);
     }
@@ -75,6 +88,10 @@ namespace KateAi
             u"**/.netrc"_s,
             u"**/*.p12"_s,
             u"**/*.pfx"_s,
+            // The MCP server list is a program the plugin starts. An agent
+            // that could edit it could add a server of its own, whose tools
+            // would then run with the user's privileges.
+            u"**/.kateai/mcp.json"_s,
         };
     }
 
@@ -117,11 +134,12 @@ bool Sandbox::globMatch(const QString &pattern, const QString &path)
             }
             if (!m_workspaceRoot.isEmpty()) {
                 QString relative = unix;
-                if (relative.startsWith(m_workspaceRoot)) {
-                    relative = relative.mid(m_workspaceRoot.size());
-                    if (relative.startsWith(u'/')) {
-                        relative = relative.mid(1);
-                    }
+                // The root has to be a directory boundary: with the root
+                // "/home/user/proj" the path "/home/user/proj2/x" is not inside
+                // the workspace, and treating it as such produced the bogus
+                // relative path "2/x" for the deny globs.
+                if (relative.startsWith(m_workspaceRoot + u'/')) {
+                    relative = relative.mid(m_workspaceRoot.size() + 1);
                     if (globMatch(glob, relative) || globMatch(glob, u"/"_s + relative)) {
                         return true;
                     }
@@ -158,6 +176,18 @@ QString Sandbox::normalizePath(const QString &path, QString *error, bool forWrit
     const QFileInfo info(QDir(m_workspaceRoot), candidate);
     QString absolute = QDir::cleanPath(info.absoluteFilePath());
 
+    // The containment check comes first, on the lexical path. The canonical
+    // paths below only exist when the file or its parent directory is already
+    // on disk: a target whose directory does not exist yet has no canonical
+    // path, and the path would leave the workspace unchecked.
+    const bool mustStayInWorkspace = m_profile == SandboxProfile::Strict || (m_profile != SandboxProfile::Off && forWrite);
+    if (mustStayInWorkspace && !pathInsideWorkspace(absolute)) {
+        if (error) {
+            *error = u"Path resolves outside the workspace: %1"_s.arg(absolute);
+        }
+        return {};
+    }
+
     // Resolve symlinks safely - use canonicalFilePath which resolves all symlinks
     // To mitigate TOCTOU, we verify the path is still within workspace after resolution.
     QFileInfo fileInfo(absolute);
@@ -165,7 +195,6 @@ QString Sandbox::normalizePath(const QString &path, QString *error, bool forWrit
     if (!canonical.isEmpty()) {
         absolute = canonical;
         // Re-check workspace containment AFTER symlink resolution
-        const bool mustStayInWorkspace = m_profile == SandboxProfile::Strict || (m_profile != SandboxProfile::Off && forWrite);
         if (mustStayInWorkspace && !pathInsideWorkspace(absolute)) {
             if (error) {
                 *error = u"Path resolves outside the workspace: %1"_s.arg(absolute);
@@ -231,6 +260,16 @@ QString Sandbox::normalizePath(const QString &path, QString *error, bool forWrit
             if (isDenied(absolute)) {
                 if (error) {
                     *error = u"Access to this path is blocked by a deny rule: %1"_s.arg(absolute);
+                }
+                return false;
+            }
+            // The read tools are approved without a prompt, so a profile that
+            // does not confine reads would let the agent read any file of the
+            // host. The workspace is the default; reading outside it is an
+            // explicit opt-in.
+            if (!m_allowOutsideReads && !pathInsideWorkspace(absolute)) {
+                if (error) {
+                    *error = u"Path is outside the workspace: %1"_s.arg(absolute);
                 }
                 return false;
             }
@@ -347,6 +386,20 @@ bool Sandbox::isReadOnlyCommand(const QString &command) const
     static const QRegularExpression writers(
         uR"(\b(?:tee|rm|mv|cp|chmod|chown|mkdir|touch|dd|del|erase|rd|rmdir|copy|move|ren|rename|New-Item|Set-Content|Out-File|Remove-Item|Move-Item|Copy-Item)\b)"_s);
     if (writers.match(cmd).hasMatch()) {
+        return false;
+    }
+    // A command substitution runs another program, whose name the writer list
+    // cannot see: "cat \"$(python3 -c 'import os;os.system(\"…\")')\"" has a
+    // read-only executable and writes anyway. The same holds for backticks and
+    // for a backgrounded command, whose result is never inspected.
+    if (cmd.contains(u"$("_s) || cmd.contains(u"`"_s) || cmd.contains(u"${"_s)) {
+        return false;
+    }
+    // A single "&" backgrounds the command, so its result is never inspected.
+    // "2>&1" is a redirection, not a background job, and "&&" chains commands
+    // (which the chain handling below deals with).
+    static const QRegularExpression background(uR"((?:^|[^>&\d])&(?!&))"_s);
+    if (background.match(cmd).hasMatch()) {
         return false;
     }
     // The writers list only knows command names. "cat notes > ~/.bashrc" has a
@@ -610,14 +663,24 @@ static QStringList linuxBubblewrapPrefix(const QString &workspaceRoot, SandboxPr
             }
         }
         args << u"--bind"_s << workspaceRoot << sandboxWorkspace;
-        args << u"--bind"_s << u"/tmp"_s << u"/tmp"_s;
+        // A private /tmp instead of the one of the host. The host's /tmp is
+        // writable by everybody, so a command could leave files there, and in
+        // the strict profile it would break the isolation of the tmpfs root.
+        args << u"--tmpfs"_s << u"/tmp"_s;
         args << u"--proc"_s << u"/proc"_s << u"--dev"_s << u"/dev"_s;
         args << u"--chdir"_s << sandboxWorkspace;
         args << u"--unshare-net"_s;
     } else {
         args << u"--ro-bind"_s << u"/"_s << u"/"_s;
         args << u"--proc"_s << u"/proc"_s << u"--dev"_s << u"/dev"_s;
-        args << u"--bind"_s << u"/tmp"_s << u"/tmp"_s;
+        // The read-only profile may write to a scratch directory, but not to
+        // the /tmp of the host: a file left there outlives the sandbox and is
+        // visible to every other process of the machine.
+        if (readOnlyFs) {
+            args << u"--tmpfs"_s << u"/tmp"_s;
+        } else {
+            args << u"--bind"_s << u"/tmp"_s << u"/tmp"_s;
+        }
         args << (readOnlyFs ? u"--ro-bind"_s : u"--bind"_s) << workspaceRoot << sandboxWorkspace;
         args << u"--chdir"_s << sandboxWorkspace;
         if (readOnlyFs) {
@@ -756,6 +819,16 @@ QStringList Sandbox::wrapCommand(const QString &command, QString *error) const
 #elif defined(Q_OS_MACOS)
     return wrapMacSandboxExec(m_workspaceRoot, m_profile, command, error);
 #else
+    // There is no isolation mechanism on this platform. The strict profile
+    // promises that the command cannot reach the rest of the system, and that
+    // promise cannot be kept here. Running the command unsandboxed would
+    // silently break it, so the command is refused instead.
+    if (m_profile == SandboxProfile::Strict) {
+        if (error) {
+            *error = u"The strict sandbox profile is not available on this platform, so the command was not run."_s;
+        }
+        return {};
+    }
     return unsandboxedArgv(command);
 #endif
 }
@@ -787,6 +860,14 @@ QStringList Sandbox::wrapArgv(const QString &program, const QStringList &args, Q
 #elif defined(Q_OS_MACOS)
     return wrapMacSandboxExecArgv(m_workspaceRoot, m_profile, program, args, error);
 #else
+    // The same as in wrapCommand(): the strict profile cannot be honoured
+    // without an isolation mechanism.
+    if (m_profile == SandboxProfile::Strict) {
+        if (error) {
+            *error = u"The strict sandbox profile is not available on this platform, so the command was not run."_s;
+        }
+        return {};
+    }
     QStringList out{program};
     out += args;
     return out;

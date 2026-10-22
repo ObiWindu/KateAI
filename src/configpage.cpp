@@ -475,6 +475,10 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
             .arg(ChatTheme::textPrimary(), ChatTheme::border()) + ChatTheme::menu());
     securityForm->addRow(i18n("Extra deny globs:"), m_deny);
 
+    m_allowOutsideReads = new QCheckBox(i18n("Allow read tools to access files outside the workspace"), securityWidget);
+    m_allowOutsideReads->setToolTip(i18n("The read tools are approved without a prompt. Keep this off to confine the agent to the project."));
+    securityForm->addRow(i18n("Reads outside workspace:"), m_allowOutsideReads);
+
     m_maxExpandedToolCards = new QSpinBox(securityWidget);
     m_maxExpandedToolCards->setRange(0, 200);
     m_maxExpandedToolCards->setSpecialValueText(i18n("Always expand all"));
@@ -1198,6 +1202,7 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     connect(m_sandbox, &QComboBox::currentIndexChanged, this, markChanged);
     connect(m_timeout, &QSpinBox::valueChanged, this, markChanged);
     connect(m_deny, &QPlainTextEdit::textChanged, this, markChanged);
+    connect(m_allowOutsideReads, &QCheckBox::toggled, this, markChanged);
     connect(m_maxExpandedToolCards, &QSpinBox::valueChanged, this, markChanged);
 
     connect(m_planMode, &QCheckBox::toggled, this, markChanged);
@@ -1624,6 +1629,7 @@ s.opencodeModel = m_opencodeModel->currentText().trimmed();
     s.thinkingMode = m_thinkingMode->isChecked();
     s.extraSystemPrompt = m_system->toPlainText();
     s.extraDenyGlobs = m_deny->toPlainText().split(u'\n', Qt::SkipEmptyParts);
+    s.allowReadsOutsideWorkspace = m_allowOutsideReads->isChecked();
     s.messageSpeed = m_speed->currentData().toInt();
 
     s.contextCompressionLevel = m_compressionLevel->value();
@@ -1812,6 +1818,7 @@ void KateAiConfigPage::reset()
     m_sandbox->setCurrentIndex(std::max(0, m_sandbox->findData(sandboxProfileId(s.sandbox))));
     m_timeout->setValue(std::max(1, s.bashTimeoutMs / 1000));
     m_deny->setPlainText(s.extraDenyGlobs.join(u'\n'));
+    m_allowOutsideReads->setChecked(s.allowReadsOutsideWorkspace);
     m_maxExpandedToolCards->setValue(s.maxExpandedToolCards);
 
     m_maxIter->setValue(s.maxToolCalls);

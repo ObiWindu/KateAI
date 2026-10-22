@@ -13,6 +13,35 @@ class TestWebSearch : public QObject
     Q_OBJECT
 
 private Q_SLOTS:
+    void internalHostsAreNotFetchable()
+    {
+        // The fetch tool is approved without a prompt, so it must not be able
+        // to reach the host's own network.
+        QVERIFY(!WebSearch::isFetchableUrl(u"http://127.0.0.1:8080/"_s));
+        QVERIFY(!WebSearch::isFetchableUrl(u"http://localhost/"_s));
+        QVERIFY(!WebSearch::isFetchableUrl(u"http://[::1]/"_s));
+        QVERIFY(!WebSearch::isFetchableUrl(u"http://169.254.169.254/latest/meta-data/"_s));
+        QVERIFY(!WebSearch::isFetchableUrl(u"http://10.0.0.5/"_s));
+        QVERIFY(!WebSearch::isFetchableUrl(u"http://192.168.1.1/"_s));
+        QVERIFY(!WebSearch::isFetchableUrl(u"http://metadata.google.internal/"_s));
+        // A normal address is still allowed.
+        QVERIFY(WebSearch::isFetchableUrl(u"https://example.org/docs"_s));
+    }
+
+    void duckDuckGoResultKeepsItsQueryString()
+    {
+        // The redirect wrapper was cut at the first "&" after the decoding,
+        // which removed the query string of the target.
+        const QByteArray html =
+            "<html><body>"
+            "<a class=\"result__a\" href=\"//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.org%2Fpage%3Fx%3D1%26y%3D2&amp;rut=abc\">Result</a>"
+            "<a class=\"result__snippet\">Snippet.</a>"
+            "</body></html>";
+        const auto results = WebSearch::parseDuckDuckGo(html, 5);
+        QCOMPARE(results.size(), 1);
+        QCOMPARE(results.first().url, u"https://example.org/page?x=1&y=2"_s);
+    }
+
     void duckDuckGoHtmlIsParsed()
     {
         // DuckDuckGo wraps every hit in a redirect whose target is percent

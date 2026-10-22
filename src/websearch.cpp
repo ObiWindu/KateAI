@@ -5,12 +5,15 @@
 
 #include "websearch.h"
 
+#include "types.h"
+
 #include <KLocalizedString>
 
 #include <QHash>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QElapsedTimer>
+#include <QHostAddress>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
@@ -24,6 +27,17 @@ using namespace Qt::Literals::StringLiterals;
 
 namespace KateAi
 {
+
+// Defined below, next to the other text helpers.
+QString decodeHtmlEntities(const QString &input);
+
+namespace
+{
+// The page is read into memory in one piece, so the download needs a ceiling.
+// Five megabytes is far more than a readable web page and far less than a
+// denial of service.
+constexpr qint64 kMaxFetchBytes = 5 * 1024 * 1024;
+}
 
 namespace
 {
@@ -210,7 +224,67 @@ bool WebSearch::isFetchableUrl(const QString &url)
     if (scheme != u"http"_s && scheme != u"https"_s) {
         return false;
     }
-    return !parsed.host().isEmpty();
+    if (parsed.host().isEmpty()) {
+        return false;
+    }
+    // The fetch tool is approved without a prompt, so it must not be able to
+    // reach the host's own network: the loopback interface, the private
+    // networks and the cloud metadata endpoint are all off limits.
+    if (isBlockedHost(parsed.host())) {
+        return false;
+    }
+    return true;
+}
+
+bool WebSearch::isBlockedHost(const QString &host)
+{
+    const QString name = host.trimmed().toLower();
+    if (name.isEmpty()) {
+        return true;
+    }
+    // A literal address is checked directly. A name is resolved by the network
+    // stack, which is the only way to know what it points at; the resolution
+    // itself is checked by the network layer's own policy below.
+    const QHostAddress address(name);
+    if (!address.isNull()) {
+        // Loopback, the "any" address, the private ranges and the link-local
+        // range are all off limits. The link-local range holds the cloud
+        // metadata endpoint.
+        if (address.isLoopback() || address.isLinkLocal() || address.isPrivateUse()) {
+            return true;
+        }
+        if (address.protocol() == QAbstractSocket::IPv4Protocol) {
+            const quint32 ip = address.toIPv4Address();
+            if (ip == 0 || ip == 0xffffffffu) {
+                return true;
+            }
+            // 169.254.0.0/16 is the link-local range, which contains the
+            // cloud metadata endpoint (169.254.169.254).
+            if ((ip & 0xffff0000u) == 0xa9fe0000u) {
+                return true;
+            }
+        }
+        return false;
+    }
+    // Named hosts that always point back into the machine or the metadata
+    // service.
+    static const QStringList blockedNames = {
+        u"localhost"_s,
+        u"localhost.localdomain"_s,
+        u"ip6-localhost"_s,
+        u"ip6-loopback"_s,
+        u"metadata"_s,
+        u"metadata.google.internal"_s,
+        u"metadata.goog"_s,
+    };
+    if (blockedNames.contains(name)) {
+        return true;
+    }
+    // A host that ends in ".localhost" resolves to the loopback interface.
+    if (name.endsWith(u".localhost"_s)) {
+        return true;
+    }
+    return false;
 }
 
 void WebSearch::abort()
@@ -332,6 +406,10 @@ void WebSearch::search(const QString &query, const QString &callId, int maxResul
         m_replies.removeAll(reply);
         reply->abort();
         reply->deleteLater();
+        // The call is over, so its per-call limit is released here as well.
+        // Only onReplyFinished() used to clear it, and this path never
+        // reaches it.
+        m_callMaxResults.remove(callId);
         finishSearch(callId, {}, i18n("The search for '%1' timed out after %2 seconds.", trimmed, m_timeoutMs / 1000));
     });
     timer->start();
@@ -363,7 +441,23 @@ void WebSearch::fetchPage(const QString &url, const QString &callId)
     auto lastEmit = QSharedPointer<QElapsedTimer>::create();
     lastEmit->start();
     connect(reply, &QNetworkReply::readyRead, this, [this, reply, callId, lastEmit] {
-        if (!reply || lastEmit->elapsed() < 200) {
+        if (!reply) {
+            return;
+        }
+        // The body is read in one piece when the reply finishes, so nothing
+        // bounds the memory a page (or a URL the model chose) can take. The
+        // download is stopped as soon as the cap is reached.
+        if (reply->bytesAvailable() + reply->header(QNetworkRequest::ContentLengthHeader).toLongLong() > kMaxFetchBytes) {
+            stopTimerFor(reply);
+            reply->disconnect(this);
+            m_replies.removeAll(reply);
+            reply->abort();
+            reply->deleteLater();
+            finishFetch(callId, QString(), QString(),
+                        i18n("The page is larger than %1 KB and was not downloaded.").arg(kMaxFetchBytes / 1024));
+            return;
+        }
+        if (lastEmit->elapsed() < 200) {
             return;
         }
         lastEmit->restart();
@@ -431,6 +525,22 @@ void WebSearch::onReplyFinished(QNetworkReply *reply, const QString &callId, boo
         // the body check below catches the usual "soft 404".
         if (status >= 400) {
             finishFetch(callId, QString(), QString(), i18n("The server returned HTTP %1.").arg(status));
+            return;
+        }
+        // The cap is enforced while the page downloads; this is the case of a
+        // response without a content length, whose size is only known here.
+        if (body.size() > kMaxFetchBytes) {
+            finishFetch(callId, QString(), QString(),
+                        i18n("The page is larger than %1 KB and was not read.").arg(kMaxFetchBytes / 1024));
+            return;
+        }
+        const QString contentType = reply->header(QNetworkRequest::ContentTypeHeader).toString().toLower();
+        if (!contentType.isEmpty()
+            && !contentType.contains(u"text/html"_s) && !contentType.contains(u"text/plain"_s)
+            && !contentType.contains(u"application/xhtml+xml"_s) && !contentType.contains(u"text/xml"_s)
+            && !contentType.contains(u"application/xml"_s) && !contentType.contains(u"application/json"_s)) {
+            finishFetch(callId, QString(), QString(),
+                        i18n("The server returned '%1', which is not a text document.").arg(contentType));
             return;
         }
         const QString title = htmlTitle(body);
@@ -509,11 +619,17 @@ QList<WebSearchResult> WebSearch::parseDuckDuckGo(const QByteArray &html, int ma
         // Unwrap the redirect wrapper.
         const int marker = href.indexOf(QLatin1String("uddg="));
         if (marker >= 0) {
-            href = QUrl::fromPercentEncoding(href.mid(marker + 5).toUtf8());
-            const int amp = href.indexOf(QLatin1Char('&'));
+            // The redirect carries the target URL percent-encoded, followed by
+            // the parameters of the redirect itself. The split has to happen
+            // before the decoding: a target with a query string of its own
+            // ("…%3Fx%3D1%26y%3D2") would be cut at the decoded ampersand and
+            // lose everything after it.
+            QString encoded = href.mid(marker + 5);
+            const int amp = encoded.indexOf(QLatin1Char('&'));
             if (amp > 0) {
-                href.truncate(amp);
+                encoded.truncate(amp);
             }
+            href = QUrl::fromPercentEncoding(encoded.toUtf8());
         }
         if (href.isEmpty() || !isFetchableUrl(href)) {
             continue;
@@ -522,11 +638,11 @@ QList<WebSearchResult> WebSearch::parseDuckDuckGo(const QByteArray &html, int ma
         result.url = href;
         QString title = match.captured(2);
         title.replace(tagPattern, QString());
-        result.title = collapseWhitespace(title);
+        result.title = collapseWhitespace(decodeHtmlEntities(title));
         if (snippetIt.hasNext()) {
             QString raw = snippetIt.next().captured(1);
             raw.replace(tagPattern, QString());
-            result.snippet = collapseWhitespace(raw);
+            result.snippet = collapseWhitespace(decodeHtmlEntities(raw));
         }
         results.append(result);
     }
@@ -605,6 +721,45 @@ QString WebSearch::htmlTitle(const QByteArray &html)
     return collapseWhitespace(match.captured(1));
 }
 
+// Decodes the HTML entities that appear in prose: the named ones are
+// replaced, and the numeric ones are turned into the character they stand
+// for. A code point outside the basic plane becomes a surrogate pair, not two
+// lone surrogates.
+QString decodeHtmlEntities(const QString &input)
+{
+    static const QHash<QString, QString> kEntities = {
+        {QStringLiteral("&nbsp;"), QStringLiteral(" ")},  {QStringLiteral("&amp;"), QStringLiteral("&")},
+        {QStringLiteral("&lt;"), QStringLiteral("<")},    {QStringLiteral("&gt;"), QStringLiteral(">")},
+        {QStringLiteral("&quot;"), QStringLiteral("\"")},{QStringLiteral("&#39;"), QStringLiteral("'")},
+        {QStringLiteral("&apos;"), QStringLiteral("'")}, {QStringLiteral("&mdash;"), QStringLiteral("\u2014")},
+        {QStringLiteral("&ndash;"), QStringLiteral("\u2013")},{QStringLiteral("&hellip;"), QStringLiteral("\u2026")},
+    };
+    QString text = input;
+    for (auto it = kEntities.constBegin(); it != kEntities.constEnd(); ++it) {
+        text.replace(it.key(), it.value());
+    }
+
+    static const QRegularExpression numericEntity(QStringLiteral("&#(x?)([0-9a-fA-F]+);"));
+    QString decoded;
+    decoded.reserve(text.size());
+    int copied = 0;
+    auto entityIt = numericEntity.globalMatch(text);
+    while (entityIt.hasNext()) {
+        const QRegularExpressionMatch match = entityIt.next();
+        decoded += QString(text.constBegin() + copied, match.capturedStart() - copied);
+        bool converted = false;
+        const uint code = match.captured(2).toUInt(&converted, match.captured(1).isEmpty() ? 10 : 16);
+        if (converted && code > 0 && code <= 0x10FFFF) {
+            decoded += QString::fromUcs4(&code, 1);
+        } else {
+            decoded += match.captured(0);
+        }
+        copied = match.capturedEnd();
+    }
+    decoded += QString(text.constBegin() + copied, text.size() - copied);
+    return decoded;
+}
+
 QString WebSearch::extractReadableText(const QByteArray &html, int maxChars)
 {
     QString text = QString::fromUtf8(html);
@@ -635,42 +790,11 @@ QString WebSearch::extractReadableText(const QByteArray &html, int maxChars)
     text.replace(tagPattern, QStringLiteral(" "));
 
     // Entity decoding for the handful that matter in prose.
-    static const QHash<QString, QString> kEntities = {
-        {QStringLiteral("&nbsp;"), QStringLiteral(" ")},  {QStringLiteral("&amp;"), QStringLiteral("&")},
-        {QStringLiteral("&lt;"), QStringLiteral("<")},    {QStringLiteral("&gt;"), QStringLiteral(">")},
-        {QStringLiteral("&quot;"), QStringLiteral("\"")},{QStringLiteral("&#39;"), QStringLiteral("'")},
-        {QStringLiteral("&apos;"), QStringLiteral("'")}, {QStringLiteral("&mdash;"), QStringLiteral("—")},
-        {QStringLiteral("&ndash;"), QStringLiteral("–")},{QStringLiteral("&hellip;"), QStringLiteral("…")},
-    };
-    for (auto it = kEntities.constBegin(); it != kEntities.constEnd(); ++it) {
-        text.replace(it.key(), it.value());
-    }
-
-    // Numeric and hex entities. Documentation sites lean on these heavily
-    // (&#116; for "t"), and leaving them raw makes the model read noise.
-    static const QRegularExpression numericEntity(QStringLiteral("&#(x?)([0-9a-fA-F]+);"));
-    QString decoded;
-    decoded.reserve(text.size());
-    int copied = 0;
-    auto entityIt = numericEntity.globalMatch(text);
-    while (entityIt.hasNext()) {
-        const QRegularExpressionMatch match = entityIt.next();
-        decoded += QString(text.constBegin() + copied, match.capturedStart() - copied);
-        bool converted = false;
-        const uint code = match.captured(2).toUInt(&converted, match.captured(1).isEmpty() ? 10 : 16);
-        if (converted && code > 0 && code <= 0x10FFFF) {
-            decoded += QString::fromUcs4(&code, 1);
-        } else {
-            decoded += match.captured(0);
-        }
-        copied = match.capturedEnd();
-    }
-    decoded += QString(text.constBegin() + copied, text.size() - copied);
-    text = decoded;
+    text = decodeHtmlEntities(text);
 
     text = collapseWhitespace(text);
     if (maxChars > 0 && text.size() > maxChars) {
-        text.truncate(maxChars);
+        text = truncateSafe(text, maxChars);
         text += QStringLiteral("\n\n… (truncated)");
     }
     return text;

@@ -9,6 +9,7 @@
 #include <QList>
 #include <QMutex>
 #include <QObject>
+#include <QProcess>
 #include <QString>
 
 namespace KateAi
@@ -82,8 +83,18 @@ private:
     // Snapshot tag refs, newest first.
     QStringList checkpointRefs() const;
     void prune();
+    // Runs the housekeeping commands in the background. "git gc" can take
+    // seconds, and it must not freeze the editor.
+    void runGitDetached(const QStringList &arguments, int timeoutMs = 60000);
+    // Removes the shadow repositories of workspaces that no longer exist, and
+    // the ones that were not touched for a long time. Without this the cache
+    // directory grows with every project that was ever opened.
+    void pruneStaleShadowRepositories() const;
     // Mutex for thread-safe checkpoint operations (recursive to allow prune() from createCheckpoint())
     mutable QRecursiveMutex m_checkpointMutex;
+    // The git commands that run in the background. They are stopped with the
+    // manager.
+    QList<QProcess *> m_detachedProcesses;
 
     QString m_workspace;
     bool m_enabled = true;

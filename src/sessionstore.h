@@ -60,8 +60,14 @@ public:
 
     // Conversation history management
     static QList<ConversationInfo> listConversations(int maxConversations = 50);
+    // The title of a single conversation, or an empty string when it does not
+    // exist. Cheaper than listing the whole history for one title.
+    static QString conversationTitle(const QString &conversationId);
     static SessionData loadConversation(const QString &conversationId);
-    static void saveConversation(const QString &conversationId, const SessionData &data, const QString &title = QString(), int maxConversations = 50);
+    // Returns true when the conversation did not exist yet and was created by
+    // this call. The caller uses it to know whether the number of stored
+    // conversations changed.
+    static bool saveConversation(const QString &conversationId, const SessionData &data, const QString &title = QString(), int maxConversations = 50);
     static void deleteConversation(const QString &conversationId);
     static QString createNewConversation();
     static void setActiveConversation(const QString &conversationId);

@@ -153,6 +153,9 @@ public:
 Q_SIGNALS:
     void userMessage(const QString &text);
     void assistantDelta(const QString &delta);
+    // The answer streamed so far was discarded (a retry replaces it); the UI
+    // has to drop what it already rendered.
+    void assistantReset();
     void thinkingDelta(const QString &delta);
     void thinkingFinished(const QString &text);
     void assistantFinished(const QString &text);
@@ -225,6 +228,10 @@ private:
     bool isVerificationForChangedFiles(const ToolCall &call) const;
     void appendToolResult(const ToolCall &call, ToolResult result);
     void appendToolResultsToConversation();
+    // Gives every tool call of the last assistant message that has no result
+    // yet a cancelled result, so the next request is not rejected by the
+    // provider.
+    void appendCancelledToolResults();
     void addBudgetFailureResults(const QString &reason);
     void requestVerificationTurn();
     void emitPlanUpdate();

@@ -151,6 +151,11 @@ struct PermissionRequest {
     QString summary;
     QString details;
     QString path;
+    // The absolute path the tool actually writes to. "path" is what the model
+    // asked for, which can be relative; the edit tracker has to use the
+    // resolved path, otherwise it reads, restores and deletes a file next to
+    // the process instead of the edited one.
+    QString resolvedPath;
     // Pre-formatted unified diff for write_file, or the old/new strings for
     // edit_file. Rendered inline by the tool-call card in the chat transcript.
     QString describeDiff;
@@ -259,6 +264,10 @@ struct Settings {
     bool thinkingMode = true;
     QString extraSystemPrompt;
     QStringList extraDenyGlobs;
+    // Lets the read tools (read_file, list_dir, grep, glob) reach files
+    // outside the workspace. Off by default: those tools are approved without
+    // a prompt, so a confined read is what keeps the agent in the project.
+    bool allowReadsOutsideWorkspace = false;
     int contextCompressionLevel = 1; // 0=full, 1=summary, 2=minimal, 3=ultra-minimal
     int maxGraphNodes = 50; // Maximum number of nodes to include in project graph
     int maxGraphEdges = 100; // Maximum number of edges to include in project graph
@@ -445,6 +454,10 @@ QStringList pickerModelsFor(const Settings &settings, Provider provider, const Q
 QJsonArray toolDefinitions(const ToolAccess &access);
 QString defaultSystemPrompt(const QString &workspace);
 QString compressText(const QString &text, int maxLength, bool enabled);
+// Cuts a text to at most maxLength UTF-16 units without splitting a
+// surrogate pair. A cut in the middle of an astral character leaves a lone
+// surrogate behind, which is serialised as U+FFFD.
+QString truncateSafe(const QString &text, int maxLength);
 // Smart context compression - preserves important parts while reducing size
 QString smartCompressContext(const QString &text, int maxLength, bool enabled);
 // Compress a list of messages intelligently

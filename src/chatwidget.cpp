@@ -834,6 +834,14 @@ ChatWidget::ChatWidget(QWidget *parent)
         setThinkingIndicator(false);
         setStreaming(m_streamText + delta);
     });
+    connect(&m_agent, &AgentLoop::assistantReset, this, [this]() {
+        // The streamed text belonged to a failed attempt and is replaced by the
+        // retry. Drop it, otherwise the transcript shows both.
+        m_streamText.clear();
+        if (m_activeAssistantBrowser) {
+            m_activeAssistantBrowser->setDocument(makeMarkdownDocument(closedMarkdown(m_streamText), ChatTheme::messageCss()));
+        }
+    });
     connect(&m_agent, &AgentLoop::assistantFinished, this, [this](const QString &text) {
         Q_UNUSED(text);
         freezeStreaming();
@@ -939,12 +947,16 @@ ChatWidget::ChatWidget(QWidget *parent)
         if (editTracking && (isFileMutatingTool(request.toolName) || request.mutatesFiles)) {
             PendingEdit pending;
             pending.toolName = request.toolName;
-            pending.path = request.path;
+            // The tracker works on the file the tool actually writes to. The
+            // path in the request is what the model asked for, which can be
+            // relative; resolving it against the process directory instead of
+            // the workspace would read, restore and delete the wrong file.
+            pending.path = request.resolvedPath.isEmpty() ? request.path : request.resolvedPath;
             pending.diff = request.describeDiff;
             // existed == false means write_file just created the file, which is
             // the one case where rejecting has to delete rather than restore.
             pending.existed = m_agent.documentBridge()
-                && m_agent.documentBridge()->readDocument(request.path, &pending.oldContent);
+                && m_agent.documentBridge()->readDocument(pending.path, &pending.oldContent);
             m_pendingToolCalls.insert(request.toolCallId, pending);
         }
 
@@ -1250,6 +1262,12 @@ ChatWidget::ChatWidget(QWidget *parent)
             showInfoMessage(i18n("Cannot revert edit for %1: document bridge not available", path), true);
             return;
         }
+        if (oldContent.isNull()) {
+            // The pre-edit content was never read. Writing it would empty the
+            // file, which is worse than leaving the edit in place.
+            showInfoMessage(i18n("Cannot revert edit for %1: the previous content is unknown", QFileInfo(path).fileName()), true);
+            return;
+        }
         QString error;
         if (m_agent.documentBridge()->writeDocument(path, oldContent, &error)) {
             showInfoMessage(i18n("Edit reverted for %1", QFileInfo(path).fileName()), false);
@@ -1385,9 +1403,12 @@ ChatWidget::~ChatWidget()
     // Also save here for widget teardown paths that do not close the app.
     saveCurrentConversation();
 
-    m_agent.abort();
+    // The agent's signals are disconnected first: abort() emits turnFinished,
+    // and the handler would rebuild the transcript while the widget is being
+    // destroyed.
     disconnect(&m_agent, nullptr, this, nullptr);
     disconnect(m_agent.client(), nullptr, this, nullptr);
+    m_agent.abort();
     if (m_scrollArea && m_scrollArea->verticalScrollBar()) {
         disconnect(m_scrollArea->verticalScrollBar(), nullptr, this, nullptr);
     }
@@ -1402,6 +1423,12 @@ ChatWidget::~ChatWidget()
 
 void ChatWidget::saveCurrentConversation()
 {
+    // A load restores another conversation into the widget. Saving while that
+    // is happening would write the loaded state under the conversation id we
+    // are leaving.
+    if (m_loadingConversation) {
+        return;
+    }
     const SessionStore::SessionData sessionData = m_agent.sessionData();
     if (sessionData.messages.isEmpty()) {
         return;
@@ -1414,15 +1441,29 @@ void ChatWidget::saveCurrentConversation()
         }
     }
 
-    SessionStore::saveConversation(m_currentConversationId, sessionData, QString(),
-                                  m_settings.maxSavedConversations > 0 ? m_settings.maxSavedConversations : 50);
+    const bool isNew = SessionStore::saveConversation(
+        m_currentConversationId, sessionData, QString(),
+        m_settings.maxSavedConversations > 0 ? m_settings.maxSavedConversations : 50);
+    // The number of conversations only changes when one is created or
+    // deleted. A save of an existing conversation keeps the cached count, so
+    // the button is repainted without a query.
+    if (isNew) {
+        m_historyCount = -1;
+    }
     updateHistoryButton();
 }
 
 void ChatWidget::scheduleSessionSave()
 {
     if (!m_loadingConversation && m_sessionSaveTimer) {
-        m_sessionSaveTimer->start();
+        // The timer is single-shot. Restarting it on every chunk would keep
+        // pushing the deadline away while the answer streams, so nothing would
+        // ever be saved while the turn is in progress -- exactly the case the
+        // save exists for. The timer is therefore only started when it is not
+        // already running.
+        if (!m_sessionSaveTimer->isActive()) {
+            m_sessionSaveTimer->start();
+        }
     }
 }
 
@@ -1948,7 +1989,10 @@ void ChatWidget::freezeStreaming()
         m_streamRenderTimer->stop();
     }
     if (m_activeAssistantBrowser && !m_streamText.isEmpty()) {
-        m_activeAssistantBrowser->setDocument(makeMarkdownDocument(m_streamText, ChatTheme::messageCss()));
+        // The live renderer closes an unterminated code fence, so the frozen
+        // card has to do the same. Otherwise a reply is rendered differently
+        // after a restart than it was while it streamed.
+        m_activeAssistantBrowser->setDocument(makeMarkdownDocument(closedMarkdown(m_streamText), ChatTheme::messageCss()));
         const int docH = std::max(30, static_cast<int>(m_activeAssistantBrowser->document()->size().height()) + 16);
         if (m_activeAssistantBrowser->height() != docH) {
             m_activeAssistantBrowser->setFixedHeight(docH);
@@ -5251,10 +5295,19 @@ void ChatWidget::reflowTranscriptMedia()
     // area below a short wrapped block.
     const auto reasoningBrowsers = m_transcriptContainer->findChildren<QTextBrowser *>(u"reasoningBrowser"_s);
     for (QTextBrowser *browser : reasoningBrowsers) {
-        if (!browser || !browser->isVisible()) {
+        if (!browser) {
             continue;
         }
-        browser->document()->setTextWidth(contentWidth);
+        // The browser lives inside the assistant card, so the scroll area's
+        // content width is wider than the space the text actually has. The
+        // browser's own viewport is the correct measure; the fallback is for
+        // a browser that was not laid out yet.
+        int width = browser->viewport()->width();
+        if (width <= 40) {
+            width = browser->parentWidget() ? browser->parentWidget()->width() - 8 : contentWidth;
+        }
+        width = std::max(120, width);
+        browser->document()->setTextWidth(width);
         const int docH = std::max(48, qCeil(browser->document()->size().height()) + 20);
         if (browser->height() != docH) {
             browser->setFixedHeight(docH);
@@ -5711,10 +5764,12 @@ void ChatWidget::restoreCurrentTurn(const SessionStore::SessionData &sessionData
     // Restore the current turn's thinking/plan state without using streaming infrastructure
     // This is for the active (unfinished) turn that was in progress when Kate was closed
     QString lastAssistantThinking;
+    QString lastAssistantContent;
     const auto &messages = m_agent.messages();
     for (int i = messages.size() - 1; i >= 0; --i) {
         if (messages.at(i).role == ChatMessage::Role::Assistant) {
             lastAssistantThinking = messages.at(i).thinking;
+            lastAssistantContent = messages.at(i).content;
             break;
         }
     }
@@ -5722,9 +5777,37 @@ void ChatWidget::restoreCurrentTurn(const SessionStore::SessionData &sessionData
     // A process can close while the assistant is still streaming. Its text is
     // persisted separately from completed messages, so restore it as a settled
     // transcript card instead of making the in-progress response disappear.
-    if (!sessionData.currentAssistant.isEmpty()) {
+    //
+    // The snapshot and the committed message can hold the same text. Rendering
+    // both would show the final answer twice, so the card is only added when
+    // the transcript does not already carry the text.
+    const QString restoredText = sessionData.currentAssistant.trimmed();
+    const bool alreadyInTranscript = !restoredText.isEmpty() && restoredText == lastAssistantContent.trimmed();
+    if (!restoredText.isEmpty() && !alreadyInTranscript) {
+        // setStreaming() builds the reply card together with the thinking and
+        // the plan blocks inside it. Rendering the reasoning and the plan into
+        // those blocks keeps them part of the reply instead of leaving them as
+        // separate blocks after it.
         setStreaming(sessionData.currentAssistant);
+        if (!sessionData.currentThinking.isEmpty() && sessionData.currentThinking != lastAssistantThinking) {
+            m_thinkingBuffer = sessionData.currentThinking;
+            m_thinkingPacedLength = m_thinkingBuffer.length();
+            updateThinkingDisplay();
+            if (m_thinkingBlock) {
+                m_thinkingBlock->show();
+            }
+        }
+        if (!sessionData.currentPlan.isEmpty() && sessionData.planShown) {
+            addPlanChecklist(sessionData.currentPlan);
+            if (m_planBlock) {
+                m_planBlock->show();
+            }
+        }
         freezeStreaming();
+        // The reasoning text belongs to the restored snapshot only. Leaving it
+        // in the live buffer would prepend it to the next turn's reasoning.
+        m_thinkingBuffer.clear();
+        m_thinkingPacedLength = 0;
         // This reply is a snapshot from the previous process, not a live
         // streaming turn. Keep its rendered card in the transcript, but detach
         // the streaming pointers so the next reply starts in a new card instead
@@ -5734,6 +5817,7 @@ void ChatWidget::restoreCurrentTurn(const SessionStore::SessionData &sessionData
         m_activeAssistantPulse = nullptr;
         m_streamText.clear();
         m_isStreaming = false;
+        return;
     }
 
     if (!sessionData.currentThinking.isEmpty()
@@ -5753,6 +5837,9 @@ void ChatWidget::restoreCurrentTurn(const SessionStore::SessionData &sessionData
         m_thinkingBlock->show();
         registerThinkingBlock(m_thinkingBlock, m_thinkingBrowser, m_thinkingToggle);
         // applyThinkingState already called by createThinkingBlock with correct initial state
+        // The snapshot must not leak into the next turn's reasoning.
+        m_thinkingBuffer.clear();
+        m_thinkingPacedLength = 0;
     }
 
     if (!sessionData.currentPlan.isEmpty() && sessionData.planShown) {
@@ -5779,8 +5866,15 @@ void ChatWidget::updateHistoryButton()
     if (!m_historyButton) {
         return;
     }
-    const int maxConversations = m_settings.maxSavedConversations > 0 ? m_settings.maxSavedConversations : 50;
-    const int count = SessionStore::listConversations(maxConversations).size();
+    // The count is cached. It is read from the database, and the button is
+    // updated after every save, so querying it every time would turn a
+    // cheap repaint into a database round trip. The cache is dropped wherever
+    // the number of conversations can change.
+    if (m_historyCount < 0) {
+        const int maxConversations = m_settings.maxSavedConversations > 0 ? m_settings.maxSavedConversations : 50;
+        m_historyCount = SessionStore::listConversations(maxConversations).size();
+    }
+    const int count = m_historyCount;
     if (count > 0) {
         m_historyButton->setToolTip(i18n("Conversation History (%1)", count));
         // Show count as a small overlay text on the button when > 1
@@ -5802,6 +5896,9 @@ void ChatWidget::showConversationHistory()
 
     const int maxConversations = m_settings.maxSavedConversations > 0 ? m_settings.maxSavedConversations : 50;
     const auto conversations = SessionStore::listConversations(maxConversations);
+    // The list is the count the button shows, so the cache is filled from it
+    // instead of querying a second time.
+    m_historyCount = conversations.size();
 
     if (conversations.isEmpty()) {
         auto *emptyAction = m_historyMenu->addAction(i18n("No conversations yet"));
@@ -5847,7 +5944,9 @@ void ChatWidget::showConversationHistory()
 
 void ChatWidget::switchToConversation(const QString &conversationId)
 {
-    if (m_loadingConversation || conversationId == m_currentConversationId) {
+    // An empty id has no conversation behind it. Switching to it would drop
+    // the current one without saving it.
+    if (conversationId.isEmpty() || m_loadingConversation || conversationId == m_currentConversationId) {
         return;
     }
 
@@ -5855,8 +5954,14 @@ void ChatWidget::switchToConversation(const QString &conversationId)
         m_sessionSaveTimer->stop();
     }
 
+    // The running turn belongs to the conversation that is being left. Without
+    // this the agent keeps streaming, and a delta that arrives after the
+    // switch would be rendered into the new transcript and saved under the
+    // new id.
+    m_agent.abort();
+
     // Save current conversation before switching
-    if (!m_agent.messages().isEmpty()) {
+    if (!m_agent.messages().isEmpty() && !m_currentConversationId.isEmpty()) {
         const auto sessionData = m_agent.sessionData();
         if (!sessionData.messages.isEmpty()) {
             SessionStore::saveConversation(m_currentConversationId, sessionData, QString(), m_settings.maxSavedConversations > 0 ? m_settings.maxSavedConversations : 50);
@@ -5904,8 +6009,16 @@ void ChatWidget::deleteConversation(const QString &conversationId)
 {
     const bool wasActive = (conversationId == m_currentConversationId);
     SessionStore::deleteConversation(conversationId);
+    // A conversation was removed, so the count of the history changed.
+    m_historyCount = -1;
 
     if (wasActive) {
+        // The agent still holds the messages of the conversation that was just
+        // deleted. Switching or starting a new chat saves the current
+        // conversation first, which would re-create the deleted row with all
+        // of its content. The state is therefore cleared before the switch.
+        m_agent.restoreSession(SessionStore::SessionData());
+        m_currentConversationId.clear();
         // Switch to most recent conversation or create new
         const auto conversations = SessionStore::listConversations(1);
         if (!conversations.isEmpty()) {
@@ -5920,14 +6033,10 @@ void ChatWidget::setCurrentConversationId(const QString &conversationId)
 {
     m_currentConversationId = conversationId;
     if (m_threadTitle) {
-        const auto conversations = SessionStore::listConversations(0);
-        for (const auto &conversation : conversations) {
-            if (conversation.id == conversationId) {
-                m_threadTitle->setText(conversation.title);
-                return;
-            }
-        }
-        m_threadTitle->setText(i18n("New Thread"));
+        // A single-row lookup: listing every conversation just to find one
+        // title materialised the whole history table.
+        const QString title = SessionStore::conversationTitle(conversationId);
+        m_threadTitle->setText(title.isEmpty() ? i18n("New Thread") : title);
     }
 }
 
@@ -5977,6 +6086,7 @@ void ChatWidget::newChat()
     m_currentConversationId = SessionStore::createNewConversation();
 
     // Update history button to reflect any newly saved previous conversation.
+    m_historyCount = -1;
     updateHistoryButton();
 
     // Rebuild transcript from scratch to ensure it matches the cleared agent state

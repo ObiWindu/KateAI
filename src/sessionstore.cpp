@@ -5,6 +5,8 @@
 
 #include "sessionstore.h"
 
+#include "types.h"
+
 #include <KConfigGroup>
 #include <KSharedConfig>
 #include <QJsonDocument>
@@ -23,6 +25,8 @@
 #include <QSqlQuery>
 #include <QStandardPaths>
 #include <QThread>
+
+#include <atomic>
 
 using namespace Qt::Literals::StringLiterals;
 
@@ -53,7 +57,17 @@ static QList<ChatMessage> messagesFromJson(const QJsonArray &arr)
     for (const auto &val : arr) {
         const QJsonObject obj = val.toObject();
         ChatMessage msg;
-        msg.role = static_cast<ChatMessage::Role>(obj[u"role"_s].toInt(static_cast<int>(ChatMessage::Role::User)));
+        // The role comes out of the stored payload. A corrupted value would
+        // be an enumerator no switch handles, and the message would be
+        // silently dropped everywhere.
+        const int roleValue = obj[u"role"_s].toInt(static_cast<int>(ChatMessage::Role::User));
+        if (roleValue < static_cast<int>(ChatMessage::Role::System)
+            || roleValue > static_cast<int>(ChatMessage::Role::Tool)) {
+            qWarning() << "KateAI: a stored message has an unknown role" << roleValue << "- using User";
+            msg.role = ChatMessage::Role::User;
+        } else {
+            msg.role = static_cast<ChatMessage::Role>(roleValue);
+        }
         msg.content = obj[u"content"_s].toString();
         msg.thinking = obj[u"thinking"_s].toString();
         msg.plan = obj[u"plan"_s].toArray();
@@ -112,7 +126,7 @@ static QString generateTitleFromMessages(const QList<ChatMessage> &messages)
         if (msg.role == ChatMessage::Role::User && !msg.content.isEmpty()) {
             QString title = msg.content.trimmed().split(u'\n').first();
             if (title.length() > 50) {
-                title = title.left(47) + u"...";
+                title = truncateSafe(title, 47) + u"...";
             }
             return title;
         }
@@ -159,7 +173,9 @@ static SessionStore::SessionData sessionDataFromJson(const QByteArray &payload)
     data.currentPlan = obj[u"currentPlan"_s].toArray();
     data.planShown = obj[u"planShown"_s].toBool();
     data.currentAssistant = obj[u"currentAssistant"_s].toString();
-    data.stateEpoch = static_cast<quint64>(obj[u"stateEpoch"_s].toInteger());
+    // The epoch counts up, so a negative value is nonsense. Casting it to an
+    // unsigned type would turn it into a huge number.
+    data.stateEpoch = static_cast<quint64>(qMax<qint64>(0, obj[u"stateEpoch"_s].toInteger()));
     data.actionSignatures = stringListFromJson(obj[u"actionSignatures"_s].toArray());
     data.actionRepeatCounts = hashFromJson(obj[u"actionRepeatCounts"_s].toObject());
     data.changedPaths = stringListFromJson(obj[u"changedPaths"_s].toArray());
@@ -252,6 +268,10 @@ static void importLegacyConversations(QSqlDatabase db);
 // then degrade to "no history" instead of losing the session.
 static QSqlDatabase openStore(bool *ok)
 {
+    // The cache is keyed by the thread pointer, but a QThread that ended
+    // frees its address, and a new thread can get the same one. The key is
+    // therefore the connection name, which holds the thread pointer and a
+    // counter.
     static QHash<QThread *, QString> connectionNames; // guarded by storeMutex()
 
     *ok = false;
@@ -279,7 +299,13 @@ static QSqlDatabase openStore(bool *ok)
         qWarning() << "KateAI: cannot create the session database directory:" << directory;
     }
 
-    const QString connectionName = u"kateai_sessions_%1"_s.arg(reinterpret_cast<quintptr>(thread));
+    // A thread that ends frees its address, and a new thread can get the same
+    // one. A counter keeps the connection names unique, and the connection is
+    // closed when the thread ends.
+    static quint64 connectionCounter = 0;
+    const QString connectionName = u"kateai_sessions_%1_%2"_s
+                                       .arg(reinterpret_cast<quintptr>(thread))
+                                       .arg(++connectionCounter);
     QString error;
 
     {
@@ -302,6 +328,20 @@ static QSqlDatabase openStore(bool *ok)
 
     QSqlDatabase db = QSqlDatabase::database(connectionName, true);
     importLegacyConversations(db);
+
+    // The connection belongs to the thread that opened it. When the thread
+    // ends, the connection has to go with it, or the next thread with the same
+    // address would find the connection of a dead thread.
+    auto *cleanup = new QObject(thread);
+    QObject::connect(thread, &QThread::finished, cleanup, [connectionName]() {
+        {
+            QSqlDatabase connection = QSqlDatabase::database(connectionName, false);
+            if (connection.isValid()) {
+                connection.close();
+            }
+        }
+        QSqlDatabase::removeDatabase(connectionName);
+    });
 
     connectionNames.insert(thread, connectionName);
     *ok = true;
@@ -436,6 +476,15 @@ static SessionStore::SessionData legacyConversationData(const QString &id)
 // entries are only dropped once every conversation is readable from the database.
 static void importLegacyConversations(QSqlDatabase db)
 {
+    // The import runs once per process. The flag in the database only stops
+    // a second import in a later session; two threads that open a connection
+    // at the same time would both pass that check and import at the same
+    // time.
+    static std::atomic_bool importStarted{false};
+    bool expected = false;
+    if (!importStarted.compare_exchange_strong(expected, true)) {
+        return;
+    }
     if (!readMeta(db, LEGACY_IMPORT_KEY).isEmpty()) {
         return;
     }
@@ -604,6 +653,28 @@ QList<SessionStore::ConversationInfo> SessionStore::listConversations(int maxCon
     return conversations;
 }
 
+QString SessionStore::conversationTitle(const QString &conversationId)
+{
+    if (conversationId.isEmpty()) {
+        return QString();
+    }
+    QMutexLocker locker(&storeMutex());
+
+    bool ok = false;
+    QSqlDatabase db = openStore(&ok);
+    if (!ok) {
+        return QString();
+    }
+
+    QSqlQuery query(db);
+    query.prepare(u"SELECT title FROM conversations WHERE id = ?"_s);
+    query.addBindValue(conversationId);
+    if (!query.exec() || !query.next()) {
+        return QString();
+    }
+    return query.value(0).toString();
+}
+
 SessionStore::SessionData SessionStore::loadConversation(const QString &conversationId)
 {
     QMutexLocker locker(&storeMutex());
@@ -624,11 +695,11 @@ SessionStore::SessionData SessionStore::loadConversation(const QString &conversa
     return sessionDataFromJson(query.value(0).toByteArray());
 }
 
-void SessionStore::saveConversation(const QString &conversationId, const SessionData &data, const QString &title, int maxConversations)
+bool SessionStore::saveConversation(const QString &conversationId, const SessionData &data, const QString &title, int maxConversations)
 {
     if (conversationId.isEmpty()) {
         qWarning() << "KateAI: refusing to save a conversation with an empty ID";
-        return;
+        return false;
     }
 
     QMutexLocker locker(&storeMutex());
@@ -636,7 +707,7 @@ void SessionStore::saveConversation(const QString &conversationId, const Session
     bool ok = false;
     QSqlDatabase db = openStore(&ok);
     if (!ok) {
-        return;
+        return false;
     }
 
     // Generate title if not provided
@@ -645,12 +716,15 @@ void SessionStore::saveConversation(const QString &conversationId, const Session
 
     if (!db.transaction()) {
         qWarning() << "KateAI: cannot save conversation" << conversationId << db.lastError().text();
-        return;
+        return false;
     }
 
     bool stored = false;
+    // Whether the conversation is new. The caller uses it to know if the
+    // number of stored conversations grew.
+    const bool isNew = !conversationExists(db, conversationId);
 
-    if (conversationExists(db, conversationId)) {
+    if (!isNew) {
         QSqlQuery update(db);
         update.prepare(u"UPDATE conversations SET title = ?, updated_at = ?, message_count = ?, version = ?, payload = ? WHERE id = ?"_s);
         update.addBindValue(convTitle);
@@ -682,17 +756,23 @@ void SessionStore::saveConversation(const QString &conversationId, const Session
     if (stored) {
         // Keep the restore pointer in the same transaction as the transcript.
         // A crash must not leave SQLite pointing at an unpersisted blank chat.
-        writeMeta(db, ACTIVE_CONVERSATION_KEY, conversationId);
+        // Only the conversation the user is actually in may become the active
+        // one: saving any conversation would otherwise switch the pointer
+        // away from the chat the user is reading.
+        if (readMeta(db, ACTIVE_CONVERSATION_KEY).isEmpty() || readMeta(db, ACTIVE_CONVERSATION_KEY) == conversationId) {
+            writeMeta(db, ACTIVE_CONVERSATION_KEY, conversationId);
+        }
     }
 
     if (!stored || !db.commit()) {
         db.rollback();
         qWarning() << "KateAI: cannot commit conversation" << conversationId << db.lastError().text();
-        return;
+        return false;
     }
 
     // Prune old conversations if needed
     pruneOldConversations(maxConversations);
+    return isNew;
 }
 
 void SessionStore::deleteConversation(const QString &conversationId)
@@ -785,10 +865,15 @@ void SessionStore::pruneOldConversations(int maxConversations)
         return;
     }
 
-    // Delete the oldest conversations beyond the limit
+    // Delete the oldest conversations beyond the limit. The active
+    // conversation is kept: pruning it would leave the restore pointer
+    // naming a row that no longer exists, and the app would silently fall
+    // back to another conversation on the next start.
     QSqlQuery query(db);
-    query.prepare(u"DELETE FROM conversations WHERE id NOT IN (SELECT id FROM conversations ORDER BY updated_at DESC LIMIT ?)"_s);
+    query.prepare(u"DELETE FROM conversations WHERE id NOT IN (SELECT id FROM conversations ORDER BY updated_at DESC LIMIT ?) "
+                  u"AND id != (SELECT value FROM meta WHERE key = ?)"_s);
     query.addBindValue(maxConversations);
+    query.addBindValue(ACTIVE_CONVERSATION_KEY);
     if (!query.exec()) {
         qWarning() << "KateAI: cannot prune old conversations:" << query.lastError().text();
     }

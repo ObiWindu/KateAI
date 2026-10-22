@@ -120,6 +120,7 @@ private:
     QSpinBox *m_timeout = nullptr;
     QSpinBox *m_maxExpandedToolCards = nullptr;
     QPlainTextEdit *m_deny = nullptr;
+    QCheckBox *m_allowOutsideReads = nullptr;
 
     // Agent
     QSpinBox *m_maxIter = nullptr;

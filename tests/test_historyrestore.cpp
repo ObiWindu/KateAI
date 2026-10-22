@@ -259,6 +259,41 @@ private Q_SLOTS:
         QVERIFY2(termCard->styleSheet().contains(ChatTheme::toolColor(u"terminal/exec"_s)),
                  qPrintable(termCard->styleSheet()));
     }
+
+    void testARestoredAnswerIsNotShownTwice()
+    {
+        // The snapshot of an unfinished turn holds the text of the answer, and
+        // the transcript may already carry the same answer. Rendering both
+        // shows the final answer twice.
+        ChatWidget widget;
+        widget.resize(900, 700);
+        widget.show();
+
+        SessionStore::SessionData data;
+        ChatMessage user;
+        user.role = ChatMessage::Role::User;
+        user.content = u"say hello"_s;
+        ChatMessage assistant;
+        assistant.role = ChatMessage::Role::Assistant;
+        assistant.content = u"Hello there"_s;
+        data.messages = {user, assistant};
+        // The same text, as a session that was saved while the answer was
+        // still streaming would hold it.
+        data.currentAssistant = u"Hello there"_s;
+        SessionStore::saveConversation(u"conv-duplicate"_s, data, u"Duplicate"_s, 50);
+
+        widget.setCurrentConversationId(SessionStore::createNewConversation());
+        widget.switchToConversation(u"conv-duplicate"_s);
+        QTest::qWait(60);
+
+        int answers = 0;
+        for (const QTextBrowser *browser : widget.findChildren<QTextBrowser *>()) {
+            if (browser->toPlainText().contains(u"Hello there"_s)) {
+                ++answers;
+            }
+        }
+        QCOMPARE(answers, 1);
+    }
 };
 
 // Explicit main rather than QTEST_MAIN: the widget built here autosaves its

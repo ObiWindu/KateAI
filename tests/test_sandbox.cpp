@@ -1,5 +1,6 @@
 #include "sandbox.h"
 
+#include <QCoreApplication>
 #include <QDir>
 #include <QFile>
 #include <QTemporaryDir>
@@ -22,6 +23,69 @@ private Q_SLOTS:
         QVERIFY(box.allowsWrite(u"src/main.cpp"_s, &error));
         QVERIFY(!box.allowsWrite(u"../outside.txt"_s, &error));
         QVERIFY(error.contains(u"outside"_s));
+    }
+
+    void writeOutsideWorkspaceIsBlockedEvenWhenTheDirectoryIsMissing()
+    {
+        // The containment check used to run only on the canonical path, which
+        // does not exist when neither the file nor its parent directory does.
+        // A write to /tmp/<new-dir>/x.txt therefore succeeded in every
+        // profile, including Strict.
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString target = QStringLiteral("/tmp/kateai-sandbox-escape-%1/outside.txt")
+                                   .arg(QCoreApplication::applicationPid());
+        for (SandboxProfile profile : {SandboxProfile::Workspace, SandboxProfile::Strict}) {
+            Sandbox box(dir.path(), profile);
+            QString error;
+            QVERIFY2(!box.allowsWrite(target, &error), "the write was allowed");
+            QVERIFY(error.contains(u"outside"_s));
+        }
+        // The same path inside the workspace is fine.
+        Sandbox box(dir.path(), SandboxProfile::Workspace);
+        QString error;
+        QVERIFY(box.allowsWrite(u"sub/dir/file.txt"_s, &error));
+    }
+
+    void readsOutsideTheWorkspaceAreBlocked()
+    {
+        // The read tools are approved without a prompt, so a profile that
+        // does not confine them lets the agent read any file of the host.
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        Sandbox box(dir.path(), SandboxProfile::Workspace);
+        QString error;
+        QVERIFY(!box.allowsRead(u"/etc/passwd"_s, &error));
+        // Inside the workspace it still works.
+        QFile file(dir.filePath(u"inside.txt"_s));
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        file.write("x");
+        file.close();
+        QVERIFY(box.allowsRead(u"inside.txt"_s, &error));
+        // The opt-in lifts the confinement again.
+        Sandbox open(dir.path(), SandboxProfile::Workspace, {}, true);
+        QVERIFY(open.allowsRead(u"/etc/passwd"_s, &error));
+    }
+
+    void readOnlyCommandRejectsSubstitution()
+    {
+        // "cat $(...)" has a read-only executable and still runs whatever the
+        // substitution expands to. Such a command was auto-approved.
+        Sandbox box(QStringLiteral("/tmp"), SandboxProfile::Workspace);
+        QVERIFY(!box.isReadOnlyCommand(u"cat \"$(python3 -c 'import os')\""_s));
+        QVERIFY(!box.isReadOnlyCommand(u"cat `id`"_s));
+        QVERIFY(!box.isReadOnlyCommand(u"ls &"_s));
+        // The ordinary read-only commands are unaffected.
+        QVERIFY(box.isReadOnlyCommand(u"ls -la"_s));
+        QVERIFY(box.isReadOnlyCommand(u"cat file.txt"_s));
+    }
+
+    void deniedDirectoryMatchesItself()
+    {
+        // "**/.ssh/**" did not match the directory itself, so a command that
+        // named the directory was not caught.
+        QVERIFY(Sandbox::globMatch(u"**/.ssh/**"_s, u"/home/user/.ssh"_s));
+        QVERIFY(Sandbox::globMatch(u"**/.ssh/**"_s, u"/home/user/.ssh/id_rsa"_s));
     }
 
     void envFileIsDenied()
@@ -240,6 +304,51 @@ private Q_SLOTS:
         QVERIFY(command.join(u' ').contains(u"(deny default)"_s));
 #else
         QVERIFY(!command.isEmpty());
+#endif
+    }
+
+    void theHostTmpIsNeverWritableInsideTheSandbox()
+    {
+        // The /tmp of the host is writable by everybody, so a command could
+        // leave files there that outlive the sandbox.
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        for (SandboxProfile profile : {SandboxProfile::Strict, SandboxProfile::ReadOnly}) {
+            Sandbox box(dir.path(), profile);
+            QString error;
+            const QStringList command = box.wrapCommand(u"pwd"_s, &error);
+            if (command.isEmpty()) {
+                QSKIP(qPrintable(error));
+            }
+#if defined(Q_OS_LINUX)
+            // A private tmpfs, not the /tmp of the host.
+            bool hasPrivateTmp = false;
+            for (int i = 0; i + 1 < command.size(); ++i) {
+                if (command.at(i) == u"--tmpfs"_s && command.at(i + 1) == u"/tmp"_s) {
+                    hasPrivateTmp = true;
+                }
+                QVERIFY(!(command.at(i) == u"--bind"_s && command.at(i + 1) == u"/tmp"_s));
+            }
+            QVERIFY(hasPrivateTmp);
+#endif
+        }
+    }
+
+    void theStrictProfileIsRefusedWithoutAnIsolationMechanism()
+    {
+        // On a platform without bubblewrap or sandbox-exec the strict profile
+        // cannot be honoured. The command is refused instead of running
+        // unsandboxed.
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        Sandbox box(dir.path(), SandboxProfile::Strict);
+        QString error;
+        const QStringList command = box.wrapCommand(u"pwd"_s, &error);
+#if defined(Q_OS_LINUX) || defined(Q_OS_MACOS)
+        QVERIFY2(!command.isEmpty() || !error.isEmpty(), "the strict profile must either run or explain itself");
+#else
+        QVERIFY(command.isEmpty());
+        QVERIFY(error.contains(u"not available"_s));
 #endif
     }
 

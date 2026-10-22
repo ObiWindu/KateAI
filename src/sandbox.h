@@ -33,7 +33,11 @@ private:
 class Sandbox
 {
 public:
-    Sandbox(QString workspaceRoot, SandboxProfile profile, QStringList extraDenyGlobs = {});
+    // allowOutsideReads lifts the workspace confinement for the read tools.
+    // It is off by default: the read tools are approved without a prompt, so
+    // a confined read is the only thing that keeps the agent inside the
+    // project.
+    Sandbox(QString workspaceRoot, SandboxProfile profile, QStringList extraDenyGlobs = {}, bool allowOutsideReads = false);
 
     QString workspaceRoot() const
     {
@@ -78,6 +82,7 @@ private:
     QString m_workspaceRoot;
     SandboxProfile m_profile = SandboxProfile::Workspace;
     QStringList m_extraDenyGlobs;
+    bool m_allowOutsideReads = false;
 };
 
 } // namespace KateAi

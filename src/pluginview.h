@@ -10,6 +10,7 @@
 #include <KTextEditor/MainWindow>
 #include <KXMLGUIClient>
 
+#include <QHash>
 #include <QObject>
 #include <QPointer>
 
@@ -40,6 +41,10 @@ private:
     void askSelectionWithInstruction(const QString &instruction);
     QString editorContext() const;
     void refreshWorkspace();
+    // Asks the user before the MCP servers that the project defines are
+    // started. A server is a program, and the list can come with the
+    // project.
+    void confirmWorkspaceMcpServers(const QString &workspace);
     void updateCompletions();
     // Catches QEvent::ApplicationPaletteChange on qApp (Qt 6 deprecates
     // QGuiApplication::paletteChanged in favour of the event).
@@ -55,6 +60,9 @@ private:
     QPointer<QWidget> m_toolView;
     QPointer<QDialog> m_configDialog;
     ChatWidget *m_chat = nullptr;
+    // The answer of the user per workspace: whether the MCP servers of that
+    // project may be started.
+    QHash<QString, bool> m_mcpTrust;
     DiskDocumentBridge m_bridge;
     // Editor colour scheme identity as of the last theme load, so configChanged
     // and ApplicationPaletteChange (which fire for every editor setting and

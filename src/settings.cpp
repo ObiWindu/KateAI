@@ -4,8 +4,10 @@
  */
 
 #include "settings.h"
+#include "websearch.h"
 
 #include <KConfigGroup>
+#include <QFile>
 #include <KSharedConfig>
 
 using namespace Qt::Literals::StringLiterals;
@@ -84,6 +86,7 @@ Settings SettingsStore::load()
     s.thinkingMode = g.readEntry(u"ThinkingMode"_s, true);
     s.extraSystemPrompt = g.readEntry(u"ExtraSystemPrompt"_s, QString());
     s.extraDenyGlobs = g.readEntry(u"ExtraDenyGlobs"_s, QStringList());
+    s.allowReadsOutsideWorkspace = g.readEntry(u"AllowReadsOutsideWorkspace"_s, false);
     s.contextCompressionLevel = g.readEntry(u"ContextCompressionLevel"_s, 1);
     s.maxGraphNodes = g.readEntry(u"MaxGraphNodes"_s, 50);
     s.maxGraphEdges = g.readEntry(u"MaxGraphEdges"_s, 100);
@@ -113,6 +116,11 @@ Settings SettingsStore::load()
     s.mcpTimeoutMs = g.readEntry(u"McpTimeoutMs"_s, 60000);
         // Web search
         s.webSearchProvider = g.readEntry(u"WebSearchProvider"_s, QStringLiteral("duckduckgo"));
+    // An unknown value would silently disable the web search, because the
+    // provider falls back to "disabled" for it.
+    if (WebSearch::providerFromId(s.webSearchProvider) == WebSearch::Provider::Disabled) {
+        s.webSearchProvider = QStringLiteral("duckduckgo");
+    }
         s.webSearchApiKey = g.readEntry(u"WebSearchApiKey"_s);
         s.webSearchEndpoint = g.readEntry(u"WebSearchEndpoint"_s);
         s.webSearchMaxResults = g.readEntry(u"WebSearchMaxResults"_s, 5);
@@ -202,6 +210,26 @@ Settings SettingsStore::load()
     s.exploitationTemperature = qBound(0.0, s.exploitationTemperature, 2.0);
     s.maxRetryAttempts = qBound(1, s.maxRetryAttempts, 10);
     s.baseRetryDelaySeconds = qBound(1, s.baseRetryDelaySeconds, 60);
+    // The length budgets need a lower bound: a negative value would empty the
+    // system prompt or the editor context without saying so.
+    s.maxFileContentLength = qBound(1, s.maxFileContentLength, 1000000);
+    s.maxEditorContextLength = qBound(1, s.maxEditorContextLength, 1000000);
+    s.maxProjectInstructionsLength = qBound(1, s.maxProjectInstructionsLength, 1000000);
+    s.maxSystemPromptLength = qBound(1, s.maxSystemPromptLength, 1000000);
+    s.maxThinkingTokens = qBound(1, s.maxThinkingTokens, 1000000);
+    s.maxPlanSteps = qBound(1, s.maxPlanSteps, 200);
+    // 0 means "no limit" for the two budgets, so only the positive values
+    // are bounded.
+    if (s.maxToolCalls > 0) {
+        s.maxToolCalls = qBound(1, s.maxToolCalls, 1000);
+    }
+    if (s.maxModelRequests > 0) {
+        s.maxModelRequests = qBound(1, s.maxModelRequests, 1000);
+    }
+    // The sampling parameters have an upper bound: a temperature above 2 is
+    // not a temperature.
+    s.temperature = qBound(0.0, s.temperature, 2.0);
+    s.topP = qBound(0.0, s.topP, 1.0);
     // 0 is the documented "no cap" value the retry maths keys off, so only the
     // positive entries are bounded.
     if (s.maxRetryDelaySeconds != 0) {
@@ -276,6 +304,7 @@ void SettingsStore::save(const Settings &settings)
     g.writeEntry(u"ThinkingMode"_s, settings.thinkingMode);
     g.writeEntry(u"ExtraSystemPrompt"_s, settings.extraSystemPrompt);
     g.writeEntry(u"ExtraDenyGlobs"_s, settings.extraDenyGlobs);
+    g.writeEntry(u"AllowReadsOutsideWorkspace"_s, settings.allowReadsOutsideWorkspace);
     
     // Save context compression settings
     g.writeEntry(u"ContextCompressionLevel"_s, settings.contextCompressionLevel);
@@ -355,6 +384,21 @@ void SettingsStore::save(const Settings &settings)
     g.writeEntry(u"CompressionThreshold"_s, settings.compressionThreshold);
     
     g.sync();
+
+    // The API keys live in this file in plain text. The file is created with
+    // the permissions of the user's umask, which usually leaves it readable
+    // by every account on the machine. It is tightened to the owner only.
+    const QString configFile = g.config()->name();
+    if (!configFile.isEmpty()) {
+        QFile file(configFile);
+        if (file.exists()) {
+            const QFileDevice::Permissions wanted =
+                QFileDevice::ReadOwner | QFileDevice::WriteOwner;
+            if ((file.permissions() & QFileDevice::ReadGroup) || (file.permissions() & QFileDevice::ReadOther)) {
+                file.setPermissions(wanted);
+            }
+        }
+    }
 }
 
 } // namespace KateAi

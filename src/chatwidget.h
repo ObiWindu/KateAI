@@ -413,6 +413,9 @@ private:
 
     // Conversation history
     QPushButton *m_historyButton = nullptr;
+    // The number of conversations the history button shows. Negative means
+    // "not known yet" and makes the next update read it from the store.
+    int m_historyCount = -1;
     QMenu *m_historyMenu = nullptr;
     QString m_currentConversationId;
     bool m_loadingConversation = false;

@@ -9,10 +9,13 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QRegularExpression>
 #include <QMutex>
 #include <QProcess>
 #include <QProcessEnvironment>
+#include <QDateTime>
 #include <QStandardPaths>
+#include <QTimer>
 #include <QRecursiveMutex>
 
 using namespace Qt::Literals::StringLiterals;
@@ -41,15 +44,26 @@ QString tagName(int sequence, const QString &hash)
     return QStringLiteral("kateai/%1-%2").arg(sequence, 8, 10, QLatin1Char('0')).arg(hash);
 }
 
+// A checkpoint id is used as a git revision, so it has to be a commit hash.
+bool isValidCheckpointId(const QString &id)
+{
+    static const QRegularExpression hashPattern(u"^[0-9a-f]{7,64}$"_s);
+    return hashPattern.match(id).hasMatch();
+}
+
 bool isTagName(const QString &ref)
 {
     return ref.startsWith(TagNamespace);
 }
 
-// Recovers the snapshot commit hash from a tag ref name.
+// Recovers the snapshot commit hash from a tag ref name. The tag carries the
+// sequence and the hash ("<sequence>-<hash>"); only the hash identifies the
+// commit, and it is the only part that can be used as a revision.
 QString hashFromTag(const QString &ref)
 {
-    return ref.mid(TagNamespace.size());
+    const QString suffix = ref.mid(TagNamespace.size());
+    const int separator = suffix.lastIndexOf(QLatin1Char('-'));
+    return separator > 0 ? suffix.mid(separator + 1) : suffix;
 }
 
 // Turns a full ref name back into the short name `git tag -d` expects.
@@ -64,7 +78,18 @@ CheckpointManager::CheckpointManager(QObject *parent)
 {
 }
 
-CheckpointManager::~CheckpointManager() = default;
+CheckpointManager::~CheckpointManager()
+{
+    // A git process that is still running is stopped, so it does not keep
+    // the repository locked after the manager is gone.
+    for (QProcess *git : std::as_const(m_detachedProcesses)) {
+        if (git && git->state() != QProcess::NotRunning) {
+            git->kill();
+            git->waitForFinished(1000);
+        }
+    }
+    m_detachedProcesses.clear();
+}
 
 void CheckpointManager::setWorkspace(const QString &workspace)
 {
@@ -73,6 +98,49 @@ void CheckpointManager::setWorkspace(const QString &workspace)
     }
     m_workspace = workspace;
     m_unavailableReason.clear();
+    // The cache directory keeps one repository per project that was ever
+    // opened. The ones that are not needed any more are removed.
+    pruneStaleShadowRepositories();
+}
+
+void CheckpointManager::pruneStaleShadowRepositories() const
+{
+    const QString base = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
+    if (base.isEmpty()) {
+        return;
+    }
+    const QString root = base + u"/checkpoints"_s;
+    QDir dir(root);
+    if (!dir.exists()) {
+        return;
+    }
+    // A repository of a project that no longer exists is useless, and one
+    // that was not touched for a month is not worth the space.
+    const QDateTime cutoff = QDateTime::currentDateTime().addDays(-30);
+    const QFileInfoList entries = dir.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot);
+    for (const QFileInfo &entry : entries) {
+        if (entry.fileName() == QFileInfo(shadowRoot()).fileName() && m_workspace.isEmpty()) {
+            continue;
+        }
+        const QString marker = entry.absoluteFilePath() + u"/workspace"_s;
+        QFile file(marker);
+        QString workspace;
+        if (file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            workspace = QString::fromUtf8(file.readAll()).trimmed();
+        }
+        if (!workspace.isEmpty() && QFileInfo::exists(workspace)) {
+            // The project is still there. It may be old, but the repository
+            // belongs to a project that exists.
+            if (entry.lastModified() < cutoff) {
+                QDir(entry.absoluteFilePath()).removeRecursively();
+            }
+            continue;
+        }
+        if (entry.lastModified() < cutoff || workspace.isEmpty()) {
+            // The project is gone, or the repository was never finished.
+            QDir(entry.absoluteFilePath()).removeRecursively();
+        }
+    }
 }
 
 void CheckpointManager::setEnabled(bool enabled)
@@ -166,6 +234,14 @@ bool CheckpointManager::ensureRepository(QString *error) const
     // Run "git init" from inside the workspace so the repository picks up the
     // project's branch name, then bind the real workspace as its work tree.
     writeExcludes();
+    // The workspace is written into the repository, so the cleanup knows
+    // which project a shadow repository belongs to.
+    {
+        QFile marker(shadowRoot() + u"/workspace"_s);
+        if (marker.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
+            marker.write(m_workspace.toUtf8());
+        }
+    }
     return true;
 }
 
@@ -202,6 +278,48 @@ void CheckpointManager::writeExcludes() const
     if (file.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
         file.write(lines.join(u'\n').toUtf8());
     }
+}
+
+void CheckpointManager::runGitDetached(const QStringList &arguments, int timeoutMs)
+{
+    const QString dir = gitDir();
+    if (dir.isEmpty()) {
+        return;
+    }
+    // The process is parented to the manager, so it goes away with it. The
+    // result is not waited for: the command is housekeeping that nobody has
+    // to see.
+    auto *git = new QProcess(this);
+    QProcessEnvironment environment = QProcessEnvironment::systemEnvironment();
+    environment.insert(u"GIT_DIR"_s, dir);
+    environment.insert(u"GIT_WORK_TREE"_s, m_workspace);
+    environment.insert(u"GIT_CONFIG_NOSYSTEM"_s, u"1"_s);
+    environment.insert(u"GIT_TERMINAL_PROMPT"_s, u"0"_s);
+    git->setProcessEnvironment(environment);
+    git->setWorkingDirectory(m_workspace);
+
+    QStringList full;
+    full << u"-c"_s << u"user.name=Kate AI"_s << u"-c"_s << u"user.email=kateai@localhost"_s
+         << u"-c"_s << u"commit.gpgsign=false"_s << arguments;
+
+    // A command that runs forever is stopped; it would keep the repository
+    // locked for good.
+    auto *guard = new QTimer(git);
+    guard->setSingleShot(true);
+    guard->setInterval(timeoutMs);
+    connect(guard, &QTimer::timeout, git, [git]() {
+        git->kill();
+    });
+    connect(git, &QProcess::finished, git, [this, git]() {
+        m_detachedProcesses.removeAll(git);
+        git->deleteLater();
+    });
+    connect(git, &QProcess::errorOccurred, git, [this, git](QProcess::ProcessError) {
+        m_detachedProcesses.removeAll(git);
+        git->deleteLater();
+    });
+    m_detachedProcesses.append(git);
+    git->start(u"git"_s, full);
 }
 
 bool CheckpointManager::runGit(const QStringList &arguments, QString *output, QString *error, int timeoutMs) const
@@ -318,6 +436,11 @@ QString CheckpointManager::createCheckpoint(const QString &label, QString *error
         return {};
     }
 
+    // The exclude list is rewritten for every snapshot: a .gitignore that was
+    // added or changed after the cache repository was created would
+    // otherwise be ignored, and the snapshot would stage the whole tree.
+    writeExcludes();
+
     if (!stageWorktree(error)) {
         return {};
     }
@@ -357,8 +480,16 @@ void CheckpointManager::prune()
     for (int i = m_retention; i < refs.size(); ++i) {
         runGit({u"tag"_s, u"-d"_s, shortTagName(refs.at(i))}, nullptr, nullptr, 5000);
     }
-    runGit({u"reflog"_s, u"expire"_s, u"--expire=now"_s, u"--expire-unreachable=now"_s, u"--all"_s}, nullptr, nullptr, 10000);
-    runGit({u"gc"_s, u"--prune=now"_s, u"--quiet"_s}, nullptr, nullptr, 30000);
+    // The housekeeping runs in the background. "git gc" walks the whole
+    // object store and can take seconds; doing that on the UI thread froze
+    // the editor for the whole time.
+    //
+    // The pruning uses the default grace period and not "--prune=now": a
+    // snapshot is written in two steps (the commit, then the tag), and a
+    // collection that runs in between would delete the commit that the tag
+    // is about to point at.
+    runGitDetached({u"reflog"_s, u"expire"_s, u"--expire=now"_s, u"--expire-unreachable=now"_s, u"--all"_s});
+    runGitDetached({u"gc"_s, u"--quiet"_s});
 }
 
 QList<CheckpointInfo> CheckpointManager::checkpoints() const
@@ -394,9 +525,13 @@ QList<CheckpointInfo> CheckpointManager::checkpoints() const
 
 int CheckpointManager::changedFileCount(const QString &id) const
 {
-    if (!isAvailable() || id.isEmpty()) {
+    if (!isAvailable() || !isValidCheckpointId(id)) {
         return 0;
     }
+    // The mutex is held for the whole call: the staging and the diff run git
+    // commands that touch the same index, and two of them at once race for
+    // the index lock.
+    QMutexLocker locker(&m_checkpointMutex);
     stageWorktree();
     QString output;
     if (!runGit({u"diff"_s, u"--cached"_s, u"--name-only"_s, id}, &output, nullptr)) {
@@ -408,9 +543,12 @@ int CheckpointManager::changedFileCount(const QString &id) const
 
 QString CheckpointManager::diffAgainstCheckpoint(const QString &id, int maxLines) const
 {
-    if (!isAvailable() || id.isEmpty()) {
+    if (!isAvailable() || !isValidCheckpointId(id)) {
         return {};
     }
+    // The same reason as in changedFileCount(): the git commands touch the
+    // shared index.
+    QMutexLocker locker(&m_checkpointMutex);
     stageWorktree();
     QString diff;
     if (!runGit({u"diff"_s, u"--cached"_s, u"--no-color"_s, id}, &diff, nullptr)) {
@@ -441,6 +579,14 @@ bool CheckpointManager::restoreCheckpoint(const QString &id, QString *error)
     if (id.isEmpty()) {
         if (error) {
             *error = u"No checkpoint was selected."_s;
+        }
+        return false;
+    }
+    // The id reaches git as a revision, and git reads an argument that starts
+    // with a dash as an option. Only a commit hash is accepted.
+    if (!isValidCheckpointId(id)) {
+        if (error) {
+            *error = u"Not a valid checkpoint id."_s;
         }
         return false;
     }

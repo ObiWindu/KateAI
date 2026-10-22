@@ -109,6 +109,18 @@ public:
 
     void start();
     void stop();
+    // Terminates the server process, if there is one, and forgets its
+    // buffers. Used when the client is restarted or the handshake times out,
+    // so no server process is left running behind the client.
+    void stopProcess();
+    // Asks the server for its tool list again, after it announced a change.
+    void refreshToolList();
+    // The manager-wide timeout. It caps the per-server timeout, so a server
+    // that asks for a very long budget cannot outlive the setting.
+    void setTimeoutMs(int timeoutMs)
+    {
+        m_timeoutMs = timeoutMs;
+    }
 
     const McpServerConfig &config() const
     {
@@ -180,6 +192,7 @@ private:
 
     QNetworkAccessManager *m_nam = nullptr;
     QString m_sessionId;
+    int m_timeoutMs = 0;
 
     int m_nextId = 1;
     QHash<int, Pending> m_pending;
@@ -210,6 +223,17 @@ public:
     void setServers(const QList<McpServerConfig> &servers);
     // Re-reads .kateai/mcp.json and applies it.
     void reloadFromDisk();
+    // When this is off, the configuration of the workspace is not loaded from
+    // disk. A workspace can carry a server list that starts a program, and
+    // that list is only honoured after the user has confirmed it.
+    void setLoadWorkspaceConfig(bool load)
+    {
+        m_loadWorkspaceConfig = load;
+    }
+    bool loadsWorkspaceConfig() const
+    {
+        return m_loadWorkspaceConfig;
+    }
     // Writes the current set back to .kateai/mcp.json.
     bool saveToDisk(QString *error = nullptr);
 
@@ -225,6 +249,11 @@ public:
     void setTimeoutMs(int timeoutMs)
     {
         m_timeoutMs = timeoutMs;
+        for (McpClient *client : std::as_const(m_clients)) {
+            if (client) {
+                client->setTimeoutMs(timeoutMs);
+            }
+        }
     }
 
     // Connects every enabled server that is not connected yet.
@@ -267,6 +296,8 @@ private:
     QHash<QString, McpClient *> m_clients;
     bool m_enabled = true;
     bool m_autoConnect = true;
+    // Whether the server list of the workspace may be loaded from disk.
+    bool m_loadWorkspaceConfig = true;
     int m_timeoutMs = 60000;
     QStringList m_autoApproved;
     QStringList m_readOnlyTools;

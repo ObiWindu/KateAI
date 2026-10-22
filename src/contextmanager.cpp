@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: LGPL-2.1-or-later
  */
 
+#include "types.h"
 #include "contextmanager.h"
 
 #include <KLocalizedString>
@@ -64,7 +65,7 @@ QString oneLine(const QString &text, int limit)
     QString flat = text.simplified();
     flat.replace(QRegularExpression(QStringLiteral("[\\r\\n]+")), QStringLiteral(" "));
     if (limit > 0 && flat.length() > limit) {
-        flat = flat.left(limit) + QStringLiteral("…");
+        flat = truncateSafe(flat, limit) + QStringLiteral("…");
     }
     return flat;
 }
@@ -77,12 +78,17 @@ QString shrinkText(const QString &text, int keepChars)
     if (text.length() <= keepChars) {
         return text;
     }
-    const int head = qMax(24, keepChars * 55 / 100);
-    const int tail = qMax(24, keepChars - head - 40);
-    if (head + tail + 40 >= text.length()) {
-        return text.left(keepChars) + QStringLiteral("…");
+    // The marker takes room too, so the head and the tail are chosen so that
+    // the result stays inside the budget. Otherwise the caller, which loops
+    // until the text fits, never converges.
+    const QString marker = QStringLiteral("\n[… compacted …]\n");
+    const int room = qMax(0, keepChars - marker.size() - 1);
+    const int head = qBound(1, room * 55 / 100, room);
+    const int tail = qMax(0, room - head);
+    if (head + tail + marker.size() + 1 >= text.length()) {
+        return truncateSafe(text, keepChars - 1) + QStringLiteral("…");
     }
-    return text.left(head) + QStringLiteral("\n[… compacted …]\n") + text.right(tail);
+    return truncateSafe(text, head) + marker + text.right(tail);
 }
 
 } // namespace
@@ -178,8 +184,11 @@ QString buildSummary(const QList<ChatMessage> &dropped, int requestChars)
             // The last thing the agent said before the span was dropped is the
             // other half of "where did this get to": the files tell the next
             // turn what was touched, the closing words tell it what was found.
-            if (!message.content.trimmed().isEmpty() && outcomes.size() < 2) {
-                outcomes.prepend(oneLine(message.content, 400));
+            // Every closing word is collected, because the loop walks the
+            // messages from the start: keeping the first two would report the
+            // oldest conclusions of the dropped span instead of the newest.
+            if (!message.content.trimmed().isEmpty()) {
+                outcomes.append(oneLine(message.content, 400));
             }
             break;
         case ChatMessage::Role::Tool:
@@ -213,6 +222,10 @@ QString buildSummary(const QList<ChatMessage> &dropped, int requestChars)
     }
     if (!tools.isEmpty()) {
         lines << QStringLiteral("\nTools used: %1").arg(tools.join(QStringLiteral(", ")));
+    }
+    // Only the last two outcomes are reported.
+    while (outcomes.size() > 2) {
+        outcomes.removeFirst();
     }
     if (!outcomes.isEmpty()) {
         lines << QStringLiteral("\nWhere it got to:");

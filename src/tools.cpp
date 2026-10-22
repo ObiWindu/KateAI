@@ -30,6 +30,13 @@ using namespace Qt::Literals::StringLiterals;
 namespace KateAi
 {
 
+namespace
+{
+// A command that writes gigabytes must not fill the memory: the output is
+// kept while the command runs, and the ceiling is applied here.
+constexpr int kMaxBashOutputChars = 80000; // keep in sync with clip()
+} // namespace
+
 static QJsonObject parseArgs(const ToolCall &call, QString *error)
 {
     // First try to use the parsed arguments directly if available
@@ -436,6 +443,7 @@ PermissionRequest ToolRunner::describe(const ToolCall &call) const
         QString existing;
         QString error;
         const QString resolved = m_sandbox.resolve(req.path, &error, true);
+        req.resolvedPath = resolved;
         if (!resolved.isEmpty() && m_bridge) {
             m_bridge->readDocument(resolved, &existing);
         }
@@ -444,6 +452,10 @@ PermissionRequest ToolRunner::describe(const ToolCall &call) const
     } else if (call.name == u"edit_file"_s) {
         req.risk = ToolRisk::Write;
         req.mutatesFiles = true;
+        {
+            QString error;
+            req.resolvedPath = m_sandbox.resolve(req.path, &error, true);
+        }
         const QString oldString = args.value(u"old_string"_s).toString();
         const QString newString = args.value(u"new_string"_s).toString();
         req.describeDiff = unifiedDiff(req.path, oldString, newString);
@@ -457,6 +469,7 @@ PermissionRequest ToolRunner::describe(const ToolCall &call) const
         QString existing;
         QString error;
         const QString resolved = m_sandbox.resolve(req.path, &error, true);
+        req.resolvedPath = resolved;
         if (!resolved.isEmpty() && m_bridge) {
             m_bridge->readDocument(resolved, &existing);
         }
@@ -1087,7 +1100,16 @@ ToolResult ToolRunner::grep(const QJsonObject &args) const
 
     QString error;
     const QString path = args.value(u"path"_s).toString();
-    const QString resolved = m_sandbox.resolve(path.isEmpty() ? m_sandbox.workspaceRoot() : path, &error);
+    const QString target = path.isEmpty() ? m_sandbox.workspaceRoot() : path;
+    // The search root is checked first. Without it a directory outside the
+    // workspace would be searched and every file in it skipped, and the
+    // model would read "no matches" instead of "not allowed".
+    if (!m_sandbox.allowsRead(target, &error)) {
+        result.ok = false;
+        result.output = error;
+        return result;
+    }
+    const QString resolved = m_sandbox.resolve(target, &error);
     if (resolved.isEmpty()) {
         result.ok = false;
         result.output = error;
@@ -1190,6 +1212,14 @@ ToolResult ToolRunner::glob(const QJsonObject &args) const
     const QString dirArg = args.value(u"path"_s).toString().trimmed();
     if (!dirArg.isEmpty()) {
         QString error;
+        // The search root is checked before it is walked, so a directory
+        // outside the workspace is refused instead of silently yielding
+        // nothing.
+        if (!m_sandbox.allowsRead(dirArg, &error)) {
+            result.ok = false;
+            result.output = error;
+            return result;
+        }
         const QString resolved = m_sandbox.resolve(dirArg, &error);
         if (resolved.isEmpty()) {
             result.ok = false;
@@ -1340,7 +1370,21 @@ void ToolRunner::runBashAsync(const ToolCall &call)
     QString program;
     QStringList programArgs;
     QString error;
-    if (!startBashProcess(call.arguments, &program, &programArgs, &error)) {
+    // The arguments are parsed like in the synchronous path: a call whose
+    // arguments only exist as raw JSON would otherwise run an empty command
+    // and report success.
+    QString parseError;
+    const QJsonObject args = parseArgs(call, &parseError);
+    if (!parseError.isEmpty() && args.isEmpty() && !call.argumentsJson.isEmpty()) {
+        ToolResult failed;
+        failed.toolCallId = callId;
+        failed.name = u"bash"_s;
+        failed.ok = false;
+        failed.output = parseError;
+        Q_EMIT bashFinished(failed);
+        return;
+    }
+    if (!startBashProcess(args, &program, &programArgs, &error)) {
         ToolResult failed;
         failed.toolCallId = callId;
         failed.name = u"bash"_s;
@@ -1373,7 +1417,14 @@ void ToolRunner::runBashAsync(const ToolCall &call)
         if (chunk.isEmpty()) {
             return {};
         }
-        m_bashAccumulated[callId] += chunk;
+        // The output is accumulated until the command finishes, and the
+        // clipping happens only then. A command that writes gigabytes would
+        // fill the memory in the meantime, so the buffer has a ceiling here.
+        QString &buffer = m_bashAccumulated[callId];
+        if (buffer.size() < kMaxBashOutputChars) {
+            const int room = kMaxBashOutputChars - buffer.size();
+            buffer += chunk.left(room);
+        }
         return m_bashAccumulated.value(callId);
     };
 
@@ -1435,6 +1486,17 @@ void ToolRunner::cancelBash(const QString &toolCallId)
     if (!process) {
         return;
     }
+    // The process is removed from the map, so its "finished" handler would
+    // never emit a result. The tool call has to be settled here, otherwise
+    // the caller waits for a result that never comes.
+    m_bashAccumulated.remove(toolCallId);
+    ToolResult cancelled;
+    cancelled.toolCallId = toolCallId;
+    cancelled.name = u"bash"_s;
+    cancelled.ok = false;
+    cancelled.cancelled = true;
+    cancelled.output = u"The command was cancelled."_s;
+    Q_EMIT bashFinished(cancelled);
 #ifdef Q_OS_UNIX
     if (process->processId() > 0) {
         ::kill(-static_cast<pid_t>(process->processId()), SIGKILL);
