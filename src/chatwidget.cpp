@@ -1179,6 +1179,22 @@ ChatWidget::ChatWidget(QWidget *parent)
         m_prompt->setFocus();
         setThinkingIndicator(false);
         setWorkingIndicator(false);
+        // A tool that was still in flight when the turn ended (a stop pressed
+        // while a command ran, a budget cut) can never report back: the loop
+        // drops its result. Its card must not sit "running" forever, so
+        // settle whatever is left as cancelled.
+        for (auto it = m_toolCallWidgets.begin(); it != m_toolCallWidgets.end(); ++it) {
+            ToolCallWidget *card = it.value();
+            if (card && card->isRunning()) {
+                ToolResult cancelled;
+                cancelled.toolCallId = it.key();
+                cancelled.name = card->toolName();
+                cancelled.ok = false;
+                cancelled.cancelled = true;
+                cancelled.output = i18n("Stopped before it finished.");
+                card->setFinished(cancelled);
+            }
+        }
         // A turn that ended with a question still on screen (abort, budget stop)
         // must not leave it docked: nothing can answer it now.
         clearQuestionCards();
