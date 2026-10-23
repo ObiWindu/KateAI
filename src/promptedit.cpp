@@ -22,10 +22,12 @@ namespace
 {
 
 // How many lines of the composer are visible when it is empty, and how many
-// before a scrollbar takes over from the growth. Half again the heights the
-// composer settled at before: 4.5 against 3, and 18 against 12.
+// before a scrollbar takes over from the growth. The empty height is half
+// again what the composer settled at before (4.5 against 3); the ceiling was
+// raised to 250 lines so a long pasted transcript stays readable in the box
+// instead of scrolling almost immediately.
 constexpr qreal minLines = 4.5;
-constexpr qreal maxLines = 18.0;
+constexpr qreal maxLines = 250.0;
 // Breathing room above and below the text, also half again the old 16, so the
 // empty box grows by half rather than only its text.
 constexpr int padding = 24;
@@ -119,12 +121,12 @@ int PromptEdit::maxHeight() const
 void PromptEdit::autoGrow()
 {
     // The composer gives four and a half lines of head-room when empty (a
-    // pasted stack trace stays readable) and eighteen lines of growth before
-    // scrolling, a tenth less than it used to be in both bounds. Both bounds
-    // move together, so raising the empty height does not quietly shrink how
-    // much may be typed before the scrollbar appears. The text itself still
-    // gets its full height plus padding: only the empty and the maximal box
-    // shrank, so nothing the user typed is ever cropped.
+    // pasted stack trace stays readable) and 250 lines of growth before
+    // scrolling. Both bounds move together, so raising the empty height does
+    // not quietly shrink how much may be typed before the scrollbar appears.
+    // The text itself still gets its full height plus padding: only the empty
+    // and the maximal box are scaled, so nothing the user typed is ever
+    // cropped.
     const int docH = static_cast<int>(document()->size().height());
     const int targetH = std::clamp(docH + padding, minHeight(), maxHeight());
     setFixedHeight(targetH);
