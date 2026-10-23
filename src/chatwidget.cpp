@@ -390,17 +390,19 @@ ChatWidget::ChatWidget(QWidget *parent)
         m_teamButton->setMinimumWidth(96);
         connect(m_teamButton, &QPushButton::clicked, this, &ChatWidget::showTeamMenu);
         toolbarLayout->addWidget(m_teamButton);
-        updateTeamButton();
 
         // The indicator flashes through theme colours while sub-agents run --
         // the same stylesheet-swap trick the transcript pills use, which costs
-        // less than a graphics effect.
+        // less than a graphics effect. Created before updateTeamButton() so
+        // the timer is valid when updateTeamButton() may call stop() on it.
         m_teamFlashTimer = new QTimer(this);
         m_teamFlashTimer->setInterval(460);
         connect(m_teamFlashTimer, &QTimer::timeout, this, [this] {
             m_teamFlashTick = (m_teamFlashTick + 1) % 3;
             styleTeamButton();
         });
+
+        updateTeamButton();
 
     // Reasoning effort chooser button — sits right next to the model label
     // in the chat input area so the user can pick an effort level at a glance.
