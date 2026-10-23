@@ -10,6 +10,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QJsonArray>
+#include <QStandardPaths>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QTextStream>
@@ -184,7 +185,22 @@ private Q_SLOTS:
         QCOMPARE(toolsStarted, 1);
         QCOMPARE(toolsFinished, 1);
         QCOMPARE(toolOutput, u"ok"_s);
-        QCOMPARE(plan.size(), 1);
+        // The plan carries the ACP spec form (content-block arrays) and the
+        // status spellings seen in the wild; every variant has to reach the
+        // todo list as a readable step. The textless entry is skipped.
+        QCOMPARE(plan.size(), 3);
+        const QJsonObject first = plan.at(0).toObject();
+        QCOMPARE(first.value(u"description"_s).toString(), u"Look around"_s);
+        QVERIFY(first.value(u"completed"_s).toBool());
+        QVERIFY(!first.value(u"inProgress"_s).toBool());
+        const QJsonObject second = plan.at(1).toObject();
+        QCOMPARE(second.value(u"description"_s).toString(), u"Fix the bug"_s);
+        QVERIFY(second.value(u"inProgress"_s).toBool());
+        QVERIFY(!second.value(u"completed"_s).toBool());
+        const QJsonObject third = plan.at(2).toObject();
+        QCOMPARE(third.value(u"description"_s).toString(), u"Tell the user"_s);
+        QVERIFY(third.value(u"inProgress"_s).toBool());
+        QVERIFY(!third.value(u"completed"_s).toBool());
         QCOMPARE(client.sessionId(), u"sess_kateai_test"_s);
         client.stop();
     }
@@ -714,6 +730,91 @@ private Q_SLOTS:
         QVERIFY(!models.contains(u"stale-model"_s));
         QCOMPARE(client.currentModelId(), u"grok-4"_s);
         client.stop();
+    }
+
+    // The config page's Fetch Models flow owns no workspace (the standard Kate
+    // config page is created without one), yet agents reject a non-absolute
+    // cwd -- opencode answers "cwd must be an absolute path". The client must
+    // fall back to the process working directory so the models still load.
+    void modelsLoadWithoutAWorkspace()
+    {
+        AcpClient client;
+        client.setSettings(mockSettings(u"models"_s));
+
+        QStringList models;
+        QString error;
+        connect(&client, &AcpClient::modelsReceived, this, [&](const QStringList &next) {
+            models = next;
+        });
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+
+        client.fetchModels();
+        QVERIFY2(waitFor([&] {
+            return !models.isEmpty() || !error.isEmpty();
+        }), qPrintable(error.isEmpty() ? u"timed out"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QVERIFY(models.contains(u"grok-4.5"_s));
+        client.stop();
+    }
+
+    // opencode's installer puts the binary in ~/.opencode/bin, which is only
+    // added to the *shell* PATH; a Kate launched from the desktop cannot find
+    // a bare "opencode" on PATH, so the fallback has to look there.
+    void resolvedCommandFallsBackToTheOpencodeInstallDir()
+    {
+        Settings settings;
+        settings.acpAgentId = u"opencode"_s;
+        settings.acpCommand = u"opencode"_s;
+        settings.acpArgs = u"acp"_s;
+
+        QString expected = QStandardPaths::findExecutable(u"opencode"_s);
+        if (expected.isEmpty()) {
+            const QFileInfo ownInstall(QDir::homePath() + u"/.opencode/bin/opencode"_s);
+            if (ownInstall.exists() && ownInstall.isExecutable()) {
+                expected = ownInstall.absoluteFilePath();
+            }
+        }
+        if (expected.isEmpty()) {
+            const QFileInfo localBin(QDir::homePath() + u"/.local/bin/opencode"_s);
+            if (localBin.exists() && localBin.isExecutable()) {
+                expected = localBin.absoluteFilePath();
+            }
+        }
+        if (expected.isEmpty()) {
+            expected = u"opencode"_s;
+        }
+        QCOMPARE(AcpClient::resolvedCommand(settings), expected);
+    }
+
+    // The registry's binary install records the command as "./opencode" with
+    // the "acp" argument per platform. Entries saved before that argument was
+    // kept must still launch the ACP server, not the interactive TUI that
+    // never answers the handshake.
+    void registryBinaryOpencodeLaunchesAcp()
+    {
+        Settings settings;
+        settings.acpAgentId = u"opencode-v2"_s;
+        settings.acpCommand = u"./opencode"_s;
+        settings.acpArgs.clear();
+        QCOMPARE(AcpClient::agentArguments(settings), (QStringList{u"acp"_s}));
+
+        // An explicit argument list is never overridden.
+        settings.acpArgs = u"acp --flag"_s;
+        QCOMPARE(AcpClient::agentArguments(settings), (QStringList{u"acp"_s, u"--flag"_s}));
+
+        // "./opencode" resolves to the same binary a bare "opencode" does,
+        // and survives unchanged when no opencode is installed at all.
+        settings.acpArgs.clear();
+        Settings bare = settings;
+        bare.acpCommand = u"opencode"_s;
+        const QString resolvedBare = AcpClient::resolvedCommand(bare);
+        if (resolvedBare != u"opencode"_s) {
+            QCOMPARE(AcpClient::resolvedCommand(settings), resolvedBare);
+        } else {
+            QCOMPARE(AcpClient::resolvedCommand(settings), u"./opencode"_s);
+        }
     }
 
     void legacySessionModelsUseSetModel()

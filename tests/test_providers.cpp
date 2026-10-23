@@ -10,6 +10,74 @@ class TestProviders : public QObject
     Q_OBJECT
 
 private Q_SLOTS:
+    void compressTextStaysInsideItsBudget()
+    {
+        // The indicator used to be added after the cut, so the result was
+        // longer than the caller asked for.
+        const QString text = QString(500, QLatin1Char('x'));
+        const QString compressed = compressText(text, 100, true);
+        QVERIFY2(compressed.size() <= 100,
+                 qPrintable(QStringLiteral("compressText returned %1 characters").arg(compressed.size())));
+        QVERIFY(compressed.contains(u"truncated"_s));
+    }
+
+    void truncateSafeDoesNotSplitASurrogatePair()
+    {
+        // A cut in the middle of an astral character leaves half of it behind,
+        // and a lone surrogate is serialised as U+FFFD.
+        // An emoji (a surrogate pair in UTF-16) followed by three letters.
+        const QString text = QString::fromUtf8("\xF0\x9F\x98\x80" "abc");
+        const QString cut = truncateSafe(text, 1);
+        QVERIFY2(cut.isEmpty() || !cut.at(cut.size() - 1).isHighSurrogate(),
+                 "the cut left a lone high surrogate behind");
+        const QString full = truncateSafe(text, 100);
+        QCOMPARE(full, text);
+    }
+
+    void smartCompressContextStaysInsideItsBudget()
+    {
+        // The marker used to be added on top of the kept head and tail.
+        const QString text = QString(2000, QLatin1Char('x'));
+        const QString compressed = smartCompressContext(text, 500, true);
+        QVERIFY2(compressed.size() <= 500,
+                 qPrintable(QStringLiteral("smartCompressContext returned %1 characters").arg(compressed.size())));
+    }
+
+    void smartCompressContextDoesNotSplitASurrogatePair()
+    {
+        const QString text = QString::fromUtf8("\xF0\x9F\x98\x80") + QString(2000, QLatin1Char('x'));
+        const QString compressed = smartCompressContext(text, 500, true);
+        for (int i = 0; i < compressed.size(); ++i) {
+            const QChar c = compressed.at(i);
+            if (c.isHighSurrogate()) {
+                QVERIFY2(i + 1 < compressed.size() && compressed.at(i + 1).isLowSurrogate(),
+                         "the compression left a lone high surrogate behind");
+                ++i;
+            } else {
+                QVERIFY2(!c.isLowSurrogate(), "the compression left a lone low surrogate behind");
+            }
+        }
+    }
+
+    void aTelegramProviderHasAnId()
+    {
+        // The enumerator fell through to "grok", so the provider could not be
+        // selected at all.
+        QCOMPARE(providerId(Provider::Telegram), u"telegram"_s);
+        QCOMPARE(providerFromId(u"telegram"_s), Provider::Telegram);
+    }
+
+    void anEmptyBaseUrlFallsBackToTheProviderDefault()
+    {
+        Settings settings;
+        settings.provider = Provider::OpenAICompatible;
+        settings.openaiCompatibleUrl.clear();
+        QVERIFY(!providerBaseUrl(settings).isEmpty());
+        settings.provider = Provider::ClaudeCompatible;
+        settings.claudeCompatibleUrl.clear();
+        QVERIFY(!providerBaseUrl(settings).isEmpty());
+    }
+
     void noProviderShipsHardCodedModelNames()
     {
         // Model names used to be baked into defaultModels() and into the

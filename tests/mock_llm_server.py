@@ -27,8 +27,17 @@ SUGGEST_MARKER = "Suggest an improvement."
 # Same call, but the arguments arrive as a JSON object the way Ollama's
 # OpenAI-compatible endpoint delivers them.
 SUGGEST_OBJECT_ARGS_MARKER = "Suggest with object arguments."
+# Sent to make the model run a long shell command, so a stop can be pressed
+# while the command is still in flight.
+STALL_MARKER = "Run a long command."
 # The orchestrator's own prompt; only the first request looks like this.
 PARENT_MARKER = "Split this across two agents."
+# Sent to make the model write a file, so the pre-mutation checkpoint and the
+# queued continuation can be observed.
+WRITE_MARKER = "Write the note file."
+# Sent to make the model stream text slowly, so a stop can be pressed while
+# the answer is still being typed into the chat.
+STREAM_MARKER = "Type slowly."
 # Long enough that two sequential dispatches would visibly not overlap.
 CHILD_DELAY_SECONDS = 1.5
 # The orchestrator delegates exactly once; every later turn gets prose. Without
@@ -39,6 +48,11 @@ ASKED = False
 ASKED_EMPTY = False
 # The suggestion is posted once per server, for the same reason.
 SUGGESTED = False
+# The long command is issued once per server, for the same reason.
+STALLED = False
+# The file write is issued once per server, for the same reason.
+WROTE = False
+STREAMED = False
 
 
 def sse(payload):
@@ -102,7 +116,7 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     def do_POST(self):
-        global DELEGATED, ASKED, ASKED_EMPTY, SUGGESTED
+        global DELEGATED, ASKED, ASKED_EMPTY, SUGGESTED, STALLED, WROTE, STREAMED
         length = int(self.headers.get("Content-Length", "0"))
         try:
             body = json.loads(self.rfile.read(length) or b"{}")
@@ -126,6 +140,8 @@ class Handler(BaseHTTPRequestHandler):
         is_empty_question = EMPTY_QUESTION_MARKER in last_user and not ASKED_EMPTY
         is_suggest = SUGGEST_MARKER in last_user and not SUGGESTED
         is_suggest_object_args = SUGGEST_OBJECT_ARGS_MARKER in last_user and not SUGGESTED
+        is_write = WRITE_MARKER in last_user and not WROTE
+        is_stream = STREAM_MARKER in last_user and not STREAMED
         # Anthropic puts the system prompt at the top level, so its requests are
         # the ones without a system-role message in the array.
         is_anthropic = "anthropic-version" in self.headers
@@ -172,6 +188,26 @@ class Handler(BaseHTTPRequestHandler):
             who = "A" if "agent-a" in last_user else "B"
             emit(chunk_text(f"[sub-agent {who}] finished its share of the work."))
             emit(sse({"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}))
+        elif STALL_MARKER in last_user and not STALLED:
+            STALLED = True
+            # A command long enough that the stop button can be pressed while
+            # it is still running.
+            respond("bash", "call_sleep", {"command": "sleep 30"})
+        elif is_stream:
+            STREAMED = True
+            # Chunks spaced out over several seconds: a stop can be pressed
+            # while the answer is visibly still streaming in.
+            for i in range(30):
+                emit(chunk_text(f"Streaming line {i} of the slow answer.\n\n"))
+                time.sleep(0.2)
+            emit(sse({"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}))
+        elif is_write:
+            WROTE = True
+            respond(
+                "write_file",
+                "call_write",
+                {"path": "notes.txt", "content": "written by the mock model"},
+            )
         elif is_orchestrator_first_turn:
             DELEGATED = True
             # Two independent subtasks in one response: these must overlap.

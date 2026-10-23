@@ -153,6 +153,9 @@ public:
 Q_SIGNALS:
     void userMessage(const QString &text);
     void assistantDelta(const QString &delta);
+    // The answer streamed so far was discarded (a retry replaces it); the UI
+    // has to drop what it already rendered.
+    void assistantReset();
     void thinkingDelta(const QString &delta);
     void thinkingFinished(const QString &text);
     void assistantFinished(const QString &text);
@@ -225,6 +228,10 @@ private:
     bool isVerificationForChangedFiles(const ToolCall &call) const;
     void appendToolResult(const ToolCall &call, ToolResult result);
     void appendToolResultsToConversation();
+    // Gives every tool call of the last assistant message that has no result
+    // yet a cancelled result, so the next request is not rejected by the
+    // provider.
+    void appendCancelledToolResults();
     void addBudgetFailureResults(const QString &reason);
     void requestVerificationTurn();
     void emitPlanUpdate();
@@ -258,8 +265,20 @@ private:
     void releaseEditLocksFor(const ToolCall &call);
     // Pushes the active mode's tool set (and the MCP tools) to the client.
     void syncToolAccess();
-    // Snapshots the workspace before the first mutation of a turn.
-    void maybeCheckpoint(const QString &label);
+    // Rebuilds the sandbox and the tool runner from the current settings and
+    // workspace. Destroys any in-flight bash process, so it must not run
+    // while a turn is executing; the callers defer it to the turn's end.
+    void rebuildTools();
+    // Defers a tool call until the pre-mutation snapshot has been taken.
+    // Returns true when the call was parked; the snapshot's completion (or
+    // failure) resumes it through resumeAfterCheckpoint().
+    bool deferForCheckpoint(const ToolCall &call, bool asBash);
+    // Runs the tool call parked by deferForCheckpoint() after the snapshot
+    // reported back. A no-op when nothing was parked.
+    void resumeAfterCheckpoint();
+    // Records a tool call as executed, so identical repeats can be told apart
+    // from retries of a call the user denied or that never ran.
+    void markActionExecuted(const QString &signature);
     void syncPermissionPolicy();
     void setSubtaskDepth(int depth)
     {
@@ -302,6 +321,14 @@ LlmClient m_client;
     int m_subtaskDepth = 0;
     quint64 m_asyncCounter = 0;
     bool m_checkpointTaken = false;
+    // A snapshot is being taken for the call below; the queue is held open
+    // until it reports back, so no mutation can slip past the checkpoint.
+    bool m_awaitingCheckpoint = false;
+    ToolCall m_checkpointCall;
+    bool m_checkpointIsBash = false;
+    // The sandbox/tool-runner configuration changed while a turn was running;
+    // rebuildTools() applies it once the turn ends.
+    bool m_sandboxDirty = false;
     QString m_taskSummary;
 
     QList<ChatMessage> m_messages;
@@ -312,6 +339,10 @@ LlmClient m_client;
     // The `bash` call currently streaming, if any. One at a time: the queue
     // waits for it, so nothing else is executing while it is set.
     QString m_runningBashId;
+    // Connection of the current bash call's finished handler. Kept so the next
+    // command can drop the previous one: without it every command leaks a
+    // connection that fires (and early-returns) on every later result.
+    QMetaObject::Connection m_bashFinishedConnection;
 
     bool m_busy = false;
     State m_state = State::Idle;

@@ -13,6 +13,7 @@
 
 #include <QHash>
 #include <QObject>
+#include <QSet>
 
 class QProcess;
 
@@ -74,7 +75,6 @@ private:
     bool startBashProcess(const QJsonObject &args, QString *program, QStringList *programArgs, QString *error) const;
     // Turns captured output plus an exit status into a tool result.
     ToolResult finishBashOutput(const QString &output, int exitCode, bool normalExit) const;
-    ToolResult finishBash(QProcess &process) const;
 
     Sandbox m_sandbox;
     DocumentBridge *m_bridge = nullptr;
@@ -84,11 +84,30 @@ private:
     // cancellation can find the right process, plus the output captured from
     // each so far (the final result is the whole stream, not only the tail).
     QHash<QString, QProcess *> m_bashProcesses;
-    QHash<QString, QString> m_bashAccumulated;
+    // The captured output of a running command. The head and the tail are
+    // kept, the middle is dropped once the ceiling is hit: the tail carries
+    // what the command last said, which is the half the model most needs.
+    struct BashBuffer {
+        QString head;
+        QString tail;
+        int droppedChars = 0;
+        void append(const QString &chunk, int cap);
+        QString view() const;
+    };
+    QHash<QString, BashBuffer> m_bashAccumulated;
+    // Call ids whose timeout timer fired. The kill only makes the process
+    // report a failure; without this marker the finished result looks like an
+    // ordinary crash and the model never learns the command was cut short.
+    QSet<QString> m_bashTimedOut;
 };
 
 QString unifiedDiff(const QString &path, const QString &before, const QString &after);
 QString shellCommandFor(const QString &toolName, const QJsonObject &args);
+
+// Unified tool argument parsing - canonicalizes arguments from ToolCall
+// Prefers pre-parsed `arguments` object, falls back to parsing `argumentsJson`
+// Returns empty object on parse failure (error output parameter is set)
+QJsonObject parseToolArgs(const ToolCall &call, QString *error = nullptr);
 
 // Path of the implementation-plan file the agent writes and the user follows.
 // It lives in the system temp directory — never in the workspace — so an

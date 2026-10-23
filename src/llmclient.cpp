@@ -161,9 +161,9 @@ QJsonArray LlmClient::messagesToJson(const QList<ChatMessage> &messages)
             if (!msg.thinking.isEmpty()) {
                 obj.insert(u"reasoning_content"_s, msg.thinking);
             }
-            if (!msg.plan.isEmpty()) {
-                obj.insert(u"plan"_s, msg.plan);
-            }
+            // The structured plan is a Kate-side artifact for the checklist
+            // UI; it is not a field any provider knows, and a strict gateway
+            // or proxy may reject the whole request over it.
             if (!msg.toolCalls.isEmpty()) {
                 obj.insert(u"tool_calls"_s, msg.toolCalls);
             }
@@ -202,7 +202,16 @@ static QString toolArgumentsText(const QJsonValue &value)
     if (value.isArray()) {
         return QString::fromUtf8(QJsonDocument(value.toArray()).toJson(QJsonDocument::Compact));
     }
-    return value.toString();
+    if (value.isString()) {
+        return value.toString();
+    }
+    // A number or a boolean is a valid argument value, but
+    // QJsonValue::toString() returns an empty string for it. The value is
+    // written as JSON instead, so the argument survives.
+    if (!value.isNull() && !value.isUndefined()) {
+        return QString::fromUtf8(QJsonDocument::fromVariant(value.toVariant()).toJson(QJsonDocument::Compact));
+    }
+    return QString();
 }
 
 void LlmClient::applyAuthHeaders(QNetworkRequest &request, ApiFormat format, const QString &key)
@@ -255,9 +264,12 @@ QList<ToolCall> LlmClient::drainToolAccumulator(QHash<int, ToolCall> *acc)
     return tools;
 }
 
-CompletionChunk LlmClient::parseSseLine(const QByteArray &line, QHash<int, ToolCall> *acc)
+CompletionChunk LlmClient::parseSseLine(const QByteArray &line, QHash<int, ToolCall> *acc, bool *parsed)
 {
     CompletionChunk chunk;
+    if (parsed) {
+        *parsed = false;
+    }
     QByteArray payload = line.trimmed();
     if (payload.startsWith("data:")) {
         payload = payload.mid(5).trimmed();
@@ -266,6 +278,9 @@ CompletionChunk LlmClient::parseSseLine(const QByteArray &line, QHash<int, ToolC
         return chunk;
     }
     if (payload == "[DONE]") {
+        if (parsed) {
+            *parsed = true;
+        }
         chunk.finished = true;
         chunk.finishReason = u"stop"_s;
         if (acc) {
@@ -278,6 +293,9 @@ CompletionChunk LlmClient::parseSseLine(const QByteArray &line, QHash<int, ToolC
     const QJsonDocument doc = QJsonDocument::fromJson(payload, &err);
     if (err.error != QJsonParseError::NoError || !doc.isObject()) {
         return chunk;
+    }
+    if (parsed) {
+        *parsed = true;
     }
 
     const QJsonObject root = doc.object();
@@ -302,8 +320,12 @@ CompletionChunk LlmClient::parseSseLine(const QByteArray &line, QHash<int, ToolC
             const QString kind = delta.value(u"type"_s).toString();
             if (kind == u"text_delta"_s) {
                 chunk.contentDelta = delta.value(u"text"_s).toString();
-            } else if (kind == u"thinking_delta"_s || kind == u"signature_delta"_s) {
+            } else if (kind == u"thinking_delta"_s) {
                 chunk.thinkingDelta = delta.value(u"thinking"_s).toString();
+            } else if (kind == u"signature_delta"_s) {
+                // A signature is a cryptographic blob, not prose. Showing it as
+                // reasoning would put noise in the transcript and store it as
+                // the assistant's thinking.
             } else if (kind == u"input_json_delta"_s && acc) {
                 // Tool arguments are streamed as JSON fragments; keep them raw
                 // so drainToolAccumulator() can parse the assembled object.
@@ -369,7 +391,19 @@ CompletionChunk LlmClient::parseSseLine(const QByteArray &line, QHash<int, ToolC
         const QJsonArray toolCalls = delta.value(u"tool_calls"_s).toArray();
         for (const QJsonValue &value : toolCalls) {
             const QJsonObject obj = value.toObject();
-            const int index = obj.value(u"index"_s).toInt();
+            int index = obj.value(u"index"_s).toInt();
+            // A provider that omits "index" would send every parallel tool call
+            // as index 0, so they would overwrite each other. Fall back to the
+            // next free slot in that case.
+            if (!obj.contains(u"index"_s)) {
+                // The next free slot. The keys of a hash are not ordered, so
+                // the highest one is looked for explicitly.
+                int next = 0;
+                for (auto it = acc->constBegin(); it != acc->constEnd(); ++it) {
+                    next = qMax(next, it.key() + 1);
+                }
+                index = next;
+            }
             ToolCall &tool = (*acc)[index];
             if (obj.contains(u"id"_s) && !obj.value(u"id"_s).toString().isEmpty()) {
                 tool.id = obj.value(u"id"_s).toString();
@@ -394,7 +428,16 @@ CompletionChunk LlmClient::parseSseLine(const QByteArray &line, QHash<int, ToolC
                     // accumulator; concatenating it with the first fragment
                     // produces e.g. `{}{\"suggestion\":...}`, which silently
                     // drops the arguments before suggest/question reach the UI.
-                    if (tool.argumentsJson.trimmed() == u"{}"_s) {
+                    //
+                    // The placeholder is only a placeholder while it stands
+                    // alone. A "{}" that arrives after real arguments is a
+                    // second, complete call and must not overwrite them, so
+                    // it is dropped instead of appended.
+                    if (fragment.trimmed() == u"{}"_s) {
+                        if (tool.argumentsJson.trimmed().isEmpty()) {
+                            tool.argumentsJson = fragment;
+                        }
+                    } else if (tool.argumentsJson.trimmed() == u"{}"_s) {
                         tool.argumentsJson = fragment;
                     } else {
                         tool.argumentsJson += fragment;
@@ -423,7 +466,10 @@ void LlmClient::resetCompletionState()
     m_completionError.clear();
     m_sawDone = false;
     m_finishEmitted = false;
-    m_abortRequested = false;
+    // m_abortRequested is deliberately not cleared here: resetCompletionState()
+    // runs at the start of every request and right after an abort, and the flag
+    // has to survive the abort so the late "finished" signal is recognised as
+    // ours. complete() clears it for the next request.
 }
 
 void LlmClient::complete(const QList<ChatMessage> &messages)
@@ -436,6 +482,7 @@ void LlmClient::complete(const QList<ChatMessage> &messages)
     }
 
     // Initialize retry context for a new request
+    m_abortRequested = false;
     m_retryContext = RetryContext{};
     m_retryContext.attempt = 0;
     m_retryContext.maxAttempts = qMax(1, m_settings.maxRetryAttempts);
@@ -531,7 +578,7 @@ void LlmClient::doComplete(const QList<ChatMessage> &messages)
     auto *idleTimer = new QTimer(this);
     idleTimer->setSingleShot(true);
     m_requestTimers.insert(m_reply, idleTimer);
-    connect(idleTimer, &QTimer::timeout, this, [this, reply = m_reply] {
+    connect(idleTimer, &QTimer::timeout, this, [this, reply = QPointer<QNetworkReply>(m_reply)] {
         if (!reply || !reply->isRunning()) {
             return;
         }
@@ -1025,6 +1072,84 @@ void LlmClient::handleModelsFinished(QNetworkReply *reply, Provider provider)
     Q_EMIT modelsReceived(provider, models);
 }
 
+bool LlmClient::applySseChunk(const CompletionChunk &chunk)
+{
+    if (!chunk.error.isEmpty()) {
+        m_completionError = chunk.error;
+        if (m_reply) {
+            // Detach first: abort() emits finished() synchronously, which
+            // would re-enter handleFinished() *inside* this slot with the
+            // rest of the stream still in m_buffer. handleFinished() is then
+            // called by hand, and the remaining lines are dropped instead
+            // of being emitted after the failure was already recorded.
+            //
+            // The abort makes the reply report OperationCanceledError, which
+            // is our doing and not a transport failure. handleFinished()
+            // therefore treats the provider error as the real cause, so the
+            // message is classified as the provider intended (a context
+            // overflow, an invalid key) instead of as a retryable network
+            // error.
+            m_reply->disconnect(this);
+            m_reply->abort();
+            handleFinished();
+        }
+        return false;
+    }
+    if (!chunk.contentDelta.isEmpty()) {
+        m_text += chunk.contentDelta;
+        Q_EMIT textDelta(chunk.contentDelta);
+    }
+    if (!chunk.thinkingDelta.isEmpty()) {
+        Q_EMIT thinkingDelta(chunk.thinkingDelta);
+    }
+    if (!chunk.completedTools.isEmpty()) {
+        m_completedTools.append(chunk.completedTools);
+    }
+    if (chunk.finished) {
+        m_sawDone = true;
+    }
+    return true;
+}
+
+bool LlmClient::feedSseLine(const QByteArray &line)
+{
+    const QByteArray trimmed = line.trimmed();
+    if (trimmed.isEmpty()) {
+        // End of an event. Anything still buffered never parsed, so the event
+        // was truncated: drop it instead of dispatching half a payload.
+        m_pendingEventData.clear();
+        return true;
+    }
+    if (trimmed.startsWith("data:")) {
+        const QByteArray payload = trimmed.mid(5).trimmed();
+        if (payload.isEmpty()) {
+            return true;
+        }
+        // The SSE specification allows one event to be spread over several
+        // "data:" lines, which are joined with a newline. The provider sends a
+        // single line per event in practice, so the buffer is dispatched as
+        // soon as it parses; only a split event stays buffered.
+        if (m_pendingEventData.isEmpty()) {
+            m_pendingEventData = payload;
+        } else {
+            m_pendingEventData += '\n';
+            m_pendingEventData += payload;
+        }
+        bool parsed = false;
+        const CompletionChunk chunk = parseSseLine(m_pendingEventData, &m_toolAcc, &parsed);
+        if (!parsed) {
+            return true;
+        }
+        m_pendingEventData.clear();
+        return applySseChunk(chunk);
+    }
+    // "event:", "id:", "retry:" and comment lines carry no payload. A pending
+    // event that never parsed is dropped here: more data will not make it
+    // valid.
+    m_pendingEventData.clear();
+    return true;
+}
+
 void LlmClient::handleReadyRead()
 {
     if (!m_reply || m_abortRequested) {
@@ -1050,36 +1175,12 @@ void LlmClient::handleReadyRead()
         const QByteArray line = m_buffer.left(idx);
         m_buffer.remove(0, idx + 1);
         if (line.trimmed().isEmpty()) {
+            feedSseLine(line);
             continue;
         }
 
-        const CompletionChunk chunk = parseSseLine(line, &m_toolAcc);
-        if (!chunk.error.isEmpty()) {
-            m_completionError = chunk.error;
-            if (m_reply) {
-                // Detach first: abort() emits finished() synchronously, which
-                // would re-enter handleFinished() *inside* this slot with the
-                // rest of the stream still in m_buffer. handleFinished() is then
-                // called by hand, and the remaining lines are dropped instead
-                // of being emitted after the failure was already recorded.
-                m_reply->disconnect(this);
-                m_reply->abort();
-                handleFinished();
-            }
+        if (!feedSseLine(line)) {
             return;
-        }
-        if (!chunk.contentDelta.isEmpty()) {
-            m_text += chunk.contentDelta;
-            Q_EMIT textDelta(chunk.contentDelta);
-        }
-        if (!chunk.thinkingDelta.isEmpty()) {
-            Q_EMIT thinkingDelta(chunk.thinkingDelta);
-        }
-        if (!chunk.completedTools.isEmpty()) {
-            m_completedTools.append(chunk.completedTools);
-        }
-        if (chunk.finished) {
-            m_sawDone = true;
         }
     }
 }
@@ -1100,7 +1201,13 @@ void LlmClient::handleFinished()
     const QByteArray tail = reply->readAll();
     appendResponseBody(tail);
     const QByteArray leftover = m_buffer + tail;
-    const QNetworkReply::NetworkError networkError = reply->error();
+    QNetworkReply::NetworkError networkError = reply->error();
+    // An SSE "error" event aborts the reply on purpose (see onReadyRead), so
+    // the resulting OperationCanceledError is our own doing. It must not be
+    // classified as a transport failure: the provider's message is the cause.
+    if (!m_completionError.isEmpty() && networkError == QNetworkReply::OperationCanceledError) {
+        networkError = QNetworkReply::NoError;
+    }
     const QString errorString = reply->errorString();
     const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
     // Read the provider's backoff hint while the reply is still alive. It is
@@ -1121,25 +1228,18 @@ void LlmClient::handleFinished()
     if (m_completionError.isEmpty() && !leftover.trimmed().isEmpty()) {
         for (const QByteArray &line : leftover.split('\n')) {
             if (line.trimmed().isEmpty()) {
+                // End of an event: flush what was accumulated.
+                feedSseLine(line);
                 continue;
             }
-            const CompletionChunk chunk = parseSseLine(line, &m_toolAcc);
-            if (!chunk.error.isEmpty() && m_completionError.isEmpty()) {
-                m_completionError = chunk.error;
-            }
-            if (!chunk.contentDelta.isEmpty()) {
-                m_text += chunk.contentDelta;
-                Q_EMIT textDelta(chunk.contentDelta);
-            }
-            if (!chunk.completedTools.isEmpty()) {
-                m_completedTools.append(chunk.completedTools);
-            }
-            if (chunk.finished) {
-                m_sawDone = true;
+            // A provider error in the tail must not be reported as text.
+            if (!feedSseLine(line)) {
+                break;
             }
         }
     }
     m_buffer.clear();
+    m_pendingEventData.clear();
 
     if (!m_toolAcc.isEmpty()) {
         m_completedTools.append(completedToolsFromAccumulator());
@@ -1150,6 +1250,13 @@ void LlmClient::handleFinished()
     // an answer mentioning "blocked" or "safety" must not read as an error.
     const bool requestFailed = networkError != QNetworkReply::NoError || status >= 400
         || !m_completionError.isEmpty();
+    if (requestFailed) {
+        // The body reaches the user verbatim in the error text, and providers
+        // echo request details in it: a key leaked into a 400 body would be
+        // shown as-is. Redact before anything reads the bodies below.
+        m_completionError = sanitizeResponseBody(m_completionError.toUtf8());
+        m_responseBody = sanitizeResponseBody(m_responseBody).toUtf8();
+    }
     const QByteArray errorBody = requestFailed ? m_responseBody : QByteArray();
     RetryErrorCategory errorCategory = classifyError(status, m_completionError, errorBody, networkError);
     m_retryContext.lastErrorCategory = errorCategory;
@@ -1213,13 +1320,21 @@ void LlmClient::handleFinished()
         }
         finalError = describe(message);
     } else {
-        // If the streaming response already delivered content, tool calls, or
-        // the [DONE] marker, the request succeeded -- complete normally instead
-        // of falling through to the "no content" error below.
-        if (m_sawDone || !m_text.isEmpty() || !m_completedTools.isEmpty()) {
+        // If the streaming response already delivered content or tool calls,
+        // the request succeeded -- complete normally instead of falling through
+        // to the "no content" error below.
+        if (!m_text.isEmpty() || !m_completedTools.isEmpty()) {
             emitCompletedOnce();
             return;
         }
+        if (m_sawDone) {
+            // The provider closed the stream without saying anything. Completing
+            // here would end the turn with a blank reply, which looks like the
+            // agent lost the answer rather than that the provider failed.
+            finalError = u"The provider returned an empty response."_s;
+        }
+    }
+    if (finalError.isEmpty()) {
         // Some compatible providers may ignore streaming and return ordinary JSON.
         // Read the accumulated body, not just the trailing line: a pretty-printed
         // response is spread over many lines and would otherwise be discarded by
@@ -1278,7 +1393,18 @@ void LlmClient::handleFinished()
         // Add friendly retry-exhausted message for retryable errors
         if (errorCategory != RetryErrorCategory::NonRetryable && errorCategory != RetryErrorCategory::None
         && errorCategory != RetryErrorCategory::ContextOverflow) {
-            finalError = formatRetryExhaustedMessage(errorCategory, m_retryContext.providerName);
+            const QString exhausted = formatRetryExhaustedMessage(errorCategory, m_retryContext.providerName);
+            // Keep the provider's own words: "Network connection failed" is
+            // useless when the provider actually said why the request failed.
+            if (!m_completionError.trimmed().isEmpty()) {
+                QString detail = m_completionError.trimmed();
+                if (detail.size() > 200) {
+                    detail = detail.left(200) + u"…"_s;
+                }
+                finalError = exhausted + u" ("_s + detail + u")"_s;
+            } else {
+                finalError = exhausted;
+            }
         }
         if (errorCategory == RetryErrorCategory::ContextOverflow
             && !finalError.contains(u"context_window_exceeded"_s, Qt::CaseInsensitive)) {
@@ -1288,78 +1414,13 @@ void LlmClient::handleFinished()
     }
 
     resetCompletionState();
-    clearStoredRequest();
+    // The request is kept on purpose: the user can ask for a manual retry
+    // after the automatic retries are exhausted. It is dropped on success
+    // (emitCompletedOnce) and on abort.
 }
 
-RetryErrorCategory LlmClient::classifyError(int httpStatus, const QString &errorMessage, const QByteArray &responseBody, QNetworkReply::NetworkError networkError)
+RetryErrorCategory LlmClient::classifyByMessage(const QString &lowerError, const QString &lowerBody)
 {
-    const QString lowerError = errorMessage.toLower();
-    const QString lowerBody = QString::fromUtf8(responseBody).toLower();
-
-    // Network-level errors (connection errors, timeouts, etc.)
-    if (networkError != QNetworkReply::NoError) {
-        switch (networkError) {
-        case QNetworkReply::ConnectionRefusedError:
-        case QNetworkReply::RemoteHostClosedError:
-        case QNetworkReply::HostNotFoundError:
-        case QNetworkReply::TimeoutError:
-        case QNetworkReply::OperationCanceledError:
-        case QNetworkReply::SslHandshakeFailedError:
-        case QNetworkReply::TemporaryNetworkFailureError:
-        case QNetworkReply::NetworkSessionFailedError:
-        case QNetworkReply::UnknownNetworkError:
-            return RetryErrorCategory::NetworkError;
-        default:
-            return RetryErrorCategory::NetworkError;
-        }
-    }
-
-    // HTTP status code classification
-    switch (httpStatus) {
-    case 429: // Too Many Requests - Rate limit
-        return RetryErrorCategory::RateLimitExceeded;
-
-    case 500: // Internal Server Error
-    case 502: // Bad Gateway
-    case 503: // Service Unavailable
-    case 504: // Gateway Timeout
-    case 509: // Bandwidth Limit Exceeded
-        return RetryErrorCategory::ServerOverloaded;
-
-    case 400: // Bad Request - check for specific retryable cases
-        // Some providers return 400 with retryable messages
-        if (lowerBody.contains(u"rate limit") || lowerBody.contains(u"quota") ||
-            lowerBody.contains(u"overloaded") || lowerBody.contains(u"throttl")) {
-            return RetryErrorCategory::RateLimitExceeded;
-        }
-        if (lowerBody.contains(u"context window") || lowerBody.contains(u"too many tokens") ||
-            lowerBody.contains(u"prompt too large") || lowerBody.contains(u"maximum context") ||
-            lowerBody.contains(u"context_length_exceeded") || lowerBody.contains(u"context too long")) {
-            return RetryErrorCategory::ContextOverflow;
-        }
-        return RetryErrorCategory::NonRetryable;
-
-    case 401: // Unauthorized
-    case 403: // Forbidden
-        return RetryErrorCategory::NonRetryable;
-
-    case 404: // Not Found - model not found, etc.
-        return RetryErrorCategory::NonRetryable;
-
-    case 408: // Request Timeout
-        return RetryErrorCategory::Timeout;
-
-    case 413: // Payload Too Large
-        return RetryErrorCategory::ContextOverflow;
-
-    default:
-        if (httpStatus >= 500 && httpStatus < 600) {
-            return RetryErrorCategory::ServerOverloaded;
-        }
-        break;
-    }
-
-    // Provider-specific error message classification
     // Anthropic / Claude compatible
     if (lowerBody.contains(u"overloaded_error") || lowerBody.contains(u"overloaded")) {
         return RetryErrorCategory::ProviderOverloaded;
@@ -1385,7 +1446,8 @@ RetryErrorCategory LlmClient::classifyError(int httpStatus, const QString &error
     if (lowerBody.contains(u"model_not_found") || lowerBody.contains(u"does not exist")) {
         return RetryErrorCategory::NonRetryable;
     }
-    if (lowerBody.contains(u"invalid_api_key") || lowerBody.contains(u"incorrect api key")) {
+    if (lowerBody.contains(u"invalid_api_key") || lowerBody.contains(u"invalid api key")
+        || lowerBody.contains(u"incorrect api key")) {
         return RetryErrorCategory::NonRetryable;
     }
 
@@ -1423,8 +1485,119 @@ RetryErrorCategory LlmClient::classifyError(int httpStatus, const QString &error
         return RetryErrorCategory::NonRetryable;
     }
 
+    // A provider-reported error message carries the cause even when the body
+    // is empty (an SSE "error" event, for example).
+    if (lowerError.contains(u"context_length_exceeded") || lowerError.contains(u"context_window_exceeded")
+        || lowerError.contains(u"too many tokens") || lowerError.contains(u"maximum context length")
+        || lowerError.contains(u"context length")) {
+        return RetryErrorCategory::ContextOverflow;
+    }
+    if (lowerError.contains(u"invalid_api_key") || lowerError.contains(u"invalid api key")
+        || lowerError.contains(u"incorrect api key") || lowerError.contains(u"unauthorized")
+        || lowerError.contains(u"forbidden")) {
+        return RetryErrorCategory::NonRetryable;
+    }
+    if (lowerError.contains(u"rate limit") || lowerError.contains(u"too many requests")
+        || lowerError.contains(u"overloaded")) {
+        return RetryErrorCategory::RateLimitExceeded;
+    }
+
+    return RetryErrorCategory::None;
+}
+
+RetryErrorCategory LlmClient::classifyError(int httpStatus, const QString &errorMessage, const QByteArray &responseBody, QNetworkReply::NetworkError networkError)
+{
+    const QString lowerError = errorMessage.toLower();
+    const QString lowerBody = QString::fromUtf8(responseBody).toLower();
+
+    // A provider-reported error is authoritative and is checked before the
+    // network error. An SSE "error" event aborts the reply, so the network
+    // error is always set in that case; classifying it first would turn every
+    // provider error into a retryable network failure and throw away the
+    // provider's message.
+    if (!errorMessage.trimmed().isEmpty()) {
+        const RetryErrorCategory fromMessage = classifyByMessage(lowerError, lowerBody);
+        if (fromMessage != RetryErrorCategory::None) {
+            return fromMessage;
+        }
+    }
+
+    // HTTP status code classification. Qt reports a network error for every
+    // status >= 400 as well, so the status has to be inspected first: 401, 404
+    // and 429 are provider errors, not transport failures, and retrying them
+    // only delays the real message.
+    if (httpStatus >= 400) {
+        switch (httpStatus) {
+        case 429: // Too Many Requests - Rate limit
+            return RetryErrorCategory::RateLimitExceeded;
+
+        case 500: // Internal Server Error
+        case 502: // Bad Gateway
+        case 503: // Service Unavailable
+        case 504: // Gateway Timeout
+        case 509: // Bandwidth Limit Exceeded
+            return RetryErrorCategory::ServerOverloaded;
+
+        case 400: // Bad Request - check for specific retryable cases
+            // Some providers return 400 with retryable messages
+            if (lowerBody.contains(u"rate limit") || lowerBody.contains(u"quota") ||
+                lowerBody.contains(u"overloaded") || lowerBody.contains(u"throttl")) {
+                return RetryErrorCategory::RateLimitExceeded;
+            }
+            if (lowerBody.contains(u"context window") || lowerBody.contains(u"too many tokens") ||
+                lowerBody.contains(u"prompt too large") || lowerBody.contains(u"maximum context") ||
+                lowerBody.contains(u"context_length_exceeded") || lowerBody.contains(u"context too long")) {
+                return RetryErrorCategory::ContextOverflow;
+            }
+            {
+                const RetryErrorCategory fromBody = classifyByMessage(lowerError, lowerBody);
+                if (fromBody != RetryErrorCategory::None) {
+                    return fromBody;
+                }
+            }
+            return RetryErrorCategory::NonRetryable;
+
+        case 401: // Unauthorized
+        case 403: // Forbidden
+            return RetryErrorCategory::NonRetryable;
+
+        case 404: // Not Found - model not found, etc.
+            return RetryErrorCategory::NonRetryable;
+
+        case 408: // Request Timeout
+            return RetryErrorCategory::Timeout;
+
+        case 413: // Payload Too Large
+            return RetryErrorCategory::ContextOverflow;
+
+        default:
+            if (httpStatus >= 500 && httpStatus < 600) {
+                return RetryErrorCategory::ServerOverloaded;
+            }
+            break;
+        }
+
+        // An unknown error status still carries a body worth classifying.
+        const RetryErrorCategory fromBody = classifyByMessage(lowerError, lowerBody);
+        if (fromBody != RetryErrorCategory::None) {
+            return fromBody;
+        }
+        return RetryErrorCategory::UnknownTransient;
+    }
+
+    // Network-level errors (connection errors, timeouts, etc.). Only reachable
+    // when the server did not answer with an HTTP error status.
+    if (networkError != QNetworkReply::NoError) {
+        return RetryErrorCategory::NetworkError;
+    }
+
+    const RetryErrorCategory fromBody = classifyByMessage(lowerError, lowerBody);
+    if (fromBody != RetryErrorCategory::None) {
+        return fromBody;
+    }
+
     // If we have an error message but couldn't classify it, treat as unknown transient
-    if (!errorMessage.isEmpty() || httpStatus >= 400) {
+    if (!errorMessage.isEmpty()) {
         return RetryErrorCategory::UnknownTransient;
     }
 
@@ -1746,6 +1919,14 @@ void LlmClient::scheduleRetry(const RetryContext &ctx)
     }
 
     m_retryScheduled = true;
+
+    // The text streamed before the failure belongs to the attempt that failed.
+    // The UI has to drop it, otherwise the transcript shows the failed answer
+    // followed by the whole retried answer.
+    if (!m_text.isEmpty()) {
+        m_text.clear();
+        Q_EMIT textReset();
+    }
 
     // Increment attempt counter
     RetryContext nextCtx = ctx;

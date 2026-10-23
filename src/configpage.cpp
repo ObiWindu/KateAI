@@ -423,7 +423,14 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
             // TODO: Implement actual binary download and installation
             QJsonObject installed = agent;
             installed.insert(u"command"_s, cmd);
-            installed.insert(u"args"_s, QJsonArray());
+            // The platform entry carries the launch arguments ("acp" for
+            // opencode); dropping them made the binary start its TUI instead
+            // of its ACP server and stall the handshake.
+            QJsonArray launchArgs;
+            for (const QJsonValue &arg : platformDist.value(u"args"_s).toArray()) {
+                launchArgs.append(arg.toString());
+            }
+            installed.insert(u"args"_s, launchArgs);
             installed.insert(u"distributionType"_s, u"binary"_s);
             installed.insert(u"binaryArchiveUrl"_s, archiveUrl);
             installed.insert(u"binaryPlatform"_s, platformKey);
@@ -474,6 +481,10 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
         QStringLiteral(u"QPlainTextEdit { background: transparent; color: %1; border: 1px solid %2; border-radius: 4px; padding: 4px; font-size: 13px; }")
             .arg(ChatTheme::textPrimary(), ChatTheme::border()) + ChatTheme::menu());
     securityForm->addRow(i18n("Extra deny globs:"), m_deny);
+
+    m_allowOutsideReads = new QCheckBox(i18n("Allow read tools to access files outside the workspace"), securityWidget);
+    m_allowOutsideReads->setToolTip(i18n("The read tools are approved without a prompt. Keep this off to confine the agent to the project."));
+    securityForm->addRow(i18n("Reads outside workspace:"), m_allowOutsideReads);
 
     m_maxExpandedToolCards = new QSpinBox(securityWidget);
     m_maxExpandedToolCards->setRange(0, 200);
@@ -928,6 +939,10 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
 
     m_maxSubtaskDepth = new QSpinBox(safetyWidget);
     m_maxSubtaskDepth->setRange(0, 5);
+    // The setting counts nesting levels and has a floor of one: 0 and 1 both
+    // allow subtasks but no grandchildren, 2 adds grandchildren, and so on.
+    m_maxSubtaskDepth->setToolTip(
+        i18n("How many levels of subtasks may be nested. The minimum is one level; subtasks cannot be turned off."));
     safetyForm->addRow(i18n("Max subtask depth:"), m_maxSubtaskDepth);
 
     m_maxParallelSubtasks = new QSpinBox(safetyWidget);
@@ -1198,6 +1213,7 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     connect(m_sandbox, &QComboBox::currentIndexChanged, this, markChanged);
     connect(m_timeout, &QSpinBox::valueChanged, this, markChanged);
     connect(m_deny, &QPlainTextEdit::textChanged, this, markChanged);
+    connect(m_allowOutsideReads, &QCheckBox::toggled, this, markChanged);
     connect(m_maxExpandedToolCards, &QSpinBox::valueChanged, this, markChanged);
 
     connect(m_planMode, &QCheckBox::toggled, this, markChanged);
@@ -1624,6 +1640,7 @@ s.opencodeModel = m_opencodeModel->currentText().trimmed();
     s.thinkingMode = m_thinkingMode->isChecked();
     s.extraSystemPrompt = m_system->toPlainText();
     s.extraDenyGlobs = m_deny->toPlainText().split(u'\n', Qt::SkipEmptyParts);
+    s.allowReadsOutsideWorkspace = m_allowOutsideReads->isChecked();
     s.messageSpeed = m_speed->currentData().toInt();
 
     s.contextCompressionLevel = m_compressionLevel->value();
@@ -1812,6 +1829,7 @@ void KateAiConfigPage::reset()
     m_sandbox->setCurrentIndex(std::max(0, m_sandbox->findData(sandboxProfileId(s.sandbox))));
     m_timeout->setValue(std::max(1, s.bashTimeoutMs / 1000));
     m_deny->setPlainText(s.extraDenyGlobs.join(u'\n'));
+    m_allowOutsideReads->setChecked(s.allowReadsOutsideWorkspace);
     m_maxExpandedToolCards->setValue(s.maxExpandedToolCards);
 
     m_maxIter->setValue(s.maxToolCalls);

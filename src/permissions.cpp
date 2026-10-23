@@ -4,6 +4,7 @@
  */
 
 #include "permissions.h"
+#include "mcp.h"
 
 using namespace Qt::Literals::StringLiterals;
 
@@ -56,13 +57,13 @@ ToolRisk PermissionPolicy::riskFor(const QString &toolName) const
     if (toolName == u"bash"_s || toolName == u"new_task"_s) {
         return ToolRisk::Execute;
     }
-    if (isReadTool(toolName)) {
-        return ToolRisk::Read;
-    }
-    // An MCP tool can do anything the server offers, so it is treated as an
-    // execute-risk call unless the server marked it read-only.
+    // An MCP tool can do anything the server offers, whatever its hints say,
+    // so it is always treated as an execute-risk call.
     if (toolName.startsWith(u"mcp__"_s)) {
         return ToolRisk::Execute;
+    }
+    if (isReadTool(toolName)) {
+        return ToolRisk::Read;
     }
     return ToolRisk::Write;
 }
@@ -110,7 +111,16 @@ PermissionPolicy::Verdict PermissionPolicy::evaluate(const QString &toolName, co
         return Verdict::Allow;
     }
 
-    if (isReadTool(toolName)) {
+    // A server's own readOnlyHint is not trusted to skip the prompt in Ask
+    // mode: an MCP tool runs code in a process the plugin did not vet, so a
+    // compromised server description could turn any tool into an unprompted
+    // call. Only the built-in read tools are static code the plugin shipped
+    // with, which is why they alone are allowed without asking. AcceptEdits
+    // still follows the read-tool rule for a hinted tool — the mode's
+    // contract is that only execute-risk calls stop to ask — and "allow for
+    // this session" (or a server's alwaysAllow list, which the user wrote)
+    // keeps it from asking twice.
+    if (isReadTool(toolName) && (m_mode == PermissionMode::AcceptEdits || !isMcpToolName(toolName))) {
         return Verdict::Allow;
     }
 

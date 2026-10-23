@@ -9,8 +9,6 @@
 #include <QFileInfo>
 #include <KLocalizedString>
 
-#include <QFileInfo>
-
 using namespace Qt::Literals::StringLiterals;
 
 namespace KateAi
@@ -35,6 +33,8 @@ QString providerId(Provider provider)
         return u"acp"_s;
     case Provider::OpenCode:
         return u"opencode"_s;
+    case Provider::Telegram:
+        return u"telegram"_s;
     case Provider::Grok:
     default:
         return u"grok"_s;
@@ -92,6 +92,9 @@ Provider providerFromId(const QString &id)
     if (id == u"opencode"_s) {
         return Provider::OpenCode;
     }
+    if (id == u"telegram"_s) {
+        return Provider::Telegram;
+    }
     return Provider::Grok;
 }
 
@@ -130,9 +133,11 @@ QString providerBaseUrl(const Settings &settings)
     case Provider::DeepSeek:
         return settings.deepseekUrl.isEmpty() ? u"https://api.deepseek.com"_s : settings.deepseekUrl;
     case Provider::OpenAICompatible:
-        return settings.openaiCompatibleUrl;
+        // An empty base URL would build a malformed request URL, so the
+        // provider default is used when the field was cleared.
+        return settings.openaiCompatibleUrl.isEmpty() ? u"https://api.openai.com/v1"_s : settings.openaiCompatibleUrl;
     case Provider::ClaudeCompatible:
-        return settings.claudeCompatibleUrl;
+        return settings.claudeCompatibleUrl.isEmpty() ? u"https://api.anthropic.com/v1"_s : settings.claudeCompatibleUrl;
     case Provider::OpenCode:
         return settings.opencodeUrl.isEmpty() ? u"https://opencode.ai/zen/v1"_s : settings.opencodeUrl;
     case Provider::Kilo:
@@ -648,15 +653,35 @@ QString defaultSystemPrompt(const QString &workspace)
         + workspace;
 }
 
+QString truncateSafe(const QString &text, int maxLength)
+{
+    if (maxLength <= 0) {
+        return QString();
+    }
+    if (text.length() <= maxLength) {
+        return text;
+    }
+    int end = maxLength;
+    // A cut between the two halves of a surrogate pair would leave half a
+    // character behind, so the cut moves back to the start of the pair.
+    if (end > 0 && end < text.length() && text.at(end - 1).isHighSurrogate()) {
+        --end;
+    }
+    return text.left(end);
+}
+
 QString compressText(const QString &text, int maxLength, bool enabled)
 {
     if (!enabled || text.length() <= maxLength) {
         return text;
     }
 
-    // Truncate and add indicator
-    QString result = text.left(maxLength);
-    result += u"... (truncated)"_s;
+    // Truncate and add indicator. The cut is taken from the budget so the
+    // result never exceeds the length the caller asked for.
+    const QString indicator = u"... (truncated)"_s;
+    const int room = qMax(0, maxLength - indicator.size());
+    QString result = truncateSafe(text, room);
+    result += indicator;
     return result;
 }
 
@@ -677,8 +702,14 @@ QString smartCompressContext(const QString &text, int maxLength, bool enabled)
         return compressText(text, maxLength, true);
     }
 
-    QString start = text.left(keepStart);
+    // The cuts go through truncateSafe(): a cut in the middle of an astral
+    // character would leave half of it behind.
+    QString start = truncateSafe(text, keepStart);
     QString end = text.right(keepEnd);
+    if (!end.isEmpty() && end.at(0).isLowSurrogate()) {
+        // The tail starts in the second half of a surrogate pair.
+        end.remove(0, 1);
+    }
 
     // Create a summary of what was in the middle
     QString middle = text.mid(keepStart, text.length() - keepStart - keepEnd);
@@ -708,8 +739,11 @@ QList<ChatMessage> compressMessageHistory(const QList<ChatMessage> &messages,
         result.append(messages.first());
     }
 
-    // Keep last N messages, but never drop every non-system message.
-    int keepCount = qBound(1, maxMessages - result.size(), messages.size() - result.size());
+    // Keep last N messages, but never drop every non-system message. The
+    // budget is counted in messages the result can hold: the system message
+    // was already taken out of it.
+    const int nonSystem = messages.size() - result.size();
+    const int keepCount = qBound(1, qMin(maxMessages - result.size(), nonSystem), nonSystem);
     for (int i = messages.size() - keepCount; i < messages.size(); ++i) {
         result.append(messages[i]);
     }
@@ -745,10 +779,13 @@ QJsonArray parsePlanFromText(const QString &text)
     const QStringList markers = QStringList() 
         << u"## plan"_s << u"## implementation plan"_s << u"## plan (structured)"_s
         << u"plan:"_s << u"implementation plan:"_s << u"steps:"_s << u"action plan:"_s;
+    // The earliest marker wins, not the first one in the list: a text that
+    // contains both "Plan:" and "## Implementation Plan" has to start at the
+    // place where the plan really begins.
     for (const QString &m : markers) {
-        start = lower.indexOf(m);
-        if (start >= 0) {
-            break;
+        const int index = lower.indexOf(m);
+        if (index >= 0 && (start < 0 || index < start)) {
+            start = index;
         }
     }
     if (start < 0) {
@@ -775,8 +812,14 @@ QJsonArray parsePlanFromText(const QString &text)
                 } else if (step.startsWith(u"- "_s) || step.startsWith(u"* "_s) || step.startsWith(u"• "_s)) {
                     step = step.mid(2).trimmed();
                 } else if (step.startsWith(u"step "_s, Qt::CaseInsensitive)) {
+                    // The colon belongs to the prefix. It has to be removed
+                    // before the digits are skipped, otherwise the "Step 1:"
+                    // form keeps its colon and the marker test below can never
+                    // match it.
                     step = step.mid(5).trimmed();
-                    if (step.startsWith(u":"_s)) step = step.mid(1).trimmed();
+                    if (step.startsWith(u":"_s)) {
+                        step = step.mid(1).trimmed();
+                    }
                 }
                 if (!step.isEmpty()) {
                     QJsonObject obj;
@@ -805,17 +848,30 @@ QJsonArray mergePlanIntoAssistantMessage(const QJsonArray &existingPlan,
     if (fresh.isEmpty()) {
         return existingPlan;
     }
+    // The state of a step is matched by its id first and by its wording
+    // second. Matching the wording alone loses the state of every step the
+    // agent reworded, and the checklist silently resets mid-task.
+    QHash<QString, bool> completedById;
     QHash<QString, bool> completedByDesc;
     for (const QJsonValue &v : existingPlan) {
         const QJsonObject o = v.toObject();
-        completedByDesc.insert(o.value(u"description"_s).toString().toLower(),
-                              o.value(u"completed"_s).toBool());
+        const bool completed = o.value(u"completed"_s).toBool();
+        const QString id = o.value(u"id"_s).toString();
+        if (!id.isEmpty()) {
+            completedById.insert(id, completed);
+        }
+        completedByDesc.insert(o.value(u"description"_s).toString().toLower(), completed);
     }
     QJsonArray merged;
     for (const QJsonValue &v : fresh) {
         QJsonObject o = v.toObject();
         const QString desc = o.value(u"description"_s).toString();
-        o.insert(u"completed"_s, completedByDesc.value(desc.toLower(), false));
+        const QString id = o.value(u"id"_s).toString();
+        if (completedById.contains(id)) {
+            o.insert(u"completed"_s, completedById.value(id));
+        } else {
+            o.insert(u"completed"_s, completedByDesc.value(desc.toLower(), false));
+        }
         merged.append(o);
     }
     return merged;

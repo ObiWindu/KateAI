@@ -26,6 +26,10 @@ public:
     // Upper bound per file, so a huge rules file cannot crowd out the
     // conversation.
     static constexpr int MaxFileBytes = 64 * 1024;
+    // The budget for all the rules together. Without it every file may add
+    // its own maximum, and a project with many rule files would fill the
+    // system prompt.
+    static constexpr int MaxTotalBytes = 256 * 1024;
     // Upper bound on the number of rule files that are read.
     static constexpr int MaxFiles = 32;
 

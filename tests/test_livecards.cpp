@@ -18,20 +18,26 @@
 #include "agentloop.h"
 #include "chattheme.h"
 #include "chatwidget.h"
+#include "sessionstoreisolation.h"
 #include "settings.h"
 #include "toolcallwidget.h"
+#include "todowidget.h"
 #include "questionwidget.h"
 #include "suggestionwidget.h"
 #include "types.h"
 
 #include <QApplication>
 #include <QFont>
+#include <QFontDatabase>
+#include <QFontInfo>
 #include <QFontMetrics>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QSignalSpy>
 #include <QTest>
 #include <QTemporaryDir>
+#include <QPoint>
+#include <QScrollArea>
 #include <QTextBlock>
 #include <QTextBrowser>
 #include <QTextFragment>
@@ -40,6 +46,31 @@
 
 using namespace Qt::Literals::StringLiterals;
 using namespace KateAi;
+
+namespace
+{
+
+// The message CSS styles inline code with the generic "monospace" family.
+// Since the KF6TextEditor 6.31 / Qt 6.11 rework, the imported HTML resolves
+// that generic to the platform's concrete fixed font (here "Noto Sans Mono"),
+// and QFontInfo::fixedPitch() does not flag every concrete fixed font either.
+// The rendered format is monospace when the generic survived, when it resolved
+// to the system's fixed font, or when the resolved font is a fixed pitch one.
+bool isMonospace(const QTextCharFormat &format)
+{
+    const QStringList families = format.fontFamilies().toStringList();
+    for (const QString &family : families) {
+        if (family.compare(QStringLiteral("monospace"), Qt::CaseInsensitive) == 0) {
+            return true;
+        }
+        if (family.compare(QFontDatabase::systemFont(QFontDatabase::FixedFont).family(), Qt::CaseInsensitive) == 0) {
+            return true;
+        }
+    }
+    return QFontInfo(format.font()).fixedPitch();
+}
+
+} // namespace
 
 class TestLiveCards : public QObject
 {
@@ -158,6 +189,10 @@ private:
 private Q_SLOTS:
     void initTestCase()
     {
+        // The widget autosaves its transcript, so without a scratch database
+        // every test run would drop mock prompts like "Run a long command."
+        // into the user's real conversation history.
+        isolateSessionStore();
     }
 
     void cleanup()
@@ -316,7 +351,7 @@ private Q_SLOTS:
                 if (text.startsWith(QStringLiteral("this")) && frag.charFormat().fontWeight() >= QFont::Bold) {
                     sawBold = true;
                 }
-                if (text.startsWith(QStringLiteral("grep")) && frag.charFormat().fontFamily() == QStringLiteral("monospace")) {
+                if (text.startsWith(QStringLiteral("grep")) && isMonospace(frag.charFormat())) {
                     sawCodeFont = true;
                 }
             }
@@ -511,6 +546,51 @@ private Q_SLOTS:
         QTextBrowser *body = cardBody(card);
         QVERIFY2(body && body->toPlainText().contains(QStringLiteral("patched src/main.cpp")),
                  qPrintable(body ? body->toPlainText() : QString()));
+    }
+
+    // The plan's todo list docks at the bottom of the chat: a compact strip
+    // above the composer that follows the agent's plan updates and stays out
+    // of the transcript, so it does not scroll away mid-turn.
+    void testPlanDocksAboveTheComposer()
+    {
+        setup();
+
+        auto *dock = m_widget->findChild<TodoWidget *>();
+        QVERIFY2(dock, "the chat has no todo dock");
+        QVERIFY2(!dock->isVisible(), "the dock shows with no plan");
+
+        // A plan update from the agent lands in the dock, not in a card.
+        QJsonArray plan;
+        for (int i = 1; i <= 5; ++i) {
+            QJsonObject step;
+            step.insert(QStringLiteral("id"), QString::number(i));
+            step.insert(QStringLiteral("description"), QStringLiteral("Step %1").arg(i));
+            step.insert(QStringLiteral("completed"), i <= 2);
+            step.insert(QStringLiteral("inProgress"), i == 3);
+            plan.append(step);
+        }
+        Q_EMIT m_widget->agent()->planUpdated(plan);
+        QTest::qWait(80);
+        QVERIFY(dock->isVisible());
+        QCOMPARE(dock->totalCount(), 5);
+        QCOMPARE(dock->completedCount(), 2);
+        // The compact window: three rows on screen.
+        QCOMPARE(dock->findChildren<QWidget *>(QStringLiteral("todoRow")).size(), 3);
+
+        // Docked at the bottom: outside the scroll area's transcript, below
+        // the scroll area's bottom edge.
+        auto *scroll = m_widget->findChild<QScrollArea *>();
+        QVERIFY(scroll);
+        QVERIFY2(dock->parentWidget() == m_widget, "the dock is not a direct child of the chat");
+        QVERIFY2(dock->mapTo(m_widget, QPoint(0, 0)).y() >= scroll->mapTo(m_widget, QPoint(0, 0)).y() + scroll->height(),
+                 "the dock is not below the transcript");
+
+        // An empty plan retires the dock again.
+        Q_EMIT m_widget->agent()->planUpdated(QJsonArray());
+        QTest::qWait(80);
+        QVERIFY(!dock->isVisible());
+
+        teardown();
     }
 };
 

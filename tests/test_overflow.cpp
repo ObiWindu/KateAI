@@ -15,10 +15,13 @@
 #include <QJsonObject>
 #include <QLabel>
 #include <QListWidget>
+#include <QPoint>
 #include <QPushButton>
 #include <QMetaObject>
 #include <QRegularExpression>
+#include <QScrollArea>
 #include <QTabWidget>
+#include <QTextBrowser>
 #include <QTcpServer>
 #include <QTemporaryDir>
 #include <QTest>
@@ -241,12 +244,98 @@ private Q_SLOTS:
         widget.show();
 
         QLabel *pill = widget.findChild<QLabel *>(u"thinkingIndicator"_s);
-        QVERIFY2(pill, "the thinking pill was not found in the transcript");
-        QVERIFY2(pill->text().contains(QChar(0x1F9E0)), qPrintable(pill->text()));
+        QVERIFY2(pill, "the thinking pill was not found in the chat");
+        // The brain is above the BMP, so the whole surrogate pair has to be in
+        // the text: QChar(0x1F9E0) alone would be a lone surrogate half.
+        QVERIFY2(pill->text().contains(u"\U0001F9E0"_s), qPrintable(pill->text()));
         QVERIFY2(pill->textFormat() == Qt::RichText, "the pill needs rich text to carry the span");
         QVERIFY2(pill->text().contains(u"font-weight: 400"_s), qPrintable(pill->text()));
         QVERIFY2(!pill->graphicsEffect(), "an opacity effect on the pill breaks the emoji glyph");
-        QVERIFY2(pill->styleSheet().contains(ChatTheme::accent()), qPrintable(pill->styleSheet()));
+        // Bare text: the sheet is the theme's own, with no box and no fill.
+        QVERIFY2(pill->styleSheet() == ChatTheme::thinkingPill(), qPrintable(pill->styleSheet()));
+        QVERIFY2(!pill->styleSheet().contains(u"background-color"_s), qPrintable(pill->styleSheet()));
+        QVERIFY2(!pill->styleSheet().contains(u"border: 1px"_s), qPrintable(pill->styleSheet()));
+    }
+
+    // The indicators float over the transcript's very bottom left corner:
+    // bare small text pinned to the bottom edge, not a row in the flow, so
+    // they never push the conversation around and cannot be scrolled away.
+    void indicatorsOverlayTheBottomLeftCorner()
+    {
+        isolateSessionStore();
+        ChatWidget widget;
+        widget.resize(900, 700);
+        widget.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&widget));
+
+        auto *scroll = widget.findChild<QScrollArea *>();
+        QVERIFY(scroll);
+        auto *row = widget.findChild<QWidget *>(u"indicatorsContainer"_s);
+        QVERIFY2(row, "the indicators row was not found");
+        QVERIFY2(row->parentWidget() == scroll, "the indicators row is not an overlay on the transcript");
+        QVERIFY2(!row->isVisible(), "the strip shows while nothing is running");
+
+        // A thinking delta turns the strip on; it must sit flush with the
+        // bottom left corner of the transcript viewport.
+        Q_EMIT widget.agent()->thinkingDelta(u"considering"_s);
+        QVERIFY(QTest::qWaitFor([&row] {
+            return row->isVisible();
+        }));
+        QTest::qWait(60);
+        const QPoint topLeft = row->mapTo(scroll, QPoint(0, 0));
+        QVERIFY2(topLeft.x() <= 8,
+                 qPrintable(QStringLiteral("the strip is not at the left edge: %1+%2 of %3")
+                                .arg(topLeft.x()).arg(row->width()).arg(scroll->width())));
+        QVERIFY2(topLeft.y() + row->height() >= scroll->height() - 8,
+                 qPrintable(QStringLiteral("the strip is not at the bottom edge: %1+%2 of %3")
+                                .arg(topLeft.y()).arg(row->height()).arg(scroll->height())));
+        // Smaller than the boxed pill it replaces (~30px tall with padding).
+        QVERIFY2(row->height() <= 16,
+                 qPrintable(QStringLiteral("the strip did not shrink: %1px").arg(row->height())));
+
+        // Clicks pass through to the transcript underneath.
+        QVERIFY2(row->testAttribute(Qt::WA_TransparentForMouseEvents),
+                 "the strip swallows clicks meant for the transcript");
+    }
+
+    // The reasoning browser's height is pinned to its document, and the
+    // document wraps at the browser's width. A fit measured before the layout
+    // gave the browser its real width used to stay pinned, so a block whose
+    // text re-wrapped to fewer lines showed empty space below it.
+    void thinkingHeightFollowsTheLaidOutWidth()
+    {
+        ChatWidget widget;
+        widget.resize(900, 700);
+        widget.show();
+
+        Q_EMIT widget.agent()->thinkingDelta(
+            u"a line of reasoning that is long enough to wrap at narrow widths, so the pinned height has to follow the width the layout actually gives the browser"_s);
+
+        auto *browser = widget.findChild<QTextBrowser *>(u"reasoningBrowser"_s);
+        QVERIFY2(browser, "the reasoning browser was not found");
+        // The pacer reveals the text over ticks; wait for it to be on screen.
+        QElapsedTimer timer;
+        timer.start();
+        while (timer.elapsed() < 4000 && !(browser->isVisible() && browser->height() >= 48)) {
+            QTest::qWait(20);
+        }
+        QVERIFY2(browser->isVisible() && browser->height() >= 48, "the reasoning browser never settled");
+
+        const auto fitsDocument = [browser] {
+            const int width = std::max(120, browser->viewport()->width());
+            browser->document()->setTextWidth(width);
+            return std::max(48, qCeil(browser->document()->size().height()) + 20);
+        };
+        QVERIFY2(qAbs(browser->height() - fitsDocument()) <= 2,
+                 "the pinned height does not match the document at the real width");
+
+        // The panel narrows: the text wraps to more lines and the pinned
+        // height has to follow, or the block shows clipped text or empty
+        // space below it.
+        widget.resize(420, 700);
+        QTest::qWait(120);
+        QVERIFY2(qAbs(browser->height() - fitsDocument()) <= 2,
+                 "the pinned height did not follow the resize");
     }
 
     // An ACP agent reports a running tool through in-progress tool_call_update

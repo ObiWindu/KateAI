@@ -7,6 +7,7 @@
 #include <QSignalSpy>
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QSet>
 #include <KConfigGroup>
 #include <KSharedConfig>
 
@@ -247,6 +248,57 @@ private Q_SLOTS:
         QCOMPARE(conversations.size(), 1);
         QCOMPARE(conversations.first().id, firstId);
         QCOMPARE(SessionStore::loadConversation(firstId).messages.size(), 1);
+    }
+
+    // Regression: abort() with tool calls outstanding used to hold a reference
+    // into m_messages across the appends of the cancelled results. The append
+    // grows the list and frees the buffer, so the remaining tool calls were
+    // iterated from freed memory — the heap corruption that took Kate down
+    // whenever Stop was pressed while the agent was typing or a tool ran.
+    void testAbortAppendsCancelledResultForEachOutstandingCall()
+    {
+        AgentLoop agent;
+
+        SessionStore::SessionData data;
+        ChatMessage systemMsg;
+        systemMsg.role = ChatMessage::Role::System;
+        systemMsg.content = u"System prompt"_s;
+        data.messages.append(systemMsg);
+        ChatMessage userMsg;
+        userMsg.role = ChatMessage::Role::User;
+        userMsg.content = u"Run these"_s;
+        data.messages.append(userMsg);
+
+        // Enough unanswered calls on the last assistant message that the
+        // result appends must grow the message list mid-iteration.
+        ChatMessage assistantMsg;
+        assistantMsg.role = ChatMessage::Role::Assistant;
+        assistantMsg.content = u"Working on it"_s;
+        const int outstanding = 40;
+        for (int i = 0; i < outstanding; ++i) {
+            QJsonObject call;
+            call.insert(u"id"_s, u"call_%1"_s.arg(i));
+            call.insert(u"function"_s, QJsonObject{{u"name"_s, u"bash"_s},
+                                                  {u"arguments"_s, u"{}"_s}});
+            assistantMsg.toolCalls.append(call);
+        }
+        data.messages.append(assistantMsg);
+
+        agent.restoreSession(data);
+        agent.abort();
+
+        const auto messages = agent.sessionData().messages;
+        QSet<QString> cancelled;
+        for (const ChatMessage &msg : messages) {
+            if (msg.role == ChatMessage::Role::Tool) {
+                cancelled.insert(msg.toolCallId);
+            }
+        }
+        QCOMPARE(cancelled.size(), outstanding);
+        for (int i = 0; i < outstanding; ++i) {
+            QVERIFY2(cancelled.contains(u"call_%1"_s.arg(i)),
+                     qPrintable(u"missing cancelled result for call_%1"_s.arg(i)));
+        }
     }
 
     void testSessionPersistenceRoundTrip()

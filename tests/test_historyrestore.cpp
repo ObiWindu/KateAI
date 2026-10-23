@@ -12,6 +12,7 @@
 #include "chattheme.h"
 #include "sessionstore.h"
 #include "sessionstoreisolation.h"
+#include "todowidget.h"
 #include "toolcallwidget.h"
 #include "types.h"
 
@@ -61,6 +62,16 @@ QWidget *cardForToolCallId(ChatWidget &widget, const QString &toolCallId)
         }
     }
     return nullptr;
+}
+
+QJsonObject planStep(const QString &id, const QString &description)
+{
+    QJsonObject step;
+    step.insert(u"id"_s, id);
+    step.insert(u"description"_s, description);
+    step.insert(u"completed"_s, false);
+    step.insert(u"inProgress"_s, true);
+    return step;
 }
 
 } // namespace
@@ -258,6 +269,100 @@ private Q_SLOTS:
                  qPrintable(QStringLiteral("terminal/exec details: %1").arg(termDetails->toPlainText())));
         QVERIFY2(termCard->styleSheet().contains(ChatTheme::toolColor(u"terminal/exec"_s)),
                  qPrintable(termCard->styleSheet()));
+    }
+
+    void testARestoredAnswerIsNotShownTwice()
+    {
+        // The snapshot of an unfinished turn holds the text of the answer, and
+        // the transcript may already carry the same answer. Rendering both
+        // shows the final answer twice.
+        ChatWidget widget;
+        widget.resize(900, 700);
+        widget.show();
+
+        SessionStore::SessionData data;
+        ChatMessage user;
+        user.role = ChatMessage::Role::User;
+        user.content = u"say hello"_s;
+        ChatMessage assistant;
+        assistant.role = ChatMessage::Role::Assistant;
+        assistant.content = u"Hello there"_s;
+        data.messages = {user, assistant};
+        // The same text, as a session that was saved while the answer was
+        // still streaming would hold it.
+        data.currentAssistant = u"Hello there"_s;
+        SessionStore::saveConversation(u"conv-duplicate"_s, data, u"Duplicate"_s, 50);
+
+        widget.setCurrentConversationId(SessionStore::createNewConversation());
+        widget.switchToConversation(u"conv-duplicate"_s);
+        QTest::qWait(60);
+
+        int answers = 0;
+        for (const QTextBrowser *browser : widget.findChildren<QTextBrowser *>()) {
+            if (browser->toPlainText().contains(u"Hello there"_s)) {
+                ++answers;
+            }
+        }
+        QCOMPARE(answers, 1);
+    }
+
+    void testPlanDockResetsWithTheConversation()
+    {
+        // The plan dock lives above the composer, outside the transcript sweep
+        // a rebuild runs. The checklist of the conversation being left must
+        // not follow the user into a new one, and a conversation from history
+        // that carries a plan must get its own checklist back.
+        ChatWidget widget;
+        widget.resize(900, 700);
+        widget.show();
+        QTest::qWait(60);
+
+        ChatMessage user;
+        user.role = ChatMessage::Role::User;
+        user.content = u"do the work"_s;
+        ChatMessage assistant;
+        assistant.role = ChatMessage::Role::Assistant;
+        assistant.content = u"Working on it."_s;
+
+        SessionStore::SessionData plain;
+        plain.messages = {user, assistant};
+        SessionStore::saveConversation(u"conv-plain"_s, plain, u"Plain"_s, 50);
+
+        QJsonArray plan;
+        plan.append(planStep(u"1"_s, u"survey the code"_s));
+        plan.append(planStep(u"2"_s, u"apply the fix"_s));
+        SessionStore::SessionData withPlan = plain;
+        withPlan.currentPlan = plan;
+        withPlan.planShown = true;
+        SessionStore::saveConversation(u"conv-with-plan"_s, withPlan, u"With plan"_s, 50);
+
+        widget.setCurrentConversationId(SessionStore::createNewConversation());
+
+        auto *todo = widget.findChild<TodoWidget *>();
+        QVERIFY(todo);
+        QVERIFY2(!todo->isVisible(), "dock must start hidden on a fresh conversation");
+
+        // A running turn puts its plan in the dock.
+        todo->setTodos(plan);
+        QVERIFY(todo->isVisible());
+
+        // Starting a new conversation drops it again.
+        widget.newChat();
+        QVERIFY2(!todo->isVisible(), "plan dock survived starting a new conversation");
+
+        // So does switching to a conversation that has no plan of its own.
+        todo->setTodos(plan);
+        QVERIFY(todo->isVisible());
+        widget.switchToConversation(u"conv-plain"_s);
+        QTest::qWait(60);
+        QVERIFY2(!todo->isVisible(), "plan dock survived switching to a plan-less conversation");
+
+        // A conversation saved with a plan shows its own checklist again.
+        widget.switchToConversation(u"conv-with-plan"_s);
+        QTest::qWait(60);
+        // showTodoList() honours the "show plan as checklist" setting, so the
+        // dock is back exactly when that setting says it should be.
+        QCOMPARE(todo->isVisible(), widget.settings().showPlanAsChecklist);
     }
 };
 

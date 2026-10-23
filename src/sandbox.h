@@ -7,6 +7,8 @@
 
 #include "types.h"
 
+#include <QHash>
+#include <QRegularExpression>
 #include <QString>
 #include <QStringList>
 
@@ -33,7 +35,11 @@ private:
 class Sandbox
 {
 public:
-    Sandbox(QString workspaceRoot, SandboxProfile profile, QStringList extraDenyGlobs = {});
+    // allowOutsideReads lifts the workspace confinement for the read tools.
+    // It is off by default: the read tools are approved without a prompt, so
+    // a confined read is the only thing that keeps the agent inside the
+    // project.
+    Sandbox(QString workspaceRoot, SandboxProfile profile, QStringList extraDenyGlobs = {}, bool allowOutsideReads = false);
 
     QString workspaceRoot() const
     {
@@ -74,10 +80,16 @@ public:
 private:
     bool pathInsideWorkspace(const QString &absolutePath) const;
     QString normalizePath(const QString &path, QString *error, bool forWrite) const;
+    bool globMatchCached(const QString &pattern, const QString &path) const;
 
     QString m_workspaceRoot;
     SandboxProfile m_profile = SandboxProfile::Workspace;
     QStringList m_extraDenyGlobs;
+    bool m_allowOutsideReads = false;
+    // Compiled deny-glob patterns. globToRegex() is cheap but QRegularExpression
+    // construction is not, and isDenied() runs one per glob per candidate path.
+    mutable QHash<QString, QRegularExpression> m_globCache;
+    mutable QStringList m_cachedDenyGlobs;
 };
 
 } // namespace KateAi

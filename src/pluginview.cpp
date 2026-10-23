@@ -5,6 +5,7 @@
 
 #include "pluginview.h"
 #include "chatwidget.h"
+#include "mcp.h"
 #include "chattheme.h"
 #include "configpage.h"
 #include "plugin.h"
@@ -29,6 +30,7 @@
 #include <QKeySequence>
 #include <QLayout>
 #include <QMenu>
+#include <QMessageBox>
 #include <QPalette>
 #include <QPushButton>
 #include <QTimer>
@@ -501,12 +503,64 @@ namespace KateAi
         return lines.join(u'\n');
     }
 
+    void KateAiView::confirmWorkspaceMcpServers(const QString &workspace)
+    {
+        if (workspace.isEmpty() || !m_chat || !m_chat->agent()) {
+            return;
+        }
+        McpManager *manager = m_chat->agent()->mcpManager();
+        if (!manager) {
+            return;
+        }
+        // The answer is remembered for the session: refreshWorkspace() runs on
+        // every editor change, and the question would pop up again and again.
+        const auto known = m_mcpTrust.constFind(workspace);
+        if (known != m_mcpTrust.constEnd()) {
+            manager->setLoadWorkspaceConfig(known.value());
+            return;
+        }
+
+        const QList<McpServerConfig> servers = McpConfigStore::load(workspace);
+        if (servers.isEmpty()) {
+            m_mcpTrust.insert(workspace, true);
+            manager->setLoadWorkspaceConfig(true);
+            return;
+        }
+
+        // A project can ship a server list, and a server is a program that
+        // runs with the user's privileges. The list is only used after the
+        // user has seen it and agreed to it.
+        QStringList names;
+        for (const McpServerConfig &server : servers) {
+            names.append(server.name);
+        }
+        const QString message = i18n(
+            "The project %1 defines %n MCP server(s): %2.\n\n"
+            "Starting a server runs a program on your machine. Only continue if you trust this project.",
+            names.size(),
+            names.join(u", "_s));
+        QMessageBox box(QMessageBox::Question, i18n("MCP servers in this project"), message,
+                        QMessageBox::Yes | QMessageBox::No, qobject_cast<QWidget *>(m_mainWindow));
+        box.setDefaultButton(QMessageBox::No);
+        box.setDetailedText(McpConfigStore::configPath(workspace));
+        const bool trusted = box.exec() == QMessageBox::Yes;
+        m_mcpTrust.insert(workspace, trusted);
+        manager->setLoadWorkspaceConfig(trusted);
+        if (!trusted) {
+            // Nothing of the file is started, and the servers of the previous
+            // workspace are stopped as well.
+            manager->setServers({});
+            manager->disconnectAll();
+        }
+    }
+
     void KateAiView::refreshWorkspace()
     {
         if (!m_mainWindow || !m_chat || !m_chat->agent()) {
             return;
         }
         const QString workspace = detectWorkspace(m_mainWindow);
+        confirmWorkspaceMcpServers(workspace);
         m_chat->agent()->setWorkspace(workspace);
         m_chat->agent()->setDocumentBridge(&m_bridge);
         m_chat->agent()->setEditorContext(editorContext());

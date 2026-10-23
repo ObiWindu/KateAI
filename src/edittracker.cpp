@@ -37,8 +37,9 @@ namespace
 
 // The tracker is deliberately compact: it is a review control, not the main
 // transcript. Keep every size in one place so the bar and the rows stay at
-// part of the chat's usual type scale.
-constexpr qreal kTrackerFontScale = 0.6;
+// part of the chat's usual type scale. The scale was raised by 15% so the
+// small type stays legible next to the transcript.
+constexpr qreal kTrackerFontScale = 0.69;
 
 QString trackerFontSize(int pixels)
 {
@@ -53,7 +54,7 @@ QString keepAllStyle()
                "  color: %2;"
                "  border: none;"
                "  border-radius: 16px;"
-               "  padding: 0 14px;"
+               "  padding: 0 4px;"
                "  font-weight: 600;"
                "  font-size: %7;"
                "}"
@@ -72,7 +73,7 @@ QString rejectAllStyle()
                "  color: %1;"
                "  border: 1px solid %1;"
                "  border-radius: 16px;"
-               "  padding: 0 14px;"
+               "  padding: 0 4px;"
                "  font-weight: 600;"
                "  font-size: %5;"
                "}"
@@ -91,7 +92,7 @@ QString keepStyle()
                "  color: %1;"
                "  border: 1px solid %1;"
                "  border-radius: 12px;"
-               "  padding: 0 10px;"
+               "  padding: 0 4px;"
                "  font-weight: 600;"
                "  font-size: %4;"
                "}"
@@ -108,7 +109,7 @@ QString rejectStyle()
                "  color: %1;"
                "  border: 1px solid %1;"
                "  border-radius: 12px;"
-               "  padding: 0 10px;"
+               "  padding: 0 4px;"
                "  font-weight: 600;"
                "  font-size: %2;"
                "}"
@@ -125,7 +126,7 @@ QString reviewStyle()
                "  color: %2;"
                "  border: 1px solid %3;"
                "  border-radius: 12px;"
-               "  padding: 0 10px;"
+               "  padding: 0 4px;"
                "  font-weight: 600;"
                "  font-size: %6;"
                "}"
@@ -143,7 +144,7 @@ QString undoStyle()
                "  color: %1;"
                "  border: 1px solid %2;"
                "  border-radius: 16px;"
-               "  padding: 0 12px;"
+               "  padding: 0 4px;"
                "  font-weight: 600;"
                "  font-size: %4;"
                "}"
@@ -421,7 +422,13 @@ void EditTracker::acceptAll()
     for (const QString &path : paths) {
         acceptEdit(path);
     }
-    clear();
+    // Not clear(): settle() already emptied and pruned every group, and
+    // clear() would wipe the undo stack these decisions were pushed on. A
+    // bulk decision is the action with the largest blast radius, so it is
+    // exactly the one that must stay undoable.
+    pruneGroups();
+    updateUI();
+    Q_EMIT editsChanged(hasPendingEdits());
 }
 
 void EditTracker::rejectAll()
@@ -430,7 +437,9 @@ void EditTracker::rejectAll()
     for (const QString &path : paths) {
         rejectEdit(path);
     }
-    clear();
+    pruneGroups();
+    updateUI();
+    Q_EMIT editsChanged(hasPendingEdits());
 }
 
 bool EditTracker::canUndo() const
@@ -477,6 +486,20 @@ void EditTracker::undoLast()
             Q_EMIT fileCreatedThenRejected(decision.path);
         } else if (!decision.previousContent.isNull()) {
             Q_EMIT editRejected(decision.path, decision.toolName, decision.previousContent);
+        }
+    } else {
+        // Undoing a rejection has to put the edit back: the file on disk holds
+        // the reverted content, and the tracker now shows the edit as pending
+        // again. Without this the two disagree.
+        const EditEntry *last = decision.pending.isEmpty() ? nullptr : &decision.pending.last();
+        if (decision.createdFile) {
+            // The file was created by the agent and then deleted by the
+            // rejection. Putting it back means writing the content again.
+            if (last && !last->newContent.isNull()) {
+                Q_EMIT editAccepted(decision.path, decision.toolName, last->newContent);
+            }
+        } else if (last && !last->newContent.isNull()) {
+            Q_EMIT editAccepted(decision.path, decision.toolName, last->newContent);
         }
     }
 
@@ -778,8 +801,11 @@ void EditTracker::settle(const QString &path, bool accepted)
     const QString restoreTo = group.lastKnownContent;
     const QString settledTo = group.pending.last().newContent;
     group.pending.clear();
-    if (accepted) {
+    if (accepted && !settledTo.isNull()) {
         // The file is already in this state, so accepting only settles the queue.
+        // A null content means the post-edit read failed, so the state of the
+        // file is unknown: the previous baseline is kept, because a null
+        // baseline would be restored as an empty file later.
         group.lastKnownContent = settledTo;
     }
     m_undoStack.append(decision);

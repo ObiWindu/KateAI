@@ -912,7 +912,17 @@ void ToolCallWidget::setFinished(const ToolResult &result)
     const QString shownSource = diff.isEmpty() ? result.output : textBeforeDiff(result.output);
     const QString shown = clampToLines(shownSource, kMaxResultLines);
     const QString language = languageForTool(m_toolName);
-    m_details->setHtml(CodeHighlight::htmlForCode(shown, language));
+    // Nothing to show must not paint an empty code block: a tool that reports
+    // no output (an edit whose result never arrived, an ACP turn whose
+    // arguments were never recorded) would otherwise render the block's frame
+    // -- surface and language label -- with no code inside it. The surface is
+    // cleared instead, so the card settles on its header (and its diff, if the
+    // arguments produced one) rather than an empty box.
+    if (!shown.trimmed().isEmpty()) {
+        m_details->setHtml(CodeHighlight::htmlForCode(shown, language));
+    } else if (m_details && !m_details->toPlainText().isEmpty()) {
+        m_details->clear();
+    }
     setExpanded(!shown.trimmed().isEmpty() || m_hasDiffPreview);
     applyDetailView();
     applyDetailsHeight();

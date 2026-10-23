@@ -112,15 +112,25 @@ private Q_SLOTS:
         QCOMPARE(policy.evaluate(u"mcp__files__write"_s, {}, box, &reason), PermissionPolicy::Verdict::Ask);
     }
 
-    void mcpReadOnlyHintIsTreatedAsAReadTool()
+    void mcpReadOnlyHintPromptsInAskMode()
     {
-        PermissionPolicy policy(PermissionMode::Ask);
+        // A server's readOnlyHint is a self-declaration: it must not skip the
+        // prompt in Ask mode, but it is honoured in AcceptEdits, whose contract
+        // is that only execute-risk calls stop to ask, and the risk of any
+        // MCP tool stays Execute whatever the server says.
+        PermissionPolicy ask(PermissionMode::Ask);
         Sandbox box(QDir::tempPath(), SandboxProfile::Workspace);
-        policy.setReadOnlyTools({u"mcp__git__status"_s});
+        ask.setReadOnlyTools({u"mcp__git__status"_s});
         QString reason;
-        QVERIFY(policy.isReadTool(u"mcp__git__status"_s));
-        QCOMPARE(policy.riskFor(u"mcp__git__status"_s), ToolRisk::Read);
-        QCOMPARE(policy.evaluate(u"mcp__git__status"_s, {}, box, &reason), PermissionPolicy::Verdict::Allow);
+        QVERIFY(ask.isReadTool(u"mcp__git__status"_s));
+        QCOMPARE(ask.riskFor(u"mcp__git__status"_s), ToolRisk::Execute);
+        QCOMPARE(ask.evaluate(u"mcp__git__status"_s, {}, box, &reason), PermissionPolicy::Verdict::Ask);
+
+        PermissionPolicy acceptEdits(PermissionMode::AcceptEdits);
+        acceptEdits.setReadOnlyTools({u"mcp__git__status"_s});
+        QCOMPARE(acceptEdits.evaluate(u"mcp__git__status"_s, {}, box, &reason), PermissionPolicy::Verdict::Allow);
+        // A tool without the hint still asks, even in AcceptEdits.
+        QCOMPARE(acceptEdits.evaluate(u"mcp__git__commit"_s, {}, box, &reason), PermissionPolicy::Verdict::Ask);
     }
 
     void subtasksAreExecuteRisk()

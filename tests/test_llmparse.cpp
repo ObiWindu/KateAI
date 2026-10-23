@@ -23,6 +23,50 @@ private Q_SLOTS:
         QVERIFY(!chunk.finished);
     }
 
+    void splitEventIsJoined()
+    {
+        // The SSE specification allows one event to be spread over several
+        // "data:" lines. The parser reports whether the payload was complete,
+        // so the caller can wait for the rest instead of dropping the event.
+        QHash<int, ToolCall> acc;
+        bool parsed = true;
+        const CompletionChunk partial = LlmClient::parseSseLine(
+            QByteArray("data: {\"choices\":[{\"delta\":{\"content\":"), &acc, &parsed);
+        QVERIFY(!parsed);
+        QVERIFY(partial.contentDelta.isEmpty());
+    }
+
+    void toolCallWithoutIndexDoesNotOverwriteTheOther()
+    {
+        // A provider that omits "index" sent every parallel tool call as
+        // index 0, so the calls overwrote each other.
+        QHash<int, ToolCall> acc;
+        LlmClient::parseSseLine(
+            QByteArray("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"a\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{}\"}}]}}]}"),
+            &acc);
+        LlmClient::parseSseLine(
+            QByteArray("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"b\",\"function\":{\"name\":\"grep\",\"arguments\":\"{}\"}}]}}]}"),
+            &acc);
+        QCOMPARE(acc.size(), 2);
+    }
+
+    void placeholderObjectDoesNotBreakTheArguments()
+    {
+        // A server that opens with "{}" and follows it with the real
+        // arguments produced "{}{\"suggestion\":...}", which dropped the
+        // arguments before the tool ran.
+        QHash<int, ToolCall> acc;
+        LlmClient::parseSseLine(
+            QByteArray("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"a\",\"function\":{\"name\":\"suggest\",\"arguments\":\"{}\"}}]}}]}"),
+            &acc);
+        LlmClient::parseSseLine(
+            QByteArray("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"suggestion\\\":\\\"hi\\\"}\"}}]}}]}"),
+            &acc);
+        const QString arguments = acc.value(0).argumentsJson;
+        QVERIFY(!arguments.contains(u"{}"_s));
+        QVERIFY(arguments.contains(u"suggestion"_s));
+    }
+
     void parsesAnthropicEvents()
     {
         // The Messages API streams its own event shapes and never the OpenAI

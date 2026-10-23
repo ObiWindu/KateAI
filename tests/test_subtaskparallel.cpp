@@ -1,4 +1,5 @@
 #include "agentloop.h"
+#include "documentbridge.h"
 #include "types.h"
 
 #include <QCoreApplication>
@@ -160,6 +161,63 @@ private Q_SLOTS:
             }
         }
         QVERIFY(sawAnswer);
+    }
+
+    void mutationRunsAfterItsCheckpoint()
+    {
+        // With checkpoints on, a mutation is parked until the snapshot - which
+        // runs off the UI thread - has reported back. The turn must still
+        // write the file, take exactly one checkpoint, and finish.
+        AgentLoop agent;
+        Settings settings;
+        settings.provider = Provider::OpenAICompatible;
+        settings.openaiCompatibleUrl = QStringLiteral("http://127.0.0.1:%1/v1").arg(m_port);
+        settings.openaiCompatibleApiKey = u"test"_s;
+        settings.openaiCompatibleModel = u"mock"_s;
+        settings.agentMode = u"code"_s;
+        settings.planMode = false;
+        settings.maxToolCalls = 20;
+        settings.maxModelRequests = 10;
+        settings.checkpointsEnabled = true;
+        settings.permissionMode = PermissionMode::AlwaysApprove;
+        settings.structuredThinking = false;
+        settings.structuredPlanning = false;
+        settings.enableAutoRetry = false;
+
+        agent.setSettings(settings);
+        agent.setWorkspace(m_workspace->path());
+
+        // write_file goes through the document bridge; without it the tool
+        // fails instead of writing.
+        DiskDocumentBridge bridge;
+        agent.setDocumentBridge(&bridge);
+
+        bool finished = false;
+        QString failure;
+        int checkpoints = 0;
+        QObject::connect(&agent, &AgentLoop::turnFinished, &agent, [&finished] {
+            finished = true;
+        });
+        QObject::connect(&agent, &AgentLoop::failed, &agent, [&failure](const QString &error) {
+            failure = error;
+        });
+        QObject::connect(&agent, &AgentLoop::checkpointCreated, &agent, [&checkpoints](const QString &, const QString &) {
+            ++checkpoints;
+        });
+
+        agent.start(u"Write the note file."_s);
+
+        QVERIFY(waitFor([&finished] {
+            return finished;
+        }, 40000));
+        QVERIFY2(failure.isEmpty(), qPrintable(failure));
+        QCOMPARE(checkpoints, 1);
+        QVERIFY(!agent.checkpoints().isEmpty());
+
+        QFile notes(m_workspace->path() + u"/notes.txt"_s);
+        QVERIFY(notes.exists());
+        QVERIFY(notes.open(QIODevice::ReadOnly | QIODevice::Text));
+        QCOMPARE(QString::fromUtf8(notes.readAll()).trimmed(), u"written by the mock model"_s);
     }
 
     void concurrencyLimitIsEnforced()

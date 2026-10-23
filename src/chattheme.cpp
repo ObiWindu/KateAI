@@ -562,28 +562,32 @@ QString activityPill()
 // -- the brain on the thinking pill is one -- do not survive that trip, they
 // come out blank or hollow. Swapping between the bright and dim sheets keeps
 // the heartbeat and paints the glyph straight onto the screen.
-QString pillSheet(const QString &textColor, const QString &background, const QString &border)
+//
+// The pill is bare text on purpose: no background, no border, half the old
+// footprint. It floats at the very bottom left of the transcript, where a
+// boxed pill would read as a card rather than as a corner tick, and the
+// colour alone carries the state.
+QString pillSheet(const QString &textColor)
 {
     return QStringLiteral(
            "QLabel {"
            "  color: %1;"
-           "  font-size: 12px;"
+           "  font-size: 7.2px;"
            "  font-weight: 600;"
-           "  padding: 5px 12px;"
-           "  background-color: %2;"
-           "  border: 1px solid %3;"
-           "  border-radius: 13px;"
+           "  padding: 2px 6px;"
+           "  border: none;"
+           "  background: transparent;"
            "}")
-        .arg(textColor, background, border);
+        .arg(textColor);
 }
 
-// Text for a pill built on the given hue. The pill's background is a
-// translucent wash of that hue over the panel, so the text must stay readable
-// on the wash in both directions: a white tint of a dark hue on dark panels
-// (the default blue, the default amber), and the hue itself when the hue is
-// light -- an accent inherited from a bright editor keyword (Tokyo Night's
-// #bb9af7) tinted towards white would be light text on a light wash. The dim
-// phase dims towards the panel instead of towards white.
+// Text colour for a pill built on the given hue. With no background wash the
+// colour has to read straight off the panel in both directions: a white tint
+// of a dark hue on dark panels (the default blue, the default amber), and the
+// hue itself when the hue is light -- an accent inherited from a bright
+// editor keyword (Tokyo Night's #bb9af7) tinted towards white would be light
+// text on a light panel. The dim phase dims towards the panel instead of
+// towards white.
 QString pillTextColor(const QString &hueHex, bool dim)
 {
     if (!isDarkColor(kPanelBg)) {
@@ -598,24 +602,24 @@ QString pillTextColor(const QString &hueHex, bool dim)
 
 QString thinkingPill()
 {
-    // Background: a translucent wash of the theme's accent, not a hardcoded
-    // rgba() -- the pill must follow the palette when the theme changes.
-    return pillSheet(pillTextColor(kAccent, false), tinted(kAccent, 0.22), kAccent);
+    // The theme's accent hue, not a hardcoded colour -- the pill must follow
+    // the palette when the theme changes.
+    return pillSheet(pillTextColor(kAccent, false));
 }
 
 QString thinkingPillDim()
 {
-    return pillSheet(pillTextColor(kAccent, true), tinted(kAccent, 0.10), kAccent);
+    return pillSheet(pillTextColor(kAccent, true));
 }
 
 QString workingPill()
 {
-    return pillSheet(pillTextColor(kWarning, false), tinted(kWarning, 0.20), kWarning);
+    return pillSheet(pillTextColor(kWarning, false));
 }
 
 QString workingPillDim()
 {
-    return pillSheet(pillTextColor(kWarning, true), tinted(kWarning, 0.09), kWarning);
+    return pillSheet(pillTextColor(kWarning, true));
 }
 
 QString userCardBg()
@@ -866,10 +870,22 @@ QString userMessageCss()
 
 QString thinkingCss()
 {
+    // The reasoning text is markdown like any message, so the code rules have
+    // to match messageCss(): without them a fenced block or inline code in the
+    // reasoning renders as prose, and the thinking block reads as if the model
+    // sent literal backticks.
     return QStringLiteral(
            "body { color: %1; font-weight: 600; font-size: 12px; margin: 0; padding: 0; background: transparent; }"
-           "p { color: %1; font-weight: 600; margin-bottom: 4px; }")
-        .arg(kTextPrimary);
+           "p { color: %1; font-weight: 600; margin-bottom: 4px; }"
+           "table.codeblock { border: 1px solid %2; border-radius: 6px; margin: 8px 0; background-color: %3; }"
+           "td.codeblock-lang { color: %4; font-family: sans-serif; font-size: 10px; font-weight: 600;"
+           "                    background-color: %3; padding: 4px 10px; }"
+           "pre.codeblock { color: %1; font-family: monospace; font-size: 12px; white-space: pre-wrap;"
+           "                 background-color: %3; margin: 6px 10px; }"
+           "code { font-family: monospace; font-size: 12px; background-color: %5; color: %1;"
+           "       padding: 2px 5px; border-radius: 3px; }"
+           "blockquote { border-left: 3px solid %6; padding-left: 10px; color: %4; margin: 8px 0; }")
+        .arg(kTextPrimary, kBorder, kCodeBlockBg, kTextMuted, kHoverBg, kAccent);
 }
 
 QString toggleLink()
@@ -900,12 +916,62 @@ QString messageText()
         .arg(kTextPrimary);
 }
 
-QString planChecklist()
+QString todoList()
+{
+    return QStringLiteral("QWidget { background: transparent; border: none; }");
+}
+
+QString todoProgress()
+{
+    return QStringLiteral("QLabel { color: %1; font-size: 10px; border: none; background: transparent; }")
+        .arg(kTextMuted);
+}
+
+QString todoItemText()
+{
+    return QStringLiteral("QLabel { color: %1; font-size: 12px; border: none; background: transparent; }")
+        .arg(kTextPrimary);
+}
+
+QString todoItemTextActive()
 {
     return QStringLiteral(
-           "QCheckBox { color: %1; font-size: 12px; spacing: 8px; }"
-           "QCheckBox::indicator { width: 14px; height: 14px; }")
+           "QLabel { color: %1; font-size: 12px; font-weight: 500; border: none; background: transparent; }")
         .arg(kTextPrimary);
+}
+
+QString todoItemTextDone()
+{
+    // A finished step stays in the list as the record of what the run did, but
+    // it must not compete with the steps still open.
+    return QStringLiteral(
+           "QLabel { color: %1; font-size: 12px; text-decoration: line-through;"
+           " border: none; background: transparent; }")
+        .arg(kTextMuted);
+}
+
+QString todoGlyphPending()
+{
+    return QStringLiteral("QLabel { color: %1; font-size: 11px; border: none; background: transparent; }")
+        .arg(kTextMuted);
+}
+
+QString todoGlyphActive()
+{
+    return QStringLiteral("QLabel { color: %1; font-size: 11px; border: none; background: transparent; }")
+        .arg(kAccent);
+}
+
+QString todoGlyphActiveDim()
+{
+    return QStringLiteral("QLabel { color: %1; font-size: 11px; border: none; background: transparent; }")
+        .arg(tinted(kAccent, 0.35));
+}
+
+QString todoGlyphDone()
+{
+    return QStringLiteral("QLabel { color: %1; font-size: 11px; border: none; background: transparent; }")
+        .arg(kSuccess);
 }
 
 bool isEditToolName(const QString &toolName)

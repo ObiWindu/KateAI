@@ -5,8 +5,11 @@
 
 #include "tools.h"
 
+#include "mcp.h"
+
 #include <QDir>
 #include <QDirIterator>
+#include <QFile>
 #include <QFileInfo>
 #include <QJsonDocument>
 #include <QJsonParseError>
@@ -14,6 +17,7 @@
 #include <QProcess>
 #include <QRegularExpression>
 #include <QCryptographicHash>
+#include <QElapsedTimer>
 #include <QTimer>
 #include <QVector>
 
@@ -30,7 +34,17 @@ using namespace Qt::Literals::StringLiterals;
 namespace KateAi
 {
 
-static QJsonObject parseArgs(const ToolCall &call, QString *error)
+namespace
+{
+// A command that writes gigabytes must not fill the memory: the output is
+// kept while the command runs, and the ceiling is applied here.
+constexpr int kMaxBashOutputChars = 80000; // keep in sync with clip()
+} // namespace
+
+// Unified tool argument parsing - canonicalizes arguments from ToolCall
+// Prefers pre-parsed `arguments` object, falls back to parsing `argumentsJson`
+// Returns empty object on parse failure (error output parameter is set)
+QJsonObject parseToolArgs(const ToolCall &call, QString *error)
 {
     // First try to use the parsed arguments directly if available
     if (!call.arguments.isEmpty()) {
@@ -83,6 +97,24 @@ static bool jsonBool(const QJsonValue &value, bool fallback = false)
         }
         if (s == u"false"_s || s == u"0"_s || s == u"no"_s) {
             return false;
+        }
+    }
+    return fallback;
+}
+
+// An integer tool argument, accepting a JSON number or a numeric string:
+// QJsonValue::toInt() silently yields the fallback for "5", which would
+// quietly drop the model's own offset/limit.
+static int jsonInt(const QJsonValue &value, int fallback)
+{
+    if (value.isDouble()) {
+        return value.toInt();
+    }
+    if (value.isString()) {
+        bool ok = false;
+        const int parsed = value.toString().trimmed().toInt(&ok);
+        if (ok) {
+            return parsed;
         }
     }
     return fallback;
@@ -182,7 +214,11 @@ QString shellCommandFor(const QString &toolName, const QJsonObject &args)
     }
     if (toolName == u"new_task"_s) {
         const QString mode = args.value(u"mode"_s).toString();
-        return u"[%1] %2"_s.arg(mode.isEmpty() ? QStringLiteral("code") : mode, args.value(u"description"_s).toString());
+        const QString description = args.value(u"description"_s).toString();
+        const QString label = mode.isEmpty() ? QStringLiteral("code") : mode;
+        // A delegation without a description still reads as a delegation, not
+        // as a bare bracket pair with nothing behind it.
+        return description.isEmpty() ? u"[%1]"_s.arg(label) : u"[%1] %2"_s.arg(label, description);
     }
     if (toolName == u"write_plan_file"_s) {
         return u"write plan file"_s;
@@ -217,13 +253,17 @@ QString planFilePath(const QString &workspaceRoot)
 
 static bool isNoisySearchPath(const QString &relativePath)
 {
-    const QStringList noisy = {
-        u"/.git/"_s, u".git/"_s, u"/node_modules/"_s, u"node_modules/"_s,
-        u"/build/"_s, u"build/"_s, u"/CMakeFiles/"_s, u"/.kateai/"_s,
-        u"/.cache/"_s, u"/__pycache__/"_s,
+    // Match whole path segments, not substrings: "cmake-build/x" or
+    // "src/mybuild/x" contain "build/" but are ordinary source directories.
+    // Only directory segments are checked — the final segment is the file
+    // name, and a file called "build" is worth searching.
+    static const QSet<QString> noisy = {
+        u".git"_s, u"node_modules"_s, u"build"_s, u"CMakeFiles"_s,
+        u".kateai"_s, u".cache"_s, u"__pycache__"_s,
     };
-    for (const QString &part : noisy) {
-        if (relativePath.contains(part) || relativePath.startsWith(part.mid(1))) {
+    const QStringList segments = relativePath.split(u'/');
+    for (int i = 0; i + 1 < segments.size(); ++i) {
+        if (noisy.contains(segments.at(i))) {
             return true;
         }
     }
@@ -422,7 +462,7 @@ ToolRunner::ToolRunner(Sandbox sandbox, DocumentBridge *bridge, QObject *parent)
 PermissionRequest ToolRunner::describe(const ToolCall &call) const
 {
     QString parseError;
-    const QJsonObject args = parseArgs(call, &parseError);
+    const QJsonObject args = parseToolArgs(call, &parseError);
     PermissionRequest req;
     req.toolName = call.name;
     req.toolCallId = call.id;
@@ -436,6 +476,7 @@ PermissionRequest ToolRunner::describe(const ToolCall &call) const
         QString existing;
         QString error;
         const QString resolved = m_sandbox.resolve(req.path, &error, true);
+        req.resolvedPath = resolved;
         if (!resolved.isEmpty() && m_bridge) {
             m_bridge->readDocument(resolved, &existing);
         }
@@ -444,6 +485,10 @@ PermissionRequest ToolRunner::describe(const ToolCall &call) const
     } else if (call.name == u"edit_file"_s) {
         req.risk = ToolRisk::Write;
         req.mutatesFiles = true;
+        {
+            QString error;
+            req.resolvedPath = m_sandbox.resolve(req.path, &error, true);
+        }
         const QString oldString = args.value(u"old_string"_s).toString();
         const QString newString = args.value(u"new_string"_s).toString();
         req.describeDiff = unifiedDiff(req.path, oldString, newString);
@@ -457,6 +502,7 @@ PermissionRequest ToolRunner::describe(const ToolCall &call) const
         QString existing;
         QString error;
         const QString resolved = m_sandbox.resolve(req.path, &error, true);
+        req.resolvedPath = resolved;
         if (!resolved.isEmpty() && m_bridge) {
             m_bridge->readDocument(resolved, &existing);
         }
@@ -504,7 +550,10 @@ PermissionRequest ToolRunner::describe(const ToolCall &call) const
         req.allowFreeform = jsonBool(args.value(u"allow_freeform"_s), true);
         req.details = QString::fromUtf8(QJsonDocument(args).toJson(QJsonDocument::Compact));
     } else {
-        req.risk = ToolRisk::Read;
+        // Unknown tools reach the permission card from here. A delegation or
+        // an MCP call can run code, so they must not be presented with the
+        // read-risk styling that auto-approval affordances key off.
+        req.risk = (call.name == u"new_task"_s || isMcpToolName(call.name)) ? ToolRisk::Execute : ToolRisk::Read;
         req.details = QString::fromUtf8(QJsonDocument(args).toJson(QJsonDocument::Compact));
     }
     return req;
@@ -513,7 +562,7 @@ PermissionRequest ToolRunner::describe(const ToolCall &call) const
 ToolResult ToolRunner::run(const ToolCall &call)
 {
     QString parseError;
-    const QJsonObject args = parseArgs(call, &parseError);
+    const QJsonObject args = parseToolArgs(call, &parseError);
     ToolResult result;
     result.toolCallId = call.id;
     result.name = call.name;
@@ -596,9 +645,24 @@ ToolResult ToolRunner::readFile(const QJsonObject &args) const
         return result;
     }
 
+    // A binary file cannot be read as numbered lines; say so instead of
+    // handing the model a wall of mojibake. The probe reads the first 8 KiB
+    // straight from disk; a document that exists only in the editor is not
+    // probed and keeps the previous behaviour.
+    QFile probe(readPath);
+    if (probe.open(QIODevice::ReadOnly)) {
+        const QByteArray head = probe.read(8192);
+        probe.close();
+        if (head.contains('\0')) {
+            result.ok = true;
+            result.output = u"(binary file, %1 bytes)"_s.arg(QFileInfo(readPath).size());
+            return result;
+        }
+    }
+
     // Apply offset and limit parameters to paginate the file contents
-    const int offset = args.value(u"offset"_s).toInt(1);
-    const int limit = args.value(u"limit"_s).toInt(0);
+    const int offset = jsonInt(args.value(u"offset"_s), 1);
+    const int limit = jsonInt(args.value(u"limit"_s), 0);
     constexpr int kMaxReadLines = 10000;
     const int cappedLimit = limit > 0 ? qMin(limit, kMaxReadLines) : 0;
     int start = std::max(0, offset - 1);
@@ -1087,7 +1151,16 @@ ToolResult ToolRunner::grep(const QJsonObject &args) const
 
     QString error;
     const QString path = args.value(u"path"_s).toString();
-    const QString resolved = m_sandbox.resolve(path.isEmpty() ? m_sandbox.workspaceRoot() : path, &error);
+    const QString target = path.isEmpty() ? m_sandbox.workspaceRoot() : path;
+    // The search root is checked first. Without it a directory outside the
+    // workspace would be searched and every file in it skipped, and the
+    // model would read "no matches" instead of "not allowed".
+    if (!m_sandbox.allowsRead(target, &error)) {
+        result.ok = false;
+        result.output = error;
+        return result;
+    }
+    const QString resolved = m_sandbox.resolve(target, &error);
     if (resolved.isEmpty()) {
         result.ok = false;
         result.output = error;
@@ -1106,6 +1179,7 @@ ToolResult ToolRunner::grep(const QJsonObject &args) const
     }
 
     QStringList hits;
+    int skippedFiles = 0;
     auto searchFile = [&](const QString &filePath) {
         if (m_sandbox.isDenied(filePath) || !m_sandbox.allowsRead(filePath, nullptr)) {
             return;
@@ -1124,11 +1198,19 @@ ToolResult ToolRunner::grep(const QJsonObject &args) const
         // cannot blow up the turn's memory.
         constexpr qint64 kMaxSearchBytes = 4 * 1024 * 1024;
         if (QFileInfo(filePath).size() > kMaxSearchBytes) {
+            ++skippedFiles;
             return;
         }
 
         QString contents;
         if (!m_bridge || !m_bridge->readDocument(filePath, &contents)) {
+            return;
+        }
+
+        // A NUL byte in the first 8 KiB marks the file as binary: regex hits
+        // in it are mojibake, and they would flood the transcript.
+        if (contents.left(8192).contains(u'\0')) {
+            ++skippedFiles;
             return;
         }
 
@@ -1172,6 +1254,12 @@ ToolResult ToolRunner::grep(const QJsonObject &args) const
 
     // Format the search results
     result.output = hits.isEmpty() ? u"No matches."_s : clip(hits.join(u'\n'));
+    if (skippedFiles > 0) {
+        // The skips are silent otherwise, and the model would read "no
+        // matches" as evidence instead of an incomplete search.
+        result.output += u"\n[%1 file(s) were skipped: binary or larger than 4 MiB. Matches in them, if any, are not visible here.]"_s
+                             .arg(skippedFiles);
+    }
     return result;
 }
 
@@ -1190,6 +1278,14 @@ ToolResult ToolRunner::glob(const QJsonObject &args) const
     const QString dirArg = args.value(u"path"_s).toString().trimmed();
     if (!dirArg.isEmpty()) {
         QString error;
+        // The search root is checked before it is walked, so a directory
+        // outside the workspace is refused instead of silently yielding
+        // nothing.
+        if (!m_sandbox.allowsRead(dirArg, &error)) {
+            result.ok = false;
+            result.output = error;
+            return result;
+        }
         const QString resolved = m_sandbox.resolve(dirArg, &error);
         if (resolved.isEmpty()) {
             result.ok = false;
@@ -1207,8 +1303,13 @@ ToolResult ToolRunner::glob(const QJsonObject &args) const
 
     // Collect all matching files by recursively searching from `base`
     QStringList matches;
+    bool capped = false;
     QDirIterator it(base, QDir::Files, QDirIterator::Subdirectories);
-    while (it.hasNext() && matches.size() < 400) {
+    while (it.hasNext()) {
+        if (matches.size() >= 400) {
+            capped = true;
+            break;
+        }
         const QString filePath = it.next();
 
         // Skip files that are denied by the sandbox for security
@@ -1232,6 +1333,9 @@ ToolResult ToolRunner::glob(const QJsonObject &args) const
 
     // Format the output with either the matched files or a "no matches" message
     result.output = matches.isEmpty() ? u"No files matched."_s : matches.join(u'\n');
+    if (capped) {
+        result.output += u"\n[Listing capped at 400 matches; narrow the pattern or set a path to see more.]"_s;
+    }
     return result;
 }
 
@@ -1261,14 +1365,6 @@ ToolResult ToolRunner::finishBashOutput(const QString &output, int exitCode, boo
         result.output += u"\nexit code %1"_s.arg(exitCode);
     }
     return result;
-}
-
-ToolResult ToolRunner::finishBash(QProcess &process) const
-{
-    // The synchronous path never streams, so everything the command wrote is
-    // still waiting in the pipe.
-    return finishBashOutput(QString::fromUtf8(process.readAll()), process.exitCode(),
-                            process.exitStatus() == QProcess::NormalExit);
 }
 
 ToolResult ToolRunner::bash(const QJsonObject &args)
@@ -1311,8 +1407,31 @@ ToolResult ToolRunner::bash(const QJsonObject &args)
         return failed;
     }
 
-    // Wait for the process to complete with a timeout
-    if (!process.waitForFinished(m_timeoutMs)) {
+    // Wait for the process to complete with a timeout, polling in short
+    // slices and draining the pipe on every pass. One long blocking
+    // waitForFinished() left the draining to Qt's internals; this way a
+    // command that writes more than the OS pipe buffer can never wedge both
+    // ends of the pipe.
+    QByteArray output;
+    QElapsedTimer elapsed;
+    elapsed.start();
+    bool timedOut = false;
+    while (true) {
+        output += process.readAll();
+        if (process.waitForFinished(50)) {
+            break;
+        }
+        if (process.state() == QProcess::NotRunning) {
+            break;
+        }
+        if (elapsed.elapsed() >= m_timeoutMs) {
+            timedOut = true;
+            break;
+        }
+    }
+    output += process.readAll();
+
+    if (timedOut) {
         // Kill the process if it times out
 #ifdef Q_OS_UNIX
         // The child leads its own session, so the negative pid reaches the whole
@@ -1331,7 +1450,42 @@ ToolResult ToolRunner::bash(const QJsonObject &args)
         return failed;
     }
 
-    return finishBash(process);
+    return finishBashOutput(QString::fromUtf8(output), process.exitCode(),
+                            process.exitStatus() == QProcess::NormalExit);
+}
+
+void ToolRunner::BashBuffer::append(const QString &chunk, int cap)
+{
+    if (chunk.isEmpty()) {
+        return;
+    }
+    // Room for the dropped-output marker is reserved in the halves, so the
+    // assembled view fits the ceiling: clip() would otherwise cut the middle
+    // of the view and take the marker (and the tail's first lines) with it.
+    const int half = cap / 2 - 64;
+    if (head.size() < half) {
+        const int room = half - head.size();
+        head += chunk.left(room);
+        const QString rest = chunk.mid(room);
+        tail += rest;
+    } else {
+        tail += chunk;
+    }
+    if (tail.size() > half) {
+        droppedChars += tail.size() - half;
+        tail = tail.right(half);
+    }
+}
+
+QString ToolRunner::BashBuffer::view() const
+{
+    if (tail.isEmpty()) {
+        return head;
+    }
+    if (droppedChars == 0) {
+        return head + tail;
+    }
+    return head + u"\n... [%1 characters of streamed output were dropped] ...\n"_s.arg(droppedChars) + tail;
 }
 
 void ToolRunner::runBashAsync(const ToolCall &call)
@@ -1340,7 +1494,21 @@ void ToolRunner::runBashAsync(const ToolCall &call)
     QString program;
     QStringList programArgs;
     QString error;
-    if (!startBashProcess(call.arguments, &program, &programArgs, &error)) {
+    // The arguments are parsed like in the synchronous path: a call whose
+    // arguments only exist as raw JSON would otherwise run an empty command
+    // and report success.
+    QString parseError;
+    const QJsonObject args = parseToolArgs(call, &parseError);
+    if (!parseError.isEmpty() && args.isEmpty() && !call.argumentsJson.isEmpty()) {
+        ToolResult failed;
+        failed.toolCallId = callId;
+        failed.name = u"bash"_s;
+        failed.ok = false;
+        failed.output = parseError;
+        Q_EMIT bashFinished(failed);
+        return;
+    }
+    if (!startBashProcess(args, &program, &programArgs, &error)) {
         ToolResult failed;
         failed.toolCallId = callId;
         failed.name = u"bash"_s;
@@ -1362,19 +1530,24 @@ void ToolRunner::runBashAsync(const ToolCall &call)
 #endif
     m_bashProcesses.insert(callId, process);
 
-    // Reads whatever has arrived since the last visit and returns it, so both
-    // the progress and the timeout path drain the pipe exactly once.
+    // Reads whatever has arrived since the last visit and returns the
+    // accumulated buffer, so both the progress and the timeout path drain the
+    // pipe exactly once.
     auto drain = [this, callId]() -> QString {
         auto *process = m_bashProcesses.value(callId);
         if (!process) {
             return {};
         }
         const QString chunk = QString::fromUtf8(process->readAll());
-        if (chunk.isEmpty()) {
-            return {};
+        if (!chunk.isEmpty()) {
+            // The output is accumulated until the command finishes, and the
+            // clipping happens only then. A command that writes gigabytes
+            // would fill the memory in the meantime, so the buffer has a
+            // ceiling that keeps both ends, like clip() does for a finished
+            // result: the tail is where a failure summary lives.
+            m_bashAccumulated[callId].append(chunk, kMaxBashOutputChars);
         }
-        m_bashAccumulated[callId] += chunk;
-        return m_bashAccumulated.value(callId);
+        return m_bashAccumulated.value(callId).view();
     };
 
     connect(process, &QProcess::readyReadStandardOutput, this, [this, callId, drain] {
@@ -1385,16 +1558,22 @@ void ToolRunner::runBashAsync(const ToolCall &call)
     });
 
     // Same timeout the synchronous path honours, on a timer rather than a
-    // blocking wait, so the UI thread stays free to render the stream.
+    // blocking wait, so the UI thread stays free to render the stream. The
+    // settings already clamp m_timeoutMs to at least a second; the bound here
+    // keeps a stray zero from turning into "no timeout" on the timer path.
+    const int timeoutMs = qMax(1000, m_timeoutMs);
     QTimer *timeout = new QTimer(process);
     timeout->setSingleShot(true);
-    timeout->setInterval(qMax(1000, m_timeoutMs));
+    timeout->setInterval(timeoutMs);
     connect(timeout, &QTimer::timeout, this, [this, callId, timeout, drain] {
         timeout->deleteLater();
         auto *process = m_bashProcesses.value(callId);
         if (!process) {
             return;
         }
+        // Remember that this call was cut short, so the finished result can
+        // say "timed out" instead of reporting an unexplained kill.
+        m_bashTimedOut.insert(callId);
         const QString soFar = drain();
         if (!soFar.isEmpty()) {
             Q_EMIT bashProgress(callId, soFar);
@@ -1407,20 +1586,30 @@ void ToolRunner::runBashAsync(const ToolCall &call)
         process->kill();
     });
 
-    connect(process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this, [this, callId, drain](int, QProcess::ExitStatus) {
+    connect(process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this, [this, callId, drain, timeout, timeoutMs](int, QProcess::ExitStatus) {
+        // The command ended on its own: stop the timeout timer, or a process
+        // that finished right at the deadline is reported as timed out.
+        timeout->stop();
         auto *process = m_bashProcesses.take(callId);
         if (!process) {
             return;
         }
+        const bool timedOut = m_bashTimedOut.remove(callId);
         const QString soFar = drain();
         if (!soFar.isEmpty()) {
             // A final progress emission, so the live text in the card is exactly
             // what the finished result reports.
             Q_EMIT bashProgress(callId, soFar);
         }
-        ToolResult result = finishBashOutput(m_bashAccumulated.take(callId), process->exitCode(),
+        ToolResult result = finishBashOutput(m_bashAccumulated.take(callId).view(), process->exitCode(),
                                              process->exitStatus() == QProcess::NormalExit);
         result.toolCallId = callId;
+        if (timedOut) {
+            // The timer killed the process; without this line the model sees a
+            // crashed command and may retry the same thing forever.
+            result.ok = false;
+            result.output += u"\nCommand timed out after %1 ms."_s.arg(timeoutMs);
+        }
         process->deleteLater();
         Q_EMIT bashFinished(result);
     });
@@ -1435,12 +1624,29 @@ void ToolRunner::cancelBash(const QString &toolCallId)
     if (!process) {
         return;
     }
+    // The process is removed from the map, so its "finished" handler would
+    // never emit a result. The tool call has to be settled here, otherwise
+    // the caller waits for a result that never comes.
+    m_bashAccumulated.remove(toolCallId);
+    m_bashTimedOut.remove(toolCallId);
+    ToolResult cancelled;
+    cancelled.toolCallId = toolCallId;
+    cancelled.name = u"bash"_s;
+    cancelled.ok = false;
+    cancelled.cancelled = true;
+    cancelled.output = u"The command was cancelled."_s;
+    Q_EMIT bashFinished(cancelled);
 #ifdef Q_OS_UNIX
     if (process->processId() > 0) {
         ::kill(-static_cast<pid_t>(process->processId()), SIGKILL);
     }
 #endif
     process->kill();
+    // SIGKILL is delivered at once, but QProcess only notices when the exit
+    // notification is read. Waiting briefly reaps the child here, so the
+    // runner is not left holding a process that is dead on the kernel side
+    // and "running" on the Qt side until teardown.
+    process->waitForFinished(500);
     process->deleteLater();
 }
 

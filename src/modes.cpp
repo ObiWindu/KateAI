@@ -109,7 +109,6 @@ DocumentFrontmatter ModeRegistry::parseFrontmatter(const QString &document)
     QStringList pendingKey;
     QString pendingBlock;
     bool inBlock = false;
-    bool inFrontmatter = true;
 
     const QStringList lines = document.mid(pos).split(u'\n');
     int endLine = -1;
@@ -120,9 +119,6 @@ DocumentFrontmatter ModeRegistry::parseFrontmatter(const QString &document)
             out.present = true;
             endLine = i;
             break;
-        }
-        if (!inFrontmatter) {
-            continue;
         }
 
         if (inBlock) {

@@ -17,6 +17,7 @@
 #include "subtaskwidget.h"
 #include "suggestionwidget.h"
 #include "questionwidget.h"
+#include "todowidget.h"
 #include "edittracker.h"
 #include "tools.h"
 #include "transcriptlayout.h"
@@ -85,14 +86,18 @@ QString progressiveDots(int tick)
 // pill's 600 weight into its own regular-weight span: emoji fonts rarely carry
 // a bold face, and the synthesised bold Qt falls back to renders the glyph at
 // the wrong size, which is what made the thinking indicator read as broken.
-QString indicatorText(QChar glyph, const QString &label, const QString &dots)
+QString indicatorText(const QString &glyph, const QString &label, const QString &dots)
 {
     return QStringLiteral("<span style=\"font-weight: 400;\">%1</span>  %2%3").arg(glyph, label, dots);
 }
 
 QString thinkingPillText(const QString &dots)
 {
-    return indicatorText(QChar(0x1F9E0), i18n("Thinking"), dots);
+    // A QString, never a QChar: the brain is above the BMP, and QChar(int)
+    // asserts on a debug build and stores a lone surrogate on a release one,
+    // which is what made the thinking pill read as a broken glyph (and took
+    // the panel down on a debug build).
+    return indicatorText(u"\U0001F9E0"_s, i18n("Thinking"), dots);
 }
 
 // Reads the suggest tool's arguments off a request. The card is built from this
@@ -381,25 +386,21 @@ ChatWidget::ChatWidget(QWidget *parent)
         // Agent team: shows how many sub-agents are running right now.
         m_teamButton = new QPushButton(this);
         m_teamButton->setCursor(Qt::PointingHandCursor);
-        m_teamButton->setToolTip(i18n("Agent team"));
+        m_teamButton->setFixedHeight(26);
+        m_teamButton->setMinimumWidth(96);
         connect(m_teamButton, &QPushButton::clicked, this, &ChatWidget::showTeamMenu);
         toolbarLayout->addWidget(m_teamButton);
         updateTeamButton();
 
-    // Expand / collapse every tool card in the transcript. Hidden until there
-    // are enough cards for a global control to say anything: on a transcript
-    // with one or two cards it is a button that does what clicking the card
-    // already does.
-    m_expandAllBtn = new QPushButton(this);
-    m_expandAllBtn->setObjectName(u"expandAllToolCards"_s);
-    m_expandAllBtn->setCursor(Qt::PointingHandCursor);
-    m_expandAllBtn->setStyleSheet(ChatTheme::chipButton());
-    m_expandAllBtn->setFixedHeight(26);
-    m_expandAllBtn->setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Fixed);
-    m_expandAllBtn->setMaximumWidth(140);
-    m_expandAllBtn->hide();
-    connect(m_expandAllBtn, &QPushButton::clicked, this, &ChatWidget::toggleAllToolCards);
-    toolbarLayout->addWidget(m_expandAllBtn);
+        // The indicator flashes through theme colours while sub-agents run --
+        // the same stylesheet-swap trick the transcript pills use, which costs
+        // less than a graphics effect.
+        m_teamFlashTimer = new QTimer(this);
+        m_teamFlashTimer->setInterval(460);
+        connect(m_teamFlashTimer, &QTimer::timeout, this, [this] {
+            m_teamFlashTick = (m_teamFlashTick + 1) % 3;
+            styleTeamButton();
+        });
 
     // Reasoning effort chooser button — sits right next to the model label
     // in the chat input area so the user can pick an effort level at a glance.
@@ -488,9 +489,9 @@ ChatWidget::ChatWidget(QWidget *parent)
     m_transcriptLayout->addWidget(createWelcomeWidget());
     m_transcriptLayout->addStretch();
 
-    // Live thinking/working pills sit under the newest turn, left-aligned.
+    // Live thinking/working indicators float over the transcript's bottom
+    // left corner; they are not part of the transcript's flow.
     m_indicatorsRow = createIndicatorsRow();
-    m_transcriptLayout->addWidget(m_indicatorsRow);
     m_scrollArea->setWidget(m_transcriptContainer);
     root->addWidget(m_scrollArea, 1);
 
@@ -563,6 +564,13 @@ ChatWidget::ChatWidget(QWidget *parent)
     m_intentDockLayout->setSpacing(6);
     m_intentDock->hide();
     root->addWidget(m_intentDock);
+
+    // The todo dock: the running plan, pinned to the bottom of the chat so it
+    // stays in sight while the transcript scrolls. The widget hides itself
+    // while no plan is set, so the strip costs nothing when idle.
+    m_todoWidget = new TodoWidget(this);
+    m_todoWidget->setContentsMargins(12, 4, 12, 0);
+    root->addWidget(m_todoWidget);
 
     // 5. Composer
     auto *composerContainer = new QWidget(this);
@@ -823,7 +831,7 @@ ChatWidget::ChatWidget(QWidget *parent)
         setThinkingIndicator(false);
         addThinkingBlock(text);
     });
-    connect(&m_agent, &AgentLoop::planUpdated, this, &ChatWidget::addPlanChecklist);
+    connect(&m_agent, &AgentLoop::planUpdated, this, &ChatWidget::showTodoList);
     connect(&m_agent, &AgentLoop::planUpdated, this, [this](const QJsonArray &) {
         scheduleSessionSave();
     });
@@ -834,6 +842,14 @@ ChatWidget::ChatWidget(QWidget *parent)
         flushThinkingPacer();
         setThinkingIndicator(false);
         setStreaming(m_streamText + delta);
+    });
+    connect(&m_agent, &AgentLoop::assistantReset, this, [this]() {
+        // The streamed text belonged to a failed attempt and is replaced by the
+        // retry. Drop it, otherwise the transcript shows both.
+        m_streamText.clear();
+        if (m_activeAssistantBrowser) {
+            m_activeAssistantBrowser->setDocument(makeMarkdownDocument(closedMarkdown(m_streamText), ChatTheme::messageCss()));
+        }
     });
     connect(&m_agent, &AgentLoop::assistantFinished, this, [this](const QString &text) {
         Q_UNUSED(text);
@@ -872,6 +888,9 @@ ChatWidget::ChatWidget(QWidget *parent)
             });
             m_subtaskWidgets.insert(request.toolCallId, subtaskWidget);
             m_subtaskOrder.append(subtaskWidget);
+            // Where the sub-agent's card belongs in the transcript once it
+            // retires: right below whatever was last when it started.
+            m_subtaskAnchors.insert(request.toolCallId, lastTranscriptContentWidget());
             addIntentWidget(subtaskWidget);
             return;
         }
@@ -911,7 +930,6 @@ ChatWidget::ChatWidget(QWidget *parent)
             connect(toolWidget, &ToolCallWidget::openFileRequested, this, [this](const QString &path, int line){ Q_EMIT openFileAtLineRequested(path, line); });
             appendTranscriptWidget(toolWidget);
         }
-        updateExpandAllButton();
         toolWidget->setRunning();
         // What the call is working on, up in the body while it runs. A question
         // is the one tool whose payload is prose rather than arguments, so its
@@ -940,12 +958,16 @@ ChatWidget::ChatWidget(QWidget *parent)
         if (editTracking && (isFileMutatingTool(request.toolName) || request.mutatesFiles)) {
             PendingEdit pending;
             pending.toolName = request.toolName;
-            pending.path = request.path;
+            // The tracker works on the file the tool actually writes to. The
+            // path in the request is what the model asked for, which can be
+            // relative; resolving it against the process directory instead of
+            // the workspace would read, restore and delete the wrong file.
+            pending.path = request.resolvedPath.isEmpty() ? request.path : request.resolvedPath;
             pending.diff = request.describeDiff;
             // existed == false means write_file just created the file, which is
             // the one case where rejecting has to delete rather than restore.
             pending.existed = m_agent.documentBridge()
-                && m_agent.documentBridge()->readDocument(request.path, &pending.oldContent);
+                && m_agent.documentBridge()->readDocument(pending.path, &pending.oldContent);
             m_pendingToolCalls.insert(request.toolCallId, pending);
         }
 
@@ -976,8 +998,10 @@ ChatWidget::ChatWidget(QWidget *parent)
         if (auto *subtaskWidget = m_subtaskWidgets.value(result.toolCallId)) {
             subtaskWidget->finishAgent(result);
             // Done: the card no longer needs the user's attention, so hand it
-            // back to the transcript instead of letting it sit above the input.
-            retireIntentWidget(subtaskWidget);
+            // back to the transcript instead of letting it sit above the
+            // input. It returns to where the sub-agent started, so the thread
+            // keeps its time order.
+            retireIntentWidget(subtaskWidget, m_subtaskAnchors.take(result.toolCallId));
         }
         if (auto *widget = m_toolCallWidgets.value(result.toolCallId)) {
             // Use rawOutput for UI display (clean execution output), fall back to output for compatibility
@@ -989,9 +1013,6 @@ ChatWidget::ChatWidget(QWidget *parent)
         }
         ++m_completedToolCount;
         m_turnStatus->setCompletedToolCount(m_completedToolCount);
-        // A finished card is one the global control now has something to say
-        // about (it can be collapsed), so the button's label may need to flip.
-        updateExpandAllButton();
 
         // Handle edit tracking for AcceptEdits mode, and for every mode while
         // an ACP agent drives the turn. A tool that did not succeed must not
@@ -1052,7 +1073,6 @@ ChatWidget::ChatWidget(QWidget *parent)
             m_toolCallWidgets.insert(request.toolCallId, widget);
             m_toolCallOrder.append(widget);
             appendTranscriptWidget(widget);
-            updateExpandAllButton();
             applyTranscriptCollapse();
         }
         widget->showApproval();
@@ -1160,6 +1180,22 @@ ChatWidget::ChatWidget(QWidget *parent)
         m_prompt->setFocus();
         setThinkingIndicator(false);
         setWorkingIndicator(false);
+        // A tool that was still in flight when the turn ended (a stop pressed
+        // while a command ran, a budget cut) can never report back: the loop
+        // drops its result. Its card must not sit "running" forever, so
+        // settle whatever is left as cancelled.
+        for (auto it = m_toolCallWidgets.begin(); it != m_toolCallWidgets.end(); ++it) {
+            ToolCallWidget *card = it.value();
+            if (card && card->isRunning()) {
+                ToolResult cancelled;
+                cancelled.toolCallId = it.key();
+                cancelled.name = card->toolName();
+                cancelled.ok = false;
+                cancelled.cancelled = true;
+                cancelled.output = i18n("Stopped before it finished.");
+                card->setFinished(cancelled);
+            }
+        }
         // A turn that ended with a question still on screen (abort, budget stop)
         // must not leave it docked: nothing can answer it now.
         clearQuestionCards();
@@ -1249,6 +1285,12 @@ ChatWidget::ChatWidget(QWidget *parent)
         Q_UNUSED(toolName);
         if (!m_agent.documentBridge()) {
             showInfoMessage(i18n("Cannot revert edit for %1: document bridge not available", path), true);
+            return;
+        }
+        if (oldContent.isNull()) {
+            // The pre-edit content was never read. Writing it would empty the
+            // file, which is worse than leaving the edit in place.
+            showInfoMessage(i18n("Cannot revert edit for %1: the previous content is unknown", QFileInfo(path).fileName()), true);
             return;
         }
         QString error;
@@ -1386,9 +1428,12 @@ ChatWidget::~ChatWidget()
     // Also save here for widget teardown paths that do not close the app.
     saveCurrentConversation();
 
-    m_agent.abort();
+    // The agent's signals are disconnected first: abort() emits turnFinished,
+    // and the handler would rebuild the transcript while the widget is being
+    // destroyed.
     disconnect(&m_agent, nullptr, this, nullptr);
     disconnect(m_agent.client(), nullptr, this, nullptr);
+    m_agent.abort();
     if (m_scrollArea && m_scrollArea->verticalScrollBar()) {
         disconnect(m_scrollArea->verticalScrollBar(), nullptr, this, nullptr);
     }
@@ -1403,6 +1448,12 @@ ChatWidget::~ChatWidget()
 
 void ChatWidget::saveCurrentConversation()
 {
+    // A load restores another conversation into the widget. Saving while that
+    // is happening would write the loaded state under the conversation id we
+    // are leaving.
+    if (m_loadingConversation) {
+        return;
+    }
     const SessionStore::SessionData sessionData = m_agent.sessionData();
     if (sessionData.messages.isEmpty()) {
         return;
@@ -1415,15 +1466,29 @@ void ChatWidget::saveCurrentConversation()
         }
     }
 
-    SessionStore::saveConversation(m_currentConversationId, sessionData, QString(),
-                                  m_settings.maxSavedConversations > 0 ? m_settings.maxSavedConversations : 50);
+    const bool isNew = SessionStore::saveConversation(
+        m_currentConversationId, sessionData, QString(),
+        m_settings.maxSavedConversations > 0 ? m_settings.maxSavedConversations : 50);
+    // The number of conversations only changes when one is created or
+    // deleted. A save of an existing conversation keeps the cached count, so
+    // the button is repainted without a query.
+    if (isNew) {
+        m_historyCount = -1;
+    }
     updateHistoryButton();
 }
 
 void ChatWidget::scheduleSessionSave()
 {
     if (!m_loadingConversation && m_sessionSaveTimer) {
-        m_sessionSaveTimer->start();
+        // The timer is single-shot. Restarting it on every chunk would keep
+        // pushing the deadline away while the answer streams, so nothing would
+        // ever be saved while the turn is in progress -- exactly the case the
+        // save exists for. The timer is therefore only started when it is not
+        // already running.
+        if (!m_sessionSaveTimer->isActive()) {
+            m_sessionSaveTimer->start();
+        }
     }
 }
 
@@ -1560,16 +1625,8 @@ void ChatWidget::setStreaming(const QString &text)
         m_thinkingBlock->hide();
         layout->addWidget(m_thinkingBlock);
 
-        // Structured plan checklist, rendered below the thinking block.
-        m_planBlock = new QWidget(m_activeAssistantWidget);
-        m_planBlock->hide();
-        m_planLayout = new QVBoxLayout(m_planBlock);
-        m_planLayout->setContentsMargins(4, 2, 4, 2);
-        m_planLayout->setSpacing(2);
-        auto *planLabel = new QLabel(i18n("Plan"), m_planBlock);
-        planLabel->setStyleSheet(ChatTheme::sectionLabel());
-        m_planLayout->addWidget(planLabel);
-        layout->addWidget(m_planBlock);
+        // The plan's todo list lives in the dock above the composer, not in
+        // this card: it has to stay in sight while the answer scrolls.
 
         m_activeAssistantBrowser = new QTextBrowser(m_activeAssistantWidget);
         m_activeAssistantBrowser->setObjectName(u"assistantBrowser"_s);
@@ -1794,6 +1851,10 @@ QWidget *ChatWidget::createThinkingBlock(QWidget *parent, QTextBrowser *&browser
     browser->setStyleSheet(QStringLiteral("QTextBrowser { background: transparent; color: %1; border: none;"
                                          " font-size: 12px; padding: 6px 8px; }")
                              .arg(ChatTheme::textPrimary()));
+    // The pinned height is re-fit whenever the layout gives the browser a new
+    // width: a fit measured at a pre-layout width is what leaves empty space
+    // below the text (see fitReasoningBrowser()).
+    browser->installEventFilter(this);
 
     // Passed with the rendered document below; a stylesheet set here would be
     // discarded by setDocument().
@@ -1821,6 +1882,52 @@ QWidget *ChatWidget::createThinkingBlock(QWidget *parent, QTextBrowser *&browser
     return block;
 }
 
+// Re-fits a reasoning browser's pinned height. The document wraps at the
+// browser's width, so the height is only correct for the width it was measured
+// at: a fit that ran before the block was laid out (the block is created
+// hidden, and its width only becomes real once the transcript layout runs)
+// keeps the stale narrow wrap, and the block then shows far more space below
+// the text than the text needs -- "sometimes", because whether the one-shot
+// re-fit in applyThinkingState() sees a laid-out width is a matter of timing.
+void ChatWidget::fitReasoningBrowser(QTextBrowser *browser)
+{
+    if (!browser || !browser->isVisible()) {
+        return;
+    }
+    int width = browser->viewport()->width();
+    if (width <= 40) {
+        // Not laid out yet: the parent block's width is the better guess,
+        // and the resize filter corrects it once the layout runs.
+        width = browser->parentWidget() ? browser->parentWidget()->width() - 8 : 240;
+    }
+    width = std::max(120, width);
+    browser->document()->setTextWidth(width);
+    // Only re-pin when the height actually moved: an unconditional
+    // setFixedHeight() invalidates the transcript layout and repaints the
+    // whole conversation. It also keeps the resize filter from looping.
+    const int docH = std::max(48, qCeil(browser->document()->size().height()) + 20);
+    if (browser->height() != docH) {
+        browser->setFixedHeight(docH);
+    }
+}
+
+bool ChatWidget::eventFilter(QObject *watched, QEvent *event)
+{
+    // The reasoning browsers carry a height pinned to their document. The
+    // layout assigns their real width only after the block is shown, and
+    // again on every panel resize, so the fit has to follow those resizes --
+    // otherwise the text re-wraps inside a height that was measured for a
+    // different width, which reads as empty space below a short block.
+    if (event->type() == QEvent::Resize) {
+        if (auto *browser = qobject_cast<QTextBrowser *>(watched)) {
+            if (browser->objectName() == u"reasoningBrowser"_s) {
+                fitReasoningBrowser(browser);
+            }
+        }
+    }
+    return QWidget::eventFilter(watched, event);
+}
+
 void ChatWidget::applyThinkingState(QWidget *block, QTextBrowser *browser, QPushButton *toggle, bool expanded)
 {
     if (!block) {
@@ -1841,24 +1948,16 @@ void ChatWidget::applyThinkingState(QWidget *block, QTextBrowser *browser, QPush
     if (browser) {
         if (expanded) {
             browser->show();
-            const int width = browser->viewport()->width() > 40
-                ? browser->viewport()->width()
-                : std::max(160, block->width() - 8);
-            browser->document()->setTextWidth(width);
-            const int h = static_cast<int>(browser->document()->size().height()) + 20;
-            browser->setFixedHeight(std::max(48, h));
+            fitReasoningBrowser(browser);
+            // The first fit runs before the layout has given the browser its
+            // real width; this second pass runs after the layout request that
+            // showing the block posted, and the resize filter covers
+            // everything after that.
             QPointer<QTextBrowser> browserWeak(browser);
-            QPointer<QWidget> blockWeak(block);
-            QTimer::singleShot(0, browser, [browserWeak, blockWeak]() {
-                if (!browserWeak || !browserWeak->isVisible()) {
-                    return;
+            QTimer::singleShot(0, browser, [this, browserWeak]() {
+                if (browserWeak) {
+                    fitReasoningBrowser(browserWeak);
                 }
-                const int laidOutWidth = browserWeak->viewport()->width() > 40
-                    ? browserWeak->viewport()->width()
-                    : std::max(160, blockWeak ? blockWeak->width() - 8 : 240);
-                browserWeak->document()->setTextWidth(laidOutWidth);
-                const int laidOutH = static_cast<int>(browserWeak->document()->size().height()) + 20;
-                browserWeak->setFixedHeight(std::max(48, laidOutH));
             });
         } else {
             browser->hide();
@@ -1870,72 +1969,22 @@ void ChatWidget::applyThinkingState(QWidget *block, QTextBrowser *browser, QPush
     }
 }
 
-void ChatWidget::addPlanChecklist(const QJsonArray &plan)
+// The plan's todo list lives in the dock above the composer (created with
+// the widget), so a plan update arriving before the streaming card exists --
+// or a restore with no streaming turn at all -- has somewhere to land.
+void ChatWidget::showTodoList(const QJsonArray &plan)
 {
-    if (!m_planBlock || !m_planLayout) {
+    if (!m_todoWidget) {
         return;
     }
-    // Remove and delete all existing plan step widgets before rebuilding.
-    // m_planSteps.clear() only drops the QCheckBox* keys from the hash; it
-    // does not delete the widgets themselves, so omitting this loop causes
-    // QCheckBox children to accumulate in m_planLayout on every plan update.
-    m_planSteps.clear();
-    while (m_planLayout->count() > 1) { // keep the "Plan" header label (index 0)
-        QLayoutItem *item = m_planLayout->takeAt(1);
-        if (item) {
-            if (item->widget()) {
-                // delete(), not deleteLater(): a deferred deletion leaves the row
-                // parented and painting over the top of the list until the event
-                // loop runs, and a plan update can rebuild several times in one
-                // turn, stacking ghosts over the real steps.
-                delete item->widget();
-            }
-            delete item;
-        }
+    // The "show plan as checklist" setting was stored but never consulted:
+    // the list showed even with it off. An empty plan has nothing to show,
+    // and setTodos() hides the dock itself.
+    if (!m_settings.showPlanAsChecklist || plan.isEmpty()) {
+        m_todoWidget->setTodos(QJsonArray());
+        return;
     }
-    for (const QJsonValue &v : plan) {
-        const QJsonObject o = v.toObject();
-        const QString desc = o.value(u"description"_s).toString();
-        const bool completed = o.value(u"completed"_s).toBool();
-        auto *cb = new QCheckBox(desc, m_planBlock);
-        cb->setChecked(completed);
-        cb->setDisabled(true);
-        cb->setStyleSheet(ChatTheme::planChecklist());
-        m_planLayout->addWidget(cb);
-        m_planSteps.insert(cb, o.value(u"id"_s).toString());
-    }
-    m_planBlock->show();
-    scrollToBottom();
-}
-
-void ChatWidget::markPlanStepCompleted(const QString &stepId)
-{
-    bool matched = false;
-    for (auto it = m_planSteps.cbegin(); it != m_planSteps.cend(); ++it) {
-        if (it.value() == stepId) {
-            if (it.key()) {
-                it.key()->setChecked(true);
-            }
-            matched = true;
-            break;
-        }
-    }
-    // Completing the last outstanding step finishes the plan, so tick the rest
-    // too. The checklist is what the user reads afterwards as a record of what
-    // the run actually did; leaving the tail unchecked after a plan that is
-    // demonstrably complete made it look like the agent stopped part-way.
-    if (matched) {
-        for (auto it = m_planSteps.cbegin(); it != m_planSteps.cend(); ++it) {
-            if (it.key() && !it.key()->isChecked()) {
-                return;
-            }
-        }
-        for (auto it = m_planSteps.cbegin(); it != m_planSteps.cend(); ++it) {
-            if (it.key()) {
-                it.key()->setChecked(true);
-            }
-        }
-    }
+    m_todoWidget->setTodos(plan);
 }
 
 void ChatWidget::freezeStreaming()
@@ -1949,7 +1998,10 @@ void ChatWidget::freezeStreaming()
         m_streamRenderTimer->stop();
     }
     if (m_activeAssistantBrowser && !m_streamText.isEmpty()) {
-        m_activeAssistantBrowser->setDocument(makeMarkdownDocument(m_streamText, ChatTheme::messageCss()));
+        // The live renderer closes an unterminated code fence, so the frozen
+        // card has to do the same. Otherwise a reply is rendered differently
+        // after a restart than it was while it streamed.
+        m_activeAssistantBrowser->setDocument(makeMarkdownDocument(closedMarkdown(m_streamText), ChatTheme::messageCss()));
         const int docH = std::max(30, static_cast<int>(m_activeAssistantBrowser->document()->size().height()) + 16);
         if (m_activeAssistantBrowser->height() != docH) {
             m_activeAssistantBrowser->setFixedHeight(docH);
@@ -2085,6 +2137,7 @@ void ChatWidget::setThinkingIndicator(bool show)
             applyThinkingState(m_thinkingBlock, m_thinkingBrowser, m_thinkingToggle, m_thinkingExpanded);
         }
     }
+    syncIndicatorsOverlay();
     syncIndicatorAnimation();
 }
 
@@ -2105,6 +2158,7 @@ void ChatWidget::setWorkingIndicator(bool show)
         m_isWorking = false;
         m_workingIndicator->hide();
     }
+    syncIndicatorsOverlay();
     syncIndicatorAnimation();
 }
 
@@ -2231,7 +2285,6 @@ void ChatWidget::setAllToolCardsExpanded(bool expanded)
 {
     m_toolCardsOverride = expanded ? ToolCardsOverride::ExpandAll : ToolCardsOverride::CollapseAll;
     applyTranscriptCollapse();
-    updateExpandAllButton();
 }
 
 bool ChatWidget::allToolCardsExpanded() const
@@ -2250,32 +2303,6 @@ bool ChatWidget::allToolCardsExpanded() const
 void ChatWidget::toggleAllToolCards()
 {
     setAllToolCardsExpanded(!allToolCardsExpanded());
-}
-
-void ChatWidget::updateExpandAllButton()
-{
-    if (!m_expandAllBtn) {
-        return;
-    }
-    int finished = 0;
-    for (const QPointer<ToolCallWidget> &card : m_toolCallOrder) {
-        if (!card) {
-            continue;
-        }
-        if (!card->isRunning()) {
-            ++finished;
-        }
-    }
-    // Below two finished cards there is nothing for a global control to do.
-    if (finished < 2) {
-        m_expandAllBtn->hide();
-        return;
-    }
-    m_expandAllBtn->setVisible(true);
-    const bool expanded = allToolCardsExpanded();
-    m_expandAllBtn->setText(expanded ? i18n("Collapse all") : i18n("Expand all"));
-    m_expandAllBtn->setToolTip(expanded ? i18n("Collapse every tool card in this transcript")
-                                        : i18n("Expand every tool card in this transcript"));
 }
 
 int ChatWidget::focusedToolCardIndex() const
@@ -2429,6 +2456,7 @@ void ChatWidget::resizeEvent(QResizeEvent *event)
 {
     QWidget::resizeEvent(event);
     updateScrollButtonPosition();
+    updateIndicatorsPosition();
     reflowTranscriptMedia();
 }
 
@@ -2553,19 +2581,25 @@ QWidget *ChatWidget::createWelcomeWidget()
     return welcome;
 }
 
-// The live "Thinking" / "Working" row that sits under the newest turn, left
-// aligned so the brain pill is at the bottom-left of the transcript.
+// The live "Thinking" / "Working" indicators. They float over the transcript's
+// very bottom left corner -- bare, small text on the panel rather than boxed
+// pills in the flow, so they read as a corner tick instead of a card and never
+// push the conversation around.
 QWidget *ChatWidget::createIndicatorsRow()
 {
-    auto *row = new QWidget(m_transcriptContainer);
+    auto *row = new QWidget(m_scrollArea);
     row->setObjectName(u"indicatorsContainer"_s);
+    // An overlay, not a transcript row: clicks pass through to whatever sits
+    // underneath it.
+    row->setAttribute(Qt::WA_TransparentForMouseEvents, true);
     auto *layout = new QHBoxLayout(row);
-    layout->setContentsMargins(0, 6, 0, 2);
+    layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(8);
 
     m_thinkingIndicator = new QLabel(thinkingPillText(progressiveDots(0)), row);
     m_thinkingIndicator->setObjectName(u"thinkingIndicator"_s);
     m_thinkingIndicator->setTextFormat(Qt::RichText);
+    m_thinkingIndicator->setAttribute(Qt::WA_TransparentForMouseEvents, true);
     m_thinkingIndicator->setStyleSheet(ChatTheme::thinkingPill());
     m_thinkingIndicator->hide();
     layout->addWidget(m_thinkingIndicator, 0, Qt::AlignLeft | Qt::AlignVCenter);
@@ -2574,12 +2608,45 @@ QWidget *ChatWidget::createIndicatorsRow()
     m_workingIndicator = new QLabel(indicatorText(QChar(0x26A1), m_workingLabelBase, progressiveDots(0)), row);
     m_workingIndicator->setObjectName(u"workingIndicator"_s);
     m_workingIndicator->setTextFormat(Qt::RichText);
+    m_workingIndicator->setAttribute(Qt::WA_TransparentForMouseEvents, true);
     m_workingIndicator->setStyleSheet(ChatTheme::workingPill());
     m_workingIndicator->hide();
     layout->addWidget(m_workingIndicator, 0, Qt::AlignLeft | Qt::AlignVCenter);
 
     layout->addStretch();
+    row->hide();
     return row;
+}
+
+// Pins the indicator strip to the transcript's bottom left corner, flush with
+// the bottom edge so it sits on top of the panel's bottom border.
+void ChatWidget::updateIndicatorsPosition()
+{
+    if (!m_indicatorsRow || !m_scrollArea) {
+        return;
+    }
+    const QSize hint = m_indicatorsRow->sizeHint();
+    const int w = hint.width();
+    const int h = hint.height();
+    m_indicatorsRow->setGeometry(0, m_scrollArea->height() - h, w, h);
+    m_indicatorsRow->raise();
+}
+
+// The strip shows when either indicator does, and follows the panel when it
+// is resized. The children are asked with isHidden() rather than isVisible():
+// while the strip itself is hidden, a freshly shown child still reports
+// isVisible() == false, and the strip would never turn back on.
+void ChatWidget::syncIndicatorsOverlay()
+{
+    if (!m_indicatorsRow) {
+        return;
+    }
+    const bool anyVisible = (m_thinkingIndicator && !m_thinkingIndicator->isHidden())
+        || (m_workingIndicator && !m_workingIndicator->isHidden());
+    m_indicatorsRow->setVisible(anyVisible);
+    if (anyVisible) {
+        updateIndicatorsPosition();
+    }
 }
 
 int ChatWidget::transcriptInsertIndex() const
@@ -2588,24 +2655,16 @@ int ChatWidget::transcriptInsertIndex() const
         return 0;
     }
     // Messages grow downward: before the trailing stretch (slack below the
-    // conversation) and always before the pinned status-indicator row.
+    // conversation). The live indicators float over the scroll area, not in
+    // the flow, so nothing else has to be stepped around.
     int spacerIndex = -1;
-    int indicatorsIndex = -1;
-    const QWidget *indicators =
-        m_indicatorsRow ? m_indicatorsRow.data() : m_thinkingIndicator ? m_thinkingIndicator->parentWidget() : nullptr;
     for (int i = 0; i < m_transcriptLayout->count(); ++i) {
         QLayoutItem *item = m_transcriptLayout->itemAt(i);
-        if (!item) {
-            continue;
-        }
-        if (item->spacerItem() && spacerIndex < 0) {
+        if (item && item->spacerItem() && spacerIndex < 0) {
             spacerIndex = i;
         }
-        if (indicators && item->widget() == indicators) {
-            indicatorsIndex = i;
-        }
     }
-    return transcriptInsertIndexFor(TranscriptAnchor::Top, spacerIndex, indicatorsIndex,
+    return transcriptInsertIndexFor(TranscriptAnchor::Top, spacerIndex, -1,
                                     m_transcriptLayout->count());
 }
 
@@ -2641,7 +2700,22 @@ void ChatWidget::moveToIntentDock(QWidget *widget, int index)
     updateIntentDockVisibility();
 }
 
-void ChatWidget::retireIntentWidget(QWidget *widget)
+QWidget *ChatWidget::lastTranscriptContentWidget() const
+{
+    if (!m_transcriptLayout) {
+        return nullptr;
+    }
+    const int growth = transcriptInsertIndex();
+    for (int i = growth - 1; i >= 0; --i) {
+        QLayoutItem *item = m_transcriptLayout->itemAt(i);
+        if (item && item->widget()) {
+            return item->widget();
+        }
+    }
+    return nullptr;
+}
+
+void ChatWidget::retireIntentWidget(QWidget *widget, QWidget *anchor)
 {
     if (!widget) {
         return;
@@ -2650,8 +2724,18 @@ void ChatWidget::retireIntentWidget(QWidget *widget)
         m_intentDockLayout->removeWidget(widget);
     }
     // Back into the transcript, reparented as a normal message so the finished
-    // result stays part of the thread.
-    appendTranscriptWidget(widget);
+    // result stays part of the thread. A card that began earlier in the turn
+    // belongs where it began: retiring at the growth point would drop it
+    // below everything that happened after it, and the transcript would read
+    // in the wrong time order -- most visibly when Stop retires every running
+    // sub-agent at once. The anchor is the transcript's last card when the
+    // operation started; when it is gone (cleared, rebuilt) the growth point
+    // is the only sensible position left.
+    if (anchor && m_transcriptLayout && m_transcriptLayout->indexOf(anchor) >= 0) {
+        m_transcriptLayout->insertWidget(m_transcriptLayout->indexOf(anchor) + 1, widget);
+    } else {
+        appendTranscriptWidget(widget);
+    }
     updateIntentDockVisibility();
 }
 
@@ -2778,10 +2862,15 @@ void ChatWidget::restylePanel()
     }
     // The header bar's icon buttons sit on window chrome, so they use the
     // window-chrome colours, which follow the editor theme in inherit mode.
-    for (auto *btn : {m_mcpButton, m_checkpointButton, m_teamButton, m_historyButton, m_newChat, m_configure}) {
+    // The agent-team button is excluded: it owns a state-dependent style
+    // (it flashes while sub-agents run), which updateTeamButton() re-applies.
+    for (auto *btn : {m_mcpButton, m_checkpointButton, m_historyButton, m_newChat, m_configure}) {
         if (btn) {
             btn->setStyleSheet(ChatTheme::headerIconButton());
         }
+    }
+    if (m_teamButton) {
+        updateTeamButton();
     }
     if (m_scrollArea) {
         m_scrollArea->setStyleSheet(ChatTheme::scrollArea());
@@ -2929,17 +3018,8 @@ void ChatWidget::restyleLiveCards()
         m_activeAssistantBrowser->setStyleSheet(
             QStringLiteral("background: transparent; color: %1; border: none; padding: 0px;").arg(ChatTheme::textPrimary()));
     }
-    // Plan checklist: the checkboxes are tracked, the "Plan" caption is the
-    // block's only label.
-    for (auto it = m_planSteps.constBegin(); it != m_planSteps.constEnd(); ++it) {
-        if (it.key()) {
-            it.key()->setStyleSheet(ChatTheme::planChecklist());
-        }
-    }
-    if (m_planBlock) {
-        if (auto *planLabel = m_planBlock->findChild<QLabel *>()) {
-            planLabel->setStyleSheet(ChatTheme::sectionLabel());
-        }
+    if (m_todoWidget) {
+        m_todoWidget->applyStyle();
     }
 }
 
@@ -4564,26 +4644,54 @@ void ChatWidget::showModeMenu()
 void ChatWidget::updateTeamButton()
 {
     const int running = m_agent.runningSubtaskCount();
-    // Keep a visible label next to the count so the status is recognizable
-    // without relying on the tooltip or an ambiguous icon.
-    m_teamButton->setText(running > 0 ? i18n("Agents · %1", running) : i18n("Agents"));
-    m_teamButton->setMinimumWidth(0);
-    m_teamButton->setMaximumWidth(96);
+    // The button is the panel's sub-agent indicator, so it says what the
+    // sub-agents are doing, not merely that the team exists. Wide enough for
+    // the longest plural form: the old 96px cap clipped the label in most
+    // locales.
+    m_teamButton->setText(running > 0 ? i18np("%1 sub-agent is working for you", "%1 sub-agents are working for you", running)
+                                      : i18n("Agents"));
     m_teamButton->setAccessibleName(running > 0 ? i18np("Agent team, %1 sub-agent running", "Agent team, %1 sub-agents running", running)
                                                 : i18n("Agent team"));
-    m_teamButton->setToolTip(running > 0 ? i18np("%1 sub-agent running", "%1 sub-agents running", running) : i18n("Agent team"));
-    // Only lit while something is actually running, so a badge that is always
-    // on stops meaning anything. The button lives on the header bar, so its
-    // chrome uses the window-chrome colours; the accent text marks the live
-    // state.
+    m_teamButton->setToolTip(running > 0
+                                 ? i18np("The orchestrator delegated work to %1 sub-agent. Sub-agents read, edit and run "
+                                         "commands in your workspace, each under the same permission rules. Click to see "
+                                         "the team.",
+                                         "The orchestrator delegated work to %1 sub-agents. Sub-agents read, edit and run "
+                                         "commands in your workspace, each under the same permission rules. Click to see "
+                                         "the team.",
+                                         running)
+                                 : i18n("Agent team"));
+    styleTeamButton();
+    // The flash is the "something is delegated" signal: it only runs while
+    // sub-agents are actually in flight, so a button that is always on stops
+    // meaning anything.
+    if (running > 0) {
+        if (!m_teamFlashTimer->isActive()) {
+            m_teamFlashTimer->start();
+        }
+    } else {
+        m_teamFlashTimer->stop();
+        m_teamFlashTick = 0;
+    }
+}
+
+void ChatWidget::styleTeamButton()
+{
+    if (m_agent.runningSubtaskCount() <= 0) {
+        m_teamButton->setStyleSheet(ChatTheme::headerIconButton());
+        return;
+    }
+    // Cycle accent -> warning -> success so the delegation is impossible to
+    // miss without an animation framework: the labels swap a stylesheet, the
+    // same trick the transcript pills use.
+    const QString colors[3] = {ChatTheme::accent(), ChatTheme::warning(), ChatTheme::success()};
+    const QString color = colors[m_teamFlashTick % 3];
     m_teamButton->setStyleSheet(
-        running > 0
-            ? QStringLiteral(
-                  "QPushButton { background: transparent; border: 1px solid transparent; border-radius: 6px;"
-                  " color: %1; padding: 0 7px; font-size: 11px; }"
-                  "QPushButton:hover { background-color: %2; border-color: %3; }")
-                  .arg(ChatTheme::accent(), ChatTheme::windowHover(), ChatTheme::windowBorder())
-            : ChatTheme::headerIconButton());
+        QStringLiteral(
+            "QPushButton { background: transparent; border: 1px solid transparent; border-radius: 6px;"
+            " color: %1; padding: 0 12px; font-size: 11px; font-weight: 600; }"
+            "QPushButton:hover { background-color: %2; border-color: %3; }")
+            .arg(color, ChatTheme::windowHover(), ChatTheme::windowBorder()));
 }
 
 void ChatWidget::addSuggestionCard(const QString &id, const Suggestion &suggestion, bool running)
@@ -4707,8 +4815,10 @@ void ChatWidget::markRunningSubtasksAbandoned()
     for (const QString &taskId : ids) {
         if (auto *widget = m_subtaskWidgets.value(taskId)) {
             widget->markAbandoned(i18n("Stopped when the turn ended."));
-            // Abandoned means over; the card belongs back in the transcript.
-            retireIntentWidget(widget);
+            // Abandoned means over; the card belongs back in the transcript --
+            // where the sub-agent started, so a stop does not shuffle the
+            // transcript's time order.
+            retireIntentWidget(widget, m_subtaskAnchors.take(taskId));
             changed = true;
         }
     }
@@ -5079,8 +5189,6 @@ void ChatWidget::clearStreamingPointers()
     m_thinkingBlock = nullptr;
     m_thinkingBrowser = nullptr;
     m_thinkingToggle = nullptr;
-    m_planBlock = nullptr;
-    m_planLayout = nullptr;
     m_thinkingBuffer.clear();
     m_thinkingPacedLength = 0;
     m_thinkingExpanded = true;
@@ -5130,6 +5238,7 @@ void ChatWidget::clearTranscriptContents()
     }
     m_subtaskWidgets.clear();
     m_subtaskOrder.clear();
+    m_subtaskAnchors.clear();
     // Suggestion cards are transcript widgets too; without this the hashes
     // would dangle once the generic teardown below deletes them.
     clearSuggestionCards();
@@ -5140,8 +5249,15 @@ void ChatWidget::clearTranscriptContents()
     // Detach any approval rows still docked; they belong to the cards deleted
     // above and must not be left parented to the dock.
     clearIntentDock();
+    // The plan dock lives above the composer, outside the transcript, so the
+    // sweep above cannot reach it: without this the checklist of the
+    // conversation being left would follow the user into the next one.
+    // restoreCurrentTurn() re-shows it when the session being rebuilt still
+    // carries a live plan.
+    if (m_todoWidget) {
+        m_todoWidget->setTodos(QJsonArray());
+    }
     m_thinkingBlocks.clear();
-    m_planSteps.clear();
     clearStreamingPointers();
     resetThinkingState();
 
@@ -5149,10 +5265,8 @@ void ChatWidget::clearTranscriptContents()
         return;
     }
 
-    QWidget *indicators = m_indicatorsRow ? m_indicatorsRow.data() : nullptr;
-    if (!indicators && m_thinkingIndicator) {
-        indicators = m_thinkingIndicator->parentWidget();
-    }
+    // The indicator strip is an overlay on the scroll area, not a transcript
+    // row, so nothing here has to be spared from the sweep.
     QList<QLayoutItem *> kept;
     while (m_transcriptLayout->count() > 0) {
         QLayoutItem *item = m_transcriptLayout->takeAt(0);
@@ -5164,10 +5278,6 @@ void ChatWidget::clearTranscriptContents()
             continue;
         }
         QWidget *w = item->widget();
-        if (w && w == indicators) {
-            kept.append(item);
-            continue;
-        }
         if (w) {
             w->hide();
             w->setParent(nullptr);
@@ -5252,14 +5362,7 @@ void ChatWidget::reflowTranscriptMedia()
     // area below a short wrapped block.
     const auto reasoningBrowsers = m_transcriptContainer->findChildren<QTextBrowser *>(u"reasoningBrowser"_s);
     for (QTextBrowser *browser : reasoningBrowsers) {
-        if (!browser || !browser->isVisible()) {
-            continue;
-        }
-        browser->document()->setTextWidth(contentWidth);
-        const int docH = std::max(48, qCeil(browser->document()->size().height()) + 20);
-        if (browser->height() != docH) {
-            browser->setFixedHeight(docH);
-        }
+        fitReasoningBrowser(browser);
     }
 
     for (const auto &widget : m_toolCallOrder) {
@@ -5434,14 +5537,16 @@ void ChatWidget::rebuildTranscript()
     clearTranscriptContents();
     m_thinkingExpanded = true;
 
-    // Recreate the indicator row if it was ever removed. clearTranscriptContents()
-    // keeps it, so this is a safety net rather than the normal path, but it has to
-    // be correct: the previous version assigned the new "Thinking" label to
+    // Recreate the indicator overlay if it was ever destroyed. Nothing in the
+    // normal path removes it -- it is an overlay child of the scroll area, not
+    // a transcript row -- but this has to be correct on the one recovery path
+    // that exists: the previous version assigned the new "Thinking" label to
     // m_workingIndicator and then dereferenced the still-null m_thinkingIndicator,
-    // which is a null-pointer write on the one path that exists to recover from a
-    // broken state.
+    // which is a null-pointer write.
     if (!m_thinkingIndicator || !m_workingIndicator) {
+        delete m_indicatorsRow;
         m_indicatorsRow = createIndicatorsRow();
+        syncIndicatorsOverlay();
     }
 
     const auto &messages = m_agent.messages();
@@ -5529,6 +5634,9 @@ void ChatWidget::rebuildTranscript()
                                       restoredArgs.value(u"description"_s).toString());
             m_subtaskWidgets.insert(toolCallId, subtaskWidget);
             m_subtaskOrder.append(subtaskWidget);
+            // The card below whatever was placed just before it in the rebuild
+            // order, which is the position it ran in during the live turn.
+            m_subtaskAnchors.insert(toolCallId, lastTranscriptContentWidget());
             addIntentWidget(subtaskWidget);
             placed.insert(toolCallId);
             if (spec.hasResult) {
@@ -5634,9 +5742,9 @@ void ChatWidget::rebuildTranscript()
                         registerThinkingBlock(thinkingBlock, thinkingBrowser, thinkingToggle);
                     }
 
-                    // Add plan checklist if present
+                    // Add the todo list if the message carried a plan
                     if (!msg.plan.isEmpty()) {
-                        addPlanChecklist(msg.plan);
+                        showTodoList(msg.plan);
                     }
 
                     auto *browser = new QTextBrowser(assistantWidget);
@@ -5703,7 +5811,6 @@ void ChatWidget::rebuildTranscript()
         thisWeak->reflowTranscriptMedia();
         thisWeak->forceScrollToBottom();
     });
-    updateExpandAllButton();
     m_loadingConversation = wasLoadingConversation;
 }
 
@@ -5712,10 +5819,12 @@ void ChatWidget::restoreCurrentTurn(const SessionStore::SessionData &sessionData
     // Restore the current turn's thinking/plan state without using streaming infrastructure
     // This is for the active (unfinished) turn that was in progress when Kate was closed
     QString lastAssistantThinking;
+    QString lastAssistantContent;
     const auto &messages = m_agent.messages();
     for (int i = messages.size() - 1; i >= 0; --i) {
         if (messages.at(i).role == ChatMessage::Role::Assistant) {
             lastAssistantThinking = messages.at(i).thinking;
+            lastAssistantContent = messages.at(i).content;
             break;
         }
     }
@@ -5723,9 +5832,36 @@ void ChatWidget::restoreCurrentTurn(const SessionStore::SessionData &sessionData
     // A process can close while the assistant is still streaming. Its text is
     // persisted separately from completed messages, so restore it as a settled
     // transcript card instead of making the in-progress response disappear.
-    if (!sessionData.currentAssistant.isEmpty()) {
+    //
+    // The snapshot and the committed message can hold the same text. Rendering
+    // both would show the final answer twice, so the card is only added when
+    // the transcript does not already carry the text.
+    const QString restoredText = sessionData.currentAssistant.trimmed();
+    const bool alreadyInTranscript = !restoredText.isEmpty() && restoredText == lastAssistantContent.trimmed();
+    if (!restoredText.isEmpty() && !alreadyInTranscript) {
+        // setStreaming() builds the reply card together with the thinking and
+        // the plan blocks inside it. Rendering the reasoning and the plan into
+        // those blocks keeps them part of the reply instead of leaving them as
+        // separate blocks after it.
         setStreaming(sessionData.currentAssistant);
+        if (!sessionData.currentThinking.isEmpty() && sessionData.currentThinking != lastAssistantThinking) {
+            m_thinkingBuffer = sessionData.currentThinking;
+            m_thinkingPacedLength = m_thinkingBuffer.length();
+            updateThinkingDisplay();
+            if (m_thinkingBlock) {
+                m_thinkingBlock->show();
+            }
+        }
+        if (!sessionData.currentPlan.isEmpty() && sessionData.planShown) {
+            // showTodoList() alone decides visibility: forcing show() here
+            // would defeat the "show plan as checklist" setting on restore.
+            showTodoList(sessionData.currentPlan);
+        }
         freezeStreaming();
+        // The reasoning text belongs to the restored snapshot only. Leaving it
+        // in the live buffer would prepend it to the next turn's reasoning.
+        m_thinkingBuffer.clear();
+        m_thinkingPacedLength = 0;
         // This reply is a snapshot from the previous process, not a live
         // streaming turn. Keep its rendered card in the transcript, but detach
         // the streaming pointers so the next reply starts in a new card instead
@@ -5735,6 +5871,7 @@ void ChatWidget::restoreCurrentTurn(const SessionStore::SessionData &sessionData
         m_activeAssistantPulse = nullptr;
         m_streamText.clear();
         m_isStreaming = false;
+        return;
     }
 
     if (!sessionData.currentThinking.isEmpty()
@@ -5754,23 +5891,15 @@ void ChatWidget::restoreCurrentTurn(const SessionStore::SessionData &sessionData
         m_thinkingBlock->show();
         registerThinkingBlock(m_thinkingBlock, m_thinkingBrowser, m_thinkingToggle);
         // applyThinkingState already called by createThinkingBlock with correct initial state
+        // The snapshot must not leak into the next turn's reasoning.
+        m_thinkingBuffer.clear();
+        m_thinkingPacedLength = 0;
     }
 
     if (!sessionData.currentPlan.isEmpty() && sessionData.planShown) {
-        if (!m_planBlock) {
-            m_planBlock = new QWidget(m_transcriptContainer);
-            m_planBlock->hide();
-            m_planLayout = new QVBoxLayout(m_planBlock);
-            m_planLayout->setContentsMargins(4, 2, 4, 2);
-            m_planLayout->setSpacing(2);
-            auto *planLabel = new QLabel(i18n("Plan"), m_planBlock);
-            planLabel->setStyleSheet(QStringLiteral(u"color: %1; font-size: 10px; font-weight: bold; letter-spacing: 0.5px;")
-                                         .arg(ChatTheme::textMuted()));
-            m_planLayout->addWidget(planLabel);
-            appendTranscriptWidget(m_planBlock);
-        }
-        addPlanChecklist(sessionData.currentPlan);
-        m_planBlock->show();
+        // showTodoList() decides visibility, so the setting is honoured on
+        // restore just as it is during a live turn.
+        showTodoList(sessionData.currentPlan);
     }
 
 }
@@ -5780,8 +5909,15 @@ void ChatWidget::updateHistoryButton()
     if (!m_historyButton) {
         return;
     }
-    const int maxConversations = m_settings.maxSavedConversations > 0 ? m_settings.maxSavedConversations : 50;
-    const int count = SessionStore::listConversations(maxConversations).size();
+    // The count is cached. It is read from the database, and the button is
+    // updated after every save, so querying it every time would turn a
+    // cheap repaint into a database round trip. The cache is dropped wherever
+    // the number of conversations can change.
+    if (m_historyCount < 0) {
+        const int maxConversations = m_settings.maxSavedConversations > 0 ? m_settings.maxSavedConversations : 50;
+        m_historyCount = SessionStore::listConversations(maxConversations).size();
+    }
+    const int count = m_historyCount;
     if (count > 0) {
         m_historyButton->setToolTip(i18n("Conversation History (%1)", count));
         // Show count as a small overlay text on the button when > 1
@@ -5803,6 +5939,9 @@ void ChatWidget::showConversationHistory()
 
     const int maxConversations = m_settings.maxSavedConversations > 0 ? m_settings.maxSavedConversations : 50;
     const auto conversations = SessionStore::listConversations(maxConversations);
+    // The list is the count the button shows, so the cache is filled from it
+    // instead of querying a second time.
+    m_historyCount = conversations.size();
 
     if (conversations.isEmpty()) {
         auto *emptyAction = m_historyMenu->addAction(i18n("No conversations yet"));
@@ -5848,7 +5987,9 @@ void ChatWidget::showConversationHistory()
 
 void ChatWidget::switchToConversation(const QString &conversationId)
 {
-    if (m_loadingConversation || conversationId == m_currentConversationId) {
+    // An empty id has no conversation behind it. Switching to it would drop
+    // the current one without saving it.
+    if (conversationId.isEmpty() || m_loadingConversation || conversationId == m_currentConversationId) {
         return;
     }
 
@@ -5856,8 +5997,14 @@ void ChatWidget::switchToConversation(const QString &conversationId)
         m_sessionSaveTimer->stop();
     }
 
+    // The running turn belongs to the conversation that is being left. Without
+    // this the agent keeps streaming, and a delta that arrives after the
+    // switch would be rendered into the new transcript and saved under the
+    // new id.
+    m_agent.abort();
+
     // Save current conversation before switching
-    if (!m_agent.messages().isEmpty()) {
+    if (!m_agent.messages().isEmpty() && !m_currentConversationId.isEmpty()) {
         const auto sessionData = m_agent.sessionData();
         if (!sessionData.messages.isEmpty()) {
             SessionStore::saveConversation(m_currentConversationId, sessionData, QString(), m_settings.maxSavedConversations > 0 ? m_settings.maxSavedConversations : 50);
@@ -5905,8 +6052,16 @@ void ChatWidget::deleteConversation(const QString &conversationId)
 {
     const bool wasActive = (conversationId == m_currentConversationId);
     SessionStore::deleteConversation(conversationId);
+    // A conversation was removed, so the count of the history changed.
+    m_historyCount = -1;
 
     if (wasActive) {
+        // The agent still holds the messages of the conversation that was just
+        // deleted. Switching or starting a new chat saves the current
+        // conversation first, which would re-create the deleted row with all
+        // of its content. The state is therefore cleared before the switch.
+        m_agent.restoreSession(SessionStore::SessionData());
+        m_currentConversationId.clear();
         // Switch to most recent conversation or create new
         const auto conversations = SessionStore::listConversations(1);
         if (!conversations.isEmpty()) {
@@ -5921,14 +6076,10 @@ void ChatWidget::setCurrentConversationId(const QString &conversationId)
 {
     m_currentConversationId = conversationId;
     if (m_threadTitle) {
-        const auto conversations = SessionStore::listConversations(0);
-        for (const auto &conversation : conversations) {
-            if (conversation.id == conversationId) {
-                m_threadTitle->setText(conversation.title);
-                return;
-            }
-        }
-        m_threadTitle->setText(i18n("New Thread"));
+        // A single-row lookup: listing every conversation just to find one
+        // title materialised the whole history table.
+        const QString title = SessionStore::conversationTitle(conversationId);
+        m_threadTitle->setText(title.isEmpty() ? i18n("New Thread") : title);
     }
 }
 
@@ -5978,6 +6129,7 @@ void ChatWidget::newChat()
     m_currentConversationId = SessionStore::createNewConversation();
 
     // Update history button to reflect any newly saved previous conversation.
+    m_historyCount = -1;
     updateHistoryButton();
 
     // Rebuild transcript from scratch to ensure it matches the cleared agent state

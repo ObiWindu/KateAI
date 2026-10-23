@@ -374,9 +374,24 @@ QString AcpClient::resolvedCommand(const Settings &settings)
     }
     const QString home = QDir::homePath();
     const QString baseName = QFileInfo(command).fileName();
+    if (baseName != command) {
+        // Registry binary entries name their command "./<name>", relative to
+        // the unpacked archive Kate never manages. Resolve the bare name
+        // through PATH like any other agent instead.
+        const QString byName = QStandardPaths::findExecutable(baseName);
+        if (!byName.isEmpty()) {
+            return byName;
+        }
+    }
     QStringList fallbacks;
     if (baseName == u"grok"_s) {
         fallbacks.append(home + u"/.grok/bin/"_s + baseName);
+    }
+    if (baseName == u"opencode"_s) {
+        // opencode's installer puts the binary in ~/.opencode/bin and only
+        // adds that to the *shell* PATH; a Kate launched from the desktop
+        // never sees it, so the agent cannot be started at all from there.
+        fallbacks.append(home + u"/.opencode/bin/"_s + baseName);
     }
     fallbacks.append(home + u"/.local/bin/"_s + baseName);
     for (const QString &candidate : fallbacks) {
@@ -395,6 +410,14 @@ QStringList AcpClient::agentArguments(const Settings &settings)
     const QString command = acpEffectiveCommand(settings);
     const QString agentId = settings.acpAgentId;
     const QString model = settings.acpModel.trimmed();
+
+    // Registry binary installs record the command as "./opencode" with the
+    // "acp" argument per platform; entries saved before that argument was
+    // kept launch the interactive TUI instead of the ACP server and stall
+    // the handshake. Default the argument when it is missing.
+    if (args.isEmpty() && QFileInfo(command).fileName() == u"opencode"_s) {
+        args = QStringList{u"acp"_s};
+    }
 
     // Handle arguments for different ACP agents
     if (acpAgentIsGrok(settings)) {
@@ -647,6 +670,14 @@ void AcpClient::setState(State state, const QString &status)
 {
     m_state = state;
     m_status = status;
+}
+
+QString AcpClient::sessionCwd() const
+{
+    if (!m_workspace.trimmed().isEmpty()) {
+        return m_workspace;
+    }
+    return QDir::currentPath();
 }
 
 void AcpClient::spawnProcess()
@@ -966,7 +997,7 @@ void AcpClient::openSession()
 void AcpClient::sendSessionNew()
 {
     QJsonObject params;
-    params.insert(u"cwd"_s, m_workspace);
+    params.insert(u"cwd"_s, sessionCwd());
     params.insert(u"mcpServers"_s, mcpServersPayload());
     const QJsonObject meta = sessionMeta();
     if (!meta.isEmpty()) {
@@ -1007,7 +1038,7 @@ void AcpClient::sendSessionLoadOrResume()
     const QString method = m_resumeSession ? u"session/resume"_s : u"session/load"_s;
     QJsonObject params;
     params.insert(u"sessionId"_s, m_resumeSessionId);
-    params.insert(u"cwd"_s, m_workspace);
+    params.insert(u"cwd"_s, sessionCwd());
     params.insert(u"mcpServers"_s, mcpServersPayload());
     sendRequest(method, params, [this](const QJsonObject &result, const QString &error) {
         if (m_shuttingDown) {
@@ -1402,6 +1433,23 @@ void AcpClient::handleNotification(const QJsonObject &message)
     }
 }
 
+// A plan entry's content is an array of content blocks in the ACP spec, but
+// agents in the wild also send a single block or a bare string (see
+// toolContentText() for the same story on tool content). Every variant has to
+// end up as the step's description, or the todo list renders blank rows.
+static QString planEntryText(const QJsonValue &content)
+{
+    QStringList parts;
+    const QJsonArray blocks = content.isArray() ? content.toArray() : QJsonArray{content};
+    for (const QJsonValue &item : blocks) {
+        const QString text = contentBlockText(item);
+        if (!text.isEmpty()) {
+            parts.append(text);
+        }
+    }
+    return parts.join(u' ').trimmed();
+}
+
 void AcpClient::handleSessionUpdate(const QJsonObject &update)
 {
     const QString kind = update.value(u"sessionUpdate"_s).toString();
@@ -1431,12 +1479,21 @@ void AcpClient::handleSessionUpdate(const QJsonObject &update)
         int index = 0;
         for (const QJsonValue &value : entries) {
             const QJsonObject entry = value.toObject();
+            const QString description = planEntryText(entry.value(u"content"_s));
+            // An entry without any text carries no information; keeping it
+            // would render a row of bare glyphs in the todo list.
+            if (description.isEmpty()) {
+                continue;
+            }
             QJsonObject step;
             step.insert(u"id"_s, QString::number(++index));
-            step.insert(u"description"_s, entry.value(u"content"_s).toString());
-            const QString status = entry.value(u"status"_s).toString();
-            step.insert(u"completed"_s, status == u"completed"_s);
-            step.insert(u"inProgress"_s, status == u"in_progress"_s);
+            step.insert(u"description"_s, description);
+            // The statuses are "pending", "in_progress" and "completed" in the
+            // spec; agents also send spellings like "in-progress", "started"
+            // or "done".
+            const QString status = entry.value(u"status"_s).toString().toLower().replace(u'-', u'_');
+            step.insert(u"completed"_s, status == u"completed"_s || status == u"done"_s);
+            step.insert(u"inProgress"_s, status == u"in_progress"_s || status == u"started"_s);
             katePlan.append(step);
         }
         m_currentPlan = katePlan;
@@ -1444,11 +1501,19 @@ void AcpClient::handleSessionUpdate(const QJsonObject &update)
         return;
     }
     if (kind == u"tool_call"_s) {
-        const PermissionRequest request = permissionFromToolCall(update);
+        PermissionRequest request = permissionFromToolCall(update);
+        if (request.toolCallId.isEmpty()) {
+            // An agent that omits the id would key every later update under
+            // "" and leak the entry in m_liveTools; give the call a local id.
+            request.toolCallId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+        }
         m_liveTools.insert(request.toolCallId, request);
         QJsonObject function;
         function.insert(u"name"_s, request.toolName);
-        function.insert(u"arguments"_s, request.details.isEmpty() ? u"{}"_s : request.details);
+        // Only a JSON object is a valid arguments payload: extracted plain
+        // text (a content-block rawInput) would fail every parse downstream,
+        // so it is not passed off as arguments.
+        function.insert(u"arguments"_s, request.details.startsWith(u'{') ? request.details : u"{}"_s);
         QJsonObject call;
         call.insert(u"id"_s, request.toolCallId);
         call.insert(u"type"_s, u"function"_s);
@@ -1540,7 +1605,18 @@ PermissionRequest AcpClient::permissionFromToolCall(const QJsonObject &toolCall)
     // tool names here. The ACP kind is the protocol-level statement of what
     // the call does, and a diff content block proves the agent edited text.
     request.mutatesFiles = kind == u"edit"_s || kind == u"write"_s || kind == u"delete"_s;
-    request.details = jsonText(toolCall.value(u"rawInput"_s));
+    const QJsonValue rawInput = toolCall.value(u"rawInput"_s);
+    if (rawInput.isObject()) {
+        // The usual shape: the tool's arguments as a JSON object, shown as-is.
+        request.details = jsonText(rawInput);
+    } else {
+        // rawInput is arbitrary JSON in the ACP spec. Some agents send a
+        // content-block array or a bare string instead; serialising an empty
+        // array would put "[]" on the running card in place of what the tool
+        // is doing. Text blocks are extracted; anything else stays empty and
+        // the card falls back to its title.
+        request.details = toolContentText(rawInput);
+    }
 
     const QJsonArray locations = toolCall.value(u"locations"_s).toArray();
     if (!locations.isEmpty()) {
@@ -1558,10 +1634,14 @@ PermissionRequest AcpClient::permissionFromToolCall(const QJsonObject &toolCall)
             break;
         }
     }
+    // Check for diff content block which contains the edit details
     if (request.describeDiff.isEmpty() && request.details.contains(u"old_string"_s)) {
-        const QJsonDocument doc = QJsonDocument::fromJson(request.details.toUtf8());
-        if (doc.isObject()) {
-            const QJsonObject args = doc.object();
+        QString parseError;
+        // Create a temporary ToolCall from the JSON details to parse
+        ToolCall tempCall;
+        tempCall.argumentsJson = request.details;
+        QJsonObject args = parseToolArgs(tempCall, &parseError);
+        if (parseError.isEmpty()) {
             request.path = args.value(u"path"_s).toString();
             request.describeDiff = unifiedDiff(request.path,
                                                args.value(u"old_string"_s).toString(),
@@ -1920,7 +2000,7 @@ bool AcpClient::pathAllowed(const QString &path, bool forWrite, QString *error) 
 
 Sandbox AcpClient::currentSandbox() const
 {
-    return Sandbox(m_workspace, m_settings.sandbox, m_settings.extraDenyGlobs);
+    return Sandbox(m_workspace, m_settings.sandbox, m_settings.extraDenyGlobs, m_settings.allowReadsOutsideWorkspace);
 }
 
 void AcpClient::handleTerminalCreate(const QJsonValue &id, const QJsonObject &params)
@@ -1976,15 +2056,24 @@ void AcpClient::handleTerminalCreate(const QJsonValue &id, const QJsonObject &pa
     }
     term->process->setProcessEnvironment(env);
 
-    connect(term->process, &QProcess::readyRead, this, [this, term] {
+    // The lambdas look the terminal up by id instead of capturing the raw
+    // pointer: the process outlives the Terminal (it is parented to the
+    // client), so after a release a late signal would dereference freed
+    // memory. A released terminal is simply absent from the map.
+    const QString termId = term->id;
+    connect(term->process, &QProcess::readyRead, this, [this, termId] {
+        Terminal *term = m_terminals.value(termId);
+        if (!term || !term->process) {
+            return;
+        }
         appendTerminalOutput(term, term->process->readAll());
     });
-    connect(term->process, &QProcess::finished, this, [this, term](int exitCode, QProcess::ExitStatus) {
-        markTerminalExited(term, exitCode, QString());
+    connect(term->process, &QProcess::finished, this, [this, termId](int exitCode, QProcess::ExitStatus) {
+        markTerminalExited(m_terminals.value(termId), exitCode, QString());
     });
-    connect(term->process, &QProcess::errorOccurred, this, [this, term](QProcess::ProcessError error) {
+    connect(term->process, &QProcess::errorOccurred, this, [this, termId](QProcess::ProcessError error) {
         if (error == QProcess::FailedToStart) {
-            markTerminalExited(term, 127, QString());
+            markTerminalExited(m_terminals.value(termId), 127, QString());
         }
     });
 
@@ -2016,13 +2105,11 @@ void AcpClient::handleTerminalOutput(const QJsonValue &id, const QJsonObject &pa
 {
     const QString terminalId = params.value(u"terminalId"_s).toString();
     Terminal *term = m_terminals.value(terminalId);
-    if (!term) {
+    if (!term || !term->process) {
         replyError(id, kServerError, u"Unknown terminal '%1'."_s.arg(terminalId));
         return;
     }
-    if (term->process) {
-        appendTerminalOutput(term, term->process->readAll());
-    }
+    appendTerminalOutput(term, term->process->readAll());
     QJsonObject result;
     result.insert(u"output"_s, QString::fromUtf8(term->output));
     result.insert(u"truncated"_s, term->truncated);
@@ -2043,7 +2130,7 @@ void AcpClient::handleTerminalWait(const QJsonValue &id, const QJsonObject &para
 {
     const QString terminalId = params.value(u"terminalId"_s).toString();
     Terminal *term = m_terminals.value(terminalId);
-    if (!term) {
+    if (!term || !term->process) {
         replyError(id, kServerError, u"Unknown terminal '%1'."_s.arg(terminalId));
         return;
     }
@@ -2065,7 +2152,7 @@ void AcpClient::handleTerminalKill(const QJsonValue &id, const QJsonObject &para
 {
     const QString terminalId = params.value(u"terminalId"_s).toString();
     Terminal *term = m_terminals.value(terminalId);
-    if (!term) {
+    if (!term || !term->process) {
         replyError(id, kServerError, u"Unknown terminal '%1'."_s.arg(terminalId));
         return;
     }
@@ -2077,14 +2164,15 @@ void AcpClient::handleTerminalRelease(const QJsonValue &id, const QJsonObject &p
 {
     const QString terminalId = params.value(u"terminalId"_s).toString();
     Terminal *term = m_terminals.take(terminalId);
-    if (!term) {
+    if (!term || !term->process) {
+        // The entry was taken out of the map, so it must be freed even when
+        // the command has to fail.
+        delete term;
         replyError(id, kServerError, u"Unknown terminal '%1'."_s.arg(terminalId));
         return;
     }
     killTerminal(term, true);
-    if (term->process) {
-        term->process->deleteLater();
-    }
+    term->process->deleteLater();
     delete term;
     replyResult(id, QJsonObject());
 }
@@ -2131,6 +2219,8 @@ void AcpClient::killTerminal(Terminal *term, bool release)
     if (!term || !term->process) {
         return;
     }
+    // Disconnect signals to prevent callbacks after process deletion
+    term->process->disconnect(this);
     if (term->process->state() != QProcess::NotRunning) {
         term->process->terminate();
         if (!term->process->waitForFinished(500)) {

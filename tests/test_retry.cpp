@@ -62,6 +62,43 @@ private Q_SLOTS:
                  RetryErrorCategory::NetworkError);
     }
 
+    void testClassifyError_HttpStatusBeatsNetworkError()
+    {
+        // Qt reports a network error for every HTTP status >= 400 as well.
+        // Classifying the network error first turned every provider error
+        // (a wrong key, a wrong model, a rate limit) into a retryable network
+        // failure, and the provider's own message was thrown away.
+        TestableLlmClient client;
+        Settings settings;
+        client.setSettings(settings);
+
+        QCOMPARE(client.classifyError(401, QString(), QByteArray(), QNetworkReply::AuthenticationRequiredError),
+                 RetryErrorCategory::NonRetryable);
+        QCOMPARE(client.classifyError(404, QString(), QByteArray(), QNetworkReply::ContentNotFoundError),
+                 RetryErrorCategory::NonRetryable);
+        QCOMPARE(client.classifyError(429, QString(), QByteArray(), QNetworkReply::UnknownContentError),
+                 RetryErrorCategory::RateLimitExceeded);
+        QCOMPARE(client.classifyError(503, QString(), QByteArray(), QNetworkReply::UnknownContentError),
+                 RetryErrorCategory::ServerOverloaded);
+        // A 2xx answer with a transport hiccup is still a network error.
+        QCOMPARE(client.classifyError(200, QString(), QByteArray(), QNetworkReply::RemoteHostClosedError),
+                 RetryErrorCategory::NetworkError);
+    }
+
+    void testClassifyError_ProviderMessageWins()
+    {
+        // An SSE "error" event aborts the reply, so the network error is set
+        // even though the provider reported the real cause.
+        TestableLlmClient client;
+        Settings settings;
+        client.setSettings(settings);
+
+        QCOMPARE(client.classifyError(200, u"context_length_exceeded"_s, QByteArray(), QNetworkReply::OperationCanceledError),
+                 RetryErrorCategory::ContextOverflow);
+        QCOMPARE(client.classifyError(200, u"Invalid API key"_s, QByteArray(), QNetworkReply::OperationCanceledError),
+                 RetryErrorCategory::NonRetryable);
+    }
+
     void testClassifyError_HttpStatusCodes()
     {
         TestableLlmClient client;

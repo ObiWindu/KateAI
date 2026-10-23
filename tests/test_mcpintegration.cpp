@@ -55,6 +55,36 @@ private:
     }
 
 private Q_SLOTS:
+    void aWorkspaceConfigIsOnlyLoadedWhenItIsTrusted()
+    {
+        // A project can carry an MCP server list, and a server is a program
+        // that runs with the user's privileges. The list is only used after
+        // the user confirmed it.
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        QVERIFY(QDir(dir.path()).mkpath(u".kateai"_s));
+
+        McpServerConfig config;
+        config.name = u"fromworkspace"_s;
+        config.command = u"true"_s;
+        config.enabled = true;
+        QString error;
+        QVERIFY2(McpConfigStore::save(dir.path(), {config}, &error), qPrintable(error));
+
+        // Not trusted: the file is not read.
+        McpManager untrusted;
+        untrusted.setLoadWorkspaceConfig(false);
+        untrusted.setWorkspace(dir.path());
+        QVERIFY(untrusted.servers().isEmpty());
+
+        // Trusted: the servers of the file are used.
+        McpManager trusted;
+        trusted.setLoadWorkspaceConfig(true);
+        trusted.setWorkspace(dir.path());
+        QCOMPARE(trusted.servers().size(), 1);
+        QCOMPARE(trusted.servers().first().name, u"fromworkspace"_s);
+    }
+
     void initTestCase()
     {
         m_server = mockServerPath();
@@ -179,9 +209,14 @@ private Q_SLOTS:
         QString reason;
         // Accept edits must not silently allow an arbitrary MCP tool...
         QCOMPARE(policy.evaluate(u"mcp__mock__other"_s, {}, sandbox, &reason), PermissionPolicy::Verdict::Ask);
-        // ...but a readOnlyHint tool is free, and alwaysAllow works.
+        // ...but a readOnlyHint tool follows the mode's read-tool rule, and
+        // alwaysAllow works.
         QCOMPARE(policy.evaluate(u"mcp__mock__echo"_s, {}, sandbox, &reason), PermissionPolicy::Verdict::Allow);
         QCOMPARE(policy.evaluate(u"mcp__mock__boom"_s, {}, sandbox, &reason), PermissionPolicy::Verdict::Allow);
+        // In Ask mode the hint alone is not trusted to skip the prompt.
+        PermissionPolicy asking(PermissionMode::Ask);
+        asking.setReadOnlyTools({u"mcp__mock__echo"_s});
+        QCOMPARE(asking.evaluate(u"mcp__mock__echo"_s, {}, sandbox, &reason), PermissionPolicy::Verdict::Ask);
     }
 
     void disabledServersAreNotStarted()

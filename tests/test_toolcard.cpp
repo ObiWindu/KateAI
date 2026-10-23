@@ -548,6 +548,73 @@ private Q_SLOTS:
     // learn what it had done once it was over. The card now carries the call's
     // own arguments until something better arrives.
 
+    // The whole live sequence for an edit_file call, in the order ChatWidget
+    // drives it: describe-diff at toolStarted, the arguments as the running
+    // input, then the one-line result. The change is the card's content, so
+    // the code block must still hold it after the tool reports back — the
+    // reported regression was a card whose code block came back empty.
+    void testEditCardKeepsItsDiffThroughTheWholeTurn()
+    {
+        QWidget host;
+        auto *layout = new QVBoxLayout(&host);
+        host.resize(440, 400);
+
+        ToolCallWidget w(QStringLiteral("e2"), &host);
+        w.setToolInfo(QStringLiteral("edit_file"), QStringLiteral("src/app.cpp"), ToolRisk::Write);
+        w.setDescribeDiff(editDiff());
+        w.setFilePath(QStringLiteral("src/app.cpp"));
+        w.setRunning();
+        w.setRunningInput(QStringLiteral("Replace:\nconst int old = 1;\n\nWith:\nconst int revised = 2;"));
+        ToolResult result;
+        result.name = u"edit_file"_s;
+        result.ok = true;
+        result.output = QStringLiteral("Updated /workspace/src/app.cpp");
+        w.setFinished(result);
+        layout->addWidget(&w);
+        host.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&host));
+        QTest::qWait(60);
+
+        auto *diff = w.findChild<QTextBrowser *>(QStringLiteral("toolDiff"));
+        QVERIFY2(diff, qPrintable(QStringLiteral("no diff surface")));
+        QVERIFY2(!diff->toPlainText().trimmed().isEmpty(),
+                 qPrintable(QStringLiteral("the code block is empty")));
+        QVERIFY2(diff->isVisible(), qPrintable(QStringLiteral("the code block is hidden")));
+        QVERIFY2(diff->height() > 0, qPrintable(QStringLiteral("the code block has no height")));
+        QVERIFY2(diff->toPlainText().contains(QStringLiteral("const int revised = 2;")),
+                 qPrintable(diff->toPlainText()));
+        QVERIFY2(w.isExpanded(), qPrintable(QStringLiteral("collapsed")));
+    }
+
+    // A tool that reports no output must not leave an empty code block behind:
+    // the block frame (surface + language label) with no code inside is what
+    // an edit card restored from an interrupted ACP turn used to show.
+    void testFinishedWithNoOutputLeavesNoEmptyCodeBlock()
+    {
+        QWidget host;
+        auto *layout = new QVBoxLayout(&host);
+        host.resize(440, 400);
+
+        ToolCallWidget w(QStringLiteral("e3"), &host);
+        w.setToolInfo(QStringLiteral("edit"), QStringLiteral("src/app.cpp"), ToolRisk::Write);
+        ToolResult result;
+        result.name = u"edit"_s;
+        result.ok = true;
+        result.output = QString();
+        w.setFinished(result);
+        layout->addWidget(&w);
+        host.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&host));
+        QTest::qWait(60);
+
+        QTextBrowser *body = w.findChild<QTextBrowser *>(QStringLiteral("toolDetails"));
+        QVERIFY2(body, qPrintable(QStringLiteral("no body surface")));
+        QVERIFY2(body->toPlainText().trimmed().isEmpty(),
+                 qPrintable(QStringLiteral("an empty result painted a code block: ")
+                                + body->toPlainText()));
+        QVERIFY2(!w.isExpanded(), qPrintable(QStringLiteral("expanded around nothing")));
+    }
+
     void testRunningToolShowsWhatItIsWorkingOn()
     {
         QWidget host;
