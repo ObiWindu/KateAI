@@ -1,0 +1,409 @@
+=== INITIALIZE RESULT ===
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "protocolVersion": 1,
+    "agentCapabilities": {
+      "loadSession": true,
+      "mcpCapabilities": {
+        "http": true,
+        "sse": false
+      },
+      "promptCapabilities": {
+        "embeddedContext": true,
+        "image": true
+      },
+      "sessionCapabilities": {
+        "additionalDirectories": {},
+        "close": {},
+        "delete": {},
+        "fork": {},
+        "list": {},
+        "resume": {}
+      },
+      "_meta": {
+        "opencode/child-session-updates": true
+      }
+    },
+    "authMethods": [
+      {
+        "description": "Run `opencode auth login` in the terminal",
+        "name": "Login with opencode",
+        "id": "opencode-login"
+      }
+    ],
+    "agentInfo": {
+      "name": "OpenCode",
+      "version": "2.1.4"
+    }
+  }
+}
+=== SESSION/NEW RESULT ===
+{
+  "jsonrpc": "2.0",
+  "id": 2,
+  "result": {
+    "sessionId": "ses_e9638ba4cffeNCywBSTsNry3Uj",
+    "configOptions": [
+      {
+        "id": "model",
+        "name": "Model",
+        "category": "model",
+        "type": "select",
+        "currentValue": "opencode/flint-40b-free",
+        "options": [
+          {
+            "value": "mistral/codestral-latest",
+            "name": "mistral/Codestral (latest)"
+          },
+          {
+            "value": "mistral/codestral-2508",
+            "name": "mistral/Codestral 25.08"
+          },
+          {
+            "value": "mistral/zai-glm-5-3",
+            "name": "mistral/GLM-5.3"
+          },
+          {
+            "value": "mistral/zai-glm-5-3-flash",
+            "name": "mistral/GLM-5.3-Flash"
+          },
+          {
+            "value": "mistral/ministral-14b-2512",
+            "name": "mistral/Ministral 3 14B"
+          },
+          {
+            "value": "mistral/ministral-3b-2512",
+            "name": "mistral/Ministral 3 3B"
+          },
+          {
+            "value": "mistral/ministral-8b-2512",
+            "name": "mistral/Ministral 3 8B"
+          },
+          {
+            "value": "mistral/ministral-3b-latest",
+            "name": "mistral/Ministral 3B (latest)"
+          },
+          {
+            "value": "mistral/ministral-8b-latest",
+            "name": "mistral/Ministral 8B (latest)"
+          },
+          {
+            "value": "mistral/mistral-embed",
+            "name": "mistral/Mistral Embed"
+          },
+          {
+            "value": "mistral/mistral-large-latest",
+            "name": "mistral/Mistral Large (latest)"
+          },
+          {
+            "value": "mistral/mistral-large-2512",
+            "name": "mistral/Mistral Large 3"
+          },
+          {
+            "value": "mistral/mistral-large-4",
+            "name": "mistral/Mistral Large 4"
+          },
+          {
+            "value": "mistral/mistral-medium-latest",
+            "name": "mistral/Mistral Medium (latest)"
+          },
+          {
+            "value": "mistral/mistral-medium-2604",
+            "name": "mistral/Mistral Medium 3.5"
+          },
+          {
+            "value": "mistral/mistral-small-latest",
+            "name": "mistral/Mistral Small (latest)"
+          },
+          {
+            "value": "mistral/mistral-small-2603",
+            "name": "mistral/Mistral Small 4"
+          },
+          {
+            "value": "mistral/voxtral-small-2507",
+            "name": "mistral/Voxtral Small"
+          },
+          {
+            "value": "mistral/voxtral-small-latest",
+            "name": "mistral/Voxtral Small (latest)"
+          },
+          {
+            "value": "opencode/beam-free",
+            "name": "opencode/Beam Free"
+          },
+          {
+            "value": "opencode/big-pickle",
+            "name": "opencode/Big Pickle"
+          },
+          {
+            "value": "opencode/deepseek-v4.1-flash-free",
+            "name": "opencode/DeepSeek V4.1 Flash Free"
+          },
+          {
+            "value": "opencode/flint-40b-free",
+            "name": "opencode/Flint 40B Free"
+          },
+          {
+            "value": "opencode/glm-5.3-flash-free",
+            "name": "opencode/GLM-5.3-Flash Free"
+          },
+          {
+            "value": "opencode/mimo-v2.6-flash-free",
+            "name": "opencode/MiMo-V2.6-Flash Free"
+          },
+          {
+            "value": "opencode/nemotron-3-ultra-free",
+            "name": "opencode/Nemotron 3 Ultra Free"
+          },
+          {
+            "value": "opencode/nemotron-3.5-lightning-free",
+            "name": "opencode/Nemotron 3.5 Lightning Free"
+          },
+          {
+            "value": "opencode/nemotron-3.5-super-vl-free",
+            "name": "opencode/Nemotron 3.5 Super VL Free"
+          },
+          {
+            "value": "openrouter/aion-labs/aion-3.5",
+            "name": "openrouter/Aion 3.5"
+          },
+          {
+            "value": "openrouter/aion-labs/aion-3.5-mini",
+            "name": "openrouter/Aion 3.5 Mini"
+          },
+          {
+            "value": "openrouter/aion-labs/aion-2.0",
+            "name": "openrouter/Aion-2.0"
+          },
+          {
+            "value": "openrouter/aion-labs/aion-3.0",
+            "name": "openrouter/Aion-3.0"
+          },
+          {
+            "value": "openrouter/aion-labs/aion-3.0-mini",
+            "name": "openrouter/Aion-3.0-Mini"
+          },
+          {
+            "value": "openrouter/aion-labs/aion-rp-llama-3.1-8b",
+            "name": "openrouter/Aion-RP 1.0 (8B)"
+          },
+          {
+            "value": "openrouter/openrouter/auto",
+            "name": "openrouter/Auto Router"
+          },
+          {
+            "value": "openrouter/reflection/beam-1.0-501b-a23b",
+            "name": "openrouter/Beam 1.0 501B A23B"
+          },
+          {
+            "value": "openrouter/openrouter/bodybuilder",
+            "name": "openrouter/Body Builder (beta)"
+          },
+          {
+            "value": "openrouter/anthropic/claude-fable-5",
+            "name": "openrouter/Claude Fable 5"
+          },
+          {
+            "value": "openrouter/anthropic/claude-fable-5.1",
+            "name": "openrouter/Claude Fable 5.1"
+          },
+          {
+            "value": "openrouter/~anthropic/claude-fable-latest",
+            "name": "openrouter/Claude Fable Latest"
+          },
+          {
+            "value": "openrouter/anthropic/claude-haiku-4.5",
+            "name": "openrouter/Claude Haiku 4.5 (latest)"
+          },
+          {
+            "value": "openrouter/anthropic/claude-haiku-5.5",
+            "name": "openrouter/Claude Haiku 5.5"
+          },
+          {
+            "value": "openrouter/~anthropic/claude-haiku-latest",
+            "name": "openrouter/Claude Haiku Latest"
+          },
+          {
+            "value": "openrouter/anthropic/claude-opus-4.1",
+            "name": "openrouter/Claude Opus 4.1 (latest)"
+          },
+          {
+            "value": "openrouter/anthropic/claude-opus-4.5",
+            "name": "openrouter/Claude Opus 4.5 (latest)"
+          },
+          {
+            "value": "openrouter/anthropic/claude-opus-4.6",
+            "name": "openrouter/Claude Opus 4.6"
+          },
+          {
+            "value": "openrouter/anthropic/claude-opus-4.7",
+            "name": "openrouter/Claude Opus 4.7"
+          },
+          {
+            "value": "openrouter/anthropic/claude-opus-4.8",
+            "name": "openrouter/Claude Opus 4.8"
+          },
+          {
+            "value": "openrouter/anthropic/claude-opus-5",
+            "name": "openrouter/Claude Opus 5"
+          },
+          {
+            "value": "openrouter/anthropic/claude-opus-5.5",
+            "name": "openrouter/Claude Opus 5.5"
+          },
+          {
+            "value": "openrouter/~anthropic/claude-opus-latest",
+            "name": "openrouter/Claude Opus Latest"
+          },
+          {
+            "value": "openrouter/anthropic/claude-sonnet-4.5",
+            "name": "openrouter/Claude Sonnet 4.5 (latest)"
+          },
+          {
+            "value": "openrouter/anthropic/claude-sonnet-4.6",
+            "name": "openrouter/Claude Sonnet 4.6"
+          },
+          {
+            "value": "openrouter/anthropic/claude-sonnet-5",
+            "name": "openrouter/Claude Sonnet 5"
+          },
+          {
+            "value": "openrouter/anthropic/claude-sonnet-5.5",
+            "name": "openrouter/Claude Sonnet 5.5"
+          },
+          {
+            "value": "openrouter/~anthropic/claude-sonnet-latest",
+            "name": "openrouter/Claude Sonnet Latest"
+          },
+          {
+            "value": "openrouter/mistralai/codestral-2508",
+            "name": "openrouter/Codestral 25.08"
+          },
+          {
+            "value": "openrouter/cohere/command-a",
+            "name": "openrouter/Command A"
+          },
+          {
+            "value": "openrouter/cohere/command-a-plus",
+            "name": "openrouter/Command A+"
+          },
+          {
+            "value": "openrouter/cohere/command-r-08-2024",
+            "name": "openrouter/Command R"
+          },
+          {
+            "value": "openrouter/cohere/command-r-plus-08-2024",
+            "name": "openrouter/Command R+"
+          },
+          {
+            "value": "openrouter/cohere/command-r7b-12-2024",
+            "name": "openrouter/Command R7B"
+          },
+          {
+            "value": "openrouter/thedrummer/cydonia-24b-v4.1",
+            "name": "openrouter/Cydonia 24B V4.1"
+          },
+          {
+            "value": "openrouter/deepseek/deepseek-chat",
+            "name": "openrouter/DeepSeek Chat"
+          },
+          {
+            "value": "openrouter/~deepseek/deepseek-flash-latest",
+            "name": "openrouter/DeepSeek Flash Latest"
+          },
+          {
+            "value": "openrouter/~deepseek/deepseek-pro-latest",
+            "name": "openrouter/DeepSeek Pro Latest"
+          },
+          {
+            "value": "openrouter/deepseek/deepseek-r1-0528",
+            "name": "openrouter/DeepSeek R1 0528"
+          },
+          {
+            "value": "openrouter/deepseek/deepseek-chat-v3-0324",
+            "name": "openrouter/DeepSeek V3 0324"
+          },
+          {
+            "value": "openrouter/deepseek/deepseek-chat-v3.1",
+            "name": "openrouter/DeepSeek V3.1"
+          },
+          {
+            "value": "openrouter/deepseek/deepseek-v3.1-terminus",
+            "name": "openrouter/DeepSeek V3.1 Terminus"
+          },
+          {
+            "value": "openrouter/deepseek/deepseek-v3.2",
+            "name": "openrouter/DeepSeek V3.2"
+          },
+          {
+            "value": "openrouter/deepseek/deepseek-v3.2-exp",
+            "name": "openrouter/DeepSeek V3.2 Exp"
+          },
+          {
+            "value": "openrouter/deepseek/deepseek-v4-flash",
+            "name": "openrouter/DeepSeek V4 Flash"
+          },
+          {
+            "value": "openrouter/deepseek/deepseek-v4-flash-0731",
+            "name": "openrouter/DeepSeek V4 Flash 0731"
+          },
+          {
+            "value": "openrouter/~deepseek/deepseek-v4-flash-latest",
+            "name": "openrouter/DeepSeek V4 Flash Latest"
+          },
+          {
+            "value": "openrouter/deepseek/deepseek-v4-flash-vision-exp",
+            "name": "openrouter/DeepSeek V4 Flash Vision Exp"
+          },
+          {
+            "value": "openrouter/deepseek/deepseek-v4-pro",
+            "name": "openrouter/DeepSeek V4 Pro"
+          },
+          {
+            "value": "openrouter/deepseek/deepseek-v4-pro-0813",
+            "name": "openrouter/DeepSeek V4 Pro 0813"
+          },
+          {
+            "value": "openrouter/deepseek/deepseek-v4.1-flash",
+            "name": "openrouter/DeepSeek V4.1 Flash"
+          },
+          {
+            "value": "openrouter/deepseek/deepseek-v4.1-flash-1017",
+            "name": "openrouter/DeepSeek V4.1 Flash 1017"
+          },
+          {
+            "value": "openrouter/mistralai/devstral-2512",
+            "name": "openrouter/Devstral 2"
+          },
+          {
+            "value": "openrouter/fireworks/ember-1",
+            "name": "openrouter/Ember-1"
+          },
+          {
+            "value": "openrouter/scaledown/extract",
+            "name": "openrouter/Extract"
+          },
+          {
+            "value": "openrouter/recursive/flint-v1.0:free",
+            "name": "openrouter/Flint (free)"
+          },
+          {
+            "value": "openrouter/openrouter/free",
+            "name": "openrouter/Free Models Router"
+          },
+          {
+            "value": "openrouter/sakana/fugu-max",
+            "name": "openrouter/Fugu Max"
+          },
+          {
+            "value": "openrouter/sakana/fugu-ultra",
+            "name": "openrouter/Fugu Ultra"
+          },
+          {
+            "value": "openrouter/sakana/fugu-ultra-v2",
+            "name": "openrouter/Fugu Ultra v2"
+          },
+          {
+            "value": "openrouter/openrouter/fusion"

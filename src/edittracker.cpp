@@ -37,8 +37,9 @@ namespace
 
 // The tracker is deliberately compact: it is a review control, not the main
 // transcript. Keep every size in one place so the bar and the rows stay at
-// part of the chat's usual type scale.
-constexpr qreal kTrackerFontScale = 0.6;
+// part of the chat's usual type scale. The scale was raised by 15% so the
+// small type stays legible next to the transcript.
+constexpr qreal kTrackerFontScale = 0.69;
 
 QString trackerFontSize(int pixels)
 {
@@ -53,7 +54,7 @@ QString keepAllStyle()
                "  color: %2;"
                "  border: none;"
                "  border-radius: 16px;"
-               "  padding: 0 14px;"
+               "  padding: 0 4px;"
                "  font-weight: 600;"
                "  font-size: %7;"
                "}"
@@ -72,7 +73,7 @@ QString rejectAllStyle()
                "  color: %1;"
                "  border: 1px solid %1;"
                "  border-radius: 16px;"
-               "  padding: 0 14px;"
+               "  padding: 0 4px;"
                "  font-weight: 600;"
                "  font-size: %5;"
                "}"
@@ -91,7 +92,7 @@ QString keepStyle()
                "  color: %1;"
                "  border: 1px solid %1;"
                "  border-radius: 12px;"
-               "  padding: 0 10px;"
+               "  padding: 0 4px;"
                "  font-weight: 600;"
                "  font-size: %4;"
                "}"
@@ -108,7 +109,7 @@ QString rejectStyle()
                "  color: %1;"
                "  border: 1px solid %1;"
                "  border-radius: 12px;"
-               "  padding: 0 10px;"
+               "  padding: 0 4px;"
                "  font-weight: 600;"
                "  font-size: %2;"
                "}"
@@ -125,7 +126,7 @@ QString reviewStyle()
                "  color: %2;"
                "  border: 1px solid %3;"
                "  border-radius: 12px;"
-               "  padding: 0 10px;"
+               "  padding: 0 4px;"
                "  font-weight: 600;"
                "  font-size: %6;"
                "}"
@@ -143,7 +144,7 @@ QString undoStyle()
                "  color: %1;"
                "  border: 1px solid %2;"
                "  border-radius: 16px;"
-               "  padding: 0 12px;"
+               "  padding: 0 4px;"
                "  font-weight: 600;"
                "  font-size: %4;"
                "}"

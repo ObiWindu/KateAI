@@ -108,12 +108,12 @@ private Q_SLOTS:
         for (const QString &sheet : {bright, dim}) {
             QVERIFY2(!sheet.contains(u"background-color"_s), qPrintable(sheet));
             QVERIFY2(!sheet.contains(u"border: 1px"_s), qPrintable(sheet));
-            QVERIFY2(sheet.contains(u"font-size: 6px"_s), qPrintable(sheet));
+            QVERIFY2(sheet.contains(u"font-size: 7.2px"_s), qPrintable(sheet));
         }
         const QString work = ChatTheme::workingPill();
         const QString workDim = ChatTheme::workingPillDim();
         QVERIFY2(work != workDim, "the working pill needs a dim phase too");
-        QVERIFY2(work.contains(u"font-size: 6px"_s), qPrintable(work));
+        QVERIFY2(work.contains(u"font-size: 7.2px"_s), qPrintable(work));
     }
 
     void testRunningCardShowsTheDelegatedTask()

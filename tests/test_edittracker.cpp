@@ -382,9 +382,9 @@ private Q_SLOTS:
         QVERIFY2(first != second, qPrintable(QStringLiteral("%1 and %2 collide").arg(first, second)));
     }
 
-    // The tracker is a compact review control, and its type was raised by a
-    // fifth so it stays legible next to the transcript.
-    void testTrackerTypeIsSixtyPercentOfTheChat()
+    // The tracker is a compact review control, and its type was raised by
+    // another 15% so it stays legible next to the transcript.
+    void testTrackerTypeIsSixtyNinePercentOfTheChat()
     {
         EditTracker tracker;
         tracker.addEdit(u"/tmp/a.cpp"_s, u"write_file"_s, diffFor(1, 0), u"old"_s, u"new"_s);
@@ -393,15 +393,20 @@ private Q_SLOTS:
 
         QLabel *count = tracker.findChild<QLabel *>();
         QVERIFY2(count, "no label on the tracker bar");
-        // A 12px label at 60% is 7.2px; at the previous 50% it was 6px.
-        QVERIFY2(count->styleSheet().contains(QStringLiteral("7.2px")), qPrintable(count->styleSheet()));
+        // A 12px label at 69% is 8.28px; at the previous 60% it was 7.2px.
+        QVERIFY2(count->styleSheet().contains(QStringLiteral("8.28px")), qPrintable(count->styleSheet()));
         const QList<QPushButton *> buttons = tracker.findChildren<QPushButton *>();
         QVERIFY(!buttons.isEmpty());
         bool sawScaledButton = false;
         for (QPushButton *button : buttons) {
-            if (button->styleSheet().contains(QStringLiteral("7.2px"))) {
+            if (button->styleSheet().contains(QStringLiteral("8.28px"))) {
                 sawScaledButton = true;
             }
+            // The buttons hug their text: the wide fixed paddings are gone.
+            QVERIFY2(!button->styleSheet().contains(QStringLiteral("padding: 0 14px"))
+                         && !button->styleSheet().contains(QStringLiteral("padding: 0 12px"))
+                         && !button->styleSheet().contains(QStringLiteral("padding: 0 10px")),
+                     qPrintable(button->styleSheet()));
         }
         QVERIFY2(sawScaledButton, "the tracker's buttons kept the old size");
     }

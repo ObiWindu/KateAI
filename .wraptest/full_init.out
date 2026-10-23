@@ -1,0 +1,55 @@
+[
+ {
+  "id": "model",
+  "category": "model",
+  "type": "select",
+  "currentValue": "opencode/flint-40b-free",
+  "numOptions": 400,
+  "grouped": false
+ },
+ {
+  "id": "effort",
+  "category": "thought_level",
+  "type": "select",
+  "currentValue": "default",
+  "numOptions": 6,
+  "grouped": false
+ },
+ {
+  "id": "mode",
+  "category": "mode",
+  "type": "select",
+  "currentValue": "build",
+  "numOptions": 2,
+  "grouped": false
+ }
+]
+model option count: 1
+{
+ "id": "model",
+ "name": "Model",
+ "category": "model",
+ "type": "select",
+ "currentValue": "opencode/flint-40b-free",
+ "options": [
+  {
+   "value": "mistral/codestral-latest",
+   "name": "mistral/Codestral (latest)"
+  },
+  {
+   "value": "mistral/codestral-2508",
+   "name": "mistral/Codestral 25.08"
+  },
+  {
+   "value": "mistral/zai-glm-5-3",
+   "name": "mistral/GLM-5.3"
+  }
+ ]
+}
+other option example: {
+ "id": "model",
+ "name": "Model",
+ "category": "model",
+ "type": "select",
+ "currentValue": "opencode/flint-40b-free"
+}

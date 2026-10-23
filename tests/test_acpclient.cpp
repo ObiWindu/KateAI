@@ -788,6 +788,35 @@ private Q_SLOTS:
         QCOMPARE(AcpClient::resolvedCommand(settings), expected);
     }
 
+    // The registry's binary install records the command as "./opencode" with
+    // the "acp" argument per platform. Entries saved before that argument was
+    // kept must still launch the ACP server, not the interactive TUI that
+    // never answers the handshake.
+    void registryBinaryOpencodeLaunchesAcp()
+    {
+        Settings settings;
+        settings.acpAgentId = u"opencode-v2"_s;
+        settings.acpCommand = u"./opencode"_s;
+        settings.acpArgs.clear();
+        QCOMPARE(AcpClient::agentArguments(settings), (QStringList{u"acp"_s}));
+
+        // An explicit argument list is never overridden.
+        settings.acpArgs = u"acp --flag"_s;
+        QCOMPARE(AcpClient::agentArguments(settings), (QStringList{u"acp"_s, u"--flag"_s}));
+
+        // "./opencode" resolves to the same binary a bare "opencode" does,
+        // and survives unchanged when no opencode is installed at all.
+        settings.acpArgs.clear();
+        Settings bare = settings;
+        bare.acpCommand = u"opencode"_s;
+        const QString resolvedBare = AcpClient::resolvedCommand(bare);
+        if (resolvedBare != u"opencode"_s) {
+            QCOMPARE(AcpClient::resolvedCommand(settings), resolvedBare);
+        } else {
+            QCOMPARE(AcpClient::resolvedCommand(settings), u"./opencode"_s);
+        }
+    }
+
     void legacySessionModelsUseSetModel()
     {
         QTemporaryDir workspace;

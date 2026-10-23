@@ -489,7 +489,7 @@ ChatWidget::ChatWidget(QWidget *parent)
     m_transcriptLayout->addStretch();
 
     // Live thinking/working indicators float over the transcript's bottom
-    // right corner; they are not part of the transcript's flow.
+    // left corner; they are not part of the transcript's flow.
     m_indicatorsRow = createIndicatorsRow();
     m_scrollArea->setWidget(m_transcriptContainer);
     root->addWidget(m_scrollArea, 1);
@@ -2581,7 +2581,7 @@ QWidget *ChatWidget::createWelcomeWidget()
 }
 
 // The live "Thinking" / "Working" indicators. They float over the transcript's
-// very bottom right corner -- bare, small text on the panel rather than boxed
+// very bottom left corner -- bare, small text on the panel rather than boxed
 // pills in the flow, so they read as a corner tick instead of a card and never
 // push the conversation around.
 QWidget *ChatWidget::createIndicatorsRow()
@@ -2601,7 +2601,7 @@ QWidget *ChatWidget::createIndicatorsRow()
     m_thinkingIndicator->setAttribute(Qt::WA_TransparentForMouseEvents, true);
     m_thinkingIndicator->setStyleSheet(ChatTheme::thinkingPill());
     m_thinkingIndicator->hide();
-    layout->addWidget(m_thinkingIndicator, 0, Qt::AlignRight | Qt::AlignVCenter);
+    layout->addWidget(m_thinkingIndicator, 0, Qt::AlignLeft | Qt::AlignVCenter);
 
     m_workingLabelBase = i18n("Working");
     m_workingIndicator = new QLabel(indicatorText(QChar(0x26A1), m_workingLabelBase, progressiveDots(0)), row);
@@ -2610,14 +2610,14 @@ QWidget *ChatWidget::createIndicatorsRow()
     m_workingIndicator->setAttribute(Qt::WA_TransparentForMouseEvents, true);
     m_workingIndicator->setStyleSheet(ChatTheme::workingPill());
     m_workingIndicator->hide();
-    layout->addWidget(m_workingIndicator, 0, Qt::AlignRight | Qt::AlignVCenter);
+    layout->addWidget(m_workingIndicator, 0, Qt::AlignLeft | Qt::AlignVCenter);
 
     layout->addStretch();
     row->hide();
     return row;
 }
 
-// Pins the indicator strip to the transcript's bottom right corner, flush with
+// Pins the indicator strip to the transcript's bottom left corner, flush with
 // the bottom edge so it sits on top of the panel's bottom border.
 void ChatWidget::updateIndicatorsPosition()
 {
@@ -2627,7 +2627,7 @@ void ChatWidget::updateIndicatorsPosition()
     const QSize hint = m_indicatorsRow->sizeHint();
     const int w = hint.width();
     const int h = hint.height();
-    m_indicatorsRow->setGeometry(m_scrollArea->width() - w, m_scrollArea->height() - h, w, h);
+    m_indicatorsRow->setGeometry(0, m_scrollArea->height() - h, w, h);
     m_indicatorsRow->raise();
 }
 
@@ -5248,6 +5248,14 @@ void ChatWidget::clearTranscriptContents()
     // Detach any approval rows still docked; they belong to the cards deleted
     // above and must not be left parented to the dock.
     clearIntentDock();
+    // The plan dock lives above the composer, outside the transcript, so the
+    // sweep above cannot reach it: without this the checklist of the
+    // conversation being left would follow the user into the next one.
+    // restoreCurrentTurn() re-shows it when the session being rebuilt still
+    // carries a live plan.
+    if (m_todoWidget) {
+        m_todoWidget->setTodos(QJsonArray());
+    }
     m_thinkingBlocks.clear();
     clearStreamingPointers();
     resetThinkingState();

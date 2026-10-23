@@ -257,10 +257,10 @@ private Q_SLOTS:
         QVERIFY2(!pill->styleSheet().contains(u"border: 1px"_s), qPrintable(pill->styleSheet()));
     }
 
-    // The indicators float over the transcript's very bottom right corner:
+    // The indicators float over the transcript's very bottom left corner:
     // bare small text pinned to the bottom edge, not a row in the flow, so
     // they never push the conversation around and cannot be scrolled away.
-    void indicatorsOverlayTheBottomRightCorner()
+    void indicatorsOverlayTheBottomLeftCorner()
     {
         isolateSessionStore();
         ChatWidget widget;
@@ -276,15 +276,15 @@ private Q_SLOTS:
         QVERIFY2(!row->isVisible(), "the strip shows while nothing is running");
 
         // A thinking delta turns the strip on; it must sit flush with the
-        // bottom right corner of the transcript viewport.
+        // bottom left corner of the transcript viewport.
         Q_EMIT widget.agent()->thinkingDelta(u"considering"_s);
         QVERIFY(QTest::qWaitFor([&row] {
             return row->isVisible();
         }));
         QTest::qWait(60);
         const QPoint topLeft = row->mapTo(scroll, QPoint(0, 0));
-        QVERIFY2(topLeft.x() + row->width() >= scroll->width() - 8,
-                 qPrintable(QStringLiteral("the strip is not at the right edge: %1+%2 of %3")
+        QVERIFY2(topLeft.x() <= 8,
+                 qPrintable(QStringLiteral("the strip is not at the left edge: %1+%2 of %3")
                                 .arg(topLeft.x()).arg(row->width()).arg(scroll->width())));
         QVERIFY2(topLeft.y() + row->height() >= scroll->height() - 8,
                  qPrintable(QStringLiteral("the strip is not at the bottom edge: %1+%2 of %3")

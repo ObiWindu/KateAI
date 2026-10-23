@@ -423,7 +423,14 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
             // TODO: Implement actual binary download and installation
             QJsonObject installed = agent;
             installed.insert(u"command"_s, cmd);
-            installed.insert(u"args"_s, QJsonArray());
+            // The platform entry carries the launch arguments ("acp" for
+            // opencode); dropping them made the binary start its TUI instead
+            // of its ACP server and stall the handshake.
+            QJsonArray launchArgs;
+            for (const QJsonValue &arg : platformDist.value(u"args"_s).toArray()) {
+                launchArgs.append(arg.toString());
+            }
+            installed.insert(u"args"_s, launchArgs);
             installed.insert(u"distributionType"_s, u"binary"_s);
             installed.insert(u"binaryArchiveUrl"_s, archiveUrl);
             installed.insert(u"binaryPlatform"_s, platformKey);

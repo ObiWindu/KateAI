@@ -1,0 +1,1 @@
+[OTHER] {"jsonrpc": "2.0", "method": "session/update", "params": {"sessionId": "ses_e96381b89ffetPYN5lpEep8Pjo", "update": {"sessionUpdate": "available_commands_update", "availableCommands": [{"name": "init", "description": "guided AGENTS.md setup"}, {"name": "review", "description": "review changes [commit

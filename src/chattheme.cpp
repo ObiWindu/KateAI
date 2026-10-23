@@ -564,7 +564,7 @@ QString activityPill()
 // the heartbeat and paints the glyph straight onto the screen.
 //
 // The pill is bare text on purpose: no background, no border, half the old
-// footprint. It floats at the very bottom right of the transcript, where a
+// footprint. It floats at the very bottom left of the transcript, where a
 // boxed pill would read as a card rather than as a corner tick, and the
 // colour alone carries the state.
 QString pillSheet(const QString &textColor)
@@ -572,7 +572,7 @@ QString pillSheet(const QString &textColor)
     return QStringLiteral(
            "QLabel {"
            "  color: %1;"
-           "  font-size: 6px;"
+           "  font-size: 7.2px;"
            "  font-weight: 600;"
            "  padding: 2px 6px;"
            "  border: none;"

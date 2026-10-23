@@ -374,6 +374,15 @@ QString AcpClient::resolvedCommand(const Settings &settings)
     }
     const QString home = QDir::homePath();
     const QString baseName = QFileInfo(command).fileName();
+    if (baseName != command) {
+        // Registry binary entries name their command "./<name>", relative to
+        // the unpacked archive Kate never manages. Resolve the bare name
+        // through PATH like any other agent instead.
+        const QString byName = QStandardPaths::findExecutable(baseName);
+        if (!byName.isEmpty()) {
+            return byName;
+        }
+    }
     QStringList fallbacks;
     if (baseName == u"grok"_s) {
         fallbacks.append(home + u"/.grok/bin/"_s + baseName);
@@ -401,6 +410,14 @@ QStringList AcpClient::agentArguments(const Settings &settings)
     const QString command = acpEffectiveCommand(settings);
     const QString agentId = settings.acpAgentId;
     const QString model = settings.acpModel.trimmed();
+
+    // Registry binary installs record the command as "./opencode" with the
+    // "acp" argument per platform; entries saved before that argument was
+    // kept launch the interactive TUI instead of the ACP server and stall
+    // the handshake. Default the argument when it is missing.
+    if (args.isEmpty() && QFileInfo(command).fileName() == u"opencode"_s) {
+        args = QStringList{u"acp"_s};
+    }
 
     // Handle arguments for different ACP agents
     if (acpAgentIsGrok(settings)) {
