@@ -161,9 +161,9 @@ QJsonArray LlmClient::messagesToJson(const QList<ChatMessage> &messages)
             if (!msg.thinking.isEmpty()) {
                 obj.insert(u"reasoning_content"_s, msg.thinking);
             }
-            if (!msg.plan.isEmpty()) {
-                obj.insert(u"plan"_s, msg.plan);
-            }
+            // The structured plan is a Kate-side artifact for the checklist
+            // UI; it is not a field any provider knows, and a strict gateway
+            // or proxy may reject the whole request over it.
             if (!msg.toolCalls.isEmpty()) {
                 obj.insert(u"tool_calls"_s, msg.toolCalls);
             }

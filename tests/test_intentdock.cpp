@@ -99,18 +99,21 @@ private Q_SLOTS:
     {
         // The pulse dims the pill between beats through the stylesheet rather
         // than through a QGraphicsOpacityEffect, which breaks colour-emoji
-        // glyphs. Both phases have to exist, differ, and keep the pill's shape.
+        // glyphs. Both phases have to exist, differ, and stay bare: the pill
+        // is text colour alone, with no background or border to carry the
+        // state, and at half its old footprint.
         const QString bright = ChatTheme::thinkingPill();
         const QString dim = ChatTheme::thinkingPillDim();
         QVERIFY2(bright != dim, "the pill needs a dim phase to pulse with");
         for (const QString &sheet : {bright, dim}) {
-            QVERIFY2(sheet.contains(u"border-radius:"_s), qPrintable(sheet));
-            QVERIFY2(sheet.contains(ChatTheme::accent()), qPrintable(sheet));
+            QVERIFY2(!sheet.contains(u"background-color"_s), qPrintable(sheet));
+            QVERIFY2(!sheet.contains(u"border: 1px"_s), qPrintable(sheet));
+            QVERIFY2(sheet.contains(u"font-size: 6px"_s), qPrintable(sheet));
         }
         const QString work = ChatTheme::workingPill();
         const QString workDim = ChatTheme::workingPillDim();
         QVERIFY2(work != workDim, "the working pill needs a dim phase too");
-        QVERIFY2(work.contains(ChatTheme::warning()), qPrintable(work));
+        QVERIFY2(work.contains(u"font-size: 6px"_s), qPrintable(work));
     }
 
     void testRunningCardShowsTheDelegatedTask()

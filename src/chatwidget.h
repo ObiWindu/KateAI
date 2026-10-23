@@ -106,6 +106,10 @@ public:
     void showMcpMenu();
     void showTeamMenu();
     void updateTeamButton();
+    // The running-state style of the agent-team button: a colour the flash
+    // timer cycles through while sub-agents run; the header icon style when
+    // idle. Split from updateTeamButton() so a flash tick repaints only.
+    void styleTeamButton();
     void markRunningSubtasksAbandoned();
     void showCheckpointMenu();
     void showCheckpointMenuFor(const CheckpointInfo &info);
@@ -123,6 +127,9 @@ Q_SIGNALS:
 
 protected:
     void resizeEvent(QResizeEvent *event) override;
+    // Watches the reasoning browsers: their pinned height has to follow the
+    // width the layout finally gives them, and that width arrives as a resize.
+    bool eventFilter(QObject *watched, QEvent *event) override;
 
 private:
     void scheduleSessionSave();
@@ -138,11 +145,21 @@ private:
     QWidget *createThinkingBlock(QWidget *parent, QTextBrowser *&browser, QPushButton *&toggle, bool initiallyExpanded);
     void applyThinkingState(QWidget *block, QTextBrowser *browser, QPushButton *toggle, bool expanded);
     void showTodoList(const QJsonArray &plan);
+    // Re-fits a reasoning browser's pinned height to its document at the
+    // browser's real width. A fit measured before the block was laid out
+    // wraps the text at a stale width, which shows up as empty space below
+    // a short block (or clipped lines below a long one).
+    void fitReasoningBrowser(QTextBrowser *browser);
+    // The bottom-most content widget of the transcript, above the slack: the
+    // anchor a retiring docked card is inserted past.
+    QWidget *lastTranscriptContentWidget() const;
     void scrollToBottom();
     void forceScrollToBottom();
     void pinWidgetInViewport(QWidget *widget);
     void applyPinnedViewport();
     void updateScrollButtonPosition();
+    void updateIndicatorsPosition();
+    void syncIndicatorsOverlay();
     void animateScrollButtonShow();
     void animateScrollButtonHide();
     QPushButton *createCopyButton(const QString &textToCopy, QWidget *parent);
@@ -191,7 +208,11 @@ private:
     // Moves a docked widget back into the transcript once it stops needing
     // attention, so the dock only ever holds live work and the finished card
     // rejoins the conversation.
-    void retireIntentWidget(QWidget *widget);
+    // Moves a docked card back into the transcript. `anchor` is the transcript
+    // card that was last when the docked operation began: the card is inserted
+    // right past it so the transcript keeps its time order instead of dropping
+    // a long-running operation below everything that happened after it.
+    void retireIntentWidget(QWidget *widget, QWidget *anchor = nullptr);
 
     // --- Suggestion cards ------------------------------------------------------
     // One card per suggestion the agent posted, keyed by the tool call id that
@@ -256,7 +277,6 @@ private:
     static QString escape(const QString &text);
     static QString markdownToHtml(const QString &text);
     static QString closedMarkdown(const QString &text);
-    void updateExpandAllButton();
 
     Settings m_settings;
     AgentLoop m_agent;
@@ -276,6 +296,9 @@ private:
     QPushButton *m_mcpButton = nullptr;
     QPushButton *m_checkpointButton = nullptr;
         QPushButton *m_teamButton = nullptr;
+        // Colour cycle for the agent-team indicator while sub-agents run.
+        QTimer *m_teamFlashTimer = nullptr;
+        int m_teamFlashTick = 0;
 
     QScrollArea *m_scrollArea = nullptr;
     QWidget *m_transcriptContainer = nullptr;
@@ -340,11 +363,9 @@ private:
     int m_thinkingPacedLength = 0;
     QTimer *m_thinkingPacerTimer = nullptr;
 
-    // The todo list of the turn, rendered below the thinking block.
-    QPointer<QWidget> m_planBlock;
-    QPointer<QVBoxLayout> m_planLayout;
-    // The list inside the plan block. QPointer like the block, which dies
-    // with the assistant card it lives in.
+    // The todo list of the turn, docked at the bottom of the chat above the
+    // composer: the plan stays in view while the transcript scrolls. The
+    // widget outlives turns; it hides itself when no plan is set.
     QPointer<TodoWidget> m_todoWidget;
 
     QHash<QString, ToolCallWidget *> m_toolCallWidgets;
@@ -352,6 +373,11 @@ private:
     // One live card per running sub-agent, keyed by task id.
     QHash<QString, SubtaskWidget *> m_subtaskWidgets;
     QList<QPointer<SubtaskWidget>> m_subtaskOrder;
+    // The transcript card that was last when each sub-agent started. The
+    // sub-agent's card retires right past it, so a delegation that began
+    // early in the turn is not glued to the bottom of the transcript when it
+    // finishes or is stopped.
+    QHash<QString, QPointer<QWidget>> m_subtaskAnchors;
     QPointer<QPushButton> m_scrollToBottomBtn;
     QPointer<QPushButton> m_activeAssistantCopyBtn;
     QPointer<QLabel> m_activeAssistantPulse;
@@ -431,7 +457,6 @@ private:
     };
     ToolCardsOverride m_toolCardsOverride = ToolCardsOverride::Auto;
     int m_focusedToolCardIndex = -1;
-    QPushButton *m_expandAllBtn = nullptr;
 };
 
 } // namespace KateAi

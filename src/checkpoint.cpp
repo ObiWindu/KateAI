@@ -15,6 +15,7 @@
 #include <QProcessEnvironment>
 #include <QDateTime>
 #include <QStandardPaths>
+#include <QThreadPool>
 #include <QTimer>
 #include <QRecursiveMutex>
 
@@ -70,6 +71,164 @@ QString hashFromTag(const QString &ref)
 QString shortTagName(const QString &ref)
 {
     return ref.startsWith(TagPrefix) ? ref.mid(TagPrefix.size()) : ref;
+}
+
+// Runs git with the shadow repository and workspace bound in. A free function
+// so the worker thread can run it without touching any member of the manager
+// (whose workspace may change on the UI thread while a snapshot is in git).
+bool runGitProcess(const QString &gitDir, const QString &workspace,
+                   const QStringList &arguments, QString *output, QString *error, int timeoutMs = 20000)
+{
+    if (gitDir.isEmpty()) {
+        if (error) {
+            *error = u"No cache directory is available."_s;
+        }
+        return false;
+    }
+
+    QProcess git;
+    QProcessEnvironment environment = QProcessEnvironment::systemEnvironment();
+    environment.insert(u"GIT_DIR"_s, gitDir);
+    environment.insert(u"GIT_WORK_TREE"_s, workspace);
+    // Keep the user's global git config out of a repository they do not own.
+    environment.insert(u"GIT_CONFIG_NOSYSTEM"_s, u"1"_s);
+    environment.insert(u"GIT_TERMINAL_PROMPT"_s, u"0"_s);
+    git.setProcessEnvironment(environment);
+    git.setWorkingDirectory(workspace);
+
+    QStringList full;
+    full << u"-c"_s << u"user.name=Kate AI"_s << u"-c"_s << u"user.email=kateai@localhost"_s
+         << u"-c"_s << u"commit.gpgsign=false"_s << arguments;
+
+    git.start(u"git"_s, full);
+    if (!git.waitForFinished(timeoutMs)) {
+        git.kill();
+        git.waitForFinished(1000);
+        if (error) {
+            *error = u"git timed out."_s;
+        }
+        return false;
+    }
+    if (output) {
+        *output = QString::fromUtf8(git.readAllStandardOutput());
+    }
+    if (git.exitCode() != 0) {
+        if (error) {
+            *error = QString::fromUtf8(git.readAllStandardError()).trimmed();
+            if (error->isEmpty()) {
+                *error = QStringLiteral("git exited with code %1").arg(git.exitCode());
+            }
+        }
+        return false;
+    }
+    return true;
+}
+
+// The exclude list is rewritten for every snapshot: a .gitignore that was
+// added or changed after the cache repository was created would otherwise be
+// ignored, and the snapshot would stage the whole tree.
+bool writeExcludesFor(const QString &gitDir, const QString &workspace)
+{
+    const QString excludePath = gitDir + u"/info/exclude"_s;
+    QDir().mkpath(QFileInfo(excludePath).absolutePath());
+
+    QStringList lines = {
+        u"# Kate AI checkpoints. The project history is managed by its own repo."_s,
+        u"/.git/"_s,
+        u".kateai/project_graph.json"_s,
+        QString(),
+        u"# Common build and dependency directories."_s,
+        u"node_modules/"_s,
+        u"__pycache__/"_s,
+        u".venv/"_s,
+        u".mypy_cache/"_s,
+        u".pytest_cache/"_s,
+        u"target/"_s,
+        u".next/"_s,
+        u".cache/"_s,
+    };
+
+    // Reuse the project's own ignore rules so snapshots stay small.
+    QFile projectIgnore(workspace + u"/.gitignore"_s);
+    if (projectIgnore.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        lines.append(QString());
+        lines.append(u"# From the project .gitignore"_s);
+        lines.append(QString::fromUtf8(projectIgnore.readAll()));
+    }
+
+    QFile file(excludePath);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
+        return false;
+    }
+    file.write(lines.join(u'\n').toUtf8());
+    return true;
+}
+
+// Sequence number for the next snapshot tag. The caller holds the checkpoint
+// mutex: the sequence is read and used as one unit.
+int nextSequenceFor(const QString &gitDir, const QString &workspace)
+{
+    QString output;
+    if (!runGitProcess(gitDir, workspace,
+                       {u"for-each-ref"_s, u"--format=%(refname)"_s, TagNamespace}, &output, nullptr)) {
+        return 1;
+    }
+    int highest = 0;
+    const QStringList refs = output.split(u'\n', Qt::SkipEmptyParts);
+    for (const QString &ref : refs) {
+        if (!isTagName(ref)) {
+            continue;
+        }
+        const int lastSlash = ref.lastIndexOf(QLatin1Char('/'));
+        const int separator = ref.lastIndexOf(QLatin1Char('-'));
+        if (separator <= lastSlash) {
+            continue;
+        }
+        bool ok = false;
+        const int value = ref.mid(lastSlash + 1, separator - lastSlash - 1).toInt(&ok);
+        if (ok) {
+            highest = qMax(highest, value);
+        }
+    }
+    return highest + 1;
+}
+
+// Stages the workspace and writes the snapshot commit. The caller holds the
+// checkpoint mutex: staging, the tree and the tag must be one unit for the
+// shadow index.
+QString snapshotWorkspace(const QString &gitDir, const QString &workspace, const QString &label, QString *error)
+{
+    writeExcludesFor(gitDir, workspace);
+
+    // Staging first is what makes new and deleted files visible to a later
+    // diff; without it `git diff <commit>` silently ignores untracked files.
+    if (!runGitProcess(gitDir, workspace,
+                       {u"add"_s, u"-A"_s, u"--"_s, u"."_s, u":(exclude).git"_s}, nullptr, error)) {
+        return {};
+    }
+
+    QString tree;
+    if (!runGitProcess(gitDir, workspace, {u"write-tree"_s}, &tree, error)) {
+        return {};
+    }
+    tree = tree.trimmed();
+
+    // No -p: every snapshot is an independent root, so deleting an old tag
+    // really does let its commit be collected instead of pinning the chain.
+    QString commit;
+    if (!runGitProcess(gitDir, workspace,
+                       {u"commit-tree"_s, tree, u"-m"_s, label.isEmpty() ? QStringLiteral("checkpoint") : label},
+                       &commit, error)) {
+        return {};
+    }
+    commit = commit.trimmed();
+
+    if (!runGitProcess(gitDir, workspace,
+                       {u"tag"_s, u"-f"_s, tagName(nextSequenceFor(gitDir, workspace), commit), commit},
+                       nullptr, error)) {
+        return {};
+    }
+    return commit;
 }
 } // namespace
 
@@ -185,7 +344,7 @@ bool CheckpointManager::isAvailable() const
         m_gitChecked = true;
         QProcess probe;
         probe.start(u"git"_s, QStringList{u"--version"_s});
-        m_gitAvailable = probe.waitForFinished(5000) && probe.exitCode() == 0;
+        m_gitAvailable = probe.waitForFinished(2000) && probe.exitCode() == 0;
         if (!m_gitAvailable) {
             m_unavailableReason = u"git was not found on PATH"_s;
         }
@@ -251,37 +410,7 @@ bool CheckpointManager::ensureRepository(QString *error) const
 
 void CheckpointManager::writeExcludes() const
 {
-    const QString excludePath = gitDir() + u"/info/exclude"_s;
-    QDir().mkpath(QFileInfo(excludePath).absolutePath());
-
-    QStringList lines = {
-        u"# Kate AI checkpoints. The project history is managed by its own repo."_s,
-        u"/.git/"_s,
-        u".kateai/project_graph.json"_s,
-        QString(),
-        u"# Common build and dependency directories."_s,
-        u"node_modules/"_s,
-        u"__pycache__/"_s,
-        u".venv/"_s,
-        u".mypy_cache/"_s,
-        u".pytest_cache/"_s,
-        u"target/"_s,
-        u".next/"_s,
-        u".cache/"_s,
-    };
-
-    // Reuse the project's own ignore rules so snapshots stay small.
-    QFile projectIgnore(m_workspace + u"/.gitignore"_s);
-    if (projectIgnore.open(QIODevice::ReadOnly | QIODevice::Text)) {
-        lines.append(QString());
-        lines.append(u"# From the project .gitignore"_s);
-        lines.append(QString::fromUtf8(projectIgnore.readAll()));
-    }
-
-    QFile file(excludePath);
-    if (file.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
-        file.write(lines.join(u'\n').toUtf8());
-    }
+    writeExcludesFor(gitDir(), m_workspace);
 }
 
 void CheckpointManager::runGitDetached(const QStringList &arguments, int timeoutMs)
@@ -328,50 +457,7 @@ void CheckpointManager::runGitDetached(const QStringList &arguments, int timeout
 
 bool CheckpointManager::runGit(const QStringList &arguments, QString *output, QString *error, int timeoutMs) const
 {
-    const QString dir = gitDir();
-    if (dir.isEmpty()) {
-        if (error) {
-            *error = u"No cache directory is available."_s;
-        }
-        return false;
-    }
-
-    QProcess git;
-    QProcessEnvironment environment = QProcessEnvironment::systemEnvironment();
-    environment.insert(u"GIT_DIR"_s, dir);
-    environment.insert(u"GIT_WORK_TREE"_s, m_workspace);
-    // Keep the user's global git config out of a repository they do not own.
-    environment.insert(u"GIT_CONFIG_NOSYSTEM"_s, u"1"_s);
-    environment.insert(u"GIT_TERMINAL_PROMPT"_s, u"0"_s);
-    git.setProcessEnvironment(environment);
-    git.setWorkingDirectory(m_workspace);
-
-    QStringList full;
-    full << u"-c"_s << u"user.name=Kate AI"_s << u"-c"_s << u"user.email=kateai@localhost"_s
-         << u"-c"_s << u"commit.gpgsign=false"_s << arguments;
-
-    git.start(u"git"_s, full);
-    if (!git.waitForFinished(timeoutMs)) {
-        git.kill();
-        git.waitForFinished(1000);
-        if (error) {
-            *error = u"git timed out."_s;
-        }
-        return false;
-    }
-    if (output) {
-        *output = QString::fromUtf8(git.readAllStandardOutput());
-    }
-    if (git.exitCode() != 0) {
-        if (error) {
-            *error = QString::fromUtf8(git.readAllStandardError()).trimmed();
-            if (error->isEmpty()) {
-                *error = QStringLiteral("git exited with code %1").arg(git.exitCode());
-            }
-        }
-        return false;
-    }
-    return true;
+    return runGitProcess(gitDir(), m_workspace, arguments, output, error, timeoutMs);
 }
 
 bool CheckpointManager::stageWorktree(QString *error) const
@@ -385,28 +471,7 @@ int CheckpointManager::nextSequence() const
 {
     QMutexLocker locker(&m_checkpointMutex);
 
-    QString output;
-    if (!runGit({u"for-each-ref"_s, u"--format=%(refname)"_s, TagNamespace}, &output, nullptr)) {
-        return 1;
-    }
-    int highest = 0;
-    const QStringList refs = output.split(u'\n', Qt::SkipEmptyParts);
-    for (const QString &ref : refs) {
-        if (!isTagName(ref)) {
-            continue;
-        }
-        const int lastSlash = ref.lastIndexOf(QLatin1Char('/'));
-        const int separator = ref.lastIndexOf(QLatin1Char('-'));
-        if (separator <= lastSlash) {
-            continue;
-        }
-        bool ok = false;
-        const int value = ref.mid(lastSlash + 1, separator - lastSlash - 1).toInt(&ok);
-        if (ok) {
-            highest = qMax(highest, value);
-        }
-    }
-    return highest + 1;
+    return nextSequenceFor(gitDir(), m_workspace);
 }
 
 QStringList CheckpointManager::checkpointHashes() const
@@ -434,42 +499,59 @@ QString CheckpointManager::createCheckpoint(const QString &label, QString *error
     QMutexLocker locker(&m_checkpointMutex);
 
     if (!isAvailable()) {
-        if (error && m_unavailableReason.isEmpty()) {
-            *error = u"Checkpoints are unavailable."_s;
+        if (error) {
+            *error = m_unavailableReason.isEmpty() ? u"Checkpoints are unavailable."_s : m_unavailableReason;
         }
         return {};
     }
 
-    // The exclude list is rewritten for every snapshot: a .gitignore that was
-    // added or changed after the cache repository was created would
-    // otherwise be ignored, and the snapshot would stage the whole tree.
-    writeExcludes();
-
-    if (!stageWorktree(error)) {
-        return {};
-    }
-
-    QString tree;
-    if (!runGit({u"write-tree"_s}, &tree, error)) {
-        return {};
-    }
-    tree = tree.trimmed();
-
-    // No -p: every snapshot is an independent root, so deleting an old tag
-    // really does let its commit be collected instead of pinning the chain.
-    QString commit;
-    if (!runGit({u"commit-tree"_s, tree, u"-m"_s, label.isEmpty() ? QStringLiteral("checkpoint") : label}, &commit, error)) {
-        return {};
-    }
-    commit = commit.trimmed();
-
-    if (!runGit({u"tag"_s, u"-f"_s, tagName(nextSequence(), commit), commit}, nullptr, error)) {
+    const QString commit = snapshotWorkspace(gitDir(), m_workspace, label, error);
+    if (commit.isEmpty()) {
         return {};
     }
 
     prune();
     Q_EMIT checkpointCreated(commit, label);
     return commit;
+}
+
+void CheckpointManager::createCheckpointAsync(const QString &label)
+{
+    // The availability probe and the one-time repository creation stay on the
+    // manager's thread: they touch the cached git flags, and the probe is a
+    // single cheap `git --version` after the first call.
+    if (!isAvailable()) {
+        Q_EMIT failed(m_unavailableReason.isEmpty() ? u"Checkpoints are unavailable."_s : m_unavailableReason);
+        return;
+    }
+
+    // Capture the state here rather than reading members from the worker:
+    // setWorkspace() may run on the UI thread while the snapshot is in git.
+    const QString dir = gitDir();
+    const QString workspace = m_workspace;
+    // Staging a big tree on the first snapshot can take seconds; running the
+    // git commands on the UI thread froze the editor for the whole time. The
+    // snapshot runs in the global thread pool instead, and the result is
+    // marshalled back to the manager's thread (prune() and the signals stay
+    // there, because prune() may start detached QProcess objects).
+    QThreadPool::globalInstance()->start([this, dir, workspace, label]() {
+        QString error;
+        QString commit;
+        {
+            // The shadow index is shared with the UI thread (diffs, restores);
+            // the same mutex that serialises those serialises this too.
+            QMutexLocker locker(&m_checkpointMutex);
+            commit = snapshotWorkspace(dir, workspace, label, &error);
+        }
+        QMetaObject::invokeMethod(this, [this, commit, label, error]() {
+            if (commit.isEmpty()) {
+                Q_EMIT failed(error.isEmpty() ? u"Checkpoints are unavailable."_s : error);
+                return;
+            }
+            prune();
+            Q_EMIT checkpointCreated(commit, label);
+        }, Qt::QueuedConnection);
+    });
 }
 
 void CheckpointManager::prune()

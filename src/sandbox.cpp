@@ -37,16 +37,80 @@ namespace KateAi
         for (int i = 0; i < normalized.size(); ++i) {
             const QChar c = normalized.at(i);
             if (c == u'*' && i + 1 < normalized.size() && normalized.at(i + 1) == u'*') {
-                regex += u".*"_s;
                 ++i;
                 if (i + 1 < normalized.size() && normalized.at(i + 1) == u'/') {
-                    regex += u"/?"_s;
+                    // "**/" matches zero or more whole directory segments. The
+                    // slash is only absent at the very start of the path, so
+                    // "**/.env" cannot match "foo.env": the dotfile has to be
+                    // its own path segment, the way gitignore reads the glob.
+                    regex += u"(?:.*/)?"_s;
                     ++i;
+                } else {
+                    regex += u".*"_s;
                 }
             } else if (c == u'*') {
                 regex += u"[^/]*"_s;
             } else if (c == u'?') {
                 regex += u"[^/]"_s;
+            } else if (c == u'[') {
+                // A character class, e.g. "*.key[0-9]". Without this branch
+                // the '[' was escaped as a literal and a user deny glob with
+                // a class silently matched nothing.
+                int close = -1;
+                // A ']' directly after '[' is a literal member, in glob and
+                // in PCRE alike, so the search for the class end starts
+                // behind it.
+                int j = i + 1;
+                if (j < normalized.size() && normalized.at(j) == u']') {
+                    ++j;
+                }
+                for (; j < normalized.size(); ++j) {
+                    if (normalized.at(j) == u']') {
+                        close = j;
+                        break;
+                    }
+                    if (normalized.at(j) == u'\\' && j + 1 < normalized.size()) {
+                        ++j;
+                    }
+                }
+                if (close < 0) {
+                    // No closing bracket: a literal '[' after all.
+                    regex += u"\\["_s;
+                    continue;
+                }
+                QString members = normalized.mid(i + 1, close - i - 1);
+                const bool negated = !members.isEmpty() && (members.at(0) == u'!' || members.at(0) == u'^');
+                if (negated) {
+                    members = members.mid(1);
+                }
+                QString mapped;
+                for (int k = 0; k < members.size(); ++k) {
+                    const QChar mc = members.at(k);
+                    if (mc == u'\\' && k + 1 < members.size()) {
+                        mapped += u'\\';
+                        mapped += members.at(k + 1);
+                        ++k;
+                        continue;
+                    }
+                    // A '-' stays: PCRE reads "a-z" as a range exactly the
+                    // way glob does. Everything else the regex engine gives a
+                    // meaning to is escaped; ']' cannot occur here except as
+                    // the first member, which PCRE also reads as literal.
+                    if (QStringLiteral(".^$()+{}|?*[]").contains(mc)) {
+                        mapped += u'\\';
+                    }
+                    mapped += mc;
+                }
+                if (mapped.isEmpty()) {
+                    // "[]" and "[!]": the class says nothing, so the '[' is a
+                    // literal like any unmatched one.
+                    regex += u"\\["_s;
+                    continue;
+                }
+                regex += negated ? u"[^"_s : u"["_s;
+                regex += mapped;
+                regex += u']';
+                i = close;
             } else if (QStringLiteral(".^$+()[]{}|\\").contains(c)) {
                 regex += u'\\';
                 regex += c;
@@ -193,10 +257,19 @@ static bool matchGlobRegex(const QString &regex, const QString &haystack, QHash<
     {
         const QString root = QDir::cleanPath(m_workspaceRoot);
         const QString path = QDir::cleanPath(absolutePath);
+#if defined(Q_OS_WIN) || defined(Q_OS_MACOS)
+        // These filesystems are case-insensitive: a path that differs from the
+        // workspace root only in casing still names a file inside it.
+        if (path.compare(root, Qt::CaseInsensitive) == 0) {
+            return true;
+        }
+        return path.startsWith(root + u'/', Qt::CaseInsensitive);
+#else
         if (path == root) {
             return true;
         }
         return path.startsWith(root + u'/');
+#endif
     }
 
 QString Sandbox::normalizePath(const QString &path, QString *error, bool forWrite) const
@@ -229,7 +302,10 @@ QString Sandbox::normalizePath(const QString &path, QString *error, bool forWrit
     }
 
     // Resolve symlinks safely using canonicalFilePath, then verify the result.
-    // This avoids TOCTOU by checking the final resolved path, not the intermediate.
+    // This narrows the classic escape (workspace/link -> /etc) to the window
+    // between this check and the tool's own open(); a fully race-free check
+    // would need the tool to open the path through an O_NOFOLLOW-style
+    // handle, which the document bridge's Kate integration cannot offer.
     QFileInfo fileInfo(absolute);
     QString canonical = fileInfo.canonicalFilePath();
     if (!canonical.isEmpty()) {
@@ -393,9 +469,11 @@ static bool hasOutputRedirection(const QString &command)
     return false;
 }
 
-// Flags that make an otherwise read-only command write to disk. Only commands
-// already on the read-only list are checked against this, so a flag can never
-// pull a new command onto the allowlist - it can only take one off it.
+// Flags that disqualify an otherwise read-only command from auto-approval.
+// They either write to disk, or (tail -f) never terminate, which would burn the
+// whole timeout of a turn that was approved without a second thought. Only
+// commands already on the read-only list are checked against this, so a flag
+// can never pull a new command onto the allowlist - it can only take one off it.
 static bool hasWriteFlag(const QString &primary, const QString &command)
 {
     static const QHash<QString, QStringList> writeFlags = {
@@ -403,7 +481,10 @@ static bool hasWriteFlag(const QString &primary, const QString &command)
          {u"-delete"_s, u"-exec"_s, u"-execdir"_s, u"-ok"_s, u"-okdir"_s,
           u"-fls"_s, u"-fprint"_s, u"-fprint0"_s, u"-fprintf"_s}},
         {u"sort"_s, {u"-o"_s, u"--output"_s}},
-        {u"date"_s, {u"-f"_s, u"--file"_s}},
+        // -s/--set writes the system clock; -f/--file only reads dates from a
+        // file and stays read-only.
+        {u"date"_s, {u"-s"_s, u"--set"_s}},
+        {u"tail"_s, {u"-f"_s, u"-F"_s, u"--follow"_s}},
     };
     const QStringList flags = writeFlags.value(primary);
     if (flags.isEmpty()) {
@@ -505,11 +586,13 @@ bool Sandbox::isAlwaysDeniedCommand(const QString &command) const
     const QString cmd = command.trimmed();
     // The rm branch covers a recursive or forced removal of the filesystem
     // root, of everything directly below it ("rm -rf /*"), or of the home
-    // directory ("rm -rf ~", "rm -rf ~/…"). The flags and --no-preserve-root
-    // may appear in any order. Deeper absolute paths are not matched: they
-    // are a normal cleanup the permission prompt can judge.
+    // directory ("rm -rf ~", "rm -rf ~/…"), with the root written bare or
+    // quoted ("rm -rf /", "rm -rf \"/\""). The flags - the short forms, the
+    // long forms --force/--recursive, and --no-preserve-root - may appear in
+    // any order and any combination. Deeper absolute paths are not matched:
+    // they are a normal cleanup the permission prompt can judge.
     static const QRegularExpression denied(
-        uR"((rm\s+((-[a-zA-Z]*[rf][a-zA-Z]*|--no-preserve-root)\s+)+(/(\s|$|\*+)|~(/\S*)?(\s|$)))|(\bmkfs\b)|(\bdd\s+.*\bof=/dev/)|(:\(\)\s*\{\s*:\|:&\s*;\s*\})|(\b(curl|wget)\b.*\|\s*(?:sudo\s+)?(sh|bash|zsh|fish|dash|ksh|cmd|cmd\.exe|powershell|powershell\.exe|pwsh|python[0-9.]*|perl|ruby|node)\b)|(\bformat\s+[a-zA-Z]:)|(\bdiskpart\b)|(\brmdir\s+/s\s+/q\s+[a-zA-Z]:\\)|(\bRemove-Item\s+.*-Recurse.*[A-Z]:\\))"_s,
+        uR"((rm\s+((?:-[a-zA-Z]*[rf][a-zA-Z]*|--no-preserve-root|--force|--recursive)\s+)+(/(\s|$|\*+)|["']/["']?(\s|$|\*+)|~(/\S*)?(\s|$)))|(\bmkfs\b)|(\bdd\s+.*\bof=/dev/)|(:\(\)\s*\{\s*:\|:&\s*;\s*\})|(\b(curl|wget)\b.*\|\s*(?:sudo\s+)?(sh|bash|zsh|fish|dash|ksh|cmd|cmd\.exe|powershell|powershell\.exe|pwsh|python[0-9.]*|perl|ruby|node)\b)|(\bformat\s+[a-zA-Z]:)|(\bdiskpart\b)|(\brmdir\s+/s\s+/q\s+[a-zA-Z]:\\)|(\bRemove-Item\s+.*-Recurse.*[A-Z]:\\))"_s,
         QRegularExpression::CaseInsensitiveOption);
     return denied.match(cmd).hasMatch();
 }
@@ -543,7 +626,7 @@ bool Sandbox::commandTouchesDeniedPath(const QString &command) const
         } else if (c == u'"' && !inSingleQuote) {
             inDoubleQuote = !inDoubleQuote;
             currentToken.append(c);
-        } else if ((c.isSpace() || c == u';' || c == u'|' || c == u'&' || c == u'<') && !inSingleQuote && !inDoubleQuote) {
+        } else if ((c.isSpace() || c == u';' || c == u'|' || c == u'&' || c == u'<' || c == u'>') && !inSingleQuote && !inDoubleQuote) {
             if (!currentToken.isEmpty()) {
                 tokens.append(currentToken);
                 currentToken.clear();
@@ -553,6 +636,10 @@ bool Sandbox::commandTouchesDeniedPath(const QString &command) const
                 ++i;
             } else if (c == u'&' && i + 1 < command.size() && command.at(i + 1) == u'&') {
                 tokens.append(QString(u"&&"));
+                ++i;
+            } else if (c == u'>' && i + 1 < command.size() && command.at(i + 1) == u'>') {
+                // An output redirection is a delimiter too: ">>file" must not
+                // glue the arrows onto the path and hide a deny-glob hit.
                 ++i;
             }
         } else {
@@ -564,20 +651,43 @@ bool Sandbox::commandTouchesDeniedPath(const QString &command) const
     }
     
     for (const QString &token : tokens) {
-        if (token.startsWith(u'-')) {
-            continue; // a flag is not a path
-        }
         QString candidate = token;
-        // Strip surrounding quotes
-        if ((candidate.startsWith(u'\'') && candidate.endsWith(u'\'')) ||
-            (candidate.startsWith(u'"') && candidate.endsWith(u'"'))) {
-            candidate = candidate.mid(1, candidate.size() - 2);
+        // A flag is not a path, but its value can name one: "--config=.env"
+        // and "-I/path/.env" would slip the deny scan entirely if every
+        // '-'-prefixed token were skipped. The part after '=' (and after ':'
+        // for include-style flags) is checked; the flag itself is not.
+        if (candidate.startsWith(u'-')) {
+            const int eq = candidate.indexOf(u'=');
+            const int colon = candidate.indexOf(u':');
+            int valueStart = -1;
+            if (eq >= 0 && (colon < 0 || eq < colon)) {
+                valueStart = eq + 1;
+            } else if (colon >= 0) {
+                valueStart = colon + 1;
+            }
+            if (valueStart < 0 || valueStart >= candidate.size()) {
+                continue;
+            }
+            candidate = candidate.mid(valueStart);
+        }
+        // Strip quote characters wherever they appear, not only as a matched
+        // surrounding pair: "~/"x"" and 'a'"b" spellings must not defeat the
+        // scan by mixing quotes. Over-blocking is the safe direction here.
+        candidate.remove(u'"');
+        candidate.remove(u'\'');
+        if (candidate.isEmpty()) {
+            continue;
         }
         if (candidate == u"~"_s) {
             candidate = QDir::homePath();
         } else if (candidate.startsWith(u"~/"_s)) {
             candidate = QDir::homePath() + candidate.mid(1);
         }
+        // $HOME names the same directory as "~", so a denied path must not
+        // slip past the check by spelling it with a variable. Other variables
+        // cannot be resolved here; those tokens are checked as written.
+        static const QRegularExpression homeVar(uR"(\$\{HOME\}|\$HOME(?![A-Za-z0-9_]))"_s);
+        candidate.replace(homeVar, QDir::homePath());
         // Check the path as written, then the symlink-resolved form, so a denied
         // name is caught even when the file does not exist yet.
         const QString literal = QDir::cleanPath(QFileInfo(QDir(m_workspaceRoot), candidate).absoluteFilePath());

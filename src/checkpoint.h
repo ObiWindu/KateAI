@@ -55,6 +55,10 @@ public:
     }
 
     QString createCheckpoint(const QString &label, QString *error = nullptr);
+    // The same snapshot, but the git commands run in the thread pool so a
+    // large first `git add` cannot freeze the UI. The outcome arrives through
+    // checkpointCreated() or failed(); there is no return value.
+    void createCheckpointAsync(const QString &label);
     QList<CheckpointInfo> checkpoints() const;
     // Writes the checkpoint's file contents back into the workspace.
     bool restoreCheckpoint(const QString &id, QString *error = nullptr);

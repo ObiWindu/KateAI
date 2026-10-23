@@ -8,8 +8,6 @@
 #include "agenttext.h"
 #include "chattheme.h"
 
-#include "agenttext.h"
-
 #include <KLocalizedString>
 
 #include <QHBoxLayout>
@@ -198,6 +196,10 @@ void SubtaskWidget::startAgent(const QString &agentName, const QString &modeId, 
     m_streamedMessage.clear();
     m_currentIsError = false;
     m_current->clear();
+    // A fresh run starts a fresh log; the previous run's steps left with its
+    // card.
+    m_activityLog.clear();
+    rebuildActivityLog();
     m_current->setVisible(false);
     updateHeader();
     updateElapsed();
@@ -208,20 +210,15 @@ void SubtaskWidget::startAgent(const QString &agentName, const QString &modeId, 
 void SubtaskWidget::appendActivity(const QString &line, bool isError)
 {
     ++m_stepCount;
-    const QString color = isError ? ChatTheme::danger() : ChatTheme::textMuted();
-    QString html = QStringLiteral("<div style=\"color:%1\">%2</div>").arg(color, line.toHtmlEscaped());
-    if (m_activity->document()->characterCount() > MaxActivityChars) {
-        m_activity->setHtml(i18n("… earlier activity trimmed"));
+    // The log is one markdown document rebuilt from the accumulated lines: a
+    // sub-agent that summarises its step with emphasis, inline code or a
+    // fenced block renders, instead of the card showing literal asterisks
+    // and backticks. Capped by lines first, then by characters.
+    m_activityLog.append(qMakePair(line, isError));
+    while (m_activityLog.size() > MaxActivityLines) {
+        m_activityLog.removeFirst();
     }
-    // insertHtml at the end keeps the newest line visible without scrolling.
-    QTextCursor cursor = m_activity->textCursor();
-    cursor.movePosition(QTextCursor::End);
-    if (!m_activity->document()->isEmpty() && m_activity->document()->characterCount() > 1) {
-        cursor.insertHtml(html);
-    } else {
-        m_activity->setHtml(html);
-    }
-    m_activity->verticalScrollBar()->setValue(m_activity->verticalScrollBar()->maximum());
+    rebuildActivityLog();
     // Mirror the step onto the card itself: the log below is opt-in, so without
     // this line a running card reported a step count and nothing else.
     m_currentLine = line;
@@ -230,6 +227,28 @@ void SubtaskWidget::appendActivity(const QString &line, bool isError)
     updateHeader();
     updateElapsed();
     reflowNow();
+}
+
+void SubtaskWidget::rebuildActivityLog()
+{
+    auto markdown = [this] {
+        QString joined;
+        for (const auto &entry : std::as_const(m_activityLog)) {
+            if (entry.second) {
+                joined += u"**%1** %2\n"_s.arg(i18n("Error:"), entry.first);
+            } else {
+                joined += entry.first + u'\n';
+            }
+        }
+        return joined;
+    };
+    QString joined = markdown();
+    while (joined.size() > MaxActivityChars && m_activityLog.size() > 1) {
+        m_activityLog.removeFirst();
+        joined = markdown();
+    }
+    m_activity->setDocument(makeMarkdownDocument(closeMarkdown(joined), ChatTheme::messageCss()));
+    m_activity->verticalScrollBar()->setValue(m_activity->verticalScrollBar()->maximum());
 }
 
 void SubtaskWidget::appendMessageDelta(const QString &delta)

@@ -27,7 +27,13 @@ QString WorkspaceLocks::normalize(const QString &path)
     // cleanPath leaves a leading "./" off but keeps the relative form; make it
     // absolute so the same file always hashes to the same key.
     const QFileInfo info(cleaned);
-    return info.isAbsolute() ? cleaned : QDir::current().absoluteFilePath(cleaned);
+    QString absolute = info.isAbsolute() ? cleaned : QDir::current().absoluteFilePath(cleaned);
+    // A file reached through a symlink and the same file reached directly
+    // must share one lock, or two agents could hold "different" locks on one
+    // file. Only an existing path has a canonical form; a not-yet-created
+    // file keeps its cleaned absolute spelling.
+    const QString canonical = QFileInfo(absolute).canonicalFilePath();
+    return canonical.isEmpty() ? absolute : canonical;
 }
 
 bool WorkspaceLocks::tryAcquire(const QString &path, const QString &owner)

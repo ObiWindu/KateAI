@@ -199,6 +199,25 @@ private Q_SLOTS:
         QVERIFY(Sandbox::globMatch(u"**/.ssh/**"_s, u"/home/me/.ssh/id_rsa"_s));
     }
 
+    void globCharacterClasses()
+    {
+        // A deny glob with a character class used to have its brackets
+        // escaped as literals and silently match nothing.
+        QVERIFY(Sandbox::globMatch(u"**/*.key[0-9]"_s, u"/home/me/backup.key5"_s));
+        QVERIFY(Sandbox::globMatch(u"**/*.key[0-9]"_s, u"backup.key5"_s));
+        QVERIFY(!Sandbox::globMatch(u"**/*.key[0-9]"_s, u"/home/me/backup.keyx"_s));
+        // Negation, ranges, and an unmatched bracket. A negated class still
+        // requires a character, so "confi" alone cannot match "confi[!g]".
+        QVERIFY(Sandbox::globMatch(u"**/confi[!g]"_s, u"/home/me/confiv"_s));
+        QVERIFY(!Sandbox::globMatch(u"**/confi[!g]"_s, u"/home/me/config"_s));
+        QVERIFY(!Sandbox::globMatch(u"**/confi[!g]"_s, u"/home/me/confi"_s));
+        QVERIFY(Sandbox::globMatch(u"**/key[a-c]x"_s, u"/home/me/keybx"_s));
+        // A ']' right after '[' is a literal member.
+        QVERIFY(Sandbox::globMatch(u"**/x[]y]z"_s, u"/home/me/x]z"_s));
+        // No closing bracket: a literal '['.
+        QVERIFY(Sandbox::globMatch(u"**/a[b"_s, u"/home/me/a[b"_s));
+    }
+
     void symlinkEscapeIsBlocked()
     {
         QTemporaryDir dir;
@@ -318,12 +337,79 @@ private Q_SLOTS:
         QVERIFY(box.commandTouchesDeniedPath(u"cat backup.pem"_s));
         QVERIFY(box.commandTouchesDeniedPath(u"head -n 5 server.key"_s));
         QVERIFY(box.commandTouchesDeniedPath(u"grep -rn token /home/me/.netrc"_s));
+        // A flag's value names a denied path too: skipping every '-'
+        // prefixed token let --flag=/path/.env walk around the globs.
+        QVERIFY(box.commandTouchesDeniedPath(u"tool --config=/home/me/.env"_s));
+        QVERIFY(box.commandTouchesDeniedPath(u"tool --input=x/.ssh/id_rsa"_s));
+        QVERIFY(box.commandTouchesDeniedPath(u"tool --config='~/.ssh/id_rsa'"_s));
         // Ordinary work must keep running.
         QVERIFY(!box.commandTouchesDeniedPath(u"ls -la"_s));
         QVERIFY(!box.commandTouchesDeniedPath(u"cat src/main.cpp"_s));
         QVERIFY(!box.commandTouchesDeniedPath(u"git status"_s));
         QVERIFY(!box.commandTouchesDeniedPath(u"cat CMakeLists.txt | grep Qt"_s));
         QVERIFY(!box.commandTouchesDeniedPath(u"git commit -m 'handle redirect'"_s));
+        QVERIFY(!box.commandTouchesDeniedPath(u"tool --config=src/main.cpp"_s));
+    }
+
+    void denyGlobsMatchWholeSegmentsOnly()
+    {
+        // "**/.env" used to compile so that every "*.env" file matched: the
+        // agent could not read "config/prod.env" although the rule only means
+        // the dotfile. The glob now demands a whole path segment.
+        Sandbox box(QDir::tempPath(), SandboxProfile::Off);
+        QString error;
+        QVERIFY(box.allowsRead(u"foo.env"_s, &error));
+        QVERIFY(box.allowsRead(u"config/prod.env"_s, &error));
+        QVERIFY(!box.allowsRead(u".env"_s, &error));
+        QVERIFY(!box.allowsRead(u"config/.env"_s, &error));
+        QVERIFY(box.allowsRead(u"foo.ssh"_s, &error));
+        QVERIFY(!box.allowsRead(u".ssh/config"_s, &error));
+        QVERIFY(!Sandbox::globMatch(u"**/.env"_s, u"/home/user/foo.env"_s));
+        QVERIFY(Sandbox::globMatch(u"**/.env"_s, u"/home/user/.env"_s));
+    }
+
+    void rootRemovalWithLongFlagsAndQuotesIsDenied()
+    {
+        Sandbox box(QDir::tempPath(), SandboxProfile::Workspace);
+        // Long flags and a quoted root used to slip past the always-deny
+        // regex, which only knew the short flag forms and a bare "/".
+        QVERIFY(box.isAlwaysDeniedCommand(u"rm --force /"_s));
+        QVERIFY(box.isAlwaysDeniedCommand(u"rm --recursive --force /"_s));
+        QVERIFY(box.isAlwaysDeniedCommand(u"rm -rf \"/\""_s));
+        QVERIFY(box.isAlwaysDeniedCommand(u"rm -rf '/*'"_s));
+        // Deeper paths still belong to the permission prompt.
+        QVERIFY(!box.isAlwaysDeniedCommand(u"rm --verbose notes.txt"_s));
+        QVERIFY(!box.isAlwaysDeniedCommand(u"rm -rf /etc"_s));
+    }
+
+    void dateSetAndTailFollowAreNotReadOnly()
+    {
+        Sandbox box(QDir::tempPath(), SandboxProfile::Workspace);
+        // date -s writes the system clock; tail -f never terminates. Neither
+        // may be auto-approved. date -f only reads dates from a file and
+        // stays read-only.
+        QVERIFY(box.isReadOnlyCommand(u"date"_s));
+        QVERIFY(box.isReadOnlyCommand(u"date -f stamps.txt"_s));
+        QVERIFY(!box.isReadOnlyCommand(u"date -s 12:00"_s));
+        QVERIFY(!box.isReadOnlyCommand(u"date --set 12:00"_s));
+        QVERIFY(!box.isReadOnlyCommand(u"tail -f debug.log"_s));
+        QVERIFY(box.isReadOnlyCommand(u"tail -n 20 debug.log"_s));
+    }
+
+    void redirectionTargetsCannotReachDeniedPaths()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        Sandbox box(dir.path(), SandboxProfile::Workspace);
+        // ">>" used to glue onto the following path, so a redirection aimed
+        // at a denied file escaped the check; $HOME did the same.
+        QVERIFY(box.commandTouchesDeniedPath(u"echo x >>~/.ssh/authorized_keys"_s));
+        QVERIFY(box.commandTouchesDeniedPath(u"echo x > ~/.ssh/authorized_keys"_s));
+        QVERIFY(box.commandTouchesDeniedPath(u"cat $HOME/.ssh/id_rsa"_s));
+        QVERIFY(box.commandTouchesDeniedPath(u"cat ${HOME}/.netrc"_s));
+        // Ordinary redirection targets keep running.
+        QVERIFY(!box.commandTouchesDeniedPath(u"echo x >> notes.txt"_s));
+        QVERIFY(!box.commandTouchesDeniedPath(u"echo done > build.log"_s));
     }
 
     void wrapCommandRefusesDeniedPaths()

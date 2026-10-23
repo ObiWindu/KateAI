@@ -932,6 +932,10 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
 
     m_maxSubtaskDepth = new QSpinBox(safetyWidget);
     m_maxSubtaskDepth->setRange(0, 5);
+    // The setting counts nesting levels and has a floor of one: 0 and 1 both
+    // allow subtasks but no grandchildren, 2 adds grandchildren, and so on.
+    m_maxSubtaskDepth->setToolTip(
+        i18n("How many levels of subtasks may be nested. The minimum is one level; subtasks cannot be turned off."));
     safetyForm->addRow(i18n("Max subtask depth:"), m_maxSubtaskDepth);
 
     m_maxParallelSubtasks = new QSpinBox(safetyWidget);

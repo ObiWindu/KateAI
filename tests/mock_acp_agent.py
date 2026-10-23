@@ -476,7 +476,16 @@ def handle_prompt(request_id, params):
     session_update(
         {
             "sessionUpdate": "plan",
-            "entries": [{"content": "Look around", "priority": "high", "status": "completed"}],
+            "entries": [
+                # The ACP spec form: content is an array of content blocks.
+                {"content": [{"type": "text", "text": "Look around"}], "priority": "high", "status": "completed"},
+                # "in-progress" hyphenated spelling some agents send.
+                {"content": [{"type": "text", "text": "Fix the bug"}], "status": "in-progress"},
+                # The shorthand form: a bare string plus another status spelling.
+                {"content": "Tell the user", "status": "started"},
+                # An entry with no text at all: it must be skipped, not rendered.
+                {"content": [], "status": "pending"},
+            ],
         }
     )
     session_update(

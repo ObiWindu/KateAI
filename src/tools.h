@@ -75,7 +75,6 @@ private:
     bool startBashProcess(const QJsonObject &args, QString *program, QStringList *programArgs, QString *error) const;
     // Turns captured output plus an exit status into a tool result.
     ToolResult finishBashOutput(const QString &output, int exitCode, bool normalExit) const;
-    ToolResult finishBash(QProcess &process) const;
 
     Sandbox m_sandbox;
     DocumentBridge *m_bridge = nullptr;
@@ -85,7 +84,17 @@ private:
     // cancellation can find the right process, plus the output captured from
     // each so far (the final result is the whole stream, not only the tail).
     QHash<QString, QProcess *> m_bashProcesses;
-    QHash<QString, QString> m_bashAccumulated;
+    // The captured output of a running command. The head and the tail are
+    // kept, the middle is dropped once the ceiling is hit: the tail carries
+    // what the command last said, which is the half the model most needs.
+    struct BashBuffer {
+        QString head;
+        QString tail;
+        int droppedChars = 0;
+        void append(const QString &chunk, int cap);
+        QString view() const;
+    };
+    QHash<QString, BashBuffer> m_bashAccumulated;
     // Call ids whose timeout timer fired. The kill only makes the process
     // report a failure; without this marker the finished result looks like an
     // ordinary crash and the model never learns the command was cut short.

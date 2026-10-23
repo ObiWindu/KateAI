@@ -8,6 +8,8 @@
 #include "types.h"
 
 #include <QElapsedTimer>
+#include <QList>
+#include <QPair>
 #include <QPointer>
 #include <QWidget>
 
@@ -64,6 +66,10 @@ private:
     void updateElapsed();
     void updateCurrentActivity();
     void setActivityVisible(bool visible);
+    // Re-renders the activity log as one markdown document from the
+    // accumulated lines, so a sub-agent that summarises its steps with
+    // emphasis or code renders instead of showing literal markup.
+    void rebuildActivityLog();
 
 protected:
     void resizeEvent(QResizeEvent *event) override;
@@ -75,6 +81,10 @@ protected:
     // The most recent step the sub-agent reported, kept in full so it can be
     // re-elided whenever the card is resized.
     QString m_currentLine;
+    // The activity log's lines with their error flag, the source the log is
+    // re-rendered from. Capped, so a chatty sub-agent cannot grow the card
+    // without bound.
+    QList<QPair<QString, bool>> m_activityLog;
     QString m_streamedMessage;
     bool m_currentIsError = false;
     bool m_running = false;

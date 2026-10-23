@@ -142,6 +142,18 @@ target_link_libraries(test_livecards PRIVATE kateai_core Qt6::Test Qt6::Widgets)
 target_compile_definitions(test_livecards PRIVATE TRANSLATION_DOMAIN="kateai")
 add_test(NAME test_livecards COMMAND test_livecards -platform offscreen)
 
+# The stop button and the new-thread button, driven through a real AgentLoop
+# against the mock LLM server. Same source list as test_livecards.
+add_executable(test_stopbehavior test_stopbehavior.cpp ../src/chatwidget.cpp ../src/toolcallwidget.cpp
+    ../src/promptedit.cpp ../src/permissionbar.cpp ../src/subtaskwidget.cpp
+    ../src/suggestionwidget.cpp ../src/questionwidget.cpp ../src/todowidget.cpp ../src/edittracker.cpp
+    ../src/turnstatus.cpp ../src/chattheme.cpp)
+target_link_libraries(test_stopbehavior PRIVATE kateai_core Qt6::Test Qt6::Widgets)
+target_compile_definitions(test_stopbehavior PRIVATE TRANSLATION_DOMAIN="kateai")
+add_test(NAME test_stopbehavior
+         COMMAND test_stopbehavior -platform offscreen
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
 # A theme change has to reach the chat UI: the panel, the cards and the
 # transcript repaint from the installed palette. Same source list as
 # test_overflow, which also builds a full ChatWidget.

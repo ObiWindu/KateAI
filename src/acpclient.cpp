@@ -1402,6 +1402,23 @@ void AcpClient::handleNotification(const QJsonObject &message)
     }
 }
 
+// A plan entry's content is an array of content blocks in the ACP spec, but
+// agents in the wild also send a single block or a bare string (see
+// toolContentText() for the same story on tool content). Every variant has to
+// end up as the step's description, or the todo list renders blank rows.
+static QString planEntryText(const QJsonValue &content)
+{
+    QStringList parts;
+    const QJsonArray blocks = content.isArray() ? content.toArray() : QJsonArray{content};
+    for (const QJsonValue &item : blocks) {
+        const QString text = contentBlockText(item);
+        if (!text.isEmpty()) {
+            parts.append(text);
+        }
+    }
+    return parts.join(u' ').trimmed();
+}
+
 void AcpClient::handleSessionUpdate(const QJsonObject &update)
 {
     const QString kind = update.value(u"sessionUpdate"_s).toString();
@@ -1431,12 +1448,21 @@ void AcpClient::handleSessionUpdate(const QJsonObject &update)
         int index = 0;
         for (const QJsonValue &value : entries) {
             const QJsonObject entry = value.toObject();
+            const QString description = planEntryText(entry.value(u"content"_s));
+            // An entry without any text carries no information; keeping it
+            // would render a row of bare glyphs in the todo list.
+            if (description.isEmpty()) {
+                continue;
+            }
             QJsonObject step;
             step.insert(u"id"_s, QString::number(++index));
-            step.insert(u"description"_s, entry.value(u"content"_s).toString());
-            const QString status = entry.value(u"status"_s).toString();
-            step.insert(u"completed"_s, status == u"completed"_s);
-            step.insert(u"inProgress"_s, status == u"in_progress"_s);
+            step.insert(u"description"_s, description);
+            // The statuses are "pending", "in_progress" and "completed" in the
+            // spec; agents also send spellings like "in-progress", "started"
+            // or "done".
+            const QString status = entry.value(u"status"_s).toString().toLower().replace(u'-', u'_');
+            step.insert(u"completed"_s, status == u"completed"_s || status == u"done"_s);
+            step.insert(u"inProgress"_s, status == u"in_progress"_s || status == u"started"_s);
             katePlan.append(step);
         }
         m_currentPlan = katePlan;
@@ -1453,7 +1479,10 @@ void AcpClient::handleSessionUpdate(const QJsonObject &update)
         m_liveTools.insert(request.toolCallId, request);
         QJsonObject function;
         function.insert(u"name"_s, request.toolName);
-        function.insert(u"arguments"_s, request.details.isEmpty() ? u"{}"_s : request.details);
+        // Only a JSON object is a valid arguments payload: extracted plain
+        // text (a content-block rawInput) would fail every parse downstream,
+        // so it is not passed off as arguments.
+        function.insert(u"arguments"_s, request.details.startsWith(u'{') ? request.details : u"{}"_s);
         QJsonObject call;
         call.insert(u"id"_s, request.toolCallId);
         call.insert(u"type"_s, u"function"_s);
@@ -1545,7 +1574,18 @@ PermissionRequest AcpClient::permissionFromToolCall(const QJsonObject &toolCall)
     // tool names here. The ACP kind is the protocol-level statement of what
     // the call does, and a diff content block proves the agent edited text.
     request.mutatesFiles = kind == u"edit"_s || kind == u"write"_s || kind == u"delete"_s;
-    request.details = jsonText(toolCall.value(u"rawInput"_s));
+    const QJsonValue rawInput = toolCall.value(u"rawInput"_s);
+    if (rawInput.isObject()) {
+        // The usual shape: the tool's arguments as a JSON object, shown as-is.
+        request.details = jsonText(rawInput);
+    } else {
+        // rawInput is arbitrary JSON in the ACP spec. Some agents send a
+        // content-block array or a bare string instead; serialising an empty
+        // array would put "[]" on the running card in place of what the tool
+        // is doing. Text blocks are extracted; anything else stays empty and
+        // the card falls back to its title.
+        request.details = toolContentText(rawInput);
+    }
 
     const QJsonArray locations = toolCall.value(u"locations"_s).toArray();
     if (!locations.isEmpty()) {
@@ -2094,6 +2134,9 @@ void AcpClient::handleTerminalRelease(const QJsonValue &id, const QJsonObject &p
     const QString terminalId = params.value(u"terminalId"_s).toString();
     Terminal *term = m_terminals.take(terminalId);
     if (!term || !term->process) {
+        // The entry was taken out of the map, so it must be freed even when
+        // the command has to fail.
+        delete term;
         replyError(id, kServerError, u"Unknown terminal '%1'."_s.arg(terminalId));
         return;
     }

@@ -1304,6 +1304,18 @@ bool save(const QString &workspace, const QList<McpServerConfig> &servers, QStri
         }
         return false;
     }
+    // The file can carry authorization headers for HTTP servers, so it must
+    // not be readable by every account on the machine. The umask usually
+    // leaves it 644; it is tightened to the owner only, the same way the
+    // settings file is after a save.
+    {
+        QFile written(path);
+        const QFileDevice::Permissions wanted = QFileDevice::ReadOwner | QFileDevice::WriteOwner;
+        if (written.exists()
+            && ((written.permissions() & QFileDevice::ReadGroup) || (written.permissions() & QFileDevice::ReadOther))) {
+            written.setPermissions(wanted);
+        }
+    }
     return true;
 }
 

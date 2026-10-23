@@ -184,7 +184,22 @@ private Q_SLOTS:
         QCOMPARE(toolsStarted, 1);
         QCOMPARE(toolsFinished, 1);
         QCOMPARE(toolOutput, u"ok"_s);
-        QCOMPARE(plan.size(), 1);
+        // The plan carries the ACP spec form (content-block arrays) and the
+        // status spellings seen in the wild; every variant has to reach the
+        // todo list as a readable step. The textless entry is skipped.
+        QCOMPARE(plan.size(), 3);
+        const QJsonObject first = plan.at(0).toObject();
+        QCOMPARE(first.value(u"description"_s).toString(), u"Look around"_s);
+        QVERIFY(first.value(u"completed"_s).toBool());
+        QVERIFY(!first.value(u"inProgress"_s).toBool());
+        const QJsonObject second = plan.at(1).toObject();
+        QCOMPARE(second.value(u"description"_s).toString(), u"Fix the bug"_s);
+        QVERIFY(second.value(u"inProgress"_s).toBool());
+        QVERIFY(!second.value(u"completed"_s).toBool());
+        const QJsonObject third = plan.at(2).toObject();
+        QCOMPARE(third.value(u"description"_s).toString(), u"Tell the user"_s);
+        QVERIFY(third.value(u"inProgress"_s).toBool());
+        QVERIFY(!third.value(u"completed"_s).toBool());
         QCOMPARE(client.sessionId(), u"sess_kateai_test"_s);
         client.stop();
     }

@@ -209,9 +209,14 @@ private Q_SLOTS:
         QString reason;
         // Accept edits must not silently allow an arbitrary MCP tool...
         QCOMPARE(policy.evaluate(u"mcp__mock__other"_s, {}, sandbox, &reason), PermissionPolicy::Verdict::Ask);
-        // ...but a readOnlyHint tool is free, and alwaysAllow works.
+        // ...but a readOnlyHint tool follows the mode's read-tool rule, and
+        // alwaysAllow works.
         QCOMPARE(policy.evaluate(u"mcp__mock__echo"_s, {}, sandbox, &reason), PermissionPolicy::Verdict::Allow);
         QCOMPARE(policy.evaluate(u"mcp__mock__boom"_s, {}, sandbox, &reason), PermissionPolicy::Verdict::Allow);
+        // In Ask mode the hint alone is not trusted to skip the prompt.
+        PermissionPolicy asking(PermissionMode::Ask);
+        asking.setReadOnlyTools({u"mcp__mock__echo"_s});
+        QCOMPARE(asking.evaluate(u"mcp__mock__echo"_s, {}, sandbox, &reason), PermissionPolicy::Verdict::Ask);
     }
 
     void disabledServersAreNotStarted()

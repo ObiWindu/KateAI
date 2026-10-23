@@ -216,8 +216,9 @@ Settings SettingsStore::load()
     s.maxEditorContextLength = qBound(1, s.maxEditorContextLength, 1000000);
     s.maxProjectInstructionsLength = qBound(1, s.maxProjectInstructionsLength, 1000000);
     s.maxSystemPromptLength = qBound(1, s.maxSystemPromptLength, 1000000);
-    s.maxThinkingTokens = qBound(1, s.maxThinkingTokens, 1000000);
-    s.maxPlanSteps = qBound(1, s.maxPlanSteps, 200);
+    // maxThinkingTokens and maxPlanSteps are already bounded earlier; a
+    // second pass used to override those bounds (a deliberate 0 became 1,
+    // and the 200k thinking cap became 1M), so each field is bounded once.
     // 0 means "no limit" for the two budgets, so only the positive values
     // are bounded.
     if (s.maxToolCalls > 0) {

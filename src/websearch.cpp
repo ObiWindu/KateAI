@@ -521,6 +521,16 @@ void WebSearch::onReplyFinished(QNetworkReply *reply, const QString &callId, boo
     const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
 
     if (isFetch) {
+        // The private-address check ran on the URL the model named, but a
+        // redirect can send the request anywhere. The reply's url() is the
+        // final target once the redirects have been followed, so a fetch that
+        // landed on a blocked host is refused here: the request may have
+        // happened, but its content never reaches the conversation.
+        if (isBlockedHost(reply->url().host())) {
+            finishFetch(callId, QString(), QString(),
+                        i18n("The page redirected to a blocked host (%1) and was not read.", reply->url().host()));
+            return;
+        }
         // A server that answers 200 to an error page is still an error page;
         // the body check below catches the usual "soft 404".
         if (status >= 400) {

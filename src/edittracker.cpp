@@ -421,7 +421,13 @@ void EditTracker::acceptAll()
     for (const QString &path : paths) {
         acceptEdit(path);
     }
-    clear();
+    // Not clear(): settle() already emptied and pruned every group, and
+    // clear() would wipe the undo stack these decisions were pushed on. A
+    // bulk decision is the action with the largest blast radius, so it is
+    // exactly the one that must stay undoable.
+    pruneGroups();
+    updateUI();
+    Q_EMIT editsChanged(hasPendingEdits());
 }
 
 void EditTracker::rejectAll()
@@ -430,7 +436,9 @@ void EditTracker::rejectAll()
     for (const QString &path : paths) {
         rejectEdit(path);
     }
-    clear();
+    pruneGroups();
+    updateUI();
+    Q_EMIT editsChanged(hasPendingEdits());
 }
 
 bool EditTracker::canUndo() const

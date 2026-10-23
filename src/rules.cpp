@@ -56,6 +56,7 @@ QList<RulesLoader::Block> RulesLoader::load(const QString &workspace, const QStr
         if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
             return false;
         }
+        const qint64 fileSize = file.size();
         const int room = MaxTotalBytes - usedBytes;
         const QByteArray contents = file.read(qMin(MaxFileBytes, room));
         if (contents.isEmpty()) {
@@ -63,15 +64,25 @@ QList<RulesLoader::Block> RulesLoader::load(const QString &workspace, const QStr
         }
         usedBytes += contents.size();
         // The cut is on a byte boundary and can split a multi-byte character
-        // in half. The text is decoded first and cut again, this time at a
-        // character boundary.
+        // in half. The text is decoded first; a trailing incomplete sequence
+        // decodes to U+FFFD, which is dropped. Only a genuine cut needs this:
+        // a file read whole is used as-is.
         QString text = QString::fromUtf8(contents);
-        bool truncated = contents.size() == MaxFileBytes;
-        if (truncated) {
-            text = text.left(MaxFileBytes / 2);
+        const bool truncated = contents.size() < fileSize;
+        if (truncated && text.endsWith(QChar(0xFFFD))) {
+            text.chop(1);
         }
         if (truncated) {
-            text += u"\n... (rules truncated)"_s;
+            const QString marker = u"\n... (rules truncated)"_s;
+            if (contents.size() > marker.size()) {
+                // The marker counts against the same budget as the payload,
+                // or every truncated file would push the total past
+                // MaxTotalBytes by its own marker.
+                while (text.size() + marker.size() > contents.size() && !text.isEmpty()) {
+                    text.chop(1);
+                }
+                text += marker;
+            }
         }
         blocks.append({label, text.trimmed()});
         return true;

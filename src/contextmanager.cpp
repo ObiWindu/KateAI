@@ -139,6 +139,11 @@ QString summaryHeader()
 namespace
 {
 
+bool isSummary(const ChatMessage &message)
+{
+    return message.role == ChatMessage::Role::User && message.content.startsWith(summaryHeader());
+}
+
 QString buildSummary(const QList<ChatMessage> &dropped, int requestChars)
 {
     QStringList userRequests;
@@ -151,6 +156,12 @@ QString buildSummary(const QList<ChatMessage> &dropped, int requestChars)
         switch (message.role) {
         case ChatMessage::Role::User: {
             if (message.content.startsWith(QLatin1String("[KateAI agent controller]"))) {
+                break;
+            }
+            // An earlier compaction's summary is not a request the user made;
+            // folding it in would report the summary itself as an "asked" line
+            // and re-summarize it again on every compaction.
+            if (isSummary(message)) {
                 break;
             }
             const QString line = oneLine(message.content, requestChars);
@@ -243,11 +254,6 @@ QString buildSummary(const QList<ChatMessage> &dropped, int requestChars)
                      .arg(rejected);
     }
     return lines.join(u'\n');
-}
-
-bool isSummary(const ChatMessage &message)
-{
-    return message.role == ChatMessage::Role::User && message.content.startsWith(summaryHeader());
 }
 
 int lastUserIndex(const QList<ChatMessage> &history, int bodyStart)

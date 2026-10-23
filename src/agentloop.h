@@ -265,8 +265,20 @@ private:
     void releaseEditLocksFor(const ToolCall &call);
     // Pushes the active mode's tool set (and the MCP tools) to the client.
     void syncToolAccess();
-    // Snapshots the workspace before the first mutation of a turn.
-    void maybeCheckpoint(const QString &label);
+    // Rebuilds the sandbox and the tool runner from the current settings and
+    // workspace. Destroys any in-flight bash process, so it must not run
+    // while a turn is executing; the callers defer it to the turn's end.
+    void rebuildTools();
+    // Defers a tool call until the pre-mutation snapshot has been taken.
+    // Returns true when the call was parked; the snapshot's completion (or
+    // failure) resumes it through resumeAfterCheckpoint().
+    bool deferForCheckpoint(const ToolCall &call, bool asBash);
+    // Runs the tool call parked by deferForCheckpoint() after the snapshot
+    // reported back. A no-op when nothing was parked.
+    void resumeAfterCheckpoint();
+    // Records a tool call as executed, so identical repeats can be told apart
+    // from retries of a call the user denied or that never ran.
+    void markActionExecuted(const QString &signature);
     void syncPermissionPolicy();
     void setSubtaskDepth(int depth)
     {
@@ -309,6 +321,14 @@ LlmClient m_client;
     int m_subtaskDepth = 0;
     quint64 m_asyncCounter = 0;
     bool m_checkpointTaken = false;
+    // A snapshot is being taken for the call below; the queue is held open
+    // until it reports back, so no mutation can slip past the checkpoint.
+    bool m_awaitingCheckpoint = false;
+    ToolCall m_checkpointCall;
+    bool m_checkpointIsBash = false;
+    // The sandbox/tool-runner configuration changed while a turn was running;
+    // rebuildTools() applies it once the turn ends.
+    bool m_sandboxDirty = false;
     QString m_taskSummary;
 
     QList<ChatMessage> m_messages;

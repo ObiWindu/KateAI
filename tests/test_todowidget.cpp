@@ -19,6 +19,7 @@
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QLabel>
+#include <QPushButton>
 #include <QTest>
 #include <QTimer>
 #include <QWidget>
@@ -59,6 +60,50 @@ class TestTodoWidget : public QObject
     Q_OBJECT
 
 private Q_SLOTS:
+    void normalizesEveryKnownStepVariant()
+    {
+        // Steps arrive from the ACP layer, the native structured-planning
+        // parser and restored sessions, and the spellings differ. The widget
+        // accepts every known variant instead of rendering blank rows.
+        QJsonArray todos;
+        {
+            // The ACP spec form: content-block array plus a status string.
+            QJsonObject acp;
+            acp.insert(u"id"_s, u"acp"_s);
+            QJsonArray content;
+            content.append(QJsonObject{{u"type"_s, u"text"_s}, {u"text"_s, u"From the ACP array"_s}});
+            acp.insert(u"content"_s, content);
+            acp.insert(u"status"_s, u"completed"_s);
+            todos.append(acp);
+        }
+        {
+            // Native planner shorthand: description plus booleans.
+            todos.append(QJsonObject{{u"description"_s, u"Native planner step"_s}, {u"inProgress"_s, true}});
+        }
+        {
+            // Hyphenated status spelling, text under another key.
+            todos.append(QJsonObject{{u"text"_s, u"Hyphenated in-progress step"_s}, {u"status"_s, u"in-progress"_s}});
+        }
+        {
+            // A titled step that is already done.
+            todos.append(QJsonObject{{u"title"_s, u"Titled done step"_s}, {u"status"_s, u"done"_s}});
+        }
+        {
+            // No text at all: skipped rather than rendered as bare glyphs.
+            todos.append(QJsonObject{{u"id"_s, u"empty"_s}, {u"status"_s, u"pending"_s}});
+        }
+
+        TodoWidget widget;
+        widget.setExpanded(true);
+        widget.setTodos(todos);
+        QCOMPARE(widget.totalCount(), 4);
+        QCOMPARE(widget.completedCount(), 2);
+        QCOMPARE(rowForDescription(widget, u"From the ACP array"_s)->property("state").toString(), u"done"_s);
+        QCOMPARE(rowForDescription(widget, u"Native planner step"_s)->property("state").toString(), u"active"_s);
+        QCOMPARE(rowForDescription(widget, u"Hyphenated in-progress step"_s)->property("state").toString(), u"active"_s);
+        QCOMPARE(rowForDescription(widget, u"Titled done step"_s)->property("state").toString(), u"done"_s);
+    }
+
     void listsEveryStepWithItsGlyphAndTheCounter()
     {
         TodoWidget widget;
@@ -116,6 +161,77 @@ private Q_SLOTS:
                          step(u"step3"_s, u"Three"_s, true, false)});
         QCOMPARE(progress->text(), u"3/3"_s);
         QCOMPARE(rowForDescription(widget, u"One"_s)->property("state").toString(), u"done"_s);
+    }
+
+    // The dock stays compact while the plan runs: only the step finished just
+    // before the current one, the current one, and the next open step are on
+    // screen, and the whole list is a toggle away.
+    void compactDockShowsThePreviousCurrentAndNextStep()
+    {
+        TodoWidget widget;
+        widget.setTodos({step(u"step1"_s, u"One"_s, true, false),
+                         step(u"step2"_s, u"Two"_s, true, false),
+                         step(u"step3"_s, u"Three"_s, false, true),
+                         step(u"step4"_s, u"Four"_s, false, false),
+                         step(u"step5"_s, u"Five"_s, false, false)});
+
+        QCOMPARE(widget.totalCount(), 5);
+        // Compact: the window around the current step, nothing else.
+        QCOMPARE(widget.findChildren<QWidget *>(u"todoRow"_s).size(), 3);
+        QVERIFY(rowForDescription(widget, u"Two"_s));
+        QVERIFY(rowForDescription(widget, u"Three"_s));
+        QVERIFY(rowForDescription(widget, u"Four"_s));
+        QVERIFY(!rowForDescription(widget, u"One"_s));
+        QVERIFY(!rowForDescription(widget, u"Five"_s));
+
+        auto *progress = widget.findChild<QLabel *>(u"todoProgress"_s);
+        QVERIFY(progress);
+        QCOMPARE(progress->text(), u"2/5"_s);
+
+        // The toggle opens the whole list.
+        auto *toggle = widget.findChild<QPushButton *>(u"todoToggle"_s);
+        QVERIFY(toggle);
+        QVERIFY(toggle->isVisible());
+        toggle->click();
+        QVERIFY(widget.isExpanded());
+        QCOMPARE(widget.findChildren<QWidget *>(u"todoRow"_s).size(), 5);
+        QVERIFY(rowForDescription(widget, u"One"_s));
+        QVERIFY(rowForDescription(widget, u"Five"_s));
+        // The counter still describes the whole plan either way.
+        QCOMPARE(progress->text(), u"2/5"_s);
+        QCOMPARE(widget.completedCount(), 2);
+        QCOMPARE(rowForDescription(widget, u"Two"_s)->property("state").toString(), u"done"_s);
+
+        // ... and closes it again.
+        toggle->click();
+        QVERIFY(!widget.isExpanded());
+        QCOMPARE(widget.findChildren<QWidget *>(u"todoRow"_s).size(), 3);
+
+        // The window follows the plan: with the current step finished and the
+        // next one started, the strip moves down the list.
+        widget.setTodos({step(u"step1"_s, u"One"_s, true, false),
+                         step(u"step2"_s, u"Two"_s, true, false),
+                         step(u"step3"_s, u"Three"_s, true, false),
+                         step(u"step4"_s, u"Four"_s, false, true),
+                         step(u"step5"_s, u"Five"_s, false, false)});
+        QVERIFY(rowForDescription(widget, u"Three"_s));
+        QVERIFY(rowForDescription(widget, u"Four"_s));
+        QVERIFY(rowForDescription(widget, u"Five"_s));
+        QVERIFY(!rowForDescription(widget, u"One"_s));
+    }
+
+    // A plan that fits in the compact window has nothing to toggle, so the
+    // toggle stays out of the way.
+    void toggleHiddenWhileTheWholeListFits()
+    {
+        TodoWidget widget;
+        widget.setTodos({step(u"step1"_s, u"One"_s, true, false),
+                         step(u"step2"_s, u"Two"_s, false, true),
+                         step(u"step3"_s, u"Three"_s, false, false)});
+        auto *toggle = widget.findChild<QPushButton *>(u"todoToggle"_s);
+        QVERIFY(toggle);
+        QVERIFY(!toggle->isVisible());
+        QCOMPARE(widget.findChildren<QWidget *>(u"todoRow"_s).size(), 3);
     }
 
     void finishedStepsReadAsDone()

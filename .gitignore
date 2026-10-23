@@ -2,4 +2,3 @@ build/
 build*/
 build.log
 edit_config.py
-packaging/dist/

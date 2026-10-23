@@ -14,6 +14,7 @@
 #include <QSaveFile>
 #include <QStringConverter>
 #include <QStringDecoder>
+#include <QStringEncoder>
 #include <QTextStream>
 #include <QUrl>
 
@@ -27,16 +28,32 @@ namespace
 
 // The encoding of a file that is not valid UTF-8. Decoding it as UTF-8 would
 // replace every non-ASCII byte with U+FFFD, and writing it back would
-// destroy the file.
+// destroy the file. The whole file is scanned, not just its head: a file that
+// is valid UTF-8 for the first 64 KiB and latin-1 after it was misdetected
+// before, and the write-back then silently corrupted the tail. The scan stops
+// at the first decoding error, so a clean UTF-8 file still costs only one
+// extra sequential read (the callers read it again right after).
 QStringConverter::Encoding encodingFor(const QString &path)
 {
     QFile file(path);
     if (!file.open(QIODevice::ReadOnly)) {
         return QStringConverter::Utf8;
     }
-    const QByteArray probe = file.read(65536);
     QStringDecoder decoder(QStringConverter::Utf8);
-    decoder.decode(probe);
+    char buffer[65536];
+    while (true) {
+        const qint64 read = file.read(buffer, sizeof(buffer));
+        if (read <= 0) {
+            break;
+        }
+        decoder.decode(QByteArrayView(buffer, static_cast<qsizetype>(read)));
+        if (decoder.hasError()) {
+            return QStringConverter::System;
+        }
+    }
+    // An incomplete multi-byte sequence at the very end of the file is also
+    // a decoding error; only the flush call can see it.
+    decoder.decode(QByteArrayView());
     if (decoder.hasError()) {
         return QStringConverter::System;
     }
@@ -204,6 +221,24 @@ bool DiskDocumentBridge::writeDocument(const QString &path, const QString &conte
         return false;
     }
 
+    // A file that was not UTF-8 is written back in the encoding it had, but
+    // only when the new content survives the round trip: an unrepresentable
+    // character would otherwise be silently replaced with '?' and destroy
+    // data while the tool reports success.
+    const QStringConverter::Encoding encoding = encodingFor(path);
+    if (encoding != QStringConverter::Utf8) {
+        QStringEncoder encoder(encoding);
+        QStringDecoder decoder(encoding);
+        const QString roundTrip = decoder.decode(encoder.encode(contents));
+        if (roundTrip != contents) {
+            if (error) {
+                *error = u"The new content cannot be represented in the file's original encoding; "
+                         "save it as UTF-8 instead."_s;
+            }
+            return false;
+        }
+    }
+
     QSaveFile file(path);
     // Binary mode again: the text mode would translate the line endings of
     // the content, which already carries the line endings of the file.
@@ -214,8 +249,7 @@ bool DiskDocumentBridge::writeDocument(const QString &path, const QString &conte
         return false;
     }
     QTextStream out(&file);
-    // A file that was not UTF-8 is written back in the encoding it had.
-    out.setEncoding(encodingFor(path));
+    out.setEncoding(encoding);
     out << contents;
     if (!file.commit()) {
         if (error) {

@@ -17,6 +17,7 @@
 #include <QDebug>
 #include <QDir>
 #include <QFileInfo>
+#include <QGlobalStatic>
 #include <QHash>
 #include <QMutex>
 #include <QMutexLocker>
@@ -266,14 +267,18 @@ static void importLegacyConversations(QSqlDatabase db);
 // Opens (once per thread) the database backing the session store. Returns an
 // invalid handle and sets *ok to false when the store is unavailable; callers
 // then degrade to "no history" instead of losing the session.
+
+// Cache of the per-thread connection names, guarded by storeMutex(). It is a
+// Q_GLOBAL_STATIC rather than a function-local static: a QThread::finished
+// handler erases the entry of a dying thread, and that handler can also run
+// for the main thread during static teardown, after plain function-local
+// statics have been destroyed. The null return of a destroyed global static
+// keeps that path safe instead of touching freed memory.
+using ThreadConnectionNames = QHash<QThread *, QString>;
+Q_GLOBAL_STATIC(ThreadConnectionNames, connectionNames)
+
 static QSqlDatabase openStore(bool *ok)
 {
-    // The cache is keyed by the thread pointer, but a QThread that ended
-    // frees its address, and a new thread can get the same one. The key is
-    // therefore the connection name, which holds the thread pointer and a
-    // counter.
-    static QHash<QThread *, QString> connectionNames; // guarded by storeMutex()
-
     *ok = false;
 
     if (!QSqlDatabase::isDriverAvailable(u"QSQLITE"_s)) {
@@ -283,14 +288,17 @@ static QSqlDatabase openStore(bool *ok)
 
     QThread *thread = QThread::currentThread();
 
-    const auto cached = connectionNames.constFind(thread);
-    if (cached != connectionNames.constEnd()) {
-        QSqlDatabase db = QSqlDatabase::database(cached.value(), false);
-        if (db.isValid() && db.isOpen()) {
-            *ok = true;
-            return db;
+    auto *names = connectionNames();
+    if (names) {
+        const auto cached = names->constFind(thread);
+        if (cached != names->constEnd()) {
+            QSqlDatabase db = QSqlDatabase::database(cached.value(), false);
+            if (db.isValid() && db.isOpen()) {
+                *ok = true;
+                return db;
+            }
+            names->erase(cached);
         }
-        connectionNames.erase(cached);
     }
 
     const QString path = databaseFilePath();
@@ -333,7 +341,7 @@ static QSqlDatabase openStore(bool *ok)
     // ends, the connection has to go with it, or the next thread with the same
     // address would find the connection of a dead thread.
     auto *cleanup = new QObject(thread);
-    QObject::connect(thread, &QThread::finished, cleanup, [connectionName]() {
+    QObject::connect(thread, &QThread::finished, cleanup, [thread, connectionName]() {
         {
             QSqlDatabase connection = QSqlDatabase::database(connectionName, false);
             if (connection.isValid()) {
@@ -341,9 +349,20 @@ static QSqlDatabase openStore(bool *ok)
             }
         }
         QSqlDatabase::removeDatabase(connectionName);
+        // The thread's address can be reused by a later thread: drop the
+        // stale cache entry so nobody inherits a removed connection, and so
+        // the cache cannot grow without bound. The guard also covers a
+        // finished() that fires for the main thread during static teardown,
+        // where the global static has already been destroyed.
+        if (auto *names = connectionNames()) {
+            QMutexLocker locker(&storeMutex());
+            names->remove(thread);
+        }
     });
 
-    connectionNames.insert(thread, connectionName);
+    if (names) {
+        names->insert(thread, connectionName);
+    }
     *ok = true;
     return db;
 }
@@ -804,7 +823,9 @@ void SessionStore::deleteConversation(const QString &conversationId)
         clearMeta(db, ACTIVE_CONVERSATION_KEY);
     }
 
-    db.commit();
+    if (!db.commit()) {
+        qWarning() << "KateAI: cannot commit the deletion of conversation" << conversationId << db.lastError().text();
+    }
 }
 
 QString SessionStore::createNewConversation()
@@ -902,7 +923,9 @@ void SessionStore::clearAllConversations()
     }
 
     clearMeta(db, ACTIVE_CONVERSATION_KEY);
-    db.commit();
+    if (!db.commit()) {
+        qWarning() << "KateAI: cannot commit the conversation history clear:" << db.lastError().text();
+    }
 }
 
 } // namespace KateAi

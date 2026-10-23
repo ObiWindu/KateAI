@@ -717,6 +717,39 @@ private Q_SLOTS:
         }
         QVERIFY(progress.last().trimmed() == finalResult.output.trimmed());
     }
+
+    void bashAsyncKeepsHeadAndTailOfLongOutput()
+    {
+        // The async buffer used to keep only the head of the stream, so the
+        // tail - where the failure summary lives - was silently dropped.
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+
+        Sandbox sandbox(tempDir.path(), SandboxProfile::Off);
+        DiskDocumentBridge bridge;
+        ToolRunner runner(sandbox, &bridge);
+
+        ToolCall call;
+        call.id = u"bash-long"_s;
+        call.name = u"bash"_s;
+        // Well over the 80000-character capture ceiling.
+        call.arguments = QJsonObject{{u"command"_s,
+                                      u"for i in $(seq 1 30000); do echo \"line $i\"; done; echo FINAL-MARKER"_s}};
+
+        bool finished = false;
+        ToolResult finalResult;
+        connect(&runner, &ToolRunner::bashFinished, this, [&](const ToolResult &result) {
+            finished = true;
+            finalResult = result;
+        });
+
+        runner.runBashAsync(call);
+        QTRY_VERIFY(finished);
+        QVERIFY2(finalResult.ok, qPrintable(finalResult.output));
+        QVERIFY(finalResult.output.contains(u"line 1\n"_s));
+        QVERIFY(finalResult.output.contains(u"FINAL-MARKER"_s));
+        QVERIFY(finalResult.output.contains(u"dropped"_s));
+    }
     void readFilePaginationNoteMatchesWhatWasShown()
     {
         // The "N more line(s)" note is the model's only cue that it has to read
