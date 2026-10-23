@@ -1535,11 +1535,9 @@ void ChatWidget::addUserMessage(const QString &text)
     headerLayout->addWidget(copyBtn);
     cardLayout->addLayout(headerLayout);
 
-    // The prompt is a markdown document too, not escaped text: a user pasting a
-    // diff, a log line in backticks or a list expects it to read the way it does
-    // on the assistant side of the same conversation. closeMarkdown() balances
-    // fences that are still open, so a half-typed prompt renders instead of
-    // swallowing the rest of the card.
+    // User turns must show the exact text that was sent. Parsing arbitrary,
+    // potentially very large prompts as Markdown can collapse or omit lines
+    // in the transcript; plain text preserves every character and newline.
     auto *msgLabel = new QTextBrowser(card);
     msgLabel->setObjectName(u"userMessageBody"_s);
     msgLabel->setOpenExternalLinks(true);
@@ -1547,8 +1545,15 @@ void ChatWidget::addUserMessage(const QString &text)
     msgLabel->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     msgLabel->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     msgLabel->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum);
-    msgLabel->setStyleSheet(QStringLiteral("background: transparent; border: none; padding: 0px;"));
-    msgLabel->setDocument(makeMarkdownDocument(closeMarkdown(text), ChatTheme::userMessageCss()));
+    msgLabel->setStyleSheet(QStringLiteral(
+        "QTextBrowser { background: transparent; border: none; padding: 0px; color: %1;"
+        " font-family: sans-serif; font-size: 13px; }").arg(ChatTheme::userCardText()));
+    msgLabel->setPlainText(text);
+    // The pinned height has to follow the width the transcript finally gives
+    // the browser. A long prompt is laid out at a provisional width first and
+    // is re-wrapped when the card is placed; a height measured before that
+    // re-wrap clips the bottom of the message. The resize filter re-fits it.
+    msgLabel->installEventFilter(this);
     cardLayout->addWidget(msgLabel);
 
     card->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum);
@@ -1915,15 +1920,19 @@ void ChatWidget::fitReasoningBrowser(QTextBrowser *browser)
 
 bool ChatWidget::eventFilter(QObject *watched, QEvent *event)
 {
-    // The reasoning browsers carry a height pinned to their document. The
-    // layout assigns their real width only after the block is shown, and
-    // again on every panel resize, so the fit has to follow those resizes --
-    // otherwise the text re-wraps inside a height that was measured for a
-    // different width, which reads as empty space below a short block.
+    // Pinned-height browsers have to follow the width the layout gives them.
+    // A fit measured at a provisional width re-wraps at the real one; without
+    // this re-fit the text is either clipped or sits in a box with empty space
+    // below it. The browser's own resizeEvent has not run yet when the filter
+    // sees the event, so the new size is taken from the event itself.
     if (event->type() == QEvent::Resize) {
         if (auto *browser = qobject_cast<QTextBrowser *>(watched)) {
             if (browser->objectName() == u"reasoningBrowser"_s) {
                 fitReasoningBrowser(browser);
+            } else if (browser->objectName() == u"userMessageBody"_s) {
+                const int width = static_cast<QResizeEvent *>(event)->size().width()
+                    - 2 * browser->frameWidth();
+                fitUserMessageBody(browser, width);
             }
         }
     }
@@ -5307,17 +5316,20 @@ void ChatWidget::flushToolProgress()
     scrollToBottom();
 }
 
-void ChatWidget::fitUserMessageBody(QTextBrowser *browser)
+void ChatWidget::fitUserMessageBody(QTextBrowser *browser, int availableWidth)
 {
     if (!browser || !browser->document()) {
         return;
     }
-    int width = 240;
-    if (m_scrollArea && m_scrollArea->viewport()) {
-        width = std::max(160, m_scrollArea->viewport()->width() - 32);
-    }
-    if (browser->viewport() && browser->viewport()->width() > 40) {
-        width = browser->viewport()->width();
+    int width = availableWidth;
+    if (width <= 40) {
+        width = 240;
+        if (m_scrollArea && m_scrollArea->viewport()) {
+            width = std::max(160, m_scrollArea->viewport()->width() - 32);
+        }
+        if (browser->viewport() && browser->viewport()->width() > 40) {
+            width = browser->viewport()->width();
+        }
     }
     browser->document()->setTextWidth(width);
     // A few pixels under the document, not the assistant bubble's +16 / 30px

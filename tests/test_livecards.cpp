@@ -27,9 +27,6 @@
 #include "types.h"
 
 #include <QApplication>
-#include <QFont>
-#include <QFontDatabase>
-#include <QFontInfo>
 #include <QFontMetrics>
 #include <QJsonArray>
 #include <QJsonObject>
@@ -38,39 +35,12 @@
 #include <QTemporaryDir>
 #include <QPoint>
 #include <QScrollArea>
-#include <QTextBlock>
 #include <QTextBrowser>
-#include <QTextFragment>
 #include <QVBoxLayout>
 #include <QWidget>
 
 using namespace Qt::Literals::StringLiterals;
 using namespace KateAi;
-
-namespace
-{
-
-// The message CSS styles inline code with the generic "monospace" family.
-// Since the KF6TextEditor 6.31 / Qt 6.11 rework, the imported HTML resolves
-// that generic to the platform's concrete fixed font (here "Noto Sans Mono"),
-// and QFontInfo::fixedPitch() does not flag every concrete fixed font either.
-// The rendered format is monospace when the generic survived, when it resolved
-// to the system's fixed font, or when the resolved font is a fixed pitch one.
-bool isMonospace(const QTextCharFormat &format)
-{
-    const QStringList families = format.fontFamilies().toStringList();
-    for (const QString &family : families) {
-        if (family.compare(QStringLiteral("monospace"), Qt::CaseInsensitive) == 0) {
-            return true;
-        }
-        if (family.compare(QFontDatabase::systemFont(QFontDatabase::FixedFont).family(), Qt::CaseInsensitive) == 0) {
-            return true;
-        }
-    }
-    return QFontInfo(format.font()).fixedPitch();
-}
-
-} // namespace
 
 class TestLiveCards : public QObject
 {
@@ -317,47 +287,20 @@ private Q_SLOTS:
         QCOMPARE(m_widget->findChildren<SuggestionWidget *>().size(), 2);
     }
 
-    // The user's own turn is markup too. It used to be escaped text run through
-    // a QLabel, so a pasted diff lost its fences, `grep` lost its backticks and
-    // **bold** stayed literal -- the same text rendering as markdown one card
-    // further up the conversation.
-    void testUserMessageRendersMarkdown()
+    // A user turn is shown verbatim so long or structured prompts keep every
+    // character and line break in the transcript.
+    void testUserMessageRendersVerbatim()
     {
         setup();
-        Q_EMIT m_widget->agent()->userMessage(u"Compare **this** with `grep`:\n\n```cpp\nint x = 1;\n```\n"_s);
+        const QString prompt = u"Compare **this** with `grep`:\n\n```cpp\nint x = 1;\n```\n"_s;
+        Q_EMIT m_widget->agent()->userMessage(prompt);
         QTest::qWait(80);
 
         QTextBrowser *body = m_widget->findChild<QTextBrowser *>(QStringLiteral("userMessageBody"));
         QVERIFY2(body, "the user card has no markup body");
         const QString plain = body->toPlainText();
-        QVERIFY2(plain.contains(QStringLiteral("this")), qPrintable(plain));
-        QVERIFY2(!plain.contains(QStringLiteral("**")), qPrintable(plain));
-        QVERIFY2(plain.contains(QStringLiteral("grep")), qPrintable(plain));
-        // A fenced block survives as a block, in order, behind the prose.
-        QVERIFY2(plain.contains(QStringLiteral("int x = 1;")), qPrintable(plain));
-        QVERIFY2(plain.indexOf(QStringLiteral("Compare")) < plain.indexOf(QStringLiteral("int x = 1;")),
-                 qPrintable(plain));
+        QCOMPARE(plain, prompt);
         QVERIFY2(body->height() > 20, qPrintable(QStringLiteral("body collapsed to %1px").arg(body->height())));
-
-        // The markup parsed rather than being dropped: **this** really is bold
-        // and `grep` really is monospace, which is the whole point of rendering
-        // the prompt instead of escaping it.
-        bool sawBold = false;
-        bool sawCodeFont = false;
-        for (QTextBlock b = body->document()->begin(); b.isValid(); b = b.next()) {
-            for (QTextBlock::Iterator it = b.begin(); !it.atEnd(); ++it) {
-                const QTextFragment frag = it.fragment();
-                const QString text = frag.text();
-                if (text.startsWith(QStringLiteral("this")) && frag.charFormat().fontWeight() >= QFont::Bold) {
-                    sawBold = true;
-                }
-                if (text.startsWith(QStringLiteral("grep")) && isMonospace(frag.charFormat())) {
-                    sawCodeFont = true;
-                }
-            }
-        }
-        QVERIFY2(sawBold, "bold text did not render as bold");
-        QVERIFY2(sawCodeFont, "inline code did not render in a monospace font");
     }
 
     // A long prompt must wrap and grow the card instead of being clipped by a
@@ -379,6 +322,48 @@ private Q_SLOTS:
         QVERIFY2(body->height() > 100, qPrintable(QStringLiteral("body is only %1px tall").arg(body->height())));
         const QString plain = body->toPlainText();
         QVERIFY2(plain.count(QStringLiteral("line of prompt")) == 24, qPrintable(QStringLiteral("only %1 lines arrived").arg(plain.count(QStringLiteral("line of prompt")))));
+    }
+
+    // The card is measured before the transcript layout gives it its real
+    // width. A long prompt was laid out at the provisional width and then
+    // re-wrapped at the final one without its pinned height following, which
+    // cut the bottom of the message off. Re-fitting on resize keeps the whole
+    // prompt visible at any panel width.
+    void testVeryLongUserMessageIsNotClipped()
+    {
+        setup();
+        // A narrow panel makes the provisional and final widths differ enough
+        // for the stale height to hide a large part of the message.
+        m_widget->resize(520, 700);
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+
+        QString longText;
+        for (int i = 0; i < 400; ++i) {
+            longText += QStringLiteral("line %1 of a very long prompt that should wrap and stay visible\n").arg(i);
+        }
+        Q_EMIT m_widget->agent()->userMessage(longText);
+        QTest::qWait(200);
+
+        QTextBrowser *body = m_widget->findChild<QTextBrowser *>(QStringLiteral("userMessageBody"));
+        QVERIFY2(body, "the user card has no markup body");
+
+        const auto verifyBodyFitsItsDocument = [&]() {
+            const int docH = qCeil(body->document()->size().height()) + 4;
+            QVERIFY2(body->height() >= docH,
+                     qPrintable(QStringLiteral("body is %1px but its document needs %2px")
+                                    .arg(body->height()).arg(docH)));
+            QVERIFY2(body->toPlainText().count(QStringLiteral("of a very long prompt")) == 400,
+                     qPrintable(QStringLiteral("only %1 lines arrived")
+                                    .arg(body->toPlainText().count(QStringLiteral("of a very long prompt")))));
+        };
+
+        verifyBodyFitsItsDocument();
+
+        // The panel can be widened later; the pinned height has to follow that
+        // re-wrap too, or the card grows a block of empty space.
+        m_widget->resize(900, 700);
+        QTest::qWait(200);
+        verifyBodyFitsItsDocument();
     }
 
     // A prompt that only looks like markup -- a bare asterisk, a lone fence, a

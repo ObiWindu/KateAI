@@ -261,7 +261,7 @@ private:
     void scheduleStreamRender();
     void flushStreamRender();
     void flushToolProgress();
-    void fitUserMessageBody(QTextBrowser *browser);
+    void fitUserMessageBody(QTextBrowser *browser, int availableWidth = 0);
     // One finished card for a tool call already stored in the session. The
     // caller decides where it goes: ACP records the result before the assistant
     // message, native turns record it after.
