@@ -325,51 +325,80 @@ void TodoWidget::applyRowStyle(Row &row) const
 
 QList<int> TodoWidget::visibleWindow() const
 {
-    QList<int> all;
-    for (int i = 0; i < m_rows.size(); ++i) {
-        all.append(i);
-    }
-    if (m_expanded || m_rows.size() <= 3) {
+    const int total = m_rows.size();
+    if (m_expanded || total <= 3) {
+        QList<int> all;
+        for (int i = 0; i < total; ++i) {
+            all.append(i);
+        }
         return all;
     }
 
-    // The compact dock frames the work in progress: the step finished just
-    // before the current one, the current one itself, and the next step open.
+    // The step being worked on anchors the middle row. When nothing runs,
+    // the first open step takes that slot; a fully finished plan has no
+    // anchor at all.
     int active = -1;
-    for (int i = 0; i < m_rows.size(); ++i) {
+    for (int i = 0; i < total; ++i) {
         if (m_rows.at(i).inProgress && !m_rows.at(i).completed) {
             active = i;
             break;
         }
     }
-    QList<int> window;
-    if (active >= 0) {
-        for (int i = active - 1; i >= 0; --i) {
-            if (m_rows.at(i).completed) {
-                window.prepend(i);
+    if (active < 0) {
+        for (int i = 0; i < total; ++i) {
+            if (!m_rows.at(i).completed) {
+                active = i;
                 break;
             }
         }
-        window.append(active);
-        for (int i = active + 1; i < m_rows.size(); ++i) {
-            if (!m_rows.at(i).completed && !m_rows.at(i).inProgress) {
-                window.append(i);
-                break;
-            }
-        }
-        return window;
     }
-    // No step in progress: the last thing finished and what opens next.
-    for (int i = m_rows.size() - 1; i >= 0; --i) {
+    if (active < 0) {
+        // Everything is done: the tail of the list is the run's record.
+        QList<int> tail;
+        for (int i = total - 3; i < total; ++i) {
+            if (i >= 0) {
+                tail.append(i);
+            }
+        }
+        return tail;
+    }
+
+    QList<int> window;
+    window.append(active);
+    // The latest finished step before it goes on top, barred; the next open
+    // one goes below.
+    for (int i = active - 1; i >= 0; --i) {
         if (m_rows.at(i).completed) {
+            window.prepend(i);
+            break;
+        }
+    }
+    for (int i = active + 1; i < total; ++i) {
+        if (!m_rows.at(i).completed && !m_rows.at(i).inProgress) {
             window.append(i);
             break;
         }
     }
-    for (int i = 0; i < m_rows.size() && window.size() < 3; ++i) {
-        if (!m_rows.at(i).completed) {
-            window.append(i);
+
+    // Exactly three rows whenever the plan has them: fill the remaining slots
+    // with the steps nearest to the current one, keeping the plan's order.
+    while (window.size() < 3) {
+        int nearest = -1;
+        int bestDistance = total + 1;
+        for (int i = 0; i < total; ++i) {
+            if (window.contains(i)) {
+                continue;
+            }
+            const int distance = qAbs(i - active);
+            if (distance < bestDistance) {
+                bestDistance = distance;
+                nearest = i;
+            }
         }
+        if (nearest < 0) {
+            break;
+        }
+        window.append(nearest);
     }
     std::sort(window.begin(), window.end());
     return window;

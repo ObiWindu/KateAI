@@ -18,12 +18,13 @@ namespace KateAi
 {
 
 // The todo list of the running turn, docked at the bottom of the chat. While
-// the plan advances the dock stays compact: it shows the step being worked
-// on framed by the step finished just before it and the next one open, so the
-// strip reads as "just did X, now doing Y, next is Z" at a glance. A toggle
-// in the header row opens the whole list; a header counter carries the
-// "done/total" progress either way. Every row leads with a status glyph: an
-// empty circle for a pending step, a pulsing dot for the step being worked
+// the plan advances the dock stays compact: it shows exactly three rows -- the
+// latest finished step barred on top, the step being worked on in the middle,
+// and the next open step at the bottom -- so the strip reads as "just did X,
+// now doing Y, next is Z" at a glance. A toggle in the header row opens the
+// whole list and collapses it back to those three; a header counter carries
+// the "done/total" progress either way. Every row leads with a status glyph:
+// an empty circle for a pending step, a pulsing dot for the step being worked
 // on, and a check for a finished one. Finished steps keep their text but
 // read as done (muted, struck through) -- they are the record of what the
 // run did, not something still competing for attention.
@@ -75,7 +76,7 @@ private:
     void updatePulse();
     void applyRowStyle(Row &row) const;
     // The rows the current mode shows: the whole plan when expanded, and the
-    // previous-completed / current / next-pending window when compact.
+    // exactly-three-row window around the current step when compact.
     QList<int> visibleWindow() const;
 
     QList<Row> m_rows;

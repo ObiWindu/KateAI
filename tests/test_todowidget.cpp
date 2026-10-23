@@ -220,6 +220,75 @@ private Q_SLOTS:
         QVERIFY(!rowForDescription(widget, u"One"_s));
     }
 
+    // The compact window always has exactly three rows when the plan has
+    // them, whatever the plan's state: the nearest steps fill the slots the
+    // previous-completed / current / next trio cannot.
+    void compactWindowAlwaysHasExactlyThreeRows()
+    {
+        TodoWidget widget;
+
+        // The current step is the first row: no finished step exists yet, so
+        // the steps that follow it fill the window.
+        widget.setTodos({step(u"step1"_s, u"One"_s, false, true),
+                         step(u"step2"_s, u"Two"_s, false, false),
+                         step(u"step3"_s, u"Three"_s, false, false),
+                         step(u"step4"_s, u"Four"_s, false, false)});
+        QCOMPARE(widget.findChildren<QWidget *>(u"todoRow"_s).size(), 3);
+        QVERIFY(rowForDescription(widget, u"One"_s));
+        QVERIFY(rowForDescription(widget, u"Two"_s));
+        QVERIFY(rowForDescription(widget, u"Three"_s));
+        QVERIFY(!rowForDescription(widget, u"Four"_s));
+
+        // The current step is the last row: the finished steps before it fill
+        // the window, the latest one barred on top.
+        widget.setTodos({step(u"step1"_s, u"One"_s, true, false),
+                         step(u"step2"_s, u"Two"_s, true, false),
+                         step(u"step3"_s, u"Three"_s, true, false),
+                         step(u"step4"_s, u"Four"_s, false, true)});
+        QCOMPARE(widget.findChildren<QWidget *>(u"todoRow"_s).size(), 3);
+        QVERIFY(!rowForDescription(widget, u"One"_s));
+        QVERIFY(rowForDescription(widget, u"Two"_s));
+        QCOMPARE(rowForDescription(widget, u"Two"_s)->property("state").toString(), u"done"_s);
+        QVERIFY(rowForDescription(widget, u"Three"_s));
+        QVERIFY(rowForDescription(widget, u"Four"_s));
+
+        // Nothing runs yet: the first open step anchors the middle row.
+        widget.setTodos({step(u"step1"_s, u"One"_s, false, false),
+                         step(u"step2"_s, u"Two"_s, false, false),
+                         step(u"step3"_s, u"Three"_s, false, false),
+                         step(u"step4"_s, u"Four"_s, false, false),
+                         step(u"step5"_s, u"Five"_s, false, false)});
+        QCOMPARE(widget.findChildren<QWidget *>(u"todoRow"_s).size(), 3);
+        QVERIFY(rowForDescription(widget, u"One"_s));
+        QVERIFY(rowForDescription(widget, u"Two"_s));
+        QVERIFY(rowForDescription(widget, u"Three"_s));
+        QVERIFY(!rowForDescription(widget, u"Five"_s));
+
+        // A finished step with nothing running after it: the finished step
+        // takes the top, the first open one the middle.
+        widget.setTodos({step(u"step1"_s, u"One"_s, true, false),
+                         step(u"step2"_s, u"Two"_s, false, false),
+                         step(u"step3"_s, u"Three"_s, false, false),
+                         step(u"step4"_s, u"Four"_s, false, false)});
+        QCOMPARE(widget.findChildren<QWidget *>(u"todoRow"_s).size(), 3);
+        QCOMPARE(rowForDescription(widget, u"One"_s)->property("state").toString(), u"done"_s);
+        QCOMPARE(rowForDescription(widget, u"Two"_s)->property("state").toString(), u"pending"_s);
+        QVERIFY(rowForDescription(widget, u"Three"_s));
+        QVERIFY(!rowForDescription(widget, u"Four"_s));
+
+        // Everything finished: the tail of the plan is the record left on
+        // screen.
+        widget.setTodos({step(u"step1"_s, u"One"_s, true, false),
+                         step(u"step2"_s, u"Two"_s, true, false),
+                         step(u"step3"_s, u"Three"_s, true, false),
+                         step(u"step4"_s, u"Four"_s, true, false)});
+        QCOMPARE(widget.findChildren<QWidget *>(u"todoRow"_s).size(), 3);
+        QVERIFY(!rowForDescription(widget, u"One"_s));
+        QVERIFY(rowForDescription(widget, u"Two"_s));
+        QVERIFY(rowForDescription(widget, u"Three"_s));
+        QVERIFY(rowForDescription(widget, u"Four"_s));
+    }
+
     // A plan that fits in the compact window has nothing to toggle, so the
     // toggle stays out of the way.
     void toggleHiddenWhileTheWholeListFits()

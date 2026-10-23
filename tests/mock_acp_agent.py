@@ -544,7 +544,12 @@ def handle(message):
     elif method == "authenticate":
         result(request_id, {})
     elif method == "session/new":
-        if SCENARIO == "models":
+        # Strict like the real agents: opencode answers a non-absolute cwd
+        # with "Invalid params: cwd must be an absolute path".
+        cwd = params.get("cwd")
+        if not isinstance(cwd, str) or not cwd.startswith("/"):
+            error(request_id, "Invalid params: cwd must be an absolute path: %s" % cwd, -32602)
+        elif SCENARIO == "models":
             result(
                 request_id,
                 {

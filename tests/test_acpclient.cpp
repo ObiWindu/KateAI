@@ -10,6 +10,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QJsonArray>
+#include <QStandardPaths>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QTextStream>
@@ -729,6 +730,62 @@ private Q_SLOTS:
         QVERIFY(!models.contains(u"stale-model"_s));
         QCOMPARE(client.currentModelId(), u"grok-4"_s);
         client.stop();
+    }
+
+    // The config page's Fetch Models flow owns no workspace (the standard Kate
+    // config page is created without one), yet agents reject a non-absolute
+    // cwd -- opencode answers "cwd must be an absolute path". The client must
+    // fall back to the process working directory so the models still load.
+    void modelsLoadWithoutAWorkspace()
+    {
+        AcpClient client;
+        client.setSettings(mockSettings(u"models"_s));
+
+        QStringList models;
+        QString error;
+        connect(&client, &AcpClient::modelsReceived, this, [&](const QStringList &next) {
+            models = next;
+        });
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+
+        client.fetchModels();
+        QVERIFY2(waitFor([&] {
+            return !models.isEmpty() || !error.isEmpty();
+        }), qPrintable(error.isEmpty() ? u"timed out"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QVERIFY(models.contains(u"grok-4.5"_s));
+        client.stop();
+    }
+
+    // opencode's installer puts the binary in ~/.opencode/bin, which is only
+    // added to the *shell* PATH; a Kate launched from the desktop cannot find
+    // a bare "opencode" on PATH, so the fallback has to look there.
+    void resolvedCommandFallsBackToTheOpencodeInstallDir()
+    {
+        Settings settings;
+        settings.acpAgentId = u"opencode"_s;
+        settings.acpCommand = u"opencode"_s;
+        settings.acpArgs = u"acp"_s;
+
+        QString expected = QStandardPaths::findExecutable(u"opencode"_s);
+        if (expected.isEmpty()) {
+            const QFileInfo ownInstall(QDir::homePath() + u"/.opencode/bin/opencode"_s);
+            if (ownInstall.exists() && ownInstall.isExecutable()) {
+                expected = ownInstall.absoluteFilePath();
+            }
+        }
+        if (expected.isEmpty()) {
+            const QFileInfo localBin(QDir::homePath() + u"/.local/bin/opencode"_s);
+            if (localBin.exists() && localBin.isExecutable()) {
+                expected = localBin.absoluteFilePath();
+            }
+        }
+        if (expected.isEmpty()) {
+            expected = u"opencode"_s;
+        }
+        QCOMPARE(AcpClient::resolvedCommand(settings), expected);
     }
 
     void legacySessionModelsUseSetModel()

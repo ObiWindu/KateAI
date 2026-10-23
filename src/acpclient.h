@@ -172,6 +172,11 @@ private:
     void openSession();
     void sendSessionNew();
     void sendSessionLoadOrResume();
+    // The session's cwd: the workspace when one is known, the process working
+    // directory otherwise. Agents reject a non-absolute cwd (opencode answers
+    // session/new with "cwd must be an absolute path: "), and a client spawned
+    // from the Kate config page has no workspace to offer.
+    QString sessionCwd() const;
     void sendPromptNow(const QString &text);
 
     int sendRequest(const QString &method, const QJsonObject &params,

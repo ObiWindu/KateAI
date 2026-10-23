@@ -378,6 +378,12 @@ QString AcpClient::resolvedCommand(const Settings &settings)
     if (baseName == u"grok"_s) {
         fallbacks.append(home + u"/.grok/bin/"_s + baseName);
     }
+    if (baseName == u"opencode"_s) {
+        // opencode's installer puts the binary in ~/.opencode/bin and only
+        // adds that to the *shell* PATH; a Kate launched from the desktop
+        // never sees it, so the agent cannot be started at all from there.
+        fallbacks.append(home + u"/.opencode/bin/"_s + baseName);
+    }
     fallbacks.append(home + u"/.local/bin/"_s + baseName);
     for (const QString &candidate : fallbacks) {
         const QFileInfo info(candidate);
@@ -647,6 +653,14 @@ void AcpClient::setState(State state, const QString &status)
 {
     m_state = state;
     m_status = status;
+}
+
+QString AcpClient::sessionCwd() const
+{
+    if (!m_workspace.trimmed().isEmpty()) {
+        return m_workspace;
+    }
+    return QDir::currentPath();
 }
 
 void AcpClient::spawnProcess()
@@ -966,7 +980,7 @@ void AcpClient::openSession()
 void AcpClient::sendSessionNew()
 {
     QJsonObject params;
-    params.insert(u"cwd"_s, m_workspace);
+    params.insert(u"cwd"_s, sessionCwd());
     params.insert(u"mcpServers"_s, mcpServersPayload());
     const QJsonObject meta = sessionMeta();
     if (!meta.isEmpty()) {
@@ -1007,7 +1021,7 @@ void AcpClient::sendSessionLoadOrResume()
     const QString method = m_resumeSession ? u"session/resume"_s : u"session/load"_s;
     QJsonObject params;
     params.insert(u"sessionId"_s, m_resumeSessionId);
-    params.insert(u"cwd"_s, m_workspace);
+    params.insert(u"cwd"_s, sessionCwd());
     params.insert(u"mcpServers"_s, mcpServersPayload());
     sendRequest(method, params, [this](const QJsonObject &result, const QString &error) {
         if (m_shuttingDown) {
