@@ -1444,7 +1444,12 @@ void AcpClient::handleSessionUpdate(const QJsonObject &update)
         return;
     }
     if (kind == u"tool_call"_s) {
-        const PermissionRequest request = permissionFromToolCall(update);
+        PermissionRequest request = permissionFromToolCall(update);
+        if (request.toolCallId.isEmpty()) {
+            // An agent that omits the id would key every later update under
+            // "" and leak the entry in m_liveTools; give the call a local id.
+            request.toolCallId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+        }
         m_liveTools.insert(request.toolCallId, request);
         QJsonObject function;
         function.insert(u"name"_s, request.toolName);
@@ -1558,10 +1563,14 @@ PermissionRequest AcpClient::permissionFromToolCall(const QJsonObject &toolCall)
             break;
         }
     }
+    // Check for diff content block which contains the edit details
     if (request.describeDiff.isEmpty() && request.details.contains(u"old_string"_s)) {
-        const QJsonDocument doc = QJsonDocument::fromJson(request.details.toUtf8());
-        if (doc.isObject()) {
-            const QJsonObject args = doc.object();
+        QString parseError;
+        // Create a temporary ToolCall from the JSON details to parse
+        ToolCall tempCall;
+        tempCall.argumentsJson = request.details;
+        QJsonObject args = parseToolArgs(tempCall, &parseError);
+        if (parseError.isEmpty()) {
             request.path = args.value(u"path"_s).toString();
             request.describeDiff = unifiedDiff(request.path,
                                                args.value(u"old_string"_s).toString(),
@@ -1976,15 +1985,24 @@ void AcpClient::handleTerminalCreate(const QJsonValue &id, const QJsonObject &pa
     }
     term->process->setProcessEnvironment(env);
 
-    connect(term->process, &QProcess::readyRead, this, [this, term] {
+    // The lambdas look the terminal up by id instead of capturing the raw
+    // pointer: the process outlives the Terminal (it is parented to the
+    // client), so after a release a late signal would dereference freed
+    // memory. A released terminal is simply absent from the map.
+    const QString termId = term->id;
+    connect(term->process, &QProcess::readyRead, this, [this, termId] {
+        Terminal *term = m_terminals.value(termId);
+        if (!term || !term->process) {
+            return;
+        }
         appendTerminalOutput(term, term->process->readAll());
     });
-    connect(term->process, &QProcess::finished, this, [this, term](int exitCode, QProcess::ExitStatus) {
-        markTerminalExited(term, exitCode, QString());
+    connect(term->process, &QProcess::finished, this, [this, termId](int exitCode, QProcess::ExitStatus) {
+        markTerminalExited(m_terminals.value(termId), exitCode, QString());
     });
-    connect(term->process, &QProcess::errorOccurred, this, [this, term](QProcess::ProcessError error) {
+    connect(term->process, &QProcess::errorOccurred, this, [this, termId](QProcess::ProcessError error) {
         if (error == QProcess::FailedToStart) {
-            markTerminalExited(term, 127, QString());
+            markTerminalExited(m_terminals.value(termId), 127, QString());
         }
     });
 
@@ -2016,13 +2034,11 @@ void AcpClient::handleTerminalOutput(const QJsonValue &id, const QJsonObject &pa
 {
     const QString terminalId = params.value(u"terminalId"_s).toString();
     Terminal *term = m_terminals.value(terminalId);
-    if (!term) {
+    if (!term || !term->process) {
         replyError(id, kServerError, u"Unknown terminal '%1'."_s.arg(terminalId));
         return;
     }
-    if (term->process) {
-        appendTerminalOutput(term, term->process->readAll());
-    }
+    appendTerminalOutput(term, term->process->readAll());
     QJsonObject result;
     result.insert(u"output"_s, QString::fromUtf8(term->output));
     result.insert(u"truncated"_s, term->truncated);
@@ -2043,7 +2059,7 @@ void AcpClient::handleTerminalWait(const QJsonValue &id, const QJsonObject &para
 {
     const QString terminalId = params.value(u"terminalId"_s).toString();
     Terminal *term = m_terminals.value(terminalId);
-    if (!term) {
+    if (!term || !term->process) {
         replyError(id, kServerError, u"Unknown terminal '%1'."_s.arg(terminalId));
         return;
     }
@@ -2065,7 +2081,7 @@ void AcpClient::handleTerminalKill(const QJsonValue &id, const QJsonObject &para
 {
     const QString terminalId = params.value(u"terminalId"_s).toString();
     Terminal *term = m_terminals.value(terminalId);
-    if (!term) {
+    if (!term || !term->process) {
         replyError(id, kServerError, u"Unknown terminal '%1'."_s.arg(terminalId));
         return;
     }
@@ -2077,14 +2093,12 @@ void AcpClient::handleTerminalRelease(const QJsonValue &id, const QJsonObject &p
 {
     const QString terminalId = params.value(u"terminalId"_s).toString();
     Terminal *term = m_terminals.take(terminalId);
-    if (!term) {
+    if (!term || !term->process) {
         replyError(id, kServerError, u"Unknown terminal '%1'."_s.arg(terminalId));
         return;
     }
     killTerminal(term, true);
-    if (term->process) {
-        term->process->deleteLater();
-    }
+    term->process->deleteLater();
     delete term;
     replyResult(id, QJsonObject());
 }
@@ -2131,6 +2145,8 @@ void AcpClient::killTerminal(Terminal *term, bool release)
     if (!term || !term->process) {
         return;
     }
+    // Disconnect signals to prevent callbacks after process deletion
+    term->process->disconnect(this);
     if (term->process->state() != QProcess::NotRunning) {
         term->process->terminate();
         if (!term->process->waitForFinished(500)) {

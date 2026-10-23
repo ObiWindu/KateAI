@@ -16,6 +16,7 @@
 #include <QNetworkRequest>
 #include <QProcess>
 #include <QProcessEnvironment>
+#include <QSaveFile>
 #include <QStandardPaths>
 #include <QTimer>
 #include <QUrl>
@@ -1285,8 +1286,11 @@ bool save(const QString &workspace, const QList<McpServerConfig> &servers, QStri
         return false;
     }
     QDir().mkpath(QFileInfo(path).absolutePath());
-    QFile file(path);
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
+    // QSaveFile writes a temporary file and renames it over the target, so a
+    // crash or a full disk mid-write cannot leave a truncated mcp.json: a
+    // reader sees either the old configuration or the complete new one.
+    QSaveFile file(path);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
         if (error) {
             *error = u"Could not write %1"_s.arg(path);
         }
@@ -1294,6 +1298,12 @@ bool save(const QString &workspace, const QList<McpServerConfig> &servers, QStri
     }
     const QJsonObject root = McpServerConfig::serversToJson(servers);
     file.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
+    if (!file.commit()) {
+        if (error) {
+            *error = u"Could not write %1"_s.arg(path);
+        }
+        return false;
+    }
     return true;
 }
 

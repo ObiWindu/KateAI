@@ -121,6 +121,11 @@ int estimateTokens(const QList<ChatMessage> &messages)
 
 int contextWindowFor(const QString &model)
 {
+    // Deliberately no per-model table: it went stale on every model release
+    // and could not know about new ones, and an overestimated window fails
+    // the request outright. The conservative default errs the safe way (it
+    // compacts a little early); settings.contextWindow or the provider
+    // catalogue overrides it. test_contextmanager pins this behaviour.
     Q_UNUSED(model)
     return kDefaultContextWindow;
 }
@@ -328,6 +333,15 @@ QList<ChatMessage> build(const QList<ChatMessage> &history, const Options &optio
     const int requestChars = options.summaryRequestChars > 0 ? options.summaryRequestChars
                                                              : kDefaultSummaryRequestChars;
 
+    if (!options.autoCompact && options.compactionLevel <= 0 && !options.summarizeEverything) {
+        // Auto-compaction is off: send the history unchanged. If it then
+        // overflows the window the provider rejects it and the caller's
+        // overflow recovery retries with compactionLevel > 0, which compacts
+        // here; summarizeEverything is the explicit user-driven reset and is
+        // honoured regardless.
+        return history;
+    }
+
     if (estimateTokens(history) <= budget && options.compactionLevel <= 0 && !options.summarizeEverything) {
         return history;
     }
@@ -413,7 +427,6 @@ QList<ChatMessage> build(const QList<ChatMessage> &history, const Options &optio
         }
     }
 
-    Q_UNUSED(options.autoCompact)
     return result;
 }
 

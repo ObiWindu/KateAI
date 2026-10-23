@@ -14,7 +14,6 @@
 #include <QLineEdit>
 #include <QIcon>
 #include <QColor>
-#include <QCheckBox>
 #include <QPointer>
 #include <QShortcut>
 
@@ -39,6 +38,7 @@ class ToolCallWidget;
 class SubtaskWidget;
 class SuggestionWidget;
 class QuestionWidget;
+class TodoWidget;
 class EditTracker;
 class TurnStatus;
 
@@ -137,8 +137,7 @@ private:
     void toggleThinking();
     QWidget *createThinkingBlock(QWidget *parent, QTextBrowser *&browser, QPushButton *&toggle, bool initiallyExpanded);
     void applyThinkingState(QWidget *block, QTextBrowser *browser, QPushButton *toggle, bool expanded);
-    void addPlanChecklist(const QJsonArray &plan);
-    void markPlanStepCompleted(const QString &stepId);
+    void showTodoList(const QJsonArray &plan);
     void scrollToBottom();
     void forceScrollToBottom();
     void pinWidgetInViewport(QWidget *widget);
@@ -341,10 +340,12 @@ private:
     int m_thinkingPacedLength = 0;
     QTimer *m_thinkingPacerTimer = nullptr;
 
-    // Structured plan checklist rendered below the thinking block.
+    // The todo list of the turn, rendered below the thinking block.
     QPointer<QWidget> m_planBlock;
     QPointer<QVBoxLayout> m_planLayout;
-    QHash<QCheckBox *, QString> m_planSteps;
+    // The list inside the plan block. QPointer like the block, which dies
+    // with the assistant card it lives in.
+    QPointer<TodoWidget> m_todoWidget;
 
     QHash<QString, ToolCallWidget *> m_toolCallWidgets;
     QList<QPointer<ToolCallWidget>> m_toolCallOrder;

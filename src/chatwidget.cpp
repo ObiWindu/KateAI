@@ -17,6 +17,7 @@
 #include "subtaskwidget.h"
 #include "suggestionwidget.h"
 #include "questionwidget.h"
+#include "todowidget.h"
 #include "edittracker.h"
 #include "tools.h"
 #include "transcriptlayout.h"
@@ -822,7 +823,7 @@ ChatWidget::ChatWidget(QWidget *parent)
         setThinkingIndicator(false);
         addThinkingBlock(text);
     });
-    connect(&m_agent, &AgentLoop::planUpdated, this, &ChatWidget::addPlanChecklist);
+    connect(&m_agent, &AgentLoop::planUpdated, this, &ChatWidget::showTodoList);
     connect(&m_agent, &AgentLoop::planUpdated, this, [this](const QJsonArray &) {
         scheduleSessionSave();
     });
@@ -1600,15 +1601,15 @@ void ChatWidget::setStreaming(const QString &text)
         m_thinkingBlock->hide();
         layout->addWidget(m_thinkingBlock);
 
-        // Structured plan checklist, rendered below the thinking block.
+        // The todo list of the turn, rendered below the thinking block: the
+        // plan steps with their advancement.
         m_planBlock = new QWidget(m_activeAssistantWidget);
         m_planBlock->hide();
         m_planLayout = new QVBoxLayout(m_planBlock);
         m_planLayout->setContentsMargins(4, 2, 4, 2);
         m_planLayout->setSpacing(2);
-        auto *planLabel = new QLabel(i18n("Plan"), m_planBlock);
-        planLabel->setStyleSheet(ChatTheme::sectionLabel());
-        m_planLayout->addWidget(planLabel);
+        m_todoWidget = new TodoWidget(m_planBlock);
+        m_planLayout->addWidget(m_todoWidget);
         layout->addWidget(m_planBlock);
 
         m_activeAssistantBrowser = new QTextBrowser(m_activeAssistantWidget);
@@ -1910,72 +1911,20 @@ void ChatWidget::applyThinkingState(QWidget *block, QTextBrowser *browser, QPush
     }
 }
 
-void ChatWidget::addPlanChecklist(const QJsonArray &plan)
+void ChatWidget::showTodoList(const QJsonArray &plan)
 {
-    if (!m_planBlock || !m_planLayout) {
+    if (!m_planBlock || !m_todoWidget) {
         return;
     }
-    // Remove and delete all existing plan step widgets before rebuilding.
-    // m_planSteps.clear() only drops the QCheckBox* keys from the hash; it
-    // does not delete the widgets themselves, so omitting this loop causes
-    // QCheckBox children to accumulate in m_planLayout on every plan update.
-    m_planSteps.clear();
-    while (m_planLayout->count() > 1) { // keep the "Plan" header label (index 0)
-        QLayoutItem *item = m_planLayout->takeAt(1);
-        if (item) {
-            if (item->widget()) {
-                // delete(), not deleteLater(): a deferred deletion leaves the row
-                // parented and painting over the top of the list until the event
-                // loop runs, and a plan update can rebuild several times in one
-                // turn, stacking ghosts over the real steps.
-                delete item->widget();
-            }
-            delete item;
-        }
+    // The "show plan as checklist" setting was stored but never consulted:
+    // the list showed even with it off. An empty plan has nothing to show.
+    if (!m_settings.showPlanAsChecklist || plan.isEmpty()) {
+        m_planBlock->hide();
+        return;
     }
-    for (const QJsonValue &v : plan) {
-        const QJsonObject o = v.toObject();
-        const QString desc = o.value(u"description"_s).toString();
-        const bool completed = o.value(u"completed"_s).toBool();
-        auto *cb = new QCheckBox(desc, m_planBlock);
-        cb->setChecked(completed);
-        cb->setDisabled(true);
-        cb->setStyleSheet(ChatTheme::planChecklist());
-        m_planLayout->addWidget(cb);
-        m_planSteps.insert(cb, o.value(u"id"_s).toString());
-    }
+    m_todoWidget->setTodos(plan);
     m_planBlock->show();
     scrollToBottom();
-}
-
-void ChatWidget::markPlanStepCompleted(const QString &stepId)
-{
-    bool matched = false;
-    for (auto it = m_planSteps.cbegin(); it != m_planSteps.cend(); ++it) {
-        if (it.value() == stepId) {
-            if (it.key()) {
-                it.key()->setChecked(true);
-            }
-            matched = true;
-            break;
-        }
-    }
-    // Completing the last outstanding step finishes the plan, so tick the rest
-    // too. The checklist is what the user reads afterwards as a record of what
-    // the run actually did; leaving the tail unchecked after a plan that is
-    // demonstrably complete made it look like the agent stopped part-way.
-    if (matched) {
-        for (auto it = m_planSteps.cbegin(); it != m_planSteps.cend(); ++it) {
-            if (it.key() && !it.key()->isChecked()) {
-                return;
-            }
-        }
-        for (auto it = m_planSteps.cbegin(); it != m_planSteps.cend(); ++it) {
-            if (it.key()) {
-                it.key()->setChecked(true);
-            }
-        }
-    }
 }
 
 void ChatWidget::freezeStreaming()
@@ -2972,17 +2921,8 @@ void ChatWidget::restyleLiveCards()
         m_activeAssistantBrowser->setStyleSheet(
             QStringLiteral("background: transparent; color: %1; border: none; padding: 0px;").arg(ChatTheme::textPrimary()));
     }
-    // Plan checklist: the checkboxes are tracked, the "Plan" caption is the
-    // block's only label.
-    for (auto it = m_planSteps.constBegin(); it != m_planSteps.constEnd(); ++it) {
-        if (it.key()) {
-            it.key()->setStyleSheet(ChatTheme::planChecklist());
-        }
-    }
-    if (m_planBlock) {
-        if (auto *planLabel = m_planBlock->findChild<QLabel *>()) {
-            planLabel->setStyleSheet(ChatTheme::sectionLabel());
-        }
+    if (m_todoWidget) {
+        m_todoWidget->applyStyle();
     }
 }
 
@@ -5124,6 +5064,7 @@ void ChatWidget::clearStreamingPointers()
     m_thinkingToggle = nullptr;
     m_planBlock = nullptr;
     m_planLayout = nullptr;
+    m_todoWidget = nullptr;
     m_thinkingBuffer.clear();
     m_thinkingPacedLength = 0;
     m_thinkingExpanded = true;
@@ -5184,7 +5125,6 @@ void ChatWidget::clearTranscriptContents()
     // above and must not be left parented to the dock.
     clearIntentDock();
     m_thinkingBlocks.clear();
-    m_planSteps.clear();
     clearStreamingPointers();
     resetThinkingState();
 
@@ -5686,9 +5626,9 @@ void ChatWidget::rebuildTranscript()
                         registerThinkingBlock(thinkingBlock, thinkingBrowser, thinkingToggle);
                     }
 
-                    // Add plan checklist if present
+                    // Add the todo list if the message carried a plan
                     if (!msg.plan.isEmpty()) {
-                        addPlanChecklist(msg.plan);
+                        showTodoList(msg.plan);
                     }
 
                     auto *browser = new QTextBrowser(assistantWidget);
@@ -5798,7 +5738,7 @@ void ChatWidget::restoreCurrentTurn(const SessionStore::SessionData &sessionData
             }
         }
         if (!sessionData.currentPlan.isEmpty() && sessionData.planShown) {
-            addPlanChecklist(sessionData.currentPlan);
+            showTodoList(sessionData.currentPlan);
             if (m_planBlock) {
                 m_planBlock->show();
             }
@@ -5849,13 +5789,11 @@ void ChatWidget::restoreCurrentTurn(const SessionStore::SessionData &sessionData
             m_planLayout = new QVBoxLayout(m_planBlock);
             m_planLayout->setContentsMargins(4, 2, 4, 2);
             m_planLayout->setSpacing(2);
-            auto *planLabel = new QLabel(i18n("Plan"), m_planBlock);
-            planLabel->setStyleSheet(QStringLiteral(u"color: %1; font-size: 10px; font-weight: bold; letter-spacing: 0.5px;")
-                                         .arg(ChatTheme::textMuted()));
-            m_planLayout->addWidget(planLabel);
+            m_todoWidget = new TodoWidget(m_planBlock);
+            m_planLayout->addWidget(m_todoWidget);
             appendTranscriptWidget(m_planBlock);
         }
-        addPlanChecklist(sessionData.currentPlan);
+        showTodoList(sessionData.currentPlan);
         m_planBlock->show();
     }
 

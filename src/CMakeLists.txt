@@ -57,6 +57,7 @@ target_sources(kateai PRIVATE
     subtaskwidget.cpp
     suggestionwidget.cpp
     questionwidget.cpp
+    todowidget.cpp
     kateai.qrc
 )
 target_link_libraries(kateai PRIVATE

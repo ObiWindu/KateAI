@@ -7,6 +7,8 @@
 
 #include "types.h"
 
+#include <QHash>
+#include <QRegularExpression>
 #include <QString>
 #include <QStringList>
 
@@ -78,11 +80,16 @@ public:
 private:
     bool pathInsideWorkspace(const QString &absolutePath) const;
     QString normalizePath(const QString &path, QString *error, bool forWrite) const;
+    bool globMatchCached(const QString &pattern, const QString &path) const;
 
     QString m_workspaceRoot;
     SandboxProfile m_profile = SandboxProfile::Workspace;
     QStringList m_extraDenyGlobs;
     bool m_allowOutsideReads = false;
+    // Compiled deny-glob patterns. globToRegex() is cheap but QRegularExpression
+    // construction is not, and isDenied() runs one per glob per candidate path.
+    mutable QHash<QString, QRegularExpression> m_globCache;
+    mutable QStringList m_cachedDenyGlobs;
 };
 
 } // namespace KateAi

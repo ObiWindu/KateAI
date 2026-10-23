@@ -1250,6 +1250,13 @@ void LlmClient::handleFinished()
     // an answer mentioning "blocked" or "safety" must not read as an error.
     const bool requestFailed = networkError != QNetworkReply::NoError || status >= 400
         || !m_completionError.isEmpty();
+    if (requestFailed) {
+        // The body reaches the user verbatim in the error text, and providers
+        // echo request details in it: a key leaked into a 400 body would be
+        // shown as-is. Redact before anything reads the bodies below.
+        m_completionError = sanitizeResponseBody(m_completionError.toUtf8());
+        m_responseBody = sanitizeResponseBody(m_responseBody).toUtf8();
+    }
     const QByteArray errorBody = requestFailed ? m_responseBody : QByteArray();
     RetryErrorCategory errorCategory = classifyError(status, m_completionError, errorBody, networkError);
     m_retryContext.lastErrorCategory = errorCategory;

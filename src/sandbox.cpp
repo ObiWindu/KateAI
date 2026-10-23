@@ -63,12 +63,16 @@ namespace KateAi
     }
 
     Sandbox::Sandbox(QString workspaceRoot, SandboxProfile profile, QStringList extraDenyGlobs, bool allowOutsideReads)
-    : m_workspaceRoot(QDir(workspaceRoot).absolutePath())
-    , m_profile(profile)
+    : m_profile(profile)
     , m_extraDenyGlobs(std::move(extraDenyGlobs))
     , m_allowOutsideReads(allowOutsideReads)
     {
-        m_workspaceRoot = QDir::cleanPath(m_workspaceRoot);
+        // An empty root stays empty. QDir("").absolutePath() is the process's
+        // working directory, which would silently root the sandbox there, and
+        // every guard that checks for an empty root would then never fire.
+        m_workspaceRoot = workspaceRoot.trimmed().isEmpty()
+            ? QString()
+            : QDir::cleanPath(QDir(workspaceRoot).absolutePath());
     }
 
     QStringList Sandbox::defaultDenyGlobs()
@@ -125,11 +129,47 @@ bool Sandbox::globMatch(const QString &pattern, const QString &path)
     return false;
 }
 
+// Runs a compiled glob regex, caching the compilation. The deny list is small
+// and fixed for the sandbox's lifetime, so each pattern is compiled once.
+static bool matchGlobRegex(const QString &regex, const QString &haystack, QHash<QString, QRegularExpression> &cache)
+{
+    auto it = cache.constFind(regex);
+    if (it == cache.constEnd()) {
+        it = cache.insert(regex, QRegularExpression(regex));
+    }
+    return it->match(haystack).hasMatch();
+}
+
+    bool Sandbox::globMatchCached(const QString &pattern, const QString &path) const
+    {
+        const QString haystack = QDir::fromNativeSeparators(path);
+        if (matchGlobRegex(globToRegex(pattern), haystack, m_globCache)) {
+            return true;
+        }
+        // Only match against filename if pattern is a simple filename pattern (no path separators)
+        // This prevents false positives like "**/.env" matching "/home/user/.env" when checking filename only
+        if (!pattern.contains(u'/') && !pattern.contains(u"**"_s)) {
+            if (matchGlobRegex(globToRegex(pattern), QFileInfo(haystack).fileName(), m_globCache)) {
+                return true;
+            }
+        }
+        // Also check against relative path from workspace root
+        if (!pattern.startsWith(u'/') && !pattern.startsWith(u"**"_s)) {
+            if (matchGlobRegex(globToRegex(u"**/"_s + pattern), haystack, m_globCache)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     bool Sandbox::isDenied(const QString &path) const
     {
         const QString unix = QDir::fromNativeSeparators(path);
-        for (const QString &glob : denyGlobs()) {
-            if (globMatch(glob, unix)) {
+        if (m_cachedDenyGlobs.isEmpty()) {
+            m_cachedDenyGlobs = denyGlobs();
+        }
+        for (const QString &glob : m_cachedDenyGlobs) {
+            if (globMatchCached(glob, unix)) {
                 return true;
             }
             if (!m_workspaceRoot.isEmpty()) {
@@ -140,7 +180,7 @@ bool Sandbox::globMatch(const QString &pattern, const QString &path)
                 // relative path "2/x" for the deny globs.
                 if (relative.startsWith(m_workspaceRoot + u'/')) {
                     relative = relative.mid(m_workspaceRoot.size() + 1);
-                    if (globMatch(glob, relative) || globMatch(glob, u"/"_s + relative)) {
+                    if (globMatchCached(glob, relative) || globMatchCached(glob, u"/"_s + relative)) {
                         return true;
                     }
                 }
@@ -188,19 +228,25 @@ QString Sandbox::normalizePath(const QString &path, QString *error, bool forWrit
         return {};
     }
 
-    // Resolve symlinks safely - use canonicalFilePath which resolves all symlinks
-    // To mitigate TOCTOU, we verify the path is still within workspace after resolution.
+    // Resolve symlinks safely using canonicalFilePath, then verify the result.
+    // This avoids TOCTOU by checking the final resolved path, not the intermediate.
     QFileInfo fileInfo(absolute);
     QString canonical = fileInfo.canonicalFilePath();
     if (!canonical.isEmpty()) {
-        absolute = canonical;
-        // Re-check workspace containment AFTER symlink resolution
-        if (mustStayInWorkspace && !pathInsideWorkspace(absolute)) {
+        // Verify the canonical path is still within workspace and not denied
+        if (mustStayInWorkspace && !pathInsideWorkspace(canonical)) {
             if (error) {
-                *error = u"Path resolves outside the workspace: %1"_s.arg(absolute);
+                *error = u"Path resolves outside the workspace: %1"_s.arg(canonical);
             }
             return {};
         }
+        if (isDenied(canonical)) {
+            if (error) {
+                *error = u"Access to this path is blocked by a deny rule: %1"_s.arg(canonical);
+            }
+            return {};
+        }
+        absolute = canonical;
     } else if (!fileInfo.exists()) {
         // File doesn't exist yet - resolve parent directory
         QString parent = fileInfo.absolutePath();
@@ -378,7 +424,11 @@ bool Sandbox::isReadOnlyCommand(const QString &command) const
         u"ls"_s,     u"cat"_s,     u"pwd"_s,     u"date"_s,      u"whoami"_s, u"hostname"_s, u"uptime"_s, u"ps"_s,
         u"head"_s,   u"tail"_s,    u"wc"_s,      u"sort"_s,      u"uniq"_s,   u"tr"_s,       u"cut"_s,    u"grep"_s,
         u"rg"_s,     u"find"_s,    u"file"_s,    u"stat"_s,      u"diff"_s,   u"echo"_s,     u"printf"_s, u"which"_s,
-        u"type"_s,   u"env"_s,     u"printenv"_s, u"dir"_s,      u"where"_s,  u"where.exe"_s,
+        // "env" is deliberately absent: with no command it prints the
+        // environment, but "env bash -c …" executes an arbitrary program, so a
+        // read-only allowlist entry would auto-approve code execution.
+        // "printenv" only ever prints.
+        u"type"_s,   u"printenv"_s, u"dir"_s,    u"where"_s,     u"where.exe"_s,
         u"Get-ChildItem"_s, u"Get-Content"_s, u"Get-Location"_s, u"Get-Date"_s, u"Get-Process"_s,
     };
 
@@ -393,6 +443,12 @@ bool Sandbox::isReadOnlyCommand(const QString &command) const
     // read-only executable and writes anyway. The same holds for backticks and
     // for a backgrounded command, whose result is never inspected.
     if (cmd.contains(u"$("_s) || cmd.contains(u"`"_s) || cmd.contains(u"${"_s)) {
+        return false;
+    }
+    // Process substitution runs a program inline, exactly like "$(…)" does:
+    // "diff <(curl …) b" has a read-only executable but still executes (and
+    // with it, any network or file access) what is inside the parens.
+    if (cmd.contains(u"<("_s) || cmd.contains(u">("_s)) {
         return false;
     }
     // A single "&" backgrounds the command, so its result is never inspected.
@@ -447,8 +503,13 @@ bool Sandbox::isDangerousCommand(const QString &command) const
 bool Sandbox::isAlwaysDeniedCommand(const QString &command) const
 {
     const QString cmd = command.trimmed();
+    // The rm branch covers a recursive or forced removal of the filesystem
+    // root, of everything directly below it ("rm -rf /*"), or of the home
+    // directory ("rm -rf ~", "rm -rf ~/…"). The flags and --no-preserve-root
+    // may appear in any order. Deeper absolute paths are not matched: they
+    // are a normal cleanup the permission prompt can judge.
     static const QRegularExpression denied(
-        uR"((rm\s+(-[a-zA-Z]*f[a-zA-Z]*\s+)?(--no-preserve-root\s+)?/(\s|$))|(\bmkfs\b)|(\bdd\s+.*\bof=/dev/)|(:\(\)\s*\{\s*:\|:&\s*;\s*\})|(\b(curl|wget)\b.*\|\s*(?:sudo\s+)?(sh|bash|zsh|fish|dash|ksh|cmd|cmd\.exe|powershell|powershell\.exe|pwsh|python[0-9.]*|perl|ruby|node)\b)|(\bformat\s+[a-zA-Z]:)|(\bdiskpart\b)|(\brmdir\s+/s\s+/q\s+[a-zA-Z]:\\)|(\bRemove-Item\s+.*-Recurse.*[A-Z]:\\))"_s,
+        uR"((rm\s+((-[a-zA-Z]*[rf][a-zA-Z]*|--no-preserve-root)\s+)+(/(\s|$|\*+)|~(/\S*)?(\s|$)))|(\bmkfs\b)|(\bdd\s+.*\bof=/dev/)|(:\(\)\s*\{\s*:\|:&\s*;\s*\})|(\b(curl|wget)\b.*\|\s*(?:sudo\s+)?(sh|bash|zsh|fish|dash|ksh|cmd|cmd\.exe|powershell|powershell\.exe|pwsh|python[0-9.]*|perl|ruby|node)\b)|(\bformat\s+[a-zA-Z]:)|(\bdiskpart\b)|(\brmdir\s+/s\s+/q\s+[a-zA-Z]:\\)|(\bRemove-Item\s+.*-Recurse.*[A-Z]:\\))"_s,
         QRegularExpression::CaseInsensitiveOption);
     return denied.match(cmd).hasMatch();
 }

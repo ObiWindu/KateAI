@@ -40,9 +40,11 @@ struct Options {
     int keepRecentTokens = 0;
     // Extra compaction pressure after a context-window rejection (0 = none).
     int compactionLevel = 0;
-    // When true (the default), compact as soon as the history would overflow.
-    // When false, still compact rather than send an oversized payload: an
-    // overflow fails the request outright.
+    // When true (the default), compact as soon as the history would overflow
+    // the window. When false, the history is sent unchanged; compaction then
+    // only happens after the provider has rejected an oversized request (the
+    // caller retries with compactionLevel > 0) or when summarizeEverything
+    // asks for it.
     bool autoCompact = true;
     // Per-request cap on how much of an old user request survives into the
     // summary. 0 means a sensible default.

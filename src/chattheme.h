@@ -153,7 +153,20 @@ QString thinkingCss();    // the collapsed reasoning block
 QString toggleLink();     // the "Reasoning" disclosure button
 QString roleHeader();     // the YOU / KATE AI captions above a message
 QString messageText();    // plain user / assistant body text
-QString planChecklist();  // structured plan steps
+// --- The todo list. -----------------------------------------------------------
+// The plan steps with their advancement, drawn the way an agent panel draws a
+// todo list: a header row with the "done/total" counter, and one row per step
+// led by a status glyph (pending / pulsing active / done). One stylesheet per
+// element, the way every other widget asks for its look.
+QString todoList();           // the container
+QString todoProgress();       // the "n/m" counter in the header
+QString todoItemText();       // a pending step's text
+QString todoItemTextActive(); // the step being worked on
+QString todoItemTextDone();   // a finished step: muted and struck through
+QString todoGlyphPending();   // ○, muted
+QString todoGlyphActive();    // ●, accent
+QString todoGlyphActiveDim(); // ●, accent at low alpha (the pulse's dim phase)
+QString todoGlyphDone();      // ✓, success
 
 // --- Copy --------------------------------------------------------------------
 // Tool names reach the model in snake_case ("multi_replace_file_content").

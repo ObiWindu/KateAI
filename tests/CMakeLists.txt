@@ -55,6 +55,13 @@ add_test(NAME test_questionflow
          COMMAND test_questionflow -platform offscreen
          WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
+# The tool-call budget: exhausting it must still ask the model for the closing
+# summary and finish the turn. Drives a real AgentLoop against an in-process
+# mock LLM, so it needs an event loop.
+add_executable(test_budget test_budget.cpp)
+target_link_libraries(test_budget PRIVATE kateai_core Qt6::Test)
+add_test(NAME test_budget COMMAND test_budget -platform offscreen)
+
 add_executable(test_tools test_tools.cpp)
 target_link_libraries(test_tools PRIVATE kateai_core Qt6::Test)
 add_test(NAME test_tools COMMAND test_tools -platform offscreen)
@@ -96,6 +103,13 @@ target_link_libraries(test_questionwidget PRIVATE kateai_core Qt6::Test Qt6::Wid
 target_compile_definitions(test_questionwidget PRIVATE TRANSLATION_DOMAIN="kateai")
 add_test(NAME test_questionwidget COMMAND test_questionwidget -platform offscreen)
 
+# The todo list of the running turn: every step with its state glyph and the
+# "done/total" counter, which must follow the plan as it advances.
+add_executable(test_todowidget test_todowidget.cpp ../src/todowidget.cpp ../src/chattheme.cpp)
+target_link_libraries(test_todowidget PRIVATE kateai_core Qt6::Test Qt6::Widgets)
+target_compile_definitions(test_todowidget PRIVATE TRANSLATION_DOMAIN="kateai")
+add_test(NAME test_todowidget COMMAND test_todowidget -platform offscreen)
+
 # Tool-card headers and command previews, which are capped at three lines.
 add_executable(test_toolcard test_toolcard.cpp ../src/toolcallwidget.cpp ../src/chattheme.cpp)
 target_link_libraries(test_toolcard PRIVATE kateai_core Qt6::Test Qt6::Widgets)
@@ -114,7 +128,7 @@ add_test(NAME test_promptedit COMMAND test_promptedit -platform offscreen)
 
 add_executable(test_overflow test_overflow.cpp ../src/chatwidget.cpp ../src/toolcallwidget.cpp
     ../src/promptedit.cpp ../src/permissionbar.cpp ../src/subtaskwidget.cpp
-    ../src/suggestionwidget.cpp ../src/questionwidget.cpp ../src/edittracker.cpp
+    ../src/suggestionwidget.cpp ../src/questionwidget.cpp ../src/todowidget.cpp ../src/edittracker.cpp
     ../src/turnstatus.cpp ../src/chattheme.cpp)
 target_link_libraries(test_overflow PRIVATE kateai_core Qt6::Test Qt6::Widgets)
 target_compile_definitions(test_overflow PRIVATE TRANSLATION_DOMAIN="kateai")
@@ -122,7 +136,7 @@ add_test(NAME test_overflow COMMAND test_overflow -platform offscreen)
 
 add_executable(test_livecards test_livecards.cpp ../src/chatwidget.cpp ../src/toolcallwidget.cpp
     ../src/promptedit.cpp ../src/permissionbar.cpp ../src/subtaskwidget.cpp
-    ../src/suggestionwidget.cpp ../src/questionwidget.cpp ../src/edittracker.cpp
+    ../src/suggestionwidget.cpp ../src/questionwidget.cpp ../src/todowidget.cpp ../src/edittracker.cpp
     ../src/turnstatus.cpp ../src/chattheme.cpp)
 target_link_libraries(test_livecards PRIVATE kateai_core Qt6::Test Qt6::Widgets)
 target_compile_definitions(test_livecards PRIVATE TRANSLATION_DOMAIN="kateai")
@@ -133,7 +147,7 @@ add_test(NAME test_livecards COMMAND test_livecards -platform offscreen)
 # test_overflow, which also builds a full ChatWidget.
 add_executable(test_themeapply test_themeapply.cpp ../src/chatwidget.cpp ../src/toolcallwidget.cpp
     ../src/promptedit.cpp ../src/permissionbar.cpp ../src/subtaskwidget.cpp
-    ../src/suggestionwidget.cpp ../src/questionwidget.cpp ../src/edittracker.cpp
+    ../src/suggestionwidget.cpp ../src/questionwidget.cpp ../src/todowidget.cpp ../src/edittracker.cpp
     ../src/turnstatus.cpp ../src/chattheme.cpp)
 target_link_libraries(test_themeapply PRIVATE kateai_core Qt6::Test Qt6::Widgets)
 target_compile_definitions(test_themeapply PRIVATE TRANSLATION_DOMAIN="kateai")
@@ -143,7 +157,7 @@ add_test(NAME test_themeapply COMMAND test_themeapply -platform offscreen)
 # cards must come back with their icons, titles, colours and result boxes.
 add_executable(test_historyrestore test_historyrestore.cpp ../src/chatwidget.cpp ../src/toolcallwidget.cpp
     ../src/promptedit.cpp ../src/permissionbar.cpp ../src/subtaskwidget.cpp
-    ../src/suggestionwidget.cpp ../src/questionwidget.cpp ../src/edittracker.cpp
+    ../src/suggestionwidget.cpp ../src/questionwidget.cpp ../src/todowidget.cpp ../src/edittracker.cpp
     ../src/turnstatus.cpp ../src/chattheme.cpp)
 target_link_libraries(test_historyrestore PRIVATE kateai_core Qt6::Test Qt6::Widgets)
 target_compile_definitions(test_historyrestore PRIVATE TRANSLATION_DOMAIN="kateai")

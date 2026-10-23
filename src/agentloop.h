@@ -319,6 +319,10 @@ LlmClient m_client;
     // The `bash` call currently streaming, if any. One at a time: the queue
     // waits for it, so nothing else is executing while it is set.
     QString m_runningBashId;
+    // Connection of the current bash call's finished handler. Kept so the next
+    // command can drop the previous one: without it every command leaks a
+    // connection that fires (and early-returns) on every later result.
+    QMetaObject::Connection m_bashFinishedConnection;
 
     bool m_busy = false;
     State m_state = State::Idle;

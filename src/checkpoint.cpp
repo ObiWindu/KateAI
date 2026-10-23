@@ -118,8 +118,12 @@ void CheckpointManager::pruneStaleShadowRepositories() const
     // that was not touched for a month is not worth the space.
     const QDateTime cutoff = QDateTime::currentDateTime().addDays(-30);
     const QFileInfoList entries = dir.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot);
+    // The repository of the workspace that is open right now is never pruned,
+    // however old it looks: deleting it would throw away the checkpoints of
+    // the project the user is actively working on.
+    const QString current = m_workspace.isEmpty() ? QString() : QFileInfo(shadowRoot()).fileName();
     for (const QFileInfo &entry : entries) {
-        if (entry.fileName() == QFileInfo(shadowRoot()).fileName() && m_workspace.isEmpty()) {
+        if (!current.isEmpty() && entry.fileName() == current) {
             continue;
         }
         const QString marker = entry.absoluteFilePath() + u"/workspace"_s;

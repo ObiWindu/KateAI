@@ -7,6 +7,7 @@
 
 #include <QDir>
 #include <QDirIterator>
+#include <QFile>
 #include <QFileInfo>
 #include <QJsonDocument>
 #include <QJsonParseError>
@@ -37,7 +38,10 @@ namespace
 constexpr int kMaxBashOutputChars = 80000; // keep in sync with clip()
 } // namespace
 
-static QJsonObject parseArgs(const ToolCall &call, QString *error)
+// Unified tool argument parsing - canonicalizes arguments from ToolCall
+// Prefers pre-parsed `arguments` object, falls back to parsing `argumentsJson`
+// Returns empty object on parse failure (error output parameter is set)
+QJsonObject parseToolArgs(const ToolCall &call, QString *error)
 {
     // First try to use the parsed arguments directly if available
     if (!call.arguments.isEmpty()) {
@@ -59,6 +63,12 @@ static QJsonObject parseArgs(const ToolCall &call, QString *error)
         return {};
     }
     return doc.object();
+}
+
+// Legacy alias for compatibility
+QJsonObject parseArgs(const ToolCall &call, QString *error)
+{
+    return parseToolArgs(call, error);
 }
 
 static QString clip(const QString &text, int maxChars = 80000)
@@ -224,13 +234,17 @@ QString planFilePath(const QString &workspaceRoot)
 
 static bool isNoisySearchPath(const QString &relativePath)
 {
-    const QStringList noisy = {
-        u"/.git/"_s, u".git/"_s, u"/node_modules/"_s, u"node_modules/"_s,
-        u"/build/"_s, u"build/"_s, u"/CMakeFiles/"_s, u"/.kateai/"_s,
-        u"/.cache/"_s, u"/__pycache__/"_s,
+    // Match whole path segments, not substrings: "cmake-build/x" or
+    // "src/mybuild/x" contain "build/" but are ordinary source directories.
+    // Only directory segments are checked — the final segment is the file
+    // name, and a file called "build" is worth searching.
+    static const QSet<QString> noisy = {
+        u".git"_s, u"node_modules"_s, u"build"_s, u"CMakeFiles"_s,
+        u".kateai"_s, u".cache"_s, u"__pycache__"_s,
     };
-    for (const QString &part : noisy) {
-        if (relativePath.contains(part) || relativePath.startsWith(part.mid(1))) {
+    const QStringList segments = relativePath.split(u'/');
+    for (int i = 0; i + 1 < segments.size(); ++i) {
+        if (noisy.contains(segments.at(i))) {
             return true;
         }
     }
@@ -607,6 +621,21 @@ ToolResult ToolRunner::readFile(const QJsonObject &args) const
         result.ok = false;
         result.output = error;
         return result;
+    }
+
+    // A binary file cannot be read as numbered lines; say so instead of
+    // handing the model a wall of mojibake. The probe reads the first 8 KiB
+    // straight from disk; a document that exists only in the editor is not
+    // probed and keeps the previous behaviour.
+    QFile probe(readPath);
+    if (probe.open(QIODevice::ReadOnly)) {
+        const QByteArray head = probe.read(8192);
+        probe.close();
+        if (head.contains('\0')) {
+            result.ok = true;
+            result.output = u"(binary file, %1 bytes)"_s.arg(QFileInfo(readPath).size());
+            return result;
+        }
     }
 
     // Apply offset and limit parameters to paginate the file contents
@@ -1154,6 +1183,12 @@ ToolResult ToolRunner::grep(const QJsonObject &args) const
             return;
         }
 
+        // A NUL byte in the first 8 KiB marks the file as binary: regex hits
+        // in it are mojibake, and they would flood the transcript.
+        if (contents.left(8192).contains(u'\0')) {
+            return;
+        }
+
         const QStringList lines = contents.split(u'\n');
         int lastMatchEnd = -1; // Track end of last context block to avoid duplicate separators
         for (int i = 0; i < lines.size(); ++i) {
@@ -1421,9 +1456,9 @@ void ToolRunner::runBashAsync(const ToolCall &call)
         // clipping happens only then. A command that writes gigabytes would
         // fill the memory in the meantime, so the buffer has a ceiling here.
         QString &buffer = m_bashAccumulated[callId];
-        if (buffer.size() < kMaxBashOutputChars) {
-            const int room = kMaxBashOutputChars - buffer.size();
-            buffer += chunk.left(room);
+        const int room = kMaxBashOutputChars - buffer.size();
+        if (room > 0) {
+            buffer += chunk.left(qMin(chunk.size(), room));
         }
         return m_bashAccumulated.value(callId);
     };
@@ -1446,6 +1481,9 @@ void ToolRunner::runBashAsync(const ToolCall &call)
         if (!process) {
             return;
         }
+        // Remember that this call was cut short, so the finished result can
+        // say "timed out" instead of reporting an unexplained kill.
+        m_bashTimedOut.insert(callId);
         const QString soFar = drain();
         if (!soFar.isEmpty()) {
             Q_EMIT bashProgress(callId, soFar);
@@ -1463,6 +1501,7 @@ void ToolRunner::runBashAsync(const ToolCall &call)
         if (!process) {
             return;
         }
+        const bool timedOut = m_bashTimedOut.remove(callId);
         const QString soFar = drain();
         if (!soFar.isEmpty()) {
             // A final progress emission, so the live text in the card is exactly
@@ -1472,6 +1511,12 @@ void ToolRunner::runBashAsync(const ToolCall &call)
         ToolResult result = finishBashOutput(m_bashAccumulated.take(callId), process->exitCode(),
                                              process->exitStatus() == QProcess::NormalExit);
         result.toolCallId = callId;
+        if (timedOut) {
+            // The timer killed the process; without this line the model sees a
+            // crashed command and may retry the same thing forever.
+            result.ok = false;
+            result.output += u"\nCommand timed out after %1 ms."_s.arg(qMax(1000, m_timeoutMs));
+        }
         process->deleteLater();
         Q_EMIT bashFinished(result);
     });
@@ -1490,6 +1535,7 @@ void ToolRunner::cancelBash(const QString &toolCallId)
     // never emit a result. The tool call has to be settled here, otherwise
     // the caller waits for a result that never comes.
     m_bashAccumulated.remove(toolCallId);
+    m_bashTimedOut.remove(toolCallId);
     ToolResult cancelled;
     cancelled.toolCallId = toolCallId;
     cancelled.name = u"bash"_s;

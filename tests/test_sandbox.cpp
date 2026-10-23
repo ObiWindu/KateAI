@@ -80,6 +80,32 @@ private Q_SLOTS:
         QVERIFY(box.isReadOnlyCommand(u"cat file.txt"_s));
     }
 
+    void envWrapperIsNotReadOnly()
+    {
+        // "env" with no command only prints the environment, but
+        // "env bash -c …" executes an arbitrary program: a read-only
+        // allowlist entry would auto-approve code execution in Ask mode.
+        Sandbox box(QDir::tempPath(), SandboxProfile::Workspace);
+        QVERIFY(!box.isReadOnlyCommand(u"env bash -c 'echo hi'"_s));
+        QVERIFY(!box.isReadOnlyCommand(u"env python3 -c 'print(1)'"_s));
+        QVERIFY(!box.isReadOnlyCommand(u"env FOO=1 ls -la"_s));
+        // "printenv" only ever prints.
+        QVERIFY(box.isReadOnlyCommand(u"printenv"_s));
+        QVERIFY(box.isReadOnlyCommand(u"printenv HOME"_s));
+    }
+
+    void processSubstitutionIsNotReadOnly()
+    {
+        // "<(…)" runs a program inline, exactly like "$(…)": the executable
+        // in front of it is read-only but the substitution is not.
+        Sandbox box(QDir::tempPath(), SandboxProfile::Workspace);
+        QVERIFY(!box.isReadOnlyCommand(u"diff <(python3 -c 'print(1)') b.txt"_s));
+        QVERIFY(!box.isReadOnlyCommand(u"sort <(curl http://example.invalid) | head"_s));
+        QVERIFY(!box.isReadOnlyCommand(u"cat >(gzip > out.gz)"_s));
+        // A plain pipe of read-only commands stays read-only.
+        QVERIFY(box.isReadOnlyCommand(u"cat a.txt | sort | head"_s));
+    }
+
     void deniedDirectoryMatchesItself()
     {
         // "**/.ssh/**" did not match the directory itself, so a command that
@@ -135,6 +161,35 @@ private Q_SLOTS:
         QVERIFY(box.isReadOnlyCommand(u"ls -la"_s));
         QVERIFY(box.isReadOnlyCommand(u"git status"_s));
         QVERIFY(!box.isReadOnlyCommand(u"ls && rm -rf src"_s));
+    }
+
+    void alwaysDeniedCoversRootHomeAndStarRemoval()
+    {
+        Sandbox box(QDir::tempPath(), SandboxProfile::Workspace);
+        QVERIFY(box.isAlwaysDeniedCommand(u"rm -rf /"_s));
+        QVERIFY(box.isAlwaysDeniedCommand(u"rm -rf /*"_s));
+        QVERIFY(box.isAlwaysDeniedCommand(u"rm -rf ~"_s));
+        QVERIFY(box.isAlwaysDeniedCommand(u"rm -rf ~/Documents"_s));
+        QVERIFY(box.isAlwaysDeniedCommand(u"rm -r /"_s));
+        // The flags and --no-preserve-root may appear in any order.
+        QVERIFY(box.isAlwaysDeniedCommand(u"rm -rf --no-preserve-root /"_s));
+        QVERIFY(box.isAlwaysDeniedCommand(u"rm --no-preserve-root -rf /"_s));
+        QVERIFY(box.isAlwaysDeniedCommand(u"sudo rm -rf ~"_s));
+        // Deeper paths are a normal cleanup the permission prompt can judge.
+        QVERIFY(!box.isAlwaysDeniedCommand(u"rm -rf /etc"_s));
+        QVERIFY(!box.isAlwaysDeniedCommand(u"rm -rf /tmp/build"_s));
+        QVERIFY(!box.isAlwaysDeniedCommand(u"rm -rf src"_s));
+        QVERIFY(!box.isAlwaysDeniedCommand(u"rm -rf ./build"_s));
+    }
+
+    void emptyWorkspaceRootStaysEmpty()
+    {
+        // QDir("").absolutePath() is the process working directory: rooting
+        // the sandbox there would silently confine to a directory the caller
+        // never chose, and every guard that checks for an empty root would
+        // stop firing.
+        Sandbox box(QString(), SandboxProfile::Workspace);
+        QVERIFY(box.workspaceRoot().isEmpty());
     }
 
     void globWorkspaceMatch()

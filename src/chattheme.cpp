@@ -900,12 +900,62 @@ QString messageText()
         .arg(kTextPrimary);
 }
 
-QString planChecklist()
+QString todoList()
+{
+    return QStringLiteral("QWidget { background: transparent; border: none; }");
+}
+
+QString todoProgress()
+{
+    return QStringLiteral("QLabel { color: %1; font-size: 10px; border: none; background: transparent; }")
+        .arg(kTextMuted);
+}
+
+QString todoItemText()
+{
+    return QStringLiteral("QLabel { color: %1; font-size: 12px; border: none; background: transparent; }")
+        .arg(kTextPrimary);
+}
+
+QString todoItemTextActive()
 {
     return QStringLiteral(
-           "QCheckBox { color: %1; font-size: 12px; spacing: 8px; }"
-           "QCheckBox::indicator { width: 14px; height: 14px; }")
+           "QLabel { color: %1; font-size: 12px; font-weight: 500; border: none; background: transparent; }")
         .arg(kTextPrimary);
+}
+
+QString todoItemTextDone()
+{
+    // A finished step stays in the list as the record of what the run did, but
+    // it must not compete with the steps still open.
+    return QStringLiteral(
+           "QLabel { color: %1; font-size: 12px; text-decoration: line-through;"
+           " border: none; background: transparent; }")
+        .arg(kTextMuted);
+}
+
+QString todoGlyphPending()
+{
+    return QStringLiteral("QLabel { color: %1; font-size: 11px; border: none; background: transparent; }")
+        .arg(kTextMuted);
+}
+
+QString todoGlyphActive()
+{
+    return QStringLiteral("QLabel { color: %1; font-size: 11px; border: none; background: transparent; }")
+        .arg(kAccent);
+}
+
+QString todoGlyphActiveDim()
+{
+    return QStringLiteral("QLabel { color: %1; font-size: 11px; border: none; background: transparent; }")
+        .arg(tinted(kAccent, 0.35));
+}
+
+QString todoGlyphDone()
+{
+    return QStringLiteral("QLabel { color: %1; font-size: 11px; border: none; background: transparent; }")
+        .arg(kSuccess);
 }
 
 bool isEditToolName(const QString &toolName)

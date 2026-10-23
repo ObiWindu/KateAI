@@ -13,6 +13,7 @@
 
 #include <QHash>
 #include <QObject>
+#include <QSet>
 
 class QProcess;
 
@@ -85,10 +86,19 @@ private:
     // each so far (the final result is the whole stream, not only the tail).
     QHash<QString, QProcess *> m_bashProcesses;
     QHash<QString, QString> m_bashAccumulated;
+    // Call ids whose timeout timer fired. The kill only makes the process
+    // report a failure; without this marker the finished result looks like an
+    // ordinary crash and the model never learns the command was cut short.
+    QSet<QString> m_bashTimedOut;
 };
 
 QString unifiedDiff(const QString &path, const QString &before, const QString &after);
 QString shellCommandFor(const QString &toolName, const QJsonObject &args);
+
+// Unified tool argument parsing - canonicalizes arguments from ToolCall
+// Prefers pre-parsed `arguments` object, falls back to parsing `argumentsJson`
+// Returns empty object on parse failure (error output parameter is set)
+QJsonObject parseToolArgs(const ToolCall &call, QString *error = nullptr);
 
 // Path of the implementation-plan file the agent writes and the user follows.
 // It lives in the system temp directory — never in the workspace — so an

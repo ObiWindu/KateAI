@@ -25,6 +25,7 @@
 #include <QElapsedTimer>
 #include <QMetaObject>
 #include <QProcess>
+#include <QSignalBlocker>
 #include <QSharedPointer>
 #include <QTimer>
 #include <QUuid>
@@ -630,6 +631,7 @@ QString AgentLoop::systemPrompt() const
         if (gitDir.exists()) {
             QProcess git;
             git.setWorkingDirectory(m_workspace);
+            // Use a fixed command with no user input to prevent injection
             git.start(u"git"_s, QStringList{u"status"_s, u"--short"_s, u"-uno"_s});
             if (git.waitForFinished(1500)) {
                 QString status = QString::fromUtf8(git.readAllStandardOutput()).trimmed();
@@ -644,6 +646,11 @@ QString AgentLoop::systemPrompt() const
                 qDebug() << "Git status command failed or timed out";
             }
         }
+    }
+    // Validate workspace is a real directory before using it further
+    QDir workspaceDir(m_workspace);
+    if (!workspaceDir.exists()) {
+        qWarning() << "Workspace directory does not exist:" << m_workspace;
     }
     if (m_settings.planMode) {
         prompt += u"\n\nPlan mode is active. Inspect the project and return a concise, ordered implementation plan. "
@@ -790,7 +797,24 @@ void AgentLoop::abort()
 
     m_nextModelTimer.stop();
     m_client.abort();
+    const bool stopAcpProcess = usesAcpNative(m_settings) && m_acp.isBusy();
+    const QString acpSessionId = stopAcpProcess ? m_acp.sessionId() : QString();
     m_acp.cancel();
+    if (stopAcpProcess) {
+        // session/cancel is advisory. Some ACP agents keep streaming and can
+        // continue issuing filesystem requests after Kate has started a new
+        // conversation. A late promptFinished is also indistinguishable from
+        // the next prompt's completion because ACP notifications do not carry
+        // a prompt id. Retire the subprocess while the turn is being aborted
+        // so neither writes nor stale events can cross the conversation
+        // boundary. Preserve the session id for a same-conversation restart;
+        // resetConversation() clears it immediately after this call.
+        if (!acpSessionId.isEmpty()) {
+            m_acp.setResumeSessionId(acpSessionId);
+        }
+        const QSignalBlocker suppressAbortSignals(&m_acp);
+        m_acp.stop();
+    }
     m_web.abort();
     // A command left streaming when the turn stops would keep writing into a
     // card that no longer has a turn behind it.
@@ -894,6 +918,14 @@ void AgentLoop::start(const QString &userText)
         m_messages.append(system);
     } else if (m_messages.first().role == ChatMessage::Role::System) {
         m_messages.first().content = systemPrompt();
+    } else {
+        // A conversation that starts without a system message (restored
+        // history, a prompt compacted away) gets a fresh one prepended:
+        // without it the model has no instructions and no tool contract.
+        ChatMessage system;
+        system.role = ChatMessage::Role::System;
+        system.content = systemPrompt();
+        m_messages.prepend(system);
     }
 
     ChatMessage user;
@@ -1134,12 +1166,11 @@ QList<ToolCall> AgentLoop::bundleSimilarTools(const QList<ToolCall> &calls)
 
 QString AgentLoop::actionSignature(const ToolCall &call) const
 {
-    QJsonObject arguments = call.arguments;
-    if (!call.argumentsJson.isEmpty()) {
-        const QJsonDocument parsed = QJsonDocument::fromJson(call.argumentsJson.toUtf8());
-        if (parsed.isObject()) {
-            arguments = parsed.object();
-        }
+    QString parseError;
+    QJsonObject arguments = parseToolArgs(call, &parseError);
+    if (!parseError.isEmpty()) {
+        // If parsing fails, fall back to empty args to avoid crashing
+        arguments = QJsonObject();
     }
     // Serialize the parsed object with sorted keys to ensure canonical form,
     // so reordering JSON fields cannot bypass repeat detection.
@@ -1692,7 +1723,12 @@ void AgentLoop::executeOne(const ToolCall &call)
         appendControllerMessage(i18n("The tool-call budget for this turn is now spent, so no further tools will run. "
                                      "Summarise what you completed, what you did not, and what the user should do next. "
                                      "Do not request any more tools."));
-        m_state = State::WaitingForNextModel;
+        // The queue was drained above, so processQueue() takes the empty-queue
+        // exit and schedules the summarising request. Setting
+        // WaitingForNextModel here instead would make that exit return at its
+        // state check and the turn would never ask the model anything. While
+        // an async tool is still running processQueue() returns early; that
+        // tool's completion pumps the queue into the same exit.
         processQueue();
         return;
     }
@@ -2135,11 +2171,17 @@ void AgentLoop::startBashTool(const ToolCall &call)
             Q_EMIT toolProgress(id, partial);
         });
 
-    connect(m_tools.get(), &ToolRunner::bashFinished, this,
+    // Only one command runs at a time (the queue waits for it), so the
+    // previous call's handler has already run and dropped its connection.
+    // Dropping it here anyway covers a call whose process vanished without
+    // reporting, and keeps one connection per loop instead of one per command.
+    disconnect(m_bashFinishedConnection);
+    m_bashFinishedConnection = connect(m_tools.get(), &ToolRunner::bashFinished, this,
         [this, call, progress](const ToolResult &result) {
             if (result.toolCallId != call.id) {
                 return;
             }
+            disconnect(m_bashFinishedConnection);
             disconnect(progress);
             if (m_runningBashId == call.id) {
                 m_runningBashId.clear();
@@ -2183,7 +2225,11 @@ void AgentLoop::releaseEditLocksFor(const ToolCall &call)
         return;
     }
     if (!m_workspace.isEmpty() && QDir::isRelativePath(path)) {
-        path = m_workspace + QLatin1Char('/') + path;
+        // cleanPath so the lock key is canonical: "src/../src/a.cpp" and
+        // "src/a.cpp" must name the same lock, or two agents could hold
+        // "different" locks on one file. acquireEditLock() normalises the
+        // same way, which is what makes release() find the key again.
+        path = QDir::cleanPath(m_workspace + QLatin1Char('/') + path);
     }
     m_locks->release(path, m_selfId);
     m_owedPaths.removeAll(path);
@@ -2202,7 +2248,9 @@ bool AgentLoop::acquireEditLock(const ToolCall &call, QString *deniedBy)
         return true;
     }
     if (!m_workspace.isEmpty() && QDir::isRelativePath(path)) {
-        path = m_workspace + QLatin1Char('/') + path;
+        // See releaseEditLocksFor(): the key must be canonical so both sides
+        // of the lock agree on it.
+        path = QDir::cleanPath(m_workspace + QLatin1Char('/') + path);
     }
     if (!m_locks->tryAcquire(path, m_selfId)) {
         if (deniedBy) {
@@ -2282,7 +2330,7 @@ void AgentLoop::dispatchSubtask(const ToolCall &call)
         finishAsyncTool(call, result);
         return;
     }
-    if (m_subtaskDepth >= qMax(0, m_settings.maxSubtaskDepth)) {
+    if (m_subtaskDepth > qMax(0, m_settings.maxSubtaskDepth)) {
         ToolResult result;
         result.ok = false;
         result.output = u"Subtask nesting limit reached (%1 levels). Do the remaining work yourself."_s.arg(m_settings.maxSubtaskDepth);
