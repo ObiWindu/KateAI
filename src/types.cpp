@@ -962,6 +962,7 @@ QList<AcpAgentPreset> acpAgentPresets()
         {u"auggie"_s, i18n("Auggie CLI"), u"npx"_s, u"-y @augmentcode/auggie --acp"_s, {}},
         {u"cursor"_s, i18n("Cursor"), u"cursor-agent"_s, u"acp"_s, {}},
         {u"mistral-vibe"_s, i18n("Mistral Vibe"), u"vibe-acp"_s, u""_s, u"MISTRAL_API_KEY"_s},
+        {u"mcode"_s, i18n("MiniMax Code"), u"mcode"_s, u"acp"_s, u""_s},
         {u"custom"_s, i18n("Custom"), {}, {}, {}},
     };
 }
@@ -1008,6 +1009,16 @@ bool acpAgentIsGrok(const Settings &settings)
     return QFileInfo(acpEffectiveCommand(settings)).fileName() == u"grok"_s;
 }
 
+bool acpAgentIsMinimaxCode(const Settings &settings)
+{
+    if (settings.acpAgentId == u"minimax-code"_s || settings.acpAgentId == u"mcode"_s) {
+        return true;
+    }
+    const QString command = acpEffectiveCommand(settings);
+    const QString baseName = QFileInfo(command).fileName();
+    return baseName == u"mcode"_s;
+}
+
 QString acpAgentDisplayName(const Settings &settings)
 {
     if (!usesAcpNative(settings)) {
@@ -1047,6 +1058,9 @@ QString acpAgentIdMatching(const QString &command, const QString &args)
     }
     if (trimmedCommand.isEmpty() || (trimmedCommand == u"grok"_s && (trimmedArgs.isEmpty() || trimmedArgs == u"agent stdio"_s))) {
         return u"grok-build"_s;
+    }
+    if (trimmedCommand == u"mcode"_s && (trimmedArgs.isEmpty() || trimmedArgs == u"acp"_s)) {
+        return u"mcode"_s;
     }
     return u"custom"_s;
 }

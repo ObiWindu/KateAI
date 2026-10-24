@@ -251,6 +251,7 @@ private:
     QString m_status;
     QProcess *m_process = nullptr;
     QByteArray m_stdoutBuffer;
+    QString m_stderrBuffer;
     bool m_discardingStdoutFrame = false;
     bool m_shuttingDown = false;
 

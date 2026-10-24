@@ -817,6 +817,38 @@ private Q_SLOTS:
         }
     }
 
+    // MiniMax Code: the ACP registry records the npm distribution
+    // (@minimax-ai/code) as the launch entry, but the standalone CLI the agent
+    // installs through its own installer is the binary that actually speaks the
+    // ACP server. Selecting the agent must resolve to it instead of letting the
+    // broken npm distribution kill the process before the handshake.
+    void minimaxCodePrefersStandaloneAcpInstall()
+    {
+        Settings settings;
+        settings.acpAgentId = u"minimax-code"_s;
+        settings.acpCommand = u"npx"_s;
+        settings.acpArgs = u"--yes @minimax-ai/code@0.2.7 acp"_s;
+
+        // npm-only tokens from the registry entry are dropped and the ACP
+        // subcommand is kept, so the standalone binary is launched properly.
+        QCOMPARE(AcpClient::agentArguments(settings), (QStringList{u"acp"_s}));
+
+        // Without a standalone install the recorded npx launch is kept.
+        const QString localInstall = QDir::homePath() + u"/.minimax-code/bin/mcode"_s;
+        if (QFileInfo(localInstall).exists() && QFileInfo(localInstall).isExecutable()) {
+            QCOMPARE(AcpClient::resolvedCommand(settings), localInstall);
+        } else {
+            QCOMPARE(AcpClient::resolvedCommand(settings), u"npx"_s);
+        }
+
+        // A bare "mcode" with no arguments must run the ACP server, not the
+        // interactive TUI that never answers the handshake.
+        Settings bare = settings;
+        bare.acpCommand = u"mcode"_s;
+        bare.acpArgs.clear();
+        QCOMPARE(AcpClient::agentArguments(bare), (QStringList{u"acp"_s}));
+    }
+
     void legacySessionModelsUseSetModel()
     {
         QTemporaryDir workspace;

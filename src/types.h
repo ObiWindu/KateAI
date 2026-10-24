@@ -456,6 +456,12 @@ QString acpEffectiveApiKeyEnv(const Settings &settings);
 // True when the resolved launch command is Grok Build (`grok`). Only then do
 // we inject `--model` / `--always-approve` and Grok `_meta`.
 bool acpAgentIsGrok(const Settings &settings);
+// True for the MiniMax Code ACP agent (`mcode`, registry id `minimax-code`).
+// Its standalone CLI (`mcode acp`) is preferred over the npm distribution the
+// ACP registry records, because the distribution's bundled native modules can
+// fail to load on current Node runtimes and the process exits before the ACP
+// handshake completes.
+bool acpAgentIsMinimaxCode(const Settings &settings);
 QString acpAgentIdMatching(const QString &command, const QString &args);
 // Models last reported by this agent (session config or the legacy models
 // field), plus the configured id when it is not already in that list.

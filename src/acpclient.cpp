@@ -365,6 +365,20 @@ void AcpClient::ingestSessionModels(const QJsonObject &result, bool applyPreferr
 QString AcpClient::resolvedCommand(const Settings &settings)
 {
     const QString command = acpEffectiveCommand(settings);
+    // MiniMax Code: prefer the standalone CLI the agent installs through its own
+    // installer (~/.minimax-code/bin/mcode). The ACP registry entry instead
+    // records the npm distribution (@minimax-ai/code), whose bundled native
+    // modules can fail to load on the current Node runtime; the process then
+    // exits with code 1 before the ACP handshake, which surfaces as "ACP agent
+    // exited (code 1)". The standalone binary speaks the same ACP server and is
+    // the one that actually works.
+    if (!command.isEmpty() && !QFileInfo(command).isAbsolute() && acpAgentIsMinimaxCode(settings)) {
+        const QString standalone = QDir::homePath() + u"/.minimax-code/bin/mcode"_s;
+        const QFileInfo standaloneInfo(standalone);
+        if (standaloneInfo.exists() && standaloneInfo.isExecutable()) {
+            return standalone;
+        }
+    }
     if (command.isEmpty() || QFileInfo(command).isAbsolute()) {
         return command;
     }
@@ -448,6 +462,25 @@ QStringList AcpClient::agentArguments(const Settings &settings)
             out.append(args.at(i));
         }
         return out;
+    }
+
+    // MiniMax Code: the standalone CLI takes the ACP server as its
+    // subcommand ("mcode acp"). Arguments recorded for the npm distribution
+    // ("--yes @minimax-ai/code@0.2.7 acp") are npm-only tokens and must not
+    // be forwarded; without the subcommand the interactive TUI would start
+    // instead of the ACP server and stall the handshake until timeout.
+    if (acpAgentIsMinimaxCode(settings)) {
+        QStringList kept;
+        for (const QString &arg : args) {
+            if (arg == u"--yes"_s || arg.startsWith(u"@"_s)) {
+                continue;
+            }
+            kept.append(arg);
+        }
+        if (!kept.contains(u"acp"_s)) {
+            kept.append(u"acp"_s);
+        }
+        return kept;
     }
 
     // Handle model arguments for other ACP agents that support --model
@@ -578,6 +611,7 @@ void AcpClient::stop()
         m_process = nullptr;
     }
     m_stdoutBuffer.clear();
+    m_stderrBuffer.clear();
     m_discardingStdoutFrame = false;
     m_sessionId.clear();
     m_promptId = 0;
@@ -693,6 +727,7 @@ void AcpClient::spawnProcess()
     }
     m_shuttingDown = false;
     m_discardingStdoutFrame = false;
+    m_stderrBuffer.clear();
     setState(State::Starting, u"Starting ACP agent…"_s);
 
     m_process = new QProcess(this);
@@ -717,7 +752,19 @@ void AcpClient::spawnProcess()
         if (m_shuttingDown) {
             return;
         }
-        const QString message = u"ACP agent exited (code %1)."_s.arg(exitCode);
+        QString message = u"ACP agent exited (code %1)."_s.arg(exitCode);
+        const QString stderrText = m_stderrBuffer.trimmed();
+        if (!stderrText.isEmpty()) {
+            // The exit code alone does not explain much; agents print their own
+            // diagnostics (native module load failures, missing binaries, auth
+            // problems) on stderr right before dying, and that is the useful part.
+            const QStringList stderrLines = stderrText.split(u"\n"_s, Qt::SkipEmptyParts);
+            QString detail;
+            for (const QString &line : stderrLines) {
+                detail += u"%1\n"_s.arg(line);
+            }
+            message += u" Stderr: %1"_s.arg(detail.trimmed());
+        }
         failAll(message);
         setState(State::Failed, message);
         Q_EMIT failed(message);
@@ -725,6 +772,7 @@ void AcpClient::spawnProcess()
     connect(m_process, &QProcess::readyReadStandardError, this, [this] {
         const QString noise = QString::fromUtf8(m_process->readAllStandardError()).trimmed();
         if (!noise.isEmpty()) {
+            m_stderrBuffer.append(u"%1\n"_s.arg(noise));
             Q_EMIT logMessage(noise);
         }
     });
