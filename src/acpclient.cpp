@@ -10,6 +10,8 @@
 
 #include <QDir>
 #include <QDesktopServices>
+#include <QDirIterator>
+#include <QFile>
 #include <QFileInfo>
 #include <QJsonDocument>
 #include <QProcessEnvironment>
@@ -353,14 +355,26 @@ void AcpClient::ingestSessionModels(const QJsonObject &result, bool applyPreferr
         m_agentModels = models;
     }
 
+    // Mistral Vibe keeps its selected model in its own global state and
+    // reports it as current in every session report, so a configured model
+    // must be pushed onto the session instead of letting the agent's state
+    // win. For every other agent the report is authoritative.
+    const bool pinConfiguredModel = acpAgentIsMistralVibe(m_settings)
+        && !m_settings.acpModel.trimmed().isEmpty();
     if (applyPreferred) {
         const QString preferred = m_settings.acpModel.trimmed();
         if (!preferred.isEmpty() && preferred != m_currentModelId
-            && (m_agentModels.isEmpty() || m_agentModels.contains(preferred))) {
+            && (pinConfiguredModel || m_agentModels.isEmpty() || m_agentModels.contains(preferred))) {
             setModel(preferred);
         } else if (preferred.isEmpty() && !m_currentModelId.isEmpty()) {
             m_settings.acpModel = m_currentModelId;
         }
+    } else if (pinConfiguredModel && !m_modelSetInFlight) {
+        // A report whose current model differs from the configured one means
+        // the agent switched: restore the configured model. The response of
+        // that restore settles here as well, but then the ids match and no
+        // second request goes out, so this cannot loop.
+        setModel(m_settings.acpModel.trimmed());
     }
 
     Q_EMIT modelsReceived(m_agentModels);
@@ -752,6 +766,25 @@ QString AcpClient::sessionCwd() const
     return QDir::currentPath();
 }
 
+// MiniMax Code refuses session/new with "The OAuth credential file
+// permissions are not private" when its own credentials under ~/.minimax/auth
+// are readable by group or other (the agent itself writes them that way under
+// a permissive umask). Tighten them to owner-only before launching: 0600 is
+// what the agent demands, and nothing besides the agent reads those files.
+void acpTightenMinimaxCredentials()
+{
+    const QString authRoot = QDir::homePath() + u"/.minimax/auth"_s;
+    QDirIterator it(authRoot, {u"auth.json"_s, u"auth-state.json"_s}, QDir::Files,
+                   QDirIterator::Subdirectories);
+    const QFile::Permissions privateMode = QFile::ReadOwner | QFile::WriteOwner;
+    while (it.hasNext()) {
+        QFile credential(it.next());
+        if ((credential.permissions() & ~privateMode) != 0) {
+            credential.setPermissions(privateMode);
+        }
+    }
+}
+
 void AcpClient::spawnProcess()
 {
     if (m_process) {
@@ -842,6 +875,9 @@ void AcpClient::spawnProcess()
         setState(State::Failed, message);
         Q_EMIT failed(message);
         return;
+    }
+    if (acpAgentIsMinimaxCode(m_settings)) {
+        acpTightenMinimaxCredentials();
     }
     m_process->start(command, args);
     if (!m_process->waitForStarted(10000)) {
@@ -1488,7 +1524,25 @@ void AcpClient::handleResponse(const QJsonObject &message)
     }
     if (message.contains(u"error"_s)) {
         const QJsonObject error = message.value(u"error"_s).toObject();
-        pending.done(QJsonObject(), error.value(u"message"_s).toString(u"ACP request failed."_s));
+        QString messageText = error.value(u"message"_s).toString(u"ACP request failed."_s);
+        // Agents like MiniMax Code answer with a generic message ("Internal
+        // error") and put the actual explanation in error.data.details. Without
+        // it the user sees "Error: Internal error" and no way forward.
+        const QJsonValue data = error.value(u"data"_s);
+        QString details;
+        if (data.isObject()) {
+            const QJsonObject dataObj = data.toObject();
+            details = dataObj.value(u"details"_s).toString();
+            if (details.isEmpty()) {
+                details = dataObj.value(u"message"_s).toString();
+            }
+        } else if (data.isString()) {
+            details = data.toString();
+        }
+        if (!details.isEmpty() && !messageText.contains(details)) {
+            messageText += u": %1"_s.arg(details);
+        }
+        pending.done(QJsonObject(), messageText);
         return;
     }
     pending.done(message.value(u"result"_s).toObject(), QString());

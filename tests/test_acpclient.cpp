@@ -129,6 +129,65 @@ private Q_SLOTS:
         QVERIFY(!acpAgentIsGrok(settings));
     }
 
+    void minimaxCredentialFilesAreTightenedBeforeLaunch()
+    {
+        // MiniMax Code answers session/new with "The OAuth credential file
+        // permissions are not private" when ~/.minimax/auth carries group or
+        // other bits -- the agent itself writes the file that way under a
+        // permissive umask. The launch path has to strip those bits.
+        QTemporaryDir home;
+        QVERIFY(home.isValid());
+        const QDir authDir(home.path() + u"/.minimax/auth/prod/en/mcode-public"_s);
+        QVERIFY(authDir.mkpath(u"."_s));
+        const QString credentialPath = authDir.filePath(u"auth.json"_s);
+        QFile credential(credentialPath);
+        QVERIFY(credential.open(QIODevice::WriteOnly | QIODevice::Text));
+        credential.write("{}");
+        credential.close();
+        QVERIFY(credential.setPermissions(QFile::ReadOwner | QFile::WriteOwner
+                                           | QFile::ReadGroup | QFile::WriteGroup));
+        QVERIFY((QFileInfo(credentialPath).permissions() & QFile::ReadGroup) != 0);
+
+        const QByteArray originalHome = qgetenv("HOME");
+        qputenv("HOME", home.path().toLocal8Bit());
+        acpTightenMinimaxCredentials();
+        if (!originalHome.isEmpty()) {
+            qputenv("HOME", originalHome);
+        } else {
+            qunsetenv("HOME");
+        }
+
+        // Qt reports an owner-only file as both *Owner and *User on Linux, so
+        // assert the mode, not the exact flag combination.
+        const QFile::Permissions tightened = QFileInfo(credentialPath).permissions();
+        QVERIFY((tightened & (QFile::ReadOwner | QFile::WriteOwner)) == (QFile::ReadOwner | QFile::WriteOwner));
+        QVERIFY((tightened & (QFile::ReadGroup | QFile::WriteGroup | QFile::ExeGroup
+                               | QFile::ReadOther | QFile::WriteOther | QFile::ExeOther)) == 0);
+
+        // Already-private files and unrelated names are left untouched.
+        QFile alreadyPrivate(authDir.filePath(u"auth-state.json"_s));
+        QVERIFY(alreadyPrivate.open(QIODevice::WriteOnly | QIODevice::Text));
+        alreadyPrivate.write("{}");
+        alreadyPrivate.close();
+        QFile unrelated(authDir.filePath(u"notes.txt"_s));
+        QVERIFY(unrelated.open(QIODevice::WriteOnly | QIODevice::Text));
+        unrelated.write("keep me readable");
+        unrelated.close();
+        QVERIFY(unrelated.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ReadGroup));
+
+        qputenv("HOME", home.path().toLocal8Bit());
+        acpTightenMinimaxCredentials();
+        if (!originalHome.isEmpty()) {
+            qputenv("HOME", originalHome);
+        } else {
+            qunsetenv("HOME");
+        }
+        const QFile::Permissions state = QFileInfo(authDir.filePath(u"auth-state.json"_s)).permissions();
+        QVERIFY((state & (QFile::ReadOwner | QFile::WriteOwner)) == (QFile::ReadOwner | QFile::WriteOwner));
+        QVERIFY((state & (QFile::ReadGroup | QFile::ReadOther)) == 0);
+        QVERIFY((QFileInfo(authDir.filePath(u"notes.txt"_s)).permissions() & QFile::ReadGroup) != 0);
+    }
+
     void echoStreamsThoughtToolsAndText()
     {
         QTemporaryDir workspace;
@@ -259,6 +318,35 @@ private Q_SLOTS:
         // The stream is not the result: the finished call still reports once.
         QCOMPARE(toolsFinished, 1);
         QVERIFY2(toolOutput.contains(u"build finished"_s), qPrintable(toolOutput));
+        client.stop();
+    }
+
+    void errorDetailsAreCarriedIntoTheFailure()
+    {
+        // MiniMax Code refuses session/new on a credential file with loose
+        // permissions by answering with the generic "Internal error" and the
+        // actual explanation in error.data.details. A client that only reads
+        // error.message shows "Error: Internal error" and nothing actionable.
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+
+        DiskDocumentBridge bridge;
+        AcpClient client;
+        client.setSettings(mockSettings(u"error-details"_s));
+        client.setWorkspace(workspace.path());
+        client.setDocumentBridge(&bridge);
+
+        QString error;
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+
+        client.prompt(u"hello"_s);
+        QVERIFY2(waitFor([&] {
+            return !error.isEmpty();
+        }), "the agent never failed");
+        QVERIFY2(error.contains(u"Internal error"_s), qPrintable(error));
+        QVERIFY2(error.contains(u"permissions are not private"_s), qPrintable(error));
         client.stop();
     }
 
@@ -932,6 +1020,54 @@ private Q_SLOTS:
         }), qPrintable(error.isEmpty() ? u"timed out setting legacy model"_s : error));
         QVERIFY2(error.isEmpty(), qPrintable(error));
         QCOMPARE(client.currentModelId(), u"gemini-2.5-flash"_s);
+        client.stop();
+    }
+
+    void mistralVibeModelIsPinnedAgainstAgentSwitches()
+    {
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+
+        Settings settings = mockSettings(u"model-drift"_s);
+        settings.acpAgentId = u"mistral-vibe"_s;
+        settings.acpModel = u"mistral-medium-3.5"_s;
+        QVERIFY(acpAgentIsMistralVibe(settings));
+
+        AcpClient client;
+        client.setSettings(settings);
+        client.setWorkspace(workspace.path());
+
+        QStringList observedCurrent;
+        QString error;
+        connect(&client, &AcpClient::modelsReceived, this, [&](const QStringList &) {
+            observedCurrent.append(client.currentModelId());
+        });
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+
+        // The session opens on the agent's own model; the configured one must
+        // be pushed onto the session instead of adopted.
+        client.fetchModels();
+        QVERIFY2(waitFor([&] {
+            return client.currentModelId() == u"mistral-medium-3.5"_s || !error.isEmpty();
+        }), qPrintable(error.isEmpty() ? u"timed out pinning the configured model"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+
+        // A mid-session report that the agent switched models must be
+        // corrected, not followed. The session-open report also carries the
+        // agent's own model before the pin settles, so the switch counts only
+        // once the configured model has been reported current once.
+        client.prompt(u"drift"_s);
+        QVERIFY2(waitFor([&] {
+            return observedCurrent.lastIndexOf(u"glm-5-3"_s)
+                    > observedCurrent.indexOf(u"mistral-medium-3.5"_s)
+                || !error.isEmpty();
+        }), qPrintable(error.isEmpty() ? u"timed out waiting for the agent switch"_s : error));
+        QVERIFY2(waitFor([&] {
+            return client.currentModelId() == u"mistral-medium-3.5"_s || !error.isEmpty();
+        }), qPrintable(error.isEmpty() ? u"agent switch was not corrected"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
         client.stop();
     }
 

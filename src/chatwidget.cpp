@@ -1392,7 +1392,13 @@ ChatWidget::ChatWidget(QWidget *parent)
                     changed = true;
                 }
             }
-            if (m_agent.acpClient() && !m_agent.acpClient()->modelChangePending()) {
+            // Mistral Vibe is pinned to the configured model: the client
+            // pushes it back whenever the agent reports another one. Adopting
+            // the live model here would let the agent's own global model
+            // state switch the selection under the user.
+            const bool followAgentModel = !acpAgentIsMistralVibe(m_settings)
+                || m_settings.acpModel.trimmed().isEmpty();
+            if (followAgentModel && m_agent.acpClient() && !m_agent.acpClient()->modelChangePending()) {
                 const QString live = m_agent.acpClient()->currentModelId();
                 if (!live.isEmpty() && m_settings.acpModel != live) {
                     m_settings.acpModel = live;
@@ -1535,6 +1541,10 @@ void ChatWidget::addUserMessage(const QString &text)
         m_transcriptLayout->removeWidget(welcome);
         delete welcome;
     }
+
+    // A new user message starts a new turn, so reasoning rendered in the
+    // previous turn's cards no longer counts as already shown.
+    m_thinkingShownEarlierInTurn.clear();
 
     // Auto-update thread title on the first user message
     if (m_threadTitle && m_threadTitle->text() == i18n("New Thread")) {
@@ -1811,7 +1821,28 @@ void ChatWidget::addThinkingBlock(const QString &text)
     if (!m_thinkingBrowser || !m_thinkingBlock) {
         return;
     }
-    m_thinkingBuffer = text;
+    // The loop re-reports the whole turn's reasoning here (ACP does it when
+    // the answer text starts). A tool freeze may already have rendered the
+    // part that streamed before the tool into an earlier, frozen card, and
+    // the live pacer may already hold part of it in this one. Only what has
+    // not been shown yet belongs in this card, or the same reasoning reads
+    // twice in two bubbles of one turn.
+    QString unseen = text;
+    if (!m_thinkingShownEarlierInTurn.isEmpty() && unseen.startsWith(m_thinkingShownEarlierInTurn)) {
+        unseen = unseen.mid(m_thinkingShownEarlierInTurn.length());
+    }
+    if (!m_thinkingBuffer.isEmpty() && unseen.startsWith(m_thinkingBuffer)) {
+        unseen = unseen.mid(m_thinkingBuffer.length());
+    }
+    if (unseen.isEmpty()) {
+        // Everything this re-report carries is already on screen.
+        return;
+    }
+    if (!m_thinkingBuffer.isEmpty() && text.startsWith(m_thinkingBuffer)) {
+        m_thinkingBuffer += unseen;
+    } else {
+        m_thinkingBuffer = unseen;
+    }
     m_thinkingBlock->show();
     registerThinkingBlock(m_thinkingBlock, m_thinkingBrowser, m_thinkingToggle);
     if (!m_isThinking) {
@@ -2045,6 +2076,12 @@ void ChatWidget::freezeStreaming()
         if (m_activeAssistantBrowser->height() != docH) {
             m_activeAssistantBrowser->setFixedHeight(docH);
         }
+    } else if (m_activeAssistantBrowser) {
+        // A thinking-only segment froze before any answer text arrived: the
+        // empty browser is a blank QTextEdit size hint (a ~190px hole) inside
+        // the card. The history rebuild hides the same browser, so the live
+        // freeze has to as well.
+        m_activeAssistantBrowser->hide();
     }
     if (m_activeAssistantCopyBtn) {
         m_activeAssistantCopyBtn->setProperty("copyText", m_streamText);
@@ -2054,6 +2091,20 @@ void ChatWidget::freezeStreaming()
     if (m_thinkingBlock && !m_thinkingBuffer.isEmpty()) {
         m_thinkingBlock->show();
         applyThinkingState(m_thinkingBlock, m_thinkingBrowser, m_thinkingToggle, true);
+    }
+    // Whatever this card revealed is on screen now; the loop re-reports the
+    // full turn's reasoning when the answer text starts, and that re-report
+    // must not draw this part again inside the next card.
+    m_thinkingShownEarlierInTurn += m_thinkingBuffer;
+    // A card with neither answer text nor reasoning is pure chrome: a header
+    // and a copy button around nothing, sitting in the middle of the thread.
+    // Nothing of the turn is lost by dropping it.
+    if (m_activeAssistantWidget && m_streamText.isEmpty() && m_thinkingBuffer.isEmpty()) {
+        QWidget *empty = m_activeAssistantWidget;
+        if (m_transcriptLayout) {
+            m_transcriptLayout->removeWidget(empty);
+        }
+        empty->deleteLater();
     }
     m_isStreaming = false;
     if (m_activeAssistantPulse) {
@@ -5664,6 +5715,9 @@ void ChatWidget::rebuildTranscript()
     m_permissionBar->hideBar();
     clearTranscriptContents();
     m_thinkingExpanded = true;
+    // The rebuild re-renders reasoning from the history; nothing a previous
+    // live turn showed counts as on screen anymore.
+    m_thinkingShownEarlierInTurn.clear();
 
     // Recreate the indicator overlay if it was ever destroyed. Nothing in the
     // normal path removes it -- it is an overlay child of the scroll area, not

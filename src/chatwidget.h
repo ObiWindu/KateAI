@@ -389,6 +389,11 @@ private:
 
     // Raw thinking text buffer for the current turn.
     QString m_thinkingBuffer;
+    // Reasoning already rendered into a card frozen earlier in the same turn
+    // (a tool freeze splits one turn into several cards). The loop re-reports
+    // the full turn's thinking when the answer text starts; this prefix is
+    // what must not be drawn a second time in the later card.
+    QString m_thinkingShownEarlierInTurn;
     int m_thinkingPacedLength = 0;
     QTimer *m_thinkingPacerTimer = nullptr;
 

@@ -1108,6 +1108,15 @@ bool acpAgentIsAntigravity(const Settings &settings)
     return baseName.contains(u"agy_acp_server"_s);
 }
 
+bool acpAgentIsMistralVibe(const Settings &settings)
+{
+    if (settings.acpAgentId == u"mistral-vibe"_s) {
+        return true;
+    }
+    const QString command = acpEffectiveCommand(settings);
+    return QFileInfo(command).fileName() == u"vibe-acp"_s;
+}
+
 QString acpAgentDisplayName(const Settings &settings)
 {
     if (!usesAcpNative(settings)) {

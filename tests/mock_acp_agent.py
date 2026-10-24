@@ -48,6 +48,22 @@ def mode_config():
     }
 
 
+def drift_model_config(current):
+    # Options of the model-drift scenario: an agent that keeps its selected
+    # model outside the client's control (like Mistral Vibe).
+    return {
+        "id": "model",
+        "name": "Model",
+        "category": "model",
+        "type": "select",
+        "currentValue": current,
+        "options": [
+            {"name": "GLM 5.3", "value": "glm-5-3"},
+            {"name": "Mistral Medium 3.5", "value": "mistral-medium-3.5"},
+        ],
+    }
+
+
 def send(message):
     sys.stdout.write(json.dumps(message, separators=(",", ":")) + "\n")
     sys.stdout.flush()
@@ -57,8 +73,11 @@ def result(request_id, payload):
     send({"jsonrpc": "2.0", "id": request_id, "result": payload})
 
 
-def error(request_id, message, code=-32000):
-    send({"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}})
+def error(request_id, message, code=-32000, data=None):
+    body = {"code": code, "message": message}
+    if data is not None:
+        body["data"] = data
+    send({"jsonrpc": "2.0", "id": request_id, "error": body})
 
 
 def notify(method, params):
@@ -142,6 +161,25 @@ def handle_prompt(request_id, params):
     for block in params.get("prompt") or []:
         if isinstance(block, dict) and block.get("type") == "text":
             text += block.get("text") or ""
+
+    if SCENARIO == "model-drift":
+        # The agent switched its model behind the client's back mid-turn and
+        # reports it; a client that pins the configured model must push it
+        # back instead of following the switch.
+        session_update(
+            {
+                "sessionUpdate": "config_option_update",
+                "configOptions": [drift_model_config("glm-5-3"), mode_config()],
+            }
+        )
+        session_update(
+            {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "drifted"},
+            }
+        )
+        result(request_id, {"stopReason": "end_turn"})
+        return
 
     if SCENARIO == "stringid":
         # JSON-RPC lets a reply quote the request id as a string. session/prompt
@@ -576,11 +614,34 @@ def handle(message):
                     },
                 },
             )
+        elif SCENARIO == "model-drift":
+            result(
+                request_id,
+                {
+                    "sessionId": SESSION_ID,
+                    "configOptions": [drift_model_config("glm-5-3"), mode_config()],
+                },
+            )
+        elif SCENARIO == "error-details":
+            # MiniMax Code answers with a generic message and puts the actual
+            # explanation in error.data.details; a client that only reads the
+            # message shows "Internal error" and nothing actionable.
+            error(
+                request_id,
+                "Internal error",
+                -32603,
+                {"details": "The OAuth credential file permissions are not private."},
+            )
         else:
             result(request_id, {"sessionId": SESSION_ID})
     elif method == "session/set_config_option":
         CURRENT_MODEL = params.get("value") or CURRENT_MODEL
-        options = [model_config(CURRENT_MODEL, extra=True), mode_config()]
+        model = (
+            drift_model_config(CURRENT_MODEL)
+            if SCENARIO == "model-drift"
+            else model_config(CURRENT_MODEL, extra=True)
+        )
+        options = [model, mode_config()]
         session_update({"sessionUpdate": "config_option_update", "configOptions": options})
         result(request_id, {"configOptions": options})
     elif method == "session/set_model":

@@ -471,6 +471,11 @@ QString acpInstalledBinaryCommand(const Settings &settings);
 bool acpAgentIsMinimaxCode(const Settings &settings);
 // True for Google Antigravity ACP agent (registry id `antigravity-acp`).
 bool acpAgentIsAntigravity(const Settings &settings);
+// True for the Mistral Vibe ACP agent (registry id `mistral-vibe`, binary
+// `vibe-acp`). It persists its selected model in its own global state and
+// reports it as current on every new session, so the model configured in
+// Kate is pinned onto the session instead of following the agent.
+bool acpAgentIsMistralVibe(const Settings &settings);
 QString acpAgentIdMatching(const QString &command, const QString &args);
 // Models last reported by this agent (session config or the legacy models
 // field), plus the configured id when it is not already in that list.
