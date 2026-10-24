@@ -41,6 +41,7 @@ class QuestionWidget;
 class TodoWidget;
 class EditTracker;
 class TurnStatus;
+class AcpBinaryInstaller;
 
 class ChatWidget : public QWidget
 {
@@ -207,6 +208,7 @@ private:
     void selectModel(Provider provider, const QString &model);
     void selectAcpAgentAndModel(const QString &agentId, const QString &model);
     void requestAcpAgentModels(const QString &agentId);
+    bool ensureAcpBinaryInstalled(const QString &agentId);
     Settings settingsForAcpAgent(const QString &agentId) const;
     void updateModelSelectorLabel();
     void showInfoMessage(const QString &message, bool isError);
@@ -362,6 +364,8 @@ private:
     QString m_acpAgentModelViewAgentName;
     QString m_acpModelsLoading;
     QPointer<AcpClient> m_acpModelProbe;
+    QPointer<AcpBinaryInstaller> m_acpBinaryInstaller;
+    QString m_acpInstallingAgentId;
     // Custom popup rather than QMenu: a QLineEdit inside QMenu::exec() plus
     // setVisible() on hundreds of model QActions is what made typing hang, and
     // exec() below the chip opened the list off the bottom of the panel.

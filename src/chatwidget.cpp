@@ -5,6 +5,7 @@
 
 #include "chatwidget.h"
 
+#include "acpinstall.h"
 #include "agenttext.h"
 #include "chattheme.h"
 #include "contextmanager.h"
@@ -1926,13 +1927,10 @@ void ChatWidget::fitReasoningBrowser(QTextBrowser *browser)
     if (!browser || !browser->isVisible()) {
         return;
     }
-    int width = browser->viewport()->width();
-    if (width <= 40) {
-        // Not laid out yet: the parent block's width is the better guess,
-        // and the resize filter corrects it once the layout runs.
-        width = browser->parentWidget() ? browser->parentWidget()->width() - 8 : 240;
-    }
-    width = std::max(120, width);
+    // The viewport can still be narrow while the widget is being shown.
+    // Keep the same minimum width used by the document fit so the browser
+    // does not get pinned to an undersized, transient layout.
+    const int width = std::max(120, browser->viewport()->width());
     browser->document()->setTextWidth(width);
     // Only re-pin when the height actually moved: an unconditional
     // setFixedHeight() invalidates the transcript layout and repaints the
@@ -4195,9 +4193,97 @@ Settings ChatWidget::settingsForAcpAgent(const QString &agentId) const
     return agentSettings;
 }
 
+// Registry entries saved before binary downloads were implemented only record
+// the relative command ("<./agy_acp_server.par>") and never unpacked the
+// archive. Selecting such an agent would fail with "No such file or directory",
+// so install it on demand before asking it for its model catalogue.
+bool ChatWidget::ensureAcpBinaryInstalled(const QString &agentId)
+{
+    if (agentId.isEmpty()) {
+        return false;
+    }
+    if (m_acpBinaryInstaller) {
+        return m_acpInstallingAgentId == agentId;
+    }
+
+    const QJsonArray installed = QJsonDocument::fromJson(m_settings.acpInstalledAgents.toUtf8()).array();
+    for (const QJsonValue &value : installed) {
+        const QJsonObject agent = value.toObject();
+        if (agent.value(u"id"_s).toString() != agentId) {
+            continue;
+        }
+        const bool isBinary = agent.value(u"distributionType"_s).toString() == u"binary"_s
+            || !agent.value(u"binaryArchiveUrl"_s).toString().isEmpty();
+        if (!isBinary) {
+            return false;
+        }
+        if (!acpInstalledBinaryCommand(settingsForAcpAgent(agentId)).isEmpty()) {
+            if (agentId == u"antigravity-acp"_s && acpNeedsPageShim()) {
+                acpEnsurePageShim(acpBinaryInstallDir(agentId));
+            }
+            return false;
+        }
+
+        auto *installer = new AcpBinaryInstaller(agent, agent.value(u"binaryPlatform"_s).toString(),
+                                                 nullptr, this);
+        m_acpBinaryInstaller = installer;
+        m_acpInstallingAgentId = agentId;
+        const QString name = agent.value(u"name"_s).toString();
+        showInfoMessage(i18n("Installing %1…", name), false);
+
+        connect(installer, &AcpBinaryInstaller::finished, this,
+                [this, installer, agentId, name](const QJsonObject &installedAgent) {
+            QJsonArray agents = QJsonDocument::fromJson(m_settings.acpInstalledAgents.toUtf8()).array();
+            for (qsizetype i = agents.size() - 1; i >= 0; --i) {
+                if (agents.at(i).toObject().value(u"id"_s).toString() == agentId) {
+                    agents.removeAt(i);
+                }
+            }
+            agents.append(installedAgent);
+            m_settings.acpInstalledAgents = QString::fromUtf8(QJsonDocument(agents).toJson(QJsonDocument::Compact));
+            if (m_settings.acpAgentId == agentId) {
+                m_settings.acpCommand = installedAgent.value(u"command"_s).toString();
+                QStringList args;
+                for (const QJsonValue &arg : installedAgent.value(u"args"_s).toArray()) {
+                    args.append(arg.toString());
+                }
+                m_settings.acpArgs = args.join(u' ');
+                m_settings.acpApiKeyEnv = installedAgent.value(u"apiKeyEnv"_s).toString();
+                m_agent.setSettings(m_settings);
+            }
+            Q_EMIT settingsChanged(m_settings);
+            showInfoMessage(i18n("Installed %1.", name), false);
+
+            if (m_acpBinaryInstaller == installer) {
+                m_acpBinaryInstaller = nullptr;
+                m_acpInstallingAgentId.clear();
+            }
+            installer->deleteLater();
+            QTimer::singleShot(0, this, [this, agentId]() {
+                requestAcpAgentModels(agentId);
+            });
+        });
+        connect(installer, &AcpBinaryInstaller::failed, this,
+                [this, installer, name](const QString &message) {
+            showInfoMessage(i18n("Could not install %1: %2", name, message), true);
+            if (m_acpBinaryInstaller == installer) {
+                m_acpBinaryInstaller = nullptr;
+                m_acpInstallingAgentId.clear();
+            }
+            installer->deleteLater();
+        });
+        installer->start();
+        return true;
+    }
+    return false;
+}
+
 void ChatWidget::requestAcpAgentModels(const QString &agentId)
 {
     if (agentId.isEmpty() || m_acpModelsLoading == agentId) {
+        return;
+    }
+    if (ensureAcpBinaryInstalled(agentId)) {
         return;
     }
     if (agentId == m_settings.acpAgentId && m_agent.acpClient()) {

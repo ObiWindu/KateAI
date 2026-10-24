@@ -456,12 +456,21 @@ QString acpEffectiveApiKeyEnv(const Settings &settings);
 // True when the resolved launch command is Grok Build (`grok`). Only then do
 // we inject `--model` / `--always-approve` and Grok `_meta`.
 bool acpAgentIsGrok(const Settings &settings);
+// Directory where a binary-distributed ACP registry agent is unpacked.
+QString acpBinaryInstallDir(const QString &agentId);
+// Absolute path of the executable for an installed binary ACP agent, or an
+// empty string when it is not installed. Registry entries record commands such
+// as "./agy_acp_server.par", which are relative to the unpacked archive rather
+// than to Kate's working directory.
+QString acpInstalledBinaryCommand(const Settings &settings);
 // True for the MiniMax Code ACP agent (`mcode`, registry id `minimax-code`).
 // Its standalone CLI (`mcode acp`) is preferred over the npm distribution the
 // ACP registry records, because the distribution's bundled native modules can
 // fail to load on current Node runtimes and the process exits before the ACP
 // handshake completes.
 bool acpAgentIsMinimaxCode(const Settings &settings);
+// True for Google Antigravity ACP agent (registry id `antigravity-acp`).
+bool acpAgentIsAntigravity(const Settings &settings);
 QString acpAgentIdMatching(const QString &command, const QString &args);
 // Models last reported by this agent (session config or the legacy models
 // field), plus the configured id when it is not already in that list.

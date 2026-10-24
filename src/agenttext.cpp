@@ -116,6 +116,21 @@ void renderMarkdown(QTextDocument *doc, const QString &markdown)
         if (prose.isEmpty()) {
             return;
         }
+        // Models and pasted text often use a typographic bullet instead of a
+        // Markdown list marker. Qt treats those as ordinary paragraphs, which
+        // makes list entries inconsistent with the surrounding Markdown.
+        for (QString &line : prose) {
+            qsizetype marker = 0;
+            while (marker < line.size() && line.at(marker).isSpace()) {
+                ++marker;
+            }
+            if (marker + 1 < line.size()
+                && (line.at(marker) == u'•' || line.at(marker) == u'·' || line.at(marker) == u'‣'
+                    || line.at(marker) == u'◦')
+                && line.at(marker + 1).isSpace()) {
+                line.replace(marker, 1, u"-"_s);
+            }
+        }
         QTextDocument scratch;
         scratch.setMarkdown(prose.join(u'\n'));
         const QString converted = scratch.toHtml();

@@ -252,6 +252,7 @@ private:
     QProcess *m_process = nullptr;
     QByteArray m_stdoutBuffer;
     QString m_stderrBuffer;
+    bool m_antigravityAuthUrlOpened = false;
     bool m_discardingStdoutFrame = false;
     bool m_shuttingDown = false;
 

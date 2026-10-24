@@ -1,5 +1,6 @@
 add_library(kateai_core STATIC
     types.cpp
+    acpinstall.cpp
     settings.cpp
     sandbox.cpp
     permissions.cpp
@@ -78,5 +79,16 @@ if(UNIX)
     add_custom_command(TARGET kateai POST_BUILD
         COMMAND chmod a+rX "$<TARGET_FILE:kateai>"
         VERBATIM
+    )
+
+    add_library(kateai_page4k_shim SHARED
+        page4k_shim.c
+    )
+    set_target_properties(kateai_page4k_shim PROPERTIES
+        OUTPUT_NAME "libpage4k"
+        PREFIX ""
+    )
+    target_link_libraries(kateai_page4k_shim PRIVATE
+        ${CMAKE_DL_LIBS}
     )
 endif()

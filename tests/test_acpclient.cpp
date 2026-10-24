@@ -10,6 +10,8 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QStandardPaths>
 #include <QTemporaryDir>
 #include <QTest>
@@ -833,12 +835,15 @@ private Q_SLOTS:
         // subcommand is kept, so the standalone binary is launched properly.
         QCOMPARE(AcpClient::agentArguments(settings), (QStringList{u"acp"_s}));
 
-        // Without a standalone install the recorded npx launch is kept.
+        // Without a standalone install the recorded npx launch is kept, still
+        // resolved through PATH like any other agent command.
         const QString localInstall = QDir::homePath() + u"/.minimax-code/bin/mcode"_s;
+        const QString npxOnPath = QStandardPaths::findExecutable(u"npx"_s);
+        const QString expectedNpx = npxOnPath.isEmpty() ? u"npx"_s : npxOnPath;
         if (QFileInfo(localInstall).exists() && QFileInfo(localInstall).isExecutable()) {
             QCOMPARE(AcpClient::resolvedCommand(settings), localInstall);
         } else {
-            QCOMPARE(AcpClient::resolvedCommand(settings), u"npx"_s);
+            QCOMPARE(AcpClient::resolvedCommand(settings), expectedNpx);
         }
 
         // A bare "mcode" with no arguments must run the ACP server, not the
@@ -847,6 +852,52 @@ private Q_SLOTS:
         bare.acpCommand = u"mcode"_s;
         bare.acpArgs.clear();
         QCOMPARE(AcpClient::agentArguments(bare), (QStringList{u"acp"_s}));
+    }
+
+    // Binary registry agents record a command relative to the unpacked archive
+    // ("./agy_acp_server.par"). Kate installs them under its own data directory,
+    // so the launcher must resolve that path instead of using the process cwd.
+    void binaryRegistryAgentResolvesFromInstallDir()
+    {
+        QTemporaryDir temp;
+        QVERIFY(temp.isValid());
+        const QByteArray previous = qgetenv("KATEAI_ACP_AGENTS_DIR");
+        qputenv("KATEAI_ACP_AGENTS_DIR", temp.path().toUtf8());
+
+        const QString installDir = acpBinaryInstallDir(u"antigravity-acp"_s);
+        QVERIFY(QDir().mkpath(installDir));
+        const QString executable = installDir + u"/agy_acp_server.par"_s;
+        {
+            QFile file(executable);
+            QVERIFY(file.open(QIODevice::WriteOnly));
+            file.write("#!/bin/sh\n");
+        }
+        QVERIFY(QFile::setPermissions(executable, QFileDevice::ReadOwner | QFileDevice::WriteOwner
+                                                       | QFileDevice::ExeOwner));
+
+        Settings settings;
+        settings.acpAgentId = u"antigravity-acp"_s;
+        settings.acpCommand = u"./agy_acp_server.par"_s;
+        settings.acpArgs = u"--uid="_s;
+        QJsonObject installed;
+        installed.insert(u"id"_s, settings.acpAgentId);
+        installed.insert(u"command"_s, settings.acpCommand);
+        installed.insert(u"distributionType"_s, u"binary"_s);
+        settings.acpInstalledAgents = QString::fromUtf8(
+            QJsonDocument(QJsonArray{installed}).toJson(QJsonDocument::Compact));
+
+        QCOMPARE(AcpClient::resolvedCommand(settings), executable);
+
+        // Without the unpacked file the recorded command is preserved, so the
+        // failure still points at the missing binary instead of an empty path.
+        QVERIFY(QFile::remove(executable));
+        QCOMPARE(AcpClient::resolvedCommand(settings), settings.acpCommand);
+
+        if (previous.isNull()) {
+            qunsetenv("KATEAI_ACP_AGENTS_DIR");
+        } else {
+            qputenv("KATEAI_ACP_AGENTS_DIR", previous);
+        }
     }
 
     void legacySessionModelsUseSetModel()
