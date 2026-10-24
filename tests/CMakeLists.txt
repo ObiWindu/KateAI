@@ -21,6 +21,12 @@ kateai_test(test_transcriptlayout)
 kateai_test(test_modes)
 kateai_test(test_projectgraph)
 
+# Creates real KTextEditor documents, which needs the full editor part (and
+# its widget machinery), so it runs offscreen like the other GUI suites.
+add_executable(test_documentbridge test_documentbridge.cpp)
+target_link_libraries(test_documentbridge PRIVATE kateai_core Qt6::Test Qt6::Widgets)
+add_test(NAME test_documentbridge COMMAND test_documentbridge -platform offscreen)
+
 # Renders through QTextDocument, which needs a QGuiApplication.
 add_executable(test_codehighlight test_codehighlight.cpp)
 target_link_libraries(test_codehighlight PRIVATE kateai_core Qt6::Test)

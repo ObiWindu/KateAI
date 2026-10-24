@@ -5,9 +5,11 @@
 
 #include "plugin.h"
 #include "configpage.h"
+#include "kateaicommand.h"
 #include "pluginview.h"
 #include "settings.h"
 
+#include <KConfigGroup>
 #include <KLocalizedString>
 #include <KPluginFactory>
 
@@ -18,11 +20,17 @@ K_PLUGIN_FACTORY_WITH_JSON(KateAiFactory, "kateai.json", registerPlugin<KateAi::
 namespace KateAi
 {
 
-KateAiPlugin::KateAiPlugin(QObject *parent, const QVariantList &)
+static constexpr auto kConversationIdsKey = "ConversationIds";
+
+KateAiPlugin::KateAiPlugin(QObject *parent, const QVariantList &args)
     : KTextEditor::Plugin(parent)
     , m_settings(SettingsStore::load())
 {
+    Q_UNUSED(args);
     // Initialize the plugin with default settings loaded from persistent storage
+    // The ":kateai" command is owned by the plugin, so it lives as long as the
+    // editor process and dispatches to the view of the window it was used in.
+    m_command = new KateAiCommand(this, this);
 }
 
 QObject *KateAiPlugin::createView(KTextEditor::MainWindow *mainWindow)
@@ -52,6 +60,57 @@ void KateAiPlugin::setSettings(const Settings &settings)
     m_settings = settings;
     SettingsStore::save(m_settings);
     Q_EMIT settingsChanged(m_settings);
+}
+
+void KateAiPlugin::readSessionConfig(const KConfigGroup &config)
+{
+    // One id per window, in the order the windows were created when the
+    // session was saved. Views claim them in the same order as Kate
+    // recreates the windows.
+    m_sessionConversations = config.readEntry(kConversationIdsKey, QStringList());
+}
+
+void KateAiPlugin::writeSessionConfig(KConfigGroup &config)
+{
+    QStringList ids;
+    for (KateAiView *view : m_views) {
+        // A view that never settled on a conversation contributes nothing;
+        // trailing empty entries must not shift the ids of later windows.
+        const QString id = m_viewConversations.value(view);
+        if (!id.isEmpty()) {
+            ids.append(id);
+        }
+    }
+    config.writeEntry(kConversationIdsKey, ids);
+}
+
+void KateAiPlugin::registerView(KateAiView *view)
+{
+    if (view && !m_views.contains(view)) {
+        m_views.append(view);
+    }
+}
+
+void KateAiPlugin::unregisterView(KateAiView *view)
+{
+    m_views.removeAll(view);
+    m_viewConversations.remove(view);
+}
+
+QString KateAiPlugin::claimSessionConversation()
+{
+    if (m_sessionConversations.isEmpty()) {
+        return QString();
+    }
+    return m_sessionConversations.takeFirst();
+}
+
+void KateAiPlugin::noteConversationChanged(KateAiView *view, const QString &conversationId)
+{
+    if (!view || conversationId.isEmpty()) {
+        return;
+    }
+    m_viewConversations.insert(view, conversationId);
 }
 
 } // namespace KateAi

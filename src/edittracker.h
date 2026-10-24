@@ -74,6 +74,10 @@ public:
 
     void acceptEdit(const QString &path);
     void rejectEdit(const QString &path);
+    // Re-points every pending and remembered edit of oldPath at newPath. A
+    // Save-As in the editor must carry the review queue along with the file,
+    // or accepting and rejecting would settle a path that no longer exists.
+    void renamePath(const QString &oldPath, const QString &newPath);
 
     // Single-step undo for the last accept/reject decision made in this tracker.
     // Cleared by addEdit(), since new edits invalidate what came before.

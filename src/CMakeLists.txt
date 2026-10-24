@@ -47,6 +47,7 @@ target_compile_definitions(kateai PRIVATE TRANSLATION_DOMAIN="kateai")
 target_sources(kateai PRIVATE
     plugin.cpp
     pluginview.cpp
+    kateaicommand.cpp
     configpage.cpp
     turnstatus.cpp
     chatwidget.cpp

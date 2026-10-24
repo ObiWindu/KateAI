@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE gui SYSTEM "kpartgui.dtd">
-<gui name="kateai" version="2" translationDomain="kateai">
+<gui name="kateai" version="3" translationDomain="kateai">
   <MenuBar>
     <Menu name="tools">
       <Separator/>
@@ -8,7 +8,11 @@
         <text>Kate AI</text>
         <Action name="kateai_toggle"/>
         <Action name="kateai_new_chat"/>
+        <Action name="kateai_stop"/>
         <Action name="kateai_ask_selection"/>
+        <Action name="kateai_fix_selection"/>
+        <Action name="kateai_refactor_selection"/>
+        <Action name="kateai_test_selection"/>
         <Separator/>
         <Action name="kateai_configure"/>
       </Menu>

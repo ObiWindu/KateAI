@@ -97,6 +97,19 @@ public:
     void switchToConversation(const QString &conversationId);
     void deleteConversation(const QString &conversationId);
     void setCurrentConversationId(const QString &conversationId);
+    // The conversation this chat is showing; the view reports it to the
+    // plugin so the session config can restore it per window.
+    QString conversationId() const
+    {
+        return m_currentConversationId;
+    }
+
+    // --- Editor review queue --------------------------------------------------
+    // Re-points pending agent edits at the file's new path after a Save-As.
+    void renamePendingEdits(const QString &oldPath, const QString &newPath);
+    // Rejects every still-pending agent edit of the path (the in-editor
+    // banner's action). Returns false when nothing was pending.
+    bool rejectPendingEdits(const QString &path);
 
     PromptEdit *promptEdit() const { return m_prompt; }
     void setCompletionWords(const QStringList &words);
@@ -121,6 +134,11 @@ Q_SIGNALS:
     void configureRequested();
     void aboutToSubmit();
     void conversationChanged(const QString &conversationId);
+    // An agent edit of this path entered the review queue. The view turns it
+    // into an in-editor banner on the open document.
+    void agentEditedFile(const QString &path);
+    // The review queue went from empty to non-empty or back.
+    void pendingEditsChanged(bool hasPending);
     // A suggestion card was accepted and carries a file anchor. The view opens
     // the file at that line; Kate core only owns the card.
     void openFileAtLineRequested(const QString &path, int line);

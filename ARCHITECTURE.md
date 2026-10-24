@@ -7,6 +7,7 @@ Developer map of the plugin. User-facing documentation lives in `README.md`.
 ```
 src/
   plugin.cpp / pluginview.cpp     KTextEditor plugin + tool view, actions, shortcuts
+  kateaicommand.cpp               the ":kateai" editor command-line command
   chatwidget.cpp                  transcript, composer, model picker, mode menus
   toolcallwidget.cpp              one tool-call card (header, diff, output, copy)
   turnstatus.cpp                  live status strip (elapsed time, current activity)

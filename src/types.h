@@ -380,6 +380,18 @@ struct Settings {
     // Wall-clock budget for a single subtask.
     int subtaskTimeoutMs = 300000;
 
+    // --- Editor integration --------------------------------------------------
+    // Apply the agent's file edits to documents that are open in the editor
+    // in the buffer, leaving them unsaved for review, instead of writing them
+    // to disk at once. Off by default: while a change is unsaved, commands
+    // and tools that read the file from disk (bash, tests) still see the
+    // previous state.
+    bool editInBuffer = false;
+    // Show an in-editor banner on documents the agent edited, with actions to
+    // review the change in the Kate AI panel or reject it. Only open documents
+    // can carry a banner, so this does nothing for files Kate has not opened.
+    bool editBannersEnabled = true;
+
     // --- Appearance ----------------------------------------------------------
     // "preset" paints the chat panel from a built-in palette (themePreset);
     // "editor" derives both the chat colours and the window chrome from the

@@ -87,6 +87,8 @@ Settings SettingsStore::load()
     s.extraSystemPrompt = g.readEntry(u"ExtraSystemPrompt"_s, QString());
     s.extraDenyGlobs = g.readEntry(u"ExtraDenyGlobs"_s, QStringList());
     s.allowReadsOutsideWorkspace = g.readEntry(u"AllowReadsOutsideWorkspace"_s, false);
+    s.editInBuffer = g.readEntry(u"EditInBuffer"_s, false);
+    s.editBannersEnabled = g.readEntry(u"EditBannersEnabled"_s, true);
     s.contextCompressionLevel = g.readEntry(u"ContextCompressionLevel"_s, 1);
     s.maxGraphNodes = g.readEntry(u"MaxGraphNodes"_s, 50);
     s.maxGraphEdges = g.readEntry(u"MaxGraphEdges"_s, 100);
@@ -306,6 +308,8 @@ void SettingsStore::save(const Settings &settings)
     g.writeEntry(u"ExtraSystemPrompt"_s, settings.extraSystemPrompt);
     g.writeEntry(u"ExtraDenyGlobs"_s, settings.extraDenyGlobs);
     g.writeEntry(u"AllowReadsOutsideWorkspace"_s, settings.allowReadsOutsideWorkspace);
+    g.writeEntry(u"EditInBuffer"_s, settings.editInBuffer);
+    g.writeEntry(u"EditBannersEnabled"_s, settings.editBannersEnabled);
     
     // Save context compression settings
     g.writeEntry(u"ContextCompressionLevel"_s, settings.contextCompressionLevel);

@@ -1032,6 +1032,10 @@ ChatWidget::ChatWidget(QWidget *parent)
                     }
                     m_editTracker->addEdit(pending.path, pending.toolName, pending.diff,
                                            pending.oldContent, newContent, !pending.existed);
+                    // The view turns this into an in-editor banner on the
+                    // open document, so the change is visible where the file
+                    // lives, not only inside the chat panel.
+                    Q_EMIT agentEditedFile(pending.path);
                 }
                 m_pendingToolCalls.erase(it);
             }
@@ -1277,9 +1281,17 @@ ChatWidget::ChatWidget(QWidget *parent)
                                                                      const QString &newContent) {
         Q_UNUSED(toolName);
         Q_UNUSED(newContent);
-        // Nothing to write: in AcceptEdits the file was already written when the
-        // tool ran, so accepting only settles it in the queue. Say so, because
-        // the button gives no other feedback.
+        // In disk mode there is nothing to write: in AcceptEdits the file was
+        // already written when the tool ran, so accepting only settles it in
+        // the queue. In buffer mode the accepted change is still unsaved in
+        // the open document, and keeping it means saving it now.
+        if (m_agent.documentBridge()) {
+            QString error;
+            if (!m_agent.documentBridge()->saveDocumentIfOpen(path, &error)) {
+                showInfoMessage(i18n("Could not save %1: %2", QFileInfo(path).fileName(), error), true);
+                return;
+            }
+        }
         showInfoMessage(i18n("Kept changes to %1", QFileInfo(path).fileName()), false);
     });
     connect(m_editTracker, &EditTracker::editRejected, this, [this](const QString &path, const QString &toolName,
@@ -1296,7 +1308,7 @@ ChatWidget::ChatWidget(QWidget *parent)
             return;
         }
         QString error;
-        if (m_agent.documentBridge()->writeDocument(path, oldContent, &error)) {
+        if (m_agent.documentBridge()->restoreDocument(path, oldContent, &error)) {
             showInfoMessage(i18n("Edit reverted for %1", QFileInfo(path).fileName()), false);
         } else {
             showInfoMessage(i18n("Failed to revert edit for %1: %2", QFileInfo(path).fileName(), error), true);
@@ -1314,6 +1326,9 @@ ChatWidget::ChatWidget(QWidget *parent)
         Q_EMIT aboutToSubmit(); // Let Kate reload so the buffer matches the disk again.
     });
     connect(m_editTracker, &EditTracker::statusMessage, this, &ChatWidget::showInfoMessage);
+    // Re-emitted so the view can retire its in-editor banners when the queue
+    // the banners point at settles.
+    connect(m_editTracker, &EditTracker::editsChanged, this, &ChatWidget::pendingEditsChanged);
     // A review is read where the rest of the work is read: the .diff file the
     // tracker lays out is opened as a document in the editor, with the editor's
     // own diff highlighting, rather than in a separate window.
@@ -6083,6 +6098,29 @@ void ChatWidget::setCurrentConversationId(const QString &conversationId)
         const QString title = SessionStore::conversationTitle(conversationId);
         m_threadTitle->setText(title.isEmpty() ? i18n("New Thread") : title);
     }
+}
+
+void ChatWidget::renamePendingEdits(const QString &oldPath, const QString &newPath)
+{
+    // A Save-As has to carry the review queue along: the tracker, and any
+    // in-flight edit of the same turn that has not finished yet.
+    m_editTracker->renamePath(oldPath, newPath);
+    for (auto it = m_pendingToolCalls.begin(); it != m_pendingToolCalls.end(); ++it) {
+        if (it.value().path == oldPath) {
+            it.value().path = newPath;
+        }
+    }
+}
+
+bool ChatWidget::rejectPendingEdits(const QString &path)
+{
+    // The in-editor banner's reject action lands here. A path without
+    // pending edits (already settled from the panel) is a no-op.
+    if (!m_editTracker->pendingPaths().contains(path)) {
+        return false;
+    }
+    m_editTracker->rejectEdit(path);
+    return true;
 }
 
 // Create a new blank conversation and reset the chat UI.

@@ -254,13 +254,19 @@ The composer shows context-window usage as a percentage, turning amber at 70% an
 
 Kate AI is a first-class KTextEditor plugin, so it sees the same documents you do.
 
-- Active file, cursor line, selection (up to 4k), and the list of open files are sent as editor context
+- Active file, cursor line and column, selection with its line range (up to 4k of text), the file's language, unsaved state, bookmarks, and the list of open files are sent as editor context; an untitled buffer sends its content so the model can still see it
 - Reads and writes prefer the in-memory buffer over disk
+- **Edit banners**: an in-editor banner appears on files the agent changed, with **Review** (opens the panel) and **Reject Changes** actions (configurable)
+- **Edit open files in buffer** (settings): agent edits to open documents land in the buffer and stay unsaved — Keep in the review queue saves, Reject restores the buffer. While a change is unsaved, commands the agent runs still read the previous state from disk, so this is off by default
+- Save-As carries the review queue along: pending edits follow the file to its new path
+- Conversations are restored per Kate session and per window, so each window reopens its own chat
 - Right-click **Kate AI** submenu on any editor view:
   - **Ask Kate AI About This** — explain the selection (or current line)
   - **Fix Selection** — find problems, explain, apply
   - **Refactor Selection** — clarity and maintainability, then apply
   - **Add Tests for Selection** — propose coverage first
+- **Stop Kate AI** action (Tools ▸ Kate AI, bindable in Kate's shortcut settings) aborts the running turn without hunting for the panel button
+- **Command line**: `:kateai ask <text>`, `:kateai explain|fix|refactor|tests` (act on the selection or the range the command line carries, vi-mode `'<,'>kateai fix` included), `:kateai stop`, `:kateai new`, `:kateai mode <id>`, `:kateai panel`
 - Workspace root is the nearest parent with `.git` or `.kateproject`, otherwise the active file’s directory
 
 ### Thinking and plan mode

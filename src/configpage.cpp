@@ -486,6 +486,14 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     m_allowOutsideReads->setToolTip(i18n("The read tools are approved without a prompt. Keep this off to confine the agent to the project."));
     securityForm->addRow(i18n("Reads outside workspace:"), m_allowOutsideReads);
 
+    m_editInBuffer = new QCheckBox(i18n("Apply edits to open documents in the buffer, leaving them unsaved for review"), securityWidget);
+    m_editInBuffer->setToolTip(i18n("Changes to files that are open in the editor land in the buffer and stay unsaved; the review queue's Keep saves them and Revert restores the buffer. Note: while a change is unsaved, commands the agent runs (bash, tests) still read the previous state from disk."));
+    securityForm->addRow(i18n("Edit open files in buffer:"), m_editInBuffer);
+
+    m_editBanners = new QCheckBox(i18n("Show an in-editor banner on files the agent edited"), securityWidget);
+    m_editBanners->setToolTip(i18n("A banner with Review and Reject actions appears in the editor on open documents the agent changed."));
+    securityForm->addRow(i18n("Edit banners:"), m_editBanners);
+
     m_maxExpandedToolCards = new QSpinBox(securityWidget);
     m_maxExpandedToolCards->setRange(0, 200);
     m_maxExpandedToolCards->setSpecialValueText(i18n("Always expand all"));
@@ -1214,6 +1222,8 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     connect(m_timeout, &QSpinBox::valueChanged, this, markChanged);
     connect(m_deny, &QPlainTextEdit::textChanged, this, markChanged);
     connect(m_allowOutsideReads, &QCheckBox::toggled, this, markChanged);
+    connect(m_editInBuffer, &QCheckBox::toggled, this, markChanged);
+    connect(m_editBanners, &QCheckBox::toggled, this, markChanged);
     connect(m_maxExpandedToolCards, &QSpinBox::valueChanged, this, markChanged);
 
     connect(m_planMode, &QCheckBox::toggled, this, markChanged);
@@ -1641,6 +1651,8 @@ s.opencodeModel = m_opencodeModel->currentText().trimmed();
     s.extraSystemPrompt = m_system->toPlainText();
     s.extraDenyGlobs = m_deny->toPlainText().split(u'\n', Qt::SkipEmptyParts);
     s.allowReadsOutsideWorkspace = m_allowOutsideReads->isChecked();
+    s.editInBuffer = m_editInBuffer->isChecked();
+    s.editBannersEnabled = m_editBanners->isChecked();
     s.messageSpeed = m_speed->currentData().toInt();
 
     s.contextCompressionLevel = m_compressionLevel->value();
@@ -1830,6 +1842,8 @@ void KateAiConfigPage::reset()
     m_timeout->setValue(std::max(1, s.bashTimeoutMs / 1000));
     m_deny->setPlainText(s.extraDenyGlobs.join(u'\n'));
     m_allowOutsideReads->setChecked(s.allowReadsOutsideWorkspace);
+    m_editInBuffer->setChecked(s.editInBuffer);
+    m_editBanners->setChecked(s.editBannersEnabled);
     m_maxExpandedToolCards->setValue(s.maxExpandedToolCards);
 
     m_maxIter->setValue(s.maxToolCalls);

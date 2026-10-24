@@ -822,6 +822,39 @@ void EditTracker::settle(const QString &path, bool accepted)
     Q_EMIT editsChanged(hasPendingEdits());
 }
 
+void EditTracker::renamePath(const QString &oldPath, const QString &newPath)
+{
+    // A Save-As moved the file a pending edit (or an earlier decision about
+    // it) refers to. The tracker keys everything by path, so the entries have
+    // to follow the file or a later accept/reject would settle the old,
+    // possibly nonexistent path.
+    if (oldPath.isEmpty() || newPath.isEmpty() || oldPath == newPath) {
+        return;
+    }
+    bool changed = false;
+    for (auto &group : m_groups) {
+        if (group.path == oldPath) {
+            group.path = newPath;
+            for (auto &entry : group.pending) {
+                entry.path = newPath;
+            }
+            changed = true;
+        }
+    }
+    for (auto &decision : m_undoStack) {
+        if (decision.path == oldPath) {
+            decision.path = newPath;
+            for (auto &entry : decision.pending) {
+                entry.path = newPath;
+            }
+            changed = true;
+        }
+    }
+    if (changed) {
+        updateUI();
+    }
+}
+
 void EditTracker::acceptEdit(const QString &path)
 {
     settle(path, true);

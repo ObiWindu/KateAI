@@ -121,6 +121,8 @@ private:
     QSpinBox *m_maxExpandedToolCards = nullptr;
     QPlainTextEdit *m_deny = nullptr;
     QCheckBox *m_allowOutsideReads = nullptr;
+    QCheckBox *m_editInBuffer = nullptr;
+    QCheckBox *m_editBanners = nullptr;
 
     // Agent
     QSpinBox *m_maxIter = nullptr;
