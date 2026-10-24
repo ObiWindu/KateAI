@@ -5,6 +5,8 @@
 
 #include "pluginview.h"
 #include "chatwidget.h"
+#include "edittracker.h"
+#include "editorassist.h"
 #include "mcp.h"
 #include "chattheme.h"
 #include "configpage.h"
@@ -13,7 +15,9 @@
 #include "workspace.h"
 
 #include <KActionCollection>
+#include <KConfigGroup>
 #include <KLocalizedString>
+#include <KSharedConfig>
 #include <KSyntaxHighlighting/Theme>
 #include <KTextEditor/Document>
 #include <KTextEditor/Editor>
@@ -78,6 +82,15 @@ namespace KateAi
         if (m_toolView) {
             m_chat = new ChatWidget(m_toolView);
         }
+
+        // The in-editor assist: AI completions at the cursor and hover hints
+        // over agent-edited lines. One per window, attached to every editor
+        // view of the window. Completions are opt-in through the settings.
+        m_assist = new EditorAssist(this);
+        m_assist->setSettings(plugin->settings());
+        m_assist->setBusyCheck([this]() {
+            return m_chat && m_chat->agent() && m_chat->agent()->isBusy();
+        });
 
         // Ensure the tool view has a layout and add our chat widget to it
         // Configure the chat widget with plugin settings and set up document bridging
@@ -147,6 +160,9 @@ namespace KateAi
                 if (m_chat) {
                     m_chat->setSettings(settings);
                 }
+                if (m_assist) {
+                    m_assist->setSettings(settings);
+                }
                 refreshWorkspace();
             });
         }
@@ -197,19 +213,35 @@ namespace KateAi
                 // turns are no longer "ours", and the agent must not build on
                 // them until they were settled.
                 m_bridge.resetBufferedEdits();
+                // Completions stay off while the chat turn runs.
+                if (m_assist) {
+                    m_assist->setAgentBusy(true);
+                }
                 refreshWorkspace();
             });
+            // The turn ends (finishes, fails or is stopped): completions and
+            // their budget come back.
+            if (m_chat->agent()) {
+                connect(m_chat->agent(), &AgentLoop::turnFinished, this, [this]() {
+                    if (m_assist) {
+                        m_assist->setAgentBusy(false);
+                    }
+                });
+            }
             // An agent edit of an open document shows where the file lives:
             // the in-editor banner points into the review queue.
             connect(m_chat, &ChatWidget::agentEditedFile, this, [this](const QString &path) {
                 postEditBanner(path);
+                syncEditRanges();
             });
             // When the queue settles, its banners have nothing left to point
-            // at, so the next round may post fresh ones.
+            // at, so the next round may post fresh ones. The hover hints move
+            // from "pending review" to "turn finished".
             connect(m_chat, &ChatWidget::pendingEditsChanged, this, [this](bool hasPending) {
                 if (!hasPending) {
                     m_bannerPaths.clear();
                 }
+                syncEditRanges();
             });
         }
         // Buffer mode follows the setting on every later change too.
@@ -235,7 +267,7 @@ namespace KateAi
         }
 
         auto *ac = actionCollection();
-        QPointer<QAction> toggle, fresh, ask, fix, refactor, tests, configure, stop;
+        QPointer<QAction> toggle, fresh, ask, fix, refactor, tests, configure, stop, completeAction;
 
         if (ac) {
             toggle = ac->addAction(u"kateai_toggle"_s);
@@ -302,6 +334,20 @@ namespace KateAi
                 configure->setIcon(QIcon::fromTheme(u"settings-configure"_s));
                 connect(configure, &QAction::triggered, this, &KateAiView::showConfiguration);
             }
+
+            // Manual completion trigger. The shortcut only reaches the panel's
+            // window; the assist is per main window and asks its active view.
+            completeAction = ac->addAction(u"kateai_complete"_s);
+            if (completeAction) {
+                completeAction->setText(i18n("Kate AI: Complete at Cursor"));
+                KActionCollection::setDefaultShortcut(
+                    completeAction, QKeySequence(Qt::ALT | Qt::Key_Backslash));
+                connect(completeAction, &QAction::triggered, this, [this]() {
+                    if (m_assist && m_mainWindow) {
+                        m_assist->triggerCompletion(m_mainWindow->activeView());
+                    }
+                });
+            }
         }
 
         // KTextEditor does not merge plugin XML clients into a view whose context
@@ -313,6 +359,39 @@ namespace KateAi
             }
             connect(m_mainWindow, &KTextEditor::MainWindow::viewCreated, this, [this, ask, fix, refactor, tests](KTextEditor::View *view) {
                 addEditorContextActions(view, {ask, fix, refactor, tests});
+            });
+        }
+
+        // The assist follows the window's view set: existing views first, then
+        // every view the editor creates later. KTextEditor has no
+        // view-about-to-be-destroyed signal; the assist tracks the views with
+        // QPointer and drops dead ones on its own.
+        if (m_mainWindow && m_assist) {
+            for (auto *view : m_mainWindow->views()) {
+                m_assist->attachView(view);
+            }
+            connect(m_mainWindow, &KTextEditor::MainWindow::viewCreated, this,
+                    [this](KTextEditor::View *view) {
+                        if (m_assist) {
+                            m_assist->attachView(view);
+                        }
+                    });
+            // One-time notice the first time auto mode is about to fire: an
+            // idle-triggered completion loop on a metered key is exactly the
+            // cost surprise the user should hear about before it happens.
+            connect(m_assist, &EditorAssist::autoModeFirstRun, this, [this]() {
+                KConfigGroup g(KSharedConfig::openConfig(), u"KateAI"_s);
+                if (g.readEntry(u"CompletionAutoNoticeShown"_s, false)) {
+                    return;
+                }
+                g.writeEntry(u"CompletionAutoNoticeShown"_s, true);
+                g.sync();
+                QVariantMap message;
+                message.insert(u"type"_s, u"Information"_s);
+                message.insert(u"category"_s, i18n("Kate AI"));
+                message.insert(u"categoryIcon"_s, QIcon::fromTheme(u"help-hint"_s));
+                message.insert(u"text"_s, i18n("Automatic AI completions are on: Kate AI now requests short completions while you type, within the per-minute budget from its settings. Turn this off any time in the Kate AI configuration."));
+                m_mainWindow->showMessage(message);
             });
         }
 
@@ -769,6 +848,18 @@ namespace KateAi
             m_docPaths.remove(document);
         });
         updateCompletions();
+    }
+
+    void KateAiView::syncEditRanges()
+    {
+        if (!m_assist || !m_chat || !m_chat->editTracker()) {
+            return;
+        }
+        EditTracker *tracker = m_chat->editTracker();
+        for (const QString &path : tracker->rangedPaths()) {
+            m_assist->updateEditRanges(path, tracker->pendingEditRanges(path),
+                                       tracker->settledEditRanges(path));
+        }
     }
 
     void KateAiView::postEditBanner(const QString &path)

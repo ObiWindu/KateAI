@@ -381,6 +381,22 @@ struct Settings {
     int subtaskTimeoutMs = 300000;
 
     // --- Editor integration --------------------------------------------------
+    // AI completions at the cursor, rendered inline and accepted with Tab.
+    // Opt-in: off by default. See docs/ai-completion-plan.md.
+    bool completionEnabled = false;
+    // "manual" (the Alt+\ action) or "auto" (idle timer after typing).
+    QString completionTrigger = QStringLiteral("manual");
+    // "inline" (ghost note at the cursor) or "popup" (native completion list).
+    QString completionRenderMode = QStringLiteral("inline");
+    // A small fast model for completions; empty means "use the chat model".
+    QString completionModel;
+    // Separate budget for completions, enforced in CompletionEngine.
+    int completionRequestsPerMinute = 20;
+    // FIM-style context window around the cursor, in characters.
+    int completionContextPrefixChars = 4000;
+    int completionContextSuffixChars = 1500;
+    // Idle time after the last keystroke before an auto trigger fires.
+    int completionAutoTriggerDelayMs = 800;
     // Apply the agent's file edits to documents that are open in the editor
     // in the buffer, leaving them unsaved for review, instead of writing them
     // to disk at once. Off by default: while a change is unsaved, commands
@@ -456,6 +472,9 @@ SandboxProfile sandboxProfileFromId(const QString &id);
 
 QString apiKeyFor(const Settings &settings);
 QString modelFor(const Settings &settings);
+// True when the provider exposes a fill-in-the-middle completion endpoint
+// (/completions with prompt markers), used by the editor completion engine.
+bool providerSupportsFim(Provider provider);
 // Models the picker should offer for a provider: the live catalogue, plus the
 // configured model when it is missing from that list. Providers with no
 // catalogue (ACP) still surface the configured model so they can be selected.

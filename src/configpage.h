@@ -124,6 +124,16 @@ private:
     QCheckBox *m_editInBuffer = nullptr;
     QCheckBox *m_editBanners = nullptr;
 
+    // --- AI completions at the cursor (the "Completion" tab) -------------
+    QCheckBox *m_completionEnabled = nullptr;
+    QComboBox *m_completionTrigger = nullptr;
+    QComboBox *m_completionRenderMode = nullptr;
+    QLineEdit *m_completionModel = nullptr;
+    QSpinBox *m_completionRequestsPerMinute = nullptr;
+    QSpinBox *m_completionPrefixChars = nullptr;
+    QSpinBox *m_completionSuffixChars = nullptr;
+    QSpinBox *m_completionAutoDelay = nullptr;
+
     // Agent
     QSpinBox *m_maxIter = nullptr;
     QSpinBox *m_maxModelRequests = nullptr;

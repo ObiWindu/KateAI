@@ -23,6 +23,8 @@ add_library(kateai_core STATIC
     contextmanager.cpp
     transcriptlayout.cpp
     websearch.cpp
+    completionengine.cpp
+    editranges.cpp
 )
 
 set_target_properties(kateai_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
@@ -47,6 +49,7 @@ target_compile_definitions(kateai PRIVATE TRANSLATION_DOMAIN="kateai")
 target_sources(kateai PRIVATE
     plugin.cpp
     pluginview.cpp
+    editorassist.cpp
     kateaicommand.cpp
     configpage.cpp
     turnstatus.cpp

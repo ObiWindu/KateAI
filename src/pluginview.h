@@ -26,6 +26,7 @@ class View;
 namespace KateAi
 {
 class ChatWidget;
+class EditorAssist;
 class KateAiPlugin;
 
 class KateAiView : public QObject, public KXMLGUIClient
@@ -71,6 +72,9 @@ private:
     // Posts the in-editor banner for an agent edit of an open document,
     // unless it is already posted.
     void postEditBanner(const QString &path);
+    // Mirrors the review queue's per-path line ranges into the editor assist,
+    // so the hover hints follow the queue (pending and settled alike).
+    void syncEditRanges();
     // Catches QEvent::ApplicationPaletteChange on qApp (Qt 6 deprecates
     // QGuiApplication::paletteChanged in favour of the event).
     bool eventFilter(QObject *watched, QEvent *event) override;
@@ -85,6 +89,8 @@ private:
     QPointer<QWidget> m_toolView;
     QPointer<QDialog> m_configDialog;
     ChatWidget *m_chat = nullptr;
+    // In-editor AI completions and agent-edit hover hints, one per window.
+    EditorAssist *m_assist = nullptr;
     // The answer of the user per workspace: whether the MCP servers of that
     // project may be started.
     QHash<QString, bool> m_mcpTrust;

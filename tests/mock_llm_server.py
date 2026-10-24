@@ -38,6 +38,9 @@ WRITE_MARKER = "Write the note file."
 # Sent to make the model stream text slowly, so a stop can be pressed while
 # the answer is still being typed into the chat.
 STREAM_MARKER = "Type slowly."
+# Same, but the chunks are hidden reasoning: the stop has to freeze the
+# paced reveal of thinking text, not only the visible answer.
+THINK_MARKER = "Think slowly."
 # Long enough that two sequential dispatches would visibly not overlap.
 CHILD_DELAY_SECONDS = 1.5
 # The orchestrator delegates exactly once; every later turn gets prose. Without
@@ -53,6 +56,7 @@ STALLED = False
 # The file write is issued once per server, for the same reason.
 WROTE = False
 STREAMED = False
+THOUGHT = False
 
 
 def sse(payload):
@@ -61,6 +65,10 @@ def sse(payload):
 
 def chunk_text(text):
     return sse({"choices": [{"index": 0, "delta": {"content": text}, "finish_reason": None}]})
+
+
+def chunk_thinking(text):
+    return sse({"choices": [{"index": 0, "delta": {"reasoning_content": text}, "finish_reason": None}]})
 
 
 def tool_call(index, call_id, name, arguments):
@@ -116,7 +124,7 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     def do_POST(self):
-        global DELEGATED, ASKED, ASKED_EMPTY, SUGGESTED, STALLED, WROTE, STREAMED
+        global DELEGATED, ASKED, ASKED_EMPTY, SUGGESTED, STALLED, WROTE, STREAMED, THOUGHT
         length = int(self.headers.get("Content-Length", "0"))
         try:
             body = json.loads(self.rfile.read(length) or b"{}")
@@ -142,6 +150,7 @@ class Handler(BaseHTTPRequestHandler):
         is_suggest_object_args = SUGGEST_OBJECT_ARGS_MARKER in last_user and not SUGGESTED
         is_write = WRITE_MARKER in last_user and not WROTE
         is_stream = STREAM_MARKER in last_user and not STREAMED
+        is_think = THINK_MARKER in last_user and not THOUGHT
         # Anthropic puts the system prompt at the top level, so its requests are
         # the ones without a system-role message in the array.
         is_anthropic = "anthropic-version" in self.headers
@@ -200,6 +209,15 @@ class Handler(BaseHTTPRequestHandler):
             for i in range(30):
                 emit(chunk_text(f"Streaming line {i} of the slow answer.\n\n"))
                 time.sleep(0.2)
+            emit(sse({"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}))
+        elif is_think:
+            THOUGHT = True
+            # Hidden reasoning, spaced out the same way: the stop has to
+            # freeze the paced thinking reveal, not just the visible text.
+            for i in range(20):
+                emit(chunk_thinking(f"Thought {i} of the slow reasoning.\n\n"))
+                time.sleep(0.25)
+            emit(chunk_text("The reasoned answer."))
             emit(sse({"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}))
         elif is_write:
             WROTE = True

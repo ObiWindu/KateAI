@@ -55,6 +55,13 @@ public:
         return &m_agent;
     }
 
+    // The review queue of agent edits, for callers (the plugin view) that
+    // mirror its state into the editor: banners and hover hints.
+    EditTracker *editTracker() const
+    {
+        return m_editTracker;
+    }
+
     void setSettings(const Settings &settings);
     Settings settings() const
     {

@@ -1,9 +1,11 @@
 # AI in-editor completion — implementation plan
 
-Plan for the highest-impact Kate integration that is deliberately not built
+Plan for the highest-impact Kate integration that was deliberately not built
 yet: AI completions inside the editor, plus agent-edit annotations. This is
 the roadmap item behind "Code completion model / text hints" from the
-integration review. Nothing here is implemented; this document is the plan.
+integration review. The plan is implemented: `CompletionEngine` and
+`EditRangeTracker` live in `kateai_core`, `EditorAssist` and the providers in
+the `kateai` target; this document remains as the design record.
 
 ## Goal
 

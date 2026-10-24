@@ -335,6 +335,15 @@ QString modelFor(const Settings &settings)
     }
 }
 
+// True when the provider exposes a fill-in-the-middle completion endpoint
+// (/completions with prompt markers): DeepSeek's documented FIM beta and the
+// OpenAI-compatible local servers (vLLM, LM Studio, Ollama) that translate
+// the generic markers. Everything else takes the chat-completions path.
+bool providerSupportsFim(Provider provider)
+{
+    return provider == Provider::DeepSeek || provider == Provider::OpenAICompatible;
+}
+
 QStringList pickerModelsFor(const Settings &settings, Provider provider, const QStringList &catalog)
 {
     QStringList models;

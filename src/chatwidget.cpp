@@ -475,6 +475,13 @@ ChatWidget::ChatWidget(QWidget *parent)
     m_scrollArea->setWidgetResizable(true);
     m_scrollArea->setFrameShape(QFrame::NoFrame);
     m_scrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    // The floating overlays (thinking/working pills, jump-to-latest) are
+    // positioned in pixels against the scroll area's height. The panel's own
+    // resize is not the only thing that moves that height: the edit tracker's
+    // "Hide files" collapses its list inside the same vertical layout without
+    // touching the panel, so the overlays have to follow the scroll area's
+    // Resize events too or they hang where the bottom used to be.
+    m_scrollArea->installEventFilter(this);
 
     m_transcriptContainer = new QWidget(m_scrollArea);
     m_transcriptContainer->setObjectName(u"transcript"_s);
@@ -1181,6 +1188,14 @@ ChatWidget::ChatWidget(QWidget *parent)
     });
 
     connect(&m_agent, &AgentLoop::turnFinished, this, [this]() {
+        // Freeze the live card first, whatever ended the turn. A stop does
+        // not emit assistantFinished, so without this the streaming card
+        // stays active: the thinking pacer and the coalesced render timer
+        // keep typing into it for a few more moments after Stop, and the
+        // next turn streams its answer into that stale card -- which by then
+        // sits in the middle of the transcript, above the newer user
+        // message, breaking the time order of the whole thread.
+        freezeStreaming();
         m_prompt->setEnabled(true);
         updateSendButtonState();
         m_prompt->setFocus();
@@ -1930,6 +1945,15 @@ void ChatWidget::fitReasoningBrowser(QTextBrowser *browser)
 
 bool ChatWidget::eventFilter(QObject *watched, QEvent *event)
 {
+    // The scroll area resizes without the panel resizing (the edit tracker's
+    // "Hide files" toggle collapses its list inside the shared vertical
+    // layout), and the floating overlays are pinned to the scroll area's
+    // bottom in pixels. Reposition them on every scroll-area resize, or they
+    // stay suspended where the bottom of the transcript used to be.
+    if (event->type() == QEvent::Resize && watched == m_scrollArea) {
+        updateScrollButtonPosition();
+        updateIndicatorsPosition();
+    }
     // The reasoning browsers carry a height pinned to their document. The
     // layout assigns their real width only after the block is shown, and
     // again on every panel resize, so the fit has to follow those resizes --

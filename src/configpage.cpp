@@ -915,6 +915,66 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     webScroll->setWidget(webWidget);
     tabs->addTab(webScroll, i18n("Web Search"));
 
+    // --- AI completions at the cursor ------------------------------------------
+    auto *completionScroll = new QScrollArea(tabs);
+    completionScroll->setWidgetResizable(true);
+    completionScroll->setFrameShape(QFrame::NoFrame);
+    auto *completionWidget = new QWidget(completionScroll);
+    auto *completionForm = new QFormLayout(completionWidget);
+    completionForm->setContentsMargins(12, 12, 12, 12);
+    completionForm->setSpacing(8);
+
+    m_completionEnabled = new QCheckBox(i18n("Offer AI completions at the cursor, accepted with Tab"), completionWidget);
+    m_completionEnabled->setToolTip(i18n("A short completion is requested from the configured provider and shown inline at the cursor (or in the completion list). It is never inserted without an explicit key press. Off while a chat turn is running."));
+    completionForm->addRow(i18n("Enable completions:"), m_completionEnabled);
+
+    m_completionTrigger = new QComboBox(completionWidget);
+    m_completionTrigger->addItem(i18n("Manual (Alt+\\)"), QStringLiteral("manual"));
+    m_completionTrigger->addItem(i18n("Automatic, after an idle pause"), QStringLiteral("auto"));
+    completionForm->addRow(i18n("Trigger:"), m_completionTrigger);
+
+    m_completionRenderMode = new QComboBox(completionWidget);
+    m_completionRenderMode->addItem(i18n("Inline ghost text"), QStringLiteral("inline"));
+    m_completionRenderMode->addItem(i18n("Completion popup"), QStringLiteral("popup"));
+    completionForm->addRow(i18n("Render mode:"), m_completionRenderMode);
+
+    m_completionModel = new QLineEdit(completionWidget);
+    m_completionModel->setPlaceholderText(i18n("Empty = the chat model"));
+    m_completionModel->setToolTip(i18n("A small, fast model costs less and answers sooner; leave empty to use the chat model."));
+    completionForm->addRow(i18n("Completion model:"), m_completionModel);
+
+    m_completionRequestsPerMinute = new QSpinBox(completionWidget);
+    m_completionRequestsPerMinute->setRange(1, 120);
+    m_completionRequestsPerMinute->setSuffix(i18n(" / min"));
+    m_completionRequestsPerMinute->setToolTip(i18n("A budget enforced by the completion engine itself, so an automatic trigger cannot fire a metered key a hundred times an hour."));
+    completionForm->addRow(i18n("Completion requests per minute:"), m_completionRequestsPerMinute);
+
+    m_completionPrefixChars = new QSpinBox(completionWidget);
+    m_completionPrefixChars->setRange(1, 100000);
+    m_completionPrefixChars->setSingleStep(500);
+    m_completionPrefixChars->setSuffix(i18n(" chars"));
+    completionForm->addRow(i18n("Context before cursor:"), m_completionPrefixChars);
+
+    m_completionSuffixChars = new QSpinBox(completionWidget);
+    m_completionSuffixChars->setRange(1, 100000);
+    m_completionSuffixChars->setSingleStep(500);
+    m_completionSuffixChars->setSuffix(i18n(" chars"));
+    completionForm->addRow(i18n("Context after cursor:"), m_completionSuffixChars);
+
+    m_completionAutoDelay = new QSpinBox(completionWidget);
+    m_completionAutoDelay->setRange(100, 10000);
+    m_completionAutoDelay->setSingleStep(100);
+    m_completionAutoDelay->setSuffix(i18n(" ms"));
+    completionForm->addRow(i18n("Idle time before an automatic completion:"), m_completionAutoDelay);
+
+    auto *completionHelp = new QLabel(i18n("Hovering a line the agent edited shows a hint that leads to the review queue; that part needs no setting and follows the review queue itself."), completionWidget);
+    completionHelp->setWordWrap(true);
+    completionHelp->setStyleSheet(QStringLiteral(u"color: %1;").arg(ChatTheme::textMuted()));
+    completionForm->addRow(completionHelp);
+
+    completionScroll->setWidget(completionWidget);
+    tabs->addTab(completionScroll, i18n("Completion"));
+
     // --- Checkpoints and subtasks ---------------------------------------------
     auto *safetyScroll = new QScrollArea(tabs);
     safetyScroll->setWidgetResizable(true);
@@ -1224,6 +1284,14 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     connect(m_allowOutsideReads, &QCheckBox::toggled, this, markChanged);
     connect(m_editInBuffer, &QCheckBox::toggled, this, markChanged);
     connect(m_editBanners, &QCheckBox::toggled, this, markChanged);
+    connect(m_completionEnabled, &QCheckBox::toggled, this, markChanged);
+    connect(m_completionTrigger, &QComboBox::currentIndexChanged, this, markChanged);
+    connect(m_completionRenderMode, &QComboBox::currentIndexChanged, this, markChanged);
+    connect(m_completionModel, &QLineEdit::textChanged, this, markChanged);
+    connect(m_completionRequestsPerMinute, &QSpinBox::valueChanged, this, markChanged);
+    connect(m_completionPrefixChars, &QSpinBox::valueChanged, this, markChanged);
+    connect(m_completionSuffixChars, &QSpinBox::valueChanged, this, markChanged);
+    connect(m_completionAutoDelay, &QSpinBox::valueChanged, this, markChanged);
     connect(m_maxExpandedToolCards, &QSpinBox::valueChanged, this, markChanged);
 
     connect(m_planMode, &QCheckBox::toggled, this, markChanged);
@@ -1653,6 +1721,14 @@ s.opencodeModel = m_opencodeModel->currentText().trimmed();
     s.allowReadsOutsideWorkspace = m_allowOutsideReads->isChecked();
     s.editInBuffer = m_editInBuffer->isChecked();
     s.editBannersEnabled = m_editBanners->isChecked();
+    s.completionEnabled = m_completionEnabled->isChecked();
+    s.completionTrigger = m_completionTrigger->currentData().toString();
+    s.completionRenderMode = m_completionRenderMode->currentData().toString();
+    s.completionModel = m_completionModel->text().trimmed();
+    s.completionRequestsPerMinute = m_completionRequestsPerMinute->value();
+    s.completionContextPrefixChars = m_completionPrefixChars->value();
+    s.completionContextSuffixChars = m_completionSuffixChars->value();
+    s.completionAutoTriggerDelayMs = m_completionAutoDelay->value();
     s.messageSpeed = m_speed->currentData().toInt();
 
     s.contextCompressionLevel = m_compressionLevel->value();
@@ -1844,6 +1920,14 @@ void KateAiConfigPage::reset()
     m_allowOutsideReads->setChecked(s.allowReadsOutsideWorkspace);
     m_editInBuffer->setChecked(s.editInBuffer);
     m_editBanners->setChecked(s.editBannersEnabled);
+    m_completionEnabled->setChecked(s.completionEnabled);
+    m_completionTrigger->setCurrentIndex(std::max(0, m_completionTrigger->findData(s.completionTrigger)));
+    m_completionRenderMode->setCurrentIndex(std::max(0, m_completionRenderMode->findData(s.completionRenderMode)));
+    m_completionModel->setText(s.completionModel);
+    m_completionRequestsPerMinute->setValue(s.completionRequestsPerMinute);
+    m_completionPrefixChars->setValue(s.completionContextPrefixChars);
+    m_completionSuffixChars->setValue(s.completionContextSuffixChars);
+    m_completionAutoDelay->setValue(s.completionAutoTriggerDelayMs);
     m_maxExpandedToolCards->setValue(s.maxExpandedToolCards);
 
     m_maxIter->setValue(s.maxToolCalls);

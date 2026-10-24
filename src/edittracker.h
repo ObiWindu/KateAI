@@ -7,6 +7,8 @@
 
 #include "types.h"
 
+#include <KTextEditor/Range>
+
 #include <QHash>
 #include <QList>
 #include <QPointer>
@@ -74,6 +76,16 @@ public:
 
     void acceptEdit(const QString &path);
     void rejectEdit(const QString &path);
+
+    // Line ranges (0-based, in the edited file) the agent's still-pending
+    // edits cover, and the ranges of the last settled decision round. Used
+    // by the in-editor hover hint; settled ranges are kept for the session
+    // and cleared with the queue.
+    QList<KTextEditor::Range> pendingEditRanges(const QString &path) const;
+    QList<KTextEditor::Range> settledEditRanges(const QString &path) const;
+    // Every path with pending or settled ranges, for the caller that pushes
+    // them into the editor-side range tracker.
+    QStringList rangedPaths() const;
     // Re-points every pending and remembered edit of oldPath at newPath. A
     // Save-As in the editor must carry the review queue along with the file,
     // or accepting and rejecting would settle a path that no longer exists.
@@ -123,6 +135,9 @@ private:
         // can restore it. A null QString means "never read", which is different
         // from "read as empty".
         QString previousContent;
+        // The line ranges this decision settled, mirrored in
+        // m_settledRanges so undo can retract exactly them.
+        QList<KTextEditor::Range> settledRanges;
     };
 
     void updateUI();
@@ -148,6 +163,11 @@ private:
     QList<Group> m_groups;
 
     QList<Decision> m_undoStack;
+
+    // Path -> added-line ranges of the decision rounds that settled in this
+    // session. The hover hint shows "edited by Kate AI (turn finished)" over
+    // these, so a change made from the panel stays discoverable days later.
+    QHash<QString, QList<KTextEditor::Range>> m_settledRanges;
 
     QWidget *m_barWidget = nullptr;
     QLabel *m_countLabel = nullptr;
