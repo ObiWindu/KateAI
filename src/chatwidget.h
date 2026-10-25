@@ -357,6 +357,7 @@ private:
     QPushButton *m_modelSelector = nullptr;
     QString m_streamText;
     QHash<Provider, QStringList> m_modelCatalog;
+    QString m_acpModelCatalogAgentId;
     Provider m_preferredProvider = Provider::Grok;
     bool m_updatingCombos = false;
     QString m_modelFilter;

@@ -1353,8 +1353,12 @@ ChatWidget::ChatWidget(QWidget *parent)
     });
 
     connect(&m_agent, &AgentLoop::modelsReceived, this, [this](Provider provider, const QStringList &models) {
-        if (!(provider == Provider::Acp && models.isEmpty() && m_modelCatalog.contains(Provider::Acp)
-              && !m_modelCatalog.value(Provider::Acp).isEmpty())) {
+        const bool keepExistingAcpCatalog = provider == Provider::Acp && models.isEmpty()
+            && m_modelCatalog.contains(Provider::Acp) && !m_modelCatalog.value(Provider::Acp).isEmpty();
+        if (provider == Provider::Acp && !keepExistingAcpCatalog) {
+            m_acpModelCatalogAgentId = m_settings.acpAgentId;
+        }
+        if (!keepExistingAcpCatalog) {
             // An empty ACP report must not wipe a catalogue we already have.
             // A session that simply didn't advertise models yet used to replace
             // the list the user was looking at with nothing.
@@ -3865,7 +3869,7 @@ void ChatWidget::fillModelResultList()
                                                      m_acpAgentModelViewAgentId);
         if (m_acpAgentModelViewAgentId == m_settings.acpAgentId) {
             const QStringList live = m_modelCatalog.value(Provider::Acp);
-            if (!live.isEmpty()) {
+            if (m_acpModelCatalogAgentId == m_acpAgentModelViewAgentId && !live.isEmpty()) {
                 models = live;
             }
             if (!m_settings.acpModel.isEmpty() && !models.contains(m_settings.acpModel)) {
@@ -3998,7 +4002,9 @@ void ChatWidget::fillModelResultList()
         }
 
         QStringList models;
-        if (p == Provider::Acp && usesAcpNative(m_settings) && m_modelCatalog.contains(Provider::Acp)) {
+        if (p == Provider::Acp && usesAcpNative(m_settings)
+            && m_acpModelCatalogAgentId == m_settings.acpAgentId
+            && m_modelCatalog.contains(Provider::Acp)) {
             models = pickerModelsFor(m_settings, p, m_modelCatalog.value(p));
         } else if (p == Provider::Acp && usesAcpNative(m_settings)) {
             models = acpAgentAvailableModels(m_settings, m_settings.acpAgentId);

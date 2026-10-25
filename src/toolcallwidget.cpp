@@ -825,10 +825,10 @@ void ToolCallWidget::setPartialOutput(const QString &partialOutput)
     }
     // The stream is rendered in the muted colour so the card reads as "this is
     // still arriving" while it runs, and setFinished's white text is clearly
-    // the final answer. Capped by lines like the finished text, so a chatty
-    // command cannot grow the card without bound either.
+    // the final answer. Command output is capped by lines; file reads stay
+    // complete so the user can inspect the full contents in the transcript.
     const QString body = diff.isEmpty() ? partialOutput : textBeforeDiff(partialOutput);
-    m_details->setHtml(partialToHtml(clampToLines(body, kMaxResultLines)));
+    m_details->setHtml(partialToHtml(m_risk == ToolRisk::Read ? body : clampToLines(body, kMaxResultLines)));
     // A stream is worth watching, so it opens itself; a card the user collapsed
     // themselves stays collapsed, because setExpanded tracks their choice.
     if (!m_details->toPlainText().isEmpty() || m_hasDiffPreview) {
@@ -867,8 +867,7 @@ void ToolCallWidget::setFinished(const ToolResult &result)
     m_partialOutput.clear();
     m_runningInput.clear();
     m_showingInput = false;
-    // Kept whole: the card clamps what it displays to 200 lines, but a copy of
-    // a truncated command output is a corrupted copy.
+    // Kept whole so a copy of the result is never corrupted by the display cap.
     m_resultOutput = result.output;
     updateCopyButton();
     if (m_durationTimer) {
@@ -910,7 +909,7 @@ void ToolCallWidget::setFinished(const ToolResult &result)
         setDescribeDiff(diff);
     }
     const QString shownSource = diff.isEmpty() ? result.output : textBeforeDiff(result.output);
-    const QString shown = clampToLines(shownSource, kMaxResultLines);
+    const QString shown = m_risk == ToolRisk::Read ? shownSource : clampToLines(shownSource, kMaxResultLines);
     const QString language = languageForTool(m_toolName);
     // Nothing to show must not paint an empty code block: a tool that reports
     // no output (an edit whose result never arrived, an ACP turn whose
