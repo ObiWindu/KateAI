@@ -83,29 +83,34 @@ bool DocumentBridge::readDocumentLines(const QString &path, int startLine, int m
     return true;
 }
 
-static KTextEditor::Document *openDocumentFor(const QString &path)
+} // namespace KateAi
+
+// The open KTextEditor document for a local path, or null when Kate does not
+// have it open. The canonical (normalized) path is compared, so a path with
+// symlinks or ../ segments still finds its document.
+KTextEditor::Document *KateAi::documentForPath(const QString &path)
 {
     // Get the global KTextEditor instance to access open documents
     auto *editor = KTextEditor::Editor::instance();
     if (!editor) {
         return nullptr;
     }
-    
+
     // Get the canonical (normalized) path for comparison
     const QString canonical = QFileInfo(path).canonicalFilePath().isEmpty() ? QFileInfo(path).absoluteFilePath()
                                                                             : QFileInfo(path).canonicalFilePath();
-    
+
     // Iterate through all open documents to find a match
     for (KTextEditor::Document *doc : editor->documents()) {
         const QString local = doc->url().toLocalFile();
         if (local.isEmpty()) {
             continue;
         }
-        
+
         // Get the canonical path of the document's local file
         const QString other = QFileInfo(local).canonicalFilePath().isEmpty() ? QFileInfo(local).absoluteFilePath()
                                                                              : QFileInfo(local).canonicalFilePath();
-        
+
         // Check if the paths match (either canonical or local)
         if (QDir::cleanPath(other) == QDir::cleanPath(canonical) || QDir::cleanPath(local) == QDir::cleanPath(path)) {
             return doc;
@@ -114,9 +119,28 @@ static KTextEditor::Document *openDocumentFor(const QString &path)
     return nullptr;
 }
 
+namespace KateAi
+{
+
+
+bool DocumentBridge::restoreDocument(const QString &path, const QString &contents, QString *error)
+{
+    // A bridge without editor access restores by writing the file.
+    return writeDocument(path, contents, error);
+}
+
+bool DocumentBridge::saveDocumentIfOpen(const QString &path, QString *error)
+{
+    // There is no editor buffer to save: nothing to do either way, so the
+    // return value says "the path is settled" without an error.
+    Q_UNUSED(path);
+    Q_UNUSED(error);
+    return true;
+}
+
 bool DiskDocumentBridge::readDocument(const QString &path, QString *contents) const
 {
-    if (auto *doc = openDocumentFor(path)) {
+    if (auto *doc = documentForPath(path)) {
         if (contents) {
             *contents = doc->text();
         }
@@ -145,7 +169,7 @@ bool DiskDocumentBridge::readDocumentLines(const QString &path, int startLine, i
     const int lineLimit = qMax(0, maxLines);
     int lineCount = 0;
 
-    if (auto *doc = openDocumentFor(path)) {
+    if (auto *doc = documentForPath(path)) {
         lineCount = doc->lines();
         if (lineCount > 0 && doc->line(lineCount - 1).isEmpty()) {
             --lineCount;
@@ -189,10 +213,12 @@ bool DiskDocumentBridge::readDocumentLines(const QString &path, int startLine, i
 
 bool DiskDocumentBridge::writeDocument(const QString &path, const QString &contents, QString *error)
 {
-    if (auto *doc = openDocumentFor(path)) {
-        // The document is open and the user has unsaved changes in it.
-        // Replacing the whole text would throw those changes away.
-        if (doc->isModified()) {
+    if (auto *doc = documentForPath(path)) {
+        // The document is open and has unsaved changes that are not ours:
+        // replacing the whole text would throw them away. An unsaved edit the
+        // bridge itself applied earlier in buffer mode is "ours" and is exactly
+        // the working state the next edit builds on.
+        if (doc->isModified() && !m_bufferedPaths.contains(path)) {
             if (error) {
                 *error = u"The document has unsaved changes; save it before the agent writes to it."_s;
             }
@@ -204,6 +230,15 @@ bool DiskDocumentBridge::writeDocument(const QString &path, const QString &conte
             }
             return false;
         }
+        if (m_editInBuffer) {
+            // The change stays in the buffer on purpose: the user reviews it
+            // through Kate's modified state and undo, and the edit tracker
+            // settles it -- accept saves, reject restores. Until then, tools
+            // that read the file from disk still see the previous state.
+            m_bufferedPaths.insert(path);
+            return true;
+        }
+        m_bufferedPaths.remove(path);
         if (doc->isModified() && !doc->url().isEmpty() && !doc->save()) {
             if (error) {
                 *error = u"The open document was updated but could not be saved."_s;
@@ -213,6 +248,58 @@ bool DiskDocumentBridge::writeDocument(const QString &path, const QString &conte
         return true;
     }
 
+    return writeDocumentToDisk(path, contents, error);
+}
+
+bool DiskDocumentBridge::restoreDocument(const QString &path, const QString &contents, QString *error)
+{
+    if (auto *doc = documentForPath(path)) {
+        // A rejected edit puts the buffer back to the content it had before
+        // the turn, also when the document is modified: in buffer mode the
+        // modification is the agent's own edit being reverted, and in disk
+        // mode the only modified state that reaches this path is the agent's
+        // unsaved leftover of a failed save. The pre-edit content came from
+        // the same buffer, so nothing of the user's is thrown away.
+        if (!doc->setText(contents)) {
+            if (error) {
+                *error = u"Failed to restore the open document."_s;
+            }
+            return false;
+        }
+        m_bufferedPaths.remove(path);
+        return true;
+    }
+
+    return writeDocumentToDisk(path, contents, error);
+}
+
+bool DiskDocumentBridge::saveDocumentIfOpen(const QString &path, QString *error)
+{
+    if (auto *doc = documentForPath(path)) {
+        // An accepted edit is kept: the buffer content becomes the file.
+        if (doc->isModified() && !doc->save()) {
+            if (error) {
+                *error = u"The open document could not be saved: %1"_s.arg(doc->url().toDisplayString());
+            }
+            return false;
+        }
+        m_bufferedPaths.remove(path);
+        return true;
+    }
+    return true;
+}
+
+// Forgets which open documents carry an unsaved edit of the bridge's own.
+// Called when a new turn starts; a path the user saved or reverted in the
+// meantime is harmless, and a path that is still modified stops the agent
+// from overwriting the user's changes, which is the safe direction.
+void DiskDocumentBridge::resetBufferedEdits()
+{
+    m_bufferedPaths.clear();
+}
+
+bool DiskDocumentBridge::writeDocumentToDisk(const QString &path, const QString &contents, QString *error)
+{
     const QDir dir = QFileInfo(path).dir();
     if (!dir.exists() && !dir.mkpath(u"."_s)) {
         if (error) {

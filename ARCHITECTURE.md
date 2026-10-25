@@ -7,6 +7,7 @@ Developer map of the plugin. User-facing documentation lives in `README.md`.
 ```
 src/
   plugin.cpp / pluginview.cpp     KTextEditor plugin + tool view, actions, shortcuts
+  kateaicommand.cpp               the ":kateai" editor command-line command
   chatwidget.cpp                  transcript, composer, model picker, mode menus
   toolcallwidget.cpp              one tool-call card (header, diff, output, copy)
   turnstatus.cpp                  live status strip (elapsed time, current activity)
@@ -20,6 +21,8 @@ src/
   mcp.cpp                         Model Context Protocol stdio clients
   checkpoint.cpp                  pre-turn shadow-git snapshots
   edittracker.cpp                 review queue for agent edits
+  completionengine.cpp / editranges.cpp  in-editor completions (core half): FIM/chat prompts, budgets, MovingCursor-anchored edit ranges
+  editorassist.cpp               in-editor pixels: ghost text, Tab accept, hover hints, one per main window
 tests/                            one QTest binary per component (see below)
 ```
 

@@ -51,7 +51,9 @@ public:
     QList<GraphNode *> getProjectNodes() const;
     QList<GraphEdge *> getProjectEdges() const;
 
-    bool isBusy() const { return m_busy; }
+    // Native ACP owns its prompt lifecycle separately from the controller's
+    // turn flag. Keep the UI in its active/stop state for the full ACP prompt.
+    bool isBusy() const { return m_busy || (usesAcpNative(m_settings) && m_acp.isBusy()); }
 
     LlmClient *client() { return &m_client; }
     AcpClient *acpClient() { return &m_acp; }

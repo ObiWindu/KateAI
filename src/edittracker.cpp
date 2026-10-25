@@ -6,6 +6,7 @@
 #include "edittracker.h"
 
 #include "chattheme.h"
+#include "editranges.h"
 
 #include <KLocalizedString>
 
@@ -336,6 +337,7 @@ void EditTracker::clear()
 {
     m_groups.clear();
     m_undoStack.clear();
+    m_settledRanges.clear();
     m_fileListVisible = false;
     updateUI();
     m_barWidget->hide();
@@ -380,6 +382,37 @@ QList<EditEntry> EditTracker::pendingEdits() const
         result.append(group.pending);
     }
     return result;
+}
+
+QList<KTextEditor::Range> EditTracker::pendingEditRanges(const QString &path) const
+{
+    for (const auto &group : m_groups) {
+        if (group.path == path) {
+            return addedLineRangesFromDiff(combinedDiff(group));
+        }
+    }
+    return {};
+}
+
+QList<KTextEditor::Range> EditTracker::settledEditRanges(const QString &path) const
+{
+    return m_settledRanges.value(path);
+}
+
+QStringList EditTracker::rangedPaths() const
+{
+    QStringList paths;
+    for (const auto &group : m_groups) {
+        if (!group.pending.isEmpty()) {
+            paths.append(group.path);
+        }
+    }
+    for (auto it = m_settledRanges.constBegin(); it != m_settledRanges.constEnd(); ++it) {
+        if (!paths.contains(it.key())) {
+            paths.append(it.key());
+        }
+    }
+    return paths;
 }
 
 void EditTracker::refreshTotals(Group &group) const
@@ -455,6 +488,19 @@ void EditTracker::undoLast()
     const Decision decision = m_undoStack.takeLast();
     if (decision.path.isEmpty()) {
         return;
+    }
+
+    // Undoing retracts the settled hint ranges of that decision round, so the
+    // lines go back to showing as pending (through the restored group) instead
+    // of both.
+    if (!decision.settledRanges.isEmpty()) {
+        QList<KTextEditor::Range> &ranges = m_settledRanges[decision.path];
+        for (const KTextEditor::Range &range : decision.settledRanges) {
+            ranges.removeAll(range);
+        }
+        if (ranges.isEmpty()) {
+            m_settledRanges.remove(decision.path);
+        }
     }
 
     // Put the edits back exactly as they were, so the user can decide again
@@ -780,6 +826,11 @@ void EditTracker::settle(const QString &path, bool accepted)
 
     Group &group = *it;
 
+    // The settled ranges are recorded before the pending list is cleared:
+    // the hover hint keeps pointing at the lines this round changed, with the
+    // "turn finished" wording, until the queue itself is cleared.
+    const QList<KTextEditor::Range> settledNow = addedLineRangesFromDiff(combinedDiff(group));
+
     // Everything still pending for this file is settled together, and the restore
     // target is the state before the FIRST of them. Restoring before the last one
     // instead would leave the file holding the intermediate result of an edit the
@@ -791,6 +842,7 @@ void EditTracker::settle(const QString &path, bool accepted)
     decision.pending = group.pending;
     decision.createdFile = group.createdFile;
     decision.previousContent = group.lastKnownContent;
+    decision.settledRanges = settledNow;
 
     // Mutate our own state before emitting anything. The slots write files and
     // show messages, and a slot is free to call back into the tracker; settling
@@ -801,6 +853,9 @@ void EditTracker::settle(const QString &path, bool accepted)
     const QString restoreTo = group.lastKnownContent;
     const QString settledTo = group.pending.last().newContent;
     group.pending.clear();
+    if (!settledNow.isEmpty()) {
+        m_settledRanges[path].append(settledNow);
+    }
     if (accepted && !settledTo.isNull()) {
         // The file is already in this state, so accepting only settles the queue.
         // A null content means the post-edit read failed, so the state of the
@@ -820,6 +875,43 @@ void EditTracker::settle(const QString &path, bool accepted)
         Q_EMIT editRejected(path, toolName, restoreTo);
     }
     Q_EMIT editsChanged(hasPendingEdits());
+}
+
+void EditTracker::renamePath(const QString &oldPath, const QString &newPath)
+{
+    // A Save-As moved the file a pending edit (or an earlier decision about
+    // it) refers to. The tracker keys everything by path, so the entries have
+    // to follow the file or a later accept/reject would settle the old,
+    // possibly nonexistent path.
+    if (oldPath.isEmpty() || newPath.isEmpty() || oldPath == newPath) {
+        return;
+    }
+    bool changed = false;
+    for (auto &group : m_groups) {
+        if (group.path == oldPath) {
+            group.path = newPath;
+            for (auto &entry : group.pending) {
+                entry.path = newPath;
+            }
+            changed = true;
+        }
+    }
+    for (auto &decision : m_undoStack) {
+        if (decision.path == oldPath) {
+            decision.path = newPath;
+            for (auto &entry : decision.pending) {
+                entry.path = newPath;
+            }
+            changed = true;
+        }
+    }
+    if (m_settledRanges.contains(oldPath)) {
+        m_settledRanges.insert(newPath, m_settledRanges.take(oldPath));
+        changed = true;
+    }
+    if (changed) {
+        updateUI();
+    }
 }
 
 void EditTracker::acceptEdit(const QString &path)

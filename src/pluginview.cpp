@@ -5,6 +5,8 @@
 
 #include "pluginview.h"
 #include "chatwidget.h"
+#include "edittracker.h"
+#include "editorassist.h"
 #include "mcp.h"
 #include "chattheme.h"
 #include "configpage.h"
@@ -13,10 +15,13 @@
 #include "workspace.h"
 
 #include <KActionCollection>
+#include <KConfigGroup>
 #include <KLocalizedString>
+#include <KSharedConfig>
 #include <KSyntaxHighlighting/Theme>
 #include <KTextEditor/Document>
 #include <KTextEditor/Editor>
+#include <KTextEditor/Message>
 #include <KTextEditor/View>
 #include <KXMLGUIFactory>
 
@@ -25,6 +30,7 @@
 #include <QColor>
 #include <QDialog>
 #include <QDialogButtonBox>
+#include <QDir>
 #include <QEvent>
 #include <QIcon>
 #include <QKeySequence>
@@ -77,6 +83,15 @@ namespace KateAi
             m_chat = new ChatWidget(m_toolView);
         }
 
+        // The in-editor assist: AI completions at the cursor and hover hints
+        // over agent-edited lines. One per window, attached to every editor
+        // view of the window. Completions are opt-in through the settings.
+        m_assist = new EditorAssist(this);
+        m_assist->setSettings(plugin->settings());
+        m_assist->setBusyCheck([this]() {
+            return m_chat && m_chat->agent() && m_chat->agent()->isBusy();
+        });
+
         // Ensure the tool view has a layout and add our chat widget to it
         // Configure the chat widget with plugin settings and set up document bridging
         if (m_toolView && m_chat) {
@@ -90,17 +105,30 @@ namespace KateAi
         // Configure the chat widget with plugin settings and set up document bridging
         if (m_chat) {
             m_chat->setSettings(plugin->settings());
+            // Edit-in-buffer mode follows the setting, both at startup and
+            // on every later change through the config page.
+            m_bridge.setEditInBuffer(plugin->settings().editInBuffer);
             if (m_chat->agent()) {
                 m_chat->agent()->setDocumentBridge(&m_bridge);
                 // Every chat needs an ID before its first turn. Otherwise the
                 // turn-finished autosave is skipped, and switching to another
                 // conversation can save the new messages under an empty ID.
-                // Load first: SessionStore may repair a stale active pointer by
-                // falling back to the newest persisted transcript.
-                const auto sessionData = SessionStore::load();
-                QString activeId = SessionStore::getActiveConversationId();
+                // The session config comes first: it knows which conversation
+                // this window was showing when the session was saved, so each
+                // window reopens its own chat instead of every window
+                // claiming the same global active one. Load first:
+                // SessionStore may repair a stale active pointer by falling
+                // back to the newest persisted transcript.
+                const QString claimedId = plugin->claimSessionConversation();
+                const auto sessionData = claimedId.isEmpty()
+                    ? SessionStore::load()
+                    : SessionStore::loadConversation(claimedId);
+                QString activeId = claimedId;
                 if (activeId.isEmpty()) {
-                    activeId = SessionStore::createNewConversation();
+                    activeId = SessionStore::getActiveConversationId();
+                    if (activeId.isEmpty()) {
+                        activeId = SessionStore::createNewConversation();
+                    }
                 }
                 m_chat->setCurrentConversationId(activeId);
 
@@ -114,6 +142,15 @@ namespace KateAi
                 m_chat->updateHistoryButton();
             }
         }
+        // The plugin remembers this view for the session config (its current
+        // conversation, per window) and for the ":kateai" command.
+        plugin->registerView(this);
+        if (m_chat) {
+            plugin->noteConversationChanged(this, m_chat->conversationId());
+            connect(m_chat, &ChatWidget::conversationChanged, this, [this, plugin](const QString &conversationId) {
+                plugin->noteConversationChanged(this, conversationId);
+            });
+        }
         refreshWorkspace();
 
         if (plugin && m_mainWindow) {
@@ -122,6 +159,9 @@ namespace KateAi
                 applyWindowChrome();
                 if (m_chat) {
                     m_chat->setSettings(settings);
+                }
+                if (m_assist) {
+                    m_assist->setSettings(settings);
                 }
                 refreshWorkspace();
             });
@@ -169,17 +209,65 @@ namespace KateAi
             connect(m_chat, &ChatWidget::configureRequested, this, &KateAiView::showConfiguration);
             connect(m_chat, &ChatWidget::openFileAtLineRequested, this, &KateAiView::openFileAtLine);
             connect(m_chat, &ChatWidget::aboutToSubmit, this, [this]() {
+                // A new turn starts: edits the bridge left unsaved in earlier
+                // turns are no longer "ours", and the agent must not build on
+                // them until they were settled.
+                m_bridge.resetBufferedEdits();
+                // Completions stay off while the chat turn runs.
+                if (m_assist) {
+                    m_assist->setAgentBusy(true);
+                }
                 refreshWorkspace();
             });
+            // The turn ends (finishes, fails or is stopped): completions and
+            // their budget come back.
+            if (m_chat->agent()) {
+                connect(m_chat->agent(), &AgentLoop::turnFinished, this, [this]() {
+                    if (m_assist) {
+                        m_assist->setAgentBusy(false);
+                    }
+                });
+            }
+            // An agent edit of an open document shows where the file lives:
+            // the in-editor banner points into the review queue.
+            connect(m_chat, &ChatWidget::agentEditedFile, this, [this](const QString &path) {
+                postEditBanner(path);
+                syncEditRanges();
+            });
+            // When the queue settles, its banners have nothing left to point
+            // at, so the next round may post fresh ones. The hover hints move
+            // from "pending review" to "turn finished".
+            connect(m_chat, &ChatWidget::pendingEditsChanged, this, [this](bool hasPending) {
+                if (!hasPending) {
+                    m_bannerPaths.clear();
+                }
+                syncEditRanges();
+            });
         }
+        // Buffer mode follows the setting on every later change too.
+        connect(plugin, &KateAiPlugin::settingsChanged, this, [this](const Settings &settings) {
+            m_bridge.setEditInBuffer(settings.editInBuffer);
+        });
         if (m_mainWindow) {
             connect(m_mainWindow, &KTextEditor::MainWindow::viewChanged, this, [this](KTextEditor::View *) {
                 refreshWorkspace();
             });
         }
+        // Follow the document set: Save-As has to rename the review queue,
+        // a close while the agent works needs a notice, and new documents
+        // change the completion words.
+        if (auto *editor = KTextEditor::Editor::instance()) {
+            for (KTextEditor::Document *document : editor->documents()) {
+                trackDocument(document);
+            }
+            connect(editor, &KTextEditor::Editor::documentCreated, this,
+                    [this](KTextEditor::Editor *, KTextEditor::Document *document) {
+                        trackDocument(document);
+                    });
+        }
 
         auto *ac = actionCollection();
-        QPointer<QAction> toggle, fresh, ask, fix, refactor, tests, configure;
+        QPointer<QAction> toggle, fresh, ask, fix, refactor, tests, configure, stop, completeAction;
 
         if (ac) {
             toggle = ac->addAction(u"kateai_toggle"_s);
@@ -201,6 +289,19 @@ namespace KateAi
             if (ask) {
                 ask->setText(i18n("Ask Kate AI About This"));
                 connect(ask, &QAction::triggered, this, &KateAiView::askSelection);
+            }
+
+            // Stop has a shortcut of its own: the panel button is at the far
+            // end of a scrolled transcript when a turn runs long.
+            stop = ac->addAction(u"kateai_stop"_s);
+            if (stop) {
+                stop->setText(i18n("Stop Kate AI"));
+                stop->setIcon(QIcon::fromTheme(u"process-stop"_s));
+                connect(stop, &QAction::triggered, this, [this]() {
+                    if (m_chat && m_chat->agent()) {
+                        m_chat->agent()->abort();
+                    }
+                });
             }
 
             fix = ac->addAction(u"kateai_fix_selection"_s);
@@ -233,6 +334,20 @@ namespace KateAi
                 configure->setIcon(QIcon::fromTheme(u"settings-configure"_s));
                 connect(configure, &QAction::triggered, this, &KateAiView::showConfiguration);
             }
+
+            // Manual completion trigger. The shortcut only reaches the panel's
+            // window; the assist is per main window and asks its active view.
+            completeAction = ac->addAction(u"kateai_complete"_s);
+            if (completeAction) {
+                completeAction->setText(i18n("Kate AI: Complete at Cursor"));
+                KActionCollection::setDefaultShortcut(
+                    completeAction, QKeySequence(Qt::ALT | Qt::Key_Backslash));
+                connect(completeAction, &QAction::triggered, this, [this]() {
+                    if (m_assist && m_mainWindow) {
+                        m_assist->triggerCompletion(m_mainWindow->activeView());
+                    }
+                });
+            }
         }
 
         // KTextEditor does not merge plugin XML clients into a view whose context
@@ -247,6 +362,39 @@ namespace KateAi
             });
         }
 
+        // The assist follows the window's view set: existing views first, then
+        // every view the editor creates later. KTextEditor has no
+        // view-about-to-be-destroyed signal; the assist tracks the views with
+        // QPointer and drops dead ones on its own.
+        if (m_mainWindow && m_assist) {
+            for (auto *view : m_mainWindow->views()) {
+                m_assist->attachView(view);
+            }
+            connect(m_mainWindow, &KTextEditor::MainWindow::viewCreated, this,
+                    [this](KTextEditor::View *view) {
+                        if (m_assist) {
+                            m_assist->attachView(view);
+                        }
+                    });
+            // One-time notice the first time auto mode is about to fire: an
+            // idle-triggered completion loop on a metered key is exactly the
+            // cost surprise the user should hear about before it happens.
+            connect(m_assist, &EditorAssist::autoModeFirstRun, this, [this]() {
+                KConfigGroup g(KSharedConfig::openConfig(), u"KateAI"_s);
+                if (g.readEntry(u"CompletionAutoNoticeShown"_s, false)) {
+                    return;
+                }
+                g.writeEntry(u"CompletionAutoNoticeShown"_s, true);
+                g.sync();
+                QVariantMap message;
+                message.insert(u"type"_s, u"Information"_s);
+                message.insert(u"category"_s, i18n("Kate AI"));
+                message.insert(u"categoryIcon"_s, QIcon::fromTheme(u"help-hint"_s));
+                message.insert(u"text"_s, i18n("Automatic AI completions are on: Kate AI now requests short completions while you type, within the per-minute budget from its settings. Turn this off any time in the Kate AI configuration."));
+                m_mainWindow->showMessage(message);
+            });
+        }
+
         if (m_mainWindow && m_mainWindow->guiFactory()) {
             m_mainWindow->guiFactory()->addClient(this);
         }
@@ -256,6 +404,9 @@ namespace KateAi
     {
         // Session is saved in ChatWidget destructor before AgentLoop is destroyed
         // m_toolView is owned by the main window, do not delete it here
+        if (m_plugin) {
+            m_plugin->unregisterView(this);
+        }
 
         if (m_mainWindow && m_mainWindow->guiFactory()) {
             m_mainWindow->guiFactory()->removeClient(this);
@@ -486,19 +637,66 @@ namespace KateAi
         auto *view = m_mainWindow->activeView();
         if (view && m_mainWindow) {
             const QString path = view->document()->url().toLocalFile();
-            lines.append(u"Active file: %1"_s.arg(path.isEmpty() ? view->document()->documentName() : path));
-            lines.append(u"Cursor: line %1"_s.arg(view->cursorPosition().line() + 1));
+            if (path.isEmpty()) {
+                // An untitled buffer has no path the tools could name, so
+                // its content is the only way the model can see it at all.
+                lines.append(u"Active file: (untitled) %1"_s.arg(view->document()->documentName()));
+                const QString text = view->document()->text();
+                if (!text.isEmpty()) {
+                    lines.append(u"Unsaved buffer content:\n%1"_s.arg(text.left(2000)));
+                }
+            } else {
+                lines.append(u"Active file: %1"_s.arg(path));
+            }
+            const KTextEditor::Cursor cursor = view->cursorPosition();
+            lines.append(u"Cursor: line %1, column %2"_s.arg(cursor.line() + 1).arg(cursor.column() + 1));
+            if (view->document()->isModified()) {
+                lines.append(u"Active file has unsaved changes."_s);
+            }
+            const QString mode = view->document()->highlightingMode();
+            if (!mode.isEmpty() && mode != u"None"_s) {
+                lines.append(u"Language: %1"_s.arg(mode));
+            }
             if (view->selection()) {
-                lines.append(u"Selection:\n%1"_s.arg(view->selectionText().left(4000)));
+                // The range, not only the text: "where" is what the model
+                // needs to point an edit at the same region.
+                const KTextEditor::Range range = view->selectionRange();
+                lines.append(u"Selection: lines %1-%2\n%3"_s
+                                 .arg(range.start().line() + 1)
+                                 .arg(range.end().line() + 1)
+                                 .arg(view->selectionText().left(4000)));
             }
         }
         QStringList openFiles;
-        for (auto *v : m_mainWindow->views()) {
+        QStringList bookmarks;
+        for (auto *v : m_mainWindow ? m_mainWindow->views() : QList<KTextEditor::View *>()) {
+            if (!v || !v->document()) {
+                continue;
+            }
             const QString path = v->document()->url().toLocalFile();
-            openFiles.append(path.isEmpty() ? v->document()->documentName() : path);
+            const QString label = path.isEmpty()
+                ? u"(untitled) %1"_s.arg(v->document()->documentName())
+                : path;
+            // The modified flag matters to the model: writing a modified
+            // document is refused, so it should save or warn first.
+            openFiles.append(v->document()->isModified() ? u"%1 [unsaved]"_s.arg(label) : label);
+            // Bookmarks are the user's own "interesting lines" markers; the
+            // agent should treat them with the same importance. KF6 exposes
+            // marks directly on Document, no interface cast needed.
+            const auto docMarks = v->document()->marks();
+            for (auto markIt = docMarks.cbegin(); markIt != docMarks.cend(); ++markIt) {
+                if (markIt.value()->type & KTextEditor::Document::Bookmark) {
+                    bookmarks.append(u"%1:%2"_s.arg(label).arg(markIt.key() + 1));
+                }
+            }
         }
         if (!openFiles.isEmpty()) {
             lines.append(u"Open files:\n- %1"_s.arg(openFiles.join(u"\n- "_s)));
+        }
+        if (!bookmarks.isEmpty()) {
+            // The list can grow with every open file; a compact cap keeps the
+            // context budget for the files themselves.
+            lines.append(u"Bookmarks:\n- %1"_s.arg(bookmarks.join(u"\n- "_s).left(1000)));
         }
         return lines.join(u'\n');
     }
@@ -595,6 +793,116 @@ namespace KateAi
             }
         }
         m_chat->setCompletionWords(words);
+    }
+
+    bool KateAiView::ownsEditorView(KTextEditor::View *view) const
+    {
+        if (!m_mainWindow || !view) {
+            return false;
+        }
+        return m_mainWindow->views().contains(view);
+    }
+
+    void KateAiView::trackDocument(KTextEditor::Document *document)
+    {
+        if (!document || m_docPaths.contains(document)) {
+            return;
+        }
+        m_docPaths.insert(document, document->url().toLocalFile());
+        // Save-As: the review queue and every in-flight edit of the turn have
+        // to follow the file to its new path, or a later accept or reject
+        // would settle a path that no longer exists.
+        connect(document, &KTextEditor::Document::documentUrlChanged, this,
+                [this, document](KTextEditor::Document *) {
+                    const QString oldPath = m_docPaths.value(document);
+                    const QString newPath = document->url().toLocalFile();
+                    m_docPaths[document] = newPath;
+                    if (!oldPath.isEmpty() && !newPath.isEmpty() && oldPath != newPath && m_chat) {
+                        m_chat->renamePendingEdits(oldPath, newPath);
+                    }
+                    updateCompletions();
+                });
+        // A close while the agent is working on the file means the next
+        // write_file would recreate it on disk, out of the editor. The
+        // message view is where a background event like this belongs.
+        connect(document, &KTextEditor::Document::aboutToClose, this, [this, document]() {
+            const QString path = m_docPaths.take(document);
+            m_bannerPaths.remove(path);
+            if (!m_chat || !m_chat->agent() || path.isEmpty()) {
+                return;
+            }
+            if (m_chat->agent()->isBusy() && m_mainWindow) {
+                QVariantMap message;
+                message.insert(u"type"_s, u"Warning"_s);
+                message.insert(u"category"_s, i18n("Kate AI"));
+                message.insert(u"categoryIcon"_s, QIcon::fromTheme(u"help-hint"_s));
+                message.insert(u"text"_s, i18n("%1 was closed while the agent is working. Further edits to it are written to disk and reopen outside the editor.", QDir::toNativeSeparators(path)));
+                m_mainWindow->showMessage(message);
+            }
+        });
+        // The deletion of a document that was never closed still has to
+        // drop the entry, or the hash would hold a dangling key. destroyed
+        // fires while the pointer value is still meaningful, which is all
+        // the hash removal needs.
+        connect(document, &QObject::destroyed, this, [this, document]() {
+            m_docPaths.remove(document);
+        });
+        updateCompletions();
+    }
+
+    void KateAiView::syncEditRanges()
+    {
+        if (!m_assist || !m_chat || !m_chat->editTracker()) {
+            return;
+        }
+        EditTracker *tracker = m_chat->editTracker();
+        for (const QString &path : tracker->rangedPaths()) {
+            m_assist->updateEditRanges(path, tracker->pendingEditRanges(path),
+                                       tracker->settledEditRanges(path));
+        }
+    }
+
+    void KateAiView::postEditBanner(const QString &path)
+    {
+        if (path.isEmpty() || !m_plugin || !m_plugin->settings().editBannersEnabled) {
+            return;
+        }
+        KTextEditor::Document *document = documentForPath(path);
+        if (!document) {
+            // Nothing to attach a banner to: the file is not open.
+            return;
+        }
+        if (m_bannerPaths.contains(path)) {
+            // One banner per file and review round, however many edits the
+            // turn makes to it. The pending-edits-cleared signal resets the
+            // set for the next round.
+            return;
+        }
+        m_bannerPaths.insert(path);
+
+        auto *message = new KTextEditor::Message(
+            i18n("Kate AI changed this file. The change is queued for review in the Kate AI panel."),
+            KTextEditor::Message::Information);
+        message->setWordWrap(true);
+        // The banner outlives the panel when its document is shared with
+        // another window, so the actions go through a pointer that nulls out
+        // with the view instead of capturing this directly.
+        QPointer<KateAiView> self = this;
+        auto *review = new QAction(i18n("Review"), message);
+        connect(review, &QAction::triggered, this, [self]() {
+            if (self) {
+                self->showPanel();
+            }
+        });
+        auto *reject = new QAction(i18n("Reject Changes"), message);
+        connect(reject, &QAction::triggered, this, [self, path]() {
+            if (self && self->m_chat) {
+                self->m_chat->rejectPendingEdits(path);
+            }
+        });
+        message->addAction(review);
+        message->addAction(reject);
+        document->postMessage(message);
     }
 
 } // namespace KateAi

@@ -31,6 +31,12 @@ class QTimer;
 namespace KateAi
 {
 
+// MiniMax Code refuses session/new unless its OAuth credential files under
+// ~/.minimax/auth are owner-only, and the agent itself can leave them readable
+// by group or other. Tightens them to 0600 before the agent is launched; a
+// no-op when they are already private or do not exist.
+void acpTightenMinimaxCredentials();
+
 // Client for the Agent Client Protocol (JSON-RPC over a stdio subprocess).
 // Kate is the ACP client; the agent is any stdio ACP implementation
 // configured in Settings (Grok Build, Claude Agent, Gemini CLI, …).
@@ -251,6 +257,8 @@ private:
     QString m_status;
     QProcess *m_process = nullptr;
     QByteArray m_stdoutBuffer;
+    QString m_stderrBuffer;
+    bool m_antigravityAuthUrlOpened = false;
     bool m_discardingStdoutFrame = false;
     bool m_shuttingDown = false;
 

@@ -49,6 +49,44 @@ private Q_SLOTS:
         QVERIFY(!tracker.canUndo());
     }
 
+    void testRenamePathCarriesPendingEdits()
+    {
+        EditTracker tracker;
+        tracker.addEdit(u"/tmp/a.cpp"_s, u"write_file"_s, diffFor(1, 0), u"v1"_s, u"v2"_s);
+        // A Save-As moves the file while its edit is still in the queue.
+        tracker.renamePath(u"/tmp/a.cpp"_s, u"/tmp/b.cpp"_s);
+
+        // The queue follows the file; the old path no longer resolves, or a
+        // later accept or reject would settle a path that does not exist.
+        QCOMPARE(tracker.pendingPaths(), QStringList{u"/tmp/b.cpp"_s});
+        QCOMPARE(tracker.pendingEditCount(), 1);
+    }
+
+    void testRenamePathIgnoresEmptyAndSamePaths()
+    {
+        EditTracker tracker;
+        tracker.addEdit(u"/tmp/a.cpp"_s, u"write_file"_s, diffFor(1, 0), u"v1"_s, u"v2"_s);
+        tracker.renamePath(QString(), u"/tmp/b.cpp"_s);
+        tracker.renamePath(u"/tmp/a.cpp"_s, u"/tmp/a.cpp"_s);
+        QCOMPARE(tracker.pendingPaths(), QStringList{u"/tmp/a.cpp"_s});
+    }
+
+    void testRenamePathKeepsRejectRestoreContent()
+    {
+        EditTracker tracker;
+        tracker.addEdit(u"/tmp/a.cpp"_s, u"write_file"_s, diffFor(1, 0), u"v1"_s, u"v2"_s);
+        tracker.renamePath(u"/tmp/a.cpp"_s, u"/tmp/b.cpp"_s);
+
+        QSignalSpy rejectedSpy(&tracker, &EditTracker::editRejected);
+        tracker.rejectEdit(u"/tmp/b.cpp"_s);
+        QCOMPARE(rejectedSpy.size(), 1);
+        // The rejection lands on the new path and restores the content the
+        // file had before the pending edit, not empty content.
+        const auto arguments = rejectedSpy.takeFirst();
+        QCOMPARE(arguments.at(0).toString(), u"/tmp/b.cpp"_s);
+        QCOMPARE(arguments.at(2).toString(), u"v1"_s);
+    }
+
     void testEditsToSamePathAccumulate()
     {
         EditTracker tracker;

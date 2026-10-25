@@ -87,6 +87,25 @@ Settings SettingsStore::load()
     s.extraSystemPrompt = g.readEntry(u"ExtraSystemPrompt"_s, QString());
     s.extraDenyGlobs = g.readEntry(u"ExtraDenyGlobs"_s, QStringList());
     s.allowReadsOutsideWorkspace = g.readEntry(u"AllowReadsOutsideWorkspace"_s, false);
+    s.editInBuffer = g.readEntry(u"EditInBuffer"_s, false);
+    s.editBannersEnabled = g.readEntry(u"EditBannersEnabled"_s, true);
+    // AI completions at the cursor. Opt-in; the trigger and render mode are
+    // ids, so an unknown value falls back to the default rather than
+    // silently disabling half the feature.
+    s.completionEnabled = g.readEntry(u"CompletionEnabled"_s, false);
+    s.completionTrigger = g.readEntry(u"CompletionTrigger"_s, QStringLiteral("manual"));
+    if (s.completionTrigger != u"auto"_s) {
+        s.completionTrigger = u"manual"_s;
+    }
+    s.completionRenderMode = g.readEntry(u"CompletionRenderMode"_s, QStringLiteral("inline"));
+    if (s.completionRenderMode != u"popup"_s) {
+        s.completionRenderMode = u"inline"_s;
+    }
+    s.completionModel = g.readEntry(u"CompletionModel"_s, QString());
+    s.completionRequestsPerMinute = g.readEntry(u"CompletionRequestsPerMinute"_s, 20);
+    s.completionContextPrefixChars = g.readEntry(u"CompletionContextPrefixChars"_s, 4000);
+    s.completionContextSuffixChars = g.readEntry(u"CompletionContextSuffixChars"_s, 1500);
+    s.completionAutoTriggerDelayMs = g.readEntry(u"CompletionAutoTriggerDelayMs"_s, 800);
     s.contextCompressionLevel = g.readEntry(u"ContextCompressionLevel"_s, 1);
     s.maxGraphNodes = g.readEntry(u"MaxGraphNodes"_s, 50);
     s.maxGraphEdges = g.readEntry(u"MaxGraphEdges"_s, 100);
@@ -191,6 +210,13 @@ Settings SettingsStore::load()
     s.mcpTimeoutMs = qBound(1000, s.mcpTimeoutMs, 30 * 60 * 1000);
     s.webSearchMaxResults = qBound(1, s.webSearchMaxResults, 20);
     s.webSearchTimeoutMs = qBound(1000, s.webSearchTimeoutMs, 120000);
+    // Completion budgets: the per-minute ceiling protects a metered key from
+    // an auto-trigger loop, and a zero context budget would make every
+    // completion request carry an empty prompt.
+    s.completionRequestsPerMinute = qBound(1, s.completionRequestsPerMinute, 120);
+    s.completionContextPrefixChars = qBound(1, s.completionContextPrefixChars, 100000);
+    s.completionContextSuffixChars = qBound(1, s.completionContextSuffixChars, 100000);
+    s.completionAutoTriggerDelayMs = qBound(100, s.completionAutoTriggerDelayMs, 10000);
     // The fields above are bounded, and the behavioural ones must be too: a
     // hand-edited or migrated config must not be able to store a zero budget, a
     // plan with no steps, or a temperature no provider accepts.
@@ -306,6 +332,16 @@ void SettingsStore::save(const Settings &settings)
     g.writeEntry(u"ExtraSystemPrompt"_s, settings.extraSystemPrompt);
     g.writeEntry(u"ExtraDenyGlobs"_s, settings.extraDenyGlobs);
     g.writeEntry(u"AllowReadsOutsideWorkspace"_s, settings.allowReadsOutsideWorkspace);
+    g.writeEntry(u"EditInBuffer"_s, settings.editInBuffer);
+    g.writeEntry(u"EditBannersEnabled"_s, settings.editBannersEnabled);
+    g.writeEntry(u"CompletionEnabled"_s, settings.completionEnabled);
+    g.writeEntry(u"CompletionTrigger"_s, settings.completionTrigger);
+    g.writeEntry(u"CompletionRenderMode"_s, settings.completionRenderMode);
+    g.writeEntry(u"CompletionModel"_s, settings.completionModel);
+    g.writeEntry(u"CompletionRequestsPerMinute"_s, settings.completionRequestsPerMinute);
+    g.writeEntry(u"CompletionContextPrefixChars"_s, settings.completionContextPrefixChars);
+    g.writeEntry(u"CompletionContextSuffixChars"_s, settings.completionContextSuffixChars);
+    g.writeEntry(u"CompletionAutoTriggerDelayMs"_s, settings.completionAutoTriggerDelayMs);
     
     // Save context compression settings
     g.writeEntry(u"ContextCompressionLevel"_s, settings.contextCompressionLevel);

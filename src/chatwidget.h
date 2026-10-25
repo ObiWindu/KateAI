@@ -41,6 +41,7 @@ class QuestionWidget;
 class TodoWidget;
 class EditTracker;
 class TurnStatus;
+class AcpBinaryInstaller;
 
 class ChatWidget : public QWidget
 {
@@ -53,6 +54,13 @@ public:
     AgentLoop *agent()
     {
         return &m_agent;
+    }
+
+    // The review queue of agent edits, for callers (the plugin view) that
+    // mirror its state into the editor: banners and hover hints.
+    EditTracker *editTracker() const
+    {
+        return m_editTracker;
     }
 
     void setSettings(const Settings &settings);
@@ -97,6 +105,19 @@ public:
     void switchToConversation(const QString &conversationId);
     void deleteConversation(const QString &conversationId);
     void setCurrentConversationId(const QString &conversationId);
+    // The conversation this chat is showing; the view reports it to the
+    // plugin so the session config can restore it per window.
+    QString conversationId() const
+    {
+        return m_currentConversationId;
+    }
+
+    // --- Editor review queue --------------------------------------------------
+    // Re-points pending agent edits at the file's new path after a Save-As.
+    void renamePendingEdits(const QString &oldPath, const QString &newPath);
+    // Rejects every still-pending agent edit of the path (the in-editor
+    // banner's action). Returns false when nothing was pending.
+    bool rejectPendingEdits(const QString &path);
 
     PromptEdit *promptEdit() const { return m_prompt; }
     void setCompletionWords(const QStringList &words);
@@ -121,6 +142,11 @@ Q_SIGNALS:
     void configureRequested();
     void aboutToSubmit();
     void conversationChanged(const QString &conversationId);
+    // An agent edit of this path entered the review queue. The view turns it
+    // into an in-editor banner on the open document.
+    void agentEditedFile(const QString &path);
+    // The review queue went from empty to non-empty or back.
+    void pendingEditsChanged(bool hasPending);
     // A suggestion card was accepted and carries a file anchor. The view opens
     // the file at that line; Kate core only owns the card.
     void openFileAtLineRequested(const QString &path, int line);
@@ -182,6 +208,7 @@ private:
     void selectModel(Provider provider, const QString &model);
     void selectAcpAgentAndModel(const QString &agentId, const QString &model);
     void requestAcpAgentModels(const QString &agentId);
+    bool ensureAcpBinaryInstalled(const QString &agentId);
     Settings settingsForAcpAgent(const QString &agentId) const;
     void updateModelSelectorLabel();
     void showInfoMessage(const QString &message, bool isError);
@@ -330,6 +357,7 @@ private:
     QPushButton *m_modelSelector = nullptr;
     QString m_streamText;
     QHash<Provider, QStringList> m_modelCatalog;
+    QString m_acpModelCatalogAgentId;
     Provider m_preferredProvider = Provider::Grok;
     bool m_updatingCombos = false;
     QString m_modelFilter;
@@ -337,6 +365,8 @@ private:
     QString m_acpAgentModelViewAgentName;
     QString m_acpModelsLoading;
     QPointer<AcpClient> m_acpModelProbe;
+    QPointer<AcpBinaryInstaller> m_acpBinaryInstaller;
+    QString m_acpInstallingAgentId;
     // Custom popup rather than QMenu: a QLineEdit inside QMenu::exec() plus
     // setVisible() on hundreds of model QActions is what made typing hang, and
     // exec() below the chip opened the list off the bottom of the panel.
@@ -360,6 +390,11 @@ private:
 
     // Raw thinking text buffer for the current turn.
     QString m_thinkingBuffer;
+    // Reasoning already rendered into a card frozen earlier in the same turn
+    // (a tool freeze splits one turn into several cards). The loop re-reports
+    // the full turn's thinking when the answer text starts; this prefix is
+    // what must not be drawn a second time in the later card.
+    QString m_thinkingShownEarlierInTurn;
     int m_thinkingPacedLength = 0;
     QTimer *m_thinkingPacerTimer = nullptr;
 

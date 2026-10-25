@@ -13,12 +13,20 @@
 #include <QHash>
 #include <QObject>
 #include <QPointer>
+#include <QSet>
 
 class QDialog;
+
+namespace KTextEditor
+{
+class Document;
+class View;
+}
 
 namespace KateAi
 {
 class ChatWidget;
+class EditorAssist;
 class KateAiPlugin;
 
 class KateAiView : public QObject, public KXMLGUIClient
@@ -34,6 +42,16 @@ public:
     void askSelection();
     void showConfiguration();
 
+    // The chat of this window's panel. The ":kateai" command line command
+    // dispatches through this.
+    ChatWidget *chat() const
+    {
+        return m_chat;
+    }
+    // True when this view's main window shows the editor view, so the
+    // command line command reaches the panel of the window it was used in.
+    bool ownsEditorView(KTextEditor::View *view) const;
+
 private:
     void addEditorContextActions(KTextEditor::View *view, const QList<QAction *> &actions);
     // Takes the user to the file and line a suggestion was anchored to.
@@ -46,6 +64,17 @@ private:
     // project.
     void confirmWorkspaceMcpServers(const QString &workspace);
     void updateCompletions();
+    // Watches a document for Save-As (rename of the pending-review queue)
+    // and closing while the agent works on it. Called for every document
+    // that already exists when the view is created and for each one the
+    // editor creates later.
+    void trackDocument(KTextEditor::Document *document);
+    // Posts the in-editor banner for an agent edit of an open document,
+    // unless it is already posted.
+    void postEditBanner(const QString &path);
+    // Mirrors the review queue's per-path line ranges into the editor assist,
+    // so the hover hints follow the queue (pending and settled alike).
+    void syncEditRanges();
     // Catches QEvent::ApplicationPaletteChange on qApp (Qt 6 deprecates
     // QGuiApplication::paletteChanged in favour of the event).
     bool eventFilter(QObject *watched, QEvent *event) override;
@@ -60,10 +89,20 @@ private:
     QPointer<QWidget> m_toolView;
     QPointer<QDialog> m_configDialog;
     ChatWidget *m_chat = nullptr;
+    // In-editor AI completions and agent-edit hover hints, one per window.
+    EditorAssist *m_assist = nullptr;
     // The answer of the user per workspace: whether the MCP servers of that
     // project may be started.
     QHash<QString, bool> m_mcpTrust;
     DiskDocumentBridge m_bridge;
+    // The last local path of every tracked document. documentUrlChanged
+    // does not carry the old URL, so the pre-rename path has to be remembered
+    // here for the review queue's rename. Cleaned on aboutToClose and
+    // destroyed, so the keys are always live documents.
+    QHash<KTextEditor::Document *, QString> m_docPaths;
+    // Paths with a banner currently posted, so one file gets one banner per
+    // review round however many edits the turn makes to it.
+    QSet<QString> m_bannerPaths;
     // Editor colour scheme identity as of the last theme load, so configChanged
     // and ApplicationPaletteChange (which fire for every editor setting and
     // every system theme switch) only repaint on a real change. The background

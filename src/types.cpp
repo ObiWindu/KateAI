@@ -6,7 +6,9 @@
 #include "modes.h"
 #include "types.h"
 
+#include <QDir>
 #include <QFileInfo>
+#include <QStandardPaths>
 #include <KLocalizedString>
 
 using namespace Qt::Literals::StringLiterals;
@@ -333,6 +335,15 @@ QString modelFor(const Settings &settings)
     default:
         return settings.grokModel;
     }
+}
+
+// True when the provider exposes a fill-in-the-middle completion endpoint
+// (/completions with prompt markers): DeepSeek's documented FIM beta and the
+// OpenAI-compatible local servers (vLLM, LM Studio, Ollama) that translate
+// the generic markers. Everything else takes the chat-completions path.
+bool providerSupportsFim(Provider provider)
+{
+    return provider == Provider::DeepSeek || provider == Provider::OpenAICompatible;
 }
 
 QStringList pickerModelsFor(const Settings &settings, Provider provider, const QStringList &catalog)
@@ -953,6 +964,7 @@ QList<AcpAgentPreset> acpAgentPresets()
         {u"auggie"_s, i18n("Auggie CLI"), u"npx"_s, u"-y @augmentcode/auggie --acp"_s, {}},
         {u"cursor"_s, i18n("Cursor"), u"cursor-agent"_s, u"acp"_s, {}},
         {u"mistral-vibe"_s, i18n("Mistral Vibe"), u"vibe-acp"_s, u""_s, u"MISTRAL_API_KEY"_s},
+        {u"mcode"_s, i18n("MiniMax Code"), u"mcode"_s, u"acp"_s, u""_s},
         {u"custom"_s, i18n("Custom"), {}, {}, {}},
     };
 }
@@ -999,6 +1011,112 @@ bool acpAgentIsGrok(const Settings &settings)
     return QFileInfo(acpEffectiveCommand(settings)).fileName() == u"grok"_s;
 }
 
+QString acpBinaryInstallDir(const QString &agentId)
+{
+    // Tests and packagers can point the installer somewhere else. Otherwise
+    // binary registry agents live next to the rest of Kate AI's user data.
+    const QByteArray overrideDir = qgetenv("KATEAI_ACP_AGENTS_DIR");
+    QString root;
+    if (!overrideDir.isEmpty()) {
+        root = QString::fromLocal8Bit(overrideDir);
+    } else {
+        root = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation);
+        if (root.isEmpty()) {
+            root = QDir::home().filePath(u".local/share"_s);
+        }
+        root += u"/kateai/acp-agents"_s;
+    }
+
+    QString safeId = agentId;
+    for (QChar &character : safeId) {
+        if (!character.isLetterOrNumber() && character != u'.' && character != u'-' && character != u'_') {
+            character = u'_';
+        }
+    }
+    if (safeId.isEmpty() || safeId == u"."_s || safeId == u".."_s) {
+        safeId = u"agent"_s;
+    }
+    return root + u'/' + safeId;
+}
+
+QString acpInstalledBinaryCommand(const Settings &settings)
+{
+    const QJsonArray installed = QJsonDocument::fromJson(settings.acpInstalledAgents.toUtf8()).array();
+    for (const QJsonValue &value : installed) {
+        const QJsonObject agent = value.toObject();
+        if (agent.value(u"id"_s).toString() != settings.acpAgentId) {
+            continue;
+        }
+        const bool isBinary = agent.value(u"distributionType"_s).toString() == u"binary"_s
+            || !agent.value(u"binaryArchiveUrl"_s).toString().isEmpty();
+        if (!isBinary) {
+            return {};
+        }
+
+        const QString command = agent.value(u"command"_s).toString();
+        if (command.isEmpty()) {
+            return {};
+        }
+        const QFileInfo commandInfo(command);
+        if (commandInfo.isAbsolute()) {
+            if (commandInfo.exists() && commandInfo.isExecutable()) {
+                return commandInfo.absoluteFilePath();
+            }
+            return {};
+        }
+
+        // The registry records the executable relative to the unpacked archive
+        // ("./agy_acp_server.par"). Kate installs the archive into its own data
+        // directory, so resolve the command against that directory instead of
+        // the process working directory.
+        QString relative = command;
+        while (relative.startsWith(u"./"_s)) {
+            relative.remove(0, 2);
+        }
+        const QDir installDir(acpBinaryInstallDir(settings.acpAgentId));
+        const QString candidate = QDir::cleanPath(installDir.absoluteFilePath(relative));
+        const QString installRoot = installDir.absolutePath();
+        if (candidate != installRoot && !candidate.startsWith(installRoot + u'/')) {
+            return {};
+        }
+        const QFileInfo candidateInfo(candidate);
+        if (candidateInfo.exists() && candidateInfo.isExecutable()) {
+            return candidateInfo.absoluteFilePath();
+        }
+        return {};
+    }
+    return {};
+}
+
+bool acpAgentIsMinimaxCode(const Settings &settings)
+{
+    if (settings.acpAgentId == u"minimax-code"_s || settings.acpAgentId == u"mcode"_s) {
+        return true;
+    }
+    const QString command = acpEffectiveCommand(settings);
+    const QString baseName = QFileInfo(command).fileName();
+    return baseName == u"mcode"_s;
+}
+
+bool acpAgentIsAntigravity(const Settings &settings)
+{
+    if (settings.acpAgentId == u"antigravity-acp"_s) {
+        return true;
+    }
+    const QString command = acpEffectiveCommand(settings);
+    const QString baseName = QFileInfo(command).fileName();
+    return baseName.contains(u"agy_acp_server"_s);
+}
+
+bool acpAgentIsMistralVibe(const Settings &settings)
+{
+    if (settings.acpAgentId == u"mistral-vibe"_s) {
+        return true;
+    }
+    const QString command = acpEffectiveCommand(settings);
+    return QFileInfo(command).fileName() == u"vibe-acp"_s;
+}
+
 QString acpAgentDisplayName(const Settings &settings)
 {
     if (!usesAcpNative(settings)) {
@@ -1038,6 +1156,9 @@ QString acpAgentIdMatching(const QString &command, const QString &args)
     }
     if (trimmedCommand.isEmpty() || (trimmedCommand == u"grok"_s && (trimmedArgs.isEmpty() || trimmedArgs == u"agent stdio"_s))) {
         return u"grok-build"_s;
+    }
+    if (trimmedCommand == u"mcode"_s && (trimmedArgs.isEmpty() || trimmedArgs == u"acp"_s)) {
+        return u"mcode"_s;
     }
     return u"custom"_s;
 }

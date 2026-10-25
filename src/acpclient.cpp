@@ -4,15 +4,21 @@
  */
 
 #include "acpclient.h"
+#include "acpinstall.h"
 #include "tools.h"
 #include "graph/projectgraph.h"
 
 #include <QDir>
+#include <QDesktopServices>
+#include <QDirIterator>
+#include <QFile>
 #include <QFileInfo>
 #include <QJsonDocument>
 #include <QProcessEnvironment>
+#include <QRegularExpression>
 #include <QStandardPaths>
 #include <QTimer>
+#include <QUrl>
 #include <QUuid>
 
 using namespace Qt::Literals::StringLiterals;
@@ -349,14 +355,26 @@ void AcpClient::ingestSessionModels(const QJsonObject &result, bool applyPreferr
         m_agentModels = models;
     }
 
+    // Mistral Vibe keeps its selected model in its own global state and
+    // reports it as current in every session report, so a configured model
+    // must be pushed onto the session instead of letting the agent's state
+    // win. For every other agent the report is authoritative.
+    const bool pinConfiguredModel = acpAgentIsMistralVibe(m_settings)
+        && !m_settings.acpModel.trimmed().isEmpty();
     if (applyPreferred) {
         const QString preferred = m_settings.acpModel.trimmed();
         if (!preferred.isEmpty() && preferred != m_currentModelId
-            && (m_agentModels.isEmpty() || m_agentModels.contains(preferred))) {
+            && (pinConfiguredModel || m_agentModels.isEmpty() || m_agentModels.contains(preferred))) {
             setModel(preferred);
         } else if (preferred.isEmpty() && !m_currentModelId.isEmpty()) {
             m_settings.acpModel = m_currentModelId;
         }
+    } else if (pinConfiguredModel && !m_modelSetInFlight) {
+        // A report whose current model differs from the configured one means
+        // the agent switched: restore the configured model. The response of
+        // that restore settles here as well, but then the ids match and no
+        // second request goes out, so this cannot loop.
+        setModel(m_settings.acpModel.trimmed());
     }
 
     Q_EMIT modelsReceived(m_agentModels);
@@ -365,6 +383,30 @@ void AcpClient::ingestSessionModels(const QJsonObject &result, bool applyPreferr
 QString AcpClient::resolvedCommand(const Settings &settings)
 {
     const QString command = acpEffectiveCommand(settings);
+    // Binary registry agents record their executable relative to the unpacked
+    // archive ("./agy_acp_server.par"). Resolve it inside Kate's install
+    // directory before falling back to PATH or the raw recorded command.
+    if (!command.isEmpty() && !QFileInfo(command).isAbsolute()) {
+        const QString installedBinary = acpInstalledBinaryCommand(settings);
+        if (!installedBinary.isEmpty()
+            && QFileInfo(command).fileName() == QFileInfo(installedBinary).fileName()) {
+            return installedBinary;
+        }
+    }
+    // MiniMax Code: prefer the standalone CLI the agent installs through its own
+    // installer (~/.minimax-code/bin/mcode). The ACP registry entry instead
+    // records the npm distribution (@minimax-ai/code), whose bundled native
+    // modules can fail to load on the current Node runtime; the process then
+    // exits with code 1 before the ACP handshake, which surfaces as "ACP agent
+    // exited (code 1)". The standalone binary speaks the same ACP server and is
+    // the one that actually works.
+    if (!command.isEmpty() && !QFileInfo(command).isAbsolute() && acpAgentIsMinimaxCode(settings)) {
+        const QString standalone = QDir::homePath() + u"/.minimax-code/bin/mcode"_s;
+        const QFileInfo standaloneInfo(standalone);
+        if (standaloneInfo.exists() && standaloneInfo.isExecutable()) {
+            return standalone;
+        }
+    }
     if (command.isEmpty() || QFileInfo(command).isAbsolute()) {
         return command;
     }
@@ -450,6 +492,25 @@ QStringList AcpClient::agentArguments(const Settings &settings)
         return out;
     }
 
+    // MiniMax Code: the standalone CLI takes the ACP server as its
+    // subcommand ("mcode acp"). Arguments recorded for the npm distribution
+    // ("--yes @minimax-ai/code@0.2.7 acp") are npm-only tokens and must not
+    // be forwarded; without the subcommand the interactive TUI would start
+    // instead of the ACP server and stall the handshake until timeout.
+    if (acpAgentIsMinimaxCode(settings)) {
+        QStringList kept;
+        for (const QString &arg : args) {
+            if (arg == u"--yes"_s || arg.startsWith(u"@"_s)) {
+                continue;
+            }
+            kept.append(arg);
+        }
+        if (!kept.contains(u"acp"_s)) {
+            kept.append(u"acp"_s);
+        }
+        return kept;
+    }
+
     // Handle model arguments for other ACP agents that support --model
     if (!model.isEmpty()) {
         if (agentId == u"claude-acp"_s || command.contains(u"claude-agent-acp"_s) || raw.contains(u"claude-agent-acp"_s)) {
@@ -472,6 +533,29 @@ QStringList AcpClient::agentArguments(const Settings &settings)
             }
         }
         // Add more agent-specific model handling here as needed
+    }
+
+    // Antigravity's binary aborts on machines without an IPv6 loopback (::1)
+    // unless IPv6 enforcement is disabled. On systems with page size > 4KB
+    // (e.g. 16KB on aarch64), Google's coredump register/memory sanitization
+    // aborts in mmap(..., MAP_FIXED) due to 4KB-aligned buffer assumptions.
+    // Disable sanitization so the binary runs cleanly on non-x86 page sizes.
+    if (agentId == u"antigravity-acp"_s || acpAgentIsAntigravity(settings)) {
+        // This server uses gflags and rejects Chromium's standard switch.
+        // Strip it in case an older Kate version persisted it in acpArgs.
+        args.removeAll(u"--disable-features=CrOSHugepageRemapAndLockInZygote"_s);
+        if (!args.contains(u"--enforce_kernel_ipv6_support=false"_s)) {
+            args << u"--enforce_kernel_ipv6_support=false"_s;
+        }
+        if (!args.contains(u"--core_register_sanitization_enabled=false"_s)) {
+            args << u"--core_register_sanitization_enabled=false"_s;
+        }
+        if (!args.contains(u"--core_sanitization_enabled=false"_s)) {
+            args << u"--core_sanitization_enabled=false"_s;
+        }
+        if (!args.contains(u"--boringssl_sanitization_enabled=false"_s)) {
+            args << u"--boringssl_sanitization_enabled=false"_s;
+        }
     }
 
     return args;
@@ -578,6 +662,8 @@ void AcpClient::stop()
         m_process = nullptr;
     }
     m_stdoutBuffer.clear();
+    m_stderrBuffer.clear();
+    m_antigravityAuthUrlOpened = false;
     m_discardingStdoutFrame = false;
     m_sessionId.clear();
     m_promptId = 0;
@@ -680,6 +766,25 @@ QString AcpClient::sessionCwd() const
     return QDir::currentPath();
 }
 
+// MiniMax Code refuses session/new with "The OAuth credential file
+// permissions are not private" when its own credentials under ~/.minimax/auth
+// are readable by group or other (the agent itself writes them that way under
+// a permissive umask). Tighten them to owner-only before launching: 0600 is
+// what the agent demands, and nothing besides the agent reads those files.
+void acpTightenMinimaxCredentials()
+{
+    const QString authRoot = QDir::homePath() + u"/.minimax/auth"_s;
+    QDirIterator it(authRoot, {u"auth.json"_s, u"auth-state.json"_s}, QDir::Files,
+                   QDirIterator::Subdirectories);
+    const QFile::Permissions privateMode = QFile::ReadOwner | QFile::WriteOwner;
+    while (it.hasNext()) {
+        QFile credential(it.next());
+        if ((credential.permissions() & ~privateMode) != 0) {
+            credential.setPermissions(privateMode);
+        }
+    }
+}
+
 void AcpClient::spawnProcess()
 {
     if (m_process) {
@@ -693,6 +798,8 @@ void AcpClient::spawnProcess()
     }
     m_shuttingDown = false;
     m_discardingStdoutFrame = false;
+    m_stderrBuffer.clear();
+    m_antigravityAuthUrlOpened = false;
     setState(State::Starting, u"Starting ACP agent…"_s);
 
     m_process = new QProcess(this);
@@ -717,7 +824,19 @@ void AcpClient::spawnProcess()
         if (m_shuttingDown) {
             return;
         }
-        const QString message = u"ACP agent exited (code %1)."_s.arg(exitCode);
+        QString message = u"ACP agent exited (code %1)."_s.arg(exitCode);
+        const QString stderrText = m_stderrBuffer.trimmed();
+        if (!stderrText.isEmpty()) {
+            // The exit code alone does not explain much; agents print their own
+            // diagnostics (native module load failures, missing binaries, auth
+            // problems) on stderr right before dying, and that is the useful part.
+            const QStringList stderrLines = stderrText.split(u"\n"_s, Qt::SkipEmptyParts);
+            QString detail;
+            for (const QString &line : stderrLines) {
+                detail += u"%1\n"_s.arg(line);
+            }
+            message += u" Stderr: %1"_s.arg(detail.trimmed());
+        }
         failAll(message);
         setState(State::Failed, message);
         Q_EMIT failed(message);
@@ -725,7 +844,27 @@ void AcpClient::spawnProcess()
     connect(m_process, &QProcess::readyReadStandardError, this, [this] {
         const QString noise = QString::fromUtf8(m_process->readAllStandardError()).trimmed();
         if (!noise.isEmpty()) {
+            m_stderrBuffer.append(u"%1\n"_s.arg(noise));
             Q_EMIT logMessage(noise);
+            if (acpAgentIsAntigravity(m_settings) && !m_antigravityAuthUrlOpened) {
+                static const QRegularExpression authUrlPattern(
+                    u"https://accounts\\.google\\.com/[^\\s\\\"'<>]+"_s);
+                const auto match = authUrlPattern.match(m_stderrBuffer);
+                if (match.hasMatch()) {
+                    QString authUrl = match.captured();
+                    while (!authUrl.isEmpty() && u".,);]"_s.contains(authUrl.back())) {
+                        authUrl.chop(1);
+                    }
+                    const QUrl url(authUrl);
+                    if (url.isValid() && url.scheme() == u"https"_s
+                        && url.host() == u"accounts.google.com"_s) {
+                        m_antigravityAuthUrlOpened = true;
+                        if (!QDesktopServices::openUrl(url)) {
+                            Q_EMIT logMessage(u"Could not open Antigravity sign-in URL: %1"_s.arg(authUrl));
+                        }
+                    }
+                }
+            }
         }
     });
 
@@ -736,6 +875,9 @@ void AcpClient::spawnProcess()
         setState(State::Failed, message);
         Q_EMIT failed(message);
         return;
+    }
+    if (acpAgentIsMinimaxCode(m_settings)) {
+        acpTightenMinimaxCredentials();
     }
     m_process->start(command, args);
     if (!m_process->waitForStarted(10000)) {
@@ -754,7 +896,9 @@ void AcpClient::spawnProcess()
     }
     m_startupTimer = new QTimer(this);
     m_startupTimer->setSingleShot(true);
-    m_startupTimer->setInterval(30000);
+    // Antigravity ACP authentication may wait for the user to finish its
+    // browser OAuth flow. Keep the process alive while that request is pending.
+    m_startupTimer->setInterval(acpAgentIsAntigravity(m_settings) ? 300000 : 30000);
     connect(m_startupTimer, &QTimer::timeout, this, [this] {
         if (m_state == State::Starting) {
             const QString message = u"Timed out waiting for the ACP handshake."_s;
@@ -780,6 +924,18 @@ QProcessEnvironment AcpClient::processEnvironment() const
         if (acpAgentIsGrok(m_settings)) {
             env.insert(u"XAI_API_KEY"_s, key);
             env.insert(u"GROK_CODE_XAI_API_KEY"_s, key);
+        }
+    }
+
+    if (acpAgentIsAntigravity(m_settings) && acpNeedsPageShim()) {
+        const QString shim = acpPageShimPath(m_settings.acpAgentId);
+        if (!shim.isEmpty()) {
+            const QString currentPreload = env.value(u"LD_PRELOAD"_s);
+            if (currentPreload.isEmpty()) {
+                env.insert(u"LD_PRELOAD"_s, shim);
+            } else if (!currentPreload.split(u':').contains(shim)) {
+                env.insert(u"LD_PRELOAD"_s, currentPreload + u':' + shim);
+            }
         }
     }
     return env;
@@ -809,8 +965,16 @@ void AcpClient::sendInitialize()
     capabilities.insert(u"session"_s, sessionCapabilities);
 
     QJsonObject clientInfo;
-    clientInfo.insert(u"name"_s, u"kateai"_s);
-    clientInfo.insert(u"title"_s, u"Kate AI"_s);
+    // Some ACP agents (e.g. Google Antigravity) restrict third-party models
+    // to specific known clients. Pretend to be Zed for those agents so we
+    // can discover the full model list.
+    if (acpAgentIsAntigravity(m_settings)) {
+        clientInfo.insert(u"name"_s, u"zed"_s);
+        clientInfo.insert(u"title"_s, u"Zed"_s);
+    } else {
+        clientInfo.insert(u"name"_s, u"kateai"_s);
+        clientInfo.insert(u"title"_s, u"Kate AI"_s);
+    }
     clientInfo.insert(u"version"_s, u"0.1.0"_s);
 
     QJsonObject params;
@@ -934,11 +1098,12 @@ void AcpClient::maybeAuthenticate(const QJsonArray &authMethods)
         return;
     }
 
-    // If no API key is configured, skip authentication and let the agent use
-    // its existing CLI login session. Most ACP agents (Grok Build, Claude Agent,
-    // Codex, Gemini CLI, etc.) support this workflow.
+    // Most ACP agents use their own CLI login session when no API key is
+    // configured. Antigravity requires ACP's authenticate request to
+    // initialize its session; its standalone ACP server performs its own
+    // OAuth flow, which can take longer than the normal JSON-RPC timeout.
     const bool hasApiKey = !m_settings.acpApiKey.trimmed().isEmpty();
-    if (!hasApiKey) {
+    if (!hasApiKey && !acpAgentIsAntigravity(m_settings)) {
         openSession();
         return;
     }
@@ -982,7 +1147,7 @@ void AcpClient::maybeAuthenticate(const QJsonArray &authMethods)
             return;
         }
         openSession();
-    });
+    }, acpAgentIsAntigravity(m_settings) ? 300000 : 30000);
 }
 
 void AcpClient::openSession()
@@ -1359,7 +1524,25 @@ void AcpClient::handleResponse(const QJsonObject &message)
     }
     if (message.contains(u"error"_s)) {
         const QJsonObject error = message.value(u"error"_s).toObject();
-        pending.done(QJsonObject(), error.value(u"message"_s).toString(u"ACP request failed."_s));
+        QString messageText = error.value(u"message"_s).toString(u"ACP request failed."_s);
+        // Agents like MiniMax Code answer with a generic message ("Internal
+        // error") and put the actual explanation in error.data.details. Without
+        // it the user sees "Error: Internal error" and no way forward.
+        const QJsonValue data = error.value(u"data"_s);
+        QString details;
+        if (data.isObject()) {
+            const QJsonObject dataObj = data.toObject();
+            details = dataObj.value(u"details"_s).toString();
+            if (details.isEmpty()) {
+                details = dataObj.value(u"message"_s).toString();
+            }
+        } else if (data.isString()) {
+            details = data.toString();
+        }
+        if (!details.isEmpty() && !messageText.contains(details)) {
+            messageText += u": %1"_s.arg(details);
+        }
+        pending.done(QJsonObject(), messageText);
         return;
     }
     pending.done(message.value(u"result"_s).toObject(), QString());

@@ -380,6 +380,34 @@ struct Settings {
     // Wall-clock budget for a single subtask.
     int subtaskTimeoutMs = 300000;
 
+    // --- Editor integration --------------------------------------------------
+    // AI completions at the cursor, rendered inline and accepted with Tab.
+    // Opt-in: off by default. See docs/ai-completion-plan.md.
+    bool completionEnabled = false;
+    // "manual" (the Alt+\ action) or "auto" (idle timer after typing).
+    QString completionTrigger = QStringLiteral("manual");
+    // "inline" (ghost note at the cursor) or "popup" (native completion list).
+    QString completionRenderMode = QStringLiteral("inline");
+    // A small fast model for completions; empty means "use the chat model".
+    QString completionModel;
+    // Separate budget for completions, enforced in CompletionEngine.
+    int completionRequestsPerMinute = 20;
+    // FIM-style context window around the cursor, in characters.
+    int completionContextPrefixChars = 4000;
+    int completionContextSuffixChars = 1500;
+    // Idle time after the last keystroke before an auto trigger fires.
+    int completionAutoTriggerDelayMs = 800;
+    // Apply the agent's file edits to documents that are open in the editor
+    // in the buffer, leaving them unsaved for review, instead of writing them
+    // to disk at once. Off by default: while a change is unsaved, commands
+    // and tools that read the file from disk (bash, tests) still see the
+    // previous state.
+    bool editInBuffer = false;
+    // Show an in-editor banner on documents the agent edited, with actions to
+    // review the change in the Kate AI panel or reject it. Only open documents
+    // can carry a banner, so this does nothing for files Kate has not opened.
+    bool editBannersEnabled = true;
+
     // --- Appearance ----------------------------------------------------------
     // "preset" paints the chat panel from a built-in palette (themePreset);
     // "editor" derives both the chat colours and the window chrome from the
@@ -428,6 +456,26 @@ QString acpEffectiveApiKeyEnv(const Settings &settings);
 // True when the resolved launch command is Grok Build (`grok`). Only then do
 // we inject `--model` / `--always-approve` and Grok `_meta`.
 bool acpAgentIsGrok(const Settings &settings);
+// Directory where a binary-distributed ACP registry agent is unpacked.
+QString acpBinaryInstallDir(const QString &agentId);
+// Absolute path of the executable for an installed binary ACP agent, or an
+// empty string when it is not installed. Registry entries record commands such
+// as "./agy_acp_server.par", which are relative to the unpacked archive rather
+// than to Kate's working directory.
+QString acpInstalledBinaryCommand(const Settings &settings);
+// True for the MiniMax Code ACP agent (`mcode`, registry id `minimax-code`).
+// Its standalone CLI (`mcode acp`) is preferred over the npm distribution the
+// ACP registry records, because the distribution's bundled native modules can
+// fail to load on current Node runtimes and the process exits before the ACP
+// handshake completes.
+bool acpAgentIsMinimaxCode(const Settings &settings);
+// True for Google Antigravity ACP agent (registry id `antigravity-acp`).
+bool acpAgentIsAntigravity(const Settings &settings);
+// True for the Mistral Vibe ACP agent (registry id `mistral-vibe`, binary
+// `vibe-acp`). It persists its selected model in its own global state and
+// reports it as current on every new session, so the model configured in
+// Kate is pinned onto the session instead of following the agent.
+bool acpAgentIsMistralVibe(const Settings &settings);
 QString acpAgentIdMatching(const QString &command, const QString &args);
 // Models last reported by this agent (session config or the legacy models
 // field), plus the configured id when it is not already in that list.
@@ -444,6 +492,9 @@ SandboxProfile sandboxProfileFromId(const QString &id);
 
 QString apiKeyFor(const Settings &settings);
 QString modelFor(const Settings &settings);
+// True when the provider exposes a fill-in-the-middle completion endpoint
+// (/completions with prompt markers), used by the editor completion engine.
+bool providerSupportsFim(Provider provider);
 // Models the picker should offer for a provider: the live catalogue, plus the
 // configured model when it is missing from that list. Providers with no
 // catalogue (ACP) still surface the configured model so they can be selected.

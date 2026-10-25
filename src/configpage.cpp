@@ -4,6 +4,7 @@
  */
 
 #include "configpage.h"
+#include "acpinstall.h"
 #include "plugin.h"
 #include "settings.h"
 #include "llmclient.h"
@@ -13,6 +14,7 @@
 #include "acpclient.h"
 #include "chattheme.h"
 
+#include <QDir>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -53,6 +55,7 @@
 #include <QSysInfo>
 
 #include <algorithm>
+#include <memory>
 
 using namespace Qt::Literals::StringLiterals;
 
@@ -60,24 +63,7 @@ namespace KateAi
 {
 QString KateAiConfigPage::getBinaryPlatformKey() const
 {
-#if defined(Q_OS_WIN)
-    return u"windows-x86_64"_s;
-#elif defined(Q_OS_MAC)
-    if (QSysInfo::currentCpuArchitecture().startsWith(u"arm"_s) || QSysInfo::currentCpuArchitecture().startsWith(u"aarch64"_s)) {
-        return u"darwin-aarch64"_s;
-    } else {
-        return u"darwin-x86_64"_s;
-    }
-#elif defined(Q_OS_LINUX)
-    if (QSysInfo::currentCpuArchitecture().startsWith(u"arm"_s) ||
-        QSysInfo::currentCpuArchitecture().startsWith(u"aarch64"_s)) {
-        return u"linux-aarch64"_s;
-    } else {
-        return u"linux-x86_64"_s;
-    }
-#else
-    return u"unknown"_s;
-#endif
+    return acpCurrentPlatformKey();
 }
 
 KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
@@ -243,9 +229,15 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     registryLayout->addWidget(m_acpRegistryResults, 1);
     m_acpRegistryStatus = new QLabel(registryWidget);
     registryLayout->addWidget(m_acpRegistryStatus);
-    auto *registryInstall = new QPushButton(i18n("Install selected package agent"), registryWidget);
+    auto *registryButtons = new QHBoxLayout;
+    auto *registryInstall = new QPushButton(i18n("Install"), registryWidget);
+    auto *registryUninstall = new QPushButton(i18n("Uninstall"), registryWidget);
     registryInstall->setEnabled(false);
-    registryLayout->addWidget(registryInstall);
+    registryUninstall->setEnabled(false);
+    registryButtons->addWidget(registryInstall);
+    registryButtons->addWidget(registryUninstall);
+    registryButtons->addStretch();
+    registryLayout->addLayout(registryButtons);
     tabs->addTab(registryWidget, i18n("ACP Registry"));
     m_acpRegistryNetwork = new QNetworkAccessManager(this);
 
@@ -343,11 +335,20 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     };
     connect(registryRefresh, &QPushButton::clicked, this, refreshRegistry);
     connect(m_acpRegistrySearch, &QLineEdit::textChanged, this, showRegistryResults);
-    connect(m_acpRegistryResults, &QListWidget::currentRowChanged, this, [this, registryInstall](int) {
+    connect(m_acpRegistryResults, &QListWidget::currentRowChanged, this, [this, registryInstall, registryUninstall](int) {
         const QListWidgetItem *item = m_acpRegistryResults->currentItem();
-        registryInstall->setEnabled(item && !item->data(Qt::UserRole).toJsonObject().isEmpty()
-                                    && !item->data(Qt::UserRole + 1).toBool()
+        if (!item || item->data(Qt::UserRole).toJsonObject().isEmpty()) {
+            registryInstall->setEnabled(false);
+            registryUninstall->setEnabled(false);
+            return;
+        }
+        const bool alreadyInstalled = item->data(Qt::UserRole + 1).toBool();
+        // Binary agents can be reinstalled: entries created before downloads
+        // were implemented have a relative command but no unpacked executable.
+        const bool isBinary = item->data(Qt::UserRole + 3).toString() == u"binary"_s;
+        registryInstall->setEnabled((!alreadyInstalled || isBinary)
                                     && item->data(Qt::UserRole + 2).toBool());
+        registryUninstall->setEnabled(alreadyInstalled);
     });
     connect(registryInstall, &QPushButton::clicked, this, [this, showRegistryResults]() {
         QListWidgetItem *item = m_acpRegistryResults->currentItem();
@@ -402,49 +403,84 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
             });
             process->start(program, args);
         } else if (installType == u"binary"_s) {
-            // Handle binary installation
-            const QString platformKey = this->getBinaryPlatformKey();
-            const QJsonObject platformDist = installInfo.value(platformKey).toObject();
-            if (platformDist.isEmpty()) {
-                m_acpRegistryStatus->setText(i18n("No binary available for this platform."));
-                return;
-            }
-
-            const QString archiveUrl = platformDist.value(u"archive"_s).toString();
-            const QString cmd = platformDist.value(u"cmd"_s).toString();
-            if (archiveUrl.isEmpty()) {
-                m_acpRegistryStatus->setText(i18n("No download URL available for this binary."));
-                return;
-            }
-
-            m_acpRegistryStatus->setText(i18n("Downloading and installing %1…", agent.value(u"name"_s).toString()));
-
-            // For now, show a message that binary installation needs to be done manually
-            // TODO: Implement actual binary download and installation
-            QJsonObject installed = agent;
-            installed.insert(u"command"_s, cmd);
-            // The platform entry carries the launch arguments ("acp" for
-            // opencode); dropping them made the binary start its TUI instead
-            // of its ACP server and stall the handshake.
-            QJsonArray launchArgs;
-            for (const QJsonValue &arg : platformDist.value(u"args"_s).toArray()) {
-                launchArgs.append(arg.toString());
-            }
-            installed.insert(u"args"_s, launchArgs);
-            installed.insert(u"distributionType"_s, u"binary"_s);
-            installed.insert(u"binaryArchiveUrl"_s, archiveUrl);
-            installed.insert(u"binaryPlatform"_s, platformKey);
-
-            QJsonArray agents = QJsonDocument::fromJson(m_plugin->settings().acpInstalledAgents.toUtf8()).array();
-            const QString id = agent.value(u"id"_s).toString();
-            for (qsizetype i = agents.size() - 1; i >= 0; --i) if (agents.at(i).toObject().value(u"id"_s).toString() == id) agents.removeAt(i);
-            agents.append(installed);
-            Settings settings = m_plugin->settings();
-            settings.acpInstalledAgents = QString::fromUtf8(QJsonDocument(agents).toJson(QJsonDocument::Compact));
-            m_plugin->setSettings(settings);
-            m_acpRegistryStatus->setText(i18n("Added %1 to installed agents. Please install the binary manually and ensure it's in your PATH.", agent.value(u"name"_s).toString()));
-            showRegistryResults(m_acpRegistrySearch->text());
+            auto *installer = new AcpBinaryInstaller(agent, getBinaryPlatformKey(),
+                                                     m_acpRegistryNetwork, this);
+            connect(installer, &AcpBinaryInstaller::progress, this, [this](const QString &message) {
+                m_acpRegistryStatus->setText(message);
+            });
+            connect(installer, &AcpBinaryInstaller::finished, this,
+                    [this, installer, agent, showRegistryResults](const QJsonObject &installed) {
+                QJsonArray agents = QJsonDocument::fromJson(m_plugin->settings().acpInstalledAgents.toUtf8()).array();
+                const QString id = agent.value(u"id"_s).toString();
+                for (qsizetype i = agents.size() - 1; i >= 0; --i) if (agents.at(i).toObject().value(u"id"_s).toString() == id) agents.removeAt(i);
+                agents.append(installed);
+                Settings settings = m_plugin->settings();
+                settings.acpInstalledAgents = QString::fromUtf8(QJsonDocument(agents).toJson(QJsonDocument::Compact));
+                m_plugin->setSettings(settings);
+                m_acpRegistryStatus->setText(i18n("Installed %1. Select it under ACP in the model selector.", agent.value(u"name"_s).toString()));
+                showRegistryResults(m_acpRegistrySearch->text());
+                installer->deleteLater();
+            });
+            connect(installer, &AcpBinaryInstaller::failed, this,
+                    [this, installer](const QString &message) {
+                m_acpRegistryStatus->setText(message);
+                installer->deleteLater();
+            });
+            installer->start();
         }
+    });
+    connect(registryUninstall, &QPushButton::clicked, this, [this, showRegistryResults]() {
+        QListWidgetItem *item = m_acpRegistryResults->currentItem();
+        if (!item || item->data(Qt::UserRole).toJsonObject().isEmpty()) {
+            return;
+        }
+        const QJsonObject agent = item->data(Qt::UserRole).toJsonObject();
+        const QString agentId = agent.value(u"id"_s).toString();
+        const QString name = agent.value(u"name"_s).toString();
+        if (agentId.isEmpty()) {
+            return;
+        }
+
+        const QJsonArray installedAgents = QJsonDocument::fromJson(m_plugin->settings().acpInstalledAgents.toUtf8()).array();
+        QJsonArray remaining;
+        QJsonObject installedEntry;
+        for (const QJsonValue &value : installedAgents) {
+            const QJsonObject entry = value.toObject();
+            if (entry.value(u"id"_s).toString() == agentId) {
+                installedEntry = entry;
+            } else {
+                remaining.append(value);
+            }
+        }
+        if (installedEntry.isEmpty()) {
+            return;
+        }
+
+        const bool isBinary = installedEntry.value(u"distributionType"_s).toString() == u"binary"_s
+            || !installedEntry.value(u"binaryArchiveUrl"_s).toString().isEmpty();
+        if (isBinary) {
+            const QString installDir = installedEntry.value(u"binaryInstallDir"_s).toString();
+            if (!installDir.isEmpty()) {
+                QDir(installDir).removeRecursively();
+            } else {
+                QDir(acpBinaryInstallDir(agentId)).removeRecursively();
+            }
+        }
+
+        Settings settings = m_plugin->settings();
+        settings.acpInstalledAgents = QString::fromUtf8(QJsonDocument(remaining).toJson(QJsonDocument::Compact));
+        // Clear cached models for this agent; the old binary command must not
+        // be reused after the files are removed.
+        QJsonObject agentModels;
+        const QJsonDocument modelsDoc = QJsonDocument::fromJson(settings.acpAgentModels.toUtf8());
+        if (modelsDoc.isObject()) {
+            agentModels = modelsDoc.object();
+        }
+        agentModels.remove(agentId);
+        settings.acpAgentModels = QString::fromUtf8(QJsonDocument(agentModels).toJson(QJsonDocument::Compact));
+        m_plugin->setSettings(settings);
+        m_acpRegistryStatus->setText(i18n("Uninstalled %1.", name));
+        showRegistryResults(m_acpRegistrySearch->text());
     });
     refreshRegistry();
 
@@ -485,6 +521,14 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     m_allowOutsideReads = new QCheckBox(i18n("Allow read tools to access files outside the workspace"), securityWidget);
     m_allowOutsideReads->setToolTip(i18n("The read tools are approved without a prompt. Keep this off to confine the agent to the project."));
     securityForm->addRow(i18n("Reads outside workspace:"), m_allowOutsideReads);
+
+    m_editInBuffer = new QCheckBox(i18n("Apply edits to open documents in the buffer, leaving them unsaved for review"), securityWidget);
+    m_editInBuffer->setToolTip(i18n("Changes to files that are open in the editor land in the buffer and stay unsaved; the review queue's Keep saves them and Revert restores the buffer. Note: while a change is unsaved, commands the agent runs (bash, tests) still read the previous state from disk."));
+    securityForm->addRow(i18n("Edit open files in buffer:"), m_editInBuffer);
+
+    m_editBanners = new QCheckBox(i18n("Show an in-editor banner on files the agent edited"), securityWidget);
+    m_editBanners->setToolTip(i18n("A banner with Review and Reject actions appears in the editor on open documents the agent changed."));
+    securityForm->addRow(i18n("Edit banners:"), m_editBanners);
 
     m_maxExpandedToolCards = new QSpinBox(securityWidget);
     m_maxExpandedToolCards->setRange(0, 200);
@@ -907,6 +951,66 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     webScroll->setWidget(webWidget);
     tabs->addTab(webScroll, i18n("Web Search"));
 
+    // --- AI completions at the cursor ------------------------------------------
+    auto *completionScroll = new QScrollArea(tabs);
+    completionScroll->setWidgetResizable(true);
+    completionScroll->setFrameShape(QFrame::NoFrame);
+    auto *completionWidget = new QWidget(completionScroll);
+    auto *completionForm = new QFormLayout(completionWidget);
+    completionForm->setContentsMargins(12, 12, 12, 12);
+    completionForm->setSpacing(8);
+
+    m_completionEnabled = new QCheckBox(i18n("Offer AI completions at the cursor, accepted with Tab"), completionWidget);
+    m_completionEnabled->setToolTip(i18n("A short completion is requested from the configured provider and shown inline at the cursor (or in the completion list). It is never inserted without an explicit key press. Off while a chat turn is running."));
+    completionForm->addRow(i18n("Enable completions:"), m_completionEnabled);
+
+    m_completionTrigger = new QComboBox(completionWidget);
+    m_completionTrigger->addItem(i18n("Manual (Alt+\\)"), QStringLiteral("manual"));
+    m_completionTrigger->addItem(i18n("Automatic, after an idle pause"), QStringLiteral("auto"));
+    completionForm->addRow(i18n("Trigger:"), m_completionTrigger);
+
+    m_completionRenderMode = new QComboBox(completionWidget);
+    m_completionRenderMode->addItem(i18n("Inline ghost text"), QStringLiteral("inline"));
+    m_completionRenderMode->addItem(i18n("Completion popup"), QStringLiteral("popup"));
+    completionForm->addRow(i18n("Render mode:"), m_completionRenderMode);
+
+    m_completionModel = new QLineEdit(completionWidget);
+    m_completionModel->setPlaceholderText(i18n("Empty = the chat model"));
+    m_completionModel->setToolTip(i18n("A small, fast model costs less and answers sooner; leave empty to use the chat model."));
+    completionForm->addRow(i18n("Completion model:"), m_completionModel);
+
+    m_completionRequestsPerMinute = new QSpinBox(completionWidget);
+    m_completionRequestsPerMinute->setRange(1, 120);
+    m_completionRequestsPerMinute->setSuffix(i18n(" / min"));
+    m_completionRequestsPerMinute->setToolTip(i18n("A budget enforced by the completion engine itself, so an automatic trigger cannot fire a metered key a hundred times an hour."));
+    completionForm->addRow(i18n("Completion requests per minute:"), m_completionRequestsPerMinute);
+
+    m_completionPrefixChars = new QSpinBox(completionWidget);
+    m_completionPrefixChars->setRange(1, 100000);
+    m_completionPrefixChars->setSingleStep(500);
+    m_completionPrefixChars->setSuffix(i18n(" chars"));
+    completionForm->addRow(i18n("Context before cursor:"), m_completionPrefixChars);
+
+    m_completionSuffixChars = new QSpinBox(completionWidget);
+    m_completionSuffixChars->setRange(1, 100000);
+    m_completionSuffixChars->setSingleStep(500);
+    m_completionSuffixChars->setSuffix(i18n(" chars"));
+    completionForm->addRow(i18n("Context after cursor:"), m_completionSuffixChars);
+
+    m_completionAutoDelay = new QSpinBox(completionWidget);
+    m_completionAutoDelay->setRange(100, 10000);
+    m_completionAutoDelay->setSingleStep(100);
+    m_completionAutoDelay->setSuffix(i18n(" ms"));
+    completionForm->addRow(i18n("Idle time before an automatic completion:"), m_completionAutoDelay);
+
+    auto *completionHelp = new QLabel(i18n("Hovering a line the agent edited shows a hint that leads to the review queue; that part needs no setting and follows the review queue itself."), completionWidget);
+    completionHelp->setWordWrap(true);
+    completionHelp->setStyleSheet(QStringLiteral(u"color: %1;").arg(ChatTheme::textMuted()));
+    completionForm->addRow(completionHelp);
+
+    completionScroll->setWidget(completionWidget);
+    tabs->addTab(completionScroll, i18n("Completion"));
+
     // --- Checkpoints and subtasks ---------------------------------------------
     auto *safetyScroll = new QScrollArea(tabs);
     safetyScroll->setWidgetResizable(true);
@@ -1214,6 +1318,16 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     connect(m_timeout, &QSpinBox::valueChanged, this, markChanged);
     connect(m_deny, &QPlainTextEdit::textChanged, this, markChanged);
     connect(m_allowOutsideReads, &QCheckBox::toggled, this, markChanged);
+    connect(m_editInBuffer, &QCheckBox::toggled, this, markChanged);
+    connect(m_editBanners, &QCheckBox::toggled, this, markChanged);
+    connect(m_completionEnabled, &QCheckBox::toggled, this, markChanged);
+    connect(m_completionTrigger, &QComboBox::currentIndexChanged, this, markChanged);
+    connect(m_completionRenderMode, &QComboBox::currentIndexChanged, this, markChanged);
+    connect(m_completionModel, &QLineEdit::textChanged, this, markChanged);
+    connect(m_completionRequestsPerMinute, &QSpinBox::valueChanged, this, markChanged);
+    connect(m_completionPrefixChars, &QSpinBox::valueChanged, this, markChanged);
+    connect(m_completionSuffixChars, &QSpinBox::valueChanged, this, markChanged);
+    connect(m_completionAutoDelay, &QSpinBox::valueChanged, this, markChanged);
     connect(m_maxExpandedToolCards, &QSpinBox::valueChanged, this, markChanged);
 
     connect(m_planMode, &QCheckBox::toggled, this, markChanged);
@@ -1641,6 +1755,16 @@ s.opencodeModel = m_opencodeModel->currentText().trimmed();
     s.extraSystemPrompt = m_system->toPlainText();
     s.extraDenyGlobs = m_deny->toPlainText().split(u'\n', Qt::SkipEmptyParts);
     s.allowReadsOutsideWorkspace = m_allowOutsideReads->isChecked();
+    s.editInBuffer = m_editInBuffer->isChecked();
+    s.editBannersEnabled = m_editBanners->isChecked();
+    s.completionEnabled = m_completionEnabled->isChecked();
+    s.completionTrigger = m_completionTrigger->currentData().toString();
+    s.completionRenderMode = m_completionRenderMode->currentData().toString();
+    s.completionModel = m_completionModel->text().trimmed();
+    s.completionRequestsPerMinute = m_completionRequestsPerMinute->value();
+    s.completionContextPrefixChars = m_completionPrefixChars->value();
+    s.completionContextSuffixChars = m_completionSuffixChars->value();
+    s.completionAutoTriggerDelayMs = m_completionAutoDelay->value();
     s.messageSpeed = m_speed->currentData().toInt();
 
     s.contextCompressionLevel = m_compressionLevel->value();
@@ -1830,6 +1954,16 @@ void KateAiConfigPage::reset()
     m_timeout->setValue(std::max(1, s.bashTimeoutMs / 1000));
     m_deny->setPlainText(s.extraDenyGlobs.join(u'\n'));
     m_allowOutsideReads->setChecked(s.allowReadsOutsideWorkspace);
+    m_editInBuffer->setChecked(s.editInBuffer);
+    m_editBanners->setChecked(s.editBannersEnabled);
+    m_completionEnabled->setChecked(s.completionEnabled);
+    m_completionTrigger->setCurrentIndex(std::max(0, m_completionTrigger->findData(s.completionTrigger)));
+    m_completionRenderMode->setCurrentIndex(std::max(0, m_completionRenderMode->findData(s.completionRenderMode)));
+    m_completionModel->setText(s.completionModel);
+    m_completionRequestsPerMinute->setValue(s.completionRequestsPerMinute);
+    m_completionPrefixChars->setValue(s.completionContextPrefixChars);
+    m_completionSuffixChars->setValue(s.completionContextSuffixChars);
+    m_completionAutoDelay->setValue(s.completionAutoTriggerDelayMs);
     m_maxExpandedToolCards->setValue(s.maxExpandedToolCards);
 
     m_maxIter->setValue(s.maxToolCalls);

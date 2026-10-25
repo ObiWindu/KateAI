@@ -3,6 +3,7 @@
 #include "chattheme.h"
 #include "chatwidget.h"
 #include "sessionstoreisolation.h"
+#include "toolcallwidget.h"
 #include "types.h"
 
 #include <QApplication>
@@ -14,6 +15,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLabel>
+#include <QLayout>
 #include <QListWidget>
 #include <QPoint>
 #include <QPushButton>
@@ -117,6 +119,17 @@ private:
     {
         QFrame *popup = root->findChild<QFrame *>(u"modelPopup"_s);
         return popup ? popup->findChildren<QListWidget *>() : QList<QListWidget *>();
+    }
+
+    static QString transcriptText(QWidget *root)
+    {
+        QString out;
+        const QList<QTextBrowser *> browsers = root->findChildren<QTextBrowser *>();
+        for (QTextBrowser *browser : browsers) {
+            out += browser->toPlainText();
+            out += QLatin1Char('\n');
+        }
+        return out;
     }
 
 private Q_SLOTS:
@@ -341,6 +354,111 @@ private Q_SLOTS:
     // An ACP agent reports a running tool through in-progress tool_call_update
     // notifications. Before those were forwarded, the card sat empty for the
     // whole command and filled in only once it ended.
+    // The default mock scenario streams reasoning, then a tool call, then the
+    // answer text -- the shape a thinking ACP agent (MiniMax Code) produces.
+    // The tool freeze splits the turn into cards around the tool card; the
+    // transcript has to read in that order without blank areas or reasoning
+    // drawn twice.
+    void acpThoughtsAroundAToolRenderOnceInOrder()
+    {
+        isolateSessionStore();
+        ChatWidget widget;
+        widget.resize(900, 700);
+        widget.show();
+
+        Settings settings;
+        settings.provider = Provider::Acp;
+        settings.apiFormat = ApiFormat::AcpNative;
+        settings.acpAgentId = u"mock-live"_s;
+        settings.acpCommand = u"python3"_s;
+        settings.acpArgs = u'"' + m_agent + u"\" plain"_s;
+        settings.permissionMode = PermissionMode::AlwaysApprove;
+        settings.sandbox = SandboxProfile::Off;
+        widget.setSettings(settings);
+
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+        widget.agent()->setWorkspace(workspace.path());
+
+        bool finished = false;
+        connect(widget.agent(), &AgentLoop::turnFinished, &widget, [&] { finished = true; });
+        widget.ask(u"hello"_s);
+        QVERIFY2(waitFor([&] { return finished; }, 20000), "the turn never finished");
+        QTest::qWait(300);
+
+        QWidget *container = widget.findChild<QWidget *>(u"transcript"_s);
+        QVERIFY2(container, "transcript container not found");
+        QLayout *layout = container->layout();
+        QVERIFY2(layout, "transcript layout not found");
+
+        // One card for the reasoning segment before the tool, one for the
+        // answer after it -- and nothing else that claims to be an answer.
+        const QList<QWidget *> cards = widget.findChildren<QWidget *>(u"assistantCard"_s);
+        QCOMPARE(cards.size(), 2);
+
+        // No assistant browser may sit visible-but-empty: a frozen thinking-only
+        // card used to keep an empty QTextEdit at its default size hint, a
+        // ~190px blank area in the middle of the thread.
+        for (QWidget *card : cards) {
+            for (QTextBrowser *browser : card->findChildren<QTextBrowser *>()) {
+                if (browser->objectName() == u"assistantBrowser"_s) {
+                    QVERIFY2(!browser->isVisible() || !browser->toPlainText().isEmpty(),
+                             "an empty assistant bubble was left visible");
+                }
+            }
+        }
+
+        // The reasoning streamed before the tool is rendered exactly once: in
+        // the earlier card, not duplicated into the answer card on top of the
+        // tool's result.
+        int cardsShowingReasoning = 0;
+        for (QWidget *card : cards) {
+            for (QTextBrowser *browser : card->findChildren<QTextBrowser *>(u"reasoningBrowser"_s)) {
+                if (browser->isVisible() && browser->toPlainText().contains(u"thinking..."_s)) {
+                    ++cardsShowingReasoning;
+                }
+            }
+        }
+        QCOMPARE(cardsShowingReasoning, 1);
+
+        // The thread reads in order: user message, the reasoning card, the
+        // tool card, then the answer card, and the answer is the last thing
+        // in the transcript.
+        auto indexOf = [&](QWidget *needle) {
+            for (int i = 0; i < layout->count(); ++i) {
+                QLayoutItem *item = layout->itemAt(i);
+                if (item && item->widget() == needle) {
+                    return i;
+                }
+            }
+            return -1;
+        };
+        QWidget *userCard = widget.findChild<QWidget *>(u"userCard"_s);
+        ToolCallWidget *toolCard = widget.findChild<ToolCallWidget *>(u"ToolCallWidget_call_ls"_s);
+        QVERIFY2(userCard && toolCard, "the user message or the tool card is missing");
+        QWidget *reasoningCard = nullptr;
+        QWidget *answerCard = nullptr;
+        for (QWidget *card : cards) {
+            for (QTextBrowser *browser : card->findChildren<QTextBrowser *>(u"assistantBrowser"_s)) {
+                if (browser->toPlainText().contains(u"hello hello"_s)) {
+                    answerCard = card;
+                }
+            }
+            if (!reasoningCard && card != answerCard) {
+                reasoningCard = card;
+            }
+        }
+        QVERIFY2(reasoningCard && answerCard, "the turn's two assistant cards were not found");
+        QVERIFY2(transcriptText(&widget).contains(u"hello hello"_s), "the answer never arrived");
+        const int userIndex = indexOf(userCard);
+        const int reasoningIndex = indexOf(reasoningCard);
+        const int toolIndex = indexOf(toolCard);
+        const int answerIndex = indexOf(answerCard);
+        QVERIFY2(userIndex < reasoningIndex && reasoningIndex < toolIndex && toolIndex < answerIndex,
+                 qPrintable(QString(u"order user=%1 reasoning=%2 tool=%3 answer=%4"_s)
+                                .arg(userIndex).arg(reasoningIndex).arg(toolIndex).arg(answerIndex)));
+    }
+
     void acpToolStreamsItsExecutionInsteadOfWaitingForTheEnd()
     {
         ChatWidget widget;

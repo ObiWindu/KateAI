@@ -5,6 +5,7 @@
 
 #include "chatwidget.h"
 
+#include "acpinstall.h"
 #include "agenttext.h"
 #include "chattheme.h"
 #include "contextmanager.h"
@@ -475,6 +476,13 @@ ChatWidget::ChatWidget(QWidget *parent)
     m_scrollArea->setWidgetResizable(true);
     m_scrollArea->setFrameShape(QFrame::NoFrame);
     m_scrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    // The floating overlays (thinking/working pills, jump-to-latest) are
+    // positioned in pixels against the scroll area's height. The panel's own
+    // resize is not the only thing that moves that height: the edit tracker's
+    // "Hide files" collapses its list inside the same vertical layout without
+    // touching the panel, so the overlays have to follow the scroll area's
+    // Resize events too or they hang where the bottom used to be.
+    m_scrollArea->installEventFilter(this);
 
     m_transcriptContainer = new QWidget(m_scrollArea);
     m_transcriptContainer->setObjectName(u"transcript"_s);
@@ -1032,6 +1040,10 @@ ChatWidget::ChatWidget(QWidget *parent)
                     }
                     m_editTracker->addEdit(pending.path, pending.toolName, pending.diff,
                                            pending.oldContent, newContent, !pending.existed);
+                    // The view turns this into an in-editor banner on the
+                    // open document, so the change is visible where the file
+                    // lives, not only inside the chat panel.
+                    Q_EMIT agentEditedFile(pending.path);
                 }
                 m_pendingToolCalls.erase(it);
             }
@@ -1177,6 +1189,14 @@ ChatWidget::ChatWidget(QWidget *parent)
     });
 
     connect(&m_agent, &AgentLoop::turnFinished, this, [this]() {
+        // Freeze the live card first, whatever ended the turn. A stop does
+        // not emit assistantFinished, so without this the streaming card
+        // stays active: the thinking pacer and the coalesced render timer
+        // keep typing into it for a few more moments after Stop, and the
+        // next turn streams its answer into that stale card -- which by then
+        // sits in the middle of the transcript, above the newer user
+        // message, breaking the time order of the whole thread.
+        freezeStreaming();
         m_prompt->setEnabled(true);
         updateSendButtonState();
         m_prompt->setFocus();
@@ -1277,9 +1297,17 @@ ChatWidget::ChatWidget(QWidget *parent)
                                                                      const QString &newContent) {
         Q_UNUSED(toolName);
         Q_UNUSED(newContent);
-        // Nothing to write: in AcceptEdits the file was already written when the
-        // tool ran, so accepting only settles it in the queue. Say so, because
-        // the button gives no other feedback.
+        // In disk mode there is nothing to write: in AcceptEdits the file was
+        // already written when the tool ran, so accepting only settles it in
+        // the queue. In buffer mode the accepted change is still unsaved in
+        // the open document, and keeping it means saving it now.
+        if (m_agent.documentBridge()) {
+            QString error;
+            if (!m_agent.documentBridge()->saveDocumentIfOpen(path, &error)) {
+                showInfoMessage(i18n("Could not save %1: %2", QFileInfo(path).fileName(), error), true);
+                return;
+            }
+        }
         showInfoMessage(i18n("Kept changes to %1", QFileInfo(path).fileName()), false);
     });
     connect(m_editTracker, &EditTracker::editRejected, this, [this](const QString &path, const QString &toolName,
@@ -1296,7 +1324,7 @@ ChatWidget::ChatWidget(QWidget *parent)
             return;
         }
         QString error;
-        if (m_agent.documentBridge()->writeDocument(path, oldContent, &error)) {
+        if (m_agent.documentBridge()->restoreDocument(path, oldContent, &error)) {
             showInfoMessage(i18n("Edit reverted for %1", QFileInfo(path).fileName()), false);
         } else {
             showInfoMessage(i18n("Failed to revert edit for %1: %2", QFileInfo(path).fileName(), error), true);
@@ -1314,6 +1342,9 @@ ChatWidget::ChatWidget(QWidget *parent)
         Q_EMIT aboutToSubmit(); // Let Kate reload so the buffer matches the disk again.
     });
     connect(m_editTracker, &EditTracker::statusMessage, this, &ChatWidget::showInfoMessage);
+    // Re-emitted so the view can retire its in-editor banners when the queue
+    // the banners point at settles.
+    connect(m_editTracker, &EditTracker::editsChanged, this, &ChatWidget::pendingEditsChanged);
     // A review is read where the rest of the work is read: the .diff file the
     // tracker lays out is opened as a document in the editor, with the editor's
     // own diff highlighting, rather than in a separate window.
@@ -1322,8 +1353,12 @@ ChatWidget::ChatWidget(QWidget *parent)
     });
 
     connect(&m_agent, &AgentLoop::modelsReceived, this, [this](Provider provider, const QStringList &models) {
-        if (!(provider == Provider::Acp && models.isEmpty() && m_modelCatalog.contains(Provider::Acp)
-              && !m_modelCatalog.value(Provider::Acp).isEmpty())) {
+        const bool keepExistingAcpCatalog = provider == Provider::Acp && models.isEmpty()
+            && m_modelCatalog.contains(Provider::Acp) && !m_modelCatalog.value(Provider::Acp).isEmpty();
+        if (provider == Provider::Acp && !keepExistingAcpCatalog) {
+            m_acpModelCatalogAgentId = m_settings.acpAgentId;
+        }
+        if (!keepExistingAcpCatalog) {
             // An empty ACP report must not wipe a catalogue we already have.
             // A session that simply didn't advertise models yet used to replace
             // the list the user was looking at with nothing.
@@ -1361,7 +1396,13 @@ ChatWidget::ChatWidget(QWidget *parent)
                     changed = true;
                 }
             }
-            if (m_agent.acpClient() && !m_agent.acpClient()->modelChangePending()) {
+            // Mistral Vibe is pinned to the configured model: the client
+            // pushes it back whenever the agent reports another one. Adopting
+            // the live model here would let the agent's own global model
+            // state switch the selection under the user.
+            const bool followAgentModel = !acpAgentIsMistralVibe(m_settings)
+                || m_settings.acpModel.trimmed().isEmpty();
+            if (followAgentModel && m_agent.acpClient() && !m_agent.acpClient()->modelChangePending()) {
                 const QString live = m_agent.acpClient()->currentModelId();
                 if (!live.isEmpty() && m_settings.acpModel != live) {
                     m_settings.acpModel = live;
@@ -1504,6 +1545,10 @@ void ChatWidget::addUserMessage(const QString &text)
         m_transcriptLayout->removeWidget(welcome);
         delete welcome;
     }
+
+    // A new user message starts a new turn, so reasoning rendered in the
+    // previous turn's cards no longer counts as already shown.
+    m_thinkingShownEarlierInTurn.clear();
 
     // Auto-update thread title on the first user message
     if (m_threadTitle && m_threadTitle->text() == i18n("New Thread")) {
@@ -1785,7 +1830,28 @@ void ChatWidget::addThinkingBlock(const QString &text)
     if (!m_thinkingBrowser || !m_thinkingBlock) {
         return;
     }
-    m_thinkingBuffer = text;
+    // The loop re-reports the whole turn's reasoning here (ACP does it when
+    // the answer text starts). A tool freeze may already have rendered the
+    // part that streamed before the tool into an earlier, frozen card, and
+    // the live pacer may already hold part of it in this one. Only what has
+    // not been shown yet belongs in this card, or the same reasoning reads
+    // twice in two bubbles of one turn.
+    QString unseen = text;
+    if (!m_thinkingShownEarlierInTurn.isEmpty() && unseen.startsWith(m_thinkingShownEarlierInTurn)) {
+        unseen = unseen.mid(m_thinkingShownEarlierInTurn.length());
+    }
+    if (!m_thinkingBuffer.isEmpty() && unseen.startsWith(m_thinkingBuffer)) {
+        unseen = unseen.mid(m_thinkingBuffer.length());
+    }
+    if (unseen.isEmpty()) {
+        // Everything this re-report carries is already on screen.
+        return;
+    }
+    if (!m_thinkingBuffer.isEmpty() && text.startsWith(m_thinkingBuffer)) {
+        m_thinkingBuffer += unseen;
+    } else {
+        m_thinkingBuffer = unseen;
+    }
     m_thinkingBlock->show();
     registerThinkingBlock(m_thinkingBlock, m_thinkingBrowser, m_thinkingToggle);
     if (!m_isThinking) {
@@ -1901,13 +1967,10 @@ void ChatWidget::fitReasoningBrowser(QTextBrowser *browser)
     if (!browser || !browser->isVisible()) {
         return;
     }
-    int width = browser->viewport()->width();
-    if (width <= 40) {
-        // Not laid out yet: the parent block's width is the better guess,
-        // and the resize filter corrects it once the layout runs.
-        width = browser->parentWidget() ? browser->parentWidget()->width() - 8 : 240;
-    }
-    width = std::max(120, width);
+    // The viewport can still be narrow while the widget is being shown.
+    // Keep the same minimum width used by the document fit so the browser
+    // does not get pinned to an undersized, transient layout.
+    const int width = std::max(120, browser->viewport()->width());
     browser->document()->setTextWidth(width);
     // Only re-pin when the height actually moved: an unconditional
     // setFixedHeight() invalidates the transcript layout and repaints the
@@ -1920,6 +1983,15 @@ void ChatWidget::fitReasoningBrowser(QTextBrowser *browser)
 
 bool ChatWidget::eventFilter(QObject *watched, QEvent *event)
 {
+    // The scroll area resizes without the panel resizing (the edit tracker's
+    // "Hide files" toggle collapses its list inside the shared vertical
+    // layout), and the floating overlays are pinned to the scroll area's
+    // bottom in pixels. Reposition them on every scroll-area resize, or they
+    // stay suspended where the bottom of the transcript used to be.
+    if (event->type() == QEvent::Resize && watched == m_scrollArea) {
+        updateScrollButtonPosition();
+        updateIndicatorsPosition();
+    }
     // Pinned-height browsers have to follow the width the layout gives them.
     // A fit measured at a provisional width re-wraps at the real one; without
     // this re-fit the text is either clipped or sits in a box with empty space
@@ -2017,6 +2089,12 @@ void ChatWidget::freezeStreaming()
         if (m_activeAssistantBrowser->height() != docH) {
             m_activeAssistantBrowser->setFixedHeight(docH);
         }
+    } else if (m_activeAssistantBrowser) {
+        // A thinking-only segment froze before any answer text arrived: the
+        // empty browser is a blank QTextEdit size hint (a ~190px hole) inside
+        // the card. The history rebuild hides the same browser, so the live
+        // freeze has to as well.
+        m_activeAssistantBrowser->hide();
     }
     if (m_activeAssistantCopyBtn) {
         m_activeAssistantCopyBtn->setProperty("copyText", m_streamText);
@@ -2026,6 +2104,20 @@ void ChatWidget::freezeStreaming()
     if (m_thinkingBlock && !m_thinkingBuffer.isEmpty()) {
         m_thinkingBlock->show();
         applyThinkingState(m_thinkingBlock, m_thinkingBrowser, m_thinkingToggle, true);
+    }
+    // Whatever this card revealed is on screen now; the loop re-reports the
+    // full turn's reasoning when the answer text starts, and that re-report
+    // must not draw this part again inside the next card.
+    m_thinkingShownEarlierInTurn += m_thinkingBuffer;
+    // A card with neither answer text nor reasoning is pure chrome: a header
+    // and a copy button around nothing, sitting in the middle of the thread.
+    // Nothing of the turn is lost by dropping it.
+    if (m_activeAssistantWidget && m_streamText.isEmpty() && m_thinkingBuffer.isEmpty()) {
+        QWidget *empty = m_activeAssistantWidget;
+        if (m_transcriptLayout) {
+            m_transcriptLayout->removeWidget(empty);
+        }
+        empty->deleteLater();
     }
     m_isStreaming = false;
     if (m_activeAssistantPulse) {
@@ -3786,7 +3878,7 @@ void ChatWidget::fillModelResultList()
                                                      m_acpAgentModelViewAgentId);
         if (m_acpAgentModelViewAgentId == m_settings.acpAgentId) {
             const QStringList live = m_modelCatalog.value(Provider::Acp);
-            if (!live.isEmpty()) {
+            if (m_acpModelCatalogAgentId == m_acpAgentModelViewAgentId && !live.isEmpty()) {
                 models = live;
             }
             if (!m_settings.acpModel.isEmpty() && !models.contains(m_settings.acpModel)) {
@@ -3919,7 +4011,9 @@ void ChatWidget::fillModelResultList()
         }
 
         QStringList models;
-        if (p == Provider::Acp && usesAcpNative(m_settings) && m_modelCatalog.contains(Provider::Acp)) {
+        if (p == Provider::Acp && usesAcpNative(m_settings)
+            && m_acpModelCatalogAgentId == m_settings.acpAgentId
+            && m_modelCatalog.contains(Provider::Acp)) {
             models = pickerModelsFor(m_settings, p, m_modelCatalog.value(p));
         } else if (p == Provider::Acp && usesAcpNative(m_settings)) {
             models = acpAgentAvailableModels(m_settings, m_settings.acpAgentId);
@@ -4165,9 +4259,97 @@ Settings ChatWidget::settingsForAcpAgent(const QString &agentId) const
     return agentSettings;
 }
 
+// Registry entries saved before binary downloads were implemented only record
+// the relative command ("<./agy_acp_server.par>") and never unpacked the
+// archive. Selecting such an agent would fail with "No such file or directory",
+// so install it on demand before asking it for its model catalogue.
+bool ChatWidget::ensureAcpBinaryInstalled(const QString &agentId)
+{
+    if (agentId.isEmpty()) {
+        return false;
+    }
+    if (m_acpBinaryInstaller) {
+        return m_acpInstallingAgentId == agentId;
+    }
+
+    const QJsonArray installed = QJsonDocument::fromJson(m_settings.acpInstalledAgents.toUtf8()).array();
+    for (const QJsonValue &value : installed) {
+        const QJsonObject agent = value.toObject();
+        if (agent.value(u"id"_s).toString() != agentId) {
+            continue;
+        }
+        const bool isBinary = agent.value(u"distributionType"_s).toString() == u"binary"_s
+            || !agent.value(u"binaryArchiveUrl"_s).toString().isEmpty();
+        if (!isBinary) {
+            return false;
+        }
+        if (!acpInstalledBinaryCommand(settingsForAcpAgent(agentId)).isEmpty()) {
+            if (agentId == u"antigravity-acp"_s && acpNeedsPageShim()) {
+                acpEnsurePageShim(acpBinaryInstallDir(agentId));
+            }
+            return false;
+        }
+
+        auto *installer = new AcpBinaryInstaller(agent, agent.value(u"binaryPlatform"_s).toString(),
+                                                 nullptr, this);
+        m_acpBinaryInstaller = installer;
+        m_acpInstallingAgentId = agentId;
+        const QString name = agent.value(u"name"_s).toString();
+        showInfoMessage(i18n("Installing %1…", name), false);
+
+        connect(installer, &AcpBinaryInstaller::finished, this,
+                [this, installer, agentId, name](const QJsonObject &installedAgent) {
+            QJsonArray agents = QJsonDocument::fromJson(m_settings.acpInstalledAgents.toUtf8()).array();
+            for (qsizetype i = agents.size() - 1; i >= 0; --i) {
+                if (agents.at(i).toObject().value(u"id"_s).toString() == agentId) {
+                    agents.removeAt(i);
+                }
+            }
+            agents.append(installedAgent);
+            m_settings.acpInstalledAgents = QString::fromUtf8(QJsonDocument(agents).toJson(QJsonDocument::Compact));
+            if (m_settings.acpAgentId == agentId) {
+                m_settings.acpCommand = installedAgent.value(u"command"_s).toString();
+                QStringList args;
+                for (const QJsonValue &arg : installedAgent.value(u"args"_s).toArray()) {
+                    args.append(arg.toString());
+                }
+                m_settings.acpArgs = args.join(u' ');
+                m_settings.acpApiKeyEnv = installedAgent.value(u"apiKeyEnv"_s).toString();
+                m_agent.setSettings(m_settings);
+            }
+            Q_EMIT settingsChanged(m_settings);
+            showInfoMessage(i18n("Installed %1.", name), false);
+
+            if (m_acpBinaryInstaller == installer) {
+                m_acpBinaryInstaller = nullptr;
+                m_acpInstallingAgentId.clear();
+            }
+            installer->deleteLater();
+            QTimer::singleShot(0, this, [this, agentId]() {
+                requestAcpAgentModels(agentId);
+            });
+        });
+        connect(installer, &AcpBinaryInstaller::failed, this,
+                [this, installer, name](const QString &message) {
+            showInfoMessage(i18n("Could not install %1: %2", name, message), true);
+            if (m_acpBinaryInstaller == installer) {
+                m_acpBinaryInstaller = nullptr;
+                m_acpInstallingAgentId.clear();
+            }
+            installer->deleteLater();
+        });
+        installer->start();
+        return true;
+    }
+    return false;
+}
+
 void ChatWidget::requestAcpAgentModels(const QString &agentId)
 {
     if (agentId.isEmpty() || m_acpModelsLoading == agentId) {
+        return;
+    }
+    if (ensureAcpBinaryInstalled(agentId)) {
         return;
     }
     if (agentId == m_settings.acpAgentId && m_agent.acpClient()) {
@@ -4435,13 +4617,14 @@ void ChatWidget::showSettingsMenu()
     acpMenu->setStyleSheet(menu.styleSheet());
 
     // Agent selection
-    const QStringList acpAgentIds = {u"grok-build"_s, u"claude-acp"_s, u"codex-acp"_s, u"gemini"_s, u"mistral-vibe"_s, u"custom"_s};
+    const QStringList acpAgentIds = {u"grok-build"_s, u"claude-acp"_s, u"codex-acp"_s, u"gemini"_s, u"mistral-vibe"_s, u"mcode"_s, u"custom"_s};
     const QStringList acpAgentLabels = {
         i18n("Grok Build"),
         i18n("Claude Agent"),
         i18n("Codex"),
         i18n("Gemini CLI"),
         i18n("Mistral Vibe"),
+        i18n("MiniMax Code"),
         i18n("Custom…")
     };
 
@@ -5550,6 +5733,9 @@ void ChatWidget::rebuildTranscript()
     m_permissionBar->hideBar();
     clearTranscriptContents();
     m_thinkingExpanded = true;
+    // The rebuild re-renders reasoning from the history; nothing a previous
+    // live turn showed counts as on screen anymore.
+    m_thinkingShownEarlierInTurn.clear();
 
     // Recreate the indicator overlay if it was ever destroyed. Nothing in the
     // normal path removes it -- it is an overlay child of the scroll area, not
@@ -6095,6 +6281,29 @@ void ChatWidget::setCurrentConversationId(const QString &conversationId)
         const QString title = SessionStore::conversationTitle(conversationId);
         m_threadTitle->setText(title.isEmpty() ? i18n("New Thread") : title);
     }
+}
+
+void ChatWidget::renamePendingEdits(const QString &oldPath, const QString &newPath)
+{
+    // A Save-As has to carry the review queue along: the tracker, and any
+    // in-flight edit of the same turn that has not finished yet.
+    m_editTracker->renamePath(oldPath, newPath);
+    for (auto it = m_pendingToolCalls.begin(); it != m_pendingToolCalls.end(); ++it) {
+        if (it.value().path == oldPath) {
+            it.value().path = newPath;
+        }
+    }
+}
+
+bool ChatWidget::rejectPendingEdits(const QString &path)
+{
+    // The in-editor banner's reject action lands here. A path without
+    // pending edits (already settled from the panel) is a no-op.
+    if (!m_editTracker->pendingPaths().contains(path)) {
+        return false;
+    }
+    m_editTracker->rejectEdit(path);
+    return true;
 }
 
 // Create a new blank conversation and reset the chat UI.

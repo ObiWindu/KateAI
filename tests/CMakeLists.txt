@@ -20,6 +20,23 @@ kateai_test(test_rules)
 kateai_test(test_transcriptlayout)
 kateai_test(test_modes)
 kateai_test(test_projectgraph)
+# The requestable half of the in-editor completions: prompt building, staleness,
+# budget, response parsing. The HTTP cases talk to an in-process mock server on
+# the loopback interface, so no GUI and no provider are needed.
+kateai_test(test_completionengine)
+
+# Diff hunk parsing and the MovingCursor anchoring of agent-edited line ranges.
+# MovingCursors need a real KTextEditor document, so this runs offscreen like
+# the other editor-facing suites.
+add_executable(test_editranges test_editranges.cpp)
+target_link_libraries(test_editranges PRIVATE kateai_core Qt6::Test Qt6::Widgets)
+add_test(NAME test_editranges COMMAND test_editranges -platform offscreen)
+
+# Creates real KTextEditor documents, which needs the full editor part (and
+# its widget machinery), so it runs offscreen like the other GUI suites.
+add_executable(test_documentbridge test_documentbridge.cpp)
+target_link_libraries(test_documentbridge PRIVATE kateai_core Qt6::Test Qt6::Widgets)
+add_test(NAME test_documentbridge COMMAND test_documentbridge -platform offscreen)
 
 # Renders through QTextDocument, which needs a QGuiApplication.
 add_executable(test_codehighlight test_codehighlight.cpp)
