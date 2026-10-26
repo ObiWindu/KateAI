@@ -156,6 +156,7 @@ static QByteArray sessionDataToJson(const SessionStore::SessionData &data)
     obj[u"modelRequests"_s] = data.modelRequests;
     obj[u"toolCalls"_s] = data.toolCalls;
     obj[u"acpSessionId"_s] = data.acpSessionId;
+    obj[u"workspace"_s] = data.workspace;
     return QJsonDocument(obj).toJson(QJsonDocument::Compact);
 }
 
@@ -186,6 +187,7 @@ static SessionStore::SessionData sessionDataFromJson(const QByteArray &payload)
     data.modelRequests = obj[u"modelRequests"_s].toInt();
     data.toolCalls = obj[u"toolCalls"_s].toInt();
     data.acpSessionId = obj[u"acpSessionId"_s].toString();
+    data.workspace = obj[u"workspace"_s].toString();
 
     // Version 2 adds the version field - no data migration needed, just ensure version is set
     if (data.version < SessionStore::CURRENT_VERSION) {

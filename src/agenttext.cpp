@@ -7,6 +7,7 @@
 
 #include "codehighlight.h"
 
+#include <QRegularExpression>
 #include <QTextDocument>
 
 using namespace Qt::Literals::StringLiterals;
@@ -14,89 +15,100 @@ using namespace Qt::Literals::StringLiterals;
 namespace KateAi
 {
 
-QString closeMarkdown(const QString &text)
-{
-    QString result = text;
-    // Close unclosed triple backticks (code blocks)
-    if (result.count(u"```"_s) % 2 == 1) {
-        result += u"\n```"_s;
-    }
-    // Close unclosed single backticks (inline code)
-    if (result.count(u"`"_s) % 2 == 1) {
-        result += u"`"_s;
-    }
-    // Close unclosed bold markers (**)
-    if (result.count(u"**"_s) % 2 == 1) {
-        result += u"**"_s;
-    }
-    // Close unclosed italic markers (*) - but not part of **
-    int singleAsterisk = 0;
-    for (int i = 0; i < result.length(); ++i) {
-        if (result[i] == u'*') {
-            bool isDouble = (i + 1 < result.length() && result[i + 1] == u'*') || (i > 0 && result[i - 1] == u'*');
-            if (!isDouble) {
-                singleAsterisk++;
-            }
-        }
-    }
-    if (singleAsterisk % 2 == 1) {
-        result += u"*"_s;
-    }
-    // Close unclosed underscore italic markers (_) - but not part of __
-    int singleUnderscore = 0;
-    for (int i = 0; i < result.length(); ++i) {
-        if (result[i] == u'_') {
-            bool isDouble = (i + 1 < result.length() && result[i + 1] == u'_') || (i > 0 && result[i - 1] == u'_');
-            if (!isDouble) {
-                singleUnderscore++;
-            }
-        }
-    }
-    if (singleUnderscore % 2 == 1) {
-        result += u"_"_s;
-    }
-    return result;
-}
-
 namespace
 {
 
-// Matches an opening or closing ``` fence, capturing an optional language hint.
-bool isFence(const QString &line, QString *language, bool *opening)
+struct Fence
 {
-    QString trimmed = line;
-    while (trimmed.startsWith(QLatin1Char(' '))) {
-        trimmed.remove(0, 1);
+    QChar marker;
+    int length = 0;
+    QString language;
+};
+
+// Markdown fences may use three or more backticks or tildes and allow up to
+// three leading spaces. Parse the marker separately from the info string so
+// language tags remain correct when a model adds tabs or attributes.
+bool openingFence(const QString &line, Fence *fence)
+{
+    int indent = 0;
+    while (indent < line.size() && line.at(indent) == u' ' && indent < 4) {
+        ++indent;
     }
-    if (!trimmed.startsWith(u"```"_s)) {
+    if (indent > 3 || indent >= line.size()) {
         return false;
     }
-    trimmed = trimmed.mid(3).trimmed();
-    // A fence may be indented for a list item; more than three spaces means the
-    // line is ordinary text that happens to contain backticks.
-    if (trimmed.startsWith(QLatin1Char('`'))) {
+
+    const QChar marker = line.at(indent);
+    if (marker != u'`' && marker != u'~') {
         return false;
     }
-    if (opening) {
-        *opening = true;
+    int end = indent;
+    while (end < line.size() && line.at(end) == marker) {
+        ++end;
     }
-    if (language) {
-        *language = trimmed.section(QLatin1Char(' '), 0, 0);
+    const int length = end - indent;
+    if (length < 3) {
+        return false;
+    }
+
+    const QString info = line.mid(end).trimmed();
+    // CommonMark forbids backticks in the info string of a backtick fence.
+    if (marker == u'`' && info.contains(u'`')) {
+        return false;
+    }
+    if (fence) {
+        fence->marker = marker;
+        fence->length = length;
+        fence->language = info.section(QRegularExpression(QStringLiteral("\\s+")), 0, 0);
     }
     return true;
 }
 
-// A closing fence carries no language hint.
-bool isClosingFence(const QString &line)
+bool closingFence(const QString &line, const Fence &fence)
 {
-    QString trimmed = line.trimmed();
-    if (!trimmed.startsWith(u"```"_s)) {
+    int indent = 0;
+    while (indent < line.size() && line.at(indent) == u' ' && indent < 4) {
+        ++indent;
+    }
+    if (indent > 3 || indent >= line.size() || line.at(indent) != fence.marker) {
         return false;
     }
-    return trimmed.mid(3).trimmed().isEmpty();
+    int end = indent;
+    while (end < line.size() && line.at(end) == fence.marker) {
+        ++end;
+    }
+    return end - indent >= fence.length && line.mid(end).trimmed().isEmpty();
 }
 
 } // namespace
+
+QString closeMarkdown(const QString &text)
+{
+    // Streaming chunks often end halfway through a fenced block. Close only
+    // that block for rendering: counting backticks, asterisks or underscores
+    // across the raw source also counts punctuation inside code and ordinary
+    // identifiers, which can make Qt reinterpret subsequent words as markup.
+    QString normalized = text;
+    normalized.replace(QStringLiteral("\r\n"), QStringLiteral("\n"));
+    normalized.replace(u'\r', u'\n');
+    const QStringList lines = normalized.split(u'\n');
+    Fence open;
+    bool inFence = false;
+    for (const QString &line : lines) {
+        if (!inFence) {
+            if (openingFence(line, &open)) {
+                inFence = true;
+            }
+        } else if (closingFence(line, open)) {
+            inFence = false;
+        }
+    }
+    if (!inFence) {
+        return text;
+    }
+    return normalized + (normalized.endsWith(u'\n') ? QString() : QStringLiteral("\n"))
+        + QString(open.length, open.marker);
+}
 
 void renderMarkdown(QTextDocument *doc, const QString &markdown)
 {
@@ -108,7 +120,13 @@ void renderMarkdown(QTextDocument *doc, const QString &markdown)
     // cannot be rendered one at a time. The body is assembled by hand instead:
     // prose goes through a scratch document, code through the highlighter.
     QString html = QStringLiteral("<html><body>");
-    const QStringList lines = markdown.split(u'\n');
+    // Providers can stream either LF or CRLF. A stray carriage return in a
+    // code line can otherwise be handed to the HTML parser as content and
+    // change where text appears in the transcript.
+    QString normalized = markdown;
+    normalized.replace(QStringLiteral("\r\n"), QStringLiteral("\n"));
+    normalized.replace(u'\r', u'\n');
+    const QStringList lines = normalized.split(u'\n');
     QStringList prose;
     int i = 0;
 
@@ -153,9 +171,8 @@ void renderMarkdown(QTextDocument *doc, const QString &markdown)
     };
 
     while (i < lines.size()) {
-        QString language;
-        bool opening = false;
-        if (!isFence(lines.at(i), &language, &opening) || isClosingFence(lines.at(i))) {
+        Fence fence;
+        if (!openingFence(lines.at(i), &fence)) {
             prose << lines.at(i);
             ++i;
             continue;
@@ -165,7 +182,7 @@ void renderMarkdown(QTextDocument *doc, const QString &markdown)
 
         QStringList code;
         ++i;
-        while (i < lines.size() && !isClosingFence(lines.at(i))) {
+        while (i < lines.size() && !closingFence(lines.at(i), fence)) {
             code << lines.at(i);
             ++i;
         }
@@ -176,7 +193,7 @@ void renderMarkdown(QTextDocument *doc, const QString &markdown)
         const QString body = code.join(u'\n');
         // htmlForCode falls back to an uncoloured block for languages it does not
         // know, so its result is always usable.
-        html += CodeHighlight::htmlForCode(body, language);
+        html += CodeHighlight::htmlForCode(body, fence.language);
     }
 
     flushProse();

@@ -146,6 +146,7 @@ Q_SIGNALS:
     void configureRequested();
     void aboutToSubmit();
     void conversationChanged(const QString &conversationId);
+    void conversationWorkspaceRequested(const QString &workspace);
     // An agent edit of this path entered the review queue. The view turns it
     // into an in-editor banner on the open document.
     void agentEditedFile(const QString &path);
@@ -162,6 +163,7 @@ protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
 
 private:
+    void resetForNewChat(bool saveCurrentConversation);
     void scheduleSessionSave();
     void addUserMessage(const QString &text);
     void addActivityMessage(const QString &text);

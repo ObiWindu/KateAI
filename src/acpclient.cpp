@@ -2668,7 +2668,8 @@ bool AcpClient::isTransientAgentError(const QString &error) const
 
 bool AcpClient::scheduleTurnRetry(const QString &error)
 {
-    if (!m_settings.enableAutoRetry || m_shuttingDown || m_state != State::Ready || m_sessionId.isEmpty()) {
+    if (!isTransientAgentError(error) || !m_settings.enableAutoRetry || m_shuttingDown
+        || m_state != State::Ready || m_sessionId.isEmpty()) {
         return false;
     }
     const int maxAttempts = qMax(1, m_settings.maxRetryAttempts);
@@ -2748,6 +2749,14 @@ QString AcpClient::turnRetryPrompt() const
     QString prompt = u"[KateAI] Your previous turn was interrupted by a transient network error before it "
                      u"finished. Continue the user's task from the point where it stopped; do not repeat "
                      u"steps that already completed. "_s;
+    if (acpAgentIsMistralVibe(m_settings)) {
+        // Mistral Vibe can hit its model output limit while producing a single
+        // large file-write tool call. On retry, steer it to bound each tool
+        // call so it can make progress instead of generating the same oversized
+        // payload again.
+        prompt += u"For large files, split the work into small, incremental edits or writes. Do not send one "
+                  u"full-file write in a single tool call; verify each chunk before continuing. "_s;
+    }
     const QString original = m_promptText.simplified();
     if (original.length() > 1000) {
         prompt += u"If nothing was started yet, the request was: "_s + original.left(1000) + u"…"_s;

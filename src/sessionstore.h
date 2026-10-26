@@ -37,6 +37,8 @@ public:
         int toolCalls = 0;
         // ACP session id, used to resume the agent conversation.
         QString acpSessionId;
+        // The editor folder active when this conversation was saved.
+        QString workspace;
     };
 
     struct ConversationInfo {
