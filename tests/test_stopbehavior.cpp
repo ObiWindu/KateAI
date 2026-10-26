@@ -14,7 +14,9 @@
 
 #include "agentloop.h"
 #include "chatwidget.h"
+#include "questionwidget.h"
 #include "sessionstoreisolation.h"
+#include "subtaskwidget.h"
 #include "toolcallwidget.h"
 #include "types.h"
 
@@ -155,6 +157,26 @@ private:
         return card->parentWidget()->layout()->indexOf(card);
     }
 
+    // The strip above the composer that holds whatever is waiting on the user.
+    static QWidget *intentDock(QWidget *root)
+    {
+        return root->findChild<QWidget *>(u"intentDock"_s);
+    }
+
+    // The user bubble carrying `text`, found through its body, so two turns'
+    // bubbles can be told apart and their places in the transcript compared.
+    static QWidget *userCardWith(QWidget *root, const QString &text)
+    {
+        for (QWidget *card : root->findChildren<QWidget *>(u"userCard"_s)) {
+            if (auto *body = card->findChild<QTextBrowser *>(u"userMessageBody"_s)) {
+                if (body->toPlainText() == text) {
+                    return card;
+                }
+            }
+        }
+        return nullptr;
+    }
+
     std::unique_ptr<QTemporaryDir> m_workspace;
     QProcess *m_server = nullptr;
     QString m_portFile;
@@ -162,7 +184,8 @@ private:
 
     // One fresh widget per turn, wired to the mock server the same way the
     // widget is wired to a real provider.
-    ChatWidget *makeWidget(bool structuredThinking = false)
+    ChatWidget *makeWidget(bool structuredThinking = false,
+                           PermissionMode permission = PermissionMode::AlwaysApprove)
     {
         auto *widget = new ChatWidget;
         widget->resize(900, 700);
@@ -176,7 +199,7 @@ private:
         settings.agentMode = u"code"_s;
         // The stop must be able to fire while the command runs, so the bash
         // call from the mock is approved without a prompt.
-        settings.permissionMode = PermissionMode::AlwaysApprove;
+        settings.permissionMode = permission;
         settings.sandbox = SandboxProfile::Off;
         settings.structuredThinking = structuredThinking;
         settings.structuredPlanning = false;
@@ -419,6 +442,138 @@ private Q_SLOTS:
         }), "the follow-up turn on the new thread never finished");
         QVERIFY2(transcriptText(widget.get()).contains(u"Both sub-agents reported back."_s),
                  qPrintable(transcriptText(widget.get())));
+    }
+
+    // A stop tears the loop's sub-agents down *before* it reports the turn as
+    // finished, so the agent's own list of running tasks is already empty by
+    // the time the UI reacts. The docked cards are the record instead: they
+    // have to settle and go back into the thread where the sub-agents started,
+    // or the panel keeps a pair of live cards pinned above the composer for the
+    // rest of the session while the next prompt types underneath them.
+    void stopRetiresRunningSubAgentCardsIntoTheTranscript()
+    {
+        std::unique_ptr<ChatWidget> widget(makeWidget());
+
+        widget->ask(u"Split this across two agents."_s);
+        QList<SubtaskWidget *> agents;
+        QVERIFY2(waitFor([&] {
+            agents = widget->findChildren<SubtaskWidget *>();
+            return agents.size() >= 2;
+        }, 15000), "the mock never started the sub-agents");
+
+        QWidget *dock = intentDock(widget.get());
+        QVERIFY2(dock && dock->isVisible(), "the sub-agent cards were never docked");
+
+        QPushButton *stop = sendButton(widget.get());
+        QVERIFY2(stop && stop->isEnabled(), "the stop button was not available while the sub-agents ran");
+        stop->click();
+        QVERIFY2(waitFor([&] {
+            return !widget->agent()->isBusy();
+        }, 8000), "the stop did not end the turn");
+
+        // They settle where they started -- back in the thread, above the
+        // composer -- instead of waiting for a result that can never arrive.
+        QVERIFY2(waitFor([&] {
+            return dock->isHidden();
+        }), "the intent dock was left on screen after the stop");
+        for (SubtaskWidget *agent : std::as_const(agents)) {
+            QVERIFY2(!agent->isRunning(), "a sub-agent card still spins after the stop");
+            QVERIFY2(transcriptIndexOf(agent) >= 0, "a sub-agent card never made it back into the thread");
+        }
+
+        widget->ask(u"Say something."_s);
+        QVERIFY2(waitFor([&] {
+            return !widget->agent()->isBusy();
+        }), "the follow-up turn never finished");
+
+        // The stopped turn's cards stay where they belong in time: below them
+        // comes the new prompt, and below that its answer.
+        QWidget *secondPrompt = userCardWith(widget.get(), u"Say something."_s);
+        QWidget *followUp = assistantCardContaining(widget.get(), u"Both sub-agents reported back."_s);
+        QVERIFY2(secondPrompt && followUp, "the follow-up turn was not rendered");
+        for (SubtaskWidget *agent : std::as_const(agents)) {
+            QVERIFY2(transcriptIndexOf(secondPrompt) > transcriptIndexOf(agent),
+                     "the next prompt was placed above a stopped sub-agent card");
+            QVERIFY2(transcriptIndexOf(followUp) > transcriptIndexOf(agent),
+                     "the follow-up answer landed above a stopped sub-agent card");
+        }
+        QVERIFY2(!dock->isVisible(), "the intent dock came back for the next prompt");
+    }
+
+    // The question a stop cut short cannot be answered any more, so its card
+    // goes -- and the strip that carried it has to go with it, or the next
+    // prompt types below an empty dock.
+    void stopClearsTheIntentDockBeforeTheNextPrompt()
+    {
+        std::unique_ptr<ChatWidget> widget(makeWidget());
+
+        widget->ask(u"Ask the user something."_s);
+        QVERIFY2(waitFor([&] {
+            return widget->findChildren<QuestionWidget *>().size() >= 1;
+        }), "the question card never appeared");
+
+        QWidget *dock = intentDock(widget.get());
+        QVERIFY2(dock && dock->isVisible(), "the question card was never docked");
+
+        QPushButton *stop = sendButton(widget.get());
+        QVERIFY2(stop && stop->isEnabled(), "the stop button was not available while the question waited");
+        stop->click();
+        QVERIFY2(waitFor([&] {
+            return !widget->agent()->isBusy();
+        }, 8000), "the stop did not end the turn");
+
+        QVERIFY2(waitFor([&] {
+            return dock->isHidden() && widget->findChildren<QuestionWidget *>().isEmpty();
+        }), "the unanswered question was left docked after the stop");
+
+        widget->ask(u"Say something."_s);
+        QVERIFY2(waitFor([&] {
+            return !widget->agent()->isBusy();
+        }), "the follow-up turn never finished");
+        QVERIFY2(transcriptText(widget.get()).contains(u"Both sub-agents reported back."_s),
+                 qPrintable(transcriptText(widget.get())));
+        QVERIFY2(!dock->isVisible(), "the empty dock came back for the next prompt");
+    }
+
+    // Same for an approval the stop cut short: the Allow / Deny row is hidden
+    // together with the card that carried it, and the strip has to notice that
+    // nothing in it is waiting on the user any more.
+    void stopClearsAPendingApprovalFromTheIntentDock()
+    {
+        std::unique_ptr<ChatWidget> widget(makeWidget(false, PermissionMode::Ask));
+
+        widget->ask(u"Write the note file."_s);
+        QVERIFY2(waitFor([&] {
+            for (ToolCallWidget *card : widget->findChildren<ToolCallWidget *>()) {
+                if (card->isAwaitingApproval()) {
+                    return true;
+                }
+            }
+            return false;
+        }), "the approval never arrived");
+
+        QWidget *dock = intentDock(widget.get());
+        QVERIFY2(dock && dock->isVisible(), "the approval row was never docked");
+
+        QPushButton *stop = sendButton(widget.get());
+        QVERIFY2(stop && stop->isEnabled(), "the stop button was not available while the approval waited");
+        stop->click();
+        QVERIFY2(waitFor([&] {
+            return !widget->agent()->isBusy();
+        }, 8000), "the stop did not end the turn");
+
+        QVERIFY2(waitFor([&] {
+            return dock->isHidden();
+        }), "the dock was left on screen with nothing in it after the stop");
+
+        widget->ask(u"Say something."_s);
+        QVERIFY2(waitFor([&] {
+            return !widget->agent()->isBusy();
+        }), "the follow-up turn never finished");
+        QVERIFY2(!dock->isVisible(), "the empty dock came back for the next prompt");
+        // The approval was never answered, so the write never ran.
+        QVERIFY2(!QFile::exists(widget->agent()->workspace() + u"/notes.txt"_s),
+                 "the stopped approval went ahead and wrote the file");
     }
 };
 
