@@ -521,6 +521,99 @@ private Q_SLOTS:
         client.stop();
     }
 
+    void transientPromptErrorIsRetried()
+    {
+        // The agent's stream to its model provider drops mid-turn ("peer
+        // closed connection without sending complete message body (incomplete
+        // chunked read)"). The turn must be retried automatically instead of
+        // surfacing the transport error to the user.
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+
+        DiskDocumentBridge bridge;
+        AcpClient client;
+        Settings settings = mockSettings(u"flaky"_s);
+        settings.baseRetryDelaySeconds = 1;
+        settings.retryStrategy = u"fixed"_s;
+        client.setSettings(settings);
+        client.setWorkspace(workspace.path());
+        client.setDocumentBridge(&bridge);
+
+        QString stopReason;
+        QString finishedText;
+        QString error;
+        int resets = 0;
+        int retries = 0;
+        connect(&client, &AcpClient::promptFinished, this, [&](const QString &reason, const QString &full, const QJsonArray &) {
+            stopReason = reason;
+            finishedText = full;
+        });
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+        connect(&client, &AcpClient::textReset, this, [&] {
+            ++resets;
+        });
+        connect(&client, &AcpClient::retryStatus, this, [&](const QString &, int, int, int) {
+            ++retries;
+        });
+
+        client.prompt(u"hello"_s);
+        QVERIFY2(waitFor([&] {
+            return !stopReason.isEmpty() || !error.isEmpty();
+        }), "the turn never finished; the retry was not sent");
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(stopReason, u"end_turn"_s);
+        // The retry continues the interrupted turn instead of replaying the
+        // original prompt verbatim.
+        QCOMPARE(finishedText, u"flaky-recovered:nudged"_s);
+        QCOMPARE(retries, 1);
+        // The partial answer streamed before the failure belonged to the
+        // failed attempt and was dropped for the retry.
+        QCOMPARE(resets, 1);
+        client.stop();
+    }
+
+    void persistentTransientPromptErrorExhaustsTheRetryBudget()
+    {
+        // A stream that keeps breaking must not retry forever: after the
+        // configured budget is spent, the original error reaches the user.
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+
+        DiskDocumentBridge bridge;
+        AcpClient client;
+        Settings settings = mockSettings(u"flaky-persistent"_s);
+        settings.baseRetryDelaySeconds = 1;
+        settings.maxRetryAttempts = 2;
+        settings.retryStrategy = u"fixed"_s;
+        client.setSettings(settings);
+        client.setWorkspace(workspace.path());
+        client.setDocumentBridge(&bridge);
+
+        QString error;
+        int retries = 0;
+        int finished = 0;
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+        connect(&client, &AcpClient::retryStatus, this, [&](const QString &, int, int, int) {
+            ++retries;
+        });
+        connect(&client, &AcpClient::promptFinished, this, [&](const QString &, const QString &, const QJsonArray &) {
+            ++finished;
+        });
+
+        client.prompt(u"hello"_s);
+        QVERIFY2(waitFor([&] {
+            return !error.isEmpty();
+        }), "the turn never failed; the budget was not enforced");
+        QVERIFY(error.contains(u"incomplete chunked read"_s));
+        QCOMPARE(retries, 2);
+        QCOMPARE(finished, 0);
+        client.stop();
+    }
+
     void approvingWithoutAnAllowOnceOptionStillAllows()
     {
         // An agent that advertises only allow_always/reject_always leaves no

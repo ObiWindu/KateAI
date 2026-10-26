@@ -13,6 +13,7 @@ NEXT_ID = 1000
 SESSION_ID = "sess_kateai_test"
 CURRENT_MODEL = "grok-4.5"
 CURRENT_EFFORT = "medium"
+PROMPT_COUNT = 0
 EFFORT_CONFIG_ID = "thinking" if SCENARIO == "mistral-thinking" else "thinking_level"
 
 
@@ -201,6 +202,36 @@ def handle_prompt(request_id, params):
     for block in params.get("prompt") or []:
         if isinstance(block, dict) and block.get("type") == "text":
             text += block.get("text") or ""
+
+    if SCENARIO in ("flaky", "flaky-persistent"):
+        # A transient drop of the agent's stream to its model provider: the
+        # turn fails mid-response and Rust agents report the hyper/reqwest
+        # transport error verbatim. "flaky" recovers on the next attempt;
+        # "flaky-persistent" never does, so the client exhausts its budget.
+        global PROMPT_COUNT
+        PROMPT_COUNT += 1
+        if SCENARIO == "flaky" and PROMPT_COUNT > 1:
+            kind = "nudged" if "transient network error" in text else "replayed"
+            session_update(
+                {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": "flaky-recovered:" + kind},
+                }
+            )
+            result(request_id, {"stopReason": "end_turn"})
+            return
+        session_update(
+            {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "partial answer"},
+            }
+        )
+        error(
+            request_id,
+            "peer closed connection without sending complete message body (incomplete chunked read)",
+            -32603,
+        )
+        return
 
     if SCENARIO == "effort-drift":
         # The agent drops its thinking level mid-turn (an adaptive agent

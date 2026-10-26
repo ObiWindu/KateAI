@@ -736,6 +736,14 @@ void AcpClient::finishLiveTools(const QString &message)
 void AcpClient::cancel()
 {
     cancelPendingPermission();
+    if (m_turnRetryPending) {
+        // The failed turn was waiting to be retried. Stop closes it here: a
+        // cancelled turn must not resurrect itself through the retry timer.
+        stopTurnRetry();
+        m_turnRetryAttempt = 0;
+        finishPrompt(u"cancelled"_s);
+        return;
+    }
     if (m_promptId != 0 && !m_sessionId.isEmpty()) {
         QJsonObject params;
         params.insert(u"sessionId"_s, m_sessionId);
@@ -773,6 +781,8 @@ void AcpClient::cancel()
 void AcpClient::stop()
 {
     m_shuttingDown = true;
+    stopTurnRetry();
+    m_turnRetryAttempt = 0;
     if (m_startupTimer) {
         m_startupTimer->stop();
     }
@@ -1369,6 +1379,11 @@ void AcpClient::sendSessionLoadOrResume()
 
 void AcpClient::sendPromptNow(const QString &text)
 {
+    stopTurnRetry();
+    // Every turn starts with a full retry budget. executeTurnRetry() restores
+    // the spent count after this reset, so automatic retries count against one
+    // budget instead of resetting it.
+    m_turnRetryAttempt = 0;
     m_promptText = text;
     m_currentText.clear();
     m_currentThinking.clear();
@@ -1388,6 +1403,12 @@ void AcpClient::sendPromptNow(const QString &text)
             return;
         }
         if (!error.isEmpty()) {
+            // A transient drop of the agent's stream to its model provider is
+            // recoverable: the session survives, so ask the agent to continue
+            // instead of failing the turn in front of the user.
+            if (scheduleTurnRetry(error)) {
+                return;
+            }
             finishPrompt(QString(), error);
             return;
         }
@@ -2609,6 +2630,131 @@ void AcpClient::finishPrompt(const QString &stopReason, const QString &error)
         const QueuedPrompt next = m_queued.takeFirst();
         sendPromptNow(next.text);
     }
+}
+
+bool AcpClient::isTransientAgentError(const QString &error) const
+{
+    const QString lower = error.toLower();
+    // Phrasings agents report when their own HTTP stream to the model
+    // provider breaks mid-response. Rust agents surface hyper/reqwest
+    // transport errors ("peer closed connection without sending complete
+    // message body (incomplete chunked read)"), Node agents surface
+    // undici/Socket errors. Auth and protocol failures are deliberately not
+    // listed: retrying them only repeats the same failure.
+    return lower.contains(u"peer closed connection"_s)
+        || lower.contains(u"incomplete chunked read"_s)
+        || lower.contains(u"incomplete message body"_s)
+        || lower.contains(u"incomplete headers"_s)
+        || lower.contains(u"connection reset"_s)
+        || lower.contains(u"connection closed"_s)
+        || lower.contains(u"connection error"_s)
+        || lower.contains(u"broken pipe"_s)
+        || lower.contains(u"epipe"_s)
+        || lower.contains(u"socket hang up"_s)
+        || lower.contains(u"fetch failed"_s)
+        || lower.contains(u"unexpected eof"_s)
+        || lower.contains(u"unexpected end of stream"_s)
+        || lower.contains(u"timed out"_s)
+        || lower.contains(u"timeout"_s)
+        || lower.contains(u"network error"_s)
+        || lower.contains(u"temporarily unavailable"_s)
+        || lower.contains(u"overloaded"_s)
+        || lower.contains(u"rate limit"_s)
+        || lower.contains(u"too many requests"_s)
+        || lower.contains(u"service unavailable"_s)
+        || lower.contains(u"bad gateway"_s)
+        || lower.contains(u"internal server error"_s);
+}
+
+bool AcpClient::scheduleTurnRetry(const QString &error)
+{
+    if (!m_settings.enableAutoRetry || m_shuttingDown || m_state != State::Ready || m_sessionId.isEmpty()) {
+        return false;
+    }
+    const int maxAttempts = qMax(1, m_settings.maxRetryAttempts);
+    if (m_turnRetryAttempt >= maxAttempts) {
+        return false;
+    }
+    ++m_turnRetryAttempt;
+
+    int delaySeconds = qMax(1, m_settings.baseRetryDelaySeconds);
+    if (m_settings.retryStrategy.compare(u"fixed"_s, Qt::CaseInsensitive) != 0) {
+        // Exponential backoff: base, 2*base, 4*base... The shift is bounded so
+        // the doubling cannot overflow.
+        delaySeconds = qMin(delaySeconds << qMin(m_turnRetryAttempt - 1, 8), 3600);
+    }
+    const int cap = m_settings.maxRetryDelaySeconds > 0 ? m_settings.maxRetryDelaySeconds : 300;
+    delaySeconds = qMin(delaySeconds, cap);
+
+    // The text streamed before the failure belongs to the attempt that
+    // failed. The retry restarts the turn, so the transcript must drop it.
+    if (!m_currentText.isEmpty()) {
+        m_currentText.clear();
+        Q_EMIT textReset();
+    }
+    m_promptId = 0;
+
+    const QString message = u"The ACP agent hit a transient error (%1). Retrying in %2s (attempt %3 of %4)."_s
+                                .arg(error.simplified().left(120))
+                                .arg(delaySeconds)
+                                .arg(m_turnRetryAttempt)
+                                .arg(maxAttempts);
+    Q_EMIT retryStatus(message, m_turnRetryAttempt, maxAttempts, delaySeconds);
+    Q_EMIT logMessage(message);
+
+    if (m_turnRetryTimer) {
+        m_turnRetryTimer->stop();
+        delete m_turnRetryTimer;
+    }
+    auto *timer = new QTimer(this);
+    timer->setSingleShot(true);
+    connect(timer, &QTimer::timeout, this, &AcpClient::executeTurnRetry);
+    timer->start(delaySeconds * 1000);
+    m_turnRetryTimer = timer;
+    m_turnRetryPending = true;
+    return true;
+}
+
+void AcpClient::executeTurnRetry()
+{
+    m_turnRetryPending = false;
+    if (m_shuttingDown || m_state != State::Ready || m_sessionId.isEmpty() || m_promptId != 0) {
+        // The process died or the turn was closed some other way (its failure
+        // was already reported); a retry would inject a turn nobody asked for.
+        return;
+    }
+    const int attempt = m_turnRetryAttempt;
+    const QString retryPrompt = turnRetryPrompt();
+    sendPromptNow(retryPrompt);
+    // sendPromptNow resets the budget for a fresh turn; the retries spent on
+    // this one must survive it.
+    m_turnRetryAttempt = attempt;
+}
+
+void AcpClient::stopTurnRetry()
+{
+    if (m_turnRetryTimer) {
+        m_turnRetryTimer->stop();
+        delete m_turnRetryTimer;
+    }
+    m_turnRetryPending = false;
+}
+
+QString AcpClient::turnRetryPrompt() const
+{
+    // The failed turn is already part of the agent's session, so the retry asks
+    // it to continue instead of replaying the whole request. Agents that roll
+    // a failed turn back still see the task through the reminder.
+    QString prompt = u"[KateAI] Your previous turn was interrupted by a transient network error before it "
+                     u"finished. Continue the user's task from the point where it stopped; do not repeat "
+                     u"steps that already completed. "_s;
+    const QString original = m_promptText.simplified();
+    if (original.length() > 1000) {
+        prompt += u"If nothing was started yet, the request was: "_s + original.left(1000) + u"…"_s;
+    } else if (!original.isEmpty()) {
+        prompt += u"If nothing was started yet, the request was: "_s + original;
+    }
+    return prompt;
 }
 
 } // namespace KateAi

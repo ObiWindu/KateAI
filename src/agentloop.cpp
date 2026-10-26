@@ -126,6 +126,16 @@ AgentLoop::AgentLoop(QObject *parent)
     });
     connect(&m_acp, &AcpClient::promptFinished, this, &AgentLoop::onAcpPromptFinished);
     connect(&m_acp, &AcpClient::failed, this, &AgentLoop::onFailed);
+    connect(&m_acp, &AcpClient::textReset, this, [this]() {
+        // A retried turn replaces the answer that was streamed before the
+        // transient failure.
+        m_currentAssistant.clear();
+        Q_EMIT assistantReset();
+    });
+    connect(&m_acp, &AcpClient::retryStatus, this, [this](const QString &message, int attempt, int maxAttempts, int delaySeconds) {
+        Q_EMIT statusChanged(message);
+        Q_EMIT activityUpdated(u"Retrying in %1s (attempt %2/%3)..."_s.arg(delaySeconds).arg(attempt).arg(maxAttempts));
+    });
     connect(&m_acp, &AcpClient::logMessage, this, &AgentLoop::mcpLogMessage);
     connect(&m_acp, &AcpClient::sessionIdChanged, this, [this](const QString &) {
         Q_EMIT statusChanged(m_acp.statusText());

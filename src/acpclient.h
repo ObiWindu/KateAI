@@ -153,6 +153,11 @@ Q_SIGNALS:
 
     void permissionNeeded(const PermissionRequest &request);
     void promptFinished(const QString &stopReason, const QString &text, const QJsonArray &toolCalls);
+    // The streamed text belonged to an attempt that failed with a transient
+    // error and is retried. The transcript must drop it, like LlmClient does.
+    void textReset();
+    // A failed turn is retried automatically. Mirrors LlmClient::retryStatus.
+    void retryStatus(const QString &message, int attempt, int maxAttempts, int delaySeconds);
     void logMessage(const QString &message);
     void sessionIdChanged(const QString &sessionId);
     void modelsReceived(const QStringList &models);
@@ -268,6 +273,17 @@ private:
     void applyForcedEffort();
     void sendSetEffortOption(const QString &effortId);
 
+    // Transient errors (broken HTTP stream to the model provider, timeouts,
+    // overloaded providers) are worth retrying; auth or protocol failures are
+    // not, and retrying them only repeats the same failure.
+    bool isTransientAgentError(const QString &error) const;
+    // Retries the failed turn after a backoff delay. Returns false when the
+    // error is not transient, retries are disabled, or the budget is spent.
+    bool scheduleTurnRetry(const QString &error);
+    void executeTurnRetry();
+    void stopTurnRetry();
+    QString turnRetryPrompt() const;
+
     Settings m_settings;
     QString m_workspace;
     QString m_editorContext;
@@ -303,6 +319,13 @@ private:
     QJsonArray m_currentPlan;
     QJsonArray m_toolCalls;
     QHash<QString, PermissionRequest> m_liveTools;
+
+    // Automatic retry of a turn that failed with a transient error. The wait
+    // between attempts holds no request, so nothing is in flight; the pending
+    // flag is what keeps the retry from racing a new prompt or a stop.
+    bool m_turnRetryPending = false;
+    int m_turnRetryAttempt = 0;
+    QPointer<QTimer> m_turnRetryTimer;
 
     // The last partial output streamed for each live tool call, so an agent that
     // repeats identical content on a heartbeat does not force a re-render.

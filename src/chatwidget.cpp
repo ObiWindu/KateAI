@@ -1191,6 +1191,12 @@ ChatWidget::ChatWidget(QWidget *parent)
         showInfoMessage(i18n("Retrying in %1s (attempt %2/%3)...", delaySeconds, attempt, maxAttempts), false);
     });
 
+    // Same for the automatic retry of a transiently failed ACP turn.
+    connect(m_agent.acpClient(), &AcpClient::retryStatus, this, [this](const QString &message, int attempt, int maxAttempts, int delaySeconds) {
+        Q_UNUSED(message);
+        showInfoMessage(i18n("Retrying in %1s (attempt %2/%3)...", delaySeconds, attempt, maxAttempts), false);
+    });
+
     connect(m_agent.client(), &LlmClient::retryScheduled, this, [this](int attempt, int maxAttempts, int delaySeconds) {
         Q_UNUSED(attempt);
         Q_UNUSED(maxAttempts);
