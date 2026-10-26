@@ -190,6 +190,20 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     modelLayout->addWidget(m_acpModel, 1);
     modelLayout->addWidget(fetchModelsBtn);
     modelLayout->addWidget(m_acpModelStatus);
+    // Effort/thought level forced onto the live agent session. The agent's
+    // own option ids are the real values (minimal/low/medium/high for some,
+    // think_hard/ultrathink-style ids for others), so the combo stays editable
+    // and Auto (empty) leaves the agent's default in place.
+    m_acpEffort = new QComboBox(this);
+    m_acpEffort->setEditable(true);
+    m_acpEffort->addItem(i18n("Auto (agent default)"), QString());
+    m_acpEffort->addItem(u"minimal"_s, u"minimal"_s);
+    m_acpEffort->addItem(u"low"_s, u"low"_s);
+    m_acpEffort->addItem(u"medium"_s, u"medium"_s);
+    m_acpEffort->addItem(u"high"_s, u"high"_s);
+    m_acpEffort->setToolTip(i18n("Effort / thinking level pushed to the agent session. "
+                                 "Only agents that advertise an effort option honor it; "
+                                 "any option id the agent supports can be typed here."));
     m_apiFormat = new QComboBox(providersWidget);
     m_apiFormat->addItem(apiFormatLabel(ApiFormat::AcpNative), apiFormatId(ApiFormat::AcpNative));
     m_apiFormat->addItem(apiFormatLabel(ApiFormat::OpenAICompatible), apiFormatId(ApiFormat::OpenAICompatible));
@@ -203,6 +217,7 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     acpForm->addRow(i18n("API Key env:"), m_acpApiKeyEnv);
     acpForm->addRow(i18n("API Key:"), m_acpKey);
     acpForm->addRow(i18n("Default Model:"), modelRow);
+    acpForm->addRow(i18n("Effort Level:"), m_acpEffort);
     acpForm->addRow(i18n("Endpoint URL:"), m_acpUrl);
     providersLayout->addWidget(acpGroup);
 
@@ -1241,6 +1256,7 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     connect(m_openaiCompatibleModel, QOverload<int>::of(&QComboBox::currentIndexChanged), this, markChanged);
     connect(m_claudeCompatibleModel, QOverload<int>::of(&QComboBox::currentIndexChanged), this, markChanged);
     connect(m_acpModel, QOverload<int>::of(&QComboBox::currentIndexChanged), this, markChanged);
+    connect(m_acpEffort, &QComboBox::currentTextChanged, this, markChanged);
     connect(m_deepseekUrl, &QLineEdit::textChanged, this, markChanged);
     connect(m_openaiCompatibleUrl, &QLineEdit::textChanged, this, markChanged);
     connect(m_claudeCompatibleUrl, &QLineEdit::textChanged, this, markChanged);
@@ -1730,6 +1746,11 @@ void KateAiConfigPage::apply()
 s.opencodeModel = m_opencodeModel->currentText().trimmed();
     s.opencodeUrl = m_opencodeUrl->text().trimmed();
     s.acpModel = m_acpModel->currentText().trimmed();
+    // The first entry is "Auto (agent default)" and maps to an empty value;
+    // anything else (picked or typed) is an agent option id.
+    s.acpEffort = m_acpEffort->currentIndex() == 0 && m_acpEffort->currentText() == m_acpEffort->itemText(0)
+        ? QString()
+        : m_acpEffort->currentText().trimmed();
     s.deepseekUrl = m_deepseekUrl->text().trimmed();
     s.openaiCompatibleUrl = m_openaiCompatibleUrl->text().trimmed();
     s.claudeCompatibleUrl = m_claudeCompatibleUrl->text().trimmed();
@@ -1907,6 +1928,7 @@ void KateAiConfigPage::reset()
     m_claudeCompatibleModel->setCurrentText(s.claudeCompatibleModel);
         m_opencodeModel->setCurrentText(s.opencodeModel);
     m_acpModel->setCurrentText(s.acpModel);
+    m_acpEffort->setCurrentText(s.acpEffort.trimmed().isEmpty() ? m_acpEffort->itemText(0) : s.acpEffort);
 
     m_deepseekUrl->setText(s.deepseekUrl);
     m_openaiCompatibleUrl->setText(s.openaiCompatibleUrl);

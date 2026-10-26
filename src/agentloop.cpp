@@ -133,6 +133,9 @@ AgentLoop::AgentLoop(QObject *parent)
     connect(&m_acp, &AcpClient::modelsReceived, this, [this](const QStringList &models) {
         Q_EMIT modelsReceived(Provider::Acp, models);
     });
+    connect(&m_acp, &AcpClient::effortsReceived, this, [this](const QStringList &efforts) {
+        Q_EMIT effortsReceived(efforts);
+    });
 
     // Retry status signals
     connect(&m_client, &LlmClient::retryStatus, this, [this](const QString &message, int attempt, int maxAttempts, int delaySeconds) {

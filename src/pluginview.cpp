@@ -56,6 +56,10 @@ namespace KateAi
         // Initialize the plugin with its component name and UI resource file
         setComponentName(u"kateai"_s, i18n("Kate AI"));
         setXMLFile(u"ui.rc"_s);
+        // Kate restores its session right after the view exists; a workspace
+        // change inside this window is Kate's own startup, not a folder the
+        // user opened, and is applied without a notice.
+        m_viewAge.start();
 
         // Create the tool view panel on the right side of the main window
         if (m_mainWindow) {
@@ -252,6 +256,18 @@ namespace KateAi
             connect(m_mainWindow, &KTextEditor::MainWindow::viewChanged, this, [this](KTextEditor::View *) {
                 refreshWorkspace();
             });
+        }
+        // Opening a folder does not have to touch any editor view: the
+        // active document can stay in the old folder while Kate loads the
+        // new one as a project. The project plugin signals that event. The
+        // connect is string-based because the plugin's class is not part of
+        // the public KTextEditor API; its signals are, and a Kate without
+        // them just leaves the connect unused. Kate restores the session's
+        // projects the same way at startup — the view age keeps that first
+        // wave of changes quiet.
+        if (auto *projects = projectPlugin()) {
+            connect(projects, SIGNAL(projectAdded(QObject *)), this, SLOT(projectListChanged()));
+            connect(projects, SIGNAL(projectRemoved(QObject *)), this, SLOT(projectListChanged()));
         }
         // Follow the document set: Save-As has to rename the review queue,
         // a close while the agent works needs a notice, and new documents
@@ -752,12 +768,44 @@ namespace KateAi
         }
     }
 
-    void KateAiView::refreshWorkspace()
+    void KateAiView::projectListChanged()
+    {
+        // A folder was opened or closed. detectWorkspace() prefers the
+        // active document's project, which still points at the previous
+        // folder when the user opens a new one without switching documents.
+        // The newest project is the folder the user just opened, so follow
+        // it directly instead of letting the active document veto the switch.
+        const QString newest = newestProjectBaseDir();
+        if (!newest.isEmpty()) {
+            refreshWorkspace(newest);
+        } else {
+            refreshWorkspace();
+        }
+    }
+
+    void KateAiView::refreshWorkspace(const QString &explicitWorkspace)
     {
         if (!m_mainWindow || !m_chat || !m_chat->agent()) {
             return;
         }
-        const QString workspace = detectWorkspace(m_mainWindow);
+        const QString workspace = explicitWorkspace.isEmpty()
+            ? detectWorkspace(m_mainWindow)
+            : explicitWorkspace;
+        // A real workspace switch (Kate opened another folder, a file from
+        // outside the project became active) has to be seen where the user
+        // types: agent context, checkpoints, MCP servers and completions all
+        // follow the new folder. The first detection settles silently, and so
+        // does a switch inside the startup window — that is Kate restoring
+        // its session, not the user opening a folder.
+        if (m_workspace.isEmpty()) {
+            m_workspace = workspace;
+        } else if (QDir::cleanPath(workspace) != QDir::cleanPath(m_workspace)) {
+            const bool announce = m_viewAge.elapsed() > 10000;
+            m_workspace = workspace;
+            if (announce) {
+                m_chat->showWorkspaceNotice(workspace);
+            }
+        }
         confirmWorkspaceMcpServers(workspace);
         m_chat->agent()->setWorkspace(workspace);
         m_chat->agent()->setDocumentBridge(&m_bridge);

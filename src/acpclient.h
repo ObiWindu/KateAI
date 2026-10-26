@@ -107,6 +107,18 @@ public:
         return m_modelSetInFlight;
     }
 
+    // Effort/thought levels the agent advertised as config options
+    // (category thought_level, or an id like thinking_level / effort).
+    QStringList agentEfforts() const
+    {
+        return m_agentEfforts;
+    }
+    // Effort option id the agent last reported as selected.
+    QString currentEffortId() const
+    {
+        return m_currentEffortId;
+    }
+
     // Read the model list from the live session. Starts the agent when it
     // is not running so the list can arrive with session/new.
     void fetchModels();
@@ -115,6 +127,11 @@ public:
     // path) and falls back to session/set_model. Returns false when this
     // process cannot apply the change and the caller should relaunch it.
     bool setModel(const QString &modelId);
+
+    // Switch the session effort level through session/set_config_option.
+    // An empty id means Auto: nothing is sent and the agent keeps its own
+    // level. Returns false when no live session or effort option exists.
+    bool setEffort(const QString &effortId);
 
 Q_SIGNALS:
     void ready();
@@ -139,6 +156,7 @@ Q_SIGNALS:
     void logMessage(const QString &message);
     void sessionIdChanged(const QString &sessionId);
     void modelsReceived(const QStringList &models);
+    void effortsReceived(const QStringList &efforts);
 
 private:
     enum class State {
@@ -243,6 +261,12 @@ private:
     void ingestSessionModels(const QJsonObject &result, bool applyPreferred);
     void sendSetConfigOption(const QString &modelId);
     void sendSetSessionModel(const QString &modelId);
+    // Same job for the effort/thought-level selector: collect the advertised
+    // options, re-apply the configured level when the agent drifted away from
+    // it, and emit effortsReceived.
+    void ingestSessionEfforts(const QJsonObject &result);
+    void applyForcedEffort();
+    void sendSetEffortOption(const QString &effortId);
 
     Settings m_settings;
     QString m_workspace;
@@ -303,6 +327,11 @@ private:
     QString m_modelConfigId;
     bool m_legacySetModel = false;
     bool m_modelSetInFlight = false;
+
+    QStringList m_agentEfforts;
+    QString m_currentEffortId;
+    QString m_effortConfigId;
+    bool m_effortSetInFlight = false;
 };
 
 } // namespace KateAi

@@ -12,6 +12,8 @@ SCENARIO = sys.argv[1] if len(sys.argv) > 1 else "echo"
 NEXT_ID = 1000
 SESSION_ID = "sess_kateai_test"
 CURRENT_MODEL = "grok-4.5"
+CURRENT_EFFORT = "medium"
+EFFORT_CONFIG_ID = "thinking" if SCENARIO == "mistral-thinking" else "thinking_level"
 
 
 def model_config(current, extra=False):
@@ -46,6 +48,44 @@ def mode_config():
         "currentValue": "code",
         "options": [{"name": "Code", "value": "code"}],
     }
+
+
+def effort_config(current):
+    if SCENARIO == "mistral-thinking":
+        # Mistral's vibe-acp advertises its thinking level with the category
+        # and id "thinking" instead of Zed's "thought_level" category.
+        return {
+            "id": "thinking",
+            "name": "Thinking",
+            "category": "thinking",
+            "type": "select",
+            "currentValue": current,
+            "options": [
+                {"name": "Low", "value": "low"},
+                {"name": "High", "value": "high"},
+                {"name": "Max", "value": "max"},
+            ],
+        }
+    # The effort/thought-level selector agents expose as a session config
+    # option (Zed's thought_level category; Claude and Gemini advertise their
+    # thinking levels this way).
+    return {
+        "id": EFFORT_CONFIG_ID,
+        "name": "Thinking level",
+        "category": "thought_level",
+        "type": "select",
+        "currentValue": current,
+        "options": [
+            {"name": "Minimal", "value": "minimal"},
+            {"name": "Low", "value": "low"},
+            {"name": "Medium", "value": "medium"},
+            {"name": "High", "value": "high"},
+        ],
+    }
+
+
+def full_options(model, effort):
+    return [model, mode_config(), effort_config(effort)]
 
 
 def drift_model_config(current):
@@ -161,6 +201,35 @@ def handle_prompt(request_id, params):
     for block in params.get("prompt") or []:
         if isinstance(block, dict) and block.get("type") == "text":
             text += block.get("text") or ""
+
+    if SCENARIO == "effort-drift":
+        # The agent drops its thinking level mid-turn (an adaptive agent
+        # deciding on its own). A client that forces a configured level must
+        # push it back; the turn is held open until that push arrives.
+        session_update(
+            {
+                "sessionUpdate": "config_option_update",
+                "configOptions": full_options(model_config(CURRENT_MODEL), "low"),
+            }
+        )
+        while True:
+            message = read_message()
+            if message is None:
+                return
+            if (
+                message.get("method") == "session/set_config_option"
+                and (message.get("params") or {}).get("configId") == EFFORT_CONFIG_ID
+            ):
+                handle(message)
+                session_update(
+                    {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": "effort:" + CURRENT_EFFORT},
+                    }
+                )
+                result(request_id, {"stopReason": "end_turn"})
+                return
+            handle(message)
 
     if SCENARIO == "model-drift":
         # The agent switched its model behind the client's back mid-turn and
@@ -560,7 +629,7 @@ def handle_prompt(request_id, params):
 
 
 def handle(message):
-    global CURRENT_MODEL
+    global CURRENT_MODEL, CURRENT_EFFORT
     method = message.get("method")
     request_id = message.get("id")
     params = message.get("params") or {}
@@ -614,6 +683,14 @@ def handle(message):
                     },
                 },
             )
+        elif SCENARIO in ("effort", "effort-drift", "mistral-thinking"):
+            result(
+                request_id,
+                {
+                    "sessionId": SESSION_ID,
+                    "configOptions": full_options(model_config(CURRENT_MODEL), CURRENT_EFFORT),
+                },
+            )
         elif SCENARIO == "model-drift":
             result(
                 request_id,
@@ -635,13 +712,16 @@ def handle(message):
         else:
             result(request_id, {"sessionId": SESSION_ID})
     elif method == "session/set_config_option":
-        CURRENT_MODEL = params.get("value") or CURRENT_MODEL
+        if params.get("configId") == EFFORT_CONFIG_ID:
+            CURRENT_EFFORT = params.get("value") or CURRENT_EFFORT
+        else:
+            CURRENT_MODEL = params.get("value") or CURRENT_MODEL
         model = (
             drift_model_config(CURRENT_MODEL)
             if SCENARIO == "model-drift"
             else model_config(CURRENT_MODEL, extra=True)
         )
-        options = [model, mode_config()]
+        options = full_options(model, CURRENT_EFFORT)
         session_update({"sessionUpdate": "config_option_update", "configOptions": options})
         result(request_id, {"configOptions": options})
     elif method == "session/set_model":

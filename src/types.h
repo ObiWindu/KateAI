@@ -214,6 +214,10 @@ struct Settings {
     QString claudeCompatibleModel;
     QString kiloModel;
     QString acpModel;
+    // Effort/thought level forced onto the live ACP agent session through
+    // session/set_config_option. Empty means Auto: the agent keeps its own
+    // default and Kate never pushes a value.
+    QString acpEffort;
     QString opencodeModel;
     // Model names are no longer hard-coded: they are fetched from whichever
     // providers have a valid key. These stay empty until then.

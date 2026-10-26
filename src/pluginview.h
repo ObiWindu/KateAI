@@ -10,6 +10,7 @@
 #include <KTextEditor/MainWindow>
 #include <KXMLGUIClient>
 
+#include <QElapsedTimer>
 #include <QHash>
 #include <QObject>
 #include <QPointer>
@@ -52,13 +53,22 @@ public:
     // command line command reaches the panel of the window it was used in.
     bool ownsEditorView(KTextEditor::View *view) const;
 
+private Q_SLOTS:
+    // Kate opened or closed a folder (a project): the workspace can switch
+    // without any editor view changing. String-based connection target.
+    void projectListChanged();
+
 private:
     void addEditorContextActions(KTextEditor::View *view, const QList<QAction *> &actions);
     // Takes the user to the file and line a suggestion was anchored to.
     void openFileAtLine(const QString &path, int line);
     void askSelectionWithInstruction(const QString &instruction);
     QString editorContext() const;
-    void refreshWorkspace();
+    // When explicitWorkspace is non-empty, it overrides detectWorkspace():
+    // projectListChanged() passes the newest project's base dir so opening a
+    // folder switches the workspace even when an editor view still points
+    // at a file from the previous folder.
+    void refreshWorkspace(const QString &explicitWorkspace = QString());
     // Asks the user before the MCP servers that the project defines are
     // started. A server is a program, and the list can come with the
     // project.
@@ -117,6 +127,12 @@ private:
     // theme switch can fire ApplicationPaletteChange without touching the
     // editor scheme, and the tool view must repaint regardless.
     QString m_lastWindowBg;
+    // The workspace currently applied to the agent, so a real switch (Kate
+    // opened another folder) can be told apart from the refreshes that run
+    // on every editor change. The age of the view suppresses the notice for
+    // Kate's own session restore at startup.
+    QString m_workspace;
+    QElapsedTimer m_viewAge;
 };
 
 } // namespace KateAi

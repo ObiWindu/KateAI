@@ -45,6 +45,7 @@ Settings SettingsStore::load()
     s.claudeCompatibleModel = g.readEntry(u"ClaudeCompatibleModel"_s, QString());
     s.kiloModel = g.readEntry(u"KiloModel"_s, QString());
     s.acpModel = g.readEntry(u"AcpModel"_s, QString());
+    s.acpEffort = g.readEntry(u"AcpEffort"_s, QString());
     s.opencodeApiKey = g.readEntry(u"OpenCodeApiKey"_s, QString());
     s.opencodeModel = g.readEntry(u"OpenCodeModel"_s, QString());
     s.opencodeUrl = g.readEntry(u"OpenCodeUrl"_s, u"https://opencode.ai/zen/v1"_s);
@@ -305,6 +306,7 @@ void SettingsStore::save(const Settings &settings)
     g.writeEntry(u"ClaudeCompatibleModel"_s, settings.claudeCompatibleModel);
     g.writeEntry(u"KiloModel"_s, settings.kiloModel);
     g.writeEntry(u"AcpModel"_s, settings.acpModel);
+    g.writeEntry(u"AcpEffort"_s, settings.acpEffort);
     g.writeEntry(u"DeepSeekUrl"_s, settings.deepseekUrl);
     g.writeEntry(u"OpenAICompatibleUrl"_s, settings.openaiCompatibleUrl);
     g.writeEntry(u"ClaudeCompatibleUrl"_s, settings.claudeCompatibleUrl);

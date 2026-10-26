@@ -122,6 +122,10 @@ public:
     PromptEdit *promptEdit() const { return m_prompt; }
     void setCompletionWords(const QStringList &words);
 
+    // Announces that the Kate AI workspace switched (another folder was
+    // opened in Kate). The notice is pinned to the top of the composer.
+    void showWorkspaceNotice(const QString &workspace);
+
     // Modes / MCP / checkpoints, exposed so the view can drive them too.
     void showModeMenu();
     void showMcpMenu();
@@ -213,6 +217,7 @@ private:
     void updateModelSelectorLabel();
     void showInfoMessage(const QString &message, bool isError);
     void applyInfoBarStyle();
+    void applyWorkspaceBannerStyle();
     void saveCurrentConversation();
     // Re-applies every theme-derived stylesheet on the panel chrome and the
     // live transcript widgets, without rebuilding the transcript.
@@ -272,6 +277,7 @@ private:
     void updateReasoningEffortButton();
     bool modelSupportsReasoningEffort() const;
     void showReasoningEffortMenu();
+    void showAcpEffortMenu();
     void setThinkingIndicator(bool show);
     void setWorkingIndicator(bool show);
     void tickIndicators();
@@ -342,6 +348,9 @@ private:
     // Tool calls completed in the current turn, shown live in the status strip.
     int m_completedToolCount = 0;
     QLabel *m_infoBar = nullptr;
+    // Workspace switch notice, pinned above the info bar in the composer so
+    // "Kate now works in this folder" is seen where the user is typing.
+    QLabel *m_workspaceBanner = nullptr;
     // What the info bar is currently showing, so a theme change can re-apply
     // its state-dependent style instead of resetting it to the default box.
     QString m_infoBarMessage;
@@ -364,6 +373,10 @@ private:
     QString m_acpAgentModelViewAgentId;
     QString m_acpAgentModelViewAgentName;
     QString m_acpModelsLoading;
+    // Effort/thought levels advertised by the live ACP agent, plus the level
+    // it last reported as selected. Drives the composer effort button.
+    QStringList m_acpEfforts;
+    QString m_acpCurrentEffort;
     QPointer<AcpClient> m_acpModelProbe;
     QPointer<AcpBinaryInstaller> m_acpBinaryInstaller;
     QString m_acpInstallingAgentId;

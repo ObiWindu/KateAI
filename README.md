@@ -268,6 +268,7 @@ Kate AI is a first-class KTextEditor plugin, so it sees the same documents you d
 - **Stop Kate AI** action (Tools ▸ Kate AI, bindable in Kate's shortcut settings) aborts the running turn without hunting for the panel button
 - **Command line**: `:kateai ask <text>`, `:kateai explain|fix|refactor|tests` (act on the selection or the range the command line carries, vi-mode `'<,'>kateai fix` included), `:kateai stop`, `:kateai new`, `:kateai mode <id>`, `:kateai panel`
 - Workspace root is the nearest parent with `.git` or `.kateproject`, otherwise the active file’s directory
+- When a different folder is opened in Kate, Kate AI switches to that workspace (agent context, checkpoints, MCP servers, completions) and shows a notice pinned above the input; the notice fades on its own or when the next turn starts
 
 ### Thinking and plan mode
 
@@ -353,6 +354,8 @@ Native ACP works with any stdio agent. Pick a preset (command/args are filled in
 | Custom | (yours) | (yours) |
 
 Kate is the ACP client: `session/prompt`, `session/update`, `session/request_permission`, `fs/read_text_file`, `fs/write_text_file`, `terminal/*`. Always-approve is handled in Kate for every agent. Grok Build also receives `--model` / `--always-approve` and Grok `_meta` (`yoloMode`).
+
+**Effort level for ACP agents.** Agents that expose a thinking/thought-level selector (Claude Agent, Gemini CLI, …) advertise it as a session config option. The composer's effort button shows the levels the live session advertised; picking one forces it onto the session (`session/set_config_option`) and pins it — an agent that changes its own level is switched back. **Auto** releases control and keeps the agent's default. The forced level is also settable in Settings → Kate AI → AI Providers → ACP Agent → **Effort Level** (editable, so agent-specific ids like `think_hard` can be typed).
 
 Kate also answers three of its own client methods, advertised in the `initialize` capabilities so agents can discover them: `query_project_graph` (the same graph the native agent queries), `write_plan_file` (files the implementation plan in a per-workspace temp file and returns its path, so the agent can point the user at a plan they can follow), and `suggest` (posts a suggestion card with an optional file anchor, so an agent can raise an idea without changing anything).
 

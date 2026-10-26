@@ -177,6 +177,7 @@ void AcpClient::setSettings(const Settings &settings)
     const QString oldCommand = resolvedCommand(m_settings);
     const QStringList oldArgs = agentArguments(m_settings);
     const QString oldModel = m_settings.acpModel;
+    const QString oldEffort = m_settings.acpEffort;
     m_settings = settings;
     if (m_state == State::Stopped || m_state == State::Failed) {
         return;
@@ -191,6 +192,13 @@ void AcpClient::setSettings(const Settings &settings)
     // Zed does, instead of restarting the agent so a --model flag is reread.
     if (oldModel != m_settings.acpModel && !setModel(m_settings.acpModel)) {
         stop();
+        return;
+    }
+    // An effort change rides the same live-session path. Unlike the model it
+    // has no --flag fallback, so an agent without an effort selector simply
+    // keeps its own level and the configured one is applied at the next start.
+    if (oldEffort != m_settings.acpEffort) {
+        setEffort(m_settings.acpEffort);
     }
 }
 
@@ -303,6 +311,51 @@ static bool collectModelConfig(const QJsonArray &configOptions, QStringList *mod
     return found;
 }
 
+// Effort selector: an option the agent exposes to control how hard it thinks
+// (Claude's thinking level, Gemini's thinking level, a reasoning effort).
+// Zed's agents advertise these with category "thought_level"; Mistral's
+// agents use category/id "thinking"; the id or name is the fallback signal
+// (thinking_level, effort, reasoning_effort, ...).
+static bool isEffortConfigOption(const QJsonObject &option)
+{
+    const QString category = option.value(u"category"_s).toString();
+    if (category == u"model"_s || category == u"model_config"_s || category == u"mode"_s) {
+        return false;
+    }
+    if (category == u"thought_level"_s || category == u"thinking"_s) {
+        return true;
+    }
+    const QString id = option.value(u"id"_s).toString().toLower();
+    const QString name = option.value(u"name"_s).toString().toLower();
+    return id.contains(u"thought"_s) || id.contains(u"effort"_s) || id.contains(u"thinking"_s)
+        || name.contains(u"thought"_s) || name.contains(u"effort"_s) || name.contains(u"thinking"_s);
+}
+
+// Returns true when an effort selector was present, even if it had no values.
+static bool collectEffortConfig(const QJsonArray &configOptions, QStringList *efforts, QString *current, QString *configId)
+{
+    bool found = false;
+    for (const QJsonValue &optionValue : configOptions) {
+        const QJsonObject option = optionValue.toObject();
+        if (!isEffortConfigOption(option)) {
+            continue;
+        }
+        const QString type = option.value(u"type"_s).toString();
+        if (!type.isEmpty() && type != u"select"_s) {
+            continue;
+        }
+        found = true;
+        *configId = option.value(u"id"_s).toString();
+        *current = option.value(u"currentValue"_s).toString();
+        efforts->clear();
+        const QJsonArray options = option.value(u"options"_s).toArray();
+        for (const QJsonValue &optValue : options) {
+            appendModelEntry(efforts, optValue);
+        }
+    }
+    return found;
+}
+
 void AcpClient::ingestSessionModels(const QJsonObject &result, bool applyPreferred)
 {
     QStringList models;
@@ -377,7 +430,88 @@ void AcpClient::ingestSessionModels(const QJsonObject &result, bool applyPreferr
         setModel(m_settings.acpModel.trimmed());
     }
 
+    ingestSessionEfforts(result);
+
     Q_EMIT modelsReceived(m_agentModels);
+}
+
+void AcpClient::ingestSessionEfforts(const QJsonObject &result)
+{
+    // Model-only updates (current_model_update) carry no effort state; the
+    // advertised levels must survive them untouched.
+    if (!result.contains(u"configOptions"_s)) {
+        return;
+    }
+    QStringList efforts;
+    QString current;
+    QString configId;
+    if (!collectEffortConfig(result.value(u"configOptions"_s).toArray(), &efforts, &current, &configId)) {
+        return;
+    }
+    if (!configId.isEmpty()) {
+        m_effortConfigId = configId;
+    }
+    if (!current.isEmpty()) {
+        m_currentEffortId = current;
+    }
+    if (!efforts.isEmpty()) {
+        m_agentEfforts = efforts;
+    }
+    // A configured effort is forced, not merely preferred: an agent that
+    // changed its own level gets pushed back to the configured one. The
+    // response of that restore settles here as well, but then the ids match
+    // and the in-flight guard blocks any second request, so this cannot loop.
+    applyForcedEffort();
+    Q_EMIT effortsReceived(m_agentEfforts);
+}
+
+void AcpClient::applyForcedEffort()
+{
+    const QString forced = m_settings.acpEffort.trimmed();
+    // Auto: the agent's own level is authoritative and Kate sends nothing.
+    if (forced.isEmpty() || forced == m_currentEffortId || m_effortSetInFlight) {
+        return;
+    }
+    if (m_sessionId.isEmpty() || m_effortConfigId.isEmpty()) {
+        return;
+    }
+    sendSetEffortOption(forced);
+}
+
+bool AcpClient::setEffort(const QString &effortId)
+{
+    const QString id = effortId.trimmed();
+    if (id.isEmpty() || id == m_currentEffortId) {
+        return true;
+    }
+    if (m_sessionId.isEmpty() || m_effortConfigId.isEmpty()) {
+        return false;
+    }
+    sendSetEffortOption(id);
+    return true;
+}
+
+void AcpClient::sendSetEffortOption(const QString &effortId)
+{
+    m_effortSetInFlight = true;
+    QJsonObject params;
+    params.insert(u"sessionId"_s, m_sessionId);
+    params.insert(u"configId"_s, m_effortConfigId);
+    // value_id variant: `value` is the option id. `type` is omitted.
+    params.insert(u"value"_s, effortId);
+    sendRequest(u"session/set_config_option"_s, params, [this, effortId](const QJsonObject &result, const QString &error) {
+        m_effortSetInFlight = false;
+        if (!error.isEmpty()) {
+            Q_EMIT logMessage(u"Failed to set effort level: %1"_s.arg(error));
+            return;
+        }
+        m_currentEffortId = effortId;
+        if (result.contains(u"configOptions"_s)) {
+            ingestSessionEfforts(result);
+        } else {
+            Q_EMIT effortsReceived(m_agentEfforts);
+        }
+    });
 }
 
 QString AcpClient::resolvedCommand(const Settings &settings)
@@ -674,6 +808,10 @@ void AcpClient::stop()
     m_modelConfigId.clear();
     m_legacySetModel = false;
     m_modelSetInFlight = false;
+    m_agentEfforts.clear();
+    m_currentEffortId.clear();
+    m_effortConfigId.clear();
+    m_effortSetInFlight = false;
     if (m_state != State::Stopped) {
         setState(State::Stopped, u"Disconnected"_s);
     }

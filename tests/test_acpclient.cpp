@@ -1071,6 +1071,151 @@ private Q_SLOTS:
         client.stop();
     }
 
+    // Agents expose their effort/thought level as a session config option
+    // (Zed's thought_level category). The advertised levels must be collected,
+    // and a configured level must be forced onto the session at open.
+    void effortOptionsAreCollectedAndForcedAtSessionOpen()
+    {
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+
+        AcpClient client;
+        Settings settings = mockSettings(u"effort"_s);
+        settings.acpEffort = u"high"_s;
+        client.setSettings(settings);
+        client.setWorkspace(workspace.path());
+
+        QStringList efforts;
+        QString error;
+        connect(&client, &AcpClient::effortsReceived, this, [&](const QStringList &next) {
+            efforts = next;
+        });
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+
+        client.fetchModels();
+        QVERIFY2(waitFor([&] {
+            return !error.isEmpty() || (efforts.contains(u"high"_s) && client.currentEffortId() == u"high"_s);
+        }), qPrintable(error.isEmpty() ? u"timed out forcing the effort level"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(efforts, (QStringList{u"minimal"_s, u"low"_s, u"medium"_s, u"high"_s}));
+        // The agent opened on "medium"; the configured "high" must win.
+        QCOMPARE(client.currentEffortId(), u"high"_s);
+        QCOMPARE(client.agentEfforts(), efforts);
+        client.stop();
+    }
+
+    // Mistral's vibe-acp exposes its thinking level as an option with the
+    // category and id "thinking", not Zed's "thought_level" category: the
+    // levels must be collected from that shape too, or the effort button
+    // stays disabled with "Auto".
+    void mistralThinkingCategoryEffortOptionsAreCollected()
+    {
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+
+        AcpClient client;
+        Settings settings = mockSettings(u"mistral-thinking"_s);
+        settings.acpEffort = u"low"_s;
+        client.setSettings(settings);
+        client.setWorkspace(workspace.path());
+
+        QStringList efforts;
+        QString error;
+        connect(&client, &AcpClient::effortsReceived, this, [&](const QStringList &next) {
+            efforts = next;
+        });
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+
+        client.fetchModels();
+        QVERIFY2(waitFor([&] {
+            return !error.isEmpty() || client.currentEffortId() == u"low"_s;
+        }), qPrintable(error.isEmpty() ? u"timed out collecting the thinking levels"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(efforts, (QStringList{u"low"_s, u"high"_s, u"max"_s}));
+        QCOMPARE(client.agentEfforts(), efforts);
+        client.stop();
+    }
+
+    // Auto (an empty configured level) leaves the agent's own level alone;
+    // an explicit setEffort() switches the live session.
+    void autoEffortFollowsTheAgentUntilSet()
+    {
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+
+        AcpClient client;
+        client.setSettings(mockSettings(u"effort"_s));
+        client.setWorkspace(workspace.path());
+
+        QString error;
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+
+        client.fetchModels();
+        QVERIFY2(waitFor([&] {
+            return !error.isEmpty() || client.currentEffortId() == u"medium"_s;
+        }), qPrintable(error.isEmpty() ? u"timed out waiting for the agent default"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(client.currentEffortId(), u"medium"_s);
+
+        QVERIFY(client.setEffort(u"low"_s));
+        QVERIFY2(waitFor([&] {
+            return client.currentEffortId() == u"low"_s || !error.isEmpty();
+        }), qPrintable(error.isEmpty() ? u"timed out switching the effort level"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(client.currentEffortId(), u"low"_s);
+        client.stop();
+    }
+
+    // An agent that drops its own thinking level mid-turn must be pushed back
+    // to the forced level before the turn continues.
+    void effortDriftIsPinnedBackMidTurn()
+    {
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+
+        AcpClient client;
+        Settings settings = mockSettings(u"effort-drift"_s);
+        settings.acpEffort = u"high"_s;
+        client.setSettings(settings);
+        client.setWorkspace(workspace.path());
+
+        QString stopReason;
+        QString finishedText;
+        QString error;
+        connect(&client, &AcpClient::promptFinished, this,
+                [&](const QString &reason, const QString &full, const QJsonArray &) {
+            stopReason = reason;
+            finishedText = full;
+        });
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+
+        client.fetchModels();
+        QVERIFY2(waitFor([&] {
+            return !error.isEmpty() || client.currentEffortId() == u"high"_s;
+        }), qPrintable(error.isEmpty() ? u"timed out forcing the effort level"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+
+        // The mock holds the turn open until the client restores the forced
+        // level, so a finished turn proves the push happened.
+        client.prompt(u"drift"_s);
+        QVERIFY2(waitFor([&] {
+            return !stopReason.isEmpty() || !error.isEmpty();
+        }), qPrintable(error.isEmpty() ? u"timed out waiting for the turn"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(stopReason, u"end_turn"_s);
+        QCOMPARE(finishedText, u"effort:high"_s);
+        QCOMPARE(client.currentEffortId(), u"high"_s);
+        client.stop();
+    }
+
 private:
     QString m_agent;
 };

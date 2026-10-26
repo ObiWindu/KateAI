@@ -183,6 +183,8 @@ Q_SIGNALS:
     void turnFinished();
     void modelsReceived(Provider provider, const QStringList &models);
     void modelsFailed(Provider provider, const QString &error);
+    // Effort/thought levels the live ACP agent advertised for its session.
+    void effortsReceived(const QStringList &efforts);
     void modesChanged();
     void mcpToolsChanged();
     void mcpStatusChanged(const QString &summary);

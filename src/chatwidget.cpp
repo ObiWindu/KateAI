@@ -35,6 +35,7 @@
 #include <QColor>
 #include <QComboBox>
 #include <QCoreApplication>
+#include <QDir>
 #include <QFile>
 #include <QFileInfo>
 #include <QGuiApplication>
@@ -589,6 +590,15 @@ ChatWidget::ChatWidget(QWidget *parent)
     auto *composerLayout = new QVBoxLayout(composerContainer);
     composerLayout->setContentsMargins(12, 10, 12, 10);
     composerLayout->setSpacing(6);
+
+    // Workspace switch notice: the topmost strip of the composer. Kate
+    // opening another folder switches the agent's workspace; the change is
+    // announced here because this is where the user is about to type.
+    m_workspaceBanner = new QLabel(composerContainer);
+    m_workspaceBanner->setWordWrap(true);
+    m_workspaceBanner->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    m_workspaceBanner->hide();
+    composerLayout->addWidget(m_workspaceBanner);
 
     // Info bar for API messages (retries, errors) - shown above composer
     m_infoBar = new QLabel(composerContainer);
@@ -1425,6 +1435,12 @@ ChatWidget::ChatWidget(QWidget *parent)
         if (provider == m_settings.provider) {
             m_turnStatus->flash(i18n("Model list unavailable: %1", error), true);
         }
+    });
+
+    connect(&m_agent, &AgentLoop::effortsReceived, this, [this](const QStringList &efforts) {
+        m_acpEfforts = efforts;
+        m_acpCurrentEffort = m_agent.acpClient() ? m_agent.acpClient()->currentEffortId() : QString();
+        updateReasoningEffortButton();
     });
 
     // One pass installs every theme-derived stylesheet; restylePanel() is the
@@ -2881,6 +2897,46 @@ void ChatWidget::clearIntentDock()
     updateIntentDockVisibility();
 }
 
+void ChatWidget::showWorkspaceNotice(const QString &workspace)
+{
+    if (!m_workspaceBanner) {
+        return;
+    }
+    const QString path = QDir::toNativeSeparators(workspace.trimmed());
+    if (path.isEmpty()) {
+        return;
+    }
+    m_workspaceBanner->setText(
+        i18n("Workspace switched to <b>%1</b>. Kate AI now works in this folder — "
+             "agent context, checkpoints, MCP servers and completions follow it.", path));
+    applyWorkspaceBannerStyle();
+    m_workspaceBanner->show();
+    m_workspaceBanner->raise();
+    // The same quiet fade as the info bar's transient notices: it announces
+    // the switch, it does not camp on the composer. A later notice replaces
+    // the text, and only the matching text is hidden by an older timer.
+    QTimer::singleShot(12000, this, [thisWeak = QPointer<ChatWidget>(this), path]() {
+        if (thisWeak && thisWeak->m_workspaceBanner && thisWeak->m_workspaceBanner->text().contains(path)) {
+            thisWeak->m_workspaceBanner->hide();
+        }
+    });
+}
+
+void ChatWidget::applyWorkspaceBannerStyle()
+{
+    if (!m_workspaceBanner) {
+        return;
+    }
+    // Informational, not a warning: the accent colour reads as "state
+    // changed", while the info bar's warning tint stays reserved for
+    // retries and errors.
+    const QString colour = ChatTheme::accent();
+    m_workspaceBanner->setStyleSheet(
+        QStringLiteral("QLabel { color: %1; font-size: 12px; font-weight: 600; padding: 8px 12px;"
+                       " background-color: %2; border: 1px solid %3; border-radius: 8px; }")
+            .arg(colour, ChatTheme::tinted(colour, 0.10), ChatTheme::tinted(colour, 0.35)));
+}
+
 void ChatWidget::showInfoMessage(const QString &message, bool isError)
 {
     if (!m_infoBar) {
@@ -2996,6 +3052,7 @@ void ChatWidget::restylePanel()
                 .arg(ChatTheme::windowBg(), ChatTheme::windowBorder()));
     }
     applyInfoBarStyle();
+    applyWorkspaceBannerStyle();
     if (m_composerCard) {
         m_composerCard->setStyleSheet(ChatTheme::composerCard());
     }
@@ -3441,7 +3498,18 @@ void ChatWidget::updateReasoningEffortButton()
 
     QString text;
     QString toolTip;
-    if (m_settings.reasoningEffort.isEmpty()) {
+    if (usesAcpNative(m_settings)) {
+        const QString forced = m_settings.acpEffort.trimmed();
+        if (forced.isEmpty()) {
+            text = i18n("Auto");
+            toolTip = m_acpCurrentEffort.isEmpty()
+                ? i18n("Agent effort level: Auto (agent default)")
+                : i18n("Agent effort level: %1 (agent default)", m_acpCurrentEffort);
+        } else {
+            text = forced;
+            toolTip = i18n("Agent effort level: %1 (forced)", forced);
+        }
+    } else if (m_settings.reasoningEffort.isEmpty()) {
         text = QStringLiteral("Auto");
         toolTip = supports ? i18n("Reasoning effort: Auto (provider default)") : i18n("Reasoning effort: not supported by this model");
     } else if (m_settings.reasoningEffort == u"minimal"_s) {
@@ -3515,6 +3583,14 @@ void ChatWidget::updateReasoningEffortButton()
 
 bool ChatWidget::modelSupportsReasoningEffort() const
 {
+    // A native ACP agent exposes its effort/thought levels as session config
+    // options. Always offer the control: clicking it triggers a fetch when
+    // the levels have not arrived yet, and the menu lists the configured
+    // level even before the session advertises anything.
+    if (usesAcpNative(m_settings)) {
+        return true;
+    }
+
     const QString model = modelFor(m_settings).toLower();
     const Provider provider = m_settings.provider;
 
@@ -3539,7 +3615,23 @@ bool ChatWidget::modelSupportsReasoningEffort() const
 
 void ChatWidget::showReasoningEffortMenu()
 {
-    if (!m_reasoningEffort || !modelSupportsReasoningEffort()) {
+    if (!m_reasoningEffort) {
+        return;
+    }
+    if (usesAcpNative(m_settings)) {
+        // No session yet: start the ACP client so it advertises its effort
+        // levels, then the next click (or the auto-reopen below) shows the
+        // menu. A forced level survives without a session, so only fetch
+        // when nothing is configured either.
+        if (m_acpEfforts.isEmpty() && m_settings.acpEffort.trimmed().isEmpty()) {
+            m_agent.fetchAcpModels();
+            showInfoMessage(i18n("Connecting to agent to get reasoning levels…"), false);
+            return;
+        }
+        showAcpEffortMenu();
+        return;
+    }
+    if (!modelSupportsReasoningEffort()) {
         return;
     }
 
@@ -3561,6 +3653,51 @@ void ChatWidget::showReasoningEffortMenu()
             m_settings.reasoningEffort = effort;
             updateReasoningEffortButton();
             updateModelSelectorLabel();
+            m_agent.setSettings(m_settings);
+            Q_EMIT settingsChanged(m_settings);
+        });
+    }
+
+    menu.exec(m_reasoningEffort->mapToGlobal(QPoint(0, m_reasoningEffort->height() + 2)));
+}
+
+void ChatWidget::showAcpEffortMenu()
+{
+    // The agent's advertised levels are the menu; Auto releases control back
+    // to the agent's own default. A configured level the agent has not (yet)
+    // advertised stays listed so the choice survives an unlisted session.
+    QStringList efforts = m_acpEfforts;
+    const QString forced = m_settings.acpEffort.trimmed();
+    if (!forced.isEmpty() && !efforts.contains(forced)) {
+        efforts.append(forced);
+    }
+
+    QMenu menu(this);
+    menu.setStyleSheet(ChatTheme::menu());
+
+    auto *group = new QActionGroup(this);
+    auto *autoAction = menu.addAction(i18n("Auto (agent default)"));
+    autoAction->setCheckable(true);
+    autoAction->setChecked(forced.isEmpty());
+    group->addAction(autoAction);
+    connect(autoAction, &QAction::triggered, this, [this]() {
+        m_settings.acpEffort.clear();
+        updateReasoningEffortButton();
+        m_agent.setSettings(m_settings);
+        Q_EMIT settingsChanged(m_settings);
+    });
+
+    for (const QString &effort : efforts) {
+        auto *action = menu.addAction(effort);
+        action->setCheckable(true);
+        action->setChecked(forced == effort);
+        group->addAction(action);
+        connect(action, &QAction::triggered, this, [this, effort]() {
+            m_settings.acpEffort = effort;
+            m_acpCurrentEffort = effort;
+            updateReasoningEffortButton();
+            // setSettings pushes the level onto the live session; an agent
+            // without one keeps its own level and gets it at the next start.
             m_agent.setSettings(m_settings);
             Q_EMIT settingsChanged(m_settings);
         });
@@ -5252,6 +5389,9 @@ void ChatWidget::submit()
     if (m_infoBar) {
         m_infoBar->hide();
     }
+    if (m_workspaceBanner) {
+        m_workspaceBanner->hide();
+    }
 
     // Start the live counters for this turn.
     m_completedToolCount = 0;
@@ -6344,6 +6484,9 @@ void ChatWidget::newChat()
     m_editTracker->clear();
     if (m_infoBar) {
         m_infoBar->hide();
+    }
+    if (m_workspaceBanner) {
+        m_workspaceBanner->hide();
     }
 
     // Allocate a fresh conversation ID.  The new conversation will only be
