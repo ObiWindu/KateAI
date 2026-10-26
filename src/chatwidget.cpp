@@ -4763,33 +4763,28 @@ void ChatWidget::showSettingsMenu()
     auto *acpMenu = menu.addMenu(i18n("ACP Agent"));
     acpMenu->setStyleSheet(menu.styleSheet());
 
-    // Agent selection
-    const QStringList acpAgentIds = {u"grok-build"_s, u"claude-acp"_s, u"codex-acp"_s, u"gemini"_s, u"mistral-vibe"_s, u"mcode"_s, u"custom"_s};
-    const QStringList acpAgentLabels = {
-        i18n("Grok Build"),
-        i18n("Claude Agent"),
-        i18n("Codex"),
-        i18n("Gemini CLI"),
-        i18n("Mistral Vibe"),
-        i18n("MiniMax Code"),
-        i18n("Custom…")
-    };
+    // Agent selection. Installed registry agents (OpenCode V2, Kilo, …) are not
+    // presets, so take them from the same list the settings page offers; a menu
+    // built only from presets left the running agent unlisted and unswitchable.
+    const QList<AcpAgentPreset> acpAgents = acpAgentChoices(m_settings);
 
-    for (int i = 0; i < acpAgentIds.size(); ++i) {
-        auto *action = acpMenu->addAction(acpAgentLabels[i]);
-        action->setData(acpAgentIds[i]);
+    for (const AcpAgentPreset &preset : acpAgents) {
+        auto *action = acpMenu->addAction(preset.label);
+        action->setData(preset.id);
         action->setCheckable(true);
-        action->setChecked(m_settings.acpAgentId == acpAgentIds[i]);
-        connect(action, &QAction::triggered, this, [this, id = acpAgentIds[i], &menu]() {
+        action->setChecked(m_settings.acpAgentId == preset.id);
+        connect(action, &QAction::triggered, this, [this, id = preset.id, &menu]() {
             m_settings.acpAgentId = id;
             m_settings.provider = Provider::Acp;
             m_preferredProvider = Provider::Acp;
-            // Update command, args, and env from preset
-            const AcpAgentPreset preset = acpAgentPreset(id);
-            if (preset.id != u"custom"_s) {
-                m_settings.acpCommand = preset.command;
-                m_settings.acpArgs = preset.args;
-                m_settings.acpApiKeyEnv = preset.apiKeyEnv;
+            // Update command, args, and env from the registry entry or preset.
+            // An empty command means the agent is unknown to both, so the typed
+            // launch line is left alone.
+            const AcpAgentPreset launch = acpAgentLaunchLine(m_settings, id);
+            if (!launch.command.isEmpty()) {
+                m_settings.acpCommand = launch.command;
+                m_settings.acpArgs = launch.args;
+                m_settings.acpApiKeyEnv = launch.apiKeyEnv;
             }
             m_agent.setSettings(m_settings);
             Q_EMIT settingsChanged(m_settings);

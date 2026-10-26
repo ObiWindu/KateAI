@@ -453,6 +453,14 @@ struct AcpAgentPreset {
 
 QList<AcpAgentPreset> acpAgentPresets();
 AcpAgentPreset acpAgentPreset(const QString &id);
+// Everything selectable in the ACP Agent combo: the built-in presets followed by
+// agents installed from the ACP registry, then Custom last. An installed agent
+// whose id also exists as a preset keeps the preset entry.
+QList<AcpAgentPreset> acpAgentChoices(const Settings &settings);
+// Launch line for an agent: the registry entry when it is installed, otherwise
+// the matching preset. Agents known to neither return an empty command/args so
+// the user's typed values are left alone.
+AcpAgentPreset acpAgentLaunchLine(const Settings &settings, const QString &agentId);
 QString acpAgentDisplayName(const Settings &settings);
 QString acpEffectiveCommand(const Settings &settings);
 QString acpEffectiveArgs(const Settings &settings);

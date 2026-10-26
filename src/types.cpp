@@ -979,13 +979,87 @@ AcpAgentPreset acpAgentPreset(const QString &id)
     return {u"custom"_s, i18n("Custom"), {}, {}, {}};
 }
 
+QList<AcpAgentPreset> acpAgentChoices(const Settings &settings)
+{
+    const QList<AcpAgentPreset> presets = acpAgentPresets();
+    const QJsonArray installed =
+        QJsonDocument::fromJson(settings.acpInstalledAgents.toUtf8()).array();
+
+    QList<AcpAgentPreset> choices;
+    choices.reserve(presets.size() + installed.size());
+    // Agents installed from the ACP registry sit above the Custom escape hatch,
+    // which stays last so the typed launch line is never the default pick.
+    qsizetype customIndex = presets.size();
+    for (qsizetype i = 0; i < presets.size(); ++i) {
+        if (presets.at(i).id == u"custom"_s) {
+            customIndex = i;
+            break;
+        }
+        choices.append(presets.at(i));
+    }
+    for (const QJsonValue &value : installed) {
+        const QJsonObject agent = value.toObject();
+        const QString id = agent.value(u"id"_s).toString().trimmed();
+        if (id.isEmpty()) {
+            continue;
+        }
+        bool known = false;
+        for (const AcpAgentPreset &choice : choices) {
+            if (choice.id == id) {
+                known = true;
+                break;
+            }
+        }
+        // An installed agent that is also a preset keeps the preset entry: its
+        // label is localized and its launch line matches the upstream one.
+        if (known) {
+            continue;
+        }
+        QString label = agent.value(u"name"_s).toString().trimmed();
+        choices.append({id, label.isEmpty() ? id : label, {}, {}, {}});
+    }
+    for (qsizetype i = customIndex; i < presets.size(); ++i) {
+        choices.append(presets.at(i));
+    }
+    return choices;
+}
+
+AcpAgentPreset acpAgentLaunchLine(const Settings &settings, const QString &agentId)
+{
+    const QJsonArray installed =
+        QJsonDocument::fromJson(settings.acpInstalledAgents.toUtf8()).array();
+    for (const QJsonValue &value : installed) {
+        const QJsonObject agent = value.toObject();
+        if (agent.value(u"id"_s).toString() != agentId) {
+            continue;
+        }
+        QStringList args;
+        for (const QJsonValue &arg : agent.value(u"args"_s).toArray()) {
+            args.append(arg.toString());
+        }
+        QString label = agent.value(u"name"_s).toString().trimmed();
+        return {agentId, label.isEmpty() ? agentId : label,
+                agent.value(u"command"_s).toString(),
+                args.join(u' '),
+                agent.value(u"apiKeyEnv"_s).toString()};
+    }
+    AcpAgentPreset preset = acpAgentPreset(agentId);
+    if (preset.id == u"custom"_s) {
+        // Neither the registry nor the presets know this agent: it is a Custom
+        // one whose launch line the user typed. Callers key off the empty
+        // command, which means "do not overwrite the launch fields".
+        return {agentId, {}, {}, {}, {}};
+    }
+    return preset;
+}
+
 QString acpEffectiveCommand(const Settings &settings)
 {
     const QString command = settings.acpCommand.trimmed();
     if (!command.isEmpty()) {
         return command;
     }
-    return acpAgentPreset(settings.acpAgentId).command;
+    return acpAgentLaunchLine(settings, settings.acpAgentId).command;
 }
 
 QString acpEffectiveArgs(const Settings &settings)
@@ -994,7 +1068,7 @@ QString acpEffectiveArgs(const Settings &settings)
     if (!args.isEmpty()) {
         return args;
     }
-    return acpAgentPreset(settings.acpAgentId).args;
+    return acpAgentLaunchLine(settings, settings.acpAgentId).args;
 }
 
 QString acpEffectiveApiKeyEnv(const Settings &settings)
@@ -1003,7 +1077,7 @@ QString acpEffectiveApiKeyEnv(const Settings &settings)
     if (!env.isEmpty()) {
         return env;
     }
-    return acpAgentPreset(settings.acpAgentId).apiKeyEnv;
+    return acpAgentLaunchLine(settings, settings.acpAgentId).apiKeyEnv;
 }
 
 bool acpAgentIsGrok(const Settings &settings)

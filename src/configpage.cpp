@@ -169,7 +169,7 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     m_acpUrl = new QLineEdit(this);
     m_acpUrl->setPlaceholderText(u"http://localhost:8080"_s);
     m_acpAgent = new QComboBox(this);
-    for (const AcpAgentPreset &preset : acpAgentPresets()) {
+    for (const AcpAgentPreset &preset : acpAgentChoices(m_plugin->settings())) {
         m_acpAgent->addItem(preset.label, preset.id);
     }
     m_acpCommand = new QLineEdit(this);
@@ -408,6 +408,7 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
                 Settings settings = m_plugin->settings();
                 settings.acpInstalledAgents = QString::fromUtf8(QJsonDocument(agents).toJson(QJsonDocument::Compact));
                 m_plugin->setSettings(settings);
+                refreshAcpAgentCombo();
                 m_acpRegistryStatus->setText(i18n("Installed %1. Select it under ACP in the model selector.", agent.value(u"name"_s).toString()));
                 showRegistryResults(m_acpRegistrySearch->text());
                 process->deleteLater();
@@ -432,6 +433,7 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
                 Settings settings = m_plugin->settings();
                 settings.acpInstalledAgents = QString::fromUtf8(QJsonDocument(agents).toJson(QJsonDocument::Compact));
                 m_plugin->setSettings(settings);
+                refreshAcpAgentCombo();
                 m_acpRegistryStatus->setText(i18n("Installed %1. Select it under ACP in the model selector.", agent.value(u"name"_s).toString()));
                 showRegistryResults(m_acpRegistrySearch->text());
                 installer->deleteLater();
@@ -494,6 +496,7 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
         agentModels.remove(agentId);
         settings.acpAgentModels = QString::fromUtf8(QJsonDocument(agentModels).toJson(QJsonDocument::Compact));
         m_plugin->setSettings(settings);
+        refreshAcpAgentCombo();
         m_acpRegistryStatus->setText(i18n("Uninstalled %1.", name));
         showRegistryResults(m_acpRegistrySearch->text());
     });
@@ -1937,6 +1940,22 @@ void KateAiConfigPage::reset()
     {
         const QSignalBlocker blockAgent(m_acpAgent);
         int agentIndex = m_acpAgent->findData(s.acpAgentId);
+        if (agentIndex < 0 && !s.acpAgentId.isEmpty()) {
+            // An agent the combo does not know (installed from the registry in
+            // another session, or removed since). Keep it selected and keep its
+            // id: falling back to "custom" here silently rewrote the setting on
+            // the next Apply and left the model combo showing another agent's
+            // cached list.
+            QString label = s.acpAgentId;
+            for (const AcpAgentPreset &preset : acpAgentChoices(s)) {
+                if (preset.id == s.acpAgentId) {
+                    label = preset.label;
+                    break;
+                }
+            }
+            m_acpAgent->insertItem(m_acpAgent->count(), label, s.acpAgentId);
+            agentIndex = m_acpAgent->count() - 1;
+        }
         if (agentIndex < 0) {
             agentIndex = m_acpAgent->findData(u"custom"_s);
         }
@@ -2192,10 +2211,45 @@ void KateAiConfigPage::defaults()
     reset();
 }
 
+void KateAiConfigPage::refreshAcpAgentCombo()
+{
+    if (!m_acpAgent) {
+        return;
+    }
+    // Repopulating fires currentIndexChanged, which would push the preset's
+    // launch line into the command fields and lose whatever the user typed.
+    const QSignalBlocker blockAgent(m_acpAgent);
+    const QString selectedId = m_acpAgent->currentData().toString();
+    const QString selectedCommand = m_acpCommand ? m_acpCommand->text() : QString();
+
+    m_acpAgent->clear();
+    for (const AcpAgentPreset &preset : acpAgentChoices(m_plugin->settings())) {
+        m_acpAgent->addItem(preset.label, preset.id);
+    }
+    int index = m_acpAgent->findData(selectedId);
+    if (index < 0 && !selectedId.isEmpty()) {
+        // Uninstalled under our feet, or typed by an older Kate: keep the id
+        // instead of silently switching the page to another agent.
+        m_acpAgent->addItem(selectedId, selectedId);
+        index = m_acpAgent->count() - 1;
+    }
+    if (index >= 0) {
+        m_acpAgent->setCurrentIndex(index);
+    }
+    if (m_acpCommand && m_acpCommand->text() != selectedCommand) {
+        m_acpCommand->setText(selectedCommand);
+    }
+}
+
 void KateAiConfigPage::applySelectedAcpPreset()
 {
-    const AcpAgentPreset preset = acpAgentPreset(m_acpAgent->currentData().toString());
-    if (preset.id == u"custom"_s) {
+    const QString agentId = m_acpAgent->currentData().toString();
+    // Registry-installed agents are not presets, so ask for the launch line by
+    // id: the registry entry wins, the preset is the fallback. An empty command
+    // means nothing is known about this agent (Custom) and the typed values are
+    // left untouched.
+    const AcpAgentPreset preset = acpAgentLaunchLine(m_plugin->settings(), agentId);
+    if (preset.command.isEmpty()) {
         m_acpCommand->setPlaceholderText(i18n("agent binary or npx"));
         m_acpArgs->setPlaceholderText(i18n("stdio / --acp / acp"));
         m_acpApiKeyEnv->setPlaceholderText(i18n("optional env var for the API key"));
@@ -2208,7 +2262,7 @@ void KateAiConfigPage::applySelectedAcpPreset()
     m_acpCommand->setPlaceholderText(preset.command);
     m_acpArgs->setPlaceholderText(preset.args);
     m_acpApiKeyEnv->setPlaceholderText(preset.apiKeyEnv);
-    if (preset.id == u"codex-acp"_s) {
+    if (agentId == u"codex-acp"_s) {
         m_acpKey->setPlaceholderText(i18n("Optional — uses ChatGPT sign-in when empty"));
     } else {
         m_acpKey->setPlaceholderText(preset.apiKeyEnv.isEmpty()

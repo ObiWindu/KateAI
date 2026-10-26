@@ -61,7 +61,9 @@ Settings SettingsStore::load()
     }
     s.acpApiKeyEnv = g.readEntry(u"AcpApiKeyEnv"_s, QString());
     if (s.acpApiKeyEnv.trimmed().isEmpty()) {
-        s.acpApiKeyEnv = acpAgentPreset(s.acpAgentId).apiKeyEnv;
+        // acpInstalledAgents is read above, so an installed agent's own
+        // apiKeyEnv is available here.
+        s.acpApiKeyEnv = acpAgentLaunchLine(s, s.acpAgentId).apiKeyEnv;
     }
     s.apiFormat = apiFormatFromId(g.readEntry(u"ApiFormat"_s, apiFormatId(ApiFormat::AcpNative)));
     s.permissionMode = permissionModeFromId(g.readEntry(u"PermissionMode"_s, permissionModeId(PermissionMode::Ask)));
