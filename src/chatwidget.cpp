@@ -830,6 +830,10 @@ ChatWidget::ChatWidget(QWidget *parent)
 
     // Agent signals
     connect(&m_agent, &AgentLoop::userMessage, this, [this](const QString &text) {
+        // Keep the transcript append-only across turns. If a prior response
+        // still has a live card for any reason (for example, an abort raced a
+        // coalesced render), finalize it before placing the next user's card.
+        freezeStreaming();
         addUserMessage(text);
         saveCurrentConversation();
     });
@@ -6321,7 +6325,11 @@ void ChatWidget::showConversationHistory()
         connect(clearAllAction, &QAction::triggered, this, [this]() {
             SessionStore::clearAllConversations();
             m_currentConversationId.clear();
-            newChat();
+            // Clear All means the current transcript must not be saved again
+            // while starting the replacement conversation. Otherwise a quit
+            // immediately after this action can repopulate the history that
+            // was just deleted.
+            resetForNewChat(false);
         });
     }
 
@@ -6362,6 +6370,9 @@ void ChatWidget::switchToConversation(const QString &conversationId)
     // Load the new conversation
     const auto sessionData = SessionStore::loadConversation(conversationId);
     m_agent.restoreSession(sessionData);
+    if (!sessionData.workspace.isEmpty()) {
+        Q_EMIT conversationWorkspaceRequested(sessionData.workspace);
+    }
     // Pending edits belong to the turn that produced them. Carrying them into a
     // different conversation meant "Reject All" could revert files that thread
     // never touched, on the strength of a decision made about another one.
@@ -6455,6 +6466,11 @@ bool ChatWidget::rejectPendingEdits(const QString &path)
 // Create a new blank conversation and reset the chat UI.
 void ChatWidget::newChat()
 {
+    resetForNewChat(true);
+}
+
+void ChatWidget::resetForNewChat(bool saveCurrentConversation)
+{
     if (m_sessionSaveTimer) {
         m_sessionSaveTimer->stop();
     }
@@ -6462,7 +6478,7 @@ void ChatWidget::newChat()
     m_agent.abort();
 
     // Save the current conversation before clearing so it remains in history.
-    if (!m_agent.messages().isEmpty()) {
+    if (saveCurrentConversation && !m_agent.messages().isEmpty()) {
         const auto sessionData = m_agent.sessionData();
         if (!sessionData.messages.isEmpty()) {
             // Allocate an ID if we somehow still don't have one.
@@ -6499,6 +6515,7 @@ void ChatWidget::newChat()
     // registered in the history list once saveConversation() is called with
     // real messages, so no empty ghost entry appears immediately.
     m_currentConversationId = SessionStore::createNewConversation();
+    Q_EMIT conversationChanged(m_currentConversationId);
 
     // Update history button to reflect any newly saved previous conversation.
     m_historyCount = -1;

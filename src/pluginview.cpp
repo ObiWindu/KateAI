@@ -32,6 +32,7 @@
 #include <QDialogButtonBox>
 #include <QDir>
 #include <QEvent>
+#include <QFileInfo>
 #include <QIcon>
 #include <QKeySequence>
 #include <QLayout>
@@ -211,6 +212,22 @@ namespace KateAi
         if (m_chat) {
             connect(m_chat, &ChatWidget::settingsChanged, plugin, &KateAiPlugin::setSettings);
             connect(m_chat, &ChatWidget::configureRequested, this, &KateAiView::showConfiguration);
+            connect(m_chat, &ChatWidget::conversationWorkspaceRequested, this, [this](const QString &workspace) {
+                if (workspace.trimmed().isEmpty() || !m_mainWindow) {
+                    return;
+                }
+                const QString folder = QDir::cleanPath(workspace);
+                if (!QFileInfo(folder).isDir()) {
+                    return;
+                }
+
+                // Opening a folder through Kate's document API lets the
+                // Projects plugin select the matching project. Apply the
+                // workspace explicitly as well, so KateAI follows history
+                // even when the project plugin is unavailable.
+                m_mainWindow->openUrl(QUrl::fromLocalFile(folder));
+                refreshWorkspace(folder);
+            });
             connect(m_chat, &ChatWidget::openFileAtLineRequested, this, &KateAiView::openFileAtLine);
             connect(m_chat, &ChatWidget::aboutToSubmit, this, [this]() {
                 // A new turn starts: edits the bridge left unsaved in earlier

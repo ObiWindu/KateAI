@@ -2922,6 +2922,7 @@ SessionStore::SessionData AgentLoop::sessionData() const
     data.modelRequests = m_modelRequests;
     data.toolCalls = m_toolCalls;
     data.acpSessionId = m_acp.sessionId();
+    data.workspace = m_workspace;
     return data;
 }
 
