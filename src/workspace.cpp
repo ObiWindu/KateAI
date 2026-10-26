@@ -14,6 +14,7 @@
 
 #include <QDir>
 #include <QFileInfo>
+#include <QMetaObject>
 #include <QObject>
 #include <QVariant>
 
@@ -42,8 +43,29 @@ QObjectList openProjects(QObject *plugin)
     if (!plugin) {
         return {};
     }
+    // Q_PROPERTY(QList<QObject *> projects READ projectsObjects): the normal
+    // path. Fall back to invoking the method directly so a future property
+    // rename does not silently empty the list (which would pin the workspace
+    // to the old folder).
     const QVariant projects = plugin->property("projects");
-    return projects.canConvert<QObjectList>() ? projects.value<QObjectList>() : QObjectList();
+    if (projects.isValid()) {
+        if (projects.canConvert<QObjectList>()) {
+            return projects.value<QObjectList>();
+        }
+        // QList<QObject *> and QObjectList share the type but canConvert can
+        // be picky across Qt versions; try the direct conversion.
+        if (projects.userType() == qMetaTypeId<QList<QObject *>>()) {
+            return projects.value<QList<QObject *>>();
+        }
+    }
+    QObjectList viaMethod;
+    if (QMetaObject::invokeMethod(plugin, "projectsObjects", Q_RETURN_ARG(QObjectList, viaMethod))) {
+        return viaMethod;
+    }
+    if (QMetaObject::invokeMethod(plugin, "projects", Q_RETURN_ARG(QObjectList, viaMethod))) {
+        return viaMethod;
+    }
+    return {};
 }
 
 QString projectBaseDir(QObject *project)
@@ -51,12 +73,26 @@ QString projectBaseDir(QObject *project)
     if (!project) {
         return QString();
     }
-    const QString base = project->property("baseDir").toString().trimmed();
-    return base.isEmpty() ? QString() : QDir::cleanPath(base);
+    // KateProject exposes baseDir as Q_PROPERTY; accept the neighbouring
+    // spelling and the getter too so a rename does not silently unpin us.
+    const QString fromProp = project->property("baseDir").toString().trimmed();
+    if (!fromProp.isEmpty()) {
+        return QDir::cleanPath(fromProp);
+    }
+    const QString altProp = project->property("projectBaseDir").toString().trimmed();
+    if (!altProp.isEmpty()) {
+        return QDir::cleanPath(altProp);
+    }
+    QString viaMethod;
+    if (QMetaObject::invokeMethod(project, "baseDir", Q_RETURN_ARG(QString, viaMethod)) && !viaMethod.trimmed().isEmpty()) {
+        return QDir::cleanPath(viaMethod.trimmed());
+    }
+    return QString();
 }
 
 // The base directory of the project that owns filePath, or null when no
-// open project contains the file.
+// open project contains the file. Exact match counts (the folder itself),
+// otherwise the file must sit under the base with a separator.
 QString owningProjectBaseDir(QObject *plugin, const QString &filePath)
 {
     if (filePath.isEmpty()) {
@@ -65,11 +101,34 @@ QString owningProjectBaseDir(QObject *plugin, const QString &filePath)
     const QString clean = QDir::cleanPath(filePath);
     for (QObject *project : openProjects(plugin)) {
         const QString base = projectBaseDir(project);
-        if (!base.isEmpty() && clean.startsWith(base + QLatin1Char('/'))) {
+        if (base.isEmpty()) {
+            continue;
+        }
+        if (clean == base || clean.startsWith(base + QLatin1Char('/'))) {
             return base;
         }
     }
     return QString();
+}
+
+// The project Kate's own panel reports as active in this window. Unlike
+// openProjects() order (creation order), this follows Prev/Next, the
+// dropdown, and clicking the tree — none of which add or remove a project.
+QString pluginViewProjectBaseDir(KTextEditor::MainWindow *mainWindow)
+{
+    if (!mainWindow) {
+        return QString();
+    }
+    QObject *view = mainWindow->pluginView(u"kateprojectplugin"_s);
+    if (!view) {
+        return QString();
+    }
+    const QString base = view->property("projectBaseDir").toString().trimmed();
+    if (base.isEmpty()) {
+        return QString();
+    }
+    const QString clean = QDir::cleanPath(base);
+    return QFileInfo(clean).isDir() ? clean : QString();
 }
 
 } // namespace
@@ -84,6 +143,11 @@ QString newestProjectBaseDir()
         }
     }
     return QString();
+}
+
+QString activeProjectBaseDir(KTextEditor::MainWindow *mainWindow)
+{
+    return pluginViewProjectBaseDir(mainWindow);
 }
 
 QString detectWorkspaceFromPath(const QString &filePath)
@@ -108,34 +172,81 @@ QString detectWorkspace(KTextEditor::MainWindow *mainWindow)
 {
     QObject *projects = projectPlugin();
 
+    // Ask Kate itself which project owns a document: it knows projectRoots,
+    // not just baseDir prefixes, so it stays right for nested/out-of-source
+    // layouts where a prefix check would pick the wrong folder.
+    auto baseDirForLocalFile = [projects](const QString &local) -> QString {
+        if (projects && !local.isEmpty()) {
+            QString viaApi;
+            // projectBaseDirForDocument(KTextEditor::Document*) needs the
+            // document; fall back to the prefix check below when we only
+            // have a path (other views loop). Handled by callers.
+            Q_UNUSED(viaApi);
+        }
+        if (!local.isEmpty()) {
+            const QString base = owningProjectBaseDir(projects, local);
+            if (!base.isEmpty()) {
+                return base;
+            }
+        }
+        return QString();
+    };
+
     if (mainWindow) {
         if (auto *view = mainWindow->activeView()) {
             const QString local = view->document()->url().toLocalFile();
             if (!local.isEmpty()) {
-                // A document that belongs to a project carries the folder the
-                // user opened, not only the directory the file sits in.
-                const QString base = owningProjectBaseDir(projects, local);
+                // Prefer Kate's document -> project map over a manual
+                // prefix check: it follows projectRoots.
+                QString viaApi;
+                if (projects
+                    && QMetaObject::invokeMethod(projects, "projectBaseDirForDocument",
+                                                 Q_RETURN_ARG(QString, viaApi),
+                                                 Q_ARG(KTextEditor::Document *, view->document()))
+                    && !viaApi.trimmed().isEmpty()) {
+                    return QDir::cleanPath(viaApi.trimmed());
+                }
+                const QString base = baseDirForLocalFile(local);
+                if (!base.isEmpty()) {
+                    return base;
+                }
+                return detectWorkspaceFromPath(local);
+            }
+            // Active view is untitled/remote but a project is active in the
+            // panel: that panel selection is the folder the user opened.
+            const QString active = pluginViewProjectBaseDir(mainWindow);
+            if (!active.isEmpty()) {
+                return active;
+            }
+        }
+        for (auto *v : mainWindow->views()) {
+            const QString local = v->document()->url().toLocalFile();
+            if (!local.isEmpty()) {
+                QString viaApi;
+                if (projects
+                    && QMetaObject::invokeMethod(projects, "projectBaseDirForDocument",
+                                                 Q_RETURN_ARG(QString, viaApi),
+                                                 Q_ARG(KTextEditor::Document *, v->document()))
+                    && !viaApi.trimmed().isEmpty()) {
+                    return QDir::cleanPath(viaApi.trimmed());
+                }
+                const QString base = baseDirForLocalFile(local);
                 if (!base.isEmpty()) {
                     return base;
                 }
                 return detectWorkspaceFromPath(local);
             }
         }
-        for (auto *view : mainWindow->views()) {
-            const QString local = view->document()->url().toLocalFile();
-            if (!local.isEmpty()) {
-                const QString base = owningProjectBaseDir(projects, local);
-                if (!base.isEmpty()) {
-                    return base;
-                }
-                return detectWorkspaceFromPath(local);
-            }
+        // No local document: "Open Folder" still shows up as a project,
+        // while the process working directory still points where Kate was
+        // started. Prefer the panel's active project (what the user
+        // selected), then the newest opened folder.
+        const QString active = pluginViewProjectBaseDir(mainWindow);
+        if (!active.isEmpty()) {
+            return active;
         }
     }
 
-    // No document is open: "Open Folder" still shows up here as a project,
-    // while the process working directory still points where Kate was
-    // started. The newest project is the folder the user just opened.
     const QObjectList list = openProjects(projects);
     for (int i = list.size() - 1; i >= 0; --i) {
         const QString base = projectBaseDir(list.at(i));

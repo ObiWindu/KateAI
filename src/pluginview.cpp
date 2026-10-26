@@ -19,6 +19,7 @@
 #include <KLocalizedString>
 #include <KSharedConfig>
 #include <KSyntaxHighlighting/Theme>
+#include <KTextEditor/Application>
 #include <KTextEditor/Document>
 #include <KTextEditor/Editor>
 #include <KTextEditor/Message>
@@ -276,16 +277,15 @@ namespace KateAi
         }
         // Opening a folder does not have to touch any editor view: the
         // active document can stay in the old folder while Kate loads the
-        // new one as a project. The project plugin signals that event. The
-        // connect is string-based because the plugin's class is not part of
-        // the public KTextEditor API; its signals are, and a Kate without
-        // them just leaves the connect unused. Kate restores the session's
+        // new one as a project, and switching the active project in the
+        // Projects panel (dropdown, Prev/Next, clicking the tree) touches
+        // neither the project list nor any editor view. Both have to move
+        // the workspace. The project plugin's class is not part of the
+        // public KTextEditor API; its signals are, and a Kate without them
+        // just leaves the connects unused. Kate restores the session's
         // projects the same way at startup — the view age keeps that first
         // wave of changes quiet.
-        if (auto *projects = projectPlugin()) {
-            connect(projects, SIGNAL(projectAdded(QObject *)), this, SLOT(projectListChanged()));
-            connect(projects, SIGNAL(projectRemoved(QObject *)), this, SLOT(projectListChanged()));
-        }
+        connectProjectSignals();
         // Follow the document set: Save-As has to rename the review queue,
         // a close while the agent works needs a notice, and new documents
         // change the completion words.
@@ -785,16 +785,97 @@ namespace KateAi
         }
     }
 
+    void KateAiView::connectProjectSignals()
+    {
+        // Plugin add/remove: a folder was opened or closed.
+        if (auto *projects = projectPlugin()) {
+            connect(projects, SIGNAL(projectAdded(QObject *)), this, SLOT(projectListChanged()));
+            connect(projects, SIGNAL(projectRemoved(QObject *)), this, SLOT(projectListChanged()));
+            // projectCreated is the canonical signal; projectAdded is only
+            // forwarded to it, so listen to both. The type name must match
+            // the Kate header (KateProject*) for the string connect to bind.
+            connect(projects, SIGNAL(projectCreated(KateProject *)), this, SLOT(projectListChanged()));
+        }
+        // Panel activation: the user switched which open folder is current
+        // (dropdown, Prev/Next, clicking the tree). Emitted by the
+        // per-window plugin view, not the plugin.
+        if (m_mainWindow) {
+            if (QObject *panel = m_mainWindow->pluginView(u"kateprojectplugin"_s)) {
+                connect(panel, SIGNAL(pluginProjectAdded(QString, QString)), this, SLOT(projectActiveChanged()));
+                connect(panel, SIGNAL(pluginProjectRemoved(QString, QString)), this, SLOT(projectActiveChanged()));
+                connect(panel, SIGNAL(projectMapChanged()), this, SLOT(projectActiveChanged()));
+                connect(panel, SIGNAL(projectFileNameChanged()), this, SLOT(projectActiveChanged()));
+                connect(panel, SIGNAL(projectFilesChanged()), this, SLOT(projectActiveChanged()));
+            }
+            // The project plugin (or its view) can load after this view:
+            // hook up and re-evaluate as soon as it appears.
+            connect(m_mainWindow, &KTextEditor::MainWindow::pluginViewCreated, this,
+                    [this](const QString &name, QObject *pluginView) {
+                        if (name == u"kateprojectplugin"_s) {
+                            connect(pluginView, SIGNAL(pluginProjectAdded(QString, QString)), this, SLOT(projectActiveChanged()));
+                            connect(pluginView, SIGNAL(pluginProjectRemoved(QString, QString)), this, SLOT(projectActiveChanged()));
+                            connect(pluginView, SIGNAL(projectMapChanged()), this, SLOT(projectActiveChanged()));
+                            connect(pluginView, SIGNAL(projectFileNameChanged()), this, SLOT(projectActiveChanged()));
+                            connect(pluginView, SIGNAL(projectFilesChanged()), this, SLOT(projectActiveChanged()));
+                            projectActiveChanged();
+                        }
+                    },
+                    Qt::UniqueConnection);
+        }
+        // Same late-load race at application level: the plugin object itself
+        // may not exist yet when this view is created. Only react to the
+        // project plugin; any other plugin load leaves the folder alone.
+        if (auto *editor = KTextEditor::Editor::instance()) {
+            if (auto *app = editor->application()) {
+                QObject::connect(app, &KTextEditor::Application::pluginCreated, this,
+                                 [this](const QString &name, KTextEditor::Plugin *) {
+                                     onPluginCreated(name);
+                                 });
+            }
+        }
+    }
+
+    void KateAiView::onPluginCreated(const QString &name)
+    {
+        if (name != u"kateprojectplugin"_s) {
+            return;
+        }
+        // The plugin arrived late: (re)hook its signals, then follow the
+        // folder it brings.
+        connectProjectSignals();
+        projectListChanged();
+    }
+
     void KateAiView::projectListChanged()
     {
         // A folder was opened or closed. detectWorkspace() prefers the
         // active document's project, which still points at the previous
         // folder when the user opens a new one without switching documents.
-        // The newest project is the folder the user just opened, so follow
-        // it directly instead of letting the active document veto the switch.
+        // The panel's active folder (falling back to the newest project) is
+        // the folder the user just opened, so follow it directly instead of
+        // letting the active document veto the switch.
+        const QString active = activeProjectBaseDir(m_mainWindow);
+        if (!active.isEmpty()) {
+            refreshWorkspace(active);
+            return;
+        }
         const QString newest = newestProjectBaseDir();
         if (!newest.isEmpty()) {
             refreshWorkspace(newest);
+        } else {
+            refreshWorkspace();
+        }
+    }
+
+    void KateAiView::projectActiveChanged()
+    {
+        // Same explicit override as projectListChanged(): the panel's active
+        // folder wins over the still-open document from the previous folder.
+        // Without the override detectWorkspace() would keep returning the
+        // old document's project and the switch would never be seen.
+        const QString active = activeProjectBaseDir(m_mainWindow);
+        if (!active.isEmpty()) {
+            refreshWorkspace(active);
         } else {
             refreshWorkspace();
         }

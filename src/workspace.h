@@ -30,6 +30,12 @@ QObject *projectPlugin();
 // view still points at a file from the previous folder.
 QString newestProjectBaseDir();
 
+// The project the Projects panel has active in this window (the folder the
+// user selected there). This is the "current opened folder" even when the
+// active editor view still shows a file from another folder, so activation
+// changes (dropdown, Prev/Next, clicking the tree) must follow it.
+QString activeProjectBaseDir(KTextEditor::MainWindow *mainWindow);
+
 QString detectWorkspace(KTextEditor::MainWindow *mainWindow);
 QString detectWorkspaceFromPath(const QString &filePath);
 

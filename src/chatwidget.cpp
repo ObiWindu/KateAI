@@ -1241,6 +1241,11 @@ ChatWidget::ChatWidget(QWidget *parent)
         // A turn that ended with a question still on screen (abort, budget stop)
         // must not leave it docked: nothing can answer it now.
         clearQuestionCards();
+        // The dock lost contents without a dock-aware call above: a cleared
+        // question, and approval rows hidden together with the cards that
+        // carried them. Recompute, or the strip stays on screen over the
+        // composer with nothing in it -- the first thing the next prompt sees.
+        updateIntentDockVisibility();
         // Refresh the context readout at the end of a turn: during one it would
         // recompute an estimate over a history that is still growing, and the
         // number the user acts on is the one for the next request.
@@ -2865,6 +2870,11 @@ void ChatWidget::retireIntentWidget(QWidget *widget, QWidget *anchor)
     } else {
         appendTranscriptWidget(widget);
     }
+    // insertWidget() reparents, and reparenting hides: a card that was docked
+    // while the dock itself was on its way out would otherwise land in the
+    // transcript flagged hidden and never paint there. It is part of the
+    // thread now, so show it explicitly.
+    widget->show();
     updateIntentDockVisibility();
 }
 
@@ -5141,27 +5151,40 @@ void ChatWidget::clearQuestionCards()
         if (m_intentDockLayout) {
             m_intentDockLayout->removeWidget(card);
         }
+        // removeWidget() only unregisters the card: it stays a visible child
+        // of the dock until deleteLater() runs, so a stale question would keep
+        // painting over the composer in the meantime. Hide it as it goes.
+        card->hide();
         card->deleteLater();
     }
     m_questionWidgets.clear();
     m_questionOrder.clear();
+    updateIntentDockVisibility();
 }
 
 void ChatWidget::markRunningSubtasksAbandoned()
 {
-    // A turn can end with sub-agents still in flight (abort, budget stop).
-    // Their cards must not be left showing a running spinner forever.
+    // A turn can end with sub-agents still in flight (abort, budget stop, the
+    // cancel-all action). Their cards must not be left showing a running
+    // spinner forever.
+    //
+    // The cards are the record, not the loop: abort() tears every sub-agent
+    // down *before* it emits turnFinished, so asking the agent which ones are
+    // still running always answers "none" -- which is how a stop used to leave
+    // every docked card pinned above the composer, spinning, for the rest of
+    // the session while the next prompt typed underneath it.
     bool changed = false;
-    const QStringList ids = m_agent.runningSubtaskIds();
-    for (const QString &taskId : ids) {
-        if (auto *widget = m_subtaskWidgets.value(taskId)) {
-            widget->markAbandoned(i18n("Stopped when the turn ended."));
-            // Abandoned means over; the card belongs back in the transcript --
-            // where the sub-agent started, so a stop does not shuffle the
-            // transcript's time order.
-            retireIntentWidget(widget, m_subtaskAnchors.take(taskId));
-            changed = true;
+    const QList<QPointer<SubtaskWidget>> cards = m_subtaskOrder;
+    for (const QPointer<SubtaskWidget> &card : cards) {
+        if (!card || !card->isRunning()) {
+            continue;
         }
+        card->markAbandoned(i18n("Stopped when the turn ended."));
+        // Abandoned means over; the card belongs back in the transcript --
+        // where the sub-agent started, so a stop does not shuffle the
+        // transcript's time order.
+        retireIntentWidget(card.data(), m_subtaskAnchors.take(card->taskId()));
+        changed = true;
     }
     if (changed) {
         updateTeamButton();

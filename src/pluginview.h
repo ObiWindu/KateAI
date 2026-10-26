@@ -57,6 +57,15 @@ private Q_SLOTS:
     // Kate opened or closed a folder (a project): the workspace can switch
     // without any editor view changing. String-based connection target.
     void projectListChanged();
+    // The Projects panel changed which open folder is active (dropdown,
+    // Prev/Next, clicking the tree): no project is added or removed and no
+    // editor view has to change, but the workspace must follow. Passes the
+    // panel's active folder explicitly for the same reason projectListChanged
+    // does.
+    void projectActiveChanged();
+    // The project plugin loaded after this view (plugin load order): hook
+    // its signals now and follow the folder it brings.
+    void onPluginCreated(const QString &name);
 
 private:
     void addEditorContextActions(KTextEditor::View *view, const QList<QAction *> &actions);
@@ -64,6 +73,13 @@ private:
     void openFileAtLine(const QString &path, int line);
     void askSelectionWithInstruction(const QString &instruction);
     QString editorContext() const;
+    // (Re)connects every project signal that can switch the folder:
+    // the plugin's add/remove plus the per-window panel view's activation
+    // (pluginProjectAdded/Removed, projectMapChanged, ...). Also hooks the
+    // late-load paths (Application::pluginCreated, MainWindow::
+    // pluginViewCreated) so a project plugin that loads after this view
+    // still switches the workspace.
+    void connectProjectSignals();
     // When explicitWorkspace is non-empty, it overrides detectWorkspace():
     // projectListChanged() passes the newest project's base dir so opening a
     // folder switches the workspace even when an editor view still points
