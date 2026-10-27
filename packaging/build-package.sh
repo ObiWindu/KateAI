@@ -20,7 +20,7 @@ case "${FAMILY}" in
         # makepkg 7+ sandboxes the build with Landlock/bubblewrap, which
         # fails inside unprivileged Docker containers. Use --nosandbox
         # when the flag is available (pacman 7.0+, 2025).
-        local makepkg_extra=""
+        makepkg_extra=""
         if makepkg --help 2>&1 | grep -q -- '--nosandbox'; then
             makepkg_extra="--nosandbox"
         fi
