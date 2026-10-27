@@ -7,16 +7,20 @@
 
 #include <QCryptographicHash>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
 #include <QRegularExpression>
 #include <QMutex>
 #include <QProcess>
 #include <QProcessEnvironment>
+#include <QScopeGuard>
 #include <QDateTime>
 #include <QStandardPaths>
 #include <QThreadPool>
 #include <QTimer>
+#include <chrono>
+#include <thread>
 #include <QRecursiveMutex>
 
 using namespace Qt::Literals::StringLiterals;
@@ -260,6 +264,16 @@ CheckpointManager::~CheckpointManager()
         }
     }
     m_detachedProcesses.clear();
+    // A snapshot worker holds m_checkpointMutex and queues its result back
+    // onto this object. Join it before the mutex (and the object the queued
+    // call names) goes away: destroying a locked mutex and then touching
+    // freed memory crashes. Every git step has its own timeout, so this is
+    // bounded; the cap is only for a wedged worker that would hang teardown.
+    QElapsedTimer elapsed;
+    elapsed.start();
+    while (m_inFlightSnapshots.loadRelaxed() > 0 && elapsed.elapsed() < 30000) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
 }
 
 void CheckpointManager::setWorkspace(const QString &workspace)
@@ -546,7 +560,13 @@ void CheckpointManager::createCheckpointAsync(const QString &label)
     // snapshot runs in the global thread pool instead, and the result is
     // marshalled back to the manager's thread (prune() and the signals stay
     // there, because prune() may start detached QProcess objects).
+    // Counted before start(): the destructor waits on this, and a worker
+    // that is queued but not yet running must still be waited for.
+    m_inFlightSnapshots.ref();
     QThreadPool::globalInstance()->start([this, dir, workspace, label]() {
+        // Balanced in every path below: the destructor waits on this counter
+        // before the mutex it guards goes away.
+        const auto release = qScopeGuard([this] { m_inFlightSnapshots.deref(); });
         QString error;
         QString commit;
         {

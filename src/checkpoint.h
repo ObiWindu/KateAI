@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <QAtomicInt>
 #include <QDateTime>
 #include <QList>
 #include <QMutex>
@@ -96,6 +97,11 @@ private:
     void pruneStaleShadowRepositories() const;
     // Mutex for thread-safe checkpoint operations (recursive to allow prune() from createCheckpoint())
     mutable QRecursiveMutex m_checkpointMutex;
+    // Snapshots currently running on the global thread pool. The destructor
+    // waits for them: a worker holds m_checkpointMutex and must never
+    // outlive it (destroying a locked QMutex then touching freed memory
+    // crashes, e.g. stopping a turn while its pre-mutation snapshot runs).
+    QAtomicInt m_inFlightSnapshots{0};
     // The git commands that run in the background. They are stopped with the
     // manager.
     QList<QProcess *> m_detachedProcesses;
