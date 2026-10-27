@@ -33,8 +33,15 @@ VERSION="${VERSION:-0.1.0}"
 ARCH="$(uname -m)"
 
 if [[ ! -f "${CRAFT_ROOT}/craft/craftenv.sh" ]]; then
-    echo "KDE Craft not found at ${CRAFT_ROOT}." >&2
-    echo "Install it first, see https://community.kde.org/Get_Involved/development/Mac" >&2
+    # Each CI job runs on a fresh VM, so the Craft stack from macos-build.sh
+    # is not here: bootstrap it on demand.
+    echo "==> Bootstrapping KDE Craft into ${CRAFT_ROOT}"
+    curl https://raw.githubusercontent.com/KDE/craft/master/setup/CraftBootstrap.py -o /tmp/CraftBootstrap.py
+    python3 /tmp/CraftBootstrap.py --prefix "${CRAFT_ROOT}"
+fi
+if [[ ! -f "${CRAFT_ROOT}/craft/craftenv.sh" ]]; then
+    echo "KDE Craft bootstrap failed for ${CRAFT_ROOT}." >&2
+    echo "See https://community.kde.org/Get_Involved/development/Mac" >&2
     exit 1
 fi
 # shellcheck source=/dev/null

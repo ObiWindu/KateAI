@@ -117,7 +117,7 @@ kateai_debian_packages() {
         qt6-base-dev qt6-base-dev-tools qt6-tools-dev \
         libkf6texteditor-dev libkf6coreaddons-dev libkf6i18n-dev \
         libkf6xmlgui-dev libkf6configwidgets-dev libkf6config-dev \
-        libkf6widgetaddons-dev \
+        libkf6widgetsaddons-dev \
         bubblewrap
 }
 

@@ -506,7 +506,7 @@ install -m 700 build/bin/kf6/ktexteditor/kateai.so ~/.local/lib/qt6/plugins/kf6/
 | --- | --- |
 | Arch / CachyOS / Manjaro | `kate extra-cmake-modules cmake ninja qt6-base ktexteditor kcoreaddons ki18n kxmlgui kconfigwidgets kconfig kwidgetsaddons bubblewrap` |
 | Fedora / Asahi | `kate extra-cmake-modules cmake gcc-c++ ninja-build qt6-qtbase-devel kf6-ktexteditor-devel kf6-kcoreaddons-devel kf6-ki18n-devel kf6-kxmlgui-devel kf6-kconfigwidgets-devel bubblewrap` |
-| Debian / Ubuntu (25.04+) | `kate cmake extra-cmake-modules ninja-build qt6-base-dev libkf6texteditor-dev libkf6coreaddons-dev libkf6i18n-dev libkf6xmlgui-dev libkf6configwidgets-dev libkf6config-dev libkf6widgetaddons-dev bubblewrap` |
+| Debian / Ubuntu (25.04+) | `kate cmake extra-cmake-modules ninja-build qt6-base-dev libkf6texteditor-dev libkf6coreaddons-dev libkf6i18n-dev libkf6xmlgui-dev libkf6configwidgets-dev libkf6config-dev libkf6widgetsaddons-dev bubblewrap` |
 | macOS | Homebrew: `cmake extra-cmake-modules ninja qtbase kcoreaddons ki18n kconfig kconfigwidgets kxmlgui kwidgetsaddons` and cask `kate`; Craft recommended to match Kate.app |
 | Windows | KDE Craft + Kate (MSVC). See `packaging/windows/install.ps1` |
 

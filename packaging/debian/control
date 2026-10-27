@@ -15,7 +15,7 @@ Build-Depends: debhelper-compat (= 13),
                libkf6xmlgui-dev,
                libkf6configwidgets-dev,
                libkf6config-dev,
-               libkf6widgetaddons-dev
+               libkf6widgetsaddons-dev
 Standards-Version: 4.7.0
 Homepage: https://github.com/KateAI/kate-ai
 Rules-Requires-Root: no

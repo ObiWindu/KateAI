@@ -33,6 +33,14 @@ if (-not $Out) {
 
 $craftEnv = Join-Path $CraftRoot "craft\craftenv.ps1"
 if (-not (Test-Path $craftEnv)) {
+    # Each CI job runs on a fresh VM, so the Craft stack built by
+    # windows-build.ps1 is not here: bootstrap it on demand.
+    Write-Host "==> Bootstrapping KDE Craft (accepting defaults)"
+    Set-ExecutionPolicy -Scope CurrentUser RemoteSigned -Force
+    python.exe -m pip install --upgrade certifi
+    iex ((New-Object net.webclient).DownloadString('https://raw.githubusercontent.com/KDE/craft/master/setup/install_craft.ps1'))
+}
+if (-not (Test-Path $craftEnv)) {
     throw "KDE Craft not found at $CraftRoot. Install it first, see https://develop.kde.org/docs/getting-started/building/craft/"
 }
 # Dot-source: the env script must mutate THIS session (PATH, KDEROOT, craft/cs
