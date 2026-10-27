@@ -192,7 +192,10 @@ jobs:
   # First run downloads a large binary cache — allow up to 5 hours.
   build-windows:
     name: Plugin build + tests (Windows)
-    runs-on: windows-latest
+    # windows-latest now ships VS 2026 (v18); Craft's bootstrap only
+    # detects VS 2022 ([17,18)). Pin to windows-2022 until Craft adds
+    # VS 2026 support.
+    runs-on: windows-2022
     timeout-minutes: 300
     steps:
       - uses: actions/checkout@v4
@@ -261,7 +264,8 @@ jobs:
 
   bundle-windows:
     name: Kate + plugin bundle (Windows)
-    runs-on: windows-latest
+    # Same as build-windows: pin to windows-2022 for VS 2022 / Craft.
+    runs-on: windows-2022
     timeout-minutes: 300
     if: github.ref == 'refs/heads/main' || github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
     steps:
