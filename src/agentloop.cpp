@@ -1298,7 +1298,12 @@ void AgentLoop::onAcpPromptFinished(const QString &stopReason, const QString &te
         return;
     }
     if (stopReason == u"max_tokens"_s) {
-        Q_EMIT statusChanged(i18n("The agent stopped because it hit the token limit."));
+        // The turn was cut off at the model output limit — usually while the
+        // agent generated one oversized tool call, like a whole large file in
+        // a single write. The auto-continuation budget was spent or disabled;
+        // point at the way out.
+        Q_EMIT statusChanged(i18n("The agent hit the model output limit — often a single tool call carrying a whole "
+                                  "large file. Ask it to write large files in smaller chunks."));
     }
     finishTurn();
 }

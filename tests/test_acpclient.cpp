@@ -615,6 +615,104 @@ private Q_SLOTS:
         client.stop();
     }
 
+    void outputLimitStopIsContinuedWithChunkedWriteSteering()
+    {
+        // The agent's model is cut off at the output token limit while
+        // producing one oversized write tool call (a whole large file in a
+        // single call) and the turn ends with stopReason "max_tokens" — not an
+        // error. The client must continue the turn with steering to split the
+        // write instead of surfacing a dead turn.
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+
+        DiskDocumentBridge bridge;
+        AcpClient client;
+        Settings settings = mockSettings(u"output-limit"_s);
+        settings.baseRetryDelaySeconds = 1;
+        settings.retryStrategy = u"fixed"_s;
+        client.setSettings(settings);
+        client.setWorkspace(workspace.path());
+        client.setDocumentBridge(&bridge);
+
+        QString stopReason;
+        QString finishedText;
+        QString error;
+        int resets = 0;
+        int retries = 0;
+        connect(&client, &AcpClient::promptFinished, this, [&](const QString &reason, const QString &full, const QJsonArray &) {
+            stopReason = reason;
+            finishedText = full;
+        });
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+        connect(&client, &AcpClient::textReset, this, [&] {
+            ++resets;
+        });
+        connect(&client, &AcpClient::retryStatus, this, [&](const QString &, int, int, int) {
+            ++retries;
+        });
+
+        client.prompt(u"write a large readme"_s);
+        QVERIFY2(waitFor([&] {
+            return !stopReason.isEmpty() || !error.isEmpty();
+        }), "the turn never finished; the output-limit continuation was not sent");
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(stopReason, u"end_turn"_s);
+        // The continuation carried the steering ("nudged"), not a verbatim
+        // replay of the original prompt.
+        QCOMPARE(finishedText, u"output-limit-recovered:nudged"_s);
+        QCOMPARE(retries, 1);
+        // The announcement streamed before the cut-off belonged to the failed
+        // attempt and was dropped for the continuation.
+        QCOMPARE(resets, 1);
+        client.stop();
+    }
+
+    void persistentOutputLimitExhaustsTheRetryBudget()
+    {
+        // An agent that keeps hitting the output limit must not be continued
+        // forever: after the configured budget is spent, the turn ends with
+        // the "max_tokens" stop reason instead of an error.
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+
+        DiskDocumentBridge bridge;
+        AcpClient client;
+        Settings settings = mockSettings(u"output-limit-persistent"_s);
+        settings.baseRetryDelaySeconds = 1;
+        settings.maxRetryAttempts = 2;
+        settings.retryStrategy = u"fixed"_s;
+        client.setSettings(settings);
+        client.setWorkspace(workspace.path());
+        client.setDocumentBridge(&bridge);
+
+        QString stopReason;
+        QString error;
+        int retries = 0;
+        int finished = 0;
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+        connect(&client, &AcpClient::retryStatus, this, [&](const QString &, int, int, int) {
+            ++retries;
+        });
+        connect(&client, &AcpClient::promptFinished, this, [&](const QString &reason, const QString &, const QJsonArray &) {
+            stopReason = reason;
+            ++finished;
+        });
+
+        client.prompt(u"write a large readme"_s);
+        QVERIFY2(waitFor([&] {
+            return finished > 0 || !error.isEmpty();
+        }), "the turn never ended; the budget was not enforced");
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(retries, 2);
+        QCOMPARE(finished, 1);
+        QCOMPARE(stopReason, u"max_tokens"_s);
+        client.stop();
+    }
+
     void approvingWithoutAnAllowOnceOptionStillAllows()
     {
         // An agent that advertises only allow_always/reject_always leaves no
