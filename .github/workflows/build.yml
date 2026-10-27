@@ -119,6 +119,17 @@ jobs:
       image: ${{ matrix.image }}
     steps:
       - uses: actions/checkout@v4
+      - name: Disable pacman sandbox (Landlock/alpm not available in containers)
+        run: |
+          # pacman 7+ uses Landlock + the alpm sandbox user, neither of
+          # which works inside unprivileged Docker containers.
+          if ! grep -q '^DisableSandbox' /etc/pacman.conf; then
+            if grep -q '^\[options\]' /etc/pacman.conf; then
+              sed -i '/^\[options\]/a DisableSandbox' /etc/pacman.conf
+            else
+              printf '\n[options]\nDisableSandbox\n' >> /etc/pacman.conf
+            fi
+          fi
       - name: Init pacman keyring (Arch ARM images sometimes ship without it)
         run: |
           pacman-key --init || true

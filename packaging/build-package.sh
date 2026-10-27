@@ -17,15 +17,22 @@ case "${FAMILY}" in
     arch)
         cp -a "${ROOT}/packaging/arch/." "${WORKDIR}/"
         cp -f "${TARBALL}" "${WORKDIR}/kateai-${VERSION}.tar.gz"
+        # makepkg 7+ sandboxes the build with Landlock/bubblewrap, which
+        # fails inside unprivileged Docker containers. Use --nosandbox
+        # when the flag is available (pacman 7.0+, 2025).
+        local makepkg_extra=""
+        if makepkg --help 2>&1 | grep -q -- '--nosandbox'; then
+            makepkg_extra="--nosandbox"
+        fi
         if [[ "$(id -u)" -eq 0 ]]; then
             # makepkg refuses to run as root (CI containers are root): build
             # as an unprivileged user instead. Deps are already installed
             # system-wide, so no -s (sudo pacman) round-trip is needed.
             id builder >/dev/null 2>&1 || useradd -m builder
             chown -R builder:builder "${WORKDIR}"
-            su builder -s /bin/bash -c "cd '${WORKDIR}' && makepkg -f --noconfirm"
+            su builder -s /bin/bash -c "cd '${WORKDIR}' && makepkg -f --noconfirm ${makepkg_extra}"
         else
-            (cd "${WORKDIR}" && makepkg -f --noconfirm)
+            (cd "${WORKDIR}" && makepkg -f --noconfirm ${makepkg_extra})
         fi
         mkdir -p "${ROOT}/packaging/dist"
         cp -f "${WORKDIR}"/*.pkg.tar.* "${ROOT}/packaging/dist/"
