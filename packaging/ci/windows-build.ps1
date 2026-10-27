@@ -32,6 +32,27 @@ $env:PATH = ($env:PATH -split ';' | Where-Object {
     $_ -and $_ -notmatch '(?i)Git\\(bin|usr\\bin)' -and $_ -notmatch '(?i)mingw|strawberry'
 }) -join ';'
 
+# Diagnostics for Craft's VS detection (its bundled vswhere has reported
+# "Unable to locate Visual Studio" even with a clean PATH): ask the
+# *system* vswhere what is actually registered, so the log shows whether
+# the instance is missing or just invisible to Craft's query.
+Write-Host "==> Visual Studio discovery diagnostics"
+$sysVsWhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+if (Test-Path $sysVsWhere) {
+    Write-Host "--- all registered instances:"
+    & $sysVsWhere -property installationPath -products "*" -nologo
+    Write-Host "exit=$LASTEXITCODE"
+    Write-Host "--- VS2022 instances ([17,18)):"
+    & $sysVsWhere -property installationPath -nologo -latest -products "*" -version "[17,18)"
+    Write-Host "exit=$LASTEXITCODE"
+} else {
+    Write-Host "no system vswhere at $sysVsWhere"
+}
+foreach ($ed in @("Enterprise", "Professional", "Community", "BuildTools")) {
+    $p = "C:\Program Files\Microsoft Visual Studio\2022\$ed"
+    if (Test-Path $p) { Write-Host "found VS dir: $p" }
+}
+
 function Invoke-CraftEnv {
     $craftEnv = Join-Path $CraftRoot "craft\craftenv.ps1"
     if (-not (Test-Path $craftEnv)) {
