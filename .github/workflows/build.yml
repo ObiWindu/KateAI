@@ -1,0 +1,352 @@
+# GitHub Actions: build the Kate AI plugin on every target distribution,
+# bundle the latest Kate editor with the plugin, and publish GitHub Releases.
+#
+# Coverage:
+#   Linux:   plugin build + ctest (Fedora container), native packages
+#            (.rpm Fedora/Asahi, .pkg.tar.zst Arch/CachyOS/Manjaro,
+#             .deb Debian/Ubuntu 25.04+) and a Linux bundle from the
+#            latest Kate master + plugin.
+#   macOS:   Homebrew build + tests (macos-15), plugin zip, Kate.app bundle.
+#   Windows: KDE Craft MSVC build + tests (windows-latest), plugin zip,
+#            Kate + plugin bundle.
+#
+# Release flow (tag main — tags on side branches are ignored):
+#   git checkout main && git merge --ff-only <branch>   # ship to main first
+#   <bump versions to X.Y.Z> && git commit && git push origin main
+#   git tag vX.Y.Z && git push origin vX.Y.Z
+# Pushing the tag runs the `release` job, which attaches every artifact
+# below to the GitHub Release.
+#
+# Bundles rebuild Kate from scratch (~30 min Linux, longer on Windows), so
+# they only run on main, tags, or manual dispatch — not on every PR push.
+
+name: Build and Release
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # ------------------------------------------------------- Linux plugin build
+  build-plugin:
+    name: Plugin build + tests (Linux)
+    runs-on: ubuntu-latest
+    container:
+      image: fedora:latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          dnf install -y kate cmake extra-cmake-modules gcc-c++ ninja-build \
+            qt6-qtbase-devel kf6-ktexteditor-devel kf6-kcoreaddons-devel \
+            kf6-ki18n-devel kf6-kxmlgui-devel kf6-kconfigwidgets-devel \
+            kf6-kconfig-devel kf6-kwidgetsaddons-devel bubblewrap git
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo -G Ninja
+      - name: Build
+        run: cmake --build build -j"$(nproc)"
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+      - name: Stage artifacts
+        run: |
+          mkdir -p artifacts
+          cp "$(find build -name kateai.so | head -1)" artifacts/kateai.so
+          ./packaging/mk-source-tarball.sh
+          cp packaging/dist/*.tar.gz artifacts/
+          ls -l artifacts/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plugin-linux
+          path: artifacts/
+          retention-days: 28
+
+  # ---------------------------------------------------------- Linux packages
+  package-fedora:
+    name: RPM package (Fedora/Asahi)
+    runs-on: ubuntu-latest
+    container:
+      image: fedora:latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          dnf install -y rpm-build kate cmake extra-cmake-modules gcc-c++ \
+            ninja-build qt6-qtbase-devel kf6-ktexteditor-devel kf6-kcoreaddons-devel \
+            kf6-ki18n-devel kf6-kxmlgui-devel kf6-kconfigwidgets-devel \
+            kf6-kconfig-devel kf6-kwidgetsaddons-devel git tar gzip
+      - name: Build RPM
+        run: ./packaging/build-package.sh fedora
+      - name: Stage artifacts
+        run: |
+          mkdir -p artifacts && cp packaging/dist/*.rpm artifacts/ 2>/dev/null || true
+          ls -l artifacts/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-fedora
+          path: artifacts/
+          retention-days: 28
+
+  package-arch:
+    name: Arch package (Arch/CachyOS/Manjaro)
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          pacman -Sy --noconfirm base-devel kate cmake extra-cmake-modules ninja \
+            qt6-base ktexteditor kcoreaddons ki18n kxmlgui kconfigwidgets kconfig \
+            kwidgetsaddons git tar gzip
+      - name: Build package
+        run: ./packaging/build-package.sh arch
+      - name: Stage artifacts
+        run: |
+          mkdir -p artifacts && cp packaging/dist/*.pkg.tar.* artifacts/ 2>/dev/null || true
+          ls -l artifacts/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-arch
+          path: artifacts/
+          retention-days: 28
+
+  package-debian:
+    name: DEB package (Debian/Ubuntu)
+    runs-on: ubuntu-latest
+    container:
+      image: ubuntu:25.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y kate cmake \
+            extra-cmake-modules ninja-build g++ pkg-config qt6-base-dev \
+            qt6-base-dev-tools qt6-tools-dev libkf6texteditor-dev \
+            libkf6coreaddons-dev libkf6i18n-dev libkf6xmlgui-dev \
+            libkf6configwidgets-dev libkf6config-dev libkf6widgetaddons-dev \
+            bubblewrap git tar gzip dpkg-dev debhelper
+      - name: Build DEB
+        run: ./packaging/build-package.sh debian
+      - name: Stage artifacts
+        run: |
+          mkdir -p artifacts && cp packaging/dist/*.deb artifacts/ 2>/dev/null || true
+          ls -l artifacts/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-debian
+          path: artifacts/
+          retention-days: 28
+
+  # ------------------------------------------------------- macOS plugin build
+  build-macos:
+    name: Plugin build + tests (macOS)
+    runs-on: macos-15
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and test
+        run: ./packaging/ci/macos-build.sh --build-type RelWithDebInfo --artifacts-dir artifacts
+      - name: Rename binary (avoid clashing with the Linux kateai.so in the release)
+        run: |
+          mv artifacts/kateai.so artifacts/kateai-macos.so
+          ls -l artifacts/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plugin-macos
+          path: artifacts/
+          retention-days: 28
+
+  package-macos:
+    name: Plugin zip (macOS)
+    runs-on: macos-15
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build zip
+        run: ./packaging/build-package.sh macos
+      - name: Stage artifacts
+        run: |
+          mkdir -p artifacts && cp packaging/dist/*.zip artifacts/ 2>/dev/null || true
+          ls -l artifacts/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-macos
+          path: artifacts/
+          retention-days: 28
+
+  # ----------------------------------------------------- Windows plugin build
+  # Hosted Windows runners are admin PowerShell with VS Build Tools, CMake,
+  # Python and Git preinstalled; Qt/KF6 come from KDE Craft (MSVC ABI).
+  # First run downloads a large binary cache — allow up to 5 hours.
+  build-windows:
+    name: Plugin build + tests (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and test with Craft
+        run: powershell -ExecutionPolicy Bypass -File packaging\ci\windows-build.ps1 -BuildType RelWithDebInfo -ArtifactsDir artifacts
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plugin-windows
+          path: artifacts/
+          retention-days: 28
+
+  # ----------------------------------------------------------------- Bundles
+  # Heavy jobs (Kate rebuilt from scratch): main, tags, or manual only.
+  bundle-linux:
+    name: Kate master + plugin bundle (Linux)
+    runs-on: ubuntu-latest
+    container:
+      image: fedora:latest
+    if: github.ref == 'refs/heads/main' || github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Kate build dependencies
+        run: |
+          dnf install -y git cmake extra-cmake-modules gcc-c++ ninja-build \
+            qt6-qtbase-devel qt6-qtdeclarative-devel qt6-qtsvg-devel \
+            kf6-ktexteditor-devel kf6-kcoreaddons-devel kf6-ki18n-devel \
+            kf6-kconfig-devel kf6-kconfigwidgets-devel kf6-kcrash-devel \
+            kf6-kdbusaddons-devel kf6-kguiaddons-devel kf6-kiconthemes-devel \
+            kf6-kio-devel kf6-kjobwidgets-devel kf6-knewstuff-devel \
+            kf6-knotifications-devel kf6-kparts-devel kf6-kservice-devel \
+            kf6-kwindowsystem-devel kf6-kxmlgui-devel kf6-kwidgetsaddons-devel \
+            kf6-sonnet-devel kf6-syndication-devel kf6-kdoctools-devel \
+            kate bubblewrap tar gzip sudo
+      - name: Bundle latest Kate + plugin
+        run: KATE_REF="${KATE_REF:-master}" ./packaging/bundle-kate.sh --release
+      - name: Stage artifacts
+        run: |
+          mkdir -p artifacts && cp packaging/dist/kate-bundle-*.tar.gz artifacts/
+          ls -l artifacts/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bundle-linux
+          path: artifacts/
+          retention-days: 28
+
+  bundle-macos:
+    name: Kate.app + plugin bundle (macOS)
+    runs-on: macos-15
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+    if: github.ref == 'refs/heads/main' || github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Bundle latest Kate.app + plugin
+        run: ./packaging/bundle-kate-macos.sh
+      - name: Stage artifacts
+        run: |
+          mkdir -p artifacts && cp packaging/dist/kate-bundle-*.tar.gz artifacts/
+          ls -l artifacts/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bundle-macos
+          path: artifacts/
+          retention-days: 28
+
+  bundle-windows:
+    name: Kate + plugin bundle (Windows)
+    runs-on: windows-latest
+    timeout-minutes: 300
+    if: github.ref == 'refs/heads/main' || github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Bundle latest Kate + plugin
+        run: powershell -ExecutionPolicy Bypass -File packaging\bundle-kate-windows.ps1
+      - name: Stage artifacts
+        run: |
+          New-Item -ItemType Directory -Force -Path artifacts | Out-Null
+          Copy-Item packaging\dist\kate-bundle-*.zip artifacts\ -Force
+          Copy-Item packaging\dist\kate-*.exe artifacts\ -Force -ErrorAction SilentlyContinue
+          Get-ChildItem artifacts\
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bundle-windows
+          path: artifacts/
+          retention-days: 28
+
+  # ----------------------------------------------------------------- Release
+  # Runs only for tags like v0.2.0 pushed on main. Attaches every artifact
+  # from the jobs above to the GitHub Release.
+  release:
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+    needs:
+      - build-plugin
+      - package-fedora
+      - package-arch
+      - package-debian
+      - build-macos
+      - package-macos
+      - build-windows
+      - bundle-linux
+      - bundle-macos
+      - bundle-windows
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Align source tarball name with the tag
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          ls -l dist/
+          for f in dist/kateai-*.tar.gz; do
+            [ -e "$f" ] || continue
+            cp "$f" "dist/kateai-${VERSION}.tar.gz"
+            break
+          done
+          ls -l dist/
+      - name: Write release notes
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          cat > NOTES.md <<EOF
+          ## Kate AI ${GITHUB_REF_NAME}
+
+          ### Plugin only
+          - \`kateai.so\` — Linux: drop into \`<qt-plugin-dir>/kf6/ktexteditor/\` (\`./install.sh\` does this for you)
+          - \`kateai-macos.so\` / \`kateai-*-macos-*.zip\` — macOS Homebrew build; install with \`./install.sh\`
+          - \`kateai.dll\` / \`kateai-windows-*.zip\` — Windows Craft/MSVC build; install with \`packaging\\\\windows\\\\install.ps1\`
+          - \`kateai-${VERSION}.tar.gz\` — source tarball
+          - \`.rpm\` (Fedora/Asahi) · \`.pkg.tar.zst\` (Arch/CachyOS/Manjaro) · \`.deb\` (Debian/Ubuntu 25.04+)
+
+          ### Kate + plugin bundles (latest Kate)
+          - \`kate-bundle-*.tar.gz\` (Linux) — Kate master built from source with the plugin
+            pre-installed. Extract to \`/\` and run \`/opt/kate-ai-bundle/bin/kate-ai\`.
+          - \`kate-bundle-*-macos-*.tar.gz\` — latest Kate.app (Homebrew cask) with the plugin
+            pre-installed in \`Contents/PlugIns/kf6/ktexteditor/\`.
+          - \`kate-bundle-*-windows-*.zip\` (plus \`kate-*.exe\` when produced) — plugin zip
+            plus the Craft-built latest Kate installer.
+
+          Built from commit ${GITHUB_SHA}. See README.md for install instructions.
+          EOF
+          cat NOTES.md
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [[ "${GITHUB_REF_NAME}" == *"-"* ]]; then PRE="--prerelease"; else PRE=""; fi
+          # shellcheck disable=SC2086
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "Kate AI ${GITHUB_REF_NAME}" \
+            --notes-file NOTES.md $PRE \
+            dist/*
