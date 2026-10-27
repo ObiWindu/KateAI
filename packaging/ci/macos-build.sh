@@ -21,6 +21,14 @@ cd "${ROOT}"
 # Craft-related in this script.
 unset ANDROID_SDK_ROOT ANDROID_NDK
 
+export HOMEBREW_NO_AUTO_UPDATE=1
+# cmake/ninja are not guaranteed on the runner image (and nothing else
+# installs them since the brew-deps approach was replaced by Craft).
+# Idempotent: a no-op when already present.
+for tool in cmake ninja git pkg-config; do
+    command -v "$tool" >/dev/null 2>&1 || brew install "$tool"
+done
+
 BUILD_TYPE="Release"
 ARTIFACTS="artifacts"
 CRAFT_ROOT="${CRAFT_ROOT:-${HOME}/CraftRoot}"
