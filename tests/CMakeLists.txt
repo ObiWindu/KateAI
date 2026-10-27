@@ -156,7 +156,9 @@ add_executable(test_overflow test_overflow.cpp ../src/chatwidget.cpp ../src/tool
     ../src/turnstatus.cpp ../src/chattheme.cpp)
 target_link_libraries(test_overflow PRIVATE kateai_core Qt6::Test Qt6::Widgets)
 target_compile_definitions(test_overflow PRIVATE TRANSLATION_DOMAIN="kateai")
-add_test(NAME test_overflow COMMAND test_overflow -platform offscreen)
+add_test(NAME test_overflow
+         COMMAND test_overflow -platform offscreen
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 add_executable(test_livecards test_livecards.cpp ../src/chatwidget.cpp ../src/toolcallwidget.cpp
     ../src/promptedit.cpp ../src/permissionbar.cpp ../src/subtaskwidget.cpp

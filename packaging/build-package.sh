@@ -17,7 +17,16 @@ case "${FAMILY}" in
     arch)
         cp -a "${ROOT}/packaging/arch/." "${WORKDIR}/"
         cp -f "${TARBALL}" "${WORKDIR}/kateai-${VERSION}.tar.gz"
-        (cd "${WORKDIR}" && makepkg -f --noconfirm)
+        if [[ "$(id -u)" -eq 0 ]]; then
+            # makepkg refuses to run as root (CI containers are root): build
+            # as an unprivileged user instead. Deps are already installed
+            # system-wide, so no -s (sudo pacman) round-trip is needed.
+            id builder >/dev/null 2>&1 || useradd -m builder
+            chown -R builder:builder "${WORKDIR}"
+            su builder -s /bin/bash -c "cd '${WORKDIR}' && makepkg -f --noconfirm"
+        else
+            (cd "${WORKDIR}" && makepkg -f --noconfirm)
+        fi
         mkdir -p "${ROOT}/packaging/dist"
         cp -f "${WORKDIR}"/*.pkg.tar.* "${ROOT}/packaging/dist/"
         echo "Arch package(s) in ${ROOT}/packaging/dist/"

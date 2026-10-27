@@ -145,11 +145,14 @@ jobs:
           retention-days: 28
 
   # ------------------------------------------------------- macOS plugin build
+  # KDE Craft (same as Windows): there is no Homebrew ktexteditor formula,
+  # so a brew-only build cannot find KTextEditor. First run downloads a
+  # large binary cache — main/tags/dispatch only, like the bundles.
   build-macos:
     name: Plugin build + tests (macOS)
     runs-on: macos-15
-    env:
-      HOMEBREW_NO_AUTO_UPDATE: "1"
+    timeout-minutes: 300
+    if: github.ref == 'refs/heads/main' || github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v4
       - name: Build and test
@@ -167,8 +170,8 @@ jobs:
   package-macos:
     name: Plugin zip (macOS)
     runs-on: macos-15
-    env:
-      HOMEBREW_NO_AUTO_UPDATE: "1"
+    timeout-minutes: 300
+    if: github.ref == 'refs/heads/main' || github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v4
       - name: Build zip
@@ -236,18 +239,19 @@ jobs:
           retention-days: 28
 
   bundle-macos:
-    name: Kate.app + plugin bundle (macOS)
+    name: Kate + plugin bundle (macOS)
     runs-on: macos-15
-    env:
-      HOMEBREW_NO_AUTO_UPDATE: "1"
+    timeout-minutes: 300
     if: github.ref == 'refs/heads/main' || github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v4
-      - name: Bundle latest Kate.app + plugin
+      - name: Bundle latest Kate + plugin (Craft .dmg + plugin zip)
         run: ./packaging/bundle-kate-macos.sh
       - name: Stage artifacts
         run: |
-          mkdir -p artifacts && cp packaging/dist/kate-bundle-*.tar.gz artifacts/
+          mkdir -p artifacts
+          cp packaging/dist/kate-*-macos-*.dmg artifacts/ 2>/dev/null || echo "no .dmg (plugin-only bundle)"
+          cp packaging/dist/kateai-*-macos-*.zip artifacts/
           ls -l artifacts/
       - uses: actions/upload-artifact@v4
         with:
@@ -332,8 +336,9 @@ jobs:
           ### Kate + plugin bundles (latest Kate)
           - \`kate-bundle-*.tar.gz\` (Linux) — Kate master built from source with the plugin
             pre-installed. Extract to \`/\` and run \`/opt/kate-ai-bundle/bin/kate-ai\`.
-          - \`kate-bundle-*-macos-*.tar.gz\` — latest Kate.app (Homebrew cask) with the plugin
-            pre-installed in \`Contents/PlugIns/kf6/ktexteditor/\`.
+          - \`kate-*-macos-*.dmg\` — latest Kate installer built via Craft.
+          - \`kateai-*-macos-*.zip\` — plugin built against the same Craft stack;
+            install with \`./install.sh\` (copies it into Kate.app).
           - \`kate-bundle-*-windows-*.zip\` (plus \`kate-*.exe\` when produced) — plugin zip
             plus the Craft-built latest Kate installer.
 
