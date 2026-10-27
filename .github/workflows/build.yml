@@ -350,8 +350,15 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           if [[ "${GITHUB_REF_NAME}" == *"-"* ]]; then PRE="--prerelease"; else PRE=""; fi
-          # shellcheck disable=SC2086
-          gh release create "${GITHUB_REF_NAME}" \
-            --title "Kate AI ${GITHUB_REF_NAME}" \
-            --notes-file NOTES.md $PRE \
-            dist/*
+          # Re-runnable: if the release already exists (re-release), refresh
+          # its assets instead of failing the way `gh release create` would.
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            # shellcheck disable=SC2086
+            gh release upload "${GITHUB_REF_NAME}" dist/* --clobber
+          else
+            # shellcheck disable=SC2086
+            gh release create "${GITHUB_REF_NAME}" \
+              --title "Kate AI ${GITHUB_REF_NAME}" \
+              --notes-file NOTES.md $PRE \
+              dist/*
+          fi
