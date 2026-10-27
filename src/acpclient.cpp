@@ -1844,7 +1844,7 @@ void AcpClient::handleSessionUpdate(const QJsonObject &update)
             // The statuses are "pending", "in_progress" and "completed" in the
             // spec; agents also send spellings like "in-progress", "started"
             // or "done".
-            const QString status = entry.value(u"status"_s).toString().toLower().replace(u'-', u'_');
+            const QString status = entry.value(u"status"_s).toString().toLower().replace(QChar(u'-'), QChar(u'_'));
             step.insert(u"completed"_s, status == u"completed"_s || status == u"done"_s);
             step.insert(u"inProgress"_s, status == u"in_progress"_s || status == u"started"_s);
             katePlan.append(step);

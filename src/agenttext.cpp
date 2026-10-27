@@ -90,7 +90,7 @@ QString closeMarkdown(const QString &text)
     // identifiers, which can make Qt reinterpret subsequent words as markup.
     QString normalized = text;
     normalized.replace(QStringLiteral("\r\n"), QStringLiteral("\n"));
-    normalized.replace(u'\r', u'\n');
+    normalized.replace(QChar(u'\r'), QChar(u'\n'));
     const QStringList lines = normalized.split(u'\n');
     Fence open;
     bool inFence = false;
@@ -125,7 +125,7 @@ void renderMarkdown(QTextDocument *doc, const QString &markdown)
     // change where text appears in the transcript.
     QString normalized = markdown;
     normalized.replace(QStringLiteral("\r\n"), QStringLiteral("\n"));
-    normalized.replace(u'\r', u'\n');
+    normalized.replace(QChar(u'\r'), QChar(u'\n'));
     const QStringList lines = normalized.split(u'\n');
     QStringList prose;
     int i = 0;

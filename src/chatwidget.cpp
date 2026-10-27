@@ -199,7 +199,10 @@ QString jsonArg(const QString &details, const QStringList &keys)
 // different one entirely.
 QString elideMiddle(QString text, int max)
 {
-    text = text.simplified().replace(u'\n', u' ', Qt::CaseInsensitive);
+    // QChar-wrapped: a bare u'\n' is char16_t, and Qt versions without a
+    // replace(char16_t, char16_t, ...) overload resolve the call ambiguously
+    // (seen on the Qt 6.8 in Ubuntu plucky; newer Qt accepts it directly).
+    text = text.simplified().replace(QChar(u'\n'), QChar(u' '), Qt::CaseInsensitive);
     text.replace(u"  "_s, u" "_s);
     if (max <= 4) {
         return text.left(qMax(0, max));

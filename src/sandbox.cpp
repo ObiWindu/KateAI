@@ -790,8 +790,8 @@ static QStringList unsandboxedArgv(const QString &command)
 static QString seatbeltQuote(const QString &path)
 {
     QString quoted = path;
-    quoted.replace(u'\\', u"\\\\"_s);
-    quoted.replace(u'"', u"\\\""_s);
+    quoted.replace(QChar(u'\\'), u"\\\\"_s);
+    quoted.replace(QChar(u'"'), u"\\\""_s);
     return quoted;
 }
 #endif

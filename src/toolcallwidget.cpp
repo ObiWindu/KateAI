@@ -1387,7 +1387,7 @@ void ToolCallWidget::updateTitleText()
     // Clamp before measuring, so the height below matches what is drawn.
     const QString wrapped = clampToLines(wrapToWidth(m_titleText, fm, firstW, avail), kMaxTitleLines, fm, avail);
     QString cmdHtml = escapeHtml(wrapped);
-    cmdHtml.replace(u'\n', u"<br>"_s);
+    cmdHtml.replace(QChar(u'\n'), u"<br>"_s);
     m_title->setText(QStringLiteral("<span style=\"color:%1\"><b>%2</b></span>&nbsp; <span style=\"color:%3\">%4</span>")
                          .arg(ChatTheme::toolColor(m_toolName), escapeHtml(label),
                               ChatTheme::ToolCard::textPrimary(), cmdHtml));
