@@ -29,8 +29,10 @@ QList<KTextEditor::Range> addedLineRangesFromDiff(const QString &diff)
         const QRegularExpressionMatch match = it.next();
         const int startLine = match.captured(3).toInt() - 1; // 0-based
         // An omitted count means exactly one line; a zero count means the
-        // hunk only removed or kept context.
-        const int addedCount = match.hasCaptured(4) ? match.captured(4).toInt() : 1;
+        // hunk only removed or kept context. Empty (non-participating group)
+        // also means omitted: hasCaptured() is true for "" on some Qt
+        // versions, which previously skipped single-line additions.
+        const int addedCount = match.captured(4).isEmpty() ? 1 : match.captured(4).toInt();
         if (startLine < 0 || addedCount <= 0) {
             continue;
         }

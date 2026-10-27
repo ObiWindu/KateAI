@@ -115,7 +115,11 @@ KSyntaxHighlighting::Definition definitionFor(const QString &language)
         // Last resort: the hint may be a file name or a suffix ("main.cpp").
         definition = repo->definitionForFileName(key);
     }
-    g_definitionCache.insert(key, definition);
+    // Only cache valid hits: a theme/repository reload may resolve a name that
+    // is invalid now (permanent negative cache otherwise).
+    if (definition.isValid()) {
+        g_definitionCache.insert(key, definition);
+    }
     return definition;
 }
 

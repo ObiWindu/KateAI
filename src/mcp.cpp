@@ -20,6 +20,7 @@
 #include <QStandardPaths>
 #include <QTimer>
 #include <QUrl>
+#include <limits>
 
 using namespace Qt::Literals::StringLiterals;
 
@@ -427,6 +428,12 @@ void McpClient::start()
     m_startupTimer->start();
 
     if (m_config.transport == McpTransport::Http) {
+        // Restarting without deleting the old manager leaks it (QObject child
+        // lives until McpClient dies) and leaves stale replies connected.
+        if (m_nam) {
+            m_nam->deleteLater();
+            m_nam = nullptr;
+        }
         m_nam = new QNetworkAccessManager(this);
     } else {
         // A previous run may still own a process: starting a new one next to
@@ -508,7 +515,10 @@ void McpClient::stop()
 
     stopProcess();
     m_tools.clear();
-    m_nam = nullptr;
+    if (m_nam) {
+        m_nam->deleteLater();
+        m_nam = nullptr;
+    }
     if (m_state != McpServerState::Disabled) {
         setState(McpServerState::Stopped, u"Disconnected"_s);
     }
@@ -585,11 +595,46 @@ bool McpClient::callTool(const QString &callToken, const QString &toolName, cons
 
 int McpClient::sendRequest(const QString &method, const QJsonObject &params)
 {
+    // int wraps after 2^31 requests and would collide with live pending ids.
+    if (m_nextId <= 0 || m_nextId == std::numeric_limits<int>::max()) {
+        m_nextId = 1;
+        // If pending is non-empty here ids may still collide; drop only when
+        // safe (no in-flight requests), otherwise keep counting to avoid
+        // misrouting (practically unreachable).
+        if (!m_pending.isEmpty()) {
+            qWarning() << "KateAI: MCP request id near overflow with pending requests";
+        }
+    }
     const int id = m_nextId++;
     Pending pending;
     pending.id = id;
     pending.method = method;
     m_pending.insert(id, pending);
+    // Handshake/path requests had no watchdog: a dead server hung them forever
+    // (only tools/call had a timer). Arm the same budget here.
+    if (method == u"initialize"_s || method == u"tools/list"_s) {
+        int budget = m_config.timeoutMs > 0 ? m_config.timeoutMs : 60000;
+        if (m_timeoutMs > 0) {
+            budget = qMin(budget, m_timeoutMs);
+        }
+        QTimer *timeout = new QTimer(this);
+        timeout->setSingleShot(true);
+        timeout->setInterval(budget);
+        connect(timeout, &QTimer::timeout, this, [this, id, method, budget] {
+            const auto it = m_pending.constFind(id);
+            if (it == m_pending.constEnd()) {
+                return;
+            }
+            m_pending.remove(id);
+            if (method == u"initialize"_s) {
+                failAll(u"Timed out waiting for the server handshake."_s);
+                setState(McpServerState::Failed, u"Handshake timed out"_s);
+                stopProcess();
+            }
+        });
+        m_pending[id].timeout = timeout;
+        timeout->start();
+    }
     sendRequestForId(method, params, id);
     return id;
 }
@@ -761,7 +806,14 @@ void McpClient::onStdioFinished(int exitCode)
 void McpClient::onHttpFinished(QNetworkReply *reply, int id)
 {
     reply->deleteLater();
-    const QByteArray body = reply->readAll();
+    QByteArray body = reply->readAll();
+    // Bound memory: malicious Streamable-HTTP server could otherwise OOM the
+    // client (stdio path already has a 16 MiB frame cap).
+    constexpr qint64 kMaxHttpBodyBytes = 16 * 1024 * 1024;
+    if (body.size() > kMaxHttpBodyBytes) {
+        body.truncate(kMaxHttpBodyBytes);
+        qWarning() << "KateAI: MCP HTTP body truncated at 16 MiB from" << m_config.name;
+    }
     const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
     const QString contentType = reply->header(QNetworkRequest::ContentTypeHeader).toString();
     const QString session = QString::fromUtf8(reply->rawHeader("mcp-session-id"));

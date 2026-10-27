@@ -31,10 +31,20 @@ namespace
 const QString TagPrefix = QStringLiteral("refs/tags/");
 const QString TagNamespace = TagPrefix + QStringLiteral("kateai/");
 
-// Never restore through these; they hold state this plugin regenerates.
+// Never restore through these; they hold state this plugin regenerates, plus
+// automation/config the agent must not be able to plant via a snapshot.
 bool isProtectedPath(const QString &relativePath)
 {
-    return relativePath.startsWith(u".git/"_s) || relativePath == u".git"_s || relativePath.startsWith(u".kateai/project_graph.json"_s);
+    if (relativePath.startsWith(u".git/"_s) || relativePath == u".git"_s || relativePath.startsWith(u".kateai/project_graph.json"_s)) {
+        return true;
+    }
+    // Restoring these would reinstate agent-planted automation without prompt.
+    if (relativePath == u".kateai/mcp.json"_s || relativePath.startsWith(u".kateai/mcp.json/"_s)
+        || relativePath == u"KATEAI.md"_s || relativePath.startsWith(u".kateai/rules/"_s)
+        || relativePath.startsWith(u".kateai/modes/"_s)) {
+        return true;
+    }
+    return false;
 }
 
 // Tag names carry a zero-padded sequence so `for-each-ref --sort=-refname`
@@ -46,9 +56,11 @@ QString tagName(int sequence, const QString &hash)
 }
 
 // A checkpoint id is used as a git revision, so it has to be a commit hash.
+// Short 7-char prefixes are ambiguous in large repos (git warns but picks one),
+// so require the full hash: SHA-1 40, SHA-256 64.
 bool isValidCheckpointId(const QString &id)
 {
-    static const QRegularExpression hashPattern(u"^[0-9a-f]{7,64}$"_s);
+    static const QRegularExpression hashPattern(u"^[0-9a-f]{40,64}$"_s);
     return hashPattern.match(id).hasMatch();
 }
 

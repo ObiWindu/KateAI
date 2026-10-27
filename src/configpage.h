@@ -100,6 +100,10 @@ private:
     QJsonArray m_acpRegistryAgents;
     QComboBox *m_apiFormat = nullptr;
     void applySelectedAcpPreset();
+    // Rebuilds the ACP Agent list from the presets plus the currently installed
+    // registry agents, keeping the selection. Called after an install or an
+    // uninstall so the combo does not go stale until Kate restarts.
+    void refreshAcpAgentCombo();
     void updateAcpNativeEnabled();
     void updateAcpModelCombo();
     void fetchAcpModels();

@@ -112,8 +112,21 @@ static KateAi::Suggestion suggestionFromRequest(const KateAi::PermissionRequest 
     if (!argsDoc.isNull() && argsDoc.isObject()) {
         const QJsonObject args = argsDoc.object();
         suggestion.text = args.value(u"suggestion"_s).toString();
-        suggestion.path = args.value(u"path"_s).toString();
-        suggestion.line = args.value(u"line"_s).toInt();
+        suggestion.path = args.value(u"path"_s).toString().trimmed();
+        // The model often sends numbers as strings ("5"); toInt() silently
+        // yields 0 for those and drops the anchor.
+        const QJsonValue lineValue = args.value(u"line"_s);
+        if (lineValue.isDouble()) {
+            suggestion.line = lineValue.toInt();
+        } else if (lineValue.isString()) {
+            suggestion.line = lineValue.toString().trimmed().toInt();
+        } else {
+            suggestion.line = 0;
+        }
+    }
+    // ToolRunner fills path separately; prefer arguments, fall back to it.
+    if (suggestion.path.isEmpty() && !request.path.isEmpty()) {
+        suggestion.path = request.path;
     }
     return suggestion;
 }
@@ -125,9 +138,14 @@ static KateAi::Suggestion suggestionFromRequest(const KateAi::PermissionRequest 
 // queue.
 bool isFileMutatingTool(const QString &toolName)
 {
+    // Native names plus the OpenCode ACP aliases (write, edit, patch), which
+    // the edit tracker also learns about through mutatesFiles on live cards;
+    // this list drives risk colouring and the working label, where the ACP
+    // kind is not available.
     return toolName == u"write_file"_s || toolName == u"edit_file"_s || toolName == u"multi_edit_file"_s
         || toolName == u"multi_replace_file_content"_s
-        || toolName == u"fs/write_text_file"_s;
+        || toolName == u"fs/write_text_file"_s
+        || toolName == u"write"_s || toolName == u"edit"_s || toolName == u"patch"_s;
 }
 
 // The welcome screen's suggestion chips share one style; kept in a function so
@@ -183,6 +201,9 @@ QString elideMiddle(QString text, int max)
 {
     text = text.simplified().replace(u'\n', u' ', Qt::CaseInsensitive);
     text.replace(u"  "_s, u" "_s);
+    if (max <= 4) {
+        return text.left(qMax(0, max));
+    }
     if (text.size() <= max) {
         return text;
     }
@@ -212,11 +233,12 @@ QString toolTargetLabel(const QString &toolName, const KateAi::PermissionRequest
     QString path = request.path;
     if (path.isEmpty()) {
         path = jsonArg(request.details, {u"path"_s, u"file_path"_s, u"filePath"_s, u"file"_s,
-                                        u"dir_path"_s, u"directory"_s, u"root_path"_s});
+                                        u"dir_path"_s, u"dirPath"_s, u"directory"_s,
+                                        u"root_path"_s, u"rootPath"_s});
     }
 
     const bool searches = toolName == u"grep"_s || toolName == u"glob"_s || toolName == u"web_search"_s
-        || toolName == u"query_project_graph"_s;
+        || toolName == u"websearch"_s || toolName == u"query_project_graph"_s || toolName == u"search"_s;
     QString pattern = jsonArg(request.details, {u"pattern"_s, u"query"_s, u"regex"_s, u"question"_s});
     if (pattern.isEmpty()) {
         pattern = request.summary.trimmed();
@@ -252,21 +274,27 @@ QString workingLabelForTool(const QString &toolName, const KateAi::PermissionReq
     // to, which is the half the user needs to tell two reads apart.
     const QString target = toolTargetLabel(toolName, request, workspace);
     if (isFileMutatingTool(toolName) || toolName == u"edit"_s || toolName == u"str_replace"_s
-        || toolName == u"write"_s || toolName == u"delete"_s) {
+        || toolName == u"write"_s || toolName == u"delete"_s || toolName == u"patch"_s) {
         return i18n("Editing") + target;
     }
     if (toolName == u"read_file"_s || toolName == u"fs/read_text_file"_s || toolName == u"read"_s) {
         return i18n("Reading") + target;
     }
     if (toolName == u"grep"_s || toolName == u"glob"_s || toolName == u"web_search"_s
-        || toolName == u"query_project_graph"_s || toolName == u"search"_s) {
+        || toolName == u"websearch"_s || toolName == u"query_project_graph"_s || toolName == u"search"_s) {
         return i18n("Searching") + target;
     }
-    if (toolName == u"list_dir"_s) {
+    if (toolName == u"list_dir"_s || toolName == u"list"_s) {
         return i18n("Listing") + target;
     }
     if (toolName == u"bash"_s || toolName == u"execute"_s || toolName.startsWith(u"terminal/"_s)) {
         return i18n("Running") + target;
+    }
+    if (toolName == u"webfetch"_s || toolName == u"web_fetch"_s) {
+        return i18n("Fetching") + target;
+    }
+    if (toolName == u"task"_s || toolName == u"todowrite"_s || toolName == u"todoread"_s) {
+        return i18n("Working") + target;
     }
 
     if (toolName == u"question"_s) {
@@ -1119,11 +1147,15 @@ ChatWidget::ChatWidget(QWidget *parent)
         if (QWidget *approvalRow = widget->approvalRow()) {
             moveToIntentDock(approvalRow);
         }
-        connect(widget, &ToolCallWidget::approvalChosen, this, [this, widget, request](PermissionDecision decision) {
-            widget->setApprovalResolved(decision);
-            updateIntentDockVisibility();
-            m_agent.resolvePermission(decision);
-        }, Qt::SingleShotConnection);
+        connect(widget, &ToolCallWidget::approvalChosen, this,
+                [this, guard = QPointer<ToolCallWidget>(widget)](PermissionDecision decision) {
+                    if (guard) {
+                        guard->setApprovalResolved(decision);
+                    }
+                    updateIntentDockVisibility();
+                    m_agent.resolvePermission(decision);
+                },
+                Qt::SingleShotConnection);
         m_turnStatus->setActivity(i18n("Waiting for approval"));
         m_prompt->setEnabled(false);
         updateSendButtonState();
@@ -1241,6 +1273,11 @@ ChatWidget::ChatWidget(QWidget *parent)
         // A turn that ended with a question still on screen (abort, budget stop)
         // must not leave it docked: nothing can answer it now.
         clearQuestionCards();
+        // The dock lost contents without a dock-aware call above: a cleared
+        // question, and approval rows hidden together with the cards that
+        // carried them. Recompute, or the strip stays on screen over the
+        // composer with nothing in it -- the first thing the next prompt sees.
+        updateIntentDockVisibility();
         // Refresh the context readout at the end of a turn: during one it would
         // recompute an estimate over a history that is still growing, and the
         // number the user acts on is the one for the next request.
@@ -1303,6 +1340,12 @@ ChatWidget::ChatWidget(QWidget *parent)
         if (auto *widget = m_subtaskWidgets.value(taskId)) {
             widget->appendMessageDelta(delta);
         }
+    });
+    connect(&m_agent, &AgentLoop::subtaskProgress, this, [this](const QString &taskId, const QString &partial) {
+        if (auto *widget = m_subtaskWidgets.value(taskId)) {
+            widget->setPartialOutput(partial);
+        }
+        forceScrollToBottom();
     });
     connect(&m_agent, &AgentLoop::subtaskFinished, this, [this](const QString &taskId, bool ok) {
         Q_UNUSED(taskId)
@@ -2625,7 +2668,9 @@ QPushButton *ChatWidget::createCopyButton(const QString &textToCopy, QWidget *pa
         if (text.isEmpty()) {
             text = m_streamText;
         }
-        QGuiApplication::clipboard()->setText(text);
+        if (QClipboard *clipboard = QGuiApplication::clipboard()) {
+            clipboard->setText(text);
+        }
         btn->setText(i18n("✓ Copied"));
         btn->setStyleSheet(
             QStringLiteral(
@@ -2865,6 +2910,11 @@ void ChatWidget::retireIntentWidget(QWidget *widget, QWidget *anchor)
     } else {
         appendTranscriptWidget(widget);
     }
+    // insertWidget() reparents, and reparenting hides: a card that was docked
+    // while the dock itself was on its way out would otherwise land in the
+    // transcript flagged hidden and never paint there. It is part of the
+    // thread now, so show it explicitly.
+    widget->show();
     updateIntentDockVisibility();
 }
 
@@ -2897,9 +2947,15 @@ void ChatWidget::clearIntentDock()
     }
     while (QLayoutItem *item = m_intentDockLayout->takeAt(0)) {
         if (QWidget *widget = item->widget()) {
-            // Delete rather than unparent: an approval row was reparented into
-            // the dock, so it is no longer a child of its tool card and would
-            // simply leak. Callers must clear their own bookkeeping first.
+            // An approval row was reparented into the dock, so it is no longer
+            // a child of its tool card. Null the owner's pointer first, or the
+            // card keeps a dangling m_approvalRow after this delete.
+            for (auto *card : std::as_const(m_toolCallWidgets)) {
+                if (card && card->approvalRow() == widget) {
+                    card->detachApprovalRow();
+                    break;
+                }
+            }
             delete widget;
         }
         delete item;
@@ -4763,33 +4819,28 @@ void ChatWidget::showSettingsMenu()
     auto *acpMenu = menu.addMenu(i18n("ACP Agent"));
     acpMenu->setStyleSheet(menu.styleSheet());
 
-    // Agent selection
-    const QStringList acpAgentIds = {u"grok-build"_s, u"claude-acp"_s, u"codex-acp"_s, u"gemini"_s, u"mistral-vibe"_s, u"mcode"_s, u"custom"_s};
-    const QStringList acpAgentLabels = {
-        i18n("Grok Build"),
-        i18n("Claude Agent"),
-        i18n("Codex"),
-        i18n("Gemini CLI"),
-        i18n("Mistral Vibe"),
-        i18n("MiniMax Code"),
-        i18n("Custom…")
-    };
+    // Agent selection. Installed registry agents (OpenCode V2, Kilo, …) are not
+    // presets, so take them from the same list the settings page offers; a menu
+    // built only from presets left the running agent unlisted and unswitchable.
+    const QList<AcpAgentPreset> acpAgents = acpAgentChoices(m_settings);
 
-    for (int i = 0; i < acpAgentIds.size(); ++i) {
-        auto *action = acpMenu->addAction(acpAgentLabels[i]);
-        action->setData(acpAgentIds[i]);
+    for (const AcpAgentPreset &preset : acpAgents) {
+        auto *action = acpMenu->addAction(preset.label);
+        action->setData(preset.id);
         action->setCheckable(true);
-        action->setChecked(m_settings.acpAgentId == acpAgentIds[i]);
-        connect(action, &QAction::triggered, this, [this, id = acpAgentIds[i], &menu]() {
+        action->setChecked(m_settings.acpAgentId == preset.id);
+        connect(action, &QAction::triggered, this, [this, id = preset.id, &menu]() {
             m_settings.acpAgentId = id;
             m_settings.provider = Provider::Acp;
             m_preferredProvider = Provider::Acp;
-            // Update command, args, and env from preset
-            const AcpAgentPreset preset = acpAgentPreset(id);
-            if (preset.id != u"custom"_s) {
-                m_settings.acpCommand = preset.command;
-                m_settings.acpArgs = preset.args;
-                m_settings.acpApiKeyEnv = preset.apiKeyEnv;
+            // Update command, args, and env from the registry entry or preset.
+            // An empty command means the agent is unknown to both, so the typed
+            // launch line is left alone.
+            const AcpAgentPreset launch = acpAgentLaunchLine(m_settings, id);
+            if (!launch.command.isEmpty()) {
+                m_settings.acpCommand = launch.command;
+                m_settings.acpArgs = launch.args;
+                m_settings.acpApiKeyEnv = launch.apiKeyEnv;
             }
             m_agent.setSettings(m_settings);
             Q_EMIT settingsChanged(m_settings);
@@ -5141,27 +5192,40 @@ void ChatWidget::clearQuestionCards()
         if (m_intentDockLayout) {
             m_intentDockLayout->removeWidget(card);
         }
+        // removeWidget() only unregisters the card: it stays a visible child
+        // of the dock until deleteLater() runs, so a stale question would keep
+        // painting over the composer in the meantime. Hide it as it goes.
+        card->hide();
         card->deleteLater();
     }
     m_questionWidgets.clear();
     m_questionOrder.clear();
+    updateIntentDockVisibility();
 }
 
 void ChatWidget::markRunningSubtasksAbandoned()
 {
-    // A turn can end with sub-agents still in flight (abort, budget stop).
-    // Their cards must not be left showing a running spinner forever.
+    // A turn can end with sub-agents still in flight (abort, budget stop, the
+    // cancel-all action). Their cards must not be left showing a running
+    // spinner forever.
+    //
+    // The cards are the record, not the loop: abort() tears every sub-agent
+    // down *before* it emits turnFinished, so asking the agent which ones are
+    // still running always answers "none" -- which is how a stop used to leave
+    // every docked card pinned above the composer, spinning, for the rest of
+    // the session while the next prompt typed underneath it.
     bool changed = false;
-    const QStringList ids = m_agent.runningSubtaskIds();
-    for (const QString &taskId : ids) {
-        if (auto *widget = m_subtaskWidgets.value(taskId)) {
-            widget->markAbandoned(i18n("Stopped when the turn ended."));
-            // Abandoned means over; the card belongs back in the transcript --
-            // where the sub-agent started, so a stop does not shuffle the
-            // transcript's time order.
-            retireIntentWidget(widget, m_subtaskAnchors.take(taskId));
-            changed = true;
+    const QList<QPointer<SubtaskWidget>> cards = m_subtaskOrder;
+    for (const QPointer<SubtaskWidget> &card : cards) {
+        if (!card || !card->isRunning()) {
+            continue;
         }
+        card->markAbandoned(i18n("Stopped when the turn ended."));
+        // Abandoned means over; the card belongs back in the transcript --
+        // where the sub-agent started, so a stop does not shuffle the
+        // transcript's time order.
+        retireIntentWidget(card.data(), m_subtaskAnchors.take(card->taskId()));
+        changed = true;
     }
     if (changed) {
         updateTeamButton();
@@ -5574,10 +5638,24 @@ void ChatWidget::clearTranscriptContents()
         m_indicatorTimer->stop();
     }
 
+    // Detach docked approval rows first so their cards null the pointer;
+    // deleting cards first would leave the dock delete with no owner to detach.
+    clearQuestionCards();
+    clearIntentDock();
+    for (auto *card : std::as_const(m_toolCallWidgets)) {
+        if (card && m_transcriptLayout && m_transcriptLayout->indexOf(card) >= 0) {
+            m_transcriptLayout->removeWidget(card);
+        }
+    }
     qDeleteAll(m_toolCallWidgets);
     m_toolCallWidgets.clear();
     m_toolCallOrder.clear();
     for (auto it = m_subtaskWidgets.begin(); it != m_subtaskWidgets.end(); ++it) {
+        // Remove from the transcript first so the generic sweep below does not
+        // delete the same QWidget a second time.
+        if (m_transcriptLayout && m_transcriptLayout->indexOf(it.value()) >= 0) {
+            m_transcriptLayout->removeWidget(it.value());
+        }
         delete it.value();
     }
     m_subtaskWidgets.clear();
@@ -5587,12 +5665,8 @@ void ChatWidget::clearTranscriptContents()
     // would dangle once the generic teardown below deletes them.
     clearSuggestionCards();
     m_pendingSuggestions.clear();
-    // Question cards live in the intent dock while they wait for an answer, so
-    // they have to be dropped explicitly rather than by the transcript sweep.
-    clearQuestionCards();
-    // Detach any approval rows still docked; they belong to the cards deleted
-    // above and must not be left parented to the dock.
-    clearIntentDock();
+    // (Question cards and docked approvals already cleared above, before the
+    // cards, so owners could detach.)
     // The plan dock lives above the composer, outside the transcript, so the
     // sweep above cannot reach it: without this the checklist of the
     // conversation being left would follow the user into the next one.
@@ -5644,6 +5718,12 @@ void ChatWidget::flushToolProgress()
     for (auto it = pending.cbegin(); it != pending.cend(); ++it) {
         if (auto *widget = m_toolCallWidgets.value(it.key())) {
             widget->setPartialOutput(it.value());
+        }
+        // Sub-agent cards are keyed by the same toolCallId (taskId == call.id):
+        // a parent-level progress chunk for a new_task call is the child's
+        // live output and belongs on the sub-agent card, not dropped.
+        if (auto *subtask = m_subtaskWidgets.value(it.key())) {
+            subtask->setPartialOutput(it.value());
         }
     }
     scrollToBottom();
@@ -5727,10 +5807,13 @@ void ChatWidget::restoreHistoricalTool(const QString &toolCallId, const QString 
     ToolRisk risk = ToolRisk::Read;
     // ACP kinds are not in isFileMutatingTool on purpose: that list drives the
     // edit tracker, which already learns about ACP writes from mutatesFiles.
-    if (isFileMutatingTool(toolName) || toolName == u"edit"_s || toolName == u"str_replace"_s
-        || toolName == u"write"_s || toolName == u"delete"_s) {
+    // isEditToolName covers the OpenCode aliases (write, edit, patch) here so
+    // restored history cards colour like live ones.
+    if (isFileMutatingTool(toolName) || ChatTheme::isEditToolName(toolName) || toolName == u"edit"_s
+        || toolName == u"str_replace"_s || toolName == u"write"_s || toolName == u"delete"_s
+        || toolName == u"patch"_s) {
         risk = ToolRisk::Write;
-    } else if (toolName == u"bash"_s || toolName == u"execute"_s) {
+    } else if (toolName == u"bash"_s || toolName == u"execute"_s || toolName.startsWith(u"terminal"_s)) {
         risk = ToolRisk::Execute;
     }
 
@@ -5750,6 +5833,12 @@ void ChatWidget::restoreHistoricalTool(const QString &toolCallId, const QString 
         QString path = argsObj.value(u"path"_s).toString();
         if (path.isEmpty()) {
             path = argsObj.value(u"file_path"_s).toString();
+        }
+        if (path.isEmpty()) {
+            path = argsObj.value(u"filePath"_s).toString();
+        }
+        if (path.isEmpty()) {
+            path = argsObj.value(u"file"_s).toString();
         }
         if (path.isEmpty()) {
             path = diffPathFromOutput(output);
@@ -5772,6 +5861,15 @@ void ChatWidget::restoreHistoricalTool(const QString &toolCallId, const QString 
     // its extension to pick a highlighting language, so the restored card needs
     // it too or the output comes back as uncoloured plain text.
     QString targetPath = argsObj.value(u"path"_s).toString();
+    if (targetPath.isEmpty()) {
+        targetPath = argsObj.value(u"file_path"_s).toString();
+    }
+    if (targetPath.isEmpty()) {
+        targetPath = argsObj.value(u"filePath"_s).toString();
+    }
+    if (targetPath.isEmpty()) {
+        targetPath = argsObj.value(u"file"_s).toString();
+    }
     if (targetPath.isEmpty()) {
         targetPath = argsObj.value(u"TargetFile"_s).toString();
     }
@@ -5831,6 +5929,12 @@ void ChatWidget::restoreHistoricalTool(const QString &toolCallId, const QString 
             path = argsObj.value(u"file_path"_s).toString();
         }
         if (path.isEmpty()) {
+            path = argsObj.value(u"filePath"_s).toString();
+        }
+        if (path.isEmpty()) {
+            path = argsObj.value(u"file"_s).toString();
+        }
+        if (path.isEmpty()) {
             path = argsObj.value(u"TargetFile"_s).toString();
         }
         const QString key = toolName.trimmed().toLower();
@@ -5865,6 +5969,20 @@ void ChatWidget::restoreHistoricalTool(const QString &toolCallId, const QString 
     result.name = toolName;
     result.output = hasResult ? output : QString();
     result.ok = !result.output.contains(u"STATUS: failure"_s);
+    // A question's payload is prose, not arguments: without this the restored
+    // card shows only the answer and the question that prompted it is lost.
+    // setFinished clears the running input, so the question is folded into the
+    // finished body instead.
+    if (toolName == u"question"_s) {
+        const QString asked = argsObj.value(u"question"_s).toString().trimmed();
+        if (!asked.isEmpty()) {
+            if (result.output.trimmed().isEmpty()) {
+                result.output = asked;
+            } else if (!result.output.contains(asked.left(40))) {
+                result.output = asked + u"\n\n— Answer: "_s + result.output;
+            }
+        }
+    }
     toolWidget->setFinished(result);
 
     m_toolCallWidgets.insert(toolCallId, toolWidget);
@@ -6008,8 +6126,15 @@ void ChatWidget::rebuildTranscript()
             }
             Suggestion suggestion;
             suggestion.text = restoredArgs.value(u"suggestion"_s).toString();
-            suggestion.path = restoredArgs.value(u"path"_s).toString();
-            suggestion.line = restoredArgs.value(u"line"_s).toInt();
+            suggestion.path = restoredArgs.value(u"path"_s).toString().trimmed();
+            const QJsonValue restoredLine = restoredArgs.value(u"line"_s);
+            if (restoredLine.isDouble()) {
+                suggestion.line = restoredLine.toInt();
+            } else if (restoredLine.isString()) {
+                suggestion.line = restoredLine.toString().trimmed().toInt();
+            } else {
+                suggestion.line = 0;
+            }
             placed.insert(toolCallId);
             if (suggestion.text.isEmpty()) {
                 return;

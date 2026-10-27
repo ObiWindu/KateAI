@@ -133,6 +133,11 @@ public:
     // level. Returns false when no live session or effort option exists.
     bool setEffort(const QString &effortId);
 
+    // Builds the card request for an ACP tool_call payload. Pure function of
+    // the JSON: public so tests can pin the OpenCode argument shapes
+    // (camelCase filePath, oldText/newText, content/contents).
+    PermissionRequest permissionFromToolCall(const QJsonObject &toolCall) const;
+
 Q_SIGNALS:
     void ready();
     void failed(const QString &error);
@@ -253,7 +258,6 @@ private:
     QJsonArray mcpServersPayload() const;
     QJsonObject sessionMeta() const;
     QJsonArray promptBlocks(const QString &text) const;
-    PermissionRequest permissionFromToolCall(const QJsonObject &toolCall) const;
     QString pickPermissionOption(PermissionDecision decision) const;
     bool autoResolvePermission(const PermissionRequest &request);
     QString sliceLines(const QString &text, int line, int limit) const;

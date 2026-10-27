@@ -139,6 +139,13 @@ target_link_libraries(test_toolcardparity PRIVATE kateai_core Qt6::Test Qt6::Wid
 target_compile_definitions(test_toolcardparity PRIVATE TRANSLATION_DOMAIN="kateai")
 add_test(NAME test_toolcardparity COMMAND test_toolcardparity -platform offscreen)
 
+# The OpenCode ACP agent's tool names must all resolve to proper cards:
+# icons, labels, colours, detail surfaces and ACP argument shapes.
+add_executable(test_opencodecards test_opencodecards.cpp ../src/toolcallwidget.cpp ../src/chattheme.cpp)
+target_link_libraries(test_opencodecards PRIVATE kateai_core Qt6::Test Qt6::Widgets)
+target_compile_definitions(test_opencodecards PRIVATE TRANSLATION_DOMAIN="kateai")
+add_test(NAME test_opencodecards COMMAND test_opencodecards -platform offscreen)
+
 add_executable(test_promptedit test_promptedit.cpp ../src/promptedit.cpp)
 target_link_libraries(test_promptedit PRIVATE kateai_core Qt6::Test)
 add_test(NAME test_promptedit COMMAND test_promptedit -platform offscreen)

@@ -46,6 +46,9 @@ public:
     void startAgent(const QString &agentName, const QString &modeId, const QString &description);
     // One line of progress from the sub-agent's own tool activity.
     void appendActivity(const QString &line, bool isError);
+    // Live partial output from a running child tool (bash stream, fetch
+    // progress). Shown immediately so the card reads as live.
+    void setPartialOutput(const QString &partial);
     // Incremental user-facing text from the sub-agent while it is running.
     void appendMessageDelta(const QString &delta);
     // Finishes the card; `output` is the answer the orchestrator received.
@@ -86,6 +89,12 @@ protected:
     // without bound.
     QList<QPair<QString, bool>> m_activityLog;
     QString m_streamedMessage;
+    // Deltas that arrived before startAgent (toolStarted creates the card
+    // before subtaskStarted marks it running). Kept so early streaming text
+    // is not silently dropped.
+    QString m_pendingStreamed;
+    // Latest live tool output for the Doing: line.
+    QString m_partialOutput;
     bool m_currentIsError = false;
     bool m_running = false;
     bool m_failed = false;

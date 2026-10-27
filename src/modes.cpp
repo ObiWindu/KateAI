@@ -427,7 +427,8 @@ ModeDefinition ModeRegistry::modeOrDefault(const QString &id) const
     fallback.id = u"code"_s;
     fallback.name = u"Code"_s;
     fallback.builtIn = true;
-    fallback.groups = {ToolGroup::read(), ToolGroup::edit(), ToolGroup::command(), ToolGroup::mcp(), ToolGroup::web()};
+    fallback.groups = {ToolGroup::read(), ToolGroup::edit(), ToolGroup::command(), ToolGroup::mcp(), ToolGroup::web(),
+                       ToolGroup::orchestrate()};
     return fallback;
 }
 
@@ -451,7 +452,16 @@ ModeDefinition ModeRegistry::parseModeFile(const QString &path, bool *ok)
     if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
         return {};
     }
-    const QString document = QString::fromUtf8(file.readAll());
+    // Bound memory: a malicious workspace could otherwise OOM the UI on every
+    // setWorkspace() with a huge modes/*.md (e.g. build artifact).
+    constexpr qint64 kMaxModeFileBytes = 256 * 1024;
+    if (file.size() > kMaxModeFileBytes) {
+        return {};
+    }
+    const QString document = QString::fromUtf8(file.read(kMaxModeFileBytes + 1));
+    if (document.size() > kMaxModeFileBytes) {
+        return {};
+    }
     const QString fallbackId = slugify(QFileInfo(path).completeBaseName());
     bool parsed = false;
     ModeDefinition mode = parseModeDocument(document, fallbackId, &parsed);

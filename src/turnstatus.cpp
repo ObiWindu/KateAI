@@ -46,6 +46,7 @@ TurnStatus::TurnStatus(QWidget *parent)
     setObjectName(u"turnStatus"_s);
     setCursor(Qt::PointingHandCursor);
     setToolTip(i18n("Scroll to the newest message"));
+    installEventFilter(this);
 
     auto *layout = new QHBoxLayout(this);
     layout->setContentsMargins(2, 2, 2, 2);
@@ -67,6 +68,11 @@ TurnStatus::TurnStatus(QWidget *parent)
     layout->addWidget(m_idle);
 
     layout->addStretch();
+    // Children eat mouse events by default, so clicks on the text never reach
+    // the widget's eventFilter. Forward them for scroll-to-latest.
+    for (QLabel *label : {m_spinner, m_activity, m_stats, m_idle}) {
+        label->setAttribute(Qt::WA_TransparentForMouseEvents, true);
+    }
 
     m_ticker = new QTimer(this);
     m_ticker->setInterval(120);

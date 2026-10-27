@@ -1,5 +1,8 @@
 #include "types.h"
 
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QTest>
 
 using namespace Qt::Literals::StringLiterals;
@@ -266,6 +269,79 @@ private Q_SLOTS:
         QVERIFY(!usesAcpNative(settings));
         QVERIFY(providerRequiresApiKey(settings, Provider::Acp));
         QCOMPARE(acpAgentDisplayName(settings), u"ACP"_s);
+    }
+
+    void installedAgentIsSelectableAndKeepsItsId()
+    {
+        // Agents installed from the ACP registry get ids the preset list does not
+        // know ("opencode-v2" is not "opencode"). The config page used to fall
+        // back to "custom" for them, which both hid the running agent from the
+        // combo and showed the *custom* cache — a list of free models only — in
+        // the model picker, even though the account was subscribed.
+        Settings settings;
+        settings.provider = Provider::Acp;
+
+        QJsonArray installed;
+        QJsonObject opencode;
+        opencode.insert(u"id"_s, u"opencode-v2"_s);
+        opencode.insert(u"name"_s, u"OpenCode V2"_s);
+        opencode.insert(u"command"_s, u"/opt/kateai/acp-agents/opencode-v2/opencode"_s);
+        opencode.insert(u"args"_s, QJsonArray{u"acp"_s});
+        installed.append(opencode);
+        // grok-build is both installed and a preset: the preset entry must win,
+        // otherwise the combo would list the same agent twice.
+        QJsonObject grok;
+        grok.insert(u"id"_s, u"grok-build"_s);
+        grok.insert(u"name"_s, u"Grok Build"_s);
+        grok.insert(u"command"_s, u"npx"_s);
+        installed.append(grok);
+        settings.acpInstalledAgents =
+            QString::fromUtf8(QJsonDocument(installed).toJson(QJsonDocument::Compact));
+
+        const QList<AcpAgentPreset> choices = acpAgentChoices(settings);
+        QStringList ids;
+        for (const AcpAgentPreset &choice : choices) {
+            ids.append(choice.id);
+        }
+
+        QVERIFY2(ids.contains(u"opencode-v2"_s),
+                 "installed agent missing from the ACP Agent choices");
+        QCOMPARE(ids.count(u"grok-build"_s), 1);
+        // Custom stays selectable and stays last, so it is never the default.
+        QCOMPARE(ids.count(u"custom"_s), 1);
+        QCOMPARE(ids.constLast(), u"custom"_s);
+
+        // The installed agent resolves to the registry name and launch line, so
+        // selecting it does not wipe the command fields.
+        const AcpAgentPreset launch = acpAgentLaunchLine(settings, u"opencode-v2"_s);
+        QCOMPARE(launch.label, u"OpenCode V2"_s);
+        QCOMPARE(launch.command, u"/opt/kateai/acp-agents/opencode-v2/opencode"_s);
+        QCOMPARE(launch.args, u"acp"_s);
+        QCOMPARE(acpAgentDisplayName(settings), u"Grok Build"_s);
+
+        // An agent known to neither keeps an empty launch line: the typed
+        // command/args must not be overwritten by it.
+        settings.acpAgentId = u"something-new"_s;
+        QVERIFY(acpAgentLaunchLine(settings, u"something-new"_s).command.isEmpty());
+    }
+
+    void installedAgentModelsAreReadFromItsOwnCacheKey()
+    {
+        // The picker reads the cache under the agent id, so an installed agent
+        // must be looked up under its own key and never under "custom".
+        Settings settings;
+        QJsonArray installed;
+        QJsonObject opencode;
+        opencode.insert(u"id"_s, u"opencode-v2"_s);
+        opencode.insert(u"name"_s, u"OpenCode V2"_s);
+        installed.append(opencode);
+        settings.acpInstalledAgents =
+            QString::fromUtf8(QJsonDocument(installed).toJson(QJsonDocument::Compact));
+        settings.acpAgentModels = u"{\"custom\":[\"opencode/free-only\"],"
+                                  "\"opencode-v2\":[\"opencode/free\",\"opencode-go/paid\"]}"_s;
+
+        const QStringList models = acpAgentAvailableModels(settings, u"opencode-v2"_s);
+        QCOMPARE(models, (QStringList{u"opencode/free"_s, u"opencode-go/paid"_s}));
     }
 };
 

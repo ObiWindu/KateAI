@@ -7,6 +7,7 @@
 #include "websearch.h"
 
 #include <KConfigGroup>
+#include <QDebug>
 #include <QFile>
 #include <KSharedConfig>
 
@@ -61,7 +62,9 @@ Settings SettingsStore::load()
     }
     s.acpApiKeyEnv = g.readEntry(u"AcpApiKeyEnv"_s, QString());
     if (s.acpApiKeyEnv.trimmed().isEmpty()) {
-        s.acpApiKeyEnv = acpAgentPreset(s.acpAgentId).apiKeyEnv;
+        // acpInstalledAgents is read above, so an installed agent's own
+        // apiKeyEnv is available here.
+        s.acpApiKeyEnv = acpAgentLaunchLine(s, s.acpAgentId).apiKeyEnv;
     }
     s.apiFormat = apiFormatFromId(g.readEntry(u"ApiFormat"_s, apiFormatId(ApiFormat::AcpNative)));
     s.permissionMode = permissionModeFromId(g.readEntry(u"PermissionMode"_s, permissionModeId(PermissionMode::Ask)));
@@ -263,6 +266,22 @@ Settings SettingsStore::load()
     if (s.maxRetryDelaySeconds != 0) {
         s.maxRetryDelaySeconds = qBound(1, s.maxRetryDelaySeconds, 3600);
     }
+    // Unbounded ints from hand-edited configs must not become negative budgets
+    // or unlimited retention. 0 keeps its documented "default/unlimited"
+    // meaning where the code already handles it (llmclient checks >0,
+    // pruneOldConversations treats <=0 as unlimited, so clamp lower bound 1
+    // for the retention/count fields).
+    if (s.maxTokens < 0) {
+        s.maxTokens = 0;
+    }
+    if (s.maxTokens > 200000) {
+        s.maxTokens = 200000;
+    }
+    s.verbosity = qBound(0, s.verbosity, 3);
+    s.maxSavedConversations = qBound(1, s.maxSavedConversations, 1000);
+    s.maxExpandedToolCards = qBound(0, s.maxExpandedToolCards, 100);
+    s.maxGraphNodes = qBound(1, s.maxGraphNodes, 10000);
+    s.maxGraphEdges = qBound(1, s.maxGraphEdges, 50000);
     s.contextWindow = g.readEntry(u"ContextWindow"_s, 0);
     s.keepRecentTokens = g.readEntry(u"KeepRecentTokens"_s, 0);
     s.contextWindowReserve = g.readEntry(u"ContextWindowReserve"_s, 8192);
@@ -277,6 +296,9 @@ Settings SettingsStore::load()
     }
     if (s.contextWindowReserve < 0) {
         s.contextWindowReserve = 0;
+    }
+    if (s.contextWindowReserve > 1000000) {
+        s.contextWindowReserve = 1000000;
     }
     return s;
 }
@@ -321,8 +343,12 @@ void SettingsStore::save(const Settings &settings)
     g.writeEntry(u"MaxModelRequests"_s, settings.maxModelRequests);
     g.writeEntry(u"MaxToolCalls"_s, settings.maxToolCalls);
     g.writeEntry(u"RequestsPerMinute"_s, settings.requestsPerMinute);
-    // Preserve the old key for existing versions/UI.
-    g.writeEntry(u"MaxIterations"_s, settings.maxToolCalls);
+    // Preserve the old key for downgraded clients: only overwrite when the new
+    // value is set, so a first save with maxToolCalls==0 does not erase a
+    // legacy budget another version relies on.
+    if (settings.maxToolCalls > 0) {
+        g.writeEntry(u"MaxIterations"_s, settings.maxToolCalls);
+    }
     g.writeEntry(u"BashTimeoutMs"_s, settings.bashTimeoutMs);
     g.writeEntry(u"PlanMode"_s, settings.planMode);
         g.writeEntry(u"AgentMode"_s, settings.agentMode);
@@ -433,8 +459,16 @@ void SettingsStore::save(const Settings &settings)
         if (file.exists()) {
             const QFileDevice::Permissions wanted =
                 QFileDevice::ReadOwner | QFileDevice::WriteOwner;
-            if ((file.permissions() & QFileDevice::ReadGroup) || (file.permissions() & QFileDevice::ReadOther)) {
-                file.setPermissions(wanted);
+            const auto perms = file.permissions();
+            // Tighten on any group/other/exec bit, not just read bits; ignore
+            // setPermissions failure but warn (backup files *.kateairc~ keep
+            // umask perms — KConfig limitation, keys in memory only briefly).
+            if ((perms & (QFileDevice::ReadGroup | QFileDevice::WriteGroup | QFileDevice::ExeGroup
+                          | QFileDevice::ReadOther | QFileDevice::WriteOther | QFileDevice::ExeOther
+                          | QFileDevice::ExeOwner))) {
+                if (!file.setPermissions(wanted)) {
+                    qWarning() << "KateAI: could not tighten permissions on" << configFile;
+                }
             }
         }
     }

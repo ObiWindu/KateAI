@@ -20,6 +20,7 @@
 #include <QTimer>
 #include <QUrl>
 #include <QUuid>
+#include <limits>
 
 using namespace Qt::Literals::StringLiterals;
 
@@ -1508,6 +1509,10 @@ int AcpClient::sendRequest(const QString &method, const QJsonObject &params,
                            std::function<void(const QJsonObject &, const QString &)> done,
                            int timeoutMs)
 {
+    // int wraps after 2^31 and would collide with live pending ids.
+    if (m_nextId <= 0 || m_nextId == std::numeric_limits<int>::max()) {
+        m_nextId = 1;
+    }
     const int id = m_nextId++;
     Pending pending;
     pending.id = id;
@@ -1664,7 +1669,13 @@ void AcpClient::handleResponse(const QJsonObject &message)
     if (idValue.isDouble()) {
         id = idValue.toInt();
     } else if (idValue.isString()) {
-        id = idValue.toString().toInt();
+        bool ok = false;
+        const int parsed = idValue.toString().toInt(&ok);
+        // "123abc" -> toInt() returns 123; only wholly numeric ids may route.
+        if (!ok || QString::number(parsed) != idValue.toString().trimmed()) {
+            return;
+        }
+        id = parsed;
     } else {
         return;
     }
@@ -1969,6 +1980,9 @@ PermissionRequest AcpClient::permissionFromToolCall(const QJsonObject &toolCall)
         const QJsonObject obj = item.toObject();
         if (obj.value(u"type"_s).toString() == u"diff"_s) {
             request.path = obj.value(u"path"_s).toString();
+            if (request.path.isEmpty()) {
+                request.path = obj.value(u"filePath"_s).toString();
+            }
             request.mutatesFiles = true;
             request.describeDiff = unifiedDiff(request.path,
                                                obj.value(u"oldText"_s).toString(),
@@ -1976,18 +1990,55 @@ PermissionRequest AcpClient::permissionFromToolCall(const QJsonObject &toolCall)
             break;
         }
     }
-    // Check for diff content block which contains the edit details
-    if (request.describeDiff.isEmpty() && request.details.contains(u"old_string"_s)) {
+    // Check for diff content block which contains the edit details.
+    // OpenCode spells the keys camelCase (filePath, oldText/newText) or
+    // content/contents; both shapes are accepted here.
+    QString rawText = request.details;
+    if (request.path.isEmpty() || (request.describeDiff.isEmpty() && rawText.contains(u"old_string"_s))) {
         QString parseError;
         // Create a temporary ToolCall from the JSON details to parse
         ToolCall tempCall;
         tempCall.argumentsJson = request.details;
         QJsonObject args = parseToolArgs(tempCall, &parseError);
-        if (parseError.isEmpty()) {
-            request.path = args.value(u"path"_s).toString();
-            request.describeDiff = unifiedDiff(request.path,
-                                               args.value(u"old_string"_s).toString(),
-                                               args.value(u"new_string"_s).toString());
+        if (parseError.isEmpty() && !args.isEmpty()) {
+            if (request.path.isEmpty()) {
+                request.path = args.value(u"path"_s).toString();
+            }
+            if (request.path.isEmpty()) {
+                request.path = args.value(u"file_path"_s).toString();
+            }
+            if (request.path.isEmpty()) {
+                request.path = args.value(u"filePath"_s).toString();
+            }
+            if (request.path.isEmpty()) {
+                request.path = args.value(u"file"_s).toString();
+            }
+            QString oldText = args.value(u"old_string"_s).toString();
+            QString newText = args.value(u"new_string"_s).toString();
+            if (oldText.isEmpty()) {
+                oldText = args.value(u"oldText"_s).toString();
+            }
+            if (newText.isEmpty()) {
+                newText = args.value(u"newText"_s).toString();
+            }
+            if (request.describeDiff.isEmpty() && (!oldText.isEmpty() || !newText.isEmpty())) {
+                request.describeDiff = unifiedDiff(request.path, oldText, newText);
+                if (!request.path.isEmpty()) {
+                    request.mutatesFiles = true;
+                }
+            }
+            if (request.describeDiff.isEmpty()) {
+                QString content = args.value(u"content"_s).toString();
+                if (content.isEmpty()) {
+                    content = args.value(u"contents"_s).toString();
+                }
+                if (!content.isEmpty() && !request.path.isEmpty()
+                    && (request.toolName.trimmed().toLower().contains(u"write"_s)
+                        || kind == u"write"_s)) {
+                    request.describeDiff = unifiedDiff(request.path, QString(), content);
+                    request.mutatesFiles = true;
+                }
+            }
         }
     }
     return request;
@@ -2086,8 +2137,10 @@ void AcpClient::handleFsRead(const QJsonValue &id, const QJsonObject &params)
         replyError(id, kServerError, u"Could not read %1."_s.arg(path));
         return;
     }
-    const int line = params.value(u"line"_s).toInt(0);
-    const int limit = params.value(u"limit"_s).toInt(0);
+    // Bound memory: whole-file read + split() duplicates; negative previously
+    // meant unlimited. Cap the slice the agent can request per call.
+    const int line = qMax(0, params.value(u"line"_s).toInt(0));
+    const int limit = params.value(u"limit"_s).toInt(0) <= 0 ? 10000 : qMin(params.value(u"limit"_s).toInt(0), 10000);
     QJsonObject result;
     result.insert(u"content"_s, sliceLines(contents, line, limit));
     replyResult(id, result);
@@ -2387,7 +2440,9 @@ void AcpClient::handleTerminalCreate(const QJsonValue &id, const QJsonObject &pa
 
     auto *term = new Terminal;
     term->id = u"term_%1"_s.arg(m_nextTerminal++);
-    term->outputByteLimit = params.value(u"outputByteLimit"_s).toInt(1024 * 1024);
+    // Clamp agent-controlled limit: negative/0 previously disabled the cap and
+    // grew term->output without bound; overly large values OOM the same way.
+    term->outputByteLimit = qBound(64 * 1024, params.value(u"outputByteLimit"_s).toInt(1024 * 1024), 16 * 1024 * 1024);
     term->process = new QProcess(this);
     term->process->setProcessChannelMode(QProcess::MergedChannels);
     term->process->setWorkingDirectory(cwd);

@@ -380,9 +380,14 @@ static QString readMeta(const QSqlDatabase &db, const QString &key)
     return query.value(0).toString();
 }
 
+static void clearMeta(QSqlDatabase db, const QString &key);
+
 static void writeMeta(QSqlDatabase db, const QString &key, const QString &value)
 {
+    // Empty means clear: callers previously had to remember clearMeta, and
+    // saveConversation worked around with a double readMeta query.
     if (value.isEmpty()) {
+        clearMeta(db, key);
         return;
     }
     QSqlQuery query(db);
@@ -894,7 +899,7 @@ void SessionStore::pruneOldConversations(int maxConversations)
     // back to another conversation on the next start.
     QSqlQuery query(db);
     query.prepare(u"DELETE FROM conversations WHERE id NOT IN (SELECT id FROM conversations ORDER BY updated_at DESC LIMIT ?) "
-                  u"AND id != (SELECT value FROM meta WHERE key = ?)"_s);
+                  u"AND id IS NOT (SELECT value FROM meta WHERE key = ?)"_s);
     query.addBindValue(maxConversations);
     query.addBindValue(ACTIVE_CONVERSATION_KEY);
     if (!query.exec()) {

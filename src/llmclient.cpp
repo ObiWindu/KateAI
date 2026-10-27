@@ -330,7 +330,11 @@ CompletionChunk LlmClient::parseSseLine(const QByteArray &line, QHash<int, ToolC
                 // Tool arguments are streamed as JSON fragments; keep them raw
                 // so drainToolAccumulator() can parse the assembled object.
                 ToolCall &tool = (*acc)[root.value(u"index"_s).toInt()];
-                tool.argumentsJson += delta.value(u"partial_json"_s).toString();
+                const QString frag = delta.value(u"partial_json"_s).toString();
+                constexpr qsizetype kMaxToolArgsChars = 1024 * 1024;
+                if (tool.argumentsJson.size() + frag.size() <= kMaxToolArgsChars) {
+                    tool.argumentsJson += frag;
+                }
             }
         } else if (anthropicType == u"content_block_start"_s) {
             const QJsonObject block = root.value(u"content_block"_s).toObject();
@@ -344,7 +348,10 @@ CompletionChunk LlmClient::parseSseLine(const QByteArray &line, QHash<int, ToolC
                 // QJsonValue::toObject()'s empty result on a string.
                 const QJsonValue input = block.value(u"input"_s);
                 if (input.isString() && !input.toString().isEmpty()) {
-                    tool.argumentsJson += input.toString();
+                    constexpr qsizetype kMaxToolArgsChars = 1024 * 1024;
+                    if (tool.argumentsJson.size() + input.toString().size() <= kMaxToolArgsChars) {
+                        tool.argumentsJson += input.toString();
+                    }
                 } else if (input.isObject()) {
                     tool.arguments = input.toObject();
                 }
@@ -440,7 +447,12 @@ CompletionChunk LlmClient::parseSseLine(const QByteArray &line, QHash<int, ToolC
                     } else if (tool.argumentsJson.trimmed() == u"{}"_s) {
                         tool.argumentsJson = fragment;
                     } else {
-                        tool.argumentsJson += fragment;
+                        // Bound memory: attacker-controlled JSON fragments must
+                        // not grow without limit before drainToolAccumulator().
+                        constexpr qsizetype kMaxToolArgsChars = 1024 * 1024;
+                        if (tool.argumentsJson.size() + fragment.size() <= kMaxToolArgsChars) {
+                            tool.argumentsJson += fragment;
+                        }
                     }
                 }
             }
@@ -1162,6 +1174,14 @@ void LlmClient::handleReadyRead()
     // unterminated line that `leftover` holds.
     appendResponseBody(incoming);
     m_buffer.append(incoming);
+    // Bound memory: a non-SSE single-line body would otherwise grow m_buffer
+    // forever (only m_responseBody was capped). Drop the head; SSE framing
+    // resyncs on the next newline.
+    constexpr qsizetype kMaxStreamBufferBytes = 4 * 1024 * 1024;
+    if (m_buffer.size() > kMaxStreamBufferBytes) {
+        m_buffer.remove(0, m_buffer.size() - kMaxStreamBufferBytes);
+        m_pendingEventData.clear();
+    }
     // The watchdog measures idleness, not total duration: restart it on every
     // chunk so a long but healthy stream is never cut off.
     if (QTimer *idleTimer = m_requestTimers.value(m_reply)) {

@@ -22,6 +22,7 @@
 #include "graph/projectgraph.h"
 
 #include <QObject>
+#include <QMutex>
 #include <QPointer>
 #include <QQueue>
 #include <QSet>
@@ -195,6 +196,7 @@ Q_SIGNALS:
     void subtaskStarted(const QString &taskId, const QString &agentId, const QString &agentName, const QString &modeId, const QString &description);
     void subtaskActivity(const QString &taskId, const QString &line, bool isError);
     void subtaskMessageDelta(const QString &taskId, const QString &delta);
+    void subtaskProgress(const QString &taskId, const QString &partialOutput);
     void subtaskFinished(const QString &taskId, bool ok);
 
 private:
@@ -264,6 +266,10 @@ private:
         bool isWebTool(const QString &toolName) const;
         // Issues a web_search / web_fetch and reports back through finishAsyncTool.
         void startWebTool(const ToolCall &call);
+    // Unified args: parseToolArgs prefers pre-parsed `arguments`, falls back to
+    // `argumentsJson`. Permission, locks and cards must use this, not
+    // `call.arguments` directly, or LLM-path calls bypass policy.
+    QJsonObject effectiveArgs(const ToolCall &call) const;
     // Takes the shared edit lock for a mutating tool, if the team has one.
     bool acquireEditLock(const ToolCall &call, QString *deniedBy);
     void releaseEditLocksFor(const ToolCall &call);
@@ -358,7 +364,10 @@ LlmClient m_client;
     // instead of aborting the prompt.
     int m_compactionLevel = 0;
     int m_contextOverflowRetries = 0;
-    QQueue<qint64> m_modelRequestTimes;
+    mutable QQueue<qint64> m_modelRequestTimes;
+    // Guard for the pacing queue; mutable so the const delay query can prune
+    // expired entries without const_cast.
+    mutable QMutex m_rateMutex;
     QTimer m_nextModelTimer;
 
     quint64 m_stateEpoch = 0;

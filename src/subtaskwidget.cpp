@@ -194,6 +194,8 @@ void SubtaskWidget::startAgent(const QString &agentName, const QString &modeId, 
     m_bodyCaption->setVisible(!m_description.isEmpty());
     m_currentLine.clear();
     m_streamedMessage.clear();
+    m_pendingStreamed.clear();
+    m_partialOutput.clear();
     m_currentIsError = false;
     m_current->clear();
     // A fresh run starts a fresh log; the previous run's steps left with its
@@ -205,6 +207,13 @@ void SubtaskWidget::startAgent(const QString &agentName, const QString &modeId, 
     updateElapsed();
     applyStyle();
     reflowNow();
+    // Deltas that arrived between toolStarted and subtaskStarted were buffered;
+    // replay them now that the card is running.
+    if (!m_pendingStreamed.isEmpty()) {
+        const QString buffered = m_pendingStreamed;
+        m_pendingStreamed.clear();
+        appendMessageDelta(buffered);
+    }
 }
 
 void SubtaskWidget::appendActivity(const QString &line, bool isError)
@@ -253,7 +262,14 @@ void SubtaskWidget::rebuildActivityLog()
 
 void SubtaskWidget::appendMessageDelta(const QString &delta)
 {
-    if (delta.isEmpty() || !m_running) {
+    if (delta.isEmpty()) {
+        return;
+    }
+    if (!m_running) {
+        // The card exists (toolStarted) but the agent has not started yet
+        // (subtaskStarted): buffer instead of dropping, so early streaming
+        // text survives.
+        m_pendingStreamed += delta;
         return;
     }
     m_streamedMessage += delta;
@@ -265,11 +281,41 @@ void SubtaskWidget::appendMessageDelta(const QString &delta)
     reflowNow();
 }
 
+void SubtaskWidget::setPartialOutput(const QString &partial)
+{
+    if (partial.isEmpty() || !m_running) {
+        // Buffer the latest chunk when the card is not running yet; it will
+        // surface as the Doing: line once the run starts.
+        if (!partial.isEmpty() && !m_running) {
+            m_partialOutput = partial;
+        }
+        return;
+    }
+    m_partialOutput = partial;
+    // Show the tail of the live output as the current step, so a long command
+    // reads as it runs instead of only the tool name.
+    QString tail = partial.trimmed();
+    const int newline = tail.lastIndexOf(u'\n');
+    if (newline >= 0) {
+        tail = tail.mid(newline + 1);
+    }
+    tail = tail.left(200).trimmed();
+    if (!tail.isEmpty()) {
+        m_currentLine = tail;
+        m_currentIsError = false;
+        updateCurrentActivity();
+        updateElapsed();
+        reflowNow();
+    }
+}
+
 void SubtaskWidget::finishAgent(const ToolResult &result)
 {
     m_running = false;
     m_failed = !result.ok && !result.cancelled;
     m_cancelled = result.cancelled;
+    m_pendingStreamed.clear();
+    m_partialOutput.clear();
     if (m_ticker) {
         m_ticker->stop();
     }

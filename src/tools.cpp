@@ -136,8 +136,23 @@ static QString quoteShellArg(const QString &s)
 
 QString shellCommandFor(const QString &toolName, const QJsonObject &args)
 {
-    if (toolName == u"read_file"_s || toolName == u"fs/read_text_file"_s) {
-        const QString path = quoteShellArg(args.value(u"path"_s).toString());
+    const QString key = toolName.trimmed().toLower();
+    // OpenCode ACP aliases resolve to the same summaries as the native tools.
+    auto argPath = [&args]() -> QString {
+        QString path = args.value(u"path"_s).toString();
+        if (path.isEmpty()) {
+            path = args.value(u"file_path"_s).toString();
+        }
+        if (path.isEmpty()) {
+            path = args.value(u"filePath"_s).toString();
+        }
+        if (path.isEmpty()) {
+            path = args.value(u"file"_s).toString();
+        }
+        return path;
+    };
+    if (toolName == u"read_file"_s || toolName == u"fs/read_text_file"_s || key == u"read"_s) {
+        const QString path = quoteShellArg(argPath());
         const int offset = args.value(u"offset"_s).toInt(args.value(u"line"_s).toInt(1));
         const int limit = args.value(u"limit"_s).toInt(args.value(u"limit"_s).toInt(0));
         if (limit > 0) {
@@ -149,11 +164,11 @@ QString shellCommandFor(const QString &toolName, const QJsonObject &args)
         }
         return u"cat %1"_s.arg(path);
     }
-    if (toolName == u"write_file"_s || toolName == u"fs/write_text_file"_s) {
-        return u"cat > %1"_s.arg(quoteShellArg(args.value(u"path"_s).toString()));
+    if (toolName == u"write_file"_s || toolName == u"fs/write_text_file"_s || key == u"write"_s) {
+        return u"cat > %1"_s.arg(quoteShellArg(argPath()));
     }
-    if (toolName == u"edit_file"_s) {
-        return u"patch %1"_s.arg(quoteShellArg(args.value(u"path"_s).toString()));
+    if (toolName == u"edit_file"_s || key == u"edit"_s || key == u"patch"_s) {
+        return u"patch %1"_s.arg(quoteShellArg(argPath()));
     }
     if (toolName == u"multi_edit_file"_s || toolName == u"multi_replace_file_content"_s) {
         const QString rawPath = args.value(u"path"_s).toString().isEmpty()
@@ -169,11 +184,11 @@ QString shellCommandFor(const QString &toolName, const QJsonObject &args)
         }
         return u"patch %1 (%2 edits)"_s.arg(path).arg(edits.size());
     }
-    if (toolName == u"list_dir"_s) {
-        const QString path = args.value(u"path"_s).toString();
+    if (toolName == u"list_dir"_s || key == u"list"_s) {
+        const QString path = argPath();
         return path.isEmpty() ? u"ls"_s : u"ls %1"_s.arg(quoteShellArg(path));
     }
-    if (toolName == u"grep"_s) {
+    if (toolName == u"grep"_s || key == u"search"_s) {
         QString cmd = u"grep -n"_s;
         if (jsonBool(args.value(u"case_insensitive"_s))) {
             cmd += u" -i"_s;
@@ -194,11 +209,21 @@ QString shellCommandFor(const QString &toolName, const QJsonObject &args)
         return cmd;
     }
     if (toolName == u"glob"_s) {
-        const QString pattern = args.value(u"pattern"_s).toString();
+        QString pattern = args.value(u"pattern"_s).toString();
+        if (pattern.isEmpty()) {
+            pattern = args.value(u"glob"_s).toString();
+        }
         return u"find . -name %1"_s.arg(quoteShellArg(pattern));
     }
-    if (toolName == u"bash"_s) {
-        return args.value(u"command"_s).toString();
+    if (toolName == u"bash"_s || key == u"execute"_s) {
+        QString command = args.value(u"command"_s).toString();
+        if (command.isEmpty()) {
+            command = args.value(u"cmd"_s).toString();
+        }
+        if (command.isEmpty()) {
+            command = args.value(u"script"_s).toString();
+        }
+        return command;
     }
     if (toolName == u"query_project_graph"_s) {
         const QString type = args.value(u"query_type"_s).toString();
@@ -212,7 +237,7 @@ QString shellCommandFor(const QString &toolName, const QJsonObject &args)
         }
         return cmd;
     }
-    if (toolName == u"new_task"_s) {
+    if (toolName == u"new_task"_s || key == u"task"_s) {
         const QString mode = args.value(u"mode"_s).toString();
         const QString description = args.value(u"description"_s).toString();
         const QString label = mode.isEmpty() ? QStringLiteral("code") : mode;
@@ -477,8 +502,15 @@ PermissionRequest ToolRunner::describe(const ToolCall &call) const
         QString error;
         const QString resolved = m_sandbox.resolve(req.path, &error, true);
         req.resolvedPath = resolved;
+        // Do not preview deny-listed content: resolve() checked write access;
+        // read access is separate and the preview is shown in the approval card.
         if (!resolved.isEmpty() && m_bridge) {
-            m_bridge->readDocument(resolved, &existing);
+            QString readError;
+            if (m_sandbox.allowsRead(resolved, &readError)) {
+                m_bridge->readDocument(resolved, &existing);
+            } else {
+                existing = u"(preview unavailable: read blocked by sandbox)"_s;
+            }
         }
         req.describeDiff = unifiedDiff(req.path, existing, args.value(u"content"_s).toString());
         req.details = req.describeDiff;
@@ -548,6 +580,13 @@ PermissionRequest ToolRunner::describe(const ToolCall &call) const
             }
         }
         req.allowFreeform = jsonBool(args.value(u"allow_freeform"_s), true);
+        req.details = QString::fromUtf8(QJsonDocument(args).toJson(QJsonDocument::Compact));
+    } else if (call.name == u"suggest"_s) {
+        // Advice, not work: read risk so it never prompts, and the full
+        // arguments as details so the card can be built while the tool runs
+        // and the history can rebuild it later.
+        req.risk = ToolRisk::Read;
+        req.path = args.value(u"path"_s).toString().trimmed();
         req.details = QString::fromUtf8(QJsonDocument(args).toJson(QJsonDocument::Compact));
     } else {
         // Unknown tools reach the permission card from here. A delegation or
@@ -660,9 +699,21 @@ ToolResult ToolRunner::readFile(const QJsonObject &args) const
         }
     }
 
-    // Apply offset and limit parameters to paginate the file contents
+    // Apply offset and limit parameters to paginate the file contents.
+    // Reject non-positive values explicitly instead of silently clamping:
+    // offset=0/-5 or limit<0 previously read from the top / unlimited.
     const int offset = jsonInt(args.value(u"offset"_s), 1);
     const int limit = jsonInt(args.value(u"limit"_s), 0);
+    if (offset < 1) {
+        result.ok = false;
+        result.output = u"offset must be >= 1."_s;
+        return result;
+    }
+    if (limit < 0) {
+        result.ok = false;
+        result.output = u"limit must be >= 0."_s;
+        return result;
+    }
     constexpr int kMaxReadLines = 10000;
     const int cappedLimit = limit > 0 ? qMin(limit, kMaxReadLines) : 0;
     int start = std::max(0, offset - 1);
@@ -1104,10 +1155,12 @@ ToolResult ToolRunner::listDir(const QJsonObject &args) const
     QVector<QPair<QString, QString>> visibleEntries;
     QDirIterator iterator(resolved, QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden);
     bool truncated = false;
+    int skippedDenied = 0;
     while (iterator.hasNext()) {
         iterator.next();
         const QFileInfo info = iterator.fileInfo();
         if (m_sandbox.isDenied(info.absoluteFilePath())) {
+            ++skippedDenied;
             continue;
         }
         if (visibleEntries.size() >= kMaxDirectoryEntries) {
@@ -1131,6 +1184,9 @@ ToolResult ToolRunner::listDir(const QJsonObject &args) const
         outputChars += addedChars;
     }
     result.output = lines.isEmpty() ? u"(empty)"_s : lines.join(u'\n');
+    if (skippedDenied > 0) {
+        result.output += u"\n[%1 entry(s) hidden by sandbox deny rules.]"_s.arg(skippedDenied);
+    }
     if (truncated) {
         result.output += u"\n[Listing truncated; refine the directory path to see more entries.]"_s;
     }
@@ -1304,6 +1360,7 @@ ToolResult ToolRunner::glob(const QJsonObject &args) const
     // Collect all matching files by recursively searching from `base`
     QStringList matches;
     bool capped = false;
+    int skippedDenied = 0;
     QDirIterator it(base, QDir::Files, QDirIterator::Subdirectories);
     while (it.hasNext()) {
         if (matches.size() >= 400) {
@@ -1314,6 +1371,7 @@ ToolResult ToolRunner::glob(const QJsonObject &args) const
 
         // Skip files that are denied by the sandbox for security
         if (m_sandbox.isDenied(filePath)) {
+            ++skippedDenied;
             continue;
         }
 
@@ -1333,6 +1391,9 @@ ToolResult ToolRunner::glob(const QJsonObject &args) const
 
     // Format the output with either the matched files or a "no matches" message
     result.output = matches.isEmpty() ? u"No files matched."_s : matches.join(u'\n');
+    if (skippedDenied > 0) {
+        result.output += u"\n[%1 file(s) hidden by sandbox deny rules.]"_s.arg(skippedDenied);
+    }
     if (capped) {
         result.output += u"\n[Listing capped at 400 matches; narrow the pattern or set a path to see more.]"_s;
     }
@@ -1412,12 +1473,20 @@ ToolResult ToolRunner::bash(const QJsonObject &args)
     // waitForFinished() left the draining to Qt's internals; this way a
     // command that writes more than the OS pipe buffer can never wedge both
     // ends of the pipe.
+    // Bound memory: a command writing gigabytes would otherwise fill RAM
+    // before the timeout kills it (async path caps at kMaxBashOutputChars).
+    constexpr qint64 kMaxSyncBashBytes = 4 * 1024 * 1024;
     QByteArray output;
     QElapsedTimer elapsed;
     elapsed.start();
     bool timedOut = false;
+    bool outputCapped = false;
     while (true) {
         output += process.readAll();
+        if (output.size() > kMaxSyncBashBytes) {
+            outputCapped = true;
+            break;
+        }
         if (process.waitForFinished(50)) {
             break;
         }
@@ -1428,6 +1497,23 @@ ToolResult ToolRunner::bash(const QJsonObject &args)
             timedOut = true;
             break;
         }
+    }
+    if (outputCapped) {
+#ifdef Q_OS_UNIX
+        if (process.processId() > 0) {
+            ::kill(-static_cast<pid_t>(process.processId()), SIGKILL);
+        }
+#endif
+        process.kill();
+        process.waitForFinished(2000);
+        // Keep head+tail like clip(): tail holds the failure summary.
+        const QString full = QString::fromUtf8(output.left(kMaxSyncBashBytes));
+        ToolResult capped = finishBashOutput(full, -1, false);
+        capped.ok = false;
+        capped.output = u"Output exceeded %1 MB and the command was killed.\n"_s.arg(
+                            kMaxSyncBashBytes / (1024 * 1024))
+            + capped.output;
+        return capped;
     }
     output += process.readAll();
 
@@ -1528,6 +1614,19 @@ void ToolRunner::runBashAsync(const ToolCall &call)
         ::setsid();
     });
 #endif
+    // Model-supplied ids are not guaranteed unique (retries/subtasks reuse
+    // ids). Overwriting would leak the old QProcess and lose its kill handle,
+    // with two finished handlers firing for one id.
+    if (m_bashProcesses.contains(callId)) {
+        process->deleteLater();
+        ToolResult failed;
+        failed.toolCallId = callId;
+        failed.name = u"bash"_s;
+        failed.ok = false;
+        failed.output = u"Duplicate tool call id: a bash command with this id is already running."_s;
+        Q_EMIT bashFinished(failed);
+        return;
+    }
     m_bashProcesses.insert(callId, process);
 
     // Reads whatever has arrived since the last visit and returns the
@@ -1837,17 +1936,19 @@ ToolResult ToolRunner::suggest(const QJsonObject &args)
     const QString path = args.value(u"path"_s).toString().trimmed();
     int line = 0;
     const QJsonValue lineValue = args.value(u"line"_s);
-    if (lineValue.isDouble()) {
-        line = lineValue.toInt();
-        if (line < 1) {
+    if (lineValue.isUndefined() || lineValue.isNull()) {
+        line = 0;
+    } else {
+        // The model often sends numbers as strings ("5"); QJsonValue::toInt()
+        // silently yields 0 for those, which would drop the anchor. jsonInt
+        // accepts both forms.
+        const int parsed = jsonInt(lineValue, -1);
+        if (parsed < 1) {
             result.ok = false;
             result.output = u"line must be a 1-based line number, or leave it out."_s;
             return result;
         }
-    } else if (!lineValue.isUndefined() && !lineValue.isNull()) {
-        result.ok = false;
-        result.output = u"line must be a 1-based line number, or leave it out."_s;
-        return result;
+        line = parsed;
     }
 
     // Nothing is executed here: the card the user sees is built from the tool

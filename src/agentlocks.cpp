@@ -40,6 +40,9 @@ bool WorkspaceLocks::tryAcquire(const QString &path, const QString &owner)
 {
     const QString key = normalize(path);
     if (key.isEmpty()) {
+        // Empty path (tool without a file argument): acquirable by design,
+        // pinned by test_multiagent::emptyPathsAreAlwaysAcquirable. Path
+        // validation happens in the tool/sandbox layer.
         return true;
     }
     const auto it = m_locks.constFind(key);
