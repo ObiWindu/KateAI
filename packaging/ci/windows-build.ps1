@@ -22,6 +22,14 @@ $ErrorActionPreference = "Stop"
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
 Set-Location $Root
 
+# Craft's MSVC toolchain aborts when sh.exe (Git\bin) or a MinGW gcc sits in
+# PATH, and the same pollution breaks its Visual Studio detection. The hosted
+# runner ships both. Strip those entries (keeping Git\cmd for git.exe); Craft
+# brings its own toolchain and the runner's cmake/ninja stay on PATH.
+$env:PATH = ($env:PATH -split ';' | Where-Object {
+    $_ -and $_ -notmatch '(?i)Git\\bin' -and $_ -notmatch '(?i)mingw'
+}) -join ';'
+
 function Invoke-CraftEnv {
     $craftEnv = Join-Path $CraftRoot "craft\craftenv.ps1"
     if (-not (Test-Path $craftEnv)) {
