@@ -12,6 +12,11 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "${ROOT}"
+# GitHub macOS images export ANDROID_SDK_ROOT/ANDROID_NDK, which makes
+# CraftBootstrap.isAndroid() true and produces an android-clang-arm64 ABI.
+# KateAI does not build for Android: drop those markers for everything
+# Craft-related in this script (also inherited by macos-build.sh below).
+unset ANDROID_SDK_ROOT ANDROID_NDK
 # shellcheck source=scripts/kateai-platform.sh
 source "${ROOT}/scripts/kateai-platform.sh"
 
@@ -43,8 +48,13 @@ if [[ ! -f "${CRAFT_ROOT}/craft/craftenv.sh" ]]; then
     echo "See https://community.kde.org/Get_Involved/development/Mac" >&2
     exit 1
 fi
+echo "==> Loading Craft environment"
+# craftenv.sh is not written with `set -u` in mind (unbound
+# CRAFT_PYTHON_BIN aborts the source); relax nounset across the source.
+set +u
 # shellcheck source=/dev/null
 source "${CRAFT_ROOT}/craft/craftenv.sh"
+set -u
 
 if [[ "${SKIP_KATE}" -eq 0 ]]; then
     echo "==> Building latest Kate via Craft"
