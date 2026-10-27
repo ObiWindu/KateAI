@@ -140,5 +140,5 @@ private:
     }
 };
 
-QTEST_MAIN(TestRules)
+QTEST_GUILESS_MAIN(TestRules)
 #include "test_rules.moc"
