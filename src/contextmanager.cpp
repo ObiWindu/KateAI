@@ -10,6 +10,7 @@
 
 #include <QJsonDocument>
 #include <QRegularExpression>
+#include <limits>
 
 using namespace Qt::Literals::StringLiterals;
 
@@ -30,11 +31,16 @@ constexpr int kMinBudget = 512;
 
 int tokensOf(const ChatMessage &message)
 {
-    int total = kTokensPerMessageOverhead + estimateTokens(message.content) + estimateTokens(message.thinking);
+    // qint64 accumulator then saturate: huge tool output must not wrap to
+    // negative and bypass the budget check.
+    qint64 total = (qint64)kTokensPerMessageOverhead + estimateTokens(message.content) + estimateTokens(message.thinking);
     for (const QJsonValue &value : message.toolCalls) {
         total += estimateTokens(QString::fromUtf8(QJsonDocument(value.toObject()).toJson(QJsonDocument::Compact)));
+        if (total > std::numeric_limits<int>::max()) {
+            return std::numeric_limits<int>::max();
+        }
     }
-    return total;
+    return (int)qMin<qint64>(total, std::numeric_limits<int>::max());
 }
 
 bool startsToolGroup(const QList<ChatMessage> &history, int index)
@@ -112,11 +118,14 @@ int estimateTokens(const QString &text)
 
 int estimateTokens(const QList<ChatMessage> &messages)
 {
-    int total = 0;
+    qint64 total = 0;
     for (const ChatMessage &message : messages) {
         total += tokensOf(message);
+        if (total > std::numeric_limits<int>::max()) {
+            return std::numeric_limits<int>::max();
+        }
     }
-    return total;
+    return (int)total;
 }
 
 int contextWindowFor(const QString &model)
@@ -278,8 +287,12 @@ void shrinkToBudget(QList<ChatMessage> &result, int budget, int lastProtected)
             continue;
         }
         ChatMessage trimmed = result.at(i);
+        // qint64 math: excess (int) * kCharsPerToken overflows before /4 for
+        // budgets near INT_MAX. Saturate instead of UB.
+        const qint64 cutChars = (qint64)excess * kCharsPerToken;
+        const qint64 keep64 = (qint64)trimmed.content.length() - cutChars;
         const int keepChars = qMax(summaryHeader().length() + 8,
-                                   trimmed.content.length() - excess * kCharsPerToken);
+                                   (int)qBound<qint64>(0, keep64, (qint64)std::numeric_limits<int>::max()));
         trimmed.content = trimmed.content.left(keepChars);
         result[i] = trimmed;
         break;

@@ -125,9 +125,14 @@ static KateAi::Suggestion suggestionFromRequest(const KateAi::PermissionRequest 
 // queue.
 bool isFileMutatingTool(const QString &toolName)
 {
+    // Native names plus the OpenCode ACP aliases (write, edit, patch), which
+    // the edit tracker also learns about through mutatesFiles on live cards;
+    // this list drives risk colouring and the working label, where the ACP
+    // kind is not available.
     return toolName == u"write_file"_s || toolName == u"edit_file"_s || toolName == u"multi_edit_file"_s
         || toolName == u"multi_replace_file_content"_s
-        || toolName == u"fs/write_text_file"_s;
+        || toolName == u"fs/write_text_file"_s
+        || toolName == u"write"_s || toolName == u"edit"_s || toolName == u"patch"_s;
 }
 
 // The welcome screen's suggestion chips share one style; kept in a function so
@@ -183,6 +188,9 @@ QString elideMiddle(QString text, int max)
 {
     text = text.simplified().replace(u'\n', u' ', Qt::CaseInsensitive);
     text.replace(u"  "_s, u" "_s);
+    if (max <= 4) {
+        return text.left(qMax(0, max));
+    }
     if (text.size() <= max) {
         return text;
     }
@@ -212,11 +220,12 @@ QString toolTargetLabel(const QString &toolName, const KateAi::PermissionRequest
     QString path = request.path;
     if (path.isEmpty()) {
         path = jsonArg(request.details, {u"path"_s, u"file_path"_s, u"filePath"_s, u"file"_s,
-                                        u"dir_path"_s, u"directory"_s, u"root_path"_s});
+                                        u"dir_path"_s, u"dirPath"_s, u"directory"_s,
+                                        u"root_path"_s, u"rootPath"_s});
     }
 
     const bool searches = toolName == u"grep"_s || toolName == u"glob"_s || toolName == u"web_search"_s
-        || toolName == u"query_project_graph"_s;
+        || toolName == u"websearch"_s || toolName == u"query_project_graph"_s || toolName == u"search"_s;
     QString pattern = jsonArg(request.details, {u"pattern"_s, u"query"_s, u"regex"_s, u"question"_s});
     if (pattern.isEmpty()) {
         pattern = request.summary.trimmed();
@@ -252,21 +261,27 @@ QString workingLabelForTool(const QString &toolName, const KateAi::PermissionReq
     // to, which is the half the user needs to tell two reads apart.
     const QString target = toolTargetLabel(toolName, request, workspace);
     if (isFileMutatingTool(toolName) || toolName == u"edit"_s || toolName == u"str_replace"_s
-        || toolName == u"write"_s || toolName == u"delete"_s) {
+        || toolName == u"write"_s || toolName == u"delete"_s || toolName == u"patch"_s) {
         return i18n("Editing") + target;
     }
     if (toolName == u"read_file"_s || toolName == u"fs/read_text_file"_s || toolName == u"read"_s) {
         return i18n("Reading") + target;
     }
     if (toolName == u"grep"_s || toolName == u"glob"_s || toolName == u"web_search"_s
-        || toolName == u"query_project_graph"_s || toolName == u"search"_s) {
+        || toolName == u"websearch"_s || toolName == u"query_project_graph"_s || toolName == u"search"_s) {
         return i18n("Searching") + target;
     }
-    if (toolName == u"list_dir"_s) {
+    if (toolName == u"list_dir"_s || toolName == u"list"_s) {
         return i18n("Listing") + target;
     }
     if (toolName == u"bash"_s || toolName == u"execute"_s || toolName.startsWith(u"terminal/"_s)) {
         return i18n("Running") + target;
+    }
+    if (toolName == u"webfetch"_s || toolName == u"web_fetch"_s) {
+        return i18n("Fetching") + target;
+    }
+    if (toolName == u"task"_s || toolName == u"todowrite"_s || toolName == u"todoread"_s) {
+        return i18n("Working") + target;
     }
 
     if (toolName == u"question"_s) {
@@ -1119,11 +1134,15 @@ ChatWidget::ChatWidget(QWidget *parent)
         if (QWidget *approvalRow = widget->approvalRow()) {
             moveToIntentDock(approvalRow);
         }
-        connect(widget, &ToolCallWidget::approvalChosen, this, [this, widget, request](PermissionDecision decision) {
-            widget->setApprovalResolved(decision);
-            updateIntentDockVisibility();
-            m_agent.resolvePermission(decision);
-        }, Qt::SingleShotConnection);
+        connect(widget, &ToolCallWidget::approvalChosen, this,
+                [this, guard = QPointer<ToolCallWidget>(widget)](PermissionDecision decision) {
+                    if (guard) {
+                        guard->setApprovalResolved(decision);
+                    }
+                    updateIntentDockVisibility();
+                    m_agent.resolvePermission(decision);
+                },
+                Qt::SingleShotConnection);
         m_turnStatus->setActivity(i18n("Waiting for approval"));
         m_prompt->setEnabled(false);
         updateSendButtonState();
@@ -2630,7 +2649,9 @@ QPushButton *ChatWidget::createCopyButton(const QString &textToCopy, QWidget *pa
         if (text.isEmpty()) {
             text = m_streamText;
         }
-        QGuiApplication::clipboard()->setText(text);
+        if (QClipboard *clipboard = QGuiApplication::clipboard()) {
+            clipboard->setText(text);
+        }
         btn->setText(i18n("✓ Copied"));
         btn->setStyleSheet(
             QStringLiteral(
@@ -2907,9 +2928,15 @@ void ChatWidget::clearIntentDock()
     }
     while (QLayoutItem *item = m_intentDockLayout->takeAt(0)) {
         if (QWidget *widget = item->widget()) {
-            // Delete rather than unparent: an approval row was reparented into
-            // the dock, so it is no longer a child of its tool card and would
-            // simply leak. Callers must clear their own bookkeeping first.
+            // An approval row was reparented into the dock, so it is no longer
+            // a child of its tool card. Null the owner's pointer first, or the
+            // card keeps a dangling m_approvalRow after this delete.
+            for (auto *card : std::as_const(m_toolCallWidgets)) {
+                if (card && card->approvalRow() == widget) {
+                    card->detachApprovalRow();
+                    break;
+                }
+            }
             delete widget;
         }
         delete item;
@@ -5592,10 +5619,24 @@ void ChatWidget::clearTranscriptContents()
         m_indicatorTimer->stop();
     }
 
+    // Detach docked approval rows first so their cards null the pointer;
+    // deleting cards first would leave the dock delete with no owner to detach.
+    clearQuestionCards();
+    clearIntentDock();
+    for (auto *card : std::as_const(m_toolCallWidgets)) {
+        if (card && m_transcriptLayout && m_transcriptLayout->indexOf(card) >= 0) {
+            m_transcriptLayout->removeWidget(card);
+        }
+    }
     qDeleteAll(m_toolCallWidgets);
     m_toolCallWidgets.clear();
     m_toolCallOrder.clear();
     for (auto it = m_subtaskWidgets.begin(); it != m_subtaskWidgets.end(); ++it) {
+        // Remove from the transcript first so the generic sweep below does not
+        // delete the same QWidget a second time.
+        if (m_transcriptLayout && m_transcriptLayout->indexOf(it.value()) >= 0) {
+            m_transcriptLayout->removeWidget(it.value());
+        }
         delete it.value();
     }
     m_subtaskWidgets.clear();
@@ -5605,12 +5646,8 @@ void ChatWidget::clearTranscriptContents()
     // would dangle once the generic teardown below deletes them.
     clearSuggestionCards();
     m_pendingSuggestions.clear();
-    // Question cards live in the intent dock while they wait for an answer, so
-    // they have to be dropped explicitly rather than by the transcript sweep.
-    clearQuestionCards();
-    // Detach any approval rows still docked; they belong to the cards deleted
-    // above and must not be left parented to the dock.
-    clearIntentDock();
+    // (Question cards and docked approvals already cleared above, before the
+    // cards, so owners could detach.)
     // The plan dock lives above the composer, outside the transcript, so the
     // sweep above cannot reach it: without this the checklist of the
     // conversation being left would follow the user into the next one.
@@ -5745,10 +5782,13 @@ void ChatWidget::restoreHistoricalTool(const QString &toolCallId, const QString 
     ToolRisk risk = ToolRisk::Read;
     // ACP kinds are not in isFileMutatingTool on purpose: that list drives the
     // edit tracker, which already learns about ACP writes from mutatesFiles.
-    if (isFileMutatingTool(toolName) || toolName == u"edit"_s || toolName == u"str_replace"_s
-        || toolName == u"write"_s || toolName == u"delete"_s) {
+    // isEditToolName covers the OpenCode aliases (write, edit, patch) here so
+    // restored history cards colour like live ones.
+    if (isFileMutatingTool(toolName) || ChatTheme::isEditToolName(toolName) || toolName == u"edit"_s
+        || toolName == u"str_replace"_s || toolName == u"write"_s || toolName == u"delete"_s
+        || toolName == u"patch"_s) {
         risk = ToolRisk::Write;
-    } else if (toolName == u"bash"_s || toolName == u"execute"_s) {
+    } else if (toolName == u"bash"_s || toolName == u"execute"_s || toolName.startsWith(u"terminal"_s)) {
         risk = ToolRisk::Execute;
     }
 
@@ -5768,6 +5808,12 @@ void ChatWidget::restoreHistoricalTool(const QString &toolCallId, const QString 
         QString path = argsObj.value(u"path"_s).toString();
         if (path.isEmpty()) {
             path = argsObj.value(u"file_path"_s).toString();
+        }
+        if (path.isEmpty()) {
+            path = argsObj.value(u"filePath"_s).toString();
+        }
+        if (path.isEmpty()) {
+            path = argsObj.value(u"file"_s).toString();
         }
         if (path.isEmpty()) {
             path = diffPathFromOutput(output);
@@ -5790,6 +5836,15 @@ void ChatWidget::restoreHistoricalTool(const QString &toolCallId, const QString 
     // its extension to pick a highlighting language, so the restored card needs
     // it too or the output comes back as uncoloured plain text.
     QString targetPath = argsObj.value(u"path"_s).toString();
+    if (targetPath.isEmpty()) {
+        targetPath = argsObj.value(u"file_path"_s).toString();
+    }
+    if (targetPath.isEmpty()) {
+        targetPath = argsObj.value(u"filePath"_s).toString();
+    }
+    if (targetPath.isEmpty()) {
+        targetPath = argsObj.value(u"file"_s).toString();
+    }
     if (targetPath.isEmpty()) {
         targetPath = argsObj.value(u"TargetFile"_s).toString();
     }
@@ -5847,6 +5902,12 @@ void ChatWidget::restoreHistoricalTool(const QString &toolCallId, const QString 
         QString path = argsObj.value(u"path"_s).toString();
         if (path.isEmpty()) {
             path = argsObj.value(u"file_path"_s).toString();
+        }
+        if (path.isEmpty()) {
+            path = argsObj.value(u"filePath"_s).toString();
+        }
+        if (path.isEmpty()) {
+            path = argsObj.value(u"file"_s).toString();
         }
         if (path.isEmpty()) {
             path = argsObj.value(u"TargetFile"_s).toString();

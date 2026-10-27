@@ -284,6 +284,22 @@ bool WebSearch::isBlockedHost(const QString &host)
     if (name.endsWith(u".localhost"_s)) {
         return true;
     }
+    // DNS-rebinding suffixes that resolve to private/loopback at fetch time
+    // (nip.io, sslip.io, xip.io, lvh.me, localtest.me). Full resolution-time
+    // checks require async DNS in the network layer (out of scope); this
+    // blocks the well-known wildcard-DNS bypasses lexically.
+    static const QStringList blockedSuffixes = {
+        u".nip.io"_s,
+        u".sslip.io"_s,
+        u".xip.io"_s,
+        u".lvh.me"_s,
+        u".localtest.me"_s,
+    };
+    for (const QString &suffix : blockedSuffixes) {
+        if (name.endsWith(suffix)) {
+            return true;
+        }
+    }
     return false;
 }
 
@@ -517,7 +533,19 @@ void WebSearch::onReplyFinished(QNetworkReply *reply, const QString &callId, boo
         return;
     }
 
-    const QByteArray body = reply->readAll();
+    const QByteArray rawBody = reply->readAll();
+    // Bound memory: search providers return small JSON; a malicious endpoint
+    // answering with gigabytes must not OOM the client (fetch path caps at 5 MiB).
+    if (rawBody.size() > kMaxFetchBytes) {
+        if (isFetch) {
+            finishFetch(callId, QString(), QString(),
+                        i18n("The page is larger than %1 KB and was not read.").arg(kMaxFetchBytes / 1024));
+        } else {
+            finishSearch(callId, {}, i18n("The search response was larger than %1 KB and was discarded.").arg(kMaxFetchBytes / 1024));
+        }
+        return;
+    }
+    const QByteArray body = rawBody;
     const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
 
     if (isFetch) {
@@ -572,20 +600,44 @@ void WebSearch::onReplyFinished(QNetworkReply *reply, const QString &callId, boo
     // The reply can arrive after a sibling call changed the shared setting, so
     // the limit is the one this call registered for itself.
     const int maxResults = pendingLimit > 0 ? pendingLimit : m_maxResults;
-    switch (m_provider) {
-    case Provider::Tavily:
-        results = parseTavily(QJsonDocument::fromJson(body).object(), maxResults);
-        break;
-    case Provider::Brave:
-        results = parseBrave(QJsonDocument::fromJson(body).object(), maxResults);
-        break;
-    case Provider::SearXNG:
-        results = parseSearx(QJsonDocument::fromJson(body).object(), maxResults);
-        break;
-    case Provider::DuckDuckGo:
-    case Provider::Disabled:
-        results = parseDuckDuckGo(body, maxResults);
-        break;
+    // Soft-200 HTML error pages parse as empty JSON and previously surfaced as
+    // misleading "no results". Surface provider errors instead.
+    if (m_provider == Provider::Tavily || m_provider == Provider::Brave || m_provider == Provider::SearXNG) {
+        QJsonParseError parseError{};
+        const QJsonDocument doc = QJsonDocument::fromJson(body, &parseError);
+        if (parseError.error != QJsonParseError::NoError || !doc.isObject()) {
+            finishSearch(callId, {}, i18n("The search provider returned an unreadable response (%1).").arg(parseError.errorString()));
+            return;
+        }
+        switch (m_provider) {
+        case Provider::Tavily:
+            results = parseTavily(doc.object(), maxResults);
+            break;
+        case Provider::Brave:
+            results = parseBrave(doc.object(), maxResults);
+            break;
+        case Provider::SearXNG:
+            results = parseSearx(doc.object(), maxResults);
+            break;
+        default:
+            break;
+        }
+    } else {
+        switch (m_provider) {
+        case Provider::Tavily:
+            results = parseTavily(QJsonDocument::fromJson(body).object(), maxResults);
+            break;
+        case Provider::Brave:
+            results = parseBrave(QJsonDocument::fromJson(body).object(), maxResults);
+            break;
+        case Provider::SearXNG:
+            results = parseSearx(QJsonDocument::fromJson(body).object(), maxResults);
+            break;
+        case Provider::DuckDuckGo:
+        case Provider::Disabled:
+            results = parseDuckDuckGo(body, maxResults);
+            break;
+        }
     }
 
     if (results.isEmpty()) {
@@ -614,11 +666,13 @@ QList<WebSearchResult> WebSearch::parseDuckDuckGo(const QByteArray &html, int ma
     // <a class="result__snippet">. The href is a redirect through
     // //duckduckgo.com/l/?uddg=<encoded>, which has to be unwrapped.
     static const QRegularExpression anchorPattern(
+        // No DotMatchesEverything: titles/snippets are single-line; DOTALL let
+        // .*? span MBs of HTML (O(n^2)). Nested tags (<b>) still match.
         QStringLiteral("<a[^>]*class=\"[^\"]*result__a[^\"]*\"[^>]*href=\"([^\"]+)\"[^>]*>(.*?)</a>"),
-        QRegularExpression::DotMatchesEverythingOption | QRegularExpression::CaseInsensitiveOption);
+        QRegularExpression::CaseInsensitiveOption);
     static const QRegularExpression snippetPattern(
         QStringLiteral("<a[^>]*class=\"[^\"]*result__snippet[^\"]*\"[^>]*>(.*?)</a>"),
-        QRegularExpression::DotMatchesEverythingOption | QRegularExpression::CaseInsensitiveOption);
+        QRegularExpression::CaseInsensitiveOption);
     static const QRegularExpression tagPattern(QStringLiteral("<[^>]+>"));
 
     auto it = anchorPattern.globalMatch(QString::fromUtf8(html));

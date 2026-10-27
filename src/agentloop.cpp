@@ -297,6 +297,11 @@ void AgentLoop::rebuildTools()
     if (m_workspace.isEmpty()) {
         return;
     }
+    if (m_busy && (m_inFlight > 0 || !m_runningBashId.isEmpty())) {
+        // Destroys in-flight async tools (see setDocumentBridge): defer to turn end.
+        m_sandboxDirty = true;
+        return;
+    }
     m_sandbox = std::make_unique<Sandbox>(m_workspace, m_settings.sandbox, m_settings.extraDenyGlobs,
                                           m_settings.allowReadsOutsideWorkspace);
     m_tools = std::make_unique<ToolRunner>(*m_sandbox, m_bridge, this);
@@ -359,6 +364,12 @@ void AgentLoop::setDocumentBridge(DocumentBridge *bridge)
     m_acp.setDocumentBridge(bridge);
     m_acp.setProjectGraph(m_projectGraph.get());
     if (m_sandbox) {
+        if (m_busy) {
+            // Rebuilding now would destroy ToolRunner holding in-flight async
+            // bash processes; defer until the turn ends (finishTurn checks flag).
+            m_sandboxDirty = true;
+            return;
+        }
         m_tools = std::make_unique<ToolRunner>(*m_sandbox, m_bridge, this);
         m_tools->setTimeoutMs(m_settings.bashTimeoutMs);
         m_tools->setProjectGraph(m_projectGraph.get());
@@ -951,6 +962,18 @@ void AgentLoop::abort()
     m_waitingCall = {};
     m_waitingRequest = {};
     // A snapshot that was still running cannot resume its parked call now.
+    // The parked call was never appended to m_messages, so
+    // appendCancelledToolResults() below would miss it and the next provider
+    // request would carry a call with no result (400). Emit a cancelled result.
+    if (m_awaitingCheckpoint && !m_checkpointCall.id.isEmpty()) {
+        ToolResult parked;
+        parked.toolCallId = m_checkpointCall.id;
+        parked.name = m_checkpointCall.name;
+        parked.ok = false;
+        parked.cancelled = true;
+        parked.output = u"Cancelled: turn stopped while waiting for checkpoint."_s;
+        appendToolResult(m_checkpointCall, parked);
+    }
     m_awaitingCheckpoint = false;
     m_checkpointCall = {};
     m_checkpointIsBash = false;
@@ -1135,16 +1158,22 @@ qint64 AgentLoop::rateLimitDelayMs(qint64 now) const
     // needs to be good enough to keep a burst from tripping the provider.
     constexpr qint64 kWindowMs = 60'000;
     const int rpm = qMax(1, m_settings.requestsPerMinute);
+    QMutexLocker locker(&m_rateMutex);
+
+    // Clock skew backwards: never let the queue grow unbounded. Drop entries
+    // from the future and, if now moved far backwards, reset the window.
+    while (!m_modelRequestTimes.isEmpty() && m_modelRequestTimes.head() > now) {
+        m_modelRequestTimes.dequeue();
+    }
+    // Remove expired entries from the front to prevent unbounded growth
+    while (!m_modelRequestTimes.isEmpty() && now - m_modelRequestTimes.head() >= kWindowMs) {
+        m_modelRequestTimes.dequeue();
+    }
+
     qint64 oldest = 0;
     int used = 0;
 
-    // Remove expired entries from the front to prevent unbounded growth
-    QQueue<qint64> &times = const_cast<QQueue<qint64>&>(m_modelRequestTimes);
-    while (!times.isEmpty() && now - times.head() >= kWindowMs) {
-        times.dequeue();
-    }
-
-    for (const qint64 stamp : times) {
+    for (const qint64 stamp : m_modelRequestTimes) {
         if (used == 0) {
             oldest = stamp;
         }
@@ -1174,7 +1203,10 @@ void AgentLoop::sendToModel()
         scheduleNextModelStep();
         return;
     }
-    m_modelRequestTimes.enqueue(now);
+    {
+        QMutexLocker locker(&m_rateMutex);
+        m_modelRequestTimes.enqueue(now);
+    }
 
     const QList<ChatMessage> requestMessages = m_messagesForRequest();
 
@@ -1303,6 +1335,16 @@ QString AgentLoop::actionSignature(const ToolCall &call) const
     return call.name + u"|"_s + QString::fromUtf8(args);
 }
 
+QJsonObject AgentLoop::effectiveArgs(const ToolCall &call) const
+{
+    QString parseError;
+    QJsonObject args = parseToolArgs(call, &parseError);
+    if (!parseError.isEmpty()) {
+        return {};
+    }
+    return args;
+}
+
 bool AgentLoop::isMutationTool(const QString &toolName) const
 {
     return toolName == u"write_file"_s || toolName == u"edit_file"_s
@@ -1336,9 +1378,10 @@ bool AgentLoop::isVerificationForChangedFiles(const ToolCall &call) const
         return false;
     }
     if (call.name == u"read_file"_s || isMutationTool(call.name)) {
-        QString path = call.arguments.value(u"path"_s).toString();
+        const QJsonObject args = effectiveArgs(call);
+        QString path = args.value(u"path"_s).toString();
         if (path.isEmpty()) {
-            path = call.arguments.value(u"TargetFile"_s).toString();
+            path = args.value(u"TargetFile"_s).toString();
         }
         return !path.isEmpty() && m_changedPaths.contains(path);
     }
@@ -1975,7 +2018,7 @@ void AgentLoop::executeOne(const ToolCall &call)
     // duplicate of itself.
     const PermissionRequest request = describeTool(call);
     QString reason;
-    const auto verdict = m_policy.evaluate(call.name, call.arguments, *m_sandbox, &reason);
+    const auto verdict = m_policy.evaluate(call.name, effectiveArgs(call), *m_sandbox, &reason);
 
     if (verdict == PermissionPolicy::Verdict::Deny) {
         ToolResult result;
@@ -2001,7 +2044,7 @@ void AgentLoop::executeOne(const ToolCall &call)
     // so the turn stops here until they answer. It never touches the sandbox:
     // the answer is captured by the UI and handed back through answerQuestion.
     if (isQuestionTool(call.name)) {
-        const QString asked = call.arguments.value(u"question"_s).toString().trimmed();
+        const QString asked = effectiveArgs(call).value(u"question"_s).toString().trimmed();
         if (asked.isEmpty()) {
             ToolResult result;
             result.ok = false;
@@ -2095,13 +2138,16 @@ QString AgentLoop::accessList() const
 
 PermissionRequest AgentLoop::describeTool(const ToolCall &call) const
 {
+    // Cards and policy must see parsed args (argumentsJson fallback); raw
+    // call.arguments is empty on the LLM path.
+    const QJsonObject eff = effectiveArgs(call);
     if (m_mcp && isMcpToolName(call.name)) {
         PermissionRequest request;
         request.toolName = call.name;
         request.toolCallId = call.id;
         request.summary = u"%1 %2"_s
-                              .arg(call.name, QString::fromUtf8(QJsonDocument(call.arguments).toJson(QJsonDocument::Compact)));
-        request.details = QString::fromUtf8(QJsonDocument(call.arguments).toJson(QJsonDocument::Indented));
+                              .arg(call.name, QString::fromUtf8(QJsonDocument(eff).toJson(QJsonDocument::Compact)));
+        request.details = QString::fromUtf8(QJsonDocument(eff).toJson(QJsonDocument::Indented));
         // riskFor() reports Execute for every MCP tool; the card must not
         // understate it even when the server declared a readOnlyHint.
         request.risk = m_policy.riskFor(call.name);
@@ -2111,15 +2157,15 @@ PermissionRequest AgentLoop::describeTool(const ToolCall &call) const
     if (isQuestionTool(call.name)) {
         // The question itself is the summary: a card that reads "question" and
         // nothing else tells the user nothing about what they are being asked.
-        const QString text = call.arguments.value(u"question"_s).toString().trimmed();
-        const QJsonArray options = call.arguments.value(u"options"_s).toArray();
+        const QString text = eff.value(u"question"_s).toString().trimmed();
+        const QJsonArray options = eff.value(u"options"_s).toArray();
         PermissionRequest request;
         request.toolName = call.name;
         request.toolCallId = call.id;
         request.risk = ToolRisk::Read;
-        request.details = QString::fromUtf8(QJsonDocument(call.arguments).toJson(QJsonDocument::Indented));
+        request.details = QString::fromUtf8(QJsonDocument(eff).toJson(QJsonDocument::Indented));
         request.questionText = text;
-        request.allowFreeform = call.arguments.value(u"allow_freeform"_s).toBool(true);
+        request.allowFreeform = eff.value(u"allow_freeform"_s).toBool(true);
         for (const QJsonValue &value : options) {
             const QString option = value.toString().trimmed();
             if (!option.isEmpty()) {
@@ -2138,15 +2184,15 @@ PermissionRequest AgentLoop::describeTool(const ToolCall &call) const
         PermissionRequest request;
         request.toolName = call.name;
         request.toolCallId = call.id;
-        const QString description = call.arguments.value(u"description"_s).toString();
-        const QString mode = call.arguments.value(u"mode"_s).toString(QStringLiteral("code"));
+        const QString description = eff.value(u"description"_s).toString();
+        const QString mode = eff.value(u"mode"_s).toString(QStringLiteral("code"));
         // A delegation without a description still has to say something: an
         // empty tail would render the card header as "sub-agent (code):" with
         // nothing after it.
         request.summary = u"sub-agent (%1): %2"_s.arg(
             mode,
             description.isEmpty() ? i18n("delegated work") : description.left(200));
-        request.details = QString::fromUtf8(QJsonDocument(call.arguments).toJson(QJsonDocument::Indented));
+        request.details = QString::fromUtf8(QJsonDocument(eff).toJson(QJsonDocument::Indented));
         request.risk = ToolRisk::Execute;
         return request;
     }
@@ -2156,11 +2202,11 @@ PermissionRequest AgentLoop::describeTool(const ToolCall &call) const
         request.toolName = call.name;
         request.toolCallId = call.id;
         if (call.name == u"web_search"_s) {
-            request.summary = u"Search the web: %1"_s.arg(call.arguments.value(u"query"_s).toString());
+            request.summary = u"Search the web: %1"_s.arg(eff.value(u"query"_s).toString());
         } else {
-            request.summary = u"Fetch page: %1"_s.arg(call.arguments.value(u"url"_s).toString());
+            request.summary = u"Fetch page: %1"_s.arg(eff.value(u"url"_s).toString());
         }
-        request.details = QString::fromUtf8(QJsonDocument(call.arguments).toJson(QJsonDocument::Indented));
+        request.details = QString::fromUtf8(QJsonDocument(eff).toJson(QJsonDocument::Indented));
         // Reading the public web cannot touch the workspace.
         request.risk = ToolRisk::Read;
         return request;
@@ -2368,9 +2414,12 @@ void AgentLoop::releaseEditLocksFor(const ToolCall &call)
     if (!m_locks || !isMutationTool(call.name)) {
         return;
     }
-    QString path = call.arguments.value(u"path"_s).toString();
+    // Use parsed args (argumentsJson fallback): raw call.arguments is empty on
+    // the LLM path, which previously skipped the release bookkeeping.
+    const QJsonObject args = effectiveArgs(call);
+    QString path = args.value(u"path"_s).toString();
     if (path.isEmpty()) {
-        path = call.arguments.value(u"TargetFile"_s).toString();
+        path = args.value(u"TargetFile"_s).toString();
     }
     if (path.isEmpty()) {
         return;
@@ -2391,9 +2440,10 @@ bool AgentLoop::acquireEditLock(const ToolCall &call, QString *deniedBy)
     if (!m_locks || !isMutationTool(call.name)) {
         return true;
     }
-    QString path = call.arguments.value(u"path"_s).toString();
+    const QJsonObject args = effectiveArgs(call);
+    QString path = args.value(u"path"_s).toString();
     if (path.isEmpty()) {
-        path = call.arguments.value(u"TargetFile"_s).toString();
+        path = args.value(u"TargetFile"_s).toString();
     }
     if (path.isEmpty()) {
         return true;
@@ -2791,7 +2841,15 @@ void AgentLoop::answerQuestion(const QString &answer)
     result.toolCallId = call.id;
     result.name = call.name;
     result.output = answer;
+    // Empty/cancelled answers must not look like success, and must advance
+    // repeat tracking like any other observation.
+    if (answer.trimmed().isEmpty()) {
+        result.ok = false;
+        result.cancelled = true;
+        result.output = u"(no answer provided)"_s;
+    }
     appendToolResult(call, result);
+    markActionExecuted(actionSignature(call));
     m_state = State::ExecutingTools;
     processQueue();
 }

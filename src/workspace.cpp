@@ -182,7 +182,9 @@ QString activeProjectBaseDir(KTextEditor::MainWindow *mainWindow)
 QString detectWorkspaceFromPath(const QString &filePath)
 {
     if (filePath.isEmpty()) {
-        return QDir::currentPath();
+        // No path: no workspace. Returning cwd would anchor sandbox/checkpoints
+        // at an arbitrary launch directory (/tmp, /).
+        return QString();
     }
 
     QDir dir = QFileInfo(filePath).isDir() ? QDir(filePath) : QFileInfo(filePath).absoluteDir();
@@ -283,7 +285,9 @@ QString detectWorkspace(KTextEditor::MainWindow *mainWindow)
             return base;
         }
     }
-    return QDir::currentPath();
+    // No project: no workspace. cwd fallback would anchor .kateai/mcp.json,
+    // checkpoints and sandbox at wherever Kate was launched.
+    return QString();
 }
 
 } // namespace KateAi

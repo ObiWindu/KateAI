@@ -79,7 +79,9 @@ public:
     }
     void setTimeoutMs(int ms)
     {
-        m_timeoutMs = qMax(1000, ms);
+        // Lower bound 1s so a stray 0 never becomes "no timeout"; upper bound
+        // 24h so INT_MAX cannot hang the QTimer/transfer effectively forever.
+        m_timeoutMs = qBound(1000, ms, 24 * 3600 * 1000);
     }
 
     // False when the provider needs a key or endpoint that is not configured,

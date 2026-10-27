@@ -95,6 +95,11 @@ KTextEditor::Document *KateAi::documentForPath(const QString &path)
     if (!editor) {
         return nullptr;
     }
+    if (path.trimmed().isEmpty()) {
+        // Empty path previously resolved to CWD and could spuriously match a
+        // document open on the working directory.
+        return nullptr;
+    }
 
     // Get the canonical (normalized) path for comparison
     const QString canonical = QFileInfo(path).canonicalFilePath().isEmpty() ? QFileInfo(path).absoluteFilePath()
@@ -140,6 +145,9 @@ bool DocumentBridge::saveDocumentIfOpen(const QString &path, QString *error)
 
 bool DiskDocumentBridge::readDocument(const QString &path, QString *contents) const
 {
+    if (path.trimmed().isEmpty()) {
+        return false;
+    }
     if (auto *doc = documentForPath(path)) {
         if (contents) {
             *contents = doc->text();
@@ -213,6 +221,12 @@ bool DiskDocumentBridge::readDocumentLines(const QString &path, int startLine, i
 
 bool DiskDocumentBridge::writeDocument(const QString &path, const QString &contents, QString *error)
 {
+    if (path.trimmed().isEmpty()) {
+        if (error) {
+            *error = u"Path must not be empty."_s;
+        }
+        return false;
+    }
     if (auto *doc = documentForPath(path)) {
         // The document is open and has unsaved changes that are not ours:
         // replacing the whole text would throw them away. An unsaved edit the

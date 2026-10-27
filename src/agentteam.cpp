@@ -195,7 +195,15 @@ AgentProfile AgentTeam::parseAgentFile(const QString &path, bool *ok)
     if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
         return {};
     }
-    const QString document = QString::fromUtf8(file.readAll());
+    // Bound memory like modes (malicious workspace could OOM on setWorkspace).
+    constexpr qint64 kMaxAgentFileBytes = 256 * 1024;
+    if (file.size() > kMaxAgentFileBytes) {
+        return {};
+    }
+    const QString document = QString::fromUtf8(file.read(kMaxAgentFileBytes + 1));
+    if (document.size() > kMaxAgentFileBytes) {
+        return {};
+    }
     const QString fallbackId = QFileInfo(path).completeBaseName().toLower();
     bool parsed = false;
     AgentProfile profile = parseAgentDocument(document, fallbackId, &parsed);

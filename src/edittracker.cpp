@@ -790,8 +790,8 @@ void EditTracker::previewDiff(const QString &path)
     addDirectory(QStandardPaths::writableLocation(QStandardPaths::CacheLocation));
     addDirectory(QStandardPaths::writableLocation(QStandardPaths::GenericCacheLocation));
     addDirectory(QDir::homePath() + u"/.cache/kateai"_s);
-    addDirectory(QDir::homePath());
-    addDirectory(QDir::currentPath());
+    // Never $HOME root or cwd: a preview containing diff secrets must not land
+    // in the workspace where agent tools would trip over it.
 
     for (const QString &directory : directories) {
         if (!QDir().mkpath(directory)) {
@@ -802,6 +802,8 @@ void EditTracker::previewDiff(const QString &path)
         if (!preview.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
             continue;
         }
+        // Secrets in diffs: owner-only regardless of umask.
+        preview.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner);
         const qint64 written = preview.write(bytes);
         preview.close();
         if (written != bytes.size()) {

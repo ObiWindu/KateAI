@@ -89,6 +89,12 @@ public:
     {
         return m_approvalRow;
     }
+    // Releases ownership without deleting: ChatWidget calls this before deleting
+    // a docked row so the card does not keep a dangling pointer.
+    void detachApprovalRow()
+    {
+        m_approvalRow = nullptr;
+    }
 
     // --- Live timing ---------------------------------------------------------
     // Elapsed time per call, shown while running and frozen afterwards so a

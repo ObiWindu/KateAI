@@ -1035,9 +1035,10 @@ QString ToolCallWidget::iconForTool(const QString &toolName) const
     if (key == u"read_file"_s || key == u"fs/read_text_file"_s || key == u"read"_s) return u"📄"_s;
     if (key == u"write_file"_s || key == u"fs/write_text_file"_s || key == u"write"_s) return u"📝"_s;
     if (key == u"edit_file"_s || key == u"multi_edit_file"_s || key == u"multi_replace_file_content"_s
-        || key == u"edit"_s || key == u"str_replace"_s || key == u"apply_patch"_s
+        || key == u"edit"_s || key == u"str_replace"_s || key == u"apply_patch"_s || key == u"patch"_s
         || key == u"search_replace"_s || key == u"replace"_s) return u"✏"_s;
     if (key == u"delete"_s) return u"✕"_s;
+    if (toolName == u"todowrite"_s || toolName == u"todoread"_s) return u"📋"_s;
     if (ChatTheme::isEditToolName(toolName)) {
         if (key.contains(u"delete"_s) || key.contains(u"remove"_s)) return u"✕"_s;
         if (key.contains(u"write"_s) && !key.contains(u"edit"_s) && !key.contains(u"replace"_s)
@@ -1046,18 +1047,18 @@ QString ToolCallWidget::iconForTool(const QString &toolName) const
         }
         return u"✏"_s;
     }
-    if (toolName == u"list_dir"_s) return u"📁"_s;
+    if (toolName == u"list_dir"_s || toolName == u"list"_s) return u"📁"_s;
     if (toolName == u"grep"_s || toolName == u"search"_s) return u"🔍"_s;
     if (toolName == u"glob"_s) return u"🔎"_s;
     if (toolName == u"bash"_s || toolName == u"execute"_s) return u"⚡"_s;
-        if (toolName == u"web_search"_s) return u"🌐"_s;
-        if (toolName == u"web_fetch"_s) return u"📖"_s;
+        if (toolName == u"web_search"_s || toolName == u"websearch"_s) return u"🌐"_s;
+        if (toolName == u"web_fetch"_s || toolName == u"webfetch"_s) return u"📖"_s;
     if (toolName == u"query_project_graph"_s) return u"🕸"_s;
     if (toolName == u"write_plan_file"_s) return u"📋"_s;
     if (toolName == u"suggest"_s) return u"💡"_s;
     if (toolName == u"question"_s) return u"❓"_s;
     if (toolName == u"goal_report"_s) return u"🎯"_s;
-    if (toolName == u"new_task"_s) return u"🧩"_s;
+    if (toolName == u"new_task"_s || toolName == u"task"_s) return u"🧩"_s;
     if (toolName.startsWith(u"mcp__"_s)) return u"🔌"_s;
     if (toolName.startsWith(u"terminal/"_s) || toolName == u"terminal"_s) return u"🖳"_s;
     return u"⚙"_s;
@@ -1100,13 +1101,19 @@ QString ToolCallWidget::languageForTool(const QString &toolName) const
     if (toolName == u"bash"_s || toolName == u"execute"_s) return u"Bash"_s;
     
     // Text-based tools - file operations, search, etc.
+    // OpenCode ACP names (read, write, edit, list, patch, todowrite,
+    // todoread, webfetch, websearch, task) ride along: raw agent results are
+    // human-readable text, not raw JSON.
     if (toolName == u"read_file"_s || toolName == u"write_file"_s
         || toolName == u"edit_file"_s || toolName == u"multi_edit_file"_s
         || toolName == u"multi_replace_file_content"_s || toolName == u"list_dir"_s
         || toolName == u"glob"_s || toolName == u"grep"_s
         || toolName == u"fs/read_text_file"_s || toolName == u"fs/write_text_file"_s
         || toolName == u"read"_s || toolName == u"write"_s || toolName == u"edit"_s
-        || toolName == u"str_replace"_s || toolName == u"delete"_s || toolName == u"search"_s) {
+        || toolName == u"list"_s || toolName == u"patch"_s
+        || toolName == u"str_replace"_s || toolName == u"delete"_s || toolName == u"search"_s
+        || toolName == u"websearch"_s || toolName == u"webfetch"_s || toolName == u"task"_s
+        || toolName == u"todowrite"_s || toolName == u"todoread"_s) {
         // File operations and search return text content, not JSON
         return u"Text"_s;
     }
@@ -1223,12 +1230,13 @@ ToolDetailView ToolCallWidget::detailViewForTool(const QString &toolName)
         return ToolDetailView::Terminal;
     }
     if (toolName == u"read_file"_s || toolName == u"fs/read_text_file"_s
-        || toolName == u"read"_s
+        || toolName == u"read"_s || toolName == u"webfetch"_s || toolName == u"web_fetch"_s
         || toolName == u"write_plan_file"_s || toolName == u"fetch_rules"_s
         || toolName == u"project_graph"_s) {
         return ToolDetailView::Code;
     }
-    if (toolName == u"grep"_s || toolName == u"glob"_s || toolName == u"search"_s) {
+    if (toolName == u"grep"_s || toolName == u"glob"_s || toolName == u"search"_s
+        || toolName == u"websearch"_s || toolName == u"web_search"_s) {
         return ToolDetailView::Search;
     }
     return ToolDetailView::Plain;
@@ -1351,7 +1359,9 @@ int ToolCallWidget::browserFitHeight(QTextBrowser *browser, int padding) const
     }
     int vw = browser->viewport()->width();
     if (vw < 40) {
-        vw = std::max(40, width() - 28);
+        // Pre-layout width()==0 explodes wrapping at 40px; fall back to the
+        // card width so the first paint does not jump on resizeEvent.
+        vw = std::max(240, width() - 28);
     }
     // The browser's own padding has to be added to the document, or the last
     // line of a result sits under the card's edge.

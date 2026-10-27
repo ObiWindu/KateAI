@@ -270,9 +270,11 @@ void ProjectGraph::removeNode(const QString &nodeId)
     for (auto it = m_edges.begin(); it != m_edges.end(); ) {
         const QString &edgeKey = it.key();
         // Parse edgeKey to get sourceId, targetId, and relationship
-        // Format: sourceId->targetId->relationship
+        // Format: sourceId->targetId->relationship. targetId may itself contain
+        // "->" (raw import line, e.g. "#include <foo->bar>"), so split the
+        // relationship off from the right; sourceIds never contain "->".
         int arrow1 = edgeKey.indexOf(u"->"_s);
-        int arrow2 = edgeKey.indexOf(u"->"_s, arrow1 + 2);
+        int arrow2 = edgeKey.lastIndexOf(u"->"_s);
         if (arrow1 != -1 && arrow2 != -1) {
             QString sourceId = edgeKey.mid(0, arrow1);
             QString targetId = edgeKey.mid(arrow1 + 2, arrow2 - arrow1 - 2);
@@ -885,9 +887,10 @@ void ProjectGraph::cleanupDeletedNodes()
 
     for (auto it = m_edges.begin(); it != m_edges.end(); ++it) {
         const QString &edgeKey = it.key();
-        // Parse edgeKey to get sourceId and targetId
+        // Parse edgeKey to get sourceId and targetId (see removeNode: split
+        // from the right so a targetId containing "->" survives).
         int arrow1 = edgeKey.indexOf(u"->"_s);
-        int arrow2 = edgeKey.indexOf(u"->"_s, arrow1 + 2);
+        int arrow2 = edgeKey.lastIndexOf(u"->"_s);
         if (arrow1 != -1 && arrow2 != -1) {
             QString sourceId = edgeKey.mid(0, arrow1);
             QString targetId = edgeKey.mid(arrow1 + 2, arrow2 - arrow1 - 2);
@@ -912,7 +915,12 @@ void ProjectGraph::cleanupDeletedNodes()
 
 int ProjectGraph::lineCount(const QString &content)
 {
-    return content.count(u'\n');
+    if (content.isEmpty()) {
+        return 0;
+    }
+    // count('\n') undercounts a last line without trailing newline (single-line
+    // file without '\n' reported 0 LOC while UI shows 1).
+    return content.count(u'\n') + (content.endsWith(u'\n') ? 0 : 1);
 }
 
 int ProjectGraph::definitionCount(ProjectGraph &analyser, const QString &content)
@@ -1079,7 +1087,7 @@ QString ProjectGraph::getNodeTypeFromPath(const QString &path)
         return u"header"_s;
     } else if (ext == QStringLiteral("py")) {
         return u"python"_s;
-    } else if (ext == QStringLiteral("js") || ext == QStringLiteral("jsx") || ext == QStringLiteral("ts")) {
+    } else if (ext == QStringLiteral("js")) {
         return u"javascript"_s;
     } else if (ext == QStringLiteral("json")) {
         return u"json"_s;
@@ -1108,46 +1116,6 @@ QString ProjectGraph::getNodeTypeFromPath(const QString &path)
     } else if (ext == QStringLiteral("sh")) {
         return u"shell"_s;
     } else if (ext == QStringLiteral("yml") || ext == QStringLiteral("yaml")) {
-        return u"yaml"_s;
-    } else if (ext == QStringLiteral("toml")) {
-        return u"toml"_s;
-    } else if (ext == QStringLiteral("ini")) {
-        return u"ini"_s;
-    } else if (ext == QStringLiteral("cfg") || ext == QStringLiteral("conf")) {
-        return u"config"_s;
-    } else if (ext == QStringLiteral("bat") || ext == QStringLiteral("cmd")) {
-        return u"batch"_s;
-    } else if (ext == QStringLiteral("pl")) {
-        return u"perl"_s;
-    } else if (ext == QStringLiteral("r")) {
-        return u"r"_s;
-    } else if (ext == QStringLiteral("m")) {
-        return u"matlab"_s;
-    } else if (ext == QStringLiteral("scala")) {
-        return u"scala"_s;
-    } else if (ext == QStringLiteral("kt")) {
-        return u"kotlin"_s;
-    } else if (ext == QStringLiteral("swift")) {
-        return u"swift"_s;
-    } else if (ext == QStringLiteral("ts")) {
-        return u"typescript"_s;
-    } else if (ext == QStringLiteral("tsx")) {
-        return u"tsx"_s;
-    } else if (ext == QStringLiteral("jsx")) {
-        return u"jsx"_s;
-    } else if (ext == QStringLiteral("vue")) {
-        return u"vue"_s;
-    } else if (ext == QStringLiteral("svelte")) {
-        return u"svelte"_s;
-    } else if (ext == QStringLiteral("astro")) {
-        return u"astro"_s;
-    } else if (ext == QStringLiteral("solid")) {
-        return u"solid"_s;
-    } else if (ext == QStringLiteral("qml")) {
-        return u"qml"_s;
-    } else if (ext == QStringLiteral("yaml")) {
-        return u"yaml"_s;
-    } else if (ext == QStringLiteral("yml")) {
         return u"yaml"_s;
     } else if (ext == QStringLiteral("toml")) {
         return u"toml"_s;
