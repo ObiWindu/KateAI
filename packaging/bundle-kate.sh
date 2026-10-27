@@ -83,12 +83,15 @@ else
 fi
 
 echo "==> Building Kate AI plugin against ${PREFIX}"
+# USE_QT_SYS_PATHS=OFF: the plugin must land under the bundle prefix.
+# ON would resolve the *system* Qt plugin dir (/usr/lib64/...) and the
+# bundle check below would fail on exactly that installed-to-system file.
 cmake -S "${ROOT}" -B "${WORKDIR}/build-kateai" \
     -DCMAKE_BUILD_TYPE="${BUILD_TYPE}" \
     -DCMAKE_INSTALL_PREFIX="${PREFIX}" \
     -DCMAKE_PREFIX_PATH="${PREFIX}" \
     -DKATEAI_USER_INSTALL=OFF \
-    -DKDE_INSTALL_USE_QT_SYS_PATHS=ON \
+    -DKDE_INSTALL_USE_QT_SYS_PATHS=OFF \
     -DBUILD_TESTING=OFF \
     -G Ninja
 cmake --build "${WORKDIR}/build-kateai" -j"${JOBS}"
@@ -108,15 +111,19 @@ echo "Bundled plugin: ${PLUGIN_SO}"
 ls -l "${PLUGIN_SO}"
 
 # Wrapper so the bundle runs without env setup: the plugin already lives in
-# the prefix's Qt plugin dir, so plain `kate` is enough. The wrapper pins
-# XDG paths to the bundle for a portable first run.
-cat > "${PREFIX}/bin/kate-ai" <<'EOF'
+# the prefix's Qt plugin dir, so plain `kate` is enough. The plugin dir is
+# derived from where the .so actually landed (lib vs lib64 varies per
+# distro) and stored relative to the prefix, so the tarball stays
+# relocatable instead of hard-coding /opt or lib/.
+PLUGIN_BASE="$(dirname "$(dirname "$(dirname "${PLUGIN_SO}")")")"
+PLUGIN_RELPATH="$(realpath --relative-to="${PREFIX}" "${PLUGIN_BASE}")"
+cat > "${PREFIX}/bin/kate-ai" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
-HERE="$(cd "$(dirname "$0")" && pwd)"
-PREFIX="$(cd "${HERE}/.." && pwd)"
-export QT_PLUGIN_PATH="${PREFIX}/lib/qt6/plugins${QT_PLUGIN_PATH:+:$QT_PLUGIN_PATH}"
-exec "${PREFIX}/bin/kate" "$@"
+HERE="\$(cd "\$(dirname "\$0")" && pwd)"
+PREFIX="\$(cd "\${HERE}/.." && pwd)"
+export QT_PLUGIN_PATH="\${PREFIX}/${PLUGIN_RELPATH}\${QT_PLUGIN_PATH:+:\$QT_PLUGIN_PATH}"
+exec "\${PREFIX}/bin/kate" "\$@"
 EOF
 chmod +x "${PREFIX}/bin/kate-ai"
 

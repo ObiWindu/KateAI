@@ -36,7 +36,14 @@ if (-not (Test-Path $craftEnv)) {
     # Each CI job runs on a fresh VM, so the Craft stack built by
     # windows-build.ps1 is not here: bootstrap it on demand.
     Write-Host "==> Bootstrapping KDE Craft (accepting defaults)"
-    Set-ExecutionPolicy -Scope CurrentUser RemoteSigned -Force
+    # The hosted runner already enforces Bypass via a higher-precedence
+    # scope, which makes this assignment throw: not fatal, Bypass is
+    # exactly what we need to run the installer below.
+    try {
+        Set-ExecutionPolicy -Scope CurrentUser RemoteSigned -Force
+    } catch {
+        Write-Host "Execution policy is host-managed; continuing with the effective Bypass policy."
+    }
     python.exe -m pip install --upgrade certifi
     iex ((New-Object net.webclient).DownloadString('https://raw.githubusercontent.com/KDE/craft/master/setup/install_craft.ps1'))
 }

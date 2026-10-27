@@ -33,8 +33,10 @@ if(KATEAI_USER_INSTALL)
         set(KDE_INSTALL_QTPLUGINDIR "${CMAKE_INSTALL_PREFIX}/lib/qt6/plugins" CACHE STRING "Qt plugins under the install prefix" FORCE)
     endif()
 else()
-    # System Kate only scans Qt's plugin dir, not /usr/local.
-    set(KDE_INSTALL_USE_QT_SYS_PATHS ON CACHE BOOL "Install into Qt plugin dir (required for Kate)" FORCE)
+    # System Kate only scans Qt's plugin dir, not /usr/local. Not forced:
+    # bundle builds pass -DKDE_INSTALL_USE_QT_SYS_PATHS=OFF with their own
+    # prefix so the plugin lands inside the bundle, not the system.
+    set(KDE_INSTALL_USE_QT_SYS_PATHS ON CACHE BOOL "Install into Qt plugin dir (required for Kate)")
 endif()
 
 find_package(ECM 6.0 REQUIRED NO_MODULE)

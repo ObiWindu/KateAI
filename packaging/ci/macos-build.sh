@@ -29,9 +29,11 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ ! -f "${CRAFT_ROOT}/craft/craftenv.sh" ]]; then
+    # Non-interactive: --use-defaults answers the setup wizard prompts
+    # (target arch auto-detected, e.g. arm64 on Apple Silicon runners).
     echo "==> Bootstrapping KDE Craft into ${CRAFT_ROOT}"
     curl https://raw.githubusercontent.com/KDE/craft/master/setup/CraftBootstrap.py -o /tmp/CraftBootstrap.py
-    python3 /tmp/CraftBootstrap.py --prefix "${CRAFT_ROOT}"
+    python3 /tmp/CraftBootstrap.py --prefix "${CRAFT_ROOT}" --use-defaults
 fi
 
 echo "==> Loading Craft environment"
