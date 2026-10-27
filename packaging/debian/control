@@ -29,5 +29,5 @@ Depends: ${misc:Depends},
 Description: AI coding agent plugin for the Kate text editor
  Kate AI is a KTextEditor plugin that adds an agent chat tool view to Kate.
  It reads the workspace, edits open documents, runs sandboxed commands, and
- asks before destructive actions. Requires Ubuntu 25.04 or later, or Debian
- with KF6.
+ asks before destructive actions. Built on Debian trixie; works on Debian 13+,
+ Ubuntu 25.04+, and Googlebook OS (Debian VM). amd64 and arm64.

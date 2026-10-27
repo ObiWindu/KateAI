@@ -1,5 +1,6 @@
 #include "agentloop.h"
 #include "documentbridge.h"
+#include "test_python.h"
 #include "types.h"
 
 #include <QCoreApplication>
@@ -75,7 +76,7 @@ private Q_SLOTS:
         m_server = new QProcess(this);
         const QString script = repoFile(u"tests/mock_llm_server.py"_s);
         QVERIFY2(!script.isEmpty(), "could not locate tests/mock_llm_server.py");
-        m_server->start(u"python3"_s, QStringList{script, m_portFile});
+        m_server->start(python3Command(), QStringList{script, m_portFile});
         QVERIFY(m_server->waitForStarted(10000));
 
         QVERIFY(waitFor([this] {

@@ -1,5 +1,6 @@
 #include "acpclient.h"
 #include "documentbridge.h"
+#include "test_python.h"
 #include "tools.h"
 #include "types.h"
 
@@ -60,7 +61,7 @@ private:
         settings.provider = Provider::Acp;
         settings.apiFormat = ApiFormat::AcpNative;
         settings.acpAgentId = u"custom"_s;
-        settings.acpCommand = u"python3"_s;
+        settings.acpCommand = python3Command();
         settings.acpArgs = u'"' + m_agent + u"\" "_s + scenario;
         settings.permissionMode = PermissionMode::Ask;
         settings.sandbox = SandboxProfile::Off;
@@ -110,7 +111,7 @@ private Q_SLOTS:
         QVERIFY(!acpAgentIsGrok(settings));
 
         settings.acpAgentId = u"custom"_s;
-        settings.acpCommand = u"python3"_s;
+        settings.acpCommand = python3Command();
         settings.acpArgs = u"/tmp/mock_acp_agent.py echo"_s;
         QCOMPARE(AcpClient::agentArguments(settings),
                  (QStringList{u"/tmp/mock_acp_agent.py"_s, u"echo"_s}));

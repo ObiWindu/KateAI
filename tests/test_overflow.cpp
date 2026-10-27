@@ -3,6 +3,7 @@
 #include "chattheme.h"
 #include "chatwidget.h"
 #include "sessionstoreisolation.h"
+#include "test_python.h"
 #include "toolcallwidget.h"
 #include "types.h"
 
@@ -163,7 +164,7 @@ private Q_SLOTS:
         settings.provider = Provider::Acp;
         settings.apiFormat = ApiFormat::AcpNative;
         settings.acpAgentId = u"mock-perm"_s;
-        settings.acpCommand = u"python3"_s;
+        settings.acpCommand = python3Command();
         settings.acpArgs = u'"' + m_agent + u"\" permission"_s;
         settings.permissionMode = PermissionMode::Ask;
         settings.sandbox = SandboxProfile::Off;
@@ -370,7 +371,7 @@ private Q_SLOTS:
         settings.provider = Provider::Acp;
         settings.apiFormat = ApiFormat::AcpNative;
         settings.acpAgentId = u"mock-live"_s;
-        settings.acpCommand = u"python3"_s;
+        settings.acpCommand = python3Command();
         settings.acpArgs = u'"' + m_agent + u"\" plain"_s;
         settings.permissionMode = PermissionMode::AlwaysApprove;
         settings.sandbox = SandboxProfile::Off;
@@ -469,7 +470,7 @@ private Q_SLOTS:
         settings.provider = Provider::Acp;
         settings.apiFormat = ApiFormat::AcpNative;
         settings.acpAgentId = u"mock-stream"_s;
-        settings.acpCommand = u"python3"_s;
+        settings.acpCommand = python3Command();
         settings.acpArgs = u'"' + m_agent + u"\" toolstream"_s;
         settings.permissionMode = PermissionMode::AlwaysApprove;
         settings.sandbox = SandboxProfile::Off;
@@ -534,7 +535,7 @@ private Q_SLOTS:
         settings.provider = Provider::Acp;
         settings.apiFormat = ApiFormat::AcpNative;
         settings.acpAgentId = u"mock-one"_s;
-        settings.acpCommand = u"python3"_s;
+        settings.acpCommand = python3Command();
         settings.acpArgs = u'"' + m_agent + u"\" models"_s;
         settings.permissionMode = PermissionMode::Ask;
         settings.sandbox = SandboxProfile::Off;
@@ -545,7 +546,7 @@ private Q_SLOTS:
         one.insert(u"name"_s, u"Mock One"_s);
         one.insert(u"description"_s, u"first mock agent"_s);
         one.insert(u"version"_s, u"1.0"_s);
-        one.insert(u"command"_s, u"python3"_s);
+        one.insert(u"command"_s, python3Command());
         one.insert(u"args"_s, QJsonArray{m_agent, u"models"_s});
         installed.append(one);
         QJsonObject two;
@@ -553,7 +554,7 @@ private Q_SLOTS:
         two.insert(u"name"_s, u"Mock Two"_s);
         two.insert(u"description"_s, u"second mock agent"_s);
         two.insert(u"version"_s, u"1.0"_s);
-        two.insert(u"command"_s, u"python3"_s);
+        two.insert(u"command"_s, python3Command());
         two.insert(u"args"_s, QJsonArray{m_agent, u"legacy-models"_s});
         installed.append(two);
         settings.acpInstalledAgents = QString::fromUtf8(QJsonDocument(installed).toJson(QJsonDocument::Compact));

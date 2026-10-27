@@ -80,6 +80,11 @@ add_subdirectory(src)
 
 if(BUILD_TESTING)
     find_package(Qt6 ${QT_MIN_VERSION} CONFIG REQUIRED COMPONENTS Test)
+    # Tests spawn python3 (mock LLM server, mock ACP agent). Craft's
+    # craftenv.sh rewrites PATH on macOS/Windows CI, hiding the system
+    # python3 from QProcess. Resolve the absolute path at configure time
+    # so tests always find it regardless of PATH.
+    find_package(Python3 COMPONENTS Interpreter)
     add_subdirectory(tests)
 endif()
 

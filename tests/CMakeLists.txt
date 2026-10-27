@@ -1,3 +1,9 @@
+# Absolute path to python3, resolved at configure time so tests can spawn it
+# even when PATH is rewritten (Craft's craftenv.sh on macOS/Windows CI).
+if(Python3_Interpreter_FOUND)
+    add_compile_definitions(KATEAI_PYTHON3="${Python3_EXECUTABLE}")
+endif()
+
 function(kateai_test name)
     add_executable(${name} ${name}.cpp)
     target_link_libraries(${name} PRIVATE kateai_core Qt6::Test)

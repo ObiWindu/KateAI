@@ -68,8 +68,16 @@ jobs:
 
   # ---------------------------------------------------------- Linux packages
   package-fedora:
-    name: RPM package (Fedora/Asahi)
-    runs-on: ubuntu-latest
+    name: RPM package (Fedora/Asahi) ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
     container:
       image: fedora:latest
     steps:
@@ -88,13 +96,21 @@ jobs:
           ls -l artifacts/
       - uses: actions/upload-artifact@v4
         with:
-          name: package-fedora
+          name: package-fedora-${{ matrix.arch }}
           path: artifacts/
           retention-days: 28
 
   package-arch:
-    name: Arch package (Arch/CachyOS/Manjaro)
-    runs-on: ubuntu-latest
+    name: Arch package (Arch/CachyOS/Manjaro) ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
     container:
       image: archlinux:latest
     steps:
@@ -112,15 +128,28 @@ jobs:
           ls -l artifacts/
       - uses: actions/upload-artifact@v4
         with:
-          name: package-arch
+          name: package-arch-${{ matrix.arch }}
           path: artifacts/
           retention-days: 28
 
+  # Built on Debian trixie (not Ubuntu) so the .deb resolves against
+  # Debian's library versions — Googlebook OS ships a Debian trixie VM,
+  # and a .deb built on Ubuntu 25.04 can pull in incompatible deps.
+  # amd64 + arm64: Googlebook runs on both Intel Core Ultra and
+  # Snapdragon X Elite.
   package-debian:
-    name: DEB package (Debian/Ubuntu)
-    runs-on: ubuntu-latest
+    name: DEB package (Debian/Ubuntu) ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
     container:
-      image: ubuntu:25.04
+      image: debian:trixie
     steps:
       - uses: actions/checkout@v4
       - name: Install dependencies
@@ -140,7 +169,7 @@ jobs:
           ls -l artifacts/
       - uses: actions/upload-artifact@v4
         with:
-          name: package-debian
+          name: package-debian-${{ matrix.arch }}
           path: artifacts/
           retention-days: 28
 
@@ -335,7 +364,7 @@ jobs:
           - \`kateai-macos.so\` / \`kateai-*-macos-*.zip\` — macOS Homebrew build; install with \`./install.sh\`
           - \`kateai.dll\` / \`kateai-windows-*.zip\` — Windows Craft/MSVC build; install with \`packaging\\\\windows\\\\install.ps1\`
           - \`kateai-${VERSION}.tar.gz\` — source tarball
-          - \`.rpm\` (Fedora/Asahi) · \`.pkg.tar.zst\` (Arch/CachyOS/Manjaro) · \`.deb\` (Debian/Ubuntu 25.04+)
+          - \`.rpm\` (Fedora/Asahi, x86_64 + aarch64) · \`.pkg.tar.zst\` (Arch/CachyOS/Manjaro, x86_64 + aarch64) · \`.deb\` (Debian trixie / Ubuntu 25.04+, amd64 + arm64 — arm64 for Googlebook Snapdragon X Elite)
 
           ### Kate + plugin bundles (latest Kate)
           - \`kate-bundle-*.tar.gz\` (Linux) — Kate master built from source with the plugin

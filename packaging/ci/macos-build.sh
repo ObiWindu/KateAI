@@ -54,8 +54,20 @@ echo "==> Loading Craft environment"
 # craftenv.sh is not written with `set -u` in mind (unbound
 # CRAFT_PYTHON_BIN aborts the source); relax nounset across the source.
 set +u
+# craftenv.sh rewrites PATH and can hide the system python3 from test
+# subprocesses. Save its directory before sourcing so we can restore it.
+_PYTHON3_DIR="$(dirname "$(command -v python3 2>/dev/null || true)")"
 # shellcheck source=/dev/null
 source "${CRAFT_ROOT}/craft/craftenv.sh"
+# Restore the pre-Craft python3 directory to PATH (tests spawn python3 via
+# QProcess; CMake bakes in the absolute path, but this is a safety net).
+if [[ -n "${_PYTHON3_DIR}" && -d "${_PYTHON3_DIR}" ]]; then
+    case ":${PATH}:" in
+        *":${_PYTHON3_DIR}:"*) ;;
+        *) export PATH="${_PYTHON3_DIR}:${PATH}" ;;
+    esac
+fi
+unset _PYTHON3_DIR
 set -u
 
 echo "==> Installing latest Kate + deps via Craft (binary cache first; long on first run)"
