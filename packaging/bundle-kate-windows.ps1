@@ -45,7 +45,19 @@ if (-not (Test-Path $craftEnv)) {
         Write-Host "Execution policy is host-managed; continuing with the effective Bypass policy."
     }
     python.exe -m pip install --upgrade certifi
-    iex ((New-Object net.webclient).DownloadString('https://raw.githubusercontent.com/KDE/craft/master/setup/install_craft.ps1'))
+    # -root skips the install-path prompt; -use-defaults is forwarded to
+    # CraftBootstrap.py (arch/compiler auto-detected). Downloaded first so
+    # the exact command line shows in the log instead of hiding in iex.
+    $installer = Join-Path ([IO.Path]::GetTempPath()) "install_craft.ps1"
+    (New-Object net.webclient).DownloadFile(
+        'https://raw.githubusercontent.com/KDE/craft/master/setup/install_craft.ps1', $installer)
+    if ($env:CI -eq 'true' -and (Test-Path $CraftRoot)) {
+        # The installer loops forever on a non-empty target dir when there
+        # is no console to answer its prompt; CI VMs are disposable.
+        Write-Host "Removing pre-existing $CraftRoot for a clean Craft bootstrap."
+        Remove-Item -Recurse -Force $CraftRoot
+    }
+    & $installer -root $CraftRoot -use-defaults
 }
 if (-not (Test-Path $craftEnv)) {
     throw "KDE Craft not found at $CraftRoot. Install it first, see https://develop.kde.org/docs/getting-started/building/craft/"
