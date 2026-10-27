@@ -8,6 +8,10 @@
 
 #include <QDir>
 #include <QFileInfo>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonValue>
 #include <QStandardPaths>
 #include <KLocalizedString>
 
