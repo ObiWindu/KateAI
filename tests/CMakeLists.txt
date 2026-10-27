@@ -5,6 +5,7 @@ function(kateai_test name)
 endfunction()
 
 kateai_test(test_sandbox)
+kateai_test(test_telegrambridge)
 kateai_test(test_permissions)
 kateai_test(test_settings)
 kateai_test(test_llmparse)

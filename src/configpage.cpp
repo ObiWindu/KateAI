@@ -969,6 +969,42 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     webScroll->setWidget(webWidget);
     tabs->addTab(webScroll, i18n("Web Search"));
 
+    // --- Telegram remote bridge -------------------------------------------
+    auto *tgScroll = new QScrollArea(tabs);
+    tgScroll->setWidgetResizable(true);
+    auto *tgWidget = new QWidget(tgScroll);
+    auto *tgForm = new QFormLayout(tgWidget);
+    tgForm->setContentsMargins(12, 12, 12, 12);
+    tgForm->setSpacing(8);
+
+    m_telegramEnabled = new QCheckBox(i18n("Enable Telegram remote prompting (long-polling, no inbound port)"), tgWidget);
+    m_telegramEnabled->setToolTip(i18n("Drives the same agent loop from Telegram. Fail-closed: needs a bot token and at least one allowed chat id."));
+    tgForm->addRow(i18n("Enabled:"), m_telegramEnabled);
+
+    m_telegramToken = new QLineEdit(tgWidget);
+    m_telegramToken->setEchoMode(QLineEdit::Password);
+    m_telegramToken->setPlaceholderText(i18n("Bot token from @BotFather, or KATEAI_TELEGRAM_BOT_TOKEN env"));
+    tgForm->addRow(i18n("Bot token:"), m_telegramToken);
+
+    m_telegramAllowedIds = new QLineEdit(tgWidget);
+    m_telegramAllowedIds->setPlaceholderText(i18n("e.g. 123456789, 987654321 (numeric chat ids)"));
+    m_telegramAllowedIds->setToolTip(i18n("Only these Telegram chat ids may prompt. Empty = bridge refuses to start. Find yours via @userinfobot."));
+    tgForm->addRow(i18n("Allowed chat ids:"), m_telegramAllowedIds);
+
+    m_telegramAllowWrites = new QCheckBox(i18n("Allow file writes and shell from Telegram (still asks per tool)"), tgWidget);
+    m_telegramAllowWrites->setToolTip(i18n("Off = remote is read-only (plan mode + Strict sandbox). On = Ask permissions + Workspace/Strict sandbox, every write still needs Allow once."));
+    tgForm->addRow(i18n("Remote writes:"), m_telegramAllowWrites);
+
+    auto *tgHint = new QLabel(i18n("Security: outbound polling only, allowlist enforced, approvals default-deny after 2 min, "
+                                   "secrets redacted, checkpoints before each remote turn. Token stored with the other API keys (owner-only file)."),
+                              tgWidget);
+    tgHint->setWordWrap(true);
+    tgHint->setStyleSheet(QStringLiteral(u"color: %1;").arg(ChatTheme::textMuted()));
+    tgForm->addRow(tgHint);
+
+    tgScroll->setWidget(tgWidget);
+    tabs->addTab(tgScroll, i18n("Telegram"));
+
     // --- AI completions at the cursor ------------------------------------------
     auto *completionScroll = new QScrollArea(tabs);
     completionScroll->setWidgetResizable(true);
@@ -1857,6 +1893,11 @@ s.opencodeModel = m_opencodeModel->currentText().trimmed();
         s.webSearchEndpoint = m_webEndpoint->text().trimmed();
         s.webSearchMaxResults = m_webMaxResults->value();
         s.webSearchTimeoutMs = m_webTimeout->value() * 1000;
+    // Telegram remote bridge
+    s.telegramEnabled = m_telegramEnabled->isChecked();
+    s.telegramBotToken = m_telegramToken->text().trimmed();
+    s.telegramAllowedChatIds = m_telegramAllowedIds->text().trimmed();
+    s.telegramAllowWrites = m_telegramAllowWrites->isChecked();
 
     // Checkpoints and subtasks
     s.checkpointsEnabled = m_checkpointsEnabled->isChecked();
@@ -2088,6 +2129,11 @@ void KateAiConfigPage::reset()
             m_webMaxResults->setValue(qBound(1, s.webSearchMaxResults, 20));
             m_webTimeout->setValue(qBound(1, s.webSearchTimeoutMs / 1000, 120));
         }
+    // Telegram remote bridge
+    m_telegramEnabled->setChecked(s.telegramEnabled);
+    m_telegramToken->setText(s.telegramBotToken);
+    m_telegramAllowedIds->setText(s.telegramAllowedChatIds);
+    m_telegramAllowWrites->setChecked(s.telegramAllowWrites);
     if (!m_mcpServerConfigs.isEmpty()) {
         refreshMcpServerTable();
     }

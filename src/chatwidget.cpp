@@ -763,6 +763,7 @@ ChatWidget::ChatWidget(QWidget *parent)
     connect(m_configure, &QPushButton::clicked, this, &ChatWidget::showSettingsMenu);
     connect(m_modelSelector, &QPushButton::clicked, this, &ChatWidget::showModelMenu);
     connect(m_permissionBar, &PermissionBar::decided, &m_agent, &AgentLoop::resolvePermission);
+    m_telegram.setAgentLoop(&m_agent);
 
     connect(m_provider, &QComboBox::currentIndexChanged, this, [this]() {
         if (m_updatingCombos || m_provider->currentData().isNull()) {
@@ -1492,6 +1493,8 @@ ChatWidget::ChatWidget(QWidget *parent)
 
 ChatWidget::~ChatWidget()
 {
+    m_telegram.stop();
+    m_telegram.setAgentLoop(nullptr);
     if (m_sessionSaveTimer) {
         m_sessionSaveTimer->stop();
     }
@@ -3310,6 +3313,46 @@ void ChatWidget::setSettings(const Settings &settings)
         // Only fetch from providers that both have a key and expose a catalogue.
         if (!apiKeyFor(providerSettings).trimmed().isEmpty() && providerSupportsModelListing(provider) && !m_modelCatalog.contains(provider)) {
             m_agent.fetchModels(provider);
+        }
+    }
+    syncTelegramBridge();
+}
+
+void ChatWidget::syncTelegramBridge()
+{
+    m_telegram.setAgentLoop(&m_agent);
+    if (!m_settings.telegramEnabled) {
+        if (m_telegram.isRunning()) {
+            m_telegram.stop();
+        }
+        return;
+    }
+    TelegramBridge::Config config = TelegramBridge::configFromSettings(m_settings);
+    if (!TelegramBridge::isTokenWellFormed(config.botToken) || config.allowedChatIds.isEmpty()) {
+        // Fail-closed: misconfigured bridge never polls. The settings page
+        // explains the two required fields; staying silent here avoids
+        // spamming the transcript on every settings change.
+        if (m_telegram.isRunning()) {
+            m_telegram.stop();
+        }
+        return;
+    }
+    // While remote prompting is enabled the shared loop runs hardened, so a
+    // remote turn cannot widen what the local panel allowed. The panel keeps
+    // showing the raw settings; the loop enforces Ask + Strict/ReadOnly.
+    m_agent.setSettings(TelegramBridge::hardenedSettingsForRemote(m_settings));
+    if (!m_telegram.isRunning()) {
+        QString error;
+        if (!m_telegram.start(config, &error) && !error.isEmpty()) {
+            showInfoMessage(error, true);
+        }
+    } else {
+        // Refresh credentials/allowlist without dropping the loop: restart
+        // polling with the new config.
+        m_telegram.stop();
+        QString error;
+        if (!m_telegram.start(config, &error) && !error.isEmpty()) {
+            showInfoMessage(error, true);
         }
     }
 }

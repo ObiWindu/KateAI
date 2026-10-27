@@ -216,6 +216,11 @@ private:
     QLineEdit *m_webEndpoint = nullptr;
     QSpinBox *m_webMaxResults = nullptr;
     QSpinBox *m_webTimeout = nullptr;
+    // Telegram remote bridge (Bot API long-polling, fail-closed allowlist)
+    QCheckBox *m_telegramEnabled = nullptr;
+    QLineEdit *m_telegramToken = nullptr;
+    QLineEdit *m_telegramAllowedIds = nullptr;
+    QCheckBox *m_telegramAllowWrites = nullptr;
     QString m_workspace;
 
     // Checkpoints & Subtasks

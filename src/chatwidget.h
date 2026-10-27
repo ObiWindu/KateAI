@@ -6,6 +6,7 @@
 #pragma once
 
 #include "agentloop.h"
+#include "telegrambridge.h"
 #include "types.h"
 
 #include <QWidget>
@@ -312,9 +313,14 @@ private:
     static QString escape(const QString &text);
     static QString markdownToHtml(const QString &text);
     static QString closedMarkdown(const QString &text);
+    // (Re)starts or stops the Telegram remote bridge from the canonical
+    // settings. The bridge drives the same AgentLoop; hardening is applied
+    // to a copy so the local panel keeps its own permissions.
+    void syncTelegramBridge();
 
     Settings m_settings;
     AgentLoop m_agent;
+    TelegramBridge m_telegram;
     QComboBox *m_provider = nullptr;
     QComboBox *m_model = nullptr;
     QComboBox *m_permission = nullptr;

@@ -288,6 +288,11 @@ Settings SettingsStore::load()
     s.compressOldMessages = g.readEntry(u"CompressOldMessages"_s, true);
     s.smartContextTruncation = g.readEntry(u"SmartContextTruncation"_s, true);
     s.compressionThreshold = g.readEntry(u"CompressionThreshold"_s, 2048);
+    // Telegram remote bridge (fail-closed: disabled + empty allowlist).
+    s.telegramEnabled = g.readEntry(u"TelegramEnabled"_s, false);
+    s.telegramBotToken = g.readEntry(u"TelegramBotToken"_s, QString());
+    s.telegramAllowedChatIds = g.readEntry(u"TelegramAllowedChatIds"_s, QString());
+    s.telegramAllowWrites = g.readEntry(u"TelegramAllowWrites"_s, false);
     if (s.contextWindow < 0) {
         s.contextWindow = 0;
     }
@@ -447,6 +452,10 @@ void SettingsStore::save(const Settings &settings)
     g.writeEntry(u"CompressOldMessages"_s, settings.compressOldMessages);
     g.writeEntry(u"SmartContextTruncation"_s, settings.smartContextTruncation);
     g.writeEntry(u"CompressionThreshold"_s, settings.compressionThreshold);
+    g.writeEntry(u"TelegramEnabled"_s, settings.telegramEnabled);
+    g.writeEntry(u"TelegramBotToken"_s, settings.telegramBotToken);
+    g.writeEntry(u"TelegramAllowedChatIds"_s, settings.telegramAllowedChatIds);
+    g.writeEntry(u"TelegramAllowWrites"_s, settings.telegramAllowWrites);
     
     g.sync();
 

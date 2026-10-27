@@ -62,6 +62,8 @@ QString providerLabel(Provider provider)
         return i18n("ACP");
     case Provider::OpenCode:
         return i18n("OpenCode Zen");
+    case Provider::Telegram:
+        return i18n("Telegram (remote bridge, not a model)");
     case Provider::Grok:
     default:
         return i18n("Grok (xAI)");
@@ -119,6 +121,8 @@ QString providerBaseUrl(Provider provider)
         return u"http://localhost:8080"_s;
     case Provider::OpenCode:
         return u"https://opencode.ai/zen/v1"_s;
+    case Provider::Telegram:
+        return u"https://api.telegram.org"_s;
     case Provider::Grok:
     default:
         return u"https://api.x.ai/v1"_s;
@@ -146,6 +150,8 @@ QString providerBaseUrl(const Settings &settings)
         return u"https://api.kilo.ai/v1"_s;
     case Provider::Acp:
         return settings.acpUrl;
+    case Provider::Telegram:
+        return u"https://api.telegram.org"_s;
     case Provider::Grok:
     default:
         return u"https://api.x.ai/v1"_s;
@@ -306,6 +312,10 @@ QString apiKeyFor(const Settings &settings)
         return settings.acpApiKey;
     case Provider::OpenCode:
         return settings.opencodeApiKey;
+    case Provider::Telegram:
+        // The Telegram bridge is a transport, not an LLM provider: it never
+        // consumes an LLM key and is never offered as a chat model provider.
+        return {};
     case Provider::Grok:
     default:
         return settings.grokApiKey;
@@ -331,6 +341,8 @@ QString modelFor(const Settings &settings)
         return settings.acpModel;
     case Provider::OpenCode:
         return settings.opencodeModel;
+    case Provider::Telegram:
+        return {};
     case Provider::Grok:
     default:
         return settings.grokModel;

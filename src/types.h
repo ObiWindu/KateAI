@@ -412,6 +412,18 @@ struct Settings {
     // can carry a banner, so this does nothing for files Kate has not opened.
     bool editBannersEnabled = true;
 
+    // --- Telegram remote bridge ---------------------------------------------
+    // Long-polling Bot API bridge that drives the same AgentLoop. Disabled by
+    // default; the token lives with the other API keys and the chat allowlist
+    // must be non-empty before the bridge starts (fail-closed).
+    bool telegramEnabled = false;
+    QString telegramBotToken;
+    // Comma/space-separated Telegram chat ids (numeric) allowed to prompt.
+    QString telegramAllowedChatIds;
+    // When false (default) the remote side is forced read-only: plan mode on,
+    // Strict sandbox, no outside reads, Ask permissions.
+    bool telegramAllowWrites = false;
+
     // --- Appearance ----------------------------------------------------------
     // "preset" paints the chat panel from a built-in palette (themePreset);
     // "editor" derives both the chat colours and the window chrome from the
