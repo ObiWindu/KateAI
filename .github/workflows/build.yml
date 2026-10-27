@@ -100,6 +100,8 @@ jobs:
           path: artifacts/
           retention-days: 28
 
+  # archlinux:latest is amd64-only. For aarch64, use the Arch Linux ARM
+  # image (same package names, ARM repos at archlinuxarm.org).
   package-arch:
     name: Arch package (Arch/CachyOS/Manjaro) ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
@@ -109,12 +111,18 @@ jobs:
         include:
           - arch: x86_64
             runner: ubuntu-latest
+            image: archlinux:latest
           - arch: aarch64
             runner: ubuntu-24.04-arm
+            image: arch4edu/archlinuxarm:latest
     container:
-      image: archlinux:latest
+      image: ${{ matrix.image }}
     steps:
       - uses: actions/checkout@v4
+      - name: Init pacman keyring (Arch ARM images sometimes ship without it)
+        run: |
+          pacman-key --init || true
+          pacman-key --populate || true
       - name: Install dependencies
         run: |
           pacman -Sy --noconfirm base-devel kate cmake extra-cmake-modules ninja \
