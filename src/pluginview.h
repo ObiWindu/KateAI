@@ -66,6 +66,10 @@ private Q_SLOTS:
     // The project plugin loaded after this view (plugin load order): hook
     // its signals now and follow the folder it brings.
     void onPluginCreated(const QString &name);
+    // A project was added to (or activated in) the Projects panel. The two
+    // strings are the project name and its base directory in some order; the
+    // one that is an existing directory wins.
+    void projectOpened(const QString &first, const QString &second);
 
 private:
     void addEditorContextActions(KTextEditor::View *view, const QList<QAction *> &actions);

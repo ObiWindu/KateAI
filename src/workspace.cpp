@@ -123,7 +123,36 @@ QString pluginViewProjectBaseDir(KTextEditor::MainWindow *mainWindow)
     if (!view) {
         return QString();
     }
-    const QString base = view->property("projectBaseDir").toString().trimmed();
+    QString base = view->property("projectBaseDir").toString().trimmed();
+    // Kate's plugin view has carried the folder under different property
+    // names across versions; fall back to the project object it exposes so a
+    // renamed accessor does not silently pin the workspace to the old folder.
+    if (base.isEmpty()) {
+        for (const char *propName : { "project", "currentProject", "activeProject" }) {
+            const QVariant v = view->property(propName);
+            if (v.isValid()) {
+                if (v.canConvert<QObject *>()) {
+                    if (const QString fromProject = projectBaseDir(v.value<QObject *>()); !fromProject.isEmpty()) {
+                        base = fromProject;
+                        break;
+                    }
+                } else if (!v.toString().trimmed().isEmpty()) {
+                    base = v.toString().trimmed();
+                    break;
+                }
+            }
+        }
+    }
+    // Last resort: ask the view itself.
+    if (base.isEmpty()) {
+        QString viaMethod;
+        for (const char *method : { "projectBaseDir", "baseDir", "projectBaseDirectory" }) {
+            if (QMetaObject::invokeMethod(view, method, Q_RETURN_ARG(QString, viaMethod)) && !viaMethod.trimmed().isEmpty()) {
+                base = viaMethod.trimmed();
+                break;
+            }
+        }
+    }
     if (base.isEmpty()) {
         return QString();
     }

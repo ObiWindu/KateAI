@@ -801,8 +801,8 @@ namespace KateAi
         // per-window plugin view, not the plugin.
         if (m_mainWindow) {
             if (QObject *panel = m_mainWindow->pluginView(u"kateprojectplugin"_s)) {
-                connect(panel, SIGNAL(pluginProjectAdded(QString, QString)), this, SLOT(projectActiveChanged()));
-                connect(panel, SIGNAL(pluginProjectRemoved(QString, QString)), this, SLOT(projectActiveChanged()));
+                connect(panel, SIGNAL(pluginProjectAdded(QString, QString)), this, SLOT(projectOpened(QString, QString)));
+                connect(panel, SIGNAL(pluginProjectRemoved(QString, QString)), this, SLOT(projectListChanged()));
                 connect(panel, SIGNAL(projectMapChanged()), this, SLOT(projectActiveChanged()));
                 connect(panel, SIGNAL(projectFileNameChanged()), this, SLOT(projectActiveChanged()));
                 connect(panel, SIGNAL(projectFilesChanged()), this, SLOT(projectActiveChanged()));
@@ -812,8 +812,8 @@ namespace KateAi
             connect(m_mainWindow, &KTextEditor::MainWindow::pluginViewCreated, this,
                     [this](const QString &name, QObject *pluginView) {
                         if (name == u"kateprojectplugin"_s) {
-                            connect(pluginView, SIGNAL(pluginProjectAdded(QString, QString)), this, SLOT(projectActiveChanged()));
-                            connect(pluginView, SIGNAL(pluginProjectRemoved(QString, QString)), this, SLOT(projectActiveChanged()));
+                            connect(pluginView, SIGNAL(pluginProjectAdded(QString, QString)), this, SLOT(projectOpened(QString, QString)));
+                            connect(pluginView, SIGNAL(pluginProjectRemoved(QString, QString)), this, SLOT(projectListChanged()));
                             connect(pluginView, SIGNAL(projectMapChanged()), this, SLOT(projectActiveChanged()));
                             connect(pluginView, SIGNAL(projectFileNameChanged()), this, SLOT(projectActiveChanged()));
                             connect(pluginView, SIGNAL(projectFilesChanged()), this, SLOT(projectActiveChanged()));
@@ -854,16 +854,48 @@ namespace KateAi
         // The panel's active folder (falling back to the newest project) is
         // the folder the user just opened, so follow it directly instead of
         // letting the active document veto the switch.
+        //
+        // When a folder is reopened (it is already in the project list) Kate
+        // may not move the panel's active selection synchronously, and the
+        // newest project is unchanged, so neither candidate differs from the
+        // current workspace on its own. Prefer whichever candidate actually
+        // differs from the current workspace, so reopening a folder or going
+        // back to one opened earlier still switches instead of being ignored.
         const QString active = activeProjectBaseDir(m_mainWindow);
-        if (!active.isEmpty()) {
-            refreshWorkspace(active);
-            return;
-        }
         const QString newest = newestProjectBaseDir();
-        if (!newest.isEmpty()) {
-            refreshWorkspace(newest);
+        const QString current = m_workspace;
+        QString chosen;
+        if (!active.isEmpty() && QDir::cleanPath(active) != QDir::cleanPath(current)) {
+            chosen = active;
+        } else if (!newest.isEmpty() && QDir::cleanPath(newest) != QDir::cleanPath(current)) {
+            chosen = newest;
+        } else if (!active.isEmpty()) {
+            chosen = active;
+        } else if (!newest.isEmpty()) {
+            chosen = newest;
+        }
+        if (!chosen.isEmpty()) {
+            refreshWorkspace(chosen);
         } else {
             refreshWorkspace();
+        }
+    }
+
+    void KateAiView::projectOpened(const QString &first, const QString &second)
+    {
+        // The panel announces a project by name and base directory, in an
+        // order that is not guaranteed across Kate versions. The argument
+        // that names an existing directory is the folder to switch to.
+        QString dir;
+        if (QFileInfo(first).isDir()) {
+            dir = first;
+        } else if (QFileInfo(second).isDir()) {
+            dir = second;
+        }
+        if (!dir.isEmpty()) {
+            refreshWorkspace(QDir::cleanPath(dir));
+        } else {
+            projectActiveChanged();
         }
     }
 
@@ -874,8 +906,20 @@ namespace KateAi
         // Without the override detectWorkspace() would keep returning the
         // old document's project and the switch would never be seen.
         const QString active = activeProjectBaseDir(m_mainWindow);
-        if (!active.isEmpty()) {
-            refreshWorkspace(active);
+        const QString newest = newestProjectBaseDir();
+        const QString current = m_workspace;
+        QString chosen;
+        if (!active.isEmpty() && QDir::cleanPath(active) != QDir::cleanPath(current)) {
+            chosen = active;
+        } else if (!newest.isEmpty() && QDir::cleanPath(newest) != QDir::cleanPath(current)) {
+            chosen = newest;
+        } else if (!active.isEmpty()) {
+            chosen = active;
+        } else if (!newest.isEmpty()) {
+            chosen = newest;
+        }
+        if (!chosen.isEmpty()) {
+            refreshWorkspace(chosen);
         } else {
             refreshWorkspace();
         }
