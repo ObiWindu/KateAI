@@ -64,6 +64,8 @@ craft kate
 echo "==> Configuring plugin (${BUILD_TYPE}) against ${CRAFT_ROOT}"
 # shellcheck source=scripts/kateai-platform.sh
 source "${ROOT}/scripts/kateai-platform.sh"
+# shellcheck source=scripts/kateai-build-dir.sh
+source "${ROOT}/scripts/kateai-build-dir.sh"
 BUILD_DIR="$(kateai_resolve_build_dir)"
 cmake -S . -B "${BUILD_DIR}" \
     -DCMAKE_BUILD_TYPE="${BUILD_TYPE}" \

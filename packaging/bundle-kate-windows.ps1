@@ -22,12 +22,14 @@ $ErrorActionPreference = "Stop"
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Set-Location $Root
 
-# Craft's MSVC toolchain aborts when sh.exe (Git\bin) or a MinGW gcc sits in
-# PATH, and the same pollution breaks its Visual Studio detection. The hosted
-# runner ships both. Strip those entries (keeping Git\cmd for git.exe); Craft
-# brings its own toolchain and the runner's cmake/ninja stay on PATH.
+# Craft's MSVC toolchain aborts when sh.exe or a foreign gcc sits in PATH,
+# and the same pollution breaks its Visual Studio detection. The hosted
+# runner ships Git's sh (Git\bin and Git\usr\bin, depending on image),
+# MinGW and Strawberry Perl gcc. Strip those entries (keeping Git\cmd for
+# git.exe); Craft brings its own toolchain and the runner's cmake/ninja
+# stay on PATH.
 $env:PATH = ($env:PATH -split ';' | Where-Object {
-    $_ -and $_ -notmatch '(?i)Git\\bin' -and $_ -notmatch '(?i)mingw'
+    $_ -and $_ -notmatch '(?i)Git\\(bin|usr\\bin)' -and $_ -notmatch '(?i)mingw|strawberry'
 }) -join ';'
 
 $m = Select-String -Path (Join-Path $Root "CMakeLists.txt") -Pattern 'project\(kateai VERSION ([^ ]+)' | Select-Object -First 1
