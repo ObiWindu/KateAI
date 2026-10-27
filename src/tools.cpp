@@ -581,6 +581,13 @@ PermissionRequest ToolRunner::describe(const ToolCall &call) const
         }
         req.allowFreeform = jsonBool(args.value(u"allow_freeform"_s), true);
         req.details = QString::fromUtf8(QJsonDocument(args).toJson(QJsonDocument::Compact));
+    } else if (call.name == u"suggest"_s) {
+        // Advice, not work: read risk so it never prompts, and the full
+        // arguments as details so the card can be built while the tool runs
+        // and the history can rebuild it later.
+        req.risk = ToolRisk::Read;
+        req.path = args.value(u"path"_s).toString().trimmed();
+        req.details = QString::fromUtf8(QJsonDocument(args).toJson(QJsonDocument::Compact));
     } else {
         // Unknown tools reach the permission card from here. A delegation or
         // an MCP call can run code, so they must not be presented with the
@@ -1929,17 +1936,19 @@ ToolResult ToolRunner::suggest(const QJsonObject &args)
     const QString path = args.value(u"path"_s).toString().trimmed();
     int line = 0;
     const QJsonValue lineValue = args.value(u"line"_s);
-    if (lineValue.isDouble()) {
-        line = lineValue.toInt();
-        if (line < 1) {
+    if (lineValue.isUndefined() || lineValue.isNull()) {
+        line = 0;
+    } else {
+        // The model often sends numbers as strings ("5"); QJsonValue::toInt()
+        // silently yields 0 for those, which would drop the anchor. jsonInt
+        // accepts both forms.
+        const int parsed = jsonInt(lineValue, -1);
+        if (parsed < 1) {
             result.ok = false;
             result.output = u"line must be a 1-based line number, or leave it out."_s;
             return result;
         }
-    } else if (!lineValue.isUndefined() && !lineValue.isNull()) {
-        result.ok = false;
-        result.output = u"line must be a 1-based line number, or leave it out."_s;
-        return result;
+        line = parsed;
     }
 
     // Nothing is executed here: the card the user sees is built from the tool

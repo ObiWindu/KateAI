@@ -112,8 +112,21 @@ static KateAi::Suggestion suggestionFromRequest(const KateAi::PermissionRequest 
     if (!argsDoc.isNull() && argsDoc.isObject()) {
         const QJsonObject args = argsDoc.object();
         suggestion.text = args.value(u"suggestion"_s).toString();
-        suggestion.path = args.value(u"path"_s).toString();
-        suggestion.line = args.value(u"line"_s).toInt();
+        suggestion.path = args.value(u"path"_s).toString().trimmed();
+        // The model often sends numbers as strings ("5"); toInt() silently
+        // yields 0 for those and drops the anchor.
+        const QJsonValue lineValue = args.value(u"line"_s);
+        if (lineValue.isDouble()) {
+            suggestion.line = lineValue.toInt();
+        } else if (lineValue.isString()) {
+            suggestion.line = lineValue.toString().trimmed().toInt();
+        } else {
+            suggestion.line = 0;
+        }
+    }
+    // ToolRunner fills path separately; prefer arguments, fall back to it.
+    if (suggestion.path.isEmpty() && !request.path.isEmpty()) {
+        suggestion.path = request.path;
     }
     return suggestion;
 }
@@ -1327,6 +1340,12 @@ ChatWidget::ChatWidget(QWidget *parent)
         if (auto *widget = m_subtaskWidgets.value(taskId)) {
             widget->appendMessageDelta(delta);
         }
+    });
+    connect(&m_agent, &AgentLoop::subtaskProgress, this, [this](const QString &taskId, const QString &partial) {
+        if (auto *widget = m_subtaskWidgets.value(taskId)) {
+            widget->setPartialOutput(partial);
+        }
+        forceScrollToBottom();
     });
     connect(&m_agent, &AgentLoop::subtaskFinished, this, [this](const QString &taskId, bool ok) {
         Q_UNUSED(taskId)
@@ -5700,6 +5719,12 @@ void ChatWidget::flushToolProgress()
         if (auto *widget = m_toolCallWidgets.value(it.key())) {
             widget->setPartialOutput(it.value());
         }
+        // Sub-agent cards are keyed by the same toolCallId (taskId == call.id):
+        // a parent-level progress chunk for a new_task call is the child's
+        // live output and belongs on the sub-agent card, not dropped.
+        if (auto *subtask = m_subtaskWidgets.value(it.key())) {
+            subtask->setPartialOutput(it.value());
+        }
     }
     scrollToBottom();
 }
@@ -5944,6 +5969,20 @@ void ChatWidget::restoreHistoricalTool(const QString &toolCallId, const QString 
     result.name = toolName;
     result.output = hasResult ? output : QString();
     result.ok = !result.output.contains(u"STATUS: failure"_s);
+    // A question's payload is prose, not arguments: without this the restored
+    // card shows only the answer and the question that prompted it is lost.
+    // setFinished clears the running input, so the question is folded into the
+    // finished body instead.
+    if (toolName == u"question"_s) {
+        const QString asked = argsObj.value(u"question"_s).toString().trimmed();
+        if (!asked.isEmpty()) {
+            if (result.output.trimmed().isEmpty()) {
+                result.output = asked;
+            } else if (!result.output.contains(asked.left(40))) {
+                result.output = asked + u"\n\n— Answer: "_s + result.output;
+            }
+        }
+    }
     toolWidget->setFinished(result);
 
     m_toolCallWidgets.insert(toolCallId, toolWidget);
@@ -6087,8 +6126,15 @@ void ChatWidget::rebuildTranscript()
             }
             Suggestion suggestion;
             suggestion.text = restoredArgs.value(u"suggestion"_s).toString();
-            suggestion.path = restoredArgs.value(u"path"_s).toString();
-            suggestion.line = restoredArgs.value(u"line"_s).toInt();
+            suggestion.path = restoredArgs.value(u"path"_s).toString().trimmed();
+            const QJsonValue restoredLine = restoredArgs.value(u"line"_s);
+            if (restoredLine.isDouble()) {
+                suggestion.line = restoredLine.toInt();
+            } else if (restoredLine.isString()) {
+                suggestion.line = restoredLine.toString().trimmed().toInt();
+            } else {
+                suggestion.line = 0;
+            }
             placed.insert(toolCallId);
             if (suggestion.text.isEmpty()) {
                 return;

@@ -2165,7 +2165,27 @@ PermissionRequest AgentLoop::describeTool(const ToolCall &call) const
         request.risk = ToolRisk::Read;
         request.details = QString::fromUtf8(QJsonDocument(eff).toJson(QJsonDocument::Indented));
         request.questionText = text;
-        request.allowFreeform = eff.value(u"allow_freeform"_s).toBool(true);
+        // The model often sends booleans as strings ("false") or numbers (0);
+        // QJsonValue::toBool(true) is only true for real booleans, so it would
+        // show a freeform box the model explicitly forbade. Be tolerant here,
+        // the same way ToolRunner::describe is.
+        {
+            const QJsonValue freeformValue = eff.value(u"allow_freeform"_s);
+            bool allowFreeform = true;
+            if (freeformValue.isBool()) {
+                allowFreeform = freeformValue.toBool();
+            } else if (freeformValue.isDouble()) {
+                allowFreeform = freeformValue.toInt() != 0;
+            } else if (freeformValue.isString()) {
+                const QString s = freeformValue.toString().trimmed().toLower();
+                if (s == u"true"_s || s == u"1"_s || s == u"yes"_s) {
+                    allowFreeform = true;
+                } else if (s == u"false"_s || s == u"0"_s || s == u"no"_s) {
+                    allowFreeform = false;
+                }
+            }
+            request.allowFreeform = allowFreeform;
+        }
         for (const QJsonValue &value : options) {
             const QString option = value.toString().trimmed();
             if (!option.isEmpty()) {
@@ -2531,10 +2551,23 @@ static QString subtaskLog(const QStringList &log, int toolCount)
 
 void AgentLoop::dispatchSubtask(const ToolCall &call)
 {
-    const QString description = call.arguments.value(u"description"_s).toString().trimmed();
-    const QString requestedMode = call.arguments.value(u"mode"_s).toString().trimmed();
-    const QString requestedAgent = call.arguments.value(u"agent"_s).toString().trimmed();
-    const bool includeTranscript = call.arguments.value(u"include_transcript"_s).toBool(false);
+    // Use the unified args: on the LLM path call.arguments is empty and only
+    // argumentsJson carries the delegation, so reading call.arguments directly
+    // would see an empty description and refuse every sub-agent.
+    const QJsonObject eff = effectiveArgs(call);
+    const QString description = eff.value(u"description"_s).toString().trimmed();
+    const QString requestedMode = eff.value(u"mode"_s).toString().trimmed();
+    const QString requestedAgent = eff.value(u"agent"_s).toString().trimmed();
+    const QJsonValue transcriptValue = eff.value(u"include_transcript"_s);
+    bool includeTranscript = false;
+    if (transcriptValue.isBool()) {
+        includeTranscript = transcriptValue.toBool();
+    } else if (transcriptValue.isDouble()) {
+        includeTranscript = transcriptValue.toInt() != 0;
+    } else if (transcriptValue.isString()) {
+        const QString s = transcriptValue.toString().trimmed().toLower();
+        includeTranscript = (s == u"true"_s || s == u"1"_s || s == u"yes"_s);
+    }
 
     if (description.isEmpty()) {
         ToolResult result;
@@ -2678,6 +2711,56 @@ void AgentLoop::dispatchSubtask(const ToolCall &call)
         const QString detail = result.ok ? QString() : QStringLiteral(" — %1").arg(result.output.left(160));
         state->log.append(QStringLiteral("  %1 %2%3").arg(marker, result.name, detail));
         Q_EMIT subtaskActivity(state->taskId, QStringLiteral("  %1 %2").arg(marker, result.name), !result.ok);
+    });
+    // Live tool output (bash stream, web fetch progress, MCP updates): the
+    // parent card shows it as it arrives instead of only the coarse
+    // started/finished lines above.
+    connect(child, &AgentLoop::toolProgress, child, [this, state](const QString &toolCallId, const QString &partial) {
+        Q_UNUSED(toolCallId);
+        Q_EMIT subtaskProgress(state->taskId, partial);
+    });
+    // Thinking, status and activity: the "what is it doing right now" half of
+    // realtime info. Reported as activity lines so the card's Doing: label and
+    // the expandable log stay in step with the child.
+    connect(child, &AgentLoop::thinkingDelta, child, [this, state](const QString &delta) {
+        Q_UNUSED(delta);
+        // Deltas are high-frequency; the card only needs to know thinking is
+        // flowing, not every fragment.
+    });
+    connect(child, &AgentLoop::statusChanged, child, [this, state](const QString &status) {
+        if (status.trimmed().isEmpty()) {
+            return;
+        }
+        Q_EMIT subtaskActivity(state->taskId, status.left(200), false);
+    });
+    connect(child, &AgentLoop::activityUpdated, child, [this, state](const QString &text) {
+        if (text.trimmed().isEmpty()) {
+            return;
+        }
+        Q_EMIT subtaskActivity(state->taskId, text.left(300), false);
+    });
+    connect(child, &AgentLoop::planUpdated, child, [this, state](const QJsonArray &plan) {
+        Q_EMIT subtaskActivity(state->taskId, i18n("Plan updated (%1 steps)", plan.size()), false);
+    });
+    // A child that asks its own question or waits for permission would stall
+    // silently: the parent never prompts for it. Surface it so the user sees
+    // why the sub-agent stopped moving.
+    connect(child, &AgentLoop::questionAsked, child, [this, state](const PermissionRequest &request) {
+        const QString asked = request.questionText.trimmed().isEmpty() ? request.summary : request.questionText;
+        Q_EMIT subtaskActivity(state->taskId,
+                               i18n("Needs an answer: %1", asked.left(200)), false);
+    });
+    connect(child, &AgentLoop::permissionNeeded, child, [this, state](const PermissionRequest &request) {
+        const QString label = request.summary.isEmpty() ? request.toolName : request.summary;
+        Q_EMIT subtaskActivity(state->taskId,
+                               i18n("Waiting for approval: %1", label.left(200)), false);
+    });
+    connect(child, &AgentLoop::suggestionPosted, child, [this, state](const Suggestion &suggestion) {
+        if (suggestion.text.trimmed().isEmpty()) {
+            return;
+        }
+        Q_EMIT subtaskActivity(state->taskId,
+                               i18n("Suggestion: %1", suggestion.text.trimmed().left(200)), false);
     });
 
     state->timer = new QTimer(child);
@@ -2848,6 +2931,10 @@ void AgentLoop::answerQuestion(const QString &answer)
         result.cancelled = true;
         result.output = u"(no answer provided)"_s;
     }
+    // The question card in the transcript was put in running state by
+    // toolStarted; without this it would spin forever because only
+    // toolFinished settles it.
+    Q_EMIT toolFinished(result);
     appendToolResult(call, result);
     markActionExecuted(actionSignature(call));
     m_state = State::ExecutingTools;

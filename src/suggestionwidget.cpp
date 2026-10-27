@@ -153,13 +153,17 @@ void SuggestionWidget::updateHeader()
         m_status->setText(i18n("accepted"));
         return;
     }
-    if (m_running) {
-        m_status->setText(i18n("posting…"));
-        return;
-    }
+    // The anchor stays visible while the tool runs: it names the file the
+    // advice is about, which is exactly what the user needs before deciding.
     if (!m_path.isEmpty()) {
         m_anchor->setText(m_line > 0 ? u"%1:%2"_s.arg(m_path).arg(m_line) : m_path);
         m_anchor->setVisible(true);
+    } else {
+        m_anchor->setVisible(false);
+    }
+    if (m_running) {
+        m_status->setText(i18n("posting…"));
+        return;
     }
     m_status->setText(i18n("posted"));
 }
