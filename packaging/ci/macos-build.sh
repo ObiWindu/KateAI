@@ -62,12 +62,14 @@ echo "==> Installing latest Kate + deps via Craft (binary cache first; long on f
 craft kate
 
 echo "==> Configuring plugin (${BUILD_TYPE}) against ${CRAFT_ROOT}"
+# `craft kate` changes CWD into CraftRoot; go back to the repo root.
+cd "${ROOT}"
 # shellcheck source=scripts/kateai-platform.sh
 source "${ROOT}/scripts/kateai-platform.sh"
 # shellcheck source=scripts/kateai-build-dir.sh
 source "${ROOT}/scripts/kateai-build-dir.sh"
 BUILD_DIR="$(kateai_resolve_build_dir)"
-cmake -S . -B "${BUILD_DIR}" \
+cmake -S "${ROOT}" -B "${BUILD_DIR}" \
     -DCMAKE_BUILD_TYPE="${BUILD_TYPE}" \
     -DCMAKE_PREFIX_PATH="${CRAFT_ROOT}" \
     -DKATEAI_USER_INSTALL=ON
