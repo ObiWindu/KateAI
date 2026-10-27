@@ -1,14 +1,27 @@
 # GitLab CI: build the Kate AI plugin, distro packages, a Kate+plugin
 # bundle from the latest Kate source, and publish them as a GitLab Release.
 #
+# Coverage — every target distribution:
+#   Linux:   plugin build + tests (Fedora) and native packages
+#            (.rpm Fedora/Asahi, .pkg.tar.zst Arch/CachyOS/Manjaro,
+#             .deb Debian/Ubuntu 25.04+) plus a Linux bundle built from
+#            the latest Kate master + plugin (bundle:kate-latest).
+#   macOS:   plugin build + tests via Homebrew (plugin:build:macos),
+#            plugin zip (package:macos) and a Kate.app bundle with the
+#            plugin pre-installed (bundle:kate-macos).
+#   Windows: plugin build + tests via KDE Craft MSVC toolchain
+#            (plugin:build:windows) and a latest-Kate + plugin bundle
+#            (bundle:kate-windows: plugin zip + Craft Kate installer).
+#
 # Pipelines:
-#   - every push / MR: plugin build + tests + source tarball + distro packages
-#   - main / tags / manual: + bundle:kate-latest (builds Kate `master` + plugin)
+#   - every push / MR: Linux plugin build + tests + distro packages.
+#   - main / tags / manual: + macOS + Windows builds, all bundles.
 #   - tags (v* or *.*.*): + release (uploads everything to the package
-#     registry and creates the Release with download links)
+#     registry and creates the Release with download links).
 #
 # Manual runs:
-#   - set BUNDLE=1 on a branch pipeline to force the Kate bundle job.
+#   - set BUNDLE=1 on a branch pipeline to force the Kate bundle jobs.
+#   - set WINMAC=1 on a branch pipeline to force the macOS/Windows builds.
 #   - push a tag (git tag v0.2.0 && git push origin v0.2.0) to cut a release.
 #   - set SKIP_BUNDLE=1 on a tag pipeline to release the plugin without Kate.
 
@@ -53,6 +66,70 @@ plugin:build:
     paths:
       - artifacts/kateai.so
       - artifacts/*.tar.gz
+
+# ------------------------------------------------- macOS plugin build+tests
+# Hosted macOS runners need an explicit image; HOMEBREW_NO_AUTO_UPDATE
+# keeps brew from self-updating on every invocation (per GitLab docs).
+plugin:build:macos:
+  stage: build
+  tags:
+    - saas-macos-medium-m1
+  image: macos-26-xcode-26
+  variables:
+    HOMEBREW_NO_AUTO_UPDATE: "1"
+  rules:
+    - if: $SKIP_MACWIN == "1"
+      when: never
+    - if: $CI_COMMIT_TAG
+      when: on_success
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: on_success
+    - if: $WINMAC == "1"
+      when: on_success
+    - when: manual
+      allow_failure: true
+  script:
+    - ./packaging/ci/macos-build.sh --build-type RelWithDebInfo --artifacts-dir artifacts
+    - ./packaging/mk-source-tarball.sh
+    - cp packaging/dist/*.tar.gz artifacts/
+    - ls -l artifacts/
+  artifacts:
+    name: "kateai-plugin-macos-${CI_COMMIT_SHORT_SHA}"
+    expire_in: 4 weeks
+    paths:
+      - artifacts/kateai.so
+      - artifacts/*.tar.gz
+
+# ------------------------------------------------- Windows plugin build+tests
+# Hosted Windows runners are PowerShell, admin, no `image:` key. Preinstalled:
+# Chocolatey, CMake, Visual Studio Build Tools, Python3, Git. Qt/KF6 come
+# from KDE Craft (MSVC ABI matching Kate); first run downloads a large
+# binary cache, so this job is gated like the bundles (tags/main/manual).
+plugin:build:windows:
+  stage: build
+  tags:
+    - saas-windows-medium-amd64
+  timeout: 3h
+  rules:
+    - if: $SKIP_MACWIN == "1"
+      when: never
+    - if: $CI_COMMIT_TAG
+      when: on_success
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: on_success
+    - if: $WINMAC == "1"
+      when: on_success
+    - when: manual
+      allow_failure: true
+  script:
+    - powershell -ExecutionPolicy Bypass -File packaging\ci\windows-build.ps1 -BuildType RelWithDebInfo -ArtifactsDir artifacts
+    - Get-ChildItem artifacts/
+  artifacts:
+    name: "kateai-plugin-windows-${CI_COMMIT_SHORT_SHA}"
+    expire_in: 4 weeks
+    paths:
+      - artifacts/kateai.dll
+      - artifacts/*.zip
 
 # ---------------------------------------------------------- distro packages
 package:fedora:
@@ -117,6 +194,41 @@ package:debian:
     paths:
       - artifacts/*.deb
 
+package:macos:
+  stage: package
+  tags:
+    - saas-macos-medium-m1
+  image: macos-26-xcode-26
+  variables:
+    HOMEBREW_NO_AUTO_UPDATE: "1"
+  needs:
+    - job: plugin:build:macos
+      artifacts: false
+  rules:
+    - if: $SKIP_MACWIN == "1"
+      when: never
+    - if: $CI_COMMIT_TAG
+      when: on_success
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: on_success
+    - if: $WINMAC == "1"
+      when: on_success
+    - when: manual
+      allow_failure: true
+  script:
+    - ./packaging/build-package.sh macos
+    - mkdir -p artifacts && cp packaging/dist/*.zip artifacts/ 2>/dev/null || true
+    - ls -l artifacts/
+  artifacts:
+    name: "kateai-macos-${CI_COMMIT_SHORT_SHA}"
+    expire_in: 4 weeks
+    paths:
+      - artifacts/*.zip
+
+# Windows has no separate package step: plugin:build:windows already stages
+# kateai.dll + kateai-windows-*.zip (Craft MSVC ABI). The full Kate installer
+# is produced by bundle:kate-windows below.
+
 # ------------------------------------------------- Kate (latest) + plugin bundle
 # Builds Kate from ${KATE_REF} (default: master) and installs this plugin
 # into the same prefix, then tars the whole prefix. Heavy (~15-30 min):
@@ -156,6 +268,77 @@ bundle:kate-latest:
     paths:
       - artifacts/kate-bundle-*.tar.gz
 
+# ------------------------------------------- macOS Kate.app + plugin bundle
+# Latest Kate from the Homebrew cask with kateai.so injected into the app's
+# plug-in directory, tarred for the release.
+bundle:kate-macos:
+  stage: bundle
+  tags:
+    - saas-macos-medium-m1
+  image: macos-26-xcode-26
+  variables:
+    HOMEBREW_NO_AUTO_UPDATE: "1"
+  rules:
+    - if: $SKIP_BUNDLE == "1"
+      when: never
+    - if: $SKIP_MACWIN == "1"
+      when: never
+    - if: $CI_COMMIT_TAG
+      when: on_success
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: on_success
+    - if: $BUNDLE == "1"
+      when: on_success
+    - if: $WINMAC == "1"
+      when: on_success
+    - when: manual
+      allow_failure: true
+  script:
+    - ./packaging/bundle-kate-macos.sh
+    - mkdir -p artifacts && cp packaging/dist/kate-bundle-*.tar.gz artifacts/
+    - ls -l artifacts/
+  artifacts:
+    name: "kate-bundle-macos-${CI_COMMIT_SHORT_SHA}"
+    expire_in: 4 weeks
+    paths:
+      - artifacts/kate-bundle-*.tar.gz
+
+# ------------------------------------------- Windows Kate + plugin bundle
+# Latest Kate via Craft plus the MSVC plugin: a plugin zip and, when Craft
+# produces one, the Kate installer (kate-*.exe) for the release.
+bundle:kate-windows:
+  stage: bundle
+  tags:
+    - saas-windows-medium-amd64
+  timeout: 3h
+  rules:
+    - if: $SKIP_BUNDLE == "1"
+      when: never
+    - if: $SKIP_MACWIN == "1"
+      when: never
+    - if: $CI_COMMIT_TAG
+      when: on_success
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: on_success
+    - if: $BUNDLE == "1"
+      when: on_success
+    - if: $WINMAC == "1"
+      when: on_success
+    - when: manual
+      allow_failure: true
+  script:
+    - powershell -ExecutionPolicy Bypass -File packaging\bundle-kate-windows.ps1
+    - mkdir artifacts -Force -ErrorAction SilentlyContinue | Out-Null
+    - Copy-Item packaging\dist\kate-bundle-*.zip artifacts\ -Force
+    - Copy-Item packaging\dist\kate-*.exe artifacts\ -Force -ErrorAction SilentlyContinue
+    - Get-ChildItem artifacts/
+  artifacts:
+    name: "kate-bundle-windows-${CI_COMMIT_SHORT_SHA}"
+    expire_in: 4 weeks
+    paths:
+      - artifacts/kate-bundle-*.zip
+      - artifacts/kate-*.exe
+
 # ------------------------------------------------------------------ release
 # Tag the repo (git tag v0.2.0 && git push origin v0.2.0) and this job
 # uploads every artifact to the generic package registry and creates the
@@ -167,13 +350,28 @@ release:
   needs:
     - job: plugin:build
       artifacts: true
+    - job: plugin:build:macos
+      artifacts: true
+      optional: true
+    - job: plugin:build:windows
+      artifacts: true
+      optional: true
     - job: package:fedora
       artifacts: true
     - job: package:arch
       artifacts: true
     - job: package:debian
       artifacts: true
+    - job: package:macos
+      artifacts: true
+      optional: true
     - job: bundle:kate-latest
+      artifacts: true
+      optional: true
+    - job: bundle:kate-macos
+      artifacts: true
+      optional: true
+    - job: bundle:kate-windows
       artifacts: true
       optional: true
   rules:
@@ -210,14 +408,21 @@ release:
       ## Kate AI $CI_COMMIT_TAG
 
       ### Plugin only
-      - `kateai.so` — drop into `<qt-plugin-dir>/kf6/ktexteditor/` (`./install.sh` does this for you)
+      - `kateai.so` — Linux: drop into `<qt-plugin-dir>/kf6/ktexteditor/` (`./install.sh` does this for you)
+      - `kateai.dll` (+ `kateai-windows-*.zip`) — Windows Craft/MSVC build; install with `packaging\windows\install.ps1`
+      - `kateai-<version>-macos-*.zip` — macOS Homebrew build; install with `./install.sh`
       - `kateai-<version>.tar.gz` — source tarball
       - `.rpm` (Fedora/Asahi) · `.pkg.tar.zst` (Arch/CachyOS/Manjaro) · `.deb` (Debian/Ubuntu 25.04+)
 
-      ### Kate + plugin bundle
-      - `kate-bundle-*.tar.gz` — latest Kate ($KATE_REF) built from source with the plugin pre-installed.
-        Extract to `/` and run `/opt/kate-ai-bundle/bin/kate-ai`.
-        (Absent when the tag pipeline ran with `SKIP_BUNDLE=1`.)
+      ### Kate + plugin bundles (latest Kate)
+      - `kate-bundle-*.tar.gz` (Linux) — latest Kate master built from source with the plugin
+        pre-installed. Extract to `/` and run `/opt/kate-ai-bundle/bin/kate-ai`.
+      - `kate-bundle-*-macos-*.tar.gz` — latest Kate.app (Homebrew cask) with the plugin
+        pre-installed in `Contents/PlugIns/kf6/ktexteditor/`.
+      - `kate-bundle-*-windows-*.zip` + `kate-*.exe` — plugin zip plus the Craft-built
+        latest Kate installer when produced.
+        (Bundle artifacts are absent when the tag pipeline ran with `SKIP_BUNDLE=1`;
+        macOS/Windows artifacts are absent with `SKIP_MACWIN=1`.)
 
       Built from commit $CI_COMMIT_SHA. See README.md for install instructions.
     assets:
