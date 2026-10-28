@@ -108,14 +108,14 @@ Invoke-CraftEnv
 # sets HAVE_ICONV=0. libtextstyle then omits iconv_ostream_create from its
 # implementation while still exporting it through libtextstyle.sym, and the
 # MSVC linker fails with LNK2001. Preset the cache variables so iconv is
-# treated as available (libiconv is built just below).
+# treated as available (iconv is built just below).
 $env:am_cv_func_iconv = "yes"
 $env:am_cv_func_iconv_works = "guessing yes"
 $env:am_cv_lib_iconv = "yes"
 
 # Build deps and kate with filtered output
-craft libs/libiconv
-if ($LASTEXITCODE -ne 0) { throw "craft libs/libiconv failed with exit code $LASTEXITCODE" }
+craft libs/iconv
+if ($LASTEXITCODE -ne 0) { throw "craft libs/iconv failed with exit code $LASTEXITCODE" }
 craft kate
 if ($LASTEXITCODE -ne 0) { throw "craft kate failed with exit code $LASTEXITCODE" }
 
