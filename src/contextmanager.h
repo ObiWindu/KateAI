@@ -12,6 +12,11 @@
 
 namespace KateAi
 {
+class ProjectGraph;
+}
+
+namespace KateAi
+{
 
 /**
  * Builds the message list actually sent to the model.
@@ -54,6 +59,10 @@ struct Options {
     // "reset context" action uses: it is how a full context window is reclaimed
     // without losing what the work so far was about.
     bool summarizeEverything = false;
+    // Optional project graph for smarter context compression/preservation
+    ProjectGraph *projectGraph = nullptr;
+    // Whether to include project graph summary in compaction
+    bool useProjectGraph = true;
 };
 
 int estimateTokens(const QString &text);

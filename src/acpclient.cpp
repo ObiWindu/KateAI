@@ -1948,6 +1948,8 @@ PermissionRequest AcpClient::permissionFromToolCall(const QJsonObject &toolCall)
     if (request.toolName.isEmpty()) {
         request.toolName = u"tool"_s;
     }
+    // Normalize ACP/varied tool names to canonical KateAI names
+    request.toolName = canonicalToolName(request.toolName);
     request.summary = toolCall.value(u"title"_s).toString();
     if (request.summary.isEmpty()) {
         request.summary = request.toolName;
@@ -2074,8 +2076,16 @@ bool AcpClient::autoResolvePermission(const PermissionRequest &request)
     if (m_settings.permissionMode == PermissionMode::AlwaysApprove) {
         return true;
     }
-    if (m_settings.autoApproveTools.contains(request.toolName)) {
+    const QString canonical = canonicalToolName(request.toolName);
+    if (m_settings.autoApproveTools.contains(request.toolName) || m_settings.autoApproveTools.contains(canonical)) {
         return true;
+    }
+    // Also check aliases
+    const QStringList aliases = toolNameAliases(canonical);
+    for (const QString &alias : aliases) {
+        if (m_settings.autoApproveTools.contains(alias)) {
+            return true;
+        }
     }
     if (m_settings.permissionMode == PermissionMode::AcceptEdits && request.risk == ToolRisk::Read) {
         return true;

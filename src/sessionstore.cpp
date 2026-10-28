@@ -750,10 +750,33 @@ bool SessionStore::saveConversation(const QString &conversationId, const Session
     // number of stored conversations grew.
     const bool isNew = !conversationExists(db, conversationId);
 
+    QString convTitleToUse = convTitle;
+    if (!isNew && title.isEmpty()) {
+        // Preserve existing title when updating (e.g. after context compaction)
+        // so titles don't get lost or regenerated from compacted messages.
+        QSqlQuery getTitle(db);
+        getTitle.prepare(u"SELECT title FROM conversations WHERE id = ?"_s);
+        getTitle.addBindValue(conversationId);
+        if (getTitle.exec() && getTitle.next()) {
+            const QString existingTitle = getTitle.value(0).toString();
+            if (!existingTitle.isEmpty()) {
+                convTitleToUse = existingTitle;
+            } else {
+                convTitleToUse = generateTitleFromMessages(data.messages);
+            }
+        } else {
+            convTitleToUse = generateTitleFromMessages(data.messages);
+        }
+    } else if (isNew && title.isEmpty()) {
+        convTitleToUse = generateTitleFromMessages(data.messages);
+    } else if (!title.isEmpty()) {
+        convTitleToUse = title;
+    }
+
     if (!isNew) {
         QSqlQuery update(db);
         update.prepare(u"UPDATE conversations SET title = ?, updated_at = ?, message_count = ?, version = ?, payload = ? WHERE id = ?"_s);
-        update.addBindValue(convTitle);
+        update.addBindValue(convTitleToUse);
         update.addBindValue(now);
         update.addBindValue(data.messages.size());
         update.addBindValue(CURRENT_VERSION);

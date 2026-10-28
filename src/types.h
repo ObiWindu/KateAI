@@ -16,6 +16,11 @@ using namespace Qt::Literals::StringLiterals;
 namespace KateAi
 {
 
+// ACP/native tool name normalization. Maps known agent tool names (e.g. fs/read_text_file,
+// terminal/exec) to canonical KateAI tool names used for policy, UI, and tracking.
+QString canonicalToolName(const QString &name);
+QStringList toolNameAliases(const QString &canonicalName);
+
 enum class Provider {
     Grok,
     OpenAI,

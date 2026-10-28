@@ -5,11 +5,13 @@
 
 #include "types.h"
 #include "contextmanager.h"
+#include "graph/projectgraph.h"
 
 #include <KLocalizedString>
 
 #include <QJsonDocument>
 #include <QRegularExpression>
+#include <QDir>
 #include <limits>
 
 using namespace Qt::Literals::StringLiterals;
@@ -153,10 +155,11 @@ bool isSummary(const ChatMessage &message)
     return message.role == ChatMessage::Role::User && message.content.startsWith(summaryHeader());
 }
 
-QString buildSummary(const QList<ChatMessage> &dropped, int requestChars)
+QString buildSummary(const QList<ChatMessage> &dropped, int requestChars, ProjectGraph *projectGraph = nullptr)
 {
     QStringList userRequests;
     QStringList files;
+    QSet<QString> fileSet;
     QStringList tools;
     QStringList outcomes;
     int rejected = 0;
@@ -199,8 +202,11 @@ QString buildSummary(const QList<ChatMessage> &dropped, int requestChars)
                 if (path.isEmpty()) {
                     path = arguments.value(u"TargetFile"_s).toString();
                 }
-                if (!path.isEmpty() && !files.contains(path)) {
-                    files << path;
+                if (!path.isEmpty()) {
+                    if (!fileSet.contains(path)) {
+                        fileSet.insert(path);
+                        files << path;
+                    }
                 }
                 if (!toolName.isEmpty() && !tools.contains(toolName)) {
                     tools << toolName;
@@ -238,12 +244,63 @@ QString buildSummary(const QList<ChatMessage> &dropped, int requestChars)
     }
     if (!files.isEmpty()) {
         QStringList shown = files;
-        if (shown.size() > 40) {
-            shown = shown.mid(0, 40);
-            shown << QStringLiteral("… (%1 more)").arg(files.size() - 40);
+        if (shown.size() > 60) {
+            shown = shown.mid(0, 60);
+            shown << QStringLiteral("… (%1 more)").arg(files.size() - 60);
         }
         lines << QStringLiteral("\nFiles touched:");
         lines << QStringLiteral("  %1").arg(shown.join(QStringLiteral(", ")));
+    }
+    if (projectGraph && projectGraph->getNodeCount() > 0 && !files.isEmpty()) {
+        // Add related files from project graph to preserve important context
+        QSet<QString> related;
+        for (const QString &f : files) {
+            if (related.size() >= 30) break;
+            // Try to find node by path
+            GraphNode *node = projectGraph->getNode(f);
+            if (!node) {
+                // Try to find by ID or partial match
+                const QList<GraphNode*> all = projectGraph->getAllNodes();
+                for (GraphNode *n : all) {
+                    if (n && (n->path.endsWith(f) || f.endsWith(QFileInfo(n->path).fileName()))) {
+                        node = n;
+                        break;
+                    }
+                }
+            }
+            if (node) {
+                // Add dependencies/imports
+                const QList<GraphEdge*> edges = projectGraph->getEdgesFrom(node->id);
+                for (GraphEdge *e : edges) {
+                    if (e && e->targetId != node->id) {
+                        GraphNode *t = projectGraph->getNode(e->targetId);
+                        if (t && !fileSet.contains(t->path) && !related.contains(t->path)) {
+                            related.insert(t->path);
+                            if (related.size() >= 30) break;
+                        }
+                    }
+                }
+                const QList<GraphEdge*> inEdges = projectGraph->getEdgesTo(node->id);
+                for (GraphEdge *e : inEdges) {
+                    if (e && e->sourceId != node->id) {
+                        GraphNode *s = projectGraph->getNode(e->sourceId);
+                        if (s && !fileSet.contains(s->path) && !related.contains(s->path)) {
+                            related.insert(s->path);
+                            if (related.size() >= 30) break;
+                        }
+                    }
+                }
+            }
+        }
+        if (!related.isEmpty()) {
+            QStringList relList = related.values();
+            if (relList.size() > 20) {
+                relList = relList.mid(0, 20);
+                relList << QStringLiteral("…");
+            }
+            lines << QStringLiteral("\nRelated files (from project graph):");
+            lines << QStringLiteral("  %1").arg(relList.join(QStringLiteral(", ")));
+        }
     }
     if (!tools.isEmpty()) {
         lines << QStringLiteral("\nTools used: %1").arg(tools.join(QStringLiteral(", ")));
@@ -413,7 +470,7 @@ QList<ChatMessage> build(const QList<ChatMessage> &history, const Options &optio
     if (keepFrom > bodyStart) {
         ChatMessage summary;
         summary.role = ChatMessage::Role::User;
-        summary.content = buildSummary(history.mid(bodyStart, keepFrom - bodyStart), requestChars);
+        summary.content = buildSummary(history.mid(bodyStart, keepFrom - bodyStart), requestChars, options.projectGraph);
         result.append(summary);
     }
     for (int i = keepFrom; i < history.size(); ++i) {

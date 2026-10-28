@@ -20,6 +20,101 @@ using namespace Qt::Literals::StringLiterals;
 namespace KateAi
 {
 
+static QHash<QString, QString> buildToolAliasMap()
+{
+    QHash<QString, QString> map;
+    // ACP filesystem tools
+    map[u"fs/read_text_file"_s] = u"read_file"_s;
+    map[u"fs/read_file"_s] = u"read_file"_s;
+    map[u"fs/write_text_file"_s] = u"write_file"_s;
+    map[u"fs/write_file"_s] = u"write_file"_s;
+    map[u"fs/append_file"_s] = u"write_file"_s;
+    map[u"fs/edit_file"_s] = u"edit_file"_s;
+    map[u"fs/str_replace_editor"_s] = u"edit_file"_s;
+    map[u"str_replace_editor"_s] = u"edit_file"_s;
+    map[u"str_replace"_s] = u"edit_file"_s;
+    map[u"replace"_s] = u"edit_file"_s;
+    map[u"edit"_s] = u"edit_file"_s;
+    map[u"patch"_s] = u"edit_file"_s;
+    map[u"apply_patch"_s] = u"edit_file"_s;
+    map[u"multi_edit"_s] = u"multi_edit_file"_s;
+    map[u"multi_edit_file"_s] = u"multi_edit_file"_s;
+    // ACP terminal/shell
+    map[u"terminal/exec"_s] = u"bash"_s;
+    map[u"terminal/run"_s] = u"bash"_s;
+    map[u"shell/exec"_s] = u"bash"_s;
+    map[u"shell"_s] = u"bash"_s;
+    map[u"execute"_s] = u"bash"_s;
+    map[u"run_command"_s] = u"bash"_s;
+    // Directory/listing/search
+    map[u"fs/list_directory"_s] = u"list_dir"_s;
+    map[u"list_directory"_s] = u"list_dir"_s;
+    map[u"readdir"_s] = u"list_dir"_s;
+    map[u"fs/grep"_s] = u"grep"_s;
+    map[u"fs/glob"_s] = u"glob"_s;
+    // Web/search/planning tools that may appear under different names
+    map[u"web/search"_s] = u"web_search"_s;
+    map[u"web/fetch"_s] = u"web_fetch"_s;
+    map[u"plan/write"_s] = u"write_plan_file"_s;
+    map[u"project/query"_s] = u"query_project_graph"_s;
+    map[u"suggest"_s] = u"suggest"_s;
+    map[u"question"_s] = u"question"_s;
+    // New task/subagent
+    map[u"agent/new_task"_s] = subtaskToolName();
+    map[u"subagent"_s] = subtaskToolName();
+    return map;
+}
+
+static const QHash<QString, QString> &toolAliasMap()
+{
+    static const QHash<QString, QString> map = buildToolAliasMap();
+    return map;
+}
+
+QString canonicalToolName(const QString &name)
+{
+    if (name.isEmpty()) {
+        return name;
+    }
+    const QString trimmed = name.trimmed();
+    if (trimmed.isEmpty()) {
+        return trimmed;
+    }
+    // MCP tools keep their names as-is (prefixed)
+    if (trimmed.startsWith(u"mcp__"_s)) {
+        return trimmed;
+    }
+    // Check exact aliases
+    const auto &map = toolAliasMap();
+    if (map.contains(trimmed)) {
+        return map.value(trimmed);
+    }
+    // Case-insensitive fallback
+    const QString lower = trimmed.toLower();
+    for (auto it = map.constBegin(); it != map.constEnd(); ++it) {
+        if (it.key().toLower() == lower) {
+            return it.value();
+        }
+    }
+    return trimmed;
+}
+
+QStringList toolNameAliases(const QString &canonicalName)
+{
+    QStringList aliases;
+    const auto &map = toolAliasMap();
+    for (auto it = map.constBegin(); it != map.constEnd(); ++it) {
+        if (it.value() == canonicalName) {
+            aliases.append(it.key());
+        }
+    }
+    // Also add canonical name itself
+    if (!aliases.contains(canonicalName)) {
+        aliases.append(canonicalName);
+    }
+    return aliases;
+}
+
 QString providerId(Provider provider)
 {
     switch (provider) {

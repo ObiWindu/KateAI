@@ -1086,6 +1086,8 @@ QList<ChatMessage> AgentLoop::m_messagesForRequest() const
         : 8192;
     options.autoCompact = m_settings.compressOldMessages;
     options.compactionLevel = m_compactionLevel;
+    options.projectGraph = m_projectGraph.get();
+    options.useProjectGraph = m_settings.compressProjectGraph;
     if (m_settings.keepRecentTokens > 0) {
         options.keepRecentTokens = m_settings.keepRecentTokens;
     } else if (m_settings.smartContextTruncation) {

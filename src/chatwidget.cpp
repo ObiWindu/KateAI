@@ -138,14 +138,18 @@ static KateAi::Suggestion suggestionFromRequest(const KateAi::PermissionRequest 
 // queue.
 bool isFileMutatingTool(const QString &toolName)
 {
+    const QString canonical = KateAi::canonicalToolName(toolName);
     // Native names plus the OpenCode ACP aliases (write, edit, patch), which
     // the edit tracker also learns about through mutatesFiles on live cards;
     // this list drives risk colouring and the working label, where the ACP
     // kind is not available.
-    return toolName == u"write_file"_s || toolName == u"edit_file"_s || toolName == u"multi_edit_file"_s
-        || toolName == u"multi_replace_file_content"_s
-        || toolName == u"fs/write_text_file"_s
-        || toolName == u"write"_s || toolName == u"edit"_s || toolName == u"patch"_s;
+    if (canonical == u"write_file"_s || canonical == u"edit_file"_s || canonical == u"multi_edit_file"_s) {
+        return true;
+    }
+    return toolName == u"multi_replace_file_content"_s
+        || toolName == u"fs/write_text_file"_s || toolName == u"fs/edit_file"_s || toolName.startsWith(u"fs/"_s)
+        || toolName == u"write"_s || toolName == u"edit"_s || toolName == u"str_replace"_s
+        || toolName == u"str_replace_editor"_s || toolName == u"apply_patch"_s || toolName == u"patch"_s;
 }
 
 // The welcome screen's suggestion chips share one style; kept in a function so
@@ -5805,6 +5809,7 @@ void ChatWidget::reflowTranscriptMedia()
 void ChatWidget::restoreHistoricalTool(const QString &toolCallId, const QString &toolName,
                                        const QString &argumentsJson, const QString &output, bool hasResult)
 {
+    const QString canonicalName = KateAi::canonicalToolName(toolName);
     auto *toolWidget = new ToolCallWidget(toolCallId, m_transcriptContainer);
 
     ToolRisk risk = ToolRisk::Read;
@@ -5812,11 +5817,14 @@ void ChatWidget::restoreHistoricalTool(const QString &toolCallId, const QString 
     // edit tracker, which already learns about ACP writes from mutatesFiles.
     // isEditToolName covers the OpenCode aliases (write, edit, patch) here so
     // restored history cards colour like live ones.
-    if (isFileMutatingTool(toolName) || ChatTheme::isEditToolName(toolName) || toolName == u"edit"_s
-        || toolName == u"str_replace"_s || toolName == u"write"_s || toolName == u"delete"_s
-        || toolName == u"patch"_s) {
+    if (isFileMutatingTool(canonicalName) || ChatTheme::isEditToolName(canonicalName) || canonicalName == u"edit_file"_s
+        || canonicalName == u"write_file"_s || canonicalName == u"multi_edit_file"_s
+        || toolName == u"edit"_s || toolName == u"str_replace"_s || toolName == u"str_replace_editor"_s
+        || toolName == u"write"_s || toolName == u"delete"_s || toolName == u"patch"_s || toolName == u"apply_patch"_s
+        || toolName.startsWith(u"fs/"_s)) {
         risk = ToolRisk::Write;
-    } else if (toolName == u"bash"_s || toolName == u"execute"_s || toolName.startsWith(u"terminal"_s)) {
+    } else if (canonicalName == u"bash"_s || toolName == u"execute"_s || toolName.startsWith(u"terminal"_s)
+               || toolName.startsWith(u"shell"_s)) {
         risk = ToolRisk::Execute;
     }
 
@@ -5828,11 +5836,14 @@ void ChatWidget::restoreHistoricalTool(const QString &toolCallId, const QString 
             argsObj = argsDoc.object();
         }
     }
-    QString summary = shellCommandFor(toolName, argsObj);
+    QString summary = shellCommandFor(canonicalName, argsObj);
+    if (summary.isEmpty()) {
+        summary = shellCommandFor(toolName, argsObj);
+    }
     // An unknown kind summarises as its own name ("edit"), and "{}" is not a
     // command. A path from the arguments or from the diff header is what the
     // card is about; failing that, the first line of the result.
-    if (summary.isEmpty() || summary == toolName || argsObj.isEmpty()) {
+    if (summary.isEmpty() || summary == canonicalName || summary == toolName || argsObj.isEmpty()) {
         QString path = argsObj.value(u"path"_s).toString();
         if (path.isEmpty()) {
             path = argsObj.value(u"file_path"_s).toString();
@@ -5859,7 +5870,7 @@ void ChatWidget::restoreHistoricalTool(const QString &toolCallId, const QString 
         }
     }
 
-    toolWidget->setToolInfo(toolName, summary, risk);
+    toolWidget->setToolInfo(canonicalName, summary, risk);
     // The live card learns the target path at toolStarted; the result box uses
     // its extension to pick a highlighting language, so the restored card needs
     // it too or the output comes back as uncoloured plain text.
