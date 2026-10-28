@@ -305,8 +305,9 @@ QString buildSummary(const QList<ChatMessage> &dropped, int requestChars, Projec
     if (!tools.isEmpty()) {
         lines << QStringLiteral("\nTools used: %1").arg(tools.join(QStringLiteral(", ")));
     }
-    // Only the last two outcomes are reported.
-    while (outcomes.size() > 2) {
+    // Keep the last few outcomes so the compacted summary retains where the work
+    // got to. Four is a reasonable balance between fidelity and size.
+    while (outcomes.size() > 4) {
         outcomes.removeFirst();
     }
     if (!outcomes.isEmpty()) {

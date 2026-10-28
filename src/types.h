@@ -100,11 +100,21 @@ struct ToolAccess {
         if (allowAll) {
             return true;
         }
-        if (exact.contains(toolName)) {
+        // Canonicalize so ACP aliases (fs/read_text_file, terminal/exec, etc.)
+        // are checked against the canonical tool names used in mode definitions.
+        const QString canonical = canonicalToolName(toolName);
+        if (exact.contains(toolName) || exact.contains(canonical)) {
             return true;
         }
         for (const QString &prefix : prefixes) {
-            if (toolName.startsWith(prefix)) {
+            if (toolName.startsWith(prefix) || canonical.startsWith(prefix)) {
+                return true;
+            }
+        }
+        // Also check aliases of canonical names in exact set
+        const QStringList aliases = toolNameAliases(canonical);
+        for (const QString &alias : aliases) {
+            if (exact.contains(alias)) {
                 return true;
             }
         }
@@ -164,6 +174,12 @@ struct PermissionRequest {
     // Pre-formatted unified diff for write_file, or the old/new strings for
     // edit_file. Rendered inline by the tool-call card in the chat transcript.
     QString describeDiff;
+    // Additional diffs for multi-file ACP tool calls (path -> diff).
+    QStringList additionalPaths;
+    QStringList additionalDiffs;
+    // The original (un-normalized) tool name as reported by the agent, kept
+    // for display/debugging.
+    QString originalToolName;
     ToolRisk risk = ToolRisk::Write;
 
     // True when the call lands its result in a file. ToolRunner::describe sets

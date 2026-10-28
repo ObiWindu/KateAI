@@ -1014,20 +1014,30 @@ ChatWidget::ChatWidget(QWidget *parent)
         // recognised by the mutatesFiles flag rather than by name.
         const bool editTracking = m_settings.permissionMode == PermissionMode::AcceptEdits
             || usesAcpNative(m_settings);
-        if (editTracking && (isFileMutatingTool(request.toolName) || request.mutatesFiles)) {
+        if (editTracking && (isFileMutatingTool(request.toolName) || request.mutatesFiles
+                             || !request.describeDiff.isEmpty())) {
+            // Primary file
             PendingEdit pending;
             pending.toolName = request.toolName;
-            // The tracker works on the file the tool actually writes to. The
-            // path in the request is what the model asked for, which can be
-            // relative; resolving it against the process directory instead of
-            // the workspace would read, restore and delete the wrong file.
             pending.path = request.resolvedPath.isEmpty() ? request.path : request.resolvedPath;
             pending.diff = request.describeDiff;
-            // existed == false means write_file just created the file, which is
-            // the one case where rejecting has to delete rather than restore.
             pending.existed = m_agent.documentBridge()
                 && m_agent.documentBridge()->readDocument(pending.path, &pending.oldContent);
             m_pendingToolCalls.insert(request.toolCallId, pending);
+
+            // Additional files (multi-file ACP edits)
+            for (int i = 0; i < request.additionalPaths.size(); ++i) {
+                const QString ap = request.additionalPaths.at(i);
+                if (ap.isEmpty() || ap == pending.path) continue;
+                PendingEdit addPending;
+                addPending.toolName = request.toolName;
+                addPending.path = ap;
+                if (i < request.additionalDiffs.size()) addPending.diff = request.additionalDiffs.at(i);
+                addPending.existed = m_agent.documentBridge()
+                    && m_agent.documentBridge()->readDocument(addPending.path, &addPending.oldContent);
+                // Store with a derived id
+                m_pendingToolCalls.insert(request.toolCallId + u"_add"_s + QString::number(i), addPending);
+            }
         }
 
         scrollToBottom();
@@ -1079,8 +1089,17 @@ ChatWidget::ChatWidget(QWidget *parent)
         // "pending" row for a failed write invited the user to approve a
         // change that never landed.
         if (m_settings.permissionMode == PermissionMode::AcceptEdits || usesAcpNative(m_settings)) {
-            auto it = m_pendingToolCalls.find(result.toolCallId);
-            if (it != m_pendingToolCalls.end()) {
+            // Process primary + any additional pending edits for this tool call
+            QStringList keysToProcess;
+            keysToProcess.append(result.toolCallId);
+            for (auto kit = m_pendingToolCalls.begin(); kit != m_pendingToolCalls.end(); ++kit) {
+                if (kit.key().startsWith(result.toolCallId + u"_add"_s)) {
+                    keysToProcess.append(kit.key());
+                }
+            }
+            for (const QString &key : keysToProcess) {
+                auto it = m_pendingToolCalls.find(key);
+                if (it == m_pendingToolCalls.end()) continue;
                 const PendingEdit pending = it.value();
                 if (result.ok) {
                     QString newContent;
@@ -1089,9 +1108,6 @@ ChatWidget::ChatWidget(QWidget *parent)
                     }
                     m_editTracker->addEdit(pending.path, pending.toolName, pending.diff,
                                            pending.oldContent, newContent, !pending.existed);
-                    // The view turns this into an in-editor banner on the
-                    // open document, so the change is visible where the file
-                    // lives, not only inside the chat panel.
                     Q_EMIT agentEditedFile(pending.path);
                 }
                 m_pendingToolCalls.erase(it);
@@ -5899,12 +5915,19 @@ void ChatWidget::restoreHistoricalTool(const QString &toolCallId, const QString 
         });
     });
 
-    if (toolName == u"edit_file"_s) {
-        const QString path = argsObj.value(u"path"_s).toString();
-        toolWidget->setDescribeDiff(unifiedDiff(path,
-            argsObj.value(u"old_string"_s).toString(),
-            argsObj.value(u"new_string"_s).toString()));
-    } else if (toolName == u"multi_edit_file"_s || toolName == u"multi_replace_file_content"_s) {
+    if (canonicalName == u"edit_file"_s || toolName == u"edit"_s || toolName == u"str_replace"_s
+        || toolName == u"str_replace_editor"_s || toolName == u"apply_patch"_s || toolName == u"patch"_s) {
+        QString path = argsObj.value(u"path"_s).toString();
+        if (path.isEmpty()) path = argsObj.value(u"file_path"_s).toString();
+        if (path.isEmpty()) path = argsObj.value(u"filePath"_s).toString();
+        if (path.isEmpty()) path = argsObj.value(u"file"_s).toString();
+        if (path.isEmpty()) path = argsObj.value(u"TargetFile"_s).toString();
+        const QString oldText = argsObj.value(u"old_string"_s).toString().isEmpty()
+            ? argsObj.value(u"oldText"_s).toString() : argsObj.value(u"old_string"_s).toString();
+        const QString newText = argsObj.value(u"new_string"_s).toString().isEmpty()
+            ? argsObj.value(u"newText"_s).toString() : argsObj.value(u"new_string"_s).toString();
+        toolWidget->setDescribeDiff(unifiedDiff(path, oldText, newText));
+    } else if (canonicalName == u"multi_edit_file"_s || toolName == u"multi_replace_file_content"_s) {
         QString path = argsObj.value(u"path"_s).toString();
         if (path.isEmpty()) {
             path = argsObj.value(u"TargetFile"_s).toString();
@@ -5930,10 +5953,14 @@ void ChatWidget::restoreHistoricalTool(const QString &toolCallId, const QString 
             newCombined += n;
         }
         toolWidget->setDescribeDiff(unifiedDiff(path, oldCombined, newCombined));
-    } else if (toolName == u"write_file"_s) {
-        const QString path = argsObj.value(u"path"_s).toString();
-        toolWidget->setDescribeDiff(unifiedDiff(path, QString(),
-            argsObj.value(u"content"_s).toString()));
+    } else if (canonicalName == u"write_file"_s || toolName == u"write"_s) {
+        QString path = argsObj.value(u"path"_s).toString();
+        if (path.isEmpty()) path = argsObj.value(u"file_path"_s).toString();
+        if (path.isEmpty()) path = argsObj.value(u"filePath"_s).toString();
+        if (path.isEmpty()) path = argsObj.value(u"file"_s).toString();
+        QString content = argsObj.value(u"content"_s).toString();
+        if (content.isEmpty()) content = argsObj.value(u"contents"_s).toString();
+        toolWidget->setDescribeDiff(unifiedDiff(path, QString(), content));
     } else if (ChatTheme::isEditToolName(toolName)) {
         // ACP agents spell the same work "Edit", "Write", "StrReplace",
         // "apply_patch". The arguments still carry the before/after text, and
@@ -5980,14 +6007,14 @@ void ChatWidget::restoreHistoricalTool(const QString &toolCallId, const QString 
     // in the result text rather than in the arguments.
     ToolResult result;
     result.toolCallId = toolCallId;
-    result.name = toolName;
+    result.name = canonicalName;
     result.output = hasResult ? output : QString();
     result.ok = !result.output.contains(u"STATUS: failure"_s);
     // A question's payload is prose, not arguments: without this the restored
     // card shows only the answer and the question that prompted it is lost.
     // setFinished clears the running input, so the question is folded into the
     // finished body instead.
-    if (toolName == u"question"_s) {
+    if (canonicalName == u"question"_s || toolName == u"question"_s) {
         const QString asked = argsObj.value(u"question"_s).toString().trimmed();
         if (!asked.isEmpty()) {
             if (result.output.trimmed().isEmpty()) {
@@ -6098,9 +6125,10 @@ void ChatWidget::rebuildTranscript()
         }
         const HistoricalTool spec = catalog.value(toolCallId);
         const QString toolName = !spec.specName.isEmpty() ? spec.specName : spec.resultName;
+        const QString canonicalToolName = KateAi::canonicalToolName(toolName);
         const QString argumentsJson = spec.argumentsJson;
 
-        if (toolName == subtaskToolName()) {
+        if (canonicalToolName == subtaskToolName()) {
             QJsonObject restoredArgs;
             const QJsonDocument restoredDoc = QJsonDocument::fromJson(argumentsJson.toUtf8());
             if (!restoredDoc.isNull() && restoredDoc.isObject()) {
@@ -6132,7 +6160,7 @@ void ChatWidget::rebuildTranscript()
             return;
         }
 
-        if (toolName == u"suggest"_s) {
+        if (canonicalToolName == u"suggest"_s || toolName == u"suggest"_s) {
             QJsonObject restoredArgs;
             const QJsonDocument restoredDoc = QJsonDocument::fromJson(argumentsJson.toUtf8());
             if (!restoredDoc.isNull() && restoredDoc.isObject()) {

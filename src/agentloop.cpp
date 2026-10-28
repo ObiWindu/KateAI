@@ -99,6 +99,27 @@ AgentLoop::AgentLoop(QObject *parent)
     });
     connect(&m_acp, &AcpClient::toolStarted, this, [this](const PermissionRequest &request) {
         ++m_toolCalls;
+        const QString canonical = canonicalToolName(request.toolName);
+        const ToolAccess access = activeToolAccess();
+        // Enforce mode-based tool access for ACP tools. Plan mode only permits
+        // read-only tools; other modes restrict to their tool set.
+        if (!access.allowAll && !access.allows(canonical)) {
+            // Still show the card, but mark it as denied so the user sees it.
+            Q_EMIT toolStarted(request);
+            ToolResult denied;
+            denied.toolCallId = request.toolCallId;
+            denied.name = request.toolName;
+            denied.ok = false;
+            if (m_settings.planMode) {
+                denied.output = u"Tool rejected: plan mode only permits read-only tools. Choose a read-only tool."_s;
+            } else {
+                denied.output = u"Tool rejected: the %1 mode does not provide the '%2' tool."_s
+                                    .arg(activeMode().name, request.toolName);
+            }
+            Q_EMIT toolFinished(denied);
+            Q_EMIT statusChanged(u"Working on the next step…"_s);
+            return;
+        }
         Q_EMIT toolStarted(request);
         Q_EMIT statusChanged(u"Working on the next step…"_s);
     });
@@ -118,6 +139,26 @@ AgentLoop::AgentLoop(QObject *parent)
         Q_EMIT toolFinished(result);
     });
     connect(&m_acp, &AcpClient::permissionNeeded, this, [this](const PermissionRequest &request) {
+        // Auto-resolve based on policy/session grants before showing UI.
+        const QString canonical = canonicalToolName(request.toolName);
+        if (m_policy.sessionGranted(request.toolName) || m_policy.sessionGranted(canonical)) {
+            m_acp.resolvePermission(PermissionDecision::AllowSession);
+            return;
+        }
+        if (m_policy.isAutoApproved(request.toolName) || m_policy.isAutoApproved(canonical)) {
+            m_acp.resolvePermission(PermissionDecision::AllowOnce);
+            return;
+        }
+        if (m_settings.permissionMode == PermissionMode::AcceptEdits
+            && (request.risk == ToolRisk::Read || request.risk == ToolRisk::Write)) {
+            // AcceptEdits: auto-approve edits too, but they're tracked.
+            m_acp.resolvePermission(PermissionDecision::AllowOnce);
+            return;
+        }
+        if (m_settings.permissionMode == PermissionMode::AlwaysApprove) {
+            m_acp.resolvePermission(PermissionDecision::AllowSession);
+            return;
+        }
         m_waitingCall.id = request.toolCallId;
         m_waitingCall.name = request.toolName;
         m_waitingRequest = request;

@@ -56,6 +56,60 @@ pixels belong in `kateai`.
 Everything is asynchronous: one `bash` process runs detached, MCP calls run over
 stdio JSON-RPC, sub-agents (`new_task`) run as nested `AgentLoop`s.
 
+## ACP tool integration
+
+When the provider is an ACP agent (`usesAcpNative`), `AgentLoop` delegates the
+turn to `AcpClient` instead of `LlmClient`. Tool calls arrive as
+`session/update` notifications (`tool_call`, `tool_call_update`); Kate renders
+cards and tracks edits from those.
+
+### Name normalisation
+
+ACP agents use their own tool names (`fs/read_text_file`, `terminal/exec`,
+`edit`, `write`, `apply_patch`, …). `canonicalToolName()` in `types.cpp` maps
+these to KateAI's canonical names (`read_file`, `bash`, `edit_file`, `write_file`,
+…) on ingest in `AcpClient::permissionFromToolCall()`. MCP-prefixed names
+(`mcp__*`) are preserved. The canonical name drives `ToolAccess`, `ChatTheme`,
+`shellCommandFor`, edit tracking, and history restoration; the original name is
+kept in `PermissionRequest::originalToolName` for display/debugging.
+
+### Parsing & diffs
+
+`permissionFromToolCall()` normalises `rawInput` (object/string/array), scans
+`content[]` and `locations[]` for paths and diff blocks, resolves relative paths
+against the workspace, and builds a unified diff from `oldText`/`newText` or
+`old_string`/`new_string` (camelCase and snake_case both accepted). Multiple
+diff blocks are collected into `additionalPaths`/`additionalDiffs`. `tool_call_update`
+backfills diffs that arrive late and aggregates progress (cumulative or delta).
+
+### Permissions
+
+`AcpClient::handleRequestPermission()` builds a `PermissionRequest` and either
+auto-resolves (AlwaysApprove, AcceptEdits, session grants, auto-approve list)
+or emits `permissionNeeded`. `AgentLoop` checks `PermissionPolicy` session
+grants and auto-approve before forwarding to the UI. Risk classification uses
+canonical names.
+
+### Edit tracking
+
+In every permission mode for ACP turns, `ChatWidget` tracks mutations detected
+by protocol kind, `mutatesFiles`, diff presence, or name heuristics. Multi-file
+edits are tracked per file. Snapshots are taken at `toolStarted`; paths are
+resolved against the workspace.
+
+### History restoration
+
+`ChatWidget::restoreHistoricalTool()` canonicalises the tool name and reconstructs
+diffs from stored arguments for native and ACP shapes, sets the file path for
+language highlighting, and restores subtask/suggestion cards.
+
+### Client methods
+
+Kate exposes `fs/read_text_file`, `fs/write_text_file`, `terminal/*`,
+`query_project_graph`, `write_plan_file`, and `suggest` to ACP agents. Results
+are formatted to match native tool output. `suggest` emits `suggestionPosted`
+which `ChatWidget` turns into a suggestion card.
+
 ## Settings and modes
 
 `Settings` is one flat struct persisted by `settings.cpp` (KConfig). Modes

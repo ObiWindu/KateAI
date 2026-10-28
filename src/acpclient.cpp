@@ -129,8 +129,11 @@ static ToolRisk riskForKind(const QString &kind, const QString &name)
     if (kind == u"read"_s || kind == u"search"_s || kind == u"fetch"_s || kind == u"think"_s) {
         return ToolRisk::Read;
     }
-    if (kind == u"execute"_s || name == u"bash"_s) {
+    if (kind == u"execute"_s || name == u"bash"_s || canonicalToolName(name) == u"bash"_s) {
         return ToolRisk::Execute;
+    }
+    if (kind == u"edit"_s || kind == u"write"_s || kind == u"delete"_s) {
+        return ToolRisk::Write;
     }
     return ToolRisk::Write;
 }
@@ -1884,6 +1887,19 @@ void AcpClient::handleSessionUpdate(const QJsonObject &update)
             m_liveTools.insert(toolCallId, existing);
             Q_EMIT toolStarted(existing);
         }
+        // Some agents send diff blocks only in the update, not the initial
+        // tool_call. Backfill the live card's diff when it was missing.
+        if (existing.describeDiff.isEmpty()) {
+            PermissionRequest refreshed = permissionFromToolCall(update);
+            if (!refreshed.describeDiff.isEmpty()) {
+                existing.describeDiff = refreshed.describeDiff;
+                existing.additionalDiffs = refreshed.additionalDiffs;
+                existing.additionalPaths = refreshed.additionalPaths;
+                if (existing.path.isEmpty()) existing.path = refreshed.path;
+                if (refreshed.mutatesFiles) existing.mutatesFiles = true;
+                m_liveTools.insert(toolCallId, existing);
+            }
+        }
         if (status == u"completed"_s || status == u"failed"_s) {
             ToolResult result;
             result.toolCallId = toolCallId;
@@ -1898,6 +1914,12 @@ void AcpClient::handleSessionUpdate(const QJsonObject &update)
             }
             if (result.output.isEmpty()) {
                 result.output = toolContentText(update.value(u"result"_s));
+            }
+            if (result.output.isEmpty() && update.contains(u"error"_s)) {
+                result.output = toolContentText(update.value(u"error"_s));
+            }
+            if (status == u"failed"_s && result.output.isEmpty()) {
+                result.output = u"Tool failed."_s;
             }
             if (result.output.isEmpty()) {
                 // Some ACP agents stream command output while the tool runs,
@@ -1915,7 +1937,25 @@ void AcpClient::handleSessionUpdate(const QJsonObject &update)
         // text replaces whatever was streamed before, exactly like bashProgress
         // does for a native command.
         const QString streamed = toolContentText(update.value(u"content"_s));
-        if (streamed.isEmpty()) {
+        // Progress aggregation: some agents send delta chunks, others send
+        // cumulative content. Detect and handle both.
+        QString finalStreamed = streamed;
+        const QString previous = m_toolStreamed.value(toolCallId);
+        if (!previous.isEmpty() && !streamed.isEmpty()) {
+            if (streamed.startsWith(previous)) {
+                // Cumulative: use as-is
+                finalStreamed = streamed;
+            } else if (previous.endsWith(streamed) || previous.contains(streamed)) {
+                // Already included: keep previous
+                finalStreamed = previous;
+            } else if (streamed.length() < previous.length() && !previous.contains(streamed)) {
+                // Possible delta: append
+                finalStreamed = previous + streamed;
+            } else {
+                finalStreamed = streamed;
+            }
+        }
+        if (finalStreamed.isEmpty()) {
             // Some agents only refresh the title mid-flight ("Running tests…").
             // Keep the card's summary current so the header never lies, but
             // there is nothing to stream into the body yet.
@@ -1928,11 +1968,11 @@ void AcpClient::handleSessionUpdate(const QJsonObject &update)
         }
         // An agent that repeats the same content word for word must not force a
         // re-render of the whole stream on every heartbeat.
-        if (m_toolStreamed.value(toolCallId) == streamed) {
+        if (m_toolStreamed.value(toolCallId) == finalStreamed) {
             return;
         }
-        m_toolStreamed.insert(toolCallId, streamed);
-        Q_EMIT toolProgress(toolCallId, streamed);
+        m_toolStreamed.insert(toolCallId, finalStreamed);
+        Q_EMIT toolProgress(toolCallId, finalStreamed);
         return;
     }
 }
@@ -1941,10 +1981,9 @@ PermissionRequest AcpClient::permissionFromToolCall(const QJsonObject &toolCall)
 {
     PermissionRequest request;
     request.toolCallId = toolCall.value(u"toolCallId"_s).toString();
-    request.toolName = toolCall.value(u"name"_s).toString();
-    if (request.toolName.isEmpty()) {
-        request.toolName = toolCall.value(u"kind"_s).toString();
-    }
+    const QString rawName = toolCall.value(u"name"_s).toString();
+    request.originalToolName = rawName.isEmpty() ? toolCall.value(u"kind"_s).toString() : rawName;
+    request.toolName = request.originalToolName;
     if (request.toolName.isEmpty()) {
         request.toolName = u"tool"_s;
     }
@@ -1952,7 +1991,7 @@ PermissionRequest AcpClient::permissionFromToolCall(const QJsonObject &toolCall)
     request.toolName = canonicalToolName(request.toolName);
     request.summary = toolCall.value(u"title"_s).toString();
     if (request.summary.isEmpty()) {
-        request.summary = request.toolName;
+        request.summary = request.originalToolName.isEmpty() ? request.toolName : request.originalToolName;
     }
     const QString kind = toolCall.value(u"kind"_s).toString();
     request.risk = riskForKind(kind, request.toolName);
@@ -1960,80 +1999,203 @@ PermissionRequest AcpClient::permissionFromToolCall(const QJsonObject &toolCall)
     // tool names here. The ACP kind is the protocol-level statement of what
     // the call does, and a diff content block proves the agent edited text.
     request.mutatesFiles = kind == u"edit"_s || kind == u"write"_s || kind == u"delete"_s;
-    const QJsonValue rawInput = toolCall.value(u"rawInput"_s);
-    if (rawInput.isObject()) {
-        // The usual shape: the tool's arguments as a JSON object, shown as-is.
-        request.details = jsonText(rawInput);
-    } else {
-        // rawInput is arbitrary JSON in the ACP spec. Some agents send a
-        // content-block array or a bare string instead; serialising an empty
-        // array would put "[]" on the running card in place of what the tool
-        // is doing. Text blocks are extracted; anything else stays empty and
-        // the card falls back to its title.
-        request.details = toolContentText(rawInput);
-    }
 
+    // --- Locations (path resolution) ---
     const QJsonArray locations = toolCall.value(u"locations"_s).toArray();
-    if (!locations.isEmpty()) {
-        request.path = locations.first().toObject().value(u"path"_s).toString();
-    }
-    const QJsonArray content = toolCall.value(u"content"_s).toArray();
-    for (const QJsonValue &item : content) {
-        const QJsonObject obj = item.toObject();
-        if (obj.value(u"type"_s).toString() == u"diff"_s) {
-            request.path = obj.value(u"path"_s).toString();
-            if (request.path.isEmpty()) {
-                request.path = obj.value(u"filePath"_s).toString();
-            }
-            request.mutatesFiles = true;
-            request.describeDiff = unifiedDiff(request.path,
-                                               obj.value(u"oldText"_s).toString(),
-                                               obj.value(u"newText"_s).toString());
-            break;
+    for (const QJsonValue &loc : locations) {
+        const QJsonObject locObj = loc.toObject();
+        QString p = locObj.value(u"path"_s).toString();
+        if (p.isEmpty()) p = locObj.value(u"filePath"_s).toString();
+        if (p.isEmpty()) p = locObj.value(u"file"_s).toString();
+        if (!p.isEmpty()) {
+            if (request.path.isEmpty()) request.path = p;
+            else if (!request.additionalPaths.contains(p)) request.additionalPaths.append(p);
         }
     }
-    // Check for diff content block which contains the edit details.
-    // OpenCode spells the keys camelCase (filePath, oldText/newText) or
-    // content/contents; both shapes are accepted here.
+
+    // --- Raw input normalization ---
+    const QJsonValue rawInput = toolCall.value(u"rawInput"_s);
+    QJsonObject normalizedArgs;
+    if (rawInput.isObject()) {
+        normalizedArgs = rawInput.toObject();
+        request.details = jsonText(rawInput);
+    } else if (rawInput.isArray()) {
+        // Could be content blocks or args array
+        const QJsonArray arr = rawInput.toArray();
+        // Try to interpret as content blocks
+        bool isContent = false;
+        for (const QJsonValue &v : arr) {
+            if (v.isObject() && v.toObject().contains(u"type"_s)) { isContent = true; break; }
+        }
+        if (isContent) {
+            request.details = toolContentText(rawInput);
+        } else {
+            // Try to parse each as JSON object and merge
+            QJsonObject merged;
+            for (const QJsonValue &v : arr) {
+                if (v.isObject()) {
+                    const QJsonObject o = v.toObject();
+                    for (auto it = o.begin(); it != o.end(); ++it) merged.insert(it.key(), it.value());
+                }
+            }
+            if (!merged.isEmpty()) {
+                normalizedArgs = merged;
+                request.details = jsonText(merged);
+            } else {
+                request.details = toolContentText(rawInput);
+            }
+        }
+    } else if (rawInput.isString()) {
+        const QString s = rawInput.toString();
+        const QJsonDocument doc = QJsonDocument::fromJson(s.toUtf8());
+        if (doc.isObject()) {
+            normalizedArgs = doc.object();
+            request.details = jsonText(normalizedArgs);
+        } else if (doc.isArray()) {
+            request.details = toolContentText(doc.array());
+        } else {
+            request.details = s;
+        }
+    } else if (rawInput.isDouble() || rawInput.isBool()) {
+        request.details = jsonText(rawInput);
+    } else {
+        request.details = QString();
+    }
+
+    // --- Content blocks (diffs, text) ---
+    const QJsonArray content = toolCall.value(u"content"_s).toArray();
+    // If content is a single object (not array), wrap it
+    QJsonArray contentArr = content;
+    if (contentArr.isEmpty() && toolCall.value(u"content"_s).isObject()) {
+        contentArr = QJsonArray{toolCall.value(u"content"_s)};
+    }
+    for (const QJsonValue &item : contentArr) {
+        const QJsonObject obj = item.toObject();
+        if (obj.isEmpty()) continue;
+        const QString type = obj.value(u"type"_s).toString();
+        if (type == u"diff"_s) {
+            QString p = obj.value(u"path"_s).toString();
+            if (p.isEmpty()) p = obj.value(u"filePath"_s).toString();
+            if (p.isEmpty()) p = obj.value(u"file"_s).toString();
+            if (p.isEmpty()) p = obj.value(u"uri"_s).toString();
+            if (p.isEmpty() && !request.path.isEmpty()) p = request.path;
+            if (!p.isEmpty()) {
+                if (request.path.isEmpty()) request.path = p;
+                else if (!request.additionalPaths.contains(p)) request.additionalPaths.append(p);
+            }
+            request.mutatesFiles = true;
+            const QString oldText = obj.value(u"oldText"_s).toString().isEmpty()
+                ? obj.value(u"old_text"_s).toString() : obj.value(u"oldText"_s).toString();
+            const QString newText = obj.value(u"newText"_s).toString().isEmpty()
+                ? obj.value(u"new_text"_s).toString() : obj.value(u"newText"_s).toString();
+            const QString diff = unifiedDiff(p, oldText, newText);
+            if (request.describeDiff.isEmpty()) {
+                request.describeDiff = diff;
+            } else {
+                request.additionalDiffs.append(diff);
+            }
+        } else if (type == u"content"_s || type == u"text"_s || type.isEmpty()) {
+            // Try to extract text for details if empty
+            if (request.details.isEmpty()) {
+                const QString t = contentBlockText(obj.contains(u"content"_s) ? obj.value(u"content"_s) : item);
+                if (!t.isEmpty()) request.details = t;
+            }
+            // Check nested content for diffs
+            if (obj.contains(u"content"_s)) {
+                const QJsonValue nested = obj.value(u"content"_s);
+                if (nested.isObject()) {
+                    const QJsonObject no = nested.toObject();
+                    if (no.value(u"type"_s).toString() == u"diff"_s) {
+                        // Recurse by re-processing
+                        QJsonObject wrapped;
+                        wrapped.insert(u"type"_s, u"diff"_s);
+                        for (auto it = no.begin(); it != no.end(); ++it) wrapped.insert(it.key(), it.value());
+                        // handle below via same logic by appending to a temp array
+                    }
+                }
+            }
+        }
+    }
+
+    // Also handle contents/contents array (some agents)
+    if (toolCall.contains(u"contents"_s) && toolCall.value(u"contents"_s).isArray()) {
+        const QJsonArray contents = toolCall.value(u"contents"_s).toArray();
+        for (const QJsonValue &c : contents) {
+            const QJsonObject co = c.toObject();
+            if (co.value(u"type"_s).toString() == u"diff"_s) {
+                QString p = co.value(u"path"_s).toString();
+                if (p.isEmpty()) p = co.value(u"filePath"_s).toString();
+                if (!p.isEmpty()) {
+                    if (request.path.isEmpty()) request.path = p;
+                    else if (!request.additionalPaths.contains(p)) request.additionalPaths.append(p);
+                }
+                request.mutatesFiles = true;
+                const QString diff = unifiedDiff(p,
+                    co.value(u"oldText"_s).toString().isEmpty() ? co.value(u"old_text"_s).toString() : co.value(u"oldText"_s).toString(),
+                    co.value(u"newText"_s).toString().isEmpty() ? co.value(u"new_text"_s).toString() : co.value(u"newText"_s).toString());
+                if (request.describeDiff.isEmpty()) request.describeDiff = diff;
+                else request.additionalDiffs.append(diff);
+            }
+        }
+    }
+
+    // --- Path resolution from args ---
+    auto tryPath = [&](const QJsonObject &o, const QString &key) {
+        if (request.path.isEmpty()) {
+            QString p = o.value(key).toString();
+            if (!p.isEmpty()) request.path = p;
+        }
+    };
+    if (request.path.isEmpty() && !normalizedArgs.isEmpty()) {
+        tryPath(normalizedArgs, u"path"_s);
+        tryPath(normalizedArgs, u"file_path"_s);
+        tryPath(normalizedArgs, u"filePath"_s);
+        tryPath(normalizedArgs, u"file"_s);
+        tryPath(normalizedArgs, u"uri"_s);
+        tryPath(normalizedArgs, u"target"_s);
+        tryPath(normalizedArgs, u"TargetFile"_s);
+    }
+    // Resolve relative paths against workspace
+    if (!request.path.isEmpty() && !QFileInfo(request.path).isAbsolute() && !m_workspace.isEmpty()) {
+        request.resolvedPath = QDir(m_workspace).absoluteFilePath(request.path);
+    } else {
+        request.resolvedPath = request.path;
+    }
+
+    // --- Args-based diff extraction ---
     QString rawText = request.details;
-    if (request.path.isEmpty() || (request.describeDiff.isEmpty() && rawText.contains(u"old_string"_s))) {
-        QString parseError;
-        // Create a temporary ToolCall from the JSON details to parse
-        ToolCall tempCall;
-        tempCall.argumentsJson = request.details;
-        QJsonObject args = parseToolArgs(tempCall, &parseError);
-        if (parseError.isEmpty() && !args.isEmpty()) {
+    if (request.describeDiff.isEmpty() || request.path.isEmpty()) {
+        QJsonObject args = normalizedArgs;
+        if (args.isEmpty() && !rawText.isEmpty()) {
+            ToolCall tempCall;
+            tempCall.argumentsJson = rawText;
+            QString parseError;
+            args = parseToolArgs(tempCall, &parseError);
+        }
+        if (!args.isEmpty()) {
             if (request.path.isEmpty()) {
-                request.path = args.value(u"path"_s).toString();
-            }
-            if (request.path.isEmpty()) {
-                request.path = args.value(u"file_path"_s).toString();
-            }
-            if (request.path.isEmpty()) {
-                request.path = args.value(u"filePath"_s).toString();
-            }
-            if (request.path.isEmpty()) {
-                request.path = args.value(u"file"_s).toString();
+                QString p = args.value(u"path"_s).toString();
+                if (p.isEmpty()) p = args.value(u"file_path"_s).toString();
+                if (p.isEmpty()) p = args.value(u"filePath"_s).toString();
+                if (p.isEmpty()) p = args.value(u"file"_s).toString();
+                if (p.isEmpty()) p = args.value(u"uri"_s).toString();
+                if (p.isEmpty()) p = args.value(u"target"_s).toString();
+                if (p.isEmpty()) p = args.value(u"TargetFile"_s).toString();
+                if (!p.isEmpty()) request.path = p;
             }
             QString oldText = args.value(u"old_string"_s).toString();
+            if (oldText.isEmpty()) oldText = args.value(u"oldText"_s).toString();
+            if (oldText.isEmpty()) oldText = args.value(u"old"_s).toString();
             QString newText = args.value(u"new_string"_s).toString();
-            if (oldText.isEmpty()) {
-                oldText = args.value(u"oldText"_s).toString();
-            }
-            if (newText.isEmpty()) {
-                newText = args.value(u"newText"_s).toString();
-            }
+            if (newText.isEmpty()) newText = args.value(u"newText"_s).toString();
+            if (newText.isEmpty()) newText = args.value(u"new"_s).toString();
             if (request.describeDiff.isEmpty() && (!oldText.isEmpty() || !newText.isEmpty())) {
                 request.describeDiff = unifiedDiff(request.path, oldText, newText);
-                if (!request.path.isEmpty()) {
-                    request.mutatesFiles = true;
-                }
+                if (!request.path.isEmpty()) request.mutatesFiles = true;
             }
             if (request.describeDiff.isEmpty()) {
                 QString content = args.value(u"content"_s).toString();
-                if (content.isEmpty()) {
-                    content = args.value(u"contents"_s).toString();
-                }
+                if (content.isEmpty()) content = args.value(u"contents"_s).toString();
                 if (!content.isEmpty() && !request.path.isEmpty()
                     && (request.toolName.trimmed().toLower().contains(u"write"_s)
                         || kind == u"write"_s)) {
@@ -2043,6 +2205,19 @@ PermissionRequest AcpClient::permissionFromToolCall(const QJsonObject &toolCall)
             }
         }
     }
+
+    // Risk re-evaluation based on canonical name
+    if (request.toolName.contains(u"bash"_s) || request.toolName == u"bash"_s) {
+        request.risk = ToolRisk::Execute;
+    } else if (request.mutatesFiles) {
+        request.risk = ToolRisk::Write;
+    }
+
+    // Ensure details is valid JSON if possible
+    if (request.details.isEmpty() && !normalizedArgs.isEmpty()) {
+        request.details = jsonText(normalizedArgs);
+    }
+
     return request;
 }
 
@@ -2087,7 +2262,8 @@ bool AcpClient::autoResolvePermission(const PermissionRequest &request)
             return true;
         }
     }
-    if (m_settings.permissionMode == PermissionMode::AcceptEdits && request.risk == ToolRisk::Read) {
+    if (m_settings.permissionMode == PermissionMode::AcceptEdits
+        && (request.risk == ToolRisk::Read || request.risk == ToolRisk::Write)) {
         return true;
     }
     return false;
