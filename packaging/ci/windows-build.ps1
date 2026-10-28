@@ -57,10 +57,18 @@ function Invoke-CraftEnv {
     # variable is not defined, and Remove-Item then throws under
     # $ErrorActionPreference = "Stop", aborting the whole build. Pre-create
     # any such variable as an empty string so the removal succeeds.
-    foreach ($name in @("GITHUB_ACTION_REF", "GITHUB_ACTION", "GITHUB_ACTION_PATH", "GITHUB_ACTION_REPOSITORY")) {
+    foreach ($name in @("GITHUB_ACTION_REF", "GITHUB_ACTION", "GITHUB_ACTION_PATH", "GITHUB_ACTION_REPOSITORY", "GITHUB_BASE_REF", "GITHUB_HEAD_REF", "GITHUB_REF", "GITHUB_SHA")) {
         if (-not (Test-Path "Env:$name")) {
             Set-Item "Env:$name" ""
         }
+    }
+    # Craft's craftenv.ps1 removes a fixed list of env vars with Remove-Item,
+    # which throws when a variable is absent. Make that call tolerant so a
+    # missing variable can never abort the build.
+    if (Test-Path $craftEnv) {
+        $content = Get-Content $craftEnv -Raw
+        $content = $content.Replace('Remove-Item ("ENV:{0}" -f ${_}.Name)', 'Remove-Item ("ENV:{0}" -f ${_}.Name) -ErrorAction SilentlyContinue')
+        Set-Content $craftEnv $content
     }
     # Dot-source: the env script must mutate THIS session (PATH, KDEROOT,
     # craft/cs functions). `&` would run it in a child scope and lose them.

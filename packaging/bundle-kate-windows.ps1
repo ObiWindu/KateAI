@@ -75,10 +75,15 @@ if (-not (Test-Path $craftEnv)) {
 # Craft's craftenv.ps1 sanitizes the environment by removing a fixed list of
 # variables (including GITHUB_ACTION_REF). On some GitHub runners that
 # variable is not defined, which makes Remove-Item throw and abort the build.
-foreach ($name in @("GITHUB_ACTION_REF", "GITHUB_ACTION", "GITHUB_ACTION_PATH", "GITHUB_ACTION_REPOSITORY")) {
+foreach ($name in @("GITHUB_ACTION_REF", "GITHUB_ACTION", "GITHUB_ACTION_PATH", "GITHUB_ACTION_REPOSITORY", "GITHUB_BASE_REF", "GITHUB_HEAD_REF", "GITHUB_REF", "GITHUB_SHA")) {
     if (-not (Test-Path "Env:$name")) {
         Set-Item "Env:$name" ""
     }
+}
+if (Test-Path $craftEnv) {
+    $content = Get-Content $craftEnv -Raw
+    $content = $content.Replace('Remove-Item ("ENV:{0}" -f ${_}.Name)', 'Remove-Item ("ENV:{0}" -f ${_}.Name) -ErrorAction SilentlyContinue')
+    Set-Content $craftEnv $content
 }
 # Dot-source: the env script must mutate THIS session (PATH, KDEROOT, craft/cs
 # functions). `&` would run it in a child scope and lose them.
