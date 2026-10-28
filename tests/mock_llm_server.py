@@ -12,6 +12,7 @@ Usage: mock_llm_server.py <port-file>
 """
 
 import json
+import os
 import sys
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -298,8 +299,17 @@ def main():
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     server.daemon_threads = True
     if len(sys.argv) > 1:
-        with open(sys.argv[1], "w", encoding="utf-8") as handle:
-            handle.write(str(server.server_address[1]))
+        # Write the port atomically: create the file only once its contents are
+        # fully flushed, so a test that waits for the file to appear never reads
+        # a half-written (empty) port and parses it as 0.
+        port_path = sys.argv[1]
+        port_value = str(server.server_address[1])
+        tmp_path = port_path + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            handle.write(port_value)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, port_path)
     server.serve_forever()
 
 
