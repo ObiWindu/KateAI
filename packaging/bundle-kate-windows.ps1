@@ -101,14 +101,30 @@ try {
 # (LNK2001: iconv_ostream_create). Preset the cache variables and build
 # iconv first, as in packaging\ci\windows-build.ps1.
 $env:am_cv_func_iconv = "yes"
-$env:am_cv_func_iconv_works = "guessing yes"
+$env:am_cv_func_iconv_works = "yes"
 $env:am_cv_lib_iconv = "yes"
-try { craft libs/iconv } catch { Write-Host $_ }
+
+# Make the func/lib cache variables explicit in Craft's gettext blueprint too
+# (it only presets works), so a failed link probe cannot reset HAVE_ICONV.
+$gettextBlueprint = Get-ChildItem -Path $CraftRoot -Recurse -Filter gettext.py -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($gettextBlueprint) {
+    $bp = Get-Content $gettextBlueprint.FullName -Raw
+    if ($bp -notmatch 'am_cv_func_iconv=yes') {
+        $bp = $bp -replace '"am_cv_func_iconv_works=yes"', '"am_cv_func_iconv=yes", "am_cv_func_iconv_works=yes", "am_cv_lib_iconv=yes"'
+        Set-Content -Path $gettextBlueprint.FullName -Value $bp
+    }
+}
+Get-ChildItem -Path $CraftRoot -Recurse -Filter config.cache -ErrorAction SilentlyContinue |
+    Where-Object { $_.FullName -match 'gettext' } |
+    Remove-Item -Force -ErrorAction SilentlyContinue
+
+craft libs/iconv
+if (-not $?) { throw "craft libs/iconv failed" }
 
 if (-not $SkipKate) {
     Write-Host "==> Building latest Kate via Craft"
     craft kate
-    if ($LASTEXITCODE -ne 0) { throw "craft kate failed with exit code $LASTEXITCODE" }
+    if (-not $?) { throw "craft kate failed" }
 }
 
 # Build the plugin against the Craft prefix (same flow as windows-build.ps1).

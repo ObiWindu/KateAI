@@ -121,14 +121,32 @@ Invoke-CraftEnv
 # MSVC linker fails with LNK2001. Preset the cache variables so iconv is
 # treated as available (iconv is built just below).
 $env:am_cv_func_iconv = "yes"
-$env:am_cv_func_iconv_works = "guessing yes"
+$env:am_cv_func_iconv_works = "yes"
 $env:am_cv_lib_iconv = "yes"
+
+# Craft's gettext blueprint only presets am_cv_func_iconv_works. Make the
+# func/lib cache variables explicit there too, so a failed link probe cannot
+# flip HAVE_ICONV back to 0 (which is what leaves iconv_ostream_create
+# undefined in libtextstyle).
+$gettextBlueprint = Get-ChildItem -Path $CraftRoot -Recurse -Filter gettext.py -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($gettextBlueprint) {
+    $bp = Get-Content $gettextBlueprint.FullName -Raw
+    if ($bp -notmatch 'am_cv_func_iconv=yes') {
+        $bp = $bp -replace '"am_cv_func_iconv_works=yes"', '"am_cv_func_iconv=yes", "am_cv_func_iconv_works=yes", "am_cv_lib_iconv=yes"'
+        Set-Content -Path $gettextBlueprint.FullName -Value $bp
+    }
+}
+# Drop any stale configure cache from a previous (possibly failed) build so
+# the preset cache variables above take effect.
+Get-ChildItem -Path $CraftRoot -Recurse -Filter config.cache -ErrorAction SilentlyContinue |
+    Where-Object { $_.FullName -match 'gettext' } |
+    Remove-Item -Force -ErrorAction SilentlyContinue
 
 # Build deps and kate with filtered output
 craft libs/iconv
-if ($LASTEXITCODE -ne 0) { throw "craft libs/iconv failed with exit code $LASTEXITCODE" }
+if (-not $?) { throw "craft libs/iconv failed" }
 craft kate
-if ($LASTEXITCODE -ne 0) { throw "craft kate failed with exit code $LASTEXITCODE" }
+if (-not $?) { throw "craft kate failed" }
 
 $BuildDir = Join-Path $Root "build"
 $configure = @(
