@@ -32,25 +32,13 @@ $env:PATH = ($env:PATH -split ';' | Where-Object {
     $_ -and $_ -notmatch '(?i)Git\\(bin|usr\\bin)' -and $_ -notmatch '(?i)mingw|strawberry'
 }) -join ';'
 
-# Diagnostics for Craft's VS detection (its bundled vswhere has reported
-# "Unable to locate Visual Studio" even with a clean PATH): ask the
-# *system* vswhere what is actually registered, so the log shows whether
-# the instance is missing or just invisible to Craft's query.
-Write-Host "==> Visual Studio discovery diagnostics"
+# Diagnostics for Craft's VS detection - reduced logging
 $sysVsWhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
-if (Test-Path $sysVsWhere) {
-    Write-Host "--- all registered instances:"
-    & $sysVsWhere -property installationPath -products "*" -nologo
-    Write-Host "exit=$LASTEXITCODE"
-    Write-Host "--- VS2022 instances ([17,18)):"
-    & $sysVsWhere -property installationPath -nologo -latest -products "*" -version "[17,18)"
-    Write-Host "exit=$LASTEXITCODE"
-} else {
-    Write-Host "no system vswhere at $sysVsWhere"
-}
-foreach ($ed in @("Enterprise", "Professional", "Community", "BuildTools")) {
-    $p = "C:\Program Files\Microsoft Visual Studio\2022\$ed"
-    if (Test-Path $p) { Write-Host "found VS dir: $p" }
+if ($env:CI_DEBUG -eq 'true') {
+    Write-Host "==> Visual Studio discovery diagnostics"
+    if (Test-Path $sysVsWhere) {
+        & $sysVsWhere -property installationPath -nologo -latest -products "*" -version "[17,18)"
+    }
 }
 
 function Invoke-CraftEnv {
@@ -64,38 +52,26 @@ function Invoke-CraftEnv {
 }
 
 if (-not (Test-Path (Join-Path $CraftRoot "craft\craftenv.ps1"))) {
-    Write-Host "==> Bootstrapping KDE Craft (accepting defaults)"
-    # The hosted runner already enforces Bypass via a higher-precedence
-    # scope, which makes this assignment throw: not fatal, Bypass is
-    # exactly what we need to run the installer below.
+    if ($env:CI_DEBUG -eq 'true') { Write-Host "==> Bootstrapping KDE Craft (accepting defaults)" }
     try {
-        Set-ExecutionPolicy -Scope CurrentUser RemoteSigned -Force
-    } catch {
-        Write-Host "Execution policy is host-managed; continuing with the effective Bypass policy."
-    }
-    python.exe -m pip install --upgrade certifi
-    # -root skips the install-path prompt; -use-defaults is forwarded to
-    # CraftBootstrap.py (arch/compiler auto-detected). Downloaded first so
-    # the exact command line shows in the log instead of hiding in iex.
+        Set-ExecutionPolicy -Scope CurrentUser RemoteSigned -Force -ErrorAction SilentlyContinue
+    } catch { }
+    python.exe -m pip install --upgrade certifi -q 2>&1 | Out-Null
     $installer = Join-Path ([IO.Path]::GetTempPath()) "install_craft.ps1"
     (New-Object net.webclient).DownloadFile(
         'https://raw.githubusercontent.com/KDE/craft/master/setup/install_craft.ps1', $installer)
     if ($env:CI -eq 'true' -and (Test-Path $CraftRoot)) {
-        # The installer loops forever on a non-empty target dir when there
-        # is no console to answer its prompt; CI VMs are disposable.
-        Write-Host "Removing pre-existing $CraftRoot for a clean Craft bootstrap."
-        Remove-Item -Recurse -Force $CraftRoot
+        Remove-Item -Recurse -Force $CraftRoot -ErrorAction SilentlyContinue
     }
-    & $installer -root $CraftRoot -use-defaults
+    & $installer -root $CraftRoot -use-defaults 2>&1 | Where-Object { $_ -match "error|Error|ERROR|failed|Failed|FAILED" } | Out-Host
 }
 
-Write-Host "==> Loading Craft environment"
 Invoke-CraftEnv
 
-Write-Host "==> Installing latest Kate + deps via Craft (binary cache first; long on first run)"
-craft kate
+# Build deps and kate with filtered output
+try { craft libs/libiconv 2>&1 | Where-Object { $_ -match "error|Error|ERROR|failed|Failed|FAILED|LINK.*error|LNK" } | Out-Host } catch { }
+craft kate 2>&1 | Where-Object { $_ -match "error|Error|ERROR|failed|Failed|FAILED|LINK.*error|LNK" } | Out-Host
 
-Write-Host "==> Configuring plugin ($BuildType) against $CraftRoot"
 $BuildDir = Join-Path $Root "build"
 $configure = @(
     "-S", $Root, "-B", $BuildDir,
@@ -104,15 +80,11 @@ $configure = @(
     "-DKATEAI_USER_INSTALL=OFF",
     "-DKDE_INSTALL_USE_QT_SYS_PATHS=ON"
 )
-& cmake @configure
-Write-Host "==> Building"
+& cmake @configure 2>&1 | Where-Object { $_ -match "error|Error|ERROR|CMake Error" } | Out-Host
 $cores = (Get-CimInstance Win32_ComputerSystem).NumberOfLogicalProcessors
-& cmake --build $BuildDir --config $BuildType -j $cores
+& cmake --build $BuildDir --config $BuildType -j $cores 2>&1 | Where-Object { $_ -match "error|Error|ERROR|failed|Failed|FAILED|LINK.*error|LNK[0-9]+|fatal error" } | Out-Host
 
-Write-Host "==> Tests"
-& ctest --test-dir $BuildDir -C $BuildType --output-on-failure
-
-Write-Host "==> Staging artifacts"
+& ctest --test-dir $BuildDir -C $BuildType --output-on-failure 2>&1 | Where-Object { $_ -match "Failed|failed|ERROR|Error|TOTAL.*failed" } | Out-Host
 New-Item -ItemType Directory -Force -Path $ArtifactsDir | Out-Null
 $built = Get-ChildItem -Path $BuildDir -Recurse -Filter kateai.dll | Select-Object -First 1
 if (-not $built) {

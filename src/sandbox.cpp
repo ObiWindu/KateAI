@@ -137,6 +137,13 @@ namespace KateAi
         m_workspaceRoot = workspaceRoot.trimmed().isEmpty()
             ? QString()
             : QDir::cleanPath(QDir(workspaceRoot).absolutePath());
+        // Canonicalize the workspace root to resolve symlinks (e.g., /var vs /private/var on macOS)
+        if (!m_workspaceRoot.isEmpty()) {
+            const QString canonicalRoot = QFileInfo(m_workspaceRoot).canonicalFilePath();
+            if (!canonicalRoot.isEmpty()) {
+                m_workspaceRoot = QDir::cleanPath(canonicalRoot);
+            }
+        }
     }
 
     QStringList Sandbox::defaultDenyGlobs()
@@ -256,19 +263,51 @@ static bool matchGlobRegex(const QString &regex, const QString &haystack, QHash<
     bool Sandbox::pathInsideWorkspace(const QString &absolutePath) const
     {
         const QString root = QDir::cleanPath(m_workspaceRoot);
-        const QString path = QDir::cleanPath(absolutePath);
+        QString path = QDir::cleanPath(absolutePath);
 #if defined(Q_OS_WIN) || defined(Q_OS_MACOS)
         // These filesystems are case-insensitive: a path that differs from the
         // workspace root only in casing still names a file inside it.
         if (path.compare(root, Qt::CaseInsensitive) == 0) {
             return true;
         }
-        return path.startsWith(root + u'/', Qt::CaseInsensitive);
+        if (path.startsWith(root + u'/', Qt::CaseInsensitive)) {
+            return true;
+        }
+        // Try canonicalizing both paths for symlink resolution (e.g., /var vs /private/var on macOS)
+        const QString canonicalRoot = QFileInfo(root).canonicalFilePath();
+        const QString canonicalPath = QFileInfo(path).canonicalFilePath();
+        if (!canonicalRoot.isEmpty() && !canonicalPath.isEmpty()) {
+            const QString cRoot = QDir::cleanPath(canonicalRoot);
+            const QString cPath = QDir::cleanPath(canonicalPath);
+            if (cPath.compare(cRoot, Qt::CaseInsensitive) == 0) {
+                return true;
+            }
+            if (cPath.startsWith(cRoot + u'/', Qt::CaseInsensitive)) {
+                return true;
+            }
+        }
+        return false;
 #else
         if (path == root) {
             return true;
         }
-        return path.startsWith(root + u'/');
+        if (path.startsWith(root + u'/')) {
+            return true;
+        }
+        // Try canonicalizing both paths for symlink resolution
+        const QString canonicalRoot = QFileInfo(root).canonicalFilePath();
+        const QString canonicalPath = QFileInfo(path).canonicalFilePath();
+        if (!canonicalRoot.isEmpty() && !canonicalPath.isEmpty()) {
+            const QString cRoot = QDir::cleanPath(canonicalRoot);
+            const QString cPath = QDir::cleanPath(canonicalPath);
+            if (cPath == cRoot) {
+                return true;
+            }
+            if (cPath.startsWith(cRoot + u'/')) {
+                return true;
+            }
+        }
+        return false;
 #endif
     }
 
@@ -360,7 +399,20 @@ QString Sandbox::normalizePath(const QString &path, QString *error, bool forWrit
     {
         if (m_profile == SandboxProfile::Off) {
             const QFileInfo info(QDir(m_workspaceRoot), path);
-            const QString absolute = QDir::cleanPath(info.absoluteFilePath());
+            QString absolute = QDir::cleanPath(info.absoluteFilePath());
+            if (QFileInfo::exists(absolute)) {
+                const QString canonical = QFileInfo(absolute).canonicalFilePath();
+                if (!canonical.isEmpty()) {
+                    absolute = canonical;
+                }
+            } else {
+                // Try to canonicalize parent
+                const QString parent = QFileInfo(absolute).absolutePath();
+                const QString parentCanon = QFileInfo(parent).canonicalFilePath();
+                if (!parentCanon.isEmpty()) {
+                    absolute = QDir::cleanPath(parentCanon + u'/' + QFileInfo(absolute).fileName());
+                }
+            }
             if (isDenied(absolute)) {
                 if (error) {
                     *error = u"Access to this path is blocked by a deny rule: %1"_s.arg(absolute);
@@ -377,6 +429,13 @@ QString Sandbox::normalizePath(const QString &path, QString *error, bool forWrit
                 const QString canonical = QFileInfo(absolute).canonicalFilePath();
                 if (!canonical.isEmpty()) {
                     absolute = canonical;
+                }
+            } else {
+                // Try to canonicalize parent directory for files that don't exist yet
+                const QString parent = QFileInfo(absolute).absolutePath();
+                const QString parentCanon = QFileInfo(parent).canonicalFilePath();
+                if (!parentCanon.isEmpty()) {
+                    absolute = QDir::cleanPath(parentCanon + u'/' + QFileInfo(absolute).fileName());
                 }
             }
             if (isDenied(absolute)) {
