@@ -104,8 +104,9 @@ if (-not (Test-Path (Join-Path $CraftRoot "craft\craftenv.ps1"))) {
 Invoke-CraftEnv
 
 # Build deps and kate with filtered output
-try { craft libs/libiconv 2>&1 | Where-Object { $_ -match "error|Error|ERROR|failed|Failed|FAILED|LINK.*error|LNK" } | Out-Host } catch { }
-craft kate 2>&1 | Where-Object { $_ -match "error|Error|ERROR|failed|Failed|FAILED|LINK.*error|LNK" } | Out-Host
+try { craft libs/libiconv } catch { Write-Host $_ }
+craft kate
+if ($LASTEXITCODE -ne 0) { throw "craft kate failed with exit code $LASTEXITCODE" }
 
 $BuildDir = Join-Path $Root "build"
 $configure = @(
