@@ -950,6 +950,238 @@ private Q_SLOTS:
         client.stop();
     }
 
+    void terminalOutputStreamsIntoLinkedToolCard()
+    {
+        // The agent embeds a terminal it created in its tool call. The output of
+        // that command reaches the card while it runs, and the reference itself
+        // is never printed as output.
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+
+        DiskDocumentBridge bridge;
+        AcpClient client;
+        client.setSettings(mockSettings(u"terminal-card"_s));
+        client.setWorkspace(workspace.path());
+        client.setDocumentBridge(&bridge);
+
+        QString progress;
+        QString finishedOutput;
+        bool finishedOk = false;
+        QString stopReason;
+        QString error;
+        connect(&client, &AcpClient::toolProgress, this, [&](const QString &toolCallId, const QString &partial) {
+            if (toolCallId == u"call_term"_s) {
+                progress = partial;
+            }
+        });
+        connect(&client, &AcpClient::toolFinished, this, [&](const ToolResult &result) {
+            if (result.toolCallId == u"call_term"_s) {
+                finishedOutput = result.output;
+                finishedOk = result.ok;
+            }
+        });
+        connect(&client, &AcpClient::promptFinished, this, [&](const QString &reason, const QString &, const QJsonArray &) {
+            stopReason = reason;
+        });
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+
+        client.prompt(u"run the probe"_s);
+        QVERIFY2(waitFor([&] {
+            return !stopReason.isEmpty() || !error.isEmpty();
+        }), qPrintable(error.isEmpty() ? u"timed out"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QVERIFY(progress.contains(u"term-card-out"_s));
+        QVERIFY(finishedOk);
+        QVERIFY(finishedOutput.contains(u"term-card-out"_s));
+        QVERIFY(!finishedOutput.contains(u"terminalId"_s));
+        client.stop();
+    }
+
+    void permissionRequestKeepsTheAnnouncedToolCall()
+    {
+        // The permission request names only the tool call's id. The request Kate
+        // shows is still the edit the agent announced, with its file and diff,
+        // and not an unnamed "tool" that an "always allow" would be keyed on.
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+        const QString target = workspace.filePath(u"notes.txt"_s);
+
+        DiskDocumentBridge bridge;
+        AcpClient client;
+        client.setSettings(mockSettings(u"bare-permission"_s));
+        client.setWorkspace(workspace.path());
+        client.setDocumentBridge(&bridge);
+
+        PermissionRequest asked;
+        int askedCount = 0;
+        QString text;
+        QString stopReason;
+        QString error;
+        connect(&client, &AcpClient::permissionNeeded, this, [&](const PermissionRequest &request) {
+            asked = request;
+            ++askedCount;
+            client.resolvePermission(PermissionDecision::AllowOnce);
+        });
+        connect(&client, &AcpClient::textDelta, this, [&](const QString &delta) {
+            text += delta;
+        });
+        connect(&client, &AcpClient::promptFinished, this, [&](const QString &reason, const QString &, const QJsonArray &) {
+            stopReason = reason;
+        });
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+
+        client.prompt(u"EDITPATH:%1"_s.arg(target));
+        QVERIFY2(waitFor([&] {
+            return !stopReason.isEmpty() || !error.isEmpty();
+        }), qPrintable(error.isEmpty() ? u"timed out"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(askedCount, 1);
+        QCOMPARE(asked.toolName, u"edit_file"_s);
+        QCOMPARE(asked.path, target);
+        QVERIFY(asked.describeDiff.contains(u"+new"_s));
+        QCOMPARE(text, u"outcome:allow-once"_s);
+        client.stop();
+    }
+
+    void lateDiffReachesTheCard()
+    {
+        // The diff of an edit can arrive in a tool_call_update after the call has
+        // started. It is announced once, so the card and the review can show it.
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+        const QString target = workspace.filePath(u"notes.txt"_s);
+
+        DiskDocumentBridge bridge;
+        AcpClient client;
+        client.setSettings(mockSettings(u"late-diff"_s));
+        client.setWorkspace(workspace.path());
+        client.setDocumentBridge(&bridge);
+
+        bool sawStart = false;
+        PermissionRequest started;
+        PermissionRequest changed;
+        int changes = 0;
+        QString stopReason;
+        QString error;
+        connect(&client, &AcpClient::toolStarted, this, [&](const PermissionRequest &request) {
+            if (request.toolCallId == u"call_late"_s) {
+                started = request;
+                sawStart = true;
+            }
+        });
+        connect(&client, &AcpClient::toolDetailsChanged, this, [&](const PermissionRequest &request) {
+            changed = request;
+            ++changes;
+        });
+        connect(&client, &AcpClient::promptFinished, this, [&](const QString &reason, const QString &, const QJsonArray &) {
+            stopReason = reason;
+        });
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+
+        client.prompt(u"EDITPATH:%1"_s.arg(target));
+        QVERIFY2(waitFor([&] {
+            return !stopReason.isEmpty() || !error.isEmpty();
+        }), qPrintable(error.isEmpty() ? u"timed out"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QVERIFY(sawStart);
+        QVERIFY(started.describeDiff.isEmpty());
+        QCOMPARE(changes, 1);
+        QVERIFY(changed.describeDiff.contains(u"+new"_s));
+        QCOMPARE(changed.path, target);
+        client.stop();
+    }
+
+    void sessionNotesReachTheFirstPromptOnly()
+    {
+        // Kate's rules and its client methods reach the agent once per session,
+        // in front of the first prompt. Later prompts of the session do not
+        // repeat them.
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+
+        DiskDocumentBridge bridge;
+        AcpClient client;
+        Settings settings = mockSettings(u"prompt-probe"_s);
+        settings.globalRules = u"Always write tests."_s;
+        client.setSettings(settings);
+        client.setWorkspace(workspace.path());
+        client.setDocumentBridge(&bridge);
+
+        QStringList replies;
+        QString error;
+        connect(&client, &AcpClient::promptFinished, this, [&](const QString &, const QString &full, const QJsonArray &) {
+            replies.append(full);
+        });
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+
+        client.prompt(u"first question"_s);
+        QVERIFY2(waitFor([&] {
+            return replies.size() == 1 || !error.isEmpty();
+        }), qPrintable(error.isEmpty() ? u"timed out"_s : error));
+        client.prompt(u"second question"_s);
+        QVERIFY2(waitFor([&] {
+            return replies.size() == 2 || !error.isEmpty();
+        }), qPrintable(error.isEmpty() ? u"timed out"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+
+        QVERIFY(replies.at(0).contains(u"Always write tests."_s));
+        QVERIFY(replies.at(0).contains(u"_kateai/write_plan_file"_s));
+        QVERIFY(replies.at(0).contains(u"first question"_s));
+        QVERIFY(!replies.at(1).contains(u"_kateai/write_plan_file"_s));
+        QVERIFY(replies.at(1).contains(u"second question"_s));
+        client.stop();
+    }
+
+    void extensionMethodNamesReachTheirHandlers()
+    {
+        // Kate's client methods, called by the _kateai/ names the capability
+        // advertises, reach the same handlers as the bare names.
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+
+        DiskDocumentBridge bridge;
+        AcpClient client;
+        client.setSettings(mockSettings(u"kateai-ext"_s));
+        client.setWorkspace(workspace.path());
+        client.setDocumentBridge(&bridge);
+
+        QList<Suggestion> posted;
+        QString text;
+        QString stopReason;
+        QString error;
+        connect(&client, &AcpClient::suggestionPosted, this, [&](const Suggestion &suggestion) {
+            posted.append(suggestion);
+        });
+        connect(&client, &AcpClient::textDelta, this, [&](const QString &delta) {
+            text += delta;
+        });
+        connect(&client, &AcpClient::promptFinished, this, [&](const QString &reason, const QString &, const QJsonArray &) {
+            stopReason = reason;
+        });
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+
+        client.prompt(u"go"_s);
+        QVERIFY2(waitFor([&] {
+            return !stopReason.isEmpty() || !error.isEmpty();
+        }), qPrintable(error.isEmpty() ? u"timed out"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(posted.size(), 1);
+        QCOMPARE(posted.first().text, u"extract a helper"_s);
+        QCOMPARE(posted.first().line, 3);
+        QCOMPARE(text, u"ext-ok"_s);
+        client.stop();
+    }
+
     void cancelReturnsCancelledStopReason()
     {
         QTemporaryDir workspace;

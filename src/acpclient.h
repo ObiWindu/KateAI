@@ -137,6 +137,11 @@ public:
     // the JSON: public so tests can pin the OpenCode argument shapes
     // (camelCase filePath, oldText/newText, content/contents).
     PermissionRequest permissionFromToolCall(const QJsonObject &toolCall) const;
+    // Combines what an agent said about one tool call in two messages (the
+    // tool_call and a later update, or the tool_call and its permission
+    // request). The base keeps every field it has; the other message fills
+    // the gaps. An identity-less base takes the other message's tool name.
+    static PermissionRequest mergeToolCallDetails(const PermissionRequest &base, const PermissionRequest &other);
 
 Q_SIGNALS:
     void ready();
@@ -155,6 +160,9 @@ Q_SIGNALS:
     // final status, and that incremental text is what lets a card stream
     // instead of sitting blank until the command ends.
     void toolProgress(const QString &toolCallId, const QString &partialOutput);
+    // A running tool gained details it did not have when it started (a diff or
+    // a path the agent reported later). The card and the review queue use it.
+    void toolDetailsChanged(const PermissionRequest &request);
 
     void permissionNeeded(const PermissionRequest &request);
     void promptFinished(const QString &stopReason, const QString &text, const QJsonArray &toolCalls);
@@ -228,6 +236,13 @@ private:
     // Emits toolFinished for every tool still open and forgets them, so a card is
     // never left spinning because the turn it belonged to is gone.
     void finishLiveTools(const QString &message);
+    // Ties a terminal the agent created to the tool call that shows it: its
+    // output then streams into that card. The link ends with the tool call.
+    void linkToolTerminals(const QString &toolCallId, const QJsonValue &content);
+    void forgetToolTerminal(const QString &toolCallId);
+    // The guidance an agent cannot know otherwise: the user's rules and Kate's
+    // own client methods. Sent once per session as a leading text block.
+    QJsonObject sessionNotesBlock() const;
 
     void onStdioReadyRead();
     void handleBuffer();
@@ -259,7 +274,6 @@ private:
     QJsonObject sessionMeta() const;
     QJsonArray promptBlocks(const QString &text) const;
     QString pickPermissionOption(PermissionDecision decision) const;
-    bool autoResolvePermission(const PermissionRequest &request);
     QString sliceLines(const QString &text, int line, int limit) const;
     bool pathAllowed(const QString &path, bool forWrite, QString *error) const;
     Sandbox currentSandbox() const;
@@ -333,6 +347,11 @@ private:
     QJsonArray m_currentPlan;
     QJsonArray m_toolCalls;
     QHash<QString, PermissionRequest> m_liveTools;
+    // Terminals the agent embedded in a tool call, in both directions.
+    QHash<QString, QString> m_toolTerminals;   // toolCallId -> terminalId
+    QHash<QString, QString> m_terminalTools;   // terminalId -> toolCallId
+    // The session notes went out with the first prompt of this session.
+    bool m_sessionNotesSent = false;
 
     // Automatic retry of a turn that failed with a transient error. The wait
     // between attempts holds no request, so nothing is in flight; the pending

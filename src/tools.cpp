@@ -136,7 +136,8 @@ static QString quoteShellArg(const QString &s)
 
 QString shellCommandFor(const QString &toolName, const QJsonObject &args)
 {
-    const QString key = toolName.trimmed().toLower();
+    const QString canonical = canonicalToolName(toolName);
+    const QString key = canonical.trimmed().toLower();
     // OpenCode ACP aliases resolve to the same summaries as the native tools.
     auto argPath = [&args]() -> QString {
         QString path = args.value(u"path"_s).toString();
@@ -149,28 +150,48 @@ QString shellCommandFor(const QString &toolName, const QJsonObject &args)
         if (path.isEmpty()) {
             path = args.value(u"file"_s).toString();
         }
+        if (path.isEmpty()) {
+            path = args.value(u"uri"_s).toString();
+        }
         return path;
     };
-    if (toolName == u"read_file"_s || toolName == u"fs/read_text_file"_s || key == u"read"_s) {
+    if (canonical == u"read_file"_s || key == u"read_file"_s || toolName == u"fs/read_text_file"_s || key == u"read"_s) {
         const QString path = quoteShellArg(argPath());
         const int offset = args.value(u"offset"_s).toInt(args.value(u"line"_s).toInt(1));
-        const int limit = args.value(u"limit"_s).toInt(args.value(u"limit"_s).toInt(0));
+        const int limit = args.value(u"limit"_s).toInt(0);
         if (limit > 0) {
             const int end = offset + limit - 1;
-            return u"sed -n '%1,%2p' %3"_s.arg(offset).arg(end).arg(path);
+            if (!path.isEmpty()) {
+                return u"sed -n '%1,%2p' %3"_s.arg(offset).arg(end).arg(path);
+            }
+            return u"sed -n '%1,%2p'"_s.arg(offset).arg(end);
         }
         if (offset > 1) {
-            return u"tail -n +%1 %2"_s.arg(offset).arg(path);
+            if (!path.isEmpty()) {
+                return u"tail -n +%1 %2"_s.arg(offset).arg(path);
+            }
+            return u"tail -n +%1"_s.arg(offset);
         }
-        return u"cat %1"_s.arg(path);
+        if (!path.isEmpty()) {
+            return u"cat %1"_s.arg(path);
+        }
+        return u"read_file"_s;
     }
-    if (toolName == u"write_file"_s || toolName == u"fs/write_text_file"_s || key == u"write"_s) {
-        return u"cat > %1"_s.arg(quoteShellArg(argPath()));
+    if (canonical == u"write_file"_s || toolName == u"fs/write_text_file"_s || key == u"write"_s) {
+        const QString path = argPath();
+        if (!path.isEmpty()) {
+            return u"cat > %1"_s.arg(quoteShellArg(path));
+        }
+        return u"write_file"_s;
     }
-    if (toolName == u"edit_file"_s || key == u"edit"_s || key == u"patch"_s) {
-        return u"patch %1"_s.arg(quoteShellArg(argPath()));
+    if (canonical == u"edit_file"_s || key == u"edit"_s || key == u"patch"_s || key == u"str_replace_editor"_s || key == u"apply_patch"_s) {
+        const QString path = argPath();
+        if (!path.isEmpty()) {
+            return u"patch %1"_s.arg(quoteShellArg(path));
+        }
+        return u"edit_file"_s;
     }
-    if (toolName == u"multi_edit_file"_s || toolName == u"multi_replace_file_content"_s) {
+    if (canonical == u"multi_edit_file"_s || toolName == u"multi_replace_file_content"_s || key == u"multi_edit"_s) {
         const QString rawPath = args.value(u"path"_s).toString().isEmpty()
             ? args.value(u"TargetFile"_s).toString()
             : args.value(u"path"_s).toString();
@@ -182,13 +203,16 @@ QString shellCommandFor(const QString &toolName, const QJsonObject &args)
         if (edits.isEmpty()) {
             edits = args.value(u"ReplacementChunks"_s).toArray();
         }
+        if (path.isEmpty()) {
+            return u"patch (%1 edits)"_s.arg(edits.size());
+        }
         return u"patch %1 (%2 edits)"_s.arg(path).arg(edits.size());
     }
-    if (toolName == u"list_dir"_s || key == u"list"_s) {
+    if (canonical == u"list_dir"_s || toolName == u"fs/list_directory"_s || key == u"list"_s || key == u"readdir"_s) {
         const QString path = argPath();
         return path.isEmpty() ? u"ls"_s : u"ls %1"_s.arg(quoteShellArg(path));
     }
-    if (toolName == u"grep"_s || key == u"search"_s) {
+    if (canonical == u"grep"_s || toolName == u"fs/grep"_s || key == u"search"_s) {
         QString cmd = u"grep -n"_s;
         if (jsonBool(args.value(u"case_insensitive"_s))) {
             cmd += u" -i"_s;
@@ -208,14 +232,17 @@ QString shellCommandFor(const QString &toolName, const QJsonObject &args)
         }
         return cmd;
     }
-    if (toolName == u"glob"_s) {
+    if (canonical == u"glob"_s || toolName == u"fs/glob"_s) {
         QString pattern = args.value(u"pattern"_s).toString();
         if (pattern.isEmpty()) {
             pattern = args.value(u"glob"_s).toString();
         }
+        if (pattern.isEmpty()) {
+            return u"find ."_s;
+        }
         return u"find . -name %1"_s.arg(quoteShellArg(pattern));
     }
-    if (toolName == u"bash"_s || key == u"execute"_s) {
+    if (canonical == u"bash"_s || key == u"execute"_s || key == u"run_command"_s || toolName == u"terminal/exec"_s || toolName == u"shell/exec"_s) {
         QString command = args.value(u"command"_s).toString();
         if (command.isEmpty()) {
             command = args.value(u"cmd"_s).toString();
@@ -225,7 +252,7 @@ QString shellCommandFor(const QString &toolName, const QJsonObject &args)
         }
         return command;
     }
-    if (toolName == u"query_project_graph"_s) {
+    if (canonical == u"query_project_graph"_s) {
         const QString type = args.value(u"query_type"_s).toString();
         QString cmd = u"query_project_graph"_s;
         if (!type.isEmpty()) {
@@ -237,7 +264,7 @@ QString shellCommandFor(const QString &toolName, const QJsonObject &args)
         }
         return cmd;
     }
-    if (toolName == u"new_task"_s || key == u"task"_s) {
+    if (canonical == u"new_task"_s) {
         const QString mode = args.value(u"mode"_s).toString();
         const QString description = args.value(u"description"_s).toString();
         const QString label = mode.isEmpty() ? QStringLiteral("code") : mode;
@@ -245,16 +272,16 @@ QString shellCommandFor(const QString &toolName, const QJsonObject &args)
         // as a bare bracket pair with nothing behind it.
         return description.isEmpty() ? u"[%1]"_s.arg(label) : u"[%1] %2"_s.arg(label, description);
     }
-    if (toolName == u"write_plan_file"_s) {
+    if (canonical == u"write_plan_file"_s) {
         return u"write plan file"_s;
     }
-    if (toolName == u"suggest"_s) {
+    if (canonical == u"suggest"_s) {
         // The first line of the advice reads better in a card header than a
         // bare tool name, so show that, capped.
         const QString firstLine = args.value(u"suggestion"_s).toString().section(u'\n', 0, 0).trimmed();
         return firstLine.isEmpty() ? u"suggest"_s : u"suggest %1"_s.arg(quoteShellArg(firstLine.left(80)));
     }
-    if (toolName == u"question"_s) {
+    if (canonical == u"question"_s) {
         // The question is the whole point of the call, so it goes in the
         // header verbatim (capped) rather than being summarised as "question".
         const QString asked = args.value(u"question"_s).toString().section(u'\n', 0, 0).trimmed();

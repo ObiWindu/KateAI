@@ -175,6 +175,12 @@ Q_SIGNALS:
     // Partial output from a running tool, so its card can stream instead of
     // waiting for the final result.
     void toolProgress(const QString &toolCallId, const QString &partialOutput);
+    // An ACP tool call gained a diff or path after it started. Forwarded from
+    // the client so the card and the review queue can catch up.
+    void toolDetailsChanged(const PermissionRequest &request);
+    // Something the user should know that is not a tool result, such as a tool
+    // the active mode does not allow.
+    void noticeRaised(const QString &text);
     // The context was reset to a summary: carries the token count before and
     // after, so the caller can report what was reclaimed.
     void contextCompacted(int beforeTokens, int afterTokens);
@@ -217,6 +223,13 @@ private:
     void startAcpTurn(const QString &userText);
     void onAcpPromptFinished(const QString &stopReason, const QString &text, const QJsonArray &toolCalls);
     void syncAcpClient();
+    // The decision on an ACP permission request the user does not have to see:
+    // a tool the active mode does not allow is declined, a session grant or the
+    // auto-approve list allows, and the accept-edits and always-approve modes
+    // allow. Returns false when the user has to decide.
+    bool acpAutoDecision(const PermissionRequest &request, PermissionDecision *decision, QString *reason) const;
+    // True when the active mode lets the agent use the tool.
+    bool acpToolAllowed(const PermissionRequest &request) const;
     void finishTurn();
     void finishWithFailure(const QString &error);
     bool canStartModelRequest(QString *error) const;
@@ -286,8 +299,8 @@ private:
     // Runs the tool call parked by deferForCheckpoint() after the snapshot
     // reported back. A no-op when nothing was parked.
     void resumeAfterCheckpoint();
-    // Records a tool call as executed, so identical repeats can be told apart
-    // from retries of a call the user denied or that never ran.
+    void clearCheckpointWait();    // Clears the checkpoint-wait bookkeeping. Used when a turn is aborted or
+    // reset while a snapshot is still running.
     void markActionExecuted(const QString &signature);
     void syncPermissionPolicy();
     void setSubtaskDepth(int depth)
@@ -336,6 +349,8 @@ LlmClient m_client;
     bool m_awaitingCheckpoint = false;
     ToolCall m_checkpointCall;
     bool m_checkpointIsBash = false;
+    // ACP turn whose prompt is held until the pre-turn snapshot finishes.
+    QString m_pendingAcpPrompt;
     // The sandbox/tool-runner configuration changed while a turn was running;
     // rebuildTools() applies it once the turn ends.
     bool m_sandboxDirty = false;

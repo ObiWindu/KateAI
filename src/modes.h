@@ -87,6 +87,10 @@ QStringList builtInToolsForGroup(const QString &group);
 QStringList allBuiltInToolNames();
 // Subtask/boomerang tool name.
 QString subtaskToolName();
+// Whether a mode's tool access lets an ACP agent run a tool. The agent runs
+// its own tools, so this decides the permission requests for them. A tool Kate
+// knows is judged by its name; an agent's own tool is judged by what it does.
+bool acpToolPermitted(const ToolAccess &access, const PermissionRequest &request);
 
 // Parsed frontmatter of a mode or agent document.
 struct DocumentFrontmatter {

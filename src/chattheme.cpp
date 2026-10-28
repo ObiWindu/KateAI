@@ -976,7 +976,8 @@ QString todoGlyphDone()
 
 bool isEditToolName(const QString &toolName)
 {
-    const QString key = toolName.trimmed().toLower();
+    const QString canonical = canonicalToolName(toolName).trimmed().toLower();
+    const QString key = canonical.isEmpty() ? toolName.trimmed().toLower() : canonical;
     if (key.isEmpty() || key == u"write_plan_file"_s || key == u"read_file"_s || key == u"read"_s
         || key == u"fs/read_text_file"_s || key == u"grep"_s || key == u"search"_s
         || key == u"glob"_s || key == u"bash"_s || key == u"execute"_s || key == u"list_dir"_s
@@ -1033,11 +1034,20 @@ QString toolLabel(const QString &toolName)
         {QStringLiteral("fetch_rules"), QStringLiteral("Load rules")},
         {QStringLiteral("update_project_graph"), QStringLiteral("Index project")},
         {QStringLiteral("project_graph"), QStringLiteral("Read project map")},
+        // ACP tool kinds that have no Kate tool of their own.
+        {QStringLiteral("move"), QStringLiteral("Move file")},
+        {QStringLiteral("think"), QStringLiteral("Thinking")},
+        {QStringLiteral("switch_mode"), QStringLiteral("Switch mode")},
     };
 
-    const auto it = labels.constFind(toolName.trimmed().toLower());
+    const QString canonical = canonicalToolName(toolName).trimmed().toLower();
+    const auto it = labels.constFind(canonical);
     if (it != labels.constEnd()) {
         return it.value();
+    }
+    const auto it2 = labels.constFind(toolName.trimmed().toLower());
+    if (it2 != labels.constEnd()) {
+        return it2.value();
     }
     if (isEditToolName(toolName)) {
         const QString key = toolName.trimmed().toLower();
@@ -1078,6 +1088,7 @@ QString toolAccent(const QString &toolName, bool running, bool ok)
 
 QString toolColor(const QString &toolName)
 {
+    const QString canonical = canonicalToolName(toolName);
     // One hue per tool family. Reads are cool and quiet, writes green, edits
     // violet, and anything that runs or delegates warm -- the card rail, icon
     // and tool-name prefix all take this, so a long transcript of cards can be
@@ -1119,10 +1130,16 @@ QString toolColor(const QString &toolName)
         {QStringLiteral("fetch_rules"), QStringLiteral("#a3be8c")},
     };
 
-    const QString key = toolName.trimmed().toLower();
+    const QString key = canonical.trimmed().toLower();
     const auto it = colors.constFind(key);
     if (it != colors.constEnd()) {
         return it.value();
+    }
+    // Also check original name
+    const QString origKey = toolName.trimmed().toLower();
+    const auto it2 = colors.constFind(origKey);
+    if (it2 != colors.constEnd()) {
+        return it2.value();
     }
     if (isEditToolName(toolName)) {
         // Same hues as the built-in edit and write tools, so an ACP card is

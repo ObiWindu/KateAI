@@ -21,6 +21,33 @@ QString subtaskToolName()
     return u"new_task"_s;
 }
 
+bool acpToolPermitted(const ToolAccess &access, const PermissionRequest &request)
+{
+    if (access.allowAll) {
+        return true;
+    }
+    const QString canonical = canonicalToolName(request.toolName);
+    // Reasoning changes nothing in the workspace, so every mode allows it.
+    if (canonical == u"think"_s) {
+        return true;
+    }
+    // A tool Kate knows by name is judged by that name.
+    if (allBuiltInToolNames().contains(canonical) || canonical.startsWith(u"mcp__"_s)) {
+        return access.allows(canonical);
+    }
+    // An agent's own tool has no Kate equivalent, so the mode judges what it
+    // does: running a command needs the command tool, changing a file needs
+    // the edit tools. A tool that does neither is not restricted here, which
+    // keeps an agent's todo or plan tools working in every mode.
+    if (request.risk == ToolRisk::Execute) {
+        return access.allows(u"bash"_s);
+    }
+    if (request.mutatesFiles) {
+        return access.allows(u"edit_file"_s);
+    }
+    return true;
+}
+
 QStringList builtInToolsForGroup(const QString &group)
 {
     if (group == ToolGroup::read()) {

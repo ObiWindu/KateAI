@@ -217,7 +217,7 @@ You ──► LLM (Grok / OpenAI / OpenRouter / local) or any ACP agent over std
 
 Plus every tool discovered from the connected MCP servers, as `mcp__<server>__<tool>`.
 
-In **Plan mode**, **Ask**, **Architect**, and **Orchestrator** the model only receives the read-only group (`read_file`, `list_dir`, `grep`, `glob`, `query_project_graph`, `write_plan_file`, `suggest`, `question`) plus MCP tools. Tool availability is enforced twice — once in the request that advertises the tools, and again when a call arrives — so a model that hallucinates a write gets a clear rejection instead of a silent one.
+In **Plan mode**, **Ask**, **Architect**, and **Orchestrator** the model only receives the read-only group (`read_file`, `list_dir`, `grep`, `glob`, `query_project_graph`, `write_plan_file`, `suggest`, `question`) plus MCP tools. Tool availability is enforced twice — once in the request that advertises the tools, and again when a call arrives — so a model that hallucinates a write gets a clear rejection instead of a silent one. ACP agents run their own tools, so Kate cannot stop one that never asks permission; it shows a notice instead, and the permission card still lets you approve a tool the active mode does not list.
 
 `write_plan_file` is the one tool that writes a file without touching the project: the destination is a per-workspace temp file Kate picks itself, so it is safe in read-only modes and plan mode, never prompts, and never enters the edit tracker. Agents are told to keep it current as the work moves, which gives the user a running plan they can open next to the code.
 
@@ -355,9 +355,23 @@ Native ACP works with any stdio agent. Pick a preset (command/args are filled in
 
 Kate is the ACP client: `session/prompt`, `session/update`, `session/request_permission`, `fs/read_text_file`, `fs/write_text_file`, `terminal/*`. Always-approve is handled in Kate for every agent. Grok Build also receives `--model` / `--always-approve` and Grok `_meta` (`yoloMode`).
 
+### ACP tool integration
+
+Different ACP agents name their tools differently (`fs/read_text_file`, `terminal/exec`, `edit`, `write`, `apply_patch`, `str_replace_editor`, …). KateAI normalises every ACP tool name to a canonical KateAI name on ingest, so cards, colours, summaries, permissions, edit tracking, and history restoration all behave consistently regardless of the agent:
+
+- **Alias map**: common ACP names map to canonical names (`read_file`, `write_file`, `edit_file`, `bash`, `list_dir`, `grep`, `glob`, `web_search`, `web_fetch`, `write_plan_file`, `query_project_graph`, `new_task`). MCP-prefixed names (`mcp__*`) are preserved.
+- **Tool cards**: icons, colours, and labels resolve via the canonical name, so an ACP edit card looks identical to a native edit card.
+- **Permissions**: risk classification and auto-approve lists work with both canonical and qualified names; session grants apply to ACP. In `AcceptEdits` mode, ACP edits are auto-approved but still tracked.
+- **Edit tracking**: ACP mutations are detected by protocol kind (`edit`/`write`/`delete`) or a diff block, plus name heuristics; multi-file edits from one call are tracked per file.
+- **History restoration**: stored ACP tool calls are normalised on restore, so cards show correct colours, diffs, and language highlighting.
+- **Mode restrictions**: mode-based tool access applies to ACP tools too; plan mode rejects mutating ACP calls.
+- **Streaming/errors**: progress is aggregated (cumulative or delta), errors surface in cards and turn status, cancellation cleans up live tools.
+
+Kate also exposes client methods to ACP agents: `fs/read_text_file`, `fs/write_text_file`, `terminal/*`, `query_project_graph`, `write_plan_file`, and `suggest`. Results are formatted to match native tool output.
+
 **Effort level for ACP agents.** Agents that expose a thinking/thought-level selector (Claude Agent, Gemini CLI, …) advertise it as a session config option. The composer's effort button shows the levels the live session advertised; picking one forces it onto the session (`session/set_config_option`) and pins it — an agent that changes its own level is switched back. **Auto** releases control and keeps the agent's default. The forced level is also settable in Settings → Kate AI → AI Providers → ACP Agent → **Effort Level** (editable, so agent-specific ids like `think_hard` can be typed).
 
-Kate also answers three of its own client methods, advertised in the `initialize` capabilities so agents can discover them: `query_project_graph` (the same graph the native agent queries), `write_plan_file` (files the implementation plan in a per-workspace temp file and returns its path, so the agent can point the user at a plan they can follow), and `suggest` (posts a suggestion card with an optional file anchor, so an agent can raise an idea without changing anything).
+Kate also answers three of its own client methods, advertised in the `initialize` capabilities under the `_kateai/` names the protocol reserves for extensions: `_kateai/query_project_graph` (the same graph the native agent queries), `_kateai/write_plan_file` (files the implementation plan in a per-workspace temp file and returns its path, so the agent can point the user at a plan they can follow), and `_kateai/suggest` (posts a suggestion card with an optional file anchor, so an agent can raise an idea without changing anything). The bare names still work. Your global rules and extra system prompt, and these method names, are sent to the agent once at the start of each session, since agents do not receive Kate's own system prompt.
 
 To use Grok Build: install the Grok CLI, run `grok` once to log in, then set the provider to **ACP** with format **ACP native** and agent **Grok Build**. Other agents: install their CLI (or have `npx` on PATH), complete that agent's login, and pick the matching preset.
 

@@ -35,7 +35,8 @@ bool PermissionPolicy::sessionGranted(const QString &toolName) const
 
 bool PermissionPolicy::isReadTool(const QString &toolName) const
 {
-    if (m_extraReadTools.contains(toolName)) {
+    const QString canonical = canonicalToolName(toolName);
+    if (m_extraReadTools.contains(toolName) || m_extraReadTools.contains(canonical)) {
         return true;
     }
     // Web tools are read-only: they cannot touch the workspace, so they are
@@ -46,15 +47,18 @@ bool PermissionPolicy::isReadTool(const QString &toolName) const
     // user to accept or dismiss.
     // question joins them for the same reason again: it neither reads the
     // workspace nor changes it -- it asks the user something.
-    return toolName == u"read_file"_s || toolName == u"list_dir"_s || toolName == u"grep"_s
-        || toolName == u"glob"_s || toolName == u"query_project_graph"_s
-        || toolName == u"web_search"_s || toolName == u"web_fetch"_s
-        || toolName == u"write_plan_file"_s || toolName == u"suggest"_s || toolName == u"question"_s;
+    const QString c = canonical;
+    return c == u"read_file"_s || c == u"list_dir"_s || c == u"grep"_s
+        || c == u"glob"_s || c == u"query_project_graph"_s
+        || c == u"web_search"_s || c == u"web_fetch"_s
+        || c == u"write_plan_file"_s || c == u"suggest"_s || c == u"question"_s
+        || toolName == u"read"_s || toolName == u"list"_s || toolName == u"search"_s;
 }
 
 ToolRisk PermissionPolicy::riskFor(const QString &toolName) const
 {
-    if (toolName == u"bash"_s || toolName == u"new_task"_s) {
+    const QString canonical = canonicalToolName(toolName);
+    if (canonical == u"bash"_s || canonical == u"new_task"_s || toolName == u"execute"_s) {
         return ToolRisk::Execute;
     }
     // An MCP tool can do anything the server offers, whatever its hints say,

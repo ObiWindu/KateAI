@@ -23,10 +23,9 @@
 name: Build and Release
 
 on:
-  push:
-    branches: ["**"]
-    tags: ["v*"]
   pull_request:
+  push:
+    tags: ["v*"]
   workflow_dispatch:
 
 permissions:
