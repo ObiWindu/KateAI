@@ -100,6 +100,9 @@ static QString toolContentText(const QJsonValue &content)
             parts.append(unifiedDiff(obj.value(u"path"_s).toString(),
                                      obj.value(u"oldText"_s).toString(),
                                      obj.value(u"newText"_s).toString()));
+        } else if (type == u"terminal"_s) {
+            // A terminal the agent embedded streams into the card on its own
+            // (see linkToolTerminals). Its JSON reference is not output.
         } else if (type == u"text"_s) {
             parts.append(obj.value(u"text"_s).toString());
         } else if (obj.contains(u"content"_s)) {
@@ -136,6 +139,23 @@ static ToolRisk riskForKind(const QString &kind, const QString &name)
         return ToolRisk::Write;
     }
     return ToolRisk::Write;
+}
+
+// Kate's own client methods, which agents call by name. The protocol reserves
+// underscore names for extensions, so the advertised form is _kateai/<method>.
+// The bare and camelCase names agents were given before still reach the same
+// handlers.
+static QString kateClientMethod(const QString &method)
+{
+    static const QHash<QString, QString> aliases = {
+        {u"queryProjectGraph"_s, u"query_project_graph"_s},
+        {u"writePlanFile"_s, u"write_plan_file"_s},
+    };
+    QString name = method;
+    if (name.startsWith(u"_kateai/"_s)) {
+        name = name.mid(8);
+    }
+    return aliases.value(name, name);
 }
 
 static QJsonObject envArrayToObject(const QJsonArray &env)
@@ -735,6 +755,8 @@ void AcpClient::finishLiveTools(const QString &message)
     }
     m_liveTools.clear();
     m_toolStreamed.clear();
+    m_toolTerminals.clear();
+    m_terminalTools.clear();
 }
 
 void AcpClient::cancel()
@@ -817,6 +839,9 @@ void AcpClient::stop()
     m_promptId = 0;
     m_permissionRpcId = QJsonValue();
     m_queued.clear();
+    m_sessionNotesSent = false;
+    m_toolTerminals.clear();
+    m_terminalTools.clear();
     m_agentModels.clear();
     m_currentModelId.clear();
     m_modelConfigId.clear();
@@ -838,6 +863,7 @@ void AcpClient::resetSession()
     cancelPendingPermission();
     m_resumeSessionId.clear();
     m_queued.clear();
+    m_sessionNotesSent = false;
     if (m_closeSession && !m_sessionId.isEmpty() && m_state == State::Ready) {
         QJsonObject params;
         params.insert(u"sessionId"_s, m_sessionId);
@@ -1109,6 +1135,11 @@ void AcpClient::sendInitialize()
     kateai.insert(u"writePlanFile"_s, true);
     kateai.insert(u"suggest"_s, true);
     capabilities.insert(u"kateai"_s, kateai);
+    // The same methods under the names the protocol reserves for extensions,
+    // listed in _meta where the spec asks extensions to advertise themselves.
+    capabilities.insert(u"_meta"_s, QJsonObject{
+        {u"com.kateai/methods"_s, QJsonArray{u"_kateai/query_project_graph"_s, u"_kateai/write_plan_file"_s, u"_kateai/suggest"_s}},
+    });
     // Advertise support for session config options (used for model selection)
     QJsonObject sessionCapabilities;
     QJsonObject configOptionsCaps;
@@ -1401,7 +1432,12 @@ void AcpClient::sendPromptNow(const QString &text)
 
     QJsonObject params;
     params.insert(u"sessionId"_s, m_sessionId);
-    params.insert(u"prompt"_s, promptBlocks(text));
+    QJsonArray prompt = promptBlocks(text);
+    if (!m_sessionNotesSent) {
+        prompt.prepend(sessionNotesBlock());
+        m_sessionNotesSent = true;
+    }
+    params.insert(u"prompt"_s, prompt);
     m_promptId = sendRequest(u"session/prompt"_s, params, [this](const QJsonObject &result, const QString &error) {
         if (m_shuttingDown) {
             return;
@@ -1435,6 +1471,30 @@ QJsonArray AcpClient::promptBlocks(const QString &text) const
     user.insert(u"text"_s, text);
     prompt.append(user);
     return prompt;
+}
+
+QJsonObject AcpClient::sessionNotesBlock() const
+{
+    QStringList lines;
+    // Grok Build gets the rules through session _meta (see sessionMeta()).
+    if (!acpAgentIsGrok(m_settings)) {
+        if (!m_settings.globalRules.trimmed().isEmpty()) {
+            lines.append(u"Rules the user set for every workspace:"_s);
+            lines.append(m_settings.globalRules.trimmed());
+        }
+        if (!m_settings.extraSystemPrompt.trimmed().isEmpty()) {
+            lines.append(m_settings.extraSystemPrompt.trimmed());
+        }
+    }
+    lines.append(u"Kate AI shows your tool calls in its transcript. Kate also offers these client methods, "
+                 u"which you may call when the capability is advertised:"_s);
+    lines.append(u"- _kateai/write_plan_file {content}: publish the plan of a multi-step task as markdown the user can follow."_s);
+    lines.append(u"- _kateai/suggest {suggestion, path?, line?}: offer an improvement the user did not ask for, instead of making the change."_s);
+    lines.append(u"- _kateai/query_project_graph {query_type, node_id?, relationship?, source_id?, target_id?}: read the project's files, symbols and imports."_s);
+    QJsonObject block;
+    block.insert(u"type"_s, u"text"_s);
+    block.insert(u"text"_s, lines.join(u'\n'));
+    return block;
 }
 
 QJsonObject AcpClient::sessionMeta() const
@@ -1723,7 +1783,7 @@ void AcpClient::handleResponse(const QJsonObject &message)
 
 void AcpClient::handleIncomingRequest(const QJsonObject &message)
 {
-    const QString method = message.value(u"method"_s).toString();
+    const QString method = kateClientMethod(message.value(u"method"_s).toString());
     const QJsonValue id = message.value(u"id"_s);
     const QJsonObject params = message.value(u"params"_s).toObject();
 
@@ -1864,6 +1924,7 @@ void AcpClient::handleSessionUpdate(const QJsonObject &update)
             request.toolCallId = QUuid::createUuid().toString(QUuid::WithoutBraces);
         }
         m_liveTools.insert(request.toolCallId, request);
+        linkToolTerminals(request.toolCallId, update.value(u"content"_s));
         QJsonObject function;
         function.insert(u"name"_s, request.toolName);
         // Only a JSON object is a valid arguments payload: extracted plain
@@ -1887,18 +1948,17 @@ void AcpClient::handleSessionUpdate(const QJsonObject &update)
             m_liveTools.insert(toolCallId, existing);
             Q_EMIT toolStarted(existing);
         }
-        // Some agents send diff blocks only in the update, not the initial
-        // tool_call. Backfill the live card's diff when it was missing.
-        if (existing.describeDiff.isEmpty()) {
-            PermissionRequest refreshed = permissionFromToolCall(update);
-            if (!refreshed.describeDiff.isEmpty()) {
-                existing.describeDiff = refreshed.describeDiff;
-                existing.additionalDiffs = refreshed.additionalDiffs;
-                existing.additionalPaths = refreshed.additionalPaths;
-                if (existing.path.isEmpty()) existing.path = refreshed.path;
-                if (refreshed.mutatesFiles) existing.mutatesFiles = true;
-                m_liveTools.insert(toolCallId, existing);
-            }
+        // Agents may report a diff, a path or a terminal only in an update, not
+        // in the initial tool_call. What the update adds is kept on the live
+        // entry and announced, so the card and the review queue catch up.
+        linkToolTerminals(toolCallId, update.value(u"content"_s));
+        const PermissionRequest refreshed = permissionFromToolCall(update);
+        const PermissionRequest merged = mergeToolCallDetails(existing, refreshed);
+        if (merged.describeDiff != existing.describeDiff || merged.resolvedPath != existing.resolvedPath
+            || merged.mutatesFiles != existing.mutatesFiles || merged.additionalDiffs != existing.additionalDiffs) {
+            existing = merged;
+            m_liveTools.insert(toolCallId, existing);
+            Q_EMIT toolDetailsChanged(existing);
         }
         if (status == u"completed"_s || status == u"failed"_s) {
             ToolResult result;
@@ -1929,6 +1989,7 @@ void AcpClient::handleSessionUpdate(const QJsonObject &update)
             }
             m_liveTools.remove(toolCallId);
             m_toolStreamed.remove(toolCallId);
+            forgetToolTerminal(toolCallId);
             Q_EMIT toolFinished(result);
             return;
         }
@@ -1998,19 +2059,24 @@ PermissionRequest AcpClient::permissionFromToolCall(const QJsonObject &toolCall)
     // Every agent names its own tools, so the edit tracker cannot rely on
     // tool names here. The ACP kind is the protocol-level statement of what
     // the call does, and a diff content block proves the agent edited text.
-    request.mutatesFiles = kind == u"edit"_s || kind == u"write"_s || kind == u"delete"_s;
+    request.mutatesFiles = kind == u"edit"_s || kind == u"write"_s || kind == u"delete"_s || kind == u"move"_s;
 
-    // --- Locations (path resolution) ---
+    // --- Locations: the files the agent says the call touches. The first one
+    // is the primary file until a diff names another; they are listed after
+    // the diffs (see below).
+    QStringList locationPaths;
     const QJsonArray locations = toolCall.value(u"locations"_s).toArray();
     for (const QJsonValue &loc : locations) {
         const QJsonObject locObj = loc.toObject();
         QString p = locObj.value(u"path"_s).toString();
         if (p.isEmpty()) p = locObj.value(u"filePath"_s).toString();
         if (p.isEmpty()) p = locObj.value(u"file"_s).toString();
-        if (!p.isEmpty()) {
-            if (request.path.isEmpty()) request.path = p;
-            else if (!request.additionalPaths.contains(p)) request.additionalPaths.append(p);
+        if (!p.isEmpty() && !locationPaths.contains(p)) {
+            locationPaths.append(p);
         }
+    }
+    if (!locationPaths.isEmpty()) {
+        request.path = locationPaths.first();
     }
 
     // --- Raw input normalization ---
@@ -2063,6 +2129,28 @@ PermissionRequest AcpClient::permissionFromToolCall(const QJsonObject &toolCall)
     }
 
     // --- Content blocks (diffs, text) ---
+    // Every diff the call carries, with the file it edits. The pairs are kept
+    // together, so a diff is never attributed to another file.
+    struct DiffPart {
+        QString path;
+        QString oldText;
+        QString newText;
+        QString diff;
+    };
+    QList<DiffPart> diffs;
+    auto addDiff = [&diffs, &request](const QJsonObject &obj) {
+        QString p = obj.value(u"path"_s).toString();
+        if (p.isEmpty()) p = obj.value(u"filePath"_s).toString();
+        if (p.isEmpty()) p = obj.value(u"file"_s).toString();
+        if (p.isEmpty()) p = obj.value(u"uri"_s).toString();
+        if (p.startsWith(u"file://"_s)) p = QUrl(p).toLocalFile();
+        if (p.isEmpty()) p = request.path;
+        QString oldText = obj.value(u"oldText"_s).toString();
+        if (oldText.isEmpty()) oldText = obj.value(u"old_text"_s).toString();
+        QString newText = obj.value(u"newText"_s).toString();
+        if (newText.isEmpty()) newText = obj.value(u"new_text"_s).toString();
+        diffs.append({p, oldText, newText, unifiedDiff(p, oldText, newText)});
+    };
     const QJsonArray content = toolCall.value(u"content"_s).toArray();
     // If content is a single object (not array), wrap it
     QJsonArray contentArr = content;
@@ -2074,68 +2162,56 @@ PermissionRequest AcpClient::permissionFromToolCall(const QJsonObject &toolCall)
         if (obj.isEmpty()) continue;
         const QString type = obj.value(u"type"_s).toString();
         if (type == u"diff"_s) {
-            QString p = obj.value(u"path"_s).toString();
-            if (p.isEmpty()) p = obj.value(u"filePath"_s).toString();
-            if (p.isEmpty()) p = obj.value(u"file"_s).toString();
-            if (p.isEmpty()) p = obj.value(u"uri"_s).toString();
-            if (p.isEmpty() && !request.path.isEmpty()) p = request.path;
-            if (!p.isEmpty()) {
-                if (request.path.isEmpty()) request.path = p;
-                else if (!request.additionalPaths.contains(p)) request.additionalPaths.append(p);
-            }
-            request.mutatesFiles = true;
-            const QString oldText = obj.value(u"oldText"_s).toString().isEmpty()
-                ? obj.value(u"old_text"_s).toString() : obj.value(u"oldText"_s).toString();
-            const QString newText = obj.value(u"newText"_s).toString().isEmpty()
-                ? obj.value(u"new_text"_s).toString() : obj.value(u"newText"_s).toString();
-            const QString diff = unifiedDiff(p, oldText, newText);
-            if (request.describeDiff.isEmpty()) {
-                request.describeDiff = diff;
-            } else {
-                request.additionalDiffs.append(diff);
-            }
+            addDiff(obj);
         } else if (type == u"content"_s || type == u"text"_s || type.isEmpty()) {
             // Try to extract text for details if empty
             if (request.details.isEmpty()) {
                 const QString t = contentBlockText(obj.contains(u"content"_s) ? obj.value(u"content"_s) : item);
                 if (!t.isEmpty()) request.details = t;
             }
-            // Check nested content for diffs
-            if (obj.contains(u"content"_s)) {
-                const QJsonValue nested = obj.value(u"content"_s);
-                if (nested.isObject()) {
-                    const QJsonObject no = nested.toObject();
-                    if (no.value(u"type"_s).toString() == u"diff"_s) {
-                        // Recurse by re-processing
-                        QJsonObject wrapped;
-                        wrapped.insert(u"type"_s, u"diff"_s);
-                        for (auto it = no.begin(); it != no.end(); ++it) wrapped.insert(it.key(), it.value());
-                        // handle below via same logic by appending to a temp array
-                    }
-                }
-            }
+        }
+    }
+    // Some agents send their diffs in a separate contents list.
+    for (const QJsonValue &c : toolCall.value(u"contents"_s).toArray()) {
+        const QJsonObject co = c.toObject();
+        if (co.value(u"type"_s).toString() == u"diff"_s) {
+            addDiff(co);
         }
     }
 
-    // Also handle contents/contents array (some agents)
-    if (toolCall.contains(u"contents"_s) && toolCall.value(u"contents"_s).isArray()) {
-        const QJsonArray contents = toolCall.value(u"contents"_s).toArray();
-        for (const QJsonValue &c : contents) {
-            const QJsonObject co = c.toObject();
-            if (co.value(u"type"_s).toString() == u"diff"_s) {
-                QString p = co.value(u"path"_s).toString();
-                if (p.isEmpty()) p = co.value(u"filePath"_s).toString();
-                if (!p.isEmpty()) {
-                    if (request.path.isEmpty()) request.path = p;
-                    else if (!request.additionalPaths.contains(p)) request.additionalPaths.append(p);
-                }
-                request.mutatesFiles = true;
-                const QString diff = unifiedDiff(p,
-                    co.value(u"oldText"_s).toString().isEmpty() ? co.value(u"old_text"_s).toString() : co.value(u"oldText"_s).toString(),
-                    co.value(u"newText"_s).toString().isEmpty() ? co.value(u"new_text"_s).toString() : co.value(u"newText"_s).toString());
-                if (request.describeDiff.isEmpty()) request.describeDiff = diff;
-                else request.additionalDiffs.append(diff);
+    // The primary diff is the one for the primary file. When no diff names
+    // that file, the first diff's file becomes the primary one.
+    auto absolutePath = [this](const QString &p) {
+        if (QFileInfo(p).isAbsolute() || m_workspace.isEmpty()) {
+            return QDir::cleanPath(p);
+        }
+        return QDir::cleanPath(QDir(m_workspace).absoluteFilePath(p));
+    };
+    int primary = -1;
+    if (!diffs.isEmpty()) {
+        for (int i = 0; i < diffs.size() && primary < 0; ++i) {
+            if (!request.path.isEmpty() && absolutePath(diffs.at(i).path) == absolutePath(request.path)) {
+                primary = i;
             }
+        }
+        if (primary < 0) {
+            primary = 0;
+            request.path = diffs.first().path;
+        }
+        request.describeDiff = diffs.at(primary).diff;
+        request.mutatesFiles = true;
+        for (int i = 0; i < diffs.size(); ++i) {
+            if (i != primary) {
+                request.additionalPaths.append(diffs.at(i).path);
+                request.additionalDiffs.append(diffs.at(i).diff);
+            }
+        }
+    }
+    // Files a location names without a diff follow the diffs. That keeps
+    // additionalPaths and additionalDiffs aligned by index.
+    for (const QString &p : std::as_const(locationPaths)) {
+        if (absolutePath(p) != absolutePath(request.path) && !request.additionalPaths.contains(p)) {
+            request.additionalPaths.append(p);
         }
     }
 
@@ -2213,6 +2289,27 @@ PermissionRequest AcpClient::permissionFromToolCall(const QJsonObject &toolCall)
         request.risk = ToolRisk::Write;
     }
 
+    // A diff that arrived as a content block is not in the arguments the agent
+    // sent, and a restored transcript rebuilds the card from those arguments.
+    // Record the diff in the shape the edit tools use, so history restores the
+    // same card as the live one.
+    if (primary >= 0) {
+        QJsonObject args = normalizedArgs;
+        if (!args.contains(u"old_string"_s) && !args.contains(u"oldText"_s) && !args.contains(u"content"_s)) {
+            const DiffPart &part = diffs.at(primary);
+            if (part.oldText.isEmpty()) {
+                args.insert(u"content"_s, part.newText);
+            } else {
+                args.insert(u"old_string"_s, part.oldText);
+                args.insert(u"new_string"_s, part.newText);
+            }
+        }
+        if (!args.contains(u"path"_s) && !request.path.isEmpty()) {
+            args.insert(u"path"_s, request.path);
+        }
+        request.details = jsonText(args);
+    }
+
     // Ensure details is valid JSON if possible
     if (request.details.isEmpty() && !normalizedArgs.isEmpty()) {
         request.details = jsonText(normalizedArgs);
@@ -2221,10 +2318,59 @@ PermissionRequest AcpClient::permissionFromToolCall(const QJsonObject &toolCall)
     return request;
 }
 
+PermissionRequest AcpClient::mergeToolCallDetails(const PermissionRequest &base, const PermissionRequest &other)
+{
+    PermissionRequest merged = base;
+    if (merged.originalToolName.isEmpty() && !other.originalToolName.isEmpty()) {
+        // A permission request often repeats only the toolCallId. Without this
+        // the call would be keyed under the placeholder name "tool", and an
+        // "always allow" would be granted to that name instead of the tool.
+        merged.originalToolName = other.originalToolName;
+        merged.toolName = other.toolName;
+        merged.risk = other.risk;
+    }
+    if (merged.toolCallId.isEmpty()) {
+        merged.toolCallId = other.toolCallId;
+    }
+    if (merged.summary.isEmpty() || merged.summary == merged.toolName || merged.summary == merged.originalToolName) {
+        if (!other.summary.isEmpty()) {
+            merged.summary = other.summary;
+        }
+    }
+    if (merged.details.isEmpty()) {
+        merged.details = other.details;
+    }
+    if (merged.path.isEmpty()) {
+        merged.path = other.path;
+    }
+    if (merged.resolvedPath.isEmpty()) {
+        merged.resolvedPath = other.resolvedPath;
+    }
+    if (merged.describeDiff.isEmpty() && !other.describeDiff.isEmpty()) {
+        // The diffs travel together: the primary one and its additional files.
+        merged.describeDiff = other.describeDiff;
+        merged.additionalDiffs = other.additionalDiffs;
+        merged.additionalPaths = other.additionalPaths;
+    }
+    for (const QString &p : other.additionalPaths) {
+        if (p != merged.path && !merged.additionalPaths.contains(p)) {
+            merged.additionalPaths.append(p);
+        }
+    }
+    merged.mutatesFiles = merged.mutatesFiles || other.mutatesFiles;
+    return merged;
+}
+
 void AcpClient::handleRequestPermission(const QJsonValue &id, const QJsonObject &params)
 {
     const QJsonObject toolCall = params.value(u"toolCall"_s).toObject();
     PermissionRequest request = permissionFromToolCall(toolCall);
+    // The request usually repeats only part of the tool call the agent has
+    // already announced. The announced call is the authority on what it is.
+    const PermissionRequest live = m_liveTools.value(request.toolCallId);
+    if (!live.toolCallId.isEmpty()) {
+        request = mergeToolCallDetails(live, request);
+    }
     if (request.toolCallId.isEmpty()) {
         request.toolCallId = QUuid::createUuid().toString(QUuid::WithoutBraces);
     }
@@ -2236,37 +2382,9 @@ void AcpClient::handleRequestPermission(const QJsonValue &id, const QJsonObject 
     m_permissionRpcId = id;
     m_permissionOptions = params.value(u"options"_s).toArray();
     m_permissionRequest = request;
-
-    if (autoResolvePermission(request)) {
-        resolvePermission(m_settings.permissionMode == PermissionMode::AlwaysApprove
-                              ? PermissionDecision::AllowSession
-                              : PermissionDecision::AllowOnce);
-        return;
-    }
+    // Whether the request is answered by the user or auto-decided is the
+    // AgentLoop's call: it owns the permission policy for every provider.
     Q_EMIT permissionNeeded(request);
-}
-
-bool AcpClient::autoResolvePermission(const PermissionRequest &request)
-{
-    if (m_settings.permissionMode == PermissionMode::AlwaysApprove) {
-        return true;
-    }
-    const QString canonical = canonicalToolName(request.toolName);
-    if (m_settings.autoApproveTools.contains(request.toolName) || m_settings.autoApproveTools.contains(canonical)) {
-        return true;
-    }
-    // Also check aliases
-    const QStringList aliases = toolNameAliases(canonical);
-    for (const QString &alias : aliases) {
-        if (m_settings.autoApproveTools.contains(alias)) {
-            return true;
-        }
-    }
-    if (m_settings.permissionMode == PermissionMode::AcceptEdits
-        && (request.risk == ToolRisk::Read || request.risk == ToolRisk::Write)) {
-        return true;
-    }
-    return false;
 }
 
 QString AcpClient::pickPermissionOption(PermissionDecision decision) const
@@ -2769,6 +2887,51 @@ void AcpClient::appendTerminalOutput(Terminal *term, const QByteArray &chunk)
     if (term->outputByteLimit > 0 && term->output.size() > term->outputByteLimit) {
         term->truncated = true;
         term->output = term->output.right(term->outputByteLimit);
+    }
+    // A terminal embedded in a running tool call shows its output in that card
+    // while the command runs.
+    const auto owner = m_terminalTools.constFind(term->id);
+    if (owner != m_terminalTools.constEnd()) {
+        const QString text = QString::fromUtf8(term->output);
+        m_toolStreamed.insert(owner.value(), text);
+        Q_EMIT toolProgress(owner.value(), text);
+    }
+}
+
+void AcpClient::linkToolTerminals(const QString &toolCallId, const QJsonValue &content)
+{
+    if (toolCallId.isEmpty() || (!content.isArray() && !content.isObject())) {
+        return;
+    }
+    const QJsonArray blocks = content.isArray() ? content.toArray() : QJsonArray{content};
+    for (const QJsonValue &item : blocks) {
+        const QJsonObject block = item.toObject();
+        if (block.value(u"type"_s).toString() != u"terminal"_s) {
+            continue;
+        }
+        const QString terminalId = block.value(u"terminalId"_s).toString();
+        if (terminalId.isEmpty() || m_terminalTools.contains(terminalId)) {
+            continue;
+        }
+        m_terminalTools.insert(terminalId, toolCallId);
+        m_toolTerminals.insert(toolCallId, terminalId);
+        // The command may have printed before the agent announced the terminal
+        // in a tool call; that output belongs in the card as well.
+        if (const Terminal *term = m_terminals.value(terminalId)) {
+            if (!term->output.isEmpty()) {
+                const QString text = QString::fromUtf8(term->output);
+                m_toolStreamed.insert(toolCallId, text);
+                Q_EMIT toolProgress(toolCallId, text);
+            }
+        }
+    }
+}
+
+void AcpClient::forgetToolTerminal(const QString &toolCallId)
+{
+    const QString terminalId = m_toolTerminals.take(toolCallId);
+    if (!terminalId.isEmpty()) {
+        m_terminalTools.remove(terminalId);
     }
 }
 

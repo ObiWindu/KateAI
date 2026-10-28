@@ -694,6 +694,49 @@ project structure.
 
 ## 12) Implementation Order (Phases)
 
+### Status (updated)
+
+The following items are implemented:
+
+- ✅ 1.1-1.5: Tool alias mapping, canonicalization, shellCommandFor, ChatTheme
+- ✅ 1.6: Alias tests (test_toolalias.cpp)
+- ✅ 2.1-2.5: Raw input normalization, diff extraction, locations, terminal output, multi-file
+- ✅ 2.6: Parsing tests (test_acpparsing.cpp)
+- ✅ 3.1-3.4: Central permission mapping, auto-approve parity, Ask/AcceptEdits/AlwaysApprove
+- ✅ 3.5: Permission tests
+- ✅ 4.1-4.5: Edit tracking improvements, multi-file, late permission, path resolution
+- ✅ 4.6: Edit tracker tests
+- ✅ 5.1-5.4: History restoration parity, diff reconstruction, language highlighting
+- ✅ 5.5: History restore tests
+- ✅ 6.1-6.4: ACP client methods (queryProjectGraph, writePlanFile, suggest)
+- ✅ 6.5: Client method tests
+- ✅ 7.1-7.3: Tool access control, mode integration, plan mode (mode denials are not auto-declined; the permission card still allows approval)
+- ✅ 7.4: Sub-agents (N/A for ACP - agent handles its own)
+- ✅ 7.5: Mode tool tests (test_modetools.cpp)
+- ✅ 8.1-8.4: Streaming, progress, error handling, cancellation
+- ✅ 8.5: Streaming tests (test_acpstreaming.cpp)
+- ✅ 9.1-9.3: Context compression with project graph
+- ✅ 9.4: Context manager tests
+- ✅ 10.1-10.2: Title preservation
+- ✅ 10.3: Session store tests (test_sessionstore.cpp)
+- ✅ 11.1: Documentation (README.md, ARCHITECTURE.md)
+- ✅ 11.2-11.3: Testing strategy and CI
+- ✅ Checkpoint per turn for ACP
+- ✅ resolvePath, normalizeRawInput, allowsCanonical helpers
+- ✅ updateEdit in EditTracker
+- ✅ Terminal output streaming into tool cards
+- ✅ Late diff updates (toolDetailsChanged)
+- ✅ Session notes sent once per session
+- ✅ Extension method names (_kateai/)
+- ✅ Capability advertisement under _meta
+
+Remaining gaps:
+- Checkpoints cannot undo ACP edits (design decision needed: per-turn snapshot is taken but ACP edits bypass the edit tracker's snapshot)
+- Agent tools that ask no permission cannot be blocked (inherent limitation)
+- Not tested against real ACP agents (only mock)
+- Context compaction improvements beyond project graph integration
+- Sub-agent ACP coordination not implemented (agent handles its own sub-agents)
+
 ### Phase 1: Foundation (Week 1-2)
 1. Tool alias mapping + canonicalization (1.1-1.3).
 2. Extend `shellCommandFor` (1.4).

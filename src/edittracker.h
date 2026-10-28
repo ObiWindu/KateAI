@@ -64,6 +64,10 @@ public:
     void addEdit(const QString &path, const QString &toolName, const QString &diff,
                  const QString &oldContent = QString(), const QString &newContent = QString(),
                  bool createdFile = false);
+    // Updates the diff (and old/new content) of an existing group entry when a
+    // later message carries them. A new path creates a new group.
+    void updateEdit(const QString &path, const QString &toolName, const QString &diff,
+                    const QString &oldContent = QString(), const QString &newContent = QString());
     void clear();
     bool hasPendingEdits() const;
     QList<EditEntry> pendingEdits() const;

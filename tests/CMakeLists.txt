@@ -25,6 +25,12 @@ kateai_test(test_providers)
 kateai_test(test_rules)
 kateai_test(test_transcriptlayout)
 kateai_test(test_modes)
+kateai_test(test_toolalias)
+kateai_test(test_acpparsing)
+kateai_test(test_acpstreaming)
+kateai_test(test_modetools)
+kateai_test(test_sessionstore)
+kateai_test(test_acpclientmethods)
 kateai_test(test_projectgraph)
 # The requestable half of the in-editor completions: prompt building, staleness,
 # budget, response parsing. The HTTP cases talk to an in-process mock server on

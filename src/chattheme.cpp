@@ -1034,6 +1034,10 @@ QString toolLabel(const QString &toolName)
         {QStringLiteral("fetch_rules"), QStringLiteral("Load rules")},
         {QStringLiteral("update_project_graph"), QStringLiteral("Index project")},
         {QStringLiteral("project_graph"), QStringLiteral("Read project map")},
+        // ACP tool kinds that have no Kate tool of their own.
+        {QStringLiteral("move"), QStringLiteral("Move file")},
+        {QStringLiteral("think"), QStringLiteral("Thinking")},
+        {QStringLiteral("switch_mode"), QStringLiteral("Switch mode")},
     };
 
     const QString canonical = canonicalToolName(toolName).trimmed().toLower();

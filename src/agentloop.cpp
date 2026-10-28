@@ -99,27 +99,6 @@ AgentLoop::AgentLoop(QObject *parent)
     });
     connect(&m_acp, &AcpClient::toolStarted, this, [this](const PermissionRequest &request) {
         ++m_toolCalls;
-        const QString canonical = canonicalToolName(request.toolName);
-        const ToolAccess access = activeToolAccess();
-        // Enforce mode-based tool access for ACP tools. Plan mode only permits
-        // read-only tools; other modes restrict to their tool set.
-        if (!access.allowAll && !access.allows(canonical)) {
-            // Still show the card, but mark it as denied so the user sees it.
-            Q_EMIT toolStarted(request);
-            ToolResult denied;
-            denied.toolCallId = request.toolCallId;
-            denied.name = request.toolName;
-            denied.ok = false;
-            if (m_settings.planMode) {
-                denied.output = u"Tool rejected: plan mode only permits read-only tools. Choose a read-only tool."_s;
-            } else {
-                denied.output = u"Tool rejected: the %1 mode does not provide the '%2' tool."_s
-                                    .arg(activeMode().name, request.toolName);
-            }
-            Q_EMIT toolFinished(denied);
-            Q_EMIT statusChanged(u"Working on the next step…"_s);
-            return;
-        }
         Q_EMIT toolStarted(request);
         Q_EMIT statusChanged(u"Working on the next step…"_s);
     });
@@ -128,6 +107,9 @@ AgentLoop::AgentLoop(QObject *parent)
         // forward it untouched, exactly like the native bash stream, so the
         // card fills in while the tool runs instead of when it ends.
         Q_EMIT toolProgress(toolCallId, partial);
+    });
+    connect(&m_acp, &AcpClient::toolDetailsChanged, this, [this](const PermissionRequest &request) {
+        Q_EMIT toolDetailsChanged(request);
     });
     connect(&m_acp, &AcpClient::toolFinished, this, [this](const ToolResult &result) {
         ChatMessage toolMsg;
@@ -139,24 +121,10 @@ AgentLoop::AgentLoop(QObject *parent)
         Q_EMIT toolFinished(result);
     });
     connect(&m_acp, &AcpClient::permissionNeeded, this, [this](const PermissionRequest &request) {
-        // Auto-resolve based on policy/session grants before showing UI.
-        const QString canonical = canonicalToolName(request.toolName);
-        if (m_policy.sessionGranted(request.toolName) || m_policy.sessionGranted(canonical)) {
-            m_acp.resolvePermission(PermissionDecision::AllowSession);
-            return;
-        }
-        if (m_policy.isAutoApproved(request.toolName) || m_policy.isAutoApproved(canonical)) {
-            m_acp.resolvePermission(PermissionDecision::AllowOnce);
-            return;
-        }
-        if (m_settings.permissionMode == PermissionMode::AcceptEdits
-            && (request.risk == ToolRisk::Read || request.risk == ToolRisk::Write)) {
-            // AcceptEdits: auto-approve edits too, but they're tracked.
-            m_acp.resolvePermission(PermissionDecision::AllowOnce);
-            return;
-        }
-        if (m_settings.permissionMode == PermissionMode::AlwaysApprove) {
-            m_acp.resolvePermission(PermissionDecision::AllowSession);
+        PermissionDecision decision = PermissionDecision::AllowOnce;
+        QString reason;
+        if (acpAutoDecision(request, &decision, &reason)) {
+            m_acp.resolvePermission(decision);
             return;
         }
         m_waitingCall.id = request.toolCallId;
@@ -565,6 +533,21 @@ void AgentLoop::resumeAfterCheckpoint()
     if (!m_awaitingCheckpoint) {
         return;
     }
+    // ACP turns have no parked tool call: they wait only for the snapshot
+    // before the prompt goes out. Handle that first.
+    if (!m_pendingAcpPrompt.isEmpty()) {
+        const QString prompt = m_pendingAcpPrompt;
+        m_pendingAcpPrompt.clear();
+        m_awaitingCheckpoint = false;
+        m_checkpointTaken = true;
+        if (!m_busy || !usesAcpNative(m_settings)) {
+            return;
+        }
+        ++m_modelRequests;
+        m_acp.prompt(prompt);
+        return;
+    }
+
     m_awaitingCheckpoint = false;
     const ToolCall call = m_checkpointCall;
     const bool asBash = m_checkpointIsBash;
@@ -594,6 +577,14 @@ void AgentLoop::resumeAfterCheckpoint()
     releaseEditLocksFor(call);
     appendToolResult(call, result);
     processQueue();
+}
+
+void AgentLoop::clearCheckpointWait()
+{
+    m_awaitingCheckpoint = false;
+    m_checkpointCall = {};
+    m_checkpointIsBash = false;
+    m_pendingAcpPrompt.clear();
 }
 
 void AgentLoop::markActionExecuted(const QString &signature)
@@ -910,6 +901,7 @@ QString AgentLoop::systemPrompt() const
 void AgentLoop::resetConversation()
 {
     abort();
+    clearCheckpointWait();
     cancelSubtask();
     m_acp.resetSession();
     m_messages.clear();
@@ -973,6 +965,9 @@ void AgentLoop::abort()
     m_busy = false;
     m_state = State::Idle;
 
+    // A snapshot that was waiting for this turn cannot resume now.
+    clearCheckpointWait();
+
     // A command left streaming when the turn stops would keep writing into a
     // card that no longer has a turn behind it.
     if (!m_runningBashId.isEmpty() && m_tools) {
@@ -1015,9 +1010,7 @@ void AgentLoop::abort()
         parked.output = u"Cancelled: turn stopped while waiting for checkpoint."_s;
         appendToolResult(m_checkpointCall, parked);
     }
-    m_awaitingCheckpoint = false;
-    m_checkpointCall = {};
-    m_checkpointIsBash = false;
+    clearCheckpointWait();
     if (m_locks) {
         m_locks->releaseAll(m_selfId);
     }
@@ -1270,6 +1263,36 @@ void AgentLoop::sendToModel()
     m_client.complete(requestMessages);
 }
 
+bool AgentLoop::acpToolAllowed(const PermissionRequest &request) const
+{
+    return acpToolPermitted(activeToolAccess(), request);
+}
+
+bool AgentLoop::acpAutoDecision(const PermissionRequest &request, PermissionDecision *decision, QString *reason) const
+{
+    Q_UNUSED(reason)
+    const QString canonical = canonicalToolName(request.toolName);
+    if (m_policy.sessionGranted(request.toolName) || m_policy.sessionGranted(canonical)) {
+        *decision = PermissionDecision::AllowSession;
+        return true;
+    }
+    if (m_policy.isAutoApproved(request.toolName) || m_policy.isAutoApproved(canonical)) {
+        *decision = PermissionDecision::AllowOnce;
+        return true;
+    }
+    if (m_settings.permissionMode == PermissionMode::AlwaysApprove) {
+        *decision = PermissionDecision::AllowSession;
+        return true;
+    }
+    if (m_settings.permissionMode == PermissionMode::AcceptEdits
+        && (request.risk == ToolRisk::Read || request.risk == ToolRisk::Write)) {
+        // AcceptEdits: the edit goes through and is queued for review.
+        *decision = PermissionDecision::AllowOnce;
+        return true;
+    }
+    return false;
+}
+
 void AgentLoop::syncAcpClient()
 {
     m_acp.setSettings(m_settings);
@@ -1301,6 +1324,7 @@ void AgentLoop::startAcpTurn(const QString &userText)
     m_currentPlan = QJsonArray();
     m_planShown = false;
     m_checkpointTaken = false;
+    m_pendingAcpPrompt.clear();
     m_taskSummary = userText.simplified().left(80);
 
     ChatMessage user;
@@ -1312,6 +1336,24 @@ void AgentLoop::startAcpTurn(const QString &userText)
     Q_EMIT statusChanged(u"Working on it…"_s);
 
     syncAcpClient();
+
+    // A snapshot per turn, exactly like the native path: the workspace is
+    // captured before any agent-driven edit lands, so the turn can be rolled
+    // back as a whole. The prompt is held until the snapshot reports back; if
+    // snapshots are unavailable the prompt goes out straight away.
+    if (!m_checkpointTaken && m_settings.checkpointsEnabled && m_checkpoints.isAvailable()
+        && m_subtaskDepth == 0) {
+        m_pendingAcpPrompt = userText;
+        m_awaitingCheckpoint = true;
+        QString label = u"Before turn"_s;
+        if (!m_taskSummary.isEmpty()) {
+            label += QStringLiteral(" during: %1").arg(m_taskSummary.left(80));
+        }
+        Q_EMIT statusChanged(i18n("Taking a checkpoint…"));
+        m_checkpoints.createCheckpointAsync(label);
+        return;
+    }
+
     ++m_modelRequests;
     m_acp.prompt(userText);
 }
@@ -1816,9 +1858,7 @@ void AgentLoop::finishWithFailure(const QString &error)
     m_pendingResults.clear();
     m_waitingCall = {};
     m_waitingRequest = {};
-    m_awaitingCheckpoint = false;
-    m_checkpointCall = {};
-    m_checkpointIsBash = false;
+    clearCheckpointWait();
     m_currentThinking.clear();
     m_currentPlan = QJsonArray();
     m_planShown = false;
@@ -1860,9 +1900,7 @@ void AgentLoop::finishTurn()
     m_pendingResults.clear();
     m_waitingCall = {};
     m_waitingRequest = {};
-    m_awaitingCheckpoint = false;
-    m_checkpointCall = {};
-    m_checkpointIsBash = false;
+    clearCheckpointWait();
     m_currentThinking.clear();
     m_currentPlan = QJsonArray();
     m_planShown = false;

@@ -73,22 +73,51 @@ these to KateAI's canonical names (`read_file`, `bash`, `edit_file`, `write_file
 `shellCommandFor`, edit tracking, and history restoration; the original name is
 kept in `PermissionRequest::originalToolName` for display/debugging.
 
+A call that names no tool falls back to its ACP `kind` (`read` → `read_file`,
+`search` → `grep`, `fetch` → `web_fetch`), and a built-in name in another case
+(`Grep`, `BASH`) is the same tool.
+
 ### Parsing & diffs
 
 `permissionFromToolCall()` normalises `rawInput` (object/string/array), scans
 `content[]` and `locations[]` for paths and diff blocks, resolves relative paths
 against the workspace, and builds a unified diff from `oldText`/`newText` or
-`old_string`/`new_string` (camelCase and snake_case both accepted). Multiple
-diff blocks are collected into `additionalPaths`/`additionalDiffs`. `tool_call_update`
-backfills diffs that arrive late and aggregates progress (cumulative or delta).
+`old_string`/`new_string` (camelCase and snake_case both accepted). Each diff is
+kept with the file it edits: the primary diff is the one for the primary file,
+and the others go to `additionalPaths`/`additionalDiffs` in matching order. A
+diff that arrived only as a content block is also written into the stored
+arguments, so a restored transcript rebuilds the same card.
+
+`tool_call_update` merges what an update adds into the live entry
+(`mergeToolCallDetails`) and emits `toolDetailsChanged` when a diff or path
+arrives late, so the card and the review entry catch up. Progress is aggregated
+(cumulative or delta).
 
 ### Permissions
 
-`AcpClient::handleRequestPermission()` builds a `PermissionRequest` and either
-auto-resolves (AlwaysApprove, AcceptEdits, session grants, auto-approve list)
-or emits `permissionNeeded`. `AgentLoop` checks `PermissionPolicy` session
-grants and auto-approve before forwarding to the UI. Risk classification uses
-canonical names.
+`AcpClient::handleRequestPermission()` merges the request with the tool call
+the agent already announced (a request often names only the call's id) and
+emits `permissionNeeded`. `AgentLoop::acpAutoDecision()` is the one decision
+point for ACP, the same policy native turns use: session grants, the
+auto-approve list, AlwaysApprove and AcceptEdits allow, and everything else
+asks the user. A tool the mode does not allow is not declined here; the
+permission card still lets you approve it.
+
+`acpToolPermitted()` (in `modes.cpp`) judges a tool the mode allows: a tool Kate
+knows is judged by its name, and an agent's own tool by what it does (running a
+command needs the command tool, changing a file needs the edit tools, anything
+else is not restricted). Reasoning is always allowed.
+
+The agent runs its own tools, so Kate cannot stop a tool that asks no permission;
+it shows a notice instead, and the permission card still lets you approve a tool
+the active mode does not list.
+
+### Terminals
+
+A terminal the agent creates with `terminal/create` and embeds in a tool call
+(`{type: "terminal", terminalId}`) is linked to that call. Its output streams
+into the card while the command runs, and the final result falls back to that
+output. The terminal reference itself is never printed as output.
 
 ### Edit tracking
 
@@ -105,10 +134,18 @@ language highlighting, and restores subtask/suggestion cards.
 
 ### Client methods
 
-Kate exposes `fs/read_text_file`, `fs/write_text_file`, `terminal/*`,
-`query_project_graph`, `write_plan_file`, and `suggest` to ACP agents. Results
-are formatted to match native tool output. `suggest` emits `suggestionPosted`
-which `ChatWidget` turns into a suggestion card.
+Kate exposes `fs/read_text_file`, `fs/write_text_file`, `terminal/*`, and its own
+`_kateai/query_project_graph`, `_kateai/write_plan_file`, and `_kateai/suggest`
+methods. The extension names are the ones the protocol reserves for
+extensions; they are advertised in the `initialize` capabilities under `_meta`
+(`com.kateai/methods`). The bare names (`write_plan_file`, …) still reach the
+same handlers. Results are formatted to match native tool output. `suggest`
+emits `suggestionPosted` which `ChatWidget` turns into a suggestion card.
+
+Agents do not receive Kate's system prompt, so the first prompt of each ACP
+session starts with a notes block: the user's global rules and extra system
+prompt (except for Grok, which gets them through `_meta`), and the list of
+Kate's client methods. The notes are sent once per session.
 
 ## Settings and modes
 

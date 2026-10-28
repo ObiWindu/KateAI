@@ -20,6 +20,12 @@ namespace KateAi
 // terminal/exec) to canonical KateAI tool names used for policy, UI, and tracking.
 QString canonicalToolName(const QString &name);
 QStringList toolNameAliases(const QString &canonicalName);
+// Resolve a path the agent reported, relative to the workspace when it is not
+// absolute. Returns an empty string for an empty input.
+QString resolvePath(const QString &path, const QString &workspace);
+// Normalise the raw input of an ACP tool call into a JSON object, whatever
+// shape the agent used (object, array, JSON string, plain text).
+QJsonObject normalizeRawInput(const QJsonValue &rawInput);
 
 enum class Provider {
     Grok,
@@ -119,6 +125,11 @@ struct ToolAccess {
             }
         }
         return false;
+    }
+    // Convenience: check the canonical form of a name directly.
+    bool allowsCanonical(const QString &canonicalName) const
+    {
+        return allows(canonicalName);
     }
 };
 

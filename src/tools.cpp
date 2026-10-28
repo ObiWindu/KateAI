@@ -252,7 +252,7 @@ QString shellCommandFor(const QString &toolName, const QJsonObject &args)
         }
         return command;
     }
-    if (toolName == u"query_project_graph"_s) {
+    if (canonical == u"query_project_graph"_s) {
         const QString type = args.value(u"query_type"_s).toString();
         QString cmd = u"query_project_graph"_s;
         if (!type.isEmpty()) {
@@ -264,7 +264,7 @@ QString shellCommandFor(const QString &toolName, const QJsonObject &args)
         }
         return cmd;
     }
-    if (toolName == u"new_task"_s || key == u"task"_s) {
+    if (canonical == u"new_task"_s) {
         const QString mode = args.value(u"mode"_s).toString();
         const QString description = args.value(u"description"_s).toString();
         const QString label = mode.isEmpty() ? QStringLiteral("code") : mode;
@@ -272,16 +272,16 @@ QString shellCommandFor(const QString &toolName, const QJsonObject &args)
         // as a bare bracket pair with nothing behind it.
         return description.isEmpty() ? u"[%1]"_s.arg(label) : u"[%1] %2"_s.arg(label, description);
     }
-    if (toolName == u"write_plan_file"_s) {
+    if (canonical == u"write_plan_file"_s) {
         return u"write plan file"_s;
     }
-    if (toolName == u"suggest"_s) {
+    if (canonical == u"suggest"_s) {
         // The first line of the advice reads better in a card header than a
         // bare tool name, so show that, capped.
         const QString firstLine = args.value(u"suggestion"_s).toString().section(u'\n', 0, 0).trimmed();
         return firstLine.isEmpty() ? u"suggest"_s : u"suggest %1"_s.arg(quoteShellArg(firstLine.left(80)));
     }
-    if (toolName == u"question"_s) {
+    if (canonical == u"question"_s) {
         // The question is the whole point of the call, so it goes in the
         // header verbatim (capped) rather than being summarised as "question".
         const QString asked = args.value(u"question"_s).toString().section(u'\n', 0, 0).trimmed();

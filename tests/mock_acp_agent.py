@@ -198,10 +198,44 @@ def outcome_summary(outcome):
 
 
 def handle_prompt(request_id, params):
-    text = ""
-    for block in params.get("prompt") or []:
-        if isinstance(block, dict) and block.get("type") == "text":
-            text += block.get("text") or ""
+    # Text blocks are joined by a line break, as a real agent reads them.
+    # user_text is the last block, the message the user typed: an agent answers
+    # that, not the editor context or the session notes sent before it.
+    texts = [
+        block.get("text") or ""
+        for block in params.get("prompt") or []
+        if isinstance(block, dict) and block.get("type") == "text"
+    ]
+    text = "\n".join(texts)
+    user_text = texts[-1] if texts else ""
+
+    if SCENARIO == "prompt-probe":
+        # Reports every text block the prompt carried, so a test can see what
+        # the agent was sent and what it was not.
+        session_update(
+            {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "\n---\n".join(texts)},
+            }
+        )
+        result(request_id, {"stopReason": "end_turn"})
+        return
+
+    if SCENARIO == "kateai-ext":
+        # Kate's client methods called by their extension names, as the
+        # capability advertises them.
+        call_client(
+            "_kateai/suggest",
+            {"sessionId": SESSION_ID, "suggestion": "extract a helper", "path": "/tmp/a.cpp", "line": 3},
+        )
+        session_update(
+            {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "ext-ok"},
+            }
+        )
+        result(request_id, {"stopReason": "end_turn"})
+        return
 
     if SCENARIO in ("flaky", "flaky-persistent"):
         # A transient drop of the agent's stream to its model provider: the
@@ -566,6 +600,144 @@ def handle_prompt(request_id, params):
         result(request_id, {"stopReason": "end_turn"})
         return
 
+    if SCENARIO == "terminal-card":
+        # A command the agent runs in a terminal it created, announced inside its
+        # tool call the way the spec describes. Kate shows the terminal's output
+        # in that tool card while the command runs.
+        session_update(
+            {
+                "sessionUpdate": "tool_call",
+                "toolCallId": "call_term",
+                "title": "Run the probe",
+                "kind": "execute",
+                "status": "pending",
+                "rawInput": {"command": "probe"},
+            }
+        )
+        created = call_client(
+            "terminal/create",
+            {
+                "sessionId": SESSION_ID,
+                "command": "python3",
+                "args": ["-c", "print('term-card-out')"],
+            },
+        )
+        terminal_id = ((created or {}).get("result") or {}).get("terminalId")
+        session_update(
+            {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "call_term",
+                "status": "in_progress",
+                "content": [{"type": "terminal", "terminalId": terminal_id}],
+            }
+        )
+        call_client("terminal/wait_for_exit", {"sessionId": SESSION_ID, "terminalId": terminal_id})
+        session_update(
+            {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "call_term",
+                "status": "completed",
+                "content": [{"type": "terminal", "terminalId": terminal_id}],
+            }
+        )
+        call_client("terminal/release", {"sessionId": SESSION_ID, "terminalId": terminal_id})
+        session_update(
+            {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "terminal-done"},
+            }
+        )
+        result(request_id, {"stopReason": "end_turn"})
+        return
+
+    if SCENARIO == "late-diff":
+        # The diff arrives in a tool_call_update, not in the tool_call that
+        # announced the edit. Kate must show it on the card once it arrives.
+        path = ""
+        for token in user_text.split():
+            if token.startswith("EDITPATH:"):
+                path = token.split(":", 1)[1]
+        session_update(
+            {
+                "sessionUpdate": "tool_call",
+                "toolCallId": "call_late",
+                "title": "Edit notes.txt",
+                "kind": "edit",
+                "status": "pending",
+            }
+        )
+        session_update(
+            {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "call_late",
+                "status": "in_progress",
+                "content": [{"type": "diff", "path": path, "oldText": "old", "newText": "new"}],
+            }
+        )
+        session_update(
+            {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "call_late",
+                "status": "completed",
+            }
+        )
+        session_update(
+            {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "late-ok"},
+            }
+        )
+        result(request_id, {"stopReason": "end_turn"})
+        return
+
+    if SCENARIO == "bare-permission":
+        # The permission request names the tool call and nothing else, which
+        # the spec allows. Kate must keep the identity and the diff that the
+        # tool_call announced, not treat the call as an unnamed "tool".
+        path = ""
+        for token in user_text.split():
+            if token.startswith("EDITPATH:"):
+                path = token.split(":", 1)[1]
+        session_update(
+            {
+                "sessionUpdate": "tool_call",
+                "toolCallId": "call_bare",
+                "title": "Edit notes.txt",
+                "kind": "edit",
+                "status": "pending",
+                "locations": [{"path": path}],
+                "rawInput": {"file_path": path, "old_string": "old", "new_string": "new"},
+            }
+        )
+        permission = request_no_wait(
+            "session/request_permission",
+            {
+                "sessionId": SESSION_ID,
+                "toolCall": {"toolCallId": "call_bare"},
+                "options": [
+                    {"optionId": "allow-once", "name": "Allow once", "kind": "allow_once"},
+                    {"optionId": "reject-once", "name": "Reject", "kind": "reject_once"},
+                ],
+            },
+        )
+        outcome = None
+        while True:
+            message = read_message()
+            if message is None:
+                return
+            if message.get("id") == permission:
+                outcome = (message.get("result") or {}).get("outcome") or {}
+                break
+            handle(message)
+        session_update(
+            {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "outcome:" + outcome_summary(outcome)},
+            }
+        )
+        result(request_id, {"stopReason": "end_turn"})
+        return
+
     if SCENARIO == "terminal":
         created = call_client(
             "terminal/create",
@@ -653,7 +825,7 @@ def handle_prompt(request_id, params):
     session_update(
         {
             "sessionUpdate": "agent_message_chunk",
-            "content": {"type": "text", "text": text.strip()},
+            "content": {"type": "text", "text": user_text.strip()},
         }
     )
     result(request_id, {"stopReason": "end_turn"})

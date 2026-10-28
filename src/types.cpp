@@ -59,9 +59,21 @@ static QHash<QString, QString> buildToolAliasMap()
     map[u"project/query"_s] = u"query_project_graph"_s;
     map[u"suggest"_s] = u"suggest"_s;
     map[u"question"_s] = u"question"_s;
+    // The ACP tool kinds and the short names agents use for the same work.
+    // Without these a kind-only call ("read") is not the read tool the modes
+    // allow, and plan mode rejects it.
+    map[u"read"_s] = u"read_file"_s;
+    map[u"write"_s] = u"write_file"_s;
+    map[u"list"_s] = u"list_dir"_s;
+    map[u"ls"_s] = u"list_dir"_s;
+    map[u"search"_s] = u"grep"_s;
+    map[u"fetch"_s] = u"web_fetch"_s;
+    map[u"webfetch"_s] = u"web_fetch"_s;
+    map[u"websearch"_s] = u"web_search"_s;
     // New task/subagent
     map[u"agent/new_task"_s] = subtaskToolName();
     map[u"subagent"_s] = subtaskToolName();
+    map[u"task"_s] = subtaskToolName();
     return map;
 }
 
@@ -96,7 +108,68 @@ QString canonicalToolName(const QString &name)
             return it.value();
         }
     }
+    // A built-in tool named in another case ("Grep", "BASH") is that tool.
+    static const QHash<QString, QString> builtInByLower = [] {
+        QHash<QString, QString> names;
+        for (const QString &name : allBuiltInToolNames()) {
+            names.insert(name.toLower(), name);
+        }
+        return names;
+    }();
+    const auto builtIn = builtInByLower.constFind(lower);
+    if (builtIn != builtInByLower.constEnd()) {
+        return builtIn.value();
+    }
     return trimmed;
+}
+
+QString resolvePath(const QString &path, const QString &workspace)
+{
+    const QString trimmed = path.trimmed();
+    if (trimmed.isEmpty()) {
+        return {};
+    }
+    if (QFileInfo(trimmed).isAbsolute() || workspace.trimmed().isEmpty()) {
+        return QDir::cleanPath(trimmed);
+    }
+    return QDir::cleanPath(QDir(workspace).absoluteFilePath(trimmed));
+}
+
+QJsonObject normalizeRawInput(const QJsonValue &rawInput)
+{
+    if (rawInput.isObject()) {
+        return rawInput.toObject();
+    }
+    if (rawInput.isArray()) {
+        const QJsonArray arr = rawInput.toArray();
+        bool isContent = false;
+        for (const QJsonValue &v : arr) {
+            if (v.isObject() && v.toObject().contains(u"type"_s)) {
+                isContent = true;
+                break;
+            }
+        }
+        if (isContent) {
+            return {};
+        }
+        QJsonObject merged;
+        for (const QJsonValue &v : arr) {
+            if (v.isObject()) {
+                const QJsonObject o = v.toObject();
+                for (auto it = o.begin(); it != o.end(); ++it) {
+                    merged.insert(it.key(), it.value());
+                }
+            }
+        }
+        return merged;
+    }
+    if (rawInput.isString()) {
+        const QJsonDocument doc = QJsonDocument::fromJson(rawInput.toString().toUtf8());
+        if (doc.isObject()) {
+            return doc.object();
+        }
+    }
+    return {};
 }
 
 QStringList toolNameAliases(const QString &canonicalName)

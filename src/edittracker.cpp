@@ -333,6 +333,49 @@ void EditTracker::addEdit(const QString &path, const QString &toolName, const QS
     Q_EMIT editsChanged(true);
 }
 
+void EditTracker::updateEdit(const QString &path, const QString &toolName, const QString &diff,
+                             const QString &oldContent, const QString &newContent)
+{
+    if (path.isEmpty()) {
+        return;
+    }
+    Group *group = nullptr;
+    for (auto &candidate : m_groups) {
+        if (candidate.path == path) {
+            group = &candidate;
+            break;
+        }
+    }
+    if (!group) {
+        // Nothing tracked yet for this path: track it from scratch, keeping the
+        // baseline the caller supplied.
+        addEdit(path, toolName, diff, oldContent, newContent, oldContent.isEmpty());
+        return;
+    }
+    if (!diff.isEmpty()) {
+        // Replace the diff of the last pending entry, leaving the baseline
+        // untouched. A diff that arrives after the snapshot still belongs to
+        // the edit that was already queued.
+        if (!group->pending.isEmpty()) {
+            group->pending.last().diff = diff;
+            group->pending.last().toolName = toolName;
+            if (oldContent.isEmpty() == false) {
+                group->pending.last().oldContent = oldContent;
+            }
+            if (!newContent.isEmpty()) {
+                group->pending.last().newContent = newContent;
+            }
+        }
+    } else {
+        // No new diff: only the tool name may have changed.
+        if (!group->pending.isEmpty()) {
+            group->pending.last().toolName = toolName;
+        }
+    }
+    updateUI();
+    Q_EMIT editsChanged(true);
+}
+
 void EditTracker::clear()
 {
     m_groups.clear();

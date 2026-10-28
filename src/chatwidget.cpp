@@ -1129,6 +1129,27 @@ ChatWidget::ChatWidget(QWidget *parent)
         scrollToBottom();
     });
 
+    connect(&m_agent, &AgentLoop::toolDetailsChanged, this, [this](const PermissionRequest &request) {
+        // A running ACP tool reported its diff or path after it started. The
+        // card shows it now; the review entry takes the diff, but never a new
+        // path, because the file's baseline was read at toolStarted.
+        if (auto *widget = m_toolCallWidgets.value(request.toolCallId)) {
+            if (!request.describeDiff.isEmpty()) {
+                widget->setDescribeDiff(request.describeDiff);
+            }
+            if (!request.path.isEmpty()) {
+                widget->setFilePath(request.path);
+            }
+        }
+        auto pending = m_pendingToolCalls.find(request.toolCallId);
+        if (pending != m_pendingToolCalls.end() && pending->diff.isEmpty()) {
+            pending->diff = request.describeDiff;
+        }
+    });
+    connect(&m_agent, &AgentLoop::noticeRaised, this, [this](const QString &text) {
+        showInfoMessage(text, false);
+    });
+
     // Approval now happens on the card that triggered it. permissionNeeded fires
     // before toolStarted, so the card is created here and later reused by the
     // toolStarted handler instead of a second card appearing.
@@ -1153,6 +1174,15 @@ ChatWidget::ChatWidget(QWidget *parent)
             m_toolCallOrder.append(widget);
             appendTranscriptWidget(widget);
             applyTranscriptCollapse();
+        } else {
+            // The card came from the tool_call, which may not have carried the
+            // diff or the path that the permission request now shows.
+            if (!request.describeDiff.isEmpty()) {
+                widget->setDescribeDiff(request.describeDiff);
+            }
+            if (!request.path.isEmpty()) {
+                widget->setFilePath(request.path);
+            }
         }
         widget->showApproval();
         // Name the target in the docked strip. The card (and its diff) can be
