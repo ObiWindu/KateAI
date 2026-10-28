@@ -32,6 +32,12 @@ $env:PATH = ($env:PATH -split ';' | Where-Object {
     $_ -and $_ -notmatch '(?i)Git\\(bin|usr\\bin)' -and $_ -notmatch '(?i)mingw|strawberry'
 }) -join ';'
 
+# CraftBootstrap.isAndroid() keys off these env vars; on a Windows runner
+# they may be set and would produce an Android ABI. KateAI does not build
+# for Android, so drop them.
+Remove-Item Env:ANDROID_SDK_ROOT -ErrorAction SilentlyContinue
+Remove-Item Env:ANDROID_NDK -ErrorAction SilentlyContinue
+
 # Diagnostics for Craft's VS detection - reduced logging
 $sysVsWhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
 if ($env:CI_DEBUG -eq 'true') {
