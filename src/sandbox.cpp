@@ -341,6 +341,27 @@ static bool matchGlobRegex(const QString &regex, const QString &haystack, QHash<
 #endif
     }
 
+static QString windowsAbsoluteCandidate(const QString &workspaceRoot, QString candidate)
+{
+#ifdef Q_OS_WIN
+    if (!workspaceRoot.isEmpty() && !candidate.isEmpty()
+        && (candidate.startsWith(u'/') || candidate.startsWith(u'\\'))
+        && !QDir::isAbsolutePath(candidate)) {
+        QString driveRoot;
+        if (workspaceRoot.size() >= 2 && workspaceRoot.at(1) == u':') {
+            driveRoot = workspaceRoot.left(3);
+        } else {
+            driveRoot = QDir::rootPath();
+        }
+        if (!driveRoot.endsWith(u'/') && !driveRoot.endsWith(u'\\')) {
+            driveRoot += u'/';
+        }
+        candidate = driveRoot + candidate.mid(1);
+    }
+#endif
+    return candidate;
+}
+
 QString Sandbox::normalizePath(const QString &path, QString *error, bool forWrite) const
 {
     if (m_workspaceRoot.isEmpty()) {
@@ -354,6 +375,7 @@ QString Sandbox::normalizePath(const QString &path, QString *error, bool forWrit
     if (candidate.isEmpty()) {
         candidate = m_workspaceRoot;
     }
+    candidate = windowsAbsoluteCandidate(m_workspaceRoot, candidate);
 
     const QFileInfo info(QDir(m_workspaceRoot), candidate);
     QString absolute = QDir::cleanPath(info.absoluteFilePath());
@@ -428,7 +450,8 @@ QString Sandbox::normalizePath(const QString &path, QString *error, bool forWrit
     bool Sandbox::allowsRead(const QString &path, QString *error) const
     {
         if (m_profile == SandboxProfile::Off) {
-            const QFileInfo info(QDir(m_workspaceRoot), path);
+            const QString resolvedPath = windowsAbsoluteCandidate(m_workspaceRoot, path);
+            const QFileInfo info(QDir(m_workspaceRoot), resolvedPath);
             QString absolute = QDir::cleanPath(info.absoluteFilePath());
             if (QFileInfo::exists(absolute)) {
                 const QString canonical = QFileInfo(absolute).canonicalFilePath();
@@ -453,7 +476,8 @@ QString Sandbox::normalizePath(const QString &path, QString *error, bool forWrit
         }
 
         if (m_profile == SandboxProfile::Workspace || m_profile == SandboxProfile::ReadOnly) {
-            const QFileInfo info(QDir(m_workspaceRoot), path);
+            const QString resolvedPath = windowsAbsoluteCandidate(m_workspaceRoot, path);
+            const QFileInfo info(QDir(m_workspaceRoot), resolvedPath);
             QString absolute = QDir::cleanPath(info.absoluteFilePath());
             if (QFileInfo::exists(absolute)) {
                 const QString canonical = QFileInfo(absolute).canonicalFilePath();
@@ -777,19 +801,20 @@ bool Sandbox::commandTouchesDeniedPath(const QString &command) const
         // cannot be resolved here; those tokens are checked as written.
         static const QRegularExpression homeVar(uR"(\$\{HOME\}|\$HOME(?![A-Za-z0-9_]))"_s);
         candidate.replace(homeVar, QDir::homePath());
+        const QString adjustedCandidate = windowsAbsoluteCandidate(m_workspaceRoot, candidate);
         // Check the path as written, then the symlink-resolved form, so a denied
         // name is caught even when the file does not exist yet.
-        const QString literal = QDir::cleanPath(QFileInfo(QDir(m_workspaceRoot), candidate).absoluteFilePath());
+        const QString literal = QDir::cleanPath(QFileInfo(QDir(m_workspaceRoot), adjustedCandidate).absoluteFilePath());
         if (isDenied(literal)) {
             return true;
         }
         // Check both read and write resolution - shell commands can write via
         // redirections (>, >>, &>) even if the command itself is read-only.
-        const QString resolvedRead = normalizePath(candidate, nullptr, false);
+        const QString resolvedRead = normalizePath(adjustedCandidate, nullptr, false);
         if (!resolvedRead.isEmpty() && resolvedRead != literal && isDenied(resolvedRead)) {
             return true;
         }
-        const QString resolvedWrite = normalizePath(candidate, nullptr, true);
+        const QString resolvedWrite = normalizePath(adjustedCandidate, nullptr, true);
         if (!resolvedWrite.isEmpty() && resolvedWrite != literal && resolvedWrite != resolvedRead && isDenied(resolvedWrite)) {
             return true;
         }

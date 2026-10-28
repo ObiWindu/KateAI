@@ -446,7 +446,8 @@ private Q_SLOTS:
         QVERIFY(command.contains(u"-p"_s));
         QVERIFY(command.join(u' ').contains(u"(deny default)"_s));
 #else
-        QVERIFY(!command.isEmpty());
+        QVERIFY(command.isEmpty());
+        QVERIFY(error.contains(u"not available"_s));
 #endif
     }
 
