@@ -1272,7 +1272,7 @@ ToolResult ToolRunner::grep(const QJsonObject &args) const
 
         // A NUL byte in the first 8 KiB marks the file as binary: regex hits
         // in it are mojibake, and they would flood the transcript.
-        if (contents.left(8192).contains(u'\0')) {
+        if (contents.left(8192).contains(QChar(u'\0'))) {
             ++skippedFiles;
             return;
         }
