@@ -57,13 +57,13 @@ if (-not (Test-Path (Join-Path $CraftRoot "craft\craftenv.ps1"))) {
         Set-ExecutionPolicy -Scope CurrentUser RemoteSigned -Force -ErrorAction SilentlyContinue
     } catch { }
     python.exe -m pip install --upgrade certifi -q 2>&1 | Out-Null
-    $installer = Join-Path ([IO.Path]::GetTempPath()) "install_craft.ps1"
-    (New-Object net.webclient).DownloadFile(
-        'https://raw.githubusercontent.com/KDE/craft/master/setup/install_craft.ps1', $installer)
     if ($env:CI -eq 'true' -and (Test-Path $CraftRoot)) {
         Remove-Item -Recurse -Force $CraftRoot -ErrorAction SilentlyContinue
     }
-    & $installer -root $CraftRoot -use-defaults 2>&1 | Where-Object { $_ -match "error|Error|ERROR|failed|Failed|FAILED" } | Out-Host
+    $bootstrap = Join-Path ([IO.Path]::GetTempPath()) "CraftBootstrap.py"
+    (New-Object net.webclient).DownloadFile(
+        'https://raw.githubusercontent.com/KDE/craft/master/setup/CraftBootstrap.py', $bootstrap)
+    & python.exe $bootstrap --prefix $CraftRoot --use-defaults
 }
 
 Invoke-CraftEnv
