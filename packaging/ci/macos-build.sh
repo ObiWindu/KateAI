@@ -55,8 +55,15 @@ echo "==> Loading Craft environment"
 # CRAFT_PYTHON_BIN aborts the source); relax nounset across the source.
 set +u
 # craftenv.sh rewrites PATH and can hide the system python3 from test
-# subprocesses. Save its directory before sourcing so we can restore it.
-_PYTHON3_DIR="$(dirname "$(command -v python3 2>/dev/null || true)")"
+# subprocesses. Prefer the Apple-signed system python3 on macOS: Homebrew's
+# framework build triggers the application firewall when it binds a listening
+# socket, which hangs the mock LLM server. Fall back to whatever python3 is
+# on PATH when /usr/bin/python3 is unavailable.
+if [[ -x /usr/bin/python3 ]]; then
+    _PYTHON3_DIR="/usr/bin"
+else
+    _PYTHON3_DIR="$(dirname "$(command -v python3 2>/dev/null || true)")"
+fi
 # shellcheck source=/dev/null
 source "${CRAFT_ROOT}/craft/craftenv.sh"
 # Restore the pre-Craft python3 directory to PATH (tests spawn python3 via

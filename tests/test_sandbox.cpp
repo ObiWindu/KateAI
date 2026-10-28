@@ -150,7 +150,9 @@ private Q_SLOTS:
         QVERIFY(!box.allowsRead(u"/etc/passwd"_s, &error));
         QVERIFY(box.allowsRead(u"src/foo.cpp"_s, &error) || error.isEmpty() || !error.contains(u"deny"_s));
         const QString resolved = box.resolve(u"src/foo.cpp"_s, &error, true);
-        QVERIFY(resolved.startsWith(QDir(dir.path()).absolutePath()));
+        QVERIFY(resolved.startsWith(QDir(dir.path()).canonicalPath().isEmpty()
+                                       ? QDir(dir.path()).absolutePath()
+                                       : QDir(dir.path()).canonicalPath()));
     }
 
     void dangerousCommands()

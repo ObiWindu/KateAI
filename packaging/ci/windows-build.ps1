@@ -52,9 +52,25 @@ function Invoke-CraftEnv {
     if (-not (Test-Path $craftEnv)) {
         throw "craftenv.ps1 not found at $craftEnv"
     }
+    # Craft's craftenv.ps1 sanitizes the environment by removing a fixed list
+    # of variables (including GITHUB_ACTION_REF). On some GitHub runners that
+    # variable is not defined, and Remove-Item then throws under
+    # $ErrorActionPreference = "Stop", aborting the whole build. Pre-create
+    # any such variable as an empty string so the removal succeeds.
+    foreach ($name in @("GITHUB_ACTION_REF", "GITHUB_ACTION", "GITHUB_ACTION_PATH", "GITHUB_ACTION_REPOSITORY")) {
+        if (-not (Test-Path "Env:$name")) {
+            Set-Item "Env:$name" ""
+        }
+    }
     # Dot-source: the env script must mutate THIS session (PATH, KDEROOT,
     # craft/cs functions). `&` would run it in a child scope and lose them.
-    . $craftEnv
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        . $craftEnv
+    } finally {
+        $ErrorActionPreference = $prevEap
+    }
 }
 
 if (-not (Test-Path (Join-Path $CraftRoot "craft\craftenv.ps1"))) {
@@ -89,8 +105,10 @@ $configure = @(
 & cmake @configure 2>&1 | Where-Object { $_ -match "error|Error|ERROR|CMake Error" } | Out-Host
 $cores = (Get-CimInstance Win32_ComputerSystem).NumberOfLogicalProcessors
 & cmake --build $BuildDir --config $BuildType -j $cores 2>&1 | Where-Object { $_ -match "error|Error|ERROR|failed|Failed|FAILED|LINK.*error|LNK[0-9]+|fatal error" } | Out-Host
+if ($LASTEXITCODE -ne 0) { throw "cmake build failed with exit code $LASTEXITCODE" }
 
 & ctest --test-dir $BuildDir -C $BuildType --output-on-failure 2>&1 | Where-Object { $_ -match "Failed|failed|ERROR|Error|TOTAL.*failed" } | Out-Host
+if ($LASTEXITCODE -ne 0) { throw "ctest failed with exit code $LASTEXITCODE" }
 New-Item -ItemType Directory -Force -Path $ArtifactsDir | Out-Null
 $built = Get-ChildItem -Path $BuildDir -Recurse -Filter kateai.dll | Select-Object -First 1
 if (-not $built) {

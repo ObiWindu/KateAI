@@ -72,9 +72,23 @@ if (-not (Test-Path $craftEnv)) {
 if (-not (Test-Path $craftEnv)) {
     throw "KDE Craft not found at $CraftRoot. Install it first, see https://develop.kde.org/docs/getting-started/building/craft/"
 }
+# Craft's craftenv.ps1 sanitizes the environment by removing a fixed list of
+# variables (including GITHUB_ACTION_REF). On some GitHub runners that
+# variable is not defined, which makes Remove-Item throw and abort the build.
+foreach ($name in @("GITHUB_ACTION_REF", "GITHUB_ACTION", "GITHUB_ACTION_PATH", "GITHUB_ACTION_REPOSITORY")) {
+    if (-not (Test-Path "Env:$name")) {
+        Set-Item "Env:$name" ""
+    }
+}
 # Dot-source: the env script must mutate THIS session (PATH, KDEROOT, craft/cs
 # functions). `&` would run it in a child scope and lose them.
-. $craftEnv
+$prevEap = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+try {
+    . $craftEnv
+} finally {
+    $ErrorActionPreference = $prevEap
+}
 
 if (-not $SkipKate) {
     Write-Host "==> Building latest Kate via Craft"

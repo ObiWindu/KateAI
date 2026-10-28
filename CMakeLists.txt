@@ -85,6 +85,13 @@ if(BUILD_TESTING)
     # python3 from QProcess. Resolve the absolute path at configure time
     # so tests always find it regardless of PATH.
     find_package(Python3 COMPONENTS Interpreter)
+    # macOS: prefer the system (Apple-signed) python3 over Homebrew's. Homebrew's
+    # framework build triggers the application firewall / Gatekeeper on the
+    # runner when it binds a listening socket, which hangs the mock LLM server
+    # and makes every port-file wait time out.
+    if(APPLE AND EXISTS "/usr/bin/python3")
+        set(Python3_EXECUTABLE "/usr/bin/python3")
+    endif()
     add_subdirectory(tests)
 endif()
 
