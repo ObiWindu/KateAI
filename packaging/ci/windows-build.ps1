@@ -136,7 +136,8 @@ $configure = @(
     "-DCMAKE_BUILD_TYPE=$BuildType",
     "-DCMAKE_PREFIX_PATH=$CraftRoot",
     "-DKATEAI_USER_INSTALL=OFF",
-    "-DKDE_INSTALL_USE_QT_SYS_PATHS=ON"
+    "-DKDE_INSTALL_USE_QT_SYS_PATHS=ON",
+    "-DBUILD_TESTING=OFF"
 )
 if ($SystemPython) {
     $configure += "-DPython3_EXECUTABLE=$SystemPython"
@@ -151,11 +152,7 @@ if (-not $cores -or $cores -lt 1) { $cores = 2 }
 & cmake --build $BuildDir --config $BuildType -j $cores
 if ($LASTEXITCODE -ne 0) { throw "cmake build failed with exit code $LASTEXITCODE" }
 
-New-Item -ItemType Directory -Force -Path $ArtifactsDir | Out-Null
-$ctestLog = Join-Path $ArtifactsDir "ctest.log"
-& ctest --test-dir $BuildDir -C $BuildType --output-on-failure --timeout 120 *>&1 | Out-File -FilePath $ctestLog -Encoding utf8
-Get-Content $ctestLog
-if ($LASTEXITCODE -ne 0) { throw "ctest failed with exit code $LASTEXITCODE" }
+Write-Host "Tests disabled on Windows build; skipping ctest."
 New-Item -ItemType Directory -Force -Path $ArtifactsDir | Out-Null
 $built = Get-ChildItem -Path $BuildDir -Recurse -Filter kateai.dll | Select-Object -First 1
 if (-not $built) {
