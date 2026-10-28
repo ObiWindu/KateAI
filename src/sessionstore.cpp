@@ -5,6 +5,7 @@
 
 #include "sessionstore.h"
 
+#include "contextmanager.h"
 #include "types.h"
 
 #include <KConfigGroup>
@@ -121,17 +122,83 @@ static QString generateConversationId()
     return QUuid::createUuid().toString(QUuid::WithoutBraces);
 }
 
+static bool isBadTitle(const QString &title)
+{
+    const QString trimmed = title.trimmed();
+    if (trimmed.isEmpty()) {
+        return true;
+    }
+    // Compaction summaries must never become a conversation title. Older
+    // builds stored the first line of a compacted summary as the title, so a
+    // title that starts with (or is a truncated prefix of) the summary header
+    // is treated as missing and regenerated.
+    if (trimmed.startsWith(ContextManager::summaryHeader().left(20))) {
+        return true;
+    }
+    if (trimmed.contains(u"compacted to fit the context window"_s)) {
+        return true;
+    }
+    if (trimmed.startsWith(u"[Earlier conversation was compacted"_s)) {
+        return true;
+    }
+    return false;
+}
+
 static QString generateTitleFromMessages(const QList<ChatMessage> &messages)
 {
+    // First pass: a real user request that survived compaction.
     for (const auto &msg : messages) {
-        if (msg.role == ChatMessage::Role::User && !msg.content.isEmpty()) {
-            QString title = msg.content.trimmed().split(u'\n').first();
-            if (title.length() > 50) {
-                title = truncateSafe(title, 47) + u"...";
-            }
+        if (msg.role != ChatMessage::Role::User || msg.content.trimmed().isEmpty()) {
+            continue;
+        }
+        if (msg.content.trimmed().startsWith(ContextManager::summaryHeader())) {
+            continue; // compaction summary, not a real request
+        }
+        if (msg.content.trimmed().startsWith(u"[KateAI agent controller]"_s)) {
+            continue;
+        }
+        QString title = msg.content.trimmed().split(u'\n').first();
+        if (title.length() > 50) {
+            title = truncateSafe(title, 47) + u"...";
+        }
+        if (!title.isEmpty() && !isBadTitle(title)) {
             return title;
         }
     }
+
+    // Second pass: if every user message was folded into a summary, recover the
+    // first request the summary still records instead of showing the marker.
+    for (const auto &msg : messages) {
+        if (msg.role != ChatMessage::Role::User || msg.content.trimmed().isEmpty()) {
+            continue;
+        }
+        if (!msg.content.trimmed().startsWith(ContextManager::summaryHeader())) {
+            continue;
+        }
+        const QStringList lines = msg.content.split(u'\n');
+        bool inAsked = false;
+        for (const QString &line : lines) {
+            const QString trimmedLine = line.trimmed();
+            if (trimmedLine.startsWith(u"What was asked:"_s)) {
+                inAsked = true;
+                continue;
+            }
+            if (inAsked && trimmedLine.startsWith(u"1. "_s)) {
+                QString title = trimmedLine.mid(3).trimmed();
+                if (title.length() > 50) {
+                    title = truncateSafe(title, 47) + u"...";
+                }
+                if (!title.isEmpty() && !isBadTitle(title)) {
+                    return title;
+                }
+                break;
+            }
+            if (inAsked && trimmedLine.isEmpty()) {
+                break;
+            }
+        }
+    }
+
     return QDateTime::currentDateTime().toString(u"yyyy-MM-dd hh:mm"_s);
 }
 
@@ -195,6 +262,46 @@ static SessionStore::SessionData sessionDataFromJson(const QByteArray &payload)
     }
 
     return data;
+}
+
+static void repairBadConversationTitles(const QSqlDatabase &db)
+{
+    QSqlQuery query(db);
+    if (!query.exec(u"SELECT id, title, payload FROM conversations"_s)) {
+        return;
+    }
+
+    struct Row {
+        QString id;
+        QString title;
+        QByteArray payload;
+    };
+    QList<Row> rows;
+    while (query.next()) {
+        Row row;
+        row.id = query.value(0).toString();
+        row.title = query.value(1).toString();
+        row.payload = query.value(2).toByteArray();
+        rows.append(row);
+    }
+
+    for (const Row &row : rows) {
+        if (!isBadTitle(row.title)) {
+            continue;
+        }
+        const SessionStore::SessionData data = sessionDataFromJson(row.payload);
+        const QString newTitle = generateTitleFromMessages(data.messages);
+        if (newTitle.isEmpty() || isBadTitle(newTitle) || newTitle == row.title) {
+            continue;
+        }
+        QSqlQuery update(db);
+        update.prepare(u"UPDATE conversations SET title = ? WHERE id = ?"_s);
+        update.addBindValue(newTitle);
+        update.addBindValue(row.id);
+        if (!update.exec()) {
+            qWarning() << "KateAI: cannot repair conversation title" << row.id << update.lastError().text();
+        }
+    }
 }
 
 // --- session database ---------------------------------------------------
@@ -338,6 +445,7 @@ static QSqlDatabase openStore(bool *ok)
 
     QSqlDatabase db = QSqlDatabase::database(connectionName, true);
     importLegacyConversations(db);
+    repairBadConversationTitles(db);
 
     // The connection belongs to the thread that opened it. When the thread
     // ends, the connection has to go with it, or the next thread with the same
@@ -655,10 +763,10 @@ QList<SessionStore::ConversationInfo> SessionStore::listConversations(int maxCon
     // requested bound (0 means "no limit").
     QSqlQuery query(db);
     if (maxConversations > 0) {
-        query.prepare(u"SELECT id, title, created_at, updated_at, message_count FROM conversations ORDER BY updated_at DESC LIMIT ?"_s);
+        query.prepare(u"SELECT id, title, created_at, updated_at, message_count, payload FROM conversations ORDER BY updated_at DESC LIMIT ?"_s);
         query.addBindValue(maxConversations);
     } else {
-        query.prepare(u"SELECT id, title, created_at, updated_at, message_count FROM conversations ORDER BY updated_at DESC"_s);
+        query.prepare(u"SELECT id, title, created_at, updated_at, message_count, payload FROM conversations ORDER BY updated_at DESC"_s);
     }
     if (!query.exec()) {
         qWarning() << "KateAI: cannot list conversations:" << query.lastError().text();
@@ -673,6 +781,22 @@ QList<SessionStore::ConversationInfo> SessionStore::listConversations(int maxCon
         info.updatedAt = QDateTime::fromMSecsSinceEpoch(query.value(3).toLongLong());
         info.messageCount = query.value(4).toInt();
         info.isActive = (info.id == activeId);
+
+        // Repair any title that still carries a compaction marker so the history
+        // list never shows "earlier conversation was compacted...".
+        if (isBadTitle(info.title)) {
+            const SessionStore::SessionData data = sessionDataFromJson(query.value(5).toByteArray());
+            const QString repaired = generateTitleFromMessages(data.messages);
+            if (!repaired.isEmpty() && !isBadTitle(repaired)) {
+                info.title = repaired;
+                QSqlQuery upd(db);
+                upd.prepare(u"UPDATE conversations SET title = ? WHERE id = ?"_s);
+                upd.addBindValue(repaired);
+                upd.addBindValue(info.id);
+                upd.exec();
+            }
+        }
+
         conversations.append(info);
     }
 
@@ -693,12 +817,25 @@ QString SessionStore::conversationTitle(const QString &conversationId)
     }
 
     QSqlQuery query(db);
-    query.prepare(u"SELECT title FROM conversations WHERE id = ?"_s);
+    query.prepare(u"SELECT title, payload FROM conversations WHERE id = ?"_s);
     query.addBindValue(conversationId);
     if (!query.exec() || !query.next()) {
         return QString();
     }
-    return query.value(0).toString();
+    QString title = query.value(0).toString();
+    if (isBadTitle(title)) {
+        const SessionStore::SessionData data = sessionDataFromJson(query.value(1).toByteArray());
+        const QString repaired = generateTitleFromMessages(data.messages);
+        if (!repaired.isEmpty() && !isBadTitle(repaired)) {
+            title = repaired;
+            QSqlQuery upd(db);
+            upd.prepare(u"UPDATE conversations SET title = ? WHERE id = ?"_s);
+            upd.addBindValue(repaired);
+            upd.addBindValue(conversationId);
+            upd.exec();
+        }
+    }
+    return title;
 }
 
 SessionStore::SessionData SessionStore::loadConversation(const QString &conversationId)
@@ -754,12 +891,15 @@ bool SessionStore::saveConversation(const QString &conversationId, const Session
     if (!isNew && title.isEmpty()) {
         // Preserve existing title when updating (e.g. after context compaction)
         // so titles don't get lost or regenerated from compacted messages.
+        // A previously stored bad/compacted title is treated as missing and
+        // regenerated from the (possibly compacted) messages instead of being
+        // kept forever.
         QSqlQuery getTitle(db);
         getTitle.prepare(u"SELECT title FROM conversations WHERE id = ?"_s);
         getTitle.addBindValue(conversationId);
         if (getTitle.exec() && getTitle.next()) {
             const QString existingTitle = getTitle.value(0).toString();
-            if (!existingTitle.isEmpty()) {
+            if (!existingTitle.isEmpty() && !isBadTitle(existingTitle)) {
                 convTitleToUse = existingTitle;
             } else {
                 convTitleToUse = generateTitleFromMessages(data.messages);
