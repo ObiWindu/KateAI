@@ -32,6 +32,12 @@ $env:PATH = ($env:PATH -split ';' | Where-Object {
     $_ -and $_ -notmatch '(?i)Git\\(bin|usr\\bin)' -and $_ -notmatch '(?i)mingw|strawberry'
 }) -join ';'
 
+# CraftBootstrap.isAndroid() keys off these env vars; on a Windows runner
+# they may be set and would produce an Android ABI. KateAI does not build
+# for Android, so drop them.
+Remove-Item Env:ANDROID_SDK_ROOT -ErrorAction SilentlyContinue
+Remove-Item Env:ANDROID_NDK -ErrorAction SilentlyContinue
+
 # Diagnostics for Craft's VS detection - reduced logging
 $sysVsWhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
 if ($env:CI_DEBUG -eq 'true') {
@@ -46,9 +52,38 @@ function Invoke-CraftEnv {
     if (-not (Test-Path $craftEnv)) {
         throw "craftenv.ps1 not found at $craftEnv"
     }
+    # Craft's craftenv.ps1 sanitizes the environment by removing a fixed list
+    # of variables (including GITHUB_ACTION_REF). On some GitHub runners that
+    # variable is not defined, and Remove-Item then throws under
+    # $ErrorActionPreference = "Stop", aborting the whole build. Pre-create
+    # any such variable as an empty string so the removal succeeds.
+    foreach ($name in @("GITHUB_ACTION_REF", "GITHUB_ACTION", "GITHUB_ACTION_PATH", "GITHUB_ACTION_REPOSITORY", "GITHUB_BASE_REF", "GITHUB_HEAD_REF", "GITHUB_REF", "GITHUB_SHA")) {
+        if (-not (Test-Path "Env:$name")) {
+            Set-Item "Env:$name" ""
+        }
+    }
+    # Craft's craftenv.ps1 removes a fixed list of env vars with Remove-Item,
+    # which throws when a variable is absent. Make that call tolerant so a
+    # missing variable can never abort the build.
+    if (Test-Path $craftEnv) {
+        $content = Get-Content $craftEnv -Raw
+        $content = $content.Replace('Remove-Item ("ENV:{0}" -f ${_}.Name)', 'Remove-Item ("ENV:{0}" -f ${_}.Name) -ErrorAction SilentlyContinue')
+        # Force the craft() helper to use the detected (sufficiently new)
+        # Python instead of a possibly too-old dev-utils/bin/python3.
+        $content = $content.Replace('$python = (Get-Command "$env:KDEROOT/dev-utils/bin/python3" -ErrorAction SilentlyContinue).Source', '$python = $env:CRAFT_PYTHON')
+        $content = $content.Replace('    if (-not $python) {', '    if (-not $python) {')
+        $content = $content.Replace('        $python = $env:CRAFT_PYTHON', '        $python = $env:CRAFT_PYTHON')
+        Set-Content $craftEnv $content
+    }
     # Dot-source: the env script must mutate THIS session (PATH, KDEROOT,
     # craft/cs functions). `&` would run it in a child scope and lose them.
-    . $craftEnv
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        . $craftEnv
+    } finally {
+        $ErrorActionPreference = $prevEap
+    }
 }
 
 if (-not (Test-Path (Join-Path $CraftRoot "craft\craftenv.ps1"))) {
@@ -57,20 +92,43 @@ if (-not (Test-Path (Join-Path $CraftRoot "craft\craftenv.ps1"))) {
         Set-ExecutionPolicy -Scope CurrentUser RemoteSigned -Force -ErrorAction SilentlyContinue
     } catch { }
     python.exe -m pip install --upgrade certifi -q 2>&1 | Out-Null
-    $installer = Join-Path ([IO.Path]::GetTempPath()) "install_craft.ps1"
-    (New-Object net.webclient).DownloadFile(
-        'https://raw.githubusercontent.com/KDE/craft/master/setup/install_craft.ps1', $installer)
     if ($env:CI -eq 'true' -and (Test-Path $CraftRoot)) {
         Remove-Item -Recurse -Force $CraftRoot -ErrorAction SilentlyContinue
     }
-    & $installer -root $CraftRoot -use-defaults 2>&1 | Where-Object { $_ -match "error|Error|ERROR|failed|Failed|FAILED" } | Out-Host
+    $bootstrap = Join-Path ([IO.Path]::GetTempPath()) "CraftBootstrap.py"
+    (New-Object net.webclient).DownloadFile(
+        'https://raw.githubusercontent.com/KDE/craft/master/setup/CraftBootstrap.py', $bootstrap)
+    & python.exe $bootstrap --prefix $CraftRoot --use-defaults
+}
+
+# Capture the runner's own Python before Craft rewrites PATH: Craft's
+# dev-utils Python can trigger a Windows Defender firewall prompt when a
+# test mock server binds a listening socket, which hangs the suite in CI.
+$SystemPython = (Get-Command python.exe -ErrorAction SilentlyContinue).Source
+if (-not $SystemPython) {
+    $SystemPython = (Get-Command python -ErrorAction SilentlyContinue).Source
+}
+if ($SystemPython) {
+    $env:KATEAI_PYTHON = $SystemPython
 }
 
 Invoke-CraftEnv
 
+# gettext's AM_ICONV probes for a *working* iconv with AC_RUN_IFELSE. On the
+# Windows/Craft host that probe executable often cannot run, so configure
+# sets HAVE_ICONV=0. libtextstyle then omits iconv_ostream_create from its
+# implementation while still exporting it through libtextstyle.sym, and the
+# MSVC linker fails with LNK2001. Preset the cache variables so iconv is
+# treated as available (iconv is built just below).
+$env:am_cv_func_iconv = "yes"
+$env:am_cv_func_iconv_works = "guessing yes"
+$env:am_cv_lib_iconv = "yes"
+
 # Build deps and kate with filtered output
-try { craft libs/libiconv 2>&1 | Where-Object { $_ -match "error|Error|ERROR|failed|Failed|FAILED|LINK.*error|LNK" } | Out-Host } catch { }
-craft kate 2>&1 | Where-Object { $_ -match "error|Error|ERROR|failed|Failed|FAILED|LINK.*error|LNK" } | Out-Host
+craft libs/iconv
+if ($LASTEXITCODE -ne 0) { throw "craft libs/iconv failed with exit code $LASTEXITCODE" }
+craft kate
+if ($LASTEXITCODE -ne 0) { throw "craft kate failed with exit code $LASTEXITCODE" }
 
 $BuildDir = Join-Path $Root "build"
 $configure = @(
@@ -80,11 +138,21 @@ $configure = @(
     "-DKATEAI_USER_INSTALL=OFF",
     "-DKDE_INSTALL_USE_QT_SYS_PATHS=ON"
 )
-& cmake @configure 2>&1 | Where-Object { $_ -match "error|Error|ERROR|CMake Error" } | Out-Host
+if ($SystemPython) {
+    $configure += "-DPython3_EXECUTABLE=$SystemPython"
+}
+# No output filtering here: filtering ctest hid QTest's "FAIL!" lines
+# (the filter only matched "Failed"), which made the Windows failure
+# undiagnosable. Show full output so the failing subtest is visible.
+& cmake @configure
+if ($LASTEXITCODE -ne 0) { throw "cmake configure failed with exit code $LASTEXITCODE" }
 $cores = (Get-CimInstance Win32_ComputerSystem).NumberOfLogicalProcessors
-& cmake --build $BuildDir --config $BuildType -j $cores 2>&1 | Where-Object { $_ -match "error|Error|ERROR|failed|Failed|FAILED|LINK.*error|LNK[0-9]+|fatal error" } | Out-Host
+if (-not $cores -or $cores -lt 1) { $cores = 2 }
+& cmake --build $BuildDir --config $BuildType -j $cores
+if ($LASTEXITCODE -ne 0) { throw "cmake build failed with exit code $LASTEXITCODE" }
 
-& ctest --test-dir $BuildDir -C $BuildType --output-on-failure 2>&1 | Where-Object { $_ -match "Failed|failed|ERROR|Error|TOTAL.*failed" } | Out-Host
+& ctest --test-dir $BuildDir -C $BuildType --output-on-failure --timeout 120
+if ($LASTEXITCODE -ne 0) { throw "ctest failed with exit code $LASTEXITCODE" }
 New-Item -ItemType Directory -Force -Path $ArtifactsDir | Out-Null
 $built = Get-ChildItem -Path $BuildDir -Recurse -Filter kateai.dll | Select-Object -First 1
 if (-not $built) {

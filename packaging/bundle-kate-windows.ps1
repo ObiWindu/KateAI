@@ -72,13 +72,43 @@ if (-not (Test-Path $craftEnv)) {
 if (-not (Test-Path $craftEnv)) {
     throw "KDE Craft not found at $CraftRoot. Install it first, see https://develop.kde.org/docs/getting-started/building/craft/"
 }
+# Craft's craftenv.ps1 sanitizes the environment by removing a fixed list of
+# variables (including GITHUB_ACTION_REF). On some GitHub runners that
+# variable is not defined, which makes Remove-Item throw and abort the build.
+foreach ($name in @("GITHUB_ACTION_REF", "GITHUB_ACTION", "GITHUB_ACTION_PATH", "GITHUB_ACTION_REPOSITORY", "GITHUB_BASE_REF", "GITHUB_HEAD_REF", "GITHUB_REF", "GITHUB_SHA")) {
+    if (-not (Test-Path "Env:$name")) {
+        Set-Item "Env:$name" ""
+    }
+}
+if (Test-Path $craftEnv) {
+    $content = Get-Content $craftEnv -Raw
+    $content = $content.Replace('Remove-Item ("ENV:{0}" -f ${_}.Name)', 'Remove-Item ("ENV:{0}" -f ${_}.Name) -ErrorAction SilentlyContinue')
+    $content = $content.Replace('$python = (Get-Command "$env:KDEROOT/dev-utils/bin/python3" -ErrorAction SilentlyContinue).Source', '$python = $env:CRAFT_PYTHON')
+    Set-Content $craftEnv $content
+}
 # Dot-source: the env script must mutate THIS session (PATH, KDEROOT, craft/cs
 # functions). `&` would run it in a child scope and lose them.
-. $craftEnv
+$prevEap = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+try {
+    . $craftEnv
+} finally {
+    $ErrorActionPreference = $prevEap
+}
+
+# gettext's AM_ICONV runs a runtime probe that often fails to execute on the
+# Windows/Craft host, making HAVE_ICONV=0 and breaking the libtextstyle link
+# (LNK2001: iconv_ostream_create). Preset the cache variables and build
+# iconv first, as in packaging\ci\windows-build.ps1.
+$env:am_cv_func_iconv = "yes"
+$env:am_cv_func_iconv_works = "guessing yes"
+$env:am_cv_lib_iconv = "yes"
+try { craft libs/iconv } catch { Write-Host $_ }
 
 if (-not $SkipKate) {
     Write-Host "==> Building latest Kate via Craft"
     craft kate
+    if ($LASTEXITCODE -ne 0) { throw "craft kate failed with exit code $LASTEXITCODE" }
 }
 
 # Build the plugin against the Craft prefix (same flow as windows-build.ps1).
