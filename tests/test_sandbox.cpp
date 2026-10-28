@@ -301,7 +301,10 @@ private Q_SLOTS:
         if (!QFile::link(dir.path() + u"/real"_s, dir.path() + u"/link"_s)) {
             QSKIP("Symlinks unavailable on this filesystem");
         }
-        QFile(dir.path() + u"/real/existing.txt"_s).open(QIODevice::WriteOnly);
+        {
+            QFile f(dir.path() + u"/real/existing.txt"_s);
+            QVERIFY(f.open(QIODevice::WriteOnly));
+        }
 
         Sandbox box(dir.path(), SandboxProfile::Workspace);
         QString error;
@@ -314,7 +317,7 @@ private Q_SLOTS:
 #if defined(Q_OS_WIN)
         QVERIFY(resolved.startsWith(root, Qt::CaseInsensitive));
         QVERIFY(resolved.endsWith(u"existing.txt"_s));
-        QVERIFY(resolved.contains(u'/'_s));
+        QVERIFY(resolved.contains(QChar(u'/')));
 #else
         QVERIFY(resolved.startsWith(root));
         QVERIFY(resolved.endsWith(u"/existing.txt"_s));
