@@ -108,6 +108,9 @@ $SystemPython = (Get-Command python.exe -ErrorAction SilentlyContinue).Source
 if (-not $SystemPython) {
     $SystemPython = (Get-Command python -ErrorAction SilentlyContinue).Source
 }
+if ($SystemPython) {
+    $env:KATEAI_PYTHON = $SystemPython
+}
 
 Invoke-CraftEnv
 

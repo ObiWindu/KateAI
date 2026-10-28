@@ -84,6 +84,12 @@ if(BUILD_TESTING)
     # craftenv.sh rewrites PATH on macOS/Windows CI, hiding the system
     # python3 from QProcess. Resolve the absolute path at configure time
     # so tests always find it regardless of PATH.
+    # Windows: prefer the runner's own Python over Craft's dev-utils Python,
+    # which can trigger a Windows Defender firewall prompt when a mock server
+    # binds a listening socket and hang the suite in CI.
+    if(WIN32 AND DEFINED ENV{KATEAI_PYTHON} AND EXISTS "$ENV{KATEAI_PYTHON}")
+        set(Python3_EXECUTABLE "$ENV{KATEAI_PYTHON}" CACHE FILEPATH "Python interpreter" FORCE)
+    endif()
     find_package(Python3 COMPONENTS Interpreter)
     # macOS: prefer the system (Apple-signed) python3 over Homebrew's. Homebrew's
     # framework build triggers the application firewall / Gatekeeper on the
