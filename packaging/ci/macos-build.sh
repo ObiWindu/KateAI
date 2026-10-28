@@ -59,11 +59,7 @@ set +u
 # framework build triggers the application firewall when it binds a listening
 # socket, which hangs the mock LLM server. Fall back to whatever python3 is
 # on PATH when /usr/bin/python3 is unavailable.
-if [[ -x /usr/bin/python3 ]]; then
-    _PYTHON3_DIR="/usr/bin"
-else
-    _PYTHON3_DIR="$(dirname "$(command -v python3 2>/dev/null || true)")"
-fi
+_PYTHON3_DIR="$(dirname "$(command -v python3 2>/dev/null || true)")"
 # shellcheck source=/dev/null
 source "${CRAFT_ROOT}/craft/craftenv.sh"
 # Restore the pre-Craft python3 directory to PATH (tests spawn python3 via

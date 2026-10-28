@@ -41,11 +41,7 @@ if [[ ! -f "${CRAFT_ROOT}/craft/craftenv.sh" ]]; then
     # Non-interactive: --use-defaults answers the setup wizard prompts.
     echo "==> Bootstrapping KDE Craft into ${CRAFT_ROOT}"
     curl https://raw.githubusercontent.com/KDE/craft/master/setup/CraftBootstrap.py -o /tmp/CraftBootstrap.py
-    if [[ -x /usr/bin/python3 ]]; then
-        /usr/bin/python3 /tmp/CraftBootstrap.py --prefix "${CRAFT_ROOT}" --use-defaults
-    else
-        python3 /tmp/CraftBootstrap.py --prefix "${CRAFT_ROOT}" --use-defaults
-    fi
+    python3 /tmp/CraftBootstrap.py --prefix "${CRAFT_ROOT}" --use-defaults
 fi
 if [[ ! -f "${CRAFT_ROOT}/craft/craftenv.sh" ]]; then
     echo "KDE Craft bootstrap failed for ${CRAFT_ROOT}." >&2
