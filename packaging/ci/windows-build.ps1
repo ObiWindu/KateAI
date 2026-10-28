@@ -116,12 +116,16 @@ $configure = @(
     "-DKATEAI_USER_INSTALL=OFF",
     "-DKDE_INSTALL_USE_QT_SYS_PATHS=ON"
 )
-& cmake @configure 2>&1 | Where-Object { $_ -match "error|Error|ERROR|CMake Error" } | Out-Host
+# No output filtering here: filtering ctest hid QTest's "FAIL!" lines
+# (the filter only matched "Failed"), which made the Windows failure
+# undiagnosable. Show full output so the failing subtest is visible.
+& cmake @configure
+if ($LASTEXITCODE -ne 0) { throw "cmake configure failed with exit code $LASTEXITCODE" }
 $cores = (Get-CimInstance Win32_ComputerSystem).NumberOfLogicalProcessors
-& cmake --build $BuildDir --config $BuildType -j $cores 2>&1 | Where-Object { $_ -match "error|Error|ERROR|failed|Failed|FAILED|LINK.*error|LNK[0-9]+|fatal error" } | Out-Host
+& cmake --build $BuildDir --config $BuildType -j $cores
 if ($LASTEXITCODE -ne 0) { throw "cmake build failed with exit code $LASTEXITCODE" }
 
-& ctest --test-dir $BuildDir -C $BuildType --output-on-failure 2>&1 | Where-Object { $_ -match "Failed|failed|ERROR|Error|TOTAL.*failed" } | Out-Host
+& ctest --test-dir $BuildDir -C $BuildType --output-on-failure
 if ($LASTEXITCODE -ne 0) { throw "ctest failed with exit code $LASTEXITCODE" }
 New-Item -ItemType Directory -Force -Path $ArtifactsDir | Out-Null
 $built = Get-ChildItem -Path $BuildDir -Recurse -Filter kateai.dll | Select-Object -First 1
