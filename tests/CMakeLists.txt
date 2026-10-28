@@ -1,7 +1,11 @@
 # Absolute path to python3, resolved at configure time so tests can spawn it
 # even when PATH is rewritten (Craft's craftenv.sh on macOS/Windows CI).
 if(Python3_Interpreter_FOUND)
-    add_compile_definitions(KATEAI_PYTHON3="${Python3_EXECUTABLE}")
+    # Escape backslashes so a Windows path survives the C++ string literal
+    # (raw backslashes would be misread as escape sequences).
+    set(KATEAI_PYTHON3 "${Python3_EXECUTABLE}")
+    string(REPLACE "\\" "\\\\" KATEAI_PYTHON3 "${KATEAI_PYTHON3}")
+    add_compile_definitions(KATEAI_PYTHON3="${KATEAI_PYTHON3}")
 endif()
 
 function(kateai_test name)
