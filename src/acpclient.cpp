@@ -849,6 +849,10 @@ void AcpClient::prompt(const QString &text)
     if (text.trimmed().isEmpty()) {
         return;
     }
+    // The task a retry continuation quotes: a retry prompt overwrites
+    // m_promptText with itself, and a chained retry must still name the
+    // user's request, not the previous retry.
+    m_taskPrompt = text;
     if (m_state != State::Ready) {
         m_queued.append(QueuedPrompt{text});
         if (m_state != State::Starting) {
@@ -1413,7 +1417,17 @@ void AcpClient::sendPromptNow(const QString &text)
             finishPrompt(QString(), error);
             return;
         }
-        finishPrompt(result.value(u"stopReason"_s).toString(u"end_turn"_s));
+        const QString stopReason = result.value(u"stopReason"_s).toString(u"end_turn"_s);
+        // A "max_tokens" stop is not an error, but the turn is unfinished:
+        // the agent's model ran out of output tokens mid-response — almost
+        // always while generating one oversized tool call, like a whole large
+        // file in a single write. Agents like Mistral Vibe then loop announcing
+        // the write without ever completing it. Continue the turn with
+        // steering to split the work instead of surfacing a dead turn.
+        if (stopReason == u"max_tokens"_s && scheduleOutputLimitRetry()) {
+            return;
+        }
+        finishPrompt(stopReason);
     }, 0);
 }
 
@@ -2723,8 +2737,22 @@ bool AcpClient::isTransientAgentError(const QString &error) const
 
 bool AcpClient::scheduleTurnRetry(const QString &error)
 {
-    if (!isTransientAgentError(error) || !m_settings.enableAutoRetry || m_shuttingDown
-        || m_state != State::Ready || m_sessionId.isEmpty()) {
+    if (!isTransientAgentError(error)) {
+        return false;
+    }
+    m_retryIsOutputLimit = false;
+    return scheduleTurnRetryWithMessage(u"The ACP agent hit a transient error (%1)."_s.arg(error.simplified().left(120)));
+}
+
+bool AcpClient::scheduleOutputLimitRetry()
+{
+    m_retryIsOutputLimit = true;
+    return scheduleTurnRetryWithMessage(u"The ACP agent hit its model output token limit before finishing."_s);
+}
+
+bool AcpClient::scheduleTurnRetryWithMessage(const QString &reason)
+{
+    if (!m_settings.enableAutoRetry || m_shuttingDown || m_state != State::Ready || m_sessionId.isEmpty()) {
         return false;
     }
     const int maxAttempts = qMax(1, m_settings.maxRetryAttempts);
@@ -2750,8 +2778,8 @@ bool AcpClient::scheduleTurnRetry(const QString &error)
     }
     m_promptId = 0;
 
-    const QString message = u"The ACP agent hit a transient error (%1). Retrying in %2s (attempt %3 of %4)."_s
-                                .arg(error.simplified().left(120))
+    const QString message = u"%1 Retrying in %2s (attempt %3 of %4)."_s
+                                .arg(reason)
                                 .arg(delaySeconds)
                                 .arg(m_turnRetryAttempt)
                                 .arg(maxAttempts);
@@ -2801,18 +2829,34 @@ QString AcpClient::turnRetryPrompt() const
     // The failed turn is already part of the agent's session, so the retry asks
     // it to continue instead of replaying the whole request. Agents that roll
     // a failed turn back still see the task through the reminder.
-    QString prompt = u"[KateAI] Your previous turn was interrupted by a transient network error before it "
-                     u"finished. Continue the user's task from the point where it stopped; do not repeat "
-                     u"steps that already completed. "_s;
-    if (acpAgentIsMistralVibe(m_settings)) {
-        // Mistral Vibe can hit its model output limit while producing a single
-        // large file-write tool call. On retry, steer it to bound each tool
-        // call so it can make progress instead of generating the same oversized
-        // payload again.
-        prompt += u"For large files, split the work into small, incremental edits or writes. Do not send one "
-                  u"full-file write in a single tool call; verify each chunk before continuing. "_s;
+    QString prompt;
+    if (m_retryIsOutputLimit) {
+        // The turn ended at the model output limit, typically while the agent
+        // generated one oversized tool call — a whole large file in a single
+        // write. The cut-off completion never ran, so the task is still open;
+        // steer the continuation to bound each tool call so it can finish.
+        prompt = u"[KateAI] Your previous turn was cut off because it reached the model output token limit "
+                 u"before it finished — typically while producing a single oversized tool call, like a whole "
+                 u"large file in one write. Continue the user's task from where it stopped; do not repeat "
+                 u"steps that already completed. If the task involves writing a large file, do not send one "
+                 u"full-file write in a single tool call: create the file with the first chunk, then append "
+                 u"the remaining sections with several smaller write or edit tool calls, a few hundred lines "
+                 u"at a time, verifying each chunk before continuing. If no file is involved, give a shorter, "
+                 u"more focused answer. "_s;
+    } else {
+        prompt = u"[KateAI] Your previous turn was interrupted by a transient network error before it "
+                 u"finished. Continue the user's task from the point where it stopped; do not repeat "
+                 u"steps that already completed. "_s;
+        if (acpAgentIsMistralVibe(m_settings)) {
+            // Mistral Vibe can hit its model output limit while producing a single
+            // large file-write tool call. On retry, steer it to bound each tool
+            // call so it can make progress instead of generating the same oversized
+            // payload again.
+            prompt += u"For large files, split the work into small, incremental edits or writes. Do not send one "
+                      u"full-file write in a single tool call; verify each chunk before continuing. "_s;
+        }
     }
-    const QString original = m_promptText.simplified();
+    const QString original = m_taskPrompt.simplified();
     if (original.length() > 1000) {
         prompt += u"If nothing was started yet, the request was: "_s + original.left(1000) + u"…"_s;
     } else if (!original.isEmpty()) {

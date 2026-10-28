@@ -233,6 +233,32 @@ def handle_prompt(request_id, params):
         )
         return
 
+    if SCENARIO in ("output-limit", "output-limit-persistent"):
+        # Mistral Vibe's failure mode for a large file: the model announces the
+        # write, then the completion is cut off at the output token limit, so
+        # the turn ends with stopReason "max_tokens" and no tool call ran.
+        # "output-limit" recovers once the client nudges it to split the write;
+        # "output-limit-persistent" never does, so the client exhausts its budget.
+        PROMPT_COUNT += 1
+        if SCENARIO == "output-limit" and PROMPT_COUNT > 1:
+            kind = "nudged" if "output token limit" in text else "replayed"
+            session_update(
+                {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": "output-limit-recovered:" + kind},
+                }
+            )
+            result(request_id, {"stopReason": "end_turn"})
+            return
+        session_update(
+            {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "Now I will write the file"},
+            }
+        )
+        result(request_id, {"stopReason": "max_tokens"})
+        return
+
     if SCENARIO == "effort-drift":
         # The agent drops its thinking level mid-turn (an adaptive agent
         # deciding on its own). A client that forces a configured level must

@@ -284,6 +284,16 @@ private:
     // Retries the failed turn after a backoff delay. Returns false when the
     // error is not transient, retries are disabled, or the budget is spent.
     bool scheduleTurnRetry(const QString &error);
+    // A turn that ended with stopReason "max_tokens" was cut off at the
+    // model's output limit before it finished — almost always inside one
+    // oversized tool call, like a whole large file in a single write. The
+    // continuation asks the agent to carry on and split the work. Returns
+    // false when retries are disabled or the budget is spent.
+    bool scheduleOutputLimitRetry();
+    // Shared scheduling for both retry kinds: budget check, backoff delay,
+    // transcript reset, and the retry timer. The reason is the first half of
+    // the status message ("… Retrying in Ns (attempt X of Y).").
+    bool scheduleTurnRetryWithMessage(const QString &reason);
     void executeTurnRetry();
     void stopTurnRetry();
     QString turnRetryPrompt() const;
@@ -330,6 +340,14 @@ private:
     bool m_turnRetryPending = false;
     int m_turnRetryAttempt = 0;
     QPointer<QTimer> m_turnRetryTimer;
+    // Which failure the pending retry answers: a transient transport error or
+    // a turn cut off at the model output limit. turnRetryPrompt() steers the
+    // continuation to match.
+    bool m_retryIsOutputLimit = false;
+    // The user's original request, kept across retries: sendPromptNow()
+    // overwrites m_promptText with the retry prompt itself, and a chained
+    // retry must quote the task, not the previous retry.
+    QString m_taskPrompt;
 
     // The last partial output streamed for each live tool call, so an agent that
     // repeats identical content on a heartbeat does not force a re-render.
