@@ -103,8 +103,19 @@ if (-not (Test-Path (Join-Path $CraftRoot "craft\craftenv.ps1"))) {
 
 Invoke-CraftEnv
 
+# gettext's AM_ICONV probes for a *working* iconv with AC_RUN_IFELSE. On the
+# Windows/Craft host that probe executable often cannot run, so configure
+# sets HAVE_ICONV=0. libtextstyle then omits iconv_ostream_create from its
+# implementation while still exporting it through libtextstyle.sym, and the
+# MSVC linker fails with LNK2001. Preset the cache variables so iconv is
+# treated as available (libiconv is built just below).
+$env:am_cv_func_iconv = "yes"
+$env:am_cv_func_iconv_works = "guessing yes"
+$env:am_cv_lib_iconv = "yes"
+
 # Build deps and kate with filtered output
-try { craft libs/libiconv } catch { Write-Host $_ }
+craft libs/libiconv
+if ($LASTEXITCODE -ne 0) { throw "craft libs/libiconv failed with exit code $LASTEXITCODE" }
 craft kate
 if ($LASTEXITCODE -ne 0) { throw "craft kate failed with exit code $LASTEXITCODE" }
 

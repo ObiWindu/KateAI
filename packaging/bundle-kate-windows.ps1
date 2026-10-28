@@ -96,9 +96,19 @@ try {
     $ErrorActionPreference = $prevEap
 }
 
+# gettext's AM_ICONV runs a runtime probe that often fails to execute on the
+# Windows/Craft host, making HAVE_ICONV=0 and breaking the libtextstyle link
+# (LNK2001: iconv_ostream_create). Preset the cache variables and build
+# libiconv first, as in packaging\ci\windows-build.ps1.
+$env:am_cv_func_iconv = "yes"
+$env:am_cv_func_iconv_works = "guessing yes"
+$env:am_cv_lib_iconv = "yes"
+try { craft libs/libiconv } catch { Write-Host $_ }
+
 if (-not $SkipKate) {
     Write-Host "==> Building latest Kate via Craft"
     craft kate
+    if ($LASTEXITCODE -ne 0) { throw "craft kate failed with exit code $LASTEXITCODE" }
 }
 
 # Build the plugin against the Craft prefix (same flow as windows-build.ps1).
