@@ -101,6 +101,14 @@ if (-not (Test-Path (Join-Path $CraftRoot "craft\craftenv.ps1"))) {
     & python.exe $bootstrap --prefix $CraftRoot --use-defaults
 }
 
+# Capture the runner's own Python before Craft rewrites PATH: Craft's
+# dev-utils Python can trigger a Windows Defender firewall prompt when a
+# test mock server binds a listening socket, which hangs the suite in CI.
+$SystemPython = (Get-Command python.exe -ErrorAction SilentlyContinue).Source
+if (-not $SystemPython) {
+    $SystemPython = (Get-Command python -ErrorAction SilentlyContinue).Source
+}
+
 Invoke-CraftEnv
 
 # gettext's AM_ICONV probes for a *working* iconv with AC_RUN_IFELSE. On the
@@ -127,16 +135,20 @@ $configure = @(
     "-DKATEAI_USER_INSTALL=OFF",
     "-DKDE_INSTALL_USE_QT_SYS_PATHS=ON"
 )
+if ($SystemPython) {
+    $configure += "-DPython3_EXECUTABLE=$SystemPython"
+}
 # No output filtering here: filtering ctest hid QTest's "FAIL!" lines
 # (the filter only matched "Failed"), which made the Windows failure
 # undiagnosable. Show full output so the failing subtest is visible.
 & cmake @configure
 if ($LASTEXITCODE -ne 0) { throw "cmake configure failed with exit code $LASTEXITCODE" }
 $cores = (Get-CimInstance Win32_ComputerSystem).NumberOfLogicalProcessors
+if (-not $cores -or $cores -lt 1) { $cores = 2 }
 & cmake --build $BuildDir --config $BuildType -j $cores
 if ($LASTEXITCODE -ne 0) { throw "cmake build failed with exit code $LASTEXITCODE" }
 
-& ctest --test-dir $BuildDir -C $BuildType --output-on-failure
+& ctest --test-dir $BuildDir -C $BuildType --output-on-failure --timeout 120
 if ($LASTEXITCODE -ne 0) { throw "ctest failed with exit code $LASTEXITCODE" }
 New-Item -ItemType Directory -Force -Path $ArtifactsDir | Out-Null
 $built = Get-ChildItem -Path $BuildDir -Recurse -Filter kateai.dll | Select-Object -First 1
