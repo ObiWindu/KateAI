@@ -569,6 +569,10 @@ void LlmClient::doComplete(const QList<ChatMessage> &messages)
 
     QNetworkRequest request{QUrl(providerBaseUrl(m_settings) + endpoint)};
     request.setHeader(QNetworkRequest::ContentTypeHeader, u"application/json"_s);
+    // Force a fresh connection per request. Reusing a keep-alive connection to
+    // the same host (notably localhost on macOS) serialised the sub-agents'
+    // requests and made them run one after another instead of in parallel.
+    request.setRawHeader("Connection", "close");
     // Idle watchdog: a provider that accepts the connection and then goes quiet
     // would otherwise leave the turn pending forever, because nothing else here
     // sets a deadline. Qt treats this as an *idle* timeout -- it only fires when

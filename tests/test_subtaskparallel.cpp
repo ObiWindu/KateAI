@@ -282,17 +282,14 @@ private Q_SLOTS:
         agent.setSettings(settings);
         agent.setWorkspace(m_workspace->path());
 
-        QString firstId;
-        QObject::connect(&agent, &AgentLoop::subtaskStarted, &agent, [&firstId](const QString &taskId, const QString &, const QString &, const QString &, const QString &) {
-            if (firstId.isEmpty()) {
-                firstId = taskId;
-            }
-        });
-
         agent.start(u"Split this across two agents."_s);
-        QVERIFY(waitFor([&firstId] {
-            return !firstId.isEmpty();
+        QVERIFY(waitFor([&agent] {
+            return agent.runningSubtaskCount() == 2;
         }, 20000));
+        const QString firstId = agent.runningSubtaskIds().isEmpty()
+            ? QString()
+            : agent.runningSubtaskIds().constFirst();
+        QVERIFY(!firstId.isEmpty());
         QCOMPARE(agent.runningSubtaskCount(), 2);
 
         agent.cancelSubtask(firstId);
