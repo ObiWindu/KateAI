@@ -68,6 +68,11 @@ function Invoke-CraftEnv {
     if (Test-Path $craftEnv) {
         $content = Get-Content $craftEnv -Raw
         $content = $content.Replace('Remove-Item ("ENV:{0}" -f ${_}.Name)', 'Remove-Item ("ENV:{0}" -f ${_}.Name) -ErrorAction SilentlyContinue')
+        # Force the craft() helper to use the detected (sufficiently new)
+        # Python instead of a possibly too-old dev-utils/bin/python3.
+        $content = $content.Replace('$python = (Get-Command "$env:KDEROOT/dev-utils/bin/python3" -ErrorAction SilentlyContinue).Source', '$python = $env:CRAFT_PYTHON')
+        $content = $content.Replace('    if (-not $python) {', '    if (-not $python) {')
+        $content = $content.Replace('        $python = $env:CRAFT_PYTHON', '        $python = $env:CRAFT_PYTHON')
         Set-Content $craftEnv $content
     }
     # Dot-source: the env script must mutate THIS session (PATH, KDEROOT,

@@ -83,6 +83,7 @@ foreach ($name in @("GITHUB_ACTION_REF", "GITHUB_ACTION", "GITHUB_ACTION_PATH", 
 if (Test-Path $craftEnv) {
     $content = Get-Content $craftEnv -Raw
     $content = $content.Replace('Remove-Item ("ENV:{0}" -f ${_}.Name)', 'Remove-Item ("ENV:{0}" -f ${_}.Name) -ErrorAction SilentlyContinue')
+    $content = $content.Replace('$python = (Get-Command "$env:KDEROOT/dev-utils/bin/python3" -ErrorAction SilentlyContinue).Source', '$python = $env:CRAFT_PYTHON')
     Set-Content $craftEnv $content
 }
 # Dot-source: the env script must mutate THIS session (PATH, KDEROOT, craft/cs
