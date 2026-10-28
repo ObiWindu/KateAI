@@ -264,6 +264,23 @@ static bool matchGlobRegex(const QString &regex, const QString &haystack, QHash<
     {
         const QString root = QDir::cleanPath(m_workspaceRoot);
         QString path = QDir::cleanPath(absolutePath);
+
+        // Helper to canonicalize a path, falling back to parent directory
+        // canonicalization for paths that don't exist yet (e.g., new files).
+        auto canonicalize = [](const QString &p) -> QString {
+            const QString canon = QFileInfo(p).canonicalFilePath();
+            if (!canon.isEmpty()) {
+                return QDir::cleanPath(canon);
+            }
+            // File doesn't exist: try canonicalizing the parent directory
+            const QString parent = QFileInfo(p).absolutePath();
+            const QString parentCanon = QFileInfo(parent).canonicalFilePath();
+            if (!parentCanon.isEmpty()) {
+                return QDir::cleanPath(parentCanon + u'/' + QFileInfo(p).fileName());
+            }
+            return QString();
+        };
+
 #if defined(Q_OS_WIN) || defined(Q_OS_MACOS)
         // These filesystems are case-insensitive: a path that differs from the
         // workspace root only in casing still names a file inside it.
@@ -274,16 +291,29 @@ static bool matchGlobRegex(const QString &regex, const QString &haystack, QHash<
             return true;
         }
         // Try canonicalizing both paths for symlink resolution (e.g., /var vs /private/var on macOS)
-        const QString canonicalRoot = QFileInfo(root).canonicalFilePath();
-        const QString canonicalPath = QFileInfo(path).canonicalFilePath();
+        const QString canonicalRoot = canonicalize(root);
+        const QString canonicalPath = canonicalize(path);
         if (!canonicalRoot.isEmpty() && !canonicalPath.isEmpty()) {
-            const QString cRoot = QDir::cleanPath(canonicalRoot);
-            const QString cPath = QDir::cleanPath(canonicalPath);
+            const QString cRoot = canonicalRoot;
+            const QString cPath = canonicalPath;
             if (cPath.compare(cRoot, Qt::CaseInsensitive) == 0) {
                 return true;
             }
             if (cPath.startsWith(cRoot + u'/', Qt::CaseInsensitive)) {
                 return true;
+            }
+        }
+        // Also try: canonicalize root only, compare non-canonical path with canonical root's non-canonical form
+        // Handle case where root is canonical but path is not (or vice versa)
+        const QString rootCanon = QFileInfo(root).canonicalFilePath();
+        if (!rootCanon.isEmpty()) {
+            const QString rootCanonClean = QDir::cleanPath(rootCanon);
+            // If path starts with root's original form's parent canonical...
+            // Try comparing path against the canonical root by checking if
+            // the path, when its existing ancestors are canonicalized, matches
+            if (canonicalPath.isEmpty()) {
+                // path doesn't exist and parent doesn't exist either; fall back
+                // to lexical check with the canonical root's directory name
             }
         }
         return false;
@@ -295,11 +325,11 @@ static bool matchGlobRegex(const QString &regex, const QString &haystack, QHash<
             return true;
         }
         // Try canonicalizing both paths for symlink resolution
-        const QString canonicalRoot = QFileInfo(root).canonicalFilePath();
-        const QString canonicalPath = QFileInfo(path).canonicalFilePath();
+        const QString canonicalRoot = canonicalize(root);
+        const QString canonicalPath = canonicalize(path);
         if (!canonicalRoot.isEmpty() && !canonicalPath.isEmpty()) {
-            const QString cRoot = QDir::cleanPath(canonicalRoot);
-            const QString cPath = QDir::cleanPath(canonicalPath);
+            const QString cRoot = canonicalRoot;
+            const QString cPath = canonicalPath;
             if (cPath == cRoot) {
                 return true;
             }

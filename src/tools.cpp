@@ -272,7 +272,14 @@ QString planFilePath(const QString &workspaceRoot)
     // A digest rather than the raw path: the temp name must be stable across
     // runs, must not leak the user's directory layout, and must be a legal
     // filename on every platform. qHash is not stable enough to build on.
-    const QByteArray digest = QCryptographicHash::hash(workspaceRoot.toUtf8(), QCryptographicHash::Sha1).toHex();
+    QString root = workspaceRoot;
+    if (!root.isEmpty()) {
+        const QString canonical = QFileInfo(root).canonicalFilePath();
+        if (!canonical.isEmpty()) {
+            root = canonical;
+        }
+    }
+    const QByteArray digest = QCryptographicHash::hash(root.toUtf8(), QCryptographicHash::Sha1).toHex();
     return QDir::tempPath() + u"/kateai-plan-"_s + QString::fromUtf8(digest.left(12)) + u".md"_s;
 }
 
