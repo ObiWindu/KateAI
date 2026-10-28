@@ -29,12 +29,15 @@ private Q_SLOTS:
     {
         // The containment check used to run only on the canonical path, which
         // does not exist when neither the file nor its parent directory does.
-        // A write to /tmp/<new-dir>/x.txt therefore succeeded in every
-        // profile, including Strict.
+        // A write to <new-dir>/x.txt therefore succeeded in every profile,
+        // including Strict. The escape target is a sibling of the workspace
+        // under the system temp dir, so it is outside on every platform
+        // (Windows included: no Unix-only "/tmp" literal).
         QTemporaryDir dir;
         QVERIFY(dir.isValid());
-        const QString target = QStringLiteral("/tmp/kateai-sandbox-escape-%1/outside.txt")
-                                   .arg(QCoreApplication::applicationPid());
+        const QString target = QDir::tempPath() + u"/kateai-sandbox-escape-%1-%2/outside.txt"_s
+                                   .arg(QCoreApplication::applicationPid())
+                                   .arg(reinterpret_cast<quintptr>(&dir));
         for (SandboxProfile profile : {SandboxProfile::Workspace, SandboxProfile::Strict}) {
             Sandbox box(dir.path(), profile);
             QString error;
@@ -51,11 +54,17 @@ private Q_SLOTS:
     {
         // The read tools are approved without a prompt, so a profile that
         // does not confine them lets the agent read any file of the host.
+        // The "outside" file lives in a second temp dir: portable on every
+        // platform (no Unix-only "/etc/passwd" literal, which maps to a
+        // drive-relative path on Windows).
         QTemporaryDir dir;
         QVERIFY(dir.isValid());
+        QTemporaryDir outside;
+        QVERIFY(outside.isValid());
+        const QString outsideFile = outside.filePath(u"secret.txt"_s);
         Sandbox box(dir.path(), SandboxProfile::Workspace);
         QString error;
-        QVERIFY(!box.allowsRead(u"/etc/passwd"_s, &error));
+        QVERIFY(!box.allowsRead(outsideFile, &error));
         // Inside the workspace it still works.
         QFile file(dir.filePath(u"inside.txt"_s));
         QVERIFY(file.open(QIODevice::WriteOnly));
@@ -64,7 +73,7 @@ private Q_SLOTS:
         QVERIFY(box.allowsRead(u"inside.txt"_s, &error));
         // The opt-in lifts the confinement again.
         Sandbox open(dir.path(), SandboxProfile::Workspace, {}, true);
-        QVERIFY(open.allowsRead(u"/etc/passwd"_s, &error));
+        QVERIFY(open.allowsRead(outsideFile, &error));
     }
 
     void readOnlyCommandRejectsSubstitution()
@@ -145,12 +154,23 @@ private Q_SLOTS:
     {
         QTemporaryDir dir;
         QVERIFY(dir.isValid());
+        QTemporaryDir outside;
+        QVERIFY(outside.isValid());
         Sandbox box(dir.path(), SandboxProfile::Strict);
         QString error;
-        QVERIFY(!box.allowsRead(u"/etc/passwd"_s, &error));
+        QVERIFY(!box.allowsRead(outside.filePath(u"secret.txt"_s), &error));
         QVERIFY(box.allowsRead(u"src/foo.cpp"_s, &error) || error.isEmpty() || !error.contains(u"deny"_s));
-        const QString resolved = box.resolve(u"src/foo.cpp"_s, &error, true);
-        QVERIFY(resolved.startsWith(QDir(dir.path()).absolutePath()));
+        const QString resolved = QDir::fromNativeSeparators(box.resolve(u"src/foo.cpp"_s, &error, true));
+        const QString root = QDir::fromNativeSeparators(QDir(dir.path()).canonicalPath().isEmpty()
+                                                            ? QDir(dir.path()).absolutePath()
+                                                            : QDir(dir.path()).canonicalPath());
+#if defined(Q_OS_WIN)
+        // Windows filesystems are case-insensitive; the temp dir may be
+        // addressed through an 8.3 short name vs. the long canonical form.
+        QVERIFY(resolved.startsWith(root, Qt::CaseInsensitive));
+#else
+        QVERIFY(resolved.startsWith(root));
+#endif
     }
 
     void dangerousCommands()
@@ -281,15 +301,27 @@ private Q_SLOTS:
         if (!QFile::link(dir.path() + u"/real"_s, dir.path() + u"/link"_s)) {
             QSKIP("Symlinks unavailable on this filesystem");
         }
-        QFile(dir.path() + u"/real/existing.txt"_s).open(QIODevice::WriteOnly);
+        {
+            QFile f(dir.path() + u"/real/existing.txt"_s);
+            QVERIFY(f.open(QIODevice::WriteOnly));
+        }
 
         Sandbox box(dir.path(), SandboxProfile::Workspace);
         QString error;
         // A link that stays inside the workspace must resolve and keep working.
-        const QString resolved = box.resolve(u"link/existing.txt"_s, &error, true);
+        // Normalize separators first: canonicalFilePath() may return native
+        // backslashes on Windows while the test compares with "/".
+        const QString resolved = QDir::fromNativeSeparators(box.resolve(u"link/existing.txt"_s, &error, true));
         QVERIFY2(!resolved.isEmpty(), qPrintable(error));
-        QVERIFY(resolved.startsWith(QDir(dir.path()).canonicalPath()));
+        const QString root = QDir::fromNativeSeparators(QDir(dir.path()).canonicalPath());
+#if defined(Q_OS_WIN)
+        QVERIFY(resolved.startsWith(root, Qt::CaseInsensitive));
+        QVERIFY(resolved.endsWith(u"existing.txt"_s));
+        QVERIFY(resolved.contains(QChar(u'/')));
+#else
+        QVERIFY(resolved.startsWith(root));
         QVERIFY(resolved.endsWith(u"/existing.txt"_s));
+#endif
         QVERIFY(box.allowsWrite(u"link/new.txt"_s, &error));
         // A link that points at the workspace root itself resolves inside too.
         if (QFile::link(dir.path(), dir.path() + u"/rootlink"_s)) {
@@ -431,20 +463,27 @@ private Q_SLOTS:
         Sandbox box(dir.path(), SandboxProfile::Strict);
         QString error;
         const QStringList command = box.wrapCommand(u"pwd"_s, &error);
+#if defined(Q_OS_LINUX)
         if (command.isEmpty()) {
             QSKIP(qPrintable(error));
         }
-#if defined(Q_OS_LINUX)
         QVERIFY(command.contains(u"--tmpfs"_s));
         QVERIFY(!command.contains(u"/bin/sh"_s));
         for (int i = 0; i + 2 < command.size(); ++i) {
             QVERIFY(!(command.at(i) == u"--ro-bind"_s && command.at(i + 1) == u"/"_s && command.at(i + 2) == u"/"_s));
         }
 #elif defined(Q_OS_MACOS)
+        if (command.isEmpty()) {
+            QSKIP(qPrintable(error));
+        }
         QVERIFY(command.contains(u"-p"_s));
         QVERIFY(command.join(u' ').contains(u"(deny default)"_s));
 #else
-        QVERIFY(!command.isEmpty());
+        // No isolation mechanism here: the strict profile must be refused
+        // rather than run unsandboxed. No SKIP: an empty command is the
+        // expected result on this platform.
+        QVERIFY(command.isEmpty());
+        QVERIFY(error.contains(u"not available"_s));
 #endif
     }
 
@@ -459,7 +498,15 @@ private Q_SLOTS:
             QString error;
             const QStringList command = box.wrapCommand(u"pwd"_s, &error);
             if (command.isEmpty()) {
+#if defined(Q_OS_LINUX)
                 QSKIP(qPrintable(error));
+#else
+                // Outside Linux there is no bubblewrap: Strict is refused
+                // (empty), other profiles run unsandboxed. Neither writes to
+                // the host tmp through a sandbox mount, so there is nothing
+                // to check.
+                continue;
+#endif
             }
 #if defined(Q_OS_LINUX)
             // A private tmpfs, not the /tmp of the host.

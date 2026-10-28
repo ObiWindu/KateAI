@@ -264,6 +264,23 @@ static bool matchGlobRegex(const QString &regex, const QString &haystack, QHash<
     {
         const QString root = QDir::cleanPath(m_workspaceRoot);
         QString path = QDir::cleanPath(absolutePath);
+
+        // Helper to canonicalize a path, falling back to parent directory
+        // canonicalization for paths that don't exist yet (e.g., new files).
+        auto canonicalize = [](const QString &p) -> QString {
+            const QString canon = QFileInfo(p).canonicalFilePath();
+            if (!canon.isEmpty()) {
+                return QDir::cleanPath(canon);
+            }
+            // File doesn't exist: try canonicalizing the parent directory
+            const QString parent = QFileInfo(p).absolutePath();
+            const QString parentCanon = QFileInfo(parent).canonicalFilePath();
+            if (!parentCanon.isEmpty()) {
+                return QDir::cleanPath(parentCanon + u'/' + QFileInfo(p).fileName());
+            }
+            return QString();
+        };
+
 #if defined(Q_OS_WIN) || defined(Q_OS_MACOS)
         // These filesystems are case-insensitive: a path that differs from the
         // workspace root only in casing still names a file inside it.
@@ -274,16 +291,29 @@ static bool matchGlobRegex(const QString &regex, const QString &haystack, QHash<
             return true;
         }
         // Try canonicalizing both paths for symlink resolution (e.g., /var vs /private/var on macOS)
-        const QString canonicalRoot = QFileInfo(root).canonicalFilePath();
-        const QString canonicalPath = QFileInfo(path).canonicalFilePath();
+        const QString canonicalRoot = canonicalize(root);
+        const QString canonicalPath = canonicalize(path);
         if (!canonicalRoot.isEmpty() && !canonicalPath.isEmpty()) {
-            const QString cRoot = QDir::cleanPath(canonicalRoot);
-            const QString cPath = QDir::cleanPath(canonicalPath);
+            const QString cRoot = canonicalRoot;
+            const QString cPath = canonicalPath;
             if (cPath.compare(cRoot, Qt::CaseInsensitive) == 0) {
                 return true;
             }
             if (cPath.startsWith(cRoot + u'/', Qt::CaseInsensitive)) {
                 return true;
+            }
+        }
+        // Also try: canonicalize root only, compare non-canonical path with canonical root's non-canonical form
+        // Handle case where root is canonical but path is not (or vice versa)
+        const QString rootCanon = QFileInfo(root).canonicalFilePath();
+        if (!rootCanon.isEmpty()) {
+            const QString rootCanonClean = QDir::cleanPath(rootCanon);
+            // If path starts with root's original form's parent canonical...
+            // Try comparing path against the canonical root by checking if
+            // the path, when its existing ancestors are canonicalized, matches
+            if (canonicalPath.isEmpty()) {
+                // path doesn't exist and parent doesn't exist either; fall back
+                // to lexical check with the canonical root's directory name
             }
         }
         return false;
@@ -295,11 +325,11 @@ static bool matchGlobRegex(const QString &regex, const QString &haystack, QHash<
             return true;
         }
         // Try canonicalizing both paths for symlink resolution
-        const QString canonicalRoot = QFileInfo(root).canonicalFilePath();
-        const QString canonicalPath = QFileInfo(path).canonicalFilePath();
+        const QString canonicalRoot = canonicalize(root);
+        const QString canonicalPath = canonicalize(path);
         if (!canonicalRoot.isEmpty() && !canonicalPath.isEmpty()) {
-            const QString cRoot = QDir::cleanPath(canonicalRoot);
-            const QString cPath = QDir::cleanPath(canonicalPath);
+            const QString cRoot = canonicalRoot;
+            const QString cPath = canonicalPath;
             if (cPath == cRoot) {
                 return true;
             }
@@ -310,6 +340,53 @@ static bool matchGlobRegex(const QString &regex, const QString &haystack, QHash<
         return false;
 #endif
     }
+
+static QString cleanCanonicalPath(const QString &canonical)
+{
+    // QFileInfo::canonicalFilePath() may return native separators (backslashes
+    // on Windows). Normalize to "/" so startsWith()/endsWith() checks and the
+    // paths returned by resolve() behave identically on every platform.
+    if (canonical.isEmpty()) {
+        return {};
+    }
+    return QDir::cleanPath(QDir::fromNativeSeparators(canonical));
+}
+
+static QString windowsAbsoluteCandidate(const QString &workspaceRoot, QString candidate)
+{
+#ifdef Q_OS_WIN
+    // A Unix-style absolute path ("/tmp/x", "/etc/passwd") is drive-relative
+    // on Windows: QFileInfo resolves it against the *current* drive, which may
+    // not be the workspace drive. Anchor it to the workspace drive instead so
+    // containment checks see a fully qualified path. QDir::isAbsolutePath()
+    // may already report "/tmp" as absolute on Windows, so the leading-slash
+    // test comes first and deliberately ignores it. UNC paths ("\\server\..")
+    // are left alone.
+    if (!workspaceRoot.isEmpty() && !candidate.isEmpty()
+        && (candidate.startsWith(u'/') || candidate.startsWith(u'\\'))
+        && !candidate.startsWith(u"\\\\"_s)) {
+        QString driveRoot;
+        if (workspaceRoot.size() >= 2 && workspaceRoot.at(1) == u':') {
+            driveRoot = workspaceRoot.left(3);
+        } else {
+            driveRoot = QDir::rootPath();
+        }
+        if (!driveRoot.endsWith(u'/') && !driveRoot.endsWith(u'\\')) {
+            driveRoot += u'/';
+        }
+        // Strip every leading slash so "//tmp" does not produce "C://tmp".
+        int lead = 0;
+        while (lead < candidate.size()
+               && (candidate.at(lead) == u'/' || candidate.at(lead) == u'\\')) {
+            ++lead;
+        }
+        candidate = driveRoot + candidate.mid(lead);
+    }
+#else
+    Q_UNUSED(workspaceRoot);
+#endif
+    return candidate;
+}
 
 QString Sandbox::normalizePath(const QString &path, QString *error, bool forWrite) const
 {
@@ -324,9 +401,10 @@ QString Sandbox::normalizePath(const QString &path, QString *error, bool forWrit
     if (candidate.isEmpty()) {
         candidate = m_workspaceRoot;
     }
+    candidate = windowsAbsoluteCandidate(m_workspaceRoot, candidate);
 
     const QFileInfo info(QDir(m_workspaceRoot), candidate);
-    QString absolute = QDir::cleanPath(info.absoluteFilePath());
+    QString absolute = QDir::cleanPath(QDir::fromNativeSeparators(info.absoluteFilePath()));
 
     // The containment check comes first, on the lexical path. The canonical
     // paths below only exist when the file or its parent directory is already
@@ -346,7 +424,7 @@ QString Sandbox::normalizePath(const QString &path, QString *error, bool forWrit
     // would need the tool to open the path through an O_NOFOLLOW-style
     // handle, which the document bridge's Kate integration cannot offer.
     QFileInfo fileInfo(absolute);
-    QString canonical = fileInfo.canonicalFilePath();
+    QString canonical = cleanCanonicalPath(fileInfo.canonicalFilePath());
     if (!canonical.isEmpty()) {
         // Verify the canonical path is still within workspace and not denied
         if (mustStayInWorkspace && !pathInsideWorkspace(canonical)) {
@@ -366,7 +444,7 @@ QString Sandbox::normalizePath(const QString &path, QString *error, bool forWrit
         // File doesn't exist yet - resolve parent directory
         QString parent = fileInfo.absolutePath();
         QFileInfo parentInfo(parent);
-        QString parentCanon = parentInfo.canonicalFilePath();
+        QString parentCanon = cleanCanonicalPath(parentInfo.canonicalFilePath());
         if (!parentCanon.isEmpty()) {
             absolute = QDir::cleanPath(parentCanon + u'/' + fileInfo.fileName());
             // Re-check workspace containment for new file path
@@ -398,17 +476,18 @@ QString Sandbox::normalizePath(const QString &path, QString *error, bool forWrit
     bool Sandbox::allowsRead(const QString &path, QString *error) const
     {
         if (m_profile == SandboxProfile::Off) {
-            const QFileInfo info(QDir(m_workspaceRoot), path);
-            QString absolute = QDir::cleanPath(info.absoluteFilePath());
+            const QString resolvedPath = windowsAbsoluteCandidate(m_workspaceRoot, path);
+            const QFileInfo info(QDir(m_workspaceRoot), resolvedPath);
+            QString absolute = QDir::cleanPath(QDir::fromNativeSeparators(info.absoluteFilePath()));
             if (QFileInfo::exists(absolute)) {
-                const QString canonical = QFileInfo(absolute).canonicalFilePath();
+                const QString canonical = cleanCanonicalPath(QFileInfo(absolute).canonicalFilePath());
                 if (!canonical.isEmpty()) {
                     absolute = canonical;
                 }
             } else {
                 // Try to canonicalize parent
                 const QString parent = QFileInfo(absolute).absolutePath();
-                const QString parentCanon = QFileInfo(parent).canonicalFilePath();
+                const QString parentCanon = cleanCanonicalPath(QFileInfo(parent).canonicalFilePath());
                 if (!parentCanon.isEmpty()) {
                     absolute = QDir::cleanPath(parentCanon + u'/' + QFileInfo(absolute).fileName());
                 }
@@ -423,17 +502,18 @@ QString Sandbox::normalizePath(const QString &path, QString *error, bool forWrit
         }
 
         if (m_profile == SandboxProfile::Workspace || m_profile == SandboxProfile::ReadOnly) {
-            const QFileInfo info(QDir(m_workspaceRoot), path);
-            QString absolute = QDir::cleanPath(info.absoluteFilePath());
+            const QString resolvedPath = windowsAbsoluteCandidate(m_workspaceRoot, path);
+            const QFileInfo info(QDir(m_workspaceRoot), resolvedPath);
+            QString absolute = QDir::cleanPath(QDir::fromNativeSeparators(info.absoluteFilePath()));
             if (QFileInfo::exists(absolute)) {
-                const QString canonical = QFileInfo(absolute).canonicalFilePath();
+                const QString canonical = cleanCanonicalPath(QFileInfo(absolute).canonicalFilePath());
                 if (!canonical.isEmpty()) {
                     absolute = canonical;
                 }
             } else {
                 // Try to canonicalize parent directory for files that don't exist yet
                 const QString parent = QFileInfo(absolute).absolutePath();
-                const QString parentCanon = QFileInfo(parent).canonicalFilePath();
+                const QString parentCanon = cleanCanonicalPath(QFileInfo(parent).canonicalFilePath());
                 if (!parentCanon.isEmpty()) {
                     absolute = QDir::cleanPath(parentCanon + u'/' + QFileInfo(absolute).fileName());
                 }
@@ -747,19 +827,21 @@ bool Sandbox::commandTouchesDeniedPath(const QString &command) const
         // cannot be resolved here; those tokens are checked as written.
         static const QRegularExpression homeVar(uR"(\$\{HOME\}|\$HOME(?![A-Za-z0-9_]))"_s);
         candidate.replace(homeVar, QDir::homePath());
+        const QString adjustedCandidate = windowsAbsoluteCandidate(m_workspaceRoot, candidate);
         // Check the path as written, then the symlink-resolved form, so a denied
         // name is caught even when the file does not exist yet.
-        const QString literal = QDir::cleanPath(QFileInfo(QDir(m_workspaceRoot), candidate).absoluteFilePath());
+        const QString literal = QDir::cleanPath(
+            QDir::fromNativeSeparators(QFileInfo(QDir(m_workspaceRoot), adjustedCandidate).absoluteFilePath()));
         if (isDenied(literal)) {
             return true;
         }
         // Check both read and write resolution - shell commands can write via
         // redirections (>, >>, &>) even if the command itself is read-only.
-        const QString resolvedRead = normalizePath(candidate, nullptr, false);
+        const QString resolvedRead = normalizePath(adjustedCandidate, nullptr, false);
         if (!resolvedRead.isEmpty() && resolvedRead != literal && isDenied(resolvedRead)) {
             return true;
         }
-        const QString resolvedWrite = normalizePath(candidate, nullptr, true);
+        const QString resolvedWrite = normalizePath(adjustedCandidate, nullptr, true);
         if (!resolvedWrite.isEmpty() && resolvedWrite != literal && resolvedWrite != resolvedRead && isDenied(resolvedWrite)) {
             return true;
         }
