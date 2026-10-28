@@ -136,12 +136,12 @@ namespace KateAi
         // every guard that checks for an empty root would then never fire.
         m_workspaceRoot = workspaceRoot.trimmed().isEmpty()
             ? QString()
-            : QDir::cleanPath(QDir(workspaceRoot).absolutePath());
+            : QDir::cleanPath(QDir::fromNativeSeparators(QDir(workspaceRoot).absolutePath()));
         // Canonicalize the workspace root to resolve symlinks (e.g., /var vs /private/var on macOS)
         if (!m_workspaceRoot.isEmpty()) {
             const QString canonicalRoot = QFileInfo(m_workspaceRoot).canonicalFilePath();
             if (!canonicalRoot.isEmpty()) {
-                m_workspaceRoot = QDir::cleanPath(canonicalRoot);
+                m_workspaceRoot = QDir::cleanPath(QDir::fromNativeSeparators(canonicalRoot));
             }
         }
     }
