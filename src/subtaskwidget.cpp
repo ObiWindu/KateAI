@@ -12,6 +12,7 @@
 
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QLayout>
 #include <QPushButton>
 #include <QResizeEvent>
 #include <QTextBrowser>
@@ -19,6 +20,7 @@
 #include <QScrollBar>
 #include <QTimer>
 #include <QVBoxLayout>
+#include <QtMath>
 
 using namespace Qt::Literals::StringLiterals;
 
@@ -151,12 +153,8 @@ SubtaskWidget::SubtaskWidget(const QString &taskId, QWidget *parent)
     activityLayout->addWidget(m_activity);
 
     connect(m_toggle, &QPushButton::clicked, this, [this] {
-        const bool show = !m_activity->isVisible();
-        m_activity->setVisible(show);
-        m_toggle->setText(show ? i18n("Activity  ▾") : i18n("Activity  ▸"));
-        m_toggle->setToolTip(show ? i18n("Hide the sub-agent's tool calls and progress")
-                                  : i18n("Show the sub-agent's tool calls and progress"));
-        reflowNow();
+        m_activityUserSet = true;
+        setActivityVisible(m_activity->isHidden());
     });
     m_expandedActivity = m_activityContainer;
 
@@ -199,9 +197,12 @@ void SubtaskWidget::startAgent(const QString &agentName, const QString &modeId, 
     m_currentIsError = false;
     m_current->clear();
     // A fresh run starts a fresh log; the previous run's steps left with its
-    // card.
+    // card. The disclosure starts closed and opens itself on the first step,
+    // unless the user has started choosing for themselves.
     m_activityLog.clear();
+    m_activityUserSet = false;
     rebuildActivityLog();
+    setActivityVisible(false);
     m_current->setVisible(false);
     updateHeader();
     updateElapsed();
@@ -228,8 +229,14 @@ void SubtaskWidget::appendActivity(const QString &line, bool isError)
         m_activityLog.removeFirst();
     }
     rebuildActivityLog();
-    // Mirror the step onto the card itself: the log below is opt-in, so without
-    // this line a running card reported a step count and nothing else.
+    // The log is where the data is, so it opens itself on the sub-agent's first
+    // step: a running card should show the work, not a disclosure hiding it.
+    // From then on the user decides.
+    if (!m_activityUserSet && m_stepCount == 1) {
+        setActivityVisible(true);
+    }
+    // Mirror the step onto the card itself: the Doing: line names what the
+    // sub-agent is on even once the log below is closed again.
     m_currentLine = line;
     m_currentIsError = isError;
     updateCurrentActivity();
@@ -258,6 +265,7 @@ void SubtaskWidget::rebuildActivityLog()
     }
     m_activity->setDocument(makeMarkdownDocument(closeMarkdown(joined), ChatTheme::messageCss()));
     m_activity->verticalScrollBar()->setValue(m_activity->verticalScrollBar()->maximum());
+    updateActivityToggle();
 }
 
 void SubtaskWidget::appendMessageDelta(const QString &delta)
@@ -327,6 +335,11 @@ void SubtaskWidget::finishAgent(const ToolResult &result)
     m_answer->setVisible(true);
     m_bodyCaption->setText(result.ok ? i18n("Result") : i18n("Error"));
     m_bodyCaption->setVisible(true);
+    // The run is over, so the card's subject is the answer: the step-by-step
+    // log folds away with it (unless the user opened it and wants it kept).
+    if (!m_activityUserSet) {
+        setActivityVisible(false);
+    }
     m_currentLine.clear();
     m_streamedMessage.clear();
     m_currentIsError = false;
@@ -349,6 +362,10 @@ void SubtaskWidget::markAbandoned(const QString &reason)
     m_answer->setVisible(true);
     m_bodyCaption->setText(i18n("Cancelled"));
     m_bodyCaption->setVisible(true);
+    // Same as a finished run: with the steps behind it, the log folds away.
+    if (!m_activityUserSet) {
+        setActivityVisible(false);
+    }
     m_currentLine.clear();
     m_streamedMessage.clear();
     m_currentIsError = false;
@@ -387,6 +404,13 @@ void SubtaskWidget::resizeEvent(QResizeEvent *event)
     // The live step is elided against the card width, so it has to be measured
     // again whenever that width changes.
     updateCurrentActivity();
+    // The width also decides how the two documents wrap, and their height is
+    // what the card's minimum height is derived from. Only a width change can
+    // change that, so a height-only resize (one this reflow would itself cause)
+    // cannot feed back into another one.
+    if (m_answer && event->oldSize().width() != event->size().width()) {
+        reflowNow();
+    }
 }
 
 void SubtaskWidget::updateHeader()
@@ -418,34 +442,11 @@ void SubtaskWidget::updateElapsed()
     // The status line carries the state, the elapsed time and the step count.
     // The state word is coloured so a finished, failed or cancelled card can be
     // told apart from a running one without reading the text.
-    QString stateWord;
-    QString stateColor;
-    if (m_running) {
-        stateWord = i18n("Running");
-        stateColor = ChatTheme::accent();
-    } else if (m_cancelled) {
-        stateWord = i18n("Cancelled");
-        stateColor = ChatTheme::textMuted();
-    } else if (m_failed) {
-        stateWord = i18n("Failed");
-        stateColor = ChatTheme::danger();
-    } else {
-        stateWord = i18n("Done");
-        stateColor = ChatTheme::success();
-    }
-
-    const qint64 secs = m_elapsed.elapsed() / 1000;
-    QString timeStr;
-    if (secs < 60) {
-        timeStr = QStringLiteral("%1s").arg(secs);
-    } else {
-        const int mins = static_cast<int>(secs / 60);
-        const int remSecs = static_cast<int>(secs % 60);
-        timeStr = i18n("%1m %2s", mins, remSecs);
-    }
+    const QString stateWord = this->stateWord();
+    const QString stateColor = this->stateColor();
 
     QStringList parts;
-    parts << timeStr;
+    parts << timeText();
     if (m_stepCount > 0) {
         parts << i18np("%1 step", "%1 steps", m_stepCount);
     }
@@ -455,6 +456,76 @@ void SubtaskWidget::updateElapsed()
                                      " <span style=\"color:%3;\">·</span> %4")
                           .arg(stateColor, stateWord.toHtmlEscaped(), ChatTheme::textMuted(),
                                parts.join(QStringLiteral(" \xC2\xB7 "))));
+    // The tab strip points at this headline; it repaints on every tick.
+    Q_EMIT appearanceChanged();
+}
+
+QString SubtaskWidget::stateWord() const
+{
+    if (m_running) {
+        return i18n("Running");
+    }
+    if (m_cancelled) {
+        return i18n("Cancelled");
+    }
+    if (m_failed) {
+        return i18n("Failed");
+    }
+    return i18n("Done");
+}
+
+QString SubtaskWidget::stateColor() const
+{
+    if (m_running) {
+        return ChatTheme::accent();
+    }
+    if (m_cancelled) {
+        return ChatTheme::textMuted();
+    }
+    if (m_failed) {
+        return ChatTheme::danger();
+    }
+    return ChatTheme::success();
+}
+
+QString SubtaskWidget::stateGlyph() const
+{
+    if (m_running) {
+        return u"◐"_s;
+    }
+    if (m_failed) {
+        return u"✗"_s;
+    }
+    if (m_cancelled) {
+        return u"⊘"_s;
+    }
+    return u"✓"_s;
+}
+
+QString SubtaskWidget::displayName() const
+{
+    return m_agentName.isEmpty() ? i18n("Sub-agent") : m_agentName;
+}
+
+QString SubtaskWidget::timeText() const
+{
+    const qint64 secs = m_elapsed.isValid() ? m_elapsed.elapsed() / 1000 : 0;
+    if (secs < 60) {
+        return QStringLiteral("%1s").arg(secs);
+    }
+    const int mins = static_cast<int>(secs / 60);
+    const int remSecs = static_cast<int>(secs % 60);
+    return i18n("%1m %2s", mins, remSecs);
+}
+
+QString SubtaskWidget::statusText() const
+{
+    QStringList parts;
+    parts << timeText();
+    if (m_stepCount > 0) {
+        parts << i18np("%1 step", "%1 steps", m_stepCount);
+    }
+    return QStringLiteral("%1 \xC2\xB7 %2").arg(stateWord(), parts.join(QStringLiteral(" \xC2\xB7 ")));
 }
 
 void SubtaskWidget::applyStyle()
@@ -474,7 +545,7 @@ void SubtaskWidget::applyStyle()
         border = ChatTheme::success();
     }
 
-    const QString glyph = m_running ? u"◐"_s : (m_failed ? u"✗"_s : (m_cancelled ? u"⊘"_s : u"✓"_s));
+    const QString glyph = stateGlyph();
     m_icon->setText(glyph);
     m_icon->setStyleSheet(QStringLiteral("font-size: 12px; color:%1;").arg(border));
 
@@ -515,24 +586,143 @@ void SubtaskWidget::applyStyle()
             .arg(ChatTheme::panelBg(), ChatTheme::border(), ChatTheme::textMuted()));
 }
 
-void SubtaskWidget::setActivityVisible(bool visible)
+void SubtaskWidget::setActivityVisible(bool open)
 {
-    if (m_activity) {
-        m_activity->setVisible(visible);
+    if (!m_activity) {
+        return;
     }
+    m_activity->setVisible(open);
+    updateActivityToggle();
+    reflowNow();
+}
+
+void SubtaskWidget::updateActivityToggle()
+{
+    if (!m_toggle || !m_activity) {
+        return;
+    }
+    const bool open = !m_activity->isHidden();
+    // Once there are steps behind it the disclosure says how many, so the user
+    // can see there is data there without opening it first.
+    const QString arrow = open ? u"▾"_s : u"▸"_s;
+    const QString text = m_activityLog.isEmpty() ? i18n("Activity  %1", arrow)
+                                                 : i18n("Activity (%1)  %2", m_activityLog.size(), arrow);
+    m_toggle->setText(text);
+    m_toggle->setToolTip(open ? i18n("Hide the sub-agent's tool calls and progress")
+                              : i18n("Show the sub-agent's tool calls and progress"));
+}
+
+void SubtaskWidget::setHeightBudget(int px)
+{
+    if (m_heightBudget == px) {
+        return;
+    }
+    m_heightBudget = px;
+    setMaximumHeight(px > 0 ? px : QWIDGETSIZE_MAX);
+    reflowNow();
+}
+
+int SubtaskWidget::activityChromeHeight() const
+{
+    if (!m_activityContainer || !m_activityContainer->layout()) {
+        return 0;
+    }
+    const QLayout *activityLayout = m_activityContainer->layout();
+    const QMargins margins = activityLayout->contentsMargins();
+    int height = margins.top() + margins.bottom();
+    int rows = 0;
+    if (m_toggle && !m_toggle->isHidden()) {
+        height += m_toggle->sizeHint().height();
+        ++rows;
+    }
+    // The log itself is body, but the gap above it is chrome.
+    if (m_activity && !m_activity->isHidden() && rows > 0) {
+        height += activityLayout->spacing();
+    }
+    return height;
+}
+
+int SubtaskWidget::chromeHeight() const
+{
+    const QLayout *root = layout();
+    if (!root) {
+        return 0;
+    }
+    const QMargins margins = root->contentsMargins();
+    int height = margins.top() + margins.bottom();
+    int rows = 0;
+    for (int i = 0; i < root->count(); ++i) {
+        QLayoutItem *item = root->itemAt(i);
+        if (!item) {
+            continue;
+        }
+        QWidget *widget = item->widget();
+        if (widget && widget->isHidden()) {
+            continue;
+        }
+        if (widget == m_answer) {
+            // Body: it is sized from the height budget, not from the chrome.
+            continue;
+        }
+        if (widget == m_activityContainer) {
+            height += activityChromeHeight();
+            ++rows;
+            continue;
+        }
+        height += item->sizeHint().height();
+        ++rows;
+    }
+    if (rows > 1) {
+        height += root->spacing() * (rows - 1);
+    }
+    return height;
 }
 
 void SubtaskWidget::reflowNow()
 {
-    if (m_answer->isVisible()) {
+    if (!m_answer || !m_activity) {
+        return;
+    }
+    // Whether the user can see these at all: an explicitly hidden document
+    // costs no height, whatever it once demanded.
+    const bool showAnswer = !m_answer->isHidden();
+    const bool showActivity = !m_activity->isHidden();
+
+    int answerWant = 0;
+    if (showAnswer) {
         m_answer->setMinimumHeight(0);
         m_answer->document()->setTextWidth(m_answer->viewport()->width());
-        m_answer->setMinimumHeight(m_answer->document()->size().height());
+        answerWant = qCeil(m_answer->document()->size().height());
     }
-    if (m_activity && m_activity->isVisible()) {
+    int activityWant = 0;
+    if (showActivity) {
+        m_activity->setMinimumHeight(0);
         m_activity->document()->setTextWidth(m_activity->viewport()->width());
-        m_activity->setMinimumHeight(m_activity->document()->size().height());
+        activityWant = qCeil(m_activity->document()->size().height());
     }
+
+    int answerMin = answerWant;
+    int activityMin = activityWant;
+    if (m_heightBudget > 0) {
+        // Under a budget the card may not grow to fit its documents, so each
+        // one is only asked for what is left after the chrome -- and scrolls
+        // inside the card past that, instead of pushing the card over the strip
+        // it lives in.
+        const int body = qMax(0, m_heightBudget - chromeHeight());
+        if (showAnswer && showActivity) {
+            // The log is supporting detail; the task and the answer are the
+            // card's subject, so the log takes at most a third of the body.
+            activityMin = qMin(activityWant, body / 3);
+            answerMin = qMin(answerWant, body - activityMin);
+        } else if (showAnswer) {
+            answerMin = qMin(answerWant, body);
+        } else if (showActivity) {
+            activityMin = qMin(activityWant, body);
+        }
+    }
+
+    m_answer->setMinimumHeight(showAnswer ? answerMin : 0);
+    m_activity->setMinimumHeight(showActivity ? activityMin : 0);
     updateGeometry();
 }
 

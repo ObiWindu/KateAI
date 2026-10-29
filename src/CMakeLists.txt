@@ -60,6 +60,7 @@ target_sources(kateai PRIVATE
     permissionbar.cpp
     edittracker.cpp
     subtaskwidget.cpp
+    subtaskdock.cpp
     suggestionwidget.cpp
     questionwidget.cpp
     todowidget.cpp

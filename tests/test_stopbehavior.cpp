@@ -465,6 +465,36 @@ private Q_SLOTS:
         QWidget *dock = intentDock(widget.get());
         QVERIFY2(dock && dock->isVisible(), "the sub-agent cards were never docked");
 
+        // The two cards share the dock's slot as tabs: only one is on top, so
+        // the strip cannot stack up over the composer, and each docked card is
+        // capped to a quarter of the panel so a chatty sub-agent cannot
+        // outgrow it. (A card already retired into the transcript is a normal
+        // transcript card again and is deliberately uncapped.)
+        auto isDocked = [&](SubtaskWidget *agent) {
+            for (QWidget *w = agent; w; w = w->parentWidget()) {
+                if (w == dock) {
+                    return true;
+                }
+            }
+            return false;
+        };
+        int visibleDockedCards = 0;
+        for (SubtaskWidget *agent : std::as_const(agents)) {
+            if (!isDocked(agent)) {
+                continue;
+            }
+            if (agent->isVisible()) {
+                ++visibleDockedCards;
+            }
+            QVERIFY2(agent->maximumHeight() <= widget->height() / 4,
+                     qPrintable(QStringLiteral("docked card allows %1px, a quarter of the panel is %2px")
+                                    .arg(agent->maximumHeight())
+                                    .arg(widget->height() / 4)));
+        }
+        QCOMPARE(visibleDockedCards, 1);
+        QVERIFY2(!widget->findChildren<QPushButton *>(u"subtaskTab"_s).isEmpty(),
+                 "two docked sub-agents need tabs to pick between them");
+
         QPushButton *stop = sendButton(widget.get());
         QVERIFY2(stop && stop->isEnabled(), "the stop button was not available while the sub-agents ran");
         stop->click();

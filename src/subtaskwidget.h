@@ -57,22 +57,59 @@ public:
     void markAbandoned(const QString &reason);
 
     void reflowNow();
+    // Caps the card's height in px; <= 0 lifts the cap. The intent dock sets
+    // this to a quarter of the chat panel, so a chatty sub-agent scrolls its
+    // body inside the card instead of growing the strip over the composer.
+    // The cap is lifted again when the card retires into the transcript,
+    // where it may be as tall as its content.
+    void setHeightBudget(int px);
+    int heightBudget() const
+    {
+        return m_heightBudget;
+    }
+
+    // --- Intent-dock tab strip --------------------------------------------------
+    // Who this card is and how it is doing, so the tab strip that picks between
+    // concurrent sub-agent cards can label them without reaching into the card's
+    // own widgets.
+    QString displayName() const;
+    QString stateGlyph() const;
+    QString stateColor() const;
+    // "Running · 12s · 5 steps" as plain text, for a tab tooltip.
+    QString statusText() const;
+    QString description() const
+    {
+        return m_description;
+    }
+
     // Re-applies every theme-derived stylesheet, so a theme change repaints a
     // card that is live in the transcript or the intent dock.
     void applyStyle();
 
 Q_SIGNALS:
     void cancelRequested(const QString &taskId);
+    // The card's headline changed (state, name, elapsed time, step count): the
+    // tab pointing at it has to be redrawn.
+    void appearanceChanged();
 
 private:
     void updateHeader();
     void updateElapsed();
     void updateCurrentActivity();
-    void setActivityVisible(bool visible);
+    void setActivityVisible(bool open);
+    // The disclosure keeps its own arrow and, once the sub-agent has reported
+    // anything, the number of steps behind it.
+    void updateActivityToggle();
     // Re-renders the activity log as one markdown document from the
     // accumulated lines, so a sub-agent that summarises its steps with
     // emphasis or code renders instead of showing literal markup.
     void rebuildActivityLog();
+    // The part of the card that is not the two scrolling documents -- header,
+    // caption, status line -- which a height budget has to leave room for.
+    int chromeHeight() const;
+    int activityChromeHeight() const;
+    QString timeText() const;
+    QString stateWord() const;
 
 protected:
     void resizeEvent(QResizeEvent *event) override;
@@ -100,6 +137,11 @@ protected:
     bool m_failed = false;
     bool m_cancelled = false;
     int m_stepCount = 0;
+    // The dock's cap on this card's height, in px; 0 means uncapped.
+    int m_heightBudget = 0;
+    // Set once the user opens or closes the activity log themselves. From then
+    // on the card stops opening and closing it on their behalf.
+    bool m_activityUserSet = false;
 
     QElapsedTimer m_elapsed;
 
