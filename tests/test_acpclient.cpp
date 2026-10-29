@@ -679,6 +679,12 @@ private Q_SLOTS:
         client.setWorkspace(workspace.path());
         client.setDocumentBridge(&bridge);
 
+        // fs/write_text_file is a mutating client method: it parks until the
+        // permission resolves. Approve it, as the user would.
+        connect(&client, &AcpClient::permissionNeeded, &client, [&](const PermissionRequest &) {
+            client.resolvePermission(PermissionDecision::AllowOnce);
+        });
+
         QString stopReason;
         QString error;
         connect(&client, &AcpClient::promptFinished, this, [&](const QString &reason, const QString &, const QJsonArray &) {
@@ -796,6 +802,11 @@ private Q_SLOTS:
         client.setWorkspace(workspace.path());
         client.setDocumentBridge(&bridge);
 
+        // terminal/create parks until the permission resolves.
+        connect(&client, &AcpClient::permissionNeeded, &client, [&](const PermissionRequest &) {
+            client.resolvePermission(PermissionDecision::AllowOnce);
+        });
+
         QString text;
         QString stopReason;
         QString error;
@@ -828,6 +839,11 @@ private Q_SLOTS:
         client.setSettings(mockSettings(u"quoted"_s));
         client.setWorkspace(workspace.path());
         client.setDocumentBridge(&bridge);
+
+        // terminal/create parks until the permission resolves.
+        connect(&client, &AcpClient::permissionNeeded, &client, [&](const PermissionRequest &) {
+            client.resolvePermission(PermissionDecision::AllowOnce);
+        });
 
         QString text;
         QString stopReason;
@@ -866,6 +882,11 @@ private Q_SLOTS:
         client.setWorkspace(workspace.path());
         client.setDocumentBridge(&bridge);
 
+        // terminal/create parks until the permission resolves.
+        connect(&client, &AcpClient::permissionNeeded, &client, [&](const PermissionRequest &) {
+            client.resolvePermission(PermissionDecision::AllowOnce);
+        });
+
         QString progress;
         QString finishedOutput;
         bool finishedOk = false;
@@ -899,6 +920,189 @@ private Q_SLOTS:
         QVERIFY(finishedOutput.contains(u"term-card-out"_s));
         QVERIFY(!finishedOutput.contains(u"terminalId"_s));
         client.stop();
+    }
+
+    void fsWriteDeniedByTheUserNeverReachesTheDisk()
+    {
+        // The agent writes without asking first: the call parks, the user
+        // denies it, and the file is never created.
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+        const QString readPath = workspace.filePath(u"in.txt"_s);
+        const QString writePath = workspace.filePath(u"out.txt"_s);
+        {
+            QFile file(readPath);
+            QVERIFY(file.open(QIODevice::WriteOnly | QIODevice::Text));
+            QTextStream(&file) << u"payload"_s;
+        }
+
+        DiskDocumentBridge bridge;
+        AcpClient client;
+        Settings settings = mockSettings(u"fs"_s);
+        settings.sandbox = SandboxProfile::Workspace;
+        client.setSettings(settings);
+        client.setWorkspace(workspace.path());
+        client.setDocumentBridge(&bridge);
+
+        PermissionRequest asked;
+        QString stopReason;
+        QString error;
+        connect(&client, &AcpClient::permissionNeeded, &client, [&](const PermissionRequest &request) {
+            asked = request;
+            client.resolvePermission(PermissionDecision::Deny);
+        });
+        connect(&client, &AcpClient::promptFinished, this, [&](const QString &reason, const QString &, const QJsonArray &) {
+            stopReason = reason;
+        });
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+
+        client.prompt(u"READPATH:%1 WRITEPATH:%2"_s.arg(readPath, writePath));
+        QVERIFY2(waitFor([&] {
+            return !stopReason.isEmpty() || !error.isEmpty();
+        }), qPrintable(error.isEmpty() ? u"timed out"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(stopReason, u"end_turn"_s);
+
+        // The parked call presented the write, and the denial stopped it.
+        QCOMPARE(asked.toolName, u"write_file"_s);
+        QCOMPARE(asked.risk, ToolRisk::Write);
+        QCOMPARE(asked.path, writePath);
+        QVERIFY(!QFile::exists(writePath));
+        client.stop();
+    }
+
+    void terminalCreateDeniedByTheUserNeverStarts()
+    {
+        // Same contract for commands: a denied terminal/create never starts, so
+        // the mock's chain of terminal calls all fail and no output appears.
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+
+        DiskDocumentBridge bridge;
+        AcpClient client;
+        client.setSettings(mockSettings(u"terminal"_s));
+        client.setWorkspace(workspace.path());
+        client.setDocumentBridge(&bridge);
+
+        PermissionRequest asked;
+        QString text;
+        QString stopReason;
+        QString error;
+        connect(&client, &AcpClient::permissionNeeded, &client, [&](const PermissionRequest &request) {
+            asked = request;
+            client.resolvePermission(PermissionDecision::Deny);
+        });
+        connect(&client, &AcpClient::textDelta, this, [&](const QString &delta) {
+            text += delta;
+        });
+        connect(&client, &AcpClient::promptFinished, this, [&](const QString &reason, const QString &, const QJsonArray &) {
+            stopReason = reason;
+        });
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+
+        client.prompt(u"run"_s);
+        QVERIFY2(waitFor([&] {
+            return !stopReason.isEmpty() || !error.isEmpty();
+        }, 20000), qPrintable(error.isEmpty() ? u"timed out"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(asked.toolName, u"bash"_s);
+        QCOMPARE(asked.risk, ToolRisk::Execute);
+        QVERIFY(!text.contains(u"hello-term"_s));
+        client.stop();
+    }
+
+    void approvalOfAnAnnouncedEditCoversTheWrite()
+    {
+        // The agent announces the edit, asks permission, then writes: the
+        // approval covers the matching fs/write_text_file, so the user is asked
+        // once, not twice for the same action.
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+        const QString writePath = workspace.filePath(u"out.txt"_s);
+
+        DiskDocumentBridge bridge;
+        AcpClient client;
+        Settings settings = mockSettings(u"fs-approved"_s);
+        settings.sandbox = SandboxProfile::Workspace;
+        client.setSettings(settings);
+        client.setWorkspace(workspace.path());
+        client.setDocumentBridge(&bridge);
+
+        int askedCount = 0;
+        QString stopReason;
+        QString error;
+        connect(&client, &AcpClient::permissionNeeded, &client, [&](const PermissionRequest &) {
+            ++askedCount;
+            client.resolvePermission(PermissionDecision::AllowOnce);
+        });
+        connect(&client, &AcpClient::promptFinished, this, [&](const QString &reason, const QString &, const QJsonArray &) {
+            stopReason = reason;
+        });
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+
+        client.prompt(u"WRITEPATH:%1"_s.arg(writePath));
+        QVERIFY2(waitFor([&] {
+            return !stopReason.isEmpty() || !error.isEmpty();
+        }), qPrintable(error.isEmpty() ? u"timed out"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+
+        QCOMPARE(askedCount, 1);
+        QString written;
+        QVERIFY(bridge.readDocument(writePath, &written));
+        QCOMPARE(written, u"approved write"_s);
+        client.stop();
+    }
+
+    void terminalKillTakesDownTheWholeProcessTree()
+    {
+#ifdef Q_OS_UNIX
+        // The agent runs a shell that backgrounds a child. terminal/kill must
+        // reach the whole process group: the child may not outlive the terminal.
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+
+        DiskDocumentBridge bridge;
+        AcpClient client;
+        client.setSettings(mockSettings(u"terminal-tree"_s));
+        client.setWorkspace(workspace.path());
+        client.setDocumentBridge(&bridge);
+        connect(&client, &AcpClient::permissionNeeded, &client, [&](const PermissionRequest &) {
+            client.resolvePermission(PermissionDecision::AllowOnce);
+        });
+
+        QString text;
+        QString stopReason;
+        QString error;
+        connect(&client, &AcpClient::textDelta, this, [&](const QString &delta) {
+            text += delta;
+        });
+        connect(&client, &AcpClient::promptFinished, this, [&](const QString &reason, const QString &, const QJsonArray &) {
+            stopReason = reason;
+        });
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+
+        client.prompt(u"run"_s);
+        QVERIFY2(waitFor([&] {
+            return !stopReason.isEmpty() || !error.isEmpty();
+        }, 20000), qPrintable(error.isEmpty() ? u"timed out"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QVERIFY2(text.startsWith(u"pid:"_s), qPrintable(text));
+        const QString pid = text.mid(4).trimmed();
+        QVERIFY2(!pid.isEmpty(), qPrintable(text));
+        // The kill reaches the backgrounded child, not just the shell.
+        QTRY_VERIFY_WITH_TIMEOUT(!QFile::exists(u"/proc/"_s + pid), 5000);
+        client.stop();
+#else
+        QSKIP("process groups are a Unix feature");
+#endif
     }
 
     void permissionRequestKeepsTheAnnouncedToolCall()

@@ -1304,7 +1304,10 @@ ToolResult ToolRunner::grep(const QJsonObject &args) const
                 continue;
             }
             if (context == 0) {
-                hits.append(u"%1:%2:%3"_s.arg(rel).arg(i + 1).arg(lines.at(i)));
+                // Concatenation, not a chained arg(): arg() replaces the
+                // lowest-numbered remaining marker, so a "%2" inside the
+                // substituted path would be rewritten by the next call.
+                hits.append(rel + u':' + QString::number(i + 1) + u':' + lines.at(i));
             } else {
                 const int from = qMax(0, i - context);
                 const int to = qMin(lines.size() - 1, i + context);
@@ -1314,7 +1317,7 @@ ToolResult ToolRunner::grep(const QJsonObject &args) const
                 }
                 for (int j = from; j <= to; ++j) {
                     const QChar mark = (j == i) ? u':' : u'-';
-                    hits.append(u"%1%2%3%4%5"_s.arg(rel).arg(mark).arg(j + 1).arg(mark).arg(lines.at(j)));
+                    hits.append(rel + mark + QString::number(j + 1) + mark + lines.at(j));
                 }
                 lastMatchEnd = to;
             }
@@ -1958,14 +1961,11 @@ ToolResult ToolRunner::suggest(const QJsonObject &args)
     }
 
     // The anchor is optional: advice without a place to look is still valid.
-    // It is carried through as given rather than resolved, because a
-    // suggestion may point at a file the work has not created yet.
-    const QString path = args.value(u"path"_s).toString().trimmed();
-    int line = 0;
+    // The card is built from the tool call itself (ToolRunner::describe carries
+    // path and line), so the line is validated here — an impossible anchor is
+    // an error the model can act on — but not carried in the result.
     const QJsonValue lineValue = args.value(u"line"_s);
-    if (lineValue.isUndefined() || lineValue.isNull()) {
-        line = 0;
-    } else {
+    if (!lineValue.isUndefined() && !lineValue.isNull()) {
         // The model often sends numbers as strings ("5"); QJsonValue::toInt()
         // silently yields 0 for those, which would drop the anchor. jsonInt
         // accepts both forms.
@@ -1975,7 +1975,6 @@ ToolResult ToolRunner::suggest(const QJsonObject &args)
             result.output = u"line must be a 1-based line number, or leave it out."_s;
             return result;
         }
-        line = parsed;
     }
 
     // Nothing is executed here: the card the user sees is built from the tool

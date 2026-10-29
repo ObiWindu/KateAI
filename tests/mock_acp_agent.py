@@ -7,6 +7,7 @@ session/request_permission, fs/*, and terminal/* back to the client.
 
 import json
 import sys
+import time
 
 SCENARIO = sys.argv[1] if len(sys.argv) > 1 else "echo"
 NEXT_ID = 1000
@@ -756,6 +757,86 @@ def handle_prompt(request_id, params):
             {
                 "sessionUpdate": "agent_message_chunk",
                 "content": {"type": "text", "text": body.strip()},
+            }
+        )
+        result(request_id, {"stopReason": "end_turn"})
+        return
+
+    if SCENARIO == "fs-approved":
+        # A well-behaved agent: announce the edit, ask permission, then write.
+        # The approval covers the matching fs/write_text_file, so the write must
+        # not be parked for a second question.
+        path = ""
+        for token in text.split():
+            if token.startswith("WRITEPATH:"):
+                path = token.split(":", 1)[1]
+        session_update(
+            {
+                "sessionUpdate": "tool_call",
+                "toolCallId": "call_fs",
+                "title": "Write out.txt",
+                "kind": "edit",
+                "status": "pending",
+                "locations": [{"path": path}],
+                "rawInput": {"path": path, "content": "approved write"},
+            }
+        )
+        response = call_client(
+            "session/request_permission",
+            {
+                "sessionId": SESSION_ID,
+                "toolCall": {"toolCallId": "call_fs", "title": "Write out.txt", "kind": "edit"},
+                "options": [
+                    {"optionId": "allow-once", "name": "Allow once", "kind": "allow_once"},
+                    {"optionId": "reject-once", "name": "Reject", "kind": "reject_once"},
+                ],
+            },
+        )
+        option = (((response or {}).get("result") or {}).get("outcome") or {}).get("optionId")
+        call_client(
+            "fs/write_text_file",
+            {"sessionId": SESSION_ID, "path": path, "content": "approved write"},
+        )
+        session_update(
+            {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "fs-approved:" + str(option)},
+            }
+        )
+        result(request_id, {"stopReason": "end_turn"})
+        return
+
+    if SCENARIO == "terminal-tree":
+        # A shell that backgrounds a child and waits. terminal/kill must take
+        # down the whole process group, not just the shell. The child's pid is
+        # reported so the test can check it is gone.
+        created = call_client(
+            "terminal/create",
+            {
+                "sessionId": SESSION_ID,
+                "command": "sh",
+                "args": ["-c", "sleep 60 & echo $!; wait"],
+            },
+        )
+        terminal_id = ((created or {}).get("result") or {}).get("terminalId")
+        pid = ""
+        for _ in range(50):
+            output = call_client(
+                "terminal/output", {"sessionId": SESSION_ID, "terminalId": terminal_id}
+            )
+            pid = ((output or {}).get("result") or {}).get("output", "").strip()
+            if pid:
+                break
+            time.sleep(0.1)
+        call_client("terminal/kill", {"sessionId": SESSION_ID, "terminalId": terminal_id})
+        call_client(
+            "terminal/wait_for_exit", {"sessionId": SESSION_ID, "terminalId": terminal_id}
+        )
+        call_client("terminal/release", {"sessionId": SESSION_ID, "terminalId": terminal_id})
+        session_update(
+            {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "pid:" + pid},
             }
         )
         result(request_id, {"stopReason": "end_turn"})

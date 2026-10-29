@@ -22,6 +22,12 @@
 #include <QUuid>
 #include <limits>
 
+#ifdef Q_OS_UNIX
+#include <signal.h>
+#include <sys/types.h>
+#include <unistd.h>
+#endif
+
 using namespace Qt::Literals::StringLiterals;
 
 namespace KateAi
@@ -138,7 +144,11 @@ static ToolRisk riskForKind(const QString &kind, const QString &name)
     if (kind == u"edit"_s || kind == u"write"_s || kind == u"delete"_s) {
         return ToolRisk::Write;
     }
-    return ToolRisk::Write;
+    // An unrecognized kind is not evidence the tool is safe: in AcceptEdits
+    // mode a Write risk is auto-approved, which would let a mislabeled
+    // command-running tool skip the prompt the way the native bash tool never
+    // does. Execute makes the policy ask.
+    return ToolRisk::Execute;
 }
 
 // Kate's own client methods, which agents call by name. The protocol reserves
@@ -729,6 +739,10 @@ void AcpClient::start()
 
 void AcpClient::cancelPendingPermission()
 {
+    // A parked client method holds the question slot when an agent-initiated
+    // request arrives: refuse it, the way the earlier request is answered as
+    // cancelled below, so the agent does not block on the parked call.
+    cancelParkedMethods();
     if (!hasPendingPermission()) {
         return;
     }
@@ -838,6 +852,12 @@ void AcpClient::stop()
     m_sessionId.clear();
     m_promptId = 0;
     m_permissionRpcId = QJsonValue();
+    // The agent process is going away, so parked RPCs cannot be answered
+    // meaningfully; drop them with the rest of the session state.
+    m_parkedMethods.clear();
+    m_activeParked.reset();
+    m_sessionGrants.clear();
+    m_onceGrants.clear();
     m_queued.clear();
     m_sessionNotesSent = false;
     m_toolTerminals.clear();
@@ -861,6 +881,10 @@ void AcpClient::resetSession()
     // Any permission question posed in the outgoing session must be closed
     // before the session id goes away.
     cancelPendingPermission();
+    // A new session is a new trust scope: approvals from the old one do not
+    // carry over.
+    m_sessionGrants.clear();
+    m_onceGrants.clear();
     m_resumeSessionId.clear();
     m_queued.clear();
     m_sessionNotesSent = false;
@@ -900,8 +924,31 @@ void AcpClient::prompt(const QString &text)
 
 void AcpClient::resolvePermission(PermissionDecision decision)
 {
+    // A parked client method is answered by running it or refusing it, not by
+    // replying with a permission outcome.
+    if (m_activeParked) {
+        const ParkedMethod parked = *m_activeParked;
+        m_activeParked.reset();
+        if (decision == PermissionDecision::Deny) {
+            replyError(parked.rpcId, kServerError, u"Permission denied."_s);
+        } else {
+            if (decision == PermissionDecision::AllowSession) {
+                m_sessionGrants.insert(parked.grantKey);
+            } else {
+                m_onceGrants.insert(parked.grantKey);
+            }
+            dispatchParkedMethod(parked);
+        }
+        askNextParkedMethod();
+        return;
+    }
     if (!hasPendingPermission()) {
         return;
+    }
+    if (decision != PermissionDecision::Deny) {
+        // The approval covers the matching client method, so an agent that
+        // announced its edit or command before asking is not asked twice.
+        recordApprovalGrants(m_permissionRequest, decision);
     }
     if (decision == PermissionDecision::AllowSession) {
         // Remembered on the Kate side; the agent also gets allow_always when present.
@@ -928,6 +975,9 @@ void AcpClient::resolvePermission(PermissionDecision decision)
     m_permissionRpcId = QJsonValue();
     m_permissionOptions = QJsonArray();
     m_permissionRequest = {};
+    // An agent-initiated request that just resolved frees the question slot:
+    // the next parked client method can be asked now.
+    askNextParkedMethod();
 }
 
 void AcpClient::setState(State state, const QString &status)
@@ -2428,6 +2478,132 @@ QString AcpClient::pickPermissionOption(PermissionDecision decision) const
     return QString();
 }
 
+QString AcpClient::writeGrantKey(const QString &path) const
+{
+    // fs/write_text_file paths are absolute (pathAllowed enforces it); the
+    // approval side resolves relative paths against the workspace. Both sides
+    // must agree on one spelling or the grant never matches.
+    if (QFileInfo(path).isAbsolute() || m_workspace.isEmpty()) {
+        return u"write:"_s + QDir::cleanPath(QDir::fromNativeSeparators(path));
+    }
+    return u"write:"_s + QDir::cleanPath(QDir(m_workspace).absoluteFilePath(path));
+}
+
+QString AcpClient::execGrantKey(const QString &command, const QStringList &args) const
+{
+    // The command line as one string. terminal/create accepts the command as a
+    // string or an argv array plus an args list; the approval side normalises
+    // whichever form the agent used to the same key.
+    return u"exec:"_s + command + u'\n' + args.join(u'\n');
+}
+
+bool AcpClient::ensureMethodPermission(const QString &grantKey, PermissionRequest request,
+                                       const QJsonValue &rpcId, const QString &method, const QJsonObject &params)
+{
+    if (m_sessionGrants.contains(grantKey)) {
+        return true;
+    }
+    if (m_onceGrants.remove(grantKey)) {
+        return true;
+    }
+    ParkedMethod parked;
+    parked.rpcId = rpcId;
+    parked.method = method;
+    parked.params = params;
+    parked.grantKey = grantKey;
+    parked.request = std::move(request);
+    m_parkedMethods.append(std::move(parked));
+    askNextParkedMethod();
+    return false;
+}
+
+void AcpClient::askNextParkedMethod()
+{
+    // One permission question at a time: a parked method is asked only when no
+    // agent-initiated request and no other parked method is being answered.
+    if (m_activeParked || hasPendingPermission() || m_parkedMethods.isEmpty()) {
+        return;
+    }
+    m_activeParked = m_parkedMethods.takeFirst();
+    Q_EMIT permissionNeeded(m_activeParked->request);
+}
+
+void AcpClient::dispatchParkedMethod(const ParkedMethod &parked)
+{
+    // Re-enters the handler with the grant recorded, so the permission check
+    // passes and the call runs (or fails on its own merits).
+    if (parked.method == u"fs/write_text_file"_s) {
+        handleFsWrite(parked.rpcId, parked.params);
+    } else if (parked.method == u"terminal/create"_s) {
+        handleTerminalCreate(parked.rpcId, parked.params);
+    }
+}
+
+void AcpClient::cancelParkedMethods()
+{
+    const auto refuse = [this](const ParkedMethod &parked) {
+        replyError(parked.rpcId, kServerError, u"Cancelled before it was approved."_s);
+    };
+    if (m_activeParked) {
+        refuse(*m_activeParked);
+        m_activeParked.reset();
+    }
+    for (const ParkedMethod &parked : std::as_const(m_parkedMethods)) {
+        refuse(parked);
+    }
+    m_parkedMethods.clear();
+}
+
+void AcpClient::recordApprovalGrants(const PermissionRequest &request, PermissionDecision decision)
+{
+    QSet<QString> &grants = decision == PermissionDecision::AllowSession ? m_sessionGrants : m_onceGrants;
+    auto absolutePath = [this](const QString &p) {
+        if (QFileInfo(p).isAbsolute() || m_workspace.isEmpty()) {
+            return QDir::cleanPath(QDir::fromNativeSeparators(p));
+        }
+        return QDir::cleanPath(QDir(m_workspace).absoluteFilePath(p));
+    };
+    QStringList paths;
+    if (!request.resolvedPath.isEmpty()) {
+        paths.append(absolutePath(request.resolvedPath));
+    }
+    if (!request.path.isEmpty()) {
+        paths.append(absolutePath(request.path));
+    }
+    for (const QString &p : request.additionalPaths) {
+        paths.append(absolutePath(p));
+    }
+    paths.removeDuplicates();
+    for (const QString &p : std::as_const(paths)) {
+        grants.insert(u"write:"_s + p);
+    }
+    // A command the agent announced in the permission request's raw input
+    // covers a terminal/create with the same command line.
+    const QJsonDocument doc = QJsonDocument::fromJson(request.details.toUtf8());
+    if (!doc.isObject()) {
+        return;
+    }
+    const QJsonObject args = doc.object();
+    QJsonValue commandValue = args.value(u"command"_s);
+    if (commandValue.isUndefined() || commandValue.isNull()) {
+        commandValue = args.value(u"cmd"_s);
+    }
+    QStringList argv;
+    if (commandValue.isArray()) {
+        for (const QJsonValue &value : commandValue.toArray()) {
+            argv.append(value.toString());
+        }
+    } else if (commandValue.isString()) {
+        argv.append(commandValue.toString());
+    }
+    for (const QJsonValue &value : args.value(u"args"_s).toArray()) {
+        argv.append(value.toString());
+    }
+    if (!argv.isEmpty()) {
+        grants.insert(execGrantKey(argv.first(), argv.mid(1)));
+    }
+}
+
 void AcpClient::handleFsRead(const QJsonValue &id, const QJsonObject &params)
 {
     const QString path = params.value(u"path"_s).toString();
@@ -2453,6 +2629,21 @@ void AcpClient::handleFsRead(const QJsonValue &id, const QJsonObject &params)
 void AcpClient::handleFsWrite(const QJsonValue &id, const QJsonObject &params)
 {
     const QString path = params.value(u"path"_s).toString();
+    // The permission bar is the contract for every write: an approval for this
+    // exact path lets the call through, anything else parks it until the user
+    // or the policy answers.
+    PermissionRequest request;
+    request.toolName = u"write_file"_s;
+    request.toolCallId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    request.path = path;
+    request.resolvedPath = path;
+    request.risk = ToolRisk::Write;
+    request.mutatesFiles = true;
+    request.summary = u"Write %1"_s.arg(path);
+    request.details = QString::fromUtf8(QJsonDocument(params).toJson(QJsonDocument::Compact));
+    if (!ensureMethodPermission(writeGrantKey(path), std::move(request), id, u"fs/write_text_file"_s, params)) {
+        return;
+    }
     QString error;
     if (!pathAllowed(path, true, &error)) {
         replyError(id, kServerError, error);
@@ -2732,6 +2923,18 @@ void AcpClient::handleTerminalCreate(const QJsonValue &id, const QJsonObject &pa
         return;
     }
 
+    // Same contract as the native bash tool: running a command needs an
+    // approval for this exact command line first.
+    PermissionRequest request;
+    request.toolName = u"bash"_s;
+    request.toolCallId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    request.risk = ToolRisk::Execute;
+    request.summary = args.isEmpty() ? command : command + u' ' + args.join(u' ');
+    request.details = QString::fromUtf8(QJsonDocument(params).toJson(QJsonDocument::Compact));
+    if (!ensureMethodPermission(execGrantKey(command, args), std::move(request), id, u"terminal/create"_s, params)) {
+        return;
+    }
+
     QString cwd = params.value(u"cwd"_s).toString();
     if (cwd.isEmpty()) {
         cwd = m_workspace;
@@ -2749,6 +2952,13 @@ void AcpClient::handleTerminalCreate(const QJsonValue &id, const QJsonObject &pa
     term->outputByteLimit = qBound(64 * 1024, params.value(u"outputByteLimit"_s).toInt(1024 * 1024), 16 * 1024 * 1024);
     term->process = new QProcess(this);
     term->process->setProcessChannelMode(QProcess::MergedChannels);
+#ifdef Q_OS_UNIX
+    // Same session trick as the native bash tool: terminal/kill has to take
+    // down everything the command started, not just the shell we launched.
+    term->process->setChildProcessModifier([]() {
+        ::setsid();
+    });
+#endif
     term->process->setWorkingDirectory(cwd);
     QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
     const QJsonObject extra = envArrayToObject(params.value(u"env"_s).toArray());
@@ -2968,11 +3178,28 @@ void AcpClient::killTerminal(Terminal *term, bool release)
     // Disconnect signals to prevent callbacks after process deletion
     term->process->disconnect(this);
     if (term->process->state() != QProcess::NotRunning) {
+#ifdef Q_OS_UNIX
+        // The process leads its own session (see handleTerminalCreate), so the
+        // negative pid reaches the whole tree. If setsid() failed there is no
+        // such group and this is a no-op, leaving terminate() below to reap
+        // the child itself. The pid is captured before the kill: once the
+        // process is reaped, processId() no longer reports it.
+        const qint64 pid = term->process->processId();
+        if (pid > 0) {
+            ::kill(-static_cast<pid_t>(pid), SIGTERM);
+        }
+#endif
         term->process->terminate();
         if (!term->process->waitForFinished(500)) {
             term->process->kill();
             term->process->waitForFinished(500);
         }
+#ifdef Q_OS_UNIX
+        // A grandchild that ignored SIGTERM must not outlive the terminal.
+        if (pid > 0) {
+            ::kill(-static_cast<pid_t>(pid), SIGKILL);
+        }
+#endif
     }
     if (!term->exited) {
         markTerminalExited(term, term->process->exitCode(), QString());
