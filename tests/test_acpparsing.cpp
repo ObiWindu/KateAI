@@ -135,6 +135,39 @@ private Q_SLOTS:
         QCOMPARE(merged.path, u"/h.cpp"_s);
         QVERIFY(merged.describeDiff.contains(u"+y"_s));
     }
+
+    // A diff block must not downgrade a command-running tool to Write risk:
+    // AcceptEdits auto-approves Write, so the downgrade would let a tool the
+    // agent labelled "execute" (or left unlabelled) run without a prompt.
+    void diffDoesNotDowngradeExecuteRisk()
+    {
+        AcpClient client;
+        const QJsonObject call{
+            {u"toolCallId"_s, u"t9"_s},
+            {u"name"_s, u"run_shell"_s},
+            {u"kind"_s, u"execute"_s},
+            {u"content"_s, QJsonArray{
+                QJsonObject{{u"type"_s, u"diff"_s}, {u"path"_s, u"/i.cpp"_s}, {u"oldText"_s, u"a"_s}, {u"newText"_s, u"b"_s}},
+            }},
+        };
+        const PermissionRequest r = client.permissionFromToolCall(call);
+        QCOMPARE(r.risk, ToolRisk::Execute);
+    }
+
+    void unknownKindWithDiffStaysExecute()
+    {
+        AcpClient client;
+        const QJsonObject call{
+            {u"toolCallId"_s, u"t10"_s},
+            {u"name"_s, u"deploy"_s},
+            {u"kind"_s, u"run"_s},
+            {u"content"_s, QJsonArray{
+                QJsonObject{{u"type"_s, u"diff"_s}, {u"path"_s, u"/j.cpp"_s}, {u"oldText"_s, u"a"_s}, {u"newText"_s, u"b"_s}},
+            }},
+        };
+        const PermissionRequest r = client.permissionFromToolCall(call);
+        QCOMPARE(r.risk, ToolRisk::Execute);
+    }
 };
 
 QTEST_GUILESS_MAIN(TestAcpParsing)

@@ -1694,8 +1694,12 @@ void ToolRunner::runBashAsync(const ToolCall &call)
     QTimer *timeout = new QTimer(process);
     timeout->setSingleShot(true);
     timeout->setInterval(timeoutMs);
-    connect(timeout, &QTimer::timeout, this, [this, callId, timeout, drain] {
-        timeout->deleteLater();
+    connect(timeout, &QTimer::timeout, this, [this, callId, drain] {
+        // The timer is parented to the process and is destroyed with it, so it
+        // must not be deleted here: the finished handler below still calls
+        // stop() on it, and a deferred delete can be processed before the
+        // process reports its exit, which would leave that handler holding a
+        // dangling pointer.
         auto *process = m_bashProcesses.value(callId);
         if (!process) {
             return;

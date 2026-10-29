@@ -44,9 +44,18 @@ bool isProtectedPath(const QString &relativePath)
         return true;
     }
     // Restoring these would reinstate agent-planted automation without prompt.
+    // Every file RulesLoader feeds into the system prompt belongs here, not
+    // just KATEAI.md: a snapshot that captured "safe" rules would otherwise
+    // write them back over the ones the user is looking at.
     if (relativePath == u".kateai/mcp.json"_s || relativePath.startsWith(u".kateai/mcp.json/"_s)
         || relativePath == u"KATEAI.md"_s || relativePath.startsWith(u".kateai/rules/"_s)
-        || relativePath.startsWith(u".kateai/modes/"_s)) {
+        || relativePath.startsWith(u".kateai/modes/"_s) || relativePath.startsWith(u".kateai/agents/"_s)
+        || relativePath == u"AGENTS.md"_s || relativePath == u"CLAUDE.md"_s
+        // .clinerules/.kilocoderules are loaded as a root file *and* as a
+        // directory of rule files (see RulesLoader::ruleDirectories), so both
+        // the path itself and anything under it belongs to the rules.
+        || relativePath == u".clinerules"_s || relativePath.startsWith(u".clinerules/"_s)
+        || relativePath == u".kilocoderules"_s || relativePath.startsWith(u".kilocoderules/"_s)) {
         return true;
     }
     return false;

@@ -141,7 +141,7 @@ static ToolRisk riskForKind(const QString &kind, const QString &name)
     if (kind == u"execute"_s || name == u"bash"_s || canonicalToolName(name) == u"bash"_s) {
         return ToolRisk::Execute;
     }
-    if (kind == u"edit"_s || kind == u"write"_s || kind == u"delete"_s) {
+    if (kind == u"edit"_s || kind == u"write"_s || kind == u"delete"_s || kind == u"move"_s) {
         return ToolRisk::Write;
     }
     // An unrecognized kind is not evidence the tool is safe: in AcceptEdits
@@ -2332,10 +2332,14 @@ PermissionRequest AcpClient::permissionFromToolCall(const QJsonObject &toolCall)
         }
     }
 
-    // Risk re-evaluation based on canonical name
+    // Risk re-evaluation based on canonical name. A file mutation raises a Read
+    // risk to Write, but it must never lower an Execute risk: AcceptEdits
+    // auto-approves Write, so a command-running tool that also carries a diff
+    // block would otherwise run without a prompt, undoing the fail-safe in
+    // riskForKind().
     if (request.toolName.contains(u"bash"_s) || request.toolName == u"bash"_s) {
         request.risk = ToolRisk::Execute;
-    } else if (request.mutatesFiles) {
+    } else if (request.mutatesFiles && request.risk == ToolRisk::Read) {
         request.risk = ToolRisk::Write;
     }
 
