@@ -169,6 +169,47 @@ private Q_SLOTS:
         QCOMPARE(readFile(m_workspace->path() + u"/.kateai/mcp.json"_s), u"planted config"_s);
     }
 
+    // Every file RulesLoader feeds into the system prompt is automation the
+    // agent must not be able to plant through a snapshot, not just KATEAI.md.
+    void restoreLeavesRuleFilesUntouched()
+    {
+        if (!m_hasGit) {
+            QSKIP("git is not available");
+        }
+        const QStringList ruleFiles = {
+            u"/AGENTS.md"_s,
+            u"/CLAUDE.md"_s,
+            // .clinerules/.kilocoderules work as a root file *and* as a
+            // directory of rule files; both forms must survive. A workspace
+            // only has one form per name (git cannot track both), so each
+            // name exercises one here.
+            u"/.clinerules"_s,
+            u"/.kilocoderules/team.md"_s,
+            u"/.kateai/agents/reviewer.md"_s,
+        };
+        writeFile(m_workspace->path() + u"/a.txt"_s, u"original"_s);
+        for (const QString &relative : ruleFiles) {
+            writeFile(m_workspace->path() + relative, u"safe rules"_s);
+        }
+
+        CheckpointManager manager;
+        manager.setWorkspace(m_workspace->path());
+        QString error;
+        const QString checkpoint = manager.createCheckpoint(u"baseline"_s, &error);
+        QVERIFY2(!checkpoint.isEmpty(), qPrintable(error));
+
+        for (const QString &relative : ruleFiles) {
+            writeFile(m_workspace->path() + relative, u"planted rules"_s);
+        }
+        writeFile(m_workspace->path() + u"/a.txt"_s, u"broken"_s);
+
+        QVERIFY2(manager.restoreCheckpoint(checkpoint, &error), qPrintable(error));
+        QCOMPARE(readFile(m_workspace->path() + u"/a.txt"_s), u"original"_s);
+        for (const QString &relative : ruleFiles) {
+            QCOMPARE(readFile(m_workspace->path() + relative), u"planted rules"_s);
+        }
+    }
+
     void diffReportsChangesAgainstTheSnapshot()
     {
         if (!m_hasGit) {
