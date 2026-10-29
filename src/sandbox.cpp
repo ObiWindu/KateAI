@@ -303,19 +303,6 @@ static bool matchGlobRegex(const QString &regex, const QString &haystack, QHash<
                 return true;
             }
         }
-        // Also try: canonicalize root only, compare non-canonical path with canonical root's non-canonical form
-        // Handle case where root is canonical but path is not (or vice versa)
-        const QString rootCanon = QFileInfo(root).canonicalFilePath();
-        if (!rootCanon.isEmpty()) {
-            const QString rootCanonClean = QDir::cleanPath(rootCanon);
-            // If path starts with root's original form's parent canonical...
-            // Try comparing path against the canonical root by checking if
-            // the path, when its existing ancestors are canonicalized, matches
-            if (canonicalPath.isEmpty()) {
-                // path doesn't exist and parent doesn't exist either; fall back
-                // to lexical check with the canonical root's directory name
-            }
-        }
         return false;
 #else
         if (path == root) {

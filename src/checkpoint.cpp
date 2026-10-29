@@ -16,6 +16,7 @@
 #include <QProcessEnvironment>
 #include <QScopeGuard>
 #include <QDateTime>
+#include <QDebug>
 #include <QStandardPaths>
 #include <QThreadPool>
 #include <QTimer>
@@ -117,20 +118,58 @@ bool runGitProcess(const QString &gitDir, const QString &workspace,
          << u"-c"_s << u"commit.gpgsign=false"_s << arguments;
 
     git.start(u"git"_s, full);
-    if (!git.waitForFinished(timeoutMs)) {
+    // Drain both channels while git runs, the way ToolRunner::bash does: a
+    // blocking waitForFinished() leaves the draining to Qt's internals, and a
+    // `git diff` of a large staged change would sit whole in memory. stdout is
+    // capped and the tail dropped with a marker instead of growing unboundedly;
+    // stderr is drained every pass so a chatty git cannot block on a full pipe.
+    constexpr qint64 kMaxGitOutputBytes = 8 * 1024 * 1024;
+    QByteArray stdOut;
+    QByteArray stdErr;
+    bool capped = false;
+    bool timedOut = false;
+    QElapsedTimer elapsed;
+    elapsed.start();
+    while (true) {
+        stdOut += git.readAllStandardOutput();
+        stdErr += git.readAllStandardError();
+        if (stdOut.size() > kMaxGitOutputBytes) {
+            capped = true;
+            break;
+        }
+        if (git.waitForFinished(50)) {
+            break;
+        }
+        if (git.state() == QProcess::NotRunning) {
+            break;
+        }
+        if (elapsed.elapsed() >= timeoutMs) {
+            timedOut = true;
+            break;
+        }
+    }
+    if (capped || timedOut) {
         git.kill();
         git.waitForFinished(1000);
+    }
+    stdOut += git.readAllStandardOutput();
+    stdErr += git.readAllStandardError();
+    if (timedOut) {
         if (error) {
             *error = u"git timed out."_s;
         }
         return false;
     }
     if (output) {
-        *output = QString::fromUtf8(git.readAllStandardOutput());
+        if (capped) {
+            *output = QString::fromUtf8(stdOut.left(kMaxGitOutputBytes)) + u"\n... (output truncated)"_s;
+        } else {
+            *output = QString::fromUtf8(stdOut);
+        }
     }
-    if (git.exitCode() != 0) {
+    if (!capped && git.exitCode() != 0) {
         if (error) {
-            *error = QString::fromUtf8(git.readAllStandardError()).trimmed();
+            *error = QString::fromUtf8(stdErr).trimmed();
             if (error->isEmpty()) {
                 *error = QStringLiteral("git exited with code %1").arg(git.exitCode());
             }
@@ -273,6 +312,12 @@ CheckpointManager::~CheckpointManager()
     elapsed.start();
     while (m_inFlightSnapshots.loadRelaxed() > 0 && elapsed.elapsed() < 30000) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    if (m_inFlightSnapshots.loadRelaxed() > 0) {
+        // The cap above keeps teardown bounded, but proceeding means the mutex
+        // below may be destroyed under a wedged worker. Say so, so the crash
+        // that follows is diagnosable instead of mysterious.
+        qWarning() << "KateAI: a checkpoint worker is still running at teardown; its result is dropped.";
     }
 }
 
@@ -719,6 +764,22 @@ bool CheckpointManager::restoreCheckpoint(const QString &id, QString *error)
 
     if (!runGit({u"read-tree"_s, id}, nullptr, error)) {
         return false;
+    }
+    // checkout-index -a writes every file in the index, including paths the
+    // snapshot must never restore: a snapshot taken while .kateai/mcp.json or
+    // a mode file held agent-planted content would write it back over the
+    // working copy. isProtectedPath() guards the deletion loop below, not the
+    // overwrite, so drop those entries from the index first and the checkout
+    // leaves the current files alone. -z keeps non-ASCII names unquoted, so
+    // the paths reach update-index exactly as git stored them.
+    QString indexed;
+    if (runGit({u"ls-files"_s, u"-z"_s}, &indexed, nullptr)) {
+        const QStringList entries = indexed.split(QChar(u'\0'), Qt::SkipEmptyParts);
+        for (const QString &relativePath : entries) {
+            if (isProtectedPath(relativePath)) {
+                runGit({u"update-index"_s, u"--force-remove"_s, u"--"_s, relativePath}, nullptr, nullptr);
+            }
+        }
     }
     if (!runGit({u"checkout-index"_s, u"-a"_s, u"-f"_s}, nullptr, error)) {
         return false;
