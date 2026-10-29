@@ -122,6 +122,14 @@ add_executable(test_intentdock test_intentdock.cpp ../src/subtaskwidget.cpp ../s
 target_link_libraries(test_intentdock PRIVATE kateai_core Qt6::Test Qt6::Widgets)
 add_test(NAME test_intentdock COMMAND test_intentdock -platform offscreen)
 
+# The intent dock's sub-agent slot: concurrent sub-agents share one bounded
+# strip as tabs over the single card on show, instead of stacking.
+add_executable(test_subtaskdock test_subtaskdock.cpp ../src/subtaskdock.cpp ../src/subtaskwidget.cpp
+    ../src/chattheme.cpp)
+target_link_libraries(test_subtaskdock PRIVATE kateai_core Qt6::Test Qt6::Widgets)
+target_compile_definitions(test_subtaskdock PRIVATE TRANSLATION_DOMAIN="kateai")
+add_test(NAME test_subtaskdock COMMAND test_subtaskdock -platform offscreen)
+
 # The suggestion cards the suggest tool and the ACP client method post.
 # suggestionwidget.cpp is compiled in for the same reason as subtaskwidget.cpp:
 # it belongs to the plugin target rather than to kateai_core.
@@ -167,7 +175,7 @@ target_link_libraries(test_promptedit PRIVATE kateai_core Qt6::Test)
 add_test(NAME test_promptedit COMMAND test_promptedit -platform offscreen)
 
 add_executable(test_overflow test_overflow.cpp ../src/chatwidget.cpp ../src/toolcallwidget.cpp
-    ../src/promptedit.cpp ../src/permissionbar.cpp ../src/subtaskwidget.cpp
+    ../src/promptedit.cpp ../src/permissionbar.cpp ../src/subtaskwidget.cpp ../src/subtaskdock.cpp
     ../src/suggestionwidget.cpp ../src/questionwidget.cpp ../src/todowidget.cpp ../src/edittracker.cpp
     ../src/turnstatus.cpp ../src/chattheme.cpp)
 target_link_libraries(test_overflow PRIVATE kateai_core Qt6::Test Qt6::Widgets)
@@ -177,7 +185,7 @@ add_test(NAME test_overflow
          WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
 add_executable(test_livecards test_livecards.cpp ../src/chatwidget.cpp ../src/toolcallwidget.cpp
-    ../src/promptedit.cpp ../src/permissionbar.cpp ../src/subtaskwidget.cpp
+    ../src/promptedit.cpp ../src/permissionbar.cpp ../src/subtaskwidget.cpp ../src/subtaskdock.cpp
     ../src/suggestionwidget.cpp ../src/questionwidget.cpp ../src/todowidget.cpp ../src/edittracker.cpp
     ../src/turnstatus.cpp ../src/chattheme.cpp)
 target_link_libraries(test_livecards PRIVATE kateai_core Qt6::Test Qt6::Widgets)
@@ -187,7 +195,7 @@ add_test(NAME test_livecards COMMAND test_livecards -platform offscreen)
 # The stop button and the new-thread button, driven through a real AgentLoop
 # against the mock LLM server. Same source list as test_livecards.
 add_executable(test_stopbehavior test_stopbehavior.cpp ../src/chatwidget.cpp ../src/toolcallwidget.cpp
-    ../src/promptedit.cpp ../src/permissionbar.cpp ../src/subtaskwidget.cpp
+    ../src/promptedit.cpp ../src/permissionbar.cpp ../src/subtaskwidget.cpp ../src/subtaskdock.cpp
     ../src/suggestionwidget.cpp ../src/questionwidget.cpp ../src/todowidget.cpp ../src/edittracker.cpp
     ../src/turnstatus.cpp ../src/chattheme.cpp)
 target_link_libraries(test_stopbehavior PRIVATE kateai_core Qt6::Test Qt6::Widgets)
@@ -200,7 +208,7 @@ add_test(NAME test_stopbehavior
 # transcript repaint from the installed palette. Same source list as
 # test_overflow, which also builds a full ChatWidget.
 add_executable(test_themeapply test_themeapply.cpp ../src/chatwidget.cpp ../src/toolcallwidget.cpp
-    ../src/promptedit.cpp ../src/permissionbar.cpp ../src/subtaskwidget.cpp
+    ../src/promptedit.cpp ../src/permissionbar.cpp ../src/subtaskwidget.cpp ../src/subtaskdock.cpp
     ../src/suggestionwidget.cpp ../src/questionwidget.cpp ../src/todowidget.cpp ../src/edittracker.cpp
     ../src/turnstatus.cpp ../src/chattheme.cpp)
 target_link_libraries(test_themeapply PRIVATE kateai_core Qt6::Test Qt6::Widgets)
@@ -210,7 +218,7 @@ add_test(NAME test_themeapply COMMAND test_themeapply -platform offscreen)
 # Switching to a conversation from history rebuilds the transcript: the tool
 # cards must come back with their icons, titles, colours and result boxes.
 add_executable(test_historyrestore test_historyrestore.cpp ../src/chatwidget.cpp ../src/toolcallwidget.cpp
-    ../src/promptedit.cpp ../src/permissionbar.cpp ../src/subtaskwidget.cpp
+    ../src/promptedit.cpp ../src/permissionbar.cpp ../src/subtaskwidget.cpp ../src/subtaskdock.cpp
     ../src/suggestionwidget.cpp ../src/questionwidget.cpp ../src/todowidget.cpp ../src/edittracker.cpp
     ../src/turnstatus.cpp ../src/chattheme.cpp)
 target_link_libraries(test_historyrestore PRIVATE kateai_core Qt6::Test Qt6::Widgets)

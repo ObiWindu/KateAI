@@ -16,6 +16,7 @@
 #include "settings.h"
 #include "toolcallwidget.h"
 #include "subtaskwidget.h"
+#include "subtaskdock.h"
 #include "suggestionwidget.h"
 #include "questionwidget.h"
 #include "todowidget.h"
@@ -609,6 +610,10 @@ ChatWidget::ChatWidget(QWidget *parent)
     m_intentDockLayout->setContentsMargins(10, 6, 10, 0);
     m_intentDockLayout->setSpacing(6);
     m_intentDock->hide();
+    // The sub-agent slot: tabs over the one card on show. It is only put into
+    // the dock's layout when the first sub-agent starts, so an approval row
+    // keeps its place in the strip while no agent is running.
+    m_subtaskDock = new SubtaskDock(m_intentDock);
     root->addWidget(m_intentDock);
 
     // The todo dock: the running plan, pinned to the bottom of the chat so it
@@ -2683,6 +2688,9 @@ void ChatWidget::resizeEvent(QResizeEvent *event)
     updateScrollButtonPosition();
     updateIndicatorsPosition();
     reflowTranscriptMedia();
+    // The docked sub-agent cards are capped to a quarter of the panel, so the
+    // cap follows the panel.
+    applySubtaskHeightBudget();
 }
 
 void ChatWidget::setCompletionWords(const QStringList &words)
@@ -2908,6 +2916,20 @@ void ChatWidget::addIntentWidget(QWidget *widget)
     if (!m_intentDockLayout || !widget) {
         return;
     }
+    // Sub-agents share one slot in the dock: a tab strip over the single card
+    // that is on show. They used to stack, and a handful of delegations pushed
+    // the composer off the screen.
+    if (auto *card = qobject_cast<SubtaskWidget *>(widget); card && m_subtaskDock) {
+        if (m_intentDockLayout->indexOf(m_subtaskDock) < 0) {
+            // Appended like any other dock widget, so the newest thing to need
+            // the user stays nearest the input.
+            m_intentDockLayout->addWidget(m_subtaskDock);
+        }
+        m_subtaskDock->addCard(card);
+        applySubtaskHeightBudget();
+        updateIntentDockVisibility();
+        return;
+    }
     m_intentDockLayout->addWidget(widget);
     updateIntentDockVisibility();
 }
@@ -2947,6 +2969,14 @@ void ChatWidget::retireIntentWidget(QWidget *widget, QWidget *anchor)
     if (!widget) {
         return;
     }
+    if (auto *card = qobject_cast<SubtaskWidget *>(widget)) {
+        // Back out of the tab strip, and back to full height: as a transcript
+        // card it may be as tall as its own content again.
+        if (m_subtaskDock) {
+            m_subtaskDock->removeCard(card);
+        }
+        card->setHeightBudget(0);
+    }
     if (m_intentDockLayout) {
         m_intentDockLayout->removeWidget(widget);
     }
@@ -2969,6 +2999,17 @@ void ChatWidget::retireIntentWidget(QWidget *widget, QWidget *anchor)
     // thread now, so show it explicitly.
     widget->show();
     updateIntentDockVisibility();
+}
+
+void ChatWidget::applySubtaskHeightBudget()
+{
+    if (!m_subtaskDock) {
+        return;
+    }
+    // The docked card shares a strip with approvals and sits over the input, so
+    // it may not grow like a transcript card: a quarter of the panel is its
+    // whole budget, and its body scrolls inside that instead.
+    m_subtaskDock->setHeightBudget(height() / 4);
 }
 
 void ChatWidget::updateIntentDockVisibility()
@@ -3009,7 +3050,16 @@ void ChatWidget::clearIntentDock()
                     break;
                 }
             }
-            delete widget;
+            if (widget == m_subtaskDock) {
+                // The host outlives the conversation: the cards inside it are
+                // owned by m_subtaskWidgets and swept by the caller just below,
+                // so drop them from the strip without deleting anything and
+                // leave the (now empty) host out of the dock until a sub-agent
+                // starts again.
+                m_subtaskDock->clearCards();
+            } else {
+                delete widget;
+            }
         }
         delete item;
     }
@@ -3256,6 +3306,9 @@ void ChatWidget::restyleLiveCards()
         if (card) {
             card->applyStyle();
         }
+    }
+    if (m_subtaskDock) {
+        m_subtaskDock->applyStyle();
     }
     for (auto *card : m_suggestionOrder) {
         if (card) {
