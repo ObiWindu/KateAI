@@ -2925,8 +2925,12 @@ void ChatWidget::addIntentWidget(QWidget *widget)
             // the user stays nearest the input.
             m_intentDockLayout->addWidget(m_subtaskDock);
         }
-        m_subtaskDock->addCard(card);
+        // Budget first, card second: a card docked before it knows how much
+        // room it has arrives with the height its documents ask for at whatever
+        // width they were last measured, and that figure feeds the strip's
+        // minimum before anything gets a chance to clamp it.
         applySubtaskHeightBudget();
+        m_subtaskDock->addCard(card);
         updateIntentDockVisibility();
         return;
     }

@@ -10,6 +10,7 @@
 
 #include <KLocalizedString>
 
+#include <QEvent>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLayout>
@@ -47,6 +48,11 @@ SubtaskWidget::SubtaskWidget(const QString &taskId, QWidget *parent)
     // background-color and the card renders fully transparent -- the border and
     // background in ChatTheme::agentTaskCard() never reach the screen.
     setAttribute(Qt::WA_StyledBackground, true);
+    // The card is exactly as tall as what it holds. Left to grow into the slack
+    // of the strip or of its transcript row, the box would spread itself over
+    // space its text does not fill -- the card would be mostly empty around a
+    // couple of lines.
+    setSizePolicy(sizePolicy().horizontalPolicy(), QSizePolicy::Fixed);
 
     // Compact: this card now sits in the intent dock above the input, and the
     // dock also carries approvals. Tighter padding and smaller type let several
@@ -164,6 +170,14 @@ SubtaskWidget::SubtaskWidget(const QString &taskId, QWidget *parent)
     m_ticker = new QTimer(this);
     m_ticker->setInterval(1000);
     connect(m_ticker, &QTimer::timeout, this, &SubtaskWidget::updateElapsed);
+
+    // The documents decide the card's height, so they decide when it has to be
+    // measured again: a re-wrap happens when one of them (or its viewport,
+    // when a scrollbar appears) changes width.
+    for (QTextBrowser *browser : {m_answer, m_activity}) {
+        browser->installEventFilter(this);
+        browser->viewport()->installEventFilter(this);
+    }
 
     m_elapsed.start();
     updateHeader();
@@ -406,10 +420,12 @@ void SubtaskWidget::resizeEvent(QResizeEvent *event)
     updateCurrentActivity();
     // The width also decides how the two documents wrap, and their height is
     // what the card's minimum height is derived from. Only a width change can
-    // change that, so a height-only resize (one this reflow would itself cause)
-    // cannot feed back into another one.
+    // change that, and the documents are re-wrapped by the layout *after* this
+    // event, so the measurement waits for the next turn rather than capturing
+    // the width they are about to leave. A height-only resize (one this reflow
+    // itself causes) cannot feed back into another one.
     if (m_answer && event->oldSize().width() != event->size().width()) {
-        reflowNow();
+        scheduleReflow();
     }
 }
 
@@ -688,21 +704,11 @@ void SubtaskWidget::reflowNow()
     const bool showAnswer = !m_answer->isHidden();
     const bool showActivity = !m_activity->isHidden();
 
-    int answerWant = 0;
-    if (showAnswer) {
-        m_answer->setMinimumHeight(0);
-        m_answer->document()->setTextWidth(m_answer->viewport()->width());
-        answerWant = qCeil(m_answer->document()->size().height());
-    }
-    int activityWant = 0;
-    if (showActivity) {
-        m_activity->setMinimumHeight(0);
-        m_activity->document()->setTextWidth(m_activity->viewport()->width());
-        activityWant = qCeil(m_activity->document()->size().height());
-    }
+    const int answerWant = showAnswer ? documentHeight(m_answer) : 0;
+    const int activityWant = showActivity ? documentHeight(m_activity) : 0;
 
-    int answerMin = answerWant;
-    int activityMin = activityWant;
+    int answerHeight = answerWant;
+    int activityHeight = activityWant;
     if (m_heightBudget > 0) {
         // Under a budget the card may not grow to fit its documents, so each
         // one is only asked for what is left after the chrome -- and scrolls
@@ -712,18 +718,79 @@ void SubtaskWidget::reflowNow()
         if (showAnswer && showActivity) {
             // The log is supporting detail; the task and the answer are the
             // card's subject, so the log takes at most a third of the body.
-            activityMin = qMin(activityWant, body / 3);
-            answerMin = qMin(answerWant, body - activityMin);
+            activityHeight = qMin(activityWant, body / 3);
+            answerHeight = qMin(answerWant, body - activityHeight);
         } else if (showAnswer) {
-            answerMin = qMin(answerWant, body);
+            answerHeight = qMin(answerWant, body);
         } else if (showActivity) {
-            activityMin = qMin(activityWant, body);
+            activityHeight = qMin(activityWant, body);
         }
     }
 
-    m_answer->setMinimumHeight(showAnswer ? answerMin : 0);
-    m_activity->setMinimumHeight(showActivity ? activityMin : 0);
+    const bool answerMoved = setBodyHeight(m_answer, showAnswer ? answerHeight : 0);
+    const bool activityMoved = setBodyHeight(m_activity, showActivity ? activityHeight : 0);
     updateGeometry();
+    if (answerMoved || activityMoved) {
+        // The card is laid out by someone else (the strip it is docked in, or
+        // the transcript row it retires to), and their picture of this card is
+        // built from these heights.
+        Q_EMIT bodyLayoutChanged();
+    }
+}
+
+int SubtaskWidget::documentHeight(QTextBrowser *browser)
+{
+    // QTextEdit keeps its document wrapped at the viewport's width; before the
+    // first layout pass that width is not known yet, so wrap it at the width we
+    // have rather than measure a single unwrapped line.
+    const int width = browser->viewport()->width();
+    if (width > 0 && !qFuzzyCompare(browser->document()->textWidth(), width)) {
+        browser->document()->setTextWidth(width);
+    }
+    return qCeil(browser->document()->size().height());
+}
+
+bool SubtaskWidget::setBodyHeight(QTextBrowser *browser, int height)
+{
+    // Minimum *and* maximum: the document gets exactly the height it holds, so
+    // the card's size hint follows the text. A QTextBrowser's own size hint is
+    // a fixed 256x192 whatever it contains, and a card sized from that left the
+    // box almost all empty around a single line of text.
+    const int maximum = height > 0 ? height : QWIDGETSIZE_MAX;
+    const bool moved = browser->minimumHeight() != height || browser->maximumHeight() != maximum;
+    browser->setMinimumHeight(height);
+    browser->setMaximumHeight(maximum);
+    return moved;
+}
+
+void SubtaskWidget::scheduleReflow()
+{
+    if (m_reflowQueued) {
+        return;
+    }
+    m_reflowQueued = true;
+    // Deferred: the layout still has to hand the documents the width they are
+    // wrapped at, and QTextEdit re-wraps as part of its own resize. Measuring
+    // now would capture the width they are about to leave, which is how the
+    // card ended up with a minimum from a narrow wrap next to a wide document.
+    QTimer::singleShot(0, this, [this] {
+        m_reflowQueued = false;
+        reflowNow();
+    });
+}
+
+bool SubtaskWidget::eventFilter(QObject *watched, QEvent *event)
+{
+    if (event->type() == QEvent::Resize) {
+        // A document that changes width has wrapped differently, and so has a
+        // viewport that changes width when a scrollbar appears or goes.
+        const bool document = (m_answer && (watched == m_answer || watched == m_answer->viewport()))
+            || (m_activity && (watched == m_activity || watched == m_activity->viewport()));
+        if (document) {
+            scheduleReflow();
+        }
+    }
+    return QWidget::eventFilter(watched, event);
 }
 
 } // namespace KateAi

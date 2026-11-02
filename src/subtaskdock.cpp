@@ -49,6 +49,14 @@ SubtaskDock::SubtaskDock(QWidget *parent)
     m_cardLayout->setSpacing(4);
     root->addLayout(m_cardLayout);
 
+    // Slack belongs to the strip, not to the card. Qt hands leftover space to
+    // any item whose maximum exceeds its size hint, and a card's maximum is its
+    // height budget -- so without somewhere for the slack to go, a card with
+    // two lines of text would grow to fill the budget and leave the box around
+    // the text empty. The transcript has a stretch at its growth point for the
+    // same reason; the strip keeps its cards at the top of what it is given.
+    root->addStretch(1);
+
     m_tabRow->hide();
     // Nothing is docked yet, so the host takes no space in the strip. addCard()
     // shows it, removeCard() hides it again.
@@ -67,6 +75,11 @@ void SubtaskDock::addCard(SubtaskWidget *card)
     }
     // The tab mirrors the card's headline, so it listens rather than polls.
     connect(card, &SubtaskWidget::appearanceChanged, this, &SubtaskDock::refreshTabs);
+    // And a card that re-measures itself asks for a different height: the
+    // strip's own figure for it (and for the strip's minimum) is built from
+    // that, so it is rebuilt here rather than left stale until the next card
+    // arrives.
+    connect(card, &SubtaskWidget::bodyLayoutChanged, this, &SubtaskDock::invalidateGeometry);
     if (m_heightBudget > 0) {
         card->setHeightBudget(m_heightBudget);
     }
@@ -79,6 +92,7 @@ void SubtaskDock::addCard(SubtaskWidget *card)
     show();
     refreshTabs();
     card->reflowNow();
+    invalidateGeometry();
 }
 
 void SubtaskDock::removeCard(SubtaskWidget *card)
@@ -91,6 +105,7 @@ void SubtaskDock::removeCard(SubtaskWidget *card)
             continue;
         }
         disconnect(card, &SubtaskWidget::appearanceChanged, this, &SubtaskDock::refreshTabs);
+        disconnect(card, &SubtaskWidget::bodyLayoutChanged, this, &SubtaskDock::invalidateGeometry);
         const bool wasActive = (m_active == card);
         // The card's tab leaves with it: the strip lists what is still here.
         if (m_cards[i].tab) {
@@ -117,6 +132,7 @@ void SubtaskDock::removeCard(SubtaskWidget *card)
         m_active->reflowNow();
     }
     refreshTabs();
+    invalidateGeometry();
 }
 
 void SubtaskDock::clearCards()
@@ -127,6 +143,7 @@ void SubtaskDock::clearCards()
         }
         if (entry.card) {
             disconnect(entry.card, &SubtaskWidget::appearanceChanged, this, &SubtaskDock::refreshTabs);
+            disconnect(entry.card, &SubtaskWidget::bodyLayoutChanged, this, &SubtaskDock::invalidateGeometry);
             // The owner sweeps the cards next; uncap them so a survivor does
             // not keep a budget that was only ever meant for the dock.
             entry.card->setHeightBudget(0);
@@ -137,6 +154,7 @@ void SubtaskDock::clearCards()
     m_active.clear();
     m_tabRow->hide();
     hide();
+    invalidateGeometry();
 }
 
 void SubtaskDock::setHeightBudget(int px)
@@ -150,6 +168,25 @@ void SubtaskDock::setHeightBudget(int px)
             entry.card->setHeightBudget(px);
         }
     }
+    invalidateGeometry();
+}
+
+void SubtaskDock::invalidateGeometry()
+{
+    // The cards' minimums feed this strip's own minimum, and a parent that is
+    // sizing itself around a figure the cards have already changed would keep
+    // the strip (and the panel with it) at a height nothing asks for any more.
+    //
+    // activate() as well as invalidate(): Qt answers a queued LayoutRequest
+    // only for a widget that is already visible, and the item minimums are
+    // cached until an activation walks them. This strip spends most of its
+    // time hidden, so waiting for the queue would leave it offering the
+    // minimum its cards asked for the last time they were on screen.
+    if (layout()) {
+        layout()->invalidate();
+        layout()->activate();
+    }
+    updateGeometry();
 }
 
 void SubtaskDock::applyStyle()

@@ -91,6 +91,9 @@ Q_SIGNALS:
     // The card's headline changed (state, name, elapsed time, step count): the
     // tab pointing at it has to be redrawn.
     void appearanceChanged();
+    // The height this card asks for changed, because one of its documents was
+    // re-measured: whoever is laying the card out has to do it again.
+    void bodyLayoutChanged();
 
 private:
     void updateHeader();
@@ -110,9 +113,23 @@ private:
     int activityChromeHeight() const;
     QString timeText() const;
     QString stateWord() const;
+    // Coalesces a reflow onto the next event-loop turn, when the layout has
+    // settled and the documents are wrapped at the width they really hold.
+    void scheduleReflow();
+    // The height a document needs at its current width.
+    int documentHeight(QTextBrowser *browser);
+    // Gives a document exactly that height: minimum *and* maximum. A
+    // QTextBrowser's sizeHint is a fixed 256x192 whatever it holds, so without
+    // a maximum the card sizes itself around that and leaves the text in the
+    // corner of an otherwise empty box. Returns whether anything moved.
+    bool setBodyHeight(QTextBrowser *browser, int height);
 
 protected:
     void resizeEvent(QResizeEvent *event) override;
+    // The two documents re-wrap when the layout hands them their real width,
+    // which happens after this widget has already been resized, so the reflow
+    // that measures them is queued from here instead of run inline.
+    bool eventFilter(QObject *watched, QEvent *event) override;
 
     QString m_taskId;
     QString m_agentName;
@@ -139,6 +156,8 @@ protected:
     int m_stepCount = 0;
     // The dock's cap on this card's height, in px; 0 means uncapped.
     int m_heightBudget = 0;
+    // A reflow is already waiting for the next event-loop turn.
+    bool m_reflowQueued = false;
     // Set once the user opens or closes the activity log themselves. From then
     // on the card stops opening and closing it on their behalf.
     bool m_activityUserSet = false;

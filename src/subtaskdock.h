@@ -62,6 +62,11 @@ public:
     void applyStyle();
 
 private:
+    // The strip's own minimum is the cards' minimum: it has to be thrown away
+    // whenever that changes, or the dock keeps offering a size the cards no
+    // longer ask for (and a parent that believes it cannot shrink the strip
+    // grows itself around an obsolete figure).
+    void invalidateGeometry();
     void refreshTabs();
     void activateCard(SubtaskWidget *card);
     QString tabSheet(bool active, const QString &stateColor) const;
