@@ -24,6 +24,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QLabel>
+#include <QLayout>
 #include <QNetworkProxyFactory>
 #include <QProcess>
 #include <QPushButton>
@@ -213,8 +214,107 @@ private Q_SLOTS:
             }
         }
         QVERIFY2(sawChildAnswer, "no sub-agent card showed its child's answer after the turn");
+
+        // Finished cards retire where the delegation happened, not at the end
+        // of the chat: every sub-agent card must sit above the orchestrator's
+        // follow-up summary in the transcript.
+        QWidget *summaryCard = nullptr;
+        for (QWidget *card : widget->findChildren<QWidget *>(u"assistantCard"_s)) {
+            for (QTextBrowser *browser : card->findChildren<QTextBrowser *>()) {
+                if (browser->toPlainText().contains(u"Both sub-agents reported back")) {
+                    summaryCard = card;
+                }
+            }
+        }
+        QVERIFY2(summaryCard, "the orchestrator summary card was not found");
+        QLayout *transcriptLayout = summaryCard->parentWidget()
+            ? summaryCard->parentWidget()->layout()
+            : nullptr;
+        QVERIFY2(transcriptLayout, "the summary card has no transcript layout");
+        const int summaryIndex = transcriptLayout->indexOf(summaryCard);
+        for (SubtaskWidget *card : subtaskCards(widget.get())) {
+            const int cardIndex = card->parentWidget() && card->parentWidget()->layout()
+                ? card->parentWidget()->layout()->indexOf(card)
+                : -1;
+            QVERIFY2(cardIndex >= 0 && cardIndex < summaryIndex,
+                     qPrintable(QStringLiteral("a finished sub-agent card sits at %1, below the summary at %2")
+                                    .arg(cardIndex)
+                                    .arg(summaryIndex)));
+        }
     }
 
+    // Finished cards retire where the delegation happened, in finish order:
+    // two runs sharing one anchor chain after each other instead of the
+    // second landing before the first (or at the end of the chat).
+    void finishedCardsRetireInFinishOrder()
+    {
+        std::unique_ptr<ChatWidget> widget(makeWidget());
+
+        // An ordinary transcript card for both delegations to anchor to.
+        PermissionRequest readRequest;
+        readRequest.toolName = u"read_file"_s;
+        readRequest.toolCallId = u"r0"_s;
+        readRequest.summary = u"Read notes.txt"_s;
+        readRequest.risk = ToolRisk::Read;
+        widget->agent()->toolStarted(readRequest);
+
+        // Two delegations issued together share that anchor.
+        for (const QString &id : {u"t1"_s, u"t2"_s}) {
+            PermissionRequest request;
+            request.toolName = subtaskToolName();
+            request.toolCallId = id;
+            request.summary = u"sub-agent (code): work "_s + id;
+            request.risk = ToolRisk::Execute;
+            widget->agent()->toolStarted(request);
+            widget->agent()->subtaskStarted(id, u"coder"_s, u"Coder"_s, u"code"_s,
+                                            u"Delegated work "_s + id);
+        }
+
+        auto transcriptIndex = [&](QWidget *card) {
+            return card && card->parentWidget() && card->parentWidget()->layout()
+                ? card->parentWidget()->layout()->indexOf(card)
+                : -1;
+        };
+        auto findToolCard = [&]() -> QWidget * {
+            const QList<ToolCallWidget *> tools = widget->findChildren<ToolCallWidget *>();
+            return tools.isEmpty() ? nullptr : tools.first();
+        };
+
+        // Finish in delegation order: each card lands after the previous one.
+        for (const QString &id : {u"t1"_s, u"t2"_s}) {
+            ToolResult result;
+            result.toolCallId = id;
+            result.name = subtaskToolName();
+            result.ok = true;
+            result.output = u"answer "_s + id;
+            widget->agent()->toolFinished(result);
+        }
+
+        QList<SubtaskWidget *> cards = subtaskCards(widget.get());
+        QCOMPARE(cards.size(), 2);
+        QWidget *toolCard = findToolCard();
+        QVERIFY2(toolCard, "the anchor tool card was not found in the transcript");
+        const int toolIndex = transcriptIndex(toolCard);
+        QVERIFY2(toolIndex >= 0, "the anchor tool card has no transcript position");
+        // Map finish order to cards by their answers.
+        SubtaskWidget *first = nullptr;
+        SubtaskWidget *second = nullptr;
+        for (SubtaskWidget *card : cards) {
+            if (cardText(card).contains(u"answer t1")) {
+                first = card;
+            } else if (cardText(card).contains(u"answer t2")) {
+                second = card;
+            }
+        }
+        QVERIFY2(first && second, "a retired card lost its answer");
+        const int firstIndex = transcriptIndex(first);
+        const int secondIndex = transcriptIndex(second);
+        QVERIFY2(toolIndex < firstIndex && firstIndex < secondIndex,
+                 qPrintable(QStringLiteral("expected tool < t1 < t2, got %1 < %2 < %3")
+                                .arg(toolIndex)
+                                .arg(firstIndex)
+                                .arg(secondIndex)));
+    }
     // An ACP agent runs task-like tools inside its own process: no native
     // sub-agent is ever dispatched, so no live subtask signals would reach a
     // sub-agent card. Those calls must render as ordinary tool cards (which

@@ -3146,10 +3146,26 @@ void ChatWidget::retireIntentWidget(QWidget *widget, QWidget *anchor)
     // sub-agent at once. The anchor is the transcript's last card when the
     // operation started; when it is gone (cleared, rebuilt) the growth point
     // is the only sensible position left.
-    if (anchor && m_transcriptLayout && m_transcriptLayout->indexOf(anchor) >= 0) {
-        m_transcriptLayout->insertWidget(m_transcriptLayout->indexOf(anchor) + 1, widget);
+    //
+    // Parallel runs share one anchor: each finish chains after the previously
+    // retired card for that anchor, so concurrent delegations land in finish
+    // order instead of reversed.
+    QWidget *placeAfter = anchor;
+    if (anchor) {
+        m_subtaskRetireTails.remove(nullptr);
+        if (QPointer<QWidget> tail = m_subtaskRetireTails.value(anchor)) {
+            if (tail && m_transcriptLayout && m_transcriptLayout->indexOf(tail) >= 0) {
+                placeAfter = tail;
+            }
+        }
+    }
+    if (placeAfter && m_transcriptLayout && m_transcriptLayout->indexOf(placeAfter) >= 0) {
+        m_transcriptLayout->insertWidget(m_transcriptLayout->indexOf(placeAfter) + 1, widget);
     } else {
         appendTranscriptWidget(widget);
+    }
+    if (anchor) {
+        m_subtaskRetireTails.insert(anchor, widget);
     }
     // insertWidget() reparents, and reparenting hides: a card that was docked
     // while the dock itself was on its way out would otherwise land in the
@@ -6085,6 +6101,7 @@ void ChatWidget::clearTranscriptContents()
     m_subtaskWidgets.clear();
     m_subtaskLiveIds.clear();
     m_subtaskOrigIds.clear();
+    m_subtaskRetireTails.clear();
     m_subtaskOrder.clear();
     m_subtaskAnchors.clear();
     // Suggestion cards are transcript widgets too; without this the hashes
@@ -6552,8 +6569,11 @@ void ChatWidget::rebuildTranscript()
             m_subtaskOrder.append(subtaskWidget);
             // The card below whatever was placed just before it in the rebuild
             // order, which is the position it ran in during the live turn.
-            m_subtaskAnchors.insert(toolCallId, lastTranscriptContentWidget());
-            addIntentWidget(subtaskWidget);
+            // Restored cards are already settled, so they retire straight
+            // into the thread instead of docking above the composer, where a
+            // finished card would sit with no turn to finish it.
+            QWidget *restoreAnchor = lastTranscriptContentWidget();
+            m_subtaskAnchors.insert(toolCallId, restoreAnchor);
             placed.insert(toolCallId);
             if (spec.hasResult) {
                 ToolResult result;
@@ -6567,6 +6587,7 @@ void ChatWidget::rebuildTranscript()
                 // over, so settle as abandoned rather than spinning forever.
                 subtaskWidget->markAbandoned(i18n("Stopped when the turn ended."));
             }
+            retireIntentWidget(subtaskWidget, m_subtaskAnchors.take(toolCallId));
             return;
         }
 

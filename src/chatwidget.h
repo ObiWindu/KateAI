@@ -450,6 +450,11 @@ private:
     // Original tool call id per card key, for retiring results that only
     // carry the call id the provider saw.
     QHash<QString, QString> m_subtaskOrigIds;
+    // Last retired card per transcript anchor. Parallel delegations share one
+    // anchor; without this every finish would insert right after the anchor
+    // and concurrent runs would retire in reverse. Pruned on use, cleared
+    // with the conversation.
+    QHash<QWidget *, QPointer<QWidget>> m_subtaskRetireTails;
     // The card for a live task id: exact hit first, otherwise the card that
     // never started (its task id does not match it yet) is claimed and
     // re-keyed, so a renamed call still feeds its card instead of an empty
