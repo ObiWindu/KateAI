@@ -104,6 +104,9 @@ private:
     // the main thread, but isDenied()/commandTouchesDeniedPath() may run on a
     // worker (permission checks), so all cache access must hold the lock.
     mutable QMutex m_globMutex;
+    // Bounded at 512 entries (cleared when exceeded, see matchGlobRegex):
+    // deny patterns are few, but search tools feed user patterns through
+    // globMatchCached() and an unbounded cache would grow per query.
     mutable QHash<QString, QRegularExpression> m_globCache;
     mutable QStringList m_cachedDenyGlobs;
 };

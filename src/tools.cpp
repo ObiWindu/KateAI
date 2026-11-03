@@ -194,6 +194,34 @@ static int jsonInt(const QJsonValue &value, int fallback)
     return fallback;
 }
 
+// Canonical path argument: the model sends path, file_path, filePath, file,
+// uri, or TargetFile depending on the prompt. Every file tool must accept all
+// of them, or an alias spelling fails with "path is required" while describe()
+// already resolved it fine.
+static QString canonicalPathArg(const QJsonObject &args)
+{
+    QString path = args.value(u"path"_s).toString();
+    if (path.isEmpty()) {
+        path = args.value(u"file_path"_s).toString();
+    }
+    if (path.isEmpty()) {
+        path = args.value(u"filePath"_s).toString();
+    }
+    if (path.isEmpty()) {
+        path = args.value(u"file"_s).toString();
+    }
+    if (path.isEmpty()) {
+        path = args.value(u"uri"_s).toString();
+    }
+    if (path.isEmpty()) {
+        path = args.value(u"TargetFile"_s).toString();
+    }
+    if (path.startsWith(u"file://"_s)) {
+        path = path.mid(7);
+    }
+    return path;
+}
+
 static QString quoteShellArg(const QString &s)
 {
     if (s.isEmpty()) {
@@ -428,7 +456,14 @@ static GraphNode *resolveGraphNode(ProjectGraph *graph, const QString &key)
             continue;
         }
         if (node->path == key || node->id.endsWith(key)) {
-            return node;
+            // Anchor on a '/' boundary: endsWith("util") must not match
+            // "someotherutil" — only "…/util" or an exact id.
+            if (node->id == key || node->id.endsWith(u'/' + key)) {
+                return node;
+            }
+            if (node->path == key) {
+                return node;
+            }
         }
         if (node->name == key) {
             byName = node;
@@ -827,13 +862,16 @@ ToolResult ToolRunner::run(const ToolCall &call)
     }
 
     // Aliases (fs/read_text_file, terminal/exec, edit, agent/new_task, ...)
-    // resolve here so every entry point runs the same tool.
-    const QString canonical = canonicalToolName(call.name);
+    // resolve here so every entry point runs the same tool. Compared by
+    // canonical name (case-insensitive) so "Read_File", "BASH", "Edit" and
+    // other casings the model emits still dispatch instead of "Unknown tool".
+    const QString canonical = canonicalToolName(call.name).trimmed().toLower();
     if (canonical == u"read_file"_s) {
         return readFile(args);
     }
     if (canonical == u"write_file"_s) {
-        if (call.name.trimmed().compare(u"fs/append_file"_s, Qt::CaseInsensitive) == 0) {
+        if (call.name.trimmed().compare(u"fs/append_file"_s, Qt::CaseInsensitive) == 0
+            || canonical == u"append_file"_s) {
             return appendFile(args);
         }
         return writeFile(args);
@@ -859,16 +897,16 @@ ToolResult ToolRunner::run(const ToolCall &call)
     if (canonical == u"query_project_graph"_s) {
         return queryProjectGraph(args);
     }
-    if (call.name == u"goal_report"_s) {
+    if (canonical == u"goal_report"_s) {
         return goalReport(args);
     }
-    if (call.name == u"write_plan_file"_s) {
+    if (canonical == u"write_plan_file"_s) {
         return writePlanFile(args);
     }
-    if (call.name == u"suggest"_s) {
+    if (canonical == u"suggest"_s) {
         return suggest(args);
     }
-    if (call.name == u"question"_s) {
+    if (canonical == u"question"_s) {
         return question(args);
     }
 
@@ -883,9 +921,9 @@ ToolResult ToolRunner::readFile(const QJsonObject &args) const
     ToolResult result;
     result.name = u"read_file"_s;
     
-    // Extract the file path from the tool arguments
+    // Accepts path/file_path/filePath/file/uri/TargetFile spellings.
     QString error;
-    const QString path = args.value(u"path"_s).toString();
+    const QString path = canonicalPathArg(args);
     if (path.trimmed().isEmpty()) {
         result.ok = false;
         result.output = u"path is required."_s;
@@ -999,9 +1037,9 @@ ToolResult ToolRunner::writeFile(const QJsonObject &args)
     ToolResult result;
     result.name = u"write_file"_s;
     
-    // Extract the file path and content from the tool arguments
+    // Accepts path/file_path/filePath/file/uri/TargetFile spellings.
     QString error;
-    const QString path = args.value(u"path"_s).toString();
+    const QString path = canonicalPathArg(args);
     if (path.trimmed().isEmpty()) {
         result.ok = false;
         result.output = u"path is required."_s;
@@ -1057,7 +1095,7 @@ ToolResult ToolRunner::appendFile(const QJsonObject &args)
     result.name = u"write_file"_s;
 
     QString error;
-    const QString path = args.value(u"path"_s).toString();
+    const QString path = canonicalPathArg(args);
     if (path.trimmed().isEmpty()) {
         result.ok = false;
         result.output = u"path is required."_s;
@@ -1086,9 +1124,25 @@ ToolResult ToolRunner::appendFile(const QJsonObject &args)
         return result;
     }
     const QString content = contentValue.toString();
+    // Same 4 MiB ceiling as editFile: an unbounded append turns the file into
+    // a memory-exhaustion vector one chunk at a time. Note: the read-modify-
+    // write below is not atomic — a concurrent writer between the read and the
+    // write is lost. Acceptable for a single-agent turn, but not for shared
+    // files under concurrent edits.
+    constexpr int kMaxAppendChars = 4 * 1024 * 1024;
+    if (content.size() > kMaxAppendChars) {
+        result.ok = false;
+        result.output = u"content is too large to append (%1 characters, max %2)."_s.arg(content.size()).arg(kMaxAppendChars);
+        return result;
+    }
     // Append, not overwrite: keep what is there and add the new content.
     QString existing;
     if (m_bridge && m_bridge->readDocument(resolved, &existing) && !existing.isEmpty()) {
+        if (existing.size() + content.size() + 1 > kMaxAppendChars) {
+            result.ok = false;
+            result.output = u"Appending %1 characters would exceed the %2 character file cap."_s.arg(content.size()).arg(kMaxAppendChars);
+            return result;
+        }
         const QString joined = (existing.endsWith(u'\n') || content.startsWith(u'\n') || content.isEmpty())
             ? QString(existing + content)
             : QString(existing + u'\n' + content);
@@ -1115,9 +1169,9 @@ ToolResult ToolRunner::editFile(const QJsonObject &args)
     ToolResult result;
     result.name = u"edit_file"_s;
 
-    // Extract the file path from the tool arguments
+    // Accepts path/file_path/filePath/file/uri/TargetFile spellings.
     QString error;
-    const QString path = args.value(u"path"_s).toString();
+    const QString path = canonicalPathArg(args);
     if (path.trimmed().isEmpty()) {
         result.ok = false;
         result.output = u"path is required."_s;
@@ -1218,10 +1272,9 @@ ToolResult ToolRunner::multiEditFile(const QJsonObject &args)
     result.name = u"multi_edit_file"_s;
 
     QString error;
-    QString path = args.value(u"path"_s).toString();
-    if (path.isEmpty()) {
-        path = args.value(u"TargetFile"_s).toString();
-    }
+    // Same alias set as describe()'s fileArg (path/file_path/filePath/file/
+    // uri/TargetFile): the approval card and run() must agree on the target.
+    const QString path = canonicalPathArg(args);
 
     if (path.isEmpty()) {
         result.ok = false;
@@ -1452,7 +1505,7 @@ ToolResult ToolRunner::listDir(const QJsonObject &args) const
     
     // Extract the directory path from the tool arguments
     QString error;
-    const QString path = args.value(u"path"_s).toString();
+    const QString path = canonicalPathArg(args);
     
     // Determine the directory to list (use workspace root if path is empty)
     const QString targetPath = path.isEmpty() ? m_sandbox.workspaceRoot() : path;
@@ -1482,10 +1535,19 @@ ToolResult ToolRunner::listDir(const QJsonObject &args) const
     
     constexpr int kMaxDirectoryEntries = 1000;
     constexpr int kMaxDirectoryOutputChars = 80000;
+    // Cap during iteration, not just after sort: a directory with millions of
+    // entries would otherwise load them all before the 1000-entry resize.
+    constexpr int kMaxWalkedEntries = 2000;
     QVector<QPair<QString, QString>> visibleEntries;
     QDirIterator iterator(resolved, QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden);
     int skippedDenied = 0;
+    int walked = 0;
+    bool walkTruncated = false;
     while (iterator.hasNext()) {
+        if (++walked > kMaxWalkedEntries) {
+            walkTruncated = true;
+            break;
+        }
         iterator.next();
         const QFileInfo info = iterator.fileInfo();
         if (m_sandbox.isDenied(info.absoluteFilePath()) || !m_sandbox.allowsRead(info.absoluteFilePath(), nullptr)) {
@@ -1519,6 +1581,9 @@ ToolResult ToolRunner::listDir(const QJsonObject &args) const
     if (skippedDenied > 0) {
         result.output += u"\n[%1 entry(s) hidden by sandbox deny rules.]"_s.arg(skippedDenied);
     }
+    if (walkTruncated) {
+        truncated = true;
+    }
     if (truncated) {
         result.output += u"\n[Listing truncated; refine the directory path to see more entries.]"_s;
     }
@@ -1540,7 +1605,7 @@ ToolResult ToolRunner::grep(const QJsonObject &args) const
     const bool contextClamped = (rawContext != context);
 
     QString error;
-    const QString path = args.value(u"path"_s).toString();
+    const QString path = canonicalPathArg(args);
     const QString target = path.isEmpty() ? m_sandbox.workspaceRoot() : path;
     // The search root is checked first. Without it a directory outside the
     // workspace would be searched and every file in it skipped, and the
@@ -1566,6 +1631,20 @@ ToolResult ToolRunner::grep(const QJsonObject &args) const
         result.ok = false;
         result.output = u"Pattern is too long (max 1024 characters)."_s;
         return result;
+    }
+    // Reject nested-quantifier patterns like "(a+)+" / "(.*)*" that blow up
+    // backtracking on long lines. Cheap syntactic check, not a full parse.
+    {
+        static const QRegularExpression nestedQuant(uR"([+*?]\s*[^+*?{]*[+*?]|\{[^}]*\}[^)]*[+*?])"_s);
+        // More targeted: an inner quantifier inside a group followed by an
+        // outer quantifier, e.g. "(a+)+", "(a*)*", "(a|b+)+".
+        static const QRegularExpression evilNest(uR"(\([^()]*[+*][^()]*\)[+*])"_s);
+        if (evilNest.match(pattern).hasMatch()) {
+            result.ok = false;
+            result.output = u"Pattern is too complex (nested quantifiers like (a+)+ are not allowed)."_s;
+            return result;
+        }
+        Q_UNUSED(nestedQuant);
     }
     QRegularExpression re(pattern, options);
     if (!re.isValid()) {
@@ -1732,17 +1811,22 @@ ToolResult ToolRunner::glob(const QJsonObject &args) const
         base = resolved;
     }
 
-    // Collect all matching files by recursively searching from `base`
+    // Collect all matching files by recursively searching from `base`.
+    // A visited budget caps the walk itself (not just the 400-match output):
+    // a huge tree would otherwise be fully enumerated before the cap hits.
+    constexpr int kMaxGlobVisited = 20000;
     QStringList matches;
     bool capped = false;
     int skippedDenied = 0;
+    int visited = 0;
     QDirIterator it(base, QDir::Files | QDir::Hidden, QDirIterator::Subdirectories);
     while (it.hasNext()) {
-        if (matches.size() >= 400) {
+        if (matches.size() >= 400 || visited >= kMaxGlobVisited) {
             capped = true;
             break;
         }
         const QString filePath = it.next();
+        ++visited;
 
         // Skip files that are denied by the sandbox for security
         if (m_sandbox.isDenied(filePath) || !m_sandbox.allowsRead(filePath, nullptr)) {
@@ -1779,6 +1863,12 @@ bool ToolRunner::startBashProcess(const QJsonObject &args, QString *program, QSt
 {
     // Extract the command to execute from the tool arguments
     const QString command = args.value(u"command"_s).toString();
+    if (command.trimmed().isEmpty()) {
+        if (error) {
+            *error = u"command must not be empty."_s;
+        }
+        return false;
+    }
 
     // Wrap the command with sandbox security restrictions
     const QStringList wrapped = m_sandbox.wrapCommand(command, error);
@@ -2080,11 +2170,13 @@ void ToolRunner::runBashAsync(const ToolCall &call)
             Q_EMIT bashProgress(callId, soFar);
         }
 #ifdef Q_OS_UNIX
-        if (process->processId() > 0) {
+        if (process->state() != QProcess::NotRunning && process->processId() > 0) {
             ::kill(-static_cast<pid_t>(process->processId()), SIGKILL);
         }
 #endif
-        process->kill();
+        if (process->state() != QProcess::NotRunning) {
+            process->kill();
+        }
     });
 
     connect(process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this, [this, callId, drain, timeout, timeoutMs](int, QProcess::ExitStatus) {
@@ -2151,11 +2243,13 @@ void ToolRunner::cancelBash(const QString &toolCallId)
     cancelled.output = u"The command was cancelled."_s;
     Q_EMIT bashFinished(cancelled);
 #ifdef Q_OS_UNIX
-    if (process->processId() > 0) {
+    if (process->state() != QProcess::NotRunning && process->processId() > 0) {
         ::kill(-static_cast<pid_t>(process->processId()), SIGKILL);
     }
 #endif
-    process->kill();
+    if (process->state() != QProcess::NotRunning) {
+        process->kill();
+    }
     // SIGKILL is delivered at once, but QProcess only notices when the exit
     // notification is read. Waiting briefly reaps the child here, so the
     // runner is not left holding a process that is dead on the kernel side
@@ -2399,6 +2493,14 @@ ToolResult ToolRunner::writePlanFile(const QJsonObject &args)
         result.output = u"content must not be empty: pass the full plan as markdown."_s;
         return result;
     }
+    // Cap the plan at 256 KiB: the content lands in the approval card and the
+    // transcript, and an unbounded write is a memory/flooding vector.
+    constexpr int kMaxPlanChars = 256 * 1024;
+    if (content.size() > kMaxPlanChars) {
+        result.ok = false;
+        result.output = u"content is too large (%1 characters, max %2)."_s.arg(content.size()).arg(kMaxPlanChars);
+        return result;
+    }
     if (!m_bridge) {
         result.ok = false;
         result.output = u"No document bridge is available."_s;
@@ -2409,12 +2511,38 @@ ToolResult ToolRunner::writePlanFile(const QJsonObject &args)
     // a read-only or strict profile must not stop the agent from writing down
     // its plan, and the model never chooses the path.
     const QString path = planFilePath(m_sandbox.workspaceRoot());
-    // The temp directory is shared: refuse a symlinked destination so a
-    // planted link cannot redirect the plan write elsewhere.
-    if (QFileInfo(path).isSymLink()) {
-        result.ok = false;
-        result.output = u"Plan file path is a symlink; refusing to write."_s;
-        return result;
+    // The temp directory is shared and the stable name is predictable, so the
+    // pre-write checks must not TOCTOU: resolve the symlink first (a planted
+    // link is refused), then create the file O_EXCL-style with 0600 perms via
+    // QTemporaryFile semantics — an existing file is opened, never followed
+    // through a fresh symlink.
+    {
+        const QFileInfo info(path);
+        // canonicalFilePath resolves one symlink level; a dangling/missing
+        // path returns empty and is fine (nothing planted there yet).
+        if (info.isSymLink()) {
+            result.ok = false;
+            result.output = u"Plan file path is a symlink; refusing to write."_s;
+            return result;
+        }
+        if (!QFile::exists(path)) {
+            // O_EXCL creation with owner-only perms before the bridge writes:
+            // a concurrent planter cannot win the race between this check and
+            // the write below.
+            QFile fresh(path);
+            if (fresh.open(QIODevice::NewOnly | QIODevice::WriteOnly)) {
+                fresh.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+                fresh.write(content.toUtf8());
+                fresh.close();
+            } else if (!QFile::exists(path)) {
+                result.ok = false;
+                result.output = u"Could not create the plan file (it may have been created concurrently)."_s;
+                return result;
+            }
+        } else {
+            // Harden existing-file perms to 0600: plans can quote secrets.
+            QFile::setPermissions(path, QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+        }
     }
     QString error;
     if (!m_bridge->writeDocument(path, content, &error)) {

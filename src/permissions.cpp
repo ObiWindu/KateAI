@@ -79,7 +79,13 @@ PermissionPolicy::Verdict PermissionPolicy::evaluate(const QString &toolName, co
     PermissionRequest request;
     request.toolName = toolName;
     request.risk = riskFor(canonicalToolName(toolName));
-    request.mutatesFiles = false;
+    // Infer file-mutation from the tool identity so the string overload cannot
+    // smuggle a mutating tool through the read-tool fast path with
+    // mutatesFiles=false. Callers that already know better still go through
+    // the PermissionRequest overload below. (riskFor() is the source of truth
+    // here rather than the UI's isFileMutatingTool list, which lives in the
+    // widget layer and would add a dependency.)
+    request.mutatesFiles = (request.risk != ToolRisk::Read);
     return evaluate(request, arguments, sandbox, reason);
 }
 
@@ -147,6 +153,19 @@ PermissionPolicy::Verdict PermissionPolicy::evaluate(const PermissionRequest &re
     }
     if (m_mode == PermissionMode::AcceptEdits && isReadTool(toolName)) {
         return Verdict::Allow;
+    }
+
+    // Read-only bash is auto-allow, but only when Sandbox::isReadOnlyCommand
+    // says so — which now gates on workspace containment and deny globs (a
+    // "cat /etc/passwd" is read-only yet outside the workspace and must not
+    // auto-allow). The deny-glob hard deny above already returned Deny, so
+    // reaching here means the command is contained; keep the explicit
+    // re-check as defense in depth against future reordering.
+    if (toolName == u"bash"_s && sandbox.commandTouchesDeniedPath(arguments.value(u"command"_s).toString())) {
+        if (reason) {
+            *reason = u"Command touches a path blocked by the deny rules."_s;
+        }
+        return Verdict::Deny;
     }
 
     if (toolName == u"bash"_s && sandbox.isReadOnlyCommand(arguments.value(u"command"_s).toString())) {

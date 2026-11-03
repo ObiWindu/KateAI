@@ -340,7 +340,10 @@ private Q_SLOTS:
         QVERIFY(!box.isReadOnlyCommand(u"cat a > b && cat c"_s));
         // Descriptor duplication writes to a stream, not a file.
         QVERIFY(box.isReadOnlyCommand(u"ls 2>&1"_s));
-        QVERIFY(box.isReadOnlyCommand(u"ls -la /etc 2>&1"_s));
+        // An absolute path inside the workspace stays read-only; one outside
+        // it (e.g. "/etc") must NOT auto-allow, so it is asserted false.
+        QVERIFY(box.isReadOnlyCommand(u"ls -la %1 2>&1"_s.arg(QDir::tempPath())));
+        QVERIFY(!box.isReadOnlyCommand(u"ls -la /etc 2>&1"_s));
         QVERIFY(box.isReadOnlyCommand(u"cat notes.txt"_s));
     }
 
