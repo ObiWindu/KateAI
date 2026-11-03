@@ -204,6 +204,18 @@ add_test(NAME test_stopbehavior
          COMMAND test_stopbehavior -platform offscreen
          WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
+# A delegated sub-agent has to stay visible while it runs: task text, current
+# step and a live activity log on its card. Same sources as test_stopbehavior.
+add_executable(test_subtasklive test_subtasklive.cpp ../src/chatwidget.cpp ../src/toolcallwidget.cpp
+    ../src/promptedit.cpp ../src/permissionbar.cpp ../src/subtaskwidget.cpp ../src/subtaskdock.cpp
+    ../src/suggestionwidget.cpp ../src/questionwidget.cpp ../src/todowidget.cpp ../src/edittracker.cpp
+    ../src/turnstatus.cpp ../src/chattheme.cpp)
+target_link_libraries(test_subtasklive PRIVATE kateai_core Qt6::Test Qt6::Widgets)
+target_compile_definitions(test_subtasklive PRIVATE TRANSLATION_DOMAIN="kateai")
+add_test(NAME test_subtasklive
+         COMMAND test_subtasklive -platform offscreen
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
 # A theme change has to reach the chat UI: the panel, the cards and the
 # transcript repaint from the installed palette. Same source list as
 # test_overflow, which also builds a full ChatWidget.

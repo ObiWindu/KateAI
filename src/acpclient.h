@@ -66,7 +66,10 @@ public:
     }
     bool isBusy() const
     {
-        return m_promptId != 0 || m_state == State::Starting;
+        // A prompt awaiting its cancellation grace is already over from the
+        // caller's side: reporting busy until the grace timer fires would keep
+        // the UI in its stop state for up to a minute after Stop.
+        return (m_promptId != 0 && !m_cancelling) || m_state == State::Starting;
     }
     bool hasPendingPermission() const
     {
@@ -240,14 +243,22 @@ private:
                     std::function<void(const QJsonObject &, const QString &)> done = {},
                     int timeoutMs = 30000);
     void sendNotification(const QString &method, const QJsonObject &params);
-    void writeMessage(const QJsonObject &message);
+    // Writes one JSON-RPC frame to the agent. Returns false when the process
+    // is not running, in which case nothing was sent; request callers report
+    // that to their callback instead of leaving the request parked.
+    bool writeMessage(const QJsonObject &message);
     void replyResult(const QJsonValue &id, const QJsonObject &result);
     void replyError(const QJsonValue &id, int code, const QString &message);
     // Answers whichever permission request is waiting with a "cancelled" outcome
-    // and clears the request state. An agent that asks twice must never leave the
-    // first reply unsent, because an unanswered session/request_permission blocks
-    // that agent until the whole session is gone.
+    // and clears the request state, including queued follow-ups. An agent that
+    // asks twice must never leave the first reply unsent, because an unanswered
+    // session/request_permission blocks that agent until the whole session is
+    // gone. Parked client methods are answered separately through
+    // cancelParkedMethods(), never as a side effect of a new permission.
     void cancelPendingPermission();
+    // Surfaces the next queued permission (agent-initiated first, then parked
+    // client methods). Called after a permission resolves.
+    void answerNextPermission();
     // Emits toolFinished for every tool still open and forgets them, so a card is
     // never left spinning because the turn it belonged to is gone.
     void finishLiveTools(const QString &message);
@@ -301,10 +312,13 @@ private:
     // whose approval never came.
     void cancelParkedMethods();
     // Grant keys: a write by its resolved path, a terminal by its exact command
-    // line. Both sides (the approval and the client method) normalise to the
-    // same key, or the grant never matches.
+    // line plus the sorted names of the extra environment it runs with. Both
+    // sides (the approval and the client method) normalise to the same key, or
+    // the grant never matches. The env names are part of the key so an
+    // approval for `cmd` cannot be replayed with a smuggled LD_PRELOAD.
     QString writeGrantKey(const QString &path) const;
-    QString execGrantKey(const QString &command, const QStringList &args) const;
+    QString execGrantKey(const QString &command, const QStringList &args,
+                         const QStringList &envKeys = {}) const;
     // Records the grants an approval of an agent-initiated permission request
     // covers, so a well-behaved agent that announces its edit or command before
     // asking is not asked twice for one action.
@@ -367,6 +381,10 @@ private:
 
     int m_promptId = 0;
     QString m_promptText;
+    // A session/cancel was sent and the bounded grace wait for the agent's
+    // answer is running. The turn is over from the caller's side; isBusy()
+    // already reports idle, and the late answer only closes the books.
+    bool m_cancelling = false;
     QString m_currentText;
     QString m_currentThinking;
     QJsonArray m_currentPlan;
@@ -394,6 +412,16 @@ private:
     QJsonValue m_permissionRpcId;
     QJsonArray m_permissionOptions;
     PermissionRequest m_permissionRequest;
+    // Agent-initiated permissions that arrived while another one is being
+    // answered. Only one question is ever shown at a time; the rest queue
+    // here instead of cancelling whatever is parked, and surface through
+    // answerNextPermission() once the current one resolves.
+    struct QueuedPermission {
+        QJsonValue rpcId;
+        QJsonArray options;
+        PermissionRequest request;
+    };
+    QList<QueuedPermission> m_permissionQueue;
 
     // Mutating client methods waiting for a permission decision. At most one
     // is active (its request is the one being shown); the rest queue behind it.

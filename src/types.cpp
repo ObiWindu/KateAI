@@ -39,6 +39,7 @@ static QHash<QString, QString> buildToolAliasMap()
     map[u"apply_patch"_s] = u"edit_file"_s;
     map[u"multi_edit"_s] = u"multi_edit_file"_s;
     map[u"multi_edit_file"_s] = u"multi_edit_file"_s;
+    map[u"multi_replace_file_content"_s] = u"multi_edit_file"_s;
     // ACP terminal/shell
     map[u"terminal/exec"_s] = u"bash"_s;
     map[u"terminal/run"_s] = u"bash"_s;
@@ -125,6 +126,11 @@ QString canonicalToolName(const QString &name)
 
 QString resolvePath(const QString &path, const QString &workspace)
 {
+    // WARNING: hazardous helper — lexical resolution only. This does NOT
+    // enforce sandbox containment, symlink resolution, or deny-glob checks.
+    // Callers that touch the filesystem must pass the result through
+    // Sandbox::resolve()/allowsRead()/allowsWrite() (or normalizePath()).
+    // Kept lexical so pure UI paths (display, history) never touch disk.
     const QString trimmed = path.trimmed();
     if (trimmed.isEmpty()) {
         return {};
@@ -137,6 +143,9 @@ QString resolvePath(const QString &path, const QString &workspace)
 
 QJsonObject normalizeRawInput(const QJsonValue &rawInput)
 {
+    // NOTE: malformed input and genuinely empty input both normalize to {}.
+    // Callers that must distinguish them should check rawInput first; this
+    // keeps a single simple contract for tool-argument parsing.
     if (rawInput.isObject()) {
         return rawInput.toObject();
     }
@@ -269,7 +278,12 @@ Provider providerFromId(const QString &id)
     if (id == u"telegram"_s) {
         return Provider::Telegram;
     }
-    return Provider::Grok;
+    if (id == u"grok"_s) {
+        return Provider::Grok;
+    }
+    // Unknown ids must not be misattributed to Grok: fall back to the generic
+    // OpenAI-compatible provider (no Custom variant exists in the enum).
+    return Provider::OpenAICompatible;
 }
 
 QString providerBaseUrl(Provider provider)
@@ -317,7 +331,9 @@ QString providerBaseUrl(const Settings &settings)
     case Provider::Kilo:
         return u"https://api.kilo.ai/v1"_s;
     case Provider::Acp:
-        return settings.acpUrl;
+        // An empty ACP URL would build a malformed request URL; fall back to
+        // the loopback default like every other provider branch does.
+        return settings.acpUrl.isEmpty() ? u"http://localhost:8080"_s : settings.acpUrl;
     case Provider::Grok:
     default:
         return u"https://api.x.ai/v1"_s;
@@ -860,8 +876,12 @@ QString compressText(const QString &text, int maxLength, bool enabled)
     }
 
     // Truncate and add indicator. The cut is taken from the budget so the
-    // result never exceeds the length the caller asked for.
+    // result never exceeds the length the caller asked for. A budget smaller
+    // than the indicator truncates the indicator itself instead of overflowing.
     const QString indicator = u"... (truncated)"_s;
+    if (maxLength < indicator.size()) {
+        return truncateSafe(indicator, maxLength);
+    }
     const int room = qMax(0, maxLength - indicator.size());
     QString result = truncateSafe(text, room);
     result += indicator;
@@ -894,8 +914,13 @@ QString smartCompressContext(const QString &text, int maxLength, bool enabled)
         end.remove(0, 1);
     }
 
+    // Recompute the middle from the *actual* cut lengths: the surrogate
+    // adjustments above change start/end by one unit, and slicing the middle
+    // from the nominal keepStart/keepEnd would then overlap or gap by one char.
+    const int actualStart = start.length();
+    const int actualEnd = end.length();
     // Create a summary of what was in the middle
-    QString middle = text.mid(keepStart, text.length() - keepStart - keepEnd);
+    QString middle = text.mid(actualStart, text.length() - actualStart - actualEnd);
     int middleLines = middle.count(u'\n');
     int middleChars = middle.length();
 
@@ -938,7 +963,8 @@ QList<ChatMessage> compressMessageHistory(const QList<ChatMessage> &messages,
     }
 
     if (totalChars > maxTotalChars && result.size() > 2) {
-        // Compress the oldest non-system message
+        // Compress the oldest non-system messages, stopping as soon as the
+        // budget is met instead of compressing every middle message.
         for (int i = 1; i < result.size() - 1; ++i) {
             ChatMessage &msg = result[i];
             if (msg.content.length() > 500) {
@@ -946,6 +972,13 @@ QList<ChatMessage> compressMessageHistory(const QList<ChatMessage> &messages,
             }
             if (msg.thinking.length() > 1000) {
                 msg.thinking = smartCompressContext(msg.thinking, 1000, true);
+            }
+            int now = 0;
+            for (const auto &m : result) {
+                now += m.content.length() + m.thinking.length();
+            }
+            if (now <= maxTotalChars) {
+                break;
             }
         }
     }
@@ -985,21 +1018,32 @@ QJsonArray parsePlanFromText(const QString &text)
             const QString line = text.mid(lineStart, i - lineStart).trimmed();
             if (!line.isEmpty()) {
                 QString step = line;
-                // Handle various list formats: "1. ", "1) ", "- ", "* ", "Step 1: "
-                int s = 0;
-                while (s < step.size() && (step[s].isDigit() || step[s] == u'.' || step[s] == u')' || step[s] == u'(')) {
-                    ++s;
-                }
-                if (s > 0 && s < step.size() && (step[s] == u' ' || step[s] == u'.' || step[s] == u')')) {
-                    step = step.mid(s).trimmed();
+                // Handle various list formats: "1. ", "1) ", "(1) ", "- ",
+                // "* ", "Step 1: ". A bare year ("2024 do x") is NOT a list
+                // marker: only digits followed by '.' or ')' (then space)
+                // count, so years and plain numbers are kept verbatim.
+                static const QRegularExpression numbered(uR"(^\(?\d+[.\)]\s+)"_s);
+                const auto nm = numbered.match(step);
+                if (nm.hasMatch()) {
+                    step = step.mid(nm.capturedLength(0)).trimmed();
                 } else if (step.startsWith(u"- "_s) || step.startsWith(u"* "_s) || step.startsWith(u"• "_s)) {
                     step = step.mid(2).trimmed();
                 } else if (step.startsWith(u"step "_s, Qt::CaseInsensitive)) {
-                    // The colon belongs to the prefix. It has to be removed
-                    // before the digits are skipped, otherwise the "Step 1:"
-                    // form keeps its colon and the marker test below can never
-                    // match it.
-                    step = step.mid(5).trimmed();
+                    // "Step 1: foo", "Step 1. foo", "Step 1 - foo": skip the
+                    // "Step" word, then any digits and ":.() -" separators.
+                    int p = 4;
+                    while (p < step.size() && step.at(p).isSpace()) {
+                        ++p;
+                    }
+                    while (p < step.size()
+                           && (step.at(p).isDigit() || step.at(p) == u'.' || step.at(p) == u')'
+                               || step.at(p) == u'(' || step.at(p) == u':' || step.at(p) == u'-')) {
+                        ++p;
+                    }
+                    while (p < step.size() && step.at(p).isSpace()) {
+                        ++p;
+                    }
+                    step = step.mid(p).trimmed();
                     if (step.startsWith(u":"_s)) {
                         step = step.mid(1).trimmed();
                     }
@@ -1036,14 +1080,19 @@ QJsonArray mergePlanIntoAssistantMessage(const QJsonArray &existingPlan,
     // agent reworded, and the checklist silently resets mid-task.
     QHash<QString, bool> completedById;
     QHash<QString, bool> completedByDesc;
+    QHash<QString, bool> progressById;
+    QHash<QString, bool> progressByDesc;
     for (const QJsonValue &v : existingPlan) {
         const QJsonObject o = v.toObject();
         const bool completed = o.value(u"completed"_s).toBool();
+        const bool inProgress = o.value(u"inProgress"_s).toBool();
         const QString id = o.value(u"id"_s).toString();
         if (!id.isEmpty()) {
             completedById.insert(id, completed);
+            progressById.insert(id, inProgress);
         }
         completedByDesc.insert(o.value(u"description"_s).toString().toLower(), completed);
+        progressByDesc.insert(o.value(u"description"_s).toString().toLower(), inProgress);
     }
     QJsonArray merged;
     for (const QJsonValue &v : fresh) {
@@ -1052,8 +1101,10 @@ QJsonArray mergePlanIntoAssistantMessage(const QJsonArray &existingPlan,
         const QString id = o.value(u"id"_s).toString();
         if (completedById.contains(id)) {
             o.insert(u"completed"_s, completedById.value(id));
+            o.insert(u"inProgress"_s, progressById.value(id, false));
         } else {
             o.insert(u"completed"_s, completedByDesc.value(desc.toLower(), false));
+            o.insert(u"inProgress"_s, progressByDesc.value(desc.toLower(), false));
         }
         merged.append(o);
     }

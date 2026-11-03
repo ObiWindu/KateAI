@@ -945,7 +945,7 @@ def handle(message):
                 request_id,
                 {
                     "sessionId": SESSION_ID,
-                    "configOptions": [model_config(CURRENT_MODEL), mode_config()],
+                    "configOptions": [model_config(CURRENT_MODEL, extra=True), mode_config()],
                     # Older clients read this. Kate must prefer configOptions.
                     "models": {
                         "currentModelId": "stale-model",

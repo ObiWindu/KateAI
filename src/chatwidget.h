@@ -365,6 +365,12 @@ private:
     // its state-dependent style instead of resetting it to the default box.
     QString m_infoBarMessage;
     bool m_infoBarIsError = false;
+    // Generation counter: concurrent auto-hide timers only hide the message
+    // they posted, never a newer one that happens to carry the same text.
+    quint64 m_infoBarGen = 0;
+    // Re-entrancy guard: compactContext() emits contextCompacted, which calls
+    // back here while this is still on the stack.
+    bool m_updatingTokenDisplay = false;
     // The empty-state hero in the transcript; kept so a theme change can
     // re-style it (it is deleted once the first message arrives).
     QPointer<QWidget> m_welcomeWidget;
@@ -375,6 +381,9 @@ private:
     QLabel *m_tokenCount = nullptr;
     QPushButton *m_modelSelector = nullptr;
     QString m_streamText;
+    // Freeze guard: freezeStreaming() is called from many signal handlers for
+    // one turn end and must settle the live card exactly once.
+    bool m_freezeDone = false;
     QHash<Provider, QStringList> m_modelCatalog;
     QString m_acpModelCatalogAgentId;
     Provider m_preferredProvider = Provider::Grok;
@@ -390,6 +399,9 @@ private:
     QPointer<AcpClient> m_acpModelProbe;
     QPointer<AcpBinaryInstaller> m_acpBinaryInstaller;
     QString m_acpInstallingAgentId;
+    // Installer requests that arrived while another agent was installing.
+    // Without a queue the second agent's request was silently dropped.
+    QStringList m_acpInstallQueue;
     // Custom popup rather than QMenu: a QLineEdit inside QMenu::exec() plus
     // setVisible() on hundreds of model QActions is what made typing hang, and
     // exec() below the chip opened the list off the bottom of the panel.
@@ -430,6 +442,25 @@ private:
     QList<QPointer<ToolCallWidget>> m_toolCallOrder;
     // One live card per running sub-agent, keyed by task id.
     QHash<QString, SubtaskWidget *> m_subtaskWidgets;
+    // Live task id per card key. Native dispatch may rename a call (an empty
+    // or reused tool id gets a suffix), so the id the live signals carry can
+    // differ from the tool call id the card was born with; cancels go out
+    // under the live id.
+    QHash<QString, QString> m_subtaskLiveIds;
+    // Original tool call id per card key, for retiring results that only
+    // carry the call id the provider saw.
+    QHash<QString, QString> m_subtaskOrigIds;
+    // The card for a live task id: exact hit first, otherwise the card that
+    // never started (its task id does not match it yet) is claimed and
+    // re-keyed, so a renamed call still feeds its card instead of an empty
+    // activity box. Returns nullptr when every card already runs.
+    SubtaskWidget *subtaskWidgetFor(const QString &taskId);
+    // The card's own key (the one recorded at creation), for anchor and
+    // retire lookups that must not hit a live-id alias.
+    QString subtaskKeyFor(SubtaskWidget *card) const;
+    // The live task id to cancel for a card key (the live id when known,
+    // otherwise the key itself).
+    QString liveSubtaskId(const QString &widgetKey) const;
     QList<QPointer<SubtaskWidget>> m_subtaskOrder;
     // The transcript card that was last when each sub-agent started. The
     // sub-agent's card retires right past it, so a delegation that began

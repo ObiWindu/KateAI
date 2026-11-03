@@ -20,8 +20,9 @@ QList<KTextEditor::Range> addedLineRangesFromDiff(const QString &diff)
 {
     QList<KTextEditor::Range> ranges;
     // "@@ -a,b +c,d @@" — the new-file side says where the added lines live.
+    // \s+ around the numbers: some producers emit tabs.
     static const QRegularExpression hunkHeader(
-        u"^@@ -(\\d+)(?:,(\\d+))? \\+(\\d+)(?:,(\\d+))? @@"_s,
+        u"^@@\\s+-(\\d+)(?:,(\\d+))?\\s+\\+(\\d+)(?:,(\\d+))?\\s+@@"_s,
         QRegularExpression::MultilineOption);
 
     QRegularExpressionMatchIterator it = hunkHeader.globalMatch(diff);
@@ -58,18 +59,36 @@ EditRangeTracker::anchor(KTextEditor::Document *document, const QList<KTextEdito
     if (!document) {
         return anchored;
     }
+    // Clamp to the document: a range past the last line anchors nowhere.
+    const int lastLine = document->lines();
     anchored.reserve(ranges.size());
     for (const KTextEditor::Range &range : ranges) {
+        const int startLine = qBound(0, range.start().line(), qMax(0, lastLine - 1));
+        const int endLine = qBound(startLine, range.end().line(), qMax(startLine, lastLine));
         AnchoredRange entry;
-        // MoveOnInsert keeps the anchor under its own line when text is
-        // inserted at the anchor position: an insertion at column 0 of the
-        // hunk's first line moves the anchor down to what the user inserted,
-        // which is the conservative choice for a hint that says "around here".
-        entry.start = document->newMovingCursor(range.start(), KTextEditor::MovingCursor::MoveOnInsert);
-        entry.end = document->newMovingCursor(range.end(), KTextEditor::MovingCursor::MoveOnInsert);
+        // StayOnInsert for the start: an insertion at the anchor position
+        // must not push the start down into the inserted text. MoveOnInsert
+        // for the end so trailing inserts extend the range.
+        entry.start = document->newMovingCursor(KTextEditor::Cursor(startLine, 0),
+                                                KTextEditor::MovingCursor::StayOnInsert);
+        entry.end = document->newMovingCursor(KTextEditor::Cursor(endLine, 0),
+                                              KTextEditor::MovingCursor::MoveOnInsert);
         anchored.append(entry);
     }
     return anchored;
+}
+
+void EditRangeTracker::freeRanges(QList<AnchoredRange> &ranges)
+{
+    // MovingCursors are heap objects the caller must delete; the document
+    // only tracks them while alive.
+    for (AnchoredRange &range : ranges) {
+        delete range.start;
+        range.start = nullptr;
+        delete range.end;
+        range.end = nullptr;
+    }
+    ranges.clear();
 }
 
 bool EditRangeTracker::lineInRanges(const QList<AnchoredRange> &ranges, int line, int *count)
@@ -90,7 +109,8 @@ bool EditRangeTracker::lineInRanges(const QList<AnchoredRange> &ranges, int line
             ++matches;
         }
     }
-    if (count && found) {
+    // Always report the count, 0 on a miss: callers must not read a stale value.
+    if (count) {
         *count = matches;
     }
     return found;
@@ -100,7 +120,13 @@ void EditRangeTracker::setRanges(const QString &path, KTextEditor::Document *doc
                                  const QList<KTextEditor::Range> &pending,
                                  const QList<KTextEditor::Range> &settled)
 {
-    m_paths.remove(path);
+    // Free the previous cursors for this path: they leak otherwise.
+    auto old = m_paths.find(path);
+    if (old != m_paths.end()) {
+        freeRanges(old->pending);
+        freeRanges(old->settled);
+        m_paths.erase(old);
+    }
     if (!document || (pending.isEmpty() && settled.isEmpty())) {
         return;
     }
@@ -109,12 +135,31 @@ void EditRangeTracker::setRanges(const QString &path, KTextEditor::Document *doc
     ranges.pending = anchor(document, pending);
     ranges.settled = anchor(document, settled);
     m_paths.insert(path, ranges);
+    // The document going away must drop (and null) the cursors: a QPointer
+    // nulls itself, but the MovingCursors would dangle.
+    connect(document, &QObject::destroyed, this, [this, path]() {
+        auto it = m_paths.find(path);
+        if (it != m_paths.end()) {
+            // The cursors died with the document; null them without delete.
+            for (AnchoredRange &range : it->pending) {
+                range.start = nullptr;
+                range.end = nullptr;
+            }
+            for (AnchoredRange &range : it->settled) {
+                range.start = nullptr;
+                range.end = nullptr;
+            }
+            m_paths.erase(it);
+        }
+    });
 }
 
 void EditRangeTracker::clear()
 {
-    // The MovingCursors are owned by their documents; dropping the hash is
-    // enough, the document deletes its moving cursors with itself.
+    for (auto it = m_paths.begin(); it != m_paths.end(); ++it) {
+        freeRanges(it->pending);
+        freeRanges(it->settled);
+    }
     m_paths.clear();
 }
 

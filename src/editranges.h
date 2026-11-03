@@ -70,6 +70,7 @@ private:
 
     static QList<AnchoredRange> anchor(KTextEditor::Document *document,
                                        const QList<KTextEditor::Range> &ranges);
+    static void freeRanges(QList<AnchoredRange> &ranges);
     static bool lineInRanges(const QList<AnchoredRange> &ranges, int line, int *count = nullptr);
 
     QHash<QString, PathRanges> m_paths;

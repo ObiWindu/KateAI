@@ -250,9 +250,9 @@ static SessionStore::SessionData sessionDataFromJson(const QByteArray &payload)
     data.changedPaths = stringListFromJson(obj[u"changedPaths"_s].toArray());
     data.changesNeedVerification = obj[u"changesNeedVerification"_s].toBool();
     data.verificationAttempted = obj[u"verificationAttempted"_s].toBool();
-    data.verificationPromptCount = obj[u"verificationPromptCount"_s].toInt();
-    data.modelRequests = obj[u"modelRequests"_s].toInt();
-    data.toolCalls = obj[u"toolCalls"_s].toInt();
+    data.verificationPromptCount = qMax(0, obj[u"verificationPromptCount"_s].toInt());
+    data.modelRequests = qMax(0, obj[u"modelRequests"_s].toInt());
+    data.toolCalls = qMax(0, obj[u"toolCalls"_s].toInt());
     data.acpSessionId = obj[u"acpSessionId"_s].toString();
     data.workspace = obj[u"workspace"_s].toString();
 
@@ -266,41 +266,55 @@ static SessionStore::SessionData sessionDataFromJson(const QByteArray &payload)
 
 static void repairBadConversationTitles(const QSqlDatabase &db)
 {
-    QSqlQuery query(db);
-    if (!query.exec(u"SELECT id, title, payload FROM conversations"_s)) {
-        return;
-    }
+    // Paginate so a large history never loads every payload into memory.
+    constexpr int kRepairPage = 100;
+    int offset = 0;
+    while (true) {
+        QSqlQuery query(db);
+        query.prepare(u"SELECT id, title, payload FROM conversations LIMIT 100 OFFSET ?"_s);
+        query.addBindValue(offset);
+        if (!query.exec()) {
+            return;
+        }
 
-    struct Row {
-        QString id;
-        QString title;
-        QByteArray payload;
-    };
-    QList<Row> rows;
-    while (query.next()) {
-        Row row;
-        row.id = query.value(0).toString();
-        row.title = query.value(1).toString();
-        row.payload = query.value(2).toByteArray();
-        rows.append(row);
-    }
+        struct Row {
+            QString id;
+            QString title;
+            QByteArray payload;
+        };
+        QList<Row> rows;
+        while (query.next()) {
+            Row row;
+            row.id = query.value(0).toString();
+            row.title = query.value(1).toString();
+            row.payload = query.value(2).toByteArray();
+            rows.append(row);
+        }
+        if (rows.isEmpty()) {
+            return;
+        }
 
-    for (const Row &row : rows) {
-        if (!isBadTitle(row.title)) {
-            continue;
+        for (const Row &row : rows) {
+            if (!isBadTitle(row.title)) {
+                continue;
+            }
+            const SessionStore::SessionData data = sessionDataFromJson(row.payload);
+            const QString newTitle = generateTitleFromMessages(data.messages);
+            if (newTitle.isEmpty() || isBadTitle(newTitle) || newTitle == row.title) {
+                continue;
+            }
+            QSqlQuery update(db);
+            update.prepare(u"UPDATE conversations SET title = ? WHERE id = ?"_s);
+            update.addBindValue(newTitle);
+            update.addBindValue(row.id);
+            if (!update.exec()) {
+                qWarning() << "KateAI: cannot repair conversation title" << row.id << update.lastError().text();
+            }
         }
-        const SessionStore::SessionData data = sessionDataFromJson(row.payload);
-        const QString newTitle = generateTitleFromMessages(data.messages);
-        if (newTitle.isEmpty() || isBadTitle(newTitle) || newTitle == row.title) {
-            continue;
+        if (rows.size() < kRepairPage) {
+            return;
         }
-        QSqlQuery update(db);
-        update.prepare(u"UPDATE conversations SET title = ? WHERE id = ?"_s);
-        update.addBindValue(newTitle);
-        update.addBindValue(row.id);
-        if (!update.exec()) {
-            qWarning() << "KateAI: cannot repair conversation title" << row.id << update.lastError().text();
-        }
+        offset += kRepairPage;
     }
 }
 
@@ -399,6 +413,7 @@ static QSqlDatabase openStore(bool *ok)
 
     auto *names = connectionNames();
     if (names) {
+        QMutexLocker locker(&storeMutex());
         const auto cached = names->constFind(thread);
         if (cached != names->constEnd()) {
             QSqlDatabase db = QSqlDatabase::database(cached.value(), false);
@@ -480,6 +495,7 @@ static QSqlDatabase openStore(bool *ok)
     });
 
     if (names) {
+        QMutexLocker locker(&storeMutex());
         names->insert(thread, connectionName);
     }
     *ok = true;
@@ -530,6 +546,7 @@ static void clearMeta(QSqlDatabase db, const QString &key)
 // Strictly increasing timestamps keep "most recent first" ordering stable.
 static qint64 nextTimestamp()
 {
+    QMutexLocker locker(&storeMutex());
     static qint64 lastIssued = 0; // guarded by storeMutex()
     lastIssued = qMax(QDateTime::currentMSecsSinceEpoch(), lastIssued + 1);
     return lastIssued;
@@ -650,6 +667,7 @@ static void importLegacyConversations(QSqlDatabase db)
 
     if (!db.transaction()) {
         qWarning() << "KateAI: cannot start the session history import:" << db.lastError().text();
+        importStarted.store(false);
         return;
     }
 
@@ -694,11 +712,13 @@ static void importLegacyConversations(QSqlDatabase db)
 
     if (!complete) {
         db.rollback();
+        importStarted.store(false);
         return; // Keep the legacy entries, the next start retries the import.
     }
 
     if (!db.commit()) {
         qWarning() << "KateAI: cannot commit the session history import:" << db.lastError().text();
+        importStarted.store(false);
         return;
     }
 
@@ -768,6 +788,10 @@ QList<SessionStore::ConversationInfo> SessionStore::listConversations(int maxCon
 
     const QString activeId = readMeta(db, ACTIVE_CONVERSATION_KEY);
 
+    // Wrap the listing plus lazy title repairs in one transaction so the
+    // N+1 repair updates are atomic and don't interleave with writers.
+    const bool inTxn = db.transaction();
+
     // A LIMIT placeholder cannot be left unbound, so build the query for the
     // requested bound (0 means "no limit").
     // NOTE: payload (full session JSON) is not selected here: most rows have
@@ -782,6 +806,9 @@ QList<SessionStore::ConversationInfo> SessionStore::listConversations(int maxCon
     }
     if (!query.exec()) {
         qWarning() << "KateAI: cannot list conversations:" << query.lastError().text();
+        if (inTxn) {
+            db.rollback();
+        }
         return conversations;
     }
 
@@ -791,7 +818,7 @@ QList<SessionStore::ConversationInfo> SessionStore::listConversations(int maxCon
         info.title = query.value(1).toString();
         info.createdAt = QDateTime::fromMSecsSinceEpoch(query.value(2).toLongLong());
         info.updatedAt = QDateTime::fromMSecsSinceEpoch(query.value(3).toLongLong());
-        info.messageCount = query.value(4).toInt();
+        info.messageCount = qMax(0, query.value(4).toInt());
         info.isActive = (info.id == activeId);
 
         // Repair any title that still carries a compaction marker so the history
@@ -816,6 +843,12 @@ QList<SessionStore::ConversationInfo> SessionStore::listConversations(int maxCon
         }
 
         conversations.append(info);
+    }
+
+    if (inTxn) {
+        if (!db.commit()) {
+            db.rollback();
+        }
     }
 
     return conversations;
@@ -948,7 +981,7 @@ bool SessionStore::saveConversation(const QString &conversationId, const Session
         QSqlQuery insert(db);
         insert.prepare(u"INSERT INTO conversations (id, title, created_at, updated_at, message_count, version, payload) VALUES (?, ?, ?, ?, ?, ?, ?)"_s);
         insert.addBindValue(conversationId);
-        insert.addBindValue(convTitle);
+        insert.addBindValue(convTitleToUse);
         insert.addBindValue(now);
         insert.addBindValue(now);
         insert.addBindValue(data.messages.size());
@@ -984,6 +1017,9 @@ bool SessionStore::saveConversation(const QString &conversationId, const Session
 
 void SessionStore::deleteConversation(const QString &conversationId)
 {
+    if (conversationId.isEmpty()) {
+        return;
+    }
     QMutexLocker locker(&storeMutex());
 
     bool ok = false;

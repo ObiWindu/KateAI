@@ -7,6 +7,7 @@
 
 #include <QCryptographicHash>
 #include <QDir>
+#include <QDirIterator>
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
@@ -40,22 +41,25 @@ const QString TagNamespace = TagPrefix + QStringLiteral("kateai/");
 // automation/config the agent must not be able to plant via a snapshot.
 bool isProtectedPath(const QString &relativePath)
 {
-    if (relativePath.startsWith(u".git/"_s) || relativePath == u".git"_s || relativePath.startsWith(u".kateai/project_graph.json"_s)) {
+    // Compared lowered: filesystems vary in case and a planted path must not
+    // dodge the guard via "KATEAI.MD" or ".GIT/".
+    const QString lowered = relativePath.toLower();
+    if (lowered.startsWith(u".git/"_s) || lowered == u".git"_s || lowered.startsWith(u".kateai/project_graph.json"_s)) {
         return true;
     }
     // Restoring these would reinstate agent-planted automation without prompt.
     // Every file RulesLoader feeds into the system prompt belongs here, not
     // just KATEAI.md: a snapshot that captured "safe" rules would otherwise
     // write them back over the ones the user is looking at.
-    if (relativePath == u".kateai/mcp.json"_s || relativePath.startsWith(u".kateai/mcp.json/"_s)
-        || relativePath == u"KATEAI.md"_s || relativePath.startsWith(u".kateai/rules/"_s)
-        || relativePath.startsWith(u".kateai/modes/"_s) || relativePath.startsWith(u".kateai/agents/"_s)
-        || relativePath == u"AGENTS.md"_s || relativePath == u"CLAUDE.md"_s
+    if (lowered == u".kateai/mcp.json"_s || lowered.startsWith(u".kateai/mcp.json/"_s)
+        || lowered == u"kateai.md"_s || lowered.startsWith(u".kateai/rules/"_s)
+        || lowered.startsWith(u".kateai/modes/"_s) || lowered.startsWith(u".kateai/agents/"_s)
+        || lowered == u"agents.md"_s || lowered == u"claude.md"_s
         // .clinerules/.kilocoderules are loaded as a root file *and* as a
         // directory of rule files (see RulesLoader::ruleDirectories), so both
         // the path itself and anything under it belongs to the rules.
-        || relativePath == u".clinerules"_s || relativePath.startsWith(u".clinerules/"_s)
-        || relativePath == u".kilocoderules"_s || relativePath.startsWith(u".kilocoderules/"_s)) {
+        || lowered == u".clinerules"_s || lowered.startsWith(u".clinerules/"_s)
+        || lowered == u".kilocoderules"_s || lowered.startsWith(u".kilocoderules/"_s)) {
         return true;
     }
     return false;
@@ -218,11 +222,13 @@ bool writeExcludesFor(const QString &gitDir, const QString &workspace)
     };
 
     // Reuse the project's own ignore rules so snapshots stay small.
+    // Bounded: a huge .gitignore must not be read whole into memory.
     QFile projectIgnore(workspace + u"/.gitignore"_s);
     if (projectIgnore.open(QIODevice::ReadOnly | QIODevice::Text)) {
         lines.append(QString());
         lines.append(u"# From the project .gitignore"_s);
-        lines.append(QString::fromUtf8(projectIgnore.readAll()));
+        static constexpr qint64 kMaxGitignoreBytes = 1024 * 1024;
+        lines.append(QString::fromUtf8(projectIgnore.read(kMaxGitignoreBytes)));
     }
 
     QFile file(excludePath);
@@ -268,6 +274,28 @@ int nextSequenceFor(const QString &gitDir, const QString &workspace)
 QString snapshotWorkspace(const QString &gitDir, const QString &workspace, const QString &label, QString *error)
 {
     writeExcludesFor(gitDir, workspace);
+
+    // `git add -A` has no size cap of its own: warn when the workspace is
+    // huge so a multi-gigabyte tree does not freeze the turn silently.
+    // (The excludes above keep the usual build dirs out; this is the last
+    // resort for an unexpectedly large tree.)
+    {
+        qint64 approxBytes = 0;
+        QDirIterator walk(workspace,
+                          QDir::Files | QDir::NoSymLinks,
+                          QDirIterator::Subdirectories);
+        int counted = 0;
+        static constexpr qint64 kSnapshotWarnBytes = 500LL * 1024 * 1024;
+        while (walk.hasNext() && counted < 20000) {
+            walk.next();
+            approxBytes += walk.fileInfo().size();
+            ++counted;
+            if (approxBytes > kSnapshotWarnBytes) {
+                qWarning() << "KateAI: workspace exceeds 500MB, checkpoint staging may be slow:" << workspace;
+                break;
+            }
+        }
+    }
 
     // Staging first is what makes new and deleted files visible to a later
     // diff; without it `git diff <commit>` silently ignores untracked files.
@@ -315,16 +343,19 @@ CheckpointManager::~CheckpointManager()
             git->kill();
             git->waitForFinished(1000);
         }
+        if (git) {
+            git->deleteLater();
+        }
     }
     m_detachedProcesses.clear();
     // A snapshot worker holds m_checkpointMutex and queues its result back
-    // onto this object. Join it before the mutex (and the object the queued
-    // call names) goes away: destroying a locked mutex and then touching
-    // freed memory crashes. Every git step has its own timeout, so this is
-    // bounded; the cap is only for a wedged worker that would hang teardown.
+    // onto this object via QueuedConnection, so a worker that finishes during
+    // teardown drops its result instead of touching freed memory. Do not
+    // destroy a locked mutex: wait briefly, then detach rather than block
+    // teardown for 30s.
     QElapsedTimer elapsed;
     elapsed.start();
-    while (m_inFlightSnapshots.loadRelaxed() > 0 && elapsed.elapsed() < 30000) {
+    while (m_inFlightSnapshots.loadRelaxed() > 0 && elapsed.elapsed() < 2000) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
     if (m_inFlightSnapshots.loadRelaxed() > 0) {
@@ -361,7 +392,7 @@ void CheckpointManager::pruneStaleShadowRepositories() const
     // A repository of a project that no longer exists is useless, and one
     // that was not touched for a month is not worth the space.
     const QDateTime cutoff = QDateTime::currentDateTime().addDays(-30);
-    const QFileInfoList entries = dir.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot);
+    const QFileInfoList entries = dir.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot | QDir::NoSymLinks);
     // The repository of the workspace that is open right now is never pruned,
     // however old it looks: deleting it would throw away the checkpoints of
     // the project the user is actively working on.
@@ -370,18 +401,35 @@ void CheckpointManager::pruneStaleShadowRepositories() const
         if (!current.isEmpty() && entry.fileName() == current) {
             continue;
         }
+        // Never follow symlinks out of the cache dir.
+        if (entry.isSymLink()) {
+            continue;
+        }
         const QString marker = entry.absoluteFilePath() + u"/workspace"_s;
         QFile file(marker);
         QString workspace;
+        QString fileError;
         if (file.open(QIODevice::ReadOnly | QIODevice::Text)) {
             workspace = QString::fromUtf8(file.readAll()).trimmed();
+        } else if (file.exists()) {
+            fileError = file.errorString();
+        }
+        if (!fileError.isEmpty()) {
+            // Unreadable (EACCES etc.): do not delete what cannot be inspected.
+            continue;
         }
         if (!workspace.isEmpty() && QFileInfo::exists(workspace)) {
             // The project is still there. It may be old, but the repository
             // belongs to a project that exists.
             continue;
         }
-        if (entry.lastModified() < cutoff || workspace.isEmpty()) {
+        // Use the marker file's mtime (last real use), not the directory's.
+        QDateTime mtime = entry.lastModified();
+        const QFileInfo markerInfo(marker);
+        if (markerInfo.exists()) {
+            mtime = markerInfo.lastModified();
+        }
+        if (mtime < cutoff || workspace.isEmpty()) {
             // The project is gone, or the repository was never finished.
             QDir(entry.absoluteFilePath()).removeRecursively();
         }
@@ -425,6 +473,7 @@ QString CheckpointManager::gitDir() const
 
 bool CheckpointManager::isAvailable() const
 {
+    QMutexLocker locker(&m_checkpointMutex);
     if (!m_enabled || m_workspace.isEmpty()) {
         return false;
     }
@@ -447,6 +496,7 @@ bool CheckpointManager::isAvailable() const
 
 bool CheckpointManager::ensureRepository(QString *error) const
 {
+    QMutexLocker locker(&m_checkpointMutex);
     if (m_workspace.isEmpty()) {
         if (error) {
             *error = u"No workspace is open."_s;
@@ -470,6 +520,13 @@ bool CheckpointManager::ensureRepository(QString *error) const
         return true;
     }
 
+    // TOCTOU: never init through a symlinked cache path.
+    if (QFileInfo(QFileInfo(dir).absolutePath()).isSymLink() || QFileInfo(dir).isSymLink()) {
+        if (error) {
+            *error = u"The checkpoint cache path is a symlink; refusing to initialise."_s;
+        }
+        return false;
+    }
     QDir().mkpath(QFileInfo(dir).absolutePath());
     QProcess init;
     init.start(u"git"_s, QStringList{u"init"_s, u"--quiet"_s, QFileInfo(dir).absolutePath()});
@@ -737,10 +794,12 @@ QString CheckpointManager::diffAgainstCheckpoint(const QString &id, int maxLines
     if (diff.trimmed().isEmpty()) {
         return {};
     }
+    // Bounded: an uncapped maxLines lets a huge diff grow without limit.
+    const int capped = qBound(1, maxLines, 5000);
     const QStringList lines = diff.split(u'\n');
-    if (lines.size() > maxLines) {
-        QString head = lines.mid(0, maxLines).join(u'\n');
-        head += u"\n... (diff truncated, "_s + QString::number(lines.size() - maxLines) + u" more lines)"_s;
+    if (lines.size() > capped) {
+        QString head = lines.mid(0, capped).join(u'\n');
+        head += u"\n... (diff truncated, "_s + QString::number(lines.size() - capped) + u" more lines)"_s;
         return head;
     }
     return diff;
@@ -780,11 +839,13 @@ bool CheckpointManager::restoreCheckpoint(const QString &id, QString *error)
     }
 
     QString listed;
-    stageWorktree();
-    if (!runGit({u"ls-files"_s}, &listed, error)) {
+    if (!stageWorktree(error)) {
         return false;
     }
-    const QStringList currentList = listed.split(u'\n', Qt::SkipEmptyParts);
+    if (!runGit({u"ls-files"_s, u"-z"_s}, &listed, error)) {
+        return false;
+    }
+    const QStringList currentList = listed.split(QChar(u'\0'), Qt::SkipEmptyParts);
     const QSet<QString> currentFiles(currentList.cbegin(), currentList.cend());
 
     if (!runGit({u"read-tree"_s, id}, nullptr, error)) {
@@ -805,19 +866,39 @@ bool CheckpointManager::restoreCheckpoint(const QString &id, QString *error)
                 runGit({u"update-index"_s, u"--force-remove"_s, u"--"_s, relativePath}, nullptr, nullptr);
             }
         }
+        // Symlink guard: never let checkout-index write through a symlinked
+        // workspace path. Remove symlinked targets first so git recreates a
+        // regular file instead of following the link.
+        const QString cleanWorkspace = QDir::cleanPath(m_workspace);
+        for (const QString &relativePath : entries) {
+            if (isProtectedPath(relativePath)) {
+                continue;
+            }
+            const QString absolute = QDir::cleanPath(m_workspace + QLatin1Char('/') + relativePath);
+            if (absolute != cleanWorkspace && !absolute.startsWith(cleanWorkspace + QLatin1Char('/'))) {
+                runGit({u"update-index"_s, u"--force-remove"_s, u"--"_s, relativePath}, nullptr, nullptr);
+                continue;
+            }
+            if (QFileInfo(absolute).isSymLink()) {
+                QFile::remove(absolute);
+                if (QFileInfo(absolute).isSymLink()) {
+                    runGit({u"update-index"_s, u"--force-remove"_s, u"--"_s, relativePath}, nullptr, nullptr);
+                }
+            }
+        }
     }
     if (!runGit({u"checkout-index"_s, u"-a"_s, u"-f"_s}, nullptr, error)) {
         return false;
     }
 
     QString restored;
-    if (!runGit({u"ls-files"_s}, &restored, nullptr)) {
+    if (!runGit({u"ls-files"_s, u"-z"_s}, &restored, nullptr)) {
         if (error) {
             *error = u"Could not list restored files; the workspace was left untouched."_s;
         }
         return false;
     }
-    const QStringList restoredList = restored.split(u'\n', Qt::SkipEmptyParts);
+    const QStringList restoredList = restored.split(QChar(u'\0'), Qt::SkipEmptyParts);
     const QSet<QString> restoredFiles(restoredList.cbegin(), restoredList.cend());
 
     // Files that existed in the snapshot we rolled back from but are absent in

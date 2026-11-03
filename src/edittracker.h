@@ -183,6 +183,9 @@ private:
     QScrollArea *m_scrollArea = nullptr;
     QVBoxLayout *m_editListLayout = nullptr;
     bool m_fileListVisible = false;
+    // True while acceptAll/rejectAll settle in bulk: per-file UI rebuilds are
+    // deferred until the batch finishes.
+    bool m_inBatch = false;
 };
 
 } // namespace KateAi

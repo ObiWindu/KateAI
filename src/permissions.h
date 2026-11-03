@@ -60,6 +60,11 @@ public:
     };
 
     Verdict evaluate(const QString &toolName, const QJsonObject &arguments, const Sandbox &sandbox, QString *reason) const;
+    // Risk-aware overload: request.risk/mutatesFiles decide whether the call
+    // counts as a read, so an unknown mutating tool named "read" is judged as
+    // a write. Prefer this overload wherever a PermissionRequest exists.
+    Verdict evaluate(const PermissionRequest &request, const QJsonObject &arguments, const Sandbox &sandbox,
+                     QString *reason) const;
 
 private:
     PermissionMode m_mode = PermissionMode::Ask;

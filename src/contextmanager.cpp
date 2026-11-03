@@ -12,6 +12,7 @@
 #include <QJsonDocument>
 #include <QRegularExpression>
 #include <QDir>
+#include <QFileInfo>
 #include <limits>
 
 using namespace Qt::Literals::StringLiterals;
@@ -90,13 +91,21 @@ QString shrinkText(const QString &text, int keepChars)
     // the result stays inside the budget. Otherwise the caller, which loops
     // until the text fits, never converges.
     const QString marker = QStringLiteral("\n[… compacted …]\n");
+    if (keepChars < marker.size() + 2) {
+        return truncateSafe(marker, keepChars);
+    }
     const int room = qMax(0, keepChars - marker.size() - 1);
     const int head = qBound(1, room * 55 / 100, room);
     const int tail = qMax(0, room - head);
     if (head + tail + marker.size() + 1 >= text.length()) {
         return truncateSafe(text, keepChars - 1) + QStringLiteral("…");
     }
-    return truncateSafe(text, head) + marker + text.right(tail);
+    QString tailPart = text.right(tail);
+    if (!tailPart.isEmpty() && tailPart.at(0).isLowSurrogate()) {
+        // The tail starts in the second half of a surrogate pair.
+        tailPart.remove(0, 1);
+    }
+    return truncateSafe(text, head) + marker + tailPart;
 }
 
 } // namespace
@@ -143,8 +152,11 @@ int contextWindowFor(const QString &model)
 
 QString summaryHeader()
 {
-    return i18n("[Earlier conversation was compacted to fit the context window. "
-                "Your requests and the files touched are preserved; full tool output is not.]");
+    // Untranslated constant: the marker is persisted in stored conversations
+    // and used to detect compaction summaries across restarts. A translated
+    // header would change with the locale and break that detection.
+    return QStringLiteral("[Earlier conversation was compacted to fit the context window. "
+                          "Your requests and the files touched are preserved; full tool output is not.]");
 }
 
 namespace
@@ -179,6 +191,11 @@ QString buildSummary(const QList<ChatMessage> &dropped, int requestChars, Projec
             const QString line = oneLine(message.content, requestChars);
             if (!line.isEmpty() && !userRequests.contains(line)) {
                 userRequests << line;
+                if (userRequests.size() >= 50) {
+                    // Bounded: a very long dropped span must not grow the
+                    // summary without limit.
+                    break;
+                }
             }
             break;
         }
@@ -254,17 +271,41 @@ QString buildSummary(const QList<ChatMessage> &dropped, int requestChars, Projec
     if (projectGraph && projectGraph->getNodeCount() > 0 && !files.isEmpty()) {
         // Add related files from project graph to preserve important context
         QSet<QString> related;
+        // Build basename -> nodes once instead of scanning all nodes per file.
+        const QList<GraphNode *> allNodes = projectGraph->getAllNodes();
+        QHash<QString, QList<GraphNode *>> byBasename;
+        byBasename.reserve(allNodes.size());
+        for (GraphNode *n : allNodes) {
+            if (n) {
+                byBasename[QFileInfo(n->path).fileName()].append(n);
+            }
+        }
         for (const QString &f : files) {
             if (related.size() >= 30) break;
             // Try to find node by path
             GraphNode *node = projectGraph->getNode(f);
             if (!node) {
-                // Try to find by ID or partial match
-                const QList<GraphNode*> all = projectGraph->getAllNodes();
-                for (GraphNode *n : all) {
-                    if (n && (n->path.endsWith(f) || f.endsWith(QFileInfo(n->path).fileName()))) {
+                // Exact filename match, or the file sitting under the node's
+                // parent directory; a bare endsWith on either side matched
+                // unrelated paths ("foo.cpp" vs "barfoo.cpp").
+                const QString base = QFileInfo(f).fileName();
+                const auto candidates = byBasename.value(base);
+                for (GraphNode *n : candidates) {
+                    if (!n) {
+                        continue;
+                    }
+                    if (n->path == f || QFileInfo(n->path).fileName() == base) {
                         node = n;
                         break;
+                    }
+                }
+                if (!node) {
+                    for (GraphNode *n : candidates) {
+                        if (n && (QFileInfo(f).absolutePath().startsWith(QFileInfo(n->path).absolutePath())
+                                  || QFileInfo(n->path).absolutePath().startsWith(QFileInfo(f).absolutePath()))) {
+                            node = n;
+                            break;
+                        }
                     }
                 }
             }
@@ -351,7 +392,7 @@ void shrinkToBudget(QList<ChatMessage> &result, int budget, int lastProtected)
         const qint64 keep64 = (qint64)trimmed.content.length() - cutChars;
         const int keepChars = qMax(summaryHeader().length() + 8,
                                    (int)qBound<qint64>(0, keep64, (qint64)std::numeric_limits<int>::max()));
-        trimmed.content = trimmed.content.left(keepChars);
+        trimmed.content = truncateSafe(trimmed.content, keepChars);
         result[i] = trimmed;
         break;
     }
@@ -445,6 +486,8 @@ QList<ChatMessage> build(const QList<ChatMessage> &history, const Options &optio
         const int minKeepTokens = qMax(800, budget / 10);
         keepTokens = qMax(minKeepTokens, keepTokens / (1 << qMin(pressure, 4)));
     }
+    // keepTokens must never exceed the budget it is carved out of.
+    keepTokens = qBound(0, keepTokens, budget);
 
     int keepFrom = history.size();
     int running = 0;
@@ -481,8 +524,8 @@ QList<ChatMessage> build(const QList<ChatMessage> &history, const Options &optio
     const int protectedFrom = result.size() - (history.size() - keepFrom);
     shrinkToBudget(result, budget, qMax(bodyStart, protectedFrom));
 
-    // Last resort: if the protected tail alone still overflows, shrink it too
-    // rather than fail the request. Keep the newest user message readable.
+    // Last resort: if the protected tail alone still overflows, drop the
+    // oldest non-latest messages until it fits, then shrink what remains.
     if (estimateTokens(result) > budget) {
         int latestUserInResult = -1;
         for (int i = result.size() - 1; i >= 0; --i) {
@@ -491,13 +534,30 @@ QList<ChatMessage> build(const QList<ChatMessage> &history, const Options &optio
                 break;
             }
         }
+        // Drop-to-fit: oldest first, never the system prefix, never the
+        // latest user turn.
+        for (int i = bodyStart; i < result.size() && estimateTokens(result) > budget;) {
+            if (i == latestUserInResult || result.at(i).role == ChatMessage::Role::System) {
+                ++i;
+                continue;
+            }
+            // Keep the index of the live request stable as entries vanish.
+            result.removeAt(i);
+            if (latestUserInResult > i) {
+                --latestUserInResult;
+            }
+            // Do not advance: the next entry shifted into position i.
+        }
         for (int i = 0; i < result.size(); ++i) {
             if (result.at(i).role == ChatMessage::Role::System) {
                 continue;
             }
             ChatMessage &message = result[i];
             message.thinking.clear();
-            const int cap = (i == latestUserInResult) ? qMax(400, budget * kCharsPerToken / 4) : 240;
+            const qint64 cap64 = (i == latestUserInResult)
+                ? qMax<qint64>(400, (qint64)budget * kCharsPerToken / 4)
+                : 240;
+            const int cap = (int)qBound<qint64>(0, cap64, (qint64)std::numeric_limits<int>::max());
             if (message.content.length() > cap) {
                 message.content = shrinkText(message.content, cap);
             }

@@ -192,6 +192,7 @@ void SubtaskWidget::startAgent(const QString &agentName, const QString &modeId, 
     m_modeId = modeId;
     m_description = description.trimmed();
     m_running = true;
+    m_everStarted = true;
     m_elapsed.restart();
     m_ticker->start();
     // The delegated task is what the card is about, so it stays on screen while

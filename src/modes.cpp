@@ -10,8 +10,10 @@
 #include <QFileInfo>
 #include <QHash>
 #include <QRegularExpression>
+#include <QSet>
 
 #include <algorithm>
+#include <cmath>
 
 namespace KateAi
 {
@@ -38,9 +40,17 @@ bool acpToolPermitted(const ToolAccess &access, const PermissionRequest &request
     // An agent's own tool has no Kate equivalent, so the mode judges what it
     // does: running a command needs the command tool, changing a file needs
     // the edit tools. A tool that does neither is not restricted here, which
-    // keeps an agent's todo or plan tools working in every mode.
+    // keeps an agent's todo or plan tools working in every mode. A tool that
+    // does both (Execute risk plus file mutation, e.g. a bash that writes)
+    // needs both groups: the command tool alone must not authorize writes.
     if (request.risk == ToolRisk::Execute) {
-        return access.allows(u"bash"_s);
+        if (!access.allows(u"bash"_s)) {
+            return false;
+        }
+        if (request.mutatesFiles) {
+            return access.allows(u"edit_file"_s);
+        }
+        return true;
     }
     if (request.mutatesFiles) {
         return access.allows(u"edit_file"_s);
@@ -124,20 +134,27 @@ ToolAccess ModeRegistry::toolAccessFor(const ModeDefinition &mode, bool planMode
 DocumentFrontmatter ModeRegistry::parseFrontmatter(const QString &document)
 {
     DocumentFrontmatter out;
+    // Strip a UTF-8 BOM: without this a file that starts with U+FEFF never
+    // matches the \A--- anchor and its frontmatter is silently ignored.
+    QString doc = document;
+    if (doc.startsWith(QChar(0xFEFF))) {
+        doc.remove(0, 1);
+    }
     static const QRegularExpression delimiter(QStringLiteral("\\A---\\s*\\r?\\n"), QRegularExpression::UseUnicodePropertiesOption);
 
-    const QRegularExpressionMatch match = delimiter.match(document);
+    const QRegularExpressionMatch match = delimiter.match(doc);
     if (!match.hasMatch()) {
-        out.body = document;
+        out.body = doc;
         return out;
     }
 
     int pos = match.capturedLength();
     QStringList pendingKey;
     QString pendingBlock;
+    QChar pendingStyle; // '|' literal or '>' folded
     bool inBlock = false;
 
-    const QStringList lines = document.mid(pos).split(u'\n');
+    const QStringList lines = doc.mid(pos).split(u'\n');
     int endLine = -1;
     for (int i = 0; i < lines.size(); ++i) {
         const QString line = lines.at(i);
@@ -156,7 +173,27 @@ DocumentFrontmatter ModeRegistry::parseFrontmatter(const QString &document)
                 pendingBlock.clear();
                 inBlock = false;
             } else {
-                pendingBlock += line.trimmed() + u'\n';
+                if (line.trimmed().isEmpty()) {
+                    pendingBlock += u'\n';
+                } else {
+                    // Strip one level of indentation but preserve the rest:
+                    // literal (|) keeps newlines, folded (>) joins with a
+                    // space. Trimming everything collapsed nested structure.
+                    QString content = line;
+                    if (content.startsWith(u"  "_s)) {
+                        content = content.mid(2);
+                    } else if (content.startsWith(u' ') || content.startsWith(u'\t')) {
+                        content = content.mid(1);
+                    }
+                    if (pendingStyle == u'>') {
+                        if (!pendingBlock.isEmpty() && !pendingBlock.endsWith(u'\n')) {
+                            pendingBlock += u' ';
+                        }
+                        pendingBlock += content.trimmed();
+                    } else {
+                        pendingBlock += content + u'\n';
+                    }
+                }
                 continue;
             }
         }
@@ -174,6 +211,7 @@ DocumentFrontmatter ModeRegistry::parseFrontmatter(const QString &document)
         if (value == u"|"_s || value == u">"_s) {
             pendingKey = {key};
             pendingBlock.clear();
+            pendingStyle = value.at(0);
             inBlock = true;
             continue;
         }
@@ -183,7 +221,7 @@ DocumentFrontmatter ModeRegistry::parseFrontmatter(const QString &document)
         out.keys.insert(pendingKey.join(u'\n'), pendingBlock);
     }
     if (!out.present) {
-        out.body = document;
+        out.body = doc;
         out.keys.clear();
         return out;
     }
@@ -233,12 +271,31 @@ QStringList parseList(const QString &value)
     if (v.startsWith(u'[') && v.endsWith(u']')) {
         v = v.mid(1, v.size() - 2);
         QStringList out;
-        const QStringList parts = v.split(u',', Qt::SkipEmptyParts);
-        for (const QString &part : parts) {
-            const QString item = unquote(part);
-            if (!item.isEmpty()) {
-                out.append(item);
+        // Split on commas outside quotes so ["a,b", c] keeps "a,b" whole.
+        QString cur;
+        bool inSingle = false;
+        bool inDouble = false;
+        for (int i = 0; i < v.size(); ++i) {
+            const QChar c = v.at(i);
+            if (c == u'\'' && !inDouble) {
+                inSingle = !inSingle;
+                cur.append(c);
+            } else if (c == u'"' && !inSingle) {
+                inDouble = !inDouble;
+                cur.append(c);
+            } else if (c == u',' && !inSingle && !inDouble) {
+                const QString item = unquote(cur);
+                if (!item.isEmpty()) {
+                    out.append(item);
+                }
+                cur.clear();
+            } else {
+                cur.append(c);
             }
+        }
+        const QString last = unquote(cur);
+        if (!last.isEmpty()) {
+            out.append(last);
         }
         return out;
     }
@@ -264,7 +321,7 @@ double samplingKey(const DocumentFrontmatter &fm, const QString &key, double min
     }
     bool ok = false;
     const double value = raw.toDouble(&ok);
-    if (!ok) {
+    if (!ok || !std::isfinite(value)) {
         return -1.0;
     }
     return qBound(min, value, max);
@@ -394,13 +451,30 @@ void ModeRegistry::loadCustomModes()
         m_workspace + u"/.roomodes"_s,
     };
     const QStringList known = validGroups();
+    QSet<QString> usedIds;
+    for (const ModeDefinition &m : m_modes) {
+        usedIds.insert(m.id);
+    }
+    constexpr int kMaxModeFilesPerDir = 100;
     for (const QString &dirPath : dirs) {
         QDir dir(dirPath);
         if (!dir.exists()) {
             continue;
         }
-        const QFileInfoList entries = dir.entryInfoList({QStringLiteral("*.md"), QStringLiteral("*.markdown")}, QDir::Files, QDir::Name);
+        const QString dirCanon = QFileInfo(dir.absolutePath()).canonicalFilePath();
+        QFileInfoList entries = dir.entryInfoList({QStringLiteral("*.md"), QStringLiteral("*.markdown")}, QDir::Files | QDir::NoSymLinks, QDir::Name);
+        if (entries.size() > kMaxModeFilesPerDir) {
+            entries = entries.mid(0, kMaxModeFilesPerDir);
+        }
         for (const QFileInfo &info : entries) {
+            if (!info.isFile() || info.isSymLink()) {
+                continue;
+            }
+            const QString canon = info.canonicalFilePath();
+            const QString check = canon.isEmpty() ? info.absoluteFilePath() : canon;
+            if (!dirCanon.isEmpty() && check != dirCanon && !check.startsWith(dirCanon + u'/')) {
+                continue;
+            }
             bool ok = false;
             ModeDefinition mode = parseModeFile(info.absoluteFilePath(), &ok);
             if (!ok) {
@@ -411,6 +485,14 @@ void ModeRegistry::loadCustomModes()
                 // A custom mode must not shadow a built-in one.
                 mode.id = mode.id + u"-custom"_s;
             }
+            if (usedIds.contains(mode.id)) {
+                int n = 2;
+                while (usedIds.contains(mode.id + u"-"_s + QString::number(n))) {
+                    ++n;
+                }
+                mode.id = mode.id + u"-"_s + QString::number(n);
+            }
+            usedIds.insert(mode.id);
             mode.builtIn = false;
             if (mode.groups.isEmpty()) {
                 mode.groups = {ToolGroup::read()};
@@ -423,7 +505,8 @@ void ModeRegistry::loadCustomModes()
             if (mode.readOnly) {
                 // A custom mode that declares itself read-only must not gain
                 // mutating groups: strip them instead of clearing readOnly.
-                const QStringList mutating = {ToolGroup::edit(), ToolGroup::command(), ToolGroup::orchestrate()};
+                // MCP tools are stripped too: a server tool can do anything.
+                const QStringList mutating = {ToolGroup::edit(), ToolGroup::command(), ToolGroup::orchestrate(), ToolGroup::mcp()};
                 for (const QString &mutatingGroup : mutating) {
                     mode.groups.removeAll(mutatingGroup);
                 }
@@ -475,6 +558,11 @@ ModeDefinition ModeRegistry::parseModeFile(const QString &path, bool *ok)
 {
     if (ok) {
         *ok = false;
+    }
+    // Only regular files: skip fifos, devices, directories and symlinks.
+    const QFileInfo info(path);
+    if (!info.isFile() || info.isSymLink()) {
+        return {};
     }
     QFile file(path);
     if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {

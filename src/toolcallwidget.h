@@ -124,6 +124,9 @@ public:
     // moment, so a card jumped to with the keyboard can be found again after
     // the scroll that carried it into view.
     void flashAttention();
+    // Collapse-all override (e.g. transcript collapse): when set, completion
+    // does not force-expand the card.
+    void setCollapseAll(bool collapse) { m_collapseAll = collapse; }
     void reflowNow();
     // Re-applies the card's stylesheets. The card's colours are fixed and
     // theme-independent, so this exists to keep the restyle plumbing uniform
@@ -193,6 +196,12 @@ private:
     bool m_finished = false;
     bool m_ok = true;
     bool m_hasDiffPreview = false;
+    // Raw diff text for re-highlighting on style changes (no HTML round-trip).
+    QString m_rawDiff;
+    bool m_collapseAll = false;
+    bool m_flashActive = false;
+    QPoint m_pressPos;
+    bool m_pressValid = false;
     int m_expandedHeight = 0;
     bool m_denied = false;
     bool m_awaitingApproval = false;

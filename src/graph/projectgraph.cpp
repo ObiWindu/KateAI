@@ -66,6 +66,7 @@ void ProjectGraph::generateGraph(const QString &workspacePath)
 void ProjectGraph::scanDirectory(const QString &dirPath, const QString &parentNodeId)
 {
     if (m_nodes.size() >= 300) {
+        qWarning("KateAI: project graph truncated at 300 nodes; some files are not indexed.");
         return;
     }
 
@@ -93,6 +94,7 @@ void ProjectGraph::scanDirectory(const QString &dirPath, const QString &parentNo
 
     for (const QFileInfo &entry : entries) {
         if (m_nodes.size() >= 300) {
+            qWarning("KateAI: project graph truncated at 300 nodes; some files are not indexed.");
             break;
         }
 
@@ -131,6 +133,14 @@ void ProjectGraph::scanDirectory(const QString &dirPath, const QString &parentNo
         } else {
             // Skip files over 64 KB
             if (entry.size() > 64 * 1024) {
+                continue;
+            }
+            // Skip hidden files (e.g. .env with secrets): no content indexing.
+            if (fileName.startsWith(u'.')) {
+                continue;
+            }
+            // Skip fifos/sockets/special files: opening them can block.
+            if (!entry.isFile() || entry.isSymLink()) {
                 continue;
             }
 
@@ -253,9 +263,16 @@ void ProjectGraph::updateGraph(const QString &filePath, const QString &content)
             edge.relationship = u"contains"_s;
             edge.isSafe = true;
             addEdge(edge);
+        } else {
+            // The parent directory was never scanned (new file outside the
+            // known tree). Keep the node instead of dropping it silently.
+            qWarning("KateAI: project graph parent missing for %s; node kept without a contains edge.",
+                     qUtf8Printable(absPath));
+            addNode(newNode);
         }
     }
 
+    cleanupDeletedNodes();
     m_lastUpdateTime = QDateTime::currentSecsSinceEpoch();
     m_isDirty = true;
 }
@@ -363,8 +380,24 @@ QList<GraphNode*> ProjectGraph::getNodesByType(const QString &type) const
 QList<GraphNode*> ProjectGraph::getFilesInDirectory(const QString &dirPath) const
 {
     QList<GraphNode*> result;
+    // Canonicalize both sides: callers pass relative paths while nodes store
+    // absolute ones (and vice versa), so compare canonical forms.
+    const QString canonicalDir = QFileInfo(dirPath).canonicalFilePath().isEmpty()
+        ? QDir::cleanPath(QDir(dirPath).absolutePath())
+        : QFileInfo(dirPath).canonicalFilePath();
     QString dirNodeId = generateNodeId(dirPath, u"directory"_s);
     const GraphNode *dirNode = getNode(dirNodeId);
+    if (!dirNode) {
+        // Fall back to matching the stored path canonically.
+        for (GraphNode *node : m_nodes) {
+            if (node && node->type == u"directory"_s
+                && QDir::cleanPath(node->path) == QDir::cleanPath(canonicalDir)) {
+                dirNode = node;
+                dirNodeId = node->id;
+                break;
+            }
+        }
+    }
 
     if (dirNode) {
         for (auto it = m_edges.begin(); it != m_edges.end(); ++it) {
@@ -408,15 +441,17 @@ void ProjectGraph::addEdge(const GraphEdge &edge)
 
 void ProjectGraph::removeEdge(const QString &sourceId, const QString &targetId)
 {
-    QString edgeKey;
+    // Remove every edge between the pair (any relationship), not just the
+    // first match.
+    QStringList doomed;
+    const QString prefix = sourceId + u"->"_s + targetId + u"->"_s;
     for (auto it = m_edges.begin(); it != m_edges.end(); ++it) {
-        if (it.key().startsWith(sourceId + u"->"_s + targetId + u"->"_s)) {
-            edgeKey = it.key();
-            break;
+        if (it.key().startsWith(prefix)) {
+            doomed.append(it.key());
         }
     }
 
-    if (!edgeKey.isEmpty()) {
+    for (const QString &edgeKey : doomed) {
         GraphEdge *edge = m_edges.take(edgeKey);
         delete edge;
 
@@ -450,7 +485,15 @@ QList<GraphEdge*> ProjectGraph::getEdgesTo(const QString &targetId) const
 {
     QList<GraphEdge*> result;
     for (auto it = m_edges.begin(); it != m_edges.end(); ++it) {
-        if (it.key().contains(u"->"_s + targetId + u"->"_s)) {
+        // Exact token compare: a substring match confuses "ab" with "abc".
+        const QString &key = it.key();
+        const int arrow1 = key.indexOf(u"->"_s);
+        const int arrow2 = key.lastIndexOf(u"->"_s);
+        if (arrow1 < 0 || arrow2 < 0 || arrow1 == arrow2) {
+            continue;
+        }
+        const QString mid = key.mid(arrow1 + 2, arrow2 - arrow1 - 2);
+        if (mid == targetId) {
             result.append(it.value());
         }
     }
@@ -505,6 +548,8 @@ QList<GraphNode*> ProjectGraph::findRelatedNodes(const QString &nodeId, int maxD
 QList<QString> ProjectGraph::findImportPaths(const QString &sourceNodeId, const QString &targetNodeId) const
 {
     QList<QString> result;
+    static constexpr int kMaxDepth = 10;
+    static constexpr int kMaxResults = 100;
     // Per-path visited set: a global visited prunes alternative routes that
     // reach the same intermediate node via a different path.
     struct Frame {
@@ -516,13 +561,16 @@ QList<QString> ProjectGraph::findImportPaths(const QString &sourceNodeId, const 
 
     stack.push({sourceNodeId, {sourceNodeId}, {sourceNodeId}});
 
-    while (!stack.isEmpty()) {
+    while (!stack.isEmpty() && result.size() < kMaxResults) {
         Frame current = stack.pop();
         const QString &currentNodeId = current.nodeId;
         const QStringList &path = current.path;
 
         if (currentNodeId == targetNodeId) {
             result.append(path.join(u" -> "_s));
+            continue;
+        }
+        if (path.size() >= kMaxDepth) {
             continue;
         }
 
@@ -617,10 +665,12 @@ QList<GraphNode*> ProjectGraph::getDependencyChain(const QString &startNodeId, c
     };
     QStack<Frame> stack;
     QList<GraphNode*> result;
+    static constexpr int kMaxDepth = 10;
+    static constexpr int kMaxResults = 100;
 
-    stack.push({startNodeId, {}, {startNodeId}});
+    stack.push({startNodeId, {startNodeId}, {startNodeId}});
 
-    while (!stack.isEmpty()) {
+    while (!stack.isEmpty() && result.size() < kMaxResults) {
         Frame current = stack.pop();
         const QString currentNodeId = current.nodeId;
         const QStringList path = current.path;
@@ -632,10 +682,9 @@ QList<GraphNode*> ProjectGraph::getDependencyChain(const QString &startNodeId, c
                     result.append(const_cast<GraphNode*>(node));
                 }
             }
-            const GraphNode *endNode = getNode(endNodeId);
-            if (endNode) {
-                result.append(const_cast<GraphNode*>(endNode));
-            }
+            continue;
+        }
+        if (path.size() >= kMaxDepth) {
             continue;
         }
 
@@ -671,6 +720,19 @@ void ProjectGraph::analyzeFileDependencies()
                 }
             }
             node->dependencies = imports;
+            // Materialise the dependency model as edges so traversals see
+            // them; resolve import text to nodes when it names one.
+            for (const QString &dep : imports) {
+                GraphNode *target = getNode(dep);
+                if (target) {
+                    GraphEdge edge;
+                    edge.sourceId = node->id;
+                    edge.targetId = target->id;
+                    edge.relationship = u"imports"_s;
+                    edge.isSafe = true;
+                    addEdge(edge);
+                }
+            }
         }
     }
 }
@@ -737,16 +799,21 @@ void ProjectGraph::generateSummaryReport() const
 
 bool ProjectGraph::saveToFile(const QString &filePath) const
 {
-    QFile file(filePath);
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
-        return false;
+    // Write-temp+rename: a crash mid-write must not leave a truncated graph.
+    const QString tempPath = filePath + u".tmp"_s;
+    {
+        QFile file(tempPath);
+        if (!file.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate)) {
+            return false;
+        }
+
+        QJsonObject json = toJson();
+        QJsonDocument doc(json);
+        file.write(doc.toJson());
+        file.close();
     }
-
-    QJsonObject json = toJson();
-    QJsonDocument doc(json);
-    file.write(doc.toJson());
-
-    return true;
+    QFile::remove(filePath);
+    return QFile::rename(tempPath, filePath);
 }
 
 bool ProjectGraph::loadFromFile(const QString &filePath)
@@ -756,9 +823,22 @@ bool ProjectGraph::loadFromFile(const QString &filePath)
         return false;
     }
 
+    static constexpr qint64 kMaxGraphBytes = 32 * 1024 * 1024;
+    if (file.size() > kMaxGraphBytes) {
+        qWarning("KateAI: project graph file too large, refusing to load.");
+        return false;
+    }
     QByteArray data = file.readAll();
     QJsonDocument doc = QJsonDocument::fromJson(data);
     if (!doc.isObject()) {
+        return false;
+    }
+    // Validate bounds before materialising thousands of nodes/edges.
+    const QJsonObject root = doc.object();
+    static constexpr int kMaxGraphEntries = 10000;
+    if (root.value(u"nodes"_s).toArray().size() > kMaxGraphEntries
+        || root.value(u"edges"_s).toArray().size() > kMaxGraphEntries) {
+        qWarning("KateAI: project graph file exceeds entry caps, refusing to load.");
         return false;
     }
 
@@ -844,7 +924,13 @@ bool ProjectGraph::fromJson(const QJsonObject &json)
 
     // Load nodes
     QJsonArray nodesArray = json.value(u"nodes"_s).toArray();
+    static constexpr int kMaxLoadEntries = 10000;
+    int loaded = 0;
     for (const QJsonValue &nodeValue : nodesArray) {
+        if (++loaded > kMaxLoadEntries) {
+            qWarning("KateAI: project graph node cap reached while loading; truncating.");
+            break;
+        }
         QJsonObject nodeJson = nodeValue.toObject();
         GraphNode node;
 
@@ -877,7 +963,12 @@ bool ProjectGraph::fromJson(const QJsonObject &json)
 
     // Load edges
     QJsonArray edgesArray = json.value(u"edges"_s).toArray();
+    loaded = 0;
     for (const QJsonValue &edgeValue : edgesArray) {
+        if (++loaded > kMaxLoadEntries) {
+            qWarning("KateAI: project graph edge cap reached while loading; truncating.");
+            break;
+        }
         QJsonObject edgeJson = edgeValue.toObject();
         GraphEdge edge;
 
@@ -993,7 +1084,8 @@ QString ProjectGraph::extractImportsFromContent(const QString &content, const QS
     }
 
     // Extract Python imports
-    QRegularExpression pythonImportRegex(u"^(import|from)\\s+\\w+(?:\\.\\w+)*"_s);
+    QRegularExpression pythonImportRegex(u"^(import|from)\\s+\\w+(?:\\.\\w+)*"_s,
+                                         QRegularExpression::MultilineOption);
     it = pythonImportRegex.globalMatch(content);
     while (it.hasNext()) {
         QRegularExpressionMatch match = it.next();
@@ -1001,7 +1093,8 @@ QString ProjectGraph::extractImportsFromContent(const QString &content, const QS
     }
 
     // Extract JavaScript imports
-    QRegularExpression jsImportRegex(u"^(import|require)\\s+[\\'\\\"][^\\'\\\"]+[\\'\\\"]"_s);
+    QRegularExpression jsImportRegex(u"^(import|require)\\s+[\\'\\\"][^\\'\\\"]+[\\'\\\"]"_s,
+                                     QRegularExpression::MultilineOption);
     it = jsImportRegex.globalMatch(content);
     while (it.hasNext()) {
         QRegularExpressionMatch match = it.next();
@@ -1013,8 +1106,9 @@ QString ProjectGraph::extractImportsFromContent(const QString &content, const QS
 
 QStringList ProjectGraph::extractClassDefinitions(const QString &content) const
 {
-    // Extract class definitions from C++ and Java
-    QRegularExpression classRegex(u"class\\s+\\w+\\s*:\\s*public\\s+\\w+"_s);
+    // Broad class match: any `class Name` declaration, not just ones with an
+    // explicit `: public Base` inheritance list.
+    QRegularExpression classRegex(u"class\\s+\\w+"_s);
     QRegularExpressionMatchIterator it = classRegex.globalMatch(content);
     QStringList matches;
     while (it.hasNext()) {
@@ -1026,8 +1120,10 @@ QStringList ProjectGraph::extractClassDefinitions(const QString &content) const
 
 QStringList ProjectGraph::extractFunctionDefinitions(const QString &content) const
 {
-    // Extract function definitions
-    QRegularExpression functionRegex(u"\\w+\\s+\\w+\\s*\\([^)]*\\)\\s*\\{?"_s);
+    // A definition has a return-type-like prefix before the name: `type name(`.
+    // A bare `name(` at line start is a call site, not a definition.
+    QRegularExpression functionRegex(u"^\\s*(?:[\\w:<>]+\\s+)+(\\w+)\\s*\\([^)]*\\)"_s,
+                                     QRegularExpression::MultilineOption);
     QRegularExpressionMatchIterator it = functionRegex.globalMatch(content);
     QStringList matches;
     while (it.hasNext()) {
@@ -1112,7 +1208,12 @@ QString ProjectGraph::extractContentPreview(const QString &content, int maxLengt
     if (flattened.size() <= budget) {
         return flattened;
     }
-    return flattened.left(budget) + u"\u2026"_s;
+    // Surrogate-safe cut: never split a surrogate pair.
+    int end = budget;
+    if (end > 0 && end < flattened.length() && flattened.at(end - 1).isHighSurrogate()) {
+        --end;
+    }
+    return flattened.left(end) + u"\u2026"_s;
 }
 
 QString ProjectGraph::getNodeTypeFromPath(const QString &path)

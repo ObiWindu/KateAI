@@ -742,21 +742,46 @@ void AcpClient::start()
 
 void AcpClient::cancelPendingPermission()
 {
-    // A parked client method holds the question slot when an agent-initiated
-    // request arrives: refuse it, the way the earlier request is answered as
-    // cancelled below, so the agent does not block on the parked call.
-    cancelParkedMethods();
-    if (!hasPendingPermission()) {
-        return;
+    // Only the agent-initiated request waiting for an answer is cancelled
+    // here. Parked client methods keep their own queue (cancelParkedMethods):
+    // a pipelined permission must queue behind them, never refuse them as a
+    // side effect of arriving.
+    const auto refuse = [this](const QJsonValue &rpcId) {
+        if (rpcId.isUndefined() || rpcId.isNull()) {
+            return;
+        }
+        QJsonObject outcome;
+        outcome.insert(u"outcome"_s, u"cancelled"_s);
+        QJsonObject result;
+        result.insert(u"outcome"_s, outcome);
+        replyResult(rpcId, result);
+    };
+    refuse(m_permissionRpcId);
+    for (const QueuedPermission &queued : std::as_const(m_permissionQueue)) {
+        refuse(queued.rpcId);
     }
-    QJsonObject outcome;
-    outcome.insert(u"outcome"_s, u"cancelled"_s);
-    QJsonObject result;
-    result.insert(u"outcome"_s, outcome);
-    replyResult(m_permissionRpcId, result);
+    m_permissionQueue.clear();
     m_permissionRpcId = QJsonValue();
     m_permissionOptions = QJsonArray();
     m_permissionRequest = {};
+}
+
+void AcpClient::answerNextPermission()
+{
+    // One question at a time: a resolving answer must not surface the next
+    // one while another is still being answered.
+    if (hasPendingPermission() || m_activeParked) {
+        return;
+    }
+    if (!m_permissionQueue.isEmpty()) {
+        QueuedPermission next = m_permissionQueue.takeFirst();
+        m_permissionRpcId = next.rpcId;
+        m_permissionOptions = next.options;
+        m_permissionRequest = next.request;
+        Q_EMIT permissionNeeded(next.request);
+        return;
+    }
+    askNextParkedMethod();
 }
 
 void AcpClient::finishLiveTools(const QString &message)
@@ -779,6 +804,10 @@ void AcpClient::finishLiveTools(const QString &message)
 void AcpClient::cancel()
 {
     cancelPendingPermission();
+    // Parked writes/terminals hold the question slot exactly like an
+    // agent-initiated request; a cancelled turn must refuse them explicitly
+    // or the agent blocks on them for as long as the process lives.
+    cancelParkedMethods();
     if (m_turnRetryPending) {
         // The failed turn was waiting to be retried. Stop closes it here: a
         // cancelled turn must not resurrect itself through the retry timer.
@@ -799,8 +828,10 @@ void AcpClient::cancel()
         const int promptId = m_promptId;
         if (m_cancelGraceTimer) {
             m_cancelGraceTimer->stop();
-            delete m_cancelGraceTimer;
+            m_cancelGraceTimer->deleteLater();
+            m_cancelGraceTimer = nullptr;
         }
+        m_cancelling = true;
         auto *grace = new QTimer(this);
         grace->setSingleShot(true);
         grace->setInterval(qBound(5000, m_settings.toolCallTimeoutMs, 60000));
@@ -814,6 +845,7 @@ void AcpClient::cancel()
             finishLiveTools(u"The turn was stopped before this finished."_s);
             m_pending.remove(promptId);
             m_promptId = 0;
+            m_cancelling = false;
             finishPrompt(QString(), u"The agent did not answer the cancellation in time."_s);
         });
         grace->start();
@@ -826,12 +858,14 @@ void AcpClient::stop()
     m_shuttingDown = true;
     stopTurnRetry();
     m_turnRetryAttempt = 0;
+    m_cancelling = false;
+    m_permissionQueue.clear();
     if (m_startupTimer) {
         m_startupTimer->stop();
     }
     if (m_cancelGraceTimer) {
         m_cancelGraceTimer->stop();
-        delete m_cancelGraceTimer;
+        m_cancelGraceTimer->deleteLater();
         m_cancelGraceTimer = nullptr;
     }
     failAll(u"ACP agent disconnected."_s);
@@ -905,6 +939,13 @@ void AcpClient::prompt(const QString &text)
     if (text.trimmed().isEmpty()) {
         return;
     }
+    // A failed turn is waiting out its retry backoff. A new prompt must not
+    // cut in: it would either resurrect a superseded turn or race the retry.
+    // The caller should stop the agent first.
+    if (m_turnRetryPending) {
+        Q_EMIT failed(u"A retry of the failed turn is already scheduled; stop the agent before starting a new turn."_s);
+        return;
+    }
     if (m_state != State::Ready) {
         m_queued.append(QueuedPrompt{text});
         if (m_state != State::Starting) {
@@ -942,7 +983,7 @@ void AcpClient::resolvePermission(PermissionDecision decision)
             }
             dispatchParkedMethod(parked);
         }
-        askNextParkedMethod();
+        answerNextPermission();
         return;
     }
     if (!hasPendingPermission()) {
@@ -979,8 +1020,8 @@ void AcpClient::resolvePermission(PermissionDecision decision)
     m_permissionOptions = QJsonArray();
     m_permissionRequest = {};
     // An agent-initiated request that just resolved frees the question slot:
-    // the next parked client method can be asked now.
-    askNextParkedMethod();
+    // a queued pipelined request goes first, then the next parked method.
+    answerNextPermission();
 }
 
 void AcpClient::setState(State state, const QString &status)
@@ -1468,6 +1509,7 @@ void AcpClient::sendSessionLoadOrResume()
 void AcpClient::sendPromptNow(const QString &text)
 {
     stopTurnRetry();
+    m_cancelling = false;
     // Every turn starts with a full retry budget. executeTurnRetry() restores
     // the spent count after this reset, so automatic retries count against one
     // budget instead of resetting it.
@@ -1658,14 +1700,24 @@ int AcpClient::sendRequest(const QString &method, const QJsonObject &params,
         pending.timeout = timer;
         timer->start();
     }
-    m_pending.insert(id, pending);
-
     QJsonObject message;
     message.insert(u"jsonrpc"_s, JsonRpcVersion);
     message.insert(u"id"_s, id);
     message.insert(u"method"_s, method);
     message.insert(u"params"_s, params);
-    writeMessage(message);
+    // A request to a dead process must fail now, through the callback, rather
+    // than sit in m_pending until its timeout while the turn hangs.
+    if (!writeMessage(message)) {
+        if (pending.timeout) {
+            pending.timeout->stop();
+            pending.timeout->deleteLater();
+        }
+        if (pending.done) {
+            pending.done(QJsonObject(), u"ACP agent is not running."_s);
+        }
+        return id;
+    }
+    m_pending.insert(id, pending);
     return id;
 }
 
@@ -1678,14 +1730,17 @@ void AcpClient::sendNotification(const QString &method, const QJsonObject &param
     writeMessage(message);
 }
 
-void AcpClient::writeMessage(const QJsonObject &message)
+bool AcpClient::writeMessage(const QJsonObject &message)
 {
+    // A reply to an agent that is already gone has nowhere to go; request
+    // callers (sendRequest) report that to their callback instead of parking.
     if (!m_process || m_process->state() == QProcess::NotRunning) {
-        return;
+        return false;
     }
     QByteArray payload = QJsonDocument(message).toJson(QJsonDocument::Compact);
     payload.append('\n');
     m_process->write(payload);
+    return true;
 }
 
 void AcpClient::replyResult(const QJsonValue &id, const QJsonObject &result)
@@ -1791,13 +1846,33 @@ void AcpClient::handleResponse(const QJsonObject &message)
     if (idValue.isDouble()) {
         id = idValue.toInt();
     } else if (idValue.isString()) {
-        bool ok = false;
-        const int parsed = idValue.toString().toInt(&ok);
-        // "123abc" -> toInt() returns 123; only wholly numeric ids may route.
-        if (!ok || QString::number(parsed) != idValue.toString().trimmed()) {
+        // Agents quote the id as a string ("1000", " 42 ", "+7", "007").
+        // Accept anything that is all digits after trimming, a leading '+'
+        // and leading zeros; "123abc" still routes nowhere.
+        QString s = idValue.toString().trimmed();
+        if (s.startsWith(u'+')) {
+            s = s.mid(1);
+        }
+        int leading = 0;
+        while (leading + 1 < s.size() && s.at(leading) == u'0') {
+            ++leading;
+        }
+        s = s.mid(leading);
+        bool allDigits = !s.isEmpty();
+        for (const QChar c : s) {
+            if (!c.isDigit()) {
+                allDigits = false;
+                break;
+            }
+        }
+        if (!allDigits) {
             return;
         }
-        id = parsed;
+        bool ok = false;
+        id = s.toInt(&ok);
+        if (!ok) {
+            return;
+        }
     } else {
         return;
     }
@@ -2014,7 +2089,8 @@ void AcpClient::handleSessionUpdate(const QJsonObject &update)
         const PermissionRequest refreshed = permissionFromToolCall(update);
         const PermissionRequest merged = mergeToolCallDetails(existing, refreshed);
         if (merged.describeDiff != existing.describeDiff || merged.resolvedPath != existing.resolvedPath
-            || merged.mutatesFiles != existing.mutatesFiles || merged.additionalDiffs != existing.additionalDiffs) {
+            || merged.mutatesFiles != existing.mutatesFiles || merged.additionalDiffs != existing.additionalDiffs
+            || merged.risk != existing.risk) {
             existing = merged;
             m_liveTools.insert(toolCallId, existing);
             Q_EMIT toolDetailsChanged(existing);
@@ -2370,6 +2446,41 @@ PermissionRequest AcpClient::permissionFromToolCall(const QJsonObject &toolCall)
         request.risk = ToolRisk::Write;
     }
 
+    // The agent's paths are claims, not facts: locations, diff paths and the
+    // title are all agent-controlled. A path the sandbox would refuse must not
+    // reach the review queue as an editable file, or the UI would offer to
+    // review (and keep) an edit outside the workspace. Drop the paths and
+    // keep the description; the title itself is display-only and is never
+    // used for any access decision. Without a workspace there is nothing to
+    // judge against, so the paths pass through untouched.
+    if ((!request.path.isEmpty() || !request.additionalPaths.isEmpty()) && !m_workspace.isEmpty()) {
+        const Sandbox sandbox = currentSandbox();
+        QString gateError;
+        const QString probe = request.resolvedPath.isEmpty() ? request.path : request.resolvedPath;
+        const bool probeOk = request.mutatesFiles ? sandbox.allowsWrite(probe, &gateError)
+                                                  : sandbox.allowsRead(probe, &gateError);
+        if (!probeOk) {
+            request.path.clear();
+            request.resolvedPath.clear();
+            request.additionalPaths.clear();
+            request.additionalDiffs.clear();
+        } else {
+            // The primary path passed; each additional path is gated on its
+            // own rather than riding along.
+            for (int i = request.additionalPaths.size() - 1; i >= 0; --i) {
+                const bool extraOk = request.mutatesFiles
+                    ? sandbox.allowsWrite(request.additionalPaths.at(i), &gateError)
+                    : sandbox.allowsRead(request.additionalPaths.at(i), &gateError);
+                if (!extraOk) {
+                    request.additionalPaths.removeAt(i);
+                    if (i < request.additionalDiffs.size()) {
+                        request.additionalDiffs.removeAt(i);
+                    }
+                }
+            }
+        }
+    }
+
     // A diff that arrived as a content block is not in the arguments the agent
     // sent, and a restored transcript rebuilds the card from those arguments.
     // Record the diff in the shape the edit tools use, so history restores the
@@ -2442,6 +2553,16 @@ PermissionRequest AcpClient::mergeToolCallDetails(const PermissionRequest &base,
         merged.additionalDiffs.append(i < other.additionalDiffs.size() ? other.additionalDiffs.at(i) : QString());
     }
     merged.mutatesFiles = merged.mutatesFiles || other.mutatesFiles;
+    // Risk only ever escalates: an update that reveals a write or an execute
+    // behind a read-looking announcement must raise the stored risk (Execute
+    // > Write > Read), never lower it. Callers re-emit the merged request so
+    // the card and the review queue catch the escalation.
+    const auto riskRank = [](ToolRisk risk) {
+        return risk == ToolRisk::Execute ? 2 : (risk == ToolRisk::Write ? 1 : 0);
+    };
+    if (riskRank(other.risk) > riskRank(merged.risk)) {
+        merged.risk = other.risk;
+    }
     return merged;
 }
 
@@ -2458,13 +2579,22 @@ void AcpClient::handleRequestPermission(const QJsonValue &id, const QJsonObject 
     if (request.toolCallId.isEmpty()) {
         request.toolCallId = QUuid::createUuid().toString(QUuid::WithoutBraces);
     }
+    const QJsonArray options = params.value(u"options"_s).toArray();
     // Only one permission can be shown at a time. If the agent pipelines a
-    // second request while the first is still waiting, the first has to be
-    // answered (as cancelled) before it is overwritten -- otherwise its id is
-    // never replied to and the agent blocks on it forever.
-    cancelPendingPermission();
+    // second request while the first is still waiting, the newcomer queues
+    // behind it: answering the first as cancelled (the old behaviour) would
+    // refuse a tool the user never saw, and dropping the parked writes with
+    // it would stall the agent on an RPC nobody answers.
+    if (hasPendingPermission() || m_activeParked) {
+        QueuedPermission queued;
+        queued.rpcId = id;
+        queued.options = options;
+        queued.request = request;
+        m_permissionQueue.append(queued);
+        return;
+    }
     m_permissionRpcId = id;
-    m_permissionOptions = params.value(u"options"_s).toArray();
+    m_permissionOptions = options;
     m_permissionRequest = request;
     // Whether the request is answered by the user or auto-decided is the
     // AgentLoop's call: it owns the permission policy for every provider.
@@ -2523,12 +2653,55 @@ QString AcpClient::writeGrantKey(const QString &path) const
     return u"write:"_s + QDir::cleanPath(QDir(m_workspace).absoluteFilePath(path));
 }
 
-QString AcpClient::execGrantKey(const QString &command, const QStringList &args) const
+QString AcpClient::execGrantKey(const QString &command, const QStringList &args, const QStringList &envKeys) const
 {
-    // The command line as one string. terminal/create accepts the command as a
+    // The command line as one string plus the sorted names of the extra
+    // environment it runs with. terminal/create accepts the command as a
     // string or an argv array plus an args list; the approval side normalises
-    // whichever form the agent used to the same key.
-    return u"exec:"_s + command + u'\n' + args.join(u'\n');
+    // whichever form the agent used to the same key, and the env names pin
+    // the grant so it cannot be replayed with smuggled variables.
+    QStringList sorted = envKeys;
+    sorted.sort(Qt::CaseInsensitive);
+    return u"exec:"_s + command + u'\n' + args.join(u'\n') + u"\nenv:"_s + sorted.join(u","_s);
+}
+
+// The sorted names of the extra environment of a terminal/create (or the
+// approval record of one), whether it arrived as [{name,value}] or {k:v}.
+static QStringList terminalEnvKeys(const QJsonValue &envValue)
+{
+    QStringList keys;
+    if (envValue.isArray()) {
+        for (const QJsonValue &item : envValue.toArray()) {
+            const QString name = item.toObject().value(u"name"_s).toString().trimmed();
+            if (!name.isEmpty() && !keys.contains(name, Qt::CaseInsensitive)) {
+                keys.append(name);
+            }
+        }
+    } else if (envValue.isObject()) {
+        const QJsonObject obj = envValue.toObject();
+        for (auto it = obj.begin(); it != obj.end(); ++it) {
+            if (!it.key().trimmed().isEmpty() && !keys.contains(it.key(), Qt::CaseInsensitive)) {
+                keys.append(it.key());
+            }
+        }
+    }
+    keys.sort(Qt::CaseInsensitive);
+    return keys;
+}
+
+// Extra environment a terminal may never override. These redirect execution
+// (loader preloads), the shell startup (BASH_ENV/ENV/PROMPT_COMMAND), git's
+// transport (GIT_SSH*) or hand out credentials (SSH_AUTH_SOCK); the agent's
+// own values for them are dropped, never applied.
+static bool terminalEnvBlocked(const QString &name)
+{
+    static const QSet<QString> blocked = {
+        u"LD_PRELOAD"_s, u"LD_AUDIT"_s, u"LD_LIBRARY_PATH"_s, u"LD_DYNAMIC_WEAK"_s,
+        u"DYLD_INSERT_LIBRARIES"_s, u"DYLD_LIBRARY_PATH"_s, u"DYLD_FALLBACK_LIBRARY_PATH"_s,
+        u"GIT_SSH_COMMAND"_s, u"GIT_SSH"_s, u"BASH_ENV"_s, u"ENV"_s,
+        u"PROMPT_COMMAND"_s, u"SSH_AUTH_SOCK"_s,
+    };
+    return blocked.contains(name.toUpper());
 }
 
 bool AcpClient::ensureMethodPermission(const QString &grantKey, PermissionRequest request,
@@ -2634,7 +2807,9 @@ void AcpClient::recordApprovalGrants(const PermissionRequest &request, Permissio
         argv.append(value.toString());
     }
     if (!argv.isEmpty()) {
-        grants.insert(execGrantKey(argv.first(), argv.mid(1)));
+        // Same key shape as the client-method side, including the env names,
+        // or the grant would never match a terminal/create with environment.
+        grants.insert(execGrantKey(argv.first(), argv.mid(1), terminalEnvKeys(args.value(u"env"_s))));
     }
 }
 
@@ -2651,8 +2826,7 @@ void AcpClient::handleFsRead(const QJsonValue &id, const QJsonObject &params)
         replyError(id, kServerError, error.isEmpty() ? u"Could not resolve %1."_s.arg(path) : error);
         return;
     }
-    QString contents;
-    if (!m_bridge || !m_bridge->readDocument(resolved, &contents)) {
+    if (!m_bridge) {
         replyError(id, kServerError, u"Could not read %1."_s.arg(path));
         return;
     }
@@ -2668,8 +2842,27 @@ void AcpClient::handleFsRead(const QJsonValue &id, const QJsonObject &params)
     }
     const int line = qMax(0, params.value(u"line"_s).toInt(0));
     const int limit = params.value(u"limit"_s).toInt(0) <= 0 ? 10000 : qMin(params.value(u"limit"_s).toInt(0), 10000);
+    // OOM guard: a whole-file read of a huge file duplicates it in memory
+    // (read + split + join). Refuse it up front and point at line/limit; the
+    // paged path below streams only the requested slice for disk files.
+    constexpr qint64 kMaxFsReadBytes = 5 * 1024 * 1024;
+    if (line <= 0) {
+        const QFileInfo info(resolved);
+        if (info.isFile() && info.size() > kMaxFsReadBytes) {
+            replyError(id, kInvalidParams,
+                u"%1 is too large to read whole (%2 bytes). Use line/limit to read it in slices."_s
+                    .arg(path).arg(info.size()));
+            return;
+        }
+    }
+    QStringList page;
+    int totalLines = 0;
+    if (!m_bridge->readDocumentLines(resolved, line <= 0 ? 1 : line, limit, &page, &totalLines)) {
+        replyError(id, kServerError, u"Could not read %1."_s.arg(path));
+        return;
+    }
     QJsonObject result;
-    result.insert(u"content"_s, sliceLines(contents, line, limit));
+    result.insert(u"content"_s, page.join(u'\n'));
     replyResult(id, result);
 }
 
@@ -2976,14 +3169,20 @@ void AcpClient::handleTerminalCreate(const QJsonValue &id, const QJsonObject &pa
     }
 
     // Same contract as the native bash tool: running a command needs an
-    // approval for this exact command line first.
+    // approval for this exact command line first. The extra environment is
+    // part of the grant key (see execGrantKey), and only its names are shown:
+    // values can carry secrets that must not reach the transcript.
+    const QStringList envKeys = terminalEnvKeys(params.value(u"env"_s));
     PermissionRequest request;
     request.toolName = u"bash"_s;
     request.toolCallId = QUuid::createUuid().toString(QUuid::WithoutBraces);
     request.risk = ToolRisk::Execute;
     request.summary = args.isEmpty() ? command : command + u' ' + args.join(u' ');
+    if (!envKeys.isEmpty()) {
+        request.summary += u" (env: %1)"_s.arg(envKeys.join(u", "_s));
+    }
     request.details = QString::fromUtf8(QJsonDocument(params).toJson(QJsonDocument::Compact));
-    if (!ensureMethodPermission(execGrantKey(command, args), std::move(request), id, u"terminal/create"_s, params)) {
+    if (!ensureMethodPermission(execGrantKey(command, args, envKeys), std::move(request), id, u"terminal/create"_s, params)) {
         return;
     }
 
@@ -3017,6 +3216,11 @@ void AcpClient::handleTerminalCreate(const QJsonValue &id, const QJsonObject &pa
     QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
     const QJsonObject extra = envArrayToObject(params.value(u"env"_s).toArray());
     for (auto it = extra.begin(); it != extra.end(); ++it) {
+        // Blocked names (loader preloads, shell startup, git transport,
+        // credential sockets) are dropped, never applied.
+        if (terminalEnvBlocked(it.key())) {
+            continue;
+        }
         env.insert(it.key(), it.value().toString());
     }
     term->process->setProcessEnvironment(env);
@@ -3119,8 +3323,12 @@ void AcpClient::handleTerminalWait(const QJsonValue &id, const QJsonObject &para
         if (!term) {
             return;
         }
+        // RPC ids cross the wire as strings or numbers interchangeably; a
+        // QJsonValue == compare is type-sensitive (1 != "1"), so compare the
+        // string forms instead of dropping a waiter whose id changed shape.
+        const QString wanted = id.toVariant().toString();
         for (int i = 0; i < term->waiters.size(); ++i) {
-            if (term->waiters.at(i) == id) {
+            if (term->waiters.at(i).toVariant().toString() == wanted) {
                 term->waiters.removeAt(i);
                 replyError(id, kServerError, u"terminal/wait_for_exit timed out."_s);
                 return;
@@ -3262,10 +3470,13 @@ void AcpClient::killTerminal(Terminal *term, bool release)
             ::kill(-static_cast<pid_t>(pid), SIGTERM);
         }
 #endif
+        // No blocking waitForFinished() here: this runs on the UI thread and
+        // a hung child would freeze the editor. terminate()/kill() queue the
+        // exit; the finished handler (or markTerminalExited below) settles
+        // the waiters, and the process object itself dies with deleteLater.
         term->process->terminate();
-        if (!term->process->waitForFinished(500)) {
+        if (term->process->state() != QProcess::NotRunning) {
             term->process->kill();
-            term->process->waitForFinished(500);
         }
 #ifdef Q_OS_UNIX
         // A grandchild that ignored SIGTERM must not outlive the terminal.
@@ -3320,10 +3531,14 @@ void AcpClient::failAll(const QString &error)
 void AcpClient::finishPrompt(const QString &stopReason, const QString &error)
 {
     m_promptId = 0;
+    m_cancelling = false;
     // The turn is over, so a pending cancellation grace window must not fire.
+    // deleteLater, not delete: this can run inside the grace timer's own
+    // timeout emission, where deleting the sender is unsafe.
     if (m_cancelGraceTimer) {
         m_cancelGraceTimer->stop();
-        delete m_cancelGraceTimer;
+        m_cancelGraceTimer->deleteLater();
+        m_cancelGraceTimer = nullptr;
     }
     if (!error.isEmpty()) {
         Q_EMIT failed(error);

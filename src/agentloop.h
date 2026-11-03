@@ -26,6 +26,7 @@
 #include <QPointer>
 #include <QQueue>
 #include <QSet>
+#include <QSharedPointer>
 #include <QHash>
 #include <QTimer>
 #include <memory>
@@ -148,6 +149,9 @@ public:
 
     // Session persistence
     SessionStore::SessionData sessionData() const;
+    // Restores persisted history into an idle loop. Any live turn is aborted
+    // first and nothing in-flight is resumed: the restored loop is not busy,
+    // holds no queue and awaits the next start().
     void restoreSession(const SessionStore::SessionData &data);
     void clearSession();
 
@@ -285,6 +289,8 @@ private:
     QJsonObject effectiveArgs(const ToolCall &call) const;
     // Takes the shared edit lock for a mutating tool, if the team has one.
     bool acquireEditLock(const ToolCall &call, QString *deniedBy);
+    // Every file a mutating call will write, as canonical lock keys.
+    QStringList editLockPaths(const ToolCall &call, const QJsonObject &args) const;
     void releaseEditLocksFor(const ToolCall &call);
     // Pushes the active mode's tool set (and the MCP tools) to the client.
     void syncToolAccess();
@@ -366,13 +372,42 @@ LlmClient m_client;
     QList<ToolResult> m_pendingResults;
     ToolCall m_waitingCall;
     PermissionRequest m_waitingRequest;
-    // The `bash` call currently streaming, if any. One at a time: the queue
-    // waits for it, so nothing else is executing while it is set.
-    QString m_runningBashId;
-    // Connection of the current bash call's finished handler. Kept so the next
-    // command can drop the previous one: without it every command leaks a
-    // connection that fires (and early-returns) on every later result.
-    QMetaObject::Connection m_bashFinishedConnection;
+    // Permissions (or questions) that arrived while another one is still
+    // awaiting the user. A single m_waitingCall would be overwritten and the
+    // first request never answered, hanging the agent; queued entries are
+    // surfaced one at a time through pumpWaitingQueue().
+    QQueue<ToolCall> m_waitingQueue;
+    QQueue<PermissionRequest> m_waitingRequestQueue;
+    // Takes the next queued permission/question into m_waitingCall and emits
+    // the matching signal. Returns false when there is nothing to surface.
+    bool pumpWaitingQueue();
+    void enqueueWaitingCall(const ToolCall &call, const PermissionRequest &request);
+    // Disconnects and forgets every tracked async (web/MCP) connection.
+    void clearAsyncConns();
+    // Drops one tracked async connection (disconnect + forget). The handler
+    // holds only the weak reference, so this is what breaks the cycle.
+    void releaseAsyncConn(const QWeakPointer<QMetaObject::Connection> &weak);
+    // Async (web/MCP) connections with their lifetime tracked. The Qt functor
+    // holds only a weak reference (see startWebTool/dispatchAsyncTool), so a
+    // turn that ends without the tool reporting back cannot leak the handler.
+    QList<QSharedPointer<QMetaObject::Connection>> m_asyncConns;
+    // The `bash` calls currently streaming, by tool call id. The queue holds
+    // while a command runs, so normally at most one is set; the map (not a
+    // single id/connection) keeps a second command from dropping the first
+    // one's finished handler when they do overlap (e.g. an approved call
+    // racing a checkpoint resume).
+    QSet<QString> m_runningBashIds;
+    // Finished-handler connection per streaming bash call, keyed the same way.
+    // A new command must not disconnect the previous one's handler.
+    QHash<QString, QMetaObject::Connection> m_bashFinishedConnections;
+    // Progress connection per streaming bash call, keyed the same way.
+    QHash<QString, QMetaObject::Connection> m_bashProgressConnections;
+    // Drops every bash handler (disconnecting first) and forgets the running
+    // ids. Used when a turn ends while a command is still streaming.
+    void clearBashState();
+    // Drops one finished streaming command's handlers (disconnecting them)
+    // without touching any other in-flight command's handlers.
+    void takeBashConnections(const QString &callId);
 
     bool m_busy = false;
     State m_state = State::Idle;

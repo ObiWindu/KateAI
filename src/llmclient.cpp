@@ -61,6 +61,19 @@ static QString sanitizeResponseBody(const QByteArray &body)
         text.replace(re, QString(u"\\1[REDACTED]\\3"));
         re = QRegularExpression(QString(u"('%1'\\s*:\\s*')([^']+)(')").arg(pattern), QRegularExpression::CaseInsensitiveOption);
         text.replace(re, QString(u"\\1[REDACTED]\\3"));
+        // URL-encoded / query-string form: api_key=SECRET&...
+        re = QRegularExpression(QString(u"((?:^|[?&;])%1=)([^&\\s\"']+)").arg(QRegularExpression::escape(pattern)),
+                                QRegularExpression::CaseInsensitiveOption);
+        text.replace(re, QString(u"\\1[REDACTED]"));
+        // Bare key=value / key: value log form.
+        re = QRegularExpression(QString(u"((?:^|[\\s,;{])%1\\s*[:=]\\s*)([^\\s,;\"'}]+)").arg(QRegularExpression::escape(pattern)),
+                                QRegularExpression::CaseInsensitiveOption);
+        text.replace(re, QString(u"\\1[REDACTED]"));
+    }
+    // Authorization headers carry the secret raw, not under a JSON key.
+    {
+        QRegularExpression bearer(u"\\bBearer\\s+[A-Za-z0-9\\-._~+/=]+"_s, QRegularExpression::CaseInsensitiveOption);
+        text.replace(bearer, u"Bearer [REDACTED]"_s);
     }
     return text;
 }
@@ -315,6 +328,21 @@ CompletionChunk LlmClient::parseSseLine(const QByteArray &line, QHash<int, ToolC
     // data line is parsed here.
     const QString anthropicType = root.value(u"type"_s).toString();
     if (!anthropicType.isEmpty() && !root.contains(u"choices"_s)) {
+        // Anthropic numbers content blocks per event, but a provider that
+        // omits "index" would merge every parallel tool call into slot 0.
+        // Fall back to the next free slot, the way the OpenAI path does.
+        const auto eventIndex = [&root, acc]() {
+            if (root.contains(u"index"_s)) {
+                return root.value(u"index"_s).toInt();
+            }
+            int next = 0;
+            if (acc) {
+                for (auto it = acc->constBegin(); it != acc->constEnd(); ++it) {
+                    next = qMax(next, it.key() + 1);
+                }
+            }
+            return next;
+        };
         if (anthropicType == u"content_block_delta"_s) {
             const QJsonObject delta = root.value(u"delta"_s).toObject();
             const QString kind = delta.value(u"type"_s).toString();
@@ -329,7 +357,7 @@ CompletionChunk LlmClient::parseSseLine(const QByteArray &line, QHash<int, ToolC
             } else if (kind == u"input_json_delta"_s && acc) {
                 // Tool arguments are streamed as JSON fragments; keep them raw
                 // so drainToolAccumulator() can parse the assembled object.
-                ToolCall &tool = (*acc)[root.value(u"index"_s).toInt()];
+                ToolCall &tool = (*acc)[eventIndex()];
                 const QString frag = delta.value(u"partial_json"_s).toString();
                 constexpr qsizetype kMaxToolArgsChars = 1024 * 1024;
                 if (tool.argumentsJson.size() + frag.size() <= kMaxToolArgsChars) {
@@ -339,7 +367,7 @@ CompletionChunk LlmClient::parseSseLine(const QByteArray &line, QHash<int, ToolC
         } else if (anthropicType == u"content_block_start"_s) {
             const QJsonObject block = root.value(u"content_block"_s).toObject();
             if (block.value(u"type"_s).toString() == u"tool_use"_s && acc) {
-                ToolCall &tool = (*acc)[root.value(u"index"_s).toInt()];
+                ToolCall &tool = (*acc)[eventIndex()];
                 tool.id = block.value(u"id"_s).toString();
                 tool.name = block.value(u"name"_s).toString();
                 // A short input can arrive complete here, with no delta events.
@@ -848,6 +876,17 @@ QJsonArray LlmClient::messagesToAnthropicJson(const QList<ChatMessage> &messages
                 }
             }
             if (!validPlacement) {
+                // An orphaned tool result (history starting with one, or one
+                // after an unrelated user message) would make the Messages API
+                // reject the whole request. Convert it to plain text instead
+                // of dropping it silently: the observation still reaches the
+                // model, just not as a tool_result block.
+                ensureTurn(u"user"_s);
+                QJsonObject block;
+                block.insert(u"type"_s, u"text"_s);
+                block.insert(u"text"_s, u"[Orphaned result of tool %1 (call %2):]\n%3"_s
+                        .arg(message.name, message.toolCallId, message.content));
+                appendBlock(block);
                 break;
             }
             ensureTurn(u"user"_s);
@@ -933,7 +972,11 @@ void LlmClient::fetchModels(Provider provider)
     reply->setParent(this);
     m_modelReplies.append(reply);
     connect(reply, &QNetworkReply::finished, this, [this, reply, provider]() {
-        m_modelReplies.removeAll(reply);
+        // Take, don't just remove: a reply aborted (and scheduled for
+        // deletion) concurrently must not be handled and deleted twice.
+        if (!m_modelReplies.removeOne(reply)) {
+            return;
+        }
         handleModelsFinished(reply, provider);
     });
 }
@@ -965,6 +1008,8 @@ void LlmClient::abort()
     reply->disconnect(this);
     reply->abort();
     reply->deleteLater();
+    // A stop keeps the partial answer on screen: it is the only record of a
+    // turn the user deliberately cut short. Do not emit textReset here.
     resetCompletionState();
     clearStoredRequest();
 }
@@ -1141,6 +1186,16 @@ bool LlmClient::feedSseLine(const QByteArray &line)
         // "data:" lines, which are joined with a newline. The provider sends a
         // single line per event in practice, so the buffer is dispatched as
         // soon as it parses; only a split event stays buffered.
+        //
+        // Bound the carry-over: field lines no longer flush it (see below),
+        // so a stream of never-parsing data lines must not grow it without
+        // limit. The tool-argument fragments that legitimately accumulate are
+        // capped at 1 MB at their own assembly sites; anything larger here is
+        // garbage and is dropped.
+        constexpr qsizetype kMaxPendingEventBytes = 1024 * 1024;
+        if (m_pendingEventData.size() > kMaxPendingEventBytes) {
+            m_pendingEventData.clear();
+        }
         if (m_pendingEventData.isEmpty()) {
             m_pendingEventData = payload;
         } else {
@@ -1155,10 +1210,10 @@ bool LlmClient::feedSseLine(const QByteArray &line)
         m_pendingEventData.clear();
         return applySseChunk(chunk);
     }
-    // "event:", "id:", "retry:" and comment lines carry no payload. A pending
-    // event that never parsed is dropped here: more data will not make it
-    // valid.
-    m_pendingEventData.clear();
+    // "event:", "id:", "retry:" and comment lines carry no payload, but they
+    // are part of the event being assembled: a split data payload must survive
+    // them, and only the empty-line dispatch above may drop a pending event.
+    // Clearing here would discard the first half of a multi-line event.
     return true;
 }
 
@@ -1237,8 +1292,14 @@ void LlmClient::handleFinished()
     reply->deleteLater();
 
     if (m_abortRequested) {
+        // Same contract as abort(): a fragment the UI already rendered must
+        // be retracted, not left as the turn's answer.
+        const bool hadPartialText = !m_text.isEmpty();
         resetCompletionState();
         clearStoredRequest();
+        if (hadPartialText) {
+            Q_EMIT textReset();
+        }
         return;
     }
 

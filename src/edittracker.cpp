@@ -22,6 +22,8 @@
 #include <QPushButton>
 #include <QScrollArea>
 #include <QShortcut>
+#include <QTimer>
+#include <QUuid>
 #include <QVBoxLayout>
 #include <QStandardPaths>
 #include <QWidget>
@@ -292,9 +294,10 @@ void EditTracker::addEdit(const QString &path, const QString &toolName, const QS
     if (path.isEmpty()) {
         return;
     }
+    const QString normPath = QDir::cleanPath(path);
 
     EditEntry entry;
-    entry.path = path;
+    entry.path = normPath;
     entry.toolName = toolName;
     entry.diff = diff;
     entry.oldContent = oldContent;
@@ -303,14 +306,16 @@ void EditTracker::addEdit(const QString &path, const QString &toolName, const QS
 
     Group *group = nullptr;
     for (auto &candidate : m_groups) {
-        if (candidate.path == path) {
+        // Normalised compare: "a/../b" and "b" are the same file and must
+        // share one group.
+        if (QDir::cleanPath(candidate.path) == normPath) {
             group = &candidate;
             break;
         }
     }
     if (!group) {
         Group fresh;
-        fresh.path = path;
+        fresh.path = normPath;
         // The baseline a rejection restores: the file as it looked before the
         // first pending edit, which for a brand-new file is nothing at all.
         fresh.lastKnownContent = oldContent;
@@ -330,8 +335,8 @@ void EditTracker::addEdit(const QString &path, const QString &toolName, const QS
     group->pending.append(entry);
     refreshTotals(*group);
 
-    // New edits invalidate the record of earlier decisions: they were made
-    // against a state that no longer exists.
+    // A new edit invalidates the state earlier decisions were made against,
+    // so undo must not reach back past it.
     m_undoStack.clear();
 
     updateUI();
@@ -344,30 +349,36 @@ void EditTracker::updateEdit(const QString &path, const QString &toolName, const
     if (path.isEmpty()) {
         return;
     }
+    const QString normPath = QDir::cleanPath(path);
     Group *group = nullptr;
     for (auto &candidate : m_groups) {
-        if (candidate.path == path) {
+        if (QDir::cleanPath(candidate.path) == normPath) {
             group = &candidate;
             break;
         }
     }
     if (!group) {
-        // Nothing tracked yet for this path: track it from scratch, keeping the
-        // baseline the caller supplied.
-        addEdit(path, toolName, diff, oldContent, newContent, oldContent.isEmpty());
+        // Nothing tracked yet for this path: track it from scratch. A null
+        // oldContent means "unknown", not "empty file": only an explicit
+        // create flag marks a new file, so pass false here.
+        addEdit(normPath, toolName, diff, oldContent, newContent, false);
         return;
     }
-    if (!diff.isEmpty()) {
+    // Null (absent) vs empty (present-but-empty) matters: an empty string is a
+    // real value for content fields, so only a null update is skipped.
+    if (!diff.isNull()) {
         // Replace the diff of the last pending entry, leaving the baseline
         // untouched. A diff that arrives after the snapshot still belongs to
         // the edit that was already queued.
+        // Find the entry by path: entries are per-file, so the last entry of
+        // this group is the one.
         if (!group->pending.isEmpty()) {
             group->pending.last().diff = diff;
             group->pending.last().toolName = toolName;
-            if (oldContent.isEmpty() == false) {
+            if (!oldContent.isNull()) {
                 group->pending.last().oldContent = oldContent;
             }
-            if (!newContent.isEmpty()) {
+            if (!newContent.isNull()) {
                 group->pending.last().newContent = newContent;
             }
         }
@@ -420,6 +431,9 @@ QStringList EditTracker::pendingPaths() const
             paths.append(group.path);
         }
     }
+    // Arrival order: rows are user-facing and must read in the order the
+    // agent made them (QHash guaranteed nothing).
+    return paths;
     return paths;
 }
 
@@ -434,9 +448,17 @@ QList<EditEntry> EditTracker::pendingEdits() const
 
 QList<KTextEditor::Range> EditTracker::pendingEditRanges(const QString &path) const
 {
+    // Per-file, current-version only: the pending entries of one file are
+    // successive versions of the same file, so their diffs do not share one
+    // coordinate space and must not be concatenated before parsing. Only the
+    // latest entry describes the file as it is now.
+    const QString normPath = QDir::cleanPath(path);
     for (const auto &group : m_groups) {
-        if (group.path == path) {
-            return addedLineRangesFromDiff(combinedDiff(group));
+        if (QDir::cleanPath(group.path) == normPath) {
+            if (group.pending.isEmpty()) {
+                return {};
+            }
+            return addedLineRangesFromDiff(group.pending.last().diff);
         }
     }
     return {};
@@ -497,12 +519,14 @@ void EditTracker::pruneGroups()
 
 void EditTracker::acceptAll()
 {
-    // Snapshot the paths first: settle() prunes m_groups as it goes, so
-    // iterating the container while emitting would invalidate the iterator.
+    // Batch: settle every path, then rebuild the list once. Settling one by
+    // one rebuilds the whole list per file (O(n²) row churn).
+    m_inBatch = true;
     const QStringList paths = pendingPaths();
     for (const QString &path : paths) {
         acceptEdit(path);
     }
+    m_inBatch = false;
     // Not clear(): settle() already emptied and pruned every group, and
     // clear() would wipe the undo stack these decisions were pushed on. A
     // bulk decision is the action with the largest blast radius, so it is
@@ -514,10 +538,12 @@ void EditTracker::acceptAll()
 
 void EditTracker::rejectAll()
 {
+    m_inBatch = true;
     const QStringList paths = pendingPaths();
     for (const QString &path : paths) {
         rejectEdit(path);
     }
+    m_inBatch = false;
     pruneGroups();
     updateUI();
     Q_EMIT editsChanged(hasPendingEdits());
@@ -580,6 +606,15 @@ void EditTracker::undoLast()
             Q_EMIT fileCreatedThenRejected(decision.path);
         } else if (!decision.previousContent.isNull()) {
             Q_EMIT editRejected(decision.path, decision.toolName, decision.previousContent);
+        } else {
+            // Null means the baseline was never read: the file diverged from
+            // anything the tracker knows. Warn and ask the caller to refetch
+            // the baseline instead of writing back an empty file.
+            qWarning("KateAI: undo of %s has no known baseline; requesting refetch.",
+                     qUtf8Printable(decision.path));
+            Q_EMIT statusMessage(i18n("No known pre-edit content for %1; cannot undo safely",
+                                      QFileInfo(decision.path).fileName()),
+                                 true);
         }
     } else {
         // Undoing a rejection has to put the edit back: the file on disk holds
@@ -604,6 +639,10 @@ void EditTracker::undoLast()
 
 void EditTracker::updateUI()
 {
+    // Deferred while a bulk settle runs; the caller rebuilds once at the end.
+    if (m_inBatch) {
+        return;
+    }
     const int pendingCount = pendingEditCount();
 
     if (pendingCount > 0) {
@@ -734,14 +773,12 @@ void EditTracker::appendRow(const Group &group)
 
 void EditTracker::rebuildEditList()
 {
-    // Delete rather than deleteLater(): a turn that lands several edits at once
-    // rebuilt the list once per edit, and the deferred deletions all queued up
-    // behind each other, so ghost rows painted over the real ones until the
-    // event loop finally ran.
+    // Detach rows with deleteLater(): a synchronous delete inside a signal
+    // sender's own slot can free the sender mid-emit.
     QLayoutItem *item = nullptr;
     while ((item = m_editListLayout->takeAt(0)) != nullptr) {
         if (item->widget()) {
-            delete item->widget();
+            item->widget()->deleteLater();
         }
         delete item;
     }
@@ -759,18 +796,25 @@ void EditTracker::rebuildEditList()
 
     // Size the viewport from the rows that actually got built rather than from a
     // guessed row height: a wrong constant either clipped the last row or raised
-    // a scrollbar on a list meant to fit.
-    const int visibleRows = std::min(rows, 6);
-    int contentHeight = 0;
-    for (int i = 0; i < visibleRows; ++i) {
-        if (auto *layoutItem = m_editListLayout->itemAt(i)) {
-            if (QWidget *row = layoutItem->widget()) {
-                contentHeight += row->sizeHint().height();
+    // a scrollbar on a list meant to fit. Deferred: sizeHint() is only valid
+    // after the layout pass, so measure after it, not synchronously here.
+    QTimer::singleShot(0, this, [this, rows]() {
+        if (!m_scrollArea || !m_editListLayout) {
+            return;
+        }
+        m_scrollArea->widget()->adjustSize();
+        const int visibleRows = std::min(rows, 6);
+        int contentHeight = 0;
+        for (int i = 0; i < visibleRows; ++i) {
+            if (auto *layoutItem = m_editListLayout->itemAt(i)) {
+                if (QWidget *row = layoutItem->widget()) {
+                    contentHeight += row->sizeHint().height();
+                }
             }
         }
-    }
-    contentHeight += std::max(0, visibleRows - 1) * m_editListLayout->spacing();
-    m_scrollArea->setFixedHeight(contentHeight > 0 ? contentHeight + 2 : 0);
+        contentHeight += std::max(0, visibleRows - 1) * m_editListLayout->spacing();
+        m_scrollArea->setFixedHeight(contentHeight > 0 ? contentHeight + 2 : 0);
+    });
 }
 
 // The whole question a review answers is "what does this file look like now
@@ -797,7 +841,8 @@ QString EditTracker::previewDiffPath(const QString &path) const
     // share a base name from overwriting each other's preview.
     const QByteArray digest = QCryptographicHash::hash(path.toUtf8(), QCryptographicHash::Sha1).toHex().left(8);
     const QString base = QFileInfo(path).completeBaseName();
-    const QString fileName = u"kateai-%1-%2.diff"_s.arg(base.isEmpty() ? u"diff"_s : base, QString::fromUtf8(digest));
+    const QString fileName = u"kateai-%1-%2.diff"_s.arg(base.isEmpty() ? u"diff"_s : base,
+                                                          QString::fromUtf8(digest));
     const QString temp = QStandardPaths::writableLocation(QStandardPaths::TempLocation);
     return QDir(temp.isEmpty() ? QDir::tempPath() : temp).absoluteFilePath(fileName);
 }
@@ -841,14 +886,28 @@ void EditTracker::previewDiff(const QString &path)
     // Never $HOME root or cwd: a preview containing diff secrets must not land
     // in the workspace where agent tools would trip over it.
 
+    // Clean stale previews from earlier runs (same naming scheme, older than
+    // a day) so random names do not pile up in the temp dir.
+    {
+        const QDir staleDir(QFileInfo(previewPath).absolutePath());
+        const QFileInfoList stale = staleDir.entryInfoList({u"kateai-*.diff"_s}, QDir::Files);
+        const QDateTime cutoff = QDateTime::currentDateTime().addDays(-1);
+        for (const QFileInfo &fi : stale) {
+            if (fi.lastModified() < cutoff && !fi.isSymLink()) {
+                QFile::remove(fi.absoluteFilePath());
+            }
+        }
+    }
+
     for (const QString &directory : directories) {
         if (!QDir().mkpath(directory)) {
             continue;
         }
         const QString candidate = QDir(directory).absoluteFilePath(fileName);
         // Predictable name in a shared temp dir: never follow or overwrite
-        // through a planted symlink, and never leave wider-than-owner perms
-        // between create and chmod.
+        // through a planted symlink (O_NOFOLLOW equivalent: refuse symlinks
+        // outright), and never leave wider-than-owner perms between create
+        // and chmod (NewOnly fails instead of following an existing file).
         QFileInfo existing(candidate);
         if (existing.isSymLink()) {
             QFile::remove(candidate);
@@ -908,7 +967,17 @@ void EditTracker::settle(const QString &path, bool accepted)
     Decision decision;
     decision.kind = accepted ? Decision::Accepted : Decision::Rejected;
     decision.path = path;
-    decision.toolName = group.pending.first().toolName;
+    // Join every contributing tool, not just the first: a group can stack
+    // edits from several tools and the record must name them all.
+    {
+        QStringList tools;
+        for (const EditEntry &entry : group.pending) {
+            if (!entry.toolName.isEmpty() && !tools.contains(entry.toolName)) {
+                tools.append(entry.toolName);
+            }
+        }
+        decision.toolName = tools.join(u", "_s);
+    }
     decision.pending = group.pending;
     decision.createdFile = group.createdFile;
     decision.previousContent = group.lastKnownContent;

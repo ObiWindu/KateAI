@@ -41,6 +41,12 @@ public:
     {
         return m_running;
     }
+    // Whether startAgent ever ran for this card. A card that exists but never
+    // started is waiting on a task id that does not match it.
+    bool wasStarted() const
+    {
+        return m_everStarted;
+    }
 
     // Begins the run. agentName/modeId describe who is being started.
     void startAgent(const QString &agentName, const QString &modeId, const QString &description);
@@ -158,6 +164,10 @@ protected:
     int m_heightBudget = 0;
     // A reflow is already waiting for the next event-loop turn.
     bool m_reflowQueued = false;
+    // Set once startAgent runs. Unlike m_running it stays true after the run,
+    // so a late live signal can tell a card that never started (wrong task id)
+    // from one that already finished.
+    bool m_everStarted = false;
     // Set once the user opens or closes the activity log themselves. From then
     // on the card stops opening and closing it on their behalf.
     bool m_activityUserSet = false;

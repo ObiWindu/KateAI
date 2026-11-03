@@ -438,9 +438,10 @@ private Q_SLOTS:
     void pipelinedPermissionRequestsBothGetAnswered()
     {
         // An agent that asks twice before the first answer arrives must not have
-        // the first question dropped: an unanswered session/request_permission
+        // either question dropped: an unanswered session/request_permission
         // blocks that agent for the rest of the session. The client shows one bar
-        // at a time, so it has to close the earlier question itself.
+        // at a time, so the second queues behind the first and surfaces once the
+        // first resolves; both carry the user's real decision.
         QTemporaryDir workspace;
         QVERIFY(workspace.isValid());
 
@@ -469,10 +470,13 @@ private Q_SLOTS:
         });
 
         client.prompt(u"please write"_s);
-        // Let both questions arrive while nothing is answered, which is the
-        // overlapping case. Then settle whichever one is still on screen.
+        // Let the first question arrive, answer it, and the queued second one
+        // must surface on its own. Then settle that one too.
+        QVERIFY2(waitFor([&] { return asks >= 1; }, 10000),
+                 "the first permission request never reached the client");
+        client.resolvePermission(PermissionDecision::Deny);
         QVERIFY2(waitFor([&] { return asks >= 2; }, 10000),
-                 "the second permission request never reached the client");
+                 "the queued permission request never surfaced");
         client.resolvePermission(PermissionDecision::Deny);
 
         QVERIFY2(waitFor([&] {
@@ -480,9 +484,9 @@ private Q_SLOTS:
         }), qPrintable(error.isEmpty() ? u"timed out"_s : error));
         QVERIFY2(error.isEmpty(), qPrintable(error));
         QCOMPARE(asks, 2);
-        // The earlier question is closed by the client as cancelled; the later
-        // one carries the user's decision.
-        QCOMPARE(text, u"permissions:a=cancelled;b=reject-once"_s);
+        // Both questions carry the user's decision; nothing is cancelled
+        // behind the user's back anymore.
+        QCOMPARE(text, u"permissions:a=reject-once;b=reject-once"_s);
         client.stop();
     }
 

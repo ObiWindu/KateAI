@@ -55,11 +55,10 @@ constexpr int kMaxInputLines = 12;
 // Keeps at most `maxLines` of already-wrapped text, marking that some was
 // dropped.
 //
-// The marker is appended first and the result elided, rather than eliding to a
-// reduced width: eliding to a narrower budget makes the line *more* likely to
-// fit whole, which silently drops the "…" and leaves the user with text that
-// stops mid-word for no visible reason. Appending then eliding to the real width
-// guarantees the marker and still respects the width.
+// The last kept line is elided with room reserved for the marker first, so the
+// "…" always survives: eliding to the full width makes the line *more* likely
+// to fit whole, which silently drops the marker and leaves text that stops
+// mid-word for no visible reason.
 QString clampToLines(const QString &text, int maxLines, const QFontMetrics &fm, int lineWidth)
 {
     const QStringList lines = text.split(u'\n');
@@ -67,44 +66,70 @@ QString clampToLines(const QString &text, int maxLines, const QFontMetrics &fm, 
         return text;
     }
     QStringList kept = lines.mid(0, maxLines);
-    kept.last() = fm.elidedText(kept.last().trimmed() + QStringLiteral(" …"),
-                                Qt::ElideRight,
-                                std::max(24, lineWidth));
+    const QString marker = QStringLiteral(" …");
+    const int markerW = fm.horizontalAdvance(marker);
+    kept.last() = fm.elidedText(kept.last().trimmed(), Qt::ElideRight,
+                                std::max(24, lineWidth - markerW))
+        + marker;
     return kept.join(u'\n');
 }
 
 // Wrap at spaces when possible, otherwise at the character that would overflow.
+// Surrogate pairs are stepped as one unit so an astral character is never
+// split, and the running width is accumulated incrementally instead of
+// re-measuring the whole line per character (O(n) not O(n²)).
 QString wrapToWidth(const QString &text, const QFontMetrics &fm, int firstWidth, int nextWidth)
 {
     QString result;
     QString line;
     int maxW = std::max(8, firstWidth);
+    int lineW = 0;
 
-    for (int i = 0; i < text.size(); ++i) {
-        const QChar ch = text.at(i);
-        if (ch == u'\n') {
-            result += line;
-            result += u'\n';
-            line.clear();
-            maxW = std::max(8, nextWidth);
-            continue;
-        }
-        const QString trial = line + ch;
-        if (fm.horizontalAdvance(trial) <= maxW || line.isEmpty()) {
-            line = trial;
-            continue;
+    auto flushLine = [&]() {
+        result += line;
+        result += u'\n';
+        line.clear();
+        lineW = 0;
+        maxW = std::max(8, nextWidth);
+    };
+    auto pushUnit = [&](const QString &unit, int unitW) {
+        if (lineW + unitW <= maxW || line.isEmpty()) {
+            line += unit;
+            lineW += unitW;
+            return;
         }
         const int sp = line.lastIndexOf(u' ');
         if (sp > 0) {
             result += line.left(sp);
             result += u'\n';
-            line = line.mid(sp + 1) + ch;
+            line = line.mid(sp + 1) + unit;
+            lineW = fm.horizontalAdvance(line);
         } else {
             result += line;
             result += u'\n';
-            line = QString(ch);
+            line = unit;
+            lineW = unitW;
         }
         maxW = std::max(8, nextWidth);
+    };
+
+    for (int i = 0; i < text.size();) {
+        const QChar ch = text.at(i);
+        if (ch == u'\n') {
+            flushLine();
+            ++i;
+            continue;
+        }
+        // Step surrogate pairs together.
+        QString unit;
+        if (ch.isHighSurrogate() && i + 1 < text.size() && text.at(i + 1).isLowSurrogate()) {
+            unit = text.mid(i, 2);
+            i += 2;
+        } else {
+            unit = QString(ch);
+            ++i;
+        }
+        pushUnit(unit, fm.horizontalAdvance(unit));
     }
     result += line;
     return result;
@@ -146,7 +171,7 @@ QString extractUnifiedDiff(const QString &text)
         if (!lines.at(i).startsWith(u"--- "_s)) {
             continue;
         }
-        const qsizetype window = std::min(count, i + 6);
+        const qsizetype window = std::min(count, i + 20);
         for (qsizetype j = i + 1; j < window; ++j) {
             if (lines.at(j).startsWith(u"+++ "_s)) {
                 start = i;
@@ -160,20 +185,49 @@ QString extractUnifiedDiff(const QString &text)
     if (start < 0) {
         return QString();
     }
-    return lines.mid(start).join(u'\n');
+    // Strip trailing prose: the diff ends at the last line that looks like
+    // diff content.
+    qsizetype end = count;
+    auto isDiffLine = [](const QString &line) {
+        return line.isEmpty() || line.startsWith(u"+"_s) || line.startsWith(u"-"_s)
+            || line.startsWith(u"@"_s) || line.startsWith(u" "_s)
+            || line.startsWith(u"\\ "_s) || line.startsWith(u"diff "_s)
+            || line.startsWith(u"Index"_s);
+    };
+    while (end > start + 1 && !isDiffLine(lines.at(end - 1))) {
+        --end;
+    }
+    return lines.mid(start, end - start).join(u'\n');
 }
 
 QString textBeforeDiff(const QString &text)
 {
-    const QString diff = extractUnifiedDiff(text);
-    if (diff.isEmpty()) {
-        return text;
+    // Search for the ^--- header line itself: indexOf(diff) misfires when the
+    // diff body repeats earlier prose.
+    const QStringList lines = text.split(u'\n');
+    qsizetype headerLine = -1;
+    for (qsizetype i = 0; i < lines.size(); ++i) {
+        if (lines.at(i).startsWith(u"--- "_s)) {
+            headerLine = i;
+            break;
+        }
     }
-    const int at = text.indexOf(diff);
-    if (at <= 0) {
-        return QString();
+    if (headerLine < 0) {
+        const QString diff = extractUnifiedDiff(text);
+        if (diff.isEmpty()) {
+            return text;
+        }
+        const int at = text.indexOf(diff);
+        if (at <= 0) {
+            return QString();
+        }
+        return text.left(at).trimmed();
     }
-    return text.left(at).trimmed();
+    QStringList before = lines.mid(0, headerLine);
+    while (!before.isEmpty() && before.last().trimmed().isEmpty()) {
+        before.removeLast();
+    }
+    return before.join(u'\n').trimmed();
 }
 
 } // namespace
@@ -497,10 +551,10 @@ void ToolCallWidget::applyStyle()
             "pre { margin: 0; white-space: pre-wrap; font-family: monospace; font-size: 11px; }")
             .arg(QStringLiteral("#ffffff")));
     // setDefaultStyleSheet() only reaches content parsed after it, so re-parse
-    // the surfaces that already hold a body: syntax spans keep their inline
-    // colours, the body colour updates.
-    if (!m_describeDiff->toPlainText().isEmpty()) {
-        m_describeDiff->setHtml(m_describeDiff->toHtml());
+    // the surfaces that already hold a body. Re-highlight from the stored raw
+    // text rather than round-tripping HTML, which would bake stale colours in.
+    if (!m_rawDiff.isEmpty() && m_describeDiff) {
+        m_describeDiff->setHtml(diffToHtml(m_rawDiff));
         scheduleReflow();
     }
 }
@@ -579,6 +633,23 @@ void ToolCallWidget::setDurationVisible(bool visible)
     if (visible) {
         updateDuration();
     }
+    if (visible && !m_finished) {
+        if (!m_durationTimer) {
+            m_durationTimer = new QTimer(this);
+            m_durationTimer->setInterval(100);
+            connect(m_durationTimer, &QTimer::timeout, this, [this] {
+                if (m_elapsed.elapsed() > 1000) {
+                    m_duration->setVisible(true);
+                }
+                updateDuration();
+            });
+        }
+        if (!m_durationTimer->isActive()) {
+            m_durationTimer->start();
+        }
+    } else if (m_durationTimer) {
+        m_durationTimer->stop();
+    }
 }
 
 void ToolCallWidget::updateDuration()
@@ -611,32 +682,47 @@ void ToolCallWidget::setRunning()
     // A running call is worth timing. The label stays hidden for the first
     // second so instant calls do not flicker a duration into the transcript.
     m_elapsed.start();
-    if (!m_durationTimer) {
-        m_durationTimer = new QTimer(this);
-        m_durationTimer->setInterval(100);
-        connect(m_durationTimer, &QTimer::timeout, this, [this] {
-            if (m_elapsed.elapsed() > 1000) {
-                m_duration->setVisible(true);
-            }
-            updateDuration();
-        });
+    // Only run the timer when durations are actually shown; otherwise it
+    // wakes the card 10x/second for nothing.
+    if (m_durationEnabled) {
+        if (!m_durationTimer) {
+            m_durationTimer = new QTimer(this);
+            m_durationTimer->setInterval(100);
+            connect(m_durationTimer, &QTimer::timeout, this, [this] {
+                if (m_elapsed.elapsed() > 1000) {
+                    m_duration->setVisible(true);
+                }
+                updateDuration();
+            });
+        }
+        m_durationTimer->start();
     }
-    m_durationTimer->start();
     updateStyle();
 }
 
 void ToolCallWidget::setDescribeDiff(const QString &diff)
 {
-    if (diff.trimmed().isEmpty() || !isDiffTool(m_toolName)) {
+    if (diff.trimmed().isEmpty()) {
         return;
     }
+    // Show details for diff tools and for mutating ACP tools, which vary per
+    // agent and are recognised by namespace or edit-like name rather than by
+    // the built-in list. Known read-only tools never carry a diff: a read
+    // showing a diff surface is a miscategorised card.
+    if (!isDiffTool(m_toolName) && !ChatTheme::isEditToolName(m_toolName)
+        && !m_toolName.contains(QChar(u'/'))) {
+        return;
+    }
+    m_rawDiff = diff;
     m_hasDiffPreview = true;
     // Count the hunks so the header can carry a one-glance size. A diff is the
     // single most useful thing to know before deciding whether to expand.
+    // Only "--- "/"+++ " headers (or the bare markers) are metadata: a
+    // content line like "----foo" must still count.
     m_diffAdded = 0;
     m_diffRemoved = 0;
     for (const QString &line : diff.split(u'\n')) {
-        if (line.startsWith(u"+++"_s) || line.startsWith(u"---"_s)) {
+        if (line == u"---"_s || line.startsWith(u"--- "_s) || line == u"+++"_s || line.startsWith(u"+++ "_s)) {
             continue;
         }
         if (line.startsWith(u"+"_s)) {
@@ -712,9 +798,10 @@ void ToolCallWidget::updateCopyButton()
 
 void ToolCallWidget::flashAttention()
 {
-    if (!m_header) {
+    if (!m_header || m_flashActive) {
         return;
     }
+    m_flashActive = true;
     // Keyboard navigation lands on a card that may be far off screen, so the
     // jump needs a marker that survives the scroll. An id-qualified rule beats
     // the card's own, so the ring is visible until the timer drops it.
@@ -722,9 +809,8 @@ void ToolCallWidget::flashAttention()
                              .arg(objectName(), ChatTheme::accent());
     setStyleSheet(styleSheet() + u'\n' + ring);
     QTimer::singleShot(800, this, [this]() {
-        if (this) {
-            updateStyle();
-        }
+        m_flashActive = false;
+        updateStyle();
     });
 }
 
@@ -806,6 +892,9 @@ QString ToolCallWidget::escapeHtml(const QString &s) const
 
 void ToolCallWidget::setPartialOutput(const QString &partialOutput)
 {
+    // Contract: partialOutput is cumulative (the whole stream so far), not a
+    // delta. An empty chunk carries no information, so keep the text already
+    // shown rather than clearing it.
     if (m_finished || partialOutput.isEmpty()) {
         return;
     }
@@ -922,7 +1011,9 @@ void ToolCallWidget::setFinished(const ToolResult &result)
     } else if (m_details && !m_details->toPlainText().isEmpty()) {
         m_details->clear();
     }
-    setExpanded(!shown.trimmed().isEmpty() || m_hasDiffPreview);
+    // A collapse-all override (transcript collapse) wins over the
+    // force-expand: the user asked for everything shut.
+    setExpanded(!m_collapseAll && (!shown.trimmed().isEmpty() || m_hasDiffPreview));
     applyDetailView();
     applyDetailsHeight();
     scheduleReflow();
@@ -1038,7 +1129,7 @@ QString ToolCallWidget::iconForTool(const QString &toolName) const
         || key == u"edit"_s || key == u"str_replace"_s || key == u"apply_patch"_s || key == u"patch"_s
         || key == u"search_replace"_s || key == u"replace"_s) return u"✏"_s;
     if (key == u"delete"_s) return u"✕"_s;
-    if (toolName == u"todowrite"_s || toolName == u"todoread"_s) return u"📋"_s;
+    if (key == u"todowrite"_s || key == u"todoread"_s) return u"📋"_s;
     if (ChatTheme::isEditToolName(toolName)) {
         if (key.contains(u"delete"_s) || key.contains(u"remove"_s)) return u"✕"_s;
         if (key.contains(u"write"_s) && !key.contains(u"edit"_s) && !key.contains(u"replace"_s)
@@ -1047,28 +1138,37 @@ QString ToolCallWidget::iconForTool(const QString &toolName) const
         }
         return u"✏"_s;
     }
-    if (toolName == u"list_dir"_s || toolName == u"list"_s) return u"📁"_s;
-    if (toolName == u"grep"_s || toolName == u"search"_s) return u"🔍"_s;
-    if (toolName == u"glob"_s) return u"🔎"_s;
-    if (toolName == u"bash"_s || toolName == u"execute"_s) return u"⚡"_s;
-        if (toolName == u"web_search"_s || toolName == u"websearch"_s) return u"🌐"_s;
-        if (toolName == u"web_fetch"_s || toolName == u"webfetch"_s) return u"📖"_s;
-    if (toolName == u"query_project_graph"_s) return u"🕸"_s;
-    if (toolName == u"write_plan_file"_s) return u"📋"_s;
-    if (toolName == u"suggest"_s) return u"💡"_s;
-    if (toolName == u"question"_s) return u"❓"_s;
-    if (toolName == u"goal_report"_s) return u"🎯"_s;
-    if (toolName == u"new_task"_s || toolName == u"task"_s) return u"🧩"_s;
-    if (toolName.startsWith(u"mcp__"_s)) return u"🔌"_s;
-    if (toolName.startsWith(u"terminal/"_s) || toolName == u"terminal"_s) return u"🖳"_s;
+    if (key == u"list_dir"_s || key == u"list"_s) return u"📁"_s;
+    if (key == u"grep"_s || key == u"search"_s) return u"🔍"_s;
+    if (key == u"glob"_s) return u"🔎"_s;
+    if (key == u"bash"_s || key == u"execute"_s) return u"⚡"_s;
+    if (key == u"web_search"_s || key == u"websearch"_s) return u"🌐"_s;
+    if (key == u"web_fetch"_s || key == u"webfetch"_s) return u"📖"_s;
+    if (key == u"query_project_graph"_s) return u"🕸"_s;
+    if (key == u"write_plan_file"_s) return u"📋"_s;
+    if (key == u"suggest"_s) return u"💡"_s;
+    if (key == u"question"_s) return u"❓"_s;
+    if (key == u"goal_report"_s) return u"🎯"_s;
+    if (key == u"new_task"_s || key == u"task"_s) return u"🧩"_s;
+    if (key.startsWith(u"mcp__"_s)) return u"🔌"_s;
+    if (key.startsWith(u"terminal/"_s) || key == u"terminal"_s) return u"🖳"_s;
     return u"⚙"_s;
 }
 
 QString ToolCallWidget::languageForTool(const QString &toolName) const
 {
     // If we have a file path, try to determine the language from the extension
+    // or, for extensionless names, the file name itself (Dockerfile, Makefile).
     if (!m_filePath.isEmpty()) {
-        const QString extension = QFileInfo(m_filePath).suffix().toLower();
+        const QFileInfo info(m_filePath);
+        const QString fileName = info.fileName().toLower();
+        if (fileName == u"dockerfile"_s) {
+            return u"Dockerfile"_s;
+        }
+        if (fileName == u"makefile"_s || fileName == u"gnumakefile"_s) {
+            return u"Makefile"_s;
+        }
+        const QString extension = info.suffix().toLower();
         if (!extension.isEmpty()) {
             // Map common extensions to KSyntaxHighlighting language names
             static const QHash<QString, QString> extensionMap = {
@@ -1374,8 +1474,21 @@ void ToolCallWidget::updateTitleText()
         return;
     }
 
-    // Icon 16 + status 20 + expand 20 + 3× spacing 8 + header margins 20.
-    const int chrome = 100;
+    // Icon 16 + status 20 + expand 20 + header margins/spacings: measured
+    // from the widgets actually visible, not a hardcoded 100.
+    int chrome = 20; // header margins
+    chrome += 16 + 8; // icon + spacing
+    chrome += 20 + 8; // status + spacing
+    chrome += 20 + 8; // expand + spacing
+    if (m_copyBtn && m_copyBtn->isVisible()) {
+        chrome += 20 + 8;
+    }
+    if (m_diffStat && m_diffStat->isVisible()) {
+        chrome += m_diffStat->sizeHint().width() + 8;
+    }
+    if (m_duration && m_duration->isVisible()) {
+        chrome += m_duration->sizeHint().width() + 8;
+    }
     const int avail = std::max(48, width() - chrome);
     const QFontMetrics fm(m_title->font());
     // "multi_replace_file_content" is 27 characters of snake_case. The
@@ -1408,7 +1521,24 @@ int ToolCallWidget::detailsFitHeight() const
     if (m_details && !m_details->toPlainText().isEmpty()) {
         h += browserFitHeight(m_details, 16);
     }
-    return h + 8;
+    // Include the layout spacing between the stacked surfaces, not just a
+    // constant: two visible browsers have a gap between them.
+    int gaps = 0;
+    if (m_detailsContainer && m_detailsContainer->layout()) {
+        const int spacing = m_detailsContainer->layout()->spacing();
+        int visible = 0;
+        if (m_viewCaption && m_viewCaption->isVisible()) {
+            ++visible;
+        }
+        if (hasDiffBody()) {
+            ++visible;
+        }
+        if (m_details && !m_details->toPlainText().isEmpty()) {
+            ++visible;
+        }
+        gaps = qMax(0, visible - 1) * spacing;
+    }
+    return h + 8 + gaps;
 }
 
 void ToolCallWidget::reflowDetails()
@@ -1430,11 +1560,25 @@ void ToolCallWidget::reflowDetails()
 
 bool ToolCallWidget::eventFilter(QObject *watched, QEvent *event)
 {
-    if (watched == m_header && event->type() == QEvent::MouseButtonRelease) {
-        auto *me = static_cast<QMouseEvent *>(event);
-        if (me->button() == Qt::LeftButton) {
-            toggleExpand();
-            return true;
+    if (watched == m_header) {
+        if (event->type() == QEvent::MouseButtonPress) {
+            auto *me = static_cast<QMouseEvent *>(event);
+            if (me->button() == Qt::LeftButton) {
+                m_pressPos = me->pos();
+                m_pressValid = true;
+            }
+        } else if (event->type() == QEvent::MouseButtonRelease) {
+            auto *me = static_cast<QMouseEvent *>(event);
+            if (me->button() == Qt::LeftButton) {
+                // Drag-select must not toggle: only a press/release in the
+                // same spot counts as a click.
+                const bool click = !m_pressValid || (me->pos() - m_pressPos).manhattanLength() < 6;
+                m_pressValid = false;
+                if (click) {
+                    toggleExpand();
+                }
+                return true;
+            }
         }
     }
     return QWidget::eventFilter(watched, event);

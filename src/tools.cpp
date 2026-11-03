@@ -7,6 +7,7 @@
 
 #include "mcp.h"
 
+#include <QCoreApplication>
 #include <QDir>
 #include <QDirIterator>
 #include <QFile>
@@ -91,6 +92,21 @@ qsizetype utf8CompletePrefixLength(const QByteArray &data)
     }
     return n;
 }
+
+// Final decode of synchronously captured output: a command killed mid-write
+// can leave a split multibyte sequence at the end, which fromUtf8() would turn
+// into U+FFFD. Decode the longest complete prefix exactly and only the ragged
+// tail with replacement, mirroring the async drain().
+inline QString decodeBashOutput(const QByteArray &data)
+{
+    const qsizetype complete = utf8CompletePrefixLength(data);
+    QStringDecoder decoder(QStringConverter::Utf8);
+    QString out = decoder.decode(QByteArrayView(data.constData(), complete));
+    if (complete < data.size()) {
+        out += QString::fromUtf8(data.sliced(complete));
+    }
+    return out;
+}
 } // namespace
 
 // Unified tool argument parsing - canonicalizes arguments from ToolCall
@@ -111,9 +127,15 @@ QJsonObject parseToolArgs(const ToolCall &call, QString *error)
     // Parse the JSON string and validate it's a proper object
     QJsonParseError parseError;
     const QJsonDocument doc = QJsonDocument::fromJson(call.argumentsJson.toUtf8(), &parseError);
-    if (parseError.error != QJsonParseError::NoError || !doc.isObject()) {
+    if (parseError.error != QJsonParseError::NoError) {
         if (error) {
             *error = u"Invalid tool arguments: %1"_s.arg(parseError.errorString());
+        }
+        return {};
+    }
+    if (!doc.isObject()) {
+        if (error) {
+            *error = u"Invalid tool arguments: arguments must be a JSON object."_s;
         }
         return {};
     }
@@ -175,7 +197,7 @@ static int jsonInt(const QJsonValue &value, int fallback)
 static QString quoteShellArg(const QString &s)
 {
     if (s.isEmpty()) {
-        return {};
+        return u"''"_s;
     }
     static const QRegularExpression safe(u"^[A-Za-z0-9_./:@%+=,-]+$"_s);
     if (safe.match(s).hasMatch()) {
@@ -205,14 +227,19 @@ QString shellCommandFor(const QString &toolName, const QJsonObject &args)
         if (path.isEmpty()) {
             path = args.value(u"uri"_s).toString();
         }
+        if (path.startsWith(u"file://"_s)) {
+            path = path.mid(7);
+        }
         return path;
     };
     if (canonical == u"read_file"_s || key == u"read_file"_s || toolName == u"fs/read_text_file"_s || key == u"read"_s) {
         const QString path = quoteShellArg(argPath());
-        const int offset = args.value(u"offset"_s).toInt(args.value(u"line"_s).toInt(1));
-        const int limit = args.value(u"limit"_s).toInt(0);
+        const int rawOffset = jsonInt(args.value(u"offset"_s), jsonInt(args.value(u"line"_s), 1));
+        const int rawLimit = jsonInt(args.value(u"limit"_s), 0);
+        const int offset = qMax(1, rawOffset);
+        const int limit = qMax(0, rawLimit);
         if (limit > 0) {
-            const int end = offset + limit - 1;
+            const qint64 end = qint64(offset) + qint64(limit) - 1;
             if (!path.isEmpty()) {
                 return u"sed -n '%1,%2p' %3"_s.arg(offset).arg(end).arg(path);
             }
@@ -269,9 +296,13 @@ QString shellCommandFor(const QString &toolName, const QJsonObject &args)
         if (jsonBool(args.value(u"case_insensitive"_s))) {
             cmd += u" -i"_s;
         }
-        const int context = args.value(u"context"_s).toInt(0);
+        const int rawContext = jsonInt(args.value(u"context"_s), 0);
+        const int context = qBound(0, rawContext, 5);
         if (context > 0) {
             cmd += u" -C %1"_s.arg(context);
+        }
+        if (rawContext != context) {
+            cmd += u" [context clamped to %1]"_s.arg(context);
         }
         cmd += u" %1"_s.arg(quoteShellArg(args.value(u"pattern"_s).toString()));
         const QString path = args.value(u"path"_s).toString();
@@ -351,8 +382,16 @@ QString planFilePath(const QString &workspaceRoot)
     // A digest rather than the raw path: the temp name must be stable across
     // runs, must not leak the user's directory layout, and must be a legal
     // filename on every platform. qHash is not stable enough to build on.
-    const QByteArray digest = QCryptographicHash::hash(workspaceRoot.toUtf8(), QCryptographicHash::Sha1).toHex();
-    return QDir::tempPath() + u"/kateai-plan-"_s + QString::fromUtf8(digest.left(12)) + u".md"_s;
+    // The pid suffix keeps concurrent sessions (two Kate instances on the same
+    // project) from overwriting each other's plan; within one process the
+    // name stays stable so repeated writes update the file the user has open.
+    const QString root = workspaceRoot.trimmed();
+    if (root.isEmpty()) {
+        return QDir::tempPath() + u"/kateai-plan-%1.md"_s.arg(QCoreApplication::applicationPid());
+    }
+    const QByteArray digest = QCryptographicHash::hash(root.toUtf8(), QCryptographicHash::Sha256).toHex();
+    return QDir::tempPath() + u"/kateai-plan-%1-%2.md"_s.arg(QString::fromUtf8(digest.left(16)))
+        .arg(QCoreApplication::applicationPid());
 }
 
 static bool isNoisySearchPath(const QString &relativePath)
@@ -453,8 +492,22 @@ QList<DiffOp> computeLineDiff(const QStringList &a, const QStringList &b)
 
 QString unifiedDiff(const QString &path, const QString &before, const QString &after)
 {
-    QStringList oldLines = before.split(u'\n');
-    QStringList newLines = after.split(u'\n');
+    // A single multi-megabyte line (minified output, a data blob) would blow
+    // the observation budget on its own and risk OOM in the diff matrix
+    // below, so overlong lines are truncated before anything else. The 1M
+    // cell guard underneath still covers the many-lines case.
+    constexpr int kMaxDiffLineChars = 2000;
+    auto capLines = [](QStringList lines) {
+        for (QString &line : lines) {
+            if (line.size() > kMaxDiffLineChars) {
+                line = line.left(kMaxDiffLineChars)
+                    + u"... [line truncated, %1 of %2 chars shown]"_s.arg(kMaxDiffLineChars).arg(line.size());
+            }
+        }
+        return lines;
+    };
+    QStringList oldLines = capLines(before.split(u'\n'));
+    QStringList newLines = capLines(after.split(u'\n'));
     // Text that ends with a newline splits into one extra empty element: that
     // element is the line terminator, not a line. Keeping it inflates every
     // count by one and appends an empty context line to each hunk.
@@ -570,14 +623,39 @@ PermissionRequest ToolRunner::describe(const ToolCall &call) const
 {
     QString parseError;
     const QJsonObject args = parseToolArgs(call, &parseError);
+    const QString canonical = canonicalToolName(call.name);
     PermissionRequest req;
     req.toolName = call.name;
     req.toolCallId = call.id;
-    req.path = args.value(u"path"_s).toString();
+    // File-argument aliases, mirroring shellCommandFor(): the model may send
+    // path, file_path, filePath, file, uri, or TargetFile.
+    auto fileArg = [&args]() -> QString {
+        QString path = args.value(u"path"_s).toString();
+        if (path.isEmpty()) {
+            path = args.value(u"file_path"_s).toString();
+        }
+        if (path.isEmpty()) {
+            path = args.value(u"filePath"_s).toString();
+        }
+        if (path.isEmpty()) {
+            path = args.value(u"file"_s).toString();
+        }
+        if (path.isEmpty()) {
+            path = args.value(u"uri"_s).toString();
+        }
+        if (path.isEmpty()) {
+            path = args.value(u"TargetFile"_s).toString();
+        }
+        if (path.startsWith(u"file://"_s)) {
+            path = path.mid(7);
+        }
+        return path;
+    };
+    req.path = fileArg();
 
     req.summary = shellCommandFor(call.name, args);
 
-    if (call.name == u"write_file"_s) {
+    if (canonical == u"write_file"_s) {
         req.risk = ToolRisk::Write;
         req.mutatesFiles = true;
         QString existing;
@@ -596,29 +674,53 @@ PermissionRequest ToolRunner::describe(const ToolCall &call) const
         }
         req.describeDiff = unifiedDiff(req.path, existing, args.value(u"content"_s).toString());
         req.details = req.describeDiff;
-    } else if (call.name == u"edit_file"_s) {
+    } else if (canonical == u"edit_file"_s) {
         req.risk = ToolRisk::Write;
         req.mutatesFiles = true;
         {
             QString error;
             req.resolvedPath = m_sandbox.resolve(req.path, &error, true);
         }
+        // Preview the real replacement, not old vs new in isolation: read the
+        // file (when readable) and verify old_string is present and unique so
+        // the approval card shows what run() will actually do or refuse.
         const QString oldString = args.value(u"old_string"_s).toString();
         const QString newString = args.value(u"new_string"_s).toString();
-        req.describeDiff = unifiedDiff(req.path, oldString, newString);
-        req.details = u"Replace:\n%1\n\nWith:\n%2"_s.arg(oldString, newString);
-    } else if (call.name == u"multi_edit_file"_s || call.name == u"multi_replace_file_content"_s) {
+        QString existing;
+        QString previewNote;
+        if (!req.resolvedPath.isEmpty() && m_bridge && m_sandbox.allowsRead(req.resolvedPath, nullptr)) {
+            m_bridge->readDocument(req.resolvedPath, &existing);
+            if (oldString.isEmpty()) {
+                previewNote = u"(old_string is empty: the edit would be refused)"_s;
+            } else {
+                const int count = existing.count(oldString);
+                if (count == 0) {
+                    previewNote = u"(old_string was not found in the file: the edit would be refused)"_s;
+                } else if (count > 1 && !jsonBool(args.value(u"replace_all"_s))) {
+                    previewNote = u"(old_string matched %1 times: the edit would be refused without replace_all=true)"_s.arg(count);
+                }
+            }
+        }
+        QString simulated = existing;
+        if (!oldString.isEmpty() && !existing.isEmpty() && existing.contains(oldString)) {
+            simulated.replace(oldString, newString);
+        }
+        req.describeDiff = unifiedDiff(req.path, existing, simulated);
+        req.details = previewNote.isEmpty()
+            ? u"Replace:\n%1\n\nWith:\n%2"_s.arg(oldString, newString)
+            : u"Replace:\n%1\n\nWith:\n%2\n\n%3"_s.arg(oldString, newString, previewNote);
+    } else if (canonical == u"multi_edit_file"_s) {
         req.risk = ToolRisk::Write;
         req.mutatesFiles = true;
-        if (req.path.isEmpty()) {
-            req.path = args.value(u"TargetFile"_s).toString();
-        }
         QString existing;
         QString error;
         const QString resolved = m_sandbox.resolve(req.path, &error, true);
         req.resolvedPath = resolved;
-        if (!resolved.isEmpty() && m_bridge) {
+        QString previewNote;
+        if (!resolved.isEmpty() && m_bridge && m_sandbox.allowsRead(resolved, nullptr)) {
             m_bridge->readDocument(resolved, &existing);
+        } else if (!resolved.isEmpty()) {
+            previewNote = u"(preview unavailable: read blocked by sandbox)"_s;
         }
         QJsonArray edits = args.value(u"edits"_s).toArray();
         if (edits.isEmpty()) {
@@ -628,29 +730,57 @@ PermissionRequest ToolRunner::describe(const ToolCall &call) const
             edits = args.value(u"ReplacementChunks"_s).toArray();
         }
         QString simulated = existing;
-        for (const QJsonValue &val : edits) {
-            const QJsonObject chunk = val.toObject();
-            const QString oldStr = chunk.value(u"old_string"_s).toString().isEmpty()
-                ? (chunk.value(u"TargetContent"_s).toString().isEmpty() ? chunk.value(u"targetContent"_s).toString() : chunk.value(u"TargetContent"_s).toString())
-                : chunk.value(u"old_string"_s).toString();
-            const QString newStr = chunk.value(u"new_string"_s).toString().isEmpty()
-                ? (chunk.value(u"ReplacementContent"_s).toString().isEmpty() ? chunk.value(u"replacementContent"_s).toString() : chunk.value(u"ReplacementContent"_s).toString())
-                : chunk.value(u"new_string"_s).toString();
-            if (!oldStr.isEmpty()) {
-                simulated.replace(oldStr, newStr);
+        if (previewNote.isEmpty() && !existing.isEmpty()) {
+            // Mirror run()'s validation so the card reports a batch that
+            // would be refused instead of previewing a silent no-op.
+            QString working = existing;
+            for (int i = 0; i < edits.size(); ++i) {
+                const QJsonObject chunk = edits.at(i).toObject();
+                const QString oldStr = chunk.value(u"old_string"_s).toString().isEmpty()
+                    ? (chunk.value(u"TargetContent"_s).toString().isEmpty() ? chunk.value(u"targetContent"_s).toString() : chunk.value(u"TargetContent"_s).toString())
+                    : chunk.value(u"old_string"_s).toString();
+                const QString newStr = chunk.value(u"new_string"_s).toString().isEmpty()
+                    ? (chunk.value(u"ReplacementContent"_s).toString().isEmpty() ? chunk.value(u"replacementContent"_s).toString() : chunk.value(u"ReplacementContent"_s).toString())
+                    : chunk.value(u"new_string"_s).toString();
+                const bool replaceAll = chunk.contains(u"replace_all"_s)
+                    ? jsonBool(chunk.value(u"replace_all"_s))
+                    : (chunk.contains(u"AllowMultiple"_s) ? jsonBool(chunk.value(u"AllowMultiple"_s))
+                                                          : jsonBool(chunk.value(u"allowMultiple"_s)));
+                if (oldStr.isEmpty()) {
+                    previewNote = u"(chunk %1: old_string is empty, the batch would be refused)"_s.arg(i + 1);
+                    break;
+                }
+                const int count = working.count(oldStr);
+                if (count == 0) {
+                    previewNote = u"(chunk %1: old_string was not found, the batch would be refused)"_s.arg(i + 1);
+                    break;
+                }
+                if (count > 1 && !replaceAll) {
+                    previewNote = u"(chunk %1: old_string matched %2 times, the batch would be refused without replace_all=true)"_s
+                                      .arg(i + 1).arg(count);
+                    break;
+                }
+                if (working.indexOf(oldStr) >= 0 && simulated.indexOf(oldStr) < 0 && i > 0) {
+                    previewNote = u"(chunk %1: old_string overlaps text an earlier edit changed, the batch would be refused)"_s.arg(i + 1);
+                    break;
+                }
+                working.replace(oldStr, newStr);
+            }
+            if (previewNote.isEmpty()) {
+                simulated = working;
             }
         }
         req.describeDiff = unifiedDiff(req.path, existing, simulated);
-        req.details = req.describeDiff;
-    } else if (call.name == u"bash"_s) {
+        req.details = previewNote.isEmpty() ? req.describeDiff : req.describeDiff + u'\n' + previewNote;
+    } else if (canonical == u"bash"_s) {
         req.risk = ToolRisk::Execute;
         req.details = args.value(u"command"_s).toString();
-    } else if (call.name == u"write_plan_file"_s) {
+    } else if (canonical == u"write_plan_file"_s) {
         // Read risk on purpose: the plan file is a Kate-chosen temp file, not a
         // workspace mutation, so it never prompts and never enters the tracker.
         req.risk = ToolRisk::Read;
         req.details = args.value(u"content"_s).toString();
-    } else if (call.name == u"question"_s) {
+    } else if (canonical == u"question"_s) {
         // Read risk for the same reason: asking the user something neither
         // reads the workspace nor changes it.
         req.risk = ToolRisk::Read;
@@ -674,9 +804,12 @@ PermissionRequest ToolRunner::describe(const ToolCall &call) const
         // Unknown tools reach the permission card from here. A delegation or
         // an MCP call can run code, so they must not be presented with the
         // read-risk styling that auto-approval affordances key off.
-        req.risk = (call.name == u"new_task"_s || isMcpToolName(call.name)) ? ToolRisk::Execute : ToolRisk::Read;
+        req.risk = (canonical == u"new_task"_s || isMcpToolName(call.name)) ? ToolRisk::Execute : ToolRisk::Read;
         req.details = QString::fromUtf8(QJsonDocument(args).toJson(QJsonDocument::Compact));
     }
+    // Details feed the approval card and the history: cap them so an unbounded
+    // argument (a whole plan, a huge pasted file) cannot flood either.
+    req.details = clip(req.details);
     return req;
 }
 
@@ -693,31 +826,37 @@ ToolResult ToolRunner::run(const ToolCall &call)
         return result;
     }
 
-    if (call.name == u"read_file"_s) {
+    // Aliases (fs/read_text_file, terminal/exec, edit, agent/new_task, ...)
+    // resolve here so every entry point runs the same tool.
+    const QString canonical = canonicalToolName(call.name);
+    if (canonical == u"read_file"_s) {
         return readFile(args);
     }
-    if (call.name == u"write_file"_s) {
+    if (canonical == u"write_file"_s) {
+        if (call.name.trimmed().compare(u"fs/append_file"_s, Qt::CaseInsensitive) == 0) {
+            return appendFile(args);
+        }
         return writeFile(args);
     }
-    if (call.name == u"edit_file"_s) {
+    if (canonical == u"edit_file"_s) {
         return editFile(args);
     }
-    if (call.name == u"multi_edit_file"_s || call.name == u"multi_replace_file_content"_s) {
+    if (canonical == u"multi_edit_file"_s) {
         return multiEditFile(args);
     }
-    if (call.name == u"list_dir"_s) {
+    if (canonical == u"list_dir"_s) {
         return listDir(args);
     }
-    if (call.name == u"grep"_s) {
+    if (canonical == u"grep"_s) {
         return grep(args);
     }
-    if (call.name == u"glob"_s) {
+    if (canonical == u"glob"_s) {
         return glob(args);
     }
-    if (call.name == u"bash"_s) {
+    if (canonical == u"bash"_s) {
         return bash(args);
     }
-    if (call.name == u"query_project_graph"_s) {
+    if (canonical == u"query_project_graph"_s) {
         return queryProjectGraph(args);
     }
     if (call.name == u"goal_report"_s) {
@@ -747,7 +886,12 @@ ToolResult ToolRunner::readFile(const QJsonObject &args) const
     // Extract the file path from the tool arguments
     QString error;
     const QString path = args.value(u"path"_s).toString();
-    
+    if (path.trimmed().isEmpty()) {
+        result.ok = false;
+        result.output = u"path is required."_s;
+        return result;
+    }
+
     // Check if the sandbox allows reading from this path
     if (!m_sandbox.allowsRead(path, &error)) {
         result.ok = false;
@@ -804,7 +948,7 @@ ToolResult ToolRunner::readFile(const QJsonObject &args) const
     if (!m_bridge || !m_bridge->readDocumentLines(readPath, start + 1, cappedLimit > 0 ? cappedLimit : kMaxReadLines,
                                                   &slice, &totalLines)) {
         result.ok = false;
-        result.output = u"Failed to read %1"_s.arg(readPath);
+        result.output = u"Failed to read %1"_s.arg(path);
         return result;
     }
     if (totalLines == 0) {
@@ -858,14 +1002,19 @@ ToolResult ToolRunner::writeFile(const QJsonObject &args)
     // Extract the file path and content from the tool arguments
     QString error;
     const QString path = args.value(u"path"_s).toString();
-    
+    if (path.trimmed().isEmpty()) {
+        result.ok = false;
+        result.output = u"path is required."_s;
+        return result;
+    }
+
     // Check if the sandbox allows writing to this path
     if (!m_sandbox.allowsWrite(path, &error)) {
         result.ok = false;
         result.output = error;
         return result;
     }
-    
+
     // Resolve the path relative to the sandbox workspace with write permissions
     const QString resolved = m_sandbox.resolve(path, &error, true);
     if (resolved.isEmpty()) {
@@ -873,19 +1022,90 @@ ToolResult ToolRunner::writeFile(const QJsonObject &args)
         result.output = error;
         return result;
     }
-    
-    // Get the content to write from the tool arguments
-    const QString content = args.value(u"content"_s).toString();
-    
+
+    // Get the content to write from the tool arguments. A missing or
+    // non-string content must be a type error, not a silent empty write:
+    // toString() on a number would otherwise write something never asked for.
+    const QJsonValue contentValue = args.value(u"content"_s);
+    if (contentValue.isUndefined() || contentValue.isNull()) {
+        result.ok = false;
+        result.output = u"content is required."_s;
+        return result;
+    }
+    if (!contentValue.isString()) {
+        result.ok = false;
+        result.output = u"content must be a string."_s;
+        return result;
+    }
+    const QString content = contentValue.toString();
+
     // Write the content to the file through the document bridge
     if (!m_bridge || !m_bridge->writeDocument(resolved, content, &error)) {
         result.ok = false;
         result.output = error.isEmpty() ? u"Write failed."_s : error;
         return result;
     }
-    
+
     // Report successful write with file path and byte count
-    result.output = u"Wrote %1 (%2 bytes)"_s.arg(resolved).arg(content.toUtf8().size());
+    result.output = u"Wrote %1 (%2 bytes)"_s.arg(path).arg(content.toUtf8().size());
+    return result;
+}
+
+ToolResult ToolRunner::appendFile(const QJsonObject &args)
+{
+    ToolResult result;
+    result.name = u"write_file"_s;
+
+    QString error;
+    const QString path = args.value(u"path"_s).toString();
+    if (path.trimmed().isEmpty()) {
+        result.ok = false;
+        result.output = u"path is required."_s;
+        return result;
+    }
+    const QJsonValue contentValue = args.value(u"content"_s);
+    if (contentValue.isUndefined() || contentValue.isNull()) {
+        result.ok = false;
+        result.output = u"content is required."_s;
+        return result;
+    }
+    if (!contentValue.isString()) {
+        result.ok = false;
+        result.output = u"content must be a string."_s;
+        return result;
+    }
+    if (!m_sandbox.allowsWrite(path, &error)) {
+        result.ok = false;
+        result.output = error;
+        return result;
+    }
+    const QString resolved = m_sandbox.resolve(path, &error, true);
+    if (resolved.isEmpty()) {
+        result.ok = false;
+        result.output = error;
+        return result;
+    }
+    const QString content = contentValue.toString();
+    // Append, not overwrite: keep what is there and add the new content.
+    QString existing;
+    if (m_bridge && m_bridge->readDocument(resolved, &existing) && !existing.isEmpty()) {
+        const QString joined = (existing.endsWith(u'\n') || content.startsWith(u'\n') || content.isEmpty())
+            ? QString(existing + content)
+            : QString(existing + u'\n' + content);
+        if (!m_bridge->writeDocument(resolved, joined, &error)) {
+            result.ok = false;
+            result.output = error.isEmpty() ? u"Write failed."_s : error;
+            return result;
+        }
+        result.output = u"Appended to %1 (%2 bytes)"_s.arg(path).arg(content.toUtf8().size());
+        return result;
+    }
+    if (!m_bridge || !m_bridge->writeDocument(resolved, content, &error)) {
+        result.ok = false;
+        result.output = error.isEmpty() ? u"Write failed."_s : error;
+        return result;
+    }
+    result.output = u"Appended to %1 (%2 bytes)"_s.arg(path).arg(content.toUtf8().size());
     return result;
 }
 
@@ -894,18 +1114,23 @@ ToolResult ToolRunner::editFile(const QJsonObject &args)
     // Initialize the result structure to track success/failure
     ToolResult result;
     result.name = u"edit_file"_s;
-    
+
     // Extract the file path from the tool arguments
     QString error;
     const QString path = args.value(u"path"_s).toString();
-    
+    if (path.trimmed().isEmpty()) {
+        result.ok = false;
+        result.output = u"path is required."_s;
+        return result;
+    }
+
     // Check if the sandbox allows writing to this path
     if (!m_sandbox.allowsWrite(path, &error)) {
         result.ok = false;
         result.output = error;
         return result;
     }
-    
+
     // Resolve the path relative to the sandbox workspace with write permissions
     const QString resolved = m_sandbox.resolve(path, &error, true);
     if (resolved.isEmpty()) {
@@ -918,12 +1143,27 @@ ToolResult ToolRunner::editFile(const QJsonObject &args)
     QString contents;
     if (!m_bridge || !m_bridge->readDocument(resolved, &contents)) {
         result.ok = false;
-        result.output = u"Failed to read %1"_s.arg(resolved);
+        result.output = u"Failed to read %1"_s.arg(path);
+        return result;
+    }
+    // The on-disk file may have grown between the stat and the read; refuse
+    // to load a pathological document into memory.
+    constexpr int kMaxEditFileChars = 4 * 1024 * 1024;
+    if (contents.size() > kMaxEditFileChars) {
+        result.ok = false;
+        result.output = u"%1 is too large to edit (%2 characters)."_s.arg(path).arg(contents.size());
         return result;
     }
 
-    const QString oldString = args.value(u"old_string"_s).toString();
-    const QString newString = args.value(u"new_string"_s).toString();
+    const QJsonValue oldValue = args.value(u"old_string"_s);
+    const QJsonValue newValue = args.value(u"new_string"_s);
+    if (!oldValue.isString() || !newValue.isString()) {
+        result.ok = false;
+        result.output = u"old_string and new_string must be strings."_s;
+        return result;
+    }
+    const QString oldString = oldValue.toString();
+    const QString newString = newValue.toString();
     const bool replaceAll = jsonBool(args.value(u"replace_all"_s));
 
     if (oldString.isEmpty()) {
@@ -949,7 +1189,7 @@ ToolResult ToolRunner::editFile(const QJsonObject &args)
                 hint = u" Nearby lines:\n"_s + nearby.join(u'\n');
             }
         }
-        result.output = u"old_string was not found in %1. Read the file and copy the exact text, including whitespace."_s.arg(resolved) + hint;
+        result.output = u"old_string was not found in %1. Read the file and copy the exact text, including whitespace."_s.arg(path) + hint;
         return result;
     }
     if (count > 1 && !replaceAll) {
@@ -967,8 +1207,8 @@ ToolResult ToolRunner::editFile(const QJsonObject &args)
     }
 
     result.output = replaceAll && count > 1
-        ? u"Updated %1 (%2 replacements)"_s.arg(resolved).arg(count)
-        : u"Updated %1"_s.arg(resolved);
+        ? u"Updated %1 (%2 replacements)"_s.arg(path).arg(count)
+        : u"Updated %1"_s.arg(path);
     return result;
 }
 
@@ -1019,7 +1259,15 @@ ToolResult ToolRunner::multiEditFile(const QJsonObject &args)
     QString contents;
     if (!m_bridge || !m_bridge->readDocument(resolved, &contents)) {
         result.ok = false;
-        result.output = u"Failed to read %1"_s.arg(resolved);
+        result.output = u"Failed to read %1"_s.arg(path);
+        return result;
+    }
+    // The on-disk file may have grown between the stat and the read; refuse
+    // to load a pathological document into memory.
+    constexpr int kMaxEditFileChars = 4 * 1024 * 1024;
+    if (contents.size() > kMaxEditFileChars) {
+        result.ok = false;
+        result.output = u"%1 is too large to edit (%2 characters)."_s.arg(path).arg(contents.size());
         return result;
     }
 
@@ -1079,7 +1327,7 @@ ToolResult ToolRunner::multiEditFile(const QJsonObject &args)
                 }
             }
             result.output = u"Chunk %1 of %2: old_string was not found in %3. No edits were applied. Read the file again and copy the exact text including whitespace."_s
-                .arg(i + 1).arg(numChunks).arg(resolved) + hint;
+                .arg(i + 1).arg(numChunks).arg(path) + hint;
             return result;
         }
 
@@ -1192,7 +1440,7 @@ ToolResult ToolRunner::multiEditFile(const QJsonObject &args)
     }
 
     result.output = u"Updated %1 (%2 edit chunks applied, %3 total replacements)"_s
-        .arg(resolved).arg(numChunks).arg(totalReplacements);
+        .arg(path).arg(numChunks).arg(totalReplacements);
     return result;
 }
 
@@ -1228,7 +1476,7 @@ ToolResult ToolRunner::listDir(const QJsonObject &args) const
     QDir dir(resolved);
     if (!dir.exists()) {
         result.ok = false;
-        result.output = u"Directory does not exist: %1"_s.arg(resolved);
+        result.output = u"Directory does not exist: %1"_s.arg(targetPath);
         return result;
     }
     
@@ -1236,7 +1484,6 @@ ToolResult ToolRunner::listDir(const QJsonObject &args) const
     constexpr int kMaxDirectoryOutputChars = 80000;
     QVector<QPair<QString, QString>> visibleEntries;
     QDirIterator iterator(resolved, QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden);
-    bool truncated = false;
     int skippedDenied = 0;
     while (iterator.hasNext()) {
         iterator.next();
@@ -1245,15 +1492,18 @@ ToolResult ToolRunner::listDir(const QJsonObject &args) const
             ++skippedDenied;
             continue;
         }
-        if (visibleEntries.size() >= kMaxDirectoryEntries) {
-            truncated = true;
-            break;
-        }
         visibleEntries.append({info.fileName(), (info.isDir() ? u"dir  "_s : u"file "_s) + info.fileName()});
     }
+    // Sort the full set before capping: capping during iteration kept an
+    // arbitrary prefix and dropped whatever sorted after it.
     std::sort(visibleEntries.begin(), visibleEntries.end(), [](const auto &left, const auto &right) {
         return left.first < right.first;
     });
+    bool truncated = false;
+    if (visibleEntries.size() > kMaxDirectoryEntries) {
+        visibleEntries.resize(kMaxDirectoryEntries);
+        truncated = true;
+    }
     QStringList lines;
     int outputChars = 0;
     for (const auto &entry : visibleEntries) {
@@ -1285,7 +1535,9 @@ ToolResult ToolRunner::grep(const QJsonObject &args) const
     const QString pattern = args.value(u"pattern"_s).toString();
     const QString globFilter = args.value(u"glob"_s).toString();
     const bool caseInsensitive = jsonBool(args.value(u"case_insensitive"_s));
-    const int context = qBound(0, args.value(u"context"_s).toInt(0), 5);
+    const int rawContext = jsonInt(args.value(u"context"_s), 0);
+    const int context = qBound(0, rawContext, 5);
+    const bool contextClamped = (rawContext != context);
 
     QString error;
     const QString path = args.value(u"path"_s).toString();
@@ -1325,9 +1577,14 @@ ToolResult ToolRunner::grep(const QJsonObject &args) const
     QStringList hits;
     int skippedFiles = 0;
     int scannedLines = 0;
+    constexpr int kMaxHits = 200;
     constexpr int kMaxScannedLines = 200000;
     bool scanCapped = false;
+    bool hitsCapped = false;
     auto searchFile = [&](const QString &filePath) {
+        if (hitsCapped || scanCapped) {
+            return;
+        }
         if (m_sandbox.isDenied(filePath) || !m_sandbox.allowsRead(filePath, nullptr)) {
             return;
         }
@@ -1336,7 +1593,7 @@ ToolResult ToolRunner::grep(const QJsonObject &args) const
             return;
         }
         if (!globFilter.isEmpty() && !QDir::match(globFilter, QFileInfo(filePath).fileName())
-            && !Sandbox::globMatch(globFilter, filePath) && !Sandbox::globMatch(globFilter, rel)) {
+            && !m_sandbox.globMatchCached(globFilter, filePath) && !m_sandbox.globMatchCached(globFilter, rel)) {
             return;
         }
 
@@ -1351,6 +1608,13 @@ ToolResult ToolRunner::grep(const QJsonObject &args) const
 
         QString contents;
         if (!m_bridge || !m_bridge->readDocument(filePath, &contents)) {
+            return;
+        }
+        // The stat above races the read: a file that grew past the ceiling in
+        // between still arrives whole, so re-check the loaded size.
+        constexpr int kMaxSearchChars = 4 * 1024 * 1024;
+        if (contents.size() > kMaxSearchChars) {
+            ++skippedFiles;
             return;
         }
 
@@ -1389,7 +1653,8 @@ ToolResult ToolRunner::grep(const QJsonObject &args) const
                 }
                 lastMatchEnd = to;
             }
-            if (hits.size() >= 200) {
+            if (hits.size() >= kMaxHits) {
+                hitsCapped = true;
                 return;
             }
         }
@@ -1400,14 +1665,23 @@ ToolResult ToolRunner::grep(const QJsonObject &args) const
     if (info.isFile()) {
         searchFile(resolved);
     } else {
-        QDirIterator it(resolved, QDir::Files, QDirIterator::Subdirectories);
-        while (it.hasNext() && hits.size() < 200 && !scanCapped) {
+        QDirIterator it(resolved, QDir::Files | QDir::Hidden, QDirIterator::Subdirectories);
+        while (it.hasNext() && hits.size() < kMaxHits && !scanCapped) {
             searchFile(it.next());
+        }
+        if (hits.size() >= kMaxHits) {
+            hitsCapped = true;
         }
     }
 
     // Format the search results
     result.output = hits.isEmpty() ? u"No matches."_s : clip(hits.join(u'\n'));
+    if (contextClamped) {
+        result.output += u"\n[context clamped to 5; narrow the path to see more surrounding lines.]"_s;
+    }
+    if (hitsCapped) {
+        result.output += u"\n[Listing truncated at 200 matches; narrow the path or pattern to see more.]"_s;
+    }
     if (scanCapped) {
         result.output += u"\n[Search stopped after 200000 scanned lines; narrow the path or pattern.]"_s;
     }
@@ -1452,7 +1726,7 @@ ToolResult ToolRunner::glob(const QJsonObject &args) const
         QDir baseDir(resolved);
         if (!baseDir.exists()) {
             result.ok = false;
-            result.output = u"Directory does not exist: %1"_s.arg(resolved);
+            result.output = u"Directory does not exist: %1"_s.arg(dirArg);
             return result;
         }
         base = resolved;
@@ -1462,7 +1736,7 @@ ToolResult ToolRunner::glob(const QJsonObject &args) const
     QStringList matches;
     bool capped = false;
     int skippedDenied = 0;
-    QDirIterator it(base, QDir::Files, QDirIterator::Subdirectories);
+    QDirIterator it(base, QDir::Files | QDir::Hidden, QDirIterator::Subdirectories);
     while (it.hasNext()) {
         if (matches.size() >= 400) {
             capped = true;
@@ -1482,7 +1756,7 @@ ToolResult ToolRunner::glob(const QJsonObject &args) const
             continue;
         }
 
-        if (Sandbox::globMatch(pattern, rel) || QDir::match(pattern, rel) || QDir::match(pattern, QFileInfo(rel).fileName())) {
+        if (m_sandbox.globMatchCached(pattern, rel) || QDir::match(pattern, rel) || QDir::match(pattern, QFileInfo(rel).fileName())) {
             matches.append(rel);
         }
     }
@@ -1545,6 +1819,10 @@ ToolResult ToolRunner::bash(const QJsonObject &args)
         return failed;
     }
 
+    // Same floor as the async path: a stray zero must not turn the deadline
+    // into an immediate kill.
+    const int timeoutMs = qMax(1000, m_timeoutMs);
+
     QProcess process;
     process.setWorkingDirectory(m_sandbox.workspaceRoot());
     process.setProcessChannelMode(QProcess::MergedChannels);
@@ -1594,21 +1872,21 @@ ToolResult ToolRunner::bash(const QJsonObject &args)
         if (process.state() == QProcess::NotRunning) {
             break;
         }
-        if (elapsed.elapsed() >= m_timeoutMs) {
+        if (elapsed.elapsed() >= timeoutMs) {
             timedOut = true;
             break;
         }
     }
     if (outputCapped) {
 #ifdef Q_OS_UNIX
-        if (process.processId() > 0) {
+        if (process.state() != QProcess::NotRunning && process.processId() > 0) {
             ::kill(-static_cast<pid_t>(process.processId()), SIGKILL);
         }
 #endif
         process.kill();
         process.waitForFinished(2000);
         // Keep head+tail like clip(): tail holds the failure summary.
-        const QString full = QString::fromUtf8(output.left(kMaxSyncBashBytes));
+        const QString full = decodeBashOutput(output.left(kMaxSyncBashBytes));
         ToolResult capped = finishBashOutput(full, -1, false);
         capped.ok = false;
         capped.output = u"Output exceeded %1 MB and the command was killed.\n"_s.arg(
@@ -1623,8 +1901,9 @@ ToolResult ToolRunner::bash(const QJsonObject &args)
 #ifdef Q_OS_UNIX
         // The child leads its own session, so the negative pid reaches the whole
         // tree. If setsid() failed there is no such group and this is a no-op,
-        // leaving the plain kill() below to reap the shell itself.
-        if (process.processId() > 0) {
+        // leaving the plain kill() below to reap the shell itself. The liveness
+        // check keeps a reaped pid from signalling an unrelated process.
+        if (process.state() != QProcess::NotRunning && process.processId() > 0) {
             ::kill(-static_cast<pid_t>(process.processId()), SIGKILL);
         }
 #endif
@@ -1633,11 +1912,11 @@ ToolResult ToolRunner::bash(const QJsonObject &args)
         ToolResult failed;
         failed.name = u"bash"_s;
         failed.ok = false;
-        failed.output = u"Command timed out after %1 ms."_s.arg(m_timeoutMs);
+        failed.output = u"Command timed out after %1 ms."_s.arg(timeoutMs);
         return failed;
     }
 
-    return finishBashOutput(QString::fromUtf8(output), process.exitCode(),
+    return finishBashOutput(decodeBashOutput(output), process.exitCode(),
                             process.exitStatus() == QProcess::NormalExit);
 }
 
@@ -1649,7 +1928,13 @@ void ToolRunner::BashBuffer::append(const QString &chunk, int cap)
     // Room for the dropped-output marker is reserved in the halves, so the
     // assembled view fits the ceiling: clip() would otherwise cut the middle
     // of the view and take the marker (and the tail's first lines) with it.
-    const int half = cap / 2 - 64;
+    const int half = qMax(0, cap / 2 - 64);
+    if (half == 0) {
+        droppedChars += chunk.size();
+        return;
+    }
+    // Invariant: each half never exceeds the cap-derived budget.
+    Q_ASSERT(head.size() <= half && tail.size() <= half);
     if (head.size() < half) {
         const int room = half - head.size();
         head += chunk.left(room);
@@ -1805,13 +2090,17 @@ void ToolRunner::runBashAsync(const ToolCall &call)
     connect(process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this, [this, callId, drain, timeout, timeoutMs](int, QProcess::ExitStatus) {
         // The command ended on its own: stop the timeout timer, or a process
         // that finished right at the deadline is reported as timed out.
-        timeout->stop();
+        if (timeout) {
+            timeout->stop();
+        }
+        // Drain before take(): drain() finds the process through the map, so
+        // taking first would make the final chunk vanish.
+        QString soFar = drain();
         auto *process = m_bashProcesses.take(callId);
         if (!process) {
             return;
         }
         const bool timedOut = m_bashTimedOut.remove(callId);
-        QString soFar = drain();
         // At end of stream an incomplete tail is genuinely truncated output,
         // not a character split across chunks: decode it with replacement
         // instead of dropping up to 3 bytes silently.
@@ -1951,18 +2240,37 @@ ToolResult ToolRunner::queryProjectGraph(const QJsonObject &args) const
             return result;
         }
         lines.append(formatNode(node));
+        constexpr int kMaxDepLines = 150;
         if (type == u"dependencies"_s) {
+            int shown = 0;
             for (const QString &dep : node->dependencies) {
+                if (shown >= kMaxDepLines) {
+                    lines.append(u"... truncated"_s);
+                    break;
+                }
                 lines.append(u"depends on: %1"_s.arg(dep));
+                ++shown;
             }
         } else if (type == u"dependents"_s) {
+            int shown = 0;
             for (const QString &dep : node->dependents) {
+                if (shown >= kMaxDepLines) {
+                    lines.append(u"... truncated"_s);
+                    break;
+                }
                 lines.append(u"used by: %1"_s.arg(dep));
+                ++shown;
             }
         } else {
+            int shown = 0;
             for (GraphNode *related : m_projectGraph->findRelatedNodes(node->id, 2)) {
                 if (related && related != node) {
+                    if (shown >= kMaxDepLines) {
+                        lines.append(u"... truncated"_s);
+                        break;
+                    }
                     lines.append(u"related: %1"_s.arg(formatNode(related)));
+                    ++shown;
                 }
             }
         }
@@ -2101,6 +2409,13 @@ ToolResult ToolRunner::writePlanFile(const QJsonObject &args)
     // a read-only or strict profile must not stop the agent from writing down
     // its plan, and the model never chooses the path.
     const QString path = planFilePath(m_sandbox.workspaceRoot());
+    // The temp directory is shared: refuse a symlinked destination so a
+    // planted link cannot redirect the plan write elsewhere.
+    if (QFileInfo(path).isSymLink()) {
+        result.ok = false;
+        result.output = u"Plan file path is a symlink; refusing to write."_s;
+        return result;
+    }
     QString error;
     if (!m_bridge->writeDocument(path, content, &error)) {
         result.ok = false;

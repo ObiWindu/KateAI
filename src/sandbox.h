@@ -8,6 +8,7 @@
 #include "types.h"
 
 #include <QHash>
+#include <QMutex>
 #include <QRegularExpression>
 #include <QString>
 #include <QStringList>
@@ -40,6 +41,14 @@ public:
     // a confined read is the only thing that keeps the agent inside the
     // project.
     Sandbox(QString workspaceRoot, SandboxProfile profile, QStringList extraDenyGlobs = {}, bool allowOutsideReads = false);
+    // Move-only in spirit (QMutex is neither copyable nor movable): the mutex
+    // and the lazily built caches stay behind and are rebuilt on demand.
+    // A copy is offered because callers pass Sandboxes by value; it copies the
+    // configuration only, never the caches.
+    Sandbox(Sandbox &&other) noexcept;
+    Sandbox &operator=(Sandbox &&other) noexcept;
+    Sandbox(const Sandbox &other);
+    Sandbox &operator=(const Sandbox &other);
 
     QString workspaceRoot() const
     {
@@ -75,12 +84,15 @@ public:
 
     static QStringList defaultDenyGlobs();
     static bool globMatch(const QString &pattern, const QString &path);
+    // Cached glob match against the sandbox's compiled-regex cache. Public so
+    // the search tools can filter candidates without recompiling the pattern
+    // per file; thread-safe via the internal glob mutex.
+    bool globMatchCached(const QString &pattern, const QString &path) const;
     static QString primaryCommand(const QString &command);
 
 private:
     bool pathInsideWorkspace(const QString &absolutePath) const;
     QString normalizePath(const QString &path, QString *error, bool forWrite) const;
-    bool globMatchCached(const QString &pattern, const QString &path) const;
 
     QString m_workspaceRoot;
     SandboxProfile m_profile = SandboxProfile::Workspace;
@@ -88,8 +100,10 @@ private:
     bool m_allowOutsideReads = false;
     // Compiled deny-glob patterns. globToRegex() is cheap but QRegularExpression
     // construction is not, and isDenied() runs one per glob per candidate path.
-    // Both caches are populated lazily without synchronization: Sandbox is used
-    // from the main thread only. Guard them if isDenied() ever runs on a worker.
+    // The caches below are guarded by m_globMutex: Sandbox is mainly used from
+    // the main thread, but isDenied()/commandTouchesDeniedPath() may run on a
+    // worker (permission checks), so all cache access must hold the lock.
+    mutable QMutex m_globMutex;
     mutable QHash<QString, QRegularExpression> m_globCache;
     mutable QStringList m_cachedDenyGlobs;
 };

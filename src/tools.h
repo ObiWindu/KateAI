@@ -58,6 +58,8 @@ Q_SIGNALS:
 private:
     ToolResult readFile(const QJsonObject &args) const;
     ToolResult writeFile(const QJsonObject &args);
+    // fs/append_file canonicalizes to write_file, but keeps append semantics.
+    ToolResult appendFile(const QJsonObject &args);
     ToolResult editFile(const QJsonObject &args);
     ToolResult multiEditFile(const QJsonObject &args);
     ToolResult listDir(const QJsonObject &args) const;

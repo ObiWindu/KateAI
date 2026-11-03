@@ -18,8 +18,9 @@ PermissionPolicy::PermissionPolicy(PermissionMode mode)
 
 void PermissionPolicy::grantSession(const QString &toolName)
 {
-    if (!m_sessionGrants.contains(toolName)) {
-        m_sessionGrants.append(toolName);
+    const QString canonical = canonicalToolName(toolName);
+    if (!m_sessionGrants.contains(toolName) && !m_sessionGrants.contains(canonical)) {
+        m_sessionGrants.append(canonical);
     }
 }
 
@@ -30,7 +31,8 @@ void PermissionPolicy::revokeSession()
 
 bool PermissionPolicy::sessionGranted(const QString &toolName) const
 {
-    return m_sessionGrants.contains(toolName);
+    const QString canonical = canonicalToolName(toolName);
+    return m_sessionGrants.contains(toolName) || m_sessionGrants.contains(canonical);
 }
 
 bool PermissionPolicy::isReadTool(const QString &toolName) const
@@ -74,7 +76,22 @@ ToolRisk PermissionPolicy::riskFor(const QString &toolName) const
 
 PermissionPolicy::Verdict PermissionPolicy::evaluate(const QString &toolName, const QJsonObject &arguments, const Sandbox &sandbox, QString *reason) const
 {
-    if (canonicalToolName(toolName) == u"bash"_s) {
+    PermissionRequest request;
+    request.toolName = toolName;
+    request.risk = riskFor(canonicalToolName(toolName));
+    request.mutatesFiles = false;
+    return evaluate(request, arguments, sandbox, reason);
+}
+
+PermissionPolicy::Verdict PermissionPolicy::evaluate(const PermissionRequest &request, const QJsonObject &arguments,
+                                                     const Sandbox &sandbox, QString *reason) const
+{
+    const QString toolName = canonicalToolName(request.toolName);
+    // Execute-risk or file-mutating calls are never read tools, whatever the
+    // name says: an unknown mutating tool literally named "read" must not
+    // auto-allow through the read-tool fast path below.
+    const bool mutating = request.mutatesFiles || request.risk == ToolRisk::Execute;
+    if (toolName == u"bash"_s) {
         const QString command = arguments.value(u"command"_s).toString();
         if (sandbox.isAlwaysDeniedCommand(command)) {
             if (reason) {
@@ -96,39 +113,43 @@ PermissionPolicy::Verdict PermissionPolicy::evaluate(const QString &toolName, co
         return Verdict::Allow;
     }
 
-    // Delegation is consent to spend, not a mutation of the workspace. Every
-    // tool the sub-agent itself runs is still judged by this policy, so
-    // allowing the spawn does not let it edit unattended.
+    // Delegation still spawns a sub-agent whose own tools are judged by this
+    // policy, but in Ask mode the spawn itself prompts: it spends budget and
+    // can fan out into unattended work. Other modes allow it directly.
     if (toolName == u"new_task"_s) {
-        return Verdict::Allow;
-    }
-
-    // Explicit auto-approval beats everything except the hard-deny list.
-    if (m_autoApprove.contains(toolName)) {
-        return Verdict::Allow;
-    }
-
-    if (sessionGranted(toolName)) {
-        if (canonicalToolName(toolName) == u"bash"_s && sandbox.isDangerousCommand(arguments.value(u"command"_s).toString())) {
+        if (m_mode == PermissionMode::Ask) {
+            if (reason) {
+                *reason = u"Spawning a sub-agent needs your approval."_s;
+            }
             return Verdict::Ask;
         }
         return Verdict::Allow;
     }
 
-    // A server's own readOnlyHint is not trusted to skip the prompt in Ask
-    // mode: an MCP tool runs code in a process the plugin did not vet, so a
-    // compromised server description could turn any tool into an unprompted
-    // call. Only the built-in read tools are static code the plugin shipped
-    // with, which is why they alone are allowed without asking. AcceptEdits
-    // still follows the read-tool rule for a hinted tool — the mode's
-    // contract is that only execute-risk calls stop to ask — and "allow for
-    // this session" (or a server's alwaysAllow list, which the user wrote)
-    // keeps it from asking twice.
-    if (isReadTool(toolName) && (m_mode == PermissionMode::AcceptEdits || !isMcpToolName(toolName))) {
+    // Explicit auto-approval beats everything except the hard-deny list.
+    // Checked by canonical and raw name so an alias cannot bypass the list.
+    if (m_autoApprove.contains(toolName) || m_autoApprove.contains(request.toolName)) {
         return Verdict::Allow;
     }
 
-    if (canonicalToolName(toolName) == u"bash"_s && sandbox.isReadOnlyCommand(arguments.value(u"command"_s).toString())) {
+    if (sessionGranted(toolName)) {
+        if (toolName == u"bash"_s && sandbox.isDangerousCommand(arguments.value(u"command"_s).toString())) {
+            return Verdict::Ask;
+        }
+        return Verdict::Allow;
+    }
+
+    // A server's own readOnlyHint is never trusted to skip the prompt in Ask
+    // mode; in AcceptEdits it follows the mode's read-tool rule (the mode
+    // contract), while the tool's risk stays Execute.
+    if (!mutating && isReadTool(toolName) && !isMcpToolName(toolName) && !isMcpToolName(request.toolName)) {
+        return Verdict::Allow;
+    }
+    if (m_mode == PermissionMode::AcceptEdits && isReadTool(toolName)) {
+        return Verdict::Allow;
+    }
+
+    if (toolName == u"bash"_s && sandbox.isReadOnlyCommand(arguments.value(u"command"_s).toString())) {
         return Verdict::Allow;
     }
 

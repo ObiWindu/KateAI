@@ -468,7 +468,12 @@ private Q_SLOTS:
             QSKIP(qPrintable(error));
         }
         QVERIFY(command.contains(u"--tmpfs"_s));
-        QVERIFY(!command.contains(u"/bin/sh"_s));
+        // A file bind of the shell binary is required (else /bin/sh is missing
+        // when /bin is a symlink); what must not appear is a directory bind
+        // of /bin or the host root.
+        for (int i = 0; i + 2 < command.size(); ++i) {
+            QVERIFY(!(command.at(i) == u"--ro-bind"_s && command.at(i + 1) == u"/bin"_s && command.at(i + 2) == u"/bin"_s));
+        }
         for (int i = 0; i + 2 < command.size(); ++i) {
             QVERIFY(!(command.at(i) == u"--ro-bind"_s && command.at(i + 1) == u"/"_s && command.at(i + 2) == u"/"_s));
         }

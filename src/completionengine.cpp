@@ -54,7 +54,8 @@ QStringList CompletionEngine::stopSequences()
 {
     // The model is told to output only the completion, but models drift; the
     // stop sequences cut the usual ways of explaining oneself short.
-    return {u"\n\n\n"_s, u"#"_s, u"//"_s};
+    // Bare "#" and "//" would stop mid-line; anchor them to a line start.
+    return {u"\n\n\n"_s, u"\n#"_s, u"\n//"_s};
 }
 
 bool CompletionEngine::isStale(const CompletionPromptContext &request, int cursorLine, int cursorColumn)
@@ -75,16 +76,15 @@ CompletionPromptContext CompletionEngine::buildContext(const QString &text, int 
         return context;
     }
 
-    // Line-based offset computation: walking the lines keeps the snapping
-    // rules (prefix starts at a line start, suffix ends at the start of the
-    // line after the cursor's own) readable.
+    // Line-based offset computation without mid(): indexOf from an offset
+    // scans in place instead of copying the tail per line (O(n), not O(n²)).
     int offset = 0;
     for (int line = 0; line < cursorLine; ++line) {
-        offset += text.mid(offset).indexOf(QChar(u'\n'));
-        if (offset < 0) {
+        const int newline = text.indexOf(QChar(u'\n'), offset);
+        if (newline < 0) {
             return context;
         }
-        ++offset;
+        offset = newline + 1;
     }
     const int lineStart = offset;
     const QString lineRest = text.mid(lineStart);
@@ -92,28 +92,37 @@ CompletionPromptContext CompletionEngine::buildContext(const QString &text, int 
     const int lineLength = newlineInLine >= 0 ? newlineInLine : lineRest.size();
     const int cursorStart = lineStart + std::min(cursorColumn, lineLength);
 
-    // Prefix: up to prefixChars before the cursor, then snapped forward to
-    // the next line start so the budget holds and the prompt never begins in
-    // the middle of a line.
+    // Prefix: up to prefixChars before the cursor, snapped forward to the
+    // next line start so the result never exceeds the budget. On a single
+    // long line the snap would empty the prefix; in that case keep the tail
+    // of the budget (right) so minified files still complete.
     if (prefixChars > 0) {
         int begin = qMax(0, cursorStart - prefixChars);
         if (begin > 0) {
-            const int newline = text.indexOf(QChar(u'\n'), begin - 1);
-            begin = newline >= 0 && newline + 1 <= cursorStart ? newline + 1 : cursorStart;
+            const int newline = text.indexOf(QChar(u'\n'), begin);
+            if (newline >= 0 && newline < cursorStart) {
+                begin = newline + 1;
+            } else if (newline < 0) {
+                // No line start ahead: single long line — keep budget tail.
+                begin = qMax(0, cursorStart - prefixChars);
+            } else {
+                begin = qMax(0, cursorStart - prefixChars);
+            }
         }
         if (begin <= cursorStart) {
-            context.prefix = text.mid(begin, cursorStart - begin);
+            QString raw = text.mid(begin, cursorStart - begin);
+            if (raw.size() > prefixChars) {
+                raw = raw.right(prefixChars);
+            }
+            context.prefix = raw;
         }
     }
 
-    // Suffix: up to suffixChars after the cursor, snapped forward so the
-    // prompt never ends inside a line the model might want to complete.
+    // Suffix: up to suffixChars after the cursor, truncated at the budget.
+    // Never extended past it: reaching forward to the next newline lets one
+    // long line blow the budget.
     if (suffixChars > 0) {
-        int end = qMin(text.size(), cursorStart + suffixChars);
-        if (end < text.size()) {
-            const int newline = text.indexOf(QChar(u'\n'), end);
-            end = newline >= 0 ? newline + 1 : text.size();
-        }
+        const int end = qMin(text.size(), cursorStart + suffixChars);
         context.suffix = text.mid(cursorStart, end - cursorStart);
     }
     return context;
@@ -177,8 +186,12 @@ bool CompletionEngine::canRequestNow() const
     if (m_agentBusy) {
         return false;
     }
+    // 0 means unlimited (no budget); any other value caps the last minute.
+    if (m_settings.completionRequestsPerMinute <= 0) {
+        return true;
+    }
     pruneBudgetWindow();
-    return m_requestTimes.size() < qMax(1, m_settings.completionRequestsPerMinute);
+    return m_requestTimes.size() < m_settings.completionRequestsPerMinute;
 }
 
 void CompletionEngine::cancel()
@@ -229,6 +242,12 @@ void CompletionEngine::request(const CompletionPromptContext &context)
     // works everywhere chat works.
     const bool fim = apiFormat == ApiFormat::OpenAICompatible && providerSupportsFim(m_settings.provider);
 
+    // Completions are short by design: cap at the dedicated 256 budget, and
+    // never above the chat maxTokens when the user lowered that.
+    const int completionMaxTokens = m_settings.maxTokens > 0
+        ? qMin(kDefaultCompletionMaxTokens, m_settings.maxTokens)
+        : kDefaultCompletionMaxTokens;
+
     QString endpoint;
     QJsonObject body;
     if (fim) {
@@ -236,6 +255,7 @@ void CompletionEngine::request(const CompletionPromptContext &context)
         body.insert(u"model"_s, model);
         body.insert(u"prompt"_s, fimPrompt(context, m_settings.provider));
         body.insert(u"stream"_s, false);
+        body.insert(u"max_tokens"_s, completionMaxTokens);
         body.insert(u"stop"_s, QJsonArray::fromStringList(stopSequences()));
     } else if (apiFormat == ApiFormat::AnthropicCompatible) {
         endpoint = u"/v1/messages"_s;
@@ -264,8 +284,7 @@ void CompletionEngine::request(const CompletionPromptContext &context)
         body.insert(u"messages"_s, turns);
         body.insert(u"stream"_s, false);
         // max_tokens is required by the Messages API.
-        body.insert(u"max_tokens"_s,
-                    m_settings.maxTokens > 0 ? m_settings.maxTokens : kDefaultCompletionMaxTokens);
+        body.insert(u"max_tokens"_s, completionMaxTokens);
         body.insert(u"stop_sequences"_s, QJsonArray::fromStringList(stopSequences()));
     } else {
         // The default path: OpenAI-compatible chat completions, including the
@@ -285,8 +304,7 @@ void CompletionEngine::request(const CompletionPromptContext &context)
         body.insert(u"messages"_s, jsonMessages);
         body.insert(u"stream"_s, false);
         body.insert(u"stop"_s, QJsonArray::fromStringList(stopSequences()));
-        body.insert(u"max_tokens"_s,
-                    m_settings.maxTokens > 0 ? m_settings.maxTokens : kDefaultCompletionMaxTokens);
+        body.insert(u"max_tokens"_s, completionMaxTokens);
     }
 
     QNetworkRequest networkRequest{QUrl(providerBaseUrl(m_settings) + endpoint)};
@@ -301,8 +319,14 @@ void CompletionEngine::request(const CompletionPromptContext &context)
     networkRequest.setTransferTimeout(15000);
 
     m_activeContext = context;
-    recordRequestTime();
     m_reply = m_nam->post(networkRequest, QJsonDocument(body).toJson(QJsonDocument::Compact));
+    // Only a request that actually went out consumes budget: record after a
+    // successful post, not before.
+    if (!m_reply) {
+        Q_EMIT failed(u"Completion request could not be started."_s);
+        return;
+    }
+    recordRequestTime();
     connect(m_reply, &QNetworkReply::finished, this, &CompletionEngine::handleReplyFinished);
 }
 
@@ -321,40 +345,81 @@ void CompletionEngine::handleReplyFinished()
     reply->deleteLater();
 
     if (!transportOk || status >= 400) {
-        Q_EMIT failed(u"Completion request failed (HTTP %1)."_s.arg(status));
+        // HTTP 0 means the request never got an answer: report the network
+        // error string, not an empty status code.
+        const QString detail = status == 0 ? reply->errorString() : QString::number(status);
+        Q_EMIT failed(detail.isEmpty() ? u"Completion request failed."_s
+                                       : u"Completion request failed (%1)."_s.arg(detail));
         return;
     }
 
     // Extract the completion text from every response shape the chat
     // transport can produce: plain JSON (stream:false), the OpenAI
     // non-streaming envelope, the /completions envelope and Anthropic's
-    // content block list.
+    // content block list. choices wins when both are present; content blocks
+    // are the fallback, never an addition.
     QString completion;
     QJsonParseError parseError;
     const QJsonDocument doc = QJsonDocument::fromJson(body, &parseError);
+    auto appendTextParts = [](const QJsonValue &contentValue) {
+        // message.content also arrives in array form (content blocks); join
+        // the text parts.
+        QString out;
+        if (contentValue.isArray()) {
+            for (const QJsonValue &part : contentValue.toArray()) {
+                const QJsonObject block = part.toObject();
+                if (block.value(u"type"_s).toString() == u"text"_s) {
+                    out += block.value(u"text"_s).toString();
+                } else if (part.isString()) {
+                    out += part.toString();
+                }
+            }
+        } else if (contentValue.isString()) {
+            out = contentValue.toString();
+        }
+        return out;
+    };
     if (parseError.error == QJsonParseError::NoError && doc.isObject()) {
         const QJsonObject root = doc.object();
         const QJsonArray choices = root.value(u"choices"_s).toArray();
         if (!choices.isEmpty()) {
             const QJsonObject choice = choices.at(0).toObject();
             if (choice.contains(u"message"_s)) {
-                completion = choice.value(u"message"_s).toObject().value(u"content"_s).toString();
+                completion = appendTextParts(choice.value(u"message"_s).toObject().value(u"content"_s));
             } else {
                 completion = choice.value(u"text"_s).toString();
             }
-        }
-        const QJsonArray contentBlocks = root.value(u"content"_s).toArray();
-        for (const QJsonValue &value : contentBlocks) {
-            if (value.toObject().value(u"type"_s).toString() == u"text"_s) {
-                completion += value.toObject().value(u"text"_s).toString();
+        } else {
+            const QJsonArray contentBlocks = root.value(u"content"_s).toArray();
+            for (const QJsonValue &value : contentBlocks) {
+                if (value.toObject().value(u"type"_s).toString() == u"text"_s) {
+                    completion += value.toObject().value(u"text"_s).toString();
+                }
             }
         }
     } else {
-        // A provider that ignored stream:false and answered with SSE. The
-        // chat client's line parser already knows the event shapes.
-        for (const QByteArray &line : body.split('\n')) {
+        // A provider that ignored stream:false and answered with SSE: parse
+        // buffered events (blank-line separated), joining the data: lines of
+        // each event before parsing, so multi-line payloads survive.
+        const QString payload = QString::fromUtf8(body);
+        const QStringList events = payload.split(u"\n\n"_s);
+        for (const QString &event : events) {
+            QStringList dataLines;
+            for (const QString &rawLine : event.split(u'\n')) {
+                QString line = rawLine.trimmed();
+                if (line.endsWith(u'\r')) {
+                    line.chop(1);
+                }
+                if (line.startsWith(u"data:"_s)) {
+                    dataLines.append(line.mid(5).trimmed());
+                }
+            }
+            if (dataLines.isEmpty()) {
+                continue;
+            }
+            const QByteArray joined = dataLines.join(u'\n').toUtf8();
             bool parsed = false;
-            const CompletionChunk chunk = LlmClient::parseSseLine(line, nullptr, &parsed);
+            const CompletionChunk chunk = LlmClient::parseSseLine(joined, nullptr, &parsed);
             if (parsed && !chunk.contentDelta.isEmpty()) {
                 completion += chunk.contentDelta;
             }
@@ -370,7 +435,8 @@ void CompletionEngine::handleReplyFinished()
     }
     // Trailing whitespace is layout noise in an inline note; the model's
     // leading text is the completion itself and is kept verbatim.
-    while (completion.endsWith(u'\n') || completion.endsWith(u' ')) {
+    while (completion.endsWith(u'\n') || completion.endsWith(u' ') || completion.endsWith(u'\t')
+        || completion.endsWith(u'\r')) {
         completion.chop(1);
     }
     Q_EMIT completed(completion, context);
