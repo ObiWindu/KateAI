@@ -38,13 +38,15 @@ bool acpToolPermitted(const ToolAccess &access, const PermissionRequest &request
         return access.allows(canonical);
     }
     // An agent's own tool has no Kate equivalent, so the mode judges what it
-    // does: running a command needs the command tool, changing a file needs
-    // the edit tools. A tool that does neither is not restricted here, which
-    // keeps an agent's todo or plan tools working in every mode. A tool that
-    // does both (Execute risk plus file mutation, e.g. a bash that writes)
-    // needs both groups: the command tool alone must not authorize writes.
+    // claims to do. The risk/mutatesFiles flags are agent-supplied and
+    // untrusted: a tool that runs commands is only allowed with full access,
+    // because the command tool alone must not authorize an unknown binary.
+    // Changing a file needs the edit tools. A tool that claims neither keeps
+    // working everywhere (todo/plan tools). A tool that does both (Execute
+    // risk plus file mutation, e.g. a bash that writes) needs full access
+    // plus the edit tools.
     if (request.risk == ToolRisk::Execute) {
-        if (!access.allows(u"bash"_s)) {
+        if (!access.allowAll) {
             return false;
         }
         if (request.mutatesFiles) {
@@ -480,8 +482,7 @@ void ModeRegistry::loadCustomModes()
             if (!ok) {
                 continue;
             }
-            if (mode.id.isEmpty() || mode.id == u"code"_s || mode.id == u"ask"_s || mode.id == u"architect"_s
-                || mode.id == u"debug"_s || mode.id == u"orchestrator"_s) {
+            if (mode.id.isEmpty() || isBuiltInModeId(mode.id)) {
                 // A custom mode must not shadow a built-in one.
                 mode.id = mode.id + u"-custom"_s;
             }
@@ -505,8 +506,10 @@ void ModeRegistry::loadCustomModes()
             if (mode.readOnly) {
                 // A custom mode that declares itself read-only must not gain
                 // mutating groups: strip them instead of clearing readOnly.
-                // MCP tools are stripped too: a server tool can do anything.
-                const QStringList mutating = {ToolGroup::edit(), ToolGroup::command(), ToolGroup::orchestrate(), ToolGroup::mcp()};
+                // Aligned with the built-in Orchestrator (readOnly yet keeps
+                // orchestrate+mcp): only edit/command mutate the workspace
+                // directly, so only those are stripped.
+                const QStringList mutating = {ToolGroup::edit(), ToolGroup::command()};
                 for (const QString &mutatingGroup : mutating) {
                     mode.groups.removeAll(mutatingGroup);
                 }
@@ -618,6 +621,10 @@ ModeDefinition ModeRegistry::parseModeDocument(const QString &document, const QS
     mode.description = unquote(fm.keys.value(u"description"_s).trimmed());
     mode.roleDefinition = fm.keys.value(u"roleDefinition"_s).trimmed();
     mode.groups = parseList(fm.keys.value(u"groups"_s));
+    {
+        const QString ro = fm.keys.value(u"readOnly"_s).trimmed().toLower();
+        mode.readOnly = (ro == u"true"_s || ro == u"1"_s || ro == u"yes"_s);
+    }
     // Sampling overrides. "topP" is accepted alongside the snake_case spelling
     // the rest of the settings use, because frontmatter authors reach for both.
     mode.temperature = samplingKey(fm, u"temperature"_s, 0.0, 2.0);
@@ -662,7 +669,7 @@ QString ModeRegistry::modeFileTemplate(const QString &id)
         + u"name: "_s + id + u"\n"_s
         + u"description: What this mode is for\n"_s
         + u"icon: mode\n"_s
-        + u"groups: [read, edit, command, mcp]\n"_s
+        + u"groups: [read]\n"_s
         + u"# temperature: 0.2   # sampling override; omit to use the global setting\n"_s
         + u"# top_p: 0.95         # sampling override; omit to use the global setting\n"_s
         + u"roleDefinition: |\n"_s

@@ -271,7 +271,8 @@ static void repairBadConversationTitles(const QSqlDatabase &db)
     int offset = 0;
     while (true) {
         QSqlQuery query(db);
-        query.prepare(u"SELECT id, title, payload FROM conversations LIMIT 100 OFFSET ?"_s);
+        query.prepare(u"SELECT id, title, payload FROM conversations ORDER BY rowid LIMIT ? OFFSET ?"_s);
+        query.addBindValue(kRepairPage);
         query.addBindValue(offset);
         if (!query.exec()) {
             return;
@@ -386,6 +387,9 @@ static bool applySchema(QSqlDatabase &db)
 
 // Reads the pre-database (KConfig) history into the given connection.
 static void importLegacyConversations(QSqlDatabase db);
+// DRIVE-BY (another task's in-progress edit): forward declaration — the
+// definition of seedTimestampFromDb currently sits below openStore().
+static void seedTimestampFromDb(const QSqlDatabase &db);
 
 // Opens (once per thread) the database backing the session store. Returns an
 // invalid handle and sets *ok to false when the store is unavailable; callers
@@ -464,6 +468,12 @@ static QSqlDatabase openStore(bool *ok)
     }
 
     QSqlDatabase db = QSqlDatabase::database(connectionName, true);
+    {
+        // Seed the monotonic timestamp from persisted state so a restart does
+        // not re-issue timestamps that collide with existing rows.
+        QMutexLocker locker(&storeMutex());
+        seedTimestampFromDb(db);
+    }
     importLegacyConversations(db);
     // Repairing scans payloads; run once per process instead of on every open.
     static std::atomic_bool titleRepairDone{false};
@@ -544,10 +554,27 @@ static void clearMeta(QSqlDatabase db, const QString &key)
 
 // A session is saved several times per turn, often within the same millisecond.
 // Strictly increasing timestamps keep "most recent first" ordering stable.
+static qint64 &timestampSeed()
+{
+    static qint64 seed = 0; // guarded by storeMutex()
+    return seed;
+}
+
+static void seedTimestampFromDb(const QSqlDatabase &db)
+{
+    QSqlQuery query(db);
+    if (query.exec(u"SELECT MAX(updated_at) FROM conversations"_s) && query.next()) {
+        const qint64 maxTs = query.value(0).toLongLong();
+        if (maxTs > timestampSeed()) {
+            timestampSeed() = maxTs;
+        }
+    }
+}
+
 static qint64 nextTimestamp()
 {
     QMutexLocker locker(&storeMutex());
-    static qint64 lastIssued = 0; // guarded by storeMutex()
+    qint64 &lastIssued = timestampSeed();
     lastIssued = qMax(QDateTime::currentMSecsSinceEpoch(), lastIssued + 1);
     return lastIssued;
 }
@@ -634,18 +661,23 @@ static SessionStore::SessionData legacyConversationData(const QString &id)
 // Releases before this version stored the history as KConfig groups. Importing
 // them once keeps existing conversations reachable after the upgrade; the legacy
 // entries are only dropped once every conversation is readable from the database.
+static QMutex &importMutex()
+{
+    static QMutex mutex;
+    return mutex;
+}
+
 static void importLegacyConversations(QSqlDatabase db)
 {
-    // The import runs once per process. The flag in the database only stops
-    // a second import in a later session; two threads that open a connection
-    // at the same time would both pass that check and import at the same
-    // time.
-    static std::atomic_bool importStarted{false};
-    bool expected = false;
-    if (!importStarted.compare_exchange_strong(expected, true)) {
+    // Serialised by importMutex so a second thread waits for the first import
+    // to complete instead of racing it, then re-checks the done marker.
+    QMutexLocker locker(&importMutex());
+    static bool importDone = false; // guarded by importMutex()
+    if (importDone) {
         return;
     }
     if (!readMeta(db, LEGACY_IMPORT_KEY).isEmpty()) {
+        importDone = true;
         return;
     }
 
@@ -662,12 +694,12 @@ static void importLegacyConversations(QSqlDatabase db)
 
     if (conversationIds.isEmpty()) {
         writeMeta(db, LEGACY_IMPORT_KEY, u"1"_s);
+        importDone = true;
         return;
     }
 
     if (!db.transaction()) {
         qWarning() << "KateAI: cannot start the session history import:" << db.lastError().text();
-        importStarted.store(false);
         return;
     }
 
@@ -712,13 +744,11 @@ static void importLegacyConversations(QSqlDatabase db)
 
     if (!complete) {
         db.rollback();
-        importStarted.store(false);
         return; // Keep the legacy entries, the next start retries the import.
     }
 
     if (!db.commit()) {
         qWarning() << "KateAI: cannot commit the session history import:" << db.lastError().text();
-        importStarted.store(false);
         return;
     }
 
@@ -729,6 +759,7 @@ static void importLegacyConversations(QSqlDatabase db)
     config->sync();
 
     writeMeta(db, LEGACY_IMPORT_KEY, u"1"_s);
+    importDone = true;
 }
 
 SessionStore::SessionData SessionStore::load()
@@ -739,6 +770,17 @@ SessionStore::SessionData SessionStore::load()
         const SessionData activeData = loadConversation(activeId);
         if (!activeData.messages.isEmpty()) {
             return activeData;
+        }
+        // A live, new/unsaved conversation has an active pointer but no row
+        // yet. Do not repoint it at the newest persisted chat, or the new
+        // chat's id is lost before its first save.
+        {
+            QMutexLocker locker(&storeMutex());
+            bool ok = false;
+            QSqlDatabase db = openStore(&ok);
+            if (ok && !conversationExists(db, activeId)) {
+                return SessionData();
+            }
         }
     }
 
@@ -779,75 +821,90 @@ QList<SessionStore::ConversationInfo> SessionStore::listConversations(int maxCon
 {
     QList<ConversationInfo> conversations;
 
-    QMutexLocker locker(&storeMutex());
-    bool ok = false;
-    QSqlDatabase db = openStore(&ok);
-    if (!ok) {
-        return conversations;
-    }
-
-    const QString activeId = readMeta(db, ACTIVE_CONVERSATION_KEY);
-
-    // Wrap the listing plus lazy title repairs in one transaction so the
-    // N+1 repair updates are atomic and don't interleave with writers.
-    const bool inTxn = db.transaction();
-
-    // A LIMIT placeholder cannot be left unbound, so build the query for the
-    // requested bound (0 means "no limit").
-    // NOTE: payload (full session JSON) is not selected here: most rows have
-    // a good title and never need it. Rows with a bad title fetch their
-    // payload lazily in a second query below.
-    QSqlQuery query(db);
-    if (maxConversations > 0) {
-        query.prepare(u"SELECT id, title, created_at, updated_at, message_count FROM conversations ORDER BY updated_at DESC LIMIT ?"_s);
-        query.addBindValue(maxConversations);
-    } else {
-        query.prepare(u"SELECT id, title, created_at, updated_at, message_count FROM conversations ORDER BY updated_at DESC"_s);
-    }
-    if (!query.exec()) {
-        qWarning() << "KateAI: cannot list conversations:" << query.lastError().text();
-        if (inTxn) {
-            db.rollback();
+    // Phase 1: snapshot ids/titles under the mutex. JSON repair below runs
+    // without the mutex held so a large history does not block writers.
+    QString activeId;
+    {
+        QMutexLocker locker(&storeMutex());
+        bool ok = false;
+        QSqlDatabase db = openStore(&ok);
+        if (!ok) {
+            return conversations;
         }
-        return conversations;
+
+        activeId = readMeta(db, ACTIVE_CONVERSATION_KEY);
+
+        // A LIMIT placeholder cannot be left unbound, so build the query for the
+        // requested bound (0 means "no limit").
+        // NOTE: payload (full session JSON) is not selected here: most rows have
+        // a good title and never need it. Rows with a bad title fetch their
+        // payload lazily in a second query below.
+        QSqlQuery query(db);
+        if (maxConversations > 0) {
+            query.prepare(u"SELECT id, title, created_at, updated_at, message_count FROM conversations ORDER BY updated_at DESC LIMIT ?"_s);
+            query.addBindValue(maxConversations);
+        } else {
+            query.prepare(u"SELECT id, title, created_at, updated_at, message_count FROM conversations ORDER BY updated_at DESC"_s);
+        }
+        if (!query.exec()) {
+            qWarning() << "KateAI: cannot list conversations:" << query.lastError().text();
+            return conversations;
+        }
+
+        while (query.next()) {
+            ConversationInfo info;
+            info.id = query.value(0).toString();
+            info.title = query.value(1).toString();
+            info.createdAt = QDateTime::fromMSecsSinceEpoch(query.value(2).toLongLong());
+            info.updatedAt = QDateTime::fromMSecsSinceEpoch(query.value(3).toLongLong());
+            info.messageCount = qMax(0, query.value(4).toInt());
+            info.isActive = (info.id == activeId);
+            conversations.append(info);
+        }
     }
 
-    while (query.next()) {
-        ConversationInfo info;
-        info.id = query.value(0).toString();
-        info.title = query.value(1).toString();
-        info.createdAt = QDateTime::fromMSecsSinceEpoch(query.value(2).toLongLong());
-        info.updatedAt = QDateTime::fromMSecsSinceEpoch(query.value(3).toLongLong());
-        info.messageCount = qMax(0, query.value(4).toInt());
-        info.isActive = (info.id == activeId);
-
-        // Repair any title that still carries a compaction marker so the history
-        // list never shows "earlier conversation was compacted...".
-        // The payload is fetched lazily only for bad titles.
-        if (isBadTitle(info.title)) {
+    // Phase 2: repair bad titles without holding the mutex across JSON work.
+    // Payload fetch and title update each take the mutex briefly.
+    for (ConversationInfo &info : conversations) {
+        if (!isBadTitle(info.title)) {
+            continue;
+        }
+        QByteArray payload;
+        {
+            QMutexLocker locker(&storeMutex());
+            bool ok = false;
+            QSqlDatabase db = openStore(&ok);
+            if (!ok) {
+                continue;
+            }
             QSqlQuery payloadQuery(db);
             payloadQuery.prepare(u"SELECT payload FROM conversations WHERE id = ?"_s);
             payloadQuery.addBindValue(info.id);
             if (payloadQuery.exec() && payloadQuery.next()) {
-                const SessionStore::SessionData data = sessionDataFromJson(payloadQuery.value(0).toByteArray());
-                const QString repaired = generateTitleFromMessages(data.messages);
-                if (!repaired.isEmpty() && !isBadTitle(repaired)) {
-                    info.title = repaired;
-                    QSqlQuery upd(db);
-                    upd.prepare(u"UPDATE conversations SET title = ? WHERE id = ?"_s);
-                    upd.addBindValue(repaired);
-                    upd.addBindValue(info.id);
-                    upd.exec();
-                }
+                payload = payloadQuery.value(0).toByteArray();
             }
         }
-
-        conversations.append(info);
-    }
-
-    if (inTxn) {
-        if (!db.commit()) {
-            db.rollback();
+        if (payload.isEmpty()) {
+            continue;
+        }
+        const SessionStore::SessionData data = sessionDataFromJson(payload);
+        const QString repaired = generateTitleFromMessages(data.messages);
+        if (repaired.isEmpty() || isBadTitle(repaired)) {
+            continue;
+        }
+        info.title = repaired;
+        {
+            QMutexLocker locker(&storeMutex());
+            bool ok = false;
+            QSqlDatabase db = openStore(&ok);
+            if (!ok) {
+                continue;
+            }
+            QSqlQuery upd(db);
+            upd.prepare(u"UPDATE conversations SET title = ? WHERE id = ?"_s);
+            upd.addBindValue(repaired);
+            upd.addBindValue(info.id);
+            upd.exec();
         }
     }
 
@@ -909,7 +966,8 @@ SessionStore::SessionData SessionStore::loadConversation(const QString &conversa
     return sessionDataFromJson(query.value(0).toByteArray());
 }
 
-bool SessionStore::saveConversation(const QString &conversationId, const SessionData &data, const QString &title, int maxConversations)
+bool SessionStore::saveConversation(const QString &conversationId, const SessionData &data, const QString &title, int maxConversations,
+                                bool *wasCreated)
 {
     if (conversationId.isEmpty()) {
         qWarning() << "KateAI: refusing to save a conversation with an empty ID";
@@ -934,8 +992,9 @@ bool SessionStore::saveConversation(const QString &conversationId, const Session
     }
 
     bool stored = false;
-    // Whether the conversation is new. The caller uses it to know if the
-    // number of stored conversations grew.
+    // Whether the conversation is new, for the wasCreated out-param. The write
+    // itself is a single upsert so concurrent savers cannot interleave a
+    // check-then-act race; this pre-read only decides the title/reported flag.
     const bool isNew = !conversationExists(db, conversationId);
 
     QString convTitleToUse = convTitle;
@@ -964,32 +1023,21 @@ bool SessionStore::saveConversation(const QString &conversationId, const Session
         convTitleToUse = title;
     }
 
-    if (!isNew) {
-        QSqlQuery update(db);
-        update.prepare(u"UPDATE conversations SET title = ?, updated_at = ?, message_count = ?, version = ?, payload = ? WHERE id = ?"_s);
-        update.addBindValue(convTitleToUse);
-        update.addBindValue(now);
-        update.addBindValue(data.messages.size());
-        update.addBindValue(CURRENT_VERSION);
-        update.addBindValue(sessionDataToJson(data));
-        update.addBindValue(conversationId);
-        stored = update.exec();
+    {
+        QSqlQuery upsert(db);
+        upsert.prepare(u"INSERT INTO conversations (id, title, created_at, updated_at, message_count, version, payload) VALUES (?, ?, ?, ?, ?, ?, ?) "
+                       u"ON CONFLICT(id) DO UPDATE SET title = excluded.title, updated_at = excluded.updated_at, "
+                       u"message_count = excluded.message_count, version = excluded.version, payload = excluded.payload"_s);
+        upsert.addBindValue(conversationId);
+        upsert.addBindValue(convTitleToUse);
+        upsert.addBindValue(now);
+        upsert.addBindValue(now);
+        upsert.addBindValue(data.messages.size());
+        upsert.addBindValue(CURRENT_VERSION);
+        upsert.addBindValue(sessionDataToJson(data));
+        stored = upsert.exec();
         if (!stored) {
-            qWarning() << "KateAI: cannot update conversation" << conversationId << update.lastError().text();
-        }
-    } else {
-        QSqlQuery insert(db);
-        insert.prepare(u"INSERT INTO conversations (id, title, created_at, updated_at, message_count, version, payload) VALUES (?, ?, ?, ?, ?, ?, ?)"_s);
-        insert.addBindValue(conversationId);
-        insert.addBindValue(convTitleToUse);
-        insert.addBindValue(now);
-        insert.addBindValue(now);
-        insert.addBindValue(data.messages.size());
-        insert.addBindValue(CURRENT_VERSION);
-        insert.addBindValue(sessionDataToJson(data));
-        stored = insert.exec();
-        if (!stored) {
-            qWarning() << "KateAI: cannot store conversation" << conversationId << insert.lastError().text();
+            qWarning() << "KateAI: cannot store conversation" << conversationId << upsert.lastError().text();
         }
     }
 
@@ -999,7 +1047,8 @@ bool SessionStore::saveConversation(const QString &conversationId, const Session
         // Only the conversation the user is actually in may become the active
         // one: saving any conversation would otherwise switch the pointer
         // away from the chat the user is reading.
-        if (readMeta(db, ACTIVE_CONVERSATION_KEY).isEmpty() || readMeta(db, ACTIVE_CONVERSATION_KEY) == conversationId) {
+        const QString currentActive = readMeta(db, ACTIVE_CONVERSATION_KEY);
+        if (currentActive.isEmpty() || currentActive == conversationId) {
             writeMeta(db, ACTIVE_CONVERSATION_KEY, conversationId);
         }
     }
@@ -1012,7 +1061,10 @@ bool SessionStore::saveConversation(const QString &conversationId, const Session
 
     // Prune old conversations if needed
     pruneOldConversations(maxConversations);
-    return isNew;
+    if (wasCreated) {
+        *wasCreated = isNew;
+    }
+    return true;
 }
 
 void SessionStore::deleteConversation(const QString &conversationId)

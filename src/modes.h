@@ -124,7 +124,7 @@ public:
         return m_modes;
     }
     const ModeDefinition *modeById(const QString &id) const;
-    // Returns the named mode, or the Code mode when it does not exist.
+    // Returns the named mode, or an Ask-with-{read} fallback when it does not exist.
     ModeDefinition modeOrDefault(const QString &id) const;
     QStringList customModeIds() const;
 

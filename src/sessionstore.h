@@ -66,10 +66,13 @@ public:
     // exist. Cheaper than listing the whole history for one title.
     static QString conversationTitle(const QString &conversationId);
     static SessionData loadConversation(const QString &conversationId);
-    // Returns true when the conversation did not exist yet and was created by
-    // this call. The caller uses it to know whether the number of stored
-    // conversations changed.
-    static bool saveConversation(const QString &conversationId, const SessionData &data, const QString &title = QString(), int maxConversations = 50);
+    // Returns true on success. When wasCreated is non-null it reports whether
+    // the conversation did not exist yet and was created by this call (the
+    // caller uses it to know whether the number of stored conversations grew).
+    // Returning is-new as the success value conflated "updated" with
+    // "failed"; success and is-new are now separate.
+    static bool saveConversation(const QString &conversationId, const SessionData &data, const QString &title = QString(), int maxConversations = 50,
+                                 bool *wasCreated = nullptr);
     static void deleteConversation(const QString &conversationId);
     static QString createNewConversation();
     static void setActiveConversation(const QString &conversationId);

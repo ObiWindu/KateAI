@@ -41,6 +41,10 @@ QString mcpToolPrefix()
 
 QString sanitizeMcpSegment(const QString &segment)
 {
+    // Collapse "__" so a server or tool name cannot forge a different
+    // "server__tool" split. This is lossy ("a__b" and "a_b" merge), so
+    // lookups must match by sanitized comparison against the original names
+    // (see McpManager::callTool / McpClient::tool) rather than by exact key.
     QString out = segment;
     while (out.contains(u"__"_s)) {
         out.replace(u"__"_s, u"_"_s);
@@ -127,6 +131,13 @@ bool McpServerConfig::isValid(QString *error) const
         if (!parsed.isValid() || parsed.scheme().isEmpty()) {
             if (error) {
                 *error = u"Server '%1' has an invalid URL: %2"_s.arg(name, url);
+            }
+            return false;
+        }
+        const QString scheme = parsed.scheme().toLower();
+        if (scheme != u"http"_s && scheme != u"https"_s) {
+            if (error) {
+                *error = u"Server '%1' must use an http(s) URL: %2"_s.arg(name, url);
             }
             return false;
         }
@@ -469,7 +480,12 @@ void McpClient::start()
         connect(m_process, &QProcess::finished, this, &McpClient::onStdioFinished);
 
         m_process->start(m_config.command, m_config.args);
-        if (!m_process->waitForStarted(10000)) {
+        // Bounded blocking start: the handshake itself is async, so waiting
+        // 10s here froze the UI on a missing binary. 2s is enough to catch
+        // "failed to start"; a slow spawn still completes via the async
+        // started/error signals.
+        if (!m_process->waitForStarted(2000)) {
+            qWarning() << "KateAI: MCP server did not start within 2s:" << m_config.name << m_process->errorString();
             setState(McpServerState::Failed, u"Could not start '%1': %2"_s.arg(m_config.command, m_process->errorString()));
             return;
         }
@@ -541,7 +557,7 @@ void McpClient::stop()
 const McpTool *McpClient::tool(const QString &toolName) const
 {
     for (const McpTool &candidate : m_tools) {
-        if (candidate.name == toolName) {
+        if (candidate.name == toolName || sanitizeMcpSegment(candidate.name) == toolName) {
             return &candidate;
         }
     }
@@ -948,6 +964,12 @@ void McpClient::handleMessage(const QJsonObject &message)
         return;
     }
 
+    if (idValue.isString()) {
+        // Pending requests are keyed by int; a string id cannot be routed.
+        // Servers must echo the int id they were sent.
+        qWarning() << "KateAI: MCP server sent a string JSON-RPC id; dropping the message.";
+        return;
+    }
     const int id = idValue.toInt(-1);
     const auto it = m_pending.constFind(id);
     if (it == m_pending.constEnd()) {
@@ -1139,6 +1161,13 @@ void McpManager::setServers(const QList<McpServerConfig> &servers)
         return;
     }
 
+    for (McpClient *client : std::as_const(m_clients)) {
+        if (client) {
+            // stop()/delete emit stateChanged; without this the teardown
+            // re-enters refreshDerived()/serverStatusChanged mid-rebuild.
+            client->blockSignals(true);
+        }
+    }
     disconnectAll();
     qDeleteAll(m_clients);
     m_clients.clear();
@@ -1328,6 +1357,16 @@ bool McpManager::callTool(const QString &callToken, const QString &qualifiedName
     }
     McpClient *client = m_clients.value(serverName);
     if (!client) {
+        // qualifiedName() carries the sanitized server segment; the clients
+        // are keyed by the original name, so match by sanitized comparison.
+        for (auto it = m_clients.constBegin(); it != m_clients.constEnd(); ++it) {
+            if (sanitizeMcpSegment(it.key()) == serverName) {
+                client = it.value();
+                break;
+            }
+        }
+    }
+    if (!client) {
         Q_EMIT toolResult(callToken, false, QString(), u"No MCP server named '%1'."_s.arg(serverName));
         return false;
     }
@@ -1359,8 +1398,18 @@ QList<McpServerConfig> load(const QString &workspace)
     if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
         return {};
     }
+    static constexpr qint64 kMaxMcpConfigBytes = 1024 * 1024;
+    if (file.size() > kMaxMcpConfigBytes + 1024) {
+        qWarning("KateAI: mcp.json too large, refusing to load.");
+        return {};
+    }
+    const QByteArray raw = file.read(kMaxMcpConfigBytes + 1);
+    if (raw.size() > kMaxMcpConfigBytes) {
+        qWarning("KateAI: mcp.json too large, refusing to load.");
+        return {};
+    }
     QJsonParseError error{};
-    const QJsonDocument document = QJsonDocument::fromJson(file.readAll(), &error);
+    const QJsonDocument document = QJsonDocument::fromJson(raw, &error);
     if (error.error != QJsonParseError::NoError || !document.isObject()) {
         return {};
     }
@@ -1381,6 +1430,9 @@ bool save(const QString &workspace, const QList<McpServerConfig> &servers, QStri
     // crash or a full disk mid-write cannot leave a truncated mcp.json: a
     // reader sees either the old configuration or the complete new one.
     QSaveFile file(path);
+    // Owner-only from the start: the file can carry authorization headers,
+    // so there must be no window where it exists mode 644.
+    file.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
         if (error) {
             *error = u"Could not write %1"_s.arg(path);

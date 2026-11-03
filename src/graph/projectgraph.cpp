@@ -8,6 +8,8 @@
 #include <QFile>
 #include <QDir>
 #include <QTextStream>
+#include <QMutexLocker>
+#include <QSaveFile>
 #include <QJsonDocument>
 #include <QRegularExpression>
 #include <QStack>
@@ -35,8 +37,10 @@ ProjectGraph::~ProjectGraph()
 
 void ProjectGraph::generateGraph(const QString &workspacePath)
 {
+    QMutexLocker locker(&m_mutex);
     setWorkspacePath(workspacePath);
     clear();
+    m_truncationWarned = false;
     // A fresh walk: a directory visited by an earlier scan no longer counts.
     m_visitedDirs.clear();
 
@@ -65,8 +69,14 @@ void ProjectGraph::generateGraph(const QString &workspacePath)
 
 void ProjectGraph::scanDirectory(const QString &dirPath, const QString &parentNodeId)
 {
+    auto warnTruncated = [this] {
+        if (!m_truncationWarned) {
+            m_truncationWarned = true;
+            qWarning("KateAI: project graph truncated at 300 nodes; some files are not indexed.");
+        }
+    };
     if (m_nodes.size() >= 300) {
-        qWarning("KateAI: project graph truncated at 300 nodes; some files are not indexed.");
+        warnTruncated();
         return;
     }
 
@@ -94,7 +104,7 @@ void ProjectGraph::scanDirectory(const QString &dirPath, const QString &parentNo
 
     for (const QFileInfo &entry : entries) {
         if (m_nodes.size() >= 300) {
-            qWarning("KateAI: project graph truncated at 300 nodes; some files are not indexed.");
+            warnTruncated();
             break;
         }
 
@@ -189,6 +199,7 @@ void ProjectGraph::scanDirectory(const QString &dirPath, const QString &parentNo
 
 void ProjectGraph::updateGraph(const QString &filePath, const QString &content)
 {
+    QMutexLocker locker(&m_mutex);
     const QString absPath = QFileInfo(filePath).absoluteFilePath();
     QString nodeId = generateNodeId(absPath);
     GraphNode *node = getNode(nodeId);
@@ -279,6 +290,7 @@ void ProjectGraph::updateGraph(const QString &filePath, const QString &content)
 
 void ProjectGraph::removeNode(const QString &nodeId)
 {
+    QMutexLocker locker(&m_mutex);
     if (!m_nodes.contains(nodeId)) {
         return;
     }
@@ -328,6 +340,8 @@ void ProjectGraph::removeNode(const QString &nodeId)
 
 void ProjectGraph::clear()
 {
+    QMutexLocker locker(&m_mutex);
+    m_truncationWarned = false;
     qDeleteAll(m_nodes);
     m_nodes.clear();
     qDeleteAll(m_edges);
@@ -338,6 +352,7 @@ void ProjectGraph::clear()
 
 void ProjectGraph::addNode(const GraphNode &node)
 {
+    QMutexLocker locker(&m_mutex);
     if (m_nodes.contains(node.id)) {
         return;
     }
@@ -353,21 +368,25 @@ void ProjectGraph::addNode(const GraphNode &node)
 
 GraphNode* ProjectGraph::getNode(const QString &nodeId)
 {
+    QMutexLocker locker(&m_mutex);
     return m_nodes.value(nodeId, nullptr);
 }
 
 const GraphNode* ProjectGraph::getNode(const QString &nodeId) const
 {
+    QMutexLocker locker(&m_mutex);
     return m_nodes.value(nodeId, nullptr);
 }
 
 QList<GraphNode*> ProjectGraph::getAllNodes() const
 {
+    QMutexLocker locker(&m_mutex);
     return m_nodes.values();
 }
 
 QList<GraphNode*> ProjectGraph::getNodesByType(const QString &type) const
 {
+    QMutexLocker locker(&m_mutex);
     QList<GraphNode*> result;
     for (GraphNode *node : m_nodes) {
         if (node->type == type) {
@@ -379,6 +398,7 @@ QList<GraphNode*> ProjectGraph::getNodesByType(const QString &type) const
 
 QList<GraphNode*> ProjectGraph::getFilesInDirectory(const QString &dirPath) const
 {
+    QMutexLocker locker(&m_mutex);
     QList<GraphNode*> result;
     // Canonicalize both sides: callers pass relative paths while nodes store
     // absolute ones (and vice versa), so compare canonical forms.
@@ -415,6 +435,7 @@ QList<GraphNode*> ProjectGraph::getFilesInDirectory(const QString &dirPath) cons
 
 void ProjectGraph::addEdge(const GraphEdge &edge)
 {
+    QMutexLocker locker(&m_mutex);
     // Check if edge already exists
     QString edgeKey = edge.sourceId + u"->"_s + edge.targetId + u"->"_s + edge.relationship;
     if (m_edges.contains(edgeKey)) {
@@ -441,6 +462,7 @@ void ProjectGraph::addEdge(const GraphEdge &edge)
 
 void ProjectGraph::removeEdge(const QString &sourceId, const QString &targetId)
 {
+    QMutexLocker locker(&m_mutex);
     // Remove every edge between the pair (any relationship), not just the
     // first match.
     QStringList doomed;
@@ -472,6 +494,7 @@ void ProjectGraph::removeEdge(const QString &sourceId, const QString &targetId)
 
 QList<GraphEdge*> ProjectGraph::getEdgesFrom(const QString &sourceId) const
 {
+    QMutexLocker locker(&m_mutex);
     QList<GraphEdge*> result;
     for (auto it = m_edges.begin(); it != m_edges.end(); ++it) {
         if (it.key().startsWith(sourceId + u"->"_s)) {
@@ -483,6 +506,7 @@ QList<GraphEdge*> ProjectGraph::getEdgesFrom(const QString &sourceId) const
 
 QList<GraphEdge*> ProjectGraph::getEdgesTo(const QString &targetId) const
 {
+    QMutexLocker locker(&m_mutex);
     QList<GraphEdge*> result;
     for (auto it = m_edges.begin(); it != m_edges.end(); ++it) {
         // Exact token compare: a substring match confuses "ab" with "abc".
@@ -502,6 +526,7 @@ QList<GraphEdge*> ProjectGraph::getEdgesTo(const QString &targetId) const
 
 QList<GraphEdge*> ProjectGraph::getEdgesByRelationship(const QString &relationship) const
 {
+    QMutexLocker locker(&m_mutex);
     QList<GraphEdge*> result;
     for (auto it = m_edges.begin(); it != m_edges.end(); ++it) {
         if (it.key().endsWith(u"->"_s + relationship)) {
@@ -513,6 +538,7 @@ QList<GraphEdge*> ProjectGraph::getEdgesByRelationship(const QString &relationsh
 
 QList<GraphNode*> ProjectGraph::findRelatedNodes(const QString &nodeId, int maxDepth) const
 {
+    QMutexLocker locker(&m_mutex);
     QList<GraphNode*> result;
     QSet<QString> visited;
     QQueue<QPair<QString, int>> queue;
@@ -547,6 +573,7 @@ QList<GraphNode*> ProjectGraph::findRelatedNodes(const QString &nodeId, int maxD
 
 QList<QString> ProjectGraph::findImportPaths(const QString &sourceNodeId, const QString &targetNodeId) const
 {
+    QMutexLocker locker(&m_mutex);
     QList<QString> result;
     static constexpr int kMaxDepth = 10;
     static constexpr int kMaxResults = 100;
@@ -595,6 +622,7 @@ QList<QString> ProjectGraph::findImportPaths(const QString &sourceNodeId, const 
 
 QSet<QString> ProjectGraph::getTransitiveDependencies(const QString &nodeId) const
 {
+    QMutexLocker locker(&m_mutex);
     QSet<QString> result;
     QSet<QString> visited;
     QQueue<QString> queue;
@@ -621,6 +649,7 @@ QSet<QString> ProjectGraph::getTransitiveDependencies(const QString &nodeId) con
 
 QSet<QString> ProjectGraph::getTransitiveDependents(const QString &nodeId) const
 {
+    QMutexLocker locker(&m_mutex);
     QSet<QString> result;
     QSet<QString> visited;
     QQueue<QString> queue;
@@ -658,6 +687,7 @@ QSet<QString> ProjectGraph::getTransitiveDependents(const QString &nodeId) const
 
 QList<GraphNode*> ProjectGraph::getDependencyChain(const QString &startNodeId, const QString &endNodeId) const
 {
+    QMutexLocker locker(&m_mutex);
     struct Frame {
         QString nodeId;
         QStringList path;
@@ -665,6 +695,7 @@ QList<GraphNode*> ProjectGraph::getDependencyChain(const QString &startNodeId, c
     };
     QStack<Frame> stack;
     QList<GraphNode*> result;
+    QSet<QString> seen; // Flattened result is deduped across paths.
     static constexpr int kMaxDepth = 10;
     static constexpr int kMaxResults = 100;
 
@@ -677,7 +708,12 @@ QList<GraphNode*> ProjectGraph::getDependencyChain(const QString &startNodeId, c
 
         if (currentNodeId == endNodeId) {
             for (const QString &nodeId : path) {
-                const GraphNode *node = getNode(nodeId);
+                if (seen.contains(nodeId)) {
+                    continue;
+                }
+                seen.insert(nodeId);
+                auto nit = m_nodes.constFind(nodeId);
+                const GraphNode *node = nit == m_nodes.constEnd() ? nullptr : nit.value();
                 if (node) {
                     result.append(const_cast<GraphNode*>(node));
                 }
@@ -688,7 +724,8 @@ QList<GraphNode*> ProjectGraph::getDependencyChain(const QString &startNodeId, c
             continue;
         }
 
-        const GraphNode *currentNode = getNode(currentNodeId);
+        auto cit = m_nodes.constFind(currentNodeId);
+        const GraphNode *currentNode = cit == m_nodes.constEnd() ? nullptr : cit.value();
         if (currentNode) {
             for (const QString &dependencyId : currentNode->dependencies) {
                 if (!current.visited.contains(dependencyId)) {
@@ -709,6 +746,7 @@ QList<GraphNode*> ProjectGraph::getDependencyChain(const QString &startNodeId, c
 
 void ProjectGraph::analyzeFileDependencies()
 {
+    QMutexLocker locker(&m_mutex);
     for (auto it = m_nodes.begin(); it != m_nodes.end(); ++it) {
         GraphNode *node = it.value();
         if (node->type == u"file"_s) {
@@ -739,6 +777,7 @@ void ProjectGraph::analyzeFileDependencies()
 
 void ProjectGraph::analyzeCodeStructure()
 {
+    QMutexLocker locker(&m_mutex);
     for (auto it = m_nodes.begin(); it != m_nodes.end(); ++it) {
         GraphNode *node = it.value();
         if (node->type == u"file"_s) {
@@ -749,6 +788,7 @@ void ProjectGraph::analyzeCodeStructure()
 
 void ProjectGraph::updateSecurityStatus()
 {
+    QMutexLocker locker(&m_mutex);
     for (auto it = m_edges.begin(); it != m_edges.end(); ++it) {
         GraphEdge *edge = it.value();
         GraphNode *sourceNode = getNode(edge->sourceId);
@@ -799,21 +839,20 @@ void ProjectGraph::generateSummaryReport() const
 
 bool ProjectGraph::saveToFile(const QString &filePath) const
 {
-    // Write-temp+rename: a crash mid-write must not leave a truncated graph.
-    const QString tempPath = filePath + u".tmp"_s;
-    {
-        QFile file(tempPath);
-        if (!file.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate)) {
-            return false;
-        }
-
-        QJsonObject json = toJson();
-        QJsonDocument doc(json);
-        file.write(doc.toJson());
-        file.close();
+    // QSaveFile writes temp + renames atomically; no remove-then-rename window
+    // where a crash leaves no graph at all.
+    QSaveFile file(filePath);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Text | QIODevice::Truncate)) {
+        return false;
     }
-    QFile::remove(filePath);
-    return QFile::rename(tempPath, filePath);
+    // toJson() locks the same recursive mutex; build the document first.
+    QJsonObject json;
+    {
+        QMutexLocker locker(&m_mutex);
+        json = toJson();
+    }
+    file.write(QJsonDocument(json).toJson());
+    return file.commit();
 }
 
 bool ProjectGraph::loadFromFile(const QString &filePath)
@@ -824,11 +863,17 @@ bool ProjectGraph::loadFromFile(const QString &filePath)
     }
 
     static constexpr qint64 kMaxGraphBytes = 32 * 1024 * 1024;
-    if (file.size() > kMaxGraphBytes) {
+    if (file.size() > kMaxGraphBytes + 1024) {
         qWarning("KateAI: project graph file too large, refusing to load.");
         return false;
     }
-    QByteArray data = file.readAll();
+    // Cap the read itself: file.size() is TOCTOU (the file can grow between
+    // the check and the read), so never read more than the cap + 1.
+    QByteArray data = file.read(kMaxGraphBytes + 1);
+    if (data.size() > kMaxGraphBytes) {
+        qWarning("KateAI: project graph file too large, refusing to load.");
+        return false;
+    }
     QJsonDocument doc = QJsonDocument::fromJson(data);
     if (!doc.isObject()) {
         return false;
@@ -842,8 +887,13 @@ bool ProjectGraph::loadFromFile(const QString &filePath)
         return false;
     }
 
-    bool result = fromJson(doc.object());
+    bool truncated = false;
+    bool result = fromJson(doc.object(), &truncated);
+    if (truncated) {
+        qWarning("KateAI: project graph file was truncated at the entry cap.");
+    }
     if (result) {
+        QMutexLocker locker(&m_mutex);
         m_lastUpdateTime = QDateTime::currentSecsSinceEpoch();
         m_isDirty = false;
     }
@@ -853,6 +903,7 @@ bool ProjectGraph::loadFromFile(const QString &filePath)
 
 QJsonObject ProjectGraph::toJson() const
 {
+    QMutexLocker locker(&m_mutex);
     QJsonObject json;
 
     // Add nodes
@@ -917,8 +968,12 @@ QJsonObject ProjectGraph::toJson() const
     return json;
 }
 
-bool ProjectGraph::fromJson(const QJsonObject &json)
+bool ProjectGraph::fromJson(const QJsonObject &json, bool *truncated)
 {
+    if (truncated) {
+        *truncated = false;
+    }
+    QMutexLocker locker(&m_mutex);
     // Clear existing graph
     clear();
 
@@ -929,6 +984,9 @@ bool ProjectGraph::fromJson(const QJsonObject &json)
     for (const QJsonValue &nodeValue : nodesArray) {
         if (++loaded > kMaxLoadEntries) {
             qWarning("KateAI: project graph node cap reached while loading; truncating.");
+            if (truncated) {
+                *truncated = true;
+            }
             break;
         }
         QJsonObject nodeJson = nodeValue.toObject();
@@ -967,6 +1025,9 @@ bool ProjectGraph::fromJson(const QJsonObject &json)
     for (const QJsonValue &edgeValue : edgesArray) {
         if (++loaded > kMaxLoadEntries) {
             qWarning("KateAI: project graph edge cap reached while loading; truncating.");
+            if (truncated) {
+                *truncated = true;
+            }
             break;
         }
         QJsonObject edgeJson = edgeValue.toObject();
@@ -986,6 +1047,7 @@ bool ProjectGraph::fromJson(const QJsonObject &json)
 
 void ProjectGraph::buildAdjacencyList()
 {
+    QMutexLocker locker(&m_mutex);
     m_adjacencyList.clear();
     for (auto it = m_edges.begin(); it != m_edges.end(); ++it) {
         const GraphEdge *edge = it.value();
@@ -998,6 +1060,7 @@ void ProjectGraph::buildAdjacencyList()
 
 void ProjectGraph::cleanupDeletedNodes()
 {
+    QMutexLocker locker(&m_mutex);
     QSet<QString> existingNodeIds;
     for (auto it = m_nodes.begin(); it != m_nodes.end(); ++it) {
         existingNodeIds.insert(it.key());
@@ -1013,7 +1076,20 @@ void ProjectGraph::cleanupDeletedNodes()
         if (arrow1 != -1 && arrow2 != -1 && arrow1 != arrow2) {
             QString sourceId = edgeKey.mid(0, arrow1);
             QString targetId = edgeKey.mid(arrow1 + 2, arrow2 - arrow1 - 2);
-            if (!existingNodeIds.contains(sourceId) || !existingNodeIds.contains(targetId)) {
+            const QString relationship = edgeKey.mid(arrow2 + 2);
+            if (!existingNodeIds.contains(sourceId)) {
+                delete it.value();
+                it = m_edges.erase(it);
+                continue;
+            }
+            if (!existingNodeIds.contains(targetId)) {
+                // Live-edit import edges carry raw import text as the target
+                // (not a node id). Dropping them here is what made updateGraph
+                // imports vanish on every edit; keep them.
+                if (relationship == u"imports"_s) {
+                    ++it;
+                    continue;
+                }
                 delete it.value();
                 it = m_edges.erase(it);
                 continue;
@@ -1026,6 +1102,13 @@ void ProjectGraph::cleanupDeletedNodes()
         }
     }
 
+    QSet<QString> keptRawTargets;
+    for (auto eit = m_edges.constBegin(); eit != m_edges.constEnd(); ++eit) {
+        const GraphEdge *e = eit.value();
+        if (e && e->relationship == u"imports"_s && !existingNodeIds.contains(e->targetId)) {
+            keptRawTargets.insert(e->targetId);
+        }
+    }
     auto adjIt = m_adjacencyList.begin();
     while (adjIt != m_adjacencyList.end()) {
         if (!existingNodeIds.contains(adjIt.key())) {
@@ -1034,7 +1117,7 @@ void ProjectGraph::cleanupDeletedNodes()
         }
         QSet<QString> &neighbors = adjIt.value();
         for (auto nIt = neighbors.begin(); nIt != neighbors.end();) {
-            if (!existingNodeIds.contains(*nIt)) {
+            if (!existingNodeIds.contains(*nIt) && !keptRawTargets.contains(*nIt)) {
                 nIt = neighbors.erase(nIt);
             } else {
                 ++nIt;
@@ -1083,25 +1166,55 @@ QString ProjectGraph::extractImportsFromContent(const QString &content, const QS
         imports += match.captured(0) + u"\n"_s;
     }
 
-    // Extract Python imports
-    QRegularExpression pythonImportRegex(u"^(import|from)\\s+\\w+(?:\\.\\w+)*"_s,
+    // Extract Python imports (allow leading indentation for nested imports)
+    QRegularExpression pythonImportRegex(u"^\\s*(import|from)\\s+\\w+(?:\\.\\w+)*"_s,
                                          QRegularExpression::MultilineOption);
     it = pythonImportRegex.globalMatch(content);
     while (it.hasNext()) {
         QRegularExpressionMatch match = it.next();
-        imports += match.captured(0) + u"\n"_s;
+        imports += match.captured(0).trimmed() + u"\n"_s;
     }
 
-    // Extract JavaScript imports
-    QRegularExpression jsImportRegex(u"^(import|require)\\s+[\\'\\\"][^\\'\\\"]+[\\'\\\"]"_s,
-                                     QRegularExpression::MultilineOption);
-    it = jsImportRegex.globalMatch(content);
-    while (it.hasNext()) {
-        QRegularExpressionMatch match = it.next();
-        imports += match.captured(0) + u"\n"_s;
+    // Extract JavaScript imports: side-effect, from-form, require(), dynamic import()
+    const QStringList jsPatterns = {
+        u"^\\s*import\\s+[^;]*?\\s+from\\s+[\\'\\\"][^\\'\\\"]+[\\'\\\"]"_s,
+        u"^\\s*import\\s+[\\'\\\"][^\\'\\\"]+[\\'\\\"]"_s,
+        u"require\\s*\\(\\s*[\\'\\\"][^\\'\\\"]+[\\'\\\"]\\s*\\)"_s,
+        u"import\\s*\\(\\s*[\\'\\\"][^\\'\\\"]+[\\'\\\"]\\s*\\)"_s,
+    };
+    for (const QString &pattern : jsPatterns) {
+        QRegularExpression jsImportRegex(pattern, QRegularExpression::MultilineOption);
+        it = jsImportRegex.globalMatch(content);
+        while (it.hasNext()) {
+            QRegularExpressionMatch match = it.next();
+            imports += match.captured(0).trimmed() + u"\n"_s;
+        }
     }
 
     return imports.trimmed();
+}
+
+static bool isCommentOrSkippedLine(const QString &lineTrimmed)
+{
+    if (lineTrimmed.startsWith(u"//"_s) || lineTrimmed.startsWith(u"#"_s)
+        || lineTrimmed.startsWith(u"*"_s)) {
+        return true;
+    }
+    // Control-flow headers are not definitions.
+    if (lineTrimmed.startsWith(u"else if"_s) || lineTrimmed.startsWith(u"else  if"_s)) {
+        return true;
+    }
+    return false;
+}
+
+static QString lineOf(const QString &content, int pos)
+{
+    const int lineStart = content.lastIndexOf(u'\n', pos) + 1;
+    int lineEnd = content.indexOf(u'\n', pos);
+    if (lineEnd < 0) {
+        lineEnd = content.size();
+    }
+    return content.mid(lineStart, lineEnd - lineStart).trimmed();
 }
 
 QStringList ProjectGraph::extractClassDefinitions(const QString &content) const
@@ -1113,6 +1226,9 @@ QStringList ProjectGraph::extractClassDefinitions(const QString &content) const
     QStringList matches;
     while (it.hasNext()) {
         QRegularExpressionMatch match = it.next();
+        if (isCommentOrSkippedLine(lineOf(content, match.capturedStart()))) {
+            continue;
+        }
         matches.append(match.captured(0));
     }
     return matches;
@@ -1128,6 +1244,17 @@ QStringList ProjectGraph::extractFunctionDefinitions(const QString &content) con
     QStringList matches;
     while (it.hasNext()) {
         QRegularExpressionMatch match = it.next();
+        const QString line = lineOf(content, match.capturedStart());
+        if (isCommentOrSkippedLine(line)) {
+            continue;
+        }
+        // `else if (...)` / `if (...)` headers match the shape above but are
+        // call sites of control flow, not definitions.
+        if (line.startsWith(u"if"_s) || line.startsWith(u"else"_s)
+            || line.startsWith(u"for"_s) || line.startsWith(u"while"_s)
+            || line.startsWith(u"switch"_s) || line.startsWith(u"catch"_s)) {
+            continue;
+        }
         matches.append(match.captured(0));
     }
     return matches;

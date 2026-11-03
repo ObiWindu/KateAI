@@ -71,8 +71,8 @@ int safeBoundary(const QList<ChatMessage> &history, int start)
 
 QString oneLine(const QString &text, int limit)
 {
+    // simplified() already flattens newlines, so no regex pass is needed.
     QString flat = text.simplified();
-    flat.replace(QRegularExpression(QStringLiteral("[\\r\\n]+")), QStringLiteral(" "));
     if (limit > 0 && flat.length() > limit) {
         flat = truncateSafe(flat, limit) + QStringLiteral("…");
     }
@@ -121,10 +121,11 @@ int estimateTokens(const QString &text)
     const int byteCount = utf8.size();
     const int charCount = text.length();
     // If mostly ASCII (1 byte per char), use char count. If multibyte, use byte count.
+    // Round up: truncating underestimates and lets oversized requests through.
     if (byteCount <= charCount * 1.2) {
-        return qMax(1, charCount / 4);
+        return qMax(1, (charCount + kCharsPerToken - 1) / kCharsPerToken);
     }
-    return qMax(1, byteCount / 4);
+    return qMax(1, (byteCount + kCharsPerToken - 1) / kCharsPerToken);
 }
 
 int estimateTokens(const QList<ChatMessage> &messages)
@@ -175,8 +176,12 @@ QString buildSummary(const QList<ChatMessage> &dropped, int requestChars, Projec
     QStringList tools;
     QStringList outcomes;
     int rejected = 0;
+    bool requestCapReached = false;
 
     for (const ChatMessage &message : dropped) {
+        if (requestCapReached) {
+            break;
+        }
         switch (message.role) {
         case ChatMessage::Role::User: {
             if (message.content.startsWith(QLatin1String("[KateAI agent controller]"))) {
@@ -193,8 +198,9 @@ QString buildSummary(const QList<ChatMessage> &dropped, int requestChars, Projec
                 userRequests << line;
                 if (userRequests.size() >= 50) {
                     // Bounded: a very long dropped span must not grow the
-                    // summary without limit.
-                    break;
+                    // summary without limit (breaks the outer loop via flag;
+                    // break alone would only leave the switch).
+                    requestCapReached = true;
                 }
             }
             break;
@@ -220,7 +226,7 @@ QString buildSummary(const QList<ChatMessage> &dropped, int requestChars, Projec
                     path = arguments.value(u"TargetFile"_s).toString();
                 }
                 if (!path.isEmpty()) {
-                    if (!fileSet.contains(path)) {
+                    if (!fileSet.contains(path) && files.size() < 200) {
                         fileSet.insert(path);
                         files << path;
                     }
@@ -300,9 +306,12 @@ QString buildSummary(const QList<ChatMessage> &dropped, int requestChars, Projec
                     }
                 }
                 if (!node) {
+                    // Resolve relative tool paths against the workspace root,
+                    // not the process CWD, which may be anywhere.
+                    const QString absF = QDir(projectGraph->getWorkspacePath()).absoluteFilePath(f);
                     for (GraphNode *n : candidates) {
-                        if (n && (QFileInfo(f).absolutePath().startsWith(QFileInfo(n->path).absolutePath())
-                                  || QFileInfo(n->path).absolutePath().startsWith(QFileInfo(f).absolutePath()))) {
+                        if (n && (QFileInfo(absF).absolutePath().startsWith(QFileInfo(n->path).absolutePath())
+                                  || QFileInfo(n->path).absolutePath().startsWith(QFileInfo(absF).absolutePath()))) {
                             node = n;
                             break;
                         }
@@ -526,7 +535,10 @@ QList<ChatMessage> build(const QList<ChatMessage> &history, const Options &optio
 
     // Last resort: if the protected tail alone still overflows, drop the
     // oldest non-latest messages until it fits, then shrink what remains.
-    if (estimateTokens(result) > budget) {
+    // Token totals are cached: recomputing estimateTokens(result) per removal
+    // is O(n^2) on long histories.
+    int cachedTotal = estimateTokens(result);
+    if (cachedTotal > budget) {
         int latestUserInResult = -1;
         for (int i = result.size() - 1; i >= 0; --i) {
             if (result.at(i).role == ChatMessage::Role::User && !isSummary(result.at(i))) {
@@ -534,14 +546,22 @@ QList<ChatMessage> build(const QList<ChatMessage> &history, const Options &optio
                 break;
             }
         }
+        // Cache per-message costs so removal updates the total in O(1).
+        QList<int> costs;
+        costs.reserve(result.size());
+        for (const ChatMessage &m : result) {
+            costs.append(tokensOf(m));
+        }
         // Drop-to-fit: oldest first, never the system prefix, never the
         // latest user turn.
-        for (int i = bodyStart; i < result.size() && estimateTokens(result) > budget;) {
+        for (int i = bodyStart; i < result.size() && cachedTotal > budget;) {
             if (i == latestUserInResult || result.at(i).role == ChatMessage::Role::System) {
                 ++i;
                 continue;
             }
             // Keep the index of the live request stable as entries vanish.
+            cachedTotal -= costs.at(i);
+            costs.removeAt(i);
             result.removeAt(i);
             if (latestUserInResult > i) {
                 --latestUserInResult;
@@ -555,7 +575,7 @@ QList<ChatMessage> build(const QList<ChatMessage> &history, const Options &optio
             ChatMessage &message = result[i];
             message.thinking.clear();
             const qint64 cap64 = (i == latestUserInResult)
-                ? qMax<qint64>(400, (qint64)budget * kCharsPerToken / 4)
+                ? qMax<qint64>(400, (qint64)budget * kCharsPerToken)
                 : 240;
             const int cap = (int)qBound<qint64>(0, cap64, (qint64)std::numeric_limits<int>::max());
             if (message.content.length() > cap) {

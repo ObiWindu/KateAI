@@ -51,6 +51,9 @@ bool isProtectedPath(const QString &relativePath)
     // Every file RulesLoader feeds into the system prompt belongs here, not
     // just KATEAI.md: a snapshot that captured "safe" rules would otherwise
     // write them back over the ones the user is looking at.
+    // Note: git paths never carry a trailing slash, so the directory-form
+    // alternatives (e.g. ".kateai/mcp.json/") never match a real entry; they
+    // are kept as harmless belt-and-braces alongside the exact match.
     if (lowered == u".kateai/mcp.json"_s || lowered.startsWith(u".kateai/mcp.json/"_s)
         || lowered == u"kateai.md"_s || lowered.startsWith(u".kateai/rules/"_s)
         || lowered.startsWith(u".kateai/modes/"_s) || lowered.startsWith(u".kateai/agents/"_s)
@@ -67,7 +70,9 @@ bool isProtectedPath(const QString &relativePath)
 
 // Tag names carry a zero-padded sequence so `for-each-ref --sort=-refname`
 // yields newest-first even when several snapshots land in the same second.
-// `git tag` prepends refs/tags/ itself, so it must be given the short name.
+// Width 8 sorts correctly up to 99,999,999 tags; retention caps at 500, so
+// this is unreachable in practice. `git tag` prepends refs/tags/ itself, so
+// it must be given the short name.
 QString tagName(int sequence, const QString &hash)
 {
     return QStringLiteral("kateai/%1-%2").arg(sequence, 8, 10, QLatin1Char('0')).arg(hash);
@@ -336,9 +341,17 @@ CheckpointManager::CheckpointManager(QObject *parent)
 
 CheckpointManager::~CheckpointManager()
 {
+    // Guard the detached list: runGitDetached() may append from another path
+    // while teardown runs.
+    QList<QProcess *> pending;
+    {
+        QMutexLocker locker(&m_checkpointMutex);
+        pending = m_detachedProcesses;
+        m_detachedProcesses.clear();
+    }
     // A git process that is still running is stopped, so it does not keep
     // the repository locked after the manager is gone.
-    for (QProcess *git : std::as_const(m_detachedProcesses)) {
+    for (QProcess *git : std::as_const(pending)) {
         if (git && git->state() != QProcess::NotRunning) {
             git->kill();
             git->waitForFinished(1000);
@@ -347,7 +360,6 @@ CheckpointManager::~CheckpointManager()
             git->deleteLater();
         }
     }
-    m_detachedProcesses.clear();
     // A snapshot worker holds m_checkpointMutex and queues its result back
     // onto this object via QueuedConnection, so a worker that finishes during
     // teardown drops its result instead of touching freed memory. Do not
@@ -392,7 +404,7 @@ void CheckpointManager::pruneStaleShadowRepositories() const
     // A repository of a project that no longer exists is useless, and one
     // that was not touched for a month is not worth the space.
     const QDateTime cutoff = QDateTime::currentDateTime().addDays(-30);
-    const QFileInfoList entries = dir.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot | QDir::NoSymLinks);
+    const QFileInfoList entries = dir.entryInfoList(QDir::Dirs | QDir::NoDotAndDotDot);
     // The repository of the workspace that is open right now is never pruned,
     // however old it looks: deleting it would throw away the checkpoints of
     // the project the user is actively working on.
@@ -429,8 +441,9 @@ void CheckpointManager::pruneStaleShadowRepositories() const
         if (markerInfo.exists()) {
             mtime = markerInfo.lastModified();
         }
-        if (mtime < cutoff || workspace.isEmpty()) {
-            // The project is gone, or the repository was never finished.
+        if (mtime < cutoff) {
+            // The project is gone and the repo is old, or the repository was
+            // never finished (marker missing) and is past the grace period.
             QDir(entry.absoluteFilePath()).removeRecursively();
         }
     }
@@ -589,14 +602,19 @@ void CheckpointManager::runGitDetached(const QStringList &arguments, int timeout
         git->kill();
     });
     connect(git, &QProcess::finished, git, [this, git]() {
+        QMutexLocker locker(&m_checkpointMutex);
         m_detachedProcesses.removeAll(git);
         git->deleteLater();
     });
     connect(git, &QProcess::errorOccurred, git, [this, git](QProcess::ProcessError) {
+        QMutexLocker locker(&m_checkpointMutex);
         m_detachedProcesses.removeAll(git);
         git->deleteLater();
     });
-    m_detachedProcesses.append(git);
+    {
+        QMutexLocker locker(&m_checkpointMutex);
+        m_detachedProcesses.append(git);
+    }
     git->start(u"git"_s, full);
 }
 
@@ -641,21 +659,25 @@ QStringList CheckpointManager::checkpointRefs() const
 
 QString CheckpointManager::createCheckpoint(const QString &label, QString *error)
 {
-    QMutexLocker locker(&m_checkpointMutex);
+    QString commit;
+    {
+        QMutexLocker locker(&m_checkpointMutex);
 
-    if (!isAvailable()) {
-        if (error) {
-            *error = m_unavailableReason.isEmpty() ? u"Checkpoints are unavailable."_s : m_unavailableReason;
+        if (!isAvailable()) {
+            if (error) {
+                *error = m_unavailableReason.isEmpty() ? u"Checkpoints are unavailable."_s : m_unavailableReason;
+            }
+            return {};
         }
-        return {};
-    }
 
-    const QString commit = snapshotWorkspace(gitDir(), m_workspace, label, error);
-    if (commit.isEmpty()) {
-        return {};
-    }
+        commit = snapshotWorkspace(gitDir(), m_workspace, label, error);
+        if (commit.isEmpty()) {
+            return {};
+        }
 
-    prune();
+        prune();
+        locker.unlock();
+    }
     Q_EMIT checkpointCreated(commit, label);
     return commit;
 }
@@ -769,7 +791,11 @@ int CheckpointManager::changedFileCount(const QString &id) const
     // commands that touch the same index, and two of them at once race for
     // the index lock.
     QMutexLocker locker(&m_checkpointMutex);
-    stageWorktree();
+    QString stageError;
+    if (!stageWorktree(&stageError)) {
+        qWarning() << "KateAI: cannot stage worktree for changed-file count:" << stageError;
+        return 0;
+    }
     QString output;
     if (!runGit({u"diff"_s, u"--cached"_s, u"--name-only"_s, id}, &output, nullptr)) {
         return 0;
@@ -786,7 +812,11 @@ QString CheckpointManager::diffAgainstCheckpoint(const QString &id, int maxLines
     // The same reason as in changedFileCount(): the git commands touch the
     // shared index.
     QMutexLocker locker(&m_checkpointMutex);
-    stageWorktree();
+    QString stageError;
+    if (!stageWorktree(&stageError)) {
+        qWarning() << "KateAI: cannot stage worktree for diff:" << stageError;
+        return {};
+    }
     QString diff;
     if (!runGit({u"diff"_s, u"--cached"_s, u"--no-color"_s, id}, &diff, nullptr)) {
         return {};
@@ -848,6 +878,28 @@ bool CheckpointManager::restoreCheckpoint(const QString &id, QString *error)
     const QStringList currentList = listed.split(QChar(u'\0'), Qt::SkipEmptyParts);
     const QSet<QString> currentFiles(currentList.cbegin(), currentList.cend());
 
+    // Back up the index before read-tree mutates it: a failed restore must
+    // leave the worktree/index as found instead of half-restored.
+    const QString indexPath = gitDir() + u"/index"_s;
+    QByteArray indexBackup;
+    bool haveIndexBackup = false;
+    {
+        QFile indexFile(indexPath);
+        if (indexFile.open(QIODevice::ReadOnly)) {
+            indexBackup = indexFile.readAll();
+            haveIndexBackup = true;
+        }
+    }
+    auto restoreIndex = [&] {
+        if (!haveIndexBackup) {
+            return;
+        }
+        QFile indexFile(indexPath);
+        if (indexFile.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            indexFile.write(indexBackup);
+        }
+    };
+
     if (!runGit({u"read-tree"_s, id}, nullptr, error)) {
         return false;
     }
@@ -888,6 +940,7 @@ bool CheckpointManager::restoreCheckpoint(const QString &id, QString *error)
         }
     }
     if (!runGit({u"checkout-index"_s, u"-a"_s, u"-f"_s}, nullptr, error)) {
+        restoreIndex();
         return false;
     }
 
@@ -896,6 +949,7 @@ bool CheckpointManager::restoreCheckpoint(const QString &id, QString *error)
         if (error) {
             *error = u"Could not list restored files; the workspace was left untouched."_s;
         }
+        restoreIndex();
         return false;
     }
     const QStringList restoredList = restored.split(QChar(u'\0'), Qt::SkipEmptyParts);

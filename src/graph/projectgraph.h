@@ -15,6 +15,7 @@
 #include <QDateTime>
 #include <QFileInfo>
 #include <QRegularExpression>
+#include <QRecursiveMutex>
 #include <QStack>
 #include <QQueue>
 #include <algorithm>
@@ -77,6 +78,8 @@ public:
     QList<QString> findImportPaths(const QString &sourceNodeId, const QString &targetNodeId) const;
     QSet<QString> getTransitiveDependencies(const QString &nodeId) const;
     QSet<QString> getTransitiveDependents(const QString &nodeId) const;
+    // Flattened across all paths (deduped): each node appears once even when
+    // several import paths contain it. Use findImportPaths() for per-path strings.
     QList<GraphNode*> getDependencyChain(const QString &startNodeId, const QString &endNodeId) const;
 
     // Project analysis
@@ -89,7 +92,9 @@ public:
     bool saveToFile(const QString &filePath) const;
     bool loadFromFile(const QString &filePath);
     QJsonObject toJson() const;
-    bool fromJson(const QJsonObject &json);
+    // Returns true even when the node/edge caps truncate the input; when
+    // truncated is non-null it is set to true in that case so callers can log.
+    bool fromJson(const QJsonObject &json, bool *truncated = nullptr);
 
     // Utility
     static QString generateNodeId(const QString &path, const QString &type = QStringLiteral("file"));
@@ -109,6 +114,9 @@ public:
     void setWorkspacePath(const QString &path) { m_workspacePath = path; }
 
 private:
+    // Guards mutation + reads; recursive because public helpers call each
+    // other (updateGraph -> cleanupDeletedNodes, clear -> fromJson, ...).
+    mutable QRecursiveMutex m_mutex;
     QMap<QString, GraphNode*> m_nodes;
     QMap<QString, GraphEdge*> m_edges;
     QMap<QString, QSet<QString>> m_adjacencyList;
@@ -118,6 +126,8 @@ private:
     QSet<QString> m_visitedDirs;
     qint64 m_lastUpdateTime;
     bool m_isDirty;
+    // scanDirectory() warns once per generation instead of once per level.
+    bool m_truncationWarned = false;
 
     void buildAdjacencyList();
     void cleanupDeletedNodes();
