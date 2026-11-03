@@ -1322,15 +1322,23 @@ void LlmClient::handleFinished()
     m_buffer.clear();
     m_pendingEventData.clear();
 
-    if (!m_toolAcc.isEmpty()) {
-        m_completedTools.append(completedToolsFromAccumulator());
-    }
-
     // Classify the error. Only trust the body as provider error text when the
     // request actually failed: on a 200 the body is the model's own output, and
     // an answer mentioning "blocked" or "safety" must not read as an error.
     const bool requestFailed = networkError != QNetworkReply::NoError || status >= 400
         || !m_completionError.isEmpty();
+
+    if (!m_toolAcc.isEmpty()) {
+        // Only trust fragments when the request itself succeeded; on an
+        // abnormal close a truncated arguments stream would otherwise become
+        // a real call.
+        if (!requestFailed) {
+            m_completedTools.append(completedToolsFromAccumulator());
+        } else {
+            qWarning() << "Dropping" << m_toolAcc.size() << "incomplete tool fragments after failed request";
+            m_toolAcc.clear();
+        }
+    }
     if (requestFailed) {
         // The body reaches the user verbatim in the error text, and providers
         // echo request details in it: a key leaked into a 400 body would be

@@ -411,6 +411,10 @@ LlmClient m_client;
 
     bool m_busy = false;
     State m_state = State::Idle;
+    // True while finishWithFailure() from the ACP budget gate unwinds; the
+    // toolFinished handler skips its transcript append then (the turn is
+    // tearing down and the message would be orphaned).
+    bool m_inBudgetAbort = false;
     int m_modelRequests = 0;
     int m_toolCalls = 0;
     bool m_cancelRequested = false;

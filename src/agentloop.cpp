@@ -104,7 +104,9 @@ AgentLoop::AgentLoop(QObject *parent)
         // ACP has no per-call gate before toolStarted: enforce the turn's
         // tool-call budget here, the way executeOne() does for native tools.
         if (m_settings.maxToolCalls > 0 && m_toolCalls > m_settings.maxToolCalls) {
+            m_inBudgetAbort = true;
             finishWithFailure(i18n("Tool-call budget exhausted (%1 calls). No further tool execution is permitted in this turn.", m_settings.maxToolCalls));
+            m_inBudgetAbort = false;
             return;
         }
         Q_EMIT toolStarted(request);
@@ -120,12 +122,14 @@ AgentLoop::AgentLoop(QObject *parent)
         Q_EMIT toolDetailsChanged(request);
     });
     connect(&m_acp, &AcpClient::toolFinished, this, [this](const ToolResult &result) {
-        ChatMessage toolMsg;
-        toolMsg.role = ChatMessage::Role::Tool;
-        toolMsg.toolCallId = result.toolCallId;
-        toolMsg.name = result.name;
-        toolMsg.content = result.output;
-        m_messages.append(toolMsg);
+        if (!m_inBudgetAbort) {
+            ChatMessage toolMsg;
+            toolMsg.role = ChatMessage::Role::Tool;
+            toolMsg.toolCallId = result.toolCallId;
+            toolMsg.name = result.name;
+            toolMsg.content = result.output;
+            m_messages.append(toolMsg);
+        }
         Q_EMIT toolFinished(result);
     });
     connect(&m_acp, &AcpClient::permissionNeeded, this, [this](const PermissionRequest &request) {
@@ -855,7 +859,9 @@ QString AgentLoop::systemPrompt() const
                     prompt += u"\n\n<git_status>\n"_s + status + u"\n</git_status>"_s;
                 }
             } else {
-                // Git command failed or timed out - silently skip git status
+                // Git command failed or timed out - kill the stray process so
+                // it does not linger, then skip git status.
+                git.kill();
                 qDebug() << "Git status command failed or timed out";
             }
         }
@@ -1129,7 +1135,7 @@ void AgentLoop::abort()
 
 void AgentLoop::start(const QString &userText)
 {
-    if (m_busy) {
+    if (isBusy()) {
         return;
     }
     if (m_workspace.isEmpty()) {
@@ -1322,6 +1328,11 @@ void AgentLoop::sendToModel()
 {
     if (!m_busy) {
         return;
+    }
+    // Results that landed while pacing (WaitingForNextModel) would otherwise
+    // strand in m_pendingResults; fold them in before building the request.
+    if (!m_pendingResults.isEmpty()) {
+        appendToolResultsToConversation();
     }
 
     QString error;
@@ -3042,6 +3053,7 @@ void AgentLoop::dispatchSubtask(const ToolCall &call)
             ToolResult result;
             result.ok = false;
             result.output = i18n("Tool-call budget exhausted (%1 calls). No further sub-agents can be started in this turn.", m_settings.maxToolCalls);
+            child->deleteLater();
             finishAsyncTool(call, result);
             return;
         }
@@ -3054,6 +3066,7 @@ void AgentLoop::dispatchSubtask(const ToolCall &call)
             ToolResult result;
             result.ok = false;
             result.output = i18n("Model-request budget exhausted (%1 requests). No further sub-agents can be started in this turn.", m_settings.maxModelRequests);
+            child->deleteLater();
             finishAsyncTool(call, result);
             return;
         }

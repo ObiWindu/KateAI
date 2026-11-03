@@ -1509,6 +1509,11 @@ void AcpClient::sendSessionLoadOrResume()
 void AcpClient::sendPromptNow(const QString &text)
 {
     stopTurnRetry();
+    if (m_cancelGraceTimer) {
+        m_cancelGraceTimer->stop();
+        m_cancelGraceTimer->deleteLater();
+        m_cancelGraceTimer = nullptr;
+    }
     m_cancelling = false;
     // Every turn starts with a full retry budget. executeTurnRetry() restores
     // the spent count after this reset, so automatic retries count against one
@@ -1671,10 +1676,18 @@ int AcpClient::sendRequest(const QString &method, const QJsonObject &params,
     if (m_nextId <= 0 || m_nextId == std::numeric_limits<int>::max()) {
         m_nextId = 1;
     }
+    int probes = 0;
     while (m_pending.contains(m_nextId)) {
         ++m_nextId;
         if (m_nextId <= 0 || m_nextId == std::numeric_limits<int>::max()) {
             m_nextId = 1;
+        }
+        if (++probes > 1000) {
+            qWarning() << "AcpClient::sendRequest: id table exhausted";
+            if (done) {
+                done(QJsonObject(), u"Internal error: request id space exhausted."_s);
+            }
+            return 0;
         }
     }
     const int id = m_nextId++;
@@ -1789,6 +1802,7 @@ void AcpClient::onStdioReadyRead()
         if (m_stdoutBuffer.size() > kMaxFrameBytes) {
             m_stdoutBuffer.clear();
             m_discardingStdoutFrame = true;
+            Q_EMIT logMessage(u"Discarded an oversized (>16MB) stdio frame."_s);
         }
     }
 }
@@ -1797,6 +1811,14 @@ void AcpClient::handleBuffer()
 {
     constexpr qsizetype kMaxFrameBytes = 16 * 1024 * 1024;
     int newline = m_stdoutBuffer.indexOf('\n');
+    if (newline < 0 && m_stdoutBuffer.size() > kMaxFrameBytes) {
+        // A newline-less frame (single-line blob) would otherwise grow the
+        // buffer without bound; drop it visibly instead.
+        m_stdoutBuffer.clear();
+        m_discardingStdoutFrame = true;
+        Q_EMIT logMessage(u"Discarded an oversized (>16MB) stdio frame without a newline."_s);
+        return;
+    }
     while (newline >= 0) {
         if (newline > kMaxFrameBytes) {
             m_stdoutBuffer.remove(0, newline + 1);
@@ -2075,6 +2097,11 @@ void AcpClient::handleSessionUpdate(const QJsonObject &update)
     }
     if (kind == u"tool_call_update"_s) {
         const QString toolCallId = update.value(u"toolCallId"_s).toString();
+        if (toolCallId.isEmpty()) {
+            // Without an id the update cannot be matched to a card or a
+            // result; keying m_liveTools[""] would collide all such updates.
+            return;
+        }
         const QString status = update.value(u"status"_s).toString();
         PermissionRequest existing = m_liveTools.value(toolCallId);
         if (existing.toolCallId.isEmpty()) {
@@ -3486,7 +3513,10 @@ void AcpClient::killTerminal(Terminal *term, bool release)
 #endif
     }
     if (!term->exited) {
-        markTerminalExited(term, term->process->exitCode(), QString());
+        // exitCode() is only valid after finish; a still-running process
+        // reads 0, which would report a kill as a clean exit.
+        const int code = term->process->state() != QProcess::NotRunning ? 143 : term->process->exitCode();
+        markTerminalExited(term, code, QString());
     }
     Q_UNUSED(release);
 }
