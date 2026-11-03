@@ -285,10 +285,15 @@ void EditorAssist::attachView(KTextEditor::View *view)
     attachment.cursorConnection =
         connect(view, &KTextEditor::View::cursorPositionChanged, this, [this, view]() {
             // A suggestion only ever belongs to the position it was built at.
+            // Text and path travel along: an undo under a stationary cursor
+            // must invalidate too, not just a cursor move.
+            const KTextEditor::Document *document = view->document();
             if (hasSuggestion()
                 && CompletionEngine::isStale(m_suggestionContext,
                                              view->cursorPosition().line(),
-                                             view->cursorPosition().column())) {
+                                             view->cursorPosition().column(),
+                                             document ? document->text() : QString(),
+                                             document ? document->url().toLocalFile() : QString())) {
                 clearSuggestion();
             }
         });
@@ -360,7 +365,9 @@ void EditorAssist::onCompleted(const QString &text, const CompletionPromptContex
         return;
     }
     const KTextEditor::Cursor cursor = view->cursorPosition();
-    if (CompletionEngine::isStale(context, cursor.line(), cursor.column())) {
+    if (CompletionEngine::isStale(context, cursor.line(), cursor.column(),
+                                  view->document()->text(),
+                                  view->document()->url().toLocalFile())) {
         return;
     }
     if (m_settings.completionRenderMode == u"popup"_s) {
@@ -429,7 +436,9 @@ void EditorAssist::acceptSuggestion(KTextEditor::View *view)
         return;
     }
     const KTextEditor::Cursor cursor = view->cursorPosition();
-    if (CompletionEngine::isStale(m_suggestionContext, cursor.line(), cursor.column())) {
+    if (CompletionEngine::isStale(m_suggestionContext, cursor.line(), cursor.column(),
+                                  view->document()->text(),
+                                  view->document()->url().toLocalFile())) {
         clearSuggestion();
         return;
     }

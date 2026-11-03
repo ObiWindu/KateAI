@@ -9,9 +9,11 @@
 #include <KTextEditor/Editor>
 
 #include <QDir>
+#include <QDebug>
 #include <QFile>
 #include <QFileInfo>
 #include <QSaveFile>
+#include <QSet>
 #include <QStringConverter>
 #include <QStringDecoder>
 #include <QStringEncoder>
@@ -26,38 +28,50 @@ namespace KateAi
 namespace
 {
 
+// Detects the encoding of raw file bytes. A file that is not valid UTF-8 is
+// decoded with the locale codec as a fallback -- but that fallback is a guess,
+// not a detection: it can silently transcode bytes the locale happens to map.
+// Callers warn when the fallback engages (once per path) so a mojibake
+// write-back is traceable instead of silent.
+void warnFallbackEncoding(const QString &path)
+{
+    static QSet<QString> warned;
+    if (warned.contains(path)) {
+        return;
+    }
+    warned.insert(path);
+    qWarning("KateAI: %s is not valid UTF-8; falling back to the locale encoding. "
+             "Non-ASCII content may not round-trip exactly.",
+             qUtf8Printable(path));
+}
+
+QStringConverter::Encoding encodingForData(const QByteArray &data, const QString &path)
+{
+    QStringDecoder probe(QStringConverter::Utf8);
+    probe.decode(data);
+    if (probe.hasError()) {
+        if (!path.isEmpty()) {
+            warnFallbackEncoding(path);
+        }
+        return QStringConverter::System;
+    }
+    return QStringConverter::Utf8;
+}
+
 // The encoding of a file that is not valid UTF-8. Decoding it as UTF-8 would
 // replace every non-ASCII byte with U+FFFD, and writing it back would
 // destroy the file. The whole file is scanned, not just its head: a file that
 // is valid UTF-8 for the first 64 KiB and latin-1 after it was misdetected
-// before, and the write-back then silently corrupted the tail. The scan stops
-// at the first decoding error, so a clean UTF-8 file still costs only one
-// extra sequential read (the callers read it again right after).
+// before, and the write-back then silently corrupted the tail.
 QStringConverter::Encoding encodingFor(const QString &path)
 {
     QFile file(path);
     if (!file.open(QIODevice::ReadOnly)) {
         return QStringConverter::Utf8;
     }
-    QStringDecoder decoder(QStringConverter::Utf8);
-    char buffer[65536];
-    while (true) {
-        const qint64 read = file.read(buffer, sizeof(buffer));
-        if (read <= 0) {
-            break;
-        }
-        decoder.decode(QByteArrayView(buffer, static_cast<qsizetype>(read)));
-        if (decoder.hasError()) {
-            return QStringConverter::System;
-        }
-    }
-    // An incomplete multi-byte sequence at the very end of the file is also
-    // a decoding error; only the flush call can see it.
-    decoder.decode(QByteArrayView());
-    if (decoder.hasError()) {
-        return QStringConverter::System;
-    }
-    return QStringConverter::Utf8;
+    // One sequential pass over the bytes; no second open by the caller.
+    const QByteArray data = file.readAll();
+    return encodingForData(data, path);
 }
 
 } // namespace
@@ -161,8 +175,12 @@ bool DiskDocumentBridge::readDocument(const QString &path, QString *contents) co
     if (!file.open(QIODevice::ReadOnly)) {
         return false;
     }
-    QTextStream in(&file);
-    in.setEncoding(encodingFor(path));
+    // Single pass: detect the encoding from the bytes just read instead of
+    // re-opening the file for a second scan (the old encodingFor() call here
+    // read the whole file twice).
+    const QByteArray data = file.readAll();
+    QTextStream in(data);
+    in.setEncoding(encodingForData(data, path));
     if (contents) {
         *contents = in.readAll();
     }
@@ -194,14 +212,23 @@ bool DiskDocumentBridge::readDocumentLines(const QString &path, int startLine, i
             return false;
         }
         QTextStream in(&file);
+        // Deliberately two passes (encoding scan, then this stream) rather
+        // than readAll: line paging must not hold a huge file in memory just
+        // to return a window of it.
         in.setEncoding(encodingFor(path));
         // The loop ends when readLine() returns a null string. atEnd() is
         // unreliable on a buffered stream and can report the end too early,
         // which would cut the file short.
         for (;;) {
-            const QString line = in.readLine();
+            QString line = in.readLine();
             if (line.isNull()) {
                 break;
+            }
+            // readLine() strips the \n but keeps a \r from \r\n endings,
+            // while the open-document branch above (doc->line()) never
+            // surfaces one. Strip it so both branches report the same text.
+            if (line.endsWith(u'\r')) {
+                line.chop(1);
             }
             if (page && lineCount >= firstLine && lineCount - firstLine < lineLimit) {
                 requestedLines.append(line);
@@ -231,8 +258,10 @@ bool DiskDocumentBridge::writeDocument(const QString &path, const QString &conte
         // The document is open and has unsaved changes that are not ours:
         // replacing the whole text would throw them away. An unsaved edit the
         // bridge itself applied earlier in buffer mode is "ours" and is exactly
-        // the working state the next edit builds on.
-        if (doc->isModified() && !m_bufferedPaths.contains(path)) {
+        // the working state the next edit builds on. Compared by clean path:
+        // "a/./b" must hit the same slot as "a/b".
+        const QString normPath = QDir::cleanPath(path);
+        if (doc->isModified() && !m_bufferedPaths.contains(normPath)) {
             if (error) {
                 *error = u"The document has unsaved changes; save it before the agent writes to it."_s;
             }
@@ -249,10 +278,10 @@ bool DiskDocumentBridge::writeDocument(const QString &path, const QString &conte
             // through Kate's modified state and undo, and the edit tracker
             // settles it -- accept saves, reject restores. Until then, tools
             // that read the file from disk still see the previous state.
-            m_bufferedPaths.insert(path);
+            m_bufferedPaths.insert(normPath);
             return true;
         }
-        m_bufferedPaths.remove(path);
+        m_bufferedPaths.remove(normPath);
         if (doc->isModified() && !doc->url().isEmpty() && !doc->save()) {
             if (error) {
                 *error = u"The open document was updated but could not be saved."_s;
@@ -280,7 +309,15 @@ bool DiskDocumentBridge::restoreDocument(const QString &path, const QString &con
             }
             return false;
         }
-        m_bufferedPaths.remove(path);
+        m_bufferedPaths.remove(QDir::cleanPath(path));
+        // Mirror writeDocument: outside buffer mode the restore must reach
+        // the disk, not linger as an unsaved buffer edit.
+        if (!m_editInBuffer && doc->isModified() && !doc->url().isEmpty() && !doc->save()) {
+            if (error) {
+                *error = u"The open document was restored but could not be saved."_s;
+            }
+            return false;
+        }
         return true;
     }
 
@@ -297,7 +334,7 @@ bool DiskDocumentBridge::saveDocumentIfOpen(const QString &path, QString *error)
             }
             return false;
         }
-        m_bufferedPaths.remove(path);
+        m_bufferedPaths.remove(QDir::cleanPath(path));
         return true;
     }
     return true;
@@ -352,6 +389,16 @@ bool DiskDocumentBridge::writeDocumentToDisk(const QString &path, const QString 
     QTextStream out(&file);
     out.setEncoding(encoding);
     out << contents;
+    out.flush();
+    // Check the stream before committing: a failed encode/write must abort
+    // the save, or commit() would replace the file with a truncated one.
+    // QSaveFile rolls back on destruction when commit() is never reached.
+    if (out.status() != QTextStream::Ok) {
+        if (error) {
+            *error = u"Failed to write file: encoding or write error."_s;
+        }
+        return false;
+    }
     if (!file.commit()) {
         if (error) {
             *error = u"Failed to write file: %1"_s.arg(file.errorString());

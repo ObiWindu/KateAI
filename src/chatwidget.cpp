@@ -207,13 +207,10 @@ QString jsonArg(const QString &details, const QStringList &keys)
 // different one entirely.
 QString elideMiddle(QString text, int max)
 {
-    // QChar-wrapped: a bare u'\n' is char16_t, and Qt versions without a
-    // replace(char16_t, char16_t, ...) overload resolve the call ambiguously
-    // (seen on the Qt 6.8 in Ubuntu plucky; newer Qt accepts it directly).
-    text = text.simplified().replace(QChar(u'\n'), QChar(u' '), Qt::CaseInsensitive);
-    // Collapse every run of whitespace, not just the first double space: one
-    // replace() pass leaves "a   b" as "a  b".
-    text.replace(QRegularExpression(u"\\s+"_s), u" "_s);
+    // simplified() already strips leading/trailing whitespace, collapses every
+    // run of whitespace (including newlines) to a single space, so no further
+    // newline or whitespace pass is needed here.
+    text = text.simplified();
     if (max <= 4) {
         return text.left(qMax(0, max));
     }
@@ -254,8 +251,9 @@ QString toolTargetLabel(const QString &toolName, const KateAi::PermissionRequest
                                         u"root_path"_s, u"rootPath"_s});
     }
 
-    const bool searches = toolName == u"grep"_s || toolName == u"glob"_s || toolName == u"web_search"_s
-        || toolName == u"websearch"_s || toolName == u"query_project_graph"_s || toolName == u"search"_s;
+    const QString canonical = KateAi::canonicalToolName(toolName);
+    const bool searches = canonical == u"grep"_s || canonical == u"glob"_s || canonical == u"web_search"_s
+        || canonical == u"websearch"_s || canonical == u"query_project_graph"_s || canonical == u"search"_s;
     QString pattern = jsonArg(request.details, {u"pattern"_s, u"query"_s, u"regex"_s, u"question"_s});
     if (pattern.isEmpty()) {
         pattern = request.summary.trimmed();
@@ -290,31 +288,34 @@ QString workingLabelForTool(const QString &toolName, const KateAi::PermissionReq
     // The verb names what is happening; the target names what it is happening
     // to, which is the half the user needs to tell two reads apart.
     const QString target = toolTargetLabel(toolName, request, workspace);
-    if (isFileMutatingTool(toolName) || toolName == u"edit"_s || toolName == u"str_replace"_s
-        || toolName == u"write"_s || toolName == u"delete"_s || toolName == u"patch"_s) {
+    // Canonicalize: aliases ("Read", "fs/read_text_file", "Bash") must hit
+    // the same branch as the built-in name.
+    const QString canonical = KateAi::canonicalToolName(toolName);
+    if (isFileMutatingTool(canonical) || canonical == u"edit"_s || canonical == u"str_replace"_s
+        || canonical == u"write"_s || canonical == u"delete"_s || canonical == u"patch"_s) {
         return i18n("Editing") + target;
     }
-    if (toolName == u"read_file"_s || toolName == u"fs/read_text_file"_s || toolName == u"read"_s) {
+    if (canonical == u"read_file"_s || canonical == u"fs/read_text_file"_s || canonical == u"read"_s) {
         return i18n("Reading") + target;
     }
-    if (toolName == u"grep"_s || toolName == u"glob"_s || toolName == u"web_search"_s
-        || toolName == u"websearch"_s || toolName == u"query_project_graph"_s || toolName == u"search"_s) {
+    if (canonical == u"grep"_s || canonical == u"glob"_s || canonical == u"web_search"_s
+        || canonical == u"websearch"_s || canonical == u"query_project_graph"_s || canonical == u"search"_s) {
         return i18n("Searching") + target;
     }
-    if (toolName == u"list_dir"_s || toolName == u"list"_s) {
+    if (canonical == u"list_dir"_s || canonical == u"list"_s) {
         return i18n("Listing") + target;
     }
-    if (toolName == u"bash"_s || toolName == u"execute"_s || toolName.startsWith(u"terminal/"_s)) {
+    if (canonical == u"bash"_s || canonical == u"execute"_s || canonical.startsWith(u"terminal/"_s)) {
         return i18n("Running") + target;
     }
-    if (toolName == u"webfetch"_s || toolName == u"web_fetch"_s) {
+    if (canonical == u"webfetch"_s || canonical == u"web_fetch"_s) {
         return i18n("Fetching") + target;
     }
-    if (toolName == u"task"_s || toolName == u"todowrite"_s || toolName == u"todoread"_s) {
+    if (canonical == u"task"_s || canonical == u"todowrite"_s || canonical == u"todoread"_s) {
         return i18n("Working") + target;
     }
 
-    if (toolName == u"question"_s) {
+    if (canonical == u"question"_s) {
         return i18n("Waiting for your answer");
     }
 
@@ -535,18 +536,6 @@ ChatWidget::ChatWidget(QWidget *parent)
 
     m_thinking = new QPushButton(this);
     m_thinking->setCheckable(true);
-
-    m_stop = new QPushButton(this);
-    m_stop->setVisible(false);
-    m_stop->setEnabled(false);
-    // Not decorative: aborts the running turn, like the send button's busy state.
-    connect(m_stop, &QPushButton::clicked, this, [this]() {
-        if (m_agent.isBusy()) {
-            m_permissionBar->hideBar();
-            m_agent.abort();
-            updateSendButtonState();
-        }
-    });
 
     // 2. Zed-style Transcript Area (Scroll Area with Cards & Tool Widgets)
     m_scrollArea = new QScrollArea(this);
@@ -1747,13 +1736,14 @@ void ChatWidget::saveCurrentConversation()
         }
     }
 
-    const bool isNew = SessionStore::saveConversation(
+    bool wasCreated = false;
+    const bool saved = SessionStore::saveConversation(
         m_currentConversationId, sessionData, QString(),
-        m_settings.maxSavedConversations > 0 ? m_settings.maxSavedConversations : 50);
+        m_settings.maxSavedConversations > 0 ? m_settings.maxSavedConversations : 50, &wasCreated);
     // The number of conversations only changes when one is created or
     // deleted. A save of an existing conversation keeps the cached count, so
     // the button is repainted without a query.
-    if (isNew) {
+    if (saved && wasCreated) {
         m_historyCount = -1;
     }
     updateHistoryButton();
@@ -2046,16 +2036,20 @@ void ChatWidget::updateThinkingDisplay()
     // Compatible endpoints sometimes wrap reasoning in a JSON envelope even
     // though this view expects the reasoning text itself. Decode known text
     // fields after a complete object arrives; preserve unrelated JSON verbatim.
-    QJsonParseError parseError;
-    const QJsonDocument json = QJsonDocument::fromJson(displayed.trimmed().toUtf8(), &parseError);
-    if (parseError.error == QJsonParseError::NoError && json.isObject()) {
-        const QJsonObject object = json.object();
-        for (const QString &key : {u"thinking"_s, u"reasoning"_s, u"analysis"_s, u"thought"_s,
-                                   u"content"_s, u"text"_s, u"message"_s, u"answer"_s, u"summary"_s}) {
-            const QJsonValue value = object.value(key);
-            if (value.isString()) {
-                markdown = value.toString();
-                break;
+    // Guarded on '{': parsing every tick costs a JSON parse per pacer step.
+    const QString trimmed = displayed.trimmed();
+    if (trimmed.startsWith(u'{')) {
+        QJsonParseError parseError;
+        const QJsonDocument json = QJsonDocument::fromJson(trimmed.toUtf8(), &parseError);
+        if (parseError.error == QJsonParseError::NoError && json.isObject()) {
+            const QJsonObject object = json.object();
+            for (const QString &key : {u"thinking"_s, u"reasoning"_s, u"analysis"_s, u"thought"_s,
+                                       u"content"_s, u"text"_s, u"message"_s, u"answer"_s, u"summary"_s}) {
+                const QJsonValue value = object.value(key);
+                if (value.isString()) {
+                    markdown = value.toString();
+                    break;
+                }
             }
         }
     }
@@ -2093,13 +2087,10 @@ void ChatWidget::addThinkingBlock(const QString &text)
         // Everything this re-report carries is already on screen.
         return;
     }
-    if (!m_thinkingBuffer.isEmpty() && text.startsWith(m_thinkingBuffer)) {
-        m_thinkingBuffer += unseen;
-    } else {
-        // Diverged rather than extended: append so nothing silently drops.
-        // Dedup above already stripped the overlap this turn has shown.
-        m_thinkingBuffer += unseen;
-    }
+    // Append what has not been shown yet so nothing silently drops, whether
+    // the re-report extended the buffer or diverged from it (dedup above
+    // already stripped the overlap this turn has shown).
+    m_thinkingBuffer += unseen;
     m_thinkingBlock->show();
     registerThinkingBlock(m_thinkingBlock, m_thinkingBrowser, m_thinkingToggle);
     if (!m_isThinking) {
@@ -3049,8 +3040,11 @@ int ChatWidget::transcriptInsertIndex() const
     int spacerIndex = -1;
     for (int i = 0; i < m_transcriptLayout->count(); ++i) {
         QLayoutItem *item = m_transcriptLayout->itemAt(i);
-        if (item && item->spacerItem() && spacerIndex < 0) {
+        if (item && item->spacerItem()) {
+            // The trailing stretch is unique: stop at the first spacer
+            // instead of scanning the whole transcript on every insert.
             spacerIndex = i;
+            break;
         }
     }
     return transcriptInsertIndexFor(TranscriptAnchor::Top, spacerIndex, -1,
@@ -3134,6 +3128,9 @@ void ChatWidget::retireIntentWidget(QWidget *widget, QWidget *anchor)
             m_subtaskDock->removeCard(card);
         }
         card->setHeightBudget(0);
+        // Retired means settled: drop it from the live order list or the dock
+        // keeps resolving (and claiming) a card that is already history.
+        m_subtaskOrder.removeAll(card);
     }
     if (m_intentDockLayout) {
         m_intentDockLayout->removeWidget(widget);
@@ -3604,15 +3601,21 @@ void ChatWidget::setSettings(const Settings &settings)
 
     const int permIndex = m_permission->findData(permissionModeId(settings.permissionMode));
     if (permIndex >= 0) {
+        m_updatingCombos = true;
         m_permission->setCurrentIndex(permIndex);
+        m_updatingCombos = false;
     }
     const int sandboxIndex = m_sandbox->findData(sandboxProfileId(settings.sandbox));
     if (sandboxIndex >= 0) {
+        m_updatingCombos = true;
         m_sandbox->setCurrentIndex(sandboxIndex);
+        m_updatingCombos = false;
     }
     const int modeIndex = m_mode->findData(settings.agentMode);
     if (modeIndex >= 0) {
+        m_updatingCombos = true;
         m_mode->setCurrentIndex(modeIndex);
+        m_updatingCombos = false;
     }
     refreshModeButton();
     refreshPermissionButton();
@@ -3817,17 +3820,6 @@ void ChatWidget::updateTokenDisplay()
     }
 
     int tokens = ContextManager::estimateTokens(m_agent.messages());
-    // A full window resets itself: fold the history into a summary as soon as
-    // the readout would reach 100%, so the next request is never built from a
-    // spent window. Mid-turn the agent already compacts on its own when the
-    // provider rejects the request, so leave a busy turn alone; compactContext()
-    // also declines when there is nothing worth reclaiming.
-    if ((tokens * 100) / window >= 100 && !m_agent.isBusy() && m_agent.compactContext()) {
-        // compactContext() emits contextCompacted synchronously, which re-enters
-        // here with the shorter history; recompute so the label settles on the
-        // new figure rather than the full window this pass started from.
-        tokens = ContextManager::estimateTokens(m_agent.messages());
-    }
 
     const int percent = qBound(0, (tokens * 100) / window, 100);
     m_tokenCount->setText(i18n("%1% ctx", percent));
@@ -5534,10 +5526,13 @@ void ChatWidget::showQuestionCard(const PermissionRequest &request)
     }
     auto *card = new QuestionWidget(request.toolCallId, m_intentDock);
     card->setQuestion(request.questionText, request.questionOptions, request.allowFreeform);
-    connect(card, &QuestionWidget::answered, this, [this, card](const QString &, const QString &answer) {
+    const QString questionId = request.toolCallId;
+    connect(card, &QuestionWidget::answered, this, [this, card, questionId](const QString &, const QString &answer) {
         // The agent resumes from the answer: the tool result *is* the user's
         // words, so there is nothing else to hand back.
         m_agent.answerQuestion(answer);
+        m_questionWidgets.remove(questionId);
+        m_questionOrder.removeAll(card);
         retireIntentWidget(card);
         updateSendButtonState();
         m_prompt->setFocus();
@@ -5648,7 +5643,7 @@ void ChatWidget::markRunningSubtasksAbandoned()
         // Abandoned means over; the card belongs back in the transcript --
         // where the sub-agent started, so a stop does not shuffle the
         // transcript's time order.
-        retireIntentWidget(card.data(), m_subtaskAnchors.take(card->taskId()));
+        retireIntentWidget(card.data(), m_subtaskAnchors.take(subtaskKeyFor(card.data())));
         changed = true;
     }
     if (changed) {
@@ -6162,11 +6157,10 @@ void ChatWidget::flushToolProgress()
         if (auto *widget = m_toolCallWidgets.value(it.key())) {
             widget->setPartialOutput(it.value());
         }
-        // Sub-agent cards are keyed by tool call id, but dispatch may rename a
-        // call (empty or reused ids): the helper also resolves live task ids.
-        // A parent-level progress chunk for a new_task call is the child's
-        // live output and belongs on the sub-agent card, not dropped.
-        if (auto *subtask = subtaskWidgetFor(it.key())) {
+        // Sub-agent cards are keyed by tool call id: a plain lookup, not the
+        // claiming helper, which would attach an unrelated unstarted card to
+        // this progress id as a side effect of a display flush.
+        if (auto *subtask = m_subtaskWidgets.value(it.key())) {
             subtask->setPartialOutput(it.value());
         }
     }
@@ -6253,15 +6247,17 @@ void ChatWidget::restoreHistoricalTool(const QString &toolCallId, const QString 
     // ACP kinds are not in isFileMutatingTool on purpose: that list drives the
     // edit tracker, which already learns about ACP writes from mutatesFiles.
     // isEditToolName covers the OpenCode aliases (write, edit, patch) here so
-    // restored history cards colour like live ones.
+    // restored history cards colour like live ones. Canonical names only: the
+    // old `startsWith("fs/")` coloured every fs-namespaced tool as a write,
+    // including fs/read_text_file.
     if (isFileMutatingTool(canonicalName) || ChatTheme::isEditToolName(canonicalName) || canonicalName == u"edit_file"_s
         || canonicalName == u"write_file"_s || canonicalName == u"multi_edit_file"_s
-        || toolName == u"edit"_s || toolName == u"str_replace"_s || toolName == u"str_replace_editor"_s
-        || toolName == u"write"_s || toolName == u"delete"_s || toolName == u"patch"_s || toolName == u"apply_patch"_s
-        || toolName.startsWith(u"fs/"_s)) {
+        || canonicalName == u"edit"_s || canonicalName == u"str_replace"_s || canonicalName == u"str_replace_editor"_s
+        || canonicalName == u"write"_s || canonicalName == u"delete"_s || canonicalName == u"patch"_s
+        || canonicalName == u"apply_patch"_s) {
         risk = ToolRisk::Write;
-    } else if (canonicalName == u"bash"_s || toolName == u"execute"_s || toolName.startsWith(u"terminal"_s)
-               || toolName.startsWith(u"shell"_s)) {
+    } else if (canonicalName == u"bash"_s || canonicalName == u"execute"_s || canonicalName.startsWith(u"terminal"_s)
+               || canonicalName.startsWith(u"shell"_s)) {
         risk = ToolRisk::Execute;
     }
 
@@ -6449,7 +6445,18 @@ void ChatWidget::restoreHistoricalTool(const QString &toolCallId, const QString 
     }
     toolWidget->setFinished(result);
 
-    m_toolCallWidgets.insert(toolCallId, toolWidget);
+    // A reused id must not overwrite the card already filed under it: each
+    // run keeps its own card, mirroring the live subtask suffix handling.
+    QString widgetKey = toolCallId;
+    if (m_toolCallWidgets.contains(widgetKey)) {
+        int suffix = 2;
+        while (m_toolCallWidgets.contains(widgetKey + u"#" + QString::number(suffix))) {
+            ++suffix;
+        }
+        widgetKey = widgetKey + u"#" + QString::number(suffix);
+        toolWidget->setObjectName(u"ToolCallWidget_%1"_s.arg(widgetKey));
+    }
+    m_toolCallWidgets.insert(widgetKey, toolWidget);
     m_toolCallOrder.append(toolWidget);
     appendTranscriptWidget(toolWidget);
 }
@@ -6954,7 +6961,9 @@ void ChatWidget::switchToConversation(const QString &conversationId)
     // The running turn belongs to the conversation that is being left. Without
     // this the agent keeps streaming, and a delta that arrives after the
     // switch would be rendered into the new transcript and saved under the
-    // new id.
+    // new id. The flag goes up first: abort() emits synchronously, and a
+    // re-entrant delta must see the loading state, not the old transcript.
+    m_loadingConversation = true;
     m_agent.abort();
 
     // Save current conversation before switching
@@ -6964,8 +6973,6 @@ void ChatWidget::switchToConversation(const QString &conversationId)
             SessionStore::saveConversation(m_currentConversationId, sessionData, QString(), m_settings.maxSavedConversations > 0 ? m_settings.maxSavedConversations : 50);
         }
     }
-
-    m_loadingConversation = true;
 
     // Load the new conversation
     const auto sessionData = SessionStore::loadConversation(conversationId);
@@ -7043,10 +7050,12 @@ void ChatWidget::setCurrentConversationId(const QString &conversationId)
 void ChatWidget::renamePendingEdits(const QString &oldPath, const QString &newPath)
 {
     // A Save-As has to carry the review queue along: the tracker, and any
-    // in-flight edit of the same turn that has not finished yet.
+    // in-flight edit of the same turn that has not finished yet. Compared by
+    // clean path: trailing slashes and ./ segments must not defeat the match.
+    const QString cleanOld = QDir::cleanPath(oldPath);
     m_editTracker->renamePath(oldPath, newPath);
     for (auto it = m_pendingToolCalls.begin(); it != m_pendingToolCalls.end(); ++it) {
-        if (it.value().path == oldPath) {
+        if (QDir::cleanPath(it.value().path) == cleanOld) {
             it.value().path = newPath;
         }
     }
@@ -7056,7 +7065,16 @@ bool ChatWidget::rejectPendingEdits(const QString &path)
 {
     // The in-editor banner's reject action lands here. A path without
     // pending edits (already settled from the panel) is a no-op.
-    if (!m_editTracker->pendingPaths().contains(path)) {
+    // Compared by clean path so "a/./b" still matches the pending "a/b".
+    const QString clean = QDir::cleanPath(path);
+    bool found = false;
+    for (const QString &pending : m_editTracker->pendingPaths()) {
+        if (QDir::cleanPath(pending) == clean) {
+            found = true;
+            break;
+        }
+    }
+    if (!found) {
         return false;
     }
     m_editTracker->rejectEdit(path);

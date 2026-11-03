@@ -328,7 +328,6 @@ private:
     QPushButton *m_newChat = nullptr;
     QPushButton *m_configure = nullptr;
     QPushButton *m_send = nullptr;
-    QPushButton *m_stop = nullptr;
     QPushButton *m_thinking = nullptr;
     QPushButton *m_reasoningEffort = nullptr;
     QPushButton *m_modeButton = nullptr;

@@ -160,18 +160,22 @@ QString clampToLines(const QString &text, int maxLines)
     return lines.join(u'\n');
 }
 
-// A unified diff starts with a "--- " file header and a "+++ " header within
-// the next few lines. Prose that merely contains dashes is not a diff.
+// A unified diff starts with a "--- " file header (or "diff --git ") and a
+// "+++ " header within the next few lines. Prose with dashes is not a diff.
 QString extractUnifiedDiff(const QString &text)
 {
     const QStringList lines = text.split(u'\n');
     const qsizetype count = lines.size();
     qsizetype start = -1;
     for (qsizetype i = 0; i < count; ++i) {
-        if (!lines.at(i).startsWith(u"--- "_s)) {
+        const bool isHeader = lines.at(i).startsWith(u"--- "_s)
+            || lines.at(i).startsWith(u"diff --git "_s);
+        if (!isHeader) {
             continue;
         }
-        const qsizetype window = std::min(count, i + 20);
+        // Verbose preambles (index lines, mode changes) can push "+++ " out;
+        // 40 lines covers those without scanning far into prose.
+        const qsizetype window = std::min(count, i + 40);
         for (qsizetype j = i + 1; j < window; ++j) {
             if (lines.at(j).startsWith(u"+++ "_s)) {
                 start = i;
@@ -459,6 +463,17 @@ ToolCallWidget::ToolCallWidget(const QString &toolCallId, QWidget *parent)
 
     // Make the entire header clickable for expand/collapse
     m_header->installEventFilter(this);
+    // Labels swallow mouse presses before they reach the header's filter, so
+    // a click on the title or status never toggled. Filter the non-interactive
+    // children too (not the buttons); hover and tooltips keep working because
+    // the labels stay mouse-sensitive, unlike with WA_TransparentForMouseEvents.
+    for (QWidget *child : {static_cast<QWidget *>(m_icon), static_cast<QWidget *>(m_title),
+                           static_cast<QWidget *>(m_status), static_cast<QWidget *>(m_diffStat),
+                           static_cast<QWidget *>(m_duration)}) {
+        if (child) {
+            child->installEventFilter(this);
+        }
+    }
 
     // Default state
     setRunning();
@@ -608,7 +623,6 @@ void ToolCallWidget::showApproval()
     // The diff is the thing being judged, so it has to be on screen when the
     // buttons are, whatever the user expanded before.
     setExpanded(true);
-    syncPreviewVisibility();
     updateStyle();
 }
 
@@ -708,7 +722,14 @@ void ToolCallWidget::setDescribeDiff(const QString &diff)
     // Show details for diff tools and for mutating ACP tools, which vary per
     // agent and are recognised by namespace or edit-like name rather than by
     // the built-in list. Known read-only tools never carry a diff: a read
-    // showing a diff surface is a miscategorised card.
+    // showing a diff surface is a miscategorised card. Reads are excluded
+    // explicitly because the namespace fallback below would otherwise admit
+    // namespaced reads such as fs/read_text_file.
+    const QString canonical = canonicalToolName(m_toolName).trimmed().toLower();
+    if (canonical == u"read_file"_s || canonical == u"fs/read_text_file"_s || canonical == u"read"_s
+        || canonical == u"webfetch"_s || canonical == u"web_fetch"_s) {
+        return;
+    }
     if (!isDiffTool(m_toolName) && !ChatTheme::isEditToolName(m_toolName)
         && !m_toolName.contains(QChar(u'/'))) {
         return;
@@ -814,20 +835,6 @@ void ToolCallWidget::flashAttention()
     });
 }
 
-QString ToolCallWidget::plainToHtml(const QString &text) const
-{
-    QString out = u"<body>"_s;
-    const QStringList lines = text.split(u'\n');
-    if (lines.isEmpty()) {
-        return u"<body><p> </p></body>"_s;
-    }
-    for (const QString &line : lines) {
-        out += u"<p>%1</p>"_s.arg(line.isEmpty() ? u"&nbsp;"_s : escapeHtml(line));
-    }
-    out += u"</body>"_s;
-    return out;
-}
-
 QString ToolCallWidget::diffToHtml(const QString &diff) const
 {
     // One row per line, each cell carrying its own background: QTextDocument
@@ -909,7 +916,10 @@ void ToolCallWidget::setPartialOutput(const QString &partialOutput)
     // the change is not drawn twice. The full stream stays in m_partialOutput
     // for the copy button.
     const QString diff = isDiffTool(m_toolName) ? extractUnifiedDiff(partialOutput) : QString();
-    if (!diff.isEmpty()) {
+    // Re-parse only when the diff itself moved: every chunk re-running the
+    // diff highlight (and re-firing expand) is per-chunk churn for identical
+    // content.
+    if (!diff.isEmpty() && diff != m_rawDiff) {
         setDescribeDiff(diff);
     }
     // The stream is rendered in the muted colour so the card reads as "this is
@@ -1029,19 +1039,14 @@ void ToolCallWidget::setExpandedHeight(int h)
 void ToolCallWidget::setExpanded(bool expanded)
 {
     if (m_expanded == expanded) {
-        syncPreviewVisibility();
         return;
     }
     m_expanded = expanded;
     if (m_expandBtn) {
         m_expandBtn->setText(m_expanded ? u"▾"_s : u"▸"_s);
     }
-    if (m_animation) {
-        m_animation->stop();
-    }
     Q_EMIT expandedChanged(m_expanded);
-    applyDetailsHeight();
-    syncPreviewVisibility();
+    animateDetails();
     scheduleReflow();
 }
 
@@ -1050,24 +1055,15 @@ bool ToolCallWidget::isFileEditTool() const
     return isDiffTool(m_toolName) || m_hasDiffPreview;
 }
 
-void ToolCallWidget::syncPreviewVisibility()
+void ToolCallWidget::animateDetails()
 {
-}
-
-void ToolCallWidget::toggleExpand()
-{
-    m_expanded = !m_expanded;
-    m_expandBtn->setText(m_expanded ? u"▾"_s : u"▸"_s);
-    Q_EMIT expandedChanged(m_expanded);
-    syncPreviewVisibility();
-
     if (!hasDetailsBody()) {
         applyDetailsHeight();
-        scheduleReflow();
         return;
     }
-
-    m_animation->stop();
+    if (m_animation) {
+        m_animation->stop();
+    }
     if (m_expanded) {
         reflowDetails();
         m_animation->setStartValue(0);
@@ -1077,6 +1073,13 @@ void ToolCallWidget::toggleExpand()
         m_animation->setEndValue(0);
     }
     m_animation->start();
+}
+
+void ToolCallWidget::toggleExpand()
+{
+    // One path for user clicks and programmatic expands alike: the state
+    // change, the signal and the animation all live in setExpanded.
+    setExpanded(!m_expanded);
 }
 
 void ToolCallWidget::updateStyle()
@@ -1401,11 +1404,27 @@ void ToolCallWidget::applyDetailsSurface(ToolDetailView view)
             "pre { margin: 0; white-space: pre-wrap; font-family: monospace; font-size: 11px; }"
             "p { margin: 0; white-space: pre-wrap; }")
             .arg(QStringLiteral("#ffffff")));
-    // setDefaultStyleSheet() only reaches content parsed after it, so re-parse
-    // the current output: syntax spans keep their inline colours, the body
-    // colour updates.
-    if (!m_details->toPlainText().isEmpty()) {
-        m_details->setHtml(m_details->toHtml());
+    // setDefaultStyleSheet() only reaches content parsed after it, so
+    // re-render the current output. Re-highlight from the stored source text,
+    // not by round-tripping toHtml(): re-parsing generated HTML bakes the old
+    // colours into the text and escapes the markup as literal content.
+    if (m_finished) {
+        if (!m_resultOutput.trimmed().isEmpty()) {
+            const QString diff = isDiffTool(m_toolName) ? extractUnifiedDiff(m_resultOutput) : QString();
+            const QString shownSource = diff.isEmpty() ? m_resultOutput : textBeforeDiff(m_resultOutput);
+            const QString shown = m_risk == ToolRisk::Read ? shownSource : clampToLines(shownSource, kMaxResultLines);
+            m_details->setHtml(CodeHighlight::htmlForCode(shown, languageForTool(m_toolName)));
+        } else if (!m_details->toPlainText().isEmpty() && !m_showingInput) {
+            m_details->clear();
+        }
+    } else if (m_showingInput && !m_runningInput.trimmed().isEmpty()) {
+        m_details->setHtml(partialToHtml(clampToLines(m_runningInput, kMaxInputLines)));
+    } else if (!m_partialOutput.isEmpty()) {
+        const QString diff = isDiffTool(m_toolName) ? extractUnifiedDiff(m_partialOutput) : QString();
+        const QString body = diff.isEmpty() ? m_partialOutput : textBeforeDiff(m_partialOutput);
+        m_details->setHtml(partialToHtml(m_risk == ToolRisk::Read ? body : clampToLines(body, kMaxResultLines)));
+    }
+    if (!m_details->toPlainText().isEmpty() || hasDiffBody()) {
         scheduleReflow();
     }
 }
@@ -1460,8 +1479,10 @@ int ToolCallWidget::browserFitHeight(QTextBrowser *browser, int padding) const
     int vw = browser->viewport()->width();
     if (vw < 40) {
         // Pre-layout width()==0 explodes wrapping at 40px; fall back to the
-        // card width so the first paint does not jump on resizeEvent.
-        vw = std::max(240, width() - 28);
+        // card width so the first paint does not jump on resizeEvent. Clamped
+        // to the real width, not a 240px floor, so narrow panels wrap at
+        // their own width instead of overflowing it.
+        vw = std::max(40, width() - 28);
     }
     // The browser's own padding has to be added to the document, or the last
     // line of a result sits under the card's edge.
@@ -1480,13 +1501,15 @@ void ToolCallWidget::updateTitleText()
     chrome += 16 + 8; // icon + spacing
     chrome += 20 + 8; // status + spacing
     chrome += 20 + 8; // expand + spacing
-    if (m_copyBtn && m_copyBtn->isVisible()) {
+    // State, not isVisible(): a card is measured before it is ever shown, and
+    // isVisible() lies then, so chrome would be under-counted on first paint.
+    if (m_copyBtn && !copyableText().trimmed().isEmpty()) {
         chrome += 20 + 8;
     }
-    if (m_diffStat && m_diffStat->isVisible()) {
+    if (m_diffStat && !m_diffStat->text().isEmpty()) {
         chrome += m_diffStat->sizeHint().width() + 8;
     }
-    if (m_duration && m_duration->isVisible()) {
+    if (m_duration && m_durationEnabled) {
         chrome += m_duration->sizeHint().width() + 8;
     }
     const int avail = std::max(48, width() - chrome);
@@ -1560,7 +1583,12 @@ void ToolCallWidget::reflowDetails()
 
 bool ToolCallWidget::eventFilter(QObject *watched, QEvent *event)
 {
-    if (watched == m_header) {
+    // The header and its non-interactive labels share one click detector: a
+    // press on the title or status belongs to the card, not the label. Only
+    // QLabels are matched, so the copy/expand buttons keep their own clicks.
+    const bool inHeader = watched == m_header
+        || (qobject_cast<QLabel *>(watched) != nullptr && m_header && m_header->isAncestorOf(static_cast<QWidget *>(watched)));
+    if (inHeader) {
         if (event->type() == QEvent::MouseButtonPress) {
             auto *me = static_cast<QMouseEvent *>(event);
             if (me->button() == Qt::LeftButton) {

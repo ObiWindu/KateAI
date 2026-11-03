@@ -588,14 +588,18 @@ void EditTracker::undoLast()
 
     bool replaced = false;
     for (auto it = m_groups.begin(); it != m_groups.end(); ++it) {
-        if (it->path == decision.path) {
+        if (QDir::cleanPath(it->path) == QDir::cleanPath(decision.path)) {
             *it = restored;
             replaced = true;
             break;
         }
     }
     if (!replaced) {
-        m_groups.append(restored);
+        // Back where the group stood when it was settled (clamped to the
+        // current list): undo must not shuffle the review order by appending
+        // a middle file at the end.
+        const int at = qBound(0, decision.groupIndex, static_cast<int>(m_groups.size()));
+        m_groups.insert(at, restored);
     }
 
     // Undoing an acceptance has to undo the file too. Restoring the pre-edit
@@ -865,7 +869,14 @@ void EditTracker::previewDiff(const QString &path)
     // same file name is tried in each candidate until one accepts the write.
     const QString previewPath = previewDiffPath(path);
     const QString fileName = QFileInfo(previewPath).fileName();
-    const QByteArray bytes = combinedDiff(group).toUtf8();
+    const QString diff = combinedDiff(group);
+    if (diff.trimmed().isEmpty()) {
+        // Nothing to show: opening an empty preview tab answers no review
+        // question and strands the user in a blank editor.
+        Q_EMIT statusMessage(i18n("No diff to preview for %1", QFileInfo(path).fileName()), true);
+        return;
+    }
+    const QByteArray bytes = diff.toUtf8();
     QStringList directories;
     const auto addDirectory = [&directories](const QString &directory) {
         if (!directory.isEmpty() && !directories.contains(directory)) {
@@ -887,14 +898,18 @@ void EditTracker::previewDiff(const QString &path)
     // in the workspace where agent tools would trip over it.
 
     // Clean stale previews from earlier runs (same naming scheme, older than
-    // a day) so random names do not pile up in the temp dir.
+    // a day) so they do not pile up. Every candidate dir is swept, not just
+    // the first: previews written to a fallback dir would otherwise never be
+    // reaped.
     {
-        const QDir staleDir(QFileInfo(previewPath).absolutePath());
-        const QFileInfoList stale = staleDir.entryInfoList({u"kateai-*.diff"_s}, QDir::Files);
         const QDateTime cutoff = QDateTime::currentDateTime().addDays(-1);
-        for (const QFileInfo &fi : stale) {
-            if (fi.lastModified() < cutoff && !fi.isSymLink()) {
-                QFile::remove(fi.absoluteFilePath());
+        for (const QString &directory : directories) {
+            const QDir staleDir(directory);
+            const QFileInfoList stale = staleDir.entryInfoList({u"kateai-*.diff"_s}, QDir::Files);
+            for (const QFileInfo &fi : stale) {
+                if (fi.lastModified() < cutoff && !fi.isSymLink()) {
+                    QFile::remove(fi.absoluteFilePath());
+                }
             }
         }
     }
@@ -904,10 +919,14 @@ void EditTracker::previewDiff(const QString &path)
             continue;
         }
         const QString candidate = QDir(directory).absoluteFilePath(fileName);
-        // Predictable name in a shared temp dir: never follow or overwrite
-        // through a planted symlink (O_NOFOLLOW equivalent: refuse symlinks
-        // outright), and never leave wider-than-owner perms between create
-        // and chmod (NewOnly fails instead of following an existing file).
+        // Predictable name in a shared temp dir: planted symlinks are refused
+        // outright rather than followed or overwritten. Note this is a
+        // check-then-act sequence, not an atomic O_NOFOLLOW open: a hostile
+        // writer with access to the same temp dir could swap the path between
+        // the check and the create. NewOnly narrows the window (creation
+        // fails instead of following an existing file), and owner-only perms
+        // apply at create time, but a fully adversarial TMPDIR is out of
+        // scope here.
         QFileInfo existing(candidate);
         if (existing.isSymLink()) {
             QFile::remove(candidate);
@@ -946,10 +965,19 @@ void EditTracker::previewDiff(const QString &path)
 
 void EditTracker::settle(const QString &path, bool accepted)
 {
-    auto it = std::find_if(m_groups.begin(), m_groups.end(), [&path](const Group &group) {
-        return group.path == path;
-    });
-    if (it == m_groups.end() || it->pending.isEmpty()) {
+    // Keyed by clean path throughout: "a/./b" and "a/b" are one file and must
+    // settle the same group and the same settled-ranges slot.
+    const QString normPath = QDir::cleanPath(path);
+    const int groupIndex = static_cast<int>(std::distance(
+        m_groups.cbegin(),
+        std::find_if(m_groups.cbegin(), m_groups.cend(), [&normPath](const Group &group) {
+            return QDir::cleanPath(group.path) == normPath;
+        })));
+    if (groupIndex >= m_groups.size()) {
+        return;
+    }
+    auto it = m_groups.begin() + groupIndex;
+    if (it->pending.isEmpty()) {
         return;
     }
 
@@ -966,7 +994,8 @@ void EditTracker::settle(const QString &path, bool accepted)
     // user just said no to.
     Decision decision;
     decision.kind = accepted ? Decision::Accepted : Decision::Rejected;
-    decision.path = path;
+    decision.path = normPath;
+    decision.groupIndex = groupIndex;
     // Join every contributing tool, not just the first: a group can stack
     // edits from several tools and the record must name them all.
     {
@@ -993,7 +1022,7 @@ void EditTracker::settle(const QString &path, bool accepted)
     const QString settledTo = group.pending.last().newContent;
     group.pending.clear();
     if (!settledNow.isEmpty()) {
-        m_settledRanges[path].append(settledNow);
+        m_settledRanges[normPath].append(settledNow);
     }
     if (accepted && !settledTo.isNull()) {
         // The file is already in this state, so accepting only settles the queue.
@@ -1007,27 +1036,32 @@ void EditTracker::settle(const QString &path, bool accepted)
     updateUI();
 
     if (accepted) {
-        Q_EMIT editAccepted(path, toolName, settledTo);
+        Q_EMIT editAccepted(normPath, toolName, settledTo);
     } else if (createdFile) {
-        Q_EMIT fileCreatedThenRejected(path);
+        Q_EMIT fileCreatedThenRejected(normPath);
     } else {
-        Q_EMIT editRejected(path, toolName, restoreTo);
+        Q_EMIT editRejected(normPath, toolName, restoreTo);
     }
-    Q_EMIT editsChanged(hasPendingEdits());
+    // Bulk settles (accept/reject all) emit once at the end; a per-file
+    // notification here would fire N times for N files.
+    if (!m_inBatch) {
+        Q_EMIT editsChanged(hasPendingEdits());
+    }
 }
 
 void EditTracker::renamePath(const QString &oldPath, const QString &newPath)
 {
-    // A Save-As moved the file a pending edit (or an earlier decision about
-    // it) refers to. The tracker keys everything by path, so the entries have
+    // The tracker keys everything by path, so the entries have
     // to follow the file or a later accept/reject would settle the old,
-    // possibly nonexistent path.
-    if (oldPath.isEmpty() || newPath.isEmpty() || oldPath == newPath) {
+    // possibly nonexistent path. Compared by clean path throughout.
+    if (oldPath.isEmpty() || newPath.isEmpty() || QDir::cleanPath(oldPath) == QDir::cleanPath(newPath)) {
         return;
     }
+    const QString cleanOld = QDir::cleanPath(oldPath);
+    const QString cleanNew = QDir::cleanPath(newPath);
     bool changed = false;
     for (auto &group : m_groups) {
-        if (group.path == oldPath) {
+        if (QDir::cleanPath(group.path) == cleanOld) {
             group.path = newPath;
             for (auto &entry : group.pending) {
                 entry.path = newPath;
@@ -1036,7 +1070,7 @@ void EditTracker::renamePath(const QString &oldPath, const QString &newPath)
         }
     }
     for (auto &decision : m_undoStack) {
-        if (decision.path == oldPath) {
+        if (QDir::cleanPath(decision.path) == cleanOld) {
             decision.path = newPath;
             for (auto &entry : decision.pending) {
                 entry.path = newPath;
@@ -1044,8 +1078,12 @@ void EditTracker::renamePath(const QString &oldPath, const QString &newPath)
             changed = true;
         }
     }
-    if (m_settledRanges.contains(oldPath)) {
-        m_settledRanges.insert(newPath, m_settledRanges.take(oldPath));
+    if (m_settledRanges.contains(cleanOld)) {
+        m_settledRanges.insert(cleanNew, m_settledRanges.take(cleanOld));
+        changed = true;
+    } else if (m_settledRanges.contains(oldPath)) {
+        // Legacy slot filed under the raw path before clean-path keying.
+        m_settledRanges.insert(cleanNew, m_settledRanges.take(oldPath));
         changed = true;
     }
     if (changed) {

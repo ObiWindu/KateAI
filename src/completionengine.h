@@ -92,7 +92,8 @@ public:
     static QStringList stopSequences();
     // A completion response is only usable at the position it was requested
     // for; anything else is stale and must not be rendered.
-    static bool isStale(const CompletionPromptContext &request, int cursorLine, int cursorColumn);
+    static bool isStale(const CompletionPromptContext &request, int cursorLine, int cursorColumn,
+                        const QString &currentText = QString(), const QString &currentPath = QString());
     // The FIM prompt for providers that expose a fill-in-the-middle
     // completion endpoint. Capability flag: providerSupportsFim().
     static QString fimPrompt(const CompletionPromptContext &context, Provider provider);

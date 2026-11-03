@@ -147,9 +147,9 @@ protected:
 
 private:
     void toggleExpand();
+    void animateDetails();
     void updateStyle();
     void updateTitleText();
-    void syncPreviewVisibility();
     void updateDuration();
     void scheduleReflow();
     void reflowDetails();
@@ -177,7 +177,6 @@ private:
     int browserFitHeight(QTextBrowser *browser, int padding) const;
     int detailsFitHeight() const;
     QString diffToHtml(const QString &diff) const;
-    QString plainToHtml(const QString &text) const;
     QString escapeHtml(const QString &s) const;
     QString iconForTool(const QString &toolName) const;
     QString colorForRisk(ToolRisk risk) const;

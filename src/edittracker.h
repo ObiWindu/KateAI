@@ -142,6 +142,9 @@ private:
         // The line ranges this decision settled, mirrored in
         // m_settledRanges so undo can retract exactly them.
         QList<KTextEditor::Range> settledRanges;
+        // Where the group stood in m_groups when it was settled, so undo can
+        // put the restored group back at (an approximation of) its slot.
+        int groupIndex = -1;
     };
 
     void updateUI();

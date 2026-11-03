@@ -53,14 +53,48 @@ CompletionEngine::~CompletionEngine()
 QStringList CompletionEngine::stopSequences()
 {
     // The model is told to output only the completion, but models drift; the
-    // stop sequences cut the usual ways of explaining oneself short.
-    // Bare "#" and "//" would stop mid-line; anchor them to a line start.
-    return {u"\n\n\n"_s, u"\n#"_s, u"\n//"_s};
+    // stop sequence cuts the usual way of explaining oneself short. Bare "#"
+    // and "//" anchored to a line start were tried here and removed: real
+    // completions legitimately contain comment lines, and stopping there cut
+    // them mid-thought.
+    return {u"\n\n\n"_s};
 }
 
-bool CompletionEngine::isStale(const CompletionPromptContext &request, int cursorLine, int cursorColumn)
+bool CompletionEngine::isStale(const CompletionPromptContext &request, int cursorLine, int cursorColumn,
+                               const QString &currentText, const QString &currentPath)
 {
-    return request.cursorLine != cursorLine || request.cursorColumn != cursorColumn;
+    if (request.cursorLine != cursorLine || request.cursorColumn != cursorColumn) {
+        return true;
+    }
+    // The cursor alone is not enough: an undo, a paste or an external reload
+    // can change the text under a stationary cursor (and a Save-As changes the
+    // path). Compare those too when the caller passes them.
+    if (!currentPath.isEmpty() && currentPath != request.path) {
+        return true;
+    }
+    if (!currentText.isEmpty()) {
+        // Same line-based offset as buildContext: the text before the cursor
+        // must still end with the request's prefix, and the text after it
+        // must still start with the request's suffix.
+        int offset = 0;
+        for (int line = 0; line < cursorLine; ++line) {
+            const int newline = currentText.indexOf(QChar(u'\n'), offset);
+            if (newline < 0) {
+                return true;
+            }
+            offset = newline + 1;
+        }
+        const int lineStart = offset;
+        const int newlineInLine = currentText.indexOf(QChar(u'\n'), lineStart);
+        const int lineLength = newlineInLine >= 0 ? newlineInLine - lineStart
+                                                  : currentText.size() - lineStart;
+        const int cursorStart = lineStart + std::min(cursorColumn, lineLength);
+        if (!currentText.left(cursorStart).endsWith(request.prefix)
+            || !currentText.mid(cursorStart).startsWith(request.suffix)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 CompletionPromptContext CompletionEngine::buildContext(const QString &text, int cursorLine, int cursorColumn,
@@ -102,12 +136,10 @@ CompletionPromptContext CompletionEngine::buildContext(const QString &text, int 
             const int newline = text.indexOf(QChar(u'\n'), begin);
             if (newline >= 0 && newline < cursorStart) {
                 begin = newline + 1;
-            } else if (newline < 0) {
-                // No line start ahead: single long line — keep budget tail.
-                begin = qMax(0, cursorStart - prefixChars);
-            } else {
-                begin = qMax(0, cursorStart - prefixChars);
             }
+            // Otherwise keep the budget tail as-is: on a single long line
+            // there is no line start ahead, and a newline at or after the
+            // cursor is not a line start for the prefix.
         }
         if (begin <= cursorStart) {
             QString raw = text.mid(begin, cursorStart - begin);
@@ -339,15 +371,18 @@ void CompletionEngine::handleReplyFinished()
     m_reply = nullptr;
     const CompletionPromptContext context = m_activeContext;
 
+    // Read everything off the reply first: errorString() below must not run
+    // after the reply is scheduled for deletion.
     const QByteArray body = reply->readAll();
     const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
     const bool transportOk = reply->error() == QNetworkReply::NoError;
+    const QString transportError = transportOk ? QString() : reply->errorString();
     reply->deleteLater();
 
     if (!transportOk || status >= 400) {
         // HTTP 0 means the request never got an answer: report the network
         // error string, not an empty status code.
-        const QString detail = status == 0 ? reply->errorString() : QString::number(status);
+        const QString detail = status == 0 ? transportError : QString::number(status);
         Q_EMIT failed(detail.isEmpty() ? u"Completion request failed."_s
                                        : u"Completion request failed (%1)."_s.arg(detail));
         return;
@@ -433,17 +468,29 @@ void CompletionEngine::handleReplyFinished()
         Q_EMIT failed(u"The provider returned an empty completion."_s);
         return;
     }
-    // Trailing whitespace is layout noise in an inline note; the model's
-    // leading text is the completion itself and is kept verbatim.
-    while (completion.endsWith(u'\n') || completion.endsWith(u' ') || completion.endsWith(u'\t')
-        || completion.endsWith(u'\r')) {
+    // Trailing spaces and tabs are layout noise in an inline note; the model's
+    // leading text is the completion itself and is kept verbatim. One trailing
+    // newline is intentional (the completion ends its line) and is preserved;
+    // only the blank lines after it are collapsed away.
+    while (completion.endsWith(u' ') || completion.endsWith(u'\t') || completion.endsWith(u'\r')) {
         completion.chop(1);
+    }
+    int trailingNewlines = 0;
+    while (completion.endsWith(u'\n')) {
+        completion.chop(1);
+        ++trailingNewlines;
+    }
+    if (trailingNewlines > 0) {
+        completion += u'\n';
     }
     Q_EMIT completed(completion, context);
 }
 
 void CompletionEngine::recordRequestTime()
 {
+    // Prune here too, not just on the check path: with the budget disabled
+    // (unlimited) nothing ever prunes and the list grows without bound.
+    pruneBudgetWindow();
     m_requestTimes.append(QDateTime::currentMSecsSinceEpoch());
 }
 
