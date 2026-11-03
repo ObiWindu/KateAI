@@ -1379,11 +1379,13 @@ ChatWidget::ChatWidget(QWidget *parent)
         Q_EMIT aboutToSubmit(); // Re-read the workspace so Kate sees the rollback.
     });
     connect(&m_agent, &AgentLoop::subtaskStarted, this, [this](const QString &taskId, const QString &agentId, const QString &agentName, const QString &modeId, const QString &description) {
-        Q_UNUSED(agentId)
         // The card already exists: it was created on toolStarted, which fires
         // before subtaskStarted for this tool.
         if (auto *widget = m_subtaskWidgets.value(taskId)) {
-            widget->startAgent(agentName, modeId, description);
+            // The roster name is the title; fall back to the raw agent id
+            // (e.g. "coder") rather than a blank header when the profile has
+            // no display name.
+            widget->startAgent(agentName.isEmpty() ? agentId : agentName, modeId, description);
         }
         m_turnStatus->setSubtaskCount(m_agent.runningSubtaskCount());
         updateTeamButton();

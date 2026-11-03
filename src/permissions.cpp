@@ -74,7 +74,7 @@ ToolRisk PermissionPolicy::riskFor(const QString &toolName) const
 
 PermissionPolicy::Verdict PermissionPolicy::evaluate(const QString &toolName, const QJsonObject &arguments, const Sandbox &sandbox, QString *reason) const
 {
-    if (toolName == u"bash"_s) {
+    if (canonicalToolName(toolName) == u"bash"_s) {
         const QString command = arguments.value(u"command"_s).toString();
         if (sandbox.isAlwaysDeniedCommand(command)) {
             if (reason) {
@@ -109,7 +109,7 @@ PermissionPolicy::Verdict PermissionPolicy::evaluate(const QString &toolName, co
     }
 
     if (sessionGranted(toolName)) {
-        if (toolName == u"bash"_s && sandbox.isDangerousCommand(arguments.value(u"command"_s).toString())) {
+        if (canonicalToolName(toolName) == u"bash"_s && sandbox.isDangerousCommand(arguments.value(u"command"_s).toString())) {
             return Verdict::Ask;
         }
         return Verdict::Allow;
@@ -128,7 +128,7 @@ PermissionPolicy::Verdict PermissionPolicy::evaluate(const QString &toolName, co
         return Verdict::Allow;
     }
 
-    if (toolName == u"bash"_s && sandbox.isReadOnlyCommand(arguments.value(u"command"_s).toString())) {
+    if (canonicalToolName(toolName) == u"bash"_s && sandbox.isReadOnlyCommand(arguments.value(u"command"_s).toString())) {
         return Verdict::Allow;
     }
 

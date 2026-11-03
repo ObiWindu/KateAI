@@ -421,12 +421,11 @@ void ModeRegistry::loadCustomModes()
                              }),
                               mode.groups.end());
             if (mode.readOnly) {
-                const QStringList editGroups = {ToolGroup::edit(), ToolGroup::command(), ToolGroup::orchestrate()};
-                for (const QString &group : mode.groups) {
-                    if (editGroups.contains(group)) {
-                        mode.readOnly = false;
-                        break;
-                    }
+                // A custom mode that declares itself read-only must not gain
+                // mutating groups: strip them instead of clearing readOnly.
+                const QStringList mutating = {ToolGroup::edit(), ToolGroup::command(), ToolGroup::orchestrate()};
+                for (const QString &mutatingGroup : mutating) {
+                    mode.groups.removeAll(mutatingGroup);
                 }
             }
             m_modes.append(mode);
@@ -450,12 +449,14 @@ ModeDefinition ModeRegistry::modeOrDefault(const QString &id) const
     if (mode) {
         return *mode;
     }
+    // Fail closed: an unknown/stale id (typo, workspace switch with a custom
+    // mode that no longer exists) must not silently grant full code access.
     ModeDefinition fallback;
-    fallback.id = u"code"_s;
-    fallback.name = u"Code"_s;
+    fallback.id = u"ask"_s;
+    fallback.name = u"Ask"_s;
     fallback.builtIn = true;
-    fallback.groups = {ToolGroup::read(), ToolGroup::edit(), ToolGroup::command(), ToolGroup::mcp(), ToolGroup::web(),
-                       ToolGroup::orchestrate()};
+    fallback.readOnly = true;
+    fallback.groups = {ToolGroup::read()};
     return fallback;
 }
 

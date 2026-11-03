@@ -66,8 +66,10 @@ AgentLoop::AgentLoop(QObject *parent)
         Q_EMIT thinkingDelta(delta);
     });
     connect(&m_client, &LlmClient::textReset, this, [this]() {
-        // A retry replaces the answer that was streamed so far.
+        // A retry replaces the answer that was streamed so far, including
+        // any reasoning attached to the failed attempt.
         m_currentAssistant.clear();
+        m_currentThinking.clear();
         Q_EMIT assistantReset();
     });
     connect(&m_client, &LlmClient::finished, this, &AgentLoop::onFinished);
@@ -137,8 +139,9 @@ AgentLoop::AgentLoop(QObject *parent)
     connect(&m_acp, &AcpClient::failed, this, &AgentLoop::onFailed);
     connect(&m_acp, &AcpClient::textReset, this, [this]() {
         // A retried turn replaces the answer that was streamed before the
-        // transient failure.
+        // transient failure, including any reasoning.
         m_currentAssistant.clear();
+        m_currentThinking.clear();
         Q_EMIT assistantReset();
     });
     connect(&m_acp, &AcpClient::retryStatus, this, [this](const QString &message, int attempt, int maxAttempts, int delaySeconds) {
@@ -981,6 +984,10 @@ void AgentLoop::abort()
     // Cancel all subtasks synchronously to avoid use-after-free
     const QList<AgentLoop *> children = m_activeSubtasks.values();
     m_activeSubtasks.clear();
+    // Their pending calls settle nowhere: the turn is over, and finishAsyncTool
+    // would drop them. The cards are retired by markRunningSubtasksAbandoned
+    // on turnFinished, so just forget the calls.
+    m_pendingSubtaskCalls.clear();
     for (AgentLoop *child : children) {
         if (m_locks) {
             m_locks->releaseAll(child->selfId());
@@ -1432,8 +1439,12 @@ QJsonObject AgentLoop::effectiveArgs(const ToolCall &call) const
 
 bool AgentLoop::isMutationTool(const QString &toolName) const
 {
-    return toolName == u"write_file"_s || toolName == u"edit_file"_s
-        || toolName == u"multi_edit_file"_s || toolName == u"multi_replace_file_content"_s;
+    // Canonical names cover the ACP aliases (fs/write_text_file, edit, patch,
+    // apply_patch, multi_edit, ...) so an agent using those names gets the
+    // same checkpoint, lock and verification treatment as the native tools.
+    const QString canonical = canonicalToolName(toolName);
+    return canonical == u"write_file"_s || canonical == u"edit_file"_s
+        || canonical == u"multi_edit_file"_s || canonical == u"multi_replace_file_content"_s;
 }
 
 bool AgentLoop::isRepeatSensitiveTool(const QString &toolName) const
@@ -1654,9 +1665,12 @@ void AgentLoop::appendToolResult(const ToolCall &call, ToolResult result)
             ++m_stateEpoch;
         }
         m_actionRepeatCounts.clear();
-        QString path = call.arguments.value(u"path"_s).toString();
+        // Parsed args (argumentsJson fallback): raw call.arguments is empty on
+        // the LLM path, which previously missed the changed path entirely.
+        const QJsonObject effArgs = effectiveArgs(call);
+        QString path = effArgs.value(u"path"_s).toString();
         if (path.isEmpty()) {
-            path = call.arguments.value(u"TargetFile"_s).toString();
+            path = effArgs.value(u"TargetFile"_s).toString();
         }
         if (!path.isEmpty()) {
             m_changedPaths.insert(path);
@@ -2099,7 +2113,9 @@ void AgentLoop::executeOne(const ToolCall &call)
     // duplicate of itself.
     const PermissionRequest request = describeTool(call);
     QString reason;
-    const auto verdict = m_policy.evaluate(call.name, effectiveArgs(call), *m_sandbox, &reason);
+    // Canonical name so ACP aliases (edit, terminal/exec, ...) are judged like
+    // the native tools they map to.
+    const auto verdict = m_policy.evaluate(canonicalToolName(call.name), effectiveArgs(call), *m_sandbox, &reason);
 
     if (verdict == PermissionPolicy::Verdict::Deny) {
         ToolResult result;
@@ -2346,8 +2362,11 @@ bool AgentLoop::isAsyncTool(const QString &toolName) const
 
 void AgentLoop::startWebTool(const ToolCall &call)
 {
-    const QString query = call.arguments.value(u"query"_s).toString().trimmed();
-    const QString url = call.arguments.value(u"url"_s).toString().trimmed();
+    // Parsed args (argumentsJson fallback): raw call.arguments is empty on
+    // the LLM path, which previously searched an empty query.
+    const QJsonObject eff = effectiveArgs(call);
+    const QString query = eff.value(u"query"_s).toString().trimmed();
+    const QString url = eff.value(u"url"_s).toString().trimmed();
 
     if (!m_web.isConfigured()) {
         ToolResult blocked;
@@ -2379,7 +2398,7 @@ void AgentLoop::startWebTool(const ToolCall &call)
         // Accept a string or a float too: QJsonValue::toInt() silently yields 0
         // for "5", which would drop the call's own limit and fall back to the
         // shared setting.
-        const int wanted = call.arguments.value(u"max_results"_s).toVariant().toInt();
+        const int wanted = eff.value(u"max_results"_s).toVariant().toInt();
         // m_web is shared for the lifetime of this loop, and several web calls
         // can be in flight at once. Each call owns its own connection and tears
         // it down when it completes, so a completion never consumes or wakes a
@@ -2618,7 +2637,7 @@ void AgentLoop::dispatchAsyncTool(const ToolCall &call)
             result.output = ok ? output : error;
             finishAsyncTool(call, result);
         });
-    m_mcp->callTool(token, call.name, call.arguments);
+    m_mcp->callTool(token, call.name, effectiveArgs(call));
 }
 
 // Renders the sub-agent's tool log so the orchestrator can audit its answer.
@@ -2711,22 +2730,26 @@ void AgentLoop::dispatchSubtask(const ToolCall &call)
     child->setSelfId(taskId);
 
     Settings childSettings = m_settings;
-    // A subtask must never narrow itself: plan mode belongs to the parent turn.
-    childSettings.planMode = false;
+    // A subtask inherits the parent's plan mode: a read-only turn stays
+    // read-only in its children rather than being silently lifted.
+    childSettings.planMode = m_settings.planMode;
     childSettings.agentMode = m_modes.modeById(modeId) ? modeId : m_settings.agentMode;
     childSettings.checkpointsEnabled = false;
     // Sub-agents keep their own model budget so a runaway child cannot starve
-    // the siblings sharing this turn. If parent has unlimited (0), child is also
-    // unlimited. If parent has a budget, give child ~50% with a minimum of 4.
+    // the siblings sharing this turn. The budget is split across the
+    // currently active children plus the new one, so N parallel children
+    // share the parent budget instead of each getting parent/2.
+    // If parent has unlimited (0), child is also unlimited.
+    const int siblings = m_activeSubtasks.size() + 1;
     if (m_settings.maxToolCalls > 0) {
-        const int parentBudget = m_settings.maxToolCalls;
-        const int childBudget = qMax(4, parentBudget / 2);
-        childSettings.maxToolCalls = qMin(childBudget, parentBudget);
+        const int remaining = qMax(0, m_settings.maxToolCalls - m_toolCalls);
+        const int childBudget = qMax(4, remaining / siblings);
+        childSettings.maxToolCalls = qMin(childBudget, m_settings.maxToolCalls);
     }
     if (m_settings.maxModelRequests > 0) {
-        const int parentBudget = m_settings.maxModelRequests;
-        const int childBudget = qMax(4, parentBudget / 2);
-        childSettings.maxModelRequests = qMin(childBudget, parentBudget);
+        const int remaining = qMax(0, m_settings.maxModelRequests - m_modelRequests);
+        const int childBudget = qMax(4, remaining / siblings);
+        childSettings.maxModelRequests = qMin(childBudget, m_settings.maxModelRequests);
     }
 
     child->setSettings(childSettings);
@@ -2908,12 +2931,14 @@ void AgentLoop::dispatchSubtask(const ToolCall &call)
             // reference goes away.
             state->timer = nullptr;
             child->deleteLater();
+            m_pendingSubtaskCalls.remove(finishedId);
             Q_EMIT subtaskFinished(finishedId, result.ok);
             finishAsyncTool(pendingCall, result);
         },
         Qt::SingleShotConnection);
 
     m_activeSubtasks.insert(taskId, child);
+    m_pendingSubtaskCalls.insert(taskId, call);
     Q_EMIT subtaskStarted(taskId, profile.id, profile.name, childSettings.agentMode, description);
     state->timer->start();
     // Without this the child only ever sees its mode's generic persona, so a
@@ -2928,29 +2953,71 @@ void AgentLoop::dispatchSubtask(const ToolCall &call)
 void AgentLoop::cancelSubtask(const QString &taskId)
 {
     if (taskId.isEmpty()) {
-        const QList<AgentLoop *> children = m_activeSubtasks.values();
-        m_activeSubtasks.clear();
-        for (AgentLoop *child : children) {
-            if (m_locks) {
-                m_locks->releaseAll(child->selfId());
+        // Settle one by one through the single-cancel path, so every pending
+        // call gets its cancelled result instead of being torn down silently.
+        const QStringList ids = m_activeSubtasks.keys() + m_pendingSubtaskCalls.keys();
+        QStringList seen;
+        for (const QString &id : ids) {
+            if (!seen.contains(id)) {
+                seen.append(id);
+                cancelSubtask(id);
             }
-            child->requestCancel();
-            child->abort();
-            child->deleteLater();
         }
         return;
     }
 
     AgentLoop *child = m_activeSubtasks.value(taskId);
     if (!child) {
+        // No running child: a refused dispatch never started one, or the turn
+        // already finished it. Settle a leftover pending call so the turn and
+        // the card do not wait on it forever.
+        if (m_pendingSubtaskCalls.contains(taskId)) {
+            ToolCall pendingCall = m_pendingSubtaskCalls.take(taskId);
+            if (pendingCall.id.isEmpty()) {
+                pendingCall.id = taskId;
+            }
+            if (pendingCall.name.isEmpty()) {
+                pendingCall.name = subtaskToolName();
+            }
+            ToolResult result;
+            result.toolCallId = taskId;
+            result.name = pendingCall.name;
+            result.ok = false;
+            result.cancelled = true;
+            result.output = u"Subtask cancelled before it started."_s;
+            Q_EMIT subtaskFinished(taskId, false);
+            finishAsyncTool(pendingCall, result);
+        }
         return;
     }
+    child->requestCancel();
+    child->abort();
+    if (!m_activeSubtasks.contains(taskId)) {
+        // abort() emitted turnFinished synchronously and its handler already
+        // settled the call and scheduled the child's deletion.
+        return;
+    }
+    // The child produced no turnFinished (it was idle), so settle the call
+    // here: otherwise the turn hangs on m_inFlight and the card spins.
     m_activeSubtasks.remove(taskId);
     if (m_locks) {
         m_locks->releaseAll(child->selfId());
     }
-    child->requestCancel();
-    child->abort();
+    ToolCall pendingCall = m_pendingSubtaskCalls.take(taskId);
+    if (pendingCall.id.isEmpty()) {
+        pendingCall.id = taskId;
+    }
+    if (pendingCall.name.isEmpty()) {
+        pendingCall.name = subtaskToolName();
+    }
+    ToolResult result;
+    result.toolCallId = taskId;
+    result.name = pendingCall.name;
+    result.ok = false;
+    result.cancelled = true;
+    result.output = u"Subtask cancelled by the user before it finished."_s;
+    Q_EMIT subtaskFinished(taskId, false);
+    finishAsyncTool(pendingCall, result);
     child->deleteLater();
 }
 
@@ -3031,6 +3098,7 @@ void AgentLoop::resolvePermission(PermissionDecision decision)
     if (usesAcpNative(m_settings)) {
         if (decision == PermissionDecision::AllowSession) {
             m_policy.grantSession(m_waitingCall.name);
+            m_policy.grantSession(canonicalToolName(m_waitingCall.name));
         }
         m_waitingCall = {};
         m_waitingRequest = {};
@@ -3058,6 +3126,7 @@ void AgentLoop::resolvePermission(PermissionDecision decision)
 
     if (decision == PermissionDecision::AllowSession) {
         m_policy.grantSession(call.name);
+        m_policy.grantSession(canonicalToolName(call.name));
     }
 
     if (m_settings.maxToolCalls > 0 && m_toolCalls >= m_settings.maxToolCalls) {

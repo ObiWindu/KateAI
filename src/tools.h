@@ -95,6 +95,12 @@ private:
         QString view() const;
     };
     QHash<QString, BashBuffer> m_bashAccumulated;
+    // Raw bytes not yet decoded for each running command. A multibyte UTF-8
+    // sequence split across two readyRead chunks must not decode to U+FFFD,
+    // so drain() only decodes the longest complete prefix and keeps the
+    // incomplete tail here for the next chunk (flushed with replacement at
+    // process finish).
+    QHash<QString, QByteArray> m_bashPending;
     // Call ids whose timeout timer fired. The kill only makes the process
     // report a failure; without this marker the finished result looks like an
     // ordinary crash and the model never learns the command was cut short.

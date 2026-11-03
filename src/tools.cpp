@@ -16,6 +16,7 @@
 #include <QMap>
 #include <QProcess>
 #include <QRegularExpression>
+#include <QStringDecoder>
 #include <QCryptographicHash>
 #include <QElapsedTimer>
 #include <QTimer>
@@ -39,6 +40,57 @@ namespace
 // A command that writes gigabytes must not fill the memory: the output is
 // kept while the command runs, and the ceiling is applied here.
 constexpr int kMaxBashOutputChars = 80000; // keep in sync with clip()
+
+// Length of the longest prefix of `data` that ends on a complete UTF-8
+// sequence. A multibyte character split across two readyRead chunks must be
+// held back until the rest arrives instead of decoding to U+FFFD.
+qsizetype utf8CompletePrefixLength(const QByteArray &data)
+{
+    const qsizetype n = data.size();
+    if (n == 0) {
+        return 0;
+    }
+    qsizetype trailingContinuations = 0;
+    while (trailingContinuations < n && trailingContinuations < 4) {
+        const auto c = static_cast<unsigned char>(data.at(n - 1 - trailingContinuations));
+        if (c >= 0x80 && c <= 0xBF) {
+            ++trailingContinuations;
+            continue;
+        }
+        break;
+    }
+    if (trailingContinuations == 0) {
+        // The chunk may end on a multibyte lead byte whose continuation bytes
+        // are all still to come: hold that byte back too.
+        const auto last = static_cast<unsigned char>(data.back());
+        if (last >= 0xC2 && last <= 0xF4) {
+            return n - 1;
+        }
+        return n;
+    }
+    if (trailingContinuations >= n) {
+        // Only continuation bytes so far; the lead byte is still to come.
+        return 0;
+    }
+    const auto lead = static_cast<unsigned char>(data.at(n - 1 - trailingContinuations));
+    qsizetype expected = 0;
+    if (lead >= 0xC2 && lead <= 0xDF) {
+        expected = 2;
+    } else if (lead >= 0xE0 && lead <= 0xEF) {
+        expected = 3;
+    } else if (lead >= 0xF0 && lead <= 0xF4) {
+        expected = 4;
+    } else {
+        // Not a multibyte lead (stray continuation or ASCII): nothing to hold
+        // back; fromUtf8 replaces the invalid byte.
+        return n;
+    }
+    const qsizetype have = trailingContinuations + 1;
+    if (have < expected) {
+        return n - have;
+    }
+    return n;
+}
 } // namespace
 
 // Unified tool argument parsing - canonicalizes arguments from ToolCall
@@ -421,7 +473,10 @@ QString unifiedDiff(const QString &path, const QString &before, const QString &a
     if (after.isEmpty()) {
         newLines.clear();
     }
-    QString out = u"--- a/%1\n+++ b/%1\n"_s.arg(path);
+    QString safePath = path;
+    safePath.replace(u'\n', u'_');
+    safePath.replace(u'\r', u'_');
+    QString out = u"--- a/%1\n+++ b/%1\n"_s.arg(safePath);
 
     // The diff is O(n*m) in time and memory; a whole-file comparison of two
     // large files would allocate a huge matrix, so fall back to a summary.
@@ -700,16 +755,16 @@ ToolResult ToolRunner::readFile(const QJsonObject &args) const
         return result;
     }
     
-    // Resolve the path relative to the sandbox workspace
+    // Resolve the path relative to the sandbox workspace (fail closed: a path
+    // the sandbox cannot resolve must never fall back to a workspace-relative
+    // join, which would read outside the allowed root).
     const QString resolved = m_sandbox.resolve(path, &error);
-    const QString readPath = resolved.isEmpty() ? QDir(m_sandbox.workspaceRoot()).absoluteFilePath(path) : resolved;
-    
-    // In strict mode, reject paths that can't be resolved
-    if (resolved.isEmpty() && m_sandbox.profile() == SandboxProfile::Strict) {
+    if (resolved.isEmpty()) {
         result.ok = false;
         result.output = error;
         return result;
     }
+    const QString readPath = resolved;
 
     // A binary file cannot be read as numbered lines; say so instead of
     // handing the model a wall of mojibake. The probe reads the first 8 KiB
@@ -1186,7 +1241,7 @@ ToolResult ToolRunner::listDir(const QJsonObject &args) const
     while (iterator.hasNext()) {
         iterator.next();
         const QFileInfo info = iterator.fileInfo();
-        if (m_sandbox.isDenied(info.absoluteFilePath())) {
+        if (m_sandbox.isDenied(info.absoluteFilePath()) || !m_sandbox.allowsRead(info.absoluteFilePath(), nullptr)) {
             ++skippedDenied;
             continue;
         }
@@ -1250,9 +1305,15 @@ ToolResult ToolRunner::grep(const QJsonObject &args) const
         return result;
     }
 
-    QRegularExpression::PatternOptions options = QRegularExpression::NoPatternOption;
+    QRegularExpression::PatternOptions options = QRegularExpression::NoPatternOption | QRegularExpression::DontCaptureOption
+        | QRegularExpression::UseUnicodePropertiesOption;
     if (caseInsensitive) {
         options |= QRegularExpression::CaseInsensitiveOption;
+    }
+    if (pattern.size() > 1024) {
+        result.ok = false;
+        result.output = u"Pattern is too long (max 1024 characters)."_s;
+        return result;
     }
     QRegularExpression re(pattern, options);
     if (!re.isValid()) {
@@ -1263,6 +1324,9 @@ ToolResult ToolRunner::grep(const QJsonObject &args) const
 
     QStringList hits;
     int skippedFiles = 0;
+    int scannedLines = 0;
+    constexpr int kMaxScannedLines = 200000;
+    bool scanCapped = false;
     auto searchFile = [&](const QString &filePath) {
         if (m_sandbox.isDenied(filePath) || !m_sandbox.allowsRead(filePath, nullptr)) {
             return;
@@ -1300,6 +1364,10 @@ ToolResult ToolRunner::grep(const QJsonObject &args) const
         const QStringList lines = contents.split(u'\n');
         int lastMatchEnd = -1; // Track end of last context block to avoid duplicate separators
         for (int i = 0; i < lines.size(); ++i) {
+            if (++scannedLines > kMaxScannedLines) {
+                scanCapped = true;
+                return;
+            }
             if (!re.match(lines.at(i)).hasMatch()) {
                 continue;
             }
@@ -1333,13 +1401,16 @@ ToolResult ToolRunner::grep(const QJsonObject &args) const
         searchFile(resolved);
     } else {
         QDirIterator it(resolved, QDir::Files, QDirIterator::Subdirectories);
-        while (it.hasNext() && hits.size() < 200) {
+        while (it.hasNext() && hits.size() < 200 && !scanCapped) {
             searchFile(it.next());
         }
     }
 
     // Format the search results
     result.output = hits.isEmpty() ? u"No matches."_s : clip(hits.join(u'\n'));
+    if (scanCapped) {
+        result.output += u"\n[Search stopped after 200000 scanned lines; narrow the path or pattern.]"_s;
+    }
     if (skippedFiles > 0) {
         // The skips are silent otherwise, and the model would read "no
         // matches" as evidence instead of an incomplete search.
@@ -1400,7 +1471,7 @@ ToolResult ToolRunner::glob(const QJsonObject &args) const
         const QString filePath = it.next();
 
         // Skip files that are denied by the sandbox for security
-        if (m_sandbox.isDenied(filePath)) {
+        if (m_sandbox.isDenied(filePath) || !m_sandbox.allowsRead(filePath, nullptr)) {
             ++skippedDenied;
             continue;
         }
@@ -1661,13 +1732,25 @@ void ToolRunner::runBashAsync(const ToolCall &call)
 
     // Reads whatever has arrived since the last visit and returns the
     // accumulated buffer, so both the progress and the timeout path drain the
-    // pipe exactly once.
+    // pipe exactly once. Decoding keeps a split multibyte UTF-8 sequence whole:
+    // only the longest complete prefix is decoded and the incomplete tail is
+    // held for the next chunk.
     auto drain = [this, callId]() -> QString {
         auto *process = m_bashProcesses.value(callId);
         if (!process) {
             return {};
         }
-        const QString chunk = QString::fromUtf8(process->readAll());
+        m_bashPending[callId] += process->readAll();
+        QByteArray &pending = m_bashPending[callId];
+        QString chunk;
+        if (!pending.isEmpty()) {
+            const qsizetype complete = utf8CompletePrefixLength(pending);
+            if (complete > 0) {
+                QStringDecoder decoder(QStringConverter::Utf8);
+                chunk = decoder.decode(QByteArrayView(pending.constData(), complete));
+                pending.remove(0, complete);
+            }
+        }
         if (!chunk.isEmpty()) {
             // The output is accumulated until the command finishes, and the
             // clipping happens only then. A command that writes gigabytes
@@ -1728,7 +1811,15 @@ void ToolRunner::runBashAsync(const ToolCall &call)
             return;
         }
         const bool timedOut = m_bashTimedOut.remove(callId);
-        const QString soFar = drain();
+        QString soFar = drain();
+        // At end of stream an incomplete tail is genuinely truncated output,
+        // not a character split across chunks: decode it with replacement
+        // instead of dropping up to 3 bytes silently.
+        const QByteArray leftover = m_bashPending.take(callId);
+        if (!leftover.isEmpty()) {
+            m_bashAccumulated[callId].append(QString::fromUtf8(leftover), kMaxBashOutputChars);
+            soFar = m_bashAccumulated.value(callId).view();
+        }
         if (!soFar.isEmpty()) {
             // A final progress emission, so the live text in the card is exactly
             // what the finished result reports.
@@ -1761,6 +1852,7 @@ void ToolRunner::cancelBash(const QString &toolCallId)
     // never emit a result. The tool call has to be settled here, otherwise
     // the caller waits for a result that never comes.
     m_bashAccumulated.remove(toolCallId);
+    m_bashPending.remove(toolCallId);
     m_bashTimedOut.remove(toolCallId);
     ToolResult cancelled;
     cancelled.toolCallId = toolCallId;

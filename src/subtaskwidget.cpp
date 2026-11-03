@@ -209,7 +209,12 @@ void SubtaskWidget::startAgent(const QString &agentName, const QString &modeId, 
     m_pendingStreamed.clear();
     m_partialOutput.clear();
     m_currentIsError = false;
+    // Never show a blank card while the child is spinning up: until its first
+    // tool report arrives the Doing line names the wait itself.
     m_current->clear();
+    m_currentLine = i18n("Starting…");
+    m_current->setVisible(true);
+    updateCurrentActivity();
     // A fresh run starts a fresh log; the previous run's steps left with its
     // card. The disclosure starts closed and opens itself on the first step,
     // unless the user has started choosing for themselves.
@@ -217,7 +222,6 @@ void SubtaskWidget::startAgent(const QString &agentName, const QString &modeId, 
     m_activityUserSet = false;
     rebuildActivityLog();
     setActivityVisible(false);
-    m_current->setVisible(false);
     updateHeader();
     updateElapsed();
     applyStyle();

@@ -1684,10 +1684,11 @@ std::optional<int> LlmClient::parseRetryAfterHeader(const QNetworkReply *reply) 
     }
     if (!retryAfterHeader.isEmpty()) {
         bool ok = false;
-        int seconds = retryAfterHeader.toInt(&ok);
+        // toInt() overflows past 2^31 and drops the hint; parse wide and clamp.
+        const qint64 seconds = retryAfterHeader.toLongLong(&ok);
         if (ok && seconds > 0) {
-            // Cap at reasonable maximum
-            return std::min(seconds, m_retryContext.maxDelaySeconds > 0 ? m_retryContext.maxDelaySeconds : 300);
+            const qint64 cap = m_retryContext.maxDelaySeconds > 0 ? m_retryContext.maxDelaySeconds : 300;
+            return static_cast<int>(qMin(seconds, cap));
         }
         // Try parsing as HTTP-date.
         if (const std::optional<qint64> secs = secondsUntilHttpDate(retryAfterHeader)) {
@@ -1725,9 +1726,10 @@ std::optional<int> LlmClient::parseRetryAfterHeader(const QNetworkReply *reply) 
     }
     if (!resetAfterHeader.isEmpty()) {
         bool ok = false;
-        int seconds = resetAfterHeader.toInt(&ok);
+        const qint64 seconds = resetAfterHeader.toLongLong(&ok);
         if (ok && seconds > 0) {
-            return std::min(seconds, m_retryContext.maxDelaySeconds > 0 ? m_retryContext.maxDelaySeconds : 300);
+            const qint64 cap = m_retryContext.maxDelaySeconds > 0 ? m_retryContext.maxDelaySeconds : 300;
+            return static_cast<int>(qMin(seconds, cap));
         }
     }
 
@@ -1759,15 +1761,19 @@ std::optional<int> LlmClient::parseRetryAfterFromBody(const QByteArray &body) co
                 bool ok = false;
                 double seconds = str.toDouble(&ok);
                 if (ok && seconds > 0) {
-                    return std::min(static_cast<int>(std::ceil(seconds)),
-                                   m_retryContext.maxDelaySeconds > 0 ? m_retryContext.maxDelaySeconds : 300);
+                    // Clamp in double before the int cast: a huge delay would
+                    // otherwise overflow the cast into a negative delay.
+                    const qint64 cap = m_retryContext.maxDelaySeconds > 0 ? m_retryContext.maxDelaySeconds : 300;
+                    seconds = qMin(seconds, double(cap));
+                    return static_cast<int>(std::ceil(seconds));
                 }
             }
         } else if (val.isDouble()) {
             double seconds = val.toDouble();
             if (seconds > 0) {
-                return std::min(static_cast<int>(std::ceil(seconds)),
-                               m_retryContext.maxDelaySeconds > 0 ? m_retryContext.maxDelaySeconds : 300);
+                const qint64 cap = m_retryContext.maxDelaySeconds > 0 ? m_retryContext.maxDelaySeconds : 300;
+                seconds = qMin(seconds, double(cap));
+                return static_cast<int>(std::ceil(seconds));
             }
         }
     }
@@ -1784,15 +1790,17 @@ std::optional<int> LlmClient::parseRetryAfterFromBody(const QByteArray &body) co
                     bool ok = false;
                     double seconds = str.toDouble(&ok);
                     if (ok && seconds > 0) {
-                        return std::min(static_cast<int>(std::ceil(seconds)),
-                                       m_retryContext.maxDelaySeconds > 0 ? m_retryContext.maxDelaySeconds : 300);
+                        const qint64 cap = m_retryContext.maxDelaySeconds > 0 ? m_retryContext.maxDelaySeconds : 300;
+                        seconds = qMin(seconds, double(cap));
+                        return static_cast<int>(std::ceil(seconds));
                     }
                 }
             } else if (val.isDouble()) {
                 double seconds = val.toDouble();
                 if (seconds > 0) {
-                    return std::min(static_cast<int>(std::ceil(seconds)),
-                                   m_retryContext.maxDelaySeconds > 0 ? m_retryContext.maxDelaySeconds : 300);
+                    const qint64 cap = m_retryContext.maxDelaySeconds > 0 ? m_retryContext.maxDelaySeconds : 300;
+                    seconds = qMin(seconds, double(cap));
+                    return static_cast<int>(std::ceil(seconds));
                 }
             }
         }
@@ -1955,9 +1963,11 @@ void LlmClient::scheduleRetry(const RetryContext &ctx)
     // Calculate delay
     std::optional<int> providerDelay;
     if (ctx.hasProviderRetryAfter) {
-        int secs = QDateTime::currentDateTime().secsTo(ctx.retryAfter);
+        // msecsTo/1000 in 64-bit: secsTo() truncates past 2^31 into a
+        // negative delay for far-future dates.
+        const qint64 secs = QDateTime::currentDateTime().msecsTo(ctx.retryAfter) / 1000;
         if (secs > 0) {
-            providerDelay = secs;
+            providerDelay = static_cast<int>(qMin(secs, qint64(std::numeric_limits<int>::max())));
         }
     }
 

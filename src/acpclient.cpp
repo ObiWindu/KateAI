@@ -77,8 +77,11 @@ static QString contentBlockText(const QJsonValue &content)
 
 // ACP agents use both the standard content-block array and shorthand output
 // shapes. Preserve useful results even when an agent uses the latter.
-static QString toolContentText(const QJsonValue &content)
+static QString toolContentText(const QJsonValue &content, int depth = 0)
 {
+    if (depth > 16) {
+        return {};
+    }
     QStringList parts;
     const QJsonArray blocks = content.isArray() ? content.toArray() : QJsonArray{content};
     for (const QJsonValue &item : blocks) {
@@ -96,9 +99,9 @@ static QString toolContentText(const QJsonValue &content)
             if (!text.isEmpty()) {
                 parts.append(text);
             } else if (obj.contains(u"output"_s)) {
-                parts.append(toolContentText(obj.value(u"output"_s)));
+                parts.append(toolContentText(obj.value(u"output"_s), depth + 1));
             } else if (obj.contains(u"result"_s)) {
-                parts.append(toolContentText(obj.value(u"result"_s)));
+                parts.append(toolContentText(obj.value(u"result"_s), depth + 1));
             } else {
                 parts.append(jsonText(item));
             }
@@ -112,11 +115,11 @@ static QString toolContentText(const QJsonValue &content)
         } else if (type == u"text"_s) {
             parts.append(obj.value(u"text"_s).toString());
         } else if (obj.contains(u"content"_s)) {
-            parts.append(toolContentText(obj.value(u"content"_s)));
+            parts.append(toolContentText(obj.value(u"content"_s), depth + 1));
         } else if (obj.contains(u"output"_s)) {
-            parts.append(toolContentText(obj.value(u"output"_s)));
+            parts.append(toolContentText(obj.value(u"output"_s), depth + 1));
         } else if (obj.contains(u"result"_s)) {
-            parts.append(toolContentText(obj.value(u"result"_s)));
+            parts.append(toolContentText(obj.value(u"result"_s), depth + 1));
         } else if (obj.contains(u"stdout"_s) || obj.contains(u"stderr"_s)) {
             const QString stdoutText = jsonText(obj.value(u"stdout"_s));
             const QString stderrText = jsonText(obj.value(u"stderr"_s));
@@ -1503,7 +1506,7 @@ void AcpClient::sendPromptNow(const QString &text)
             return;
         }
         finishPrompt(result.value(u"stopReason"_s).toString(u"end_turn"_s));
-    }, 0);
+    }, m_settings.toolCallTimeoutMs);
 }
 
 QJsonArray AcpClient::promptBlocks(const QString &text) const
@@ -1625,6 +1628,12 @@ int AcpClient::sendRequest(const QString &method, const QJsonObject &params,
     // int wraps after 2^31 and would collide with live pending ids.
     if (m_nextId <= 0 || m_nextId == std::numeric_limits<int>::max()) {
         m_nextId = 1;
+    }
+    while (m_pending.contains(m_nextId)) {
+        ++m_nextId;
+        if (m_nextId <= 0 || m_nextId == std::numeric_limits<int>::max()) {
+            m_nextId = 1;
+        }
     }
     const int id = m_nextId++;
     Pending pending;
@@ -2082,10 +2091,24 @@ void AcpClient::handleSessionUpdate(const QJsonObject &update)
         if (m_toolStreamed.value(toolCallId) == finalStreamed) {
             return;
         }
+        // Bound memory like the terminal buffers: an agent that streams a
+        // whole file every heartbeat must not grow this without limit.
+        if (finalStreamed.size() > 1 * 1024 * 1024) {
+            finalStreamed = finalStreamed.right(1 * 1024 * 1024);
+        }
         m_toolStreamed.insert(toolCallId, finalStreamed);
         Q_EMIT toolProgress(toolCallId, finalStreamed);
         return;
     }
+}
+
+static QString stripFileUrl(const QString &p)
+{
+    if (!p.startsWith(u"file://"_s)) {
+        return p;
+    }
+    const QString local = QUrl::fromUserInput(p).toLocalFile();
+    return local.isEmpty() ? p : local;
 }
 
 PermissionRequest AcpClient::permissionFromToolCall(const QJsonObject &toolCall) const
@@ -2121,6 +2144,7 @@ PermissionRequest AcpClient::permissionFromToolCall(const QJsonObject &toolCall)
         QString p = locObj.value(u"path"_s).toString();
         if (p.isEmpty()) p = locObj.value(u"filePath"_s).toString();
         if (p.isEmpty()) p = locObj.value(u"file"_s).toString();
+        p = stripFileUrl(p);
         if (!p.isEmpty() && !locationPaths.contains(p)) {
             locationPaths.append(p);
         }
@@ -2232,10 +2256,13 @@ PermissionRequest AcpClient::permissionFromToolCall(const QJsonObject &toolCall)
     // The primary diff is the one for the primary file. When no diff names
     // that file, the first diff's file becomes the primary one.
     auto absolutePath = [this](const QString &p) {
-        if (QFileInfo(p).isAbsolute() || m_workspace.isEmpty()) {
-            return QDir::cleanPath(p);
-        }
-        return QDir::cleanPath(QDir(m_workspace).absoluteFilePath(p));
+        const QString abs = (QFileInfo(p).isAbsolute() || m_workspace.isEmpty())
+            ? p
+            : QDir(m_workspace).absoluteFilePath(p);
+        // Resolve symlinks where the file exists; otherwise fall back to the
+        // lexical clean so non-existent paths still compare canonically.
+        const QString canonical = QFileInfo(abs).canonicalFilePath();
+        return canonical.isEmpty() ? QDir::cleanPath(abs) : canonical;
     };
     int primary = -1;
     if (!diffs.isEmpty()) {
@@ -2268,7 +2295,7 @@ PermissionRequest AcpClient::permissionFromToolCall(const QJsonObject &toolCall)
     // --- Path resolution from args ---
     auto tryPath = [&](const QJsonObject &o, const QString &key) {
         if (request.path.isEmpty()) {
-            QString p = o.value(key).toString();
+            QString p = stripFileUrl(o.value(key).toString());
             if (!p.isEmpty()) request.path = p;
         }
     };
@@ -2283,9 +2310,9 @@ PermissionRequest AcpClient::permissionFromToolCall(const QJsonObject &toolCall)
     }
     // Resolve relative paths against workspace
     if (!request.path.isEmpty() && !QFileInfo(request.path).isAbsolute() && !m_workspace.isEmpty()) {
-        request.resolvedPath = QDir(m_workspace).absoluteFilePath(request.path);
+        request.resolvedPath = QDir::cleanPath(QDir(m_workspace).absoluteFilePath(request.path));
     } else {
-        request.resolvedPath = request.path;
+        request.resolvedPath = QDir::cleanPath(request.path);
     }
 
     // --- Args-based diff extraction ---
@@ -2300,13 +2327,13 @@ PermissionRequest AcpClient::permissionFromToolCall(const QJsonObject &toolCall)
         }
         if (!args.isEmpty()) {
             if (request.path.isEmpty()) {
-                QString p = args.value(u"path"_s).toString();
-                if (p.isEmpty()) p = args.value(u"file_path"_s).toString();
-                if (p.isEmpty()) p = args.value(u"filePath"_s).toString();
-                if (p.isEmpty()) p = args.value(u"file"_s).toString();
-                if (p.isEmpty()) p = args.value(u"uri"_s).toString();
-                if (p.isEmpty()) p = args.value(u"target"_s).toString();
-                if (p.isEmpty()) p = args.value(u"TargetFile"_s).toString();
+                QString p = stripFileUrl(args.value(u"path"_s).toString());
+                if (p.isEmpty()) p = stripFileUrl(args.value(u"file_path"_s).toString());
+                if (p.isEmpty()) p = stripFileUrl(args.value(u"filePath"_s).toString());
+                if (p.isEmpty()) p = stripFileUrl(args.value(u"file"_s).toString());
+                if (p.isEmpty()) p = stripFileUrl(args.value(u"uri"_s).toString());
+                if (p.isEmpty()) p = stripFileUrl(args.value(u"target"_s).toString());
+                if (p.isEmpty()) p = stripFileUrl(args.value(u"TargetFile"_s).toString());
                 if (!p.isEmpty()) request.path = p;
             }
             QString oldText = args.value(u"old_string"_s).toString();
@@ -2406,10 +2433,13 @@ PermissionRequest AcpClient::mergeToolCallDetails(const PermissionRequest &base,
         merged.additionalDiffs = other.additionalDiffs;
         merged.additionalPaths = other.additionalPaths;
     }
-    for (const QString &p : other.additionalPaths) {
-        if (p != merged.path && !merged.additionalPaths.contains(p)) {
-            merged.additionalPaths.append(p);
+    for (int i = 0; i < other.additionalPaths.size(); ++i) {
+        const QString &p = other.additionalPaths.at(i);
+        if (p == merged.path || merged.additionalPaths.contains(p)) {
+            continue;
         }
+        merged.additionalPaths.append(p);
+        merged.additionalDiffs.append(i < other.additionalDiffs.size() ? other.additionalDiffs.at(i) : QString());
     }
     merged.mutatesFiles = merged.mutatesFiles || other.mutatesFiles;
     return merged;
@@ -2610,19 +2640,32 @@ void AcpClient::recordApprovalGrants(const PermissionRequest &request, Permissio
 
 void AcpClient::handleFsRead(const QJsonValue &id, const QJsonObject &params)
 {
-    const QString path = params.value(u"path"_s).toString();
+    const QString path = stripFileUrl(params.value(u"path"_s).toString());
     QString error;
     if (!pathAllowed(path, false, &error)) {
         replyError(id, kServerError, error);
         return;
     }
+    const QString resolved = currentSandbox().resolve(path, &error, false);
+    if (resolved.isEmpty()) {
+        replyError(id, kServerError, error.isEmpty() ? u"Could not resolve %1."_s.arg(path) : error);
+        return;
+    }
     QString contents;
-    if (!m_bridge || !m_bridge->readDocument(path, &contents)) {
+    if (!m_bridge || !m_bridge->readDocument(resolved, &contents)) {
         replyError(id, kServerError, u"Could not read %1."_s.arg(path));
         return;
     }
     // Bound memory: whole-file read + split() duplicates; negative previously
     // meant unlimited. Cap the slice the agent can request per call.
+    if (params.contains(u"line"_s) && params.value(u"line"_s).toInt(0) < 1) {
+        replyError(id, kInvalidParams, u"line must be >= 1."_s);
+        return;
+    }
+    if (params.contains(u"limit"_s) && params.value(u"limit"_s).toInt(0) < 0) {
+        replyError(id, kInvalidParams, u"limit must be >= 0."_s);
+        return;
+    }
     const int line = qMax(0, params.value(u"line"_s).toInt(0));
     const int limit = params.value(u"limit"_s).toInt(0) <= 0 ? 10000 : qMin(params.value(u"limit"_s).toInt(0), 10000);
     QJsonObject result;
@@ -2632,7 +2675,7 @@ void AcpClient::handleFsRead(const QJsonValue &id, const QJsonObject &params)
 
 void AcpClient::handleFsWrite(const QJsonValue &id, const QJsonObject &params)
 {
-    const QString path = params.value(u"path"_s).toString();
+    const QString path = stripFileUrl(params.value(u"path"_s).toString());
     // The permission bar is the contract for every write: an approval for this
     // exact path lets the call through, anything else parks it until the user
     // or the policy answers.
@@ -2653,11 +2696,16 @@ void AcpClient::handleFsWrite(const QJsonValue &id, const QJsonObject &params)
         replyError(id, kServerError, error);
         return;
     }
+    const QString resolved = currentSandbox().resolve(path, &error, true);
+    if (resolved.isEmpty()) {
+        replyError(id, kServerError, error.isEmpty() ? u"Could not resolve %1."_s.arg(path) : error);
+        return;
+    }
     if (!m_bridge) {
         replyError(id, kInternalError, u"No document bridge is available."_s);
         return;
     }
-    if (!m_bridge->writeDocument(path, params.value(u"content"_s).toString(), &error)) {
+    if (!m_bridge->writeDocument(resolved, params.value(u"content"_s).toString(), &error)) {
         replyError(id, kServerError, error.isEmpty() ? u"Could not write %1."_s.arg(path) : error);
         return;
     }
@@ -2944,7 +2992,9 @@ void AcpClient::handleTerminalCreate(const QJsonValue &id, const QJsonObject &pa
         cwd = m_workspace;
     }
     QString error;
-    if (!pathAllowed(cwd, false, &error)) {
+    // A terminal runs an arbitrary command that can write relative to cwd,
+    // so the directory must pass the write gate, not just the read gate.
+    if (!pathAllowed(cwd, true, &error)) {
         replyError(id, kServerError, error);
         return;
     }
@@ -3061,6 +3111,22 @@ void AcpClient::handleTerminalWait(const QJsonValue &id, const QJsonObject &para
         return;
     }
     term->waiters.append(id);
+    // Bound the wait: an agent that never exits would otherwise park the RPC
+    // forever. The budget matches the per-tool-call budget.
+    const int budget = m_settings.toolCallTimeoutMs > 0 ? m_settings.toolCallTimeoutMs : 120000;
+    QTimer::singleShot(budget, this, [this, terminalId, id] {
+        Terminal *term = m_terminals.value(terminalId);
+        if (!term) {
+            return;
+        }
+        for (int i = 0; i < term->waiters.size(); ++i) {
+            if (term->waiters.at(i) == id) {
+                term->waiters.removeAt(i);
+                replyError(id, kServerError, u"terminal/wait_for_exit timed out."_s);
+                return;
+            }
+        }
+    });
 }
 
 void AcpClient::handleTerminalKill(const QJsonValue &id, const QJsonObject &params)
@@ -3106,7 +3172,10 @@ void AcpClient::appendTerminalOutput(Terminal *term, const QByteArray &chunk)
     // while the command runs.
     const auto owner = m_terminalTools.constFind(term->id);
     if (owner != m_terminalTools.constEnd()) {
-        const QString text = QString::fromUtf8(term->output);
+        QString text = QString::fromUtf8(term->output);
+        if (text.size() > 1 * 1024 * 1024) {
+            text = text.right(1 * 1024 * 1024);
+        }
         m_toolStreamed.insert(owner.value(), text);
         Q_EMIT toolProgress(owner.value(), text);
     }
@@ -3270,6 +3339,13 @@ void AcpClient::finishPrompt(const QString &stopReason, const QString &error)
 bool AcpClient::isTransientAgentError(const QString &error) const
 {
     const QString lower = error.toLower();
+    // Auth failures are never transient: retrying them only repeats the same
+    // failure. Exclude them before the substring checks below, whose generic
+    // tokens ("timeout", "overloaded") could otherwise match an auth message.
+    if (lower.contains(u"api key"_s) || lower.contains(u"apikey"_s) || lower.contains(u"auth"_s)
+        || lower.contains(u"401"_s) || lower.contains(u"403"_s)) {
+        return false;
+    }
     // Phrasings agents report when their own HTTP stream to the model
     // provider breaks mid-response. Rust agents surface hyper/reqwest
     // transport errors ("peer closed connection without sending complete

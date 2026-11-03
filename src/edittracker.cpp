@@ -160,8 +160,13 @@ int countDiffLines(const QString &diff, QChar marker)
     int count = 0;
     const QStringList lines = diff.split(u'\n');
     for (const QString &line : lines) {
-        // The ---/+++ file headers are metadata, not content changes.
-        if (line.startsWith(u"---"_s) || line.startsWith(u"+++"_s) || line.startsWith(u'@')) {
+        // Only true hunk headers and file headers are metadata. "@decorator"
+        // is a content line, and "++++foo"/"----foo" are content lines, so
+        // only "@@" hunks and "--- "/"+++ " (or bare "---"/"+++") are skipped.
+        if (line.startsWith(u"@@")) {
+            continue;
+        }
+        if (line == u"---"_s || line.startsWith(u"--- "_s) || line == u"+++"_s || line.startsWith(u"+++ "_s)) {
             continue;
         }
         if (line.startsWith(marker)) {
@@ -841,8 +846,28 @@ void EditTracker::previewDiff(const QString &path)
             continue;
         }
         const QString candidate = QDir(directory).absoluteFilePath(fileName);
+        // Predictable name in a shared temp dir: never follow or overwrite
+        // through a planted symlink, and never leave wider-than-owner perms
+        // between create and chmod.
+        QFileInfo existing(candidate);
+        if (existing.isSymLink()) {
+            QFile::remove(candidate);
+            if (QFileInfo(candidate).isSymLink()) {
+                continue;
+            }
+        }
+        const bool isNew = !QFile::exists(candidate);
+        if (!isNew) {
+            // A regular file from an earlier preview is replaced wholesale so
+            // the write below never follows stale state.
+            QFile::remove(candidate);
+            if (QFileInfo(candidate).isSymLink() || QFile::exists(candidate)) {
+                continue;
+            }
+        }
         QFile preview(candidate);
-        if (!preview.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
+        QIODevice::OpenMode mode = QIODevice::WriteOnly | QIODevice::Text | QIODevice::NewOnly;
+        if (!preview.open(mode)) {
             continue;
         }
         // Secrets in diffs: owner-only regardless of umask.

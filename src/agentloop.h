@@ -334,6 +334,11 @@ LlmClient m_client;
     CheckpointManager m_checkpoints;
     // taskId -> child loop, for every sub-agent running right now.
     QHash<QString, AgentLoop *> m_activeSubtasks;
+    // taskId -> the new_task call being served, so a cancel that produces no
+    // turnFinished from the child (idle child, refused dispatch) can still
+    // settle the tool with a cancelled result instead of hanging the turn
+    // and leaving the card spinning.
+    QHash<QString, ToolCall> m_pendingSubtaskCalls;
     // How many async tools (MCP or sub-agent) have been dispatched but have
     // not reported back yet. The queue is held open while this is non-zero.
     int m_inFlight = 0;

@@ -262,7 +262,13 @@ static bool matchGlobRegex(const QString &regex, const QString &haystack, QHash<
 
     bool Sandbox::pathInsideWorkspace(const QString &absolutePath) const
     {
+        if (m_workspaceRoot.isEmpty()) {
+            return false;
+        }
         const QString root = QDir::cleanPath(m_workspaceRoot);
+        if (root.isEmpty() || root == u"."_s) {
+            return false;
+        }
         QString path = QDir::cleanPath(absolutePath);
 
         // Helper to canonicalize a path, falling back to parent directory
@@ -462,6 +468,12 @@ QString Sandbox::normalizePath(const QString &path, QString *error, bool forWrit
 
     bool Sandbox::allowsRead(const QString &path, QString *error) const
     {
+        if (m_workspaceRoot.isEmpty() && m_profile != SandboxProfile::Off) {
+            if (error) {
+                *error = u"Workspace root is not set."_s;
+            }
+            return false;
+        }
         if (m_profile == SandboxProfile::Off) {
             const QString resolvedPath = windowsAbsoluteCandidate(m_workspaceRoot, path);
             const QFileInfo info(QDir(m_workspaceRoot), resolvedPath);
@@ -600,26 +612,60 @@ static bool hasOutputRedirection(const QString &command)
 // whole timeout of a turn that was approved without a second thought. Only
 // commands already on the read-only list are checked against this, so a flag
 // can never pull a new command onto the allowlist - it can only take one off it.
+// Strips one surrounding pair of matching single/double quotes:
+// "'-delete'" spells the flag -delete and must not slip the write-flag scan.
+static QString unquoteFlagToken(const QString &raw)
+{
+    QString t = raw;
+    if (t.size() >= 2) {
+        const QChar first = t.at(0);
+        const QChar last = t.at(t.size() - 1);
+        if ((first == u'"' && last == u'"') || (first == u'\'' && last == u'\'')) {
+            return t.mid(1, t.size() - 2);
+        }
+    }
+    return t;
+}
+
 static bool hasWriteFlag(const QString &primary, const QString &command)
 {
-    static const QHash<QString, QStringList> writeFlags = {
-        {u"find"_s,
-         {u"-delete"_s, u"-exec"_s, u"-execdir"_s, u"-ok"_s, u"-okdir"_s,
-          u"-fls"_s, u"-fprint"_s, u"-fprint0"_s, u"-fprintf"_s}},
-        {u"sort"_s, {u"-o"_s, u"--output"_s}},
-        // -s/--set writes the system clock; -f/--file only reads dates from a
-        // file and stays read-only.
-        {u"date"_s, {u"-s"_s, u"--set"_s}},
-        {u"tail"_s, {u"-f"_s, u"-F"_s, u"--follow"_s}},
-    };
-    const QStringList flags = writeFlags.value(primary);
-    if (flags.isEmpty()) {
-        return false;
-    }
-    const QStringList tokens = command.split(QRegularExpression(uR"(\s+)"_s), Qt::SkipEmptyParts);
-    for (const QString &token : tokens) {
-        if (flags.contains(token)) {
-            return true;
+    const QStringList rawTokens = command.split(QRegularExpression(uR"(\s+)"_s), Qt::SkipEmptyParts);
+    for (const QString &raw : rawTokens) {
+        const QString token = unquoteFlagToken(raw);
+        if (token.isEmpty()) {
+            continue;
+        }
+        // A flag value can hide behind '=' ("--output=file"); check the value
+        // part too for the find actions.
+        QString afterEq;
+        const int eq = token.indexOf(u'=');
+        if (eq >= 0) {
+            afterEq = unquoteFlagToken(token.mid(eq + 1));
+        }
+        if (primary == u"find"_s) {
+            static const QStringList findWrites = {
+                u"-delete"_s, u"-exec"_s, u"-execdir"_s, u"-ok"_s, u"-okdir"_s,
+                u"-fls"_s, u"-fprint"_s, u"-fprint0"_s, u"-fprintf"_s,
+            };
+            if (findWrites.contains(token) || (!afterEq.isEmpty() && findWrites.contains(afterEq))) {
+                return true;
+            }
+        } else if (primary == u"sort"_s) {
+            if (token == u"-o"_s || token == u"--output"_s || token.startsWith(u"--output="_s)
+                || (token.startsWith(u"-o"_s) && token.size() > 2)) {
+                return true;
+            }
+        } else if (primary == u"date"_s) {
+            if (token == u"-s"_s || token == u"--set"_s || token.startsWith(u"--set="_s)
+                || token.startsWith(u"-s"_s)) {
+                return true;
+            }
+        } else if (primary == u"tail"_s) {
+            if (token == u"-f"_s || token == u"-F"_s || token == u"--follow"_s
+                || token.startsWith(u"-f"_s) || token.startsWith(u"-F"_s)
+                || token.startsWith(u"--follow="_s)) {
+                return true;
+            }
         }
     }
     return false;
@@ -640,6 +686,12 @@ bool Sandbox::isReadOnlyCommand(const QString &command) const
     };
 
     const QString cmd = command.trimmed();
+    // "sudo ls" must not auto-approve: primaryCommand() strips a leading
+    // "sudo " for display, but the allowlist decision must see the privilege
+    // escalation. Any sudo/su prefix is never read-only.
+    if (cmd.startsWith(u"sudo "_s) || cmd.startsWith(u"sudo\t"_s) || cmd.startsWith(u"su "_s) || cmd.startsWith(u"su\t"_s)) {
+        return false;
+    }
     static const QRegularExpression writers(
         uR"(\b(?:tee|rm|mv|cp|chmod|chown|mkdir|touch|dd|del|erase|rd|rmdir|copy|move|ren|rename|New-Item|Set-Content|Out-File|Remove-Item|Move-Item|Copy-Item)\b)"_s);
     if (writers.match(cmd).hasMatch()) {
@@ -670,8 +722,8 @@ bool Sandbox::isReadOnlyCommand(const QString &command) const
     if (hasOutputRedirection(cmd)) {
         return false;
     }
-    if (cmd.contains(u"&&"_s) || cmd.contains(u"||"_s) || cmd.contains(u';') || cmd.contains(u'|')) {
-        const QStringList parts = cmd.split(QRegularExpression(uR"(\s*(?:&&|\|\||;|\|)\s*)"_s));
+    if (cmd.contains(u"&&"_s) || cmd.contains(u"||"_s) || cmd.contains(u';') || cmd.contains(u'|') || cmd.contains(u'\n')) {
+        const QStringList parts = cmd.split(QRegularExpression(uR"(\s*(?:&&|\|\||;|\||\n)\s*)"_s));
         for (const QString &part : parts) {
             if (!isReadOnlyCommand(part)) {
                 return false;
@@ -707,6 +759,129 @@ bool Sandbox::isDangerousCommand(const QString &command) const
     return dangerous.match(cmd).hasMatch() || isAlwaysDeniedCommand(cmd);
 }
 
+// Programmatic rm-root check to cover what the rm regex cannot spell:
+// flags after the target ("rm / -rf"), "--" terminators, "//", "/./" and
+// "/tmp/.." spellings (all clean to "/"), quoted targets, "~" and $HOME.
+static bool rmTargetsRoot(const QString &command)
+{
+    // Tokenize respecting single/double quotes so quoted targets stay whole.
+    QStringList tokens;
+    QString cur;
+    bool inSingle = false;
+    bool inDouble = false;
+    for (int i = 0; i < command.size(); ++i) {
+        const QChar c = command.at(i);
+        if (c == u'\'' && !inDouble) {
+            inSingle = !inSingle;
+            cur.append(c);
+        } else if (c == u'"' && !inSingle) {
+            inDouble = !inDouble;
+            cur.append(c);
+        } else if ((c.isSpace() || c == u';' || c == u'|' || c == u'&' || c == u'\n') && !inSingle && !inDouble) {
+            if (!cur.isEmpty()) {
+                tokens.append(cur);
+                cur.clear();
+            }
+            if ((c == u'|' || c == u'&') && i + 1 < command.size() && command.at(i + 1) == c) {
+                tokens.append(QString(c) + QString(c));
+                ++i;
+            } else if (!c.isSpace() && c != u'\n') {
+                tokens.append(QString(c));
+            }
+        } else {
+            cur.append(c);
+        }
+    }
+    if (!cur.isEmpty()) {
+        tokens.append(cur);
+    }
+
+    auto stripQuotes = [](QString t) -> QString {
+        // Strip surrounding quote pairs and any stray quote characters, so
+        // "'-delete'"-style quoting cannot hide a target either.
+        if (t.size() >= 2) {
+            const QChar f = t.at(0);
+            const QChar l = t.at(t.size() - 1);
+            if ((f == u'"' && l == u'"') || (f == u'\'' && l == u'\'')) {
+                t = t.mid(1, t.size() - 2);
+            }
+        }
+        t.remove(u'"');
+        t.remove(u'\'');
+        return t;
+    };
+    auto baseName = [](const QString &t) -> QString {
+        QString s = t;
+        const int slash = s.lastIndexOf(u'/');
+        const int backslash = s.lastIndexOf(u'\\');
+        const int sep = qMax(slash, backslash);
+        if (sep >= 0) {
+            s = s.mid(sep + 1);
+        }
+#ifdef Q_OS_WIN
+        if (s.endsWith(u".exe"_s, Qt::CaseInsensitive)) {
+            s = s.left(s.size() - 4);
+        }
+#endif
+        return s;
+    };
+
+    const QString home = QDir::homePath();
+    for (int i = 0; i < tokens.size(); ++i) {
+        QString tok = stripQuotes(tokens.at(i));
+        if (tok.isEmpty()) {
+            continue;
+        }
+        if (baseName(tok) != u"rm"_s) {
+            continue;
+        }
+        // Found an rm invocation: scan its arguments until a chain delimiter.
+        bool endOfFlags = false;
+        for (int j = i + 1; j < tokens.size(); ++j) {
+            const QString rawNext = tokens.at(j);
+            if (rawNext == u";"_s || rawNext == u"|"_s || rawNext == u"&"_s
+                || rawNext == u"&&"_s || rawNext == u"||"_s) {
+                break;
+            }
+            QString t = stripQuotes(rawNext);
+            if (t.isEmpty()) {
+                continue;
+            }
+            if (!endOfFlags && t == u"--"_s) {
+                endOfFlags = true;
+                continue;
+            }
+            if (!endOfFlags && t.startsWith(u'-') && t.size() > 1 && t != u"-"_s) {
+                continue; // a flag; flags may also follow targets
+            }
+            // A target candidate.
+            if (t == u"$HOME"_s || t == u"${HOME}"_s || t == u"$HOME/*"_s || t == u"${HOME}/*"_s
+                || t == u"$HOME/"_s || t == u"${HOME}/"_s) {
+                return true;
+            }
+            QString expanded = t;
+            if (expanded == u"~"_s) {
+                expanded = home;
+            } else if (expanded.startsWith(u"~/"_s)) {
+                expanded = home + expanded.mid(1);
+            } else {
+                static const QRegularExpression homeVar(uR"(\$\{HOME\}|\$HOME(?![A-Za-z0-9_]))"_s);
+                expanded.replace(homeVar, home);
+            }
+            if (expanded == home) {
+                return true; // bare "~" (or its $HOME spellings resolved above)
+            }
+            const QString cleaned = QDir::cleanPath(QDir::fromNativeSeparators(expanded));
+            if (cleaned == u"/"_s) {
+                // Covers "/", "//", "/./", "/tmp/..", quoted variants, and
+                // "--"-terminated spellings alike.
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 bool Sandbox::isAlwaysDeniedCommand(const QString &command) const
 {
     const QString cmd = command.trimmed();
@@ -718,9 +893,9 @@ bool Sandbox::isAlwaysDeniedCommand(const QString &command) const
     // any order and any combination. Deeper absolute paths are not matched:
     // they are a normal cleanup the permission prompt can judge.
     static const QRegularExpression denied(
-        uR"((rm\s+((?:-[a-zA-Z]*[rf][a-zA-Z]*|--no-preserve-root|--force|--recursive)\s+)+(/(\s|$|\*+)|["']/["']?(\s|$|\*+)|~(/\S*)?(\s|$)))|(\bmkfs\b)|(\bdd\s+.*\bof=/dev/)|(:\(\)\s*\{\s*:\|:&\s*;\s*\})|(\b(curl|wget)\b.*\|\s*(?:sudo\s+)?(sh|bash|zsh|fish|dash|ksh|cmd|cmd\.exe|powershell|powershell\.exe|pwsh|python[0-9.]*|perl|ruby|node)\b)|(\bformat\s+[a-zA-Z]:)|(\bdiskpart\b)|(\brmdir\s+/s\s+/q\s+[a-zA-Z]:\\)|(\bRemove-Item\s+.*-Recurse.*[A-Z]:\\))"_s,
+        uR"((rm\s+((?:-[a-zA-Z]*[rf][a-zA-Z]*|--no-preserve-root|--force|--recursive)\s+)+(/(\s|$|\*+)|["']/["']?(\s|$|\*+)|~(/\S*)?(\s|$)))|(\bmkfs\b)|(\bdd\s+.*\bof=/dev/)|([A-Za-z_:][A-Za-z0-9_:]*\(\)\s*\{\s*[A-Za-z_:][A-Za-z0-9_:]*\|[A-Za-z_:][A-Za-z0-9_:]*&\s*;\s*[^}]*\})|(\b(curl|wget)\b.*\|\s*(?:sudo(?:\s+-[^\s]+)*\s+)?(sh|bash|zsh|fish|dash|ksh|cmd|cmd\.exe|powershell|powershell\.exe|pwsh|python[0-9.]*|perl|ruby|node)\b)|(\bformat\s+[a-zA-Z]:)|(\bdiskpart\b)|(\brmdir\s+(?:/s\s+/q|/q\s+/s)\s+[a-zA-Z]:\\)|(\bRemove-Item\s+.*-Recurse.*[A-Z]:\\))"_s,
         QRegularExpression::CaseInsensitiveOption);
-    return denied.match(cmd).hasMatch();
+    return denied.match(cmd).hasMatch() || rmTargetsRoot(cmd);
 }
 
 bool Sandbox::commandTouchesDeniedPath(const QString &command) const

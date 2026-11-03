@@ -288,6 +288,14 @@ private Q_SLOTS:
                 firstId = taskId;
             }
         });
+        // The cancel must settle the tool: without a cancelled result the
+        // parent turn hangs on m_inFlight and the card spins forever.
+        bool gotCancelledResult = false;
+        QObject::connect(&agent, &AgentLoop::toolFinished, &agent, [&](const ToolResult &result) {
+            if (result.toolCallId == firstId && result.cancelled) {
+                gotCancelledResult = true;
+            }
+        });
 
         agent.start(u"Split this across two agents."_s);
         QVERIFY(waitFor([&firstId] {
@@ -298,6 +306,9 @@ private Q_SLOTS:
         agent.cancelSubtask(firstId);
         QVERIFY(!agent.runningSubtaskIds().contains(firstId));
         QVERIFY(agent.runningSubtaskCount() == 1);
+        QVERIFY(waitFor([&gotCancelledResult] {
+            return gotCancelledResult;
+        }, 20000));
 
         agent.abort();
         QCOMPARE(agent.runningSubtaskCount(), 0);

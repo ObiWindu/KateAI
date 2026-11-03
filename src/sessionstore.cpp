@@ -419,10 +419,15 @@ static QSqlDatabase openStore(bool *ok)
     // A thread that ends frees its address, and a new thread can get the same
     // one. A counter keeps the connection names unique, and the connection is
     // closed when the thread ends.
-    static quint64 connectionCounter = 0;
+    static quint64 connectionCounter = 0; // guarded by storeMutex()
+    quint64 connectionSeq = 0;
+    {
+        QMutexLocker locker(&storeMutex());
+        connectionSeq = ++connectionCounter;
+    }
     const QString connectionName = u"kateai_sessions_%1_%2"_s
                                        .arg(reinterpret_cast<quintptr>(thread))
-                                       .arg(++connectionCounter);
+                                       .arg(connectionSeq);
     QString error;
 
     {
@@ -445,7 +450,11 @@ static QSqlDatabase openStore(bool *ok)
 
     QSqlDatabase db = QSqlDatabase::database(connectionName, true);
     importLegacyConversations(db);
-    repairBadConversationTitles(db);
+    // Repairing scans payloads; run once per process instead of on every open.
+    static std::atomic_bool titleRepairDone{false};
+    if (!titleRepairDone.exchange(true)) {
+        repairBadConversationTitles(db);
+    }
 
     // The connection belongs to the thread that opened it. When the thread
     // ends, the connection has to go with it, or the next thread with the same
@@ -761,12 +770,15 @@ QList<SessionStore::ConversationInfo> SessionStore::listConversations(int maxCon
 
     // A LIMIT placeholder cannot be left unbound, so build the query for the
     // requested bound (0 means "no limit").
+    // NOTE: payload (full session JSON) is not selected here: most rows have
+    // a good title and never need it. Rows with a bad title fetch their
+    // payload lazily in a second query below.
     QSqlQuery query(db);
     if (maxConversations > 0) {
-        query.prepare(u"SELECT id, title, created_at, updated_at, message_count, payload FROM conversations ORDER BY updated_at DESC LIMIT ?"_s);
+        query.prepare(u"SELECT id, title, created_at, updated_at, message_count FROM conversations ORDER BY updated_at DESC LIMIT ?"_s);
         query.addBindValue(maxConversations);
     } else {
-        query.prepare(u"SELECT id, title, created_at, updated_at, message_count, payload FROM conversations ORDER BY updated_at DESC"_s);
+        query.prepare(u"SELECT id, title, created_at, updated_at, message_count FROM conversations ORDER BY updated_at DESC"_s);
     }
     if (!query.exec()) {
         qWarning() << "KateAI: cannot list conversations:" << query.lastError().text();
@@ -784,16 +796,22 @@ QList<SessionStore::ConversationInfo> SessionStore::listConversations(int maxCon
 
         // Repair any title that still carries a compaction marker so the history
         // list never shows "earlier conversation was compacted...".
+        // The payload is fetched lazily only for bad titles.
         if (isBadTitle(info.title)) {
-            const SessionStore::SessionData data = sessionDataFromJson(query.value(5).toByteArray());
-            const QString repaired = generateTitleFromMessages(data.messages);
-            if (!repaired.isEmpty() && !isBadTitle(repaired)) {
-                info.title = repaired;
-                QSqlQuery upd(db);
-                upd.prepare(u"UPDATE conversations SET title = ? WHERE id = ?"_s);
-                upd.addBindValue(repaired);
-                upd.addBindValue(info.id);
-                upd.exec();
+            QSqlQuery payloadQuery(db);
+            payloadQuery.prepare(u"SELECT payload FROM conversations WHERE id = ?"_s);
+            payloadQuery.addBindValue(info.id);
+            if (payloadQuery.exec() && payloadQuery.next()) {
+                const SessionStore::SessionData data = sessionDataFromJson(payloadQuery.value(0).toByteArray());
+                const QString repaired = generateTitleFromMessages(data.messages);
+                if (!repaired.isEmpty() && !isBadTitle(repaired)) {
+                    info.title = repaired;
+                    QSqlQuery upd(db);
+                    upd.prepare(u"UPDATE conversations SET title = ? WHERE id = ?"_s);
+                    upd.addBindValue(repaired);
+                    upd.addBindValue(info.id);
+                    upd.exec();
+                }
             }
         }
 
@@ -994,6 +1012,7 @@ void SessionStore::deleteConversation(const QString &conversationId)
     }
 
     if (!db.commit()) {
+        db.rollback();
         qWarning() << "KateAI: cannot commit the deletion of conversation" << conversationId << db.lastError().text();
     }
 }

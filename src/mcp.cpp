@@ -343,8 +343,22 @@ QJsonArray parseHttpBody(const QByteArray &body, const QString &contentType)
         return messages;
     }
     QString currentEvent;
-    for (const QByteArray &line : body.split('\n')) {
-        const QString text = QString::fromUtf8(line).trimmed();
+    // Iterate lines via indexOf instead of body.split('\n'): split() copies
+    // the whole body into a list and then each line again, doubling peak
+    // memory on large SSE streams.
+    qsizetype pos = 0;
+    while (pos <= body.size()) {
+        qsizetype nl = body.indexOf('\n', pos);
+        if (nl < 0) {
+            nl = body.size();
+        }
+        qsizetype len = nl - pos;
+        // Strip a trailing '\r' before decoding so trimmed() works on views.
+        if (len > 0 && body.at(pos + len - 1) == '\r') {
+            --len;
+        }
+        const QString text = QString::fromUtf8(body.constData() + pos, len).trimmed();
+        pos = nl + 1;
         if (text.startsWith(u"event:"_s)) {
             currentEvent = text.mid(6).trimmed();
             continue;
@@ -576,13 +590,20 @@ bool McpClient::callTool(const QString &callToken, const QString &toolName, cons
         budget = qMin(budget, m_timeoutMs);
     }
     timeout->setInterval(budget);
-    connect(timeout, &QTimer::timeout, this, [this, id, toolName, budget] {
-        const auto it = m_pending.constFind(id);
-        if (it == m_pending.constEnd()) {
+    connect(timeout, &QTimer::timeout, this, [this, id, toolName, budget, timeout] {
+        const auto it = m_pending.find(id);
+        if (it == m_pending.end()) {
+            timeout->stop();
+            timeout->deleteLater();
             return;
+        }
+        if (it.value().reply) {
+            it.value().reply->abort();
         }
         const QString token = it.value().callToken;
         m_pending.remove(id);
+        timeout->stop();
+        timeout->deleteLater();
         Q_EMIT toolResult(token, false, QString(), u"Tool '%1' timed out after %2 ms."_s.arg(toolName).arg(budget));
     });
     pending.timeout = timeout;
@@ -620,12 +641,19 @@ int McpClient::sendRequest(const QString &method, const QJsonObject &params)
         QTimer *timeout = new QTimer(this);
         timeout->setSingleShot(true);
         timeout->setInterval(budget);
-        connect(timeout, &QTimer::timeout, this, [this, id, method, budget] {
-            const auto it = m_pending.constFind(id);
-            if (it == m_pending.constEnd()) {
+        connect(timeout, &QTimer::timeout, this, [this, id, method, budget, timeout] {
+            const auto it = m_pending.find(id);
+            if (it == m_pending.end()) {
+                timeout->stop();
+                timeout->deleteLater();
                 return;
             }
+            if (it.value().reply) {
+                it.value().reply->abort();
+            }
             m_pending.remove(id);
+            timeout->stop();
+            timeout->deleteLater();
             if (method == u"initialize"_s) {
                 failAll(u"Timed out waiting for the server handshake."_s);
                 setState(McpServerState::Failed, u"Handshake timed out"_s);
@@ -675,6 +703,14 @@ void McpClient::sendRequestForId(const QString &method, const QJsonObject &param
         if (auto it = m_pending.find(id); it != m_pending.end()) {
             it.value().reply = reply;
         }
+        // Abort oversized bodies as they arrive so a malicious server cannot
+        // OOM the client before finished() truncates (see onHttpFinished).
+        connect(reply, &QNetworkReply::downloadProgress, reply, [reply](qint64 bytesReceived, qint64 bytesTotal) {
+            constexpr qint64 kMaxHttpBodyBytes = 16 * 1024 * 1024;
+            if (bytesReceived > kMaxHttpBodyBytes || bytesTotal > kMaxHttpBodyBytes) {
+                reply->abort();
+            }
+        });
         connect(reply, &QNetworkReply::finished, this, [this, reply, id] {
             onHttpFinished(reply, id);
         });
@@ -934,6 +970,9 @@ void McpClient::handleMessage(const QJsonObject &message)
         } else if (method == u"initialize"_s) {
             failAll(text);
             setState(McpServerState::Failed, u"Handshake failed: %1"_s.arg(text));
+        } else if (method == u"tools/list"_s) {
+            failAll(text);
+            setState(McpServerState::Failed, u"Failed to list tools: %1"_s.arg(text));
         }
         return;
     }

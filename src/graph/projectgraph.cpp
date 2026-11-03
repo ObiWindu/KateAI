@@ -179,7 +179,8 @@ void ProjectGraph::scanDirectory(const QString &dirPath, const QString &parentNo
 
 void ProjectGraph::updateGraph(const QString &filePath, const QString &content)
 {
-    QString nodeId = generateNodeId(filePath);
+    const QString absPath = QFileInfo(filePath).absoluteFilePath();
+    QString nodeId = generateNodeId(absPath);
     GraphNode *node = getNode(nodeId);
 
     if (node) {
@@ -222,27 +223,27 @@ void ProjectGraph::updateGraph(const QString &filePath, const QString &content)
         for (auto it = m_nodes.begin(); it != m_nodes.end(); ++it) {
             GraphNode *dependentNode = it.value();
             if (dependentNode->dependencies.contains(nodeId)) {
-                dependentNode->dependents.insert(nodeId);
+                node->dependents.insert(dependentNode->id);
             }
         }
     } else {
         // Create new node for file
         GraphNode newNode;
-        newNode.id = generateNodeId(filePath);
-        newNode.name = QFileInfo(filePath).fileName();
+        newNode.id = generateNodeId(absPath);
+        newNode.name = QFileInfo(absPath).fileName();
         // Same convention as scanDirectory(): the node type is "file" and the
         // language lives in metadata. A language here would hide the node from
         // every analyser and query that filters on type == "file".
         newNode.type = u"file"_s;
-        newNode.metadata.insert(u"language"_s, getNodeTypeFromPath(filePath));
-        newNode.path = filePath;
+        newNode.metadata.insert(u"language"_s, getNodeTypeFromPath(absPath));
+        newNode.path = absPath;
         newNode.content = content;
         newNode.isReadOnly = false;
         newNode.lastModified = QDateTime::currentSecsSinceEpoch();
         updateNodeMetrics(&newNode);
 
         // Find parent directory
-        QString parentDirId = generateNodeId(QFileInfo(filePath).absolutePath(), u"directory"_s);
+        QString parentDirId = generateNodeId(QFileInfo(absPath).absolutePath(), u"directory"_s);
         GraphNode *parentNode = getNode(parentDirId);
         if (parentNode) {
             addNode(newNode);
@@ -504,16 +505,21 @@ QList<GraphNode*> ProjectGraph::findRelatedNodes(const QString &nodeId, int maxD
 QList<QString> ProjectGraph::findImportPaths(const QString &sourceNodeId, const QString &targetNodeId) const
 {
     QList<QString> result;
-    QSet<QString> visited;
-    QStack<QPair<QString, QStringList>> stack;
+    // Per-path visited set: a global visited prunes alternative routes that
+    // reach the same intermediate node via a different path.
+    struct Frame {
+        QString nodeId;
+        QStringList path;
+        QSet<QString> visited;
+    };
+    QStack<Frame> stack;
 
-    stack.push({sourceNodeId, {sourceNodeId}});
-    visited.insert(sourceNodeId);
+    stack.push({sourceNodeId, {sourceNodeId}, {sourceNodeId}});
 
     while (!stack.isEmpty()) {
-        QPair<QString, QStringList> current = stack.pop();
-        QString currentNodeId = current.first;
-        QStringList path = current.second;
+        Frame current = stack.pop();
+        const QString &currentNodeId = current.nodeId;
+        const QStringList &path = current.path;
 
         if (currentNodeId == targetNodeId) {
             result.append(path.join(u" -> "_s));
@@ -523,11 +529,14 @@ QList<QString> ProjectGraph::findImportPaths(const QString &sourceNodeId, const 
         const GraphNode *currentNode = getNode(currentNodeId);
         if (currentNode) {
             for (const QString &dependencyId : currentNode->dependencies) {
-                if (!visited.contains(dependencyId)) {
-                    visited.insert(dependencyId);
-                    QStringList newPath = path;
-                    newPath.append(dependencyId);
-                    stack.push({dependencyId, newPath});
+                if (!current.visited.contains(dependencyId)) {
+                    Frame next;
+                    next.nodeId = dependencyId;
+                    next.path = path;
+                    next.path.append(dependencyId);
+                    next.visited = current.visited;
+                    next.visited.insert(dependencyId);
+                    stack.push(std::move(next));
                 }
             }
         }
@@ -568,18 +577,30 @@ QSet<QString> ProjectGraph::getTransitiveDependents(const QString &nodeId) const
     QSet<QString> visited;
     QQueue<QString> queue;
 
+    // m_adjacencyList holds outgoing edges; dependents need reverse traversal.
+    QHash<QString, QSet<QString>> reverse;
+    reverse.reserve(m_edges.size());
+    for (auto it = m_edges.begin(); it != m_edges.end(); ++it) {
+        const GraphEdge *edge = it.value();
+        if (edge) {
+            reverse[edge->targetId].insert(edge->sourceId);
+        }
+    }
+
     queue.enqueue(nodeId);
     visited.insert(nodeId);
 
     while (!queue.isEmpty()) {
-        QString currentId = queue.dequeue();
-        if (m_adjacencyList.contains(currentId)) {
-            for (const QString &dependentId : m_adjacencyList[currentId]) {
-                if (!visited.contains(dependentId)) {
-                    visited.insert(dependentId);
-                    result.insert(dependentId);
-                    queue.enqueue(dependentId);
-                }
+        const QString currentId = queue.dequeue();
+        const auto revIt = reverse.constFind(currentId);
+        if (revIt == reverse.constEnd()) {
+            continue;
+        }
+        for (const QString &dependentId : revIt.value()) {
+            if (!visited.contains(dependentId)) {
+                visited.insert(dependentId);
+                result.insert(dependentId);
+                queue.enqueue(dependentId);
             }
         }
     }
@@ -589,17 +610,20 @@ QSet<QString> ProjectGraph::getTransitiveDependents(const QString &nodeId) const
 
 QList<GraphNode*> ProjectGraph::getDependencyChain(const QString &startNodeId, const QString &endNodeId) const
 {
-    QSet<QString> visited;
-    QStack<QPair<QString, QStringList>> stack;
+    struct Frame {
+        QString nodeId;
+        QStringList path;
+        QSet<QString> visited;
+    };
+    QStack<Frame> stack;
     QList<GraphNode*> result;
 
-    stack.push({startNodeId, {}});
-    visited.insert(startNodeId);
+    stack.push({startNodeId, {}, {startNodeId}});
 
     while (!stack.isEmpty()) {
-        QPair<QString, QStringList> current = stack.pop();
-        QString currentNodeId = current.first;
-        QStringList path = current.second;
+        Frame current = stack.pop();
+        const QString currentNodeId = current.nodeId;
+        const QStringList path = current.path;
 
         if (currentNodeId == endNodeId) {
             for (const QString &nodeId : path) {
@@ -618,11 +642,14 @@ QList<GraphNode*> ProjectGraph::getDependencyChain(const QString &startNodeId, c
         const GraphNode *currentNode = getNode(currentNodeId);
         if (currentNode) {
             for (const QString &dependencyId : currentNode->dependencies) {
-                if (!visited.contains(dependencyId)) {
-                    visited.insert(dependencyId);
-                    QStringList newPath = path;
-                    newPath.append(dependencyId);
-                    stack.push({dependencyId, newPath});
+                if (!current.visited.contains(dependencyId)) {
+                    Frame next;
+                    next.nodeId = dependencyId;
+                    next.path = path;
+                    next.path.append(dependencyId);
+                    next.visited = current.visited;
+                    next.visited.insert(dependencyId);
+                    stack.push(std::move(next));
                 }
             }
         }
@@ -885,31 +912,44 @@ void ProjectGraph::cleanupDeletedNodes()
         existingNodeIds.insert(it.key());
     }
 
-    for (auto it = m_edges.begin(); it != m_edges.end(); ++it) {
+    auto it = m_edges.begin();
+    while (it != m_edges.end()) {
         const QString &edgeKey = it.key();
         // Parse edgeKey to get sourceId and targetId (see removeNode: split
         // from the right so a targetId containing "->" survives).
         int arrow1 = edgeKey.indexOf(u"->"_s);
         int arrow2 = edgeKey.lastIndexOf(u"->"_s);
-        if (arrow1 != -1 && arrow2 != -1) {
+        if (arrow1 != -1 && arrow2 != -1 && arrow1 != arrow2) {
             QString sourceId = edgeKey.mid(0, arrow1);
             QString targetId = edgeKey.mid(arrow1 + 2, arrow2 - arrow1 - 2);
             if (!existingNodeIds.contains(sourceId) || !existingNodeIds.contains(targetId)) {
                 delete it.value();
                 it = m_edges.erase(it);
+                continue;
             }
+            ++it;
+        } else {
+            // Malformed key cannot be parsed; drop it rather than leaking.
+            delete it.value();
+            it = m_edges.erase(it);
         }
     }
 
-    for (auto it = m_adjacencyList.begin(); it != m_adjacencyList.end(); ++it) {
-        QSet<QString> &neighbors = it.value();
-        QSet<QString> newNeighbors;
-        for (const QString &neighborId : neighbors) {
-            if (existingNodeIds.contains(neighborId)) {
-                newNeighbors.insert(neighborId);
+    auto adjIt = m_adjacencyList.begin();
+    while (adjIt != m_adjacencyList.end()) {
+        if (!existingNodeIds.contains(adjIt.key())) {
+            adjIt = m_adjacencyList.erase(adjIt);
+            continue;
+        }
+        QSet<QString> &neighbors = adjIt.value();
+        for (auto nIt = neighbors.begin(); nIt != neighbors.end();) {
+            if (!existingNodeIds.contains(*nIt)) {
+                nIt = neighbors.erase(nIt);
+            } else {
+                ++nIt;
             }
         }
-        neighbors = newNeighbors;
+        ++adjIt;
     }
 }
 

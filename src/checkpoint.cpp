@@ -169,14 +169,19 @@ bool runGitProcess(const QString &gitDir, const QString &workspace,
         }
         return false;
     }
-    if (output) {
-        if (capped) {
+    if (capped) {
+        if (output) {
             *output = QString::fromUtf8(stdOut.left(kMaxGitOutputBytes)) + u"\n... (output truncated)"_s;
-        } else {
-            *output = QString::fromUtf8(stdOut);
         }
+        if (error) {
+            *error = u"git output exceeded the cap and was truncated."_s;
+        }
+        return false;
     }
-    if (!capped && git.exitCode() != 0) {
+    if (output) {
+        *output = QString::fromUtf8(stdOut);
+    }
+    if (git.exitCode() != 0) {
         if (error) {
             *error = QString::fromUtf8(stdErr).trimmed();
             if (error->isEmpty()) {
@@ -374,9 +379,6 @@ void CheckpointManager::pruneStaleShadowRepositories() const
         if (!workspace.isEmpty() && QFileInfo::exists(workspace)) {
             // The project is still there. It may be old, but the repository
             // belongs to a project that exists.
-            if (entry.lastModified() < cutoff) {
-                QDir(entry.absoluteFilePath()).removeRecursively();
-            }
             continue;
         }
         if (entry.lastModified() < cutoff || workspace.isEmpty()) {
@@ -401,7 +403,13 @@ QString CheckpointManager::shadowRoot() const
     if (m_workspace.isEmpty()) {
         return {};
     }
-    const QByteArray digest = QCryptographicHash::hash(m_workspace.toUtf8(), QCryptographicHash::Sha1).toHex();
+    QString norm = QDir::cleanPath(m_workspace);
+    // Strip a trailing slash (except the filesystem root) so "/ws" and "/ws/"
+    // hash to the same shadow repository instead of two.
+    while (norm.size() > 1 && norm.endsWith(QLatin1Char('/'))) {
+        norm.chop(1);
+    }
+    const QByteArray digest = QCryptographicHash::hash(norm.toUtf8(), QCryptographicHash::Sha1).toHex();
     const QString base = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
     if (base.isEmpty()) {
         return {};
@@ -697,7 +705,7 @@ QList<CheckpointInfo> CheckpointManager::checkpoints() const
 
 int CheckpointManager::changedFileCount(const QString &id) const
 {
-    if (!isAvailable() || !isValidCheckpointId(id)) {
+    if (!isAvailable() || !isValidCheckpointId(id) || !checkpointHashes().contains(id)) {
         return 0;
     }
     // The mutex is held for the whole call: the staging and the diff run git
@@ -715,7 +723,7 @@ int CheckpointManager::changedFileCount(const QString &id) const
 
 QString CheckpointManager::diffAgainstCheckpoint(const QString &id, int maxLines) const
 {
-    if (!isAvailable() || !isValidCheckpointId(id)) {
+    if (!isAvailable() || !isValidCheckpointId(id) || !checkpointHashes().contains(id)) {
         return {};
     }
     // The same reason as in changedFileCount(): the git commands touch the
@@ -762,6 +770,14 @@ bool CheckpointManager::restoreCheckpoint(const QString &id, QString *error)
         }
         return false;
     }
+    // Only checkpoints this manager created may be restored: a dangling or
+    // planted commit hash that merely looks like hex must not reach read-tree.
+    if (!checkpointHashes().contains(id)) {
+        if (error) {
+            *error = u"Unknown checkpoint id."_s;
+        }
+        return false;
+    }
 
     QString listed;
     stageWorktree();
@@ -796,19 +812,30 @@ bool CheckpointManager::restoreCheckpoint(const QString &id, QString *error)
 
     QString restored;
     if (!runGit({u"ls-files"_s}, &restored, nullptr)) {
-        return true;
+        if (error) {
+            *error = u"Could not list restored files; the workspace was left untouched."_s;
+        }
+        return false;
     }
     const QStringList restoredList = restored.split(u'\n', Qt::SkipEmptyParts);
     const QSet<QString> restoredFiles(restoredList.cbegin(), restoredList.cend());
 
     // Files that existed in the snapshot we rolled back from but are absent in
     // the checkpoint were added after it, so they must be removed.
+    const QString cleanWorkspace = QDir::cleanPath(m_workspace);
     for (const QString &relativePath : currentFiles) {
         if (restoredFiles.contains(relativePath) || isProtectedPath(relativePath)) {
             continue;
         }
-        const QString absolute = m_workspace + QLatin1Char('/') + relativePath;
+        const QString absolute = QDir::cleanPath(m_workspace + QLatin1Char('/') + relativePath);
+        if (absolute != cleanWorkspace && !absolute.startsWith(cleanWorkspace + QLatin1Char('/'))) {
+            continue;
+        }
         const QFileInfo info(absolute);
+        if (info.isSymLink()) {
+            QFile::remove(absolute);
+            continue;
+        }
         if (info.isDir()) {
             QDir(absolute).removeRecursively();
         } else if (info.exists()) {
