@@ -17,6 +17,7 @@
 #include <QSet>
 
 class QDialog;
+class QTimer;
 
 namespace KTextEditor
 {
@@ -29,6 +30,7 @@ namespace KateAi
 class ChatWidget;
 class EditorAssist;
 class KateAiPlugin;
+class KateLspBridge;
 
 class KateAiView : public QObject, public KXMLGUIClient
 {
@@ -105,6 +107,16 @@ private:
     // Mirrors the review queue's per-path line ranges into the editor assist,
     // so the hover hints follow the queue (pending and settled alike).
     void syncEditRanges();
+    // Re-sends the editor context to the agent. Debounced: cursor moves and
+    // selection changes arrive per keystroke/mouse-move and the context is a
+    // prompt-sized string.
+    void scheduleEditorContextRefresh();
+    // Watches one editor view for cursor/selection changes so the editor
+    // context the agent sees stays current while the user moves around.
+    void watchViewForContext(KTextEditor::View *view);
+    // Debounced push of a document's current text into the project graph, so
+    // the user's own edits are indexed too, not only the agent's.
+    void scheduleGraphUpdate(const QString &path, const QString &content);
     // Catches QEvent::ApplicationPaletteChange on qApp (Qt 6 deprecates
     // QGuiApplication::paletteChanged in favour of the event).
     bool eventFilter(QObject *watched, QEvent *event) override;
@@ -125,6 +137,15 @@ private:
     // project may be started.
     QHash<QString, bool> m_mcpTrust;
     DiskDocumentBridge m_bridge;
+    // The bridge to Kate's LSP client plugin: availability, document-mark
+    // diagnostics and LSP messages. Owns the probing; the agent and the
+    // in-editor assist only see the LspProvider interface.
+    KateLspBridge *m_lsp = nullptr;
+    // Debounce timers: editor-context refresh on cursor/selection moves, and
+    // project-graph update on the user's own typing.
+    QTimer *m_contextTimer = nullptr;
+    QTimer *m_graphTimer = nullptr;
+    QString m_pendingGraphPath;
     // The last local path of every tracked document. documentUrlChanged
     // does not carry the old URL, so the pre-rename path has to be remembered
     // here for the review queue's rename. Cleaned on aboutToClose and

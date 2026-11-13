@@ -6,6 +6,7 @@
 #pragma once
 
 #include "documentbridge.h"
+#include "lsp.h"
 #include "mcp.h"
 #include "sandbox.h"
 #include "types.h"
@@ -18,10 +19,12 @@
 #include <QObject>
 #include <QPointer>
 #include <QProcess>
+#include <QSet>
 #include <QString>
 #include <QStringList>
 #include <functional>
 #include <memory>
+#include <optional>
 
 namespace KateAi {
 class ProjectGraph;
@@ -54,6 +57,11 @@ public:
     void setMcpServers(const QList<McpServerConfig> &servers);
     void setEditorContext(const QString &context);
     void setProjectGraph(ProjectGraph *graph);
+    // The editor's language-server surface; null when there is no editor.
+    void setLspProvider(LspProvider *provider)
+    {
+        m_lsp = provider;
+    }
     // Session id from a previous Kate conversation, used with session/load
     // or session/resume when the agent advertises those capabilities.
     void setResumeSessionId(const QString &sessionId);
@@ -207,6 +215,19 @@ private:
         QString text;
     };
 
+    // A mutating client method (fs/write_text_file, terminal/create) parked
+    // until its permission resolves. The permission bar is the contract for
+    // every write and every command, so an agent that skips
+    // session/request_permission cannot execute unprompted: the call waits
+    // here until the policy or the user answers, and is refused otherwise.
+    struct ParkedMethod {
+        QJsonValue rpcId;
+        QString method;
+        QJsonObject params;
+        QString grantKey;
+        PermissionRequest request;
+    };
+
     void setState(State state, const QString &status);
     void spawnProcess();
     void sendInitialize();
@@ -259,6 +280,7 @@ private:
     void handleWritePlanFile(const QJsonValue &id, const QJsonObject &params);
     void handleSuggest(const QJsonValue &id, const QJsonObject &params);
     void handleQueryProjectGraph(const QJsonValue &id, const QJsonObject &params);
+    void handleLspDiagnostics(const QJsonValue &id, const QJsonObject &params);
     void handleRequestPermission(const QJsonValue &id, const QJsonObject &params);
     void handleTerminalCreate(const QJsonValue &id, const QJsonObject &params);
     void handleTerminalOutput(const QJsonValue &id, const QJsonObject &params);
@@ -274,6 +296,26 @@ private:
     QJsonObject sessionMeta() const;
     QJsonArray promptBlocks(const QString &text) const;
     QString pickPermissionOption(PermissionDecision decision) const;
+    // True when the call may run. A grant covers it when a permission request
+    // for the same path or command line was approved; otherwise the RPC is
+    // parked and a permission request is emitted, and the RPC is answered from
+    // resolvePermission().
+    bool ensureMethodPermission(const QString &grantKey, PermissionRequest request,
+                                const QJsonValue &rpcId, const QString &method, const QJsonObject &params);
+    void askNextParkedMethod();
+    void dispatchParkedMethod(const ParkedMethod &parked);
+    // Answers every parked RPC as refused, so an agent never blocks on a call
+    // whose approval never came.
+    void cancelParkedMethods();
+    // Grant keys: a write by its resolved path, a terminal by its exact command
+    // line. Both sides (the approval and the client method) normalise to the
+    // same key, or the grant never matches.
+    QString writeGrantKey(const QString &path) const;
+    QString execGrantKey(const QString &command, const QStringList &args) const;
+    // Records the grants an approval of an agent-initiated permission request
+    // covers, so a well-behaved agent that announces its edit or command before
+    // asking is not asked twice for one action.
+    void recordApprovalGrants(const PermissionRequest &request, PermissionDecision decision);
     QString sliceLines(const QString &text, int line, int limit) const;
     bool pathAllowed(const QString &path, bool forWrite, QString *error) const;
     Sandbox currentSandbox() const;
@@ -320,6 +362,7 @@ private:
     QList<McpServerConfig> m_mcpServers;
 
     ProjectGraph *m_projectGraph = nullptr;
+    LspProvider *m_lsp = nullptr;
 
     State m_state = State::Stopped;
     QString m_status;
@@ -377,6 +420,17 @@ private:
     QJsonValue m_permissionRpcId;
     QJsonArray m_permissionOptions;
     PermissionRequest m_permissionRequest;
+
+    // Mutating client methods waiting for a permission decision. At most one
+    // is active (its request is the one being shown); the rest queue behind it.
+    QList<ParkedMethod> m_parkedMethods;
+    std::optional<ParkedMethod> m_activeParked;
+    // Approvals remembered by grant key: paths and command lines the user (or
+    // the policy) already allowed. Once-grants are consumed by the first
+    // matching call; session grants live until the session or the agent goes
+    // away.
+    QSet<QString> m_sessionGrants;
+    QSet<QString> m_onceGrants;
 
     QHash<QString, Terminal *> m_terminals;
     int m_nextTerminal = 1;

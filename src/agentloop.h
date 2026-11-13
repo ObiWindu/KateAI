@@ -11,6 +11,7 @@
 #include "checkpoint.h"
 #include "documentbridge.h"
 #include "llmclient.h"
+#include "lsp.h"
 #include "mcp.h"
 #include "modes.h"
 #include "permissions.h"
@@ -46,6 +47,9 @@ public:
     QString workspace() const { return m_workspace; }
     void setDocumentBridge(DocumentBridge *bridge);
     void setEditorContext(const QString &context);
+    // The editor's language-server surface (KateLspBridge). Null in tests and
+    // headless use: the LSP tools then report the feature as unavailable.
+    void setLspProvider(LspProvider *provider);
 
     void updateProjectGraph(const QString &filePath, const QString &content);
     ProjectGraph *getProjectGraph() const { return m_projectGraph.get(); }
@@ -312,6 +316,7 @@ private:
     QString m_workspace;
     QString m_editorContext;
     DocumentBridge *m_bridge = nullptr;
+    LspProvider *m_lsp = nullptr;
 LlmClient m_client;
     AcpClient m_acp;
     // Shared by every loop in a turn, so the in-flight replies can be cancelled

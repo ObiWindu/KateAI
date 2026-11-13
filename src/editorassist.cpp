@@ -118,6 +118,16 @@ public:
         if (m_assist->editRanges()->lineInSettledRange(path, position.line())) {
             return i18n("edited by Kate AI (turn finished)");
         }
+        // A diagnostic mark on this line (LSP error/warning and friends) is
+        // the other thing worth a hover: the model can be asked to fix it.
+        if (LspProvider *lsp = m_assist->lspProvider()) {
+            for (const LspDiagnostic &d : lsp->diagnostics(path)) {
+                if (d.line == position.line() + 1) {
+                    const QString sev = d.severity == 1 ? i18n("Error") : i18n("Warning");
+                    return i18n("%1: %2 (Kate AI can fix this — ask in the Kate AI panel)", sev, d.message);
+                }
+            }
+        }
         return {};
     }
 
@@ -329,6 +339,11 @@ void EditorAssist::triggerCompletion(KTextEditor::View *view)
         return;
     }
     if (!m_settings.completionEnabled || m_agentBusy || (m_busyCheck && m_busyCheck())) {
+        return;
+    }
+    // The native completion popup (LSP and friends) is already answering at
+    // this position; an AI ghost on top would fight it for Tab.
+    if (view->isCompletionActive()) {
         return;
     }
     if (!m_engine->canRequestNow()) {

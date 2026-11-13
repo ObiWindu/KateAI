@@ -32,7 +32,7 @@ const QString &commandWord()
 
 QString usageText()
 {
-    return i18n("usage: kateai ask <text> | explain | fix | refactor | tests | stop | new | mode <id> | panel");
+    return i18n("usage: kateai ask <text> | explain | fix | refactor | tests | diagnostics | symbols | stop | new | mode <id> | panel");
 }
 
 // The instruction of the one-word review subcommands. Kept next to the
@@ -50,6 +50,12 @@ QString instructionFor(const QString &sub)
     }
     if (sub == u"tests"_s) {
         return i18n("Add or improve focused tests for this code. Explain the proposed coverage first.");
+    }
+    if (sub == u"diagnostics"_s) {
+        return i18n("Report the diagnostics (errors and warnings) for this file with lsp_diagnostics and propose concrete fixes. Explain the change, then apply it.");
+    }
+    if (sub == u"symbols"_s) {
+        return i18n("List this file's symbols with lsp_symbols and explain its structure and the role of each part.");
     }
     return QString();
 }
@@ -79,6 +85,7 @@ KCompletion *KateAiCommand::completionObject(KTextEditor::View *view, const QStr
     auto *completion = new KCompletion();
     completion->setIgnoreCase(true);
     completion->setItems({u"ask "_s, u"explain"_s, u"fix"_s, u"refactor"_s, u"tests"_s,
+                          u"diagnostics"_s, u"symbols"_s,
                           u"stop"_s, u"new"_s, u"mode "_s, u"panel"_s});
     return completion;
 }

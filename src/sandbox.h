@@ -88,6 +88,8 @@ private:
     bool m_allowOutsideReads = false;
     // Compiled deny-glob patterns. globToRegex() is cheap but QRegularExpression
     // construction is not, and isDenied() runs one per glob per candidate path.
+    // Both caches are populated lazily without synchronization: Sandbox is used
+    // from the main thread only. Guard them if isDenied() ever runs on a worker.
     mutable QHash<QString, QRegularExpression> m_globCache;
     mutable QStringList m_cachedDenyGlobs;
 };

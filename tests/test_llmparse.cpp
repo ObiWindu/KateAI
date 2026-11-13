@@ -255,12 +255,14 @@ private Q_SLOTS:
     void planModeOnlyAdvertisesReadTools()
     {
         const QJsonArray tools = toolDefinitions(ModeRegistry::toolAccessForGroups({ToolGroup::read()}));
-        QCOMPARE(tools.size(), 8);
+        QCOMPARE(tools.size(), 14);
         for (const QJsonValue &tool : tools) {
             const QString name = tool.toObject().value(u"function"_s).toObject().value(u"name"_s).toString();
             QVERIFY(name == u"read_file"_s || name == u"list_dir"_s || name == u"grep"_s || name == u"glob"_s
                     || name == u"query_project_graph"_s || name == u"write_plan_file"_s || name == u"suggest"_s
-                    || name == u"question"_s);
+                    || name == u"question"_s
+                    || name == u"lsp_diagnostics"_s || name == u"lsp_symbols"_s || name == u"lsp_hover"_s
+                    || name == u"lsp_definition"_s || name == u"lsp_references"_s || name == u"lsp_code_actions"_s);
         }
     }
 

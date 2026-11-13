@@ -10,6 +10,7 @@
 #include "pluginview.h"
 #include "settings.h"
 
+#include <QDateTime>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -26,6 +27,7 @@
 
 #include <KConfigGroup>
 #include <KLocalizedString>
+#include <KSharedConfig>
 #include <KPluginFactory>
 
 using namespace Qt::Literals::StringLiterals;
@@ -55,6 +57,19 @@ public:
 
     void start()
     {
+        // The check shells out to package managers and queries the ACP
+        // registry; running it on every Kate launch is wasteful and can be a
+        // network surprise, so run it at most once a week.
+        {
+            KConfigGroup g(KSharedConfig::openConfig(), u"KateAI"_s);
+            const qint64 lastCheck = g.readEntry(u"AcpUpdateLastCheck"_s, 0LL);
+            const qint64 now = QDateTime::currentSecsSinceEpoch();
+            if (lastCheck > 0 && now - lastCheck < 7 * 24 * 3600) {
+                return;
+            }
+            g.writeEntry(u"AcpUpdateLastCheck"_s, now);
+            g.sync();
+        }
         if (!m_plugin) {
             return;
         }

@@ -163,6 +163,7 @@ void ProjectGraph::scanDirectory(const QString &dirPath, const QString &parentNo
                 // same helpers the incremental update path uses.
                 node.linesOfCode = lineCount(node.content);
                 node.complexity = definitionCount(*this, node.content);
+                indexFileSymbols(&node);
             }
             addNode(node);
 
@@ -186,6 +187,7 @@ void ProjectGraph::updateGraph(const QString &filePath, const QString &content)
         // Update node content and metrics
         node->content = content;
         updateNodeMetrics(node);
+        indexFileSymbols(node);
 
         // Update dependencies based on new content
         QSet<QString> oldDependencies = node->dependencies;
@@ -240,6 +242,7 @@ void ProjectGraph::updateGraph(const QString &filePath, const QString &content)
         newNode.isReadOnly = false;
         newNode.lastModified = QDateTime::currentSecsSinceEpoch();
         updateNodeMetrics(&newNode);
+        indexFileSymbols(&newNode);
 
         // Find parent directory
         QString parentDirId = generateNodeId(QFileInfo(filePath).absolutePath(), u"directory"_s);
@@ -706,6 +709,223 @@ void ProjectGraph::generateSummaryReport() const
     for (auto it = relationshipCount.begin(); it != relationshipCount.end(); ++it) {
         qDebug() << "    " << it.key() << ":" << it.value();
     }
+}
+
+QList<GraphSymbol> ProjectGraph::extractSymbols(const QString &content, const QString &filePath) const
+{
+    QList<GraphSymbol> symbols;
+    if (content.isEmpty()) {
+        return symbols;
+    }
+    const QString language = getNodeTypeFromPath(filePath);
+    const bool isPython = language == u"python"_s;
+    const bool isJs = language == u"javascript"_s || language == u"typescript"_s
+        || language == u"jsx"_s || language == u"tsx"_s;
+
+    auto lineOf = [&content](int offset) -> int {
+        return offset <= 0 ? 1 : int(content.left(offset).count(u'\n')) + 1;
+    };
+    auto columnOf = [&content](int offset) -> int {
+        const int nl = content.lastIndexOf(u'\n', qMax(0, offset - 1));
+        return offset - nl; // 1-based column
+    };
+    // Brace-matched end line for C-like languages, starting at the match.
+    auto braceEndLine = [&content, &lineOf](int from) -> int {
+        int depth = 0;
+        bool opened = false;
+        const int cap = qMin(content.size(), from + 200 * 1024);
+        for (int i = from; i < cap; ++i) {
+            const QChar c = content.at(i);
+            if (c == u'{') {
+                ++depth;
+                opened = true;
+            } else if (c == u'}') {
+                --depth;
+                if (opened && depth <= 0) {
+                    return lineOf(i);
+                }
+            }
+        }
+        return 0;
+    };
+    // Indentation-based end line for Python: the block ends at the first
+    // non-blank line whose indent is not deeper than the definition's.
+    auto indentEndLine = [&content, &lineOf](int from, int baseIndent) -> int {
+        const int startLine = lineOf(from);
+        const QStringList lines = content.split(u'\n');
+        int endLine = startLine;
+        for (int i = startLine; i < lines.size(); ++i) {
+            const QString &line = lines.at(i);
+            if (line.trimmed().isEmpty()) {
+                continue;
+            }
+            int indent = 0;
+            while (indent < line.size() && (line.at(indent) == u' ' || line.at(indent) == u'\t')) {
+                ++indent;
+            }
+            if (indent <= baseIndent) {
+                break;
+            }
+            endLine = i + 1;
+        }
+        return endLine;
+    };
+    auto add = [&](const QString &name, const QString &kind, int offset, int baseIndent, bool braceLang) {
+        if (name.isEmpty() || symbols.size() >= 500) {
+            return;
+        }
+        GraphSymbol sym;
+        sym.name = name;
+        sym.kind = kind;
+        sym.line = lineOf(offset);
+        sym.column = columnOf(offset);
+        sym.endLine = braceLang ? braceEndLine(offset) : indentEndLine(offset, baseIndent);
+        symbols.append(sym);
+    };
+
+    if (isPython) {
+        static const QRegularExpression defRe(u"^([ \\t]*)(?:async[ \\t]+)?def[ \\t]+(\\w+)"_s,
+                                              QRegularExpression::MultilineOption);
+        static const QRegularExpression classRe(u"^([ \\t]*)class[ \\t]+(\\w+)"_s,
+                                                QRegularExpression::MultilineOption);
+        QRegularExpressionMatchIterator it = defRe.globalMatch(content);
+        while (it.hasNext()) {
+            const QRegularExpressionMatch m = it.next();
+            add(m.captured(2), u"function"_s, m.capturedStart(2), m.captured(1).size(), false);
+        }
+        it = classRe.globalMatch(content);
+        while (it.hasNext()) {
+            const QRegularExpressionMatch m = it.next();
+            add(m.captured(2), u"class"_s, m.capturedStart(2), m.captured(1).size(), false);
+        }
+        return symbols;
+    }
+
+    if (isJs) {
+        static const QRegularExpression funcRe(u"\\bfunction[ \\t]+(\\w+)"_s);
+        static const QRegularExpression arrowRe(
+            u"\\b(?:const|let|var)[ \\t]+(\\w+)[ \\t]*=[ \\t]*(?:async[ \\t]*)?(?:\\([^)]*\\)|\\w+)[ \\t]*=>"_s);
+        static const QRegularExpression classRe(u"\\bclass[ \\t]+(\\w+)"_s);
+        QRegularExpressionMatchIterator it = funcRe.globalMatch(content);
+        while (it.hasNext()) {
+            const QRegularExpressionMatch m = it.next();
+            add(m.captured(1), u"function"_s, m.capturedStart(1), 0, true);
+        }
+        it = arrowRe.globalMatch(content);
+        while (it.hasNext()) {
+            const QRegularExpressionMatch m = it.next();
+            add(m.captured(1), u"function"_s, m.capturedStart(1), 0, true);
+        }
+        it = classRe.globalMatch(content);
+        while (it.hasNext()) {
+            const QRegularExpressionMatch m = it.next();
+            add(m.captured(1), u"class"_s, m.capturedStart(1), 0, true);
+        }
+        return symbols;
+    }
+
+    // C-like and every other brace language: classes, and functions whose
+    // parameter list is followed by an opening brace (that requirement is
+    // what keeps if/for/while/switch out).
+    static const QSet<QString> keywords{
+        u"if"_s, u"for"_s, u"while"_s, u"switch"_s, u"catch"_s, u"return"_s, u"sizeof"_s, u"do"_s, u"else"_s};
+    static const QRegularExpression classRe(u"\\bclass[ \\t]+(\\w+)"_s);
+    static const QRegularExpression funcRe(u"\\b(\\w+)[ \\t]*\\([^;{}]*\\)[ \\t]*(?:const[ \\t]*)?\\{"_s);
+    QRegularExpressionMatchIterator it = classRe.globalMatch(content);
+    while (it.hasNext()) {
+        const QRegularExpressionMatch m = it.next();
+        add(m.captured(1), u"class"_s, m.capturedStart(1), 0, true);
+    }
+    it = funcRe.globalMatch(content);
+    while (it.hasNext()) {
+        const QRegularExpressionMatch m = it.next();
+        const QString name = m.captured(1);
+        if (keywords.contains(name)) {
+            continue;
+        }
+        add(name, u"function"_s, m.capturedStart(1), 0, true);
+    }
+    return symbols;
+}
+
+void ProjectGraph::indexFileSymbols(GraphNode *fileNode)
+{
+    if (!fileNode || fileNode->type != u"file"_s) {
+        return;
+    }
+    const QList<GraphSymbol> symbols = extractSymbols(fileNode->content, fileNode->path);
+    QJsonArray arr;
+    for (const GraphSymbol &sym : symbols) {
+        QJsonObject obj;
+        obj.insert(u"name"_s, sym.name);
+        obj.insert(u"kind"_s, sym.kind);
+        obj.insert(u"line"_s, sym.line);
+        obj.insert(u"column"_s, sym.column);
+        obj.insert(u"endLine"_s, sym.endLine);
+        arr.append(obj);
+    }
+    fileNode->metadata.insert(u"symbols"_s, arr);
+}
+
+QList<GraphSymbol> ProjectGraph::symbolsInFile(const QString &filePath) const
+{
+    const GraphNode *node = getNode(generateNodeId(filePath));
+    if (!node) {
+        return {};
+    }
+    QList<GraphSymbol> out;
+    const QJsonArray arr = node->metadata.value(u"symbols"_s).toArray();
+    for (const QJsonValue &value : arr) {
+        const QJsonObject obj = value.toObject();
+        GraphSymbol sym;
+        sym.name = obj.value(u"name"_s).toString();
+        sym.kind = obj.value(u"kind"_s).toString();
+        sym.line = obj.value(u"line"_s).toInt();
+        sym.column = obj.value(u"column"_s).toInt();
+        sym.endLine = obj.value(u"endLine"_s).toInt();
+        if (!sym.name.isEmpty()) {
+            out.append(sym);
+        }
+    }
+    return out;
+}
+
+GraphSymbol ProjectGraph::enclosingSymbol(const QString &filePath, int line) const
+{
+    const QList<GraphSymbol> symbols = symbolsInFile(filePath);
+    GraphSymbol covering;
+    GraphSymbol nearest;
+    for (const GraphSymbol &sym : symbols) {
+        if (sym.line > line) {
+            continue;
+        }
+        if (nearest.name.isEmpty() || sym.line >= nearest.line) {
+            nearest = sym;
+        }
+        // A symbol whose range is known and still covers the line wins over
+        // everything that merely starts before it.
+        if (sym.endLine > 0 && sym.endLine >= line
+            && (covering.name.isEmpty() || sym.line >= covering.line)) {
+            covering = sym;
+        }
+    }
+    return covering.name.isEmpty() ? nearest : covering;
+}
+
+int ProjectGraph::staleFileCount() const
+{
+    int stale = 0;
+    for (auto it = m_nodes.begin(); it != m_nodes.end(); ++it) {
+        const GraphNode *node = it.value();
+        if (!node || node->type != u"file"_s || node->path.isEmpty()) {
+            continue;
+        }
+        const QFileInfo info(node->path);
+        if (!info.exists() || info.lastModified().toSecsSinceEpoch() != node->lastModified) {
+            ++stale;
+        }
+    }
+    return stale;
 }
 
 bool ProjectGraph::saveToFile(const QString &filePath) const

@@ -210,6 +210,11 @@ You ──► LLM (Grok / OpenAI / OpenRouter / local) or any ACP agent over std
 | `glob` | Find paths (`**/*.h`, `src/**/*.cpp`, …) |
 | `bash` | Run a command in the workspace under the active sandbox |
 | `query_project_graph` | Query indexed files, symbols, imports, dependents, and paths |
+| `lsp_diagnostics` | Language-server/editor diagnostics (errors, warnings) for one file or workspace-wide |
+| `lsp_symbols` | A file's classes and functions with line numbers |
+| `lsp_hover` | The enclosing symbol at a position plus its declaration |
+| `lsp_definition` / `lsp_references` | Where a symbol is defined / used across the workspace |
+| `lsp_code_actions` | Quick fixes the language server offers at a position |
 | `write_plan_file` | Write the implementation plan for a complicated task to a temp file the user can open and follow |
 | `suggest` | Post a suggestion card for the user to accept or dismiss instead of making an unrequested change |
 | `question` | Ask the user something and wait for the answer before continuing |
@@ -254,8 +259,9 @@ The composer shows context-window usage as a percentage, turning amber at 70% an
 
 Kate AI is a first-class KTextEditor plugin, so it sees the same documents you do.
 
-- Active file, cursor line and column, selection with its line range (up to 4k of text), the file's language, unsaved state, bookmarks, and the list of open files are sent as editor context; an untitled buffer sends its content so the model can still see it
+- Active file, cursor line and column, selection with its line range (up to 4k of text), the file's language, unsaved state, bookmarks, and the list of open files are sent as editor context; an untitled buffer sends its content so the model can still see it. The context also carries the git branch, the enclosing symbol at the cursor (from the project graph), the LSP plugin state, and the active file's error/warning count — and it refreshes live as you move the cursor or change the selection
 - Reads and writes prefer the in-memory buffer over disk
+- **LSP integration**: Kate AI detects Kate's LSP client plugin (`katelspclientplugin`) at runtime. The `lsp_*` tools (diagnostics, symbols, hover, definition, references, code actions) answer from it when it can and fall back to the project graph and text search otherwise; hovering a line with an error/warning mark shows the diagnostic; AI completions step aside while the native (LSP) completion popup is open. When no LSP server runs, the tools say so and the agent falls back to builds/tests via `bash`
 - **Edit banners**: an in-editor banner appears on files the agent changed, with **Review** (opens the panel) and **Reject Changes** actions (configurable)
 - **Edit open files in buffer** (settings): agent edits to open documents land in the buffer and stay unsaved — Keep in the review queue saves, Reject restores the buffer. While a change is unsaved, commands the agent runs still read the previous state from disk, so this is off by default
 - Save-As carries the review queue along: pending edits follow the file to its new path
@@ -266,7 +272,7 @@ Kate AI is a first-class KTextEditor plugin, so it sees the same documents you d
   - **Refactor Selection** — clarity and maintainability, then apply
   - **Add Tests for Selection** — propose coverage first
 - **Stop Kate AI** action (Tools ▸ Kate AI, bindable in Kate's shortcut settings) aborts the running turn without hunting for the panel button
-- **Command line**: `:kateai ask <text>`, `:kateai explain|fix|refactor|tests` (act on the selection or the range the command line carries, vi-mode `'<,'>kateai fix` included), `:kateai stop`, `:kateai new`, `:kateai mode <id>`, `:kateai panel`
+- **Command line**: `:kateai ask <text>`, `:kateai explain|fix|refactor|tests|diagnostics|symbols` (act on the selection or the range the command line carries, vi-mode `'<,'>kateai fix` included), `:kateai stop`, `:kateai new`, `:kateai mode <id>`, `:kateai panel`
 - Workspace root is the nearest parent with `.git` or `.kateproject`, otherwise the active file’s directory
 - When a different folder is opened in Kate, Kate AI switches to that workspace (agent context, checkpoints, MCP servers, completions) and shows a notice pinned above the input; the notice fades on its own or when the next turn starts
 
@@ -371,7 +377,7 @@ Kate also exposes client methods to ACP agents: `fs/read_text_file`, `fs/write_t
 
 **Effort level for ACP agents.** Agents that expose a thinking/thought-level selector (Claude Agent, Gemini CLI, …) advertise it as a session config option. The composer's effort button shows the levels the live session advertised; picking one forces it onto the session (`session/set_config_option`) and pins it — an agent that changes its own level is switched back. **Auto** releases control and keeps the agent's default. The forced level is also settable in Settings → Kate AI → AI Providers → ACP Agent → **Effort Level** (editable, so agent-specific ids like `think_hard` can be typed).
 
-Kate also answers three of its own client methods, advertised in the `initialize` capabilities under the `_kateai/` names the protocol reserves for extensions: `_kateai/query_project_graph` (the same graph the native agent queries), `_kateai/write_plan_file` (files the implementation plan in a per-workspace temp file and returns its path, so the agent can point the user at a plan they can follow), and `_kateai/suggest` (posts a suggestion card with an optional file anchor, so an agent can raise an idea without changing anything). The bare names still work. Your global rules and extra system prompt, and these method names, are sent to the agent once at the start of each session, since agents do not receive Kate's own system prompt.
+Kate also answers its own client methods, advertised in the `initialize` capabilities under the `_kateai/` names the protocol reserves for extensions: `_kateai/query_project_graph` (the same graph the native agent queries), `_kateai/write_plan_file` (files the implementation plan in a per-workspace temp file and returns its path, so the agent can point the user at a plan they can follow), `_kateai/suggest` (posts a suggestion card with an optional file anchor, so an agent can raise an idea without changing anything), and `_kateai/lsp_diagnostics` (language-server errors/warnings for a file, or workspace-wide, formatted like the native `lsp_diagnostics` tool). The bare names still work. Your global rules and extra system prompt, and these method names, are sent to the agent once at the start of each session, since agents do not receive Kate's own system prompt.
 
 To use Grok Build: install the Grok CLI, run `grok` once to log in, then set the provider to **ACP** with format **ACP native** and agent **Grok Build**. Other agents: install their CLI (or have `npx` on PATH), complete that agent's login, and pick the matching preset.
 

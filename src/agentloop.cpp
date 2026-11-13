@@ -316,6 +316,7 @@ void AgentLoop::rebuildTools()
     m_tools = std::make_unique<ToolRunner>(*m_sandbox, m_bridge, this);
     m_tools->setTimeoutMs(m_settings.bashTimeoutMs);
     m_tools->setProjectGraph(m_projectGraph.get());
+    m_tools->setLspProvider(m_lsp);
     m_sandboxDirty = false;
 }
 
@@ -356,6 +357,13 @@ void AgentLoop::setWorkspace(const QString &workspace)
                 qWarning() << "Failed to load existing graph from" << graphFilePath;
                 // Fall back to generating a new graph
                 m_projectGraph->generateGraph(m_workspace);
+            } else if (m_projectGraph->staleFileCount() > 0) {
+                // The cache was written by an earlier session; files changed
+                // on disk while Kate was closed would otherwise be served with
+                // stale metadata, so regenerate instead of trusting it.
+                qWarning() << "Project graph cache is stale for" << m_projectGraph->staleFileCount()
+                           << "file(s); regenerating";
+                m_projectGraph->generateGraph(m_workspace);
             }
         } else {
             // Generate new graph
@@ -382,6 +390,16 @@ void AgentLoop::setDocumentBridge(DocumentBridge *bridge)
         m_tools = std::make_unique<ToolRunner>(*m_sandbox, m_bridge, this);
         m_tools->setTimeoutMs(m_settings.bashTimeoutMs);
         m_tools->setProjectGraph(m_projectGraph.get());
+        m_tools->setLspProvider(m_lsp);
+    }
+}
+
+void AgentLoop::setLspProvider(LspProvider *provider)
+{
+    m_lsp = provider;
+    m_acp.setLspProvider(provider);
+    if (m_tools) {
+        m_tools->setLspProvider(provider);
     }
 }
 

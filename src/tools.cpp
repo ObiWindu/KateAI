@@ -672,6 +672,24 @@ ToolResult ToolRunner::run(const ToolCall &call)
     if (call.name == u"query_project_graph"_s) {
         return queryProjectGraph(args);
     }
+    if (call.name == u"lsp_diagnostics"_s) {
+        return lspDiagnostics(args);
+    }
+    if (call.name == u"lsp_symbols"_s) {
+        return lspSymbols(args);
+    }
+    if (call.name == u"lsp_hover"_s) {
+        return lspHover(args);
+    }
+    if (call.name == u"lsp_definition"_s) {
+        return lspDefinition(args);
+    }
+    if (call.name == u"lsp_references"_s) {
+        return lspReferences(args);
+    }
+    if (call.name == u"lsp_code_actions"_s) {
+        return lspCodeActions(args);
+    }
     if (call.name == u"goal_report"_s) {
         return goalReport(args);
     }
@@ -1311,7 +1329,10 @@ ToolResult ToolRunner::grep(const QJsonObject &args) const
                 continue;
             }
             if (context == 0) {
-                hits.append(u"%1:%2:%3"_s.arg(rel).arg(i + 1).arg(lines.at(i)));
+                // Concatenation, not a chained arg(): arg() replaces the
+                // lowest-numbered remaining marker, so a "%2" inside the
+                // substituted path would be rewritten by the next call.
+                hits.append(rel + u':' + QString::number(i + 1) + u':' + lines.at(i));
             } else {
                 const int from = qMax(0, i - context);
                 const int to = qMin(lines.size() - 1, i + context);
@@ -1321,7 +1342,7 @@ ToolResult ToolRunner::grep(const QJsonObject &args) const
                 }
                 for (int j = from; j <= to; ++j) {
                     const QChar mark = (j == i) ? u':' : u'-';
-                    hits.append(u"%1%2%3%4%5"_s.arg(rel).arg(mark).arg(j + 1).arg(mark).arg(lines.at(j)));
+                    hits.append(rel + mark + QString::number(j + 1) + mark + lines.at(j));
                 }
                 lastMatchEnd = to;
             }
@@ -1698,8 +1719,12 @@ void ToolRunner::runBashAsync(const ToolCall &call)
     QTimer *timeout = new QTimer(process);
     timeout->setSingleShot(true);
     timeout->setInterval(timeoutMs);
-    connect(timeout, &QTimer::timeout, this, [this, callId, timeout, drain] {
-        timeout->deleteLater();
+    connect(timeout, &QTimer::timeout, this, [this, callId, drain] {
+        // The timer is parented to the process and is destroyed with it, so it
+        // must not be deleted here: the finished handler below still calls
+        // stop() on it, and a deferred delete can be processed before the
+        // process reports its exit, which would leave that handler holding a
+        // dangling pointer.
         auto *process = m_bashProcesses.value(callId);
         if (!process) {
             return;
@@ -1910,6 +1935,465 @@ ToolResult ToolRunner::queryProjectGraph(const QJsonObject &args) const
     return result;
 }
 
+namespace
+{
+
+// Shared read-path resolution for the LSP tools: sandbox check first, then
+// resolve against the workspace, exactly like read_file.
+bool resolveReadPath(const Sandbox &sandbox, const QString &path, QString *resolved, QString *error)
+{
+    if (path.isEmpty()) {
+        *resolved = QString();
+        return true;
+    }
+    if (!sandbox.allowsRead(path, error)) {
+        return false;
+    }
+    const QString r = sandbox.resolve(path, error);
+    if (r.isEmpty() && sandbox.profile() == SandboxProfile::Strict) {
+        return false;
+    }
+    *resolved = r.isEmpty() ? QDir(sandbox.workspaceRoot()).absoluteFilePath(path) : r;
+    return true;
+}
+
+// The identifier at a 1-based line/column of a file, read through the bridge
+// so an open buffer is seen. Empty when the position is not on a word.
+QString wordAtPosition(const DocumentBridge *bridge, const QString &resolvedPath, int line, int column)
+{
+    if (!bridge || line < 1) {
+        return {};
+    }
+    QStringList page;
+    if (!bridge->readDocumentLines(resolvedPath, line, 1, &page, nullptr) || page.isEmpty()) {
+        return {};
+    }
+    const QString text = page.first();
+    static const QRegularExpression wordRe(u"\\w+"_s);
+    const int col0 = qBound(0, column - 1, text.size());
+    QRegularExpressionMatchIterator it = wordRe.globalMatch(text);
+    while (it.hasNext()) {
+        const QRegularExpressionMatch m = it.next();
+        if (m.capturedStart() <= col0 && col0 <= m.capturedEnd()) {
+            return m.captured(0);
+        }
+    }
+    return {};
+}
+
+// Text-scan fallback for references/definitions when no language server
+// answers: every word-boundary hit of `word` in the workspace, same guards as
+// grep (deny globs, sandbox read check, noisy paths, size and binary caps).
+QStringList scanWordReferences(const Sandbox &sandbox, const DocumentBridge *bridge,
+                               const QString &word, int maxHits)
+{
+    QStringList hits;
+    if (word.isEmpty()) {
+        return hits;
+    }
+    const QRegularExpression re(u"\\b%1\\b"_s.arg(QRegularExpression::escape(word)));
+    const QString root = sandbox.workspaceRoot();
+    QDirIterator it(root, QDir::Files | QDir::NoDotAndDotDot, QDirIterator::Subdirectories);
+    while (it.hasNext() && hits.size() < maxHits) {
+        const QString filePath = it.next();
+        const QString rel = QDir(root).relativeFilePath(filePath);
+        if (isNoisySearchPath(rel) || sandbox.isDenied(filePath) || !sandbox.allowsRead(filePath, nullptr)) {
+            continue;
+        }
+        if (QFileInfo(filePath).size() > 4 * 1024 * 1024) {
+            continue;
+        }
+        QString contents;
+        if (!bridge || !bridge->readDocument(filePath, &contents)) {
+            continue;
+        }
+        if (contents.left(8192).contains(u'\0')) {
+            continue;
+        }
+        const QStringList lines = contents.split(u'\n');
+        for (int i = 0; i < lines.size() && hits.size() < maxHits; ++i) {
+            if (re.match(lines.at(i)).hasMatch()) {
+                hits.append(rel + u':' + QString::number(i + 1) + u':' + lines.at(i).trimmed().left(200));
+            }
+        }
+    }
+    return hits;
+}
+
+QString severityName(int severity)
+{
+    switch (severity) {
+    case 1:
+        return u"error"_s;
+    case 2:
+        return u"warning"_s;
+    case 3:
+        return u"info"_s;
+    default:
+        return u"hint"_s;
+    }
+}
+
+} // namespace
+
+ToolResult ToolRunner::lspDiagnostics(const QJsonObject &args) const
+{
+    ToolResult result;
+    result.name = u"lsp_diagnostics"_s;
+
+    if (!m_lsp || !m_lsp->isAvailable()) {
+        result.ok = false;
+        result.output = u"No language server available: Kate's LSP plugin (katelspclientplugin) is not loaded. "
+                        u"Run a build, test, or lint command with bash to get diagnostics instead."_s;
+        return result;
+    }
+
+    QString error;
+    QString resolved;
+    if (!resolveReadPath(m_sandbox, args.value(u"path"_s).toString(), &resolved, &error)) {
+        result.ok = false;
+        result.output = error;
+        return result;
+    }
+    const QString severityFilter = args.value(u"severity"_s).toString().trimmed().toLower();
+
+    QList<LspDiagnostic> diags = m_lsp->diagnostics(resolved);
+    int minSeverity = 4;
+    if (severityFilter == u"error"_s) {
+        minSeverity = 1;
+    } else if (severityFilter == u"warning"_s) {
+        minSeverity = 2;
+    } else if (severityFilter == u"info"_s || severityFilter == u"information"_s) {
+        minSeverity = 3;
+    }
+    // Severity filters keep everything at least as severe as the threshold:
+    // "warning" means warnings and errors, like an IDE's filter.
+    QStringList lines;
+    int errors = 0;
+    int warnings = 0;
+    for (const LspDiagnostic &d : diags) {
+        if (d.severity > minSeverity) {
+            continue;
+        }
+        if (d.severity == 1) {
+            ++errors;
+        } else if (d.severity == 2) {
+            ++warnings;
+        }
+        const QString rel = QDir(m_sandbox.workspaceRoot()).relativeFilePath(d.path);
+        lines.append(u"%1:%2:%3: %4: %5%6"_s
+                         .arg(rel.isEmpty() ? d.path : rel)
+                         .arg(d.line)
+                         .arg(d.column > 0 ? d.column : 1)
+                         .arg(severityName(d.severity))
+                         .arg(d.message)
+                         .arg(d.source.isEmpty() ? QString() : u" [%1]"_s.arg(d.source)));
+    }
+    std::sort(lines.begin(), lines.end());
+    lines.prepend(u"%1 error(s), %2 warning(s)%3"_s
+                      .arg(errors)
+                      .arg(warnings)
+                      .arg(resolved.isEmpty() ? u" in the workspace"_s : u" in %1"_s.arg(QDir(m_sandbox.workspaceRoot()).relativeFilePath(resolved))));
+    if (resolved.isEmpty()) {
+        // Workspace-wide: the recent server messages are the closest thing to
+        // a build log the LSP surface offers.
+        const QStringList messages = m_lsp->recentMessages(5);
+        if (!messages.isEmpty()) {
+            lines.append(u"Recent LSP messages:"_s);
+            for (const QString &m : messages) {
+                lines.append(u"  "_s + m);
+            }
+        }
+    }
+    result.ok = true;
+    result.output = clip(lines.join(u'\n'));
+    return result;
+}
+
+ToolResult ToolRunner::lspSymbols(const QJsonObject &args) const
+{
+    ToolResult result;
+    result.name = u"lsp_symbols"_s;
+
+    QString error;
+    QString resolved;
+    if (!resolveReadPath(m_sandbox, args.value(u"path"_s).toString(), &resolved, &error) || resolved.isEmpty()) {
+        result.ok = false;
+        result.output = resolved.isEmpty() ? u"path is required."_s : error;
+        return result;
+    }
+
+    QList<LspSymbol> symbols;
+    if (m_lsp && m_lsp->isAvailable()) {
+        symbols = m_lsp->documentSymbols(resolved);
+    }
+    if (symbols.isEmpty() && m_projectGraph) {
+        // Fallback: the project graph's own symbol index.
+        for (const GraphSymbol &s : m_projectGraph->symbolsInFile(resolved)) {
+            LspSymbol sym;
+            sym.name = s.name;
+            sym.kind = s.kind;
+            sym.line = s.line;
+            sym.column = s.column;
+            sym.endLine = s.endLine;
+            symbols.append(sym);
+        }
+    }
+    if (symbols.isEmpty()) {
+        result.ok = false;
+        result.output = u"No symbols indexed for %1. The file may not be in the project graph yet; read_file it first or use grep."_s
+                            .arg(QDir(m_sandbox.workspaceRoot()).relativeFilePath(resolved));
+        return result;
+    }
+
+    std::sort(symbols.begin(), symbols.end(), [](const LspSymbol &a, const LspSymbol &b) {
+        return a.line < b.line;
+    });
+    QStringList lines;
+    for (const LspSymbol &s : symbols) {
+        lines.append(u"%1:%2: %3 %4%5"_s
+                         .arg(s.line)
+                         .arg(s.column > 0 ? s.column : 1)
+                         .arg(s.kind)
+                         .arg(s.name)
+                         .arg(s.endLine > s.line ? u"  (lines %1-%2)"_s.arg(s.line).arg(s.endLine) : QString()));
+    }
+    result.ok = true;
+    result.output = clip(lines.join(u'\n'));
+    return result;
+}
+
+ToolResult ToolRunner::lspHover(const QJsonObject &args) const
+{
+    ToolResult result;
+    result.name = u"lsp_hover"_s;
+
+    QString error;
+    QString resolved;
+    if (!resolveReadPath(m_sandbox, args.value(u"path"_s).toString(), &resolved, &error) || resolved.isEmpty()) {
+        result.ok = false;
+        result.output = resolved.isEmpty() ? u"path is required."_s : error;
+        return result;
+    }
+    const int line = qMax(1, args.value(u"line"_s).toInt(1));
+    const int column = qMax(1, args.value(u"column"_s).toInt(1));
+
+    if (m_lsp && m_lsp->isAvailable()) {
+        const QString text = m_lsp->hover(resolved, line, column);
+        if (!text.trimmed().isEmpty()) {
+            result.ok = true;
+            result.output = clip(text);
+            return result;
+        }
+    }
+
+    // Fallback: the enclosing symbol from the project graph plus its
+    // declaration lines, which is most of what a hover shows.
+    if (m_projectGraph) {
+        const GraphSymbol sym = m_projectGraph->enclosingSymbol(resolved, line);
+        if (!sym.name.isEmpty()) {
+            QStringList lines;
+            lines.append(u"%1 %2 at %3:%4"_s
+                             .arg(sym.kind, sym.name,
+                                  QDir(m_sandbox.workspaceRoot()).relativeFilePath(resolved))
+                             .arg(sym.line));
+            if (m_bridge) {
+                const int last = sym.endLine > sym.line ? qMin(sym.endLine, sym.line + 4) : sym.line;
+                QStringList page;
+                if (m_bridge->readDocumentLines(resolved, sym.line, last - sym.line + 1, &page, nullptr)) {
+                    for (int i = 0; i < page.size(); ++i) {
+                        lines.append(u"%1: %2"_s.arg(sym.line + i).arg(page.at(i)));
+                    }
+                }
+            }
+            result.ok = true;
+            result.output = clip(lines.join(u'\n'));
+            return result;
+        }
+    }
+
+    const QString word = wordAtPosition(m_bridge, resolved, line, column);
+    if (word.isEmpty()) {
+        result.ok = false;
+        result.output = u"No symbol or word at %1:%2:%3."_s
+                            .arg(QDir(m_sandbox.workspaceRoot()).relativeFilePath(resolved))
+                            .arg(line)
+                            .arg(column);
+        return result;
+    }
+    result.ok = true;
+    result.output = clip(u"%1 at %2:%3:%4 (no language server; word from the text)"_s
+                             .arg(word, QDir(m_sandbox.workspaceRoot()).relativeFilePath(resolved))
+                             .arg(line)
+                             .arg(column));
+    return result;
+}
+
+ToolResult ToolRunner::lspDefinition(const QJsonObject &args) const
+{
+    ToolResult result;
+    result.name = u"lsp_definition"_s;
+
+    QString error;
+    QString resolved;
+    if (!resolveReadPath(m_sandbox, args.value(u"path"_s).toString(), &resolved, &error) || resolved.isEmpty()) {
+        result.ok = false;
+        result.output = resolved.isEmpty() ? u"path is required."_s : error;
+        return result;
+    }
+    const int line = qMax(1, args.value(u"line"_s).toInt(1));
+    const int column = qMax(1, args.value(u"column"_s).toInt(1));
+
+    if (m_lsp && m_lsp->isAvailable()) {
+        const QList<LspLocation> locations = m_lsp->definitions(resolved, line, column);
+        if (!locations.isEmpty()) {
+            QStringList lines;
+            for (const LspLocation &loc : locations) {
+                lines.append(u"%1:%2:%3"_s
+                                 .arg(QDir(m_sandbox.workspaceRoot()).relativeFilePath(loc.path).isEmpty()
+                                          ? loc.path
+                                          : QDir(m_sandbox.workspaceRoot()).relativeFilePath(loc.path))
+                                 .arg(loc.line)
+                                 .arg(loc.column > 0 ? loc.column : 1));
+            }
+            result.ok = true;
+            result.output = clip(lines.join(u'\n'));
+            return result;
+        }
+    }
+
+    // Fallback: the declaration is the symbol's indexed definition line.
+    const QString word = args.value(u"symbol"_s).toString().trimmed().isEmpty()
+        ? wordAtPosition(m_bridge, resolved, line, column)
+        : args.value(u"symbol"_s).toString().trimmed();
+    if (word.isEmpty()) {
+        result.ok = false;
+        result.output = u"No symbol at %1:%2:%3."_s
+                            .arg(QDir(m_sandbox.workspaceRoot()).relativeFilePath(resolved))
+                            .arg(line)
+                            .arg(column);
+        return result;
+    }
+    QStringList lines;
+    if (m_projectGraph) {
+        for (const GraphSymbol &s : m_projectGraph->symbolsInFile(resolved)) {
+            if (s.name == word) {
+                lines.append(u"%1:%2: %3 %4 (declaration)"_s
+                                 .arg(QDir(m_sandbox.workspaceRoot()).relativeFilePath(resolved))
+                                 .arg(s.line)
+                                 .arg(s.kind, s.name));
+            }
+        }
+    }
+    // And where the name is defined/used elsewhere, textually.
+    const QStringList refs = scanWordReferences(m_sandbox, m_bridge, word, 60);
+    for (const QString &ref : refs) {
+        lines.append(ref + u"  (text match)"_s);
+    }
+    if (lines.isEmpty()) {
+        result.ok = false;
+        result.output = u"No definition found for %1 (no language server, no indexed declaration, no text matches)."_s.arg(word);
+        return result;
+    }
+    result.ok = true;
+    result.output = clip(lines.join(u'\n'));
+    return result;
+}
+
+ToolResult ToolRunner::lspReferences(const QJsonObject &args) const
+{
+    ToolResult result;
+    result.name = u"lsp_references"_s;
+
+    QString error;
+    QString resolved;
+    if (!resolveReadPath(m_sandbox, args.value(u"path"_s).toString(), &resolved, &error) || resolved.isEmpty()) {
+        result.ok = false;
+        result.output = resolved.isEmpty() ? u"path is required."_s : error;
+        return result;
+    }
+    const int line = qMax(1, args.value(u"line"_s).toInt(1));
+    const int column = qMax(1, args.value(u"column"_s).toInt(1));
+    const bool includeDeclaration = jsonBool(args.value(u"include_declaration"_s), true);
+
+    if (m_lsp && m_lsp->isAvailable()) {
+        const QList<LspLocation> locations = m_lsp->references(resolved, line, column, includeDeclaration);
+        if (!locations.isEmpty()) {
+            QStringList lines;
+            for (const LspLocation &loc : locations) {
+                const QString rel = QDir(m_sandbox.workspaceRoot()).relativeFilePath(loc.path);
+                lines.append(u"%1:%2:%3"_s.arg(rel.isEmpty() ? loc.path : rel).arg(loc.line).arg(loc.column > 0 ? loc.column : 1));
+            }
+            result.ok = true;
+            result.output = clip(lines.join(u'\n'));
+            return result;
+        }
+    }
+
+    const QString word = args.value(u"symbol"_s).toString().trimmed().isEmpty()
+        ? wordAtPosition(m_bridge, resolved, line, column)
+        : args.value(u"symbol"_s).toString().trimmed();
+    if (word.isEmpty()) {
+        result.ok = false;
+        result.output = u"No symbol at %1:%2:%3."_s
+                            .arg(QDir(m_sandbox.workspaceRoot()).relativeFilePath(resolved))
+                            .arg(line)
+                            .arg(column);
+        return result;
+    }
+    const QStringList hits = scanWordReferences(m_sandbox, m_bridge, word, 200);
+    if (hits.isEmpty()) {
+        result.ok = false;
+        result.output = u"No references to %1 found (no language server; text scan found nothing)."_s.arg(word);
+        return result;
+    }
+    QStringList lines;
+    lines.append(u"%1 reference(s) to %2 (text scan, no language server):"_s.arg(hits.size()).arg(word));
+    lines.append(hits);
+    result.ok = true;
+    result.output = clip(lines.join(u'\n'));
+    return result;
+}
+
+ToolResult ToolRunner::lspCodeActions(const QJsonObject &args) const
+{
+    ToolResult result;
+    result.name = u"lsp_code_actions"_s;
+
+    QString error;
+    QString resolved;
+    if (!resolveReadPath(m_sandbox, args.value(u"path"_s).toString(), &resolved, &error) || resolved.isEmpty()) {
+        result.ok = false;
+        result.output = resolved.isEmpty() ? u"path is required."_s : error;
+        return result;
+    }
+    const int line = qMax(1, args.value(u"line"_s).toInt(1));
+    const int column = qMax(1, args.value(u"column"_s).toInt(1));
+
+    QStringList actions;
+    if (m_lsp && m_lsp->isAvailable()) {
+        actions = m_lsp->codeActions(resolved, line, column);
+    }
+    if (actions.isEmpty()) {
+        result.ok = false;
+        result.output = u"No code actions offered at %1:%2:%3 (no language server running for this file, or none at that position)."_s
+                            .arg(QDir(m_sandbox.workspaceRoot()).relativeFilePath(resolved))
+                            .arg(line)
+                            .arg(column);
+        return result;
+    }
+    result.ok = true;
+    QStringList lines;
+    lines.append(u"Code actions at %1:%2:"_s
+                     .arg(QDir(m_sandbox.workspaceRoot()).relativeFilePath(resolved))
+                     .arg(line));
+    for (int i = 0; i < actions.size(); ++i) {
+        lines.append(u"%1. %2"_s.arg(i + 1).arg(actions.at(i)));
+    }
+    result.output = clip(lines.join(u'\n'));
+    return result;
+}
+
 ToolResult ToolRunner::goalReport(const QJsonObject &args)
 {
     ToolResult result;
@@ -1965,14 +2449,11 @@ ToolResult ToolRunner::suggest(const QJsonObject &args)
     }
 
     // The anchor is optional: advice without a place to look is still valid.
-    // It is carried through as given rather than resolved, because a
-    // suggestion may point at a file the work has not created yet.
-    const QString path = args.value(u"path"_s).toString().trimmed();
-    int line = 0;
+    // The card is built from the tool call itself (ToolRunner::describe carries
+    // path and line), so the line is validated here — an impossible anchor is
+    // an error the model can act on — but not carried in the result.
     const QJsonValue lineValue = args.value(u"line"_s);
-    if (lineValue.isUndefined() || lineValue.isNull()) {
-        line = 0;
-    } else {
+    if (!lineValue.isUndefined() && !lineValue.isNull()) {
         // The model often sends numbers as strings ("5"); QJsonValue::toInt()
         // silently yields 0 for those, which would drop the anchor. jsonInt
         // accepts both forms.
@@ -1982,7 +2463,6 @@ ToolResult ToolRunner::suggest(const QJsonObject &args)
             result.output = u"line must be a 1-based line number, or leave it out."_s;
             return result;
         }
-        line = parsed;
     }
 
     // Nothing is executed here: the card the user sees is built from the tool

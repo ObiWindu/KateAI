@@ -53,7 +53,7 @@ private Q_SLOTS:
         QVERIFY(!codeTools.contains(u"new_task"_s));
 
         const QStringList askTools = toolNames(toolDefinitions(ModeRegistry::toolAccessForGroups({ToolGroup::read(), ToolGroup::mcp()})));
-        QCOMPARE(askTools.size(), 8);
+        QCOMPARE(askTools.size(), 14);
         // The plan file lives outside the workspace and suggest only posts a
         // card, so read-only modes and plan mode keep both.
         QVERIFY(askTools.contains(u"write_plan_file"_s));

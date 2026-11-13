@@ -8,6 +8,7 @@
 #include <KTextEditor/Document>
 #include <KTextEditor/Editor>
 
+#include <QCryptographicHash>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -238,6 +239,20 @@ bool DiskDocumentBridge::writeDocument(const QString &path, const QString &conte
             }
             return false;
         }
+        if (m_bufferedPaths.contains(path)) {
+            // The buffer is ours to overwrite only while it still holds
+            // exactly what we last wrote. If the user typed into the file in
+            // the meantime, the buffer differs and a setText would silently
+            // discard their changes.
+            const QByteArray expected = m_bufferedHashes.value(path);
+            if (!expected.isNull()
+                && QCryptographicHash::hash(doc->text().toUtf8(), QCryptographicHash::Sha256) != expected) {
+                if (error) {
+                    *error = u"The document was changed after Kate AI's last edit; save or review it before the agent writes again."_s;
+                }
+                return false;
+            }
+        }
         if (!doc->setText(contents)) {
             if (error) {
                 *error = u"Failed to update the open document."_s;
@@ -250,9 +265,11 @@ bool DiskDocumentBridge::writeDocument(const QString &path, const QString &conte
             // settles it -- accept saves, reject restores. Until then, tools
             // that read the file from disk still see the previous state.
             m_bufferedPaths.insert(path);
+            m_bufferedHashes.insert(path, QCryptographicHash::hash(contents.toUtf8(), QCryptographicHash::Sha256));
             return true;
         }
         m_bufferedPaths.remove(path);
+        m_bufferedHashes.remove(path);
         if (doc->isModified() && !doc->url().isEmpty() && !doc->save()) {
             if (error) {
                 *error = u"The open document was updated but could not be saved."_s;
@@ -281,6 +298,7 @@ bool DiskDocumentBridge::restoreDocument(const QString &path, const QString &con
             return false;
         }
         m_bufferedPaths.remove(path);
+        m_bufferedHashes.remove(path);
         return true;
     }
 
@@ -298,6 +316,7 @@ bool DiskDocumentBridge::saveDocumentIfOpen(const QString &path, QString *error)
             return false;
         }
         m_bufferedPaths.remove(path);
+        m_bufferedHashes.remove(path);
         return true;
     }
     return true;
@@ -310,6 +329,7 @@ bool DiskDocumentBridge::saveDocumentIfOpen(const QString &path, QString *error)
 void DiskDocumentBridge::resetBufferedEdits()
 {
     m_bufferedPaths.clear();
+    m_bufferedHashes.clear();
 }
 
 bool DiskDocumentBridge::writeDocumentToDisk(const QString &path, const QString &contents, QString *error)

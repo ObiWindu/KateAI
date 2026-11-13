@@ -36,6 +36,7 @@ class PermissionBar;
 class PromptEdit;
 class ToolCallWidget;
 class SubtaskWidget;
+class SubtaskDock;
 class SuggestionWidget;
 class QuestionWidget;
 class TodoWidget;
@@ -247,6 +248,10 @@ private:
     // right past it so the transcript keeps its time order instead of dropping
     // a long-running operation below everything that happened after it.
     void retireIntentWidget(QWidget *widget, QWidget *anchor = nullptr);
+    // Re-applies the quarter-of-the-panel height cap the docked sub-agent cards
+    // live under. Called whenever the panel is resized and whenever a card is
+    // docked, so a card never inherits a stale budget.
+    void applySubtaskHeightBudget();
 
     // --- Suggestion cards ------------------------------------------------------
     // One card per suggestion the agent posted, keyed by the tool call id that
@@ -345,6 +350,9 @@ private:
     // Intent dock: sits between the transcript and the permission bar.
     QWidget *m_intentDock = nullptr;
     QVBoxLayout *m_intentDockLayout = nullptr;
+    // The dock's sub-agent slot: tabs over the one live sub-agent card, so
+    // concurrent delegations share a single bounded strip instead of stacking.
+    SubtaskDock *m_subtaskDock = nullptr;
     PromptEdit *m_prompt = nullptr;
     TurnStatus *m_turnStatus = nullptr;
     // Tool calls completed in the current turn, shown live in the status strip.

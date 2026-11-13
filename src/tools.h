@@ -7,6 +7,7 @@
 
 #include "documentbridge.h"
 #include "graph/projectgraph.h"
+#include "lsp.h"
 #include "permissions.h"
 #include "sandbox.h"
 #include "types.h"
@@ -39,6 +40,12 @@ public:
     {
         m_projectGraph = graph;
     }
+    // The editor's language-server surface. Null means "no editor": the LSP
+    // tools then report the feature as unavailable instead of failing.
+    void setLspProvider(LspProvider *provider)
+    {
+        m_lsp = provider;
+    }
 
     ToolResult run(const ToolCall &call);
     PermissionRequest describe(const ToolCall &call) const;
@@ -65,6 +72,12 @@ private:
     ToolResult glob(const QJsonObject &args) const;
     ToolResult bash(const QJsonObject &args);
     ToolResult queryProjectGraph(const QJsonObject &args) const;
+    ToolResult lspDiagnostics(const QJsonObject &args) const;
+    ToolResult lspSymbols(const QJsonObject &args) const;
+    ToolResult lspHover(const QJsonObject &args) const;
+    ToolResult lspDefinition(const QJsonObject &args) const;
+    ToolResult lspReferences(const QJsonObject &args) const;
+    ToolResult lspCodeActions(const QJsonObject &args) const;
     ToolResult goalReport(const QJsonObject &args);
     ToolResult writePlanFile(const QJsonObject &args);
     ToolResult suggest(const QJsonObject &args);
@@ -79,6 +92,7 @@ private:
     Sandbox m_sandbox;
     DocumentBridge *m_bridge = nullptr;
     ProjectGraph *m_projectGraph = nullptr;
+    LspProvider *m_lsp = nullptr;
     int m_timeoutMs = 60000;
     // Running async bash commands, keyed by tool call id, so progress and
     // cancellation can find the right process, plus the output captured from

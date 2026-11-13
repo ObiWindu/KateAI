@@ -10,6 +10,8 @@ add_library(kateai_core STATIC
     agentloop.cpp
     workspace.cpp
     documentbridge.cpp
+    katelspbridge.cpp
+    lsp.cpp
     sessionstore.cpp
     graph/projectgraph.cpp
     modes.cpp
@@ -60,6 +62,7 @@ target_sources(kateai PRIVATE
     permissionbar.cpp
     edittracker.cpp
     subtaskwidget.cpp
+    subtaskdock.cpp
     suggestionwidget.cpp
     questionwidget.cpp
     todowidget.cpp

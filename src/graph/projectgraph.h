@@ -46,6 +46,17 @@ struct GraphEdge {
     bool isSafe; // For permission evaluation
 };
 
+// One top-level definition of a file, with its 1-based line range. endLine
+// is 0 when the extent could not be determined. Stored in the file node's
+// metadata under "symbols" so it serializes with the graph.
+struct GraphSymbol {
+    QString name;
+    QString kind; // "class", "function"
+    int line = 0;
+    int column = 0;
+    int endLine = 0;
+};
+
 class ProjectGraph {
 public:
     ProjectGraph();
@@ -84,6 +95,21 @@ public:
     void analyzeCodeStructure();
     void updateSecurityStatus();
     void generateSummaryReport() const;
+
+    // Symbol indexing: extracts the definitions of one file with their line
+    // ranges and stores them in the file node's metadata ("symbols").
+    QList<GraphSymbol> extractSymbols(const QString &content, const QString &filePath) const;
+    void indexFileSymbols(GraphNode *fileNode);
+    // The definitions recorded for a file, empty when none were indexed.
+    QList<GraphSymbol> symbolsInFile(const QString &filePath) const;
+    // The definition enclosing a 1-based line: the one with the greatest
+    // start line <= line whose range still covers it. Falls back to the
+    // greatest start line <= line when no range covers it. Returns a symbol
+    // with an empty name when the file has no indexed symbols.
+    GraphSymbol enclosingSymbol(const QString &filePath, int line) const;
+    // Number of file nodes whose recorded mtime no longer matches the file on
+    // disk (or whose file is gone): the graph cache is stale for them.
+    int staleFileCount() const;
 
     // Serialization
     bool saveToFile(const QString &filePath) const;
