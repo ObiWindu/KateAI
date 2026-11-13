@@ -664,6 +664,68 @@ QJsonArray toolDefinitions(const ToolAccess &access)
                          {},
                          false));
 
+    tools.append(toolDef(u"lsp_diagnostics"_s,
+                         u"Report language-server/editor diagnostics (errors, warnings) for one file, or workspace-wide when path is omitted. "
+                         u"Read-only. Check this after edits instead of only reading test output. When no LSP server is running, "
+                         u"the tool says so and you should fall back to a build/lint via bash."_s,
+                         QJsonObject{
+                             {u"path"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"File to check, relative to the workspace or absolute. Omit for a workspace-wide summary."_s}}},
+                             {u"severity"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"enum"_s, QJsonArray{u"error"_s, u"warning"_s, u"info"_s, u"hint"_s}}, {u"description"_s, u"Only report this severity and above. Omit for everything."_s}}},
+                         },
+                         {},
+                         false));
+
+    tools.append(toolDef(u"lsp_symbols"_s,
+                         u"List the symbols (classes, functions) of a file with their line numbers. Read-only."_s,
+                         QJsonObject{
+                             {u"path"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"File to list, relative to the workspace or absolute."_s}}},
+                         },
+                         {u"path"_s},
+                         false));
+
+    tools.append(toolDef(u"lsp_hover"_s,
+                         u"Show hover information for the symbol at a position: the enclosing symbol and its declaration. Read-only."_s,
+                         QJsonObject{
+                             {u"path"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"File, relative to the workspace or absolute."_s}}},
+                             {u"line"_s, QJsonObject{{u"type"_s, u"integer"_s}, {u"description"_s, u"1-based line of the symbol."_s}}},
+                             {u"column"_s, QJsonObject{{u"type"_s, u"integer"_s}, {u"description"_s, u"1-based column. Defaults to 1."_s}}},
+                         },
+                         {u"path"_s, u"line"_s},
+                         false));
+
+    tools.append(toolDef(u"lsp_definition"_s,
+                         u"Find where the symbol at a position is defined. Read-only."_s,
+                         QJsonObject{
+                             {u"path"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"File, relative to the workspace or absolute."_s}}},
+                             {u"line"_s, QJsonObject{{u"type"_s, u"integer"_s}, {u"description"_s, u"1-based line of the symbol."_s}}},
+                             {u"column"_s, QJsonObject{{u"type"_s, u"integer"_s}, {u"description"_s, u"1-based column. Defaults to 1."_s}}},
+                             {u"symbol"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"Override the symbol name instead of taking it from the position."_s}}},
+                         },
+                         {u"path"_s, u"line"_s},
+                         false));
+
+    tools.append(toolDef(u"lsp_references"_s,
+                         u"Find all references to the symbol at a position across the workspace. Read-only."_s,
+                         QJsonObject{
+                             {u"path"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"File, relative to the workspace or absolute."_s}}},
+                             {u"line"_s, QJsonObject{{u"type"_s, u"integer"_s}, {u"description"_s, u"1-based line of the symbol."_s}}},
+                             {u"column"_s, QJsonObject{{u"type"_s, u"integer"_s}, {u"description"_s, u"1-based column. Defaults to 1."_s}}},
+                             {u"symbol"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"Override the symbol name instead of taking it from the position."_s}}},
+                             {u"include_declaration"_s, QJsonObject{{u"type"_s, u"boolean"_s}, {u"description"_s, u"Include the declaration itself. Defaults to true."_s}}},
+                         },
+                         {u"path"_s, u"line"_s},
+                         false));
+
+    tools.append(toolDef(u"lsp_code_actions"_s,
+                         u"List the quick fixes / code actions the language server offers at a position (e.g. on a diagnostic line). Read-only."_s,
+                         QJsonObject{
+                             {u"path"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"File, relative to the workspace or absolute."_s}}},
+                             {u"line"_s, QJsonObject{{u"type"_s, u"integer"_s}, {u"description"_s, u"1-based line. Defaults to 1."_s}}},
+                             {u"column"_s, QJsonObject{{u"type"_s, u"integer"_s}, {u"description"_s, u"1-based column. Defaults to 1."_s}}},
+                         },
+                         {u"path"_s},
+                         false));
+
     tools.append(toolDef(u"write_plan_file"_s,
                          u"Write the implementation plan for a complicated, multi-step task to a temporary file "
                          u"the user can open and follow while you work. Pass the full plan as markdown: the goal, "
@@ -790,6 +852,11 @@ QString defaultSystemPrompt(const QString &workspace)
                       "- Read a result with web_fetch before relying on it; snippets alone are often misleading.\n"
                       "- Cite the URL when a web result informs your answer.\n"
                       "- Never send workspace contents, file contents, secrets, or user code to a search provider. Queries only.\n"
+           "\n"
+           "LSP & DIAGNOSTICS:\n"
+           "- lsp_diagnostics reports language-server/editor errors and warnings for a file or the whole workspace; check it after edits instead of only reading test output.\n"
+           "- lsp_symbols lists a file's classes and functions with line numbers; lsp_hover, lsp_definition and lsp_references answer symbol questions without guessing; lsp_code_actions lists the quick fixes offered at a position.\n"
+           "- When no language server is running for a file these tools say so; fall back to a build/lint/test via bash and to grep.\n"
            "\n"
            "REASONING & PLANNING (required):\n"
            "1. THINKING: Before every response, output your reasoning in a <thinking> block. Analyze the request, consider alternatives, plan steps, and anticipate issues. The user sees this block - it stays open above your answer. Be thorough.\n"

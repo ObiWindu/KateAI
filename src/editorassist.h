@@ -7,6 +7,7 @@
 
 #include "completionengine.h"
 #include "editranges.h"
+#include "lsp.h"
 #include "types.h"
 
 #include <KTextEditor/Range>
@@ -94,6 +95,17 @@ public:
         return m_editRanges;
     }
 
+    // The editor's language-server surface, used to show diagnostic hovers.
+    // Null in tests: the hint then just skips the diagnostic part.
+    void setLspProvider(LspProvider *provider)
+    {
+        m_lsp = provider;
+    }
+    LspProvider *lspProvider() const
+    {
+        return m_lsp;
+    }
+
 Q_SIGNALS:
     // The auto trigger is about to fire for the first time this session; the
     // view shows the one-time notice about request volume.
@@ -122,6 +134,7 @@ private:
 
     CompletionEngine *m_engine = nullptr;
     EditRangeTracker *m_editRanges = nullptr;
+    LspProvider *m_lsp = nullptr;
     GhostNoteProvider *m_noteProvider = nullptr;
     EditHintProvider *m_hintProvider = nullptr;
     AiCompletionModel *m_popupModel = nullptr;

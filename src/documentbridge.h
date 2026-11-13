@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <QHash>
 #include <QSet>
 #include <QString>
 #include <QStringList>
@@ -69,6 +70,11 @@ private:
     // Open paths whose current modification is the bridge's own unsaved
     // edit, so a later write may build on it instead of refusing.
     QSet<QString> m_bufferedPaths;
+    // SHA-256 of the content the bridge last wrote into each buffered path.
+    // Before overwriting a buffered path, the current buffer is compared
+    // against it: if they differ, someone (the user) edited the file after
+    // the agent's last write, and overwriting would throw those changes away.
+    QHash<QString, QByteArray> m_bufferedHashes;
 };
 
 // The open KTextEditor document for a local path, or null when Kate does not

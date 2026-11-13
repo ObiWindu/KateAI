@@ -6,6 +6,7 @@
 #pragma once
 
 #include "documentbridge.h"
+#include "lsp.h"
 #include "mcp.h"
 #include "sandbox.h"
 #include "types.h"
@@ -56,6 +57,11 @@ public:
     void setMcpServers(const QList<McpServerConfig> &servers);
     void setEditorContext(const QString &context);
     void setProjectGraph(ProjectGraph *graph);
+    // The editor's language-server surface; null when there is no editor.
+    void setLspProvider(LspProvider *provider)
+    {
+        m_lsp = provider;
+    }
     // Session id from a previous Kate conversation, used with session/load
     // or session/resume when the agent advertises those capabilities.
     void setResumeSessionId(const QString &sessionId);
@@ -274,6 +280,7 @@ private:
     void handleWritePlanFile(const QJsonValue &id, const QJsonObject &params);
     void handleSuggest(const QJsonValue &id, const QJsonObject &params);
     void handleQueryProjectGraph(const QJsonValue &id, const QJsonObject &params);
+    void handleLspDiagnostics(const QJsonValue &id, const QJsonObject &params);
     void handleRequestPermission(const QJsonValue &id, const QJsonObject &params);
     void handleTerminalCreate(const QJsonValue &id, const QJsonObject &params);
     void handleTerminalOutput(const QJsonValue &id, const QJsonObject &params);
@@ -355,6 +362,7 @@ private:
     QList<McpServerConfig> m_mcpServers;
 
     ProjectGraph *m_projectGraph = nullptr;
+    LspProvider *m_lsp = nullptr;
 
     State m_state = State::Stopped;
     QString m_status;

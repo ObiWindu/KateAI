@@ -19,6 +19,9 @@ src/
   contextmanager.cpp              prompt assembly, context window, compaction
   graph/projectgraph.cpp          workspace structure graph
   mcp.cpp                         Model Context Protocol stdio clients
+  lsp.h / lsp.cpp                 the editor's language-server surface (LspProvider) the core queries
+  katelspbridge.cpp               Kate-facing LspProvider: probes the katelspclientplugin at runtime,
+                                  reads Error/Warning document marks, captures LSP messages
   checkpoint.cpp                  pre-turn shadow-git snapshots
   edittracker.cpp                 review queue for agent edits
   completionengine.cpp / editranges.cpp  in-editor completions (core half): FIM/chat prompts, budgets, MovingCursor-anchored edit ranges
@@ -135,12 +138,30 @@ language highlighting, and restores subtask/suggestion cards.
 ### Client methods
 
 Kate exposes `fs/read_text_file`, `fs/write_text_file`, `terminal/*`, and its own
-`_kateai/query_project_graph`, `_kateai/write_plan_file`, and `_kateai/suggest`
+`_kateai/query_project_graph`, `_kateai/write_plan_file`, `_kateai/suggest`, and
+`_kateai/lsp_diagnostics`
 methods. The extension names are the ones the protocol reserves for
 extensions; they are advertised in the `initialize` capabilities under `_meta`
 (`com.kateai/methods`). The bare names (`write_plan_file`, …) still reach the
 same handlers. Results are formatted to match native tool output. `suggest`
 emits `suggestionPosted` which `ChatWidget` turns into a suggestion card.
+
+## LSP bridge
+
+`LspProvider` (lsp.h) is the interface the core (`ToolRunner`, `AcpClient`)
+queries for language-server data: availability, per-file diagnostics, server
+messages, and optional symbols/hover/definition/references/code-action answers.
+`KateLspBridge` (katelspbridge.cpp) implements it against Kate's LSP client
+plugin: it looks up `katelspclientplugin` through the application plugin list
+(the same string-based, runtime-probed pattern used for `kateprojectplugin`),
+captures its public `showMessage` signal, and derives diagnostics from the
+Error/Warning marks of open documents, re-scanned on `marksChanged` plus a
+slow poll so `diagnosticsChanged` fires. When the plugin is absent or changes
+its internals, `isAvailable()` is false and the `lsp_*` tools report the
+feature as unavailable instead of failing; symbol/hover/definition/references
+then fall back to the project graph (which now indexes per-file symbols with
+line ranges) and plain text search. The `lsp_*` tools are read-only, so they
+are allowed in plan/ask/architect/orchestrator modes and never prompt.
 
 Agents do not receive Kate's system prompt, so the first prompt of each ACP
 session starts with a notes block: the user's global rules and extra system

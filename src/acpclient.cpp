@@ -20,6 +20,7 @@
 #include <QTimer>
 #include <QUrl>
 #include <QUuid>
+#include <algorithm>
 #include <limits>
 
 #ifdef Q_OS_UNIX
@@ -160,6 +161,7 @@ static QString kateClientMethod(const QString &method)
     static const QHash<QString, QString> aliases = {
         {u"queryProjectGraph"_s, u"query_project_graph"_s},
         {u"writePlanFile"_s, u"write_plan_file"_s},
+        {u"lspDiagnostics"_s, u"lsp_diagnostics"_s},
     };
     QString name = method;
     if (name.startsWith(u"_kateai/"_s)) {
@@ -1192,7 +1194,7 @@ void AcpClient::sendInitialize()
     // The same methods under the names the protocol reserves for extensions,
     // listed in _meta where the spec asks extensions to advertise themselves.
     capabilities.insert(u"_meta"_s, QJsonObject{
-        {u"com.kateai/methods"_s, QJsonArray{u"_kateai/query_project_graph"_s, u"_kateai/write_plan_file"_s, u"_kateai/suggest"_s}},
+        {u"com.kateai/methods"_s, QJsonArray{u"_kateai/query_project_graph"_s, u"_kateai/write_plan_file"_s, u"_kateai/suggest"_s, u"_kateai/lsp_diagnostics"_s}},
     });
     // Advertise support for session config options (used for model selection)
     QJsonObject sessionCapabilities;
@@ -1555,6 +1557,7 @@ QJsonObject AcpClient::sessionNotesBlock() const
     lines.append(u"- _kateai/write_plan_file {content}: publish the plan of a multi-step task as markdown the user can follow."_s);
     lines.append(u"- _kateai/suggest {suggestion, path?, line?}: offer an improvement the user did not ask for, instead of making the change."_s);
     lines.append(u"- _kateai/query_project_graph {query_type, node_id?, relationship?, source_id?, target_id?}: read the project's files, symbols and imports."_s);
+    lines.append(u"- _kateai/lsp_diagnostics {path?, severity?}: read language-server diagnostics (errors/warnings) for a file, or workspace-wide when path is omitted. When no LSP server is running, the call reports that instead."_s);
     QJsonObject block;
     block.insert(u"type"_s, u"text"_s);
     block.insert(u"text"_s, lines.join(u'\n'));
@@ -1893,6 +1896,10 @@ void AcpClient::handleIncomingRequest(const QJsonObject &message)
     }
     if (method == u"query_project_graph"_s) {
         handleQueryProjectGraph(id, params);
+        return;
+    }
+    if (method == u"lsp_diagnostics"_s) {
+        handleLspDiagnostics(id, params);
         return;
     }
     replyError(id, kMethodNotFound, u"Method not found: %1"_s.arg(method));
@@ -2867,6 +2874,98 @@ void AcpClient::handleQueryProjectGraph(const QJsonValue &id, const QJsonObject 
     } else {
         replyError(id, kInvalidParams, u"Unknown query_type. Use summary, nodes, edges, dependencies, dependents, find_related, find_path, or dependency_chain."_s);
         return;
+    }
+
+    QJsonObject result;
+    result.insert(u"content"_s, lines.join(u'\n'));
+    replyResult(id, result);
+}
+
+// Kate-specific client method, mirroring the native lsp_diagnostics tool: the
+// agent asks for language-server/editor diagnostics and Kate answers from its
+// LSP bridge. Read-only, so no sandbox write check and no permission prompt.
+void AcpClient::handleLspDiagnostics(const QJsonValue &id, const QJsonObject &params)
+{
+    if (!m_lsp || !m_lsp->isAvailable()) {
+        replyError(id, kServerError,
+                   u"No language server available: Kate's LSP plugin is not loaded. Run a build or lint command instead."_s);
+        return;
+    }
+
+    QString path = params.value(u"path"_s).toString().trimmed();
+    if (!path.isEmpty() && !QFileInfo(path).isAbsolute()) {
+        // Agents may send a workspace-relative path; the native tool resolves
+        // against the workspace, so do the same here.
+        path = QDir(m_workspace).absoluteFilePath(path);
+    }
+    if (!path.isEmpty()) {
+        QString error;
+        if (!pathAllowed(path, false, &error)) {
+            replyError(id, kServerError, error);
+            return;
+        }
+    }
+
+    static const auto severityName = [](int severity) {
+        switch (severity) {
+        case 1:
+            return u"error"_s;
+        case 2:
+            return u"warning"_s;
+        case 3:
+            return u"info"_s;
+        default:
+            return u"hint"_s;
+        }
+    };
+    const QString severityFilter = params.value(u"severity"_s).toString().trimmed().toLower();
+    int minSeverity = 4;
+    if (severityFilter == u"error"_s) {
+        minSeverity = 1;
+    } else if (severityFilter == u"warning"_s) {
+        minSeverity = 2;
+    } else if (severityFilter == u"info"_s || severityFilter == u"information"_s) {
+        minSeverity = 3;
+    }
+
+    const QList<LspDiagnostic> diags = m_lsp->diagnostics(path);
+    QStringList lines;
+    int errors = 0;
+    int warnings = 0;
+    for (const LspDiagnostic &d : diags) {
+        if (d.severity > minSeverity) {
+            continue;
+        }
+        if (d.severity == 1) {
+            ++errors;
+        } else if (d.severity == 2) {
+            ++warnings;
+        }
+        QString rel = QDir(m_workspace).relativeFilePath(d.path);
+        if (rel.isEmpty()) {
+            rel = d.path;
+        }
+        lines.append(u"%1:%2:%3: %4: %5%6"_s
+                         .arg(rel)
+                         .arg(d.line)
+                         .arg(d.column > 0 ? d.column : 1)
+                         .arg(severityName(d.severity))
+                         .arg(d.message)
+                         .arg(d.source.isEmpty() ? QString() : u" [%1]"_s.arg(d.source)));
+    }
+    std::sort(lines.begin(), lines.end());
+    lines.prepend(u"%1 error(s), %2 warning(s)%3"_s
+                      .arg(errors)
+                      .arg(warnings)
+                      .arg(path.isEmpty() ? u" in the workspace"_s : u" in %1"_s.arg(QDir(m_workspace).relativeFilePath(path))));
+    if (path.isEmpty()) {
+        const QStringList messages = m_lsp->recentMessages(5);
+        if (!messages.isEmpty()) {
+            lines.append(u"Recent LSP messages:"_s);
+            for (const QString &m : messages) {
+                lines.append(u"  "_s + m);
+            }
+        }
     }
 
     QJsonObject result;

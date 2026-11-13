@@ -36,6 +36,7 @@ kateai_test(test_modetools)
 kateai_test(test_sessionstore)
 kateai_test(test_acpclientmethods)
 kateai_test(test_projectgraph)
+kateai_test(test_lsp)
 # The requestable half of the in-editor completions: prompt building, staleness,
 # budget, response parsing. The HTTP cases talk to an in-process mock server on
 # the loopback interface, so no GUI and no provider are needed.

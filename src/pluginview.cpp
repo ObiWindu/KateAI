@@ -7,6 +7,8 @@
 #include "chatwidget.h"
 #include "edittracker.h"
 #include "editorassist.h"
+#include "katelspbridge.h"
+#include "lsp.h"
 #include "mcp.h"
 #include "chattheme.h"
 #include "configpage.h"
@@ -40,6 +42,7 @@
 #include <QMenu>
 #include <QMessageBox>
 #include <QPalette>
+#include <QProcess>
 #include <QPushButton>
 #include <QTimer>
 #include <QUrl>
@@ -98,6 +101,44 @@ namespace KateAi
             return m_chat && m_chat->agent() && m_chat->agent()->isBusy();
         });
 
+        // The bridge to Kate's LSP client plugin. It probes the plugin at
+        // runtime and reports "not available" when Kate runs without it, so
+        // the agent's lsp_* tools and the hover hints degrade gracefully.
+        m_lsp = new KateLspBridge(this);
+        m_lsp->setMainWindow(m_mainWindow);
+        m_assist->setLspProvider(m_lsp);
+        connect(m_lsp, &LspProvider::diagnosticsChanged, this, [this](const QString &) {
+            // Diagnostic marks changed: the editor context carries their
+            // counts, so refresh it (debounced).
+            scheduleEditorContextRefresh();
+        });
+
+        // Debounced editor-context refresh on cursor/selection moves: the
+        // context string is prompt-sized and the signals fire per keystroke.
+        m_contextTimer = new QTimer(this);
+        m_contextTimer->setSingleShot(true);
+        m_contextTimer->setInterval(300);
+        connect(m_contextTimer, &QTimer::timeout, this, [this]() {
+            if (m_chat && m_chat->agent()) {
+                m_chat->agent()->setEditorContext(editorContext());
+            }
+        });
+        // Debounced project-graph update for the user's own typing.
+        m_graphTimer = new QTimer(this);
+        m_graphTimer->setSingleShot(true);
+        m_graphTimer->setInterval(1500);
+        connect(m_graphTimer, &QTimer::timeout, this, [this]() {
+            if (m_pendingGraphPath.isEmpty() || !m_chat || !m_chat->agent()) {
+                return;
+            }
+            const QString path = m_pendingGraphPath;
+            m_pendingGraphPath.clear();
+            QString content;
+            if (m_bridge.readDocument(path, &content)) {
+                m_chat->agent()->updateProjectGraph(path, content);
+            }
+        });
+
         // Ensure the tool view has a layout and add our chat widget to it
         // Configure the chat widget with plugin settings and set up document bridging
         if (m_toolView && m_chat) {
@@ -116,6 +157,7 @@ namespace KateAi
             m_bridge.setEditInBuffer(plugin->settings().editInBuffer);
             if (m_chat->agent()) {
                 m_chat->agent()->setDocumentBridge(&m_bridge);
+                m_chat->agent()->setLspProvider(m_lsp);
                 // Every chat needs an ID before its first turn. Otherwise the
                 // turn-finished autosave is skipped, and switching to another
                 // conversation can save the new messages under an empty ID.
@@ -402,12 +444,14 @@ namespace KateAi
         if (m_mainWindow && m_assist) {
             for (auto *view : m_mainWindow->views()) {
                 m_assist->attachView(view);
+                watchViewForContext(view);
             }
             connect(m_mainWindow, &KTextEditor::MainWindow::viewCreated, this,
                     [this](KTextEditor::View *view) {
                         if (m_assist) {
                             m_assist->attachView(view);
                         }
+                        watchViewForContext(view);
                     });
             // One-time notice the first time auto mode is about to fire: an
             // idle-triggered completion loop on a metered key is exactly the
@@ -575,8 +619,27 @@ namespace KateAi
             return;
         }
 
-        // Extract the selected text or the current line if nothing is selected
-        QString snippet = view->selectionText();
+        // Extract the selected text or the current line if nothing is
+        // selected. With several selections (multi-cursor), every range goes
+        // in with its line numbers, so the model can point edits at each.
+        QString snippet;
+        const QList<KTextEditor::Range> ranges = view->selectionRanges();
+        if (ranges.size() > 1) {
+            QStringList parts;
+            for (const KTextEditor::Range &range : ranges) {
+                if (range.isEmpty()) {
+                    continue;
+                }
+                parts.append(u"Lines %1-%2:\n%3"_s
+                                 .arg(range.start().line() + 1)
+                                 .arg(range.end().line() + 1)
+                                 .arg(view->document()->text(range)));
+            }
+            snippet = parts.join(u"\n\n"_s);
+        }
+        if (snippet.isEmpty()) {
+            snippet = view->selectionText();
+        }
         if (snippet.isEmpty()) {
             snippet = view->document()->line(view->cursorPosition().line());
         }
@@ -690,6 +753,34 @@ namespace KateAi
             if (!mode.isEmpty() && mode != u"None"_s) {
                 lines.append(u"Language: %1"_s.arg(mode));
             }
+            // LSP surface: whether Kate's LSP client plugin is loaded, and the
+            // diagnostic counts for the active file when it has any.
+            if (m_lsp) {
+                lines.append(m_lsp->isAvailable() ? u"LSP: plugin loaded"_s : u"LSP: not available"_s);
+                if (m_lsp->isAvailable() && !path.isEmpty()) {
+                    const QList<LspDiagnostic> diags = m_lsp->diagnostics(path);
+                    int errs = 0;
+                    int warns = 0;
+                    for (const LspDiagnostic &d : diags) {
+                        if (d.severity == 1) {
+                            ++errs;
+                        } else if (d.severity == 2) {
+                            ++warns;
+                        }
+                    }
+                    if (errs > 0 || warns > 0) {
+                        lines.append(u"Diagnostics in active file: %1 error(s), %2 warning(s)"_s.arg(errs).arg(warns));
+                    }
+                }
+            }
+            // The symbol the cursor sits in, from the project graph, so the
+            // model knows the local context without reading the file first.
+            if (!path.isEmpty() && m_chat && m_chat->agent() && m_chat->agent()->getProjectGraph()) {
+                const GraphSymbol sym = m_chat->agent()->getProjectGraph()->enclosingSymbol(path, cursor.line() + 1);
+                if (!sym.name.isEmpty()) {
+                    lines.append(u"Enclosing symbol: %1 %2 (line %3)"_s.arg(sym.kind, sym.name).arg(sym.line));
+                }
+            }
             if (view->selection()) {
                 // The range, not only the text: "where" is what the model
                 // needs to point an edit at the same region.
@@ -720,6 +811,19 @@ namespace KateAi
             for (auto markIt = docMarks.cbegin(); markIt != docMarks.cend(); ++markIt) {
                 if (markIt.value()->type & KTextEditor::Document::Bookmark) {
                     bookmarks.append(u"%1:%2"_s.arg(label).arg(markIt.key() + 1));
+                }
+            }
+        }
+        // The branch the workspace is on: cheap, and it tells the model which
+        // line of work the edits belong to.
+        if (!m_workspace.isEmpty() && QFileInfo(m_workspace + u"/.git"_s).exists()) {
+            QProcess git;
+            git.setWorkingDirectory(m_workspace);
+            git.start(u"git"_s, QStringList{u"rev-parse"_s, u"--abbrev-ref"_s, u"HEAD"_s});
+            if (git.waitForFinished(800)) {
+                const QString branch = QString::fromUtf8(git.readAllStandardOutput()).trimmed();
+                if (!branch.isEmpty() && branch != u"HEAD"_s) {
+                    lines.append(u"Git branch: %1"_s.arg(branch));
                 }
             }
         }
@@ -951,8 +1055,38 @@ namespace KateAi
         confirmWorkspaceMcpServers(workspace);
         m_chat->agent()->setWorkspace(workspace);
         m_chat->agent()->setDocumentBridge(&m_bridge);
+        m_chat->agent()->setLspProvider(m_lsp);
         m_chat->agent()->setEditorContext(editorContext());
         updateCompletions();
+    }
+
+    void KateAiView::scheduleEditorContextRefresh()
+    {
+        if (m_contextTimer) {
+            m_contextTimer->start();
+        }
+    }
+
+    void KateAiView::watchViewForContext(KTextEditor::View *view)
+    {
+        if (!view) {
+            return;
+        }
+        connect(view, &KTextEditor::View::cursorPositionChanged, this, [this](KTextEditor::View *, const KTextEditor::Cursor &) {
+            scheduleEditorContextRefresh();
+        });
+        connect(view, &KTextEditor::View::selectionChanged, this, [this](KTextEditor::View *) {
+            scheduleEditorContextRefresh();
+        });
+    }
+
+    void KateAiView::scheduleGraphUpdate(const QString &path, const QString &content)
+    {
+        Q_UNUSED(content); // re-read from the buffer at fire time
+        m_pendingGraphPath = path;
+        if (m_graphTimer) {
+            m_graphTimer->start();
+        }
     }
 
     void KateAiView::updateCompletions()
@@ -999,6 +1133,15 @@ namespace KateAi
             return;
         }
         m_docPaths.insert(document, document->url().toLocalFile());
+        // The user's own typing updates the project graph too, not only the
+        // agent's edits: debounced, and the content is re-read from the buffer
+        // when the timer fires so the graph gets the latest text.
+        connect(document, &KTextEditor::Document::textChanged, this, [this, document]() {
+            const QString path = m_docPaths.value(document);
+            if (!path.isEmpty()) {
+                scheduleGraphUpdate(path, QString());
+            }
+        });
         // Save-As: the review queue and every in-flight edit of the turn have
         // to follow the file to its new path, or a later accept or reject
         // would settle a path that no longer exists.

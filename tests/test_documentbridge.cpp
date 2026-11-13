@@ -56,6 +56,7 @@ private Q_SLOTS:
     void testRejectRestoresBuffer();
     void testBufferWriteRefusesUserModifiedDocument();
     void testBufferWriteBuildsOnOwnUnsavedEdit();
+    void testBufferWriteRefusesUserEditAfterAgentEdit();
     void testResetBufferedEditsRevertsProtection();
     void testRejectRestoresClosedFileOnDisk();
 
@@ -187,6 +188,27 @@ void TestDocumentBridge::testBufferWriteBuildsOnOwnUnsavedEdit()
     QVERIFY(bridge.writeDocument(m_path, u"second edit\n"_s, &error));
     QCOMPARE(m_document->text(), u"second edit\n"_s);
     QVERIFY(m_document->isModified());
+    QCOMPARE(readFile(m_path), before);
+}
+
+void TestDocumentBridge::testBufferWriteRefusesUserEditAfterAgentEdit()
+{
+    DiskDocumentBridge bridge;
+    bridge.setEditInBuffer(true);
+    const QString before = readFile(m_path);
+    QString error;
+    // The agent writes in buffer mode: the modification is its own.
+    QVERIFY(bridge.writeDocument(m_path, u"agent edit\n"_s, &error));
+    // The user then types into the same file before the turn ends.
+    m_document->setText(u"agent edit\nuser typing\n"_s);
+    QVERIFY(m_document->isModified());
+
+    // The next agent write must refuse: the buffer no longer holds exactly
+    // what the agent last wrote, so a setText would discard the user's
+    // changes on top of the agent's buffered edit.
+    QVERIFY(!bridge.writeDocument(m_path, u"agent overwrite\n"_s, &error));
+    QVERIFY(!error.isEmpty());
+    QCOMPARE(m_document->text(), u"agent edit\nuser typing\n"_s);
     QCOMPARE(readFile(m_path), before);
 }
 

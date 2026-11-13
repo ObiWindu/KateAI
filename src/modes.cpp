@@ -57,7 +57,9 @@ QStringList builtInToolsForGroup(const QString &group)
         // writes nothing, it just puts a question to the user, which is
         // exactly when a read-only turn most needs an answer.
         return {u"read_file"_s, u"list_dir"_s, u"grep"_s, u"glob"_s, u"query_project_graph"_s,
-                u"write_plan_file"_s, u"suggest"_s, u"question"_s};
+                u"write_plan_file"_s, u"suggest"_s, u"question"_s,
+                u"lsp_diagnostics"_s, u"lsp_symbols"_s, u"lsp_hover"_s,
+                u"lsp_definition"_s, u"lsp_references"_s, u"lsp_code_actions"_s};
     }
     if (group == ToolGroup::edit()) {
         return {u"write_file"_s, u"edit_file"_s, u"multi_edit_file"_s};
@@ -91,6 +93,12 @@ QStringList allBuiltInToolNames()
             u"write_plan_file"_s,
             u"suggest"_s,
             u"question"_s,
+            u"lsp_diagnostics"_s,
+            u"lsp_symbols"_s,
+            u"lsp_hover"_s,
+            u"lsp_definition"_s,
+            u"lsp_references"_s,
+            u"lsp_code_actions"_s,
             subtaskToolName()};
 }
 

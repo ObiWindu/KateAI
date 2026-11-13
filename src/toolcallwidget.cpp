@@ -1054,6 +1054,12 @@ QString ToolCallWidget::iconForTool(const QString &toolName) const
         if (toolName == u"web_search"_s || toolName == u"websearch"_s) return u"🌐"_s;
         if (toolName == u"web_fetch"_s || toolName == u"webfetch"_s) return u"📖"_s;
     if (toolName == u"query_project_graph"_s) return u"🕸"_s;
+    if (toolName == u"lsp_diagnostics"_s) return u"🩺"_s;
+    if (toolName == u"lsp_symbols"_s) return u"🔣"_s;
+    if (toolName == u"lsp_hover"_s) return u"💬"_s;
+    if (toolName == u"lsp_definition"_s) return u"📍"_s;
+    if (toolName == u"lsp_references"_s) return u"🔗"_s;
+    if (toolName == u"lsp_code_actions"_s) return u"🛠"_s;
     if (toolName == u"write_plan_file"_s) return u"📋"_s;
     if (toolName == u"suggest"_s) return u"💡"_s;
     if (toolName == u"question"_s) return u"❓"_s;

@@ -418,7 +418,7 @@ struct Settings {
 
     // --- Editor integration --------------------------------------------------
     // AI completions at the cursor, rendered inline and accepted with Tab.
-    // Opt-in: off by default. See docs/ai-completion-plan.md.
+    // Opt-in: off by default. See the "Editor integration" section of README.md.
     bool completionEnabled = false;
     // "manual" (the Alt+\ action) or "auto" (idle timer after typing).
     QString completionTrigger = QStringLiteral("manual");
