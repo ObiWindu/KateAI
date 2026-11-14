@@ -147,6 +147,37 @@ private Q_SLOTS:
         QCOMPARE(mode->temperature, 0.0);
         QCOMPARE(mode->topP, 0.1);
     }
+
+    void testToolGroupsCoverTheNewTools()
+    {
+        // The read-only group must carry the planning/asking tools so plan
+        // mode and ask mode keep working with them; the edit group carries
+        // apply_patch.
+        const QStringList read = builtInToolsForGroup(ToolGroup::read());
+        for (const QString &name : {u"todo_write"_s, u"todo_read"_s, u"think"_s, u"exit_plan_mode"_s, u"question"_s, u"suggest"_s}) {
+            QVERIFY2(read.contains(name), qPrintable(name));
+        }
+        const QStringList edit = builtInToolsForGroup(ToolGroup::edit());
+        QVERIFY(edit.contains(u"apply_patch"_s));
+        // Every built-in name is reachable through some group or is the
+        // subtask tool (orchestrate group).
+        const QStringList all = allBuiltInToolNames();
+        const QStringList orchestrate = builtInToolsForGroup(ToolGroup::orchestrate());
+        for (const QString &name : all) {
+            const bool covered = read.contains(name) || edit.contains(name)
+                || builtInToolsForGroup(ToolGroup::command()).contains(name)
+                || builtInToolsForGroup(ToolGroup::web()).contains(name)
+                || orchestrate.contains(name);
+            QVERIFY2(covered, qPrintable(name));
+        }
+        // Plan mode therefore allows asking and todos but not patching.
+        ModeDefinition planLike;
+        planLike.groups = {ToolGroup::read()};
+        const ToolAccess planAccess = ModeRegistry::toolAccessFor(planLike, true);
+        QVERIFY(planAccess.allows(u"question"_s));
+        QVERIFY(planAccess.allows(u"todo_write"_s));
+        QVERIFY(!planAccess.allows(u"apply_patch"_s));
+    }
 };
 
 QTEST_GUILESS_MAIN(TestModes)

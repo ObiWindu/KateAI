@@ -175,7 +175,12 @@ Q_SIGNALS:
     void permissionNeeded(const PermissionRequest &request);
     // The agent asked the user something with the `question` tool and is
     // waiting. The request carries the question and the suggested answers.
+    // Also emitted for ACP: an agent's ask_user client method or a question
+    // tool call, so every provider parks the same way.
     void questionAsked(const PermissionRequest &request);
+    // The agent called exit_plan_mode: the UI should leave plan mode (when it
+    // is on) so the turn can start editing.
+    void exitPlanModeRequested();
     // Partial output from a running tool, so its card can stream instead of
     // waiting for the final result.
     void toolProgress(const QString &toolCallId, const QString &partialOutput);
@@ -276,10 +281,17 @@ private:
     bool isSubtaskTool(const QString &toolName) const;
     // The one tool that stops the turn and waits for the user to type.
     bool isQuestionTool(const QString &toolName) const;
+    // UI-state side effects of a finished tool (todo list, reasoning, plan-mode
+    // exit); separate from the history because they drive signals, not messages.
+    void handleToolSideEffects(const ToolCall &call, const ToolResult &result);
     // Issues a `bash` and reports back through finishAsyncTool. The queue holds
     // while it runs, so only one command is ever in flight; unlike the other
     // async tools it streams its output through toolProgress.
     void startBashTool(const ToolCall &call);
+    // Issues a read-only disk tool (read_file/list_dir/grep/glob) on a worker
+    // thread and reports back through finishAsyncTool, like startBashTool but
+    // without the one-at-a-time serialization.
+    void startReadTool(const ToolCall &call);
         bool isWebTool(const QString &toolName) const;
         // Issues a web_search / web_fetch and reports back through finishAsyncTool.
         void startWebTool(const ToolCall &call);
@@ -405,6 +417,9 @@ LlmClient m_client;
     QString m_currentThinking;
     QJsonArray m_currentPlan;
     bool m_planShown = false;
+    // True while an ACP ask_user/elicitation RPC is parked waiting for the
+    // user's answer (answerQuestion routes there instead of a native call).
+    bool m_acpQuestionPending = false;
     bool m_thinkingFinishedEmitted = false;
 
     QString m_currentAssistant;

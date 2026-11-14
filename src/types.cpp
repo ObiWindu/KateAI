@@ -12,8 +12,11 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonValue>
+#include <QRegularExpression>
 #include <QStandardPaths>
 #include <KLocalizedString>
+
+#include <algorithm>
 
 using namespace Qt::Literals::StringLiterals;
 
@@ -35,30 +38,62 @@ static QHash<QString, QString> buildToolAliasMap()
     map[u"str_replace"_s] = u"edit_file"_s;
     map[u"replace"_s] = u"edit_file"_s;
     map[u"edit"_s] = u"edit_file"_s;
-    map[u"patch"_s] = u"edit_file"_s;
-    map[u"apply_patch"_s] = u"edit_file"_s;
     map[u"multi_edit"_s] = u"multi_edit_file"_s;
     map[u"multi_edit_file"_s] = u"multi_edit_file"_s;
+    map[u"multi_replace_file_content"_s] = u"multi_edit_file"_s;
+    // apply_patch is its own tool (multi-file unified diff), not a single-file
+    // edit: canonicalizing it to edit_file mangles multi-file patches.
+    map[u"patch"_s] = u"apply_patch"_s;
+    map[u"apply_patch"_s] = u"apply_patch"_s;
+    map[u"Patch"_s] = u"apply_patch"_s;
+    map[u"UpdateFile"_s] = u"apply_patch"_s;
     // ACP terminal/shell
     map[u"terminal/exec"_s] = u"bash"_s;
     map[u"terminal/run"_s] = u"bash"_s;
     map[u"shell/exec"_s] = u"bash"_s;
     map[u"shell"_s] = u"bash"_s;
+    map[u"Shell"_s] = u"bash"_s;
     map[u"execute"_s] = u"bash"_s;
+    map[u"Exec"_s] = u"bash"_s;
     map[u"run_command"_s] = u"bash"_s;
+    map[u"RunCommand"_s] = u"bash"_s;
     // Directory/listing/search
     map[u"fs/list_directory"_s] = u"list_dir"_s;
     map[u"list_directory"_s] = u"list_dir"_s;
     map[u"readdir"_s] = u"list_dir"_s;
+    map[u"Read"_s] = u"read_file"_s;
+    map[u"View"_s] = u"read_file"_s;
+    map[u"LS"_s] = u"list_dir"_s;
+    map[u"Glob"_s] = u"glob"_s;
+    map[u"Grep"_s] = u"grep"_s;
     map[u"fs/grep"_s] = u"grep"_s;
     map[u"fs/glob"_s] = u"glob"_s;
+    map[u"find_files"_s] = u"glob"_s;
     // Web/search/planning tools that may appear under different names
     map[u"web/search"_s] = u"web_search"_s;
     map[u"web/fetch"_s] = u"web_fetch"_s;
+    map[u"WebFetch"_s] = u"web_fetch"_s;
     map[u"plan/write"_s] = u"write_plan_file"_s;
     map[u"project/query"_s] = u"query_project_graph"_s;
     map[u"suggest"_s] = u"suggest"_s;
     map[u"question"_s] = u"question"_s;
+    // Agents ask the user under several names; all park the turn the same way.
+    map[u"ask_user"_s] = u"question"_s;
+    map[u"ask_user_question"_s] = u"question"_s;
+    map[u"request_user_input"_s] = u"question"_s;
+    map[u"AskUserQuestion"_s] = u"question"_s;
+    // Structured todos (Claude Code-style) and plan-mode exit.
+    map[u"todo_write"_s] = u"todo_write"_s;
+    map[u"TodoWrite"_s] = u"todo_write"_s;
+    map[u"todo_read"_s] = u"todo_read"_s;
+    map[u"TodoRead"_s] = u"todo_read"_s;
+    map[u"exit_plan_mode"_s] = u"exit_plan_mode"_s;
+    map[u"ExitPlanMode"_s] = u"exit_plan_mode"_s;
+    map[u"think"_s] = u"think"_s;
+    map[u"Think"_s] = u"think"_s;
+    map[u"move_file"_s] = u"edit_file"_s;
+    map[u"rename_file"_s] = u"edit_file"_s;
+    map[u"delete_file"_s] = u"edit_file"_s;
     // The ACP tool kinds and the short names agents use for the same work.
     // Without these a kind-only call ("read") is not the read tool the modes
     // allow, and plan mode rejects it.
@@ -70,6 +105,7 @@ static QHash<QString, QString> buildToolAliasMap()
     map[u"fetch"_s] = u"web_fetch"_s;
     map[u"webfetch"_s] = u"web_fetch"_s;
     map[u"websearch"_s] = u"web_search"_s;
+    map[u"think_kind"_s] = u"think"_s;
     // New task/subagent
     map[u"agent/new_task"_s] = subtaskToolName();
     map[u"subagent"_s] = subtaskToolName();
@@ -121,6 +157,220 @@ QString canonicalToolName(const QString &name)
         return builtIn.value();
     }
     return trimmed;
+}
+
+namespace
+{
+
+// Strips the a/ or b/ prefix git-style diffs carry, and quotes around paths.
+QString stripDiffPath(QString p)
+{
+    p = p.trimmed();
+    if (p.startsWith(u'"') && p.endsWith(u'"') && p.size() >= 2) {
+        p = p.mid(1, p.size() - 2);
+    }
+    if (p == u"/dev/null"_s) {
+        return p;
+    }
+    // Strip a timestamp some tools append after a tab.
+    const int tab = p.indexOf(u'\t');
+    if (tab >= 0) {
+        p = p.left(tab);
+    }
+    if ((p.startsWith(u"a/"_s) || p.startsWith(u"b/"_s)) && p.size() > 2) {
+        p = p.mid(2);
+    }
+    return p.trimmed();
+}
+
+// Parses the "@@ -oldStart[,oldCount] +newStart[,newCount] @@" header.
+bool parseHunkHeader(const QString &line, PatchHunk *hunk)
+{
+    static const QRegularExpression re(u"^@@ -(\\d+)(?:,(\\d+))? \\+(\\d+)(?:,(\\d+))? @@"_s);
+    const QRegularExpressionMatch m = re.match(line);
+    if (!m.hasMatch()) {
+        return false;
+    }
+    hunk->oldStart = m.captured(1).toInt();
+    hunk->oldCount = m.captured(2).isEmpty() ? 1 : m.captured(2).toInt();
+    hunk->newStart = m.captured(3).toInt();
+    hunk->newCount = m.captured(4).isEmpty() ? 1 : m.captured(4).toInt();
+    return true;
+}
+
+} // namespace
+
+QList<PatchFile> parseUnifiedPatch(const QString &patch)
+{
+    QList<PatchFile> files;
+    const QStringList lines = patch.split(u'\n');
+    PatchFile *current = nullptr;
+    PatchHunk *hunk = nullptr;
+    bool inHunk = false;
+    // Number of old/new lines still expected in the current hunk; when both
+    // reach zero the hunk is complete and the next @@ or --- starts a new one.
+    int oldLeft = 0;
+    int newLeft = 0;
+
+    for (int i = 0; i < lines.size(); ++i) {
+        const QString line = lines.at(i);
+        if (line.startsWith(u"--- "_s)) {
+            // A new file section begins. Hunks of the previous file end here.
+            inHunk = false;
+            hunk = nullptr;
+            PatchFile file;
+            file.oldPath = stripDiffPath(line.mid(4));
+            if (file.oldPath == u"/dev/null"_s) {
+                file.isNew = true;
+            }
+            files.append(file);
+            current = &files.last();
+            continue;
+        }
+        if (!current) {
+            continue;
+        }
+        if (line.startsWith(u"+++ "_s)) {
+            current->path = stripDiffPath(line.mid(4));
+            if (current->path == u"/dev/null"_s) {
+                current->isDelete = true;
+                current->path = current->oldPath;
+            }
+            if (current->path.isEmpty()) {
+                current->path = current->oldPath;
+            }
+            inHunk = false;
+            hunk = nullptr;
+            continue;
+        }
+        if (line.startsWith(u"diff --git"_s) || line.startsWith(u"index "_s) || line.startsWith(u"new file mode"_s)
+            || line.startsWith(u"deleted file mode"_s) || line.startsWith(u"similarity index"_s)
+            || line.startsWith(u"rename from"_s) || line.startsWith(u"rename to"_s)) {
+            inHunk = false;
+            hunk = nullptr;
+            continue;
+        }
+        if (line.startsWith(u"@@"_s)) {
+            PatchHunk h;
+            if (!parseHunkHeader(line, &h)) {
+                continue;
+            }
+            current->hunks.append(h);
+            hunk = &current->hunks.last();
+            oldLeft = h.oldCount;
+            newLeft = h.newCount;
+            inHunk = true;
+            continue;
+        }
+        if (!inHunk || !hunk) {
+            continue;
+        }
+        if (line.startsWith(u'\\')) {
+            // "\ No newline at end of file" belongs to the preceding line.
+            hunk->lines.append(line);
+            continue;
+        }
+        if (line.startsWith(u'-')) {
+            if (oldLeft <= 0) {
+                inHunk = false;
+                hunk = nullptr;
+                continue;
+            }
+            hunk->lines.append(line);
+            --oldLeft;
+            continue;
+        }
+        if (line.startsWith(u'+')) {
+            if (newLeft <= 0) {
+                inHunk = false;
+                hunk = nullptr;
+                continue;
+            }
+            hunk->lines.append(line);
+            --newLeft;
+            continue;
+        }
+        // Context line (or an empty line, which in a hunk means a context line
+        // whose content is empty).
+        if (oldLeft <= 0 && newLeft <= 0) {
+            inHunk = false;
+            hunk = nullptr;
+            continue;
+        }
+        hunk->lines.append(line.isEmpty() ? u" "_s : line);
+        --oldLeft;
+        --newLeft;
+    }
+    // Drop file sections that carry no hunks and no clear target (prose that
+    // merely looked like a diff header).
+    QList<PatchFile> out;
+    for (const PatchFile &file : files) {
+        if (file.path.isEmpty() && file.hunks.isEmpty()) {
+            continue;
+        }
+        out.append(file);
+    }
+    return out;
+}
+
+QString applyPatchToContent(const QString &content, const QList<PatchHunk> &hunks, QString *error)
+{
+    QStringList lines = content.isEmpty() ? QStringList() : content.split(u'\n');
+    // A trailing newline in the file produces a final empty element after
+    // split(); keep it so positions stay stable, and re-join identically.
+    QStringList out = lines;
+    // Apply hunks from last to first so earlier positions stay valid.
+    QList<PatchHunk> ordered = hunks;
+    std::sort(ordered.begin(), ordered.end(), [](const PatchHunk &a, const PatchHunk &b) {
+        return a.oldStart > b.oldStart;
+    });
+    for (const PatchHunk &hunk : ordered) {
+        const int start = hunk.oldStart - 1; // 0-based index of the first old line
+        if (hunk.oldStart < 1 || start < 0) {
+            if (error) {
+                *error = u"patch hunk has an invalid start line (%1)"_s.arg(hunk.oldStart);
+            }
+            return {};
+        }
+        // Verify the context/removed lines match the current content.
+        QStringList oldLines;
+        QStringList newLines;
+        for (const QString &l : hunk.lines) {
+            if (l.startsWith(u'\\')) {
+                continue;
+            }
+            if (l.startsWith(u'-')) {
+                oldLines.append(l.mid(1));
+            } else if (l.startsWith(u'+')) {
+                newLines.append(l.mid(1));
+            } else {
+                oldLines.append(l.mid(1));
+                newLines.append(l.mid(1));
+            }
+        }
+        if (start + oldLines.size() > out.size()) {
+            if (error) {
+                *error = u"patch hunk at line %1 is past the end of the file (%2 lines)"_s.arg(hunk.oldStart).arg(out.size());
+            }
+            return {};
+        }
+        for (int i = 0; i < oldLines.size(); ++i) {
+            if (out.at(start + i) != oldLines.at(i)) {
+                if (error) {
+                    *error = u"patch does not apply at line %1: expected %2, found %3"_s
+                                 .arg(hunk.oldStart + i)
+                                 .arg(oldLines.at(i), out.at(start + i));
+                }
+                return {};
+            }
+        }
+        // Replace the old range with the new lines.
+        out.erase(out.begin() + start, out.begin() + start + oldLines.size());
+        for (int i = 0; i < newLines.size(); ++i) {
+            out.insert(out.begin() + start + i, newLines.at(i));
+        }
+    }
+    return out.join(u'\n');
 }
 
 QString resolvePath(const QString &path, const QString &workspace)
@@ -565,7 +815,7 @@ QJsonArray toolDefinitions(const ToolAccess &access)
                          u"Read a UTF-8 text file. Use offset/limit (1-based lines) for large files."_s,
                          QJsonObject{
                              {u"path"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"Path relative to the workspace or absolute."_s}}},
-                             {u"offset"_s, QJsonObject{{u"type"_s, u"integer"_s}, {u"description"_s, u"First line to return (1-based)."_s}}},
+                             {u"offset"_s, QJsonObject{{u"type"_s, u"integer"_s}, {u"description"_s, u"First line to return (1-based). \"line\" is accepted as an alias."_s}}},
                              {u"limit"_s, QJsonObject{{u"type"_s, u"integer"_s}, {u"description"_s, u"Maximum number of lines to return."_s}}},
                          },
                          {u"path"_s},
@@ -613,6 +863,16 @@ QJsonArray toolDefinitions(const ToolAccess &access)
                          {u"path"_s, u"edits"_s},
                          false));
 
+    tools.append(toolDef(u"apply_patch"_s,
+                         u"Apply a unified diff (git-style, possibly covering several files) in one call. "
+                         u"Use this for multi-file changes instead of many edit_file calls. The patch must apply "
+                         u"cleanly at the recorded line numbers; the whole patch is atomic - if any hunk fails, "
+                         u"no file is changed."_s,
+                         QJsonObject{
+                             {u"patch"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"The unified diff, with --- a/<path> / +++ b/<path> headers and @@ hunks."_s}}},
+                         },
+                         {u"patch"_s},
+                         false));
 
     tools.append(toolDef(u"list_dir"_s,
                          u"List files and directories in a folder."_s,
@@ -767,6 +1027,49 @@ QJsonArray toolDefinitions(const ToolAccess &access)
                          {u"question"_s},
                          false));
 
+    tools.append(toolDef(u"todo_write"_s,
+                         u"Replace the task list with the given todos, each with a status of pending, in_progress, "
+                         u"or completed. Use it to plan a multi-step task and to keep the user's checklist current "
+                         u"as steps finish: write the full list every time, marking what is done. Read-only: it "
+                         u"changes no file, only the checklist shown to the user."_s,
+                         QJsonObject{
+                             {u"todos"_s, QJsonObject{{u"type"_s, u"array"_s}, {u"items"_s, QJsonObject{
+                                 {u"type"_s, u"object"_s},
+                                 {u"properties"_s, QJsonObject{
+                                     {u"content"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"What has to be done."_s}}},
+                                     {u"status"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"enum"_s, QJsonArray{u"pending"_s, u"in_progress"_s, u"completed"_s}}, {u"description"_s, u"Defaults to pending."_s}}},
+                                 }},
+                                 {u"required"_s, QJsonArray{u"content"_s}},
+                             }}, {u"description"_s, u"The full todo list; replaces the previous one."_s}}},
+                         },
+                         {u"todos"_s},
+                         false));
+
+    tools.append(toolDef(u"todo_read"_s,
+                         u"Return the current task list. Read-only."_s,
+                         QJsonObject{},
+                         {},
+                         false));
+
+    tools.append(toolDef(u"think"_s,
+                         u"Think through a problem out loud before acting: analyze the request, weigh alternatives, "
+                         u"and state the plan. The thought is recorded in the transcript's reasoning block. Read-only."_s,
+                         QJsonObject{
+                             {u"thought"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"The reasoning to record."_s}}},
+                         },
+                         {u"thought"_s},
+                         false));
+
+    tools.append(toolDef(u"exit_plan_mode"_s,
+                         u"Leave plan mode once the plan has been presented and approved, so the turn can start "
+                         u"making edits. Outside plan mode this just reports that plan mode is off. Read-only: it "
+                         u"changes no file."_s,
+                         QJsonObject{
+                             {u"plan"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"Optional final plan summary to show the user before leaving plan mode."_s}}},
+                         },
+                         {},
+                         false));
+
     tools.append(toolDef(u"web_search"_s,
                              u"Search the public web and return ranked results with titles, URLs and snippets. "
                              u"Use it for library documentation, error messages, API references, or anything outside "
@@ -774,6 +1077,7 @@ QJsonArray toolDefinitions(const ToolAccess &access)
                              QJsonObject{
                                  {u"query"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"The search query."_s}}},
                                  {u"max_results"_s, QJsonObject{{u"type"_s, u"integer"_s}, {u"description"_s, u"How many results to return (1-20). Defaults to 5."_s}}},
+                                 {u"site"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"Restrict results to this site, e.g. \"doc.rust-lang.org\". Omit for the whole web."_s}}},
                              },
                              {u"query"_s},
                              false));
@@ -784,6 +1088,8 @@ QJsonArray toolDefinitions(const ToolAccess &access)
                              u"Only http and https URLs are fetched."_s,
                              QJsonObject{
                                  {u"url"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"The absolute http(s) URL to fetch."_s}}},
+                                 {u"timeout_ms"_s, QJsonObject{{u"type"_s, u"integer"_s}, {u"description"_s, u"Per-request timeout in milliseconds. Defaults to the configured web timeout."_s}}},
+                                 {u"max_bytes"_s, QJsonObject{{u"type"_s, u"integer"_s}, {u"description"_s, u"Stop reading the body after this many bytes. Defaults to 200000."_s}}},
                              },
                              {u"url"_s},
                              false));
@@ -860,9 +1166,9 @@ QString defaultSystemPrompt(const QString &workspace)
            "\n"
            "REASONING & PLANNING (required):\n"
            "1. THINKING: Before every response, output your reasoning in a <thinking> block. Analyze the request, consider alternatives, plan steps, and anticipate issues. The user sees this block - it stays open above your answer. Be thorough.\n"
-           "2. PLAN: After thinking, output a structured implementation plan as a numbered list under a 'Plan:' or 'Implementation Plan:' heading. Each step should be a concrete, verifiable action. This plan IS visible to the user as a checklist.\n"
-            "3. EXECUTION: Follow your plan step by step. After completing each step, you may update the plan by marking steps complete.\n"
-            "- For a complicated, multi-step task, write the plan to the plan file with write_plan_file and keep it current as steps complete. The user can open that file and follow the implementation as it happens.\n"
+           "2. PLAN: After thinking, record the plan with todo_write as a list of concrete, verifiable steps with statuses (pending/in_progress/completed), and keep it current as you go - the user sees it as a live checklist. For a complicated, multi-step task also write the full plan to the plan file with write_plan_file; the user can open that file and follow the implementation as it happens.\n"
+            "3. EXECUTION: Follow your plan step by step. After completing each step, call todo_write again with that step marked completed. When the plan was presented in plan mode and the user approved it, call exit_plan_mode to leave plan mode and start editing.\n"
+            "- For multi-file changes, prefer apply_patch with one unified diff over many separate edit_file calls.\n"
              "- When you notice an improvement the user did not ask for, post it with suggest instead of making the change: it becomes a card the user can accept or dismiss.\n"
              "- When the next step depends on a decision only the user can make, stop and ask with question instead of guessing: it pauses the turn and shows them your question with the likely answers.\n"
             "\n"
@@ -1419,6 +1725,35 @@ bool acpAgentIsAntigravity(const Settings &settings)
     const QString command = acpEffectiveCommand(settings);
     const QString baseName = QFileInfo(command).fileName();
     return baseName.contains(u"agy_acp_server"_s);
+}
+
+AcpAgentQuirks acpAgentQuirks(const QString &agentId, const QString &command)
+{
+    AcpAgentQuirks q;
+    const QString baseName = QFileInfo(command).fileName();
+    if (agentId == u"grok-build"_s || baseName == u"grok"_s) {
+        // grok agent stdio --model <model> --always-approve
+        q.modelFlag = true;
+    } else if (agentId == u"minimax-code"_s || baseName == u"mcode"_s) {
+        q.stripNpmTokens = true;
+        q.needsAcpSubcommand = true;
+    } else if (agentId == u"antigravity-acp"_s || baseName.contains(u"agy_acp_server"_s)) {
+        // gflags-based binary: reject Chromium's standard switch, and the
+        // sanitizer flags keep it running on >4KB-page and no-IPv6 machines.
+        q.stripArgs = {u"--disable-features=CrOSHugepageRemapAndLockInZygote"_s};
+        q.extraArgs = {u"--enforce_kernel_ipv6_support=false"_s,
+                       u"--core_register_sanitization_enabled=false"_s,
+                       u"--core_sanitization_enabled=false"_s,
+                       u"--boringssl_sanitization_enabled=false"_s};
+        q.spoofZedClientInfo = true;
+    } else if (agentId == u"opencode"_s || baseName == u"opencode"_s) {
+        q.needsAcpSubcommand = true;
+    } else if (agentId == u"claude-acp"_s || command.contains(u"claude-agent-acp"_s)) {
+        q.modelFlag = true;
+    } else if (agentId == u"gemini"_s || baseName == u"gemini"_s) {
+        q.modelFlag = true;
+    }
+    return q;
 }
 
 bool acpAgentIsMistralVibe(const Settings &settings)

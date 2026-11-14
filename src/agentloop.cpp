@@ -97,9 +97,30 @@ AgentLoop::AgentLoop(QObject *parent)
         // message history or the tool counters. Only the widget reacts.
         Q_EMIT suggestionPosted(suggestion);
     });
+    // The agent asked the user something through _kateai/ask_user (or an
+    // elicitation request). The RPC is parked in the client until
+    // answerQuestion() replies, so the turn is already blocked agent-side; all
+    // the loop does is show the card and remember that this turn's answer goes
+    // to the ACP RPC rather than to a native tool result.
+    connect(&m_acp, &AcpClient::questionAsked, this, [this](const PermissionRequest &request) {
+        m_acpQuestionPending = true;
+        Q_EMIT questionAsked(request);
+        Q_EMIT statusChanged(i18n("Waiting for your answer…"));
+    });
+    connect(&m_acp, &AcpClient::todosChanged, this, [this](const QJsonArray &todos) {
+        m_currentPlan = todos;
+        m_planShown = true;
+        Q_EMIT planUpdated(todos);
+    });
     connect(&m_acp, &AcpClient::toolStarted, this, [this](const PermissionRequest &request) {
         ++m_toolCalls;
         Q_EMIT toolStarted(request);
+        // An agent-side question tool call (ask_user & friends) cannot be
+        // answered by Kate — the agent produces its own result — but the user
+        // should still see it as a question, not as a dead tool card.
+        if (isQuestionTool(request.toolName)) {
+            Q_EMIT questionAsked(request);
+        }
         Q_EMIT statusChanged(u"Working on the next step…"_s);
     });
     connect(&m_acp, &AcpClient::toolProgress, this, [this](const QString &toolCallId, const QString &partial) {
@@ -943,6 +964,7 @@ void AgentLoop::resetConversation()
     m_currentThinking.clear();
     m_currentPlan = QJsonArray();
     m_planShown = false;
+    m_acpQuestionPending = false;
     m_currentAssistant.clear();
 }
 
@@ -1318,6 +1340,15 @@ void AgentLoop::syncAcpClient()
     m_acp.setDocumentBridge(m_bridge);
     m_acp.setEditorContext(m_editorContext);
     m_acp.setProjectGraph(m_projectGraph.get());
+    // The ACP client methods todo_write/todo_read share the native todo store,
+    // so both paths update the one checklist the UI renders.
+    m_acp.setTodoStore([this]() {
+        return m_tools ? m_tools->todos() : QJsonArray();
+    }, [this](const QJsonArray &todos) {
+        if (m_tools) {
+            m_tools->setTodos(todos);
+        }
+    });
     if (m_mcp) {
         m_acp.setMcpServers(m_mcp->servers());
     }
@@ -2214,11 +2245,49 @@ void AgentLoop::executeOne(const ToolCall &call)
         }
     }
 
+    // Read-only disk tools run on a worker thread: a grep over a large tree or
+    // a big listing must not freeze the transcript while it runs. They take no
+    // edit locks and no checkpoint, so they can overlap with the rest of the
+    // queue safely.
+    if (ToolRunner::isAsyncReadTool(call.name)) {
+        ++m_inFlight;
+        Q_EMIT statusChanged(u"Working on the next step…"_s);
+        startReadTool(call);
+        processQueue();
+        return;
+    }
+
     Q_EMIT statusChanged(u"Working on the next step…"_s);
     ToolResult result = m_tools->run(call);
     releaseEditLocksFor(call);
+    handleToolSideEffects(call, result);
     appendToolResult(call, result);
     processQueue();
+}
+
+void AgentLoop::handleToolSideEffects(const ToolCall &call, const ToolResult &result)
+{
+    // UI-state tools whose effect is not a workspace mutation: the todo list
+    // feeds the checklist, think feeds the reasoning block, exit_plan_mode
+    // flips the plan-mode toggle. Kept out of ToolRunner because they drive
+    // signals, and out of appendToolResult because they are not history.
+    if (!result.ok) {
+        return;
+    }
+    if (call.name == u"todo_write"_s) {
+        const QJsonArray todos = m_tools->todos();
+        m_currentPlan = todos;
+        m_planShown = true;
+        Q_EMIT planUpdated(todos);
+    } else if (call.name == u"think"_s) {
+        const QString thought = result.rawOutput.isEmpty() ? result.output : result.rawOutput;
+        if (!thought.isEmpty()) {
+            m_currentThinking += thought + u'\n';
+            Q_EMIT thinkingDelta(thought + u'\n');
+        }
+    } else if (call.name == u"exit_plan_mode"_s) {
+        Q_EMIT exitPlanModeRequested();
+    }
 }
 
 QString AgentLoop::accessList() const
@@ -2341,7 +2410,8 @@ PermissionRequest AgentLoop::describeTool(const ToolCall &call) const
 
 bool AgentLoop::isQuestionTool(const QString &toolName) const
 {
-    return toolName == u"question"_s;
+    // Compare canonicalized: ACP agents ask under ask_user & friends.
+    return canonicalToolName(toolName) == u"question"_s;
 }
 
 bool AgentLoop::isSubtaskTool(const QString &toolName) const
@@ -2511,6 +2581,31 @@ void AgentLoop::startBashTool(const ToolCall &call)
         });
 
     m_tools->runBashAsync(call);
+}
+
+void AgentLoop::startReadTool(const ToolCall &call)
+{
+    // Same wiring as startBashTool: progress streams while the search runs,
+    // and the finished signal completes the call through finishAsyncTool. The
+    // id guards keep concurrent read tools from settling each other's cards.
+    QMetaObject::Connection progress = connect(m_tools.get(), &ToolRunner::bashProgress, this,
+        [this, call](const QString &id, const QString &partial) {
+            if (id != call.id) {
+                return;
+            }
+            Q_EMIT toolProgress(id, partial);
+        });
+    auto conn = QSharedPointer<QMetaObject::Connection>::create();
+    *conn = connect(m_tools.get(), &ToolRunner::bashFinished, this,
+        [this, call, conn, progress](const ToolResult &result) {
+            if (result.toolCallId != call.id) {
+                return;
+            }
+            disconnect(*conn);
+            disconnect(progress);
+            finishAsyncTool(call, result);
+        });
+    m_tools->runReadToolAsync(call);
 }
 
 void AgentLoop::finishAsyncTool(const ToolCall &call, const ToolResult &result)
@@ -3016,6 +3111,14 @@ bool AgentLoop::compactContext()
 
 void AgentLoop::answerQuestion(const QString &answer)
 {
+    // An ACP ask_user/elicitation RPC parked in the client takes priority: the
+    // answer is the RPC result, which is what unblocks the agent.
+    if (m_acp.hasPendingQuestion()) {
+        m_acpQuestionPending = false;
+        m_acp.answerQuestion(answer);
+        return;
+    }
+
     if (!m_busy || m_state != State::WaitingForQuestion || m_waitingCall.name.isEmpty()) {
         return;
     }

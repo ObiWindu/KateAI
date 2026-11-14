@@ -880,7 +880,9 @@ private Q_SLOTS:
         QCOMPARE(posted.size(), 1);
         const Suggestion suggestion = posted.first();
         QVERIFY(suggestion.text.contains(u"std::string_view"_s));
-        QCOMPARE(suggestion.path, u"src/main.cpp"_s);
+        // A workspace-relative anchor is resolved so Accept opens the right
+        // file even though the agent sent "src/main.cpp".
+        QCOMPARE(suggestion.path, QDir(workspace.path()).absoluteFilePath(u"src/main.cpp"_s));
         QCOMPARE(suggestion.line, 7);
 
         // Advice only: the workspace is untouched, exactly as with the native
@@ -1841,6 +1843,280 @@ private Q_SLOTS:
         QCOMPARE(stopReason, u"end_turn"_s);
         QCOMPARE(finishedText, u"effort:high"_s);
         QCOMPARE(client.currentEffortId(), u"high"_s);
+        client.stop();
+    }
+
+    // The ask_user client method parks the RPC, surfaces the question, and
+    // the user's answer comes back as the RPC result.
+    void askUserMethodParksUntilAnswered()
+    {
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+
+        DiskDocumentBridge bridge;
+        AcpClient client;
+        client.setSettings(mockSettings(u"ask_user"_s));
+        client.setWorkspace(workspace.path());
+        client.setDocumentBridge(&bridge);
+
+        bool asked = false;
+        PermissionRequest question;
+        QString stopReason;
+        QString finishedText;
+        QString error;
+        connect(&client, &AcpClient::questionAsked, this, [&](const PermissionRequest &request) {
+            asked = true;
+            question = request;
+        });
+        connect(&client, &AcpClient::promptFinished, this,
+                [&](const QString &reason, const QString &full, const QJsonArray &) {
+            stopReason = reason;
+            finishedText = full;
+        });
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+
+        client.prompt(u"ask me something"_s);
+        QVERIFY2(waitFor([&] {
+            return asked || !error.isEmpty();
+        }), qPrintable(error.isEmpty() ? u"timed out waiting for the question"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QVERIFY(client.hasPendingQuestion());
+        QCOMPARE(question.questionText, u"Rewrite the file, or patch it in place?"_s);
+        QCOMPARE(question.questionOptions, QStringList({u"Rewrite"_s, u"Patch"_s}));
+        QVERIFY(question.allowFreeform);
+
+        // The turn must not finish while the question is parked: the agent is
+        // blocked on the RPC, so an early finish would mean Kate dropped it.
+        QTest::qWait(1000);
+        QVERIFY(stopReason.isEmpty());
+
+        client.answerQuestion(u"Patch"_s);
+        QVERIFY2(waitFor([&] {
+            return !stopReason.isEmpty() || !error.isEmpty();
+        }), qPrintable(error.isEmpty() ? u"timed out waiting for the turn"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(stopReason, u"end_turn"_s);
+        QCOMPARE(finishedText, u"answer:Patch"_s);
+        QVERIFY(!client.hasPendingQuestion());
+        client.stop();
+    }
+
+    void askUserCancelledWhenTurnStops()
+    {
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+
+        DiskDocumentBridge bridge;
+        AcpClient client;
+        client.setSettings(mockSettings(u"ask_user"_s));
+        client.setWorkspace(workspace.path());
+        client.setDocumentBridge(&bridge);
+
+        bool asked = false;
+        QString finishedText;
+        QString error;
+        connect(&client, &AcpClient::questionAsked, this, [&](const PermissionRequest &) {
+            asked = true;
+        });
+        connect(&client, &AcpClient::promptFinished, this,
+                [&](const QString &, const QString &full, const QJsonArray &) {
+            finishedText = full;
+        });
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+
+        client.prompt(u"ask me something"_s);
+        QVERIFY2(waitFor([&] {
+            return asked;
+        }), "the mock never asked");
+        // Stopping the turn answers the parked RPC as cancelled so the agent
+        // does not block on it forever.
+        client.cancel();
+        QVERIFY2(waitFor([&] {
+            return finishedText == u"cancelled"_s || !error.isEmpty();
+        }), qPrintable(error.isEmpty() ? u"timed out"_s : error));
+        QVERIFY(!client.hasPendingQuestion());
+        client.stop();
+    }
+
+    void todoMethodsShareOneStore()
+    {
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+
+        DiskDocumentBridge bridge;
+        AcpClient client;
+        client.setSettings(mockSettings(u"todo"_s));
+        client.setWorkspace(workspace.path());
+        client.setDocumentBridge(&bridge);
+
+        QJsonArray stored;
+        client.setTodoStore([&stored]() {
+            return stored;
+        }, [&stored](const QJsonArray &todos) {
+            stored = todos;
+        });
+
+        QList<QJsonArray> updates;
+        QString finishedText;
+        QString error;
+        connect(&client, &AcpClient::todosChanged, this, [&](const QJsonArray &todos) {
+            updates.append(todos);
+        });
+        connect(&client, &AcpClient::promptFinished, this,
+                [&](const QString &, const QString &full, const QJsonArray &) {
+            finishedText = full;
+        });
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+
+        client.prompt(u"update the todo list"_s);
+        QVERIFY2(waitFor([&] {
+            return !finishedText.isEmpty() || !error.isEmpty();
+        }), qPrintable(error.isEmpty() ? u"timed out"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(updates.size(), 1);
+        QCOMPARE(updates.first().size(), 2);
+        QCOMPARE(stored.size(), 2);
+        // The read-back the mock performed went through the same store.
+        QVERIFY(finishedText.contains(u"[completed] step one"_s));
+        QVERIFY(finishedText.contains(u"[in_progress] step two"_s));
+        client.stop();
+    }
+
+    void lspSymbolsMethodAnswersOrReportsUnavailable()
+    {
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+
+        DiskDocumentBridge bridge;
+        AcpClient client;
+        client.setSettings(mockSettings(u"lsp-symbols"_s));
+        client.setWorkspace(workspace.path());
+        client.setDocumentBridge(&bridge);
+        // No LspProvider: the method must answer "unavailable", not fail.
+
+        QString finishedText;
+        QString error;
+        connect(&client, &AcpClient::promptFinished, this,
+                [&](const QString &, const QString &full, const QJsonArray &) {
+            finishedText = full;
+        });
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+
+        client.prompt(u"list symbols"_s);
+        QVERIFY2(waitFor([&] {
+            return !finishedText.isEmpty() || !error.isEmpty();
+        }), qPrintable(error.isEmpty() ? u"timed out"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(finishedText, u"lsp-unavailable"_s);
+        client.stop();
+    }
+
+    void titleOnlyUpdateAnnouncesDetailsChanged()
+    {
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+
+        DiskDocumentBridge bridge;
+        AcpClient client;
+        client.setSettings(mockSettings(u"title-update"_s));
+        client.setWorkspace(workspace.path());
+        client.setDocumentBridge(&bridge);
+
+        QStringList detailTitles;
+        QString stopReason;
+        QString error;
+        connect(&client, &AcpClient::toolDetailsChanged, this, [&](const PermissionRequest &request) {
+            detailTitles.append(request.summary);
+        });
+        connect(&client, &AcpClient::promptFinished, this, [&](const QString &reason, const QString &, const QJsonArray &) {
+            stopReason = reason;
+        });
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+
+        client.prompt(u"run the suite"_s);
+        QVERIFY2(waitFor([&] {
+            return !stopReason.isEmpty() || !error.isEmpty();
+        }), qPrintable(error.isEmpty() ? u"timed out"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QVERIFY2(detailTitles.contains(u"Running the full test suite"_s),
+                 qPrintable(detailTitles.join(u", "_s)));
+        client.stop();
+    }
+
+    void applyPatchCallGetsPerFileDiffs()
+    {
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+
+        DiskDocumentBridge bridge;
+        AcpClient client;
+        client.setSettings(mockSettings(u"apply-patch"_s));
+        client.setWorkspace(workspace.path());
+        client.setDocumentBridge(&bridge);
+
+        QList<PermissionRequest> started;
+        QString stopReason;
+        QString error;
+        connect(&client, &AcpClient::toolStarted, this, [&](const PermissionRequest &request) {
+            started.append(request);
+        });
+        connect(&client, &AcpClient::promptFinished, this, [&](const QString &reason, const QString &, const QJsonArray &) {
+            stopReason = reason;
+        });
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+
+        client.prompt(u"apply this patch"_s);
+        QVERIFY2(waitFor([&] {
+            return !stopReason.isEmpty() || !error.isEmpty();
+        }), qPrintable(error.isEmpty() ? u"timed out"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(started.size(), 1);
+        const PermissionRequest request = started.first();
+        QCOMPARE(request.toolName, u"apply_patch"_s);
+        QVERIFY(request.mutatesFiles);
+        QCOMPARE(request.path, u"src/a.cpp"_s);
+        QCOMPARE(request.additionalPaths, QStringList{u"src/b.cpp"_s});
+        QVERIFY(request.describeDiff.contains(u"+++ b/src/a.cpp"_s));
+        QCOMPARE(request.additionalDiffs.size(), 1);
+        client.stop();
+    }
+
+    void availableCommandsUpdateIsAnnounced()
+    {
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+
+        AcpClient client;
+        client.setSettings(mockSettings(u"commands"_s));
+        client.setWorkspace(workspace.path());
+
+        QList<QJsonArray> commands;
+        QString error;
+        connect(&client, &AcpClient::availableCommandsChanged, this, [&](const QJsonArray &cmds) {
+            commands.append(cmds);
+        });
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+
+        client.fetchModels();
+        QVERIFY2(waitFor([&] {
+            return !commands.isEmpty() || !error.isEmpty();
+        }), qPrintable(error.isEmpty() ? u"timed out"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(commands.first().size(), 2);
         client.stop();
     }
 

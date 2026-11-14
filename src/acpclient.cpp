@@ -162,6 +162,14 @@ static QString kateClientMethod(const QString &method)
         {u"queryProjectGraph"_s, u"query_project_graph"_s},
         {u"writePlanFile"_s, u"write_plan_file"_s},
         {u"lspDiagnostics"_s, u"lsp_diagnostics"_s},
+        {u"lspSymbols"_s, u"lsp_symbols"_s},
+        {u"lspHover"_s, u"lsp_hover"_s},
+        {u"lspDefinition"_s, u"lsp_definition"_s},
+        {u"lspReferences"_s, u"lsp_references"_s},
+        {u"lspCodeActions"_s, u"lsp_code_actions"_s},
+        {u"askUser"_s, u"ask_user"_s},
+        {u"todoWrite"_s, u"todo_write"_s},
+        {u"todoRead"_s, u"todo_read"_s},
     };
     QString name = method;
     if (name.startsWith(u"_kateai/"_s)) {
@@ -622,13 +630,30 @@ QStringList AcpClient::agentArguments(const Settings &settings)
     const QString command = acpEffectiveCommand(settings);
     const QString agentId = settings.acpAgentId;
     const QString model = settings.acpModel.trimmed();
+    // Per-agent launch quirks, keyed by registry id where possible, so agents
+    // installed from the registry get the same fixes as the built-in presets.
+    const AcpAgentQuirks quirks = acpAgentQuirks(agentId, command);
 
-    // Registry binary installs record the command as "./opencode" with the
-    // "acp" argument per platform; entries saved before that argument was
-    // kept launch the interactive TUI instead of the ACP server and stall
-    // the handshake. Default the argument when it is missing.
-    if (args.isEmpty() && QFileInfo(command).fileName() == u"opencode"_s) {
-        args = QStringList{u"acp"_s};
+    for (const QString &strip : quirks.stripArgs) {
+        args.removeAll(strip);
+    }
+    if (quirks.stripNpmTokens) {
+        // npm-only tokens from a recorded npx line ("--yes", "@scope/pkg"):
+        // forwarded to a standalone binary they are just noise, and some
+        // binaries reject unknown flags outright.
+        QStringList kept;
+        for (const QString &arg : args) {
+            if (arg == u"--yes"_s || arg.startsWith(u"@"_s)) {
+                continue;
+            }
+            kept.append(arg);
+        }
+        args = kept;
+    }
+    if (quirks.needsAcpSubcommand && !args.contains(u"acp"_s)) {
+        // Without the "acp" subcommand these CLIs start their interactive TUI
+        // instead of the ACP server and stall the handshake until timeout.
+        args.append(u"acp"_s);
     }
 
     // Handle arguments for different ACP agents
@@ -662,69 +687,22 @@ QStringList AcpClient::agentArguments(const Settings &settings)
         return out;
     }
 
-    // MiniMax Code: the standalone CLI takes the ACP server as its
-    // subcommand ("mcode acp"). Arguments recorded for the npm distribution
-    // ("--yes @minimax-ai/code@0.2.7 acp") are npm-only tokens and must not
-    // be forwarded; without the subcommand the interactive TUI would start
-    // instead of the ACP server and stall the handshake until timeout.
-    if (acpAgentIsMinimaxCode(settings)) {
-        QStringList kept;
-        for (const QString &arg : args) {
-            if (arg == u"--yes"_s || arg.startsWith(u"@"_s)) {
-                continue;
-            }
-            kept.append(arg);
+    // Model flag for every agent whose CLI accepts --model (the quirks table
+    // says which). Gemini wants it before its --acp flag; everyone else takes
+    // it at the end.
+    if (!model.isEmpty() && quirks.modelFlag && !args.contains(u"--model"_s) && !args.contains(u"-m"_s)) {
+        const int acpIndex = args.indexOf(u"--acp"_s);
+        if (acpIndex >= 0) {
+            args.insert(acpIndex, u"--model"_s);
+            args.insert(acpIndex + 1, model);
+        } else {
+            args << u"--model"_s << model;
         }
-        if (!kept.contains(u"acp"_s)) {
-            kept.append(u"acp"_s);
-        }
-        return kept;
     }
 
-    // Handle model arguments for other ACP agents that support --model
-    if (!model.isEmpty()) {
-        if (agentId == u"claude-acp"_s || command.contains(u"claude-agent-acp"_s) || raw.contains(u"claude-agent-acp"_s)) {
-            // Claude Agent: npx -y @agentclientprotocol/claude-agent-acp --model <model>
-            if (!args.contains(u"--model"_s) && !args.contains(u"-m"_s)) {
-                args << u"--model"_s << model;
-            }
-        }
-        else if (agentId == u"gemini"_s || command == u"gemini"_s) {
-            // Gemini CLI: gemini --acp --model <model>
-            if (!args.contains(u"--model"_s) && !args.contains(u"-m"_s)) {
-                // Insert --model before --acp if it exists, otherwise at the end
-                int acpIndex = args.indexOf(u"--acp"_s);
-                if (acpIndex >= 0) {
-                    args.insert(acpIndex, u"--model"_s);
-                    args.insert(acpIndex + 1, model);
-                } else {
-                    args << u"--model"_s << model;
-                }
-            }
-        }
-        // Add more agent-specific model handling here as needed
-    }
-
-    // Antigravity's binary aborts on machines without an IPv6 loopback (::1)
-    // unless IPv6 enforcement is disabled. On systems with page size > 4KB
-    // (e.g. 16KB on aarch64), Google's coredump register/memory sanitization
-    // aborts in mmap(..., MAP_FIXED) due to 4KB-aligned buffer assumptions.
-    // Disable sanitization so the binary runs cleanly on non-x86 page sizes.
-    if (agentId == u"antigravity-acp"_s || acpAgentIsAntigravity(settings)) {
-        // This server uses gflags and rejects Chromium's standard switch.
-        // Strip it in case an older Kate version persisted it in acpArgs.
-        args.removeAll(u"--disable-features=CrOSHugepageRemapAndLockInZygote"_s);
-        if (!args.contains(u"--enforce_kernel_ipv6_support=false"_s)) {
-            args << u"--enforce_kernel_ipv6_support=false"_s;
-        }
-        if (!args.contains(u"--core_register_sanitization_enabled=false"_s)) {
-            args << u"--core_register_sanitization_enabled=false"_s;
-        }
-        if (!args.contains(u"--core_sanitization_enabled=false"_s)) {
-            args << u"--core_sanitization_enabled=false"_s;
-        }
-        if (!args.contains(u"--boringssl_sanitization_enabled=false"_s)) {
-            args << u"--boringssl_sanitization_enabled=false"_s;
+    for (const QString &extra : quirks.extraArgs) {
+        if (!args.contains(extra)) {
+            args << extra;
         }
     }
 
@@ -745,6 +723,7 @@ void AcpClient::cancelPendingPermission()
     // request arrives: refuse it, the way the earlier request is answered as
     // cancelled below, so the agent does not block on the parked call.
     cancelParkedMethods();
+    cancelPendingQuestion();
     if (!hasPendingPermission()) {
         return;
     }
@@ -756,6 +735,39 @@ void AcpClient::cancelPendingPermission()
     m_permissionRpcId = QJsonValue();
     m_permissionOptions = QJsonArray();
     m_permissionRequest = {};
+}
+
+void AcpClient::cancelPendingQuestion()
+{
+    if (!hasPendingQuestion()) {
+        return;
+    }
+    // Same shape as the ask_user answer, but cancelled: the agent must be able
+    // to tell "the user dismissed this" apart from a real answer.
+    QJsonObject result;
+    result.insert(u"cancelled"_s, true);
+    result.insert(u"answer"_s, QString());
+    replyResult(m_questionRpcId, result);
+    m_questionRpcId = QJsonValue();
+    m_questionRequest = {};
+}
+
+void AcpClient::answerQuestion(const QString &answer)
+{
+    if (!hasPendingQuestion()) {
+        return;
+    }
+    QJsonObject result;
+    if (answer.trimmed().isEmpty()) {
+        result.insert(u"cancelled"_s, true);
+        result.insert(u"answer"_s, QString());
+    } else {
+        result.insert(u"cancelled"_s, false);
+        result.insert(u"answer"_s, answer);
+    }
+    replyResult(m_questionRpcId, result);
+    m_questionRpcId = QJsonValue();
+    m_questionRequest = {};
 }
 
 void AcpClient::finishLiveTools(const QString &message)
@@ -854,6 +866,8 @@ void AcpClient::stop()
     m_sessionId.clear();
     m_promptId = 0;
     m_permissionRpcId = QJsonValue();
+    m_questionRpcId = QJsonValue();
+    m_questionRequest = {};
     // The agent process is going away, so parked RPCs cannot be answered
     // meaningfully; drop them with the rest of the session state.
     m_parkedMethods.clear();
@@ -1161,6 +1175,34 @@ QProcessEnvironment AcpClient::processEnvironment() const
         }
     }
 
+    // Registry entries can carry an env array (top-level and per-distribution)
+    // naming variables the agent needs, e.g. which variable holds its API key
+    // or feature flags. Merge it under the user's explicit key so the typed
+    // credential always wins.
+    const QJsonArray installed = QJsonDocument::fromJson(m_settings.acpInstalledAgents.toUtf8()).array();
+    for (const QJsonValue &value : installed) {
+        const QJsonObject agent = value.toObject();
+        if (agent.value(u"id"_s).toString() != m_settings.acpAgentId) {
+            continue;
+        }
+        auto mergeEnv = [&env](const QJsonArray &rows) {
+            for (const QJsonValue &row : rows) {
+                const QJsonObject obj = row.toObject();
+                const QString name = obj.value(u"name"_s).toString();
+                const QString value = obj.value(u"value"_s).toString();
+                if (!name.isEmpty() && !env.contains(name)) {
+                    env.insert(name, value);
+                }
+            }
+        };
+        mergeEnv(agent.value(u"env"_s).toArray());
+        const QJsonObject distribution = agent.value(u"distribution"_s).toObject();
+        for (const QJsonValue &dist : {distribution.value(u"npx"_s), distribution.value(u"uvx"_s), distribution.value(u"binary"_s)}) {
+            mergeEnv(dist.toObject().value(u"env"_s).toArray());
+        }
+        break;
+    }
+
     if (acpAgentIsAntigravity(m_settings) && acpNeedsPageShim()) {
         const QString shim = acpPageShimPath(m_settings.acpAgentId);
         if (!shim.isEmpty()) {
@@ -1190,11 +1232,23 @@ void AcpClient::sendInitialize()
     kateai.insert(u"queryProjectGraph"_s, true);
     kateai.insert(u"writePlanFile"_s, true);
     kateai.insert(u"suggest"_s, true);
+    kateai.insert(u"askUser"_s, true);
+    kateai.insert(u"todoWrite"_s, true);
+    kateai.insert(u"todoRead"_s, true);
+    kateai.insert(u"lspDiagnostics"_s, true);
+    kateai.insert(u"lspSymbols"_s, true);
+    kateai.insert(u"lspHover"_s, true);
+    kateai.insert(u"lspDefinition"_s, true);
+    kateai.insert(u"lspReferences"_s, true);
+    kateai.insert(u"lspCodeActions"_s, true);
     capabilities.insert(u"kateai"_s, kateai);
     // The same methods under the names the protocol reserves for extensions,
     // listed in _meta where the spec asks extensions to advertise themselves.
     capabilities.insert(u"_meta"_s, QJsonObject{
-        {u"com.kateai/methods"_s, QJsonArray{u"_kateai/query_project_graph"_s, u"_kateai/write_plan_file"_s, u"_kateai/suggest"_s, u"_kateai/lsp_diagnostics"_s}},
+        {u"com.kateai/methods"_s, QJsonArray{u"_kateai/query_project_graph"_s, u"_kateai/write_plan_file"_s, u"_kateai/suggest"_s,
+                                           u"_kateai/ask_user"_s, u"_kateai/todo_write"_s, u"_kateai/todo_read"_s,
+                                           u"_kateai/lsp_diagnostics"_s, u"_kateai/lsp_symbols"_s, u"_kateai/lsp_hover"_s,
+                                           u"_kateai/lsp_definition"_s, u"_kateai/lsp_references"_s, u"_kateai/lsp_code_actions"_s}},
     });
     // Advertise support for session config options (used for model selection)
     QJsonObject sessionCapabilities;
@@ -1206,8 +1260,9 @@ void AcpClient::sendInitialize()
     QJsonObject clientInfo;
     // Some ACP agents (e.g. Google Antigravity) restrict third-party models
     // to specific known clients. Pretend to be Zed for those agents so we
-    // can discover the full model list.
-    if (acpAgentIsAntigravity(m_settings)) {
+    // can discover the full model list. Keyed by registry id via the quirks
+    // table, so other gated agents can be added there.
+    if (acpAgentQuirks(m_settings.acpAgentId, acpEffectiveCommand(m_settings)).spoofZedClientInfo) {
         clientInfo.insert(u"name"_s, u"zed"_s);
         clientInfo.insert(u"title"_s, u"Zed"_s);
     } else {
@@ -1230,14 +1285,15 @@ void AcpClient::sendInitialize()
             Q_EMIT failed(error);
             return;
         }
-        m_protocolVersion = result.value(u"protocolVersion"_s).toInt(kAcpProtocolVersion);
-        if (m_protocolVersion != kAcpProtocolVersion) {
-            const QString message = u"ACP agent negotiated protocol version %1, Kate AI supports %2."_s
-                                        .arg(m_protocolVersion)
-                                        .arg(kAcpProtocolVersion);
-            setState(State::Failed, message);
-            Q_EMIT failed(message);
-            return;
+        // Negotiate like Zed does: send our maximum, accept whatever the agent
+        // chose (clamped to what we speak), and gate optional features on it
+        // instead of failing the handshake. A v2 agent that answers 2 is
+        // clamped to our v1 and simply does not get the v2 features.
+        const int agentVersion = result.value(u"protocolVersion"_s).toInt(kAcpProtocolVersion);
+        m_protocolVersion = qMin(agentVersion, kAcpProtocolVersion);
+        m_negotiatedVersion = m_protocolVersion;
+        if (agentVersion != kAcpProtocolVersion) {
+            Q_EMIT logMessage(u"ACP agent speaks protocol version %1; Kate AI negotiated %2."_s.arg(agentVersion).arg(m_protocolVersion));
         }
         const QJsonObject caps = result.value(u"agentCapabilities"_s).toObject();
         m_loadSession = caps.value(u"loadSession"_s).toBool();
@@ -1245,6 +1301,8 @@ void AcpClient::sendInitialize()
         const QJsonObject sessionCaps = caps.value(u"sessionCapabilities"_s).toObject();
         m_resumeSession = sessionCaps.contains(u"resume"_s);
         m_closeSession = sessionCaps.contains(u"close"_s);
+        // v2 draft: elicitation is the standardized ask-the-user channel.
+        m_agentSupportsElicitation = m_negotiatedVersion >= 2 || caps.contains(u"elicitation"_s);
         maybeAuthenticate(result.value(u"authMethods"_s).toArray());
     });
 }
@@ -1556,8 +1614,11 @@ QJsonObject AcpClient::sessionNotesBlock() const
                  u"which you may call when the capability is advertised:"_s);
     lines.append(u"- _kateai/write_plan_file {content}: publish the plan of a multi-step task as markdown the user can follow."_s);
     lines.append(u"- _kateai/suggest {suggestion, path?, line?}: offer an improvement the user did not ask for, instead of making the change."_s);
+    lines.append(u"- _kateai/ask_user {question, options?, allow_freeform?}: ask the user something and wait for the answer (the call blocks until they reply; the answer is the result)."_s);
+    lines.append(u"- _kateai/todo_write {todos: [{content, status}]} / _kateai/todo_read: keep the user's task checklist current; status is pending, in_progress, or completed."_s);
     lines.append(u"- _kateai/query_project_graph {query_type, node_id?, relationship?, source_id?, target_id?}: read the project's files, symbols and imports."_s);
     lines.append(u"- _kateai/lsp_diagnostics {path?, severity?}: read language-server diagnostics (errors/warnings) for a file, or workspace-wide when path is omitted. When no LSP server is running, the call reports that instead."_s);
+    lines.append(u"- _kateai/lsp_symbols {path}, _kateai/lsp_hover {path, line, column?}, _kateai/lsp_definition {path, line, column?, symbol?}, _kateai/lsp_references {path, line, column?, symbol?, include_declaration?}, _kateai/lsp_code_actions {path, line?, column?}: the same read-only language-server answers the editor tools give."_s);
     QJsonObject block;
     block.insert(u"type"_s, u"text"_s);
     block.insert(u"text"_s, lines.join(u'\n'));
@@ -1902,6 +1963,43 @@ void AcpClient::handleIncomingRequest(const QJsonObject &message)
         handleLspDiagnostics(id, params);
         return;
     }
+    if (method == u"lsp_symbols"_s) {
+        handleLspSymbols(id, params);
+        return;
+    }
+    if (method == u"lsp_hover"_s) {
+        handleLspHover(id, params);
+        return;
+    }
+    if (method == u"lsp_definition"_s) {
+        handleLspDefinition(id, params);
+        return;
+    }
+    if (method == u"lsp_references"_s) {
+        handleLspReferences(id, params);
+        return;
+    }
+    if (method == u"lsp_code_actions"_s) {
+        handleLspCodeActions(id, params);
+        return;
+    }
+    if (method == u"ask_user"_s) {
+        handleAskUser(id, params);
+        return;
+    }
+    if (method == u"todo_write"_s) {
+        handleTodoWrite(id, params);
+        return;
+    }
+    if (method == u"todo_read"_s) {
+        handleTodoRead(id, params);
+        return;
+    }
+    // ACP v2 draft: elicitation is the standardized ask-the-user channel.
+    if (method == u"elicitation/create"_s) {
+        handleElicitationCreate(id, params);
+        return;
+    }
     replyError(id, kMethodNotFound, u"Method not found: %1"_s.arg(method));
 }
 
@@ -1917,6 +2015,18 @@ void AcpClient::handleNotification(const QJsonObject &message)
         handleSessionUpdate(update);
     } else if (method == u"config_option_update"_s) {
         ingestSessionModels(params, false);
+    } else if (method == u"available_commands_update"_s) {
+        // Slash commands the agent offers (v1 extension used by several
+        // registry agents). Kept and announced; the composer can offer them
+        // later. Never fatal when the shape differs.
+        const QJsonArray commands = params.value(u"availableCommands"_s).toArray();
+        if (commands.isEmpty()) {
+            m_availableCommands = params.value(u"commands"_s).toArray();
+        } else {
+            m_availableCommands = commands;
+        }
+        Q_EMIT availableCommandsChanged(m_availableCommands);
+        Q_EMIT logMessage(u"Agent advertised %1 slash command(s)."_s.arg(m_availableCommands.size()));
     }
 }
 
@@ -2023,6 +2133,11 @@ void AcpClient::handleSessionUpdate(const QJsonObject &update)
         // in the initial tool_call. What the update adds is kept on the live
         // entry and announced, so the card and the review queue catch up.
         linkToolTerminals(toolCallId, update.value(u"content"_s));
+        // Some agents reference the terminal by a top-level field instead of a
+        // content block; link that too so its output streams into the card.
+        if (!update.value(u"terminalId"_s).toString().isEmpty()) {
+            linkToolTerminals(toolCallId, QJsonObject{{u"type"_s, u"terminal"_s}, {u"terminalId"_s, update.value(u"terminalId"_s)}});
+        }
         const PermissionRequest refreshed = permissionFromToolCall(update);
         const PermissionRequest merged = mergeToolCallDetails(existing, refreshed);
         if (merged.describeDiff != existing.describeDiff || merged.resolvedPath != existing.resolvedPath
@@ -2090,11 +2205,14 @@ void AcpClient::handleSessionUpdate(const QJsonObject &update)
         if (finalStreamed.isEmpty()) {
             // Some agents only refresh the title mid-flight ("Running tests…").
             // Keep the card's summary current so the header never lies, but
-            // there is nothing to stream into the body yet.
+            // there is nothing to stream into the body yet. Announce the new
+            // title too: mutating the entry silently left the card header
+            // stale until the call finished.
             const QString title = update.value(u"title"_s).toString();
             if (!title.isEmpty() && title != existing.summary) {
                 existing.summary = title;
                 m_liveTools.insert(toolCallId, existing);
+                Q_EMIT toolDetailsChanged(existing);
             }
             return;
         }
@@ -2247,6 +2365,42 @@ PermissionRequest AcpClient::permissionFromToolCall(const QJsonObject &toolCall)
         const QJsonObject co = c.toObject();
         if (co.value(u"type"_s).toString() == u"diff"_s) {
             addDiff(co);
+        }
+    }
+
+    // apply_patch-style calls carry one unified diff as plain text, often in a
+    // text content block or in rawInput. Parse it into per-file diffs so a
+    // multi-file patch renders one card entry per file instead of one blob.
+    if (diffs.isEmpty()) {
+        QString patchText;
+        for (const QJsonValue &item : contentArr) {
+            const QJsonObject obj = item.toObject();
+            const QString type = obj.value(u"type"_s).toString();
+            if (type == u"text"_s || type == u"content"_s || type.isEmpty()) {
+                const QString t = contentBlockText(obj.contains(u"content"_s) ? obj.value(u"content"_s) : item);
+                if (t.contains(u"\n--- "_s) || t.startsWith(u"--- "_s)) {
+                    patchText = t;
+                    break;
+                }
+            }
+        }
+        if (patchText.isEmpty() && (request.details.contains(u"\n--- "_s) || request.details.startsWith(u"--- "_s))) {
+            patchText = request.details;
+        }
+        if (!patchText.isEmpty()) {
+            const QList<PatchFile> files = parseUnifiedPatch(patchText);
+            for (const PatchFile &file : files) {
+                if (file.path.isEmpty() || file.hunks.isEmpty()) {
+                    continue;
+                }
+                QStringList hunkText;
+                for (const PatchHunk &hunk : file.hunks) {
+                    hunkText.append(u"@@ -%1,%2 +%3,%4 @@"_s.arg(hunk.oldStart).arg(hunk.oldCount).arg(hunk.newStart).arg(hunk.newCount));
+                    hunkText.append(hunk.lines);
+                }
+                const QString diff = u"--- a/%1\n+++ b/%2\n"_s.arg(file.path, file.path) + hunkText.join(u'\n');
+                diffs.append({file.path, QString(), QString(), diff});
+            }
         }
     }
 
@@ -2551,6 +2705,10 @@ void AcpClient::askNextParkedMethod()
     }
     m_activeParked = m_parkedMethods.takeFirst();
     Q_EMIT permissionNeeded(m_activeParked->request);
+    // Tell the transcript the call is parked, not dead: without a progress
+    // line an agent waiting on fs/write_text_file looks like a stuck card.
+    Q_EMIT toolProgress(m_activeParked->request.toolCallId,
+                        u"Waiting for approval: %1"_s.arg(m_activeParked->request.summary));
 }
 
 void AcpClient::dispatchParkedMethod(const ParkedMethod &parked)
@@ -2646,8 +2804,23 @@ void AcpClient::handleFsRead(const QJsonValue &id, const QJsonObject &params)
     // meant unlimited. Cap the slice the agent can request per call.
     const int line = qMax(0, params.value(u"line"_s).toInt(0));
     const int limit = params.value(u"limit"_s).toInt(0) <= 0 ? 10000 : qMin(params.value(u"limit"_s).toInt(0), 10000);
+    const QStringList allLines = contents.split(u'\n');
+    const int totalLines = contents.isEmpty() ? 0 : allLines.size();
+    QString sliced = sliceLines(contents, line, limit);
+    // Same pagination note the native read_file appends, so agents learn the
+    // next offset the same way on both paths.
+    if (totalLines > 0) {
+        const int start = line > 0 ? line - 1 : 0;
+        const int shown = limit > 0 ? qMin(limit, totalLines - start) : totalLines - start;
+        const int remaining = totalLines - (start + (shown > 0 ? shown : 0));
+        if (remaining > 0) {
+            sliced += u"\n[%1 more line(s) not shown. Call again with line=%2 to continue.]"_s
+                          .arg(remaining)
+                          .arg(start + (shown > 0 ? shown : 0) + 1);
+        }
+    }
     QJsonObject result;
-    result.insert(u"content"_s, sliceLines(contents, line, limit));
+    result.insert(u"content"_s, sliced);
     replyResult(id, result);
 }
 
@@ -2727,6 +2900,11 @@ void AcpClient::handleSuggest(const QJsonValue &id, const QJsonObject &params)
     Suggestion suggestion;
     suggestion.text = text;
     suggestion.path = params.value(u"path"_s).toString().trimmed();
+    // Resolve a workspace-relative anchor, the same way the native path does,
+    // so Accept opens the right file.
+    if (!suggestion.path.isEmpty() && !QFileInfo(suggestion.path).isAbsolute() && !m_workspace.isEmpty()) {
+        suggestion.path = QDir(m_workspace).absoluteFilePath(suggestion.path);
+    }
     const QJsonValue lineValue = params.value(u"line"_s);
     if (lineValue.isDouble()) {
         suggestion.line = lineValue.toInt();
@@ -2970,6 +3148,293 @@ void AcpClient::handleLspDiagnostics(const QJsonValue &id, const QJsonObject &pa
 
     QJsonObject result;
     result.insert(u"content"_s, lines.join(u'\n'));
+    replyResult(id, result);
+}
+
+void AcpClient::handleLspSymbols(const QJsonValue &id, const QJsonObject &params)
+{
+    if (!m_lsp || !m_lsp->isAvailable()) {
+        replyError(id, kServerError,
+                   u"No language server available: Kate's LSP plugin is not loaded. Use grep or query_project_graph instead."_s);
+        return;
+    }
+    QString path = params.value(u"path"_s).toString().trimmed();
+    if (!path.isEmpty() && !QFileInfo(path).isAbsolute()) {
+        path = QDir(m_workspace).absoluteFilePath(path);
+    }
+    QString error;
+    if (!pathAllowed(path, false, &error)) {
+        replyError(id, kServerError, error);
+        return;
+    }
+    const QList<LspSymbol> symbols = m_lsp->documentSymbols(path);
+    QStringList lines;
+    if (symbols.isEmpty()) {
+        lines.append(u"No symbols reported for %1 (no language server running for this file, or none found)."_s.arg(path));
+    } else {
+        for (const LspSymbol &s : symbols) {
+            lines.append(u"%1: %2 %3"_s.arg(s.line).arg(s.kind, s.name));
+        }
+    }
+    QJsonObject result;
+    result.insert(u"content"_s, lines.join(u'\n'));
+    replyResult(id, result);
+}
+
+void AcpClient::handleLspHover(const QJsonValue &id, const QJsonObject &params)
+{
+    if (!m_lsp || !m_lsp->isAvailable()) {
+        replyError(id, kServerError,
+                   u"No language server available: Kate's LSP plugin is not loaded."_s);
+        return;
+    }
+    QString path = params.value(u"path"_s).toString().trimmed();
+    if (!path.isEmpty() && !QFileInfo(path).isAbsolute()) {
+        path = QDir(m_workspace).absoluteFilePath(path);
+    }
+    QString error;
+    if (!pathAllowed(path, false, &error)) {
+        replyError(id, kServerError, error);
+        return;
+    }
+    const int line = qMax(1, params.value(u"line"_s).toInt(1));
+    const int column = qMax(1, params.value(u"column"_s).toInt(1));
+    const QString hover = m_lsp->hover(path, line, column);
+    QJsonObject result;
+    result.insert(u"content"_s, hover.isEmpty() ? u"No hover information at %1:%2:%3."_s.arg(path).arg(line).arg(column) : hover);
+    replyResult(id, result);
+}
+
+void AcpClient::handleLspDefinition(const QJsonValue &id, const QJsonObject &params)
+{
+    if (!m_lsp || !m_lsp->isAvailable()) {
+        replyError(id, kServerError,
+                   u"No language server available: Kate's LSP plugin is not loaded."_s);
+        return;
+    }
+    QString path = params.value(u"path"_s).toString().trimmed();
+    if (!path.isEmpty() && !QFileInfo(path).isAbsolute()) {
+        path = QDir(m_workspace).absoluteFilePath(path);
+    }
+    QString error;
+    if (!pathAllowed(path, false, &error)) {
+        replyError(id, kServerError, error);
+        return;
+    }
+    const int line = qMax(1, params.value(u"line"_s).toInt(1));
+    const int column = qMax(1, params.value(u"column"_s).toInt(1));
+    const QList<LspLocation> defs = m_lsp->definitions(path, line, column);
+    QStringList lines;
+    if (defs.isEmpty()) {
+        lines.append(u"No definition found at %1:%2:%3."_s.arg(path).arg(line).arg(column));
+    } else {
+        for (const LspLocation &loc : defs) {
+            lines.append(u"%1:%2:%3"_s.arg(loc.path).arg(loc.line).arg(loc.column));
+        }
+    }
+    QJsonObject result;
+    result.insert(u"content"_s, lines.join(u'\n'));
+    replyResult(id, result);
+}
+
+void AcpClient::handleLspReferences(const QJsonValue &id, const QJsonObject &params)
+{
+    if (!m_lsp || !m_lsp->isAvailable()) {
+        replyError(id, kServerError,
+                   u"No language server available: Kate's LSP plugin is not loaded."_s);
+        return;
+    }
+    QString path = params.value(u"path"_s).toString().trimmed();
+    if (!path.isEmpty() && !QFileInfo(path).isAbsolute()) {
+        path = QDir(m_workspace).absoluteFilePath(path);
+    }
+    QString error;
+    if (!pathAllowed(path, false, &error)) {
+        replyError(id, kServerError, error);
+        return;
+    }
+    const int line = qMax(1, params.value(u"line"_s).toInt(1));
+    const int column = qMax(1, params.value(u"column"_s).toInt(1));
+    const bool includeDeclaration = params.value(u"include_declaration"_s).toBool(true);
+    const QList<LspLocation> refs = m_lsp->references(path, line, column, includeDeclaration);
+    QStringList lines;
+    if (refs.isEmpty()) {
+        lines.append(u"No references found at %1:%2:%3."_s.arg(path).arg(line).arg(column));
+    } else {
+        for (const LspLocation &loc : refs) {
+            lines.append(u"%1:%2:%3"_s.arg(loc.path).arg(loc.line).arg(loc.column));
+        }
+    }
+    QJsonObject result;
+    result.insert(u"content"_s, lines.join(u'\n'));
+    replyResult(id, result);
+}
+
+void AcpClient::handleLspCodeActions(const QJsonValue &id, const QJsonObject &params)
+{
+    if (!m_lsp || !m_lsp->isAvailable()) {
+        replyError(id, kServerError,
+                   u"No language server available: Kate's LSP plugin is not loaded."_s);
+        return;
+    }
+    QString path = params.value(u"path"_s).toString().trimmed();
+    if (!path.isEmpty() && !QFileInfo(path).isAbsolute()) {
+        path = QDir(m_workspace).absoluteFilePath(path);
+    }
+    QString error;
+    if (!pathAllowed(path, false, &error)) {
+        replyError(id, kServerError, error);
+        return;
+    }
+    const int line = qMax(1, params.value(u"line"_s).toInt(1));
+    const int column = qMax(1, params.value(u"column"_s).toInt(1));
+    const QStringList actions = m_lsp->codeActions(path, line, column);
+    QStringList lines;
+    if (actions.isEmpty()) {
+        lines.append(u"No code actions offered at %1:%2:%3."_s.arg(path).arg(line).arg(column));
+    } else {
+        for (int i = 0; i < actions.size(); ++i) {
+            lines.append(u"%1. %2"_s.arg(i + 1).arg(actions.at(i)));
+        }
+    }
+    QJsonObject result;
+    result.insert(u"content"_s, lines.join(u'\n'));
+    replyResult(id, result);
+}
+
+// Kate extension client method, mirroring the native question tool: the agent
+// hands over the question and Kate parks the RPC until the user answers, which
+// is what makes asking work over ACP — v1 has no other ask-user channel. The
+// answer is the RPC result.
+void AcpClient::handleAskUser(const QJsonValue &id, const QJsonObject &params)
+{
+    const QString question = params.value(u"question"_s).toString().trimmed();
+    QStringList options;
+    for (const QJsonValue &value : params.value(u"options"_s).toArray()) {
+        // Options may be plain strings or {label, ...} objects.
+        const QString option = value.isObject() ? value.toObject().value(u"label"_s).toString() : value.toString();
+        if (!option.trimmed().isEmpty()) {
+            options.append(option.trimmed());
+        }
+    }
+    bool allowFreeform = true;
+    const QJsonValue freeform = params.value(u"allow_freeform"_s);
+    if (freeform.isBool()) {
+        allowFreeform = freeform.toBool();
+    }
+    askUser(id, question, options, allowFreeform);
+}
+
+// ACP v2 draft elicitation: same ask-user flow under the standardized method.
+void AcpClient::handleElicitationCreate(const QJsonValue &id, const QJsonObject &params)
+{
+    const QString message = params.value(u"message"_s).toString().trimmed();
+    QStringList options;
+    const QJsonObject schema = params.value(u"requestedSchema"_s).toObject();
+    const QJsonObject properties = schema.value(u"properties"_s).toObject();
+    for (auto it = properties.begin(); it != properties.end(); ++it) {
+        const QJsonArray enumValues = it.value().toObject().value(u"enum"_s).toArray();
+        for (const QJsonValue &v : enumValues) {
+            const QString option = v.toString();
+            if (!option.isEmpty()) {
+                options.append(option);
+            }
+        }
+    }
+    askUser(id, message, options, true);
+}
+
+void AcpClient::askUser(const QJsonValue &id, const QString &question, const QStringList &options, bool allowFreeform)
+{
+    if (question.isEmpty()) {
+        replyError(id, kInvalidParams, u"question must not be empty: state what you are asking the user."_s);
+        return;
+    }
+    // Only one question can be on screen at a time: answer a previous parked
+    // question as cancelled before parking this one, or the agent blocks on it.
+    cancelPendingQuestion();
+    m_questionRpcId = id;
+    PermissionRequest request;
+    request.toolName = u"question"_s;
+    request.toolCallId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    request.risk = ToolRisk::Read;
+    request.questionText = question;
+    request.questionOptions = options;
+    request.allowFreeform = allowFreeform;
+    request.summary = question.left(200);
+    QJsonArray optionsJson;
+    for (const QString &option : options) {
+        optionsJson.append(option);
+    }
+    QJsonObject detailsObj;
+    detailsObj.insert(u"question"_s, question);
+    detailsObj.insert(u"options"_s, optionsJson);
+    detailsObj.insert(u"allow_freeform"_s, allowFreeform);
+    request.details = QString::fromUtf8(QJsonDocument(detailsObj).toJson(QJsonDocument::Compact));
+    m_questionRequest = request;
+    Q_EMIT questionAsked(request);
+}
+
+void AcpClient::handleTodoWrite(const QJsonValue &id, const QJsonObject &params)
+{
+    const QJsonArray todos = params.value(u"todos"_s).toArray();
+    if (todos.isEmpty()) {
+        replyError(id, kInvalidParams, u"todos must be a non-empty array of {content, status}."_s);
+        return;
+    }
+    QJsonArray stored;
+    int index = 0;
+    for (const QJsonValue &value : todos) {
+        const QJsonObject todo = value.toObject();
+        const QString content = todo.value(u"content"_s).toString().trimmed();
+        if (content.isEmpty()) {
+            replyError(id, kInvalidParams, u"Every todo needs a content string (item %1 is empty)."_s.arg(index + 1));
+            return;
+        }
+        QString status = todo.value(u"status"_s).toString().trimmed().toLower().replace(u'-', u'_');
+        if (status.isEmpty()) {
+            status = u"pending"_s;
+        }
+        if (status != u"pending"_s && status != u"in_progress"_s && status != u"completed"_s) {
+            replyError(id, kInvalidParams,
+                       u"Invalid status '%1' for todo %2: use pending, in_progress, or completed."_s.arg(status, content.left(40)));
+            return;
+        }
+        QJsonObject step;
+        step.insert(u"id"_s, QString::number(++index));
+        step.insert(u"description"_s, content);
+        step.insert(u"completed"_s, status == u"completed"_s);
+        step.insert(u"inProgress"_s, status == u"in_progress"_s);
+        stored.append(step);
+    }
+    if (m_todosSetter) {
+        m_todosSetter(stored);
+    }
+    Q_EMIT todosChanged(stored);
+    QJsonObject result;
+    result.insert(u"content"_s, u"Task list updated (%1 item(s))."_s.arg(stored.size()));
+    result.insert(u"todos"_s, stored);
+    replyResult(id, result);
+}
+
+void AcpClient::handleTodoRead(const QJsonValue &id, const QJsonObject &params)
+{
+    Q_UNUSED(params)
+    const QJsonArray todos = m_todosGetter ? m_todosGetter() : QJsonArray();
+    QStringList lines;
+    if (todos.isEmpty()) {
+        lines.append(u"(no todos yet)"_s);
+    } else {
+        for (const QJsonValue &value : todos) {
+            const QJsonObject todo = value.toObject();
+            const QString status = todo.value(u"completed"_s).toBool() ? u"completed"_s
+                                   : (todo.value(u"inProgress"_s).toBool() ? u"in_progress"_s : u"pending"_s);
+            lines.append(u"- [%1] %2"_s.arg(status, todo.value(u"description"_s).toString()));
+        }
+    }
+    QJsonObject result;
+    result.insert(u"content"_s, lines.join(u'\n'));
+    result.insert(u"todos"_s, todos);
     replyResult(id, result);
 }
 

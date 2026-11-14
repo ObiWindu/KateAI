@@ -305,7 +305,18 @@ QString workingLabelForTool(const QString &toolName, const KateAi::PermissionReq
         return i18n("Working") + target;
     }
 
-    if (toolName == u"question"_s) {
+    const QString canonical = KateAi::canonicalToolName(toolName);
+    if (canonical == u"todo_write"_s || canonical == u"todo_read"_s) {
+        return i18n("Updating the task list");
+    }
+    if (canonical == u"think"_s) {
+        return i18n("Thinking");
+    }
+    if (canonical == u"exit_plan_mode"_s) {
+        return i18n("Leaving plan mode");
+    }
+
+    if (canonical == u"question"_s) {
         return i18n("Waiting for your answer");
     }
 
@@ -898,6 +909,13 @@ ChatWidget::ChatWidget(QWidget *parent)
     connect(&m_agent, &AgentLoop::planUpdated, this, &ChatWidget::showTodoList);
     connect(&m_agent, &AgentLoop::planUpdated, this, [this](const QJsonArray &) {
         scheduleSessionSave();
+    });
+    // The agent finished planning and called exit_plan_mode: leave plan mode
+    // so the next turn may edit. Outside plan mode this is a no-op.
+    connect(&m_agent, &AgentLoop::exitPlanModeRequested, this, [this]() {
+        if (m_settings.planMode) {
+            togglePlanMode();
+        }
     });
     connect(&m_agent, &AgentLoop::assistantDelta, this, [this](const QString &delta) {
         scheduleSessionSave();
@@ -5198,7 +5216,16 @@ void ChatWidget::addSuggestionCard(const QString &id, const Suggestion &suggesti
         return;
     }
     auto *card = new SuggestionWidget(id, m_transcriptContainer);
-    card->setSuggestion(suggestion.text, suggestion.path, suggestion.line);
+    // The agent may anchor the suggestion to a workspace-relative path; resolve
+    // it so Accept opens the right file even when the agent wrote "src/…".
+    Suggestion anchored = suggestion;
+    if (!anchored.path.isEmpty() && !QFileInfo(anchored.path).isAbsolute()) {
+        const QString workspace = m_agent.workspace();
+        if (!workspace.isEmpty()) {
+            anchored.path = QDir(workspace).absoluteFilePath(anchored.path);
+        }
+    }
+    card->setSuggestion(anchored.text, anchored.path, anchored.line);
     // Live while its tool is still running: the advice is on screen already,
     // but the call carrying it has not reported back yet.
     if (running) {

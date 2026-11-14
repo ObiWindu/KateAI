@@ -138,13 +138,36 @@ language highlighting, and restores subtask/suggestion cards.
 ### Client methods
 
 Kate exposes `fs/read_text_file`, `fs/write_text_file`, `terminal/*`, and its own
-`_kateai/query_project_graph`, `_kateai/write_plan_file`, `_kateai/suggest`, and
-`_kateai/lsp_diagnostics`
-methods. The extension names are the ones the protocol reserves for
+`_kateai/query_project_graph`, `_kateai/write_plan_file`, `_kateai/suggest`,
+`_kateai/ask_user`, `_kateai/todo_write`, `_kateai/todo_read`, and the `lsp_*`
+family (`_kateai/lsp_diagnostics`, `_kateai/lsp_symbols`, `_kateai/lsp_hover`,
+`_kateai/lsp_definition`, `_kateai/lsp_references`, `_kateai/lsp_code_actions`).
+The extension names are the ones the protocol reserves for
 extensions; they are advertised in the `initialize` capabilities under `_meta`
 (`com.kateai/methods`). The bare names (`write_plan_file`, …) still reach the
-same handlers. Results are formatted to match native tool output. `suggest`
-emits `suggestionPosted` which `ChatWidget` turns into a suggestion card.
+same handlers. Results are formatted to match native tool output, including the
+pagination note on reads. `suggest` emits `suggestionPosted` which `ChatWidget`
+turns into a suggestion card; `ask_user` parks the RPC, emits `questionAsked`
+(the same signal the native `question` tool drives), and answers the RPC from
+`AgentLoop::answerQuestion` — the v2-draft `elicitation/create` reaches the same
+path. `todo_write`/`todo_read` share the native todo store through a
+getter/setter pair installed by `AgentLoop::syncAcpClient`, and emit
+`todosChanged`, which the loop forwards as `planUpdated` so `TodoWidget` renders
+them. `available_commands_update` notifications are stored and announced via
+`availableCommandsChanged`.
+
+### Protocol negotiation and agent quirks
+
+`initialize` sends Kate's maximum `protocolVersion` and accepts the agent's
+answer clamped to what Kate speaks (a v2 agent is clamped to v1 and simply does
+not get the v2 features; elicitation is enabled when the agent advertises the
+`elicitation` capability). Per-agent launch quirks (an `acp` subcommand,
+npm-token stripping, `--model` support, sanitizer flags, Zed clientInfo spoof)
+live in `acpAgentQuirks()` keyed by registry id, so agents installed from the
+ACP registry get the same treatment as the built-in presets. Registry `env`
+arrays are merged into the agent process environment in `processEnvironment()`.
+Package-distribution agents are launched via `npx --yes <pkg>@<version>` /
+`uvx <pkg>@<version>` with no global install.
 
 ## LSP bridge
 
@@ -200,7 +223,12 @@ tests there are the regression net for TOCTOU-style changes.
 ## Tool contract
 
 `tools.cpp` implements the tool set advertised by `toolDefinitions()` in
-`types.cpp` (name, description, JSON schema, access group). Conventions:
+`types.cpp` (name, description, JSON schema, access group): file tools,
+`apply_patch` (multi-file unified diff, atomic — parsed by `parseUnifiedPatch`/
+`applyPatchToContent` in `types.cpp`, shared with the ACP ingest path),
+`bash`, web tools, the `lsp_*` family, `query_project_graph`, and the UI-state
+tools `write_plan_file`, `suggest`, `question`, `todo_write`/`todo_read`,
+`think`, `exit_plan_mode`, plus `new_task` and `goal_report`. Conventions:
 
 - Tools return a `ToolResult` with `output` (formatted, clipped) and `rawOutput`.
 - `clip()` truncates at 80 KB **keeping head and tail** — for a command whose
@@ -210,6 +238,11 @@ tests there are the regression net for TOCTOU-style changes.
 - `multi_edit_file` applies a batch atomically and **rejects overlapping edits**:
   each edit must target text none of the earlier ones consumed or produced,
   because matches are found in the working string after those edits.
+- Read-only disk tools (`read_file`, `list_dir`, `grep`, `glob`) are offloaded
+  to a worker thread by `ToolRunner::runReadToolAsync` (reading through a
+  disk-only bridge), emitting `bashProgress`/`bashFinished`, so a long search
+  streams instead of freezing the transcript. Tools that touch the editor
+  bridge, the project graph, or the LSP provider stay synchronous.
 
 ## UI structure
 

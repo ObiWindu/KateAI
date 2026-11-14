@@ -14,9 +14,11 @@
 
 #include <QHash>
 #include <QObject>
+#include <QPointer>
 #include <QSet>
 
 class QProcess;
+class QThread;
 
 namespace KateAi
 {
@@ -27,6 +29,7 @@ class ToolRunner : public QObject
 
 public:
     ToolRunner(Sandbox sandbox, DocumentBridge *bridge, QObject *parent = nullptr);
+    ~ToolRunner() override;
 
     void setSandbox(Sandbox sandbox)
     {
@@ -50,11 +53,36 @@ public:
     ToolResult run(const ToolCall &call);
     PermissionRequest describe(const ToolCall &call) const;
 
+    // The structured todo list written by todo_write and read by todo_read.
+    // Lives here (not in AgentLoop) so both the native path and the ACP client
+    // method path share one store per turn.
+    QJsonArray todos() const
+    {
+        return m_todos;
+    }
+    void setTodos(const QJsonArray &todos)
+    {
+        m_todos = todos;
+    }
+
     // Runs `bash` without blocking the caller, so a long command streams its
     // output into the transcript while it runs instead of arriving as one lump
     // at the end. One command at a time per call id; `cancelBash` stops it.
     void runBashAsync(const ToolCall &call);
     void cancelBash(const QString &toolCallId);
+
+    // Runs a read-only, disk-only tool (read_file, list_dir, grep, glob) on a
+    // worker thread so a long search or listing does not freeze the transcript.
+    // The worker reads through a disk-only bridge, so open unsaved buffers are
+    // not searched in async mode; writes and LSP/graph tools stay synchronous
+    // because they touch editor-owned state. Emits bashProgress once with the
+    // starting status and bashFinished with the result, reusing the bash
+    // signals so the loop needs no extra plumbing. Returns false when the tool
+    // is not async-safe and the caller must run it synchronously.
+    bool runReadToolAsync(const ToolCall &call);
+    // True for the tools runReadToolAsync will offload (read_file, list_dir,
+    // grep, glob). Lets the caller decide without starting the job twice.
+    static bool isAsyncReadTool(const QString &toolName);
 
 Q_SIGNALS:
     void bashFinished(const ToolResult &result);
@@ -83,6 +111,12 @@ private:
     ToolResult suggest(const QJsonObject &args);
     // Defensive only: a question is answered by the UI, never by the runner.
     ToolResult question(const QJsonObject &args);
+    // Multi-file unified diff (apply_patch). Atomic: all files or none.
+    ToolResult applyPatch(const QJsonObject &args);
+    ToolResult todoWrite(const QJsonObject &args);
+    ToolResult todoRead(const QJsonObject &args);
+    ToolResult think(const QJsonObject &args);
+    ToolResult exitPlanMode(const QJsonObject &args);
     // Shared tail of the sync and async bash paths: validates, wraps and
     // starts the process. Returns false and fills `error` when it cannot.
     bool startBashProcess(const QJsonObject &args, QString *program, QStringList *programArgs, QString *error) const;
@@ -113,6 +147,15 @@ private:
     // report a failure; without this marker the finished result looks like an
     // ordinary crash and the model never learns the command was cut short.
     QSet<QString> m_bashTimedOut;
+    // The structured todo list (todo_write/todo_read), in the plan-step shape
+    // {id, description, completed, inProgress} the TodoWidget renders.
+    QJsonArray m_todos;
+    // Dedicated worker thread for runReadToolAsync. A per-runner thread (not
+    // the global pool) so it is stopped in ~ToolRunner, before the
+    // application tears down: a global-pool thread still alive at exit
+    // crashes QApplication teardown in some KF6 builds.
+    QThread *m_workerThread = nullptr;
+    QObject *m_workerContext = nullptr;
 };
 
 QString unifiedDiff(const QString &path, const QString &before, const QString &after);
