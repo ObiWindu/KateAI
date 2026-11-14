@@ -53,7 +53,7 @@ private Q_SLOTS:
         QVERIFY(!codeTools.contains(u"new_task"_s));
 
         const QStringList askTools = toolNames(toolDefinitions(ModeRegistry::toolAccessForGroups({ToolGroup::read(), ToolGroup::mcp()})));
-        QCOMPARE(askTools.size(), 14);
+        QCOMPARE(askTools.size(), 18);
         // The plan file lives outside the workspace and suggest only posts a
         // card, so read-only modes and plan mode keep both.
         QVERIFY(askTools.contains(u"write_plan_file"_s));
@@ -61,6 +61,11 @@ private Q_SLOTS:
         // A question touches nothing, so a read-only turn may ask one -- which
         // is exactly when the turn is otherwise stuck on the user.
         QVERIFY(askTools.contains(u"question"_s));
+        // The todo list, think and exit_plan_mode are also workspace-neutral.
+        QVERIFY(askTools.contains(u"todo_write"_s));
+        QVERIFY(askTools.contains(u"think"_s));
+        QVERIFY(askTools.contains(u"exit_plan_mode"_s));
+        QVERIFY(!askTools.contains(u"apply_patch"_s));
         QVERIFY(!askTools.contains(u"write_file"_s));
         QVERIFY(!askTools.contains(u"bash"_s));
 

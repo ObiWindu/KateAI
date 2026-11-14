@@ -212,6 +212,50 @@ private Q_SLOTS:
         // Unrestricted access allows everything.
         QVERIFY(acpToolPermitted(ToolAccess::unrestricted(), request(u"execute"_s, ToolRisk::Execute, false)));
     }
+
+    void registryAgentToolNamesCanonicalize()
+    {
+        // Names registry agents actually send for ask-user, todos and patches.
+        QCOMPARE(canonicalToolName(u"ask_user"_s), u"question"_s);
+        QCOMPARE(canonicalToolName(u"ask_user_question"_s), u"question"_s);
+        QCOMPARE(canonicalToolName(u"request_user_input"_s), u"question"_s);
+        QCOMPARE(canonicalToolName(u"TodoWrite"_s), u"todo_write"_s);
+        QCOMPARE(canonicalToolName(u"todo_read"_s), u"todo_read"_s);
+        QCOMPARE(canonicalToolName(u"exit_plan_mode"_s), u"exit_plan_mode"_s);
+        QCOMPARE(canonicalToolName(u"ExitPlanMode"_s), u"exit_plan_mode"_s);
+        // apply_patch is its own tool now, not a single-file edit.
+        QCOMPARE(canonicalToolName(u"apply_patch"_s), u"apply_patch"_s);
+        QCOMPARE(canonicalToolName(u"patch"_s), u"apply_patch"_s);
+        QCOMPARE(canonicalToolName(u"Shell"_s), u"bash"_s);
+        QCOMPARE(canonicalToolName(u"RunCommand"_s), u"bash"_s);
+        QCOMPARE(canonicalToolName(u"WebFetch"_s), u"web_fetch"_s);
+        QCOMPARE(canonicalToolName(u"View"_s), u"read_file"_s);
+        QCOMPARE(canonicalToolName(u"find_files"_s), u"glob"_s);
+        QCOMPARE(canonicalToolName(u"multi_replace_file_content"_s), u"multi_edit_file"_s);
+    }
+
+    void applyPatchToolCallParsesPerFileDiffs()
+    {
+        AcpClient client;
+        client.setWorkspace(u"/ws"_s);
+        const QString patch = u"--- a/src/a.cpp\n+++ b/src/a.cpp\n@@ -1,2 +1,2 @@\n-old\n+new\n"
+                              u"--- a/src/b.cpp\n+++ b/src/b.cpp\n@@ -5,1 +5,1 @@\n-x\n+y\n"_s;
+        const QJsonObject call{
+            {u"toolCallId"_s, u"c9"_s},
+            {u"name"_s, u"apply_patch"_s},
+            {u"kind"_s, u"edit"_s},
+            {u"title"_s, u"Apply patch"_s},
+            {u"content"_s, QJsonArray{QJsonObject{{u"type"_s, u"text"_s}, {u"text"_s, patch}}}},
+        };
+        const PermissionRequest request = client.permissionFromToolCall(call);
+        QCOMPARE(request.toolName, u"apply_patch"_s);
+        QVERIFY(request.mutatesFiles);
+        QCOMPARE(request.path, u"src/a.cpp"_s);
+        QVERIFY(request.describeDiff.contains(u"+++ b/src/a.cpp"_s));
+        QCOMPARE(request.additionalPaths, QStringList{u"src/b.cpp"_s});
+        QCOMPARE(request.additionalDiffs.size(), 1);
+        QVERIFY(request.additionalDiffs.first().contains(u"+++ b/src/b.cpp"_s));
+    }
 };
 
 QTEST_GUILESS_MAIN(TestToolAlias)

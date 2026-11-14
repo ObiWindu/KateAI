@@ -14,10 +14,12 @@
 #include <QJsonDocument>
 #include <QJsonParseError>
 #include <QMap>
+#include <QPointer>
 #include <QProcess>
 #include <QRegularExpression>
 #include <QCryptographicHash>
 #include <QElapsedTimer>
+#include <QThread>
 #include <QTimer>
 #include <QVector>
 
@@ -622,6 +624,45 @@ PermissionRequest ToolRunner::describe(const ToolCall &call) const
         req.risk = ToolRisk::Read;
         req.path = args.value(u"path"_s).toString().trimmed();
         req.details = QString::fromUtf8(QJsonDocument(args).toJson(QJsonDocument::Compact));
+    } else if (call.name == u"apply_patch"_s) {
+        req.risk = ToolRisk::Write;
+        req.mutatesFiles = true;
+        // The patch names every file it touches; the card shows the first as
+        // the primary path and the rest as additional diffs, so multi-file
+        // patches are reviewable per file like any other edit.
+        const QList<PatchFile> files = parseUnifiedPatch(args.value(u"patch"_s).toString());
+        QStringList paths;
+        QStringList diffs;
+        for (const PatchFile &file : files) {
+            if (file.path.isEmpty()) {
+                continue;
+            }
+            paths.append(file.path);
+            QStringList hunkText;
+            for (const PatchHunk &hunk : file.hunks) {
+                hunkText.append(u"@@ -%1,%2 +%3,%4 @@"_s.arg(hunk.oldStart).arg(hunk.oldCount).arg(hunk.newStart).arg(hunk.newCount));
+                hunkText.append(hunk.lines);
+            }
+            diffs.append(u"--- a/%1\n+++ b/%2\n"_s.arg(file.path, file.path) + hunkText.join(u'\n'));
+        }
+        if (!paths.isEmpty()) {
+            req.path = paths.first();
+            QString error;
+            req.resolvedPath = m_sandbox.resolve(req.path, &error, true);
+            for (int i = 1; i < paths.size(); ++i) {
+                req.additionalPaths.append(paths.at(i));
+                QString err;
+                m_sandbox.resolve(paths.at(i), &err, true);
+            }
+            req.additionalDiffs = diffs.mid(1);
+        }
+        req.describeDiff = diffs.isEmpty() ? args.value(u"patch"_s).toString() : diffs.first();
+        req.details = req.describeDiff;
+    } else if (call.name == u"todo_write"_s || call.name == u"todo_read"_s || call.name == u"think"_s
+               || call.name == u"exit_plan_mode"_s) {
+        // Checklist, reasoning and plan-mode bookkeeping touch no file.
+        req.risk = ToolRisk::Read;
+        req.details = QString::fromUtf8(QJsonDocument(args).toJson(QJsonDocument::Compact));
     } else {
         // Unknown tools reach the permission card from here. A delegation or
         // an MCP call can run code, so they must not be presented with the
@@ -702,6 +743,21 @@ ToolResult ToolRunner::run(const ToolCall &call)
     if (call.name == u"question"_s) {
         return question(args);
     }
+    if (call.name == u"apply_patch"_s) {
+        return applyPatch(args);
+    }
+    if (call.name == u"todo_write"_s) {
+        return todoWrite(args);
+    }
+    if (call.name == u"todo_read"_s) {
+        return todoRead(args);
+    }
+    if (call.name == u"think"_s) {
+        return think(args);
+    }
+    if (call.name == u"exit_plan_mode"_s) {
+        return exitPlanMode(args);
+    }
 
     result.ok = false;
     result.output = u"Unknown tool: %1"_s.arg(call.name);
@@ -754,7 +810,15 @@ ToolResult ToolRunner::readFile(const QJsonObject &args) const
     // Apply offset and limit parameters to paginate the file contents.
     // Reject non-positive values explicitly instead of silently clamping:
     // offset=0/-5 or limit<0 previously read from the top / unlimited.
-    const int offset = jsonInt(args.value(u"offset"_s), 1);
+    // "line" is accepted as an alias of "offset": ACP's fs/read_text_file uses
+    // line/limit, and agents carry that shape over to the native tool.
+    int offset = jsonInt(args.value(u"offset"_s), 0);
+    if (offset == 0) {
+        offset = jsonInt(args.value(u"line"_s), 1);
+    }
+    if (offset == 0) {
+        offset = 1;
+    }
     const int limit = jsonInt(args.value(u"limit"_s), 0);
     if (offset < 1) {
         result.ok = false;
@@ -1627,6 +1691,71 @@ QString ToolRunner::BashBuffer::view() const
         return head + tail;
     }
     return head + u"\n... [%1 characters of streamed output were dropped] ...\n"_s.arg(droppedChars) + tail;
+}
+
+bool ToolRunner::isAsyncReadTool(const QString &toolName)
+{
+    // Only pure read tools whose inputs come from disk are offloaded. Anything
+    // touching the Kate bridge (open buffers), the project graph or the LSP
+    // provider stays on the caller's thread: those are editor-owned objects.
+    static const QSet<QString> kAsyncReadTools = {
+        u"read_file"_s, u"list_dir"_s, u"grep"_s, u"glob"_s,
+    };
+    return kAsyncReadTools.contains(toolName);
+}
+
+ToolRunner::~ToolRunner()
+{
+    // Stop the worker thread here, while the QApplication is still alive:
+    // a worker thread that outlives the application crashes teardown in some
+    // KF6 builds (KDirWatch's destructor calls deleteLater on a dead thread).
+    if (m_workerThread) {
+        m_workerThread->quit();
+        m_workerThread->wait(5000);
+    }
+}
+
+bool ToolRunner::runReadToolAsync(const ToolCall &call)
+{
+    if (!isAsyncReadTool(call.name)) {
+        return false;
+    }
+    const Sandbox sandbox = m_sandbox;
+    Q_EMIT bashProgress(call.id, u"Working…"_s);
+    if (!m_workerThread) {
+        m_workerThread = new QThread(this);
+        // A plain QObject moved into the worker thread is the invoke target;
+        // the job itself is a lambda, so no moc'd worker class is needed.
+        m_workerContext = new QObject();
+        m_workerContext->moveToThread(m_workerThread);
+        m_workerThread->start();
+    }
+    const QPointer<ToolRunner> guard(this);
+    QMetaObject::invokeMethod(m_workerContext, [guard, call, sandbox]() {
+        // A disk-only bridge on the worker: reading open documents would call
+        // into KTextEditor from a non-GUI thread.
+        DiskDocumentBridge diskBridge;
+        ToolRunner worker(sandbox, &diskBridge);
+        ToolResult result = worker.run(call);
+        // The per-tool runners build a fresh ToolResult and leave the id empty;
+        // the async path keys cards on it, so stamp it here.
+        if (result.toolCallId.isEmpty()) {
+            result.toolCallId = call.id;
+        }
+        if (result.name.isEmpty()) {
+            result.name = call.name;
+        }
+        // The runner may be gone by the time the search finishes (turn aborted,
+        // loop destroyed); then the result is simply dropped.
+        if (guard) {
+            QMetaObject::invokeMethod(guard.data(), [guard, result]() {
+                if (guard) {
+                    Q_EMIT guard->bashFinished(result);
+                }
+            }, Qt::QueuedConnection);
+        }
+    }, Qt::QueuedConnection);
+    return true;
 }
 
 void ToolRunner::runBashAsync(const ToolCall &call)
@@ -2505,6 +2634,213 @@ ToolResult ToolRunner::writePlanFile(const QJsonObject &args)
                       "later calls overwrite it, so keep it current as the work moves."_s
                       .arg(path)
                       .arg(content.toUtf8().size());
+    return result;
+}
+
+ToolResult ToolRunner::applyPatch(const QJsonObject &args)
+{
+    ToolResult result;
+    result.name = u"apply_patch"_s;
+
+    const QString patch = args.value(u"patch"_s).toString();
+    if (patch.trimmed().isEmpty()) {
+        result.ok = false;
+        result.output = u"patch must not be empty: pass a unified diff with ---/+++ file headers and @@ hunks."_s;
+        return result;
+    }
+
+    const QList<PatchFile> files = parseUnifiedPatch(patch);
+    if (files.isEmpty()) {
+        result.ok = false;
+        result.output = u"No file sections found: the patch needs '--- a/<path>' / '+++ b/<path>' headers and @@ hunks."_s;
+        return result;
+    }
+
+    // Phase 1: resolve, read and compute every new file content. Nothing is
+    // written yet, so a failing hunk anywhere leaves the workspace untouched.
+    struct PlannedWrite {
+        QString resolved;
+        QString displayPath;
+        QString newContent;
+        bool existed = false;
+    };
+    QList<PlannedWrite> planned;
+    for (const PatchFile &file : files) {
+        if (file.path.isEmpty() || file.hunks.isEmpty()) {
+            result.ok = false;
+            result.output = u"Patch section without a path or without hunks: %1"_s.arg(file.oldPath.isEmpty() ? file.path : file.oldPath);
+            return result;
+        }
+        QString error;
+        if (!m_sandbox.allowsWrite(file.path, &error)) {
+            result.ok = false;
+            result.output = error;
+            return result;
+        }
+        const QString resolved = m_sandbox.resolve(file.path, &error, true);
+        if (resolved.isEmpty()) {
+            result.ok = false;
+            result.output = error;
+            return result;
+        }
+        if (file.isDelete) {
+            // +++ /dev/null: the whole file goes away; no hunks to apply.
+            planned.append({resolved, file.path, QString(), QFileInfo::exists(resolved)});
+            continue;
+        }
+        QString current;
+        bool existed = false;
+        if (m_bridge && m_bridge->readDocument(resolved, &current)) {
+            existed = true;
+        } else {
+            QFile disk(resolved);
+            if (disk.open(QIODevice::ReadOnly | QIODevice::Text)) {
+                current = QString::fromUtf8(disk.readAll());
+                disk.close();
+                existed = true;
+            } else if (!file.isNew) {
+                result.ok = false;
+                result.output = u"Cannot read %1: %2"_s.arg(file.path, disk.errorString().isEmpty() ? u"file not found"_s : disk.errorString());
+                return result;
+            }
+        }
+        QString applyError;
+        const QString newContent = applyPatchToContent(current, file.hunks, &applyError);
+        if (newContent.isNull() && !applyError.isEmpty()) {
+            result.ok = false;
+            result.output = u"Patch does not apply to %1: %2"_s.arg(file.path, applyError);
+            return result;
+        }
+        planned.append({resolved, file.path, newContent, existed});
+    }
+
+    // Phase 2: write everything.
+    QStringList written;
+    for (const PlannedWrite &w : planned) {
+        QString error;
+        if (w.newContent.isNull()) {
+            // Deletion (+++ /dev/null): a null content is the marker, because
+            // a real patch result is never null, only possibly empty.
+            if (!w.existed) {
+                result.ok = false;
+                result.output = u"Patch deletes %1, but that file does not exist."_s.arg(w.displayPath);
+                return result;
+            }
+            if (!QFile::remove(w.resolved)) {
+                result.ok = false;
+                result.output = u"Patch computed cleanly but deleting %1 failed."_s.arg(w.displayPath);
+                return result;
+            }
+            written.append(u"deleted %1"_s.arg(w.displayPath));
+            continue;
+        }
+        if (!m_bridge || !m_bridge->writeDocument(w.resolved, w.newContent, &error)) {
+            result.ok = false;
+            result.output = u"Patch computed cleanly but writing %1 failed: %2"_s.arg(w.displayPath, error);
+            return result;
+        }
+        written.append(u"patched %1"_s.arg(w.displayPath));
+    }
+
+    result.ok = true;
+    result.output = u"Applied patch to %1 file(s):\n%2"_s.arg(planned.size()).arg(written.join(u'\n'));
+    result.rawOutput = result.output;
+    return result;
+}
+
+ToolResult ToolRunner::todoWrite(const QJsonObject &args)
+{
+    ToolResult result;
+    result.name = u"todo_write"_s;
+
+    const QJsonArray todos = args.value(u"todos"_s).toArray();
+    if (todos.isEmpty()) {
+        result.ok = false;
+        result.output = u"todos must be a non-empty array of {content, status}."_s;
+        return result;
+    }
+    QJsonArray stored;
+    int index = 0;
+    for (const QJsonValue &value : todos) {
+        const QJsonObject todo = value.toObject();
+        const QString content = todo.value(u"content"_s).toString().trimmed();
+        if (content.isEmpty()) {
+            result.ok = false;
+            result.output = u"Every todo needs a content string (item %1 is empty)."_s.arg(index + 1);
+            return result;
+        }
+        QString status = todo.value(u"status"_s).toString().trimmed().toLower().replace(u'-', u'_');
+        if (status.isEmpty()) {
+            status = u"pending"_s;
+        }
+        if (status != u"pending"_s && status != u"in_progress"_s && status != u"completed"_s) {
+            result.ok = false;
+            result.output = u"Invalid status '%1' for todo %2: use pending, in_progress, or completed."_s.arg(status, content.left(40));
+            return result;
+        }
+        QJsonObject step;
+        step.insert(u"id"_s, QString::number(++index));
+        step.insert(u"description"_s, content);
+        step.insert(u"completed"_s, status == u"completed"_s);
+        step.insert(u"inProgress"_s, status == u"in_progress"_s);
+        stored.append(step);
+    }
+    m_todos = stored;
+    result.ok = true;
+    result.output = u"Task list updated (%1 item(s))."_s.arg(stored.size());
+    // The UI reads the list from the store; carry it in the result as well so
+    // the ACP path (which has no ToolRunner) can forward the same array.
+    result.rawOutput = QString::fromUtf8(QJsonDocument(stored).toJson(QJsonDocument::Compact));
+    return result;
+}
+
+ToolResult ToolRunner::todoRead(const QJsonObject &args)
+{
+    Q_UNUSED(args)
+    ToolResult result;
+    result.name = u"todo_read"_s;
+    result.ok = true;
+    if (m_todos.isEmpty()) {
+        result.output = u"(no todos yet)"_s;
+    } else {
+        QStringList lines;
+        for (const QJsonValue &value : m_todos) {
+            const QJsonObject todo = value.toObject();
+            const QString status = todo.value(u"completed"_s).toBool() ? u"completed"_s
+                                   : (todo.value(u"inProgress"_s).toBool() ? u"in_progress"_s : u"pending"_s);
+            lines.append(u"- [%1] %2"_s.arg(status, todo.value(u"description"_s).toString()));
+        }
+        result.output = lines.join(u'\n');
+    }
+    result.rawOutput = QString::fromUtf8(QJsonDocument(m_todos).toJson(QJsonDocument::Compact));
+    return result;
+}
+
+ToolResult ToolRunner::think(const QJsonObject &args)
+{
+    ToolResult result;
+    result.name = u"think"_s;
+    const QString thought = args.value(u"thought"_s).toString().trimmed();
+    if (thought.isEmpty()) {
+        result.ok = false;
+        result.output = u"thought must not be empty."_s;
+        return result;
+    }
+    result.ok = true;
+    result.output = u"Recorded %1 character(s) of reasoning."_s.arg(thought.size());
+    result.rawOutput = thought;
+    return result;
+}
+
+ToolResult ToolRunner::exitPlanMode(const QJsonObject &args)
+{
+    Q_UNUSED(args)
+    ToolResult result;
+    result.name = u"exit_plan_mode"_s;
+    // The runner only validates; flipping plan mode is the loop's/UI's call,
+    // because the setting belongs to the chat, not to the tool.
+    result.ok = true;
+    result.output = u"Plan mode exit requested."_s;
     return result;
 }
 

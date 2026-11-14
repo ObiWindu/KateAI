@@ -98,6 +98,23 @@ public:
 
     void prompt(const QString &text);
     void resolvePermission(PermissionDecision decision);
+    // True while an ask_user / elicitation RPC from the agent is parked waiting
+    // for the user's answer.
+    bool hasPendingQuestion() const
+    {
+        return !m_questionRpcId.isUndefined() && !m_questionRpcId.isNull();
+    }
+    // Answers the parked ask-user RPC with the user's text; an empty answer
+    // replies as cancelled. No-op when no question is pending.
+    void answerQuestion(const QString &answer);
+    // The structured todo list is shared with the native path: the loop hands
+    // over a getter/setter pair so _kateai/todo_write and the native
+    // todo_write tool update the same list the TodoWidget renders.
+    void setTodoStore(std::function<QJsonArray()> getter, std::function<void(const QJsonArray &)> setter)
+    {
+        m_todosGetter = std::move(getter);
+        m_todosSetter = std::move(setter);
+    }
 
     // Command used to launch the agent. Grok Build also receives --model /
     // --always-approve; other agents get the configured args unchanged.
@@ -173,7 +190,16 @@ Q_SIGNALS:
     void toolDetailsChanged(const PermissionRequest &request);
 
     void permissionNeeded(const PermissionRequest &request);
+    // The agent asked the user something through the ask_user client method (or
+    // an elicitation request when the negotiated protocol offers it). The RPC
+    // is parked until answerQuestion() replies to it.
+    void questionAsked(const PermissionRequest &request);
     void promptFinished(const QString &stopReason, const QString &text, const QJsonArray &toolCalls);
+    // The agent advertised slash commands (available_commands_update).
+    void availableCommandsChanged(const QJsonArray &commands);
+    // The agent replaced the task list through _kateai/todo_write; the loop
+    // forwards this to the same checklist the native todo_write drives.
+    void todosChanged(const QJsonArray &todos);
     // The streamed text belonged to an attempt that failed with a transient
     // error and is retried. The transcript must drop it, like LlmClient does.
     void textReset();
@@ -281,6 +307,19 @@ private:
     void handleSuggest(const QJsonValue &id, const QJsonObject &params);
     void handleQueryProjectGraph(const QJsonValue &id, const QJsonObject &params);
     void handleLspDiagnostics(const QJsonValue &id, const QJsonObject &params);
+    void handleLspSymbols(const QJsonValue &id, const QJsonObject &params);
+    void handleLspHover(const QJsonValue &id, const QJsonObject &params);
+    void handleLspDefinition(const QJsonValue &id, const QJsonObject &params);
+    void handleLspReferences(const QJsonValue &id, const QJsonObject &params);
+    void handleLspCodeActions(const QJsonValue &id, const QJsonObject &params);
+    void handleAskUser(const QJsonValue &id, const QJsonObject &params);
+    void handleElicitationCreate(const QJsonValue &id, const QJsonObject &params);
+    void handleTodoWrite(const QJsonValue &id, const QJsonObject &params);
+    void handleTodoRead(const QJsonValue &id, const QJsonObject &params);
+    // Shared body of the ask-user paths (Kate extension + v2 elicitation).
+    void askUser(const QJsonValue &id, const QString &question, const QStringList &options, bool allowFreeform);
+    // Answers a parked ask-user RPC as cancelled and clears the state.
+    void cancelPendingQuestion();
     void handleRequestPermission(const QJsonValue &id, const QJsonObject &params);
     void handleTerminalCreate(const QJsonValue &id, const QJsonObject &params);
     void handleTerminalOutput(const QJsonValue &id, const QJsonObject &params);
@@ -420,6 +459,23 @@ private:
     QJsonValue m_permissionRpcId;
     QJsonArray m_permissionOptions;
     PermissionRequest m_permissionRequest;
+
+    // A parked ask-user RPC (Kate's _kateai/ask_user or v2 elicitation/create).
+    // The agent blocks on this request until the user answers, which is what
+    // makes asking work over ACP at all.
+    QJsonValue m_questionRpcId;
+    PermissionRequest m_questionRequest;
+
+    // The shared todo store (native todo_write and _kateai/todo_write).
+    std::function<QJsonArray()> m_todosGetter;
+    std::function<void(const QJsonArray &)> m_todosSetter;
+
+    // Slash commands the agent advertised via available_commands_update.
+    QJsonArray m_availableCommands;
+    // The protocol version agreed at initialize (never above what Kate speaks).
+    int m_negotiatedVersion = 1;
+    // The agent advertised elicitation (ACP v2 draft) in its capabilities.
+    bool m_agentSupportsElicitation = false;
 
     // Mutating client methods waiting for a permission decision. At most one
     // is active (its request is the one being shown); the rest queue behind it.

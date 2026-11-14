@@ -228,6 +228,34 @@ struct Suggestion {
     int line = 0;
 };
 
+// One hunk of a unified diff. `lines` keeps the leading marker character
+// (' ', '+', '-'); the '\\ No newline at end of file' line is kept as-is.
+struct PatchHunk {
+    int oldStart = 0;
+    int oldCount = 0;
+    int newStart = 0;
+    int newCount = 0;
+    QStringList lines;
+};
+
+// One file section of a unified diff, as produced by apply_patch-style tools
+// (Codex, aider, OpenCode, ...). Paths keep the a/ b/ prefixes stripped.
+struct PatchFile {
+    QString path; // target path (from the +++ line)
+    QString oldPath; // from the --- line
+    bool isNew = false; // /dev/null on the --- side
+    bool isDelete = false; // /dev/null on the +++ side
+    QList<PatchHunk> hunks;
+};
+
+// Parses a unified diff into per-file sections. Returns an empty list when the
+// text is not a unified diff. Shared by the native apply_patch tool and the
+// ACP ingest path, which turns agent patches into per-file card diffs.
+QList<PatchFile> parseUnifiedPatch(const QString &patch);
+// Applies hunks to `content` (LF-separated). Fails with an error when a hunk's
+// context does not match at its recorded position; applies nothing on failure.
+QString applyPatchToContent(const QString &content, const QList<PatchHunk> &hunks, QString *error);
+
 struct Settings {
     Provider provider = Provider::Grok;
     QString grokApiKey;
@@ -515,6 +543,25 @@ QString acpInstalledBinaryCommand(const Settings &settings);
 bool acpAgentIsMinimaxCode(const Settings &settings);
 // True for Google Antigravity ACP agent (registry id `antigravity-acp`).
 bool acpAgentIsAntigravity(const Settings &settings);
+// Launch-line quirks of one ACP agent, keyed by registry id so newly installed
+// registry agents get the same treatment as the built-in presets. Zed keeps the
+// equivalent knowledge in crates/agent_servers/<name>.rs.
+struct AcpAgentQuirks {
+    // Append an "acp" subcommand when the recorded args have none (opencode and
+    // friends start their TUI instead of the ACP server otherwise).
+    bool needsAcpSubcommand = false;
+    // Drop npm-only tokens ("--yes", "@scope/pkg") from recorded args.
+    bool stripNpmTokens = false;
+    // The agent accepts "--model <id>".
+    bool modelFlag = false;
+    // Always appended (e.g. antigravity's sanitizer-disabling flags).
+    QStringList extraArgs;
+    // Removed from the recorded args when present.
+    QStringList stripArgs;
+    // Present clientInfo as Zed at initialize (agents that gate models by client).
+    bool spoofZedClientInfo = false;
+};
+AcpAgentQuirks acpAgentQuirks(const QString &agentId, const QString &command);
 // True for the Mistral Vibe ACP agent (registry id `mistral-vibe`, binary
 // `vibe-acp`). It persists its selected model in its own global state and
 // reports it as current on every new session, so the model configured in

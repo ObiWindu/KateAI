@@ -327,13 +327,21 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
                 kind = i18n("manual install");
             }
             bool isInstalled = false;
+            QString installedVersion;
             for (const QJsonValue &installedValue : installedAgents) {
                 if (installedValue.toObject().value(u"id"_s).toString() == agent.value(u"id"_s).toString()) {
                     isInstalled = true;
+                    installedVersion = installedValue.toObject().value(u"version"_s).toString();
                     break;
                 }
             }
-            const QString marker = isInstalled ? i18n("  ✓ Installed") : QString();
+            QString marker;
+            if (isInstalled) {
+                const QString registryVersion = agent.value(u"version"_s).toString();
+                marker = (i18n("  ✓ Installed") + (!registryVersion.isEmpty() && registryVersion != installedVersion
+                                                        ? i18n("  (update: %1)", registryVersion)
+                                                        : QString()));
+            }
             auto *item = new QListWidgetItem(u"%1%2  ·  %3  ·  %4\n%5"_s.arg(name, marker,
                                                                                       agent.value(u"version"_s).toString(),
                                                                                       kind, description),
@@ -376,48 +384,42 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
             const bool npm = installType == u"npx"_s;
             const QString package = installInfo.value(u"package"_s).toString();
             if (package.isEmpty()) return;
-            auto *process = new QProcess(this);
-            const QString program = npm ? u"npm"_s : u"uv"_s;
-            const QStringList args = npm ? QStringList{u"install"_s, u"--global"_s, package}
-                                         : QStringList{u"tool"_s, u"install"_s, package};
-            m_acpRegistryStatus->setText(i18n("Installing %1…", agent.value(u"name"_s).toString()));
-            connect(process, &QProcess::finished, this, [this, process, agent, installInfo, package, npm, showRegistryResults](int code, QProcess::ExitStatus status) {
-                const QString output = QString::fromLocal8Bit(process->readAllStandardError()).trimmed();
-                if (code != 0 || status != QProcess::NormalExit) {
-                    m_acpRegistryStatus->setText(i18n("Install failed: %1", output));
-                    process->deleteLater();
-                    return;
-                }
-                QJsonObject installed = agent;
-                QStringList argsList;
-                for (const QJsonValue &arg : installInfo.value(u"args"_s).toArray()) argsList.append(arg.toString());
-                QJsonArray launchArgs;
-                for (const QString &arg : argsList) launchArgs.append(arg);
-                installed.insert(u"command"_s, npm ? u"npx"_s : u"uvx"_s);
-                QJsonArray fullArgs;
-                if (npm) { fullArgs.append(u"--yes"_s); fullArgs.append(package); }
-                else fullArgs.append(package);
-                for (const QJsonValue &arg : launchArgs) fullArgs.append(arg);
-                installed.insert(u"args"_s, fullArgs);
-                installed.insert(u"package"_s, package);
-                installed.insert(u"distributionType"_s, npm ? u"npx"_s : u"uvx"_s);
-                QJsonArray agents = QJsonDocument::fromJson(m_plugin->settings().acpInstalledAgents.toUtf8()).array();
-                const QString id = agent.value(u"id"_s).toString();
-                for (qsizetype i = agents.size() - 1; i >= 0; --i) if (agents.at(i).toObject().value(u"id"_s).toString() == id) agents.removeAt(i);
-                agents.append(installed);
-                Settings settings = m_plugin->settings();
-                settings.acpInstalledAgents = QString::fromUtf8(QJsonDocument(agents).toJson(QJsonDocument::Compact));
-                m_plugin->setSettings(settings);
-                refreshAcpAgentCombo();
-                m_acpRegistryStatus->setText(i18n("Installed %1. Select it under ACP in the model selector.", agent.value(u"name"_s).toString()));
-                showRegistryResults(m_acpRegistrySearch->text());
-                process->deleteLater();
-            });
-            connect(process, &QProcess::errorOccurred, this, [this, process](QProcess::ProcessError) {
-                m_acpRegistryStatus->setText(i18n("Install failed: package manager not found or could not start."));
-                process->deleteLater();
-            });
-            process->start(program, args);
+            // Zed-style: no global package install. The launch line runs the
+            // package through npx -y / uvx directly (cached by the package
+            // manager on first run), pinned to the registry version, so
+            // installing never needs write access to the global prefix and
+            // never mutates the user's npm/uv state.
+            QJsonObject installed = agent;
+            QStringList argsList;
+            for (const QJsonValue &arg : installInfo.value(u"args"_s).toArray()) argsList.append(arg.toString());
+            QJsonArray fullArgs;
+            // Pin to the registry version when the entry carries one.
+            QString pinned = package;
+            const QString version = agent.value(u"version"_s).toString().trimmed();
+            if (!version.isEmpty() && package.lastIndexOf(u'@') <= 0) {
+                pinned = package + u'@' + version;
+            }
+            if (npm) {
+                fullArgs.append(u"--yes"_s);
+            }
+            fullArgs.append(pinned);
+            for (const QString &arg : argsList) fullArgs.append(arg);
+            installed.insert(u"command"_s, npm ? u"npx"_s : u"uvx"_s);
+            installed.insert(u"args"_s, fullArgs);
+            installed.insert(u"package"_s, package);
+            installed.insert(u"pinnedPackage"_s, pinned);
+            installed.insert(u"distributionType"_s, npm ? u"npx"_s : u"uvx"_s);
+            QJsonArray agents = QJsonDocument::fromJson(m_plugin->settings().acpInstalledAgents.toUtf8()).array();
+            const QString id = agent.value(u"id"_s).toString();
+            for (qsizetype i = agents.size() - 1; i >= 0; --i) if (agents.at(i).toObject().value(u"id"_s).toString() == id) agents.removeAt(i);
+            agents.append(installed);
+            Settings settings = m_plugin->settings();
+            settings.acpInstalledAgents = QString::fromUtf8(QJsonDocument(agents).toJson(QJsonDocument::Compact));
+            m_plugin->setSettings(settings);
+            refreshAcpAgentCombo();
+            m_acpRegistryStatus->setText(i18n("Installed %1 (launched via %2, no global install needed). Select it under ACP in the model selector.",
+                                               agent.value(u"name"_s).toString(), npm ? u"npx --yes"_s : u"uvx"_s));
+            showRegistryResults(m_acpRegistrySearch->text());
         } else if (installType == u"binary"_s) {
             auto *installer = new AcpBinaryInstaller(agent, getBinaryPlatformKey(),
                                                      m_acpRegistryNetwork, this);

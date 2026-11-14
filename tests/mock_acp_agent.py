@@ -605,6 +605,132 @@ def handle_prompt(request_id, params):
         result(request_id, {"stopReason": "end_turn"})
         return
 
+    if SCENARIO == "ask_user":
+        # Kate's ask-user extension: the RPC blocks until the client replies
+        # with the user's answer, and the agent echoes it back.
+        reply = call_client(
+            "_kateai/ask_user",
+            {
+                "sessionId": SESSION_ID,
+                "question": "Rewrite the file, or patch it in place?",
+                "options": ["Rewrite", "Patch"],
+                "allow_freeform": True,
+            },
+        )
+        answer = ((reply or {}).get("result") or {}).get("answer", "")
+        cancelled = ((reply or {}).get("result") or {}).get("cancelled", False)
+        session_update(
+            {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {
+                    "type": "text",
+                    "text": ("cancelled" if cancelled else "answer:" + answer),
+                },
+            }
+        )
+        result(request_id, {"stopReason": "end_turn"})
+        return
+
+    if SCENARIO == "todo":
+        call_client(
+            "_kateai/todo_write",
+            {
+                "sessionId": SESSION_ID,
+                "todos": [
+                    {"content": "step one", "status": "completed"},
+                    {"content": "step two", "status": "in_progress"},
+                ],
+            },
+        )
+        read = call_client("_kateai/todo_read", {"sessionId": SESSION_ID})
+        content = ((read or {}).get("result") or {}).get("content", "")
+        session_update(
+            {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "todo:" + content.replace("\n", "|")},
+            }
+        )
+        result(request_id, {"stopReason": "end_turn"})
+        return
+
+    if SCENARIO == "lsp-symbols":
+        reply = call_client(
+            "_kateai/lsp_symbols", {"sessionId": SESSION_ID, "path": "src/main.cpp"}
+        )
+        if reply is None or "error" in reply:
+            body = "lsp-unavailable"
+        else:
+            body = "lsp:" + ((reply.get("result") or {}).get("content", "")).replace("\n", "|")
+        session_update(
+            {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": body},
+            }
+        )
+        result(request_id, {"stopReason": "end_turn"})
+        return
+
+    if SCENARIO == "title-update":
+        # A tool call whose only later update is a new title: the card header
+        # must follow it (toolDetailsChanged), and the call then completes.
+        session_update(
+            {
+                "sessionUpdate": "tool_call",
+                "toolCallId": "call_title",
+                "name": "bash",
+                "kind": "execute",
+                "title": "Starting",
+                "status": "in_progress",
+            }
+        )
+        session_update(
+            {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "call_title",
+                "title": "Running the full test suite",
+                "status": "in_progress",
+            }
+        )
+        session_update(
+            {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "call_title",
+                "status": "completed",
+                "content": [{"type": "text", "text": "title-done"}],
+            }
+        )
+        result(request_id, {"stopReason": "end_turn"})
+        return
+
+    if SCENARIO == "apply-patch":
+        # A multi-file unified diff in a text content block: Kate must parse
+        # it into per-file diffs for the card.
+        patch = (
+            "--- a/src/a.cpp\n+++ b/src/a.cpp\n@@ -1,2 +1,2 @@\n-old\n+new\n"
+            "--- a/src/b.cpp\n+++ b/src/b.cpp\n@@ -5,1 +5,1 @@\n-x\n+y\n"
+        )
+        session_update(
+            {
+                "sessionUpdate": "tool_call",
+                "toolCallId": "call_patch",
+                "name": "apply_patch",
+                "kind": "edit",
+                "title": "Apply patch",
+                "status": "in_progress",
+                "content": [{"type": "text", "text": patch}],
+            }
+        )
+        session_update(
+            {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "call_patch",
+                "status": "completed",
+                "content": [{"type": "text", "text": "patched"}],
+            }
+        )
+        result(request_id, {"stopReason": "end_turn"})
+        return
+
     if SCENARIO == "quoted":
         created = call_client(
             "terminal/create",
@@ -945,15 +1071,19 @@ def handle(message):
     params = message.get("params") or {}
 
     if method == "initialize":
+        agent_capabilities = {
+            "loadSession": True,
+            "promptCapabilities": {"embeddedContext": True},
+            "sessionCapabilities": {"resume": {}, "close": {}},
+        }
+        if SCENARIO == "commands":
+            # v2-draft capability advertised by the commands scenario.
+            agent_capabilities["elicitation"] = {}
         result(
             request_id,
             {
                 "protocolVersion": 1,
-                "agentCapabilities": {
-                    "loadSession": True,
-                    "promptCapabilities": {"embeddedContext": True},
-                    "sessionCapabilities": {"resume": {}, "close": {}},
-                },
+                "agentCapabilities": agent_capabilities,
                 "agentInfo": {"name": "mock-acp", "title": "Mock ACP", "version": "1"},
                 "authMethods": [],
             },
@@ -1018,6 +1148,19 @@ def handle(message):
                 "Internal error",
                 -32603,
                 {"details": "The OAuth credential file permissions are not private."},
+            )
+        elif SCENARIO == "commands":
+            # Advertises slash commands and the v2-draft elicitation capability.
+            result(request_id, {"sessionId": SESSION_ID})
+            notify(
+                "available_commands_update",
+                {
+                    "sessionId": SESSION_ID,
+                    "availableCommands": [
+                        {"name": "review", "description": "Review the changes"},
+                        {"name": "test", "description": "Run the tests"},
+                    ],
+                },
             )
         else:
             result(request_id, {"sessionId": SESSION_ID})
