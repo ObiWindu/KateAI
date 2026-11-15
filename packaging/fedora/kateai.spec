@@ -1,5 +1,5 @@
 Name:           kateai
-Version:        0.1.0
+Version:        0.3.0
 Release:        1%{?dist}
 Summary:        AI coding agent plugin for the Kate text editor
 
@@ -51,5 +51,9 @@ asks before destructive actions. Works on Fedora and Fedora Asahi Remix.
 %{_libdir}/qt6/plugins/kf6/ktexteditor/kateai.so
 
 %changelog
+* Sun Nov 15 2026 ObiWindu <Obi.wandu@proton.me> - 0.3.0-1
+- Release 0.3.0: ACP card fixes, apply_patch hardening, async read safety,
+  live sub-agent activity, and improved tool/permission handling.
+
 * Tue Sep 30 2026 ObiWindu <Obi.wandu@proton.me> - 0.1.0-1
 - Initial package.

@@ -1548,7 +1548,11 @@ void AcpClient::sendInitialize()
         clientInfo.insert(u"name"_s, u"kateai"_s);
         clientInfo.insert(u"title"_s, u"Kate AI"_s);
     }
-    clientInfo.insert(u"version"_s, u"0.1.0"_s);
+#ifdef KATEAI_VERSION
+    clientInfo.insert(u"version"_s, QStringLiteral(KATEAI_VERSION));
+#else
+    clientInfo.insert(u"version"_s, u"0.3.0"_s);
+#endif
 
     QJsonObject params;
     params.insert(u"protocolVersion"_s, kAcpProtocolVersion);
