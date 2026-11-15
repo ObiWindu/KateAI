@@ -41,41 +41,20 @@ if (-not $Out) {
     $Out = Join-Path $Root "packaging\dist\kate-bundle-$version-windows-$arch.zip"
 }
 
+# Let the CI-tested Windows plugin build own the Craft bootstrap, iconv
+# workaround, `craft kate`, and the plugin build. The bundle job used to
+# duplicate that setup and then failed before Craft was ready; one code path
+# means the bundle and plugin artifacts are produced by the same recipe.
+$artifactsDir = Join-Path $Root "artifacts-windows-tmp"
+Write-Host "==> Building Kate and the plugin with packaging\ci\windows-build.ps1"
+& (Join-Path $Root "packaging\ci\windows-build.ps1") -BuildType Release -ArtifactsDir $artifactsDir -CraftRoot $CraftRoot
+if (-not (Test-Path (Join-Path $artifactsDir "kateai.dll"))) {
+    throw "The Windows build did not produce kateai.dll."
+}
+
 $craftEnv = Join-Path $CraftRoot "craft\craftenv.ps1"
 if (-not (Test-Path $craftEnv)) {
-    # Each CI job runs on a fresh VM, so the Craft stack built by
-    # windows-build.ps1 is not here: bootstrap it on demand.
-    Write-Host "==> Bootstrapping KDE Craft (accepting defaults)"
-    # The hosted runner already enforces Bypass via a higher-precedence
-    # scope, which makes this assignment throw: not fatal, Bypass is
-    # exactly what we need to run the installer below.
-    try {
-        Set-ExecutionPolicy -Scope CurrentUser RemoteSigned -Force -ErrorAction SilentlyContinue
-    } catch {
-        Write-Host "Execution policy is host-managed; continuing with the effective Bypass policy."
-    }
-    # Use the same CraftBootstrap.py path as packaging/ci/windows-build.ps1.
-    # The older install_craft.ps1 helper is interactive in places and has
-    # aborted headless bundle jobs before this script even reached Craft.
-    $python = (Get-Command python.exe -ErrorAction SilentlyContinue).Source
-    if (-not $python) {
-        $python = (Get-Command python -ErrorAction SilentlyContinue).Source
-    }
-    if (-not $python) {
-        throw "Python is required to bootstrap KDE Craft."
-    }
-    & $python -m pip install --upgrade certifi
-    if ($env:CI -eq 'true' -and (Test-Path $CraftRoot)) {
-        Write-Host "Removing pre-existing $CraftRoot for a clean Craft bootstrap."
-        Remove-Item -Recurse -Force $CraftRoot
-    }
-    $bootstrap = Join-Path ([IO.Path]::GetTempPath()) "CraftBootstrap.py"
-    (New-Object net.webclient).DownloadFile(
-        'https://raw.githubusercontent.com/KDE/craft/master/setup/CraftBootstrap.py', $bootstrap)
-    & $python $bootstrap --prefix $CraftRoot --use-defaults
-}
-if (-not (Test-Path $craftEnv)) {
-    throw "KDE Craft not found at $CraftRoot. Install it first, see https://develop.kde.org/docs/getting-started/building/craft/"
+    throw "KDE Craft not found at $CraftRoot."
 }
 # Craft's craftenv.ps1 sanitizes the environment by removing a fixed list of
 # variables (including GITHUB_ACTION_REF). On some GitHub runners that
@@ -85,12 +64,11 @@ foreach ($name in @("GITHUB_ACTION_REF", "GITHUB_ACTION", "GITHUB_ACTION_PATH", 
         Set-Item "Env:$name" ""
     }
 }
-if (Test-Path $craftEnv) {
-    $content = Get-Content $craftEnv -Raw
-    $content = $content.Replace('Remove-Item ("ENV:{0}" -f ${_}.Name)', 'Remove-Item ("ENV:{0}" -f ${_}.Name) -ErrorAction SilentlyContinue')
-    $content = $content.Replace('$python = (Get-Command "$env:KDEROOT/dev-utils/bin/python3" -ErrorAction SilentlyContinue).Source', '$python = $env:CRAFT_PYTHON')
-    Set-Content $craftEnv $content
-}
+$content = Get-Content $craftEnv -Raw
+$content = $content.Replace('Remove-Item ("ENV:{0}" -f ${_}.Name)', 'Remove-Item ("ENV:{0}" -f ${_}.Name) -ErrorAction SilentlyContinue')
+$content = $content.Replace('$python = (Get-Command "$env:KDEROOT/dev-utils/bin/python3" -ErrorAction SilentlyContinue).Source', '$python = $env:CRAFT_PYTHON')
+Set-Content $craftEnv $content
+
 # Dot-source: the env script must mutate THIS session (PATH, KDEROOT, craft/cs
 # functions). `&` would run it in a child scope and lose them.
 $prevEap = $ErrorActionPreference
@@ -100,41 +78,6 @@ try {
 } finally {
     $ErrorActionPreference = $prevEap
 }
-
-# gettext's AM_ICONV runs a runtime probe that often fails to execute on the
-# Windows/Craft host, making HAVE_ICONV=0 and breaking the libtextstyle link
-# (LNK2001: iconv_ostream_create). Preset the cache variables and build
-# iconv first, as in packaging\ci\windows-build.ps1.
-$env:am_cv_func_iconv = "yes"
-$env:am_cv_func_iconv_works = "yes"
-$env:am_cv_lib_iconv = "yes"
-
-# Make the func/lib cache variables explicit in Craft's gettext blueprint too
-# (it only presets works), so a failed link probe cannot reset HAVE_ICONV.
-$gettextBlueprint = Get-ChildItem -Path $CraftRoot -Recurse -Filter gettext.py -ErrorAction SilentlyContinue | Select-Object -First 1
-if ($gettextBlueprint) {
-    $bp = Get-Content $gettextBlueprint.FullName -Raw
-    if ($bp -notmatch 'am_cv_func_iconv=yes') {
-        $bp = $bp -replace '"am_cv_func_iconv_works=yes"', '"am_cv_func_iconv=yes", "am_cv_func_iconv_works=yes", "am_cv_lib_iconv=yes"'
-        Set-Content -Path $gettextBlueprint.FullName -Value $bp
-    }
-}
-Get-ChildItem -Path $CraftRoot -Recurse -Filter config.cache -ErrorAction SilentlyContinue |
-    Where-Object { $_.FullName -match 'gettext' } |
-    Remove-Item -Force -ErrorAction SilentlyContinue
-
-craft libs/iconv
-if (-not $?) { throw "craft libs/iconv failed" }
-
-if (-not $SkipKate) {
-    Write-Host "==> Building latest Kate via Craft"
-    craft kate
-    if (-not $?) { throw "craft kate failed" }
-}
-
-# Build the plugin against the Craft prefix (same flow as windows-build.ps1).
-Write-Host "==> Building plugin against $CraftRoot"
-& (Join-Path $Root "packaging\ci\windows-build.ps1") -BuildType Release -ArtifactsDir (Join-Path $Root "artifacts-windows-tmp")
 
 $stage = Join-Path ([System.IO.Path]::GetTempPath()) ([System.IO.Path]::GetRandomFileName())
 New-Item -ItemType Directory -Force -Path $stage | Out-Null
