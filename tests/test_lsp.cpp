@@ -36,6 +36,14 @@ void writeFile(const QString &path, const QByteArray &data)
     f.write(data);
 }
 
+// /var/... and /private/var/... name the same file on macOS. The tools resolve
+// paths before querying, so the stub must compare canonically too.
+QString canonicalPath(const QString &path)
+{
+    const QString canonical = QFileInfo(path).canonicalFilePath();
+    return QDir::cleanPath(canonical.isEmpty() ? QFileInfo(path).absoluteFilePath() : canonical);
+}
+
 // A stand-in for KateLspBridge: the same LspProvider interface the core uses,
 // with canned answers so the tool layer can be tested without Kate's LSP
 // plugin.
@@ -62,7 +70,7 @@ public:
         }
         QList<LspDiagnostic> out;
         for (const LspDiagnostic &d : diags) {
-            if (d.path == path) {
+            if (canonicalPath(d.path) == canonicalPath(path)) {
                 out.append(d);
             }
         }

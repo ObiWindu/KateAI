@@ -7,6 +7,7 @@
 
 #include <QFile>
 #include <QDir>
+#include <QFileInfo>
 #include <QTextStream>
 #include <QJsonDocument>
 #include <QRegularExpression>
@@ -20,6 +21,28 @@ using namespace Qt::Literals::StringLiterals;
 
 namespace KateAi
 {
+
+namespace
+{
+
+// Node ids hash the path as it was scanned. On macOS a temporary directory is
+// commonly /var/... while QFileInfo resolves the same file to /private/var/...;
+// tools resolve paths before querying, so lookups need a canonical fallback.
+QString canonicalLookupPath(const QString &path, const QString &workspace)
+{
+    QString absolute = path;
+    if (absolute.isEmpty()) {
+        return {};
+    }
+    if (QDir::isRelativePath(absolute)) {
+        absolute = workspace.isEmpty() ? QDir::current().absoluteFilePath(absolute)
+                                       : QDir(workspace).absoluteFilePath(absolute);
+    }
+    const QString canonical = QFileInfo(absolute).canonicalFilePath();
+    return QDir::cleanPath(canonical.isEmpty() ? absolute : canonical);
+}
+
+} // namespace
 
 ProjectGraph::ProjectGraph()
     : m_lastUpdateTime(0)
@@ -182,6 +205,18 @@ void ProjectGraph::updateGraph(const QString &filePath, const QString &content)
 {
     QString nodeId = generateNodeId(filePath);
     GraphNode *node = getNode(nodeId);
+    if (!node) {
+        const QString wanted = canonicalLookupPath(filePath, m_workspacePath);
+        for (auto it = m_nodes.begin(); it != m_nodes.end(); ++it) {
+            GraphNode *candidate = it.value();
+            if (candidate && candidate->type == u"file"_s && !candidate->path.isEmpty()
+                && canonicalLookupPath(candidate->path, m_workspacePath) == wanted) {
+                node = candidate;
+                nodeId = it.key();
+                break;
+            }
+        }
+    }
 
     if (node) {
         // Update node content and metrics
@@ -870,6 +905,20 @@ void ProjectGraph::indexFileSymbols(GraphNode *fileNode)
 QList<GraphSymbol> ProjectGraph::symbolsInFile(const QString &filePath) const
 {
     const GraphNode *node = getNode(generateNodeId(filePath));
+    if (!node) {
+        // The graph may have indexed a path spelling that differs only by a
+        // symlinked prefix (macOS /var -> /private/var). Match canonically
+        // before giving up.
+        const QString wanted = canonicalLookupPath(filePath, m_workspacePath);
+        for (auto it = m_nodes.cbegin(); it != m_nodes.cend(); ++it) {
+            const GraphNode *candidate = it.value();
+            if (candidate && candidate->type == u"file"_s && !candidate->path.isEmpty()
+                && canonicalLookupPath(candidate->path, m_workspacePath) == wanted) {
+                node = candidate;
+                break;
+            }
+        }
+    }
     if (!node) {
         return {};
     }

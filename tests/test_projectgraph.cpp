@@ -7,6 +7,7 @@
 
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QTemporaryDir>
 #include <QTest>
 
@@ -51,6 +52,28 @@ private Q_SLOTS:
         QVERIFY(!graph.getNode(ProjectGraph::generateNodeId(dir.path() + u"/.git/config"_s)));
         QVERIFY(!graph.getNode(ProjectGraph::generateNodeId(dir.path() + u"/build/out.o"_s)));
         QVERIFY(!graph.getNode(ProjectGraph::generateNodeId(dir.path() + u"/node_modules/pkg/index.js"_s)));
+    }
+
+    void testSymbolsResolveThroughASymlinkedWorkspacePath()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        writeFile(dir.path() + u"/a.cpp"_s, "int compute() {\n    return 1;\n}\n");
+
+        QTemporaryDir links;
+        QVERIFY(links.isValid());
+        const QString link = links.filePath(u"workspace"_s);
+        if (!QFile::link(dir.path(), link) || !QFileInfo(link).isSymLink()) {
+            QSKIP("symlinks are not available on this filesystem");
+        }
+
+        ProjectGraph graph;
+        graph.generateGraph(dir.path());
+        // macOS names the same temporary directory /var/... or /private/var/...;
+        // lookups must not depend on which spelling the caller has.
+        const QList<GraphSymbol> symbols = graph.symbolsInFile(link + u"/a.cpp"_s);
+        QVERIFY2(!symbols.isEmpty(), "the graph did not find the file through the symlinked path");
+        QCOMPARE(symbols.first().name, u"compute"_s);
     }
 
     void testNodeTypesAndLanguageMetadata()
