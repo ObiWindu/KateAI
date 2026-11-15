@@ -168,6 +168,10 @@ static QString kateClientMethod(const QString &method)
         {u"lspReferences"_s, u"lsp_references"_s},
         {u"lspCodeActions"_s, u"lsp_code_actions"_s},
         {u"askUser"_s, u"ask_user"_s},
+        {u"askUserQuestion"_s, u"ask_user"_s},
+        {u"ask_question"_s, u"ask_user"_s},
+        {u"suggestion"_s, u"suggest"_s},
+        {u"postSuggestion"_s, u"suggest"_s},
         {u"todoWrite"_s, u"todo_write"_s},
         {u"todoRead"_s, u"todo_read"_s},
     };
@@ -176,6 +180,184 @@ static QString kateClientMethod(const QString &method)
         name = name.mid(8);
     }
     return aliases.value(name, name);
+}
+
+// JSON numbers arrive as numbers, but models and extensions routinely send
+// integers as strings ("12"). QJsonValue::toInt() silently turns those into
+// the fallback, which moved LSP queries to line 1. Accept both forms.
+static int jsonIntValue(const QJsonValue &value, int fallback)
+{
+    if (value.isDouble()) {
+        return value.toInt();
+    }
+    if (value.isString()) {
+        bool ok = false;
+        const int parsed = value.toString().trimmed().toInt(&ok);
+        if (ok) {
+            return parsed;
+        }
+    }
+    return fallback;
+}
+
+static QString firstStringField(const QJsonObject &object, const QStringList &keys)
+{
+    for (const QString &key : keys) {
+        const QJsonValue value = object.value(key);
+        if (value.isString()) {
+            const QString text = value.toString().trimmed();
+            if (!text.isEmpty()) {
+                return text;
+            }
+        }
+    }
+    return {};
+}
+
+static bool boolishValue(const QJsonValue &value, bool fallback)
+{
+    if (value.isBool()) {
+        return value.toBool();
+    }
+    if (value.isDouble()) {
+        return value.toInt() != 0;
+    }
+    if (value.isString()) {
+        const QString text = value.toString().trimmed().toLower();
+        if (text == u"true"_s || text == u"1"_s || text == u"yes"_s) {
+            return true;
+        }
+        if (text == u"false"_s || text == u"0"_s || text == u"no"_s) {
+            return false;
+        }
+    }
+    return fallback;
+}
+
+static QStringList optionLabels(const QJsonValue &value)
+{
+    QStringList labels;
+    const auto add = [&labels](const QJsonValue &item) {
+        QString label;
+        if (item.isString()) {
+            label = item.toString().trimmed();
+        } else if (item.isObject()) {
+            const QJsonObject option = item.toObject();
+            label = firstStringField(option, {u"label"_s, u"title"_s, u"name"_s, u"text"_s, u"value"_s});
+            if (label.isEmpty()) {
+                label = firstStringField(option, {u"description"_s});
+            }
+        }
+        if (!label.isEmpty() && !labels.contains(label)) {
+            labels.append(label);
+        }
+    };
+
+    if (value.isArray()) {
+        for (const QJsonValue &item : value.toArray()) {
+            add(item);
+        }
+    } else if (!value.isUndefined() && !value.isNull()) {
+        add(value);
+    }
+    return labels;
+}
+
+// Normalizes the many question-tool shapes agents use into the fields the
+// QuestionWidget reads. Claude/OpenCode send {questions: [{question, options:
+// [{label}]}]}; simpler agents send {question, options: ["a"]}; others use
+// prompt/message. The normalized form is also written back to the details JSON
+// so history restoration and the suggestion/question card parsers see it.
+static void normalizeQuestionMetadata(PermissionRequest &request, QJsonObject *args, const QString &title)
+{
+    QJsonObject source = *args;
+    const QJsonValue nested = args->value(u"questions"_s);
+    if (nested.isArray() && !nested.toArray().isEmpty()) {
+        const QJsonObject first = nested.toArray().first().toObject();
+        if (!first.isEmpty()) {
+            source = first;
+        }
+    }
+
+    QString text = firstStringField(source, {u"question"_s, u"prompt"_s, u"message"_s, u"text"_s, u"header"_s});
+    if (text.isEmpty()) {
+        text = firstStringField(*args, {u"question"_s, u"prompt"_s, u"message"_s, u"text"_s, u"header"_s});
+    }
+    if (text.isEmpty() && !title.isEmpty() && title != request.originalToolName) {
+        text = title;
+    }
+    if (text.isEmpty() && request.summary != request.originalToolName && request.summary != request.toolName) {
+        text = request.summary;
+    }
+    if (text.isEmpty()) {
+        text = u"The agent is waiting for your answer."_s;
+    }
+
+    QStringList options = optionLabels(source.value(u"options"_s));
+    if (options.isEmpty()) {
+        options = optionLabels(args->value(u"options"_s));
+    }
+
+    const QJsonValue freeform = source.contains(u"allow_freeform"_s)
+        ? source.value(u"allow_freeform"_s)
+        : source.value(u"allowFreeform"_s);
+    request.allowFreeform = boolishValue(freeform, true);
+    // A card with neither options nor a text box cannot be answered.
+    if (options.isEmpty()) {
+        request.allowFreeform = true;
+    }
+
+    request.questionText = text;
+    request.questionOptions = options;
+    if (!text.isEmpty()) {
+        request.summary = text.left(200);
+    }
+
+    args->insert(u"question"_s, text);
+    if (!options.isEmpty()) {
+        args->insert(u"options"_s, QJsonArray::fromStringList(options));
+    }
+    args->insert(u"allow_freeform"_s, request.allowFreeform);
+}
+
+static void normalizeSuggestionMetadata(PermissionRequest &request, QJsonObject *args, const QString &title)
+{
+    QString text = firstStringField(*args, {u"suggestion"_s, u"message"_s, u"text"_s, u"description"_s,
+                                            u"content"_s, u"advice"_s, u"recommendation"_s});
+    if (text.isEmpty() && !title.isEmpty() && title != request.originalToolName) {
+        text = title;
+    }
+    if (text.isEmpty() && request.summary != request.originalToolName && request.summary != request.toolName) {
+        text = request.summary;
+    }
+    if (text.isEmpty()) {
+        return;
+    }
+
+    QString path = firstStringField(*args, {u"path"_s, u"file_path"_s, u"filePath"_s, u"file"_s,
+                                            u"target"_s, u"TargetFile"_s, u"uri"_s});
+    if (path.startsWith(u"file://"_s)) {
+        path = QUrl(path).toLocalFile();
+    }
+    int line = jsonIntValue(args->value(u"line"_s), 0);
+    if (line <= 0) {
+        line = jsonIntValue(args->value(u"start_line"_s), 0);
+    }
+    if (line <= 0) {
+        line = jsonIntValue(args->value(u"startLine"_s), 0);
+    }
+
+    args->insert(u"suggestion"_s, text);
+    if (!path.isEmpty()) {
+        args->insert(u"path"_s, path);
+        if (request.path.isEmpty()) {
+            request.path = path;
+        }
+    }
+    if (line > 0) {
+        args->insert(u"line"_s, line);
+    }
+    request.summary = text.left(200);
 }
 
 static QJsonObject envArrayToObject(const QJsonArray &env)
@@ -402,6 +584,14 @@ static bool collectEffortConfig(const QJsonArray &configOptions, QStringList *ef
 
 void AcpClient::ingestSessionModels(const QJsonObject &result, bool applyPreferred)
 {
+    // ACP v2 setup responses can carry the initial complete command list, and
+    // v1 setup responses (session/new, session/resume) do the same in recent
+    // agents. Only replace the list when the field is present: an update that
+    // omits it must not clear commands announced earlier.
+    if (result.contains(u"availableCommands"_s)) {
+        setAvailableCommands(result.value(u"availableCommands"_s).toArray());
+    }
+
     QStringList models;
     QString current;
     QString configId;
@@ -739,26 +929,102 @@ void AcpClient::cancelPendingPermission()
 
 void AcpClient::cancelPendingQuestion()
 {
+    if (m_permissionQuestion) {
+        const QString toolCallId = m_permissionRequest.toolCallId;
+        QJsonObject outcome;
+        outcome.insert(u"outcome"_s, u"cancelled"_s);
+        QJsonObject result;
+        result.insert(u"outcome"_s, outcome);
+        replyResult(m_permissionRpcId, result);
+        m_permissionRpcId = QJsonValue();
+        m_permissionOptions = QJsonArray();
+        m_permissionRequest = {};
+        m_permissionQuestion = false;
+        if (!toolCallId.isEmpty()) {
+            Q_EMIT questionCancelled(toolCallId);
+        }
+        askNextParkedMethod();
+        return;
+    }
     if (!hasPendingQuestion()) {
         return;
     }
-    // Same shape as the ask_user answer, but cancelled: the agent must be able
-    // to tell "the user dismissed this" apart from a real answer.
+    const QString toolCallId = m_questionRequest.toolCallId;
     QJsonObject result;
-    result.insert(u"cancelled"_s, true);
-    result.insert(u"answer"_s, QString());
+    if (m_questionIsElicitation) {
+        // ACP elicitation uses a three-action response, not the extension's
+        // {cancelled, answer} shape.
+        result.insert(u"action"_s, u"cancel"_s);
+    } else {
+        // Same shape as the ask_user answer, but cancelled: the agent must be
+        // able to tell "the user dismissed this" apart from a real answer.
+        result.insert(u"cancelled"_s, true);
+        result.insert(u"answer"_s, QString());
+    }
     replyResult(m_questionRpcId, result);
     m_questionRpcId = QJsonValue();
     m_questionRequest = {};
+    m_questionIsElicitation = false;
+    m_questionElicitationProperty.clear();
+    if (!toolCallId.isEmpty()) {
+        Q_EMIT questionCancelled(toolCallId);
+    }
 }
 
 void AcpClient::answerQuestion(const QString &answer)
 {
+    if (m_permissionQuestion) {
+        // A permission request used as an ask-user channel: the chosen label
+        // selects its optionId, which is the only answer ACP can carry back.
+        QString chosen;
+        for (const QJsonValue &value : std::as_const(m_permissionOptions)) {
+            const QJsonObject option = value.toObject();
+            const QString optionId = option.value(u"optionId"_s).toString();
+            if (optionId.isEmpty()) {
+                continue;
+            }
+            const QString label = firstStringField(option, {u"name"_s, u"label"_s, u"title"_s});
+            const QString text = answer.trimmed();
+            if (!text.isEmpty() && (text == optionId || text == label)) {
+                chosen = optionId;
+                break;
+            }
+        }
+        QJsonObject outcome;
+        if (chosen.isEmpty()) {
+            outcome.insert(u"outcome"_s, u"cancelled"_s);
+        } else {
+            outcome.insert(u"outcome"_s, u"selected"_s);
+            outcome.insert(u"optionId"_s, chosen);
+        }
+        QJsonObject result;
+        result.insert(u"outcome"_s, outcome);
+        replyResult(m_permissionRpcId, result);
+        m_permissionRpcId = QJsonValue();
+        m_permissionOptions = QJsonArray();
+        m_permissionRequest = {};
+        m_permissionQuestion = false;
+        askNextParkedMethod();
+        return;
+    }
     if (!hasPendingQuestion()) {
         return;
     }
     QJsonObject result;
-    if (answer.trimmed().isEmpty()) {
+    if (m_questionIsElicitation) {
+        if (answer.trimmed().isEmpty()) {
+            result.insert(u"action"_s, u"cancel"_s);
+        } else {
+            result.insert(u"action"_s, u"accept"_s);
+            QJsonObject content;
+            // The editor card asks one textual question. Map the answer onto
+            // the first schema property, which is what a single-field form
+            // means in practice.
+            const QString property = m_questionElicitationProperty.isEmpty() ? u"answer"_s : m_questionElicitationProperty;
+            content.insert(property, answer);
+            result.insert(u"content"_s, content);
+        }
+    } else if (answer.trimmed().isEmpty()) {
         result.insert(u"cancelled"_s, true);
         result.insert(u"answer"_s, QString());
     } else {
@@ -768,6 +1034,8 @@ void AcpClient::answerQuestion(const QString &answer)
     replyResult(m_questionRpcId, result);
     m_questionRpcId = QJsonValue();
     m_questionRequest = {};
+    m_questionIsElicitation = false;
+    m_questionElicitationProperty.clear();
 }
 
 void AcpClient::finishLiveTools(const QString &message)
@@ -866,8 +1134,13 @@ void AcpClient::stop()
     m_sessionId.clear();
     m_promptId = 0;
     m_permissionRpcId = QJsonValue();
+    m_permissionOptions = QJsonArray();
+    m_permissionRequest = {};
+    m_permissionQuestion = false;
     m_questionRpcId = QJsonValue();
     m_questionRequest = {};
+    m_questionIsElicitation = false;
+    m_questionElicitationProperty.clear();
     // The agent process is going away, so parked RPCs cannot be answered
     // meaningfully; drop them with the rest of the session state.
     m_parkedMethods.clear();
@@ -904,6 +1177,11 @@ void AcpClient::resetSession()
     m_resumeSessionId.clear();
     m_queued.clear();
     m_sessionNotesSent = false;
+    if (!m_availableCommands.isEmpty()) {
+        // Slash commands belonged to the outgoing session; the next
+        // session/new response replaces the list, and omission means none.
+        setAvailableCommands(QJsonArray());
+    }
     if (m_closeSession && !m_sessionId.isEmpty() && m_state == State::Ready) {
         QJsonObject params;
         params.insert(u"sessionId"_s, m_sessionId);
@@ -995,6 +1273,7 @@ void AcpClient::resolvePermission(PermissionDecision decision)
     m_permissionRpcId = QJsonValue();
     m_permissionOptions = QJsonArray();
     m_permissionRequest = {};
+    m_permissionQuestion = false;
     // An agent-initiated request that just resolved frees the question slot:
     // the next parked client method can be asked now.
     askNextParkedMethod();
@@ -1291,7 +1570,6 @@ void AcpClient::sendInitialize()
         // clamped to our v1 and simply does not get the v2 features.
         const int agentVersion = result.value(u"protocolVersion"_s).toInt(kAcpProtocolVersion);
         m_protocolVersion = qMin(agentVersion, kAcpProtocolVersion);
-        m_negotiatedVersion = m_protocolVersion;
         if (agentVersion != kAcpProtocolVersion) {
             Q_EMIT logMessage(u"ACP agent speaks protocol version %1; Kate AI negotiated %2."_s.arg(agentVersion).arg(m_protocolVersion));
         }
@@ -1301,8 +1579,6 @@ void AcpClient::sendInitialize()
         const QJsonObject sessionCaps = caps.value(u"sessionCapabilities"_s).toObject();
         m_resumeSession = sessionCaps.contains(u"resume"_s);
         m_closeSession = sessionCaps.contains(u"close"_s);
-        // v2 draft: elicitation is the standardized ask-the-user channel.
-        m_agentSupportsElicitation = m_negotiatedVersion >= 2 || caps.contains(u"elicitation"_s);
         maybeAuthenticate(result.value(u"authMethods"_s).toArray());
     });
 }
@@ -2016,18 +2292,19 @@ void AcpClient::handleNotification(const QJsonObject &message)
     } else if (method == u"config_option_update"_s) {
         ingestSessionModels(params, false);
     } else if (method == u"available_commands_update"_s) {
-        // Slash commands the agent offers (v1 extension used by several
-        // registry agents). Kept and announced; the composer can offer them
-        // later. Never fatal when the shape differs.
+        // Some non-conforming agents send this as a top-level notification.
+        // The protocol-defined form is a session/update variant, handled in
+        // handleSessionUpdate(); keep this as a compatibility fallback.
         const QJsonArray commands = params.value(u"availableCommands"_s).toArray();
-        if (commands.isEmpty()) {
-            m_availableCommands = params.value(u"commands"_s).toArray();
-        } else {
-            m_availableCommands = commands;
-        }
-        Q_EMIT availableCommandsChanged(m_availableCommands);
-        Q_EMIT logMessage(u"Agent advertised %1 slash command(s)."_s.arg(m_availableCommands.size()));
+        setAvailableCommands(commands.isEmpty() ? params.value(u"commands"_s).toArray() : commands);
     }
+}
+
+void AcpClient::setAvailableCommands(const QJsonArray &commands)
+{
+    m_availableCommands = commands;
+    Q_EMIT availableCommandsChanged(m_availableCommands);
+    Q_EMIT logMessage(u"Agent advertised %1 slash command(s)."_s.arg(m_availableCommands.size()));
 }
 
 // A plan entry's content is an array of content blocks in the ACP spec, but
@@ -2052,6 +2329,12 @@ void AcpClient::handleSessionUpdate(const QJsonObject &update)
     const QString kind = update.value(u"sessionUpdate"_s).toString();
     if (kind == u"config_option_update"_s || kind == u"available_models_update"_s || kind == u"current_model_update"_s) {
         ingestSessionModels(update, false);
+        return;
+    }
+    if (kind == u"available_commands_update"_s) {
+        // Protocol-defined form: params.update.sessionUpdate names the variant
+        // and availableCommands is the complete replacement list.
+        setAvailableCommands(update.value(u"availableCommands"_s).toArray());
         return;
     }
     if (kind == u"agent_message_chunk"_s) {
@@ -2239,12 +2522,32 @@ PermissionRequest AcpClient::permissionFromToolCall(const QJsonObject &toolCall)
     }
     // Normalize ACP/varied tool names to canonical KateAI names
     request.toolName = canonicalToolName(request.toolName);
-    request.summary = toolCall.value(u"title"_s).toString();
+    const QString title = toolCall.value(u"title"_s).toString().trimmed();
+    // Registry agents keep inventing names for the same two UI-only calls.
+    // The alias map catches the common ones; the title is the last hint when
+    // the name itself is unknown ("other", "tool", ...).
+    if (request.toolName == request.originalToolName) {
+        const QString probe = (request.originalToolName + u' ' + title).toLower();
+        if (probe.contains(u"suggest"_s) || probe.contains(u"propose"_s) || probe.contains(u"advice"_s)) {
+            request.toolName = u"suggest"_s;
+        } else if (probe.contains(u"question"_s)
+                   || (probe.contains(u"ask"_s)
+                       && (probe.contains(u"user"_s) || probe.contains(u"human"_s)))) {
+            request.toolName = u"question"_s;
+        }
+    }
+    request.summary = title;
     if (request.summary.isEmpty()) {
         request.summary = request.originalToolName.isEmpty() ? request.toolName : request.originalToolName;
     }
     const QString kind = toolCall.value(u"kind"_s).toString();
     request.risk = riskForKind(kind, request.toolName);
+    // These two tools only drive Kate's UI. A registry agent often labels them
+    // "other", which riskForKind() maps to Execute and would turn into a
+    // permission prompt; they must stay Read.
+    if (request.toolName == u"question"_s || request.toolName == u"suggest"_s) {
+        request.risk = ToolRisk::Read;
+    }
     // Every agent names its own tools, so the edit tracker cannot rely on
     // tool names here. The ACP kind is the protocol-level statement of what
     // the call does, and a diff content block proves the agent edited text.
@@ -2346,6 +2649,7 @@ PermissionRequest AcpClient::permissionFromToolCall(const QJsonObject &toolCall)
     if (contentArr.isEmpty() && toolCall.value(u"content"_s).isObject()) {
         contentArr = QJsonArray{toolCall.value(u"content"_s)};
     }
+    QString contentText;
     for (const QJsonValue &item : contentArr) {
         const QJsonObject obj = item.toObject();
         if (obj.isEmpty()) continue;
@@ -2353,10 +2657,13 @@ PermissionRequest AcpClient::permissionFromToolCall(const QJsonObject &toolCall)
         if (type == u"diff"_s) {
             addDiff(obj);
         } else if (type == u"content"_s || type == u"text"_s || type.isEmpty()) {
+            const QString t = contentBlockText(obj.contains(u"content"_s) ? obj.value(u"content"_s) : item);
+            if (!t.isEmpty() && contentText.isEmpty()) {
+                contentText = t;
+            }
             // Try to extract text for details if empty
-            if (request.details.isEmpty()) {
-                const QString t = contentBlockText(obj.contains(u"content"_s) ? obj.value(u"content"_s) : item);
-                if (!t.isEmpty()) request.details = t;
+            if (request.details.isEmpty() && !t.isEmpty()) {
+                request.details = t;
             }
         }
     }
@@ -2365,6 +2672,38 @@ PermissionRequest AcpClient::permissionFromToolCall(const QJsonObject &toolCall)
         const QJsonObject co = c.toObject();
         if (co.value(u"type"_s).toString() == u"diff"_s) {
             addDiff(co);
+        }
+    }
+
+    // Question and suggestion tools are UI-only, but every agent names and
+    // shapes them differently. Normalize the arguments once here so the card,
+    // the history, and the transcript rebuild all see the same canonical
+    // `question`/`options`/`suggestion`/`path`/`line` fields. This runs after
+    // content blocks so a title-only tool_call whose real text lives in a
+    // content block still gets it.
+    if (request.toolName == u"question"_s || request.toolName == u"suggest"_s) {
+        QJsonObject semanticArgs = normalizedArgs;
+        if (semanticArgs.isEmpty() && !request.details.trimmed().isEmpty()) {
+            const QJsonDocument doc = QJsonDocument::fromJson(request.details.toUtf8());
+            if (doc.isObject()) {
+                semanticArgs = doc.object();
+            } else {
+                // The agent sent the advice/question as plain text rather than
+                // JSON; keep it as the text field so the card is not blank.
+                semanticArgs.insert(u"text"_s, request.details);
+            }
+        }
+        if (!contentText.isEmpty() && !semanticArgs.contains(u"text"_s)) {
+            semanticArgs.insert(u"text"_s, contentText);
+        }
+        if (request.toolName == u"question"_s) {
+            normalizeQuestionMetadata(request, &semanticArgs, title);
+        } else {
+            normalizeSuggestionMetadata(request, &semanticArgs, title);
+        }
+        if (!semanticArgs.isEmpty()) {
+            normalizedArgs = semanticArgs;
+            request.details = jsonText(semanticArgs);
         }
     }
 
@@ -2611,6 +2950,39 @@ void AcpClient::handleRequestPermission(const QJsonValue &id, const QJsonObject 
     m_permissionRpcId = id;
     m_permissionOptions = params.value(u"options"_s).toArray();
     m_permissionRequest = request;
+
+    // Some agents without a dedicated ask-user method tunnel their question
+    // through session/request_permission: the options are answer labels, not
+    // allow/reject decisions. Present those as a question card; selecting a
+    // chip responds with its optionId.
+    bool looksLikePermission = false;
+    for (const QJsonValue &value : std::as_const(m_permissionOptions)) {
+        const QString kind = value.toObject().value(u"kind"_s).toString();
+        if (kind.startsWith(u"allow"_s) || kind.startsWith(u"reject"_s)) {
+            looksLikePermission = true;
+            break;
+        }
+    }
+    const QStringList answerChoices = optionLabels(m_permissionOptions);
+    if (request.toolName == u"question"_s && !looksLikePermission && !answerChoices.isEmpty()) {
+        m_permissionQuestion = true;
+        QString text = request.questionText;
+        if (text.isEmpty()) {
+            text = request.summary;
+        }
+        if (text.isEmpty() || text == request.originalToolName || text == request.toolName) {
+            text = u"The agent is waiting for your answer."_s;
+        }
+        request.questionText = text;
+        request.questionOptions = answerChoices;
+        request.allowFreeform = false;
+        request.risk = ToolRisk::Read;
+        request.summary = text.left(200);
+        m_permissionRequest = request;
+        Q_EMIT questionAsked(request);
+        return;
+    }
+
     // Whether the request is answered by the user or auto-decided is the
     // AgentLoop's call: it owns the permission policy for every provider.
     Q_EMIT permissionNeeded(request);
@@ -2802,15 +3174,24 @@ void AcpClient::handleFsRead(const QJsonValue &id, const QJsonObject &params)
     }
     // Bound memory: whole-file read + split() duplicates; negative previously
     // meant unlimited. Cap the slice the agent can request per call.
-    const int line = qMax(0, params.value(u"line"_s).toInt(0));
-    const int limit = params.value(u"limit"_s).toInt(0) <= 0 ? 10000 : qMin(params.value(u"limit"_s).toInt(0), 10000);
-    const QStringList allLines = contents.split(u'\n');
+    const int line = qMax(0, jsonIntValue(params.value(u"line"_s), 0));
+    const int requestedLimit = jsonIntValue(params.value(u"limit"_s), 0);
+    const int limit = requestedLimit <= 0 ? 10000 : qMin(requestedLimit, 10000);
+    // Do not count the empty element after a trailing newline as a line: the
+    // native read_file does the same, and otherwise pagination promises a
+    // phantom next line.
+    QStringList allLines = contents.split(u'\n');
+    if (!allLines.isEmpty() && allLines.last().isEmpty()) {
+        allLines.removeLast();
+    }
     const int totalLines = contents.isEmpty() ? 0 : allLines.size();
+    const int start = line > 0 ? line - 1 : 0;
     QString sliced = sliceLines(contents, line, limit);
     // Same pagination note the native read_file appends, so agents learn the
     // next offset the same way on both paths.
-    if (totalLines > 0) {
-        const int start = line > 0 ? line - 1 : 0;
+    if (totalLines > 0 && start >= totalLines) {
+        sliced = u"[line %1 is past the end; the file has %2 line(s).]"_s.arg(line > 0 ? line : 1).arg(totalLines);
+    } else if (totalLines > 0) {
         const int shown = limit > 0 ? qMin(limit, totalLines - start) : totalLines - start;
         const int remaining = totalLines - (start + (shown > 0 ? shown : 0));
         if (remaining > 0) {
@@ -2849,6 +3230,10 @@ void AcpClient::handleFsWrite(const QJsonValue &id, const QJsonObject &params)
     }
     if (!m_bridge) {
         replyError(id, kInternalError, u"No document bridge is available."_s);
+        return;
+    }
+    if (!params.contains(u"content"_s)) {
+        replyError(id, kInvalidParams, u"content is required (pass an empty string to write an empty file)."_s);
         return;
     }
     if (!m_bridge->writeDocument(path, params.value(u"content"_s).toString(), &error)) {
@@ -2906,15 +3291,13 @@ void AcpClient::handleSuggest(const QJsonValue &id, const QJsonObject &params)
         suggestion.path = QDir(m_workspace).absoluteFilePath(suggestion.path);
     }
     const QJsonValue lineValue = params.value(u"line"_s);
-    if (lineValue.isDouble()) {
-        suggestion.line = lineValue.toInt();
-        if (suggestion.line < 1) {
+    if (!lineValue.isUndefined() && !lineValue.isNull()) {
+        const int line = jsonIntValue(lineValue, -1);
+        if (line < 1) {
             replyError(id, kInvalidParams, u"line must be a 1-based line number, or leave it out."_s);
             return;
         }
-    } else if (!lineValue.isUndefined() && !lineValue.isNull()) {
-        replyError(id, kInvalidParams, u"line must be a 1-based line number, or leave it out."_s);
-        return;
+        suggestion.line = line;
     }
 
     Q_EMIT suggestionPosted(suggestion);
@@ -3197,8 +3580,8 @@ void AcpClient::handleLspHover(const QJsonValue &id, const QJsonObject &params)
         replyError(id, kServerError, error);
         return;
     }
-    const int line = qMax(1, params.value(u"line"_s).toInt(1));
-    const int column = qMax(1, params.value(u"column"_s).toInt(1));
+    const int line = qMax(1, jsonIntValue(params.value(u"line"_s), 1));
+    const int column = qMax(1, jsonIntValue(params.value(u"column"_s), 1));
     const QString hover = m_lsp->hover(path, line, column);
     QJsonObject result;
     result.insert(u"content"_s, hover.isEmpty() ? u"No hover information at %1:%2:%3."_s.arg(path).arg(line).arg(column) : hover);
@@ -3221,8 +3604,8 @@ void AcpClient::handleLspDefinition(const QJsonValue &id, const QJsonObject &par
         replyError(id, kServerError, error);
         return;
     }
-    const int line = qMax(1, params.value(u"line"_s).toInt(1));
-    const int column = qMax(1, params.value(u"column"_s).toInt(1));
+    const int line = qMax(1, jsonIntValue(params.value(u"line"_s), 1));
+    const int column = qMax(1, jsonIntValue(params.value(u"column"_s), 1));
     const QList<LspLocation> defs = m_lsp->definitions(path, line, column);
     QStringList lines;
     if (defs.isEmpty()) {
@@ -3253,8 +3636,8 @@ void AcpClient::handleLspReferences(const QJsonValue &id, const QJsonObject &par
         replyError(id, kServerError, error);
         return;
     }
-    const int line = qMax(1, params.value(u"line"_s).toInt(1));
-    const int column = qMax(1, params.value(u"column"_s).toInt(1));
+    const int line = qMax(1, jsonIntValue(params.value(u"line"_s), 1));
+    const int column = qMax(1, jsonIntValue(params.value(u"column"_s), 1));
     const bool includeDeclaration = params.value(u"include_declaration"_s).toBool(true);
     const QList<LspLocation> refs = m_lsp->references(path, line, column, includeDeclaration);
     QStringList lines;
@@ -3286,8 +3669,8 @@ void AcpClient::handleLspCodeActions(const QJsonValue &id, const QJsonObject &pa
         replyError(id, kServerError, error);
         return;
     }
-    const int line = qMax(1, params.value(u"line"_s).toInt(1));
-    const int column = qMax(1, params.value(u"column"_s).toInt(1));
+    const int line = qMax(1, jsonIntValue(params.value(u"line"_s), 1));
+    const int column = qMax(1, jsonIntValue(params.value(u"column"_s), 1));
     const QStringList actions = m_lsp->codeActions(path, line, column);
     QStringList lines;
     if (actions.isEmpty()) {
@@ -3330,21 +3713,34 @@ void AcpClient::handleElicitationCreate(const QJsonValue &id, const QJsonObject 
 {
     const QString message = params.value(u"message"_s).toString().trimmed();
     QStringList options;
+    QString firstProperty;
     const QJsonObject schema = params.value(u"requestedSchema"_s).toObject();
     const QJsonObject properties = schema.value(u"properties"_s).toObject();
     for (auto it = properties.begin(); it != properties.end(); ++it) {
-        const QJsonArray enumValues = it.value().toObject().value(u"enum"_s).toArray();
-        for (const QJsonValue &v : enumValues) {
+        if (firstProperty.isEmpty()) {
+            firstProperty = it.key();
+        }
+        const QJsonObject property = it.value().toObject();
+        for (const QJsonValue &v : property.value(u"enum"_s).toArray()) {
             const QString option = v.toString();
             if (!option.isEmpty()) {
                 options.append(option);
             }
         }
+        // v2 also expresses single-select options as oneOf: [{const, title}].
+        for (const QJsonValue &v : property.value(u"oneOf"_s).toArray()) {
+            const QJsonObject option = v.toObject();
+            const QString label = option.value(u"title"_s).toString(option.value(u"const"_s).toString());
+            if (!label.isEmpty() && !options.contains(label)) {
+                options.append(label);
+            }
+        }
     }
-    askUser(id, message, options, true);
+    askUser(id, message, options, true, true, firstProperty);
 }
 
-void AcpClient::askUser(const QJsonValue &id, const QString &question, const QStringList &options, bool allowFreeform)
+void AcpClient::askUser(const QJsonValue &id, const QString &question, const QStringList &options, bool allowFreeform,
+                        bool elicitation, const QString &elicitationProperty)
 {
     if (question.isEmpty()) {
         replyError(id, kInvalidParams, u"question must not be empty: state what you are asking the user."_s);
@@ -3354,6 +3750,8 @@ void AcpClient::askUser(const QJsonValue &id, const QString &question, const QSt
     // question as cancelled before parking this one, or the agent blocks on it.
     cancelPendingQuestion();
     m_questionRpcId = id;
+    m_questionIsElicitation = elicitation;
+    m_questionElicitationProperty = elicitationProperty;
     PermissionRequest request;
     request.toolName = u"question"_s;
     request.toolCallId = QUuid::createUuid().toString(QUuid::WithoutBraces);

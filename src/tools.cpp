@@ -908,9 +908,16 @@ ToolResult ToolRunner::writeFile(const QJsonObject &args)
         return result;
     }
     
-    // Get the content to write from the tool arguments
+    // A missing content key must not truncate an existing file: a truncated
+    // stream or a malformed model call would otherwise silently empty it. An
+    // explicit empty string is still a valid write.
+    if (!args.contains(u"content"_s)) {
+        result.ok = false;
+        result.output = u"content is required (pass an empty string to write an empty file)."_s;
+        return result;
+    }
     const QString content = args.value(u"content"_s).toString();
-    
+
     // Write the content to the file through the document bridge
     if (!m_bridge || !m_bridge->writeDocument(resolved, content, &error)) {
         result.ok = false;
@@ -1273,6 +1280,12 @@ ToolResult ToolRunner::listDir(const QJsonObject &args) const
     bool truncated = false;
     int skippedDenied = 0;
     while (iterator.hasNext()) {
+        if (readCancelled()) {
+            result.ok = false;
+            result.cancelled = true;
+            result.output = u"Read cancelled because the turn ended."_s;
+            return result;
+        }
         iterator.next();
         const QFileInfo info = iterator.fileInfo();
         if (m_sandbox.isDenied(info.absoluteFilePath())) {
@@ -1319,7 +1332,7 @@ ToolResult ToolRunner::grep(const QJsonObject &args) const
     const QString pattern = args.value(u"pattern"_s).toString();
     const QString globFilter = args.value(u"glob"_s).toString();
     const bool caseInsensitive = jsonBool(args.value(u"case_insensitive"_s));
-    const int context = qBound(0, args.value(u"context"_s).toInt(0), 5);
+    const int context = qBound(0, jsonInt(args.value(u"context"_s), 0), 5);
 
     QString error;
     const QString path = args.value(u"path"_s).toString();
@@ -1353,6 +1366,9 @@ ToolResult ToolRunner::grep(const QJsonObject &args) const
     QStringList hits;
     int skippedFiles = 0;
     auto searchFile = [&](const QString &filePath) {
+        if (readCancelled()) {
+            return;
+        }
         if (m_sandbox.isDenied(filePath) || !m_sandbox.allowsRead(filePath, nullptr)) {
             return;
         }
@@ -1389,6 +1405,9 @@ ToolResult ToolRunner::grep(const QJsonObject &args) const
         const QStringList lines = contents.split(u'\n');
         int lastMatchEnd = -1; // Track end of last context block to avoid duplicate separators
         for (int i = 0; i < lines.size(); ++i) {
+            if ((i & 0x3ff) == 0 && readCancelled()) {
+                return;
+            }
             if (!re.match(lines.at(i)).hasMatch()) {
                 continue;
             }
@@ -1423,8 +1442,18 @@ ToolResult ToolRunner::grep(const QJsonObject &args) const
     } else {
         QDirIterator it(resolved, QDir::Files, QDirIterator::Subdirectories);
         while (it.hasNext() && hits.size() < 200) {
+            if (readCancelled()) {
+                break;
+            }
             searchFile(it.next());
         }
+    }
+
+    if (readCancelled()) {
+        result.ok = false;
+        result.cancelled = true;
+        result.output = u"Read cancelled because the turn ended."_s;
+        return result;
     }
 
     // Format the search results
@@ -1482,6 +1511,12 @@ ToolResult ToolRunner::glob(const QJsonObject &args) const
     int skippedDenied = 0;
     QDirIterator it(base, QDir::Files, QDirIterator::Subdirectories);
     while (it.hasNext()) {
+        if (readCancelled()) {
+            result.ok = false;
+            result.cancelled = true;
+            result.output = u"Read cancelled because the turn ended."_s;
+            return result;
+        }
         if (matches.size() >= 400) {
             capped = true;
             break;
@@ -1695,13 +1730,29 @@ QString ToolRunner::BashBuffer::view() const
 
 bool ToolRunner::isAsyncReadTool(const QString &toolName)
 {
-    // Only pure read tools whose inputs come from disk are offloaded. Anything
-    // touching the Kate bridge (open buffers), the project graph or the LSP
-    // provider stays on the caller's thread: those are editor-owned objects.
+    // Only pure disk tools are offloaded. read_file is deliberately excluded:
+    // it must see an open editor buffer, and KTextEditor documents cannot be
+    // touched from the worker thread. Tools that use the project graph or LSP
+    // provider also stay on the caller's thread.
     static const QSet<QString> kAsyncReadTools = {
-        u"read_file"_s, u"list_dir"_s, u"grep"_s, u"glob"_s,
+        u"list_dir"_s, u"grep"_s, u"glob"_s,
     };
     return kAsyncReadTools.contains(toolName);
+}
+
+bool ToolRunner::readCancelled() const
+{
+    return m_cancelFlag && m_cancelFlag->load();
+}
+
+void ToolRunner::cancelReadTools()
+{
+    for (const auto &flag : std::as_const(m_readJobs)) {
+        if (flag) {
+            flag->store(true);
+        }
+    }
+    m_readJobs.clear();
 }
 
 ToolRunner::~ToolRunner()
@@ -1710,8 +1761,17 @@ ToolRunner::~ToolRunner()
     // a worker thread that outlives the application crashes teardown in some
     // KF6 builds (KDirWatch's destructor calls deleteLater on a dead thread).
     if (m_workerThread) {
+        cancelReadTools();
         m_workerThread->quit();
-        m_workerThread->wait(5000);
+        // The jobs check the cancellation flag at every file/line boundary.
+        // Wait for them rather than destroying a running QThread; the bounded
+        // wait covers the common case, and a long filesystem read is allowed
+        // to finish because terminating a thread mid-I/O is not safe.
+        if (!m_workerThread->wait(5000)) {
+            m_workerThread->wait();
+        }
+        delete m_workerContext;
+        m_workerContext = nullptr;
     }
 }
 
@@ -1730,12 +1790,17 @@ bool ToolRunner::runReadToolAsync(const ToolCall &call)
         m_workerContext->moveToThread(m_workerThread);
         m_workerThread->start();
     }
+    auto cancelFlag = std::make_shared<std::atomic_bool>(false);
+    m_readJobs.append(cancelFlag);
     const QPointer<ToolRunner> guard(this);
-    QMetaObject::invokeMethod(m_workerContext, [guard, call, sandbox]() {
-        // A disk-only bridge on the worker: reading open documents would call
-        // into KTextEditor from a non-GUI thread.
+    QMetaObject::invokeMethod(m_workerContext, [guard, call, sandbox, cancelFlag]() {
+        // The worker must never touch an open KTextEditor document: that is
+        // GUI-thread state. setUseOpenDocuments(false) makes the bridge read
+        // straight from disk, which is the only safe thing to do here.
         DiskDocumentBridge diskBridge;
+        diskBridge.setUseOpenDocuments(false);
         ToolRunner worker(sandbox, &diskBridge);
+        worker.m_cancelFlag = cancelFlag;
         ToolResult result = worker.run(call);
         // The per-tool runners build a fresh ToolResult and leave the id empty;
         // the async path keys cards on it, so stamp it here.
@@ -1748,8 +1813,9 @@ bool ToolRunner::runReadToolAsync(const ToolCall &call)
         // The runner may be gone by the time the search finishes (turn aborted,
         // loop destroyed); then the result is simply dropped.
         if (guard) {
-            QMetaObject::invokeMethod(guard.data(), [guard, result]() {
+            QMetaObject::invokeMethod(guard.data(), [guard, cancelFlag, result]() {
                 if (guard) {
+                    guard->m_readJobs.removeAll(cancelFlag);
                     Q_EMIT guard->bashFinished(result);
                 }
             }, Qt::QueuedConnection);
@@ -2304,8 +2370,8 @@ ToolResult ToolRunner::lspHover(const QJsonObject &args) const
         result.output = resolved.isEmpty() ? u"path is required."_s : error;
         return result;
     }
-    const int line = qMax(1, args.value(u"line"_s).toInt(1));
-    const int column = qMax(1, args.value(u"column"_s).toInt(1));
+    const int line = qMax(1, jsonInt(args.value(u"line"_s), 1));
+    const int column = qMax(1, jsonInt(args.value(u"column"_s), 1));
 
     if (m_lsp && m_lsp->isAvailable()) {
         const QString text = m_lsp->hover(resolved, line, column);
@@ -2370,8 +2436,8 @@ ToolResult ToolRunner::lspDefinition(const QJsonObject &args) const
         result.output = resolved.isEmpty() ? u"path is required."_s : error;
         return result;
     }
-    const int line = qMax(1, args.value(u"line"_s).toInt(1));
-    const int column = qMax(1, args.value(u"column"_s).toInt(1));
+    const int line = qMax(1, jsonInt(args.value(u"line"_s), 1));
+    const int column = qMax(1, jsonInt(args.value(u"column"_s), 1));
 
     if (m_lsp && m_lsp->isAvailable()) {
         const QList<LspLocation> locations = m_lsp->definitions(resolved, line, column);
@@ -2441,8 +2507,8 @@ ToolResult ToolRunner::lspReferences(const QJsonObject &args) const
         result.output = resolved.isEmpty() ? u"path is required."_s : error;
         return result;
     }
-    const int line = qMax(1, args.value(u"line"_s).toInt(1));
-    const int column = qMax(1, args.value(u"column"_s).toInt(1));
+    const int line = qMax(1, jsonInt(args.value(u"line"_s), 1));
+    const int column = qMax(1, jsonInt(args.value(u"column"_s), 1));
     const bool includeDeclaration = jsonBool(args.value(u"include_declaration"_s), true);
 
     if (m_lsp && m_lsp->isAvailable()) {
@@ -2496,8 +2562,8 @@ ToolResult ToolRunner::lspCodeActions(const QJsonObject &args) const
         result.output = resolved.isEmpty() ? u"path is required."_s : error;
         return result;
     }
-    const int line = qMax(1, args.value(u"line"_s).toInt(1));
-    const int column = qMax(1, args.value(u"column"_s).toInt(1));
+    const int line = qMax(1, jsonInt(args.value(u"line"_s), 1));
+    const int column = qMax(1, jsonInt(args.value(u"column"_s), 1));
 
     QStringList actions;
     if (m_lsp && m_lsp->isAvailable()) {
@@ -2662,11 +2728,16 @@ ToolResult ToolRunner::applyPatch(const QJsonObject &args)
         QString resolved;
         QString displayPath;
         QString newContent;
+        QString oldContent;
         bool existed = false;
+        bool isDelete = false;
     };
     QList<PlannedWrite> planned;
+    QSet<QString> plannedPaths;
     for (const PatchFile &file : files) {
-        if (file.path.isEmpty() || file.hunks.isEmpty()) {
+        // A deletion may arrive without hunks (the whole file goes away); an
+        // edit must have at least one.
+        if (file.path.isEmpty() || (!file.isDelete && file.hunks.isEmpty())) {
             result.ok = false;
             result.output = u"Patch section without a path or without hunks: %1"_s.arg(file.oldPath.isEmpty() ? file.path : file.oldPath);
             return result;
@@ -2683,11 +2754,13 @@ ToolResult ToolRunner::applyPatch(const QJsonObject &args)
             result.output = error;
             return result;
         }
-        if (file.isDelete) {
-            // +++ /dev/null: the whole file goes away; no hunks to apply.
-            planned.append({resolved, file.path, QString(), QFileInfo::exists(resolved)});
-            continue;
+        if (plannedPaths.contains(resolved)) {
+            result.ok = false;
+            result.output = u"Patch names %1 more than once; split it into one section per file so the changes cannot overwrite each other."_s.arg(file.path);
+            return result;
         }
+        plannedPaths.insert(resolved);
+
         QString current;
         bool existed = false;
         if (m_bridge && m_bridge->readDocument(resolved, &current)) {
@@ -2698,48 +2771,93 @@ ToolResult ToolRunner::applyPatch(const QJsonObject &args)
                 current = QString::fromUtf8(disk.readAll());
                 disk.close();
                 existed = true;
-            } else if (!file.isNew) {
-                result.ok = false;
-                result.output = u"Cannot read %1: %2"_s.arg(file.path, disk.errorString().isEmpty() ? u"file not found"_s : disk.errorString());
-                return result;
             }
+        }
+        if (!existed && file.isDelete) {
+            result.ok = false;
+            result.output = u"Patch deletes %1, but that file does not exist."_s.arg(file.path);
+            return result;
+        }
+        if (!existed && !file.isNew) {
+            result.ok = false;
+            result.output = u"Cannot read %1: file not found."_s.arg(file.path);
+            return result;
+        }
+        if (file.isDelete) {
+            // +++ /dev/null: the whole file goes away; no hunks to apply.
+            planned.append({resolved, file.path, QString(), current, existed, true});
+            continue;
         }
         QString applyError;
         const QString newContent = applyPatchToContent(current, file.hunks, &applyError);
-        if (newContent.isNull() && !applyError.isEmpty()) {
+        if (!applyError.isEmpty()) {
             result.ok = false;
             result.output = u"Patch does not apply to %1: %2"_s.arg(file.path, applyError);
             return result;
         }
-        planned.append({resolved, file.path, newContent, existed});
+        planned.append({resolved, file.path, newContent, current, existed, false});
     }
 
-    // Phase 2: write everything.
+    // Phase 2: write everything. If a write fails, undo the files already
+    // written so the tool's documented all-or-nothing contract holds even when
+    // the failure happens late (a permission error, an open modified buffer,
+    // a full disk).
+    const auto writeContent = [this](const QString &resolved, const QString &content, QString *error) {
+        return m_bridge && m_bridge->writeDocument(resolved, content, error);
+    };
+    const auto removeFile = [this](const QString &resolved, QString *error) {
+        if (m_bridge) {
+            return m_bridge->removeDocument(resolved, error);
+        }
+        if (!QFileInfo::exists(resolved)) {
+            if (error) {
+                *error = u"File does not exist."_s;
+            }
+            return false;
+        }
+        if (!QFile::remove(resolved)) {
+            if (error) {
+                *error = u"Could not delete the file."_s;
+            }
+            return false;
+        }
+        return true;
+    };
+
     QStringList written;
+    int applied = 0;
     for (const PlannedWrite &w : planned) {
         QString error;
-        if (w.newContent.isNull()) {
-            // Deletion (+++ /dev/null): a null content is the marker, because
-            // a real patch result is never null, only possibly empty.
-            if (!w.existed) {
-                result.ok = false;
-                result.output = u"Patch deletes %1, but that file does not exist."_s.arg(w.displayPath);
-                return result;
+        const bool ok = w.isDelete ? removeFile(w.resolved, &error)
+                                   : writeContent(w.resolved, w.newContent, &error);
+        if (!ok) {
+            // Roll back in reverse order. A failure here cannot be hidden: the
+            // caller must know the workspace may be partially changed.
+            int rolledBack = 0;
+            QStringList rollbackErrors;
+            for (int i = applied - 1; i >= 0; --i) {
+                const PlannedWrite &undo = planned.at(i);
+                QString undoError;
+                const bool undone = undo.existed
+                    ? writeContent(undo.resolved, undo.oldContent, &undoError)
+                    : removeFile(undo.resolved, &undoError);
+                if (undone) {
+                    ++rolledBack;
+                } else {
+                    rollbackErrors.append(u"%1 (%2)"_s.arg(undo.displayPath, undoError));
+                }
             }
-            if (!QFile::remove(w.resolved)) {
-                result.ok = false;
-                result.output = u"Patch computed cleanly but deleting %1 failed."_s.arg(w.displayPath);
-                return result;
-            }
-            written.append(u"deleted %1"_s.arg(w.displayPath));
-            continue;
-        }
-        if (!m_bridge || !m_bridge->writeDocument(w.resolved, w.newContent, &error)) {
             result.ok = false;
-            result.output = u"Patch computed cleanly but writing %1 failed: %2"_s.arg(w.displayPath, error);
+            result.output = u"Patch computed cleanly but %1 %2 failed: %3"_s
+                                .arg(w.isDelete ? u"deleting"_s : u"writing"_s, w.displayPath, error);
+            result.output += u"\nRolled back %1 of %2 already-applied file(s)."_s.arg(rolledBack).arg(applied);
+            if (!rollbackErrors.isEmpty()) {
+                result.output += u"\nRollback failed for: %1. Check these files before continuing."_s.arg(rollbackErrors.join(u", "_s));
+            }
             return result;
         }
-        written.append(u"patched %1"_s.arg(w.displayPath));
+        written.append(w.isDelete ? u"deleted %1"_s.arg(w.displayPath) : u"patched %1"_s.arg(w.displayPath));
+        ++applied;
     }
 
     result.ok = true;

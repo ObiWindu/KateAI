@@ -99,11 +99,17 @@ AgentLoop::AgentLoop(QObject *parent)
     });
     // The agent asked the user something through _kateai/ask_user (or an
     // elicitation request). The RPC is parked in the client until
-    // answerQuestion() replies, so the turn is already blocked agent-side; all
-    // the loop does is show the card and remember that this turn's answer goes
-    // to the ACP RPC rather than to a native tool result.
+    // answerQuestion() replies, so the turn is already blocked agent-side; the
+    // loop only shows the card. answerQuestion() checks the client for a
+    // parked RPC before falling back to the native question state.
     connect(&m_acp, &AcpClient::questionAsked, this, [this](const PermissionRequest &request) {
-        m_acpQuestionPending = true;
+        // A parked client method takes precedence over an agent-side question
+        // tool card; only one question can be answered at a time.
+        if (!m_acpToolQuestionId.isEmpty()) {
+            Q_EMIT questionCancelled(m_acpToolQuestionId);
+            m_acpToolQuestionId.clear();
+        }
+        m_pendingAcpAnswer.clear();
         Q_EMIT questionAsked(request);
         Q_EMIT statusChanged(i18n("Waiting for your answer…"));
     });
@@ -115,11 +121,18 @@ AgentLoop::AgentLoop(QObject *parent)
     connect(&m_acp, &AcpClient::toolStarted, this, [this](const PermissionRequest &request) {
         ++m_toolCalls;
         Q_EMIT toolStarted(request);
-        // An agent-side question tool call (ask_user & friends) cannot be
-        // answered by Kate — the agent produces its own result — but the user
-        // should still see it as a question, not as a dead tool card.
-        if (isQuestionTool(request.toolName)) {
+        // Agent-side question tools are not ACP client methods, so there is no
+        // RPC result to fill. They still deserve the same answerable card: the
+        // answer becomes the next prompt once this turn closes. A parked
+        // _kateai/ask_user RPC already has a card, so don't stack a second one.
+        if (isQuestionTool(request.toolName) && !m_acp.hasPendingQuestion()) {
+            if (!m_acpToolQuestionId.isEmpty() && m_acpToolQuestionId != request.toolCallId) {
+                Q_EMIT questionCancelled(m_acpToolQuestionId);
+            }
+            m_acpToolQuestionId = request.toolCallId;
             Q_EMIT questionAsked(request);
+            Q_EMIT statusChanged(i18n("Waiting for your answer…"));
+            return;
         }
         Q_EMIT statusChanged(u"Working on the next step…"_s);
     });
@@ -964,7 +977,6 @@ void AgentLoop::resetConversation()
     m_currentThinking.clear();
     m_currentPlan = QJsonArray();
     m_planShown = false;
-    m_acpQuestionPending = false;
     m_currentAssistant.clear();
 }
 
@@ -972,6 +984,14 @@ void AgentLoop::abort()
 {
     const bool hadActiveTurn = m_busy || m_client.isBusy() || m_acp.isBusy() || !m_queue.isEmpty() || !m_pendingResults.isEmpty()
         || !m_waitingCall.name.isEmpty() || m_nextModelTimer.isActive() || !m_activeSubtasks.isEmpty();
+
+    // Anything still running belongs to the turn being closed. The generation
+    // bump makes late async results recognisable as stale, and the read jobs
+    // are asked to stop at their next boundary.
+    ++m_turnGeneration;
+    if (m_tools) {
+        m_tools->cancelReadTools();
+    }
 
     m_nextModelTimer.stop();
     m_client.abort();
@@ -1004,6 +1024,8 @@ void AgentLoop::abort()
     // turn fail with "The agent is not ready for another model request."
     m_busy = false;
     m_state = State::Idle;
+    m_pendingAcpAnswer.clear();
+    m_acpToolQuestionId.clear();
 
     // A snapshot that was waiting for this turn cannot resume now.
     clearCheckpointWait();
@@ -1090,6 +1112,17 @@ void AgentLoop::start(const QString &userText)
     if (m_sandboxDirty) {
         rebuildTools();
     }
+
+    // A new user turn supersedes any question card left over from the previous
+    // turn that was never answered.
+    if (!m_acpToolQuestionId.isEmpty()) {
+        Q_EMIT questionCancelled(m_acpToolQuestionId);
+        m_acpToolQuestionId.clear();
+    }
+    m_pendingAcpAnswer.clear();
+
+    // A new turn invalidates every async result captured by the previous one.
+    ++m_turnGeneration;
 
     if (usesAcpNative(m_settings)) {
         startAcpTurn(userText);
@@ -1374,6 +1407,8 @@ void AgentLoop::startAcpTurn(const QString &userText)
     m_planShown = false;
     m_checkpointTaken = false;
     m_pendingAcpPrompt.clear();
+    m_acpToolQuestionId.clear();
+    m_pendingAcpAnswer.clear();
     m_taskSummary = userText.simplified().left(80);
 
     ChatMessage user;
@@ -1486,8 +1521,46 @@ QJsonObject AgentLoop::effectiveArgs(const ToolCall &call) const
 
 bool AgentLoop::isMutationTool(const QString &toolName) const
 {
-    return toolName == u"write_file"_s || toolName == u"edit_file"_s
-        || toolName == u"multi_edit_file"_s || toolName == u"multi_replace_file_content"_s;
+    const QString canonical = canonicalToolName(toolName);
+    return canonical == u"write_file"_s || canonical == u"edit_file"_s
+        || canonical == u"multi_edit_file"_s || canonical == u"apply_patch"_s;
+}
+
+QStringList AgentLoop::mutationPathsForCall(const ToolCall &call) const
+{
+    QStringList paths;
+    const auto addPath = [&paths](const QString &raw) {
+        const QString path = raw.trimmed();
+        if (!path.isEmpty() && !paths.contains(path)) {
+            paths.append(path);
+        }
+    };
+
+    const QJsonObject args = effectiveArgs(call);
+    if (canonicalToolName(call.name) == u"apply_patch"_s) {
+        // A patch may span several files; every one is locked and recorded, so
+        // two agents cannot interleave writes to the same file.
+        for (const PatchFile &file : parseUnifiedPatch(args.value(u"patch"_s).toString())) {
+            addPath(file.path);
+        }
+        return paths;
+    }
+
+    QString path = args.value(u"path"_s).toString();
+    if (path.isEmpty()) {
+        path = args.value(u"file_path"_s).toString();
+    }
+    if (path.isEmpty()) {
+        path = args.value(u"filePath"_s).toString();
+    }
+    if (path.isEmpty()) {
+        path = args.value(u"file"_s).toString();
+    }
+    if (path.isEmpty()) {
+        path = args.value(u"TargetFile"_s).toString();
+    }
+    addPath(path);
+    return paths;
 }
 
 bool AgentLoop::isRepeatSensitiveTool(const QString &toolName) const
@@ -1508,7 +1581,8 @@ void AgentLoop::appendControllerMessage(const QString &content)
 
 bool AgentLoop::isVerificationTool(const QString &toolName) const
 {
-    return toolName == u"read_file"_s || toolName == u"grep"_s || toolName == u"bash"_s;
+    return toolName == u"read_file"_s || toolName == u"grep"_s || toolName == u"bash"_s
+        || toolName == u"lsp_diagnostics"_s;
 }
 
 bool AgentLoop::isVerificationForChangedFiles(const ToolCall &call) const
@@ -1526,8 +1600,9 @@ bool AgentLoop::isVerificationForChangedFiles(const ToolCall &call) const
     }
     // grep/bash can be a real verification when the command/search is not
     // tied to a specific path; the model is explicitly instructed to use them
-    // for tests/builds/checks after changes.
-    return call.name == u"grep"_s || call.name == u"bash"_s;
+    // for tests/builds/checks after changes. LSP diagnostics is the editor's
+    // own check and is at least as strong evidence as a text search.
+    return call.name == u"grep"_s || call.name == u"bash"_s || call.name == u"lsp_diagnostics"_s;
 }
 
 QString AgentLoop::describePlannedWork(const QList<ToolCall> &calls) const
@@ -1708,11 +1783,7 @@ void AgentLoop::appendToolResult(const ToolCall &call, ToolResult result)
             ++m_stateEpoch;
         }
         m_actionRepeatCounts.clear();
-        QString path = call.arguments.value(u"path"_s).toString();
-        if (path.isEmpty()) {
-            path = call.arguments.value(u"TargetFile"_s).toString();
-        }
-        if (!path.isEmpty()) {
+        for (const QString &path : mutationPathsForCall(call)) {
             m_changedPaths.insert(path);
         }
         m_changesNeedVerification = true;
@@ -1912,6 +1983,8 @@ void AgentLoop::finishWithFailure(const QString &error)
     m_pendingResults.clear();
     m_waitingCall = {};
     m_waitingRequest = {};
+    m_pendingAcpAnswer.clear();
+    m_acpToolQuestionId.clear();
     clearCheckpointWait();
     m_currentThinking.clear();
     m_currentPlan = QJsonArray();
@@ -1959,6 +2032,15 @@ void AgentLoop::finishTurn()
     m_currentPlan = QJsonArray();
     m_planShown = false;
     m_currentAssistant.clear();
+    // An answer typed into an agent-side ACP question card is sent as the
+    // next user prompt, never injected into the finished turn. If the user has
+    // not answered yet, keep the card and its id alive after the turn ends: a
+    // late answer still starts the answer turn instead of vanishing.
+    const QString pendingAnswer = m_pendingAcpAnswer;
+    m_pendingAcpAnswer.clear();
+    if (!pendingAnswer.isEmpty()) {
+        m_acpToolQuestionId.clear();
+    }
     // The turn is over: apply a sandbox or workspace change that arrived
     // mid-turn and was deferred to keep the running command's environment.
     if (m_sandboxDirty) {
@@ -1966,6 +2048,13 @@ void AgentLoop::finishTurn()
     }
     Q_EMIT statusChanged(QString());
     Q_EMIT turnFinished();
+    if (!pendingAnswer.isEmpty()) {
+        QTimer::singleShot(0, this, [this, pendingAnswer]() {
+            if (!m_busy) {
+                start(pendingAnswer);
+            }
+        });
+    }
 }
 
 void AgentLoop::processQueue()
@@ -2439,8 +2528,9 @@ bool AgentLoop::isAsyncTool(const QString &toolName) const
 
 void AgentLoop::startWebTool(const ToolCall &call)
 {
-    const QString query = call.arguments.value(u"query"_s).toString().trimmed();
-    const QString url = call.arguments.value(u"url"_s).toString().trimmed();
+    const QJsonObject args = effectiveArgs(call);
+    const QString query = args.value(u"query"_s).toString().trimmed();
+    const QString url = args.value(u"url"_s).toString().trimmed();
 
     if (!m_web.isConfigured()) {
         ToolResult blocked;
@@ -2472,7 +2562,8 @@ void AgentLoop::startWebTool(const ToolCall &call)
         // Accept a string or a float too: QJsonValue::toInt() silently yields 0
         // for "5", which would drop the call's own limit and fall back to the
         // shared setting.
-        const int wanted = call.arguments.value(u"max_results"_s).toVariant().toInt();
+        const int wanted = args.value(u"max_results"_s).toVariant().toInt();
+        const QString site = args.value(u"site"_s).toString().trimmed();
         // m_web is shared for the lifetime of this loop, and several web calls
         // can be in flight at once. Each call owns its own connection and tears
         // it down when it completes, so a completion never consumes or wakes a
@@ -2507,7 +2598,7 @@ void AgentLoop::startWebTool(const ToolCall &call)
                     out.output = lines.join(u"\n"_s);
                     finishAsyncTool(call, out);
                 });
-        m_web.search(query, call.id, wanted);
+        m_web.search(query, call.id, wanted, site);
         return;
     }
 
@@ -2543,7 +2634,9 @@ void AgentLoop::startWebTool(const ToolCall &call)
     // before the request because a fetch can fail inline and finish the call
     // synchronously.
     Q_EMIT toolProgress(call.id, i18n("Connecting to %1…", QUrl(url).host()));
-    m_web.fetchPage(url, call.id);
+    const int timeoutMs = args.value(u"timeout_ms"_s).toVariant().toInt();
+    const qint64 maxBytes = args.value(u"max_bytes"_s).toVariant().toLongLong();
+    m_web.fetchPage(url, call.id, timeoutMs, maxBytes);
 }
 
 void AgentLoop::startBashTool(const ToolCall &call)
@@ -2587,22 +2680,27 @@ void AgentLoop::startReadTool(const ToolCall &call)
 {
     // Same wiring as startBashTool: progress streams while the search runs,
     // and the finished signal completes the call through finishAsyncTool. The
-    // id guards keep concurrent read tools from settling each other's cards.
+    // id guards keep concurrent read tools from settling each other's cards;
+    // the turn generation makes a result that lands after Stop inert.
+    const quint64 generation = m_turnGeneration;
     QMetaObject::Connection progress = connect(m_tools.get(), &ToolRunner::bashProgress, this,
-        [this, call](const QString &id, const QString &partial) {
-            if (id != call.id) {
+        [this, call, generation](const QString &id, const QString &partial) {
+            if (id != call.id || generation != m_turnGeneration) {
                 return;
             }
             Q_EMIT toolProgress(id, partial);
         });
     auto conn = QSharedPointer<QMetaObject::Connection>::create();
     *conn = connect(m_tools.get(), &ToolRunner::bashFinished, this,
-        [this, call, conn, progress](const ToolResult &result) {
+        [this, call, conn, progress, generation](const ToolResult &result) {
             if (result.toolCallId != call.id) {
                 return;
             }
             disconnect(*conn);
             disconnect(progress);
+            if (generation != m_turnGeneration) {
+                return;
+            }
             finishAsyncTool(call, result);
         });
     m_tools->runReadToolAsync(call);
@@ -2633,25 +2731,17 @@ void AgentLoop::releaseEditLocksFor(const ToolCall &call)
     if (!m_locks || !isMutationTool(call.name)) {
         return;
     }
-    // Use parsed args (argumentsJson fallback): raw call.arguments is empty on
-    // the LLM path, which previously skipped the release bookkeeping.
-    const QJsonObject args = effectiveArgs(call);
-    QString path = args.value(u"path"_s).toString();
-    if (path.isEmpty()) {
-        path = args.value(u"TargetFile"_s).toString();
+    for (QString path : mutationPathsForCall(call)) {
+        if (!m_workspace.isEmpty() && QDir::isRelativePath(path)) {
+            // cleanPath so the lock key is canonical: "src/../src/a.cpp" and
+            // "src/a.cpp" must name the same lock, or two agents could hold
+            // "different" locks on one file. acquireEditLock() normalises the
+            // same way, which is what makes release() find the key again.
+            path = QDir::cleanPath(m_workspace + QLatin1Char('/') + path);
+        }
+        m_locks->release(path, m_selfId);
+        m_owedPaths.removeAll(path);
     }
-    if (path.isEmpty()) {
-        return;
-    }
-    if (!m_workspace.isEmpty() && QDir::isRelativePath(path)) {
-        // cleanPath so the lock key is canonical: "src/../src/a.cpp" and
-        // "src/a.cpp" must name the same lock, or two agents could hold
-        // "different" locks on one file. acquireEditLock() normalises the
-        // same way, which is what makes release() find the key again.
-        path = QDir::cleanPath(m_workspace + QLatin1Char('/') + path);
-    }
-    m_locks->release(path, m_selfId);
-    m_owedPaths.removeAll(path);
 }
 
 bool AgentLoop::acquireEditLock(const ToolCall &call, QString *deniedBy)
@@ -2659,26 +2749,30 @@ bool AgentLoop::acquireEditLock(const ToolCall &call, QString *deniedBy)
     if (!m_locks || !isMutationTool(call.name)) {
         return true;
     }
-    const QJsonObject args = effectiveArgs(call);
-    QString path = args.value(u"path"_s).toString();
-    if (path.isEmpty()) {
-        path = args.value(u"TargetFile"_s).toString();
-    }
-    if (path.isEmpty()) {
-        return true;
-    }
-    if (!m_workspace.isEmpty() && QDir::isRelativePath(path)) {
-        // See releaseEditLocksFor(): the key must be canonical so both sides
-        // of the lock agree on it.
-        path = QDir::cleanPath(m_workspace + QLatin1Char('/') + path);
-    }
-    if (!m_locks->tryAcquire(path, m_selfId)) {
-        if (deniedBy) {
-            *deniedBy = m_locks->holder(path);
+    // Acquire every path the call touches. A multi-file patch must be atomic
+    // with respect to other agents too: if one path is busy, release the locks
+    // already taken for this call and report the holder.
+    QStringList acquired;
+    for (QString path : mutationPathsForCall(call)) {
+        if (!m_workspace.isEmpty() && QDir::isRelativePath(path)) {
+            // See releaseEditLocksFor(): the key must be canonical so both
+            // sides of the lock agree on it.
+            path = QDir::cleanPath(m_workspace + QLatin1Char('/') + path);
         }
-        return false;
+        if (!m_locks->tryAcquire(path, m_selfId)) {
+            if (deniedBy) {
+                *deniedBy = m_locks->holder(path);
+            }
+            for (const QString &held : std::as_const(acquired)) {
+                m_locks->release(held, m_selfId);
+            }
+            return false;
+        }
+        acquired.append(path);
     }
-    m_owedPaths.append(path);
+    for (const QString &path : std::as_const(acquired)) {
+        m_owedPaths.append(path);
+    }
     return true;
 }
 
@@ -3114,8 +3208,23 @@ void AgentLoop::answerQuestion(const QString &answer)
     // An ACP ask_user/elicitation RPC parked in the client takes priority: the
     // answer is the RPC result, which is what unblocks the agent.
     if (m_acp.hasPendingQuestion()) {
-        m_acpQuestionPending = false;
         m_acp.answerQuestion(answer);
+        return;
+    }
+
+    // An agent-side ACP question tool has no RPC to answer. Send the user's
+    // words as the next prompt instead: the agent sees them as the user's
+    // reply after its current turn, which is the only ACP channel available.
+    if (!m_acpToolQuestionId.isEmpty()) {
+        m_acpToolQuestionId.clear();
+        if (answer.trimmed().isEmpty()) {
+            return;
+        }
+        if (!m_busy) {
+            start(answer);
+        } else {
+            m_pendingAcpAnswer = answer;
+        }
         return;
     }
 

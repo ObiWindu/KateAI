@@ -20,6 +20,47 @@
 using namespace Qt::Literals::StringLiterals;
 using namespace KateAi;
 
+namespace
+{
+
+// Wraps the real bridge and fails one chosen write, so apply_patch's rollback
+// path can be exercised without making a file actually unwritable.
+class FailingWriteBridge : public DocumentBridge
+{
+public:
+    explicit FailingWriteBridge(int failOnCall)
+        : m_failOnCall(failOnCall)
+    {
+    }
+
+    bool readDocument(const QString &path, QString *contents) const override
+    {
+        return m_disk.readDocument(path, contents);
+    }
+    bool writeDocument(const QString &path, const QString &contents, QString *error) override
+    {
+        ++m_writes;
+        if (m_writes == m_failOnCall) {
+            if (error) {
+                *error = u"simulated write failure"_s;
+            }
+            return false;
+        }
+        return m_disk.writeDocument(path, contents, error);
+    }
+    bool removeDocument(const QString &path, QString *error) override
+    {
+        return m_disk.removeDocument(path, error);
+    }
+
+private:
+    DiskDocumentBridge m_disk;
+    int m_failOnCall = 0;
+    int m_writes = 0;
+};
+
+} // namespace
+
 class TestTools : public QObject
 {
     Q_OBJECT
@@ -955,6 +996,151 @@ private Q_SLOTS:
         QCOMPARE(request.additionalPaths, QStringList{u"b.txt"_s});
         QCOMPARE(request.additionalDiffs.size(), 1);
         QVERIFY(request.describeDiff.contains(u"+++ b/a.txt"_s));
+    }
+
+    void applyPatchCreatesNewFile()
+    {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        Sandbox sandbox(tempDir.path(), SandboxProfile::Workspace);
+        DiskDocumentBridge bridge;
+        ToolRunner runner(sandbox, &bridge);
+
+        // Standard git/unified-diff new-file header. The old range is
+        // "@@ -0,0", which must be treated as an insertion at the top.
+        const QString patch = u"--- /dev/null\n+++ b/new.txt\n@@ -0,0 +1,2 @@\n+hello\n+world\n"_s;
+        ToolCall call;
+        call.id = u"new-file"_s;
+        call.name = u"apply_patch"_s;
+        call.arguments = QJsonObject{{u"patch"_s, patch}};
+        const ToolResult result = runner.run(call);
+        QVERIFY2(result.ok, qPrintable(result.output));
+
+        QString content;
+        QVERIFY(bridge.readDocument(tempDir.path() + u"/new.txt"_s, &content));
+        QCOMPARE(content, u"hello\nworld\n"_s);
+    }
+
+    void applyPatchNewFileWithoutFinalNewline()
+    {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        Sandbox sandbox(tempDir.path(), SandboxProfile::Workspace);
+        DiskDocumentBridge bridge;
+        ToolRunner runner(sandbox, &bridge);
+
+        const QString patch = u"--- /dev/null\n+++ b/new.txt\n@@ -0,0 +1,1 @@\n+no newline\n\\ No newline at end of file\n"_s;
+        ToolCall call;
+        call.id = u"new-file-no-newline"_s;
+        call.name = u"apply_patch"_s;
+        call.arguments = QJsonObject{{u"patch"_s, patch}};
+        const ToolResult result = runner.run(call);
+        QVERIFY2(result.ok, qPrintable(result.output));
+
+        QString content;
+        QVERIFY(bridge.readDocument(tempDir.path() + u"/new.txt"_s, &content));
+        QCOMPARE(content, u"no newline"_s);
+    }
+
+    void applyPatchRollsBackWhenALaterWriteFails()
+    {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        const QString fileA = tempDir.path() + u"/a.txt"_s;
+        const QString fileB = tempDir.path() + u"/b.txt"_s;
+        for (const QString &path : {fileA, fileB}) {
+            QFile f(path);
+            QVERIFY(f.open(QIODevice::WriteOnly | QIODevice::Text));
+            f.write("old\n");
+        }
+
+        Sandbox sandbox(tempDir.path(), SandboxProfile::Workspace);
+        FailingWriteBridge bridge(2); // first write succeeds, second fails
+        ToolRunner runner(sandbox, &bridge);
+
+        const QString patch = u"--- a/a.txt\n+++ b/a.txt\n@@ -1,1 +1,1 @@\n-old\n+new A\n"
+                              u"--- a/b.txt\n+++ b/b.txt\n@@ -1,1 +1,1 @@\n-old\n+new B\n"_s;
+        ToolCall call;
+        call.id = u"rollback"_s;
+        call.name = u"apply_patch"_s;
+        call.arguments = QJsonObject{{u"patch"_s, patch}};
+        const ToolResult result = runner.run(call);
+        QVERIFY(!result.ok);
+        QVERIFY(result.output.contains(u"Rolled back"_s));
+
+        QString content;
+        QVERIFY(bridge.readDocument(fileA, &content));
+        QCOMPARE(content, u"old\n"_s);
+        QVERIFY(bridge.readDocument(fileB, &content));
+        QCOMPARE(content, u"old\n"_s);
+    }
+
+    void applyPatchEmptyResultTruncatesInsteadOfDeleting()
+    {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        const QString filePath = tempDir.path() + u"/a.txt"_s;
+        {
+            QFile f(filePath);
+            QVERIFY(f.open(QIODevice::WriteOnly | QIODevice::Text));
+            f.write("alpha\nbeta\n");
+        }
+        Sandbox sandbox(tempDir.path(), SandboxProfile::Workspace);
+        DiskDocumentBridge bridge;
+        ToolRunner runner(sandbox, &bridge);
+
+        // Removing every line is a successful patch that leaves an empty file,
+        // not a deletion. The old code used a null result as the deletion
+        // marker and removed the file.
+        const QString patch = u"--- a/a.txt\n+++ b/a.txt\n@@ -1,2 +0,0 @@\n-alpha\n-beta\n"_s;
+        ToolCall call;
+        call.id = u"empty"_s;
+        call.name = u"apply_patch"_s;
+        call.arguments = QJsonObject{{u"patch"_s, patch}};
+        const ToolResult result = runner.run(call);
+        QVERIFY2(result.ok, qPrintable(result.output));
+        QVERIFY2(QFileInfo::exists(filePath), "the file must still exist");
+
+        QString content;
+        QVERIFY(bridge.readDocument(filePath, &content));
+        QCOMPARE(content, QString());
+    }
+
+    void readFileStaysSynchronousButSearchesAreAsync()
+    {
+        // read_file must see the editor's unsaved buffer, so it cannot run on
+        // the worker thread. The disk-only searches can.
+        QVERIFY(!ToolRunner::isAsyncReadTool(u"read_file"_s));
+        QVERIFY(ToolRunner::isAsyncReadTool(u"list_dir"_s));
+        QVERIFY(ToolRunner::isAsyncReadTool(u"grep"_s));
+        QVERIFY(ToolRunner::isAsyncReadTool(u"glob"_s));
+        QVERIFY(!ToolRunner::isAsyncReadTool(u"query_project_graph"_s));
+    }
+
+    void writeFileRequiresContent()
+    {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        const QString filePath = tempDir.path() + u"/keep.txt"_s;
+        {
+            QFile f(filePath);
+            QVERIFY(f.open(QIODevice::WriteOnly | QIODevice::Text));
+            f.write("original\n");
+        }
+        Sandbox sandbox(tempDir.path(), SandboxProfile::Workspace);
+        DiskDocumentBridge bridge;
+        ToolRunner runner(sandbox, &bridge);
+
+        ToolCall call;
+        call.id = u"missing-content"_s;
+        call.name = u"write_file"_s;
+        call.arguments = QJsonObject{{u"path"_s, u"keep.txt"_s}};
+        const ToolResult result = runner.run(call);
+        QVERIFY(!result.ok);
+
+        QString content;
+        QVERIFY(bridge.readDocument(filePath, &content));
+        QCOMPARE(content, u"original\n"_s);
     }
 
     void testTodoWriteReadRoundTrip()

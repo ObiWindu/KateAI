@@ -36,7 +36,11 @@ kateai_test(test_modetools)
 kateai_test(test_sessionstore)
 kateai_test(test_acpclientmethods)
 kateai_test(test_projectgraph)
-kateai_test(test_lsp)
+# KTextEditor's editor singleton (reached through DiskDocumentBridge) needs a
+# QGuiApplication, so this runs offscreen like the other editor-facing suites.
+add_executable(test_lsp test_lsp.cpp)
+target_link_libraries(test_lsp PRIVATE kateai_core Qt6::Test Qt6::Widgets)
+add_test(NAME test_lsp COMMAND test_lsp -platform offscreen)
 # The requestable half of the in-editor completions: prompt building, staleness,
 # budget, response parsing. The HTTP cases talk to an in-process mock server on
 # the loopback interface, so no GUI and no provider are needed.

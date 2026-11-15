@@ -130,6 +130,34 @@ private Q_SLOTS:
         delete card;
     }
 
+    void testDockedCardShowsLiveToolActivity()
+    {
+        SubtaskDock dock;
+        auto *card = new SubtaskWidget(u"task-live"_s, &dock);
+        card->startAgent(u"Builder"_s, u"code"_s, u"Build the project"_s);
+        card->appendActivity(u"→ bash make -j8"_s, false);
+        card->setPartialOutput(u"compiling parser.cpp\ncompiling renderer.cpp\n"_s);
+        QTest::qWait(150);
+
+        dock.addCard(card);
+        dock.resize(600, 300);
+        dock.show();
+        QApplication::processEvents();
+
+        bool showsTool = false;
+        bool showsOutput = false;
+        for (const QTextBrowser *browser : card->findChildren<QTextBrowser *>()) {
+            if (!browser->isVisibleTo(card)) {
+                continue;
+            }
+            const QString text = browser->toPlainText();
+            showsTool = showsTool || text.contains(u"make -j8"_s);
+            showsOutput = showsOutput || text.contains(u"compiling renderer.cpp"_s);
+        }
+        QVERIFY2(showsTool, "the activity log should show the running tool");
+        QVERIFY2(showsOutput, "tool output should stream into the activity log");
+    }
+
     void testTheHeightBudgetCapsTheCard()
     {
         SubtaskDock dock;

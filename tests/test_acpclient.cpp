@@ -1,4 +1,5 @@
 #include "acpclient.h"
+#include "agentloop.h"
 #include "documentbridge.h"
 #include "test_python.h"
 #include "tools.h"
@@ -54,6 +55,26 @@ private:
         }
         return true;
     }
+
+#ifdef Q_OS_UNIX
+    // A killed process can linger in /proc as a zombie until the container's
+    // PID 1 reaps it. It is not running; reading the state lets the test wait
+    // for the process to die without depending on init's reaping cadence.
+    static bool processStillRunning(const QString &pid)
+    {
+        QFile stat(u"/proc/"_s + pid + u"/stat"_s);
+        if (!stat.open(QIODevice::ReadOnly)) {
+            return false;
+        }
+        const QByteArray line = stat.readLine();
+        const int closeParen = line.lastIndexOf(')');
+        if (closeParen < 0 || closeParen + 2 >= line.size()) {
+            return true;
+        }
+        const char state = line.at(closeParen + 2);
+        return state != 'Z' && state != 'X';
+    }
+#endif
 
     Settings mockSettings(const QString &scenario) const
     {
@@ -804,6 +825,48 @@ private Q_SLOTS:
         client.stop();
     }
 
+    void fsReadPaginationDoesNotCountPhantomTrailingLine()
+    {
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+        const QString readPath = workspace.filePath(u"in.txt"_s);
+        {
+            QFile file(readPath);
+            QVERIFY(file.open(QIODevice::WriteOnly | QIODevice::Text));
+            QTextStream(&file) << u"one\ntwo\n"_s;
+        }
+
+        DiskDocumentBridge bridge;
+        AcpClient client;
+        Settings settings = mockSettings(u"read-pagination"_s);
+        settings.sandbox = SandboxProfile::Workspace;
+        client.setSettings(settings);
+        client.setWorkspace(workspace.path());
+        client.setDocumentBridge(&bridge);
+
+        QString finishedText;
+        QString error;
+        connect(&client, &AcpClient::promptFinished, this,
+                [&](const QString &, const QString &full, const QJsonArray &) {
+            finishedText = full;
+        });
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+
+        client.prompt(u"READPATH:%1"_s.arg(readPath));
+        QVERIFY2(waitFor([&] {
+            return !finishedText.isEmpty() || !error.isEmpty();
+        }), qPrintable(error.isEmpty() ? u"timed out"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        // A two-line file with a trailing newline has exactly two lines. The
+        // empty element after the newline must not produce a "1 more line"
+        // note pointing at a line that does not exist.
+        QCOMPARE(finishedText, u"one\ntwo"_s);
+        QVERIFY(!finishedText.contains(u"more line"_s));
+        client.stop();
+    }
+
     void writePlanFileClientMethodFilesThePlanOutsideTheWorkspace()
     {
         QTemporaryDir workspace;
@@ -1197,8 +1260,10 @@ private Q_SLOTS:
         QVERIFY2(text.startsWith(u"pid:"_s), qPrintable(text));
         const QString pid = text.mid(4).trimmed();
         QVERIFY2(!pid.isEmpty(), qPrintable(text));
-        // The kill reaches the backgrounded child, not just the shell.
-        QTRY_VERIFY_WITH_TIMEOUT(!QFile::exists(u"/proc/"_s + pid), 5000);
+        // The kill reaches the backgrounded child, not just the shell. A zombie
+        // entry can survive until PID 1 reaps it, so check the process state,
+        // not merely whether /proc still has a directory for the pid.
+        QTRY_VERIFY_WITH_TIMEOUT(!processStillRunning(pid), 5000);
         client.stop();
 #else
         QSKIP("process groups are a Unix feature");
@@ -1903,6 +1968,50 @@ private Q_SLOTS:
         client.stop();
     }
 
+    void elicitationUsesSpecResponseShape()
+    {
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+
+        DiskDocumentBridge bridge;
+        AcpClient client;
+        client.setSettings(mockSettings(u"elicitation"_s));
+        client.setWorkspace(workspace.path());
+        client.setDocumentBridge(&bridge);
+
+        bool asked = false;
+        PermissionRequest question;
+        QString finishedText;
+        QString error;
+        connect(&client, &AcpClient::questionAsked, this, [&](const PermissionRequest &request) {
+            asked = true;
+            question = request;
+        });
+        connect(&client, &AcpClient::promptFinished, this,
+                [&](const QString &, const QString &full, const QJsonArray &) {
+            finishedText = full;
+        });
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+
+        client.prompt(u"ask me something"_s);
+        QVERIFY2(waitFor([&] {
+            return asked || !error.isEmpty();
+        }), qPrintable(error.isEmpty() ? u"timed out waiting for the elicitation"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(question.questionOptions, QStringList({u"conservative"_s, u"balanced"_s}));
+
+        client.answerQuestion(u"balanced"_s);
+        QVERIFY2(waitFor([&] {
+            return !finishedText.isEmpty() || !error.isEmpty();
+        }), qPrintable(error.isEmpty() ? u"timed out"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        // The mock echoes back what it parsed from the ACP accept response.
+        QCOMPARE(finishedText, u"accept:balanced"_s);
+        client.stop();
+    }
+
     void askUserCancelledWhenTurnStops()
     {
         QTemporaryDir workspace;
@@ -1915,10 +2024,14 @@ private Q_SLOTS:
         client.setDocumentBridge(&bridge);
 
         bool asked = false;
+        bool cancelled = false;
         QString finishedText;
         QString error;
         connect(&client, &AcpClient::questionAsked, this, [&](const PermissionRequest &) {
             asked = true;
+        });
+        connect(&client, &AcpClient::questionCancelled, this, [&](const QString &toolCallId) {
+            cancelled = !toolCallId.isEmpty();
         });
         connect(&client, &AcpClient::promptFinished, this,
                 [&](const QString &, const QString &full, const QJsonArray &) {
@@ -1939,6 +2052,7 @@ private Q_SLOTS:
             return finishedText == u"cancelled"_s || !error.isEmpty();
         }), qPrintable(error.isEmpty() ? u"timed out"_s : error));
         QVERIFY(!client.hasPendingQuestion());
+        QVERIFY(cancelled);
         client.stop();
     }
 
@@ -2090,6 +2204,190 @@ private Q_SLOTS:
         QCOMPARE(request.additionalPaths, QStringList{u"src/b.cpp"_s});
         QVERIFY(request.describeDiff.contains(u"+++ b/src/a.cpp"_s));
         QCOMPARE(request.additionalDiffs.size(), 1);
+        client.stop();
+    }
+
+    void toolQuestionIsNormalizedForTheCard()
+    {
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+        DiskDocumentBridge bridge;
+        AcpClient client;
+        client.setSettings(mockSettings(u"tool-question"_s));
+        client.setWorkspace(workspace.path());
+        client.setDocumentBridge(&bridge);
+
+        PermissionRequest question;
+        QString error;
+        connect(&client, &AcpClient::toolStarted, this, [&](const PermissionRequest &request) {
+            if (request.toolName == u"question"_s) {
+                question = request;
+            }
+        });
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+
+        client.prompt(u"go"_s);
+        QVERIFY2(waitFor([&] {
+            return !question.toolCallId.isEmpty() || !error.isEmpty();
+        }), qPrintable(error.isEmpty() ? u"timed out waiting for the question tool"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(question.questionText, u"Which strategy should I use?"_s);
+        QCOMPARE(question.questionOptions, QStringList({u"conservative"_s, u"balanced"_s}));
+        QCOMPARE(question.risk, ToolRisk::Read);
+        const QJsonObject details = QJsonDocument::fromJson(question.details.toUtf8()).object();
+        QCOMPARE(details.value(u"question"_s).toString(), u"Which strategy should I use?"_s);
+        client.stop();
+    }
+
+    void permissionRequestWithAnswerChoicesBecomesAQuestionCard()
+    {
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+        DiskDocumentBridge bridge;
+        AcpClient client;
+        client.setSettings(mockSettings(u"permission-question"_s));
+        client.setWorkspace(workspace.path());
+        client.setDocumentBridge(&bridge);
+
+        PermissionRequest question;
+        QString finishedText;
+        QString error;
+        connect(&client, &AcpClient::questionAsked, this, [&](const PermissionRequest &request) {
+            question = request;
+        });
+        connect(&client, &AcpClient::promptFinished, this,
+                [&](const QString &, const QString &full, const QJsonArray &) {
+            finishedText = full;
+        });
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+
+        client.prompt(u"go"_s);
+        QVERIFY2(waitFor([&] {
+            return !question.toolCallId.isEmpty() || !error.isEmpty();
+        }), qPrintable(error.isEmpty() ? u"timed out waiting for the question card"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(question.questionText, u"Which strategy should I use?"_s);
+        QCOMPARE(question.questionOptions, QStringList({u"conservative"_s, u"balanced"_s}));
+        QCOMPARE(question.risk, ToolRisk::Read);
+
+        client.answerQuestion(u"balanced"_s);
+        QVERIFY2(waitFor([&] {
+            return !finishedText.isEmpty() || !error.isEmpty();
+        }), qPrintable(error.isEmpty() ? u"timed out waiting for the selected option"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(finishedText, u"choice:opt-balanced"_s);
+        client.stop();
+    }
+
+    void agentLoopAnswerToAcpToolQuestionBecomesNextPrompt()
+    {
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+
+        AgentLoop loop;
+        Settings settings = mockSettings(u"tool-question"_s);
+        settings.checkpointsEnabled = false;
+        loop.setSettings(settings);
+        loop.setWorkspace(workspace.path());
+        DiskDocumentBridge bridge;
+        loop.setDocumentBridge(&bridge);
+
+        QString asked;
+        QStringList options;
+        QString finalText;
+        QString error;
+        bool answered = false;
+        connect(&loop, &AgentLoop::questionAsked, this, [&](const PermissionRequest &request) {
+            asked = request.questionText;
+            options = request.questionOptions;
+        });
+        connect(&loop, &AgentLoop::turnFinished, this, [&]() {
+            // The agent's turn may end before the user answers. The card (and
+            // the pending id) must survive so the late answer can still start
+            // the answer turn.
+            if (!asked.isEmpty() && !answered) {
+                answered = true;
+                loop.answerQuestion(u"balanced"_s);
+            }
+        });
+        connect(&loop, &AgentLoop::assistantFinished, this, [&](const QString &text) {
+            finalText += text;
+        });
+        connect(&loop, &AgentLoop::failed, this, [&](const QString &message) {
+            error = message;
+        });
+
+        loop.start(u"go"_s);
+        QVERIFY2(waitFor([&] {
+            return finalText.contains(u"answer:balanced"_s) || !error.isEmpty();
+        }), qPrintable(error.isEmpty() ? u"timed out waiting for the answered turn"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(asked, u"Which strategy should I use?"_s);
+        QCOMPARE(options, QStringList({u"conservative"_s, u"balanced"_s}));
+    }
+
+    void toolSuggestionIsNormalizedForTheCard()
+    {
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+        DiskDocumentBridge bridge;
+        AcpClient client;
+        client.setSettings(mockSettings(u"tool-suggestion"_s));
+        client.setWorkspace(workspace.path());
+        client.setDocumentBridge(&bridge);
+
+        PermissionRequest suggestion;
+        QString error;
+        connect(&client, &AcpClient::toolStarted, this, [&](const PermissionRequest &request) {
+            if (request.toolName == u"suggest"_s) {
+                suggestion = request;
+            }
+        });
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+
+        client.prompt(u"go"_s);
+        QVERIFY2(waitFor([&] {
+            return !suggestion.toolCallId.isEmpty() || !error.isEmpty();
+        }), qPrintable(error.isEmpty() ? u"timed out waiting for the suggestion tool"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(suggestion.risk, ToolRisk::Read);
+        const QJsonObject details = QJsonDocument::fromJson(suggestion.details.toUtf8()).object();
+        QCOMPARE(details.value(u"suggestion"_s).toString(), u"Use std::string_view here"_s);
+        QCOMPARE(details.value(u"path"_s).toString(), u"src/main.cpp"_s);
+        QCOMPARE(details.value(u"line"_s).toInt(), 7);
+        client.stop();
+    }
+
+    void availableCommandsFromSessionSetup()
+    {
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+
+        AcpClient client;
+        client.setSettings(mockSettings(u"commands_setup"_s));
+        client.setWorkspace(workspace.path());
+
+        QList<QJsonArray> commands;
+        QString error;
+        connect(&client, &AcpClient::availableCommandsChanged, this, [&](const QJsonArray &cmds) {
+            commands.append(cmds);
+        });
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+
+        client.fetchModels();
+        QVERIFY2(waitFor([&] {
+            return !commands.isEmpty() || !error.isEmpty();
+        }), qPrintable(error.isEmpty() ? u"timed out"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(commands.first().size(), 1);
         client.stop();
     }
 

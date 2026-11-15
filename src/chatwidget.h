@@ -270,7 +270,12 @@ private:
     // lives in the intent dock while it waits and is retired into the
     // transcript once it does. Keyed by tool call id, like the tool cards.
     void showQuestionCard(const PermissionRequest &request);
-    void clearQuestionCards();
+    // Retires one docked question card, e.g. when a newer question replaced the
+    // parked RPC or the turn stopped.
+    void removeQuestionCard(const QString &toolCallId);
+    // `keepId` is an agent-side ACP question that remains answerable after the
+    // turn ends; every other card is retired.
+    void clearQuestionCards(const QString &keepId = QString());
 
     void submit();
         // True while a tool card is showing its inline approval row.

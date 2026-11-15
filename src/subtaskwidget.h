@@ -104,6 +104,11 @@ private:
     // accumulated lines, so a sub-agent that summarises its steps with
     // emphasis or code renders instead of showing literal markup.
     void rebuildActivityLog();
+    // Streams complete lines of a running child tool's output into the
+    // activity log at a coalesced cadence, so a long command reads live instead
+    // of only appearing when it exits.
+    void flushStreamOutput();
+    void appendLogLine(const QString &line, bool isError, bool countStep = true);
     // The part of the card that is not the two scrolling documents -- header,
     // caption, status line -- which a height budget has to leave room for.
     int chromeHeight() const;
@@ -132,6 +137,10 @@ protected:
     QString m_pendingStreamed;
     // Latest live tool output for the Doing: line.
     QString m_partialOutput;
+    // Complete lines waiting to be appended to the activity log. Output chunks
+    // arrive far faster than a card can be re-rendered, so lines are collected
+    // and flushed on a short timer.
+    QString m_pendingStreamDelta;
     bool m_currentIsError = false;
     bool m_running = false;
     bool m_failed = false;
@@ -160,6 +169,7 @@ protected:
     QTextBrowser *m_activity = nullptr;
     QWidget *m_activityContainer = nullptr;
     QTimer *m_ticker = nullptr;
+    QTimer *m_streamTimer = nullptr;
     QPointer<QWidget> m_expandedActivity = nullptr;
 };
 

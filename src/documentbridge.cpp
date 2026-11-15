@@ -5,6 +5,7 @@
 
 #include "documentbridge.h"
 
+#include <KTextEditor/Application>
 #include <KTextEditor/Document>
 #include <KTextEditor/Editor>
 
@@ -128,6 +129,28 @@ KTextEditor::Document *KateAi::documentForPath(const QString &path)
 namespace KateAi
 {
 
+bool DocumentBridge::removeDocument(const QString &path, QString *error)
+{
+    if (path.trimmed().isEmpty()) {
+        if (error) {
+            *error = u"Path must not be empty."_s;
+        }
+        return false;
+    }
+    if (!QFileInfo::exists(path)) {
+        if (error) {
+            *error = u"File does not exist: %1"_s.arg(path);
+        }
+        return false;
+    }
+    if (!QFile::remove(path)) {
+        if (error) {
+            *error = u"Could not delete %1."_s.arg(path);
+        }
+        return false;
+    }
+    return true;
+}
 
 bool DocumentBridge::restoreDocument(const QString &path, const QString &contents, QString *error)
 {
@@ -149,11 +172,13 @@ bool DiskDocumentBridge::readDocument(const QString &path, QString *contents) co
     if (path.trimmed().isEmpty()) {
         return false;
     }
-    if (auto *doc = documentForPath(path)) {
-        if (contents) {
-            *contents = doc->text();
+    if (m_useOpenDocuments) {
+        if (auto *doc = documentForPath(path)) {
+            if (contents) {
+                *contents = doc->text();
+            }
+            return true;
         }
-        return true;
     }
 
     QFile file(path);
@@ -178,7 +203,8 @@ bool DiskDocumentBridge::readDocumentLines(const QString &path, int startLine, i
     const int lineLimit = qMax(0, maxLines);
     int lineCount = 0;
 
-    if (auto *doc = documentForPath(path)) {
+    KTextEditor::Document *doc = m_useOpenDocuments ? documentForPath(path) : nullptr;
+    if (doc) {
         lineCount = doc->lines();
         if (lineCount > 0 && doc->line(lineCount - 1).isEmpty()) {
             --lineCount;
@@ -228,7 +254,8 @@ bool DiskDocumentBridge::writeDocument(const QString &path, const QString &conte
         }
         return false;
     }
-    if (auto *doc = documentForPath(path)) {
+    KTextEditor::Document *doc = m_useOpenDocuments ? documentForPath(path) : nullptr;
+    if (doc) {
         // The document is open and has unsaved changes that are not ours:
         // replacing the whole text would throw them away. An unsaved edit the
         // bridge itself applied earlier in buffer mode is "ours" and is exactly
@@ -282,9 +309,41 @@ bool DiskDocumentBridge::writeDocument(const QString &path, const QString &conte
     return writeDocumentToDisk(path, contents, error);
 }
 
+bool DiskDocumentBridge::removeDocument(const QString &path, QString *error)
+{
+    if (path.trimmed().isEmpty()) {
+        if (error) {
+            *error = u"Path must not be empty."_s;
+        }
+        return false;
+    }
+    if (m_useOpenDocuments) {
+        if (KTextEditor::Document *doc = documentForPath(path)) {
+            if (doc->isModified()) {
+                if (error) {
+                    *error = u"The document has unsaved changes; save or close it before deleting the file."_s;
+                }
+                return false;
+            }
+            // Closing the clean document first avoids leaving an editor buffer
+            // that would recreate the file on the next save.
+            if (auto *editor = KTextEditor::Editor::instance()) {
+                if (auto *app = editor->application(); app && !app->closeDocument(doc)) {
+                    if (error) {
+                        *error = u"The document is open and could not be closed before deleting %1."_s.arg(path);
+                    }
+                    return false;
+                }
+            }
+        }
+    }
+    return DocumentBridge::removeDocument(path, error);
+}
+
 bool DiskDocumentBridge::restoreDocument(const QString &path, const QString &contents, QString *error)
 {
-    if (auto *doc = documentForPath(path)) {
+    KTextEditor::Document *doc = m_useOpenDocuments ? documentForPath(path) : nullptr;
+    if (doc) {
         // A rejected edit puts the buffer back to the content it had before
         // the turn, also when the document is modified: in buffer mode the
         // modification is the agent's own edit being reverted, and in disk
@@ -307,7 +366,8 @@ bool DiskDocumentBridge::restoreDocument(const QString &path, const QString &con
 
 bool DiskDocumentBridge::saveDocumentIfOpen(const QString &path, QString *error)
 {
-    if (auto *doc = documentForPath(path)) {
+    KTextEditor::Document *doc = m_useOpenDocuments ? documentForPath(path) : nullptr;
+    if (doc) {
         // An accepted edit is kept: the buffer content becomes the file.
         if (doc->isModified() && !doc->save()) {
             if (error) {

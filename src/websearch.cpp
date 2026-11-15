@@ -35,7 +35,7 @@ namespace
 {
 // The page is read into memory in one piece, so the download needs a ceiling.
 // Five megabytes is far more than a readable web page and far less than a
-// denial of service.
+// denial of service. A per-call max_bytes can lower it; it cannot raise it.
 constexpr qint64 kMaxFetchBytes = 5 * 1024 * 1024;
 }
 
@@ -327,9 +327,10 @@ void WebSearch::abort()
         }
     }
     m_callMaxResults.clear();
+    m_callMaxBytes.clear();
 }
 
-void WebSearch::search(const QString &query, const QString &callId, int maxResults)
+void WebSearch::search(const QString &query, const QString &callId, int maxResults, const QString &site)
 {
     if (!isConfigured()) {
         finishSearch(callId, {}, configurationError());
@@ -340,6 +341,14 @@ void WebSearch::search(const QString &query, const QString &callId, int maxResul
         finishSearch(callId, {}, i18n("The search query was empty."));
         return;
     }
+    // Every provider accepts the site: operator in its query text, which is
+    // also what the model would type manually. Strip whitespace so a stray
+    // newline cannot split the query into separate terms.
+    const QString siteFilter = site.trimmed();
+    QString siteValue = siteFilter.simplified();
+    siteValue.remove(u' ');
+    const QString effectiveQuery = siteValue.isEmpty() ? trimmed
+        : trimmed + u" site:"_s + siteValue;
 
     // Register the per-call limit only once the request is actually going out:
     // an early return above (unconfigured provider, empty query) never reaches
@@ -360,7 +369,7 @@ void WebSearch::search(const QString &query, const QString &callId, int maxResul
         // JS runtime to interpret the response.
         QUrl url(QStringLiteral("https://html.duckduckgo.com/html/"));
         QUrlQuery queryItems;
-        queryItems.addQueryItem(QStringLiteral("q"), trimmed);
+        queryItems.addQueryItem(QStringLiteral("q"), effectiveQuery);
         queryItems.addQueryItem(QStringLiteral("kl"), QStringLiteral("wt-wt"));
         url.setQuery(queryItems);
         reply = m_nam->get(makeRequest(url, m_timeoutMs));
@@ -370,7 +379,7 @@ void WebSearch::search(const QString &query, const QString &callId, int maxResul
         QNetworkRequest request = makeRequest(QUrl(QStringLiteral("https://api.tavily.com/search")), m_timeoutMs);
         request.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
         const QJsonObject payload{{QStringLiteral("api_key"), m_apiKey},
-                                  {QStringLiteral("query"), trimmed},
+                                  {QStringLiteral("query"), effectiveQuery},
                                   {QStringLiteral("max_results"), effectiveLimit},
                                   {QStringLiteral("search_depth"), QStringLiteral("basic")}};
         reply = m_nam->post(request, QJsonDocument(payload).toJson(QJsonDocument::Compact));
@@ -379,7 +388,7 @@ void WebSearch::search(const QString &query, const QString &callId, int maxResul
     case Provider::Brave: {
         QUrl url(QStringLiteral("https://api.search.brave.com/res/v1/web/search"));
         QUrlQuery braveItems;
-        braveItems.addQueryItem(QStringLiteral("q"), trimmed);
+        braveItems.addQueryItem(QStringLiteral("q"), effectiveQuery);
         braveItems.addQueryItem(QStringLiteral("count"), QString::number(effectiveLimit));
         url.setQuery(braveItems);
         QNetworkRequest request = makeRequest(url, m_timeoutMs);
@@ -391,7 +400,7 @@ void WebSearch::search(const QString &query, const QString &callId, int maxResul
     case Provider::SearXNG: {
         QUrl url(m_endpoint);
         QUrlQuery searxItems;
-        searxItems.addQueryItem(QStringLiteral("q"), trimmed);
+        searxItems.addQueryItem(QStringLiteral("q"), effectiveQuery);
         searxItems.addQueryItem(QStringLiteral("format"), QStringLiteral("json"));
         url.setQuery(searxItems);
         reply = m_nam->get(makeRequest(url, m_timeoutMs));
@@ -435,7 +444,7 @@ void WebSearch::search(const QString &query, const QString &callId, int maxResul
     });
 }
 
-void WebSearch::fetchPage(const QString &url, const QString &callId)
+void WebSearch::fetchPage(const QString &url, const QString &callId, int timeoutMs, qint64 maxBytes)
 {
     if (!isConfigured()) {
         // Fetching does not strictly need a search provider, but tying the
@@ -448,7 +457,13 @@ void WebSearch::fetchPage(const QString &url, const QString &callId)
         return;
     }
 
-    QNetworkReply *reply = m_nam->get(makeRequest(QUrl(url.trimmed()), m_timeoutMs));
+    // Per-call override from the tool arguments. Clamp both ends: a timeout
+    // below a second is useless and the hard cap still protects memory.
+    const int effectiveTimeout = timeoutMs > 0 ? qBound(1000, timeoutMs, 24 * 3600 * 1000) : m_timeoutMs;
+    const qint64 effectiveMaxBytes = maxBytes > 0 ? qBound<qint64>(1, maxBytes, kMaxFetchBytes) : kMaxFetchBytes;
+    m_callMaxBytes.insert(callId, effectiveMaxBytes);
+
+    QNetworkReply *reply = m_nam->get(makeRequest(QUrl(url.trimmed()), effectiveTimeout));
     m_replies.append(reply);
 
     // Stream the fetch as it lands. Only the byte count is read, never the
@@ -456,21 +471,22 @@ void WebSearch::fetchPage(const QString &url, const QString &callId)
     // and draining it here would empty the buffer the extraction depends on.
     auto lastEmit = QSharedPointer<QElapsedTimer>::create();
     lastEmit->start();
-    connect(reply, &QNetworkReply::readyRead, this, [this, reply, callId, lastEmit] {
+    connect(reply, &QNetworkReply::readyRead, this, [this, reply, callId, lastEmit, effectiveMaxBytes] {
         if (!reply) {
             return;
         }
         // The body is read in one piece when the reply finishes, so nothing
         // bounds the memory a page (or a URL the model chose) can take. The
-        // download is stopped as soon as the cap is reached.
-        if (reply->bytesAvailable() + reply->header(QNetworkRequest::ContentLengthHeader).toLongLong() > kMaxFetchBytes) {
+        // download is stopped as soon as the per-call cap is reached.
+        if (reply->bytesAvailable() + reply->header(QNetworkRequest::ContentLengthHeader).toLongLong() > effectiveMaxBytes) {
             stopTimerFor(reply);
             reply->disconnect(this);
             m_replies.removeAll(reply);
+            m_callMaxBytes.remove(callId);
             reply->abort();
             reply->deleteLater();
             finishFetch(callId, QString(), QString(),
-                        i18n("The page is larger than %1 KB and was not downloaded.").arg(kMaxFetchBytes / 1024));
+                        i18n("The page is larger than %1 KB and was not downloaded.").arg(effectiveMaxBytes / 1024));
             return;
         }
         if (lastEmit->elapsed() < 200) {
@@ -489,9 +505,9 @@ void WebSearch::fetchPage(const QString &url, const QString &callId)
 
     auto *timer = new QTimer(this);
     timer->setSingleShot(true);
-    timer->setInterval(m_timeoutMs);
+    timer->setInterval(effectiveTimeout);
     m_timers.insert(reply, timer);
-    connect(timer, &QTimer::timeout, this, [this, reply, callId] {
+    connect(timer, &QTimer::timeout, this, [this, reply, callId, effectiveTimeout] {
         if (!reply || !reply->isRunning()) {
             return;
         }
@@ -500,9 +516,10 @@ void WebSearch::fetchPage(const QString &url, const QString &callId)
         // report this fetch twice.
         reply->disconnect(this);
         m_replies.removeAll(reply);
+        m_callMaxBytes.remove(callId);
         reply->abort();
         reply->deleteLater();
-        finishFetch(callId, QString(), QString(), i18n("The page did not load within %1 seconds.", m_timeoutMs / 1000));
+        finishFetch(callId, QString(), QString(), i18n("The page did not load within %1 seconds.", effectiveTimeout / 1000));
     });
     timer->start();
 
@@ -521,6 +538,8 @@ void WebSearch::onReplyFinished(QNetworkReply *reply, const QString &callId, boo
     // leave it behind. Keep the value: it belongs to this reply, which is about
     // to be consumed below.
     const int pendingLimit = m_callMaxResults.take(callId);
+    const qint64 pendingMaxBytes = m_callMaxBytes.take(callId);
+    const qint64 fetchLimit = isFetch && pendingMaxBytes > 0 ? pendingMaxBytes : kMaxFetchBytes;
     reply->deleteLater();
 
     if (reply->error() != QNetworkReply::NoError) {
@@ -535,11 +554,13 @@ void WebSearch::onReplyFinished(QNetworkReply *reply, const QString &callId, boo
 
     const QByteArray rawBody = reply->readAll();
     // Bound memory: search providers return small JSON; a malicious endpoint
-    // answering with gigabytes must not OOM the client (fetch path caps at 5 MiB).
-    if (rawBody.size() > kMaxFetchBytes) {
+    // answering with gigabytes must not OOM the client. A fetch honours its
+    // per-call cap, and the hard ceiling still protects the process.
+    const qint64 bodyLimit = isFetch ? fetchLimit : kMaxFetchBytes;
+    if (rawBody.size() > bodyLimit) {
         if (isFetch) {
             finishFetch(callId, QString(), QString(),
-                        i18n("The page is larger than %1 KB and was not read.").arg(kMaxFetchBytes / 1024));
+                        i18n("The page is larger than %1 KB and was not read.").arg(bodyLimit / 1024));
         } else {
             finishSearch(callId, {}, i18n("The search response was larger than %1 KB and was discarded.").arg(kMaxFetchBytes / 1024));
         }
@@ -567,9 +588,9 @@ void WebSearch::onReplyFinished(QNetworkReply *reply, const QString &callId, boo
         }
         // The cap is enforced while the page downloads; this is the case of a
         // response without a content length, whose size is only known here.
-        if (body.size() > kMaxFetchBytes) {
+        if (body.size() > fetchLimit) {
             finishFetch(callId, QString(), QString(),
-                        i18n("The page is larger than %1 KB and was not read.").arg(kMaxFetchBytes / 1024));
+                        i18n("The page is larger than %1 KB and was not read.").arg(fetchLimit / 1024));
             return;
         }
         const QString contentType = reply->header(QNetworkRequest::ContentTypeHeader).toString().toLower();
@@ -814,7 +835,8 @@ QString decodeHtmlEntities(const QString &input)
         bool converted = false;
         const uint code = match.captured(2).toUInt(&converted, match.captured(1).isEmpty() ? 10 : 16);
         if (converted && code > 0 && code <= 0x10FFFF) {
-            decoded += QString::fromUcs4(&code, 1);
+            const char32_t codepoint = static_cast<char32_t>(code);
+            decoded += QString::fromUcs4(&codepoint, 1);
         } else {
             decoded += match.captured(0);
         }

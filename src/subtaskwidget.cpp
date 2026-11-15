@@ -165,6 +165,14 @@ SubtaskWidget::SubtaskWidget(const QString &taskId, QWidget *parent)
     m_ticker->setInterval(1000);
     connect(m_ticker, &QTimer::timeout, this, &SubtaskWidget::updateElapsed);
 
+    // Child tool output can arrive in hundreds of small chunks. Coalescing the
+    // complete lines keeps the activity document from being rebuilt per chunk
+    // while still reading as live.
+    m_streamTimer = new QTimer(this);
+    m_streamTimer->setSingleShot(true);
+    m_streamTimer->setInterval(80);
+    connect(m_streamTimer, &QTimer::timeout, this, &SubtaskWidget::flushStreamOutput);
+
     m_elapsed.start();
     updateHeader();
     applyStyle();
@@ -194,6 +202,11 @@ void SubtaskWidget::startAgent(const QString &agentName, const QString &modeId, 
     m_streamedMessage.clear();
     m_pendingStreamed.clear();
     m_partialOutput.clear();
+    m_pendingStreamDelta.clear();
+    m_stepCount = 0;
+    if (m_streamTimer) {
+        m_streamTimer->stop();
+    }
     m_currentIsError = false;
     m_current->clear();
     // A fresh run starts a fresh log; the previous run's steps left with its
@@ -219,7 +232,22 @@ void SubtaskWidget::startAgent(const QString &agentName, const QString &modeId, 
 
 void SubtaskWidget::appendActivity(const QString &line, bool isError)
 {
-    ++m_stepCount;
+    // A new tool starts with "→ tool …". Flush the previous tool's output
+    // first, then forget the old cumulative buffer so the next stream is
+    // measured from zero instead of being mistaken for a continuation.
+    if (line.startsWith(u"→"_s) || line.startsWith(u"  ✓"_s) || line.startsWith(u"  ✗"_s)) {
+        flushStreamOutput();
+        m_partialOutput.clear();
+        m_pendingStreamDelta.clear();
+    }
+    appendLogLine(line, isError, true);
+}
+
+void SubtaskWidget::appendLogLine(const QString &line, bool isError, bool countStep)
+{
+    if (countStep) {
+        ++m_stepCount;
+    }
     // The log is one markdown document rebuilt from the accumulated lines: a
     // sub-agent that summarises its step with emphasis, inline code or a
     // fenced block renders, instead of the card showing literal asterisks
@@ -232,14 +260,60 @@ void SubtaskWidget::appendActivity(const QString &line, bool isError)
     // The log is where the data is, so it opens itself on the sub-agent's first
     // step: a running card should show the work, not a disclosure hiding it.
     // From then on the user decides.
-    if (!m_activityUserSet && m_stepCount == 1) {
+    if (!m_activityUserSet && !m_activityLog.isEmpty()) {
         setActivityVisible(true);
     }
     // Mirror the step onto the card itself: the Doing: line names what the
-    // sub-agent is on even once the log below is closed again.
-    m_currentLine = line;
-    m_currentIsError = isError;
-    updateCurrentActivity();
+    // sub-agent is on even once the log below is closed again. Tool output
+    // lines do not replace the tool's own Doing: label.
+    if (countStep) {
+        m_currentLine = line;
+        m_currentIsError = isError;
+        updateCurrentActivity();
+    }
+    updateHeader();
+    updateElapsed();
+    reflowNow();
+}
+
+void SubtaskWidget::flushStreamOutput()
+{
+    if (m_pendingStreamDelta.isEmpty()) {
+        return;
+    }
+    const QString pending = m_pendingStreamDelta;
+    const int lastNewline = pending.lastIndexOf(u'\n');
+    // Keep the incomplete tail for the next chunk; one line of output is not
+    // enough to re-render on every arrival.
+    if (lastNewline < 0) {
+        return;
+    }
+    m_pendingStreamDelta = pending.mid(lastNewline + 1);
+    const QStringList lines = pending.left(lastNewline).split(u'\n');
+    m_streamTimer->stop();
+
+    QStringList rendered;
+    for (const QString &line : lines) {
+        if (line.trimmed().isEmpty()) {
+            continue;
+        }
+        rendered.append(u"│ "_s + line);
+    }
+    if (rendered.isEmpty()) {
+        return;
+    }
+
+    // Batch the whole flush into one document rebuild.
+    for (const QString &line : std::as_const(rendered)) {
+        m_activityLog.append(qMakePair(line, false));
+        while (m_activityLog.size() > MaxActivityLines) {
+            m_activityLog.removeFirst();
+        }
+    }
+    rebuildActivityLog();
+    if (!m_activityUserSet) {
+        setActivityVisible(true);
+    }
     updateHeader();
     updateElapsed();
     reflowNow();
@@ -299,7 +373,34 @@ void SubtaskWidget::setPartialOutput(const QString &partial)
         }
         return;
     }
+    const QString previous = m_partialOutput;
     m_partialOutput = partial;
+
+    // Feed complete lines into the Activity log as the command runs. Child
+    // tools stream either the accumulated output or a fragment; handle both so
+    // the log never repeats the whole accumulated buffer on every chunk.
+    QString delta;
+    if (previous.isEmpty()) {
+        delta = partial;
+    } else if (partial.startsWith(previous)) {
+        delta = partial.mid(previous.size());
+    } else if (previous.startsWith(partial)) {
+        delta.clear();
+    } else if (partial.contains(previous)) {
+        delta = partial.mid(partial.indexOf(previous) + previous.size());
+    } else {
+        delta = partial;
+    }
+    if (!delta.isEmpty()) {
+        m_pendingStreamDelta += delta;
+        if (m_pendingStreamDelta.size() > MaxActivityChars) {
+            m_pendingStreamDelta = m_pendingStreamDelta.right(MaxActivityChars);
+        }
+        if (!m_streamTimer->isActive()) {
+            m_streamTimer->start();
+        }
+    }
+
     // Show the tail of the live output as the current step, so a long command
     // reads as it runs instead of only the tool name.
     QString tail = partial.trimmed();
@@ -322,7 +423,13 @@ void SubtaskWidget::finishAgent(const ToolResult &result)
     m_running = false;
     m_failed = !result.ok && !result.cancelled;
     m_cancelled = result.cancelled;
+    // Keep the last complete output lines that were still coalescing.
+    flushStreamOutput();
+    if (m_streamTimer) {
+        m_streamTimer->stop();
+    }
     m_pendingStreamed.clear();
+    m_pendingStreamDelta.clear();
     m_partialOutput.clear();
     if (m_ticker) {
         m_ticker->stop();
@@ -353,6 +460,12 @@ void SubtaskWidget::markAbandoned(const QString &reason)
 {
     m_running = false;
     m_cancelled = true;
+    flushStreamOutput();
+    if (m_streamTimer) {
+        m_streamTimer->stop();
+    }
+    m_pendingStreamDelta.clear();
+    m_partialOutput.clear();
     if (m_ticker) {
         m_ticker->stop();
     }

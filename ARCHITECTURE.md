@@ -150,11 +150,25 @@ pagination note on reads. `suggest` emits `suggestionPosted` which `ChatWidget`
 turns into a suggestion card; `ask_user` parks the RPC, emits `questionAsked`
 (the same signal the native `question` tool drives), and answers the RPC from
 `AgentLoop::answerQuestion` — the v2-draft `elicitation/create` reaches the same
-path. `todo_write`/`todo_read` share the native todo store through a
+path.
+
+Agents that expose their own question/suggestion tools are normalized too:
+`permissionFromToolCall()` accepts the flat `{question, options}` shape, the
+Claude/OpenCode `{questions:[{question, options:[{label}]}]}` shape and plain
+text, and canonicalizes names like `suggestion`, `ask_question`,
+`ask_user_question` or a title that says "ask user". A question tool call shows
+the same dock card; because ACP has no client-to-agent tool-result channel, its
+answer is sent as the next user prompt after the current turn closes. A
+`session/request_permission` whose options are answer labels rather than
+allow/reject kinds is shown as a question card too, and the selected chip is
+returned as the permission request's `optionId`. A suggestion tool call becomes
+a normal suggestion card through `toolStarted`. `todo_write`/`todo_read` share the native todo store through a
 getter/setter pair installed by `AgentLoop::syncAcpClient`, and emit
 `todosChanged`, which the loop forwards as `planUpdated` so `TodoWidget` renders
-them. `available_commands_update` notifications are stored and announced via
-`availableCommandsChanged`.
+them. Slash commands are stored and announced via `availableCommandsChanged`:
+the `session/new`/`session/resume` `availableCommands` field is read, and the
+protocol's `session/update` → `available_commands_update` variant replaces the
+list (the old top-level notification is accepted as a compatibility fallback).
 
 ### Protocol negotiation and agent quirks
 
@@ -238,11 +252,16 @@ tools `write_plan_file`, `suggest`, `question`, `todo_write`/`todo_read`,
 - `multi_edit_file` applies a batch atomically and **rejects overlapping edits**:
   each edit must target text none of the earlier ones consumed or produced,
   because matches are found in the working string after those edits.
-- Read-only disk tools (`read_file`, `list_dir`, `grep`, `glob`) are offloaded
-  to a worker thread by `ToolRunner::runReadToolAsync` (reading through a
-  disk-only bridge), emitting `bashProgress`/`bashFinished`, so a long search
-  streams instead of freezing the transcript. Tools that touch the editor
-  bridge, the project graph, or the LSP provider stay synchronous.
+- `apply_patch` plans every file before writing, accepts the standard
+  `@@ -0,0` new-file range, distinguishes an empty file from a deletion, and
+  rolls back already-written files if a later write fails.
+- Read-only disk tools (`list_dir`, `grep`, `glob`) are offloaded to a worker
+  thread by `ToolRunner::runReadToolAsync` through a bridge that never touches
+  KTextEditor documents, emitting `bashProgress`/`bashFinished`, so a long
+  search streams instead of freezing the transcript. `read_file` stays
+  synchronous because it must see the editor's unsaved buffer; tools that touch
+  the project graph or the LSP provider stay synchronous too. A stop cancels
+  the in-flight jobs and a turn generation marks late results stale.
 
 ## UI structure
 
@@ -255,7 +274,10 @@ tools `write_plan_file`, `suggest`, `question`, `todo_write`/`todo_read`,
   so a click opens the file in Kate at that line.
 - The **intent dock** above the composer holds anything awaiting the user
   (approval rows, question cards, live sub-agent cards); retired widgets move
-  back into the transcript in place.
+  back into the transcript in place. A running sub-agent card streams its tool
+  starts/finishes, streamed command output, progress text and latest step into
+  the card's activity log as they arrive; complete output lines are coalesced
+  on a short timer so a chatty child does not rebuild the document per chunk.
 - `TurnStatus` is the busy strip: elapsed timer, verb + target of the current
   tool ("Reading src/agentloop.cpp"), running sub-agents, completed tool count.
 
