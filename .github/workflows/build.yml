@@ -337,7 +337,11 @@ jobs:
   release:
     name: Publish GitHub Release
     runs-on: ubuntu-latest
-    if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+    # Always publish the artifacts that did build: a single optional bundle
+    # failure (historically the Windows Craft bundle) must not leave the tag
+    # with only GitHub's source archives. Missing artifacts are simply absent
+    # from the release.
+    if: always() && github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
     needs:
       - build-plugin
       - package-fedora

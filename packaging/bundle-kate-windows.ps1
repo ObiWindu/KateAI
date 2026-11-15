@@ -50,24 +50,29 @@ if (-not (Test-Path $craftEnv)) {
     # scope, which makes this assignment throw: not fatal, Bypass is
     # exactly what we need to run the installer below.
     try {
-        Set-ExecutionPolicy -Scope CurrentUser RemoteSigned -Force
+        Set-ExecutionPolicy -Scope CurrentUser RemoteSigned -Force -ErrorAction SilentlyContinue
     } catch {
         Write-Host "Execution policy is host-managed; continuing with the effective Bypass policy."
     }
-    python.exe -m pip install --upgrade certifi
-    # -root skips the install-path prompt; -use-defaults is forwarded to
-    # CraftBootstrap.py (arch/compiler auto-detected). Downloaded first so
-    # the exact command line shows in the log instead of hiding in iex.
-    $installer = Join-Path ([IO.Path]::GetTempPath()) "install_craft.ps1"
-    (New-Object net.webclient).DownloadFile(
-        'https://raw.githubusercontent.com/KDE/craft/master/setup/install_craft.ps1', $installer)
+    # Use the same CraftBootstrap.py path as packaging/ci/windows-build.ps1.
+    # The older install_craft.ps1 helper is interactive in places and has
+    # aborted headless bundle jobs before this script even reached Craft.
+    $python = (Get-Command python.exe -ErrorAction SilentlyContinue).Source
+    if (-not $python) {
+        $python = (Get-Command python -ErrorAction SilentlyContinue).Source
+    }
+    if (-not $python) {
+        throw "Python is required to bootstrap KDE Craft."
+    }
+    & $python -m pip install --upgrade certifi
     if ($env:CI -eq 'true' -and (Test-Path $CraftRoot)) {
-        # The installer loops forever on a non-empty target dir when there
-        # is no console to answer its prompt; CI VMs are disposable.
         Write-Host "Removing pre-existing $CraftRoot for a clean Craft bootstrap."
         Remove-Item -Recurse -Force $CraftRoot
     }
-    & $installer -root $CraftRoot -use-defaults
+    $bootstrap = Join-Path ([IO.Path]::GetTempPath()) "CraftBootstrap.py"
+    (New-Object net.webclient).DownloadFile(
+        'https://raw.githubusercontent.com/KDE/craft/master/setup/CraftBootstrap.py', $bootstrap)
+    & $python $bootstrap --prefix $CraftRoot --use-defaults
 }
 if (-not (Test-Path $craftEnv)) {
     throw "KDE Craft not found at $CraftRoot. Install it first, see https://develop.kde.org/docs/getting-started/building/craft/"
