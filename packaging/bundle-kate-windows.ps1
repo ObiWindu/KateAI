@@ -64,8 +64,11 @@ foreach ($name in @("GITHUB_ACTION_REF", "GITHUB_ACTION", "GITHUB_ACTION_PATH", 
         Set-Item "Env:$name" ""
     }
 }
+# windows-build.ps1 already made craftenv's Remove-Item calls tolerant while
+# it ran its own Craft setup. Do not apply that textual replacement a second
+# time here: the second pass adds another -ErrorAction to the same command,
+# and PowerShell rejects the duplicated parameter while dot-sourcing.
 $content = Get-Content $craftEnv -Raw
-$content = $content.Replace('Remove-Item ("ENV:{0}" -f ${_}.Name)', 'Remove-Item ("ENV:{0}" -f ${_}.Name) -ErrorAction SilentlyContinue')
 $content = $content.Replace('$python = (Get-Command "$env:KDEROOT/dev-utils/bin/python3" -ErrorAction SilentlyContinue).Source', '$python = $env:CRAFT_PYTHON')
 Set-Content $craftEnv $content
 

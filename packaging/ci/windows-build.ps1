@@ -67,7 +67,11 @@ function Invoke-CraftEnv {
     # missing variable can never abort the build.
     if (Test-Path $craftEnv) {
         $content = Get-Content $craftEnv -Raw
-        $content = $content.Replace('Remove-Item ("ENV:{0}" -f ${_}.Name)', 'Remove-Item ("ENV:{0}" -f ${_}.Name) -ErrorAction SilentlyContinue')
+        # Idempotent: a previous run may already have made this call tolerant,
+        # and appending a second -ErrorAction breaks the PowerShell parser.
+        if ($content -notmatch 'Remove-Item \("ENV:\{0\}" -f \$\{_\}\.Name\) -ErrorAction') {
+            $content = $content.Replace('Remove-Item ("ENV:{0}" -f ${_}.Name)', 'Remove-Item ("ENV:{0}" -f ${_}.Name) -ErrorAction SilentlyContinue')
+        }
         # Force the craft() helper to use the detected (sufficiently new)
         # Python instead of a possibly too-old dev-utils/bin/python3.
         $content = $content.Replace('$python = (Get-Command "$env:KDEROOT/dev-utils/bin/python3" -ErrorAction SilentlyContinue).Source', '$python = $env:CRAFT_PYTHON')
