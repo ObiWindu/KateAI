@@ -76,11 +76,22 @@ static QHash<QString, QString> buildToolAliasMap()
     map[u"plan/write"_s] = u"write_plan_file"_s;
     map[u"project/query"_s] = u"query_project_graph"_s;
     map[u"suggest"_s] = u"suggest"_s;
+    map[u"suggestion"_s] = u"suggest"_s;
+    map[u"suggest_change"_s] = u"suggest"_s;
+    map[u"suggest_edit"_s] = u"suggest"_s;
+    map[u"suggest_improvement"_s] = u"suggest"_s;
+    map[u"propose"_s] = u"suggest"_s;
+    map[u"advice"_s] = u"suggest"_s;
     map[u"question"_s] = u"question"_s;
     // Agents ask the user under several names; all park the turn the same way.
     map[u"ask_user"_s] = u"question"_s;
     map[u"ask_user_question"_s] = u"question"_s;
+    map[u"ask_question"_s] = u"question"_s;
+    map[u"ask_user_input"_s] = u"question"_s;
     map[u"request_user_input"_s] = u"question"_s;
+    map[u"user_question"_s] = u"question"_s;
+    map[u"prompt_user"_s] = u"question"_s;
+    map[u"ask_human"_s] = u"question"_s;
     map[u"AskUserQuestion"_s] = u"question"_s;
     // Structured todos (Claude Code-style) and plan-mode exit.
     map[u"todo_write"_s] = u"todo_write"_s;
@@ -315,22 +326,43 @@ QList<PatchFile> parseUnifiedPatch(const QString &patch)
 
 QString applyPatchToContent(const QString &content, const QList<PatchHunk> &hunks, QString *error)
 {
-    QStringList lines = content.isEmpty() ? QStringList() : content.split(u'\n');
-    // A trailing newline in the file produces a final empty element after
-    // split(); keep it so positions stay stable, and re-join identically.
-    QStringList out = lines;
+    // A non-empty file with a trailing newline splits into a final empty
+    // element; keeping it makes positions stable and re-joins identically. An
+    // empty file uses the same sentinel so a hunk that adds lines produces a
+    // file ending in a newline, which is what unified diff lines mean unless a
+    // "\ No newline at end of file" marker says otherwise.
+    QStringList out = content.isEmpty() ? QStringList{QString()} : content.split(u'\n');
+    bool newSideHasNoFinalNewline = false;
     // Apply hunks from last to first so earlier positions stay valid.
     QList<PatchHunk> ordered = hunks;
     std::sort(ordered.begin(), ordered.end(), [](const PatchHunk &a, const PatchHunk &b) {
         return a.oldStart > b.oldStart;
     });
     for (const PatchHunk &hunk : ordered) {
-        const int start = hunk.oldStart - 1; // 0-based index of the first old line
-        if (hunk.oldStart < 1 || start < 0) {
+        // Unified diffs write a zero-length old range as "<line before>,0".
+        // Creating a file at the top uses "@@ -0,0", so oldStart 0 is valid
+        // exactly when the hunk removes nothing. That insertion lands at 0.
+        const bool emptyOldRange = hunk.oldStart == 0 && hunk.oldCount == 0;
+        const int start = hunk.oldStart > 0 ? hunk.oldStart - 1 : 0;
+        if ((hunk.oldStart < 1 && !emptyOldRange) || start < 0) {
             if (error) {
                 *error = u"patch hunk has an invalid start line (%1)"_s.arg(hunk.oldStart);
             }
             return {};
+        }
+        // A trailing "\ No newline at end of file" marker applies to the line
+        // before it. If that line survives in the new content, the result must
+        // not end with a newline.
+        if (!hunk.lines.isEmpty()) {
+            const int last = hunk.lines.size() - 1;
+            if (hunk.lines.at(last).startsWith(u'\\') && last > 0) {
+                const QChar previous = hunk.lines.at(last - 1).at(0);
+                if (previous == u'+' || previous == u' ') {
+                    newSideHasNoFinalNewline = true;
+                } else if (previous == u'-') {
+                    newSideHasNoFinalNewline = false;
+                }
+            }
         }
         // Verify the context/removed lines match the current content.
         QStringList oldLines;
@@ -370,7 +402,17 @@ QString applyPatchToContent(const QString &content, const QList<PatchHunk> &hunk
             out.insert(out.begin() + start + i, newLines.at(i));
         }
     }
-    return out.join(u'\n');
+    QString joined = out.join(u'\n');
+    if (newSideHasNoFinalNewline && joined.endsWith(u'\n')) {
+        joined.chop(1);
+    }
+    if (joined.isNull()) {
+        // QStringList::join() returns a null string for an empty result, which
+        // callers used to mistake for failure/deletion. An empty file is a
+        // successful patch result; keep it non-null.
+        return QStringLiteral("");
+    }
+    return joined;
 }
 
 QString resolvePath(const QString &path, const QString &workspace)
@@ -816,6 +858,7 @@ QJsonArray toolDefinitions(const ToolAccess &access)
                          QJsonObject{
                              {u"path"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"Path relative to the workspace or absolute."_s}}},
                              {u"offset"_s, QJsonObject{{u"type"_s, u"integer"_s}, {u"description"_s, u"First line to return (1-based). \"line\" is accepted as an alias."_s}}},
+                             {u"line"_s, QJsonObject{{u"type"_s, u"integer"_s}, {u"description"_s, u"Alias of offset, matching ACP's fs/read_text_file shape."_s}}},
                              {u"limit"_s, QJsonObject{{u"type"_s, u"integer"_s}, {u"description"_s, u"Maximum number of lines to return."_s}}},
                          },
                          {u"path"_s},
@@ -898,6 +941,7 @@ QJsonArray toolDefinitions(const ToolAccess &access)
                          u"Find files whose paths match a glob pattern."_s,
                          QJsonObject{
                              {u"pattern"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"Glob such as **/*.h or src/**/*.cpp."_s}}},
+                             {u"path"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"Optional directory to search under. Defaults to the workspace root."_s}}},
                          },
                          {u"pattern"_s},
                          false));
@@ -1064,9 +1108,7 @@ QJsonArray toolDefinitions(const ToolAccess &access)
                          u"Leave plan mode once the plan has been presented and approved, so the turn can start "
                          u"making edits. Outside plan mode this just reports that plan mode is off. Read-only: it "
                          u"changes no file."_s,
-                         QJsonObject{
-                             {u"plan"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"Optional final plan summary to show the user before leaving plan mode."_s}}},
-                         },
+                         QJsonObject{},
                          {},
                          false));
 
@@ -1088,8 +1130,8 @@ QJsonArray toolDefinitions(const ToolAccess &access)
                              u"Only http and https URLs are fetched."_s,
                              QJsonObject{
                                  {u"url"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"The absolute http(s) URL to fetch."_s}}},
-                                 {u"timeout_ms"_s, QJsonObject{{u"type"_s, u"integer"_s}, {u"description"_s, u"Per-request timeout in milliseconds. Defaults to the configured web timeout."_s}}},
-                                 {u"max_bytes"_s, QJsonObject{{u"type"_s, u"integer"_s}, {u"description"_s, u"Stop reading the body after this many bytes. Defaults to 200000."_s}}},
+                                 {u"timeout_ms"_s, QJsonObject{{u"type"_s, u"integer"_s}, {u"description"_s, u"Per-request timeout in milliseconds (minimum 1000). Defaults to the configured web timeout."_s}}},
+                                 {u"max_bytes"_s, QJsonObject{{u"type"_s, u"integer"_s}, {u"description"_s, u"Reject a body larger than this many bytes; capped at 5 MiB. Defaults to 5 MiB."_s}}},
                              },
                              {u"url"_s},
                              false));

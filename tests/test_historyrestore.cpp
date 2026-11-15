@@ -196,6 +196,43 @@ private Q_SLOTS:
                  qPrintable(QStringLiteral("edit_file details: %1").arg(editDetails->toPlainText())));
     }
 
+    void testApplyPatchCardKeepsItsDiff()
+    {
+        ChatWidget widget;
+        widget.resize(900, 700);
+        widget.show();
+
+        ChatMessage user;
+        user.role = ChatMessage::Role::User;
+        user.content = u"apply the patch"_s;
+
+        const QString patch = u"--- a/new.txt\n+++ b/new.txt\n@@ -0,0 +1,2 @@\n+hello\n+world\n"_s;
+        ChatMessage assistant;
+        assistant.role = ChatMessage::Role::Assistant;
+        assistant.content = QString();
+        QJsonArray calls;
+        calls.append(toolCall(u"call-patch"_s, u"apply_patch"_s, {{u"patch"_s, patch}}));
+        assistant.toolCalls = calls;
+
+        SessionStore::SessionData data;
+        data.messages = {user, assistant,
+                         toolResultMessage(u"call-patch"_s, u"apply_patch"_s, u"Applied patch to 1 file(s):\npatched new.txt"_s)};
+        SessionStore::saveConversation(u"conv-patch"_s, data, u"Patch chat"_s, 50);
+
+        widget.setCurrentConversationId(SessionStore::createNewConversation());
+        widget.switchToConversation(u"conv-patch"_s);
+        QTest::qWait(60);
+
+        auto *card = qobject_cast<ToolCallWidget *>(cardForToolCallId(widget, u"call-patch"_s));
+        QVERIFY2(card, "apply_patch card missing after the switch");
+        auto *diff = card->findChild<QTextBrowser *>(u"toolDiff"_s);
+        QVERIFY(diff);
+        QVERIFY2(diff->toPlainText().contains(u"hello"_s),
+                 qPrintable(QStringLiteral("apply_patch diff: %1").arg(diff->toPlainText())));
+        QVERIFY2(card->styleSheet().contains(ChatTheme::toolColor(u"apply_patch"_s)),
+                 qPrintable(card->styleSheet()));
+    }
+
     // ACP agents report tool results as they finish, while the assistant
     // message that declares the tool calls is only appended when the whole
     // prompt ends. Stored ACP conversations therefore carry the Tool results

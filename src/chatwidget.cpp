@@ -129,6 +129,18 @@ static KateAi::Suggestion suggestionFromRequest(const KateAi::PermissionRequest 
     if (suggestion.path.isEmpty() && !request.path.isEmpty()) {
         suggestion.path = request.path;
     }
+    // ACP agents can send the advice as plain text or only a title. Never let
+    // the branch above drop the one thing the card exists to show.
+    if (suggestion.text.trimmed().isEmpty() && !request.details.trimmed().isEmpty()
+        && !request.details.trimmed().startsWith(u'{')) {
+        suggestion.text = request.details.trimmed();
+    }
+    if (suggestion.text.trimmed().isEmpty()
+        && !request.summary.isEmpty()
+        && request.summary != request.toolName
+        && request.summary != request.originalToolName) {
+        suggestion.text = request.summary;
+    }
     return suggestion;
 }
 
@@ -144,7 +156,8 @@ bool isFileMutatingTool(const QString &toolName)
     // the edit tracker also learns about through mutatesFiles on live cards;
     // this list drives risk colouring and the working label, where the ACP
     // kind is not available.
-    if (canonical == u"write_file"_s || canonical == u"edit_file"_s || canonical == u"multi_edit_file"_s) {
+    if (canonical == u"write_file"_s || canonical == u"edit_file"_s || canonical == u"multi_edit_file"_s
+        || canonical == u"apply_patch"_s) {
         return true;
     }
     return toolName == u"multi_replace_file_content"_s
@@ -962,8 +975,10 @@ ChatWidget::ChatWidget(QWidget *parent)
         // it gets a dedicated card instead of the flat tool-call card. The card
         // carries a Cancel button, which makes it something the user may need
         // to act on, so it lives in the intent dock above the input rather than
-        // down in the transcript.
-        if (request.toolName == subtaskToolName()) {
+        // down in the transcript. Only Kate's own native delegation has a child
+        // loop behind it; an ACP agent's similarly named "task" tool runs inside
+        // the agent and would otherwise sit in a forever-empty sub-agent card.
+        if (request.toolName == subtaskToolName() && !usesAcpNative(m_settings)) {
             auto *subtaskWidget = new SubtaskWidget(request.toolCallId, m_intentDock);
             connect(subtaskWidget, &SubtaskWidget::cancelRequested, this, [this](const QString &taskId) {
                 m_agent.cancelSubtask(taskId);
@@ -1040,17 +1055,27 @@ ChatWidget::ChatWidget(QWidget *parent)
         if (editTracking && (isFileMutatingTool(request.toolName) || request.mutatesFiles
                              || !request.describeDiff.isEmpty())) {
             // Primary file
+            const QString workspace = m_agent.workspace();
+            const auto trackerPath = [&workspace](const QString &raw) {
+                if (raw.isEmpty() || workspace.isEmpty() || QFileInfo(raw).isAbsolute()) {
+                    return raw;
+                }
+                return QDir::cleanPath(QDir(workspace).absoluteFilePath(raw));
+            };
             PendingEdit pending;
             pending.toolName = request.toolName;
-            pending.path = request.resolvedPath.isEmpty() ? request.path : request.resolvedPath;
+            pending.path = trackerPath(request.resolvedPath.isEmpty() ? request.path : request.resolvedPath);
             pending.diff = request.describeDiff;
             pending.existed = m_agent.documentBridge()
                 && m_agent.documentBridge()->readDocument(pending.path, &pending.oldContent);
             m_pendingToolCalls.insert(request.toolCallId, pending);
 
-            // Additional files (multi-file ACP edits)
+            // Additional files (multi-file ACP edits / apply_patch). The
+            // protocol paths are often workspace-relative; the tracker and
+            // document bridge need absolute paths or they would resolve
+            // against the process CWD and snapshot/revert the wrong file.
             for (int i = 0; i < request.additionalPaths.size(); ++i) {
-                const QString ap = request.additionalPaths.at(i);
+                const QString ap = trackerPath(request.additionalPaths.at(i));
                 if (ap.isEmpty() || ap == pending.path) continue;
                 PendingEdit addPending;
                 addPending.toolName = request.toolName;
@@ -1154,8 +1179,8 @@ ChatWidget::ChatWidget(QWidget *parent)
 
     connect(&m_agent, &AgentLoop::toolDetailsChanged, this, [this](const PermissionRequest &request) {
         // A running ACP tool reported its diff or path after it started. The
-        // card shows it now; the review entry takes the diff, but never a new
-        // path, because the file's baseline was read at toolStarted.
+        // card shows it now, and the review entry catches up: a call announced
+        // without a path/diff cannot be tracked until the update supplies them.
         if (auto *widget = m_toolCallWidgets.value(request.toolCallId)) {
             if (!request.describeDiff.isEmpty()) {
                 widget->setDescribeDiff(request.describeDiff);
@@ -1164,9 +1189,65 @@ ChatWidget::ChatWidget(QWidget *parent)
                 widget->setFilePath(request.path);
             }
         }
+
+        const QString workspace = m_agent.workspace();
+        const auto trackerPath = [&workspace](const QString &raw) {
+            if (raw.isEmpty() || workspace.isEmpty() || QFileInfo(raw).isAbsolute()) {
+                return raw;
+            }
+            return QDir::cleanPath(QDir(workspace).absoluteFilePath(raw));
+        };
+
         auto pending = m_pendingToolCalls.find(request.toolCallId);
-        if (pending != m_pendingToolCalls.end() && pending->diff.isEmpty()) {
-            pending->diff = request.describeDiff;
+        const bool editTracking = m_settings.permissionMode == PermissionMode::AcceptEdits
+            || usesAcpNative(m_settings);
+        if (pending == m_pendingToolCalls.end() && editTracking && !request.path.isEmpty()
+            && (request.mutatesFiles || !request.describeDiff.isEmpty())) {
+            PendingEdit created;
+            created.toolName = request.toolName;
+            created.path = trackerPath(request.resolvedPath.isEmpty() ? request.path : request.resolvedPath);
+            created.diff = request.describeDiff;
+            created.existed = m_agent.documentBridge()
+                && m_agent.documentBridge()->readDocument(created.path, &created.oldContent);
+            m_pendingToolCalls.insert(request.toolCallId, created);
+            pending = m_pendingToolCalls.find(request.toolCallId);
+        }
+        if (pending != m_pendingToolCalls.end()) {
+            if (pending->path.isEmpty() && !request.path.isEmpty()) {
+                pending->path = trackerPath(request.resolvedPath.isEmpty() ? request.path : request.resolvedPath);
+                pending->existed = m_agent.documentBridge()
+                    && m_agent.documentBridge()->readDocument(pending->path, &pending->oldContent);
+            }
+            if (pending->diff.isEmpty()) {
+                pending->diff = request.describeDiff;
+            }
+        }
+
+        if (editTracking) {
+            const QString primaryPath = pending != m_pendingToolCalls.end()
+                ? pending->path
+                : trackerPath(request.resolvedPath.isEmpty() ? request.path : request.resolvedPath);
+            for (int i = 0; i < request.additionalPaths.size(); ++i) {
+                const QString path = trackerPath(request.additionalPaths.at(i));
+                if (path.isEmpty() || path == primaryPath) {
+                    continue;
+                }
+                const QString key = request.toolCallId + u"_add"_s + QString::number(i);
+                auto extra = m_pendingToolCalls.find(key);
+                if (extra == m_pendingToolCalls.end()) {
+                    PendingEdit addPending;
+                    addPending.toolName = request.toolName;
+                    addPending.path = path;
+                    addPending.existed = m_agent.documentBridge()
+                        && m_agent.documentBridge()->readDocument(path, &addPending.oldContent);
+                    if (i < request.additionalDiffs.size()) {
+                        addPending.diff = request.additionalDiffs.at(i);
+                    }
+                    m_pendingToolCalls.insert(key, addPending);
+                } else if (extra->diff.isEmpty() && i < request.additionalDiffs.size()) {
+                    extra->diff = request.additionalDiffs.at(i);
+                }
+            }
         }
     });
     connect(&m_agent, &AgentLoop::noticeRaised, this, [this](const QString &text) {
@@ -1251,6 +1332,12 @@ ChatWidget::ChatWidget(QWidget *parent)
     connect(&m_agent, &AgentLoop::questionAsked, this, [this](const PermissionRequest &request) {
         showQuestionCard(request);
     });
+    // The parked RPC was closed internally (a newer question, a permission
+    // request, or a stop). Retire the old card so it cannot answer the next RPC.
+    connect(m_agent.acpClient(), &AcpClient::questionCancelled, this, [this](const QString &toolCallId) {
+        removeQuestionCard(toolCallId);
+    });
+    connect(&m_agent, &AgentLoop::questionCancelled, this, &ChatWidget::removeQuestionCard);
 
     // Live tool output. Every chunk is forwarded to the card, so a long command
     // reads as it runs; a chatty one is coalesced onto a timer, because
@@ -1347,8 +1434,9 @@ ChatWidget::ChatWidget(QWidget *parent)
             }
         }
         // A turn that ended with a question still on screen (abort, budget stop)
-        // must not leave it docked: nothing can answer it now.
-        clearQuestionCards();
+        // must not leave it docked: nothing can answer it now. The exception is
+        // an agent-side ACP question, whose answer starts a fresh turn.
+        clearQuestionCards(m_agent.pendingAcpToolQuestionId());
         // The dock lost contents without a dock-aware call above: a cleared
         // question, and approval rows hidden together with the cards that
         // carried them. Recompute, or the strip stays on screen over the
@@ -1473,8 +1561,12 @@ ChatWidget::ChatWidget(QWidget *parent)
     // Writing the empty pre-edit content back instead would leave a zero-byte
     // file behind, which is worse than the file never having existed.
     connect(m_editTracker, &EditTracker::fileCreatedThenRejected, this, [this](const QString &path) {
-        if (!QFile::remove(path)) {
-            showInfoMessage(i18n("Failed to delete %1", QFileInfo(path).fileName()), true);
+        QString error;
+        const bool removed = m_agent.documentBridge()
+            ? m_agent.documentBridge()->removeDocument(path, &error)
+            : QFile::remove(path);
+        if (!removed) {
+            showInfoMessage(i18n("Failed to delete %1: %2", QFileInfo(path).fileName(), error), true);
             return;
         }
         showInfoMessage(i18n("Deleted %1", QFileInfo(path).fileName()), false);
@@ -5299,7 +5391,8 @@ void ChatWidget::showQuestionCard(const PermissionRequest &request)
         return;
     }
     auto *card = new QuestionWidget(request.toolCallId, m_intentDock);
-    card->setQuestion(request.questionText, request.questionOptions, request.allowFreeform);
+    const QString questionText = request.questionText.trimmed().isEmpty() ? request.summary : request.questionText;
+    card->setQuestion(questionText, request.questionOptions, request.allowFreeform);
     connect(card, &QuestionWidget::answered, this, [this, card](const QString &, const QString &answer) {
         // The agent resumes from the answer: the tool result *is* the user's
         // words, so there is nothing else to hand back.
@@ -5316,11 +5409,33 @@ void ChatWidget::showQuestionCard(const PermissionRequest &request)
     scrollToBottom();
 }
 
-void ChatWidget::clearQuestionCards()
+void ChatWidget::removeQuestionCard(const QString &toolCallId)
+{
+    auto *card = m_questionWidgets.take(toolCallId);
+    if (!card) {
+        return;
+    }
+    m_questionOrder.removeAll(card);
+    if (m_intentDockLayout) {
+        m_intentDockLayout->removeWidget(card);
+    }
+    card->hide();
+    card->deleteLater();
+    updateIntentDockVisibility();
+}
+
+void ChatWidget::clearQuestionCards(const QString &keepId)
 {
     // Called when a turn ends: a question that was never answered must not sit
-    // in the dock offering buttons that can no longer resume anything.
-    for (auto *card : std::as_const(m_questionWidgets)) {
+    // in the dock offering buttons that can no longer resume anything. The
+    // exception is an agent-side ACP question tool: its turn may end before the
+    // user answers, and the answer still becomes the next prompt.
+    const QList<QuestionWidget *> cards = m_questionWidgets.values();
+    for (auto *card : cards) {
+        if (card->questionCallId() == keepId) {
+            continue;
+        }
+        m_questionWidgets.remove(card->questionCallId());
         m_questionOrder.removeAll(card);
         if (m_intentDockLayout) {
             m_intentDockLayout->removeWidget(card);
@@ -5331,8 +5446,6 @@ void ChatWidget::clearQuestionCards()
         card->hide();
         card->deleteLater();
     }
-    m_questionWidgets.clear();
-    m_questionOrder.clear();
     updateIntentDockVisibility();
 }
 
@@ -6025,8 +6138,21 @@ void ChatWidget::restoreHistoricalTool(const QString &toolCallId, const QString 
         });
     });
 
-    if (canonicalName == u"edit_file"_s || toolName == u"edit"_s || toolName == u"str_replace"_s
-        || toolName == u"str_replace_editor"_s || toolName == u"apply_patch"_s || toolName == u"patch"_s) {
+    if (canonicalName == u"apply_patch"_s) {
+        // The patch itself is the diff; it may span several files. Do not run
+        // it through the old_string/new_string branch, which has neither.
+        const QString patch = argsObj.value(u"patch"_s).toString();
+        const QList<PatchFile> files = parseUnifiedPatch(patch);
+        QString path = argsObj.value(u"path"_s).toString();
+        if (path.isEmpty() && !files.isEmpty()) {
+            path = files.first().path;
+        }
+        if (!path.isEmpty()) {
+            toolWidget->setFilePath(path);
+        }
+        toolWidget->setDescribeDiff(patch);
+    } else if (canonicalName == u"edit_file"_s || toolName == u"edit"_s || toolName == u"str_replace"_s
+        || toolName == u"str_replace_editor"_s) {
         QString path = argsObj.value(u"path"_s).toString();
         if (path.isEmpty()) path = argsObj.value(u"file_path"_s).toString();
         if (path.isEmpty()) path = argsObj.value(u"filePath"_s).toString();

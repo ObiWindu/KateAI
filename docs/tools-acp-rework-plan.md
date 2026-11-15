@@ -397,12 +397,15 @@ test binaries pass, including the new cases below.
   (`acpAgentQuirks`), npx/uvx installs launch `npx --yes <pkg>@<version>` /
   `uvx` with no global install, registry list marks available updates.
 - **Phase 4 — progress**: `ToolRunner::runReadToolAsync` offloads
-  read_file/list_dir/grep/glob to a dedicated worker thread (disk-only bridge,
-  stopped in `~ToolRunner`), wired through `AgentLoop::startReadTool` with the
-  same progress/finish plumbing as bash. ACP side: title-only updates emit
+  list_dir/grep/glob to a dedicated worker thread (disk-only bridge, cancellable
+  and stopped in `~ToolRunner`), wired through `AgentLoop::startReadTool` with
+  the same progress/finish plumbing as bash. `read_file` stays synchronous so
+  it sees open unsaved buffers. ACP side: title-only updates emit
   `toolDetailsChanged`, terminals referenced by id in updates are linked, parked
   permission-gated methods emit a progress line.
-- **Phase 5 — UI**: ACP questions show the intent-dock card and are cleared on
-  turn end; suggestion anchors are resolved against the workspace on both paths;
-  todos render in `TodoWidget` from both native and ACP calls.
+- **Phase 5 — UI**: ACP questions show the intent-dock card; an agent-side
+  question tool card survives the turn so a late answer starts the answer turn
+  (a permission request shaped as answers replies with the selected optionId);
+  suggestion anchors are resolved against the workspace on both paths; todos
+  render in `TodoWidget` from both native and ACP calls.
 - **Verification**: full `ctest` run 50/50 green after the changes.

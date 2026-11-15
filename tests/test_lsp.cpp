@@ -107,6 +107,7 @@ private Q_SLOTS:
     void testLspSymbolsViaGraph();
     void testLspReferencesTextFallback();
     void testLspCodeActions();
+    void testLspAcceptsStringPositions();
     void testToolRegistration();
 };
 
@@ -418,6 +419,36 @@ void TestLsp::testLspCodeActions()
                                          QJsonObject{{u"path"_s, u"a.cpp"_s}, {u"line"_s, 1}}));
     QVERIFY2(res.ok, qPrintable(res.output));
     QVERIFY(res.output.contains(u"Declare 'x'"_s));
+}
+
+void TestLsp::testLspAcceptsStringPositions()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    writeFile(dir.path() + u"/a.cpp"_s,
+              "class Thing {\n"
+              "};\n"
+              "int compute() {\n"
+              "    return 42;\n"
+              "}\n");
+
+    ProjectGraph graph;
+    graph.generateGraph(dir.path());
+
+    Sandbox sandbox(dir.path(), SandboxProfile::Workspace);
+    DiskDocumentBridge bridge;
+    ToolRunner runner(sandbox, &bridge);
+    runner.setProjectGraph(&graph);
+    StubLsp lsp;
+    lsp.available = false;
+    runner.setLspProvider(&lsp);
+
+    // Models often send positions as strings. A silent fallback to line 1
+    // would report the class instead of the enclosing function.
+    const ToolResult res = runner.run(makeCall(u"lsp_hover"_s,
+        QJsonObject{{u"path"_s, u"a.cpp"_s}, {u"line"_s, u"4"_s}, {u"column"_s, u"2"_s}}));
+    QVERIFY2(res.ok, qPrintable(res.output));
+    QVERIFY2(res.output.contains(u"function compute"_s), qPrintable(res.output));
 }
 
 void TestLsp::testToolRegistration()

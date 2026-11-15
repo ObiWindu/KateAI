@@ -50,6 +50,7 @@ private Q_SLOTS:
     void initTestCase();
     void cleanup();
     void testDocumentForPathFindsOpenDocument();
+    void testDiskOnlyBridgeIgnoresOpenBuffer();
     void testDiskWriteToOpenDocumentSaves();
     void testBufferWriteKeepsChangeUnsaved();
     void testAcceptSavesBuffer();
@@ -95,6 +96,26 @@ void TestDocumentBridge::testDocumentForPathFindsOpenDocument()
     QCOMPARE(documentForPath(m_path), m_document);
     // A path that is not open resolves to nothing, not to a stray document.
     QVERIFY(!documentForPath(QDir(m_dir.path()).filePath(u"other.cpp"_s)));
+}
+
+void TestDocumentBridge::testDiskOnlyBridgeIgnoresOpenBuffer()
+{
+    // The worker thread must never call into KTextEditor. With the flag off,
+    // reads come straight from disk even while an unsaved buffer exists.
+    m_document->setText(u"unsaved buffer\n"_s);
+    QVERIFY(m_document->isModified());
+
+    DiskDocumentBridge editorAware;
+    QString content;
+    QVERIFY(editorAware.readDocument(m_path, &content));
+    QCOMPARE(content, u"unsaved buffer\n"_s);
+
+    DiskDocumentBridge diskOnly;
+    diskOnly.setUseOpenDocuments(false);
+    QVERIFY(diskOnly.readDocument(m_path, &content));
+    QCOMPARE(content, u"original\n"_s);
+    m_document->setText(u"original\n"_s);
+    QVERIFY(m_document->save());
 }
 
 void TestDocumentBridge::testDiskWriteToOpenDocumentSaves()

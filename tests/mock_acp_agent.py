@@ -15,6 +15,7 @@ SESSION_ID = "sess_kateai_test"
 CURRENT_MODEL = "grok-4.5"
 CURRENT_EFFORT = "medium"
 PROMPT_COUNT = 0
+TOOL_QUESTION_COUNT = 0
 EFFORT_CONFIG_ID = "thinking" if SCENARIO == "mistral-thinking" else "thinking_level"
 
 
@@ -444,6 +445,35 @@ def handle_prompt(request_id, params):
         result(request_id, {"stopReason": "end_turn"})
         return
 
+    if SCENARIO == "permission-question":
+        # An agent without ask_user tunnels its question through permission:
+        # the options are answer labels, not allow/reject decisions.
+        response = call_client(
+            "session/request_permission",
+            {
+                "sessionId": SESSION_ID,
+                "toolCall": {
+                    "toolCallId": "call_question",
+                    "title": "Ask a question",
+                    "kind": "other",
+                    "rawInput": {"question": "Which strategy should I use?"},
+                },
+                "options": [
+                    {"optionId": "opt-conservative", "name": "conservative"},
+                    {"optionId": "opt-balanced", "name": "balanced"},
+                ],
+            },
+        )
+        option = (((response or {}).get("result") or {}).get("outcome") or {}).get("optionId")
+        session_update(
+            {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": f"choice:{option}"},
+            }
+        )
+        result(request_id, {"stopReason": "end_turn"})
+        return
+
     if SCENARIO == "permission-double":
         # Two questions outstanding at once. Only one can be answered at a time,
         # so the first must be closed by the client rather than left unanswered.
@@ -571,6 +601,25 @@ def handle_prompt(request_id, params):
         result(request_id, {"stopReason": "end_turn"})
         return
 
+    if SCENARIO == "read-pagination":
+        read_path = ""
+        for token in text.split():
+            if token.startswith("READPATH:"):
+                read_path = token.split(":", 1)[1]
+        read = call_client(
+            "fs/read_text_file",
+            {"sessionId": SESSION_ID, "path": read_path, "line": 1, "limit": 2},
+        )
+        content = ((read or {}).get("result") or {}).get("content", "")
+        session_update(
+            {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": content},
+            }
+        )
+        result(request_id, {"stopReason": "end_turn"})
+        return
+
     if SCENARIO == "plan":
         written = call_client(
             "write_plan_file",
@@ -605,6 +654,77 @@ def handle_prompt(request_id, params):
         result(request_id, {"stopReason": "end_turn"})
         return
 
+    if SCENARIO == "tool-question":
+        # An agent-side question tool, shaped like Claude Code/OpenCode
+        # (questions[] with option objects). The client should surface the
+        # same question card as _kateai/ask_user.
+        global TOOL_QUESTION_COUNT
+        TOOL_QUESTION_COUNT += 1
+        if TOOL_QUESTION_COUNT == 1:
+            session_update(
+                {
+                    "sessionUpdate": "tool_call",
+                    "toolCallId": "tool-question-1",
+                    "title": "Ask a question",
+                    "kind": "other",
+                    "rawInput": {
+                        "questions": [
+                            {
+                                "question": "Which strategy should I use?",
+                                "options": [
+                                    {"label": "conservative", "description": "small steps"},
+                                    {"label": "balanced", "description": "normal pace"},
+                                ],
+                            }
+                        ]
+                    },
+                }
+            )
+            session_update(
+                {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "tool-question-1",
+                    "status": "completed",
+                    "rawOutput": "waiting for the user",
+                }
+            )
+        else:
+            session_update(
+                {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": "answer:" + text},
+                }
+            )
+        result(request_id, {"stopReason": "end_turn"})
+        return
+
+    if SCENARIO == "tool-suggestion":
+        # A suggestion tool that uses text/file_path/start_line rather than
+        # Kate's own suggestion/path/line names.
+        session_update(
+            {
+                "sessionUpdate": "tool_call",
+                "toolCallId": "tool-suggestion-1",
+                "title": "Suggest an improvement",
+                "kind": "other",
+                "rawInput": {
+                    "text": "Use std::string_view here",
+                    "file_path": "src/main.cpp",
+                    "start_line": 7,
+                },
+            }
+        )
+        session_update(
+            {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "tool-suggestion-1",
+                "status": "completed",
+                "content": {"type": "text", "text": "posted"},
+            }
+        )
+        result(request_id, {"stopReason": "end_turn"})
+        return
+
     if SCENARIO == "ask_user":
         # Kate's ask-user extension: the RPC blocks until the client replies
         # with the user's answer, and the agent echoes it back.
@@ -626,6 +746,38 @@ def handle_prompt(request_id, params):
                     "type": "text",
                     "text": ("cancelled" if cancelled else "answer:" + answer),
                 },
+            }
+        )
+        result(request_id, {"stopReason": "end_turn"})
+        return
+
+    if SCENARIO == "elicitation":
+        # ACP v2 elicitation: the response uses {action, content}, not Kate's
+        # extension shape.
+        reply = call_client(
+            "elicitation/create",
+            {
+                "sessionId": SESSION_ID,
+                "message": "Which strategy should I use?",
+                "requestedSchema": {
+                    "type": "object",
+                    "properties": {
+                        "strategy": {
+                            "type": "string",
+                            "enum": ["conservative", "balanced"],
+                        }
+                    },
+                    "required": ["strategy"],
+                },
+            },
+        )
+        response = ((reply or {}).get("result") or {})
+        action = response.get("action", "")
+        strategy = (response.get("content") or {}).get("strategy", "")
+        session_update(
+            {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "%s:%s" % (action, strategy)},
             }
         )
         result(request_id, {"stopReason": "end_turn"})
@@ -1152,13 +1304,26 @@ def handle(message):
         elif SCENARIO == "commands":
             # Advertises slash commands and the v2-draft elicitation capability.
             result(request_id, {"sessionId": SESSION_ID})
-            notify(
-                "available_commands_update",
+            # The protocol-defined form: a session/update variant, not a
+            # top-level notification.
+            session_update(
+                {
+                    "sessionUpdate": "available_commands_update",
+                    "availableCommands": [
+                        {"name": "review", "description": "Review the changes"},
+                        {"name": "test", "description": "Run the tests"},
+                    ],
+                },
+            )
+        elif SCENARIO == "commands_setup":
+            # ACP v2 lets setup responses advertise the initial command list;
+            # recent v1 agents do the same.
+            result(
+                request_id,
                 {
                     "sessionId": SESSION_ID,
                     "availableCommands": [
                         {"name": "review", "description": "Review the changes"},
-                        {"name": "test", "description": "Run the tests"},
                     ],
                 },
             )

@@ -35,6 +35,7 @@
 #include <QDialogButtonBox>
 #include <QDir>
 #include <QEvent>
+#include <QFile>
 #include <QFileInfo>
 #include <QIcon>
 #include <QKeySequence>
@@ -42,7 +43,6 @@
 #include <QMenu>
 #include <QMessageBox>
 #include <QPalette>
-#include <QProcess>
 #include <QPushButton>
 #include <QTimer>
 #include <QUrl>
@@ -52,6 +52,58 @@ using namespace Qt::Literals::StringLiterals;
 
 namespace KateAi
 {
+
+namespace
+{
+
+// Reads the branch name from .git/HEAD. This is intentionally a small file
+// read instead of `git rev-parse`: editorContext() runs on every debounced
+// cursor move, and spawning a process there can freeze the UI for most of a
+// second. Handles both a normal repository (.git directory) and a linked
+// worktree (.git file containing "gitdir: <path>").
+QString gitBranchForWorkspace(const QString &workspace)
+{
+    if (workspace.isEmpty()) {
+        return {};
+    }
+    const QString gitPath = QDir(workspace).absoluteFilePath(u".git"_s);
+    const QFileInfo gitInfo(gitPath);
+    QString headPath;
+    if (gitInfo.isFile()) {
+        QFile gitFile(gitPath);
+        if (!gitFile.open(QIODevice::ReadOnly)) {
+            return {};
+        }
+        const QString line = QString::fromUtf8(gitFile.readLine()).trimmed();
+        gitFile.close();
+        if (!line.startsWith(u"gitdir:"_s)) {
+            return {};
+        }
+        QString gitDir = line.mid(7).trimmed();
+        if (QDir::isRelativePath(gitDir)) {
+            gitDir = QDir::cleanPath(QDir(workspace).absoluteFilePath(gitDir));
+        }
+        headPath = QDir(gitDir).absoluteFilePath(u"HEAD"_s);
+    } else if (gitInfo.isDir()) {
+        headPath = QDir(gitPath).absoluteFilePath(u"HEAD"_s);
+    } else {
+        return {};
+    }
+
+    QFile head(headPath);
+    if (!head.open(QIODevice::ReadOnly)) {
+        return {};
+    }
+    const QString ref = QString::fromUtf8(head.readLine()).trimmed();
+    head.close();
+    const QString prefix = u"ref: refs/heads/"_s;
+    if (!ref.startsWith(prefix)) {
+        return {}; // detached HEAD: no branch name to report
+    }
+    return ref.mid(prefix.size());
+}
+
+} // namespace
 
     KateAiView::KateAiView(KateAiPlugin *plugin, KTextEditor::MainWindow *mainWindow)
     : QObject(plugin)
@@ -815,16 +867,12 @@ namespace KateAi
             }
         }
         // The branch the workspace is on: cheap, and it tells the model which
-        // line of work the edits belong to.
-        if (!m_workspace.isEmpty() && QFileInfo(m_workspace + u"/.git"_s).exists()) {
-            QProcess git;
-            git.setWorkingDirectory(m_workspace);
-            git.start(u"git"_s, QStringList{u"rev-parse"_s, u"--abbrev-ref"_s, u"HEAD"_s});
-            if (git.waitForFinished(800)) {
-                const QString branch = QString::fromUtf8(git.readAllStandardOutput()).trimmed();
-                if (!branch.isEmpty() && branch != u"HEAD"_s) {
-                    lines.append(u"Git branch: %1"_s.arg(branch));
-                }
+        // line of work the edits belong to. Read HEAD directly rather than
+        // spawning git on a path that runs for every cursor pause.
+        if (!m_workspace.isEmpty()) {
+            const QString branch = gitBranchForWorkspace(m_workspace);
+            if (!branch.isEmpty()) {
+                lines.append(u"Git branch: %1"_s.arg(branch));
             }
         }
         if (!openFiles.isEmpty()) {

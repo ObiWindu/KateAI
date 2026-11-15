@@ -45,6 +45,9 @@ public:
     void setSettings(const Settings &settings);
     void setWorkspace(const QString &workspace);
     QString workspace() const { return m_workspace; }
+    // Tool-call id of an ACP agent question whose card is still answerable.
+    // The turn can end before the user answers; the card survives until then.
+    QString pendingAcpToolQuestionId() const { return m_acpToolQuestionId; }
     void setDocumentBridge(DocumentBridge *bridge);
     void setEditorContext(const QString &context);
     // The editor's language-server surface (KateLspBridge). Null in tests and
@@ -178,6 +181,9 @@ Q_SIGNALS:
     // Also emitted for ACP: an agent's ask_user client method or a question
     // tool call, so every provider parks the same way.
     void questionAsked(const PermissionRequest &request);
+    // A question card shown for an earlier ACP tool call is no longer the one
+    // the user should answer. The numbered id is the card's tool call id.
+    void questionCancelled(const QString &toolCallId);
     // The agent called exit_plan_mode: the UI should leave plan mode (when it
     // is on) so the turn can start editing.
     void exitPlanModeRequested();
@@ -288,9 +294,10 @@ private:
     // while it runs, so only one command is ever in flight; unlike the other
     // async tools it streams its output through toolProgress.
     void startBashTool(const ToolCall &call);
-    // Issues a read-only disk tool (read_file/list_dir/grep/glob) on a worker
-    // thread and reports back through finishAsyncTool, like startBashTool but
-    // without the one-at-a-time serialization.
+    // Issues a read-only disk tool (list_dir/grep/glob) on a worker thread and
+    // reports back through finishAsyncTool, like startBashTool but without the
+    // one-at-a-time serialization. read_file stays synchronous because it must
+    // see the editor's unsaved buffer.
     void startReadTool(const ToolCall &call);
         bool isWebTool(const QString &toolName) const;
         // Issues a web_search / web_fetch and reports back through finishAsyncTool.
@@ -302,6 +309,9 @@ private:
     // Takes the shared edit lock for a mutating tool, if the team has one.
     bool acquireEditLock(const ToolCall &call, QString *deniedBy);
     void releaseEditLocksFor(const ToolCall &call);
+    // Every file a mutating call writes. A patch names several; the other
+    // edit tools name one. Used for locks and changed-path bookkeeping.
+    QStringList mutationPathsForCall(const ToolCall &call) const;
     // Pushes the active mode's tool set (and the MCP tools) to the client.
     void syncToolAccess();
     // Rebuilds the sandbox and the tool runner from the current settings and
@@ -378,6 +388,11 @@ LlmClient m_client;
     QList<ToolResult> m_pendingResults;
     ToolCall m_waitingCall;
     PermissionRequest m_waitingRequest;
+    // An agent-side ACP question tool call whose card is on screen. ACP has no
+    // client-to-agent tool-result channel, so its answer is sent as the next
+    // prompt once the current turn closes.
+    QString m_acpToolQuestionId;
+    QString m_pendingAcpAnswer;
     // The `bash` call currently streaming, if any. One at a time: the queue
     // waits for it, so nothing else is executing while it is set.
     QString m_runningBashId;
@@ -388,6 +403,9 @@ LlmClient m_client;
 
     bool m_busy = false;
     State m_state = State::Idle;
+    // Incremented when a turn starts or is aborted. Async work captures it so
+    // a result that lands after the turn changed cannot settle the new turn.
+    quint64 m_turnGeneration = 0;
     int m_modelRequests = 0;
     int m_toolCalls = 0;
     bool m_cancelRequested = false;
@@ -417,9 +435,6 @@ LlmClient m_client;
     QString m_currentThinking;
     QJsonArray m_currentPlan;
     bool m_planShown = false;
-    // True while an ACP ask_user/elicitation RPC is parked waiting for the
-    // user's answer (answerQuestion routes there instead of a native call).
-    bool m_acpQuestionPending = false;
     bool m_thinkingFinishedEmitted = false;
 
     QString m_currentAssistant;

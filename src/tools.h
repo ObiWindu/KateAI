@@ -17,6 +17,9 @@
 #include <QPointer>
 #include <QSet>
 
+#include <atomic>
+#include <memory>
+
 class QProcess;
 class QThread;
 
@@ -71,18 +74,22 @@ public:
     void runBashAsync(const ToolCall &call);
     void cancelBash(const QString &toolCallId);
 
-    // Runs a read-only, disk-only tool (read_file, list_dir, grep, glob) on a
-    // worker thread so a long search or listing does not freeze the transcript.
-    // The worker reads through a disk-only bridge, so open unsaved buffers are
-    // not searched in async mode; writes and LSP/graph tools stay synchronous
-    // because they touch editor-owned state. Emits bashProgress once with the
-    // starting status and bashFinished with the result, reusing the bash
-    // signals so the loop needs no extra plumbing. Returns false when the tool
-    // is not async-safe and the caller must run it synchronously.
+    // Runs a read-only, disk-only tool (list_dir, grep, glob) on a worker
+    // thread so a long search or listing does not freeze the transcript. The
+    // worker uses a bridge that never touches KTextEditor documents: reading an
+    // open buffer from a non-GUI thread is not safe. read_file stays
+    // synchronous because it must see the editor's unsaved content. Emits
+    // bashProgress once with the starting status and bashFinished with the
+    // result, reusing the bash signals so the loop needs no extra plumbing.
+    // Returns false when the tool is not async-safe and the caller must run it
+    // synchronously.
     bool runReadToolAsync(const ToolCall &call);
-    // True for the tools runReadToolAsync will offload (read_file, list_dir,
-    // grep, glob). Lets the caller decide without starting the job twice.
+    // True for the tools runReadToolAsync will offload (list_dir, grep, glob).
+    // Lets the caller decide without starting the job twice.
     static bool isAsyncReadTool(const QString &toolName);
+    // Asks every in-flight read job to stop at its next loop boundary. Called
+    // on abort and before the worker thread is torn down.
+    void cancelReadTools();
 
 Q_SIGNALS:
     void bashFinished(const ToolResult &result);
@@ -150,12 +157,18 @@ private:
     // The structured todo list (todo_write/todo_read), in the plan-step shape
     // {id, description, completed, inProgress} the TodoWidget renders.
     QJsonArray m_todos;
+    // Cancellation flag for the worker-side runner. Only the worker reads it;
+    // the GUI side sets it through the shared_ptr held in m_readJobs.
+    std::shared_ptr<std::atomic_bool> m_cancelFlag;
+    bool readCancelled() const;
+
     // Dedicated worker thread for runReadToolAsync. A per-runner thread (not
     // the global pool) so it is stopped in ~ToolRunner, before the
     // application tears down: a global-pool thread still alive at exit
     // crashes QApplication teardown in some KF6 builds.
     QThread *m_workerThread = nullptr;
     QObject *m_workerContext = nullptr;
+    QList<std::shared_ptr<std::atomic_bool>> m_readJobs;
 };
 
 QString unifiedDiff(const QString &path, const QString &before, const QString &after);

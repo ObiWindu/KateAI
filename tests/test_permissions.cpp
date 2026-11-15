@@ -39,6 +39,21 @@ private Q_SLOTS:
         QCOMPARE(PermissionPolicy(PermissionMode::AlwaysApprove).riskFor(u"question"_s), ToolRisk::Read);
     }
 
+    void uiStateToolsAreReadOnly()
+    {
+        PermissionPolicy policy(PermissionMode::Ask);
+        Sandbox box(QDir::tempPath(), SandboxProfile::Workspace);
+        QString reason;
+        // The checklist, the reasoning note and the plan-mode switch change no
+        // file. They are in the read group and must not prompt or take a
+        // checkpoint, even in Ask mode.
+        for (const QString &tool : {u"todo_write"_s, u"todo_read"_s, u"think"_s, u"exit_plan_mode"_s}) {
+            QVERIFY2(policy.isReadTool(tool), qPrintable(tool));
+            QCOMPARE(policy.riskFor(tool), ToolRisk::Read);
+            QCOMPARE(policy.evaluate(tool, QJsonObject{}, box, &reason), PermissionPolicy::Verdict::Allow);
+        }
+    }
+
     void writesAskByDefault()
     {
         PermissionPolicy policy(PermissionMode::Ask);

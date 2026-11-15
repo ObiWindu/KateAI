@@ -98,13 +98,14 @@ public:
 
     void prompt(const QString &text);
     void resolvePermission(PermissionDecision decision);
-    // True while an ask_user / elicitation RPC from the agent is parked waiting
-    // for the user's answer.
+    // True while an ask_user / elicitation RPC is parked waiting for the
+    // user's answer, or a session/request_permission carrying answer choices
+    // is being shown as a question card.
     bool hasPendingQuestion() const
     {
-        return !m_questionRpcId.isUndefined() && !m_questionRpcId.isNull();
+        return (!m_questionRpcId.isUndefined() && !m_questionRpcId.isNull()) || m_permissionQuestion;
     }
-    // Answers the parked ask-user RPC with the user's text; an empty answer
+    // Answers the parked question with the user's text; an empty answer
     // replies as cancelled. No-op when no question is pending.
     void answerQuestion(const QString &answer);
     // The structured todo list is shared with the native path: the loop hands
@@ -194,6 +195,10 @@ Q_SIGNALS:
     // an elicitation request when the negotiated protocol offers it). The RPC
     // is parked until answerQuestion() replies to it.
     void questionAsked(const PermissionRequest &request);
+    // The parked question was closed by the client (a newer question arrived,
+    // a permission request needed the slot, or the turn stopped). The UI must
+    // retire the matching card; otherwise it would answer the next RPC.
+    void questionCancelled(const QString &toolCallId);
     void promptFinished(const QString &stopReason, const QString &text, const QJsonArray &toolCalls);
     // The agent advertised slash commands (available_commands_update).
     void availableCommandsChanged(const QJsonArray &commands);
@@ -316,8 +321,14 @@ private:
     void handleElicitationCreate(const QJsonValue &id, const QJsonObject &params);
     void handleTodoWrite(const QJsonValue &id, const QJsonObject &params);
     void handleTodoRead(const QJsonValue &id, const QJsonObject &params);
+    // Stores and announces a complete replacement command list, from a setup
+    // response or an available_commands_update session notification.
+    void setAvailableCommands(const QJsonArray &commands);
     // Shared body of the ask-user paths (Kate extension + v2 elicitation).
-    void askUser(const QJsonValue &id, const QString &question, const QStringList &options, bool allowFreeform);
+    // `elicitationProperty` names the schema property the single-line answer
+    // fills when the request is an elicitation/create call.
+    void askUser(const QJsonValue &id, const QString &question, const QStringList &options, bool allowFreeform,
+                 bool elicitation = false, const QString &elicitationProperty = QString());
     // Answers a parked ask-user RPC as cancelled and clears the state.
     void cancelPendingQuestion();
     void handleRequestPermission(const QJsonValue &id, const QJsonObject &params);
@@ -459,12 +470,17 @@ private:
     QJsonValue m_permissionRpcId;
     QJsonArray m_permissionOptions;
     PermissionRequest m_permissionRequest;
+    // A session/request_permission whose options are answer choices, not
+    // allow/reject decisions. It is answered with the selected option id.
+    bool m_permissionQuestion = false;
 
     // A parked ask-user RPC (Kate's _kateai/ask_user or v2 elicitation/create).
     // The agent blocks on this request until the user answers, which is what
     // makes asking work over ACP at all.
     QJsonValue m_questionRpcId;
     PermissionRequest m_questionRequest;
+    bool m_questionIsElicitation = false;
+    QString m_questionElicitationProperty;
 
     // The shared todo store (native todo_write and _kateai/todo_write).
     std::function<QJsonArray()> m_todosGetter;
@@ -472,10 +488,6 @@ private:
 
     // Slash commands the agent advertised via available_commands_update.
     QJsonArray m_availableCommands;
-    // The protocol version agreed at initialize (never above what Kate speaks).
-    int m_negotiatedVersion = 1;
-    // The agent advertised elicitation (ACP v2 draft) in its capabilities.
-    bool m_agentSupportsElicitation = false;
 
     // Mutating client methods waiting for a permission decision. At most one
     // is active (its request is the one being shown); the rest queue behind it.
