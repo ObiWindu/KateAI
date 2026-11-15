@@ -56,6 +56,26 @@ private:
         return true;
     }
 
+#ifdef Q_OS_UNIX
+    // A killed process can linger in /proc as a zombie until the container's
+    // PID 1 reaps it. It is not running; reading the state lets the test wait
+    // for the process to die without depending on init's reaping cadence.
+    static bool processStillRunning(const QString &pid)
+    {
+        QFile stat(u"/proc/"_s + pid + u"/stat"_s);
+        if (!stat.open(QIODevice::ReadOnly)) {
+            return false;
+        }
+        const QByteArray line = stat.readLine();
+        const int closeParen = line.lastIndexOf(')');
+        if (closeParen < 0 || closeParen + 2 >= line.size()) {
+            return true;
+        }
+        const char state = line.at(closeParen + 2);
+        return state != 'Z' && state != 'X';
+    }
+#endif
+
     Settings mockSettings(const QString &scenario) const
     {
         Settings settings;
@@ -1240,8 +1260,10 @@ private Q_SLOTS:
         QVERIFY2(text.startsWith(u"pid:"_s), qPrintable(text));
         const QString pid = text.mid(4).trimmed();
         QVERIFY2(!pid.isEmpty(), qPrintable(text));
-        // The kill reaches the backgrounded child, not just the shell.
-        QTRY_VERIFY_WITH_TIMEOUT(!QFile::exists(u"/proc/"_s + pid), 5000);
+        // The kill reaches the backgrounded child, not just the shell. A zombie
+        // entry can survive until PID 1 reaps it, so check the process state,
+        // not merely whether /proc still has a directory for the pid.
+        QTRY_VERIFY_WITH_TIMEOUT(!processStillRunning(pid), 5000);
         client.stop();
 #else
         QSKIP("process groups are a Unix feature");
