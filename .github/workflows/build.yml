@@ -369,9 +369,13 @@ jobs:
           set -euo pipefail
           VERSION="${GITHUB_REF_NAME#v}"
           ls -l dist/
+          # The source tarball may already be named after the tag. Copying a
+          # file onto itself makes cp fail under set -e.
+          target="dist/kateai-${VERSION}.tar.gz"
           for f in dist/kateai-*.tar.gz; do
             [ -e "$f" ] || continue
-            cp "$f" "dist/kateai-${VERSION}.tar.gz"
+            [ "$f" = "$target" ] && break
+            cp "$f" "$target"
             break
           done
           ls -l dist/
