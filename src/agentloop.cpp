@@ -460,13 +460,19 @@ void AgentLoop::setWorkspace(const QString &workspace)
     }
 
     if (m_projectGraph) {
-        QString graphFilePath = m_workspace + u"/.kateai/project_graph.json"_s;
+        // Create the metadata directory before the scan so the root directory
+        // timestamp the graph records is the one it will see on the next load.
+        QDir().mkpath(m_workspace + u"/.kateai"_s);
+        m_projectGraph->setWorkspacePath(m_workspace);
+        const QString graphFilePath = m_workspace + u"/.kateai/project_graph.json"_s;
+        bool regenerated = false;
         if (QFile::exists(graphFilePath)) {
             // Load existing graph
             if (!m_projectGraph->loadFromFile(graphFilePath)) {
                 qWarning() << "Failed to load existing graph from" << graphFilePath;
                 // Fall back to generating a new graph
                 m_projectGraph->generateGraph(m_workspace);
+                regenerated = true;
             } else if (m_projectGraph->staleFileCount() > 0) {
                 // The cache was written by an earlier session; files changed
                 // on disk while Kate was closed would otherwise be served with
@@ -474,10 +480,15 @@ void AgentLoop::setWorkspace(const QString &workspace)
                 qWarning() << "Project graph cache is stale for" << m_projectGraph->staleFileCount()
                            << "file(s); regenerating";
                 m_projectGraph->generateGraph(m_workspace);
+                regenerated = true;
             }
         } else {
-            // Generate new graph
+            // First index of this workspace.
             m_projectGraph->generateGraph(m_workspace);
+            regenerated = true;
+        }
+        if (regenerated && !m_projectGraph->saveToFile(graphFilePath)) {
+            qWarning() << "Could not write the project graph cache to" << graphFilePath;
         }
         // Update ACP client with the project graph
         m_acp.setProjectGraph(m_projectGraph.get());
@@ -945,82 +956,16 @@ QString AgentLoop::systemPrompt() const
         }
     }
     
-    // Add project graph information to help the agent understand the project structure
+    // Give the model the project's shape before it starts grepping. The graph
+    // formatter emits readable paths and symbols rather than hash ids, and
+    // honours the node/edge caps so a large repository cannot flood the
+    // prompt.
     if (m_projectGraph && m_projectGraph->getNodeCount() > 0 && m_settings.compressProjectGraph) {
-        prompt += u"\n\n<project_graph>\n"_s;
-        
-        // Apply context compression based on settings
-        int maxNodes = m_settings.maxGraphNodes;
-        int maxEdges = m_settings.maxGraphEdges;
-        
-        if (m_settings.contextCompressionLevel == 0) {
-            // Full context - include all nodes and edges
-            prompt += u"Project contains "_s + QString::number(m_projectGraph->getNodeCount()) + u" nodes and "_s + 
-                      QString::number(m_projectGraph->getEdgeCount()) + u" edges.\n"_s;
-            
-            // Include node types for full context
-            QMap<QString, int> typeCount;
-            for (auto it = m_projectGraph->getNodes().begin(); it != m_projectGraph->getNodes().end(); ++it) {
-                const GraphNode *node = it.value();
-                typeCount[node->type]++;
-            }
-            
-            prompt += u"Node types:\n"_s;
-            for (auto it = typeCount.begin(); it != typeCount.end(); ++it) {
-                prompt += u"  - "_s + it.key() + u": "_s + QString::number(it.value()) + u"\n"_s;
-            }
-            
-            // Include key dependencies for full context
-            prompt += u"\nKey dependencies:\n"_s;
-            for (auto it = m_projectGraph->getEdges().begin(); it != m_projectGraph->getEdges().end(); ++it) {
-                const GraphEdge *edge = it.value();
-                if (edge->relationship == u"imports"_s || edge->relationship == u"calls"_s || edge->relationship == u"extends"_s) {
-                    prompt += u"  - "_s + edge->sourceId + u" -> "_s + edge->targetId +
-                              u" ("_s + edge->relationship + u")\n"_s;
-                }
-            }
-        } else {
-            // Compressed context - include limited information
-            prompt += u"Project contains "_s + QString::number(qMin(m_projectGraph->getNodeCount(), maxNodes)) + u" nodes and "_s + 
-                      QString::number(qMin(m_projectGraph->getEdgeCount(), maxEdges)) + u" edges.\n"_s;
-            
-            if (m_settings.contextCompressionLevel == 1) {
-                // Summary level - include node types and key dependencies
-                QMap<QString, int> typeCount;
-                for (auto it = m_projectGraph->getNodes().begin(); it != m_projectGraph->getNodes().end(); ++it) {
-                    const GraphNode *node = it.value();
-                    typeCount[node->type]++;
-                }
-                
-                prompt += u"Node types:\n"_s;
-                for (auto it = typeCount.begin(); it != typeCount.end(); ++it) {
-                    prompt += u"  - "_s + it.key() + u": "_s + QString::number(it.value()) + u"\n"_s;
-                }
-                
-                // Add key dependencies (limited to most important relationships)
-                prompt += u"\nKey dependencies:\n"_s;
-                int edgeCount = 0;
-                for (auto it = m_projectGraph->getEdges().begin(); it != m_projectGraph->getEdges().end() && edgeCount < maxEdges; ++it) {
-                    const GraphEdge *edge = it.value();
-                    if (edge->relationship == u"imports"_s || edge->relationship == u"calls"_s || edge->relationship == u"extends"_s) {
-                        prompt += u"  - "_s + edge->sourceId + u" -> "_s + edge->targetId +
-                                  u" ("_s + edge->relationship + u")\n"_s;
-                        edgeCount++;
-                    }
-                }
-            } else if (m_settings.contextCompressionLevel == 2) {
-                // Minimal level - just basic structure
-                prompt += u"Project structure overview.\n"_s;
-                if (m_settings.includeFileContents) {
-                    prompt += u"Key files and directories are available for inspection.\n"_s;
-                }
-            } else if (m_settings.contextCompressionLevel == 3) {
-                // Ultra-minimal level - only essential info
-                prompt += u"Project overview available. Use tools to explore specific files as needed.\n"_s;
-            }
+        const QString summary = m_projectGraph->contextSummary(
+            m_settings.maxGraphNodes, m_settings.maxGraphEdges, m_settings.contextCompressionLevel);
+        if (!summary.trimmed().isEmpty()) {
+            prompt += u"\n\n<project_graph>\n"_s + summary + u"\n</project_graph>\n"_s;
         }
-        
-        prompt += u"</project_graph>\n"_s;
     }
     
     return prompt;
@@ -1289,13 +1234,17 @@ QList<ChatMessage> AgentLoop::m_messagesForRequest() const
     options.autoCompact = m_settings.compressOldMessages;
     options.compactionLevel = m_compactionLevel;
     options.projectGraph = m_projectGraph.get();
-    options.useProjectGraph = m_settings.compressProjectGraph;
+    // The graph is useful for preserving related files in a compaction even
+    // when the user does not want its summary in the system prompt.
+    options.useProjectGraph = true;
     if (m_settings.keepRecentTokens > 0) {
         options.keepRecentTokens = m_settings.keepRecentTokens;
-    } else if (m_settings.smartContextTruncation) {
-        options.keepRecentTokens = qMax(2000, options.reserveForResponse * 2);
     } else {
-        options.keepRecentTokens = qMax(800, m_settings.compressionThreshold / 4);
+        // Keep a substantial third of the usable window verbatim. A fixed
+        // small tail made a 128k/1M model compact as if it were a 32k one,
+        // losing recent decisions the model still needed.
+        const int usable = qMax(2048, options.contextWindow - options.reserveForResponse);
+        options.keepRecentTokens = qMax(4000, usable / 3);
     }
     return ContextManager::build(m_messages, options);
 }
@@ -3264,8 +3213,13 @@ bool AgentLoop::compactContext()
     options.reserveForResponse = m_settings.contextWindowReserve > 0
         ? m_settings.contextWindowReserve
         : 8192;
+    options.projectGraph = m_projectGraph.get();
+    options.useProjectGraph = true;
     if (m_settings.keepRecentTokens > 0) {
         options.keepRecentTokens = m_settings.keepRecentTokens;
+    } else {
+        const int usable = qMax(2048, options.contextWindow - options.reserveForResponse);
+        options.keepRecentTokens = qMax(4000, usable / 3);
     }
 
     const int before = ContextManager::estimateTokens(m_messages);

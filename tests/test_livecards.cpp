@@ -27,6 +27,7 @@
 #include "types.h"
 
 #include <QApplication>
+#include <QFile>
 #include <QFontMetrics>
 #include <QJsonArray>
 #include <QJsonObject>
@@ -170,6 +171,20 @@ private Q_SLOTS:
     void cleanup()
     {
         teardown();
+    }
+
+    void testFirstWorkspaceIndexWritesTheGraphCache()
+    {
+        setup();
+        // The first workspace load must persist the index immediately, so the
+        // next start and ACP session can read it even before any edit.
+        const QString cache = m_workspace->path() + u"/.kateai/project_graph.json"_s;
+        QVERIFY2(QFile::exists(cache), qPrintable(cache));
+        QFile file(cache);
+        QVERIFY(file.open(QIODevice::ReadOnly));
+        const QByteArray data = file.readAll();
+        QVERIFY(data.contains("\"nodes\""));
+        QVERIFY(data.contains("\"edges\""));
     }
 
     // A read is the plainest card there is: no output to stream, no change to

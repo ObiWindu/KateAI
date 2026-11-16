@@ -107,9 +107,22 @@ public:
     // greatest start line <= line when no range covers it. Returns a symbol
     // with an empty name when the file has no indexed symbols.
     GraphSymbol enclosingSymbol(const QString &filePath, int line) const;
-    // Number of file nodes whose recorded mtime no longer matches the file on
-    // disk (or whose file is gone): the graph cache is stale for them.
+    // Number of recorded nodes whose file/directory timestamp no longer
+    // matches the disk (or whose entry is gone): the graph cache is stale.
     int staleFileCount() const;
+
+    // --- LLM/ACP presentation ------------------------------------------------
+    // A path relative to the workspace, used in prompts and query results.
+    // Hash ids are stable but unreadable, so agents should see paths first.
+    QString displayPath(const QString &path) const;
+    QString nodeLabel(const GraphNode *node) const;
+    QString nodeSymbols(const GraphNode *node) const;
+    GraphNode *findNodeByPath(const QString &path);
+    const GraphNode *findNodeByPath(const QString &path) const;
+    // Compact graph description for a system prompt or ACP session notes.
+    // level follows contextCompressionLevel: 0 full, 1 summary, 2 minimal,
+    // 3 counts only. maxNodes/maxEdges bound the output.
+    QString contextSummary(int maxNodes, int maxEdges, int level) const;
 
     // Serialization
     bool saveToFile(const QString &filePath) const;
@@ -152,7 +165,12 @@ private:
     // line and a definition are; they used to be computed two different ways.
     static int lineCount(const QString &content);
     static int definitionCount(ProjectGraph &analyser, const QString &content);
-    QString extractImportsFromContent(const QString &content, const QString &filePath) const;
+    // Resolve the import statements in `content` to existing file-node ids.
+    // Raw import syntax is useful for display but cannot answer "what depends
+    // on this file"; edges and dependency sets must point at node ids.
+    QSet<QString> resolveImportTargets(const QString &content, const QString &sourcePath) const;
+    void reindexFileDependencies(GraphNode *node);
+    const GraphNode *findNodeByName(const QString &name) const;
     // Both return the list of definitions, not a joined string: the only
     // consumer needs the count, and QString::size() on the joined text measured
     // characters instead of definitions.

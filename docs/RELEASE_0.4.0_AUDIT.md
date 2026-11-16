@@ -103,6 +103,22 @@ gaps were:
   macOS/Windows bundlers, and the source tarball script.
 - `ConfigVersion` and version-0 credential migration in settings.
 
+### Context and project graph
+
+- Removed context settings that were never read and raised the remaining
+  budgets to useful defaults.
+- First workspace load now generates and persists `.kateai/project_graph.json`;
+  the cache has a schema version and checks directory timestamps so new or
+  removed files invalidate it.
+- Import analysis resolves C/C++ includes, Python modules, and relative JS/TS
+  imports to file-node ids, so dependency queries return real relationships.
+- Native system prompts and ACP session notes carry a readable graph summary
+  (paths, languages, line counts, symbols, edges); `query_project_graph` uses
+  the same paths instead of hash ids.
+- Compaction uses model-family context windows, keeps a third of the usable
+  window verbatim, uses graph-related files, and preserves recent tool
+  failures and longer user requests.
+
 ## Test results
 
 Command:
@@ -121,6 +137,8 @@ New or expanded suites:
 
 - `test_sandbox` (namespace/mount/environment construction and live runtime
   confinement checks)
+- `test_projectgraph` / `test_contextmanager` (first-index graph cache, import
+  resolution, readable summaries, graph-related compaction, failure retention)
 - `test_credentials`
 - `test_configmigration`
 - `test_sessionrecovery`

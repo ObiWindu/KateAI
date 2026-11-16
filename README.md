@@ -185,7 +185,7 @@ The model can call tools, read the results, and continue until the task is done 
 - Adaptive temperature (higher while exploring, lower while applying edits)
 - Automatic retry on rate limits, 5xx, and network errors (exponential backoff)
 - Repeat-call detection so the agent does not loop on the same failed tool
-- Context compression and smart truncation so long sessions stay within the window
+- Window-aware context compression that keeps a substantial recent tail and preserves requests, files, graph relationships, and recent failures
 
 ```text
 You ──► LLM (Grok / OpenAI / OpenRouter / local) or any ACP agent over stdio
@@ -408,7 +408,7 @@ The model menu fetches live catalogs when the provider supports it; you can stil
 
 ### Project graph
 
-On workspace load the plugin indexes files, symbols, imports, and relationships. The agent queries it with `query_project_graph` (`summary`, `nodes`, `edges`, `dependencies`, `dependents`, `find_related`, `find_path`, `dependency_chain`) so it can map structure before grepping blindly. Node/edge caps and content-preview length are configurable.
+On workspace load the plugin indexes files, symbols, imports, and relationships, writes the first index to `.kateai/project_graph.json`, and regenerates it when file or directory timestamps show the cache is stale. The native system prompt and ACP session notes receive a compact graph summary with workspace-relative paths, languages, line counts, symbols, and dependency edges, so agents can orient themselves before searching. The agent can then query it with `query_project_graph` (`summary`, `nodes`, `edges`, `dependencies`, `dependents`, `find_related`, `find_path`, `dependency_chain`), using a path, name, or node id. Node/edge caps and graph-prompt verbosity are configurable.
 
 ### Configuration surface
 

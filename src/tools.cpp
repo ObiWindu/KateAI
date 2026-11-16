@@ -339,6 +339,9 @@ static GraphNode *resolveGraphNode(ProjectGraph *graph, const QString &key)
     if (GraphNode *direct = graph->getNode(key)) {
         return direct;
     }
+    if (GraphNode *byPath = graph->findNodeByPath(key)) {
+        return byPath;
+    }
     GraphNode *byName = nullptr;
     int nameHits = 0;
     for (GraphNode *node : graph->getAllNodes()) {
@@ -2025,29 +2028,26 @@ ToolResult ToolRunner::queryProjectGraph(const QJsonObject &args) const
     const QString sourceId = args.value(u"source_id"_s).toString();
     const QString targetId = args.value(u"target_id"_s).toString();
 
-    auto formatNode = [](const GraphNode *node) {
+    auto formatNode = [this](const GraphNode *node) {
         if (!node) {
             return QString();
         }
-        return u"%1 [%2] %3 loc=%4"_s.arg(node->id, node->type, node->path.isEmpty() ? node->name : node->path)
-            .arg(node->linesOfCode);
+        QString line = u"- %1 [%2]"_s.arg(m_projectGraph->nodeLabel(node), node->type);
+        if (node->linesOfCode > 0) {
+            line += u" %1 loc"_s.arg(node->linesOfCode);
+        }
+        const QString symbols = m_projectGraph->nodeSymbols(node);
+        if (!symbols.isEmpty()) {
+            line += u"; symbols: "_s + symbols;
+        }
+        return line;
     };
 
     QStringList lines;
     const QString type = queryType.isEmpty() ? u"summary"_s : queryType;
 
     if (type == u"summary"_s) {
-        lines.append(u"nodes: %1"_s.arg(m_projectGraph->getNodeCount()));
-        lines.append(u"edges: %1"_s.arg(m_projectGraph->getEdgeCount()));
-        QMap<QString, int> typeCount;
-        for (GraphNode *node : m_projectGraph->getAllNodes()) {
-            if (node) {
-                typeCount[node->type]++;
-            }
-        }
-        for (auto it = typeCount.begin(); it != typeCount.end(); ++it) {
-            lines.append(u"  %1: %2"_s.arg(it.key()).arg(it.value()));
-        }
+        lines.append(m_projectGraph->contextSummary(40, 60, 1));
     } else if (type == u"nodes"_s) {
         int shown = 0;
         for (GraphNode *node : m_projectGraph->getAllNodes()) {
@@ -2070,7 +2070,12 @@ ToolResult ToolRunner::queryProjectGraph(const QJsonObject &args) const
             if (!relationship.isEmpty() && edge->relationship != relationship) {
                 continue;
             }
-            lines.append(u"%1 -> %2 (%3)"_s.arg(edge->sourceId, edge->targetId, edge->relationship));
+            const GraphNode *source = m_projectGraph->getNode(edge->sourceId);
+            const GraphNode *target = m_projectGraph->getNode(edge->targetId);
+            lines.append(u"%1 -> %2 (%3)"_s.arg(
+                source ? m_projectGraph->nodeLabel(source) : edge->sourceId.left(12),
+                target ? m_projectGraph->nodeLabel(target) : edge->targetId.left(12),
+                edge->relationship));
             if (++shown >= 150) {
                 lines.append(u"... truncated"_s);
                 break;
@@ -2086,11 +2091,13 @@ ToolResult ToolRunner::queryProjectGraph(const QJsonObject &args) const
         lines.append(formatNode(node));
         if (type == u"dependencies"_s) {
             for (const QString &dep : node->dependencies) {
-                lines.append(u"depends on: %1"_s.arg(dep));
+                const GraphNode *depNode = m_projectGraph->getNode(dep);
+                lines.append(u"depends on: %1"_s.arg(depNode ? m_projectGraph->nodeLabel(depNode) : dep));
             }
         } else if (type == u"dependents"_s) {
             for (const QString &dep : node->dependents) {
-                lines.append(u"used by: %1"_s.arg(dep));
+                const GraphNode *depNode = m_projectGraph->getNode(dep);
+                lines.append(u"used by: %1"_s.arg(depNode ? m_projectGraph->nodeLabel(depNode) : dep));
             }
         } else {
             for (GraphNode *related : m_projectGraph->findRelatedNodes(node->id, 2)) {
@@ -2112,7 +2119,12 @@ ToolResult ToolRunner::queryProjectGraph(const QJsonObject &args) const
             if (path.isEmpty()) {
                 lines.append(u"No import path found."_s);
             } else {
-                lines.append(path.join(u" -> "_s));
+                QStringList labels;
+                for (const QString &id : path) {
+                    const GraphNode *node = m_projectGraph->getNode(id);
+                    labels.append(node ? m_projectGraph->nodeLabel(node) : id);
+                }
+                lines.append(labels.join(u" -> "_s));
             }
         } else {
             const QList<GraphNode *> chain = m_projectGraph->getDependencyChain(source->id, target->id);

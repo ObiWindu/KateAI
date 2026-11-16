@@ -1906,6 +1906,13 @@ QJsonObject AcpClient::sessionNotesBlock() const
     lines.append(u"- _kateai/query_project_graph {query_type, node_id?, relationship?, source_id?, target_id?}: read the project's files, symbols and imports."_s);
     lines.append(u"- _kateai/lsp_diagnostics {path?, severity?}: read language-server diagnostics (errors/warnings) for a file, or workspace-wide when path is omitted. When no LSP server is running, the call reports that instead."_s);
     lines.append(u"- _kateai/lsp_symbols {path}, _kateai/lsp_hover {path, line, column?}, _kateai/lsp_definition {path, line, column?, symbol?}, _kateai/lsp_references {path, line, column?, symbol?, include_declaration?}, _kateai/lsp_code_actions {path, line?, column?}: the same read-only language-server answers the editor tools give."_s);
+    if (m_projectGraph && m_projectGraph->getNodeCount() > 0) {
+        const QString graph = m_projectGraph->contextSummary(40, 60, 2);
+        if (!graph.trimmed().isEmpty()) {
+            lines.append(u"\nProject graph summary (paths are workspace-relative; use _kateai/query_project_graph for details):"_s);
+            lines.append(graph);
+        }
+    }
     QJsonObject block;
     block.insert(u"type"_s, u"text"_s);
     block.insert(u"text"_s, lines.join(u'\n'));
@@ -3338,29 +3345,26 @@ void AcpClient::handleQueryProjectGraph(const QJsonValue &id, const QJsonObject 
     const QString sourceId = params.value(u"source_id"_s).toString();
     const QString targetId = params.value(u"target_id"_s).toString();
 
-    auto formatNode = [](const GraphNode *node) {
+    auto formatNode = [this](const GraphNode *node) {
         if (!node) {
             return QString();
         }
-        return u"%1 [%2] %3 loc=%4"_s.arg(node->id, node->type, node->path.isEmpty() ? node->name : node->path)
-            .arg(node->linesOfCode);
+        QString line = u"- %1 [%2]"_s.arg(m_projectGraph->nodeLabel(node), node->type);
+        if (node->linesOfCode > 0) {
+            line += u" %1 loc"_s.arg(node->linesOfCode);
+        }
+        const QString symbols = m_projectGraph->nodeSymbols(node);
+        if (!symbols.isEmpty()) {
+            line += u"; symbols: "_s + symbols;
+        }
+        return line;
     };
 
     QStringList lines;
     const QString type = queryType.isEmpty() ? u"summary"_s : queryType;
 
     if (type == u"summary"_s) {
-        lines.append(u"nodes: %1"_s.arg(m_projectGraph->getNodeCount()));
-        lines.append(u"edges: %1"_s.arg(m_projectGraph->getEdgeCount()));
-        QMap<QString, int> typeCount;
-        for (GraphNode *node : m_projectGraph->getAllNodes()) {
-            if (node) {
-                typeCount[node->type]++;
-            }
-        }
-        for (auto it = typeCount.begin(); it != typeCount.end(); ++it) {
-            lines.append(u"  %1: %2"_s.arg(it.key()).arg(it.value()));
-        }
+        lines.append(m_projectGraph->contextSummary(40, 60, 1));
     } else if (type == u"nodes"_s) {
         int shown = 0;
         for (GraphNode *node : m_projectGraph->getAllNodes()) {
@@ -3383,7 +3387,12 @@ void AcpClient::handleQueryProjectGraph(const QJsonValue &id, const QJsonObject 
             if (!relationship.isEmpty() && edge->relationship != relationship) {
                 continue;
             }
-            lines.append(u"%1 -> %2 (%3)"_s.arg(edge->sourceId, edge->targetId, edge->relationship));
+            const GraphNode *source = m_projectGraph->getNode(edge->sourceId);
+            const GraphNode *target = m_projectGraph->getNode(edge->targetId);
+            lines.append(u"%1 -> %2 (%3)"_s.arg(
+                source ? m_projectGraph->nodeLabel(source) : edge->sourceId.left(12),
+                target ? m_projectGraph->nodeLabel(target) : edge->targetId.left(12),
+                edge->relationship));
             if (++shown >= 150) {
                 lines.append(u"... truncated"_s);
                 break;
@@ -3392,9 +3401,11 @@ void AcpClient::handleQueryProjectGraph(const QJsonValue &id, const QJsonObject 
     } else if (type == u"dependencies"_s || type == u"dependents"_s || type == u"find_related"_s) {
         GraphNode *node = nullptr;
         if (!nodeId.isEmpty()) {
-            node = m_projectGraph->getNode(nodeId);
+            node = m_projectGraph->findNodeByPath(nodeId);
             if (!node) {
-                // Try to find by name
+                node = m_projectGraph->getNode(nodeId);
+            }
+            if (!node) {
                 for (GraphNode *n : m_projectGraph->getAllNodes()) {
                     if (n && (n->path == nodeId || n->name == nodeId)) {
                         node = n;
@@ -3410,11 +3421,13 @@ void AcpClient::handleQueryProjectGraph(const QJsonValue &id, const QJsonObject 
         lines.append(formatNode(node));
         if (type == u"dependencies"_s) {
             for (const QString &dep : node->dependencies) {
-                lines.append(u"depends on: %1"_s.arg(dep));
+                const GraphNode *depNode = m_projectGraph->getNode(dep);
+                lines.append(u"depends on: %1"_s.arg(depNode ? m_projectGraph->nodeLabel(depNode) : dep));
             }
         } else if (type == u"dependents"_s) {
             for (const QString &dep : node->dependents) {
-                lines.append(u"used by: %1"_s.arg(dep));
+                const GraphNode *depNode = m_projectGraph->getNode(dep);
+                lines.append(u"used by: %1"_s.arg(depNode ? m_projectGraph->nodeLabel(depNode) : dep));
             }
         } else {
             for (GraphNode *related : m_projectGraph->findRelatedNodes(node->id, 2)) {
@@ -3427,10 +3440,16 @@ void AcpClient::handleQueryProjectGraph(const QJsonValue &id, const QJsonObject 
         GraphNode *source = nullptr;
         GraphNode *target = nullptr;
         if (!sourceId.isEmpty()) {
-            source = m_projectGraph->getNode(sourceId);
+            source = m_projectGraph->findNodeByPath(sourceId);
+            if (!source) {
+                source = m_projectGraph->getNode(sourceId);
+            }
         }
         if (!targetId.isEmpty()) {
-            target = m_projectGraph->getNode(targetId);
+            target = m_projectGraph->findNodeByPath(targetId);
+            if (!target) {
+                target = m_projectGraph->getNode(targetId);
+            }
         }
         if (!source || !target) {
             replyError(id, kInvalidParams, u"Need valid source_id and target_id."_s);
@@ -3441,7 +3460,12 @@ void AcpClient::handleQueryProjectGraph(const QJsonValue &id, const QJsonObject 
             if (path.isEmpty()) {
                 lines.append(u"No import path found."_s);
             } else {
-                lines.append(path.join(u" -> "_s));
+                QStringList labels;
+                for (const QString &nodeId : path) {
+                    const GraphNode *node = m_projectGraph->getNode(nodeId);
+                    labels.append(node ? m_projectGraph->nodeLabel(node) : nodeId);
+                }
+                lines.append(labels.join(u" -> "_s));
             }
         } else {
             const QList<GraphNode *> chain = m_projectGraph->getDependencyChain(source->id, target->id);

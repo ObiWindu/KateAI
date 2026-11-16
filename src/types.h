@@ -333,17 +333,15 @@ struct Settings {
     // a prompt, so a confined read is what keeps the agent in the project.
     bool allowReadsOutsideWorkspace = false;
     int contextCompressionLevel = 1; // 0=full, 1=summary, 2=minimal, 3=ultra-minimal
-    int maxGraphNodes = 50; // Maximum number of nodes to include in project graph
-    int maxGraphEdges = 100; // Maximum number of edges to include in project graph
-    bool compressProjectGraph = true; // Whether to compress project graph information
-    bool includeFileContents = true; // Whether to include file content in project graph
-    int maxFileContentLength = 500; // Maximum characters per file content preview
+    int maxGraphNodes = 80; // Maximum number of file nodes to include in the graph prompt
+    int maxGraphEdges = 160; // Maximum number of dependency edges to include
+    bool compressProjectGraph = true; // Whether to include the graph summary in the prompt
     bool compressEditorContext = true; // Whether to compress editor context
-    int maxEditorContextLength = 4000; // Maximum characters for editor context
+    int maxEditorContextLength = 8000; // Maximum characters for editor context
     bool compressProjectInstructions = true; // Whether to compress project instructions
-    int maxProjectInstructionsLength = 2048; // Maximum characters for project instructions
+    int maxProjectInstructionsLength = 8192; // Maximum characters for project instructions
     bool compressSystemPrompt = true; // Whether to compress system prompt
-    int maxSystemPromptLength = 1024; // Maximum characters for system prompt
+    int maxSystemPromptLength = 4096; // Maximum characters for system prompt
     int messageSpeed = 2; // 0=slow, 1=medium, 2=fast (default fast)
 
     // --- Optimal-intelligence generation parameters -----------------------
@@ -363,7 +361,6 @@ struct Settings {
     bool selfCritique = true; // ask the model to check its own work before finishing
     bool parallelToolCalls = true; // let the model batch independent tool calls
     int toolCallTimeoutMs = 120000; // per-tool-call wall-clock budget
-    int maxContextMessages = 0; // 0 = keep full history; else sliding window size
     bool compactOnFailure = true; // summarise history after a failed tool call
     int verbosity = 1; // 0= terse, 1= normal, 2= detailed narration
 
@@ -377,10 +374,8 @@ struct Settings {
     int maxPlanSteps = 15;           // Max steps in structured plan
     
     // Context management for performance
-    bool smartContextTruncation = true;  // Keep a recent tail verbatim when compacting
     int contextWindowReserve = 8192;     // Reserve tokens for the model's reply
     bool compressOldMessages = true;     // Auto-compact older turns to fit the window
-    int compressionThreshold = 2048;     // Soft hint for how much recent text to keep
     
     // Agent behavior tuning
     bool requireVerification = true;    // Require verification after mutations

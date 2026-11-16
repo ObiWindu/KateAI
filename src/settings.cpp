@@ -135,17 +135,15 @@ Settings SettingsStore::load()
     s.completionContextSuffixChars = g.readEntry(u"CompletionContextSuffixChars"_s, 1500);
     s.completionAutoTriggerDelayMs = g.readEntry(u"CompletionAutoTriggerDelayMs"_s, 800);
     s.contextCompressionLevel = g.readEntry(u"ContextCompressionLevel"_s, 1);
-    s.maxGraphNodes = g.readEntry(u"MaxGraphNodes"_s, 50);
-    s.maxGraphEdges = g.readEntry(u"MaxGraphEdges"_s, 100);
+    s.maxGraphNodes = g.readEntry(u"MaxGraphNodes"_s, 80);
+    s.maxGraphEdges = g.readEntry(u"MaxGraphEdges"_s, 160);
     s.compressProjectGraph = g.readEntry(u"CompressProjectGraph"_s, true);
-    s.includeFileContents = g.readEntry(u"IncludeFileContents"_s, true);
-    s.maxFileContentLength = g.readEntry(u"MaxFileContentLength"_s, 500);
     s.compressEditorContext = g.readEntry(u"CompressEditorContext"_s, true);
-    s.maxEditorContextLength = g.readEntry(u"MaxEditorContextLength"_s, 4000);
+    s.maxEditorContextLength = g.readEntry(u"MaxEditorContextLength"_s, 8000);
     s.compressProjectInstructions = g.readEntry(u"CompressProjectInstructions"_s, true);
-    s.maxProjectInstructionsLength = g.readEntry(u"MaxProjectInstructionsLength"_s, 2048);
+    s.maxProjectInstructionsLength = g.readEntry(u"MaxProjectInstructionsLength"_s, 8192);
     s.compressSystemPrompt = g.readEntry(u"CompressSystemPrompt"_s, true);
-    s.maxSystemPromptLength = g.readEntry(u"MaxSystemPromptLength"_s, 1024);
+    s.maxSystemPromptLength = g.readEntry(u"MaxSystemPromptLength"_s, 4096);
     // Optimal Intelligence Parameters
     s.temperature = g.readEntry(u"Temperature"_s, 0.2);
     s.topP = g.readEntry(u"TopP"_s, 0.95);
@@ -190,7 +188,6 @@ Settings SettingsStore::load()
     // Behavioural toggles and budgets. These used to be dropped by save(), so
     // any value the UI wrote reverted to the struct default on the next start.
     s.toolCallTimeoutMs = g.readEntry(u"ToolCallTimeoutMs"_s, 120000);
-    s.maxContextMessages = g.readEntry(u"MaxContextMessages"_s, 0);
     s.compactOnFailure = g.readEntry(u"CompactOnFailure"_s, true);
     s.structuredThinking = g.readEntry(u"StructuredThinking"_s, true);
     s.structuredPlanning = g.readEntry(u"StructuredPlanning"_s, true);
@@ -249,7 +246,6 @@ Settings SettingsStore::load()
     // hand-edited or migrated config must not be able to store a zero budget, a
     // plan with no steps, or a temperature no provider accepts.
     s.toolCallTimeoutMs = qBound(1000, s.toolCallTimeoutMs, 30 * 60 * 1000);
-    s.maxContextMessages = qMax(0, s.maxContextMessages);
     s.maxThinkingTokens = qBound(0, s.maxThinkingTokens, 200000);
     s.maxPlanSteps = qBound(1, s.maxPlanSteps, 50);
     s.maxVerificationAttempts = qBound(0, s.maxVerificationAttempts, 10);
@@ -266,7 +262,6 @@ Settings SettingsStore::load()
     s.baseRetryDelaySeconds = qBound(1, s.baseRetryDelaySeconds, 60);
     // The length budgets need a lower bound: a negative value would empty the
     // system prompt or the editor context without saying so.
-    s.maxFileContentLength = qBound(1, s.maxFileContentLength, 1000000);
     s.maxEditorContextLength = qBound(1, s.maxEditorContextLength, 1000000);
     s.maxProjectInstructionsLength = qBound(1, s.maxProjectInstructionsLength, 1000000);
     s.maxSystemPromptLength = qBound(1, s.maxSystemPromptLength, 1000000);
@@ -310,8 +305,6 @@ Settings SettingsStore::load()
     s.keepRecentTokens = g.readEntry(u"KeepRecentTokens"_s, 0);
     s.contextWindowReserve = g.readEntry(u"ContextWindowReserve"_s, 8192);
     s.compressOldMessages = g.readEntry(u"CompressOldMessages"_s, true);
-    s.smartContextTruncation = g.readEntry(u"SmartContextTruncation"_s, true);
-    s.compressionThreshold = g.readEntry(u"CompressionThreshold"_s, 2048);
     if (s.contextWindow < 0) {
         s.contextWindow = 0;
     }
@@ -419,8 +412,6 @@ void SettingsStore::save(const Settings &settings)
     g.writeEntry(u"MaxGraphNodes"_s, settings.maxGraphNodes);
     g.writeEntry(u"MaxGraphEdges"_s, settings.maxGraphEdges);
     g.writeEntry(u"CompressProjectGraph"_s, settings.compressProjectGraph);
-    g.writeEntry(u"IncludeFileContents"_s, settings.includeFileContents);
-    g.writeEntry(u"MaxFileContentLength"_s, settings.maxFileContentLength);
     g.writeEntry(u"CompressEditorContext"_s, settings.compressEditorContext);
     g.writeEntry(u"MaxEditorContextLength"_s, settings.maxEditorContextLength);
     g.writeEntry(u"CompressProjectInstructions"_s, settings.compressProjectInstructions);
@@ -463,7 +454,6 @@ void SettingsStore::save(const Settings &settings)
     // Keep every field the UI can write, so a restart restores the same
     // configuration instead of silently falling back to struct defaults.
     g.writeEntry(u"ToolCallTimeoutMs"_s, settings.toolCallTimeoutMs);
-    g.writeEntry(u"MaxContextMessages"_s, settings.maxContextMessages);
     g.writeEntry(u"CompactOnFailure"_s, settings.compactOnFailure);
     g.writeEntry(u"StructuredThinking"_s, settings.structuredThinking);
     g.writeEntry(u"StructuredPlanning"_s, settings.structuredPlanning);
@@ -489,8 +479,13 @@ void SettingsStore::save(const Settings &settings)
     g.writeEntry(u"KeepRecentTokens"_s, settings.keepRecentTokens);
     g.writeEntry(u"ContextWindowReserve"_s, settings.contextWindowReserve);
     g.writeEntry(u"CompressOldMessages"_s, settings.compressOldMessages);
-    g.writeEntry(u"SmartContextTruncation"_s, settings.smartContextTruncation);
-    g.writeEntry(u"CompressionThreshold"_s, settings.compressionThreshold);
+    // Drop settings that no longer have a consumer, so an upgraded config does
+    // not keep advertising knobs that do nothing.
+    for (const QString &removed : {u"MaxContextMessages"_s, u"IncludeFileContents"_s,
+                                   u"MaxFileContentLength"_s, u"SmartContextTruncation"_s,
+                                   u"CompressionThreshold"_s}) {
+        g.deleteEntry(removed);
+    }
     g.writeEntry(u"ConfigVersion"_s, 1);
 
     g.sync();

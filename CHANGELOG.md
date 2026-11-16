@@ -25,6 +25,10 @@
 - Question and suggestion cards now read the field names and nested shapes
   providers actually send, render their body with a theme-aware document, and
   size themselves after layout instead of leaving a blank, oversized card.
+- Context settings now map to real behavior: dead knobs were removed, defaults
+  for graph/editor/instruction budgets were raised, the project graph is saved
+  on first index and resolves imports to real file relationships, and
+  compaction uses model-aware windows plus graph/failure-aware summaries.
 - Added an explicit per-turn `TurnState` lifecycle and persisted turn ids; the
   status strip now shows starting, model-wait, and stopping phases from it.
 - Fixed a crash when an ACP parked `fs/write_text_file` / `terminal/create`

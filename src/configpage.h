@@ -155,8 +155,6 @@ private:
     QSpinBox *m_maxGraphNodes = nullptr;
     QSpinBox *m_maxGraphEdges = nullptr;
     QCheckBox *m_compressGraph = nullptr;
-    QCheckBox *m_includeFileContents = nullptr;
-    QSpinBox *m_maxFileContentLength = nullptr;
     QCheckBox *m_compressEditorContext = nullptr;
     QSpinBox *m_maxEditorContextLength = nullptr;
     QCheckBox *m_compressProjectInstructions = nullptr;
@@ -189,12 +187,10 @@ private:
     QCheckBox *m_narrativeProgress = nullptr;
 
     // Context Management
-    QCheckBox *m_smartContextTruncation = nullptr;
     QSpinBox *m_contextWindow = nullptr;
     QSpinBox *m_keepRecentTokens = nullptr;
     QSpinBox *m_contextWindowReserve = nullptr;
     QCheckBox *m_compressOldMessages = nullptr;
-    QSpinBox *m_compressionThreshold = nullptr;
 
     // Modes & Tools
     QComboBox *m_agentMode = nullptr;

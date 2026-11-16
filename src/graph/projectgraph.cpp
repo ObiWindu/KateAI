@@ -8,6 +8,7 @@
 #include <QFile>
 #include <QDir>
 #include <QFileInfo>
+#include <QSaveFile>
 #include <QTextStream>
 #include <QJsonDocument>
 #include <QRegularExpression>
@@ -24,6 +25,11 @@ namespace KateAi
 
 namespace
 {
+
+// Bumped when dependency/edge semantics change (version 2 resolves imports to
+// file-node ids instead of storing raw import lines). An older cache must be
+// rebuilt rather than trusted with an incompatible graph.
+constexpr int kGraphSchemaVersion = 2;
 
 // Node ids hash the path as it was scanned. On macOS a temporary directory is
 // commonly /var/... while QFileInfo resolves the same file to /private/var/...;
@@ -88,7 +94,11 @@ void ProjectGraph::generateGraph(const QString &workspacePath)
 
 void ProjectGraph::scanDirectory(const QString &dirPath, const QString &parentNodeId)
 {
-    if (m_nodes.size() >= 300) {
+    // A graph of the first few hundred files is enough for orientation; the
+    // tool can inspect the rest on demand. Raise the ceiling for normal
+    // projects while keeping a first index bounded and responsive.
+    constexpr int kMaxGraphNodes = 1000;
+    if (m_nodes.size() >= kMaxGraphNodes) {
         return;
     }
 
@@ -115,7 +125,7 @@ void ProjectGraph::scanDirectory(const QString &dirPath, const QString &parentNo
     const QFileInfoList entries = dir.entryInfoList(QDir::AllEntries | QDir::NoDotAndDotDot | QDir::NoSymLinks);
 
     for (const QFileInfo &entry : entries) {
-        if (m_nodes.size() >= 300) {
+        if (m_nodes.size() >= kMaxGraphNodes) {
             break;
         }
 
@@ -225,43 +235,7 @@ void ProjectGraph::updateGraph(const QString &filePath, const QString &content)
         indexFileSymbols(node);
 
         // Update dependencies based on new content
-        QSet<QString> oldDependencies = node->dependencies;
-        QStringList importLines = extractImportsFromContent(content, filePath).split(u"\n"_s, Qt::SkipEmptyParts);
-        QSet<QString> newDependencies;
-        for (const QString &line : importLines) {
-            if (!line.isEmpty()) {
-                newDependencies.insert(line);
-            }
-        }
-
-        // Remove old dependency edges
-        for (const QString &oldDep : oldDependencies) {
-            if (!newDependencies.contains(oldDep)) {
-                removeEdge(nodeId, oldDep);
-            }
-        }
-
-        // Add new dependency edges
-        for (const QString &newDep : newDependencies) {
-            if (!oldDependencies.contains(newDep)) {
-                GraphEdge edge;
-                edge.sourceId = nodeId;
-                edge.targetId = newDep;
-                edge.relationship = u"imports"_s;
-                edge.isSafe = true;
-                addEdge(edge);
-            }
-        }
-
-        node->dependencies = newDependencies;
-
-        // Update dependent nodes
-        for (auto it = m_nodes.begin(); it != m_nodes.end(); ++it) {
-            GraphNode *dependentNode = it.value();
-            if (dependentNode->dependencies.contains(nodeId)) {
-                dependentNode->dependents.insert(nodeId);
-            }
-        }
+        reindexFileDependencies(node);
     } else {
         // Create new node for file
         GraphNode newNode;
@@ -669,19 +643,211 @@ QList<GraphNode*> ProjectGraph::getDependencyChain(const QString &startNodeId, c
     return result;
 }
 
+const GraphNode *ProjectGraph::findNodeByName(const QString &name) const
+{
+    if (name.isEmpty()) {
+        return nullptr;
+    }
+    const GraphNode *match = nullptr;
+    for (auto it = m_nodes.constBegin(); it != m_nodes.constEnd(); ++it) {
+        const GraphNode *node = it.value();
+        if (!node || node->type != u"file"_s || node->path.isEmpty()) {
+            continue;
+        }
+        if (node->name == name || QFileInfo(node->path).fileName() == name
+            || displayPath(node->path) == name) {
+            if (match) {
+                return nullptr; // ambiguous basename
+            }
+            match = node;
+        }
+    }
+    return match;
+}
+
+QSet<QString> ProjectGraph::resolveImportTargets(const QString &content, const QString &sourcePath) const
+{
+    QSet<QString> targets;
+    if (content.isEmpty() || m_nodes.isEmpty()) {
+        return targets;
+    }
+    const QFileInfo sourceInfo(sourcePath);
+    const QString sourceDir = sourceInfo.absolutePath();
+    const QString workspace = m_workspacePath;
+
+    auto remember = [&targets](const GraphNode *node) {
+        if (node && node->type == u"file"_s) {
+            targets.insert(node->id);
+        }
+    };
+    auto lookupPath = [this, &remember](const QString &candidate) {
+        if (candidate.isEmpty()) {
+            return;
+        }
+        const QString clean = QDir::cleanPath(candidate);
+        if (const GraphNode *direct = getNode(generateNodeId(clean, u"file"_s))) {
+            remember(direct);
+        }
+    };
+    auto lookupBasename = [this, &remember](const QString &candidate) {
+        if (candidate.isEmpty()) {
+            return;
+        }
+        remember(findNodeByName(QFileInfo(candidate).fileName()));
+    };
+    static const QStringList extensions = {
+        u".h"_s, u".hpp"_s, u".hh"_s, u".hxx"_s, u".c"_s, u".cc"_s, u".cpp"_s,
+        u".cxx"_s, u".m"_s, u".mm"_s, u".py"_s, u".pyi"_s, u".js"_s, u".jsx"_s,
+        u".ts"_s, u".tsx"_s, u".mjs"_s, u".cjs"_s, u".rs"_s, u".go"_s,
+        u".java"_s, u".kt"_s, u".kts"_s, u".swift"_s, u".cs"_s, u".rb"_s,
+        u".php"_s, u".vue"_s, u".svelte"_s,
+    };
+    auto tryCandidates = [&lookupPath, &extensions](const QString &base, bool addExtensions) {
+        lookupPath(base);
+        if (!addExtensions) {
+            return;
+        }
+        for (const QString &extension : extensions) {
+            lookupPath(base + extension);
+        }
+        for (const QString &extension : extensions) {
+            lookupPath(base + u"/index"_s + extension);
+        }
+        lookupPath(base + u"/__init__.py"_s);
+    };
+
+    // C/C++: #include "x" and #include <x>
+    static const QRegularExpression cppInclude(uR"(#\s*include\s*[<"]([^>"]+)[>"])"_s);
+    QRegularExpressionMatchIterator includes = cppInclude.globalMatch(content);
+    while (includes.hasNext()) {
+        const QString include = includes.next().captured(1).trimmed();
+        if (include.isEmpty()) {
+            continue;
+        }
+        const QStringList bases = {
+            QDir(sourceDir).filePath(include),
+            QDir(workspace).filePath(include),
+            QDir(workspace + u"/include"_s).filePath(include),
+            QDir(workspace + u"/src"_s).filePath(include),
+        };
+        const int before = targets.size();
+        for (const QString &base : bases) {
+            tryCandidates(base, true);
+        }
+        if (targets.size() == before && !QFileInfo(include).suffix().isEmpty()) {
+            // A header may be named without the directory prefix.
+            for (const QString &base : bases) {
+                lookupBasename(base);
+            }
+        }
+    }
+
+    // Python: import a.b / from a.b import c. Relative forms are resolved
+    // against the source directory; absolute module paths against the root.
+    static const QRegularExpression pythonImport(uR"(^\s*(?:from\s+([.\w]+)\s+import|import\s+([.\w]+)))"_s,
+                                                QRegularExpression::MultilineOption);
+    QRegularExpressionMatchIterator pyImports = pythonImport.globalMatch(content);
+    while (pyImports.hasNext()) {
+        const QRegularExpressionMatch match = pyImports.next();
+        QString module = match.captured(1).isEmpty() ? match.captured(2) : match.captured(1);
+        if (module.isEmpty()) {
+            continue;
+        }
+        int leadingDots = 0;
+        while (leadingDots < module.size() && module.at(leadingDots) == u'.') {
+            ++leadingDots;
+        }
+        module = module.mid(leadingDots);
+        if (module.isEmpty()) {
+            continue;
+        }
+        QString relative = module;
+        relative.replace(u'.', u'/');
+        const QString root = leadingDots > 0 ? sourceDir : workspace;
+        const int before = targets.size();
+        tryCandidates(QDir(root).filePath(relative), false);
+        const QStringList parts = relative.split(u'/');
+        if (!parts.isEmpty()) {
+            tryCandidates(QDir(root).filePath(parts.join(u'/')), true);
+        }
+        if (targets.size() == before) {
+            lookupBasename(QDir(root).filePath(parts.isEmpty() ? relative : parts.last()));
+        }
+    }
+
+    // JavaScript/TypeScript imports and require(), but only relative paths:
+    // a bare package name names node_modules, not a workspace file.
+    static const QRegularExpression jsImport(
+        uR"((?:from\s*|require\s*\(\s*)["']([^"']+)["'])"_s);
+    QRegularExpressionMatchIterator jsImports = jsImport.globalMatch(content);
+    while (jsImports.hasNext()) {
+        const QString import = jsImports.next().captured(1).trimmed();
+        if (!import.startsWith(u'.') && !import.startsWith(u'/')) {
+            continue;
+        }
+        const QString base = QDir(sourceDir).filePath(import);
+        const int before = targets.size();
+        tryCandidates(base, true);
+        if (targets.size() == before) {
+            lookupBasename(base);
+        }
+    }
+
+    return targets;
+}
+
+void ProjectGraph::reindexFileDependencies(GraphNode *node)
+{
+    if (!node || node->type != u"file"_s || node->path.isEmpty()) {
+        return;
+    }
+    // Replace this file's import edges. removeEdge also fixes the reciprocal
+    // dependents sets, so a changed include cannot leave a stale edge behind.
+    const QSet<QString> oldTargets = node->dependencies;
+    for (const QString &target : oldTargets) {
+        removeEdge(node->id, target);
+    }
+    node->dependencies.clear();
+
+    const QSet<QString> targets = resolveImportTargets(node->content, node->path);
+    for (const QString &target : targets) {
+        GraphEdge edge;
+        edge.sourceId = node->id;
+        edge.targetId = target;
+        edge.relationship = u"imports"_s;
+        edge.isSafe = true;
+        addEdge(edge);
+    }
+}
+
 void ProjectGraph::analyzeFileDependencies()
 {
+    // Start from a clean dependency state: generateGraph() may have created
+    // containment edges only, and a re-analysis after an update must not keep
+    // a previous import that no longer exists.
     for (auto it = m_nodes.begin(); it != m_nodes.end(); ++it) {
         GraphNode *node = it.value();
-        if (node->type == u"file"_s) {
-            QStringList importLines = extractImportsFromContent(node->content, node->path).split(u"\n"_s, Qt::SkipEmptyParts);
-            QSet<QString> imports;
-            for (const QString &line : importLines) {
-                if (!line.isEmpty()) {
-                    imports.insert(line);
-                }
+        if (node && node->type == u"file"_s) {
+            const QSet<QString> oldTargets = node->dependencies;
+            for (const QString &target : oldTargets) {
+                removeEdge(node->id, target);
             }
-            node->dependencies = imports;
+            node->dependencies.clear();
+        }
+    }
+    for (auto it = m_nodes.begin(); it != m_nodes.end(); ++it) {
+        GraphNode *node = it.value();
+        if (!node || node->type != u"file"_s) {
+            continue;
+        }
+        const QSet<QString> targets = resolveImportTargets(node->content, node->path);
+        for (const QString &target : targets) {
+            GraphEdge edge;
+            edge.sourceId = node->id;
+            edge.targetId = target;
+            edge.relationship = u"imports"_s;
+            edge.isSafe = true;
+            addEdge(edge);
         }
     }
 }
@@ -966,7 +1132,8 @@ int ProjectGraph::staleFileCount() const
     int stale = 0;
     for (auto it = m_nodes.begin(); it != m_nodes.end(); ++it) {
         const GraphNode *node = it.value();
-        if (!node || node->type != u"file"_s || node->path.isEmpty()) {
+        if (!node || node->path.isEmpty()
+            || (node->type != u"file"_s && node->type != u"directory"_s)) {
             continue;
         }
         const QFileInfo info(node->path);
@@ -977,18 +1144,247 @@ int ProjectGraph::staleFileCount() const
     return stale;
 }
 
+QString ProjectGraph::displayPath(const QString &path) const
+{
+    if (path.isEmpty()) {
+        return {};
+    }
+    if (m_workspacePath.isEmpty()) {
+        return QDir::cleanPath(path);
+    }
+    const QString relative = QDir(m_workspacePath).relativeFilePath(path);
+    if (relative == u"."_s) {
+        return QDir(m_workspacePath).dirName();
+    }
+    return relative;
+}
+
+QString ProjectGraph::nodeLabel(const GraphNode *node) const
+{
+    if (!node) {
+        return {};
+    }
+    if (!node->path.isEmpty()) {
+        return displayPath(node->path);
+    }
+    if (!node->name.isEmpty()) {
+        return node->name;
+    }
+    return node->id.left(12);
+}
+
+QString ProjectGraph::nodeSymbols(const GraphNode *node) const
+{
+    if (!node) {
+        return {};
+    }
+    const QJsonArray symbols = node->metadata.value(u"symbols"_s).toArray();
+    QStringList names;
+    for (const QJsonValue &value : symbols) {
+        const QString name = value.toObject().value(u"name"_s).toString().trimmed();
+        if (!name.isEmpty() && !names.contains(name)) {
+            names.append(name);
+            if (names.size() >= 8) {
+                break;
+            }
+        }
+    }
+    return names.join(u", "_s);
+}
+
+GraphNode *ProjectGraph::findNodeByPath(const QString &path)
+{
+    if (path.isEmpty()) {
+        return nullptr;
+    }
+    QString absolute = path;
+    if (QDir::isRelativePath(absolute) && !m_workspacePath.isEmpty()) {
+        absolute = QDir(m_workspacePath).absoluteFilePath(absolute);
+    }
+    absolute = QDir::cleanPath(absolute);
+    // Fast path: the caller usually names a file exactly as it appears in the
+    // workspace, and node ids are a hash of that path. Scanning every node and
+    // canonicalising each one is too expensive for compaction summaries.
+    if (GraphNode *direct = getNode(generateNodeId(absolute, u"file"_s))) {
+        return direct;
+    }
+    if (GraphNode *direct = getNode(generateNodeId(absolute, u"directory"_s))) {
+        return direct;
+    }
+    const QString wanted = canonicalLookupPath(path, m_workspacePath);
+    for (auto it = m_nodes.begin(); it != m_nodes.end(); ++it) {
+        GraphNode *node = it.value();
+        if (!node || node->path.isEmpty()) {
+            continue;
+        }
+        if (canonicalLookupPath(node->path, m_workspacePath) == wanted) {
+            return node;
+        }
+        if (displayPath(node->path) == path || node->name == path) {
+            return node;
+        }
+    }
+    return nullptr;
+}
+
+const GraphNode *ProjectGraph::findNodeByPath(const QString &path) const
+{
+    return const_cast<ProjectGraph *>(this)->findNodeByPath(path);
+}
+
+QString ProjectGraph::contextSummary(int maxNodes, int maxEdges, int level) const
+{
+    if (m_nodes.isEmpty()) {
+        return {};
+    }
+    const int nodeCap = qBound(1, maxNodes, 5000);
+    const int edgeCap = qBound(0, maxEdges, 20000);
+    const int detail = qBound(0, level, 3);
+
+    int directories = 0;
+    int files = 0;
+    QSet<QString> languages;
+    QList<const GraphNode *> fileNodes;
+    QList<const GraphNode *> topDirectories;
+    for (auto it = m_nodes.constBegin(); it != m_nodes.constEnd(); ++it) {
+        const GraphNode *node = it.value();
+        if (!node) {
+            continue;
+        }
+        if (node->type == u"directory"_s) {
+            ++directories;
+            const QString relative = displayPath(node->path);
+            if (!relative.contains(u'/') && relative != displayPath(m_workspacePath)) {
+                topDirectories.append(node);
+            }
+        } else if (node->type == u"file"_s) {
+            ++files;
+            fileNodes.append(node);
+            const QString language = node->metadata.value(u"language"_s).toString();
+            if (!language.isEmpty()) {
+                languages.insert(language);
+            }
+        }
+    }
+
+    std::sort(fileNodes.begin(), fileNodes.end(), [this](const GraphNode *a, const GraphNode *b) {
+        if (a->linesOfCode != b->linesOfCode) {
+            return a->linesOfCode > b->linesOfCode;
+        }
+        return displayPath(a->path) < displayPath(b->path);
+    });
+    std::sort(topDirectories.begin(), topDirectories.end(), [this](const GraphNode *a, const GraphNode *b) {
+        return displayPath(a->path) < displayPath(b->path);
+    });
+
+    QStringList lines;
+    lines << u"Workspace: %1"_s.arg(displayPath(m_workspacePath));
+    QStringList languageList = languages.values();
+    languageList.sort();
+    const QString languageText = languageList.join(u", "_s);
+    lines << u"Indexed: %1 files, %2 directories, %3 edges%4"_s
+                 .arg(files)
+                 .arg(directories)
+                 .arg(m_edges.size())
+                 .arg(languageText.isEmpty() ? QString() : u"; languages: "_s + languageText);
+    if (detail >= 3) {
+        lines << u"Use query_project_graph for a file's symbols, imports, dependents, or a dependency path."_s;
+        return lines.join(u'\n');
+    }
+
+    if (!topDirectories.isEmpty()) {
+        QStringList names;
+        for (const GraphNode *node : topDirectories) {
+            if (names.size() >= 16) {
+                names << u"…"_s;
+                break;
+            }
+            names << displayPath(node->path) + u'/';
+        }
+        lines << u"Top-level directories: %1"_s.arg(names.join(u", "_s));
+    }
+
+    int shownFiles = 0;
+    QStringList fileLines;
+    for (const GraphNode *node : fileNodes) {
+        if (shownFiles >= nodeCap) {
+            fileLines << u"… (%1 more files)"_s.arg(fileNodes.size() - shownFiles);
+            break;
+        }
+        QString line = u"- %1"_s.arg(displayPath(node->path));
+        const QString language = node->metadata.value(u"language"_s).toString();
+        if (!language.isEmpty()) {
+            line += u" [%1]"_s.arg(language);
+        }
+        if (node->linesOfCode > 0) {
+            line += u" %1 loc"_s.arg(node->linesOfCode);
+        }
+        if (detail <= 1) {
+            const QString symbols = nodeSymbols(node);
+            if (!symbols.isEmpty()) {
+                line += u"; symbols: "_s + symbols;
+            }
+        }
+        fileLines << line;
+        ++shownFiles;
+    }
+    if (!fileLines.isEmpty()) {
+        lines << u"Files:"_s;
+        lines.append(fileLines);
+    }
+
+    if (detail <= 1 && edgeCap > 0) {
+        QStringList edgeLines;
+        int shownEdges = 0;
+        for (auto it = m_edges.constBegin(); it != m_edges.constEnd(); ++it) {
+            const GraphEdge *edge = it.value();
+            if (!edge) {
+                continue;
+            }
+            // "contains" is useful for the tree but not for understanding a
+            // dependency; the file list already carries the tree.
+            if (edge->relationship == u"contains"_s) {
+                continue;
+            }
+            const GraphNode *source = getNode(edge->sourceId);
+            const GraphNode *target = getNode(edge->targetId);
+            if (!source || !target) {
+                continue;
+            }
+            edgeLines << u"- %1 -> %2 (%3)"_s.arg(nodeLabel(source), nodeLabel(target), edge->relationship);
+            if (++shownEdges >= edgeCap) {
+                break;
+            }
+        }
+        if (!edgeLines.isEmpty()) {
+            lines << u"Dependencies:"_s;
+            lines.append(edgeLines);
+        }
+    }
+    return lines.join(u'\n');
+}
+
 bool ProjectGraph::saveToFile(const QString &filePath) const
 {
-    QFile file(filePath);
+    const QString directory = QFileInfo(filePath).absolutePath();
+    if (!directory.isEmpty() && !QDir().mkpath(directory)) {
+        return false;
+    }
+    // A graph cache is disposable, but a half-written one is not harmless: the
+    // next start would read a truncated JSON object. QSaveFile commits the
+    // whole document or leaves the previous one intact.
+    QSaveFile file(filePath);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Text)) {
         return false;
     }
 
     QJsonObject json = toJson();
     QJsonDocument doc(json);
-    file.write(doc.toJson());
-
-    return true;
+    if (file.write(doc.toJson()) < 0) {
+        file.cancelWriting();
+        return false;
+    }
+    return file.commit();
 }
 
 bool ProjectGraph::loadFromFile(const QString &filePath)
@@ -1016,6 +1412,8 @@ bool ProjectGraph::loadFromFile(const QString &filePath)
 QJsonObject ProjectGraph::toJson() const
 {
     QJsonObject json;
+    json.insert(u"schemaVersion"_s, kGraphSchemaVersion);
+    json.insert(u"workspacePath"_s, m_workspacePath);
 
     // Add nodes
     QJsonArray nodesArray;
@@ -1027,7 +1425,11 @@ QJsonObject ProjectGraph::toJson() const
         nodeJson.insert(u"name"_s, node->name);
         nodeJson.insert(u"type"_s, node->type);
         nodeJson.insert(u"path"_s, node->path);
-        nodeJson.insert(u"content"_s, node->content);
+        // The full file preview is in-memory analysis input, not graph data:
+        // serialising it made the cache many megabytes and copied source text
+        // into a second on-disk location. Symbols and metrics are enough for
+        // every query the graph tool serves.
+        nodeJson.insert(u"content"_s, QString());
 
         // Add dependencies
         QJsonArray dependenciesArray;
@@ -1081,6 +1483,12 @@ QJsonObject ProjectGraph::toJson() const
 
 bool ProjectGraph::fromJson(const QJsonObject &json)
 {
+    if (json.value(u"schemaVersion"_s).toInt() < kGraphSchemaVersion) {
+        return false;
+    }
+    if (m_workspacePath.isEmpty()) {
+        m_workspacePath = json.value(u"workspacePath"_s).toString();
+    }
     // Clear existing graph
     clear();
 
@@ -1206,38 +1614,6 @@ void ProjectGraph::updateNodeMetrics(GraphNode *node)
 
     node->linesOfCode = lineCount(node->content);
     node->complexity = definitionCount(*this, node->content);
-}
-
-QString ProjectGraph::extractImportsFromContent(const QString &content, const QString &filePath) const
-{
-    Q_UNUSED(filePath);
-    QString imports;
-
-    // Extract C++ includes
-    QRegularExpression cppIncludeRegex(u"#[ \\t]*include[ \\t]*[<\"][^<>]+[>\"]"_s);
-    QRegularExpressionMatchIterator it = cppIncludeRegex.globalMatch(content);
-    while (it.hasNext()) {
-        QRegularExpressionMatch match = it.next();
-        imports += match.captured(0) + u"\n"_s;
-    }
-
-    // Extract Python imports
-    QRegularExpression pythonImportRegex(u"^(import|from)\\s+\\w+(?:\\.\\w+)*"_s);
-    it = pythonImportRegex.globalMatch(content);
-    while (it.hasNext()) {
-        QRegularExpressionMatch match = it.next();
-        imports += match.captured(0) + u"\n"_s;
-    }
-
-    // Extract JavaScript imports
-    QRegularExpression jsImportRegex(u"^(import|require)\\s+[\\'\\\"][^\\'\\\"]+[\\'\\\"]"_s);
-    it = jsImportRegex.globalMatch(content);
-    while (it.hasNext()) {
-        QRegularExpressionMatch match = it.next();
-        imports += match.captured(0) + u"\n"_s;
-    }
-
-    return imports.trimmed();
 }
 
 QStringList ProjectGraph::extractClassDefinitions(const QString &content) const

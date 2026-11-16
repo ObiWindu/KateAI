@@ -158,19 +158,19 @@ private Q_SLOTS:
         QVERIFY(!graph.getNode(ProjectGraph::generateNodeId(outside.path() + u"/secret.txt"_s)));
     }
 
-    void testNodeBudgetCapsAtThreeHundred()
+    void testNodeBudgetCapsAtOneThousand()
     {
         QTemporaryDir dir;
         QVERIFY(dir.isValid());
-        for (int i = 0; i < 350; ++i) {
+        for (int i = 0; i < 1050; ++i) {
             writeFile(dir.path() + u"/f%1.txt"_s.arg(i), "x\n");
         }
 
         ProjectGraph graph;
         graph.generateGraph(dir.path());
 
-        // The cap counts the root node too, so the graph stops at exactly 300.
-        QCOMPARE(graph.getNodeCount(), 300);
+        // The cap counts the root node too, so the graph stops at 1000.
+        QCOMPARE(graph.getNodeCount(), 1000);
     }
 
     void testUpdateAndRemoveNode()
@@ -228,6 +228,48 @@ private Q_SLOTS:
         QCOMPARE(preview.size(), 11);
         QVERIFY(preview.endsWith(u"\u2026"_s));
         QCOMPARE(ProjectGraph::extractContentPreview(u"anything"_s, 0), QString());
+    }
+
+    void testImportsResolveToFileNodeIds()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        QVERIFY(QDir(dir.path()).mkpath(u"src"_s));
+        writeFile(dir.path() + u"/src/a.cpp"_s, QByteArrayLiteral("#include \"b.h\"\nint a() { return 1; }\n"));
+        writeFile(dir.path() + u"/src/b.h"_s, QByteArrayLiteral("int b();\n"));
+
+        ProjectGraph graph;
+        graph.generateGraph(dir.path());
+        const QString aId = ProjectGraph::generateNodeId(dir.path() + u"/src/a.cpp"_s);
+        const QString bId = ProjectGraph::generateNodeId(dir.path() + u"/src/b.h"_s);
+        GraphNode *a = graph.getNode(aId);
+        QVERIFY(a);
+        QVERIFY2(a->dependencies.contains(bId), "the include did not resolve to the header node");
+        QVERIFY2(graph.getNode(bId)->dependents.contains(aId), "the header does not know its dependent");
+        const QString summary = graph.contextSummary(10, 10, 1);
+        QVERIFY2(summary.contains(u"src/a.cpp -> src/b.h (imports)"_s), qPrintable(summary));
+    }
+
+    void testContextSummaryUsesReadablePathsAndSymbols()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        QVERIFY(QDir(dir.path()).mkpath(u"src"_s));
+        writeFile(dir.path() + u"/src/main.cpp"_s,
+                  "class Widget { };\n\nint main() { return 0; }\n");
+
+        ProjectGraph graph;
+        graph.generateGraph(dir.path());
+
+        const QString summary = graph.contextSummary(10, 10, 1);
+        QVERIFY2(summary.contains(u"src/main.cpp"_s), qPrintable(summary));
+        QVERIFY2(summary.contains(u"Widget"_s), qPrintable(summary));
+        QVERIFY2(summary.contains(u"main"_s), qPrintable(summary));
+        // A compact description must not leak the internal hash id when a
+        // human-readable path is available.
+        const QString id = ProjectGraph::generateNodeId(dir.path() + u"/src/main.cpp"_s);
+        QVERIFY2(!summary.contains(id), qPrintable(summary));
+        QVERIFY(graph.findNodeByPath(u"src/main.cpp"_s));
     }
 
     void testJsonRoundTrip()

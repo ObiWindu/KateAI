@@ -82,6 +82,35 @@ agent workflows keep working, and the on-disk formats are migrated in place.
 - **Redaction fix.** The `api_key=...` redaction pattern now uses a real
   capture group, so assignment-shaped secrets are actually masked.
 
+## Context and project graph
+
+- Removed context settings that had no effect: `MaxContextMessages`,
+  `IncludeFileContents`, `MaxFileContentLength`, `SmartContextTruncation`, and
+  `CompressionThreshold`. The remaining context controls now map to real
+  behavior.
+- Raised the defaults that were squeezing useful context: 80 graph nodes / 160
+  edges, 8,000 editor-context characters, 8,192 project-instruction
+  characters, and a 4,096-character extra system prompt. The graph prompt,
+  editor context, project instructions, and extra system prompt now have room
+  to carry the information an agent actually needs.
+- The project graph is generated and saved on the first workspace load, not
+  only after the first edit. Its cache has a schema version; older caches are
+  rebuilt. Directory timestamps are checked too, so files added or removed
+  while Kate was closed invalidate the cache.
+- Import analysis now resolves C/C++ includes, Python modules, and relative
+  JavaScript/TypeScript imports to file-node ids and dependency edges instead
+  of storing raw import lines. `dependencies`, `dependents`, `find_path`, and
+  the graph summary therefore answer real relationships.
+- Native system prompts and ACP session notes receive a compact graph summary
+  with workspace-relative paths, languages, line counts, symbols, and
+  dependency edges. `query_project_graph` returns the same readable paths
+  rather than hash ids. The scan ceiling rose from 300 to 1,000 nodes.
+- Context compaction now uses model-family window defaults (Claude, GPT-4/o,
+  Gemini, Grok, DeepSeek, Qwen, and others) instead of treating every model as
+  32k, keeps a third of the usable window verbatim, preserves project-graph
+  related files, and carries recent tool failures into the summary. User
+  requests in the summary are kept up to 600 characters instead of 280.
+
 ## Agent lifecycle
 
 - Added a public `AgentLoop::TurnState` vocabulary (`idle`, `preparing`,

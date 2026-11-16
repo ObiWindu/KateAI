@@ -44,7 +44,6 @@ private Q_SLOTS:
         s.frequencyPenalty = 0.25;
         s.presencePenalty = 0.5;
         s.toolCallTimeoutMs = 45000;
-        s.maxContextMessages = 40;
         s.compactOnFailure = false;
         s.structuredThinking = false;
         s.structuredPlanning = false;
@@ -82,7 +81,6 @@ private Q_SLOTS:
         QCOMPARE(loaded.frequencyPenalty, s.frequencyPenalty);
         QCOMPARE(loaded.presencePenalty, s.presencePenalty);
         QCOMPARE(loaded.toolCallTimeoutMs, s.toolCallTimeoutMs);
-        QCOMPARE(loaded.maxContextMessages, s.maxContextMessages);
         QCOMPARE(loaded.compactOnFailure, s.compactOnFailure);
         QCOMPARE(loaded.structuredThinking, s.structuredThinking);
         QCOMPARE(loaded.structuredPlanning, s.structuredPlanning);
