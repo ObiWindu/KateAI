@@ -521,9 +521,11 @@ bool CredentialStore::store(const QString &id, const QString &secret, QString *e
         return storeInMemory(id, secret);
     case Backend::ConfigFile:
         return storeInConfig(id, secret, error);
-#if KATEAI_HAVE_KWALLET
     case Backend::KWallet:
+#if KATEAI_HAVE_KWALLET
         return storeInWallet(id, secret, error);
+#else
+        break;
 #endif
     case Backend::Auto:
         break;
@@ -551,9 +553,11 @@ QString CredentialStore::load(const QString &id, bool *ok)
         return loadFromMemory(id, ok);
     case Backend::ConfigFile:
         return loadFromConfig(id, ok);
-#if KATEAI_HAVE_KWALLET
     case Backend::KWallet:
+#if KATEAI_HAVE_KWALLET
         return loadFromWallet(id, ok);
+#else
+        break;
 #endif
     case Backend::Auto:
         break;
@@ -577,12 +581,15 @@ bool CredentialStore::contains(const QString &id)
         const QString value = loadFromConfig(id, nullptr);
         return !value.isEmpty() || idsFromConfig().contains(id);
     }
+    case Backend::KWallet:
 #if KATEAI_HAVE_KWALLET
-    case Backend::KWallet: {
+    {
         QMutexLocker locker(&globalMutex());
         KWallet::Wallet *wallet = openWalletHandle();
         return wallet && wallet->hasEntry(id);
     }
+#else
+        break;
 #endif
     case Backend::Auto:
         break;
@@ -601,9 +608,11 @@ bool CredentialStore::remove(const QString &id)
         return removeFromMemory(id);
     case Backend::ConfigFile:
         return removeFromConfig(id);
-#if KATEAI_HAVE_KWALLET
     case Backend::KWallet:
+#if KATEAI_HAVE_KWALLET
         return removeFromWallet(id);
+#else
+        break;
 #endif
     case Backend::Auto:
         break;
@@ -619,9 +628,11 @@ QStringList CredentialStore::storedIds()
         return idsFromMemory();
     case Backend::ConfigFile:
         return idsFromConfig();
-#if KATEAI_HAVE_KWALLET
     case Backend::KWallet:
+#if KATEAI_HAVE_KWALLET
         return idsFromWallet();
+#else
+        break;
 #endif
     case Backend::Auto:
         break;

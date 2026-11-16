@@ -38,6 +38,10 @@ target_compile_definitions(kateai_core PRIVATE TRANSLATION_DOMAIN="kateai" KATEA
 if(KATEAI_HAVE_KWALLET)
     target_compile_definitions(kateai_core PRIVATE KATEAI_HAVE_KWALLET=1)
     target_link_libraries(kateai_core PUBLIC KF6::Wallet)
+else()
+    # Always define the feature macro: `#if KATEAI_HAVE_KWALLET` in source must
+    # not evaluate an undefined identifier under -Werror=undef.
+    target_compile_definitions(kateai_core PRIVATE KATEAI_HAVE_KWALLET=0)
 endif()
 target_link_libraries(kateai_core
     PUBLIC
