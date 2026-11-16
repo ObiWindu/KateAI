@@ -131,6 +131,9 @@ agent workflows keep working, and the on-disk formats are migrated in place.
   Fedora, macOS, Windows, source tarball).
 - Added `KATEAI_HAVE_KWALLET` CMake detection; KWallet is optional and the
   build continues without it.
+- Release packaging no longer uploads debuginfo/dbgsym/source packages, and
+  the macOS bundle now contains a Craft-built Kate.app with the plugin already
+  installed (the plugin zip and DMG remain separately available).
 
 ## Tests
 

@@ -230,20 +230,33 @@ jobs:
   package-macos:
     name: Plugin zip (macOS)
     runs-on: macos-15
-    timeout-minutes: 300
+    timeout-minutes: 30
+    needs: build-macos
     if: github.ref == 'refs/heads/main' || github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v4
-      - name: Build zip
-        run: ./packaging/build-package.sh macos
+      - name: Download tested macOS plugin
+        uses: actions/download-artifact@v4
+        with:
+          name: plugin-macos
+          path: artifacts
+      - name: Package plugin zip
+        run: |
+          set -euo pipefail
+          VERSION="$(sed -n 's/^project(kateai VERSION \([^ ]*\).*/\1/p' CMakeLists.txt | head -1)"
+          OUT="packaging/dist/kateai-${VERSION}-macos-$(uname -m).zip"
+          mkdir -p packaging/dist
+          rm -f "${OUT}"
+          (cd artifacts && zip -j "../${OUT}" kateai-macos.so)
+          ls -l "${OUT}"
       - name: Stage artifacts
         run: |
-          mkdir -p artifacts && cp packaging/dist/*.zip artifacts/ 2>/dev/null || true
-          ls -l artifacts/
+          mkdir -p artifacts-out && cp packaging/dist/*.zip artifacts-out/
+          ls -l artifacts-out/
       - uses: actions/upload-artifact@v4
         with:
           name: package-macos
-          path: artifacts/
+          path: artifacts-out/
           retention-days: 28
 
   # ----------------------------------------------------- Windows plugin build
@@ -305,16 +318,22 @@ jobs:
     name: Kate + plugin bundle (macOS)
     runs-on: macos-15
     timeout-minutes: 300
+    needs: build-macos
     if: github.ref == 'refs/heads/main' || github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v4
-      - name: Bundle latest Kate + plugin (Craft .dmg + plugin zip)
-        run: ./packaging/bundle-kate-macos.sh
+      - name: Download tested macOS plugin
+        uses: actions/download-artifact@v4
+        with:
+          name: plugin-macos
+          path: artifacts-macos-tmp
+      - name: Bundle latest Kate + plugin (.dmg and preinstalled Kate.app)
+        run: ./packaging/bundle-kate-macos.sh --plugin-so artifacts-macos-tmp/kateai-macos.so
       - name: Stage artifacts
         run: |
           mkdir -p artifacts
           cp packaging/dist/kate-*-macos-*.dmg artifacts/ 2>/dev/null || echo "no .dmg (plugin-only bundle)"
-          cp packaging/dist/kateai-*-macos-*.zip artifacts/
+          cp packaging/dist/kate-bundle-*-macos-*.zip artifacts/ 2>/dev/null || echo "no Kate.app bundle"
           ls -l artifacts/
       - uses: actions/upload-artifact@v4
         with:
@@ -423,6 +442,8 @@ jobs:
           - \`kate-bundle-*.tar.gz\` (Linux) — Kate master built from source with the plugin
             pre-installed. Extract to \`/\` and run \`/opt/kate-ai-bundle/bin/kate-ai\`.
           - \`kate-*-macos-*.dmg\` — latest Kate installer built via Craft.
+          - \`kate-bundle-*-macos-*.zip\` — Craft-built Kate.app with the plugin already
+            installed; unzip and drag Kate.app to Applications.
           - \`kateai-*-macos-*.zip\` — plugin built against the same Craft stack;
             install with \`./install.sh\` (copies it into Kate.app).
           - \`kate-bundle-*-windows-*.zip\` plus \`kate-*.exe\` when Craft produced a Kate

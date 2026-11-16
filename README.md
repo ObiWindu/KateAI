@@ -514,6 +514,8 @@ The script copies `kateai.so` into `~/Library/Application Support/kate/lib/qt6/p
 
 A Homebrew-built plugin may not load in the Craft-built Kate.app. For a matching ABI, build with [KDE Craft](https://develop.kde.org/docs/getting-started/building/craft/) using `packaging/craft/kateai.py`.
 
+Release macOS assets: `kate-bundle-*-macos-*.zip` is a Craft-built Kate.app with the plugin already installed, `kate-*-macos-*.dmg` is the Craft Kate installer, and `kateai-*-macos-*.zip` contains the plugin alone.
+
 ### Windows
 
 Kate for Windows is a Craft/MSVC build. The plugin has to use the same toolchain.
