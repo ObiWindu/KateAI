@@ -35,8 +35,7 @@
   permission was answered synchronously.
 - Fixed assignment-shaped `api_key=...` redaction.
 - Version metadata updated to 0.4.0 across CMake, plugin metadata, README, and
-  packaging. See `CHANGELOG_0.4.0.md` and
-  `docs/RELEASE_0.4.0_AUDIT.md`.
+  packaging. See `CHANGELOG_0.4.0.md`.
 
 ## 0.3.0 — 2026-11-15
 
