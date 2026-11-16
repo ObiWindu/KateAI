@@ -91,7 +91,11 @@ jobs:
         run: ./packaging/build-package.sh fedora
       - name: Stage artifacts
         run: |
-          mkdir -p artifacts && cp packaging/dist/*.rpm artifacts/ 2>/dev/null || true
+          mkdir -p artifacts
+          # Source/debug RPMs are build by-products, not user packages.
+          find packaging/dist -maxdepth 1 -type f -name '*.rpm' \
+            ! -name '*-debuginfo-*' ! -name '*-debugsource-*' ! -name '*.src.rpm' \
+            -exec cp -f {} artifacts/ \;
           ls -l artifacts/
       - uses: actions/upload-artifact@v4
         with:
@@ -142,7 +146,11 @@ jobs:
         run: ./packaging/build-package.sh arch
       - name: Stage artifacts
         run: |
-          mkdir -p artifacts && cp packaging/dist/*.pkg.tar.* artifacts/ 2>/dev/null || true
+          mkdir -p artifacts
+          # Arch emits a separate debug package; it is not a user install.
+          find packaging/dist -maxdepth 1 -type f -name '*.pkg.tar.*' \
+            ! -name '*-debug-*' ! -name '*-debugsymbols-*' \
+            -exec cp -f {} artifacts/ \;
           ls -l artifacts/
       - uses: actions/upload-artifact@v4
         with:
@@ -183,7 +191,12 @@ jobs:
         run: ./packaging/build-package.sh debian
       - name: Stage artifacts
         run: |
-          mkdir -p artifacts && cp packaging/dist/*.deb artifacts/ 2>/dev/null || true
+          mkdir -p artifacts
+          # dpkg-buildpackage emits kateai-dbgsym alongside the installable
+          # kateai package. Only the installable package belongs in a release.
+          find packaging/dist -maxdepth 1 -type f -name '*.deb' \
+            ! -name '*-dbgsym_*' ! -name '*-dbg_*' \
+            -exec cp -f {} artifacts/ \;
           ls -l artifacts/
       - uses: actions/upload-artifact@v4
         with:
@@ -322,8 +335,10 @@ jobs:
       - name: Stage artifacts
         run: |
           New-Item -ItemType Directory -Force -Path artifacts | Out-Null
-          Copy-Item packaging\dist\kate-bundle-*.zip artifacts\ -Force
-          Copy-Item packaging\dist\kate-*.exe artifacts\ -Force -ErrorAction SilentlyContinue
+          Get-ChildItem packaging\dist\kate-bundle-*.zip -ErrorAction SilentlyContinue |
+            Copy-Item -Destination artifacts\ -Force
+          Get-ChildItem packaging\dist\kate-*.exe -ErrorAction SilentlyContinue |
+            Copy-Item -Destination artifacts\ -Force
           Get-ChildItem artifacts\
       - uses: actions/upload-artifact@v4
         with:
@@ -364,6 +379,16 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+      - name: Remove build-only packages from the release
+        run: |
+          set -euo pipefail
+          # Debug symbols and source RPMs are build by-products. They were
+          # previously uploaded and buried the actual Kate+plugin bundles in
+          # the release asset list.
+          find dist -maxdepth 1 -type f \
+            \( -iname '*debug*' -o -iname '*dbgsym*' -o -iname '*-dbg_*' -o -iname '*.src.rpm' \) \
+            -print -delete
+          ls -l dist/
       - name: Align source tarball name with the tag
         run: |
           set -euo pipefail
@@ -388,9 +413,11 @@ jobs:
           ### Plugin only
           - \`kateai.so\` — Linux: drop into \`<qt-plugin-dir>/kf6/ktexteditor/\` (\`./install.sh\` does this for you)
           - \`kateai-macos.so\` / \`kateai-*-macos-*.zip\` — macOS Homebrew build; install with \`./install.sh\`
-          - \`kateai.dll\` / \`kateai-windows-*.zip\` — Windows Craft/MSVC build; install with \`packaging\\\\windows\\\\install.ps1\`
+          - \`kateai.dll\` / \`kateai-windows-*.zip\` — Windows Craft/MSVC plugin build; install with \`packaging\\\\windows\\\\install.ps1\`
           - \`kateai-${VERSION}.tar.gz\` — source tarball
           - \`.rpm\` (Fedora/Asahi, x86_64 + aarch64) · \`.pkg.tar.zst\` (Arch/CachyOS/Manjaro, x86_64 + aarch64) · \`.deb\` (Debian trixie / Ubuntu 25.04+, amd64 + arm64 — arm64 for Googlebook Snapdragon X Elite)
+
+          Debug symbols and source RPMs are intentionally excluded from the release.
 
           ### Kate + plugin bundles (latest Kate)
           - \`kate-bundle-*.tar.gz\` (Linux) — Kate master built from source with the plugin
@@ -398,8 +425,9 @@ jobs:
           - \`kate-*-macos-*.dmg\` — latest Kate installer built via Craft.
           - \`kateai-*-macos-*.zip\` — plugin built against the same Craft stack;
             install with \`./install.sh\` (copies it into Kate.app).
-          - \`kate-bundle-*-windows-*.zip\` (plus \`kate-*.exe\` when produced) — plugin zip
-            plus the Craft-built latest Kate installer.
+          - \`kate-bundle-*-windows-*.zip\` plus \`kate-*.exe\` when Craft produced a Kate
+            installer. If the installer was unavailable, the Windows asset is the
+            plugin zip listed above.
 
           Built from commit ${GITHUB_SHA}. See README.md for install instructions.
           EOF
@@ -412,6 +440,18 @@ jobs:
           # Re-runnable: if the release already exists (re-release), refresh
           # its assets instead of failing the way `gh release create` would.
           if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            # Remove assets that are no longer produced (debug packages from an
+            # older run, stale plugin-only bundles, renamed files), then upload
+            # the current set. Without this, a re-run keeps the old debug
+            # packages next to the new release.
+            existing_assets="$(gh release view "${GITHUB_REF_NAME}" --json assets --jq '.assets[].name')"
+            while IFS= read -r asset; do
+              [ -z "$asset" ] && continue
+              if [ ! -e "dist/$asset" ]; then
+                echo "Removing stale release asset: $asset"
+                gh release delete-asset "${GITHUB_REF_NAME}" "$asset" --yes
+              fi
+            done <<< "$existing_assets"
             # shellcheck disable=SC2086
             gh release upload "${GITHUB_REF_NAME}" dist/* --clobber
           else

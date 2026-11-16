@@ -21,6 +21,7 @@ param(
 $ErrorActionPreference = "Stop"
 $Root = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
 Set-Location $Root
+$startedAt = Get-Date
 
 # Craft's MSVC toolchain aborts when sh.exe or a foreign gcc sits in PATH,
 # and the same pollution breaks its Visual Studio detection. The hosted
@@ -37,9 +38,7 @@ $version = "0.4.0"
 if ($m) { $version = $m.Matches[0].Groups[1].Value }
 $arch = $env:PROCESSOR_ARCHITECTURE
 if (-not $arch) { $arch = "amd64" }
-if (-not $Out) {
-    $Out = Join-Path $Root "packaging\dist\kate-bundle-$version-windows-$arch.zip"
-}
+$outWasProvided = -not [string]::IsNullOrWhiteSpace($Out)
 
 # Let the CI-tested Windows plugin build own the Craft bootstrap, iconv
 # workaround, `craft kate`, and the plugin build. The bundle job used to
@@ -96,16 +95,49 @@ Pairs with the latest Kate. Either:
   2. Or copy kateai.dll next to Kate's kf6\ktexteditor plugin directory.
 "@ | Out-File -Encoding utf8 (Join-Path $stage "README.txt")
 
-# Also pick up a Craft-built Kate installer when present: that plus this zip
-# is the full "latest Kate bundled with the plugin" set for the release.
+# Pick up the Craft-built Kate installer. That plus this zip is the full
+# "latest Kate + plugin" set for the release. Craft's package output has
+# moved between Craft versions, so search the whole tmp tree rather than
+# assuming the installer sits directly in CraftRoot\tmp.
 $kateInstallers = @()
 $tmpDir = Join-Path $CraftRoot "tmp"
+$findKateInstaller = {
+    if (-not (Test-Path $tmpDir)) {
+        return @()
+    }
+    return @(Get-ChildItem -Path $tmpDir -Recurse -File -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.Name -match '^kate-.*\.(exe|msi)$' -and $_.LastWriteTime -ge $startedAt.AddMinutes(-1)
+        } |
+        Sort-Object LastWriteTime -Descending |
+        Select-Object -First 1)
+}
 if (Test-Path $tmpDir) {
-    $kateInstallers = @(Get-ChildItem -Path $tmpDir -Filter "kate-*.exe" | Sort-Object LastWriteTime -Descending | Select-Object -First 1)
-    if (-not $kateInstallers -or $kateInstallers.Count -eq 0) {
-        Write-Host "No Craft Kate installer in $tmpDir; building one with: craft --package kate"
+    $found = & $findKateInstaller
+    if (-not $found -or $found.Count -eq 0) {
+        Write-Host "No Craft Kate installer found; building one with: craft --package kate"
         craft --package kate
-        $kateInstallers = @(Get-ChildItem -Path $tmpDir -Filter "kate-*.exe" | Sort-Object LastWriteTime -Descending | Select-Object -First 1)
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning "craft --package kate failed with exit code $LASTEXITCODE"
+        }
+        $found = & $findKateInstaller
+    }
+    if ($found -and $found.Count -gt 0) {
+        $kateInstallers = @($found)
+    }
+}
+
+# Only call this a Kate bundle when the Kate installer is actually present.
+# Otherwise publish a plainly named plugin zip: a 1 MB plugin-only archive
+# under a "kate-bundle" name is what made the previous release look like it
+# contained an editor it did not.
+$distDir = Join-Path $Root "packaging\dist"
+if (-not $outWasProvided) {
+    if ($kateInstallers.Count -gt 0) {
+        $Out = Join-Path $distDir "kate-bundle-$version-windows-$arch.zip"
+    } else {
+        $Out = Join-Path $distDir "kateai-$version-windows-$arch.zip"
+        Write-Warning "No Kate installer was produced; publishing plugin-only zip $Out"
     }
 }
 
@@ -121,4 +153,8 @@ foreach ($installer in $kateInstallers) {
         Get-Item (Join-Path (Split-Path $Out) $installer.Name)
     }
 }
-Write-Host "Bundle ready: $Out"
+if ($kateInstallers.Count -gt 0) {
+    Write-Host "Bundle ready: $Out (with $($kateInstallers[0].Name))"
+} else {
+    Write-Host "Plugin zip ready: $Out (no Kate installer was produced)"
+}
