@@ -702,7 +702,7 @@ QSet<QString> ProjectGraph::resolveImportTargets(const QString &content, const Q
         u".java"_s, u".kt"_s, u".kts"_s, u".swift"_s, u".cs"_s, u".rb"_s,
         u".php"_s, u".vue"_s, u".svelte"_s,
     };
-    auto tryCandidates = [&lookupPath, &extensions](const QString &base, bool addExtensions) {
+    auto tryCandidates = [&lookupPath](const QString &base, bool addExtensions) {
         lookupPath(base);
         if (!addExtensions) {
             return;
