@@ -129,6 +129,39 @@ KTextEditor::Document *KateAi::documentForPath(const QString &path)
 namespace KateAi
 {
 
+bool DocumentBridge::writeDocumentIfUnchanged(const QString &path, const QString &expectedContents,
+                                             const QString &contents, QString *error)
+{
+    QString current;
+    if (!readDocument(path, &current)) {
+        if (error) {
+            *error = u"The file could not be read before writing; it may have been deleted or made unreadable."_s;
+        }
+        return false;
+    }
+    if (current != expectedContents) {
+        if (error) {
+            *error = u"The file changed after it was read (on disk or in the editor). "
+                     u"Read it again before editing, so newer changes are not overwritten."_s;
+        }
+        return false;
+    }
+    return writeDocument(path, contents, error);
+}
+
+bool DocumentBridge::writeDocumentIfMissing(const QString &path, const QString &contents, QString *error)
+{
+    QString existing;
+    if (readDocument(path, &existing)) {
+        if (error) {
+            *error = u"The file already exists. Creating it would overwrite content that was not "
+                     u"part of the patch."_s;
+        }
+        return false;
+    }
+    return writeDocument(path, contents, error);
+}
+
 bool DocumentBridge::removeDocument(const QString &path, QString *error)
 {
     if (path.trimmed().isEmpty()) {
@@ -392,6 +425,66 @@ void DiskDocumentBridge::resetBufferedEdits()
     m_bufferedHashes.clear();
 }
 
+bool DiskDocumentBridge::writeDocumentIfMissing(const QString &path, const QString &contents, QString *error)
+{
+    if (path.trimmed().isEmpty()) {
+        if (error) {
+            *error = u"Path must not be empty."_s;
+        }
+        return false;
+    }
+    if (m_useOpenDocuments && documentForPath(path)) {
+        // An open buffer is content the patch planner did not read from disk.
+        // Overwriting it here would discard whatever the user has in it.
+        if (error) {
+            *error = u"The file is already open in the editor. Close it or save it before the agent "
+                     u"creates it."_s;
+        }
+        return false;
+    }
+
+    const QDir dir = QFileInfo(path).dir();
+    if (!dir.exists() && !dir.mkpath(u"."_s)) {
+        if (error) {
+            *error = u"Failed to create directory: %1"_s.arg(dir.absolutePath());
+        }
+        return false;
+    }
+
+    // QFile::NewOnly creates the file atomically (O_EXCL on POSIX), so a file
+    // that appeared after the patch was planned is reported as a conflict
+    // instead of being replaced by QSaveFile's rename.
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::NewOnly)) {
+        if (error) {
+            if (QFileInfo::exists(path)) {
+                *error = u"The file was created after the patch was read. Read it before replacing it."_s;
+            } else {
+                *error = u"Failed to create file: %1"_s.arg(file.errorString());
+            }
+        }
+        return false;
+    }
+
+    QTextStream out(&file);
+    out.setEncoding(QStringConverter::Utf8);
+    out << contents;
+    out.flush();
+    if (file.error() != QFileDevice::NoError) {
+        const QString reason = file.errorString();
+        file.close();
+        // Do not leave a half-written file behind under a name the patch
+        // claimed to have created successfully.
+        QFile::remove(path);
+        if (error) {
+            *error = u"Failed to write file: %1"_s.arg(reason);
+        }
+        return false;
+    }
+    file.close();
+    return true;
+}
+
 bool DiskDocumentBridge::writeDocumentToDisk(const QString &path, const QString &contents, QString *error)
 {
     const QDir dir = QFileInfo(path).dir();
@@ -428,6 +521,14 @@ bool DiskDocumentBridge::writeDocumentToDisk(const QString &path, const QString 
             *error = u"Failed to open file for writing: %1"_s.arg(file.errorString());
         }
         return false;
+    }
+    // QSaveFile writes a temporary file and renames it over the target. Set
+    // the original permissions on the temporary file so replacing an
+    // executable script (or a restricted file) does not silently turn it into
+    // a default-mode file.
+    const QFileInfo existing(path);
+    if (existing.exists()) {
+        file.setPermissions(existing.permissions());
     }
     QTextStream out(&file);
     out.setEncoding(encoding);

@@ -5,6 +5,7 @@
 
 #include "acpclient.h"
 #include "acpinstall.h"
+#include "processenv.h"
 #include "tools.h"
 #include "graph/projectgraph.h"
 
@@ -279,7 +280,7 @@ static void normalizeQuestionMetadata(PermissionRequest &request, QJsonObject *a
         }
     }
 
-    QString text = firstStringField(source, {u"question"_s, u"prompt"_s, u"message"_s, u"text"_s, u"header"_s});
+    QString text = questionTextFromToolArguments(*args);
     if (text.isEmpty()) {
         text = firstStringField(*args, {u"question"_s, u"prompt"_s, u"message"_s, u"text"_s, u"header"_s});
     }
@@ -293,7 +294,10 @@ static void normalizeQuestionMetadata(PermissionRequest &request, QJsonObject *a
         text = u"The agent is waiting for your answer."_s;
     }
 
-    QStringList options = optionLabels(source.value(u"options"_s));
+    QStringList options = questionOptionsFromToolArguments(*args);
+    if (options.isEmpty()) {
+        options = optionLabels(source.value(u"options"_s));
+    }
     if (options.isEmpty()) {
         options = optionLabels(args->value(u"options"_s));
     }
@@ -301,7 +305,7 @@ static void normalizeQuestionMetadata(PermissionRequest &request, QJsonObject *a
     const QJsonValue freeform = source.contains(u"allow_freeform"_s)
         ? source.value(u"allow_freeform"_s)
         : source.value(u"allowFreeform"_s);
-    request.allowFreeform = boolishValue(freeform, true);
+    request.allowFreeform = questionAllowFreeformFromToolArguments(*args, boolishValue(freeform, true));
     // A card with neither options nor a text box cannot be answered.
     if (options.isEmpty()) {
         request.allowFreeform = true;
@@ -322,8 +326,11 @@ static void normalizeQuestionMetadata(PermissionRequest &request, QJsonObject *a
 
 static void normalizeSuggestionMetadata(PermissionRequest &request, QJsonObject *args, const QString &title)
 {
-    QString text = firstStringField(*args, {u"suggestion"_s, u"message"_s, u"text"_s, u"description"_s,
-                                            u"content"_s, u"advice"_s, u"recommendation"_s});
+    QString text = suggestionTextFromToolArguments(*args);
+    if (text.isEmpty()) {
+        text = firstStringField(*args, {u"suggestion"_s, u"message"_s, u"text"_s, u"description"_s,
+                                        u"content"_s, u"advice"_s, u"recommendation"_s});
+    }
     if (text.isEmpty() && !title.isEmpty() && title != request.originalToolName) {
         text = title;
     }
@@ -1551,7 +1558,7 @@ void AcpClient::sendInitialize()
 #ifdef KATEAI_VERSION
     clientInfo.insert(u"version"_s, QStringLiteral(KATEAI_VERSION));
 #else
-    clientInfo.insert(u"version"_s, u"0.3.0"_s);
+    clientInfo.insert(u"version"_s, u"0.4.0"_s);
 #endif
 
     QJsonObject params;
@@ -3080,11 +3087,15 @@ void AcpClient::askNextParkedMethod()
         return;
     }
     m_activeParked = m_parkedMethods.takeFirst();
-    Q_EMIT permissionNeeded(m_activeParked->request);
+    // Copy the request before emitting: a synchronous permission handler (the
+    // tests, and any UI that answers immediately) resolves the request from
+    // inside permissionNeeded(), which resets m_activeParked. Dereferencing the
+    // optional afterwards would crash on the empty value.
+    const PermissionRequest request = m_activeParked->request;
     // Tell the transcript the call is parked, not dead: without a progress
     // line an agent waiting on fs/write_text_file looks like a stuck card.
-    Q_EMIT toolProgress(m_activeParked->request.toolCallId,
-                        u"Waiting for approval: %1"_s.arg(m_activeParked->request.summary));
+    Q_EMIT toolProgress(request.toolCallId, u"Waiting for approval: %1"_s.arg(request.summary));
+    Q_EMIT permissionNeeded(request);
 }
 
 void AcpClient::dispatchParkedMethod(const ParkedMethod &parked)
@@ -3280,7 +3291,7 @@ void AcpClient::handleWritePlanFile(const QJsonValue &id, const QJsonObject &par
 // no sandbox check and no permission prompt.
 void AcpClient::handleSuggest(const QJsonValue &id, const QJsonObject &params)
 {
-    const QString text = params.value(u"suggestion"_s).toString().trimmed();
+    const QString text = suggestionTextFromToolArguments(params);
     if (text.isEmpty()) {
         replyError(id, kInvalidParams, u"suggestion must not be empty: describe what you are suggesting."_s);
         return;
@@ -3288,13 +3299,19 @@ void AcpClient::handleSuggest(const QJsonValue &id, const QJsonObject &params)
 
     Suggestion suggestion;
     suggestion.text = text;
-    suggestion.path = params.value(u"path"_s).toString().trimmed();
+    suggestion.path = firstStringToolArgument(
+        params, {u"path"_s, u"file_path"_s, u"filePath"_s, u"file"_s, u"target"_s, u"uri"_s});
+    if (suggestion.path.startsWith(u"file://"_s)) {
+        suggestion.path = QUrl(suggestion.path).toLocalFile();
+    }
     // Resolve a workspace-relative anchor, the same way the native path does,
     // so Accept opens the right file.
     if (!suggestion.path.isEmpty() && !QFileInfo(suggestion.path).isAbsolute() && !m_workspace.isEmpty()) {
         suggestion.path = QDir(m_workspace).absoluteFilePath(suggestion.path);
     }
-    const QJsonValue lineValue = params.value(u"line"_s);
+    const QJsonValue lineValue = params.contains(u"line"_s)
+        ? params.value(u"line"_s)
+        : (params.contains(u"start_line"_s) ? params.value(u"start_line"_s) : params.value(u"startLine"_s));
     if (!lineValue.isUndefined() && !lineValue.isNull()) {
         const int line = jsonIntValue(lineValue, -1);
         if (line < 1) {
@@ -3695,20 +3712,9 @@ void AcpClient::handleLspCodeActions(const QJsonValue &id, const QJsonObject &pa
 // answer is the RPC result.
 void AcpClient::handleAskUser(const QJsonValue &id, const QJsonObject &params)
 {
-    const QString question = params.value(u"question"_s).toString().trimmed();
-    QStringList options;
-    for (const QJsonValue &value : params.value(u"options"_s).toArray()) {
-        // Options may be plain strings or {label, ...} objects.
-        const QString option = value.isObject() ? value.toObject().value(u"label"_s).toString() : value.toString();
-        if (!option.trimmed().isEmpty()) {
-            options.append(option.trimmed());
-        }
-    }
-    bool allowFreeform = true;
-    const QJsonValue freeform = params.value(u"allow_freeform"_s);
-    if (freeform.isBool()) {
-        allowFreeform = freeform.toBool();
-    }
+    const QString question = questionTextFromToolArguments(params);
+    const QStringList options = questionOptionsFromToolArguments(params);
+    const bool allowFreeform = questionAllowFreeformFromToolArguments(params, true);
     askUser(id, question, options, allowFreeform);
 }
 
@@ -3928,6 +3934,7 @@ void AcpClient::handleTerminalCreate(const QJsonValue &id, const QJsonObject &pa
         replyError(id, kServerError, error);
         return;
     }
+    const Sandbox sandbox = currentSandbox();
 
     auto *term = new Terminal;
     term->id = u"term_%1"_s.arg(m_nextTerminal++);
@@ -3944,7 +3951,13 @@ void AcpClient::handleTerminalCreate(const QJsonValue &id, const QJsonObject &pa
     });
 #endif
     term->process->setWorkingDirectory(cwd);
-    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+    // Terminal commands run on behalf of a remote agent. Start from the
+    // sandbox's scrubbed environment so ambient provider credentials and
+    // session channels are not inherited implicitly; the agent can request
+    // specific variables explicitly through `env`.
+    QProcessEnvironment env = sandbox.profile() == SandboxProfile::Off
+        ? sanitizedProcessEnvironment()
+        : sandbox.processEnvironment();
     const QJsonObject extra = envArrayToObject(params.value(u"env"_s).toArray());
     for (auto it = extra.begin(); it != extra.end(); ++it) {
         env.insert(it.key(), it.value().toString());
@@ -3977,10 +3990,10 @@ void AcpClient::handleTerminalCreate(const QJsonValue &id, const QJsonObject &pa
     if (args.isEmpty()) {
         // A lone command string is a shell line. Pass it as one `-c` argument
         // so inner quotes stay part of the script.
-        wrapped = currentSandbox().wrapCommand(command, &wrapError);
+        wrapped = sandbox.wrapCommand(command, &wrapError, cwd);
     } else {
         // ACP argv stays argv. wrapArgv never rewrites this into `bash -c '…'`.
-        wrapped = currentSandbox().wrapArgv(command, args, &wrapError);
+        wrapped = sandbox.wrapArgv(command, args, &wrapError, cwd);
     }
     if (wrapped.isEmpty()) {
         replyError(id, kServerError, wrapError.isEmpty() ? u"Failed to wrap the terminal command."_s : wrapError);

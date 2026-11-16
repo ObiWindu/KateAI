@@ -10,12 +10,17 @@
 
 #include <KLocalizedString>
 
+#include <QColor>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
+#include <QPalette>
 #include <QPushButton>
+#include <QResizeEvent>
 #include <QTextBrowser>
+#include <QTimer>
 #include <QVBoxLayout>
+#include <QtMath>
 
 using namespace Qt::Literals::StringLiterals;
 
@@ -124,7 +129,7 @@ QuestionWidget::~QuestionWidget() = default;
 void QuestionWidget::setQuestion(const QString &questionText, const QStringList &options, bool allowFreeform)
 {
     m_answered = false;
-    m_question->setDocument(makeMarkdownDocument(closeMarkdown(questionText)));
+    m_text = questionText;
     m_question->setVisible(true);
 
     auto *optionsLayout = qobject_cast<QHBoxLayout *>(m_optionsRow->layout());
@@ -173,6 +178,35 @@ void QuestionWidget::markAnswered(const QString &answer)
     reflowNow();
 }
 
+void QuestionWidget::renderBody()
+{
+    if (!m_question) {
+        return;
+    }
+    // The document carries its own colour CSS. The widget stylesheet alone is
+    // not enough: a QTextBrowser paints its viewport with its palette, and a
+    // palette inherited from a different editor theme can leave the text the
+    // same colour as the surface. The body therefore bakes textPrimary into
+    // the document and keeps the viewport transparent over the card.
+    m_question->setDocument(makeMarkdownDocument(closeMarkdown(m_text), ChatTheme::messageCss()));
+    QPalette palette = m_question->palette();
+    palette.setColor(QPalette::Base, Qt::transparent);
+    palette.setColor(QPalette::Text, QColor(ChatTheme::textPrimary()));
+    m_question->setPalette(palette);
+    m_question->viewport()->setAutoFillBackground(false);
+}
+
+void QuestionWidget::resizeEvent(QResizeEvent *event)
+{
+    QWidget::resizeEvent(event);
+    // The card has its real width only after the layout ran. Re-measure then
+    // instead of locking in the height of a document laid out at construction
+    // width.
+    QTimer::singleShot(0, this, [this] {
+        reflowNow();
+    });
+}
+
 void QuestionWidget::applyStyle()
 {
     const QString border = m_answered ? ChatTheme::success() : ChatTheme::accent();
@@ -208,6 +242,8 @@ void QuestionWidget::applyStyle()
     for (auto *chip : m_optionsRow->findChildren<QPushButton *>()) {
         chip->setStyleSheet(optionChipStyle());
     }
+    renderBody();
+    reflowNow();
 }
 
 void QuestionWidget::updateStatus()
@@ -219,11 +255,21 @@ void QuestionWidget::updateStatus()
 
 void QuestionWidget::reflowNow()
 {
-    if (m_question->isVisible()) {
-        m_question->setMinimumHeight(0);
-        m_question->document()->setTextWidth(m_question->viewport()->width());
-        m_question->setMinimumHeight(m_question->document()->size().height());
+    if (!m_question || !m_question->isVisible()) {
+        return;
     }
+    const int width = m_question->viewport()->width();
+    if (width <= 1) {
+        // The card is not laid out yet. resizeEvent will ask again once it has
+        // a real width; measuring now would lock in a height computed against
+        // a one-pixel document.
+        return;
+    }
+    m_question->setMinimumHeight(0);
+    m_question->setMaximumHeight(QWIDGETSIZE_MAX);
+    m_question->document()->setTextWidth(width);
+    const int height = qCeil(m_question->document()->size().height());
+    m_question->setFixedHeight(qMax(1, height + 2));
     updateGeometry();
 }
 

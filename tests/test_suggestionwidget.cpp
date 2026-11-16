@@ -15,8 +15,10 @@
 #include "suggestionwidget.h"
 
 #include <QApplication>
+#include <QImage>
 #include <QLabel>
 #include <QPushButton>
+#include <QSet>
 #include <QSignalSpy>
 #include <QTest>
 #include <QTextBrowser>
@@ -74,6 +76,16 @@ private Q_SLOTS:
         const QList<QTextBrowser *> bodies = widget.findChildren<QTextBrowser *>();
         QCOMPARE(bodies.size(), 1);
         QVERIFY2(bodies.first()->toPlainText().contains(u"string_view"_s), qPrintable(bodies.first()->toPlainText()));
+        QVERIFY2(bodies.first()->height() > 20,
+                 qPrintable(QStringLiteral("the suggestion body collapsed to %1px").arg(bodies.first()->height())));
+        const QImage painted = bodies.first()->viewport()->grab().toImage();
+        QSet<QRgb> colours;
+        for (int y = 0; y < painted.height(); ++y) {
+            for (int x = 0; x < painted.width(); ++x) {
+                colours.insert(painted.pixel(x, y));
+            }
+        }
+        QVERIFY2(colours.size() > 2, "the suggestion body painted no text pixels");
 
         QVERIFY2(labelWithText(widget, u"src/main.cpp:42"_s), "the anchor label should read path:line");
         QVERIFY2(labelWithText(widget, u"posted"_s), "a fresh card is posted, not decided");

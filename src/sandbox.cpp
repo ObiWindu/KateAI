@@ -5,11 +5,16 @@
 
 #include "sandbox.h"
 
+#include "processenv.h"
+
 #include <QDir>
+#include <QFile>
 #include <QFileInfo>
 #include <QHash>
 #include <QProcess>
+#include <QProcessEnvironment>
 #include <QRegularExpression>
+#include <QSet>
 #include <QStandardPaths>
 
 #ifdef Q_OS_UNIX
@@ -924,8 +929,259 @@ static QString seatbeltQuote(const QString &path)
 }
 #endif
 
+#if defined(Q_OS_UNIX)
+// The home directory a strict sandbox gets. It is a fresh, empty directory
+// inside the sandbox's private tmpfs, so commands cannot read the user's
+// dotfiles or write caches into the real home.
+static QString sandboxHomePath()
+{
+#if defined(Q_OS_MACOS)
+    return QDir::cleanPath(QDir::tempPath() + u"/kateai-home"_s);
+#else
+    return u"/tmp/kateai-home"_s;
+#endif
+}
+
+// A private runtime directory for sockets a command creates itself. The host
+// runtime directory is never mounted: it contains the session bus, the SSH and
+// GPG agents, and the display-server sockets.
+static QString sandboxRuntimePath(SandboxProfile profile)
+{
+#if defined(Q_OS_MACOS)
+    Q_UNUSED(profile);
+    return QDir::cleanPath(QDir::tempPath() + u"/kateai-runtime"_s);
+#else
+    return profile == SandboxProfile::Strict ? sandboxHomePath() + u"/run"_s
+                                             : u"/tmp/kateai-runtime"_s;
+#endif
+}
+
+static bool pathIsWithinOrEqual(const QString &path, const QString &root)
+{
+    if (path.isEmpty() || root.isEmpty()) {
+        return false;
+    }
+    const QString normalizedPath = QDir::cleanPath(QDir::fromNativeSeparators(path));
+    const QString normalizedRoot = QDir::cleanPath(QDir::fromNativeSeparators(root));
+    return normalizedPath == normalizedRoot || normalizedPath.startsWith(normalizedRoot + u'/');
+}
+
+// Credential stores and session channels that must not be reachable from a
+// sandboxed command. Deny globs cover the file tools and command arguments;
+// this list closes the dynamic-path hole ("cat ~/$d/id_rsa") by mounting an
+// empty view over the real path. Only existing paths are returned.
+static QStringList sensitiveSandboxPaths()
+{
+    QStringList paths;
+    const QString home = QDir::homePath();
+
+    static const QStringList homeDirectories = {
+        u".ssh"_s,
+        u".gnupg"_s,
+        u".aws"_s,
+        u".azure"_s,
+        u".config/gcloud"_s,
+        u".config/gh"_s,
+        u".config/kateai"_s,
+        u".docker"_s,
+        u".kube"_s,
+        u".password-store"_s,
+        u".local/share/keyrings"_s,
+        u".local/share/kateai"_s,
+        u".mozilla"_s,
+        u".config/google-chrome"_s,
+        u".config/chromium"_s,
+        u".config/BraveSoftware"_s,
+        u".config/microsoft-edge"_s,
+        u".config/containers"_s,
+        u".config/hub"_s,
+        u".config/heroku"_s,
+        u".terraform.d"_s,
+    };
+    for (const QString &relative : homeDirectories) {
+        const QString path = home + u'/' + relative;
+        if (QFileInfo(path).isDir()) {
+            paths.append(path);
+        }
+    }
+
+    // XDG_CONFIG_HOME / XDG_DATA_HOME can move the KateAI config and the
+    // fallback credential store away from ~/.config and ~/.local/share.
+    QStringList xdgKateAiDirs;
+    const QString xdgConfig = QStandardPaths::writableLocation(QStandardPaths::GenericConfigLocation);
+    const QString xdgData = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation);
+    if (!xdgConfig.isEmpty()) {
+        xdgKateAiDirs.append(xdgConfig + u"/kateai"_s);
+    }
+    if (!xdgData.isEmpty()) {
+        xdgKateAiDirs.append(xdgData + u"/kateai"_s);
+    }
+    for (const QString &path : xdgKateAiDirs) {
+        if (QFileInfo(path).isDir() && !paths.contains(path)) {
+            paths.append(path);
+        }
+    }
+
+    static const QStringList homeFiles = {
+        u".netrc"_s,
+        u".git-credentials"_s,
+        u".npmrc"_s,
+        u".pypirc"_s,
+        u".cargo/credentials"_s,
+        u".cargo/credentials.toml"_s,
+        u".config/gh/hosts.yml"_s,
+        u".config/gcloud/application_default_credentials.json"_s,
+        u".docker/config.json"_s,
+        u".kube/config"_s,
+        u".vault-token"_s,
+        u".ansible/galaxy_token"_s,
+        u".gradle/gradle.properties"_s,
+        u".m2/settings.xml"_s,
+        u".nuget/NuGet/NuGet.Config"_s,
+        u".local/share/kateai/credentials.json"_s,
+        u".local/share/kateai/credentials.conf"_s,
+    };
+    for (const QString &relative : homeFiles) {
+        const QString path = home + u'/' + relative;
+        if (QFileInfo(path).isFile()) {
+            paths.append(path);
+        }
+    }
+
+#if defined(Q_OS_UNIX)
+    // The per-user runtime directory holds the session bus, PipeWire/PulseAudio
+    // sockets, the GPG agent and the SSH agent. Use the environment value only
+    // when it belongs to this user: a stale XDG_RUNTIME_DIR from another login
+    // must not make us mount a tmpfs over someone else's directory.
+    QString runtime = qEnvironmentVariable("XDG_RUNTIME_DIR");
+    if (runtime.isEmpty() || QFileInfo(runtime).ownerId() != getuid()) {
+        runtime = u"/run/user/"_s + QString::number(getuid());
+    }
+    if (QFileInfo(runtime).isDir() && QFileInfo(runtime).ownerId() == getuid()) {
+        paths.append(runtime);
+    }
+#endif
+
+    static const QStringList systemSockets = {
+        u"/run/dbus"_s,
+        u"/run/docker.sock"_s,
+        u"/run/podman"_s,
+        u"/run/containers"_s,
+        u"/run/snapd.socket"_s,
+        u"/run/NetworkManager"_s,
+        u"/run/wpa_supplicant"_s,
+        u"/run/systemd/private"_s,
+        u"/run/systemd/journal/socket"_s,
+    };
+    for (const QString &path : systemSockets) {
+        if (QFileInfo::exists(path)) {
+            paths.append(path);
+        }
+    }
+
+    // Resolve symlinks and de-duplicate: /var/run is usually a link to /run,
+    // and mounting the same target twice makes bubblewrap fail.
+    QStringList unique;
+    QSet<QString> seen;
+    for (const QString &path : paths) {
+        const QString canonical = QFileInfo(path).canonicalFilePath();
+        const QString key = canonical.isEmpty() ? QDir::cleanPath(path) : QDir::cleanPath(canonical);
+        if (!seen.contains(key)) {
+            seen.insert(key);
+            unique.append(canonical.isEmpty() ? path : canonical);
+        }
+    }
+    return unique;
+}
+#endif
+
 #if defined(Q_OS_LINUX)
-static QStringList linuxBubblewrapPrefix(const QString &workspaceRoot, SandboxProfile profile, QString *error)
+// A stable, owner-only empty file used to blank out a single credential file
+// inside the sandbox. A directory is masked with tmpfs instead.
+static QString sandboxEmptyMaskFile()
+{
+    static const QString path = []() -> QString {
+        QString directory = QStandardPaths::writableLocation(QStandardPaths::GenericCacheLocation);
+        if (directory.isEmpty()) {
+            directory = QDir::homePath() + u"/.cache"_s;
+        }
+        directory += u"/kateai"_s;
+        if (!QDir().mkpath(directory)) {
+            return {};
+        }
+        QFile::setPermissions(directory, QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
+        const QString file = directory + u"/sandbox-empty"_s;
+        QFile empty(file);
+        if (!empty.exists() && empty.open(QIODevice::WriteOnly | QIODevice::NewOnly)) {
+            empty.close();
+        }
+        if (!QFileInfo(file).isFile()) {
+            return {};
+        }
+        QFile::setPermissions(file, QFile::ReadOwner);
+        return file;
+    }();
+    return path;
+}
+
+static void appendLinuxMaskMount(QStringList &args, const QString &path, int depth = 0)
+{
+    if (depth > 3) {
+        return;
+    }
+    const QFileInfo info(path);
+    if (!info.exists() && !info.isSymLink()) {
+        return;
+    }
+    // Mount over the symlink target, not the link itself: binding a tmpfs over
+    // a symlink can hide an unrelated directory after resolution.
+    if (info.isSymLink()) {
+        const QString target = info.canonicalFilePath();
+        if (!target.isEmpty() && QDir::cleanPath(target) != QDir::cleanPath(path)) {
+            appendLinuxMaskMount(args, target, depth + 1);
+        }
+        return;
+    }
+    if (info.isDir()) {
+        args << u"--tmpfs"_s << QDir::cleanPath(path);
+        return;
+    }
+    // Sockets, FIFOs and device nodes are not files, but they are just as
+    // sensitive (the Docker/Podman socket is root-equivalent). Any existing
+    // non-directory is blanked with an empty regular file.
+    const QString empty = sandboxEmptyMaskFile();
+    if (!empty.isEmpty()) {
+        args << u"--ro-bind"_s << empty << QDir::cleanPath(path);
+    } else {
+        // The empty-file helper needs a writable cache directory. /dev/null is
+        // a safe fallback even when reading the mask yields EACCES: the point
+        // is that the original path is no longer reachable.
+        args << u"--ro-bind"_s << u"/dev/null"_s << QDir::cleanPath(path);
+    }
+}
+#endif
+
+#if defined(Q_OS_LINUX)
+// Bind a runtime directory, or recreate a runtime symlink. Distributions differ
+// on whether /bin, /lib and /lib64 are real directories or links into /usr;
+// both forms have to look the same inside the sandbox.
+static void appendBubblewrapRuntimePath(QStringList &args, const QString &path)
+{
+    const QFileInfo info(path);
+    if (info.isSymLink()) {
+        const QString target = info.symLinkTarget();
+        if (!target.isEmpty()) {
+            args << u"--symlink"_s << target << path;
+        }
+    } else if (info.isDir()) {
+        args << u"--ro-bind"_s << path << path;
+    }
+}
+#endif
+
+#if defined(Q_OS_LINUX)
+static QStringList linuxBubblewrapPrefix(const QString &workspaceRoot, SandboxProfile profile,
+                                        const QString &workingDirectory, QString *error)
 {
     const QString bwrap = QStandardPaths::findExecutable(u"bwrap"_s);
     if (bwrap.isEmpty()) {
@@ -934,75 +1190,166 @@ static QStringList linuxBubblewrapPrefix(const QString &workspaceRoot, SandboxPr
         }
         return {};
     }
+    if (workspaceRoot.trimmed().isEmpty()) {
+        if (error) {
+            *error = u"Workspace root is not set; refusing to run a sandboxed command."_s;
+        }
+        return {};
+    }
 
+    const bool strict = profile == SandboxProfile::Strict;
     const bool readOnlyFs = profile == SandboxProfile::ReadOnly;
-
-    // Never use the host absolute path as a bwrap destination. Intermediate
-    // symlinks (common for /home) or special mounts make bwrap fail with
-    // "Can't mkdir parents … Permission denied". Zed and other working
-    // sandboxes always mount the project at a fixed shallow path instead.
-    //
-    // Strict              → /workspace under a clean tmpfs root
-    // Workspace/ReadOnly  → /tmp/kateai-workspace (under a re-bound writable /tmp)
-    const QString sandboxWorkspace =
-        (profile == SandboxProfile::Strict) ? u"/workspace"_s : u"/tmp/kateai-workspace"_s;
+    const QString workspace = QDir::cleanPath(QDir::fromNativeSeparators(workspaceRoot));
+    if (strict && workspace == QDir::rootPath()) {
+        if (error) {
+            *error = u"The strict profile cannot use the filesystem root as its workspace."_s;
+        }
+        return {};
+    }
+    // The strict profile has a writable tmpfs root, so it can create the
+    // stable mount point. The other profiles mount the host root read-only,
+    // where /workspace does not exist; a private /tmp tmpfs is writable and
+    // gives them a safe place for the shallow mount.
+    const QString workspaceMount = strict ? u"/workspace"_s : u"/tmp/kateai-workspace"_s;
+    QString chdir = workspaceMount;
+    if (!workingDirectory.trimmed().isEmpty()) {
+        QString cwd = QDir::cleanPath(QDir::fromNativeSeparators(workingDirectory));
+        const QString canonical = QFileInfo(cwd).canonicalFilePath();
+        if (!canonical.isEmpty()) {
+            cwd = QDir::cleanPath(QDir::fromNativeSeparators(canonical));
+        }
+        if (!QFileInfo(cwd).isDir() || !pathIsWithinOrEqual(cwd, workspace)) {
+            if (error) {
+                *error = u"The working directory is not a directory inside the workspace: %1"_s.arg(workingDirectory);
+            }
+            return {};
+        }
+        chdir = cwd;
+    }
 
     QStringList args;
-    args << bwrap << u"--die-with-parent"_s << u"--unshare-pid"_s << u"--unshare-ipc"_s << u"--unshare-uts"_s;
+    args << bwrap
+         // A new session blocks TIOCSTI-style injection into the terminal that
+         // started Kate, and --die-with-parent makes cancellation reliable.
+         << u"--die-with-parent"_s << u"--new-session"_s
+         // A user namespace gives the sandbox an unmapped-uid view even when
+         // bubblewrap is not setuid. -try keeps setuid installations working on
+         // kernels that disable unprivileged user namespaces.
+         << u"--unshare-user-try"_s
+         << u"--unshare-pid"_s << u"--unshare-ipc"_s << u"--unshare-uts"_s
+         << u"--unshare-cgroup-try"_s
+         // A sandboxed build never needs capabilities; dropping them also keeps
+         // a setuid bubblewrap from retaining anything after setup.
+         << u"--cap-drop"_s << u"ALL"_s
+         // The UTS namespace is already unshared; a stable hostname keeps the
+         // real one out of command output.
+         << u"--hostname"_s << u"kateai-sandbox"_s;
 
-    if (profile == SandboxProfile::Strict) {
+    if (strict || readOnlyFs) {
+        args << u"--unshare-net"_s;
+    }
+
+    if (strict) {
+        // A tmpfs root means the host filesystem is not mounted at all. Only
+        // the runtime needed to start and run programs is exposed read-only.
         args << u"--tmpfs"_s << u"/"_s;
-        const QStringList runtimeDirectories = {
-            u"/usr"_s, u"/lib"_s, u"/lib64"_s, u"/bin"_s, u"/sbin"_s,
+        static const QStringList runtimePaths = {
+            u"/usr"_s, u"/bin"_s, u"/sbin"_s, u"/lib"_s, u"/lib64"_s,
+            u"/lib32"_s, u"/libx32"_s, u"/etc"_s, u"/opt"_s, u"/nix"_s,
+            u"/snap"_s,
         };
-        for (const QString &directory : runtimeDirectories) {
-            const QFileInfo info(directory);
-            if (info.exists() && info.isDir() && !info.isSymLink()) {
-                args << u"--ro-bind"_s << directory << directory;
+        for (const QString &path : runtimePaths) {
+            if (QFileInfo::exists(path) || QFileInfo(path).isSymLink()) {
+                appendBubblewrapRuntimePath(args, path);
             }
         }
-        args << u"--bind"_s << workspaceRoot << sandboxWorkspace;
-        // A private /tmp instead of the one of the host. The host's /tmp is
-        // writable by everybody, so a command could leave files there, and in
-        // the strict profile it would break the isolation of the tmpfs root.
-        args << u"--tmpfs"_s << u"/tmp"_s;
-        args << u"--proc"_s << u"/proc"_s << u"--dev"_s << u"/dev"_s;
-        args << u"--chdir"_s << sandboxWorkspace;
-        args << u"--unshare-net"_s;
     } else {
+        // Workspace and ReadOnly can read the host, but never write it: the
+        // root is mounted read-only and the workspace is rebound below.
         args << u"--ro-bind"_s << u"/"_s << u"/"_s;
-        args << u"--proc"_s << u"/proc"_s << u"--dev"_s << u"/dev"_s;
-        // The read-only profile may write to a scratch directory, but not to
-        // the /tmp of the host: a file left there outlives the sandbox and is
-        // visible to every other process of the machine.
-        if (readOnlyFs) {
-            args << u"--tmpfs"_s << u"/tmp"_s;
-        } else {
-            args << u"--bind"_s << u"/tmp"_s << u"/tmp"_s;
+    }
+
+    args << u"--proc"_s << u"/proc"_s << u"--dev"_s << u"/dev"_s;
+    // A private /tmp for every profile. Binding the host /tmp made the profile
+    // table's "workspace only" promise false and left files that outlive the
+    // command visible to every process on the machine.
+    args << u"--tmpfs"_s << u"/tmp"_s;
+
+    // The workspace is available under a stable, shallow path and under its
+    // real absolute path, so commands that spell out the project directory keep
+    // working. Both point at the same bind mount.
+    const QString workspaceMode = readOnlyFs ? u"--ro-bind"_s : u"--bind"_s;
+    if (workspace != workspaceMount) {
+        args << workspaceMode << workspace << workspace;
+    }
+    args << workspaceMode << workspace << workspaceMount;
+
+    // The strict profile has no host home mounted, so it needs a fresh one.
+    // The other profiles keep the real HOME for tool configuration, but the
+    // sensitive stores inside it are hidden.
+    if (strict) {
+        const QString home = sandboxHomePath();
+        const QString runtime = sandboxRuntimePath(profile);
+        args << u"--dir"_s << home
+             << u"--dir"_s << home + u"/.cache"_s
+             << u"--dir"_s << home + u"/.config"_s
+             << u"--dir"_s << home + u"/.local"_s
+             << u"--dir"_s << home + u"/.local/share"_s
+             << u"--dir"_s << home + u"/.local/state"_s
+             << u"--dir"_s << runtime;
+    } else {
+        args << u"--dir"_s << sandboxRuntimePath(profile);
+        for (const QString &path : sensitiveSandboxPaths()) {
+            // Masking an ancestor of the workspace would hide the project.
+            if (pathIsWithinOrEqual(workspace, path)) {
+                continue;
+            }
+            appendLinuxMaskMount(args, path);
         }
-        args << (readOnlyFs ? u"--ro-bind"_s : u"--bind"_s) << workspaceRoot << sandboxWorkspace;
-        args << u"--chdir"_s << sandboxWorkspace;
-        if (readOnlyFs) {
-            args << u"--unshare-net"_s;
+    }
+
+    args << u"--chdir"_s << chdir;
+
+    // These override ambient values even when a caller started bwrap directly
+    // instead of going through Sandbox::processEnvironment().
+    args << u"--setenv"_s << u"TMPDIR"_s << u"/tmp"_s
+         << u"--setenv"_s << u"XDG_RUNTIME_DIR"_s << sandboxRuntimePath(profile);
+    if (strict) {
+        const QString home = sandboxHomePath();
+        QString path = u"/usr/local/bin:/usr/bin:/bin"_s;
+        const QString nixProfile = u"/nix/var/nix/profiles/default/bin"_s;
+        if (QFileInfo(nixProfile).isDir()) {
+            path.prepend(nixProfile + u':');
         }
+        args << u"--setenv"_s << u"HOME"_s << home
+             << u"--setenv"_s << u"XDG_CACHE_HOME"_s << home + u"/.cache"_s
+             << u"--setenv"_s << u"XDG_CONFIG_HOME"_s << home + u"/.config"_s
+             << u"--setenv"_s << u"XDG_DATA_HOME"_s << home + u"/.local/share"_s
+             << u"--setenv"_s << u"XDG_STATE_HOME"_s << home + u"/.local/state"_s
+             << u"--setenv"_s << u"PATH"_s << path;
     }
     return args;
 }
 
-static QStringList wrapLinuxBubblewrap(const QString &workspaceRoot, SandboxProfile profile, const QString &command, QString *error)
+static QStringList wrapLinuxBubblewrap(const QString &workspaceRoot, SandboxProfile profile,
+                                      const QString &command, const QString &workingDirectory, QString *error)
 {
-    QStringList args = linuxBubblewrapPrefix(workspaceRoot, profile, error);
+    QStringList args = linuxBubblewrapPrefix(workspaceRoot, profile, workingDirectory, error);
     if (args.isEmpty()) {
         return {};
     }
-    args << u"--"_s << findShellExecutable() << u"-lc"_s << command;
+    // -c, not -lc: a login shell reads the user's profile, which could
+    // re-export the credentials and session channels the environment policy
+    // just removed. Off keeps -lc for compatibility.
+    args << u"--"_s << findShellExecutable() << u"-c"_s << command;
     return args;
 }
 
 static QStringList wrapLinuxBubblewrapArgv(const QString &workspaceRoot, SandboxProfile profile,
-                                          const QString &program, const QStringList &argv, QString *error)
+                                          const QString &program, const QStringList &argv,
+                                          const QString &workingDirectory, QString *error)
 {
-    QStringList args = linuxBubblewrapPrefix(workspaceRoot, profile, error);
+    QStringList args = linuxBubblewrapPrefix(workspaceRoot, profile, workingDirectory, error);
     if (args.isEmpty()) {
         return {};
     }
@@ -1013,7 +1360,65 @@ static QStringList wrapLinuxBubblewrapArgv(const QString &workspaceRoot, Sandbox
 #endif
 
 #if defined(Q_OS_MACOS)
-static QStringList wrapMacSandboxExec(const QString &workspaceRoot, SandboxProfile profile, const QString &command, QString *error)
+static QString macSandboxProfile(const QString &workspaceRoot, SandboxProfile profile)
+{
+    const QString ws = seatbeltQuote(QDir::cleanPath(workspaceRoot));
+    QString profileText;
+
+    if (profile == SandboxProfile::Strict) {
+        // Deny by default, then allow only the runtime needed to execute
+        // programs and touch the workspace and private temporary directories.
+        profileText = u"(version 1)\n"
+                      "(deny default)\n"
+                      "(allow process*)\n"
+                      "(allow signal)\n"
+                      "(allow sysctl-read)\n"
+                      "(allow mach-lookup)\n"
+                      "(allow ipc-posix-shm)\n"
+                      "(allow file-read-metadata)\n"_s;
+        profileText += u"(allow file-read* (subpath \"/usr\") (subpath \"/bin\") (subpath \"/sbin\") "
+                       "(subpath \"/opt\") (subpath \"/Library\") (subpath \"/System\") "
+                       "(subpath \"/private/etc\") (subpath \"/etc\") "
+                       "(subpath \"/private/var/db\") (subpath \"/private/var/folders\") "
+                       "(subpath \"/var/folders\") (subpath \"/private/tmp\") (subpath \"/tmp\") "
+                       "(subpath \"/dev\") (subpath \""_s
+                      + ws + u"\"))\n"_s;
+        profileText += u"(allow file-write* (subpath \""_s + ws
+                       + u"\") (subpath \"/private/tmp\") (subpath \"/tmp\") "
+                         "(subpath \"/private/var/folders\") (subpath \"/var/folders\") "
+                         "(subpath \"/dev\"))\n"
+                         "(deny network*)\n"_s;
+        return profileText;
+    }
+
+    // Workspace and ReadOnly can read the host but write only the workspace
+    // and temporary directories. Sensitive credential stores are denied after
+    // the broad allow rule, so a dynamic path cannot bypass the deny globs.
+    profileText = u"(version 1)\n(allow default)\n(deny file-write*)\n"_s;
+    profileText += u"(allow file-write* (subpath \""_s + ws
+                   + u"\") (subpath \"/tmp\") (subpath \"/private/tmp\") "
+                     "(subpath \"/private/var/folders\") (subpath \"/var/folders\") "
+                     "(subpath \"/dev\"))\n"_s;
+    for (const QString &path : sensitiveSandboxPaths()) {
+        if (pathIsWithinOrEqual(QDir::cleanPath(workspaceRoot), path)) {
+            continue;
+        }
+        const QString quoted = seatbeltQuote(path);
+        if (QFileInfo(path).isDir()) {
+            profileText += u"(deny file-read* (subpath \""_s + quoted + u"\"))\n"_s;
+            profileText += u"(deny file-write* (subpath \""_s + quoted + u"\"))\n"_s;
+        } else {
+            profileText += u"(deny file-read* (literal \""_s + quoted + u"\"))\n"_s;
+            profileText += u"(deny file-write* (literal \""_s + quoted + u"\"))\n"_s;
+        }
+    }
+    if (profile == SandboxProfile::ReadOnly) {
+        profileText += u"(deny network*)\n"_s;
+    }
+    return profileText;
+}
+
+static QStringList macSandboxPrefix(const QString &workspaceRoot, SandboxProfile profile, QString *error)
 {
     QString sandboxExec = QStandardPaths::findExecutable(u"sandbox-exec"_s);
     if (sandboxExec.isEmpty()) {
@@ -1025,52 +1430,37 @@ static QStringList wrapMacSandboxExec(const QString &workspaceRoot, SandboxProfi
         }
         return {};
     }
-
-    const QString ws = seatbeltQuote(QDir::cleanPath(workspaceRoot));
-    QString profileText = u"(version 1)\n(allow default)\n"_s;
-    if (profile == SandboxProfile::ReadOnly) {
-        profileText += u"(deny file-write*)\n"
-                       "(allow file-write* (subpath \"/tmp\") (subpath \"/private/tmp\") "
-                       "(subpath \"/private/var/folders\") (subpath \"/var/folders\") (subpath \"/dev\"))\n"
-                       "(deny network*)\n"_s;
-    } else if (profile == SandboxProfile::Strict) {
-        profileText = u"(version 1)\n(deny default)\n"
-                      "(allow process*)\n(allow signal)\n(allow sysctl-read)\n(allow mach-lookup)\n"
-                      "(allow ipc-posix-shm)\n(allow file-read-metadata)\n"_s;
-        profileText += u"(allow file-read* (subpath \"/usr\") (subpath \"/bin\") (subpath \"/sbin\") "
-                       "(subpath \"/opt\") (subpath \"/Library\") (subpath \"/System\") "
-                       "(subpath \"/private/tmp\") (subpath \"/tmp\") (subpath \"/dev\") (subpath \""_s
-            + ws + u"\"))\n"_s;
-        profileText += u"(allow file-write* (subpath \""_s + ws
-            + u"\") (subpath \"/tmp\") (subpath \"/private/tmp\") "
-              "(subpath \"/private/var/folders\") (subpath \"/var/folders\") (subpath \"/dev\"))\n"
-              "(deny network*)\n"_s;
-    } else {
-        profileText += u"(deny file-write*)\n(allow file-write* (subpath \""_s + ws
-            + u"\") (subpath \"/tmp\") (subpath \"/private/tmp\") "
-              "(subpath \"/private/var/folders\") (subpath \"/var/folders\") (subpath \"/dev\"))\n"_s;
+    if (workspaceRoot.trimmed().isEmpty()) {
+        if (error) {
+            *error = u"Workspace root is not set; refusing to run a sandboxed command."_s;
+        }
+        return {};
     }
+    return {sandboxExec, u"-p"_s, macSandboxProfile(workspaceRoot, profile)};
+}
 
-    return {sandboxExec, u"-p"_s, profileText, findShellExecutable(), u"-lc"_s, command};
+static QStringList wrapMacSandboxExec(const QString &workspaceRoot, SandboxProfile profile, const QString &command, QString *error)
+{
+    QStringList args = macSandboxPrefix(workspaceRoot, profile, error);
+    if (args.isEmpty()) {
+        return {};
+    }
+    // -c, not -lc: see the Linux wrapper. A sandboxed command must not source
+    // the user's login profile and re-add the environment we removed.
+    args << findShellExecutable() << u"-c"_s << command;
+    return args;
 }
 
 static QStringList wrapMacSandboxExecArgv(const QString &workspaceRoot, SandboxProfile profile,
                                          const QString &program, const QStringList &argv, QString *error)
 {
-    QStringList wrapped = wrapMacSandboxExec(workspaceRoot, profile, QString(), error);
-    if (wrapped.isEmpty()) {
+    QStringList args = macSandboxPrefix(workspaceRoot, profile, error);
+    if (args.isEmpty()) {
         return {};
     }
-    // Replace the trailing `shell -lc command` with the raw argv so quotes in
-    // arguments are never re-parsed by a nested bash -c.
-    if (wrapped.size() >= 3) {
-        wrapped.removeLast(); // command
-        wrapped.removeLast(); // -lc
-        wrapped.removeLast(); // shell
-    }
-    wrapped << program;
-    wrapped += argv;
-    return wrapped;
+    args << program;
+    args += argv;
+    return args;
 }
 #endif
 
@@ -1091,7 +1481,106 @@ bool Sandbox::isolationAvailable() const
 #endif
 }
 
-QStringList Sandbox::wrapCommand(const QString &command, QString *error) const
+QProcessEnvironment Sandbox::processEnvironment() const
+{
+    if (m_profile == SandboxProfile::Off) {
+        // Off is explicitly unsandboxed; callers that need the old behaviour
+        // keep it. Every other profile starts from a scrubbed environment.
+        return QProcessEnvironment::systemEnvironment();
+    }
+
+    QProcessEnvironment env = sanitizedProcessEnvironment();
+
+    // Session and credential channels are not secrets by name, but they grant
+    // access to the host's session: DBus can activate services, the SSH/GPG
+    // agents hold keys, and DISPLAY/WAYLAND reach the user's desktop. None of
+    // them belong in a sandboxed build command.
+    static const QStringList blocked = {
+        u"DBUS_SESSION_BUS_ADDRESS"_s,
+        u"DBUS_SYSTEM_BUS_ADDRESS"_s,
+        u"DBUS_STARTER_ADDRESS"_s,
+        u"DBUS_STARTER_BUS_TYPE"_s,
+        u"AT_SPI_BUS_ADDRESS"_s,
+        u"NOTIFY_SOCKET"_s,
+        u"XDG_ACTIVATION_TOKEN"_s,
+        u"DESKTOP_STARTUP_ID"_s,
+        u"DISPLAY"_s,
+        u"WAYLAND_DISPLAY"_s,
+        u"XAUTHORITY"_s,
+        u"SSH_AUTH_SOCK"_s,
+        u"SSH_AGENT_PID"_s,
+        u"SSH_ASKPASS"_s,
+        u"SUDO_ASKPASS"_s,
+        u"GPG_AGENT_INFO"_s,
+        u"KRB5CCNAME"_s,
+        u"KRB5_KTNAME"_s,
+        u"PULSE_SERVER"_s,
+        u"PULSE_COOKIE"_s,
+        u"PIPEWIRE_REMOTE"_s,
+        u"PIPEWIRE_RUNTIME_DIR"_s,
+        u"LD_PRELOAD"_s,
+        u"LD_AUDIT"_s,
+        u"DYLD_INSERT_LIBRARIES"_s,
+        u"BASH_ENV"_s,
+        u"ENV"_s,
+        u"PWD"_s,
+        u"OLDPWD"_s,
+    };
+    for (const QString &name : blocked) {
+        env.remove(name);
+    }
+    const QStringList names = env.keys();
+    for (const QString &name : names) {
+        if (name.startsWith(u"XDG_SESSION_"_s)) {
+            env.remove(name);
+        }
+    }
+
+#if defined(Q_OS_UNIX)
+    const QString home = sandboxHomePath();
+    const QString runtime = sandboxRuntimePath(m_profile);
+    env.insert(u"TMPDIR"_s, u"/tmp"_s);
+    env.insert(u"XDG_RUNTIME_DIR"_s, runtime);
+    if (env.value(u"PATH"_s).isEmpty()) {
+        env.insert(u"PATH"_s, u"/usr/local/bin:/usr/bin:/bin"_s);
+    }
+    if (env.value(u"SHELL"_s).isEmpty()) {
+        env.insert(u"SHELL"_s, findShellExecutable());
+    }
+
+    if (m_profile == SandboxProfile::Strict) {
+        env.insert(u"HOME"_s, home);
+        env.insert(u"XDG_CACHE_HOME"_s, home + u"/.cache"_s);
+        env.insert(u"XDG_CONFIG_HOME"_s, home + u"/.config"_s);
+        env.insert(u"XDG_DATA_HOME"_s, home + u"/.local/share"_s);
+        env.insert(u"XDG_STATE_HOME"_s, home + u"/.local/state"_s);
+        QString path = u"/usr/local/bin:/usr/bin:/bin"_s;
+        const QString nixProfile = u"/nix/var/nix/profiles/default/bin"_s;
+        if (QFileInfo(nixProfile).isDir()) {
+            path.prepend(nixProfile + u':');
+        }
+        env.insert(u"PATH"_s, path);
+    } else if (env.value(u"HOME"_s).isEmpty()) {
+        env.insert(u"HOME"_s, QDir::homePath());
+    }
+
+#if !defined(Q_OS_LINUX)
+    // macOS has no mount namespace to create these for us. The strict profile
+    // allows writes below /tmp and /private/var/folders, so the directories
+    // can be created before the profile starts.
+    if (m_profile == SandboxProfile::Strict) {
+        QDir().mkpath(home);
+        QFile::setPermissions(home, QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
+    }
+    QDir().mkpath(runtime);
+    QFile::setPermissions(runtime, QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
+#endif
+#endif
+
+    return env;
+}
+
+QStringList Sandbox::wrapCommand(const QString &command, QString *error, const QString &workingDirectory) const
 {
     if (isAlwaysDeniedCommand(command)) {
         if (error) {
@@ -1114,17 +1603,21 @@ QStringList Sandbox::wrapCommand(const QString &command, QString *error) const
     }
 
 #if defined(Q_OS_LINUX)
-    return wrapLinuxBubblewrap(m_workspaceRoot, m_profile, command, error);
+    return wrapLinuxBubblewrap(m_workspaceRoot, m_profile, command, workingDirectory, error);
 #elif defined(Q_OS_MACOS)
+    Q_UNUSED(workingDirectory);
     return wrapMacSandboxExec(m_workspaceRoot, m_profile, command, error);
 #else
-    // There is no isolation mechanism on this platform. The strict profile
-    // promises that the command cannot reach the rest of the system, and that
-    // promise cannot be kept here. Running the command unsandboxed would
-    // silently break it, so the command is refused instead.
-    if (m_profile == SandboxProfile::Strict) {
+    Q_UNUSED(workingDirectory);
+    // There is no isolation mechanism on this platform. Strict and ReadOnly
+    // make promises about filesystem and network access that a policy check
+    // cannot keep, so they are refused instead of running unsandboxed.
+    // Workspace remains policy-only here and is documented as such; selecting
+    // Off is the explicit way to run completely unsandboxed.
+    if (m_profile == SandboxProfile::Strict || m_profile == SandboxProfile::ReadOnly) {
         if (error) {
-            *error = u"The strict sandbox profile is not available on this platform, so the command was not run."_s;
+            *error = u"The %1 sandbox profile is not available on this platform, so the command was not run."_s
+                         .arg(m_profile == SandboxProfile::Strict ? u"strict"_s : u"read-only"_s);
         }
         return {};
     }
@@ -1132,7 +1625,8 @@ QStringList Sandbox::wrapCommand(const QString &command, QString *error) const
 #endif
 }
 
-QStringList Sandbox::wrapArgv(const QString &program, const QStringList &args, QString *error) const
+QStringList Sandbox::wrapArgv(const QString &program, const QStringList &args, QString *error,
+                              const QString &workingDirectory) const
 {
     const QString reconstructed = argvAsShellLine(program, args);
     if (isAlwaysDeniedCommand(reconstructed)) {
@@ -1155,15 +1649,18 @@ QStringList Sandbox::wrapArgv(const QString &program, const QStringList &args, Q
     }
 
 #if defined(Q_OS_LINUX)
-    return wrapLinuxBubblewrapArgv(m_workspaceRoot, m_profile, program, args, error);
+    return wrapLinuxBubblewrapArgv(m_workspaceRoot, m_profile, program, args, workingDirectory, error);
 #elif defined(Q_OS_MACOS)
+    Q_UNUSED(workingDirectory);
     return wrapMacSandboxExecArgv(m_workspaceRoot, m_profile, program, args, error);
 #else
-    // The same as in wrapCommand(): the strict profile cannot be honoured
+    Q_UNUSED(workingDirectory);
+    // The same as in wrapCommand(): Strict and ReadOnly cannot be honoured
     // without an isolation mechanism.
-    if (m_profile == SandboxProfile::Strict) {
+    if (m_profile == SandboxProfile::Strict || m_profile == SandboxProfile::ReadOnly) {
         if (error) {
-            *error = u"The strict sandbox profile is not available on this platform, so the command was not run."_s;
+            *error = u"The %1 sandbox profile is not available on this platform, so the command was not run."_s
+                         .arg(m_profile == SandboxProfile::Strict ? u"strict"_s : u"read-only"_s);
         }
         return {};
     }

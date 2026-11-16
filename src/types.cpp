@@ -173,6 +173,173 @@ QString canonicalToolName(const QString &name)
 namespace
 {
 
+// The first non-empty string among `keys`. Objects are unwrapped one level so
+// a provider that sends {"question":{"text":"..."}} still works.
+QString firstTextValue(const QJsonObject &args, const QStringList &keys)
+{
+    for (const QString &key : keys) {
+        const QJsonValue value = args.value(key);
+        if (value.isString()) {
+            const QString text = value.toString().trimmed();
+            if (!text.isEmpty()) {
+                return text;
+            }
+        } else if (value.isObject()) {
+            const QString text = firstTextValue(value.toObject(),
+                                                {u"text"_s, u"message"_s, u"description"_s, u"content"_s, u"label"_s});
+            if (!text.isEmpty()) {
+                return text;
+            }
+        }
+    }
+    return {};
+}
+
+QJsonObject questionSourceObject(const QJsonObject &args)
+{
+    const QJsonValue questions = args.value(u"questions"_s);
+    if (questions.isArray()) {
+        const QJsonArray array = questions.toArray();
+        if (!array.isEmpty()) {
+            if (array.first().isObject()) {
+                return array.first().toObject();
+            }
+            if (array.first().isString()) {
+                QJsonObject source;
+                source.insert(u"question"_s, array.first().toString());
+                return source;
+            }
+        }
+    }
+    const QJsonValue question = args.value(u"question"_s);
+    if (question.isObject()) {
+        return question.toObject();
+    }
+    return args;
+}
+
+void appendOptionValues(QStringList *out, const QJsonValue &value)
+{
+    if (!out) {
+        return;
+    }
+    if (value.isString()) {
+        const QString label = value.toString().trimmed();
+        if (!label.isEmpty() && !out->contains(label)) {
+            out->append(label);
+        }
+        return;
+    }
+    if (value.isObject()) {
+        const QString label = firstTextValue(value.toObject(),
+                                             {u"label"_s, u"title"_s, u"name"_s, u"text"_s, u"value"_s,
+                                              u"description"_s});
+        if (!label.isEmpty() && !out->contains(label)) {
+            out->append(label);
+        }
+        return;
+    }
+    if (value.isArray()) {
+        for (const QJsonValue &item : value.toArray()) {
+            appendOptionValues(out, item);
+        }
+    }
+}
+
+bool boolishJson(const QJsonValue &value, bool fallback)
+{
+    if (value.isBool()) {
+        return value.toBool();
+    }
+    if (value.isDouble()) {
+        return value.toInt() != 0;
+    }
+    if (value.isString()) {
+        const QString text = value.toString().trimmed().toLower();
+        if (text == u"true"_s || text == u"1"_s || text == u"yes"_s) {
+            return true;
+        }
+        if (text == u"false"_s || text == u"0"_s || text == u"no"_s) {
+            return false;
+        }
+    }
+    return fallback;
+}
+
+} // namespace
+
+QString firstStringToolArgument(const QJsonObject &args, const QStringList &keys)
+{
+    return firstTextValue(args, keys);
+}
+
+QString questionTextFromToolArguments(const QJsonObject &args)
+{
+    const QJsonObject source = questionSourceObject(args);
+    QString text = firstTextValue(source, {u"question"_s, u"prompt"_s, u"message"_s, u"text"_s,
+                                          u"header"_s, u"title"_s, u"description"_s});
+    if (text.isEmpty()) {
+        text = firstTextValue(args, {u"question"_s, u"prompt"_s, u"message"_s, u"text"_s,
+                                    u"header"_s, u"title"_s, u"description"_s});
+    }
+    return text;
+}
+
+QStringList questionOptionsFromToolArguments(const QJsonObject &args)
+{
+    QStringList options;
+    const QJsonObject source = questionSourceObject(args);
+    for (const QString &key : {u"options"_s, u"choices"_s, u"answers"_s}) {
+        appendOptionValues(&options, source.value(key));
+        appendOptionValues(&options, args.value(key));
+    }
+    return options;
+}
+
+bool questionAllowFreeformFromToolArguments(const QJsonObject &args, bool fallback)
+{
+    const QJsonObject source = questionSourceObject(args);
+    if (source.contains(u"allow_freeform"_s)) {
+        return boolishJson(source.value(u"allow_freeform"_s), fallback);
+    }
+    if (source.contains(u"allowFreeform"_s)) {
+        return boolishJson(source.value(u"allowFreeform"_s), fallback);
+    }
+    if (args.contains(u"allow_freeform"_s)) {
+        return boolishJson(args.value(u"allow_freeform"_s), fallback);
+    }
+    if (args.contains(u"allowFreeform"_s)) {
+        return boolishJson(args.value(u"allowFreeform"_s), fallback);
+    }
+    return fallback;
+}
+
+QString suggestionTextFromToolArguments(const QJsonObject &args)
+{
+    QString text = firstTextValue(args, {u"suggestion"_s, u"message"_s, u"text"_s, u"description"_s,
+                                        u"content"_s, u"advice"_s, u"recommendation"_s, u"title"_s,
+                                        u"prompt"_s});
+    if (!text.isEmpty()) {
+        return text;
+    }
+    const QJsonValue suggestions = args.value(u"suggestions"_s);
+    if (suggestions.isArray() && !suggestions.toArray().isEmpty()) {
+        const QJsonValue first = suggestions.toArray().first();
+        if (first.isString()) {
+            return first.toString().trimmed();
+        }
+        if (first.isObject()) {
+            return firstTextValue(first.toObject(),
+                                  {u"suggestion"_s, u"text"_s, u"message"_s, u"description"_s,
+                                   u"content"_s, u"advice"_s, u"recommendation"_s});
+        }
+    }
+    return {};
+}
+
+namespace
+{
+
 // Strips the a/ or b/ prefix git-style diffs carry, and quotes around paths.
 QString stripDiffPath(QString p)
 {

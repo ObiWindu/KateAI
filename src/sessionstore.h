@@ -17,7 +17,7 @@ namespace KateAi
 class SessionStore
 {
 public:
-    static constexpr int CURRENT_VERSION = 2;
+    static constexpr int CURRENT_VERSION = 3;
 
     struct SessionData {
         int version = CURRENT_VERSION;
@@ -26,6 +26,9 @@ public:
         QJsonArray currentPlan;
         bool planShown = false;
         QString currentAssistant;
+        // Identifier of the last user turn. Persisted so a restored transcript
+        // and the live runtime agree on which turn the UI is describing.
+        QString lastTurnId;
         quint64 stateEpoch = 0;
         QList<QString> actionSignatures;
         QHash<QString, int> actionRepeatCounts;

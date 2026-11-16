@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(kateai VERSION 0.3.0 LANGUAGES CXX)
+project(kateai VERSION 0.4.0 LANGUAGES CXX)
 
 set(QT_MAJOR_VERSION "6")
 set(QT_MIN_VERSION "6.5.0")
@@ -75,6 +75,15 @@ find_package(KF6 ${KF6_DEP_VERSION} REQUIRED COMPONENTS
     XmlGui
     WidgetsAddons
 )
+
+find_package(KF6Wallet ${KF6_DEP_VERSION} QUIET)
+if(KF6Wallet_FOUND)
+    set(KATEAI_HAVE_KWALLET TRUE)
+    message(STATUS "KateAI: KDE Wallet available, enabling secure credential storage")
+else()
+    set(KATEAI_HAVE_KWALLET FALSE)
+    message(STATUS "KateAI: KDE Wallet not found, falling back to owner-only config file")
+endif()
 
 add_subdirectory(src)
 

@@ -697,8 +697,13 @@ QList<CheckpointInfo> CheckpointManager::checkpoints() const
 
 int CheckpointManager::changedFileCount(const QString &id) const
 {
+    return changedFiles(id).size();
+}
+
+QStringList CheckpointManager::changedFiles(const QString &id) const
+{
     if (!isAvailable() || !isValidCheckpointId(id)) {
-        return 0;
+        return {};
     }
     // The mutex is held for the whole call: the staging and the diff run git
     // commands that touch the same index, and two of them at once race for
@@ -707,10 +712,9 @@ int CheckpointManager::changedFileCount(const QString &id) const
     stageWorktree();
     QString output;
     if (!runGit({u"diff"_s, u"--cached"_s, u"--name-only"_s, id}, &output, nullptr)) {
-        return 0;
+        return {};
     }
-    const QStringList files = output.split(u'\n', Qt::SkipEmptyParts);
-    return static_cast<int>(files.size());
+    return output.split(u'\n', Qt::SkipEmptyParts);
 }
 
 QString CheckpointManager::diffAgainstCheckpoint(const QString &id, int maxLines) const
@@ -738,7 +742,7 @@ QString CheckpointManager::diffAgainstCheckpoint(const QString &id, int maxLines
     return diff;
 }
 
-bool CheckpointManager::restoreCheckpoint(const QString &id, QString *error)
+bool CheckpointManager::restoreCheckpoint(const QString &id, QString *error, bool createSafetySnapshot)
 {
     QMutexLocker locker(&m_checkpointMutex);
 
@@ -761,6 +765,28 @@ bool CheckpointManager::restoreCheckpoint(const QString &id, QString *error)
             *error = u"Not a valid checkpoint id."_s;
         }
         return false;
+    }
+
+    // Snapshot the current worktree before overwriting it. A restore is a
+    // destructive operation by nature, and files may have been changed after
+    // the checkpoint by the user or another tool. Keeping that state in a
+    // "before restore" checkpoint means a mistaken restore is itself
+    // recoverable, and the restore fails closed if the snapshot cannot be
+    // written instead of silently discarding the newer content.
+    if (createSafetySnapshot) {
+        const QString label = u"Before restoring "_s + id.left(8);
+        QString snapshotError;
+        const QString safetyId = snapshotWorkspace(gitDir(), m_workspace, label, &snapshotError);
+        if (safetyId.isEmpty()) {
+            if (error) {
+                *error = u"Could not snapshot the current workspace before restoring, so nothing was changed: "_s
+                    + (snapshotError.isEmpty() ? u"unknown git error"_s : snapshotError);
+            }
+            return false;
+        }
+        // Do not prune here: with a small retention window the target commit
+        // could be the one dropped before it has been restored.
+        Q_EMIT checkpointCreated(safetyId, label);
     }
 
     QString listed;

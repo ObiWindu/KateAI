@@ -61,12 +61,18 @@ public:
     // checkpointCreated() or failed(); there is no return value.
     void createCheckpointAsync(const QString &label);
     QList<CheckpointInfo> checkpoints() const;
-    // Writes the checkpoint's file contents back into the workspace.
-    bool restoreCheckpoint(const QString &id, QString *error = nullptr);
+    // Writes the checkpoint's file contents back into the workspace. Unless
+    // `createSafetySnapshot` is false, the current worktree is snapshotted
+    // first, so changes made after the checkpoint -- including edits made
+    // outside KateAI -- can still be recovered from the new checkpoint.
+    // The restore fails closed when that snapshot cannot be written.
+    bool restoreCheckpoint(const QString &id, QString *error = nullptr, bool createSafetySnapshot = true);
     // Unified diff between the checkpoint and the current working tree.
     QString diffAgainstCheckpoint(const QString &id, int maxLines = 400) const;
     // Number of files that differ from the checkpoint.
     int changedFileCount(const QString &id) const;
+    // Paths (relative to the workspace) that differ from the checkpoint.
+    QStringList changedFiles(const QString &id) const;
 
 Q_SIGNALS:
     void checkpointCreated(const QString &id, const QString &label);

@@ -12,10 +12,15 @@
 
 #include "questionwidget.h"
 
+#include "chattheme.h"
+#include "settings.h"
+
 #include <QApplication>
+#include <QImage>
 #include <QLabel>
 #include <QLineEdit>
 #include <QPushButton>
+#include <QSet>
 #include <QSignalSpy>
 #include <QTest>
 #include <QTextBrowser>
@@ -38,6 +43,21 @@ private Q_SLOTS:
         const QList<QTextBrowser *> bodies = widget.findChildren<QTextBrowser *>();
         QCOMPARE(bodies.size(), 1);
         QVERIFY2(bodies.first()->toPlainText().contains(u"patch it in place"_s), qPrintable(bodies.first()->toPlainText()));
+        // The body must actually occupy space, not just hold the text in a
+        // collapsed document that is never painted.
+        QVERIFY2(bodies.first()->height() > 20,
+                 qPrintable(QStringLiteral("the question body collapsed to %1px").arg(bodies.first()->height())));
+        // The text has to be painted, not merely stored in the document: a
+        // body colour equal to the card background leaves a blank card even
+        // though toPlainText() still returns the question.
+        const QImage painted = bodies.first()->viewport()->grab().toImage();
+        QSet<QRgb> colours;
+        for (int y = 0; y < painted.height(); ++y) {
+            for (int x = 0; x < painted.width(); ++x) {
+                colours.insert(painted.pixel(x, y));
+            }
+        }
+        QVERIFY2(colours.size() > 2, "the question body painted no text pixels");
 
         // The offered answers are one-tap chips, not a menu to go hunting for.
         QVERIFY2(widget.findChild<QPushButton *>(), qPrintable(QStringLiteral("no option chips at all")));
@@ -53,6 +73,32 @@ private Q_SLOTS:
         // Free-form answering is on by default.
         QVERIFY(widget.findChild<QLineEdit *>());
         QVERIFY(widget.findChild<QLineEdit *>()->isVisible());
+    }
+
+    void testQuestionBodyPaintsInBothThemes()
+    {
+        for (const QString &preset : {u"kateai-dark"_s, u"kateai-light"_s}) {
+            Settings settings;
+            settings.themePreset = preset;
+            ChatTheme::loadTheme(settings);
+
+            QuestionWidget widget(u"q-theme"_s);
+            widget.setQuestion(u"Rewrite the file, or patch it in place?"_s, {u"Rewrite"_s, u"Patch"_s}, true);
+            widget.show();
+            QVERIFY(QTest::qWaitForWindowExposed(&widget));
+
+            QTextBrowser *body = widget.findChild<QTextBrowser *>();
+            QVERIFY(body);
+            const QImage painted = body->viewport()->grab().toImage();
+            QSet<QRgb> colours;
+            for (int y = 0; y < painted.height(); ++y) {
+                for (int x = 0; x < painted.width(); ++x) {
+                    colours.insert(painted.pixel(x, y));
+                }
+            }
+            QVERIFY2(colours.size() > 2, qPrintable(u"the %1 question body painted no text"_s.arg(preset)));
+        }
+        ChatTheme::loadTheme(Settings());
     }
 
     void testChipAnswersWithItsOwnText()

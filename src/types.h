@@ -573,8 +573,18 @@ QString acpAgentIdMatching(const QString &command, const QString &args);
 // Agents that have not been queried yet contribute no names.
 QStringList acpAgentAvailableModels(const Settings &settings, const QString &agentId = QString());
 
-QString permissionModeId(PermissionMode mode);
-QString permissionModeLabel(PermissionMode mode);
+// Tolerant readers for the two UI-only tools. Agents commonly spell the same
+// payload differently (`question`/`prompt`/`message`, `suggestion`/`text`/
+// `advice`, nested `questions[]`, option objects instead of strings). Card
+// construction and tool validation share these so a synonym cannot leave a
+// question or suggestion card blank.
+QString firstStringToolArgument(const QJsonObject &args, const QStringList &keys);
+QString questionTextFromToolArguments(const QJsonObject &args);
+QStringList questionOptionsFromToolArguments(const QJsonObject &args);
+bool questionAllowFreeformFromToolArguments(const QJsonObject &args, bool fallback = true);
+QString suggestionTextFromToolArguments(const QJsonObject &args);
+
+QString permissionModeId(PermissionMode mode);QString permissionModeLabel(PermissionMode mode);
 PermissionMode permissionModeFromId(const QString &id);
 
 QString sandboxProfileId(SandboxProfile profile);

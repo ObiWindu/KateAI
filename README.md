@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.3.0-orange" alt="Kate AI 0.3.0">
+  <img src="https://img.shields.io/badge/version-0.4.0-orange" alt="Kate AI 0.4.0">
   <img src="https://img.shields.io/badge/Kate-24.08%2B-1d99f3?logo=kde" alt="Kate 24.08+">
   <img src="https://img.shields.io/badge/Qt-6.5%2B-41cd52?logo=qt" alt="Qt 6.5+">
   <img src="https://img.shields.io/badge/KF-6-blue" alt="KDE Frameworks 6">
@@ -320,12 +320,20 @@ Hard-denied commands (`rm -rf /`, `mkfs`, `dd` to devices, curl-piped-to-shell) 
 
 | Sandbox | Reads | Writes | Child network |
 | --- | --- | --- | --- |
-| **Workspace** | Anywhere except deny globs | Workspace only | Allowed |
-| **Read-only** | Anywhere except deny globs | Blocked | Blocked |
-| **Strict** | Workspace only | Workspace only | Blocked |
+| **Workspace** | Anywhere except deny globs | Workspace + private `/tmp` | Allowed |
+| **Read-only** | Anywhere except deny globs | Private `/tmp` only | Blocked |
+| **Strict** | Workspace only | Workspace + private `/tmp` | Blocked |
 | **Off** | Deny globs only | Deny globs only | Unsandboxed |
 
-Shell isolation depends on the OS: [bubblewrap](https://github.com/containers/bubblewrap) on Linux, `sandbox-exec` on macOS, and workspace-cwd plus command policy on Windows. File tools still work if the OS sandbox helper is missing.
+Shell commands run inside an OS-level sandbox, not just a command filter:
+
+- **Linux (validated):** [bubblewrap](https://github.com/containers/bubblewrap) creates user, PID, IPC, UTS and cgroup namespaces, drops all capabilities, starts a new session, replaces `/tmp` with a private tmpfs, and mounts the host read-only for **Workspace** / **Read-only**. **Strict** starts from a tmpfs root and mounts only the runtime (`/usr`, `/etc`, libraries, `/opt`, `/nix`) read-only. **Read-only** and **Strict** also unshare the network namespace. The workspace is the only writable persistent path in **Workspace** and **Strict**.
+- **macOS:** `sandbox-exec` seatbelt profiles deny writes outside the workspace and block the network in **Read-only** / **Strict**. The code path is built but was not runtime-validated for this release.
+- **Windows:** there is no bundled OS sandbox helper. **Workspace** runs with a workspace working directory plus the command policy, which is **not** a hard boundary; **Read-only** and **Strict** refuse to run instead of silently weakening their promise. Choose **Off** to run unsandboxed.
+
+If bubblewrap cannot start or create the required namespaces, sandboxed commands fail with an explanation rather than falling back to an unsandboxed run. The sandbox is not a virtual machine: it shares the host kernel, and `sandbox-exec` is deprecated by Apple.
+
+Common credential stores (`~/.ssh`, `~/.gnupg`, `~/.aws`, cloud CLI configs, keyrings, browser profiles, `~/.local/share/kateai`) and session channels (`/run/dbus`, Docker/Podman sockets, the per-user runtime directory) are masked inside the sandbox even when a command constructs the path dynamically. Sandboxed shell commands also start from a scrubbed environment: secret-shaped variables and DBus, X11, Wayland, SSH-agent, GPG-agent, and PulseAudio/PipeWire channels are removed, and the shell does not source the user's login profile (which could re-export them). Stdio MCP servers and ACP terminal commands use the same policy; add a variable explicitly in the server's `env` block or the terminal request when a command genuinely needs it.
 
 **Always blocked paths:** `.env`, `.env.*`, `*.pem`, `*.key`, `id_rsa` / `id_ecdsa` / `id_ed25519`, `.ssh/**`, AWS credentials, GnuPG, `.netrc`, `*.p12`, `*.pfx`. Extra deny globs can be added in settings.
 
@@ -581,7 +589,7 @@ API keys:
 - Claude-compatible — Anthropic or compatible gateway
 - ACP — your ACP server endpoint and API key
 
-Keys are stored in Kate’s config (`KateAI` group). Only the selected provider receives its key.
+Keys are stored through KDE Wallet when it is available. Without a wallet they go to an owner-only `credentials.json` (never the main Kate config); settings report which backend is active. Keys from earlier releases are migrated automatically. Only the selected provider receives its key.
 
 ---
 

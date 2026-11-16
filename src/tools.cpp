@@ -280,13 +280,13 @@ QString shellCommandFor(const QString &toolName, const QJsonObject &args)
     if (canonical == u"suggest"_s) {
         // The first line of the advice reads better in a card header than a
         // bare tool name, so show that, capped.
-        const QString firstLine = args.value(u"suggestion"_s).toString().section(u'\n', 0, 0).trimmed();
+        const QString firstLine = suggestionTextFromToolArguments(args).section(u'\n', 0, 0).trimmed();
         return firstLine.isEmpty() ? u"suggest"_s : u"suggest %1"_s.arg(quoteShellArg(firstLine.left(80)));
     }
     if (canonical == u"question"_s) {
         // The question is the whole point of the call, so it goes in the
         // header verbatim (capped) rather than being summarised as "question".
-        const QString asked = args.value(u"question"_s).toString().section(u'\n', 0, 0).trimmed();
+        const QString asked = questionTextFromToolArguments(args).section(u'\n', 0, 0).trimmed();
         return asked.isEmpty() ? u"question"_s : u"question %1"_s.arg(quoteShellArg(asked.left(120)));
     }
     if (toolName.startsWith(u"mcp__"_s)) {
@@ -608,14 +608,9 @@ PermissionRequest ToolRunner::describe(const ToolCall &call) const
         // Read risk for the same reason: asking the user something neither
         // reads the workspace nor changes it.
         req.risk = ToolRisk::Read;
-        req.questionText = args.value(u"question"_s).toString();
-        for (const QJsonValue &value : args.value(u"options"_s).toArray()) {
-            const QString option = value.toString().trimmed();
-            if (!option.isEmpty()) {
-                req.questionOptions.append(option);
-            }
-        }
-        req.allowFreeform = jsonBool(args.value(u"allow_freeform"_s), true);
+        req.questionText = questionTextFromToolArguments(args);
+        req.questionOptions = questionOptionsFromToolArguments(args);
+        req.allowFreeform = questionAllowFreeformFromToolArguments(args, true);
         req.details = QString::fromUtf8(QJsonDocument(args).toJson(QJsonDocument::Compact));
     } else if (call.name == u"suggest"_s) {
         // Advice, not work: read risk so it never prompts, and the full
@@ -623,6 +618,10 @@ PermissionRequest ToolRunner::describe(const ToolCall &call) const
         // and the history can rebuild it later.
         req.risk = ToolRisk::Read;
         req.path = args.value(u"path"_s).toString().trimmed();
+        const QString advice = suggestionTextFromToolArguments(args);
+        if (!advice.isEmpty()) {
+            req.summary = advice.left(200);
+        }
         req.details = QString::fromUtf8(QJsonDocument(args).toJson(QJsonDocument::Compact));
     } else if (call.name == u"apply_patch"_s) {
         req.risk = ToolRisk::Write;
@@ -999,9 +998,10 @@ ToolResult ToolRunner::editFile(const QJsonObject &args)
         return result;
     }
 
+    const QString originalContents = contents;
     contents.replace(oldString, newString);
 
-    if (!m_bridge->writeDocument(resolved, contents, &error)) {
+    if (!m_bridge->writeDocumentIfUnchanged(resolved, originalContents, contents, &error)) {
         result.ok = false;
         result.output = error;
         return result;
@@ -1226,7 +1226,7 @@ ToolResult ToolRunner::multiEditFile(const QJsonObject &args)
         totalReplacements += matches.size();
     }
 
-    if (!m_bridge->writeDocument(resolved, workingContents, &error)) {
+    if (!m_bridge->writeDocumentIfUnchanged(resolved, contents, workingContents, &error)) {
         result.ok = false;
         result.output = error.isEmpty() ? u"Failed to write modified content."_s : error;
         return result;
@@ -1601,6 +1601,10 @@ ToolResult ToolRunner::bash(const QJsonObject &args)
     QProcess process;
     process.setWorkingDirectory(m_sandbox.workspaceRoot());
     process.setProcessChannelMode(QProcess::MergedChannels);
+    // Ambient provider credentials and desktop session channels are not
+    // inherited by a sandboxed command. Off deliberately keeps the old
+    // environment behaviour.
+    process.setProcessEnvironment(m_sandbox.processEnvironment());
 #ifdef Q_OS_UNIX
     // Give the command its own session so a timeout can take down everything it
     // started. Otherwise kill() only reaps the shell we launched and whatever it
@@ -1857,6 +1861,7 @@ void ToolRunner::runBashAsync(const ToolCall &call)
     auto *process = new QProcess(this);
     process->setWorkingDirectory(m_sandbox.workspaceRoot());
     process->setProcessChannelMode(QProcess::MergedChannels);
+    process->setProcessEnvironment(m_sandbox.processEnvironment());
 #ifdef Q_OS_UNIX
     // Same session trick as the synchronous path: a timeout must be able to
     // reap the command and anything it started, not just the shell.
@@ -2636,7 +2641,7 @@ ToolResult ToolRunner::suggest(const QJsonObject &args)
     ToolResult result;
     result.name = u"suggest"_s;
 
-    const QString text = args.value(u"suggestion"_s).toString().trimmed();
+    const QString text = suggestionTextFromToolArguments(args).trimmed();
     if (text.isEmpty()) {
         result.ok = false;
         result.output = u"suggestion must not be empty: describe what you are suggesting."_s;
@@ -2802,8 +2807,18 @@ ToolResult ToolRunner::applyPatch(const QJsonObject &args)
     // written so the tool's documented all-or-nothing contract holds even when
     // the failure happens late (a permission error, an open modified buffer,
     // a full disk).
-    const auto writeContent = [this](const QString &resolved, const QString &content, QString *error) {
-        return m_bridge && m_bridge->writeDocument(resolved, content, error);
+    const auto writeContent = [this](const QString &resolved, const QString &expected, const QString &content,
+                                     bool existed, QString *error) {
+        if (!m_bridge) {
+            if (error) {
+                *error = u"No document bridge is available."_s;
+            }
+            return false;
+        }
+        if (!existed) {
+            return m_bridge->writeDocumentIfMissing(resolved, content, error);
+        }
+        return m_bridge->writeDocumentIfUnchanged(resolved, expected, content, error);
     };
     const auto removeFile = [this](const QString &resolved, QString *error) {
         if (m_bridge) {
@@ -2829,7 +2844,7 @@ ToolResult ToolRunner::applyPatch(const QJsonObject &args)
     for (const PlannedWrite &w : planned) {
         QString error;
         const bool ok = w.isDelete ? removeFile(w.resolved, &error)
-                                   : writeContent(w.resolved, w.newContent, &error);
+                                   : writeContent(w.resolved, w.oldContent, w.newContent, w.existed, &error);
         if (!ok) {
             // Roll back in reverse order. A failure here cannot be hidden: the
             // caller must know the workspace may be partially changed.
@@ -2839,7 +2854,7 @@ ToolResult ToolRunner::applyPatch(const QJsonObject &args)
                 const PlannedWrite &undo = planned.at(i);
                 QString undoError;
                 const bool undone = undo.existed
-                    ? writeContent(undo.resolved, undo.oldContent, &undoError)
+                    ? writeContent(undo.resolved, undo.newContent, undo.oldContent, true, &undoError)
                     : removeFile(undo.resolved, &undoError);
                 if (undone) {
                     ++rolledBack;

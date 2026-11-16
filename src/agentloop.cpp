@@ -41,6 +41,82 @@ using namespace Qt::Literals::StringLiterals;
 namespace KateAi
 {
 
+QString AgentLoop::turnStateId(TurnState state)
+{
+    switch (state) {
+    case TurnState::Idle:
+        return u"idle"_s;
+    case TurnState::Preparing:
+        return u"preparing"_s;
+    case TurnState::Running:
+        return u"running"_s;
+    case TurnState::AwaitingModel:
+        return u"awaiting-model"_s;
+    case TurnState::AwaitingTool:
+        return u"awaiting-tool"_s;
+    case TurnState::AwaitingPermission:
+        return u"awaiting-permission"_s;
+    case TurnState::Cancelling:
+        return u"cancelling"_s;
+    case TurnState::Completed:
+        return u"completed"_s;
+    case TurnState::Failed:
+        return u"failed"_s;
+    case TurnState::Interrupted:
+        return u"interrupted"_s;
+    }
+    return u"unknown"_s;
+}
+
+bool AgentLoop::isTerminalTurnState(TurnState state)
+{
+    return state == TurnState::Completed || state == TurnState::Failed
+        || state == TurnState::Interrupted || state == TurnState::Idle;
+}
+
+AgentLoop::TurnState AgentLoop::turnState() const
+{
+    if (m_busy) {
+        switch (m_state) {
+        case State::Idle:
+            return TurnState::Running;
+        case State::WaitingForNextModel:
+            return TurnState::Running;
+        case State::WaitingForModel:
+            return TurnState::AwaitingModel;
+        case State::ExecutingTools:
+            return TurnState::AwaitingTool;
+        case State::WaitingForPermission:
+            return TurnState::AwaitingPermission;
+        case State::WaitingForQuestion:
+            return TurnState::AwaitingTool;
+        }
+    }
+    return m_lastTurnState;
+}
+
+void AgentLoop::setTurnState(TurnState state, const QString &reason)
+{
+    if (m_turnId.isEmpty()) {
+        return;
+    }
+    if (isTerminalTurnState(state)) {
+        // A terminal state is reported once per turn. finishTurn() and a late
+        // abort can both run while the loop unwinds; a second "completed"
+        // event would make the UI re-render a transcript that is already
+        // settled.
+        if (m_terminalSignalled) {
+            return;
+        }
+        m_lastTurnState = state;
+        m_terminalSignalled = true;
+    }
+    Q_EMIT turnStateChanged(m_turnId, turnStateId(state));
+    if (!reason.isEmpty()) {
+        Q_EMIT statusChanged(reason);
+    }
+}
+
 AgentLoop::AgentLoop(QObject *parent)
     : QObject(parent)
 {
@@ -978,12 +1054,22 @@ void AgentLoop::resetConversation()
     m_currentPlan = QJsonArray();
     m_planShown = false;
     m_currentAssistant.clear();
+    m_turnId.clear();
+    m_lastTurnState = TurnState::Idle;
+    m_terminalSignalled = true;
 }
 
 void AgentLoop::abort()
 {
     const bool hadActiveTurn = m_busy || m_client.isBusy() || m_acp.isBusy() || !m_queue.isEmpty() || !m_pendingResults.isEmpty()
         || !m_waitingCall.name.isEmpty() || m_nextModelTimer.isActive() || !m_activeSubtasks.isEmpty();
+
+    // Report the cancellation before any awaitable teardown runs, so a UI
+    // that is showing "awaiting model" does not sit there while the network
+    // request is being dropped. Interrupted is reported after the teardown.
+    if (hadActiveTurn) {
+        setTurnState(TurnState::Cancelling);
+    }
 
     // Anything still running belongs to the turn being closed. The generation
     // bump makes late async results recognisable as stale, and the read jobs
@@ -1024,6 +1110,9 @@ void AgentLoop::abort()
     // turn fail with "The agent is not ready for another model request."
     m_busy = false;
     m_state = State::Idle;
+    if (hadActiveTurn) {
+        setTurnState(TurnState::Interrupted);
+    }
     m_pendingAcpAnswer.clear();
     m_acpToolQuestionId.clear();
 
@@ -1123,6 +1212,10 @@ void AgentLoop::start(const QString &userText)
 
     // A new turn invalidates every async result captured by the previous one.
     ++m_turnGeneration;
+    m_turnId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    m_lastTurnState = TurnState::Preparing;
+    m_terminalSignalled = false;
+    setTurnState(TurnState::Preparing);
 
     if (usesAcpNative(m_settings)) {
         startAcpTurn(userText);
@@ -1131,6 +1224,8 @@ void AgentLoop::start(const QString &userText)
 
     m_busy = true;
     m_state = State::WaitingForNextModel;
+    m_lastTurnState = TurnState::Running;
+    setTurnState(TurnState::Running);
     m_modelRequests = 0;
     m_toolCalls = 0;
     m_stateEpoch = 0;
@@ -1326,6 +1421,7 @@ void AgentLoop::sendToModel()
     m_currentPlan = QJsonArray();
     m_planShown = false;
     m_state = State::WaitingForModel;
+    setTurnState(TurnState::AwaitingModel);
 
     if (m_settings.structuredThinking) {
         Q_EMIT statusChanged(u"Thinking…"_s);
@@ -1394,6 +1490,8 @@ void AgentLoop::startAcpTurn(const QString &userText)
 {
     m_busy = true;
     m_state = State::WaitingForModel;
+    m_lastTurnState = TurnState::AwaitingModel;
+    setTurnState(TurnState::AwaitingModel);
     m_modelRequests = 0;
     m_toolCalls = 0;
     m_queue.clear();
@@ -1946,6 +2044,7 @@ void AgentLoop::onFinished(const QString &text, const QList<ToolCall> &toolCalls
         m_pendingResults.clear();
         Q_EMIT activityUpdated(describePlannedWork(m_queue));
         m_state = State::ExecutingTools;
+        setTurnState(TurnState::AwaitingTool);
         processQueue();
         return;
     }
@@ -1970,6 +2069,7 @@ void AgentLoop::onFinished(const QString &text, const QList<ToolCall> &toolCalls
         // for this model turn.
     }
     m_state = State::ExecutingTools;
+    setTurnState(TurnState::AwaitingTool);
     processQueue();
 }
 
@@ -1979,6 +2079,7 @@ void AgentLoop::finishWithFailure(const QString &error)
     m_client.abort();
     m_busy = false;
     m_state = State::Idle;
+    setTurnState(TurnState::Failed);
     m_queue.clear();
     m_pendingResults.clear();
     m_waitingCall = {};
@@ -2023,6 +2124,7 @@ void AgentLoop::finishTurn()
     m_nextModelTimer.stop();
     m_busy = false;
     m_state = State::Idle;
+    setTurnState(TurnState::Completed);
     m_queue.clear();
     m_pendingResults.clear();
     m_waitingCall = {};
@@ -2257,6 +2359,7 @@ void AgentLoop::executeOne(const ToolCall &call)
         m_waitingCall = call;
         m_waitingRequest = request;
         m_state = State::WaitingForPermission;
+        setTurnState(TurnState::AwaitingPermission);
         Q_EMIT statusChanged(u"Waiting for permission…"_s);
         Q_EMIT permissionNeeded(request);
         return;
@@ -2268,7 +2371,7 @@ void AgentLoop::executeOne(const ToolCall &call)
     // so the turn stops here until they answer. It never touches the sandbox:
     // the answer is captured by the UI and handed back through answerQuestion.
     if (isQuestionTool(call.name)) {
-        const QString asked = effectiveArgs(call).value(u"question"_s).toString().trimmed();
+        const QString asked = questionTextFromToolArguments(effectiveArgs(call));
         if (asked.isEmpty()) {
             ToolResult result;
             result.ok = false;
@@ -2419,8 +2522,8 @@ PermissionRequest AgentLoop::describeTool(const ToolCall &call) const
     if (isQuestionTool(call.name)) {
         // The question itself is the summary: a card that reads "question" and
         // nothing else tells the user nothing about what they are being asked.
-        const QString text = eff.value(u"question"_s).toString().trimmed();
-        const QJsonArray options = eff.value(u"options"_s).toArray();
+        const QString text = questionTextFromToolArguments(eff);
+        const QStringList options = questionOptionsFromToolArguments(eff);
         PermissionRequest request;
         request.toolName = call.name;
         request.toolCallId = call.id;
@@ -2429,31 +2532,10 @@ PermissionRequest AgentLoop::describeTool(const ToolCall &call) const
         request.questionText = text;
         // The model often sends booleans as strings ("false") or numbers (0);
         // QJsonValue::toBool(true) is only true for real booleans, so it would
-        // show a freeform box the model explicitly forbade. Be tolerant here,
-        // the same way ToolRunner::describe is.
-        {
-            const QJsonValue freeformValue = eff.value(u"allow_freeform"_s);
-            bool allowFreeform = true;
-            if (freeformValue.isBool()) {
-                allowFreeform = freeformValue.toBool();
-            } else if (freeformValue.isDouble()) {
-                allowFreeform = freeformValue.toInt() != 0;
-            } else if (freeformValue.isString()) {
-                const QString s = freeformValue.toString().trimmed().toLower();
-                if (s == u"true"_s || s == u"1"_s || s == u"yes"_s) {
-                    allowFreeform = true;
-                } else if (s == u"false"_s || s == u"0"_s || s == u"no"_s) {
-                    allowFreeform = false;
-                }
-            }
-            request.allowFreeform = allowFreeform;
-        }
-        for (const QJsonValue &value : options) {
-            const QString option = value.toString().trimmed();
-            if (!option.isEmpty()) {
-                request.questionOptions.append(option);
-            }
-        }
+        // show a freeform box the model explicitly forbade. The shared reader
+        // is tolerant, the same way ToolRunner::describe is.
+        request.allowFreeform = questionAllowFreeformFromToolArguments(eff, true);
+        request.questionOptions = options;
         if (request.questionText.isEmpty()) {
             request.summary = i18n("asked a question");
         } else {
@@ -3373,6 +3455,7 @@ SessionStore::SessionData AgentLoop::sessionData() const
     data.currentPlan = m_currentPlan;
     data.planShown = m_planShown;
     data.currentAssistant = m_currentAssistant;
+    data.lastTurnId = m_turnId;
     data.stateEpoch = m_stateEpoch;
     data.actionSignatures = m_actionSignatures.values();
     data.actionRepeatCounts = m_actionRepeatCounts;
@@ -3400,6 +3483,9 @@ void AgentLoop::restoreSession(const SessionStore::SessionData &data)
     m_currentPlan = data.currentPlan;
     m_planShown = data.planShown;
     m_currentAssistant = data.currentAssistant;
+    m_turnId = data.lastTurnId;
+    m_lastTurnState = m_turnId.isEmpty() ? TurnState::Idle : TurnState::Completed;
+    m_terminalSignalled = true;
 
     // Restore tracking state
     m_stateEpoch = data.stateEpoch;

@@ -66,6 +66,7 @@
 #include <QTabWidget>
 #include <QTextDocument>
 #include <QJsonDocument>
+#include <QUrl>
 #include <QSet>
 #include <QTimer>
 #include <QtMath>
@@ -112,11 +113,17 @@ static KateAi::Suggestion suggestionFromRequest(const KateAi::PermissionRequest 
     const QJsonDocument argsDoc = QJsonDocument::fromJson(request.details.toUtf8());
     if (!argsDoc.isNull() && argsDoc.isObject()) {
         const QJsonObject args = argsDoc.object();
-        suggestion.text = args.value(u"suggestion"_s).toString();
-        suggestion.path = args.value(u"path"_s).toString().trimmed();
+        suggestion.text = KateAi::suggestionTextFromToolArguments(args);
+        suggestion.path = KateAi::firstStringToolArgument(
+            args, {u"path"_s, u"file_path"_s, u"filePath"_s, u"file"_s, u"target"_s, u"uri"_s});
+        if (suggestion.path.startsWith(u"file://"_s)) {
+            suggestion.path = QUrl(suggestion.path).toLocalFile();
+        }
         // The model often sends numbers as strings ("5"); toInt() silently
         // yields 0 for those and drops the anchor.
-        const QJsonValue lineValue = args.value(u"line"_s);
+        const QJsonValue lineValue = args.contains(u"line"_s)
+            ? args.value(u"line"_s)
+            : (args.contains(u"start_line"_s) ? args.value(u"start_line"_s) : args.value(u"startLine"_s));
         if (lineValue.isDouble()) {
             suggestion.line = lineValue.toInt();
         } else if (lineValue.isString()) {
@@ -1032,7 +1039,14 @@ ChatWidget::ChatWidget(QWidget *parent)
         // is the one tool whose payload is prose rather than arguments, so its
         // card carries the question instead of a JSON blob of it.
         if (request.toolName == u"question"_s) {
-            toolWidget->setRunningInput(request.questionText.isEmpty() ? request.summary : request.questionText);
+            QString asked = request.questionText;
+            if (asked.trimmed().isEmpty()) {
+                const QJsonDocument doc = QJsonDocument::fromJson(request.details.toUtf8());
+                if (doc.isObject()) {
+                    asked = questionTextFromToolArguments(doc.object());
+                }
+            }
+            toolWidget->setRunningInput(asked.isEmpty() ? request.summary : asked);
         } else {
             toolWidget->setRunningInput(request.details);
         }
@@ -1324,6 +1338,24 @@ ChatWidget::ChatWidget(QWidget *parent)
         m_prompt->setEnabled(!m_approvalPending());
         updateSendButtonState();
         Q_UNUSED(status)
+    });
+
+    // Drive the status strip from the stable turn vocabulary. Tool/ACP signals
+    // still provide the specific activity text; these are the phases where no
+    // other signal has described what the turn is waiting on.
+    connect(&m_agent, &AgentLoop::turnStateChanged, this, [this](const QString &turnId, const QString &stateId) {
+        if (turnId != m_agent.turnId()) {
+            return; // a late event from a turn the user already left
+        }
+        using TurnState = AgentLoop::TurnState;
+        if (stateId == AgentLoop::turnStateId(TurnState::Preparing)) {
+            m_turnStatus->setActivity(i18n("Starting…"));
+        } else if (stateId == AgentLoop::turnStateId(TurnState::AwaitingModel)) {
+            m_turnStatus->setActivity(i18n("Waiting for the model"));
+        } else if (stateId == AgentLoop::turnStateId(TurnState::Cancelling)) {
+            m_turnStatus->setActivity(i18n("Stopping…"));
+        }
+        // Terminal states settle the strip through turnFinished below.
     });
 
     // The question tool stops the turn until the user answers, so its card goes
@@ -5391,8 +5423,40 @@ void ChatWidget::showQuestionCard(const PermissionRequest &request)
         return;
     }
     auto *card = new QuestionWidget(request.toolCallId, m_intentDock);
-    const QString questionText = request.questionText.trimmed().isEmpty() ? request.summary : request.questionText;
-    card->setQuestion(questionText, request.questionOptions, request.allowFreeform);
+    QJsonObject args;
+    const QJsonDocument argsDoc = QJsonDocument::fromJson(request.details.toUtf8());
+    if (argsDoc.isObject()) {
+        args = argsDoc.object();
+    }
+    QString questionText = request.questionText.trimmed();
+    if (questionText.isEmpty() && !args.isEmpty()) {
+        questionText = questionTextFromToolArguments(args);
+    }
+    // ACP can carry the question as plain text rather than JSON. Never render
+    // a card whose only content is the literal tool name.
+    if (questionText.isEmpty() && !request.details.trimmed().isEmpty()
+        && !request.details.trimmed().startsWith(u'{')) {
+        questionText = request.details.trimmed();
+    }
+    if (questionText.isEmpty() && !request.summary.isEmpty()
+        && request.summary != request.toolName && request.summary != request.originalToolName) {
+        questionText = request.summary;
+    }
+    if (questionText.isEmpty()) {
+        questionText = i18n("The agent is waiting for your answer.");
+    }
+    QStringList options = request.questionOptions;
+    if (options.isEmpty() && !args.isEmpty()) {
+        options = questionOptionsFromToolArguments(args);
+    }
+    bool allowFreeform = request.allowFreeform;
+    if (options.isEmpty()) {
+        // A card with neither chips nor a text box cannot be answered.
+        allowFreeform = true;
+    } else if (args.contains(u"allow_freeform"_s) || args.contains(u"allowFreeform"_s)) {
+        allowFreeform = questionAllowFreeformFromToolArguments(args, request.allowFreeform);
+    }
+    card->setQuestion(questionText, options, allowFreeform);
     connect(card, &QuestionWidget::answered, this, [this, card](const QString &, const QString &answer) {
         // The agent resumes from the answer: the tool result *is* the user's
         // words, so there is nothing else to hand back.
@@ -5677,8 +5741,9 @@ void ChatWidget::showCheckpointMenuFor(const CheckpointInfo &info)
                                                                    i18n("Restore checkpoint"),
                                                                    i18n("Restore the workspace to checkpoint %1?\n\n"
                                                                        "Files changed since then will be overwritten and files "
-                                                                       "added afterwards will be removed. Your own git "
-                                                                       "history is not touched.")
+                                                                       "added afterwards will be removed. A \"Before restoring\" "
+                                                                       "checkpoint is saved first, so this step can be undone. "
+                                                                       "Your own git history is not touched.")
                                                                        .arg(info.shortId),
                                                                    QMessageBox::Yes | QMessageBox::No,
                                                                    QMessageBox::No);
@@ -6251,7 +6316,7 @@ void ChatWidget::restoreHistoricalTool(const QString &toolCallId, const QString 
     // setFinished clears the running input, so the question is folded into the
     // finished body instead.
     if (canonicalName == u"question"_s || toolName == u"question"_s) {
-        const QString asked = argsObj.value(u"question"_s).toString().trimmed();
+        const QString asked = questionTextFromToolArguments(argsObj);
         if (!asked.isEmpty()) {
             if (result.output.trimmed().isEmpty()) {
                 result.output = asked;
@@ -6403,9 +6468,16 @@ void ChatWidget::rebuildTranscript()
                 restoredArgs = restoredDoc.object();
             }
             Suggestion suggestion;
-            suggestion.text = restoredArgs.value(u"suggestion"_s).toString();
-            suggestion.path = restoredArgs.value(u"path"_s).toString().trimmed();
-            const QJsonValue restoredLine = restoredArgs.value(u"line"_s);
+            suggestion.text = suggestionTextFromToolArguments(restoredArgs);
+            suggestion.path = firstStringToolArgument(
+                restoredArgs, {u"path"_s, u"file_path"_s, u"filePath"_s, u"file"_s, u"target"_s, u"uri"_s});
+            if (suggestion.path.startsWith(u"file://"_s)) {
+                suggestion.path = QUrl(suggestion.path).toLocalFile();
+            }
+            const QJsonValue restoredLine = restoredArgs.contains(u"line"_s)
+                ? restoredArgs.value(u"line"_s)
+                : (restoredArgs.contains(u"start_line"_s) ? restoredArgs.value(u"start_line"_s)
+                                                          : restoredArgs.value(u"startLine"_s));
             if (restoredLine.isDouble()) {
                 suggestion.line = restoredLine.toInt();
             } else if (restoredLine.isString()) {

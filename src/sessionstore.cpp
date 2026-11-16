@@ -213,6 +213,7 @@ static QByteArray sessionDataToJson(const SessionStore::SessionData &data)
     obj[u"currentPlan"_s] = data.currentPlan;
     obj[u"planShown"_s] = data.planShown;
     obj[u"currentAssistant"_s] = data.currentAssistant;
+    obj[u"lastTurnId"_s] = data.lastTurnId;
     obj[u"stateEpoch"_s] = static_cast<qint64>(data.stateEpoch);
     obj[u"actionSignatures"_s] = stringListToJson(data.actionSignatures);
     obj[u"actionRepeatCounts"_s] = hashToJson(data.actionRepeatCounts);
@@ -242,6 +243,7 @@ static SessionStore::SessionData sessionDataFromJson(const QByteArray &payload)
     data.currentPlan = obj[u"currentPlan"_s].toArray();
     data.planShown = obj[u"planShown"_s].toBool();
     data.currentAssistant = obj[u"currentAssistant"_s].toString();
+    data.lastTurnId = obj[u"lastTurnId"_s].toString();
     // The epoch counts up, so a negative value is nonsense. Casting it to an
     // unsigned type would turn it into a huge number.
     data.stateEpoch = static_cast<quint64>(qMax<qint64>(0, obj[u"stateEpoch"_s].toInteger()));
@@ -256,7 +258,8 @@ static SessionStore::SessionData sessionDataFromJson(const QByteArray &payload)
     data.acpSessionId = obj[u"acpSessionId"_s].toString();
     data.workspace = obj[u"workspace"_s].toString();
 
-    // Version 2 adds the version field - no data migration needed, just ensure version is set
+    // Version 2 added the version field, version 3 the last turn id. Both are
+    // additive: an older payload simply leaves the new field empty.
     if (data.version < SessionStore::CURRENT_VERSION) {
         data.version = SessionStore::CURRENT_VERSION;
     }
@@ -308,6 +311,11 @@ static void repairBadConversationTitles(const QSqlDatabase &db)
 
 static const QString ACTIVE_CONVERSATION_KEY = u"active_conversation"_s;
 static const QString LEGACY_IMPORT_KEY = u"legacy_kconfig_imported"_s;
+static const QString SCHEMA_VERSION_KEY = u"schema_version"_s;
+
+// Incremented whenever a statement below changes the on-disk shape. The
+// migration step for each version lives in migrateSchema().
+static constexpr int CURRENT_SCHEMA_VERSION = 1;
 
 // Guards the database handle and every read-modify-write sequence below.
 // Recursive because the public helpers call each other (save() -> saveConversation(),
@@ -332,13 +340,77 @@ static QString databaseFilePath()
     return dataDir + u"/kateai/sessions.sqlite"_s;
 }
 
+// `PRAGMA quick_check` walks the b-trees without the full integrity-check
+// cost. It catches the damage that makes a SQLite file unusable (truncated
+// pages, a broken freelist, an unreadable schema), which otherwise surfaced
+// only as "no history" on every start.
+static bool databaseIsHealthy(const QSqlDatabase &db, QString *detail)
+{
+    QSqlQuery check(db);
+    if (!check.exec(u"PRAGMA quick_check"_s)) {
+        if (detail) {
+            *detail = check.lastError().text();
+        }
+        return false;
+    }
+    QStringList rows;
+    while (check.next()) {
+        rows.append(check.value(0).toString());
+    }
+    if (rows.size() == 1 && rows.first().compare(u"ok"_s, Qt::CaseInsensitive) == 0) {
+        return true;
+    }
+    if (detail) {
+        *detail = rows.join(u"; "_s);
+    }
+    // A successful quick_check always reports one row, "ok". No rows means the
+    // check did not actually run, which is not evidence of a healthy database.
+    return false;
+}
+
+// Moves an unreadable database out of the way instead of deleting it. The
+// data may still be recoverable with sqlite3, and the user deserves the
+// chance; the application starts with an empty history rather than failing
+// forever.
+static void quarantineDatabase(const QString &path)
+{
+    if (!QFileInfo::exists(path)) {
+        return;
+    }
+    const QString suffix = QDateTime::currentDateTimeUtc().toString(u"yyyyMMdd-hhmmss"_s);
+    const QString target = path + u".corrupt-"_s + suffix;
+    bool moved = QFile::rename(path, target);
+    if (!moved) {
+        // Cross-device rename is not expected (same directory), but a
+        // read-only file can still refuse. Copy then remove as a fallback.
+        moved = QFile::copy(path, target) && QFile::remove(path);
+    }
+    if (moved) {
+        // Only drop the sidecars once the main file is safely moved; deleting
+        // them after a failed move could damage a database another process is
+        // still using.
+        QFile::remove(path + u"-wal"_s);
+        QFile::remove(path + u"-shm"_s);
+        qWarning() << "KateAI: the session database was unreadable; moved it to" << target;
+    } else {
+        qWarning() << "KateAI: could not move the unreadable session database" << path;
+    }
+}
+
 // WAL keeps readers from blocking on a write, which is what makes restoring the
 // last session fast even while a request is streaming in.
 static bool applySchema(QSqlDatabase &db)
 {
     QSqlQuery pragmas(db);
+    // FULL makes a committed conversation durable across a power loss. The
+    // store writes a few times per turn, not on a hot path, so the extra
+    // fsync is worth it. The earlier NORMAL setting could lose the last
+    // transaction after an unclean shutdown, which looked like messages
+    // vanishing from the transcript.
     pragmas.exec(u"PRAGMA journal_mode=WAL"_s);
-    pragmas.exec(u"PRAGMA synchronous=NORMAL"_s);
+    pragmas.exec(u"PRAGMA synchronous=FULL"_s);
+    pragmas.exec(u"PRAGMA busy_timeout=5000"_s);
+    pragmas.exec(u"PRAGMA foreign_keys=ON"_s);
 
     static const char *const statements[] = {
         "CREATE TABLE IF NOT EXISTS meta ("
@@ -363,6 +435,35 @@ static bool applySchema(QSqlDatabase &db)
         QSqlQuery query(db);
         if (!query.exec(QString::fromLatin1(statement))) {
             qWarning() << "KateAI: cannot create the session database schema:" << query.lastError().text();
+            return false;
+        }
+    }
+
+    // Versioned migration. Version 1 is the initial schema; later versions add
+    // their statements here and bump CURRENT_SCHEMA_VERSION. A database from a
+    // newer KateAI is left untouched (only a warning is logged) so a downgrade
+    // cannot corrupt data it does not understand.
+    QSqlQuery readVersion(db);
+    readVersion.prepare(u"SELECT value FROM meta WHERE key = ?"_s);
+    readVersion.addBindValue(SCHEMA_VERSION_KEY);
+    int storedVersion = 0;
+    if (readVersion.exec() && readVersion.next()) {
+        storedVersion = readVersion.value(0).toInt();
+    }
+    if (storedVersion > CURRENT_SCHEMA_VERSION) {
+        qWarning() << "KateAI: the session database schema is newer than this build"
+                   << storedVersion << ">" << CURRENT_SCHEMA_VERSION << "- leaving it unchanged";
+        return true;
+    }
+    if (storedVersion < CURRENT_SCHEMA_VERSION) {
+        QSqlQuery writeVersion(db);
+        writeVersion.prepare(u"INSERT INTO meta (key, value) VALUES (?, ?) "
+                             "ON CONFLICT(key) DO UPDATE SET value = excluded.value"_s);
+        writeVersion.addBindValue(SCHEMA_VERSION_KEY);
+        writeVersion.addBindValue(QString::number(CURRENT_SCHEMA_VERSION));
+        if (!writeVersion.exec()) {
+            qWarning() << "KateAI: cannot record the session schema version:"
+                       << writeVersion.lastError().text();
             return false;
         }
     }
@@ -425,21 +526,53 @@ static QSqlDatabase openStore(bool *ok)
                                        .arg(++connectionCounter);
     QString error;
 
-    {
-        // The handle must be destroyed before removeDatabase() runs.
-        QSqlDatabase db = QSqlDatabase::addDatabase(u"QSQLITE"_s, connectionName);
-        db.setDatabaseName(path);
-        if (!db.open()) {
-            error = db.lastError().text();
-        } else if (!applySchema(db)) {
-            error = u"cannot create the schema"_s;
-            db.close();
-        }
-    }
+    // Open, verify and, when the file is damaged, quarantine it and start over
+    // once. Without this a single bad page made every later start report "no
+    // history" while the file sat there blocking the store.
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        error.clear();
+        bool corrupt = false;
+        {
+            // The handle must be destroyed before removeDatabase() runs.
+            QSqlDatabase db = QSqlDatabase::addDatabase(u"QSQLITE"_s, connectionName);
+            db.setDatabaseName(path);
+            if (!db.open()) {
+                error = db.lastError().text();
+            } else {
+                // Wait for a competing writer before probing. Without this a
+                // second Kate process could make quick_check fail with "busy"
+                // and, before the fix, get the healthy database quarantined.
+                QSqlQuery timeout(db);
+                timeout.exec(u"PRAGMA busy_timeout=5000"_s);
 
-    if (!error.isEmpty()) {
-        qWarning() << "KateAI: cannot open the session database" << path << error;
+                QString damage;
+                if (!databaseIsHealthy(db, &damage)) {
+                    qWarning() << "KateAI: session database failed its integrity check:"
+                               << (damage.isEmpty() ? QStringLiteral("unknown damage") : damage);
+                    // Contention is transient and must never move the file.
+                    corrupt = !damage.contains(u"locked"_s, Qt::CaseInsensitive)
+                        && !damage.contains(u"busy"_s, Qt::CaseInsensitive);
+                    db.close();
+                    error = u"integrity check failed"_s;
+                } else if (!applySchema(db)) {
+                    // A schema failure can be a permission or lock problem;
+                    // only a demonstrably damaged file is quarantined.
+                    error = u"cannot create the schema"_s;
+                    db.close();
+                }
+            }
+        }
+
+        if (error.isEmpty()) {
+            break;
+        }
+
         QSqlDatabase::removeDatabase(connectionName);
+        if (attempt == 0 && corrupt) {
+            quarantineDatabase(path);
+            continue;
+        }
+        qWarning() << "KateAI: cannot open the session database" << path << error;
         return {};
     }
 

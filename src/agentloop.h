@@ -42,6 +42,39 @@ public:
     explicit AgentLoop(QObject *parent = nullptr);
         ~AgentLoop() override;
 
+    // Explicit lifecycle of a user turn. The internal state machine has more
+    // detail; this is the stable, UI-facing vocabulary. A turn is Prepared
+    // when the user message is accepted, Running while the loop schedules a
+    // model step, AwaitingModel while the provider request is in flight,
+    // AwaitingTool while tools run, AwaitingPermission while the user has to
+    // decide, and one of the terminal states afterwards.
+    enum class TurnState {
+        Idle,
+        Preparing,
+        Running,
+        AwaitingModel,
+        AwaitingTool,
+        AwaitingPermission,
+        Cancelling,
+        Completed,
+        Failed,
+        Interrupted,
+    };
+    Q_ENUM(TurnState)
+
+    // Stable machine-readable id for logging and tests (for example
+    // "awaiting-model"). Never translated.
+    static QString turnStateId(TurnState state);
+    // Unique identifier of the current (or most recent) turn. A new id is
+    // issued for every start(); async results from an older id must never
+    // settle the newer turn.
+    QString turnId() const
+    {
+        return m_turnId;
+    }
+    TurnState turnState() const;
+    static bool isTerminalTurnState(TurnState state);
+
     void setSettings(const Settings &settings);
     void setWorkspace(const QString &workspace);
     QString workspace() const { return m_workspace; }
@@ -202,6 +235,9 @@ Q_SIGNALS:
     void statusChanged(const QString &status);
     void activityUpdated(const QString &text);
     void failed(const QString &error);
+    // The turn state changed. Both arguments are stable ids; the turn id lets
+    // a consumer discard an event from a turn it no longer displays.
+    void turnStateChanged(const QString &turnId, const QString &stateId);
     void turnFinished();
     void modelsReceived(Provider provider, const QStringList &models);
     void modelsFailed(Provider provider, const QString &error);
@@ -403,6 +439,12 @@ LlmClient m_client;
 
     bool m_busy = false;
     State m_state = State::Idle;
+    // Lifecycle: the id of the turn the UI is currently describing, and the
+    // terminal state of the most recent turn (Idle until one ends).
+    QString m_turnId;
+    TurnState m_lastTurnState = TurnState::Idle;
+    void setTurnState(TurnState state, const QString &reason = QString());
+    bool m_terminalSignalled = true;
     // Incremented when a turn starts or is aborted. Async work captures it so
     // a result that lands after the turn changed cannot settle the new turn.
     quint64 m_turnGeneration = 0;

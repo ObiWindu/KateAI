@@ -4,6 +4,7 @@
  */
 
 #include "settings.h"
+#include "credentialstore.h"
 #include "websearch.h"
 
 #include <KConfigGroup>
@@ -23,17 +24,40 @@ static KConfigGroup group()
 
 Settings SettingsStore::load()
 {
+    // Move any pre-0.4.0 plaintext keys into the secure store before reading.
+    CredentialStore::migrateLegacyKateConfig();
     const KConfigGroup g = group();
+
+    // Versioned configuration migration. v0 -> v1 relocated API keys from this
+    // plaintext file into CredentialStore (the call above); no setting changes
+    // shape. A config written by a newer KateAI is read on a best-effort basis
+    // and the unknown keys are ignored rather than rewritten.
+    const int storedVersion = g.readEntry(u"ConfigVersion"_s, 0);
+    if (storedVersion > configVersion()) {
+        qWarning() << "KateAI: the configuration was written by a newer release"
+                   << storedVersion << ">" << configVersion();
+    }
     Settings s;
     s.provider = providerFromId(g.readEntry(u"Provider"_s, providerId(Provider::Grok)));
-    s.grokApiKey = g.readEntry(u"GrokApiKey"_s, QString());
-    s.openaiApiKey = g.readEntry(u"OpenAIApiKey"_s, QString());
-    s.openrouterApiKey = g.readEntry(u"OpenRouterApiKey"_s, QString());
-    s.deepseekApiKey = g.readEntry(u"DeepSeekApiKey"_s, QString());
-    s.openaiCompatibleApiKey = g.readEntry(u"OpenAICompatibleApiKey"_s, QString());
-    s.claudeCompatibleApiKey = g.readEntry(u"ClaudeCompatibleApiKey"_s, QString());
-    s.kiloApiKey = g.readEntry(u"KiloApiKey"_s, QString());
-    s.acpApiKey = g.readEntry(u"AcpApiKey"_s, QString());
+    // Credentials live in the secure store (KWallet or owner-only fallback).
+    // Fall back to the legacy plaintext entry so a not-yet-migrated install
+    // keeps working; migration clears the legacy copy on the next save.
+    auto cred = [](const QString &id, const QString &legacyKey, const KConfigGroup &grp) {
+        bool ok = false;
+        const QString v = CredentialStore::load(id, &ok);
+        if (ok && !v.isEmpty()) {
+            return v;
+        }
+        return grp.readEntry(legacyKey, QString());
+    };
+    s.grokApiKey = cred(u"grok-api-key"_s, u"GrokApiKey"_s, g);
+    s.openaiApiKey = cred(u"openai-api-key"_s, u"OpenAIApiKey"_s, g);
+    s.openrouterApiKey = cred(u"openrouter-api-key"_s, u"OpenRouterApiKey"_s, g);
+    s.deepseekApiKey = cred(u"deepseek-api-key"_s, u"DeepSeekApiKey"_s, g);
+    s.openaiCompatibleApiKey = cred(u"openai-compatible-api-key"_s, u"OpenAICompatibleApiKey"_s, g);
+    s.claudeCompatibleApiKey = cred(u"claude-compatible-api-key"_s, u"ClaudeCompatibleApiKey"_s, g);
+    s.kiloApiKey = cred(u"kilo-api-key"_s, u"KiloApiKey"_s, g);
+    s.acpApiKey = cred(u"acp-api-key"_s, u"AcpApiKey"_s, g);
     s.acpInstalledAgents = g.readEntry(u"AcpInstalledAgents"_s, QString());
     s.acpAgentModels = g.readEntry(u"AcpAgentModels"_s, QString());
     // Models are read from the provider, not hard-coded here; an empty entry
@@ -47,7 +71,7 @@ Settings SettingsStore::load()
     s.kiloModel = g.readEntry(u"KiloModel"_s, QString());
     s.acpModel = g.readEntry(u"AcpModel"_s, QString());
     s.acpEffort = g.readEntry(u"AcpEffort"_s, QString());
-    s.opencodeApiKey = g.readEntry(u"OpenCodeApiKey"_s, QString());
+    s.opencodeApiKey = cred(u"opencode-api-key"_s, u"OpenCodeApiKey"_s, g);
     s.opencodeModel = g.readEntry(u"OpenCodeModel"_s, QString());
     s.opencodeUrl = g.readEntry(u"OpenCodeUrl"_s, u"https://opencode.ai/zen/v1"_s);
     s.deepseekUrl = g.readEntry(u"DeepSeekUrl"_s, u"https://api.deepseek.com"_s);
@@ -137,17 +161,17 @@ Settings SettingsStore::load()
     s.mcpEnabled = g.readEntry(u"McpEnabled"_s, true);
     s.mcpAutoConnect = g.readEntry(u"McpAutoConnect"_s, true);
     s.mcpTimeoutMs = g.readEntry(u"McpTimeoutMs"_s, 60000);
-        // Web search
-        s.webSearchProvider = g.readEntry(u"WebSearchProvider"_s, QStringLiteral("duckduckgo"));
+    // Web search
+    s.webSearchProvider = g.readEntry(u"WebSearchProvider"_s, QStringLiteral("duckduckgo"));
     // An unknown value would silently disable the web search, because the
     // provider falls back to "disabled" for it.
     if (WebSearch::providerFromId(s.webSearchProvider) == WebSearch::Provider::Disabled) {
         s.webSearchProvider = QStringLiteral("duckduckgo");
     }
-        s.webSearchApiKey = g.readEntry(u"WebSearchApiKey"_s);
-        s.webSearchEndpoint = g.readEntry(u"WebSearchEndpoint"_s);
-        s.webSearchMaxResults = g.readEntry(u"WebSearchMaxResults"_s, 5);
-        s.webSearchTimeoutMs = g.readEntry(u"WebSearchTimeoutMs"_s, 20000);
+    s.webSearchApiKey = cred(u"web-search-api-key"_s, u"WebSearchApiKey"_s, g);
+    s.webSearchEndpoint = g.readEntry(u"WebSearchEndpoint"_s);
+    s.webSearchMaxResults = g.readEntry(u"WebSearchMaxResults"_s, 5);
+    s.webSearchTimeoutMs = g.readEntry(u"WebSearchTimeoutMs"_s, 20000);
     // Checkpoints
     s.checkpointsEnabled = g.readEntry(u"CheckpointsEnabled"_s, true);
     s.checkpointRetention = g.readEntry(u"CheckpointRetention"_s, 20);
@@ -307,17 +331,36 @@ void SettingsStore::save(const Settings &settings)
 {
     KConfigGroup g = group();
     g.writeEntry(u"Provider"_s, providerId(settings.provider));
-    g.writeEntry(u"GrokApiKey"_s, settings.grokApiKey);
-    g.writeEntry(u"OpenAIApiKey"_s, settings.openaiApiKey);
-    g.writeEntry(u"OpenRouterApiKey"_s, settings.openrouterApiKey);
-    g.writeEntry(u"DeepSeekApiKey"_s, settings.deepseekApiKey);
-    g.writeEntry(u"OpenAICompatibleApiKey"_s, settings.openaiCompatibleApiKey);
-    g.writeEntry(u"ClaudeCompatibleApiKey"_s, settings.claudeCompatibleApiKey);
-    g.writeEntry(u"KiloApiKey"_s, settings.kiloApiKey);
-    g.writeEntry(u"AcpApiKey"_s, settings.acpApiKey);
+    // Credentials are persisted through the secure store, never in the main
+    // config file. Clear any legacy plaintext copy at the same time. A failed
+    // store is reported: silently dropping a key would look like the user's
+    // provider stopped authenticating for no reason.
+    const auto storeCredential = [](const QString &id, const QString &secret) {
+        QString error;
+        if (!CredentialStore::store(id, secret, &error)) {
+            qWarning() << "KateAI: could not store credential" << id << ":" << error;
+        }
+    };
+    storeCredential(u"grok-api-key"_s, settings.grokApiKey);
+    storeCredential(u"openai-api-key"_s, settings.openaiApiKey);
+    storeCredential(u"openrouter-api-key"_s, settings.openrouterApiKey);
+    storeCredential(u"deepseek-api-key"_s, settings.deepseekApiKey);
+    storeCredential(u"openai-compatible-api-key"_s, settings.openaiCompatibleApiKey);
+    storeCredential(u"claude-compatible-api-key"_s, settings.claudeCompatibleApiKey);
+    storeCredential(u"kilo-api-key"_s, settings.kiloApiKey);
+    storeCredential(u"acp-api-key"_s, settings.acpApiKey);
+    g.deleteEntry(u"GrokApiKey"_s);
+    g.deleteEntry(u"OpenAIApiKey"_s);
+    g.deleteEntry(u"OpenRouterApiKey"_s);
+    g.deleteEntry(u"DeepSeekApiKey"_s);
+    g.deleteEntry(u"OpenAICompatibleApiKey"_s);
+    g.deleteEntry(u"ClaudeCompatibleApiKey"_s);
+    g.deleteEntry(u"KiloApiKey"_s);
+    g.deleteEntry(u"AcpApiKey"_s);
     g.writeEntry(u"AcpInstalledAgents"_s, settings.acpInstalledAgents);
     g.writeEntry(u"AcpAgentModels"_s, settings.acpAgentModels);
-    g.writeEntry(u"OpenCodeApiKey"_s, settings.opencodeApiKey);
+    storeCredential(u"opencode-api-key"_s, settings.opencodeApiKey);
+    g.deleteEntry(u"OpenCodeApiKey"_s);
     g.writeEntry(u"OpenCodeModel"_s, settings.opencodeModel);
     g.writeEntry(u"OpenCodeUrl"_s, settings.opencodeUrl);
     g.writeEntry(u"GrokModel"_s, settings.grokModel);
@@ -399,11 +442,12 @@ void SettingsStore::save(const Settings &settings)
     g.writeEntry(u"McpEnabled"_s, settings.mcpEnabled);
     g.writeEntry(u"McpAutoConnect"_s, settings.mcpAutoConnect);
     g.writeEntry(u"McpTimeoutMs"_s, settings.mcpTimeoutMs);
-        g.writeEntry(u"WebSearchProvider"_s, settings.webSearchProvider);
-        g.writeEntry(u"WebSearchApiKey"_s, settings.webSearchApiKey);
-        g.writeEntry(u"WebSearchEndpoint"_s, settings.webSearchEndpoint);
-        g.writeEntry(u"WebSearchMaxResults"_s, settings.webSearchMaxResults);
-        g.writeEntry(u"WebSearchTimeoutMs"_s, settings.webSearchTimeoutMs);
+    g.writeEntry(u"WebSearchProvider"_s, settings.webSearchProvider);
+    storeCredential(u"web-search-api-key"_s, settings.webSearchApiKey);
+    g.deleteEntry(u"WebSearchApiKey"_s);
+    g.writeEntry(u"WebSearchEndpoint"_s, settings.webSearchEndpoint);
+    g.writeEntry(u"WebSearchMaxResults"_s, settings.webSearchMaxResults);
+    g.writeEntry(u"WebSearchTimeoutMs"_s, settings.webSearchTimeoutMs);
     // Checkpoints
     g.writeEntry(u"CheckpointsEnabled"_s, settings.checkpointsEnabled);
     g.writeEntry(u"CheckpointRetention"_s, settings.checkpointRetention);
@@ -447,7 +491,8 @@ void SettingsStore::save(const Settings &settings)
     g.writeEntry(u"CompressOldMessages"_s, settings.compressOldMessages);
     g.writeEntry(u"SmartContextTruncation"_s, settings.smartContextTruncation);
     g.writeEntry(u"CompressionThreshold"_s, settings.compressionThreshold);
-    
+    g.writeEntry(u"ConfigVersion"_s, 1);
+
     g.sync();
 
     // The API keys live in this file in plain text. The file is created with
