@@ -10,11 +10,16 @@
 
 #include <KLocalizedString>
 
+#include <QColor>
 #include <QHBoxLayout>
 #include <QLabel>
+#include <QPalette>
 #include <QPushButton>
+#include <QResizeEvent>
 #include <QTextBrowser>
+#include <QTimer>
 #include <QVBoxLayout>
+#include <QtMath>
 
 using namespace Qt::Literals::StringLiterals;
 
@@ -101,9 +106,9 @@ void SuggestionWidget::setSuggestion(const QString &text, const QString &path, i
 {
     m_path = path;
     m_line = line;
+    m_text = text;
     m_failed = false;
     m_running = false;
-    m_body->setDocument(makeMarkdownDocument(closeMarkdown(text)));
     m_body->setVisible(true);
     applyStyle();
     updateHeader();
@@ -124,7 +129,7 @@ void SuggestionWidget::setError(const QString &message)
 {
     m_failed = true;
     m_running = false;
-    m_body->setDocument(makeMarkdownDocument(closeMarkdown(message)));
+    m_text = message;
     m_body->setVisible(true);
     // A suggestion that never arrived cannot be accepted or dismissed.
     m_accept->setVisible(false);
@@ -166,6 +171,27 @@ void SuggestionWidget::updateHeader()
         return;
     }
     m_status->setText(i18n("posted"));
+}
+
+void SuggestionWidget::renderBody()
+{
+    if (!m_body) {
+        return;
+    }
+    m_body->setDocument(makeMarkdownDocument(closeMarkdown(m_text), ChatTheme::messageCss()));
+    QPalette palette = m_body->palette();
+    palette.setColor(QPalette::Base, Qt::transparent);
+    palette.setColor(QPalette::Text, QColor(ChatTheme::textPrimary()));
+    m_body->setPalette(palette);
+    m_body->viewport()->setAutoFillBackground(false);
+}
+
+void SuggestionWidget::resizeEvent(QResizeEvent *event)
+{
+    QWidget::resizeEvent(event);
+    QTimer::singleShot(0, this, [this] {
+        reflowNow();
+    });
 }
 
 void SuggestionWidget::applyStyle()
@@ -215,15 +241,24 @@ void SuggestionWidget::applyStyle()
     m_body->setStyleSheet(
         QStringLiteral("QTextBrowser { background: transparent; border: none; color: %1; font-size: 11px; padding: 0; }")
             .arg(ChatTheme::textPrimary()));
+    renderBody();
+    reflowNow();
 }
 
 void SuggestionWidget::reflowNow()
 {
-    if (m_body->isVisible()) {
-        m_body->setMinimumHeight(0);
-        m_body->document()->setTextWidth(m_body->viewport()->width());
-        m_body->setMinimumHeight(m_body->document()->size().height());
+    if (!m_body || !m_body->isVisible()) {
+        return;
     }
+    const int width = m_body->viewport()->width();
+    if (width <= 1) {
+        return;
+    }
+    m_body->setMinimumHeight(0);
+    m_body->setMaximumHeight(QWIDGETSIZE_MAX);
+    m_body->document()->setTextWidth(width);
+    const int height = qCeil(m_body->document()->size().height());
+    m_body->setFixedHeight(qMax(1, height + 2));
     updateGeometry();
 }
 

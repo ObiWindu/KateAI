@@ -11,6 +11,7 @@
 #include <QApplication>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QUrl>
@@ -60,6 +61,12 @@ private Q_SLOTS:
     void testBufferWriteRefusesUserEditAfterAgentEdit();
     void testResetBufferedEditsRevertsProtection();
     void testRejectRestoresClosedFileOnDisk();
+    void testConditionalWriteRejectsStaleContents();
+    void testConditionalWriteAcceptsMatchingContents();
+    void testCreateOnlyWriteRefusesExistingFile();
+    void testCreateOnlyWriteCreatesFile();
+    void testCreateOnlyWriteRefusesOpenBuffer();
+    void testWritePreservesFilePermissions();
 
 private:
     QTemporaryDir m_dir;
@@ -265,6 +272,113 @@ void TestDocumentBridge::testRejectRestoresClosedFileOnDisk()
     // A path Kate does not have open restores by writing the file; there is
     // no buffer to put the content into.
     QCOMPARE(readFile(closedPath), u"restored\n"_s);
+}
+
+void TestDocumentBridge::testConditionalWriteRejectsStaleContents()
+{
+    const QString path = QDir(m_dir.path()).filePath(u"stale.txt"_s);
+    {
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        file.write("before\n");
+    }
+
+    DiskDocumentBridge bridge;
+    QString read;
+    QVERIFY(bridge.readDocument(path, &read));
+    QCOMPARE(read, u"before\n"_s);
+
+    // Someone else changes the file between the tool's read and its write.
+    {
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly | QIODevice::Truncate));
+        file.write("newer content\n");
+    }
+
+    QString error;
+    QVERIFY(!bridge.writeDocumentIfUnchanged(path, read, u"agent edit\n"_s, &error));
+    QVERIFY(!error.isEmpty());
+    // The newer content survived; a stale write must never clobber it.
+    QCOMPARE(readFile(path), u"newer content\n"_s);
+}
+
+void TestDocumentBridge::testConditionalWriteAcceptsMatchingContents()
+{
+    const QString path = QDir(m_dir.path()).filePath(u"fresh.txt"_s);
+    {
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        file.write("current\n");
+    }
+
+    DiskDocumentBridge bridge;
+    QString error;
+    QVERIFY(bridge.writeDocumentIfUnchanged(path, u"current\n"_s, u"agent edit\n"_s, &error));
+    QVERIFY2(error.isEmpty(), qPrintable(error));
+    QCOMPARE(readFile(path), u"agent edit\n"_s);
+}
+
+void TestDocumentBridge::testCreateOnlyWriteRefusesExistingFile()
+{
+    const QString path = QDir(m_dir.path()).filePath(u"existing.txt"_s);
+    {
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        file.write("already here\n");
+    }
+
+    DiskDocumentBridge bridge;
+    QString error;
+    QVERIFY(!bridge.writeDocumentIfMissing(path, u"patch content\n"_s, &error));
+    QVERIFY(!error.isEmpty());
+    QCOMPARE(readFile(path), u"already here\n"_s);
+}
+
+void TestDocumentBridge::testCreateOnlyWriteCreatesFile()
+{
+    const QString path = QDir(m_dir.path()).filePath(u"created.txt"_s);
+    QVERIFY(!QFileInfo::exists(path));
+
+    DiskDocumentBridge bridge;
+    QString error;
+    QVERIFY2(bridge.writeDocumentIfMissing(path, u"created by patch\n"_s, &error), qPrintable(error));
+    QCOMPARE(readFile(path), u"created by patch\n"_s);
+}
+
+void TestDocumentBridge::testCreateOnlyWriteRefusesOpenBuffer()
+{
+    // m_path is open in the editor; creating it must not replace its buffer.
+    const QString before = m_document->text();
+    DiskDocumentBridge bridge;
+    QString error;
+    QVERIFY(!bridge.writeDocumentIfMissing(m_path, u"replacement\n"_s, &error));
+    QVERIFY(!error.isEmpty());
+    QCOMPARE(m_document->text(), before);
+}
+
+void TestDocumentBridge::testWritePreservesFilePermissions()
+{
+#ifdef Q_OS_UNIX
+    const QString path = QDir(m_dir.path()).filePath(u"script.sh"_s);
+    {
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        file.write("#!/bin/sh\n");
+    }
+    const auto permissions = QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner
+        | QFileDevice::ReadGroup;
+    QVERIFY(QFile::setPermissions(path, permissions));
+    const auto before = QFile::permissions(path);
+
+    DiskDocumentBridge bridge;
+    QString error;
+    QVERIFY(bridge.writeDocument(path, u"#!/bin/sh\necho updated\n"_s, &error));
+    QCOMPARE(readFile(path), u"#!/bin/sh\necho updated\n"_s);
+    // Replacing the file through QSaveFile must not reset it to 0600/0644.
+    QCOMPARE(QFile::permissions(path), before);
+#else
+    QSKIP("POSIX permissions are not meaningful on this platform");
+#endif
 }
 
 } // namespace KateAi

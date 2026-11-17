@@ -629,16 +629,8 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     m_maxGraphEdges->setRange(10, 500);
     agentForm->addRow(i18n("Max project graph edges:"), m_maxGraphEdges);
 
-    m_compressGraph = new QCheckBox(i18n("Compress project graph information"), agentWidget);
+    m_compressGraph = new QCheckBox(i18n("Include project graph summary in the system prompt"), agentWidget);
     agentForm->addRow(m_compressGraph);
-
-    m_includeFileContents = new QCheckBox(i18n("Include file contents in project graph"), agentWidget);
-    agentForm->addRow(m_includeFileContents);
-
-    m_maxFileContentLength = new QSpinBox(agentWidget);
-    m_maxFileContentLength->setRange(100, 5000);
-    m_maxFileContentLength->setSuffix(i18n(" chars"));
-    agentForm->addRow(i18n("Max file content length:"), m_maxFileContentLength);
 
     m_compressEditorContext = new QCheckBox(i18n("Compress editor context"), agentWidget);
     agentForm->addRow(m_compressEditorContext);
@@ -769,9 +761,6 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     m_compressOldMessages = new QCheckBox(i18n("Auto-compact older turns as the window fills"), agentWidget);
     agentForm->addRow(i18n("Auto-compact:"), m_compressOldMessages);
 
-    m_smartContextTruncation = new QCheckBox(i18n("Keep a recent tail verbatim when compacting"), agentWidget);
-    agentForm->addRow(i18n("Keep recent tail:"), m_smartContextTruncation);
-
     m_contextWindow = new QSpinBox(agentWidget);
     m_contextWindow->setRange(0, 2000000);
     m_contextWindow->setSuffix(i18n(" tokens"));
@@ -789,11 +778,6 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     m_keepRecentTokens->setSuffix(i18n(" tokens"));
     m_keepRecentTokens->setSpecialValueText(i18n("Auto"));
     agentForm->addRow(i18n("Keep recent context:"), m_keepRecentTokens);
-
-    m_compressionThreshold = new QSpinBox(agentWidget);
-    m_compressionThreshold->setRange(256, 100000);
-    m_compressionThreshold->setSuffix(i18n(" chars"));
-    agentForm->addRow(i18n("Recent-tail hint:"), m_compressionThreshold);
 
     agentScroll->setWidget(agentWidget);
     tabs->addTab(agentScroll, i18n("Agent & Context"));
@@ -1363,8 +1347,6 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     connect(m_maxGraphNodes, &QSpinBox::valueChanged, this, markChanged);
     connect(m_maxGraphEdges, &QSpinBox::valueChanged, this, markChanged);
     connect(m_compressGraph, &QCheckBox::toggled, this, markChanged);
-    connect(m_includeFileContents, &QCheckBox::toggled, this, markChanged);
-    connect(m_maxFileContentLength, &QSpinBox::valueChanged, this, markChanged);
     connect(m_compressEditorContext, &QCheckBox::toggled, this, markChanged);
     connect(m_maxEditorContextLength, &QSpinBox::valueChanged, this, markChanged);
     connect(m_compressProjectInstructions, &QCheckBox::toggled, this, markChanged);
@@ -1397,12 +1379,10 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     connect(m_narrativeProgress, &QCheckBox::toggled, this, markChanged);
 
     // Context Management
-    connect(m_smartContextTruncation, &QCheckBox::toggled, this, markChanged);
     connect(m_contextWindow, &QSpinBox::valueChanged, this, markChanged);
     connect(m_keepRecentTokens, &QSpinBox::valueChanged, this, markChanged);
     connect(m_contextWindowReserve, &QSpinBox::valueChanged, this, markChanged);
     connect(m_compressOldMessages, &QCheckBox::toggled, this, markChanged);
-    connect(m_compressionThreshold, &QSpinBox::valueChanged, this, markChanged);
 
     // Modes, auto-approve and rules
     connect(m_agentMode, &QComboBox::currentIndexChanged, this, markChanged);
@@ -1797,8 +1777,6 @@ s.opencodeModel = m_opencodeModel->currentText().trimmed();
     s.maxGraphNodes = m_maxGraphNodes->value();
     s.maxGraphEdges = m_maxGraphEdges->value();
     s.compressProjectGraph = m_compressGraph->isChecked();
-    s.includeFileContents = m_includeFileContents->isChecked();
-    s.maxFileContentLength = m_maxFileContentLength->value();
     s.compressEditorContext = m_compressEditorContext->isChecked();
     s.maxEditorContextLength = m_maxEditorContextLength->value();
     s.compressProjectInstructions = m_compressProjectInstructions->isChecked();
@@ -1831,12 +1809,10 @@ s.opencodeModel = m_opencodeModel->currentText().trimmed();
     s.narrativeProgress = m_narrativeProgress->isChecked();
 
     // Context Management
-    s.smartContextTruncation = m_smartContextTruncation->isChecked();
     s.contextWindow = m_contextWindow->value();
     s.keepRecentTokens = m_keepRecentTokens->value();
     s.contextWindowReserve = m_contextWindowReserve->value();
     s.compressOldMessages = m_compressOldMessages->isChecked();
-    s.compressionThreshold = m_compressionThreshold->value();
 
     // Modes, auto-approve and rules
     s.agentMode = m_agentMode->currentData().toString();
@@ -2023,8 +1999,6 @@ void KateAiConfigPage::reset()
     m_maxGraphNodes->setValue(s.maxGraphNodes);
     m_maxGraphEdges->setValue(s.maxGraphEdges);
     m_compressGraph->setChecked(s.compressProjectGraph);
-    m_includeFileContents->setChecked(s.includeFileContents);
-    m_maxFileContentLength->setValue(s.maxFileContentLength);
     m_compressEditorContext->setChecked(s.compressEditorContext);
     m_maxEditorContextLength->setValue(s.maxEditorContextLength);
     m_compressProjectInstructions->setChecked(s.compressProjectInstructions);
@@ -2058,12 +2032,10 @@ void KateAiConfigPage::reset()
     m_narrativeProgress->setChecked(s.narrativeProgress);
 
     // Context Management
-    m_smartContextTruncation->setChecked(s.smartContextTruncation);
     m_contextWindow->setValue(s.contextWindow);
     m_keepRecentTokens->setValue(s.keepRecentTokens);
     m_contextWindowReserve->setValue(s.contextWindowReserve);
     m_compressOldMessages->setChecked(s.compressOldMessages);
-    m_compressionThreshold->setValue(s.compressionThreshold);
 
     // Modes, auto-approve and rules
     int modeIndex = m_agentMode->findData(s.agentMode);

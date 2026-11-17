@@ -1,3 +1,12 @@
+kateai (0.4.0-1) unstable; urgency=medium
+
+  * Release 0.4.0: secure credential storage with migration, session database
+    recovery, checkpoint safety snapshots, stale-edit conflict detection,
+    explicit agent turn lifecycle, sanitized MCP/ACP process environments,
+    and versioned configuration/session schema migration.
+
+ -- ObiWindu <Obi.wandu@proton.me>  Mon, 16 Nov 2026 00:00:00 +0000
+
 kateai (0.3.0-1) unstable; urgency=medium
 
   * Release 0.3.0: ACP question/suggestion cards, apply_patch hardening,

@@ -228,8 +228,11 @@ never leaks back into saved settings. Built-in modes set neither override.
   re-checked **after** resolution — the classic escape (`workspace/link ->
   /etc`) is refused for writes in every profile but `Off`.
 - Deny globs (`.env`, `**/.ssh/**`) apply on top of the profile.
-- Commands are classified read-only / dangerous / always-denied, and wrapped in
-  bubblewrap under Workspace/Strict profiles.
+- Commands are classified read-only / dangerous / always-denied and run inside
+  an OS sandbox: bubblewrap on Linux and `sandbox-exec` on macOS. The
+  workspace, private temporary directories, credentials, environment, and
+  network are confined by the profile; Read-only/Strict fail closed when no
+  isolation mechanism is available.
 
 When touching this code, add cases to `tests/test_sandbox.cpp` — the escape
 tests there are the regression net for TOCTOU-style changes.
@@ -307,7 +310,8 @@ Build and run everything:
 Useful single suites:
 
 - `test_tools` — every built-in tool, sandbox interaction, atomicity rules
-- `test_sandbox` — path escapes, deny globs, command classification
+- `test_sandbox` — path escapes, deny globs, command classification, namespace/
+  mount construction, and live bubblewrap confinement checks where available
 - `test_modes` — mode parsing, tool groups, per-mode sampling overrides
 - `test_projectgraph` — scan limits, binary detection, symlink loops, round-trip
 - `test_livecards` / `test_toolcard` / `test_overflow` — widget-level behaviour

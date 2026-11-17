@@ -41,6 +41,82 @@ using namespace Qt::Literals::StringLiterals;
 namespace KateAi
 {
 
+QString AgentLoop::turnStateId(TurnState state)
+{
+    switch (state) {
+    case TurnState::Idle:
+        return u"idle"_s;
+    case TurnState::Preparing:
+        return u"preparing"_s;
+    case TurnState::Running:
+        return u"running"_s;
+    case TurnState::AwaitingModel:
+        return u"awaiting-model"_s;
+    case TurnState::AwaitingTool:
+        return u"awaiting-tool"_s;
+    case TurnState::AwaitingPermission:
+        return u"awaiting-permission"_s;
+    case TurnState::Cancelling:
+        return u"cancelling"_s;
+    case TurnState::Completed:
+        return u"completed"_s;
+    case TurnState::Failed:
+        return u"failed"_s;
+    case TurnState::Interrupted:
+        return u"interrupted"_s;
+    }
+    return u"unknown"_s;
+}
+
+bool AgentLoop::isTerminalTurnState(TurnState state)
+{
+    return state == TurnState::Completed || state == TurnState::Failed
+        || state == TurnState::Interrupted || state == TurnState::Idle;
+}
+
+AgentLoop::TurnState AgentLoop::turnState() const
+{
+    if (m_busy) {
+        switch (m_state) {
+        case State::Idle:
+            return TurnState::Running;
+        case State::WaitingForNextModel:
+            return TurnState::Running;
+        case State::WaitingForModel:
+            return TurnState::AwaitingModel;
+        case State::ExecutingTools:
+            return TurnState::AwaitingTool;
+        case State::WaitingForPermission:
+            return TurnState::AwaitingPermission;
+        case State::WaitingForQuestion:
+            return TurnState::AwaitingTool;
+        }
+    }
+    return m_lastTurnState;
+}
+
+void AgentLoop::setTurnState(TurnState state, const QString &reason)
+{
+    if (m_turnId.isEmpty()) {
+        return;
+    }
+    if (isTerminalTurnState(state)) {
+        // A terminal state is reported once per turn. finishTurn() and a late
+        // abort can both run while the loop unwinds; a second "completed"
+        // event would make the UI re-render a transcript that is already
+        // settled.
+        if (m_terminalSignalled) {
+            return;
+        }
+        m_lastTurnState = state;
+        m_terminalSignalled = true;
+    }
+    Q_EMIT turnStateChanged(m_turnId, turnStateId(state));
+    if (!reason.isEmpty()) {
+        Q_EMIT statusChanged(reason);
+    }
+}
+
 AgentLoop::AgentLoop(QObject *parent)
     : QObject(parent)
 {
@@ -384,13 +460,19 @@ void AgentLoop::setWorkspace(const QString &workspace)
     }
 
     if (m_projectGraph) {
-        QString graphFilePath = m_workspace + u"/.kateai/project_graph.json"_s;
+        // Create the metadata directory before the scan so the root directory
+        // timestamp the graph records is the one it will see on the next load.
+        QDir().mkpath(m_workspace + u"/.kateai"_s);
+        m_projectGraph->setWorkspacePath(m_workspace);
+        const QString graphFilePath = m_workspace + u"/.kateai/project_graph.json"_s;
+        bool regenerated = false;
         if (QFile::exists(graphFilePath)) {
             // Load existing graph
             if (!m_projectGraph->loadFromFile(graphFilePath)) {
                 qWarning() << "Failed to load existing graph from" << graphFilePath;
                 // Fall back to generating a new graph
                 m_projectGraph->generateGraph(m_workspace);
+                regenerated = true;
             } else if (m_projectGraph->staleFileCount() > 0) {
                 // The cache was written by an earlier session; files changed
                 // on disk while Kate was closed would otherwise be served with
@@ -398,10 +480,15 @@ void AgentLoop::setWorkspace(const QString &workspace)
                 qWarning() << "Project graph cache is stale for" << m_projectGraph->staleFileCount()
                            << "file(s); regenerating";
                 m_projectGraph->generateGraph(m_workspace);
+                regenerated = true;
             }
         } else {
-            // Generate new graph
+            // First index of this workspace.
             m_projectGraph->generateGraph(m_workspace);
+            regenerated = true;
+        }
+        if (regenerated && !m_projectGraph->saveToFile(graphFilePath)) {
+            qWarning() << "Could not write the project graph cache to" << graphFilePath;
         }
         // Update ACP client with the project graph
         m_acp.setProjectGraph(m_projectGraph.get());
@@ -869,82 +956,16 @@ QString AgentLoop::systemPrompt() const
         }
     }
     
-    // Add project graph information to help the agent understand the project structure
+    // Give the model the project's shape before it starts grepping. The graph
+    // formatter emits readable paths and symbols rather than hash ids, and
+    // honours the node/edge caps so a large repository cannot flood the
+    // prompt.
     if (m_projectGraph && m_projectGraph->getNodeCount() > 0 && m_settings.compressProjectGraph) {
-        prompt += u"\n\n<project_graph>\n"_s;
-        
-        // Apply context compression based on settings
-        int maxNodes = m_settings.maxGraphNodes;
-        int maxEdges = m_settings.maxGraphEdges;
-        
-        if (m_settings.contextCompressionLevel == 0) {
-            // Full context - include all nodes and edges
-            prompt += u"Project contains "_s + QString::number(m_projectGraph->getNodeCount()) + u" nodes and "_s + 
-                      QString::number(m_projectGraph->getEdgeCount()) + u" edges.\n"_s;
-            
-            // Include node types for full context
-            QMap<QString, int> typeCount;
-            for (auto it = m_projectGraph->getNodes().begin(); it != m_projectGraph->getNodes().end(); ++it) {
-                const GraphNode *node = it.value();
-                typeCount[node->type]++;
-            }
-            
-            prompt += u"Node types:\n"_s;
-            for (auto it = typeCount.begin(); it != typeCount.end(); ++it) {
-                prompt += u"  - "_s + it.key() + u": "_s + QString::number(it.value()) + u"\n"_s;
-            }
-            
-            // Include key dependencies for full context
-            prompt += u"\nKey dependencies:\n"_s;
-            for (auto it = m_projectGraph->getEdges().begin(); it != m_projectGraph->getEdges().end(); ++it) {
-                const GraphEdge *edge = it.value();
-                if (edge->relationship == u"imports"_s || edge->relationship == u"calls"_s || edge->relationship == u"extends"_s) {
-                    prompt += u"  - "_s + edge->sourceId + u" -> "_s + edge->targetId +
-                              u" ("_s + edge->relationship + u")\n"_s;
-                }
-            }
-        } else {
-            // Compressed context - include limited information
-            prompt += u"Project contains "_s + QString::number(qMin(m_projectGraph->getNodeCount(), maxNodes)) + u" nodes and "_s + 
-                      QString::number(qMin(m_projectGraph->getEdgeCount(), maxEdges)) + u" edges.\n"_s;
-            
-            if (m_settings.contextCompressionLevel == 1) {
-                // Summary level - include node types and key dependencies
-                QMap<QString, int> typeCount;
-                for (auto it = m_projectGraph->getNodes().begin(); it != m_projectGraph->getNodes().end(); ++it) {
-                    const GraphNode *node = it.value();
-                    typeCount[node->type]++;
-                }
-                
-                prompt += u"Node types:\n"_s;
-                for (auto it = typeCount.begin(); it != typeCount.end(); ++it) {
-                    prompt += u"  - "_s + it.key() + u": "_s + QString::number(it.value()) + u"\n"_s;
-                }
-                
-                // Add key dependencies (limited to most important relationships)
-                prompt += u"\nKey dependencies:\n"_s;
-                int edgeCount = 0;
-                for (auto it = m_projectGraph->getEdges().begin(); it != m_projectGraph->getEdges().end() && edgeCount < maxEdges; ++it) {
-                    const GraphEdge *edge = it.value();
-                    if (edge->relationship == u"imports"_s || edge->relationship == u"calls"_s || edge->relationship == u"extends"_s) {
-                        prompt += u"  - "_s + edge->sourceId + u" -> "_s + edge->targetId +
-                                  u" ("_s + edge->relationship + u")\n"_s;
-                        edgeCount++;
-                    }
-                }
-            } else if (m_settings.contextCompressionLevel == 2) {
-                // Minimal level - just basic structure
-                prompt += u"Project structure overview.\n"_s;
-                if (m_settings.includeFileContents) {
-                    prompt += u"Key files and directories are available for inspection.\n"_s;
-                }
-            } else if (m_settings.contextCompressionLevel == 3) {
-                // Ultra-minimal level - only essential info
-                prompt += u"Project overview available. Use tools to explore specific files as needed.\n"_s;
-            }
+        const QString summary = m_projectGraph->contextSummary(
+            m_settings.maxGraphNodes, m_settings.maxGraphEdges, m_settings.contextCompressionLevel);
+        if (!summary.trimmed().isEmpty()) {
+            prompt += u"\n\n<project_graph>\n"_s + summary + u"\n</project_graph>\n"_s;
         }
-        
-        prompt += u"</project_graph>\n"_s;
     }
     
     return prompt;
@@ -978,12 +999,22 @@ void AgentLoop::resetConversation()
     m_currentPlan = QJsonArray();
     m_planShown = false;
     m_currentAssistant.clear();
+    m_turnId.clear();
+    m_lastTurnState = TurnState::Idle;
+    m_terminalSignalled = true;
 }
 
 void AgentLoop::abort()
 {
     const bool hadActiveTurn = m_busy || m_client.isBusy() || m_acp.isBusy() || !m_queue.isEmpty() || !m_pendingResults.isEmpty()
         || !m_waitingCall.name.isEmpty() || m_nextModelTimer.isActive() || !m_activeSubtasks.isEmpty();
+
+    // Report the cancellation before any awaitable teardown runs, so a UI
+    // that is showing "awaiting model" does not sit there while the network
+    // request is being dropped. Interrupted is reported after the teardown.
+    if (hadActiveTurn) {
+        setTurnState(TurnState::Cancelling);
+    }
 
     // Anything still running belongs to the turn being closed. The generation
     // bump makes late async results recognisable as stale, and the read jobs
@@ -1024,6 +1055,9 @@ void AgentLoop::abort()
     // turn fail with "The agent is not ready for another model request."
     m_busy = false;
     m_state = State::Idle;
+    if (hadActiveTurn) {
+        setTurnState(TurnState::Interrupted);
+    }
     m_pendingAcpAnswer.clear();
     m_acpToolQuestionId.clear();
 
@@ -1123,6 +1157,10 @@ void AgentLoop::start(const QString &userText)
 
     // A new turn invalidates every async result captured by the previous one.
     ++m_turnGeneration;
+    m_turnId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    m_lastTurnState = TurnState::Preparing;
+    m_terminalSignalled = false;
+    setTurnState(TurnState::Preparing);
 
     if (usesAcpNative(m_settings)) {
         startAcpTurn(userText);
@@ -1131,6 +1169,8 @@ void AgentLoop::start(const QString &userText)
 
     m_busy = true;
     m_state = State::WaitingForNextModel;
+    m_lastTurnState = TurnState::Running;
+    setTurnState(TurnState::Running);
     m_modelRequests = 0;
     m_toolCalls = 0;
     m_stateEpoch = 0;
@@ -1194,13 +1234,17 @@ QList<ChatMessage> AgentLoop::m_messagesForRequest() const
     options.autoCompact = m_settings.compressOldMessages;
     options.compactionLevel = m_compactionLevel;
     options.projectGraph = m_projectGraph.get();
-    options.useProjectGraph = m_settings.compressProjectGraph;
+    // The graph is useful for preserving related files in a compaction even
+    // when the user does not want its summary in the system prompt.
+    options.useProjectGraph = true;
     if (m_settings.keepRecentTokens > 0) {
         options.keepRecentTokens = m_settings.keepRecentTokens;
-    } else if (m_settings.smartContextTruncation) {
-        options.keepRecentTokens = qMax(2000, options.reserveForResponse * 2);
     } else {
-        options.keepRecentTokens = qMax(800, m_settings.compressionThreshold / 4);
+        // Keep a substantial third of the usable window verbatim. A fixed
+        // small tail made a 128k/1M model compact as if it were a 32k one,
+        // losing recent decisions the model still needed.
+        const int usable = qMax(2048, options.contextWindow - options.reserveForResponse);
+        options.keepRecentTokens = qMax(4000, usable / 3);
     }
     return ContextManager::build(m_messages, options);
 }
@@ -1326,6 +1370,7 @@ void AgentLoop::sendToModel()
     m_currentPlan = QJsonArray();
     m_planShown = false;
     m_state = State::WaitingForModel;
+    setTurnState(TurnState::AwaitingModel);
 
     if (m_settings.structuredThinking) {
         Q_EMIT statusChanged(u"Thinking…"_s);
@@ -1394,6 +1439,8 @@ void AgentLoop::startAcpTurn(const QString &userText)
 {
     m_busy = true;
     m_state = State::WaitingForModel;
+    m_lastTurnState = TurnState::AwaitingModel;
+    setTurnState(TurnState::AwaitingModel);
     m_modelRequests = 0;
     m_toolCalls = 0;
     m_queue.clear();
@@ -1946,6 +1993,7 @@ void AgentLoop::onFinished(const QString &text, const QList<ToolCall> &toolCalls
         m_pendingResults.clear();
         Q_EMIT activityUpdated(describePlannedWork(m_queue));
         m_state = State::ExecutingTools;
+        setTurnState(TurnState::AwaitingTool);
         processQueue();
         return;
     }
@@ -1970,6 +2018,7 @@ void AgentLoop::onFinished(const QString &text, const QList<ToolCall> &toolCalls
         // for this model turn.
     }
     m_state = State::ExecutingTools;
+    setTurnState(TurnState::AwaitingTool);
     processQueue();
 }
 
@@ -1979,6 +2028,7 @@ void AgentLoop::finishWithFailure(const QString &error)
     m_client.abort();
     m_busy = false;
     m_state = State::Idle;
+    setTurnState(TurnState::Failed);
     m_queue.clear();
     m_pendingResults.clear();
     m_waitingCall = {};
@@ -2023,6 +2073,7 @@ void AgentLoop::finishTurn()
     m_nextModelTimer.stop();
     m_busy = false;
     m_state = State::Idle;
+    setTurnState(TurnState::Completed);
     m_queue.clear();
     m_pendingResults.clear();
     m_waitingCall = {};
@@ -2257,6 +2308,7 @@ void AgentLoop::executeOne(const ToolCall &call)
         m_waitingCall = call;
         m_waitingRequest = request;
         m_state = State::WaitingForPermission;
+        setTurnState(TurnState::AwaitingPermission);
         Q_EMIT statusChanged(u"Waiting for permission…"_s);
         Q_EMIT permissionNeeded(request);
         return;
@@ -2268,7 +2320,7 @@ void AgentLoop::executeOne(const ToolCall &call)
     // so the turn stops here until they answer. It never touches the sandbox:
     // the answer is captured by the UI and handed back through answerQuestion.
     if (isQuestionTool(call.name)) {
-        const QString asked = effectiveArgs(call).value(u"question"_s).toString().trimmed();
+        const QString asked = questionTextFromToolArguments(effectiveArgs(call));
         if (asked.isEmpty()) {
             ToolResult result;
             result.ok = false;
@@ -2419,8 +2471,8 @@ PermissionRequest AgentLoop::describeTool(const ToolCall &call) const
     if (isQuestionTool(call.name)) {
         // The question itself is the summary: a card that reads "question" and
         // nothing else tells the user nothing about what they are being asked.
-        const QString text = eff.value(u"question"_s).toString().trimmed();
-        const QJsonArray options = eff.value(u"options"_s).toArray();
+        const QString text = questionTextFromToolArguments(eff);
+        const QStringList options = questionOptionsFromToolArguments(eff);
         PermissionRequest request;
         request.toolName = call.name;
         request.toolCallId = call.id;
@@ -2429,31 +2481,10 @@ PermissionRequest AgentLoop::describeTool(const ToolCall &call) const
         request.questionText = text;
         // The model often sends booleans as strings ("false") or numbers (0);
         // QJsonValue::toBool(true) is only true for real booleans, so it would
-        // show a freeform box the model explicitly forbade. Be tolerant here,
-        // the same way ToolRunner::describe is.
-        {
-            const QJsonValue freeformValue = eff.value(u"allow_freeform"_s);
-            bool allowFreeform = true;
-            if (freeformValue.isBool()) {
-                allowFreeform = freeformValue.toBool();
-            } else if (freeformValue.isDouble()) {
-                allowFreeform = freeformValue.toInt() != 0;
-            } else if (freeformValue.isString()) {
-                const QString s = freeformValue.toString().trimmed().toLower();
-                if (s == u"true"_s || s == u"1"_s || s == u"yes"_s) {
-                    allowFreeform = true;
-                } else if (s == u"false"_s || s == u"0"_s || s == u"no"_s) {
-                    allowFreeform = false;
-                }
-            }
-            request.allowFreeform = allowFreeform;
-        }
-        for (const QJsonValue &value : options) {
-            const QString option = value.toString().trimmed();
-            if (!option.isEmpty()) {
-                request.questionOptions.append(option);
-            }
-        }
+        // show a freeform box the model explicitly forbade. The shared reader
+        // is tolerant, the same way ToolRunner::describe is.
+        request.allowFreeform = questionAllowFreeformFromToolArguments(eff, true);
+        request.questionOptions = options;
         if (request.questionText.isEmpty()) {
             request.summary = i18n("asked a question");
         } else {
@@ -3182,8 +3213,13 @@ bool AgentLoop::compactContext()
     options.reserveForResponse = m_settings.contextWindowReserve > 0
         ? m_settings.contextWindowReserve
         : 8192;
+    options.projectGraph = m_projectGraph.get();
+    options.useProjectGraph = true;
     if (m_settings.keepRecentTokens > 0) {
         options.keepRecentTokens = m_settings.keepRecentTokens;
+    } else {
+        const int usable = qMax(2048, options.contextWindow - options.reserveForResponse);
+        options.keepRecentTokens = qMax(4000, usable / 3);
     }
 
     const int before = ContextManager::estimateTokens(m_messages);
@@ -3373,6 +3409,7 @@ SessionStore::SessionData AgentLoop::sessionData() const
     data.currentPlan = m_currentPlan;
     data.planShown = m_planShown;
     data.currentAssistant = m_currentAssistant;
+    data.lastTurnId = m_turnId;
     data.stateEpoch = m_stateEpoch;
     data.actionSignatures = m_actionSignatures.values();
     data.actionRepeatCounts = m_actionRepeatCounts;
@@ -3400,6 +3437,9 @@ void AgentLoop::restoreSession(const SessionStore::SessionData &data)
     m_currentPlan = data.currentPlan;
     m_planShown = data.planShown;
     m_currentAssistant = data.currentAssistant;
+    m_turnId = data.lastTurnId;
+    m_lastTurnState = m_turnId.isEmpty() ? TurnState::Idle : TurnState::Completed;
+    m_terminalSignalled = true;
 
     // Restore tracking state
     m_stateEpoch = data.stateEpoch;

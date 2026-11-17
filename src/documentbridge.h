@@ -26,6 +26,16 @@ public:
     virtual bool readDocumentLines(const QString &path, int startLine, int maxLines,
                                    QStringList *page, int *totalLines) const;
     virtual bool writeDocument(const QString &path, const QString &contents, QString *error) = 0;
+    // Optimistic write for read-modify-write tools: the write only happens
+    // when the file still holds exactly `expectedContents`. If the user (or
+    // another process) changed it between the tool's read and its write, the
+    // tool fails with a conflict instead of silently clobbering newer content.
+    virtual bool writeDocumentIfUnchanged(const QString &path, const QString &expectedContents,
+                                          const QString &contents, QString *error);
+    // The create half of the same contract: only writes when the path does not
+    // exist yet. A file created between planning and applying a patch is a
+    // conflict, not something to overwrite.
+    virtual bool writeDocumentIfMissing(const QString &path, const QString &contents, QString *error);
     // Deletes a file. The default removes it from disk; the Kate bridge refuses
     // a document the user has unsaved changes in, so a deletion can never
     // silently discard an editor buffer.
@@ -47,6 +57,7 @@ public:
     bool readDocumentLines(const QString &path, int startLine, int maxLines,
                            QStringList *page, int *totalLines) const override;
     bool writeDocument(const QString &path, const QString &contents, QString *error) override;
+    bool writeDocumentIfMissing(const QString &path, const QString &contents, QString *error) override;
     bool removeDocument(const QString &path, QString *error) override;
     bool restoreDocument(const QString &path, const QString &contents, QString *error) override;
     bool saveDocumentIfOpen(const QString &path, QString *error) override;

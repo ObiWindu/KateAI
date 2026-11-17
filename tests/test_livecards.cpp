@@ -27,9 +27,12 @@
 #include "types.h"
 
 #include <QApplication>
+#include <QFile>
 #include <QFontMetrics>
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QLabel>
+#include <QPushButton>
 #include <QSignalSpy>
 #include <QTest>
 #include <QTemporaryDir>
@@ -170,6 +173,20 @@ private Q_SLOTS:
         teardown();
     }
 
+    void testFirstWorkspaceIndexWritesTheGraphCache()
+    {
+        setup();
+        // The first workspace load must persist the index immediately, so the
+        // next start and ACP session can read it even before any edit.
+        const QString cache = m_workspace->path() + u"/.kateai/project_graph.json"_s;
+        QVERIFY2(QFile::exists(cache), qPrintable(cache));
+        QFile file(cache);
+        QVERIFY(file.open(QIODevice::ReadOnly));
+        const QByteArray data = file.readAll();
+        QVERIFY(data.contains("\"nodes\""));
+        QVERIFY(data.contains("\"edges\""));
+    }
+
     // A read is the plainest card there is: no output to stream, no change to
     // show. While it runs it used to be a header row and nothing else.
     void testRunningToolCardShowsWhatItIsWorkingOn()
@@ -240,6 +257,12 @@ private Q_SLOTS:
         QuestionWidget *prompt = questionCard(u"tc-question"_s);
         QVERIFY2(prompt, "no question prompt in the intent dock");
         QVERIFY2(prompt->height() > 40, qPrintable(QStringLiteral("the prompt is header-only at %1px").arg(prompt->height())));
+        QTextBrowser *promptBody = prompt->findChild<QTextBrowser *>();
+        QVERIFY2(promptBody, "the prompt has no body");
+        QVERIFY2(promptBody->height() > 20,
+                 qPrintable(QStringLiteral("the prompt body collapsed to %1px").arg(promptBody->height())));
+        QVERIFY2(promptBody->toPlainText().contains(QStringLiteral("patch it in place")),
+                 qPrintable(promptBody->toPlainText()));
     }
 
     // A suggestion is advice the user is meant to read, and it is fully written
@@ -259,6 +282,8 @@ private Q_SLOTS:
         QVERIFY2(!bodies.isEmpty(), "the posted card has no body");
         QVERIFY2(bodies.first()->toPlainText().contains(QStringLiteral("std::string_view")),
                  qPrintable(bodies.first()->toPlainText()));
+        QVERIFY2(bodies.first()->height() > 20,
+                 qPrintable(QStringLiteral("the posted card body collapsed to %1px").arg(bodies.first()->height())));
 
         // The result settles the card instead of posting a second one.
         Q_EMIT m_widget->agent()->toolFinished(result(u"suggest"_s, u"tc-suggest"_s, u"ok"_s));
@@ -531,6 +556,99 @@ private Q_SLOTS:
         QTextBrowser *body = cardBody(card);
         QVERIFY2(body && body->toPlainText().contains(QStringLiteral("patched src/main.cpp")),
                  qPrintable(body ? body->toPlainText() : QString()));
+    }
+
+    void testHistoryRestoresSuggestionAndQuestionText()
+    {
+        setup();
+        SessionStore::SessionData data;
+
+        ChatMessage assistant;
+        assistant.role = ChatMessage::Role::Assistant;
+        assistant.content = u"Posting advice and asking a question."_s;
+        assistant.toolCalls = QJsonArray{
+            functionCall(u"call-suggest"_s, u"suggest"_s,
+                         u"{\"suggestion\":\"Use std::string_view here\",\"path\":\"src/main.cpp\",\"line\":42}"_s),
+            functionCall(u"call-question"_s, u"question"_s,
+                         u"{\"question\":\"Rewrite the file, or patch it in place?\",\"options\":[\"Rewrite\",\"Patch\"]}"_s)};
+
+        ChatMessage suggestResult;
+        suggestResult.role = ChatMessage::Role::Tool;
+        suggestResult.name = u"suggest"_s;
+        suggestResult.toolCallId = u"call-suggest"_s;
+        suggestResult.content = u"Suggestion posted for the user to accept or dismiss."_s;
+
+        ChatMessage questionResult;
+        questionResult.role = ChatMessage::Role::Tool;
+        questionResult.name = u"question"_s;
+        questionResult.toolCallId = u"call-question"_s;
+        questionResult.content = u"Rewrite"_s;
+
+        data.messages = {assistant, suggestResult, questionResult};
+        m_widget->agent()->restoreSession(data);
+        m_widget->rebuildTranscript();
+        QTest::qWait(150);
+
+        SuggestionWidget *suggestion = suggestionCard(u"call-suggest"_s);
+        QVERIFY2(suggestion, "history restore dropped the suggestion card");
+        QTextBrowser *suggestionBody = suggestion->findChild<QTextBrowser *>();
+        QVERIFY(suggestionBody);
+        QVERIFY2(suggestionBody->toPlainText().contains(u"std::string_view"_s),
+                 qPrintable(suggestionBody->toPlainText()));
+
+        ToolCallWidget *question = cardOfClass<ToolCallWidget>(QStringLiteral("ToolCallWidget_call-question"));
+        QVERIFY2(question, "history restore dropped the question card");
+        QTextBrowser *questionBody = cardBody(question);
+        QVERIFY(questionBody);
+        QVERIFY2(questionBody->toPlainText().contains(u"Rewrite the file, or patch it in place?"_s),
+                 qPrintable(questionBody->toPlainText()));
+    }
+
+    // Providers do not all use the canonical field names. A card that only
+    // reads request.questionText / details["suggestion"] is blank when the
+    // call carries the same content as prompt/message/description.
+    void testCardsReadAliasFields()
+    {
+        setup();
+
+        PermissionRequest question = request(u"question"_s, u"tc-question-alias"_s,
+                                             u"{\"questions\":[{\"prompt\":\"Which strategy should I use?\",\"choices\":[{\"label\":\"Fast\"},{\"label\":\"Correct\"}],\"allowFreeform\":false}]}"_s);
+        Q_EMIT m_widget->agent()->toolStarted(question);
+        Q_EMIT m_widget->agent()->questionAsked(question);
+        QTest::qWait(80);
+
+        QuestionWidget *prompt = questionCard(u"tc-question-alias"_s);
+        QVERIFY2(prompt, "the alias-shaped question produced no prompt");
+        QTextBrowser *promptBody = prompt->findChild<QTextBrowser *>();
+        QVERIFY(promptBody);
+        QVERIFY2(promptBody->toPlainText().contains(u"Which strategy should I use?"_s),
+                 qPrintable(promptBody->toPlainText()));
+        QStringList labels;
+        for (QPushButton *button : prompt->findChildren<QPushButton *>()) {
+            labels << button->text();
+        }
+        QVERIFY2(labels.contains(u"Fast"_s) && labels.contains(u"Correct"_s),
+                 qPrintable(labels.join(u", "_s)));
+
+        PermissionRequest suggestion = request(u"suggest"_s, u"tc-suggest-alias"_s,
+                                              u"{\"message\":\"Use std::string_view here\",\"file_path\":\"src/main.cpp\",\"start_line\":\"42\"}"_s);
+        Q_EMIT m_widget->agent()->toolStarted(suggestion);
+        QTest::qWait(80);
+
+        SuggestionWidget *card = suggestionCard(u"tc-suggest-alias"_s);
+        QVERIFY2(card, "the alias-shaped suggestion produced no card");
+        const QList<QTextBrowser *> bodies = card->findChildren<QTextBrowser *>();
+        QVERIFY(!bodies.isEmpty());
+        QVERIFY2(bodies.first()->toPlainText().contains(u"std::string_view"_s),
+                 qPrintable(bodies.first()->toPlainText()));
+        QVERIFY2(card->findChildren<QLabel *>().size() > 0, "the suggestion card has no labels");
+        bool anchored = false;
+        for (QLabel *label : card->findChildren<QLabel *>()) {
+            if (label->text().contains(u"src/main.cpp:42"_s)) {
+                anchored = true;
+            }
+        }
+        QVERIFY2(anchored, "the alias-shaped suggestion lost its anchor");
     }
 
     // The plan's todo list docks at the bottom of the chat: a compact strip

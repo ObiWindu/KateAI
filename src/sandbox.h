@@ -8,6 +8,7 @@
 #include "types.h"
 
 #include <QHash>
+#include <QProcessEnvironment>
 #include <QRegularExpression>
 #include <QString>
 #include <QStringList>
@@ -66,10 +67,17 @@ public:
     // needs the same guard or a read-only command sidesteps them entirely.
     bool commandTouchesDeniedPath(const QString &command) const;
 
-    QStringList wrapCommand(const QString &command, QString *error) const;
+    QStringList wrapCommand(const QString &command, QString *error, const QString &workingDirectory = QString()) const;
     // Wrap an argv vector (ACP terminal/create). The program and each argument
-    // stay separate; nothing is re-quoted into `bash -c`.
-    QStringList wrapArgv(const QString &program, const QStringList &args, QString *error) const;
+    // stay separate; nothing is re-quoted into `bash -c`. `workingDirectory`
+    // is confined to the workspace when it is set.
+    QStringList wrapArgv(const QString &program, const QStringList &args, QString *error,
+                         const QString &workingDirectory = QString()) const;
+    // The environment a sandboxed child may inherit. Secrets and session
+    // channels (DBus, X11, Wayland, SSH agents, display servers) are removed;
+    // the strict profile gets a private HOME and runtime directory. `Off`
+    // deliberately returns the ambient environment unchanged.
+    QProcessEnvironment processEnvironment() const;
     bool bubblewrapAvailable() const;
     bool isolationAvailable() const;
 

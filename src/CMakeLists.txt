@@ -1,5 +1,7 @@
 add_library(kateai_core STATIC
     types.cpp
+    credentialstore.cpp
+    processenv.cpp
     acpinstall.cpp
     settings.cpp
     sandbox.cpp
@@ -33,6 +35,14 @@ add_library(kateai_core STATIC
 set_target_properties(kateai_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(kateai_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_definitions(kateai_core PRIVATE TRANSLATION_DOMAIN="kateai" KATEAI_VERSION="${PROJECT_VERSION}")
+if(KATEAI_HAVE_KWALLET)
+    target_compile_definitions(kateai_core PRIVATE KATEAI_HAVE_KWALLET=1)
+    target_link_libraries(kateai_core PUBLIC KF6::Wallet)
+else()
+    # Always define the feature macro: `#if KATEAI_HAVE_KWALLET` in source must
+    # not evaluate an undefined identifier under -Werror=undef.
+    target_compile_definitions(kateai_core PRIVATE KATEAI_HAVE_KWALLET=0)
+endif()
 target_link_libraries(kateai_core
     PUBLIC
         Qt6::Core

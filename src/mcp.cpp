@@ -4,6 +4,7 @@
  */
 
 #include "mcp.h"
+#include "processenv.h"
 
 #include <KLocalizedString>
 
@@ -444,7 +445,11 @@ void McpClient::start()
         if (!m_config.cwd.trimmed().isEmpty() && QFileInfo(m_config.cwd).isDir()) {
             m_process->setWorkingDirectory(m_config.cwd);
         }
-        QProcessEnvironment environment = QProcessEnvironment::systemEnvironment();
+        // Third-party MCP servers get a scrubbed environment: ambient provider
+        // keys are not needed to run the server, and leaking them to every
+        // configured server would widen the blast radius of a compromised one.
+        // Keys the user explicitly configured for this server are added back.
+        QProcessEnvironment environment = sanitizedProcessEnvironment();
         for (auto it = m_config.env.constBegin(); it != m_config.env.constEnd(); ++it) {
             environment.insert(it.key(), it.value());
         }

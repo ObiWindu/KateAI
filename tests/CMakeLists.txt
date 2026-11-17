@@ -11,12 +11,24 @@ endif()
 function(kateai_test name)
     add_executable(${name} ${name}.cpp)
     target_link_libraries(${name} PRIVATE kateai_core Qt6::Test)
-    add_test(NAME ${name} COMMAND ${name})
+    # Tests that drive a mock agent/server locate `tests/...` relative to the
+    # current directory. Pin it to the source tree so an out-of-tree build (for
+    # example /tmp/build) runs the same way as ./build.
+    add_test(NAME ${name} COMMAND ${name}
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 endfunction()
 
 kateai_test(test_sandbox)
 kateai_test(test_permissions)
 kateai_test(test_settings)
+kateai_test(test_configmigration)
+kateai_test(test_credentials)
+
+# These three all read and write the shared test-mode KConfig and credential
+# file. Running them in parallel made a save/load round-trip observe another
+# test's write, so serialize just this group.
+set_tests_properties(test_settings test_configmigration test_credentials
+                     PROPERTIES RESOURCE_LOCK kateai_test_credentials_config)
 kateai_test(test_llmparse)
 kateai_test(test_session)
 kateai_test(test_retry)
@@ -34,6 +46,8 @@ kateai_test(test_acpparsing)
 kateai_test(test_acpstreaming)
 kateai_test(test_modetools)
 kateai_test(test_sessionstore)
+kateai_test(test_sessionrecovery)
+kateai_test(test_processenv)
 kateai_test(test_acpclientmethods)
 kateai_test(test_projectgraph)
 # KTextEditor's editor singleton (reached through DiskDocumentBridge) needs a

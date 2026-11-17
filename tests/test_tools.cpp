@@ -10,12 +10,15 @@
 
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QTimer>
+
+#include <utility>
 
 using namespace Qt::Literals::StringLiterals;
 using namespace KateAi;
@@ -57,6 +60,51 @@ private:
     DiskDocumentBridge m_disk;
     int m_failOnCall = 0;
     int m_writes = 0;
+};
+
+// Reports one path as missing during planning even though it exists on disk,
+// reproducing a file created between the patch planner's read and its write.
+class CreateRaceBridge : public DocumentBridge
+{
+public:
+    explicit CreateRaceBridge(QString missingPath)
+        : m_missingPath(std::move(missingPath))
+    {
+    }
+
+    bool readDocument(const QString &path, QString *contents) const override
+    {
+        if (path == m_missingPath) {
+            if (contents) {
+                contents->clear();
+            }
+            return false;
+        }
+        return m_disk.readDocument(path, contents);
+    }
+    bool writeDocument(const QString &path, const QString &contents, QString *error) override
+    {
+        return m_disk.writeDocument(path, contents, error);
+    }
+    bool writeDocumentIfMissing(const QString &path, const QString &contents, QString *error) override
+    {
+        // The file appears after planning finished, exactly when the write is
+        // about to create it.
+        QFile competitor(path);
+        if (competitor.open(QIODevice::WriteOnly | QIODevice::NewOnly)) {
+            competitor.write("created by someone else\n");
+            competitor.close();
+        }
+        return m_disk.writeDocumentIfMissing(path, contents, error);
+    }
+    bool removeDocument(const QString &path, QString *error) override
+    {
+        return m_disk.removeDocument(path, error);
+    }
+
+private:
+    DiskDocumentBridge m_disk;
+    QString m_missingPath;
 };
 
 } // namespace
@@ -668,6 +716,61 @@ private Q_SLOTS:
         QVERIFY(!req.allowFreeform);
     }
 
+    void questionAcceptsNestedAndAliasShapes()
+    {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        Sandbox sandbox(tempDir.path(), SandboxProfile::ReadOnly);
+        DiskDocumentBridge bridge;
+        ToolRunner runner(sandbox, &bridge);
+
+        ToolCall call;
+        call.id = u"question-nested"_s;
+        call.name = u"question"_s;
+        // Claude/OpenCode shape: the question and options live inside a
+        // questions[] entry, and options are objects rather than strings.
+        call.arguments = QJsonObject{
+            {u"questions"_s, QJsonArray{QJsonObject{
+                 {u"prompt"_s, u"Which strategy should I use?"_s},
+                 {u"choices"_s, QJsonArray{QJsonObject{{u"label"_s, u"Fast"_s}},
+                                            QJsonObject{{u"label"_s, u"Correct"_s}}}},
+                 {u"allowFreeform"_s, u"false"_s},
+             }}},
+        };
+
+        const PermissionRequest req = runner.describe(call);
+        QCOMPARE(req.questionText, u"Which strategy should I use?"_s);
+        QCOMPARE(req.questionOptions, QStringList({u"Fast"_s, u"Correct"_s}));
+        QVERIFY(!req.allowFreeform);
+        QVERIFY(req.summary.contains(u"Which strategy"_s));
+    }
+
+    void suggestionAcceptsAliasFields()
+    {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        Sandbox sandbox(tempDir.path(), SandboxProfile::ReadOnly);
+        DiskDocumentBridge bridge;
+        ToolRunner runner(sandbox, &bridge);
+
+        ToolCall call;
+        call.id = u"suggest-alias"_s;
+        call.name = u"suggest"_s;
+        call.arguments = QJsonObject{
+            {u"message"_s, u"Use std::string_view here instead of const std::string &"_s},
+            {u"file_path"_s, u"src/main.cpp"_s},
+            {u"start_line"_s, u"42"_s},
+        };
+
+        const PermissionRequest req = runner.describe(call);
+        QCOMPARE(req.risk, ToolRisk::Read);
+        QVERIFY(req.summary.contains(u"string_view"_s));
+
+        // The tool must not reject the same aliases the card understands.
+        const ToolResult res = runner.run(call);
+        QVERIFY2(res.ok, qPrintable(res.output));
+    }
+
     void readingAnEmptyFileIsNotAFailure()
     {
         // The agent reads back files it just created, and a zero-byte file is a
@@ -1040,6 +1143,30 @@ private Q_SLOTS:
         QString content;
         QVERIFY(bridge.readDocument(tempDir.path() + u"/new.txt"_s, &content));
         QCOMPARE(content, u"no newline"_s);
+    }
+
+    void applyPatchDoesNotOverwriteFileCreatedBeforeWrite()
+    {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        const QString path = tempDir.path() + u"/new.txt"_s;
+        QVERIFY(!QFileInfo::exists(path));
+
+        Sandbox sandbox(tempDir.path(), SandboxProfile::Workspace);
+        CreateRaceBridge bridge(path);
+        ToolRunner runner(sandbox, &bridge);
+
+        const QString patch = u"--- /dev/null\n+++ b/new.txt\n@@ -0,0 +1,1 @@\n+from the patch\n"_s;
+        ToolCall call;
+        call.id = u"create-race"_s;
+        call.name = u"apply_patch"_s;
+        call.arguments = QJsonObject{{u"patch"_s, patch}};
+        const ToolResult result = runner.run(call);
+
+        QVERIFY2(!result.ok, "a new-file hunk overwrote a file that appeared after planning");
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::ReadOnly | QIODevice::Text));
+        QCOMPARE(QString::fromUtf8(file.readAll()), u"created by someone else\n"_s);
     }
 
     void applyPatchRollsBackWhenALaterWriteFails()

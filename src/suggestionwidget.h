@@ -11,6 +11,7 @@
 
 class QLabel;
 class QPushButton;
+class QResizeEvent;
 class QTextBrowser;
 
 namespace KateAi
@@ -58,10 +59,15 @@ Q_SIGNALS:
     void accepted(const QString &suggestionId, const QString &path, int line);
     void dismissed(const QString &suggestionId);
 
+protected:
+    void resizeEvent(QResizeEvent *event) override;
+
 private:
     void updateHeader();
+    void renderBody();
 
     QString m_suggestionId;
+    QString m_text;
     QString m_path;
     int m_line = 0;
     bool m_failed = false;

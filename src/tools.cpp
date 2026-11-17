@@ -280,13 +280,13 @@ QString shellCommandFor(const QString &toolName, const QJsonObject &args)
     if (canonical == u"suggest"_s) {
         // The first line of the advice reads better in a card header than a
         // bare tool name, so show that, capped.
-        const QString firstLine = args.value(u"suggestion"_s).toString().section(u'\n', 0, 0).trimmed();
+        const QString firstLine = suggestionTextFromToolArguments(args).section(u'\n', 0, 0).trimmed();
         return firstLine.isEmpty() ? u"suggest"_s : u"suggest %1"_s.arg(quoteShellArg(firstLine.left(80)));
     }
     if (canonical == u"question"_s) {
         // The question is the whole point of the call, so it goes in the
         // header verbatim (capped) rather than being summarised as "question".
-        const QString asked = args.value(u"question"_s).toString().section(u'\n', 0, 0).trimmed();
+        const QString asked = questionTextFromToolArguments(args).section(u'\n', 0, 0).trimmed();
         return asked.isEmpty() ? u"question"_s : u"question %1"_s.arg(quoteShellArg(asked.left(120)));
     }
     if (toolName.startsWith(u"mcp__"_s)) {
@@ -338,6 +338,9 @@ static GraphNode *resolveGraphNode(ProjectGraph *graph, const QString &key)
     }
     if (GraphNode *direct = graph->getNode(key)) {
         return direct;
+    }
+    if (GraphNode *byPath = graph->findNodeByPath(key)) {
+        return byPath;
     }
     GraphNode *byName = nullptr;
     int nameHits = 0;
@@ -608,14 +611,9 @@ PermissionRequest ToolRunner::describe(const ToolCall &call) const
         // Read risk for the same reason: asking the user something neither
         // reads the workspace nor changes it.
         req.risk = ToolRisk::Read;
-        req.questionText = args.value(u"question"_s).toString();
-        for (const QJsonValue &value : args.value(u"options"_s).toArray()) {
-            const QString option = value.toString().trimmed();
-            if (!option.isEmpty()) {
-                req.questionOptions.append(option);
-            }
-        }
-        req.allowFreeform = jsonBool(args.value(u"allow_freeform"_s), true);
+        req.questionText = questionTextFromToolArguments(args);
+        req.questionOptions = questionOptionsFromToolArguments(args);
+        req.allowFreeform = questionAllowFreeformFromToolArguments(args, true);
         req.details = QString::fromUtf8(QJsonDocument(args).toJson(QJsonDocument::Compact));
     } else if (call.name == u"suggest"_s) {
         // Advice, not work: read risk so it never prompts, and the full
@@ -623,6 +621,10 @@ PermissionRequest ToolRunner::describe(const ToolCall &call) const
         // and the history can rebuild it later.
         req.risk = ToolRisk::Read;
         req.path = args.value(u"path"_s).toString().trimmed();
+        const QString advice = suggestionTextFromToolArguments(args);
+        if (!advice.isEmpty()) {
+            req.summary = advice.left(200);
+        }
         req.details = QString::fromUtf8(QJsonDocument(args).toJson(QJsonDocument::Compact));
     } else if (call.name == u"apply_patch"_s) {
         req.risk = ToolRisk::Write;
@@ -999,9 +1001,10 @@ ToolResult ToolRunner::editFile(const QJsonObject &args)
         return result;
     }
 
+    const QString originalContents = contents;
     contents.replace(oldString, newString);
 
-    if (!m_bridge->writeDocument(resolved, contents, &error)) {
+    if (!m_bridge->writeDocumentIfUnchanged(resolved, originalContents, contents, &error)) {
         result.ok = false;
         result.output = error;
         return result;
@@ -1226,7 +1229,7 @@ ToolResult ToolRunner::multiEditFile(const QJsonObject &args)
         totalReplacements += matches.size();
     }
 
-    if (!m_bridge->writeDocument(resolved, workingContents, &error)) {
+    if (!m_bridge->writeDocumentIfUnchanged(resolved, contents, workingContents, &error)) {
         result.ok = false;
         result.output = error.isEmpty() ? u"Failed to write modified content."_s : error;
         return result;
@@ -1601,6 +1604,10 @@ ToolResult ToolRunner::bash(const QJsonObject &args)
     QProcess process;
     process.setWorkingDirectory(m_sandbox.workspaceRoot());
     process.setProcessChannelMode(QProcess::MergedChannels);
+    // Ambient provider credentials and desktop session channels are not
+    // inherited by a sandboxed command. Off deliberately keeps the old
+    // environment behaviour.
+    process.setProcessEnvironment(m_sandbox.processEnvironment());
 #ifdef Q_OS_UNIX
     // Give the command its own session so a timeout can take down everything it
     // started. Otherwise kill() only reaps the shell we launched and whatever it
@@ -1857,6 +1864,7 @@ void ToolRunner::runBashAsync(const ToolCall &call)
     auto *process = new QProcess(this);
     process->setWorkingDirectory(m_sandbox.workspaceRoot());
     process->setProcessChannelMode(QProcess::MergedChannels);
+    process->setProcessEnvironment(m_sandbox.processEnvironment());
 #ifdef Q_OS_UNIX
     // Same session trick as the synchronous path: a timeout must be able to
     // reap the command and anything it started, not just the shell.
@@ -2020,29 +2028,26 @@ ToolResult ToolRunner::queryProjectGraph(const QJsonObject &args) const
     const QString sourceId = args.value(u"source_id"_s).toString();
     const QString targetId = args.value(u"target_id"_s).toString();
 
-    auto formatNode = [](const GraphNode *node) {
+    auto formatNode = [this](const GraphNode *node) {
         if (!node) {
             return QString();
         }
-        return u"%1 [%2] %3 loc=%4"_s.arg(node->id, node->type, node->path.isEmpty() ? node->name : node->path)
-            .arg(node->linesOfCode);
+        QString line = u"- %1 [%2]"_s.arg(m_projectGraph->nodeLabel(node), node->type);
+        if (node->linesOfCode > 0) {
+            line += u" %1 loc"_s.arg(node->linesOfCode);
+        }
+        const QString symbols = m_projectGraph->nodeSymbols(node);
+        if (!symbols.isEmpty()) {
+            line += u"; symbols: "_s + symbols;
+        }
+        return line;
     };
 
     QStringList lines;
     const QString type = queryType.isEmpty() ? u"summary"_s : queryType;
 
     if (type == u"summary"_s) {
-        lines.append(u"nodes: %1"_s.arg(m_projectGraph->getNodeCount()));
-        lines.append(u"edges: %1"_s.arg(m_projectGraph->getEdgeCount()));
-        QMap<QString, int> typeCount;
-        for (GraphNode *node : m_projectGraph->getAllNodes()) {
-            if (node) {
-                typeCount[node->type]++;
-            }
-        }
-        for (auto it = typeCount.begin(); it != typeCount.end(); ++it) {
-            lines.append(u"  %1: %2"_s.arg(it.key()).arg(it.value()));
-        }
+        lines.append(m_projectGraph->contextSummary(40, 60, 1));
     } else if (type == u"nodes"_s) {
         int shown = 0;
         for (GraphNode *node : m_projectGraph->getAllNodes()) {
@@ -2065,7 +2070,12 @@ ToolResult ToolRunner::queryProjectGraph(const QJsonObject &args) const
             if (!relationship.isEmpty() && edge->relationship != relationship) {
                 continue;
             }
-            lines.append(u"%1 -> %2 (%3)"_s.arg(edge->sourceId, edge->targetId, edge->relationship));
+            const GraphNode *source = m_projectGraph->getNode(edge->sourceId);
+            const GraphNode *target = m_projectGraph->getNode(edge->targetId);
+            lines.append(u"%1 -> %2 (%3)"_s.arg(
+                source ? m_projectGraph->nodeLabel(source) : edge->sourceId.left(12),
+                target ? m_projectGraph->nodeLabel(target) : edge->targetId.left(12),
+                edge->relationship));
             if (++shown >= 150) {
                 lines.append(u"... truncated"_s);
                 break;
@@ -2081,11 +2091,13 @@ ToolResult ToolRunner::queryProjectGraph(const QJsonObject &args) const
         lines.append(formatNode(node));
         if (type == u"dependencies"_s) {
             for (const QString &dep : node->dependencies) {
-                lines.append(u"depends on: %1"_s.arg(dep));
+                const GraphNode *depNode = m_projectGraph->getNode(dep);
+                lines.append(u"depends on: %1"_s.arg(depNode ? m_projectGraph->nodeLabel(depNode) : dep));
             }
         } else if (type == u"dependents"_s) {
             for (const QString &dep : node->dependents) {
-                lines.append(u"used by: %1"_s.arg(dep));
+                const GraphNode *depNode = m_projectGraph->getNode(dep);
+                lines.append(u"used by: %1"_s.arg(depNode ? m_projectGraph->nodeLabel(depNode) : dep));
             }
         } else {
             for (GraphNode *related : m_projectGraph->findRelatedNodes(node->id, 2)) {
@@ -2107,7 +2119,12 @@ ToolResult ToolRunner::queryProjectGraph(const QJsonObject &args) const
             if (path.isEmpty()) {
                 lines.append(u"No import path found."_s);
             } else {
-                lines.append(path.join(u" -> "_s));
+                QStringList labels;
+                for (const QString &id : path) {
+                    const GraphNode *node = m_projectGraph->getNode(id);
+                    labels.append(node ? m_projectGraph->nodeLabel(node) : id);
+                }
+                lines.append(labels.join(u" -> "_s));
             }
         } else {
             const QList<GraphNode *> chain = m_projectGraph->getDependencyChain(source->id, target->id);
@@ -2636,7 +2653,7 @@ ToolResult ToolRunner::suggest(const QJsonObject &args)
     ToolResult result;
     result.name = u"suggest"_s;
 
-    const QString text = args.value(u"suggestion"_s).toString().trimmed();
+    const QString text = suggestionTextFromToolArguments(args).trimmed();
     if (text.isEmpty()) {
         result.ok = false;
         result.output = u"suggestion must not be empty: describe what you are suggesting."_s;
@@ -2802,8 +2819,18 @@ ToolResult ToolRunner::applyPatch(const QJsonObject &args)
     // written so the tool's documented all-or-nothing contract holds even when
     // the failure happens late (a permission error, an open modified buffer,
     // a full disk).
-    const auto writeContent = [this](const QString &resolved, const QString &content, QString *error) {
-        return m_bridge && m_bridge->writeDocument(resolved, content, error);
+    const auto writeContent = [this](const QString &resolved, const QString &expected, const QString &content,
+                                     bool existed, QString *error) {
+        if (!m_bridge) {
+            if (error) {
+                *error = u"No document bridge is available."_s;
+            }
+            return false;
+        }
+        if (!existed) {
+            return m_bridge->writeDocumentIfMissing(resolved, content, error);
+        }
+        return m_bridge->writeDocumentIfUnchanged(resolved, expected, content, error);
     };
     const auto removeFile = [this](const QString &resolved, QString *error) {
         if (m_bridge) {
@@ -2829,7 +2856,7 @@ ToolResult ToolRunner::applyPatch(const QJsonObject &args)
     for (const PlannedWrite &w : planned) {
         QString error;
         const bool ok = w.isDelete ? removeFile(w.resolved, &error)
-                                   : writeContent(w.resolved, w.newContent, &error);
+                                   : writeContent(w.resolved, w.oldContent, w.newContent, w.existed, &error);
         if (!ok) {
             // Roll back in reverse order. A failure here cannot be hidden: the
             // caller must know the workspace may be partially changed.
@@ -2839,7 +2866,7 @@ ToolResult ToolRunner::applyPatch(const QJsonObject &args)
                 const PlannedWrite &undo = planned.at(i);
                 QString undoError;
                 const bool undone = undo.existed
-                    ? writeContent(undo.resolved, undo.oldContent, &undoError)
+                    ? writeContent(undo.resolved, undo.newContent, undo.oldContent, true, &undoError)
                     : removeFile(undo.resolved, &undoError);
                 if (undone) {
                     ++rolledBack;

@@ -1,3 +1,4 @@
+#include "agentloop.h"
 #include "mcp.h"
 #include "modes.h"
 #include "rules.h"
@@ -27,6 +28,23 @@ private:
     }
 
 private Q_SLOTS:
+    // --- turn lifecycle ------------------------------------------------------
+
+    void turnStateIdsAreStableAndTerminalStatesAreDistinct()
+    {
+        // These ids are persisted/logged and must not change silently.
+        QCOMPARE(AgentLoop::turnStateId(AgentLoop::TurnState::Idle), u"idle"_s);
+        QCOMPARE(AgentLoop::turnStateId(AgentLoop::TurnState::AwaitingModel), u"awaiting-model"_s);
+        QCOMPARE(AgentLoop::turnStateId(AgentLoop::TurnState::AwaitingPermission), u"awaiting-permission"_s);
+        QCOMPARE(AgentLoop::turnStateId(AgentLoop::TurnState::Interrupted), u"interrupted"_s);
+
+        QVERIFY(AgentLoop::isTerminalTurnState(AgentLoop::TurnState::Completed));
+        QVERIFY(AgentLoop::isTerminalTurnState(AgentLoop::TurnState::Failed));
+        QVERIFY(AgentLoop::isTerminalTurnState(AgentLoop::TurnState::Interrupted));
+        QVERIFY(!AgentLoop::isTerminalTurnState(AgentLoop::TurnState::Running));
+        QVERIFY(!AgentLoop::isTerminalTurnState(AgentLoop::TurnState::AwaitingTool));
+    }
+
     // --- modes ---------------------------------------------------------------
 
     void builtInModesExist()

@@ -28,7 +28,7 @@ constexpr int kCharsPerToken = 4;
 constexpr int kTokensPerMessageOverhead = 4;
 constexpr int kDefaultContextWindow = 32768;
 constexpr int kDefaultReserve = 4096;
-constexpr int kDefaultSummaryRequestChars = 280;
+constexpr int kDefaultSummaryRequestChars = 600;
 constexpr int kMinBudget = 512;
 
 int tokensOf(const ChatMessage &message)
@@ -132,12 +132,49 @@ int estimateTokens(const QList<ChatMessage> &messages)
 
 int contextWindowFor(const QString &model)
 {
-    // Deliberately no per-model table: it went stale on every model release
-    // and could not know about new ones, and an overestimated window fails
-    // the request outright. The conservative default errs the safe way (it
-    // compacts a little early); settings.contextWindow or the provider
-    // catalogue overrides it. test_contextmanager pins this behaviour.
-    Q_UNUSED(model)
+    const QString name = model.trimmed().toLower();
+    if (name.isEmpty()) {
+        return kDefaultContextWindow;
+    }
+    // Conservative family defaults. A provider catalogue or the explicit
+    // contextWindow setting still wins; these keep common coding models from
+    // compacting at the 32k fallback long before their real window is full.
+    // Values are intentionally below the advertised maximum where a model has
+    // several variants, so a wrong guess compacts early rather than overflowing.
+    if (name.contains(u"gemini"_s)) {
+        return 1000000;
+    }
+    if (name.contains(u"claude"_s)) {
+        return 200000;
+    }
+    if (name.contains(u"grok"_s)) {
+        return 256000;
+    }
+    if (name.contains(u"kimi"_s) || name.contains(u"moonshot"_s)) {
+        return 256000;
+    }
+    if (name.contains(u"deepseek"_s)) {
+        return 128000;
+    }
+    if (name.contains(u"qwen"_s) || name.contains(u"qwq"_s)) {
+        return 131072;
+    }
+    if (name.contains(u"glm"_s)) {
+        return 128000;
+    }
+    if (name.contains(u"codestral"_s) || name.contains(u"mistral"_s)) {
+        return 128000;
+    }
+    if (name.contains(u"command-r"_s)) {
+        return 128000;
+    }
+    if (name.contains(u"gpt-3.5"_s)) {
+        return 16384;
+    }
+    if (name.contains(u"gpt-4"_s) || name.contains(u"gpt-4o"_s) || name.startsWith(u"o1"_s)
+        || name.startsWith(u"o3"_s) || name.startsWith(u"o4"_s)) {
+        return 128000;
+    }
     return kDefaultContextWindow;
 }
 
@@ -162,6 +199,7 @@ QString buildSummary(const QList<ChatMessage> &dropped, int requestChars, Projec
     QSet<QString> fileSet;
     QStringList tools;
     QStringList outcomes;
+    QStringList failures;
     int rejected = 0;
 
     for (const ChatMessage &message : dropped) {
@@ -227,6 +265,23 @@ QString buildSummary(const QList<ChatMessage> &dropped, int requestChars, Projec
                 || message.content.startsWith(QLatin1String("Tool denied"))) {
                 ++rejected;
             }
+            // Preserve the last few failures/constraints. Repeating a command
+            // whose real error was compacted away is exactly the loop this
+            // summary exists to prevent.
+            {
+                const QString text = message.content.trimmed();
+                if (text.startsWith(QLatin1String("Error"))
+                    || text.startsWith(QLatin1String("Failed"))
+                    || text.startsWith(QLatin1String("Tool rejected"))
+                    || text.startsWith(QLatin1String("Tool denied"))
+                    || text.contains(QLatin1String("timed out"), Qt::CaseInsensitive)
+                    || text.contains(QLatin1String("exit code "), Qt::CaseInsensitive)) {
+                    failures.append(oneLine(text, 300));
+                    while (failures.size() > 3) {
+                        failures.removeFirst();
+                    }
+                }
+            }
             break;
         case ChatMessage::Role::System:
             break;
@@ -257,7 +312,7 @@ QString buildSummary(const QList<ChatMessage> &dropped, int requestChars, Projec
         for (const QString &f : files) {
             if (related.size() >= 30) break;
             // Try to find node by path
-            GraphNode *node = projectGraph->getNode(f);
+            GraphNode *node = projectGraph->findNodeByPath(f);
             if (!node) {
                 // Try to find by ID or partial match
                 const QList<GraphNode*> all = projectGraph->getAllNodes();
@@ -293,7 +348,11 @@ QString buildSummary(const QList<ChatMessage> &dropped, int requestChars, Projec
             }
         }
         if (!related.isEmpty()) {
-            QStringList relList = related.values();
+            QStringList relList;
+            for (const QString &path : related) {
+                relList.append(projectGraph->displayPath(path));
+            }
+            relList.sort();
             if (relList.size() > 20) {
                 relList = relList.mid(0, 20);
                 relList << QStringLiteral("…");
@@ -314,6 +373,12 @@ QString buildSummary(const QList<ChatMessage> &dropped, int requestChars, Projec
         lines << QStringLiteral("\nWhere it got to:");
         for (int i = 0; i < outcomes.size(); ++i) {
             lines << QStringLiteral("  %1. %2").arg(i + 1).arg(outcomes.at(i));
+        }
+    }
+    if (!failures.isEmpty()) {
+        lines << QStringLiteral("\nRecent errors or constraints:");
+        for (const QString &failure : failures) {
+            lines << QStringLiteral("  - %1").arg(failure);
         }
     }
     if (rejected > 0) {
@@ -471,7 +536,8 @@ QList<ChatMessage> build(const QList<ChatMessage> &history, const Options &optio
     if (keepFrom > bodyStart) {
         ChatMessage summary;
         summary.role = ChatMessage::Role::User;
-        summary.content = buildSummary(history.mid(bodyStart, keepFrom - bodyStart), requestChars, options.projectGraph);
+        summary.content = buildSummary(history.mid(bodyStart, keepFrom - bodyStart), requestChars,
+                                       options.useProjectGraph ? options.projectGraph : nullptr);
         result.append(summary);
     }
     for (int i = keepFrom; i < history.size(); ++i) {

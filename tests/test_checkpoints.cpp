@@ -278,6 +278,57 @@ private Q_SLOTS:
         QCOMPARE(readFile(m_workspace->path() + u"/a.txt"_s), u"x"_s);
     }
 
+    void restoreCreatesASafetySnapshot()
+    {
+        if (!m_hasGit) {
+            QSKIP("git is not available");
+        }
+        writeFile(m_workspace->path() + u"/a.txt"_s, u"original"_s);
+
+        CheckpointManager manager;
+        manager.setWorkspace(m_workspace->path());
+        QString error;
+        const QString checkpoint = manager.createCheckpoint(u"baseline"_s, &error);
+        QVERIFY2(!checkpoint.isEmpty(), qPrintable(error));
+
+        // Work that appeared after the checkpoint (possibly the user's) must
+        // not disappear silently when the restore overwrites it.
+        writeFile(m_workspace->path() + u"/a.txt"_s, u"later work"_s);
+        QVERIFY2(manager.restoreCheckpoint(checkpoint, &error), qPrintable(error));
+        QCOMPARE(readFile(m_workspace->path() + u"/a.txt"_s), u"original"_s);
+
+        const QList<CheckpointInfo> checkpoints = manager.checkpoints();
+        QVERIFY(checkpoints.size() >= 2);
+        const CheckpointInfo safety = checkpoints.first();
+        QVERIFY2(safety.label.startsWith(u"Before restoring "_s), qPrintable(safety.label));
+        // The snapshot holds the pre-restore state, so it differs from the
+        // worktree for the file the restore just rewrote.
+        QCOMPARE(manager.changedFileCount(safety.id), 1);
+
+        // Restoring the safety snapshot brings the newer work back.
+        QVERIFY2(manager.restoreCheckpoint(safety.id, &error), qPrintable(error));
+        QCOMPARE(readFile(m_workspace->path() + u"/a.txt"_s), u"later work"_s);
+    }
+
+    void restoreWithoutSafetySnapshotLeavesHistoryAlone()
+    {
+        if (!m_hasGit) {
+            QSKIP("git is not available");
+        }
+        writeFile(m_workspace->path() + u"/a.txt"_s, u"original"_s);
+
+        CheckpointManager manager;
+        manager.setWorkspace(m_workspace->path());
+        QString error;
+        const QString checkpoint = manager.createCheckpoint(u"baseline"_s, &error);
+        QVERIFY2(!checkpoint.isEmpty(), qPrintable(error));
+
+        writeFile(m_workspace->path() + u"/a.txt"_s, u"later work"_s);
+        QVERIFY2(manager.restoreCheckpoint(checkpoint, &error, false), qPrintable(error));
+        QCOMPARE(readFile(m_workspace->path() + u"/a.txt"_s), u"original"_s);
+        QCOMPARE(manager.checkpoints().size(), 1);
+    }
+
     void theProjectsOwnGitHistoryIsNeverTouched()
     {
         if (!m_hasGit) {

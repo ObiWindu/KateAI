@@ -15,6 +15,9 @@ class SettingsStore
 public:
     static Settings load();
     static void save(const Settings &settings);
+    // Current on-disk configuration schema version. Bumped whenever a
+    // migration step is added to load().
+    static int configVersion() { return 1; }
 };
 
 } // namespace KateAi

@@ -49,6 +49,17 @@ private Q_SLOTS:
         QCOMPARE(loaded.messages.size(), 2);
     }
 
+    void lastTurnIdSurvivesARoundTrip()
+    {
+        const QString id = SessionStore::createNewConversation();
+        QVERIFY(!id.isEmpty());
+
+        SessionStore::SessionData data;
+        data.lastTurnId = u"turn-1234"_s;
+        QVERIFY(SessionStore::saveConversation(id, data, u"Turn id"_s));
+        QCOMPARE(SessionStore::loadConversation(id).lastTurnId, u"turn-1234"_s);
+    }
+
     void badTitleRepaired()
     {
         // A title that is a compaction summary must not survive.

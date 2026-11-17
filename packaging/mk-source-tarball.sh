@@ -3,7 +3,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VERSION="$(sed -n 's/^project(kateai VERSION \([^ ]*\).*/\1/p' "${ROOT}/CMakeLists.txt" | head -1)"
-VERSION="${VERSION:-0.3.0}"
+VERSION="${VERSION:-0.4.0}"
 DIST="${ROOT}/packaging/dist"
 NAME="kateai-${VERSION}"
 STAGE="$(mktemp -d)"
