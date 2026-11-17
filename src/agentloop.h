@@ -348,6 +348,11 @@ private:
     // Every file a mutating call writes. A patch names several; the other
     // edit tools name one. Used for locks and changed-path bookkeeping.
     QStringList mutationPathsForCall(const ToolCall &call) const;
+    // The key a path is locked under. A relative path is resolved against the
+    // workspace and cleaned, so "src/../src/a.cpp" and "src/a.cpp" name one
+    // lock. Acquire and release must use the same key, so both go through
+    // here.
+    QString lockKeyForPath(const QString &path) const;
     // Pushes the active mode's tool set (and the MCP tools) to the client.
     void syncToolAccess();
     // Rebuilds the sandbox and the tool runner from the current settings and

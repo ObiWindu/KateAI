@@ -74,6 +74,25 @@ private Q_SLOTS:
         QCOMPARE(WebSearch::parseDuckDuckGo(html, 2).size(), 2);
     }
 
+    void duckDuckGoSkippedResultDoesNotShiftTheSnippets()
+    {
+        // A result that is skipped used to leave the snippet iterator one
+        // behind, so every following result showed the snippet of the one
+        // before it.
+        const QByteArray html =
+            "<a class=\"result__a\" href=\"https://a.test\">A</a>"
+            "<a class=\"result__snippet\">Snippet A.</a>"
+            "<a class=\"result__a\" href=\"ftp://b.test\">B</a>"
+            "<a class=\"result__snippet\">Snippet B.</a>"
+            "<a class=\"result__a\" href=\"https://c.test\">C</a>"
+            "<a class=\"result__snippet\">Snippet C.</a>";
+
+        const auto results = WebSearch::parseDuckDuckGo(html, 5);
+        QCOMPARE(results.size(), 2);
+        QCOMPARE(results.at(0).snippet, QStringLiteral("Snippet A."));
+        QCOMPARE(results.at(1).snippet, QStringLiteral("Snippet C."));
+    }
+
     void tavilyJsonIsParsed()
     {
         const QByteArray json =

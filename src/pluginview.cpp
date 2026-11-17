@@ -914,14 +914,20 @@ QString gitBranchForWorkspace(const QString &workspace)
         // runs with the user's privileges. The list is only used after the
         // user has seen it and agreed to it.
         QStringList names;
+        QStringList commands;
         for (const McpServerConfig &server : servers) {
             names.append(server.name);
+            commands.append(u"%1: %2"_s.arg(server.name, server.commandLine()));
         }
-        const QString message = i18n(
+        QString message = i18n(
             "The project %1 defines %n MCP server(s): %2.\n\n"
             "Starting a server runs a program on your machine. Only continue if you trust this project.",
             names.size(),
             names.join(u", "_s));
+        // The names come from the project, so they say nothing about what runs.
+        // The command line is what the user has to judge, so it is in the
+        // message itself and not only in the collapsible details.
+        message += u"\n\n"_s + i18n("These commands will run:") + u"\n"_s + commands.join(u'\n');
         QMessageBox box(QMessageBox::Question, i18n("MCP servers in this project"), message,
                         QMessageBox::Yes | QMessageBox::No, qobject_cast<QWidget *>(m_mainWindow));
         box.setDefaultButton(QMessageBox::No);

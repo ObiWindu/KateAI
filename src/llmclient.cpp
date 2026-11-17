@@ -214,6 +214,65 @@ static QString toolArgumentsText(const QJsonValue &value)
     return QString();
 }
 
+// True when the accumulated argument text is a complete JSON value. A tool
+// call that is still being streamed has incomplete arguments, which is how a
+// continuation delta is told apart from the start of a new call.
+static bool isCompleteToolArguments(const QString &arguments)
+{
+    if (arguments.trimmed().isEmpty()) {
+        return false;
+    }
+    QJsonParseError error;
+    const QJsonDocument document = QJsonDocument::fromJson(arguments.toUtf8(), &error);
+    return error.error == QJsonParseError::NoError && !document.isNull();
+}
+
+// The accumulator slot an index-less tool-call delta belongs to.
+//
+// A provider that omits "index" cannot be handled by falling back to the next
+// free slot: a call that is streamed over several deltas - which is how every
+// OpenAI-compatible server sends one - would be split into one call per delta,
+// each with a fragment of the arguments and no name. The slot is therefore
+// derived from the delta itself:
+//
+//  - A delta that names a call continues that call.
+//  - A delta without an id is a continuation of the call whose arguments are
+//    still incomplete.
+//
+// Only when neither applies is a new slot opened.
+static int slotForIndexLessDelta(const QHash<int, ToolCall> &acc, const QJsonObject &delta)
+{
+    const QString deltaId = delta.value(u"id"_s).toString();
+    if (!deltaId.isEmpty()) {
+        for (auto it = acc.constBegin(); it != acc.constEnd(); ++it) {
+            if (it.value().id == deltaId) {
+                return it.key();
+            }
+        }
+    } else {
+        int openSlot = -1;
+        int openCalls = 0;
+        for (auto it = acc.constBegin(); it != acc.constEnd(); ++it) {
+            if (isCompleteToolArguments(it.value().argumentsJson)) {
+                continue;
+            }
+            ++openCalls;
+            // The highest slot is the call that was started last.
+            openSlot = qMax(openSlot, it.key());
+        }
+        if (openCalls > 0) {
+            return openSlot;
+        }
+    }
+    // A new call: the next free slot. The keys of a hash are not ordered, so
+    // the highest one is looked for explicitly.
+    int next = 0;
+    for (auto it = acc.constBegin(); it != acc.constEnd(); ++it) {
+        next = qMax(next, it.key() + 1);
+    }
+    return next;
+}
+
 void LlmClient::applyAuthHeaders(QNetworkRequest &request, ApiFormat format, const QString &key)
 {
     if (format == ApiFormat::AnthropicCompatible) {
@@ -400,16 +459,11 @@ CompletionChunk LlmClient::parseSseLine(const QByteArray &line, QHash<int, ToolC
             const QJsonObject obj = value.toObject();
             int index = obj.value(u"index"_s).toInt();
             // A provider that omits "index" would send every parallel tool call
-            // as index 0, so they would overwrite each other. Fall back to the
-            // next free slot in that case.
+            // as index 0, so they would overwrite each other - and a call
+            // streamed over several deltas would be split into one call per
+            // delta. The slot comes from the delta instead.
             if (!obj.contains(u"index"_s)) {
-                // The next free slot. The keys of a hash are not ordered, so
-                // the highest one is looked for explicitly.
-                int next = 0;
-                for (auto it = acc->constBegin(); it != acc->constEnd(); ++it) {
-                    next = qMax(next, it.key() + 1);
-                }
-                index = next;
+                index = slotForIndexLessDelta(*acc, obj);
             }
             ToolCall &tool = (*acc)[index];
             if (obj.contains(u"id"_s) && !obj.value(u"id"_s).toString().isEmpty()) {

@@ -35,6 +35,12 @@ namespace
 // before, and the write-back then silently corrupted the tail. The scan stops
 // at the first decoding error, so a clean UTF-8 file still costs only one
 // extra sequential read (the callers read it again right after).
+//
+// The fallback is Latin-1, not the system encoding. Every byte value maps to
+// exactly one codepoint in Latin-1, so the file is read and written back byte
+// for byte. The system encoding is UTF-8 on Linux and on macOS, which would
+// decode the file exactly the way the UTF-8 guess does and destroy it all the
+// same.
 QStringConverter::Encoding encodingFor(const QString &path)
 {
     QFile file(path);
@@ -48,16 +54,23 @@ QStringConverter::Encoding encodingFor(const QString &path)
         if (read <= 0) {
             break;
         }
-        decoder.decode(QByteArrayView(buffer, static_cast<qsizetype>(read)));
+        // The decoded text has to be used. QStringDecoder::decode() returns a
+        // lazy wrapper that only runs the conversion when it is turned into a
+        // string, so discarding the result skipped the decoding altogether and
+        // hasError() stayed false for every file - which is how a non-UTF-8
+        // file was classified as UTF-8 and mangled on the way back.
+        const QString decoded = decoder.decode(QByteArrayView(buffer, static_cast<qsizetype>(read)));
+        Q_UNUSED(decoded);
         if (decoder.hasError()) {
-            return QStringConverter::System;
+            return QStringConverter::Latin1;
         }
     }
     // An incomplete multi-byte sequence at the very end of the file is also
     // a decoding error; only the flush call can see it.
-    decoder.decode(QByteArrayView());
+    const QString tail = decoder.decode(QByteArrayView());
+    Q_UNUSED(tail);
     if (decoder.hasError()) {
-        return QStringConverter::System;
+        return QStringConverter::Latin1;
     }
     return QStringConverter::Utf8;
 }

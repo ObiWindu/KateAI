@@ -89,6 +89,14 @@ private:
     bool pathInsideWorkspace(const QString &absolutePath) const;
     QString normalizePath(const QString &path, QString *error, bool forWrite) const;
     bool globMatchCached(const QString &pattern, const QString &path) const;
+    // Expands a shell glob token into the paths it currently matches, so the
+    // deny scan looks at real files instead of the pattern text. A pattern
+    // such as ".e*" names a set of files, and checking the text alone lets the
+    // shell expand it straight past a deny rule.
+    QStringList expandGlobToken(const QString &pattern) const;
+    // True when a glob pattern could name a path the deny rules cover, even
+    // when nothing on disk matches it at this moment.
+    bool patternCouldMatchDeniedName(const QString &pattern) const;
 
     QString m_workspaceRoot;
     SandboxProfile m_profile = SandboxProfile::Workspace;

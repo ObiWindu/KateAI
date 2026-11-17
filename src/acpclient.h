@@ -277,7 +277,10 @@ private:
                     std::function<void(const QJsonObject &, const QString &)> done = {},
                     int timeoutMs = 30000);
     void sendNotification(const QString &method, const QJsonObject &params);
-    void writeMessage(const QJsonObject &message);
+    // Writes a message to the agent. False when the agent is not running or
+    // the pipe did not take the whole message, so the caller can settle the
+    // request instead of waiting for an answer that cannot arrive.
+    bool writeMessage(const QJsonObject &message);
     void replyResult(const QJsonValue &id, const QJsonObject &result);
     void replyError(const QJsonValue &id, int code, const QString &message);
     // Answers whichever permission request is waiting with a "cancelled" outcome
@@ -298,6 +301,10 @@ private:
 
     void onStdioReadyRead();
     void handleBuffer();
+    // Fails the turn after a protocol frame exceeded the size limit. The frame
+    // cannot be parsed, so the answer it carried is lost and the agent would
+    // otherwise wait for a response that never comes.
+    void reportOversizedFrame();
     void handleMessage(const QJsonObject &message);
     void handleResponse(const QJsonObject &message);
     void handleIncomingRequest(const QJsonObject &message);
@@ -421,6 +428,12 @@ private:
     QString m_stderrBuffer;
     bool m_antigravityAuthUrlOpened = false;
     bool m_discardingStdoutFrame = false;
+    // The tool call that was announced last. An update that omits its id
+    // belongs to it.
+    QString m_lastToolCallId;
+    // Set once a frame exceeded the size limit, so the failure is reported a
+    // single time per turn.
+    bool m_oversizedFrameReported = false;
     bool m_shuttingDown = false;
 
     int m_nextId = 1;

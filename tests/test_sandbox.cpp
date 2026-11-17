@@ -303,6 +303,52 @@ private Q_SLOTS:
         QVERIFY(!box.isAlwaysDeniedCommand(u"rm -rf ./build"_s));
     }
 
+    void globPatternCannotWalkAroundDenyGlobs()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        QFile envFile(dir.filePath(u".env"_s));
+        QVERIFY(envFile.open(QIODevice::WriteOnly));
+        envFile.write("SECRET=1\n");
+        envFile.close();
+        QVERIFY(QDir().mkpath(dir.filePath(u".kateai"_s)));
+        QFile mcpFile(dir.filePath(u".kateai/mcp.json"_s));
+        QVERIFY(mcpFile.open(QIODevice::WriteOnly));
+        mcpFile.write("{}");
+        mcpFile.close();
+
+        Sandbox box(dir.path(), SandboxProfile::Workspace);
+        // The pattern text does not match the deny glob, but the shell expands
+        // it to the denied file, so the check has to look at the expansion.
+        QVERIFY(box.commandTouchesDeniedPath(u"cat .e*"_s));
+        QVERIFY(box.commandTouchesDeniedPath(u"cat .*nv"_s));
+        QVERIFY(box.commandTouchesDeniedPath(u"cat .kateai/mcp.jso?"_s));
+        // A quoted word must not swallow the rest of the command: the token
+        // after the closing quote is a path of its own.
+        QVERIFY(box.commandTouchesDeniedPath(u"cat \"a b.txt\" .env"_s));
+        // A pattern that expands to nothing denied keeps running.
+        QVERIFY(!box.commandTouchesDeniedPath(u"cat *.cpp"_s));
+        QVERIFY(!box.commandTouchesDeniedPath(u"cat nonexistent/*.txt"_s));
+    }
+
+    void alwaysDeniedCoversSeparatorAndHomeVariable()
+    {
+        Sandbox box(QDir::tempPath(), SandboxProfile::Workspace);
+        // "--" separates the flags from the target, and the home directory can
+        // be spelled with a variable. Both used to slip past the rule.
+        QVERIFY(box.isAlwaysDeniedCommand(u"rm -rf -- /"_s));
+        QVERIFY(box.isAlwaysDeniedCommand(u"rm -rf $HOME"_s));
+        QVERIFY(box.isAlwaysDeniedCommand(u"rm -rf ${HOME}"_s));
+        QVERIFY(box.isAlwaysDeniedCommand(u"rm --force --recursive /"_s));
+        QVERIFY(box.isAlwaysDeniedCommand(u"rm -rf --no-preserve-root -- /"_s));
+        // The program itself may be quoted or spelled with a path.
+        QVERIFY(box.isAlwaysDeniedCommand(u"\"/bin/rm\" -rf /"_s));
+        QVERIFY(box.isAlwaysDeniedCommand(u"/bin/rm -rf /"_s));
+        // A command that is not blocked must not be called dangerous either.
+        QVERIFY(box.isDangerousCommand(u"rm -rf -- /"_s));
+        QVERIFY(!box.isAlwaysDeniedCommand(u"rm -rf -- /etc/keep"_s));
+    }
+
     void emptyWorkspaceRootStaysEmpty()
     {
         // QDir("").absolutePath() is the process working directory: rooting

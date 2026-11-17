@@ -41,6 +41,10 @@ static const int kMethodNotFound = -32601;
 static const int kInvalidParams = -32602;
 static const int kInternalError = -32603;
 static const int kServerError = -32000;
+// The largest protocol frame the client accepts. A frame above it is dropped,
+// and the turn is failed rather than left waiting for an answer that cannot
+// arrive.
+static constexpr qsizetype MaxFrameBytes = 16 * 1024 * 1024;
 
 static QString jsonText(const QJsonValue &value)
 {
@@ -1138,6 +1142,7 @@ void AcpClient::stop()
     m_stderrBuffer.clear();
     m_antigravityAuthUrlOpened = false;
     m_discardingStdoutFrame = false;
+    m_oversizedFrameReported = false;
     m_sessionId.clear();
     m_promptId = 0;
     m_permissionRpcId = QJsonValue();
@@ -1332,6 +1337,7 @@ void AcpClient::spawnProcess()
     }
     m_shuttingDown = false;
     m_discardingStdoutFrame = false;
+    m_oversizedFrameReported = false;
     m_stderrBuffer.clear();
     m_antigravityAuthUrlOpened = false;
     setState(State::Starting, u"Starting ACP agent…"_s);
@@ -1378,7 +1384,16 @@ void AcpClient::spawnProcess()
     connect(m_process, &QProcess::readyReadStandardError, this, [this] {
         const QString noise = QString::fromUtf8(m_process->readAllStandardError()).trimmed();
         if (!noise.isEmpty()) {
+            // The buffer holds the agent's diagnostics for the whole lifetime
+            // of the process and is pasted into the error message when it
+            // exits. An agent that chatters on stderr would grow it without
+            // bound, so the head and the tail are kept and the rest dropped -
+            // the tail is where a failure summary lives.
+            constexpr qsizetype kMaxStderrChars = 64 * 1024;
             m_stderrBuffer.append(u"%1\n"_s.arg(noise));
+            if (m_stderrBuffer.size() > kMaxStderrChars) {
+                m_stderrBuffer = u"[... earlier output dropped ...]\n"_s + m_stderrBuffer.right(kMaxStderrChars);
+            }
             Q_EMIT logMessage(noise);
             if (acpAgentIsAntigravity(m_settings) && !m_antigravityAuthUrlOpened) {
                 static const QRegularExpression authUrlPattern(
@@ -1825,6 +1840,9 @@ void AcpClient::sendPromptNow(const QString &text)
     m_currentThinking.clear();
     m_currentPlan = QJsonArray();
     m_toolCalls = QJsonArray();
+    // The live tools of the previous turn are gone, so an update that omits
+    // its id must not be filed under one of them.
+    m_lastToolCallId.clear();
     // Tools may still be open if the previous turn was cancelled by force (an
     // agent ignoring session/cancel keeps streaming updates until the grace
     // window closes). Close their cards rather than dropping them silently, or
@@ -2028,7 +2046,23 @@ int AcpClient::sendRequest(const QString &method, const QJsonObject &params,
     message.insert(u"id"_s, id);
     message.insert(u"method"_s, method);
     message.insert(u"params"_s, params);
-    writeMessage(message);
+    if (!writeMessage(message)) {
+        // The request never reached the agent. Leaving it pending would wait
+        // for an answer that cannot come - and session/prompt has no timeout,
+        // so the turn would hang until the user stopped it.
+        const auto it = m_pending.constFind(id);
+        if (it != m_pending.constEnd()) {
+            auto callback = it.value().done;
+            m_pending.remove(id);
+            if (it.value().timeout) {
+                it.value().timeout->stop();
+            }
+            if (callback) {
+                callback(QJsonObject(), u"The ACP agent is not running, so the request could not be sent."_s);
+            }
+        }
+        return id;
+    }
     return id;
 }
 
@@ -2041,14 +2075,14 @@ void AcpClient::sendNotification(const QString &method, const QJsonObject &param
     writeMessage(message);
 }
 
-void AcpClient::writeMessage(const QJsonObject &message)
+bool AcpClient::writeMessage(const QJsonObject &message)
 {
     if (!m_process || m_process->state() == QProcess::NotRunning) {
-        return;
+        return false;
     }
     QByteArray payload = QJsonDocument(message).toJson(QJsonDocument::Compact);
     payload.append('\n');
-    m_process->write(payload);
+    return m_process->write(payload) == payload.size();
 }
 
 void AcpClient::replyResult(const QJsonValue &id, const QJsonObject &result)
@@ -2077,7 +2111,6 @@ void AcpClient::onStdioReadyRead()
     if (!m_process) {
         return;
     }
-    constexpr qsizetype kMaxFrameBytes = 16 * 1024 * 1024;
     const QByteArray output = m_process->readAllStandardOutput();
     for (qsizetype offset = 0; offset < output.size();) {
         const qsizetype chunkSize = qMin<qsizetype>(64 * 1024, output.size() - offset);
@@ -2094,22 +2127,50 @@ void AcpClient::onStdioReadyRead()
             m_stdoutBuffer.append(chunk);
         }
         handleBuffer();
-        if (m_stdoutBuffer.size() > kMaxFrameBytes) {
+        if (m_stdoutBuffer.size() > MaxFrameBytes) {
             m_stdoutBuffer.clear();
             m_discardingStdoutFrame = true;
+            reportOversizedFrame();
+            return;
         }
+    }
+}
+
+void AcpClient::reportOversizedFrame()
+{
+    if (m_oversizedFrameReported) {
+        return;
+    }
+    m_oversizedFrameReported = true;
+    // A frame this large cannot be parsed, so the answer it carried is lost.
+    // Dropping it silently left the turn without an answer: the agent waits
+    // for a response to session/prompt, and that request has no timeout, so
+    // the chat sat on "Working on it…" forever. Reporting the failure closes
+    // the turn with a reason instead.
+    const QString message = QStringLiteral("The agent sent a message larger than the %1 MiB limit, so the turn cannot continue.")
+                                .arg(MaxFrameBytes / (1024 * 1024));
+    // failAll() settles the pending prompt, and its callback reports the
+    // failure itself. Without a prompt in flight there is nobody to report it.
+    const bool hadPrompt = m_promptId != 0;
+    failAll(message);
+    setState(State::Failed, message);
+    if (!hadPrompt) {
+        Q_EMIT failed(message);
     }
 }
 
 void AcpClient::handleBuffer()
 {
-    constexpr qsizetype kMaxFrameBytes = 16 * 1024 * 1024;
     int newline = m_stdoutBuffer.indexOf('\n');
     while (newline >= 0) {
-        if (newline > kMaxFrameBytes) {
+        if (newline > MaxFrameBytes) {
+            // A single line this long cannot be a protocol frame. It is
+            // dropped, and the turn is failed: the frame it belonged to is
+            // lost, and the agent would otherwise wait for an answer that
+            // never comes.
             m_stdoutBuffer.remove(0, newline + 1);
-            newline = m_stdoutBuffer.indexOf('\n');
-            continue;
+            reportOversizedFrame();
+            return;
         }
         QByteArray line = m_stdoutBuffer.left(newline);
         m_stdoutBuffer.remove(0, newline + 1);
@@ -2406,6 +2467,9 @@ void AcpClient::handleSessionUpdate(const QJsonObject &update)
             request.toolCallId = QUuid::createUuid().toString(QUuid::WithoutBraces);
         }
         m_liveTools.insert(request.toolCallId, request);
+        // Remembered so a later update that omits the id can be filed under
+        // the call it belongs to.
+        m_lastToolCallId = request.toolCallId;
         linkToolTerminals(request.toolCallId, update.value(u"content"_s));
         QJsonObject function;
         function.insert(u"name"_s, request.toolName);
@@ -2422,7 +2486,17 @@ void AcpClient::handleSessionUpdate(const QJsonObject &update)
         return;
     }
     if (kind == u"tool_call_update"_s) {
-        const QString toolCallId = update.value(u"toolCallId"_s).toString();
+        QString toolCallId = update.value(u"toolCallId"_s).toString();
+        if (toolCallId.isEmpty()) {
+            // An update without an id belongs to the call that was announced
+            // last. Keying it under "" instead would file every id-less
+            // update under the same entry, so the card would show the last
+            // one and the others were lost.
+            toolCallId = m_lastToolCallId;
+            if (toolCallId.isEmpty()) {
+                return;
+            }
+        }
         const QString status = update.value(u"status"_s).toString();
         PermissionRequest existing = m_liveTools.value(toolCallId);
         if (existing.toolCallId.isEmpty()) {

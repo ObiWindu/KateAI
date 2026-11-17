@@ -130,6 +130,27 @@ bool acpNeedsPageShim()
 #endif
 }
 
+// A library that is loaded into the agent process through LD_PRELOAD must come
+// from a place the user cannot write to: /tmp is world-writable and the
+// working directory belongs to the project, so a file planted there would be
+// loaded into the agent. Only the installation directory and the system
+// directories are searched, and the file must not be writable by anyone else.
+static bool isTrustedShimSource(const QString &path)
+{
+    const QFileInfo info(path);
+    if (!info.exists() || !info.isFile()) {
+        return false;
+    }
+    if (info.permissions() & (QFileDevice::WriteGroup | QFileDevice::WriteOther)) {
+        return false;
+    }
+    const QFileInfo dirInfo(info.absolutePath());
+    if (dirInfo.permissions() & QFileDevice::WriteOther) {
+        return false;
+    }
+    return true;
+}
+
 QString acpEnsurePageShim(const QString &dir)
 {
     if (dir.isEmpty()) {
@@ -140,35 +161,40 @@ QString acpEnsurePageShim(const QString &dir)
         return target;
     }
 
-    // Check if a built libpage4k.so exists in known directories
-    const QStringList knownPaths = {
-        QCoreApplication::applicationDirPath() + u"/libpage4k.so"_s,
-        QCoreApplication::applicationDirPath() + u"/../lib/libpage4k.so"_s,
-        QCoreApplication::applicationDirPath() + u"/../lib64/libpage4k.so"_s,
-        QDir::current().filePath(u"build/bin/libpage4k.so"_s),
-        QDir::current().filePath(u"src/page4k_shim.so"_s),
-        u"/usr/lib64/kateai/libpage4k.so"_s,
-        u"/usr/lib/kateai/libpage4k.so"_s,
-        u"/tmp/libpage4k.so"_s,
+    // The directories the shim may come from: the installation and the system
+    // directories. The working directory and /tmp are deliberately not on the
+    // list - a project or another user on the machine could plant a library
+    // there, and it would then be loaded into the agent.
+    const QStringList trustedDirs = {
+        QCoreApplication::applicationDirPath(),
+        QCoreApplication::applicationDirPath() + u"/../lib"_s,
+        QCoreApplication::applicationDirPath() + u"/../lib64"_s,
+        u"/usr/lib/kateai"_s,
+        u"/usr/lib64/kateai"_s,
     };
-    for (const QString &src : knownPaths) {
-        if (QFileInfo::exists(src)) {
-            QDir().mkpath(dir);
-            if (QFile::copy(src, target)) {
-                QFile::setPermissions(target, QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner
-                                                | QFileDevice::ReadGroup | QFileDevice::ExeGroup
-                                                | QFileDevice::ReadOther | QFileDevice::ExeOther);
-                return target;
-            }
+    for (const QString &base : trustedDirs) {
+        const QString src = QDir(base).filePath(u"libpage4k.so"_s);
+        if (!isTrustedShimSource(src)) {
+            continue;
+        }
+        QDir().mkpath(dir);
+        if (QFile::copy(src, target)) {
+            QFile::setPermissions(target, QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner
+                                            | QFileDevice::ReadGroup | QFileDevice::ExeGroup
+                                            | QFileDevice::ReadOther | QFileDevice::ExeOther);
+            return target;
         }
     }
 
-    // If no prebuilt binary is found, try compiling page4k_shim.c if gcc/cc is available
+    // If no prebuilt binary is found, compile the shim that ships with the
+    // plugin. Only the installation directory is used: a "src/page4k_shim.c"
+    // in the working directory belongs to the project, and compiling it would
+    // run code the project supplied.
     const QString gcc = QStandardPaths::findExecutable(u"gcc"_s);
     const QString cc = gcc.isEmpty() ? QStandardPaths::findExecutable(u"cc"_s) : gcc;
     if (!cc.isEmpty()) {
-        const QString srcPath = QDir::current().filePath(u"src/page4k_shim.c"_s);
-        if (QFileInfo::exists(srcPath)) {
+        const QString srcPath = QDir(QCoreApplication::applicationDirPath()).filePath(u"page4k_shim.c"_s);
+        if (isTrustedShimSource(srcPath)) {
             QDir().mkpath(dir);
             QProcess compile;
             compile.start(cc, {u"-shared"_s, u"-fPIC"_s, u"-O2"_s, u"-o"_s, target, srcPath, u"-ldl"_s, u"-lpthread"_s});

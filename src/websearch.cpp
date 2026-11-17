@@ -399,7 +399,10 @@ void WebSearch::search(const QString &query, const QString &callId, int maxResul
     }
     case Provider::SearXNG: {
         QUrl url(m_endpoint);
-        QUrlQuery searxItems;
+        // The endpoint may carry its own query - an instance token, a
+        // language, a category. They are kept: replacing the query dropped
+        // them, and a SearXNG that needs a token then answered with an error.
+        QUrlQuery searxItems(url.query());
         searxItems.addQueryItem(QStringLiteral("q"), effectiveQuery);
         searxItems.addQueryItem(QStringLiteral("format"), QStringLiteral("json"));
         url.setQuery(searxItems);
@@ -478,7 +481,14 @@ void WebSearch::fetchPage(const QString &url, const QString &callId, int timeout
         // The body is read in one piece when the reply finishes, so nothing
         // bounds the memory a page (or a URL the model chose) can take. The
         // download is stopped as soon as the per-call cap is reached.
-        if (reply->bytesAvailable() + reply->header(QNetworkRequest::ContentLengthHeader).toLongLong() > effectiveMaxBytes) {
+        //
+        // The declared length is the size of the whole body and the available
+        // bytes are what has arrived so far. Adding the two counted the body
+        // twice, so every page of more than half the cap was rejected - with
+        // a message about a cap it was well below.
+        const qint64 declaredSize = reply->header(QNetworkRequest::ContentLengthHeader).toLongLong();
+        const qint64 received = reply->bytesAvailable();
+        if ((declaredSize > 0 && declaredSize > effectiveMaxBytes) || received > effectiveMaxBytes) {
             stopTimerFor(reply);
             reply->disconnect(this);
             m_replies.removeAll(reply);
@@ -700,6 +710,15 @@ QList<WebSearchResult> WebSearch::parseDuckDuckGo(const QByteArray &html, int ma
     auto snippetIt = snippetPattern.globalMatch(QString::fromUtf8(html));
     while (it.hasNext() && results.size() < maxResults) {
         const QRegularExpressionMatch match = it.next();
+        // The snippet belongs to the anchor that is being read, so it is taken
+        // here - before a result can be skipped. Taking it only for a result
+        // that is kept left the snippet iterator one behind, and every
+        // following result then showed the snippet of the one before it.
+        QString rawSnippet;
+        if (snippetIt.hasNext()) {
+            rawSnippet = snippetIt.next().captured(1);
+            rawSnippet.replace(tagPattern, QString());
+        }
         QString href = match.captured(1);
         // Unwrap the redirect wrapper.
         const int marker = href.indexOf(QLatin1String("uddg="));
@@ -724,11 +743,7 @@ QList<WebSearchResult> WebSearch::parseDuckDuckGo(const QByteArray &html, int ma
         QString title = match.captured(2);
         title.replace(tagPattern, QString());
         result.title = collapseWhitespace(decodeHtmlEntities(title));
-        if (snippetIt.hasNext()) {
-            QString raw = snippetIt.next().captured(1);
-            raw.replace(tagPattern, QString());
-            result.snippet = collapseWhitespace(decodeHtmlEntities(raw));
-        }
+        result.snippet = collapseWhitespace(decodeHtmlEntities(rawSnippet));
         results.append(result);
     }
     return results;
@@ -812,16 +827,24 @@ QString WebSearch::htmlTitle(const QByteArray &html)
 // lone surrogates.
 QString decodeHtmlEntities(const QString &input)
 {
-    static const QHash<QString, QString> kEntities = {
-        {QStringLiteral("&nbsp;"), QStringLiteral(" ")},  {QStringLiteral("&amp;"), QStringLiteral("&")},
-        {QStringLiteral("&lt;"), QStringLiteral("<")},    {QStringLiteral("&gt;"), QStringLiteral(">")},
-        {QStringLiteral("&quot;"), QStringLiteral("\"")},{QStringLiteral("&#39;"), QStringLiteral("'")},
-        {QStringLiteral("&apos;"), QStringLiteral("'")}, {QStringLiteral("&mdash;"), QStringLiteral("\u2014")},
-        {QStringLiteral("&ndash;"), QStringLiteral("\u2013")},{QStringLiteral("&hellip;"), QStringLiteral("\u2026")},
+    // The order is the order of the list, not the order of a hash: "&amp;"
+    // produces an "&", so decoding it before "&lt;" would turn "&amp;lt;" into
+    // "<" instead of the literal text "&lt;".
+    static const QList<QPair<QString, QString>> kEntities = {
+        {QStringLiteral("&nbsp;"), QStringLiteral(" ")},
+        {QStringLiteral("&lt;"), QStringLiteral("<")},
+        {QStringLiteral("&gt;"), QStringLiteral(">")},
+        {QStringLiteral("&quot;"), QStringLiteral("\"")},
+        {QStringLiteral("&#39;"), QStringLiteral("'")},
+        {QStringLiteral("&apos;"), QStringLiteral("'")},
+        {QStringLiteral("&mdash;"), QStringLiteral("\u2014")},
+        {QStringLiteral("&ndash;"), QStringLiteral("\u2013")},
+        {QStringLiteral("&hellip;"), QStringLiteral("\u2026")},
+        {QStringLiteral("&amp;"), QStringLiteral("&")},
     };
     QString text = input;
-    for (auto it = kEntities.constBegin(); it != kEntities.constEnd(); ++it) {
-        text.replace(it.key(), it.value());
+    for (const QPair<QString, QString> &entity : kEntities) {
+        text.replace(entity.first, entity.second);
     }
 
     static const QRegularExpression numericEntity(QStringLiteral("&#(x?)([0-9a-fA-F]+);"));

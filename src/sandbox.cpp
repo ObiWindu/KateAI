@@ -17,6 +17,8 @@
 #include <QSet>
 #include <QStandardPaths>
 
+#include <functional>
+
 #ifdef Q_OS_UNIX
 #include <signal.h>
 #include <unistd.h>
@@ -26,6 +28,11 @@ using namespace Qt::Literals::StringLiterals;
 
 namespace KateAi
 {
+
+    // How many paths a single glob token may expand to. The expansion only
+    // feeds the deny scan, so a bound keeps a wide pattern in a huge directory
+    // from turning the permission check into a directory walk.
+    constexpr int MaxGlobExpansionResults = 512;
 
     static QString globToRegex(const QString &pattern)
     {
@@ -129,6 +136,133 @@ namespace KateAi
             regex += QLatin1Char('$');
         }
         return regex;
+    }
+
+    // Splits a command line into shell words, honouring quotes. The shell
+    // operators that separate one command from the next are kept as their own
+    // words so a caller can tell where an invocation ends.
+    static QStringList shellTokens(const QString &command)
+    {
+        QStringList tokens;
+        bool inSingleQuote = false;
+        bool inDoubleQuote = false;
+        QString currentToken;
+
+        for (int i = 0; i < command.size(); ++i) {
+            const QChar c = command.at(i);
+
+            if (c == u'\'' && !inDoubleQuote) {
+                inSingleQuote = !inSingleQuote;
+                currentToken.append(c);
+            } else if (c == u'"' && !inSingleQuote) {
+                inDoubleQuote = !inDoubleQuote;
+                currentToken.append(c);
+            } else if ((c.isSpace() || c == u';' || c == u'|' || c == u'&' || c == u'<' || c == u'>') && !inSingleQuote && !inDoubleQuote) {
+                if (!currentToken.isEmpty()) {
+                    tokens.append(currentToken);
+                    currentToken.clear();
+                }
+                if (c == u'|' && i + 1 < command.size() && command.at(i + 1) == u'|') {
+                    tokens.append(QString(u"||"));
+                    ++i;
+                } else if (c == u'&' && i + 1 < command.size() && command.at(i + 1) == u'&') {
+                    tokens.append(QString(u"&&"));
+                    ++i;
+                } else if (c == u'>' && i + 1 < command.size() && command.at(i + 1) == u'>') {
+                    // An output redirection is a delimiter too: ">>file" must not
+                    // glue the arrows onto the path and hide a deny-glob hit.
+                    ++i;
+                }
+            } else {
+                currentToken.append(c);
+            }
+        }
+        if (!currentToken.isEmpty()) {
+            tokens.append(currentToken);
+        }
+        return tokens;
+    }
+
+    // True when a word carries a shell glob metacharacter, so it names a set of
+    // paths rather than one path.
+    static bool containsGlobMeta(const QString &word)
+    {
+        return word.contains(u'*') || word.contains(u'?') || word.contains(u'[');
+    }
+
+    // A word that separates one command from the next.
+    static bool isShellSeparator(const QString &word)
+    {
+        return word == u";" || word == u"&&" || word == u"||" || word == u"|" || word == u"&";
+    }
+
+    // True when an "rm" invocation removes the filesystem root or the home
+    // directory. The flags may be short ("-rf", "-fr"), long ("--recursive",
+    // "--force") and in any order, "--" may separate them from the target, and
+    // the target may be the root, the home directory, or something below it,
+    // spelled with "~", "$HOME" or the resolved home path.
+    static bool rmTargetsRootOrHome(const QString &command)
+    {
+        const QString home = QDir::homePath();
+        const QStringList words = shellTokens(command);
+        for (int i = 0; i < words.size(); ++i) {
+            const QString &word = words.at(i);
+            // The quotes are stripped before the command is looked at, so
+            // "\"/bin/rm\"" is recognised like the bare spelling.
+            QString bareWord = word;
+            bareWord.remove(u'"');
+            bareWord.remove(u'\'');
+            const QString base = QFileInfo(bareWord).fileName();
+            if (base != u"rm"_s) {
+                continue;
+            }
+            bool recursive = false;
+            bool force = false;
+            bool endOfFlags = false;
+            QString target;
+            for (int j = i + 1; j < words.size(); ++j) {
+                const QString &arg = words.at(j);
+                if (isShellSeparator(arg)) {
+                    break;
+                }
+                if (!endOfFlags && arg == u"--"_s) {
+                    endOfFlags = true;
+                    continue;
+                }
+                if (!endOfFlags && arg.startsWith(u'-') && arg.size() > 1) {
+                    if (arg.startsWith(u"--"_s)) {
+                        recursive = recursive || arg == u"--recursive"_s;
+                        force = force || arg == u"--force"_s;
+                    } else {
+                        for (const QChar flag : arg) {
+                            recursive = recursive || flag == u'r';
+                            force = force || flag == u'f';
+                        }
+                    }
+                    continue;
+                }
+                target = arg;
+                break;
+            }
+            if (!recursive && !force) {
+                continue;
+            }
+            // The quotes are stripped before the target is compared, so
+            // "rm -rf \"/\"" is recognised like the bare spelling.
+            QString bare = target;
+            bare.remove(u'"');
+            bare.remove(u'\'');
+            if (bare.isEmpty()) {
+                continue;
+            }
+            const bool isRoot = bare == u"/"_s || bare.startsWith(u"/*"_s);
+            const bool isHome = bare == u"~"_s || bare.startsWith(u"~/"_s) || bare == u"$HOME"_s || bare.startsWith(u"$HOME/"_s)
+                || bare == u"${HOME}"_s || bare.startsWith(u"${HOME}/"_s) || bare == home || bare.startsWith(home + u'/');
+            if (isRoot || isHome) {
+                return true;
+            }
+        }
+        return false;
     }
 
     Sandbox::Sandbox(QString workspaceRoot, SandboxProfile profile, QStringList extraDenyGlobs, bool allowOutsideReads)
@@ -717,15 +851,122 @@ bool Sandbox::isAlwaysDeniedCommand(const QString &command) const
     const QString cmd = command.trimmed();
     // The rm branch covers a recursive or forced removal of the filesystem
     // root, of everything directly below it ("rm -rf /*"), or of the home
-    // directory ("rm -rf ~", "rm -rf ~/…"), with the root written bare or
-    // quoted ("rm -rf /", "rm -rf \"/\""). The flags - the short forms, the
-    // long forms --force/--recursive, and --no-preserve-root - may appear in
-    // any order and any combination. Deeper absolute paths are not matched:
-    // they are a normal cleanup the permission prompt can judge.
+    // directory ("rm -rf ~", "rm -rf ~/…"). It is parsed rather than matched
+    // with one regular expression: the flags may appear in any order, "--" may
+    // separate them from the target ("rm -rf -- /"), and the target may be
+    // spelled with a shell variable ("rm -rf $HOME"). A single anchored
+    // pattern missed those spellings, and a command that slipped past was not
+    // even classified as dangerous.
+    if (rmTargetsRootOrHome(cmd)) {
+        return true;
+    }
+    // Everything else the policy blocks outright. Deeper absolute paths are
+    // not matched here: they are a normal cleanup the permission prompt can
+    // judge.
     static const QRegularExpression denied(
-        uR"((rm\s+((?:-[a-zA-Z]*[rf][a-zA-Z]*|--no-preserve-root|--force|--recursive)\s+)+(/(\s|$|\*+)|["']/["']?(\s|$|\*+)|~(/\S*)?(\s|$)))|(\bmkfs\b)|(\bdd\s+.*\bof=/dev/)|(:\(\)\s*\{\s*:\|:&\s*;\s*\})|(\b(curl|wget)\b.*\|\s*(?:sudo\s+)?(sh|bash|zsh|fish|dash|ksh|cmd|cmd\.exe|powershell|powershell\.exe|pwsh|python[0-9.]*|perl|ruby|node)\b)|(\bformat\s+[a-zA-Z]:)|(\bdiskpart\b)|(\brmdir\s+/s\s+/q\s+[a-zA-Z]:\\)|(\bRemove-Item\s+.*-Recurse.*[A-Z]:\\))"_s,
+        uR"((\bmkfs\b)|(\bdd\s+.*\bof=/dev/)|(:\(\)\s*\{\s*:\|:&\s*;\s*\})|(\b(curl|wget)\b.*\|\s*(?:sudo\s+)?(sh|bash|zsh|fish|dash|ksh|cmd|cmd\.exe|powershell|powershell\.exe|pwsh|python[0-9.]*|perl|ruby|node)\b)|(\bformat\s+[a-zA-Z]:)|(\bdiskpart\b)|(\brmdir\s+/s\s+/q\s+[a-zA-Z]:\\)|(\bRemove-Item\s+.*-Recurse.*[A-Z]:\\))"_s,
         QRegularExpression::CaseInsensitiveOption);
     return denied.match(cmd).hasMatch();
+}
+
+QStringList Sandbox::expandGlobToken(const QString &pattern) const
+{
+    QStringList results;
+    if (pattern.isEmpty() || m_workspaceRoot.isEmpty()) {
+        return results;
+    }
+
+    const QString native = QDir::fromNativeSeparators(pattern);
+    const bool absolute = native.startsWith(u'/');
+    QStringList segments = native.split(u'/');
+    if (absolute && !segments.isEmpty()) {
+        segments.removeFirst();
+    }
+    // A trailing slash means "the directory itself", not its contents.
+    while (!segments.isEmpty() && segments.last().isEmpty()) {
+        segments.removeLast();
+    }
+    if (segments.isEmpty()) {
+        return results;
+    }
+
+    // The base the pattern is relative to: the workspace root, because that is
+    // the working directory of every sandboxed command.
+    QStringList base;
+    if (absolute) {
+        base.append(u"/"_s);
+    } else {
+        base.append(m_workspaceRoot);
+    }
+
+    // Walk the segments one at a time. A literal segment is descended into, a
+    // patterned one is matched against the directory listing.
+    std::function<void(const QString &, int)> walk = [&](const QString &dir, int index) {
+        if (index >= segments.size() || results.size() >= MaxGlobExpansionResults) {
+            return;
+        }
+        const QString &segment = segments.at(index);
+        const bool last = index == segments.size() - 1;
+        QDir current(dir);
+        if (!current.exists()) {
+            return;
+        }
+        if (!containsGlobMeta(segment)) {
+            const QString next = QDir(current).filePath(segment);
+            if (last) {
+                if (QFileInfo::exists(next)) {
+                    results.append(next);
+                }
+            } else if (QFileInfo(next).isDir()) {
+                walk(next, index + 1);
+            }
+            return;
+        }
+        const QRegularExpression nameRe(globToRegex(segment));
+        const QFileInfoList entries = current.entryInfoList(QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden);
+        for (const QFileInfo &entry : entries) {
+            if (!nameRe.match(entry.fileName()).hasMatch()) {
+                continue;
+            }
+            const QString next = entry.absoluteFilePath();
+            if (last) {
+                results.append(next);
+            } else if (entry.isDir()) {
+                walk(next, index + 1);
+            }
+            if (results.size() >= MaxGlobExpansionResults) {
+                return;
+            }
+        }
+    };
+
+    for (const QString &part : base) {
+        walk(part, 0);
+    }
+    return results;
+}
+
+bool Sandbox::patternCouldMatchDeniedName(const QString &pattern) const
+{
+    const QString native = QDir::fromNativeSeparators(pattern);
+    const QStringList segments = native.split(u'/');
+    const QString nameSegment = segments.isEmpty() ? pattern : segments.last();
+    if (nameSegment.isEmpty()) {
+        return false;
+    }
+    const QRegularExpression nameRe(globToRegex(nameSegment));
+    for (const QString &glob : denyGlobs()) {
+        const QStringList globSegments = QDir::fromNativeSeparators(glob).split(u'/');
+        const QString denyName = globSegments.isEmpty() ? glob : globSegments.last();
+        if (denyName.isEmpty()) {
+            continue;
+        }
+        // The pattern can produce the denied name, so the command may read it.
+        if (nameRe.match(denyName).hasMatch()) {
+            return true;
+        }
+    }
+    return false;
 }
 
 bool Sandbox::commandTouchesDeniedPath(const QString &command) const
@@ -743,44 +984,8 @@ bool Sandbox::commandTouchesDeniedPath(const QString &command) const
     // glob tool for pattern searches, and a blocked call reports why.
     
     // Parse command respecting quoted strings
-    QStringList tokens;
-    bool inSingleQuote = false;
-    bool inDoubleQuote = false;
-    QString currentToken;
-    
-    for (int i = 0; i < command.size(); ++i) {
-        QChar c = command.at(i);
-        
-        if (c == u'\'' && !inDoubleQuote) {
-            inSingleQuote = !inSingleQuote;
-            currentToken.append(c);
-        } else if (c == u'"' && !inSingleQuote) {
-            inDoubleQuote = !inDoubleQuote;
-            currentToken.append(c);
-        } else if ((c.isSpace() || c == u';' || c == u'|' || c == u'&' || c == u'<' || c == u'>') && !inSingleQuote && !inDoubleQuote) {
-            if (!currentToken.isEmpty()) {
-                tokens.append(currentToken);
-                currentToken.clear();
-            }
-            if (c == u'|' && i + 1 < command.size() && command.at(i + 1) == u'|') {
-                tokens.append(QString(u"||"));
-                ++i;
-            } else if (c == u'&' && i + 1 < command.size() && command.at(i + 1) == u'&') {
-                tokens.append(QString(u"&&"));
-                ++i;
-            } else if (c == u'>' && i + 1 < command.size() && command.at(i + 1) == u'>') {
-                // An output redirection is a delimiter too: ">>file" must not
-                // glue the arrows onto the path and hide a deny-glob hit.
-                ++i;
-            }
-        } else {
-            currentToken.append(c);
-        }
-    }
-    if (!currentToken.isEmpty()) {
-        tokens.append(currentToken);
-    }
-    
+    const QStringList tokens = shellTokens(command);
+
     for (const QString &token : tokens) {
         QString candidate = token;
         // A flag is not a path, but its value can name one: "--config=.env"
@@ -819,6 +1024,31 @@ bool Sandbox::commandTouchesDeniedPath(const QString &command) const
         // cannot be resolved here; those tokens are checked as written.
         static const QRegularExpression homeVar(uR"(\$\{HOME\}|\$HOME(?![A-Za-z0-9_]))"_s);
         candidate.replace(homeVar, QDir::homePath());
+        // A glob token names a set of files, not one path. Checking the pattern
+        // text alone lets "cat .e*" past the "**/.env" rule while the shell
+        // expands it to the dotfile, so the pattern is expanded against the
+        // filesystem and every match is checked.
+        if (containsGlobMeta(candidate)) {
+            const QStringList expanded = expandGlobToken(candidate);
+            if (expanded.isEmpty()) {
+                // Nothing on disk matches, so there is nothing to read either -
+                // but the pattern could still cover a denied name, and
+                // over-blocking is the safe direction here.
+                if (patternCouldMatchDeniedName(candidate)) {
+                    return true;
+                }
+            }
+            for (const QString &match : expanded) {
+                const QString absolute = QDir::cleanPath(QDir::fromNativeSeparators(QFileInfo(match).absoluteFilePath()));
+                if (isDenied(absolute)) {
+                    return true;
+                }
+                const QString resolved = normalizePath(absolute, nullptr, false);
+                if (!resolved.isEmpty() && resolved != absolute && isDenied(resolved)) {
+                    return true;
+                }
+            }
+        }
         const QString adjustedCandidate = windowsAbsoluteCandidate(m_workspaceRoot, candidate);
         // Check the path as written, then the symlink-resolved form, so a denied
         // name is caught even when the file does not exist yet.

@@ -73,6 +73,11 @@ struct McpServerConfig {
     {
         return mcpTransportId(transport);
     }
+    // What actually starts the server: the program and its arguments for a
+    // stdio server, the endpoint for an HTTP one. A server runs with the
+    // user's privileges, so the trust prompt has to show this rather than the
+    // name the project chose for it.
+    QString commandLine() const;
     static McpTransport transportFromId(const QString &id);
 
     QJsonObject toJson() const;

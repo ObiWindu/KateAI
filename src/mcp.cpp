@@ -49,6 +49,21 @@ QString sanitizeMcpSegment(const QString &segment)
     return out;
 }
 
+// A JSON value used as a command argument or as an environment value.
+// QJsonValue::toString() answers an empty string for a number or a boolean,
+// so such an argument was silently dropped and the server was started with a
+// different command line than the configuration described.
+QString jsonValueAsText(const QJsonValue &value)
+{
+    if (value.isString()) {
+        return value.toString();
+    }
+    if (value.isNull() || value.isUndefined()) {
+        return QString();
+    }
+    return QString::fromUtf8(QJsonDocument::fromVariant(value.toVariant()).toJson(QJsonDocument::Compact));
+}
+
 bool isMcpToolName(const QString &toolName)
 {
     return toolName.startsWith(mcpToolPrefix()) && toolName.size() > mcpToolPrefix().size();
@@ -142,6 +157,26 @@ bool McpServerConfig::isValid(QString *error) const
     return true;
 }
 
+QString McpServerConfig::commandLine() const
+{
+    if (transport == McpTransport::Http) {
+        return url.trimmed();
+    }
+    // The program and its arguments, quoted so the boundaries stay readable.
+    QStringList parts;
+    if (!command.trimmed().isEmpty()) {
+        parts.append(command.trimmed());
+    }
+    for (const QString &arg : args) {
+        if (arg.contains(u' ') || arg.contains(u'\t')) {
+            parts.append(u"\"%1\""_s.arg(arg));
+        } else {
+            parts.append(arg);
+        }
+    }
+    return parts.join(u' ');
+}
+
 QJsonObject McpServerConfig::toJson() const
 {
     QJsonObject obj;
@@ -198,12 +233,12 @@ McpServerConfig McpServerConfig::fromJson(const QJsonObject &object, const QStri
     config.command = object.value(u"command"_s).toString();
     const QJsonArray args = object.value(u"args"_s).toArray();
     for (const QJsonValue &value : args) {
-        config.args.append(value.toString());
+        config.args.append(jsonValueAsText(value));
     }
     config.cwd = object.value(u"cwd"_s).toString();
     const QJsonObject envObj = object.value(u"env"_s).toObject();
     for (auto it = envObj.constBegin(); it != envObj.constEnd(); ++it) {
-        config.env.insert(it.key(), it.value().toString());
+        config.env.insert(it.key(), jsonValueAsText(it.value()));
     }
     config.url = object.value(u"url"_s).toString();
     if (config.url.isEmpty()) {
@@ -843,7 +878,13 @@ void McpClient::onHttpFinished(QNetworkReply *reply, int id)
             return;
         }
         if (id > 0) {
+            // The request was already settled - its watchdog fired while the
+            // reply was still in flight. The server itself is fine; one slow
+            // call must not mark it as failed, or the manager tears it down and
+            // restarts it.
             m_pending.remove(id);
+            Q_EMIT logMessage(i18n("MCP request failed after it had already timed out: %1").arg(detail));
+            return;
         }
         setState(McpServerState::Failed, u"Request failed: %1"_s.arg(detail));
         return;
@@ -1074,9 +1115,23 @@ void McpManager::setEnabled(bool enabled)
 
 void McpManager::setServers(const QList<McpServerConfig> &servers)
 {
+    // The server name is part of the qualified name its tools are exposed
+    // under: "mcp__<server>__<tool>". A name with a double underscore is
+    // collapsed in the qualified name, so the client map and the tool lookup
+    // would disagree and every tool of that server would be unreachable
+    // ("No MCP server named ..."). The name is normalised once, here, so both
+    // sides use the same spelling.
+    QList<McpServerConfig> normalised;
+    normalised.reserve(servers.size());
+    for (const McpServerConfig &config : servers) {
+        McpServerConfig copy = config;
+        copy.name = sanitizeMcpSegment(copy.name.trimmed());
+        normalised.append(copy);
+    }
+
     // Drop servers that vanished from the configuration.
     QStringList wanted;
-    for (const McpServerConfig &config : servers) {
+    for (const McpServerConfig &config : normalised) {
         if (!config.name.trimmed().isEmpty()) {
             wanted.append(config.name);
         }
@@ -1091,7 +1146,7 @@ void McpManager::setServers(const QList<McpServerConfig> &servers)
         }
     }
     if (!changed) {
-        for (const McpServerConfig &config : servers) {
+        for (const McpServerConfig &config : normalised) {
             const auto it = std::find_if(existing.cbegin(), existing.cend(), [&config](const McpServerConfig &item) {
                 return item.name == config.name;
             });
@@ -1108,7 +1163,7 @@ void McpManager::setServers(const QList<McpServerConfig> &servers)
     disconnectAll();
     qDeleteAll(m_clients);
     m_clients.clear();
-    m_configs = servers;
+    m_configs = normalised;
     rebuildClients();
     Q_EMIT serversChanged();
     if (m_enabled && m_autoConnect) {

@@ -50,6 +50,25 @@ private Q_SLOTS:
         QCOMPARE(acc.size(), 2);
     }
 
+    void toolCallStreamedWithoutIndexStaysOneCall()
+    {
+        // A provider that omits "index" and streams the arguments in fragments
+        // - the shape every OpenAI-compatible server uses - was split into one
+        // call per delta, each with a fragment of the arguments and no name.
+        QHash<int, ToolCall> acc;
+        LlmClient::parseSseLine(
+            QByteArray("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"a\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\"}}]}}]}"),
+            &acc);
+        LlmClient::parseSseLine(
+            QByteArray("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"arguments\":\"\\\"main.cpp\\\"}\"}}]}}]}"),
+            &acc);
+        QCOMPARE(acc.size(), 1);
+        const ToolCall tool = acc.value(0);
+        QCOMPARE(tool.id, u"a"_s);
+        QCOMPARE(tool.name, u"read_file"_s);
+        QCOMPARE(tool.argumentsJson, u"{\"path\":\"main.cpp\"}"_s);
+    }
+
     void placeholderObjectDoesNotBreakTheArguments()
     {
         // A server that opens with "{}" and follows it with the real

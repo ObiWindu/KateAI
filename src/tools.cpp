@@ -1947,6 +1947,30 @@ void ToolRunner::runBashAsync(const ToolCall &call)
         process->kill();
     });
 
+    // A process that fails to start never reports "finished": Qt emits
+    // errorOccurred(FailedToStart) and nothing else. Without this handler the
+    // tool call was never settled, the agent loop kept its in-flight counter
+    // raised and the turn waited for a result that could not arrive.
+    connect(process, &QProcess::errorOccurred, this, [this, callId, timeout](QProcess::ProcessError error) {
+        if (error != QProcess::FailedToStart) {
+            return;
+        }
+        timeout->stop();
+        auto *process = m_bashProcesses.take(callId);
+        if (!process) {
+            return;
+        }
+        m_bashAccumulated.remove(callId);
+        m_bashTimedOut.remove(callId);
+        ToolResult result;
+        result.toolCallId = callId;
+        result.name = u"bash"_s;
+        result.ok = false;
+        result.output = u"The command could not be started: %1"_s.arg(process->errorString());
+        process->deleteLater();
+        Q_EMIT bashFinished(result);
+    });
+
     connect(process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this, [this, callId, drain, timeout, timeoutMs](int, QProcess::ExitStatus) {
         // The command ended on its own: stop the timeout timer, or a process
         // that finished right at the deadline is reported as timed out.

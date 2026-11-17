@@ -148,6 +148,53 @@ private Q_SLOTS:
         QCOMPARE(mode->topP, 0.1);
     }
 
+    void testReadOnlyModeKeepsTheEditGroupsOut()
+    {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+
+        const QString path = tempDir.path() + u"/.kateai/modes/reviewer.md"_s;
+        QVERIFY(QDir().mkpath(tempDir.path() + u"/.kateai/modes"_s));
+        {
+            QFile f(path);
+            QVERIFY(f.open(QIODevice::WriteOnly | QIODevice::Text));
+            f.write(u"---\nid: reviewer\nname: Reviewer\nreadOnly: true\ngroups: [read, edit, command]\n---\n"_s.toUtf8());
+        }
+
+        ModeRegistry registry;
+        registry.setWorkspace(tempDir.path());
+        const ModeDefinition *mode = registry.modeById(u"reviewer"_s);
+        QVERIFY(mode);
+        // The key was never read, so the mode kept the edit and command
+        // groups and the read-only promise was not kept.
+        QVERIFY(mode->readOnly);
+        QVERIFY(!mode->groups.contains(ToolGroup::edit()));
+        QVERIFY(!mode->groups.contains(ToolGroup::command()));
+        QVERIFY(mode->groups.contains(ToolGroup::read()));
+    }
+
+    void testBlockScalarMayContainTheFrontmatterDelimiter()
+    {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+
+        const QString path = tempDir.path() + u"/.kateai/modes/with-separator.md"_s;
+        QVERIFY(QDir().mkpath(tempDir.path() + u"/.kateai/modes"_s));
+        {
+            QFile f(path);
+            QVERIFY(f.open(QIODevice::WriteOnly | QIODevice::Text));
+            // A "---" inside the block scalar belongs to the scalar; it used to
+            // end the frontmatter, so the role definition was cut short.
+            f.write(u"---\nid: with-separator\nroleDefinition: |\n  First line\n  ---\n  Third line\n---\n"_s.toUtf8());
+        }
+
+        ModeRegistry registry;
+        registry.setWorkspace(tempDir.path());
+        const ModeDefinition *mode = registry.modeById(u"with-separator"_s);
+        QVERIFY(mode);
+        QVERIFY(mode->roleDefinition.contains(u"Third line"_s));
+    }
+
     void testToolGroupsCoverTheNewTools()
     {
         // The read-only group must carry the planning/asking tools so plan

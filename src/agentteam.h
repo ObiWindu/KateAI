@@ -63,11 +63,16 @@ public:
 
     // Enabled agents, built-ins first.
     QList<AgentProfile> agents() const;
+    // Every agent with this id, enabled or not. Returned by value because the
+    // roster is rebuilt per call and a pointer into it would not outlive us.
+    std::optional<AgentProfile> byIdIncludingDisabled(const QString &id) const;
     // The enabled agent with this id, if any. Returned by value because the
     // roster is rebuilt per call and a pointer into it would not outlive us.
     std::optional<AgentProfile> byId(const QString &id) const;
     // Resolves a requested agent id to a profile, falling back to the Code
-    // mode with the id as its name.
+    // mode with the id as its name. An agent the user disabled never runs with
+    // the mode it was declared with: it falls back to the read-only Ask mode
+    // instead, so naming it cannot hand out write rights the roster withheld.
     AgentProfile resolve(const QString &id) const;
     // Ids and names for the orchestrator's system prompt.
     QString describeRoster() const;

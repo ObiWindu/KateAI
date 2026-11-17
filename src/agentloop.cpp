@@ -1028,22 +1028,6 @@ void AgentLoop::abort()
     m_client.abort();
     const bool stopAcpProcess = usesAcpNative(m_settings) && m_acp.isBusy();
     const QString acpSessionId = stopAcpProcess ? m_acp.sessionId() : QString();
-    m_acp.cancel();
-    if (stopAcpProcess) {
-        // session/cancel is advisory. Some ACP agents keep streaming and can
-        // continue issuing filesystem requests after Kate has started a new
-        // conversation. A late promptFinished is also indistinguishable from
-        // the next prompt's completion because ACP notifications do not carry
-        // a prompt id. Retire the subprocess while the turn is being aborted
-        // so neither writes nor stale events can cross the conversation
-        // boundary. Preserve the session id for a same-conversation restart;
-        // resetConversation() clears it immediately after this call.
-        if (!acpSessionId.isEmpty()) {
-            m_acp.setResumeSessionId(acpSessionId);
-        }
-        const QSignalBlocker suppressAbortSignals(&m_acp);
-        m_acp.stop();
-    }
     m_web.abort();
 
     // The turn is over before anything is cancelled. cancelBash() and the
@@ -1060,6 +1044,30 @@ void AgentLoop::abort()
     }
     m_pendingAcpAnswer.clear();
     m_acpToolQuestionId.clear();
+
+    // The ACP client reports the cancelled prompt synchronously: cancel()
+    // finishes a pending prompt, and finishPrompt() emits promptFinished right
+    // away. The handler treats that as the end of a live turn - it appends the
+    // aborted answer to the transcript, closes the turn as completed and can
+    // start the next one - so it must not run while the turn is still live.
+    // The turn was closed above, and the handler returns early when the loop
+    // is no longer busy, so the late finish is ignored.
+    m_acp.cancel();
+    if (stopAcpProcess) {
+        // session/cancel is advisory. Some ACP agents keep streaming and can
+        // continue issuing filesystem requests after Kate has started a new
+        // conversation. A late promptFinished is also indistinguishable from
+        // the next prompt's completion because ACP notifications do not carry
+        // a prompt id. Retire the subprocess while the turn is being aborted
+        // so neither writes nor stale events can cross the conversation
+        // boundary. Preserve the session id for a same-conversation restart;
+        // resetConversation() clears it immediately after this call.
+        if (!acpSessionId.isEmpty()) {
+            m_acp.setResumeSessionId(acpSessionId);
+        }
+        const QSignalBlocker suppressAbortSignals(&m_acp);
+        m_acp.stop();
+    }
 
     // A snapshot that was waiting for this turn cannot resume now.
     clearCheckpointWait();
@@ -2763,16 +2771,22 @@ void AgentLoop::releaseEditLocksFor(const ToolCall &call)
         return;
     }
     for (QString path : mutationPathsForCall(call)) {
-        if (!m_workspace.isEmpty() && QDir::isRelativePath(path)) {
-            // cleanPath so the lock key is canonical: "src/../src/a.cpp" and
-            // "src/a.cpp" must name the same lock, or two agents could hold
-            // "different" locks on one file. acquireEditLock() normalises the
-            // same way, which is what makes release() find the key again.
-            path = QDir::cleanPath(m_workspace + QLatin1Char('/') + path);
-        }
-        m_locks->release(path, m_selfId);
-        m_owedPaths.removeAll(path);
+        const QString key = lockKeyForPath(path);
+        m_locks->release(key, m_selfId);
+        m_owedPaths.removeAll(key);
     }
+}
+
+QString AgentLoop::lockKeyForPath(const QString &path) const
+{
+    if (!m_workspace.isEmpty() && QDir::isRelativePath(path)) {
+        // cleanPath so the lock key is canonical: "src/../src/a.cpp" and
+        // "src/a.cpp" must name the same lock, or two agents could hold
+        // "different" locks on one file. A relative path is resolved against
+        // the workspace, not against the working directory of the process.
+        return QDir::cleanPath(m_workspace + QLatin1Char('/') + path);
+    }
+    return path;
 }
 
 bool AgentLoop::acquireEditLock(const ToolCall &call, QString *deniedBy)
@@ -2785,11 +2799,7 @@ bool AgentLoop::acquireEditLock(const ToolCall &call, QString *deniedBy)
     // already taken for this call and report the holder.
     QStringList acquired;
     for (QString path : mutationPathsForCall(call)) {
-        if (!m_workspace.isEmpty() && QDir::isRelativePath(path)) {
-            // See releaseEditLocksFor(): the key must be canonical so both
-            // sides of the lock agree on it.
-            path = QDir::cleanPath(m_workspace + QLatin1Char('/') + path);
-        }
+        path = lockKeyForPath(path);
         if (!m_locks->tryAcquire(path, m_selfId)) {
             if (deniedBy) {
                 *deniedBy = m_locks->holder(path);

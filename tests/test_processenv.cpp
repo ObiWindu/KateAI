@@ -79,6 +79,21 @@ private Q_SLOTS:
         QVERIFY(!sanitized.contains(u"MY_SERVICE_TOKEN"_s));
     }
 
+    void urlWithCredentialsIsDropped()
+    {
+        // The name says nothing about the value: "DATABASE_URL" is not a
+        // secret by name, but the password in the userinfo part is.
+        QProcessEnvironment base;
+        base.insert(u"PATH"_s, u"/usr/bin"_s);
+        base.insert(u"DATABASE_URL"_s, u"postgres://user:s3cret@db.internal:5432/app"_s);
+        base.insert(u"PUBLIC_URL"_s, u"https://example.com/path"_s);
+
+        const QProcessEnvironment sanitized = sanitizedProcessEnvironment(base);
+        QVERIFY(!sanitized.contains(u"DATABASE_URL"_s));
+        // A URL without credentials is kept.
+        QVERIFY(sanitized.contains(u"PUBLIC_URL"_s));
+    }
+
     void explicitlyRequestedSecretsCanBeReadded()
     {
         // The sanitizer is a starting point; a caller that deliberately needs a

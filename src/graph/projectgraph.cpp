@@ -14,6 +14,7 @@
 #include <QRegularExpression>
 #include <QStack>
 #include <QQueue>
+#include <QVector>
 #include <QCryptographicHash>
 #include <algorithm>
 #include <cmath>
@@ -923,8 +924,27 @@ QList<GraphSymbol> ProjectGraph::extractSymbols(const QString &content, const QS
     const bool isJs = language == u"javascript"_s || language == u"typescript"_s
         || language == u"jsx"_s || language == u"tsx"_s;
 
-    auto lineOf = [&content](int offset) -> int {
-        return offset <= 0 ? 1 : int(content.left(offset).count(u'\n')) + 1;
+    // The line index and the split lines are computed once per file. They used
+    // to be recomputed for every symbol: lineOf() copied the whole prefix of
+    // the file to count its newlines, and indentEndLine() split the file into
+    // lines again - so indexing one file cost symbols x file size.
+    QVector<int> lineStarts;
+    lineStarts.reserve(64);
+    lineStarts.append(0);
+    for (int i = 0; i < content.size(); ++i) {
+        if (content.at(i) == u'\n') {
+            lineStarts.append(i + 1);
+        }
+    }
+    const QStringList contentLines = content.split(u'\n');
+
+    auto lineOf = [&lineStarts](int offset) -> int {
+        if (offset <= 0) {
+            return 1;
+        }
+        // The last line start that is not past the offset.
+        const auto it = std::upper_bound(lineStarts.constBegin(), lineStarts.constEnd(), offset);
+        return int(it - lineStarts.constBegin());
     };
     auto columnOf = [&content](int offset) -> int {
         const int nl = content.lastIndexOf(u'\n', qMax(0, offset - 1));
@@ -951,12 +971,11 @@ QList<GraphSymbol> ProjectGraph::extractSymbols(const QString &content, const QS
     };
     // Indentation-based end line for Python: the block ends at the first
     // non-blank line whose indent is not deeper than the definition's.
-    auto indentEndLine = [&content, &lineOf](int from, int baseIndent) -> int {
+    auto indentEndLine = [&contentLines, &lineOf](int from, int baseIndent) -> int {
         const int startLine = lineOf(from);
-        const QStringList lines = content.split(u'\n');
         int endLine = startLine;
-        for (int i = startLine; i < lines.size(); ++i) {
-            const QString &line = lines.at(i);
+        for (int i = startLine; i < contentLines.size(); ++i) {
+            const QString &line = contentLines.at(i);
             if (line.trimmed().isEmpty()) {
                 continue;
             }
@@ -1391,6 +1410,15 @@ bool ProjectGraph::loadFromFile(const QString &filePath)
 {
     QFile file(filePath);
     if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        return false;
+    }
+
+    // The graph file is written by the plugin, but it lives in the project and
+    // can be replaced by anything. A huge file would be read into memory in
+    // one piece and then parsed, so the size is bounded first.
+    constexpr qint64 kMaxGraphBytes = 64 * 1024 * 1024;
+    if (file.size() > kMaxGraphBytes) {
+        qWarning() << "KateAI: project graph file too large, not loaded:" << filePath << file.size();
         return false;
     }
 

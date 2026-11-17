@@ -69,14 +69,37 @@ bool isSecretEnvironmentName(const QString &name)
     return exact.contains(upper);
 }
 
+// A URL that carries a password in its userinfo part:
+// "postgres://user:secret@host/db". The name says nothing about it -
+// "DATABASE_URL" is not a secret by name - but the value is a password, and a
+// sandboxed command would inherit it.
+static bool valueCarriesCredentials(const QString &value)
+{
+    const int schemeEnd = value.indexOf(u"://"_s);
+    if (schemeEnd < 0) {
+        return false;
+    }
+    const int authorityStart = schemeEnd + 3;
+    const int pathStart = value.indexOf(u'/', authorityStart);
+    const QString authority = value.mid(authorityStart, pathStart < 0 ? -1 : pathStart - authorityStart);
+    const int at = authority.lastIndexOf(u'@');
+    if (at < 0) {
+        return false;
+    }
+    // A userinfo without a colon is a user name, not a secret.
+    return authority.left(at).contains(u':');
+}
+
 QProcessEnvironment sanitizedProcessEnvironment(const QProcessEnvironment &base)
 {
     QProcessEnvironment out;
     const QStringList names = base.keys();
     for (const QString &name : names) {
-        if (!isSecretEnvironmentName(name)) {
-            out.insert(name, base.value(name));
+        const QString value = base.value(name);
+        if (isSecretEnvironmentName(name) || valueCarriesCredentials(value)) {
+            continue;
         }
+        out.insert(name, value);
     }
     return out;
 }

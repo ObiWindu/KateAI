@@ -1539,19 +1539,39 @@ QList<ChatMessage> compressMessageHistory(const QList<ChatMessage> &messages,
 QJsonArray parsePlanFromText(const QString &text)
 {
     QJsonArray plan;
-    const QString lower = text.toLower();
-    int start = -1;
-    const QStringList markers = QStringList() 
+    const QStringList markers = QStringList()
         << u"## plan"_s << u"## implementation plan"_s << u"## plan (structured)"_s
         << u"plan:"_s << u"implementation plan:"_s << u"steps:"_s << u"action plan:"_s;
+    // The marker has to open a line. A bare "plan:" is also the tail of
+    // "explanation:", and "steps:" turns up in ordinary prose - matched
+    // anywhere in the text, they started a plan in the middle of a sentence.
     // The earliest marker wins, not the first one in the list: a text that
     // contains both "Plan:" and "## Implementation Plan" has to start at the
     // place where the plan really begins.
-    for (const QString &m : markers) {
-        const int index = lower.indexOf(m);
-        if (index >= 0 && (start < 0 || index < start)) {
-            start = index;
+    int start = -1;
+    int offset = 0;
+    const QStringList lines = text.split(u'\n');
+    for (const QString &line : lines) {
+        const QString trimmed = line.trimmed();
+        const QString lowerTrimmed = trimmed.toLower();
+        if (!lowerTrimmed.isEmpty()) {
+            // The offset of the marker in the text: the line start plus the
+            // indentation in front of it.
+            int indent = 0;
+            while (indent < line.size() && line.at(indent).isSpace()) {
+                ++indent;
+            }
+            for (const QString &m : markers) {
+                if (!lowerTrimmed.startsWith(m)) {
+                    continue;
+                }
+                const int index = offset + indent;
+                if (start < 0 || index < start) {
+                    start = index;
+                }
+            }
         }
+        offset += line.size() + 1;
     }
     if (start < 0) {
         return plan;
