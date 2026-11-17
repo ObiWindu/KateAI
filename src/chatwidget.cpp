@@ -1005,7 +1005,13 @@ ChatWidget::ChatWidget(QWidget *parent)
         // it is posted rather than only once the call has reported back; the
         // parsed arguments are stashed as well, so a failure can be reported
         // against this same card instead of a second one appearing.
-        if (request.toolName == u"suggest"_s) {
+        //
+        // The name is compared canonically: an agent may hand its advice over
+        // as suggestion, propose or advice, and the restored card already
+        // matches on the canonical name. A live call that answered to a
+        // different name got the generic card and a JSON blob instead of the
+        // advice it was carrying.
+        if (canonicalToolName(request.toolName) == u"suggest"_s) {
             const Suggestion suggestion = suggestionFromRequest(request);
             m_pendingSuggestions.insert(request.toolCallId, suggestion);
             if (!suggestion.text.isEmpty()) {
@@ -1037,8 +1043,9 @@ ChatWidget::ChatWidget(QWidget *parent)
         toolWidget->setRunning();
         // What the call is working on, up in the body while it runs. A question
         // is the one tool whose payload is prose rather than arguments, so its
-        // card carries the question instead of a JSON blob of it.
-        if (request.toolName == u"question"_s) {
+        // card carries the question instead of a JSON blob of it. The tool name
+        // is compared canonically: an agent may ask under ask_user & friends.
+        if (canonicalToolName(request.toolName) == u"question"_s) {
             QString asked = request.questionText;
             if (asked.trimmed().isEmpty()) {
                 const QJsonDocument doc = QJsonDocument::fromJson(request.details.toUtf8());
@@ -1046,7 +1053,15 @@ ChatWidget::ChatWidget(QWidget *parent)
                     asked = questionTextFromToolArguments(doc.object());
                 }
             }
-            toolWidget->setRunningInput(asked.isEmpty() ? request.summary : asked);
+            if (asked.trimmed().isEmpty() && request.summary != request.toolName
+                && request.summary != request.originalToolName) {
+                asked = request.summary;
+            }
+            // Kept for the finished card: setFinished clears the running input,
+            // and the card would otherwise show the answer without the question
+            // that produced it.
+            m_questionTexts.insert(request.toolCallId, asked);
+            toolWidget->setRunningInput(asked);
         } else {
             toolWidget->setRunningInput(request.details);
         }
@@ -1139,6 +1154,19 @@ ChatWidget::ChatWidget(QWidget *parent)
             ToolResult displayResult = result;
             if (!result.rawOutput.isEmpty()) {
                 displayResult.output = result.rawOutput;
+            }
+            // A question's payload is prose, not arguments: setFinished clears
+            // the running input, so without this the finished card shows only
+            // the answer and the question that prompted it is lost. The
+            // restored card keeps it (see restoreHistoricalTool); a live card
+            // has to read the same.
+            const QString asked = m_questionTexts.take(result.toolCallId);
+            if (!asked.trimmed().isEmpty()) {
+                if (displayResult.output.trimmed().isEmpty()) {
+                    displayResult.output = asked;
+                } else if (!displayResult.output.contains(asked.left(40))) {
+                    displayResult.output = asked + u"\n\n— Answer: "_s + displayResult.output;
+                }
             }
             widget->setFinished(displayResult);
         }
@@ -5941,6 +5969,7 @@ void ChatWidget::clearTranscriptContents()
         m_progressTimer->stop();
     }
     m_pendingProgress.clear();
+    m_questionTexts.clear();
     if (m_streamRenderTimer) {
         m_streamRenderTimer->stop();
     }

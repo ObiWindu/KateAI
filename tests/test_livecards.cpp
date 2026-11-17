@@ -265,6 +265,92 @@ private Q_SLOTS:
                  qPrintable(promptBody->toPlainText()));
     }
 
+    // The question card is the only card whose payload is prose. Once the
+    // question is answered the answer takes the body, and the question that
+    // prompted it has to stay in the card: the restored card keeps it, and a
+    // live card that dropped it read as "the agent answered ok" with no
+    // question anywhere near it.
+    void testQuestionCardKeepsTheQuestionAfterItIsAnswered()
+    {
+        setup();
+        PermissionRequest req = request(u"question"_s, u"tc-q2"_s, u"{\"question\": \"Which one?\"}"_s);
+        req.questionText = u"Which one?"_s;
+        req.questionOptions = QStringList({u"Rewrite"_s});
+        req.allowFreeform = true;
+        Q_EMIT m_widget->agent()->toolStarted(req);
+        Q_EMIT m_widget->agent()->questionAsked(req);
+        QTest::qWait(80);
+
+        ToolCallWidget *card = cardOfClass<ToolCallWidget>(QStringLiteral("ToolCallWidget_tc-q2"));
+        QVERIFY2(card, "no card was created for the question");
+        QTextBrowser *body = cardBody(card);
+        QVERIFY2(body, "the question card has no body surface");
+        QVERIFY2(body->toPlainText().contains(QStringLiteral("Which one?")),
+                 qPrintable(body->toPlainText()));
+
+        // The answer lands in the same card, and the question stays with it.
+        Q_EMIT m_widget->agent()->toolFinished(result(u"question"_s, u"tc-q2"_s, u"Rewrite"_s));
+        QTest::qWait(80);
+        const QString finished = body->toPlainText();
+        QVERIFY2(finished.contains(QStringLiteral("Which one?")),
+                 qPrintable(QStringLiteral("the finished card lost the question: %1").arg(finished)));
+        QVERIFY2(finished.contains(QStringLiteral("Rewrite")),
+                 qPrintable(QStringLiteral("the finished card lost the answer: %1").arg(finished)));
+    }
+
+    // An agent hands its advice over under a name of its own. The advice is
+    // still advice: the card has to show it, not the arguments as a JSON blob.
+    // The restored card already matched on the canonical name, so a live call
+    // that answered to a different name read completely differently from the
+    // same conversation after a reload.
+    void testAdviceUnderAnAliasNameStillGetsASuggestionCard()
+    {
+        setup();
+        PermissionRequest suggestion = request(u"suggestion"_s, u"tc-suggest-alias-name"_s, QString());
+        suggestion.originalToolName = u"suggestion"_s;
+        suggestion.details = QStringLiteral(
+            "{\"suggestion\": \"Hoist this allocation out of the loop\", \"path\": \"src/agentloop.cpp\", \"line\": 2100}");
+        Q_EMIT m_widget->agent()->toolStarted(suggestion);
+        QTest::qWait(80);
+
+        SuggestionWidget *card = suggestionCard(u"tc-suggest-alias-name"_s);
+        QVERIFY2(card, "advice under another name produced no suggestion card");
+        const QList<QTextBrowser *> bodies = card->findChildren<QTextBrowser *>();
+        QVERIFY(!bodies.isEmpty());
+        QVERIFY2(bodies.first()->toPlainText().contains(u"Hoist this allocation"_s),
+                 qPrintable(bodies.first()->toPlainText()));
+        // The generic card would render the arguments as a JSON blob instead of
+        // the advice they carry.
+        QVERIFY2(!cardOfClass<ToolCallWidget>(QStringLiteral("ToolCallWidget_tc-suggest-alias-name")),
+                 "advice must not get the generic tool card");
+    }
+
+    // The same for a question: the card in the transcript carries the question
+    // and the prompt above the composer repeats it.
+    void testQuestionUnderAnAliasNameStillShowsTheQuestion()
+    {
+        setup();
+        PermissionRequest question = request(u"ask_user"_s, u"tc-question-alias-name"_s,
+                                             u"{\"question\": \"Which strategy should I use?\"}"_s);
+        question.originalToolName = u"ask_user"_s;
+        Q_EMIT m_widget->agent()->toolStarted(question);
+        Q_EMIT m_widget->agent()->questionAsked(question);
+        QTest::qWait(80);
+
+        ToolCallWidget *card = cardOfClass<ToolCallWidget>(QStringLiteral("ToolCallWidget_tc-question-alias-name"));
+        QVERIFY2(card, "no card was created for the question");
+        QTextBrowser *body = cardBody(card);
+        QVERIFY2(body->toPlainText().contains(u"Which strategy should I use?"_s),
+                 qPrintable(body->toPlainText()));
+
+        QuestionWidget *prompt = questionCard(u"tc-question-alias-name"_s);
+        QVERIFY2(prompt, "no question prompt in the intent dock");
+        QTextBrowser *promptBody = prompt->findChild<QTextBrowser *>();
+        QVERIFY(promptBody);
+        QVERIFY2(promptBody->toPlainText().contains(u"Which strategy should I use?"_s),
+                 qPrintable(promptBody->toPlainText()));
+    }
+
     // A suggestion is advice the user is meant to read, and it is fully written
     // by the time the tool is called: waiting for the result before showing it
     // meant the card appeared with nothing in it, or not at all.

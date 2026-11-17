@@ -496,6 +496,10 @@ private:
     // Live question cards, keyed by the tool call id that asked them.
     QHash<QString, QuestionWidget *> m_questionWidgets;
     QList<QPointer<QuestionWidget>> m_questionOrder;
+    // The question each question tool asked, keyed by the tool call id. The
+    // card shows it while the question is open; when the tool finishes the
+    // answer takes the body, so the question is folded back in.
+    QHash<QString, QString> m_questionTexts;
     // Latest live output per running tool, flushed on a timer so a chatty
     // command does not re-render its card once per chunk.
     QHash<QString, QString> m_pendingProgress;
