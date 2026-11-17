@@ -65,11 +65,19 @@ fi
 
 echo "==> Building plugin against ${CRAFT_ROOT}"
 mkdir -p "${ROOT}/artifacts-macos-tmp"
+if [[ -n "${PLUGIN_SO}" && ! -f "${PLUGIN_SO}" ]]; then
+    # actions/download-artifact has changed its directory layout across
+    # versions. Accept the expected file plus a nested/renamed extraction
+    # instead of failing the bundle because of one extra path component.
+    PLUGIN_SO="$(find "${ROOT}/artifacts-macos-tmp" -type f \
+        \( -name 'kateai-macos.so' -o -name 'kateai.so' \) -print 2>/dev/null | head -1 || true)"
+fi
+if [[ -n "${PLUGIN_SO}" && ! -f "${PLUGIN_SO}" ]]; then
+    echo "WARNING: prebuilt plugin was not found under ${ROOT}/artifacts-macos-tmp; rebuilding it." >&2
+    find "${ROOT}/artifacts-macos-tmp" -maxdepth 4 -type f -print >&2 2>/dev/null || true
+    PLUGIN_SO=""
+fi
 if [[ -n "${PLUGIN_SO}" ]]; then
-    if [[ ! -f "${PLUGIN_SO}" ]]; then
-        echo "Plugin binary not found: ${PLUGIN_SO}" >&2
-        exit 1
-    fi
     cp -f "${PLUGIN_SO}" "${ROOT}/artifacts-macos-tmp/kateai.so"
     echo "==> Reusing prebuilt plugin ${PLUGIN_SO}"
 else
