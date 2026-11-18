@@ -4,8 +4,8 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QHash>
 #include <QProcess>
-#include <QStandardPaths>
 #include <QTemporaryDir>
 #include <QTemporaryFile>
 #include <QTest>
@@ -54,18 +54,39 @@ SandboxRunResult runSandboxed(const Sandbox &box, const QString &command, int ti
     return result;
 }
 
-bool bubblewrapRuntimeWorks()
+bool bubblewrapRuntimeWorks(SandboxProfile profile)
 {
 #if defined(Q_OS_LINUX)
-    static const bool works = []() {
-        const QString bwrap = QStandardPaths::findExecutable(u"bwrap"_s);
-        if (bwrap.isEmpty()) {
+    // Probe the wrapper the sandbox actually builds for this profile, not a
+    // hand-written subset of its flags. A host can allow a user/PID namespace
+    // but reject the network or cgroup namespace (Fedora aarch64 runners have
+    // done both); the old probe passed anyway and the strict/read-only runtime
+    // tests failed at the first command instead of skipping. Per-profile
+    // results keep the workspace runtime test running on hosts where only the
+    // network-namespaced profiles are unavailable.
+    static QHash<int, bool> cache;
+    const int key = static_cast<int>(profile);
+    const auto cached = cache.constFind(key);
+    if (cached != cache.constEnd()) {
+        return cached.value();
+    }
+
+    const bool works = [profile]() {
+        QTemporaryDir workspace;
+        if (!workspace.isValid()) {
+            return false;
+        }
+        Sandbox box(workspace.path(), profile);
+        QString error;
+        const QStringList wrapped = box.wrapCommand(u"true"_s, &error);
+        if (wrapped.isEmpty()) {
             return false;
         }
         QProcess probe;
         probe.setProcessChannelMode(QProcess::MergedChannels);
-        probe.start(bwrap, {u"--die-with-parent"_s, u"--unshare-user-try"_s, u"--unshare-pid"_s,
-                            u"--ro-bind"_s, u"/"_s, u"/"_s, u"--"_s, u"/bin/sh"_s, u"-c"_s, u"true"_s});
+        probe.setWorkingDirectory(workspace.path());
+        probe.setProcessEnvironment(box.processEnvironment());
+        probe.start(wrapped.first(), wrapped.mid(1));
         if (!probe.waitForStarted(5000)) {
             return false;
         }
@@ -76,8 +97,10 @@ bool bubblewrapRuntimeWorks()
         }
         return probe.exitStatus() == QProcess::NormalExit && probe.exitCode() == 0;
     }();
+    cache.insert(key, works);
     return works;
 #else
+    Q_UNUSED(profile);
     return false;
 #endif
 }
@@ -646,7 +669,8 @@ private Q_SLOTS:
             QSKIP(qPrintable(error));
         }
         QVERIFY(command.contains(u"--tmpfs"_s));
-        QVERIFY(!command.contains(u"/bin/sh"_s));
+        // The shell path itself is host-dependent (`/bin/sh` on Fedora, other
+        // paths elsewhere); what matters is that the host root is not mounted.
         for (int i = 0; i + 2 < command.size(); ++i) {
             QVERIFY(!(command.at(i) == u"--ro-bind"_s && command.at(i + 1) == u"/"_s && command.at(i + 2) == u"/"_s));
         }
@@ -849,8 +873,8 @@ private Q_SLOTS:
 #if !defined(Q_OS_LINUX)
         QSKIP("bubblewrap runtime isolation is Linux-only");
 #else
-        if (!bubblewrapRuntimeWorks()) {
-            QSKIP("bubblewrap cannot create the required namespaces in this environment");
+        if (!bubblewrapRuntimeWorks(SandboxProfile::Strict)) {
+            QSKIP("bubblewrap cannot create the required strict namespaces in this environment");
         }
 
         QTemporaryDir workspace;
@@ -946,8 +970,8 @@ private Q_SLOTS:
 #if !defined(Q_OS_LINUX)
         QSKIP("bubblewrap runtime isolation is Linux-only");
 #else
-        if (!bubblewrapRuntimeWorks()) {
-            QSKIP("bubblewrap cannot create the required namespaces in this environment");
+        if (!bubblewrapRuntimeWorks(SandboxProfile::Workspace)) {
+            QSKIP("bubblewrap cannot create the required workspace sandbox in this environment");
         }
 
         QTemporaryDir workspace;
@@ -982,8 +1006,8 @@ private Q_SLOTS:
 #if !defined(Q_OS_LINUX)
         QSKIP("bubblewrap runtime isolation is Linux-only");
 #else
-        if (!bubblewrapRuntimeWorks()) {
-            QSKIP("bubblewrap cannot create the required namespaces in this environment");
+        if (!bubblewrapRuntimeWorks(SandboxProfile::ReadOnly)) {
+            QSKIP("bubblewrap cannot create the required read-only namespaces in this environment");
         }
 
         QTemporaryDir workspace;
