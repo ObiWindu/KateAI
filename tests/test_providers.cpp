@@ -22,6 +22,20 @@ private Q_SLOTS:
         QVERIFY2(compressed.size() <= 100,
                  qPrintable(QStringLiteral("compressText returned %1 characters").arg(compressed.size())));
         QVERIFY(compressed.contains(u"truncated"_s));
+        // A budget smaller than the indicator itself must still be honoured.
+        QCOMPARE(compressText(text, 5, true), QString(5, QLatin1Char('x')));
+    }
+
+    void apiEndpointDoesNotDoubleTheVersionSegment()
+    {
+        QCOMPARE(joinApiEndpoint(u"https://api.anthropic.com/v1"_s, u"/v1/messages"_s),
+                 u"https://api.anthropic.com/v1/messages"_s);
+        QCOMPARE(joinApiEndpoint(u"https://api.anthropic.com"_s, u"/v1/messages"_s),
+                 u"https://api.anthropic.com/v1/messages"_s);
+        QCOMPARE(joinApiEndpoint(u"https://api.openai.com/v1/"_s, u"/chat/completions"_s),
+                 u"https://api.openai.com/v1/chat/completions"_s);
+        QCOMPARE(joinApiEndpoint(u"http://localhost:8080"_s, u"/acp/v1/chat/completions"_s),
+                 u"http://localhost:8080/acp/v1/chat/completions"_s);
     }
 
     void truncateSafeDoesNotSplitASurrogatePair()

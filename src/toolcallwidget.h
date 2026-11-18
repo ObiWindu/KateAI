@@ -73,6 +73,8 @@ public:
     // toolStarted, so approval and execution share one widget.
     void showApproval();
     void setApprovalResolved(PermissionDecision decision);
+    // Hides an approval row whose request was superseded by a newer one.
+    void cancelApproval();
     bool isAwaitingApproval() const
     {
         return m_awaitingApproval;

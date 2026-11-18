@@ -20,6 +20,8 @@
 #include <QSysInfo>
 #include <QStandardPaths>
 #include <QTemporaryFile>
+#include <QUuid>
+#include <QUrl>
 
 #if defined(Q_OS_UNIX)
 #include <unistd.h>
@@ -38,7 +40,11 @@ QString findArchiveExtractor(const QString &archiveUrl, const QString &archive,
     // Some registry entries ship tar archives (Mistral Vibe, OpenCode),
     // others ZIP files (Antigravity, Kilo). Pick the matching extractor.
     const bool tarArchive = archiveUrl.contains(u".tar"_s, Qt::CaseInsensitive)
-        || archiveUrl.endsWith(u".tgz"_s, Qt::CaseInsensitive);
+        || archiveUrl.endsWith(u".tgz"_s, Qt::CaseInsensitive)
+        || archiveUrl.endsWith(u".tbz2"_s, Qt::CaseInsensitive)
+        || archiveUrl.endsWith(u".tbz"_s, Qt::CaseInsensitive)
+        || archiveUrl.endsWith(u".txz"_s, Qt::CaseInsensitive)
+        || archiveUrl.endsWith(u".tzst"_s, Qt::CaseInsensitive);
     if (tarArchive) {
         const QString tar = QStandardPaths::findExecutable(u"tar"_s);
         if (!tar.isEmpty()) {
@@ -63,23 +69,66 @@ QString findArchiveExtractor(const QString &archiveUrl, const QString &archive,
     // the standard library and handles the registry archives correctly.
     const QString python = QStandardPaths::findExecutable(u"python3"_s);
     if (!python.isEmpty()) {
-        *arguments = {u"-c"_s,
-                      u"import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])"_s,
-                      archive, destination};
+        const QString zipScript = uR"PY(
+import os, sys, zipfile
+z = zipfile.ZipFile(sys.argv[1])
+dest = os.path.realpath(sys.argv[2])
+for info in z.infolist():
+    target = os.path.realpath(os.path.join(dest, info.filename))
+    if target != dest and not target.startswith(dest + os.sep):
+        raise SystemExit("unsafe path: " + info.filename)
+    path = z.extract(info, sys.argv[2])
+    mode = (info.external_attr >> 16) & 0o777
+    if mode:
+        os.chmod(path, mode)
+)PY"_s;
+        *arguments = {u"-c"_s, zipScript, archive, destination};
         return python;
     }
 #endif
     return {};
 }
 
-QString findInstalledBinary(const QString &installDir, const QString &recordedCommand)
+// The registry may publish either an archive or a raw executable. The temp
+// file has a generic name, so decide from the URL first and the file magic
+// second. Treating a raw binary as a zip made muse-code/sigit uninstallable.
+bool archiveIsArchive(const QString &archiveUrl, const QString &archivePath)
 {
-    QString relative = recordedCommand;
+    const QString path = QUrl(archiveUrl).path().toLower();
+    static const QStringList archiveSuffixes = {
+        u".zip"_s, u".tar"_s, u".tgz"_s, u".tar.gz"_s, u".tbz2"_s, u".tar.bz2"_s,
+        u".txz"_s, u".tar.xz"_s, u".tar.zst"_s, u".tzst"_s,
+    };
+    for (const QString &suffix : archiveSuffixes) {
+        if (path.endsWith(suffix)) {
+            return true;
+        }
+    }
+    QFile file(archivePath);
+    if (!file.open(QIODevice::ReadOnly)) {
+        return false;
+    }
+    const QByteArray head = file.read(512);
+    if (head.startsWith("PK\x03\x04") || head.startsWith("PK\x05\x06")
+        || head.startsWith("\x1f\x8b") || head.startsWith("BZh")) {
+        return true;
+    }
+    if (head.size() >= 6 && head.startsWith("\xfd" "7zXZ")) {
+        return true;
+    }
+    if (head.size() >= 262 && head.mid(257, 5) == "ustar") {
+        return true;
+    }
+    return false;
+}
+
+QString findInstalledBinary(const QString &installDir, const QString &recordedCommand)
+{    QString relative = recordedCommand;
     while (relative.startsWith(u"./"_s)) {
         relative.remove(0, 2);
     }
     const QString candidate = QDir(installDir).filePath(relative);
-    if (QFileInfo(candidate).isFile()) {
+    if (QFileInfo(candidate).isFile() && !QFileInfo(candidate).isSymLink()) {
         return QFileInfo(candidate).absoluteFilePath();
     }
     // Some archives wrap their payload in a top-level directory. The registry
@@ -87,11 +136,76 @@ QString findInstalledBinary(const QString &installDir, const QString &recordedCo
     const QString baseName = QFileInfo(relative).fileName();
     if (!baseName.isEmpty()) {
         QDirIterator it(installDir, {baseName}, QDir::Files, QDirIterator::Subdirectories);
-        if (it.hasNext()) {
-            return it.next();
+        while (it.hasNext()) {
+            const QString found = it.next();
+            if (!QFileInfo(found).isSymLink()) {
+                return found;
+            }
         }
     }
     return {};
+}
+
+// An archive from the registry is still attacker-controlled if the registry
+// entry or the download is compromised. Reject absolute paths and ".."
+// components before handing it to tar/unzip, which would otherwise write
+// outside the per-agent install directory (zip-slip).
+bool archiveEntriesAreSafe(const QString &archiveUrl, const QString &archive, QString *badEntry)
+{
+    const bool tarArchive = archiveUrl.contains(u".tar"_s, Qt::CaseInsensitive)
+        || archiveUrl.endsWith(u".tgz"_s, Qt::CaseInsensitive)
+        || archiveUrl.endsWith(u".tbz2"_s, Qt::CaseInsensitive)
+        || archiveUrl.endsWith(u".tbz"_s, Qt::CaseInsensitive)
+        || archiveUrl.endsWith(u".txz"_s, Qt::CaseInsensitive)
+        || archiveUrl.endsWith(u".tzst"_s, Qt::CaseInsensitive);
+    QString program;
+    QStringList args;
+    if (tarArchive) {
+        program = QStandardPaths::findExecutable(u"tar"_s);
+        args = {u"-tf"_s, archive};
+    } else {
+        program = QStandardPaths::findExecutable(u"unzip"_s);
+        if (!program.isEmpty()) {
+            args = {u"-Z1"_s, archive};
+        } else {
+            program = QStandardPaths::findExecutable(u"python3"_s);
+            if (!program.isEmpty()) {
+                args = {u"-c"_s,
+                        u"import sys,zipfile; [print(n) for n in zipfile.ZipFile(sys.argv[1]).namelist()]"_s,
+                        archive};
+            }
+        }
+    }
+    if (program.isEmpty()) {
+        // No lister is available; extraction itself will use the same tools,
+        // and refusing here would make installation impossible.
+        return true;
+    }
+    QProcess list;
+    list.start(program, args);
+    if (!list.waitForFinished(15000) || list.exitCode() != 0) {
+        // The archive could not be inspected, so its paths cannot be trusted.
+        if (badEntry) *badEntry = u"archive listing failed"_s;
+        return false;
+    }
+    const QStringList entries = QString::fromLocal8Bit(list.readAllStandardOutput()).split(u'\n', Qt::SkipEmptyParts);
+    for (const QString &raw : entries) {
+        const QString entry = raw.trimmed();
+        if (entry.isEmpty()) {
+            continue;
+        }
+        const QString unix = QDir::fromNativeSeparators(entry);
+        if (unix.startsWith(u'/') || (unix.size() > 1 && unix.at(1) == u':')) {
+            if (badEntry) *badEntry = entry;
+            return false;
+        }
+        const QStringList parts = QDir::cleanPath(unix).split(u'/');
+        if (parts.contains(u".."_s)) {
+            if (badEntry) *badEntry = entry;
+            return false;
+        }
+    }
+    return true;
 }
 } // namespace
 
@@ -110,11 +224,38 @@ QString acpCurrentPlatformKey()
     }
     return u"darwin-x86_64"_s;
 #elif defined(Q_OS_LINUX)
-    if (QSysInfo::currentCpuArchitecture().startsWith(u"arm"_s)
-        || QSysInfo::currentCpuArchitecture().startsWith(u"aarch64"_s)) {
-        return u"linux-aarch64"_s;
+    // The registry publishes separate musl targets. Installing the glibc build
+    // on Alpine (and similar) produces a binary the loader cannot start, so
+    // select the musl key when the host itself is musl.
+    bool musl = false;
+    bool loaderDetected = false;
+    QFile maps(u"/proc/self/maps"_s);
+    if (maps.open(QIODevice::ReadOnly)) {
+        const QByteArray loaded = maps.read(256 * 1024);
+        if (loaded.contains("ld-musl-")) {
+            musl = true;
+            loaderDetected = true;
+        } else if (loaded.contains("ld-linux") || loaded.contains("ld64") || loaded.contains("ld.so")) {
+            loaderDetected = true;
+        }
     }
-    return u"linux-x86_64"_s;
+    if (!loaderDetected) {
+        // Some containers hide /proc/self/maps; fall back to the common loader
+        // paths. Musl images always ship one of them.
+        for (const QString &candidate : {u"/lib/ld-musl-x86_64.so.1"_s, u"/lib/ld-musl-aarch64.so.1"_s,
+                                         u"/usr/lib/ld-musl-x86_64.so.1"_s, u"/usr/lib/ld-musl-aarch64.so.1"_s}) {
+            if (QFileInfo::exists(candidate)) {
+                musl = true;
+                break;
+            }
+        }
+    }
+    const bool arm = QSysInfo::currentCpuArchitecture().startsWith(u"arm"_s)
+        || QSysInfo::currentCpuArchitecture().startsWith(u"aarch64"_s);
+    if (musl) {
+        return arm ? u"linux-aarch64-musl"_s : u"linux-x86_64-musl"_s;
+    }
+    return arm ? u"linux-aarch64"_s : u"linux-x86_64"_s;
 #else
     return u"unknown"_s;
 #endif
@@ -130,6 +271,27 @@ bool acpNeedsPageShim()
 #endif
 }
 
+// A library that is loaded into the agent process through LD_PRELOAD must come
+// from a place the user cannot write to: /tmp is world-writable and the
+// working directory belongs to the project, so a file planted there would be
+// loaded into the agent. Only the installation directory and the system
+// directories are searched, and the file must not be writable by anyone else.
+static bool isTrustedShimSource(const QString &path)
+{
+    const QFileInfo info(path);
+    if (!info.exists() || !info.isFile()) {
+        return false;
+    }
+    if (info.permissions() & (QFileDevice::WriteGroup | QFileDevice::WriteOther)) {
+        return false;
+    }
+    const QFileInfo dirInfo(info.absolutePath());
+    if (dirInfo.permissions() & QFileDevice::WriteOther) {
+        return false;
+    }
+    return true;
+}
+
 QString acpEnsurePageShim(const QString &dir)
 {
     if (dir.isEmpty()) {
@@ -140,35 +302,40 @@ QString acpEnsurePageShim(const QString &dir)
         return target;
     }
 
-    // Check if a built libpage4k.so exists in known directories
-    const QStringList knownPaths = {
-        QCoreApplication::applicationDirPath() + u"/libpage4k.so"_s,
-        QCoreApplication::applicationDirPath() + u"/../lib/libpage4k.so"_s,
-        QCoreApplication::applicationDirPath() + u"/../lib64/libpage4k.so"_s,
-        QDir::current().filePath(u"build/bin/libpage4k.so"_s),
-        QDir::current().filePath(u"src/page4k_shim.so"_s),
-        u"/usr/lib64/kateai/libpage4k.so"_s,
-        u"/usr/lib/kateai/libpage4k.so"_s,
-        u"/tmp/libpage4k.so"_s,
+    // The directories the shim may come from: the installation and the system
+    // directories. The working directory and /tmp are deliberately not on the
+    // list - a project or another user on the machine could plant a library
+    // there, and it would then be loaded into the agent.
+    const QStringList trustedDirs = {
+        QCoreApplication::applicationDirPath(),
+        QCoreApplication::applicationDirPath() + u"/../lib"_s,
+        QCoreApplication::applicationDirPath() + u"/../lib64"_s,
+        u"/usr/lib/kateai"_s,
+        u"/usr/lib64/kateai"_s,
     };
-    for (const QString &src : knownPaths) {
-        if (QFileInfo::exists(src)) {
-            QDir().mkpath(dir);
-            if (QFile::copy(src, target)) {
-                QFile::setPermissions(target, QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner
-                                                | QFileDevice::ReadGroup | QFileDevice::ExeGroup
-                                                | QFileDevice::ReadOther | QFileDevice::ExeOther);
-                return target;
-            }
+    for (const QString &base : trustedDirs) {
+        const QString src = QDir(base).filePath(u"libpage4k.so"_s);
+        if (!isTrustedShimSource(src)) {
+            continue;
+        }
+        QDir().mkpath(dir);
+        if (QFile::copy(src, target)) {
+            QFile::setPermissions(target, QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner
+                                            | QFileDevice::ReadGroup | QFileDevice::ExeGroup
+                                            | QFileDevice::ReadOther | QFileDevice::ExeOther);
+            return target;
         }
     }
 
-    // If no prebuilt binary is found, try compiling page4k_shim.c if gcc/cc is available
+    // If no prebuilt binary is found, compile the shim that ships with the
+    // plugin. Only the installation directory is used: a "src/page4k_shim.c"
+    // in the working directory belongs to the project, and compiling it would
+    // run code the project supplied.
     const QString gcc = QStandardPaths::findExecutable(u"gcc"_s);
     const QString cc = gcc.isEmpty() ? QStandardPaths::findExecutable(u"cc"_s) : gcc;
     if (!cc.isEmpty()) {
-        const QString srcPath = QDir::current().filePath(u"src/page4k_shim.c"_s);
-        if (QFileInfo::exists(srcPath)) {
+        const QString srcPath = QDir(QCoreApplication::applicationDirPath()).filePath(u"page4k_shim.c"_s);
+        if (isTrustedShimSource(srcPath)) {
             QDir().mkpath(dir);
             QProcess compile;
             compile.start(cc, {u"-shared"_s, u"-fPIC"_s, u"-O2"_s, u"-o"_s, target, srcPath, u"-ldl"_s, u"-lpthread"_s});
@@ -240,6 +407,15 @@ void AcpBinaryInstaller::start()
         Q_EMIT failed(i18n("Could not create the install directory %1.", m_installDir));
         return;
     }
+    // Extract into a sibling staging directory and swap it in only after the
+    // executable is found. A failed update must not leave stale binaries that
+    // the next launch still resolves.
+    m_stagingDir = m_installDir + u".staging-"_s
+        + QUuid::createUuid().toString(QUuid::WithoutBraces).left(8);
+    if (!QDir().mkpath(m_stagingDir)) {
+        Q_EMIT failed(i18n("Could not create the staging directory."));
+        return;
+    }
 
     m_archive = new QTemporaryFile(QDir::tempPath() + u"/kateai-acp-XXXXXX.archive"_s, this);
     m_archive->setAutoRemove(true);
@@ -252,6 +428,8 @@ void AcpBinaryInstaller::start()
     Q_EMIT progress(i18n("Downloading %1…", m_agent.value(u"name"_s).toString()));
     QNetworkRequest request{QUrl(m_archiveUrl)};
     request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+    // A stalled CDN must not leave the installer alive forever.
+    request.setTransferTimeout(60000);
     m_reply = m_network->get(request);
 
     connect(m_reply, &QNetworkReply::readyRead, this, [this]() {
@@ -260,6 +438,16 @@ void AcpBinaryInstaller::start()
         m_hash.addData(chunk);
     });
     connect(m_reply, &QNetworkReply::downloadProgress, this, [this](qint64 received, qint64 total) {
+        // A registry download is a program archive. Bound it so a broken or
+        // malicious endpoint cannot fill the disk before the checksum runs.
+        constexpr qint64 kMaxArchiveBytes = 1024LL * 1024 * 1024;
+        if (received > kMaxArchiveBytes || total > kMaxArchiveBytes) {
+            fail(i18n("The agent archive is larger than 1 GB and was not downloaded."));
+            if (m_reply) {
+                m_reply->abort();
+            }
+            return;
+        }
         if (total > 0) {
             Q_EMIT progress(i18n("Downloading %1… %2 / %3 MB",
                                m_agent.value(u"name"_s).toString(),
@@ -281,6 +469,10 @@ void AcpBinaryInstaller::start()
 
         const QString expectedHash = m_platformDistribution.value(u"sha256"_s).toString();
         const QString actualHash = QString::fromLatin1(m_hash.result().toHex());
+        if (expectedHash.isEmpty()) {
+            qWarning() << "KateAI: ACP registry entry has no sha256; installing"
+                       << m_agent.value(u"id"_s).toString() << "without checksum verification";
+        }
         if (!expectedHash.isEmpty() && actualHash.compare(expectedHash, Qt::CaseInsensitive) != 0) {
             fail(i18n("Download failed: checksum mismatch."));
             return;
@@ -289,12 +481,58 @@ void AcpBinaryInstaller::start()
     });
 }
 
+void AcpBinaryInstaller::installRawBinary()
+{
+    QString relative = m_command;
+    while (relative.startsWith(u"./"_s) || relative.startsWith(u".\\"_s)) {
+        relative.remove(0, 2);
+    }
+    if (relative.isEmpty()) {
+        relative = QUrl(m_archiveUrl).fileName();
+    }
+    if (relative.isEmpty()) {
+        fail(i18n("The registry entry does not name the downloaded executable."));
+        return;
+    }
+    const QString clean = QDir::cleanPath(QDir::fromNativeSeparators(relative));
+    if (QDir::isAbsolutePath(clean) || clean.startsWith(u"../"_s) || clean == u".."_s) {
+        fail(i18n("The registry entry names an unsafe executable path."));
+        return;
+    }
+    const QString target = QDir(m_stagingDir).filePath(clean);
+    if (!QDir().mkpath(QFileInfo(target).absolutePath())) {
+        fail(i18n("Could not create the install directory."));
+        return;
+    }
+    QFile::remove(target);
+    if (!QFile::copy(m_archive->fileName(), target)) {
+        fail(i18n("Could not install the downloaded agent executable."));
+        return;
+    }
+    QFile::setPermissions(target, QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner
+                                     | QFileDevice::ReadGroup | QFileDevice::ExeGroup
+                                     | QFileDevice::ReadOther | QFileDevice::ExeOther);
+    finishInstall(QFileInfo(target).absoluteFilePath());
+}
+
 void AcpBinaryInstaller::extractArchive()
 {
+    if (!archiveIsArchive(m_archiveUrl, m_archive->fileName())) {
+        // Some registry entries publish a raw executable rather than an
+        // archive (muse-code, sigit). Extractors rejected those downloads.
+        Q_EMIT progress(i18n("Installing %1…", m_agent.value(u"name"_s).toString()));
+        installRawBinary();
+        return;
+    }
     Q_EMIT progress(i18n("Extracting %1…", m_agent.value(u"name"_s).toString()));
+    QString badEntry;
+    if (!archiveEntriesAreSafe(m_archiveUrl, m_archive->fileName(), &badEntry)) {
+        fail(i18n("The archive contains an unsafe path and was not extracted: %1", badEntry));
+        return;
+    }
     QStringList extractorArgs;
     const QString extractor = findArchiveExtractor(m_archiveUrl, m_archive->fileName(),
-                                                   m_installDir, &extractorArgs);
+                                                   m_stagingDir, &extractorArgs);
     if (extractor.isEmpty()) {
         fail(i18n("Could not extract the archive: install unzip or python3 and try again."));
         return;
@@ -314,7 +552,7 @@ void AcpBinaryInstaller::extractArchive()
             fail(i18n("Could not extract the archive: %1", output));
             return;
         }
-        const QString executable = findInstalledBinary(m_installDir, m_command);
+        const QString executable = findInstalledBinary(m_stagingDir, m_command);
         if (executable.isEmpty()) {
             fail(i18n("The archive did not contain %1.", m_command));
             return;
@@ -326,13 +564,29 @@ void AcpBinaryInstaller::extractArchive()
 
 void AcpBinaryInstaller::finishInstall(const QString &executable)
 {
-    QFile::setPermissions(executable, QFile::permissions(executable)
-                                         | QFileDevice::ExeOwner
-                                         | QFileDevice::ExeGroup
-                                         | QFileDevice::ExeOther);
+    // The archive was unpacked into a staging directory. Swap it in only now
+    // that the executable was found, so a failed update cannot leave the old
+    // binary in place while reporting success.
+    QString relative = QDir(m_stagingDir).relativeFilePath(executable);
+    if (relative.isEmpty() || relative.startsWith(u"../"_s) || QDir::isAbsolutePath(relative)) {
+        fail(i18n("The extracted executable is outside the install directory."));
+        return;
+    }
+    QDir(m_installDir).removeRecursively();
+    if (!QDir().rename(m_stagingDir, m_installDir)) {
+        fail(i18n("Could not move the installed agent into place."));
+        return;
+    }
+    m_stagingDir.clear();
+    const QString installedExecutable = QDir(m_installDir).filePath(relative);
+
+    QFile::setPermissions(installedExecutable, QFile::permissions(installedExecutable)
+                                                   | QFileDevice::ExeOwner
+                                                   | QFileDevice::ExeGroup
+                                                   | QFileDevice::ExeOther);
 
     QJsonObject installed = m_agent;
-    installed.insert(u"command"_s, executable);
+    installed.insert(u"command"_s, installedExecutable);
     // The platform entry carries the launch arguments ("acp" for opencode);
     // dropping them made the binary start its TUI instead of its ACP server
     // and stall the handshake.
@@ -378,6 +632,10 @@ void AcpBinaryInstaller::cleanUp()
     if (m_archive) {
         m_archive->deleteLater();
         m_archive = nullptr;
+    }
+    if (!m_stagingDir.isEmpty()) {
+        QDir(m_stagingDir).removeRecursively();
+        m_stagingDir.clear();
     }
 }
 

@@ -147,6 +147,25 @@ QList<AgentProfile> AgentTeam::agents() const
     return all;
 }
 
+std::optional<AgentProfile> AgentTeam::byIdIncludingDisabled(const QString &id) const
+{
+    if (id.isEmpty()) {
+        return std::nullopt;
+    }
+    // The roster is built from three sources in priority order, and the first
+    // one that claims an id wins - the same order agents() uses.
+    const QList<QList<AgentProfile>> sources = {builtinAgents(), m_custom, m_project};
+    for (const QList<AgentProfile> &source : sources) {
+        for (const AgentProfile &profile : source) {
+            if (!profile.isValid() || profile.id != id) {
+                continue;
+            }
+            return profile;
+        }
+    }
+    return std::nullopt;
+}
+
 std::optional<AgentProfile> AgentTeam::byId(const QString &id) const
 {
     if (id.isEmpty()) {
@@ -166,6 +185,20 @@ AgentProfile AgentTeam::resolve(const QString &id) const
 {
     if (const std::optional<AgentProfile> found = byId(id)) {
         return *found;
+    }
+    // An agent the user turned off is not in the enabled roster, so it is not
+    // found above. Falling back to the generic code agent would hand it write
+    // and command rights the roster deliberately withheld: naming a disabled
+    // agent is enough to get them. It falls back to the read-only Ask mode
+    // instead, so the subtask can still answer a question but cannot change
+    // anything.
+    if (const std::optional<AgentProfile> disabled = byIdIncludingDisabled(id)) {
+        AgentProfile fallback;
+        fallback.id = disabled->id;
+        fallback.name = disabled->name.isEmpty() ? disabled->id : disabled->name;
+        fallback.modeId = QStringLiteral("ask");
+        fallback.description = u"Disabled agent '%1': it runs read-only and cannot change files or run commands."_s.arg(fallback.id);
+        return fallback;
     }
     // Unknown ids fall back to a generic code agent rather than failing the
     // subtask; the orchestrator gets told what actually ran.

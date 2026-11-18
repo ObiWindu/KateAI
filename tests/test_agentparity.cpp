@@ -1,4 +1,5 @@
 #include "agentloop.h"
+#include "credentialstore.h"
 #include "mcp.h"
 #include "modes.h"
 #include "rules.h"
@@ -7,6 +8,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QProcess>
 #include <QTemporaryDir>
 #include <QTest>
 
@@ -264,6 +266,65 @@ private Q_SLOTS:
         QCOMPARE(loaded.size(), 1);
         QCOMPARE(loaded.first().name, u"demo"_s);
         QCOMPARE(loaded.first().command, u"true"_s);
+    }
+
+    void installedAgentArgsAreQuotedWhenSerialized()
+    {
+        QJsonObject agent;
+        agent.insert(u"id"_s, u"space-agent"_s);
+        agent.insert(u"name"_s, u"Space Agent"_s);
+        agent.insert(u"command"_s, u"npx"_s);
+        agent.insert(u"args"_s, QJsonArray{u"--yes"_s, u"pkg"_s, u"arg with space"_s});
+        Settings settings;
+        settings.acpInstalledAgents = QString::fromUtf8(
+            QJsonDocument(QJsonArray{agent}).toJson(QJsonDocument::Compact));
+        const AcpAgentPreset launch = acpAgentLaunchLine(settings, u"space-agent"_s);
+        // The stored launch line is a command string parsed with
+        // QProcess::splitCommand(); the whitespace argument must survive.
+        QCOMPARE(QProcess::splitCommand(launch.args),
+                 (QStringList{u"--yes"_s, u"pkg"_s, u"arg with space"_s}));
+    }
+
+    void mcpSecretsAreNotWrittenIntoTheWorkspaceFile()
+    {
+        // mcp.json is commonly committed. Authorization headers and env values
+        // must live in the credential store, not in that file.
+        CredentialStore::resetForTests();
+        CredentialStore::setBackendOverride(CredentialStore::Backend::Memory);
+
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+        McpServerConfig config;
+        config.name = u"remote"_s;
+        config.transport = McpTransport::Http;
+        config.url = u"https://example.com/mcp"_s;
+        config.headers.insert(u"Authorization"_s, u"Bearer top-secret"_s);
+        McpServerConfig local;
+        local.name = u"local"_s;
+        local.command = u"true"_s;
+        local.env.insert(u"API_KEY"_s, u"env-secret"_s);
+
+        QString error;
+        QVERIFY2(McpConfigStore::save(workspace.path(), {config, local}, &error), qPrintable(error));
+        QFile file(McpConfigStore::configPath(workspace.path()));
+        QVERIFY(file.open(QIODevice::ReadOnly));
+        const QByteArray onDisk = file.readAll();
+        QVERIFY(!onDisk.contains("top-secret"));
+        QVERIFY(!onDisk.contains("env-secret"));
+
+        const QList<McpServerConfig> loaded = McpConfigStore::load(workspace.path());
+        QCOMPARE(loaded.size(), 2);
+        auto byName = [&loaded](const QString &name) {
+            for (const McpServerConfig &server : loaded) {
+                if (server.name == name) {
+                    return server;
+                }
+            }
+            return McpServerConfig();
+        };
+        QCOMPARE(byName(u"remote"_s).headers.value(u"Authorization"_s), u"Bearer top-secret"_s);
+        QCOMPARE(byName(u"local"_s).env.value(u"API_KEY"_s), u"env-secret"_s);
+        CredentialStore::resetForTests();
     }
 
     void mcpToolDefinitionCarriesTheServerSchema()

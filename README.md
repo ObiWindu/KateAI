@@ -172,7 +172,7 @@ Anything after the frontmatter is extra guidance for the agent.
 
 ### Chat panel
 
-Sub-agents get a card of their own rather than a generic tool row: agent name and mode, a live `running · 12s · 5 steps` status, a **Cancel** button, the answer when it lands, and an expandable activity log of everything it ran. The toolbar shows how many agents are in flight and opens a menu with the roster and *Cancel all*.
+Sub-agents get a card of their own rather than a generic tool row: agent name and mode, a live `Running · 12s · 3 tools` status, a **Cancel** button, and a headline that names the tool in flight (colour-coded by kind) instead of leaving only a spinner. The answer lands in the body with a **Copy** button, and an expandable activity log shows the tools and errors behind it; concurrent cards share one bounded tab strip. The toolbar shows how many agents are in flight and opens a menu with the roster and *Cancel all*.
 
 ### Agent loop
 

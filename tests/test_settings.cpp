@@ -119,6 +119,15 @@ private Q_SLOTS:
         QCOMPARE(fresh.retryStrategy, defaults.retryStrategy);
         QCOMPARE(fresh.verbosity, defaults.verbosity);
     }
+    void unlimitedSavedConversationsIsPreserved()
+    {
+        // 0 is the config UI's "Unlimited". Clamping it to 1 made the next
+        // save prune every other conversation.
+        Settings s;
+        s.maxSavedConversations = 0;
+        SettingsStore::save(s);
+        QCOMPARE(SettingsStore::load().maxSavedConversations, 0);
+    }
 };
 
 QTEST_GUILESS_MAIN(TestSettings)

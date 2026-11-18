@@ -29,6 +29,9 @@ private Q_SLOTS:
             u"LOGIN_PASSWD"_s,
             u"DEPLOY_PRIVATE_KEY"_s,
             u"GOOGLE_APPLICATION_CREDENTIALS"_s,
+            u"PGPASSWORD"_s,
+            u"MYSQL_PWD"_s,
+            u"SSH_AUTH_SOCK"_s,
             u"TOKEN"_s,
             u"PASSWORD"_s,
         };
@@ -77,6 +80,21 @@ private Q_SLOTS:
         QVERIFY(sanitized.contains(u"LANG"_s));
         QVERIFY(!sanitized.contains(u"OPENAI_API_KEY"_s));
         QVERIFY(!sanitized.contains(u"MY_SERVICE_TOKEN"_s));
+    }
+
+    void urlWithCredentialsIsDropped()
+    {
+        // The name says nothing about the value: "DATABASE_URL" is not a
+        // secret by name, but the password in the userinfo part is.
+        QProcessEnvironment base;
+        base.insert(u"PATH"_s, u"/usr/bin"_s);
+        base.insert(u"DATABASE_URL"_s, u"postgres://user:s3cret@db.internal:5432/app"_s);
+        base.insert(u"PUBLIC_URL"_s, u"https://example.com/path"_s);
+
+        const QProcessEnvironment sanitized = sanitizedProcessEnvironment(base);
+        QVERIFY(!sanitized.contains(u"DATABASE_URL"_s));
+        // A URL without credentials is kept.
+        QVERIFY(sanitized.contains(u"PUBLIC_URL"_s));
     }
 
     void explicitlyRequestedSecretsCanBeReadded()

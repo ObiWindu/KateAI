@@ -24,6 +24,10 @@ private Q_SLOTS:
         QVERIFY(!WebSearch::isFetchableUrl(u"http://10.0.0.5/"_s));
         QVERIFY(!WebSearch::isFetchableUrl(u"http://192.168.1.1/"_s));
         QVERIFY(!WebSearch::isFetchableUrl(u"http://metadata.google.internal/"_s));
+        // A trailing dot is the explicit root label; it resolves to the same
+        // loopback/metadata host but is a different string.
+        QVERIFY(!WebSearch::isFetchableUrl(u"http://localhost./"_s));
+        QVERIFY(!WebSearch::isFetchableUrl(u"http://127.0.0.1./"_s));
         // A normal address is still allowed.
         QVERIFY(WebSearch::isFetchableUrl(u"https://example.org/docs"_s));
     }
@@ -72,6 +76,25 @@ private Q_SLOTS:
             "<a class=\"result__a\" href=\"https://b.test\">B</a>"
             "<a class=\"result__a\" href=\"https://c.test\">C</a>";
         QCOMPARE(WebSearch::parseDuckDuckGo(html, 2).size(), 2);
+    }
+
+    void duckDuckGoSkippedResultDoesNotShiftTheSnippets()
+    {
+        // A result that is skipped used to leave the snippet iterator one
+        // behind, so every following result showed the snippet of the one
+        // before it.
+        const QByteArray html =
+            "<a class=\"result__a\" href=\"https://a.test\">A</a>"
+            "<a class=\"result__snippet\">Snippet A.</a>"
+            "<a class=\"result__a\" href=\"ftp://b.test\">B</a>"
+            "<a class=\"result__snippet\">Snippet B.</a>"
+            "<a class=\"result__a\" href=\"https://c.test\">C</a>"
+            "<a class=\"result__snippet\">Snippet C.</a>";
+
+        const auto results = WebSearch::parseDuckDuckGo(html, 5);
+        QCOMPARE(results.size(), 2);
+        QCOMPARE(results.at(0).snippet, QStringLiteral("Snippet A."));
+        QCOMPARE(results.at(1).snippet, QStringLiteral("Snippet C."));
     }
 
     void tavilyJsonIsParsed()

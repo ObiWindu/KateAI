@@ -486,6 +486,10 @@ QString providerLabel(Provider provider);
 Provider providerFromId(const QString &id);
 QString providerBaseUrl(Provider provider);
 QString providerBaseUrl(const Settings &settings);
+// Joins a provider base URL and an API path without doubling an existing
+// "/v1" segment. The Anthropic base already ends in /v1, while the endpoints
+// are written as /v1/messages, which used to produce /v1/v1/messages.
+QString joinApiEndpoint(const QString &baseUrl, const QString &endpoint);
 QStringList defaultModels(Provider provider);
 // True when the provider can be listed: it has a key and speaks an API we can
 // query a model catalogue on. Used to decide which providers to fetch from.
@@ -530,6 +534,10 @@ QString acpBinaryInstallDir(const QString &agentId);
 // as "./agy_acp_server.par", which are relative to the unpacked archive rather
 // than to Kate's working directory.
 QString acpInstalledBinaryCommand(const Settings &settings);
+// True when the agent's registry entry is a binary distribution. Such a
+// command is staged by the installer, so an unresolved relative path means the
+// install is missing rather than that the user meant a workspace file.
+bool acpAgentHasBinaryInstall(const Settings &settings);
 // True for the MiniMax Code ACP agent (`mcode`, registry id `minimax-code`).
 // Its standalone CLI (`mcode acp`) is preferred over the npm distribution the
 // ACP registry records, because the distribution's bundled native modules can

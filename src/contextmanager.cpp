@@ -106,11 +106,25 @@ int estimateTokens(const QString &text)
     if (text.isEmpty()) {
         return 0;
     }
+    const int charCount = text.length();
+    // Fast path for the overwhelmingly common ASCII/code case: UTF-8 bytes
+    // equal UTF-16 code units, so no temporary QByteArray is needed. The
+    // previous implementation allocated a UTF-8 copy of every message on
+    // every token estimate, which is expensive for a long transcript.
+    bool ascii = true;
+    for (const QChar c : text) {
+        if (c.unicode() > 0x7f) {
+            ascii = false;
+            break;
+        }
+    }
+    if (ascii) {
+        return qMax(1, charCount / 4);
+    }
     // Better token estimation: use UTF-8 byte count / 4 for non-ASCII, chars / 4 for ASCII
     // This is more accurate for mixed content
     const QByteArray utf8 = text.toUtf8();
     const int byteCount = utf8.size();
-    const int charCount = text.length();
     // If mostly ASCII (1 byte per char), use char count. If multibyte, use byte count.
     if (byteCount <= charCount * 1.2) {
         return qMax(1, charCount / 4);

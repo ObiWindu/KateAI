@@ -365,6 +365,23 @@ QString diffPathFromOutput(const QString &output)
     }
     return fromOld;
 }
+
+// Stored tool results are text only; there is no ok/cancelled flag in the
+// transcript schema. These are the exact markers both the loop and the UI write
+// when a call never produced an answer, so a restored card can say "cancelled"
+// instead of painting it as a successful (green) result.
+bool restoredResultWasCancelled(const QString &output)
+{
+    const QString text = output.trimmed();
+    if (text.isEmpty()) {
+        return false;
+    }
+    const QString lower = text.toLower();
+    return lower.startsWith(u"the tool call was cancelled before it ran"_s)
+        || lower.startsWith(u"stopped before it finished"_s)
+        || lower.contains(u"cancelled before it finished"_s)
+        || lower.startsWith(u"cancelled: turn stopped"_s);
+}
 } // namespace
 
 namespace KateAi
@@ -380,7 +397,10 @@ ChatWidget::ChatWidget(QWidget *parent)
 {
     m_sessionSaveTimer = new QTimer(this);
     m_sessionSaveTimer->setSingleShot(true);
-    m_sessionSaveTimer->setInterval(500);
+    // A long turn can finish tools many times per second. Serializing the
+    // whole transcript on every one of those saves is the largest avoidable
+    // disk cost in a long session; 1.5 s still persists work continuously.
+    m_sessionSaveTimer->setInterval(1500);
     connect(m_sessionSaveTimer, &QTimer::timeout, this, &ChatWidget::saveCurrentConversation);
 
     // A stable name the panel stylesheet can select: a class selector like
@@ -818,7 +838,9 @@ ChatWidget::ChatWidget(QWidget *parent)
     });
     connect(m_configure, &QPushButton::clicked, this, &ChatWidget::showSettingsMenu);
     connect(m_modelSelector, &QPushButton::clicked, this, &ChatWidget::showModelMenu);
-    connect(m_permissionBar, &PermissionBar::decided, &m_agent, &AgentLoop::resolvePermission);
+    connect(m_permissionBar, &PermissionBar::decided, this, [this](PermissionDecision decision) {
+        m_agent.resolvePermission(decision);
+    });
 
     connect(m_provider, &QComboBox::currentIndexChanged, this, [this]() {
         if (m_updatingCombos || m_provider->currentData().isNull()) {
@@ -915,9 +937,15 @@ ChatWidget::ChatWidget(QWidget *parent)
         }
         if (m_thinkingBrowser) {
             appendThinkingDelta(delta);
-            scrollToBottom();
+            if (!m_answerStarted) {
+                scrollToBottom();
+            }
         }
-        setThinkingIndicator(true);
+        // In the answer phase late reasoning is buffered for the transcript but
+        // must not restart the thinking pill next to the streaming answer.
+        if (!m_answerStarted) {
+            setThinkingIndicator(true);
+        }
     });
     connect(&m_agent, &AgentLoop::thinkingFinished, this, [this](const QString &text) {
         // Stop thinking indicator BEFORE adding thinking block so that
@@ -940,14 +968,19 @@ ChatWidget::ChatWidget(QWidget *parent)
     connect(&m_agent, &AgentLoop::assistantDelta, this, [this](const QString &delta) {
         scheduleSessionSave();
         // Reasoning stays open for the whole turn. Collapsing it when the answer
-        // started hid the only record of what the agent was doing.
+        // started hid the only record of what the agent was doing. It is
+        // flushed (not just stopped) first, so everything the agent reasoned
+        // before answering is on screen before the answer starts arriving.
+        m_answerStarted = true;
         flushThinkingPacer();
         setThinkingIndicator(false);
         setStreaming(m_streamText + delta);
     });
     connect(&m_agent, &AgentLoop::assistantReset, this, [this]() {
         // The streamed text belonged to a failed attempt and is replaced by the
-        // retry. Drop it, otherwise the transcript shows both.
+        // retry. Drop it, otherwise the transcript shows both. The retry may
+        // reason again, so it starts back in the reasoning phase.
+        m_answerStarted = false;
         m_streamText.clear();
         if (m_activeAssistantBrowser) {
             m_activeAssistantBrowser->setDocument(makeMarkdownDocument(closedMarkdown(m_streamText), ChatTheme::messageCss()));
@@ -992,6 +1025,34 @@ ChatWidget::ChatWidget(QWidget *parent)
             });
             m_subtaskWidgets.insert(request.toolCallId, subtaskWidget);
             m_subtaskOrder.append(subtaskWidget);
+            // Sub-agent cards are full transcript widgets; keep the recent
+            // ones after a very long orchestration session.
+            constexpr int kMaxSubtaskCards = 40;
+            while (m_subtaskOrder.size() > kMaxSubtaskCards) {
+                int victimIndex = -1;
+                for (int i = 0; i < m_subtaskOrder.size(); ++i) {
+                    SubtaskWidget *candidate = m_subtaskOrder.at(i);
+                    if (candidate && !candidate->isRunning()) {
+                        victimIndex = i;
+                        break;
+                    }
+                }
+                if (victimIndex < 0) {
+                    break;
+                }
+                SubtaskWidget *victim = m_subtaskOrder.takeAt(victimIndex);
+                m_subtaskWidgets.remove(victim->taskId());
+                m_subtaskAnchors.remove(victim->taskId());
+                if (m_subtaskDock) {
+                    m_subtaskDock->removeCard(victim);
+                }
+                if (m_transcriptLayout) {
+                    m_transcriptLayout->removeWidget(victim);
+                }
+                victim->hide();
+                victim->setParent(nullptr);
+                victim->deleteLater();
+            }
             // Where the sub-agent's card belongs in the transcript once it
             // retires: right below whatever was last when it started.
             m_subtaskAnchors.insert(request.toolCallId, lastTranscriptContentWidget());
@@ -1005,7 +1066,13 @@ ChatWidget::ChatWidget(QWidget *parent)
         // it is posted rather than only once the call has reported back; the
         // parsed arguments are stashed as well, so a failure can be reported
         // against this same card instead of a second one appearing.
-        if (request.toolName == u"suggest"_s) {
+        //
+        // The name is compared canonically: an agent may hand its advice over
+        // as suggestion, propose or advice, and the restored card already
+        // matches on the canonical name. A live call that answered to a
+        // different name got the generic card and a JSON blob instead of the
+        // advice it was carrying.
+        if (canonicalToolName(request.toolName) == u"suggest"_s) {
             const Suggestion suggestion = suggestionFromRequest(request);
             m_pendingSuggestions.insert(request.toolCallId, suggestion);
             if (!suggestion.text.isEmpty()) {
@@ -1037,8 +1104,9 @@ ChatWidget::ChatWidget(QWidget *parent)
         toolWidget->setRunning();
         // What the call is working on, up in the body while it runs. A question
         // is the one tool whose payload is prose rather than arguments, so its
-        // card carries the question instead of a JSON blob of it.
-        if (request.toolName == u"question"_s) {
+        // card carries the question instead of a JSON blob of it. The tool name
+        // is compared canonically: an agent may ask under ask_user & friends.
+        if (canonicalToolName(request.toolName) == u"question"_s) {
             QString asked = request.questionText;
             if (asked.trimmed().isEmpty()) {
                 const QJsonDocument doc = QJsonDocument::fromJson(request.details.toUtf8());
@@ -1046,7 +1114,15 @@ ChatWidget::ChatWidget(QWidget *parent)
                     asked = questionTextFromToolArguments(doc.object());
                 }
             }
-            toolWidget->setRunningInput(asked.isEmpty() ? request.summary : asked);
+            if (asked.trimmed().isEmpty() && request.summary != request.toolName
+                && request.summary != request.originalToolName) {
+                asked = request.summary;
+            }
+            // Kept for the finished card: setFinished clears the running input,
+            // and the card would otherwise show the answer without the question
+            // that produced it.
+            m_questionTexts.insert(request.toolCallId, asked);
+            toolWidget->setRunningInput(asked);
         } else {
             toolWidget->setRunningInput(request.details);
         }
@@ -1139,6 +1215,19 @@ ChatWidget::ChatWidget(QWidget *parent)
             ToolResult displayResult = result;
             if (!result.rawOutput.isEmpty()) {
                 displayResult.output = result.rawOutput;
+            }
+            // A question's payload is prose, not arguments: setFinished clears
+            // the running input, so without this the finished card shows only
+            // the answer and the question that prompted it is lost. The
+            // restored card keeps it (see restoreHistoricalTool); a live card
+            // has to read the same.
+            const QString asked = m_questionTexts.take(result.toolCallId);
+            if (!asked.trimmed().isEmpty()) {
+                if (displayResult.output.trimmed().isEmpty()) {
+                    displayResult.output = asked;
+                } else if (!displayResult.output.contains(asked.left(40))) {
+                    displayResult.output = asked + u"\n\n— Answer: "_s + displayResult.output;
+                }
             }
             widget->setFinished(displayResult);
         }
@@ -1272,6 +1361,13 @@ ChatWidget::ChatWidget(QWidget *parent)
     // before toolStarted, so the card is created here and later reused by the
     // toolStarted handler instead of a second card appearing.
     connect(&m_agent, &AgentLoop::permissionNeeded, this, [this](const PermissionRequest &request) {
+        // Only one request is live. A card left over from a request that was
+        // cancelled by a newer one must not keep an active Allow button.
+        for (auto it = m_toolCallWidgets.constBegin(); it != m_toolCallWidgets.constEnd(); ++it) {
+            if (it.key() != request.toolCallId && it.value()) {
+                it.value()->cancelApproval();
+            }
+        }
         ToolCallWidget *widget = m_toolCallWidgets.value(request.toolCallId);
         if (!widget) {
             widget = new ToolCallWidget(request.toolCallId, m_transcriptContainer);
@@ -1319,12 +1415,12 @@ ChatWidget::ChatWidget(QWidget *parent)
             moveToIntentDock(approvalRow);
         }
         connect(widget, &ToolCallWidget::approvalChosen, this,
-                [this, guard = QPointer<ToolCallWidget>(widget)](PermissionDecision decision) {
+                [this, guard = QPointer<ToolCallWidget>(widget), callId = request.toolCallId](PermissionDecision decision) {
                     if (guard) {
                         guard->setApprovalResolved(decision);
                     }
                     updateIntentDockVisibility();
-                    m_agent.resolvePermission(decision);
+                    m_agent.resolvePermission(decision, callId);
                 },
                 Qt::SingleShotConnection);
         m_turnStatus->setActivity(i18n("Waiting for approval"));
@@ -1389,7 +1485,12 @@ ChatWidget::ChatWidget(QWidget *parent)
             m_progressTimer->setInterval(50);
             connect(m_progressTimer, &QTimer::timeout, this, &ChatWidget::flushToolProgress);
         }
+        // Large streamed outputs are expensive to re-HTML on every tick.
+        // Only change the interval while the timer is stopped: setInterval()
+        // on a running timer restarts it, which would starve a steady stream
+        // exactly like the old restart-on-every-chunk bug.
         if (!m_progressTimer->isActive()) {
+            m_progressTimer->setInterval(partial.size() > 20000 ? 150 : 50);
             flushToolProgress();
             m_progressTimer->start();
         }
@@ -1469,6 +1570,11 @@ ChatWidget::ChatWidget(QWidget *parent)
         // must not leave it docked: nothing can answer it now. The exception is
         // an agent-side ACP question, whose answer starts a fresh turn.
         clearQuestionCards(m_agent.pendingAcpToolQuestionId());
+        // Tool payloads that never produced a result are no longer routable;
+        // drop them instead of retaining one entry per aborted call.
+        m_questionTexts.clear();
+        m_pendingSuggestions.clear();
+        m_pendingProgress.clear();
         // The dock lost contents without a dock-aware call above: a cleared
         // question, and approval rows hidden together with the cards that
         // carried them. Recompute, or the strip stays on screen over the
@@ -1568,6 +1674,38 @@ ChatWidget::ChatWidget(QWidget *parent)
             }
         }
         showInfoMessage(i18n("Kept changes to %1", QFileInfo(path).fileName()), false);
+    });
+    connect(m_editTracker, &EditTracker::editRestored, this, [this](const QString &path, const QString &toolName,
+                                                                    const QString &newContent,
+                                                                    const QString &expectedContent) {
+        Q_UNUSED(toolName);
+        if (!m_agent.documentBridge()) {
+            showInfoMessage(i18n("Cannot restore edit for %1: document bridge not available", path), true);
+            return;
+        }
+        QString current;
+        const bool exists = m_agent.documentBridge()->readDocument(path, &current);
+        if (expectedContent.isNull()) {
+            // The rejection deleted a file the agent had created. Only
+            // re-create it if it is still absent.
+            if (exists) {
+                showInfoMessage(i18n("Cannot restore %1: the file exists again", QFileInfo(path).fileName()), true);
+                return;
+            }
+        } else if (!exists || current != expectedContent) {
+            showInfoMessage(i18n("Cannot restore %1: it changed after the rejection", QFileInfo(path).fileName()), true);
+            return;
+        }
+        QString error;
+        if (!m_agent.documentBridge()->writeDocument(path, newContent, &error)) {
+            showInfoMessage(i18n("Could not restore %1: %2", QFileInfo(path).fileName(), error), true);
+            return;
+        }
+        if (!m_agent.documentBridge()->saveDocumentIfOpen(path, &error)) {
+            showInfoMessage(i18n("Could not save %1: %2", QFileInfo(path).fileName(), error), true);
+            return;
+        }
+        showInfoMessage(i18n("Restored the edit to %1", QFileInfo(path).fileName()), false);
     });
     connect(m_editTracker, &EditTracker::editRejected, this, [this](const QString &path, const QString &toolName,
                                                                     const QString &oldContent) {
@@ -1780,14 +1918,14 @@ void ChatWidget::saveCurrentConversation()
 
     const bool isNew = SessionStore::saveConversation(
         m_currentConversationId, sessionData, QString(),
-        m_settings.maxSavedConversations > 0 ? m_settings.maxSavedConversations : 50);
+        m_settings.maxSavedConversations);
     // The number of conversations only changes when one is created or
     // deleted. A save of an existing conversation keeps the cached count, so
     // the button is repainted without a query.
     if (isNew) {
         m_historyCount = -1;
+        updateHistoryButton();
     }
-    updateHistoryButton();
 }
 
 void ChatWidget::scheduleSessionSave()
@@ -1988,8 +2126,13 @@ void ChatWidget::scheduleStreamRender()
     }
     // Restarting is safe because it is single-shot: a burst of chunks collapses
     // into one rebuild, while a steady stream still renders ~20 times a second,
-    // which is well past the eye's ability to notice on text arriving.
+    // which is well past the eye's ability to notice on text arriving. A very
+    // long answer costs more per rebuild, so back off the rate as it grows.
+    // Only set the interval while stopped: setInterval() on a running timer
+    // restarts it, which would starve a continuous stream.
     if (!m_streamRenderTimer->isActive()) {
+        const int length = m_streamText.size();
+        m_streamRenderTimer->setInterval(length > 60000 ? 200 : (length > 20000 ? 100 : 50));
         m_streamRenderTimer->start();
     }
 }
@@ -2123,7 +2266,11 @@ void ChatWidget::addThinkingBlock(const QString &text)
     }
     m_thinkingBlock->show();
     registerThinkingBlock(m_thinkingBlock, m_thinkingBrowser, m_thinkingToggle);
-    if (!m_isThinking) {
+    if (m_answerStarted) {
+        // The answer is already streaming. Keep this reasoning in the buffer
+        // and render it when the card freezes instead of writing it next to
+        // the answer.
+    } else if (!m_isThinking) {
         flushThinkingPacer();
     } else {
         startThinkingPacer();
@@ -2141,7 +2288,9 @@ void ChatWidget::appendThinkingDelta(const QString &delta)
     }
     // Only auto-expand if the user hasn't manually collapsed the thinking block.
     // We track this via m_thinkingExpanded - if it's false, the user explicitly collapsed.
-    if (m_thinkingExpanded) {
+    // Once the answer has started, later reasoning is buffered for the final
+    // transcript but not paced in: reasoning and answer must stay sequential.
+    if (m_thinkingExpanded && !m_answerStarted) {
         startThinkingPacer();
     }
 }
@@ -2612,6 +2761,17 @@ void ChatWidget::applyTranscriptCollapse()
             m_thinkingBlocks.removeAt(i);
         }
     }
+    // Reasoning blocks carry their own browser/document too. Keep recent
+    // turns and drop the oldest ones once the transcript is very long.
+    constexpr int kMaxRetainedThinkingBlocks = 200;
+    while (m_thinkingBlocks.size() > kMaxRetainedThinkingBlocks) {
+        const ThinkingBlockRef entry = m_thinkingBlocks.takeFirst();
+        if (entry.block) {
+            entry.block->hide();
+            entry.block->setParent(nullptr);
+            entry.block->deleteLater();
+        }
+    }
     // Reasoning is part of the turn, not a disclosure the transcript budget
     // is allowed to close. Every block stays expanded.
     for (int i = m_thinkingBlocks.size() - 1; i >= 0; --i) {
@@ -2650,6 +2810,67 @@ void ChatWidget::applyTranscriptCollapse()
         } else {
             widget->setExpanded(false);
         }
+    }
+    pruneOldTranscriptCards();
+}
+
+void ChatWidget::pruneOldTranscriptCards()
+{
+    // Every tool card owns a QTextBrowser and its document. A long session
+    // could otherwise retain thousands of them, so the oldest finished cards
+    // are dropped from the live widget tree once the retention cap is passed.
+    // The session still has the history and rebuilds them on reload.
+    constexpr int kMaxRetainedToolCards = 400;
+    if (m_toolCallOrder.size() <= kMaxRetainedToolCards) {
+        return;
+    }
+    int toRemove = m_toolCallOrder.size() - kMaxRetainedToolCards;
+    for (int i = 0; i < m_toolCallOrder.size() && toRemove > 0;) {
+        ToolCallWidget *widget = m_toolCallOrder.at(i);
+        if (!widget || widget->isRunning()) {
+            ++i;
+            continue;
+        }
+        if (m_pinnedViewportWidget == widget) {
+            m_pinnedViewportWidget = nullptr;
+        }
+        m_toolCallWidgets.remove(widget->toolCallId());
+        m_toolCallOrder.removeAt(i);
+        m_focusedToolCardIndex = -1;
+        widget->hide();
+        widget->setParent(nullptr);
+        widget->deleteLater();
+        --toRemove;
+    }
+
+    // Text turns are lighter than tool cards but still unbounded. Keep the
+    // recent user/assistant cards and let the session restore the rest.
+    if (!m_transcriptLayout) {
+        return;
+    }
+    constexpr int kMaxRetainedTextCards = 300;
+    int textCards = 0;
+    for (int i = 0; i < m_transcriptLayout->count(); ++i) {
+        QWidget *widget = m_transcriptLayout->itemAt(i) ? m_transcriptLayout->itemAt(i)->widget() : nullptr;
+        if (widget && (widget->objectName() == u"userCard"_s || widget->objectName() == u"assistantCard"_s)) {
+            ++textCards;
+        }
+    }
+    int textToRemove = textCards - kMaxRetainedTextCards;
+    for (int i = 0; i < m_transcriptLayout->count() && textToRemove > 0;) {
+        QLayoutItem *item = m_transcriptLayout->itemAt(i);
+        QWidget *widget = item ? item->widget() : nullptr;
+        if (!widget || (widget->objectName() != u"userCard"_s && widget->objectName() != u"assistantCard"_s)
+            || widget == m_activeAssistantWidget || widget == m_pinnedViewportWidget) {
+            ++i;
+            continue;
+        }
+        m_transcriptLayout->takeAt(i);
+        widget->hide();
+        widget->setParent(nullptr);
+        widget->deleteLater();
+        delete item;
+        --textToRemove;
     }
 }
 
@@ -4741,7 +4962,7 @@ bool ChatWidget::ensureAcpBinaryInstalled(const QString &agentId)
             return false;
         }
 
-        auto *installer = new AcpBinaryInstaller(agent, agent.value(u"binaryPlatform"_s).toString(),
+        auto *installer = new AcpBinaryInstaller(agent, acpCurrentPlatformKey(),
                                                  nullptr, this);
         m_acpBinaryInstaller = installer;
         m_acpInstallingAgentId = agentId;
@@ -4759,13 +4980,12 @@ bool ChatWidget::ensureAcpBinaryInstalled(const QString &agentId)
             agents.append(installedAgent);
             m_settings.acpInstalledAgents = QString::fromUtf8(QJsonDocument(agents).toJson(QJsonDocument::Compact));
             if (m_settings.acpAgentId == agentId) {
-                m_settings.acpCommand = installedAgent.value(u"command"_s).toString();
-                QStringList args;
-                for (const QJsonValue &arg : installedAgent.value(u"args"_s).toArray()) {
-                    args.append(arg.toString());
+                const AcpAgentPreset launch = acpAgentLaunchLine(m_settings, agentId);
+                if (!launch.command.isEmpty()) {
+                    m_settings.acpCommand = launch.command;
+                    m_settings.acpArgs = launch.args;
+                    m_settings.acpApiKeyEnv = launch.apiKeyEnv;
                 }
-                m_settings.acpArgs = args.join(u' ');
-                m_settings.acpApiKeyEnv = installedAgent.value(u"apiKeyEnv"_s).toString();
                 m_agent.setSettings(m_settings);
             }
             Q_EMIT settingsChanged(m_settings);
@@ -5078,7 +5298,15 @@ void ChatWidget::showSettingsMenu()
         action->setCheckable(true);
         action->setChecked(m_settings.acpAgentId == preset.id);
         connect(action, &QAction::triggered, this, [this, id = preset.id, &menu]() {
+            const bool agentChanged = m_settings.acpAgentId != id;
             m_settings.acpAgentId = id;
+            // A model/effort id belongs to one agent's catalogue. Carrying the
+            // previous agent's selection into a newly selected agent makes its
+            // --model flag or set_config_option invalid.
+            if (agentChanged) {
+                m_settings.acpModel.clear();
+                m_settings.acpEffort.clear();
+            }
             m_settings.provider = Provider::Acp;
             m_preferredProvider = Provider::Acp;
             // Update command, args, and env from the registry entry or preset.
@@ -5238,8 +5466,10 @@ void ChatWidget::setMcpToolAutoApproved(const McpTool &tool, bool enabled)
             config.alwaysAllow.removeAll(tool.name);
         }
     }
-    manager->saveToDisk();
+    // Apply first, then persist the applied list. Saving before setServers()
+    // serialized the old m_configs and the toggle reverted on reload.
     manager->setServers(updated);
+    manager->saveToDisk();
 }
 
 void ChatWidget::showModeMenu()
@@ -5369,6 +5599,25 @@ void ChatWidget::addSuggestionCard(const QString &id, const Suggestion &suggesti
     m_suggestionWidgets.insert(id, card);
     m_suggestionOrder.append(card);
     appendTranscriptWidget(card);
+    // Suggestion cards are transcript widgets with their own browsers; keep
+    // only the recent ones in a very long session.
+    constexpr int kMaxSuggestionCards = 100;
+    while (m_suggestionOrder.size() > kMaxSuggestionCards) {
+        SuggestionWidget *oldest = m_suggestionOrder.first();
+        if (!oldest) {
+            m_suggestionOrder.removeFirst();
+            continue;
+        }
+        const QString oldestId = oldest->suggestionId();
+        m_suggestionWidgets.remove(oldestId);
+        m_suggestionOrder.removeFirst();
+        if (m_transcriptLayout) {
+            m_transcriptLayout->removeWidget(oldest);
+        }
+        oldest->hide();
+        oldest->setParent(nullptr);
+        oldest->deleteLater();
+    }
     applyTranscriptCollapse();
     scrollToBottom();
 }
@@ -5383,6 +5632,25 @@ void ChatWidget::addSuggestionErrorCard(const QString &id, const QString &messag
     m_suggestionWidgets.insert(id, card);
     m_suggestionOrder.append(card);
     appendTranscriptWidget(card);
+    // Suggestion cards are transcript widgets with their own browsers; keep
+    // only the recent ones in a very long session.
+    constexpr int kMaxSuggestionCards = 100;
+    while (m_suggestionOrder.size() > kMaxSuggestionCards) {
+        SuggestionWidget *oldest = m_suggestionOrder.first();
+        if (!oldest) {
+            m_suggestionOrder.removeFirst();
+            continue;
+        }
+        const QString oldestId = oldest->suggestionId();
+        m_suggestionWidgets.remove(oldestId);
+        m_suggestionOrder.removeFirst();
+        if (m_transcriptLayout) {
+            m_transcriptLayout->removeWidget(oldest);
+        }
+        oldest->hide();
+        oldest->setParent(nullptr);
+        oldest->deleteLater();
+    }
     applyTranscriptCollapse();
     scrollToBottom();
 }
@@ -5689,7 +5957,7 @@ void ChatWidget::showCheckpointMenu()
     connect(create, &QAction::triggered, this, [this] {
         const QString label = i18n("Manual checkpoint");
         QString error;
-        const QString id = m_agent.createCheckpoint(label);
+        const QString id = m_agent.createCheckpoint(label, &error);
         if (id.isEmpty()) {
             showInfoMessage(i18n("Could not create a checkpoint: %1", error.isEmpty() ? i18n("git is unavailable") : error), true);
         } else {
@@ -5911,6 +6179,7 @@ void ChatWidget::clearStreamingPointers()
     m_thinkingBuffer.clear();
     m_thinkingPacedLength = 0;
     m_thinkingExpanded = true;
+    m_answerStarted = false;
     m_streamText.clear();
     m_isStreaming = false;
 }
@@ -5920,6 +6189,7 @@ void ChatWidget::resetThinkingState()
     m_thinkingBuffer.clear();
     m_thinkingPacedLength = 0;
     m_thinkingExpanded = true;
+    m_answerStarted = false;
     stopThinkingPacer();
 }
 
@@ -5941,6 +6211,7 @@ void ChatWidget::clearTranscriptContents()
         m_progressTimer->stop();
     }
     m_pendingProgress.clear();
+    m_questionTexts.clear();
     if (m_streamRenderTimer) {
         m_streamRenderTimer->stop();
     }
@@ -6120,15 +6391,17 @@ void ChatWidget::restoreHistoricalTool(const QString &toolCallId, const QString 
     // ACP kinds are not in isFileMutatingTool on purpose: that list drives the
     // edit tracker, which already learns about ACP writes from mutatesFiles.
     // isEditToolName covers the OpenCode aliases (write, edit, patch) here so
-    // restored history cards colour like live ones.
+    // restored history cards colour like live ones. Canonical names only: the
+    // old `startsWith("fs/")` painted fs/read_text_file as a write, so a
+    // restored read looked like an edit in the history.
     if (isFileMutatingTool(canonicalName) || ChatTheme::isEditToolName(canonicalName) || canonicalName == u"edit_file"_s
         || canonicalName == u"write_file"_s || canonicalName == u"multi_edit_file"_s
-        || toolName == u"edit"_s || toolName == u"str_replace"_s || toolName == u"str_replace_editor"_s
-        || toolName == u"write"_s || toolName == u"delete"_s || toolName == u"patch"_s || toolName == u"apply_patch"_s
-        || toolName.startsWith(u"fs/"_s)) {
+        || canonicalName == u"edit"_s || canonicalName == u"str_replace"_s || canonicalName == u"str_replace_editor"_s
+        || canonicalName == u"write"_s || canonicalName == u"delete"_s || canonicalName == u"patch"_s
+        || canonicalName == u"apply_patch"_s) {
         risk = ToolRisk::Write;
-    } else if (canonicalName == u"bash"_s || toolName == u"execute"_s || toolName.startsWith(u"terminal"_s)
-               || toolName.startsWith(u"shell"_s)) {
+    } else if (canonicalName == u"bash"_s || canonicalName == u"execute"_s || canonicalName.startsWith(u"terminal"_s)
+               || canonicalName.startsWith(u"shell"_s)) {
         risk = ToolRisk::Execute;
     }
 
@@ -6310,7 +6583,8 @@ void ChatWidget::restoreHistoricalTool(const QString &toolCallId, const QString 
     result.toolCallId = toolCallId;
     result.name = canonicalName;
     result.output = hasResult ? output : QString();
-    result.ok = !result.output.contains(u"STATUS: failure"_s);
+    result.cancelled = hasResult && restoredResultWasCancelled(result.output);
+    result.ok = !result.cancelled && !result.output.contains(u"STATUS: failure"_s);
     // A question's payload is prose, not arguments: without this the restored
     // card shows only the answer and the question that prompted it is lost.
     // setFinished clears the running input, so the question is folded into the
@@ -6371,60 +6645,119 @@ void ChatWidget::rebuildTranscript()
     }
 
     // Specs live on assistant messages and results on Role::Tool messages, and
-    // ACP writes the results first. Gather both before walking so a card can
-    // be created, already filled, at whichever message appears first. A later
-    // duplicate id keeps the last non-empty output. "{}" is not useful args.
+    // ACP writes the results first. Build one entry per *call occurrence*, not
+    // per id: providers and sub-agents reuse ids ("call_0", a retried task), and
+    // keying by id alone silently collapsed several cards into one. Results are
+    // paired with occurrences in order, so duplicates still come back as
+    // separate cards with their own output.
     struct HistoricalTool {
+        QString id;
         QString specName;
         QString resultName;
         QString argumentsJson;
         QString output;
         bool hasResult = false;
+        // Unique key for the widget maps. The first occurrence keeps the plain
+        // id so live routing for a still-running call keeps working.
+        QString widgetKey;
     };
-    QHash<QString, HistoricalTool> catalog;
-    for (const auto &msg : messages) {
-        if (msg.role == ChatMessage::Role::Assistant) {
-            for (const QJsonValue &toolCallVal : msg.toolCalls) {
-                const QJsonObject toolCallObj = toolCallVal.toObject();
-                const QString toolCallId = toolCallObj.value(u"id"_s).toString();
-                if (toolCallId.isEmpty()) {
-                    continue;
-                }
-                HistoricalTool &slot = catalog[toolCallId];
-                const QJsonObject functionObj = toolCallObj.value(u"function"_s).toObject();
-                const QString name = functionObj.value(u"name"_s).toString();
-                if (!name.isEmpty()) {
-                    slot.specName = name;
-                }
-                const QString argumentsJson = functionObj.value(u"arguments"_s).toString().trimmed();
-                if (!argumentsJson.isEmpty() && argumentsJson != u"{}"_s) {
-                    slot.argumentsJson = argumentsJson;
-                }
-            }
-        } else if (msg.role == ChatMessage::Role::Tool) {
-            if (msg.toolCallId.isEmpty()) {
+    QList<HistoricalTool> calls;
+    QHash<QString, QList<int>> callIndexesById;
+    QList<QList<int>> callOccurrencesByMessage(messages.size());
+    QSet<QString> usedWidgetKeys;
+    auto makeWidgetKey = [&usedWidgetKeys](const QString &id) {
+        QString key = id;
+        int suffix = 2;
+        while (usedWidgetKeys.contains(key)) {
+            key = id + u"#"_s + QString::number(suffix++);
+        }
+        usedWidgetKeys.insert(key);
+        return key;
+    };
+
+    for (int mi = 0; mi < messages.size(); ++mi) {
+        const ChatMessage &msg = messages.at(mi);
+        if (msg.role != ChatMessage::Role::Assistant) {
+            continue;
+        }
+        QList<int> occurrences;
+        for (const QJsonValue &toolCallVal : msg.toolCalls) {
+            const QJsonObject toolCallObj = toolCallVal.toObject();
+            const QString toolCallId = toolCallObj.value(u"id"_s).toString();
+            if (toolCallId.isEmpty()) {
+                occurrences.append(-1);
                 continue;
             }
-            HistoricalTool &slot = catalog[msg.toolCallId];
-            if (!msg.name.isEmpty()) {
-                slot.resultName = msg.name;
+            HistoricalTool slot;
+            slot.id = toolCallId;
+            slot.widgetKey = makeWidgetKey(toolCallId);
+            const QJsonObject functionObj = toolCallObj.value(u"function"_s).toObject();
+            slot.specName = functionObj.value(u"name"_s).toString();
+            const QString argumentsJson = functionObj.value(u"arguments"_s).toString().trimmed();
+            if (!argumentsJson.isEmpty() && argumentsJson != u"{}"_s) {
+                slot.argumentsJson = argumentsJson;
             }
-            slot.hasResult = true;
-            if (!msg.content.isEmpty()) {
-                slot.output = msg.content;
-            }
+            const int index = calls.size();
+            calls.append(slot);
+            callIndexesById[toolCallId].append(index);
+            occurrences.append(index);
         }
+        callOccurrencesByMessage[mi] = occurrences;
     }
 
-    QSet<QString> placed;
-    // First sight of an id is where the card goes. A later sight (ACP's
-    // trailing assistant toolCalls, or a native tool message after the bubble)
-    // must not create a second, empty card.
-    auto place = [&](const QString &toolCallId) {
-        if (toolCallId.isEmpty() || placed.contains(toolCallId)) {
+    // Tool results are stored as separate messages, and their position relative
+    // to the assistant message that declares the call depends on the driver:
+    // the native loop appends the declaring message first and the results after
+    // it, while an ACP agent reports each result as it finishes and the
+    // declaring assistant message only lands when the whole prompt ends. Bind
+    // every result to its call occurrence up front: reuse the next unmatched
+    // occurrence for the id. A result with no declaration at all still gets a
+    // card, so an interrupted history does not drop work the user can see.
+    QHash<QString, int> nextCallForResult;
+    QList<int> resultOccurrence(messages.size(), -1);
+    for (int mi = 0; mi < messages.size(); ++mi) {
+        const ChatMessage &msg = messages.at(mi);
+        if (msg.role != ChatMessage::Role::Tool || msg.toolCallId.isEmpty()) {
+            continue;
+        }
+        const QList<int> candidates = callIndexesById.value(msg.toolCallId);
+        const int next = nextCallForResult.value(msg.toolCallId, 0);
+        int occurrence = -1;
+        if (next < candidates.size()) {
+            occurrence = candidates.at(next);
+        } else {
+            HistoricalTool orphan;
+            orphan.id = msg.toolCallId;
+            orphan.widgetKey = makeWidgetKey(msg.toolCallId);
+            occurrence = calls.size();
+            calls.append(orphan);
+            callIndexesById[msg.toolCallId].append(occurrence);
+        }
+        nextCallForResult[msg.toolCallId] = next + 1;
+
+        HistoricalTool &slot = calls[occurrence];
+        if (!msg.name.isEmpty()) {
+            slot.resultName = msg.name;
+        }
+        slot.hasResult = true;
+        if (!msg.content.isEmpty()) {
+            slot.output = msg.content;
+        }
+        resultOccurrence[mi] = occurrence;
+    }
+
+    QSet<int> placedCalls;
+    // First sight of a call occurrence is where its card goes. A later sight
+    // (ACP's trailing assistant toolCalls, or a native tool message after the
+    // bubble) must not create a second, empty card.
+    auto place = [&](int occurrenceIndex) {
+        if (occurrenceIndex < 0 || occurrenceIndex >= calls.size()
+            || placedCalls.contains(occurrenceIndex)) {
             return;
         }
-        const HistoricalTool spec = catalog.value(toolCallId);
+        placedCalls.insert(occurrenceIndex);
+        const HistoricalTool spec = calls.at(occurrenceIndex);
+        const QString widgetKey = spec.widgetKey;
         const QString toolName = !spec.specName.isEmpty() ? spec.specName : spec.resultName;
         const QString canonicalToolName = KateAi::canonicalToolName(toolName);
         const QString argumentsJson = spec.argumentsJson;
@@ -6435,28 +6768,38 @@ void ChatWidget::rebuildTranscript()
             if (!restoredDoc.isNull() && restoredDoc.isObject()) {
                 restoredArgs = restoredDoc.object();
             }
-            auto *subtaskWidget = new SubtaskWidget(toolCallId, m_intentDock);
-            connect(subtaskWidget, &SubtaskWidget::cancelRequested, this, [this](const QString &taskId) {
-                m_agent.cancelSubtask(taskId);
+            auto *subtaskWidget = new SubtaskWidget(widgetKey, m_intentDock);
+            const QString liveTaskId = spec.id;
+            connect(subtaskWidget, &SubtaskWidget::cancelRequested, this, [this, liveTaskId](const QString &) {
+                m_agent.cancelSubtask(liveTaskId);
             });
             const QString agentName = restoredArgs.value(u"agent"_s).toString();
             subtaskWidget->startAgent(agentName.isEmpty() ? i18n("Sub-agent") : agentName,
                                       restoredArgs.value(u"mode"_s).toString(),
                                       restoredArgs.value(u"description"_s).toString());
-            m_subtaskWidgets.insert(toolCallId, subtaskWidget);
+            m_subtaskWidgets.insert(widgetKey, subtaskWidget);
             m_subtaskOrder.append(subtaskWidget);
-            // The card below whatever was placed just before it in the rebuild
-            // order, which is the position it ran in during the live turn.
-            m_subtaskAnchors.insert(toolCallId, lastTranscriptContentWidget());
-            addIntentWidget(subtaskWidget);
-            placed.insert(toolCallId);
             if (spec.hasResult) {
                 ToolResult result;
-                result.toolCallId = toolCallId;
+                result.toolCallId = widgetKey;
                 result.name = spec.resultName.isEmpty() ? toolName : spec.resultName;
                 result.output = spec.output;
-                result.ok = !spec.output.contains(u"STATUS: failure"_s);
+                result.cancelled = restoredResultWasCancelled(spec.output);
+                result.ok = !result.cancelled && !spec.output.contains(u"STATUS: failure"_s);
                 subtaskWidget->finishAgent(result);
+                // A restored sub-agent that already reported back belongs to
+                // the thread, exactly like a live one that retired on finish.
+                // Docking it left every old sub-agent card pinned above the
+                // composer -- and the dock on screen with nothing running.
+                subtaskWidget->setHeightBudget(0);
+                appendTranscriptWidget(subtaskWidget);
+                subtaskWidget->show();
+            } else {
+                // Still running (a rebuild during the turn): the card below
+                // whatever was placed just before it in the rebuild order,
+                // which is the position it ran in.
+                m_subtaskAnchors.insert(widgetKey, lastTranscriptContentWidget());
+                addIntentWidget(subtaskWidget);
             }
             return;
         }
@@ -6485,39 +6828,23 @@ void ChatWidget::rebuildTranscript()
             } else {
                 suggestion.line = 0;
             }
-            placed.insert(toolCallId);
             if (suggestion.text.isEmpty()) {
                 return;
             }
-            auto *card = new SuggestionWidget(toolCallId, m_transcriptContainer);
+            auto *card = new SuggestionWidget(widgetKey, m_transcriptContainer);
             card->setSuggestion(suggestion.text, suggestion.path, suggestion.line);
             card->markDecided();
-            m_suggestionWidgets.insert(toolCallId, card);
+            m_suggestionWidgets.insert(widgetKey, card);
             m_suggestionOrder.append(card);
             appendTranscriptWidget(card);
             return;
         }
 
-        restoreHistoricalTool(toolCallId, toolName, argumentsJson, spec.output, spec.hasResult);
-        placed.insert(toolCallId);
+        restoreHistoricalTool(widgetKey, toolName, argumentsJson, spec.output, spec.hasResult);
     };
 
-    // Tool results are stored as separate messages, and their position relative
-    // to the assistant message that declares the call depends on the driver:
-    // the native loop appends the declaring message first and the results after
-    // it, while an ACP agent reports each result as it finishes and the
-    // declaring assistant message only lands when the whole prompt ends. Index
-    // the results up front so a card can be created already finished, whichever
-    // order the history has — matching results to widgets in the loop below
-    // alone would drop every ACP result and leave the restored card's box empty.
-    QHash<QString, ChatMessage> toolResultsById;
-    for (const auto &msg : messages) {
-        if (msg.role == ChatMessage::Role::Tool && !msg.toolCallId.isEmpty()) {
-            toolResultsById.insert(msg.toolCallId, msg);
-        }
-    }
-
-    for (const auto &msg : messages) {
+    for (int mi = 0; mi < messages.size(); ++mi) {
+        const ChatMessage &msg = messages.at(mi);
         switch (msg.role) {
             case ChatMessage::Role::User:
                 if (!isInternalUserMessage(msg.content)) {
@@ -6600,14 +6927,17 @@ void ChatWidget::rebuildTranscript()
                 // message earlier in the transcript already placed them (ACP
                 // stores the result before this bubble). Native order still
                 // lands the card here, already filled from the pre-scan.
-                for (const QJsonValue &toolCallVal : msg.toolCalls) {
-                    place(toolCallVal.toObject().value(u"id"_s).toString());
+                for (int occurrence : callOccurrencesByMessage.at(mi)) {
+                    place(occurrence);
                 }
                 break;
             case ChatMessage::Role::Tool:
                 // Place here when the result precedes the assistant message.
-                // An id already placed (native: card follows the bubble) is skipped.
-                place(msg.toolCallId);
+                // A call already placed (native: card follows the bubble) is
+                // skipped because its occurrence is already in placedCalls.
+                if (mi < resultOccurrence.size()) {
+                    place(resultOccurrence.at(mi));
+                }
                 break;
             case ChatMessage::Role::System:
                 // System messages are not shown in transcript
@@ -6739,7 +7069,7 @@ void ChatWidget::updateHistoryButton()
     // cheap repaint into a database round trip. The cache is dropped wherever
     // the number of conversations can change.
     if (m_historyCount < 0) {
-        const int maxConversations = m_settings.maxSavedConversations > 0 ? m_settings.maxSavedConversations : 50;
+        const int maxConversations = m_settings.maxSavedConversations;
         m_historyCount = SessionStore::listConversations(maxConversations).size();
     }
     const int count = m_historyCount;
@@ -6762,7 +7092,7 @@ void ChatWidget::showConversationHistory()
         m_historyMenu->clear();
     }
 
-    const int maxConversations = m_settings.maxSavedConversations > 0 ? m_settings.maxSavedConversations : 50;
+    const int maxConversations = m_settings.maxSavedConversations;
     const auto conversations = SessionStore::listConversations(maxConversations);
     // The list is the count the button shows, so the cache is filled from it
     // instead of querying a second time.
@@ -6798,6 +7128,14 @@ void ChatWidget::showConversationHistory()
 
         auto *clearAllAction = m_historyMenu->addAction(QIcon::fromTheme(u"edit-clear"_s), i18n("Clear All History"));
         connect(clearAllAction, &QAction::triggered, this, [this]() {
+            // This permanently deletes every transcript, so it needs an
+            // explicit confirmation rather than one click in a popup menu.
+            if (QMessageBox::question(this, i18n("Clear All History"),
+                                      i18n("Delete every saved conversation? This cannot be undone."),
+                                      QMessageBox::Yes | QMessageBox::No, QMessageBox::No)
+                != QMessageBox::Yes) {
+                return;
+            }
             SessionStore::clearAllConversations();
             m_currentConversationId.clear();
             // Clear All means the current transcript must not be saved again
@@ -6829,21 +7167,30 @@ void ChatWidget::switchToConversation(const QString &conversationId)
     // The running turn belongs to the conversation that is being left. Without
     // this the agent keeps streaming, and a delta that arrives after the
     // switch would be rendered into the new transcript and saved under the
-    // new id.
+    // new id. The flag goes up first: abort() emits turnFinished synchronously,
+    // and a re-entrant save/delta must see the loading state, not the old
+    // transcript.
+    m_loadingConversation = true;
     m_agent.abort();
 
     // Save current conversation before switching
     if (!m_agent.messages().isEmpty() && !m_currentConversationId.isEmpty()) {
         const auto sessionData = m_agent.sessionData();
         if (!sessionData.messages.isEmpty()) {
-            SessionStore::saveConversation(m_currentConversationId, sessionData, QString(), m_settings.maxSavedConversations > 0 ? m_settings.maxSavedConversations : 50);
+            SessionStore::saveConversation(m_currentConversationId, sessionData, QString(), m_settings.maxSavedConversations);
         }
     }
 
-    m_loadingConversation = true;
-
     // Load the new conversation
     const auto sessionData = SessionStore::loadConversation(conversationId);
+    if (sessionData.loadFailed) {
+        // The stored transcript could not be read. Showing it as an empty chat
+        // and then autosaving would overwrite the very history that is still
+        // on disk, so refuse the switch and keep the current conversation.
+        m_loadingConversation = false;
+        showInfoMessage(i18n("Could not load that conversation: its stored history is unreadable."), true);
+        return;
+    }
     m_agent.restoreSession(sessionData);
     if (!sessionData.workspace.isEmpty()) {
         Q_EMIT conversationWorkspaceRequested(sessionData.workspace);
@@ -6961,7 +7308,7 @@ void ChatWidget::resetForNewChat(bool saveCurrentConversation)
                 m_currentConversationId = QUuid::createUuid().toString(QUuid::WithoutBraces);
             }
             SessionStore::saveConversation(m_currentConversationId, sessionData, QString(),
-                                          m_settings.maxSavedConversations > 0 ? m_settings.maxSavedConversations : 50);
+                                          m_settings.maxSavedConversations);
         }
     }
 

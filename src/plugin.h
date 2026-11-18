@@ -76,6 +76,11 @@ private:
     // Conversation ids restored from the session config, handed out in
     // order as windows appear.
     QStringList m_sessionConversations;
+    // The last known live view order. Kate can destroy its windows before it
+    // asks the plugin to write the session config; without this snapshot every
+    // view had unregistered first and the next session reopened blank.
+    QStringList m_lastConversationIds;
+    QStringList liveConversationIds() const;
     // The ":kateai" command line command. One instance for the whole
     // process: a second registration of the same command name would replace
     // the first in the editor's registry, and closing one window would then

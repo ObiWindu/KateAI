@@ -1,8 +1,10 @@
 #include "checkpoint.h"
 
+#include <QCryptographicHash>
 #include <QDir>
 #include <QFile>
 #include <QProcess>
+#include <QStandardPaths>
 #include <QTemporaryDir>
 #include <QTest>
 
@@ -139,6 +141,35 @@ private Q_SLOTS:
         QCOMPARE(readFile(m_workspace->path() + u"/nested/b.txt"_s), u"keep me"_s);
         QVERIFY(!QFileInfo::exists(m_workspace->path() + u"/added.txt"_s));
         QCOMPARE(manager.changedFileCount(checkpoint), 0);
+    }
+
+    void restoreRemovesSymlinkWithoutFollowingIt()
+    {
+#if defined(Q_OS_WIN)
+        QSKIP("symlink creation is not portable in this test");
+#else
+        if (!m_hasGit) {
+            QSKIP("git is not available");
+        }
+        QTemporaryDir outside;
+        QVERIFY(outside.isValid());
+        writeFile(outside.path() + u"/victim.txt"_s, u"do not delete"_s);
+
+        writeFile(m_workspace->path() + u"/a.txt"_s, u"original"_s);
+        CheckpointManager manager;
+        manager.setWorkspace(m_workspace->path());
+        QString error;
+        const QString checkpoint = manager.createCheckpoint(u"baseline"_s, &error);
+        QVERIFY2(!checkpoint.isEmpty(), qPrintable(error));
+
+        const QString link = m_workspace->path() + u"/outside"_s;
+        QVERIFY(QFile::link(outside.path(), link));
+        QVERIFY2(manager.restoreCheckpoint(checkpoint, &error), qPrintable(error));
+        // The link is removed; its target and the file inside it are not.
+        QVERIFY(!QFileInfo(link).isSymLink());
+        QVERIFY(QFileInfo::exists(outside.path() + u"/victim.txt"_s));
+        QCOMPARE(readFile(outside.path() + u"/victim.txt"_s), u"do not delete"_s);
+#endif
     }
 
     void restoreLeavesProtectedFilesUntouched()
@@ -326,6 +357,32 @@ private Q_SLOTS:
         writeFile(m_workspace->path() + u"/a.txt"_s, u"later work"_s);
         QVERIFY2(manager.restoreCheckpoint(checkpoint, &error, false), qPrintable(error));
         QCOMPARE(readFile(m_workspace->path() + u"/a.txt"_s), u"original"_s);
+        QCOMPARE(manager.checkpoints().size(), 1);
+    }
+
+    // An interrupted init (or a cache left by an older version) can leave the
+    // shadow repository as a bare directory: no HEAD, no objects. Treating
+    // that as "already initialised" made every snapshot fail for the rest of
+    // the session, so the manager has to rebuild it.
+    void recoversFromAnIncompleteShadowRepository()
+    {
+        if (!m_hasGit) {
+            QSKIP("git is not available");
+        }
+        writeFile(m_workspace->path() + u"/a.txt"_s, u"original"_s);
+
+        const QByteArray digest = QCryptographicHash::hash(m_workspace->path().toUtf8(),
+                                                           QCryptographicHash::Sha1)
+                                      .toHex();
+        const QString shadow = QStandardPaths::writableLocation(QStandardPaths::CacheLocation)
+            + u"/checkpoints/"_s + QString::fromLatin1(digest) + u"/repo/.git"_s;
+        QVERIFY(QDir().mkpath(shadow));
+        // The directory exists, but it is not a repository (no HEAD/objects).
+
+        CheckpointManager manager;
+        manager.setWorkspace(m_workspace->path());
+        QString error;
+        QVERIFY2(!manager.createCheckpoint(u"after a broken cache"_s, &error).isEmpty(), qPrintable(error));
         QCOMPARE(manager.checkpoints().size(), 1);
     }
 

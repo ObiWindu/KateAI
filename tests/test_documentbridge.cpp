@@ -33,6 +33,16 @@ QString readFile(const QString &path)
     return QString::fromUtf8(file.readAll());
 }
 
+// The raw bytes, for a file whose encoding is not UTF-8.
+QByteArray readRawFile(const QString &path)
+{
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) {
+        return QByteArray();
+    }
+    return file.readAll();
+}
+
 } // namespace
 
 /**
@@ -67,6 +77,8 @@ private Q_SLOTS:
     void testCreateOnlyWriteCreatesFile();
     void testCreateOnlyWriteRefusesOpenBuffer();
     void testWritePreservesFilePermissions();
+    void testWriteThroughSymlinkEditsTarget();
+    void testNonUtf8FileSurvivesReadModifyWrite();
 
 private:
     QTemporaryDir m_dir;
@@ -379,6 +391,58 @@ void TestDocumentBridge::testWritePreservesFilePermissions()
 #else
     QSKIP("POSIX permissions are not meaningful on this platform");
 #endif
+}
+
+void TestDocumentBridge::testWriteThroughSymlinkEditsTarget()
+{
+#if defined(Q_OS_WIN)
+    QSKIP("symlink creation is not portable in this test");
+#else
+    const QString target = QDir(m_dir.path()).filePath(u"target.cpp"_s);
+    {
+        QFile file(target);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        file.write("before\n");
+    }
+    const QString link = QDir(m_dir.path()).filePath(u"link.cpp"_s);
+    QVERIFY(QFile::link(target, link));
+    QVERIFY(QFileInfo(link).isSymLink());
+
+    DiskDocumentBridge bridge;
+    bridge.setUseOpenDocuments(false);
+    QString error;
+    QVERIFY2(bridge.writeDocument(link, u"after\n"_s, &error), qPrintable(error));
+    // The link stays a link and the target receives the content; QSaveFile
+    // must not replace the link itself.
+    QVERIFY(QFileInfo(link).isSymLink());
+    QCOMPARE(readFile(target), u"after\n"_s);
+#endif
+}
+
+void TestDocumentBridge::testNonUtf8FileSurvivesReadModifyWrite()
+{
+    const QString path = QDir(m_dir.path()).filePath(u"latin1.txt"_s);
+    // 0xE9 is 'é' in latin-1 and an invalid UTF-8 byte.
+    const QByteArray original = QByteArray("caf\xe9 latte\n");
+    {
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        file.write(original);
+    }
+
+    DiskDocumentBridge bridge;
+    bridge.setUseOpenDocuments(false);
+
+    QString contents;
+    QVERIFY(bridge.readDocument(path, &contents));
+    // The byte must not have been replaced by the replacement character: that
+    // is what the file was destroyed with.
+    QVERIFY(!contents.contains(QChar(0xFFFD)));
+
+    QString error;
+    QVERIFY2(bridge.writeDocument(path, contents, &error), qPrintable(error));
+    // The non-ASCII byte has to survive the write unchanged.
+    QCOMPARE(readRawFile(path), original);
 }
 
 } // namespace KateAi

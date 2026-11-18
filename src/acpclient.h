@@ -98,6 +98,7 @@ public:
 
     void prompt(const QString &text);
     void resolvePermission(PermissionDecision decision);
+    void resolvePermission(PermissionDecision decision, const QString &toolCallId);
     // True while an ask_user / elicitation RPC is parked waiting for the
     // user's answer, or a session/request_permission carrying answer choices
     // is being shown as a question card.
@@ -240,6 +241,7 @@ private:
         int exitCode = 0;
         QString signal;
         QList<QJsonValue> waiters;
+        qint64 lastProgressMs = 0;
     };
 
     struct QueuedPrompt {
@@ -262,7 +264,7 @@ private:
     void setState(State state, const QString &status);
     void spawnProcess();
     void sendInitialize();
-    void maybeAuthenticate(const QJsonArray &authMethods);
+    void maybeAuthenticate(const QJsonArray &authMethods, bool force = false);
     void openSession();
     void sendSessionNew();
     void sendSessionLoadOrResume();
@@ -277,7 +279,10 @@ private:
                     std::function<void(const QJsonObject &, const QString &)> done = {},
                     int timeoutMs = 30000);
     void sendNotification(const QString &method, const QJsonObject &params);
-    void writeMessage(const QJsonObject &message);
+    // Writes a message to the agent. False when the agent is not running or
+    // the pipe did not take the whole message, so the caller can settle the
+    // request instead of waiting for an answer that cannot arrive.
+    bool writeMessage(const QJsonObject &message);
     void replyResult(const QJsonValue &id, const QJsonObject &result);
     void replyError(const QJsonValue &id, int code, const QString &message);
     // Answers whichever permission request is waiting with a "cancelled" outcome
@@ -298,6 +303,10 @@ private:
 
     void onStdioReadyRead();
     void handleBuffer();
+    // Fails the turn after a protocol frame exceeded the size limit. The frame
+    // cannot be parsed, so the answer it carried is lost and the agent would
+    // otherwise wait for a response that never comes.
+    void reportOversizedFrame();
     void handleMessage(const QJsonObject &message);
     void handleResponse(const QJsonObject &message);
     void handleIncomingRequest(const QJsonObject &message);
@@ -366,7 +375,6 @@ private:
     // covers, so a well-behaved agent that announces its edit or command before
     // asking is not asked twice for one action.
     void recordApprovalGrants(const PermissionRequest &request, PermissionDecision decision);
-    QString sliceLines(const QString &text, int line, int limit) const;
     bool pathAllowed(const QString &path, bool forWrite, QString *error) const;
     Sandbox currentSandbox() const;
     QProcessEnvironment processEnvironment() const;
@@ -421,12 +429,34 @@ private:
     QString m_stderrBuffer;
     bool m_antigravityAuthUrlOpened = false;
     bool m_discardingStdoutFrame = false;
+    // The tool call that was announced last. An update that omits its id
+    // belongs to it.
+    QString m_lastToolCallId;
+    // Set once a frame exceeded the size limit, so the failure is reported a
+    // single time per turn.
+    bool m_oversizedFrameReported = false;
     bool m_shuttingDown = false;
 
     int m_nextId = 1;
     QHash<int, Pending> m_pending;
 
     QString m_sessionId;
+    // A session/new or session/load request is in flight. A second prompt
+    // must queue instead of opening a second agent-side session.
+    bool m_sessionOpening = false;
+    bool m_failingAll = false;
+    // session/load replays the old conversation as session/update events.
+    // Those are history, not a new answer; suppress them while loading.
+    bool m_replayingLoad = false;
+    // MCP transports the agent says it supports. Older agents do not advertise
+    // these; stdio is the universally supported default.
+    bool m_mcpStdioCapable = true;
+    bool m_mcpHttpCapable = false;
+    // Methods the agent advertised during initialize, kept so a session
+    // failure that turns out to be an auth failure can authenticate once and
+    // retry instead of failing the whole turn.
+    QJsonArray m_authMethods;
+    bool m_authRetryDone = false;
     bool m_loadSession = false;
     bool m_resumeSession = false;
     bool m_closeSession = false;
@@ -464,6 +494,7 @@ private:
     // The last partial output streamed for each live tool call, so an agent that
     // repeats identical content on a heartbeat does not force a re-render.
     QHash<QString, QString> m_toolStreamed;
+    QHash<QString, qint64> m_toolProgressAt;
 
     QList<QueuedPrompt> m_queued;
 

@@ -156,14 +156,12 @@ DocumentFrontmatter ModeRegistry::parseFrontmatter(const QString &document)
     for (int i = 0; i < lines.size(); ++i) {
         const QString line = lines.at(i);
         const QString trimmed = line.trimmed();
-        if (trimmed == u"---"_s || trimmed == u"..."_s) {
-            out.present = true;
-            endLine = i;
-            break;
-        }
 
         if (inBlock) {
-            // Block scalars continue while lines are indented or blank.
+            // Block scalars continue while lines are indented or blank. The
+            // check comes before the frontmatter delimiter: a "---" inside the
+            // scalar belongs to it, and only a delimiter that follows the
+            // scalar closes the frontmatter.
             if (!line.isEmpty() && !line.startsWith(u' ') && !line.startsWith(u'\t')) {
                 out.keys.insert(pendingKey.join(u'\n'), pendingBlock);
                 pendingKey.clear();
@@ -173,6 +171,12 @@ DocumentFrontmatter ModeRegistry::parseFrontmatter(const QString &document)
                 pendingBlock += line.trimmed() + u'\n';
                 continue;
             }
+        }
+
+        if (trimmed == u"---"_s || trimmed == u"..."_s) {
+            out.present = true;
+            endLine = i;
+            break;
         }
 
         if (trimmed.isEmpty() || trimmed.startsWith(u'#')) {
@@ -435,13 +439,16 @@ void ModeRegistry::loadCustomModes()
                              }),
                               mode.groups.end());
             if (mode.readOnly) {
+                // A read-only mode keeps its hands off the workspace: the edit,
+                // command and orchestrate groups are dropped from the tool set.
+                // The check used to clear the read-only flag when it found one
+                // of them, which turned the promise into the opposite of what
+                // it says.
                 const QStringList editGroups = {ToolGroup::edit(), ToolGroup::command(), ToolGroup::orchestrate()};
-                for (const QString &group : mode.groups) {
-                    if (editGroups.contains(group)) {
-                        mode.readOnly = false;
-                        break;
-                    }
-                }
+                mode.groups.erase(std::remove_if(mode.groups.begin(), mode.groups.end(), [&editGroups](const QString &group) {
+                                     return editGroups.contains(group);
+                                 }),
+                                  mode.groups.end());
             }
             m_modes.append(mode);
         }
@@ -543,6 +550,16 @@ ModeDefinition ModeRegistry::parseModeDocument(const QString &document, const QS
     mode.description = unquote(fm.keys.value(u"description"_s).trimmed());
     mode.roleDefinition = fm.keys.value(u"roleDefinition"_s).trimmed();
     mode.groups = parseList(fm.keys.value(u"groups"_s));
+    // A mode that declares itself read-only keeps the edit, command and
+    // orchestrate groups out of its tool set. The key was accepted in the
+    // documentation but never read, so the groups below were handed out
+    // unchanged and the read-only promise was not kept.
+    const QString readOnly = fm.keys.value(u"readOnly"_s).trimmed().toLower();
+    if (readOnly.isEmpty()) {
+        mode.readOnly = fm.keys.value(u"read_only"_s).trimmed().toLower() == u"true"_s;
+    } else {
+        mode.readOnly = readOnly == u"true"_s;
+    }
     // Sampling overrides. "topP" is accepted alongside the snake_case spelling
     // the rest of the settings use, because frontmatter authors reach for both.
     mode.temperature = samplingKey(fm, u"temperature"_s, 0.0, 2.0);
@@ -588,6 +605,7 @@ QString ModeRegistry::modeFileTemplate(const QString &id)
         + u"description: What this mode is for\n"_s
         + u"icon: mode\n"_s
         + u"groups: [read, edit, command, mcp]\n"_s
+        + u"# readOnly: true       # keep the edit, command and orchestrate groups out\n"_s
         + u"# temperature: 0.2   # sampling override; omit to use the global setting\n"_s
         + u"# top_p: 0.95         # sampling override; omit to use the global setting\n"_s
         + u"roleDefinition: |\n"_s

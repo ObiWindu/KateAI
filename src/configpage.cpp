@@ -319,9 +319,16 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
                 installInfo = distribution.value(u"uvx"_s).toObject();
             } else if (distribution.value(u"binary"_s).isObject()) {
                 kind = i18n("binary");
-                installable = true;
+                const QJsonObject binary = distribution.value(u"binary"_s).toObject();
                 installType = u"binary"_s;
-                installInfo = distribution.value(u"binary"_s).toObject();
+                installInfo = binary;
+                // Only offer a platform we actually have a binary for. The
+                // registry often publishes a subset; enabling Install anyway
+                // produced a guaranteed post-click failure.
+                installable = binary.value(acpCurrentPlatformKey()).isObject();
+                if (!installable) {
+                    kind = i18n("binary (not available for this platform)");
+                }
             }
             if (kind.isEmpty()) {
                 kind = i18n("manual install");
@@ -351,6 +358,8 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
             item->setData(Qt::UserRole + 2, installable);
             item->setData(Qt::UserRole + 3, installType);
             item->setData(Qt::UserRole + 4, installInfo);
+            item->setData(Qt::UserRole + 5, installedVersion);
+            item->setData(Qt::UserRole + 6, agent.value(u"version"_s).toString());
             item->setToolTip(agent.value(u"license_url"_s).toString());
             if (isInstalled) item->setForeground(QColor(QStringLiteral("#75c991")));
         }
@@ -369,7 +378,11 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
         // Binary agents can be reinstalled: entries created before downloads
         // were implemented have a relative command but no unpacked executable.
         const bool isBinary = item->data(Qt::UserRole + 3).toString() == u"binary"_s;
-        registryInstall->setEnabled((!alreadyInstalled || isBinary)
+        const QString installedVersion = item->data(Qt::UserRole + 5).toString();
+        const QString registryVersion = item->data(Qt::UserRole + 6).toString();
+        const bool updateAvailable = !installedVersion.isEmpty() && !registryVersion.isEmpty()
+            && installedVersion != registryVersion;
+        registryInstall->setEnabled((!alreadyInstalled || isBinary || updateAvailable)
                                     && item->data(Qt::UserRole + 2).toBool());
         registryUninstall->setEnabled(alreadyInstalled);
     });
@@ -393,11 +406,16 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
             QStringList argsList;
             for (const QJsonValue &arg : installInfo.value(u"args"_s).toArray()) argsList.append(arg.toString());
             QJsonArray fullArgs;
-            // Pin to the registry version when the entry carries one.
+            // Pin to the registry version when the entry carries one. npm
+            // spells a version as pkg@1.2.3; they are different package
+            // managers with different syntax.
             QString pinned = package;
             const QString version = agent.value(u"version"_s).toString().trimmed();
-            if (!version.isEmpty() && package.lastIndexOf(u'@') <= 0) {
-                pinned = package + u'@' + version;
+            const bool alreadyPinned = npm ? (package.lastIndexOf(u'@') > 0)
+                                           : (package.contains(u"=="_s) || package.lastIndexOf(u'@') > 0);
+            if (!version.isEmpty() && !alreadyPinned) {
+                const QString suffix = npm ? u"@"_s : u"=="_s;
+                pinned = package + suffix + version;
             }
             if (npm) {
                 fullArgs.append(u"--yes"_s);
@@ -478,16 +496,27 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
         const bool isBinary = installedEntry.value(u"distributionType"_s).toString() == u"binary"_s
             || !installedEntry.value(u"binaryArchiveUrl"_s).toString().isEmpty();
         if (isBinary) {
-            const QString installDir = installedEntry.value(u"binaryInstallDir"_s).toString();
+            // Remove only the directory this id owns. The stored
+            // binaryInstallDir comes from a hand-editable/synced settings file
+            // and must not turn Uninstall into arbitrary recursive deletion.
+            const QString installDir = acpBinaryInstallDir(agentId);
             if (!installDir.isEmpty()) {
                 QDir(installDir).removeRecursively();
-            } else {
-                QDir(acpBinaryInstallDir(agentId)).removeRecursively();
             }
         }
 
         Settings settings = m_plugin->settings();
         settings.acpInstalledAgents = QString::fromUtf8(QJsonDocument(remaining).toJson(QJsonDocument::Compact));
+        if (settings.acpAgentId == agentId) {
+            // The launch line points at files that were just removed; do not
+            // try to start the deleted binary on the next turn.
+            settings.acpAgentId = u"custom"_s;
+            settings.acpCommand.clear();
+            settings.acpArgs.clear();
+            settings.acpApiKeyEnv.clear();
+            settings.acpModel.clear();
+            settings.acpEffort.clear();
+        }
         // Clear cached models for this agent; the old binary command must not
         // be reused after the files are removed.
         QJsonObject agentModels;
@@ -2279,9 +2308,13 @@ void KateAiConfigPage::updateAcpModelCombo()
         m_acpModel->addItems(models);
     }
 
-    // Restore current text if it was set
-    if (!currentText.isEmpty()) {
+    // Restore the previous selection only when it still exists for this agent.
+    // Carrying another agent's model id into the new agent makes its --model
+    // flag or set_config_option invalid.
+    if (!currentText.isEmpty() && (models.isEmpty() || models.contains(currentText))) {
         m_acpModel->setCurrentText(currentText);
+    } else if (!models.isEmpty()) {
+        m_acpModel->setCurrentIndex(-1);
     }
 }
 

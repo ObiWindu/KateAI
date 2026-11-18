@@ -220,15 +220,35 @@ QString gitBranchForWorkspace(const QString &workspace)
                 // SessionStore may repair a stale active pointer by falling
                 // back to the newest persisted transcript.
                 const QString claimedId = plugin->claimSessionConversation();
-                const auto sessionData = claimedId.isEmpty()
-                    ? SessionStore::load()
-                    : SessionStore::loadConversation(claimedId);
+                SessionStore::SessionData sessionData;
                 QString activeId = claimedId;
-                if (activeId.isEmpty()) {
+                if (claimedId.isEmpty()) {
+                    sessionData = SessionStore::load();
                     activeId = SessionStore::getActiveConversationId();
-                    if (activeId.isEmpty()) {
+                } else {
+                    sessionData = SessionStore::loadConversation(claimedId);
+                    if (sessionData.loadFailed) {
+                        // The stored transcript is unreadable. Restoring it as
+                        // an empty chat and autosaving would overwrite the one
+                        // copy that might still be salvageable, so start on a
+                        // fresh id and leave the damaged row alone.
                         activeId = SessionStore::createNewConversation();
+                        sessionData = SessionStore::SessionData();
+                        m_chat->showInfoMessage(
+                            i18n("The saved conversation could not be read. It was left untouched; starting a new chat so it is not overwritten."),
+                            true);
+                    } else if (sessionData.messages.isEmpty()
+                               && SessionStore::conversationTitle(claimedId).isEmpty()) {
+                        // The session pointed at a conversation that no longer
+                        // exists (pruned, deleted, or a never-saved new chat).
+                        // Leaving the claimed id here opened a blank panel
+                        // while perfectly good history sat next to it.
+                        sessionData = SessionStore::load();
+                        activeId = SessionStore::getActiveConversationId();
                     }
+                }
+                if (activeId.isEmpty()) {
+                    activeId = SessionStore::createNewConversation();
                 }
                 m_chat->setCurrentConversationId(activeId);
 
@@ -914,14 +934,20 @@ QString gitBranchForWorkspace(const QString &workspace)
         // runs with the user's privileges. The list is only used after the
         // user has seen it and agreed to it.
         QStringList names;
+        QStringList commands;
         for (const McpServerConfig &server : servers) {
             names.append(server.name);
+            commands.append(u"%1: %2"_s.arg(server.name, server.commandLine()));
         }
-        const QString message = i18n(
+        QString message = i18n(
             "The project %1 defines %n MCP server(s): %2.\n\n"
             "Starting a server runs a program on your machine. Only continue if you trust this project.",
             names.size(),
             names.join(u", "_s));
+        // The names come from the project, so they say nothing about what runs.
+        // The command line is what the user has to judge, so it is in the
+        // message itself and not only in the collapsible details.
+        message += u"\n\n"_s + i18n("These commands will run:") + u"\n"_s + commands.join(u'\n');
         QMessageBox box(QMessageBox::Question, i18n("MCP servers in this project"), message,
                         QMessageBox::Yes | QMessageBox::No, qobject_cast<QWidget *>(m_mainWindow));
         box.setDefaultButton(QMessageBox::No);

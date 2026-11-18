@@ -188,6 +188,31 @@ private Q_SLOTS:
         // The ordinary read-only commands are unaffected.
         QVERIFY(box.isReadOnlyCommand(u"ls -la"_s));
         QVERIFY(box.isReadOnlyCommand(u"cat file.txt"_s));
+        // A newline separates commands just like ';'. The second command used
+        // to be auto-approved with the first.
+        QVERIFY(!box.isReadOnlyCommand(u"ls\npython3 -c 'print(1)'"_s));
+        QVERIFY(!box.isReadOnlyCommand(u"cat f\rpython3 -c 'print(1)'"_s));
+        // Privilege escalation is never read-only.
+        QVERIFY(!box.isReadOnlyCommand(u"sudo cat /etc/shadow"_s));
+        // Attached/output forms of a write flag are not read-only.
+        QVERIFY(!box.isReadOnlyCommand(u"sort -oout.txt list.txt"_s));
+        QVERIFY(!box.isReadOnlyCommand(u"sort --output=out.txt list.txt"_s));
+        QVERIFY(!box.isReadOnlyCommand(u"git branch -D main"_s));
+        QVERIFY(!box.isReadOnlyCommand(u"git log --output=out.txt"_s));
+    }
+
+    void shellReadsAreConfinedToTheWorkspace()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        Sandbox box(dir.path(), SandboxProfile::Workspace);
+        QVERIFY(box.commandTouchesOutsideWorkspace(u"cat /etc/passwd"_s));
+        QVERIFY(box.commandTouchesOutsideWorkspace(u"cat ~/.bash_history"_s));
+        QVERIFY(!box.commandTouchesOutsideWorkspace(u"cat notes.txt"_s));
+        QVERIFY(!box.commandTouchesOutsideWorkspace(u"grep -rn foo src"_s));
+        // The opt-in lifts the restriction, matching allowsRead().
+        Sandbox open(dir.path(), SandboxProfile::Workspace, {}, true);
+        QVERIFY(!open.commandTouchesOutsideWorkspace(u"cat /etc/passwd"_s));
     }
 
     void envWrapperIsNotReadOnly()
@@ -239,6 +264,10 @@ private Q_SLOTS:
         QVERIFY(box.isDenied(dir.filePath(u".env"_s)));
         QVERIFY(Sandbox::globMatch(u"**/.env"_s, dir.filePath(u".env"_s)));
         QVERIFY(Sandbox::globMatch(u"**/*.pem"_s, u"/tmp/cert.pem"_s));
+        // The shell removes the backslash; the deny scan must too.
+        QVERIFY(box.commandTouchesDeniedPath(u"cat .\\env"_s));
+        QVERIFY(box.commandTouchesDeniedPath(u"(cat .env)"_s));
+        QVERIFY(box.commandTouchesDeniedPath(u"sh -c 'cat .env'"_s));
     }
 
     void readOnlyBlocksWrites()
@@ -289,6 +318,8 @@ private Q_SLOTS:
         Sandbox box(QDir::tempPath(), SandboxProfile::Workspace);
         QVERIFY(box.isAlwaysDeniedCommand(u"rm -rf /"_s));
         QVERIFY(box.isAlwaysDeniedCommand(u"rm -rf /*"_s));
+        QVERIFY(box.isAlwaysDeniedCommand(u"rm -rf //"_s));
+        QVERIFY(box.isAlwaysDeniedCommand(u"rm -rf /./*"_s));
         QVERIFY(box.isAlwaysDeniedCommand(u"rm -rf ~"_s));
         QVERIFY(box.isAlwaysDeniedCommand(u"rm -rf ~/Documents"_s));
         QVERIFY(box.isAlwaysDeniedCommand(u"rm -r /"_s));
@@ -301,6 +332,52 @@ private Q_SLOTS:
         QVERIFY(!box.isAlwaysDeniedCommand(u"rm -rf /tmp/build"_s));
         QVERIFY(!box.isAlwaysDeniedCommand(u"rm -rf src"_s));
         QVERIFY(!box.isAlwaysDeniedCommand(u"rm -rf ./build"_s));
+    }
+
+    void globPatternCannotWalkAroundDenyGlobs()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        QFile envFile(dir.filePath(u".env"_s));
+        QVERIFY(envFile.open(QIODevice::WriteOnly));
+        envFile.write("SECRET=1\n");
+        envFile.close();
+        QVERIFY(QDir().mkpath(dir.filePath(u".kateai"_s)));
+        QFile mcpFile(dir.filePath(u".kateai/mcp.json"_s));
+        QVERIFY(mcpFile.open(QIODevice::WriteOnly));
+        mcpFile.write("{}");
+        mcpFile.close();
+
+        Sandbox box(dir.path(), SandboxProfile::Workspace);
+        // The pattern text does not match the deny glob, but the shell expands
+        // it to the denied file, so the check has to look at the expansion.
+        QVERIFY(box.commandTouchesDeniedPath(u"cat .e*"_s));
+        QVERIFY(box.commandTouchesDeniedPath(u"cat .*nv"_s));
+        QVERIFY(box.commandTouchesDeniedPath(u"cat .kateai/mcp.jso?"_s));
+        // A quoted word must not swallow the rest of the command: the token
+        // after the closing quote is a path of its own.
+        QVERIFY(box.commandTouchesDeniedPath(u"cat \"a b.txt\" .env"_s));
+        // A pattern that expands to nothing denied keeps running.
+        QVERIFY(!box.commandTouchesDeniedPath(u"cat *.cpp"_s));
+        QVERIFY(!box.commandTouchesDeniedPath(u"cat nonexistent/*.txt"_s));
+    }
+
+    void alwaysDeniedCoversSeparatorAndHomeVariable()
+    {
+        Sandbox box(QDir::tempPath(), SandboxProfile::Workspace);
+        // "--" separates the flags from the target, and the home directory can
+        // be spelled with a variable. Both used to slip past the rule.
+        QVERIFY(box.isAlwaysDeniedCommand(u"rm -rf -- /"_s));
+        QVERIFY(box.isAlwaysDeniedCommand(u"rm -rf $HOME"_s));
+        QVERIFY(box.isAlwaysDeniedCommand(u"rm -rf ${HOME}"_s));
+        QVERIFY(box.isAlwaysDeniedCommand(u"rm --force --recursive /"_s));
+        QVERIFY(box.isAlwaysDeniedCommand(u"rm -rf --no-preserve-root -- /"_s));
+        // The program itself may be quoted or spelled with a path.
+        QVERIFY(box.isAlwaysDeniedCommand(u"\"/bin/rm\" -rf /"_s));
+        QVERIFY(box.isAlwaysDeniedCommand(u"/bin/rm -rf /"_s));
+        // A command that is not blocked must not be called dangerous either.
+        QVERIFY(box.isDangerousCommand(u"rm -rf -- /"_s));
+        QVERIFY(!box.isAlwaysDeniedCommand(u"rm -rf -- /etc/keep"_s));
     }
 
     void emptyWorkspaceRootStaysEmpty()

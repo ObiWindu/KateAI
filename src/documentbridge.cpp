@@ -35,6 +35,12 @@ namespace
 // before, and the write-back then silently corrupted the tail. The scan stops
 // at the first decoding error, so a clean UTF-8 file still costs only one
 // extra sequential read (the callers read it again right after).
+//
+// The fallback is Latin-1, not the system encoding. Every byte value maps to
+// exactly one codepoint in Latin-1, so the file is read and written back byte
+// for byte. The system encoding is UTF-8 on Linux and on macOS, which would
+// decode the file exactly the way the UTF-8 guess does and destroy it all the
+// same.
 QStringConverter::Encoding encodingFor(const QString &path)
 {
     QFile file(path);
@@ -48,18 +54,34 @@ QStringConverter::Encoding encodingFor(const QString &path)
         if (read <= 0) {
             break;
         }
-        decoder.decode(QByteArrayView(buffer, static_cast<qsizetype>(read)));
+        // The decoded text has to be used. QStringDecoder::decode() returns a
+        // lazy wrapper that only runs the conversion when it is turned into a
+        // string, so discarding the result skipped the decoding altogether and
+        // hasError() stayed false for every file - which is how a non-UTF-8
+        // file was classified as UTF-8 and mangled on the way back.
+        const QString decoded = decoder.decode(QByteArrayView(buffer, static_cast<qsizetype>(read)));
+        Q_UNUSED(decoded);
         if (decoder.hasError()) {
-            return QStringConverter::System;
+            return QStringConverter::Latin1;
         }
     }
     // An incomplete multi-byte sequence at the very end of the file is also
     // a decoding error; only the flush call can see it.
-    decoder.decode(QByteArrayView());
+    const QString tail = decoder.decode(QByteArrayView());
+    Q_UNUSED(tail);
     if (decoder.hasError()) {
-        return QStringConverter::System;
+        return QStringConverter::Latin1;
     }
     return QStringConverter::Utf8;
+}
+
+// Map keys for buffered writes must name the same file as documentForPath()
+// does. Otherwise the same open document reached through a relative spelling
+// or a symlink is treated as "user modified" and refused.
+QString bufferKey(const QString &path)
+{
+    const QString canonical = QFileInfo(path).canonicalFilePath();
+    return canonical.isEmpty() ? QDir::cleanPath(QFileInfo(path).absoluteFilePath()) : canonical;
 }
 
 } // namespace
@@ -287,24 +309,25 @@ bool DiskDocumentBridge::writeDocument(const QString &path, const QString &conte
         }
         return false;
     }
+    const QString key = bufferKey(path);
     KTextEditor::Document *doc = m_useOpenDocuments ? documentForPath(path) : nullptr;
     if (doc) {
         // The document is open and has unsaved changes that are not ours:
         // replacing the whole text would throw them away. An unsaved edit the
         // bridge itself applied earlier in buffer mode is "ours" and is exactly
         // the working state the next edit builds on.
-        if (doc->isModified() && !m_bufferedPaths.contains(path)) {
+        if (doc->isModified() && !m_bufferedPaths.contains(key)) {
             if (error) {
                 *error = u"The document has unsaved changes; save it before the agent writes to it."_s;
             }
             return false;
         }
-        if (m_bufferedPaths.contains(path)) {
+        if (m_bufferedPaths.contains(key)) {
             // The buffer is ours to overwrite only while it still holds
             // exactly what we last wrote. If the user typed into the file in
             // the meantime, the buffer differs and a setText would silently
             // discard their changes.
-            const QByteArray expected = m_bufferedHashes.value(path);
+            const QByteArray expected = m_bufferedHashes.value(key);
             if (!expected.isNull()
                 && QCryptographicHash::hash(doc->text().toUtf8(), QCryptographicHash::Sha256) != expected) {
                 if (error) {
@@ -319,17 +342,18 @@ bool DiskDocumentBridge::writeDocument(const QString &path, const QString &conte
             }
             return false;
         }
+        m_lastWrittenHashes.insert(key, QCryptographicHash::hash(contents.toUtf8(), QCryptographicHash::Sha256));
         if (m_editInBuffer) {
             // The change stays in the buffer on purpose: the user reviews it
             // through Kate's modified state and undo, and the edit tracker
             // settles it -- accept saves, reject restores. Until then, tools
             // that read the file from disk still see the previous state.
-            m_bufferedPaths.insert(path);
-            m_bufferedHashes.insert(path, QCryptographicHash::hash(contents.toUtf8(), QCryptographicHash::Sha256));
+            m_bufferedPaths.insert(key);
+            m_bufferedHashes.insert(key, QCryptographicHash::hash(contents.toUtf8(), QCryptographicHash::Sha256));
             return true;
         }
-        m_bufferedPaths.remove(path);
-        m_bufferedHashes.remove(path);
+        m_bufferedPaths.remove(key);
+        m_bufferedHashes.remove(key);
         if (doc->isModified() && !doc->url().isEmpty() && !doc->save()) {
             if (error) {
                 *error = u"The open document was updated but could not be saved."_s;
@@ -375,22 +399,33 @@ bool DiskDocumentBridge::removeDocument(const QString &path, QString *error)
 
 bool DiskDocumentBridge::restoreDocument(const QString &path, const QString &contents, QString *error)
 {
+    const QString key = bufferKey(path);
     KTextEditor::Document *doc = m_useOpenDocuments ? documentForPath(path) : nullptr;
     if (doc) {
         // A rejected edit puts the buffer back to the content it had before
-        // the turn, also when the document is modified: in buffer mode the
-        // modification is the agent's own edit being reverted, and in disk
-        // mode the only modified state that reaches this path is the agent's
-        // unsaved leftover of a failed save. The pre-edit content came from
-        // the same buffer, so nothing of the user's is thrown away.
+        // the turn. Refuse if the user typed something after the agent's last
+        // write: overwriting it would delete their work. In buffer mode the
+        // unsaved modification is the agent's own edit, and its hash still
+        // matches what the bridge wrote, so reverting it is allowed.
+        if (doc->isModified()) {
+            const auto written = m_lastWrittenHashes.constFind(key);
+            const QByteArray current = QCryptographicHash::hash(doc->text().toUtf8(), QCryptographicHash::Sha256);
+            if (written == m_lastWrittenHashes.constEnd() || written.value() != current) {
+                if (error) {
+                    *error = u"The document changed after Kate AI's edit; save or review it before rejecting."_s;
+                }
+                return false;
+            }
+        }
         if (!doc->setText(contents)) {
             if (error) {
                 *error = u"Failed to restore the open document."_s;
             }
             return false;
         }
-        m_bufferedPaths.remove(path);
-        m_bufferedHashes.remove(path);
+        m_bufferedPaths.remove(key);
+        m_bufferedHashes.remove(key);
+        m_lastWrittenHashes.remove(key);
         return true;
     }
 
@@ -399,6 +434,7 @@ bool DiskDocumentBridge::restoreDocument(const QString &path, const QString &con
 
 bool DiskDocumentBridge::saveDocumentIfOpen(const QString &path, QString *error)
 {
+    const QString key = bufferKey(path);
     KTextEditor::Document *doc = m_useOpenDocuments ? documentForPath(path) : nullptr;
     if (doc) {
         // An accepted edit is kept: the buffer content becomes the file.
@@ -408,8 +444,8 @@ bool DiskDocumentBridge::saveDocumentIfOpen(const QString &path, QString *error)
             }
             return false;
         }
-        m_bufferedPaths.remove(path);
-        m_bufferedHashes.remove(path);
+        m_bufferedPaths.remove(key);
+        m_bufferedHashes.remove(key);
         return true;
     }
     return true;
@@ -423,6 +459,7 @@ void DiskDocumentBridge::resetBufferedEdits()
 {
     m_bufferedPaths.clear();
     m_bufferedHashes.clear();
+    m_lastWrittenHashes.clear();
 }
 
 bool DiskDocumentBridge::writeDocumentIfMissing(const QString &path, const QString &contents, QString *error)
@@ -487,7 +524,18 @@ bool DiskDocumentBridge::writeDocumentIfMissing(const QString &path, const QStri
 
 bool DiskDocumentBridge::writeDocumentToDisk(const QString &path, const QString &contents, QString *error)
 {
-    const QDir dir = QFileInfo(path).dir();
+    // QSaveFile renames its temporary file over the path. For a symlink that
+    // replaces the link, while the user expected the target to be edited.
+    // Resolve it first when the target exists.
+    QString targetPath = path;
+    const QFileInfo linkInfo(path);
+    if (linkInfo.isSymLink()) {
+        const QString canonical = linkInfo.canonicalFilePath();
+        if (!canonical.isEmpty()) {
+            targetPath = canonical;
+        }
+    }
+    const QDir dir = QFileInfo(targetPath).dir();
     if (!dir.exists() && !dir.mkpath(u"."_s)) {
         if (error) {
             *error = u"Failed to create directory: %1"_s.arg(dir.absolutePath());
@@ -499,7 +547,7 @@ bool DiskDocumentBridge::writeDocumentToDisk(const QString &path, const QString 
     // only when the new content survives the round trip: an unrepresentable
     // character would otherwise be silently replaced with '?' and destroy
     // data while the tool reports success.
-    const QStringConverter::Encoding encoding = encodingFor(path);
+    const QStringConverter::Encoding encoding = encodingFor(targetPath);
     if (encoding != QStringConverter::Utf8) {
         QStringEncoder encoder(encoding);
         QStringDecoder decoder(encoding);
@@ -513,7 +561,7 @@ bool DiskDocumentBridge::writeDocumentToDisk(const QString &path, const QString 
         }
     }
 
-    QSaveFile file(path);
+    QSaveFile file(targetPath);
     // Binary mode again: the text mode would translate the line endings of
     // the content, which already carries the line endings of the file.
     if (!file.open(QIODevice::WriteOnly)) {
@@ -526,7 +574,7 @@ bool DiskDocumentBridge::writeDocumentToDisk(const QString &path, const QString 
     // the original permissions on the temporary file so replacing an
     // executable script (or a restricted file) does not silently turn it into
     // a default-mode file.
-    const QFileInfo existing(path);
+    const QFileInfo existing(targetPath);
     if (existing.exists()) {
         file.setPermissions(existing.permissions());
     }

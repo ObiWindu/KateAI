@@ -67,7 +67,8 @@ public:
     // Updates the diff (and old/new content) of an existing group entry when a
     // later message carries them. A new path creates a new group.
     void updateEdit(const QString &path, const QString &toolName, const QString &diff,
-                    const QString &oldContent = QString(), const QString &newContent = QString());
+                    const QString &oldContent = QString(), const QString &newContent = QString(),
+                    bool createdFile = false);
     void clear();
     bool hasPendingEdits() const;
     QList<EditEntry> pendingEdits() const;
@@ -107,6 +108,11 @@ public:
 Q_SIGNALS:
     void editAccepted(const QString &path, const QString &toolName, const QString &newContent);
     void editRejected(const QString &path, const QString &toolName, const QString &oldContent);
+    // Undoing a rejection puts the agent's edit back. expectedContent is the
+    // reverted state the file should still be in; the receiver must not
+    // overwrite a file the user changed after the rejection.
+    void editRestored(const QString &path, const QString &toolName, const QString &newContent,
+                      const QString &expectedContent);
     // Rejection of the last pending edit for a path that the agent created:
     // the caller has to delete the file, since writing "" back leaves debris.
     void fileCreatedThenRejected(const QString &path);

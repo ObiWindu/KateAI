@@ -126,6 +126,9 @@ public:
     // Announces that the Kate AI workspace switched (another folder was
     // opened in Kate). The notice is pinned to the top of the composer.
     void showWorkspaceNotice(const QString &workspace);
+    // Shows a transient notice (a retry, a failed restore) in the strip above
+    // the composer. Errors stay until dismissed.
+    void showInfoMessage(const QString &message, bool isError);
 
     // Modes / MCP / checkpoints, exposed so the view can drive them too.
     void showModeMenu();
@@ -218,7 +221,6 @@ private:
     bool ensureAcpBinaryInstalled(const QString &agentId);
     Settings settingsForAcpAgent(const QString &agentId) const;
     void updateModelSelectorLabel();
-    void showInfoMessage(const QString &message, bool isError);
     void applyInfoBarStyle();
     void applyWorkspaceBannerStyle();
     void saveCurrentConversation();
@@ -296,6 +298,9 @@ private:
     void syncIndicatorAnimation();
     bool registerThinkingBlock(QWidget *block, QTextBrowser *browser, QPushButton *toggle);
     void applyTranscriptCollapse();
+    // Drop the oldest finished tool cards once a long session keeps more than
+    // the retention cap. Restored history can rebuild them from the session.
+    void pruneOldTranscriptCards();
     void clearTranscriptContents();
     void reflowTranscriptMedia();
     void scheduleStreamHeightUpdate();
@@ -423,6 +428,11 @@ private:
     // the full turn's thinking when the answer text starts; this prefix is
     // what must not be drawn a second time in the later card.
     QString m_thinkingShownEarlierInTurn;
+    // True once the visible answer has started streaming in the current card.
+    // Some providers keep sending reasoning after the first text delta; those
+    // later deltas are buffered but not paced in, so the reasoning and the
+    // answer are never written into the chat at the same time.
+    bool m_answerStarted = false;
     int m_thinkingPacedLength = 0;
     QTimer *m_thinkingPacerTimer = nullptr;
 
@@ -496,6 +506,10 @@ private:
     // Live question cards, keyed by the tool call id that asked them.
     QHash<QString, QuestionWidget *> m_questionWidgets;
     QList<QPointer<QuestionWidget>> m_questionOrder;
+    // The question each question tool asked, keyed by the tool call id. The
+    // card shows it while the question is open; when the tool finishes the
+    // answer takes the body, so the question is folded back in.
+    QHash<QString, QString> m_questionTexts;
     // Latest live output per running tool, flushed on a timer so a chatty
     // command does not re-render its card once per chunk.
     QHash<QString, QString> m_pendingProgress;

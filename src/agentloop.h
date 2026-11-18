@@ -104,6 +104,9 @@ public:
     void abort();
     void resetConversation();
     void resolvePermission(PermissionDecision decision);
+    // Identity-checked variant: a decision from an old card must not approve
+    // the request that replaced it.
+    void resolvePermission(PermissionDecision decision, const QString &toolCallId);
     // Answers the blocking `question` tool with the user's text; the agent loop
     // resumes from the answer.
     void answerQuestion(const QString &answer);
@@ -180,7 +183,7 @@ public:
         return &m_checkpoints;
     }
     QList<CheckpointInfo> checkpoints() const;
-    QString createCheckpoint(const QString &label);
+    QString createCheckpoint(const QString &label, QString *error = nullptr);
     bool restoreCheckpoint(const QString &id, QString *error);
     QString diffAgainstCheckpoint(const QString &id) const;
 
@@ -287,6 +290,11 @@ private:
         // The history as it should be sent: budgeted and compacted to fit the
         // model's context window.
         QList<ChatMessage> m_messagesForRequest() const;
+        // Replace the stored transcript with the compacted request history
+        // once compaction has made a material difference. Without this the
+        // full session stayed in memory and was rewritten to SQLite on every
+        // save, so memory and save cost grew without bound.
+        void maybeCompactStoredHistory(const QList<ChatMessage> &requestMessages);
     QString actionSignature(const ToolCall &call) const;
     bool isRepeatSensitiveTool(const QString &toolName) const;
     void appendControllerMessage(const QString &content);
@@ -348,6 +356,11 @@ private:
     // Every file a mutating call writes. A patch names several; the other
     // edit tools name one. Used for locks and changed-path bookkeeping.
     QStringList mutationPathsForCall(const ToolCall &call) const;
+    // The key a path is locked under. A relative path is resolved against the
+    // workspace and cleaned, so "src/../src/a.cpp" and "src/a.cpp" name one
+    // lock. Acquire and release must use the same key, so both go through
+    // here.
+    QString lockKeyForPath(const QString &path) const;
     // Pushes the active mode's tool set (and the MCP tools) to the client.
     void syncToolAccess();
     // Rebuilds the sandbox and the tool runner from the current settings and
@@ -442,6 +455,7 @@ LlmClient m_client;
     // Lifecycle: the id of the turn the UI is currently describing, and the
     // terminal state of the most recent turn (Idle until one ends).
     QString m_turnId;
+    QString m_lastFailedTurn;
     TurnState m_lastTurnState = TurnState::Idle;
     void setTurnState(TurnState state, const QString &reason = QString());
     bool m_terminalSignalled = true;

@@ -99,6 +99,27 @@ QString shortTagName(const QString &ref)
     return ref.startsWith(TagPrefix) ? ref.mid(TagPrefix.size()) : ref;
 }
 
+// An empty global git config kept next to the shadow repository. This used to
+// be GIT_CONFIG_GLOBAL=/dev/null, which does not exist on Windows: git failed
+// to read "dev\null" and every snapshot there failed before it ran. The file is
+// only created when missing, so a git process can never truncate a config
+// another one is reading.
+QString shadowGlobalConfig(const QString &gitDir)
+{
+    if (gitDir.isEmpty()) {
+        return {};
+    }
+    const QString path = QFileInfo(gitDir).absolutePath() + u"/kateai-gitconfig"_s;
+    if (QFileInfo::exists(path)) {
+        return path;
+    }
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
+        return {};
+    }
+    return path;
+}
+
 // Runs git with the shadow repository and workspace bound in. A free function
 // so the worker thread can run it without touching any member of the manager
 // (whose workspace may change on the UI thread while a snapshot is in git).
@@ -118,7 +139,20 @@ bool runGitProcess(const QString &gitDir, const QString &workspace,
     environment.insert(u"GIT_WORK_TREE"_s, workspace);
     // Keep the user's global git config out of a repository they do not own.
     environment.insert(u"GIT_CONFIG_NOSYSTEM"_s, u"1"_s);
+    const QString globalConfig = shadowGlobalConfig(gitDir);
+    if (globalConfig.isEmpty()) {
+        environment.remove(u"GIT_CONFIG_GLOBAL"_s);
+    } else {
+        environment.insert(u"GIT_CONFIG_GLOBAL"_s, globalConfig);
+    }
     environment.insert(u"GIT_TERMINAL_PROMPT"_s, u"0"_s);
+    // Kate itself may have been launched by git (as the editor); that exports
+    // GIT_INDEX_FILE/GIT_OBJECT_DIRECTORY and friends. Inheriting them would
+    // make the shadow repository operate on the user's real index.
+    for (const char *name : {"GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+                             "GIT_EXTERNAL_DIFF", "GIT_SSH_COMMAND", "GIT_ASKPASS"}) {
+        environment.remove(QString::fromLatin1(name));
+    }
     git.setProcessEnvironment(environment);
     git.setWorkingDirectory(workspace);
 
@@ -304,8 +338,11 @@ CheckpointManager::CheckpointManager(QObject *parent)
 CheckpointManager::~CheckpointManager()
 {
     // A git process that is still running is stopped, so it does not keep
-    // the repository locked after the manager is gone.
-    for (QProcess *git : std::as_const(m_detachedProcesses)) {
+    // the repository locked after the manager is gone. Iterate over a copy:
+    // waitForFinished() emits finished(), whose handler removes the process
+    // from the live list and would invalidate the iterator.
+    const auto processes = m_detachedProcesses;
+    for (QProcess *git : processes) {
         if (git && git->state() != QProcess::NotRunning) {
             git->kill();
             git->waitForFinished(1000);
@@ -365,6 +402,18 @@ void CheckpointManager::pruneStaleShadowRepositories() const
         if (!current.isEmpty() && entry.fileName() == current) {
             continue;
         }
+        // Git updates the repository under repo/.git and the marker file, not
+        // the top-level shadow directory. Its mtime alone therefore says when
+        // the repository was created, not when it was last used, and a project
+        // used yesterday could be pruned because the directory is a month old.
+        QDateTime lastTouched = entry.lastModified();
+        for (const QString &probe : {entry.absoluteFilePath() + u"/repo/.git"_s,
+                                     entry.absoluteFilePath() + u"/workspace"_s}) {
+            const QFileInfo info(probe);
+            if (info.exists() && info.lastModified() > lastTouched) {
+                lastTouched = info.lastModified();
+            }
+        }
         const QString marker = entry.absoluteFilePath() + u"/workspace"_s;
         QFile file(marker);
         QString workspace;
@@ -374,12 +423,12 @@ void CheckpointManager::pruneStaleShadowRepositories() const
         if (!workspace.isEmpty() && QFileInfo::exists(workspace)) {
             // The project is still there. It may be old, but the repository
             // belongs to a project that exists.
-            if (entry.lastModified() < cutoff) {
+            if (lastTouched < cutoff) {
                 QDir(entry.absoluteFilePath()).removeRecursively();
             }
             continue;
         }
-        if (entry.lastModified() < cutoff || workspace.isEmpty()) {
+        if (lastTouched < cutoff || workspace.isEmpty()) {
             // The project is gone, or the repository was never finished.
             QDir(entry.absoluteFilePath()).removeRecursively();
         }
@@ -420,14 +469,19 @@ bool CheckpointManager::isAvailable() const
     if (!m_enabled || m_workspace.isEmpty()) {
         return false;
     }
-    if (!m_gitChecked) {
+    // A failed probe used to be cached for the whole session. A Kate launched
+    // before git was on PATH (desktop launcher, a shell profile that has not
+    // run yet) then reported checkpoints broken until it was restarted, even
+    // though git worked. Successful probes stay cached; a missing git is
+    // retried occasionally instead.
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    if (!m_gitChecked || (!m_gitAvailable && now - m_gitProbeMs >= 30000)) {
         m_gitChecked = true;
+        m_gitProbeMs = now;
         QProcess probe;
         probe.start(u"git"_s, QStringList{u"--version"_s});
         m_gitAvailable = probe.waitForFinished(2000) && probe.exitCode() == 0;
-        if (!m_gitAvailable) {
-            m_unavailableReason = u"git was not found on PATH"_s;
-        }
+        m_unavailableReason = m_gitAvailable ? QString() : u"git was not found on PATH"_s;
     }
     if (!m_gitAvailable) {
         return false;
@@ -459,7 +513,14 @@ bool CheckpointManager::ensureRepository(QString *error) const
         return false;
     }
     if (QFileInfo(dir).isDir()) {
-        return true;
+        // A directory is not yet a usable repository: an interrupted init (or
+        // a cache written by an older version) can leave it without HEAD or
+        // objects, and then every snapshot fails. The shadow is disposable, so
+        // rebuild anything that is not complete instead of failing forever.
+        if (QFileInfo::exists(dir + u"/HEAD"_s) && QFileInfo(dir + u"/objects"_s).isDir()) {
+            return true;
+        }
+        QDir(dir).removeRecursively();
     }
 
     QDir().mkpath(QFileInfo(dir).absolutePath());
@@ -507,6 +568,12 @@ void CheckpointManager::runGitDetached(const QStringList &arguments, int timeout
     environment.insert(u"GIT_DIR"_s, dir);
     environment.insert(u"GIT_WORK_TREE"_s, m_workspace);
     environment.insert(u"GIT_CONFIG_NOSYSTEM"_s, u"1"_s);
+    const QString globalConfig = shadowGlobalConfig(dir);
+    if (globalConfig.isEmpty()) {
+        environment.remove(u"GIT_CONFIG_GLOBAL"_s);
+    } else {
+        environment.insert(u"GIT_CONFIG_GLOBAL"_s, globalConfig);
+    }
     environment.insert(u"GIT_TERMINAL_PROMPT"_s, u"0"_s);
     git->setProcessEnvironment(environment);
     git->setWorkingDirectory(m_workspace);
@@ -709,7 +776,11 @@ QStringList CheckpointManager::changedFiles(const QString &id) const
     // commands that touch the same index, and two of them at once race for
     // the index lock.
     QMutexLocker locker(&m_checkpointMutex);
-    stageWorktree();
+    if (!stageWorktree()) {
+        // Reporting an empty/stale diff after a failed staging would claim
+        // "no changes since this checkpoint".
+        return {};
+    }
     QString output;
     if (!runGit({u"diff"_s, u"--cached"_s, u"--name-only"_s, id}, &output, nullptr)) {
         return {};
@@ -725,7 +796,9 @@ QString CheckpointManager::diffAgainstCheckpoint(const QString &id, int maxLines
     // The same reason as in changedFileCount(): the git commands touch the
     // shared index.
     QMutexLocker locker(&m_checkpointMutex);
-    stageWorktree();
+    if (!stageWorktree()) {
+        return {};
+    }
     QString diff;
     if (!runGit({u"diff"_s, u"--cached"_s, u"--no-color"_s, id}, &diff, nullptr)) {
         return {};
@@ -790,7 +863,12 @@ bool CheckpointManager::restoreCheckpoint(const QString &id, QString *error, boo
     }
 
     QString listed;
-    stageWorktree();
+    if (!stageWorktree()) {
+        if (error) {
+            *error = u"Could not stage the current workspace before restoring."_s;
+        }
+        return false;
+    }
     if (!runGit({u"ls-files"_s}, &listed, error)) {
         return false;
     }
@@ -808,11 +886,16 @@ bool CheckpointManager::restoreCheckpoint(const QString &id, QString *error, boo
     // leaves the current files alone. -z keeps non-ASCII names unquoted, so
     // the paths reach update-index exactly as git stored them.
     QString indexed;
-    if (runGit({u"ls-files"_s, u"-z"_s}, &indexed, nullptr)) {
-        const QStringList entries = indexed.split(QChar(u'\0'), Qt::SkipEmptyParts);
-        for (const QString &relativePath : entries) {
-            if (isProtectedPath(relativePath)) {
-                runGit({u"update-index"_s, u"--force-remove"_s, u"--"_s, relativePath}, nullptr, nullptr);
+    if (!runGit({u"ls-files"_s, u"-z"_s}, &indexed, error)) {
+        // checkout-index below would write protected files back over the
+        // working copy if this listing failed. Fail closed instead.
+        return false;
+    }
+    const QStringList entries = indexed.split(QChar(u'\0'), Qt::SkipEmptyParts);
+    for (const QString &relativePath : entries) {
+        if (isProtectedPath(relativePath)) {
+            if (!runGit({u"update-index"_s, u"--force-remove"_s, u"--"_s, relativePath}, nullptr, error)) {
+                return false;
             }
         }
     }
@@ -835,7 +918,12 @@ bool CheckpointManager::restoreCheckpoint(const QString &id, QString *error, boo
         }
         const QString absolute = m_workspace + QLatin1Char('/') + relativePath;
         const QFileInfo info(absolute);
-        if (info.isDir()) {
+        if (info.isSymLink()) {
+            // A symlink is a file entry, not the directory it points at.
+            // QFileInfo::isDir() follows it, and removeRecursively() would
+            // delete the target outside the workspace.
+            QFile::remove(absolute);
+        } else if (info.isDir()) {
             QDir(absolute).removeRecursively();
         } else if (info.exists()) {
             QFile::remove(absolute);

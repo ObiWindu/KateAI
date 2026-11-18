@@ -392,7 +392,26 @@ QList<PatchFile> parseUnifiedPatch(const QString &patch)
 
     for (int i = 0; i < lines.size(); ++i) {
         const QString line = lines.at(i);
-        if (line.startsWith(u"--- "_s)) {
+        // A new file header is a "--- path" immediately followed by
+        // "+++ path". Inside a hunk, that pair is the only reliable way to
+        // tell it from a removed line whose content starts with "-- " (which
+        // is encoded as "--- ...").
+        const bool headerPair = line.startsWith(u"--- "_s) && i + 1 < lines.size()
+            && lines.at(i + 1).startsWith(u"+++ "_s);
+        // A hunk is complete once both declared counts are consumed. Close it
+        // before looking at headers, so the next "--- file" is a new file
+        // section rather than one more (zero-length) hunk line. A trailing
+        // "\ No newline at end of file" marker still belongs to the hunk, so
+        // it keeps the hunk open for one more line.
+        if (inHunk && oldLeft <= 0 && newLeft <= 0 && !line.startsWith(u'\\')) {
+            inHunk = false;
+            hunk = nullptr;
+        }
+        // A removed line whose content begins with "-- " is encoded as
+        // "--- ...", and an added line whose content begins with "++ " as
+        // "+++ ...". Inside a hunk they are content, not file headers unless
+        // the following line is the matching "+++".
+        if ((!inHunk || headerPair) && line.startsWith(u"--- "_s)) {
             // A new file section begins. Hunks of the previous file end here.
             inHunk = false;
             hunk = nullptr;
@@ -408,7 +427,7 @@ QList<PatchFile> parseUnifiedPatch(const QString &patch)
         if (!current) {
             continue;
         }
-        if (line.startsWith(u"+++ "_s)) {
+        if (!inHunk && line.startsWith(u"+++ "_s)) {
             current->path = stripDiffPath(line.mid(4));
             if (current->path == u"/dev/null"_s) {
                 current->isDelete = true;
@@ -511,9 +530,18 @@ QString applyPatchToContent(const QString &content, const QList<PatchHunk> &hunk
         // exactly when the hunk removes nothing. That insertion lands at 0.
         const bool emptyOldRange = hunk.oldStart == 0 && hunk.oldCount == 0;
         const int start = hunk.oldStart > 0 ? hunk.oldStart - 1 : 0;
-        if ((hunk.oldStart < 1 && !emptyOldRange) || start < 0) {
+        if ((hunk.oldStart < 1 && !emptyOldRange) || start < 0
+            || hunk.oldCount < 0 || hunk.newCount < 0) {
             if (error) {
                 *error = u"patch hunk has an invalid start line (%1)"_s.arg(hunk.oldStart);
+            }
+            return {};
+        }
+        // A model-supplied number can be INT_MAX. Do the range arithmetic
+        // before subtracting/adding so the bounds check itself cannot wrap.
+        if (start > out.size()) {
+            if (error) {
+                *error = u"patch hunk at line %1 is past the end of the file (%2 lines)"_s.arg(hunk.oldStart).arg(out.size());
             }
             return {};
         }
@@ -523,11 +551,14 @@ QString applyPatchToContent(const QString &content, const QList<PatchHunk> &hunk
         if (!hunk.lines.isEmpty()) {
             const int last = hunk.lines.size() - 1;
             if (hunk.lines.at(last).startsWith(u'\\') && last > 0) {
-                const QChar previous = hunk.lines.at(last - 1).at(0);
-                if (previous == u'+' || previous == u' ') {
-                    newSideHasNoFinalNewline = true;
-                } else if (previous == u'-') {
-                    newSideHasNoFinalNewline = false;
+                const QString &previousLine = hunk.lines.at(last - 1);
+                if (!previousLine.isEmpty()) {
+                    const QChar previous = previousLine.at(0);
+                    if (previous == u'+' || previous == u' ') {
+                        newSideHasNoFinalNewline = true;
+                    } else if (previous == u'-') {
+                        newSideHasNoFinalNewline = false;
+                    }
                 }
             }
         }
@@ -547,7 +578,20 @@ QString applyPatchToContent(const QString &content, const QList<PatchHunk> &hunk
                 newLines.append(l.mid(1));
             }
         }
-        if (start + oldLines.size() > out.size()) {
+        // Verify the declared counts match what was collected. A truncated
+        // stream or a hand-edited @@ count must fail here rather than apply a
+        // partial hunk to the file.
+        if (oldLines.size() != hunk.oldCount || newLines.size() != hunk.newCount) {
+            if (error) {
+                *error = u"patch hunk at line %1 declares %2 removed/%3 added line(s) but carries %4/%5"_s
+                             .arg(hunk.oldStart).arg(hunk.oldCount).arg(hunk.newCount)
+                             .arg(oldLines.size()).arg(newLines.size());
+            }
+            return {};
+        }
+        const qint64 start64 = start;
+        const qint64 oldSize = oldLines.size();
+        if (start64 > out.size() || oldSize > qint64(out.size()) - start64) {
             if (error) {
                 *error = u"patch hunk at line %1 is past the end of the file (%2 lines)"_s.arg(hunk.oldStart).arg(out.size());
             }
@@ -781,6 +825,26 @@ QString providerBaseUrl(const Settings &settings)
     default:
         return u"https://api.x.ai/v1"_s;
     }
+}
+
+QString joinApiEndpoint(const QString &baseUrl, const QString &endpoint)
+{
+    QString base = baseUrl.trimmed();
+    QString path = endpoint;
+    while (base.endsWith(u'/')) {
+        base.chop(1);
+    }
+    // A base that already ends in /v1 and an endpoint that starts with /v1/
+    // name the same version segment; keep one copy. This covers the default
+    // Anthropic base (https://api.anthropic.com/v1) and a user who entered a
+    // bare host with an endpoint that includes /v1.
+    if (path.startsWith(u"/v1/"_s) && base.endsWith(u"/v1"_s)) {
+        path = path.mid(3);
+    }
+    if (!path.startsWith(u'/')) {
+        path.prepend(u'/');
+    }
+    return base + path;
 }
 
 QStringList defaultModels(Provider provider)
@@ -1444,6 +1508,9 @@ QString compressText(const QString &text, int maxLength, bool enabled)
     // Truncate and add indicator. The cut is taken from the budget so the
     // result never exceeds the length the caller asked for.
     const QString indicator = u"... (truncated)"_s;
+    if (maxLength <= indicator.size()) {
+        return truncateSafe(text, maxLength);
+    }
     const int room = qMax(0, maxLength - indicator.size());
     QString result = truncateSafe(text, room);
     result += indicator;
@@ -1509,7 +1576,18 @@ QList<ChatMessage> compressMessageHistory(const QList<ChatMessage> &messages,
     // was already taken out of it.
     const int nonSystem = messages.size() - result.size();
     const int keepCount = qBound(1, qMin(maxMessages - result.size(), nonSystem), nonSystem);
-    for (int i = messages.size() - keepCount; i < messages.size(); ++i) {
+    int keepFrom = messages.size() - keepCount;
+    // Never begin the kept window with a Tool result whose declaring
+    // assistant message was dropped: OpenAI/Anthropic reject that request.
+    const int firstBody = result.size();
+    while (keepFrom > firstBody && messages.at(keepFrom).role == ChatMessage::Role::Tool) {
+        --keepFrom;
+    }
+    if (keepFrom > firstBody && messages.at(keepFrom - 1).role == ChatMessage::Role::Assistant
+        && !messages.at(keepFrom - 1).toolCalls.isEmpty()) {
+        --keepFrom;
+    }
+    for (int i = keepFrom; i < messages.size(); ++i) {
         result.append(messages[i]);
     }
 
@@ -1539,19 +1617,39 @@ QList<ChatMessage> compressMessageHistory(const QList<ChatMessage> &messages,
 QJsonArray parsePlanFromText(const QString &text)
 {
     QJsonArray plan;
-    const QString lower = text.toLower();
-    int start = -1;
-    const QStringList markers = QStringList() 
+    const QStringList markers = QStringList()
         << u"## plan"_s << u"## implementation plan"_s << u"## plan (structured)"_s
         << u"plan:"_s << u"implementation plan:"_s << u"steps:"_s << u"action plan:"_s;
+    // The marker has to open a line. A bare "plan:" is also the tail of
+    // "explanation:", and "steps:" turns up in ordinary prose - matched
+    // anywhere in the text, they started a plan in the middle of a sentence.
     // The earliest marker wins, not the first one in the list: a text that
     // contains both "Plan:" and "## Implementation Plan" has to start at the
     // place where the plan really begins.
-    for (const QString &m : markers) {
-        const int index = lower.indexOf(m);
-        if (index >= 0 && (start < 0 || index < start)) {
-            start = index;
+    int start = -1;
+    int offset = 0;
+    const QStringList lines = text.split(u'\n');
+    for (const QString &line : lines) {
+        const QString trimmed = line.trimmed();
+        const QString lowerTrimmed = trimmed.toLower();
+        if (!lowerTrimmed.isEmpty()) {
+            // The offset of the marker in the text: the line start plus the
+            // indentation in front of it.
+            int indent = 0;
+            while (indent < line.size() && line.at(indent).isSpace()) {
+                ++indent;
+            }
+            for (const QString &m : markers) {
+                if (!lowerTrimmed.startsWith(m)) {
+                    continue;
+                }
+                const int index = offset + indent;
+                if (start < 0 || index < start) {
+                    start = index;
+                }
+            }
         }
+        offset += line.size() + 1;
     }
     if (start < 0) {
         return plan;
@@ -1789,7 +1887,17 @@ AcpAgentPreset acpAgentLaunchLine(const Settings &settings, const QString &agent
         }
         QStringList args;
         for (const QJsonValue &arg : agent.value(u"args"_s).toArray()) {
-            args.append(arg.toString());
+            // acpArgs is a command-line string parsed with
+            // QProcess::splitCommand(), so an argument containing whitespace
+            // must be quoted here or it turns into several arguments.
+            const QString text = arg.toString();
+            if (text.contains(u' ') || text.contains(u'\t') || text.contains(u'"')) {
+                QString escaped = text;
+                escaped.replace(u'"', u"\\\""_s);
+                args.append(u"\"%1\""_s.arg(escaped));
+            } else {
+                args.append(text);
+            }
         }
         QString label = agent.value(u"name"_s).toString().trimmed();
         return {agentId, label.isEmpty() ? agentId : label,
@@ -1867,6 +1975,24 @@ QString acpBinaryInstallDir(const QString &agentId)
     return root + u'/' + safeId;
 }
 
+static bool isBinaryInstallEntry(const QJsonObject &agent)
+{
+    return agent.value(u"distributionType"_s).toString() == u"binary"_s
+        || !agent.value(u"binaryArchiveUrl"_s).toString().isEmpty();
+}
+
+bool acpAgentHasBinaryInstall(const Settings &settings)
+{
+    const QJsonArray installed = QJsonDocument::fromJson(settings.acpInstalledAgents.toUtf8()).array();
+    for (const QJsonValue &value : installed) {
+        const QJsonObject agent = value.toObject();
+        if (agent.value(u"id"_s).toString() == settings.acpAgentId && isBinaryInstallEntry(agent)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 QString acpInstalledBinaryCommand(const Settings &settings)
 {
     const QJsonArray installed = QJsonDocument::fromJson(settings.acpInstalledAgents.toUtf8()).array();
@@ -1875,9 +2001,7 @@ QString acpInstalledBinaryCommand(const Settings &settings)
         if (agent.value(u"id"_s).toString() != settings.acpAgentId) {
             continue;
         }
-        const bool isBinary = agent.value(u"distributionType"_s).toString() == u"binary"_s
-            || !agent.value(u"binaryArchiveUrl"_s).toString().isEmpty();
-        if (!isBinary) {
+        if (!isBinaryInstallEntry(agent)) {
             return {};
         }
 
@@ -1896,19 +2020,25 @@ QString acpInstalledBinaryCommand(const Settings &settings)
         // The registry records the executable relative to the unpacked archive
         // ("./agy_acp_server.par"). Kate installs the archive into its own data
         // directory, so resolve the command against that directory instead of
-        // the process working directory.
+        // the process working directory. Prefer the directory recorded at
+        // install time: an env override or a moved data dir must not make the
+        // installed agent invisible.
         QString relative = command;
         while (relative.startsWith(u"./"_s)) {
             relative.remove(0, 2);
         }
-        const QDir installDir(acpBinaryInstallDir(settings.acpAgentId));
+        QString installRoot = agent.value(u"binaryInstallDir"_s).toString().trimmed();
+        if (installRoot.isEmpty()) {
+            installRoot = acpBinaryInstallDir(settings.acpAgentId);
+        }
+        const QDir installDir(installRoot);
         const QString candidate = QDir::cleanPath(installDir.absoluteFilePath(relative));
-        const QString installRoot = installDir.absolutePath();
-        if (candidate != installRoot && !candidate.startsWith(installRoot + u'/')) {
+        const QString installRootPath = installDir.absolutePath();
+        if (candidate != installRootPath && !candidate.startsWith(installRootPath + u'/')) {
             return {};
         }
         const QFileInfo candidateInfo(candidate);
-        if (candidateInfo.exists() && candidateInfo.isExecutable()) {
+        if (candidateInfo.exists() && candidateInfo.isExecutable() && !candidateInfo.isSymLink()) {
             return candidateInfo.absoluteFilePath();
         }
         return {};

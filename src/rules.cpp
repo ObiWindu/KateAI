@@ -8,6 +8,7 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QRegularExpression>
 
 using namespace Qt::Literals::StringLiterals;
 
@@ -143,24 +144,31 @@ QList<RulesLoader::Block> RulesLoader::load(const QString &workspace, const QStr
     return blocks;
 }
 
+// A rule file that contains "</rules>" would close the wrapper and put the
+// rest of its content into the prompt as free text. The closing tag is
+// neutralised. The match is case-insensitive and ignores the space before
+// the ">": "</RULES>" and "</rules >" close the wrapper just as well, and a
+// case-sensitive replacement left those spellings untouched.
+static QString neutraliseClosingTag(QString content)
+{
+    static const QRegularExpression closingTag(uR"(</rules\b)"_s, QRegularExpression::CaseInsensitiveOption);
+    content.replace(closingTag, u"<\\/rules"_s);
+    return content;
+}
+
 QString RulesLoader::render(const QList<Block> &blocks, const QString &globalRules)
 {
     QString out;
     if (!globalRules.trimmed().isEmpty()) {
         // The same neutralising as for the project rules.
-        QString content = globalRules.trimmed();
-        content.replace(u"</rules"_s, u"<\\/rules"_s);
+        const QString content = neutraliseClosingTag(globalRules.trimmed());
         out += u"<rules source=\"global\">\n"_s + content + u"\n</rules>\n"_s;
     }
     for (const Block &block : blocks) {
         if (block.content.trimmed().isEmpty()) {
             continue;
         }
-        // A rule file that contains "</rules>" would close the wrapper and put
-        // the rest of its content into the prompt as free text. The closing
-        // tag is neutralised.
-        QString content = block.content;
-        content.replace(u"</rules"_s, u"<\\/rules"_s);
+        const QString content = neutraliseClosingTag(block.content);
         out += u"<rules source=\""_s + block.source.toHtmlEscaped() + u"\">\n"_s + content + u"\n</rules>\n"_s;
     }
     return out;

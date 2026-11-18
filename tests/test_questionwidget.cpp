@@ -24,6 +24,8 @@
 #include <QSignalSpy>
 #include <QTest>
 #include <QTextBrowser>
+#include <QVBoxLayout>
+#include <QWidget>
 
 using namespace Qt::Literals::StringLiterals;
 using namespace KateAi;
@@ -99,6 +101,30 @@ private Q_SLOTS:
             QVERIFY2(colours.size() > 2, qPrintable(u"the %1 question body painted no text"_s.arg(preset)));
         }
         ChatTheme::loadTheme(Settings());
+    }
+
+    void testCardShowsTheQuestionInsideAHostDock()
+    {
+        // The chat panel creates the card while its host is still hidden, fills
+        // it, and only then adds it to the dock layout. The body has to come
+        // up with the question once the dock is on screen.
+        QWidget dock;
+        auto *dockLayout = new QVBoxLayout(&dock);
+        dockLayout->setContentsMargins(10, 6, 10, 0);
+
+        auto *card = new QuestionWidget(u"q-dock"_s, &dock);
+        card->setQuestion(u"Rewrite the whole file, or patch it in place?"_s, {u"Rewrite"_s}, true);
+        dockLayout->addWidget(card);
+        dock.resize(600, 400);
+        dock.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&dock));
+        QTest::qWait(50);
+
+        QTextBrowser *body = card->findChild<QTextBrowser *>();
+        QVERIFY(body);
+        QVERIFY2(body->toPlainText().contains(u"patch it in place"_s), qPrintable(body->toPlainText()));
+        QVERIFY2(body->height() > 10,
+                 qPrintable(QStringLiteral("the question body collapsed to %1px").arg(body->height())));
     }
 
     void testChipAnswersWithItsOwnText()

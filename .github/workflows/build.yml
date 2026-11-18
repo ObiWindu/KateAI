@@ -319,11 +319,12 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 300
     needs: build-macos
-    if: github.ref == 'refs/heads/main' || github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
+    if: always() && (github.ref == 'refs/heads/main' || github.ref_type == 'tag' || github.event_name == 'workflow_dispatch')
     steps:
       - uses: actions/checkout@v4
       - name: Download tested macOS plugin
         uses: actions/download-artifact@v4
+        continue-on-error: true
         with:
           name: plugin-macos
           path: artifacts-macos-tmp

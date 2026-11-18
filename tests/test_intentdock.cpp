@@ -154,6 +154,45 @@ private Q_SLOTS:
                  "the finished card must not keep reporting a step from a run that is over");
     }
 
+    void testCardSurfacesTheUsefulRunFacts()
+    {
+        SubtaskWidget card(QStringLiteral("task-facts"));
+        card.startAgent(QStringLiteral("Reviewer"), QStringLiteral("architect"),
+                        QStringLiteral("Check the diff for the new parser"));
+
+        auto *title = card.findChild<QLabel *>(u"subtaskTitle"_s);
+        auto *mode = card.findChild<QLabel *>(u"subtaskMode"_s);
+        auto *status = card.findChild<QLabel *>(u"subtaskStatus"_s);
+        auto *current = card.findChild<QLabel *>(u"subtaskCurrent"_s);
+        auto *toggle = card.findChild<QPushButton *>(u"subtaskActivityToggle"_s);
+        QVERIFY(title && mode && status && current && toggle);
+
+        QVERIFY2(title->text().contains(u"Reviewer"_s), qPrintable(title->text()));
+        QVERIFY2(mode->text().contains(u"Architect"_s),
+                 qPrintable(QStringLiteral("mode chip: %1").arg(mode->text())));
+        QVERIFY2(status->text().contains(u"Running"_s), qPrintable(status->text()));
+        // A card that has not heard from the child yet still says it is
+        // starting instead of looking like an empty, stuck box.
+        QVERIFY2(current->text().contains(u"Starting"_s), qPrintable(current->text()));
+
+        card.appendActivity(u"→ read_file src/parser.cpp"_s, false);
+        QVERIFY2(current->text().contains(u"read_file"_s), qPrintable(current->text()));
+        QVERIFY2(current->text().contains(u"src/parser.cpp"_s), qPrintable(current->text()));
+        QVERIFY2(status->text().contains(u"1 tool"_s), qPrintable(status->text()));
+        QVERIFY2(toggle->text().contains(u"1 tool"_s), qPrintable(toggle->text()));
+
+        ToolResult result;
+        result.ok = true;
+        result.output = u"The parser looks correct."_s;
+        card.finishAgent(result);
+
+        QVERIFY2(!current->isVisibleTo(&card), "the live step belongs to the run that just ended");
+        QVERIFY2(status->text().contains(u"Done"_s), qPrintable(status->text()));
+        QVERIFY2(toggle->text().contains(u"1 tool"_s), qPrintable(toggle->text()));
+        auto *copy = card.findChild<QPushButton *>(u"subtaskCopyResult"_s);
+        QVERIFY2(copy && !copy->isHidden(), "the finished card should offer its answer on the clipboard");
+    }
+
     void testRunningAgentTaskKeepsStateColourInTheBorder()
     {
         SubtaskWidget running(QStringLiteral("task-3"));

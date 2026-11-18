@@ -23,6 +23,16 @@ private Q_SLOTS:
         QVERIFY(!chunk.finished);
     }
 
+    void nullErrorFieldIsNotAnError()
+    {
+        // Some providers include {"error":null} on a successful chunk.
+        QHash<int, ToolCall> acc;
+        const CompletionChunk chunk = LlmClient::parseSseLine(
+            QByteArray("data: {\"error\":null,\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}"), &acc);
+        QVERIFY2(chunk.error.isEmpty(), qPrintable(chunk.error));
+        QCOMPARE(chunk.contentDelta, u"ok"_s);
+    }
+
     void splitEventIsJoined()
     {
         // The SSE specification allows one event to be spread over several
@@ -48,6 +58,40 @@ private Q_SLOTS:
             QByteArray("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"b\",\"function\":{\"name\":\"grep\",\"arguments\":\"{}\"}}]}}]}"),
             &acc);
         QCOMPARE(acc.size(), 2);
+    }
+
+    void toolCallWithStringIndexUsesItsSlot()
+    {
+        // QJsonValue::toInt() yielded 0 for "index":"1", collapsing parallel
+        // calls into slot 0.
+        QHash<int, ToolCall> acc;
+        LlmClient::parseSseLine(
+            QByteArray("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"a\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{}\"}}]}}]}"),
+            &acc);
+        LlmClient::parseSseLine(
+            QByteArray("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":\"1\",\"id\":\"b\",\"function\":{\"name\":\"grep\",\"arguments\":\"{}\"}}]}}]}"),
+            &acc);
+        QCOMPARE(acc.size(), 2);
+        QCOMPARE(acc.value(1).name, u"grep"_s);
+    }
+
+    void toolCallStreamedWithoutIndexStaysOneCall()
+    {
+        // A provider that omits "index" and streams the arguments in fragments
+        // - the shape every OpenAI-compatible server uses - was split into one
+        // call per delta, each with a fragment of the arguments and no name.
+        QHash<int, ToolCall> acc;
+        LlmClient::parseSseLine(
+            QByteArray("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"a\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\"}}]}}]}"),
+            &acc);
+        LlmClient::parseSseLine(
+            QByteArray("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"arguments\":\"\\\"main.cpp\\\"}\"}}]}}]}"),
+            &acc);
+        QCOMPARE(acc.size(), 1);
+        const ToolCall tool = acc.value(0);
+        QCOMPARE(tool.id, u"a"_s);
+        QCOMPARE(tool.name, u"read_file"_s);
+        QCOMPARE(tool.argumentsJson, u"{\"path\":\"main.cpp\"}"_s);
     }
 
     void placeholderObjectDoesNotBreakTheArguments()

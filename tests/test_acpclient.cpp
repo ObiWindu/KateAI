@@ -1614,20 +1614,25 @@ private Q_SLOTS:
         settings.acpCommand = u"npx"_s;
         settings.acpArgs = u"--yes @minimax-ai/code@0.2.7 acp"_s;
 
-        // npm-only tokens from the registry entry are dropped and the ACP
-        // subcommand is kept, so the standalone binary is launched properly.
-        QCOMPARE(AcpClient::agentArguments(settings), (QStringList{u"acp"_s}));
-
         // Without a standalone install the recorded npx launch is kept, still
         // resolved through PATH like any other agent command.
         const QString localInstall = QDir::homePath() + u"/.minimax-code/bin/mcode"_s;
+        const bool standalone = QFileInfo(localInstall).exists() && QFileInfo(localInstall).isExecutable();
         const QString npxOnPath = QStandardPaths::findExecutable(u"npx"_s);
         const QString expectedNpx = npxOnPath.isEmpty() ? u"npx"_s : npxOnPath;
-        if (QFileInfo(localInstall).exists() && QFileInfo(localInstall).isExecutable()) {
+        if (standalone) {
             QCOMPARE(AcpClient::resolvedCommand(settings), localInstall);
         } else {
             QCOMPARE(AcpClient::resolvedCommand(settings), expectedNpx);
         }
+
+        // npm-only tokens from the registry entry are dropped and the ACP
+        // subcommand is kept when the standalone binary is what launches. With
+        // the npx launch line the package must stay: "npx acp" would fetch an
+        // unrelated package instead of MiniMax Code.
+        QCOMPARE(AcpClient::agentArguments(settings),
+                 (standalone ? QStringList{u"acp"_s}
+                             : QStringList{u"--yes"_s, u"@minimax-ai/code@0.2.7"_s, u"acp"_s}));
 
         // A bare "mcode" with no arguments must run the ACP server, not the
         // interactive TUI that never answers the handshake.
@@ -1671,10 +1676,10 @@ private Q_SLOTS:
 
         QCOMPARE(AcpClient::resolvedCommand(settings), executable);
 
-        // Without the unpacked file the recorded command is preserved, so the
-        // failure still points at the missing binary instead of an empty path.
+        // Without the unpacked file the relative command is not allowed to
+        // fall through to the workspace as a working-directory lookup.
         QVERIFY(QFile::remove(executable));
-        QCOMPARE(AcpClient::resolvedCommand(settings), settings.acpCommand);
+        QVERIFY(AcpClient::resolvedCommand(settings).isEmpty());
 
         if (previous.isNull()) {
             qunsetenv("KATEAI_ACP_AGENTS_DIR");

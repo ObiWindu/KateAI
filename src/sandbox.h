@@ -66,6 +66,11 @@ public:
     // "cat ~/.ssh/id_rsa". Deny globs apply to file tools already; the shell
     // needs the same guard or a read-only command sidesteps them entirely.
     bool commandTouchesDeniedPath(const QString &command) const;
+    // True when a shell command names a path outside the workspace. Read-only
+    // commands are approved without a prompt, so their operands must obey the
+    // same confinement the read tools enforce; otherwise "cat ~/.bash_history"
+    // is an unprompted read of the whole host.
+    bool commandTouchesOutsideWorkspace(const QString &command) const;
 
     QStringList wrapCommand(const QString &command, QString *error, const QString &workingDirectory = QString()) const;
     // Wrap an argv vector (ACP terminal/create). The program and each argument
@@ -89,6 +94,14 @@ private:
     bool pathInsideWorkspace(const QString &absolutePath) const;
     QString normalizePath(const QString &path, QString *error, bool forWrite) const;
     bool globMatchCached(const QString &pattern, const QString &path) const;
+    // Expands a shell glob token into the paths it currently matches, so the
+    // deny scan looks at real files instead of the pattern text. A pattern
+    // such as ".e*" names a set of files, and checking the text alone lets the
+    // shell expand it straight past a deny rule.
+    QStringList expandGlobToken(const QString &pattern) const;
+    // True when a glob pattern could name a path the deny rules cover, even
+    // when nothing on disk matches it at this moment.
+    bool patternCouldMatchDeniedName(const QString &pattern) const;
 
     QString m_workspaceRoot;
     SandboxProfile m_profile = SandboxProfile::Workspace;

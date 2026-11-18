@@ -87,6 +87,26 @@ private Q_SLOTS:
         QVERIFY(!team.describeRoster().contains(u"off"_s));
     }
 
+    void aDisabledAgentNeverRunsInTheCodeMode()
+    {
+        // A disabled agent is not in the roster, so naming it used to fall
+        // through to the generic code agent - which has write and command
+        // rights the roster had withheld.
+        AgentTeam team;
+        AgentProfile custom;
+        custom.id = u"off"_s;
+        custom.name = u"Off"_s;
+        custom.modeId = u"ask"_s;
+        custom.enabled = false;
+        team.setCustomAgents({custom});
+
+        const AgentProfile resolved = team.resolve(u"off"_s);
+        QCOMPARE(resolved.modeId, u"ask"_s);
+        QVERIFY(!resolved.modeId.contains(u"code"_s));
+        // An unknown id is still the generic code agent.
+        QCOMPARE(team.resolve(u"nobody"_s).modeId, u"code"_s);
+    }
+
     void customAgentsLoadFromTheWorkspace()
     {
         QTemporaryDir workspace;

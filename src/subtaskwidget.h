@@ -146,6 +146,13 @@ protected:
     bool m_failed = false;
     bool m_cancelled = false;
     int m_stepCount = 0;
+    // Tool starts (lines beginning with "→"), so the headline can say how much
+    // work actually ran instead of counting every status note as a step.
+    int m_toolCount = 0;
+    int m_errorCount = 0;
+    // The full answer, kept after finishAgent() so the card can offer it on the
+    // clipboard independently of the display/height caps.
+    QString m_resultOutput;
     // The dock's cap on this card's height, in px; 0 means uncapped.
     int m_heightBudget = 0;
     // Set once the user opens or closes the activity log themselves. From then
@@ -165,6 +172,7 @@ protected:
     QLabel *m_current = nullptr;
     QPushButton *m_cancel = nullptr;
     QPushButton *m_toggle = nullptr;
+    QPushButton *m_copyResult = nullptr;
     QTextBrowser *m_answer = nullptr;
     QTextBrowser *m_activity = nullptr;
     QWidget *m_activityContainer = nullptr;

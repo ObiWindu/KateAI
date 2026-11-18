@@ -104,6 +104,10 @@ private:
     // against it: if they differ, someone (the user) edited the file after
     // the agent's last write, and overwriting would throw those changes away.
     QHash<QString, QByteArray> m_bufferedHashes;
+    // The content this bridge last wrote through an open document, regardless
+    // of buffer mode. restoreDocument() uses it to refuse a revert when the
+    // user typed into the document after the agent's edit.
+    QHash<QString, QByteArray> m_lastWrittenHashes;
 };
 
 // The open KTextEditor document for a local path, or null when Kate does not
