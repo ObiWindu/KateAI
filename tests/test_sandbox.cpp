@@ -941,6 +941,78 @@ private Q_SLOTS:
 #endif
     }
 
+    void mountPointsBelowADirectoryThatCannotBeReadAreCreated()
+    {
+#if !defined(Q_OS_LINUX)
+        QSKIP("bubblewrap mount setup is Linux-only");
+#else
+        // A parent the user may only traverse is enough for a shell, but
+        // bubblewrap used to open every mount point parent for reading and
+        // failed with "Can't mkdir parents ... Permission denied" before a
+        // single command ran. The sandbox has to cover such a parent with a
+        // private tmpfs and bind the workspace back, or no mount inside the
+        // workspace can be created.
+        const QString base = QDir::homePath();
+        const QString tempRoot = QDir::cleanPath(QDir::tempPath());
+        if (base.isEmpty() || base == u"/"_s || base == tempRoot || base.startsWith(tempRoot + u'/')) {
+            QSKIP("the home directory is not usable for this check");
+        }
+        QTemporaryDir outer(base + u"/.kateai-sandbox-XXXXXX"_s);
+        QVERIFY(outer.isValid());
+        const QString blocked = outer.filePath(u"blocked"_s);
+        const QString workspace = blocked + u"/workspace"_s;
+        QVERIFY(QDir().mkpath(workspace));
+
+        const QFileDevice::Permissions restricted = QFileDevice::WriteOwner | QFileDevice::ExeOwner;
+        const QFileDevice::Permissions restored =
+            QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner;
+        QVERIFY(QFile::setPermissions(blocked, restricted));
+        if (QFileInfo(blocked).isReadable()) {
+            QFile::setPermissions(blocked, restored);
+            QSKIP("the test user can read every directory (running as root?)");
+        }
+        if (!bubblewrapRuntimeWorks()) {
+            QFile::setPermissions(blocked, restored);
+            QSKIP("bubblewrap cannot create the required namespaces in this environment");
+        }
+
+        Sandbox box(workspace, SandboxProfile::Workspace);
+        QString error;
+        const QStringList wrapped = box.wrapCommand(u"pwd"_s, &error);
+        SandboxRunResult result = runSandboxed(box, u"echo inside > inside.txt"_s);
+        // Restore before any assertion can return early, so the temporary
+        // directory stays removable.
+        QFile::setPermissions(blocked, restored);
+
+        QVERIFY2(!wrapped.isEmpty(), qPrintable(error));
+        // The unreadable directory (or the unreadable ancestor that hides it)
+        // is replaced by a tmpfs and the child on the way to the workspace is
+        // bound back, so the mount points below it stay usable.
+        bool covered = false;
+        for (int i = 0; i + 1 < wrapped.size(); ++i) {
+            if (wrapped.at(i) != u"--tmpfs"_s) {
+                continue;
+            }
+            const QString ancestor = wrapped.at(i + 1);
+            if (ancestor.isEmpty() || ancestor == u"/"_s
+                || !(workspace == ancestor || workspace.startsWith(ancestor + u'/'))) {
+                continue;
+            }
+            const QString relative = workspace.mid(ancestor.size() + 1);
+            const QString child = ancestor + u'/' + relative.section(u'/', 0, 0);
+            for (int j = 0; j + 2 < wrapped.size(); ++j) {
+                if ((wrapped.at(j) == u"--ro-bind"_s || wrapped.at(j) == u"--bind"_s)
+                    && wrapped.at(j + 1) == child && wrapped.at(j + 2) == child) {
+                    covered = true;
+                }
+            }
+        }
+        QVERIFY2(covered, "the unreadable parent was not covered and restored");
+        QVERIFY2(result.exitCode == 0, qPrintable(result.output));
+        QVERIFY(QFileInfo::exists(workspace + u"/inside.txt"_s));
+#endif
+    }
+
     void workspaceRuntimeCannotWriteOutsideTheWorkspace()
     {
 #if !defined(Q_OS_LINUX)

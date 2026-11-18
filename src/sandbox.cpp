@@ -17,9 +17,11 @@
 #include <QSet>
 #include <QStandardPaths>
 
+#include <algorithm>
 #include <functional>
 
 #ifdef Q_OS_UNIX
+#include <fcntl.h>
 #include <signal.h>
 #include <unistd.h>
 #endif
@@ -1617,6 +1619,90 @@ static void appendBubblewrapRuntimePath(QStringList &args, const QString &path)
 #endif
 
 #if defined(Q_OS_LINUX)
+// True when the current user may open the directory for reading, which is
+// more than the execute permission a plain path traversal needs.
+static bool directoryOpensForReading(const QString &path)
+{
+    const QByteArray native = QFile::encodeName(path);
+    const int fd = ::open(native.constData(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (fd < 0) {
+        return false;
+    }
+    ::close(fd);
+    return true;
+}
+
+// The ancestors of a mount destination, outermost first, without the root and
+// without the destination itself. These are exactly the directories bubblewrap
+// opens before it resolves the mount point.
+static QStringList mountParentChain(const QString &destination)
+{
+    QStringList chain;
+    QString path = QDir::cleanPath(QDir::fromNativeSeparators(destination));
+    while (true) {
+        const QString parent = QFileInfo(path).absolutePath();
+        if (parent.isEmpty() || parent == path || parent == u"/"_s) {
+            break;
+        }
+        chain.prepend(parent);
+        path = parent;
+    }
+    return chain;
+}
+
+// bubblewrap 0.12 opens every parent directory of a mount point with
+// O_DIRECTORY, so it needs read permission on the whole chain and not just the
+// search permission a path traversal needs. A home directory below a directory
+// the user may only traverse (pam_tmpdir's a+x, a shared home) therefore made
+// every mount inside it fail with "Can't mkdir parents ... Permission denied".
+// For each ancestor bubblewrap cannot open, cover it with a private tmpfs and
+// bind the child leading to the destination back read-only: the destination
+// stays reachable and can still be masked or rebound writable afterwards,
+// while nothing else from the unreadable directory is exposed.
+static QStringList mountableDestinationPrep(const QStringList &destinations)
+{
+    QStringList blockers;
+    QHash<QString, QStringList> restore;
+    for (const QString &destination : destinations) {
+        // /tmp is a private tmpfs by the time any of these mounts is created,
+        // so a destination below it only ever walks directories we made.
+        if (pathIsWithinOrEqual(destination, u"/tmp"_s)) {
+            continue;
+        }
+        for (const QString &ancestor : mountParentChain(destination)) {
+            if (directoryOpensForReading(ancestor)) {
+                continue;
+            }
+            if (!restore.contains(ancestor)) {
+                blockers.append(ancestor);
+                restore.insert(ancestor, {});
+            }
+            const QString relative = destination.mid(ancestor.size() + 1);
+            const QString child = ancestor + u'/' + relative.section(u'/', 0, 0);
+            if (!restore[ancestor].contains(child)) {
+                restore[ancestor].append(child);
+            }
+            break;
+        }
+    }
+    // An outer blocker is restored first; a deeper one is only ever visible
+    // after its own ancestors were brought back.
+    std::sort(blockers.begin(), blockers.end(), [](const QString &left, const QString &right) {
+        return left.size() < right.size();
+    });
+    QStringList args;
+    for (const QString &ancestor : blockers) {
+        args << u"--tmpfs"_s << ancestor;
+        const QStringList children = restore.value(ancestor);
+        for (const QString &child : children) {
+            args << u"--ro-bind"_s << child << child;
+        }
+    }
+    return args;
+}
+#endif
+
+#if defined(Q_OS_LINUX)
 static QStringList linuxBubblewrapPrefix(const QString &workspaceRoot, SandboxProfile profile,
                                         const QString &workingDirectory, QString *error)
 {
@@ -1712,6 +1798,31 @@ static QStringList linuxBubblewrapPrefix(const QString &workspaceRoot, SandboxPr
     // command visible to every process on the machine.
     args << u"--tmpfs"_s << u"/tmp"_s;
 
+    // The credential stores that are hidden inside the sandbox. They are
+    // collected before the workspace mounts because the mount points below may
+    // need their ancestors restored first.
+    QStringList maskedPaths;
+    if (!strict) {
+        for (const QString &path : sensitiveSandboxPaths()) {
+            // Masking an ancestor of the workspace would hide the project.
+            if (pathIsWithinOrEqual(workspace, path)) {
+                continue;
+            }
+            maskedPaths.append(path);
+        }
+    }
+
+    // A mount destination below a directory that may only be traversed cannot
+    // be created by bubblewrap; restore those ancestors first. The strict
+    // profile builds its own root, so its parents are directories we create.
+    if (!strict) {
+        QStringList mountDestinations = maskedPaths;
+        if (workspace != workspaceMount) {
+            mountDestinations.append(workspace);
+        }
+        args << mountableDestinationPrep(mountDestinations);
+    }
+
     // The workspace is available under a stable, shallow path and under its
     // real absolute path, so commands that spell out the project directory keep
     // working. Both point at the same bind mount.
@@ -1736,11 +1847,7 @@ static QStringList linuxBubblewrapPrefix(const QString &workspaceRoot, SandboxPr
              << u"--dir"_s << runtime;
     } else {
         args << u"--dir"_s << sandboxRuntimePath(profile);
-        for (const QString &path : sensitiveSandboxPaths()) {
-            // Masking an ancestor of the workspace would hide the project.
-            if (pathIsWithinOrEqual(workspace, path)) {
-                continue;
-            }
+        for (const QString &path : maskedPaths) {
             appendLinuxMaskMount(args, path);
         }
     }
