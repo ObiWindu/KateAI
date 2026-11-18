@@ -57,6 +57,52 @@ private Q_SLOTS:
         QVERIFY(!graph.getNode(ProjectGraph::generateNodeId(dir.path() + u"/node_modules/pkg/index.js"_s)));
     }
 
+    void dependentsWalkTheReverseDirection()
+    {
+        ProjectGraph graph;
+        GraphNode a; a.id = u"a"_s; a.type = u"file"_s;
+        GraphNode b; b.id = u"b"_s; b.type = u"file"_s;
+        GraphNode c; c.id = u"c"_s; c.type = u"file"_s;
+        graph.addNode(a);
+        graph.addNode(b);
+        graph.addNode(c);
+        graph.addEdge({u"a"_s, u"b"_s, u"imports"_s, {}, true});
+        graph.addEdge({u"b"_s, u"c"_s, u"imports"_s, {}, true});
+        const QSet<QString> dependents = graph.getTransitiveDependents(u"c"_s);
+        QVERIFY(dependents.contains(u"b"_s));
+        QVERIFY(dependents.contains(u"a"_s));
+        QVERIFY(!dependents.contains(u"c"_s));
+    }
+
+    void removingOneRelationshipKeepsTheOther()
+    {
+        ProjectGraph graph;
+        GraphNode a; a.id = u"a"_s; a.type = u"file"_s;
+        GraphNode b; b.id = u"b"_s; b.type = u"file"_s;
+        graph.addNode(a);
+        graph.addNode(b);
+        graph.addEdge({u"a"_s, u"b"_s, u"imports"_s, {}, true});
+        graph.addEdge({u"a"_s, u"b"_s, u"references"_s, {}, true});
+        graph.removeEdge(u"a"_s, u"b"_s);
+        QCOMPARE(graph.getEdgesFrom(u"a"_s).size(), 1);
+        graph.removeEdge(u"a"_s, u"b"_s);
+        QCOMPARE(graph.getEdgesFrom(u"a"_s).size(), 0);
+    }
+
+    void importPathIsANodeIdSequence()
+    {
+        ProjectGraph graph;
+        GraphNode a; a.id = u"a"_s; a.type = u"file"_s;
+        GraphNode b; b.id = u"b"_s; b.type = u"file"_s;
+        GraphNode c; c.id = u"c"_s; c.type = u"file"_s;
+        graph.addNode(a);
+        graph.addNode(b);
+        graph.addNode(c);
+        graph.addEdge({u"a"_s, u"b"_s, u"imports"_s, {}, true});
+        graph.addEdge({u"b"_s, u"c"_s, u"imports"_s, {}, true});
+        QCOMPARE(graph.findImportPaths(u"a"_s, u"c"_s), (QList<QString>{u"a"_s, u"b"_s, u"c"_s}));
+    }
+
     void testSymbolsResolveThroughASymlinkedWorkspacePath()
     {
         QTemporaryDir dir;

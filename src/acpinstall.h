@@ -58,6 +58,7 @@ private:
     void fail(const QString &message);
     void cleanUp();
     void extractArchive();
+    void installRawBinary();
     void finishInstall(const QString &executable);
 
     QJsonObject m_agent;
@@ -66,6 +67,7 @@ private:
     QString m_archiveUrl;
     QString m_command;
     QString m_installDir;
+    QString m_stagingDir;
     QNetworkAccessManager *m_network = nullptr;
     QNetworkReply *m_reply = nullptr;
     QTemporaryFile *m_archive = nullptr;

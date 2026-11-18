@@ -664,7 +664,8 @@ bool McpClient::callTool(const QString &callToken, const QString &toolName, cons
         budget = qMin(budget, m_timeoutMs);
     }
     timeout->setInterval(budget);
-    connect(timeout, &QTimer::timeout, this, [this, id, toolName, budget] {
+    connect(timeout, &QTimer::timeout, this, [this, id, toolName, budget, timeout] {
+        timeout->deleteLater();
         const auto it = m_pending.constFind(id);
         if (it == m_pending.constEnd()) {
             return;
@@ -708,7 +709,8 @@ int McpClient::sendRequest(const QString &method, const QJsonObject &params)
         QTimer *timeout = new QTimer(this);
         timeout->setSingleShot(true);
         timeout->setInterval(budget);
-        connect(timeout, &QTimer::timeout, this, [this, id, method, budget] {
+        connect(timeout, &QTimer::timeout, this, [this, id, method, timeout] {
+            timeout->deleteLater();
             const auto it = m_pending.constFind(id);
             if (it == m_pending.constEnd()) {
                 return;

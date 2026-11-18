@@ -644,6 +644,47 @@ private Q_SLOTS:
                  qPrintable(body ? body->toPlainText() : QString()));
     }
 
+    void testReasoningAfterAnswerStartsDoesNotStreamAlongsideIt()
+    {
+        setup();
+        Q_EMIT m_widget->agent()->thinkingDelta(u"Initial reasoning. "_s);
+        auto *reasoning = m_widget->findChild<QTextBrowser *>(QStringLiteral("reasoningBrowser"));
+        QVERIFY2(reasoning, "the reasoning browser was not found");
+        QVERIFY2(QTest::qWaitFor([reasoning] {
+            return reasoning->toPlainText().contains(QStringLiteral("Initial reasoning."));
+        }), qPrintable(reasoning->toPlainText()));
+
+        // The first visible text chunk starts the answer phase. Everything the
+        // agent reasoned before it has to be on screen first.
+        Q_EMIT m_widget->agent()->assistantDelta(u"The answer starts. "_s);
+        QVERIFY(QTest::qWaitFor([reasoning] {
+            return reasoning->toPlainText().contains(QStringLiteral("Initial reasoning."));
+        }));
+        auto *pill = m_widget->findChild<QLabel *>(QStringLiteral("thinkingIndicator"));
+        QVERIFY(pill);
+        QVERIFY2(!pill->isVisible(), "the thinking pill kept running while the answer streamed");
+
+        // Some providers keep emitting reasoning after the answer started. It
+        // may be kept for the transcript, but it must not animate into the
+        // reasoning block while the answer is being written.
+        Q_EMIT m_widget->agent()->thinkingDelta(u"Late reasoning that must not animate."_s);
+        QTest::qWait(300);
+        QVERIFY2(!reasoning->toPlainText().contains(QStringLiteral("Late reasoning")),
+                 qPrintable(reasoning->toPlainText()));
+        QVERIFY2(!pill->isVisible(), "late reasoning restarted the thinking pill during the answer");
+
+        // Freezing the turn keeps that reasoning in the transcript without
+        // having shown it alongside the answer.
+        Q_EMIT m_widget->agent()->assistantFinished(u"The answer starts. "_s);
+        QVERIFY2(QTest::qWaitFor([reasoning] {
+            return reasoning->toPlainText().contains(QStringLiteral("Late reasoning"));
+        }), qPrintable(reasoning->toPlainText()));
+        auto *answer = m_widget->findChild<QTextBrowser *>(QStringLiteral("assistantBrowser"));
+        QVERIFY(answer);
+        QVERIFY2(answer->toPlainText().contains(QStringLiteral("The answer starts.")),
+                 qPrintable(answer->toPlainText()));
+    }
+
     void testHistoryRestoresSuggestionAndQuestionText()
     {
         setup();

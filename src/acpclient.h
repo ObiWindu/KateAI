@@ -241,6 +241,7 @@ private:
         int exitCode = 0;
         QString signal;
         QList<QJsonValue> waiters;
+        qint64 lastProgressMs = 0;
     };
 
     struct QueuedPrompt {
@@ -263,7 +264,7 @@ private:
     void setState(State state, const QString &status);
     void spawnProcess();
     void sendInitialize();
-    void maybeAuthenticate(const QJsonArray &authMethods);
+    void maybeAuthenticate(const QJsonArray &authMethods, bool force = false);
     void openSession();
     void sendSessionNew();
     void sendSessionLoadOrResume();
@@ -374,7 +375,6 @@ private:
     // covers, so a well-behaved agent that announces its edit or command before
     // asking is not asked twice for one action.
     void recordApprovalGrants(const PermissionRequest &request, PermissionDecision decision);
-    QString sliceLines(const QString &text, int line, int limit) const;
     bool pathAllowed(const QString &path, bool forWrite, QString *error) const;
     Sandbox currentSandbox() const;
     QProcessEnvironment processEnvironment() const;
@@ -444,6 +444,19 @@ private:
     // A session/new or session/load request is in flight. A second prompt
     // must queue instead of opening a second agent-side session.
     bool m_sessionOpening = false;
+    bool m_failingAll = false;
+    // session/load replays the old conversation as session/update events.
+    // Those are history, not a new answer; suppress them while loading.
+    bool m_replayingLoad = false;
+    // MCP transports the agent says it supports. Older agents do not advertise
+    // these; stdio is the universally supported default.
+    bool m_mcpStdioCapable = true;
+    bool m_mcpHttpCapable = false;
+    // Methods the agent advertised during initialize, kept so a session
+    // failure that turns out to be an auth failure can authenticate once and
+    // retry instead of failing the whole turn.
+    QJsonArray m_authMethods;
+    bool m_authRetryDone = false;
     bool m_loadSession = false;
     bool m_resumeSession = false;
     bool m_closeSession = false;
@@ -481,6 +494,7 @@ private:
     // The last partial output streamed for each live tool call, so an agent that
     // repeats identical content on a heartbeat does not force a re-render.
     QHash<QString, QString> m_toolStreamed;
+    QHash<QString, qint64> m_toolProgressAt;
 
     QList<QueuedPrompt> m_queued;
 

@@ -296,6 +296,9 @@ private:
     void syncIndicatorAnimation();
     bool registerThinkingBlock(QWidget *block, QTextBrowser *browser, QPushButton *toggle);
     void applyTranscriptCollapse();
+    // Drop the oldest finished tool cards once a long session keeps more than
+    // the retention cap. Restored history can rebuild them from the session.
+    void pruneOldTranscriptCards();
     void clearTranscriptContents();
     void reflowTranscriptMedia();
     void scheduleStreamHeightUpdate();
@@ -423,6 +426,11 @@ private:
     // the full turn's thinking when the answer text starts; this prefix is
     // what must not be drawn a second time in the later card.
     QString m_thinkingShownEarlierInTurn;
+    // True once the visible answer has started streaming in the current card.
+    // Some providers keep sending reasoning after the first text delta; those
+    // later deltas are buffered but not paced in, so the reasoning and the
+    // answer are never written into the chat at the same time.
+    bool m_answerStarted = false;
     int m_thinkingPacedLength = 0;
     QTimer *m_thinkingPacerTimer = nullptr;
 

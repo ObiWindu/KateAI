@@ -920,6 +920,12 @@ void EditTracker::settle(const QString &path, bool accepted)
         group.lastKnownContent = settledTo;
     }
     m_undoStack.append(decision);
+    // Keep undo useful without retaining every edit of a long session (each
+    // Decision carries the full old/new contents of its entries).
+    constexpr int kMaxUndoDecisions = 50;
+    while (m_undoStack.size() > kMaxUndoDecisions) {
+        m_undoStack.removeFirst();
+    }
     pruneGroups();
     updateUI();
 

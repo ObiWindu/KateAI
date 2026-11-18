@@ -178,6 +178,38 @@ private:
         return packageName(package) + u"@latest"_s;
     }
 
+    static QString pinPackage(const QString &package, const QString &version, bool npm)
+    {
+        if (version.trimmed().isEmpty()) {
+            return package;
+        }
+        const bool alreadyPinned = npm ? (package.lastIndexOf(u'@') > 0)
+                                       : (package.contains(u"=="_s) || package.lastIndexOf(u'@') > 0);
+        if (alreadyPinned) {
+            return package;
+        }
+        const QString suffix = npm ? u"@"_s : u"=="_s;
+        return package + suffix + version.trimmed();
+    }
+
+    static QStringList stringList(const QJsonArray &array)
+    {
+        QStringList out;
+        for (const QJsonValue &value : array) {
+            out.append(value.toString());
+        }
+        return out;
+    }
+
+    static QJsonArray jsonArray(const QStringList &values)
+    {
+        QJsonArray out;
+        for (const QString &value : values) {
+            out.append(value);
+        }
+        return out;
+    }
+
     void checkStandaloneMistral()
     {
         auto *process = new QProcess(this);
@@ -243,6 +275,31 @@ private:
         }
 
         const bool npm = update.type == u"npx"_s;
+        if (!update.latest.isEmpty()) {
+            // A registry package agent is launched directly through npx/uvx
+            // with the version pinned in its args, so an update is just a new
+            // pinned launch line. Running `npm install --global` both mutated
+            // the user's global prefix and left the old pinned args in place,
+            // so the old version kept running.
+            const QJsonObject distribution = update.latest.value(u"distribution"_s).toObject();
+            const QJsonObject packageInfo = distribution.value(update.type).toObject();
+            QStringList launch;
+            if (npm) {
+                launch.append(u"--yes"_s);
+            }
+            launch.append(pinPackage(update.package, update.latest.value(u"version"_s).toString(), npm));
+            launch += stringList(packageInfo.value(u"args"_s).toArray());
+            QJsonObject updated = update.latest;
+            updated.insert(u"command"_s, npm ? u"npx"_s : u"uvx"_s);
+            updated.insert(u"args"_s, jsonArray(launch));
+            updated.insert(u"package"_s, update.package);
+            updated.insert(u"pinnedPackage"_s, pinPackage(update.package, update.latest.value(u"version"_s).toString(), npm));
+            updated.insert(u"distributionType"_s, update.type);
+            saveUpdatedAgent(updated);
+            updateNext();
+            return;
+        }
+
         auto *process = new QProcess(this);
         m_process = process;
         const QString package = packageAtLatest(update.package);
@@ -305,6 +362,14 @@ private:
             return;
         }
         settings.acpInstalledAgents = QString::fromUtf8(QJsonDocument(agents).toJson(QJsonDocument::Compact));
+        if (settings.acpAgentId == id) {
+            const AcpAgentPreset launch = acpAgentLaunchLine(settings, id);
+            if (!launch.command.isEmpty()) {
+                settings.acpCommand = launch.command;
+                settings.acpArgs = launch.args;
+                settings.acpApiKeyEnv = launch.apiKeyEnv;
+            }
+        }
         m_plugin->setSettings(settings);
     }
 

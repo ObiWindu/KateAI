@@ -1155,8 +1155,12 @@ bool SessionStore::saveConversation(const QString &conversationId, const Session
         return false;
     }
 
-    // Prune old conversations if needed
-    pruneOldConversations(maxConversations);
+    // Pruning is only needed when a conversation was added. Running the
+    // DELETE subquery on every autosave of an existing thread was wasted
+    // work in long sessions.
+    if (isNew) {
+        pruneOldConversations(maxConversations);
+    }
     return isNew;
 }
 

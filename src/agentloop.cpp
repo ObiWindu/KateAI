@@ -1272,6 +1272,28 @@ QList<ChatMessage> AgentLoop::m_messagesForRequest() const
     return ContextManager::build(m_messages, options);
 }
 
+void AgentLoop::maybeCompactStoredHistory(const QList<ChatMessage> &requestMessages)
+{
+    // Only compact a settled history. While a turn is executing, tool calls
+    // in m_messages have not received their results yet, and replacing the
+    // list would break the provider's call/result pairing.
+    if (!m_settings.compressOldMessages || m_messages.size() < 8) {
+        return;
+    }
+    if (m_messages.size() <= requestMessages.size()) {
+        return;
+    }
+    const int storedTokens = ContextManager::estimateTokens(m_messages);
+    const int requestTokens = ContextManager::estimateTokens(requestMessages);
+    // A small truncation is not worth losing the full transcript over. Once
+    // compaction saves at least 30% of the prompt, adopt it as the stored
+    // history so both memory and every later SQLite save shrink.
+    if (storedTokens <= 0 || qint64(requestTokens) * 10 > qint64(storedTokens) * 7) {
+        return;
+    }
+    m_messages = requestMessages;
+}
+
 bool AgentLoop::canStartModelRequest(QString *error) const
 {
     if (!m_busy) {
@@ -1385,6 +1407,7 @@ void AgentLoop::sendToModel()
     }
 
     const QList<ChatMessage> requestMessages = m_messagesForRequest();
+    maybeCompactStoredHistory(requestMessages);
 
     ++m_modelRequests;
     m_currentAssistant.clear();
@@ -2047,6 +2070,13 @@ void AgentLoop::onFinished(const QString &text, const QList<ToolCall> &toolCalls
 
 void AgentLoop::finishWithFailure(const QString &error)
 {
+    // failAll() and a process-exit handler can both report the same dead agent.
+    // Emit one failure per turn so the UI does not show duplicate errors and
+    // run cancellation bookkeeping twice.
+    if (m_lastFailedTurn == m_turnId) {
+        return;
+    }
+    m_lastFailedTurn = m_turnId;
     m_nextModelTimer.stop();
     m_client.abort();
     m_busy = false;
@@ -2130,6 +2160,12 @@ void AgentLoop::finishTurn()
     // mid-turn and was deferred to keep the running command's environment.
     if (m_sandboxDirty) {
         rebuildTools();
+    }
+    // Native turns compact when the next request is built; ACP turns do not
+    // go through that path, so their stored transcript is bounded here.
+    if (usesAcpNative(m_settings) && m_messages.size() > 200
+        && m_inFlight == 0 && m_runningBashId.isEmpty()) {
+        maybeCompactStoredHistory(m_messagesForRequest());
     }
     Q_EMIT statusChanged(QString());
     Q_EMIT turnFinished();

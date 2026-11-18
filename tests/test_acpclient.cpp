@@ -1671,10 +1671,10 @@ private Q_SLOTS:
 
         QCOMPARE(AcpClient::resolvedCommand(settings), executable);
 
-        // Without the unpacked file the recorded command is preserved, so the
-        // failure still points at the missing binary instead of an empty path.
+        // Without the unpacked file the relative command is not allowed to
+        // fall through to the workspace as a working-directory lookup.
         QVERIFY(QFile::remove(executable));
-        QCOMPARE(AcpClient::resolvedCommand(settings), settings.acpCommand);
+        QVERIFY(AcpClient::resolvedCommand(settings).isEmpty());
 
         if (previous.isNull()) {
             qunsetenv("KATEAI_ACP_AGENTS_DIR");

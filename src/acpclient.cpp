@@ -173,6 +173,18 @@ static ToolResult completedToolResult(const QString &toolCallId, const QString &
     return result;
 }
 
+// Streamed tool content is retained for the final card when an agent sends a
+// terminal status without content. Bound it like the command buffers: a very
+// chatty tool must not pin an unbounded string per live call.
+static QString capToolStream(QString text)
+{
+    constexpr int kMaxStreamChars = 1024 * 1024;
+    if (text.size() <= kMaxStreamChars) {
+        return text;
+    }
+    return u"… (earlier output truncated) …\n"_s + text.right(kMaxStreamChars);
+}
+
 static ToolRisk riskForKind(const QString &kind, const QString &name)
 {
     if (kind == u"read"_s || kind == u"search"_s || kind == u"fetch"_s || kind == u"think"_s) {
@@ -217,6 +229,10 @@ static QString kateClientMethod(const QString &method)
     QString name = method;
     if (name.startsWith(u"_kateai/"_s)) {
         name = name.mid(8);
+    } else if (name.startsWith(u"kateai/"_s)) {
+        name = name.mid(7);
+    } else if (name.startsWith(u"com.kateai/"_s)) {
+        name = name.mid(11);
     }
     return aliases.value(name, name);
 }
@@ -418,6 +434,24 @@ static QJsonObject envArrayToObject(const QJsonArray &env)
     return out;
 }
 
+// Agents normally send a local absolute path, but some registries send a
+// file:// URI or use "uri" instead of "path". Accept both so fs and terminal
+// methods work across implementations.
+static QString acpPathParam(const QJsonObject &params)
+{
+    QString path = params.value(u"path"_s).toString().trimmed();
+    if (path.isEmpty()) {
+        path = params.value(u"uri"_s).toString().trimmed();
+    }
+    if (path.startsWith(u"file:"_s, Qt::CaseInsensitive)) {
+        const QUrl url(path);
+        if (url.isLocalFile()) {
+            path = url.toLocalFile();
+        }
+    }
+    return path;
+}
+
 AcpClient::AcpClient(QObject *parent)
     : QObject(parent)
 {
@@ -430,9 +464,60 @@ AcpClient::~AcpClient()
     stop();
 }
 
-static QStringList argsWithoutModelFlag(const QStringList &args)
+// Desktop-launched editors often inherit a minimal PATH (/usr/bin:/bin), so
+// npx/uvx/node installed by nvm, Volta, fnm, Homebrew or pip --user are
+// invisible. The registry is mostly npx/uvx packages, so search the standard
+// user tool locations and pass the same PATH to the child.
+static QStringList agentToolDirectories()
 {
-    QStringList out;
+    const QString home = QDir::homePath();
+    QStringList dirs = {
+        home + u"/.local/bin"_s,
+        home + u"/.npm-global/bin"_s,
+        home + u"/.volta/bin"_s,
+        home + u"/.bun/bin"_s,
+        home + u"/.cargo/bin"_s,
+        home + u"/.local/share/pnpm"_s,
+        home + u"/.asdf/shims"_s,
+        home + u"/.fnm/aliases/default/bin"_s,
+        u"/opt/homebrew/bin"_s,
+        u"/usr/local/bin"_s,
+    };
+    // nvm keeps each Node version under ~/.nvm/versions/node/<version>/bin.
+    QDir nvm(home + u"/.nvm/versions/node"_s);
+    if (nvm.exists()) {
+        const QStringList versions = nvm.entryList(QDir::Dirs | QDir::NoDotAndDotDot, QDir::Name);
+        for (auto it = versions.crbegin(); it != versions.crend(); ++it) {
+            dirs.append(nvm.absoluteFilePath(*it) + u"/bin"_s);
+        }
+    }
+    return dirs;
+}
+
+static QString findExecutableInToolDirs(const QString &command)
+{
+    if (command.isEmpty() || command.contains(u'/') || command.contains(u'\\')) {
+        return {};
+    }
+#ifdef Q_OS_WIN
+    const QStringList names = {command + u".exe"_s, command + u".cmd"_s, command + u".bat"_s, command};
+#else
+    const QStringList names = {command};
+#endif
+    for (const QString &dir : agentToolDirectories()) {
+        for (const QString &name : names) {
+            const QString candidate = QDir(dir).filePath(name);
+            const QFileInfo info(candidate);
+            if (info.exists() && info.isFile() && info.isExecutable()) {
+                return info.absoluteFilePath();
+            }
+        }
+    }
+    return {};
+}
+
+static QStringList argsWithoutModelFlag(const QStringList &args)
+{    QStringList out;
     for (int i = 0; i < args.size(); ++i) {
         if ((args.at(i) == u"--model"_s || args.at(i) == u"-m"_s) && i + 1 < args.size()) {
             ++i;
@@ -486,6 +571,9 @@ void AcpClient::setWorkspace(const QString &workspace)
         return;
     }
     m_workspace = workspace;
+    // A saved session belongs to its cwd; resuming it under another workspace
+    // makes agents reject the load or index the wrong tree.
+    m_resumeSessionId.clear();
     if (m_state != State::Stopped && m_state != State::Failed) {
         stop();
     }
@@ -768,6 +856,10 @@ void AcpClient::applyForcedEffort()
     if (m_sessionId.isEmpty() || m_effortConfigId.isEmpty()) {
         return;
     }
+    if (!m_agentEfforts.contains(forced)) {
+        // A stale id from another agent/session would fail on every update.
+        return;
+    }
     sendSetEffortOption(forced);
 }
 
@@ -841,6 +933,17 @@ QString AcpClient::resolvedCommand(const Settings &settings)
     if (!found.isEmpty()) {
         return found;
     }
+    const QString toolDirFound = findExecutableInToolDirs(command);
+    if (!toolDirFound.isEmpty()) {
+        return toolDirFound;
+    }
+    // A recorded relative path ("./foo") is not a PATH lookup. If it did not
+    // resolve inside the install directory and is not on PATH, fail closed:
+    // letting QProcess interpret it with the workspace as cwd could execute a
+    // project file that happens to share the name.
+    if (command.contains(u'/') || command.contains(u'\\')) {
+        return {};
+    }
     const QString home = QDir::homePath();
     const QString baseName = QFileInfo(command).fileName();
     if (baseName != command) {
@@ -887,17 +990,22 @@ QStringList AcpClient::agentArguments(const Settings &settings)
         args.removeAll(strip);
     }
     if (quirks.stripNpmTokens) {
-        // npm-only tokens from a recorded npx line ("--yes", "@scope/pkg"):
-        // forwarded to a standalone binary they are just noise, and some
-        // binaries reject unknown flags outright.
-        QStringList kept;
-        for (const QString &arg : args) {
-            if (arg == u"--yes"_s || arg.startsWith(u"@"_s)) {
-                continue;
+        // npm-only tokens from a recorded npx line ("--yes", "@scope/pkg")
+        // are noise for the standalone mcode binary. When the launch command
+        // is still npx (the standalone binary is not installed), stripping the
+        // package would leave "npx acp" and run an unrelated package.
+        const QString launch = resolvedCommand(settings);
+        const bool standalone = QFileInfo(launch).fileName() == u"mcode"_s;
+        if (standalone) {
+            QStringList kept;
+            for (const QString &arg : args) {
+                if (arg == u"--yes"_s || arg.startsWith(u"@"_s)) {
+                    continue;
+                }
+                kept.append(arg);
             }
-            kept.append(arg);
+            args = kept;
         }
-        args = kept;
     }
     if (quirks.needsAcpSubcommand && !args.contains(u"acp"_s)) {
         // Without the "acp" subcommand these CLIs start their interactive TUI
@@ -1028,6 +1136,7 @@ void AcpClient::cancelPendingQuestion()
     if (!toolCallId.isEmpty()) {
         Q_EMIT questionCancelled(toolCallId);
     }
+    askNextParkedMethod();
 }
 
 void AcpClient::answerQuestion(const QString &answer)
@@ -1095,6 +1204,7 @@ void AcpClient::answerQuestion(const QString &answer)
     m_questionRequest = {};
     m_questionIsElicitation = false;
     m_questionElicitationProperty.clear();
+    askNextParkedMethod();
 }
 
 void AcpClient::finishLiveTools(const QString &message)
@@ -1110,12 +1220,18 @@ void AcpClient::finishLiveTools(const QString &message)
     }
     m_liveTools.clear();
     m_toolStreamed.clear();
+    m_toolProgressAt.clear();
     m_toolTerminals.clear();
     m_terminalTools.clear();
+    m_lastToolCallId.clear();
 }
 
 void AcpClient::cancel()
 {
+    // A Stop means the turn and everything queued behind it are cancelled; a
+    // queued prompt replayed after the agent answers session/cancel started a
+    // turn the user had already stopped.
+    m_queued.clear();
     cancelPendingPermission();
     if (m_turnRetryPending) {
         // The failed turn was waiting to be retried. Stop closes it here: a
@@ -1191,9 +1307,9 @@ void AcpClient::stop()
         if (m_process->state() != QProcess::NotRunning) {
             m_process->disconnect(this);
             m_process->terminate();
-            if (!m_process->waitForFinished(2000)) {
+            if (!m_process->waitForFinished(500)) {
                 m_process->kill();
-                m_process->waitForFinished(1000);
+                m_process->waitForFinished(500);
             }
         }
         m_process->deleteLater();
@@ -1205,6 +1321,7 @@ void AcpClient::stop()
     m_discardingStdoutFrame = false;
     m_oversizedFrameReported = false;
     m_sessionId.clear();
+    m_replayingLoad = false;
     m_promptId = 0;
     // Capabilities and commands belong to the agent that just went away.
     // Keeping them made the next agent inherit the previous one's slash
@@ -1273,6 +1390,7 @@ void AcpClient::resetSession()
     }
     m_sessionId.clear();
     m_sessionOpening = false;
+    m_replayingLoad = false;
     Q_EMIT sessionIdChanged(QString());
 }
 
@@ -1404,7 +1522,7 @@ void AcpClient::setState(State state, const QString &status)
 
 QString AcpClient::sessionCwd() const
 {
-    if (!m_workspace.trimmed().isEmpty()) {
+    if (!m_workspace.trimmed().isEmpty() && QFileInfo(m_workspace).isDir()) {
         return m_workspace;
     }
     return QDir::currentPath();
@@ -1435,7 +1553,7 @@ void AcpClient::spawnProcess()
         m_process->disconnect(this);
         if (m_process->state() != QProcess::NotRunning) {
             m_process->kill();
-            m_process->waitForFinished(1000);
+            m_process->waitForFinished(500);
         }
         m_process->deleteLater();
         m_process = nullptr;
@@ -1444,7 +1562,33 @@ void AcpClient::spawnProcess()
     m_discardingStdoutFrame = false;
     m_oversizedFrameReported = false;
     m_stderrBuffer.clear();
+    // A respawn is a new process/session. Leftovers from the previous one
+    // (half a frame, live tool ids, one-turn grants) must not be applied to
+    // the new agent.
+    m_stdoutBuffer.clear();
+    m_sessionId.clear();
+    m_sessionOpening = false;
+    m_replayingLoad = false;
+    m_promptId = 0;
+    m_lastToolCallId.clear();
+    m_liveTools.clear();
+    m_toolStreamed.clear();
+    m_toolProgressAt.clear();
+    m_toolTerminals.clear();
+    m_terminalTools.clear();
+    m_onceGrants.clear();
+    m_sessionGrants.clear();
     m_antigravityAuthUrlOpened = false;
+    m_permissionRpcId = QJsonValue();
+    m_permissionOptions = QJsonArray();
+    m_permissionRequest = {};
+    m_permissionQuestion = false;
+    m_questionRpcId = QJsonValue();
+    m_questionRequest = {};
+    m_questionIsElicitation = false;
+    m_questionElicitationProperty.clear();
+    m_parkedMethods.clear();
+    m_activeParked.reset();
     setState(State::Starting, u"Starting ACP agent…"_s);
 
     m_process = new QProcess(this);
@@ -1530,7 +1674,10 @@ void AcpClient::spawnProcess()
     const QString command = resolvedCommand(m_settings);
     const QStringList args = agentArguments(m_settings);
     if (command.isEmpty()) {
-        const QString message = u"ACP agent command is empty. Pick an agent in Settings or set a command."_s;
+        const QString configured = acpEffectiveCommand(m_settings);
+        const QString message = configured.isEmpty()
+            ? u"ACP agent command is empty. Pick an agent in Settings or set a command."_s
+            : u"Could not find the ACP agent executable '%1'. Install it or fix the launch command in Settings."_s.arg(configured);
         setState(State::Failed, message);
         Q_EMIT failed(message);
         return;
@@ -1539,7 +1686,7 @@ void AcpClient::spawnProcess()
         acpTightenMinimaxCredentials();
     }
     m_process->start(command, args);
-    if (!m_process->waitForStarted(10000)) {
+    if (!m_process->waitForStarted(5000)) {
         // errorOccurred(FailedToStart) is delivered during waitForStarted and
         // already reported the failure. Do not report it a second time.
         if (m_state == State::Failed) {
@@ -1562,8 +1709,20 @@ void AcpClient::spawnProcess()
     m_startupTimer = new QTimer(this);
     m_startupTimer->setSingleShot(true);
     // Antigravity ACP authentication may wait for the user to finish its
-    // browser OAuth flow. Keep the process alive while that request is pending.
-    m_startupTimer->setInterval(acpAgentIsAntigravity(m_settings) ? 300000 : 30000);
+    // browser OAuth flow. npx/uvx have to fetch and unpack a package on first
+    // run, which can take longer than a plain local binary; give them room so
+    // the first launch of a registry agent does not fail the handshake.
+    const QString startupCommand = acpEffectiveCommand(m_settings);
+    const QString startupBase = QFileInfo(startupCommand).fileName();
+    const bool packageRunner = startupBase == u"npx"_s || startupBase == u"uvx"_s
+        || startupBase == u"npm"_s || startupBase == u"pnpm"_s || startupBase == u"bunx"_s;
+    int startupTimeoutMs = 60000;
+    if (acpAgentIsAntigravity(m_settings)) {
+        startupTimeoutMs = 300000;
+    } else if (packageRunner) {
+        startupTimeoutMs = 180000;
+    }
+    m_startupTimer->setInterval(startupTimeoutMs);
     connect(m_startupTimer, &QTimer::timeout, this, [this] {
         if (m_state == State::Starting) {
             const QString message = u"Timed out waiting for the ACP handshake."_s;
@@ -1580,6 +1739,19 @@ void AcpClient::spawnProcess()
 QProcessEnvironment AcpClient::processEnvironment() const
 {
     QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+    // GUI-launched editors often get a minimal PATH. Registry agents are mostly
+    // npx/uvx packages installed under the user's tool managers, so make those
+    // locations visible to both the parent-side lookup and the child process.
+    {
+        QString path = env.value(u"PATH"_s);
+        QStringList entries = path.split(QDir::listSeparator(), Qt::SkipEmptyParts);
+        for (const QString &dir : agentToolDirectories()) {
+            if (QFileInfo(dir).isDir() && !entries.contains(dir)) {
+                entries.append(dir);
+            }
+        }
+        env.insert(u"PATH"_s, entries.join(QDir::listSeparator()));
+    }
     const QString key = m_settings.acpApiKey.trimmed();
     if (!key.isEmpty()) {
         const QString envName = acpEffectiveApiKeyEnv(m_settings);
@@ -1602,20 +1774,30 @@ QProcessEnvironment AcpClient::processEnvironment() const
         if (agent.value(u"id"_s).toString() != m_settings.acpAgentId) {
             continue;
         }
-        auto mergeEnv = [&env](const QJsonArray &rows) {
-            for (const QJsonValue &row : rows) {
-                const QJsonObject obj = row.toObject();
-                const QString name = obj.value(u"name"_s).toString();
-                const QString value = obj.value(u"value"_s).toString();
+        auto mergeEnv = [&env](const QJsonValue &raw) {
+            auto insert = [&env](const QString &name, const QString &value) {
                 if (!name.isEmpty() && !env.contains(name)) {
                     env.insert(name, value);
                 }
+            };
+            if (raw.isObject()) {
+                // The registry schema uses a JSON object for env; older
+                // records and some hand-written entries use [{name,value}].
+                const QJsonObject map = raw.toObject();
+                for (auto it = map.constBegin(); it != map.constEnd(); ++it) {
+                    insert(it.key(), it.value().toString());
+                }
+                return;
+            }
+            for (const QJsonValue &row : raw.toArray()) {
+                const QJsonObject obj = row.toObject();
+                insert(obj.value(u"name"_s).toString(), obj.value(u"value"_s).toString());
             }
         };
-        mergeEnv(agent.value(u"env"_s).toArray());
+        mergeEnv(agent.value(u"env"_s));
         const QJsonObject distribution = agent.value(u"distribution"_s).toObject();
         for (const QJsonValue &dist : {distribution.value(u"npx"_s), distribution.value(u"uvx"_s), distribution.value(u"binary"_s)}) {
-            mergeEnv(dist.toObject().value(u"env"_s).toArray());
+            mergeEnv(dist.toObject().value(u"env"_s));
         }
         break;
     }
@@ -1642,37 +1824,21 @@ void AcpClient::sendInitialize()
     QJsonObject capabilities;
     capabilities.insert(u"fs"_s, fs);
     capabilities.insert(u"terminal"_s, true);
-    // Kate-specific client methods agents may call. Advertised so agents can
-    // discover them the way they discover fs/terminal support instead of
-    // having to hard-code Kate's extensions.
-    QJsonObject kateai;
-    kateai.insert(u"queryProjectGraph"_s, true);
-    kateai.insert(u"writePlanFile"_s, true);
-    kateai.insert(u"suggest"_s, true);
-    kateai.insert(u"askUser"_s, true);
-    kateai.insert(u"todoWrite"_s, true);
-    kateai.insert(u"todoRead"_s, true);
-    kateai.insert(u"lspDiagnostics"_s, true);
-    kateai.insert(u"lspSymbols"_s, true);
-    kateai.insert(u"lspHover"_s, true);
-    kateai.insert(u"lspDefinition"_s, true);
-    kateai.insert(u"lspReferences"_s, true);
-    kateai.insert(u"lspCodeActions"_s, true);
-    capabilities.insert(u"kateai"_s, kateai);
-    // The same methods under the names the protocol reserves for extensions,
-    // listed in _meta where the spec asks extensions to advertise themselves.
+    // Elicitation form is implemented; the value must be an object, not a bool.
+    capabilities.insert(u"elicitation"_s, QJsonObject{{u"form"_s, QJsonObject{}}});
+    // Config option support is a standard client-session capability. Kate
+    // handles select options; advertising boolean support would promise
+    // options sendSetConfigOption cannot send, so only select is implied.
+    capabilities.insert(u"session"_s, QJsonObject{{u"configOptions"_s, QJsonObject{}}});
+    // Kate-specific client methods agents may call are advertised under _meta,
+    // where the protocol expects extensions. A top-level "kateai" field is
+    // outside the schema and strict validators can reject initialize outright.
     capabilities.insert(u"_meta"_s, QJsonObject{
         {u"com.kateai/methods"_s, QJsonArray{u"_kateai/query_project_graph"_s, u"_kateai/write_plan_file"_s, u"_kateai/suggest"_s,
                                            u"_kateai/ask_user"_s, u"_kateai/todo_write"_s, u"_kateai/todo_read"_s,
                                            u"_kateai/lsp_diagnostics"_s, u"_kateai/lsp_symbols"_s, u"_kateai/lsp_hover"_s,
                                            u"_kateai/lsp_definition"_s, u"_kateai/lsp_references"_s, u"_kateai/lsp_code_actions"_s}},
     });
-    // Advertise support for session config options (used for model selection)
-    QJsonObject sessionCapabilities;
-    QJsonObject configOptionsCaps;
-    configOptionsCaps.insert(u"boolean"_s, QJsonObject());
-    sessionCapabilities.insert(u"configOptions"_s, configOptionsCaps);
-    capabilities.insert(u"session"_s, sessionCapabilities);
 
     QJsonObject clientInfo;
     // Some ACP agents (e.g. Google Antigravity) restrict third-party models
@@ -1719,9 +1885,27 @@ void AcpClient::sendInitialize()
         m_loadSession = caps.value(u"loadSession"_s).toBool();
         m_embeddedContext = caps.value(u"promptCapabilities"_s).toObject().value(u"embeddedContext"_s).toBool();
         const QJsonObject sessionCaps = caps.value(u"sessionCapabilities"_s).toObject();
-        m_resumeSession = sessionCaps.contains(u"resume"_s);
-        m_closeSession = sessionCaps.contains(u"close"_s);
-        maybeAuthenticate(result.value(u"authMethods"_s).toArray());
+        const QJsonValue resumeCap = sessionCaps.value(u"resume"_s);
+        const QJsonValue closeCap = sessionCaps.value(u"close"_s);
+        const QJsonValue loadCap = sessionCaps.value(u"load"_s);
+        m_resumeSession = !resumeCap.isUndefined() && !resumeCap.isNull();
+        m_closeSession = !closeCap.isUndefined() && !closeCap.isNull();
+        // ACP v2 moved load under sessionCapabilities; accept both spellings.
+        if (!loadCap.isUndefined() && !loadCap.isNull()) {
+            m_loadSession = true;
+        }
+        const QJsonValue mcpCapsValue = caps.value(u"mcpCapabilities"_s);
+        if (mcpCapsValue.isObject()) {
+            const QJsonObject mcpCaps = mcpCapsValue.toObject();
+            m_mcpStdioCapable = mcpCaps.value(u"stdio"_s).toBool(false);
+            m_mcpHttpCapable = mcpCaps.value(u"http"_s).toBool(false);
+        } else {
+            m_mcpStdioCapable = true;
+            m_mcpHttpCapable = false;
+        }
+        m_authMethods = result.value(u"authMethods"_s).toArray();
+        m_authRetryDone = false;
+        maybeAuthenticate(m_authMethods);
     });
 }
 
@@ -1806,7 +1990,7 @@ void AcpClient::sendSetSessionModel(const QString &modelId)
     });
 }
 
-void AcpClient::maybeAuthenticate(const QJsonArray &authMethods)
+void AcpClient::maybeAuthenticate(const QJsonArray &authMethods, bool force)
 {
     if (authMethods.isEmpty()) {
         openSession();
@@ -1818,7 +2002,7 @@ void AcpClient::maybeAuthenticate(const QJsonArray &authMethods)
     // initialize its session; its standalone ACP server performs its own
     // OAuth flow, which can take longer than the normal JSON-RPC timeout.
     const bool hasApiKey = !m_settings.acpApiKey.trimmed().isEmpty();
-    if (!hasApiKey && !acpAgentIsAntigravity(m_settings)) {
+    if (!force && !hasApiKey && !acpAgentIsAntigravity(m_settings)) {
         openSession();
         return;
     }
@@ -1832,16 +2016,39 @@ void AcpClient::maybeAuthenticate(const QJsonArray &authMethods)
     // selected, which is chat-gpt for codex and fails authentication.
     const QString preferredMethod = codexAgent ? u"chat-gpt"_s : QString();
     QJsonObject selectedMethod;
-    for (const QJsonValue &value : authMethods) {
-        const QJsonObject method = value.toObject();
+    QJsonObject fallbackMethod;
+    auto methodIdOf = [](const QJsonObject &method) {
         QString id = method.value(u"id"_s).toString();
         if (id.isEmpty()) id = method.value(u"methodId"_s).toString();
-        // An agent advertising no id at all still has to authenticate with
-        // something, and the request carries a methodId.
-        if (selectedMethod.isEmpty() || (!preferredMethod.isEmpty() && id == preferredMethod)) {
-            selectedMethod = method;
+        return id;
+    };
+    for (const QJsonValue &value : authMethods) {
+        const QJsonObject method = value.toObject();
+        const QString id = methodIdOf(method);
+        if (fallbackMethod.isEmpty()) {
+            fallbackMethod = method;
         }
-        if (!preferredMethod.isEmpty() && id == preferredMethod) break;
+        if (!preferredMethod.isEmpty() && id == preferredMethod) {
+            selectedMethod = method;
+            break;
+        }
+        if (selectedMethod.isEmpty()) {
+            // Prefer a method that can use an already-configured key over an
+            // interactive browser/terminal flow the user did not ask for.
+            const QString type = method.value(u"type"_s).toString().toLower();
+            const QString lowerId = id.toLower();
+            const bool envLike = type == u"env"_s || lowerId.contains(u"api"_s)
+                || lowerId.contains(u"key"_s) || lowerId.contains(u"env"_s)
+                || lowerId.contains(u"token"_s);
+            const bool interactive = type == u"agent"_s || type == u"terminal"_s
+                || lowerId.contains(u"oauth"_s) || lowerId.contains(u"login"_s);
+            if (envLike || !interactive) {
+                selectedMethod = method;
+            }
+        }
+    }
+    if (selectedMethod.isEmpty()) {
+        selectedMethod = fallbackMethod;
     }
     QString methodId = selectedMethod.value(u"id"_s).toString();
     if (methodId.isEmpty()) methodId = selectedMethod.value(u"methodId"_s).toString();
@@ -1892,6 +2099,20 @@ void AcpClient::sendSessionNew()
             return;
         }
         if (!error.isEmpty()) {
+            // Some agents only discover that they need the ACP authenticate
+            // request when session/new rejects them. Retry once through the
+            // advertised methods instead of failing the turn.
+            const QString lowerError = error.toLower();
+            const bool authFailure = lowerError.contains(u"auth"_s) || lowerError.contains(u"login"_s)
+                || lowerError.contains(u"credential"_s) || lowerError.contains(u"oauth"_s)
+                || lowerError.contains(u"api key"_s) || lowerError.contains(u"unauthorized"_s)
+                || lowerError.contains(u"required"_s);
+            if (!m_authRetryDone && !m_authMethods.isEmpty() && authFailure) {
+                m_authRetryDone = true;
+                m_sessionOpening = false;
+                maybeAuthenticate(m_authMethods, true);
+                return;
+            }
             setState(State::Failed, error);
             Q_EMIT failed(error);
             return;
@@ -1914,23 +2135,44 @@ void AcpClient::sendSessionNew()
             const QueuedPrompt next = m_queued.takeFirst();
             sendPromptNow(next.text);
         }
-    });
+    }, 0);
 }
 
 void AcpClient::sendSessionLoadOrResume()
 {
     const QString method = m_resumeSession ? u"session/resume"_s : u"session/load"_s;
+    m_replayingLoad = method == u"session/load"_s;
     QJsonObject params;
     params.insert(u"sessionId"_s, m_resumeSessionId);
     params.insert(u"cwd"_s, sessionCwd());
     params.insert(u"mcpServers"_s, mcpServersPayload());
-    sendRequest(method, params, [this](const QJsonObject &result, const QString &error) {
+    sendRequest(method, params, [this, method](const QJsonObject &result, const QString &error) {
         if (m_shuttingDown) {
             return;
         }
         if (!error.isEmpty()) {
-            m_resumeSessionId.clear();
-            sendSessionNew();
+            m_replayingLoad = false;
+            const QString lowerError = error.toLower();
+            const bool unknownSession = lowerError.contains(u"not found"_s)
+                || lowerError.contains(u"unknown session"_s)
+                || lowerError.contains(u"no such session"_s)
+                || lowerError.contains(u"does not exist"_s);
+            if (unknownSession) {
+                if (method == u"session/resume"_s && m_loadSession) {
+                    Q_EMIT logMessage(u"Session resume is unavailable; loading the saved session instead."_s);
+                    m_resumeSession = false;
+                    sendSessionLoadOrResume();
+                    return;
+                }
+                Q_EMIT logMessage(u"The agent no longer has that session; starting a new one."_s);
+                m_resumeSessionId.clear();
+                sendSessionNew();
+                return;
+            }
+            // A timeout or transient load failure must not silently start a
+            // blank session while the transcript is full of old context.
+            setState(State::Failed, error);
+            Q_EMIT failed(error);
             return;
         }
         m_sessionId = m_resumeSessionId;
@@ -1941,16 +2183,36 @@ void AcpClient::sendSessionLoadOrResume()
         setState(State::Ready, u"ACP ready"_s);
         Q_EMIT sessionIdChanged(m_sessionId);
         Q_EMIT ready();
-        if (!m_queued.isEmpty() && m_promptId == 0) {
-            const QueuedPrompt next = m_queued.takeFirst();
-            sendPromptNow(next.text);
+        auto drainQueue = [this]() {
+            if (!m_queued.isEmpty() && m_promptId == 0) {
+                const QueuedPrompt next = m_queued.takeFirst();
+                sendPromptNow(next.text);
+            }
+        };
+        if (m_replayingLoad) {
+            // session/load streams the old conversation as session/update.
+            // Give the tail of that replay a moment to arrive before live
+            // output starts, so history is not painted as a new answer.
+            const QString loadedSession = m_sessionId;
+            QTimer::singleShot(150, this, [this, loadedSession, drainQueue]() {
+                if (m_sessionId != loadedSession) {
+                    return;
+                }
+                m_replayingLoad = false;
+                drainQueue();
+            });
+        } else {
+            m_replayingLoad = false;
+            drainQueue();
         }
-    });
+    }, 0);
 }
 
 void AcpClient::sendPromptNow(const QString &text)
 {
     stopTurnRetry();
+    // Approval-once is scoped to the turn that asked for it.
+    m_onceGrants.clear();
     // Every turn starts with a full retry budget. executeTurnRetry() restores
     // the spent count after this reset, so automatic retries count against one
     // budget instead of resetting it.
@@ -1972,9 +2234,9 @@ void AcpClient::sendPromptNow(const QString &text)
     QJsonObject params;
     params.insert(u"sessionId"_s, m_sessionId);
     QJsonArray prompt = promptBlocks(text);
-    if (!m_sessionNotesSent) {
+    const bool includeSessionNotes = !m_sessionNotesSent;
+    if (includeSessionNotes) {
         prompt.prepend(sessionNotesBlock());
-        m_sessionNotesSent = true;
     }
     params.insert(u"prompt"_s, prompt);
     const int promptRequestId = sendRequest(u"session/prompt"_s, params, [this](const QJsonObject &result, const QString &error) {
@@ -2008,6 +2270,9 @@ void AcpClient::sendPromptNow(const QString &text)
     // value unconditionally put the dead id back and wedged the client busy
     // forever.
     m_promptId = m_pending.contains(promptRequestId) ? promptRequestId : 0;
+    if (m_promptId != 0 && includeSessionNotes) {
+        m_sessionNotesSent = true;
+    }
 }
 
 QJsonArray AcpClient::promptBlocks(const QString &text) const
@@ -2106,6 +2371,9 @@ QJsonArray AcpClient::mcpServersPayload() const
         QJsonObject obj;
         obj.insert(u"name"_s, server.name);
         if (server.transport == McpTransport::Http) {
+            if (!m_mcpHttpCapable) {
+                continue;
+            }
             obj.insert(u"type"_s, u"http"_s);
             obj.insert(u"url"_s, server.url);
             QJsonArray headers;
@@ -2117,7 +2385,40 @@ QJsonArray AcpClient::mcpServersPayload() const
             }
             obj.insert(u"headers"_s, headers);
         } else {
-            obj.insert(u"command"_s, server.command);
+            if (!m_mcpStdioCapable) {
+                continue;
+            }
+            // ACP requires an absolute executable path. Kate's config is typed
+            // by the user and normally holds "npx"/"uvx"/"node", so resolve it
+            // the same way a shell would.
+            QString command = server.command.trimmed();
+            if (command.isEmpty()) {
+                continue;
+            }
+            if (!QFileInfo(command).isAbsolute()) {
+                if (command.contains(u'/') || command.contains(u'\\')) {
+                    const QString candidate = QDir(m_workspace).absoluteFilePath(command);
+                    if (QFileInfo(candidate).isFile() && QFileInfo(candidate).isExecutable()) {
+                        command = candidate;
+                    } else {
+                        continue;
+                    }
+                } else {
+                    const QString resolved = QStandardPaths::findExecutable(command);
+                    if (resolved.isEmpty()) {
+                        const QString tool = findExecutableInToolDirs(command);
+                        if (tool.isEmpty()) {
+                            qWarning() << "KateAI: MCP server" << server.name
+                                       << "was not passed to the agent: command not found:" << server.command;
+                            continue;
+                        }
+                        command = tool;
+                    } else {
+                        command = resolved;
+                    }
+                }
+            }
+            obj.insert(u"command"_s, command);
             obj.insert(u"args"_s, QJsonArray::fromStringList(server.args));
             QJsonArray env;
             for (auto it = server.env.constBegin(); it != server.env.constEnd(); ++it) {
@@ -2137,6 +2438,12 @@ int AcpClient::sendRequest(const QString &method, const QJsonObject &params,
                            std::function<void(const QJsonObject &, const QString &)> done,
                            int timeoutMs)
 {
+    if (m_shuttingDown || m_failingAll) {
+        if (done) {
+            done(QJsonObject(), u"The ACP client is shutting down; the request was not sent."_s);
+        }
+        return 0;
+    }
     // int wraps after 2^31 and would collide with live pending ids.
     if (m_nextId <= 0 || m_nextId == std::numeric_limits<int>::max()) {
         m_nextId = 1;
@@ -2217,7 +2524,18 @@ bool AcpClient::writeMessage(const QJsonObject &message)
     }
     QByteArray payload = QJsonDocument(message).toJson(QJsonDocument::Compact);
     payload.append('\n');
-    return m_process->write(payload) == payload.size();
+    // QProcess::write() is allowed to accept fewer bytes than requested. A
+    // short write used to leave a partial frame on the wire and treat the
+    // request as failed; loop until the whole frame is queued.
+    qsizetype written = 0;
+    while (written < payload.size()) {
+        const qint64 n = m_process->write(payload.constData() + written, payload.size() - written);
+        if (n <= 0) {
+            return false;
+        }
+        written += n;
+    }
+    return true;
 }
 
 void AcpClient::replyResult(const QJsonValue &id, const QJsonObject &result)
@@ -2296,6 +2614,10 @@ void AcpClient::reportOversizedFrame()
 
 void AcpClient::handleBuffer()
 {
+    // A UTF-8 BOM before the first JSON frame is not part of the JSON text.
+    if (m_stdoutBuffer.startsWith("\xEF\xBB\xBF")) {
+        m_stdoutBuffer.remove(0, 3);
+    }
     int newline = m_stdoutBuffer.indexOf('\n');
     while (newline >= 0) {
         if (newline > MaxFrameBytes) {
@@ -2374,22 +2696,34 @@ void AcpClient::handleResponse(const QJsonObject &message)
         return;
     }
     if (message.contains(u"error"_s)) {
-        const QJsonObject error = message.value(u"error"_s).toObject();
-        QString messageText = error.value(u"message"_s).toString(u"ACP request failed."_s);
+        const QJsonValue errorValue = message.value(u"error"_s);
+        QString messageText;
+        QString details;
+        if (errorValue.isObject()) {
+            const QJsonObject error = errorValue.toObject();
+            messageText = error.value(u"message"_s).toString();
+            const QJsonValue data = error.value(u"data"_s);
+            if (data.isObject()) {
+                const QJsonObject dataObj = data.toObject();
+                details = dataObj.value(u"details"_s).toString();
+                if (details.isEmpty()) {
+                    details = dataObj.value(u"message"_s).toString();
+                }
+                if (details.isEmpty() && dataObj.value(u"error"_s).isObject()) {
+                    details = dataObj.value(u"error"_s).toObject().value(u"message"_s).toString();
+                }
+            } else if (data.isString()) {
+                details = data.toString();
+            }
+        } else if (errorValue.isString()) {
+            messageText = errorValue.toString();
+        }
+        if (messageText.isEmpty()) {
+            messageText = u"ACP request failed."_s;
+        }
         // Agents like MiniMax Code answer with a generic message ("Internal
         // error") and put the actual explanation in error.data.details. Without
         // it the user sees "Error: Internal error" and no way forward.
-        const QJsonValue data = error.value(u"data"_s);
-        QString details;
-        if (data.isObject()) {
-            const QJsonObject dataObj = data.toObject();
-            details = dataObj.value(u"details"_s).toString();
-            if (details.isEmpty()) {
-                details = dataObj.value(u"message"_s).toString();
-            }
-        } else if (data.isString()) {
-            details = data.toString();
-        }
         if (!details.isEmpty() && !messageText.contains(details)) {
             messageText += u": %1"_s.arg(details);
         }
@@ -2404,6 +2738,11 @@ void AcpClient::handleIncomingRequest(const QJsonObject &message)
     const QString method = kateClientMethod(message.value(u"method"_s).toString());
     const QJsonValue id = message.value(u"id"_s);
     const QJsonObject params = message.value(u"params"_s).toObject();
+    const QString requestSession = params.value(u"sessionId"_s).toString();
+    if (!requestSession.isEmpty() && !m_sessionId.isEmpty() && requestSession != m_sessionId) {
+        replyError(id, kInvalidParams, u"This request belongs to a session that is no longer active."_s);
+        return;
+    }
 
     if (method == u"session/request_permission"_s) {
         handleRequestPermission(id, params);
@@ -2497,6 +2836,17 @@ void AcpClient::handleNotification(const QJsonObject &message)
 {
     const QString method = message.value(u"method"_s).toString();
     const QJsonObject params = message.value(u"params"_s).toObject();
+    if (m_replayingLoad) {
+        // session/load replays history through session/update. Rendering it
+        // again would duplicate the prior conversation in the live transcript.
+        return;
+    }
+    const QString notificationSession = params.value(u"sessionId"_s).toString();
+    if (!notificationSession.isEmpty() && !m_sessionId.isEmpty()
+        && notificationSession != m_sessionId) {
+        // A late update from a session that was replaced or closed.
+        return;
+    }
     if (method == u"session/update"_s || method == u"x.ai/session/update"_s) {
         QJsonObject update = params.value(u"update"_s).toObject();
         if (update.isEmpty()) {
@@ -2601,6 +2951,12 @@ void AcpClient::handleSessionUpdate(const QJsonObject &update)
             // "" and leak the entry in m_liveTools; give the call a local id.
             request.toolCallId = QUuid::createUuid().toString(QUuid::WithoutBraces);
         }
+        constexpr int kMaxLiveTools = 2000;
+        if (!m_liveTools.contains(request.toolCallId) && m_liveTools.size() >= kMaxLiveTools) {
+            // A broken or hostile agent must not be able to grow the per-turn
+            // live-tool maps without bound.
+            return;
+        }
         m_liveTools.insert(request.toolCallId, request);
         // Remembered so a later update that omits the id can be filed under
         // the call it belongs to.
@@ -2624,6 +2980,7 @@ void AcpClient::handleSessionUpdate(const QJsonObject &update)
                                                           m_toolStreamed.value(request.toolCallId));
             m_liveTools.remove(request.toolCallId);
             m_toolStreamed.remove(request.toolCallId);
+            m_toolProgressAt.remove(request.toolCallId);
             forgetToolTerminal(request.toolCallId);
             Q_EMIT toolFinished(result);
         }
@@ -2644,9 +3001,22 @@ void AcpClient::handleSessionUpdate(const QJsonObject &update)
         const QString status = update.value(u"status"_s).toString();
         PermissionRequest existing = m_liveTools.value(toolCallId);
         if (existing.toolCallId.isEmpty()) {
+            constexpr int kMaxLiveTools = 2000;
+            if (m_liveTools.size() >= kMaxLiveTools) {
+                return;
+            }
             existing = permissionFromToolCall(update);
             existing.toolCallId = toolCallId;
             m_liveTools.insert(toolCallId, existing);
+            QJsonObject function;
+            function.insert(u"name"_s, existing.toolName);
+            function.insert(u"arguments"_s,
+                            existing.details.startsWith(u'{') ? existing.details : u"{}"_s);
+            QJsonObject call;
+            call.insert(u"id"_s, toolCallId);
+            call.insert(u"type"_s, u"function"_s);
+            call.insert(u"function"_s, function);
+            m_toolCalls.append(call);
             Q_EMIT toolStarted(existing);
         }
         // Agents may report a diff, a path or a terminal only in an update, not
@@ -2674,6 +3044,7 @@ void AcpClient::handleSessionUpdate(const QJsonObject &update)
                                                           m_toolStreamed.value(toolCallId));
             m_liveTools.remove(toolCallId);
             m_toolStreamed.remove(toolCallId);
+            m_toolProgressAt.remove(toolCallId);
             forgetToolTerminal(toolCallId);
             Q_EMIT toolFinished(result);
             return;
@@ -2717,11 +3088,20 @@ void AcpClient::handleSessionUpdate(const QJsonObject &update)
         }
         // An agent that repeats the same content word for word must not force a
         // re-render of the whole stream on every heartbeat.
-        if (m_toolStreamed.value(toolCallId) == finalStreamed) {
+        const QString capped = capToolStream(finalStreamed);
+        if (m_toolStreamed.value(toolCallId) == capped) {
             return;
         }
-        m_toolStreamed.insert(toolCallId, finalStreamed);
-        Q_EMIT toolProgress(toolCallId, finalStreamed);
+        m_toolStreamed.insert(toolCallId, capped);
+        // A multi-megabyte card update every few milliseconds is expensive even
+        // after ChatWidget coalescing. Keep the stored text current but rate
+        // limit large progress emissions.
+        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        if (capped.size() > 64 * 1024 && now - m_toolProgressAt.value(toolCallId) < 100) {
+            return;
+        }
+        m_toolProgressAt.insert(toolCallId, now);
+        Q_EMIT toolProgress(toolCallId, capped);
         return;
     }
 }
@@ -2779,6 +3159,11 @@ PermissionRequest AcpClient::permissionFromToolCall(const QJsonObject &toolCall)
         QString p = locObj.value(u"path"_s).toString();
         if (p.isEmpty()) p = locObj.value(u"filePath"_s).toString();
         if (p.isEmpty()) p = locObj.value(u"file"_s).toString();
+        if (p.isEmpty()) p = locObj.value(u"uri"_s).toString();
+        if (p.startsWith(u"file:"_s, Qt::CaseInsensitive)) {
+            const QUrl url(p);
+            if (url.isLocalFile()) p = url.toLocalFile();
+        }
         if (!p.isEmpty() && !locationPaths.contains(p)) {
             locationPaths.append(p);
         }
@@ -2865,7 +3250,7 @@ PermissionRequest AcpClient::permissionFromToolCall(const QJsonObject &toolCall)
     if (contentArr.isEmpty() && toolCall.value(u"content"_s).isObject()) {
         contentArr = QJsonArray{toolCall.value(u"content"_s)};
     }
-    QString contentText;
+    QStringList contentTexts;
     for (const QJsonValue &item : contentArr) {
         const QJsonObject obj = item.toObject();
         if (obj.isEmpty()) continue;
@@ -2874,8 +3259,8 @@ PermissionRequest AcpClient::permissionFromToolCall(const QJsonObject &toolCall)
             addDiff(obj);
         } else if (type == u"content"_s || type == u"text"_s || type.isEmpty()) {
             const QString t = contentBlockText(obj.contains(u"content"_s) ? obj.value(u"content"_s) : item);
-            if (!t.isEmpty() && contentText.isEmpty()) {
-                contentText = t;
+            if (!t.isEmpty()) {
+                contentTexts.append(t);
             }
             // Try to extract text for details if empty
             if (request.details.isEmpty() && !t.isEmpty()) {
@@ -2883,6 +3268,7 @@ PermissionRequest AcpClient::permissionFromToolCall(const QJsonObject &toolCall)
             }
         }
     }
+    const QString contentText = contentTexts.join(u'\n');
     // Some agents send their diffs in a separate contents list.
     for (const QJsonValue &c : toolCall.value(u"contents"_s).toArray()) {
         const QJsonObject co = c.toObject();
@@ -3273,6 +3659,24 @@ bool AcpClient::ensureMethodPermission(const QString &grantKey, PermissionReques
     if (m_onceGrants.remove(grantKey)) {
         return true;
     }
+    // An agent can issue these methods far faster than a user can approve
+    // them. Bound the queue so a misbehaving agent cannot grow it without
+    // limit; the refused call gets a normal error response.
+    constexpr int kMaxParkedMethods = 64;
+    constexpr qint64 kMaxParkedBytes = 32 * 1024 * 1024;
+    if (m_parkedMethods.size() >= kMaxParkedMethods) {
+        replyError(rpcId, kServerError, u"Too many permission requests are queued; retry after they settle."_s);
+        return false;
+    }
+    const qint64 incomingBytes = QJsonDocument(params).toJson(QJsonDocument::Compact).size();
+    qint64 parkedBytes = incomingBytes;
+    for (const ParkedMethod &queued : std::as_const(m_parkedMethods)) {
+        parkedBytes += QJsonDocument(queued.params).toJson(QJsonDocument::Compact).size();
+    }
+    if (incomingBytes > 8 * 1024 * 1024 || parkedBytes > kMaxParkedBytes) {
+        replyError(rpcId, kServerError, u"The queued permission payload is too large."_s);
+        return false;
+    }
     ParkedMethod parked;
     parked.rpcId = rpcId;
     parked.method = method;
@@ -3287,8 +3691,9 @@ bool AcpClient::ensureMethodPermission(const QString &grantKey, PermissionReques
 void AcpClient::askNextParkedMethod()
 {
     // One permission question at a time: a parked method is asked only when no
-    // agent-initiated request and no other parked method is being answered.
-    if (m_activeParked || hasPendingPermission() || m_parkedMethods.isEmpty()) {
+    // agent-initiated request, no pending question, and no other parked method
+    // is being answered.
+    if (m_activeParked || hasPendingPermission() || hasPendingQuestion() || m_parkedMethods.isEmpty()) {
         return;
     }
     m_activeParked = m_parkedMethods.takeFirst();
@@ -3318,6 +3723,13 @@ void AcpClient::cancelParkedMethods()
 {
     const auto refuse = [this](const ParkedMethod &parked) {
         replyError(parked.rpcId, kServerError, u"Cancelled before it was approved."_s);
+        ToolResult result;
+        result.toolCallId = parked.request.toolCallId;
+        result.name = parked.request.toolName;
+        result.ok = false;
+        result.cancelled = true;
+        result.output = u"Cancelled before it was approved."_s;
+        Q_EMIT toolFinished(result);
     };
     if (m_activeParked) {
         refuse(*m_activeParked);
@@ -3385,7 +3797,7 @@ void AcpClient::recordApprovalGrants(const PermissionRequest &request, Permissio
 
 void AcpClient::handleFsRead(const QJsonValue &id, const QJsonObject &params)
 {
-    const QString path = params.value(u"path"_s).toString();
+    const QString path = acpPathParam(params);
     QString error;
     if (!pathAllowed(path, false, &error)) {
         replyError(id, kServerError, error);
@@ -3399,47 +3811,49 @@ void AcpClient::handleFsRead(const QJsonValue &id, const QJsonObject &params)
         replyError(id, kServerError, error);
         return;
     }
-    QString contents;
-    if (!m_bridge || !m_bridge->readDocument(resolved, &contents)) {
+    // Bound the work before reading: an agent can ask a client to read a
+    // multi-gigabyte log, and QTextStream::readAll() would copy it several
+    // times on the GUI thread. Paginated reads are the supported shape.
+    const QFileInfo fileInfo(resolved);
+    constexpr qint64 kMaxAcpReadBytes = 64 * 1024 * 1024;
+    if (fileInfo.exists() && fileInfo.size() > kMaxAcpReadBytes) {
+        replyError(id, kServerError, u"File is larger than 64 MB; read it in line ranges."_s);
+        return;
+    }
+    int line = qMax(0, jsonIntValue(params.value(u"line"_s), 0));
+    if (line == 0) {
+        line = qMax(0, jsonIntValue(params.value(u"offset"_s), 0));
+    }
+    const int requestedLimit = jsonIntValue(params.value(u"limit"_s), 0);
+    const int limit = requestedLimit <= 0 ? 10000 : qMin(requestedLimit, 10000);
+
+    QStringList page;
+    int totalLines = 0;
+    if (!m_bridge
+        || !m_bridge->readDocumentLines(resolved, line > 0 ? line : 1, limit, &page, &totalLines)) {
         replyError(id, kServerError, u"Could not read %1."_s.arg(path));
         return;
     }
-    // Bound memory: whole-file read + split() duplicates; negative previously
-    // meant unlimited. Cap the slice the agent can request per call.
-    const int line = qMax(0, jsonIntValue(params.value(u"line"_s), 0));
-    const int requestedLimit = jsonIntValue(params.value(u"limit"_s), 0);
-    const int limit = requestedLimit <= 0 ? 10000 : qMin(requestedLimit, 10000);
-    // Do not count the empty element after a trailing newline as a line: the
-    // native read_file does the same, and otherwise pagination promises a
-    // phantom next line.
-    QStringList allLines = contents.split(u'\n');
-    if (!allLines.isEmpty() && allLines.last().isEmpty()) {
-        allLines.removeLast();
-    }
-    const int totalLines = contents.isEmpty() ? 0 : allLines.size();
     const int start = line > 0 ? line - 1 : 0;
-    QString sliced = sliceLines(contents, line, limit);
-    // Same pagination note the native read_file appends, so agents learn the
-    // next offset the same way on both paths.
-    if (totalLines > 0 && start >= totalLines) {
-        sliced = u"[line %1 is past the end; the file has %2 line(s).]"_s.arg(line > 0 ? line : 1).arg(totalLines);
-    } else if (totalLines > 0) {
-        const int shown = limit > 0 ? qMin(limit, totalLines - start) : totalLines - start;
-        const int remaining = totalLines - (start + (shown > 0 ? shown : 0));
-        if (remaining > 0) {
-            sliced += u"\n[%1 more line(s) not shown. Call again with line=%2 to continue.]"_s
-                          .arg(remaining)
-                          .arg(start + (shown > 0 ? shown : 0) + 1);
-        }
-    }
+    // fs/read_text_file returns the file text for the requested slice. Do not
+    // append a pagination note: agents parse this as file content (JSON/YAML
+    // lockfiles, generated sources) and a note corrupts it.
+    QString sliced = (totalLines > 0 && start < totalLines) ? page.join(u'\n') : QString();
     QJsonObject result;
     result.insert(u"content"_s, sliced);
+    if (totalLines > start + page.size()) {
+        QJsonObject meta;
+        meta.insert(u"truncated"_s, true);
+        meta.insert(u"totalLines"_s, totalLines);
+        meta.insert(u"nextLine"_s, start + page.size() + 1);
+        result.insert(u"_meta"_s, meta);
+    }
     replyResult(id, result);
 }
 
 void AcpClient::handleFsWrite(const QJsonValue &id, const QJsonObject &params)
 {
-    const QString path = params.value(u"path"_s).toString();
+    const QString path = acpPathParam(params);
     // The permission bar is the contract for every write: an approval for this
     // exact path lets the call through, anything else parks it until the user
     // or the policy answers.
@@ -3961,6 +4375,15 @@ void AcpClient::handleAskUser(const QJsonValue &id, const QJsonObject &params)
 // ACP v2 draft elicitation: same ask-user flow under the standardized method.
 void AcpClient::handleElicitationCreate(const QJsonValue &id, const QJsonObject &params)
 {
+    // URL elicitation needs a completion callback and browser flow; Kate
+    // implements the form variant, so decline the URL variant rather than
+    // sending a free-text answer with the wrong shape.
+    if (params.value(u"mode"_s).toString() == u"url"_s) {
+        QJsonObject result;
+        result.insert(u"action"_s, u"cancel"_s);
+        replyResult(id, result);
+        return;
+    }
     const QString message = params.value(u"message"_s).toString().trimmed();
     QStringList options;
     QString firstProperty;
@@ -4092,22 +4515,6 @@ void AcpClient::handleTodoRead(const QJsonValue &id, const QJsonObject &params)
     replyResult(id, result);
 }
 
-QString AcpClient::sliceLines(const QString &text, int line, int limit) const
-{
-    if (line <= 0 && limit <= 0) {
-        return text;
-    }
-    const QStringList lines = text.split(u'\n');
-    int start = line > 0 ? line - 1 : 0;
-    if (start < 0) {
-        start = 0;
-    }
-    if (start >= lines.size()) {
-        return {};
-    }
-    const int count = limit > 0 ? qMin(limit, lines.size() - start) : (lines.size() - start);
-    return QStringList(lines.mid(start, count)).join(u'\n');
-}
 
 bool AcpClient::pathAllowed(const QString &path, bool forWrite, QString *error) const
 {
@@ -4171,9 +4578,14 @@ void AcpClient::handleTerminalCreate(const QJsonValue &id, const QJsonObject &pa
         return;
     }
 
-    QString cwd = params.value(u"cwd"_s).toString();
+    QString cwd = params.value(u"cwd"_s).toString().trimmed();
     if (cwd.isEmpty()) {
-        cwd = m_workspace;
+        cwd = sessionCwd();
+    } else if (cwd.startsWith(u"file:"_s, Qt::CaseInsensitive)) {
+        const QUrl url(cwd);
+        if (url.isLocalFile()) {
+            cwd = url.toLocalFile();
+        }
     }
     QString error;
     if (!pathAllowed(cwd, false, &error)) {
@@ -4189,9 +4601,11 @@ void AcpClient::handleTerminalCreate(const QJsonValue &id, const QJsonObject &pa
 
     auto *term = new Terminal;
     term->id = u"term_%1"_s.arg(m_nextTerminal++);
-    // Clamp agent-controlled limit: negative/0 previously disabled the cap and
-    // grew term->output without bound; overly large values OOM the same way.
-    term->outputByteLimit = qBound(64 * 1024, params.value(u"outputByteLimit"_s).toInt(1024 * 1024), 16 * 1024 * 1024);
+    // Honour the agent's requested limit, including a small one. Zero/negative
+    // would otherwise disable the cap; use the documented 1 MiB default for
+    // those, and a 4 MiB ceiling for memory safety.
+    const int requestedLimit = params.value(u"outputByteLimit"_s).toInt(1024 * 1024);
+    term->outputByteLimit = requestedLimit <= 0 ? 1024 * 1024 : qMin(requestedLimit, 4 * 1024 * 1024);
     term->process = new QProcess(this);
     term->process->setProcessChannelMode(QProcess::MergedChannels);
 #ifdef Q_OS_UNIX
@@ -4248,6 +4662,39 @@ void AcpClient::handleTerminalCreate(const QJsonValue &id, const QJsonObject &pa
     }
     if (wrapped.isEmpty()) {
         replyError(id, kServerError, wrapError.isEmpty() ? u"Failed to wrap the terminal command."_s : wrapError);
+        delete term->process;
+        delete term;
+        return;
+    }
+
+    // Agents are not required to call terminal/release. Bound the retained
+    // terminals so a long session cannot accumulate processes and output
+    // buffers indefinitely; reclaim the oldest exited one first.
+    constexpr int kMaxRetainedTerminals = 24;
+    while (m_terminals.size() >= kMaxRetainedTerminals) {
+        auto victim = m_terminals.end();
+        for (auto it = m_terminals.begin(); it != m_terminals.end(); ++it) {
+            if (it.value() && it.value()->exited) {
+                victim = it;
+                break;
+            }
+        }
+        if (victim == m_terminals.end()) {
+            break;
+        }
+        Terminal *old = victim.value();
+        m_terminals.erase(victim);
+        const QString linkedTool = m_terminalTools.take(old->id);
+        if (!linkedTool.isEmpty()) {
+            m_toolTerminals.remove(linkedTool);
+        }
+        if (old->process) {
+            old->process->deleteLater();
+        }
+        delete old;
+    }
+    if (m_terminals.size() >= kMaxRetainedTerminals) {
+        replyError(id, kServerError, u"Too many terminals are open; release one before creating another."_s);
         delete term->process;
         delete term;
         return;
@@ -4333,6 +4780,10 @@ void AcpClient::handleTerminalRelease(const QJsonValue &id, const QJsonObject &p
     killTerminal(term, true);
     term->process->deleteLater();
     delete term;
+    const QString linkedTool = m_terminalTools.take(terminalId);
+    if (!linkedTool.isEmpty()) {
+        m_toolTerminals.remove(linkedTool);
+    }
     replyResult(id, QJsonObject());
 }
 
@@ -4342,17 +4793,32 @@ void AcpClient::appendTerminalOutput(Terminal *term, const QByteArray &chunk)
         return;
     }
     term->output.append(chunk);
-    if (term->outputByteLimit > 0 && term->output.size() > term->outputByteLimit) {
+    if (term->outputByteLimit > 0
+        && term->output.size() > term->outputByteLimit + 64 * 1024) {
+        // Trim in blocks rather than calling right() on every chunk once the
+        // cap is reached; a chatty command would otherwise copy the whole
+        // retained buffer for every new fragment.
         term->truncated = true;
-        term->output = term->output.right(term->outputByteLimit);
+        int drop = term->output.size() - term->outputByteLimit;
+        while (drop < term->output.size()
+               && (static_cast<unsigned char>(term->output.at(drop)) & 0xC0) == 0x80) {
+            ++drop;
+        }
+        term->output.remove(0, drop);
     }
     // A terminal embedded in a running tool call shows its output in that card
-    // while the command runs.
+    // while the command runs. Decoding and emitting the whole accumulated
+    // buffer on every chunk was quadratic; a small output still updates
+    // immediately, a large one is coalesced to ~10 updates/second.
     const auto owner = m_terminalTools.constFind(term->id);
     if (owner != m_terminalTools.constEnd()) {
-        const QString text = QString::fromUtf8(term->output);
-        m_toolStreamed.insert(owner.value(), text);
-        Q_EMIT toolProgress(owner.value(), text);
+        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        if (term->output.size() <= 4096 || now - term->lastProgressMs >= 100) {
+            term->lastProgressMs = now;
+            const QString text = QString::fromUtf8(term->output);
+            m_toolStreamed.insert(owner.value(), capToolStream(text));
+            Q_EMIT toolProgress(owner.value(), text);
+        }
     }
 }
 
@@ -4371,13 +4837,19 @@ void AcpClient::linkToolTerminals(const QString &toolCallId, const QJsonValue &c
         if (terminalId.isEmpty() || m_terminalTools.contains(terminalId)) {
             continue;
         }
+        // A tool can switch terminals; remove the reverse link of the old one
+        // or it keeps streaming into a card that no longer owns it.
+        const QString previousTerminal = m_toolTerminals.value(toolCallId);
+        if (!previousTerminal.isEmpty() && previousTerminal != terminalId) {
+            m_terminalTools.remove(previousTerminal);
+        }
         m_terminalTools.insert(terminalId, toolCallId);
         m_toolTerminals.insert(toolCallId, terminalId);
         // The command may have printed before the agent announced the terminal
         // in a tool call; that output belongs in the card as well.
         if (const Terminal *term = m_terminals.value(terminalId)) {
             if (!term->output.isEmpty()) {
-                const QString text = QString::fromUtf8(term->output);
+                const QString text = capToolStream(QString::fromUtf8(term->output));
                 m_toolStreamed.insert(toolCallId, text);
                 Q_EMIT toolProgress(toolCallId, text);
             }
@@ -4403,6 +4875,13 @@ void AcpClient::markTerminalExited(Terminal *term, int exitCode, const QString &
     term->signal = signal;
     if (term->process) {
         appendTerminalOutput(term, term->process->readAll());
+    }
+    // Always publish the final buffer, even when the throttle skipped the
+    // last chunk.
+    if (const auto owner = m_terminalTools.constFind(term->id); owner != m_terminalTools.constEnd()) {
+        const QString text = QString::fromUtf8(term->output);
+        m_toolStreamed.insert(owner.value(), capToolStream(text));
+        Q_EMIT toolProgress(owner.value(), text);
     }
     const QList<QJsonValue> waiters = term->waiters;
     term->waiters.clear();
@@ -4438,9 +4917,9 @@ void AcpClient::killTerminal(Terminal *term, bool release)
         }
 #endif
         term->process->terminate();
-        if (!term->process->waitForFinished(500)) {
+        if (!term->process->waitForFinished(200)) {
             term->process->kill();
-            term->process->waitForFinished(500);
+            term->process->waitForFinished(300);
         }
 #ifdef Q_OS_UNIX
         // A grandchild that ignored SIGTERM must not outlive the terminal.
@@ -4470,6 +4949,11 @@ void AcpClient::releaseAllTerminals()
 
 void AcpClient::failAll(const QString &error)
 {
+    // Callbacks below may try to issue follow-up requests (model fallback,
+    // config retry). Reject those instead of letting them add a live request
+    // after the map was cleared; such a request would outlive the process and
+    // fire its timeout against the next session.
+    m_failingAll = true;
     // A prompt queued while the handshake was still starting must not be
     // replayed into the next turn after a failure.
     m_queued.clear();
@@ -4493,11 +4977,19 @@ void AcpClient::failAll(const QString &error)
     if (m_promptId != 0) {
         m_promptId = 0;
     }
+    m_failingAll = false;
 }
 
 void AcpClient::finishPrompt(const QString &stopReason, const QString &error)
 {
     m_promptId = 0;
+    // Once-grants are per-turn consent. Keeping them let an approval from an
+    // earlier turn auto-approve a matching write/command later, before the
+    // active mode ever got a chance to inspect it.
+    m_onceGrants.clear();
+    // A client method parked in this turn cannot be answered after it ended;
+    // close it and its card instead of promoting it into the next turn.
+    cancelParkedMethods();
     // The turn is over, so a pending cancellation grace window must not fire.
     if (m_cancelGraceTimer) {
         m_cancelGraceTimer->stop();
@@ -4511,6 +5003,9 @@ void AcpClient::finishPrompt(const QString &stopReason, const QString &error)
         finishLiveTools(error);
         Q_EMIT failed(error);
         return;
+    }
+    if (!m_liveTools.isEmpty()) {
+        finishLiveTools(u"The turn ended before this tool reported completion."_s);
     }
     Q_EMIT promptFinished(stopReason.isEmpty() ? u"end_turn"_s : stopReason, m_currentText, m_toolCalls);
     if (!m_queued.isEmpty() && m_state == State::Ready) {

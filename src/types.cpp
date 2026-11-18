@@ -1887,7 +1887,17 @@ AcpAgentPreset acpAgentLaunchLine(const Settings &settings, const QString &agent
         }
         QStringList args;
         for (const QJsonValue &arg : agent.value(u"args"_s).toArray()) {
-            args.append(arg.toString());
+            // acpArgs is a command-line string parsed with
+            // QProcess::splitCommand(), so an argument containing whitespace
+            // must be quoted here or it turns into several arguments.
+            const QString text = arg.toString();
+            if (text.contains(u' ') || text.contains(u'\t') || text.contains(u'"')) {
+                QString escaped = text;
+                escaped.replace(u'"', u"\\\""_s);
+                args.append(u"\"%1\""_s.arg(escaped));
+            } else {
+                args.append(text);
+            }
         }
         QString label = agent.value(u"name"_s).toString().trimmed();
         return {agentId, label.isEmpty() ? agentId : label,
@@ -1994,19 +2004,25 @@ QString acpInstalledBinaryCommand(const Settings &settings)
         // The registry records the executable relative to the unpacked archive
         // ("./agy_acp_server.par"). Kate installs the archive into its own data
         // directory, so resolve the command against that directory instead of
-        // the process working directory.
+        // the process working directory. Prefer the directory recorded at
+        // install time: an env override or a moved data dir must not make the
+        // installed agent invisible.
         QString relative = command;
         while (relative.startsWith(u"./"_s)) {
             relative.remove(0, 2);
         }
-        const QDir installDir(acpBinaryInstallDir(settings.acpAgentId));
+        QString installRoot = agent.value(u"binaryInstallDir"_s).toString().trimmed();
+        if (installRoot.isEmpty()) {
+            installRoot = acpBinaryInstallDir(settings.acpAgentId);
+        }
+        const QDir installDir(installRoot);
         const QString candidate = QDir::cleanPath(installDir.absoluteFilePath(relative));
-        const QString installRoot = installDir.absolutePath();
-        if (candidate != installRoot && !candidate.startsWith(installRoot + u'/')) {
+        const QString installRootPath = installDir.absolutePath();
+        if (candidate != installRootPath && !candidate.startsWith(installRootPath + u'/')) {
             return {};
         }
         const QFileInfo candidateInfo(candidate);
-        if (candidateInfo.exists() && candidateInfo.isExecutable()) {
+        if (candidateInfo.exists() && candidateInfo.isExecutable() && !candidateInfo.isSymLink()) {
             return candidateInfo.absoluteFilePath();
         }
         return {};

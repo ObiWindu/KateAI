@@ -380,7 +380,10 @@ ChatWidget::ChatWidget(QWidget *parent)
 {
     m_sessionSaveTimer = new QTimer(this);
     m_sessionSaveTimer->setSingleShot(true);
-    m_sessionSaveTimer->setInterval(500);
+    // A long turn can finish tools many times per second. Serializing the
+    // whole transcript on every one of those saves is the largest avoidable
+    // disk cost in a long session; 1.5 s still persists work continuously.
+    m_sessionSaveTimer->setInterval(1500);
     connect(m_sessionSaveTimer, &QTimer::timeout, this, &ChatWidget::saveCurrentConversation);
 
     // A stable name the panel stylesheet can select: a class selector like
@@ -917,9 +920,15 @@ ChatWidget::ChatWidget(QWidget *parent)
         }
         if (m_thinkingBrowser) {
             appendThinkingDelta(delta);
-            scrollToBottom();
+            if (!m_answerStarted) {
+                scrollToBottom();
+            }
         }
-        setThinkingIndicator(true);
+        // In the answer phase late reasoning is buffered for the transcript but
+        // must not restart the thinking pill next to the streaming answer.
+        if (!m_answerStarted) {
+            setThinkingIndicator(true);
+        }
     });
     connect(&m_agent, &AgentLoop::thinkingFinished, this, [this](const QString &text) {
         // Stop thinking indicator BEFORE adding thinking block so that
@@ -942,14 +951,19 @@ ChatWidget::ChatWidget(QWidget *parent)
     connect(&m_agent, &AgentLoop::assistantDelta, this, [this](const QString &delta) {
         scheduleSessionSave();
         // Reasoning stays open for the whole turn. Collapsing it when the answer
-        // started hid the only record of what the agent was doing.
+        // started hid the only record of what the agent was doing. It is
+        // flushed (not just stopped) first, so everything the agent reasoned
+        // before answering is on screen before the answer starts arriving.
+        m_answerStarted = true;
         flushThinkingPacer();
         setThinkingIndicator(false);
         setStreaming(m_streamText + delta);
     });
     connect(&m_agent, &AgentLoop::assistantReset, this, [this]() {
         // The streamed text belonged to a failed attempt and is replaced by the
-        // retry. Drop it, otherwise the transcript shows both.
+        // retry. Drop it, otherwise the transcript shows both. The retry may
+        // reason again, so it starts back in the reasoning phase.
+        m_answerStarted = false;
         m_streamText.clear();
         if (m_activeAssistantBrowser) {
             m_activeAssistantBrowser->setDocument(makeMarkdownDocument(closedMarkdown(m_streamText), ChatTheme::messageCss()));
@@ -994,6 +1008,34 @@ ChatWidget::ChatWidget(QWidget *parent)
             });
             m_subtaskWidgets.insert(request.toolCallId, subtaskWidget);
             m_subtaskOrder.append(subtaskWidget);
+            // Sub-agent cards are full transcript widgets; keep the recent
+            // ones after a very long orchestration session.
+            constexpr int kMaxSubtaskCards = 40;
+            while (m_subtaskOrder.size() > kMaxSubtaskCards) {
+                int victimIndex = -1;
+                for (int i = 0; i < m_subtaskOrder.size(); ++i) {
+                    SubtaskWidget *candidate = m_subtaskOrder.at(i);
+                    if (candidate && !candidate->isRunning()) {
+                        victimIndex = i;
+                        break;
+                    }
+                }
+                if (victimIndex < 0) {
+                    break;
+                }
+                SubtaskWidget *victim = m_subtaskOrder.takeAt(victimIndex);
+                m_subtaskWidgets.remove(victim->taskId());
+                m_subtaskAnchors.remove(victim->taskId());
+                if (m_subtaskDock) {
+                    m_subtaskDock->removeCard(victim);
+                }
+                if (m_transcriptLayout) {
+                    m_transcriptLayout->removeWidget(victim);
+                }
+                victim->hide();
+                victim->setParent(nullptr);
+                victim->deleteLater();
+            }
             // Where the sub-agent's card belongs in the transcript once it
             // retires: right below whatever was last when it started.
             m_subtaskAnchors.insert(request.toolCallId, lastTranscriptContentWidget());
@@ -1426,7 +1468,12 @@ ChatWidget::ChatWidget(QWidget *parent)
             m_progressTimer->setInterval(50);
             connect(m_progressTimer, &QTimer::timeout, this, &ChatWidget::flushToolProgress);
         }
+        // Large streamed outputs are expensive to re-HTML on every tick.
+        // Only change the interval while the timer is stopped: setInterval()
+        // on a running timer restarts it, which would starve a steady stream
+        // exactly like the old restart-on-every-chunk bug.
         if (!m_progressTimer->isActive()) {
+            m_progressTimer->setInterval(partial.size() > 20000 ? 150 : 50);
             flushToolProgress();
             m_progressTimer->start();
         }
@@ -1506,6 +1553,11 @@ ChatWidget::ChatWidget(QWidget *parent)
         // must not leave it docked: nothing can answer it now. The exception is
         // an agent-side ACP question, whose answer starts a fresh turn.
         clearQuestionCards(m_agent.pendingAcpToolQuestionId());
+        // Tool payloads that never produced a result are no longer routable;
+        // drop them instead of retaining one entry per aborted call.
+        m_questionTexts.clear();
+        m_pendingSuggestions.clear();
+        m_pendingProgress.clear();
         // The dock lost contents without a dock-aware call above: a cleared
         // question, and approval rows hidden together with the cards that
         // carried them. Recompute, or the strip stays on screen over the
@@ -1855,8 +1907,8 @@ void ChatWidget::saveCurrentConversation()
     // the button is repainted without a query.
     if (isNew) {
         m_historyCount = -1;
+        updateHistoryButton();
     }
-    updateHistoryButton();
 }
 
 void ChatWidget::scheduleSessionSave()
@@ -2057,8 +2109,13 @@ void ChatWidget::scheduleStreamRender()
     }
     // Restarting is safe because it is single-shot: a burst of chunks collapses
     // into one rebuild, while a steady stream still renders ~20 times a second,
-    // which is well past the eye's ability to notice on text arriving.
+    // which is well past the eye's ability to notice on text arriving. A very
+    // long answer costs more per rebuild, so back off the rate as it grows.
+    // Only set the interval while stopped: setInterval() on a running timer
+    // restarts it, which would starve a continuous stream.
     if (!m_streamRenderTimer->isActive()) {
+        const int length = m_streamText.size();
+        m_streamRenderTimer->setInterval(length > 60000 ? 200 : (length > 20000 ? 100 : 50));
         m_streamRenderTimer->start();
     }
 }
@@ -2192,7 +2249,11 @@ void ChatWidget::addThinkingBlock(const QString &text)
     }
     m_thinkingBlock->show();
     registerThinkingBlock(m_thinkingBlock, m_thinkingBrowser, m_thinkingToggle);
-    if (!m_isThinking) {
+    if (m_answerStarted) {
+        // The answer is already streaming. Keep this reasoning in the buffer
+        // and render it when the card freezes instead of writing it next to
+        // the answer.
+    } else if (!m_isThinking) {
         flushThinkingPacer();
     } else {
         startThinkingPacer();
@@ -2210,7 +2271,9 @@ void ChatWidget::appendThinkingDelta(const QString &delta)
     }
     // Only auto-expand if the user hasn't manually collapsed the thinking block.
     // We track this via m_thinkingExpanded - if it's false, the user explicitly collapsed.
-    if (m_thinkingExpanded) {
+    // Once the answer has started, later reasoning is buffered for the final
+    // transcript but not paced in: reasoning and answer must stay sequential.
+    if (m_thinkingExpanded && !m_answerStarted) {
         startThinkingPacer();
     }
 }
@@ -2681,6 +2744,17 @@ void ChatWidget::applyTranscriptCollapse()
             m_thinkingBlocks.removeAt(i);
         }
     }
+    // Reasoning blocks carry their own browser/document too. Keep recent
+    // turns and drop the oldest ones once the transcript is very long.
+    constexpr int kMaxRetainedThinkingBlocks = 200;
+    while (m_thinkingBlocks.size() > kMaxRetainedThinkingBlocks) {
+        const ThinkingBlockRef entry = m_thinkingBlocks.takeFirst();
+        if (entry.block) {
+            entry.block->hide();
+            entry.block->setParent(nullptr);
+            entry.block->deleteLater();
+        }
+    }
     // Reasoning is part of the turn, not a disclosure the transcript budget
     // is allowed to close. Every block stays expanded.
     for (int i = m_thinkingBlocks.size() - 1; i >= 0; --i) {
@@ -2719,6 +2793,67 @@ void ChatWidget::applyTranscriptCollapse()
         } else {
             widget->setExpanded(false);
         }
+    }
+    pruneOldTranscriptCards();
+}
+
+void ChatWidget::pruneOldTranscriptCards()
+{
+    // Every tool card owns a QTextBrowser and its document. A long session
+    // could otherwise retain thousands of them, so the oldest finished cards
+    // are dropped from the live widget tree once the retention cap is passed.
+    // The session still has the history and rebuilds them on reload.
+    constexpr int kMaxRetainedToolCards = 400;
+    if (m_toolCallOrder.size() <= kMaxRetainedToolCards) {
+        return;
+    }
+    int toRemove = m_toolCallOrder.size() - kMaxRetainedToolCards;
+    for (int i = 0; i < m_toolCallOrder.size() && toRemove > 0;) {
+        ToolCallWidget *widget = m_toolCallOrder.at(i);
+        if (!widget || widget->isRunning()) {
+            ++i;
+            continue;
+        }
+        if (m_pinnedViewportWidget == widget) {
+            m_pinnedViewportWidget = nullptr;
+        }
+        m_toolCallWidgets.remove(widget->toolCallId());
+        m_toolCallOrder.removeAt(i);
+        m_focusedToolCardIndex = -1;
+        widget->hide();
+        widget->setParent(nullptr);
+        widget->deleteLater();
+        --toRemove;
+    }
+
+    // Text turns are lighter than tool cards but still unbounded. Keep the
+    // recent user/assistant cards and let the session restore the rest.
+    if (!m_transcriptLayout) {
+        return;
+    }
+    constexpr int kMaxRetainedTextCards = 300;
+    int textCards = 0;
+    for (int i = 0; i < m_transcriptLayout->count(); ++i) {
+        QWidget *widget = m_transcriptLayout->itemAt(i) ? m_transcriptLayout->itemAt(i)->widget() : nullptr;
+        if (widget && (widget->objectName() == u"userCard"_s || widget->objectName() == u"assistantCard"_s)) {
+            ++textCards;
+        }
+    }
+    int textToRemove = textCards - kMaxRetainedTextCards;
+    for (int i = 0; i < m_transcriptLayout->count() && textToRemove > 0;) {
+        QLayoutItem *item = m_transcriptLayout->itemAt(i);
+        QWidget *widget = item ? item->widget() : nullptr;
+        if (!widget || (widget->objectName() != u"userCard"_s && widget->objectName() != u"assistantCard"_s)
+            || widget == m_activeAssistantWidget || widget == m_pinnedViewportWidget) {
+            ++i;
+            continue;
+        }
+        m_transcriptLayout->takeAt(i);
+        widget->hide();
+        widget->setParent(nullptr);
+        widget->deleteLater();
+        delete item;
+        --textToRemove;
     }
 }
 
@@ -4810,7 +4945,7 @@ bool ChatWidget::ensureAcpBinaryInstalled(const QString &agentId)
             return false;
         }
 
-        auto *installer = new AcpBinaryInstaller(agent, agent.value(u"binaryPlatform"_s).toString(),
+        auto *installer = new AcpBinaryInstaller(agent, acpCurrentPlatformKey(),
                                                  nullptr, this);
         m_acpBinaryInstaller = installer;
         m_acpInstallingAgentId = agentId;
@@ -4828,13 +4963,12 @@ bool ChatWidget::ensureAcpBinaryInstalled(const QString &agentId)
             agents.append(installedAgent);
             m_settings.acpInstalledAgents = QString::fromUtf8(QJsonDocument(agents).toJson(QJsonDocument::Compact));
             if (m_settings.acpAgentId == agentId) {
-                m_settings.acpCommand = installedAgent.value(u"command"_s).toString();
-                QStringList args;
-                for (const QJsonValue &arg : installedAgent.value(u"args"_s).toArray()) {
-                    args.append(arg.toString());
+                const AcpAgentPreset launch = acpAgentLaunchLine(m_settings, agentId);
+                if (!launch.command.isEmpty()) {
+                    m_settings.acpCommand = launch.command;
+                    m_settings.acpArgs = launch.args;
+                    m_settings.acpApiKeyEnv = launch.apiKeyEnv;
                 }
-                m_settings.acpArgs = args.join(u' ');
-                m_settings.acpApiKeyEnv = installedAgent.value(u"apiKeyEnv"_s).toString();
                 m_agent.setSettings(m_settings);
             }
             Q_EMIT settingsChanged(m_settings);
@@ -5147,7 +5281,15 @@ void ChatWidget::showSettingsMenu()
         action->setCheckable(true);
         action->setChecked(m_settings.acpAgentId == preset.id);
         connect(action, &QAction::triggered, this, [this, id = preset.id, &menu]() {
+            const bool agentChanged = m_settings.acpAgentId != id;
             m_settings.acpAgentId = id;
+            // A model/effort id belongs to one agent's catalogue. Carrying the
+            // previous agent's selection into a newly selected agent makes its
+            // --model flag or set_config_option invalid.
+            if (agentChanged) {
+                m_settings.acpModel.clear();
+                m_settings.acpEffort.clear();
+            }
             m_settings.provider = Provider::Acp;
             m_preferredProvider = Provider::Acp;
             // Update command, args, and env from the registry entry or preset.
@@ -5440,6 +5582,25 @@ void ChatWidget::addSuggestionCard(const QString &id, const Suggestion &suggesti
     m_suggestionWidgets.insert(id, card);
     m_suggestionOrder.append(card);
     appendTranscriptWidget(card);
+    // Suggestion cards are transcript widgets with their own browsers; keep
+    // only the recent ones in a very long session.
+    constexpr int kMaxSuggestionCards = 100;
+    while (m_suggestionOrder.size() > kMaxSuggestionCards) {
+        SuggestionWidget *oldest = m_suggestionOrder.first();
+        if (!oldest) {
+            m_suggestionOrder.removeFirst();
+            continue;
+        }
+        const QString oldestId = oldest->suggestionId();
+        m_suggestionWidgets.remove(oldestId);
+        m_suggestionOrder.removeFirst();
+        if (m_transcriptLayout) {
+            m_transcriptLayout->removeWidget(oldest);
+        }
+        oldest->hide();
+        oldest->setParent(nullptr);
+        oldest->deleteLater();
+    }
     applyTranscriptCollapse();
     scrollToBottom();
 }
@@ -5454,6 +5615,25 @@ void ChatWidget::addSuggestionErrorCard(const QString &id, const QString &messag
     m_suggestionWidgets.insert(id, card);
     m_suggestionOrder.append(card);
     appendTranscriptWidget(card);
+    // Suggestion cards are transcript widgets with their own browsers; keep
+    // only the recent ones in a very long session.
+    constexpr int kMaxSuggestionCards = 100;
+    while (m_suggestionOrder.size() > kMaxSuggestionCards) {
+        SuggestionWidget *oldest = m_suggestionOrder.first();
+        if (!oldest) {
+            m_suggestionOrder.removeFirst();
+            continue;
+        }
+        const QString oldestId = oldest->suggestionId();
+        m_suggestionWidgets.remove(oldestId);
+        m_suggestionOrder.removeFirst();
+        if (m_transcriptLayout) {
+            m_transcriptLayout->removeWidget(oldest);
+        }
+        oldest->hide();
+        oldest->setParent(nullptr);
+        oldest->deleteLater();
+    }
     applyTranscriptCollapse();
     scrollToBottom();
 }
@@ -5982,6 +6162,7 @@ void ChatWidget::clearStreamingPointers()
     m_thinkingBuffer.clear();
     m_thinkingPacedLength = 0;
     m_thinkingExpanded = true;
+    m_answerStarted = false;
     m_streamText.clear();
     m_isStreaming = false;
 }
@@ -5991,6 +6172,7 @@ void ChatWidget::resetThinkingState()
     m_thinkingBuffer.clear();
     m_thinkingPacedLength = 0;
     m_thinkingExpanded = true;
+    m_answerStarted = false;
     stopThinkingPacer();
 }
 

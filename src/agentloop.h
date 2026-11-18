@@ -290,6 +290,11 @@ private:
         // The history as it should be sent: budgeted and compacted to fit the
         // model's context window.
         QList<ChatMessage> m_messagesForRequest() const;
+        // Replace the stored transcript with the compacted request history
+        // once compaction has made a material difference. Without this the
+        // full session stayed in memory and was rewritten to SQLite on every
+        // save, so memory and save cost grew without bound.
+        void maybeCompactStoredHistory(const QList<ChatMessage> &requestMessages);
     QString actionSignature(const ToolCall &call) const;
     bool isRepeatSensitiveTool(const QString &toolName) const;
     void appendControllerMessage(const QString &content);
@@ -450,6 +455,7 @@ LlmClient m_client;
     // Lifecycle: the id of the turn the UI is currently describing, and the
     // terminal state of the most recent turn (Idle until one ends).
     QString m_turnId;
+    QString m_lastFailedTurn;
     TurnState m_lastTurnState = TurnState::Idle;
     void setTurnState(TurnState state, const QString &reason = QString());
     bool m_terminalSignalled = true;

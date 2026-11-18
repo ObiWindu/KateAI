@@ -8,6 +8,7 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QProcess>
 #include <QTemporaryDir>
 #include <QTest>
 
@@ -265,6 +266,23 @@ private Q_SLOTS:
         QCOMPARE(loaded.size(), 1);
         QCOMPARE(loaded.first().name, u"demo"_s);
         QCOMPARE(loaded.first().command, u"true"_s);
+    }
+
+    void installedAgentArgsAreQuotedWhenSerialized()
+    {
+        QJsonObject agent;
+        agent.insert(u"id"_s, u"space-agent"_s);
+        agent.insert(u"name"_s, u"Space Agent"_s);
+        agent.insert(u"command"_s, u"npx"_s);
+        agent.insert(u"args"_s, QJsonArray{u"--yes"_s, u"pkg"_s, u"arg with space"_s});
+        Settings settings;
+        settings.acpInstalledAgents = QString::fromUtf8(
+            QJsonDocument(QJsonArray{agent}).toJson(QJsonDocument::Compact));
+        const AcpAgentPreset launch = acpAgentLaunchLine(settings, u"space-agent"_s);
+        // The stored launch line is a command string parsed with
+        // QProcess::splitCommand(); the whitespace argument must survive.
+        QCOMPARE(QProcess::splitCommand(launch.args),
+                 (QStringList{u"--yes"_s, u"pkg"_s, u"arg with space"_s}));
     }
 
     void mcpSecretsAreNotWrittenIntoTheWorkspaceFile()

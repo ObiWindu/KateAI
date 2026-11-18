@@ -77,6 +77,7 @@ private Q_SLOTS:
     void testCreateOnlyWriteCreatesFile();
     void testCreateOnlyWriteRefusesOpenBuffer();
     void testWritePreservesFilePermissions();
+    void testWriteThroughSymlinkEditsTarget();
     void testNonUtf8FileSurvivesReadModifyWrite();
 
 private:
@@ -389,6 +390,32 @@ void TestDocumentBridge::testWritePreservesFilePermissions()
     QCOMPARE(QFile::permissions(path), before);
 #else
     QSKIP("POSIX permissions are not meaningful on this platform");
+#endif
+}
+
+void TestDocumentBridge::testWriteThroughSymlinkEditsTarget()
+{
+#if defined(Q_OS_WIN)
+    QSKIP("symlink creation is not portable in this test");
+#else
+    const QString target = QDir(m_dir.path()).filePath(u"target.cpp"_s);
+    {
+        QFile file(target);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        file.write("before\n");
+    }
+    const QString link = QDir(m_dir.path()).filePath(u"link.cpp"_s);
+    QVERIFY(QFile::link(target, link));
+    QVERIFY(QFileInfo(link).isSymLink());
+
+    DiskDocumentBridge bridge;
+    bridge.setUseOpenDocuments(false);
+    QString error;
+    QVERIFY2(bridge.writeDocument(link, u"after\n"_s, &error), qPrintable(error));
+    // The link stays a link and the target receives the content; QSaveFile
+    // must not replace the link itself.
+    QVERIFY(QFileInfo(link).isSymLink());
+    QCOMPARE(readFile(target), u"after\n"_s);
 #endif
 }
 
