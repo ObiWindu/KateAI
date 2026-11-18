@@ -10,11 +10,14 @@
 
 #include <KLocalizedString>
 
+#include <QClipboard>
+#include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLayout>
 #include <QPushButton>
 #include <QResizeEvent>
+#include <QStringList>
 #include <QTextBrowser>
 #include <QTextCursor>
 #include <QScrollBar>
@@ -36,6 +39,60 @@ constexpr int MaxActivityChars = 12000;
 // replaces this text at the end anyway, and an unbounded description would
 // push the dock (and the input with it) off the screen.
 constexpr int RunningDescriptionChars = 400;
+
+// Mode ids are stable identifiers ("code", "architect"), not display text.
+// Show a readable form without turning a custom id into a translation.
+QString displayMode(const QString &id)
+{
+    QString text = id.trimmed();
+    if (text.isEmpty()) {
+        return text;
+    }
+    text[0] = text[0].toUpper();
+    text.replace(u'_', u' ');
+    return text;
+}
+
+struct ActivityParts {
+    QString prefix;
+    QString tool;
+    QString detail;
+    bool isFailure = false;
+};
+
+// The activity feed carries three shapes: a tool starting ("→ bash ls"), a
+// tool finishing ("  ✓ bash" / "  ✗ bash"), and a plain status note. Splitting
+// them lets the headline colour and label the tool instead of printing an
+// arrow and a raw protocol string.
+ActivityParts splitActivityLine(const QString &line)
+{
+    ActivityParts parts;
+    QString rest = line;
+    bool done = false;
+    bool failed = false;
+    if (rest.startsWith(u"→ "_s)) {
+        rest = rest.mid(2);
+    } else if (rest.startsWith(u"  ✓ "_s)) {
+        rest = rest.mid(4);
+        done = true;
+    } else if (rest.startsWith(u"  ✗ "_s)) {
+        rest = rest.mid(4);
+        failed = true;
+    }
+
+    if (done || failed || line.startsWith(u"→ "_s)) {
+        const int space = rest.indexOf(u' ');
+        parts.tool = (space < 0) ? rest : rest.left(space);
+        parts.detail = (space < 0) ? QString() : rest.mid(space + 1).trimmed();
+        parts.isFailure = failed;
+        parts.prefix = failed ? i18n("Failed:") : (done ? i18n("Done:") : i18n("Doing:"));
+    } else {
+        // A plain note ("Starting…", "Waiting for approval: …") is its own
+        // sentence; a generic "Status:" prefix only adds noise.
+        parts.detail = line.trimmed();
+    }
+    return parts;
+}
 } // namespace
 
 SubtaskWidget::SubtaskWidget(const QString &taskId, QWidget *parent)
@@ -64,32 +121,39 @@ SubtaskWidget::SubtaskWidget(const QString &taskId, QWidget *parent)
     // The badge carries both the delegation glyph and a text label, so the card
     // is identifiable as a sub-agent even when the glyph alone is ambiguous.
     m_badge = new QLabel(i18n("↳ Agent"), this);
+    m_badge->setObjectName(u"subtaskBadge"_s);
     m_badge->setToolTip(i18n("Delegated sub-agent"));
     header->addWidget(m_badge);
 
     m_icon = new QLabel(u"◐"_s, this);
+    m_icon->setObjectName(u"subtaskState"_s);
     m_icon->setStyleSheet(u"font-size: 12px;"_s);
     header->addWidget(m_icon);
 
     m_title = new QLabel(this);
+    m_title->setObjectName(u"subtaskTitle"_s);
     m_title->setTextFormat(Qt::RichText);
     m_title->setMinimumWidth(0);
     m_title->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    m_title->setToolTip(i18n("Sub-agent"));
     header->addWidget(m_title);
 
     // The mode the sub-agent runs in, shown as a small chip between the title
     // and the status line. A delegated task is only meaningful with the mode
     // that was chosen for it, and burying it in the title makes it easy to miss.
     m_modeChip = new QLabel(this);
+    m_modeChip->setObjectName(u"subtaskMode"_s);
     m_modeChip->setTextFormat(Qt::RichText);
     m_modeChip->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Preferred);
     m_modeChip->setVisible(false);
     header->addWidget(m_modeChip);
 
     m_status = new QLabel(this);
+    m_status->setObjectName(u"subtaskStatus"_s);
     m_status->setMinimumWidth(0);
     m_status->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     m_status->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    m_status->setToolTip(i18n("Sub-agent state"));
     // textPrimary rather than textMuted: the card surface is now a warm yellow,
     // and a grey-on-gold status line drops under a readable contrast.
     m_status->setStyleSheet(QStringLiteral("color: %1; font-size: 10px;").arg(ChatTheme::textPrimary()));
@@ -97,8 +161,10 @@ SubtaskWidget::SubtaskWidget(const QString &taskId, QWidget *parent)
     header->addStretch();
 
     m_cancel = new QPushButton(i18n("Cancel"), this);
+    m_cancel->setObjectName(u"subtaskCancel"_s);
     m_cancel->setCursor(Qt::PointingHandCursor);
     m_cancel->setFixedHeight(20);
+    m_cancel->setToolTip(i18n("Stop this sub-agent"));
     connect(m_cancel, &QPushButton::clicked, this, [this] {
         Q_EMIT cancelRequested(m_taskId);
     });
@@ -109,6 +175,7 @@ SubtaskWidget::SubtaskWidget(const QString &taskId, QWidget *parent)
     // A small caption above the body so the user knows whether they are reading
     // the delegated task or the sub-agent's answer.
     m_bodyCaption = new QLabel(this);
+    m_bodyCaption->setObjectName(u"subtaskCaption"_s);
     m_bodyCaption->setStyleSheet(QStringLiteral("color: %1; font-size: 9px; font-weight: 600;"
                                                 " text-transform: uppercase; letter-spacing: 0.5px;")
                                      .arg(ChatTheme::textMuted()));
@@ -118,6 +185,7 @@ SubtaskWidget::SubtaskWidget(const QString &taskId, QWidget *parent)
     // The task description the orchestrator wrote, so the user can see what
     // was actually delegated without expanding anything.
     m_answer = new QTextBrowser(this);
+    m_answer->setObjectName(u"subtaskBody"_s);
     m_answer->setOpenExternalLinks(true);
     m_answer->setFrameShape(QFrame::NoFrame);
     m_answer->setMinimumHeight(0);
@@ -125,9 +193,10 @@ SubtaskWidget::SubtaskWidget(const QString &taskId, QWidget *parent)
 
     // What the sub-agent is doing right now: the newest step it reported. The
     // status line in the header says how long the run has taken and how many
-    // steps it has made, which is not the same thing as saying which step it is
+    // tools it has used, which is not the same thing as saying which step it is
     // on -- without this the card reads as a spinner with no reason.
     m_current = new QLabel(this);
+    m_current->setObjectName(u"subtaskCurrent"_s);
     m_current->setWordWrap(false);
     // No colour in the stylesheet: the label uses rich text with inline spans
     // so the "Doing:" prefix and the step text can carry different colours.
@@ -135,18 +204,48 @@ SubtaskWidget::SubtaskWidget(const QString &taskId, QWidget *parent)
     m_current->setVisible(false);
     root->addWidget(m_current);
 
-    // Live activity log, hidden until the user asks for it.
+    // Live activity log, hidden until the user asks for it. The toggle shares
+    // its row with Copy, so the result is one click away without another row
+    // eating the dock's height.
     m_activityContainer = new QWidget(this);
+    m_activityContainer->setObjectName(u"subtaskActivityContainer"_s);
     auto *activityLayout = new QVBoxLayout(m_activityContainer);
     activityLayout->setContentsMargins(0, 3, 0, 0);
     activityLayout->setSpacing(3);
 
+    auto *activityFooter = new QHBoxLayout;
+    activityFooter->setContentsMargins(0, 0, 0, 0);
+    activityFooter->setSpacing(6);
+
     m_toggle = new QPushButton(i18n("Activity  ▸"), m_activityContainer);
+    m_toggle->setObjectName(u"subtaskActivityToggle"_s);
     m_toggle->setCursor(Qt::PointingHandCursor);
     m_toggle->setToolTip(i18n("Show the sub-agent's tool calls and progress"));
-    activityLayout->addWidget(m_toggle);
+    activityFooter->addWidget(m_toggle);
+    activityFooter->addStretch();
+
+    m_copyResult = new QPushButton(i18n("Copy"), m_activityContainer);
+    m_copyResult->setObjectName(u"subtaskCopyResult"_s);
+    m_copyResult->setCursor(Qt::PointingHandCursor);
+    m_copyResult->setToolTip(i18n("Copy the sub-agent's answer"));
+    m_copyResult->setVisible(false);
+    connect(m_copyResult, &QPushButton::clicked, this, [this] {
+        if (m_resultOutput.isEmpty() || !QGuiApplication::clipboard()) {
+            return;
+        }
+        QGuiApplication::clipboard()->setText(m_resultOutput);
+        m_copyResult->setText(i18n("Copied"));
+        QTimer::singleShot(1200, m_copyResult, [thisWeak = QPointer<SubtaskWidget>(this)] {
+            if (thisWeak && thisWeak->m_copyResult) {
+                thisWeak->m_copyResult->setText(i18n("Copy"));
+            }
+        });
+    });
+    activityFooter->addWidget(m_copyResult);
+    activityLayout->addLayout(activityFooter);
 
     m_activity = new QTextBrowser(m_activityContainer);
+    m_activity->setObjectName(u"subtaskActivity"_s);
     m_activity->setOpenExternalLinks(false);
     m_activity->setFrameShape(QFrame::NoFrame);
     m_activity->setVisible(false);
@@ -204,11 +303,22 @@ void SubtaskWidget::startAgent(const QString &agentName, const QString &modeId, 
     m_partialOutput.clear();
     m_pendingStreamDelta.clear();
     m_stepCount = 0;
+    m_toolCount = 0;
+    m_errorCount = 0;
+    m_resultOutput.clear();
     if (m_streamTimer) {
         m_streamTimer->stop();
     }
     m_currentIsError = false;
+    // Never show a blank card while the child is spinning up: until its first
+    // tool report arrives the headline names the wait itself.
+    m_currentLine = i18n("Starting…");
     m_current->clear();
+    updateCurrentActivity();
+    if (m_copyResult) {
+        m_copyResult->setVisible(false);
+        m_copyResult->setText(i18n("Copy"));
+    }
     // A fresh run starts a fresh log; the previous run's steps left with its
     // card. The disclosure starts closed and opens itself on the first step,
     // unless the user has started choosing for themselves.
@@ -216,7 +326,6 @@ void SubtaskWidget::startAgent(const QString &agentName, const QString &modeId, 
     m_activityUserSet = false;
     rebuildActivityLog();
     setActivityVisible(false);
-    m_current->setVisible(false);
     updateHeader();
     updateElapsed();
     applyStyle();
@@ -239,6 +348,12 @@ void SubtaskWidget::appendActivity(const QString &line, bool isError)
         flushStreamOutput();
         m_partialOutput.clear();
         m_pendingStreamDelta.clear();
+    }
+    if (line.startsWith(u"→ "_s)) {
+        ++m_toolCount;
+    }
+    if (isError) {
+        ++m_errorCount;
     }
     appendLogLine(line, isError, true);
 }
@@ -437,11 +552,20 @@ void SubtaskWidget::finishAgent(const ToolResult &result)
     m_cancel->setVisible(false);
     // A sub-agent's answer is markdown like any assistant turn, so it gets the
     // same body table styling for any fenced code it contains.
+    m_resultOutput = result.output;
     m_answer->setDocument(makeMarkdownDocument(closeMarkdown(result.output), ChatTheme::messageCss()));
     m_answer->setToolTip(QString());
     m_answer->setVisible(true);
-    m_bodyCaption->setText(result.ok ? i18n("Result") : i18n("Error"));
+    if (m_cancelled) {
+        m_bodyCaption->setText(i18n("Cancelled"));
+    } else {
+        m_bodyCaption->setText(result.ok ? i18n("Result") : i18n("Error"));
+    }
     m_bodyCaption->setVisible(true);
+    if (m_copyResult) {
+        m_copyResult->setVisible(!m_resultOutput.trimmed().isEmpty());
+        m_copyResult->setText(i18n("Copy"));
+    }
     // The run is over, so the card's subject is the answer: the step-by-step
     // log folds away with it (unless the user opened it and wants it kept).
     if (!m_activityUserSet) {
@@ -470,11 +594,16 @@ void SubtaskWidget::markAbandoned(const QString &reason)
         m_ticker->stop();
     }
     m_cancel->setVisible(false);
+    m_resultOutput = reason;
     m_answer->setDocument(makeMarkdownDocument(closeMarkdown(reason), ChatTheme::messageCss()));
     m_answer->setToolTip(QString());
     m_answer->setVisible(true);
     m_bodyCaption->setText(i18n("Cancelled"));
     m_bodyCaption->setVisible(true);
+    if (m_copyResult) {
+        m_copyResult->setVisible(!m_resultOutput.trimmed().isEmpty());
+        m_copyResult->setText(i18n("Copy"));
+    }
     // Same as a finished run: with the steps behind it, the log folds away.
     if (!m_activityUserSet) {
         setActivityVisible(false);
@@ -494,19 +623,46 @@ void SubtaskWidget::updateCurrentActivity()
         m_current->setVisible(false);
         return;
     }
+    const ActivityParts parts = splitActivityLine(m_currentLine);
     // Elided to the card's own width: a raw step line can be long (a summary of
     // the arguments), and a label wider than the card would stretch the dock.
     // The full text stays reachable through the tooltip.
     const int available = qMax(80, width() - 24);
-    const QString elided = m_current->fontMetrics().elidedText(m_currentLine, Qt::ElideRight, available);
-    // A prefix label makes it clear this is the current step, not a status.
-    // The step text is coloured by whether it is an error or not.
-    const QString stepColor = m_currentIsError ? ChatTheme::danger() : ChatTheme::accent();
+    const QString detail = parts.detail.isEmpty()
+        ? QString()
+        : m_current->fontMetrics().elidedText(parts.detail, Qt::ElideRight, available);
+    // The tool's own colour is the one thing that says *what kind* of work this
+    // is (read, edit, command) without spelling it out; a failure overrides it.
+    const QString toolColor = m_currentIsError || parts.isFailure
+        ? ChatTheme::danger()
+        : ChatTheme::toolColor(parts.tool);
+    QString tool;
+    if (!parts.tool.isEmpty()) {
+        tool = QStringLiteral("<span style=\"color:%1; font-weight:600;\">%2</span>")
+                   .arg(toolColor, parts.tool.toHtmlEscaped());
+    }
+    QString body = tool;
+    if (!detail.isEmpty()) {
+        if (!body.isEmpty()) {
+            body += u' ';
+        }
+        body += QStringLiteral("<span style=\"color:%1;\">%2</span>")
+                    .arg(m_currentIsError ? ChatTheme::danger() : ChatTheme::textPrimary(), detail.toHtmlEscaped());
+    }
+    if (body.isEmpty()) {
+        body = QStringLiteral("<span style=\"color:%1;\">%2</span>")
+                   .arg(m_currentIsError ? ChatTheme::danger() : ChatTheme::textPrimary(),
+                        m_currentLine.toHtmlEscaped());
+    }
+    // A prefix label makes it clear what the row is: work in flight or a step
+    // that finished. A plain status note needs no prefix.
+    QString prefix;
+    if (!parts.prefix.isEmpty()) {
+        prefix = QStringLiteral("<span style=\"color:%1; font-weight:600;\">%2</span> ")
+                     .arg(ChatTheme::textMuted(), parts.prefix);
+    }
     m_current->setTextFormat(Qt::RichText);
-    m_current->setText(QStringLiteral("<span style=\"color:%1; font-weight:600;\">%2</span>"
-                                      " <span style=\"color:%3;\">%4</span>")
-                           .arg(ChatTheme::textMuted(), i18n("Doing:"),
-                                stepColor, elided.toHtmlEscaped()));
+    m_current->setText(prefix + body);
     m_current->setToolTip(m_currentLine);
     m_current->setVisible(true);
 }
@@ -533,18 +689,20 @@ void SubtaskWidget::updateHeader()
     // shown in the badge, so the title no longer repeats it.
     m_title->setText(QStringLiteral("<span style=\"color:%1\">%2</span>")
                          .arg(ChatTheme::textPrimary(), escapedName));
+    m_title->setToolTip(i18n("Sub-agent: %1", m_agentName));
 
     // The mode chip shows which mode the sub-agent runs in. Hidden when no mode
     // was given, so a modeless delegation stays compact.
-    if (m_modeId.isEmpty()) {
+    const QString modeText = displayMode(m_modeId);
+    if (modeText.isEmpty()) {
         m_modeChip->setVisible(false);
     } else {
         m_modeChip->setText(QStringLiteral("<span style=\"color:%1; font-size:9px;"
                                            " background:%2; border-radius:3px;"
                                            " padding:1px 5px;\">%3</span>")
                                 .arg(ChatTheme::accent(), ChatTheme::mixColors(ChatTheme::accent(), ChatTheme::cardBg(), 18),
-                                     m_modeId.toHtmlEscaped()));
-        m_modeChip->setToolTip(i18n("Mode: %1", m_modeId));
+                                     modeText.toHtmlEscaped()));
+        m_modeChip->setToolTip(i18n("Mode: %1", modeText));
         m_modeChip->setVisible(true);
     }
     updateElapsed();
@@ -559,16 +717,27 @@ void SubtaskWidget::updateElapsed()
     const QString stateColor = this->stateColor();
 
     QStringList parts;
-    parts << timeText();
-    if (m_stepCount > 0) {
+    const QString elapsed = timeText();
+    if (!elapsed.isEmpty()) {
+        parts << elapsed;
+    }
+    if (m_toolCount > 0) {
+        parts << i18np("%1 tool", "%1 tools", m_toolCount);
+    } else if (m_stepCount > 0) {
         parts << i18np("%1 step", "%1 steps", m_stepCount);
+    }
+    if (m_errorCount > 0) {
+        parts << i18np("%1 error", "%1 errors", m_errorCount);
     }
 
     m_status->setTextFormat(Qt::RichText);
-    m_status->setText(QStringLiteral("<span style=\"color:%1; font-weight:600;\">%2</span>"
-                                     " <span style=\"color:%3;\">·</span> %4")
-                          .arg(stateColor, stateWord.toHtmlEscaped(), ChatTheme::textMuted(),
-                               parts.join(QStringLiteral(" \xC2\xB7 "))));
+    QString status = QStringLiteral("<span style=\"color:%1; font-weight:600;\">%2</span>")
+                         .arg(stateColor, stateWord.toHtmlEscaped());
+    if (!parts.isEmpty()) {
+        status += QStringLiteral(" <span style=\"color:%1;\">·</span> %2")
+                      .arg(ChatTheme::textMuted(), parts.join(QStringLiteral(" \xC2\xB7 ")));
+    }
+    m_status->setText(status);
     // The tab strip points at this headline; it repaints on every tick.
     Q_EMIT appearanceChanged();
 }
@@ -624,7 +793,12 @@ QString SubtaskWidget::timeText() const
 {
     const qint64 secs = m_elapsed.isValid() ? m_elapsed.elapsed() / 1000 : 0;
     if (secs < 60) {
-        return QStringLiteral("%1s").arg(secs);
+        if (secs > 0) {
+            return QStringLiteral("%1s").arg(secs);
+        }
+        // "Done · 0s" is noise on a restored card, where there is no duration
+        // to report. A live run still says something while it warms up.
+        return m_running ? i18n("<1s") : QString();
     }
     const int mins = static_cast<int>(secs / 60);
     const int remSecs = static_cast<int>(secs % 60);
@@ -634,9 +808,20 @@ QString SubtaskWidget::timeText() const
 QString SubtaskWidget::statusText() const
 {
     QStringList parts;
-    parts << timeText();
-    if (m_stepCount > 0) {
+    const QString elapsed = timeText();
+    if (!elapsed.isEmpty()) {
+        parts << elapsed;
+    }
+    if (m_toolCount > 0) {
+        parts << i18np("%1 tool", "%1 tools", m_toolCount);
+    } else if (m_stepCount > 0) {
         parts << i18np("%1 step", "%1 steps", m_stepCount);
+    }
+    if (m_errorCount > 0) {
+        parts << i18np("%1 error", "%1 errors", m_errorCount);
+    }
+    if (parts.isEmpty()) {
+        return stateWord();
     }
     return QStringLiteral("%1 \xC2\xB7 %2").arg(stateWord(), parts.join(QStringLiteral(" \xC2\xB7 ")));
 }
@@ -693,6 +878,13 @@ void SubtaskWidget::applyStyle()
                        " border-radius: 5px; text-align: left; padding: 2px 7px; font-size: 10px; }"
                        "QPushButton:hover { background-color: %3; }")
             .arg(ChatTheme::accent(), ChatTheme::border(), ChatTheme::hoverBg()));
+    if (m_copyResult) {
+        m_copyResult->setStyleSheet(
+            QStringLiteral("QPushButton { background: transparent; color: %1; border: 1px solid %2;"
+                           " border-radius: 5px; padding: 2px 7px; font-size: 10px; }"
+                           "QPushButton:hover { background-color: %3; }")
+                .arg(ChatTheme::textMuted(), ChatTheme::border(), ChatTheme::hoverBg()));
+    }
     m_activity->setStyleSheet(
         QStringLiteral("QTextBrowser { background: %1; border: 1px solid %2; border-radius: 5px;"
                        " color: %3; font-size: 10px; padding: 4px; }")
@@ -715,14 +907,26 @@ void SubtaskWidget::updateActivityToggle()
         return;
     }
     const bool open = !m_activity->isHidden();
-    // Once there are steps behind it the disclosure says how many, so the user
-    // can see there is data there without opening it first.
+    // Once there is work behind it the disclosure says how much, so the user
+    // can see there is data there without opening it first. Tools and errors
+    // are the useful counts; the raw line count is noise.
     const QString arrow = open ? u"▾"_s : u"▸"_s;
-    const QString text = m_activityLog.isEmpty() ? i18n("Activity  %1", arrow)
-                                                 : i18n("Activity (%1)  %2", m_activityLog.size(), arrow);
-    m_toggle->setText(text);
-    m_toggle->setToolTip(open ? i18n("Hide the sub-agent's tool calls and progress")
-                              : i18n("Show the sub-agent's tool calls and progress"));
+    QStringList summary;
+    if (m_toolCount > 0) {
+        summary << i18np("%1 tool", "%1 tools", m_toolCount);
+    }
+    if (m_errorCount > 0) {
+        summary << i18np("%1 error", "%1 errors", m_errorCount);
+    }
+    const QString label = summary.isEmpty() ? i18n("Activity")
+                                            : i18n("Activity · %1", summary.join(QStringLiteral(" · ")));
+    m_toggle->setText(QStringLiteral("%1  %2").arg(label, arrow));
+    QString tip = open ? i18n("Hide the sub-agent's tool calls and progress")
+                       : i18n("Show the sub-agent's tool calls and progress");
+    if (m_toolCount > 0) {
+        tip += u'\n' + i18np("%1 tool call recorded", "%1 tool calls recorded", m_toolCount);
+    }
+    m_toggle->setToolTip(tip);
 }
 
 void SubtaskWidget::setHeightBudget(int px)

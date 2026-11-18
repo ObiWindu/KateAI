@@ -126,6 +126,9 @@ public:
     // Announces that the Kate AI workspace switched (another folder was
     // opened in Kate). The notice is pinned to the top of the composer.
     void showWorkspaceNotice(const QString &workspace);
+    // Shows a transient notice (a retry, a failed restore) in the strip above
+    // the composer. Errors stay until dismissed.
+    void showInfoMessage(const QString &message, bool isError);
 
     // Modes / MCP / checkpoints, exposed so the view can drive them too.
     void showModeMenu();
@@ -218,7 +221,6 @@ private:
     bool ensureAcpBinaryInstalled(const QString &agentId);
     Settings settingsForAcpAgent(const QString &agentId) const;
     void updateModelSelectorLabel();
-    void showInfoMessage(const QString &message, bool isError);
     void applyInfoBarStyle();
     void applyWorkspaceBannerStyle();
     void saveCurrentConversation();

@@ -63,6 +63,8 @@ private Q_SLOTS:
         // The tabs are on top of the card, and they switch it.
         QPushButton *betaTab = tabFor(&dock, u"Beta"_s);
         QVERIFY2(betaTab, "a second sub-agent has to get a tab to switch to");
+        QVERIFY2(!betaTab->text().contains(u"<span"_s),
+                 qPrintable(QStringLiteral("tab shows literal HTML: %1").arg(betaTab->text())));
         const int tabTop = dock.mapFromGlobal(betaTab->mapToGlobal(QPoint(0, 0))).y();
         const int cardTop = dock.mapFromGlobal(dock.activeCard()->mapToGlobal(QPoint(0, 0))).y();
         QVERIFY2(tabTop < cardTop, "the tabs belong above the card they pick");

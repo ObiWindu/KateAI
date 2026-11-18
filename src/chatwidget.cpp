@@ -365,6 +365,23 @@ QString diffPathFromOutput(const QString &output)
     }
     return fromOld;
 }
+
+// Stored tool results are text only; there is no ok/cancelled flag in the
+// transcript schema. These are the exact markers both the loop and the UI write
+// when a call never produced an answer, so a restored card can say "cancelled"
+// instead of painting it as a successful (green) result.
+bool restoredResultWasCancelled(const QString &output)
+{
+    const QString text = output.trimmed();
+    if (text.isEmpty()) {
+        return false;
+    }
+    const QString lower = text.toLower();
+    return lower.startsWith(u"the tool call was cancelled before it ran"_s)
+        || lower.startsWith(u"stopped before it finished"_s)
+        || lower.contains(u"cancelled before it finished"_s)
+        || lower.startsWith(u"cancelled: turn stopped"_s);
+}
 } // namespace
 
 namespace KateAi
@@ -6374,15 +6391,17 @@ void ChatWidget::restoreHistoricalTool(const QString &toolCallId, const QString 
     // ACP kinds are not in isFileMutatingTool on purpose: that list drives the
     // edit tracker, which already learns about ACP writes from mutatesFiles.
     // isEditToolName covers the OpenCode aliases (write, edit, patch) here so
-    // restored history cards colour like live ones.
+    // restored history cards colour like live ones. Canonical names only: the
+    // old `startsWith("fs/")` painted fs/read_text_file as a write, so a
+    // restored read looked like an edit in the history.
     if (isFileMutatingTool(canonicalName) || ChatTheme::isEditToolName(canonicalName) || canonicalName == u"edit_file"_s
         || canonicalName == u"write_file"_s || canonicalName == u"multi_edit_file"_s
-        || toolName == u"edit"_s || toolName == u"str_replace"_s || toolName == u"str_replace_editor"_s
-        || toolName == u"write"_s || toolName == u"delete"_s || toolName == u"patch"_s || toolName == u"apply_patch"_s
-        || toolName.startsWith(u"fs/"_s)) {
+        || canonicalName == u"edit"_s || canonicalName == u"str_replace"_s || canonicalName == u"str_replace_editor"_s
+        || canonicalName == u"write"_s || canonicalName == u"delete"_s || canonicalName == u"patch"_s
+        || canonicalName == u"apply_patch"_s) {
         risk = ToolRisk::Write;
-    } else if (canonicalName == u"bash"_s || toolName == u"execute"_s || toolName.startsWith(u"terminal"_s)
-               || toolName.startsWith(u"shell"_s)) {
+    } else if (canonicalName == u"bash"_s || canonicalName == u"execute"_s || canonicalName.startsWith(u"terminal"_s)
+               || canonicalName.startsWith(u"shell"_s)) {
         risk = ToolRisk::Execute;
     }
 
@@ -6564,7 +6583,8 @@ void ChatWidget::restoreHistoricalTool(const QString &toolCallId, const QString 
     result.toolCallId = toolCallId;
     result.name = canonicalName;
     result.output = hasResult ? output : QString();
-    result.ok = !result.output.contains(u"STATUS: failure"_s);
+    result.cancelled = hasResult && restoredResultWasCancelled(result.output);
+    result.ok = !result.cancelled && !result.output.contains(u"STATUS: failure"_s);
     // A question's payload is prose, not arguments: without this the restored
     // card shows only the answer and the question that prompted it is lost.
     // setFinished clears the running input, so the question is folded into the
@@ -6625,60 +6645,119 @@ void ChatWidget::rebuildTranscript()
     }
 
     // Specs live on assistant messages and results on Role::Tool messages, and
-    // ACP writes the results first. Gather both before walking so a card can
-    // be created, already filled, at whichever message appears first. A later
-    // duplicate id keeps the last non-empty output. "{}" is not useful args.
+    // ACP writes the results first. Build one entry per *call occurrence*, not
+    // per id: providers and sub-agents reuse ids ("call_0", a retried task), and
+    // keying by id alone silently collapsed several cards into one. Results are
+    // paired with occurrences in order, so duplicates still come back as
+    // separate cards with their own output.
     struct HistoricalTool {
+        QString id;
         QString specName;
         QString resultName;
         QString argumentsJson;
         QString output;
         bool hasResult = false;
+        // Unique key for the widget maps. The first occurrence keeps the plain
+        // id so live routing for a still-running call keeps working.
+        QString widgetKey;
     };
-    QHash<QString, HistoricalTool> catalog;
-    for (const auto &msg : messages) {
-        if (msg.role == ChatMessage::Role::Assistant) {
-            for (const QJsonValue &toolCallVal : msg.toolCalls) {
-                const QJsonObject toolCallObj = toolCallVal.toObject();
-                const QString toolCallId = toolCallObj.value(u"id"_s).toString();
-                if (toolCallId.isEmpty()) {
-                    continue;
-                }
-                HistoricalTool &slot = catalog[toolCallId];
-                const QJsonObject functionObj = toolCallObj.value(u"function"_s).toObject();
-                const QString name = functionObj.value(u"name"_s).toString();
-                if (!name.isEmpty()) {
-                    slot.specName = name;
-                }
-                const QString argumentsJson = functionObj.value(u"arguments"_s).toString().trimmed();
-                if (!argumentsJson.isEmpty() && argumentsJson != u"{}"_s) {
-                    slot.argumentsJson = argumentsJson;
-                }
-            }
-        } else if (msg.role == ChatMessage::Role::Tool) {
-            if (msg.toolCallId.isEmpty()) {
+    QList<HistoricalTool> calls;
+    QHash<QString, QList<int>> callIndexesById;
+    QList<QList<int>> callOccurrencesByMessage(messages.size());
+    QSet<QString> usedWidgetKeys;
+    auto makeWidgetKey = [&usedWidgetKeys](const QString &id) {
+        QString key = id;
+        int suffix = 2;
+        while (usedWidgetKeys.contains(key)) {
+            key = id + u"#"_s + QString::number(suffix++);
+        }
+        usedWidgetKeys.insert(key);
+        return key;
+    };
+
+    for (int mi = 0; mi < messages.size(); ++mi) {
+        const ChatMessage &msg = messages.at(mi);
+        if (msg.role != ChatMessage::Role::Assistant) {
+            continue;
+        }
+        QList<int> occurrences;
+        for (const QJsonValue &toolCallVal : msg.toolCalls) {
+            const QJsonObject toolCallObj = toolCallVal.toObject();
+            const QString toolCallId = toolCallObj.value(u"id"_s).toString();
+            if (toolCallId.isEmpty()) {
+                occurrences.append(-1);
                 continue;
             }
-            HistoricalTool &slot = catalog[msg.toolCallId];
-            if (!msg.name.isEmpty()) {
-                slot.resultName = msg.name;
+            HistoricalTool slot;
+            slot.id = toolCallId;
+            slot.widgetKey = makeWidgetKey(toolCallId);
+            const QJsonObject functionObj = toolCallObj.value(u"function"_s).toObject();
+            slot.specName = functionObj.value(u"name"_s).toString();
+            const QString argumentsJson = functionObj.value(u"arguments"_s).toString().trimmed();
+            if (!argumentsJson.isEmpty() && argumentsJson != u"{}"_s) {
+                slot.argumentsJson = argumentsJson;
             }
-            slot.hasResult = true;
-            if (!msg.content.isEmpty()) {
-                slot.output = msg.content;
-            }
+            const int index = calls.size();
+            calls.append(slot);
+            callIndexesById[toolCallId].append(index);
+            occurrences.append(index);
         }
+        callOccurrencesByMessage[mi] = occurrences;
     }
 
-    QSet<QString> placed;
-    // First sight of an id is where the card goes. A later sight (ACP's
-    // trailing assistant toolCalls, or a native tool message after the bubble)
-    // must not create a second, empty card.
-    auto place = [&](const QString &toolCallId) {
-        if (toolCallId.isEmpty() || placed.contains(toolCallId)) {
+    // Tool results are stored as separate messages, and their position relative
+    // to the assistant message that declares the call depends on the driver:
+    // the native loop appends the declaring message first and the results after
+    // it, while an ACP agent reports each result as it finishes and the
+    // declaring assistant message only lands when the whole prompt ends. Bind
+    // every result to its call occurrence up front: reuse the next unmatched
+    // occurrence for the id. A result with no declaration at all still gets a
+    // card, so an interrupted history does not drop work the user can see.
+    QHash<QString, int> nextCallForResult;
+    QList<int> resultOccurrence(messages.size(), -1);
+    for (int mi = 0; mi < messages.size(); ++mi) {
+        const ChatMessage &msg = messages.at(mi);
+        if (msg.role != ChatMessage::Role::Tool || msg.toolCallId.isEmpty()) {
+            continue;
+        }
+        const QList<int> candidates = callIndexesById.value(msg.toolCallId);
+        const int next = nextCallForResult.value(msg.toolCallId, 0);
+        int occurrence = -1;
+        if (next < candidates.size()) {
+            occurrence = candidates.at(next);
+        } else {
+            HistoricalTool orphan;
+            orphan.id = msg.toolCallId;
+            orphan.widgetKey = makeWidgetKey(msg.toolCallId);
+            occurrence = calls.size();
+            calls.append(orphan);
+            callIndexesById[msg.toolCallId].append(occurrence);
+        }
+        nextCallForResult[msg.toolCallId] = next + 1;
+
+        HistoricalTool &slot = calls[occurrence];
+        if (!msg.name.isEmpty()) {
+            slot.resultName = msg.name;
+        }
+        slot.hasResult = true;
+        if (!msg.content.isEmpty()) {
+            slot.output = msg.content;
+        }
+        resultOccurrence[mi] = occurrence;
+    }
+
+    QSet<int> placedCalls;
+    // First sight of a call occurrence is where its card goes. A later sight
+    // (ACP's trailing assistant toolCalls, or a native tool message after the
+    // bubble) must not create a second, empty card.
+    auto place = [&](int occurrenceIndex) {
+        if (occurrenceIndex < 0 || occurrenceIndex >= calls.size()
+            || placedCalls.contains(occurrenceIndex)) {
             return;
         }
-        const HistoricalTool spec = catalog.value(toolCallId);
+        placedCalls.insert(occurrenceIndex);
+        const HistoricalTool spec = calls.at(occurrenceIndex);
+        const QString widgetKey = spec.widgetKey;
         const QString toolName = !spec.specName.isEmpty() ? spec.specName : spec.resultName;
         const QString canonicalToolName = KateAi::canonicalToolName(toolName);
         const QString argumentsJson = spec.argumentsJson;
@@ -6689,23 +6768,24 @@ void ChatWidget::rebuildTranscript()
             if (!restoredDoc.isNull() && restoredDoc.isObject()) {
                 restoredArgs = restoredDoc.object();
             }
-            auto *subtaskWidget = new SubtaskWidget(toolCallId, m_intentDock);
-            connect(subtaskWidget, &SubtaskWidget::cancelRequested, this, [this](const QString &taskId) {
-                m_agent.cancelSubtask(taskId);
+            auto *subtaskWidget = new SubtaskWidget(widgetKey, m_intentDock);
+            const QString liveTaskId = spec.id;
+            connect(subtaskWidget, &SubtaskWidget::cancelRequested, this, [this, liveTaskId](const QString &) {
+                m_agent.cancelSubtask(liveTaskId);
             });
             const QString agentName = restoredArgs.value(u"agent"_s).toString();
             subtaskWidget->startAgent(agentName.isEmpty() ? i18n("Sub-agent") : agentName,
                                       restoredArgs.value(u"mode"_s).toString(),
                                       restoredArgs.value(u"description"_s).toString());
-            m_subtaskWidgets.insert(toolCallId, subtaskWidget);
+            m_subtaskWidgets.insert(widgetKey, subtaskWidget);
             m_subtaskOrder.append(subtaskWidget);
-            placed.insert(toolCallId);
             if (spec.hasResult) {
                 ToolResult result;
-                result.toolCallId = toolCallId;
+                result.toolCallId = widgetKey;
                 result.name = spec.resultName.isEmpty() ? toolName : spec.resultName;
                 result.output = spec.output;
-                result.ok = !spec.output.contains(u"STATUS: failure"_s);
+                result.cancelled = restoredResultWasCancelled(spec.output);
+                result.ok = !result.cancelled && !spec.output.contains(u"STATUS: failure"_s);
                 subtaskWidget->finishAgent(result);
                 // A restored sub-agent that already reported back belongs to
                 // the thread, exactly like a live one that retired on finish.
@@ -6718,7 +6798,7 @@ void ChatWidget::rebuildTranscript()
                 // Still running (a rebuild during the turn): the card below
                 // whatever was placed just before it in the rebuild order,
                 // which is the position it ran in.
-                m_subtaskAnchors.insert(toolCallId, lastTranscriptContentWidget());
+                m_subtaskAnchors.insert(widgetKey, lastTranscriptContentWidget());
                 addIntentWidget(subtaskWidget);
             }
             return;
@@ -6748,39 +6828,23 @@ void ChatWidget::rebuildTranscript()
             } else {
                 suggestion.line = 0;
             }
-            placed.insert(toolCallId);
             if (suggestion.text.isEmpty()) {
                 return;
             }
-            auto *card = new SuggestionWidget(toolCallId, m_transcriptContainer);
+            auto *card = new SuggestionWidget(widgetKey, m_transcriptContainer);
             card->setSuggestion(suggestion.text, suggestion.path, suggestion.line);
             card->markDecided();
-            m_suggestionWidgets.insert(toolCallId, card);
+            m_suggestionWidgets.insert(widgetKey, card);
             m_suggestionOrder.append(card);
             appendTranscriptWidget(card);
             return;
         }
 
-        restoreHistoricalTool(toolCallId, toolName, argumentsJson, spec.output, spec.hasResult);
-        placed.insert(toolCallId);
+        restoreHistoricalTool(widgetKey, toolName, argumentsJson, spec.output, spec.hasResult);
     };
 
-    // Tool results are stored as separate messages, and their position relative
-    // to the assistant message that declares the call depends on the driver:
-    // the native loop appends the declaring message first and the results after
-    // it, while an ACP agent reports each result as it finishes and the
-    // declaring assistant message only lands when the whole prompt ends. Index
-    // the results up front so a card can be created already finished, whichever
-    // order the history has — matching results to widgets in the loop below
-    // alone would drop every ACP result and leave the restored card's box empty.
-    QHash<QString, ChatMessage> toolResultsById;
-    for (const auto &msg : messages) {
-        if (msg.role == ChatMessage::Role::Tool && !msg.toolCallId.isEmpty()) {
-            toolResultsById.insert(msg.toolCallId, msg);
-        }
-    }
-
-    for (const auto &msg : messages) {
+    for (int mi = 0; mi < messages.size(); ++mi) {
+        const ChatMessage &msg = messages.at(mi);
         switch (msg.role) {
             case ChatMessage::Role::User:
                 if (!isInternalUserMessage(msg.content)) {
@@ -6863,14 +6927,17 @@ void ChatWidget::rebuildTranscript()
                 // message earlier in the transcript already placed them (ACP
                 // stores the result before this bubble). Native order still
                 // lands the card here, already filled from the pre-scan.
-                for (const QJsonValue &toolCallVal : msg.toolCalls) {
-                    place(toolCallVal.toObject().value(u"id"_s).toString());
+                for (int occurrence : callOccurrencesByMessage.at(mi)) {
+                    place(occurrence);
                 }
                 break;
             case ChatMessage::Role::Tool:
                 // Place here when the result precedes the assistant message.
-                // An id already placed (native: card follows the bubble) is skipped.
-                place(msg.toolCallId);
+                // A call already placed (native: card follows the bubble) is
+                // skipped because its occurrence is already in placedCalls.
+                if (mi < resultOccurrence.size()) {
+                    place(resultOccurrence.at(mi));
+                }
                 break;
             case ChatMessage::Role::System:
                 // System messages are not shown in transcript
@@ -7100,7 +7167,10 @@ void ChatWidget::switchToConversation(const QString &conversationId)
     // The running turn belongs to the conversation that is being left. Without
     // this the agent keeps streaming, and a delta that arrives after the
     // switch would be rendered into the new transcript and saved under the
-    // new id.
+    // new id. The flag goes up first: abort() emits turnFinished synchronously,
+    // and a re-entrant save/delta must see the loading state, not the old
+    // transcript.
+    m_loadingConversation = true;
     m_agent.abort();
 
     // Save current conversation before switching
@@ -7110,8 +7180,6 @@ void ChatWidget::switchToConversation(const QString &conversationId)
             SessionStore::saveConversation(m_currentConversationId, sessionData, QString(), m_settings.maxSavedConversations);
         }
     }
-
-    m_loadingConversation = true;
 
     // Load the new conversation
     const auto sessionData = SessionStore::loadConversation(conversationId);

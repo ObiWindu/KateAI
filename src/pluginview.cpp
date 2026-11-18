@@ -220,15 +220,35 @@ QString gitBranchForWorkspace(const QString &workspace)
                 // SessionStore may repair a stale active pointer by falling
                 // back to the newest persisted transcript.
                 const QString claimedId = plugin->claimSessionConversation();
-                const auto sessionData = claimedId.isEmpty()
-                    ? SessionStore::load()
-                    : SessionStore::loadConversation(claimedId);
+                SessionStore::SessionData sessionData;
                 QString activeId = claimedId;
-                if (activeId.isEmpty()) {
+                if (claimedId.isEmpty()) {
+                    sessionData = SessionStore::load();
                     activeId = SessionStore::getActiveConversationId();
-                    if (activeId.isEmpty()) {
+                } else {
+                    sessionData = SessionStore::loadConversation(claimedId);
+                    if (sessionData.loadFailed) {
+                        // The stored transcript is unreadable. Restoring it as
+                        // an empty chat and autosaving would overwrite the one
+                        // copy that might still be salvageable, so start on a
+                        // fresh id and leave the damaged row alone.
                         activeId = SessionStore::createNewConversation();
+                        sessionData = SessionStore::SessionData();
+                        m_chat->showInfoMessage(
+                            i18n("The saved conversation could not be read. It was left untouched; starting a new chat so it is not overwritten."),
+                            true);
+                    } else if (sessionData.messages.isEmpty()
+                               && SessionStore::conversationTitle(claimedId).isEmpty()) {
+                        // The session pointed at a conversation that no longer
+                        // exists (pruned, deleted, or a never-saved new chat).
+                        // Leaving the claimed id here opened a blank panel
+                        // while perfectly good history sat next to it.
+                        sessionData = SessionStore::load();
+                        activeId = SessionStore::getActiveConversationId();
                     }
+                }
+                if (activeId.isEmpty()) {
+                    activeId = SessionStore::createNewConversation();
                 }
                 m_chat->setCurrentConversationId(activeId);
 

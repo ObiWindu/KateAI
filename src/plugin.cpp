@@ -430,9 +430,10 @@ void KateAiPlugin::readSessionConfig(const KConfigGroup &config)
     // session was saved. Views claim them in the same order as Kate
     // recreates the windows.
     m_sessionConversations = config.readEntry(kConversationIdsKey, QStringList());
+    m_lastConversationIds = m_sessionConversations;
 }
 
-void KateAiPlugin::writeSessionConfig(KConfigGroup &config)
+QStringList KateAiPlugin::liveConversationIds() const
 {
     QStringList ids;
     for (KateAiView *view : m_views) {
@@ -442,6 +443,23 @@ void KateAiPlugin::writeSessionConfig(KConfigGroup &config)
         if (!id.isEmpty()) {
             ids.append(id);
         }
+    }
+    return ids;
+}
+
+void KateAiPlugin::writeSessionConfig(KConfigGroup &config)
+{
+    // Normally the live views are still here and are the authoritative list.
+    // Kate may write the session config after it has destroyed the windows
+    // (the plugin and its views are separate objects), so when every view has
+    // already unregistered, fall back to the order captured on the last change
+    // or unregister. Writing an empty list there made every restart open a
+    // blank chat even though the transcripts were safely stored.
+    QStringList ids = liveConversationIds();
+    if (ids.isEmpty()) {
+        ids = m_lastConversationIds;
+    } else {
+        m_lastConversationIds = ids;
     }
     config.writeEntry(kConversationIdsKey, ids);
 }
@@ -455,6 +473,12 @@ void KateAiPlugin::registerView(KateAiView *view)
 
 void KateAiPlugin::unregisterView(KateAiView *view)
 {
+    // Snapshot before dropping the view: this may be the last place the session
+    // id is available if Kate tears the window down before writing the session.
+    const QStringList ids = liveConversationIds();
+    if (!ids.isEmpty()) {
+        m_lastConversationIds = ids;
+    }
     m_views.removeAll(view);
     m_viewConversations.remove(view);
 }
@@ -473,6 +497,10 @@ void KateAiPlugin::noteConversationChanged(KateAiView *view, const QString &conv
         return;
     }
     m_viewConversations.insert(view, conversationId);
+    const QStringList ids = liveConversationIds();
+    if (!ids.isEmpty()) {
+        m_lastConversationIds = ids;
+    }
 }
 
 } // namespace KateAi

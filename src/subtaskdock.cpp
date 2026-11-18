@@ -244,8 +244,10 @@ void SubtaskDock::refreshTabs()
         QPushButton *tab = entry.tab.data();
         const bool active = (card == m_active.data());
         const QString name = tab->fontMetrics().elidedText(card->displayName(), Qt::ElideRight, MaxTabLabelWidth);
-        tab->setText(QStringLiteral("<span style=\"color:%1;\">%2</span> %3")
-                         .arg(card->stateColor(), card->stateGlyph(), name.toHtmlEscaped()));
+        // Plain text: QPushButton does not render a rich-text label, so an
+        // HTML span here paints its literal tags. The state colour already
+        // rides on the tab's border and the glyph names the state.
+        tab->setText(QStringLiteral("%1 %2").arg(card->stateGlyph(), name));
         QString tip = card->statusText();
         if (!card->description().isEmpty()) {
             tip += u'\n';
