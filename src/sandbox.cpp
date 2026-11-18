@@ -1364,6 +1364,18 @@ static QString seatbeltQuote(const QString &path)
 }
 #endif
 
+// Used by the cross-platform working-directory confinement check in
+// wrapCommand() and wrapArgv(), so it must not live behind a platform guard.
+static bool pathIsWithinOrEqual(const QString &path, const QString &root)
+{
+    if (path.isEmpty() || root.isEmpty()) {
+        return false;
+    }
+    const QString normalizedPath = QDir::cleanPath(QDir::fromNativeSeparators(path));
+    const QString normalizedRoot = QDir::cleanPath(QDir::fromNativeSeparators(root));
+    return normalizedPath == normalizedRoot || normalizedPath.startsWith(normalizedRoot + u'/');
+}
+
 #if defined(Q_OS_UNIX)
 // The home directory a strict sandbox gets. It is a fresh, empty directory
 // inside the sandbox's private tmpfs, so commands cannot read the user's
@@ -1389,16 +1401,6 @@ static QString sandboxRuntimePath(SandboxProfile profile)
     return profile == SandboxProfile::Strict ? sandboxHomePath() + u"/run"_s
                                              : u"/tmp/kateai-runtime"_s;
 #endif
-}
-
-static bool pathIsWithinOrEqual(const QString &path, const QString &root)
-{
-    if (path.isEmpty() || root.isEmpty()) {
-        return false;
-    }
-    const QString normalizedPath = QDir::cleanPath(QDir::fromNativeSeparators(path));
-    const QString normalizedRoot = QDir::cleanPath(QDir::fromNativeSeparators(root));
-    return normalizedPath == normalizedRoot || normalizedPath.startsWith(normalizedRoot + u'/');
 }
 
 // Credential stores and session channels that must not be reachable from a
