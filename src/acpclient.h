@@ -98,6 +98,7 @@ public:
 
     void prompt(const QString &text);
     void resolvePermission(PermissionDecision decision);
+    void resolvePermission(PermissionDecision decision, const QString &toolCallId);
     // True while an ask_user / elicitation RPC is parked waiting for the
     // user's answer, or a session/request_permission carrying answer choices
     // is being shown as a question card.
@@ -440,6 +441,9 @@ private:
     QHash<int, Pending> m_pending;
 
     QString m_sessionId;
+    // A session/new or session/load request is in flight. A second prompt
+    // must queue instead of opening a second agent-side session.
+    bool m_sessionOpening = false;
     bool m_loadSession = false;
     bool m_resumeSession = false;
     bool m_closeSession = false;

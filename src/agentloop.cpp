@@ -142,8 +142,11 @@ AgentLoop::AgentLoop(QObject *parent)
         Q_EMIT thinkingDelta(delta);
     });
     connect(&m_client, &LlmClient::textReset, this, [this]() {
-        // A retry replaces the answer that was streamed so far.
+        // A retry replaces the answer that was streamed so far, including the
+        // reasoning that belonged to the failed attempt. Keeping it would
+        // concatenate two attempts and replay the mixture later.
         m_currentAssistant.clear();
+        m_currentThinking.clear();
         Q_EMIT assistantReset();
     });
     connect(&m_client, &LlmClient::finished, this, &AgentLoop::onFinished);
@@ -231,6 +234,14 @@ AgentLoop::AgentLoop(QObject *parent)
         Q_EMIT toolFinished(result);
     });
     connect(&m_acp, &AcpClient::permissionNeeded, this, [this](const PermissionRequest &request) {
+        // The agent runs its own tools, but the active mode still decides
+        // which actions exist. Without this check a plan/ask turn could let
+        // an agent write or run commands through AlwaysApprove/AcceptEdits.
+        if (!acpToolAllowed(request)) {
+            m_acp.resolvePermission(PermissionDecision::Deny);
+            Q_EMIT activityUpdated(i18n("Declined '%1': the active mode does not allow it.", request.toolName));
+            return;
+        }
         PermissionDecision decision = PermissionDecision::AllowOnce;
         QString reason;
         if (acpAutoDecision(request, &decision, &reason)) {
@@ -1094,6 +1105,9 @@ void AgentLoop::abort()
         child->deleteLater();
     }
 
+    if (m_tools) {
+        m_tools->cancelReadTools();
+    }
     m_inFlight = 0;
     // A sub-task that reports back while it is being cancelled leaves its
     // result behind. The turn is over, so it does not belong to the next
@@ -1165,6 +1179,7 @@ void AgentLoop::start(const QString &userText)
 
     // A new turn invalidates every async result captured by the previous one.
     ++m_turnGeneration;
+    m_inFlight = 0;
     m_turnId = QUuid::createUuid().toString(QUuid::WithoutBraces);
     m_lastTurnState = TurnState::Preparing;
     m_terminalSignalled = false;
@@ -1651,7 +1666,8 @@ bool AgentLoop::isVerificationForChangedFiles(const ToolCall &call) const
         if (path.isEmpty()) {
             path = args.value(u"TargetFile"_s).toString();
         }
-        return !path.isEmpty() && m_changedPaths.contains(path);
+        return !path.isEmpty()
+            && (m_changedPaths.contains(path) || m_changedPaths.contains(lockKeyForPath(path)));
     }
     // grep/bash can be a real verification when the command/search is not
     // tied to a specific path; the model is explicitly instructed to use them
@@ -1781,7 +1797,8 @@ QString AgentLoop::formatToolResult(const ToolCall &call, const ToolResult &resu
     out += u"TOOL: %1\n"_s.arg(call.name);
     out += u"STATUS: %1\n"_s.arg(result.ok ? u"success"_s : u"failure"_s);
 
-    const QString path = call.arguments.value(u"path"_s).toString();
+    const QJsonObject args = effectiveArgs(call);
+    const QString path = args.value(u"path"_s).toString();
     if (!path.isEmpty()) {
         out += u"TARGET: %1\n"_s.arg(path);
     }
@@ -1839,7 +1856,7 @@ void AgentLoop::appendToolResult(const ToolCall &call, ToolResult result)
         }
         m_actionRepeatCounts.clear();
         for (const QString &path : mutationPathsForCall(call)) {
-            m_changedPaths.insert(path);
+            m_changedPaths.insert(lockKeyForPath(path));
         }
         m_changesNeedVerification = true;
         m_verificationAttempted = false;
@@ -1868,24 +1885,21 @@ void AgentLoop::appendCancelledToolResults()
     // answer with HTTP 400, the Anthropic path with a missing tool_result
     // block. A cancelled turn leaves exactly that behind, so every outstanding
     // call gets a result that says it was cancelled.
-    for (int i = m_messages.size() - 1; i >= 0; --i) {
-        if (m_messages.at(i).role != ChatMessage::Role::Assistant) {
+    //
+    // Results are collected from the whole history, not only from messages
+    // after the newest assistant turn: ACP agents report tool results while
+    // the prompt runs and the declaring assistant message is appended last,
+    // so a restored ACP conversation stores the results *before* the calls.
+    QSet<QString> answered;
+    for (const ChatMessage &message : std::as_const(m_messages)) {
+        if (message.role == ChatMessage::Role::Tool && !message.toolCallId.isEmpty()) {
+            answered.insert(message.toolCallId);
+        }
+    }
+    QList<ChatMessage> additions;
+    for (const ChatMessage &message : std::as_const(m_messages)) {
+        if (message.role != ChatMessage::Role::Assistant) {
             continue;
-        }
-        // A copy, not a reference: the appends below can grow m_messages and
-        // free the buffer a reference into it names, and the toolCalls loop
-        // would then read freed memory. This runs on every stop, so it is the
-        // difference between a clean cancel and taking the editor down.
-        const ChatMessage message = m_messages.at(i);
-        if (message.toolCalls.isEmpty()) {
-            return;
-        }
-        QSet<QString> answered;
-        for (int j = i + 1; j < m_messages.size(); ++j) {
-            const ChatMessage &toolMessage = m_messages.at(j);
-            if (toolMessage.role == ChatMessage::Role::Tool && !toolMessage.toolCallId.isEmpty()) {
-                answered.insert(toolMessage.toolCallId);
-            }
         }
         for (const QJsonValue &value : message.toolCalls) {
             const QJsonObject object = value.toObject();
@@ -1898,10 +1912,11 @@ void AgentLoop::appendCancelledToolResults()
             toolMessage.toolCallId = id;
             toolMessage.name = object.value(u"function"_s).toObject().value(u"name"_s).toString();
             toolMessage.content = u"The tool call was cancelled before it ran."_s;
-            m_messages.append(toolMessage);
+            additions.append(toolMessage);
+            answered.insert(id);
         }
-        return;
     }
+    m_messages.append(additions);
 }
 
 void AgentLoop::onFailed(const QString &error)
@@ -1914,7 +1929,7 @@ void AgentLoop::onFailed(const QString &error)
         || lower.contains(u"prompt too large"_s)
         || lower.contains(u"too many tokens"_s)
         || lower.contains(u"payload too large"_s);
-    if (overflow && m_busy && m_contextOverflowRetries < 6) {
+    if (overflow && !usesAcpNative(m_settings) && m_busy && m_contextOverflowRetries < 6) {
         ++m_contextOverflowRetries;
         ++m_compactionLevel;
         if (m_modelRequests > 0) {
@@ -2039,6 +2054,17 @@ void AgentLoop::finishWithFailure(const QString &error)
     setTurnState(TurnState::Failed);
     m_queue.clear();
     m_pendingResults.clear();
+    // In-flight read/search workers must not keep the failed turn's counter
+    // alive; a late completion would otherwise leave the next turn waiting
+    // forever, or inject its result into that turn.
+    if (m_tools) {
+        m_tools->cancelReadTools();
+    }
+    m_inFlight = 0;
+    if (!m_runningBashId.isEmpty() && m_tools) {
+        m_tools->cancelBash(m_runningBashId);
+        m_runningBashId.clear();
+    }
     m_waitingCall = {};
     m_waitingRequest = {};
     m_pendingAcpAnswer.clear();
@@ -2156,7 +2182,11 @@ void AgentLoop::processQueue()
         return;
     }
 
-    const ToolCall call = m_queue.takeFirst();
+    ToolCall call = m_queue.takeFirst();
+    // The access and permission layers canonicalize names, so execution must
+    // use the same spelling. Otherwise "Read", "patch" or "terminal/exec"
+    // passes the mode check and then fails as an unknown tool.
+    call.name = canonicalToolName(call.name);
     executeOne(call);
 }
 
@@ -2567,6 +2597,7 @@ bool AgentLoop::isAsyncTool(const QString &toolName) const
 
 void AgentLoop::startWebTool(const ToolCall &call)
 {
+    const quint64 generation = m_turnGeneration;
     const QJsonObject args = effectiveArgs(call);
     const QString query = args.value(u"query"_s).toString().trimmed();
     const QString url = args.value(u"url"_s).toString().trimmed();
@@ -2611,12 +2642,15 @@ void AgentLoop::startWebTool(const ToolCall &call)
         // fire (and discard) every sibling's handler and drop their result.
         auto conn = QSharedPointer<QMetaObject::Connection>::create();
         *conn = connect(&m_web, &WebSearch::searchFinished, this,
-                [this, call, query, conn, progressConn](const QString &callId, const QList<WebSearchResult> &results, const QString &error) {
+                [this, call, query, conn, progressConn, generation](const QString &callId, const QList<WebSearchResult> &results, const QString &error) {
                     if (callId != call.id) {
                         return;
                     }
                     disconnect(*conn);
                     disconnect(*progressConn);
+                    if (generation != m_turnGeneration) {
+                        return;
+                    }
                     ToolResult out;
                     out.toolCallId = callId;
                     out.name = call.name;
@@ -2643,12 +2677,15 @@ void AgentLoop::startWebTool(const ToolCall &call)
 
     auto conn = QSharedPointer<QMetaObject::Connection>::create();
     *conn = connect(&m_web, &WebSearch::fetchFinished, this,
-            [this, call, conn, progressConn](const QString &callId, const QString &title, const QString &text, const QString &error) {
+            [this, call, conn, progressConn, generation](const QString &callId, const QString &title, const QString &text, const QString &error) {
                 if (callId != call.id) {
                     return;
                 }
                 disconnect(*conn);
                 disconnect(*progressConn);
+                if (generation != m_turnGeneration) {
+                    return;
+                }
                 ToolResult out;
                 out.toolCallId = callId;
                 out.name = call.name;
@@ -2779,14 +2816,34 @@ void AgentLoop::releaseEditLocksFor(const ToolCall &call)
 
 QString AgentLoop::lockKeyForPath(const QString &path) const
 {
+    QString absolute = path;
     if (!m_workspace.isEmpty() && QDir::isRelativePath(path)) {
         // cleanPath so the lock key is canonical: "src/../src/a.cpp" and
         // "src/a.cpp" must name the same lock, or two agents could hold
         // "different" locks on one file. A relative path is resolved against
         // the workspace, not against the working directory of the process.
-        return QDir::cleanPath(m_workspace + QLatin1Char('/') + path);
+        absolute = QDir::cleanPath(m_workspace + QLatin1Char('/') + path);
+    } else {
+        absolute = QDir::cleanPath(path);
     }
-    return path;
+    // Resolve symlinks too; Sandbox::resolve() does, and a lock key that does
+    // not would let two spellings of one file be edited concurrently.
+    const QString canonical = QFileInfo(absolute).canonicalFilePath();
+    if (!canonical.isEmpty()) {
+        absolute = canonical;
+    } else {
+        const QFileInfo info(absolute);
+        const QString parentCanonical = QFileInfo(info.absolutePath()).canonicalFilePath();
+        if (!parentCanonical.isEmpty()) {
+            absolute = QDir::cleanPath(parentCanonical + QLatin1Char('/') + info.fileName());
+        }
+    }
+#if defined(Q_OS_WIN) || defined(Q_OS_MACOS)
+    // Case-insensitive filesystems name one file with several spellings.
+    // Over-locking on a case-sensitive volume is safe.
+    absolute = absolute.toLower();
+#endif
+    return absolute;
 }
 
 bool AgentLoop::acquireEditLock(const ToolCall &call, QString *deniedBy)
@@ -2845,6 +2902,21 @@ void AgentLoop::dispatchAsyncTool(const ToolCall &call)
         return;
     }
 
+    // Use the same argument parsing as the native path. Passing raw
+    // call.arguments sent {} when the call only carried argumentsJson (the
+    // normal LLM shape, or a truncated stream), executing a side-effecting
+    // tool with empty arguments instead of failing.
+    QString parseError;
+    const QJsonObject mcpArgs = parseToolArgs(call, &parseError);
+    if (!parseError.isEmpty() && mcpArgs.isEmpty() && !call.argumentsJson.isEmpty()) {
+        ToolResult result;
+        result.ok = false;
+        result.output = parseError;
+        finishAsyncTool(call, result);
+        return;
+    }
+
+    const quint64 generation = m_turnGeneration;
     const QString token = QStringLiteral("mcp-%1").arg(++m_asyncCounter);
     // A single-shot connection would be consumed by the FIRST toolResult()
     // emission, whatever its token: with several MCP calls in flight, one
@@ -2857,11 +2929,14 @@ void AgentLoop::dispatchAsyncTool(const ToolCall &call)
         m_mcp,
         &McpManager::toolResult,
         this,
-        [this, call, token, conn](const QString &id, bool ok, const QString &output, const QString &error) {
+        [this, call, token, conn, generation](const QString &id, bool ok, const QString &output, const QString &error) {
             if (id != token) {
                 return;
             }
             disconnect(*conn);
+            if (generation != m_turnGeneration) {
+                return;
+            }
             ToolResult result;
             result.toolCallId = call.id;
             result.name = call.name;
@@ -2871,7 +2946,7 @@ void AgentLoop::dispatchAsyncTool(const ToolCall &call)
             result.output = ok ? output : error;
             finishAsyncTool(call, result);
         });
-    m_mcp->callTool(token, call.name, call.arguments);
+    m_mcp->callTool(token, call.name, mcpArgs);
 }
 
 // Renders the sub-agent's tool log so the orchestrator can audit its answer.
@@ -2960,7 +3035,17 @@ void AgentLoop::dispatchSubtask(const ToolCall &call)
 
     // Use the tool call id so the chat card, the activity log and the tool
     // result all key off the same string.
-    const QString taskId = call.id.isEmpty() ? QStringLiteral("sub-%1").arg(++m_asyncCounter) : call.id;
+    QString taskId = call.id.isEmpty() ? QStringLiteral("sub-%1").arg(++m_asyncCounter) : call.id;
+    // Ids are model-supplied and not guaranteed unique. A duplicate would
+    // overwrite the first child in m_activeSubtasks (orphaning it) and give
+    // both children the same lock identity.
+    if (m_activeSubtasks.contains(taskId)) {
+        ToolResult result;
+        result.ok = false;
+        result.output = u"A sub-agent with id '%1' is already running. Use a unique task id."_s.arg(taskId);
+        finishAsyncTool(call, result);
+        return;
+    }
     child->setSelfId(taskId);
 
     Settings childSettings = m_settings;
@@ -3293,10 +3378,9 @@ void AgentLoop::answerQuestion(const QString &answer)
         result.cancelled = true;
         result.output = u"(no answer provided)"_s;
     }
-    // The question card in the transcript was put in running state by
-    // toolStarted; without this it would spin forever because only
-    // toolFinished settles it.
-    Q_EMIT toolFinished(result);
+    // appendToolResult() emits toolFinished, which settles the card that
+    // toolStarted put in running state. Emitting here as well delivered the
+    // same result to every consumer twice.
     appendToolResult(call, result);
     markActionExecuted(actionSignature(call));
     m_state = State::ExecutingTools;
@@ -3305,7 +3389,18 @@ void AgentLoop::answerQuestion(const QString &answer)
 
 void AgentLoop::resolvePermission(PermissionDecision decision)
 {
+    resolvePermission(decision, QString());
+}
+
+void AgentLoop::resolvePermission(PermissionDecision decision, const QString &toolCallId)
+{
     if (!m_busy || m_state != State::WaitingForPermission || m_waitingCall.name.isEmpty()) {
+        return;
+    }
+    // A decision from a card that a newer request replaced must not approve
+    // the newer request. The UI may still have the old buttons on screen.
+    if (!toolCallId.isEmpty()
+        && toolCallId != m_waitingRequest.toolCallId && toolCallId != m_waitingCall.id) {
         return;
     }
 
@@ -3316,7 +3411,7 @@ void AgentLoop::resolvePermission(PermissionDecision decision)
         m_waitingCall = {};
         m_waitingRequest = {};
         m_state = State::WaitingForModel;
-        m_acp.resolvePermission(decision);
+        m_acp.resolvePermission(decision, toolCallId);
         return;
     }
 
@@ -3464,6 +3559,10 @@ void AgentLoop::restoreSession(const SessionStore::SessionData &data)
         m_acp.setResumeSessionId(data.acpSessionId);
     }
     m_toolCalls = data.toolCalls;
+    // A session saved while a tool was still running has an assistant message
+    // with tool_calls and no matching Tool messages. Repair the pairing before
+    // the next provider request, which would otherwise be rejected with 400.
+    appendCancelledToolResults();
 }
 
 void AgentLoop::clearSession()

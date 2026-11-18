@@ -29,6 +29,9 @@ private Q_SLOTS:
             u"LOGIN_PASSWD"_s,
             u"DEPLOY_PRIVATE_KEY"_s,
             u"GOOGLE_APPLICATION_CREDENTIALS"_s,
+            u"PGPASSWORD"_s,
+            u"MYSQL_PWD"_s,
+            u"SSH_AUTH_SOCK"_s,
             u"TOKEN"_s,
             u"PASSWORD"_s,
         };

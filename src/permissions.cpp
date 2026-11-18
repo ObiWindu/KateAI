@@ -81,7 +81,12 @@ ToolRisk PermissionPolicy::riskFor(const QString &toolName) const
 
 PermissionPolicy::Verdict PermissionPolicy::evaluate(const QString &toolName, const QJsonObject &arguments, const Sandbox &sandbox, QString *reason) const
 {
-    if (toolName == u"bash"_s) {
+    // Access, risk and the hard-deny checks all use the canonical name. The
+    // raw comparison here used to let "BASH"/"execute" skip the command checks
+    // while still being classified as the bash tool everywhere else.
+    const QString canonical = canonicalToolName(toolName);
+    const bool isBash = canonical == u"bash"_s;
+    if (isBash) {
         const QString command = arguments.value(u"command"_s).toString();
         if (sandbox.isAlwaysDeniedCommand(command)) {
             if (reason) {
@@ -106,19 +111,28 @@ PermissionPolicy::Verdict PermissionPolicy::evaluate(const QString &toolName, co
     // Delegation is consent to spend, not a mutation of the workspace. Every
     // tool the sub-agent itself runs is still judged by this policy, so
     // allowing the spawn does not let it edit unattended.
-    if (toolName == u"new_task"_s) {
+    if (canonical == u"new_task"_s) {
         return Verdict::Allow;
+    }
+
+    // A dangerous command (sudo, recursive chmod, a system control command)
+    // must be seen by the user even when bash was auto-approved for the
+    // session. It used to be re-checked only in the session-grant branch,
+    // which left the read-only auto-approval below as an unprompted path to
+    // "sudo cat /etc/shadow".
+    if (isBash && sandbox.isDangerousCommand(arguments.value(u"command"_s).toString())) {
+        if (reason) {
+            *reason = u"This command is potentially destructive and needs your approval."_s;
+        }
+        return Verdict::Ask;
     }
 
     // Explicit auto-approval beats everything except the hard-deny list.
-    if (m_autoApprove.contains(toolName)) {
+    if (m_autoApprove.contains(toolName) || m_autoApprove.contains(canonical)) {
         return Verdict::Allow;
     }
 
-    if (sessionGranted(toolName)) {
-        if (toolName == u"bash"_s && sandbox.isDangerousCommand(arguments.value(u"command"_s).toString())) {
-            return Verdict::Ask;
-        }
+    if (sessionGranted(toolName) || sessionGranted(canonical)) {
         return Verdict::Allow;
     }
 
@@ -131,15 +145,16 @@ PermissionPolicy::Verdict PermissionPolicy::evaluate(const QString &toolName, co
     // contract is that only execute-risk calls stop to ask — and "allow for
     // this session" (or a server's alwaysAllow list, which the user wrote)
     // keeps it from asking twice.
-    if (isReadTool(toolName) && (m_mode == PermissionMode::AcceptEdits || !isMcpToolName(toolName))) {
+    if (isReadTool(canonical) && (m_mode == PermissionMode::AcceptEdits || !isMcpToolName(canonical))) {
         return Verdict::Allow;
     }
 
-    if (toolName == u"bash"_s && sandbox.isReadOnlyCommand(arguments.value(u"command"_s).toString())) {
+    if (isBash && sandbox.isReadOnlyCommand(arguments.value(u"command"_s).toString())
+        && !sandbox.commandTouchesOutsideWorkspace(arguments.value(u"command"_s).toString())) {
         return Verdict::Allow;
     }
 
-    if (m_mode == PermissionMode::AcceptEdits && riskFor(toolName) == ToolRisk::Write) {
+    if (m_mode == PermissionMode::AcceptEdits && riskFor(canonical) == ToolRisk::Write) {
         return Verdict::Allow;
     }
 

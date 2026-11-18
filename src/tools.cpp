@@ -10,6 +10,7 @@
 #include <QDir>
 #include <QDirIterator>
 #include <QFile>
+#include <QCoreApplication>
 #include <QFileInfo>
 #include <QJsonDocument>
 #include <QJsonParseError>
@@ -61,9 +62,15 @@ QJsonObject parseToolArgs(const ToolCall &call, QString *error)
     // Parse the JSON string and validate it's a proper object
     QJsonParseError parseError;
     const QJsonDocument doc = QJsonDocument::fromJson(call.argumentsJson.toUtf8(), &parseError);
-    if (parseError.error != QJsonParseError::NoError || !doc.isObject()) {
+    if (parseError.error != QJsonParseError::NoError) {
         if (error) {
             *error = u"Invalid tool arguments: %1"_s.arg(parseError.errorString());
+        }
+        return {};
+    }
+    if (!doc.isObject()) {
+        if (error) {
+            *error = u"Invalid tool arguments: expected a JSON object."_s;
         }
         return {};
     }
@@ -309,7 +316,15 @@ QString planFilePath(const QString &workspaceRoot)
         }
     }
     const QByteArray digest = QCryptographicHash::hash(root.toUtf8(), QCryptographicHash::Sha1).toHex();
-    return QDir::tempPath() + u"/kateai-plan-"_s + QString::fromUtf8(digest.left(12)) + u".md"_s;
+    // The shared temp directory is world-readable/writable. Put the plan in a
+    // per-user directory with owner-only permissions so another account
+    // cannot read the notes (which quote source) or pre-plant a symlink at
+    // the predictable file name.
+    const QByteArray user = QCryptographicHash::hash(QDir::homePath().toUtf8(), QCryptographicHash::Sha1).toHex();
+    const QString dir = QDir::tempPath() + u"/kateai-plans-"_s + QString::fromLatin1(user.left(10));
+    QDir().mkpath(dir);
+    QFile::setPermissions(dir, QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner);
+    return dir + u"/"_s + QString::fromLatin1(digest.left(16)) + u".md"_s;
 }
 
 static bool isNoisySearchPath(const QString &relativePath)
@@ -587,14 +602,35 @@ PermissionRequest ToolRunner::describe(const ToolCall &call) const
         QString simulated = existing;
         for (const QJsonValue &val : edits) {
             const QJsonObject chunk = val.toObject();
-            const QString oldStr = chunk.value(u"old_string"_s).toString().isEmpty()
-                ? (chunk.value(u"TargetContent"_s).toString().isEmpty() ? chunk.value(u"targetContent"_s).toString() : chunk.value(u"TargetContent"_s).toString())
-                : chunk.value(u"old_string"_s).toString();
-            const QString newStr = chunk.value(u"new_string"_s).toString().isEmpty()
-                ? (chunk.value(u"ReplacementContent"_s).toString().isEmpty() ? chunk.value(u"replacementContent"_s).toString() : chunk.value(u"ReplacementContent"_s).toString())
-                : chunk.value(u"new_string"_s).toString();
-            if (!oldStr.isEmpty()) {
-                simulated.replace(oldStr, newStr);
+            const QString oldStr = chunk.contains(u"old_string"_s)
+                ? chunk.value(u"old_string"_s).toString()
+                : (chunk.contains(u"TargetContent"_s) ? chunk.value(u"TargetContent"_s).toString()
+                                                      : chunk.value(u"targetContent"_s).toString());
+            QString newStr;
+            if (chunk.contains(u"new_string"_s)) {
+                newStr = chunk.value(u"new_string"_s).toString();
+            } else if (chunk.contains(u"ReplacementContent"_s)) {
+                newStr = chunk.value(u"ReplacementContent"_s).toString();
+            } else {
+                newStr = chunk.value(u"replacementContent"_s).toString();
+            }
+            if (oldStr.isEmpty()) {
+                continue;
+            }
+            // Match the tool: replace only the first occurrence unless the
+            // chunk explicitly asks for all, otherwise the preview can show a
+            // different file from the one the user approves.
+            const bool replaceAll = chunk.contains(u"replace_all"_s)
+                ? jsonBool(chunk.value(u"replace_all"_s))
+                : (chunk.contains(u"AllowMultiple"_s) ? jsonBool(chunk.value(u"AllowMultiple"_s))
+                                                      : jsonBool(chunk.value(u"allowMultiple"_s)));
+            const int at = simulated.indexOf(oldStr);
+            if (at >= 0) {
+                if (replaceAll) {
+                    simulated.replace(oldStr, newStr);
+                } else {
+                    simulated.replace(at, oldStr.size(), newStr);
+                }
             }
         }
         req.describeDiff = unifiedDiff(req.path, existing, simulated);
@@ -814,12 +850,11 @@ ToolResult ToolRunner::readFile(const QJsonObject &args) const
     // offset=0/-5 or limit<0 previously read from the top / unlimited.
     // "line" is accepted as an alias of "offset": ACP's fs/read_text_file uses
     // line/limit, and agents carry that shape over to the native tool.
-    int offset = jsonInt(args.value(u"offset"_s), 0);
-    if (offset == 0) {
+    int offset = 1;
+    if (args.contains(u"offset"_s)) {
+        offset = jsonInt(args.value(u"offset"_s), 0);
+    } else if (args.contains(u"line"_s)) {
         offset = jsonInt(args.value(u"line"_s), 1);
-    }
-    if (offset == 0) {
-        offset = 1;
     }
     const int limit = jsonInt(args.value(u"limit"_s), 0);
     if (offset < 1) {
@@ -1818,9 +1853,12 @@ bool ToolRunner::runReadToolAsync(const ToolCall &call)
             result.name = call.name;
         }
         // The runner may be gone by the time the search finishes (turn aborted,
-        // loop destroyed); then the result is simply dropped.
-        if (guard) {
-            QMetaObject::invokeMethod(guard.data(), [guard, cancelFlag, result]() {
+        // loop destroyed); then the result is simply dropped. Post through the
+        // application object rather than a raw ToolRunner pointer captured on
+        // this thread: reading QPointer::data() here races with destruction on
+        // the GUI thread.
+        if (QCoreApplication::instance()) {
+            QMetaObject::invokeMethod(QCoreApplication::instance(), [guard, cancelFlag, result]() {
                 if (guard) {
                     guard->m_readJobs.removeAll(cancelFlag);
                     Q_EMIT guard->bashFinished(result);
@@ -2210,7 +2248,7 @@ QString wordAtPosition(const DocumentBridge *bridge, const QString &resolvedPath
     QRegularExpressionMatchIterator it = wordRe.globalMatch(text);
     while (it.hasNext()) {
         const QRegularExpressionMatch m = it.next();
-        if (m.capturedStart() <= col0 && col0 <= m.capturedEnd()) {
+        if (m.capturedStart() <= col0 && col0 < m.capturedEnd()) {
             return m.captured(0);
         }
     }
@@ -2221,7 +2259,8 @@ QString wordAtPosition(const DocumentBridge *bridge, const QString &resolvedPath
 // answers: every word-boundary hit of `word` in the workspace, same guards as
 // grep (deny globs, sandbox read check, noisy paths, size and binary caps).
 QStringList scanWordReferences(const Sandbox &sandbox, const DocumentBridge *bridge,
-                               const QString &word, int maxHits)
+                               const QString &word, int maxHits,
+                               const std::atomic_bool *cancel = nullptr)
 {
     QStringList hits;
     if (word.isEmpty()) {
@@ -2231,6 +2270,9 @@ QStringList scanWordReferences(const Sandbox &sandbox, const DocumentBridge *bri
     const QString root = sandbox.workspaceRoot();
     QDirIterator it(root, QDir::Files | QDir::NoDotAndDotDot, QDirIterator::Subdirectories);
     while (it.hasNext() && hits.size() < maxHits) {
+        if (cancel && cancel->load()) {
+            return hits;
+        }
         const QString filePath = it.next();
         const QString rel = QDir(root).relativeFilePath(filePath);
         if (isNoisySearchPath(rel) || sandbox.isDenied(filePath) || !sandbox.allowsRead(filePath, nullptr)) {
@@ -2248,6 +2290,9 @@ QStringList scanWordReferences(const Sandbox &sandbox, const DocumentBridge *bri
         }
         const QStringList lines = contents.split(u'\n');
         for (int i = 0; i < lines.size() && hits.size() < maxHits; ++i) {
+            if (cancel && cancel->load()) {
+                return hits;
+            }
             if (re.match(lines.at(i)).hasMatch()) {
                 hits.append(rel + u':' + QString::number(i + 1) + u':' + lines.at(i).trimmed().left(200));
             }
@@ -2522,7 +2567,7 @@ ToolResult ToolRunner::lspDefinition(const QJsonObject &args) const
         }
     }
     // And where the name is defined/used elsewhere, textually.
-    const QStringList refs = scanWordReferences(m_sandbox, m_bridge, word, 60);
+    const QStringList refs = scanWordReferences(m_sandbox, m_bridge, word, 60, m_cancelFlag.get());
     for (const QString &ref : refs) {
         lines.append(ref + u"  (text match)"_s);
     }
@@ -2577,7 +2622,7 @@ ToolResult ToolRunner::lspReferences(const QJsonObject &args) const
                             .arg(column);
         return result;
     }
-    const QStringList hits = scanWordReferences(m_sandbox, m_bridge, word, 200);
+    const QStringList hits = scanWordReferences(m_sandbox, m_bridge, word, 200, m_cancelFlag.get());
     if (hits.isEmpty()) {
         result.ok = false;
         result.output = u"No references to %1 found (no language server; text scan found nothing)."_s.arg(word);
@@ -2735,6 +2780,7 @@ ToolResult ToolRunner::writePlanFile(const QJsonObject &args)
         result.output = error.isEmpty() ? u"Could not write the plan file."_s : error;
         return result;
     }
+    QFile::setPermissions(path, QFileDevice::ReadOwner | QFileDevice::WriteOwner);
 
     result.ok = true;
     result.output = u"Plan written to %1 (%2 bytes). The user can open that file to follow the implementation; "
@@ -2879,8 +2925,21 @@ ToolResult ToolRunner::applyPatch(const QJsonObject &args)
     int applied = 0;
     for (const PlannedWrite &w : planned) {
         QString error;
-        const bool ok = w.isDelete ? removeFile(w.resolved, &error)
-                                   : writeContent(w.resolved, w.oldContent, w.newContent, w.existed, &error);
+        bool ok = false;
+        if (w.isDelete) {
+            // Do not delete a file that changed after phase 1 read it. The
+            // delete path used to skip this check entirely.
+            QString current;
+            if (!m_bridge || !m_bridge->readDocument(w.resolved, &current)) {
+                error = u"The file could not be read before deleting; it may have been removed or made unreadable."_s;
+            } else if (current != w.oldContent) {
+                error = u"The file changed after it was read, so it was not deleted."_s;
+            } else {
+                ok = removeFile(w.resolved, &error);
+            }
+        } else {
+            ok = writeContent(w.resolved, w.oldContent, w.newContent, w.existed, &error);
+        }
         if (!ok) {
             // Roll back in reverse order. A failure here cannot be hidden: the
             // caller must know the workspace may be partially changed.
@@ -2889,9 +2948,17 @@ ToolResult ToolRunner::applyPatch(const QJsonObject &args)
             for (int i = applied - 1; i >= 0; --i) {
                 const PlannedWrite &undo = planned.at(i);
                 QString undoError;
-                const bool undone = undo.existed
-                    ? writeContent(undo.resolved, undo.newContent, undo.oldContent, true, &undoError)
-                    : removeFile(undo.resolved, &undoError);
+                bool undone = false;
+                if (undo.isDelete) {
+                    // The file was removed, so re-create it. Going through
+                    // writeDocumentIfUnchanged() would re-read a file that no
+                    // longer exists and always fail.
+                    undone = m_bridge && m_bridge->writeDocumentIfMissing(undo.resolved, undo.oldContent, &undoError);
+                } else if (undo.existed) {
+                    undone = writeContent(undo.resolved, undo.newContent, undo.oldContent, true, &undoError);
+                } else {
+                    undone = removeFile(undo.resolved, &undoError);
+                }
                 if (undone) {
                     ++rolledBack;
                 } else {

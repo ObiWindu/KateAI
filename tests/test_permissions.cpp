@@ -3,6 +3,7 @@
 
 #include <QDir>
 #include <QJsonObject>
+#include <QTemporaryDir>
 #include <QTest>
 
 using namespace Qt::Literals::StringLiterals;
@@ -52,6 +53,30 @@ private Q_SLOTS:
             QCOMPARE(policy.riskFor(tool), ToolRisk::Read);
             QCOMPARE(policy.evaluate(tool, QJsonObject{}, box, &reason), PermissionPolicy::Verdict::Allow);
         }
+    }
+
+    void dangerousShellCommandsAreNeverAutoApproved()
+    {
+        PermissionPolicy policy(PermissionMode::Ask);
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+        Sandbox box(workspace.path(), SandboxProfile::Workspace);
+        QString reason;
+        auto verdict = [&](const QString &command) {
+            return policy.evaluate(u"bash"_s, QJsonObject{{u"command"_s, command}}, box, &reason);
+        };
+        // These used to be classified as read-only and auto-approved.
+        QCOMPARE(verdict(u"sudo cat /etc/shadow"_s), PermissionPolicy::Verdict::Ask);
+        QCOMPARE(verdict(u"ls\npython3 -c 'print(1)'"_s), PermissionPolicy::Verdict::Ask);
+        QCOMPARE(verdict(u"sort --output=out.txt f"_s), PermissionPolicy::Verdict::Ask);
+        QCOMPARE(verdict(u"git branch -D main"_s), PermissionPolicy::Verdict::Ask);
+        // Reading outside the workspace needs the same consent as read_file.
+        QCOMPARE(verdict(u"cat /etc/passwd"_s), PermissionPolicy::Verdict::Ask);
+        // A plain workspace read stays silent.
+        QCOMPARE(verdict(u"ls -la"_s), PermissionPolicy::Verdict::Allow);
+        // The canonical name check applies the hard deny to aliases too.
+        QCOMPARE(policy.evaluate(u"BASH"_s, QJsonObject{{u"command"_s, u"rm -rf /"_s}}, box, &reason),
+                 PermissionPolicy::Verdict::Deny);
     }
 
     void writesAskByDefault()

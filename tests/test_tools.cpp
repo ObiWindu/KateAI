@@ -1011,6 +1011,35 @@ private Q_SLOTS:
         QVERIFY(res6.ok);
     }
 
+    void testPatchContentLineThatLooksLikeAHeader()
+    {
+        // A removed line whose content starts with "-- " is encoded as
+        // "--- ..." in the diff. It must stay inside the hunk instead of
+        // opening a bogus file section.
+        const QString patch = u"--- a/a.txt\n+++ b/a.txt\n@@ -1,2 +1,2 @@\n--- old\n+new\n context\n"_s;
+        const QList<PatchFile> files = parseUnifiedPatch(patch);
+        QCOMPARE(files.size(), 1);
+        QCOMPARE(files.first().path, u"a.txt"_s);
+        QCOMPARE(files.first().hunks.size(), 1);
+        QString error;
+        const QString out = applyPatchToContent(u"-- old\ncontext\n"_s, files.first().hunks, &error);
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(out, u"new\ncontext\n"_s);
+    }
+
+    void testPatchWithTruncatedHunkDoesNotApply()
+    {
+        // The header promises three lines, the body carries one. A truncated
+        // stream must fail instead of applying a partial edit.
+        const QString patch = u"--- a/a.txt\n+++ b/a.txt\n@@ -1,3 +1,3 @@\n-old\n+new\n"_s;
+        const QList<PatchFile> files = parseUnifiedPatch(patch);
+        QCOMPARE(files.size(), 1);
+        QString error;
+        const QString out = applyPatchToContent(u"old\nsecond\nthird\n"_s, files.first().hunks, &error);
+        QVERIFY(!error.isEmpty());
+        QVERIFY(out.isEmpty());
+    }
+
     void testApplyPatchMultiFileAtomic()
     {
         QTemporaryDir tempDir;

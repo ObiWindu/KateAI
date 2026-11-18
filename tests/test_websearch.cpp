@@ -24,6 +24,10 @@ private Q_SLOTS:
         QVERIFY(!WebSearch::isFetchableUrl(u"http://10.0.0.5/"_s));
         QVERIFY(!WebSearch::isFetchableUrl(u"http://192.168.1.1/"_s));
         QVERIFY(!WebSearch::isFetchableUrl(u"http://metadata.google.internal/"_s));
+        // A trailing dot is the explicit root label; it resolves to the same
+        // loopback/metadata host but is a different string.
+        QVERIFY(!WebSearch::isFetchableUrl(u"http://localhost./"_s));
+        QVERIFY(!WebSearch::isFetchableUrl(u"http://127.0.0.1./"_s));
         // A normal address is still allowed.
         QVERIFY(WebSearch::isFetchableUrl(u"https://example.org/docs"_s));
     }

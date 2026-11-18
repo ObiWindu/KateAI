@@ -42,6 +42,10 @@ public:
         QString acpSessionId;
         // The editor folder active when this conversation was saved.
         QString workspace;
+        // Set when the stored payload could not be read or parsed. It is not
+        // persisted; callers use it to avoid treating a damaged transcript as
+        // an empty one and overwriting it on the next save.
+        bool loadFailed = false;
     };
 
     struct ConversationInfo {

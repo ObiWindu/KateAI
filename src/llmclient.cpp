@@ -156,14 +156,9 @@ QJsonArray LlmClient::messagesToJson(const QList<ChatMessage> &messages)
         case ChatMessage::Role::Assistant:
             obj.insert(u"role"_s, u"assistant"_s);
             obj.insert(u"content"_s, msg.content);
-            // Hidden reasoning is sent back to the model so it can reference
-            // its own earlier analysis without re-deriving it.
-            if (!msg.thinking.isEmpty()) {
-                obj.insert(u"reasoning_content"_s, msg.thinking);
-            }
-            // The structured plan is a Kate-side artifact for the checklist
-            // UI; it is not a field any provider knows, and a strict gateway
-            // or proxy may reject the whole request over it.
+            // Hidden reasoning is deliberately not replayed. DeepSeek returns
+            // 400 when reasoning_content is present in an input message, and
+            // strict OpenAI-compatible gateways reject unknown message fields.
             if (!msg.toolCalls.isEmpty()) {
                 obj.insert(u"tool_calls"_s, msg.toolCalls);
             }
@@ -358,8 +353,9 @@ CompletionChunk LlmClient::parseSseLine(const QByteArray &line, QHash<int, ToolC
     }
 
     const QJsonObject root = doc.object();
-    if (root.contains(u"error"_s)) {
-        const QJsonValue error = root.value(u"error"_s);
+    const QJsonValue streamError = root.value(u"error"_s);
+    if (!streamError.isUndefined() && !streamError.isNull()) {
+        const QJsonValue error = streamError;
         chunk.error = error.isObject() ? error.toObject().value(u"message"_s).toString() : error.toString();
         if (chunk.error.isEmpty()) {
             chunk.error = QString::fromUtf8(payload);
@@ -388,7 +384,11 @@ CompletionChunk LlmClient::parseSseLine(const QByteArray &line, QHash<int, ToolC
             } else if (kind == u"input_json_delta"_s && acc) {
                 // Tool arguments are streamed as JSON fragments; keep them raw
                 // so drainToolAccumulator() can parse the assembled object.
-                ToolCall &tool = (*acc)[root.value(u"index"_s).toInt()];
+                const QJsonValue indexValue = root.value(u"index"_s);
+                const int index = indexValue.isDouble()
+                    ? indexValue.toInt()
+                    : (indexValue.isString() ? indexValue.toString().toInt() : 0);
+                ToolCall &tool = (*acc)[index];
                 const QString frag = delta.value(u"partial_json"_s).toString();
                 constexpr qsizetype kMaxToolArgsChars = 1024 * 1024;
                 if (tool.argumentsJson.size() + frag.size() <= kMaxToolArgsChars) {
@@ -398,7 +398,11 @@ CompletionChunk LlmClient::parseSseLine(const QByteArray &line, QHash<int, ToolC
         } else if (anthropicType == u"content_block_start"_s) {
             const QJsonObject block = root.value(u"content_block"_s).toObject();
             if (block.value(u"type"_s).toString() == u"tool_use"_s && acc) {
-                ToolCall &tool = (*acc)[root.value(u"index"_s).toInt()];
+                const QJsonValue indexValue = root.value(u"index"_s);
+                const int index = indexValue.isDouble()
+                    ? indexValue.toInt()
+                    : (indexValue.isString() ? indexValue.toString().toInt() : 0);
+                ToolCall &tool = (*acc)[index];
                 tool.id = block.value(u"id"_s).toString();
                 tool.name = block.value(u"name"_s).toString();
                 // A short input can arrive complete here, with no delta events.
@@ -457,12 +461,24 @@ CompletionChunk LlmClient::parseSseLine(const QByteArray &line, QHash<int, ToolC
         const QJsonArray toolCalls = delta.value(u"tool_calls"_s).toArray();
         for (const QJsonValue &value : toolCalls) {
             const QJsonObject obj = value.toObject();
-            int index = obj.value(u"index"_s).toInt();
-            // A provider that omits "index" would send every parallel tool call
-            // as index 0, so they would overwrite each other - and a call
-            // streamed over several deltas would be split into one call per
-            // delta. The slot comes from the delta instead.
-            if (!obj.contains(u"index"_s)) {
+            const QJsonValue indexValue = obj.value(u"index"_s);
+            int index = 0;
+            bool haveIndex = false;
+            if (indexValue.isDouble()) {
+                index = indexValue.toInt();
+                haveIndex = true;
+            } else if (indexValue.isString()) {
+                bool ok = false;
+                const int parsed = indexValue.toString().trimmed().toInt(&ok);
+                if (ok) {
+                    index = parsed;
+                    haveIndex = true;
+                }
+            }
+            // A provider that omits (or sends a non-numeric) "index" would
+            // otherwise send every parallel tool call to slot 0. The slot
+            // comes from the delta instead.
+            if (!haveIndex) {
                 index = slotForIndexLessDelta(*acc, obj);
             }
             ToolCall &tool = (*acc)[index];
@@ -525,6 +541,7 @@ CompletionChunk LlmClient::parseSseLine(const QByteArray &line, QHash<int, ToolC
 void LlmClient::resetCompletionState()
 {
     m_buffer.clear();
+    m_pendingEventData.clear();
     m_responseBody.clear();
     m_text.clear();
     m_toolAcc.clear();
@@ -621,7 +638,7 @@ void LlmClient::doComplete(const QList<ChatMessage> &messages)
         break;
     }
 
-    QNetworkRequest request{QUrl(providerBaseUrl(m_settings) + endpoint)};
+    QNetworkRequest request{QUrl(joinApiEndpoint(providerBaseUrl(m_settings), endpoint))};
     request.setHeader(QNetworkRequest::ContentTypeHeader, u"application/json"_s);
     // Force a fresh connection per request. Reusing a keep-alive connection to
     // the same host (notably localhost on macOS) serialised the sub-agents'
@@ -729,12 +746,16 @@ QJsonObject LlmClient::buildOpenAIRequest(const QList<ChatMessage> &messages, co
     if (!m_settings.reasoningEffort.trimmed().isEmpty()) {
         body.insert(u"reasoning_effort"_s, m_settings.reasoningEffort.trimmed());
     }
-    // Enhanced intelligence parameters
-    if (m_settings.structuredThinking) {
-        body.insert(u"include_reasoning"_s, true);
-    }
-    if (m_settings.maxThinkingTokens > 0) {
-        body.insert(u"max_reasoning_tokens"_s, m_settings.maxThinkingTokens);
+    // Enhanced intelligence parameters. These are OpenRouter extensions, not
+    // part of the OpenAI schema: sending them to OpenAI, DeepSeek or a local
+    // server can be rejected as an unknown request field.
+    if (m_settings.provider == Provider::OpenRouter) {
+        if (m_settings.structuredThinking) {
+            body.insert(u"include_reasoning"_s, true);
+        }
+        if (m_settings.maxThinkingTokens > 0) {
+            body.insert(u"max_reasoning_tokens"_s, m_settings.maxThinkingTokens);
+        }
     }
     return body;
 }
@@ -758,11 +779,19 @@ QJsonObject LlmClient::buildAnthropicRequest(const QList<ChatMessage> &messages,
 
     // Extended thinking is the Messages API counterpart of the OpenAI
     // include_reasoning/max_reasoning_tokens pair; without it the thinking
-    // toggle is a no-op on this provider even though the stream parser already
-    // handles thinking_delta. While it is on the API requires a budget of at
-    // least 1024 tokens that stays below max_tokens, and it pins both sampling
-    // knobs to their defaults: a clamped or configured value is rejected.
-    const bool thinkingEnabled = m_settings.structuredThinking && m_settings.maxThinkingTokens > 0;
+    // Tools must be in Anthropic's {name, input_schema} shape, not OpenAI's.
+    // Anthropic has no parallel_tool_calls flag; it always decides on its own
+    // which tools to batch, and "none" would forbid tool calls entirely.
+    const QJsonArray tools = anthropicTools(advertisedTools());
+
+    // Extended thinking blocks must be replayed with their signatures when a
+    // tool_use turn is sent back. Kate does not retain those signatures, so
+    // enabling thinking on a tool-using turn would make the follow-up request
+    // fail with "Expected thinking ... but found tool_use". Keep thinking for
+    // plain chat turns, where no replay is required, and disable it whenever
+    // tools are advertised or the budget cannot satisfy budget < max_tokens.
+    const bool thinkingEnabled = tools.isEmpty() && m_settings.structuredThinking
+        && m_settings.maxThinkingTokens > 0 && maxTokens > 1024;
     body.insert(u"temperature"_s, thinkingEnabled ? 1.0 : qBound(0.0, m_settings.temperature, 1.0));
     if (!thinkingEnabled && m_settings.topP > 0.0) {
         body.insert(u"top_p"_s, qBound(0.0, m_settings.topP, 1.0));
@@ -770,15 +799,11 @@ QJsonObject LlmClient::buildAnthropicRequest(const QList<ChatMessage> &messages,
     if (thinkingEnabled) {
         QJsonObject thinking;
         thinking.insert(u"type"_s, u"enabled"_s);
-        const int ceiling = qMax(1024, maxTokens - 1024);
+        const int ceiling = maxTokens - 1;
         thinking.insert(u"budget_tokens"_s, qBound(1024, m_settings.maxThinkingTokens, ceiling));
         body.insert(u"thinking"_s, thinking);
     }
 
-    // Tools must be in Anthropic's {name, input_schema} shape, not OpenAI's.
-    // Anthropic has no parallel_tool_calls flag; it always decides on its own
-    // which tools to batch, and "none" would forbid tool calls entirely.
-    const QJsonArray tools = anthropicTools(advertisedTools());
     if (!tools.isEmpty()) {
         body.insert(u"tools"_s, tools);
         body.insert(u"tool_choice"_s, u"auto"_s);
@@ -976,7 +1001,7 @@ void LlmClient::fetchModels(Provider provider)
 
     // Respect the configured endpoint, not just the provider default, so a
     // custom Ollama/LocalAI/ACP URL actually takes effect.
-    QNetworkRequest request{QUrl(providerBaseUrl(providerSettings) + modelsEndpoint)};
+    QNetworkRequest request{QUrl(joinApiEndpoint(providerBaseUrl(providerSettings), modelsEndpoint))};
     applyAuthHeaders(request, apiFormat, key);
     request.setHeader(QNetworkRequest::UserAgentHeader, u"Kate AI"_s);
     // A models listing is a single short response; it gets the same idle
@@ -1326,8 +1351,11 @@ void LlmClient::handleFinished()
     // Classify the error. Only trust the body as provider error text when the
     // request actually failed: on a 200 the body is the model's own output, and
     // an answer mentioning "blocked" or "safety" must not read as an error.
-    const bool requestFailed = networkError != QNetworkReply::NoError || status >= 400
-        || !m_completionError.isEmpty();
+    // A stream that already delivered [DONE] is complete even if the socket
+    // was reset afterwards. Treating the late transport error as a failure
+    // threw away the full answer and re-ran the model.
+    const bool requestFailed = !m_sawDone
+        && (networkError != QNetworkReply::NoError || status >= 400 || !m_completionError.isEmpty());
     if (requestFailed) {
         // The body reaches the user verbatim in the error text, and providers
         // echo request details in it: a key leaked into a 400 body would be
@@ -1340,7 +1368,8 @@ void LlmClient::handleFinished()
     m_retryContext.lastErrorCategory = errorCategory;
 
     // Check if we should retry
-    if (errorCategory != RetryErrorCategory::NonRetryable && errorCategory != RetryErrorCategory::None
+    if (!m_sawDone
+        && errorCategory != RetryErrorCategory::NonRetryable && errorCategory != RetryErrorCategory::None
         && errorCategory != RetryErrorCategory::ContextOverflow) {
         // Extract provider-suggested retry delay
         std::optional<int> providerDelaySeconds = headerRetryAfter;
@@ -1579,6 +1608,13 @@ RetryErrorCategory LlmClient::classifyByMessage(const QString &lowerError, const
         || lowerError.contains(u"overloaded")) {
         return RetryErrorCategory::RateLimitExceeded;
     }
+    // Permanent billing/authorisation failures. Retrying these only delays the
+    // message the user has to act on.
+    if (lowerError.contains(u"credit balance") || lowerError.contains(u"insufficient")
+        || lowerError.contains(u"billing") || lowerError.contains(u"payment required")
+        || lowerBody.contains(u"credit balance") || lowerBody.contains(u"insufficient_quota")) {
+        return RetryErrorCategory::NonRetryable;
+    }
 
     return RetryErrorCategory::None;
 }
@@ -1652,7 +1688,9 @@ RetryErrorCategory LlmClient::classifyError(int httpStatus, const QString &error
             if (httpStatus >= 500 && httpStatus < 600) {
                 return RetryErrorCategory::ServerOverloaded;
             }
-            break;
+            // Any other 4xx is the client's fault (validation, method, media
+            // type, payment). It will not become valid on a retry.
+            return RetryErrorCategory::NonRetryable;
         }
 
         // An unknown error status still carries a body worth classifying.
@@ -1725,7 +1763,11 @@ std::optional<int> LlmClient::clampProviderDelay(qint64 seconds) const
     if (seconds <= 0) {
         return std::nullopt;
     }
-    const qint64 cap = m_retryContext.maxDelaySeconds > 0 ? m_retryContext.maxDelaySeconds : 300;
+    // 0 means "no configured cap"; use the same 24-hour ceiling the retry
+    // timer applies instead of silently turning it into five minutes.
+    const qint64 cap = m_retryContext.maxDelaySeconds > 0
+        ? m_retryContext.maxDelaySeconds
+        : 24 * 60 * 60;
     return static_cast<int>(qMin(seconds, cap));
 }
 
@@ -1785,7 +1827,7 @@ std::optional<int> LlmClient::parseRetryAfterHeader(const QNetworkReply *reply) 
         bool ok = false;
         int seconds = resetAfterHeader.toInt(&ok);
         if (ok && seconds > 0) {
-            return std::min(seconds, m_retryContext.maxDelaySeconds > 0 ? m_retryContext.maxDelaySeconds : 300);
+            return clampProviderDelay(seconds);
         }
     }
 
@@ -1817,15 +1859,17 @@ std::optional<int> LlmClient::parseRetryAfterFromBody(const QByteArray &body) co
                 bool ok = false;
                 double seconds = str.toDouble(&ok);
                 if (ok && seconds > 0) {
-                    return std::min(static_cast<int>(std::ceil(seconds)),
-                                   m_retryContext.maxDelaySeconds > 0 ? m_retryContext.maxDelaySeconds : 300);
+                    // Clamp in double space: casting an out-of-range double to
+                    // int is undefined and usually yields a negative delay.
+                    const qint64 rounded = static_cast<qint64>(std::ceil(std::min(seconds, 1.0e12)));
+                    return clampProviderDelay(rounded);
                 }
             }
         } else if (val.isDouble()) {
             double seconds = val.toDouble();
             if (seconds > 0) {
-                return std::min(static_cast<int>(std::ceil(seconds)),
-                               m_retryContext.maxDelaySeconds > 0 ? m_retryContext.maxDelaySeconds : 300);
+                const qint64 rounded = static_cast<qint64>(std::ceil(std::min(seconds, 1.0e12)));
+                return clampProviderDelay(rounded);
             }
         }
     }
@@ -2064,7 +2108,13 @@ void LlmClient::executeRetry()
     }
 
     // Check if we should still retry (user might have disabled auto-retry in settings)
-    if (!shouldRetry(m_retryContext)) {
+    // The last retry in the budget is the one with attempt == maxAttempts.
+    // shouldRetry() refuses to schedule anything beyond that, but it must not
+    // be used here: it refuses this final attempt too, which wasted a full
+    // backoff and made maxRetryAttempts = 1 run no retry at all.
+    const bool mayRun = m_settings.enableAutoRetry && !m_abortRequested
+        && m_retryContext.attempt <= m_retryContext.maxAttempts;
+    if (!mayRun) {
         QString finalError = formatRetryExhaustedMessage(m_retryContext.lastErrorCategory, m_retryContext.providerName);
         Q_EMIT failed(finalError);
         clearStoredRequest();

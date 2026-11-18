@@ -72,6 +72,19 @@ EditRangeTracker::anchor(KTextEditor::Document *document, const QList<KTextEdito
     return anchored;
 }
 
+void EditRangeTracker::releaseAnchored(QList<AnchoredRange> &ranges)
+{
+    // newMovingCursor() passes ownership to the caller; the document does
+    // not delete the cursors with itself.
+    for (AnchoredRange &range : ranges) {
+        delete range.start;
+        delete range.end;
+        range.start = nullptr;
+        range.end = nullptr;
+    }
+    ranges.clear();
+}
+
 bool EditRangeTracker::lineInRanges(const QList<AnchoredRange> &ranges, int line, int *count)
 {
     bool found = false;
@@ -100,7 +113,19 @@ void EditRangeTracker::setRanges(const QString &path, KTextEditor::Document *doc
                                  const QList<KTextEditor::Range> &pending,
                                  const QList<KTextEditor::Range> &settled)
 {
-    m_paths.remove(path);
+    auto existing = m_paths.find(path);
+    if (existing != m_paths.end()) {
+        if (!existing.value().document.isNull()) {
+            releaseAnchored(existing.value().pending);
+            releaseAnchored(existing.value().settled);
+        } else {
+            // The document is gone; its cursors must not be dereferenced or
+            // deleted through a dead document pointer.
+            existing.value().pending.clear();
+            existing.value().settled.clear();
+        }
+        m_paths.erase(existing);
+    }
     if (!document || (pending.isEmpty() && settled.isEmpty())) {
         return;
     }
@@ -113,15 +138,22 @@ void EditRangeTracker::setRanges(const QString &path, KTextEditor::Document *doc
 
 void EditRangeTracker::clear()
 {
-    // The MovingCursors are owned by their documents; dropping the hash is
-    // enough, the document deletes its moving cursors with itself.
+    for (auto it = m_paths.begin(); it != m_paths.end(); ++it) {
+        if (it.value().document.isNull()) {
+            it.value().pending.clear();
+            it.value().settled.clear();
+            continue;
+        }
+        releaseAnchored(it.value().pending);
+        releaseAnchored(it.value().settled);
+    }
     m_paths.clear();
 }
 
 bool EditRangeTracker::lineInPendingRange(const QString &path, int line, int *pendingCount) const
 {
     const auto it = m_paths.constFind(path);
-    if (it == m_paths.constEnd()) {
+    if (it == m_paths.constEnd() || it.value().document.isNull()) {
         return false;
     }
     int count = 0;
@@ -137,7 +169,7 @@ bool EditRangeTracker::lineInPendingRange(const QString &path, int line, int *pe
 bool EditRangeTracker::lineInSettledRange(const QString &path, int line) const
 {
     const auto it = m_paths.constFind(path);
-    if (it == m_paths.constEnd()) {
+    if (it == m_paths.constEnd() || it.value().document.isNull()) {
         return false;
     }
     return lineInRanges(it.value().settled, line);

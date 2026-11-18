@@ -818,7 +818,9 @@ ChatWidget::ChatWidget(QWidget *parent)
     });
     connect(m_configure, &QPushButton::clicked, this, &ChatWidget::showSettingsMenu);
     connect(m_modelSelector, &QPushButton::clicked, this, &ChatWidget::showModelMenu);
-    connect(m_permissionBar, &PermissionBar::decided, &m_agent, &AgentLoop::resolvePermission);
+    connect(m_permissionBar, &PermissionBar::decided, this, [this](PermissionDecision decision) {
+        m_agent.resolvePermission(decision);
+    });
 
     connect(m_provider, &QComboBox::currentIndexChanged, this, [this]() {
         if (m_updatingCombos || m_provider->currentData().isNull()) {
@@ -1300,6 +1302,13 @@ ChatWidget::ChatWidget(QWidget *parent)
     // before toolStarted, so the card is created here and later reused by the
     // toolStarted handler instead of a second card appearing.
     connect(&m_agent, &AgentLoop::permissionNeeded, this, [this](const PermissionRequest &request) {
+        // Only one request is live. A card left over from a request that was
+        // cancelled by a newer one must not keep an active Allow button.
+        for (auto it = m_toolCallWidgets.constBegin(); it != m_toolCallWidgets.constEnd(); ++it) {
+            if (it.key() != request.toolCallId && it.value()) {
+                it.value()->cancelApproval();
+            }
+        }
         ToolCallWidget *widget = m_toolCallWidgets.value(request.toolCallId);
         if (!widget) {
             widget = new ToolCallWidget(request.toolCallId, m_transcriptContainer);
@@ -1347,12 +1356,12 @@ ChatWidget::ChatWidget(QWidget *parent)
             moveToIntentDock(approvalRow);
         }
         connect(widget, &ToolCallWidget::approvalChosen, this,
-                [this, guard = QPointer<ToolCallWidget>(widget)](PermissionDecision decision) {
+                [this, guard = QPointer<ToolCallWidget>(widget), callId = request.toolCallId](PermissionDecision decision) {
                     if (guard) {
                         guard->setApprovalResolved(decision);
                     }
                     updateIntentDockVisibility();
-                    m_agent.resolvePermission(decision);
+                    m_agent.resolvePermission(decision, callId);
                 },
                 Qt::SingleShotConnection);
         m_turnStatus->setActivity(i18n("Waiting for approval"));
@@ -1597,6 +1606,38 @@ ChatWidget::ChatWidget(QWidget *parent)
         }
         showInfoMessage(i18n("Kept changes to %1", QFileInfo(path).fileName()), false);
     });
+    connect(m_editTracker, &EditTracker::editRestored, this, [this](const QString &path, const QString &toolName,
+                                                                    const QString &newContent,
+                                                                    const QString &expectedContent) {
+        Q_UNUSED(toolName);
+        if (!m_agent.documentBridge()) {
+            showInfoMessage(i18n("Cannot restore edit for %1: document bridge not available", path), true);
+            return;
+        }
+        QString current;
+        const bool exists = m_agent.documentBridge()->readDocument(path, &current);
+        if (expectedContent.isNull()) {
+            // The rejection deleted a file the agent had created. Only
+            // re-create it if it is still absent.
+            if (exists) {
+                showInfoMessage(i18n("Cannot restore %1: the file exists again", QFileInfo(path).fileName()), true);
+                return;
+            }
+        } else if (!exists || current != expectedContent) {
+            showInfoMessage(i18n("Cannot restore %1: it changed after the rejection", QFileInfo(path).fileName()), true);
+            return;
+        }
+        QString error;
+        if (!m_agent.documentBridge()->writeDocument(path, newContent, &error)) {
+            showInfoMessage(i18n("Could not restore %1: %2", QFileInfo(path).fileName(), error), true);
+            return;
+        }
+        if (!m_agent.documentBridge()->saveDocumentIfOpen(path, &error)) {
+            showInfoMessage(i18n("Could not save %1: %2", QFileInfo(path).fileName(), error), true);
+            return;
+        }
+        showInfoMessage(i18n("Restored the edit to %1", QFileInfo(path).fileName()), false);
+    });
     connect(m_editTracker, &EditTracker::editRejected, this, [this](const QString &path, const QString &toolName,
                                                                     const QString &oldContent) {
         Q_UNUSED(toolName);
@@ -1808,7 +1849,7 @@ void ChatWidget::saveCurrentConversation()
 
     const bool isNew = SessionStore::saveConversation(
         m_currentConversationId, sessionData, QString(),
-        m_settings.maxSavedConversations > 0 ? m_settings.maxSavedConversations : 50);
+        m_settings.maxSavedConversations);
     // The number of conversations only changes when one is created or
     // deleted. A save of an existing conversation keeps the cached count, so
     // the button is repainted without a query.
@@ -5266,8 +5307,10 @@ void ChatWidget::setMcpToolAutoApproved(const McpTool &tool, bool enabled)
             config.alwaysAllow.removeAll(tool.name);
         }
     }
-    manager->saveToDisk();
+    // Apply first, then persist the applied list. Saving before setServers()
+    // serialized the old m_configs and the toggle reverted on reload.
     manager->setServers(updated);
+    manager->saveToDisk();
 }
 
 void ChatWidget::showModeMenu()
@@ -6768,7 +6811,7 @@ void ChatWidget::updateHistoryButton()
     // cheap repaint into a database round trip. The cache is dropped wherever
     // the number of conversations can change.
     if (m_historyCount < 0) {
-        const int maxConversations = m_settings.maxSavedConversations > 0 ? m_settings.maxSavedConversations : 50;
+        const int maxConversations = m_settings.maxSavedConversations;
         m_historyCount = SessionStore::listConversations(maxConversations).size();
     }
     const int count = m_historyCount;
@@ -6791,7 +6834,7 @@ void ChatWidget::showConversationHistory()
         m_historyMenu->clear();
     }
 
-    const int maxConversations = m_settings.maxSavedConversations > 0 ? m_settings.maxSavedConversations : 50;
+    const int maxConversations = m_settings.maxSavedConversations;
     const auto conversations = SessionStore::listConversations(maxConversations);
     // The list is the count the button shows, so the cache is filled from it
     // instead of querying a second time.
@@ -6827,6 +6870,14 @@ void ChatWidget::showConversationHistory()
 
         auto *clearAllAction = m_historyMenu->addAction(QIcon::fromTheme(u"edit-clear"_s), i18n("Clear All History"));
         connect(clearAllAction, &QAction::triggered, this, [this]() {
+            // This permanently deletes every transcript, so it needs an
+            // explicit confirmation rather than one click in a popup menu.
+            if (QMessageBox::question(this, i18n("Clear All History"),
+                                      i18n("Delete every saved conversation? This cannot be undone."),
+                                      QMessageBox::Yes | QMessageBox::No, QMessageBox::No)
+                != QMessageBox::Yes) {
+                return;
+            }
             SessionStore::clearAllConversations();
             m_currentConversationId.clear();
             // Clear All means the current transcript must not be saved again
@@ -6865,7 +6916,7 @@ void ChatWidget::switchToConversation(const QString &conversationId)
     if (!m_agent.messages().isEmpty() && !m_currentConversationId.isEmpty()) {
         const auto sessionData = m_agent.sessionData();
         if (!sessionData.messages.isEmpty()) {
-            SessionStore::saveConversation(m_currentConversationId, sessionData, QString(), m_settings.maxSavedConversations > 0 ? m_settings.maxSavedConversations : 50);
+            SessionStore::saveConversation(m_currentConversationId, sessionData, QString(), m_settings.maxSavedConversations);
         }
     }
 
@@ -6873,6 +6924,14 @@ void ChatWidget::switchToConversation(const QString &conversationId)
 
     // Load the new conversation
     const auto sessionData = SessionStore::loadConversation(conversationId);
+    if (sessionData.loadFailed) {
+        // The stored transcript could not be read. Showing it as an empty chat
+        // and then autosaving would overwrite the very history that is still
+        // on disk, so refuse the switch and keep the current conversation.
+        m_loadingConversation = false;
+        showInfoMessage(i18n("Could not load that conversation: its stored history is unreadable."), true);
+        return;
+    }
     m_agent.restoreSession(sessionData);
     if (!sessionData.workspace.isEmpty()) {
         Q_EMIT conversationWorkspaceRequested(sessionData.workspace);
@@ -6990,7 +7049,7 @@ void ChatWidget::resetForNewChat(bool saveCurrentConversation)
                 m_currentConversationId = QUuid::createUuid().toString(QUuid::WithoutBraces);
             }
             SessionStore::saveConversation(m_currentConversationId, sessionData, QString(),
-                                          m_settings.maxSavedConversations > 0 ? m_settings.maxSavedConversations : 50);
+                                          m_settings.maxSavedConversations);
         }
     }
 

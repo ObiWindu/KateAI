@@ -233,6 +233,7 @@ static SessionStore::SessionData sessionDataFromJson(const QByteArray &payload)
     SessionStore::SessionData data;
     const QJsonDocument doc = QJsonDocument::fromJson(payload);
     if (doc.isNull() || !doc.isObject()) {
+        data.loadFailed = true;
         return data;
     }
 
@@ -259,7 +260,13 @@ static SessionStore::SessionData sessionDataFromJson(const QByteArray &payload)
     data.workspace = obj[u"workspace"_s].toString();
 
     // Version 2 added the version field, version 3 the last turn id. Both are
-    // additive: an older payload simply leaves the new field empty.
+    // additive: an older payload simply leaves the new field empty. A newer
+    // payload is not safe to rewrite, because saving it from this build would
+    // drop fields the newer build wrote.
+    if (data.version > SessionStore::CURRENT_VERSION) {
+        data.loadFailed = true;
+        return data;
+    }
     if (data.version < SessionStore::CURRENT_VERSION) {
         data.version = SessionStore::CURRENT_VERSION;
     }
@@ -269,30 +276,36 @@ static SessionStore::SessionData sessionDataFromJson(const QByteArray &payload)
 
 static void repairBadConversationTitles(const QSqlDatabase &db)
 {
+    // Only titles are scanned up front. The full payload is fetched for the
+    // (rare) rows whose title actually needs repair, instead of loading every
+    // transcript at startup.
     QSqlQuery query(db);
-    if (!query.exec(u"SELECT id, title, payload FROM conversations"_s)) {
+    if (!query.exec(u"SELECT id, title FROM conversations"_s)) {
         return;
     }
 
     struct Row {
         QString id;
         QString title;
-        QByteArray payload;
     };
     QList<Row> rows;
     while (query.next()) {
         Row row;
         row.id = query.value(0).toString();
         row.title = query.value(1).toString();
-        row.payload = query.value(2).toByteArray();
-        rows.append(row);
+        if (isBadTitle(row.title)) {
+            rows.append(row);
+        }
     }
 
     for (const Row &row : rows) {
-        if (!isBadTitle(row.title)) {
+        QSqlQuery payloadQuery(db);
+        payloadQuery.prepare(u"SELECT payload FROM conversations WHERE id = ?"_s);
+        payloadQuery.addBindValue(row.id);
+        if (!payloadQuery.exec() || !payloadQuery.next()) {
             continue;
         }
-        const SessionStore::SessionData data = sessionDataFromJson(row.payload);
+        const SessionStore::SessionData data = sessionDataFromJson(payloadQuery.value(0).toByteArray());
         const QString newTitle = generateTitleFromMessages(data.messages);
         if (newTitle.isEmpty() || isBadTitle(newTitle) || newTitle == row.title) {
             continue;
@@ -386,11 +399,20 @@ static void quarantineDatabase(const QString &path)
         moved = QFile::copy(path, target) && QFile::remove(path);
     }
     if (moved) {
-        // Only drop the sidecars once the main file is safely moved; deleting
-        // them after a failed move could damage a database another process is
-        // still using.
-        QFile::remove(path + u"-wal"_s);
-        QFile::remove(path + u"-shm"_s);
+        // Move the WAL/SHM sidecars next to the quarantined copy instead of
+        // deleting them. In WAL mode the newest committed transactions often
+        // live only in the -wal file, so deleting it discards the very history
+        // the quarantine is meant to preserve.
+        for (const QByteArray &suffix : {QByteArrayLiteral("-wal"), QByteArrayLiteral("-shm")}) {
+            const QString sidecar = path + QLatin1String(suffix);
+            if (QFileInfo::exists(sidecar)) {
+                const QString sidecarTarget = target + QLatin1String(suffix);
+                if (!QFile::rename(sidecar, sidecarTarget)) {
+                    QFile::copy(sidecar, sidecarTarget);
+                    QFile::remove(sidecar);
+                }
+            }
+        }
         qWarning() << "KateAI: the session database was unreadable; moved it to" << target;
     } else {
         qWarning() << "KateAI: could not move the unreadable session database" << path;
@@ -516,6 +538,9 @@ static QSqlDatabase openStore(bool *ok)
     if (!QDir().mkpath(directory)) {
         qWarning() << "KateAI: cannot create the session database directory:" << directory;
     }
+    // Transcripts contain source code and whatever the agent saw. Keep them
+    // owner-only instead of inheriting the umask (usually 0644).
+    QFile::setPermissions(directory, QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner);
 
     // A thread that ends frees its address, and a new thread can get the same
     // one. A counter keeps the connection names unique, and the connection is
@@ -577,6 +602,14 @@ static QSqlDatabase openStore(bool *ok)
     }
 
     QSqlDatabase db = QSqlDatabase::database(connectionName, true);
+    // SQLite creates the main file (and its WAL sidecars) with the process
+    // umask. Tighten them now that they exist.
+    const QStringList sessionFiles{path, path + u"-wal"_s, path + u"-shm"_s};
+    for (const QString &file : sessionFiles) {
+        if (QFileInfo::exists(file)) {
+            QFile::setPermissions(file, QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+        }
+    }
     importLegacyConversations(db);
     repairBadConversationTitles(db);
 
@@ -780,7 +813,8 @@ static void importLegacyConversations(QSqlDatabase db)
     const qint64 now = nextTimestamp();
     bool complete = true;
 
-    for (const QString &id : conversationIds) {
+    for (int index = 0; index < conversationIds.size(); ++index) {
+        const QString &id = conversationIds.at(index);
         const SessionStore::SessionData data = legacyConversationData(id);
         const KConfigGroup convGroup(config, LEGACY_CONVERSATION_GROUP_PREFIX + id);
         const QDateTime createdAt = QDateTime::fromString(convGroup.readEntry(u"CreatedAt"_s, QString()), Qt::ISODate);
@@ -790,8 +824,12 @@ static void importLegacyConversations(QSqlDatabase db)
         insert.prepare(u"INSERT OR IGNORE INTO conversations (id, title, created_at, updated_at, message_count, version, payload) VALUES (?, ?, ?, ?, ?, ?, ?)"_s);
         insert.addBindValue(id);
         insert.addBindValue(convGroup.readEntry(u"Title"_s, generateTitleFromMessages(data.messages)));
-        insert.addBindValue(createdAt.isValid() ? createdAt.toMSecsSinceEpoch() : now);
-        insert.addBindValue(updatedAt.isValid() ? updatedAt.toMSecsSinceEpoch() : now);
+        // Legacy entries without a timestamp must still sort deterministically.
+        // Giving every imported conversation the same "now" made the history
+        // order arbitrary.
+        const qint64 fallbackTime = now - (conversationIds.size() - index);
+        insert.addBindValue(createdAt.isValid() ? createdAt.toMSecsSinceEpoch() : fallbackTime);
+        insert.addBindValue(updatedAt.isValid() ? updatedAt.toMSecsSinceEpoch() : fallbackTime);
         insert.addBindValue(data.messages.size());
         insert.addBindValue(SessionStore::CURRENT_VERSION);
         insert.addBindValue(sessionDataToJson(data));
@@ -823,6 +861,7 @@ static void importLegacyConversations(QSqlDatabase db)
 
     if (!db.commit()) {
         qWarning() << "KateAI: cannot commit the session history import:" << db.lastError().text();
+        db.rollback();
         return;
     }
 
@@ -896,10 +935,10 @@ QList<SessionStore::ConversationInfo> SessionStore::listConversations(int maxCon
     // requested bound (0 means "no limit").
     QSqlQuery query(db);
     if (maxConversations > 0) {
-        query.prepare(u"SELECT id, title, created_at, updated_at, message_count, payload FROM conversations ORDER BY updated_at DESC LIMIT ?"_s);
+        query.prepare(u"SELECT id, title, created_at, updated_at, message_count FROM conversations ORDER BY updated_at DESC LIMIT ?"_s);
         query.addBindValue(maxConversations);
     } else {
-        query.prepare(u"SELECT id, title, created_at, updated_at, message_count, payload FROM conversations ORDER BY updated_at DESC"_s);
+        query.prepare(u"SELECT id, title, created_at, updated_at, message_count FROM conversations ORDER BY updated_at DESC"_s);
     }
     if (!query.exec()) {
         qWarning() << "KateAI: cannot list conversations:" << query.lastError().text();
@@ -918,7 +957,15 @@ QList<SessionStore::ConversationInfo> SessionStore::listConversations(int maxCon
         // Repair any title that still carries a compaction marker so the history
         // list never shows "earlier conversation was compacted...".
         if (isBadTitle(info.title)) {
-            const SessionStore::SessionData data = sessionDataFromJson(query.value(5).toByteArray());
+            // Payload is only fetched for the rare bad title, not for every
+            // row in the history.
+            QSqlQuery payloadQuery(db);
+            payloadQuery.prepare(u"SELECT payload FROM conversations WHERE id = ?"_s);
+            payloadQuery.addBindValue(info.id);
+            SessionStore::SessionData data;
+            if (payloadQuery.exec() && payloadQuery.next()) {
+                data = sessionDataFromJson(payloadQuery.value(0).toByteArray());
+            }
             const QString repaired = generateTitleFromMessages(data.messages);
             if (!repaired.isEmpty() && !isBadTitle(repaired)) {
                 info.title = repaired;
@@ -984,7 +1031,14 @@ SessionStore::SessionData SessionStore::loadConversation(const QString &conversa
     QSqlQuery query(db);
     query.prepare(u"SELECT payload FROM conversations WHERE id = ?"_s);
     query.addBindValue(conversationId);
-    if (!query.exec() || !query.next()) {
+    if (!query.exec()) {
+        SessionData failed;
+        failed.loadFailed = true;
+        return failed;
+    }
+    if (!query.next()) {
+        // The row is gone (deleted or pruned). An empty conversation is the
+        // right answer here; it is not a load failure.
         return SessionData();
     }
 
@@ -1056,6 +1110,15 @@ bool SessionStore::saveConversation(const QString &conversationId, const Session
         update.addBindValue(sessionDataToJson(data));
         update.addBindValue(conversationId);
         stored = update.exec();
+        if (stored) {
+            const int affected = update.numRowsAffected();
+            // The row was pruned by another process between isNew and the
+            // UPDATE. An UPDATE that affects no rows is not a save.
+            if (affected == 0) {
+                db.rollback();
+                return saveConversation(conversationId, data, title, maxConversations);
+            }
+        }
         if (!stored) {
             qWarning() << "KateAI: cannot update conversation" << conversationId << update.lastError().text();
         }
@@ -1128,6 +1191,7 @@ void SessionStore::deleteConversation(const QString &conversationId)
 
     if (!db.commit()) {
         qWarning() << "KateAI: cannot commit the deletion of conversation" << conversationId << db.lastError().text();
+        db.rollback();
     }
 }
 
@@ -1228,6 +1292,7 @@ void SessionStore::clearAllConversations()
     clearMeta(db, ACTIVE_CONVERSATION_KEY);
     if (!db.commit()) {
         qWarning() << "KateAI: cannot commit the conversation history clear:" << db.lastError().text();
+        db.rollback();
     }
 }
 

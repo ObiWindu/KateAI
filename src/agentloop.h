@@ -104,6 +104,9 @@ public:
     void abort();
     void resetConversation();
     void resolvePermission(PermissionDecision decision);
+    // Identity-checked variant: a decision from an old card must not approve
+    // the request that replaced it.
+    void resolvePermission(PermissionDecision decision, const QString &toolCallId);
     // Answers the blocking `question` tool with the user's text; the agent loop
     // resumes from the answer.
     void answerQuestion(const QString &answer);

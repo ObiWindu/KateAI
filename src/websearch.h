@@ -143,6 +143,10 @@ private:
     int m_maxResults = 5;
     // Per-call overrides, keyed by call id; consumed when the reply arrives.
     QHash<QString, int> m_callMaxResults;
+    // The provider a search call was sent to. Parsing with the provider that
+    // happens to be configured when the reply lands breaks if settings change
+    // while the request is in flight.
+    QHash<QString, Provider> m_callProviders;
     QHash<QString, qint64> m_callMaxBytes;
     int m_timeoutMs = 20000;
     QNetworkAccessManager *m_nam = nullptr;

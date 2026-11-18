@@ -608,10 +608,21 @@ void ToolCallWidget::showApproval()
     updateStyle();
 }
 
+void ToolCallWidget::cancelApproval()
+{
+    m_awaitingApproval = false;
+    if (m_approvalRow) {
+        m_approvalRow->hide();
+    }
+    updateStyle();
+}
+
 void ToolCallWidget::setApprovalResolved(PermissionDecision decision)
 {
     m_awaitingApproval = false;
-    m_approvalRow->hide();
+    if (m_approvalRow) {
+        m_approvalRow->hide();
+    }
     if (decision == PermissionDecision::Deny) {
         m_denied = true;
         m_status->setText(u"✗"_s);

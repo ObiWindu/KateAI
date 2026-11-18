@@ -66,6 +66,11 @@ public:
     // "cat ~/.ssh/id_rsa". Deny globs apply to file tools already; the shell
     // needs the same guard or a read-only command sidesteps them entirely.
     bool commandTouchesDeniedPath(const QString &command) const;
+    // True when a shell command names a path outside the workspace. Read-only
+    // commands are approved without a prompt, so their operands must obey the
+    // same confinement the read tools enforce; otherwise "cat ~/.bash_history"
+    // is an unprompted read of the whole host.
+    bool commandTouchesOutsideWorkspace(const QString &command) const;
 
     QStringList wrapCommand(const QString &command, QString *error, const QString &workingDirectory = QString()) const;
     // Wrap an argv vector (ACP terminal/create). The program and each argument

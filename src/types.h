@@ -486,6 +486,10 @@ QString providerLabel(Provider provider);
 Provider providerFromId(const QString &id);
 QString providerBaseUrl(Provider provider);
 QString providerBaseUrl(const Settings &settings);
+// Joins a provider base URL and an API path without doubling an existing
+// "/v1" segment. The Anthropic base already ends in /v1, while the endpoints
+// are written as /v1/messages, which used to produce /v1/v1/messages.
+QString joinApiEndpoint(const QString &baseUrl, const QString &endpoint);
 QStringList defaultModels(Provider provider);
 // True when the provider can be listed: it has a key and speaks an API we can
 // query a model catalogue on. Used to decide which providers to fetch from.

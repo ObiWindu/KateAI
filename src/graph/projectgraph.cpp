@@ -264,6 +264,7 @@ void ProjectGraph::updateGraph(const QString &filePath, const QString &content)
         node->content = content;
         updateNodeMetrics(node);
         indexFileSymbols(node);
+        node->lastModified = QFileInfo(node->path).lastModified().toSecsSinceEpoch();
 
         // Update dependencies based on new content
         reindexFileDependencies(node);
@@ -273,16 +274,18 @@ void ProjectGraph::updateGraph(const QString &filePath, const QString &content)
             node->content = node->content.left(kContentPreviewChars);
         }
     } else {
-        // Create new node for file
+        // Create new node for file. Use an absolute path so it matches the
+        // ids the scanner creates for existing files.
+        const QString absolutePath = QFileInfo(filePath).absoluteFilePath();
         GraphNode newNode;
-        newNode.id = generateNodeId(filePath);
-        newNode.name = QFileInfo(filePath).fileName();
+        newNode.id = generateNodeId(absolutePath);
+        newNode.name = QFileInfo(absolutePath).fileName();
         // Same convention as scanDirectory(): the node type is "file" and the
         // language lives in metadata. A language here would hide the node from
         // every analyser and query that filters on type == "file".
         newNode.type = u"file"_s;
-        newNode.metadata.insert(u"language"_s, getNodeTypeFromPath(filePath));
-        newNode.path = filePath;
+        newNode.metadata.insert(u"language"_s, getNodeTypeFromPath(absolutePath));
+        newNode.path = absolutePath;
         newNode.content = content;
         newNode.isReadOnly = false;
         newNode.lastModified = QDateTime::currentSecsSinceEpoch();
@@ -295,7 +298,7 @@ void ProjectGraph::updateGraph(const QString &filePath, const QString &content)
         }
 
         // Find parent directory
-        QString parentDirId = generateNodeId(QFileInfo(filePath).absolutePath(), u"directory"_s);
+        QString parentDirId = generateNodeId(QFileInfo(absolutePath).absolutePath(), u"directory"_s);
         GraphNode *parentNode = getNode(parentDirId);
         if (parentNode) {
             addNode(newNode);
@@ -305,6 +308,11 @@ void ProjectGraph::updateGraph(const QString &filePath, const QString &content)
             edge.relationship = u"contains"_s;
             edge.isSafe = true;
             addEdge(edge);
+            // A newly created file gets import edges immediately, instead of
+            // waiting for a full regeneration of the project graph.
+            if (GraphNode *added = getNode(newNode.id)) {
+                reindexFileDependencies(added);
+            }
         }
     }
 
@@ -468,22 +476,28 @@ void ProjectGraph::removeEdge(const QString &sourceId, const QString &targetId)
         }
     }
 
-    if (!edgeKey.isEmpty()) {
-        GraphEdge *edge = m_edges.take(edgeKey);
-        delete edge;
+    if (edgeKey.isEmpty()) {
+        return;
+    }
+    delete m_edges.take(edgeKey);
 
-        // Update adjacency list
-        if (m_adjacencyList.contains(sourceId)) {
-            m_adjacencyList[sourceId].remove(targetId);
+    // Another relationship between the same pair may still exist. Only drop
+    // the adjacency entry and the node back-links when this was the last one.
+    for (auto it = m_edges.constBegin(); it != m_edges.constEnd(); ++it) {
+        if (it.key().startsWith(sourceId + u"->"_s + targetId + u"->"_s)) {
+            return;
         }
-
-        // Update node dependencies
-        GraphNode *sourceNode = getNode(sourceId);
-        GraphNode *targetNode = getNode(targetId);
-        if (sourceNode && targetNode) {
-            sourceNode->dependencies.remove(targetId);
-            targetNode->dependents.remove(sourceId);
-        }
+    }
+    if (m_adjacencyList.contains(sourceId)) {
+        m_adjacencyList[sourceId].remove(targetId);
+    }
+    GraphNode *sourceNode = getNode(sourceId);
+    GraphNode *targetNode = getNode(targetId);
+    if (sourceNode) {
+        sourceNode->dependencies.remove(targetId);
+    }
+    if (targetNode) {
+        targetNode->dependents.remove(sourceId);
     }
 }
 
@@ -556,37 +570,34 @@ QList<GraphNode*> ProjectGraph::findRelatedNodes(const QString &nodeId, int maxD
 
 QList<QString> ProjectGraph::findImportPaths(const QString &sourceNodeId, const QString &targetNodeId) const
 {
-    QList<QString> result;
+    // The return value is the node-id sequence of one path, because the
+    // callers resolve each element with getNode(). It used to return
+    // "a -> b -> c" strings, which getNode() could never resolve.
     QSet<QString> visited;
     QStack<QPair<QString, QStringList>> stack;
-
     stack.push({sourceNodeId, {sourceNodeId}});
     visited.insert(sourceNodeId);
 
     while (!stack.isEmpty()) {
-        QPair<QString, QStringList> current = stack.pop();
-        QString currentNodeId = current.first;
-        QStringList path = current.second;
-
-        if (currentNodeId == targetNodeId) {
-            result.append(path.join(u" -> "_s));
+        const QPair<QString, QStringList> current = stack.pop();
+        if (current.first == targetNodeId) {
+            return current.second;
+        }
+        const GraphNode *currentNode = getNode(current.first);
+        if (!currentNode) {
             continue;
         }
-
-        const GraphNode *currentNode = getNode(currentNodeId);
-        if (currentNode) {
-            for (const QString &dependencyId : currentNode->dependencies) {
-                if (!visited.contains(dependencyId)) {
-                    visited.insert(dependencyId);
-                    QStringList newPath = path;
-                    newPath.append(dependencyId);
-                    stack.push({dependencyId, newPath});
-                }
+        for (const QString &dependencyId : currentNode->dependencies) {
+            if (visited.contains(dependencyId)) {
+                continue;
             }
+            visited.insert(dependencyId);
+            QStringList newPath = current.second;
+            newPath.append(dependencyId);
+            stack.push({dependencyId, newPath});
         }
     }
-
-    return result;
+    return {};
 }
 
 QSet<QString> ProjectGraph::getTransitiveDependencies(const QString &nodeId) const
@@ -625,14 +636,18 @@ QSet<QString> ProjectGraph::getTransitiveDependents(const QString &nodeId) const
     visited.insert(nodeId);
 
     while (!queue.isEmpty()) {
-        QString currentId = queue.dequeue();
-        if (m_adjacencyList.contains(currentId)) {
-            for (const QString &dependentId : m_adjacencyList[currentId]) {
-                if (!visited.contains(dependentId)) {
-                    visited.insert(dependentId);
-                    result.insert(dependentId);
-                    queue.enqueue(dependentId);
-                }
+        const QString currentId = queue.dequeue();
+        // m_adjacencyList[source] holds source's dependencies (the forward
+        // direction). Dependents are the reverse edges, kept on the node.
+        const GraphNode *current = getNode(currentId);
+        if (!current) {
+            continue;
+        }
+        for (const QString &dependentId : current->dependents) {
+            if (!visited.contains(dependentId)) {
+                visited.insert(dependentId);
+                result.insert(dependentId);
+                queue.enqueue(dependentId);
             }
         }
     }
@@ -1191,9 +1206,25 @@ int ProjectGraph::staleFileCount() const
     int stale = 0;
     for (auto it = m_nodes.begin(); it != m_nodes.end(); ++it) {
         const GraphNode *node = it.value();
-        if (!node || node->path.isEmpty()
-            || (node->type != u"file"_s && node->type != u"directory"_s)) {
+        if (!node || (node->type != u"file"_s && node->type != u"directory"_s)) {
             continue;
+        }
+        // An empty path used to be skipped entirely, so a crafted cache whose
+        // nodes all had path "" was never considered stale and its injected
+        // names/symbols stayed in the model context forever.
+        if (node->path.isEmpty()) {
+            ++stale;
+            continue;
+        }
+        // A cache node naming a path outside this workspace is untrusted
+        // content, not a file of this project.
+        if (!m_workspacePath.isEmpty()) {
+            const QString root = QDir::cleanPath(m_workspacePath);
+            const QString path = QDir::cleanPath(node->path);
+            if (path != root && !path.startsWith(root + u'/')) {
+                ++stale;
+                continue;
+            }
         }
         const QFileInfo info(node->path);
         if (!info.exists() || info.lastModified().toSecsSinceEpoch() != node->lastModified) {
@@ -1448,21 +1479,26 @@ bool ProjectGraph::saveToFile(const QString &filePath) const
 
 bool ProjectGraph::loadFromFile(const QString &filePath)
 {
+    // A project-controlled path can be a FIFO, a device or a symlink to
+    // /dev/zero; opening/readAll() would block or exhaust memory at workspace
+    // open. Only a regular, non-symlink file of bounded size is read.
+    const QFileInfo source(filePath);
+    constexpr qint64 kMaxGraphBytes = 64 * 1024 * 1024;
+    if (!source.exists() || !source.isFile() || source.isSymLink()) {
+        return false;
+    }
+    if (source.size() > kMaxGraphBytes) {
+        qWarning() << "KateAI: project graph file too large, not loaded:" << filePath << source.size();
+        return false;
+    }
     QFile file(filePath);
     if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
         return false;
     }
-
-    // The graph file is written by the plugin, but it lives in the project and
-    // can be replaced by anything. A huge file would be read into memory in
-    // one piece and then parsed, so the size is bounded first.
-    constexpr qint64 kMaxGraphBytes = 64 * 1024 * 1024;
-    if (file.size() > kMaxGraphBytes) {
-        qWarning() << "KateAI: project graph file too large, not loaded:" << filePath << file.size();
+    QByteArray data = file.read(kMaxGraphBytes + 1);
+    if (data.size() > kMaxGraphBytes) {
         return false;
     }
-
-    QByteArray data = file.readAll();
     QJsonDocument doc = QJsonDocument::fromJson(data);
     if (!doc.isObject()) {
         return false;

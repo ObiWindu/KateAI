@@ -139,6 +139,40 @@ static QString toolContentText(const QJsonValue &content)
     return parts.join(u"\n"_s);
 }
 
+// Builds the final ToolResult for a tool_call/tool_call_update that already
+// carries a terminal status. The tool_call branch used to ignore status, so a
+// fast call that completed in one message spun forever and leaked into the
+// next turn's live-tool sweep.
+static ToolResult completedToolResult(const QString &toolCallId, const QString &toolName,
+                                      const QJsonObject &update, const QString &streamed)
+{
+    ToolResult result;
+    result.toolCallId = toolCallId;
+    result.name = toolName;
+    const QString status = update.value(u"status"_s).toString();
+    result.ok = status == u"completed"_s;
+    result.output = toolContentText(update.value(u"content"_s));
+    if (result.output.isEmpty()) {
+        result.output = toolContentText(update.value(u"rawOutput"_s));
+    }
+    if (result.output.isEmpty()) {
+        result.output = toolContentText(update.value(u"output"_s));
+    }
+    if (result.output.isEmpty()) {
+        result.output = toolContentText(update.value(u"result"_s));
+    }
+    if (result.output.isEmpty() && update.contains(u"error"_s)) {
+        result.output = toolContentText(update.value(u"error"_s));
+    }
+    if (status == u"failed"_s && result.output.isEmpty()) {
+        result.output = u"Tool failed."_s;
+    }
+    if (result.output.isEmpty()) {
+        result.output = streamed;
+    }
+    return result;
+}
+
 static ToolRisk riskForKind(const QString &kind, const QString &name)
 {
     if (kind == u"read"_s || kind == u"search"_s || kind == u"fetch"_s || kind == u"think"_s) {
@@ -427,6 +461,13 @@ void AcpClient::setSettings(const Settings &settings)
     }
     // Same process. A model change is applied on the live session, the way
     // Zed does, instead of restarting the agent so a --model flag is reread.
+    // Clearing the model must restart: setModel("") is a no-op and the old
+    // --model flag would otherwise keep applying.
+    if (oldModel != m_settings.acpModel && m_settings.acpModel.trimmed().isEmpty()
+        && !oldModel.trimmed().isEmpty()) {
+        stop();
+        return;
+    }
     if (oldModel != m_settings.acpModel && !setModel(m_settings.acpModel)) {
         stop();
         return;
@@ -595,6 +636,13 @@ static bool collectEffortConfig(const QJsonArray &configOptions, QStringList *ef
 
 void AcpClient::ingestSessionModels(const QJsonObject &result, bool applyPreferred)
 {
+    // A current_model_update may carry only the id, with no model list.
+    if (result.contains(u"currentModelId"_s)) {
+        m_currentModelId = result.value(u"currentModelId"_s).toString();
+    }
+    if (result.contains(u"currentEffortId"_s)) {
+        m_currentEffortId = result.value(u"currentEffortId"_s).toString();
+    }
     // ACP v2 setup responses can carry the initial complete command list, and
     // v1 setup responses (session/new, session/resume) do the same in recent
     // agents. Only replace the list when the field is present: an update that
@@ -1077,6 +1125,14 @@ void AcpClient::cancel()
         finishPrompt(u"cancelled"_s);
         return;
     }
+    if (m_promptId != 0 && m_sessionId.isEmpty()) {
+        // The prompt is pending but its session id was cleared (resetSession),
+        // so session/cancel cannot be sent. Close the turn locally instead of
+        // leaving it pending forever.
+        finishLiveTools(u"Cancelled."_s);
+        finishPrompt(u"cancelled"_s);
+        return;
+    }
     if (m_promptId != 0 && !m_sessionId.isEmpty()) {
         QJsonObject params;
         params.insert(u"sessionId"_s, m_sessionId);
@@ -1089,7 +1145,7 @@ void AcpClient::cancel()
         const int promptId = m_promptId;
         if (m_cancelGraceTimer) {
             m_cancelGraceTimer->stop();
-            delete m_cancelGraceTimer;
+            m_cancelGraceTimer->deleteLater();
         }
         auto *grace = new QTimer(this);
         grace->setSingleShot(true);
@@ -1113,6 +1169,11 @@ void AcpClient::cancel()
 
 void AcpClient::stop()
 {
+    // Do this before the bookkeeping below clears m_promptId. A stop issued
+    // while a turn is running (settings/workspace change) otherwise left the
+    // owner busy forever, because every prompt callback bails while shutting
+    // down and no failure was reported.
+    const bool hadActiveTurn = m_promptId != 0;
     m_shuttingDown = true;
     stopTurnRetry();
     m_turnRetryAttempt = 0;
@@ -1121,7 +1182,7 @@ void AcpClient::stop()
     }
     if (m_cancelGraceTimer) {
         m_cancelGraceTimer->stop();
-        delete m_cancelGraceTimer;
+        m_cancelGraceTimer->deleteLater();
         m_cancelGraceTimer = nullptr;
     }
     failAll(u"ACP agent disconnected."_s);
@@ -1145,6 +1206,14 @@ void AcpClient::stop()
     m_oversizedFrameReported = false;
     m_sessionId.clear();
     m_promptId = 0;
+    // Capabilities and commands belong to the agent that just went away.
+    // Keeping them made the next agent inherit the previous one's slash
+    // commands and feature flags.
+    m_availableCommands = QJsonArray();
+    m_loadSession = false;
+    m_closeSession = false;
+    m_embeddedContext = false;
+    m_protocolVersion = 1;
     m_permissionRpcId = QJsonValue();
     m_permissionOptions = QJsonArray();
     m_permissionRequest = {};
@@ -1175,6 +1244,9 @@ void AcpClient::stop()
     if (m_state != State::Stopped) {
         setState(State::Stopped, u"Disconnected"_s);
     }
+    if (hadActiveTurn) {
+        Q_EMIT failed(u"The ACP agent was stopped before the turn finished."_s);
+    }
 }
 
 void AcpClient::resetSession()
@@ -1200,6 +1272,7 @@ void AcpClient::resetSession()
         sendRequest(u"session/close"_s, params, {}, 5000);
     }
     m_sessionId.clear();
+    m_sessionOpening = false;
     Q_EMIT sessionIdChanged(QString());
 }
 
@@ -1234,13 +1307,28 @@ void AcpClient::prompt(const QString &text)
 
 void AcpClient::resolvePermission(PermissionDecision decision)
 {
+    resolvePermission(decision, QString());
+}
+
+void AcpClient::resolvePermission(PermissionDecision decision, const QString &toolCallId)
+{
     // A parked client method is answered by running it or refusing it, not by
     // replying with a permission outcome.
     if (m_activeParked) {
+        if (!toolCallId.isEmpty() && m_activeParked->request.toolCallId != toolCallId) {
+            return;
+        }
         const ParkedMethod parked = *m_activeParked;
         m_activeParked.reset();
         if (decision == PermissionDecision::Deny) {
             replyError(parked.rpcId, kServerError, u"Permission denied."_s);
+            ToolResult result;
+            result.toolCallId = parked.request.toolCallId;
+            result.name = parked.request.toolName;
+            result.ok = false;
+            result.cancelled = true;
+            result.output = u"Permission denied."_s;
+            Q_EMIT toolFinished(result);
         } else {
             if (decision == PermissionDecision::AllowSession) {
                 m_sessionGrants.insert(parked.grantKey);
@@ -1248,11 +1336,25 @@ void AcpClient::resolvePermission(PermissionDecision decision)
                 m_onceGrants.insert(parked.grantKey);
             }
             dispatchParkedMethod(parked);
+            // The card was opened by askNextParkedMethod(); the handler only
+            // answers the JSON-RPC, so without this it stayed "running" and
+            // the end-of-turn sweep marked a successful write as cancelled.
+            ToolResult result;
+            result.toolCallId = parked.request.toolCallId;
+            result.name = parked.request.toolName;
+            result.ok = true;
+            result.output = parked.method == u"terminal/create"_s
+                ? u"Terminal started."_s
+                : u"Write completed."_s;
+            Q_EMIT toolFinished(result);
         }
         askNextParkedMethod();
         return;
     }
     if (!hasPendingPermission()) {
+        return;
+    }
+    if (!toolCallId.isEmpty() && m_permissionRequest.toolCallId != toolCallId) {
         return;
     }
     if (decision != PermissionDecision::Deny) {
@@ -1295,6 +1397,9 @@ void AcpClient::setState(State state, const QString &status)
 {
     m_state = state;
     m_status = status;
+    if (state == State::Ready || state == State::Failed || state == State::Stopped) {
+        m_sessionOpening = false;
+    }
 }
 
 QString AcpClient::sessionCwd() const
@@ -1351,7 +1456,12 @@ void AcpClient::spawnProcess()
 
     connect(m_process, &QProcess::readyReadStandardOutput, this, &AcpClient::onStdioReadyRead);
     connect(m_process, &QProcess::errorOccurred, this, [this](QProcess::ProcessError error) {
-        Q_UNUSED(error);
+        // A crash after a successful start is reported by finished(), with
+        // the exit code and stderr. Reporting it here as "could not start"
+        // was both wrong and a duplicate failure.
+        if (error != QProcess::FailedToStart) {
+            return;
+        }
         if (m_shuttingDown) {
             return;
         }
@@ -1430,7 +1540,13 @@ void AcpClient::spawnProcess()
     }
     m_process->start(command, args);
     if (!m_process->waitForStarted(10000)) {
+        // errorOccurred(FailedToStart) is delivered during waitForStarted and
+        // already reported the failure. Do not report it a second time.
+        if (m_state == State::Failed) {
+            return;
+        }
         const QString message = u"Could not start ACP agent '%1': %2"_s.arg(command, m_process->errorString());
+        failAll(message);
         setState(State::Failed, message);
         Q_EMIT failed(message);
         return;
@@ -1751,6 +1867,10 @@ void AcpClient::maybeAuthenticate(const QJsonArray &authMethods)
 
 void AcpClient::openSession()
 {
+    if (m_sessionOpening) {
+        return;
+    }
+    m_sessionOpening = true;
     if (!m_resumeSessionId.isEmpty() && (m_loadSession || m_resumeSession)) {
         sendSessionLoadOrResume();
         return;
@@ -1857,7 +1977,7 @@ void AcpClient::sendPromptNow(const QString &text)
         m_sessionNotesSent = true;
     }
     params.insert(u"prompt"_s, prompt);
-    m_promptId = sendRequest(u"session/prompt"_s, params, [this](const QJsonObject &result, const QString &error) {
+    const int promptRequestId = sendRequest(u"session/prompt"_s, params, [this](const QJsonObject &result, const QString &error) {
         if (m_shuttingDown) {
             return;
         }
@@ -1883,6 +2003,11 @@ void AcpClient::sendPromptNow(const QString &text)
         }
         finishPrompt(stopReason);
     }, 0);
+    // sendRequest invokes the completion callback synchronously when the
+    // write fails; that callback cleared m_promptId. Assigning its return
+    // value unconditionally put the dead id back and wedged the client busy
+    // forever.
+    m_promptId = m_pending.contains(promptRequestId) ? promptRequestId : 0;
 }
 
 QJsonArray AcpClient::promptBlocks(const QString &text) const
@@ -2015,6 +2140,12 @@ int AcpClient::sendRequest(const QString &method, const QJsonObject &params,
     // int wraps after 2^31 and would collide with live pending ids.
     if (m_nextId <= 0 || m_nextId == std::numeric_limits<int>::max()) {
         m_nextId = 1;
+        while (m_pending.contains(m_nextId) && m_nextId < std::numeric_limits<int>::max()) {
+            ++m_nextId;
+        }
+    }
+    while (m_pending.contains(m_nextId) && m_nextId < std::numeric_limits<int>::max()) {
+        ++m_nextId;
     }
     const int id = m_nextId++;
     Pending pending;
@@ -2025,13 +2156,15 @@ int AcpClient::sendRequest(const QString &method, const QJsonObject &params,
         auto *timer = new QTimer(this);
         timer->setSingleShot(true);
         timer->setInterval(timeoutMs);
-        connect(timer, &QTimer::timeout, this, [this, id, method, timeoutMs] {
+        connect(timer, &QTimer::timeout, this, [this, id, method, timeoutMs, timer] {
             const auto it = m_pending.constFind(id);
             if (it == m_pending.constEnd()) {
+                timer->deleteLater();
                 return;
             }
             auto callback = it.value().done;
             m_pending.remove(id);
+            timer->deleteLater();
             if (callback) {
                 callback(QJsonObject(), u"ACP '%1' timed out after %2 ms."_s.arg(method).arg(timeoutMs));
             }
@@ -2053,9 +2186,11 @@ int AcpClient::sendRequest(const QString &method, const QJsonObject &params,
         const auto it = m_pending.constFind(id);
         if (it != m_pending.constEnd()) {
             auto callback = it.value().done;
+            QTimer *timer = it.value().timeout;
             m_pending.remove(id);
-            if (it.value().timeout) {
-                it.value().timeout->stop();
+            if (timer) {
+                timer->stop();
+                timer->deleteLater();
             }
             if (callback) {
                 callback(QJsonObject(), u"The ACP agent is not running, so the request could not be sent."_s);
@@ -2483,6 +2618,15 @@ void AcpClient::handleSessionUpdate(const QJsonObject &update)
         call.insert(u"function"_s, function);
         m_toolCalls.append(call);
         Q_EMIT toolStarted(request);
+        const QString status = update.value(u"status"_s).toString();
+        if (status == u"completed"_s || status == u"failed"_s) {
+            const ToolResult result = completedToolResult(request.toolCallId, request.toolName, update,
+                                                          m_toolStreamed.value(request.toolCallId));
+            m_liveTools.remove(request.toolCallId);
+            m_toolStreamed.remove(request.toolCallId);
+            forgetToolTerminal(request.toolCallId);
+            Q_EMIT toolFinished(result);
+        }
         return;
     }
     if (kind == u"tool_call_update"_s) {
@@ -2501,6 +2645,7 @@ void AcpClient::handleSessionUpdate(const QJsonObject &update)
         PermissionRequest existing = m_liveTools.value(toolCallId);
         if (existing.toolCallId.isEmpty()) {
             existing = permissionFromToolCall(update);
+            existing.toolCallId = toolCallId;
             m_liveTools.insert(toolCallId, existing);
             Q_EMIT toolStarted(existing);
         }
@@ -2522,32 +2667,11 @@ void AcpClient::handleSessionUpdate(const QJsonObject &update)
             Q_EMIT toolDetailsChanged(existing);
         }
         if (status == u"completed"_s || status == u"failed"_s) {
-            ToolResult result;
-            result.toolCallId = toolCallId;
-            result.name = existing.toolName;
-            result.ok = status == u"completed"_s;
-            result.output = toolContentText(update.value(u"content"_s));
-            if (result.output.isEmpty()) {
-                result.output = toolContentText(update.value(u"rawOutput"_s));
-            }
-            if (result.output.isEmpty()) {
-                result.output = toolContentText(update.value(u"output"_s));
-            }
-            if (result.output.isEmpty()) {
-                result.output = toolContentText(update.value(u"result"_s));
-            }
-            if (result.output.isEmpty() && update.contains(u"error"_s)) {
-                result.output = toolContentText(update.value(u"error"_s));
-            }
-            if (status == u"failed"_s && result.output.isEmpty()) {
-                result.output = u"Tool failed."_s;
-            }
-            if (result.output.isEmpty()) {
-                // Some ACP agents stream command output while the tool runs,
-                // then send a terminal status update with no content at all.
-                // Keep that last complete stream as the final card output.
-                result.output = m_toolStreamed.value(toolCallId);
-            }
+            // Some ACP agents stream command output while the tool runs, then
+            // send a terminal status update with no content at all. Keep that
+            // last complete stream as the final card output.
+            const ToolResult result = completedToolResult(toolCallId, existing.toolName, update,
+                                                          m_toolStreamed.value(toolCallId));
             m_liveTools.remove(toolCallId);
             m_toolStreamed.remove(toolCallId);
             forgetToolTerminal(toolCallId);
@@ -3207,6 +3331,10 @@ void AcpClient::cancelParkedMethods()
 
 void AcpClient::recordApprovalGrants(const PermissionRequest &request, PermissionDecision decision)
 {
+    // Approving a read request must not mint a write grant for the same path.
+    if (request.risk == ToolRisk::Read && !request.mutatesFiles) {
+        return;
+    }
     QSet<QString> &grants = decision == PermissionDecision::AllowSession ? m_sessionGrants : m_onceGrants;
     auto absolutePath = [this](const QString &p) {
         if (QFileInfo(p).isAbsolute() || m_workspace.isEmpty()) {
@@ -3263,8 +3391,16 @@ void AcpClient::handleFsRead(const QJsonValue &id, const QJsonObject &params)
         replyError(id, kServerError, error);
         return;
     }
+    // Use the resolved path for the actual read. pathAllowed() canonicalises
+    // internally but only returns a bool, so reading the raw path let a
+    // symlink swapped in after the check escape the workspace.
+    const QString resolved = currentSandbox().resolve(path, &error, false);
+    if (resolved.isEmpty()) {
+        replyError(id, kServerError, error);
+        return;
+    }
     QString contents;
-    if (!m_bridge || !m_bridge->readDocument(path, &contents)) {
+    if (!m_bridge || !m_bridge->readDocument(resolved, &contents)) {
         replyError(id, kServerError, u"Could not read %1."_s.arg(path));
         return;
     }
@@ -3324,6 +3460,11 @@ void AcpClient::handleFsWrite(const QJsonValue &id, const QJsonObject &params)
         replyError(id, kServerError, error);
         return;
     }
+    const QString resolved = currentSandbox().resolve(path, &error, true);
+    if (resolved.isEmpty()) {
+        replyError(id, kServerError, error);
+        return;
+    }
     if (!m_bridge) {
         replyError(id, kInternalError, u"No document bridge is available."_s);
         return;
@@ -3332,7 +3473,7 @@ void AcpClient::handleFsWrite(const QJsonValue &id, const QJsonObject &params)
         replyError(id, kInvalidParams, u"content is required (pass an empty string to write an empty file)."_s);
         return;
     }
-    if (!m_bridge->writeDocument(path, params.value(u"content"_s).toString(), &error)) {
+    if (!m_bridge->writeDocument(resolved, params.value(u"content"_s).toString(), &error)) {
         replyError(id, kServerError, error.isEmpty() ? u"Could not write %1."_s.arg(path) : error);
         return;
     }
@@ -3361,6 +3502,7 @@ void AcpClient::handleWritePlanFile(const QJsonValue &id, const QJsonObject &par
         replyError(id, kServerError, error.isEmpty() ? u"Could not write the plan file."_s : error);
         return;
     }
+    QFile::setPermissions(path, QFileDevice::ReadOwner | QFileDevice::WriteOwner);
     QJsonObject result;
     result.insert(u"path"_s, path);
     replyResult(id, result);
@@ -3854,6 +3996,12 @@ void AcpClient::askUser(const QJsonValue &id, const QString &question, const QSt
         replyError(id, kInvalidParams, u"question must not be empty: state what you are asking the user."_s);
         return;
     }
+    // A permission request and a question are both blocking UI cards. Only one
+    // may be on screen; cancel the permission rather than leaving a stale
+    // approval card that could be clicked later.
+    if (hasPendingPermission()) {
+        cancelPendingPermission();
+    }
     // Only one question can be on screen at a time: answer a previous parked
     // question as cancelled before parking this one, or the agent blocks on it.
     cancelPendingQuestion();
@@ -4032,6 +4180,11 @@ void AcpClient::handleTerminalCreate(const QJsonValue &id, const QJsonObject &pa
         replyError(id, kServerError, error);
         return;
     }
+    const QString resolvedCwd = currentSandbox().resolve(cwd, &error, false);
+    if (resolvedCwd.isEmpty()) {
+        replyError(id, kServerError, error);
+        return;
+    }
     const Sandbox sandbox = currentSandbox();
 
     auto *term = new Terminal;
@@ -4048,7 +4201,7 @@ void AcpClient::handleTerminalCreate(const QJsonValue &id, const QJsonObject &pa
         ::setsid();
     });
 #endif
-    term->process->setWorkingDirectory(cwd);
+    term->process->setWorkingDirectory(resolvedCwd);
     // Terminal commands run on behalf of a remote agent. Start from the
     // sandbox's scrubbed environment so ambient provider credentials and
     // session channels are not inherited implicitly; the agent can request
@@ -4088,10 +4241,10 @@ void AcpClient::handleTerminalCreate(const QJsonValue &id, const QJsonObject &pa
     if (args.isEmpty()) {
         // A lone command string is a shell line. Pass it as one `-c` argument
         // so inner quotes stay part of the script.
-        wrapped = sandbox.wrapCommand(command, &wrapError, cwd);
+        wrapped = sandbox.wrapCommand(command, &wrapError, resolvedCwd);
     } else {
         // ACP argv stays argv. wrapArgv never rewrites this into `bash -c '…'`.
-        wrapped = sandbox.wrapArgv(command, args, &wrapError, cwd);
+        wrapped = sandbox.wrapArgv(command, args, &wrapError, resolvedCwd);
     }
     if (wrapped.isEmpty()) {
         replyError(id, kServerError, wrapError.isEmpty() ? u"Failed to wrap the terminal command."_s : wrapError);
@@ -4317,6 +4470,9 @@ void AcpClient::releaseAllTerminals()
 
 void AcpClient::failAll(const QString &error)
 {
+    // A prompt queued while the handshake was still starting must not be
+    // replayed into the next turn after a failure.
+    m_queued.clear();
     // A permission request in flight must still be answered, or the agent waits
     // on it for as long as the process lives.
     cancelPendingPermission();
@@ -4345,9 +4501,14 @@ void AcpClient::finishPrompt(const QString &stopReason, const QString &error)
     // The turn is over, so a pending cancellation grace window must not fire.
     if (m_cancelGraceTimer) {
         m_cancelGraceTimer->stop();
-        delete m_cancelGraceTimer;
+        m_cancelGraceTimer->deleteLater();
+        m_cancelGraceTimer = nullptr;
     }
     if (!error.isEmpty()) {
+        // Tool cards still open belong to the turn that just failed; close
+        // them now instead of letting the next turn's finishLiveTools emit
+        // them as orphan results.
+        finishLiveTools(error);
         Q_EMIT failed(error);
         return;
     }
@@ -4445,7 +4606,8 @@ bool AcpClient::scheduleTurnRetryWithMessage(const QString &reason)
 
     if (m_turnRetryTimer) {
         m_turnRetryTimer->stop();
-        delete m_turnRetryTimer;
+        m_turnRetryTimer->deleteLater();
+        m_turnRetryTimer = nullptr;
     }
     auto *timer = new QTimer(this);
     timer->setSingleShot(true);
@@ -4476,7 +4638,8 @@ void AcpClient::stopTurnRetry()
 {
     if (m_turnRetryTimer) {
         m_turnRetryTimer->stop();
-        delete m_turnRetryTimer;
+        m_turnRetryTimer->deleteLater();
+        m_turnRetryTimer = nullptr;
     }
     m_turnRetryPending = false;
 }

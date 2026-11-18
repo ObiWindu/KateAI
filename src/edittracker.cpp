@@ -334,7 +334,7 @@ void EditTracker::addEdit(const QString &path, const QString &toolName, const QS
 }
 
 void EditTracker::updateEdit(const QString &path, const QString &toolName, const QString &diff,
-                             const QString &oldContent, const QString &newContent)
+                             const QString &oldContent, const QString &newContent, bool createdFile)
 {
     if (path.isEmpty()) {
         return;
@@ -349,7 +349,7 @@ void EditTracker::updateEdit(const QString &path, const QString &toolName, const
     if (!group) {
         // Nothing tracked yet for this path: track it from scratch, keeping the
         // baseline the caller supplied.
-        addEdit(path, toolName, diff, oldContent, newContent, oldContent.isEmpty());
+        addEdit(path, toolName, diff, oldContent, newContent, createdFile);
         return;
     }
     if (!diff.isEmpty()) {
@@ -583,12 +583,13 @@ void EditTracker::undoLast()
         const EditEntry *last = decision.pending.isEmpty() ? nullptr : &decision.pending.last();
         if (decision.createdFile) {
             // The file was created by the agent and then deleted by the
-            // rejection. Putting it back means writing the content again.
+            // rejection. Putting it back means writing the content again; a
+            // null expectedContent tells the receiver the file should be gone.
             if (last && !last->newContent.isNull()) {
-                Q_EMIT editAccepted(decision.path, decision.toolName, last->newContent);
+                Q_EMIT editRestored(decision.path, decision.toolName, last->newContent, QString());
             }
         } else if (last && !last->newContent.isNull()) {
-            Q_EMIT editAccepted(decision.path, decision.toolName, last->newContent);
+            Q_EMIT editRestored(decision.path, decision.toolName, last->newContent, decision.previousContent);
         }
     }
 
@@ -729,14 +730,15 @@ void EditTracker::appendRow(const Group &group)
 
 void EditTracker::rebuildEditList()
 {
-    // Delete rather than deleteLater(): a turn that lands several edits at once
-    // rebuilt the list once per edit, and the deferred deletions all queued up
-    // behind each other, so ghost rows painted over the real ones until the
-    // event loop finally ran.
+    // Delete later: this runs from the click handler of a button in the list,
+    // and destroying that button while its clicked() signal is still being
+    // emitted is unsafe. The row is hidden immediately so deferred deletions
+    // cannot paint ghost rows over the rebuilt list.
     QLayoutItem *item = nullptr;
     while ((item = m_editListLayout->takeAt(0)) != nullptr) {
-        if (item->widget()) {
-            delete item->widget();
+        if (QWidget *widget = item->widget()) {
+            widget->hide();
+            widget->deleteLater();
         }
         delete item;
     }
@@ -870,11 +872,20 @@ void EditTracker::settle(const QString &path, bool accepted)
     }
 
     Group &group = *it;
+    if (!accepted && !group.createdFile && group.lastKnownContent.isNull()) {
+        // Without a baseline a revert would either write an empty file or
+        // clear the queue without touching anything. Keep the entries: the
+        // user can still Keep them.
+        Q_EMIT statusMessage(i18n("Cannot revert %1: its previous content was never read.", QFileInfo(path).fileName()), true);
+        return;
+    }
 
     // The settled ranges are recorded before the pending list is cleared:
     // the hover hint keeps pointing at the lines this round changed, with the
     // "turn finished" wording, until the queue itself is cleared.
-    const QList<KTextEditor::Range> settledNow = addedLineRangesFromDiff(combinedDiff(group));
+    const QList<KTextEditor::Range> settledNow = accepted
+        ? addedLineRangesFromDiff(combinedDiff(group))
+        : QList<KTextEditor::Range>();
 
     // Everything still pending for this file is settled together, and the restore
     // target is the state before the FIRST of them. Restoring before the last one
@@ -932,15 +943,33 @@ void EditTracker::renamePath(const QString &oldPath, const QString &newPath)
         return;
     }
     bool changed = false;
+    // A Save-As onto a path that already has pending edits must merge the two
+    // groups, not create two groups sharing one key (settle() would act on the
+    // first and undo would discard the other).
+    auto target = std::find_if(m_groups.begin(), m_groups.end(), [&newPath](const Group &group) {
+        return group.path == newPath;
+    });
+    Group *existingTarget = target == m_groups.end() ? nullptr : &*target;
     for (auto &group : m_groups) {
         if (group.path == oldPath) {
             group.path = newPath;
             for (auto &entry : group.pending) {
                 entry.path = newPath;
             }
+            if (existingTarget && existingTarget != &group) {
+                existingTarget->pending.append(group.pending);
+                existingTarget->createdFile = existingTarget->createdFile || group.createdFile;
+                if (existingTarget->lastKnownContent.isNull()) {
+                    existingTarget->lastKnownContent = group.lastKnownContent;
+                }
+                group.pending.clear();
+            }
             changed = true;
         }
     }
+    m_groups.removeIf([&newPath](const Group &group) {
+        return group.path == newPath && group.pending.isEmpty();
+    });
     for (auto &decision : m_undoStack) {
         if (decision.path == oldPath) {
             decision.path = newPath;

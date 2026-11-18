@@ -141,6 +141,35 @@ private Q_SLOTS:
         QCOMPARE(manager.changedFileCount(checkpoint), 0);
     }
 
+    void restoreRemovesSymlinkWithoutFollowingIt()
+    {
+#if defined(Q_OS_WIN)
+        QSKIP("symlink creation is not portable in this test");
+#else
+        if (!m_hasGit) {
+            QSKIP("git is not available");
+        }
+        QTemporaryDir outside;
+        QVERIFY(outside.isValid());
+        writeFile(outside.path() + u"/victim.txt"_s, u"do not delete"_s);
+
+        writeFile(m_workspace->path() + u"/a.txt"_s, u"original"_s);
+        CheckpointManager manager;
+        manager.setWorkspace(m_workspace->path());
+        QString error;
+        const QString checkpoint = manager.createCheckpoint(u"baseline"_s, &error);
+        QVERIFY2(!checkpoint.isEmpty(), qPrintable(error));
+
+        const QString link = m_workspace->path() + u"/outside"_s;
+        QVERIFY(QFile::link(outside.path(), link));
+        QVERIFY2(manager.restoreCheckpoint(checkpoint, &error), qPrintable(error));
+        // The link is removed; its target and the file inside it are not.
+        QVERIFY(!QFileInfo(link).isSymLink());
+        QVERIFY(QFileInfo::exists(outside.path() + u"/victim.txt"_s));
+        QCOMPARE(readFile(outside.path() + u"/victim.txt"_s), u"do not delete"_s);
+#endif
+    }
+
     void restoreLeavesProtectedFilesUntouched()
     {
         if (!m_hasGit) {

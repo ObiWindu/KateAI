@@ -297,7 +297,7 @@ Settings SettingsStore::load()
         s.maxTokens = 200000;
     }
     s.verbosity = qBound(0, s.verbosity, 3);
-    s.maxSavedConversations = qBound(1, s.maxSavedConversations, 1000);
+    s.maxSavedConversations = qBound(0, s.maxSavedConversations, 1000);
     s.maxExpandedToolCards = qBound(0, s.maxExpandedToolCards, 100);
     s.maxGraphNodes = qBound(1, s.maxGraphNodes, 10000);
     s.maxGraphEdges = qBound(1, s.maxGraphEdges, 50000);
@@ -486,7 +486,7 @@ void SettingsStore::save(const Settings &settings)
                                    u"CompressionThreshold"_s}) {
         g.deleteEntry(removed);
     }
-    g.writeEntry(u"ConfigVersion"_s, 1);
+    g.writeEntry(u"ConfigVersion"_s, configVersion());
 
     g.sync();
 

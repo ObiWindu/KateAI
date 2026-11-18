@@ -188,6 +188,31 @@ private Q_SLOTS:
         // The ordinary read-only commands are unaffected.
         QVERIFY(box.isReadOnlyCommand(u"ls -la"_s));
         QVERIFY(box.isReadOnlyCommand(u"cat file.txt"_s));
+        // A newline separates commands just like ';'. The second command used
+        // to be auto-approved with the first.
+        QVERIFY(!box.isReadOnlyCommand(u"ls\npython3 -c 'print(1)'"_s));
+        QVERIFY(!box.isReadOnlyCommand(u"cat f\rpython3 -c 'print(1)'"_s));
+        // Privilege escalation is never read-only.
+        QVERIFY(!box.isReadOnlyCommand(u"sudo cat /etc/shadow"_s));
+        // Attached/output forms of a write flag are not read-only.
+        QVERIFY(!box.isReadOnlyCommand(u"sort -oout.txt list.txt"_s));
+        QVERIFY(!box.isReadOnlyCommand(u"sort --output=out.txt list.txt"_s));
+        QVERIFY(!box.isReadOnlyCommand(u"git branch -D main"_s));
+        QVERIFY(!box.isReadOnlyCommand(u"git log --output=out.txt"_s));
+    }
+
+    void shellReadsAreConfinedToTheWorkspace()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        Sandbox box(dir.path(), SandboxProfile::Workspace);
+        QVERIFY(box.commandTouchesOutsideWorkspace(u"cat /etc/passwd"_s));
+        QVERIFY(box.commandTouchesOutsideWorkspace(u"cat ~/.bash_history"_s));
+        QVERIFY(!box.commandTouchesOutsideWorkspace(u"cat notes.txt"_s));
+        QVERIFY(!box.commandTouchesOutsideWorkspace(u"grep -rn foo src"_s));
+        // The opt-in lifts the restriction, matching allowsRead().
+        Sandbox open(dir.path(), SandboxProfile::Workspace, {}, true);
+        QVERIFY(!open.commandTouchesOutsideWorkspace(u"cat /etc/passwd"_s));
     }
 
     void envWrapperIsNotReadOnly()
@@ -239,6 +264,10 @@ private Q_SLOTS:
         QVERIFY(box.isDenied(dir.filePath(u".env"_s)));
         QVERIFY(Sandbox::globMatch(u"**/.env"_s, dir.filePath(u".env"_s)));
         QVERIFY(Sandbox::globMatch(u"**/*.pem"_s, u"/tmp/cert.pem"_s));
+        // The shell removes the backslash; the deny scan must too.
+        QVERIFY(box.commandTouchesDeniedPath(u"cat .\\env"_s));
+        QVERIFY(box.commandTouchesDeniedPath(u"(cat .env)"_s));
+        QVERIFY(box.commandTouchesDeniedPath(u"sh -c 'cat .env'"_s));
     }
 
     void readOnlyBlocksWrites()
@@ -289,6 +318,8 @@ private Q_SLOTS:
         Sandbox box(QDir::tempPath(), SandboxProfile::Workspace);
         QVERIFY(box.isAlwaysDeniedCommand(u"rm -rf /"_s));
         QVERIFY(box.isAlwaysDeniedCommand(u"rm -rf /*"_s));
+        QVERIFY(box.isAlwaysDeniedCommand(u"rm -rf //"_s));
+        QVERIFY(box.isAlwaysDeniedCommand(u"rm -rf /./*"_s));
         QVERIFY(box.isAlwaysDeniedCommand(u"rm -rf ~"_s));
         QVERIFY(box.isAlwaysDeniedCommand(u"rm -rf ~/Documents"_s));
         QVERIFY(box.isAlwaysDeniedCommand(u"rm -r /"_s));

@@ -4,6 +4,7 @@
  */
 
 #include "mcp.h"
+#include "credentialstore.h"
 #include "processenv.h"
 
 #include <KLocalizedString>
@@ -11,6 +12,7 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QCryptographicHash>
 #include <QJsonDocument>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
@@ -62,6 +64,28 @@ QString jsonValueAsText(const QJsonValue &value)
         return QString();
     }
     return QString::fromUtf8(QJsonDocument::fromVariant(value.toVariant()).toJson(QJsonDocument::Compact));
+}
+
+// QJsonValue::toBool(true) treats the string "false" as true. Workspace
+// configuration is hand-editable, so a quoted boolean must be honoured.
+static bool mcpBoolValue(const QJsonValue &value, bool fallback)
+{
+    if (value.isBool()) {
+        return value.toBool();
+    }
+    if (value.isDouble()) {
+        return value.toInt() != 0;
+    }
+    if (value.isString()) {
+        const QString text = value.toString().trimmed().toLower();
+        if (text == u"true"_s || text == u"1"_s || text == u"yes"_s || text == u"on"_s) {
+            return true;
+        }
+        if (text == u"false"_s || text == u"0"_s || text == u"no"_s || text == u"off"_s) {
+            return false;
+        }
+    }
+    return fallback;
 }
 
 bool isMcpToolName(const QString &toolName)
@@ -168,8 +192,11 @@ QString McpServerConfig::commandLine() const
         parts.append(command.trimmed());
     }
     for (const QString &arg : args) {
-        if (arg.contains(u' ') || arg.contains(u'\t')) {
-            parts.append(u"\"%1\""_s.arg(arg));
+        if (arg.contains(u' ') || arg.contains(u'\t') || arg.contains(u'\n') || arg.contains(u'"')) {
+            QString escaped = arg;
+            escaped.replace(u'"', u"\\\""_s);
+            escaped.replace(u'\n', u"\\n"_s);
+            parts.append(u"\"%1\""_s.arg(escaped));
         } else {
             parts.append(arg);
         }
@@ -248,7 +275,7 @@ McpServerConfig McpServerConfig::fromJson(const QJsonObject &object, const QStri
     for (auto it = headerObj.constBegin(); it != headerObj.constEnd(); ++it) {
         config.headers.insert(it.key(), it.value().toString());
     }
-    config.enabled = object.value(u"enabled"_s).toBool(true);
+    config.enabled = mcpBoolValue(object.value(u"enabled"_s), true);
     const QJsonArray allow = object.value(u"alwaysAllow"_s).toArray();
     for (const QJsonValue &value : allow) {
         config.alwaysAllow.append(value.toString());
@@ -379,8 +406,38 @@ QJsonArray parseHttpBody(const QByteArray &body, const QString &contentType)
         return messages;
     }
     QString currentEvent;
+    QString data;
+    auto dispatch = [&]() {
+        if (data.trimmed().isEmpty() || data.trimmed() == u"[DONE]"_s) {
+            data.clear();
+            return;
+        }
+        const QJsonDocument document = QJsonDocument::fromJson(data.trimmed().toUtf8());
+        QJsonArray payloads;
+        if (document.isObject()) {
+            payloads.append(document.object());
+        } else if (document.isArray()) {
+            payloads = document.array();
+        }
+        for (const QJsonValue &value : std::as_const(payloads)) {
+            QJsonObject obj = value.toObject();
+            if (obj.isEmpty()) {
+                continue;
+            }
+            if (!currentEvent.isEmpty()) {
+                obj.insert(u"_event"_s, currentEvent);
+            }
+            messages.append(obj);
+        }
+        currentEvent.clear();
+        data.clear();
+    };
     for (const QByteArray &line : body.split('\n')) {
         const QString text = QString::fromUtf8(line).trimmed();
+        if (text.isEmpty()) {
+            dispatch();
+            continue;
+        }
         if (text.startsWith(u"event:"_s)) {
             currentEvent = text.mid(6).trimmed();
             continue;
@@ -388,21 +445,12 @@ QJsonArray parseHttpBody(const QByteArray &body, const QString &contentType)
         if (!text.startsWith(u"data:"_s)) {
             continue;
         }
-        const QString payload = text.mid(5).trimmed();
-        if (payload.isEmpty() || payload == u"[DONE]"_s) {
-            continue;
+        if (!data.isEmpty()) {
+            data += u'\n';
         }
-        QJsonParseError parseError{};
-        const QJsonDocument document = QJsonDocument::fromJson(payload.toUtf8(), &parseError);
-        if (parseError.error == QJsonParseError::NoError && document.isObject()) {
-            QJsonObject obj = document.object();
-            if (!currentEvent.isEmpty()) {
-                obj.insert(u"_event"_s, currentEvent);
-                currentEvent.clear();
-            }
-            messages.append(obj);
-        }
+        data += text.mid(5).trimmed();
     }
+    dispatch();
     return messages;
 }
 
@@ -712,6 +760,10 @@ void McpClient::sendRequestForId(const QString &method, const QJsonObject &param
         }
 
         QNetworkReply *reply = m_nam->post(request, QJsonDocument(message).toJson(QJsonDocument::Compact));
+        // Stop QNetworkReply from buffering more than the body cap; readAll()
+        // still sees the first 16 MiB plus one byte, which is enough to detect
+        // an oversized response.
+        reply->setReadBufferSize(16 * 1024 * 1024 + 1);
         if (auto it = m_pending.find(id); it != m_pending.end()) {
             it.value().reply = reply;
         }
@@ -764,6 +816,7 @@ void McpClient::writeMessage(const QJsonObject &message)
         }
 
         QNetworkReply *reply = m_nam->post(request, QJsonDocument(message).toJson(QJsonDocument::Compact));
+        reply->setReadBufferSize(16 * 1024 * 1024 + 1);
         connect(reply, &QNetworkReply::finished, reply, &QNetworkReply::deleteLater);
         return;
     }
@@ -1005,7 +1058,7 @@ void McpClient::handleMessage(const QJsonObject &message)
     }
 
     if (method == u"tools/call"_s) {
-        const bool isError = result.value(u"isError"_s).toBool(false);
+        const bool isError = mcpBoolValue(result.value(u"isError"_s), false);
         QString text = extractToolResultText(result);
         if (text.isEmpty()) {
             text = QString::fromUtf8(QJsonDocument(result).toJson(QJsonDocument::Compact));
@@ -1049,8 +1102,8 @@ QList<McpTool> McpClient::parseToolsList(const QJsonObject &params) const
         entry.description = item.value(u"description"_s).toString();
         entry.inputSchema = item.value(u"inputSchema"_s).toObject();
         const QJsonObject annotations = item.value(u"annotations"_s).toObject();
-        entry.readOnly = annotations.value(u"readOnlyHint"_s).toBool(false);
-        entry.destructive = annotations.value(u"destructiveHint"_s).toBool(false);
+        entry.readOnly = mcpBoolValue(annotations.value(u"readOnlyHint"_s), false);
+        entry.destructive = mcpBoolValue(annotations.value(u"destructiveHint"_s), false);
         // Prefix the server name so the model can tell where a tool lives.
         if (!m_config.name.isEmpty()) {
             entry.description = u"[%1] %2"_s.arg(m_config.name, entry.description);
@@ -1347,6 +1400,14 @@ bool McpManager::callTool(const QString &callToken, const QString &qualifiedName
         Q_EMIT toolResult(callToken, false, QString(), u"'%1' is not a valid MCP tool name."_s.arg(qualifiedName));
         return false;
     }
+    // The advertised name is sanitized (a double underscore is collapsed), so
+    // the split name can differ from the server's original tool name. Look up
+    // the advertised tool and pass its original name through.
+    const std::optional<McpTool> advertised = tool(qualifiedName);
+    if (advertised) {
+        serverName = advertised->server;
+        toolName = advertised->name;
+    }
     McpClient *client = m_clients.value(serverName);
     if (!client) {
         Q_EMIT toolResult(callToken, false, QString(), u"No MCP server named '%1'."_s.arg(serverName));
@@ -1361,6 +1422,55 @@ bool McpManager::callTool(const QString &callToken, const QString &qualifiedName
 
 namespace McpConfigStore
 {
+
+namespace
+{
+
+constexpr auto kCredentialMarker = "${kateai-credential:";
+
+QString credentialId(const QString &workspace, const QString &server, const QString &kind, const QString &key)
+{
+    const QString scope = QString::fromLatin1(QCryptographicHash::hash(workspace.toUtf8(), QCryptographicHash::Sha1).toHex().left(12));
+    const QString name = QString::fromLatin1(
+        QCryptographicHash::hash((kind + u':' + server + u':' + key).toUtf8(), QCryptographicHash::Sha1).toHex().left(24));
+    return u"mcp-%1-%2"_s.arg(scope, name);
+}
+
+bool isCredentialMarker(const QString &value)
+{
+    return value.startsWith(QLatin1String(kCredentialMarker)) && value.endsWith(u'}');
+}
+
+// Header and environment values are secrets (bearer tokens, API keys). The
+// workspace file is frequently committed to git, so the value is kept in the
+// credential store and only a marker is written to mcp.json.
+bool protectValue(const QString &workspace, const QString &server, const QString &kind,
+                  const QString &key, QString *value, QString *error)
+{
+    if (value->isEmpty() || isCredentialMarker(*value)) {
+        return true;
+    }
+    const QString id = credentialId(workspace, server, kind, key);
+    if (!CredentialStore::store(id, *value, error)) {
+        return false;
+    }
+    *value = QString::fromLatin1(kCredentialMarker) + id + u'}';
+    return true;
+}
+
+QString resolveValue(const QString &value)
+{
+    if (!isCredentialMarker(value)) {
+        return value;
+    }
+    const QString id = value.mid(int(QLatin1String(kCredentialMarker).size()));
+    const QString trimmed = id.left(id.size() - 1);
+    bool ok = false;
+    const QString secret = CredentialStore::load(trimmed, &ok);
+    return ok ? secret : QString();
+}
+
+} // namespace
 
 QString configPath(const QString &workspace)
 {
@@ -1377,15 +1487,37 @@ QList<McpServerConfig> load(const QString &workspace)
         return {};
     }
     QFile file(path);
+    // A workspace-controlled path can be a FIFO, a device or a symlink to
+    // /dev/zero; opening/readAll() would block or exhaust memory before the
+    // user is even asked whether to trust the project.
+    const QFileInfo fileInfo(path);
+    constexpr qint64 kMaxConfigBytes = 1024 * 1024;
+    if (!fileInfo.exists() || !fileInfo.isFile() || fileInfo.isSymLink()
+        || fileInfo.size() <= 0 || fileInfo.size() > kMaxConfigBytes) {
+        return {};
+    }
     if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
         return {};
     }
+    const QByteArray payload = file.read(kMaxConfigBytes + 1);
+    if (payload.size() > kMaxConfigBytes) {
+        return {};
+    }
     QJsonParseError error{};
-    const QJsonDocument document = QJsonDocument::fromJson(file.readAll(), &error);
+    const QJsonDocument document = QJsonDocument::fromJson(payload, &error);
     if (error.error != QJsonParseError::NoError || !document.isObject()) {
         return {};
     }
-    return McpServerConfig::serversFromJson(document.object());
+    QList<McpServerConfig> servers = McpServerConfig::serversFromJson(document.object());
+    for (McpServerConfig &server : servers) {
+        for (auto it = server.headers.begin(); it != server.headers.end(); ++it) {
+            it.value() = resolveValue(it.value());
+        }
+        for (auto it = server.env.begin(); it != server.env.end(); ++it) {
+            it.value() = resolveValue(it.value());
+        }
+    }
+    return servers;
 }
 
 bool save(const QString &workspace, const QList<McpServerConfig> &servers, QString *error)
@@ -1408,26 +1540,38 @@ bool save(const QString &workspace, const QList<McpServerConfig> &servers, QStri
         }
         return false;
     }
-    const QJsonObject root = McpServerConfig::serversToJson(servers);
+    // Keep header and environment values out of the workspace file: it is
+    // commonly committed, and those values are bearer tokens/API keys. The
+    // in-memory configuration keeps the real values; only the serialized copy
+    // carries markers.
+    QList<McpServerConfig> onDisk = servers;
+    for (McpServerConfig &server : onDisk) {
+        for (auto it = server.headers.begin(); it != server.headers.end(); ++it) {
+            if (!protectValue(workspace, server.name, u"header"_s, it.key(), &it.value(), error)) {
+                return false;
+            }
+        }
+        for (auto it = server.env.begin(); it != server.env.end(); ++it) {
+            if (!protectValue(workspace, server.name, u"env"_s, it.key(), &it.value(), error)) {
+                return false;
+            }
+        }
+    }
+    const QJsonObject root = McpServerConfig::serversToJson(onDisk);
     file.write(QJsonDocument(root).toJson(QJsonDocument::Indented));
+    // Set the permissions on the temporary file before it is renamed into
+    // place: tightening after commit leaves a window in which a file carrying
+    // authorization headers is world-readable.
+    file.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner);
     if (!file.commit()) {
         if (error) {
             *error = u"Could not write %1"_s.arg(path);
         }
         return false;
     }
-    // The file can carry authorization headers for HTTP servers, so it must
-    // not be readable by every account on the machine. The umask usually
-    // leaves it 644; it is tightened to the owner only, the same way the
-    // settings file is after a save.
-    {
-        QFile written(path);
-        const QFileDevice::Permissions wanted = QFileDevice::ReadOwner | QFileDevice::WriteOwner;
-        if (written.exists()
-            && ((written.permissions() & QFileDevice::ReadGroup) || (written.permissions() & QFileDevice::ReadOther))) {
-            written.setPermissions(wanted);
-        }
-    }
+    // QSaveFile honours setPermissions on the temporary file, but keep a
+    // post-commit tightening for platforms where it does not.
+    QFile::setPermissions(path, QFileDevice::ReadOwner | QFileDevice::WriteOwner);
     return true;
 }
 
