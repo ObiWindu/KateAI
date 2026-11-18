@@ -183,7 +183,7 @@ public:
         return &m_checkpoints;
     }
     QList<CheckpointInfo> checkpoints() const;
-    QString createCheckpoint(const QString &label);
+    QString createCheckpoint(const QString &label, QString *error = nullptr);
     bool restoreCheckpoint(const QString &id, QString *error);
     QString diffAgainstCheckpoint(const QString &id) const;
 

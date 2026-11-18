@@ -117,6 +117,7 @@ private:
     int m_retention = 20;
     mutable bool m_gitChecked = false;
     mutable bool m_gitAvailable = false;
+    mutable qint64 m_gitProbeMs = 0;
     mutable QString m_unavailableReason;
 };
 

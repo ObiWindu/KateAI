@@ -263,6 +263,39 @@ private Q_SLOTS:
         m_workspace.reset();
     }
 
+    // A docked sub-agent card has to show what the sub-agent is doing while it
+    // runs. The status line and the activity log are the only evidence of
+    // progress; a card that only spins is indistinguishable from a stuck one.
+    void liveSubAgentCardShowsItsActivity()
+    {
+        std::unique_ptr<ChatWidget> widget(makeWidget());
+
+        widget->ask(u"Split this across two agents."_s);
+        QList<SubtaskWidget *> agents;
+        QVERIFY2(waitFor([&] {
+            agents = widget->findChildren<SubtaskWidget *>();
+            return agents.size() >= 2;
+        }, 15000), "the mock never started the sub-agents");
+
+        const auto showsActivity = [&] {
+            for (SubtaskWidget *agent : std::as_const(agents)) {
+                for (QTextBrowser *browser : agent->findChildren<QTextBrowser *>()) {
+                    // The card's own answer surface is a direct child; the
+                    // activity log lives inside its disclosure container.
+                    if (browser->parentWidget() == agent) {
+                        continue;
+                    }
+                    if (browser->isVisibleTo(agent) && !browser->toPlainText().trimmed().isEmpty()) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        };
+        QVERIFY2(waitFor(showsActivity, 8000),
+                 "a running sub-agent card showed no activity at all");
+    }
+
     // A stop pressed while a command is still running has to end the turn
     // long before the command would have, and settle the card it started.
     void stopEndsATurnWhileItsCommandRuns()

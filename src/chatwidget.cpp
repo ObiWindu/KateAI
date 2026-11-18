@@ -5940,7 +5940,7 @@ void ChatWidget::showCheckpointMenu()
     connect(create, &QAction::triggered, this, [this] {
         const QString label = i18n("Manual checkpoint");
         QString error;
-        const QString id = m_agent.createCheckpoint(label);
+        const QString id = m_agent.createCheckpoint(label, &error);
         if (id.isEmpty()) {
             showInfoMessage(i18n("Could not create a checkpoint: %1", error.isEmpty() ? i18n("git is unavailable") : error), true);
         } else {
@@ -6699,10 +6699,6 @@ void ChatWidget::rebuildTranscript()
                                       restoredArgs.value(u"description"_s).toString());
             m_subtaskWidgets.insert(toolCallId, subtaskWidget);
             m_subtaskOrder.append(subtaskWidget);
-            // The card below whatever was placed just before it in the rebuild
-            // order, which is the position it ran in during the live turn.
-            m_subtaskAnchors.insert(toolCallId, lastTranscriptContentWidget());
-            addIntentWidget(subtaskWidget);
             placed.insert(toolCallId);
             if (spec.hasResult) {
                 ToolResult result;
@@ -6711,6 +6707,19 @@ void ChatWidget::rebuildTranscript()
                 result.output = spec.output;
                 result.ok = !spec.output.contains(u"STATUS: failure"_s);
                 subtaskWidget->finishAgent(result);
+                // A restored sub-agent that already reported back belongs to
+                // the thread, exactly like a live one that retired on finish.
+                // Docking it left every old sub-agent card pinned above the
+                // composer -- and the dock on screen with nothing running.
+                subtaskWidget->setHeightBudget(0);
+                appendTranscriptWidget(subtaskWidget);
+                subtaskWidget->show();
+            } else {
+                // Still running (a rebuild during the turn): the card below
+                // whatever was placed just before it in the rebuild order,
+                // which is the position it ran in.
+                m_subtaskAnchors.insert(toolCallId, lastTranscriptContentWidget());
+                addIntentWidget(subtaskWidget);
             }
             return;
         }

@@ -12,6 +12,7 @@
 #include "chattheme.h"
 #include "sessionstore.h"
 #include "sessionstoreisolation.h"
+#include "subtaskwidget.h"
 #include "todowidget.h"
 #include "toolcallwidget.h"
 #include "types.h"
@@ -21,6 +22,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLabel>
+#include <QLayout>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QTextBrowser>
@@ -306,6 +308,68 @@ private Q_SLOTS:
                  qPrintable(QStringLiteral("terminal/exec details: %1").arg(termDetails->toPlainText())));
         QVERIFY2(termCard->styleSheet().contains(ChatTheme::toolColor(u"terminal/exec"_s)),
                  qPrintable(termCard->styleSheet()));
+    }
+
+    // A reconstructed transcript must put sub-agents that already reported
+    // back into the thread. Recreating every one of them as a docked card left
+    // old, finished sub-agents pinned above the composer and the intent dock
+    // on screen for a conversation where nothing was running.
+    void testFinishedSubAgentCardsRestoreIntoTheTranscript()
+    {
+        ChatWidget widget;
+        widget.resize(900, 700);
+        widget.show();
+
+        ChatMessage user;
+        user.role = ChatMessage::Role::User;
+        user.content = u"delegate the parser work"_s;
+
+        ChatMessage assistant;
+        assistant.role = ChatMessage::Role::Assistant;
+        assistant.content = u"Both agents reported back."_s;
+        QJsonArray calls;
+        calls.append(toolCall(u"call-sub"_s, u"new_task"_s,
+                              {{u"description"_s, u"Review the parser"_s}, {u"agent"_s, u"reviewer"_s}}));
+        assistant.toolCalls = calls;
+
+        SessionStore::SessionData data;
+        data.messages = {user, assistant,
+                         toolResultMessage(u"call-sub"_s, u"new_task"_s,
+                                           u"The parser looks correct."_s)};
+        SessionStore::saveConversation(u"conv-subtask"_s, data, u"Delegation chat"_s, 50);
+
+        widget.setCurrentConversationId(SessionStore::createNewConversation());
+        widget.switchToConversation(u"conv-subtask"_s);
+        QTest::qWait(60);
+
+        const auto agents = widget.findChildren<SubtaskWidget *>();
+        QCOMPARE(agents.size(), 1);
+        SubtaskWidget *agent = agents.first();
+        QVERIFY2(!agent->isRunning(), "a restored sub-agent card was recreated as running");
+
+        bool showsResult = false;
+        for (const QTextBrowser *browser : agent->findChildren<QTextBrowser *>()) {
+            if (browser->isVisibleTo(agent)
+                && browser->toPlainText().contains(u"The parser looks correct."_s)) {
+                showsResult = true;
+            }
+        }
+        QVERIFY2(showsResult, "the restored sub-agent card lost its result");
+
+        QWidget *dock = widget.findChild<QWidget *>(u"intentDock"_s);
+        QVERIFY(dock);
+        bool insideDock = false;
+        for (QWidget *parent = agent->parentWidget(); parent; parent = parent->parentWidget()) {
+            if (parent == dock) {
+                insideDock = true;
+                break;
+            }
+        }
+        QVERIFY2(!insideDock, "a finished sub-agent was restored into the intent dock");
+        QVERIFY2(agent->parentWidget() && agent->parentWidget()->layout()
+                     && agent->parentWidget()->layout()->indexOf(agent) >= 0,
+                 "the restored sub-agent never made it into the transcript");
+        QVERIFY2(!dock->isVisible(), "the intent dock is on screen with no sub-agent running");
     }
 
     void testARestoredAnswerIsNotShownTwice()

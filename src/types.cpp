@@ -1975,6 +1975,24 @@ QString acpBinaryInstallDir(const QString &agentId)
     return root + u'/' + safeId;
 }
 
+static bool isBinaryInstallEntry(const QJsonObject &agent)
+{
+    return agent.value(u"distributionType"_s).toString() == u"binary"_s
+        || !agent.value(u"binaryArchiveUrl"_s).toString().isEmpty();
+}
+
+bool acpAgentHasBinaryInstall(const Settings &settings)
+{
+    const QJsonArray installed = QJsonDocument::fromJson(settings.acpInstalledAgents.toUtf8()).array();
+    for (const QJsonValue &value : installed) {
+        const QJsonObject agent = value.toObject();
+        if (agent.value(u"id"_s).toString() == settings.acpAgentId && isBinaryInstallEntry(agent)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 QString acpInstalledBinaryCommand(const Settings &settings)
 {
     const QJsonArray installed = QJsonDocument::fromJson(settings.acpInstalledAgents.toUtf8()).array();
@@ -1983,9 +2001,7 @@ QString acpInstalledBinaryCommand(const Settings &settings)
         if (agent.value(u"id"_s).toString() != settings.acpAgentId) {
             continue;
         }
-        const bool isBinary = agent.value(u"distributionType"_s).toString() == u"binary"_s
-            || !agent.value(u"binaryArchiveUrl"_s).toString().isEmpty();
-        if (!isBinary) {
+        if (!isBinaryInstallEntry(agent)) {
             return {};
         }
 

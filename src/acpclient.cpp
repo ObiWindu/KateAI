@@ -902,16 +902,23 @@ void AcpClient::sendSetEffortOption(const QString &effortId)
 QString AcpClient::resolvedCommand(const Settings &settings)
 {
     const QString command = acpEffectiveCommand(settings);
+    if (command.isEmpty()) {
+        return {};
+    }
+    const QFileInfo commandInfo(command);
+    if (commandInfo.isAbsolute()) {
+        return command;
+    }
+
     // Binary registry agents record their executable relative to the unpacked
     // archive ("./agy_acp_server.par"). Resolve it inside Kate's install
     // directory before falling back to PATH or the raw recorded command.
-    if (!command.isEmpty() && !QFileInfo(command).isAbsolute()) {
-        const QString installedBinary = acpInstalledBinaryCommand(settings);
-        if (!installedBinary.isEmpty()
-            && QFileInfo(command).fileName() == QFileInfo(installedBinary).fileName()) {
-            return installedBinary;
-        }
+    const QString installedBinary = acpInstalledBinaryCommand(settings);
+    if (!installedBinary.isEmpty()
+        && commandInfo.fileName() == QFileInfo(installedBinary).fileName()) {
+        return installedBinary;
     }
+
     // MiniMax Code: prefer the standalone CLI the agent installs through its own
     // installer (~/.minimax-code/bin/mcode). The ACP registry entry instead
     // records the npm distribution (@minimax-ai/code), whose bundled native
@@ -919,58 +926,62 @@ QString AcpClient::resolvedCommand(const Settings &settings)
     // exits with code 1 before the ACP handshake, which surfaces as "ACP agent
     // exited (code 1)". The standalone binary speaks the same ACP server and is
     // the one that actually works.
-    if (!command.isEmpty() && !QFileInfo(command).isAbsolute() && acpAgentIsMinimaxCode(settings)) {
+    if (acpAgentIsMinimaxCode(settings)) {
         const QString standalone = QDir::homePath() + u"/.minimax-code/bin/mcode"_s;
         const QFileInfo standaloneInfo(standalone);
         if (standaloneInfo.exists() && standaloneInfo.isExecutable()) {
             return standalone;
         }
     }
-    if (command.isEmpty() || QFileInfo(command).isAbsolute()) {
+
+    // A bare name and the registry's "./<name>" form name the same binary.
+    // Resolve both the same way, so "./opencode" finds the executable the
+    // user's shell would run instead of depending on the process working
+    // directory, which is what QProcess uses for a relative path.
+    const QString baseName = commandInfo.fileName();
+    const bool relative = command.contains(u'/') || command.contains(u'\\');
+    const bool registryRelative = relative && !baseName.isEmpty()
+        && (command == u"./"_s + baseName || command == u".\\"_s + baseName);
+    if (!relative || registryRelative) {
+        const QString found = QStandardPaths::findExecutable(baseName);
+        if (!found.isEmpty()) {
+            return found;
+        }
+        const QString toolDirFound = findExecutableInToolDirs(baseName);
+        if (!toolDirFound.isEmpty()) {
+            return toolDirFound;
+        }
+        const QString home = QDir::homePath();
+        QStringList fallbacks;
+        if (baseName == u"grok"_s) {
+            fallbacks.append(home + u"/.grok/bin/"_s + baseName);
+        }
+        if (baseName == u"opencode"_s) {
+            // opencode's installer puts the binary in ~/.opencode/bin and only
+            // adds that to the *shell* PATH; a Kate launched from the desktop
+            // never sees it, so the agent cannot be started at all from there.
+            fallbacks.append(home + u"/.opencode/bin/"_s + baseName);
+        }
+        fallbacks.append(home + u"/.local/bin/"_s + baseName);
+        for (const QString &candidate : fallbacks) {
+            const QFileInfo info(candidate);
+            if (info.exists() && info.isExecutable()) {
+                return info.absoluteFilePath();
+            }
+        }
+    }
+    if (!relative) {
+        // An unresolved bare name is kept so the launch failure still names the
+        // command the user configured.
         return command;
     }
-    const QString found = QStandardPaths::findExecutable(command);
-    if (!found.isEmpty()) {
-        return found;
-    }
-    const QString toolDirFound = findExecutableInToolDirs(command);
-    if (!toolDirFound.isEmpty()) {
-        return toolDirFound;
-    }
-    // A recorded relative path ("./foo") is not a PATH lookup. If it did not
-    // resolve inside the install directory and is not on PATH, fail closed:
-    // letting QProcess interpret it with the workspace as cwd could execute a
-    // project file that happens to share the name.
-    if (command.contains(u'/') || command.contains(u'\\')) {
+    // Letting QProcess interpret an unresolved relative path against the
+    // workspace could execute a project file that happens to share the name.
+    // A binary registry entry is staged by the installer, so its absence means
+    // the install is incomplete; every other relative path is the user's own
+    // launch line and is left to the working directory.
+    if (acpAgentHasBinaryInstall(settings)) {
         return {};
-    }
-    const QString home = QDir::homePath();
-    const QString baseName = QFileInfo(command).fileName();
-    if (baseName != command) {
-        // Registry binary entries name their command "./<name>", relative to
-        // the unpacked archive Kate never manages. Resolve the bare name
-        // through PATH like any other agent instead.
-        const QString byName = QStandardPaths::findExecutable(baseName);
-        if (!byName.isEmpty()) {
-            return byName;
-        }
-    }
-    QStringList fallbacks;
-    if (baseName == u"grok"_s) {
-        fallbacks.append(home + u"/.grok/bin/"_s + baseName);
-    }
-    if (baseName == u"opencode"_s) {
-        // opencode's installer puts the binary in ~/.opencode/bin and only
-        // adds that to the *shell* PATH; a Kate launched from the desktop
-        // never sees it, so the agent cannot be started at all from there.
-        fallbacks.append(home + u"/.opencode/bin/"_s + baseName);
-    }
-    fallbacks.append(home + u"/.local/bin/"_s + baseName);
-    for (const QString &candidate : fallbacks) {
-        const QFileInfo info(candidate);
-        if (info.exists() && info.isExecutable()) {
-            return info.absoluteFilePath();
-        }
     }
     return command;
 }

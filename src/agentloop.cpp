@@ -613,15 +613,19 @@ QList<CheckpointInfo> AgentLoop::checkpoints() const
     return m_checkpoints.checkpoints();
 }
 
-QString AgentLoop::createCheckpoint(const QString &label)
+QString AgentLoop::createCheckpoint(const QString &label, QString *error)
 {
     if (m_subtaskDepth > 0) {
+        if (error) {
+            *error = u"Checkpoints belong to the parent turn, not to a sub-agent."_s;
+        }
         return {};
     }
-    QString error;
-    const QString id = m_checkpoints.createCheckpoint(label, &error);
-    if (id.isEmpty() && !error.isEmpty()) {
-        Q_EMIT checkpointFailed(error);
+    QString localError;
+    QString *out = error ? error : &localError;
+    const QString id = m_checkpoints.createCheckpoint(label, out);
+    if (id.isEmpty() && !out->isEmpty()) {
+        Q_EMIT checkpointFailed(*out);
     }
     return id;
 }

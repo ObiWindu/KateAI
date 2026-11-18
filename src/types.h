@@ -534,6 +534,10 @@ QString acpBinaryInstallDir(const QString &agentId);
 // as "./agy_acp_server.par", which are relative to the unpacked archive rather
 // than to Kate's working directory.
 QString acpInstalledBinaryCommand(const Settings &settings);
+// True when the agent's registry entry is a binary distribution. Such a
+// command is staged by the installer, so an unresolved relative path means the
+// install is missing rather than that the user meant a workspace file.
+bool acpAgentHasBinaryInstall(const Settings &settings);
 // True for the MiniMax Code ACP agent (`mcode`, registry id `minimax-code`).
 // Its standalone CLI (`mcode acp`) is preferred over the npm distribution the
 // ACP registry records, because the distribution's bundled native modules can

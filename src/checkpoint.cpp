@@ -99,6 +99,27 @@ QString shortTagName(const QString &ref)
     return ref.startsWith(TagPrefix) ? ref.mid(TagPrefix.size()) : ref;
 }
 
+// An empty global git config kept next to the shadow repository. This used to
+// be GIT_CONFIG_GLOBAL=/dev/null, which does not exist on Windows: git failed
+// to read "dev\null" and every snapshot there failed before it ran. The file is
+// only created when missing, so a git process can never truncate a config
+// another one is reading.
+QString shadowGlobalConfig(const QString &gitDir)
+{
+    if (gitDir.isEmpty()) {
+        return {};
+    }
+    const QString path = QFileInfo(gitDir).absolutePath() + u"/kateai-gitconfig"_s;
+    if (QFileInfo::exists(path)) {
+        return path;
+    }
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
+        return {};
+    }
+    return path;
+}
+
 // Runs git with the shadow repository and workspace bound in. A free function
 // so the worker thread can run it without touching any member of the manager
 // (whose workspace may change on the UI thread while a snapshot is in git).
@@ -118,7 +139,12 @@ bool runGitProcess(const QString &gitDir, const QString &workspace,
     environment.insert(u"GIT_WORK_TREE"_s, workspace);
     // Keep the user's global git config out of a repository they do not own.
     environment.insert(u"GIT_CONFIG_NOSYSTEM"_s, u"1"_s);
-    environment.insert(u"GIT_CONFIG_GLOBAL"_s, u"/dev/null"_s);
+    const QString globalConfig = shadowGlobalConfig(gitDir);
+    if (globalConfig.isEmpty()) {
+        environment.remove(u"GIT_CONFIG_GLOBAL"_s);
+    } else {
+        environment.insert(u"GIT_CONFIG_GLOBAL"_s, globalConfig);
+    }
     environment.insert(u"GIT_TERMINAL_PROMPT"_s, u"0"_s);
     // Kate itself may have been launched by git (as the editor); that exports
     // GIT_INDEX_FILE/GIT_OBJECT_DIRECTORY and friends. Inheriting them would
@@ -443,14 +469,19 @@ bool CheckpointManager::isAvailable() const
     if (!m_enabled || m_workspace.isEmpty()) {
         return false;
     }
-    if (!m_gitChecked) {
+    // A failed probe used to be cached for the whole session. A Kate launched
+    // before git was on PATH (desktop launcher, a shell profile that has not
+    // run yet) then reported checkpoints broken until it was restarted, even
+    // though git worked. Successful probes stay cached; a missing git is
+    // retried occasionally instead.
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    if (!m_gitChecked || (!m_gitAvailable && now - m_gitProbeMs >= 30000)) {
         m_gitChecked = true;
+        m_gitProbeMs = now;
         QProcess probe;
         probe.start(u"git"_s, QStringList{u"--version"_s});
         m_gitAvailable = probe.waitForFinished(2000) && probe.exitCode() == 0;
-        if (!m_gitAvailable) {
-            m_unavailableReason = u"git was not found on PATH"_s;
-        }
+        m_unavailableReason = m_gitAvailable ? QString() : u"git was not found on PATH"_s;
     }
     if (!m_gitAvailable) {
         return false;
@@ -482,7 +513,14 @@ bool CheckpointManager::ensureRepository(QString *error) const
         return false;
     }
     if (QFileInfo(dir).isDir()) {
-        return true;
+        // A directory is not yet a usable repository: an interrupted init (or
+        // a cache written by an older version) can leave it without HEAD or
+        // objects, and then every snapshot fails. The shadow is disposable, so
+        // rebuild anything that is not complete instead of failing forever.
+        if (QFileInfo::exists(dir + u"/HEAD"_s) && QFileInfo(dir + u"/objects"_s).isDir()) {
+            return true;
+        }
+        QDir(dir).removeRecursively();
     }
 
     QDir().mkpath(QFileInfo(dir).absolutePath());
@@ -530,6 +568,12 @@ void CheckpointManager::runGitDetached(const QStringList &arguments, int timeout
     environment.insert(u"GIT_DIR"_s, dir);
     environment.insert(u"GIT_WORK_TREE"_s, m_workspace);
     environment.insert(u"GIT_CONFIG_NOSYSTEM"_s, u"1"_s);
+    const QString globalConfig = shadowGlobalConfig(dir);
+    if (globalConfig.isEmpty()) {
+        environment.remove(u"GIT_CONFIG_GLOBAL"_s);
+    } else {
+        environment.insert(u"GIT_CONFIG_GLOBAL"_s, globalConfig);
+    }
     environment.insert(u"GIT_TERMINAL_PROMPT"_s, u"0"_s);
     git->setProcessEnvironment(environment);
     git->setWorkingDirectory(m_workspace);
