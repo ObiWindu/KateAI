@@ -579,6 +579,13 @@
             "isSafe": true,
             "relationship": "imports",
             "sourceId": "2eb2fd64f8e7cdfa96431c092e7bfa1c20f07b13b5c5f3b4a7a59cbc17fc606c_file",
+            "targetId": "7e8b5e295fdefc35ce03f352d0837ac85bf4eac71e5abb170ac776e16760feae_file"
+        },
+        {
+            "details": "",
+            "isSafe": true,
+            "relationship": "imports",
+            "sourceId": "2eb2fd64f8e7cdfa96431c092e7bfa1c20f07b13b5c5f3b4a7a59cbc17fc606c_file",
             "targetId": "9346291866eb279d7236287137758866fc706e6636cf82ce16af56419c77f556_file"
         },
         {
@@ -692,6 +699,13 @@
             "relationship": "imports",
             "sourceId": "31ba86659a2840919382396a4b56911f80e651567fe510545fdd0b33a5f992b1_file",
             "targetId": "3acd38cdc9cdf0b2e88798bb914a05f5ffc96fa02d9cb11c6bfc121f0b6ba255_file"
+        },
+        {
+            "details": "",
+            "isSafe": true,
+            "relationship": "imports",
+            "sourceId": "31ba86659a2840919382396a4b56911f80e651567fe510545fdd0b33a5f992b1_file",
+            "targetId": "7e8b5e295fdefc35ce03f352d0837ac85bf4eac71e5abb170ac776e16760feae_file"
         },
         {
             "details": "",
@@ -4143,7 +4157,7 @@
             "type": "file"
         },
         {
-            "complexity": 142,
+            "complexity": 148,
             "content": "",
             "dependencies": [
                 "3acd38cdc9cdf0b2e88798bb914a05f5ffc96fa02d9cb11c6bfc121f0b6ba255_file",
@@ -4154,8 +4168,8 @@
             ],
             "id": "00ef98033199de51af1d9f3dac0c1a6e2760dd79f5363afc53d5e545d4af358d_file",
             "isReadOnly": false,
-            "lastModified": 1794933388,
-            "linesOfCode": 2069,
+            "lastModified": 1794989202,
+            "linesOfCode": 2147,
             "metadata": {
                 "language": "cpp",
                 "symbols": [
@@ -4167,18 +4181,32 @@
                         "name": "is"
                     },
                     {
-                        "column": 20,
-                        "endLine": 477,
+                        "column": 36,
+                        "endLine": 409,
                         "kind": "function",
-                        "line": 471,
+                        "line": 403,
+                        "name": "more"
+                    },
+                    {
+                        "column": 20,
+                        "endLine": 496,
+                        "kind": "function",
+                        "line": 490,
                         "name": "line"
                     },
                     {
                         "column": 10,
-                        "endLine": 507,
+                        "endLine": 526,
                         "kind": "function",
-                        "line": 505,
+                        "line": 524,
                         "name": "sort"
+                    },
+                    {
+                        "column": 18,
+                        "endLine": 843,
+                        "kind": "function",
+                        "line": 839,
+                        "name": "base"
                     }
                 ]
             },
@@ -4218,8 +4246,8 @@
             ],
             "id": "02524211d0243812a60a76174781479f939ddcc3e5b5fb2bb44e0f77fd53159c_file",
             "isReadOnly": false,
-            "lastModified": 1794640643,
-            "linesOfCode": 146,
+            "lastModified": 1794990042,
+            "linesOfCode": 178,
             "metadata": {
                 "language": "cpp",
                 "symbols": [
@@ -4319,7 +4347,7 @@
             "type": "file"
         },
         {
-            "complexity": 28,
+            "complexity": 31,
             "content": "",
             "dependencies": [
                 "d0d8d3690b8ba57ea2d24830ca484fa9290db641e34709f04efb243eb1b1e633_file"
@@ -4329,23 +4357,23 @@
             ],
             "id": "04c94e05afb97904a044f4586ea40714cf19c27f53536f0d5af7def627160945_file",
             "isReadOnly": false,
-            "lastModified": 1794932959,
-            "linesOfCode": 558,
+            "lastModified": 1794991072,
+            "linesOfCode": 593,
             "metadata": {
                 "language": "cpp",
                 "symbols": [
                     {
                         "column": 31,
-                        "endLine": 137,
+                        "endLine": 146,
                         "kind": "function",
-                        "line": 134,
+                        "line": 143,
                         "name": "match"
                     },
                     {
                         "column": 69,
-                        "endLine": 382,
+                        "endLine": 393,
                         "kind": "function",
-                        "line": 377,
+                        "line": 388,
                         "name": "closeDocument"
                     }
                 ]
@@ -4614,7 +4642,7 @@
             "type": "directory"
         },
         {
-            "complexity": 186,
+            "complexity": 195,
             "content": "",
             "dependencies": [
                 "02f5331dbcd2c2fddf71a103169f7500485836f0fe3cd46dd6938171b6ba2eee_file",
@@ -4629,163 +4657,184 @@
             ],
             "id": "0f1cda4f884ab2309b070de1a3b64c55cebc5884b85b8b8a6ccf33d9850f0d13_file",
             "isReadOnly": false,
-            "lastModified": 1794933095,
-            "linesOfCode": 4525,
+            "lastModified": 1794990865,
+            "linesOfCode": 4688,
             "metadata": {
                 "language": "cpp",
                 "symbols": [
                     {
-                        "column": 17,
-                        "endLine": 604,
+                        "column": 41,
+                        "endLine": 470,
                         "kind": "function",
-                        "line": 599,
+                        "line": 464,
+                        "name": "setModel"
+                    },
+                    {
+                        "column": 17,
+                        "endLine": 652,
+                        "kind": "function",
+                        "line": 647,
                         "name": "responses"
                     },
                     {
                         "column": 5,
-                        "endLine": 759,
+                        "endLine": 807,
                         "kind": "function",
-                        "line": 747,
+                        "line": 795,
                         "name": "sendRequest"
                     },
                     {
                         "column": 8,
-                        "endLine": 774,
+                        "endLine": 822,
                         "kind": "function",
-                        "line": 766,
+                        "line": 814,
                         "name": "archive"
                     },
                     {
                         "column": 8,
-                        "endLine": 788,
+                        "endLine": 836,
                         "kind": "function",
-                        "line": 780,
+                        "line": 828,
                         "name": "exited"
                     },
                     {
                         "column": 5,
-                        "endLine": 1362,
+                        "endLine": 1472,
                         "kind": "function",
-                        "line": 1353,
+                        "line": 1458,
                         "name": "connect"
                     },
                     {
-                        "column": 5,
-                        "endLine": 1383,
+                        "column": 60,
+                        "endLine": 1464,
                         "kind": "function",
-                        "line": 1363,
+                        "line": 1459,
+                        "name": "finished"
+                    },
+                    {
+                        "column": 5,
+                        "endLine": 1493,
+                        "kind": "function",
+                        "line": 1473,
                         "name": "connect"
                     },
                     {
                         "column": 61,
-                        "endLine": 1406,
+                        "endLine": 1516,
                         "kind": "function",
-                        "line": 1404,
+                        "line": 1514,
                         "name": "contains"
                     },
                     {
-                        "column": 17,
-                        "endLine": 1569,
+                        "column": 12,
+                        "endLine": 1547,
                         "kind": "function",
-                        "line": 1562,
+                        "line": 1543,
+                        "name": "errorOccurred"
+                    },
+                    {
+                        "column": 17,
+                        "endLine": 1685,
+                        "kind": "function",
+                        "line": 1678,
                         "name": "agents"
                     },
                     {
                         "column": 5,
-                        "endLine": 1609,
+                        "endLine": 1725,
                         "kind": "function",
-                        "line": 1584,
+                        "line": 1700,
                         "name": "sendRequest"
                     },
                     {
                         "column": 5,
-                        "endLine": 1668,
+                        "endLine": 1784,
                         "kind": "function",
-                        "line": 1652,
+                        "line": 1768,
                         "name": "sendRequest"
                     },
                     {
                         "column": 5,
-                        "endLine": 1690,
+                        "endLine": 1806,
                         "kind": "function",
-                        "line": 1677,
+                        "line": 1793,
                         "name": "sendRequest"
                     },
                     {
                         "column": 5,
-                        "endLine": 1749,
+                        "endLine": 1865,
                         "kind": "function",
-                        "line": 1738,
+                        "line": 1854,
                         "name": "sendRequest"
                     },
                     {
                         "column": 5,
-                        "endLine": 1797,
+                        "endLine": 1917,
                         "kind": "function",
-                        "line": 1770,
+                        "line": 1890,
                         "name": "sendRequest"
                     },
                     {
                         "column": 5,
-                        "endLine": 1828,
+                        "endLine": 1948,
                         "kind": "function",
-                        "line": 1807,
+                        "line": 1927,
                         "name": "sendRequest"
                     },
                     {
-                        "column": 18,
-                        "endLine": 1885,
+                        "column": 33,
+                        "endLine": 2005,
                         "kind": "function",
-                        "line": 1860,
+                        "line": 1980,
                         "name": "sendRequest"
                     },
                     {
                         "column": 50,
-                        "endLine": 1917,
+                        "endLine": 2042,
                         "kind": "function",
-                        "line": 1908,
+                        "line": 2033,
                         "name": "_meta"
                     },
                     {
                         "column": 27,
-                        "endLine": 2630,
+                        "endLine": 2754,
                         "kind": "function",
-                        "line": 2620,
+                        "line": 2744,
                         "name": "unknown"
                     },
                     {
                         "column": 8,
-                        "endLine": 2948,
+                        "endLine": 3072,
                         "kind": "function",
-                        "line": 2945,
+                        "line": 3069,
                         "name": "riskForKind"
                     },
                     {
                         "column": 28,
-                        "endLine": 3188,
+                        "endLine": 3312,
                         "kind": "function",
-                        "line": 3185,
+                        "line": 3309,
                         "name": "runs"
                     },
                     {
                         "column": 20,
-                        "endLine": 4049,
+                        "endLine": 4202,
                         "kind": "function",
-                        "line": 4047,
+                        "line": 4200,
                         "name": "setChildProcessModifier"
                     },
                     {
                         "column": 5,
-                        "endLine": 4079,
+                        "endLine": 4232,
                         "kind": "function",
-                        "line": 4077,
+                        "line": 4230,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 4084,
+                        "endLine": 4237,
                         "kind": "function",
-                        "line": 4080,
+                        "line": 4233,
                         "name": "connect"
                     }
                 ]
@@ -5030,7 +5079,7 @@
             "type": "file"
         },
         {
-            "complexity": 153,
+            "complexity": 154,
             "content": "",
             "dependencies": [
                 "19f4e5a732620df98448ec8c001e9c4f1d8fedd96cd7fb219e8b73fdf3161958_file",
@@ -5068,14 +5117,14 @@
             ],
             "id": "1ac31d8e476eff9e23ebc472947737fb98a8a51cf6ed011ef51e19a960866a68_file",
             "isReadOnly": false,
-            "lastModified": 1794932959,
-            "linesOfCode": 490,
+            "lastModified": 1794988416,
+            "linesOfCode": 493,
             "metadata": {
                 "language": "header",
                 "symbols": [
                     {
                         "column": 7,
-                        "endLine": 488,
+                        "endLine": 491,
                         "kind": "class",
                         "line": 37,
                         "name": "AgentLoop"
@@ -5089,9 +5138,9 @@
                     },
                     {
                         "column": 16,
-                        "endLine": 267,
+                        "endLine": 270,
                         "kind": "class",
-                        "line": 260,
+                        "line": 263,
                         "name": "State"
                     },
                     {
@@ -5145,16 +5194,16 @@
                     },
                     {
                         "column": 31,
-                        "endLine": 187,
+                        "endLine": 190,
                         "kind": "function",
-                        "line": 187,
+                        "line": 190,
                         "name": "messages"
                     },
                     {
                         "column": 23,
-                        "endLine": 194,
+                        "endLine": 197,
                         "kind": "function",
-                        "line": 194,
+                        "line": 197,
                         "name": "policy"
                     }
                 ]
@@ -5312,7 +5361,7 @@
             "type": "file"
         },
         {
-            "complexity": 46,
+            "complexity": 49,
             "content": "",
             "dependencies": [
                 "cccb540759c3d8883d50e6457efa9b6f00cba2ad0a45dfae5da29702b954b465_file",
@@ -5323,16 +5372,16 @@
             ],
             "id": "22e45eb7facdbdb4b0c5a4291a142bd825fb83aa993f8886f4e236d8b8141598_file",
             "isReadOnly": false,
-            "lastModified": 1794754609,
-            "linesOfCode": 204,
+            "lastModified": 1794989835,
+            "linesOfCode": 229,
             "metadata": {
                 "language": "cpp",
                 "symbols": [
                     {
                         "column": 7,
-                        "endLine": 201,
+                        "endLine": 226,
                         "kind": "class",
-                        "line": 11,
+                        "line": 12,
                         "name": "TestPermissions"
                     }
                 ]
@@ -5823,9 +5872,10 @@
             "type": "file"
         },
         {
-            "complexity": 65,
+            "complexity": 73,
             "content": "",
             "dependencies": [
+                "7e8b5e295fdefc35ce03f352d0837ac85bf4eac71e5abb170ac776e16760feae_file",
                 "9346291866eb279d7236287137758866fc706e6636cf82ce16af56419c77f556_file",
                 "d77f0fed8cd3909dcde9c9bb80c763c766be6f079033e89e044ed9b566c45755_file"
             ],
@@ -5834,51 +5884,51 @@
             ],
             "id": "2eb2fd64f8e7cdfa96431c092e7bfa1c20f07b13b5c5f3b4a7a59cbc17fc606c_file",
             "isReadOnly": false,
-            "lastModified": 1794932959,
-            "linesOfCode": 1436,
+            "lastModified": 1794990790,
+            "linesOfCode": 1580,
             "metadata": {
                 "language": "cpp",
                 "symbols": [
                     {
                         "column": 62,
-                        "endLine": 472,
+                        "endLine": 520,
                         "kind": "function",
-                        "line": 467,
+                        "line": 515,
                         "name": "it"
                     },
                     {
                         "column": 12,
-                        "endLine": 646,
+                        "endLine": 694,
                         "kind": "function",
-                        "line": 642,
+                        "line": 690,
                         "name": "safe"
                     },
                     {
                         "column": 59,
-                        "endLine": 717,
+                        "endLine": 769,
                         "kind": "function",
-                        "line": 715,
+                        "line": 767,
                         "name": "end"
                     },
                     {
                         "column": 34,
-                        "endLine": 1152,
+                        "endLine": 1205,
                         "kind": "function",
-                        "line": 1150,
+                        "line": 1203,
                         "name": "find_if"
                     },
                     {
                         "column": 9,
-                        "endLine": 1194,
+                        "endLine": 1247,
                         "kind": "function",
-                        "line": 1192,
+                        "line": 1245,
                         "name": "connect"
                     },
                     {
                         "column": 8,
-                        "endLine": 1294,
+                        "endLine": 1347,
                         "kind": "function",
-                        "line": 1288,
+                        "line": 1341,
                         "name": "tools"
                     }
                 ]
@@ -6097,12 +6147,13 @@
             "type": "file"
         },
         {
-            "complexity": 23,
+            "complexity": 26,
             "content": "",
             "dependencies": [
                 "1645f1cfb8ea7ab40ae71d55ad76b78131844e4c903316eba92cd6276f5dc240_file",
                 "1ac31d8e476eff9e23ebc472947737fb98a8a51cf6ed011ef51e19a960866a68_file",
                 "3acd38cdc9cdf0b2e88798bb914a05f5ffc96fa02d9cb11c6bfc121f0b6ba255_file",
+                "7e8b5e295fdefc35ce03f352d0837ac85bf4eac71e5abb170ac776e16760feae_file",
                 "9346291866eb279d7236287137758866fc706e6636cf82ce16af56419c77f556_file"
             ],
             "dependents": [
@@ -6110,16 +6161,16 @@
             ],
             "id": "31ba86659a2840919382396a4b56911f80e651567fe510545fdd0b33a5f992b1_file",
             "isReadOnly": false,
-            "lastModified": 1794825093,
-            "linesOfCode": 350,
+            "lastModified": 1794989904,
+            "linesOfCode": 393,
             "metadata": {
                 "language": "cpp",
                 "symbols": [
                     {
                         "column": 7,
-                        "endLine": 347,
+                        "endLine": 390,
                         "kind": "class",
-                        "line": 16,
+                        "line": 17,
                         "name": "TestAgentParity"
                     }
                 ]
@@ -6307,7 +6358,7 @@
             ],
             "id": "337c077cdd5edc9937a8b4daa120d47bb6a0a7f7bd70c5917f78115e7d5e9bac_directory",
             "isReadOnly": false,
-            "lastModified": 1794932959,
+            "lastModified": 1794989310,
             "linesOfCode": 0,
             "metadata": {
             },
@@ -6316,7 +6367,7 @@
             "type": "directory"
         },
         {
-            "complexity": 69,
+            "complexity": 70,
             "content": "",
             "dependencies": [
                 "bbd095d72b67445b2ed22edb8e7363b61778f8386f95c01d4b72df6a05c5fad2_file"
@@ -6336,49 +6387,49 @@
             ],
             "id": "36500b842c8dc2fb749de08ccce31b936cec8850ed30946dc37969093d803da0_file",
             "isReadOnly": false,
-            "lastModified": 1794640643,
-            "linesOfCode": 247,
+            "lastModified": 1794988454,
+            "linesOfCode": 249,
             "metadata": {
                 "language": "header",
                 "symbols": [
                     {
                         "column": 7,
-                        "endLine": 247,
+                        "endLine": 249,
                         "kind": "class",
                         "line": 13,
                         "name": "QLabel"
                     },
                     {
                         "column": 7,
-                        "endLine": 247,
+                        "endLine": 249,
                         "kind": "class",
                         "line": 14,
                         "name": "QPropertyAnimation"
                     },
                     {
                         "column": 7,
-                        "endLine": 247,
+                        "endLine": 249,
                         "kind": "class",
                         "line": 15,
                         "name": "QPushButton"
                     },
                     {
                         "column": 7,
-                        "endLine": 247,
+                        "endLine": 249,
                         "kind": "class",
                         "line": 16,
                         "name": "QShowEvent"
                     },
                     {
                         "column": 7,
-                        "endLine": 247,
+                        "endLine": 249,
                         "kind": "class",
                         "line": 17,
                         "name": "QTextBrowser"
                     },
                     {
                         "column": 7,
-                        "endLine": 247,
+                        "endLine": 249,
                         "kind": "class",
                         "line": 18,
                         "name": "QTimer"
@@ -6392,51 +6443,51 @@
                     },
                     {
                         "column": 7,
-                        "endLine": 245,
+                        "endLine": 247,
                         "kind": "class",
                         "line": 49,
                         "name": "ToolCallWidget"
                     },
                     {
                         "column": 13,
-                        "endLine": 113,
+                        "endLine": 115,
                         "kind": "function",
-                        "line": 113,
+                        "line": 115,
                         "name": "toolCallId"
                     },
                     {
                         "column": 17,
-                        "endLine": 114,
+                        "endLine": 116,
                         "kind": "function",
-                        "line": 114,
+                        "line": 116,
                         "name": "toolName"
                     },
                     {
                         "column": 9,
-                        "endLine": 115,
+                        "endLine": 117,
                         "kind": "function",
-                        "line": 115,
+                        "line": 117,
                         "name": "expandedHeight"
-                    },
-                    {
-                        "column": 10,
-                        "endLine": 118,
-                        "kind": "function",
-                        "line": 118,
-                        "name": "isExpanded"
-                    },
-                    {
-                        "column": 10,
-                        "endLine": 119,
-                        "kind": "function",
-                        "line": 119,
-                        "name": "isRunning"
                     },
                     {
                         "column": 10,
                         "endLine": 120,
                         "kind": "function",
                         "line": 120,
+                        "name": "isExpanded"
+                    },
+                    {
+                        "column": 10,
+                        "endLine": 121,
+                        "kind": "function",
+                        "line": 121,
+                        "name": "isRunning"
+                    },
+                    {
+                        "column": 10,
+                        "endLine": 122,
+                        "kind": "function",
+                        "line": 122,
                         "name": "hasDiffPreview"
                     }
                 ]
@@ -6446,7 +6497,7 @@
             "type": "file"
         },
         {
-            "complexity": 106,
+            "complexity": 111,
             "content": "",
             "dependencies": [
                 "cd15d968b793a3e28cc732d3878d39991bc0fd9219e14b024bd95f2186eb28d6_file"
@@ -6456,87 +6507,87 @@
             ],
             "id": "37d0ba9db93e3760ce03c71dc4f04390abd46b69dc3148df7adbd0f62eb8d9c3_file",
             "isReadOnly": false,
-            "lastModified": 1794932959,
-            "linesOfCode": 2088,
+            "lastModified": 1794987854,
+            "linesOfCode": 2138,
             "metadata": {
                 "language": "cpp",
                 "symbols": [
                     {
                         "column": 20,
-                        "endLine": 213,
+                        "endLine": 208,
                         "kind": "function",
-                        "line": 209,
+                        "line": 204,
                         "name": "toString"
                     },
                     {
-                        "column": 55,
-                        "endLine": 821,
+                        "column": 32,
+                        "endLine": 483,
                         "kind": "function",
-                        "line": 817,
+                        "line": 478,
+                        "name": "omits"
+                    },
+                    {
+                        "column": 55,
+                        "endLine": 846,
+                        "kind": "function",
+                        "line": 842,
                         "name": "role"
                     },
                     {
                         "column": 61,
-                        "endLine": 861,
+                        "endLine": 886,
                         "kind": "function",
-                        "line": 856,
+                        "line": 881,
                         "name": "calls"
                     },
                     {
                         "column": 54,
-                        "endLine": 940,
+                        "endLine": 965,
                         "kind": "function",
-                        "line": 923,
+                        "line": 948,
                         "name": "content"
                     },
                     {
                         "column": 5,
-                        "endLine": 996,
+                        "endLine": 1021,
                         "kind": "function",
-                        "line": 993,
+                        "line": 1018,
                         "name": "connect"
                     },
                     {
                         "column": 49,
-                        "endLine": 1288,
+                        "endLine": 1313,
                         "kind": "function",
-                        "line": 1283,
+                        "line": 1308,
                         "name": "purpose"
                     },
                     {
                         "column": 11,
-                        "endLine": 1572,
+                        "endLine": 1601,
                         "kind": "function",
-                        "line": 1567,
+                        "line": 1596,
                         "name": "empty"
                     },
                     {
                         "column": 22,
-                        "endLine": 1670,
+                        "endLine": 1708,
                         "kind": "function",
-                        "line": 1666,
+                        "line": 1704,
                         "name": "errors"
                     },
                     {
                         "column": 40,
-                        "endLine": 1831,
+                        "endLine": 1875,
                         "kind": "function",
-                        "line": 1809,
+                        "line": 1851,
                         "name": "field"
                     },
                     {
                         "column": 31,
-                        "endLine": 1857,
+                        "endLine": 1901,
                         "kind": "function",
-                        "line": 1833,
+                        "line": 1877,
                         "name": "retry_delay"
-                    },
-                    {
-                        "column": 33,
-                        "endLine": 2072,
-                        "kind": "function",
-                        "line": 2066,
-                        "name": "retry"
                     }
                 ]
             },
@@ -6751,7 +6802,7 @@
             "type": "file"
         },
         {
-            "complexity": 51,
+            "complexity": 56,
             "content": "",
             "dependencies": [
                 "e47702b24a58c6929b54ff73ecc409c0977d8819abdd9040c75606108c23bd16_file"
@@ -6761,44 +6812,44 @@
             ],
             "id": "3be449e809a2fc9657c7baea00c3c0d3c05c41c7bdc3c46462526fd2f1a5dea3_file",
             "isReadOnly": false,
-            "lastModified": 1794824246,
-            "linesOfCode": 847,
+            "lastModified": 1794990887,
+            "linesOfCode": 891,
             "metadata": {
                 "language": "cpp",
                 "symbols": [
                     {
                         "column": 5,
-                        "endLine": 525,
+                        "endLine": 548,
                         "kind": "function",
-                        "line": 523,
+                        "line": 546,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 529,
+                        "endLine": 552,
                         "kind": "function",
-                        "line": 526,
+                        "line": 549,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 533,
+                        "endLine": 556,
                         "kind": "function",
-                        "line": 530,
+                        "line": 553,
                         "name": "connect"
                     },
                     {
                         "column": 18,
-                        "endLine": 640,
+                        "endLine": 663,
                         "kind": "function",
-                        "line": 620,
+                        "line": 643,
                         "name": "globalInstance"
                     },
                     {
                         "column": 22,
-                        "endLine": 639,
+                        "endLine": 662,
                         "kind": "function",
-                        "line": 632,
+                        "line": 655,
                         "name": "invokeMethod"
                     }
                 ]
@@ -7393,7 +7444,7 @@
             ],
             "id": "4a8a01b099f39b53df20488cded15fce7840d75d8bd80df4f247826b215007e8_directory",
             "isReadOnly": false,
-            "lastModified": 1794940454,
+            "lastModified": 1794985074,
             "linesOfCode": 0,
             "metadata": {
             },
@@ -7778,7 +7829,7 @@
             "type": "file"
         },
         {
-            "complexity": 57,
+            "complexity": 58,
             "content": "",
             "dependencies": [
                 "b5447f482b1b013eca40a5e915499a1cbe3da2e2fae11d9399fec7439d5643fe_file",
@@ -7789,30 +7840,37 @@
             ],
             "id": "56cff0fb73ad0af32bc70cf92f22329762f9f79089e14bbbbb845b4cb6eec04b_file",
             "isReadOnly": false,
-            "lastModified": 1794932959,
-            "linesOfCode": 912,
+            "lastModified": 1794990763,
+            "linesOfCode": 953,
             "metadata": {
                 "language": "cpp",
                 "symbols": [
                     {
                         "column": 31,
-                        "endLine": 265,
+                        "endLine": 290,
                         "kind": "function",
-                        "line": 262,
+                        "line": 287,
                         "name": "endpoint"
                     },
                     {
                         "column": 24,
-                        "endLine": 358,
+                        "endLine": 385,
                         "kind": "function",
-                        "line": 354,
+                        "line": 380,
                         "name": "above"
                     },
                     {
-                        "column": 64,
-                        "endLine": 592,
+                        "column": 5,
+                        "endLine": 507,
                         "kind": "function",
-                        "line": 584,
+                        "line": 503,
+                        "name": "connect"
+                    },
+                    {
+                        "column": 64,
+                        "endLine": 630,
+                        "kind": "function",
+                        "line": 622,
                         "name": "url"
                     }
                 ]
@@ -8024,7 +8082,7 @@
             "type": "file"
         },
         {
-            "complexity": 67,
+            "complexity": 69,
             "content": "",
             "dependencies": [
                 "6e9c48bded73c52266b472d5aa12ecb5f06c3521f761eaac0c8f85bdbebbb276_file",
@@ -8036,8 +8094,8 @@
             ],
             "id": "58c82f234bbe503b3bb55cbcbc565f7bbe8a8c514451f582ba30af5c70983282_file",
             "isReadOnly": false,
-            "lastModified": 1794640643,
-            "linesOfCode": 972,
+            "lastModified": 1794989270,
+            "linesOfCode": 1001,
             "metadata": {
                 "language": "cpp",
                 "symbols": [
@@ -8064,38 +8122,52 @@
                     },
                     {
                         "column": 5,
-                        "endLine": 700,
+                        "endLine": 701,
                         "kind": "function",
-                        "line": 698,
+                        "line": 699,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 709,
+                        "endLine": 710,
                         "kind": "function",
-                        "line": 707,
+                        "line": 708,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 719,
+                        "endLine": 720,
                         "kind": "function",
-                        "line": 717,
+                        "line": 718,
                         "name": "connect"
                     },
                     {
                         "column": 20,
-                        "endLine": 867,
+                        "endLine": 869,
                         "kind": "function",
-                        "line": 865,
+                        "line": 867,
                         "name": "find_if"
                     },
                     {
                         "column": 43,
-                        "endLine": 933,
+                        "endLine": 944,
                         "kind": "function",
-                        "line": 927,
+                        "line": 938,
                         "name": "edit"
+                    },
+                    {
+                        "column": 50,
+                        "endLine": 951,
+                        "kind": "function",
+                        "line": 947,
+                        "name": "key"
+                    },
+                    {
+                        "column": 14,
+                        "endLine": 972,
+                        "kind": "function",
+                        "line": 970,
+                        "name": "removeIf"
                     }
                 ]
             },
@@ -8206,14 +8278,14 @@
             ],
             "id": "5c433218f0dfb9d7631ee2cc4798308c7c5a06f38a29f061888e7894f85ad614_file",
             "isReadOnly": false,
-            "lastModified": 1794932802,
-            "linesOfCode": 112,
+            "lastModified": 1794990935,
+            "linesOfCode": 115,
             "metadata": {
                 "language": "cpp",
                 "symbols": [
                     {
                         "column": 7,
-                        "endLine": 109,
+                        "endLine": 112,
                         "kind": "class",
                         "line": 14,
                         "name": "TestProcessEnv"
@@ -8269,7 +8341,7 @@
             "type": "file"
         },
         {
-            "complexity": 124,
+            "complexity": 132,
             "content": "",
             "dependencies": [
                 "cccb540759c3d8883d50e6457efa9b6f00cba2ad0a45dfae5da29702b954b465_file",
@@ -8280,128 +8352,128 @@
             ],
             "id": "5e8bd69f9e2d9fd7165398c79401c0dfe798671dc4a57746953729506530a1b0_file",
             "isReadOnly": false,
-            "lastModified": 1794933323,
-            "linesOfCode": 1903,
+            "lastModified": 1794990141,
+            "linesOfCode": 2141,
             "metadata": {
                 "language": "cpp",
                 "symbols": [
                     {
                         "column": 28,
-                        "endLine": 78,
+                        "endLine": 90,
                         "kind": "class",
-                        "line": 70,
+                        "line": 82,
                         "name": "silently"
                     },
                     {
                         "column": 63,
-                        "endLine": 78,
+                        "endLine": 90,
                         "kind": "class",
-                        "line": 73,
+                        "line": 85,
                         "name": "end"
                     },
                     {
                         "column": 50,
-                        "endLine": 126,
+                        "endLine": 138,
                         "kind": "class",
-                        "line": 117,
+                        "line": 129,
                         "name": "says"
                     },
                     {
                         "column": 57,
-                        "endLine": 113,
+                        "endLine": 125,
                         "kind": "function",
-                        "line": 111,
+                        "line": 123,
                         "name": "contains"
                     },
                     {
                         "column": 56,
-                        "endLine": 129,
+                        "endLine": 141,
                         "kind": "function",
-                        "line": 126,
+                        "line": 138,
                         "name": "contains"
                     },
                     {
                         "column": 55,
-                        "endLine": 285,
+                        "endLine": 300,
                         "kind": "function",
-                        "line": 279,
+                        "line": 294,
                         "name": "symlinks"
                     },
                     {
                         "column": 68,
-                        "endLine": 331,
+                        "endLine": 346,
                         "kind": "function",
-                        "line": 324,
+                        "line": 339,
                         "name": "pattern"
                     },
                     {
                         "column": 72,
-                        "endLine": 365,
+                        "endLine": 380,
                         "kind": "function",
-                        "line": 359,
+                        "line": 374,
                         "name": "pattern"
                     },
                     {
                         "column": 5,
-                        "endLine": 428,
+                        "endLine": 449,
                         "kind": "function",
-                        "line": 423,
+                        "line": 443,
                         "name": "defined"
                     },
                     {
                         "column": 19,
-                        "endLine": 477,
+                        "endLine": 498,
                         "kind": "function",
-                        "line": 472,
+                        "line": 493,
                         "name": "canonicalFilePath"
                     },
                     {
                         "column": 30,
-                        "endLine": 510,
+                        "endLine": 531,
                         "kind": "function",
-                        "line": 484,
+                        "line": 505,
                         "name": "path"
                     },
                     {
                         "column": 64,
-                        "endLine": 799,
+                        "endLine": 841,
                         "kind": "function",
-                        "line": 795,
+                        "line": 837,
                         "name": "executes"
                     },
                     {
-                        "column": 85,
-                        "endLine": 820,
+                        "column": 16,
+                        "endLine": 871,
                         "kind": "function",
-                        "line": 812,
+                        "line": 858,
                         "name": "contains"
                     },
                     {
                         "column": 43,
-                        "endLine": 862,
+                        "endLine": 947,
                         "kind": "function",
-                        "line": 853,
+                        "line": 938,
                         "name": "it"
                     },
                     {
                         "column": 19,
-                        "endLine": 941,
+                        "endLine": 1026,
                         "kind": "function",
-                        "line": 904,
+                        "line": 989,
                         "name": "void"
                     },
                     {
                         "column": 6,
-                        "endLine": 1804,
+                        "endLine": 2024,
                         "kind": "function",
-                        "line": 1797,
+                        "line": 2017,
                         "name": "defined"
                     },
                     {
                         "column": 23,
-                        "endLine": 1896,
+                        "endLine": 2134,
                         "kind": "function",
-                        "line": 1888,
+                        "line": 2126,
                         "name": "wrapCommand"
                     }
                 ]
@@ -8411,7 +8483,7 @@
             "type": "file"
         },
         {
-            "complexity": 5,
+            "complexity": 6,
             "content": "",
             "dependencies": [
                 "d77f0fed8cd3909dcde9c9bb80c763c766be6f079033e89e044ed9b566c45755_file"
@@ -8421,8 +8493,8 @@
             ],
             "id": "5ff60f3588f03d718d5e0db27b4cb0533ca6260dff38110cb866b8b697597472_file",
             "isReadOnly": false,
-            "lastModified": 1794932959,
-            "linesOfCode": 112,
+            "lastModified": 1794988869,
+            "linesOfCode": 152,
             "metadata": {
                 "language": "cpp",
                 "symbols": [
@@ -8913,7 +8985,7 @@
             "type": "file"
         },
         {
-            "complexity": 40,
+            "complexity": 41,
             "content": "",
             "dependencies": [
                 "bbd095d72b67445b2ed22edb8e7363b61778f8386f95c01d4b72df6a05c5fad2_file"
@@ -8927,63 +8999,63 @@
             ],
             "id": "6e9c48bded73c52266b472d5aa12ecb5f06c3521f761eaac0c8f85bdbebbb276_file",
             "isReadOnly": false,
-            "lastModified": 1794640643,
-            "linesOfCode": 188,
+            "lastModified": 1794988212,
+            "linesOfCode": 194,
             "metadata": {
                 "language": "header",
                 "symbols": [
                     {
                         "column": 7,
-                        "endLine": 188,
+                        "endLine": 194,
                         "kind": "class",
                         "line": 18,
                         "name": "QLabel"
                     },
                     {
                         "column": 7,
-                        "endLine": 188,
+                        "endLine": 194,
                         "kind": "class",
                         "line": 19,
                         "name": "QLineEdit"
                     },
                     {
                         "column": 7,
-                        "endLine": 188,
+                        "endLine": 194,
                         "kind": "class",
                         "line": 20,
                         "name": "QPushButton"
                     },
                     {
                         "column": 7,
-                        "endLine": 188,
+                        "endLine": 194,
                         "kind": "class",
                         "line": 21,
                         "name": "QScrollArea"
                     },
                     {
                         "column": 7,
-                        "endLine": 188,
+                        "endLine": 194,
                         "kind": "class",
                         "line": 22,
                         "name": "QTextBrowser"
                     },
                     {
                         "column": 7,
-                        "endLine": 188,
+                        "endLine": 194,
                         "kind": "class",
                         "line": 23,
                         "name": "QVBoxLayout"
                     },
                     {
                         "column": 7,
-                        "endLine": 188,
+                        "endLine": 194,
                         "kind": "class",
                         "line": 24,
                         "name": "QWidget"
                     },
                     {
                         "column": 7,
-                        "endLine": 186,
+                        "endLine": 192,
                         "kind": "class",
                         "line": 57,
                         "name": "EditTracker"
@@ -9017,7 +9089,7 @@
             "type": "file"
         },
         {
-            "complexity": 157,
+            "complexity": 159,
             "content": "",
             "dependencies": [
                 "19f4e5a732620df98448ec8c001e9c4f1d8fedd96cd7fb219e8b73fdf3161958_file",
@@ -9030,8 +9102,8 @@
             ],
             "id": "6f300b951d33e8fe111a5087f51dc5fd1674a308f64a4fcba7cf8a7c7d48d09b_file",
             "isReadOnly": false,
-            "lastModified": 1794833233,
-            "linesOfCode": 1393,
+            "lastModified": 1794989770,
+            "linesOfCode": 1422,
             "metadata": {
                 "language": "cpp",
                 "symbols": [
@@ -9051,7 +9123,7 @@
                     },
                     {
                         "column": 7,
-                        "endLine": 1390,
+                        "endLine": 1419,
                         "kind": "class",
                         "line": 112,
                         "name": "TestTools"
@@ -9079,30 +9151,30 @@
                     },
                     {
                         "column": 132,
-                        "endLine": 1369,
+                        "endLine": 1398,
                         "kind": "function",
-                        "line": 1369,
+                        "line": 1398,
                         "name": "main"
                     },
                     {
                         "column": 29,
-                        "endLine": 1380,
+                        "endLine": 1409,
                         "kind": "function",
-                        "line": 1380,
+                        "line": 1409,
                         "name": "applyPatchToContent"
                     },
                     {
                         "column": 9,
-                        "endLine": 1382,
+                        "endLine": 1411,
                         "kind": "function",
-                        "line": 1382,
+                        "line": 1411,
                         "name": "QCOMPARE"
                     },
                     {
                         "column": 29,
-                        "endLine": 1385,
+                        "endLine": 1414,
                         "kind": "function",
-                        "line": 1385,
+                        "line": 1414,
                         "name": "applyPatchToContent"
                     }
                 ]
@@ -9124,7 +9196,7 @@
             ],
             "id": "6fb0c5aedbb5c4ba430cc7ac461c8be7ccbfff305704a536962f3799c968caa5_file",
             "isReadOnly": false,
-            "lastModified": 1794845003,
+            "lastModified": 1794989207,
             "linesOfCode": 517,
             "metadata": {
                 "language": "cpp",
@@ -9526,6 +9598,8 @@
             "dependencies": [
             ],
             "dependents": [
+                "2eb2fd64f8e7cdfa96431c092e7bfa1c20f07b13b5c5f3b4a7a59cbc17fc606c_file",
+                "31ba86659a2840919382396a4b56911f80e651567fe510545fdd0b33a5f992b1_file",
                 "337c077cdd5edc9937a8b4daa120d47bb6a0a7f7bd70c5917f78115e7d5e9bac_directory",
                 "6fb0c5aedbb5c4ba430cc7ac461c8be7ccbfff305704a536962f3799c968caa5_file",
                 "f636b2f317d8437cffa41d3b771ecbfd2e0044403d193dc4094b6ed9549fafbf_file",
@@ -9624,7 +9698,7 @@
             "type": "file"
         },
         {
-            "complexity": 5,
+            "complexity": 6,
             "content": "",
             "dependencies": [
                 "4e04ea6ae98b4faa5937b9bf19a2475a968dbce235d0cc2e4db98c0212789552_file"
@@ -9634,14 +9708,14 @@
             ],
             "id": "84f3e9dff6513da2c8e569b4a4c49bfede21776e8f6258bcdc26c960ad18b245_file",
             "isReadOnly": false,
-            "lastModified": 1794843824,
-            "linesOfCode": 125,
+            "lastModified": 1794989577,
+            "linesOfCode": 134,
             "metadata": {
                 "language": "cpp",
                 "symbols": [
                     {
                         "column": 7,
-                        "endLine": 122,
+                        "endLine": 131,
                         "kind": "class",
                         "line": 14,
                         "name": "TestSettings"
@@ -9687,7 +9761,7 @@
             "type": "file"
         },
         {
-            "complexity": 146,
+            "complexity": 151,
             "content": "",
             "dependencies": [
                 "19f4e5a732620df98448ec8c001e9c4f1d8fedd96cd7fb219e8b73fdf3161958_file",
@@ -9699,107 +9773,114 @@
             ],
             "id": "867924113469e6f8a2da9a0fb823b814b37edddae052a3c6689c2540c2a76123_file",
             "isReadOnly": false,
-            "lastModified": 1794932959,
-            "linesOfCode": 3016,
+            "lastModified": 1794990822,
+            "linesOfCode": 3083,
             "metadata": {
                 "language": "cpp",
                 "symbols": [
                     {
                         "column": 65,
-                        "endLine": 1816,
+                        "endLine": 1851,
                         "kind": "class",
-                        "line": 1795,
+                        "line": 1830,
                         "name": "is"
                     },
                     {
                         "column": 11,
-                        "endLine": 432,
+                        "endLine": 447,
                         "kind": "function",
-                        "line": 427,
+                        "line": 442,
                         "name": "split"
                     },
                     {
                         "column": 10,
-                        "endLine": 1306,
+                        "endLine": 1341,
                         "kind": "function",
-                        "line": 1304,
+                        "line": 1339,
                         "name": "sort"
                     },
                     {
                         "column": 27,
-                        "endLine": 1617,
+                        "endLine": 1652,
                         "kind": "function",
-                        "line": 1613,
+                        "line": 1648,
                         "name": "kill"
                     },
                     {
                         "column": 21,
-                        "endLine": 1689,
+                        "endLine": 1724,
                         "kind": "function",
-                        "line": 1685,
+                        "line": 1720,
                         "name": "setsid"
                     },
                     {
                         "column": 12,
-                        "endLine": 1782,
+                        "endLine": 1817,
                         "kind": "function",
-                        "line": 1769,
+                        "line": 1804,
                         "name": "builds"
                     },
                     {
                         "column": 18,
-                        "endLine": 1830,
+                        "endLine": 1868,
                         "kind": "function",
-                        "line": 1803,
+                        "line": 1838,
                         "name": "invokeMethod"
                     },
                     {
-                        "column": 26,
-                        "endLine": 1828,
+                        "column": 43,
+                        "endLine": 1867,
                         "kind": "function",
-                        "line": 1823,
+                        "line": 1858,
+                        "name": "data"
+                    },
+                    {
+                        "column": 26,
+                        "endLine": 1866,
+                        "kind": "function",
+                        "line": 1861,
                         "name": "invokeMethod"
                     },
                     {
                         "column": 14,
-                        "endLine": 1873,
+                        "endLine": 1911,
                         "kind": "function",
-                        "line": 1871,
+                        "line": 1909,
                         "name": "setChildProcessModifier"
                     },
                     {
                         "column": 46,
-                        "endLine": 1887,
+                        "endLine": 1925,
                         "kind": "function",
-                        "line": 1875,
+                        "line": 1913,
                         "name": "unique"
                     },
                     {
                         "column": 8,
-                        "endLine": 1972,
+                        "endLine": 2010,
                         "kind": "function",
-                        "line": 1951,
+                        "line": 1989,
                         "name": "errorOccurred"
                     },
                     {
                         "column": 5,
-                        "endLine": 2000,
+                        "endLine": 2038,
                         "kind": "function",
-                        "line": 1974,
+                        "line": 2012,
                         "name": "connect"
                     },
                     {
                         "column": 10,
-                        "endLine": 2387,
+                        "endLine": 2432,
                         "kind": "function",
-                        "line": 2385,
+                        "line": 2430,
                         "name": "sort"
                     },
                     {
                         "column": 28,
-                        "endLine": 2858,
+                        "endLine": 2904,
                         "kind": "function",
-                        "line": 2844,
+                        "line": 2890,
                         "name": "late"
                     }
                 ]
@@ -9879,7 +9960,7 @@
             "type": "file"
         },
         {
-            "complexity": 365,
+            "complexity": 367,
             "content": "",
             "dependencies": [
                 "02f5331dbcd2c2fddf71a103169f7500485836f0fe3cd46dd6938171b6ba2eee_file",
@@ -9911,8 +9992,8 @@
             ],
             "id": "8ab4ae3360c36b53074b22aa669f76d7692f4bc3bff406e968a3181276455b45_file",
             "isReadOnly": false,
-            "lastModified": 1794942562,
-            "linesOfCode": 7043,
+            "lastModified": 1794990906,
+            "linesOfCode": 7102,
             "metadata": {
                 "language": "cpp",
                 "symbols": [
@@ -9932,9 +10013,9 @@
                     },
                     {
                         "column": 14,
-                        "endLine": 1760,
+                        "endLine": 1801,
                         "kind": "class",
-                        "line": 1755,
+                        "line": 1796,
                         "name": "destructor"
                     },
                     {
@@ -10016,891 +10097,905 @@
                     },
                     {
                         "column": 5,
-                        "endLine": 835,
+                        "endLine": 823,
                         "kind": "function",
-                        "line": 823,
+                        "line": 821,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 873,
+                        "endLine": 837,
                         "kind": "function",
-                        "line": 837,
+                        "line": 825,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 881,
+                        "endLine": 875,
                         "kind": "function",
-                        "line": 875,
+                        "line": 839,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 888,
+                        "endLine": 883,
                         "kind": "function",
-                        "line": 883,
+                        "line": 877,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 893,
+                        "endLine": 890,
                         "kind": "function",
-                        "line": 890,
+                        "line": 885,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 900,
+                        "endLine": 895,
                         "kind": "function",
-                        "line": 895,
+                        "line": 892,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 910,
+                        "endLine": 902,
                         "kind": "function",
-                        "line": 903,
+                        "line": 897,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 921,
+                        "endLine": 912,
                         "kind": "function",
-                        "line": 911,
+                        "line": 905,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 928,
+                        "endLine": 923,
                         "kind": "function",
-                        "line": 922,
+                        "line": 913,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 932,
+                        "endLine": 930,
                         "kind": "function",
-                        "line": 930,
+                        "line": 924,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 939,
+                        "endLine": 934,
                         "kind": "function",
-                        "line": 935,
+                        "line": 932,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 947,
+                        "endLine": 941,
                         "kind": "function",
-                        "line": 940,
+                        "line": 937,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 955,
+                        "endLine": 949,
                         "kind": "function",
-                        "line": 948,
+                        "line": 942,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 960,
+                        "endLine": 957,
                         "kind": "function",
-                        "line": 956,
+                        "line": 950,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 968,
+                        "endLine": 962,
                         "kind": "function",
-                        "line": 966,
+                        "line": 958,
+                        "name": "connect"
+                    },
+                    {
+                        "column": 5,
+                        "endLine": 970,
+                        "kind": "function",
+                        "line": 968,
                         "name": "connect"
                     },
                     {
                         "column": 24,
-                        "endLine": 1121,
+                        "endLine": 1123,
                         "kind": "function",
-                        "line": 970,
+                        "line": 972,
                         "name": "signals"
                     },
                     {
                         "column": 13,
-                        "endLine": 992,
+                        "endLine": 994,
                         "kind": "function",
-                        "line": 990,
+                        "line": 992,
                         "name": "connect"
                     },
                     {
                         "column": 13,
-                        "endLine": 1039,
-                        "kind": "function",
-                        "line": 1032,
-                        "name": "connect"
-                    },
-                    {
-                        "column": 25,
-                        "endLine": 1038,
+                        "endLine": 1041,
                         "kind": "function",
                         "line": 1034,
-                        "name": "singleShot"
-                    },
-                    {
-                        "column": 13,
-                        "endLine": 1040,
-                        "kind": "function",
-                        "line": 1040,
-                        "name": "connect"
-                    },
-                    {
-                        "column": 5,
-                        "endLine": 1220,
-                        "kind": "function",
-                        "line": 1123,
-                        "name": "connect"
-                    },
-                    {
-                        "column": 5,
-                        "endLine": 1294,
-                        "kind": "function",
-                        "line": 1222,
-                        "name": "connect"
-                    },
-                    {
-                        "column": 5,
-                        "endLine": 1297,
-                        "kind": "function",
-                        "line": 1295,
-                        "name": "connect"
-                    },
-                    {
-                        "column": 5,
-                        "endLine": 1362,
-                        "kind": "function",
-                        "line": 1302,
-                        "name": "connect"
-                    },
-                    {
-                        "column": 13,
-                        "endLine": 1317,
-                        "kind": "function",
-                        "line": 1310,
                         "name": "connect"
                     },
                     {
                         "column": 25,
-                        "endLine": 1316,
+                        "endLine": 1040,
                         "kind": "function",
-                        "line": 1312,
+                        "line": 1036,
                         "name": "singleShot"
                     },
                     {
                         "column": 13,
-                        "endLine": 1318,
+                        "endLine": 1042,
                         "kind": "function",
-                        "line": 1318,
+                        "line": 1042,
+                        "name": "connect"
+                    },
+                    {
+                        "column": 5,
+                        "endLine": 1222,
+                        "kind": "function",
+                        "line": 1125,
+                        "name": "connect"
+                    },
+                    {
+                        "column": 5,
+                        "endLine": 1296,
+                        "kind": "function",
+                        "line": 1224,
+                        "name": "connect"
+                    },
+                    {
+                        "column": 5,
+                        "endLine": 1299,
+                        "kind": "function",
+                        "line": 1297,
+                        "name": "connect"
+                    },
+                    {
+                        "column": 5,
+                        "endLine": 1371,
+                        "kind": "function",
+                        "line": 1304,
+                        "name": "connect"
+                    },
+                    {
+                        "column": 13,
+                        "endLine": 1326,
+                        "kind": "function",
+                        "line": 1319,
+                        "name": "connect"
+                    },
+                    {
+                        "column": 25,
+                        "endLine": 1325,
+                        "kind": "function",
+                        "line": 1321,
+                        "name": "singleShot"
+                    },
+                    {
+                        "column": 13,
+                        "endLine": 1327,
+                        "kind": "function",
+                        "line": 1327,
                         "name": "connect"
                     },
                     {
                         "column": 9,
-                        "endLine": 1356,
+                        "endLine": 1365,
                         "kind": "function",
-                        "line": 1349,
+                        "line": 1358,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 1369,
+                        "endLine": 1378,
                         "kind": "function",
-                        "line": 1364,
+                        "line": 1373,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 1387,
+                        "endLine": 1396,
                         "kind": "function",
-                        "line": 1374,
+                        "line": 1383,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 1394,
+                        "endLine": 1403,
                         "kind": "function",
-                        "line": 1392,
+                        "line": 1401,
                         "name": "connect"
                     },
                     {
                         "column": 34,
-                        "endLine": 1399,
+                        "endLine": 1408,
                         "kind": "function",
-                        "line": 1395,
+                        "line": 1404,
                         "name": "internally"
-                    },
-                    {
-                        "column": 5,
-                        "endLine": 1424,
-                        "kind": "function",
-                        "line": 1412,
-                        "name": "connect"
                     },
                     {
                         "column": 5,
                         "endLine": 1433,
                         "kind": "function",
-                        "line": 1426,
+                        "line": 1421,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 1445,
+                        "endLine": 1442,
                         "kind": "function",
                         "line": 1435,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 1451,
+                        "endLine": 1454,
                         "kind": "function",
-                        "line": 1448,
+                        "line": 1444,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 1457,
+                        "endLine": 1460,
                         "kind": "function",
-                        "line": 1454,
+                        "line": 1457,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 1464,
+                        "endLine": 1466,
                         "kind": "function",
-                        "line": 1459,
+                        "line": 1463,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 1519,
+                        "endLine": 1473,
                         "kind": "function",
-                        "line": 1466,
+                        "line": 1468,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 1529,
+                        "endLine": 1528,
                         "kind": "function",
-                        "line": 1526,
+                        "line": 1475,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 1535,
+                        "endLine": 1538,
                         "kind": "function",
-                        "line": 1533,
+                        "line": 1535,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 1539,
+                        "endLine": 1544,
                         "kind": "function",
-                        "line": 1536,
+                        "line": 1542,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 1542,
+                        "endLine": 1548,
                         "kind": "function",
-                        "line": 1540,
+                        "line": 1545,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 1546,
+                        "endLine": 1551,
                         "kind": "function",
-                        "line": 1543,
+                        "line": 1549,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 1557,
+                        "endLine": 1555,
                         "kind": "function",
-                        "line": 1547,
+                        "line": 1552,
+                        "name": "connect"
+                    },
+                    {
+                        "column": 5,
+                        "endLine": 1566,
+                        "kind": "function",
+                        "line": 1556,
                         "name": "connect"
                     },
                     {
                         "column": 9,
-                        "endLine": 1553,
+                        "endLine": 1562,
                         "kind": "function",
-                        "line": 1548,
+                        "line": 1557,
                         "name": "Q_UNUSED"
                     },
                     {
                         "column": 5,
-                        "endLine": 1562,
+                        "endLine": 1571,
                         "kind": "function",
-                        "line": 1558,
+                        "line": 1567,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 1567,
+                        "endLine": 1576,
                         "kind": "function",
-                        "line": 1563,
+                        "line": 1572,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 1573,
+                        "endLine": 1582,
                         "kind": "function",
-                        "line": 1568,
+                        "line": 1577,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 1579,
-                        "kind": "function",
-                        "line": 1574,
-                        "name": "connect"
-                    },
-                    {
-                        "column": 5,
-                        "endLine": 1599,
+                        "endLine": 1588,
                         "kind": "function",
                         "line": 1583,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 1619,
+                        "endLine": 1608,
                         "kind": "function",
-                        "line": 1600,
+                        "line": 1592,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 1634,
+                        "endLine": 1640,
                         "kind": "function",
-                        "line": 1623,
+                        "line": 1609,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 1644,
+                        "endLine": 1660,
                         "kind": "function",
-                        "line": 1642,
+                        "line": 1641,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 1710,
+                        "endLine": 1675,
                         "kind": "function",
-                        "line": 1646,
+                        "line": 1664,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 1719,
+                        "endLine": 1685,
                         "kind": "function",
-                        "line": 1712,
+                        "line": 1683,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 1725,
+                        "endLine": 1751,
                         "kind": "function",
-                        "line": 1721,
+                        "line": 1687,
+                        "name": "connect"
+                    },
+                    {
+                        "column": 5,
+                        "endLine": 1760,
+                        "kind": "function",
+                        "line": 1753,
+                        "name": "connect"
+                    },
+                    {
+                        "column": 5,
+                        "endLine": 1766,
+                        "kind": "function",
+                        "line": 1762,
                         "name": "connect"
                     },
                     {
                         "column": 64,
-                        "endLine": 1760,
+                        "endLine": 1801,
                         "kind": "function",
-                        "line": 1754,
+                        "line": 1795,
                         "name": "gone"
                     },
                     {
                         "column": 17,
-                        "endLine": 1915,
+                        "endLine": 1956,
                         "kind": "function",
-                        "line": 1911,
+                        "line": 1952,
                         "name": "singleShot"
                     },
                     {
                         "column": 9,
-                        "endLine": 2069,
+                        "endLine": 2110,
                         "kind": "function",
-                        "line": 2042,
+                        "line": 2083,
                         "name": "connect"
                     },
                     {
                         "column": 36,
-                        "endLine": 2126,
+                        "endLine": 2167,
                         "kind": "function",
-                        "line": 2123,
+                        "line": 2164,
                         "name": "widget"
                     },
                     {
                         "column": 5,
-                        "endLine": 2249,
+                        "endLine": 2290,
                         "kind": "function",
-                        "line": 2237,
+                        "line": 2278,
                         "name": "connect"
                     },
                     {
                         "column": 17,
-                        "endLine": 2248,
+                        "endLine": 2289,
                         "kind": "function",
-                        "line": 2244,
+                        "line": 2285,
                         "name": "singleShot"
                     },
                     {
                         "column": 50,
-                        "endLine": 2291,
+                        "endLine": 2332,
                         "kind": "function",
-                        "line": 2283,
+                        "line": 2324,
                         "name": "resizing"
                     },
                     {
                         "column": 21,
-                        "endLine": 2341,
+                        "endLine": 2382,
                         "kind": "function",
-                        "line": 2337,
+                        "line": 2378,
                         "name": "singleShot"
                     },
                     {
                         "column": 12,
-                        "endLine": 2366,
+                        "endLine": 2407,
                         "kind": "function",
-                        "line": 2362,
+                        "line": 2403,
                         "name": "setTodos"
                     },
                     {
                         "column": 13,
-                        "endLine": 2518,
+                        "endLine": 2559,
                         "kind": "function",
-                        "line": 2512,
+                        "line": 2553,
                         "name": "singleShot"
                     },
                     {
                         "column": 5,
-                        "endLine": 2851,
+                        "endLine": 2892,
                         "kind": "function",
-                        "line": 2847,
+                        "line": 2888,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 2923,
+                        "endLine": 2964,
                         "kind": "function",
-                        "line": 2897,
+                        "line": 2938,
                         "name": "connect"
                     },
                     {
                         "column": 17,
-                        "endLine": 2922,
+                        "endLine": 2963,
                         "kind": "function",
-                        "line": 2917,
+                        "line": 2958,
                         "name": "singleShot"
                     },
                     {
                         "column": 9,
-                        "endLine": 2980,
+                        "endLine": 3021,
                         "kind": "function",
-                        "line": 2978,
+                        "line": 3019,
                         "name": "connect"
                     },
                     {
                         "column": 38,
-                        "endLine": 3163,
+                        "endLine": 3204,
                         "kind": "function",
-                        "line": 3159,
+                        "line": 3200,
                         "name": "gone"
                     },
                     {
                         "column": 13,
-                        "endLine": 3261,
+                        "endLine": 3302,
                         "kind": "function",
-                        "line": 3257,
+                        "line": 3298,
                         "name": "singleShot"
                     },
                     {
                         "column": 17,
-                        "endLine": 3297,
+                        "endLine": 3338,
                         "kind": "function",
-                        "line": 3292,
+                        "line": 3333,
                         "name": "singleShot"
                     },
                     {
                         "column": 47,
-                        "endLine": 3564,
+                        "endLine": 3605,
                         "kind": "function",
-                        "line": 3539,
+                        "line": 3580,
                         "name": "fetch"
                     },
                     {
                         "column": 66,
-                        "endLine": 3785,
+                        "endLine": 3826,
                         "kind": "function",
-                        "line": 3778,
+                        "line": 3819,
                         "name": "compactContext"
                     },
                     {
                         "column": 34,
-                        "endLine": 3972,
+                        "endLine": 4013,
                         "kind": "function",
-                        "line": 3965,
+                        "line": 4006,
                         "name": "click"
                     },
                     {
                         "column": 9,
-                        "endLine": 4000,
+                        "endLine": 4041,
                         "kind": "function",
-                        "line": 3994,
+                        "line": 4035,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 4030,
+                        "endLine": 4071,
                         "kind": "function",
-                        "line": 4025,
+                        "line": 4066,
                         "name": "connect"
                     },
                     {
                         "column": 9,
-                        "endLine": 4045,
+                        "endLine": 4086,
                         "kind": "function",
-                        "line": 4037,
+                        "line": 4078,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 4118,
+                        "endLine": 4159,
                         "kind": "function",
-                        "line": 4111,
+                        "line": 4152,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 4123,
+                        "endLine": 4164,
                         "kind": "function",
-                        "line": 4120,
+                        "line": 4161,
                         "name": "connect"
                     },
                     {
                         "column": 17,
-                        "endLine": 4153,
+                        "endLine": 4194,
                         "kind": "function",
-                        "line": 4138,
+                        "line": 4179,
                         "name": "singleShot"
                     },
                     {
                         "column": 5,
-                        "endLine": 4233,
-                        "kind": "function",
-                        "line": 4206,
-                        "name": "connect"
-                    },
-                    {
-                        "column": 5,
-                        "endLine": 4243,
-                        "kind": "function",
-                        "line": 4234,
-                        "name": "connect"
-                    },
-                    {
-                        "column": 5,
-                        "endLine": 4249,
+                        "endLine": 4274,
                         "kind": "function",
                         "line": 4247,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 4254,
+                        "endLine": 4284,
                         "kind": "function",
-                        "line": 4252,
+                        "line": 4275,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 4265,
+                        "endLine": 4290,
                         "kind": "function",
-                        "line": 4260,
+                        "line": 4288,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 4278,
+                        "endLine": 4295,
                         "kind": "function",
-                        "line": 4268,
+                        "line": 4293,
+                        "name": "connect"
+                    },
+                    {
+                        "column": 5,
+                        "endLine": 4306,
+                        "kind": "function",
+                        "line": 4301,
+                        "name": "connect"
+                    },
+                    {
+                        "column": 5,
+                        "endLine": 4319,
+                        "kind": "function",
+                        "line": 4309,
                         "name": "connect"
                     },
                     {
                         "column": 9,
-                        "endLine": 4810,
+                        "endLine": 4851,
                         "kind": "function",
-                        "line": 4779,
+                        "line": 4820,
                         "name": "connect"
                     },
                     {
                         "column": 21,
-                        "endLine": 4809,
+                        "endLine": 4850,
                         "kind": "function",
-                        "line": 4807,
+                        "line": 4848,
                         "name": "singleShot"
                     },
                     {
                         "column": 9,
-                        "endLine": 4819,
+                        "endLine": 4860,
                         "kind": "function",
-                        "line": 4811,
+                        "line": 4852,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 4893,
+                        "endLine": 4934,
                         "kind": "function",
-                        "line": 4870,
+                        "line": 4911,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 4906,
+                        "endLine": 4947,
                         "kind": "function",
-                        "line": 4894,
+                        "line": 4935,
                         "name": "connect"
                     },
                     {
                         "column": 9,
-                        "endLine": 4986,
+                        "endLine": 5027,
                         "kind": "function",
-                        "line": 4984,
+                        "line": 5025,
                         "name": "connect"
                     },
                     {
                         "column": 9,
-                        "endLine": 5001,
+                        "endLine": 5042,
                         "kind": "function",
-                        "line": 4999,
+                        "line": 5040,
                         "name": "connect"
                     },
                     {
                         "column": 9,
-                        "endLine": 5021,
+                        "endLine": 5062,
                         "kind": "function",
-                        "line": 5019,
+                        "line": 5060,
                         "name": "connect"
                     },
                     {
                         "column": 13,
-                        "endLine": 5037,
+                        "endLine": 5078,
                         "kind": "function",
-                        "line": 5035,
+                        "line": 5076,
                         "name": "connect"
                     },
                     {
                         "column": 18,
-                        "endLine": 5092,
+                        "endLine": 5133,
                         "kind": "function",
-                        "line": 5041,
+                        "line": 5082,
                         "name": "Selection"
                     },
                     {
                         "column": 13,
-                        "endLine": 5060,
+                        "endLine": 5101,
                         "kind": "function",
-                        "line": 5051,
+                        "line": 5092,
                         "name": "connect"
                     },
                     {
                         "column": 9,
-                        "endLine": 5073,
+                        "endLine": 5114,
                         "kind": "function",
-                        "line": 5069,
+                        "line": 5110,
                         "name": "connect"
                     },
                     {
                         "column": 9,
-                        "endLine": 5091,
+                        "endLine": 5132,
                         "kind": "function",
-                        "line": 5082,
+                        "line": 5123,
                         "name": "connect"
                     },
                     {
                         "column": 9,
-                        "endLine": 5124,
+                        "endLine": 5165,
                         "kind": "function",
-                        "line": 5108,
+                        "line": 5149,
                         "name": "connect"
                     },
                     {
                         "column": 9,
-                        "endLine": 5138,
+                        "endLine": 5179,
                         "kind": "function",
-                        "line": 5136,
+                        "line": 5177,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 5159,
+                        "endLine": 5200,
                         "kind": "function",
-                        "line": 5157,
+                        "line": 5198,
                         "name": "connect"
                     },
                     {
                         "column": 9,
-                        "endLine": 5219,
+                        "endLine": 5260,
                         "kind": "function",
-                        "line": 5217,
+                        "line": 5258,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 5393,
+                        "endLine": 5436,
                         "kind": "function",
-                        "line": 5386,
+                        "line": 5429,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 5396,
+                        "endLine": 5439,
                         "kind": "function",
-                        "line": 5394,
+                        "line": 5437,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 5495,
+                        "endLine": 5538,
                         "kind": "function",
-                        "line": 5488,
+                        "line": 5531,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 5636,
+                        "endLine": 5679,
                         "kind": "function",
-                        "line": 5630,
+                        "line": 5673,
                         "name": "connect"
                     },
                     {
                         "column": 13,
-                        "endLine": 5657,
+                        "endLine": 5700,
                         "kind": "function",
-                        "line": 5649,
+                        "line": 5692,
                         "name": "connect"
                     },
                     {
                         "column": 9,
-                        "endLine": 5920,
+                        "endLine": 5963,
                         "kind": "function",
-                        "line": 5907,
+                        "line": 5950,
                         "name": "connect"
                     },
                     {
                         "column": 16,
-                        "endLine": 5918,
+                        "endLine": 5961,
                         "kind": "function",
-                        "line": 5913,
+                        "line": 5956,
                         "name": "setFixedHeight"
                     },
                     {
                         "column": 8,
-                        "endLine": 6017,
+                        "endLine": 6060,
                         "kind": "function",
-                        "line": 6013,
+                        "line": 6056,
                         "name": "restoreCurrentTurn"
                     },
                     {
                         "column": 50,
-                        "endLine": 6067,
+                        "endLine": 6110,
                         "kind": "function",
-                        "line": 6062,
+                        "line": 6105,
                         "name": "toolCallId"
                     },
                     {
                         "column": 26,
-                        "endLine": 6123,
+                        "endLine": 6166,
                         "kind": "function",
-                        "line": 6119,
+                        "line": 6162,
                         "name": "setFixedHeight"
                     },
                     {
                         "column": 43,
-                        "endLine": 6159,
+                        "endLine": 6202,
                         "kind": "function",
-                        "line": 6151,
+                        "line": 6194,
                         "name": "aliases"
                     },
                     {
                         "column": 5,
-                        "endLine": 6233,
+                        "endLine": 6276,
                         "kind": "function",
-                        "line": 6226,
+                        "line": 6269,
                         "name": "connect"
                     },
                     {
                         "column": 17,
-                        "endLine": 6232,
+                        "endLine": 6275,
                         "kind": "function",
-                        "line": 6228,
+                        "line": 6271,
                         "name": "singleShot"
                     },
                     {
                         "column": 61,
-                        "endLine": 6532,
+                        "endLine": 6575,
                         "kind": "function",
-                        "line": 6449,
+                        "line": 6492,
                         "name": "sight"
                     },
                     {
                         "column": 13,
-                        "endLine": 6470,
+                        "endLine": 6513,
                         "kind": "function",
-                        "line": 6468,
+                        "line": 6511,
                         "name": "connect"
                     },
                     {
                         "column": 69,
-                        "endLine": 6634,
+                        "endLine": 6677,
                         "kind": "function",
-                        "line": 6629,
+                        "line": 6672,
                         "name": "them"
                     },
                     {
                         "column": 13,
-                        "endLine": 6667,
+                        "endLine": 6710,
                         "kind": "function",
-                        "line": 6661,
+                        "line": 6704,
                         "name": "singleShot"
                     },
                     {
                         "column": 43,
-                        "endLine": 6741,
+                        "endLine": 6784,
                         "kind": "function",
-                        "line": 6733,
+                        "line": 6776,
                         "name": "directly"
                     },
                     {
                         "column": 13,
-                        "endLine": 6820,
+                        "endLine": 6863,
                         "kind": "function",
-                        "line": 6818,
+                        "line": 6861,
                         "name": "connect"
                     },
                     {
                         "column": 9,
-                        "endLine": 6837,
+                        "endLine": 6888,
                         "kind": "function",
-                        "line": 6829,
+                        "line": 6872,
                         "name": "connect"
                     },
                     {
                         "column": 16,
-                        "endLine": 6965,
+                        "endLine": 7024,
                         "kind": "function",
-                        "line": 6962,
+                        "line": 7021,
                         "name": "edits"
                     }
                 ]
@@ -11368,7 +11463,7 @@
             "type": "file"
         },
         {
-            "complexity": 209,
+            "complexity": 213,
             "content": "",
             "dependencies": [
                 "1645f1cfb8ea7ab40ae71d55ad76b78131844e4c903316eba92cd6276f5dc240_file",
@@ -11384,8 +11479,8 @@
             ],
             "id": "951f336fe5b8b007e4d5305b088ddceee66f95dad8dad9cf851f4b104a85b1bf_file",
             "isReadOnly": false,
-            "lastModified": 1794932959,
-            "linesOfCode": 3479,
+            "lastModified": 1794989098,
+            "linesOfCode": 3578,
             "metadata": {
                 "language": "cpp",
                 "symbols": [
@@ -11405,380 +11500,387 @@
                     },
                     {
                         "column": 5,
-                        "endLine": 148,
+                        "endLine": 151,
                         "kind": "function",
                         "line": 144,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 161,
+                        "endLine": 164,
                         "kind": "function",
-                        "line": 154,
+                        "line": 157,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 165,
+                        "endLine": 168,
                         "kind": "function",
-                        "line": 162,
+                        "line": 165,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 170,
+                        "endLine": 173,
                         "kind": "function",
-                        "line": 166,
+                        "line": 169,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 175,
+                        "endLine": 178,
                         "kind": "function",
-                        "line": 171,
+                        "line": 174,
                         "name": "connect"
                     },
                     {
                         "column": 34,
-                        "endLine": 191,
+                        "endLine": 194,
                         "kind": "function",
-                        "line": 179,
+                        "line": 182,
                         "name": "answerQuestion"
                     },
                     {
                         "column": 5,
-                        "endLine": 196,
+                        "endLine": 199,
                         "kind": "function",
-                        "line": 192,
+                        "line": 195,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 214,
+                        "endLine": 217,
                         "kind": "function",
-                        "line": 197,
-                        "name": "connect"
-                    },
-                    {
-                        "column": 5,
-                        "endLine": 220,
-                        "kind": "function",
-                        "line": 215,
+                        "line": 200,
                         "name": "connect"
                     },
                     {
                         "column": 5,
                         "endLine": 223,
                         "kind": "function",
-                        "line": 221,
+                        "line": 218,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 232,
+                        "endLine": 226,
                         "kind": "function",
                         "line": 224,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 245,
+                        "endLine": 235,
                         "kind": "function",
-                        "line": 233,
+                        "line": 227,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 253,
+                        "endLine": 256,
                         "kind": "function",
-                        "line": 248,
-                        "name": "connect"
-                    },
-                    {
-                        "column": 5,
-                        "endLine": 257,
-                        "kind": "function",
-                        "line": 254,
-                        "name": "connect"
-                    },
-                    {
-                        "column": 5,
-                        "endLine": 261,
-                        "kind": "function",
-                        "line": 259,
+                        "line": 236,
                         "name": "connect"
                     },
                     {
                         "column": 5,
                         "endLine": 264,
                         "kind": "function",
-                        "line": 262,
+                        "line": 259,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 267,
+                        "endLine": 268,
                         "kind": "function",
                         "line": 265,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 273,
+                        "endLine": 272,
                         "kind": "function",
                         "line": 270,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 279,
+                        "endLine": 275,
                         "kind": "function",
-                        "line": 274,
+                        "line": 273,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 311,
+                        "endLine": 278,
                         "kind": "function",
-                        "line": 305,
+                        "line": 276,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 320,
+                        "endLine": 284,
                         "kind": "function",
-                        "line": 312,
+                        "line": 281,
+                        "name": "connect"
+                    },
+                    {
+                        "column": 5,
+                        "endLine": 290,
+                        "kind": "function",
+                        "line": 285,
+                        "name": "connect"
+                    },
+                    {
+                        "column": 5,
+                        "endLine": 322,
+                        "kind": "function",
+                        "line": 316,
+                        "name": "connect"
+                    },
+                    {
+                        "column": 5,
+                        "endLine": 331,
+                        "kind": "function",
+                        "line": 323,
                         "name": "connect"
                     },
                     {
                         "column": 19,
-                        "endLine": 411,
+                        "endLine": 422,
                         "kind": "function",
-                        "line": 402,
+                        "line": 413,
                         "name": "end"
                     },
                     {
                         "column": 26,
-                        "endLine": 457,
+                        "endLine": 468,
                         "kind": "function",
-                        "line": 454,
+                        "line": 465,
                         "name": "ends"
                     },
                     {
                         "column": 53,
-                        "endLine": 957,
+                        "endLine": 968,
                         "kind": "function",
-                        "line": 949,
+                        "line": 960,
                         "name": "rules"
                     },
                     {
                         "column": 12,
-                        "endLine": 1067,
+                        "endLine": 1078,
                         "kind": "function",
-                        "line": 1064,
+                        "line": 1075,
                         "name": "resetConversation"
                     },
                     {
                         "column": 8,
-                        "endLine": 1116,
+                        "endLine": 1130,
                         "kind": "function",
-                        "line": 1106,
+                        "line": 1120,
                         "name": "appendCancelledToolResults"
                     },
                     {
                         "column": 11,
-                        "endLine": 1433,
+                        "endLine": 1448,
                         "kind": "function",
-                        "line": 1431,
+                        "line": 1446,
                         "name": "setTodoStore"
                     },
                     {
                         "column": 30,
-                        "endLine": 1837,
+                        "endLine": 1854,
                         "kind": "function",
-                        "line": 1832,
+                        "line": 1849,
                         "name": "overflow"
                     },
                     {
                         "column": 17,
-                        "endLine": 2115,
+                        "endLine": 2141,
                         "kind": "function",
-                        "line": 2111,
+                        "line": 2137,
                         "name": "singleShot"
                     },
                     {
                         "column": 55,
-                        "endLine": 2129,
+                        "endLine": 2155,
                         "kind": "function",
-                        "line": 2125,
+                        "line": 2151,
                         "name": "call"
                     },
                     {
                         "column": 21,
-                        "endLine": 2594,
+                        "endLine": 2625,
                         "kind": "function",
-                        "line": 2588,
+                        "line": 2619,
                         "name": "connect"
                     },
                     {
                         "column": 17,
-                        "endLine": 2639,
+                        "endLine": 2673,
                         "kind": "function",
-                        "line": 2613,
+                        "line": 2644,
                         "name": "connect"
                     },
                     {
                         "column": 13,
-                        "endLine": 2670,
+                        "endLine": 2707,
                         "kind": "function",
-                        "line": 2645,
+                        "line": 2679,
                         "name": "connect"
                     },
                     {
                         "column": 44,
-                        "endLine": 2695,
+                        "endLine": 2732,
                         "kind": "function",
-                        "line": 2685,
+                        "line": 2722,
                         "name": "connection"
                     },
                     {
                         "column": 32,
-                        "endLine": 2713,
+                        "endLine": 2750,
                         "kind": "function",
-                        "line": 2702,
+                        "line": 2739,
                         "name": "connect"
                     },
                     {
                         "column": 40,
-                        "endLine": 2731,
+                        "endLine": 2768,
                         "kind": "function",
-                        "line": 2725,
+                        "line": 2762,
                         "name": "connect"
                     },
                     {
                         "column": 13,
-                        "endLine": 2744,
+                        "endLine": 2781,
                         "kind": "function",
-                        "line": 2733,
+                        "line": 2770,
                         "name": "connect"
                     },
                     {
                         "column": 25,
-                        "endLine": 2836,
+                        "endLine": 2893,
                         "kind": "function",
-                        "line": 2831,
+                        "line": 2888,
                         "name": "resolvePermission"
                     },
                     {
                         "column": 13,
-                        "endLine": 2873,
+                        "endLine": 2948,
                         "kind": "function",
-                        "line": 2856,
+                        "line": 2928,
                         "name": "connect"
                     },
                     {
-                        "column": 54,
-                        "endLine": 2978,
+                        "column": 37,
+                        "endLine": 3048,
                         "kind": "function",
-                        "line": 2972,
+                        "line": 3040,
+                        "name": "m_activeSubtasks"
+                    },
+                    {
+                        "column": 54,
+                        "endLine": 3063,
+                        "kind": "function",
+                        "line": 3057,
                         "name": "unlimited"
                     },
                     {
                         "column": 5,
-                        "endLine": 3026,
+                        "endLine": 3111,
                         "kind": "function",
-                        "line": 3018,
+                        "line": 3103,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 3030,
+                        "endLine": 3115,
                         "kind": "function",
-                        "line": 3027,
+                        "line": 3112,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 3034,
+                        "endLine": 3119,
                         "kind": "function",
-                        "line": 3031,
+                        "line": 3116,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 3042,
+                        "endLine": 3127,
                         "kind": "function",
-                        "line": 3037,
+                        "line": 3122,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 3048,
+                        "endLine": 3133,
                         "kind": "function",
-                        "line": 3043,
+                        "line": 3128,
                         "name": "connect"
                     },
                     {
                         "column": 18,
-                        "endLine": 3055,
+                        "endLine": 3140,
                         "kind": "function",
-                        "line": 3049,
+                        "line": 3134,
                         "name": "output"
                     },
                     {
                         "column": 5,
-                        "endLine": 3063,
+                        "endLine": 3148,
                         "kind": "function",
-                        "line": 3059,
+                        "line": 3144,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 3069,
+                        "endLine": 3154,
                         "kind": "function",
-                        "line": 3064,
+                        "line": 3149,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 3075,
+                        "endLine": 3160,
                         "kind": "function",
-                        "line": 3070,
+                        "line": 3155,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 3078,
+                        "endLine": 3163,
                         "kind": "function",
-                        "line": 3076,
+                        "line": 3161,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 3086,
+                        "endLine": 3171,
                         "kind": "function",
-                        "line": 3082,
+                        "line": 3167,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 3091,
+                        "endLine": 3176,
                         "kind": "function",
-                        "line": 3087,
+                        "line": 3172,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 3098,
+                        "endLine": 3183,
                         "kind": "function",
-                        "line": 3092,
+                        "line": 3177,
                         "name": "connect"
                     },
                     {
                         "column": 56,
-                        "endLine": 3110,
+                        "endLine": 3195,
                         "kind": "function",
-                        "line": 3105,
+                        "line": 3190,
                         "name": "that"
                     }
                 ]
@@ -11880,7 +11982,7 @@
             "type": "file"
         },
         {
-            "complexity": 19,
+            "complexity": 21,
             "content": "",
             "dependencies": [
                 "3acd38cdc9cdf0b2e88798bb914a05f5ffc96fa02d9cb11c6bfc121f0b6ba255_file",
@@ -11892,8 +11994,8 @@
             ],
             "id": "9d4e51d06f2a608a09c9436a1dbc98cf1bb41d1114408509b152f8bcec74a2df_file",
             "isReadOnly": false,
-            "lastModified": 1794932777,
-            "linesOfCode": 329,
+            "lastModified": 1794989626,
+            "linesOfCode": 354,
             "metadata": {
                 "language": "cpp",
                 "symbols": [
@@ -13409,14 +13511,14 @@
             ],
             "id": "ad00fced02373c97d40d653155a44911a88c4a9a5089fb451f7494b27b690dc2_file",
             "isReadOnly": false,
-            "lastModified": 1794932826,
-            "linesOfCode": 229,
+            "lastModified": 1794989559,
+            "linesOfCode": 233,
             "metadata": {
                 "language": "cpp",
                 "symbols": [
                     {
                         "column": 7,
-                        "endLine": 226,
+                        "endLine": 230,
                         "kind": "class",
                         "line": 11,
                         "name": "TestWebSearch"
@@ -13531,14 +13633,14 @@
             ],
             "id": "afd569f4ac6fd8e9d861f07086db352d28c265c0aa8594afffb275aea585f5ac_file",
             "isReadOnly": false,
-            "lastModified": 1794824221,
-            "linesOfCode": 84,
+            "lastModified": 1794988036,
+            "linesOfCode": 88,
             "metadata": {
                 "language": "header",
                 "symbols": [
                     {
                         "column": 7,
-                        "endLine": 82,
+                        "endLine": 86,
                         "kind": "class",
                         "line": 17,
                         "name": "SessionStore"
@@ -13746,35 +13848,35 @@
             ],
             "id": "b5447f482b1b013eca40a5e915499a1cbe3da2e2fae11d9399fec7439d5643fe_file",
             "isReadOnly": false,
-            "lastModified": 1794754609,
-            "linesOfCode": 158,
+            "lastModified": 1794988886,
+            "linesOfCode": 162,
             "metadata": {
                 "language": "header",
                 "symbols": [
                     {
                         "column": 7,
-                        "endLine": 158,
+                        "endLine": 162,
                         "kind": "class",
                         "line": 16,
                         "name": "QNetworkAccessManager"
                     },
                     {
                         "column": 7,
-                        "endLine": 158,
+                        "endLine": 162,
                         "kind": "class",
                         "line": 17,
                         "name": "QNetworkReply"
                     },
                     {
                         "column": 7,
-                        "endLine": 158,
+                        "endLine": 162,
                         "kind": "class",
                         "line": 18,
                         "name": "QTimer"
                     },
                     {
                         "column": 7,
-                        "endLine": 156,
+                        "endLine": 160,
                         "kind": "class",
                         "line": 46,
                         "name": "WebSearch"
@@ -13843,7 +13945,7 @@
             "type": "file"
         },
         {
-            "complexity": 103,
+            "complexity": 109,
             "content": "",
             "dependencies": [
                 "867030011f291bf5337e072cec8810222224d9c8cadd623f461a7316978a6192_file",
@@ -13855,8 +13957,8 @@
             ],
             "id": "b7535410c5b4a741bdfbb5c117f7e37c0bdc06512e9a88efeaa6becca1086a2e_file",
             "isReadOnly": false,
-            "lastModified": 1794824849,
-            "linesOfCode": 1234,
+            "lastModified": 1794990918,
+            "linesOfCode": 1299,
             "metadata": {
                 "language": "cpp",
                 "symbols": [
@@ -13869,16 +13971,16 @@
                     },
                     {
                         "column": 14,
-                        "endLine": 604,
+                        "endLine": 637,
                         "kind": "function",
-                        "line": 587,
+                        "line": 620,
                         "name": "connect"
                     },
                     {
                         "column": 12,
-                        "endLine": 603,
+                        "endLine": 636,
                         "kind": "function",
-                        "line": 598,
+                        "line": 631,
                         "name": "finished"
                     }
                 ]
@@ -13888,7 +13990,7 @@
             "type": "file"
         },
         {
-            "complexity": 98,
+            "complexity": 99,
             "content": "",
             "dependencies": [
             ],
@@ -13955,8 +14057,8 @@
             ],
             "id": "bbd095d72b67445b2ed22edb8e7363b61778f8386f95c01d4b72df6a05c5fad2_file",
             "isReadOnly": false,
-            "lastModified": 1794843690,
-            "linesOfCode": 628,
+            "lastModified": 1794987703,
+            "linesOfCode": 632,
             "metadata": {
                 "language": "header",
                 "symbols": [
@@ -14360,7 +14462,7 @@
             "type": "file"
         },
         {
-            "complexity": 161,
+            "complexity": 162,
             "content": "",
             "dependencies": [
                 "2d9fb5abb592ca861720af2c4aa78a03f6ed86a80abe56fba704e00d0923c4ba_file",
@@ -14385,37 +14487,37 @@
             ],
             "id": "c76f67c57b6e6d36ea2aa39f9701eba16981720f0a1fc07b65da2ef12df41505_file",
             "isReadOnly": false,
-            "lastModified": 1794932959,
-            "linesOfCode": 536,
+            "lastModified": 1794990836,
+            "linesOfCode": 540,
             "metadata": {
                 "language": "header",
                 "symbols": [
                     {
                         "column": 7,
-                        "endLine": 534,
+                        "endLine": 538,
                         "kind": "class",
                         "line": 30,
                         "name": "ProjectGraph"
                     },
                     {
                         "column": 7,
-                        "endLine": 536,
+                        "endLine": 540,
                         "kind": "class",
                         "line": 32,
                         "name": "QTimer"
                     },
                     {
                         "column": 7,
-                        "endLine": 534,
+                        "endLine": 538,
                         "kind": "class",
                         "line": 46,
                         "name": "AcpClient"
                     },
                     {
                         "column": 16,
-                        "endLine": 224,
+                        "endLine": 225,
                         "kind": "class",
-                        "line": 219,
+                        "line": 220,
                         "name": "State"
                     }
                 ]
@@ -14436,7 +14538,7 @@
             ],
             "id": "c80edd5c61113217b454adde77b3dbbe44b7742c1466a676ce4c3c6d77f97a38_file",
             "isReadOnly": false,
-            "lastModified": 1794640643,
+            "lastModified": 1794987725,
             "linesOfCode": 384,
             "metadata": {
                 "language": "cpp",
@@ -14596,7 +14698,7 @@
             "type": "file"
         },
         {
-            "complexity": 115,
+            "complexity": 119,
             "content": "",
             "dependencies": [
                 "cccb540759c3d8883d50e6457efa9b6f00cba2ad0a45dfae5da29702b954b465_file"
@@ -14606,30 +14708,30 @@
             ],
             "id": "cbd6f1b6223b56bb7d4b49878321c70650daf8c5e9e5aeff571f6a035a206af5_file",
             "isReadOnly": false,
-            "lastModified": 1794933341,
-            "linesOfCode": 1041,
+            "lastModified": 1794989532,
+            "linesOfCode": 1072,
             "metadata": {
                 "language": "cpp",
                 "symbols": [
                     {
                         "column": 7,
-                        "endLine": 1038,
+                        "endLine": 1069,
                         "kind": "class",
                         "line": 113,
                         "name": "TestSandbox"
                     },
                     {
                         "column": 47,
-                        "endLine": 400,
+                        "endLine": 431,
                         "kind": "class",
-                        "line": 371,
+                        "line": 402,
                         "name": "used"
                     },
                     {
                         "column": 72,
-                        "endLine": 400,
+                        "endLine": 431,
                         "kind": "class",
-                        "line": 376,
+                        "line": 407,
                         "name": "still"
                     },
                     {
@@ -14641,16 +14743,16 @@
                     },
                     {
                         "column": 5,
-                        "endLine": 616,
+                        "endLine": 647,
                         "kind": "function",
-                        "line": 613,
+                        "line": 644,
                         "name": "defined"
                     },
                     {
                         "column": 7,
-                        "endLine": 625,
+                        "endLine": 656,
                         "kind": "function",
-                        "line": 622,
+                        "line": 653,
                         "name": "defined"
                     }
                 ]
@@ -14660,7 +14762,7 @@
             "type": "file"
         },
         {
-            "complexity": 29,
+            "complexity": 30,
             "content": "",
             "dependencies": [
                 "bbd095d72b67445b2ed22edb8e7363b61778f8386f95c01d4b72df6a05c5fad2_file"
@@ -14680,8 +14782,8 @@
             ],
             "id": "cccb540759c3d8883d50e6457efa9b6f00cba2ad0a45dfae5da29702b954b465_file",
             "isReadOnly": false,
-            "lastModified": 1794932959,
-            "linesOfCode": 113,
+            "lastModified": 1794987446,
+            "linesOfCode": 118,
             "metadata": {
                 "language": "header",
                 "symbols": [
@@ -14694,7 +14796,7 @@
                     },
                     {
                         "column": 7,
-                        "endLine": 111,
+                        "endLine": 116,
                         "kind": "class",
                         "line": 36,
                         "name": "Sandbox"
@@ -14846,8 +14948,8 @@
             ],
             "id": "d0d8d3690b8ba57ea2d24830ca484fa9290db641e34709f04efb243eb1b1e633_file",
             "isReadOnly": false,
-            "lastModified": 1794826275,
-            "linesOfCode": 114,
+            "lastModified": 1794988174,
+            "linesOfCode": 118,
             "metadata": {
                 "language": "header",
                 "symbols": [
@@ -14867,7 +14969,7 @@
                     },
                     {
                         "column": 7,
-                        "endLine": 107,
+                        "endLine": 111,
                         "kind": "class",
                         "line": 53,
                         "name": "DiskDocumentBridge"
@@ -15113,7 +15215,7 @@
             "type": "file"
         },
         {
-            "complexity": 22,
+            "complexity": 25,
             "content": "",
             "dependencies": [
                 "e47702b24a58c6929b54ff73ecc409c0977d8819abdd9040c75606108c23bd16_file"
@@ -15123,14 +15225,14 @@
             ],
             "id": "d8376cb3e5356cb78e884002acda9f869c83b9309e67f0bc29f5b4eee772afd4_file",
             "isReadOnly": false,
-            "lastModified": 1794824546,
-            "linesOfCode": 381,
+            "lastModified": 1794990214,
+            "linesOfCode": 410,
             "metadata": {
                 "language": "cpp",
                 "symbols": [
                     {
                         "column": 7,
-                        "endLine": 378,
+                        "endLine": 407,
                         "kind": "class",
                         "line": 14,
                         "name": "TestCheckpoints"
@@ -15142,7 +15244,7 @@
             "type": "file"
         },
         {
-            "complexity": 20,
+            "complexity": 21,
             "content": "",
             "dependencies": [
                 "bbd095d72b67445b2ed22edb8e7363b61778f8386f95c01d4b72df6a05c5fad2_file"
@@ -15152,14 +15254,14 @@
             ],
             "id": "da683c67408032b94c4799608032ece315cb3a91bb6dbc9298e0eb0d38675a59_file",
             "isReadOnly": false,
-            "lastModified": 1793120448,
-            "linesOfCode": 349,
+            "lastModified": 1794989592,
+            "linesOfCode": 363,
             "metadata": {
                 "language": "cpp",
                 "symbols": [
                     {
                         "column": 7,
-                        "endLine": 346,
+                        "endLine": 360,
                         "kind": "class",
                         "line": 11,
                         "name": "TestProviders"
@@ -15310,8 +15412,8 @@
             ],
             "id": "df0b9ce5fc2acb9a0890c5d00aee79f3f46470ecaabb7e64f5fdb77ab1562cc5_file",
             "isReadOnly": false,
-            "lastModified": 1794968705,
-            "linesOfCode": 1504,
+            "lastModified": 1794988464,
+            "linesOfCode": 1515,
             "metadata": {
                 "language": "cpp",
                 "symbols": [
@@ -15352,37 +15454,37 @@
                     },
                     {
                         "column": 60,
-                        "endLine": 734,
+                        "endLine": 745,
                         "kind": "function",
-                        "line": 729,
+                        "line": 740,
                         "name": "hasDiffBody"
                     },
                     {
                         "column": 13,
-                        "endLine": 778,
+                        "endLine": 789,
                         "kind": "function",
-                        "line": 774,
+                        "line": 785,
                         "name": "singleShot"
                     },
                     {
                         "column": 11,
-                        "endLine": 977,
+                        "endLine": 988,
                         "kind": "function",
-                        "line": 970,
+                        "line": 981,
                         "name": "output"
                     },
                     {
                         "column": 21,
-                        "endLine": 1180,
+                        "endLine": 1191,
                         "kind": "function",
-                        "line": 1165,
+                        "line": 1176,
                         "name": "names"
                     },
                     {
                         "column": 8,
-                        "endLine": 1371,
+                        "endLine": 1382,
                         "kind": "function",
-                        "line": 1365,
+                        "line": 1376,
                         "name": "setDefaultStyleSheet"
                     }
                 ]
@@ -15678,7 +15780,7 @@
             "type": "file"
         },
         {
-            "complexity": 95,
+            "complexity": 98,
             "content": "",
             "dependencies": [
                 "8bfa9b968ffe557de13033ecad7ca6ce476abb46845186da3a67982d761d03e5_file"
@@ -15688,16 +15790,16 @@
             ],
             "id": "e549dbb3863a02b82b07c2670a1919010d958284dbde3c0fb9aef495bdd57d5f_file",
             "isReadOnly": false,
-            "lastModified": 1794968830,
-            "linesOfCode": 1883,
+            "lastModified": 1794991033,
+            "linesOfCode": 1919,
             "metadata": {
                 "language": "cpp",
                 "symbols": [
                     {
                         "column": 22,
-                        "endLine": 1703,
+                        "endLine": 1739,
                         "kind": "class",
-                        "line": 1696,
+                        "line": 1732,
                         "name": "definitions"
                     },
                     {
@@ -15709,16 +15811,16 @@
                     },
                     {
                         "column": 10,
-                        "endLine": 1334,
+                        "endLine": 1365,
                         "kind": "function",
-                        "line": 1329,
+                        "line": 1360,
                         "name": "sort"
                     },
                     {
                         "column": 10,
-                        "endLine": 1337,
+                        "endLine": 1368,
                         "kind": "function",
-                        "line": 1335,
+                        "line": 1366,
                         "name": "sort"
                     }
                 ]
@@ -15855,7 +15957,7 @@
             "type": "file"
         },
         {
-            "complexity": 0,
+            "complexity": 1,
             "content": "",
             "dependencies": [
                 "9346291866eb279d7236287137758866fc706e6636cf82ce16af56419c77f556_file",
@@ -15866,11 +15968,18 @@
             ],
             "id": "f02ba075434e62645e0887f02a673a29467d6184dec62f6984e7f0bfde6b56eb_file",
             "isReadOnly": false,
-            "lastModified": 1794754609,
-            "linesOfCode": 152,
+            "lastModified": 1794987565,
+            "linesOfCode": 167,
             "metadata": {
                 "language": "cpp",
                 "symbols": [
+                    {
+                        "column": 20,
+                        "endLine": 128,
+                        "kind": "function",
+                        "line": 118,
+                        "name": "command"
+                    }
                 ]
             },
             "name": "permissions.cpp",
@@ -15878,7 +15987,7 @@
             "type": "file"
         },
         {
-            "complexity": 11,
+            "complexity": 12,
             "content": "",
             "dependencies": [
             ],
@@ -15891,21 +16000,21 @@
             ],
             "id": "f054c93aad268d3c89bc7bdb4bc22a65247456cbc700ed3a565ce080d8391b5a_file",
             "isReadOnly": false,
-            "lastModified": 1794640643,
-            "linesOfCode": 78,
+            "lastModified": 1794988243,
+            "linesOfCode": 79,
             "metadata": {
                 "language": "header",
                 "symbols": [
                     {
                         "column": 7,
-                        "endLine": 76,
+                        "endLine": 77,
                         "kind": "class",
                         "line": 19,
                         "name": "MovingCursor"
                     },
                     {
                         "column": 7,
-                        "endLine": 76,
+                        "endLine": 77,
                         "kind": "class",
                         "line": 38,
                         "name": "EditRangeTracker"
