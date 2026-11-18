@@ -1,3 +1,11 @@
+kateai (0.5.1-1) unstable; urgency=medium
+
+  * Release 0.5.1: make the sandbox runtime test portable to Fedora aarch64
+    hosts that cannot create the network or cgroup namespaces required by the
+    Strict/Read-only profiles. No user-facing behavior changes.
+
+ -- ObiWindu <Obi.wandu@proton.me>  Wed, 18 Nov 2026 00:00:00 +0000
+
 kateai (0.5.0-1) unstable; urgency=medium
 
   * Release 0.5.0: hardened ACP agent launch and protocol handling, stricter

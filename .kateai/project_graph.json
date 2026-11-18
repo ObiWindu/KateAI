@@ -14776,7 +14776,7 @@
             "type": "file"
         },
         {
-            "complexity": 119,
+            "complexity": 122,
             "content": "",
             "dependencies": [
                 "cccb540759c3d8883d50e6457efa9b6f00cba2ad0a45dfae5da29702b954b465_file"
@@ -14786,51 +14786,44 @@
             ],
             "id": "cbd6f1b6223b56bb7d4b49878321c70650daf8c5e9e5aeff571f6a035a206af5_file",
             "isReadOnly": false,
-            "lastModified": 1794989532,
-            "linesOfCode": 1072,
+            "lastModified": 1795017725,
+            "linesOfCode": 1096,
             "metadata": {
                 "language": "cpp",
                 "symbols": [
                     {
                         "column": 7,
-                        "endLine": 1069,
+                        "endLine": 1093,
                         "kind": "class",
-                        "line": 113,
+                        "line": 136,
                         "name": "TestSandbox"
                     },
                     {
                         "column": 47,
-                        "endLine": 431,
+                        "endLine": 454,
                         "kind": "class",
-                        "line": 402,
+                        "line": 425,
                         "name": "used"
                     },
                     {
                         "column": 72,
-                        "endLine": 431,
+                        "endLine": 454,
                         "kind": "class",
-                        "line": 407,
+                        "line": 430,
                         "name": "still"
                     },
                     {
                         "column": 5,
-                        "endLine": 78,
+                        "endLine": 670,
                         "kind": "function",
-                        "line": 59,
-                        "name": "defined"
-                    },
-                    {
-                        "column": 5,
-                        "endLine": 647,
-                        "kind": "function",
-                        "line": 644,
+                        "line": 667,
                         "name": "defined"
                     },
                     {
                         "column": 7,
-                        "endLine": 656,
+                        "endLine": 680,
                         "kind": "function",
-                        "line": 653,
+                        "line": 677,
                         "name": "defined"
                     }
                 ]

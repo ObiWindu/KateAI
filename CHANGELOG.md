@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.1 — 2026-11-18
+
+- Fixed `test_sandbox` on Fedora aarch64: the bubblewrap runtime probe now
+  exercises the actual wrapper for each sandbox profile, so hosts that cannot
+  create the network or cgroup namespace required by Strict/Read-only skip
+  those runtime assertions instead of failing. The probe also no longer
+  assumes a particular host shell path.
+- No user-facing behavior changes; the 0.5.0 features and on-disk formats are
+  unchanged.
+
 ## 0.5.0 — 2026-11-18
 
 - Hardened ACP agent installation and launch: raw-binary distributions,
