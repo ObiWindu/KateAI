@@ -8,6 +8,9 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QTemporaryDir>
 #include <QTest>
 
@@ -96,13 +99,18 @@ private Q_SLOTS:
         QCOMPARE(file->complexity, 1);
     }
 
-    void testBinaryAndLargeFilesSkipped()
+    void testBinaryFilesAreSkippedAndLargeFilesAreIndexed()
     {
         QTemporaryDir dir;
         QVERIFY(dir.isValid());
-        // Over the 64 KB cap.
-        const QByteArray big(70 * 1024, 'x');
-        writeFile(dir.path() + u"/big.txt"_s, big);
+        // A file well over the old 64 KB cap, with real definitions in it.
+        constexpr int kLines = 4000;
+        QByteArray big;
+        for (int i = 0; i < kLines; ++i) {
+            big += "int function_" + QByteArray::number(i) + "() { return " + QByteArray::number(i) + "; }\n";
+        }
+        QVERIFY(big.size() > 64 * 1024);
+        writeFile(dir.path() + u"/big.cpp"_s, big);
         // Known binary extension.
         writeFile(dir.path() + u"/pic.png"_s, QByteArrayLiteral("\x89PNG\r\n\x1a\n") + QByteArray(32, '\0'));
         // Text extension, but NUL bytes in the head.
@@ -111,10 +119,62 @@ private Q_SLOTS:
         ProjectGraph graph;
         graph.generateGraph(dir.path());
 
-        QCOMPARE(graph.getNodeCount(), 1);
-        QVERIFY(!graph.getNode(ProjectGraph::generateNodeId(dir.path() + u"/big.txt"_s)));
+        // The big file is part of the project: dropping it left the graph
+        // without the very files an agent asks about most.
+        const GraphNode *node = graph.getNode(ProjectGraph::generateNodeId(dir.path() + u"/big.cpp"_s));
+        QVERIFY2(node, "a file over 64 KB is missing from the graph");
+        QCOMPARE(node->type, u"file"_s);
+        // Its own metrics, not those of the first page of it.
+        QCOMPARE(node->linesOfCode, kLines);
+        QCOMPARE(node->complexity, kLines);
+        // The binaries are still left out: the root and the one text file.
+        QCOMPARE(graph.getNodeCount(), 2);
         QVERIFY(!graph.getNode(ProjectGraph::generateNodeId(dir.path() + u"/pic.png"_s)));
         QVERIFY(!graph.getNode(ProjectGraph::generateNodeId(dir.path() + u"/sneaky.dat"_s)));
+    }
+
+    void testTheGraphIsSerialisedTheSameWayEveryTime()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        // Enough dependencies that the order of an unordered set cannot be the
+        // sorted order by accident.
+        QString source;
+        for (int i = 0; i < 12; ++i) {
+            const QString name = QStringLiteral("header_%1.h").arg(i);
+            writeFile(dir.path() + u'/' + name, QByteArrayLiteral("int function();\n"));
+            source += QStringLiteral("#include \"%1\"\n").arg(name);
+        }
+        writeFile(dir.path() + u"/a.cpp"_s, source.toUtf8());
+
+        ProjectGraph graph;
+        graph.generateGraph(dir.path());
+
+        // The cache is written into the project and compared and committed, so
+        // the same graph has to serialise to the same bytes every time. The
+        // dependency sets are unordered, and their order shifted with the hash
+        // seed of the process.
+        const QByteArray first = QJsonDocument(graph.toJson()).toJson();
+        const QByteArray second = QJsonDocument(graph.toJson()).toJson();
+        QCOMPARE(first, second);
+
+        // And the lists themselves are ordered, not left to the hash seed.
+        QJsonArray dependencies;
+        const QJsonArray nodes = graph.toJson().value(u"nodes"_s).toArray();
+        for (const QJsonValue &value : nodes) {
+            const QJsonObject node = value.toObject();
+            if (node.value(u"name"_s).toString() == QLatin1String("a.cpp")) {
+                dependencies = node.value(u"dependencies"_s).toArray();
+            }
+        }
+        QCOMPARE(dependencies.size(), 12);
+        QStringList ids;
+        for (const QJsonValue &value : dependencies) {
+            ids.append(value.toString());
+        }
+        QStringList sorted = ids;
+        sorted.sort();
+        QCOMPARE(ids, sorted);
     }
 
     void testSymlinkLoopTerminates()

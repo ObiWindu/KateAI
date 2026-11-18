@@ -16,6 +16,8 @@
 #include <QFontMetrics>
 #include <QGuiApplication>
 #include <QHBoxLayout>
+#include <QJsonDocument>
+#include <QJsonParseError>
 #include <QLabel>
 #include <QMouseEvent>
 #include <QPropertyAnimation>
@@ -133,6 +135,54 @@ QString clampToLines(const QString &text, int maxLines)
     lines = lines.mid(0, maxLines);
     lines.append(i18n("… %1 more lines", hidden));
     return lines.join(u'\n');
+}
+
+// A payload that is JSON is re-indented before it is shown.
+//
+// The arguments of a tool call arrive as one long line of {"key": "value"}
+// pairs -- from the model, from an ACP agent, from a tool description -- and
+// a card that shows that line as it came in is a wall of text with no
+// structure to it: the keys run into the values and the reader has to parse
+// the line by eye. Re-indenting puts every key on its own line, which is what
+// the payload was meant to be read as.
+//
+// Everything that is not JSON is left exactly as it was: a command's output
+// and a diff are prose, and touching them would only lose information.
+QString formatJsonPayload(const QString &text)
+{
+    const QString trimmed = text.trimmed();
+    if (trimmed.size() < 2) {
+        return text;
+    }
+    const QChar first = trimmed.front();
+    if (first != u'{' && first != u'[') {
+        return text;
+    }
+    QJsonParseError error;
+    const QJsonDocument doc = QJsonDocument::fromJson(trimmed.toUtf8(), &error);
+    if (error.error != QJsonParseError::NoError || (!doc.isObject() && !doc.isArray())) {
+        // Not JSON, or JSON that has not arrived whole yet: a stream that
+        // arrives in pieces is not valid JSON until the last piece is in.
+        return text;
+    }
+    return QString::fromUtf8(doc.toJson(QJsonDocument::Indented));
+}
+
+// Whether a payload is a JSON object or array, which is also the language the
+// card should label it with.
+bool isJsonPayload(const QString &text)
+{
+    const QString trimmed = text.trimmed();
+    if (trimmed.size() < 2) {
+        return false;
+    }
+    const QChar first = trimmed.front();
+    if (first != u'{' && first != u'[') {
+        return false;
+    }
+    QJsonParseError error;
+    const QJsonDocument doc = QJsonDocument::fromJson(trimmed.toUtf8(), &error);
+    return error.error == QJsonParseError::NoError && (doc.isObject() || doc.isArray());
 }
 
 // A unified diff starts with a "--- " file header and a "+++ " header within
@@ -686,7 +736,7 @@ void ToolCallWidget::setRunningInput(const QString &input)
     // flight that says nothing but the tool name tells the user nothing about
     // the work it is doing.
     m_showingInput = true;
-    m_details->setHtml(partialToHtml(clampToLines(input, kMaxInputLines)));
+    m_details->setHtml(partialToHtml(clampToLines(formatJsonPayload(input), kMaxInputLines)));
     applyDetailView();
     if (!m_details->toPlainText().isEmpty()) {
         setExpanded(true);
@@ -828,7 +878,8 @@ void ToolCallWidget::setPartialOutput(const QString &partialOutput)
     // the final answer. Command output is capped by lines; file reads stay
     // complete so the user can inspect the full contents in the transcript.
     const QString body = diff.isEmpty() ? partialOutput : textBeforeDiff(partialOutput);
-    m_details->setHtml(partialToHtml(m_risk == ToolRisk::Read ? body : clampToLines(body, kMaxResultLines)));
+    m_details->setHtml(partialToHtml(m_risk == ToolRisk::Read ? formatJsonPayload(body)
+                                                               : clampToLines(formatJsonPayload(body), kMaxResultLines)));
     // A stream is worth watching, so it opens itself; a card the user collapsed
     // themselves stays collapsed, because setExpanded tracks their choice.
     if (!m_details->toPlainText().isEmpty() || m_hasDiffPreview) {
@@ -909,8 +960,12 @@ void ToolCallWidget::setFinished(const ToolResult &result)
         setDescribeDiff(diff);
     }
     const QString shownSource = diff.isEmpty() ? result.output : textBeforeDiff(result.output);
-    const QString shown = m_risk == ToolRisk::Read ? shownSource : clampToLines(shownSource, kMaxResultLines);
-    const QString language = languageForTool(m_toolName);
+    // A result that is JSON is shown re-indented, and labelled as JSON: the
+    // language of the tool is what its output looks like, not what it happens
+    // to contain.
+    const QString formatted = formatJsonPayload(shownSource);
+    const QString shown = m_risk == ToolRisk::Read ? formatted : clampToLines(formatted, kMaxResultLines);
+    const QString language = isJsonPayload(formatted) ? QStringLiteral("JSON") : languageForTool(m_toolName);
     // Nothing to show must not paint an empty code block: a tool that reports
     // no output (an edit whose result never arrived, an ACP turn whose
     // arguments were never recorded) would otherwise render the block's frame

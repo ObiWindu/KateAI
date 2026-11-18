@@ -32,6 +32,17 @@ namespace
 // rebuilt rather than trusted with an incompatible graph.
 constexpr int kGraphSchemaVersion = 2;
 
+// How much of a file is read for the analysis. A file is read whole so its
+// line count, its definitions and its imports are the file's own and not the
+// first page of it; the cap keeps one oversized file from taking the memory
+// down with it.
+constexpr qint64 kMaxAnalysedBytes = 1024 * 1024;
+
+// What the graph keeps of each file once the analysis has run. The content is
+// analysis input, not graph data: holding every file in memory would make the
+// graph grow with the workspace.
+constexpr int kContentPreviewChars = 16 * 1024;
+
 // Node ids hash the path as it was scanned. On macOS a temporary directory is
 // commonly /var/... while QFileInfo resolves the same file to /private/var/...;
 // tools resolve paths before querying, so lookups need a canonical fallback.
@@ -88,9 +99,25 @@ void ProjectGraph::generateGraph(const QString &workspacePath)
     analyzeFileDependencies();
     analyzeCodeStructure();
     updateSecurityStatus();
+    // The analysis is done with the full text of every file; what stays on the
+    // nodes is a preview.
+    trimContentPreviews();
 
     m_lastUpdateTime = QDateTime::currentSecsSinceEpoch();
     m_isDirty = false;
+}
+
+void ProjectGraph::trimContentPreviews()
+{
+    // The graph holds a bounded preview of each file rather than its text.
+    // The analysis has already run over the full text by now, so the rest is
+    // only kept to make a later incremental update cheap.
+    for (auto it = m_nodes.begin(); it != m_nodes.end(); ++it) {
+        GraphNode *node = it.value();
+        if (node && node->content.size() > kContentPreviewChars) {
+            node->content = node->content.left(kContentPreviewChars);
+        }
+    }
 }
 
 void ProjectGraph::scanDirectory(const QString &dirPath, const QString &parentNodeId)
@@ -163,11 +190,6 @@ void ProjectGraph::scanDirectory(const QString &dirPath, const QString &parentNo
             // Recursively scan subdirectories
             scanDirectory(entry.absoluteFilePath(), node.id);
         } else {
-            // Skip files over 64 KB
-            if (entry.size() > 64 * 1024) {
-                continue;
-            }
-
             // Skip binaries. The extension list used to be open-coded here and
             // missed text-named files with binary content; isBinaryFile() checks
             // the same extensions first and then sniffs the head of the file.
@@ -188,13 +210,21 @@ void ProjectGraph::scanDirectory(const QString &dirPath, const QString &parentNo
             node.isReadOnly = false;
             node.lastModified = entry.lastModified().toSecsSinceEpoch();
 
-            // Read bounded file content for analysis
+            // Read the file for the analysis
             QFile file(entry.absoluteFilePath());
             if (file.open(QIODevice::ReadOnly | QIODevice::Text)) {
-                node.content = QString::fromUtf8(file.read(16 * 1024));
-                // Both metrics were left indeterminate here and serialised as
-                // garbage; derive them from what was actually read, with the
-                // same helpers the incremental update path uses.
+                // The whole file is read, not a prefix of it. A file too large
+                // to analyse used to be missing from the graph altogether, and
+                // a file analysed from a prefix alone is indexed with the wrong
+                // line count and with most of its definitions missing. The read
+                // is capped so one huge file cannot blow the memory up, and
+                // what the graph keeps afterwards is trimmed back to a preview.
+                //
+                // Both metrics used to be left indeterminate here and
+                // serialised as garbage; they are derived from what was
+                // actually read, with the same helpers the incremental update
+                // path uses.
+                node.content = QString::fromUtf8(file.read(kMaxAnalysedBytes));
                 node.linesOfCode = lineCount(node.content);
                 node.complexity = definitionCount(*this, node.content);
                 indexFileSymbols(&node);
@@ -237,6 +267,11 @@ void ProjectGraph::updateGraph(const QString &filePath, const QString &content)
 
         // Update dependencies based on new content
         reindexFileDependencies(node);
+        // The content was needed whole for the metrics, the symbols and the
+        // imports; what stays on the node is a preview.
+        if (node->content.size() > kContentPreviewChars) {
+            node->content = node->content.left(kContentPreviewChars);
+        }
     } else {
         // Create new node for file
         GraphNode newNode;
@@ -253,6 +288,11 @@ void ProjectGraph::updateGraph(const QString &filePath, const QString &content)
         newNode.lastModified = QDateTime::currentSecsSinceEpoch();
         updateNodeMetrics(&newNode);
         indexFileSymbols(&newNode);
+        // The content was needed whole for the metrics and the symbols; what
+        // stays on the node is a preview.
+        if (newNode.content.size() > kContentPreviewChars) {
+            newNode.content = newNode.content.left(kContentPreviewChars);
+        }
 
         // Find parent directory
         QString parentDirId = generateNodeId(QFileInfo(filePath).absolutePath(), u"directory"_s);
@@ -1459,16 +1499,23 @@ QJsonObject ProjectGraph::toJson() const
         // every query the graph tool serves.
         nodeJson.insert(u"content"_s, QString());
 
-        // Add dependencies
+        // Add dependencies. The sets are unordered and the hash seed is
+        // different in every process, so the lists are sorted: the cache is
+        // written to the project and compared and committed, and the same
+        // graph has to serialise to the same bytes every time.
+        QStringList dependencies = node->dependencies.values();
+        dependencies.sort();
         QJsonArray dependenciesArray;
-        for (const QString &dep : node->dependencies) {
+        for (const QString &dep : dependencies) {
             dependenciesArray.append(dep);
         }
         nodeJson.insert(u"dependencies"_s, dependenciesArray);
 
         // Add dependents
+        QStringList dependents = node->dependents.values();
+        dependents.sort();
         QJsonArray dependentsArray;
-        for (const QString &dep : node->dependents) {
+        for (const QString &dep : dependents) {
             dependentsArray.append(dep);
         }
         nodeJson.insert(u"dependents"_s, dependentsArray);

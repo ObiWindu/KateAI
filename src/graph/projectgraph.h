@@ -170,6 +170,9 @@ private:
     // on this file"; edges and dependency sets must point at node ids.
     QSet<QString> resolveImportTargets(const QString &content, const QString &sourcePath) const;
     void reindexFileDependencies(GraphNode *node);
+    // Cuts the analysed text back to a bounded preview once the analysis has
+    // run, so the graph does not hold every file of the workspace in memory.
+    void trimContentPreviews();
     const GraphNode *findNodeByName(const QString &name) const;
     // Both return the list of definitions, not a joined string: the only
     // consumer needs the count, and QString::size() on the joined text measured
