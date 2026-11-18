@@ -1866,7 +1866,7 @@ void AcpClient::sendInitialize()
 #ifdef KATEAI_VERSION
     clientInfo.insert(u"version"_s, QStringLiteral(KATEAI_VERSION));
 #else
-    clientInfo.insert(u"version"_s, u"0.4.0"_s);
+    clientInfo.insert(u"version"_s, u"0.5.0"_s);
 #endif
 
     QJsonObject params;

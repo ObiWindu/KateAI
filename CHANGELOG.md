@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.5.0 — 2026-11-18
+
+- Hardened ACP agent installation and launch: raw-binary distributions,
+  archive type detection, staged swaps, registry env maps, musl targets,
+  tool-manager discovery, pinned `npx`/`uvx` lines, and safe uninstall paths.
+- ACP protocol correctness: session-scoped updates and requests, no replayed
+  history on `session/load`, no forced 30-second session setup timeout,
+  auth-method fallback, capability-filtered MCP servers, bounded file reads,
+  terminal output limits, scoped approval grants, and bounded parked methods.
+- Closed sandbox and permission bypasses around newline command chains,
+  `sudo`/`doas`/`pkexec`, glob expansion before deny scanning, write-capable
+  flags, mutating git subcommands, path case rules, and tool aliases. ACP paths
+  are resolved before policy is applied.
+- Made checkpoint handling more robust across Windows and interrupted
+  repositories, added failure reasons to the checkpoint API, and made restore
+  symlink-safe with fail-closed staging.
+- Improved data safety: WAL/SHM sidecars are kept when a session database is
+  quarantined, unreadable payloads are never overwritten, unlimited history
+  stays unlimited, deletes in `apply_patch` are atomic, and undo/reject paths
+  refuse to discard newer edits.
+- Hardened LLM transports and retries: no duplicated `/v1`, bounded retries,
+  permanent HTTP errors are not retried, and partial SSE events, late
+  transport errors, null tool indexes, and non-replayable reasoning are handled.
+- MCP and web-search fixes: secrets stay in the credential store, config/HTTP
+  loads are bounded, multi-line SSE and batches parse, internal hosts and
+  blocked redirects are rejected, and search snippets no longer shift between
+  results.
+- Project graph improvements: files up to 1 MB are indexed, dependency lists
+  are stable, cache generation is reproducible, and JSON arguments/results are
+  formatted in cards while prose is left untouched.
+- Conversation history now restores reliably after closing and reopening Kate,
+  including per-window conversation ids, stale ids, repeated tool-call ids, ACP
+  read cards, and cancelled results.
+- Reworked sub-agent cards: readable mode, live tool and state, elapsed time,
+  tool/error counts, a starting indicator, cancelled-state handling, and a
+  copy-answer action. Concurrent cards keep their bounded tab strip, with
+  plain-text tabs.
+- Question and suggestion cards keep their prompt/advice payload alongside the
+  answer, including alias tool names and ACP client methods.
+- Reasoning and answers render sequentially, completed cards freeze cleanly,
+  and long-running sessions compact without growing stored history unbounded.
+- Version metadata updated to 0.5.0 across CMake, plugin metadata, README, ACP
+  client identity, and packaging. See `CHANGELOG_0.5.0.md`.
+
 ## 0.4.0 — 2026-11-16
 
 - API keys move from the plaintext KConfig file into `CredentialStore`:

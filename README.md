@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.4.0-orange" alt="Kate AI 0.4.0">
+  <img src="https://img.shields.io/badge/version-0.5.0-orange" alt="Kate AI 0.5.0">
   <img src="https://img.shields.io/badge/Kate-24.08%2B-1d99f3?logo=kde" alt="Kate 24.08+">
   <img src="https://img.shields.io/badge/Qt-6.5%2B-41cd52?logo=qt" alt="Qt 6.5+">
   <img src="https://img.shields.io/badge/KF-6-blue" alt="KDE Frameworks 6">

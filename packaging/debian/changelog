@@ -1,3 +1,11 @@
+kateai (0.5.0-1) unstable; urgency=medium
+
+  * Release 0.5.0: hardened ACP agent launch and protocol handling, stricter
+    sandbox and permission checks, safer checkpoints and patches, reliable
+    conversation restore, and reworked sub-agent cards.
+
+ -- ObiWindu <Obi.wandu@proton.me>  Wed, 18 Nov 2026 00:00:00 +0000
+
 kateai (0.4.0-1) unstable; urgency=medium
 
   * Release 0.4.0: secure credential storage with migration, session database
