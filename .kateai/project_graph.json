@@ -6201,7 +6201,7 @@
             "type": "file"
         },
         {
-            "complexity": 66,
+            "complexity": 67,
             "content": "",
             "dependencies": [
             ],
@@ -6210,7 +6210,7 @@
             ],
             "id": "32306d9206d41beab7695aa46a5db7774cee95413d9dfcfcf60e84bac60db461_file",
             "isReadOnly": false,
-            "lastModified": 1794872052,
+            "lastModified": 1795014987,
             "linesOfCode": 647,
             "metadata": {
                 "language": "markdown",
@@ -7153,7 +7153,7 @@
             "type": "file"
         },
         {
-            "complexity": 13,
+            "complexity": 14,
             "content": "",
             "dependencies": [
                 "bbd095d72b67445b2ed22edb8e7363b61778f8386f95c01d4b72df6a05c5fad2_file"
@@ -7167,35 +7167,35 @@
             ],
             "id": "40f2a5d0bc74ce5bdf34e3858c2063718c89ac8336b4f7a1dd33972e8270515f_file",
             "isReadOnly": false,
-            "lastModified": 1792832440,
-            "linesOfCode": 86,
+            "lastModified": 1795014676,
+            "linesOfCode": 91,
             "metadata": {
                 "language": "header",
                 "symbols": [
                     {
                         "column": 7,
-                        "endLine": 86,
+                        "endLine": 91,
                         "kind": "class",
                         "line": 17,
                         "name": "KConfigGroup"
                     },
                     {
                         "column": 7,
-                        "endLine": 84,
+                        "endLine": 89,
                         "kind": "class",
                         "line": 22,
                         "name": "KateAiCommand"
                     },
                     {
                         "column": 7,
-                        "endLine": 84,
+                        "endLine": 89,
                         "kind": "class",
                         "line": 23,
                         "name": "KateAiView"
                     },
                     {
                         "column": 7,
-                        "endLine": 84,
+                        "endLine": 89,
                         "kind": "class",
                         "line": 25,
                         "name": "KateAiPlugin"
@@ -8098,8 +8098,8 @@
             ],
             "id": "58ab06ebdd9e653d2014e352eca5e84bba9e84a19cbea4dbc629143b561904af_file",
             "isReadOnly": false,
-            "lastModified": 1794640648,
-            "linesOfCode": 260,
+            "lastModified": 1795014579,
+            "linesOfCode": 262,
             "metadata": {
                 "language": "cpp",
                 "symbols": [
@@ -8585,7 +8585,7 @@
             "type": "file"
         },
         {
-            "complexity": 59,
+            "complexity": 60,
             "content": "",
             "dependencies": [
                 "0558310f0e682a2e93e96a4e6f9ec877695e7ba6003b34ea7d5149e2290b3877_file",
@@ -8606,16 +8606,16 @@
             ],
             "id": "6821a48bb414ed563c3fb107b83da121098a9d0f9af70b06b2b33f26285e35bb_file",
             "isReadOnly": false,
-            "lastModified": 1794932959,
-            "linesOfCode": 1295,
+            "lastModified": 1795014714,
+            "linesOfCode": 1315,
             "metadata": {
                 "language": "cpp",
                 "symbols": [
                     {
                         "column": 54,
-                        "endLine": 394,
+                        "endLine": 414,
                         "kind": "class",
-                        "line": 377,
+                        "line": 397,
                         "name": "is"
                     },
                     {
@@ -8648,233 +8648,233 @@
                     },
                     {
                         "column": 13,
-                        "endLine": 252,
+                        "endLine": 272,
                         "kind": "function",
-                        "line": 250,
+                        "line": 270,
                         "name": "connect"
                     },
                     {
                         "column": 13,
-                        "endLine": 267,
+                        "endLine": 287,
                         "kind": "function",
-                        "line": 257,
+                        "line": 277,
                         "name": "connect"
                     },
                     {
                         "column": 13,
-                        "endLine": 301,
+                        "endLine": 321,
                         "kind": "function",
-                        "line": 299,
+                        "line": 319,
                         "name": "connect"
                     },
                     {
                         "column": 13,
-                        "endLine": 325,
+                        "endLine": 345,
                         "kind": "function",
-                        "line": 310,
+                        "line": 330,
                         "name": "connect"
                     },
                     {
                         "column": 13,
-                        "endLine": 337,
+                        "endLine": 357,
                         "kind": "function",
-                        "line": 327,
+                        "line": 347,
                         "name": "connect"
                     },
                     {
                         "column": 25,
-                        "endLine": 346,
+                        "endLine": 366,
                         "kind": "function",
-                        "line": 338,
+                        "line": 358,
                         "name": "ends"
                     },
                     {
                         "column": 17,
-                        "endLine": 345,
+                        "endLine": 365,
                         "kind": "function",
-                        "line": 341,
+                        "line": 361,
                         "name": "connect"
                     },
                     {
                         "column": 13,
-                        "endLine": 352,
+                        "endLine": 372,
                         "kind": "function",
-                        "line": 349,
+                        "line": 369,
                         "name": "connect"
                     },
                     {
                         "column": 13,
-                        "endLine": 361,
+                        "endLine": 381,
                         "kind": "function",
-                        "line": 356,
+                        "line": 376,
                         "name": "connect"
                     },
                     {
                         "column": 9,
-                        "endLine": 366,
+                        "endLine": 386,
                         "kind": "function",
-                        "line": 364,
+                        "line": 384,
                         "name": "connect"
                     },
                     {
                         "column": 13,
-                        "endLine": 370,
+                        "endLine": 390,
                         "kind": "function",
-                        "line": 368,
+                        "line": 388,
                         "name": "connect"
                     },
                     {
                         "column": 13,
-                        "endLine": 393,
+                        "endLine": 413,
                         "kind": "function",
-                        "line": 390,
+                        "line": 410,
                         "name": "connect"
                     },
                     {
                         "column": 17,
-                        "endLine": 431,
+                        "endLine": 451,
                         "kind": "function",
-                        "line": 427,
+                        "line": 447,
                         "name": "connect"
                     },
                     {
                         "column": 17,
-                        "endLine": 439,
+                        "endLine": 459,
                         "kind": "function",
-                        "line": 437,
+                        "line": 457,
                         "name": "connect"
                     },
                     {
                         "column": 17,
-                        "endLine": 447,
+                        "endLine": 467,
                         "kind": "function",
-                        "line": 445,
+                        "line": 465,
                         "name": "connect"
                     },
                     {
                         "column": 17,
-                        "endLine": 455,
+                        "endLine": 475,
                         "kind": "function",
-                        "line": 453,
+                        "line": 473,
                         "name": "connect"
                     },
                     {
                         "column": 17,
-                        "endLine": 476,
+                        "endLine": 496,
                         "kind": "function",
-                        "line": 472,
+                        "line": 492,
                         "name": "connect"
                     },
                     {
                         "column": 13,
-                        "endLine": 489,
+                        "endLine": 509,
                         "kind": "function",
-                        "line": 487,
+                        "line": 507,
                         "name": "connect"
                     },
                     {
                         "column": 13,
-                        "endLine": 507,
+                        "endLine": 527,
                         "kind": "function",
-                        "line": 501,
+                        "line": 521,
                         "name": "connect"
                     },
                     {
                         "column": 13,
-                        "endLine": 524,
+                        "endLine": 544,
                         "kind": "function",
-                        "line": 511,
+                        "line": 531,
                         "name": "connect"
                     },
                     {
                         "column": 20,
-                        "endLine": 618,
+                        "endLine": 638,
                         "kind": "function",
-                        "line": 572,
+                        "line": 592,
                         "name": "theme"
                     },
                     {
                         "column": 9,
-                        "endLine": 746,
+                        "endLine": 766,
                         "kind": "function",
-                        "line": 744,
+                        "line": 764,
                         "name": "connect"
                     },
                     {
                         "column": 9,
-                        "endLine": 779,
+                        "endLine": 799,
                         "kind": "function",
-                        "line": 758,
+                        "line": 778,
                         "name": "connect"
                     },
                     {
                         "column": 28,
-                        "endLine": 980,
+                        "endLine": 1000,
                         "kind": "function",
-                        "line": 968,
+                        "line": 988,
                         "name": "plugin"
                     },
                     {
                         "column": 26,
-                        "endLine": 991,
+                        "endLine": 1011,
                         "kind": "function",
-                        "line": 988,
+                        "line": 1008,
                         "name": "connect"
                     },
                     {
                         "column": 9,
-                        "endLine": 1131,
+                        "endLine": 1151,
                         "kind": "function",
-                        "line": 1129,
+                        "line": 1149,
                         "name": "connect"
                     },
                     {
                         "column": 9,
-                        "endLine": 1134,
+                        "endLine": 1154,
                         "kind": "function",
-                        "line": 1132,
+                        "line": 1152,
                         "name": "connect"
                     },
                     {
                         "column": 9,
-                        "endLine": 1198,
+                        "endLine": 1218,
                         "kind": "function",
-                        "line": 1193,
+                        "line": 1213,
                         "name": "connect"
                     },
                     {
                         "column": 9,
-                        "endLine": 1211,
+                        "endLine": 1231,
                         "kind": "function",
-                        "line": 1202,
+                        "line": 1222,
                         "name": "connect"
                     },
                     {
                         "column": 9,
-                        "endLine": 1229,
+                        "endLine": 1249,
                         "kind": "function",
-                        "line": 1215,
+                        "line": 1235,
                         "name": "connect"
                     },
                     {
                         "column": 9,
-                        "endLine": 1236,
+                        "endLine": 1256,
                         "kind": "function",
-                        "line": 1234,
+                        "line": 1254,
                         "name": "connect"
                     },
                     {
                         "column": 9,
-                        "endLine": 1283,
+                        "endLine": 1303,
                         "kind": "function",
-                        "line": 1279,
+                        "line": 1299,
                         "name": "connect"
                     },
                     {
                         "column": 9,
-                        "endLine": 1289,
+                        "endLine": 1309,
                         "kind": "function",
-                        "line": 1285,
+                        "line": 1305,
                         "name": "connect"
                     }
                 ]
@@ -9547,7 +9547,7 @@
             "type": "file"
         },
         {
-            "complexity": 37,
+            "complexity": 49,
             "content": "",
             "dependencies": [
                 "3e595b535d88c14fd0af07222c3c40c2a650501c735ffc8adbdc9e9762a749b3_file",
@@ -9559,23 +9559,23 @@
             ],
             "id": "7dc0677339c6ba9f1be7bd788d275d467dc8dda8bc6c11b08008a130b4e929e7_file",
             "isReadOnly": false,
-            "lastModified": 1794754609,
-            "linesOfCode": 842,
+            "lastModified": 1795014978,
+            "linesOfCode": 1046,
             "metadata": {
                 "language": "cpp",
                 "symbols": [
                     {
                         "column": 28,
-                        "endLine": 449,
+                        "endLine": 573,
                         "kind": "function",
-                        "line": 446,
+                        "line": 570,
                         "name": "it"
                     },
                     {
                         "column": 38,
-                        "endLine": 526,
+                        "endLine": 682,
                         "kind": "function",
-                        "line": 522,
+                        "line": 678,
                         "name": "resize"
                     }
                 ]
@@ -9988,7 +9988,7 @@
             "type": "file"
         },
         {
-            "complexity": 369,
+            "complexity": 370,
             "content": "",
             "dependencies": [
                 "02f5331dbcd2c2fddf71a103169f7500485836f0fe3cd46dd6938171b6ba2eee_file",
@@ -10020,422 +10020,394 @@
             ],
             "id": "8ab4ae3360c36b53074b22aa669f76d7692f4bc3bff406e968a3181276455b45_file",
             "isReadOnly": false,
-            "lastModified": 1795011515,
-            "linesOfCode": 7293,
+            "lastModified": 1795014664,
+            "linesOfCode": 7361,
             "metadata": {
                 "language": "cpp",
                 "symbols": [
                     {
                         "column": 63,
-                        "endLine": 390,
+                        "endLine": 407,
                         "kind": "class",
-                        "line": 389,
+                        "line": 406,
                         "name": "selector"
                     },
                     {
                         "column": 24,
-                        "endLine": 475,
+                        "endLine": 492,
                         "kind": "class",
-                        "line": 391,
+                        "line": 408,
                         "name": "name"
                     },
                     {
                         "column": 14,
-                        "endLine": 1853,
+                        "endLine": 1870,
                         "kind": "class",
-                        "line": 1848,
+                        "line": 1865,
                         "name": "destructor"
                     },
                     {
                         "column": 13,
-                        "endLine": 583,
+                        "endLine": 600,
                         "kind": "function",
-                        "line": 579,
+                        "line": 596,
                         "name": "singleShot"
                     },
                     {
                         "column": 5,
-                        "endLine": 605,
-                        "kind": "function",
-                        "line": 590,
-                        "name": "connect"
-                    },
-                    {
-                        "column": 5,
-                        "endLine": 634,
+                        "endLine": 622,
                         "kind": "function",
                         "line": 607,
                         "name": "connect"
                     },
                     {
-                        "column": 21,
-                        "endLine": 622,
+                        "column": 5,
+                        "endLine": 651,
                         "kind": "function",
-                        "line": 618,
+                        "line": 624,
+                        "name": "connect"
+                    },
+                    {
+                        "column": 21,
+                        "endLine": 639,
+                        "kind": "function",
+                        "line": 635,
                         "name": "singleShot"
                     },
                     {
                         "column": 5,
-                        "endLine": 762,
+                        "endLine": 779,
                         "kind": "function",
-                        "line": 756,
+                        "line": 773,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 767,
+                        "endLine": 784,
                         "kind": "function",
-                        "line": 763,
-                        "name": "connect"
-                    },
-                    {
-                        "column": 5,
-                        "endLine": 777,
-                        "kind": "function",
-                        "line": 769,
+                        "line": 780,
                         "name": "connect"
                     },
                     {
                         "column": 5,
                         "endLine": 794,
                         "kind": "function",
-                        "line": 792,
+                        "line": 786,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 800,
+                        "endLine": 811,
                         "kind": "function",
-                        "line": 798,
+                        "line": 809,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 816,
+                        "endLine": 817,
                         "kind": "function",
-                        "line": 814,
+                        "line": 815,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 821,
+                        "endLine": 833,
                         "kind": "function",
-                        "line": 819,
+                        "line": 831,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 826,
+                        "endLine": 838,
                         "kind": "function",
-                        "line": 824,
+                        "line": 836,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 840,
+                        "endLine": 843,
                         "kind": "function",
-                        "line": 828,
+                        "line": 841,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 878,
+                        "endLine": 857,
                         "kind": "function",
-                        "line": 842,
+                        "line": 845,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 886,
+                        "endLine": 895,
                         "kind": "function",
-                        "line": 880,
+                        "line": 859,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 893,
+                        "endLine": 903,
                         "kind": "function",
-                        "line": 888,
+                        "line": 897,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 898,
+                        "endLine": 910,
                         "kind": "function",
-                        "line": 895,
-                        "name": "connect"
-                    },
-                    {
-                        "column": 5,
-                        "endLine": 905,
-                        "kind": "function",
-                        "line": 900,
+                        "line": 905,
                         "name": "connect"
                     },
                     {
                         "column": 5,
                         "endLine": 915,
                         "kind": "function",
-                        "line": 908,
+                        "line": 912,
+                        "name": "connect"
+                    },
+                    {
+                        "column": 5,
+                        "endLine": 922,
+                        "kind": "function",
+                        "line": 917,
                         "name": "connect"
                     },
                     {
                         "column": 5,
                         "endLine": 932,
                         "kind": "function",
-                        "line": 916,
+                        "line": 925,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 939,
+                        "endLine": 949,
                         "kind": "function",
                         "line": 933,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 943,
+                        "endLine": 956,
                         "kind": "function",
-                        "line": 941,
+                        "line": 950,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 950,
+                        "endLine": 960,
                         "kind": "function",
-                        "line": 946,
+                        "line": 958,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 961,
+                        "endLine": 967,
                         "kind": "function",
-                        "line": 951,
+                        "line": 963,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 971,
+                        "endLine": 978,
                         "kind": "function",
-                        "line": 962,
+                        "line": 968,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 976,
+                        "endLine": 988,
                         "kind": "function",
-                        "line": 972,
+                        "line": 979,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 984,
+                        "endLine": 993,
                         "kind": "function",
-                        "line": 982,
+                        "line": 989,
+                        "name": "connect"
+                    },
+                    {
+                        "column": 5,
+                        "endLine": 1001,
+                        "kind": "function",
+                        "line": 999,
                         "name": "connect"
                     },
                     {
                         "column": 24,
-                        "endLine": 1165,
+                        "endLine": 1182,
                         "kind": "function",
-                        "line": 986,
+                        "line": 1003,
                         "name": "signals"
                     },
                     {
                         "column": 13,
-                        "endLine": 1008,
+                        "endLine": 1025,
                         "kind": "function",
-                        "line": 1006,
+                        "line": 1023,
                         "name": "connect"
                     },
                     {
                         "column": 13,
-                        "endLine": 1083,
+                        "endLine": 1100,
                         "kind": "function",
-                        "line": 1076,
+                        "line": 1093,
                         "name": "connect"
                     },
                     {
                         "column": 25,
-                        "endLine": 1082,
+                        "endLine": 1099,
                         "kind": "function",
-                        "line": 1078,
+                        "line": 1095,
                         "name": "singleShot"
                     },
                     {
                         "column": 13,
-                        "endLine": 1084,
+                        "endLine": 1101,
                         "kind": "function",
-                        "line": 1084,
+                        "line": 1101,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 1264,
+                        "endLine": 1281,
                         "kind": "function",
-                        "line": 1167,
+                        "line": 1184,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 1338,
+                        "endLine": 1355,
                         "kind": "function",
-                        "line": 1266,
+                        "line": 1283,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 1341,
+                        "endLine": 1358,
                         "kind": "function",
-                        "line": 1339,
+                        "line": 1356,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 1413,
-                        "kind": "function",
-                        "line": 1346,
-                        "name": "connect"
-                    },
-                    {
-                        "column": 13,
-                        "endLine": 1368,
-                        "kind": "function",
-                        "line": 1361,
-                        "name": "connect"
-                    },
-                    {
-                        "column": 25,
-                        "endLine": 1367,
+                        "endLine": 1430,
                         "kind": "function",
                         "line": 1363,
+                        "name": "connect"
+                    },
+                    {
+                        "column": 13,
+                        "endLine": 1385,
+                        "kind": "function",
+                        "line": 1378,
+                        "name": "connect"
+                    },
+                    {
+                        "column": 25,
+                        "endLine": 1384,
+                        "kind": "function",
+                        "line": 1380,
                         "name": "singleShot"
                     },
                     {
                         "column": 13,
-                        "endLine": 1369,
+                        "endLine": 1386,
                         "kind": "function",
-                        "line": 1369,
+                        "line": 1386,
                         "name": "connect"
                     },
                     {
                         "column": 9,
-                        "endLine": 1407,
+                        "endLine": 1424,
                         "kind": "function",
-                        "line": 1400,
+                        "line": 1417,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 1420,
+                        "endLine": 1437,
                         "kind": "function",
-                        "line": 1415,
+                        "line": 1432,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 1438,
+                        "endLine": 1455,
                         "kind": "function",
-                        "line": 1425,
+                        "line": 1442,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 1445,
+                        "endLine": 1462,
                         "kind": "function",
-                        "line": 1443,
+                        "line": 1460,
                         "name": "connect"
                     },
                     {
                         "column": 34,
-                        "endLine": 1450,
+                        "endLine": 1467,
                         "kind": "function",
-                        "line": 1446,
+                        "line": 1463,
                         "name": "internally"
                     },
                     {
                         "column": 5,
-                        "endLine": 1480,
+                        "endLine": 1497,
                         "kind": "function",
-                        "line": 1463,
+                        "line": 1480,
                         "name": "connect"
                     },
                     {
                         "column": 65,
-                        "endLine": 1479,
+                        "endLine": 1496,
                         "kind": "function",
-                        "line": 1472,
+                        "line": 1489,
                         "name": "setInterval"
                     },
                     {
                         "column": 5,
-                        "endLine": 1489,
+                        "endLine": 1506,
                         "kind": "function",
-                        "line": 1482,
+                        "line": 1499,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 1501,
+                        "endLine": 1518,
                         "kind": "function",
-                        "line": 1491,
+                        "line": 1508,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 1507,
+                        "endLine": 1524,
                         "kind": "function",
-                        "line": 1504,
+                        "line": 1521,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 1513,
+                        "endLine": 1530,
                         "kind": "function",
-                        "line": 1510,
+                        "line": 1527,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 1520,
+                        "endLine": 1537,
                         "kind": "function",
-                        "line": 1515,
+                        "line": 1532,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 1580,
+                        "endLine": 1597,
                         "kind": "function",
-                        "line": 1522,
-                        "name": "connect"
-                    },
-                    {
-                        "column": 5,
-                        "endLine": 1590,
-                        "kind": "function",
-                        "line": 1587,
-                        "name": "connect"
-                    },
-                    {
-                        "column": 5,
-                        "endLine": 1596,
-                        "kind": "function",
-                        "line": 1594,
-                        "name": "connect"
-                    },
-                    {
-                        "column": 5,
-                        "endLine": 1600,
-                        "kind": "function",
-                        "line": 1597,
-                        "name": "connect"
-                    },
-                    {
-                        "column": 5,
-                        "endLine": 1603,
-                        "kind": "function",
-                        "line": 1601,
+                        "line": 1539,
                         "name": "connect"
                     },
                     {
@@ -10447,597 +10419,625 @@
                     },
                     {
                         "column": 5,
-                        "endLine": 1618,
+                        "endLine": 1613,
                         "kind": "function",
-                        "line": 1608,
+                        "line": 1611,
+                        "name": "connect"
+                    },
+                    {
+                        "column": 5,
+                        "endLine": 1617,
+                        "kind": "function",
+                        "line": 1614,
+                        "name": "connect"
+                    },
+                    {
+                        "column": 5,
+                        "endLine": 1620,
+                        "kind": "function",
+                        "line": 1618,
+                        "name": "connect"
+                    },
+                    {
+                        "column": 5,
+                        "endLine": 1624,
+                        "kind": "function",
+                        "line": 1621,
+                        "name": "connect"
+                    },
+                    {
+                        "column": 5,
+                        "endLine": 1635,
+                        "kind": "function",
+                        "line": 1625,
                         "name": "connect"
                     },
                     {
                         "column": 9,
-                        "endLine": 1614,
+                        "endLine": 1631,
                         "kind": "function",
-                        "line": 1609,
+                        "line": 1626,
                         "name": "Q_UNUSED"
-                    },
-                    {
-                        "column": 5,
-                        "endLine": 1623,
-                        "kind": "function",
-                        "line": 1619,
-                        "name": "connect"
-                    },
-                    {
-                        "column": 5,
-                        "endLine": 1628,
-                        "kind": "function",
-                        "line": 1624,
-                        "name": "connect"
-                    },
-                    {
-                        "column": 5,
-                        "endLine": 1634,
-                        "kind": "function",
-                        "line": 1629,
-                        "name": "connect"
                     },
                     {
                         "column": 5,
                         "endLine": 1640,
                         "kind": "function",
-                        "line": 1635,
+                        "line": 1636,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 1660,
+                        "endLine": 1645,
                         "kind": "function",
-                        "line": 1644,
+                        "line": 1641,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 1692,
+                        "endLine": 1651,
+                        "kind": "function",
+                        "line": 1646,
+                        "name": "connect"
+                    },
+                    {
+                        "column": 5,
+                        "endLine": 1657,
+                        "kind": "function",
+                        "line": 1652,
+                        "name": "connect"
+                    },
+                    {
+                        "column": 5,
+                        "endLine": 1677,
                         "kind": "function",
                         "line": 1661,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 1712,
+                        "endLine": 1709,
                         "kind": "function",
-                        "line": 1693,
+                        "line": 1678,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 1727,
+                        "endLine": 1729,
                         "kind": "function",
-                        "line": 1716,
+                        "line": 1710,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 1737,
+                        "endLine": 1744,
                         "kind": "function",
-                        "line": 1735,
+                        "line": 1733,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 1803,
+                        "endLine": 1754,
                         "kind": "function",
-                        "line": 1739,
+                        "line": 1752,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 1812,
+                        "endLine": 1820,
                         "kind": "function",
-                        "line": 1805,
+                        "line": 1756,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 1818,
+                        "endLine": 1829,
                         "kind": "function",
-                        "line": 1814,
+                        "line": 1822,
+                        "name": "connect"
+                    },
+                    {
+                        "column": 5,
+                        "endLine": 1835,
+                        "kind": "function",
+                        "line": 1831,
                         "name": "connect"
                     },
                     {
                         "column": 64,
-                        "endLine": 1853,
+                        "endLine": 1870,
                         "kind": "function",
-                        "line": 1847,
+                        "line": 1864,
                         "name": "gone"
                     },
                     {
                         "column": 17,
-                        "endLine": 2008,
+                        "endLine": 2025,
                         "kind": "function",
-                        "line": 2004,
+                        "line": 2021,
                         "name": "singleShot"
                     },
                     {
                         "column": 45,
-                        "endLine": 2120,
+                        "endLine": 2137,
                         "kind": "function",
-                        "line": 2114,
+                        "line": 2131,
                         "name": "setInterval"
                     },
                     {
                         "column": 9,
-                        "endLine": 2167,
+                        "endLine": 2184,
                         "kind": "function",
-                        "line": 2140,
+                        "line": 2157,
                         "name": "connect"
                     },
                     {
                         "column": 36,
-                        "endLine": 2224,
+                        "endLine": 2241,
                         "kind": "function",
-                        "line": 2221,
+                        "line": 2238,
                         "name": "widget"
                     },
                     {
                         "column": 5,
-                        "endLine": 2353,
+                        "endLine": 2370,
                         "kind": "function",
-                        "line": 2341,
+                        "line": 2358,
                         "name": "connect"
                     },
                     {
                         "column": 17,
-                        "endLine": 2352,
+                        "endLine": 2369,
                         "kind": "function",
-                        "line": 2348,
+                        "line": 2365,
                         "name": "singleShot"
                     },
                     {
                         "column": 50,
-                        "endLine": 2395,
+                        "endLine": 2412,
                         "kind": "function",
-                        "line": 2387,
+                        "line": 2404,
                         "name": "resizing"
                     },
                     {
                         "column": 21,
-                        "endLine": 2445,
+                        "endLine": 2462,
                         "kind": "function",
-                        "line": 2441,
+                        "line": 2458,
                         "name": "singleShot"
                     },
                     {
                         "column": 12,
-                        "endLine": 2470,
+                        "endLine": 2487,
                         "kind": "function",
-                        "line": 2466,
+                        "line": 2483,
                         "name": "setTodos"
                     },
                     {
                         "column": 13,
-                        "endLine": 2622,
+                        "endLine": 2639,
                         "kind": "function",
-                        "line": 2616,
+                        "line": 2633,
                         "name": "singleShot"
                     },
                     {
                         "column": 5,
-                        "endLine": 3027,
+                        "endLine": 3044,
                         "kind": "function",
-                        "line": 3023,
+                        "line": 3040,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 3099,
+                        "endLine": 3116,
                         "kind": "function",
-                        "line": 3073,
+                        "line": 3090,
                         "name": "connect"
                     },
                     {
                         "column": 17,
-                        "endLine": 3098,
+                        "endLine": 3115,
                         "kind": "function",
-                        "line": 3093,
+                        "line": 3110,
                         "name": "singleShot"
                     },
                     {
                         "column": 9,
-                        "endLine": 3156,
+                        "endLine": 3173,
                         "kind": "function",
-                        "line": 3154,
+                        "line": 3171,
                         "name": "connect"
                     },
                     {
                         "column": 38,
-                        "endLine": 3339,
+                        "endLine": 3356,
                         "kind": "function",
-                        "line": 3335,
+                        "line": 3352,
                         "name": "gone"
                     },
                     {
                         "column": 13,
-                        "endLine": 3437,
+                        "endLine": 3454,
                         "kind": "function",
-                        "line": 3433,
+                        "line": 3450,
                         "name": "singleShot"
                     },
                     {
                         "column": 17,
-                        "endLine": 3473,
+                        "endLine": 3490,
                         "kind": "function",
-                        "line": 3468,
+                        "line": 3485,
                         "name": "singleShot"
                     },
                     {
                         "column": 47,
-                        "endLine": 3740,
+                        "endLine": 3757,
                         "kind": "function",
-                        "line": 3715,
+                        "line": 3732,
                         "name": "fetch"
                     },
                     {
                         "column": 66,
-                        "endLine": 3961,
+                        "endLine": 3978,
                         "kind": "function",
-                        "line": 3954,
+                        "line": 3971,
                         "name": "compactContext"
                     },
                     {
                         "column": 34,
-                        "endLine": 4148,
+                        "endLine": 4165,
                         "kind": "function",
-                        "line": 4141,
+                        "line": 4158,
                         "name": "click"
                     },
                     {
                         "column": 9,
-                        "endLine": 4176,
+                        "endLine": 4193,
                         "kind": "function",
-                        "line": 4170,
+                        "line": 4187,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 4206,
+                        "endLine": 4223,
                         "kind": "function",
-                        "line": 4201,
+                        "line": 4218,
                         "name": "connect"
                     },
                     {
                         "column": 9,
-                        "endLine": 4221,
+                        "endLine": 4238,
                         "kind": "function",
-                        "line": 4213,
+                        "line": 4230,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 4294,
+                        "endLine": 4311,
                         "kind": "function",
-                        "line": 4287,
+                        "line": 4304,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 4299,
+                        "endLine": 4316,
                         "kind": "function",
-                        "line": 4296,
+                        "line": 4313,
                         "name": "connect"
                     },
                     {
                         "column": 17,
-                        "endLine": 4329,
+                        "endLine": 4346,
                         "kind": "function",
-                        "line": 4314,
+                        "line": 4331,
                         "name": "singleShot"
                     },
                     {
                         "column": 5,
-                        "endLine": 4409,
+                        "endLine": 4426,
                         "kind": "function",
-                        "line": 4382,
+                        "line": 4399,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 4419,
+                        "endLine": 4436,
                         "kind": "function",
-                        "line": 4410,
+                        "line": 4427,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 4425,
+                        "endLine": 4442,
                         "kind": "function",
-                        "line": 4423,
+                        "line": 4440,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 4430,
+                        "endLine": 4447,
                         "kind": "function",
-                        "line": 4428,
+                        "line": 4445,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 4441,
+                        "endLine": 4458,
                         "kind": "function",
-                        "line": 4436,
+                        "line": 4453,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 4454,
+                        "endLine": 4471,
                         "kind": "function",
-                        "line": 4444,
+                        "line": 4461,
                         "name": "connect"
                     },
                     {
                         "column": 9,
-                        "endLine": 4985,
+                        "endLine": 5002,
                         "kind": "function",
-                        "line": 4955,
+                        "line": 4972,
                         "name": "connect"
                     },
                     {
                         "column": 21,
-                        "endLine": 4984,
+                        "endLine": 5001,
                         "kind": "function",
-                        "line": 4982,
+                        "line": 4999,
                         "name": "singleShot"
                     },
                     {
                         "column": 9,
-                        "endLine": 4994,
+                        "endLine": 5011,
                         "kind": "function",
-                        "line": 4986,
+                        "line": 5003,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 5068,
+                        "endLine": 5085,
                         "kind": "function",
-                        "line": 5045,
+                        "line": 5062,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 5081,
+                        "endLine": 5098,
                         "kind": "function",
-                        "line": 5069,
+                        "line": 5086,
                         "name": "connect"
                     },
                     {
                         "column": 9,
-                        "endLine": 5161,
+                        "endLine": 5178,
                         "kind": "function",
-                        "line": 5159,
+                        "line": 5176,
                         "name": "connect"
                     },
                     {
                         "column": 9,
-                        "endLine": 5176,
+                        "endLine": 5193,
                         "kind": "function",
-                        "line": 5174,
+                        "line": 5191,
                         "name": "connect"
                     },
                     {
                         "column": 9,
-                        "endLine": 5196,
+                        "endLine": 5213,
                         "kind": "function",
-                        "line": 5194,
+                        "line": 5211,
                         "name": "connect"
                     },
                     {
                         "column": 13,
-                        "endLine": 5212,
+                        "endLine": 5229,
                         "kind": "function",
-                        "line": 5210,
+                        "line": 5227,
                         "name": "connect"
                     },
                     {
                         "column": 18,
-                        "endLine": 5267,
+                        "endLine": 5284,
                         "kind": "function",
-                        "line": 5216,
+                        "line": 5233,
                         "name": "Selection"
                     },
                     {
                         "column": 13,
-                        "endLine": 5235,
+                        "endLine": 5252,
                         "kind": "function",
-                        "line": 5226,
+                        "line": 5243,
                         "name": "connect"
                     },
                     {
                         "column": 9,
-                        "endLine": 5248,
+                        "endLine": 5265,
                         "kind": "function",
-                        "line": 5244,
+                        "line": 5261,
                         "name": "connect"
                     },
                     {
                         "column": 9,
-                        "endLine": 5266,
+                        "endLine": 5283,
                         "kind": "function",
-                        "line": 5257,
+                        "line": 5274,
                         "name": "connect"
                     },
                     {
                         "column": 9,
-                        "endLine": 5307,
+                        "endLine": 5324,
                         "kind": "function",
-                        "line": 5283,
+                        "line": 5300,
                         "name": "connect"
                     },
                     {
                         "column": 9,
-                        "endLine": 5321,
+                        "endLine": 5338,
                         "kind": "function",
-                        "line": 5319,
+                        "line": 5336,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 5342,
+                        "endLine": 5359,
                         "kind": "function",
-                        "line": 5340,
+                        "line": 5357,
                         "name": "connect"
                     },
                     {
                         "column": 9,
-                        "endLine": 5402,
+                        "endLine": 5419,
                         "kind": "function",
-                        "line": 5400,
+                        "line": 5417,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 5578,
+                        "endLine": 5595,
                         "kind": "function",
-                        "line": 5571,
+                        "line": 5588,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 5581,
+                        "endLine": 5598,
                         "kind": "function",
-                        "line": 5579,
+                        "line": 5596,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 5718,
+                        "endLine": 5735,
                         "kind": "function",
-                        "line": 5711,
+                        "line": 5728,
                         "name": "connect"
                     },
                     {
                         "column": 5,
-                        "endLine": 5859,
+                        "endLine": 5876,
                         "kind": "function",
-                        "line": 5853,
+                        "line": 5870,
                         "name": "connect"
                     },
                     {
                         "column": 13,
-                        "endLine": 5880,
+                        "endLine": 5897,
                         "kind": "function",
-                        "line": 5872,
+                        "line": 5889,
                         "name": "connect"
                     },
                     {
                         "column": 9,
-                        "endLine": 6143,
+                        "endLine": 6160,
                         "kind": "function",
-                        "line": 6130,
+                        "line": 6147,
                         "name": "connect"
                     },
                     {
                         "column": 16,
-                        "endLine": 6141,
+                        "endLine": 6158,
                         "kind": "function",
-                        "line": 6136,
+                        "line": 6153,
                         "name": "setFixedHeight"
                     },
                     {
                         "column": 8,
-                        "endLine": 6242,
+                        "endLine": 6259,
                         "kind": "function",
-                        "line": 6238,
+                        "line": 6255,
                         "name": "restoreCurrentTurn"
                     },
                     {
                         "column": 50,
-                        "endLine": 6292,
+                        "endLine": 6309,
                         "kind": "function",
-                        "line": 6287,
+                        "line": 6304,
                         "name": "toolCallId"
                     },
                     {
                         "column": 26,
-                        "endLine": 6348,
+                        "endLine": 6365,
                         "kind": "function",
-                        "line": 6344,
+                        "line": 6361,
                         "name": "setFixedHeight"
                     },
                     {
                         "column": 43,
-                        "endLine": 6384,
+                        "endLine": 6403,
                         "kind": "function",
-                        "line": 6376,
+                        "line": 6393,
                         "name": "aliases"
                     },
                     {
                         "column": 5,
-                        "endLine": 6458,
+                        "endLine": 6477,
                         "kind": "function",
-                        "line": 6451,
+                        "line": 6470,
                         "name": "connect"
                     },
                     {
                         "column": 17,
-                        "endLine": 6457,
+                        "endLine": 6476,
                         "kind": "function",
-                        "line": 6453,
+                        "line": 6472,
                         "name": "singleShot"
                     },
                     {
-                        "column": 61,
-                        "endLine": 6766,
-                        "kind": "function",
-                        "line": 6674,
-                        "name": "sight"
-                    },
-                    {
                         "column": 13,
-                        "endLine": 6695,
+                        "endLine": 6775,
                         "kind": "function",
-                        "line": 6693,
+                        "line": 6773,
                         "name": "connect"
                     },
                     {
                         "column": 69,
-                        "endLine": 6868,
+                        "endLine": 6932,
                         "kind": "function",
-                        "line": 6863,
+                        "line": 6927,
                         "name": "them"
                     },
                     {
-                        "column": 13,
-                        "endLine": 6901,
+                        "column": 35,
+                        "endLine": 6940,
                         "kind": "function",
-                        "line": 6895,
+                        "line": 6936,
+                        "name": "placed"
+                    },
+                    {
+                        "column": 13,
+                        "endLine": 6968,
+                        "kind": "function",
+                        "line": 6962,
                         "name": "singleShot"
                     },
                     {
                         "column": 43,
-                        "endLine": 6975,
+                        "endLine": 7042,
                         "kind": "function",
-                        "line": 6967,
+                        "line": 7034,
                         "name": "directly"
                     },
                     {
                         "column": 13,
-                        "endLine": 7054,
+                        "endLine": 7121,
                         "kind": "function",
-                        "line": 7052,
+                        "line": 7119,
                         "name": "connect"
                     },
                     {
                         "column": 9,
-                        "endLine": 7079,
+                        "endLine": 7146,
                         "kind": "function",
-                        "line": 7063,
+                        "line": 7130,
                         "name": "connect"
                     },
                     {
                         "column": 16,
-                        "endLine": 7215,
+                        "endLine": 7283,
                         "kind": "function",
-                        "line": 7212,
+                        "line": 7280,
                         "name": "edits"
                     }
                 ]
@@ -14717,7 +14717,7 @@
             "type": "file"
         },
         {
-            "complexity": 21,
+            "complexity": 23,
             "content": "",
             "dependencies": [
                 "a7e61c1a56ffd1c1a0be1275488b12d8ba51c48c9bae2326b60f01221a4f3322_file",
@@ -14728,14 +14728,14 @@
             ],
             "id": "cba3a15e3bf4cc80031a4a5678043b350da731375898991ffafb647d11072b6a_file",
             "isReadOnly": false,
-            "lastModified": 1793117937,
-            "linesOfCode": 222,
+            "lastModified": 1795014760,
+            "linesOfCode": 261,
             "metadata": {
                 "language": "cpp",
                 "symbols": [
                     {
                         "column": 7,
-                        "endLine": 219,
+                        "endLine": 258,
                         "kind": "class",
                         "line": 26,
                         "name": "TestIntentDock"
@@ -15075,7 +15075,7 @@
             "type": "file"
         },
         {
-            "complexity": 18,
+            "complexity": 25,
             "content": "",
             "dependencies": [
                 "36500b842c8dc2fb749de08ccce31b936cec8850ed30946dc37969093d803da0_file",
@@ -15092,51 +15092,65 @@
             ],
             "id": "d271ace0abff5f1362c60dc2d62d07cf910184b61e0d2eb1245e366090d2c11a_file",
             "isReadOnly": false,
-            "lastModified": 1795011636,
-            "linesOfCode": 481,
+            "lastModified": 1795014948,
+            "linesOfCode": 648,
             "metadata": {
                 "language": "cpp",
                 "symbols": [
                     {
                         "column": 7,
-                        "endLine": 468,
+                        "endLine": 635,
                         "kind": "class",
-                        "line": 81,
+                        "line": 97,
                         "name": "TestHistoryRestore"
                     },
                     {
                         "column": 26,
-                        "endLine": 110,
+                        "endLine": 126,
                         "kind": "function",
-                        "line": 110,
+                        "line": 126,
                         "name": "toolResultMessage"
                     },
                     {
                         "column": 9,
-                        "endLine": 143,
+                        "endLine": 159,
                         "kind": "function",
-                        "line": 143,
+                        "line": 159,
                         "name": "QVERIFY2"
                     },
                     {
                         "column": 26,
-                        "endLine": 267,
+                        "endLine": 237,
                         "kind": "function",
-                        "line": 267,
+                        "line": 237,
                         "name": "toolResultMessage"
                     },
                     {
                         "column": 9,
-                        "endLine": 284,
+                        "endLine": 268,
                         "kind": "function",
-                        "line": 284,
+                        "line": 268,
+                        "name": "QVERIFY2"
+                    },
+                    {
+                        "column": 26,
+                        "endLine": 338,
+                        "kind": "function",
+                        "line": 338,
+                        "name": "toolResultMessage"
+                    },
+                    {
+                        "column": 9,
+                        "endLine": 355,
+                        "kind": "function",
+                        "line": 355,
                         "name": "QVERIFY2"
                     },
                     {
                         "column": 80,
-                        "endLine": 367,
+                        "endLine": 438,
                         "kind": "function",
-                        "line": 362,
+                        "line": 433,
                         "name": "parentWidget"
                     }
                 ]
@@ -15431,14 +15445,14 @@
             ],
             "id": "dc980b9eac5a1573ef2f6fbb898329293bc47aa5be4a63660a7ad7d41bd3bae7_file",
             "isReadOnly": false,
-            "lastModified": 1794754609,
-            "linesOfCode": 230,
+            "lastModified": 1795014767,
+            "linesOfCode": 232,
             "metadata": {
                 "language": "cpp",
                 "symbols": [
                     {
                         "column": 7,
-                        "endLine": 227,
+                        "endLine": 229,
                         "kind": "class",
                         "line": 41,
                         "name": "TestSubtaskDock"
@@ -16204,8 +16218,8 @@
             ],
             "id": "f31a02f7e0da21e58ede836e035b6d2d5598ce860f13f4df251c3936bf868230_file",
             "isReadOnly": false,
-            "lastModified": 1794994405,
-            "linesOfCode": 480,
+            "lastModified": 1795014698,
+            "linesOfCode": 508,
             "metadata": {
                 "language": "cpp",
                 "symbols": [
@@ -16343,7 +16357,7 @@
             "type": "file"
         },
         {
-            "complexity": 158,
+            "complexity": 159,
             "content": "",
             "dependencies": [
                 "1ac31d8e476eff9e23ebc472947737fb98a8a51cf6ed011ef51e19a960866a68_file",
@@ -16362,177 +16376,177 @@
             ],
             "id": "f986bc7a58108aafc31390361c7b5f1526f4383fd714a35b50df5c8a2cb524ae_file",
             "isReadOnly": false,
-            "lastModified": 1794997644,
-            "linesOfCode": 537,
+            "lastModified": 1795014809,
+            "linesOfCode": 539,
             "metadata": {
                 "language": "header",
                 "symbols": [
                     {
                         "column": 7,
-                        "endLine": 537,
+                        "endLine": 539,
                         "kind": "class",
                         "line": 20,
                         "name": "QAction"
                     },
                     {
                         "column": 7,
-                        "endLine": 537,
+                        "endLine": 539,
                         "kind": "class",
                         "line": 21,
                         "name": "QComboBox"
                     },
                     {
                         "column": 7,
-                        "endLine": 537,
+                        "endLine": 539,
                         "kind": "class",
                         "line": 22,
                         "name": "QLabel"
                     },
                     {
                         "column": 7,
-                        "endLine": 537,
+                        "endLine": 539,
                         "kind": "class",
                         "line": 23,
                         "name": "QPushButton"
                     },
                     {
                         "column": 7,
-                        "endLine": 537,
+                        "endLine": 539,
                         "kind": "class",
                         "line": 24,
                         "name": "QScrollArea"
                     },
                     {
                         "column": 7,
-                        "endLine": 537,
+                        "endLine": 539,
                         "kind": "class",
                         "line": 25,
                         "name": "QTextBrowser"
                     },
                     {
                         "column": 7,
-                        "endLine": 537,
+                        "endLine": 539,
                         "kind": "class",
                         "line": 26,
                         "name": "QTimer"
                     },
                     {
                         "column": 7,
-                        "endLine": 537,
+                        "endLine": 539,
                         "kind": "class",
                         "line": 27,
                         "name": "QVBoxLayout"
                     },
                     {
                         "column": 7,
-                        "endLine": 537,
+                        "endLine": 539,
                         "kind": "class",
                         "line": 28,
                         "name": "QMenu"
                     },
                     {
                         "column": 7,
-                        "endLine": 537,
+                        "endLine": 539,
                         "kind": "class",
                         "line": 29,
                         "name": "QListWidget"
                     },
                     {
                         "column": 7,
-                        "endLine": 537,
+                        "endLine": 539,
                         "kind": "class",
                         "line": 30,
                         "name": "QTabWidget"
                     },
                     {
                         "column": 7,
-                        "endLine": 535,
+                        "endLine": 537,
                         "kind": "class",
                         "line": 35,
                         "name": "PermissionBar"
                     },
                     {
                         "column": 7,
-                        "endLine": 535,
+                        "endLine": 537,
                         "kind": "class",
                         "line": 36,
                         "name": "PromptEdit"
                     },
                     {
                         "column": 7,
-                        "endLine": 535,
+                        "endLine": 537,
                         "kind": "class",
                         "line": 37,
                         "name": "ToolCallWidget"
                     },
                     {
                         "column": 7,
-                        "endLine": 535,
+                        "endLine": 537,
                         "kind": "class",
                         "line": 38,
                         "name": "SubtaskWidget"
                     },
                     {
                         "column": 7,
-                        "endLine": 535,
+                        "endLine": 537,
                         "kind": "class",
                         "line": 39,
                         "name": "SubtaskDock"
                     },
                     {
                         "column": 7,
-                        "endLine": 535,
+                        "endLine": 537,
                         "kind": "class",
                         "line": 40,
                         "name": "SuggestionWidget"
                     },
                     {
                         "column": 7,
-                        "endLine": 535,
+                        "endLine": 537,
                         "kind": "class",
                         "line": 41,
                         "name": "QuestionWidget"
                     },
                     {
                         "column": 7,
-                        "endLine": 535,
+                        "endLine": 537,
                         "kind": "class",
                         "line": 42,
                         "name": "TodoWidget"
                     },
                     {
                         "column": 7,
-                        "endLine": 535,
+                        "endLine": 537,
                         "kind": "class",
                         "line": 43,
                         "name": "EditTracker"
                     },
                     {
                         "column": 7,
-                        "endLine": 535,
+                        "endLine": 537,
                         "kind": "class",
                         "line": 44,
                         "name": "TurnStatus"
                     },
                     {
                         "column": 7,
-                        "endLine": 535,
+                        "endLine": 537,
                         "kind": "class",
                         "line": 45,
                         "name": "AcpBinaryInstaller"
                     },
                     {
                         "column": 7,
-                        "endLine": 535,
+                        "endLine": 537,
                         "kind": "class",
                         "line": 47,
                         "name": "ChatWidget"
                     },
                     {
                         "column": 16,
-                        "endLine": 532,
+                        "endLine": 534,
                         "kind": "class",
-                        "line": 528,
+                        "line": 530,
                         "name": "ToolCardsOverride"
                     },
                     {
@@ -16603,7 +16617,7 @@
             "type": "file"
         },
         {
-            "complexity": 37,
+            "complexity": 39,
             "content": "",
             "dependencies": [
                 "bbd095d72b67445b2ed22edb8e7363b61778f8386f95c01d4b72df6a05c5fad2_file"
@@ -16620,42 +16634,42 @@
             ],
             "id": "fdbd36b485c3111b11675bdd7be16438455ddc7a028d9eb7e17b04d3e712364a_file",
             "isReadOnly": false,
-            "lastModified": 1794754609,
-            "linesOfCode": 176,
+            "lastModified": 1795014401,
+            "linesOfCode": 184,
             "metadata": {
                 "language": "header",
                 "symbols": [
                     {
                         "column": 7,
-                        "endLine": 176,
+                        "endLine": 184,
                         "kind": "class",
                         "line": 16,
                         "name": "QLabel"
                     },
                     {
                         "column": 7,
-                        "endLine": 176,
+                        "endLine": 184,
                         "kind": "class",
                         "line": 17,
                         "name": "QPushButton"
                     },
                     {
                         "column": 7,
-                        "endLine": 176,
+                        "endLine": 184,
                         "kind": "class",
                         "line": 18,
                         "name": "QTextBrowser"
                     },
                     {
                         "column": 7,
-                        "endLine": 176,
+                        "endLine": 184,
                         "kind": "class",
                         "line": 19,
                         "name": "QTimer"
                     },
                     {
                         "column": 7,
-                        "endLine": 174,
+                        "endLine": 182,
                         "kind": "class",
                         "line": 28,
                         "name": "SubtaskWidget"
