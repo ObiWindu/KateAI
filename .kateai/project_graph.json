@@ -3351,6 +3351,13 @@
             "isSafe": true,
             "relationship": "contains",
             "sourceId": "bc681c1aac88c8b0d90b3d269df092981e69af65154a19576833b4d4699165ff_directory",
+            "targetId": "a16022b29f18babfe48b81161c0438e15a09be728466ccac22321ed3f1063eb6_file"
+        },
+        {
+            "details": "",
+            "isSafe": true,
+            "relationship": "contains",
+            "sourceId": "bc681c1aac88c8b0d90b3d269df092981e69af65154a19576833b4d4699165ff_directory",
             "targetId": "a173d99676d91f8ca3ef8da0caa87ac564f6777a8f75362a92349a6cb519c60a_file"
         },
         {
@@ -4664,7 +4671,7 @@
             ],
             "id": "0f1cda4f884ab2309b070de1a3b64c55cebc5884b85b8b8a6ccf33d9850f0d13_file",
             "isReadOnly": false,
-            "lastModified": 1794999181,
+            "lastModified": 1795016182,
             "linesOfCode": 5194,
             "metadata": {
                 "language": "cpp",
@@ -5341,7 +5348,7 @@
             ],
             "id": "20109df1461f2e962283c4116b9489a2e6e2361f04ae5dd57bda7b6c055ab977_file",
             "isReadOnly": false,
-            "lastModified": 1794819585,
+            "lastModified": 1795016182,
             "linesOfCode": 142,
             "metadata": {
                 "language": "text",
@@ -5845,8 +5852,8 @@
             ],
             "id": "2b2d43f89fc79369f5099204ca1b771b8602dbf053e157730b9eafe0590f77dc_file",
             "isReadOnly": false,
-            "lastModified": 1794872299,
-            "linesOfCode": 64,
+            "lastModified": 1795016215,
+            "linesOfCode": 108,
             "metadata": {
                 "language": "markdown",
                 "symbols": [
@@ -6210,7 +6217,7 @@
             ],
             "id": "32306d9206d41beab7695aa46a5db7774cee95413d9dfcfcf60e84bac60db461_file",
             "isReadOnly": false,
-            "lastModified": 1795014987,
+            "lastModified": 1795016182,
             "linesOfCode": 647,
             "metadata": {
                 "language": "markdown",
@@ -7817,7 +7824,7 @@
             ],
             "id": "5532aa14fcfcd9c8710955060a6c3958e2324d5f248e15ed0ffa24da6e6e722c_file",
             "isReadOnly": false,
-            "lastModified": 1794871726,
+            "lastModified": 1795016191,
             "linesOfCode": 160,
             "metadata": {
                 "language": "unknown",
@@ -8992,7 +8999,7 @@
             "type": "file"
         },
         {
-            "complexity": 2,
+            "complexity": 3,
             "content": "",
             "dependencies": [
             ],
@@ -9001,8 +9008,8 @@
             ],
             "id": "6d29d7f3fa2f309f74fb54212df8d27036026cb4b4eba3c58623863abc8114f2_file",
             "isReadOnly": false,
-            "lastModified": 1794824562,
-            "linesOfCode": 21,
+            "lastModified": 1795016197,
+            "linesOfCode": 29,
             "metadata": {
                 "language": "unknown",
                 "symbols": [
@@ -9512,7 +9519,7 @@
             ],
             "id": "7918de71ad41f6ec9660cc97f2f098583f543da7392e464159df188c9aad8d64_file",
             "isReadOnly": false,
-            "lastModified": 1794824557,
+            "lastModified": 1795016191,
             "linesOfCode": 88,
             "metadata": {
                 "language": "shell",
@@ -9976,7 +9983,7 @@
             ],
             "id": "89b28ffcd9e0ef6e921ccf2eec4ba657acd64e6460e6dfebb2972870c5d19be0_file",
             "isReadOnly": false,
-            "lastModified": 1794815644,
+            "lastModified": 1795016182,
             "linesOfCode": 16,
             "metadata": {
                 "language": "json",
@@ -11164,7 +11171,7 @@
             ],
             "id": "8e7c8bf2493778a6884c3e9076ece6646c06b1401db8c2fab4f18308006a2f60_file",
             "isReadOnly": false,
-            "lastModified": 1794824557,
+            "lastModified": 1795016191,
             "linesOfCode": 28,
             "metadata": {
                 "language": "shell",
@@ -13237,6 +13244,27 @@
             "type": "file"
         },
         {
+            "complexity": 5,
+            "content": "",
+            "dependencies": [
+            ],
+            "dependents": [
+                "bc681c1aac88c8b0d90b3d269df092981e69af65154a19576833b4d4699165ff_directory"
+            ],
+            "id": "a16022b29f18babfe48b81161c0438e15a09be728466ccac22321ed3f1063eb6_file",
+            "isReadOnly": false,
+            "lastModified": 1795016245,
+            "linesOfCode": 174,
+            "metadata": {
+                "language": "markdown",
+                "symbols": [
+                ]
+            },
+            "name": "CHANGELOG_0.5.0.md",
+            "path": "/home/dizeman/zed_folder/KateAI/CHANGELOG_0.5.0.md",
+            "type": "file"
+        },
+        {
             "complexity": 0,
             "content": "",
             "dependencies": [
@@ -14277,6 +14305,7 @@
                 "83a285a6772bff2439acb33d02b6650a4d1f112f42c4a568fbdfa807c1212947_file",
                 "8c92af27cee34dc6156c4ee501426c5c9889ed6592a355f25d5515f706d674a4_file",
                 "9266951c8bef0d69a42741afe9ee2dc7689909d76740a2bdeccd5b495ac47679_directory",
+                "a16022b29f18babfe48b81161c0438e15a09be728466ccac22321ed3f1063eb6_file",
                 "a173d99676d91f8ca3ef8da0caa87ac564f6777a8f75362a92349a6cb519c60a_file",
                 "a4885eb5ba604ccbd451f1f6787b3293103013ec243e1714d79792ef4c2e488a_file"
             ],
@@ -14284,7 +14313,7 @@
             ],
             "id": "bc681c1aac88c8b0d90b3d269df092981e69af65154a19576833b4d4699165ff_directory",
             "isReadOnly": false,
-            "lastModified": 1794829511,
+            "lastModified": 1795016245,
             "linesOfCode": 0,
             "metadata": {
             },
@@ -14499,7 +14528,7 @@
             ],
             "id": "c544a49f49f2a3e10b1d65bdf3af985f43740be0e8286d782467dc56e862b374_file",
             "isReadOnly": false,
-            "lastModified": 1794824557,
+            "lastModified": 1795016191,
             "linesOfCode": 135,
             "metadata": {
                 "language": "shell",
@@ -15241,8 +15270,8 @@
             ],
             "id": "d45ecafa6e1738bf88a448f2541b5bd9f489a45ec60b1b94815879c5d3b5dbe3_file",
             "isReadOnly": false,
-            "lastModified": 1794824562,
-            "linesOfCode": 64,
+            "lastModified": 1795016197,
+            "linesOfCode": 69,
             "metadata": {
                 "language": "unknown",
                 "symbols": [
@@ -15786,7 +15815,7 @@
             ],
             "id": "e37d91dd09432feddfa4b416837962a5e08edcd348f901692f126149452eee4e_file",
             "isReadOnly": false,
-            "lastModified": 1794824557,
+            "lastModified": 1795016191,
             "linesOfCode": 42,
             "metadata": {
                 "language": "unknown",
@@ -15903,7 +15932,7 @@
             ],
             "id": "e778dbd8dd446ead12777ae56b5981e686c750825a6d05fc1dbb64cd2429a143_file",
             "isReadOnly": false,
-            "lastModified": 1794884322,
+            "lastModified": 1795016191,
             "linesOfCode": 165,
             "metadata": {
                 "language": "shell",
