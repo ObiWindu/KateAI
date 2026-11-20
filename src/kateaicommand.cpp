@@ -32,7 +32,11 @@ const QString &commandWord()
 
 QString usageText()
 {
-    return i18n("usage: kateai ask <text> | explain | fix | refactor | tests | diagnostics | symbols | stop | new | mode <id> | panel");
+    return i18n(
+        "usage: kateai ask <text> | explain | fix | refactor | tests | diagnostics | symbols | "
+        "debug | explain-stop | stack | break [cond] | snapshot | fix-errors | build-errors | "
+        "launch-config | backtrace | terminal | blame | commit | diff-tab | graph-tab | annotations | "
+        "stop | new | mode <id> | panel");
 }
 
 // The instruction of the one-word review subcommands. Kept next to the
@@ -86,6 +90,10 @@ KCompletion *KateAiCommand::completionObject(KTextEditor::View *view, const QStr
     completion->setIgnoreCase(true);
     completion->setItems({u"ask "_s, u"explain"_s, u"fix"_s, u"refactor"_s, u"tests"_s,
                           u"diagnostics"_s, u"symbols"_s,
+                          u"debug"_s, u"explain-stop"_s, u"stack"_s, u"break "_s, u"snapshot"_s,
+                          u"fix-errors"_s, u"build-errors"_s, u"launch-config"_s,
+                          u"backtrace"_s, u"terminal"_s, u"blame"_s, u"commit"_s,
+                          u"diff-tab"_s, u"graph-tab"_s, u"annotations"_s,
                           u"stop"_s, u"new"_s, u"mode "_s, u"panel"_s});
     return completion;
 }
@@ -161,6 +169,77 @@ bool KateAiCommand::exec(KTextEditor::View *view, const QString &cmd, QString &m
             return false;
         }
         target->chat()->applyMode(rest);
+        return true;
+    }
+    if (sub == u"debug"_s || sub == u"explain-stop"_s) {
+        target->diagnoseDebugStop();
+        msg = i18n("Kate AI: diagnosing debugger stop.");
+        return true;
+    }
+    if (sub == u"stack"_s) {
+        target->explainDebugStack();
+        msg = i18n("Kate AI: analyzing call stack.");
+        return true;
+    }
+    if (sub == u"break"_s) {
+        QString bpMsg;
+        const bool ok = target->setBreakpointAtCursor(rest, &bpMsg);
+        msg = bpMsg.isEmpty() ? (ok ? i18n("Breakpoint updated.") : i18n("Could not set breakpoint.")) : bpMsg;
+        return ok;
+    }
+    if (sub == u"snapshot"_s) {
+        target->snapshotDebugState();
+        msg = i18n("Kate AI: captured debugger snapshot.");
+        return true;
+    }
+    if (sub == u"fix-errors"_s) {
+        target->fixDiagnostics();
+        msg = i18n("Kate AI: fixing diagnostics.");
+        return true;
+    }
+    if (sub == u"build-errors"_s) {
+        target->fixBuildErrors();
+        msg = i18n("Kate AI: fixing build errors.");
+        return true;
+    }
+    if (sub == u"launch-config"_s) {
+        target->generateLaunchJson();
+        msg = i18n("Kate AI: generated .vscode/launch.json.");
+        return true;
+    }
+    if (sub == u"backtrace"_s) {
+        target->analyzeBacktrace();
+        msg = i18n("Kate AI: analyzing backtrace.");
+        return true;
+    }
+    if (sub == u"terminal"_s) {
+        target->explainTerminalSelection();
+        msg = i18n("Kate AI: analyzing terminal selection.");
+        return true;
+    }
+    if (sub == u"blame"_s) {
+        target->explainGitBlame();
+        msg = i18n("Kate AI: explaining line history.");
+        return true;
+    }
+    if (sub == u"commit"_s) {
+        target->generateCommitMessage();
+        msg = i18n("Kate AI: drafting commit message.");
+        return true;
+    }
+    if (sub == u"diff-tab"_s) {
+        target->openReviewDiffTab();
+        msg = i18n("Kate AI: opened review diff tab.");
+        return true;
+    }
+    if (sub == u"graph-tab"_s) {
+        target->openProjectGraphTab();
+        msg = i18n("Kate AI: opened project graph tab.");
+        return true;
+    }
+    if (sub == u"annotations"_s) {
+        target->toggleAnnotationGutter();
+        msg = i18n("Kate AI: toggled AI edit gutter annotations.");
         return true;
     }
 

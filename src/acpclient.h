@@ -6,6 +6,8 @@
 #pragma once
 
 #include "documentbridge.h"
+#include "debug.h"
+#include "ecosystem.h"
 #include "lsp.h"
 #include "mcp.h"
 #include "sandbox.h"
@@ -61,6 +63,14 @@ public:
     void setLspProvider(LspProvider *provider)
     {
         m_lsp = provider;
+    }
+    void setDebugProvider(DebugProvider *provider)
+    {
+        m_debug = provider;
+    }
+    void setEcosystemProvider(EcosystemProvider *provider)
+    {
+        m_ecosystem = provider;
     }
     // Session id from a previous Kate conversation, used with session/load
     // or session/resume when the agent advertises those capabilities.
@@ -146,6 +156,32 @@ public:
         return m_currentEffortId;
     }
 
+    // Session modes the agent advertised (e.g. default, accept-edits, plan).
+    QStringList agentModes() const
+    {
+        return m_agentModes;
+    }
+    QString currentModeId() const
+    {
+        return m_currentModeId;
+    }
+    // Switch the live session mode through session/set_config_option or
+    // session/set_mode. Returns false when no live session or matching mode exists.
+    bool setSessionMode(const QString &modeId);
+    // Records the desired ACP mode (e.g. "plan", "accept-edits", "default") so
+    // it is pushed as soon as the session opens or immediately when ready.
+    void setDesiredMode(const QString &modeId);
+
+    // Last context usage reported via ACP usage_update notifications.
+    qint64 contextUsedTokens() const
+    {
+        return m_contextUsedTokens;
+    }
+    qint64 contextWindowSize() const
+    {
+        return m_contextWindowSize;
+    }
+
     // Read the model list from the live session. Starts the agent when it
     // is not running so the list can arrive with session/new.
     void fetchModels();
@@ -215,6 +251,10 @@ Q_SIGNALS:
     void sessionIdChanged(const QString &sessionId);
     void modelsReceived(const QStringList &models);
     void effortsReceived(const QStringList &efforts);
+    void modesReceived(const QStringList &modes);
+    void modeChanged(const QString &modeId);
+    void usageUpdated(qint64 used, qint64 size);
+    void exitPlanModeRequested();
 
 private:
     enum class State {
@@ -317,6 +357,14 @@ private:
 
     void handleFsRead(const QJsonValue &id, const QJsonObject &params);
     void handleFsWrite(const QJsonValue &id, const QJsonObject &params);
+    void handleFsEdit(const QJsonValue &id, const QJsonObject &params);
+    void handleFsMultiEdit(const QJsonValue &id, const QJsonObject &params);
+    void handleFsDelete(const QJsonValue &id, const QJsonObject &params);
+    void handleFsListDir(const QJsonValue &id, const QJsonObject &params);
+    void handleFsGrep(const QJsonValue &id, const QJsonObject &params);
+    void handleFsGlob(const QJsonValue &id, const QJsonObject &params);
+    void handleApplyPatch(const QJsonValue &id, const QJsonObject &params);
+    void handleExitPlanMode(const QJsonValue &id, const QJsonObject &params);
     void handleWritePlanFile(const QJsonValue &id, const QJsonObject &params);
     void handleSuggest(const QJsonValue &id, const QJsonObject &params);
     void handleQueryProjectGraph(const QJsonValue &id, const QJsonObject &params);
@@ -326,6 +374,7 @@ private:
     void handleLspDefinition(const QJsonValue &id, const QJsonObject &params);
     void handleLspReferences(const QJsonValue &id, const QJsonObject &params);
     void handleLspCodeActions(const QJsonValue &id, const QJsonObject &params);
+    void handleKateToolMethod(const QString &toolName, const QJsonValue &id, const QJsonObject &params);
     void handleAskUser(const QJsonValue &id, const QJsonObject &params);
     void handleElicitationCreate(const QJsonValue &id, const QJsonObject &params);
     void handleTodoWrite(const QJsonValue &id, const QJsonObject &params);
@@ -346,6 +395,7 @@ private:
     void handleTerminalWait(const QJsonValue &id, const QJsonObject &params);
     void handleTerminalKill(const QJsonValue &id, const QJsonObject &params);
     void handleTerminalRelease(const QJsonValue &id, const QJsonObject &params);
+    void handleTerminalSendInput(const QJsonValue &id, const QJsonObject &params);
 
     void appendTerminalOutput(Terminal *term, const QByteArray &chunk);
     void markTerminalExited(Terminal *term, int exitCode, const QString &signal);
@@ -390,6 +440,11 @@ private:
     void ingestSessionEfforts(const QJsonObject &result);
     void applyForcedEffort();
     void sendSetEffortOption(const QString &effortId);
+    void ingestSessionModes(const QJsonObject &result);
+    void applyDesiredMode();
+    void sendSetModeOption(const QString &modeId);
+    void sendSetSessionMode(const QString &modeId);
+    static bool isAuthFailureError(const QString &error);
 
     // Transient errors (broken HTTP stream to the model provider, timeouts,
     // overloaded providers) are worth retrying; auth or protocol failures are
@@ -421,6 +476,8 @@ private:
 
     ProjectGraph *m_projectGraph = nullptr;
     LspProvider *m_lsp = nullptr;
+    DebugProvider *m_debug = nullptr;
+    EcosystemProvider *m_ecosystem = nullptr;
 
     State m_state = State::Stopped;
     QString m_status;
@@ -461,6 +518,7 @@ private:
     bool m_resumeSession = false;
     bool m_closeSession = false;
     bool m_embeddedContext = false;
+    bool m_supportsSystemPromptAppend = false;
     int m_protocolVersion = 1;
 
     int m_promptId = 0;
@@ -512,6 +570,7 @@ private:
     PermissionRequest m_questionRequest;
     bool m_questionIsElicitation = false;
     QString m_questionElicitationProperty;
+    QHash<QString, QString> m_questionElicitationValueMap;
 
     // The shared todo store (native todo_write and _kateai/todo_write).
     std::function<QJsonArray()> m_todosGetter;
@@ -549,6 +608,16 @@ private:
     QString m_currentEffortId;
     QString m_effortConfigId;
     bool m_effortSetInFlight = false;
+
+    QStringList m_agentModes;
+    QString m_currentModeId;
+    QString m_desiredModeId;
+    QString m_modeConfigId;
+    bool m_legacySetMode = false;
+    bool m_modeSetInFlight = false;
+
+    qint64 m_contextUsedTokens = 0;
+    qint64 m_contextWindowSize = 0;
 };
 
 } // namespace KateAi

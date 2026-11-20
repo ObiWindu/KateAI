@@ -56,17 +56,27 @@ QStringList builtInToolsForGroup(const QString &group)
         // touches the workspace. question joins them: it reads nothing and
         // writes nothing, it just puts a question to the user, which is
         // exactly when a read-only turn most needs an answer.
+        // Read-only debugger inspection and build target discovery also live
+        // here so Ask/Architect/Plan modes can inspect a paused debug session
+        // or project targets without mutating state.
         return {u"read_file"_s, u"list_dir"_s, u"grep"_s, u"glob"_s, u"query_project_graph"_s,
                 u"write_plan_file"_s, u"suggest"_s, u"question"_s,
                 u"todo_write"_s, u"todo_read"_s, u"think"_s, u"exit_plan_mode"_s,
                 u"lsp_diagnostics"_s, u"lsp_symbols"_s, u"lsp_hover"_s,
-                u"lsp_definition"_s, u"lsp_references"_s, u"lsp_code_actions"_s};
+                u"lsp_definition"_s, u"lsp_references"_s, u"lsp_code_actions"_s,
+                u"debug_status"_s, u"debug_stack"_s, u"debug_locals"_s,
+                u"debug_breakpoints"_s, u"debug_select_frame"_s, u"debug_select_thread"_s,
+                u"debug_snapshot"_s, u"build_targets"_s};
     }
     if (group == ToolGroup::edit()) {
         return {u"write_file"_s, u"edit_file"_s, u"multi_edit_file"_s, u"apply_patch"_s};
     }
     if (group == ToolGroup::command()) {
-        return {u"bash"_s};
+        return {u"bash"_s, u"build_run"_s, u"terminal_run"_s};
+    }
+    if (group == ToolGroup::debug()) {
+        return {u"debug_set_breakpoint"_s, u"debug_step"_s, u"debug_eval"_s,
+                u"debug_session"_s, u"debug_console"_s};
     }
     if (group == ToolGroup::web()) {
         return {u"web_search"_s, u"web_fetch"_s};
@@ -105,6 +115,21 @@ QStringList allBuiltInToolNames()
             u"lsp_definition"_s,
             u"lsp_references"_s,
             u"lsp_code_actions"_s,
+            u"debug_status"_s,
+            u"debug_stack"_s,
+            u"debug_locals"_s,
+            u"debug_breakpoints"_s,
+            u"debug_select_frame"_s,
+            u"debug_select_thread"_s,
+            u"debug_snapshot"_s,
+            u"debug_set_breakpoint"_s,
+            u"debug_step"_s,
+            u"debug_eval"_s,
+            u"debug_session"_s,
+            u"debug_console"_s,
+            u"build_targets"_s,
+            u"build_run"_s,
+            u"terminal_run"_s,
             subtaskToolName()};
 }
 
@@ -129,6 +154,14 @@ ToolAccess ModeRegistry::toolAccessFor(const ModeDefinition &mode, bool planMode
     if (planMode) {
         // Plan mode is a hard read-only restriction regardless of mode.
         return toolAccessForGroups({ToolGroup::read()});
+    }
+    if (mode.readOnly) {
+        QStringList filtered = mode.groups;
+        filtered.erase(std::remove_if(filtered.begin(), filtered.end(), [](const QString &g) {
+                           return g == ToolGroup::edit() || g == ToolGroup::command() || g == ToolGroup::debug();
+                       }),
+                       filtered.end());
+        return toolAccessForGroups(filtered);
     }
     return toolAccessForGroups(mode.groups);
 }
@@ -266,7 +299,8 @@ QStringList parseList(const QString &value)
 
 QStringList validGroups()
 {
-    return {ToolGroup::read(), ToolGroup::edit(), ToolGroup::command(), ToolGroup::mcp(), ToolGroup::web(), ToolGroup::orchestrate()};
+    return {ToolGroup::read(), ToolGroup::edit(), ToolGroup::command(), ToolGroup::debug(),
+            ToolGroup::mcp(), ToolGroup::web(), ToolGroup::orchestrate()};
 }
 
 // One sampling knob from frontmatter, or -1 when the key is absent or not a
@@ -312,9 +346,10 @@ void ModeRegistry::loadBuiltIns()
     code.id = u"code"_s;
     code.name = u"Code"_s;
     code.icon = u"code"_s;
-    code.description = u"Read, edit, and run commands. The default working mode."_s;
+    code.description = u"Read, edit, debug, and run commands. The default working mode."_s;
     code.builtIn = true;
-    code.groups = {ToolGroup::read(), ToolGroup::edit(), ToolGroup::command(), ToolGroup::mcp(), ToolGroup::web(), ToolGroup::orchestrate()};
+    code.groups = {ToolGroup::read(), ToolGroup::edit(), ToolGroup::command(), ToolGroup::debug(),
+                   ToolGroup::mcp(), ToolGroup::web(), ToolGroup::orchestrate()};
     code.roleDefinition = u"You are working in Code mode: implement the requested change directly. You may hand a "
                               u"well-scoped, self-contained piece of the work to a sub-agent with new_task when that is the "
                               u"clearer route, but you stay responsible for the result."_s;
@@ -353,13 +388,16 @@ void ModeRegistry::loadBuiltIns()
     debug.id = u"debug"_s;
     debug.name = u"Debug"_s;
     debug.icon = u"tools"_s;
-    debug.description = u"Find the root cause of a failure and fix it."_s;
+    debug.description = u"Find the root cause of a failure using the live debugger and fix it."_s;
     debug.builtIn = true;
-    debug.groups = {ToolGroup::read(), ToolGroup::edit(), ToolGroup::command(), ToolGroup::mcp(), ToolGroup::web(), ToolGroup::orchestrate()};
+    debug.groups = {ToolGroup::read(), ToolGroup::edit(), ToolGroup::command(), ToolGroup::debug(),
+                    ToolGroup::mcp(), ToolGroup::web(), ToolGroup::orchestrate()};
     debug.roleDefinition =
-        u"You are working in Debug mode. Diagnose before you change anything: reproduce the failure or read the exact "
-        "error, form a concrete hypothesis about the root cause, and prove it from the code or a run. Only then make the "
-        "smallest repair, and re-run the failing case to confirm it is actually fixed. Never guess-fix."_s;
+        u"You are working in Debug mode. Diagnose before you change anything: prefer live inspection with Kate's "
+        "debugger tools (debug_status, debug_stack, debug_locals, debug_breakpoints, conditional debug_set_breakpoint, "
+        "debug_step, debug_eval, debug_snapshot) and lsp_diagnostics over adding temporary printf/log statements. "
+        "Form a concrete hypothesis about the root cause, prove it from live state or a reproduction run, make the "
+        "smallest repair, then rebuild (build_run or bash) and re-verify the failing case. Never guess-fix."_s;
     m_modes.append(debug);
 
     ModeDefinition orchestrator;
@@ -440,11 +478,8 @@ void ModeRegistry::loadCustomModes()
                               mode.groups.end());
             if (mode.readOnly) {
                 // A read-only mode keeps its hands off the workspace: the edit,
-                // command and orchestrate groups are dropped from the tool set.
-                // The check used to clear the read-only flag when it found one
-                // of them, which turned the promise into the opposite of what
-                // it says.
-                const QStringList editGroups = {ToolGroup::edit(), ToolGroup::command(), ToolGroup::orchestrate()};
+                // command, debug control and orchestrate groups are dropped.
+                const QStringList editGroups = {ToolGroup::edit(), ToolGroup::command(), ToolGroup::debug(), ToolGroup::orchestrate()};
                 mode.groups.erase(std::remove_if(mode.groups.begin(), mode.groups.end(), [&editGroups](const QString &group) {
                                      return editGroups.contains(group);
                                  }),
@@ -475,8 +510,8 @@ ModeDefinition ModeRegistry::modeOrDefault(const QString &id) const
     fallback.id = u"code"_s;
     fallback.name = u"Code"_s;
     fallback.builtIn = true;
-    fallback.groups = {ToolGroup::read(), ToolGroup::edit(), ToolGroup::command(), ToolGroup::mcp(), ToolGroup::web(),
-                       ToolGroup::orchestrate()};
+    fallback.groups = {ToolGroup::read(), ToolGroup::edit(), ToolGroup::command(), ToolGroup::debug(),
+                       ToolGroup::mcp(), ToolGroup::web(), ToolGroup::orchestrate()};
     return fallback;
 }
 
@@ -550,18 +585,12 @@ ModeDefinition ModeRegistry::parseModeDocument(const QString &document, const QS
     mode.description = unquote(fm.keys.value(u"description"_s).trimmed());
     mode.roleDefinition = fm.keys.value(u"roleDefinition"_s).trimmed();
     mode.groups = parseList(fm.keys.value(u"groups"_s));
-    // A mode that declares itself read-only keeps the edit, command and
-    // orchestrate groups out of its tool set. The key was accepted in the
-    // documentation but never read, so the groups below were handed out
-    // unchanged and the read-only promise was not kept.
     const QString readOnly = fm.keys.value(u"readOnly"_s).trimmed().toLower();
     if (readOnly.isEmpty()) {
         mode.readOnly = fm.keys.value(u"read_only"_s).trimmed().toLower() == u"true"_s;
     } else {
         mode.readOnly = readOnly == u"true"_s;
     }
-    // Sampling overrides. "topP" is accepted alongside the snake_case spelling
-    // the rest of the settings use, because frontmatter authors reach for both.
     mode.temperature = samplingKey(fm, u"temperature"_s, 0.0, 2.0);
     const double topP = samplingKey(fm, u"top_p"_s, 0.0, 1.0);
     mode.topP = topP >= 0.0 ? topP : samplingKey(fm, u"topP"_s, 0.0, 1.0);
@@ -571,8 +600,6 @@ ModeDefinition ModeRegistry::parseModeDocument(const QString &document, const QS
         mode.customInstructions.append(custom);
     }
     if (!fm.body.isEmpty()) {
-        // Anything after the frontmatter counts as additional instructions,
-        // which is how Kilo Code mode files carry their long-form prompt.
         mode.customInstructions.append(fm.body);
     }
     mode.builtIn = false;
@@ -585,9 +612,6 @@ ModeDefinition ModeRegistry::parseModeDocument(const QString &document, const QS
 
 Settings ModeRegistry::settingsForMode(const Settings &settings, const ModeDefinition &mode)
 {
-    // The client is handed a copy, never the user's settings: a mode must be
-    // able to tune the request without the override leaking back into what the
-    // config page reads and saves.
     Settings effective = settings;
     if (mode.hasTemperature()) {
         effective.temperature = qBound(0.0, mode.temperature, 2.0);
@@ -604,8 +628,8 @@ QString ModeRegistry::modeFileTemplate(const QString &id)
         + u"name: "_s + id + u"\n"_s
         + u"description: What this mode is for\n"_s
         + u"icon: mode\n"_s
-        + u"groups: [read, edit, command, mcp]\n"_s
-        + u"# readOnly: true       # keep the edit, command and orchestrate groups out\n"_s
+        + u"groups: [read, edit, command, debug, mcp]\n"_s
+        + u"# readOnly: true       # keep the edit, command, debug and orchestrate groups out\n"_s
         + u"# temperature: 0.2   # sampling override; omit to use the global setting\n"_s
         + u"# top_p: 0.95         # sampling override; omit to use the global setting\n"_s
         + u"roleDefinition: |\n"_s

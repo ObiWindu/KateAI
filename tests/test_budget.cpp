@@ -25,6 +25,7 @@
 #include <QTcpSocket>
 #include <QTemporaryDir>
 #include <QTest>
+#include <memory>
 
 using namespace Qt::Literals::StringLiterals;
 using namespace KateAi;
@@ -48,15 +49,30 @@ public:
         connect(m_server, &QTcpServer::newConnection, this, [this] {
             QTcpSocket *socket = m_server->nextPendingConnection();
             connect(socket, &QTcpSocket::disconnected, socket, &QTcpSocket::deleteLater);
-            connect(socket, &QTcpSocket::readyRead, this, [this, socket] {
-                while (socket->canReadLine()) {
-                    const QString line = QString::fromUtf8(socket->readLine()).trimmed();
-                    if (!line.isEmpty()) {
-                        continue;
-                    }
-                    handle(socket);
+            auto buf = std::make_shared<QByteArray>();
+            auto replied = std::make_shared<bool>(false);
+            connect(socket, &QTcpSocket::readyRead, this, [this, socket, buf, replied] {
+                if (*replied) {
                     return;
                 }
+                buf->append(socket->readAll());
+                const int headerEnd = buf->indexOf("\r\n\r\n");
+                if (headerEnd < 0) {
+                    return;
+                }
+                int contentLength = 0;
+                const QList<QByteArray> headerLines = buf->left(headerEnd).split('\n');
+                for (const QByteArray &hl : headerLines) {
+                    if (hl.toLower().startsWith("content-length:")) {
+                        contentLength = hl.mid(15).trimmed().toInt();
+                        break;
+                    }
+                }
+                if (buf->size() < headerEnd + 4 + contentLength) {
+                    return;
+                }
+                *replied = true;
+                handle(socket);
             });
         });
     }

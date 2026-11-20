@@ -5,6 +5,7 @@
 
 #include "documentbridge.h"
 #include "graph/projectgraph.h"
+#include "katelspbridge.h"
 #include "lsp.h"
 #include "modes.h"
 #include "permissions.h"
@@ -17,7 +18,10 @@
 #include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonObject>
+#include <KTextEditor/Range>
+#include <QStandardItemModel>
 #include <QTemporaryDir>
+#include <QUrl>
 #include <QTest>
 
 using namespace Qt::Literals::StringLiterals;
@@ -117,6 +121,7 @@ private Q_SLOTS:
     void testLspCodeActions();
     void testLspAcceptsStringPositions();
     void testToolRegistration();
+    void testRichDiagnosticsFromModel();
 };
 
 void TestLsp::testSymbolExtractionCpp()
@@ -485,5 +490,48 @@ void TestLsp::testToolRegistration()
 
 // QTEST_MAIN, not GUILESS: the DiskDocumentBridge asks KTextEditor for open
 // documents, and the editor singleton needs a QGuiApplication.
+
+void TestLsp::testRichDiagnosticsFromModel()
+{
+    QStandardItemModel model;
+    auto *fileItem = new QStandardItem(u"src/main.cpp"_s);
+    fileItem->setData(QUrl::fromLocalFile(u"/tmp/proj/src/main.cpp"_s), Qt::UserRole);
+
+    auto *errItem = new QStandardItem(u"[clangd] (undeclared_var_use) use of undeclared identifier 'foo'"_s);
+    errItem->setData(QVariant::fromValue(KTextEditor::Range(9, 4, 9, 7)), Qt::UserRole + 1);
+    errItem->setData(1, Qt::UserRole + 2); // Error
+    auto *relItem = new QStandardItem(u"did you mean 'bar'?"_s);
+    errItem->appendRow(relItem);
+    fileItem->appendRow(errItem);
+
+    auto *warnItem = new QStandardItem(u"[clangd] unused variable 'x'"_s);
+    warnItem->setData(QVariant::fromValue(KTextEditor::Range(14, 8, 14, 9)), Qt::UserRole + 1);
+    warnItem->setData(2, Qt::UserRole + 2); // Warning
+    fileItem->appendRow(warnItem);
+
+    auto *suppressedItem = new QStandardItem(u"[clangd] suppressed notice"_s);
+    suppressedItem->setEnabled(false);
+    suppressedItem->setData(QVariant::fromValue(KTextEditor::Range(20, 0, 20, 1)), Qt::UserRole + 1);
+    suppressedItem->setData(1, Qt::UserRole + 2);
+    fileItem->appendRow(suppressedItem);
+
+    model.appendRow(fileItem);
+
+    const QList<LspDiagnostic> all = KateLspBridge::readDiagnosticsFromModel(&model);
+    QCOMPARE(all.size(), 2);
+    QCOMPARE(all.at(0).path, u"/tmp/proj/src/main.cpp"_s);
+    QCOMPARE(all.at(0).line, 10);
+    QCOMPARE(all.at(0).column, 5);
+    QCOMPARE(all.at(0).severity, 1);
+    QCOMPARE(all.at(0).source, u"clangd"_s);
+    QVERIFY(all.at(0).message.contains(u"undeclared identifier 'foo'"_s));
+    QVERIFY(all.at(0).message.contains(u"did you mean 'bar'?"_s));
+    QCOMPARE(all.at(1).line, 15);
+    QCOMPARE(all.at(1).severity, 2);
+
+    const QList<LspDiagnostic> none = KateLspBridge::readDiagnosticsFromModel(&model, u"/tmp/proj/other.cpp"_s);
+    QVERIFY(none.isEmpty());
+}
+
 QTEST_MAIN(TestLsp)
 #include "test_lsp.moc"

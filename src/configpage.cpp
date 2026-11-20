@@ -201,6 +201,8 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     m_acpEffort->addItem(u"low"_s, u"low"_s);
     m_acpEffort->addItem(u"medium"_s, u"medium"_s);
     m_acpEffort->addItem(u"high"_s, u"high"_s);
+    m_acpEffort->addItem(u"xhigh"_s, u"xhigh"_s);
+    m_acpEffort->addItem(u"max"_s, u"max"_s);
     m_acpEffort->setToolTip(i18n("Effort / thinking level pushed to the agent session. "
                                  "Only agents that advertise an effort option honor it; "
                                  "any option id the agent supports can be typed here."));
@@ -2354,7 +2356,7 @@ void KateAiConfigPage::autoFetchAcpModels()
 
 void KateAiConfigPage::fetchAcpModels()
 {
-    if (!usesAcpNative(m_plugin->settings())) {
+    if (m_apiFormat && apiFormatFromId(m_apiFormat->currentData().toString()) != ApiFormat::AcpNative) {
         return;
     }
 
@@ -2373,6 +2375,7 @@ void KateAiConfigPage::fetchAcpModels()
     }
     if (m_acpModelStatus) {
         m_acpModelStatus->setText(i18n("Loading models from agent..."));
+        m_acpModelStatus->setToolTip(QString());
     }
 
     // Use the selected agent ID and current UI values
@@ -2382,10 +2385,15 @@ void KateAiConfigPage::fetchAcpModels()
     auto *client = new AcpClient(this);
     m_acpFetchClient = client;
     Settings tempSettings = m_plugin->settings();
+    tempSettings.provider = Provider::Acp;
+    tempSettings.apiFormat = ApiFormat::AcpNative;
     tempSettings.acpAgentId = agentId;
     tempSettings.acpCommand = m_acpCommand->text().trimmed();
     tempSettings.acpArgs = m_acpArgs->text().trimmed();
     tempSettings.acpApiKeyEnv = m_acpApiKeyEnv->text().trimmed();
+    if (m_acpKey && !m_acpKey->text().trimmed().isEmpty()) {
+        tempSettings.acpApiKey = m_acpKey->text().trimmed();
+    }
     client->setSettings(tempSettings);
     client->setWorkspace(m_workspace);
 
@@ -2441,13 +2449,14 @@ void KateAiConfigPage::fetchAcpModels()
         client->deleteLater();
     });
 
-    connect(client, &AcpClient::failed, this, [this, client, btnWeak, statusWeak](const QString &) {
+    connect(client, &AcpClient::failed, this, [this, client, btnWeak, statusWeak](const QString &error) {
         if (btnWeak) {
             btnWeak->setEnabled(true);
             btnWeak->setText(i18n("Fetch Models"));
         }
         if (statusWeak) {
             statusWeak->setText(i18n("Failed to load models"));
+            statusWeak->setToolTip(error);
         }
         if (m_acpFetchClient == client) {
             m_acpFetchClient = nullptr;

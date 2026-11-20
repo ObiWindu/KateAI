@@ -147,27 +147,27 @@ QString shellCommandFor(const QString &toolName, const QJsonObject &args)
 {
     const QString canonical = canonicalToolName(toolName);
     const QString key = canonical.trimmed().toLower();
-    // OpenCode ACP aliases resolve to the same summaries as the native tools.
+    // OpenCode & Antigravity ACP aliases resolve to the same summaries as the native tools.
     auto argPath = [&args]() -> QString {
-        QString path = args.value(u"path"_s).toString();
-        if (path.isEmpty()) {
-            path = args.value(u"file_path"_s).toString();
+        for (const QString &k : {u"path"_s, u"Path"_s, u"file_path"_s, u"filePath"_s, u"file"_s, u"File"_s,
+                                 u"target_file"_s, u"targetFile"_s, u"TargetFile"_s,
+                                 u"absolute_path"_s, u"AbsolutePath"_s, u"DirectoryPath"_s,
+                                 u"SearchPath"_s, u"SearchDirectory"_s, u"uri"_s}) {
+            const QString p = args.value(k).toString();
+            if (!p.isEmpty()) {
+                return p;
+            }
         }
-        if (path.isEmpty()) {
-            path = args.value(u"filePath"_s).toString();
-        }
-        if (path.isEmpty()) {
-            path = args.value(u"file"_s).toString();
-        }
-        if (path.isEmpty()) {
-            path = args.value(u"uri"_s).toString();
-        }
-        return path;
+        return {};
     };
     if (canonical == u"read_file"_s || key == u"read_file"_s || toolName == u"fs/read_text_file"_s || key == u"read"_s) {
         const QString path = quoteShellArg(argPath());
-        const int offset = args.value(u"offset"_s).toInt(args.value(u"line"_s).toInt(1));
-        const int limit = args.value(u"limit"_s).toInt(0);
+        const int startLine = args.value(u"StartLine"_s).toInt(args.value(u"start_line"_s).toInt(0));
+        const int endLine = args.value(u"EndLine"_s).toInt(args.value(u"end_line"_s).toInt(0));
+        const int offset = startLine > 0 ? startLine : args.value(u"offset"_s).toInt(args.value(u"line"_s).toInt(1));
+        const int limit = (startLine > 0 && endLine >= startLine)
+            ? (endLine - startLine + 1)
+            : args.value(u"limit"_s).toInt(0);
         if (limit > 0) {
             const int end = offset + limit - 1;
             if (!path.isEmpty()) {
@@ -230,8 +230,11 @@ QString shellCommandFor(const QString &toolName, const QJsonObject &args)
         if (context > 0) {
             cmd += u" -C %1"_s.arg(context);
         }
-        cmd += u" %1"_s.arg(quoteShellArg(args.value(u"pattern"_s).toString()));
-        const QString path = args.value(u"path"_s).toString();
+        QString pattern = args.value(u"pattern"_s).toString();
+        if (pattern.isEmpty()) pattern = args.value(u"Query"_s).toString();
+        if (pattern.isEmpty()) pattern = args.value(u"query"_s).toString();
+        cmd += u" %1"_s.arg(quoteShellArg(pattern));
+        const QString path = argPath();
         if (!path.isEmpty()) {
             cmd += u" %1"_s.arg(quoteShellArg(path));
         }
@@ -244,6 +247,9 @@ QString shellCommandFor(const QString &toolName, const QJsonObject &args)
     if (canonical == u"glob"_s || toolName == u"fs/glob"_s) {
         QString pattern = args.value(u"pattern"_s).toString();
         if (pattern.isEmpty()) {
+            pattern = args.value(u"Pattern"_s).toString();
+        }
+        if (pattern.isEmpty()) {
             pattern = args.value(u"glob"_s).toString();
         }
         if (pattern.isEmpty()) {
@@ -254,12 +260,25 @@ QString shellCommandFor(const QString &toolName, const QJsonObject &args)
     if (canonical == u"bash"_s || key == u"execute"_s || key == u"run_command"_s || toolName == u"terminal/exec"_s || toolName == u"shell/exec"_s) {
         QString command = args.value(u"command"_s).toString();
         if (command.isEmpty()) {
+            command = args.value(u"CommandLine"_s).toString();
+        }
+        if (command.isEmpty()) {
             command = args.value(u"cmd"_s).toString();
         }
         if (command.isEmpty()) {
             command = args.value(u"script"_s).toString();
         }
         return command;
+    }
+    if (canonical == u"web_search"_s) {
+        QString q = args.value(u"query"_s).toString();
+        if (q.isEmpty()) q = args.value(u"Query"_s).toString();
+        return q.isEmpty() ? u"web_search"_s : u"web_search %1"_s.arg(quoteShellArg(q.left(120)));
+    }
+    if (canonical == u"web_fetch"_s) {
+        QString url = args.value(u"url"_s).toString();
+        if (url.isEmpty()) url = args.value(u"Url"_s).toString();
+        return url.isEmpty() ? u"web_fetch"_s : u"web_fetch %1"_s.arg(quoteShellArg(url.left(120)));
     }
     if (canonical == u"query_project_graph"_s) {
         const QString type = args.value(u"query_type"_s).toString();
@@ -274,12 +293,35 @@ QString shellCommandFor(const QString &toolName, const QJsonObject &args)
         return cmd;
     }
     if (canonical == u"new_task"_s) {
-        const QString mode = args.value(u"mode"_s).toString();
-        const QString description = args.value(u"description"_s).toString();
+        QString mode = args.value(u"mode"_s).toString();
+        if (mode.isEmpty()) mode = args.value(u"TypeName"_s).toString();
+        QString description = args.value(u"description"_s).toString();
+        if (description.isEmpty()) description = args.value(u"Role"_s).toString();
         const QString label = mode.isEmpty() ? QStringLiteral("code") : mode;
         // A delegation without a description still reads as a delegation, not
         // as a bare bracket pair with nothing behind it.
         return description.isEmpty() ? u"[%1]"_s.arg(label) : u"[%1] %2"_s.arg(label, description);
+    }
+    if (key == u"manage_task"_s) {
+        const QString action = args.value(u"Action"_s).toString();
+        const QString taskId = args.value(u"TaskId"_s).toString();
+        if (!action.isEmpty() && !taskId.isEmpty()) {
+            return u"manage_task %1 %2"_s.arg(action, taskId);
+        }
+        return action.isEmpty() ? u"manage_task"_s : u"manage_task %1"_s.arg(action);
+    }
+    if (key == u"run_workflow"_s) {
+        QString desc = args.value(u"Description"_s).toString();
+        if (desc.isEmpty()) desc = args.value(u"ScriptPath"_s).toString();
+        return desc.isEmpty() ? u"run_workflow"_s : u"run_workflow %1"_s.arg(quoteShellArg(desc.left(80)));
+    }
+    if (key == u"swarm"_s) {
+        const QString action = args.value(u"action"_s).toString();
+        const QString name = args.value(u"name"_s).toString();
+        if (!action.isEmpty() && !name.isEmpty()) {
+            return u"swarm %1 %2"_s.arg(action, name);
+        }
+        return action.isEmpty() ? u"swarm"_s : u"swarm %1"_s.arg(action);
     }
     if (canonical == u"write_plan_file"_s) {
         return u"write plan file"_s;
@@ -295,6 +337,75 @@ QString shellCommandFor(const QString &toolName, const QJsonObject &args)
         // header verbatim (capped) rather than being summarised as "question".
         const QString asked = questionTextFromToolArguments(args).section(u'\n', 0, 0).trimmed();
         return asked.isEmpty() ? u"question"_s : u"question %1"_s.arg(quoteShellArg(asked.left(120)));
+    }
+    if (canonical == u"debug_status"_s) {
+        return u"debug status"_s;
+    }
+    if (canonical == u"debug_stack"_s) {
+        const int tid = args.value(u"thread_id"_s).toInt(-1);
+        return tid >= 0 ? u"debug stack (thread %1)"_s.arg(tid) : u"debug stack"_s;
+    }
+    if (canonical == u"debug_locals"_s) {
+        const int lvl = args.value(u"frame_level"_s).toInt(-1);
+        return lvl >= 0 ? u"debug locals (frame #%1)"_s.arg(lvl) : u"debug locals"_s;
+    }
+    if (canonical == u"debug_breakpoints"_s) {
+        return u"debug breakpoints"_s;
+    }
+    if (canonical == u"debug_select_frame"_s) {
+        return u"debug select frame #%1"_s.arg(args.value(u"frame_level"_s).toInt(0));
+    }
+    if (canonical == u"debug_select_thread"_s) {
+        return u"debug select thread #%1"_s.arg(args.value(u"thread_id"_s).toInt(0));
+    }
+    if (canonical == u"debug_snapshot"_s) {
+        const QString act = args.value(u"action"_s).toString(u"capture"_s);
+        const QString label = args.value(u"label"_s).toString();
+        return label.isEmpty() ? u"debug snapshot %1"_s.arg(act) : u"debug snapshot %1 %2"_s.arg(act, quoteShellArg(label));
+    }
+    if (canonical == u"debug_set_breakpoint"_s) {
+        if (jsonBool(args.value(u"clear_all"_s))) {
+            return u"debug clear all breakpoints"_s;
+        }
+        const QString verb = jsonBool(args.value(u"remove"_s)) ? u"remove"_s : u"set"_s;
+        const QString bpPath = argPath();
+        const int line = args.value(u"line"_s).toInt(0);
+        return bpPath.isEmpty() ? u"debug %1 breakpoint"_s.arg(verb)
+                                : u"debug %1 breakpoint %2:%3"_s.arg(verb, quoteShellArg(bpPath)).arg(line);
+    }
+    if (canonical == u"debug_step"_s) {
+        const QString act = args.value(u"action"_s).toString();
+        if (act == u"run_to_cursor"_s) {
+            return u"debug run_to_cursor %1:%2"_s.arg(quoteShellArg(argPath())).arg(args.value(u"line"_s).toInt(0));
+        }
+        return act.isEmpty() ? u"debug step"_s : u"debug %1"_s.arg(act);
+    }
+    if (canonical == u"debug_eval"_s) {
+        const QString expr = args.value(u"expression"_s).toString().left(100);
+        return expr.isEmpty() ? u"debug eval"_s : u"debug eval %1"_s.arg(quoteShellArg(expr));
+    }
+    if (canonical == u"debug_session"_s) {
+        const QString act = args.value(u"action"_s).toString();
+        const QString target = args.value(u"target"_s).toString();
+        if (!target.isEmpty()) {
+            return u"debug %1 %2"_s.arg(act, quoteShellArg(target));
+        }
+        return act.isEmpty() ? u"debug session"_s : u"debug %1"_s.arg(act);
+    }
+    if (canonical == u"debug_console"_s) {
+        const QString cmd = args.value(u"command"_s).toString().left(100);
+        return cmd.isEmpty() ? u"debug console"_s : u"debug console %1"_s.arg(quoteShellArg(cmd));
+    }
+    if (canonical == u"build_targets"_s) {
+        return u"build targets"_s;
+    }
+    if (canonical == u"build_run"_s) {
+        const QString target = args.value(u"target"_s).toString();
+        return target.isEmpty() ? u"kate build (default target)"_s : u"kate build %1"_s.arg(quoteShellArg(target));
+    }
+    if (canonical == u"terminal_run"_s) {
+        const QString cmd = args.value(u"command"_s).toString().left(120);
+        return cmd.isEmpty() ? u"terminal_run"_s : u"konsole: %1"_s.arg(cmd);
     }
     if (toolName.startsWith(u"mcp__"_s)) {
         // MCP tools carry their own argument shapes, so show them verbatim.
@@ -701,6 +812,32 @@ PermissionRequest ToolRunner::describe(const ToolCall &call) const
         // Checklist, reasoning and plan-mode bookkeeping touch no file.
         req.risk = ToolRisk::Read;
         req.details = QString::fromUtf8(QJsonDocument(args).toJson(QJsonDocument::Compact));
+    } else if (call.name == u"debug_status"_s || call.name == u"debug_stack"_s
+               || call.name == u"debug_locals"_s || call.name == u"debug_breakpoints"_s
+               || call.name == u"debug_select_frame"_s || call.name == u"debug_select_thread"_s
+               || call.name == u"debug_snapshot"_s || call.name == u"build_targets"_s) {
+        req.risk = ToolRisk::Read;
+        req.details = QString::fromUtf8(QJsonDocument(args).toJson(QJsonDocument::Compact));
+    } else if (call.name == u"debug_set_breakpoint"_s) {
+        req.risk = ToolRisk::Write;
+        if (!req.path.isEmpty()) {
+            QString error;
+            req.resolvedPath = m_sandbox.resolve(req.path, &error, true);
+        }
+        req.details = QString::fromUtf8(QJsonDocument(args).toJson(QJsonDocument::Compact));
+    } else if (call.name == u"debug_step"_s || call.name == u"debug_eval"_s
+               || call.name == u"debug_session"_s || call.name == u"debug_console"_s
+               || call.name == u"build_run"_s || call.name == u"terminal_run"_s) {
+        req.risk = ToolRisk::Execute;
+        if (call.name == u"terminal_run"_s) {
+            req.details = args.value(u"command"_s).toString();
+        } else if (call.name == u"debug_eval"_s) {
+            req.details = args.value(u"expression"_s).toString();
+        } else if (call.name == u"debug_console"_s) {
+            req.details = args.value(u"command"_s).toString();
+        } else {
+            req.details = QString::fromUtf8(QJsonDocument(args).toJson(QJsonDocument::Compact));
+        }
     } else {
         // Unknown tools reach the permission card from here. A delegation or
         // an MCP call can run code, so they must not be presented with the
@@ -768,6 +905,51 @@ ToolResult ToolRunner::run(const ToolCall &call)
     }
     if (call.name == u"lsp_code_actions"_s) {
         return lspCodeActions(args);
+    }
+    if (call.name == u"debug_status"_s) {
+        return debugStatus(args);
+    }
+    if (call.name == u"debug_stack"_s) {
+        return debugStack(args);
+    }
+    if (call.name == u"debug_locals"_s) {
+        return debugLocals(args);
+    }
+    if (call.name == u"debug_breakpoints"_s) {
+        return debugBreakpoints(args);
+    }
+    if (call.name == u"debug_select_frame"_s) {
+        return debugSelectFrame(args);
+    }
+    if (call.name == u"debug_select_thread"_s) {
+        return debugSelectThread(args);
+    }
+    if (call.name == u"debug_snapshot"_s) {
+        return debugSnapshot(args);
+    }
+    if (call.name == u"debug_set_breakpoint"_s) {
+        return debugSetBreakpoint(args);
+    }
+    if (call.name == u"debug_step"_s) {
+        return debugStep(args);
+    }
+    if (call.name == u"debug_eval"_s) {
+        return debugEval(args);
+    }
+    if (call.name == u"debug_session"_s) {
+        return debugSession(args);
+    }
+    if (call.name == u"debug_console"_s) {
+        return debugConsole(args);
+    }
+    if (call.name == u"build_targets"_s) {
+        return buildTargets(args);
+    }
+    if (call.name == u"build_run"_s) {
+        return buildRun(args);
+    }
+    if (call.name == u"terminal_run"_s) {
+        return terminalRun(args);
     }
     if (call.name == u"goal_report"_s) {
         return goalReport(args);
@@ -2324,7 +2506,7 @@ ToolResult ToolRunner::lspDiagnostics(const QJsonObject &args) const
 
     if (!m_lsp || !m_lsp->isAvailable()) {
         result.ok = false;
-        result.output = u"No language server available: Kate's LSP plugin (katelspclientplugin) is not loaded. "
+        result.output = u"No language server available: Kate's LSP plugin (lspclientplugin) is not loaded. "
                         u"Run a build, test, or lint command with bash to get diagnostics instead."_s;
         return result;
     }
@@ -3077,6 +3259,614 @@ ToolResult ToolRunner::exitPlanMode(const QJsonObject &args)
     // because the setting belongs to the chat, not to the tool.
     result.ok = true;
     result.output = u"Plan mode exit requested."_s;
+    return result;
+}
+
+
+namespace
+{
+
+QString formatDebugVarLines(const QList<DebugVariable> &vars, const QString &filterLower, int indent = 0)
+{
+    QStringList out;
+    const QString pad(indent * 2, u' ');
+    for (const DebugVariable &v : vars) {
+        if (indent == 0 && !filterLower.isEmpty() && !v.name.toLower().contains(filterLower)) {
+            continue;
+        }
+        QString line = pad + v.name;
+        if (!v.type.isEmpty()) {
+            line += u" : "_s + v.type;
+        }
+        line += u" = "_s + (v.value.isEmpty() ? u"<unavailable>"_s : v.value);
+        out.append(line);
+        if (!v.children.isEmpty() && indent < 2) {
+            const QString childText = formatDebugVarLines(v.children, QString(), indent + 1);
+            if (!childText.isEmpty()) {
+                out.append(childText);
+            }
+        }
+    }
+    return out.join(u'\n');
+}
+
+QString formatDebugUnavailable()
+{
+    return u"Kate's Debugger plugin (kategdbplugin) is not loaded or unavailable in this window. "
+           u"Enable Settings -> Configure Kate -> Plugins -> Debugger (GDB / DAP) or run a debugger via bash."_s;
+}
+
+} // namespace
+
+ToolResult ToolRunner::debugStatus(const QJsonObject &args) const
+{
+    ToolResult result;
+    result.name = u"debug_status"_s;
+    if (!m_debug || !m_debug->isAvailable()) {
+        result.ok = false;
+        result.output = formatDebugUnavailable();
+        return result;
+    }
+
+    QStringList lines;
+    const DebugSessionState st = m_debug->sessionState();
+    lines.append(u"State: %1"_s.arg(DebugProvider::stateName(st)));
+    const QString target = m_debug->activeTarget();
+    if (!target.isEmpty()) {
+        lines.append(u"Active target: %1"_s.arg(target));
+    }
+
+    const DebugStopInfo stop = m_debug->currentStop();
+    if (st == DebugSessionState::Paused || !stop.reason.isEmpty() || !stop.file.isEmpty()) {
+        QString stopLine = u"Stop: %1"_s.arg(stop.reason.isEmpty() ? u"paused"_s : stop.reason);
+        if (!stop.description.isEmpty()) {
+            stopLine += u" (%1)"_s.arg(stop.description);
+        }
+        if (!stop.file.isEmpty()) {
+            const QString rel = QDir(m_sandbox.workspaceRoot()).relativeFilePath(stop.file);
+            stopLine += u" at %1:%2"_s.arg(rel.startsWith(u".."_s) ? stop.file : rel).arg(stop.line);
+        }
+        if (stop.threadId >= 0) {
+            stopLine += u" [thread %1]"_s.arg(stop.threadId);
+        }
+        if (stop.isCrashOrException) {
+            stopLine += u" [CRASH/EXCEPTION]"_s;
+        }
+        lines.append(stopLine);
+    }
+
+    const QList<DebugThread> threads = m_debug->threads();
+    if (!threads.isEmpty()) {
+        lines.append(u"Threads (%1):"_s.arg(threads.size()));
+        for (const DebugThread &t : threads) {
+            lines.append(u"  %1#%2 %3 (%4)"_s
+                             .arg(t.active ? u"* "_s : u"  "_s)
+                             .arg(t.id)
+                             .arg(t.name.isEmpty() ? u"thread"_s : t.name,
+                                  t.state.isEmpty() ? u"unknown"_s : t.state));
+        }
+    }
+
+    const QList<DebugTarget> targets = m_debug->targets();
+    if (!targets.isEmpty()) {
+        lines.append(u"Configured targets (%1):"_s.arg(targets.size()));
+        for (const DebugTarget &t : targets) {
+            lines.append(u"  %1%2%3"_s
+                             .arg(t.active ? u"* "_s : u"  "_s,
+                                  t.name,
+                                  t.executable.isEmpty() ? QString() : u" -> "_s + t.executable));
+        }
+    }
+
+    const QList<DebugBreakpoint> bps = m_debug->breakpoints();
+    lines.append(u"Breakpoints: %1"_s.arg(bps.size()));
+
+    if (jsonBool(args.value(u"include_output"_s))) {
+        const QString out = m_debug->recentOutput(4000).trimmed();
+        if (!out.isEmpty()) {
+            lines.append(u"\nRecent debugger output:\n"_s + out);
+        }
+    }
+
+    result.ok = true;
+    result.output = clip(lines.join(u'\n'));
+    return result;
+}
+
+ToolResult ToolRunner::debugStack(const QJsonObject &args) const
+{
+    ToolResult result;
+    result.name = u"debug_stack"_s;
+    if (!m_debug || !m_debug->isAvailable()) {
+        result.ok = false;
+        result.output = formatDebugUnavailable();
+        return result;
+    }
+
+    const int threadId = args.value(u"thread_id"_s).toInt(-1);
+    const int maxFrames = qBound(1, args.value(u"max_frames"_s).toInt(40), 200);
+    const QList<DebugStackFrame> frames = m_debug->stackFrames(threadId);
+    if (frames.isEmpty()) {
+        result.ok = true;
+        result.output = u"No stack frames available (state: %1)."_s.arg(DebugProvider::stateName(m_debug->sessionState()));
+        return result;
+    }
+
+    QStringList lines;
+    const int count = qMin(frames.size(), maxFrames);
+    for (int i = 0; i < count; ++i) {
+        const DebugStackFrame &f = frames.at(i);
+        QString loc;
+        if (!f.file.isEmpty()) {
+            const QString rel = QDir(m_sandbox.workspaceRoot()).relativeFilePath(f.file);
+            loc = u"%1:%2"_s.arg(rel.startsWith(u".."_s) ? f.file : rel).arg(f.line);
+        }
+        lines.append(u"%1#%2 %3%4"_s
+                         .arg(f.active ? u"-> "_s : u"   "_s)
+                         .arg(f.level)
+                         .arg(f.function.isEmpty() ? u"<unknown>"_s : f.function)
+                         .arg(loc.isEmpty() ? QString() : u" at "_s + loc));
+    }
+    if (frames.size() > count) {
+        lines.append(u"... (%1 more frames)"_s.arg(frames.size() - count));
+    }
+
+    result.ok = true;
+    result.output = clip(lines.join(u'\n'));
+    return result;
+}
+
+ToolResult ToolRunner::debugLocals(const QJsonObject &args) const
+{
+    ToolResult result;
+    result.name = u"debug_locals"_s;
+    if (!m_debug || !m_debug->isAvailable()) {
+        result.ok = false;
+        result.output = formatDebugUnavailable();
+        return result;
+    }
+
+    const int frameLevel = args.value(u"frame_level"_s).toInt(-1);
+    const QString filter = args.value(u"filter"_s).toString().trimmed().toLower();
+    const QList<DebugVariable> vars = m_debug->locals(frameLevel);
+    if (vars.isEmpty()) {
+        result.ok = true;
+        result.output = u"No local variables available (state: %1)."_s.arg(DebugProvider::stateName(m_debug->sessionState()));
+        return result;
+    }
+
+    const QString formatted = formatDebugVarLines(vars, filter);
+    result.ok = true;
+    result.output = formatted.isEmpty()
+        ? u"No local variables matched filter '%1'."_s.arg(filter)
+        : clip(formatted);
+    return result;
+}
+
+ToolResult ToolRunner::debugBreakpoints(const QJsonObject &args) const
+{
+    Q_UNUSED(args)
+    ToolResult result;
+    result.name = u"debug_breakpoints"_s;
+    if (!m_debug || !m_debug->isAvailable()) {
+        result.ok = false;
+        result.output = formatDebugUnavailable();
+        return result;
+    }
+
+    const QList<DebugBreakpoint> bps = m_debug->breakpoints();
+    if (bps.isEmpty()) {
+        result.ok = true;
+        result.output = u"No breakpoints set."_s;
+        return result;
+    }
+
+    QStringList lines;
+    for (const DebugBreakpoint &bp : bps) {
+        const QString rel = bp.file.isEmpty() ? bp.functionName
+                                              : QDir(m_sandbox.workspaceRoot()).relativeFilePath(bp.file);
+        const QString loc = bp.file.isEmpty()
+            ? rel
+            : u"%1:%2"_s.arg(rel.startsWith(u".."_s) ? bp.file : rel).arg(bp.line);
+        QString line = u"[%1] %2 (%3%4)"_s
+                           .arg(bp.id >= 0 ? QString::number(bp.id) : u"*"_s,
+                                loc,
+                                bp.enabled ? u"enabled"_s : u"disabled"_s,
+                                bp.verified ? QString() : u", unverified"_s);
+        if (!bp.condition.isEmpty()) {
+            line += u" if (%1)"_s.arg(bp.condition);
+        }
+        if (!bp.hitCondition.isEmpty()) {
+            line += u" hit(%1)"_s.arg(bp.hitCondition);
+        }
+        if (!bp.logMessage.isEmpty()) {
+            line += u" log(%1)"_s.arg(bp.logMessage);
+        }
+        lines.append(line);
+    }
+    result.ok = true;
+    result.output = clip(lines.join(u'\n'));
+    return result;
+}
+
+ToolResult ToolRunner::debugSelectFrame(const QJsonObject &args)
+{
+    ToolResult result;
+    result.name = u"debug_select_frame"_s;
+    if (!m_debug || !m_debug->isAvailable()) {
+        result.ok = false;
+        result.output = formatDebugUnavailable();
+        return result;
+    }
+    if (!args.contains(u"frame_level"_s)) {
+        result.ok = false;
+        result.output = u"frame_level is required."_s;
+        return result;
+    }
+    const int level = args.value(u"frame_level"_s).toInt(-1);
+    const DebugActionResult action = m_debug->selectFrame(level);
+    result.ok = action.ok;
+    result.output = clip(action.output);
+    return result;
+}
+
+ToolResult ToolRunner::debugSelectThread(const QJsonObject &args)
+{
+    ToolResult result;
+    result.name = u"debug_select_thread"_s;
+    if (!m_debug || !m_debug->isAvailable()) {
+        result.ok = false;
+        result.output = formatDebugUnavailable();
+        return result;
+    }
+    if (!args.contains(u"thread_id"_s)) {
+        result.ok = false;
+        result.output = u"thread_id is required."_s;
+        return result;
+    }
+    const int tid = args.value(u"thread_id"_s).toInt(-1);
+    const DebugActionResult action = m_debug->selectThread(tid);
+    result.ok = action.ok;
+    result.output = clip(action.output);
+    return result;
+}
+
+ToolResult ToolRunner::debugSnapshot(const QJsonObject &args)
+{
+    ToolResult result;
+    result.name = u"debug_snapshot"_s;
+    if (!m_debug || !m_debug->isAvailable()) {
+        result.ok = false;
+        result.output = formatDebugUnavailable();
+        return result;
+    }
+
+    const QString act = args.value(u"action"_s).toString(u"capture"_s).trimmed().toLower();
+    if (act == u"clear"_s) {
+        m_debug->clearSnapshots();
+        result.ok = true;
+        result.output = u"Cleared all debugger snapshots."_s;
+        return result;
+    }
+    if (act == u"list"_s) {
+        const QList<DebugSnapshot> snaps = m_debug->snapshots();
+        if (snaps.isEmpty()) {
+            result.ok = true;
+            result.output = u"No debugger snapshots captured yet."_s;
+            return result;
+        }
+        QStringList lines;
+        for (int i = 0; i < snaps.size(); ++i) {
+            const DebugSnapshot &s = snaps.at(i);
+            lines.append(u"#%1 %2 @ %3:%4 (%5 frames, %6 locals)"_s
+                             .arg(i + 1)
+                             .arg(s.label,
+                                  s.stopInfo.file.isEmpty() ? u"<unknown>"_s : s.stopInfo.file)
+                             .arg(s.stopInfo.line)
+                             .arg(s.frames.size())
+                             .arg(s.locals.size()));
+        }
+        result.ok = true;
+        result.output = lines.join(u'\n');
+        return result;
+    }
+    if (act == u"diff"_s) {
+        const QList<DebugSnapshot> snaps = m_debug->snapshots();
+        if (snaps.size() < 2) {
+            result.ok = false;
+            result.output = u"Need at least 2 snapshots to diff (currently have %1)."_s.arg(snaps.size());
+            return result;
+        }
+        const int secondIdx = args.contains(u"second"_s) ? (args.value(u"second"_s).toInt(snaps.size()) - 1) : (snaps.size() - 1);
+        const int firstIdx = args.contains(u"first"_s) ? (args.value(u"first"_s).toInt(snaps.size() - 1) - 1) : (snaps.size() - 2);
+        if (firstIdx < 0 || firstIdx >= snaps.size() || secondIdx < 0 || secondIdx >= snaps.size()) {
+            result.ok = false;
+            result.output = u"Snapshot index out of range (1..%1)."_s.arg(snaps.size());
+            return result;
+        }
+        result.ok = true;
+        result.output = clip(DebugProvider::diffSnapshots(snaps.at(firstIdx), snaps.at(secondIdx)));
+        return result;
+    }
+
+    const QString label = args.value(u"label"_s).toString().trimmed();
+    const DebugSnapshot snap = m_debug->captureSnapshot(label);
+    result.ok = true;
+    result.output = u"Captured debugger snapshot #%1 '%2' (%3 frames, %4 locals)."_s
+                        .arg(m_debug->snapshots().size())
+                        .arg(snap.label)
+                        .arg(snap.frames.size())
+                        .arg(snap.locals.size());
+    return result;
+}
+
+ToolResult ToolRunner::debugSetBreakpoint(const QJsonObject &args)
+{
+    ToolResult result;
+    result.name = u"debug_set_breakpoint"_s;
+    if (!m_debug || !m_debug->isAvailable()) {
+        result.ok = false;
+        result.output = formatDebugUnavailable();
+        return result;
+    }
+
+    if (jsonBool(args.value(u"clear_all"_s))) {
+        const DebugActionResult action = m_debug->clearAllBreakpoints();
+        result.ok = action.ok;
+        result.output = clip(action.output);
+        return result;
+    }
+
+    const QString rawPath = args.value(u"path"_s).toString().trimmed();
+    const int line = args.value(u"line"_s).toInt(0);
+    if (rawPath.isEmpty() || line <= 0) {
+        result.ok = false;
+        result.output = u"Both path and positive 1-based line are required (unless clear_all is true)."_s;
+        return result;
+    }
+
+    QString err;
+    const QString resolved = m_sandbox.resolve(rawPath, &err, true);
+    if (resolved.isEmpty()) {
+        result.ok = false;
+        result.output = err;
+        return result;
+    }
+
+    const DebugActionResult action = m_debug->setBreakpoint(
+        resolved,
+        line,
+        args.value(u"condition"_s).toString(),
+        args.value(u"hit_condition"_s).toString(),
+        args.value(u"log_message"_s).toString(),
+        jsonBool(args.value(u"remove"_s)));
+    result.ok = action.ok;
+    result.output = clip(action.output);
+    return result;
+}
+
+ToolResult ToolRunner::debugStep(const QJsonObject &args)
+{
+    ToolResult result;
+    result.name = u"debug_step"_s;
+    if (!m_debug || !m_debug->isAvailable()) {
+        result.ok = false;
+        result.output = formatDebugUnavailable();
+        return result;
+    }
+
+    const QString actionName = args.value(u"action"_s).toString().trimmed().toLower();
+    if (actionName.isEmpty()) {
+        result.ok = false;
+        result.output = u"action is required (continue, step_over, step_into, step_out, run_to_cursor, pause)."_s;
+        return result;
+    }
+
+    QString resolved;
+    const int line = args.value(u"line"_s).toInt(0);
+    if (actionName == u"run_to_cursor"_s) {
+        const QString rawPath = args.value(u"path"_s).toString().trimmed();
+        if (rawPath.isEmpty() || line <= 0) {
+            result.ok = false;
+            result.output = u"run_to_cursor requires path and positive 1-based line."_s;
+            return result;
+        }
+        QString err;
+        resolved = m_sandbox.resolve(rawPath, &err, false);
+        if (resolved.isEmpty()) {
+            result.ok = false;
+            result.output = err;
+            return result;
+        }
+    }
+
+    const int timeoutMs = qBound(1000, args.value(u"timeout_ms"_s).toInt(15000), 60000);
+    const DebugActionResult action = m_debug->step(actionName, resolved, line, timeoutMs);
+    result.ok = action.ok;
+    QString out = action.output;
+    if (action.ok && m_debug->sessionState() == DebugSessionState::Paused) {
+        const QString summary = m_debug->contextSummary(6, 16, 400);
+        if (!summary.isEmpty()) {
+            out += u"\n\n"_s + summary;
+        }
+    }
+    result.output = clip(out);
+    return result;
+}
+
+ToolResult ToolRunner::debugEval(const QJsonObject &args)
+{
+    ToolResult result;
+    result.name = u"debug_eval"_s;
+    if (!m_debug || !m_debug->isAvailable()) {
+        result.ok = false;
+        result.output = formatDebugUnavailable();
+        return result;
+    }
+
+    const QString expr = args.value(u"expression"_s).toString().trimmed();
+    if (expr.isEmpty()) {
+        result.ok = false;
+        result.output = u"expression must not be empty."_s;
+        return result;
+    }
+    const int timeoutMs = qBound(500, args.value(u"timeout_ms"_s).toInt(5000), 30000);
+    const DebugActionResult action = m_debug->evaluate(expr, timeoutMs);
+    result.ok = action.ok;
+    result.output = clip(action.output);
+    return result;
+}
+
+ToolResult ToolRunner::debugSession(const QJsonObject &args)
+{
+    ToolResult result;
+    result.name = u"debug_session"_s;
+    if (!m_debug || !m_debug->isAvailable()) {
+        result.ok = false;
+        result.output = formatDebugUnavailable();
+        return result;
+    }
+
+    const QString actionName = args.value(u"action"_s).toString().trimmed().toLower();
+    if (actionName.isEmpty()) {
+        result.ok = false;
+        result.output = u"action is required (start, restart, stop, hot_reload, hot_restart, reload_launch_json)."_s;
+        return result;
+    }
+
+    if (actionName == u"reload_launch_json"_s) {
+        const bool ok = m_debug->reloadLaunchJsonTargets();
+        result.ok = ok;
+        result.output = ok ? u"Reloaded .vscode/launch.json targets in Kate's debugger."_s
+                           : u"Could not reload .vscode/launch.json targets."_s;
+        return result;
+    }
+
+    const QString target = args.value(u"target"_s).toString().trimmed();
+    const int timeoutMs = qBound(1000, args.value(u"timeout_ms"_s).toInt(15000), 60000);
+    const DebugActionResult action = m_debug->controlSession(actionName, target, timeoutMs);
+    result.ok = action.ok;
+    result.output = clip(action.output);
+    return result;
+}
+
+ToolResult ToolRunner::debugConsole(const QJsonObject &args)
+{
+    ToolResult result;
+    result.name = u"debug_console"_s;
+    if (!m_debug || !m_debug->isAvailable()) {
+        result.ok = false;
+        result.output = formatDebugUnavailable();
+        return result;
+    }
+
+    const QString cmd = args.value(u"command"_s).toString().trimmed();
+    if (cmd.isEmpty()) {
+        result.ok = false;
+        result.output = u"command must not be empty."_s;
+        return result;
+    }
+
+    const DebugActionResult action = m_debug->sendConsoleCommand(cmd);
+    result.ok = action.ok;
+    result.output = clip(action.output);
+    return result;
+}
+
+ToolResult ToolRunner::buildTargets(const QJsonObject &args) const
+{
+    Q_UNUSED(args)
+    ToolResult result;
+    result.name = u"build_targets"_s;
+
+    const QString workspace = m_sandbox.workspaceRoot();
+    const QList<BuildTargetInfo> targets = m_ecosystem
+        ? m_ecosystem->buildTargets(workspace)
+        : EcosystemProvider::discoverWorkspaceBuildTargets(workspace);
+    const QString compileCommands = m_ecosystem
+        ? m_ecosystem->compileCommandsPath(workspace)
+        : EcosystemProvider::findCompileCommands(workspace);
+
+    QStringList lines;
+    lines.append(u"Kate Build plugin: %1"_s.arg((m_ecosystem && m_ecosystem->isBuildPluginAvailable()) ? u"available"_s : u"not loaded (filesystem discovery only)"_s));
+    if (!compileCommands.isEmpty()) {
+        lines.append(u"compile_commands.json: %1"_s.arg(QDir(workspace).relativeFilePath(compileCommands)));
+    }
+    if (targets.isEmpty()) {
+        lines.append(u"No build targets discovered in %1."_s.arg(workspace));
+    } else {
+        lines.append(u"Targets (%1):"_s.arg(targets.size()));
+        for (const BuildTargetInfo &t : targets) {
+            QString line = u"  %1%2 [%3]"_s.arg(t.isDefault ? u"* "_s : u"  "_s, t.name, t.type);
+            if (!t.command.isEmpty()) {
+                line += u" cmd=`%1`"_s.arg(t.command);
+            }
+            if (!t.artifactPath.isEmpty()) {
+                line += u" artifact=%1"_s.arg(QDir(workspace).relativeFilePath(t.artifactPath));
+            }
+            lines.append(line);
+        }
+    }
+
+    result.ok = true;
+    result.output = clip(lines.join(u'\n'));
+    return result;
+}
+
+ToolResult ToolRunner::buildRun(const QJsonObject &args)
+{
+    ToolResult result;
+    result.name = u"build_run"_s;
+    if (!m_ecosystem || !m_ecosystem->isBuildPluginAvailable()) {
+        result.ok = false;
+        result.output = u"Kate's Build plugin (katebuildplugin) is not loaded. Use bash to run your build command instead."_s;
+        return result;
+    }
+
+    const QString target = args.value(u"target"_s).toString().trimmed();
+    const EcosystemActionResult action = m_ecosystem->triggerBuild(target);
+    result.ok = action.ok;
+    result.output = clip(action.output);
+    return result;
+}
+
+ToolResult ToolRunner::terminalRun(const QJsonObject &args)
+{
+    ToolResult result;
+    result.name = u"terminal_run"_s;
+    if (!m_ecosystem || !m_ecosystem->isTerminalAvailable()) {
+        result.ok = false;
+        result.output = u"Kate's Konsole plugin (katekonsoleplugin) is not loaded. Use bash instead."_s;
+        return result;
+    }
+
+    const QString command = args.value(u"command"_s).toString().trimmed();
+    if (command.isEmpty()) {
+        result.ok = false;
+        result.output = u"command must not be empty."_s;
+        return result;
+    }
+    if (m_sandbox.isAlwaysDeniedCommand(command) || m_sandbox.commandTouchesDeniedPath(command)) {
+        result.ok = false;
+        result.output = u"Command blocked by sandbox policy."_s;
+        return result;
+    }
+
+    QString resolvedDir;
+    const QString rawDir = args.value(u"working_dir"_s).toString().trimmed();
+    if (!rawDir.isEmpty()) {
+        QString err;
+        resolvedDir = m_sandbox.resolve(rawDir, &err, false);
+        if (resolvedDir.isEmpty()) {
+            result.ok = false;
+            result.output = err;
+            return result;
+        }
+    }
+
+    const EcosystemActionResult action = m_ecosystem->runInTerminal(command, resolvedDir);
+    result.ok = action.ok;
+    result.output = clip(action.output);
     return result;
 }
 

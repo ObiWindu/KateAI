@@ -16,8 +16,10 @@
 #include <QPointer>
 #include <QSet>
 
+class QAction;
 class QDialog;
 class QTimer;
+class QToolButton;
 
 namespace KTextEditor
 {
@@ -30,7 +32,10 @@ namespace KateAi
 class ChatWidget;
 class EditorAssist;
 class KateAiPlugin;
+class KateDebugBridge;
+class KateEcosystemBridge;
 class KateLspBridge;
+struct DebugStopInfo;
 
 class KateAiView : public QObject, public KXMLGUIClient
 {
@@ -44,6 +49,23 @@ public:
     void newChat();
     void askSelection();
     void showConfiguration();
+
+    // Debugger, diagnostics, build, and editor-integration actions (also
+    // dispatched by the ":kateai" command-line subcommands).
+    void diagnoseDebugStop();
+    void explainDebugStack();
+    void fixDiagnostics();
+    void fixBuildErrors();
+    void generateLaunchJson();
+    void snapshotDebugState();
+    void openReviewDiffTab();
+    void openProjectGraphTab();
+    void toggleAnnotationGutter();
+    void generateCommitMessage();
+    void explainGitBlame();
+    void analyzeBacktrace();
+    void explainTerminalSelection();
+    bool setBreakpointAtCursor(const QString &condition = QString(), QString *message = nullptr);
 
     // The chat of this window's panel. The ":kateai" command line command
     // dispatches through this.
@@ -104,9 +126,15 @@ private:
     // Posts the in-editor banner for an agent edit of an open document,
     // unless it is already posted.
     void postEditBanner(const QString &path);
+    // Posts a crash/exception KTextEditor::Message banner when the debugger
+    // stops on a signal or unhandled exception.
+    void postDebugStopBanner(const DebugStopInfo &info);
     // Mirrors the review queue's per-path line ranges into the editor assist,
     // so the hover hints follow the queue (pending and settled alike).
     void syncEditRanges();
+    // Installs and updates the compact clickable Kate AI pill in Kate's status bar.
+    void setupStatusBarPill();
+    void updateStatusBarPill();
     // Re-sends the editor context to the agent. Debounced: cursor moves and
     // selection changes arrive per keystroke/mouse-move and the context is a
     // prompt-sized string.
@@ -130,17 +158,22 @@ private:
     KTextEditor::MainWindow *m_mainWindow = nullptr;
     QPointer<QWidget> m_toolView;
     QPointer<QDialog> m_configDialog;
+    QPointer<QToolButton> m_statusPill;
+    QPointer<QAction> m_annotationAction;
     ChatWidget *m_chat = nullptr;
-    // In-editor AI completions and agent-edit hover hints, one per window.
+    // In-editor AI completions, debug overlays, and agent-edit hover hints, one per window.
     EditorAssist *m_assist = nullptr;
     // The answer of the user per workspace: whether the MCP servers of that
     // project may be started.
     QHash<QString, bool> m_mcpTrust;
     DiskDocumentBridge m_bridge;
-    // The bridge to Kate's LSP client plugin: availability, document-mark
-    // diagnostics and LSP messages. Owns the probing; the agent and the
-    // in-editor assist only see the LspProvider interface.
+    // The bridge to Kate's LSP client plugin: availability, rich diagnostics
+    // and LSP messages.
     KateLspBridge *m_lsp = nullptr;
+    // The bridge to Kate's DAP/GDB debugger plugin ("kategdbplugin").
+    KateDebugBridge *m_debug = nullptr;
+    // The bridge to Kate's build, konsole, project tree, backtrace, and native tabs.
+    KateEcosystemBridge *m_ecosystem = nullptr;
     // Debounce timers: editor-context refresh on cursor/selection moves, and
     // project-graph update on the user's own typing.
     QTimer *m_contextTimer = nullptr;
@@ -154,24 +187,10 @@ private:
     // Paths with a banner currently posted, so one file gets one banner per
     // review round however many edits the turn makes to it.
     QSet<QString> m_bannerPaths;
-    // Editor colour scheme identity as of the last theme load, so configChanged
-    // and ApplicationPaletteChange (which fire for every editor setting and
-    // every system theme switch) only repaint on a real change. The background
-    // colour is tracked alongside the name: KDE can swap the scheme under the
-    // same name, and the signal can fire before theme() reflects the new
-    // scheme, so the check is deferred to the next event-loop turn and
-    // compares colours.
+    // Editor colour scheme identity as of the last theme load.
     QString m_lastEditorThemeName;
     QString m_lastEditorThemeBg;
-    // The application palette's window colour as of the last theme load. In
-    // inherit mode the window chrome follows the editor theme, but a system
-    // theme switch can fire ApplicationPaletteChange without touching the
-    // editor scheme, and the tool view must repaint regardless.
     QString m_lastWindowBg;
-    // The workspace currently applied to the agent, so a real switch (Kate
-    // opened another folder) can be told apart from the refreshes that run
-    // on every editor change. The age of the view suppresses the notice for
-    // Kate's own session restore at startup.
     QString m_workspace;
     QElapsedTimer m_viewAge;
 };

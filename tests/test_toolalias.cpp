@@ -232,6 +232,22 @@ private Q_SLOTS:
         QCOMPARE(canonicalToolName(u"View"_s), u"read_file"_s);
         QCOMPARE(canonicalToolName(u"find_files"_s), u"glob"_s);
         QCOMPARE(canonicalToolName(u"multi_replace_file_content"_s), u"multi_edit_file"_s);
+        // Antigravity (`agy`) & ACP tool names.
+        QCOMPARE(canonicalToolName(u"view_file"_s), u"read_file"_s);
+        QCOMPARE(canonicalToolName(u"view_file_outline"_s), u"read_file"_s);
+        QCOMPARE(canonicalToolName(u"write_to_file"_s), u"write_file"_s);
+        QCOMPARE(canonicalToolName(u"replace_file_content"_s), u"edit_file"_s);
+        QCOMPARE(canonicalToolName(u"grep_search"_s), u"grep"_s);
+        QCOMPARE(canonicalToolName(u"find_by_name"_s), u"glob"_s);
+        QCOMPARE(canonicalToolName(u"search_web"_s), u"web_search"_s);
+        QCOMPARE(canonicalToolName(u"read_url_content"_s), u"web_fetch"_s);
+        QCOMPARE(canonicalToolName(u"invoke_subagent"_s), subtaskToolName());
+        QCOMPARE(canonicalToolName(u"terminal/create"_s), u"bash"_s);
+        QCOMPARE(canonicalToolName(u"fs/delete_file"_s), u"edit_file"_s);
+        QCOMPARE(canonicalToolName(u"fs/multi_edit_file"_s), u"multi_edit_file"_s);
+        QCOMPARE(canonicalToolName(u"client_view_file"_s), u"read_file"_s);
+        QCOMPARE(canonicalToolName(u"client_create_file"_s), u"write_file"_s);
+        QCOMPARE(canonicalToolName(u"client_edit_file"_s), u"edit_file"_s);
     }
 
     void applyPatchToolCallParsesPerFileDiffs()

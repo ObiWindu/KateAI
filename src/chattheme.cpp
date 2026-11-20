@@ -978,8 +978,10 @@ bool isEditToolName(const QString &toolName)
 {
     const QString canonical = canonicalToolName(toolName).trimmed().toLower();
     const QString key = canonical.isEmpty() ? toolName.trimmed().toLower() : canonical;
-    if (key.isEmpty() || key == u"write_plan_file"_s || key == u"read_file"_s || key == u"read"_s
-        || key == u"fs/read_text_file"_s || key == u"grep"_s || key == u"search"_s
+    if (key.isEmpty() || key == u"write_plan_file"_s || key == u"todo_write"_s || key == u"todo_read"_s
+        || key == u"todowrite"_s || key == u"todoread"_s || key == u"read_file"_s || key == u"read"_s
+        || key == u"fs/read_text_file"_s || key == u"fs/read_file"_s || key == u"fs/list_directory"_s
+        || key == u"fs/grep"_s || key == u"fs/glob"_s || key == u"grep"_s || key == u"search"_s
         || key == u"glob"_s || key == u"bash"_s || key == u"execute"_s || key == u"list_dir"_s
         || key.startsWith(u"mcp__"_s) || key.startsWith(u"terminal"_s)) {
         return false;
@@ -1023,10 +1025,14 @@ QString toolLabel(const QString &toolName)
         {QStringLiteral("task"), QStringLiteral("Delegate")},
         {QStringLiteral("todowrite"), QStringLiteral("Update todo list")},
         {QStringLiteral("todoread"), QStringLiteral("Read todo list")},
+        {QStringLiteral("todo_write"), QStringLiteral("Update todo list")},
+        {QStringLiteral("todo_read"), QStringLiteral("Read todo list")},
         {QStringLiteral("webfetch"), QStringLiteral("Fetch page")},
         {QStringLiteral("web_fetch"), QStringLiteral("Fetch page")},
         {QStringLiteral("patch"), QStringLiteral("Edit file")},
+        {QStringLiteral("apply_patch"), QStringLiteral("Edit file")},
         {QStringLiteral("write_plan_file"), QStringLiteral("Write plan file")},
+        {QStringLiteral("exit_plan_mode"), QStringLiteral("Exit plan mode")},
         {QStringLiteral("suggest"), QStringLiteral("Suggestion")},
         {QStringLiteral("question"), QStringLiteral("Question")},
         {QStringLiteral("attempt_completion"), QStringLiteral("Finish")},
@@ -1040,6 +1046,36 @@ QString toolLabel(const QString &toolName)
         {QStringLiteral("lsp_definition"), QStringLiteral("Go to definition")},
         {QStringLiteral("lsp_references"), QStringLiteral("Find references")},
         {QStringLiteral("lsp_code_actions"), QStringLiteral("Quick fixes")},
+        {QStringLiteral("debug_status"), QStringLiteral("Debugger status")},
+        {QStringLiteral("debug_stack"), QStringLiteral("Call stack")},
+        {QStringLiteral("debug_locals"), QStringLiteral("Local variables")},
+        {QStringLiteral("debug_breakpoints"), QStringLiteral("Breakpoints")},
+        {QStringLiteral("debug_select_frame"), QStringLiteral("Select stack frame")},
+        {QStringLiteral("debug_select_thread"), QStringLiteral("Select thread")},
+        {QStringLiteral("debug_snapshot"), QStringLiteral("Debug snapshot")},
+        {QStringLiteral("debug_set_breakpoint"), QStringLiteral("Set breakpoint")},
+        {QStringLiteral("debug_step"), QStringLiteral("Step debugger")},
+        {QStringLiteral("debug_eval"), QStringLiteral("Evaluate expression")},
+        {QStringLiteral("debug_session"), QStringLiteral("Debug session")},
+        {QStringLiteral("debug_console"), QStringLiteral("Debug console")},
+        {QStringLiteral("build_targets"), QStringLiteral("Build targets")},
+        {QStringLiteral("build_run"), QStringLiteral("Run build")},
+        {QStringLiteral("terminal_run"), QStringLiteral("Run in Konsole")},
+        // ACP / Antigravity orchestration, terminal, and browser tools.
+        {QStringLiteral("manage_task"), QStringLiteral("Manage task")},
+        {QStringLiteral("command_status"), QStringLiteral("Command status")},
+        {QStringLiteral("read_terminal"), QStringLiteral("Read terminal")},
+        {QStringLiteral("define_subagent"), QStringLiteral("Define subagent")},
+        {QStringLiteral("manage_subagents"), QStringLiteral("Manage subagents")},
+        {QStringLiteral("send_message"), QStringLiteral("Send message")},
+        {QStringLiteral("schedule"), QStringLiteral("Schedule")},
+        {QStringLiteral("run_workflow"), QStringLiteral("Run workflow")},
+        {QStringLiteral("swarm"), QStringLiteral("Swarm")},
+        {QStringLiteral("generate_image"), QStringLiteral("Generate image")},
+        {QStringLiteral("browser_subagent"), QStringLiteral("Browser")},
+        {QStringLiteral("open_browser_url"), QStringLiteral("Open browser")},
+        {QStringLiteral("task_boundary"), QStringLiteral("Task status")},
+        {QStringLiteral("notify_user"), QStringLiteral("Notify")},
         // ACP tool kinds that have no Kate tool of their own.
         {QStringLiteral("move"), QStringLiteral("Move file")},
         {QStringLiteral("think"), QStringLiteral("Thinking")},
@@ -1138,8 +1174,26 @@ QString toolColor(const QString &toolName)
         {QStringLiteral("task"), QStringLiteral("#88c0d0")},
         {QStringLiteral("todowrite"), QStringLiteral("#ebcb8b")},
         {QStringLiteral("todoread"), QStringLiteral("#ebcb8b")},
+        {QStringLiteral("todo_write"), QStringLiteral("#ebcb8b")},
+        {QStringLiteral("todo_read"), QStringLiteral("#ebcb8b")},
+        {QStringLiteral("exit_plan_mode"), QStringLiteral("#ebcb8b")},
         {QStringLiteral("patch"), QStringLiteral("#c678dd")},
+        {QStringLiteral("apply_patch"), QStringLiteral("#c678dd")},
         {QStringLiteral("fetch_rules"), QStringLiteral("#a3be8c")},
+        {QStringLiteral("manage_task"), QStringLiteral("#e06c75")},
+        {QStringLiteral("command_status"), QStringLiteral("#56b6c2")},
+        {QStringLiteral("read_terminal"), QStringLiteral("#56b6c2")},
+        {QStringLiteral("define_subagent"), QStringLiteral("#88c0d0")},
+        {QStringLiteral("manage_subagents"), QStringLiteral("#88c0d0")},
+        {QStringLiteral("send_message"), QStringLiteral("#88c0d0")},
+        {QStringLiteral("schedule"), QStringLiteral("#d19a66")},
+        {QStringLiteral("run_workflow"), QStringLiteral("#88c0d0")},
+        {QStringLiteral("swarm"), QStringLiteral("#88c0d0")},
+        {QStringLiteral("generate_image"), QStringLiteral("#b48ead")},
+        {QStringLiteral("browser_subagent"), QStringLiteral("#5ab0d8")},
+        {QStringLiteral("open_browser_url"), QStringLiteral("#5ab0d8")},
+        {QStringLiteral("task_boundary"), QStringLiteral("#ebcb8b")},
+        {QStringLiteral("notify_user"), QStringLiteral("#3d7eff")},
     };
 
     const QString key = canonical.trimmed().toLower();

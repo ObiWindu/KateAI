@@ -7,6 +7,7 @@
 #include "types.h"
 
 #include <QCoreApplication>
+#include <QDateTime>
 #include <QDir>
 #include <QDirIterator>
 #include <QFile>
@@ -24,6 +25,7 @@
 #include <QUrl>
 
 #if defined(Q_OS_UNIX)
+#include <cstdio>
 #include <unistd.h>
 #endif
 
@@ -279,7 +281,7 @@ bool acpNeedsPageShim()
 static bool isTrustedShimSource(const QString &path)
 {
     const QFileInfo info(path);
-    if (!info.exists() || !info.isFile()) {
+    if (!info.exists() || !info.isFile() || info.isSymLink()) {
         return false;
     }
     if (info.permissions() & (QFileDevice::WriteGroup | QFileDevice::WriteOther)) {
@@ -292,15 +294,55 @@ static bool isTrustedShimSource(const QString &path)
     return true;
 }
 
+static bool filesHaveSameBytes(const QString &aPath, const QString &bPath)
+{
+    const QFileInfo aInfo(aPath);
+    const QFileInfo bInfo(bPath);
+    if (!aInfo.exists() || !bInfo.exists() || aInfo.isSymLink() || bInfo.isSymLink()
+        || aInfo.size() != bInfo.size()) {
+        return false;
+    }
+    QFile a(aPath);
+    QFile b(bPath);
+    if (!a.open(QIODevice::ReadOnly) || !b.open(QIODevice::ReadOnly)) {
+        return false;
+    }
+    return a.readAll() == b.readAll();
+}
+
+static bool installShimAtomically(const QString &src, const QString &target)
+{
+    const QString staged = target + u".tmp-"_s
+        + QUuid::createUuid().toString(QUuid::WithoutBraces).left(8);
+    if (!QFile::copy(src, staged)) {
+        QFile::remove(staged);
+        return false;
+    }
+    QFile::setPermissions(staged, QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner
+                                      | QFileDevice::ReadGroup | QFileDevice::ExeGroup
+                                      | QFileDevice::ReadOther | QFileDevice::ExeOther);
+#if defined(Q_OS_UNIX)
+    if (::rename(QFile::encodeName(staged).constData(), QFile::encodeName(target).constData()) == 0) {
+        return true;
+    }
+    QFile::remove(staged);
+    return false;
+#else
+    QFile::remove(target);
+    if (QFile::rename(staged, target)) {
+        return true;
+    }
+    QFile::remove(staged);
+    return false;
+#endif
+}
+
 QString acpEnsurePageShim(const QString &dir)
 {
     if (dir.isEmpty()) {
         return {};
     }
     const QString target = QDir(dir).filePath(u"libpage4k.so"_s);
-    if (QFileInfo::exists(target)) {
-        return target;
-    }
 
     // The directories the shim may come from: the installation and the system
     // directories. The working directory and /tmp are deliberately not on the
@@ -310,6 +352,8 @@ QString acpEnsurePageShim(const QString &dir)
         QCoreApplication::applicationDirPath(),
         QCoreApplication::applicationDirPath() + u"/../lib"_s,
         QCoreApplication::applicationDirPath() + u"/../lib64"_s,
+        QDir::homePath() + u"/.local/lib/kateai"_s,
+        QDir::homePath() + u"/.local/lib64/kateai"_s,
         u"/usr/lib/kateai"_s,
         u"/usr/lib64/kateai"_s,
     };
@@ -318,11 +362,11 @@ QString acpEnsurePageShim(const QString &dir)
         if (!isTrustedShimSource(src)) {
             continue;
         }
+        if (filesHaveSameBytes(src, target)) {
+            return target;
+        }
         QDir().mkpath(dir);
-        if (QFile::copy(src, target)) {
-            QFile::setPermissions(target, QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner
-                                            | QFileDevice::ReadGroup | QFileDevice::ExeGroup
-                                            | QFileDevice::ReadOther | QFileDevice::ExeOther);
+        if (installShimAtomically(src, target)) {
             return target;
         }
     }
@@ -331,21 +375,47 @@ QString acpEnsurePageShim(const QString &dir)
     // plugin. Only the installation directory is used: a "src/page4k_shim.c"
     // in the working directory belongs to the project, and compiling it would
     // run code the project supplied.
-    const QString gcc = QStandardPaths::findExecutable(u"gcc"_s);
-    const QString cc = gcc.isEmpty() ? QStandardPaths::findExecutable(u"cc"_s) : gcc;
+    QString cc = QStandardPaths::findExecutable(u"gcc"_s);
+    if (cc.isEmpty()) {
+        cc = QStandardPaths::findExecutable(u"clang"_s);
+    }
+    if (cc.isEmpty()) {
+        cc = QStandardPaths::findExecutable(u"cc"_s);
+    }
     if (!cc.isEmpty()) {
         const QString srcPath = QDir(QCoreApplication::applicationDirPath()).filePath(u"page4k_shim.c"_s);
         if (isTrustedShimSource(srcPath)) {
-            QDir().mkpath(dir);
-            QProcess compile;
-            compile.start(cc, {u"-shared"_s, u"-fPIC"_s, u"-O2"_s, u"-o"_s, target, srcPath, u"-ldl"_s, u"-lpthread"_s});
-            if (compile.waitForFinished(5000) && compile.exitCode() == 0 && QFileInfo::exists(target)) {
-                QFile::setPermissions(target, QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner
-                                                | QFileDevice::ReadGroup | QFileDevice::ExeGroup
-                                                | QFileDevice::ReadOther | QFileDevice::ExeOther);
-                return target;
+            const QFileInfo targetInfo(target);
+            const QFileInfo srcInfo(srcPath);
+            if (!targetInfo.exists() || srcInfo.lastModified() > targetInfo.lastModified()) {
+                QDir().mkpath(dir);
+                const QString staged = target + u".tmp-"_s
+                    + QUuid::createUuid().toString(QUuid::WithoutBraces).left(8);
+                QProcess compile;
+                compile.start(cc, {u"-shared"_s, u"-fPIC"_s, u"-O2"_s, u"-fno-omit-frame-pointer"_s,
+                                   u"-o"_s, staged, srcPath, u"-ldl"_s, u"-lpthread"_s});
+                if (compile.waitForFinished(5000) && compile.exitCode() == 0 && QFileInfo::exists(staged)) {
+                    QFile::setPermissions(staged, QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner
+                                                      | QFileDevice::ReadGroup | QFileDevice::ExeGroup
+                                                      | QFileDevice::ReadOther | QFileDevice::ExeOther);
+#if defined(Q_OS_UNIX)
+                    if (::rename(QFile::encodeName(staged).constData(), QFile::encodeName(target).constData()) == 0) {
+                        return target;
+                    }
+#else
+                    QFile::remove(target);
+                    if (QFile::rename(staged, target)) {
+                        return target;
+                    }
+#endif
+                }
+                QFile::remove(staged);
             }
         }
+    }
+
+    if (isTrustedShimSource(target)) {
+        return target;
     }
 
     return {};
@@ -353,12 +423,7 @@ QString acpEnsurePageShim(const QString &dir)
 
 QString acpPageShimPath(const QString &agentId)
 {
-    const QString installDir = acpBinaryInstallDir(agentId);
-    const QString target = QDir(installDir).filePath(u"libpage4k.so"_s);
-    if (QFileInfo::exists(target)) {
-        return target;
-    }
-    return acpEnsurePageShim(installDir);
+    return acpEnsurePageShim(acpBinaryInstallDir(agentId));
 }
 
 AcpBinaryInstaller::AcpBinaryInstaller(const QJsonObject &registryAgent,
@@ -600,7 +665,9 @@ void AcpBinaryInstaller::finishInstall(const QString &executable)
     installed.insert(u"binaryPlatform"_s, m_platformKey);
     installed.insert(u"binaryInstallDir"_s, m_installDir);
 
-    if (m_agent.value(u"id"_s).toString() == u"antigravity-acp"_s && acpNeedsPageShim()) {
+    if (m_agent.value(u"id"_s).toString() == u"antigravity-acp"_s
+        && m_command.contains(u"agy_acp_server"_s, Qt::CaseInsensitive)
+        && acpNeedsPageShim()) {
         acpEnsurePageShim(m_installDir);
     }
 

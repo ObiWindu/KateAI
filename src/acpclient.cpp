@@ -78,6 +78,20 @@ static QString contentBlockText(const QJsonValue &content)
     if (type == u"resource"_s) {
         return obj.value(u"resource"_s).toObject().value(u"text"_s).toString();
     }
+    if (type == u"resource_link"_s) {
+        const QString title = obj.value(u"title"_s).toString();
+        const QString name = obj.value(u"name"_s).toString();
+        const QString uri = obj.value(u"uri"_s).toString();
+        const QString label = !title.isEmpty() ? title : name;
+        if (!label.isEmpty() && !uri.isEmpty()) {
+            return u"%1 (%2)"_s.arg(label, uri);
+        }
+        return !label.isEmpty() ? label : uri;
+    }
+    if (type == u"image"_s) {
+        const QString mime = obj.value(u"mimeType"_s).toString();
+        return mime.isEmpty() ? u"[Image]"_s : u"[Image: %1]"_s.arg(mime);
+    }
     return obj.value(u"text"_s).toString();
 }
 
@@ -117,6 +131,11 @@ static QString toolContentText(const QJsonValue &content)
             // (see linkToolTerminals). Its JSON reference is not output.
         } else if (type == u"text"_s) {
             parts.append(obj.value(u"text"_s).toString());
+        } else if (type == u"resource_link"_s || type == u"image"_s || type == u"resource"_s) {
+            const QString text = contentBlockText(item);
+            if (!text.isEmpty()) {
+                parts.append(text);
+            }
         } else if (obj.contains(u"content"_s)) {
             parts.append(toolContentText(obj.value(u"content"_s)));
         } else if (obj.contains(u"output"_s)) {
@@ -143,6 +162,13 @@ static QString toolContentText(const QJsonValue &content)
 // carries a terminal status. The tool_call branch used to ignore status, so a
 // fast call that completed in one message spun forever and leaked into the
 // next turn's live-tool sweep.
+static bool isTerminalToolStatus(const QString &status)
+{
+    return status == u"completed"_s || status == u"failed"_s
+        || status == u"cancelled"_s || status == u"canceled"_s
+        || status == u"error"_s;
+}
+
 static ToolResult completedToolResult(const QString &toolCallId, const QString &toolName,
                                       const QJsonObject &update, const QString &streamed)
 {
@@ -151,6 +177,7 @@ static ToolResult completedToolResult(const QString &toolCallId, const QString &
     result.name = toolName;
     const QString status = update.value(u"status"_s).toString();
     result.ok = status == u"completed"_s;
+    result.cancelled = status == u"cancelled"_s || status == u"canceled"_s;
     result.output = toolContentText(update.value(u"content"_s));
     if (result.output.isEmpty()) {
         result.output = toolContentText(update.value(u"rawOutput"_s));
@@ -164,7 +191,9 @@ static ToolResult completedToolResult(const QString &toolCallId, const QString &
     if (result.output.isEmpty() && update.contains(u"error"_s)) {
         result.output = toolContentText(update.value(u"error"_s));
     }
-    if (status == u"failed"_s && result.output.isEmpty()) {
+    if (result.cancelled && result.output.isEmpty()) {
+        result.output = u"Tool cancelled."_s;
+    } else if ((status == u"failed"_s || status == u"error"_s) && result.output.isEmpty()) {
         result.output = u"Tool failed."_s;
     }
     if (result.output.isEmpty()) {
@@ -187,14 +216,26 @@ static QString capToolStream(QString text)
 
 static ToolRisk riskForKind(const QString &kind, const QString &name)
 {
+    const QString canonical = canonicalToolName(name);
     if (kind == u"read"_s || kind == u"search"_s || kind == u"fetch"_s || kind == u"think"_s) {
         return ToolRisk::Read;
     }
-    if (kind == u"execute"_s || name == u"bash"_s || canonicalToolName(name) == u"bash"_s) {
+    if (kind == u"execute"_s || name == u"bash"_s || canonical == u"bash"_s) {
         return ToolRisk::Execute;
     }
     if (kind == u"edit"_s || kind == u"write"_s || kind == u"delete"_s || kind == u"move"_s) {
         return ToolRisk::Write;
+    }
+    // Well-known read-only or UI-only tools when an agent omits kind or sends "other".
+    if (canonical == u"read_file"_s || canonical == u"list_dir"_s || canonical == u"grep"_s
+        || canonical == u"glob"_s || canonical == u"web_search"_s || canonical == u"web_fetch"_s
+        || canonical == u"query_project_graph"_s || canonical == u"write_plan_file"_s
+        || canonical == u"suggest"_s || canonical == u"question"_s || canonical == u"todo_write"_s
+        || canonical == u"todo_read"_s || canonical == u"think"_s || canonical == u"exit_plan_mode"_s
+        || canonical.startsWith(u"lsp_"_s)
+        || name == u"command_status"_s || name == u"read_terminal"_s
+        || name == u"task_boundary"_s || name == u"notify_user"_s) {
+        return ToolRisk::Read;
     }
     // An unrecognized kind is not evidence the tool is safe: in AcceptEdits
     // mode a Write risk is auto-approved, which would let a mislabeled
@@ -225,6 +266,21 @@ static QString kateClientMethod(const QString &method)
         {u"postSuggestion"_s, u"suggest"_s},
         {u"todoWrite"_s, u"todo_write"_s},
         {u"todoRead"_s, u"todo_read"_s},
+        {u"listDir"_s, u"list_dir"_s},
+        {u"listDirectory"_s, u"list_dir"_s},
+        {u"editFile"_s, u"edit_file"_s},
+        {u"multiEditFile"_s, u"multi_edit_file"_s},
+        {u"deleteFile"_s, u"delete_file"_s},
+        {u"applyPatch"_s, u"apply_patch"_s},
+        {u"exitPlanMode"_s, u"exit_plan_mode"_s},
+        {u"viewFile"_s, u"read_file"_s},
+        {u"view_file"_s, u"read_file"_s},
+        {u"readFile"_s, u"read_file"_s},
+        {u"writeFile"_s, u"write_file"_s},
+        {u"createFile"_s, u"write_file"_s},
+        {u"client_view_file"_s, u"read_file"_s},
+        {u"client_create_file"_s, u"write_file"_s},
+        {u"client_edit_file"_s, u"edit_file"_s},
     };
     QString name = method;
     if (name.startsWith(u"_kateai/"_s)) {
@@ -421,10 +477,19 @@ static void normalizeSuggestionMetadata(PermissionRequest &request, QJsonObject 
     request.summary = text.left(200);
 }
 
-static QJsonObject envArrayToObject(const QJsonArray &env)
+static QJsonObject envValueToObject(const QJsonValue &env)
 {
     QJsonObject out;
-    for (const QJsonValue &item : env) {
+    if (env.isObject()) {
+        const QJsonObject obj = env.toObject();
+        for (auto it = obj.constBegin(); it != obj.constEnd(); ++it) {
+            if (!it.key().isEmpty()) {
+                out.insert(it.key(), it.value().toString());
+            }
+        }
+        return out;
+    }
+    for (const QJsonValue &item : env.toArray()) {
         const QJsonObject row = item.toObject();
         const QString name = row.value(u"name"_s).toString();
         if (!name.isEmpty()) {
@@ -435,14 +500,15 @@ static QJsonObject envArrayToObject(const QJsonArray &env)
 }
 
 // Agents normally send a local absolute path, but some registries send a
-// file:// URI or use "uri" instead of "path". Accept both so fs and terminal
-// methods work across implementations.
+// file:// URI or use "uri" / PascalCase keys instead of "path". Accept all so
+// fs and terminal methods work across implementations.
 static QString acpPathParam(const QJsonObject &params)
 {
-    QString path = params.value(u"path"_s).toString().trimmed();
-    if (path.isEmpty()) {
-        path = params.value(u"uri"_s).toString().trimmed();
-    }
+    QString path = firstStringField(
+        params, {u"path"_s, u"uri"_s, u"file_path"_s, u"filePath"_s, u"file"_s, u"File"_s,
+                 u"Path"_s, u"target_file"_s, u"targetFile"_s, u"TargetFile"_s,
+                 u"absolute_path"_s, u"AbsolutePath"_s, u"target"_s,
+                 u"DirectoryPath"_s, u"SearchPath"_s, u"SearchDirectory"_s});
     if (path.startsWith(u"file:"_s, Qt::CaseInsensitive)) {
         const QUrl url(path);
         if (url.isLocalFile()) {
@@ -722,6 +788,45 @@ static bool collectEffortConfig(const QJsonArray &configOptions, QStringList *ef
     return found;
 }
 
+// Mode selector: an option the agent exposes for execution mode (default,
+// accept-edits, plan, etc.).
+static bool isModeConfigOption(const QJsonObject &option)
+{
+    const QString category = option.value(u"category"_s).toString();
+    if (category == u"mode"_s) {
+        return true;
+    }
+    if (category == u"model"_s || category == u"model_config"_s
+        || category == u"thought_level"_s || category == u"thinking"_s) {
+        return false;
+    }
+    return option.value(u"id"_s).toString().compare(u"mode"_s, Qt::CaseInsensitive) == 0;
+}
+
+static bool collectModeConfig(const QJsonArray &configOptions, QStringList *modes, QString *current, QString *configId)
+{
+    bool found = false;
+    for (const QJsonValue &optionValue : configOptions) {
+        const QJsonObject option = optionValue.toObject();
+        if (!isModeConfigOption(option)) {
+            continue;
+        }
+        const QString type = option.value(u"type"_s).toString();
+        if (!type.isEmpty() && type != u"select"_s) {
+            continue;
+        }
+        found = true;
+        *configId = option.value(u"id"_s).toString();
+        *current = option.value(u"currentValue"_s).toString();
+        modes->clear();
+        const QJsonArray options = option.value(u"options"_s).toArray();
+        for (const QJsonValue &optValue : options) {
+            appendModelEntry(modes, optValue);
+        }
+    }
+    return found;
+}
+
 void AcpClient::ingestSessionModels(const QJsonObject &result, bool applyPreferred)
 {
     // A current_model_update may carry only the id, with no model list.
@@ -812,8 +917,178 @@ void AcpClient::ingestSessionModels(const QJsonObject &result, bool applyPreferr
     }
 
     ingestSessionEfforts(result);
+    ingestSessionModes(result);
 
     Q_EMIT modelsReceived(m_agentModels);
+}
+
+void AcpClient::ingestSessionModes(const QJsonObject &result)
+{
+    if (result.contains(u"currentModeId"_s)) {
+        const QString modeId = result.value(u"currentModeId"_s).toString().trimmed();
+        if (!modeId.isEmpty() && modeId != m_currentModeId) {
+            m_currentModeId = modeId;
+            Q_EMIT modeChanged(m_currentModeId);
+        }
+    }
+    QStringList modes;
+    QString current;
+    QString configId;
+    bool fromConfig = false;
+    if (result.contains(u"configOptions"_s)) {
+        fromConfig = collectModeConfig(result.value(u"configOptions"_s).toArray(), &modes, &current, &configId);
+    }
+    bool legacy = false;
+    if (!fromConfig && result.contains(u"modes"_s) && result.value(u"modes"_s).isObject()) {
+        const QJsonObject state = result.value(u"modes"_s).toObject();
+        current = state.value(u"currentModeId"_s).toString().trimmed();
+        for (const QJsonValue &entry : state.value(u"availableModes"_s).toArray()) {
+            appendModelEntry(&modes, entry);
+        }
+        legacy = !modes.isEmpty() || !current.isEmpty();
+    }
+    if (!fromConfig && !legacy) {
+        return;
+    }
+    if (fromConfig) {
+        m_modeConfigId = configId.isEmpty() ? u"mode"_s : configId;
+        m_legacySetMode = result.contains(u"modes"_s);
+    } else if (legacy) {
+        m_modeConfigId.clear();
+        m_legacySetMode = true;
+    }
+    if (!current.isEmpty()) {
+        const bool changed = (current != m_currentModeId);
+        m_currentModeId = current;
+        if (changed) {
+            Q_EMIT modeChanged(m_currentModeId);
+        }
+    }
+    if (!modes.isEmpty()) {
+        m_agentModes = modes;
+        Q_EMIT modesReceived(m_agentModes);
+    }
+    applyDesiredMode();
+}
+
+void AcpClient::setDesiredMode(const QString &modeId)
+{
+    const QString trimmed = modeId.trimmed();
+    if (m_desiredModeId == trimmed) {
+        return;
+    }
+    m_desiredModeId = trimmed;
+    applyDesiredMode();
+}
+
+void AcpClient::applyDesiredMode()
+{
+    if (m_desiredModeId.isEmpty() || m_desiredModeId == m_currentModeId || m_modeSetInFlight) {
+        return;
+    }
+    if (m_sessionId.isEmpty() || m_agentModes.isEmpty()) {
+        return;
+    }
+    QString targetMode;
+    for (const QString &m : m_agentModes) {
+        if (m == m_desiredModeId) {
+            targetMode = m;
+            break;
+        }
+    }
+    if (targetMode.isEmpty()) {
+        for (const QString &m : m_agentModes) {
+            if (m.compare(m_desiredModeId, Qt::CaseInsensitive) == 0) {
+                targetMode = m;
+                break;
+            }
+        }
+    }
+    if (targetMode.isEmpty() || targetMode == m_currentModeId) {
+        return;
+    }
+    setSessionMode(targetMode);
+}
+
+bool AcpClient::setSessionMode(const QString &modeId)
+{
+    QString id = modeId.trimmed();
+    if (id.isEmpty() || id == m_currentModeId) {
+        return true;
+    }
+    if (m_sessionId.isEmpty()) {
+        return false;
+    }
+    if (!m_agentModes.isEmpty()) {
+        if (!m_agentModes.contains(id)) {
+            QString matched;
+            for (const QString &m : m_agentModes) {
+                if (m.compare(id, Qt::CaseInsensitive) == 0) {
+                    matched = m;
+                    break;
+                }
+            }
+            if (matched.isEmpty()) {
+                return false;
+            }
+            id = matched;
+        }
+    }
+    if (!m_modeConfigId.isEmpty()) {
+        sendSetModeOption(id);
+        return true;
+    }
+    if (m_legacySetMode) {
+        sendSetSessionMode(id);
+        return true;
+    }
+    return false;
+}
+
+void AcpClient::sendSetModeOption(const QString &modeId)
+{
+    m_modeSetInFlight = true;
+    QJsonObject params;
+    params.insert(u"sessionId"_s, m_sessionId);
+    params.insert(u"configId"_s, m_modeConfigId.isEmpty() ? u"mode"_s : m_modeConfigId);
+    params.insert(u"value"_s, modeId);
+    sendRequest(u"session/set_config_option"_s, params, [this, modeId](const QJsonObject &result, const QString &error) {
+        m_modeSetInFlight = false;
+        if (!error.isEmpty()) {
+            Q_EMIT logMessage(u"Failed to set session mode: %1"_s.arg(error));
+            if (m_legacySetMode) {
+                sendSetSessionMode(modeId);
+            }
+            return;
+        }
+        m_currentModeId = modeId;
+        if (result.contains(u"configOptions"_s)) {
+            ingestSessionModes(result);
+        } else {
+            Q_EMIT modeChanged(m_currentModeId);
+        }
+    });
+}
+
+void AcpClient::sendSetSessionMode(const QString &modeId)
+{
+    m_modeSetInFlight = true;
+    QJsonObject params;
+    params.insert(u"sessionId"_s, m_sessionId);
+    params.insert(u"modeId"_s, modeId);
+    sendRequest(u"session/set_mode"_s, params, [this, modeId](const QJsonObject &result, const QString &error) {
+        m_modeSetInFlight = false;
+        if (!error.isEmpty()) {
+            Q_EMIT logMessage(u"Failed to set session mode: %1"_s.arg(error));
+            return;
+        }
+        m_currentModeId = modeId;
+        if (result.contains(u"modes"_s) || result.contains(u"configOptions"_s)) {
+            ingestSessionModes(result);
+        } else {
+            Q_EMIT modeChanged(m_currentModeId);
+        }
+    });
 }
 
 void AcpClient::ingestSessionEfforts(const QJsonObject &result)
@@ -1144,6 +1419,7 @@ void AcpClient::cancelPendingQuestion()
     m_questionRequest = {};
     m_questionIsElicitation = false;
     m_questionElicitationProperty.clear();
+    m_questionElicitationValueMap.clear();
     if (!toolCallId.isEmpty()) {
         Q_EMIT questionCancelled(toolCallId);
     }
@@ -1200,7 +1476,8 @@ void AcpClient::answerQuestion(const QString &answer)
             // the first schema property, which is what a single-field form
             // means in practice.
             const QString property = m_questionElicitationProperty.isEmpty() ? u"answer"_s : m_questionElicitationProperty;
-            content.insert(property, answer);
+            const QString mapped = m_questionElicitationValueMap.value(answer, answer);
+            content.insert(property, mapped);
             result.insert(u"content"_s, content);
         }
     } else if (answer.trimmed().isEmpty()) {
@@ -1215,6 +1492,7 @@ void AcpClient::answerQuestion(const QString &answer)
     m_questionRequest = {};
     m_questionIsElicitation = false;
     m_questionElicitationProperty.clear();
+    m_questionElicitationValueMap.clear();
     askNextParkedMethod();
 }
 
@@ -1339,8 +1617,12 @@ void AcpClient::stop()
     // commands and feature flags.
     m_availableCommands = QJsonArray();
     m_loadSession = false;
+    m_resumeSession = false;
     m_closeSession = false;
     m_embeddedContext = false;
+    m_supportsSystemPromptAppend = false;
+    m_mcpStdioCapable = true;
+    m_mcpHttpCapable = false;
     m_protocolVersion = 1;
     m_permissionRpcId = QJsonValue();
     m_permissionOptions = QJsonArray();
@@ -1350,6 +1632,7 @@ void AcpClient::stop()
     m_questionRequest = {};
     m_questionIsElicitation = false;
     m_questionElicitationProperty.clear();
+    m_questionElicitationValueMap.clear();
     // The agent process is going away, so parked RPCs cannot be answered
     // meaningfully; drop them with the rest of the session state.
     m_parkedMethods.clear();
@@ -1369,6 +1652,13 @@ void AcpClient::stop()
     m_currentEffortId.clear();
     m_effortConfigId.clear();
     m_effortSetInFlight = false;
+    m_agentModes.clear();
+    m_currentModeId.clear();
+    m_modeConfigId.clear();
+    m_legacySetMode = false;
+    m_modeSetInFlight = false;
+    m_contextUsedTokens = 0;
+    m_contextWindowSize = 0;
     if (m_state != State::Stopped) {
         setState(State::Stopped, u"Disconnected"_s);
     }
@@ -1472,9 +1762,17 @@ void AcpClient::resolvePermission(PermissionDecision decision, const QString &to
             result.toolCallId = parked.request.toolCallId;
             result.name = parked.request.toolName;
             result.ok = true;
-            result.output = parked.method == u"terminal/create"_s
-                ? u"Terminal started."_s
-                : u"Write completed."_s;
+            if (parked.method == u"terminal/create"_s) {
+                result.output = u"Terminal started."_s;
+            } else if (parked.method == u"fs/delete_file"_s) {
+                result.output = u"File deleted."_s;
+            } else if (parked.method == u"fs/edit_file"_s || parked.method == u"fs/multi_edit_file"_s) {
+                result.output = u"Edit completed."_s;
+            } else if (parked.method == u"apply_patch"_s) {
+                result.output = u"Patch applied."_s;
+            } else {
+                result.output = u"Write completed."_s;
+            }
             Q_EMIT toolFinished(result);
         }
         askNextParkedMethod();
@@ -1773,6 +2071,9 @@ QProcessEnvironment AcpClient::processEnvironment() const
             env.insert(u"XAI_API_KEY"_s, key);
             env.insert(u"GROK_CODE_XAI_API_KEY"_s, key);
         }
+        if (acpAgentIsAntigravity(m_settings)) {
+            env.insert(u"GEMINI_API_KEY"_s, key);
+        }
     }
 
     // Registry entries can carry an env array (top-level and per-distribution)
@@ -1813,7 +2114,10 @@ QProcessEnvironment AcpClient::processEnvironment() const
         break;
     }
 
-    if (acpAgentIsAntigravity(m_settings) && acpNeedsPageShim()) {
+    // Only the legacy standalone C++/Chromium agy_acp_server binary needs the
+    // 4KB page shim on >4KB hosts. The modern Go `agy` CLI runs natively and
+    // must not get a spoofed sysconf(_SC_PAGESIZE).
+    if (acpAgentIsLegacyAntigravityServer(m_settings) && acpNeedsPageShim()) {
         const QString shim = acpPageShimPath(m_settings.acpAgentId);
         if (!shim.isEmpty()) {
             const QString currentPreload = env.value(u"LD_PRELOAD"_s);
@@ -1847,8 +2151,17 @@ void AcpClient::sendInitialize()
     capabilities.insert(u"_meta"_s, QJsonObject{
         {u"com.kateai/methods"_s, QJsonArray{u"_kateai/query_project_graph"_s, u"_kateai/write_plan_file"_s, u"_kateai/suggest"_s,
                                            u"_kateai/ask_user"_s, u"_kateai/todo_write"_s, u"_kateai/todo_read"_s,
+                                           u"_kateai/exit_plan_mode"_s,
+                                           u"_kateai/list_dir"_s, u"_kateai/edit_file"_s, u"_kateai/multi_edit_file"_s,
+                                           u"_kateai/delete_file"_s, u"_kateai/grep"_s, u"_kateai/glob"_s,
+                                           u"_kateai/apply_patch"_s,
                                            u"_kateai/lsp_diagnostics"_s, u"_kateai/lsp_symbols"_s, u"_kateai/lsp_hover"_s,
-                                           u"_kateai/lsp_definition"_s, u"_kateai/lsp_references"_s, u"_kateai/lsp_code_actions"_s}},
+                                           u"_kateai/lsp_definition"_s, u"_kateai/lsp_references"_s, u"_kateai/lsp_code_actions"_s,
+                                           u"_kateai/debug_status"_s, u"_kateai/debug_stack"_s, u"_kateai/debug_locals"_s,
+                                           u"_kateai/debug_breakpoints"_s, u"_kateai/debug_select_frame"_s, u"_kateai/debug_select_thread"_s,
+                                           u"_kateai/debug_snapshot"_s, u"_kateai/debug_set_breakpoint"_s, u"_kateai/debug_step"_s,
+                                           u"_kateai/debug_eval"_s, u"_kateai/debug_session"_s, u"_kateai/debug_console"_s,
+                                           u"_kateai/build_targets"_s, u"_kateai/build_run"_s, u"_kateai/terminal_run"_s}},
     });
 
     QJsonObject clientInfo;
@@ -1893,9 +2206,16 @@ void AcpClient::sendInitialize()
             Q_EMIT logMessage(u"ACP agent speaks protocol version %1; Kate AI negotiated %2."_s.arg(agentVersion).arg(m_protocolVersion));
         }
         const QJsonObject caps = result.value(u"agentCapabilities"_s).toObject();
-        m_loadSession = caps.value(u"loadSession"_s).toBool();
+        m_loadSession = caps.value(u"loadSession"_s).toBool() || caps.value(u"load_session"_s).toBool();
         m_embeddedContext = caps.value(u"promptCapabilities"_s).toObject().value(u"embeddedContext"_s).toBool();
-        const QJsonObject sessionCaps = caps.value(u"sessionCapabilities"_s).toObject();
+        m_supportsSystemPromptAppend = caps.value(u"_meta"_s).toObject()
+            .value(u"antigravity"_s).toObject()
+            .value(u"systemPrompt"_s).toObject()
+            .value(u"append"_s).toBool(false);
+        QJsonObject sessionCaps = caps.value(u"sessionCapabilities"_s).toObject();
+        if (sessionCaps.isEmpty()) {
+            sessionCaps = caps.value(u"session_capabilities"_s).toObject();
+        }
         const QJsonValue resumeCap = sessionCaps.value(u"resume"_s);
         const QJsonValue closeCap = sessionCaps.value(u"close"_s);
         const QJsonValue loadCap = sessionCaps.value(u"load"_s);
@@ -2001,6 +2321,15 @@ void AcpClient::sendSetSessionModel(const QString &modelId)
     });
 }
 
+bool AcpClient::isAuthFailureError(const QString &error)
+{
+    const QString lowerError = error.toLower();
+    return lowerError.contains(u"auth"_s) || lowerError.contains(u"login"_s)
+        || lowerError.contains(u"credential"_s) || lowerError.contains(u"oauth"_s)
+        || lowerError.contains(u"api key"_s) || lowerError.contains(u"unauthorized"_s)
+        || lowerError.contains(u"required"_s);
+}
+
 void AcpClient::maybeAuthenticate(const QJsonArray &authMethods, bool force)
 {
     if (authMethods.isEmpty()) {
@@ -2008,12 +2337,20 @@ void AcpClient::maybeAuthenticate(const QJsonArray &authMethods, bool force)
         return;
     }
 
-    // Most ACP agents use their own CLI login session when no API key is
-    // configured. Antigravity requires ACP's authenticate request to
-    // initialize its session; its standalone ACP server performs its own
-    // OAuth flow, which can take longer than the normal JSON-RPC timeout.
-    const bool hasApiKey = !m_settings.acpApiKey.trimmed().isEmpty();
-    if (!force && !hasApiKey && !acpAgentIsAntigravity(m_settings)) {
+    // Most ACP agents — including modern `agy acp` — use their own CLI login
+    // session silently during session/new when no API key is configured.
+    // Only the legacy standalone `agy_acp_server` requires an upfront
+    // authenticate call before session/new. If session/new or session/load
+    // later rejects with an auth error, it retries here with force=true.
+    const QString configuredKey = m_settings.acpApiKey.trimmed();
+    const bool hasConfiguredKey = !configuredKey.isEmpty();
+    const QProcessEnvironment env = processEnvironment();
+    const QString keyEnvName = acpEffectiveApiKeyEnv(m_settings);
+    const bool hasEnvKey = (!keyEnvName.isEmpty() && !env.value(keyEnvName).trimmed().isEmpty())
+        || (acpAgentIsAntigravity(m_settings) && !env.value(u"GEMINI_API_KEY"_s).trimmed().isEmpty());
+    const bool hasAnyApiKey = hasConfiguredKey || hasEnvKey;
+
+    if (!force && !hasConfiguredKey && !acpAgentIsLegacyAntigravityServer(m_settings)) {
         openSession();
         return;
     }
@@ -2021,11 +2358,16 @@ void AcpClient::maybeAuthenticate(const QJsonArray &authMethods, bool force)
     const QString effectiveArgs = acpEffectiveArgs(m_settings);
     const bool codexAgent = m_settings.acpAgentId == u"codex-acp"_s
         || effectiveArgs.contains(u"@agentclientprotocol/codex-acp"_s);
-    // Reached only with a key configured (the no-key path returned above), so
-    // the preference must depend on the agent alone. Testing the key here as
-    // well made the condition always false and left the first advertised method
-    // selected, which is chat-gpt for codex and fails authentication.
-    const QString preferredMethod = codexAgent ? u"chat-gpt"_s : QString();
+    QString preferredMethod;
+    if (codexAgent) {
+        preferredMethod = u"chat-gpt"_s;
+    } else if (acpAgentIsAntigravity(m_settings)) {
+        // When an API key is available, select gemini-api-key; otherwise
+        // select oauth-personal so Google OAuth runs instead of failing with
+        // "GEMINI_API_KEY is not set".
+        preferredMethod = hasAnyApiKey ? u"gemini-api-key"_s : u"oauth-personal"_s;
+    }
+
     QJsonObject selectedMethod;
     QJsonObject fallbackMethod;
     auto methodIdOf = [](const QJsonObject &method) {
@@ -2044,8 +2386,6 @@ void AcpClient::maybeAuthenticate(const QJsonArray &authMethods, bool force)
             break;
         }
         if (selectedMethod.isEmpty()) {
-            // Prefer a method that can use an already-configured key over an
-            // interactive browser/terminal flow the user did not ask for.
             const QString type = method.value(u"type"_s).toString().toLower();
             const QString lowerId = id.toLower();
             const bool envLike = type == u"env"_s || lowerId.contains(u"api"_s)
@@ -2053,8 +2393,19 @@ void AcpClient::maybeAuthenticate(const QJsonArray &authMethods, bool force)
                 || lowerId.contains(u"token"_s);
             const bool interactive = type == u"agent"_s || type == u"terminal"_s
                 || lowerId.contains(u"oauth"_s) || lowerId.contains(u"login"_s);
-            if (envLike || !interactive) {
-                selectedMethod = method;
+            if (hasAnyApiKey) {
+                // Prefer a method that uses the configured key over an
+                // interactive browser/terminal flow.
+                if (envLike || !interactive) {
+                    selectedMethod = method;
+                }
+            } else {
+                // Without an API key, never choose an API-key method that will
+                // immediately fail due to a missing key; pick an interactive
+                // or OAuth method instead.
+                if (!envLike) {
+                    selectedMethod = method;
+                }
             }
         }
     }
@@ -2069,6 +2420,14 @@ void AcpClient::maybeAuthenticate(const QJsonArray &authMethods, bool force)
     }
     QJsonObject params;
     params.insert(u"methodId"_s, methodId);
+    // Antigravity ACP (`agy acp`) accepts the API key in `_meta.apiKey` in
+    // addition to GEMINI_API_KEY in the environment.
+    const QString lowerMethodId = methodId.toLower();
+    if (hasConfiguredKey
+        && (lowerMethodId.contains(u"api"_s) || lowerMethodId.contains(u"key"_s)
+            || lowerMethodId.contains(u"token"_s))) {
+        params.insert(u"_meta"_s, QJsonObject{{u"apiKey"_s, configuredKey}});
+    }
     sendRequest(u"authenticate"_s, params, [this, methodId](const QJsonObject &, const QString &error) {
         if (m_shuttingDown) {
             return;
@@ -2113,12 +2472,7 @@ void AcpClient::sendSessionNew()
             // Some agents only discover that they need the ACP authenticate
             // request when session/new rejects them. Retry once through the
             // advertised methods instead of failing the turn.
-            const QString lowerError = error.toLower();
-            const bool authFailure = lowerError.contains(u"auth"_s) || lowerError.contains(u"login"_s)
-                || lowerError.contains(u"credential"_s) || lowerError.contains(u"oauth"_s)
-                || lowerError.contains(u"api key"_s) || lowerError.contains(u"unauthorized"_s)
-                || lowerError.contains(u"required"_s);
-            if (!m_authRetryDone && !m_authMethods.isEmpty() && authFailure) {
+            if (!m_authRetryDone && !m_authMethods.isEmpty() && isAuthFailureError(error)) {
                 m_authRetryDone = true;
                 m_sessionOpening = false;
                 maybeAuthenticate(m_authMethods, true);
@@ -2157,12 +2511,22 @@ void AcpClient::sendSessionLoadOrResume()
     params.insert(u"sessionId"_s, m_resumeSessionId);
     params.insert(u"cwd"_s, sessionCwd());
     params.insert(u"mcpServers"_s, mcpServersPayload());
+    const QJsonObject meta = sessionMeta();
+    if (!meta.isEmpty()) {
+        params.insert(u"_meta"_s, meta);
+    }
     sendRequest(method, params, [this, method](const QJsonObject &result, const QString &error) {
         if (m_shuttingDown) {
             return;
         }
         if (!error.isEmpty()) {
             m_replayingLoad = false;
+            if (!m_authRetryDone && !m_authMethods.isEmpty() && isAuthFailureError(error)) {
+                m_authRetryDone = true;
+                m_sessionOpening = false;
+                maybeAuthenticate(m_authMethods, true);
+                return;
+            }
             const QString lowerError = error.toLower();
             const bool unknownSession = lowerError.contains(u"not found"_s)
                 || lowerError.contains(u"unknown session"_s)
@@ -2306,8 +2670,10 @@ QJsonArray AcpClient::promptBlocks(const QString &text) const
 QJsonObject AcpClient::sessionNotesBlock() const
 {
     QStringList lines;
-    // Grok Build gets the rules through session _meta (see sessionMeta()).
-    if (!acpAgentIsGrok(m_settings)) {
+    // Grok Build gets the rules through session _meta.rules, and agents that
+    // advertise _meta.antigravity.systemPrompt.append get them through
+    // _meta.systemPrompt.append (see sessionMeta()).
+    if (!acpAgentIsGrok(m_settings) && !m_supportsSystemPromptAppend) {
         if (!m_settings.globalRules.trimmed().isEmpty()) {
             lines.append(u"Rules the user set for every workspace:"_s);
             lines.append(m_settings.globalRules.trimmed());
@@ -2322,9 +2688,15 @@ QJsonObject AcpClient::sessionNotesBlock() const
     lines.append(u"- _kateai/suggest {suggestion, path?, line?}: offer an improvement the user did not ask for, instead of making the change."_s);
     lines.append(u"- _kateai/ask_user {question, options?, allow_freeform?}: ask the user something and wait for the answer (the call blocks until they reply; the answer is the result)."_s);
     lines.append(u"- _kateai/todo_write {todos: [{content, status}]} / _kateai/todo_read: keep the user's task checklist current; status is pending, in_progress, or completed."_s);
+    lines.append(u"- _kateai/exit_plan_mode: notify Kate AI to leave plan mode once the plan is ready."_s);
+    lines.append(u"- _kateai/list_dir {path?} / _kateai/grep {pattern, path?, glob?, case_insensitive?, context?} / _kateai/glob {pattern, path?}: read-only workspace inspection respecting Kate's sandbox."_s);
+    lines.append(u"- _kateai/edit_file {path, old_string, new_string} / _kateai/multi_edit_file {path, edits} / _kateai/delete_file {path} / _kateai/apply_patch {patch}: edit workspace files through Kate's open-buffer bridge and permission policy."_s);
     lines.append(u"- _kateai/query_project_graph {query_type, node_id?, relationship?, source_id?, target_id?}: read the project's files, symbols and imports."_s);
     lines.append(u"- _kateai/lsp_diagnostics {path?, severity?}: read language-server diagnostics (errors/warnings) for a file, or workspace-wide when path is omitted. When no LSP server is running, the call reports that instead."_s);
     lines.append(u"- _kateai/lsp_symbols {path}, _kateai/lsp_hover {path, line, column?}, _kateai/lsp_definition {path, line, column?, symbol?}, _kateai/lsp_references {path, line, column?, symbol?, include_declaration?}, _kateai/lsp_code_actions {path, line?, column?}: the same read-only language-server answers the editor tools give."_s);
+    lines.append(u"- _kateai/debug_status {include_output?}, _kateai/debug_stack {thread_id?, max_frames?}, _kateai/debug_locals {frame_level?, filter?}, _kateai/debug_breakpoints, _kateai/debug_select_frame {frame_level}, _kateai/debug_select_thread {thread_id}, _kateai/debug_snapshot {action?, label?, first?, second?}: inspect Kate's live debugger (DAP/GDB/LLDB)."_s);
+    lines.append(u"- _kateai/debug_set_breakpoint {path?, line?, condition?, hit_condition?, log_message?, remove?, clear_all?}, _kateai/debug_step {action, path?, line?, timeout_ms?}, _kateai/debug_eval {expression}, _kateai/debug_session {action, target?}, _kateai/debug_console {command}: control Kate's live debugger (permission-gated)."_s);
+    lines.append(u"- _kateai/build_targets, _kateai/build_run {target?}, _kateai/terminal_run {command, working_dir?}: inspect/trigger Kate's Build plugin and embedded Konsole terminal."_s);
     if (m_projectGraph && m_projectGraph->getNodeCount() > 0) {
         const QString graph = m_projectGraph->contextSummary(40, 60, 2);
         if (!graph.trimmed().isEmpty()) {
@@ -2343,6 +2715,16 @@ QJsonObject AcpClient::sessionMeta() const
     QJsonObject meta;
     const QString agentId = m_settings.acpAgentId;
     const QString command = acpEffectiveCommand(m_settings);
+    Q_UNUSED(agentId);
+    Q_UNUSED(command);
+
+    QStringList rules;
+    if (!m_settings.globalRules.trimmed().isEmpty()) {
+        rules.append(m_settings.globalRules.trimmed());
+    }
+    if (!m_settings.extraSystemPrompt.trimmed().isEmpty()) {
+        rules.append(m_settings.extraSystemPrompt.trimmed());
+    }
 
     // Grok Build reads yoloMode / autoMode / rules from session _meta.
     if (acpAgentIsGrok(m_settings)) {
@@ -2351,22 +2733,15 @@ QJsonObject AcpClient::sessionMeta() const
         } else if (m_settings.permissionMode == PermissionMode::AcceptEdits) {
             meta.insert(u"autoMode"_s, true);
         }
-        QStringList rules;
-        if (!m_settings.globalRules.trimmed().isEmpty()) {
-            rules.append(m_settings.globalRules.trimmed());
-        }
-        if (!m_settings.extraSystemPrompt.trimmed().isEmpty()) {
-            rules.append(m_settings.extraSystemPrompt.trimmed());
-        }
         if (!rules.isEmpty()) {
             meta.insert(u"rules"_s, rules.join(u"\n\n"_s));
         }
     }
 
-    // Add model information for agents that support it in _meta
-    const QString model = m_settings.acpModel.trimmed();
-    if (!model.isEmpty()) {
-        // Add other agents that support model in _meta here
+    // Antigravity ACP (`agy acp`) advertises _meta.antigravity.systemPrompt.append
+    // and appends `_meta.systemPrompt.append` directly to the agent's system prompt.
+    if (m_supportsSystemPromptAppend && !rules.isEmpty()) {
+        meta.insert(u"systemPrompt"_s, QJsonObject{{u"append"_s, rules.join(u"\n\n"_s)}});
     }
 
     return meta;
@@ -2575,8 +2950,12 @@ void AcpClient::onStdioReadyRead()
     if (!m_process) {
         return;
     }
+    QPointer<AcpClient> self(this);
     const QByteArray output = m_process->readAllStandardOutput();
     for (qsizetype offset = 0; offset < output.size();) {
+        if (!self || m_shuttingDown) {
+            return;
+        }
         const qsizetype chunkSize = qMin<qsizetype>(64 * 1024, output.size() - offset);
         const QByteArray chunk = output.mid(offset, chunkSize);
         offset += chunkSize;
@@ -2591,6 +2970,9 @@ void AcpClient::onStdioReadyRead()
             m_stdoutBuffer.append(chunk);
         }
         handleBuffer();
+        if (!self || m_shuttingDown) {
+            return;
+        }
         if (m_stdoutBuffer.size() > MaxFrameBytes) {
             m_stdoutBuffer.clear();
             m_discardingStdoutFrame = true;
@@ -2625,12 +3007,16 @@ void AcpClient::reportOversizedFrame()
 
 void AcpClient::handleBuffer()
 {
+    QPointer<AcpClient> self(this);
     // A UTF-8 BOM before the first JSON frame is not part of the JSON text.
     if (m_stdoutBuffer.startsWith("\xEF\xBB\xBF")) {
         m_stdoutBuffer.remove(0, 3);
     }
     int newline = m_stdoutBuffer.indexOf('\n');
     while (newline >= 0) {
+        if (!self || m_shuttingDown) {
+            return;
+        }
         if (newline > MaxFrameBytes) {
             // A single line this long cannot be a protocol frame. It is
             // dropped, and the turn is failed: the frame it belonged to is
@@ -2647,9 +3033,15 @@ void AcpClient::handleBuffer()
         }
         const QByteArray trimmed = line.trimmed();
         if (!trimmed.isEmpty() && trimmed.startsWith('{')) {
-            const QJsonDocument doc = QJsonDocument::fromJson(trimmed);
-            if (doc.isObject()) {
+            QJsonParseError parseError;
+            const QJsonDocument doc = QJsonDocument::fromJson(trimmed, &parseError);
+            if (parseError.error == QJsonParseError::NoError && doc.isObject()) {
                 handleMessage(doc.object());
+                if (!self || m_shuttingDown) {
+                    return;
+                }
+            } else {
+                Q_EMIT logMessage(u"Ignored malformed ACP JSON-RPC frame: %1"_s.arg(parseError.errorString()));
             }
         }
         newline = m_stdoutBuffer.indexOf('\n');
@@ -2658,15 +3050,17 @@ void AcpClient::handleBuffer()
 
 void AcpClient::handleMessage(const QJsonObject &message)
 {
+    const QJsonValue idValue = message.value(u"id"_s);
+    const bool hasValidId = !idValue.isUndefined() && !idValue.isNull();
     if (message.contains(u"method"_s)) {
-        if (message.contains(u"id"_s)) {
+        if (hasValidId) {
             handleIncomingRequest(message);
         } else {
             handleNotification(message);
         }
         return;
     }
-    if (message.contains(u"id"_s)) {
+    if (hasValidId) {
         handleResponse(message);
     }
 }
@@ -2759,12 +3153,46 @@ void AcpClient::handleIncomingRequest(const QJsonObject &message)
         handleRequestPermission(id, params);
         return;
     }
-    if (method == u"fs/read_text_file"_s) {
+    if (method == u"fs/read_text_file"_s || method == u"fs/read_file"_s
+        || method == u"read_file"_s || method == u"read_text_file"_s || method == u"view_file"_s) {
         handleFsRead(id, params);
         return;
     }
-    if (method == u"fs/write_text_file"_s) {
+    if (method == u"fs/write_text_file"_s || method == u"fs/write_file"_s
+        || method == u"write_file"_s || method == u"write_text_file"_s || method == u"create_file"_s) {
         handleFsWrite(id, params);
+        return;
+    }
+    if (method == u"fs/edit_file"_s || method == u"edit_file"_s) {
+        handleFsEdit(id, params);
+        return;
+    }
+    if (method == u"fs/multi_edit_file"_s || method == u"multi_edit_file"_s) {
+        handleFsMultiEdit(id, params);
+        return;
+    }
+    if (method == u"fs/delete_file"_s || method == u"fs/remove_file"_s || method == u"delete_file"_s) {
+        handleFsDelete(id, params);
+        return;
+    }
+    if (method == u"fs/list_directory"_s || method == u"list_dir"_s) {
+        handleFsListDir(id, params);
+        return;
+    }
+    if (method == u"fs/grep"_s || method == u"grep"_s) {
+        handleFsGrep(id, params);
+        return;
+    }
+    if (method == u"fs/glob"_s || method == u"glob"_s) {
+        handleFsGlob(id, params);
+        return;
+    }
+    if (method == u"apply_patch"_s) {
+        handleApplyPatch(id, params);
+        return;
+    }
+    if (method == u"exit_plan_mode"_s) {
+        handleExitPlanMode(id, params);
         return;
     }
     if (method == u"write_plan_file"_s) {
@@ -2795,6 +3223,10 @@ void AcpClient::handleIncomingRequest(const QJsonObject &message)
         handleTerminalRelease(id, params);
         return;
     }
+    if (method == u"terminal/send_input"_s) {
+        handleTerminalSendInput(id, params);
+        return;
+    }
     if (method == u"query_project_graph"_s) {
         handleQueryProjectGraph(id, params);
         return;
@@ -2821,6 +3253,16 @@ void AcpClient::handleIncomingRequest(const QJsonObject &message)
     }
     if (method == u"lsp_code_actions"_s) {
         handleLspCodeActions(id, params);
+        return;
+    }
+    if (method == u"debug_status"_s || method == u"debug_stack"_s || method == u"debug_locals"_s
+        || method == u"debug_breakpoints"_s || method == u"debug_select_frame"_s
+        || method == u"debug_select_thread"_s || method == u"debug_snapshot"_s
+        || method == u"debug_set_breakpoint"_s || method == u"debug_step"_s
+        || method == u"debug_eval"_s || method == u"debug_session"_s
+        || method == u"debug_console"_s || method == u"build_targets"_s
+        || method == u"build_run"_s || method == u"terminal_run"_s) {
+        handleKateToolMethod(method, id, params);
         return;
     }
     if (method == u"ask_user"_s) {
@@ -2906,6 +3348,23 @@ void AcpClient::handleSessionUpdate(const QJsonObject &update)
         ingestSessionModels(update, false);
         return;
     }
+    if (kind == u"current_mode_update"_s) {
+        ingestSessionModes(update);
+        return;
+    }
+    if (kind == u"usage_update"_s) {
+        const qint64 used = static_cast<qint64>(update.value(u"used"_s).toDouble(0));
+        const qint64 size = static_cast<qint64>(update.value(u"size"_s).toDouble(0));
+        if (used >= 0 && size >= 0) {
+            m_contextUsedTokens = used;
+            m_contextWindowSize = size;
+            Q_EMIT usageUpdated(used, size);
+        }
+        return;
+    }
+    if (kind == u"session_info_update"_s || kind == u"user_message_chunk"_s) {
+        return;
+    }
     if (kind == u"available_commands_update"_s) {
         // Protocol-defined form: params.update.sessionUpdate names the variant
         // and availableCommands is the complete replacement list.
@@ -2986,7 +3445,7 @@ void AcpClient::handleSessionUpdate(const QJsonObject &update)
         m_toolCalls.append(call);
         Q_EMIT toolStarted(request);
         const QString status = update.value(u"status"_s).toString();
-        if (status == u"completed"_s || status == u"failed"_s) {
+        if (isTerminalToolStatus(status)) {
             const ToolResult result = completedToolResult(request.toolCallId, request.toolName, update,
                                                           m_toolStreamed.value(request.toolCallId));
             m_liveTools.remove(request.toolCallId);
@@ -3040,14 +3499,34 @@ void AcpClient::handleSessionUpdate(const QJsonObject &update)
             linkToolTerminals(toolCallId, QJsonObject{{u"type"_s, u"terminal"_s}, {u"terminalId"_s, update.value(u"terminalId"_s)}});
         }
         const PermissionRequest refreshed = permissionFromToolCall(update);
-        const PermissionRequest merged = mergeToolCallDetails(existing, refreshed);
+        PermissionRequest merged = mergeToolCallDetails(existing, refreshed);
+        const QString updatedTitle = update.value(u"title"_s).toString().trimmed();
+        if (!updatedTitle.isEmpty() && updatedTitle != merged.summary) {
+            merged.summary = updatedTitle;
+        }
         if (merged.describeDiff != existing.describeDiff || merged.resolvedPath != existing.resolvedPath
-            || merged.mutatesFiles != existing.mutatesFiles || merged.additionalDiffs != existing.additionalDiffs) {
+            || merged.mutatesFiles != existing.mutatesFiles || merged.additionalDiffs != existing.additionalDiffs
+            || merged.details != existing.details || merged.summary != existing.summary
+            || merged.toolName != existing.toolName || merged.path != existing.path) {
             existing = merged;
             m_liveTools.insert(toolCallId, existing);
+            // Keep the recorded tool call arguments up to date for transcript history.
+            for (int i = m_toolCalls.size() - 1; i >= 0; --i) {
+                QJsonObject callObj = m_toolCalls.at(i).toObject();
+                if (callObj.value(u"id"_s).toString() == toolCallId) {
+                    QJsonObject fn = callObj.value(u"function"_s).toObject();
+                    fn.insert(u"name"_s, existing.toolName);
+                    if (existing.details.startsWith(u'{')) {
+                        fn.insert(u"arguments"_s, existing.details);
+                    }
+                    callObj.insert(u"function"_s, fn);
+                    m_toolCalls.replace(i, callObj);
+                    break;
+                }
+            }
             Q_EMIT toolDetailsChanged(existing);
         }
-        if (status == u"completed"_s || status == u"failed"_s) {
+        if (isTerminalToolStatus(status)) {
             // Some ACP agents stream command output while the tool runs, then
             // send a terminal status update with no content at all. Keep that
             // last complete stream as the final card output.
@@ -3396,17 +3875,32 @@ PermissionRequest AcpClient::permissionFromToolCall(const QJsonObject &toolCall)
     auto tryPath = [&](const QJsonObject &o, const QString &key) {
         if (request.path.isEmpty()) {
             QString p = o.value(key).toString();
+            if (p.startsWith(u"file:"_s, Qt::CaseInsensitive)) {
+                const QUrl url(p);
+                if (url.isLocalFile()) {
+                    p = url.toLocalFile();
+                }
+            }
             if (!p.isEmpty()) request.path = p;
         }
     };
     if (request.path.isEmpty() && !normalizedArgs.isEmpty()) {
         tryPath(normalizedArgs, u"path"_s);
+        tryPath(normalizedArgs, u"Path"_s);
         tryPath(normalizedArgs, u"file_path"_s);
         tryPath(normalizedArgs, u"filePath"_s);
         tryPath(normalizedArgs, u"file"_s);
+        tryPath(normalizedArgs, u"File"_s);
         tryPath(normalizedArgs, u"uri"_s);
         tryPath(normalizedArgs, u"target"_s);
+        tryPath(normalizedArgs, u"target_file"_s);
+        tryPath(normalizedArgs, u"targetFile"_s);
         tryPath(normalizedArgs, u"TargetFile"_s);
+        tryPath(normalizedArgs, u"absolute_path"_s);
+        tryPath(normalizedArgs, u"AbsolutePath"_s);
+        tryPath(normalizedArgs, u"DirectoryPath"_s);
+        tryPath(normalizedArgs, u"SearchPath"_s);
+        tryPath(normalizedArgs, u"SearchDirectory"_s);
     }
     // Resolve relative paths against workspace
     if (!request.path.isEmpty() && !QFileInfo(request.path).isAbsolute() && !m_workspace.isEmpty()) {
@@ -3427,28 +3921,69 @@ PermissionRequest AcpClient::permissionFromToolCall(const QJsonObject &toolCall)
         }
         if (!args.isEmpty()) {
             if (request.path.isEmpty()) {
-                QString p = args.value(u"path"_s).toString();
-                if (p.isEmpty()) p = args.value(u"file_path"_s).toString();
-                if (p.isEmpty()) p = args.value(u"filePath"_s).toString();
-                if (p.isEmpty()) p = args.value(u"file"_s).toString();
-                if (p.isEmpty()) p = args.value(u"uri"_s).toString();
-                if (p.isEmpty()) p = args.value(u"target"_s).toString();
-                if (p.isEmpty()) p = args.value(u"TargetFile"_s).toString();
-                if (!p.isEmpty()) request.path = p;
+                QString p = firstStringField(
+                    args, {u"path"_s, u"Path"_s, u"file_path"_s, u"filePath"_s, u"file"_s, u"File"_s,
+                           u"target_file"_s, u"targetFile"_s, u"TargetFile"_s,
+                           u"absolute_path"_s, u"AbsolutePath"_s, u"uri"_s, u"target"_s,
+                           u"DirectoryPath"_s, u"SearchPath"_s, u"SearchDirectory"_s});
+                if (p.startsWith(u"file:"_s, Qt::CaseInsensitive)) {
+                    const QUrl url(p);
+                    if (url.isLocalFile()) {
+                        p = url.toLocalFile();
+                    }
+                }
+                if (!p.isEmpty()) {
+                    request.path = p;
+                    request.resolvedPath = (!QFileInfo(p).isAbsolute() && !m_workspace.isEmpty())
+                        ? QDir(m_workspace).absoluteFilePath(p)
+                        : p;
+                }
             }
             QString oldText = args.value(u"old_string"_s).toString();
             if (oldText.isEmpty()) oldText = args.value(u"oldText"_s).toString();
             if (oldText.isEmpty()) oldText = args.value(u"old"_s).toString();
+            if (oldText.isEmpty()) oldText = args.value(u"Target"_s).toString();
+            if (oldText.isEmpty()) oldText = args.value(u"TargetContent"_s).toString();
             QString newText = args.value(u"new_string"_s).toString();
             if (newText.isEmpty()) newText = args.value(u"newText"_s).toString();
             if (newText.isEmpty()) newText = args.value(u"new"_s).toString();
+            if (newText.isEmpty()) newText = args.value(u"Replacement"_s).toString();
+            if (newText.isEmpty()) newText = args.value(u"ReplacementContent"_s).toString();
             if (request.describeDiff.isEmpty() && (!oldText.isEmpty() || !newText.isEmpty())) {
                 request.describeDiff = unifiedDiff(request.path, oldText, newText);
                 if (!request.path.isEmpty()) request.mutatesFiles = true;
             }
             if (request.describeDiff.isEmpty()) {
+                QJsonArray chunks = args.value(u"ReplacementChunks"_s).toArray();
+                if (chunks.isEmpty()) chunks = args.value(u"edits"_s).toArray();
+                if (chunks.isEmpty()) chunks = args.value(u"chunks"_s).toArray();
+                if (!chunks.isEmpty()) {
+                    QStringList chunkDiffs;
+                    for (const QJsonValue &chunkVal : chunks) {
+                        const QJsonObject chunk = chunkVal.toObject();
+                        QString cOld = chunk.value(u"old_string"_s).toString();
+                        if (cOld.isEmpty()) cOld = chunk.value(u"oldText"_s).toString();
+                        if (cOld.isEmpty()) cOld = chunk.value(u"TargetContent"_s).toString();
+                        if (cOld.isEmpty()) cOld = chunk.value(u"Target"_s).toString();
+                        QString cNew = chunk.value(u"new_string"_s).toString();
+                        if (cNew.isEmpty()) cNew = chunk.value(u"newText"_s).toString();
+                        if (cNew.isEmpty()) cNew = chunk.value(u"ReplacementContent"_s).toString();
+                        if (cNew.isEmpty()) cNew = chunk.value(u"Replacement"_s).toString();
+                        if (!cOld.isEmpty() || !cNew.isEmpty()) {
+                            chunkDiffs.append(unifiedDiff(request.path, cOld, cNew));
+                        }
+                    }
+                    if (!chunkDiffs.isEmpty()) {
+                        request.describeDiff = chunkDiffs.join(u"\n"_s);
+                        if (!request.path.isEmpty()) request.mutatesFiles = true;
+                    }
+                }
+            }
+            if (request.describeDiff.isEmpty()) {
                 QString content = args.value(u"content"_s).toString();
                 if (content.isEmpty()) content = args.value(u"contents"_s).toString();
+                if (content.isEmpty()) content = args.value(u"Content"_s).toString();
+                if (content.isEmpty()) content = args.value(u"CodeContent"_s).toString();
                 if (!content.isEmpty() && !request.path.isEmpty()
                     && (request.toolName.trimmed().toLower().contains(u"write"_s)
                         || kind == u"write"_s)) {
@@ -3725,8 +4260,21 @@ void AcpClient::dispatchParkedMethod(const ParkedMethod &parked)
     // passes and the call runs (or fails on its own merits).
     if (parked.method == u"fs/write_text_file"_s) {
         handleFsWrite(parked.rpcId, parked.params);
+    } else if (parked.method == u"fs/edit_file"_s) {
+        handleFsEdit(parked.rpcId, parked.params);
+    } else if (parked.method == u"fs/multi_edit_file"_s) {
+        handleFsMultiEdit(parked.rpcId, parked.params);
+    } else if (parked.method == u"fs/delete_file"_s) {
+        handleFsDelete(parked.rpcId, parked.params);
+    } else if (parked.method == u"apply_patch"_s) {
+        handleApplyPatch(parked.rpcId, parked.params);
     } else if (parked.method == u"terminal/create"_s) {
         handleTerminalCreate(parked.rpcId, parked.params);
+    } else if (parked.method == u"debug_set_breakpoint"_s || parked.method == u"debug_step"_s
+               || parked.method == u"debug_eval"_s || parked.method == u"debug_session"_s
+               || parked.method == u"debug_console"_s || parked.method == u"build_run"_s
+               || parked.method == u"terminal_run"_s) {
+        handleKateToolMethod(parked.method, parked.rpcId, parked.params);
     }
 }
 
@@ -3790,6 +4338,9 @@ void AcpClient::recordApprovalGrants(const PermissionRequest &request, Permissio
     if (commandValue.isUndefined() || commandValue.isNull()) {
         commandValue = args.value(u"cmd"_s);
     }
+    if (commandValue.isUndefined() || commandValue.isNull()) {
+        commandValue = args.value(u"CommandLine"_s);
+    }
     QStringList argv;
     if (commandValue.isArray()) {
         for (const QJsonValue &value : commandValue.toArray()) {
@@ -3808,7 +4359,10 @@ void AcpClient::recordApprovalGrants(const PermissionRequest &request, Permissio
 
 void AcpClient::handleFsRead(const QJsonValue &id, const QJsonObject &params)
 {
-    const QString path = acpPathParam(params);
+    QString path = acpPathParam(params);
+    if (!path.isEmpty() && !QFileInfo(path).isAbsolute() && !m_workspace.isEmpty()) {
+        path = QDir(m_workspace).absoluteFilePath(path);
+    }
     QString error;
     if (!pathAllowed(path, false, &error)) {
         replyError(id, kServerError, error);
@@ -3835,7 +4389,15 @@ void AcpClient::handleFsRead(const QJsonValue &id, const QJsonObject &params)
     if (line == 0) {
         line = qMax(0, jsonIntValue(params.value(u"offset"_s), 0));
     }
-    const int requestedLimit = jsonIntValue(params.value(u"limit"_s), 0);
+    const int startLine = qMax(0, jsonIntValue(params.value(u"start_line"_s), jsonIntValue(params.value(u"StartLine"_s), 0)));
+    const int endLine = qMax(0, jsonIntValue(params.value(u"end_line"_s), jsonIntValue(params.value(u"EndLine"_s), 0)));
+    if (startLine > 0) {
+        line = startLine;
+    }
+    int requestedLimit = jsonIntValue(params.value(u"limit"_s), 0);
+    if (requestedLimit == 0 && startLine > 0 && endLine >= startLine) {
+        requestedLimit = (endLine - startLine + 1);
+    }
     const int limit = requestedLimit <= 0 ? 10000 : qMin(requestedLimit, 10000);
 
     QStringList page;
@@ -3864,7 +4426,23 @@ void AcpClient::handleFsRead(const QJsonValue &id, const QJsonObject &params)
 
 void AcpClient::handleFsWrite(const QJsonValue &id, const QJsonObject &params)
 {
-    const QString path = acpPathParam(params);
+    QString path = acpPathParam(params);
+    if (!path.isEmpty() && !QFileInfo(path).isAbsolute() && !m_workspace.isEmpty()) {
+        path = QDir(m_workspace).absoluteFilePath(path);
+    }
+    QString contentKey;
+    for (const QString &k : {u"content"_s, u"Content"_s, u"contents"_s, u"code_content"_s, u"CodeContent"_s, u"text"_s}) {
+        if (params.contains(k)) {
+            contentKey = k;
+            break;
+        }
+    }
+    if (contentKey.isEmpty()) {
+        replyError(id, kInvalidParams, u"content is required (pass an empty string to write an empty file)."_s);
+        return;
+    }
+    const QString content = params.value(contentKey).toString();
+
     // The permission bar is the contract for every write: an approval for this
     // exact path lets the call through, anything else parks it until the user
     // or the policy answers.
@@ -3876,6 +4454,12 @@ void AcpClient::handleFsWrite(const QJsonValue &id, const QJsonObject &params)
     request.risk = ToolRisk::Write;
     request.mutatesFiles = true;
     request.summary = u"Write %1"_s.arg(path);
+    QString existingForDiff;
+    if (m_bridge && m_bridge->readDocument(path, &existingForDiff)) {
+        request.describeDiff = unifiedDiff(path, existingForDiff, content);
+    } else {
+        request.describeDiff = unifiedDiff(path, QString(), content);
+    }
     request.details = QString::fromUtf8(QJsonDocument(params).toJson(QJsonDocument::Compact));
     if (!ensureMethodPermission(writeGrantKey(path), std::move(request), id, u"fs/write_text_file"_s, params)) {
         return;
@@ -3894,15 +4478,600 @@ void AcpClient::handleFsWrite(const QJsonValue &id, const QJsonObject &params)
         replyError(id, kInternalError, u"No document bridge is available."_s);
         return;
     }
-    if (!params.contains(u"content"_s)) {
-        replyError(id, kInvalidParams, u"content is required (pass an empty string to write an empty file)."_s);
-        return;
-    }
-    if (!m_bridge->writeDocument(resolved, params.value(u"content"_s).toString(), &error)) {
+    if (!m_bridge->writeDocument(resolved, content, &error)) {
         replyError(id, kServerError, error.isEmpty() ? u"Could not write %1."_s.arg(path) : error);
         return;
     }
     replyResult(id, QJsonObject());
+}
+
+void AcpClient::handleFsEdit(const QJsonValue &id, const QJsonObject &params)
+{
+    QString path = acpPathParam(params);
+    if (!path.isEmpty() && !QFileInfo(path).isAbsolute() && !m_workspace.isEmpty()) {
+        path = QDir(m_workspace).absoluteFilePath(path);
+    }
+    QString oldText = params.value(u"old_string"_s).toString();
+    if (oldText.isEmpty()) oldText = params.value(u"oldText"_s).toString();
+    if (oldText.isEmpty()) oldText = params.value(u"Target"_s).toString();
+    if (oldText.isEmpty()) oldText = params.value(u"TargetContent"_s).toString();
+    QString newText = params.value(u"new_string"_s).toString();
+    if (!params.contains(u"new_string"_s)) {
+        if (params.contains(u"newText"_s)) newText = params.value(u"newText"_s).toString();
+        else if (params.contains(u"Replacement"_s)) newText = params.value(u"Replacement"_s).toString();
+        else if (params.contains(u"ReplacementContent"_s)) newText = params.value(u"ReplacementContent"_s).toString();
+    }
+    const bool isFullReplacement = oldText.isEmpty()
+        && (params.contains(u"code_content"_s) || params.contains(u"CodeContent"_s)
+            || params.contains(u"content"_s) || params.contains(u"Content"_s));
+    if (isFullReplacement) {
+        if (params.contains(u"code_content"_s)) newText = params.value(u"code_content"_s).toString();
+        else if (params.contains(u"CodeContent"_s)) newText = params.value(u"CodeContent"_s).toString();
+        else if (params.contains(u"content"_s)) newText = params.value(u"content"_s).toString();
+        else if (params.contains(u"Content"_s)) newText = params.value(u"Content"_s).toString();
+    } else if (path.isEmpty() || oldText.isEmpty()) {
+        replyError(id, kInvalidParams, u"edit_file requires path and non-empty old_string."_s);
+        return;
+    }
+
+    PermissionRequest request;
+    request.toolName = u"edit_file"_s;
+    request.toolCallId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    request.path = path;
+    request.resolvedPath = path;
+    request.risk = ToolRisk::Write;
+    request.mutatesFiles = true;
+    request.summary = u"Edit %1"_s.arg(path);
+    if (isFullReplacement && m_bridge) {
+        QString docBefore;
+        if (m_bridge->readDocument(path, &docBefore)) {
+            request.describeDiff = unifiedDiff(path, docBefore, newText);
+        }
+    }
+    if (request.describeDiff.isEmpty()) {
+        request.describeDiff = unifiedDiff(path, oldText, newText);
+    }
+    request.details = QString::fromUtf8(QJsonDocument(params).toJson(QJsonDocument::Compact));
+    if (!ensureMethodPermission(writeGrantKey(path), std::move(request), id, u"fs/edit_file"_s, params)) {
+        return;
+    }
+
+    QString error;
+    if (!pathAllowed(path, true, &error)) {
+        replyError(id, kServerError, error);
+        return;
+    }
+    const QString resolved = currentSandbox().resolve(path, &error, true);
+    if (resolved.isEmpty()) {
+        replyError(id, kServerError, error);
+        return;
+    }
+    if (!m_bridge) {
+        replyError(id, kInternalError, u"No document bridge is available."_s);
+        return;
+    }
+    QString contents;
+    if (!m_bridge->readDocument(resolved, &contents)) {
+        replyError(id, kServerError, u"Could not read %1."_s.arg(path));
+        return;
+    }
+    QString updated = contents;
+    if (isFullReplacement) {
+        updated = newText;
+    } else {
+        const bool replaceAll = boolishValue(params.value(u"replace_all"_s), false);
+        const qsizetype first = contents.indexOf(oldText);
+        if (first < 0) {
+            replyError(id, kServerError, u"old_string was not found in %1."_s.arg(path));
+            return;
+        }
+        if (!replaceAll && contents.indexOf(oldText, first + oldText.size()) >= 0) {
+            replyError(id, kServerError, u"old_string appears more than once in %1; provide more context or set replace_all."_s.arg(path));
+            return;
+        }
+        if (replaceAll) {
+            updated.replace(oldText, newText);
+        } else {
+            updated.replace(first, oldText.size(), newText);
+        }
+    }
+    if (!m_bridge->writeDocumentIfUnchanged(resolved, contents, updated, &error)) {
+        replyError(id, kServerError, error.isEmpty() ? u"Could not edit %1."_s.arg(path) : error);
+        return;
+    }
+    QJsonObject result;
+    result.insert(u"path"_s, resolved);
+    result.insert(u"diff"_s, unifiedDiff(path, contents, updated));
+    replyResult(id, result);
+}
+
+void AcpClient::handleFsMultiEdit(const QJsonValue &id, const QJsonObject &params)
+{
+    QString path = acpPathParam(params);
+    if (!path.isEmpty() && !QFileInfo(path).isAbsolute() && !m_workspace.isEmpty()) {
+        path = QDir(m_workspace).absoluteFilePath(path);
+    }
+    QJsonArray edits = params.value(u"edits"_s).toArray();
+    if (edits.isEmpty()) edits = params.value(u"chunks"_s).toArray();
+    if (edits.isEmpty()) edits = params.value(u"ReplacementChunks"_s).toArray();
+    if (path.isEmpty() || edits.isEmpty()) {
+        replyError(id, kInvalidParams, u"multi_edit_file requires path and a non-empty edits array."_s);
+        return;
+    }
+
+    PermissionRequest request;
+    request.toolName = u"multi_edit_file"_s;
+    request.toolCallId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    request.path = path;
+    request.resolvedPath = path;
+    request.risk = ToolRisk::Write;
+    request.mutatesFiles = true;
+    request.summary = u"Edit %1 (%2 edits)"_s.arg(path).arg(edits.size());
+    request.details = QString::fromUtf8(QJsonDocument(params).toJson(QJsonDocument::Compact));
+    if (!ensureMethodPermission(writeGrantKey(path), std::move(request), id, u"fs/multi_edit_file"_s, params)) {
+        return;
+    }
+
+    QString error;
+    if (!pathAllowed(path, true, &error)) {
+        replyError(id, kServerError, error);
+        return;
+    }
+    const QString resolved = currentSandbox().resolve(path, &error, true);
+    if (resolved.isEmpty()) {
+        replyError(id, kServerError, error);
+        return;
+    }
+    if (!m_bridge) {
+        replyError(id, kInternalError, u"No document bridge is available."_s);
+        return;
+    }
+    QString original;
+    if (!m_bridge->readDocument(resolved, &original)) {
+        replyError(id, kServerError, u"Could not read %1."_s.arg(path));
+        return;
+    }
+    QString updated = original;
+    for (int i = 0; i < edits.size(); ++i) {
+        const QJsonObject edit = edits.at(i).toObject();
+        QString oldText = edit.value(u"old_string"_s).toString();
+        if (oldText.isEmpty()) oldText = edit.value(u"oldText"_s).toString();
+        if (oldText.isEmpty()) oldText = edit.value(u"TargetContent"_s).toString();
+        if (oldText.isEmpty()) oldText = edit.value(u"Target"_s).toString();
+        QString newText = edit.value(u"new_string"_s).toString();
+        if (!edit.contains(u"new_string"_s)) {
+            if (edit.contains(u"newText"_s)) newText = edit.value(u"newText"_s).toString();
+            else if (edit.contains(u"ReplacementContent"_s)) newText = edit.value(u"ReplacementContent"_s).toString();
+            else if (edit.contains(u"Replacement"_s)) newText = edit.value(u"Replacement"_s).toString();
+        }
+        if (oldText.isEmpty()) {
+            replyError(id, kInvalidParams, u"Edit %1 has an empty old_string."_s.arg(i + 1));
+            return;
+        }
+        const bool replaceAll = boolishValue(edit.value(u"replace_all"_s), false);
+        const qsizetype first = updated.indexOf(oldText);
+        if (first < 0) {
+            replyError(id, kServerError, u"Edit %1: old_string was not found in %2."_s.arg(i + 1).arg(path));
+            return;
+        }
+        if (!replaceAll && updated.indexOf(oldText, first + oldText.size()) >= 0) {
+            replyError(id, kServerError, u"Edit %1: old_string appears more than once in %2."_s.arg(i + 1).arg(path));
+            return;
+        }
+        if (replaceAll) {
+            updated.replace(oldText, newText);
+        } else {
+            updated.replace(first, oldText.size(), newText);
+        }
+    }
+    if (!m_bridge->writeDocumentIfUnchanged(resolved, original, updated, &error)) {
+        replyError(id, kServerError, error.isEmpty() ? u"Could not edit %1."_s.arg(path) : error);
+        return;
+    }
+    QJsonObject result;
+    result.insert(u"path"_s, resolved);
+    result.insert(u"editsApplied"_s, edits.size());
+    result.insert(u"diff"_s, unifiedDiff(path, original, updated));
+    replyResult(id, result);
+}
+
+void AcpClient::handleFsDelete(const QJsonValue &id, const QJsonObject &params)
+{
+    QString path = acpPathParam(params);
+    if (!path.isEmpty() && !QFileInfo(path).isAbsolute() && !m_workspace.isEmpty()) {
+        path = QDir(m_workspace).absoluteFilePath(path);
+    }
+    if (path.isEmpty()) {
+        replyError(id, kInvalidParams, u"delete_file requires path."_s);
+        return;
+    }
+
+    PermissionRequest request;
+    request.toolName = u"edit_file"_s;
+    request.originalToolName = u"delete_file"_s;
+    request.toolCallId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    request.path = path;
+    request.resolvedPath = path;
+    request.risk = ToolRisk::Write;
+    request.mutatesFiles = true;
+    request.summary = u"Delete %1"_s.arg(path);
+    if (m_bridge) {
+        QString docBefore;
+        if (m_bridge->readDocument(path, &docBefore)) {
+            request.describeDiff = unifiedDiff(path, docBefore, QString());
+        }
+    }
+    request.details = QString::fromUtf8(QJsonDocument(params).toJson(QJsonDocument::Compact));
+    if (!ensureMethodPermission(writeGrantKey(path), std::move(request), id, u"fs/delete_file"_s, params)) {
+        return;
+    }
+
+    QString error;
+    if (!pathAllowed(path, true, &error)) {
+        replyError(id, kServerError, error);
+        return;
+    }
+    const QString resolved = currentSandbox().resolve(path, &error, true);
+    if (resolved.isEmpty()) {
+        replyError(id, kServerError, error);
+        return;
+    }
+    if (!m_bridge) {
+        replyError(id, kInternalError, u"No document bridge is available."_s);
+        return;
+    }
+    if (!m_bridge->removeDocument(resolved, &error)) {
+        replyError(id, kServerError, error.isEmpty() ? u"Could not delete %1."_s.arg(path) : error);
+        return;
+    }
+    replyResult(id, QJsonObject{{u"path"_s, resolved}});
+}
+
+void AcpClient::handleFsListDir(const QJsonValue &id, const QJsonObject &params)
+{
+    QString path = acpPathParam(params);
+    if (path.isEmpty()) {
+        path = sessionCwd();
+    } else if (!QFileInfo(path).isAbsolute() && !m_workspace.isEmpty()) {
+        path = QDir(m_workspace).absoluteFilePath(path);
+    }
+    QString error;
+    if (!pathAllowed(path, false, &error)) {
+        replyError(id, kServerError, error);
+        return;
+    }
+    const QString resolved = currentSandbox().resolve(path, &error, false);
+    if (resolved.isEmpty()) {
+        replyError(id, kServerError, error);
+        return;
+    }
+    const QDir dir(resolved);
+    if (!dir.exists()) {
+        replyError(id, kServerError, u"Directory does not exist: %1"_s.arg(path));
+        return;
+    }
+    const Sandbox sandbox = currentSandbox();
+    const QFileInfoList infos = dir.entryInfoList(QDir::AllEntries | QDir::NoDotAndDotDot | QDir::Hidden,
+                                                  QDir::DirsFirst | QDir::Name);
+    QJsonArray entries;
+    QStringList lines;
+    constexpr int kMaxEntries = 500;
+    for (const QFileInfo &info : infos) {
+        if (entries.size() >= kMaxEntries) {
+            lines.append(u"… (truncated)"_s);
+            break;
+        }
+        const QString entryPath = info.absoluteFilePath();
+        if (!sandbox.allowsRead(entryPath, nullptr)) {
+            continue;
+        }
+        QJsonObject item;
+        item.insert(u"name"_s, info.fileName());
+        item.insert(u"type"_s, info.isDir() ? u"directory"_s : (info.isSymLink() ? u"symlink"_s : u"file"_s));
+        if (info.isFile()) {
+            item.insert(u"size"_s, info.size());
+        }
+        entries.append(item);
+        lines.append(info.isDir() ? info.fileName() + u'/' : info.fileName());
+    }
+    QJsonObject result;
+    result.insert(u"entries"_s, entries);
+    result.insert(u"content"_s, lines.join(u'\n'));
+    replyResult(id, result);
+}
+
+void AcpClient::handleFsGrep(const QJsonValue &id, const QJsonObject &params)
+{
+    const QString pattern = firstStringField(params, {u"pattern"_s, u"query"_s, u"Query"_s, u"regex"_s});
+    if (pattern.isEmpty()) {
+        replyError(id, kInvalidParams, u"grep requires a non-empty pattern."_s);
+        return;
+    }
+    QString root = acpPathParam(params);
+    if (root.isEmpty()) {
+        root = firstStringField(params, {u"SearchPath"_s, u"SearchDirectory"_s});
+    }
+    if (root.isEmpty()) {
+        root = sessionCwd();
+    } else if (!QFileInfo(root).isAbsolute() && !m_workspace.isEmpty()) {
+        root = QDir(m_workspace).absoluteFilePath(root);
+    }
+    QString error;
+    if (!pathAllowed(root, false, &error)) {
+        replyError(id, kServerError, error);
+        return;
+    }
+    const QString resolvedRoot = currentSandbox().resolve(root, &error, false);
+    if (resolvedRoot.isEmpty()) {
+        replyError(id, kServerError, error);
+        return;
+    }
+    const bool caseInsensitive = boolishValue(params.value(u"case_insensitive"_s), false);
+    const QRegularExpression regex(
+        pattern, caseInsensitive ? QRegularExpression::CaseInsensitiveOption : QRegularExpression::NoPatternOption);
+    if (!regex.isValid()) {
+        replyError(id, kInvalidParams, u"Invalid regex pattern: %1"_s.arg(regex.errorString()));
+        return;
+    }
+    const QString globFilter = params.value(u"glob"_s).toString().trimmed();
+    QRegularExpression globRe;
+    if (!globFilter.isEmpty()) {
+        globRe = QRegularExpression(QRegularExpression::wildcardToRegularExpression(globFilter));
+    }
+
+    const Sandbox sandbox = currentSandbox();
+    QStringList filesToSearch;
+    const QFileInfo rootInfo(resolvedRoot);
+    if (rootInfo.isFile()) {
+        filesToSearch.append(resolvedRoot);
+    } else {
+        static const QSet<QString> skipDirs = {
+            u".git"_s, u"node_modules"_s, u"build"_s, u"CMakeFiles"_s, u".cache"_s, u"__pycache"_s,
+        };
+        QDirIterator it(resolvedRoot, QDir::Files, QDirIterator::Subdirectories);
+        constexpr int kMaxFiles = 4000;
+        while (it.hasNext() && filesToSearch.size() < kMaxFiles) {
+            const QString filePath = it.next();
+            const QString rel = QDir(resolvedRoot).relativeFilePath(filePath);
+            const QStringList parts = rel.split(u'/');
+            bool skipped = false;
+            for (int i = 0; i + 1 < parts.size(); ++i) {
+                if (skipDirs.contains(parts.at(i))) {
+                    skipped = true;
+                    break;
+                }
+            }
+            if (skipped || !sandbox.allowsRead(filePath, nullptr)) {
+                continue;
+            }
+            if (globRe.isValid() && !globFilter.isEmpty()
+                && !globRe.match(QFileInfo(filePath).fileName()).hasMatch()
+                && !globRe.match(rel).hasMatch()) {
+                continue;
+            }
+            filesToSearch.append(filePath);
+        }
+    }
+
+    QStringList matches;
+    constexpr int kMaxMatches = 200;
+    constexpr qint64 kMaxSearchFileBytes = 2 * 1024 * 1024;
+    for (const QString &filePath : filesToSearch) {
+        if (matches.size() >= kMaxMatches) {
+            break;
+        }
+        const QFileInfo fi(filePath);
+        if (fi.size() > kMaxSearchFileBytes) {
+            continue;
+        }
+        QFile file(filePath);
+        if (!file.open(QIODevice::ReadOnly)) {
+            continue;
+        }
+        const QByteArray raw = file.read(kMaxSearchFileBytes);
+        if (raw.contains('\0')) {
+            continue; // skip binary files
+        }
+        const QStringList lines = QString::fromUtf8(raw).split(u'\n');
+        const QString rel = m_workspace.isEmpty() ? filePath : QDir(m_workspace).relativeFilePath(filePath);
+        for (int lineIdx = 0; lineIdx < lines.size(); ++lineIdx) {
+            if (regex.match(lines.at(lineIdx)).hasMatch()) {
+                matches.append(u"%1:%2:%3"_s.arg(rel).arg(lineIdx + 1).arg(lines.at(lineIdx)));
+                if (matches.size() >= kMaxMatches) {
+                    matches.append(u"… (matches truncated)"_s);
+                    break;
+                }
+            }
+        }
+    }
+
+    QJsonObject result;
+    result.insert(u"content"_s, matches.isEmpty() ? u"(no matches)"_s : matches.join(u'\n'));
+    result.insert(u"matches"_s, QJsonArray::fromStringList(matches));
+    replyResult(id, result);
+}
+
+void AcpClient::handleFsGlob(const QJsonValue &id, const QJsonObject &params)
+{
+    const QString pattern = firstStringField(params, {u"pattern"_s, u"glob"_s, u"Pattern"_s});
+    if (pattern.isEmpty()) {
+        replyError(id, kInvalidParams, u"glob requires a non-empty pattern."_s);
+        return;
+    }
+    QString root = acpPathParam(params);
+    if (root.isEmpty()) {
+        root = firstStringField(params, {u"SearchDirectory"_s, u"SearchPath"_s});
+    }
+    if (root.isEmpty()) {
+        root = sessionCwd();
+    } else if (!QFileInfo(root).isAbsolute() && !m_workspace.isEmpty()) {
+        root = QDir(m_workspace).absoluteFilePath(root);
+    }
+    QString error;
+    if (!pathAllowed(root, false, &error)) {
+        replyError(id, kServerError, error);
+        return;
+    }
+    const QString resolvedRoot = currentSandbox().resolve(root, &error, false);
+    if (resolvedRoot.isEmpty()) {
+        replyError(id, kServerError, error);
+        return;
+    }
+
+    // Support `**/` recursive glob patterns cleanly.
+    QString rxStr = QRegularExpression::wildcardToRegularExpression(
+        pattern, QRegularExpression::UnanchoredWildcardConversion);
+    rxStr.replace(u"[^/]*[^/]*/"_s, u"(?:.*/)?"_s);
+    rxStr.replace(u"[^/]*[^/]*"_s, u".*"_s);
+    const QRegularExpression re(u"\\A(?:"_s + rxStr + u")\\z"_s);
+
+    const Sandbox sandbox = currentSandbox();
+    QStringList matched;
+    constexpr int kMaxMatches = 500;
+    QDirIterator it(resolvedRoot, QDir::Files, QDirIterator::Subdirectories);
+    while (it.hasNext() && matched.size() < kMaxMatches) {
+        const QString filePath = it.next();
+        const QString rel = QDir(resolvedRoot).relativeFilePath(filePath);
+        if (rel.startsWith(u".git/"_s) || rel.contains(u"/.git/"_s)
+            || rel.startsWith(u"node_modules/"_s) || rel.contains(u"/node_modules/"_s)) {
+            continue;
+        }
+        if (!sandbox.allowsRead(filePath, nullptr)) {
+            continue;
+        }
+        if (re.match(rel).hasMatch() || (!pattern.contains(u'/') && re.match(QFileInfo(filePath).fileName()).hasMatch())) {
+            matched.append(rel);
+        }
+    }
+    std::sort(matched.begin(), matched.end());
+    QJsonObject result;
+    result.insert(u"files"_s, QJsonArray::fromStringList(matched));
+    result.insert(u"content"_s, matched.isEmpty() ? u"(no files matched)"_s : matched.join(u'\n'));
+    replyResult(id, result);
+}
+
+void AcpClient::handleApplyPatch(const QJsonValue &id, const QJsonObject &params)
+{
+    const QString patchText = firstStringField(params, {u"patch"_s, u"diff"_s, u"content"_s});
+    if (patchText.isEmpty()) {
+        replyError(id, kInvalidParams, u"apply_patch requires a non-empty patch string."_s);
+        return;
+    }
+    const QList<PatchFile> files = parseUnifiedPatch(patchText);
+    if (files.isEmpty()) {
+        replyError(id, kInvalidParams, u"Could not parse a valid unified diff patch."_s);
+        return;
+    }
+    QStringList targetPaths;
+    for (const PatchFile &f : files) {
+        const QString raw = f.isDelete ? f.oldPath : f.path;
+        if (raw.isEmpty()) {
+            continue;
+        }
+        const QString abs = (!QFileInfo(raw).isAbsolute() && !m_workspace.isEmpty())
+            ? QDir(m_workspace).absoluteFilePath(raw)
+            : raw;
+        targetPaths.append(QDir::cleanPath(abs));
+    }
+    if (targetPaths.isEmpty()) {
+        replyError(id, kInvalidParams, u"Patch did not target any files."_s);
+        return;
+    }
+
+    PermissionRequest request;
+    request.toolName = u"apply_patch"_s;
+    request.toolCallId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    request.path = targetPaths.first();
+    request.resolvedPath = targetPaths.first();
+    request.additionalPaths = targetPaths.mid(1);
+    request.risk = ToolRisk::Write;
+    request.mutatesFiles = true;
+    request.summary = u"Apply patch (%1 file(s))"_s.arg(targetPaths.size());
+    request.describeDiff = patchText;
+    request.details = QString::fromUtf8(QJsonDocument(params).toJson(QJsonDocument::Compact));
+    const QString grantKey = u"patch:"_s + targetPaths.join(u'|');
+    if (!ensureMethodPermission(grantKey, std::move(request), id, u"apply_patch"_s, params)) {
+        return;
+    }
+    if (!m_bridge) {
+        replyError(id, kInternalError, u"No document bridge is available."_s);
+        return;
+    }
+
+    // Validate every file before writing any of them.
+    struct PlannedFile {
+        QString resolved;
+        QString original;
+        QString updated;
+        bool isNew = false;
+        bool isDelete = false;
+    };
+    QList<PlannedFile> planned;
+    for (const PatchFile &pf : files) {
+        const QString raw = pf.isDelete ? pf.oldPath : pf.path;
+        const QString abs = (!QFileInfo(raw).isAbsolute() && !m_workspace.isEmpty())
+            ? QDir(m_workspace).absoluteFilePath(raw)
+            : raw;
+        QString error;
+        if (!pathAllowed(abs, true, &error)) {
+            replyError(id, kServerError, error);
+            return;
+        }
+        const QString resolved = currentSandbox().resolve(abs, &error, true);
+        if (resolved.isEmpty()) {
+            replyError(id, kServerError, error);
+            return;
+        }
+        PlannedFile plan;
+        plan.resolved = resolved;
+        plan.isNew = pf.isNew;
+        plan.isDelete = pf.isDelete;
+        if (!pf.isNew) {
+            if (!m_bridge->readDocument(resolved, &plan.original)) {
+                replyError(id, kServerError, u"Could not read %1."_s.arg(raw));
+                return;
+            }
+        }
+        if (!pf.isDelete) {
+            QString patchErr;
+            plan.updated = applyPatchToContent(plan.original, pf.hunks, &patchErr);
+            if (!patchErr.isEmpty()) {
+                replyError(id, kServerError, u"Patch failed on %1: %2"_s.arg(raw, patchErr));
+                return;
+            }
+        }
+        planned.append(std::move(plan));
+    }
+
+    QStringList appliedPaths;
+    for (const PlannedFile &plan : planned) {
+        QString error;
+        bool ok = false;
+        if (plan.isDelete) {
+            ok = m_bridge->removeDocument(plan.resolved, &error);
+        } else if (plan.isNew) {
+            ok = m_bridge->writeDocumentIfMissing(plan.resolved, plan.updated, &error);
+        } else {
+            ok = m_bridge->writeDocumentIfUnchanged(plan.resolved, plan.original, plan.updated, &error);
+        }
+        if (!ok) {
+            replyError(id, kServerError, error.isEmpty() ? u"Failed writing %1."_s.arg(plan.resolved) : error);
+            return;
+        }
+        appliedPaths.append(plan.resolved);
+    }
+
+    QJsonObject result;
+    result.insert(u"files"_s, QJsonArray::fromStringList(appliedPaths));
+    result.insert(u"content"_s, u"Applied patch to %1 file(s)."_s.arg(appliedPaths.size()));
+    replyResult(id, result);
+}
+
+void AcpClient::handleExitPlanMode(const QJsonValue &id, const QJsonObject &params)
+{
+    Q_UNUSED(params);
+    Q_EMIT exitPlanModeRequested();
+    replyResult(id, QJsonObject{{u"ok"_s, true}});
 }
 
 // Kate-specific client method, mirroring the native write_plan_file tool: the
@@ -4371,6 +5540,39 @@ void AcpClient::handleLspCodeActions(const QJsonValue &id, const QJsonObject &pa
     replyResult(id, result);
 }
 
+void AcpClient::handleKateToolMethod(const QString &toolName, const QJsonValue &id, const QJsonObject &params)
+{
+    ToolRunner runner(currentSandbox(), m_bridge);
+    runner.setTimeoutMs(m_settings.bashTimeoutMs);
+    runner.setProjectGraph(m_projectGraph);
+    runner.setLspProvider(m_lsp);
+    runner.setDebugProvider(m_debug);
+    runner.setEcosystemProvider(m_ecosystem);
+
+    ToolCall call;
+    call.id = u"acp-kate-%1"_s.arg(id.toVariant().toString());
+    call.name = toolName;
+    call.arguments = params;
+
+    PermissionRequest req = runner.describe(call);
+    if (req.risk != ToolRisk::Read) {
+        const QString grantKey = u"kateai:%1:%2"_s.arg(toolName, req.summary);
+        if (!ensureMethodPermission(grantKey, req, id, toolName, params)) {
+            return;
+        }
+    }
+
+    const ToolResult res = runner.run(call);
+    if (!res.ok) {
+        replyError(id, kServerError, res.output.isEmpty() ? u"Tool execution failed."_s : res.output);
+        return;
+    }
+    QJsonObject payload;
+    payload.insert(u"content"_s, res.output);
+    payload.insert(u"ok"_s, true);
+    replyResult(id, payload);
+}
+
 // Kate extension client method, mirroring the native question tool: the agent
 // hands over the question and Kate parks the RPC until the user answers, which
 // is what makes asking work over ACP — v1 has no other ask-user channel. The
@@ -4398,6 +5600,7 @@ void AcpClient::handleElicitationCreate(const QJsonValue &id, const QJsonObject 
     const QString message = params.value(u"message"_s).toString().trimmed();
     QStringList options;
     QString firstProperty;
+    QHash<QString, QString> valueMap;
     const QJsonObject schema = params.value(u"requestedSchema"_s).toObject();
     const QJsonObject properties = schema.value(u"properties"_s).toObject();
     for (auto it = properties.begin(); it != properties.end(); ++it) {
@@ -4414,13 +5617,18 @@ void AcpClient::handleElicitationCreate(const QJsonValue &id, const QJsonObject 
         // v2 also expresses single-select options as oneOf: [{const, title}].
         for (const QJsonValue &v : property.value(u"oneOf"_s).toArray()) {
             const QJsonObject option = v.toObject();
-            const QString label = option.value(u"title"_s).toString(option.value(u"const"_s).toString());
+            const QString rawConst = option.value(u"const"_s).toString();
+            const QString label = option.value(u"title"_s).toString(rawConst);
             if (!label.isEmpty() && !options.contains(label)) {
                 options.append(label);
+                if (!rawConst.isEmpty()) {
+                    valueMap.insert(label, rawConst);
+                }
             }
         }
     }
     askUser(id, message, options, true, true, firstProperty);
+    m_questionElicitationValueMap = std::move(valueMap);
 }
 
 void AcpClient::askUser(const QJsonValue &id, const QString &question, const QStringList &options, bool allowFreeform,
@@ -4634,7 +5842,7 @@ void AcpClient::handleTerminalCreate(const QJsonValue &id, const QJsonObject &pa
     QProcessEnvironment env = sandbox.profile() == SandboxProfile::Off
         ? sanitizedProcessEnvironment()
         : sandbox.processEnvironment();
-    const QJsonObject extra = envArrayToObject(params.value(u"env"_s).toArray());
+    const QJsonObject extra = envValueToObject(params.value(u"env"_s));
     for (auto it = extra.begin(); it != extra.end(); ++it) {
         env.insert(it.key(), it.value().toString());
     }
@@ -4796,6 +6004,37 @@ void AcpClient::handleTerminalRelease(const QJsonValue &id, const QJsonObject &p
         m_toolTerminals.remove(linkedTool);
     }
     replyResult(id, QJsonObject());
+}
+
+void AcpClient::handleTerminalSendInput(const QJsonValue &id, const QJsonObject &params)
+{
+    const QString terminalId = params.value(u"terminalId"_s).toString();
+    Terminal *term = m_terminals.value(terminalId);
+    if (!term || !term->process) {
+        replyError(id, kServerError, u"Unknown terminal '%1'."_s.arg(terminalId));
+        return;
+    }
+    if (term->exited || term->process->state() == QProcess::NotRunning) {
+        replyError(id, kServerError, u"Terminal '%1' has already exited."_s.arg(terminalId));
+        return;
+    }
+    const QString input = params.contains(u"input"_s)
+        ? params.value(u"input"_s).toString()
+        : params.value(u"data"_s).toString();
+    const QByteArray bytes = input.toUtf8();
+    qsizetype written = 0;
+    while (written < bytes.size()) {
+        const qint64 n = term->process->write(bytes.constData() + written, bytes.size() - written);
+        if (n <= 0) {
+            replyError(id, kServerError, u"Could not write to terminal '%1'."_s.arg(terminalId));
+            return;
+        }
+        written += n;
+    }
+    if (boolishValue(params.value(u"eof"_s), false)) {
+        term->process->closeWriteChannel();
+    }
+    replyResult(id, QJsonObject{{u"bytesWritten"_s, static_cast<qint64>(written)}});
 }
 
 void AcpClient::appendTerminalOutput(Terminal *term, const QByteArray &chunk)

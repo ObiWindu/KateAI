@@ -14,6 +14,10 @@ add_library(kateai_core STATIC
     documentbridge.cpp
     katelspbridge.cpp
     lsp.cpp
+    debug.cpp
+    katedebugbridge.cpp
+    ecosystem.cpp
+    kateecosystembridge.cpp
     sessionstore.cpp
     graph/projectgraph.cpp
     modes.cpp
@@ -55,6 +59,8 @@ target_link_libraries(kateai_core
         KF6::I18n
         KF6::TextEditor
         KF6::SyntaxHighlighting
+        KF6::XmlGui
+        KF6::WidgetsAddons
 )
 
 kcoreaddons_add_plugin(kateai INSTALL_NAMESPACE "kf6/ktexteditor")
@@ -100,8 +106,23 @@ if(UNIX)
     set_target_properties(kateai_page4k_shim PROPERTIES
         OUTPUT_NAME "libpage4k"
         PREFIX ""
+        AUTOMOC OFF
+        LINKER_LANGUAGE C
+        C_VISIBILITY_PRESET default
+    )
+    target_compile_options(kateai_page4k_shim PRIVATE
+        -fno-omit-frame-pointer
     )
     target_link_libraries(kateai_page4k_shim PRIVATE
         ${CMAKE_DL_LIBS}
+        pthread
+    )
+    add_custom_command(TARGET kateai_page4k_shim POST_BUILD
+        COMMAND chmod 755 "$<TARGET_FILE:kateai_page4k_shim>"
+        VERBATIM
+    )
+    install(TARGETS kateai_page4k_shim
+        LIBRARY DESTINATION "${KDE_INSTALL_LIBDIR}/kateai"
+        PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE
     )
 endif()

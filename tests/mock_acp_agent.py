@@ -14,6 +14,11 @@ NEXT_ID = 1000
 SESSION_ID = "sess_kateai_test"
 CURRENT_MODEL = "grok-4.5"
 CURRENT_EFFORT = "medium"
+CURRENT_MODE = "default"
+AUTHENTICATED = False
+AUTH_METHOD_SEEN = None
+AUTH_API_KEY_SEEN = None
+SYSTEM_PROMPT_APPEND_SEEN = None
 PROMPT_COUNT = 0
 TOOL_QUESTION_COUNT = 0
 EFFORT_CONFIG_ID = "thinking" if SCENARIO == "mistral-thinking" else "thinking_level"
@@ -210,6 +215,103 @@ def handle_prompt(request_id, params):
     ]
     text = "\n".join(texts)
     user_text = texts[-1] if texts else ""
+
+    if SCENARIO == "agy-protocol":
+        # Verify null-id notification is ignored cleanly as a notification,
+        # usage_update and current_mode_update work, and cancelled tool status
+        # + resource_link/image content blocks are handled without leaking JSON.
+        send({
+            "jsonrpc": "2.0",
+            "id": None,
+            "method": "session/update",
+            "params": {
+                "sessionId": SESSION_ID,
+                "update": {"sessionUpdate": "usage_update", "used": 1234, "size": 1048576},
+            },
+        })
+        session_update({"sessionUpdate": "current_mode_update", "currentModeId": CURRENT_MODE})
+        session_update({
+            "sessionUpdate": "tool_call",
+            "toolCallId": "call_cancel",
+            "name": "run_command",
+            "kind": "execute",
+            "title": "Run build",
+            "rawInput": {"CommandLine": "cmake --build build"},
+            "status": "cancelled",
+            "content": [{"type": "image", "mimeType": "image/png", "data": "AAAA"}],
+        })
+        summary = f"auth={AUTH_METHOD_SEEN};key={AUTH_API_KEY_SEEN};mode={CURRENT_MODE};sys={SYSTEM_PROMPT_APPEND_SEEN}"
+        session_update({
+            "sessionUpdate": "agent_message_chunk",
+            "content": {"type": "text", "text": summary},
+        })
+        result(request_id, {"stopReason": "end_turn"})
+        return
+
+    if SCENARIO == "acp-all-tools":
+        # Exercises all newly added ACP client tools over JSON-RPC.
+        cwd = user_text.strip()
+        f1 = f"{cwd}/alpha.txt"
+        f2 = f"{cwd}/beta.txt"
+        r_list = call_client("fs/list_directory", {"sessionId": SESSION_ID, "path": cwd})
+        r_glob = call_client("fs/glob", {"sessionId": SESSION_ID, "path": cwd, "pattern": "*.txt"})
+        r_grep = call_client("fs/grep", {"sessionId": SESSION_ID, "path": cwd, "pattern": "hello"})
+        r_edit = call_client("fs/edit_file", {
+            "sessionId": SESSION_ID,
+            "path": f1,
+            "old_string": "hello world",
+            "new_string": "hello acp",
+        })
+        r_multi = call_client("fs/multi_edit_file", {
+            "sessionId": SESSION_ID,
+            "path": f1,
+            "edits": [
+                {"old_string": "hello acp", "new_string": "hi acp"},
+                {"old_string": "line2", "new_string": "lineTWO"},
+            ],
+        })
+        patch = (
+            f"--- a/alpha.txt\n+++ b/alpha.txt\n"
+            f"@@ -1,2 +1,2 @@\n"
+            f"-hi acp\n+patched acp\n lineTWO\n"
+        )
+        r_patch = call_client("_kateai/apply_patch", {"sessionId": SESSION_ID, "patch": patch})
+        r_del = call_client("fs/delete_file", {"sessionId": SESSION_ID, "path": f2})
+        r_exit = call_client("_kateai/exit_plan_mode", {"sessionId": SESSION_ID})
+        r_term = call_client("terminal/create", {
+            "sessionId": SESSION_ID,
+            "command": "cat",
+            "cwd": cwd,
+            "env": {"TEST_ENV_MAP": "yes"},
+        })
+        term_id = (r_term or {}).get("result", {}).get("terminalId", "")
+        r_in = call_client("terminal/send_input", {
+            "sessionId": SESSION_ID,
+            "terminalId": term_id,
+            "input": "ping\n",
+            "eof": True,
+        })
+        call_client("terminal/wait_for_exit", {"sessionId": SESSION_ID, "terminalId": term_id})
+        r_out = call_client("terminal/output", {"sessionId": SESSION_ID, "terminalId": term_id})
+        call_client("terminal/release", {"sessionId": SESSION_ID, "terminalId": term_id})
+        report = {
+            "list": "result" in (r_list or {}),
+            "glob": "alpha.txt" in ((r_glob or {}).get("result", {}).get("content", "")),
+            "grep": "hello world" in ((r_grep or {}).get("result", {}).get("content", "")),
+            "edit": "result" in (r_edit or {}),
+            "multi": "result" in (r_multi or {}),
+            "patch": "result" in (r_patch or {}),
+            "del": "result" in (r_del or {}),
+            "exit_plan": (r_exit or {}).get("result", {}).get("ok") is True,
+            "term_in": (r_in or {}).get("result", {}).get("bytesWritten", 0) == 5,
+            "term_out": "ping" in ((r_out or {}).get("result", {}).get("output", "")),
+        }
+        session_update({
+            "sessionUpdate": "agent_message_chunk",
+            "content": {"type": "text", "text": json.dumps(report, separators=(",", ":"))},
+        })
+        result(request_id, {"stopReason": "end_turn"})
+        return
 
     if SCENARIO == "prompt-probe":
         # Reports every text block the prompt carried, so a test can see what
@@ -1217,7 +1319,8 @@ def handle_prompt(request_id, params):
 
 
 def handle(message):
-    global CURRENT_MODEL, CURRENT_EFFORT
+    global CURRENT_MODEL, CURRENT_EFFORT, CURRENT_MODE, AUTHENTICATED
+    global AUTH_METHOD_SEEN, AUTH_API_KEY_SEEN, SYSTEM_PROMPT_APPEND_SEEN
     method = message.get("method")
     request_id = message.get("id")
     params = message.get("params") or {}
@@ -1228,19 +1331,36 @@ def handle(message):
             "promptCapabilities": {"embeddedContext": True},
             "sessionCapabilities": {"resume": {}, "close": {}},
         }
+        auth_methods = []
         if SCENARIO == "commands":
             # v2-draft capability advertised by the commands scenario.
             agent_capabilities["elicitation"] = {}
+        if SCENARIO == "agy-protocol":
+            agent_capabilities["_meta"] = {
+                "antigravity": {"tier": True, "systemPrompt": {"append": True}}
+            }
+            auth_methods = [
+                {"id": "oauth-personal", "name": "Log in with Google"},
+                {"id": "oauth-business", "name": "Log in with Gemini Enterprise"},
+                {"id": "gemini-api-key", "name": "Gemini API key"},
+                {"id": "agent-platform", "name": "Vertex AI"},
+            ]
         result(
             request_id,
             {
                 "protocolVersion": 1,
                 "agentCapabilities": agent_capabilities,
                 "agentInfo": {"name": "mock-acp", "title": "Mock ACP", "version": "1"},
-                "authMethods": [],
+                "authMethods": auth_methods,
             },
         )
     elif method == "authenticate":
+        AUTH_METHOD_SEEN = params.get("methodId")
+        AUTH_API_KEY_SEEN = (params.get("_meta") or {}).get("apiKey")
+        if SCENARIO == "agy-protocol" and AUTH_METHOD_SEEN == "gemini-api-key" and not AUTH_API_KEY_SEEN:
+            error(request_id, "GEMINI_API_KEY is not set; pass an API key in _meta.apiKey", -32602)
+            return
+        AUTHENTICATED = True
         result(request_id, {})
     elif method == "session/new":
         # Strict like the real agents: opencode answers a non-absolute cwd
@@ -1248,6 +1368,63 @@ def handle(message):
         cwd = params.get("cwd")
         if not isinstance(cwd, str) or not cwd.startswith("/"):
             error(request_id, "Invalid params: cwd must be an absolute path: %s" % cwd, -32602)
+        elif SCENARIO == "agy-protocol":
+            if not AUTHENTICATED:
+                error(request_id, "Authentication required", -32000)
+                return
+            meta = params.get("_meta") or {}
+            SYSTEM_PROMPT_APPEND_SEEN = (meta.get("systemPrompt") or {}).get("append")
+            agy_opts = [
+                {
+                    "id": "model",
+                    "name": "Model",
+                    "category": "model",
+                    "type": "select",
+                    "currentValue": "gemini-3.1-pro",
+                    "options": [
+                        {"value": "gemini-4-neon", "name": "Gemini 4 Neon"},
+                        {"value": "gemini-3.1-pro", "name": "Gemini 3.1 Pro"},
+                    ],
+                },
+                {
+                    "id": "thought_level",
+                    "name": "Thinking Level",
+                    "category": "thought_level",
+                    "type": "select",
+                    "currentValue": "low",
+                    "options": [
+                        {"value": "low", "name": "Low"},
+                        {"value": "high", "name": "High"},
+                    ],
+                },
+                {
+                    "id": "mode",
+                    "name": "Mode",
+                    "category": "mode",
+                    "type": "select",
+                    "currentValue": CURRENT_MODE,
+                    "options": [
+                        {"value": "default", "name": "Default"},
+                        {"value": "accept-edits", "name": "Accept edits"},
+                        {"value": "plan", "name": "Plan"},
+                    ],
+                },
+            ]
+            result(
+                request_id,
+                {
+                    "sessionId": SESSION_ID,
+                    "modes": {
+                        "currentModeId": CURRENT_MODE,
+                        "availableModes": [
+                            {"id": "default", "name": "Default"},
+                            {"id": "accept-edits", "name": "Accept edits"},
+                            {"id": "plan", "name": "Plan"},
+                        ],
+                    },
+                    "configOptions": agy_opts,
+                },
+            )
         elif SCENARIO == "models":
             result(
                 request_id,
@@ -1330,7 +1507,38 @@ def handle(message):
         else:
             result(request_id, {"sessionId": SESSION_ID})
     elif method == "session/set_config_option":
-        if params.get("configId") == EFFORT_CONFIG_ID:
+        if params.get("configId") == "mode":
+            CURRENT_MODE = params.get("value") or CURRENT_MODE
+            if SCENARIO == "agy-protocol":
+                agy_opts = [
+                    {
+                        "id": "model",
+                        "name": "Model",
+                        "category": "model",
+                        "type": "select",
+                        "currentValue": "gemini-3.1-pro",
+                        "options": [
+                            {"value": "gemini-4-neon", "name": "Gemini 4 Neon"},
+                            {"value": "gemini-3.1-pro", "name": "Gemini 3.1 Pro"},
+                        ],
+                    },
+                    {
+                        "id": "mode",
+                        "name": "Mode",
+                        "category": "mode",
+                        "type": "select",
+                        "currentValue": CURRENT_MODE,
+                        "options": [
+                            {"value": "default", "name": "Default"},
+                            {"value": "accept-edits", "name": "Accept edits"},
+                            {"value": "plan", "name": "Plan"},
+                        ],
+                    },
+                ]
+                session_update({"sessionUpdate": "current_mode_update", "currentModeId": CURRENT_MODE})
+                result(request_id, {"configOptions": agy_opts})
+                return
+        elif params.get("configId") == EFFORT_CONFIG_ID:
             CURRENT_EFFORT = params.get("value") or CURRENT_EFFORT
         else:
             CURRENT_MODEL = params.get("value") or CURRENT_MODEL
@@ -1342,6 +1550,10 @@ def handle(message):
         options = full_options(model, CURRENT_EFFORT)
         session_update({"sessionUpdate": "config_option_update", "configOptions": options})
         result(request_id, {"configOptions": options})
+    elif method == "session/set_mode":
+        CURRENT_MODE = params.get("modeId") or CURRENT_MODE
+        session_update({"sessionUpdate": "current_mode_update", "currentModeId": CURRENT_MODE})
+        result(request_id, {})
     elif method == "session/set_model":
         result(request_id, {})
     elif method == "session/load" or method == "session/resume":

@@ -210,10 +210,12 @@ private Q_SLOTS:
         // subtask tool (orchestrate group).
         const QStringList all = allBuiltInToolNames();
         const QStringList orchestrate = builtInToolsForGroup(ToolGroup::orchestrate());
+        const QStringList debug = builtInToolsForGroup(ToolGroup::debug());
         for (const QString &name : all) {
             const bool covered = read.contains(name) || edit.contains(name)
                 || builtInToolsForGroup(ToolGroup::command()).contains(name)
                 || builtInToolsForGroup(ToolGroup::web()).contains(name)
+                || debug.contains(name)
                 || orchestrate.contains(name);
             QVERIFY2(covered, qPrintable(name));
         }
@@ -223,7 +225,23 @@ private Q_SLOTS:
         const ToolAccess planAccess = ModeRegistry::toolAccessFor(planLike, true);
         QVERIFY(planAccess.allows(u"question"_s));
         QVERIFY(planAccess.allows(u"todo_write"_s));
+        QVERIFY(planAccess.allows(u"debug_status"_s));
+        QVERIFY(planAccess.allows(u"debug_stack"_s));
+        QVERIFY(planAccess.allows(u"debug_locals"_s));
         QVERIFY(!planAccess.allows(u"apply_patch"_s));
+        QVERIFY(!planAccess.allows(u"debug_eval"_s));
+        QVERIFY(!planAccess.allows(u"debug_step"_s));
+        QVERIFY(!planAccess.allows(u"build_run"_s));
+        QVERIFY(!planAccess.allows(u"terminal_run"_s));
+
+        // Read-only custom modes strip ToolGroup::debug() even if listed.
+        ModeDefinition roDebug;
+        roDebug.groups = {ToolGroup::read(), ToolGroup::debug()};
+        roDebug.readOnly = true;
+        const ToolAccess roAccess = ModeRegistry::toolAccessFor(roDebug, false);
+        QVERIFY(roAccess.allows(u"debug_status"_s));
+        QVERIFY(!roAccess.allows(u"debug_eval"_s));
+        QVERIFY(!roAccess.allows(u"debug_set_breakpoint"_s));
     }
 };
 

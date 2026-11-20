@@ -29,17 +29,30 @@ static QHash<QString, QString> buildToolAliasMap()
     // ACP filesystem tools
     map[u"fs/read_text_file"_s] = u"read_file"_s;
     map[u"fs/read_file"_s] = u"read_file"_s;
+    map[u"view_file"_s] = u"read_file"_s;
+    map[u"client_view_file"_s] = u"read_file"_s;
+    map[u"client_create_file"_s] = u"write_file"_s;
+    map[u"client_edit_file"_s] = u"edit_file"_s;
+    map[u"view_file_outline"_s] = u"read_file"_s;
+    map[u"view_code_item"_s] = u"read_file"_s;
+    map[u"read_resource"_s] = u"read_file"_s;
     map[u"fs/write_text_file"_s] = u"write_file"_s;
     map[u"fs/write_file"_s] = u"write_file"_s;
     map[u"fs/append_file"_s] = u"write_file"_s;
+    map[u"write_to_file"_s] = u"write_file"_s;
+    map[u"create_file"_s] = u"write_file"_s;
     map[u"fs/edit_file"_s] = u"edit_file"_s;
     map[u"fs/str_replace_editor"_s] = u"edit_file"_s;
     map[u"str_replace_editor"_s] = u"edit_file"_s;
     map[u"str_replace"_s] = u"edit_file"_s;
     map[u"replace"_s] = u"edit_file"_s;
+    map[u"replace_file_content"_s] = u"edit_file"_s;
+    map[u"notebook_edit"_s] = u"edit_file"_s;
+    map[u"NotebookEdit"_s] = u"edit_file"_s;
     map[u"edit"_s] = u"edit_file"_s;
     map[u"multi_edit"_s] = u"multi_edit_file"_s;
     map[u"multi_edit_file"_s] = u"multi_edit_file"_s;
+    map[u"fs/multi_edit_file"_s] = u"multi_edit_file"_s;
     map[u"multi_replace_file_content"_s] = u"multi_edit_file"_s;
     // apply_patch is its own tool (multi-file unified diff), not a single-file
     // edit: canonicalizing it to edit_file mangles multi-file patches.
@@ -48,8 +61,10 @@ static QHash<QString, QString> buildToolAliasMap()
     map[u"Patch"_s] = u"apply_patch"_s;
     map[u"UpdateFile"_s] = u"apply_patch"_s;
     // ACP terminal/shell
+    map[u"terminal/create"_s] = u"bash"_s;
     map[u"terminal/exec"_s] = u"bash"_s;
     map[u"terminal/run"_s] = u"bash"_s;
+    map[u"terminal/send_input"_s] = u"bash"_s;
     map[u"shell/exec"_s] = u"bash"_s;
     map[u"shell"_s] = u"bash"_s;
     map[u"Shell"_s] = u"bash"_s;
@@ -57,9 +72,13 @@ static QHash<QString, QString> buildToolAliasMap()
     map[u"Exec"_s] = u"bash"_s;
     map[u"run_command"_s] = u"bash"_s;
     map[u"RunCommand"_s] = u"bash"_s;
+    map[u"run_shell_command"_s] = u"bash"_s;
+    map[u"bash_command"_s] = u"bash"_s;
+    map[u"send_command_input"_s] = u"bash"_s;
     // Directory/listing/search
     map[u"fs/list_directory"_s] = u"list_dir"_s;
     map[u"list_directory"_s] = u"list_dir"_s;
+    map[u"dir_list"_s] = u"list_dir"_s;
     map[u"readdir"_s] = u"list_dir"_s;
     map[u"Read"_s] = u"read_file"_s;
     map[u"View"_s] = u"read_file"_s;
@@ -67,12 +86,29 @@ static QHash<QString, QString> buildToolAliasMap()
     map[u"Glob"_s] = u"glob"_s;
     map[u"Grep"_s] = u"grep"_s;
     map[u"fs/grep"_s] = u"grep"_s;
+    map[u"grep_search"_s] = u"grep"_s;
+    map[u"GrepSearch"_s] = u"grep"_s;
+    map[u"search_files"_s] = u"grep"_s;
+    map[u"search_in_files"_s] = u"grep"_s;
+    map[u"codebase_search"_s] = u"grep"_s;
+    map[u"ripgrep"_s] = u"grep"_s;
+    map[u"rg"_s] = u"grep"_s;
     map[u"fs/glob"_s] = u"glob"_s;
     map[u"find_files"_s] = u"glob"_s;
+    map[u"find_by_name"_s] = u"glob"_s;
+    map[u"FindByName"_s] = u"glob"_s;
+    map[u"glob_files"_s] = u"glob"_s;
+    map[u"list_files"_s] = u"glob"_s;
     // Web/search/planning tools that may appear under different names
     map[u"web/search"_s] = u"web_search"_s;
+    map[u"search_web"_s] = u"web_search"_s;
+    map[u"WebSearch"_s] = u"web_search"_s;
+    map[u"google_search"_s] = u"web_search"_s;
     map[u"web/fetch"_s] = u"web_fetch"_s;
     map[u"WebFetch"_s] = u"web_fetch"_s;
+    map[u"read_url_content"_s] = u"web_fetch"_s;
+    map[u"fetch_url"_s] = u"web_fetch"_s;
+    map[u"url_fetch"_s] = u"web_fetch"_s;
     map[u"plan/write"_s] = u"write_plan_file"_s;
     map[u"project/query"_s] = u"query_project_graph"_s;
     map[u"suggest"_s] = u"suggest"_s;
@@ -105,6 +141,11 @@ static QHash<QString, QString> buildToolAliasMap()
     map[u"move_file"_s] = u"edit_file"_s;
     map[u"rename_file"_s] = u"edit_file"_s;
     map[u"delete_file"_s] = u"edit_file"_s;
+    map[u"remove_file"_s] = u"edit_file"_s;
+    map[u"fs/delete_file"_s] = u"edit_file"_s;
+    map[u"fs/remove_file"_s] = u"edit_file"_s;
+    map[u"fs/move_file"_s] = u"edit_file"_s;
+    map[u"fs/rename_file"_s] = u"edit_file"_s;
     // The ACP tool kinds and the short names agents use for the same work.
     // Without these a kind-only call ("read") is not the read tool the modes
     // allow, and plan mode rejects it.
@@ -121,6 +162,9 @@ static QHash<QString, QString> buildToolAliasMap()
     map[u"agent/new_task"_s] = subtaskToolName();
     map[u"subagent"_s] = subtaskToolName();
     map[u"task"_s] = subtaskToolName();
+    map[u"invoke_subagent"_s] = subtaskToolName();
+    map[u"dispatch_agent"_s] = subtaskToolName();
+    map[u"spawn_agent"_s] = subtaskToolName();
     return map;
 }
 
@@ -1261,6 +1305,140 @@ QJsonArray toolDefinitions(const ToolAccess &access)
                          {u"path"_s},
                          false));
 
+    tools.append(toolDef(u"debug_status"_s,
+                         u"Inspect the live Kate debugger (DAP/GDB/LLDB) state: session status (idle/running/paused/terminated), active target, stop reason/location, threads, and configured targets. Read-only."_s,
+                         QJsonObject{
+                             {u"include_output"_s, QJsonObject{{u"type"_s, u"boolean"_s}, {u"description"_s, u"Include recent debugger console/IO output. Defaults to false."_s}}},
+                         },
+                         {},
+                         false));
+
+    tools.append(toolDef(u"debug_stack"_s,
+                         u"Read the call stack frames of the paused debuggee (or a specific thread) with function names, files, and 1-based line numbers. Read-only."_s,
+                         QJsonObject{
+                             {u"thread_id"_s, QJsonObject{{u"type"_s, u"integer"_s}, {u"description"_s, u"Optional thread id. Omit for the active stopped thread."_s}}},
+                             {u"max_frames"_s, QJsonObject{{u"type"_s, u"integer"_s}, {u"description"_s, u"Maximum frames to return (default 40)."_s}}},
+                         },
+                         {},
+                         false));
+
+    tools.append(toolDef(u"debug_locals"_s,
+                         u"Read local variables, types, values, and children in the active (or specified) stack frame while paused. Read-only."_s,
+                         QJsonObject{
+                             {u"frame_level"_s, QJsonObject{{u"type"_s, u"integer"_s}, {u"description"_s, u"Optional 0-based frame level. Omit for the active frame."_s}}},
+                             {u"filter"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"Optional substring filter on variable name."_s}}},
+                         },
+                         {},
+                         false));
+
+    tools.append(toolDef(u"debug_breakpoints"_s,
+                         u"List all configured debugger breakpoints (file, line, condition, hit count, logpoint message, enabled/verified). Read-only."_s,
+                         QJsonObject{},
+                         {},
+                         false));
+
+    tools.append(toolDef(u"debug_select_frame"_s,
+                         u"Select a stack frame (0 = innermost) to inspect its local variables and source context. Non-mutating inspection."_s,
+                         QJsonObject{
+                             {u"frame_level"_s, QJsonObject{{u"type"_s, u"integer"_s}, {u"description"_s, u"0-based stack frame level to select."_s}}},
+                         },
+                         {u"frame_level"_s},
+                         false));
+
+    tools.append(toolDef(u"debug_select_thread"_s,
+                         u"Select a thread by id to inspect its call stack and local variables. Non-mutating inspection."_s,
+                         QJsonObject{
+                             {u"thread_id"_s, QJsonObject{{u"type"_s, u"integer"_s}, {u"description"_s, u"Thread id from debug_status."_s}}},
+                         },
+                         {u"thread_id"_s},
+                         false));
+
+    tools.append(toolDef(u"debug_snapshot"_s,
+                         u"Capture a snapshot of the current paused debugger state (stop location, call stack, locals) or diff two captured snapshots to compare a working stop against a failing stop. Read-only."_s,
+                         QJsonObject{
+                             {u"action"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"enum"_s, QJsonArray{u"capture"_s, u"list"_s, u"diff"_s, u"clear"_s}}, {u"description"_s, u"capture (default), list, diff, or clear."_s}}},
+                             {u"label"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"Optional label when capturing a snapshot (e.g. 'before_fix' or 'iter_1')."_s}}},
+                             {u"first"_s, QJsonObject{{u"type"_s, u"integer"_s}, {u"description"_s, u"1-based index of the first snapshot for diff (defaults to second-to-last)."_s}}},
+                             {u"second"_s, QJsonObject{{u"type"_s, u"integer"_s}, {u"description"_s, u"1-based index of the second snapshot for diff (defaults to latest)."_s}}},
+                         },
+                         {},
+                         false));
+
+    tools.append(toolDef(u"debug_set_breakpoint"_s,
+                         u"Set or remove a breakpoint (line, conditional, hit-count, or logpoint) in a workspace source file, or clear all breakpoints."_s,
+                         QJsonObject{
+                             {u"path"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"Workspace file path (relative or absolute). Required unless clear_all is true."_s}}},
+                             {u"line"_s, QJsonObject{{u"type"_s, u"integer"_s}, {u"description"_s, u"1-based line number. Required unless clear_all is true."_s}}},
+                             {u"condition"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"Optional boolean expression condition for a conditional breakpoint."_s}}},
+                             {u"hit_condition"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"Optional hit count condition."_s}}},
+                             {u"log_message"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"Optional logpoint message (logs without stopping)."_s}}},
+                             {u"remove"_s, QJsonObject{{u"type"_s, u"boolean"_s}, {u"description"_s, u"If true, remove the breakpoint at path:line instead of setting it."_s}}},
+                             {u"clear_all"_s, QJsonObject{{u"type"_s, u"boolean"_s}, {u"description"_s, u"If true, clear all breakpoints."_s}}},
+                         },
+                         {},
+                         false));
+
+    tools.append(toolDef(u"debug_step"_s,
+                         u"Control execution of the debuggee (continue, step_over, step_into, step_out, run_to_cursor, pause) and wait for the next stop event."_s,
+                         QJsonObject{
+                             {u"action"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"enum"_s, QJsonArray{u"continue"_s, u"step_over"_s, u"step_into"_s, u"step_out"_s, u"run_to_cursor"_s, u"pause"_s}}, {u"description"_s, u"Execution step action."_s}}},
+                             {u"path"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"File path for run_to_cursor."_s}}},
+                             {u"line"_s, QJsonObject{{u"type"_s, u"integer"_s}, {u"description"_s, u"1-based line for run_to_cursor."_s}}},
+                             {u"timeout_ms"_s, QJsonObject{{u"type"_s, u"integer"_s}, {u"description"_s, u"Max ms to wait for stop (default 15000)."_s}}},
+                         },
+                         {u"action"_s},
+                         false));
+
+    tools.append(toolDef(u"debug_eval"_s,
+                         u"Evaluate an expression in the paused debugger's active stack frame. Note: arbitrary expressions may call target functions and have side effects."_s,
+                         QJsonObject{
+                             {u"expression"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"Expression to evaluate in the active frame."_s}}},
+                             {u"timeout_ms"_s, QJsonObject{{u"type"_s, u"integer"_s}, {u"description"_s, u"Max ms to wait for evaluation (default 5000)."_s}}},
+                         },
+                         {u"expression"_s},
+                         false));
+
+    tools.append(toolDef(u"debug_session"_s,
+                         u"Start, restart, stop, hot_reload, or hot_restart Kate's debug session, or reload .vscode/launch.json targets."_s,
+                         QJsonObject{
+                             {u"action"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"enum"_s, QJsonArray{u"start"_s, u"restart"_s, u"stop"_s, u"hot_reload"_s, u"hot_restart"_s, u"reload_launch_json"_s}}, {u"description"_s, u"Session lifecycle action."_s}}},
+                             {u"target"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"Optional target name to select before starting."_s}}},
+                             {u"timeout_ms"_s, QJsonObject{{u"type"_s, u"integer"_s}, {u"description"_s, u"Max ms to wait (default 15000)."_s}}},
+                         },
+                         {u"action"_s},
+                         false));
+
+    tools.append(toolDef(u"debug_console"_s,
+                         u"Send a raw command to Kate's DAP/GDB debugger console REPL (e.g. 'whereami', 'modules', 'blist', 'info registers')."_s,
+                         QJsonObject{
+                             {u"command"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"Console command to execute in the debugger REPL."_s}}},
+                         },
+                         {u"command"_s},
+                         false));
+
+    tools.append(toolDef(u"build_targets"_s,
+                         u"Discover workspace build targets from Kate's Build plugin, CMake File API / CMakeLists.txt, Cargo, npm, Go, Make, and locate compile_commands.json. Read-only."_s,
+                         QJsonObject{},
+                         {},
+                         false));
+
+    tools.append(toolDef(u"build_run"_s,
+                         u"Trigger a build in Kate's Build plugin (default target or a named target). Build diagnostics flow into Kate's Diagnostics view where lsp_diagnostics can read them."_s,
+                         QJsonObject{
+                             {u"target"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"Optional target name. Omit to build the default target."_s}}},
+                         },
+                         {},
+                         false));
+
+    tools.append(toolDef(u"terminal_run"_s,
+                         u"Send a command to Kate's embedded Konsole terminal panel so the user can observe interactive/long-running output directly."_s,
+                         QJsonObject{
+                             {u"command"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"Shell command to run in Kate's embedded terminal."_s}}},
+                             {u"working_dir"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"Optional workspace-relative or absolute directory to cd into first."_s}}},
+                         },
+                         {u"command"_s},
+                         false));
+
     tools.append(toolDef(u"write_plan_file"_s,
                          u"Write the implementation plan for a complicated, multi-step task to a temporary file "
                          u"the user can open and follow while you work. Pass the full plan as markdown: the goal, "
@@ -1436,6 +1614,11 @@ QString defaultSystemPrompt(const QString &workspace)
            "- lsp_diagnostics reports language-server/editor errors and warnings for a file or the whole workspace; check it after edits instead of only reading test output.\n"
            "- lsp_symbols lists a file's classes and functions with line numbers; lsp_hover, lsp_definition and lsp_references answer symbol questions without guessing; lsp_code_actions lists the quick fixes offered at a position.\n"
            "- When no language server is running for a file these tools say so; fall back to a build/lint/test via bash and to grep.\n"
+           "\n"
+           "DEBUGGER, BUILD & TERMINAL:\n"
+           "- When Kate's debugger (kategdbplugin) is active/paused, use debug_status, debug_stack, debug_locals, debug_breakpoints, debug_select_frame, debug_select_thread, and debug_snapshot to inspect live runtime state before editing.\n"
+           "- Use debug_set_breakpoint, debug_step, debug_eval, debug_session, and debug_console when actively reproducing or stepping through a bug. Always prefer read-only inspection over debug_eval with side effects.\n"
+           "- Use build_targets to discover workspace build targets and compile_commands.json, build_run to trigger Kate's Build plugin, and terminal_run only when the user should observe output in Kate's embedded Konsole (use bash when you need captured stdout/stderr).\n"
            "\n"
            "REASONING & PLANNING (required):\n"
            "1. THINKING: Before every response, output your reasoning in a <thinking> block. Analyze the request, consider alternatives, plan steps, and anticipate issues. The user sees this block - it stays open above your answer. Be thorough.\n"
@@ -1805,6 +1988,7 @@ QList<AcpAgentPreset> acpAgentPresets()
 {
     return {
         {u"grok-build"_s, i18n("Grok Build"), u"grok"_s, u"agent stdio"_s, u"XAI_API_KEY"_s},
+        {u"antigravity-acp"_s, i18n("Antigravity (agy)"), u"agy"_s, u"acp"_s, u"GEMINI_API_KEY"_s},
         {u"claude-acp"_s, i18n("Claude Agent"), u"npx"_s, u"-y @agentclientprotocol/claude-agent-acp"_s, u"ANTHROPIC_API_KEY"_s},
         {u"codex-acp"_s, i18n("Codex"), u"npx"_s, u"-y @agentclientprotocol/codex-acp"_s, u"OPENAI_API_KEY"_s},
         {u"gemini"_s, i18n("Gemini CLI"), u"gemini"_s, u"--acp"_s, u"GEMINI_API_KEY"_s},
@@ -1930,7 +2114,18 @@ QString acpEffectiveArgs(const Settings &settings)
     if (!args.isEmpty()) {
         return args;
     }
-    return acpAgentLaunchLine(settings, settings.acpAgentId).args;
+    const AcpAgentPreset launch = acpAgentLaunchLine(settings, settings.acpAgentId);
+    const QString configuredCmd = settings.acpCommand.trimmed();
+    const QString configuredBase = QFileInfo(configuredCmd).baseName().toLower();
+    const QString launchBase = QFileInfo(launch.command).baseName().toLower();
+    if (!configuredCmd.isEmpty() && !launch.command.isEmpty()
+        && configuredBase != launchBase) {
+        // The user/registry pointed this agent id at a different executable
+        // than the built-in preset (e.g. legacy `./agy_acp_server.par` vs
+        // `agy`): do not inherit the preset's subcommand args.
+        return {};
+    }
+    return launch.args;
 }
 
 QString acpEffectiveApiKeyEnv(const Settings &settings)
@@ -2058,11 +2253,20 @@ bool acpAgentIsMinimaxCode(const Settings &settings)
 
 bool acpAgentIsAntigravity(const Settings &settings)
 {
-    if (settings.acpAgentId == u"antigravity-acp"_s) {
+    if (settings.acpAgentId == u"antigravity-acp"_s
+        || settings.acpAgentId == u"agy"_s
+        || settings.acpAgentId == u"antigravity"_s) {
         return true;
     }
     const QString command = acpEffectiveCommand(settings);
-    const QString baseName = QFileInfo(command).fileName();
+    const QString baseName = QFileInfo(command).fileName().toLower();
+    return baseName == u"agy"_s || baseName == u"agy.exe"_s || baseName.contains(u"agy_acp_server"_s);
+}
+
+bool acpAgentIsLegacyAntigravityServer(const Settings &settings)
+{
+    const QString command = acpEffectiveCommand(settings);
+    const QString baseName = QFileInfo(command).fileName().toLower();
     return baseName.contains(u"agy_acp_server"_s);
 }
 
@@ -2070,26 +2274,42 @@ AcpAgentQuirks acpAgentQuirks(const QString &agentId, const QString &command)
 {
     AcpAgentQuirks q;
     const QString baseName = QFileInfo(command).fileName();
-    if (agentId == u"grok-build"_s || baseName == u"grok"_s) {
+    const QString lowerBase = baseName.toLower();
+    if (agentId == u"grok-build"_s || lowerBase == u"grok"_s) {
         // grok agent stdio --model <model> --always-approve
         q.modelFlag = true;
-    } else if (agentId == u"minimax-code"_s || baseName == u"mcode"_s) {
+    } else if (agentId == u"minimax-code"_s || lowerBase == u"mcode"_s) {
         q.stripNpmTokens = true;
         q.needsAcpSubcommand = true;
-    } else if (agentId == u"antigravity-acp"_s || baseName.contains(u"agy_acp_server"_s)) {
-        // gflags-based binary: reject Chromium's standard switch, and the
-        // sanitizer flags keep it running on >4KB-page and no-IPv6 machines.
+    } else if (lowerBase.contains(u"agy_acp_server"_s)) {
+        // Legacy gflags-based standalone binary: reject Chromium's standard
+        // switch, and the sanitizer + hugepage flags keep it running cleanly on
+        // >4KB-page and no-IPv6 machines.
         q.stripArgs = {u"--disable-features=CrOSHugepageRemapAndLockInZygote"_s};
         q.extraArgs = {u"--enforce_kernel_ipv6_support=false"_s,
                        u"--core_register_sanitization_enabled=false"_s,
                        u"--core_sanitization_enabled=false"_s,
-                       u"--boringssl_sanitization_enabled=false"_s};
+                       u"--boringssl_sanitization_enabled=false"_s,
+                       u"--hugepage_text=false"_s};
         q.spoofZedClientInfo = true;
-    } else if (agentId == u"opencode"_s || baseName == u"opencode"_s) {
+    } else if (lowerBase == u"agy"_s || lowerBase == u"agy.exe"_s
+               || agentId == u"antigravity-acp"_s || agentId == u"agy"_s || agentId == u"antigravity"_s) {
+        // Modern Antigravity CLI (`agy acp`): needs the `acp` subcommand so it
+        // speaks stdio JSON-RPC instead of opening its interactive TUI. Strip
+        // any legacy `agy_acp_server` gflags that might have been persisted in
+        // user settings, because `agy acp` rejects unknown flags and exits 1.
+        q.needsAcpSubcommand = true;
+        q.stripArgs = {u"--disable-features=CrOSHugepageRemapAndLockInZygote"_s,
+                       u"--enforce_kernel_ipv6_support=false"_s,
+                       u"--core_register_sanitization_enabled=false"_s,
+                       u"--core_sanitization_enabled=false"_s,
+                       u"--boringssl_sanitization_enabled=false"_s,
+                       u"--hugepage_text=false"_s};
+    } else if (agentId == u"opencode"_s || lowerBase == u"opencode"_s) {
         q.needsAcpSubcommand = true;
     } else if (agentId == u"claude-acp"_s || command.contains(u"claude-agent-acp"_s)) {
         q.modelFlag = true;
-    } else if (agentId == u"gemini"_s || baseName == u"gemini"_s) {
+    } else if (agentId == u"gemini"_s || lowerBase == u"gemini"_s) {
         q.modelFlag = true;
     }
     return q;
@@ -2146,6 +2366,11 @@ QString acpAgentIdMatching(const QString &command, const QString &args)
     }
     if (trimmedCommand == u"mcode"_s && (trimmedArgs.isEmpty() || trimmedArgs == u"acp"_s)) {
         return u"mcode"_s;
+    }
+    const QString cmdBase = QFileInfo(trimmedCommand).baseName().toLower();
+    if ((cmdBase == u"agy"_s || trimmedCommand.contains(u"agy_acp_server"_s))
+        && (trimmedArgs.isEmpty() || trimmedArgs == u"acp"_s || trimmedArgs.contains(u"agy_acp_server"_s))) {
+        return u"antigravity-acp"_s;
     }
     return u"custom"_s;
 }

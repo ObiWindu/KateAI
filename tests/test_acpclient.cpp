@@ -1,4 +1,5 @@
 #include "acpclient.h"
+#include "acpinstall.h"
 #include "agentloop.h"
 #include "documentbridge.h"
 #include "test_python.h"
@@ -14,11 +15,16 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QProcess>
 #include <QStandardPaths>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QTextStream>
 #include <QTimer>
+
+#if defined(Q_OS_LINUX)
+#include <unistd.h>
+#endif
 
 using namespace Qt::Literals::StringLiterals;
 using namespace KateAi;
@@ -2421,6 +2427,361 @@ private Q_SLOTS:
         QVERIFY2(error.isEmpty(), qPrintable(error));
         QCOMPARE(commands.first().size(), 2);
         client.stop();
+    }
+
+    void agyCliQuirksAndPresetAvoidLegacyGflags()
+    {
+        // Built-in preset exists and launches `agy acp` with GEMINI_API_KEY.
+        const AcpAgentPreset preset = acpAgentPreset(u"antigravity-acp"_s);
+        QCOMPARE(preset.id, u"antigravity-acp"_s);
+        QCOMPARE(preset.command, u"agy"_s);
+        QCOMPARE(preset.args, u"acp"_s);
+        QCOMPARE(preset.apiKeyEnv, u"GEMINI_API_KEY"_s);
+        QCOMPARE(acpAgentIdMatching(u"agy"_s, QString()), u"antigravity-acp"_s);
+        QCOMPARE(acpAgentIdMatching(u"agy"_s, u"acp"_s), u"antigravity-acp"_s);
+
+        // Modern `agy` CLI gets `acp` subcommand and strips legacy gflags.
+        Settings agySettings;
+        agySettings.acpAgentId = u"antigravity-acp"_s;
+        agySettings.acpCommand = u"agy"_s;
+        agySettings.acpArgs = u"--enforce_kernel_ipv6_support=false --core_sanitization_enabled=false --hugepage_text=false"_s;
+        QVERIFY(acpAgentIsAntigravity(agySettings));
+        QVERIFY(!acpAgentIsLegacyAntigravityServer(agySettings));
+        QCOMPARE(AcpClient::agentArguments(agySettings), (QStringList{u"acp"_s}));
+
+        // Legacy standalone `agy_acp_server.par` still receives its gflags.
+        Settings legacy;
+        legacy.acpAgentId = u"antigravity-acp"_s;
+        legacy.acpCommand = u"./agy_acp_server.par"_s;
+        legacy.acpArgs.clear();
+        QVERIFY(acpAgentIsAntigravity(legacy));
+        QVERIFY(acpAgentIsLegacyAntigravityServer(legacy));
+        const QStringList legacyArgs = AcpClient::agentArguments(legacy);
+        QVERIFY(legacyArgs.contains(u"--enforce_kernel_ipv6_support=false"_s));
+        QVERIFY(legacyArgs.contains(u"--hugepage_text=false"_s));
+        QVERIFY(!legacyArgs.contains(u"acp"_s));
+    }
+
+    void agyProtocolAuthModesUsageAndSystemPrompt()
+    {
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+
+        // Case 1: No API key -> session/new triggers auth retry with oauth-personal
+        // (NOT gemini-api-key), forwards globalRules via _meta.systemPrompt.append,
+        // syncs desired mode, handles usage_update and cancelled tool status.
+        {
+            const QByteArray prevGeminiKey = qgetenv("GEMINI_API_KEY");
+            qunsetenv("GEMINI_API_KEY");
+
+            Settings settings = mockSettings(u"agy-protocol"_s);
+            settings.acpAgentId = u"antigravity-acp"_s;
+            settings.acpApiKey.clear();
+            settings.globalRules = u"Always write clean C++."_s;
+
+            DiskDocumentBridge bridge;
+            AcpClient client;
+            client.setSettings(settings);
+            client.setWorkspace(workspace.path());
+            client.setDocumentBridge(&bridge);
+            client.setDesiredMode(u"plan"_s);
+
+            QString finalText;
+            QString error;
+            qint64 seenUsed = -1;
+            qint64 seenSize = -1;
+            bool seenCancelledTool = false;
+            QString toolOutput;
+            connect(&client, &AcpClient::usageUpdated, this, [&](qint64 used, qint64 size) {
+                seenUsed = used;
+                seenSize = size;
+            });
+            connect(&client, &AcpClient::toolFinished, this, [&](const ToolResult &res) {
+                if (res.toolCallId == u"call_cancel"_s) {
+                    seenCancelledTool = res.cancelled && !res.ok;
+                    toolOutput = res.output;
+                }
+            });
+            connect(&client, &AcpClient::promptFinished, this, [&](const QString &, const QString &text, const QJsonArray &) {
+                finalText = text;
+            });
+            connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+                error = message;
+            });
+
+            client.prompt(u"ping"_s);
+            QVERIFY2(waitFor([&] {
+                return !finalText.isEmpty() || !error.isEmpty();
+            }), qPrintable(error.isEmpty() ? u"timed out"_s : error));
+            QVERIFY2(error.isEmpty(), qPrintable(error));
+            QVERIFY2(finalText.contains(u"auth=oauth-personal"_s), qPrintable(finalText));
+            QVERIFY2(finalText.contains(u"sys=Always write clean C++."_s), qPrintable(finalText));
+            QVERIFY2(finalText.contains(u"mode=plan"_s), qPrintable(finalText));
+            QCOMPARE(client.currentModeId(), u"plan"_s);
+            QCOMPARE(seenUsed, 1234);
+            QCOMPARE(seenSize, 1048576);
+            QVERIFY(seenCancelledTool);
+            QCOMPARE(toolOutput, u"[Image: image/png]"_s);
+            client.stop();
+
+            if (!prevGeminiKey.isNull()) {
+                qputenv("GEMINI_API_KEY", prevGeminiKey);
+            }
+        }
+
+        // Case 2: API key configured -> selects gemini-api-key and sends _meta.apiKey.
+        {
+            Settings settings = mockSettings(u"agy-protocol"_s);
+            settings.acpAgentId = u"antigravity-acp"_s;
+            settings.acpApiKey = u"test-secret-key"_s;
+
+            DiskDocumentBridge bridge;
+            AcpClient client;
+            client.setSettings(settings);
+            client.setWorkspace(workspace.path());
+            client.setDocumentBridge(&bridge);
+
+            QString finalText;
+            QString error;
+            connect(&client, &AcpClient::promptFinished, this, [&](const QString &, const QString &text, const QJsonArray &) {
+                finalText = text;
+            });
+            connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+                error = message;
+            });
+
+            client.prompt(u"ping"_s);
+            QVERIFY2(waitFor([&] {
+                return !finalText.isEmpty() || !error.isEmpty();
+            }), qPrintable(error.isEmpty() ? u"timed out"_s : error));
+            QVERIFY2(error.isEmpty(), qPrintable(error));
+            QVERIFY2(finalText.contains(u"auth=gemini-api-key"_s), qPrintable(finalText));
+            QVERIFY2(finalText.contains(u"key=test-secret-key"_s), qPrintable(finalText));
+            client.stop();
+        }
+    }
+
+    void acpClientSupportsAllWorkspaceAndTerminalTools()
+    {
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+
+        const QString f1 = workspace.path() + u"/alpha.txt"_s;
+        const QString f2 = workspace.path() + u"/beta.txt"_s;
+        {
+            QFile file1(f1);
+            QVERIFY(file1.open(QIODevice::WriteOnly));
+            file1.write("hello world\nline2\n");
+            QFile file2(f2);
+            QVERIFY(file2.open(QIODevice::WriteOnly));
+            file2.write("remove me\n");
+        }
+
+        DiskDocumentBridge bridge;
+        AcpClient client;
+        client.setSettings(mockSettings(u"acp-all-tools"_s));
+        client.setWorkspace(workspace.path());
+        client.setDocumentBridge(&bridge);
+
+        bool exitPlanEmitted = false;
+        QString finalText;
+        QString error;
+        connect(&client, &AcpClient::permissionNeeded, this, [&](const PermissionRequest &req) {
+            client.resolvePermission(PermissionDecision::AllowOnce, req.toolCallId);
+        });
+        connect(&client, &AcpClient::exitPlanModeRequested, this, [&]() {
+            exitPlanEmitted = true;
+        });
+        connect(&client, &AcpClient::promptFinished, this, [&](const QString &, const QString &text, const QJsonArray &) {
+            finalText = text;
+        });
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+
+        client.prompt(workspace.path());
+        QVERIFY2(waitFor([&] {
+            return !finalText.isEmpty() || !error.isEmpty();
+        }), qPrintable(error.isEmpty() ? u"timed out"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+
+        const QJsonObject report = QJsonDocument::fromJson(finalText.toUtf8()).object();
+        QVERIFY2(report.value(u"list"_s).toBool(), qPrintable(finalText));
+        QVERIFY2(report.value(u"glob"_s).toBool(), qPrintable(finalText));
+        QVERIFY2(report.value(u"grep"_s).toBool(), qPrintable(finalText));
+        QVERIFY2(report.value(u"edit"_s).toBool(), qPrintable(finalText));
+        QVERIFY2(report.value(u"multi"_s).toBool(), qPrintable(finalText));
+        QVERIFY2(report.value(u"patch"_s).toBool(), qPrintable(finalText));
+        QVERIFY2(report.value(u"del"_s).toBool(), qPrintable(finalText));
+        QVERIFY2(report.value(u"exit_plan"_s).toBool(), qPrintable(finalText));
+        QVERIFY2(report.value(u"term_in"_s).toBool(), qPrintable(finalText));
+        QVERIFY2(report.value(u"term_out"_s).toBool(), qPrintable(finalText));
+        QVERIFY(exitPlanEmitted);
+        QVERIFY(!QFileInfo::exists(f2));
+
+        QString finalContent;
+        QVERIFY(bridge.readDocument(f1, &finalContent));
+        QCOMPARE(finalContent, u"patched acp\nlineTWO\n"_s);
+        client.stop();
+    }
+
+    void realAgyAcpHandshakeAndSessionControl()
+    {
+        const QString agyPath = QStandardPaths::findExecutable(u"agy"_s);
+        if (agyPath.isEmpty()) {
+            QSKIP("agy CLI is not installed on PATH");
+        }
+        QTemporaryDir tempHome;
+        QTemporaryDir workspace;
+        QVERIFY(tempHome.isValid());
+        QVERIFY(workspace.isValid());
+
+        const QByteArray prevHome = qgetenv("HOME");
+        qputenv("HOME", tempHome.path().toUtf8());
+
+        Settings settings;
+        settings.provider = Provider::Acp;
+        settings.apiFormat = ApiFormat::AcpNative;
+        settings.acpAgentId = u"antigravity-acp"_s;
+        settings.acpCommand = agyPath;
+        settings.acpArgs = u"acp --log-file="_s + tempHome.path() + u"/agy_test.log"_s;
+        settings.acpApiKeyEnv = u"GEMINI_API_KEY"_s;
+        settings.acpApiKey = u"test-dummy-key"_s;
+        settings.globalRules = u"Prefer concise C++."_s;
+
+        AcpClient client;
+        client.setSettings(settings);
+        client.setWorkspace(workspace.path());
+
+        QStringList models;
+        QStringList efforts;
+        QStringList modes;
+        QString error;
+        bool isReady = false;
+        connect(&client, &AcpClient::ready, this, [&]() { isReady = true; });
+        connect(&client, &AcpClient::modelsReceived, this, [&](const QStringList &m) { models = m; });
+        connect(&client, &AcpClient::effortsReceived, this, [&](const QStringList &e) { efforts = e; });
+        connect(&client, &AcpClient::modesReceived, this, [&](const QStringList &m) { modes = m; });
+        connect(&client, &AcpClient::failed, this, [&](const QString &msg) { error = msg; });
+
+        client.start();
+        QVERIFY2(waitFor([&] {
+            return isReady || !error.isEmpty();
+        }, 15000), qPrintable(error.isEmpty() ? u"timed out waiting for agy acp ready"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QVERIFY(!client.sessionId().isEmpty());
+        QVERIFY(!models.isEmpty());
+        QVERIFY(!efforts.isEmpty());
+        QVERIFY(modes.contains(u"plan"_s));
+
+        QVERIFY(client.setSessionMode(u"plan"_s));
+        QVERIFY2(waitFor([&] {
+            return client.currentModeId() == u"plan"_s || !error.isEmpty();
+        }, 10000), qPrintable(error.isEmpty() ? u"timed out switching agy mode to plan"_s : error));
+        QCOMPARE(client.currentModeId(), u"plan"_s);
+
+        client.stop();
+        if (prevHome.isNull()) {
+            qunsetenv("HOME");
+        } else {
+            qputenv("HOME", prevHome);
+        }
+    }
+
+    void page4kShimPreservesRealPageSizeForAllocatorsAndUpdatesStaleCopy()
+    {
+#if !defined(Q_OS_LINUX)
+        QSKIP("Linux-only 4KB page shim test");
+#else
+        const QString builtShim = QDir(QCoreApplication::applicationDirPath()).filePath(u"libpage4k.so"_s);
+        if (!QFileInfo::exists(builtShim)) {
+            QSKIP("libpage4k.so not present next to test binary");
+        }
+
+        // acpEnsurePageShim must overwrite a stale libpage4k.so with the
+        // current trusted build so users upgrading KateAI stop loading an old shim.
+        QTemporaryDir agentDir;
+        QVERIFY(agentDir.isValid());
+        const QString targetShim = QDir(agentDir.path()).filePath(u"libpage4k.so"_s);
+        {
+            QFile stale(targetShim);
+            QVERIFY(stale.open(QIODevice::WriteOnly));
+            stale.write("stale-shim-bytes");
+        }
+        const QString ensured = acpEnsurePageShim(agentDir.path());
+        QCOMPARE(ensured, targetShim);
+        {
+            QFile srcFile(builtShim);
+            QFile dstFile(targetShim);
+            QVERIFY(srcFile.open(QIODevice::ReadOnly));
+            QVERIFY(dstFile.open(QIODevice::ReadOnly));
+            QCOMPARE(dstFile.readAll(), srcFile.readAll());
+        }
+
+        const long hostPage = ::sysconf(_SC_PAGESIZE);
+        if (hostPage <= 4096) {
+            return;
+        }
+        const QString cc = QStandardPaths::findExecutable(u"gcc"_s).isEmpty()
+            ? QStandardPaths::findExecutable(u"cc"_s)
+            : QStandardPaths::findExecutable(u"gcc"_s);
+        if (cc.isEmpty()) {
+            QSKIP("No C compiler available to verify LD_PRELOAD shim behavior");
+        }
+
+        // Verify that under LD_PRELOAD=libpage4k.so:
+        // 1. Allocator / normal callers still observe the real kernel page size
+        //    (preventing TCMalloc from issuing sub-page madvise(MADV_DONTNEED)).
+        // 2. Direct and GoogleInitializer-wrapped verify_page_size checks get 4096.
+        const QString probeSrc = QDir(agentDir.path()).filePath(u"probe.c"_s);
+        const QString probeBin = QDir(agentDir.path()).filePath(u"probe"_s);
+        {
+            QFile f(probeSrc);
+            QVERIFY(f.open(QIODevice::WriteOnly));
+            f.write(
+                "#include <stdio.h>\n"
+                "#include <unistd.h>\n"
+                "__attribute__((noinline)) long tcmalloc_like_GetPageSize(void) {\n"
+                "    volatile long v = sysconf(_SC_PAGESIZE);\n"
+                "    return v;\n"
+                "}\n"
+                "__attribute__((noinline)) long bamm2_init_verify_page_size(void) {\n"
+                "    volatile long v = sysconf(_SC_PAGESIZE);\n"
+                "    return v;\n"
+                "}\n"
+                "__attribute__((noinline)) static long static_verify_page_size(void) {\n"
+                "    volatile long v = sysconf(_SC_PAGESIZE);\n"
+                "    return v;\n"
+                "}\n"
+                "__attribute__((noinline)) long GoogleInitializer_RunIfNecessary(void) {\n"
+                "    volatile long v = static_verify_page_size();\n"
+                "    return v;\n"
+                "}\n"
+                "int main(void) {\n"
+                "    printf(\"alloc=%ld getpagesize=%d direct_verify=%ld init_verify=%ld\\n\",\n"
+                "           tcmalloc_like_GetPageSize(), getpagesize(),\n"
+                "           bamm2_init_verify_page_size(), GoogleInitializer_RunIfNecessary());\n"
+                "    return 0;\n"
+                "}\n");
+        }
+
+        QProcess compile;
+        compile.start(cc, {u"-O2"_s, u"-fno-omit-frame-pointer"_s, u"-fno-ipa-icf"_s, u"-rdynamic"_s,
+                           u"-o"_s, probeBin, probeSrc});
+        QVERIFY(compile.waitForFinished(10000));
+        QCOMPARE(compile.exitCode(), 0);
+
+        QProcess run;
+        QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+        env.insert(u"LD_PRELOAD"_s, ensured);
+        run.setProcessEnvironment(env);
+        run.start(probeBin);
+        QVERIFY(run.waitForFinished(10000));
+        QCOMPARE(run.exitCode(), 0);
+        const QString output = QString::fromUtf8(run.readAllStandardOutput()).trimmed();
+        const QString expected = u"alloc=%1 getpagesize=%1 direct_verify=4096 init_verify=4096"_s.arg(hostPage);
+        QCOMPARE(output, expected);
+#endif
     }
 
 private:

@@ -197,9 +197,13 @@ AgentLoop::AgentLoop(QObject *parent)
         m_planShown = true;
         Q_EMIT planUpdated(todos);
     });
+    connect(&m_acp, &AcpClient::exitPlanModeRequested, this, &AgentLoop::exitPlanModeRequested);
     connect(&m_acp, &AcpClient::toolStarted, this, [this](const PermissionRequest &request) {
         ++m_toolCalls;
         Q_EMIT toolStarted(request);
+        if (canonicalToolName(request.toolName) == u"exit_plan_mode"_s) {
+            Q_EMIT exitPlanModeRequested();
+        }
         // Agent-side question tools are not ACP client methods, so there is no
         // RPC result to fill. They still deserve the same answerable card: the
         // answer becomes the next prompt once this turn closes. A parked
@@ -438,6 +442,8 @@ void AgentLoop::rebuildTools()
     m_tools->setTimeoutMs(m_settings.bashTimeoutMs);
     m_tools->setProjectGraph(m_projectGraph.get());
     m_tools->setLspProvider(m_lsp);
+    m_tools->setDebugProvider(m_debug);
+    m_tools->setEcosystemProvider(m_ecosystem);
     m_sandboxDirty = false;
 }
 
@@ -523,6 +529,8 @@ void AgentLoop::setDocumentBridge(DocumentBridge *bridge)
         m_tools->setTimeoutMs(m_settings.bashTimeoutMs);
         m_tools->setProjectGraph(m_projectGraph.get());
         m_tools->setLspProvider(m_lsp);
+    m_tools->setDebugProvider(m_debug);
+    m_tools->setEcosystemProvider(m_ecosystem);
     }
 }
 
@@ -532,6 +540,24 @@ void AgentLoop::setLspProvider(LspProvider *provider)
     m_acp.setLspProvider(provider);
     if (m_tools) {
         m_tools->setLspProvider(provider);
+    }
+}
+
+void AgentLoop::setDebugProvider(DebugProvider *provider)
+{
+    m_debug = provider;
+    m_acp.setDebugProvider(provider);
+    if (m_tools) {
+        m_tools->setDebugProvider(provider);
+    }
+}
+
+void AgentLoop::setEcosystemProvider(EcosystemProvider *provider)
+{
+    m_ecosystem = provider;
+    m_acp.setEcosystemProvider(provider);
+    if (m_tools) {
+        m_tools->setEcosystemProvider(provider);
     }
 }
 
@@ -606,6 +632,16 @@ void AgentLoop::syncToolAccess()
 {
     m_client.setToolAccess(activeToolAccess());
     m_client.setExtraToolDefinitions(m_mcp ? m_mcp->toolDefinitions() : QJsonArray());
+    if (usesAcpNative(m_settings)) {
+        const bool readOnly = m_settings.planMode || activeMode().readOnly;
+        if (readOnly) {
+            m_acp.setDesiredMode(u"plan"_s);
+        } else if (m_settings.permissionMode == PermissionMode::AcceptEdits) {
+            m_acp.setDesiredMode(u"accept-edits"_s);
+        } else {
+            m_acp.setDesiredMode(u"default"_s);
+        }
+    }
 }
 
 QList<CheckpointInfo> AgentLoop::checkpoints() const
@@ -1480,6 +1516,14 @@ void AgentLoop::syncAcpClient()
     if (m_mcp) {
         m_acp.setMcpServers(m_mcp->servers());
     }
+    const bool readOnly = m_settings.planMode || activeMode().readOnly;
+    if (readOnly) {
+        m_acp.setDesiredMode(u"plan"_s);
+    } else if (m_settings.permissionMode == PermissionMode::AcceptEdits) {
+        m_acp.setDesiredMode(u"accept-edits"_s);
+    } else {
+        m_acp.setDesiredMode(u"default"_s);
+    }
     if (!usesAcpNative(m_settings) && !m_acp.isBusy()) {
         m_acp.stop();
     }
@@ -1679,7 +1723,7 @@ void AgentLoop::appendControllerMessage(const QString &content)
 bool AgentLoop::isVerificationTool(const QString &toolName) const
 {
     return toolName == u"read_file"_s || toolName == u"grep"_s || toolName == u"bash"_s
-        || toolName == u"lsp_diagnostics"_s;
+        || toolName == u"lsp_diagnostics"_s || toolName == u"build_run"_s;
 }
 
 bool AgentLoop::isVerificationForChangedFiles(const ToolCall &call) const
@@ -1700,7 +1744,7 @@ bool AgentLoop::isVerificationForChangedFiles(const ToolCall &call) const
     // tied to a specific path; the model is explicitly instructed to use them
     // for tests/builds/checks after changes. LSP diagnostics is the editor's
     // own check and is at least as strong evidence as a text search.
-    return call.name == u"grep"_s || call.name == u"bash"_s || call.name == u"lsp_diagnostics"_s;
+    return call.name == u"grep"_s || call.name == u"bash"_s || call.name == u"lsp_diagnostics"_s || call.name == u"build_run"_s;
 }
 
 QString AgentLoop::describePlannedWork(const QList<ToolCall> &calls) const
@@ -3110,6 +3154,9 @@ void AgentLoop::dispatchSubtask(const ToolCall &call)
     child->setSettings(childSettings);
     child->setWorkspace(m_workspace);
     child->setDocumentBridge(m_bridge);
+    child->setLspProvider(m_lsp);
+    child->setDebugProvider(m_debug);
+    child->setEcosystemProvider(m_ecosystem);
     child->setEditorContext(m_editorContext);
 
     struct SubtaskState {
