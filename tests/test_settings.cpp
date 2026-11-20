@@ -62,6 +62,15 @@ private Q_SLOTS:
         s.baseRetryDelaySeconds = 1;
         s.maxRetryDelaySeconds = 30;
         s.retryStrategy = u"linear"_s;
+        s.voiceProvider = u"openai_compatible"_s;
+        s.voiceApiKey = u"sk-voice-test"_s;
+        s.voiceEndpoint = u"http://127.0.0.1:8000/v1/audio/transcriptions"_s;
+        s.voiceModel = u"whisper-large-v3-turbo"_s;
+        s.voiceLanguage = u"en"_s;
+        s.voiceLocalCommand = u"whisper-cli -m /tmp/model.bin -f {file}"_s;
+        s.voiceInputDevice = u"alsa_input.usb-mic"_s;
+        s.voiceNoiseRemoval = false;
+        s.voiceAutoSend = false;
 
         SettingsStore::save(s);
         const Settings loaded = SettingsStore::load();
@@ -99,6 +108,15 @@ private Q_SLOTS:
         QCOMPARE(loaded.baseRetryDelaySeconds, s.baseRetryDelaySeconds);
         QCOMPARE(loaded.maxRetryDelaySeconds, s.maxRetryDelaySeconds);
         QCOMPARE(loaded.retryStrategy, s.retryStrategy);
+        QCOMPARE(loaded.voiceProvider, s.voiceProvider);
+        QCOMPARE(loaded.voiceApiKey, s.voiceApiKey);
+        QCOMPARE(loaded.voiceEndpoint, s.voiceEndpoint);
+        QCOMPARE(loaded.voiceModel, s.voiceModel);
+        QCOMPARE(loaded.voiceLanguage, s.voiceLanguage);
+        QCOMPARE(loaded.voiceLocalCommand, s.voiceLocalCommand);
+        QCOMPARE(loaded.voiceInputDevice, s.voiceInputDevice);
+        QCOMPARE(loaded.voiceNoiseRemoval, s.voiceNoiseRemoval);
+        QCOMPARE(loaded.voiceAutoSend, s.voiceAutoSend);
     }
 
     void loadingAnEmptyConfigKeepsTheDocumentedDefaults()

@@ -245,6 +245,21 @@ private:
     void resetThemeColor(const QString &key);
     void updateThemePresetEnabled();
 
+    // Voice prompting
+    QComboBox *m_voiceProvider = nullptr;
+    QLineEdit *m_voiceApiKey = nullptr;
+    QLineEdit *m_voiceEndpoint = nullptr;
+    QLineEdit *m_voiceModel = nullptr;
+    QLineEdit *m_voiceLanguage = nullptr;
+    QLineEdit *m_voiceLocalCommand = nullptr;
+    QLineEdit *m_voiceInputDevice = nullptr;
+    QCheckBox *m_voiceNoiseRemoval = nullptr;
+    QCheckBox *m_voiceAutoSend = nullptr;
+    QLabel *m_voiceMicStatus = nullptr;
+    QLabel *m_voiceToolsStatus = nullptr;
+    void updateVoiceMicStatus();
+    void updateVoiceFieldStates();
+
     QString getBinaryPlatformKey() const;
 };
 

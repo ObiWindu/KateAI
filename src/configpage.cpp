@@ -13,6 +13,7 @@
 #include "agentteam.h"
 #include "acpclient.h"
 #include "chattheme.h"
+#include "voiceinput.h"
 
 #include <QDir>
 #include <QJsonArray>
@@ -1231,6 +1232,82 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     themeScroll->setWidget(themeWidget);
     tabs->addTab(themeScroll, i18n("Themes"));
 
+    // ==========================================
+    // TAB 10: Voice Prompting
+    // ==========================================
+    auto *voiceScroll = new QScrollArea(tabs);
+    voiceScroll->setWidgetResizable(true);
+    voiceScroll->setFrameShape(QFrame::NoFrame);
+    auto *voiceWidget = new QWidget(voiceScroll);
+    auto *voiceForm = new QFormLayout(voiceWidget);
+    voiceForm->setContentsMargins(12, 12, 12, 12);
+    voiceForm->setSpacing(8);
+
+    auto *voiceIntro = new QLabel(
+        i18n("Capture speech from your microphone, remove background noise, transcribe to text, and send to chat. "
+             "Shortcuts: <b>Ctrl+Alt+V</b> (window-wide), <b>Ctrl+Alt+M</b> (inside Kate AI), "
+             "<b>Ctrl+Alt+Shift+V</b> / <b>Esc</b> (cancel)."),
+        voiceWidget);
+    voiceIntro->setWordWrap(true);
+    voiceIntro->setStyleSheet(QStringLiteral(u"color: %1; font-size: 11px;").arg(ChatTheme::textMuted()));
+    voiceForm->addRow(voiceIntro);
+
+    auto *micRow = new QWidget(voiceWidget);
+    auto *micRowLayout = new QHBoxLayout(micRow);
+    micRowLayout->setContentsMargins(0, 0, 0, 0);
+    m_voiceMicStatus = new QLabel(micRow);
+    m_voiceMicStatus->setWordWrap(true);
+    auto *micRefreshBtn = new QPushButton(i18n("Re-check Mic"), micRow);
+    connect(micRefreshBtn, &QPushButton::clicked, this, &KateAiConfigPage::updateVoiceMicStatus);
+    micRowLayout->addWidget(m_voiceMicStatus, 1);
+    micRowLayout->addWidget(micRefreshBtn);
+    voiceForm->addRow(i18n("Microphone status:"), micRow);
+
+    m_voiceToolsStatus = new QLabel(VoiceInput::detectedToolsSummary(), voiceWidget);
+    m_voiceToolsStatus->setWordWrap(true);
+    m_voiceToolsStatus->setStyleSheet(QStringLiteral(u"color: %1; font-size: 11px;").arg(ChatTheme::textMuted()));
+    voiceForm->addRow(i18n("Detected tools:"), m_voiceToolsStatus);
+
+    m_voiceProvider = new QComboBox(voiceWidget);
+    m_voiceProvider->addItem(i18n("Auto (OpenAI key / custom endpoint / local Whisper)"), u"auto"_s);
+    m_voiceProvider->addItem(i18n("OpenAI Whisper API"), u"openai"_s);
+    m_voiceProvider->addItem(i18n("OpenAI-Compatible Endpoint (Groq, LocalAI, faster-whisper)"), u"openai_compatible"_s);
+    m_voiceProvider->addItem(i18n("Local CLI (whisper-cli / whisper)"), u"local_cli"_s);
+    voiceForm->addRow(i18n("Transcription backend:"), m_voiceProvider);
+
+    m_voiceApiKey = makeKey();
+    m_voiceApiKey->setPlaceholderText(i18n("Optional — falls back to OpenAI / OpenAI-Compatible API key"));
+    voiceForm->addRow(i18n("Voice API key:"), m_voiceApiKey);
+
+    m_voiceEndpoint = new QLineEdit(voiceWidget);
+    m_voiceEndpoint->setPlaceholderText(u"https://api.groq.com/openai/v1/audio/transcriptions"_s);
+    voiceForm->addRow(i18n("Custom endpoint URL:"), m_voiceEndpoint);
+
+    m_voiceModel = new QLineEdit(voiceWidget);
+    m_voiceModel->setPlaceholderText(u"whisper-1"_s);
+    voiceForm->addRow(i18n("Transcription model:"), m_voiceModel);
+
+    m_voiceLanguage = new QLineEdit(voiceWidget);
+    m_voiceLanguage->setPlaceholderText(i18n("Optional ISO-639-1 code (e.g. en, fr, de; empty = auto)"));
+    voiceForm->addRow(i18n("Language hint:"), m_voiceLanguage);
+
+    m_voiceLocalCommand = new QLineEdit(voiceWidget);
+    m_voiceLocalCommand->setPlaceholderText(i18n("e.g. whisper-cli -m ~/.local/share/whisper/ggml-base.bin -f {file}"));
+    voiceForm->addRow(i18n("Local CLI command:"), m_voiceLocalCommand);
+
+    m_voiceInputDevice = new QLineEdit(voiceWidget);
+    m_voiceInputDevice->setPlaceholderText(i18n("Optional — leave empty to use the system default microphone"));
+    voiceForm->addRow(i18n("Input device:"), m_voiceInputDevice);
+
+    m_voiceNoiseRemoval = new QCheckBox(i18n("Remove background noise before transcription"), voiceWidget);
+    voiceForm->addRow(i18n("Noise removal:"), m_voiceNoiseRemoval);
+
+    m_voiceAutoSend = new QCheckBox(i18n("Automatically send transcribed prompt to chat"), voiceWidget);
+    voiceForm->addRow(i18n("Auto-send:"), m_voiceAutoSend);
+
+    voiceScroll->setWidget(voiceWidget);
+    tabs->addTab(voiceScroll, i18n("Voice"));
+
     // Initialize model fetcher
     m_modelFetcher = new LlmClient(this);
     m_modelFetcher->setSettings(m_plugin->settings());
@@ -1455,6 +1532,20 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     connect(m_mcpServers, &QTableWidget::itemDoubleClicked, this, [this] {
         editMcpServer();
     });
+
+    // Voice prompting
+    connect(m_voiceProvider, &QComboBox::currentIndexChanged, this, [this, markChanged]() {
+        updateVoiceFieldStates();
+        markChanged();
+    });
+    connect(m_voiceApiKey, &QLineEdit::textChanged, this, markChanged);
+    connect(m_voiceEndpoint, &QLineEdit::textChanged, this, markChanged);
+    connect(m_voiceModel, &QLineEdit::textChanged, this, markChanged);
+    connect(m_voiceLanguage, &QLineEdit::textChanged, this, markChanged);
+    connect(m_voiceLocalCommand, &QLineEdit::textChanged, this, markChanged);
+    connect(m_voiceInputDevice, &QLineEdit::textChanged, this, markChanged);
+    connect(m_voiceNoiseRemoval, &QCheckBox::toggled, this, markChanged);
+    connect(m_voiceAutoSend, &QCheckBox::toggled, this, markChanged);
 
     reset();
 }
@@ -1899,6 +1990,17 @@ s.opencodeModel = m_opencodeModel->currentText().trimmed();
         s.themeOverrides = QString::fromUtf8(QJsonDocument(overrides).toJson(QJsonDocument::Compact));
     }
 
+    // Voice prompting
+    s.voiceProvider = m_voiceProvider->currentData().toString();
+    s.voiceApiKey = m_voiceApiKey->text();
+    s.voiceEndpoint = m_voiceEndpoint->text().trimmed();
+    s.voiceModel = m_voiceModel->text().trimmed().isEmpty() ? u"whisper-1"_s : m_voiceModel->text().trimmed();
+    s.voiceLanguage = m_voiceLanguage->text().trimmed();
+    s.voiceLocalCommand = m_voiceLocalCommand->text().trimmed();
+    s.voiceInputDevice = m_voiceInputDevice->text().trimmed();
+    s.voiceNoiseRemoval = m_voiceNoiseRemoval->isChecked();
+    s.voiceAutoSend = m_voiceAutoSend->isChecked();
+
     if (!m_workspace.isEmpty()) {
         QString error;
         if (!McpConfigStore::save(m_workspace, m_mcpServerConfigs, &error)) {
@@ -2147,6 +2249,23 @@ void KateAiConfigPage::reset()
         }
     }
     refreshThemeColorTable();
+
+    // Voice prompting
+    {
+        const QSignalBlocker blockVoice(m_voiceProvider);
+        const int idx = m_voiceProvider->findData(s.voiceProvider);
+        m_voiceProvider->setCurrentIndex(idx >= 0 ? idx : 0);
+    }
+    m_voiceApiKey->setText(s.voiceApiKey);
+    m_voiceEndpoint->setText(s.voiceEndpoint);
+    m_voiceModel->setText(s.voiceModel);
+    m_voiceLanguage->setText(s.voiceLanguage);
+    m_voiceLocalCommand->setText(s.voiceLocalCommand);
+    m_voiceInputDevice->setText(s.voiceInputDevice);
+    m_voiceNoiseRemoval->setChecked(s.voiceNoiseRemoval);
+    m_voiceAutoSend->setChecked(s.voiceAutoSend);
+    updateVoiceFieldStates();
+    updateVoiceMicStatus();
 }
 
 void KateAiConfigPage::setWorkspace(const QString &workspace)
@@ -2568,6 +2687,39 @@ void KateAiConfigPage::resetThemeColor(const QString &key)
     m_themeOverrideValues.remove(key);
     refreshThemeColorTable();
     Q_EMIT changed();
+}
+
+void KateAiConfigPage::updateVoiceMicStatus()
+{
+    if (!m_voiceMicStatus) {
+        return;
+    }
+    const QString device = m_voiceInputDevice ? m_voiceInputDevice->text().trimmed() : QString();
+    const VoiceInput::MicrophoneStatus status = VoiceInput::probeMicrophone(device);
+    if (status.available) {
+        m_voiceMicStatus->setText(i18n("Available: %1", status.deviceName.isEmpty() ? i18n("Default microphone") : status.deviceName));
+        m_voiceMicStatus->setStyleSheet(QStringLiteral(u"color: %1; font-weight: 600;").arg(ChatTheme::success()));
+    } else {
+        m_voiceMicStatus->setText(status.reason.isEmpty() ? i18n("No microphone is available or usable.") : status.reason);
+        m_voiceMicStatus->setStyleSheet(QStringLiteral(u"color: %1;").arg(ChatTheme::warning()));
+    }
+    if (m_voiceToolsStatus) {
+        m_voiceToolsStatus->setText(VoiceInput::detectedToolsSummary());
+    }
+}
+
+void KateAiConfigPage::updateVoiceFieldStates()
+{
+    if (!m_voiceProvider) {
+        return;
+    }
+    const QString backend = m_voiceProvider->currentData().toString();
+    const bool isLocal = (backend == u"local_cli"_s);
+    const bool isOpenAI = (backend == u"openai"_s);
+    m_voiceApiKey->setEnabled(!isLocal);
+    m_voiceEndpoint->setEnabled(!isLocal && !isOpenAI);
+    m_voiceModel->setEnabled(!isLocal);
+    m_voiceLocalCommand->setEnabled(isLocal || backend == u"auto"_s);
 }
 
 } // namespace KateAi

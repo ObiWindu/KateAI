@@ -43,6 +43,7 @@ class TodoWidget;
 class EditTracker;
 class TurnStatus;
 class AcpBinaryInstaller;
+class VoiceInput;
 
 class ChatWidget : public QWidget
 {
@@ -122,6 +123,14 @@ public:
 
     PromptEdit *promptEdit() const { return m_prompt; }
     void setCompletionWords(const QStringList &words);
+
+    // Voice prompting: microphone availability check, capture, noise removal,
+    // transcription, and sending to chat.
+    VoiceInput *voiceInput() const { return m_voiceInput; }
+    bool isMicrophoneAvailable() const;
+    void refreshMicrophoneAvailability();
+    void toggleVoicePrompt();
+    void cancelVoicePrompt();
 
     // Announces that the Kate AI workspace switched (another folder was
     // opened in Kate). The notice is pinned to the top of the composer.
@@ -286,6 +295,7 @@ private:
     void refreshProviders();
     void refreshModels();
     void updateSendButtonState();
+    void updateVoicePromptUi();
     void updateTokenDisplay();
     void updateThinkingButtonStyle();
     void updateReasoningEffortButton();
@@ -364,6 +374,8 @@ private:
     // concurrent delegations share a single bounded strip instead of stacking.
     SubtaskDock *m_subtaskDock = nullptr;
     PromptEdit *m_prompt = nullptr;
+    VoiceInput *m_voiceInput = nullptr;
+    QTimer *m_micRefreshTimer = nullptr;
     TurnStatus *m_turnStatus = nullptr;
     // Tool calls completed in the current turn, shown live in the status strip.
     int m_completedToolCount = 0;

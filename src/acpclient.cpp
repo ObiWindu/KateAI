@@ -1174,12 +1174,68 @@ void AcpClient::sendSetEffortOption(const QString &effortId)
     });
 }
 
+static QString findNativeAgyExecutable()
+{
+    const QString found = QStandardPaths::findExecutable(u"agy"_s);
+    if (!found.isEmpty()) {
+        return found;
+    }
+    const QString toolDirFound = findExecutableInToolDirs(u"agy"_s);
+    if (!toolDirFound.isEmpty()) {
+        return toolDirFound;
+    }
+    const QString home = QDir::homePath();
+#ifdef Q_OS_WIN
+    const QStringList candidates = {
+        home + u"/.gemini/antigravity-cli/bin/agy.exe"_s,
+        home + u"/.local/bin/agy.exe"_s,
+    };
+#else
+    const QStringList candidates = {
+        home + u"/.gemini/antigravity-cli/bin/agy"_s,
+        home + u"/.local/bin/agy"_s,
+    };
+#endif
+    for (const QString &candidate : candidates) {
+        const QFileInfo info(candidate);
+        if (info.exists() && info.isFile() && info.isExecutable()) {
+            return info.absoluteFilePath();
+        }
+    }
+    return {};
+}
+
+static bool isLegacyAntigravityCommand(const QString &command)
+{
+    return QFileInfo(command).fileName().toLower().contains(u"agy_acp_server"_s);
+}
+
+static bool isLaunchingLegacyAntigravityServer(const Settings &settings)
+{
+    const QString launch = AcpClient::resolvedCommand(settings);
+    return isLegacyAntigravityCommand(launch.isEmpty() ? acpEffectiveCommand(settings) : launch);
+}
+
 QString AcpClient::resolvedCommand(const Settings &settings)
 {
     const QString command = acpEffectiveCommand(settings);
     if (command.isEmpty()) {
         return {};
     }
+
+    // Antigravity: the ACP registry distributes the legacy standalone
+    // Python/C++ `agy_acp_server.par`, which proxies model calls through an
+    // embedded Python HTTP/1.1 urllib proxy that fails long/heavy reasoning
+    // turns at 60s with "502 Bad Gateway: Failed to connect to backend API"
+    // and requires the 4KB page shim on >4KB kernels. Prefer the modern native
+    // Go `agy` CLI (`agy acp`) whenever it is installed.
+    if (acpAgentIsLegacyAntigravityServer(settings)) {
+        const QString nativeAgy = findNativeAgyExecutable();
+        if (!nativeAgy.isEmpty()) {
+            return nativeAgy;
+        }
+    }
+
     const QFileInfo commandInfo(command);
     if (commandInfo.isAbsolute()) {
         return command;
@@ -1237,6 +1293,9 @@ QString AcpClient::resolvedCommand(const Settings &settings)
             // never sees it, so the agent cannot be started at all from there.
             fallbacks.append(home + u"/.opencode/bin/"_s + baseName);
         }
+        if (baseName == u"agy"_s || baseName == u"agy.exe"_s) {
+            fallbacks.append(home + u"/.gemini/antigravity-cli/bin/"_s + baseName);
+        }
         fallbacks.append(home + u"/.local/bin/"_s + baseName);
         for (const QString &candidate : fallbacks) {
             const QFileInfo info(candidate);
@@ -1266,21 +1325,49 @@ QStringList AcpClient::agentArguments(const Settings &settings)
     const QString raw = acpEffectiveArgs(settings);
     QStringList args = raw.isEmpty() ? QStringList() : QProcess::splitCommand(raw);
     const QString command = acpEffectiveCommand(settings);
+    const QString launch = resolvedCommand(settings);
+    const QString effectiveCommand = launch.isEmpty() ? command : launch;
     const QString agentId = settings.acpAgentId;
     const QString model = settings.acpModel.trimmed();
-    // Per-agent launch quirks, keyed by registry id where possible, so agents
-    // installed from the registry get the same fixes as the built-in presets.
-    const AcpAgentQuirks quirks = acpAgentQuirks(agentId, command);
+    // Per-agent launch quirks, keyed by registry id and the resolved launch
+    // executable so upgrading a legacy registry binary (e.g. `agy_acp_server`
+    // -> `agy`) applies the target binary's flags rather than the legacy ones.
+    const AcpAgentQuirks quirks = acpAgentQuirks(agentId, effectiveCommand);
 
     for (const QString &strip : quirks.stripArgs) {
         args.removeAll(strip);
+    }
+    if (acpAgentIsAntigravity(settings) && !isLegacyAntigravityCommand(effectiveCommand)) {
+        // The ACP registry entry for `antigravity-acp` (`agy_acp_server.par`)
+        // persists `--uid=` and legacy gflags that modern `agy acp` rejects
+        // with exit code 1. Strip any value-bearing variant as well.
+        QStringList kept;
+        kept.reserve(args.size());
+        for (int i = 0; i < args.size(); ++i) {
+            const QString &arg = args.at(i);
+            if (arg == u"--uid"_s) {
+                if (i + 1 < args.size() && !args.at(i + 1).startsWith(u'-') && args.at(i + 1) != u"acp"_s) {
+                    ++i;
+                }
+                continue;
+            }
+            if (arg.startsWith(u"--uid="_s)
+                || arg.startsWith(u"--enforce_kernel_ipv6_support="_s)
+                || arg.startsWith(u"--core_register_sanitization_enabled="_s)
+                || arg.startsWith(u"--core_sanitization_enabled="_s)
+                || arg.startsWith(u"--boringssl_sanitization_enabled="_s)
+                || arg.startsWith(u"--hugepage_text="_s)) {
+                continue;
+            }
+            kept.append(arg);
+        }
+        args = kept;
     }
     if (quirks.stripNpmTokens) {
         // npm-only tokens from a recorded npx line ("--yes", "@scope/pkg")
         // are noise for the standalone mcode binary. When the launch command
         // is still npx (the standalone binary is not installed), stripping the
         // package would leave "npx acp" and run an unrelated package.
-        const QString launch = resolvedCommand(settings);
         const bool standalone = QFileInfo(launch).fileName() == u"mcode"_s;
         if (standalone) {
             QStringList kept;
@@ -2117,7 +2204,7 @@ QProcessEnvironment AcpClient::processEnvironment() const
     // Only the legacy standalone C++/Chromium agy_acp_server binary needs the
     // 4KB page shim on >4KB hosts. The modern Go `agy` CLI runs natively and
     // must not get a spoofed sysconf(_SC_PAGESIZE).
-    if (acpAgentIsLegacyAntigravityServer(m_settings) && acpNeedsPageShim()) {
+    if (isLaunchingLegacyAntigravityServer(m_settings) && acpNeedsPageShim()) {
         const QString shim = acpPageShimPath(m_settings.acpAgentId);
         if (!shim.isEmpty()) {
             const QString currentPreload = env.value(u"LD_PRELOAD"_s);
@@ -2169,7 +2256,8 @@ void AcpClient::sendInitialize()
     // to specific known clients. Pretend to be Zed for those agents so we
     // can discover the full model list. Keyed by registry id via the quirks
     // table, so other gated agents can be added there.
-    if (acpAgentQuirks(m_settings.acpAgentId, acpEffectiveCommand(m_settings)).spoofZedClientInfo) {
+    const QString launchCmd = resolvedCommand(m_settings);
+    if (acpAgentQuirks(m_settings.acpAgentId, launchCmd.isEmpty() ? acpEffectiveCommand(m_settings) : launchCmd).spoofZedClientInfo) {
         clientInfo.insert(u"name"_s, u"zed"_s);
         clientInfo.insert(u"title"_s, u"Zed"_s);
     } else {
@@ -2350,7 +2438,7 @@ void AcpClient::maybeAuthenticate(const QJsonArray &authMethods, bool force)
         || (acpAgentIsAntigravity(m_settings) && !env.value(u"GEMINI_API_KEY"_s).trimmed().isEmpty());
     const bool hasAnyApiKey = hasConfiguredKey || hasEnvKey;
 
-    if (!force && !hasConfiguredKey && !acpAgentIsLegacyAntigravityServer(m_settings)) {
+    if (!force && !hasConfiguredKey && !isLaunchingLegacyAntigravityServer(m_settings)) {
         openSession();
         return;
     }
@@ -2528,11 +2616,14 @@ void AcpClient::sendSessionLoadOrResume()
                 return;
             }
             const QString lowerError = error.toLower();
+            const bool resumeSuggestsLoad = method == u"session/resume"_s && m_loadSession
+                && (lowerError.contains(u"session/load"_s)
+                    || lowerError.contains(u"failed to read session"_s));
             const bool unknownSession = lowerError.contains(u"not found"_s)
                 || lowerError.contains(u"unknown session"_s)
                 || lowerError.contains(u"no such session"_s)
                 || lowerError.contains(u"does not exist"_s);
-            if (unknownSession) {
+            if (resumeSuggestsLoad || unknownSession) {
                 if (method == u"session/resume"_s && m_loadSession) {
                     Q_EMIT logMessage(u"Session resume is unavailable; loading the saved session instead."_s);
                     m_resumeSession = false;
@@ -3116,6 +3207,8 @@ void AcpClient::handleResponse(const QJsonObject &message)
                 }
                 if (details.isEmpty() && dataObj.value(u"error"_s).isObject()) {
                     details = dataObj.value(u"error"_s).toObject().value(u"message"_s).toString();
+                } else if (details.isEmpty() && dataObj.value(u"error"_s).isString()) {
+                    details = dataObj.value(u"error"_s).toString();
                 }
             } else if (data.isString()) {
                 details = data.toString();
@@ -6295,6 +6388,12 @@ bool AcpClient::isTransientAgentError(const QString &error) const
         || lower.contains(u"too many requests"_s)
         || lower.contains(u"service unavailable"_s)
         || lower.contains(u"bad gateway"_s)
+        || lower.contains(u"gateway timeout"_s)
+        || lower.contains(u"model unreachable"_s)
+        || lower.contains(u"remote end closed connection"_s)
+        || lower.contains(u"error 502"_s)
+        || lower.contains(u"error 503"_s)
+        || lower.contains(u"error 504"_s)
         || lower.contains(u"internal server error"_s);
 }
 

@@ -32,6 +32,7 @@ add_library(kateai_core STATIC
     contextmanager.cpp
     transcriptlayout.cpp
     websearch.cpp
+    voiceinput.cpp
     completionengine.cpp
     editranges.cpp
 )

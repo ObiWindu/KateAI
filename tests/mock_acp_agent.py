@@ -341,12 +341,30 @@ def handle_prompt(request_id, params):
         result(request_id, {"stopReason": "end_turn"})
         return
 
+    if SCENARIO == "flaky-model-unreachable":
+        global PROMPT_COUNT
+        PROMPT_COUNT += 1
+        if PROMPT_COUNT == 1:
+            error(
+                request_id,
+                "Agent execution error: model unreachable: Error 502, Message: Bad Gateway: Failed to connect to backend API, Status: 502 Bad Gateway",
+                -32603,
+            )
+            return
+        session_update(
+            {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "model-unreachable-recovered"},
+            }
+        )
+        result(request_id, {"stopReason": "end_turn"})
+        return
+
     if SCENARIO in ("flaky", "flaky-persistent"):
         # A transient drop of the agent's stream to its model provider: the
         # turn fails mid-response and Rust agents report the hyper/reqwest
         # transport error verbatim. "flaky" recovers on the next attempt;
         # "flaky-persistent" never does, so the client exhausts its budget.
-        global PROMPT_COUNT
         PROMPT_COUNT += 1
         if SCENARIO == "flaky" and PROMPT_COUNT > 1:
             kind = "nudged" if "transient network error" in text else "replayed"
@@ -1556,7 +1574,13 @@ def handle(message):
         result(request_id, {})
     elif method == "session/set_model":
         result(request_id, {})
-    elif method == "session/load" or method == "session/resume":
+    elif method == "session/resume":
+        if SCENARIO == "agy-resume-suggests-load":
+            sid = params.get("sessionId") or "unknown"
+            error(request_id, f"Failed to read session {sid}; retry, or load it with session/load", -32603)
+        else:
+            result(request_id, {})
+    elif method == "session/load":
         result(request_id, {})
     elif method == "session/close":
         result(request_id, {})

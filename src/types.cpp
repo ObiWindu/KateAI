@@ -2299,7 +2299,8 @@ AcpAgentQuirks acpAgentQuirks(const QString &agentId, const QString &command)
         // any legacy `agy_acp_server` gflags that might have been persisted in
         // user settings, because `agy acp` rejects unknown flags and exits 1.
         q.needsAcpSubcommand = true;
-        q.stripArgs = {u"--disable-features=CrOSHugepageRemapAndLockInZygote"_s,
+        q.stripArgs = {u"--uid="_s,
+                       u"--disable-features=CrOSHugepageRemapAndLockInZygote"_s,
                        u"--enforce_kernel_ipv6_support=false"_s,
                        u"--core_register_sanitization_enabled=false"_s,
                        u"--core_sanitization_enabled=false"_s,

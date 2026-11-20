@@ -36,7 +36,7 @@ QString usageText()
         "usage: kateai ask <text> | explain | fix | refactor | tests | diagnostics | symbols | "
         "debug | explain-stop | stack | break [cond] | snapshot | fix-errors | build-errors | "
         "launch-config | backtrace | terminal | blame | commit | diff-tab | graph-tab | annotations | "
-        "stop | new | mode <id> | panel");
+        "voice | stop | new | mode <id> | panel");
 }
 
 // The instruction of the one-word review subcommands. Kept next to the
@@ -94,7 +94,7 @@ KCompletion *KateAiCommand::completionObject(KTextEditor::View *view, const QStr
                           u"fix-errors"_s, u"build-errors"_s, u"launch-config"_s,
                           u"backtrace"_s, u"terminal"_s, u"blame"_s, u"commit"_s,
                           u"diff-tab"_s, u"graph-tab"_s, u"annotations"_s,
-                          u"stop"_s, u"new"_s, u"mode "_s, u"panel"_s});
+                          u"voice"_s, u"stop"_s, u"new"_s, u"mode "_s, u"panel"_s});
     return completion;
 }
 
@@ -240,6 +240,11 @@ bool KateAiCommand::exec(KTextEditor::View *view, const QString &cmd, QString &m
     if (sub == u"annotations"_s) {
         target->toggleAnnotationGutter();
         msg = i18n("Kate AI: toggled AI edit gutter annotations.");
+        return true;
+    }
+    if (sub == u"voice"_s) {
+        target->toggleVoicePrompt();
+        msg = i18n("Kate AI: toggled voice prompt.");
         return true;
     }
 
