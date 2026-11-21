@@ -9,7 +9,7 @@
 | Date | 2026-11-21 |
 | Scope | The agent harness around the model: loop, context, tools, safety, orchestration, extensibility, evaluation, and the editor surface. Not model training, not Kate itself. |
 | Audience | KateAI maintainers; contributors touching `src/agentloop.*`, `src/tools.*`, `src/contextmanager.*`, `src/sandbox.*`, `src/mcp.*`, `src/acpclient.*` |
-| Companion docs | `ARCHITECTURE.md`, `README.md`, `CHANGELOG_0.6.0.md` |
+| Companion docs | `ARCHITECTURE.md`, `README.md`, `CHANGELOG_0.6.0.md`, `HARNESS_IMPLEMENTATION_PLAN.md` (the execution plan for this report) |
 
 > **How to read this.** Sections 1–4 are the research: what Claude Code, Codex, DeepSeek Harness and seven other production harnesses actually do, and what the evidence says actually matters. Section 5 is KateAI as it exists today. Section 6 is the gap analysis. Section 7 is the target architecture, with concrete interfaces and file placement. Section 8 is the phased roadmap. Section 9 is measurement. Section 10 is risk. The appendices hold schemas, a source map, and the bibliography. Every non-obvious claim is linked; vendor claims are labelled as such.
 
