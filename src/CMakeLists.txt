@@ -34,6 +34,8 @@ add_library(kateai_core STATIC
     websearch.cpp
     completionengine.cpp
     editranges.cpp
+    harness/harnessflags.cpp
+    harness/toolresults.cpp
 )
 
 set_target_properties(kateai_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
