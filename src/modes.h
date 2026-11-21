@@ -31,6 +31,10 @@ inline QString command()
 {
     return u"command"_s;
 }
+inline QString debug()
+{
+    return u"debug"_s;
+}
 inline QString mcp()
 {
     return u"mcp"_s;

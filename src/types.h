@@ -544,8 +544,14 @@ bool acpAgentHasBinaryInstall(const Settings &settings);
 // fail to load on current Node runtimes and the process exits before the ACP
 // handshake completes.
 bool acpAgentIsMinimaxCode(const Settings &settings);
-// True for Google Antigravity ACP agent (registry id `antigravity-acp`).
+// True for Google Antigravity ACP agent (`agy acp` CLI or legacy
+// `agy_acp_server` binary, registry id `antigravity-acp`).
 bool acpAgentIsAntigravity(const Settings &settings);
+// True only for the legacy standalone gflags/C++ `agy_acp_server` binary
+// (`.par` archive), which needs sanitizer-disabling gflags and the 4KB page
+// shim on >4KB hosts. The modern Go `agy` CLI (`agy acp`) rejects those flags
+// and runs natively without LD_PRELOAD.
+bool acpAgentIsLegacyAntigravityServer(const Settings &settings);
 // Launch-line quirks of one ACP agent, keyed by registry id so newly installed
 // registry agents get the same treatment as the built-in presets. Zed keeps the
 // equivalent knowledge in crates/agent_servers/<name>.rs.

@@ -168,6 +168,47 @@ private Q_SLOTS:
         const PermissionRequest r = client.permissionFromToolCall(call);
         QCOMPARE(r.risk, ToolRisk::Execute);
     }
+
+    void antigravityPascalCaseArgsAndDiffs()
+    {
+        AcpClient client;
+        // edit_file with Path / Target / Replacement
+        const PermissionRequest edit = client.permissionFromToolCall(QJsonObject{
+            {u"toolCallId"_s, u"agy1"_s},
+            {u"name"_s, u"edit_file"_s},
+            {u"kind"_s, u"edit"_s},
+            {u"rawInput"_s, QJsonObject{{u"Path"_s, u"/ws/a.cpp"_s}, {u"Target"_s, u"oldLine"_s}, {u"Replacement"_s, u"newLine"_s}}},
+        });
+        QCOMPARE(edit.path, u"/ws/a.cpp"_s);
+        QVERIFY(edit.mutatesFiles);
+        QVERIFY(edit.describeDiff.contains(u"+newLine"_s));
+
+        // multi_replace_file_content with TargetFile / ReplacementChunks
+        const PermissionRequest multi = client.permissionFromToolCall(QJsonObject{
+            {u"toolCallId"_s, u"agy2"_s},
+            {u"name"_s, u"multi_replace_file_content"_s},
+            {u"kind"_s, u"edit"_s},
+            {u"rawInput"_s, QJsonObject{
+                {u"TargetFile"_s, u"/ws/b.cpp"_s},
+                {u"ReplacementChunks"_s, QJsonArray{
+                    QJsonObject{{u"TargetContent"_s, u"alpha"_s}, {u"ReplacementContent"_s, u"beta"_s}},
+                }},
+            }},
+        });
+        QCOMPARE(multi.toolName, u"multi_edit_file"_s);
+        QCOMPARE(multi.path, u"/ws/b.cpp"_s);
+        QVERIFY(multi.describeDiff.contains(u"+beta"_s));
+
+        // write_file with Path / Content
+        const PermissionRequest write = client.permissionFromToolCall(QJsonObject{
+            {u"toolCallId"_s, u"agy3"_s},
+            {u"name"_s, u"write_file"_s},
+            {u"kind"_s, u"write"_s},
+            {u"rawInput"_s, QJsonObject{{u"Path"_s, u"/ws/c.cpp"_s}, {u"Content"_s, u"int main() {}"_s}}},
+        });
+        QCOMPARE(write.path, u"/ws/c.cpp"_s);
+        QVERIFY(write.describeDiff.contains(u"+int main() {}"_s));
+    }
 };
 
 QTEST_GUILESS_MAIN(TestAcpParsing)

@@ -299,7 +299,7 @@ private Q_SLOTS:
     void planModeOnlyAdvertisesReadTools()
     {
         const QJsonArray tools = toolDefinitions(ModeRegistry::toolAccessForGroups({ToolGroup::read()}));
-        QCOMPARE(tools.size(), 18);
+        QCOMPARE(tools.size(), 26);
         for (const QJsonValue &tool : tools) {
             const QString name = tool.toObject().value(u"function"_s).toObject().value(u"name"_s).toString();
             QVERIFY(name == u"read_file"_s || name == u"list_dir"_s || name == u"grep"_s || name == u"glob"_s
@@ -308,7 +308,11 @@ private Q_SLOTS:
                     || name == u"todo_write"_s || name == u"todo_read"_s || name == u"think"_s
                     || name == u"exit_plan_mode"_s
                     || name == u"lsp_diagnostics"_s || name == u"lsp_symbols"_s || name == u"lsp_hover"_s
-                    || name == u"lsp_definition"_s || name == u"lsp_references"_s || name == u"lsp_code_actions"_s);
+                    || name == u"lsp_definition"_s || name == u"lsp_references"_s || name == u"lsp_code_actions"_s
+                    || name == u"debug_status"_s || name == u"debug_stack"_s || name == u"debug_locals"_s
+                    || name == u"debug_breakpoints"_s || name == u"debug_select_frame"_s
+                    || name == u"debug_select_thread"_s || name == u"debug_snapshot"_s
+                    || name == u"build_targets"_s);
         }
     }
 

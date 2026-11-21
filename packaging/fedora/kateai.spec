@@ -49,6 +49,9 @@ asks before destructive actions. Works on Fedora and Fedora Asahi Remix.
 %license LICENSE
 %doc README.md
 %{_libdir}/qt6/plugins/kf6/ktexteditor/kateai.so
+# Page-size shim used by the agent sandbox on 4K-page systems (e.g. Asahi).
+%dir %{_libdir}/kateai
+%{_libdir}/kateai/libpage4k.so
 
 %changelog
 * Mon Nov 16 2026 ObiWindu <Obi.wandu@proton.me> - 0.4.0-1
@@ -60,5 +63,5 @@ asks before destructive actions. Works on Fedora and Fedora Asahi Remix.
 - Release 0.3.0: ACP card fixes, apply_patch hardening, async read safety,
   live sub-agent activity, and improved tool/permission handling.
 
-* Tue Sep 30 2026 ObiWindu <Obi.wandu@proton.me> - 0.1.0-1
+* Wed Sep 30 2026 ObiWindu <Obi.wandu@proton.me> - 0.1.0-1
 - Initial package.

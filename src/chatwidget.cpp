@@ -168,7 +168,11 @@ bool isFileMutatingTool(const QString &toolName)
         return true;
     }
     return toolName == u"multi_replace_file_content"_s
-        || toolName == u"fs/write_text_file"_s || toolName == u"fs/edit_file"_s || toolName.startsWith(u"fs/"_s)
+        || toolName == u"fs/write_text_file"_s || toolName == u"fs/write_file"_s
+        || toolName == u"fs/append_file"_s || toolName == u"fs/edit_file"_s
+        || toolName == u"fs/multi_edit_file"_s || toolName == u"fs/str_replace_editor"_s
+        || toolName == u"fs/delete_file"_s || toolName == u"fs/remove_file"_s
+        || toolName == u"fs/move_file"_s || toolName == u"fs/rename_file"_s
         || toolName == u"write"_s || toolName == u"edit"_s || toolName == u"str_replace"_s
         || toolName == u"str_replace_editor"_s || toolName == u"apply_patch"_s || toolName == u"patch"_s;
 }
@@ -260,14 +264,16 @@ QString toolTargetLabel(const QString &toolName, const KateAi::PermissionRequest
     // ACP calls, which Kate does not get to name itself.
     QString path = request.path;
     if (path.isEmpty()) {
-        path = jsonArg(request.details, {u"path"_s, u"file_path"_s, u"filePath"_s, u"file"_s,
+        path = jsonArg(request.details, {u"path"_s, u"Path"_s, u"file_path"_s, u"filePath"_s, u"file"_s, u"File"_s,
+                                        u"TargetFile"_s, u"AbsolutePath"_s, u"DirectoryPath"_s,
+                                        u"SearchPath"_s, u"SearchDirectory"_s,
                                         u"dir_path"_s, u"dirPath"_s, u"directory"_s,
                                         u"root_path"_s, u"rootPath"_s});
     }
 
     const bool searches = toolName == u"grep"_s || toolName == u"glob"_s || toolName == u"web_search"_s
         || toolName == u"websearch"_s || toolName == u"query_project_graph"_s || toolName == u"search"_s;
-    QString pattern = jsonArg(request.details, {u"pattern"_s, u"query"_s, u"regex"_s, u"question"_s});
+    QString pattern = jsonArg(request.details, {u"pattern"_s, u"Pattern"_s, u"query"_s, u"Query"_s, u"regex"_s, u"question"_s});
     if (pattern.isEmpty()) {
         pattern = request.summary.trimmed();
     }
@@ -278,12 +284,12 @@ QString toolTargetLabel(const QString &toolName, const KateAi::PermissionRequest
         return i18n("for \u201C%1\u201D%2", pattern, scope);
     }
 
-    const QString command = jsonArg(request.details, {u"command"_s, u"cmd"_s, u"script"_s});
+    const QString command = jsonArg(request.details, {u"command"_s, u"CommandLine"_s, u"cmd"_s, u"script"_s});
     if (!command.isEmpty()) {
         return u" " % elideMiddle(command, 64);
     }
 
-    const QString url = jsonArg(request.details, {u"url"_s, u"link"_s});
+    const QString url = jsonArg(request.details, {u"url"_s, u"Url"_s, u"link"_s});
     if (!url.isEmpty()) {
         return u" " % elideMiddle(url, 64);
     }
@@ -4956,7 +4962,7 @@ bool ChatWidget::ensureAcpBinaryInstalled(const QString &agentId)
             return false;
         }
         if (!acpInstalledBinaryCommand(settingsForAcpAgent(agentId)).isEmpty()) {
-            if (agentId == u"antigravity-acp"_s && acpNeedsPageShim()) {
+            if (acpAgentIsLegacyAntigravityServer(settingsForAcpAgent(agentId)) && acpNeedsPageShim()) {
                 acpEnsurePageShim(acpBinaryInstallDir(agentId));
             }
             return false;

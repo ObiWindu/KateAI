@@ -7,6 +7,8 @@
 #include "chatwidget.h"
 #include "edittracker.h"
 #include "editorassist.h"
+#include "katedebugbridge.h"
+#include "kateecosystembridge.h"
 #include "katelspbridge.h"
 #include "lsp.h"
 #include "mcp.h"
@@ -40,7 +42,11 @@
 #include <QIcon>
 #include <QKeySequence>
 #include <QLayout>
+#include <QJsonDocument>
+#include <QMainWindow>
 #include <QMenu>
+#include <QStatusBar>
+#include <QToolButton>
 #include <QMessageBox>
 #include <QPalette>
 #include <QPushButton>
@@ -165,6 +171,46 @@ QString gitBranchForWorkspace(const QString &workspace)
             scheduleEditorContextRefresh();
         });
 
+        // Bridge to Kate's DAP/GDB debugger plugin ("kategdbplugin").
+        m_debug = new KateDebugBridge(this);
+        m_debug->setMainWindow(m_mainWindow);
+        m_assist->setDebugProvider(m_debug);
+        connect(m_debug, &DebugProvider::stateChanged, this, [this]() {
+            scheduleEditorContextRefresh();
+            updateStatusBarPill();
+        });
+        connect(m_debug, &DebugProvider::breakpointsChanged, this, [this]() {
+            scheduleEditorContextRefresh();
+        });
+        connect(m_debug, &DebugProvider::stopped, this, [this](const DebugStopInfo &info) {
+            scheduleEditorContextRefresh();
+            updateStatusBarPill();
+            if (info.isCrashOrException) {
+                postDebugStopBanner(info);
+            }
+        });
+
+        // Bridge to Kate's Build, Konsole, Project Tree, Backtrace, and native tabs.
+        m_ecosystem = new KateEcosystemBridge(this);
+        m_ecosystem->setMainWindow(m_mainWindow);
+        connect(m_ecosystem, &KateEcosystemBridge::projectTreeActionRequested, this,
+                [this](const QString &actionId, const QString &path, const QString &baseDir) {
+                    if (!m_chat || path.isEmpty()) {
+                        return;
+                    }
+                    showPanel();
+                    const QString target = baseDir.isEmpty() ? path : QDir(baseDir).relativeFilePath(path);
+                    QString prompt;
+                    if (actionId == u"summarize"_s) {
+                        prompt = i18n("Summarize the purpose, key symbols, and architecture of `%1`.", target);
+                    } else if (actionId == u"tests"_s) {
+                        prompt = i18n("Add or improve focused unit tests for `%1`. Explain the proposed coverage first.", target);
+                    } else {
+                        prompt = i18n("Inspect `%1` and explain how it works and any issues or improvements you notice.", target);
+                    }
+                    m_chat->ask(prompt);
+                });
+
         // Debounced editor-context refresh on cursor/selection moves: the
         // context string is prompt-sized and the signals fire per keystroke.
         m_contextTimer = new QTimer(this);
@@ -210,6 +256,10 @@ QString gitBranchForWorkspace(const QString &workspace)
             if (m_chat->agent()) {
                 m_chat->agent()->setDocumentBridge(&m_bridge);
                 m_chat->agent()->setLspProvider(m_lsp);
+        m_chat->agent()->setDebugProvider(m_debug);
+        m_chat->agent()->setEcosystemProvider(m_ecosystem);
+                m_chat->agent()->setDebugProvider(m_debug);
+                m_chat->agent()->setEcosystemProvider(m_ecosystem);
                 // Every chat needs an ID before its first turn. Otherwise the
                 // turn-finished autosave is skipped, and switching to another
                 // conversation can save the new messages under an empty ID.
@@ -284,6 +334,7 @@ QString gitBranchForWorkspace(const QString &workspace)
                     m_assist->setSettings(settings);
                 }
                 refreshWorkspace();
+                updateStatusBarPill();
             });
         }
         // Inheriting the Kate editor theme has to follow the editor live: the
@@ -354,6 +405,7 @@ QString gitBranchForWorkspace(const QString &workspace)
                     m_assist->setAgentBusy(true);
                 }
                 refreshWorkspace();
+                updateStatusBarPill();
             });
             // The turn ends (finishes, fails or is stopped): completions and
             // their budget come back.
@@ -362,6 +414,7 @@ QString gitBranchForWorkspace(const QString &workspace)
                     if (m_assist) {
                         m_assist->setAgentBusy(false);
                     }
+                    updateStatusBarPill();
                 });
             }
             // An agent edit of an open document shows where the file lives:
@@ -378,6 +431,7 @@ QString gitBranchForWorkspace(const QString &workspace)
                     m_bannerPaths.clear();
                 }
                 syncEditRanges();
+                updateStatusBarPill();
             });
         }
         // Buffer mode follows the setting on every later change too.
@@ -415,6 +469,9 @@ QString gitBranchForWorkspace(const QString &workspace)
 
         auto *ac = actionCollection();
         QPointer<QAction> toggle, fresh, ask, fix, refactor, tests, configure, stop, completeAction;
+        QPointer<QAction> diagnoseStopAct, explainStackAct, fixDiagAct, fixBuildAct, launchJsonAct,
+            snapshotDebugAct, reviewDiffTabAct, projectGraphTabAct, commitMsgAct, blameAct,
+            backtraceAct, termSelAct;
 
         if (ac) {
             toggle = ac->addAction(u"kateai_toggle"_s);
@@ -495,17 +552,99 @@ QString gitBranchForWorkspace(const QString &workspace)
                     }
                 });
             }
+
+            diagnoseStopAct = ac->addAction(u"kateai_diagnose_stop"_s);
+            if (diagnoseStopAct) {
+                diagnoseStopAct->setText(i18n("Diagnose Debugger Stop / Crash"));
+                diagnoseStopAct->setIcon(QIcon::fromTheme(u"debug-run"_s));
+                connect(diagnoseStopAct, &QAction::triggered, this, &KateAiView::diagnoseDebugStop);
+            }
+
+            explainStackAct = ac->addAction(u"kateai_explain_stack"_s);
+            if (explainStackAct) {
+                explainStackAct->setText(i18n("Explain Call Stack && Locals"));
+                connect(explainStackAct, &QAction::triggered, this, &KateAiView::explainDebugStack);
+            }
+
+            snapshotDebugAct = ac->addAction(u"kateai_snapshot_debug"_s);
+            if (snapshotDebugAct) {
+                snapshotDebugAct->setText(i18n("Snapshot / Diff Debugger State"));
+                connect(snapshotDebugAct, &QAction::triggered, this, &KateAiView::snapshotDebugState);
+            }
+
+            launchJsonAct = ac->addAction(u"kateai_generate_launch_json"_s);
+            if (launchJsonAct) {
+                launchJsonAct->setText(i18n("Generate .vscode/launch.json for Debugger"));
+                connect(launchJsonAct, &QAction::triggered, this, &KateAiView::generateLaunchJson);
+            }
+
+            fixDiagAct = ac->addAction(u"kateai_fix_diagnostics"_s);
+            if (fixDiagAct) {
+                fixDiagAct->setText(i18n("Fix File / Workspace Diagnostics"));
+                connect(fixDiagAct, &QAction::triggered, this, &KateAiView::fixDiagnostics);
+            }
+
+            fixBuildAct = ac->addAction(u"kateai_fix_build_errors"_s);
+            if (fixBuildAct) {
+                fixBuildAct->setText(i18n("Fix Build Errors"));
+                connect(fixBuildAct, &QAction::triggered, this, &KateAiView::fixBuildErrors);
+            }
+
+            backtraceAct = ac->addAction(u"kateai_analyze_backtrace"_s);
+            if (backtraceAct) {
+                backtraceAct->setText(i18n("Analyze Crash Backtrace"));
+                connect(backtraceAct, &QAction::triggered, this, &KateAiView::analyzeBacktrace);
+            }
+
+            termSelAct = ac->addAction(u"kateai_explain_terminal"_s);
+            if (termSelAct) {
+                termSelAct->setText(i18n("Explain Terminal Output"));
+                connect(termSelAct, &QAction::triggered, this, &KateAiView::explainTerminalSelection);
+            }
+
+            reviewDiffTabAct = ac->addAction(u"kateai_review_diff_tab"_s);
+            if (reviewDiffTabAct) {
+                reviewDiffTabAct->setText(i18n("Open Pending Edits Diff Tab"));
+                connect(reviewDiffTabAct, &QAction::triggered, this, &KateAiView::openReviewDiffTab);
+            }
+
+            projectGraphTabAct = ac->addAction(u"kateai_project_graph_tab"_s);
+            if (projectGraphTabAct) {
+                projectGraphTabAct->setText(i18n("Open Project Graph Tab"));
+                connect(projectGraphTabAct, &QAction::triggered, this, &KateAiView::openProjectGraphTab);
+            }
+
+            m_annotationAction = ac->addAction(u"kateai_toggle_annotations"_s);
+            if (m_annotationAction) {
+                m_annotationAction->setText(i18n("Show AI Edit Gutter Annotations"));
+                m_annotationAction->setCheckable(true);
+                m_annotationAction->setChecked(false);
+                connect(m_annotationAction, &QAction::triggered, this, &KateAiView::toggleAnnotationGutter);
+            }
+
+            commitMsgAct = ac->addAction(u"kateai_commit_message"_s);
+            if (commitMsgAct) {
+                commitMsgAct->setText(i18n("Generate Git Commit Message"));
+                connect(commitMsgAct, &QAction::triggered, this, &KateAiView::generateCommitMessage);
+            }
+
+            blameAct = ac->addAction(u"kateai_explain_git_blame"_s);
+            if (blameAct) {
+                blameAct->setText(i18n("Explain Line History (Git Blame)"));
+                connect(blameAct, &QAction::triggered, this, &KateAiView::explainGitBlame);
+            }
         }
 
         // KTextEditor does not merge plugin XML clients into a view whose context
         // menu was supplied by another plugin. Add this action at show time so it
         // is consistently available in every editor tab.
         if (m_mainWindow) {
+            const QList<QAction *> ctxActions = {ask, fix, refactor, tests, fixDiagAct, blameAct, diagnoseStopAct};
             for (auto *view : m_mainWindow->views()) {
-                addEditorContextActions(view, {ask, fix, refactor, tests});
+                addEditorContextActions(view, ctxActions);
             }
-            connect(m_mainWindow, &KTextEditor::MainWindow::viewCreated, this, [this, ask, fix, refactor, tests](KTextEditor::View *view) {
-                addEditorContextActions(view, {ask, fix, refactor, tests});
+            connect(m_mainWindow, &KTextEditor::MainWindow::viewCreated, this, [this, ctxActions](KTextEditor::View *view) {
+                addEditorContextActions(view, ctxActions);
             });
         }
 
@@ -547,6 +686,7 @@ QString gitBranchForWorkspace(const QString &workspace)
         if (m_mainWindow && m_mainWindow->guiFactory()) {
             m_mainWindow->guiFactory()->addClient(this);
         }
+        setupStatusBarPill();
     }
 
     KateAiView::~KateAiView()
@@ -557,6 +697,17 @@ QString gitBranchForWorkspace(const QString &workspace)
             m_plugin->unregisterView(this);
         }
 
+        if (m_statusPill) {
+            if (m_mainWindow) {
+                if (auto *mw = qobject_cast<QMainWindow *>(m_mainWindow->window())) {
+                    if (QStatusBar *sb = mw->statusBar()) {
+                        sb->removeWidget(m_statusPill);
+                    }
+                }
+            }
+            delete m_statusPill.data();
+            m_statusPill = nullptr;
+        }
         if (m_mainWindow && m_mainWindow->guiFactory()) {
             m_mainWindow->guiFactory()->removeClient(this);
         }
@@ -902,6 +1053,12 @@ QString gitBranchForWorkspace(const QString &workspace)
             // The list can grow with every open file; a compact cap keeps the
             // context budget for the files themselves.
             lines.append(u"Bookmarks:\n- %1"_s.arg(bookmarks.join(u"\n- "_s).left(1000)));
+        }
+        if (m_debug && m_debug->isAvailable()) {
+            const QString dbgSummary = m_debug->contextSummary(8, 24, 1000);
+            if (!dbgSummary.isEmpty()) {
+                lines.append(dbgSummary);
+            }
         }
         return lines.join(u'\n');
     }
@@ -1310,6 +1467,382 @@ QString gitBranchForWorkspace(const QString &workspace)
         message->addAction(review);
         message->addAction(reject);
         document->postMessage(message);
+    }
+
+
+    void KateAiView::setupStatusBarPill()
+    {
+        if (!m_mainWindow) {
+            return;
+        }
+        auto *mw = qobject_cast<QMainWindow *>(m_mainWindow->window());
+        if (!mw || !mw->statusBar()) {
+            return;
+        }
+        auto *btn = new QToolButton(mw->statusBar());
+        btn->setAutoRaise(true);
+        btn->setCursor(Qt::PointingHandCursor);
+        btn->setToolButtonStyle(Qt::ToolButtonTextOnly);
+        btn->setToolTip(i18n("Click to open the Kate AI panel"));
+        btn->setStyleSheet(QStringLiteral(
+            "QToolButton { padding: 1px 7px; border-radius: 3px; font-size: 11px; }"
+            "QToolButton:hover { background: rgba(128,128,128,0.18); }"));
+        connect(btn, &QToolButton::clicked, this, &KateAiView::showPanel);
+        mw->statusBar()->addPermanentWidget(btn);
+        m_statusPill = btn;
+        updateStatusBarPill();
+    }
+
+    void KateAiView::updateStatusBarPill()
+    {
+        if (!m_statusPill) {
+            return;
+        }
+        QStringList parts;
+        const QString mode = (m_plugin && !m_plugin->settings().agentMode.isEmpty())
+            ? m_plugin->settings().agentMode
+            : u"code"_s;
+        const bool busy = m_chat && m_chat->agent() && m_chat->agent()->isBusy();
+        parts.append(busy ? i18n("Kate AI: %1 (working…)", mode) : i18n("Kate AI: %1", mode));
+        if (m_chat && m_chat->editTracker()) {
+            const int pending = m_chat->editTracker()->pendingEditCount();
+            if (pending > 0) {
+                parts.append(i18np("%1 edit pending", "%1 edits pending", pending));
+            }
+        }
+        if (m_debug && m_debug->isAvailable()) {
+            const DebugSessionState st = m_debug->sessionState();
+            if (st == DebugSessionState::Paused) {
+                parts.append(i18n("DBG paused"));
+            } else if (st == DebugSessionState::Running) {
+                parts.append(i18n("DBG running"));
+            }
+        }
+        m_statusPill->setText(parts.join(u" · "_s));
+    }
+
+    void KateAiView::postDebugStopBanner(const DebugStopInfo &info)
+    {
+        KTextEditor::Document *document = !info.file.isEmpty() ? documentForPath(info.file) : nullptr;
+        if (!document && m_mainWindow && m_mainWindow->activeView()) {
+            document = m_mainWindow->activeView()->document();
+        }
+        if (!document) {
+            return;
+        }
+        const QString detail = info.description.isEmpty() ? info.reason : (info.reason + u": "_s + info.description);
+        auto *message = new KTextEditor::Message(
+            i18n("Debugger stopped on crash/exception (%1). Kate AI can inspect the stack and local variables.", detail),
+            KTextEditor::Message::Warning);
+        message->setWordWrap(true);
+        QPointer<KateAiView> self = this;
+        auto *diagnose = new QAction(i18n("Diagnose with Kate AI"), message);
+        connect(diagnose, &QAction::triggered, this, [self]() {
+            if (self) {
+                self->diagnoseDebugStop();
+            }
+        });
+        message->addAction(diagnose);
+        document->postMessage(message);
+    }
+
+    void KateAiView::diagnoseDebugStop()
+    {
+        showPanel();
+        if (!m_chat) {
+            return;
+        }
+        m_chat->applyMode(u"debug"_s);
+        m_chat->ask(i18n(
+            "Inspect the current live debugger stop using debug_status, debug_stack, and debug_locals. "
+            "Explain the root cause of the stop/crash and propose a focused fix."));
+    }
+
+    void KateAiView::explainDebugStack()
+    {
+        showPanel();
+        if (!m_chat) {
+            return;
+        }
+        m_chat->ask(i18n(
+            "Read the current debugger call stack (debug_stack) and active frame locals (debug_locals), "
+            "and explain how execution reached this point and what each frame is doing."));
+    }
+
+    void KateAiView::fixDiagnostics()
+    {
+        showPanel();
+        if (!m_chat) {
+            return;
+        }
+        QString file;
+        if (m_mainWindow && m_mainWindow->activeView() && m_mainWindow->activeView()->document()) {
+            file = m_mainWindow->activeView()->document()->url().toLocalFile();
+        }
+        if (file.isEmpty()) {
+            m_chat->ask(i18n("Inspect workspace diagnostics with lsp_diagnostics, explain the errors, and apply focused fixes."));
+        } else {
+            m_chat->ask(i18n("Inspect diagnostics for `%1` with lsp_diagnostics, explain each error/warning, and apply focused fixes.", file));
+        }
+    }
+
+    void KateAiView::fixBuildErrors()
+    {
+        showPanel();
+        if (!m_chat) {
+            return;
+        }
+        m_chat->ask(i18n(
+            "Inspect build targets with build_targets and compiler diagnostics with lsp_diagnostics "
+            "(or run the build if needed), diagnose the build failures, and apply focused fixes."));
+    }
+
+    void KateAiView::generateLaunchJson()
+    {
+        const QString workspace = m_workspace.isEmpty() ? detectWorkspace(m_mainWindow) : m_workspace;
+        if (workspace.isEmpty()) {
+            return;
+        }
+        QString summary;
+        const QJsonDocument doc = DebugProvider::generateLaunchConfig(workspace, &summary);
+        const QString vscodeDir = QDir(workspace).absoluteFilePath(u".vscode"_s);
+        const QString launchPath = QDir(vscodeDir).absoluteFilePath(u"launch.json"_s);
+
+        if (QFile::exists(launchPath)) {
+            const auto reply = QMessageBox::question(
+                m_mainWindow ? m_mainWindow->window() : nullptr,
+                i18n("Overwrite launch.json?"),
+                i18n("%1 already exists.\n\nOverwrite it with an auto-generated Kate DAP launch configuration?\n(%2)",
+                     launchPath, summary),
+                QMessageBox::Yes | QMessageBox::No,
+                QMessageBox::No);
+            if (reply != QMessageBox::Yes) {
+                openFileAtLine(launchPath, 1);
+                return;
+            }
+        }
+
+        QDir().mkpath(vscodeDir);
+        QFile f(launchPath);
+        if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            if (m_mainWindow) {
+                QVariantMap msg;
+                msg.insert(u"type"_s, u"Error"_s);
+                msg.insert(u"category"_s, i18n("Kate AI"));
+                msg.insert(u"text"_s, i18n("Could not write %1.", launchPath));
+                m_mainWindow->showMessage(msg);
+            }
+            return;
+        }
+        f.write(doc.toJson(QJsonDocument::Indented));
+        f.close();
+
+        if (m_debug) {
+            m_debug->reloadLaunchJsonTargets();
+        }
+        openFileAtLine(launchPath, 1);
+        if (m_mainWindow) {
+            QVariantMap msg;
+            msg.insert(u"type"_s, u"Information"_s);
+            msg.insert(u"category"_s, i18n("Kate AI"));
+            msg.insert(u"text"_s, i18n("Generated %1 (%2).", launchPath, summary));
+            m_mainWindow->showMessage(msg);
+        }
+    }
+
+    void KateAiView::snapshotDebugState()
+    {
+        if (!m_debug || !m_debug->isAvailable()) {
+            if (m_mainWindow) {
+                QVariantMap msg;
+                msg.insert(u"type"_s, u"Warning"_s);
+                msg.insert(u"category"_s, i18n("Kate AI"));
+                msg.insert(u"text"_s, i18n("Kate's debugger plugin (kategdbplugin) is not active."));
+                m_mainWindow->showMessage(msg);
+            }
+            return;
+        }
+        const DebugSnapshot snap = m_debug->captureSnapshot();
+        const QList<DebugSnapshot> all = m_debug->snapshots();
+        if (all.size() >= 2 && m_ecosystem) {
+            const QString diffText = DebugProvider::diffSnapshots(all.at(all.size() - 2), all.last());
+            m_ecosystem->openNativeTab(
+                i18n("Debug Diff: %1 -> %2", all.at(all.size() - 2).label, all.last().label),
+                i18n("Snapshot comparison (%1 captured total)", all.size()),
+                diffText,
+                true);
+        } else if (m_mainWindow) {
+            QVariantMap msg;
+            msg.insert(u"type"_s, u"Information"_s);
+            msg.insert(u"category"_s, i18n("Kate AI"));
+            msg.insert(u"text"_s, i18n("Captured debugger snapshot '%1' (%2 frames, %3 locals). Capture another snapshot to diff.",
+                                       snap.label, snap.frames.size(), snap.locals.size()));
+            m_mainWindow->showMessage(msg);
+        }
+    }
+
+    void KateAiView::openReviewDiffTab()
+    {
+        if (!m_ecosystem || !m_chat || !m_chat->editTracker()) {
+            return;
+        }
+        EditTracker *tracker = m_chat->editTracker();
+        const QList<EditEntry> entries = tracker->pendingEdits();
+        if (entries.isEmpty()) {
+            if (m_mainWindow) {
+                QVariantMap msg;
+                msg.insert(u"type"_s, u"Information"_s);
+                msg.insert(u"category"_s, i18n("Kate AI"));
+                msg.insert(u"text"_s, i18n("There are no pending AI edits to review."));
+                m_mainWindow->showMessage(msg);
+            }
+            return;
+        }
+        QStringList blocks;
+        for (const EditEntry &e : entries) {
+            const QString rel = m_workspace.isEmpty() ? e.path : QDir(m_workspace).relativeFilePath(e.path);
+            blocks.append(u"=== %1 (%2) ===\n%3"_s.arg(rel, e.toolName, e.diff));
+        }
+        QPointer<EditTracker> trackerPtr = tracker;
+        m_ecosystem->openNativeTab(
+            i18n("Kate AI Review Diff (%1)", entries.size()),
+            i18np("%1 pending file change", "%1 pending file changes", entries.size()),
+            blocks.join(u"\n\n"_s),
+            true,
+            [trackerPtr]() {
+                if (trackerPtr) {
+                    trackerPtr->acceptAll();
+                }
+            },
+            [trackerPtr]() {
+                if (trackerPtr) {
+                    trackerPtr->rejectAll();
+                }
+            });
+    }
+
+    void KateAiView::openProjectGraphTab()
+    {
+        if (!m_ecosystem || !m_chat || !m_chat->agent() || !m_chat->agent()->getProjectGraph()) {
+            return;
+        }
+        ProjectGraph *graph = m_chat->agent()->getProjectGraph();
+        const QString summary = graph->contextSummary(200, 300, 3);
+        m_ecosystem->openNativeTab(
+            i18n("Project Graph"),
+            i18n("Workspace: %1 (%2 nodes, %3 edges)", m_workspace, graph->getNodeCount(), graph->getEdgeCount()),
+            summary.isEmpty() ? i18n("(Project graph is empty.)") : summary,
+            false);
+    }
+
+    void KateAiView::toggleAnnotationGutter()
+    {
+        if (!m_assist) {
+            return;
+        }
+        const bool next = !m_assist->annotationGutterEnabled();
+        m_assist->setAnnotationGutterEnabled(next);
+        if (m_annotationAction) {
+            m_annotationAction->setChecked(next);
+        }
+    }
+
+    void KateAiView::generateCommitMessage()
+    {
+        showPanel();
+        if (!m_chat) {
+            return;
+        }
+        m_chat->ask(i18n(
+            "Inspect `git status` and `git diff --staged` (or `git diff` if nothing is staged) via bash, "
+            "and draft a clear, concise commit message summarizing the changes and why they were made."));
+    }
+
+    void KateAiView::explainGitBlame()
+    {
+        showPanel();
+        if (!m_chat || !m_mainWindow || !m_mainWindow->activeView() || !m_mainWindow->activeView()->document()) {
+            return;
+        }
+        KTextEditor::View *view = m_mainWindow->activeView();
+        const QString path = view->document()->url().toLocalFile();
+        if (path.isEmpty()) {
+            return;
+        }
+        int startLine = view->cursorPosition().line() + 1;
+        int endLine = startLine;
+        if (view->selection()) {
+            const KTextEditor::Range r = view->selectionRange();
+            startLine = r.start().line() + 1;
+            endLine = qMax(startLine, r.end().line() + 1);
+        }
+        m_chat->ask(i18n(
+            "Run `git log -n 5 -L %1,%2:%3` (or `git blame -L %1,%2 %3`) via bash and explain the history and rationale behind these lines.",
+            startLine, endLine, path));
+    }
+
+    void KateAiView::analyzeBacktrace()
+    {
+        showPanel();
+        if (!m_chat) {
+            return;
+        }
+        const QString bt = m_ecosystem ? m_ecosystem->activeBacktraceText().trimmed() : QString();
+        if (!bt.isEmpty()) {
+            m_chat->ask(i18n(
+                "Analyze this crash backtrace from Kate's Backtrace Browser, locate the relevant workspace files, and identify the likely root cause and fix:\n\n```\n%1\n```",
+                bt.left(8000)));
+        } else {
+            m_chat->ask(i18n(
+                "No backtrace is loaded in Kate's Backtrace Browser. Check debug_stack if a debug session is paused, or ask me for the stack trace to analyze."));
+        }
+    }
+
+    void KateAiView::explainTerminalSelection()
+    {
+        showPanel();
+        if (!m_chat) {
+            return;
+        }
+        const QString sel = m_ecosystem ? m_ecosystem->terminalContext().trimmed() : QString();
+        if (!sel.isEmpty()) {
+            m_chat->ask(i18n(
+                "Explain this output from Kate's Konsole terminal and suggest fixes for any errors:\n\n```\n%1\n```",
+                sel.left(6000)));
+        } else {
+            m_chat->ask(i18n(
+                "Nothing is currently selected in Kate's Konsole terminal. Select some terminal output and run this action again, or paste the error here."));
+        }
+    }
+
+    bool KateAiView::setBreakpointAtCursor(const QString &condition, QString *message)
+    {
+        if (!m_debug || !m_debug->isAvailable()) {
+            if (message) {
+                *message = i18n("Kate's debugger plugin (kategdbplugin) is not available.");
+            }
+            return false;
+        }
+        if (!m_mainWindow || !m_mainWindow->activeView() || !m_mainWindow->activeView()->document()) {
+            if (message) {
+                *message = i18n("No active editor document.");
+            }
+            return false;
+        }
+        KTextEditor::View *view = m_mainWindow->activeView();
+        const QString path = view->document()->url().toLocalFile();
+        const int line = view->cursorPosition().line() + 1;
+        if (path.isEmpty()) {
+            if (message) {
+                *message = i18n("Save the document before setting a breakpoint.");
+            }
+            return false;
+        }
+        const DebugActionResult res = m_debug->setBreakpoint(path, line, condition);
+        if (message) {
+            *message = res.output;
+        }
+        return res.ok;
     }
 
 } // namespace KateAi

@@ -5,7 +5,9 @@
 
 #pragma once
 
+#include "debug.h"
 #include "documentbridge.h"
+#include "ecosystem.h"
 #include "graph/projectgraph.h"
 #include "lsp.h"
 #include "permissions.h"
@@ -51,6 +53,17 @@ public:
     void setLspProvider(LspProvider *provider)
     {
         m_lsp = provider;
+    }
+    // The editor's live debugger surface (kategdbplugin / DAP). Null means
+    // no debugger bridge is attached.
+    void setDebugProvider(DebugProvider *provider)
+    {
+        m_debug = provider;
+    }
+    // Kate build/konsole/project/backtrace ecosystem surface.
+    void setEcosystemProvider(EcosystemProvider *provider)
+    {
+        m_ecosystem = provider;
     }
 
     ToolResult run(const ToolCall &call);
@@ -113,6 +126,21 @@ private:
     ToolResult lspDefinition(const QJsonObject &args) const;
     ToolResult lspReferences(const QJsonObject &args) const;
     ToolResult lspCodeActions(const QJsonObject &args) const;
+    ToolResult debugStatus(const QJsonObject &args) const;
+    ToolResult debugStack(const QJsonObject &args) const;
+    ToolResult debugLocals(const QJsonObject &args) const;
+    ToolResult debugBreakpoints(const QJsonObject &args) const;
+    ToolResult debugSelectFrame(const QJsonObject &args);
+    ToolResult debugSelectThread(const QJsonObject &args);
+    ToolResult debugSnapshot(const QJsonObject &args);
+    ToolResult debugSetBreakpoint(const QJsonObject &args);
+    ToolResult debugStep(const QJsonObject &args);
+    ToolResult debugEval(const QJsonObject &args);
+    ToolResult debugSession(const QJsonObject &args);
+    ToolResult debugConsole(const QJsonObject &args);
+    ToolResult buildTargets(const QJsonObject &args) const;
+    ToolResult buildRun(const QJsonObject &args);
+    ToolResult terminalRun(const QJsonObject &args);
     ToolResult goalReport(const QJsonObject &args);
     ToolResult writePlanFile(const QJsonObject &args);
     ToolResult suggest(const QJsonObject &args);
@@ -134,6 +162,8 @@ private:
     DocumentBridge *m_bridge = nullptr;
     ProjectGraph *m_projectGraph = nullptr;
     LspProvider *m_lsp = nullptr;
+    DebugProvider *m_debug = nullptr;
+    EcosystemProvider *m_ecosystem = nullptr;
     int m_timeoutMs = 60000;
     // Running async bash commands, keyed by tool call id, so progress and
     // cancellation can find the right process, plus the output captured from

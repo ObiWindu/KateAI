@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE gui SYSTEM "kpartgui.dtd">
-<gui name="kateai" version="3" translationDomain="kateai">
+<gui name="kateai" version="4" translationDomain="kateai">
   <MenuBar>
     <Menu name="tools">
       <Separator/>
@@ -9,10 +9,26 @@
         <Action name="kateai_toggle"/>
         <Action name="kateai_new_chat"/>
         <Action name="kateai_stop"/>
+        <Separator/>
         <Action name="kateai_ask_selection"/>
         <Action name="kateai_fix_selection"/>
         <Action name="kateai_refactor_selection"/>
         <Action name="kateai_test_selection"/>
+        <Action name="kateai_fix_diagnostics"/>
+        <Action name="kateai_fix_build_errors"/>
+        <Separator/>
+        <Action name="kateai_diagnose_stop"/>
+        <Action name="kateai_explain_stack"/>
+        <Action name="kateai_snapshot_debug"/>
+        <Action name="kateai_generate_launch_json"/>
+        <Action name="kateai_analyze_backtrace"/>
+        <Action name="kateai_explain_terminal"/>
+        <Separator/>
+        <Action name="kateai_review_diff_tab"/>
+        <Action name="kateai_project_graph_tab"/>
+        <Action name="kateai_toggle_annotations"/>
+        <Action name="kateai_commit_message"/>
+        <Action name="kateai_explain_git_blame"/>
         <Separator/>
         <Action name="kateai_configure"/>
       </Menu>

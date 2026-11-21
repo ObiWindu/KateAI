@@ -1126,6 +1126,13 @@ QString ToolCallWidget::iconForTool(const QString &toolName) const
     if (toolName == u"lsp_definition"_s) return u"📍"_s;
     if (toolName == u"lsp_references"_s) return u"🔗"_s;
     if (toolName == u"lsp_code_actions"_s) return u"🛠"_s;
+    if (key == u"debug_set_breakpoint"_s || key == u"debug_breakpoints"_s) return u"🔴"_s;
+    if (key == u"debug_step"_s || key == u"debug_session"_s) return u"⏯"_s;
+    if (key == u"debug_eval"_s || key == u"debug_console"_s) return u"🧮"_s;
+    if (key == u"debug_snapshot"_s) return u"📸"_s;
+    if (key.startsWith(u"debug_"_s)) return u"🐞"_s;
+    if (key == u"build_targets"_s || key == u"build_run"_s) return u"🔨"_s;
+    if (key == u"terminal_run"_s) return u"🖳"_s;
     if (toolName == u"write_plan_file"_s) return u"📋"_s;
     if (toolName == u"suggest"_s) return u"💡"_s;
     if (toolName == u"question"_s) return u"❓"_s;
