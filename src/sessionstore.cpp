@@ -6,6 +6,7 @@
 #include "sessionstore.h"
 
 #include "contextmanager.h"
+#include "harness/eventstore.h"
 #include "types.h"
 
 #include <KConfigGroup>
@@ -321,6 +322,13 @@ static void repairBadConversationTitles(const QSqlDatabase &db)
 }
 
 // --- session database ---------------------------------------------------
+
+static QString databaseFilePath();
+
+QString SessionStore::databasePath()
+{
+    return databaseFilePath();
+}
 
 static const QString ACTIVE_CONVERSATION_KEY = u"active_conversation"_s;
 static const QString LEGACY_IMPORT_KEY = u"legacy_kconfig_imported"_s;
@@ -1196,7 +1204,13 @@ void SessionStore::deleteConversation(const QString &conversationId)
     if (!db.commit()) {
         qWarning() << "KateAI: cannot commit the deletion of conversation" << conversationId << db.lastError().text();
         db.rollback();
+        return;
     }
+    // The event log is part of the same history. Removing the payload without
+    // it would leave replayable turns for a conversation that no longer
+    // exists.
+    EventStore events;
+    events.removeConversation(conversationId);
 }
 
 QString SessionStore::createNewConversation()
@@ -1268,7 +1282,10 @@ void SessionStore::pruneOldConversations(int maxConversations)
     query.addBindValue(ACTIVE_CONVERSATION_KEY);
     if (!query.exec()) {
         qWarning() << "KateAI: cannot prune old conversations:" << query.lastError().text();
+        return;
     }
+    EventStore events;
+    events.pruneOrphans();
 }
 
 void SessionStore::clearAllConversations()
@@ -1297,7 +1314,10 @@ void SessionStore::clearAllConversations()
     if (!db.commit()) {
         qWarning() << "KateAI: cannot commit the conversation history clear:" << db.lastError().text();
         db.rollback();
+        return;
     }
+    EventStore events;
+    events.clearAll();
 }
 
 } // namespace KateAi

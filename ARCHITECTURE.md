@@ -19,9 +19,11 @@ src/
   contextmanager.cpp              prompt assembly, context window, compaction
   graph/projectgraph.cpp          workspace structure graph
   mcp.cpp                         Model Context Protocol clients (stdio + Streamable HTTP)
-  harness/                        rollout flags and the tool-result content store;
-                                  the home for the event log, policy, hooks and
-                                  evaluation work described in docs/HARNESS_ROADMAP.md
+  harness/                        rollout flags, the append-only event log and
+                                  replay, turn middleware, verification checks,
+                                  deny-first policy, hooks, audit and the
+                                  tool-result content store. See
+                                  docs/HARNESS_0.7.md.
   lsp.h / lsp.cpp                 the editor's language-server surface (LspProvider) the core queries
   katelspbridge.cpp               Kate-facing LspProvider: probes the lspclientplugin at runtime,
                                   reads the diagnostics model (document marks as fallback), captures LSP messages
@@ -72,6 +74,24 @@ pixels belong in `kateai`.
 Everything is asynchronous: one `bash` process runs detached, MCP calls run over
 stdio JSON-RPC, sub-agents (`new_task`) run as nested `AgentLoop`s.
 
+### Harness layer (0.7)
+
+`src/harness/` owns the substrate around that lifecycle:
+
+- `EventStore` appends `turn/*`, `step/*`, request, assistant, tool, permission,
+  hook and verification events to `sessions.sqlite`. The transcript is a
+  projection; a crash either commits an event and its projection together or
+  neither.
+- `TurnController` gives the loop explicit phases; `MiddlewareChain` runs
+  policies in order (pre) and reverse (post). The verification gate is the first
+  built-in middleware.
+- `PolicyEngine` is deny-first across managed/project/user rules and adds an
+  immutable hardline floor. `HookRegistry` runs trusted lifecycle commands.
+  Both run before and after the legacy `PermissionPolicy` rather than replacing
+  it in one step.
+- `CheckDiscovery`/`CheckRunner` run the repository's checks through the active
+  sandbox; `Replay` validates recorded call/result pairing.
+
 ## ACP tool integration
 
 When the provider is an ACP agent (`usesAcpNative`), `AgentLoop` delegates the
@@ -114,10 +134,11 @@ arrives late, so the card and the review entry catch up. Progress is aggregated
 `AcpClient::handleRequestPermission()` merges the request with the tool call
 the agent already announced (a request often names only the call's id) and
 emits `permissionNeeded`. `AgentLoop::acpAutoDecision()` is the one decision
-point for ACP, the same policy native turns use: session grants, the
-auto-approve list, AlwaysApprove and AcceptEdits allow, and everything else
-asks the user. A tool the mode does not allow is not declined here; the
-permission card still lets you approve it.
+point for ACP, the same policy native turns use. When the policy engine is on,
+its deny/allow/ask decision runs first; then session grants, the auto-approve
+list, AlwaysApprove and AcceptEdits allow, and everything else asks the user. A
+tool the mode does not allow is not declined here; the permission card still
+lets you approve it.
 
 `acpToolPermitted()` (in `modes.cpp`) judges a tool the mode allows: a tool Kate
 knows is judged by its name, and an agent's own tool by what it does (running a

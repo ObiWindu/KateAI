@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(kateai VERSION 0.6.0 LANGUAGES C CXX)
+project(kateai VERSION 0.7.0 LANGUAGES C CXX)
 
 set(QT_MAJOR_VERSION "6")
 set(QT_MIN_VERSION "6.5.0")

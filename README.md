@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.6.0-orange" alt="Kate AI 0.6.0">
+  <img src="https://img.shields.io/badge/version-0.7.0-orange" alt="Kate AI 0.7.0">
   <img src="https://img.shields.io/badge/Kate-24.08%2B-1d99f3?logo=kde" alt="Kate 24.08+">
   <img src="https://img.shields.io/badge/Qt-6.5%2B-41cd52?logo=qt" alt="Qt 6.5+">
   <img src="https://img.shields.io/badge/KF-6-blue" alt="KDE Frameworks 6">
@@ -360,6 +360,35 @@ If bubblewrap cannot start or create the required namespaces, sandboxed commands
 Common credential stores (`~/.ssh`, `~/.gnupg`, `~/.aws`, cloud CLI configs, keyrings, browser profiles, `~/.local/share/kateai`) and session channels (`/run/dbus`, Docker/Podman sockets, the per-user runtime directory) are masked inside the sandbox even when a command constructs the path dynamically. Sandboxed shell commands also start from a scrubbed environment: secret-shaped variables and DBus, X11, Wayland, SSH-agent, GPG-agent, and PulseAudio/PipeWire channels are removed, and the shell does not source the user's login profile (which could re-export them). Stdio MCP servers and ACP terminal commands use the same policy; add a variable explicitly in the server's `env` block or the terminal request when a command genuinely needs it.
 
 **Always blocked paths:** `.env`, `.env.*`, `*.pem`, `*.key`, `id_rsa` / `id_ecdsa` / `id_ed25519`, `.ssh/**`, AWS credentials, GnuPG, `.netrc`, `*.p12`, `*.pfx`. Extra deny globs can be added in settings.
+
+### Harness: events, verification, policy, hooks
+
+0.7 makes the turn replayable and makes "done" mean "the check passed".
+
+- **Event log.** Every turn, step, request, tool call/result, permission
+  decision and verification is appended to an event table in the session
+  database. The transcript is a projection. `:kateai trace` exports the
+  redacted log as JSONL.
+- **Verification.** After a file mutation Kate AI discovers checks from
+  `.kateai/config.json`, `## Commands` in `AGENTS.md`/`KATEAI.md`/`CLAUDE.md`,
+  or the build system (CTest, Cargo, npm/pnpm/yarn, pytest, Make). A failing
+  check sends the output back to the model and blocks completion; passing
+  checks become the evidence the final answer must cite. `:kateai verify` runs
+  the plan now.
+- **Policy.** `.kateai/policy.json`, the user policy and the managed policy
+  add deny-first rules for tools, paths, commands, risk and MCP tools. The
+  hardline floor (`.env`, private keys, `rm -rf /`, force-pushes to protected
+  refs) applies even in **Always approve**. `:kateai policy` shows the rules.
+- **Hooks.** `PreToolUse`, `PostToolUse`, `Stop` and session/prompt hooks can
+  block, rewrite arguments or add context. Project hooks require
+  `:kateai trust-hooks`; `:kateai hooks` shows the state. See
+  `docs/HOOKS.md` and `docs/POLICY.md`.
+
+All harness features default on. For a bisect or a minimal setup:
+
+```sh
+KATEAI_HARNESS_FLAGS=-verificationGate,-hooks,+eventLog kate
+```
 
 ### Providers and models
 

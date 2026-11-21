@@ -36,6 +36,15 @@ add_library(kateai_core STATIC
     editranges.cpp
     harness/harnessflags.cpp
     harness/toolresults.cpp
+    harness/events.cpp
+    harness/eventstore.cpp
+    harness/turn.cpp
+    harness/middleware.cpp
+    harness/checks.cpp
+    harness/policy.cpp
+    harness/audit.cpp
+    harness/hooks.cpp
+    harness/replay.cpp
 )
 
 set_target_properties(kateai_core PROPERTIES POSITION_INDEPENDENT_CODE ON)

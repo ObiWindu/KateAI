@@ -36,7 +36,7 @@ QString usageText()
         "usage: kateai ask <text> | explain | fix | refactor | tests | diagnostics | symbols | "
         "debug | explain-stop | stack | break [cond] | snapshot | fix-errors | build-errors | "
         "launch-config | backtrace | terminal | blame | commit | diff-tab | graph-tab | annotations | "
-        "context | usage | stop | new | mode <id> | panel");
+        "context | usage | verify | policy | hooks | trace | trust-hooks | stop | new | mode <id> | panel");
 }
 
 // The instruction of the one-word review subcommands. Kept next to the
@@ -94,7 +94,8 @@ KCompletion *KateAiCommand::completionObject(KTextEditor::View *view, const QStr
                           u"fix-errors"_s, u"build-errors"_s, u"launch-config"_s,
                           u"backtrace"_s, u"terminal"_s, u"blame"_s, u"commit"_s,
                           u"diff-tab"_s, u"graph-tab"_s, u"annotations"_s,
-                          u"context"_s, u"usage"_s,
+                          u"context"_s, u"usage"_s, u"verify"_s, u"policy"_s,
+                          u"hooks"_s, u"trace"_s, u"trust-hooks"_s,
                           u"stop"_s, u"new"_s, u"mode "_s, u"panel"_s});
     return completion;
 }
@@ -156,6 +157,30 @@ bool KateAiCommand::exec(KTextEditor::View *view, const QString &cmd, QString &m
     }
     if (sub == u"usage"_s) {
         target->chat()->showUsageReport();
+        return true;
+    }
+    if (sub == u"verify"_s) {
+        target->chat()->showVerificationReport();
+        return true;
+    }
+    if (sub == u"policy"_s) {
+        target->chat()->showPolicyReport();
+        return true;
+    }
+    if (sub == u"hooks"_s) {
+        target->chat()->showHooksReport();
+        return true;
+    }
+    if (sub == u"trust-hooks"_s) {
+        if (!target->chat()->agent()->trustProjectHooks()) {
+            msg = i18n("Kate AI: no project hooks to trust (or the hooks flag is off).");
+            return false;
+        }
+        msg = i18n("Kate AI: project hooks trusted.");
+        return true;
+    }
+    if (sub == u"trace"_s) {
+        target->chat()->showTraceReport();
         return true;
     }
     if (sub == u"stop"_s) {

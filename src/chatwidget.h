@@ -132,6 +132,10 @@ public:
     // Plain-text reports opened by ":kateai context" and ":kateai usage".
     void showContextReport();
     void showUsageReport();
+    void showVerificationReport();
+    void showPolicyReport();
+    void showHooksReport();
+    void showTraceReport();
     // Slash commands advertised by the live ACP agent. Hidden when empty.
     void showAgentCommandsMenu();
 

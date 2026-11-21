@@ -1942,6 +1942,7 @@ void ChatWidget::saveCurrentConversation()
             m_currentConversationId = SessionStore::createNewConversation();
         }
     }
+    m_agent.setConversationId(m_currentConversationId);
 
     const bool isNew = SessionStore::saveConversation(
         m_currentConversationId, sessionData, QString(),
@@ -3514,6 +3515,58 @@ void ChatWidget::showUsageReport()
     box.setIcon(QMessageBox::Information);
     box.setTextFormat(Qt::PlainText);
     box.setText(m_agent.usageReport());
+    box.setStandardButtons(QMessageBox::Close);
+    box.exec();
+}
+
+void ChatWidget::showVerificationReport()
+{
+    QMessageBox box(this);
+    box.setWindowTitle(i18n("Kate AI Verification"));
+    box.setIcon(QMessageBox::Information);
+    box.setTextFormat(Qt::PlainText);
+    box.setText(m_agent.verificationReport());
+    box.setStandardButtons(QMessageBox::Close);
+    box.exec();
+}
+
+void ChatWidget::showPolicyReport()
+{
+    QMessageBox box(this);
+    box.setWindowTitle(i18n("Kate AI Policy"));
+    box.setIcon(QMessageBox::Information);
+    box.setTextFormat(Qt::PlainText);
+    box.setText(m_agent.policyReport());
+    box.setStandardButtons(QMessageBox::Close);
+    box.exec();
+}
+
+void ChatWidget::showHooksReport()
+{
+    QMessageBox box(this);
+    box.setWindowTitle(i18n("Kate AI Hooks"));
+    box.setIcon(QMessageBox::Information);
+    box.setTextFormat(Qt::PlainText);
+    box.setText(m_agent.hooksReport());
+    box.setStandardButtons(QMessageBox::Close);
+    box.exec();
+}
+
+void ChatWidget::showTraceReport()
+{
+    const QString conversation = m_agent.conversationId();
+    const QString fileName = conversation.isEmpty()
+        ? u"kateai-trace.jsonl"_s
+        : u"kateai-trace-%1.jsonl"_s.arg(conversation);
+    const QString path = QDir(QDir::tempPath()).filePath(fileName);
+    QString error;
+    const bool ok = m_agent.exportTrace(path, &error);
+    QMessageBox box(this);
+    box.setWindowTitle(i18n("Kate AI Trace"));
+    box.setIcon(ok ? QMessageBox::Information : QMessageBox::Warning);
+    box.setTextFormat(Qt::PlainText);
+    box.setText(ok ? i18n("Exported the harness event log to:\n%1", path)
+                   : i18n("Could not export the trace:\n%1", error));
     box.setStandardButtons(QMessageBox::Close);
     box.exec();
 }
@@ -7288,6 +7341,7 @@ void ChatWidget::switchToConversation(const QString &conversationId)
     m_editTracker->clear();
     m_currentConversationId = conversationId;
     SessionStore::setActiveConversation(conversationId);
+    m_agent.setConversationId(conversationId);
 
     // Rebuild transcript
     rebuildTranscript();
@@ -7335,6 +7389,7 @@ void ChatWidget::deleteConversation(const QString &conversationId)
 void ChatWidget::setCurrentConversationId(const QString &conversationId)
 {
     m_currentConversationId = conversationId;
+    m_agent.setConversationId(conversationId);
     if (m_threadTitle) {
         // A single-row lookup: listing every conversation just to find one
         // title materialised the whole history table.
@@ -7418,6 +7473,7 @@ void ChatWidget::resetForNewChat(bool saveCurrentConversation)
     // registered in the history list once saveConversation() is called with
     // real messages, so no empty ghost entry appears immediately.
     m_currentConversationId = SessionStore::createNewConversation();
+    m_agent.setConversationId(m_currentConversationId);
     Q_EMIT conversationChanged(m_currentConversationId);
 
     // Update history button to reflect any newly saved previous conversation.
