@@ -1561,17 +1561,6 @@ tools.append(toolDef(subtaskToolName(),
                           {u"description"_s},
                           false));
 
-    tools.append(toolDef(u"goal_report"_s,
-                          u"Report the completion status of a goal or task. Use this to explicitly mark a goal as complete, failed, or blocked with a reason. "
-                          u"This helps track progress and provides clear feedback on task outcomes."_s,
-                          QJsonObject{
-                              {u"status"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"Goal status: complete, failed, or blocked."_s}, {u"enum"_s, QJsonArray{u"complete"_s, u"failed"_s, u"blocked"_s}}}},
-                              {u"reason"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"Explanation of the outcome or why the goal is blocked/failed."_s}}},
-                          },
-                          {u"status"_s, u"reason"_s},
-                          false));
-
-
     if (access.allowAll) {
         return tools;
     }

@@ -290,7 +290,7 @@ tests there are the regression net for TOCTOU-style changes.
 `applyPatchToContent` in `types.cpp`, shared with the ACP ingest path),
 `bash`, web tools, the `lsp_*` family, `query_project_graph`, and the UI-state
 tools `write_plan_file`, `suggest`, `question`, `todo_write`/`todo_read`,
-`think`, `exit_plan_mode`, plus `new_task` and `goal_report`. Conventions:
+`think`, `exit_plan_mode`, and `new_task`. Conventions:
 
 - Tools return a `ToolResult` with `output` (formatted, clipped) and `rawOutput`.
 - `clip()` truncates at 80 KB **keeping head and tail** — for a command whose

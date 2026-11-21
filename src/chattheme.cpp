@@ -1169,7 +1169,6 @@ QString toolColor(const QString &toolName)
         {QStringLiteral("write_plan_file"), QStringLiteral("#ebcb8b")},
         {QStringLiteral("suggest"), QStringLiteral("#b48ead")},
         {QStringLiteral("question"), QStringLiteral("#3d7eff")},
-        {QStringLiteral("goal_report"), QStringLiteral("#98c379")},
         {QStringLiteral("new_task"), QStringLiteral("#88c0d0")},
         {QStringLiteral("task"), QStringLiteral("#88c0d0")},
         {QStringLiteral("todowrite"), QStringLiteral("#ebcb8b")},

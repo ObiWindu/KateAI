@@ -955,60 +955,53 @@ private Q_SLOTS:
     }
 #endif
 
-    void testGoalReportValidation()
+    void testWriteFileRejectsChangeAfterRead()
     {
         QTemporaryDir tempDir;
         QVERIFY(tempDir.isValid());
+        const QString path = tempDir.filePath(u"a.txt"_s);
+        {
+            QFile file(path);
+            QVERIFY(file.open(QIODevice::WriteOnly));
+            file.write("one\n");
+        }
 
         Sandbox sandbox(tempDir.path(), SandboxProfile::Workspace);
         DiskDocumentBridge bridge;
         ToolRunner runner(sandbox, &bridge);
 
-        // Missing status
-        ToolCall call1;
-        call1.id = u"g1"_s;
-        call1.name = u"goal_report"_s;
-        call1.arguments = QJsonObject{{u"reason"_s, u"done"_s}};
-        ToolResult res1 = runner.run(call1);
-        QVERIFY(!res1.ok);
+        ToolCall read;
+        read.id = u"r1"_s;
+        read.name = u"read_file"_s;
+        read.arguments = QJsonObject{{u"path"_s, u"a.txt"_s}};
+        QVERIFY(runner.run(read).ok);
 
-        // Invalid status
-        ToolCall call2;
-        call2.id = u"g2"_s;
-        call2.name = u"goal_report"_s;
-        call2.arguments = QJsonObject{{u"status"_s, u"invalid"_s}, {u"reason"_s, u"why"_s}};
-        ToolResult res2 = runner.run(call2);
-        QVERIFY(!res2.ok);
+        // Someone changes the file after the read, before the write.
+        {
+            QFile file(path);
+            QVERIFY(file.open(QIODevice::WriteOnly | QIODevice::Truncate));
+            file.write("two\n");
+        }
 
-        // Missing reason
-        ToolCall call3;
-        call3.id = u"g3"_s;
-        call3.name = u"goal_report"_s;
-        call3.arguments = QJsonObject{{u"status"_s, u"complete"_s}};
-        ToolResult res3 = runner.run(call3);
-        QVERIFY(!res3.ok);
+        ToolCall write;
+        write.id = u"w1"_s;
+        write.name = u"write_file"_s;
+        write.arguments = QJsonObject{{u"path"_s, u"a.txt"_s}, {u"content"_s, u"three\n"_s}};
+        const ToolResult conflict = runner.run(write);
+        QVERIFY2(!conflict.ok, qPrintable(conflict.output));
+        QVERIFY(conflict.output.contains(u"changed"_s));
 
-        // Valid cases
-        ToolCall call4;
-        call4.id = u"g4"_s;
-        call4.name = u"goal_report"_s;
-        call4.arguments = QJsonObject{{u"status"_s, u"complete"_s}, {u"reason"_s, u"Finished task"_s}};
-        ToolResult res4 = runner.run(call4);
-        QVERIFY(res4.ok);
+        // Re-reading the current content makes the write valid again.
+        QVERIFY(runner.run(read).ok);
+        const ToolResult ok = runner.run(write);
+        QVERIFY2(ok.ok, qPrintable(ok.output));
 
-        ToolCall call5;
-        call5.id = u"g5"_s;
-        call5.name = u"goal_report"_s;
-        call5.arguments = QJsonObject{{u"status"_s, u"failed"_s}, {u"reason"_s, u"Error occurred"_s}};
-        ToolResult res5 = runner.run(call5);
-        QVERIFY(res5.ok);
-
-        ToolCall call6;
-        call6.id = u"g6"_s;
-        call6.name = u"goal_report"_s;
-        call6.arguments = QJsonObject{{u"status"_s, u"blocked"_s}, {u"reason"_s, u"Waiting for input"_s}};
-        ToolResult res6 = runner.run(call6);
-        QVERIFY(res6.ok);
+        // A file that was never read keeps the create/overwrite behaviour.
+        ToolCall create;
+        create.id = u"w2"_s;
+        create.name = u"write_file"_s;
+        create.arguments = QJsonObject{{u"path"_s, u"new.txt"_s}, {u"content"_s, u"created\n"_s}};
+        QVERIFY(runner.run(create).ok);
     }
 
     void testPatchContentLineThatLooksLikeAHeader()

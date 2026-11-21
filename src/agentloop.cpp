@@ -41,6 +41,27 @@ using namespace Qt::Literals::StringLiterals;
 namespace KateAi
 {
 
+namespace
+{
+
+// The conversation should not receive an unbounded observation. MCP servers
+// and ACP agents can return megabytes; keep the head and tail so the model
+// sees the beginning and the final error/summary, and say what was dropped.
+QString clipObservation(const QString &text, int maxChars = 80000)
+{
+    if (text.size() <= maxChars) {
+        return text;
+    }
+    const int head = maxChars * 3 / 4;
+    const int tail = maxChars - head;
+    return text.left(head)
+        + u"\n\n… [observation truncated: %1 characters omitted; showing the first %2 and last %3] …\n\n"_s
+              .arg(text.size() - head - tail).arg(head).arg(tail)
+        + text.right(tail);
+}
+
+} // namespace
+
 QString AgentLoop::turnStateId(TurnState state)
 {
     switch (state) {
@@ -1245,6 +1266,11 @@ void AgentLoop::start(const QString &userText)
     m_actionSignatures.clear();
     m_actionRepeatCounts.clear();
     m_actionsThisModelTurn.clear();
+    if (m_tools) {
+        // A new turn must not compare a write against a read from an earlier
+        // turn that the user may have edited in between.
+        m_tools->resetReadLedger();
+    }
     m_recoveryPromptCount = 0;
     m_repeatedTruncatedObservationCount = 0;
     // The verification bookkeeping belongs to a turn. Without this reset the
@@ -1875,7 +1901,7 @@ QString AgentLoop::formatToolResult(const ToolCall &call, const ToolResult &resu
     }
 
     out += u"OBSERVATION:\n"_s;
-    out += result.output.trimmed().isEmpty() ? u"(no output)"_s : result.output.trimmed();
+    out += result.output.trimmed().isEmpty() ? u"(no output)"_s : clipObservation(result.output.trimmed());
     out += u"\n"_s;
 
     if (!result.ok) {
@@ -1931,6 +1957,11 @@ void AgentLoop::appendToolResult(const ToolCall &call, ToolResult result)
         }
         m_changesNeedVerification = true;
         m_verificationAttempted = false;
+        if (m_tools) {
+            // The mutation changed the files the ledger remembers; force the
+            // next write_file to re-read instead of comparing against them.
+            m_tools->resetReadLedger();
+        }
     } else if (result.ok && isVerificationForChangedFiles(call)) {
         m_verificationAttempted = true;
     }
