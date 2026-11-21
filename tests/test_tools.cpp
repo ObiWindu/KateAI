@@ -5,6 +5,7 @@
 
 #include "documentbridge.h"
 #include "sandbox.h"
+#include "harness/toolresults.h"
 #include "tools.h"
 #include "types.h"
 
@@ -1002,6 +1003,48 @@ private Q_SLOTS:
         create.name = u"write_file"_s;
         create.arguments = QJsonObject{{u"path"_s, u"new.txt"_s}, {u"content"_s, u"created\n"_s}};
         QVERIFY(runner.run(create).ok);
+    }
+
+    void testReadToolResultPagesStoredOutput()
+    {
+        QTemporaryDir storeDir;
+        QVERIFY(storeDir.isValid());
+        ToolResults::setDirectoryForTests(storeDir.path());
+
+        QString text;
+        for (int i = 0; i < 3000; ++i) {
+            text += u"row %1: abcdefghijklmnopqrstuvwxyz\n"_s.arg(i);
+        }
+        const StoredToolResult stored = ToolResults::store(text, 200, 100);
+        QVERIFY(!stored.id.isEmpty());
+
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+        Sandbox sandbox(workspace.path(), SandboxProfile::Workspace);
+        DiskDocumentBridge bridge;
+        ToolRunner runner(sandbox, &bridge);
+
+        ToolCall call;
+        call.id = u"r"_s;
+        call.name = u"read_tool_result"_s;
+        call.arguments = QJsonObject{{u"id"_s, stored.id}, {u"offset"_s, 0}, {u"limit"_s, 150}};
+        const ToolResult first = runner.run(call);
+        QVERIFY2(first.ok, qPrintable(first.output));
+        QVERIFY(first.output.startsWith(text.left(150)));
+        QVERIFY(first.output.contains(u"continue with offset=150"_s));
+
+        call.arguments = QJsonObject{{u"id"_s, stored.id}, {u"offset"_s, 150}, {u"limit"_s, 100}};
+        const ToolResult second = runner.run(call);
+        QVERIFY2(second.ok, qPrintable(second.output));
+        QVERIFY(second.output.startsWith(text.mid(150, 100)));
+
+        ToolCall missing;
+        missing.id = u"m"_s;
+        missing.name = u"read_tool_result"_s;
+        missing.arguments = QJsonObject{{u"id"_s, u"not-a-real-id"_s}};
+        QVERIFY(!runner.run(missing).ok);
+
+        ToolResults::setDirectoryForTests(QString());
     }
 
     void testPatchContentLineThatLooksLikeAHeader()

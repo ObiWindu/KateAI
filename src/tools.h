@@ -117,6 +117,7 @@ Q_SIGNALS:
 
 private:
     ToolResult readFile(const QJsonObject &args) const;
+    ToolResult readToolResult(const QJsonObject &args);
     ToolResult writeFile(const QJsonObject &args);
     ToolResult editFile(const QJsonObject &args);
     ToolResult multiEditFile(const QJsonObject &args);

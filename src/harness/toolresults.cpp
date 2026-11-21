@@ -29,7 +29,11 @@ QString ToolResults::directory()
     if (!fromEnv.isEmpty()) {
         return fromEnv;
     }
-    return QDir(QStandardPaths::writableLocation(QStandardPaths::CacheLocation)).filePath(u"tool-results"_s);
+    QString base = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
+    if (base.isEmpty()) {
+        base = QDir::tempPath() + u"/kateai-cache"_s;
+    }
+    return QDir(base).filePath(u"tool-results"_s);
 }
 
 void ToolResults::setDirectoryForTests(const QString &directory)
@@ -83,6 +87,9 @@ StoredToolResult ToolResults::store(const QString &text, int headChars, int tail
         return result;
     }
     file.close();
+    // Tool output can contain source code or command output the user considers
+    // sensitive; keep the cache owner-only.
+    QFile::setPermissions(path, QFileDevice::ReadOwner | QFileDevice::WriteOwner);
 
     result.id = id;
     result.totalChars = stored.size();

@@ -19,6 +19,9 @@ src/
   contextmanager.cpp              prompt assembly, context window, compaction
   graph/projectgraph.cpp          workspace structure graph
   mcp.cpp                         Model Context Protocol stdio clients
+  harness/                        rollout flags and the tool-result content store;
+                                  the home for the event log, policy, hooks and
+                                  evaluation work described in docs/HARNESS_ROADMAP.md
   lsp.h / lsp.cpp                 the editor's language-server surface (LspProvider) the core queries
   katelspbridge.cpp               Kate-facing LspProvider: probes the lspclientplugin at runtime,
                                   reads the diagnostics model (document marks as fallback), captures LSP messages
@@ -50,9 +53,13 @@ pixels belong in `kateai`.
 
 `AgentLoop` owns one conversation. The lifecycle:
 
-1. `submit()` appends the user message and builds the system prompt
-   (`buildSystemPrompt()`): mode persona, rules (`.kateai/`, `KATEAI.md`), editor
-   context, project graph summary, sandbox/permission summary.
+1. `start()` appends the user message and builds the system prompt
+   (`systemPrompt()`): mode persona, rules (`.kateai/`, `KATEAI.md`), project
+   graph summary, sandbox/permission summary. Editor context, the workspace
+   listing and git status are not part of the system prompt: they are a
+   transient turn-context message added to each request
+   (`turnContextMessage()`), so the cached prefix stays stable and ambient
+   state is never persisted.
 2. `LlmClient::complete()` streams tokens. Thinking deltas and content deltas
    arrive separately, so the UI can render hidden reasoning collapsibly.
 3. Tool calls are executed through `ToolRunner`, gated by `PermissionPolicy`

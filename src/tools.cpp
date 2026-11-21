@@ -5,6 +5,7 @@
 
 #include "tools.h"
 
+#include "harness/toolresults.h"
 #include "mcp.h"
 
 #include <QDir>
@@ -883,6 +884,9 @@ ToolResult ToolRunner::run(const ToolCall &call)
     if (call.name == u"read_file"_s) {
         return readFile(args);
     }
+    if (call.name == u"read_tool_result"_s) {
+        return readToolResult(args);
+    }
     if (call.name == u"write_file"_s) {
         return writeFile(args);
     }
@@ -997,6 +1001,41 @@ ToolResult ToolRunner::run(const ToolCall &call)
 
     result.ok = false;
     result.output = u"Unknown tool: %1"_s.arg(call.name);
+    return result;
+}
+
+ToolResult ToolRunner::readToolResult(const QJsonObject &args)
+{
+    ToolResult result;
+    result.name = u"read_tool_result"_s;
+
+    const QString id = args.value(u"id"_s).toString();
+    if (id.isEmpty()) {
+        result.ok = false;
+        result.output = u"id is required (the value shown in the truncation marker)."_s;
+        return result;
+    }
+    const qint64 offset = jsonInt(args.value(u"offset"_s), 0);
+    int limit = jsonInt(args.value(u"limit"_s), 20000);
+    limit = qBound(1, limit, 80000);
+
+    QString page;
+    qint64 total = 0;
+    QString error;
+    if (!ToolResults::read(id, offset, limit, &page, &total, &error)) {
+        result.ok = false;
+        result.output = error;
+        return result;
+    }
+    result.ok = true;
+    result.output = page;
+    const qint64 next = offset + page.size();
+    if (next < total) {
+        result.output += u"\n\n[showing characters %1-%2 of %3; continue with offset=%4]"_s
+                             .arg(offset).arg(next).arg(total).arg(next);
+    } else {
+        result.output += u"\n\n[end of stored output; %1 characters total]"_s.arg(total);
+    }
     return result;
 }
 

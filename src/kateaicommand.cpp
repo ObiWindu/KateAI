@@ -36,7 +36,7 @@ QString usageText()
         "usage: kateai ask <text> | explain | fix | refactor | tests | diagnostics | symbols | "
         "debug | explain-stop | stack | break [cond] | snapshot | fix-errors | build-errors | "
         "launch-config | backtrace | terminal | blame | commit | diff-tab | graph-tab | annotations | "
-        "stop | new | mode <id> | panel");
+        "context | usage | stop | new | mode <id> | panel");
 }
 
 // The instruction of the one-word review subcommands. Kept next to the
@@ -94,6 +94,7 @@ KCompletion *KateAiCommand::completionObject(KTextEditor::View *view, const QStr
                           u"fix-errors"_s, u"build-errors"_s, u"launch-config"_s,
                           u"backtrace"_s, u"terminal"_s, u"blame"_s, u"commit"_s,
                           u"diff-tab"_s, u"graph-tab"_s, u"annotations"_s,
+                          u"context"_s, u"usage"_s,
                           u"stop"_s, u"new"_s, u"mode "_s, u"panel"_s});
     return completion;
 }
@@ -149,6 +150,14 @@ bool KateAiCommand::exec(KTextEditor::View *view, const QString &cmd, QString &m
     const QString sub = args.section(u' ', 0, 0).toLower();
     const QString rest = args.section(u' ', 1).trimmed();
 
+    if (sub == u"context"_s) {
+        target->chat()->showContextReport();
+        return true;
+    }
+    if (sub == u"usage"_s) {
+        target->chat()->showUsageReport();
+        return true;
+    }
     if (sub == u"stop"_s) {
         target->chat()->agent()->abort();
         msg = i18n("Kate AI: stopped.");

@@ -1,5 +1,33 @@
 # Changelog
 
+## Unreleased — 0.6.1
+
+- **Context visibility.** `:kateai context` reports the model window, the
+  request estimate, the system/ambient/tool-schema/conversation breakdown,
+  rules and graph sizes, and the free space. `:kateai usage` reports provider,
+  model, mode, turn state, request/tool counters and the estimated request.
+- **Stable prompt prefix.** Editor context, the workspace listing and git
+  status moved out of the system prompt into a transient turn-context message.
+  The system prompt and tool schemas are now stable across turns, which lets
+  providers reuse their prompt cache; ambient state is never persisted.
+- **Tool-result budgets.** Tool output over 40K characters is stored outside the
+  conversation and replaced with a head/tail preview. The new
+  `read_tool_result` tool pages it back by character offset. MCP and ACP output
+  is clipped before it enters history instead of arriving unbounded.
+- **Write conflict detection.** `write_file` remembers files read during the
+  turn and refuses to overwrite one that changed afterwards; the model is told
+  to re-read and retry. Files never read keep the create/overwrite behaviour.
+- **ACP slash commands.** When an agent advertises commands, the composer shows
+  a **Commands** button that inserts the selected `/command` into the prompt.
+- **Sub-agents fail fast instead of hanging.** A sub-agent's question is
+  answered with an instruction to proceed without the user, and a permission
+  ask is denied, with an activity line explaining why. Sub-agents cannot prompt
+  the user.
+- **Removed dead surface.** The orphaned `goal_report` tool, the
+  `run-workflow` skill that documented a non-existent tool, and eight settings
+  that were persisted and editable but unused.
+- Version metadata is unchanged in this entry; the release commit bumps it.
+
 ## 0.6.0 — 2026-11-21
 
 - **Live debugger integration.** Kate AI reads Kate's debugger plugin

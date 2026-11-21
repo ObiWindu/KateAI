@@ -5,6 +5,7 @@
 
 #include "harness/harnessflags.h"
 #include "harness/toolresults.h"
+#include "agentloop.h"
 
 #include <QDir>
 #include <QTemporaryDir>
@@ -103,6 +104,18 @@ private Q_SLOTS:
         QVERIFY(stored.id.isEmpty());
         QCOMPARE(stored.preview, u"tiny"_s);
         ToolResults::setDirectoryForTests(QString());
+    }
+
+    void reportsAreAvailableOutsideATurn()
+    {
+        AgentLoop loop;
+        const QString context = loop.contextReport();
+        QVERIFY(context.contains(u"Context window"_s));
+        QVERIFY(context.contains(u"Messages"_s));
+
+        const QString usage = loop.usageReport();
+        QVERIFY(usage.contains(u"Provider"_s));
+        QVERIFY(usage.contains(u"Model requests"_s));
     }
 };
 
