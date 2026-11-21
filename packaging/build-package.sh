@@ -63,7 +63,7 @@ case "${FAMILY}" in
     macos)
         # Plugin zip for macOS: Homebrew Kate + KF6 build (see packaging/ci/macos-build.sh).
         VERSION="$(sed -n 's/^project(kateai VERSION \([^ ]*\).*/\1/p' "${ROOT}/CMakeLists.txt" | head -1)"
-        VERSION="${VERSION:-0.4.0}"
+        VERSION="${VERSION:-0.6.0}"
         "${ROOT}/packaging/ci/macos-build.sh" --build-type Release --artifacts-dir "${ROOT}/artifacts-macos-tmp"
         mkdir -p "${ROOT}/packaging/dist"
         OUT="${ROOT}/packaging/dist/kateai-${VERSION}-macos-$(uname -m).zip"

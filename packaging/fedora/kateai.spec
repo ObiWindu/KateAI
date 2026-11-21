@@ -1,5 +1,5 @@
 Name:           kateai
-Version:        0.4.0
+Version:        0.6.0
 Release:        1%{?dist}
 Summary:        AI coding agent plugin for the Kate text editor
 
@@ -54,6 +54,24 @@ asks before destructive actions. Works on Fedora and Fedora Asahi Remix.
 %{_libdir}/kateai/libpage4k.so
 
 %changelog
+* Sat Nov 21 2026 ObiWindu <Obi.wandu@proton.me> - 0.6.0-1
+- Release 0.6.0: live Kate debugger bridge and twelve debugger tools, build
+  and terminal tools, structured LSP diagnostics from Kate's diagnostics
+  model, ecosystem bridges (build, terminal, project tree, backtrace browser),
+  native review/debug/graph tabs, and debugger-aware editor assistance.
+- Ship the 4K-page sandbox shim, which rpmbuild previously reported as an
+  unpackaged file on x86_64 and aarch64.
+
+* Wed Nov 18 2026 ObiWindu <Obi.wandu@proton.me> - 0.5.1-1
+- Release 0.5.1: make the sandbox runtime test portable to Fedora aarch64
+  hosts that cannot create the network or cgroup namespaces required by the
+  Strict/Read-only profiles. No user-facing behavior changes.
+
+* Wed Nov 18 2026 ObiWindu <Obi.wandu@proton.me> - 0.5.0-1
+- Release 0.5.0: hardened ACP agent launch and protocol handling, stricter
+  sandbox and permission checks, safer checkpoints and patches, reliable
+  conversation restore, and reworked sub-agent cards.
+
 * Mon Nov 16 2026 ObiWindu <Obi.wandu@proton.me> - 0.4.0-1
 - Release 0.4.0: secure credential storage, session database recovery,
   checkpoint safety snapshots, edit conflict detection, explicit turn

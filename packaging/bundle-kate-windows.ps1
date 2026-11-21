@@ -34,7 +34,7 @@ $env:PATH = ($env:PATH -split ';' | Where-Object {
 }) -join ';'
 
 $m = Select-String -Path (Join-Path $Root "CMakeLists.txt") -Pattern 'project\(kateai VERSION ([^ ]+)' | Select-Object -First 1
-$version = "0.4.0"
+$version = "0.6.0"
 if ($m) { $version = $m.Matches[0].Groups[1].Value }
 $arch = $env:PROCESSOR_ARCHITECTURE
 if (-not $arch) { $arch = "amd64" }

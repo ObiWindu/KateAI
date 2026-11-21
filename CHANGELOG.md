@@ -1,5 +1,98 @@
 # Changelog
 
+## 0.6.0 — 2026-11-21
+
+- **Live debugger integration.** Kate AI reads Kate's debugger plugin
+  (`kategdbplugin`, GDB/DAP) through a model-and-signal bridge with an
+  auto-detected `Q_INVOKABLE` upgrade path. The agent sees the session state,
+  paused frame, call stack, locals, and breakpoints; that context is injected
+  into the prompt, a stopped or crashed session raises a banner, and debugger
+  state can be snapshotted and diffed.
+- **Twelve debugger tools**: `debug_status`, `debug_stack`, `debug_locals`,
+  `debug_breakpoints`, `debug_select_frame`, `debug_select_thread`,
+  `debug_snapshot`, `debug_set_breakpoint`, `debug_step`, `debug_eval`,
+  `debug_session`, and `debug_console`, plus `build_targets`, `build_run`, and
+  `terminal_run`. They run through the tool runner, agent loop, mode tool
+  groups, and the ACP bridge with the same risk classification and sandbox
+  gates as `bash`.
+- **Rich LSP diagnostics.** The bridge resolves the `lspclientplugin` plugin
+  id and reads structured rows from Kate's diagnostics model, falling back to
+  document marks. `lsp_diagnostics` now reports severity, source, code, and
+  range instead of flattened mark text, including diagnostics for unopened
+  workspace files.
+- **Kate ecosystem bridge.** Build-plugin targets, the Konsole terminal's
+  selection and current command, project-tree actions, and the Backtrace
+  Browser are reachable from the agent and the menus. Review diffs, debug
+  diffs, and the project graph open in native Kate tabs (review diffs keep
+  **Accept All** / **Reject All**).
+- **Editor assistance while paused.** Inline variable notes on the paused
+  line, hover values, a toggleable annotation gutter for AI edits, and a
+  clickable status-bar pill that jumps back to the panel.
+- **New `:kateai` subcommands**: `debug`, `stack`, `break`, `snapshot`,
+  `fix-errors`, `build-errors`, `launch-config`, `backtrace`, `terminal`,
+  `blame`, `commit`, `diff-tab`, `graph-tab`, and `annotations`.
+  `:kateai launch-config` generates a `.vscode/launch.json` from the project's
+  build targets; `:kateai backtrace` explains a crash dump.
+- Fixed ACP agent installation edge cases and the page-size shim install path;
+  the Fedora RPM now packages the shim and passes rpmbuild on x86_64 and
+  aarch64.
+- Version metadata updated to 0.6.0 across CMake, plugin metadata, README, ACP
+  client identity, and packaging. See `CHANGELOG_0.6.0.md`.
+
+## 0.5.1 — 2026-11-18
+
+- Fixed `test_sandbox` on Fedora aarch64: the bubblewrap runtime probe now
+  exercises the actual wrapper for each sandbox profile, so hosts that cannot
+  create the network or cgroup namespace required by Strict/Read-only skip
+  those runtime assertions instead of failing. The probe also no longer
+  assumes a particular host shell path.
+- No user-facing behavior changes; the 0.5.0 features and on-disk formats are
+  unchanged.
+
+## 0.5.0 — 2026-11-18
+
+- Hardened ACP agent installation and launch: raw-binary distributions,
+  archive type detection, staged swaps, registry env maps, musl targets,
+  tool-manager discovery, pinned `npx`/`uvx` lines, and safe uninstall paths.
+- ACP protocol correctness: session-scoped updates and requests, no replayed
+  history on `session/load`, no forced 30-second session setup timeout,
+  auth-method fallback, capability-filtered MCP servers, bounded file reads,
+  terminal output limits, scoped approval grants, and bounded parked methods.
+- Closed sandbox and permission bypasses around newline command chains,
+  `sudo`/`doas`/`pkexec`, glob expansion before deny scanning, write-capable
+  flags, mutating git subcommands, path case rules, and tool aliases. ACP paths
+  are resolved before policy is applied.
+- Made checkpoint handling more robust across Windows and interrupted
+  repositories, added failure reasons to the checkpoint API, and made restore
+  symlink-safe with fail-closed staging.
+- Improved data safety: WAL/SHM sidecars are kept when a session database is
+  quarantined, unreadable payloads are never overwritten, unlimited history
+  stays unlimited, deletes in `apply_patch` are atomic, and undo/reject paths
+  refuse to discard newer edits.
+- Hardened LLM transports and retries: no duplicated `/v1`, bounded retries,
+  permanent HTTP errors are not retried, and partial SSE events, late
+  transport errors, null tool indexes, and non-replayable reasoning are handled.
+- MCP and web-search fixes: secrets stay in the credential store, config/HTTP
+  loads are bounded, multi-line SSE and batches parse, internal hosts and
+  blocked redirects are rejected, and search snippets no longer shift between
+  results.
+- Project graph improvements: files up to 1 MB are indexed, dependency lists
+  are stable, cache generation is reproducible, and JSON arguments/results are
+  formatted in cards while prose is left untouched.
+- Conversation history now restores reliably after closing and reopening Kate,
+  including per-window conversation ids, stale ids, repeated tool-call ids, ACP
+  read cards, and cancelled results.
+- Reworked sub-agent cards: readable mode, live tool and state, elapsed time,
+  tool/error counts, a starting indicator, cancelled-state handling, and a
+  copy-answer action. Concurrent cards keep their bounded tab strip, with
+  plain-text tabs.
+- Question and suggestion cards keep their prompt/advice payload alongside the
+  answer, including alias tool names and ACP client methods.
+- Reasoning and answers render sequentially, completed cards freeze cleanly,
+  and long-running sessions compact without growing stored history unbounded.
+- Version metadata updated to 0.5.0 across CMake, plugin metadata, README, ACP
+  client identity, and packaging. See `CHANGELOG_0.5.0.md`.
+
 ## 0.4.0 — 2026-11-16
 
 - API keys move from the plaintext KConfig file into `CredentialStore`:

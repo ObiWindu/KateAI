@@ -1,3 +1,29 @@
+kateai (0.6.0-1) unstable; urgency=medium
+
+  * Release 0.6.0: live Kate debugger integration with twelve debugger tools,
+    build and terminal tools, structured LSP diagnostics from Kate's
+    diagnostics model, ecosystem bridges (build, terminal, project tree,
+    backtrace browser), native review/debug/graph tabs, and debugger-aware
+    editor assistance. The package now ships the 4K-page sandbox shim.
+
+ -- ObiWindu <Obi.wandu@proton.me>  Sat, 21 Nov 2026 00:00:00 +0000
+
+kateai (0.5.1-1) unstable; urgency=medium
+
+  * Release 0.5.1: make the sandbox runtime test portable to Fedora aarch64
+    hosts that cannot create the network or cgroup namespaces required by the
+    Strict/Read-only profiles. No user-facing behavior changes.
+
+ -- ObiWindu <Obi.wandu@proton.me>  Wed, 18 Nov 2026 00:00:00 +0000
+
+kateai (0.5.0-1) unstable; urgency=medium
+
+  * Release 0.5.0: hardened ACP agent launch and protocol handling, stricter
+    sandbox and permission checks, safer checkpoints and patches, reliable
+    conversation restore, and reworked sub-agent cards.
+
+ -- ObiWindu <Obi.wandu@proton.me>  Wed, 18 Nov 2026 00:00:00 +0000
+
 kateai (0.4.0-1) unstable; urgency=medium
 
   * Release 0.4.0: secure credential storage with migration, session database

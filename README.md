@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.4.0-orange" alt="Kate AI 0.4.0">
+  <img src="https://img.shields.io/badge/version-0.6.0-orange" alt="Kate AI 0.6.0">
   <img src="https://img.shields.io/badge/Kate-24.08%2B-1d99f3?logo=kde" alt="Kate 24.08+">
   <img src="https://img.shields.io/badge/Qt-6.5%2B-41cd52?logo=qt" alt="Qt 6.5+">
   <img src="https://img.shields.io/badge/KF-6-blue" alt="KDE Frameworks 6">
@@ -221,6 +221,15 @@ You ──► LLM (Grok / OpenAI / OpenRouter / local) or any ACP agent over std
 | `lsp_hover` | The enclosing symbol at a position plus its declaration |
 | `lsp_definition` / `lsp_references` | Where a symbol is defined / used across the workspace |
 | `lsp_code_actions` | Quick fixes the language server offers at a position |
+| `debug_status` / `debug_stack` / `debug_locals` / `debug_breakpoints` | Live Kate debugger: session state, backtrace, locals, breakpoints |
+| `debug_select_frame` / `debug_select_thread` | Change the frame or thread the debugger tools read |
+| `debug_snapshot` | Capture debugger state, or diff two snapshots |
+| `debug_set_breakpoint` | Set, condition, or remove a breakpoint |
+| `debug_step` | Continue, step over/into/out, or run to a line |
+| `debug_eval` / `debug_console` | Evaluate an expression in the paused frame, or run a debugger console command |
+| `debug_session` | Start, stop, or attach a debug session |
+| `build_targets` / `build_run` | List and build targets through Kate's Build plugin |
+| `terminal_run` | Run a command in Kate's embedded terminal |
 | `write_plan_file` | Write the implementation plan for a complicated task to a temp file the user can open and follow |
 | `suggest` | Post a suggestion card for the user to accept or dismiss instead of making an unrequested change |
 | `question` | Ask the user something and wait for the answer before continuing |
@@ -228,7 +237,7 @@ You ──► LLM (Grok / OpenAI / OpenRouter / local) or any ACP agent over std
 
 Plus every tool discovered from the connected MCP servers, as `mcp__<server>__<tool>`.
 
-In **Plan mode**, **Ask**, **Architect**, and **Orchestrator** the model only receives the read-only group (`read_file`, `list_dir`, `grep`, `glob`, `query_project_graph`, `write_plan_file`, `suggest`, `question`, `todo_write`, `todo_read`, `think`, `exit_plan_mode`, `lsp_*`) plus MCP tools. Tool availability is enforced twice — once in the request that advertises the tools, and again when a call arrives — so a model that hallucinates a write gets a clear rejection instead of a silent one. ACP agents run their own tools, so Kate cannot stop one that never asks permission; it shows a notice instead, and the permission card still lets you approve a tool the active mode does not list.
+In **Plan mode**, **Ask**, **Architect**, and **Orchestrator** the model only receives the read-only group (`read_file`, `list_dir`, `grep`, `glob`, `query_project_graph`, `write_plan_file`, `suggest`, `question`, `todo_write`, `todo_read`, `think`, `exit_plan_mode`, `lsp_*`, the read-only `debug_*` tools, and `build_targets`) plus MCP tools. Tool availability is enforced twice — once in the request that advertises the tools, and again when a call arrives — so a model that hallucinates a write gets a clear rejection instead of a silent one. ACP agents run their own tools, so Kate cannot stop one that never asks permission; it shows a notice instead, and the permission card still lets you approve a tool the active mode does not list.
 
 `write_plan_file` is the one tool that writes a file without touching the project: the destination is a per-workspace temp file Kate picks itself, so it is safe in read-only modes and plan mode, never prompts, and never enters the edit tracker. Agents are told to keep it current as the work moves, which gives the user a running plan they can open next to the code.
 
@@ -267,7 +276,9 @@ Kate AI is a first-class KTextEditor plugin, so it sees the same documents you d
 
 - Active file, cursor line and column, selection with its line range (up to 4k of text), the file's language, unsaved state, bookmarks, and the list of open files are sent as editor context; an untitled buffer sends its content so the model can still see it. The context also carries the git branch, the enclosing symbol at the cursor (from the project graph), the LSP plugin state, and the active file's error/warning count — and it refreshes live as you move the cursor or change the selection
 - Reads and writes prefer the in-memory buffer over disk
-- **LSP integration**: Kate AI detects Kate's LSP client plugin (`katelspclientplugin`) at runtime. The `lsp_*` tools (diagnostics, symbols, hover, definition, references, code actions) answer from it when it can and fall back to the project graph and text search otherwise; hovering a line with an error/warning mark shows the diagnostic; AI completions step aside while the native (LSP) completion popup is open. When no LSP server runs, the tools say so and the agent falls back to builds/tests via `bash`
+- **LSP integration**: Kate AI detects Kate's LSP client plugin (`lspclientplugin`) at runtime. The `lsp_*` tools (diagnostics, symbols, hover, definition, references, code actions) answer from it when it can and fall back to the project graph and text search otherwise; `lsp_diagnostics` reads structured rows from Kate's diagnostics model when it is available, so severity, source, code, and ranges survive, including for workspace files that are not open. Hovering a line with an error/warning mark shows the diagnostic; AI completions step aside while the native (LSP) completion popup is open. When no LSP server runs, the tools say so and the agent falls back to builds/tests via `bash`
+- **Live debugger**: Kate AI bridges Kate's debugger plugin (`kategdbplugin`, GDB/DAP). The current session, stop reason, frame, stack, locals, and breakpoints are part of the agent's context while paused; a crash or exception raises a banner with **Diagnose Stop**, and debugger state can be snapshotted and diffed. Inline variable notes and hover values appear on the paused line
+- **Kate ecosystem**: the Build plugin's targets, the embedded Konsole terminal, project-tree actions, and the Backtrace Browser are available to the agent; review diffs (**Accept All** / **Reject All**), debug diffs, and the project graph open in native Kate tabs
 - **Edit banners**: an in-editor banner appears on files the agent changed, with **Review** (opens the panel) and **Reject Changes** actions (configurable)
 - **Edit open files in buffer** (settings): agent edits to open documents land in the buffer and stay unsaved — Keep in the review queue saves, Reject restores the buffer. While a change is unsaved, commands the agent runs still read the previous state from disk, so this is off by default
 - Save-As carries the review queue along: pending edits follow the file to its new path
@@ -278,9 +289,21 @@ Kate AI is a first-class KTextEditor plugin, so it sees the same documents you d
   - **Refactor Selection** — clarity and maintainability, then apply
   - **Add Tests for Selection** — propose coverage first
 - **Stop Kate AI** action (Tools ▸ Kate AI, bindable in Kate's shortcut settings) aborts the running turn without hunting for the panel button
-- **Command line**: `:kateai ask <text>`, `:kateai explain|fix|refactor|tests|diagnostics|symbols` (act on the selection or the range the command line carries, vi-mode `'<,'>kateai fix` included), `:kateai stop`, `:kateai new`, `:kateai mode <id>`, `:kateai panel`
+- **Command line**: `:kateai ask <text>`, `:kateai explain|fix|refactor|tests|diagnostics|symbols` (act on the selection or the range the command line carries, vi-mode `'<,'>kateai fix` included), `:kateai debug|stack|break|snapshot` for the live debugger, `:kateai fix-errors|build-errors`, `:kateai launch-config` to generate `.vscode/launch.json`, `:kateai backtrace`, `:kateai terminal`, `:kateai blame|commit`, `:kateai diff-tab|graph-tab|annotations`, `:kateai stop`, `:kateai new`, `:kateai mode <id>`, `:kateai panel`
 - Workspace root is the nearest parent with `.git` or `.kateproject`, otherwise the active file’s directory
 - When a different folder is opened in Kate, Kate AI switches to that workspace (agent context, checkpoints, MCP servers, completions) and shows a notice pinned above the input; the notice fades on its own or when the next turn starts
+
+### Debugger and build
+
+Kate AI reads the debugger session you already have open, so a paused frame is context instead of something to describe.
+
+- `debug_status`, `debug_stack`, `debug_locals`, and `debug_breakpoints` report the live session; `debug_select_frame` / `debug_select_thread` move the context the other tools read
+- `debug_step` continues, steps over/into/out, and runs to a line; `debug_eval` evaluates in the paused frame; `debug_console` runs a raw debugger command; `debug_session` starts, stops, or attaches
+- A crash, signal, or exception stop raises a banner on the stopped file with **Diagnose Stop**, and the prompt starts with the stack and locals
+- `debug_snapshot` captures the state and can diff two snapshots, so "what changed between these stops?" is one call
+- `build_targets` and `build_run` use Kate's Build plugin; `terminal_run` runs in the embedded Konsole terminal; `:kateai launch-config` generates `.vscode/launch.json` from the project's targets
+- Read-only debugger tools and `build_targets` need no approval and remain available in plan mode. `debug_set_breakpoint` is a write (its path goes through the sandbox), and stepping, evaluating, running a session, building, and `terminal_run` are executes, so they use the normal permission bar and sandbox checks
+- Works with GDB/DAP through Kate's `kategdbplugin`; when the plugin is not loaded the tools say so and point at `bash` instead of failing
 
 ### Thinking and plan mode
 

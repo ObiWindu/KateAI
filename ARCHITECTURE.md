@@ -20,8 +20,14 @@ src/
   graph/projectgraph.cpp          workspace structure graph
   mcp.cpp                         Model Context Protocol stdio clients
   lsp.h / lsp.cpp                 the editor's language-server surface (LspProvider) the core queries
-  katelspbridge.cpp               Kate-facing LspProvider: probes the katelspclientplugin at runtime,
-                                  reads Error/Warning document marks, captures LSP messages
+  katelspbridge.cpp               Kate-facing LspProvider: probes the lspclientplugin at runtime,
+                                  reads the diagnostics model (document marks as fallback), captures LSP messages
+  debug.h / debug.cpp             debugger session model, snapshot parsing/diffing, launch.json generation
+  katedebugbridge.cpp             Kate-facing DebugProvider: kategdbplugin Tier-1 model/signal bridge,
+                                  Tier-2 Q_INVOKABLE upgrade when the plugin view exposes it
+  ecosystem.h / ecosystem.cpp     offline parsers and models for the Kate plugin bridges
+  kateecosystembridge.cpp         bridges to katebuildplugin, katekonsoleplugin, kateprojectplugin,
+                                  katebacktracebrowserplugin, and the native review/debug/graph tabs
   checkpoint.cpp                  pre-turn shadow-git snapshots
   edittracker.cpp                 review queue for agent edits
   completionengine.cpp / editranges.cpp  in-editor completions (core half): FIM/chat prompts, budgets, MovingCursor-anchored edit ranges
@@ -189,21 +195,60 @@ Package-distribution agents are launched via `npx --yes <pkg>@<version>` /
 queries for language-server data: availability, per-file diagnostics, server
 messages, and optional symbols/hover/definition/references/code-action answers.
 `KateLspBridge` (katelspbridge.cpp) implements it against Kate's LSP client
-plugin: it looks up `katelspclientplugin` through the application plugin list
+plugin: it looks up `lspclientplugin` through the application plugin list
 (the same string-based, runtime-probed pattern used for `kateprojectplugin`),
-captures its public `showMessage` signal, and derives diagnostics from the
-Error/Warning marks of open documents, re-scanned on `marksChanged` plus a
-slow poll so `diagnosticsChanged` fires. When the plugin is absent or changes
-its internals, `isAvailable()` is false and the `lsp_*` tools report the
-feature as unavailable instead of failing; symbol/hover/definition/references
-then fall back to the project graph (which now indexes per-file symbols with
-line ranges) and plain text search. The `lsp_*` tools are read-only, so they
-are allowed in plan/ask/architect/orchestrator modes and never prompt.
+captures its public `showMessage` signal, and reads diagnostics from the
+model behind the plugin's DiagnosticsView — severity, source, code, and range,
+including for workspace files that are not open. When that model is not
+available it falls back to the Error/Warning marks of open documents,
+re-scanned on `marksChanged` plus a slow poll so `diagnosticsChanged` fires.
+When the plugin is absent or changes its internals, `isAvailable()` is false
+and the `lsp_*` tools report the feature as unavailable instead of failing;
+symbol/hover/definition/references then fall back to the project graph (which
+now indexes per-file symbols with line ranges) and plain text search. The
+`lsp_*` tools are read-only, so they are allowed in
+plan/ask/architect/orchestrator modes and never prompt.
 
 Agents do not receive Kate's system prompt, so the first prompt of each ACP
 session starts with a notes block: the user's global rules and extra system
 prompt (except for Grok, which gets them through `_meta`), and the list of
 Kate's client methods. The notes are sent once per session.
+
+## Debugger bridge
+
+`DebugProvider` (debug.h) is the interface the core (`ToolRunner`, `AgentLoop`)
+queries for debugger data: availability, session state, stop reason, threads,
+frames, locals, breakpoints, recent output, and actions (select frame/thread,
+set/clear breakpoints, step, evaluate, control the session, console, reload
+launch targets). `KateDebugBridge` (katedebugbridge.cpp) implements it against
+Kate's debugger plugin (`kategdbplugin`, GDB/DAP):
+
+- **Tier 1** works on stock Kate 25.x/26.x. The bridge finds the plugin view
+  through `MainWindow::pluginView()` (and follows `pluginViewCreated`), reads
+  the plugin's stack/frame/locals/breakpoint models, and watches their change
+  signals, so the snapshot the agent receives tracks the live session.
+- **Tier 2** is auto-detected at runtime: when the plugin view exposes the
+  richer `Q_INVOKABLE` surface, the bridge calls it for exact state and
+  actions, and keeps Tier 1 as the fallback.
+- The model-layout parsers are static members of `DebugProvider`, so
+  `test_debug` covers them offline without a GUI or a live GDB.
+- Without the plugin, `isAvailable()` is false, the debugger tools return an
+  actionable message, and `bash` remains the fallback.
+
+`AgentLoop` folds the current stop into the prompt and editor context, and the
+plugin view raises the crash/exception banner, inline variable notes, hover
+values, and the status pill from the same state.
+
+## Ecosystem bridge
+
+`KateEcosystemBridge` (kateecosystembridge.cpp) resolves the sibling Kate
+plugins by id at runtime — `katebuildplugin`, `katekonsoleplugin`,
+`kateprojectplugin`, `katebacktracebrowserplugin` — and exposes only what each
+one advertises. A missing plugin makes the matching tool unavailable instead of
+failing. `build_targets`/`build_run` read the Build plugin's target model,
+`terminal_run` drives the Konsole plugin, project-tree and backtrace actions
+use their menu/view surfaces, and review diffs, debug diffs, and the project
+graph open as native `KTextEditor` tabs from the plugin view.
 
 ## Settings and modes
 
@@ -316,6 +361,8 @@ Useful single suites:
 - `test_projectgraph` — scan limits, binary detection, symlink loops, round-trip
 - `test_livecards` / `test_toolcard` / `test_overflow` — widget-level behaviour
 - `test_subtaskparallel` / `test_multiagent` — sub-agent concurrency and locks
+- `test_lsp` — diagnostics parsing (structured rows and mark fallback), symbol/hover lookups
+- `test_debug` — debugger model parsers, stop classification, snapshot diffing, launch.json generation
 
 ## Persistence
 
