@@ -739,7 +739,7 @@ ChatWidget::ChatWidget(QWidget *parent)
     // call to action.
     bottomRow->addWidget(m_thinking);
 
-    m_agentCommandsButton = new QPushButton(i18n("Commands"), composerCard);
+    m_agentCommandsButton = new QPushButton(i18n("cmds"), composerCard);
     m_agentCommandsButton->setCursor(Qt::PointingHandCursor);
     m_agentCommandsButton->setFixedHeight(26);
     m_agentCommandsButton->setToolTip(i18n("Slash commands advertised by the active ACP agent"));
@@ -1540,7 +1540,7 @@ ChatWidget::ChatWidget(QWidget *parent)
         }
         m_agentCommandsButton->setVisible(!commands.isEmpty());
         if (!commands.isEmpty()) {
-            m_agentCommandsButton->setText(i18n("Commands (%1)", commands.size()));
+            m_agentCommandsButton->setText(i18n("cmds (%1)", commands.size()));
         }
     });
 
@@ -3627,7 +3627,7 @@ void ChatWidget::restylePanel()
     if (m_threadTitle) {
         m_threadTitle->setStyleSheet(ChatTheme::headerTitle());
     }
-    for (auto *chip : {m_modelSelector, m_modeButton, m_permissionButton}) {
+    for (auto *chip : {m_modelSelector, m_modeButton, m_permissionButton, m_agentCommandsButton}) {
         if (chip) {
             chip->setStyleSheet(ChatTheme::chipButton());
         }
