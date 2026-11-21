@@ -18,7 +18,7 @@ src/
   sessionstore.cpp                conversation persistence (SQLite)
   contextmanager.cpp              prompt assembly, context window, compaction
   graph/projectgraph.cpp          workspace structure graph
-  mcp.cpp                         Model Context Protocol stdio clients
+  mcp.cpp                         Model Context Protocol clients (stdio + Streamable HTTP)
   harness/                        rollout flags and the tool-result content store;
                                   the home for the event log, policy, hooks and
                                   evaluation work described in docs/HARNESS_ROADMAP.md
