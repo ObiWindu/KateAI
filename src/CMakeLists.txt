@@ -101,7 +101,14 @@ if(UNIX)
         COMMAND chmod a+rX "$<TARGET_FILE:kateai>"
         VERBATIM
     )
+endif()
 
+# The 4 KiB page shim is a Linux-only interposer: it relies on <link.h>,
+# dladdr1(), ElfW and the Linux __NR_* syscall numbers, and it spoofs glibc
+# sysconf()/mmap() for the legacy Antigravity binary. macOS has none of those
+# headers, and acpNeedsPageShim() is compile-time false off Linux, so building
+# the shim there only breaks the build.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_library(kateai_page4k_shim SHARED
         page4k_shim.c
     )
