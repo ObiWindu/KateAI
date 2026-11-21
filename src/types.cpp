@@ -1139,6 +1139,18 @@ QJsonArray toolDefinitions(const ToolAccess &access)
                          {u"path"_s},
                          false));
 
+    tools.append(toolDef(u"read_tool_result"_s,
+                         u"Read a page of a tool output that was too large to keep in the conversation. "
+                         u"The truncation marker in that output contains the id. Pages are character ranges; "
+                         u"continue with the returned offset until the end."_s,
+                         QJsonObject{
+                             {u"id"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"The tool_result id from the truncation marker."_s}}},
+                             {u"offset"_s, QJsonObject{{u"type"_s, u"integer"_s}, {u"description"_s, u"Character offset to start at (default 0)."_s}}},
+                             {u"limit"_s, QJsonObject{{u"type"_s, u"integer"_s}, {u"description"_s, u"Maximum characters to return (default 20000, max 80000)."_s}}},
+                         },
+                         {u"id"_s},
+                         false));
+
     tools.append(toolDef(u"write_file"_s,
                          u"Create or overwrite a UTF-8 text file with the given contents."_s,
                          QJsonObject{
@@ -1560,17 +1572,6 @@ tools.append(toolDef(subtaskToolName(),
                           },
                           {u"description"_s},
                           false));
-
-    tools.append(toolDef(u"goal_report"_s,
-                          u"Report the completion status of a goal or task. Use this to explicitly mark a goal as complete, failed, or blocked with a reason. "
-                          u"This helps track progress and provides clear feedback on task outcomes."_s,
-                          QJsonObject{
-                              {u"status"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"Goal status: complete, failed, or blocked."_s}, {u"enum"_s, QJsonArray{u"complete"_s, u"failed"_s, u"blocked"_s}}}},
-                              {u"reason"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"Explanation of the outcome or why the goal is blocked/failed."_s}}},
-                          },
-                          {u"status"_s, u"reason"_s},
-                          false));
-
 
     if (access.allowAll) {
         return tools;

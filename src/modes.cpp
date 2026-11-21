@@ -59,7 +59,7 @@ QStringList builtInToolsForGroup(const QString &group)
         // Read-only debugger inspection and build target discovery also live
         // here so Ask/Architect/Plan modes can inspect a paused debug session
         // or project targets without mutating state.
-        return {u"read_file"_s, u"list_dir"_s, u"grep"_s, u"glob"_s, u"query_project_graph"_s,
+        return {u"read_file"_s, u"read_tool_result"_s, u"list_dir"_s, u"grep"_s, u"glob"_s, u"query_project_graph"_s,
                 u"write_plan_file"_s, u"suggest"_s, u"question"_s,
                 u"todo_write"_s, u"todo_read"_s, u"think"_s, u"exit_plan_mode"_s,
                 u"lsp_diagnostics"_s, u"lsp_symbols"_s, u"lsp_hover"_s,
@@ -91,6 +91,7 @@ QStringList builtInToolsForGroup(const QString &group)
 QStringList allBuiltInToolNames()
 {
     return {u"read_file"_s,
+            u"read_tool_result"_s,
             u"write_file"_s,
             u"edit_file"_s,
             u"multi_edit_file"_s,

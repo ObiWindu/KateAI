@@ -6,6 +6,7 @@
 #include "agentloop.h"
 #include "contextmanager.h"
 #include "graph/projectgraph.h"
+#include "harness/toolresults.h"
 #include "rules.h"
 
 #include <KLocalizedString>
@@ -40,6 +41,27 @@ using namespace Qt::Literals::StringLiterals;
 
 namespace KateAi
 {
+
+namespace
+{
+
+// The conversation should not receive an unbounded observation. MCP servers
+// and ACP agents can return megabytes; keep the head and tail so the model
+// sees the beginning and the final error/summary, and say what was dropped.
+QString clipObservation(const QString &text, int maxChars = 80000)
+{
+    if (text.size() <= maxChars) {
+        return text;
+    }
+    const int head = maxChars * 3 / 4;
+    const int tail = maxChars - head;
+    return text.left(head)
+        + u"\n\n… [observation truncated: %1 characters omitted; showing the first %2 and last %3] …\n\n"_s
+              .arg(text.size() - head - tail).arg(head).arg(tail)
+        + text.right(tail);
+}
+
+} // namespace
 
 QString AgentLoop::turnStateId(TurnState state)
 {
@@ -361,6 +383,7 @@ void AgentLoop::setSettings(const Settings &settings)
         || m_settings.checkpointRetention != settings.checkpointRetention;
 
     m_settings = settings;
+    m_harness = HarnessFlags::load();
     // The mode may override the sampling knobs; everything else reaches the
     // client unchanged. Kept as a copy so the override never writes back into
     // the settings the config page shows.
@@ -916,65 +939,10 @@ QString AgentLoop::systemPrompt() const
     } else if (!m_settings.extraSystemPrompt.trimmed().isEmpty()) {
         prompt += u"\n\n"_s + m_settings.extraSystemPrompt.trimmed();
     }
-    if (!m_editorContext.isEmpty() && m_settings.compressEditorContext) {
-        // Apply compression to editor context if enabled
-        QString editorContext = m_editorContext;
-        if (editorContext.length() > m_settings.maxEditorContextLength) {
-            editorContext = editorContext.left(m_settings.maxEditorContextLength) + u"... (truncated)"_s;
-        }
-        prompt += u"\n\n<editor_context>\n"_s + editorContext + u"\n</editor_context>\n"_s;
-    } else if (!m_editorContext.isEmpty()) {
-        prompt += u"\n\n<editor_context>\n"_s + m_editorContext + u"\n</editor_context>\n"_s;
-    }
     prompt += u"\nSandbox profile: "_s + sandboxProfileId(m_settings.sandbox);
     prompt += u"\nPermission mode: "_s + permissionModeId(m_settings.permissionMode);
     prompt += u"\nAgent mode: "_s + mode.id;
 
-    if (!m_workspace.isEmpty()) {
-        QDir dir(m_workspace);
-        if (dir.exists()) {
-            const QFileInfoList entries = dir.entryInfoList(QDir::AllEntries | QDir::NoDotAndDotDot, QDir::DirsFirst | QDir::Name);
-            QStringList listing;
-            int shown = 0;
-            for (const QFileInfo &info : entries) {
-                if (info.fileName() == u".git"_s || info.fileName() == u".kateai"_s) {
-                    continue;
-                }
-                listing.append((info.isDir() ? u"dir  "_s : u"file "_s) + info.fileName());
-                if (++shown >= 40) {
-                    listing.append(u"..."_s);
-                    break;
-                }
-            }
-            if (!listing.isEmpty()) {
-                prompt += u"\n\n<workspace_root>\n"_s + listing.join(u'\n') + u"\n</workspace_root>"_s;
-            }
-        }
-        QDir gitDir(m_workspace + u"/.git"_s);
-        if (gitDir.exists()) {
-            QProcess git;
-            git.setWorkingDirectory(m_workspace);
-            // Use a fixed command with no user input to prevent injection
-            git.start(u"git"_s, QStringList{u"status"_s, u"--short"_s, u"-uno"_s});
-            if (git.waitForFinished(1500)) {
-                QString status = QString::fromUtf8(git.readAllStandardOutput()).trimmed();
-                if (status.size() > 1200) {
-                    status = status.left(1200) + u"\n..."_s;
-                }
-                if (!status.isEmpty()) {
-                    prompt += u"\n\n<git_status>\n"_s + status + u"\n</git_status>"_s;
-                }
-            } else {
-                // Git command failed or timed out - silently skip git status
-                qDebug() << "Git status command failed or timed out";
-            }
-        }
-    }
-    // Validate workspace is a real directory before using it further
-    QDir workspaceDir(m_workspace);
-    if (!workspaceDir.exists()) {
-        qWarning() << "Workspace directory does not exist:" << m_workspace;
-    }
     if (m_settings.planMode) {
         prompt += u"\n\nPlan mode is active. Inspect the project and return a concise, ordered implementation plan. "
                   "Only read-only tools are available; do not claim to have changed files or run commands."_s;
@@ -1245,6 +1213,11 @@ void AgentLoop::start(const QString &userText)
     m_actionSignatures.clear();
     m_actionRepeatCounts.clear();
     m_actionsThisModelTurn.clear();
+    if (m_tools) {
+        // A new turn must not compare a write against a read from an earlier
+        // turn that the user may have edited in between.
+        m_tools->resetReadLedger();
+    }
     m_recoveryPromptCount = 0;
     m_repeatedTruncatedObservationCount = 0;
     // The verification bookkeeping belongs to a turn. Without this reset the
@@ -1285,6 +1258,72 @@ void AgentLoop::start(const QString &userText)
     scheduleNextModelStep();
 }
 
+QString AgentLoop::turnContextMessage() const
+{
+    if (!m_harness.stablePromptPrefix) {
+        return {};
+    }
+    if (m_cachedTurnContextTurnId == m_turnId && !m_cachedTurnContext.isEmpty()) {
+        return m_cachedTurnContext;
+    }
+
+    QString context;
+    if (!m_editorContext.isEmpty()) {
+        QString editor = m_editorContext;
+        if (m_settings.compressEditorContext && editor.size() > m_settings.maxEditorContextLength) {
+            editor = editor.left(m_settings.maxEditorContextLength) + u"... (truncated)"_s;
+        }
+        context += u"<editor_context>\n"_s + editor + u"\n</editor_context>\n"_s;
+    }
+
+    if (!m_workspace.isEmpty()) {
+        QDir dir(m_workspace);
+        if (dir.exists()) {
+            const QFileInfoList entries = dir.entryInfoList(QDir::AllEntries | QDir::NoDotAndDotDot,
+                                                            QDir::DirsFirst | QDir::Name);
+            QStringList listing;
+            int shown = 0;
+            for (const QFileInfo &info : entries) {
+                if (info.fileName() == u".git"_s || info.fileName() == u".kateai"_s) {
+                    continue;
+                }
+                listing.append((info.isDir() ? u"dir  "_s : u"file "_s) + info.fileName());
+                if (++shown >= 40) {
+                    listing.append(u"..."_s);
+                    break;
+                }
+            }
+            if (!listing.isEmpty()) {
+                context += u"<workspace_root>\n"_s + listing.join(u'\n') + u"\n</workspace_root>\n"_s;
+            }
+        }
+        if (QDir(m_workspace + u"/.git"_s).exists()) {
+            QProcess git;
+            git.setWorkingDirectory(m_workspace);
+            git.start(u"git"_s, QStringList{u"status"_s, u"--short"_s, u"-uno"_s});
+            if (git.waitForFinished(1500)) {
+                QString status = QString::fromUtf8(git.readAllStandardOutput()).trimmed();
+                if (status.size() > 1200) {
+                    status = status.left(1200) + u"\n..."_s;
+                }
+                if (!status.isEmpty()) {
+                    context += u"<git_status>\n"_s + status + u"\n</git_status>\n"_s;
+                }
+            }
+        }
+    }
+
+    if (context.isEmpty()) {
+        return {};
+    }
+
+    m_cachedTurnContextTurnId = m_turnId;
+    m_cachedTurnContext = u"<turn_context>\n"_s
+        + u"Ambient editor state for this request. It is not a user instruction and may change between turns.\n"_s
+        + context + u"</turn_context>\n"_s;
+    return m_cachedTurnContext;
+}
+
 QList<ChatMessage> AgentLoop::m_messagesForRequest() const
 {
     ContextManager::Options options;
@@ -1309,7 +1348,109 @@ QList<ChatMessage> AgentLoop::m_messagesForRequest() const
         const int usable = qMax(2048, options.contextWindow - options.reserveForResponse);
         options.keepRecentTokens = qMax(4000, usable / 3);
     }
-    return ContextManager::build(m_messages, options);
+    QList<ChatMessage> request = ContextManager::build(m_messages, options);
+    const QString context = turnContextMessage();
+    if (!context.isEmpty()) {
+        ChatMessage ambient;
+        ambient.role = ChatMessage::Role::User;
+        ambient.transient = true;
+        ambient.content = context;
+        // Keep the system message first; the ambient state is user context,
+        // not system instruction. It changes every turn, so placing it after
+        // the stable prefix preserves provider prompt caching for the system
+        // prompt and tool schemas.
+        const int at = (!request.isEmpty() && request.first().role == ChatMessage::Role::System) ? 1 : 0;
+        request.insert(at, ambient);
+    }
+    return request;
+}
+
+QString AgentLoop::contextReport() const
+{
+    const QString model = modelFor(m_settings);
+    const int window = m_settings.contextWindow > 0 ? m_settings.contextWindow
+                                                    : ContextManager::contextWindowFor(model);
+    const int reserve = m_settings.contextWindowReserve > 0 ? m_settings.contextWindowReserve : 8192;
+    const QList<ChatMessage> request = m_messagesForRequest();
+    const int requestTokens = ContextManager::estimateTokens(request);
+    const int historyTokens = ContextManager::estimateTokens(m_messages);
+    const int systemTokens = request.isEmpty() ? 0 : ContextManager::estimateTokens(request.first().content);
+    const int ambientTokens = ContextManager::estimateTokens(turnContextMessage());
+
+    QJsonArray definitions = toolDefinitions(activeToolAccess());
+    if (m_mcp) {
+        const QJsonArray mcpTools = m_mcp->toolDefinitions();
+        for (const QJsonValue &tool : mcpTools) {
+            definitions.append(tool);
+        }
+    }
+    const int toolSchemaChars = QJsonDocument(definitions).toJson(QJsonDocument::Compact).size();
+
+    int rulesChars = 0;
+    if (m_settings.loadAgentRules) {
+        const ModeDefinition mode = m_modes.modeOrDefault(m_settings.agentMode);
+        rulesChars = RulesLoader::render(RulesLoader::load(m_workspace, mode.id), m_settings.globalRules).size();
+    }
+    qint64 instructionsChars = 0;
+    if (m_settings.loadProjectInstructions) {
+        const QFileInfo instructions(m_workspace + u"/KATEAI.md"_s);
+        if (instructions.exists()) {
+            instructionsChars = instructions.size();
+        }
+    }
+    int graphChars = 0;
+    if (m_projectGraph && m_projectGraph->getNodeCount() > 0 && m_settings.compressProjectGraph) {
+        graphChars = m_projectGraph->contextSummary(m_settings.maxGraphNodes, m_settings.maxGraphEdges,
+                                                    m_settings.contextCompressionLevel).size();
+    }
+
+    auto kb = [](qint64 chars) { return QString::number(chars / 1024.0, 'f', 1); };
+    auto tokens = [](int value) { return QString::number(value); };
+
+    QString report;
+    report += i18n("Context window: %1 tokens (%2)\n", tokens(window), model);
+    report += i18n("Reserved for the reply: %1 tokens\n", tokens(reserve));
+    report += i18n("Request estimate: %1 tokens (level %2)\n", tokens(requestTokens + toolSchemaChars / 4),
+                   m_compactionLevel);
+    report += i18n("  system prompt: %1\n", tokens(systemTokens));
+    report += i18n("  ambient context: %1\n", tokens(ambientTokens));
+    report += i18n("  tool schemas: %1 (%2 tools, %3 KB)\n", tokens(toolSchemaChars / 4),
+                   definitions.size(), kb(toolSchemaChars));
+    report += i18n("  conversation: %1\n", tokens(historyTokens));
+    const int used = requestTokens + toolSchemaChars / 4;
+    report += i18n("  free: %1\n", tokens(qMax(0, window - reserve - used)));
+    report += u"\n"_s;
+    report += i18n("KATEAI.md: %1 KB\n", kb(instructionsChars));
+    report += i18n("Project rules: %1 KB\n", kb(rulesChars));
+    report += i18n("Editor context: %1 KB\n", kb(m_editorContext.size()));
+    report += i18n("Project graph: %1 KB\n", kb(graphChars));
+    report += i18n("Messages: %1\n", m_messages.size());
+    report += i18n("Compaction level: %1 (higher = more aggressive)\n", m_compactionLevel);
+    report += i18n("\nEstimates use ~4 characters per token and are corrected only after a provider reports usage.");
+    return report;
+}
+
+QString AgentLoop::usageReport() const
+{
+    const QString model = modelFor(m_settings);
+    const int window = m_settings.contextWindow > 0 ? m_settings.contextWindow
+                                                    : ContextManager::contextWindowFor(model);
+    QString report;
+    report += i18n("Provider: %1\n", providerId(m_settings.provider));
+    report += i18n("Model: %1\n", model.isEmpty() ? i18n("(not selected)") : model);
+    report += i18n("Mode: %1\n", m_modes.modeOrDefault(m_settings.agentMode).id);
+    report += i18n("Turn: %1 (%2)\n", m_turnId.isEmpty() ? i18n("none") : m_turnId,
+                   turnStateId(turnState()));
+    report += i18n("Model requests: %1%2\n", m_modelRequests,
+                   m_settings.maxModelRequests > 0 ? i18n(" / %1", m_settings.maxModelRequests) : QString());
+    report += i18n("Tool calls: %1%2\n", m_toolCalls,
+                   m_settings.maxToolCalls > 0 ? i18n(" / %1", m_settings.maxToolCalls) : QString());
+    report += i18n("Messages: %1\n", m_messages.size());
+    report += i18n("Context window: %1 tokens\n", window);
+    report += i18n("Estimated request: %1 tokens\n", ContextManager::estimateTokens(m_messagesForRequest()));
+    report += i18n("Recovery prompts: %1\n", m_recoveryPromptCount);
+    report += i18n("\nProvider token usage and pricing are not exposed by every transport yet; this report counts requests and estimates context locally.");
+    return report;
 }
 
 void AgentLoop::maybeCompactStoredHistory(const QList<ChatMessage> &requestMessages)
@@ -1323,15 +1464,23 @@ void AgentLoop::maybeCompactStoredHistory(const QList<ChatMessage> &requestMessa
     if (m_messages.size() <= requestMessages.size()) {
         return;
     }
+    // The ambient context message is request-only; never persist it.
+    QList<ChatMessage> persistent;
+    persistent.reserve(requestMessages.size());
+    for (const ChatMessage &message : requestMessages) {
+        if (!message.transient) {
+            persistent.append(message);
+        }
+    }
     const int storedTokens = ContextManager::estimateTokens(m_messages);
-    const int requestTokens = ContextManager::estimateTokens(requestMessages);
+    const int requestTokens = ContextManager::estimateTokens(persistent);
     // A small truncation is not worth losing the full transcript over. Once
     // compaction saves at least 30% of the prompt, adopt it as the stored
     // history so both memory and every later SQLite save shrink.
     if (storedTokens <= 0 || qint64(requestTokens) * 10 > qint64(storedTokens) * 7) {
         return;
     }
-    m_messages = requestMessages;
+    m_messages = persistent;
 }
 
 bool AgentLoop::canStartModelRequest(QString *error) const
@@ -1875,7 +2024,7 @@ QString AgentLoop::formatToolResult(const ToolCall &call, const ToolResult &resu
     }
 
     out += u"OBSERVATION:\n"_s;
-    out += result.output.trimmed().isEmpty() ? u"(no output)"_s : result.output.trimmed();
+    out += result.output.trimmed().isEmpty() ? u"(no output)"_s : clipObservation(result.output.trimmed());
     out += u"\n"_s;
 
     if (!result.ok) {
@@ -1901,6 +2050,18 @@ void AgentLoop::appendToolResult(const ToolCall &call, ToolResult result)
     result.toolCallId = call.id;
     result.name = call.name;
     result.rawOutput = result.output;  // Preserve raw output for UI display
+
+    // Large tool output is stored outside the conversation and replaced with a
+    // bounded preview. The model can page it back with read_tool_result. The
+    // raw copy remains in rawOutput for the card, but the transcript keeps the
+    // preview.
+    if (m_harness.resultBudget && call.name != u"read_tool_result"_s
+        && result.output.size() > 40000) {
+        const StoredToolResult stored = ToolResults::store(result.output);
+        if (!stored.id.isEmpty()) {
+            result.output = stored.preview;
+        }
+    }
 
     if (result.ok && (call.name == u"bash"_s || call.name == u"read_file"_s)
         && result.output.contains(u"truncated"_s, Qt::CaseInsensitive)) {
@@ -1931,6 +2092,11 @@ void AgentLoop::appendToolResult(const ToolCall &call, ToolResult result)
         }
         m_changesNeedVerification = true;
         m_verificationAttempted = false;
+        if (m_tools) {
+            // The mutation changed the files the ledger remembers; force the
+            // next write_file to re-read instead of comparing against them.
+            m_tools->resetReadLedger();
+        }
     } else if (result.ok && isVerificationForChangedFiles(call)) {
         m_verificationAttempted = true;
     }
@@ -3248,18 +3414,28 @@ void AgentLoop::dispatchSubtask(const ToolCall &call)
     connect(child, &AgentLoop::planUpdated, child, [this, state](const QJsonArray &plan) {
         Q_EMIT subtaskActivity(state->taskId, i18n("Plan updated (%1 steps)", plan.size()), false);
     });
-    // A child that asks its own question or waits for permission would stall
-    // silently: the parent never prompts for it. Surface it so the user sees
-    // why the sub-agent stopped moving.
-    connect(child, &AgentLoop::questionAsked, child, [this, state](const PermissionRequest &request) {
+    // A child that asks its own question or waits for permission cannot use
+    // the user's intent dock: the parent has no channel to route the answer
+    // back into the child's parked request. Rather than stall forever, answer
+    // the question with a clear instruction and deny approvals the child
+    // cannot justify. The activity line tells the user what happened.
+    connect(child, &AgentLoop::questionAsked, child, [this, state, child](const PermissionRequest &request) {
         const QString asked = request.questionText.trimmed().isEmpty() ? request.summary : request.questionText;
         Q_EMIT subtaskActivity(state->taskId,
-                               i18n("Needs an answer: %1", asked.left(200)), false);
+                               i18n("Answered automatically (sub-agents cannot ask you): %1", asked.left(200)), false);
+        QMetaObject::invokeMethod(child, [child]() {
+            child->answerQuestion(i18n("No interactive user is available for a sub-agent. "
+                                       "Choose the best option and continue; if you cannot, stop and "
+                                       "report exactly what you need."));
+        }, Qt::QueuedConnection);
     });
-    connect(child, &AgentLoop::permissionNeeded, child, [this, state](const PermissionRequest &request) {
+    connect(child, &AgentLoop::permissionNeeded, child, [this, state, child](const PermissionRequest &request) {
         const QString label = request.summary.isEmpty() ? request.toolName : request.summary;
         Q_EMIT subtaskActivity(state->taskId,
-                               i18n("Waiting for approval: %1", label.left(200)), false);
+                               i18n("Denied (sub-agents cannot ask you): %1", label.left(200)), false);
+        QMetaObject::invokeMethod(child, [child]() {
+            child->resolvePermission(PermissionDecision::Deny);
+        }, Qt::QueuedConnection);
     });
     connect(child, &AgentLoop::suggestionPosted, child, [this, state](const Suggestion &suggestion) {
         if (suggestion.text.trimmed().isEmpty()) {

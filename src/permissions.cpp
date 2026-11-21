@@ -48,7 +48,7 @@ bool PermissionPolicy::isReadTool(const QString &toolName) const
     // question joins them for the same reason again: it neither reads the
     // workspace nor changes it -- it asks the user something.
     const QString c = canonical;
-    return c == u"read_file"_s || c == u"list_dir"_s || c == u"grep"_s
+    return c == u"read_file"_s || c == u"read_tool_result"_s || c == u"list_dir"_s || c == u"grep"_s
         || c == u"glob"_s || c == u"query_project_graph"_s
         || c == u"web_search"_s || c == u"web_fetch"_s
         || c == u"write_plan_file"_s || c == u"suggest"_s || c == u"question"_s

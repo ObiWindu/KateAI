@@ -10,6 +10,7 @@
 #include "agentteam.h"
 #include "checkpoint.h"
 #include "documentbridge.h"
+#include "harness/harnessflags.h"
 #include "llmclient.h"
 #include "lsp.h"
 #include "mcp.h"
@@ -191,10 +192,16 @@ public:
 
     const QList<ChatMessage> &messages() const { return m_messages; }
 
-    // Session persistence
+    // --- Session persistence -------------------------------------------------
     SessionStore::SessionData sessionData() const;
     void restoreSession(const SessionStore::SessionData &data);
     void clearSession();
+
+    // Plain-text reports for ":kateai context" and ":kateai usage". Both are
+    // best-effort estimates: the provider's own usage counters are not exposed
+    // by every transport yet, so the report says what it measured.
+    QString contextReport() const;
+    QString usageReport() const;
 
     PermissionPolicy &policy() { return m_policy; }
 
@@ -320,6 +327,10 @@ private:
     void processQueue();
     void executeOne(const ToolCall &call);
     QString systemPrompt() const;
+    // Ambient editor/workspace/git state for the current request. It is added
+    // as a transient user message so the static system prefix stays stable for
+    // provider prompt caching.
+    QString turnContextMessage() const;
     QList<ToolCall> bundleSimilarTools(const QList<ToolCall> &calls);
 
     // Routes a tool call to MCP, a sub-agent, or the built-in runner.
@@ -498,6 +509,11 @@ LlmClient m_client;
     bool m_thinkingFinishedEmitted = false;
 
     QString m_currentAssistant;
+    // Per-request ambient context, cached for the turn so a long turn does not
+    // run `git status` on every model call. Keyed by turn id.
+    mutable QString m_cachedTurnContext;
+    mutable QString m_cachedTurnContextTurnId;
+    HarnessFlags m_harness;
 };
 
 } // namespace KateAi

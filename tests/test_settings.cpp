@@ -40,11 +40,9 @@ private Q_SLOTS:
         s.kiloApiKey = u"kilo-test"_s;
         s.kiloModel = u"kilo-model-test"_s;
         s.acpAgentModels = u"{\"grok\": [\"m1\"]}"_s;
-        s.messageSpeed = 1;
         s.frequencyPenalty = 0.25;
         s.presencePenalty = 0.5;
         s.toolCallTimeoutMs = 45000;
-        s.compactOnFailure = false;
         s.structuredThinking = false;
         s.structuredPlanning = false;
         s.showPlanAsChecklist = false;
@@ -52,11 +50,6 @@ private Q_SLOTS:
         s.maxPlanSteps = 4;
         s.requireVerification = false;
         s.maxVerificationAttempts = 1;
-        s.adaptiveTemperature = false;
-        s.explorationTemperature = 0.7;
-        s.exploitationTemperature = 0.05;
-        s.enablePlanUpdates = false;
-        s.narrativeProgress = false;
         s.enableAutoRetry = false;
         s.maxRetryAttempts = 1;
         s.baseRetryDelaySeconds = 1;
@@ -77,11 +70,9 @@ private Q_SLOTS:
         QCOMPARE(loaded.kiloApiKey, s.kiloApiKey);
         QCOMPARE(loaded.kiloModel, s.kiloModel);
         QCOMPARE(loaded.acpAgentModels, s.acpAgentModels);
-        QCOMPARE(loaded.messageSpeed, s.messageSpeed);
         QCOMPARE(loaded.frequencyPenalty, s.frequencyPenalty);
         QCOMPARE(loaded.presencePenalty, s.presencePenalty);
         QCOMPARE(loaded.toolCallTimeoutMs, s.toolCallTimeoutMs);
-        QCOMPARE(loaded.compactOnFailure, s.compactOnFailure);
         QCOMPARE(loaded.structuredThinking, s.structuredThinking);
         QCOMPARE(loaded.structuredPlanning, s.structuredPlanning);
         QCOMPARE(loaded.showPlanAsChecklist, s.showPlanAsChecklist);
@@ -89,11 +80,6 @@ private Q_SLOTS:
         QCOMPARE(loaded.maxPlanSteps, s.maxPlanSteps);
         QCOMPARE(loaded.requireVerification, s.requireVerification);
         QCOMPARE(loaded.maxVerificationAttempts, s.maxVerificationAttempts);
-        QCOMPARE(loaded.adaptiveTemperature, s.adaptiveTemperature);
-        QCOMPARE(loaded.explorationTemperature, s.explorationTemperature);
-        QCOMPARE(loaded.exploitationTemperature, s.exploitationTemperature);
-        QCOMPARE(loaded.enablePlanUpdates, s.enablePlanUpdates);
-        QCOMPARE(loaded.narrativeProgress, s.narrativeProgress);
         QCOMPARE(loaded.enableAutoRetry, s.enableAutoRetry);
         QCOMPARE(loaded.maxRetryAttempts, s.maxRetryAttempts);
         QCOMPARE(loaded.baseRetryDelaySeconds, s.baseRetryDelaySeconds);

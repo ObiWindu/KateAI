@@ -610,7 +610,6 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     m_speed->addItem(i18n("Slow"), 0);
     m_speed->addItem(i18n("Medium"), 1);
     m_speed->addItem(i18n("Fast"), 2);
-    agentForm->addRow(i18n("Message speed:"), m_speed);
 
     m_thinkingMode = new QCheckBox(i18n("Enable thinking mode (model outputs reasoning before answer)"), agentWidget);
     agentForm->addRow(i18n("Thinking mode:"), m_thinkingMode);
@@ -762,26 +761,10 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     m_maxVerificationAttempts->setRange(1, 5);
     agentForm->addRow(i18n("Max verification attempts:"), m_maxVerificationAttempts);
 
-    m_adaptiveTemperature = new QCheckBox(i18n("Adjust temperature based on task phase"), agentWidget);
-    agentForm->addRow(i18n("Adaptive temperature:"), m_adaptiveTemperature);
 
-    m_explorationTemperature = new QDoubleSpinBox(agentWidget);
-    m_explorationTemperature->setRange(0.0, 2.0);
-    m_explorationTemperature->setSingleStep(0.05);
-    m_explorationTemperature->setDecimals(2);
-    agentForm->addRow(i18n("Exploration temperature:"), m_explorationTemperature);
 
-    m_exploitationTemperature = new QDoubleSpinBox(agentWidget);
-    m_exploitationTemperature->setRange(0.0, 2.0);
-    m_exploitationTemperature->setSingleStep(0.05);
-    m_exploitationTemperature->setDecimals(2);
-    agentForm->addRow(i18n("Exploitation temperature:"), m_exploitationTemperature);
 
-    m_enablePlanUpdates = new QCheckBox(i18n("Allow plan updates during execution"), agentWidget);
-    agentForm->addRow(i18n("Enable plan updates:"), m_enablePlanUpdates);
 
-    m_narrativeProgress = new QCheckBox(i18n("Natural language progress narration"), agentWidget);
-    agentForm->addRow(i18n("Narrative progress:"), m_narrativeProgress);
 
     // Context management: compact older turns to fit the model window so a
     // long chat never stops prompting on a hard message cap.
@@ -1403,11 +1386,6 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     connect(m_maxPlanSteps, &QSpinBox::valueChanged, this, markChanged);
     connect(m_requireVerification, &QCheckBox::toggled, this, markChanged);
     connect(m_maxVerificationAttempts, &QSpinBox::valueChanged, this, markChanged);
-    connect(m_adaptiveTemperature, &QCheckBox::toggled, this, markChanged);
-    connect(m_explorationTemperature, &QDoubleSpinBox::valueChanged, this, markChanged);
-    connect(m_exploitationTemperature, &QDoubleSpinBox::valueChanged, this, markChanged);
-    connect(m_enablePlanUpdates, &QCheckBox::toggled, this, markChanged);
-    connect(m_narrativeProgress, &QCheckBox::toggled, this, markChanged);
 
     // Context Management
     connect(m_contextWindow, &QSpinBox::valueChanged, this, markChanged);
@@ -1802,7 +1780,6 @@ s.opencodeModel = m_opencodeModel->currentText().trimmed();
     s.completionContextPrefixChars = m_completionPrefixChars->value();
     s.completionContextSuffixChars = m_completionSuffixChars->value();
     s.completionAutoTriggerDelayMs = m_completionAutoDelay->value();
-    s.messageSpeed = m_speed->currentData().toInt();
 
     s.contextCompressionLevel = m_compressionLevel->value();
     s.maxGraphNodes = m_maxGraphNodes->value();
@@ -1833,11 +1810,6 @@ s.opencodeModel = m_opencodeModel->currentText().trimmed();
     s.maxPlanSteps = m_maxPlanSteps->value();
     s.requireVerification = m_requireVerification->isChecked();
     s.maxVerificationAttempts = m_maxVerificationAttempts->value();
-    s.adaptiveTemperature = m_adaptiveTemperature->isChecked();
-    s.explorationTemperature = m_explorationTemperature->value();
-    s.exploitationTemperature = m_exploitationTemperature->value();
-    s.enablePlanUpdates = m_enablePlanUpdates->isChecked();
-    s.narrativeProgress = m_narrativeProgress->isChecked();
 
     // Context Management
     s.contextWindow = m_contextWindow->value();
@@ -2024,7 +1996,6 @@ void KateAiConfigPage::reset()
     m_projectInstructions->setChecked(s.loadProjectInstructions);
     m_thinkingMode->setChecked(s.thinkingMode);
     m_system->setPlainText(s.extraSystemPrompt);
-    m_speed->setCurrentIndex(m_speed->findData(s.messageSpeed));
 
     m_compressionLevel->setValue(s.contextCompressionLevel);
     m_maxGraphNodes->setValue(s.maxGraphNodes);
@@ -2056,11 +2027,6 @@ void KateAiConfigPage::reset()
     m_maxPlanSteps->setValue(s.maxPlanSteps);
     m_requireVerification->setChecked(s.requireVerification);
     m_maxVerificationAttempts->setValue(s.maxVerificationAttempts);
-    m_adaptiveTemperature->setChecked(s.adaptiveTemperature);
-    m_explorationTemperature->setValue(s.explorationTemperature);
-    m_exploitationTemperature->setValue(s.exploitationTemperature);
-    m_enablePlanUpdates->setChecked(s.enablePlanUpdates);
-    m_narrativeProgress->setChecked(s.narrativeProgress);
 
     // Context Management
     m_contextWindow->setValue(s.contextWindow);

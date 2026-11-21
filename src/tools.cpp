@@ -5,6 +5,7 @@
 
 #include "tools.h"
 
+#include "harness/toolresults.h"
 #include "mcp.h"
 
 #include <QDir>
@@ -89,6 +90,20 @@ static QString clip(const QString &text, int maxChars = 80000)
     const int half = maxChars / 2;
     return text.left(half) + u"\n... truncated %1 of %2 characters ...\n"_s.arg(text.size() - maxChars).arg(text.size())
         + text.right(half);
+}
+
+// Stable identity for the read ledger: the canonical path when it exists, and
+// a cleaned absolute path otherwise. Both read and write resolve through the
+// sandbox, so the two sides agree even when the model spells the path
+// differently.
+static QString ledgerKey(const QString &path)
+{
+    const QFileInfo info(path);
+    const QString canonical = info.canonicalFilePath();
+    if (!canonical.isEmpty()) {
+        return canonical;
+    }
+    return QDir::cleanPath(info.absoluteFilePath());
 }
 
 static bool jsonBool(const QJsonValue &value, bool fallback = false)
@@ -848,6 +863,11 @@ PermissionRequest ToolRunner::describe(const ToolCall &call) const
     return req;
 }
 
+void ToolRunner::resetReadLedger()
+{
+    m_readSnapshots.clear();
+}
+
 ToolResult ToolRunner::run(const ToolCall &call)
 {
     QString parseError;
@@ -863,6 +883,9 @@ ToolResult ToolRunner::run(const ToolCall &call)
 
     if (call.name == u"read_file"_s) {
         return readFile(args);
+    }
+    if (call.name == u"read_tool_result"_s) {
+        return readToolResult(args);
     }
     if (call.name == u"write_file"_s) {
         return writeFile(args);
@@ -951,9 +974,6 @@ ToolResult ToolRunner::run(const ToolCall &call)
     if (call.name == u"terminal_run"_s) {
         return terminalRun(args);
     }
-    if (call.name == u"goal_report"_s) {
-        return goalReport(args);
-    }
     if (call.name == u"write_plan_file"_s) {
         return writePlanFile(args);
     }
@@ -984,6 +1004,41 @@ ToolResult ToolRunner::run(const ToolCall &call)
     return result;
 }
 
+ToolResult ToolRunner::readToolResult(const QJsonObject &args)
+{
+    ToolResult result;
+    result.name = u"read_tool_result"_s;
+
+    const QString id = args.value(u"id"_s).toString();
+    if (id.isEmpty()) {
+        result.ok = false;
+        result.output = u"id is required (the value shown in the truncation marker)."_s;
+        return result;
+    }
+    const qint64 offset = jsonInt(args.value(u"offset"_s), 0);
+    int limit = jsonInt(args.value(u"limit"_s), 20000);
+    limit = qBound(1, limit, 80000);
+
+    QString page;
+    qint64 total = 0;
+    QString error;
+    if (!ToolResults::read(id, offset, limit, &page, &total, &error)) {
+        result.ok = false;
+        result.output = error;
+        return result;
+    }
+    result.ok = true;
+    result.output = page;
+    const qint64 next = offset + page.size();
+    if (next < total) {
+        result.output += u"\n\n[showing characters %1-%2 of %3; continue with offset=%4]"_s
+                             .arg(offset).arg(next).arg(total).arg(next);
+    } else {
+        result.output += u"\n\n[end of stored output; %1 characters total]"_s.arg(total);
+    }
+    return result;
+}
+
 ToolResult ToolRunner::readFile(const QJsonObject &args) const
 {
     // Initialize the result structure to track success/failure
@@ -1010,6 +1065,18 @@ ToolResult ToolRunner::readFile(const QJsonObject &args) const
         result.ok = false;
         result.output = error;
         return result;
+    }
+
+    // Remember the state of the file the agent is looking at. write_file uses
+    // this to refuse an overwrite after the file changed underneath the agent.
+    // The cap keeps a multi-hundred-megabyte read from sitting in memory just
+    // for the conflict check.
+    if (m_bridge) {
+        QString full;
+        constexpr qsizetype kMaxLedgerChars = 4 * 1024 * 1024;
+        if (m_bridge->readDocument(readPath, &full) && full.size() <= kMaxLedgerChars) {
+            m_readSnapshots.insert(ledgerKey(readPath), full);
+        }
     }
 
     // A binary file cannot be read as numbered lines; say so instead of
@@ -1137,12 +1204,38 @@ ToolResult ToolRunner::writeFile(const QJsonObject &args)
     }
     const QString content = args.value(u"content"_s).toString();
 
-    // Write the content to the file through the document bridge
-    if (!m_bridge || !m_bridge->writeDocument(resolved, content, &error)) {
+    // If the agent read this file earlier in the turn, only write when it still
+    // holds exactly what the agent saw. This is optimistic concurrency: a user
+    // edit, a formatter, or another agent between the read and the write is a
+    // conflict, not something to silently clobber. A file never read this turn
+    // keeps the historical create/overwrite behaviour.
+    const QString key = ledgerKey(resolved);
+    const auto snapshot = m_readSnapshots.constFind(key);
+    if (snapshot != m_readSnapshots.constEnd()) {
+        QString current;
+        if (!m_bridge || !m_bridge->readDocument(resolved, &current)) {
+            result.ok = false;
+            result.output = u"%1 changed or disappeared after it was read. Re-read it before writing."_s.arg(path);
+            return result;
+        }
+        if (current != snapshot.value()) {
+            result.ok = false;
+            result.output = u"%1 changed after it was read. Re-read it, then apply the intended edit to the current content."_s.arg(path);
+            return result;
+        }
+        if (!m_bridge->writeDocumentIfUnchanged(resolved, current, content, &error)) {
+            result.ok = false;
+            result.output = error.isEmpty() ? u"Write failed."_s : error;
+            return result;
+        }
+    } else if (!m_bridge || !m_bridge->writeDocument(resolved, content, &error)) {
         result.ok = false;
         result.output = error.isEmpty() ? u"Write failed."_s : error;
         return result;
     }
+
+    // The file now holds the new content; the old snapshot is stale.
+    m_readSnapshots.remove(key);
     
     // Report successful write with file path and byte count
     result.output = u"Wrote %1 (%2 bytes)"_s.arg(resolved).arg(content.toUtf8().size());
@@ -2854,37 +2947,6 @@ ToolResult ToolRunner::lspCodeActions(const QJsonObject &args) const
         lines.append(u"%1. %2"_s.arg(i + 1).arg(actions.at(i)));
     }
     result.output = clip(lines.join(u'\n'));
-    return result;
-}
-
-ToolResult ToolRunner::goalReport(const QJsonObject &args)
-{
-    ToolResult result;
-    result.name = u"goal_report"_s;
-
-    const QString status = args.value(u"status"_s).toString();
-    const QString reason = args.value(u"reason"_s).toString();
-
-    if (status.isEmpty()) {
-        result.ok = false;
-        result.output = u"Goal report requires a status (complete, failed, or blocked)."_s;
-        return result;
-    }
-
-    if (status != u"complete"_s && status != u"failed"_s && status != u"blocked"_s) {
-        result.ok = false;
-        result.output = u"Invalid status: %1. Must be 'complete', 'failed', or 'blocked'."_s.arg(status);
-        return result;
-    }
-
-    if (reason.isEmpty()) {
-        result.ok = false;
-        result.output = u"Goal report requires a reason explaining the outcome."_s;
-        return result;
-    }
-
-    result.ok = true;
-    result.output = u"Goal reported as %1: %2"_s.arg(status, reason);
     return result;
 }
 

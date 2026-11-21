@@ -1136,7 +1136,6 @@ QString ToolCallWidget::iconForTool(const QString &toolName) const
     if (toolName == u"write_plan_file"_s) return u"📋"_s;
     if (toolName == u"suggest"_s) return u"💡"_s;
     if (toolName == u"question"_s) return u"❓"_s;
-    if (toolName == u"goal_report"_s) return u"🎯"_s;
     if (toolName == u"new_task"_s || toolName == u"task"_s) return u"🧩"_s;
     if (toolName.startsWith(u"mcp__"_s)) return u"🔌"_s;
     if (toolName.startsWith(u"terminal/"_s) || toolName == u"terminal"_s) return u"🖳"_s;
