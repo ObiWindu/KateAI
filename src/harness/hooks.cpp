@@ -61,9 +61,11 @@ bool matchesEventMatcher(const QString &matcher, const QJsonObject &payload)
         .hasMatch();
 }
 
-QJsonObject parseHookOutput(const QByteArray &stdout)
+// The parameter is not named "stdout": MSVC's stdio.h defines stdout as a
+// macro, which turns the declaration into a syntax error.
+QJsonObject parseHookOutput(const QByteArray &output)
 {
-    const QByteArray trimmed = stdout.trimmed();
+    const QByteArray trimmed = output.trimmed();
     if (!trimmed.startsWith('{')) {
         return {};
     }
