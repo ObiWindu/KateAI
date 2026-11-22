@@ -687,7 +687,7 @@ API keys:
 - [Grok / xAI](https://console.x.ai)
 - [OpenAI](https://platform.openai.com/api-keys)
 - [OpenRouter](https://openrouter.ai/keys)
-- OpenAI-compatible — local server URL (Ollama default `http://localhost:11434/v1`)
+- OpenAI-compatible — local server URL (Ollama default `http://localhost:11434/v1`). For Gemini with explicit cache resources, use `https://generativelanguage.googleapis.com/v1beta/openai`; Kate detects the Google host, switches to the native Gemini transport, and manages `cachedContents` for the stable prompt prefix.
 - Claude-compatible — Anthropic or compatible gateway
 - ACP — your ACP server endpoint and API key
 

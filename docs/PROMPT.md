@@ -42,7 +42,11 @@ changing session sections leaves the hash unchanged.
 
 For Anthropic-shaped transports, `LlmClient` adds one `cache_control:
 ephemeral` breakpoint after the static system prompt and one on the last tool
-schema. Other providers get a byte-stable prefix and their automatic cache.
+schema. For Gemini reached through Google's Generative Language API, it creates
+an explicit `cachedContents` resource for the system instruction, tool
+declarations, and the first exchange, then sends only the suffix with
+`cachedContent`. Other providers get a byte-stable prefix and their automatic
+cache.
 
 ## Budgets
 

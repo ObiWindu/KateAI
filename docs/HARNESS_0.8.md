@@ -63,6 +63,15 @@ by the profile. OpenAI-compatible providers that support streaming usage are
 asked for it, and Anthropic cache reads are included when calibrating the local
 token estimate.
 
+Gemini models configured through the OpenAI-compatible provider at
+`https://generativelanguage.googleapis.com/v1beta/openai` are switched to the
+native Gemini transport. Kate creates an explicit `cachedContents` resource for
+the system instruction, tool declarations, and the first exchange, keyed by
+model + prompt + tools. Later requests send only the suffix and reference the
+cache with `cachedContent`; an expired or changed cache is deleted and rebuilt.
+The native transport also emits Gemini text, thought, function-call, and usage
+events through the existing stream handler.
+
 ## Context engine
 
 `src/harness/contextengine.{h,cpp}` compacts only when needed and stops at the

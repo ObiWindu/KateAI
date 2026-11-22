@@ -206,8 +206,11 @@ AgentLoop::AgentLoop(QObject *parent)
                     m_settings.provider == Provider::ClaudeCompatible
                     || (m_settings.provider == Provider::Acp
                         && m_settings.apiFormat == ApiFormat::AnthropicCompatible);
+                // Gemini's native usage reports promptTokenCount without the
+                // cached prefix; totalTokenCount includes it.
+                const bool geminiWire = LlmClient::usesGeminiNativeTransport(m_settings);
                 const int effectiveInput = inputTokens
-                    + (anthropicWire ? cachedInputTokens : 0);
+                    + ((anthropicWire || geminiWire) ? cachedInputTokens : 0);
                 if (effectiveInput > 0 && m_lastRequestEstimate > 0) {
                     m_tokenCalibrator.observe(m_lastRequestEstimate, effectiveInput);
                 }

@@ -7,6 +7,7 @@
 
 #include "types.h"
 
+#include <QDateTime>
 #include <QHash>
 #include <QJsonArray>
 #include <QList>
@@ -99,6 +100,11 @@ public:
     // completion request and the model catalogue fetch.
     static void applyAuthHeaders(QNetworkRequest &request, ApiFormat format, const QString &key);
     static CompletionChunk parseSseLine(const QByteArray &line, QHash<int, ToolCall> *acc, bool *parsed = nullptr);
+    // A Gemini model reached through Google's Generative Language API gets the
+    // native transport, because the OpenAI-compatible facade does not expose
+    // explicit cached-content resources.
+    static bool usesGeminiNativeTransport(const Settings &settings);
+    static QString geminiNativeBaseUrl(const Settings &settings);
 
     // Retry control
     void retryLastRequest();  // Manual retry from UI
@@ -146,7 +152,32 @@ private:
     QJsonObject buildOpenAIRequest(const QList<ChatMessage> &messages, const QString &model);
     QJsonObject buildAnthropicRequest(const QList<ChatMessage> &messages, const QString &model);
     QJsonObject buildAcpNativeRequest(const QList<ChatMessage> &messages, const QString &model);
+    QJsonObject buildGeminiRequest(const QList<ChatMessage> &messages, const QString &model,
+                                   const QString &cachedContent);
+    QJsonArray messagesToGeminiJson(const QList<ChatMessage> &messages,
+                                    QString *systemInstruction) const;
     QJsonArray messagesToAnthropicJson(const QList<ChatMessage> &messages);
+
+    // Explicit Gemini cache resources. The cache holds the system instruction,
+    // tool declarations, and the first user turn; requests then carry only the
+    // suffix after that prefix.
+    struct GeminiCachePlan {
+        QString key;
+        QString systemText;
+        QJsonArray prefixContents;
+        QString cachedContent;
+        QList<ChatMessage> requestMessages;
+    };
+    GeminiCachePlan geminiCachePlan(const QList<ChatMessage> &messages,
+                                    const QString &model) const;
+    QJsonObject buildGeminiCacheRequest(const GeminiCachePlan &plan,
+                                        const QString &model) const;
+    void startGeminiCache(const QList<ChatMessage> &messages,
+                          const QString &model,
+                          const GeminiCachePlan &plan);
+    void deleteGeminiCacheResource(const QString &baseUrl, const QString &name);
+    void clearGeminiCache();
+    static QString geminiModelName(const QString &model);
     
     // Retry logic
     void scheduleRetry(const RetryContext &ctx);
@@ -189,6 +220,19 @@ private:
     int m_usageInput = 0;
     int m_usageOutput = 0;
     int m_usageCached = 0;
+
+    // The cache resource currently suitable for this conversation. There is
+    // at most one: a changed system prompt, tool set, model, or first user
+    // message invalidates it.
+    QString m_geminiCacheKey;
+    QString m_geminiCacheName;
+    QString m_geminiCacheBaseUrl;
+    QDateTime m_geminiCacheExpires;
+    QPointer<QNetworkReply> m_geminiCacheReply;
+    QString m_geminiCachePendingKey;
+    QString m_geminiCacheFailedKey;
+    bool m_geminiRequestUsedCache = false;
+
     QNetworkAccessManager m_nam;
     QNetworkReply *m_reply = nullptr;
     QList<QPointer<QNetworkReply>> m_modelReplies;

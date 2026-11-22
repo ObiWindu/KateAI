@@ -12,6 +12,11 @@
   limits, prices, cache semantics, prompt variant, and edit dialect for every
   provider. Unknown models get a conservative 32k fallback and a visible
   notice. Anthropic requests use explicit cache breakpoints.
+- **Gemini explicit cache resources.** Gemini models configured through the
+  OpenAI-compatible provider on Google's Generative Language API now use the
+  native transport. Kate creates a `cachedContents` resource for the system
+  instruction, tool declarations, and first exchange, then sends only the
+  suffix with `cachedContent`; changed or expired caches are rebuilt.
 - **Context engine v2.** Graduated shapers page oversized tool output, prune
   old output, snip old turns, merge an incremental summary, and fall back to
   full compaction. Rehydration re-attaches the plan, touched files, running
