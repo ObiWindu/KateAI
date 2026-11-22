@@ -27,6 +27,7 @@
 #include "mcp.h"
 #include "modes.h"
 #include "types.h"
+#include "voiceinput.h"
 
 #include <KLocalizedString>
 
@@ -767,16 +768,105 @@ ChatWidget::ChatWidget(QWidget *parent)
     // The status strip is now a live widget: keyboard hint while idle, elapsed
     // time and current activity while a turn runs.
     m_turnStatus = new TurnStatus(composerContainer);
-    m_turnStatus->setIdleText(i18n("Enter to send · Shift+Enter for a new line"));
+    m_turnStatus->setIdleText(i18n("Enter to send · Shift+Enter for a new line · Ctrl+Alt+V for voice"));
     m_turnStatus->setMinimumHeight(18);
     composerLayout->addWidget(m_turnStatus);
     connect(m_turnStatus, &TurnStatus::scrollToLatestRequested, this, &ChatWidget::forceScrollToBottom);
 
     root->addWidget(composerContainer);
 
+    // Voice capture, noise removal, and transcription pipeline
+    m_voiceInput = new VoiceInput(this);
+    m_micRefreshTimer = new QTimer(this);
+    m_micRefreshTimer->setInterval(8000);
+    connect(m_micRefreshTimer, &QTimer::timeout, this, [this]() {
+        if (m_voiceInput && !m_voiceInput->isActive()) {
+            m_voiceInput->refreshMicrophoneAvailability();
+        }
+    });
+    m_micRefreshTimer->start();
+
+    connect(m_voiceInput, &VoiceInput::microphoneAvailabilityChanged, this, [this](bool, const QString &) {
+        updateVoicePromptUi();
+    });
+    connect(m_voiceInput, &VoiceInput::stateChanged, this, [this](VoiceInput::State state) {
+        updateVoicePromptUi();
+        if (!m_turnStatus) {
+            return;
+        }
+        switch (state) {
+        case VoiceInput::State::Recording:
+            m_turnStatus->flash(i18n("Listening (0:00)… click mic or press Ctrl+Alt+V to send, Esc to cancel"), false);
+            break;
+        case VoiceInput::State::Denoising:
+            m_turnStatus->flash(i18n("Removing background noise…"), false);
+            break;
+        case VoiceInput::State::Transcribing:
+            m_turnStatus->flash(i18n("Transcribing voice prompt…"), false);
+            break;
+        case VoiceInput::State::Idle:
+            if (!m_agent.isBusy()) {
+                m_turnStatus->reset();
+                m_turnStatus->setIdleText(i18n("Enter to send · Shift+Enter for a new line · Ctrl+Alt+V for voice"));
+            }
+            break;
+        }
+    });
+    connect(m_voiceInput, &VoiceInput::recordingTick, this, [this](int elapsedMs) {
+        const int totalSec = std::max(0, elapsedMs / 1000);
+        const QString dur = QStringLiteral("%1:%2").arg(totalSec / 60).arg(totalSec % 60, 2, 10, QLatin1Char('0'));
+        if (m_turnStatus) {
+            m_turnStatus->flash(
+                i18n("Listening (%1)… click mic or press Ctrl+Alt+V to send, Esc to cancel", dur), false);
+        }
+        if (m_prompt) {
+            m_prompt->setVoiceVisualState(
+                PromptEdit::VoiceVisualState::Recording,
+                i18n("Recording (%1) — click or press Ctrl+Alt+V to stop and send, Esc to cancel", dur));
+        }
+    });
+    connect(m_voiceInput, &VoiceInput::transcribed, this, [this](const QString &text) {
+        const QString clean = text.trimmed();
+        if (clean.isEmpty()) {
+            showInfoMessage(i18n("No speech was detected in the recording."), false);
+            return;
+        }
+        if (m_prompt) {
+            const QString existing = m_prompt->toPlainText().trimmed();
+            m_prompt->setPlainText(existing.isEmpty() ? clean : (existing + u" "_s + clean));
+            m_prompt->moveCursor(QTextCursor::End);
+        }
+        updateSendButtonState();
+        if (m_settings.voiceAutoSend && !m_agent.isBusy() && !m_approvalPending()) {
+            submit();
+        } else {
+            if (m_prompt) {
+                m_prompt->setFocus();
+            }
+            if (m_turnStatus && !m_agent.isBusy()) {
+                m_turnStatus->flash(i18n("Voice prompt transcribed — press Enter to send"), false);
+            }
+        }
+    });
+    connect(m_voiceInput, &VoiceInput::errorOccurred, this, [this](const QString &message) {
+        showInfoMessage(message, true);
+        updateVoicePromptUi();
+    });
+    connect(m_voiceInput, &VoiceInput::cancelled, this, [this]() {
+        updateVoicePromptUi();
+        if (m_turnStatus && !m_agent.isBusy()) {
+            m_turnStatus->flash(i18n("Voice prompt cancelled"), false);
+        }
+    });
+
     // Signal connections
     connect(m_prompt, &PromptEdit::submitRequested, this, &ChatWidget::submit);
+    connect(m_prompt, &PromptEdit::voiceRequested, this, &ChatWidget::toggleVoicePrompt);
     connect(m_prompt, &PromptEdit::escapePressed, this, [this]() {
+        if (m_voiceInput && m_voiceInput->isActive()) {
+            m_voiceInput->cancel();
+            return;
+        }
         if (m_agent.isBusy()) {
             m_permissionBar->hideBar();
             m_agent.abort();
@@ -842,6 +932,13 @@ ChatWidget::ChatWidget(QWidget *parent)
     connect(nextModelShortcut, &QShortcut::activated, this, [this]() {
         cycleModel(1);
     });
+
+    // Panel-scoped voice prompt shortcut (window-wide Ctrl+Alt+V is registered
+    // on Kate's KActionCollection so both shortcuts remain unambiguous).
+    auto *voiceShortcut = new QShortcut(QKeySequence(Qt::CTRL | Qt::ALT | Qt::Key_M), this);
+    voiceShortcut->setContext(Qt::WidgetWithChildrenShortcut);
+    voiceShortcut->setObjectName(u"shortcutVoicePrompt"_s);
+    connect(voiceShortcut, &QShortcut::activated, this, &ChatWidget::toggleVoicePrompt);
     connect(m_configure, &QPushButton::clicked, this, &ChatWidget::showSettingsMenu);
     connect(m_modelSelector, &QPushButton::clicked, this, &ChatWidget::showModelMenu);
     connect(m_permissionBar, &PermissionBar::decided, this, [this](PermissionDecision decision) {
@@ -1436,7 +1533,7 @@ ChatWidget::ChatWidget(QWidget *parent)
     });
 
     connect(&m_agent, &AgentLoop::statusChanged, this, [this](const QString &status) {
-        m_turnStatus->setIdleText(i18n("Enter to send · Shift+Enter for a new line"));
+        m_turnStatus->setIdleText(i18n("Enter to send · Shift+Enter for a new line · Ctrl+Alt+V for voice"));
         m_prompt->setEnabled(!m_approvalPending());
         updateSendButtonState();
         Q_UNUSED(status)
@@ -1867,6 +1964,10 @@ ChatWidget::ChatWidget(QWidget *parent)
     restylePanel();
     updateModelSelectorLabel();
     updateTokenDisplay();
+    updateVoicePromptUi();
+    if (m_voiceInput) {
+        m_voiceInput->refreshMicrophoneAvailability();
+    }
 
     if (QCoreApplication::instance()) {
         connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit,
@@ -1885,6 +1986,13 @@ ChatWidget::~ChatWidget()
     }
     if (m_streamHeightTimer) {
         m_streamHeightTimer->stop();
+    }
+    if (m_micRefreshTimer) {
+        m_micRefreshTimer->stop();
+    }
+    if (m_voiceInput) {
+        m_voiceInput->disconnect(this);
+        m_voiceInput->cancel();
     }
 
     // Tear the model popup down here, while the members it resets still live.
@@ -3691,6 +3799,7 @@ void ChatWidget::restylePanel()
     }
     if (m_prompt) {
         m_prompt->setStyleSheet(ChatTheme::promptInput());
+        m_prompt->applyTheme();
     }
     if (m_permissionBar) {
         m_permissionBar->applyStyle();
@@ -3845,6 +3954,9 @@ void ChatWidget::setSettings(const Settings &settings)
             updated.acpAgentModels = QString::fromUtf8(QJsonDocument(agentModels).toJson(QJsonDocument::Compact));
             m_settings = updated;
             m_agent.setSettings(updated);
+            if (m_voiceInput) {
+                m_voiceInput->setSettings(updated);
+            }
             refreshProviders();
             updateModelSelectorLabel();
             updateTokenDisplay();
@@ -3881,6 +3993,9 @@ void ChatWidget::setSettings(const Settings &settings)
 
     // Propagate settings to agent
     m_agent.setSettings(settings);
+    if (m_voiceInput) {
+        m_voiceInput->setSettings(settings);
+    }
     refreshProviders();
     updateModelSelectorLabel();
     updateTokenDisplay();
@@ -5056,8 +5171,19 @@ bool ChatWidget::ensureAcpBinaryInstalled(const QString &agentId)
         if (!isBinary) {
             return false;
         }
-        if (!acpInstalledBinaryCommand(settingsForAcpAgent(agentId)).isEmpty()) {
-            if (acpAgentIsLegacyAntigravityServer(settingsForAcpAgent(agentId)) && acpNeedsPageShim()) {
+        const Settings agentSettings = settingsForAcpAgent(agentId);
+        // When Antigravity resolves to the native `agy` CLI instead of the
+        // legacy `agy_acp_server.par` archive, no archive unpack or 4KB page
+        // shim is needed.
+        if (acpAgentIsLegacyAntigravityServer(agentSettings)) {
+            const QString resolved = AcpClient::resolvedCommand(agentSettings);
+            if (!resolved.isEmpty()
+                && !QFileInfo(resolved).fileName().contains(u"agy_acp_server"_s, Qt::CaseInsensitive)) {
+                return false;
+            }
+        }
+        if (!acpInstalledBinaryCommand(agentSettings).isEmpty()) {
+            if (acpAgentIsLegacyAntigravityServer(agentSettings) && acpNeedsPageShim()) {
                 acpEnsurePageShim(acpBinaryInstallDir(agentId));
             }
             return false;
@@ -6224,6 +6350,81 @@ void ChatWidget::ask(const QString &text)
     submit();
 }
 
+bool ChatWidget::isMicrophoneAvailable() const
+{
+    return m_voiceInput && m_voiceInput->isMicrophoneAvailable();
+}
+
+void ChatWidget::refreshMicrophoneAvailability()
+{
+    if (m_voiceInput) {
+        m_voiceInput->refreshMicrophoneAvailability();
+    }
+}
+
+void ChatWidget::toggleVoicePrompt()
+{
+    if (!m_voiceInput) {
+        return;
+    }
+    if (m_voiceInput->isActive()) {
+        m_voiceInput->toggle();
+        return;
+    }
+    if (!m_voiceInput->isMicrophoneAvailable()) {
+        const QString reason = m_voiceInput->microphoneStatus().reason.trimmed();
+        showInfoMessage(reason.isEmpty() ? i18n("No microphone is available or usable.") : reason, false);
+        m_voiceInput->refreshMicrophoneAvailability();
+        return;
+    }
+    if (m_approvalPending()) {
+        showInfoMessage(i18n("Resolve the pending approval before starting voice prompting."), false);
+        return;
+    }
+    m_voiceInput->startRecording();
+}
+
+void ChatWidget::cancelVoicePrompt()
+{
+    if (m_voiceInput && m_voiceInput->isActive()) {
+        m_voiceInput->cancel();
+    }
+}
+
+void ChatWidget::updateVoicePromptUi()
+{
+    if (!m_prompt || !m_voiceInput) {
+        return;
+    }
+    const VoiceInput::MicrophoneStatus mic = m_voiceInput->microphoneStatus();
+    const QString detail = mic.available
+        ? mic.deviceName
+        : (mic.reason.isEmpty() ? i18n("No microphone is available or usable.") : mic.reason);
+    m_prompt->setVoiceAvailability(mic.available, detail, u"Ctrl+Alt+V / Ctrl+Alt+M"_s);
+
+    switch (m_voiceInput->state()) {
+    case VoiceInput::State::Idle:
+        m_prompt->setVoiceVisualState(
+            mic.available ? PromptEdit::VoiceVisualState::Idle : PromptEdit::VoiceVisualState::Unavailable);
+        break;
+    case VoiceInput::State::Recording:
+        m_prompt->setVoiceVisualState(
+            PromptEdit::VoiceVisualState::Recording,
+            i18n("Recording — click or press Ctrl+Alt+V to stop and send, Esc to cancel"));
+        break;
+    case VoiceInput::State::Denoising:
+        m_prompt->setVoiceVisualState(
+            PromptEdit::VoiceVisualState::Processing,
+            i18n("Removing background noise… click or press Esc to cancel"));
+        break;
+    case VoiceInput::State::Transcribing:
+        m_prompt->setVoiceVisualState(
+            PromptEdit::VoiceVisualState::Processing,
+            i18n("Transcribing voice prompt… click or press Esc to cancel"));
+        break;
+    }
+}
+
 QString ChatWidget::escape(const QString &text)
 {
     return text.toHtmlEscaped();
@@ -6307,6 +6508,9 @@ void ChatWidget::clearTranscriptContents()
     m_toolCardsOverride = ToolCardsOverride::Auto;
     if (m_streamHeightTimer) {
         m_streamHeightTimer->stop();
+    }
+    if (m_voiceInput && m_voiceInput->isActive()) {
+        m_voiceInput->cancel();
     }
     if (m_progressTimer) {
         m_progressTimer->stop();

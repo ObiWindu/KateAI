@@ -12,6 +12,7 @@
 class QCompleter;
 class QFrame;
 class QLabel;
+class QPushButton;
 class QStringListModel;
 class QVBoxLayout;
 
@@ -30,6 +31,13 @@ class PromptEdit : public QPlainTextEdit
     Q_OBJECT
 
 public:
+    enum class VoiceVisualState {
+        Unavailable,
+        Idle,
+        Recording,
+        Processing,
+    };
+
     explicit PromptEdit(QWidget *parent = nullptr);
 
     QSize sizeHint() const override;
@@ -41,16 +49,29 @@ public:
     // with "/". An empty list restores the plain placeholder.
     void setSlashCommands(const QList<PromptCommand> &commands);
 
+    // Microphone button embedded inside the text input area.
+    QPushButton *voiceButton() const
+    {
+        return m_voiceButton;
+    }
+    void setVoiceAvailability(bool available, const QString &detail = QString(), const QString &shortcutHint = QString());
+    void setVoiceVisualState(VoiceVisualState state, const QString &toolTip = QString());
+    void applyTheme();
+
 public Q_SLOTS:
     void autoGrow();
+
 Q_SIGNALS:
     void submitRequested();
     void escapePressed();
+    void voiceRequested();
 
 protected:
     void keyPressEvent(QKeyEvent *event) override;
     void focusInEvent(QFocusEvent *event) override;
     void focusOutEvent(QFocusEvent *event) override;
+    void resizeEvent(QResizeEvent *event) override;
+    bool event(QEvent *event) override;
     bool eventFilter(QObject *watched, QEvent *event) override;
 
 private Q_SLOTS:
@@ -64,6 +85,8 @@ private:
     // of constants so the empty height and the growth cap move together.
     int minHeight() const;
     int maxHeight() const;
+    void positionVoiceButton();
+    void updateVoiceButtonAppearance();
 
     void rebuildSlashCommandRows();
     void selectSlashCommand(int index);
@@ -74,6 +97,12 @@ private:
 
     QCompleter *m_completer = nullptr;
     QStringListModel *m_completionModel = nullptr;
+    QPushButton *m_voiceButton = nullptr;
+    VoiceVisualState m_voiceState = VoiceVisualState::Unavailable;
+    bool m_voiceAvailable = false;
+    QString m_voiceDetail;
+    QString m_voiceShortcutHint;
+    QString m_voiceToolTip;
 
     QFrame *m_commandPopup = nullptr;
     QVBoxLayout *m_commandLayout = nullptr;

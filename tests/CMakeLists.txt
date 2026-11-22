@@ -258,3 +258,13 @@ add_executable(test_historyrestore test_historyrestore.cpp ../src/chatwidget.cpp
 target_link_libraries(test_historyrestore PRIVATE kateai_core Qt6::Test Qt6::Widgets)
 target_compile_definitions(test_historyrestore PRIVATE TRANSLATION_DOMAIN="kateai")
 add_test(NAME test_historyrestore COMMAND test_historyrestore -platform offscreen)
+
+# Voice prompting: mic availability detection, DSP noise removal, HTTP/CLI
+# transcription, disabled-button hover tooltip, and chat submission wiring.
+add_executable(test_voiceinput test_voiceinput.cpp ../src/chatwidget.cpp ../src/toolcallwidget.cpp
+    ../src/promptedit.cpp ../src/permissionbar.cpp ../src/subtaskwidget.cpp ../src/subtaskdock.cpp
+    ../src/suggestionwidget.cpp ../src/questionwidget.cpp ../src/todowidget.cpp ../src/edittracker.cpp
+    ../src/turnstatus.cpp ../src/chattheme.cpp)
+target_link_libraries(test_voiceinput PRIVATE kateai_core Qt6::Test Qt6::Widgets)
+target_compile_definitions(test_voiceinput PRIVATE TRANSLATION_DOMAIN="kateai")
+add_test(NAME test_voiceinput COMMAND test_voiceinput -platform offscreen)

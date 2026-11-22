@@ -1,10 +1,13 @@
 #include "promptedit.h"
 
 #include <QFrame>
+#include <QHelpEvent>
 #include <QKeyEvent>
 #include <QLabel>
+#include <QPushButton>
 #include <QSignalSpy>
 #include <QTest>
+#include <QToolTip>
 
 using namespace Qt::Literals::StringLiterals;
 
@@ -170,6 +173,38 @@ private Q_SLOTS:
                  qPrintable(QStringLiteral("composer shrank to %1px, below the %2px floor")
                             .arg(edit.height())
                             .arg(floorHeight)));
+    }
+
+    void testVoiceButtonLivesInsidePromptAndShowsTooltipWhenDisabled()
+    {
+        PromptEdit edit;
+        edit.resize(360, 100);
+        edit.show();
+
+        QPushButton *btn = edit.voiceButton();
+        QVERIFY(btn != nullptr);
+        QCOMPARE(btn->parentWidget(), &edit);
+        QCOMPARE(btn->objectName(), u"voicePromptButton"_s);
+
+        // Disabled by default until a usable mic is confirmed.
+        QVERIFY(!btn->isEnabled());
+        QVERIFY(btn->toolTip().contains(u"No microphone"_s, Qt::CaseInsensitive));
+
+        // Hovering over the disabled mic button delivers QEvent::ToolTip to
+        // PromptEdit, which must display the informational tooltip.
+        const QPoint centerInEdit = btn->geometry().center();
+        QHelpEvent helpEvent(QEvent::ToolTip, centerInEdit, edit.mapToGlobal(centerInEdit));
+        QToolTip::hideText();
+        QVERIFY(QApplication::sendEvent(&edit, &helpEvent));
+        QCOMPARE(QToolTip::text(), btn->toolTip());
+
+        // Enabling when a mic is usable allows clicking and emits voiceRequested.
+        QSignalSpy voiceSpy(&edit, &PromptEdit::voiceRequested);
+        edit.setVoiceAvailability(true, u"USB Condenser Mic"_s, u"Ctrl+Alt+V"_s);
+        QVERIFY(btn->isEnabled());
+        QVERIFY(btn->toolTip().contains(u"USB Condenser Mic"_s));
+        btn->click();
+        QCOMPARE(voiceSpy.count(), 1);
     }
 };
 
