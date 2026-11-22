@@ -46,6 +46,16 @@ kateai_test(test_acpparsing)
 kateai_test(test_acpstreaming)
 kateai_test(test_modetools)
 kateai_test(test_harness_foundation)
+kateai_test(test_harness_events)
+kateai_test(test_harness_middleware)
+kateai_test(test_harness_checks)
+kateai_test(test_harness_policy)
+kateai_test(test_harness_hooks)
+add_executable(test_harness_verification test_harness_verification.cpp)
+target_link_libraries(test_harness_verification PRIVATE kateai_core Qt6::Test)
+add_test(NAME test_harness_verification
+         COMMAND test_harness_verification -platform offscreen
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 kateai_test(test_sessionstore)
 kateai_test(test_sessionrecovery)
 kateai_test(test_processenv)
@@ -248,3 +258,13 @@ add_executable(test_historyrestore test_historyrestore.cpp ../src/chatwidget.cpp
 target_link_libraries(test_historyrestore PRIVATE kateai_core Qt6::Test Qt6::Widgets)
 target_compile_definitions(test_historyrestore PRIVATE TRANSLATION_DOMAIN="kateai")
 add_test(NAME test_historyrestore COMMAND test_historyrestore -platform offscreen)
+
+# Voice prompting: mic availability detection, DSP noise removal, HTTP/CLI
+# transcription, disabled-button hover tooltip, and chat submission wiring.
+add_executable(test_voiceinput test_voiceinput.cpp ../src/chatwidget.cpp ../src/toolcallwidget.cpp
+    ../src/promptedit.cpp ../src/permissionbar.cpp ../src/subtaskwidget.cpp ../src/subtaskdock.cpp
+    ../src/suggestionwidget.cpp ../src/questionwidget.cpp ../src/todowidget.cpp ../src/edittracker.cpp
+    ../src/turnstatus.cpp ../src/chattheme.cpp)
+target_link_libraries(test_voiceinput PRIVATE kateai_core Qt6::Test Qt6::Widgets)
+target_compile_definitions(test_voiceinput PRIVATE TRANSLATION_DOMAIN="kateai")
+add_test(NAME test_voiceinput COMMAND test_voiceinput -platform offscreen)

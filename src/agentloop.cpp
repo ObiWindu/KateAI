@@ -7,6 +7,8 @@
 #include "contextmanager.h"
 #include "graph/projectgraph.h"
 #include "harness/toolresults.h"
+#include "harness/audit.h"
+#include "harness/replay.h"
 #include "rules.h"
 
 #include <KLocalizedString>
@@ -268,6 +270,38 @@ AgentLoop::AgentLoop(QObject *parent)
             Q_EMIT activityUpdated(i18n("Declined '%1': the active mode does not allow it.", request.toolName));
             return;
         }
+        if (m_harness.policyV2 && m_sandbox) {
+            QJsonObject arguments;
+            const QJsonDocument details = QJsonDocument::fromJson(request.details.toUtf8());
+            if (details.isObject()) {
+                arguments = details.object();
+            }
+            const PolicyDecision policy = m_policyEngine.evaluate(request.toolName, arguments,
+                                                                 *m_sandbox, m_workspace);
+            if (policy.verdict == PolicyVerdict::Deny) {
+                recordPermissionDecision(request.toolName, u"deny"_s, policy.ruleId, policy.reason);
+                m_acp.resolvePermission(PermissionDecision::Deny);
+                Q_EMIT activityUpdated(i18n("Declined '%1': %2", request.toolName, policy.reason));
+                return;
+            }
+            if (policy.verdict == PolicyVerdict::Allow) {
+                recordPermissionDecision(request.toolName, u"allow"_s, policy.ruleId, policy.reason);
+                m_acp.resolvePermission(PermissionDecision::AllowOnce);
+                return;
+            }
+            if (policy.verdict == PolicyVerdict::Ask || policy.verdict == PolicyVerdict::Review) {
+                recordPermissionDecision(request.toolName, u"ask"_s, policy.ruleId, policy.reason);
+                m_waitingCall.id = request.toolCallId;
+                m_waitingCall.name = request.toolName;
+                m_waitingRequest = request;
+                m_waitingRequest.summary = policy.reason.isEmpty()
+                    ? request.summary
+                    : request.summary + u"\n"_s + policy.reason;
+                m_state = State::WaitingForPermission;
+                Q_EMIT permissionNeeded(m_waitingRequest);
+                return;
+            }
+        }
         PermissionDecision decision = PermissionDecision::AllowOnce;
         QString reason;
         if (acpAutoDecision(request, &decision, &reason)) {
@@ -383,7 +417,7 @@ void AgentLoop::setSettings(const Settings &settings)
         || m_settings.checkpointRetention != settings.checkpointRetention;
 
     m_settings = settings;
-    m_harness = HarnessFlags::load();
+    reloadHarnessConfig();
     // The mode may override the sampling knobs; everything else reaches the
     // client unchanged. Kept as a copy so the override never writes back into
     // the settings the config page shows.
@@ -487,6 +521,7 @@ void AgentLoop::setWorkspace(const QString &workspace)
     }
     syncPermissionPolicy();
     syncToolAccess();
+    reloadHarnessConfig();
 
     if (!m_workspace.isEmpty()) {
         // A workspace change mid-turn is deferred like a sandbox change: the
@@ -649,6 +684,513 @@ void AgentLoop::syncPermissionPolicy()
     }
     m_policy.setAutoApproveTools(autoApproved);
     m_policy.setReadOnlyTools(readOnly);
+}
+
+void AgentLoop::reloadHarnessConfig()
+{
+    m_harness = HarnessFlags::load();
+    if (m_workspace.isEmpty()) {
+        return;
+    }
+
+    const bool workspaceChanged = m_harnessConfigWorkspace != m_workspace;
+    if (m_harness.policyV2) {
+        m_policyEngine.load(m_workspace);
+        if (workspaceChanged) {
+            for (const PolicyWarning &warning : m_policyEngine.warnings()) {
+                qWarning() << "KateAI: policy warning" << warning.file << warning.message;
+            }
+        }
+    } else {
+        m_policyEngine.clear();
+    }
+
+    if (m_harness.hooks) {
+        QString error;
+        m_hooks.load(m_workspace, &error);
+        if (!error.isEmpty() && m_hookLoadError != error) {
+            m_hookLoadError = error;
+            qWarning() << "KateAI: hook configuration:" << error;
+        }
+    } else {
+        m_hooks.clear();
+        m_hookLoadError.clear();
+    }
+
+    m_harnessConfigLoaded = true;
+    m_harnessConfigWorkspace = m_workspace;
+}
+
+void AgentLoop::setConversationId(const QString &conversationId)
+{
+    if (m_conversationId == conversationId) {
+        return;
+    }
+    m_conversationId = conversationId;
+    m_sessionStartRan = false;
+    m_eventLogBroken = false;
+}
+
+QString AgentLoop::conversationId() const
+{
+    return currentConversationId();
+}
+
+QString AgentLoop::currentConversationId() const
+{
+    if (!m_conversationId.isEmpty()) {
+        return m_conversationId;
+    }
+    return SessionStore::getActiveConversationId();
+}
+
+QString AgentLoop::currentStepId()
+{
+    if (m_currentStepId.isEmpty()) {
+        m_currentStepId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    }
+    return m_currentStepId;
+}
+
+void AgentLoop::emitHarnessEvent(const QString &type, const QJsonObject &payload,
+                                 const QString &stepId)
+{
+    Q_EMIT harnessEvent(type, Events::redact(payload));
+    if (!m_harness.eventLog || m_eventLogBroken) {
+        return;
+    }
+    // Only write when the UI or a host explicitly bound a conversation. A
+    // test or a headless caller without a session must not create one as a
+    // side effect of emitting an event.
+    const QString conversation = m_conversationId;
+    if (conversation.isEmpty()) {
+        return;
+    }
+    QString error;
+    if (!m_events.open(&error)) {
+        m_eventLogBroken = true;
+        qWarning() << "KateAI: the harness event log is unavailable:" << error;
+        return;
+    }
+    QList<HarnessEvent> events;
+    events.append(Events::make(type, payload, m_turnId,
+                               stepId.isEmpty() ? m_currentStepId : stepId));
+    if (!m_events.append(conversation, events, &error)) {
+        m_eventLogBroken = true;
+        qWarning() << "KateAI: cannot append a harness event:" << error;
+    }
+}
+
+bool AgentLoop::beginHarnessTurn(const QString &userText)
+{
+    m_stepNumber = 0;
+    m_currentStepId.clear();
+    m_verificationEvidenceSent = false;
+    m_pendingHookContext.clear();
+    m_middleware.clear();
+    m_verification = nullptr;
+
+    m_turnContext.begin(m_turnId, currentConversationId(), m_workspace, userText,
+                        m_settings.agentMode);
+    m_turnController.begin(&m_turnContext);
+
+    if (m_harness.eventLog && !m_conversationId.isEmpty()) {
+        QString eventError;
+        if (m_events.open(&eventError)) {
+            m_events.backfillConversation(m_conversationId);
+        } else if (!m_eventLogBroken) {
+            m_eventLogBroken = true;
+            qWarning() << "KateAI: the harness event log is unavailable:" << eventError;
+        }
+    }
+
+    if (m_harness.verificationGate) {
+        auto verification = std::make_unique<VerificationMiddleware>(
+            m_workspace, m_sandbox.get(), m_settings.maxVerificationAttempts);
+        m_verification = verification.get();
+        m_middleware.add(std::move(verification));
+    }
+    m_middleware.runTurnStart(m_turnContext);
+
+    QJsonObject payload;
+    payload.insert(u"userText"_s, userText);
+    payload.insert(u"mode"_s, m_settings.agentMode);
+    payload.insert(u"permissionMode"_s, permissionModeId(m_settings.permissionMode));
+    payload.insert(u"sandbox"_s, sandboxProfileId(m_settings.sandbox));
+    payload.insert(u"workspace"_s, m_workspace);
+    emitHarnessEvent(EventTypes::TurnStart, payload);
+
+    if (!m_harness.hooks) {
+        return true;
+    }
+
+    if (!m_sessionStartRan && m_hooks.hasHooks(u"SessionStart"_s)) {
+        m_sessionStartRan = true;
+        const HookOutcome session = m_hooks.run(u"SessionStart"_s, payload, m_sandbox.get());
+        if (session.blocked) {
+            emitHarnessEvent(EventTypes::HookDecision,
+                             QJsonObject{{u"event"_s, u"SessionStart"_s},
+                                         {u"decision"_s, u"block"_s},
+                                         {u"reason"_s, session.reason}});
+            finishWithFailure(u"A SessionStart hook blocked this session: "_s + session.reason);
+            return false;
+        }
+    }
+
+    if (m_hooks.hasHooks(u"UserPromptSubmit"_s)) {
+        const HookOutcome prompt = m_hooks.run(u"UserPromptSubmit"_s, payload, m_sandbox.get());
+        if (prompt.blocked) {
+            emitHarnessEvent(EventTypes::HookDecision,
+                             QJsonObject{{u"event"_s, u"UserPromptSubmit"_s},
+                                         {u"decision"_s, u"block"_s},
+                                         {u"reason"_s, prompt.reason}});
+            finishWithFailure(u"A UserPromptSubmit hook blocked this prompt: "_s + prompt.reason);
+            return false;
+        }
+        if (!prompt.additionalContext.isEmpty()) {
+            m_pendingHookContext += prompt.additionalContext;
+        }
+    }
+    return true;
+}
+
+void AgentLoop::endHarnessTurn(const QString &status, const QString &detail)
+{
+    QJsonObject payload;
+    payload.insert(u"status"_s, status);
+    if (!detail.isEmpty()) {
+        payload.insert(u"detail"_s, detail);
+    }
+    payload.insert(u"modelRequests"_s, m_modelRequests);
+    payload.insert(u"toolCalls"_s, m_toolCalls);
+    payload.insert(u"changedPaths"_s, QJsonArray::fromStringList(m_turnContext.changedPaths.values()));
+    emitHarnessEvent(EventTypes::TurnEnd, payload);
+    m_middleware.runTurnEnd(m_turnContext);
+}
+
+void AgentLoop::recordPermissionDecision(const QString &toolName, const QString &decision,
+                                         const QString &ruleId, const QString &reason)
+{
+    if (!m_harness.policyV2 && !m_harness.eventLog) {
+        return;
+    }
+    QJsonObject payload;
+    payload.insert(u"tool"_s, toolName);
+    payload.insert(u"decision"_s, decision);
+    payload.insert(u"ruleId"_s, ruleId);
+    payload.insert(u"reason"_s, reason);
+    emitHarnessEvent(EventTypes::PermissionDecision, payload);
+    AuditLog::recordPermission(m_turnId, toolName, decision, ruleId, reason);
+}
+
+bool AgentLoop::applyPreToolHooks(ToolCall &call)
+{
+    if (!m_harness.hooks || !m_hooks.hasHooks(u"PreToolUse"_s)) {
+        return true;
+    }
+    QJsonObject arguments = effectiveArgs(call);
+    QJsonObject tool;
+    tool.insert(u"name"_s, call.name);
+    tool.insert(u"arguments"_s, arguments);
+    QJsonObject payload;
+    payload.insert(u"tool"_s, tool);
+
+    const HookOutcome outcome = m_hooks.run(u"PreToolUse"_s, payload, m_sandbox.get());
+    if (!outcome.warnings.isEmpty()) {
+        for (const QString &warning : outcome.warnings) {
+            Q_EMIT noticeRaised(u"Hook warning: "_s + warning);
+        }
+    }
+    if (outcome.blocked) {
+        emitHarnessEvent(EventTypes::HookDecision,
+                         QJsonObject{{u"event"_s, u"PreToolUse"_s},
+                                     {u"tool"_s, call.name},
+                                     {u"decision"_s, u"block"_s},
+                                     {u"reason"_s, outcome.reason}});
+        ToolResult result;
+        result.ok = false;
+        result.output = u"Tool denied by a PreToolUse hook: "_s + outcome.reason;
+        appendToolResult(call, result);
+        return false;
+    }
+    if (!outcome.updatedInput.isEmpty()) {
+        if (call.arguments.isEmpty()) {
+            call.arguments = arguments;
+        }
+        for (auto it = outcome.updatedInput.constBegin(); it != outcome.updatedInput.constEnd(); ++it) {
+            call.arguments.insert(it.key(), it.value());
+        }
+        // Keep the raw JSON consistent for consumers that read it first.
+        if (!call.argumentsJson.isEmpty()) {
+            call.argumentsJson = QString::fromUtf8(
+                QJsonDocument(call.arguments).toJson(QJsonDocument::Compact));
+        }
+        emitHarnessEvent(EventTypes::HookDecision,
+                         QJsonObject{{u"event"_s, u"PreToolUse"_s},
+                                     {u"tool"_s, call.name},
+                                     {u"decision"_s, u"updated-input"_s}});
+    }
+    if (!outcome.additionalContext.isEmpty()) {
+        m_pendingHookContext += outcome.additionalContext + u'\n';
+    }
+    return true;
+}
+
+void AgentLoop::applyPostToolHooks(const ToolCall &call, ToolResult &result)
+{
+    if (!m_harness.hooks) {
+        return;
+    }
+    const QString event = result.ok ? u"PostToolUse"_s : u"PostToolUseFailure"_s;
+    if (!m_hooks.hasHooks(event)) {
+        return;
+    }
+    QJsonObject tool;
+    tool.insert(u"name"_s, call.name);
+    tool.insert(u"arguments"_s, effectiveArgs(call));
+    QJsonObject resultObject;
+    resultObject.insert(u"ok"_s, result.ok);
+    resultObject.insert(u"output"_s, result.output.left(4000));
+    QJsonObject payload;
+    payload.insert(u"tool"_s, tool);
+    payload.insert(u"result"_s, resultObject);
+
+    const HookOutcome outcome = m_hooks.run(event, payload, m_sandbox.get());
+    if (outcome.blocked || outcome.failed) {
+        emitHarnessEvent(EventTypes::HookDecision,
+                         QJsonObject{{u"event"_s, event},
+                                     {u"tool"_s, call.name},
+                                     {u"decision"_s, outcome.blocked ? u"block"_s : u"failed"_s},
+                                     {u"reason"_s, outcome.reason}});
+        result.output += u"\n[%1 hook] %2"_s.arg(event, outcome.reason);
+    }
+    if (!outcome.additionalContext.isEmpty()) {
+        result.output += u"\n[%1 hook] %2"_s.arg(event, outcome.additionalContext);
+    }
+}
+
+bool AgentLoop::runStopHooks()
+{
+    if (!m_harness.hooks || !m_hooks.hasHooks(u"Stop"_s)) {
+        return false;
+    }
+    QString summary;
+    for (auto it = m_messages.crbegin(); it != m_messages.crend(); ++it) {
+        if (it->role == ChatMessage::Role::Assistant && !it->content.trimmed().isEmpty()) {
+            summary = it->content;
+            break;
+        }
+    }
+    QJsonObject payload;
+    payload.insert(u"reason"_s, u"stop"_s);
+    payload.insert(u"summary"_s, summary.left(4000));
+    payload.insert(u"changedPaths"_s, QJsonArray::fromStringList(m_turnContext.changedPaths.values()));
+
+    const HookOutcome outcome = m_hooks.run(u"Stop"_s, payload, m_sandbox.get());
+    if (outcome.blocked) {
+        ++m_turnContext.stopHookAttempts;
+        emitHarnessEvent(EventTypes::HookDecision,
+                         QJsonObject{{u"event"_s, u"Stop"_s},
+                                     {u"decision"_s, u"block"_s},
+                                     {u"reason"_s, outcome.reason},
+                                     {u"attempt"_s, m_turnContext.stopHookAttempts}});
+        if (m_turnContext.stopHookAttempts >= 3) {
+            Q_EMIT noticeRaised(u"The Stop hook still blocks completion after three attempts: "_s
+                                + outcome.reason);
+            return false;
+        }
+        appendControllerMessage(u"[KateAI Stop hook] "_s + outcome.reason
+                                + u"\nAddress this before finishing the turn."_s);
+        m_state = State::WaitingForNextModel;
+        scheduleNextModelStep();
+        return true;
+    }
+    if (!outcome.additionalContext.isEmpty()) {
+        appendControllerMessage(u"[KateAI Stop hook] "_s + outcome.additionalContext);
+        m_state = State::WaitingForNextModel;
+        scheduleNextModelStep();
+        return true;
+    }
+    return false;
+}
+
+void AgentLoop::flushHookContext()
+{
+    if (m_pendingHookContext.trimmed().isEmpty()) {
+        return;
+    }
+    appendControllerMessage(u"[KateAI hook context] "_s + m_pendingHookContext.trimmed());
+    m_pendingHookContext.clear();
+}
+
+bool AgentLoop::runVerificationGate()
+{
+    if (!m_harness.verificationGate || !m_settings.requireVerification
+        || !m_changesNeedVerification || m_verificationEvidenceSent) {
+        return false;
+    }
+    if (!m_verification) {
+        auto verification = std::make_unique<VerificationMiddleware>(
+            m_workspace, m_sandbox.get(), m_settings.maxVerificationAttempts);
+        m_verification = verification.get();
+        m_middleware.add(std::move(verification));
+    }
+    if (m_verification->plan().isEmpty()) {
+        const CheckPlan plan = CheckDiscovery::discover(
+            m_workspace, m_turnContext.changedPaths.values());
+        if (plan.isEmpty()) {
+            return false;
+        }
+        m_verification->setPlan(plan);
+    }
+
+    const MiddlewareResult result = m_middleware.runStop(m_turnContext);
+    if (result.flow == MiddlewareFlow::Retry) {
+        m_verificationAttempted = true;
+        emitHarnessEvent(EventTypes::Verification,
+                         QJsonObject{{u"passed"_s, false},
+                                     {u"attempt"_s, m_turnContext.verificationAttempts},
+                                     {u"evidence"_s, result.reason}});
+        appendControllerMessage(u"[KateAI verification] "_s + result.reason
+                                + u"\nFix the failure, then complete the task. Do not claim success without evidence."_s);
+        m_state = State::WaitingForNextModel;
+        scheduleNextModelStep();
+        return true;
+    }
+    if (result.flow == MiddlewareFlow::Stop) {
+        emitHarnessEvent(EventTypes::Verification,
+                         QJsonObject{{u"passed"_s, false},
+                                     {u"attempt"_s, m_turnContext.verificationAttempts},
+                                     {u"evidence"_s, result.reason}});
+        Q_EMIT noticeRaised(u"Verification did not pass; finishing with a failure notice. "_s
+                            + result.reason);
+        finishTurn();
+        return true;
+    }
+    if (result.flow == MiddlewareFlow::Continue && m_turnContext.verificationPassed) {
+        const QString evidence = CheckRunner::evidence(m_verification->lastResults());
+        m_changesNeedVerification = false;
+        m_verificationAttempted = true;
+        m_verificationEvidenceSent = true;
+        emitHarnessEvent(EventTypes::Verification,
+                         QJsonObject{{u"passed"_s, true},
+                                     {u"attempt"_s, m_turnContext.verificationAttempts},
+                                     {u"evidence"_s, evidence.left(8000)}});
+        appendControllerMessage(u"[KateAI verification] The configured checks passed. "
+                                u"Finish with a short summary that cites this evidence:\n"_s
+                                + evidence.left(6000));
+        m_state = State::WaitingForNextModel;
+        scheduleNextModelStep();
+        return true;
+    }
+    return false;
+}
+
+QString AgentLoop::verificationReport()
+{
+    const CheckPlan plan = CheckDiscovery::discover(m_workspace, {});
+    if (plan.isEmpty()) {
+        return u"No verification commands were discovered for this workspace."_s;
+    }
+    const QList<CheckResult> results = CheckRunner::run(m_workspace, plan, m_sandbox.get());
+    QStringList lines;
+    lines.append(u"Sources: %1"_s.arg(plan.sources.join(u", "_s)));
+    for (const CheckResult &result : results) {
+        lines.append(result.summary());
+    }
+    lines.append(QString());
+    lines.append(CheckRunner::evidence(results));
+    return lines.join(u'\n');
+}
+
+QString AgentLoop::policyReport() const
+{
+    QStringList lines;
+    lines.append(u"Policy engine: %1"_s.arg(m_harness.policyV2 ? u"on"_s : u"off"_s));
+    lines.append(u"Files: %1"_s.arg(m_policyEngine.loadedFiles().isEmpty()
+                                      ? u"(none)"_s
+                                      : m_policyEngine.loadedFiles().join(u", "_s)));
+    if (m_policyEngine.rules().isEmpty()) {
+        lines.append(u"Rules: none"_s);
+    } else {
+        for (const PolicyRule &rule : m_policyEngine.rules()) {
+            lines.append(u"- %1 [%2] %3 — %4"_s.arg(rule.id, rule.scope,
+                                                    policyVerdictId(rule.verdict), rule.reason));
+        }
+    }
+    for (const PolicyWarning &warning : m_policyEngine.warnings()) {
+        lines.append(u"Warning: %1: %2"_s.arg(warning.file, warning.message));
+    }
+    lines.append(u"Hardline: immutable (deny-first, survives always-approve)"_s);
+    return lines.join(u'\n');
+}
+
+QString AgentLoop::hooksReport() const
+{
+    QStringList lines;
+    lines.append(u"Hooks: %1"_s.arg(m_harness.hooks ? u"on"_s : u"off"_s));
+    lines.append(u"Project hooks trusted: %1"_s.arg(m_hooks.projectTrusted() ? u"yes"_s : u"no"_s));
+    const QStringList ids = m_hooks.hookIds();
+    if (ids.isEmpty()) {
+        lines.append(u"Configured hooks: none"_s);
+    } else {
+        lines.append(u"Configured hooks:"_s);
+        for (const QString &id : ids) {
+            lines.append(u"- "_s + id);
+        }
+    }
+    if (!m_hookLoadError.isEmpty()) {
+        lines.append(u"Warning: "_s + m_hookLoadError);
+    }
+    if (!m_hooks.projectTrusted()) {
+        lines.append(u"Use :kateai trust-hooks to approve this project's hooks."_s);
+    }
+    return lines.join(u'\n');
+}
+
+bool AgentLoop::trustProjectHooks()
+{
+    if (!m_harness.hooks || m_workspace.isEmpty()) {
+        return false;
+    }
+    m_hooks.setProjectTrusted(true);
+    const bool saved = m_hooks.saveProjectTrust();
+    if (saved) {
+        Q_EMIT noticeRaised(u"Project hooks are now trusted for this workspace."_s);
+    }
+    return saved;
+}
+
+bool AgentLoop::exportTrace(const QString &path, QString *error)
+{
+    if (!m_harness.eventLog) {
+        if (error) {
+            *error = u"The event log is disabled; enable the eventLog harness flag."_s;
+        }
+        return false;
+    }
+    const QString conversation = currentConversationId();
+    if (conversation.isEmpty()) {
+        if (error) {
+            *error = u"There is no active conversation to export."_s;
+        }
+        return false;
+    }
+    QString localError;
+    if (!m_events.open(&localError)) {
+        if (error) {
+            *error = localError;
+        }
+        return false;
+    }
+    const QList<HarnessEvent> events = m_events.read(conversation, 0, -1, &localError);
+    if (!localError.isEmpty()) {
+        if (error) {
+            *error = localError;
+        }
+        return false;
+    }
+    return Replay::exportJsonl(events, path, error);
 }
 
 void AgentLoop::syncToolAccess()
@@ -1154,6 +1696,8 @@ void AgentLoop::abort()
     appendCancelledToolResults();
 
     if (hadActiveTurn) {
+        m_turnController.interrupt(&m_turnContext);
+        endHarnessTurn(u"interrupted"_s, u"The user stopped the turn."_s);
         Q_EMIT statusChanged(u"Stopped"_s);
         Q_EMIT turnFinished();
     }
@@ -1194,6 +1738,9 @@ void AgentLoop::start(const QString &userText)
     setTurnState(TurnState::Preparing);
 
     if (usesAcpNative(m_settings)) {
+        if (!beginHarnessTurn(userText)) {
+            return;
+        }
         startAcpTurn(userText);
         return;
     }
@@ -1255,6 +1802,9 @@ void AgentLoop::start(const QString &userText)
     Q_EMIT userMessage(userText);
     Q_EMIT activityUpdated(u"I’ll inspect the relevant parts of the project and work through the task step by step."_s);
 
+    if (!beginHarnessTurn(userText)) {
+        return;
+    }
     scheduleNextModelStep();
 }
 
@@ -1449,6 +1999,15 @@ QString AgentLoop::usageReport() const
     report += i18n("Context window: %1 tokens\n", window);
     report += i18n("Estimated request: %1 tokens\n", ContextManager::estimateTokens(m_messagesForRequest()));
     report += i18n("Recovery prompts: %1\n", m_recoveryPromptCount);
+    report += i18n("Harness flags: %1\n", m_harness.enabledNames().isEmpty()
+                                            ? i18n("none")
+                                            : m_harness.enabledNames().join(u", "_s));
+    report += i18n("Policy rules: %1 (hardline floor is always on)\n", m_policyEngine.rules().size());
+    report += i18n("Hooks: %1 configured, project %2\n", m_hooks.hookIds().size(),
+                   m_hooks.projectTrusted() ? i18n("trusted") : i18n("untrusted"));
+    report += i18n("Event log: %1 conversation %2\n",
+                   m_harness.eventLog ? i18n("on") : i18n("off"),
+                   currentConversationId().isEmpty() ? i18n("(none)") : currentConversationId());
     report += i18n("\nProvider token usage and pricing are not exposed by every transport yet; this report counts requests and estimates context locally.");
     return report;
 }
@@ -1480,6 +2039,11 @@ void AgentLoop::maybeCompactStoredHistory(const QList<ChatMessage> &requestMessa
     if (storedTokens <= 0 || qint64(requestTokens) * 10 > qint64(storedTokens) * 7) {
         return;
     }
+    emitHarnessEvent(EventTypes::Compaction,
+                     QJsonObject{{u"beforeTokens"_s, storedTokens},
+                                 {u"afterTokens"_s, requestTokens},
+                                 {u"beforeMessages"_s, m_messages.size()},
+                                 {u"afterMessages"_s, persistent.size()}});
     m_messages = persistent;
 }
 
@@ -1597,6 +2161,36 @@ void AgentLoop::sendToModel()
 
     const QList<ChatMessage> requestMessages = m_messagesForRequest();
     maybeCompactStoredHistory(requestMessages);
+
+    ++m_stepNumber;
+    m_currentStepId = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    QString phaseError;
+    m_turnController.transition(&m_turnContext, TurnPhase::ModelWait, &phaseError);
+    const MiddlewareResult stepResult = m_middleware.runStepStart(m_turnContext, m_stepNumber);
+    if (!stepResult.continues()) {
+        emitHarnessEvent(EventTypes::Notice,
+                         QJsonObject{{u"source"_s, stepResult.ruleId},
+                                     {u"message"_s, stepResult.reason}});
+        Q_EMIT noticeRaised(stepResult.reason);
+        finishTurn();
+        return;
+    }
+
+    int requestChars = 0;
+    for (const ChatMessage &message : requestMessages) {
+        requestChars += message.content.size() + message.thinking.size();
+    }
+    QJsonObject stepPayload;
+    stepPayload.insert(u"step"_s, m_stepNumber);
+    stepPayload.insert(u"provider"_s, providerId(m_settings.provider));
+    stepPayload.insert(u"modelRequests"_s, m_turnContext.modelRequests);
+    emitHarnessEvent(EventTypes::StepStart, stepPayload);
+    QJsonObject headerPayload;
+    headerPayload.insert(u"messages"_s, requestMessages.size());
+    headerPayload.insert(u"estimatedTokens"_s, requestChars / 4);
+    headerPayload.insert(u"provider"_s, providerId(m_settings.provider));
+    headerPayload.insert(u"permissionMode"_s, permissionModeId(m_settings.permissionMode));
+    emitHarnessEvent(EventTypes::RequestHeaders, headerPayload);
 
     ++m_modelRequests;
     m_currentAssistant.clear();
@@ -1745,6 +2339,28 @@ void AgentLoop::onAcpPromptFinished(const QString &stopReason, const QString &te
     assistant.plan = m_currentPlan;
     assistant.toolCalls = toolCalls;
     m_messages.append(assistant);
+    {
+        QJsonObject payload;
+        payload.insert(u"text"_s, text.left(16000));
+        if (!m_currentThinking.isEmpty()) {
+            payload.insert(u"thinking"_s, m_currentThinking.left(4000));
+        }
+        QJsonArray calls;
+        for (const QJsonValue &value : toolCalls) {
+            const QJsonObject call = value.toObject();
+            QJsonObject encoded;
+            encoded.insert(u"id"_s, call.value(u"id"_s).toString());
+            const QJsonObject function = call.value(u"function"_s).toObject();
+            encoded.insert(u"name"_s,
+                           function.value(u"name"_s).toString(call.value(u"name"_s).toString()));
+            encoded.insert(u"arguments"_s, function.value(u"arguments"_s).toString());
+            calls.append(encoded);
+        }
+        if (!calls.isEmpty()) {
+            payload.insert(u"toolCalls"_s, calls);
+        }
+        emitHarnessEvent(EventTypes::AssistantMessage, payload);
+    }
 
     if (!m_thinkingFinishedEmitted && !m_currentThinking.isEmpty()) {
         m_thinkingFinishedEmitted = true;
@@ -2068,8 +2684,18 @@ void AgentLoop::appendToolResult(const ToolCall &call, ToolResult result)
         ++m_repeatedTruncatedObservationCount;
     }
 
+    applyPostToolHooks(call, result);
     result.output = formatToolResult(call, result);
     m_pendingResults.append(result);
+    {
+        QJsonObject payload;
+        payload.insert(u"toolCallId"_s, call.id);
+        payload.insert(u"name"_s, call.name);
+        payload.insert(u"ok"_s, result.ok);
+        payload.insert(u"cancelled"_s, result.cancelled);
+        payload.insert(u"output"_s, result.output.left(8000));
+        emitHarnessEvent(EventTypes::ToolResult, payload);
+    }
     Q_EMIT toolFinished(result);
 
     if (result.ok && isMutationTool(call.name)) {
@@ -2089,9 +2715,16 @@ void AgentLoop::appendToolResult(const ToolCall &call, ToolResult result)
         m_actionRepeatCounts.clear();
         for (const QString &path : mutationPathsForCall(call)) {
             m_changedPaths.insert(lockKeyForPath(path));
+            m_turnContext.noteMutation(path);
         }
         m_changesNeedVerification = true;
         m_verificationAttempted = false;
+        // A new mutation invalidates earlier verification evidence. Without
+        // this reset a second edit after a passing check would finish
+        // unverified.
+        m_verificationEvidenceSent = false;
+        m_turnContext.verificationPassed = false;
+        m_turnContext.verificationAttempts = 0;
         if (m_tools) {
             // The mutation changed the files the ledger remembers; force the
             // next write_file to re-read instead of comparing against them.
@@ -2228,6 +2861,29 @@ void AgentLoop::onFinished(const QString &text, const QList<ToolCall> &toolCalls
     }
 
     m_messages.append(assistant);
+    {
+        QJsonObject payload;
+        payload.insert(u"text"_s, text.left(16000));
+        if (!m_currentThinking.isEmpty()) {
+            payload.insert(u"thinking"_s, m_currentThinking.left(4000));
+        }
+        if (!toolCalls.isEmpty()) {
+            QJsonArray calls;
+            for (const ToolCall &call : toolCalls) {
+                QJsonObject encoded;
+                encoded.insert(u"id"_s, call.id);
+                encoded.insert(u"name"_s, call.name);
+                encoded.insert(u"arguments"_s,
+                               call.argumentsJson.isEmpty()
+                                   ? QString::fromUtf8(QJsonDocument(call.arguments)
+                                                           .toJson(QJsonDocument::Compact))
+                                   : call.argumentsJson);
+                calls.append(encoded);
+            }
+            payload.insert(u"toolCalls"_s, calls);
+        }
+        emitHarnessEvent(EventTypes::AssistantMessage, payload);
+    }
     // The answer is committed to the transcript now. Keeping it in
     // m_currentAssistant as well would make a session that is saved during the
     // tool phase hold the same text twice, and the restore would show the
@@ -2262,6 +2918,12 @@ void AgentLoop::onFinished(const QString &text, const QList<ToolCall> &toolCalls
     // without at least one verification attempt. One controller turn is
     // allowed to force the model back into the inspect/test loop.
     if (toolCalls.isEmpty()) {
+        if (runStopHooks()) {
+            return;
+        }
+        if (runVerificationGate()) {
+            return;
+        }
         if (m_changesNeedVerification && !m_verificationAttempted && m_verificationPromptCount < 1) {
             requestVerificationTurn();
             return;
@@ -2329,6 +2991,8 @@ void AgentLoop::finishWithFailure(const QString &error)
     // The assistant message may carry tool calls that never produced a
     // result. Without one, the next request is rejected by the provider.
     appendCancelledToolResults();
+    m_turnController.fail(&m_turnContext);
+    endHarnessTurn(u"failed"_s, error);
     Q_EMIT failed(error);
     Q_EMIT turnFinished();
 }
@@ -2352,6 +3016,8 @@ void AgentLoop::finishTurn()
     m_busy = false;
     m_state = State::Idle;
     setTurnState(TurnState::Completed);
+    m_turnController.complete(&m_turnContext);
+    endHarnessTurn(u"completed"_s);
     m_queue.clear();
     m_pendingResults.clear();
     m_waitingCall = {};
@@ -2423,6 +3089,7 @@ void AgentLoop::processQueue()
             Q_EMIT activityUpdated(summarizeCompletedWork());
         }
         appendToolResultsToConversation();
+        flushHookContext();
         if (m_repeatedTruncatedObservationCount >= 4) {
             finishWithFailure(u"Stopped after repeated successful tool calls returned truncated output. Use a bounded file range or focused search, then continue from that observation."_s);
             return;
@@ -2437,6 +3104,10 @@ void AgentLoop::processQueue()
     // use the same spelling. Otherwise "Read", "patch" or "terminal/exec"
     // passes the mode check and then fails as an unknown tool.
     call.name = canonicalToolName(call.name);
+    if (!applyPreToolHooks(call)) {
+        processQueue();
+        return;
+    }
     executeOne(call);
 }
 
@@ -2580,10 +3251,40 @@ void AgentLoop::executeOne(const ToolCall &call)
     // or that never executed must be re-askable without being reported as a
     // duplicate of itself.
     const PermissionRequest request = describeTool(call);
+    {
+        QJsonObject payload;
+        payload.insert(u"toolCallId"_s, call.id);
+        payload.insert(u"name"_s, call.name);
+        payload.insert(u"arguments"_s, effectiveArgs(call));
+        emitHarnessEvent(EventTypes::ToolCall, payload);
+    }
     QString reason;
-    const auto verdict = m_policy.evaluate(call.name, effectiveArgs(call), *m_sandbox, &reason);
+    const auto legacyVerdict = m_policy.evaluate(call.name, effectiveArgs(call), *m_sandbox, &reason);
+    PolicyDecision policyDecision;
+    if (m_harness.policyV2) {
+        policyDecision = m_policyEngine.evaluate(call.name, effectiveArgs(call), *m_sandbox,
+                                                 m_workspace);
+    }
 
-    if (verdict == PermissionPolicy::Verdict::Deny) {
+    const bool denied = legacyVerdict == PermissionPolicy::Verdict::Deny
+        || policyDecision.verdict == PolicyVerdict::Deny;
+    const bool asked = !denied && policyDecision.verdict != PolicyVerdict::Allow
+        && (legacyVerdict == PermissionPolicy::Verdict::Ask
+            || policyDecision.verdict == PolicyVerdict::Ask
+            || policyDecision.verdict == PolicyVerdict::Review);
+    if (policyDecision.verdict == PolicyVerdict::Deny) {
+        reason = policyDecision.reason;
+    } else if (policyDecision.verdict == PolicyVerdict::Ask
+               || policyDecision.verdict == PolicyVerdict::Review) {
+        reason = policyDecision.reason;
+    }
+    const QString decisionId = denied ? u"deny"_s : (asked ? u"ask"_s : u"allow"_s);
+    const QString ruleId = policyDecision.verdict == PolicyVerdict::NoMatch
+        ? u"legacy"_s
+        : policyDecision.ruleId;
+    recordPermissionDecision(call.name, decisionId, ruleId, reason);
+
+    if (denied) {
         ToolResult result;
         result.ok = false;
         result.output = u"Tool denied: "_s + reason;
@@ -2592,7 +3293,7 @@ void AgentLoop::executeOne(const ToolCall &call)
         return;
     }
 
-    if (verdict == PermissionPolicy::Verdict::Ask) {
+    if (asked) {
         m_waitingCall = call;
         m_waitingRequest = request;
         m_state = State::WaitingForPermission;
@@ -3684,6 +4385,7 @@ void AgentLoop::resolvePermission(PermissionDecision decision, const QString &to
     m_waitingRequest = {};
 
     if (decision == PermissionDecision::Deny) {
+        recordPermissionDecision(call.name, u"deny"_s, u"user"_s, u"User denied the call."_s);
         ToolResult result;
         result.ok = false;
         result.output = u"User denied this tool call. Continue the task without assuming the denied action happened."_s;
@@ -3698,6 +4400,10 @@ void AgentLoop::resolvePermission(PermissionDecision decision, const QString &to
     if (decision == PermissionDecision::AllowSession) {
         m_policy.grantSession(call.name);
     }
+    recordPermissionDecision(call.name,
+                             decision == PermissionDecision::AllowSession ? u"allow-session"_s
+                                                                          : u"allow-once"_s,
+                             u"user"_s, u"The user approved the call."_s);
 
     if (m_settings.maxToolCalls > 0 && m_toolCalls >= m_settings.maxToolCalls) {
         ToolResult result;

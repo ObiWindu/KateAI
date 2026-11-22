@@ -60,6 +60,7 @@ Settings SettingsStore::load()
     s.acpApiKey = cred(u"acp-api-key"_s, u"AcpApiKey"_s, g);
     s.acpInstalledAgents = g.readEntry(u"AcpInstalledAgents"_s, QString());
     s.acpAgentModels = g.readEntry(u"AcpAgentModels"_s, QString());
+    s.acpAgentCommands = g.readEntry(u"AcpAgentCommands"_s, QString());
     // Models are read from the provider, not hard-coded here; an empty entry
     // simply means "not chosen yet" and the fetched catalogue fills it in.
     s.grokModel = g.readEntry(u"GrokModel"_s, QString());
@@ -185,6 +186,20 @@ Settings SettingsStore::load()
     }
     s.themePreset = g.readEntry(u"ThemePreset"_s, QStringLiteral("kateai-dark"));
     s.themeOverrides = g.readEntry(u"ThemeOverrides"_s, QString());
+    // Voice prompting
+    s.voiceProvider = g.readEntry(u"VoiceProvider"_s, QStringLiteral("auto"));
+    if (s.voiceProvider != u"auto"_s && s.voiceProvider != u"openai"_s
+        && s.voiceProvider != u"openai_compatible"_s && s.voiceProvider != u"local_cli"_s) {
+        s.voiceProvider = QStringLiteral("auto");
+    }
+    s.voiceApiKey = cred(u"voice-api-key"_s, u"VoiceApiKey"_s, g);
+    s.voiceEndpoint = g.readEntry(u"VoiceEndpoint"_s, QString());
+    s.voiceModel = g.readEntry(u"VoiceModel"_s, QStringLiteral("whisper-1"));
+    s.voiceLanguage = g.readEntry(u"VoiceLanguage"_s, QString());
+    s.voiceLocalCommand = g.readEntry(u"VoiceLocalCommand"_s, QString());
+    s.voiceInputDevice = g.readEntry(u"VoiceInputDevice"_s, QString());
+    s.voiceNoiseRemoval = g.readEntry(u"VoiceNoiseRemoval"_s, true);
+    s.voiceAutoSend = g.readEntry(u"VoiceAutoSend"_s, true);
     // Behavioural toggles and budgets. These used to be dropped by save(), so
     // any value the UI wrote reverted to the struct default on the next start.
     s.toolCallTimeoutMs = g.readEntry(u"ToolCallTimeoutMs"_s, 120000);
@@ -342,6 +357,7 @@ void SettingsStore::save(const Settings &settings)
     g.deleteEntry(u"AcpApiKey"_s);
     g.writeEntry(u"AcpInstalledAgents"_s, settings.acpInstalledAgents);
     g.writeEntry(u"AcpAgentModels"_s, settings.acpAgentModels);
+    g.writeEntry(u"AcpAgentCommands"_s, settings.acpAgentCommands);
     storeCredential(u"opencode-api-key"_s, settings.opencodeApiKey);
     g.deleteEntry(u"OpenCodeApiKey"_s);
     g.writeEntry(u"OpenCodeModel"_s, settings.opencodeModel);
@@ -441,6 +457,17 @@ void SettingsStore::save(const Settings &settings)
     g.writeEntry(u"ThemeSource"_s, settings.themeSource);
     g.writeEntry(u"ThemePreset"_s, settings.themePreset);
     g.writeEntry(u"ThemeOverrides"_s, settings.themeOverrides);
+    // Voice prompting
+    g.writeEntry(u"VoiceProvider"_s, settings.voiceProvider);
+    storeCredential(u"voice-api-key"_s, settings.voiceApiKey);
+    g.deleteEntry(u"VoiceApiKey"_s);
+    g.writeEntry(u"VoiceEndpoint"_s, settings.voiceEndpoint);
+    g.writeEntry(u"VoiceModel"_s, settings.voiceModel);
+    g.writeEntry(u"VoiceLanguage"_s, settings.voiceLanguage);
+    g.writeEntry(u"VoiceLocalCommand"_s, settings.voiceLocalCommand);
+    g.writeEntry(u"VoiceInputDevice"_s, settings.voiceInputDevice);
+    g.writeEntry(u"VoiceNoiseRemoval"_s, settings.voiceNoiseRemoval);
+    g.writeEntry(u"VoiceAutoSend"_s, settings.voiceAutoSend);
     // Keep every field the UI can write, so a restart restores the same
     // configuration instead of silently falling back to struct defaults.
     g.writeEntry(u"ToolCallTimeoutMs"_s, settings.toolCallTimeoutMs);

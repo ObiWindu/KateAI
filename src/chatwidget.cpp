@@ -27,6 +27,7 @@
 #include "mcp.h"
 #include "modes.h"
 #include "types.h"
+#include "voiceinput.h"
 
 #include <KLocalizedString>
 
@@ -388,6 +389,54 @@ bool restoredResultWasCancelled(const QString &output)
         || lower.contains(u"cancelled before it finished"_s)
         || lower.startsWith(u"cancelled: turn stopped"_s);
 }
+
+// ACP advertises slash commands as {name, description} objects, but older
+// agents and extensions use "command" for the name. Both the live notification
+// and the per-agent cache go through this one converter so they cannot drift.
+QList<KateAi::PromptCommand> promptCommandsFromJson(const QJsonArray &commands)
+{
+    QList<KateAi::PromptCommand> result;
+    for (const QJsonValue &value : commands) {
+        const QJsonObject command = value.toObject();
+        KateAi::PromptCommand promptCommand;
+        promptCommand.name = command.value(u"name"_s).toString();
+        if (promptCommand.name.isEmpty()) {
+            promptCommand.name = command.value(u"command"_s).toString();
+        }
+        promptCommand.name = promptCommand.name.trimmed();
+        promptCommand.description = command.value(u"description"_s).toString().simplified();
+        if (!promptCommand.name.isEmpty()) {
+            result.append(promptCommand);
+        }
+    }
+    return result;
+}
+
+// The commands the agent advertised the last time it ran. A fresh window has
+// no live session yet, so this is what lets "/" show the real list (with
+// descriptions) from the first keystroke instead of after the first turn.
+QList<KateAi::PromptCommand> cachedAcpCommands(const KateAi::Settings &settings, const QString &agentId)
+{
+    if (agentId.isEmpty()) {
+        return {};
+    }
+    const QJsonDocument doc = QJsonDocument::fromJson(settings.acpAgentCommands.toUtf8());
+    if (!doc.isObject()) {
+        return {};
+    }
+    return promptCommandsFromJson(doc.object().value(agentId).toArray());
+}
+
+// Returns the command cache with one agent's list replaced. The caller compares
+// the result with the stored value before persisting, so an agent that repeats
+// the same list on every turn does not churn the settings file.
+QString withCachedAcpCommands(const QString &cache, const QString &agentId, const QJsonArray &commands)
+{
+    QJsonDocument doc = QJsonDocument::fromJson(cache.toUtf8());
+    QJsonObject all = doc.isObject() ? doc.object() : QJsonObject();
+    all.insert(agentId, commands);
+    return QString::fromUtf8(QJsonDocument(all).toJson(QJsonDocument::Compact));
+}
 } // namespace
 
 namespace KateAi
@@ -721,6 +770,11 @@ ChatWidget::ChatWidget(QWidget *parent)
     composerCardLayout->setSpacing(2);
 
     m_prompt = new PromptEdit(composerCard);
+    // The slash-command list is an overlay of the whole panel: it has to cover
+    // the transcript above the composer, not just the input card. Parenting it
+    // to the chat widget (rather than to the top-level window) also keeps it in
+    // front of the panel's own children once raised.
+    m_prompt->setCommandPopupHost(this);
     composerCardLayout->addWidget(m_prompt);
 
     auto *bottomRow = new QHBoxLayout;
@@ -739,20 +793,7 @@ ChatWidget::ChatWidget(QWidget *parent)
     // call to action.
     bottomRow->addWidget(m_thinking);
 
-    m_agentCommandsButton = new QPushButton(i18n("cmds"), composerCard);
-    m_agentCommandsButton->setCursor(Qt::PointingHandCursor);
-    m_agentCommandsButton->setFixedHeight(26);
-    m_agentCommandsButton->setToolTip(i18n("Slash commands advertised by the active ACP agent"));
-    m_agentCommandsButton->hide();
-    connect(m_agentCommandsButton, &QPushButton::clicked, this, &ChatWidget::showAgentCommandsMenu);
-    bottomRow->addWidget(m_agentCommandsButton);
-
     bottomRow->addStretch();
-
-    m_tokenCount = new QLabel(composerCard);
-    m_tokenCount->setObjectName(u"tokenCount"_s);
-    m_tokenCount->hide();
-    bottomRow->addWidget(m_tokenCount);
 
     // Thinking mode toggle button
     m_thinking->setParent(composerCard);
@@ -775,16 +816,119 @@ ChatWidget::ChatWidget(QWidget *parent)
     // The status strip is now a live widget: keyboard hint while idle, elapsed
     // time and current activity while a turn runs.
     m_turnStatus = new TurnStatus(composerContainer);
-    m_turnStatus->setIdleText(i18n("Enter to send · Shift+Enter for a new line"));
+    m_turnStatus->setIdleText(i18n("Enter to send · Shift+Enter for a new line · Ctrl+Alt+V for voice"));
     m_turnStatus->setMinimumHeight(18);
-    composerLayout->addWidget(m_turnStatus);
+
+    // The context readout shares the strip below the input card, pinned to its
+    // right edge. It used to sit in the card's control row, which made it read
+    // as part of the composer buttons and squeezed the model selector.
+    auto *statusRow = new QHBoxLayout;
+    statusRow->setContentsMargins(0, 0, 0, 0);
+    statusRow->setSpacing(8);
+    statusRow->addWidget(m_turnStatus, 1);
+
+    m_tokenCount = new QLabel(composerContainer);
+    m_tokenCount->setObjectName(u"tokenCount"_s);
+    m_tokenCount->hide();
+    statusRow->addWidget(m_tokenCount, 0, Qt::AlignRight | Qt::AlignVCenter);
+
+    composerLayout->addLayout(statusRow);
     connect(m_turnStatus, &TurnStatus::scrollToLatestRequested, this, &ChatWidget::forceScrollToBottom);
 
     root->addWidget(composerContainer);
 
+    // Voice capture, noise removal, and transcription pipeline
+    m_voiceInput = new VoiceInput(this);
+    m_micRefreshTimer = new QTimer(this);
+    m_micRefreshTimer->setInterval(8000);
+    connect(m_micRefreshTimer, &QTimer::timeout, this, [this]() {
+        if (m_voiceInput && !m_voiceInput->isActive()) {
+            m_voiceInput->refreshMicrophoneAvailability();
+        }
+    });
+    m_micRefreshTimer->start();
+
+    connect(m_voiceInput, &VoiceInput::microphoneAvailabilityChanged, this, [this](bool, const QString &) {
+        updateVoicePromptUi();
+    });
+    connect(m_voiceInput, &VoiceInput::stateChanged, this, [this](VoiceInput::State state) {
+        updateVoicePromptUi();
+        if (!m_turnStatus) {
+            return;
+        }
+        switch (state) {
+        case VoiceInput::State::Recording:
+            m_turnStatus->flash(i18n("Listening (0:00)… click mic or press Ctrl+Alt+V to send, Esc to cancel"), false);
+            break;
+        case VoiceInput::State::Denoising:
+            m_turnStatus->flash(i18n("Removing background noise…"), false);
+            break;
+        case VoiceInput::State::Transcribing:
+            m_turnStatus->flash(i18n("Transcribing voice prompt…"), false);
+            break;
+        case VoiceInput::State::Idle:
+            if (!m_agent.isBusy()) {
+                m_turnStatus->reset();
+                m_turnStatus->setIdleText(i18n("Enter to send · Shift+Enter for a new line · Ctrl+Alt+V for voice"));
+            }
+            break;
+        }
+    });
+    connect(m_voiceInput, &VoiceInput::recordingTick, this, [this](int elapsedMs) {
+        const int totalSec = std::max(0, elapsedMs / 1000);
+        const QString dur = QStringLiteral("%1:%2").arg(totalSec / 60).arg(totalSec % 60, 2, 10, QLatin1Char('0'));
+        if (m_turnStatus) {
+            m_turnStatus->flash(
+                i18n("Listening (%1)… click mic or press Ctrl+Alt+V to send, Esc to cancel", dur), false);
+        }
+        if (m_prompt) {
+            m_prompt->setVoiceVisualState(
+                PromptEdit::VoiceVisualState::Recording,
+                i18n("Recording (%1) — click or press Ctrl+Alt+V to stop and send, Esc to cancel", dur));
+        }
+    });
+    connect(m_voiceInput, &VoiceInput::transcribed, this, [this](const QString &text) {
+        const QString clean = text.trimmed();
+        if (clean.isEmpty()) {
+            showInfoMessage(i18n("No speech was detected in the recording."), false);
+            return;
+        }
+        if (m_prompt) {
+            const QString existing = m_prompt->toPlainText().trimmed();
+            m_prompt->setPlainText(existing.isEmpty() ? clean : (existing + u" "_s + clean));
+            m_prompt->moveCursor(QTextCursor::End);
+        }
+        updateSendButtonState();
+        if (m_settings.voiceAutoSend && !m_agent.isBusy() && !m_approvalPending()) {
+            submit();
+        } else {
+            if (m_prompt) {
+                m_prompt->setFocus();
+            }
+            if (m_turnStatus && !m_agent.isBusy()) {
+                m_turnStatus->flash(i18n("Voice prompt transcribed — press Enter to send"), false);
+            }
+        }
+    });
+    connect(m_voiceInput, &VoiceInput::errorOccurred, this, [this](const QString &message) {
+        showInfoMessage(message, true);
+        updateVoicePromptUi();
+    });
+    connect(m_voiceInput, &VoiceInput::cancelled, this, [this]() {
+        updateVoicePromptUi();
+        if (m_turnStatus && !m_agent.isBusy()) {
+            m_turnStatus->flash(i18n("Voice prompt cancelled"), false);
+        }
+    });
+
     // Signal connections
     connect(m_prompt, &PromptEdit::submitRequested, this, &ChatWidget::submit);
+    connect(m_prompt, &PromptEdit::voiceRequested, this, &ChatWidget::toggleVoicePrompt);
     connect(m_prompt, &PromptEdit::escapePressed, this, [this]() {
+        if (m_voiceInput && m_voiceInput->isActive()) {
+            m_voiceInput->cancel();
+            return;
+        }
         if (m_agent.isBusy()) {
             m_permissionBar->hideBar();
             m_agent.abort();
@@ -850,6 +994,13 @@ ChatWidget::ChatWidget(QWidget *parent)
     connect(nextModelShortcut, &QShortcut::activated, this, [this]() {
         cycleModel(1);
     });
+
+    // Panel-scoped voice prompt shortcut (window-wide Ctrl+Alt+V is registered
+    // on Kate's KActionCollection so both shortcuts remain unambiguous).
+    auto *voiceShortcut = new QShortcut(QKeySequence(Qt::CTRL | Qt::ALT | Qt::Key_M), this);
+    voiceShortcut->setContext(Qt::WidgetWithChildrenShortcut);
+    voiceShortcut->setObjectName(u"shortcutVoicePrompt"_s);
+    connect(voiceShortcut, &QShortcut::activated, this, &ChatWidget::toggleVoicePrompt);
     connect(m_configure, &QPushButton::clicked, this, &ChatWidget::showSettingsMenu);
     connect(m_modelSelector, &QPushButton::clicked, this, &ChatWidget::showModelMenu);
     connect(m_permissionBar, &PermissionBar::decided, this, [this](PermissionDecision decision) {
@@ -1444,7 +1595,7 @@ ChatWidget::ChatWidget(QWidget *parent)
     });
 
     connect(&m_agent, &AgentLoop::statusChanged, this, [this](const QString &status) {
-        m_turnStatus->setIdleText(i18n("Enter to send · Shift+Enter for a new line"));
+        m_turnStatus->setIdleText(i18n("Enter to send · Shift+Enter for a new line · Ctrl+Alt+V for voice"));
         m_prompt->setEnabled(!m_approvalPending());
         updateSendButtonState();
         Q_UNUSED(status)
@@ -1531,17 +1682,31 @@ ChatWidget::ChatWidget(QWidget *parent)
         updateSendButtonState();
     });
 
-    // Slash commands advertised by the live ACP agent: show a button that
-    // inserts the selected command into the prompt.
+    // Slash commands advertised by the live ACP agent. They are offered as an
+    // in-input hint: typing "/" as the first character opens a filtered list
+    // above the cursor, with each command's description.
     connect(m_agent.acpClient(), &AcpClient::availableCommandsChanged, this, [this](const QJsonArray &commands) {
-        m_agentCommands = commands;
-        if (!m_agentCommandsButton) {
+        const QList<PromptCommand> advertised = promptCommandsFromJson(commands);
+        // A stop or a session reset clears the live list; fall back to the
+        // agent's cache so "/" keeps working while the next session starts.
+        m_prompt->setSlashCommands(advertised.isEmpty() && usesAcpNative(m_settings)
+                                       ? cachedAcpCommands(m_settings, m_settings.acpAgentId)
+                                       : advertised);
+        if (usesAcpNative(m_settings)) {
+            m_acpCommandsAgentId = m_settings.acpAgentId;
+        }
+        if (advertised.isEmpty() || !usesAcpNative(m_settings) || m_settings.acpAgentId.isEmpty()) {
             return;
         }
-        m_agentCommandsButton->setVisible(!commands.isEmpty());
-        if (!commands.isEmpty()) {
-            m_agentCommandsButton->setText(i18n("cmds (%1)", commands.size()));
+        // Remember the list for the next window. Commands belong to the agent,
+        // not to one conversation, so the key is the agent id.
+        const QJsonDocument doc = QJsonDocument::fromJson(m_settings.acpAgentCommands.toUtf8());
+        const QJsonObject all = doc.isObject() ? doc.object() : QJsonObject();
+        if (all.value(m_settings.acpAgentId).toArray() == commands) {
+            return;
         }
+        m_settings.acpAgentCommands = withCachedAcpCommands(m_settings.acpAgentCommands, m_settings.acpAgentId, commands);
+        Q_EMIT settingsChanged(m_settings);
     });
 
     // Retry status from LlmClient - show in info bar with bright brown/orange
@@ -1867,6 +2032,10 @@ ChatWidget::ChatWidget(QWidget *parent)
     restylePanel();
     updateModelSelectorLabel();
     updateTokenDisplay();
+    updateVoicePromptUi();
+    if (m_voiceInput) {
+        m_voiceInput->refreshMicrophoneAvailability();
+    }
 
     if (QCoreApplication::instance()) {
         connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit,
@@ -1885,6 +2054,13 @@ ChatWidget::~ChatWidget()
     }
     if (m_streamHeightTimer) {
         m_streamHeightTimer->stop();
+    }
+    if (m_micRefreshTimer) {
+        m_micRefreshTimer->stop();
+    }
+    if (m_voiceInput) {
+        m_voiceInput->disconnect(this);
+        m_voiceInput->cancel();
     }
 
     // Tear the model popup down here, while the members it resets still live.
@@ -1942,6 +2118,7 @@ void ChatWidget::saveCurrentConversation()
             m_currentConversationId = SessionStore::createNewConversation();
         }
     }
+    m_agent.setConversationId(m_currentConversationId);
 
     const bool isNew = SessionStore::saveConversation(
         m_currentConversationId, sessionData, QString(),
@@ -3518,37 +3695,56 @@ void ChatWidget::showUsageReport()
     box.exec();
 }
 
-void ChatWidget::showAgentCommandsMenu()
+void ChatWidget::showVerificationReport()
 {
-    if (m_agentCommands.isEmpty()) {
-        return;
-    }
-    QMenu menu(this);
-    for (const QJsonValue &value : std::as_const(m_agentCommands)) {
-        const QJsonObject command = value.toObject();
-        QString name = command.value(u"name"_s).toString();
-        if (name.isEmpty()) {
-            name = command.value(u"command"_s).toString();
-        }
-        name = name.trimmed();
-        if (name.isEmpty()) {
-            continue;
-        }
-        if (!name.startsWith(u'/')) {
-            name.prepend(u'/');
-        }
-        const QString description = command.value(u"description"_s).toString().simplified();
-        QAction *action = menu.addAction(description.isEmpty() ? name
-                                                               : i18n("%1 — %2", name, description));
-        connect(action, &QAction::triggered, this, [this, name]() {
-            m_prompt->insertPlainText(name + u" "_s);
-            m_prompt->setFocus();
-        });
-    }
-    if (menu.isEmpty() || !m_agentCommandsButton) {
-        return;
-    }
-    menu.exec(m_agentCommandsButton->mapToGlobal(QPoint(0, m_agentCommandsButton->height())));
+    QMessageBox box(this);
+    box.setWindowTitle(i18n("Kate AI Verification"));
+    box.setIcon(QMessageBox::Information);
+    box.setTextFormat(Qt::PlainText);
+    box.setText(m_agent.verificationReport());
+    box.setStandardButtons(QMessageBox::Close);
+    box.exec();
+}
+
+void ChatWidget::showPolicyReport()
+{
+    QMessageBox box(this);
+    box.setWindowTitle(i18n("Kate AI Policy"));
+    box.setIcon(QMessageBox::Information);
+    box.setTextFormat(Qt::PlainText);
+    box.setText(m_agent.policyReport());
+    box.setStandardButtons(QMessageBox::Close);
+    box.exec();
+}
+
+void ChatWidget::showHooksReport()
+{
+    QMessageBox box(this);
+    box.setWindowTitle(i18n("Kate AI Hooks"));
+    box.setIcon(QMessageBox::Information);
+    box.setTextFormat(Qt::PlainText);
+    box.setText(m_agent.hooksReport());
+    box.setStandardButtons(QMessageBox::Close);
+    box.exec();
+}
+
+void ChatWidget::showTraceReport()
+{
+    const QString conversation = m_agent.conversationId();
+    const QString fileName = conversation.isEmpty()
+        ? u"kateai-trace.jsonl"_s
+        : u"kateai-trace-%1.jsonl"_s.arg(conversation);
+    const QString path = QDir(QDir::tempPath()).filePath(fileName);
+    QString error;
+    const bool ok = m_agent.exportTrace(path, &error);
+    QMessageBox box(this);
+    box.setWindowTitle(i18n("Kate AI Trace"));
+    box.setIcon(ok ? QMessageBox::Information : QMessageBox::Warning);
+    box.setTextFormat(Qt::PlainText);
+    box.setText(ok ? i18n("Exported the harness event log to:\n%1", path)
+                   : i18n("Could not export the trace:\n%1", error));
+    box.setStandardButtons(QMessageBox::Close);
+    box.exec();
 }
 
 void ChatWidget::showInfoMessage(const QString &message, bool isError){
@@ -3627,7 +3823,7 @@ void ChatWidget::restylePanel()
     if (m_threadTitle) {
         m_threadTitle->setStyleSheet(ChatTheme::headerTitle());
     }
-    for (auto *chip : {m_modelSelector, m_modeButton, m_permissionButton, m_agentCommandsButton}) {
+    for (auto *chip : {m_modelSelector, m_modeButton, m_permissionButton}) {
         if (chip) {
             chip->setStyleSheet(ChatTheme::chipButton());
         }
@@ -3671,6 +3867,7 @@ void ChatWidget::restylePanel()
     }
     if (m_prompt) {
         m_prompt->setStyleSheet(ChatTheme::promptInput());
+        m_prompt->applyTheme();
     }
     if (m_permissionBar) {
         m_permissionBar->applyStyle();
@@ -3809,6 +4006,29 @@ void ChatWidget::setSettings(const Settings &settings)
         || settings.themePreset != m_settings.themePreset
         || settings.themeOverrides != m_settings.themeOverrides;
 
+    // The "/" hint belongs to the ACP composer. It is shown as soon as an ACP
+    // agent is selected, not only after a live session advertised its command
+    // list: a restored conversation starts with no process running, and the
+    // hint would otherwise be missing until the first turn finished.
+    const bool acpCommands = usesAcpNative(settings);
+    m_prompt->setSlashCommandHintEnabled(acpCommands);
+    // Commands arrive with a live session, which a freshly opened window does
+    // not have. Seed the composer from the agent's cached list so "/" opens the
+    // real menu right away; a non-ACP provider must not keep offering the
+    // outgoing agent's commands.
+    if (!acpCommands) {
+        m_prompt->setSlashCommands({});
+        m_acpCommandsAgentId.clear();
+    } else {
+        const QList<PromptCommand> cached = cachedAcpCommands(settings, settings.acpAgentId);
+        // An empty cache on an unchanged agent must not wipe a list the live
+        // session just advertised; an agent switch still clears the old one.
+        if (!cached.isEmpty() || m_acpCommandsAgentId != settings.acpAgentId) {
+            m_prompt->setSlashCommands(cached);
+            m_acpCommandsAgentId = settings.acpAgentId;
+        }
+    }
+
     // Detect ACP agent configuration changes and invalidate the cached model list
     // so the next model picker opens a fresh fetch (Zed-style dynamic loading).
     if (usesAcpNative(settings) && usesAcpNative(m_settings)) {
@@ -3824,7 +4044,12 @@ void ChatWidget::setSettings(const Settings &settings)
             Settings updated = settings;
             updated.acpAgentModels = QString::fromUtf8(QJsonDocument(agentModels).toJson(QJsonDocument::Compact));
             m_settings = updated;
+            // The composer was seeded from the new agent's cache above; the
+            // outgoing agent's list must not linger under the new one.
             m_agent.setSettings(updated);
+            if (m_voiceInput) {
+                m_voiceInput->setSettings(updated);
+            }
             refreshProviders();
             updateModelSelectorLabel();
             updateTokenDisplay();
@@ -3861,6 +4086,9 @@ void ChatWidget::setSettings(const Settings &settings)
 
     // Propagate settings to agent
     m_agent.setSettings(settings);
+    if (m_voiceInput) {
+        m_voiceInput->setSettings(settings);
+    }
     refreshProviders();
     updateModelSelectorLabel();
     updateTokenDisplay();
@@ -5036,8 +5264,19 @@ bool ChatWidget::ensureAcpBinaryInstalled(const QString &agentId)
         if (!isBinary) {
             return false;
         }
-        if (!acpInstalledBinaryCommand(settingsForAcpAgent(agentId)).isEmpty()) {
-            if (acpAgentIsLegacyAntigravityServer(settingsForAcpAgent(agentId)) && acpNeedsPageShim()) {
+        const Settings agentSettings = settingsForAcpAgent(agentId);
+        // When Antigravity resolves to the native `agy` CLI instead of the
+        // legacy `agy_acp_server.par` archive, no archive unpack or 4KB page
+        // shim is needed.
+        if (acpAgentIsLegacyAntigravityServer(agentSettings)) {
+            const QString resolved = AcpClient::resolvedCommand(agentSettings);
+            if (!resolved.isEmpty()
+                && !QFileInfo(resolved).fileName().contains(u"agy_acp_server"_s, Qt::CaseInsensitive)) {
+                return false;
+            }
+        }
+        if (!acpInstalledBinaryCommand(agentSettings).isEmpty()) {
+            if (acpAgentIsLegacyAntigravityServer(agentSettings) && acpNeedsPageShim()) {
                 acpEnsurePageShim(acpBinaryInstallDir(agentId));
             }
             return false;
@@ -6204,6 +6443,81 @@ void ChatWidget::ask(const QString &text)
     submit();
 }
 
+bool ChatWidget::isMicrophoneAvailable() const
+{
+    return m_voiceInput && m_voiceInput->isMicrophoneAvailable();
+}
+
+void ChatWidget::refreshMicrophoneAvailability()
+{
+    if (m_voiceInput) {
+        m_voiceInput->refreshMicrophoneAvailability();
+    }
+}
+
+void ChatWidget::toggleVoicePrompt()
+{
+    if (!m_voiceInput) {
+        return;
+    }
+    if (m_voiceInput->isActive()) {
+        m_voiceInput->toggle();
+        return;
+    }
+    if (!m_voiceInput->isMicrophoneAvailable()) {
+        const QString reason = m_voiceInput->microphoneStatus().reason.trimmed();
+        showInfoMessage(reason.isEmpty() ? i18n("No microphone is available or usable.") : reason, false);
+        m_voiceInput->refreshMicrophoneAvailability();
+        return;
+    }
+    if (m_approvalPending()) {
+        showInfoMessage(i18n("Resolve the pending approval before starting voice prompting."), false);
+        return;
+    }
+    m_voiceInput->startRecording();
+}
+
+void ChatWidget::cancelVoicePrompt()
+{
+    if (m_voiceInput && m_voiceInput->isActive()) {
+        m_voiceInput->cancel();
+    }
+}
+
+void ChatWidget::updateVoicePromptUi()
+{
+    if (!m_prompt || !m_voiceInput) {
+        return;
+    }
+    const VoiceInput::MicrophoneStatus mic = m_voiceInput->microphoneStatus();
+    const QString detail = mic.available
+        ? mic.deviceName
+        : (mic.reason.isEmpty() ? i18n("No microphone is available or usable.") : mic.reason);
+    m_prompt->setVoiceAvailability(mic.available, detail, u"Ctrl+Alt+V / Ctrl+Alt+M"_s);
+
+    switch (m_voiceInput->state()) {
+    case VoiceInput::State::Idle:
+        m_prompt->setVoiceVisualState(
+            mic.available ? PromptEdit::VoiceVisualState::Idle : PromptEdit::VoiceVisualState::Unavailable);
+        break;
+    case VoiceInput::State::Recording:
+        m_prompt->setVoiceVisualState(
+            PromptEdit::VoiceVisualState::Recording,
+            i18n("Recording — click or press Ctrl+Alt+V to stop and send, Esc to cancel"));
+        break;
+    case VoiceInput::State::Denoising:
+        m_prompt->setVoiceVisualState(
+            PromptEdit::VoiceVisualState::Processing,
+            i18n("Removing background noise… click or press Esc to cancel"));
+        break;
+    case VoiceInput::State::Transcribing:
+        m_prompt->setVoiceVisualState(
+            PromptEdit::VoiceVisualState::Processing,
+            i18n("Transcribing voice prompt… click or press Esc to cancel"));
+        break;
+    }
+}
+
 QString ChatWidget::escape(const QString &text)
 {
     return text.toHtmlEscaped();
@@ -6287,6 +6601,9 @@ void ChatWidget::clearTranscriptContents()
     m_toolCardsOverride = ToolCardsOverride::Auto;
     if (m_streamHeightTimer) {
         m_streamHeightTimer->stop();
+    }
+    if (m_voiceInput && m_voiceInput->isActive()) {
+        m_voiceInput->cancel();
     }
     if (m_progressTimer) {
         m_progressTimer->stop();
@@ -7288,6 +7605,7 @@ void ChatWidget::switchToConversation(const QString &conversationId)
     m_editTracker->clear();
     m_currentConversationId = conversationId;
     SessionStore::setActiveConversation(conversationId);
+    m_agent.setConversationId(conversationId);
 
     // Rebuild transcript
     rebuildTranscript();
@@ -7335,6 +7653,7 @@ void ChatWidget::deleteConversation(const QString &conversationId)
 void ChatWidget::setCurrentConversationId(const QString &conversationId)
 {
     m_currentConversationId = conversationId;
+    m_agent.setConversationId(conversationId);
     if (m_threadTitle) {
         // A single-row lookup: listing every conversation just to find one
         // title materialised the whole history table.
@@ -7418,6 +7737,7 @@ void ChatWidget::resetForNewChat(bool saveCurrentConversation)
     // registered in the history list once saveConversation() is called with
     // real messages, so no empty ghost entry appears immediately.
     m_currentConversationId = SessionStore::createNewConversation();
+    m_agent.setConversationId(m_currentConversationId);
     Q_EMIT conversationChanged(m_currentConversationId);
 
     // Update history button to reflect any newly saved previous conversation.

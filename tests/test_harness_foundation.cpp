@@ -25,7 +25,11 @@ private Q_SLOTS:
         QVERIFY(flags.stablePromptPrefix);
         QVERIFY(flags.resultBudget);
         QVERIFY(flags.contextReport);
-        QVERIFY(!flags.middleware);
+        QVERIFY(flags.eventLog);
+        QVERIFY(flags.middleware);
+        QVERIFY(flags.verificationGate);
+        QVERIFY(flags.policyV2);
+        QVERIFY(flags.hooks);
         QVERIFY(!flags.toolSearch);
     }
 
