@@ -204,7 +204,8 @@ You ──► LLM (Grok / OpenAI / OpenRouter / local) or any ACP agent over std
 | Tool | What it does |
 | --- | --- |
 | `read_file` | Read a UTF-8 file; `offset` / `limit` for large files |
-| `write_file` | Create or overwrite a file (open Kate buffer if the file is already open) |
+| `read_tool_result` | Page back a tool output that was too large to keep in the conversation |
+| `write_file` | Create or overwrite a file (open Kate buffer if the file is already open). Refuses an overwrite if the file changed since the agent read it. |
 | `edit_file` | Exact-string replace; optional `replace_all` |
 | `multi_edit_file` | Apply multiple non-contiguous edits to a file in a single tool call |
 | `apply_patch` | Apply a unified diff, possibly covering several files, atomically (all files or none) |
@@ -237,7 +238,7 @@ You ──► LLM (Grok / OpenAI / OpenRouter / local) or any ACP agent over std
 
 Plus every tool discovered from the connected MCP servers, as `mcp__<server>__<tool>`.
 
-In **Plan mode**, **Ask**, **Architect**, and **Orchestrator** the model only receives the read-only group (`read_file`, `list_dir`, `grep`, `glob`, `query_project_graph`, `write_plan_file`, `suggest`, `question`, `todo_write`, `todo_read`, `think`, `exit_plan_mode`, `lsp_*`, the read-only `debug_*` tools, and `build_targets`) plus MCP tools. Tool availability is enforced twice — once in the request that advertises the tools, and again when a call arrives — so a model that hallucinates a write gets a clear rejection instead of a silent one. ACP agents run their own tools, so Kate cannot stop one that never asks permission; it shows a notice instead, and the permission card still lets you approve a tool the active mode does not list.
+In **Plan mode**, **Ask**, **Architect**, and **Orchestrator** the model only receives the read-only group (`read_file`, `read_tool_result`, `list_dir`, `grep`, `glob`, `query_project_graph`, `write_plan_file`, `suggest`, `question`, `todo_write`, `todo_read`, `think`, `exit_plan_mode`, `lsp_*`, the read-only `debug_*` tools, and `build_targets`) plus MCP tools. Tool availability is enforced twice — once in the request that advertises the tools, and again when a call arrives — so a model that hallucinates a write gets a clear rejection instead of a silent one. ACP agents run their own tools, so Kate cannot stop one that never asks permission; it shows a notice instead, and the permission card still lets you approve a tool the active mode does not list.
 
 `write_plan_file` is the one tool that writes a file without touching the project: the destination is a per-workspace temp file Kate picks itself, so it is safe in read-only modes and plan mode, never prompts, and never enters the edit tracker. Agents are told to keep it current as the work moves, which gives the user a running plan they can open next to the code.
 
@@ -289,7 +290,7 @@ Kate AI is a first-class KTextEditor plugin, so it sees the same documents you d
   - **Refactor Selection** — clarity and maintainability, then apply
   - **Add Tests for Selection** — propose coverage first
 - **Stop Kate AI** action (Tools ▸ Kate AI, bindable in Kate's shortcut settings) aborts the running turn without hunting for the panel button
-- **Command line**: `:kateai ask <text>`, `:kateai explain|fix|refactor|tests|diagnostics|symbols` (act on the selection or the range the command line carries, vi-mode `'<,'>kateai fix` included), `:kateai debug|stack|break|snapshot` for the live debugger, `:kateai fix-errors|build-errors`, `:kateai launch-config` to generate `.vscode/launch.json`, `:kateai backtrace`, `:kateai terminal`, `:kateai blame|commit`, `:kateai diff-tab|graph-tab|annotations`, `:kateai stop`, `:kateai new`, `:kateai mode <id>`, `:kateai panel`
+- **Command line**: `:kateai ask <text>`, `:kateai explain|fix|refactor|tests|diagnostics|symbols` (act on the selection or the range the command line carries, vi-mode `'<,'>kateai fix` included), `:kateai debug|stack|break|snapshot` for the live debugger, `:kateai fix-errors|build-errors`, `:kateai launch-config` to generate `.vscode/launch.json`, `:kateai backtrace`, `:kateai terminal`, `:kateai blame|commit`, `:kateai diff-tab|graph-tab|annotations`, `:kateai context|usage` to inspect the context window and this turn's counters, `:kateai stop`, `:kateai new`, `:kateai mode <id>`, `:kateai panel`
 - Workspace root is the nearest parent with `.git` or `.kateproject`, otherwise the active file’s directory
 - When a different folder is opened in Kate, Kate AI switches to that workspace (agent context, checkpoints, MCP servers, completions) and shows a notice pinned above the input; the notice fades on its own or when the next turn starts
 

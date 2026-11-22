@@ -180,11 +180,6 @@ private:
     QSpinBox *m_maxPlanSteps = nullptr;
     QCheckBox *m_requireVerification = nullptr;
     QSpinBox *m_maxVerificationAttempts = nullptr;
-    QCheckBox *m_adaptiveTemperature = nullptr;
-    QDoubleSpinBox *m_explorationTemperature = nullptr;
-    QDoubleSpinBox *m_exploitationTemperature = nullptr;
-    QCheckBox *m_enablePlanUpdates = nullptr;
-    QCheckBox *m_narrativeProgress = nullptr;
 
     // Context Management
     QSpinBox *m_contextWindow = nullptr;

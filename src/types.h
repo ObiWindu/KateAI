@@ -146,6 +146,9 @@ struct ChatMessage {
     QString toolCallId;
     QString name;
     QJsonArray toolCalls;
+    // Ambient context injected into a request only (editor state, git status).
+    // It is never stored in the conversation or the session database.
+    bool transient = false;
 };
 
 struct PlanStep {
@@ -342,7 +345,6 @@ struct Settings {
     int maxProjectInstructionsLength = 8192; // Maximum characters for project instructions
     bool compressSystemPrompt = true; // Whether to compress system prompt
     int maxSystemPromptLength = 4096; // Maximum characters for system prompt
-    int messageSpeed = 2; // 0=slow, 1=medium, 2=fast (default fast)
 
     // --- Optimal-intelligence generation parameters -----------------------
     // These are sent to the model per request and tuned for coding tasks:
@@ -361,7 +363,6 @@ struct Settings {
     bool selfCritique = true; // ask the model to check its own work before finishing
     bool parallelToolCalls = true; // let the model batch independent tool calls
     int toolCallTimeoutMs = 120000; // per-tool-call wall-clock budget
-    bool compactOnFailure = true; // summarise history after a failed tool call
     int verbosity = 1; // 0= terse, 1= normal, 2= detailed narration
 
     // --- Enhanced Intelligence Parameters ---------------------------------
@@ -380,11 +381,6 @@ struct Settings {
     // Agent behavior tuning
     bool requireVerification = true;    // Require verification after mutations
     int maxVerificationAttempts = 2;    // Max verification retries
-    bool adaptiveTemperature = true;    // Adjust temperature based on task phase
-    double explorationTemperature = 0.4; // Higher temp for exploration phase
-    double exploitationTemperature = 0.1; // Lower temp for execution phase
-    bool enablePlanUpdates = true;      // Allow plan updates during execution
-    bool narrativeProgress = true;      // Natural language progress updates
 
     // --- Retry Configuration -----------------------------------------------
     // Automatic retry for transient API errors (rate limits, server errors, network issues)

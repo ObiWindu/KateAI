@@ -69,6 +69,11 @@ public:
     ToolResult run(const ToolCall &call);
     PermissionRequest describe(const ToolCall &call) const;
 
+    // Forgets which files the agent has read this turn. Called when a turn
+    // starts so a write_file conflict check never compares against a stale
+    // read from an earlier turn.
+    void resetReadLedger();
+
     // The structured todo list written by todo_write and read by todo_read.
     // Lives here (not in AgentLoop) so both the native path and the ACP client
     // method path share one store per turn.
@@ -112,6 +117,7 @@ Q_SIGNALS:
 
 private:
     ToolResult readFile(const QJsonObject &args) const;
+    ToolResult readToolResult(const QJsonObject &args);
     ToolResult writeFile(const QJsonObject &args);
     ToolResult editFile(const QJsonObject &args);
     ToolResult multiEditFile(const QJsonObject &args);
@@ -141,7 +147,6 @@ private:
     ToolResult buildTargets(const QJsonObject &args) const;
     ToolResult buildRun(const QJsonObject &args);
     ToolResult terminalRun(const QJsonObject &args);
-    ToolResult goalReport(const QJsonObject &args);
     ToolResult writePlanFile(const QJsonObject &args);
     ToolResult suggest(const QJsonObject &args);
     // Defensive only: a question is answered by the UI, never by the runner.
@@ -199,6 +204,12 @@ private:
     QThread *m_workerThread = nullptr;
     QObject *m_workerContext = nullptr;
     QList<std::shared_ptr<std::atomic_bool>> m_readJobs;
+    // Full content of files read this turn, keyed by canonical path. write_file
+    // compares against it before overwriting an existing file, so a change made
+    // by the user or another process after the read is a conflict rather than
+    // silently lost. Empty for files the agent never read: writing a new file
+    // (or overwriting without a read) keeps the pre-0.6.1 behaviour.
+    mutable QHash<QString, QString> m_readSnapshots;
 };
 
 QString unifiedDiff(const QString &path, const QString &before, const QString &after);

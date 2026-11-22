@@ -188,22 +188,15 @@ Settings SettingsStore::load()
     // Behavioural toggles and budgets. These used to be dropped by save(), so
     // any value the UI wrote reverted to the struct default on the next start.
     s.toolCallTimeoutMs = g.readEntry(u"ToolCallTimeoutMs"_s, 120000);
-    s.compactOnFailure = g.readEntry(u"CompactOnFailure"_s, true);
     s.structuredThinking = g.readEntry(u"StructuredThinking"_s, true);
     s.structuredPlanning = g.readEntry(u"StructuredPlanning"_s, true);
     s.showPlanAsChecklist = g.readEntry(u"ShowPlanAsChecklist"_s, true);
     s.maxThinkingTokens = g.readEntry(u"MaxThinkingTokens"_s, 4096);
     s.maxPlanSteps = g.readEntry(u"MaxPlanSteps"_s, 15);
-    s.enablePlanUpdates = g.readEntry(u"EnablePlanUpdates"_s, true);
-    s.narrativeProgress = g.readEntry(u"NarrativeProgress"_s, true);
-    s.messageSpeed = g.readEntry(u"MessageSpeed"_s, 2);
     s.frequencyPenalty = g.readEntry(u"FrequencyPenalty"_s, 0.0);
     s.presencePenalty = g.readEntry(u"PresencePenalty"_s, 0.0);
     s.requireVerification = g.readEntry(u"RequireVerification"_s, true);
     s.maxVerificationAttempts = g.readEntry(u"MaxVerificationAttempts"_s, 2);
-    s.adaptiveTemperature = g.readEntry(u"AdaptiveTemperature"_s, true);
-    s.explorationTemperature = g.readEntry(u"ExplorationTemperature"_s, 0.4);
-    s.exploitationTemperature = g.readEntry(u"ExploitationTemperature"_s, 0.1);
     s.enableAutoRetry = g.readEntry(u"EnableAutoRetry"_s, true);
     s.maxRetryAttempts = g.readEntry(u"MaxRetryAttempts"_s, 4);
     s.baseRetryDelaySeconds = g.readEntry(u"BaseRetryDelaySeconds"_s, 5);
@@ -249,15 +242,12 @@ Settings SettingsStore::load()
     s.maxThinkingTokens = qBound(0, s.maxThinkingTokens, 200000);
     s.maxPlanSteps = qBound(1, s.maxPlanSteps, 50);
     s.maxVerificationAttempts = qBound(0, s.maxVerificationAttempts, 10);
-    s.messageSpeed = qBound(0, s.messageSpeed, 5);
     s.frequencyPenalty = qBound(-2.0, s.frequencyPenalty, 2.0);
     s.presencePenalty = qBound(-2.0, s.presencePenalty, 2.0);
     // Generation temperature, not the adaptive pair below.
     if (s.temperature < 0.0) {
         s.temperature = 0.0;
     }
-    s.explorationTemperature = qBound(0.0, s.explorationTemperature, 2.0);
-    s.exploitationTemperature = qBound(0.0, s.exploitationTemperature, 2.0);
     s.maxRetryAttempts = qBound(1, s.maxRetryAttempts, 10);
     s.baseRetryDelaySeconds = qBound(1, s.baseRetryDelaySeconds, 60);
     // The length budgets need a lower bound: a negative value would empty the
@@ -454,22 +444,15 @@ void SettingsStore::save(const Settings &settings)
     // Keep every field the UI can write, so a restart restores the same
     // configuration instead of silently falling back to struct defaults.
     g.writeEntry(u"ToolCallTimeoutMs"_s, settings.toolCallTimeoutMs);
-    g.writeEntry(u"CompactOnFailure"_s, settings.compactOnFailure);
     g.writeEntry(u"StructuredThinking"_s, settings.structuredThinking);
     g.writeEntry(u"StructuredPlanning"_s, settings.structuredPlanning);
     g.writeEntry(u"ShowPlanAsChecklist"_s, settings.showPlanAsChecklist);
     g.writeEntry(u"MaxThinkingTokens"_s, settings.maxThinkingTokens);
     g.writeEntry(u"MaxPlanSteps"_s, settings.maxPlanSteps);
-    g.writeEntry(u"EnablePlanUpdates"_s, settings.enablePlanUpdates);
-    g.writeEntry(u"NarrativeProgress"_s, settings.narrativeProgress);
-    g.writeEntry(u"MessageSpeed"_s, settings.messageSpeed);
     g.writeEntry(u"FrequencyPenalty"_s, settings.frequencyPenalty);
     g.writeEntry(u"PresencePenalty"_s, settings.presencePenalty);
     g.writeEntry(u"RequireVerification"_s, settings.requireVerification);
     g.writeEntry(u"MaxVerificationAttempts"_s, settings.maxVerificationAttempts);
-    g.writeEntry(u"AdaptiveTemperature"_s, settings.adaptiveTemperature);
-    g.writeEntry(u"ExplorationTemperature"_s, settings.explorationTemperature);
-    g.writeEntry(u"ExploitationTemperature"_s, settings.exploitationTemperature);
     g.writeEntry(u"EnableAutoRetry"_s, settings.enableAutoRetry);
     g.writeEntry(u"MaxRetryAttempts"_s, settings.maxRetryAttempts);
     g.writeEntry(u"BaseRetryDelaySeconds"_s, settings.baseRetryDelaySeconds);
