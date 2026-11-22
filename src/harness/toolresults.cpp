@@ -13,6 +13,8 @@
 #include <QStandardPaths>
 #include <QUuid>
 
+#include <utility>
+
 using namespace Qt::Literals::StringLiterals;
 
 namespace KateAi
@@ -100,7 +102,39 @@ StoredToolResult ToolResults::store(const QString &text, int headChars, int tail
         + u"Full output: tool_result id=" + id
         + u" (call read_tool_result with this id and optional offset/limit)\n\n"_s
         + text.right(tail);
+    // The store is shared by every conversation. Evict oldest-first so a long
+    // session cannot grow the cache without bound; the preview already says
+    // how to page, and an evicted id reports "unknown or expired".
+    prune();
     return result;
+}
+
+int ToolResults::prune(qint64 maxBytes)
+{
+    const QString dirPath = directory();
+    QDir dir(dirPath);
+    if (!dir.exists()) {
+        return 0;
+    }
+    QFileInfoList entries = dir.entryInfoList({QStringLiteral("*.txt")}, QDir::Files, QDir::Time);
+    qint64 total = 0;
+    for (const QFileInfo &info : std::as_const(entries)) {
+        total += info.size();
+    }
+    if (total <= maxBytes) {
+        return 0;
+    }
+    // QDir::Time is newest first; remove from the end.
+    int removed = 0;
+    for (int i = entries.size() - 1; i >= 0 && total > maxBytes; --i) {
+        const QFileInfo &info = entries.at(i);
+        const qint64 size = info.size();
+        if (QFile::remove(info.absoluteFilePath())) {
+            total -= size;
+            ++removed;
+        }
+    }
+    return removed;
 }
 
 bool ToolResults::read(const QString &id, qint64 offset, int limit, QString *out,

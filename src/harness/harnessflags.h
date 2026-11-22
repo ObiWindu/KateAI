@@ -37,11 +37,12 @@ struct HarnessFlags {
     bool policyV2 = true;
     bool hooks = true;
 
-    // Later releases.
-    bool promptV2 = false;
-    bool contextV2 = false;
-    bool memoryV2 = false;
-    bool toolSearch = false;
+    // 0.8: on by default at the release gate; each still degrades to the
+    // legacy path when turned off.
+    bool promptV2 = true;
+    bool contextV2 = true;
+    bool memoryV2 = true;
+    bool toolSearch = true;
     bool skills = false;
     bool agentsV2 = false;
     bool inspector = false;

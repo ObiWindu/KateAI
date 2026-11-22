@@ -172,6 +172,11 @@ struct CompletionChunk {
     bool finished = false;
     QString finishReason;
     QString error;
+    // Provider-reported usage when the stream carries it. 0 means "not
+    // reported by this chunk/provider". Used to calibrate local estimates.
+    int inputTokens = 0;
+    int outputTokens = 0;
+    int cachedInputTokens = 0;
 };
 
 struct PermissionRequest {

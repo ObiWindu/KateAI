@@ -1204,6 +1204,18 @@ QJsonArray toolDefinitions(const ToolAccess &access)
                          {u"patch"_s},
                          false));
 
+    tools.append(toolDef(u"memory_write"_s,
+                         u"Propose a durable memory note. The user approves the write in the normal permission card; "
+                         u"the note goes to .kateai/memory/<topic>.md (or the user memory directory). This never "
+                         u"edits AGENTS.md/CLAUDE.md silently. Use it for facts worth remembering across turns."_s,
+                         QJsonObject{
+                             {u"topic"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"Short slug, e.g. build-quirks."_s}}},
+                             {u"content"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"Markdown note to remember."_s}}},
+                             {u"scope"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"enum"_s, QJsonArray{u"project"_s, u"user"_s}}, {u"description"_s, u"project (default) or user."_s}}},
+                         },
+                         {u"topic"_s, u"content"_s},
+                         false));
+
     tools.append(toolDef(u"list_dir"_s,
                          u"List files and directories in a folder."_s,
                          QJsonObject{

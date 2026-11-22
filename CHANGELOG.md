@@ -1,5 +1,42 @@
 # Changelog
 
+## Unreleased — 0.8.0
+
+- **Prompt assembler v2.** The system prompt is now a deterministic, ordered
+  section registry with per-section and total budgets and a stable static
+  prefix. Editor state, git status, and workspace listings stay in a transient
+  turn message, verification prose is consolidated, and `:kateai prompt` dumps
+  the exact prompt with its token manifest. See `docs/PROMPT.md` and
+  `docs/HARNESS_0.8.md`.
+- **Model profiles.** A family registry now supplies context windows, output
+  limits, prices, cache semantics, prompt variant, and edit dialect for every
+  provider. Unknown models get a conservative 32k fallback and a visible
+  notice. Anthropic requests use explicit cache breakpoints.
+- **Context engine v2.** Graduated shapers page oversized tool output, prune
+  old output, snip old turns, merge an incremental summary, and fall back to
+  full compaction. Rehydration re-attaches the plan, touched files, running
+  tasks, and skills. Provider usage calibrates the local token estimate;
+  summaries preserve content-store ids so paged output stays reachable.
+- **Memory hierarchy v2.** Managed, user, project, nested, and local scopes;
+  `AGENTS.md`/`CLAUDE.md`/`KATEAI.md` and rules directories; `paths:` globs,
+  priorities, deduplication by path and hash, and 32 KiB/128 KiB/32-file
+  budgets. The new `memory_write` tool proposes a diff and writes only to the
+  memory directory after approval. See `:kateai memory`.
+- **Tool registry v2.** Declarative `ToolSpec` metadata, byte-identical
+  schemas, per-tool result budgets, and a BM25 `tool_search` /
+  `tool_describe` / `tool_call` bridge. MCP tools defer by default when search
+  is on; a 100-tool catalog now advertises only the core set plus the bridge.
+  See `:kateai tools`.
+- **Edit canonicalisation.** `edit_file` retries a failed exact match against
+  folded smart quotes, CRLF, trailing whitespace, and whitespace runs, applying
+  the replacement at mapped original offsets. Ambiguous canonical matches still
+  fail; no line-number edit path was added.
+- **Reports.** `:kateai context` and `:kateai usage` now include prompt
+  sections, context shapers, profile pricing, and token calibration.
+  `:kateai prompt`, `memory`, and `tools` are new.
+- All four 0.8 flags default on (`promptV2`, `contextV2`, `memoryV2`,
+  `toolSearch`) and degrade to the legacy path when disabled.
+
 ## 0.7.0 — 2026-11-21
 
 - **Session event log.** Conversations are now recorded as an append-only

@@ -19,6 +19,7 @@
 #include <QPointer>
 #include <QProcess>
 #include <QRegularExpression>
+#include <QStandardPaths>
 #include <QCryptographicHash>
 #include <QElapsedTimer>
 #include <QThread>
@@ -552,9 +553,216 @@ QList<DiffOp> computeLineDiff(const QStringList &a, const QStringList &b)
 }
 } // namespace
 
-QString unifiedDiff(const QString &path, const QString &before, const QString &after)
+namespace
 {
-    QStringList oldLines = before.split(u'\n');
+
+// A memory note uses a fixed directory and a validated slug. The model cannot
+// name a path, so it cannot overwrite AGENTS.md or escape the memory folder.
+QString memoryNotePath(const QJsonObject &args, const QString &workspace, QString *error)
+{
+    QString topic = args.value(u"topic"_s).toString().trimmed();
+    static const QRegularExpression valid(u"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"_s);
+    if (!valid.match(topic).hasMatch() || topic == u"."_s || topic == u".."_s) {
+        if (error) {
+            *error = u"topic must be a short slug of letters, digits, '.', '_' or '-'."_s;
+        }
+        return {};
+    }
+    if (!topic.endsWith(u".md"_s)) {
+        topic += u".md"_s;
+    }
+    const QString scope = args.value(u"scope"_s).toString(u"project"_s);
+    QString directory;
+    if (scope == u"user"_s) {
+        QString config = QStandardPaths::writableLocation(QStandardPaths::ConfigLocation);
+        if (config.isEmpty()) {
+            config = QDir::home().filePath(u".config"_s);
+        }
+        directory = config + u"/kateai/memory"_s;
+    } else if (scope == u"project"_s) {
+        if (workspace.isEmpty()) {
+            if (error) {
+                *error = u"no workspace is open, so there is no project memory directory."_s;
+            }
+            return {};
+        }
+        directory = workspace + u"/.kateai/memory"_s;
+    } else {
+        if (error) {
+            *error = u"scope must be 'project' or 'user'."_s;
+        }
+        return {};
+    }
+    return QDir(directory).filePath(topic);
+}
+
+QString memoryNoteBody(const QJsonObject &args)
+{
+    const QString topic = args.value(u"topic"_s).toString().trimmed();
+    QString content = args.value(u"content"_s).toString().trimmed();
+    if (content.size() > 32 * 1024) {
+        content = content.left(32 * 1024) + u"\n... (memory note truncated)"_s;
+    }
+    const QString description = content.section(u'\n', 0, 0).simplified().left(160);
+    return u"---\ndescription: "_s + description + u"\nalwaysApply: true\n---\n# "_s + topic
+        + u"\n\n"_s + content + u"\n"_s;
+}
+
+// --- edit canonicalisation --------------------------------------------------
+//
+// Exact matching stays the primary contract. When it fails, a second pass
+// compares text with smart quotes/punctuation folded, CRLF normalised,
+// trailing whitespace removed, and (optionally) runs of spaces/tabs collapsed.
+// The map keeps byte fidelity: the replacement is applied to the original
+// string at the mapped original offsets, so the rest of the file is untouched.
+
+QChar foldPunctuation(QChar c)
+{
+    switch (c.unicode()) {
+    case 0x2018:
+    case 0x2019:
+    case 0x201A:
+    case 0x201B:
+        return u'\'';
+    case 0x201C:
+    case 0x201D:
+    case 0x201E:
+    case 0x201F:
+        return u'"';
+    case 0x2010:
+    case 0x2011:
+    case 0x2012:
+    case 0x2013:
+    case 0x2014:
+    case 0x2015:
+    case 0x2212:
+        return u'-';
+    case 0x00A0:
+        return u' ';
+    default:
+        return c;
+    }
+}
+
+struct CanonicalText {
+    QString text;
+    QVector<int> map;
+};
+
+CanonicalText canonicalizeForMatch(const QString &input, bool collapseWhitespace)
+{
+    CanonicalText out;
+    out.text.reserve(input.size());
+    out.map.reserve(input.size());
+    bool previousWasSpace = false;
+    for (int i = 0; i < input.size(); ++i) {
+        const QChar c = input.at(i);
+        if (c == u'\r') {
+            if (i + 1 < input.size() && input.at(i + 1) == u'\n') {
+                continue; // CRLF reads as LF
+            }
+            out.text += u'\n';
+            out.map.append(i);
+            previousWasSpace = false;
+            continue;
+        }
+        if (c == u'\n') {
+            out.text += u'\n';
+            out.map.append(i);
+            previousWasSpace = false;
+            continue;
+        }
+        if (c == u' ' || c == u'\t') {
+            int look = i;
+            while (look < input.size() && (input.at(look) == u' ' || input.at(look) == u'\t')) {
+                ++look;
+            }
+            if (look >= input.size() || input.at(look) == u'\n' || input.at(look) == u'\r') {
+                continue; // trailing whitespace is not significant
+            }
+            if (collapseWhitespace && previousWasSpace) {
+                continue;
+            }
+            previousWasSpace = true;
+            out.text += u' ';
+            out.map.append(i);
+            continue;
+        }
+        previousWasSpace = false;
+        const QChar folded = foldPunctuation(c);
+        // NFKC per character keeps the mapping exact for the common cases
+        // (compatibility forms that expand are rare in code and rules).
+        const QString normalized = QString(folded).normalized(QString::NormalizationForm_KC);
+        for (const QChar n : normalized) {
+            out.text += n;
+            out.map.append(i);
+        }
+    }
+    return out;
+}
+
+QList<QPair<int, int>> canonicalMatches(const QString &contents, const QString &oldString)
+{
+    QList<QPair<int, int>> matches;
+    const CanonicalText canonicalContents = canonicalizeForMatch(contents, true);
+    const CanonicalText canonicalOld = canonicalizeForMatch(oldString, true);
+    if (canonicalOld.text.isEmpty()) {
+        return matches;
+    }
+    int from = 0;
+    while (from <= canonicalContents.text.size() - canonicalOld.text.size()) {
+        const int at = canonicalContents.text.indexOf(canonicalOld.text, from);
+        if (at < 0) {
+            break;
+        }
+        const int normalizedEnd = at + canonicalOld.text.size();
+        const int originalStart = canonicalContents.map.value(at, 0);
+        const int originalEnd = normalizedEnd < canonicalContents.map.size()
+            ? canonicalContents.map.at(normalizedEnd)
+            : contents.size();
+        if (originalEnd > originalStart) {
+            matches.append({originalStart, originalEnd});
+        }
+        from = at + qMax(1, canonicalOld.text.size());
+    }
+    return matches;
+}
+
+bool applyCanonicalEdit(const QString &contents, const QString &oldString,
+                        const QString &newString, bool replaceAll,
+                        QString *updated, int *replacements, QString *error)
+{
+    const QList<QPair<int, int>> matches = canonicalMatches(contents, oldString);
+    if (matches.isEmpty()) {
+        if (error) {
+            *error = u"no match"_s;
+        }
+        return false;
+    }
+    if (matches.size() > 1 && !replaceAll) {
+        if (error) {
+            *error = u"ambiguous"_s;
+        }
+        return false;
+    }
+    QString result = contents;
+    for (int i = matches.size() - 1; i >= 0; --i) {
+        result.replace(matches.at(i).first, matches.at(i).second - matches.at(i).first, newString);
+    }
+    if (updated) {
+        *updated = result;
+    }
+    if (replacements) {
+        *replacements = matches.size();
+    }
+    return true;
+}
+
+
+} // namespace
+
+QString unifiedDiff(const QString &path, const QString &before, const QString &after)
+{    QStringList oldLines = before.split(u'\n');
     QStringList newLines = after.split(u'\n');
     // Text that ends with a newline splits into one extra empty element: that
     // element is the line terminator, not a line. Keeping it inflates every
@@ -764,6 +972,42 @@ PermissionRequest ToolRunner::describe(const ToolCall &call) const
     } else if (call.name == u"bash"_s) {
         req.risk = ToolRisk::Execute;
         req.details = args.value(u"command"_s).toString();
+    } else if (call.name == u"memory_write"_s) {
+        req.risk = ToolRisk::Write;
+        req.mutatesFiles = true;
+        QString pathError;
+        const QString path = memoryNotePath(args, m_sandbox.workspaceRoot(), &pathError);
+        if (path.isEmpty()) {
+            req.summary = pathError;
+            req.details = pathError;
+            return req;
+        }
+        QString resolved = path;
+        if (args.value(u"scope"_s).toString(u"project"_s) == u"project"_s) {
+            QString error;
+            resolved = m_sandbox.resolve(path, &error, true);
+            if (resolved.isEmpty()) {
+                req.summary = error;
+                req.details = error;
+                return req;
+            }
+        }
+        req.path = m_sandbox.workspaceRoot().isEmpty()
+            ? path
+            : QDir(m_sandbox.workspaceRoot()).relativeFilePath(path);
+        req.resolvedPath = resolved;
+        QString existing;
+        if (m_bridge) {
+            m_bridge->readDocument(resolved, &existing);
+        } else {
+            QFile file(resolved);
+            if (file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+                existing = QString::fromUtf8(file.readAll());
+            }
+        }
+        const QString updated = memoryNoteBody(args);
+        req.describeDiff = unifiedDiff(req.path, existing, updated);
+        req.details = req.describeDiff;
     } else if (call.name == u"write_plan_file"_s) {
         // Read risk on purpose: the plan file is a Kate-chosen temp file, not a
         // workspace mutation, so it never prompts and never enters the tracker.
@@ -985,6 +1229,9 @@ ToolResult ToolRunner::run(const ToolCall &call)
     }
     if (call.name == u"apply_patch"_s) {
         return applyPatch(args);
+    }
+    if (call.name == u"memory_write"_s) {
+        return memoryWrite(args);
     }
     if (call.name == u"todo_write"_s) {
         return todoWrite(args);
@@ -1278,6 +1525,7 @@ ToolResult ToolRunner::editFile(const QJsonObject &args)
     const QString oldString = args.value(u"old_string"_s).toString();
     const QString newString = args.value(u"new_string"_s).toString();
     const bool replaceAll = jsonBool(args.value(u"replace_all"_s));
+    const QString originalContents = contents;
 
     if (oldString.isEmpty()) {
         result.ok = false;
@@ -1285,44 +1533,66 @@ ToolResult ToolRunner::editFile(const QJsonObject &args)
         return result;
     }
 
-    const int count = contents.count(oldString);
+    int count = contents.count(oldString);
+    bool canonicalMatch = false;
+    int canonicalCount = 0;
     if (count == 0) {
-        result.ok = false;
-        QString hint;
-        const QString needle = oldString.section(u'\n', 0, 0).trimmed();
-        if (!needle.isEmpty()) {
-            const QStringList lines = contents.split(u'\n');
-            QStringList nearby;
-            for (int i = 0; i < lines.size() && nearby.size() < 5; ++i) {
-                if (lines.at(i).contains(needle)) {
-                    nearby.append(u"%1:%2"_s.arg(i + 1).arg(lines.at(i).left(200)));
+        QString updated;
+        QString canonicalError;
+        if (applyCanonicalEdit(contents, oldString, newString, replaceAll,
+                               &updated, &canonicalCount, &canonicalError)) {
+            contents = updated;
+            canonicalMatch = true;
+        } else {
+            result.ok = false;
+            QString hint;
+            const QString needle = oldString.section(u'\n', 0, 0).trimmed();
+            if (!needle.isEmpty()) {
+                const QStringList lines = contents.split(u'\n');
+                QStringList nearby;
+                for (int i = 0; i < lines.size() && nearby.size() < 5; ++i) {
+                    if (lines.at(i).contains(needle)) {
+                        nearby.append(u"%1:%2"_s.arg(i + 1).arg(lines.at(i).left(200)));
+                    }
+                }
+                if (!nearby.isEmpty()) {
+                    hint = u" Nearby lines:\n"_s + nearby.join(u'\n');
                 }
             }
-            if (!nearby.isEmpty()) {
-                hint = u" Nearby lines:\n"_s + nearby.join(u'\n');
+            if (canonicalError == u"ambiguous"_s) {
+                result.output = u"old_string matched multiple locations after normalising whitespace and punctuation in %1; "
+                                u"set replace_all=true or include more context."_s.arg(resolved) + hint;
+            } else {
+                result.output = u"old_string was not found in %1. Read the file and copy the exact text, including whitespace."_s.arg(resolved) + hint;
             }
+            return result;
         }
-        result.output = u"old_string was not found in %1. Read the file and copy the exact text, including whitespace."_s.arg(resolved) + hint;
-        return result;
     }
-    if (count > 1 && !replaceAll) {
+    if (!canonicalMatch && count > 1 && !replaceAll) {
         result.ok = false;
         result.output = u"old_string matched %1 times; it must be unique, or set replace_all=true."_s.arg(count);
         return result;
     }
 
-    const QString originalContents = contents;
-    contents.replace(oldString, newString);
-
+    if (!canonicalMatch) {
+        contents.replace(oldString, newString);
+    }
     if (!m_bridge->writeDocumentIfUnchanged(resolved, originalContents, contents, &error)) {
         result.ok = false;
         result.output = error;
         return result;
     }
 
-    result.output = replaceAll && count > 1
-        ? u"Updated %1 (%2 replacements)"_s.arg(resolved).arg(count)
-        : u"Updated %1"_s.arg(resolved);
+    if (canonicalMatch) {
+        result.output = u"Updated %1 (%2 canonical match%3; exact text differed in whitespace or punctuation)"_s
+                            .arg(resolved)
+                            .arg(canonicalCount)
+                            .arg(canonicalCount > 1 ? u"s"_s : u""_s);
+    } else {
+        result.output = replaceAll && count > 1
+            ? u"Updated %1 (%2 replacements)"_s.arg(resolved).arg(count)
+            : u"Updated %1"_s.arg(resolved);
+    }
     return result;
 }
 
@@ -3224,6 +3494,64 @@ ToolResult ToolRunner::applyPatch(const QJsonObject &args)
 
     result.ok = true;
     result.output = u"Applied patch to %1 file(s):\n%2"_s.arg(planned.size()).arg(written.join(u'\n'));
+    result.rawOutput = result.output;
+    return result;
+}
+
+ToolResult ToolRunner::memoryWrite(const QJsonObject &args)
+{
+    ToolResult result;
+    result.name = u"memory_write"_s;
+    const QString content = args.value(u"content"_s).toString().trimmed();
+    if (content.isEmpty()) {
+        result.ok = false;
+        result.output = u"memory_write needs non-empty content."_s;
+        return result;
+    }
+
+    QString error;
+    const QString path = memoryNotePath(args, m_sandbox.workspaceRoot(), &error);
+    if (path.isEmpty()) {
+        result.ok = false;
+        result.output = error;
+        return result;
+    }
+
+    QString resolved = path;
+    if (args.value(u"scope"_s).toString(u"project"_s) == u"project"_s) {
+        resolved = m_sandbox.resolve(path, &error, true);
+        if (resolved.isEmpty()) {
+            result.ok = false;
+            result.output = error;
+            return result;
+        }
+    }
+    if (!QDir().mkpath(QFileInfo(resolved).absolutePath())) {
+        result.ok = false;
+        result.output = u"Could not create the memory directory for %1."_s.arg(resolved);
+        return result;
+    }
+
+    QFile file(resolved);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
+        result.ok = false;
+        result.output = u"Could not write the memory note: %1"_s.arg(file.errorString());
+        return result;
+    }
+    const QByteArray payload = memoryNoteBody(args).toUtf8();
+    if (file.write(payload) != payload.size()) {
+        result.ok = false;
+        result.output = u"Could not write the memory note: %1"_s.arg(file.errorString());
+        file.close();
+        return result;
+    }
+    file.close();
+
+    result.ok = true;
+    result.output = u"Remembered '%1' in the %2 memory scope. The note is loaded on future turns."_s
+                        .arg(args.value(u"topic"_s).toString(),
+                             args.value(u"scope"_s).toString(u"project"_s))
+        + u"\nPath: "_s + resolved;
     result.rawOutput = result.output;
     return result;
 }

@@ -73,6 +73,13 @@ public:
     {
         m_extraTools = tools;
     }
+    // Complete replacement for the advertised tool list. The tool registry
+    // uses this so deferred specs and the search bridge are exactly what the
+    // model sees; empty restores the legacy built-in + extras path.
+    void setToolDefinitionsOverride(const QJsonArray &tools)
+    {
+        m_toolDefinitionsOverride = tools;
+    }
     // Built-in tools filtered by the active access, plus the runtime tools.
     QJsonArray advertisedTools() const;
 
@@ -107,6 +114,9 @@ Q_SIGNALS:
     void failed(const QString &error);
     void modelsReceived(Provider provider, const QStringList &models);
     void modelsFailed(Provider provider, const QString &error);
+    // Token usage the provider reported for the request that just streamed.
+    // Emitted at most once per request when the transport exposes it.
+    void usageReceived(int inputTokens, int outputTokens, int cachedInputTokens);
     // Retry status signals for UI
     void retryStatus(const QString &message, int attempt, int maxAttempts, int delaySeconds);
     void retryScheduled(int attempt, int maxAttempts, int delaySeconds);
@@ -174,6 +184,11 @@ private:
     Settings m_settings;
     ToolAccess m_toolAccess = ToolAccess::unrestricted();
     QJsonArray m_extraTools;
+    QJsonArray m_toolDefinitionsOverride;
+    bool m_usageEmitted = false;
+    int m_usageInput = 0;
+    int m_usageOutput = 0;
+    int m_usageCached = 0;
     QNetworkAccessManager m_nam;
     QNetworkReply *m_reply = nullptr;
     QList<QPointer<QNetworkReply>> m_modelReplies;

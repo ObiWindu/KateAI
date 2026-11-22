@@ -1452,6 +1452,94 @@ private Q_SLOTS:
         QVERIFY(!error.isEmpty());
     }
 
+    void testMemoryWriteUsesAFixedDirectory()
+    {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        Sandbox sandbox(tempDir.path(), SandboxProfile::Workspace);
+        DiskDocumentBridge bridge;
+        ToolRunner runner(sandbox, &bridge);
+
+        ToolCall call;
+        call.id = u"mem1"_s;
+        call.name = u"memory_write"_s;
+        call.arguments = QJsonObject{
+            {u"topic"_s, u"build-quirks"_s},
+            {u"content"_s, u"The build needs -DBUILD_TESTING=ON."_s},
+            {u"scope"_s, u"project"_s},
+        };
+        const ToolResult result = runner.run(call);
+        QVERIFY2(result.ok, qPrintable(result.output));
+
+        const QString path = tempDir.path() + u"/.kateai/memory/build-quirks.md"_s;
+        QVERIFY(QFileInfo::exists(path));
+        QFile file(path);
+        QVERIFY(file.open(QIODevice::ReadOnly | QIODevice::Text));
+        const QString written = QString::fromUtf8(file.readAll());
+        QVERIFY(written.contains(u"BUILD_TESTING"_s));
+        QVERIFY(written.startsWith(u"---\n"_s));
+
+        // The permission card shows the real file and its diff.
+        const PermissionRequest request = runner.describe(call);
+        QCOMPARE(request.risk, ToolRisk::Write);
+        QVERIFY(request.mutatesFiles);
+        QCOMPARE(request.path, u".kateai/memory/build-quirks.md"_s);
+
+        // Traversal is rejected before a path is built.
+        call.arguments = QJsonObject{
+            {u"topic"_s, u"../../etc/passwd"_s},
+            {u"content"_s, u"nope"_s},
+        };
+        const ToolResult rejected = runner.run(call);
+        QVERIFY(!rejected.ok);
+        QVERIFY(rejected.output.contains(u"topic"_s));
+    }
+
+    void testEditFileCanonicalFallback()
+    {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        const QString filePath = tempDir.path() + u"/canonical.txt"_s;
+        {
+            QFile f(filePath);
+            QVERIFY(f.open(QIODevice::WriteOnly | QIODevice::Text));
+            // Smart quotes, CRLF, and trailing spaces: the exact text differs
+            // on every axis the fallback canonicalises.
+            f.write("Don't \xE2\x80\x9Cquote\xE2\x80\x9D me   \r\nkeep me\r\n");
+        }
+        Sandbox sandbox(tempDir.path(), SandboxProfile::Workspace);
+        DiskDocumentBridge bridge;
+        ToolRunner runner(sandbox, &bridge);
+
+        ToolCall call;
+        call.id = u"c1"_s;
+        call.name = u"edit_file"_s;
+        call.arguments = QJsonObject{
+            {u"path"_s, u"canonical.txt"_s},
+            {u"old_string"_s, u"Don't \"quote\" me"_s},
+            {u"new_string"_s, u"changed"_s},
+        };
+        const ToolResult result = runner.run(call);
+        QVERIFY2(result.ok, qPrintable(result.output));
+        QVERIFY(result.output.contains(u"canonical match"_s));
+
+        QString updated;
+        QVERIFY(bridge.readDocument(filePath, &updated));
+        QVERIFY(updated.startsWith(u"changed"_s));
+        QVERIFY(updated.contains(u"keep me"_s));
+        QVERIFY(!updated.contains(u"quote"_s));
+
+        // Ambiguity still fails; canonicalisation never picks a location.
+        call.arguments = QJsonObject{
+            {u"path"_s, u"canonical.txt"_s},
+            {u"old_string"_s, u"e"_s},
+            {u"new_string"_s, u"E"_s},
+        };
+        const ToolResult ambiguous = runner.run(call);
+        QVERIFY(!ambiguous.ok);
+        QVERIFY(ambiguous.output.contains(u"matched"_s));
+    }
+
 };
 
 QTEST_MAIN(TestTools)

@@ -5,6 +5,8 @@
 
 #include "llmclient.h"
 
+#include "harness/models.h"
+
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -419,8 +421,15 @@ CompletionChunk LlmClient::parseSseLine(const QByteArray &line, QHash<int, ToolC
                     tool.arguments = input.toObject();
                 }
             }
+        } else if (anthropicType == u"message_start"_s) {
+            const QJsonObject usage = root.value(u"message"_s).toObject().value(u"usage"_s).toObject();
+            chunk.inputTokens = usage.value(u"input_tokens"_s).toInt();
+            chunk.outputTokens = usage.value(u"output_tokens"_s).toInt();
+            chunk.cachedInputTokens = usage.value(u"cache_read_input_tokens"_s).toInt();
         } else if (anthropicType == u"message_delta"_s) {
             chunk.finishReason = root.value(u"delta"_s).toObject().value(u"stop_reason"_s).toString();
+            const QJsonObject usage = root.value(u"usage"_s).toObject();
+            chunk.outputTokens = usage.value(u"output_tokens"_s).toInt();
         } else if (anthropicType == u"message_stop"_s) {
             // Anthropic never sends "data: [DONE]".
             chunk.finished = true;
@@ -443,6 +452,19 @@ CompletionChunk LlmClient::parseSseLine(const QByteArray &line, QHash<int, ToolC
 
     const QJsonArray choices = root.value(u"choices"_s).toArray();
     if (choices.isEmpty()) {
+        // OpenAI-compatible streams report usage in a final chunk whose
+        // choices array is empty. Carry it on the chunk even without content.
+        const QJsonObject usage = root.value(u"usage"_s).toObject();
+        if (!usage.isEmpty()) {
+            chunk.inputTokens = usage.value(u"prompt_tokens"_s).toInt();
+            chunk.outputTokens = usage.value(u"completion_tokens"_s).toInt();
+            const QJsonObject details = usage.value(u"prompt_tokens_details"_s).toObject();
+            chunk.cachedInputTokens = details.value(u"cached_tokens"_s).toInt();
+            if (chunk.cachedInputTokens == 0) {
+                chunk.cachedInputTokens = usage.value(u"prompt_cache_hit_tokens"_s).toInt();
+            }
+            chunk.finished = true;
+        }
         return chunk;
     }
 
@@ -549,6 +571,10 @@ void LlmClient::resetCompletionState()
     m_completionError.clear();
     m_sawDone = false;
     m_finishEmitted = false;
+    m_usageEmitted = false;
+    m_usageInput = 0;
+    m_usageOutput = 0;
+    m_usageCached = 0;
     // m_abortRequested is deliberately not cleared here: resetCompletionState()
     // runs at the start of every request and right after an abort, and the flag
     // has to survive the abort so the late "finished" signal is recognised as
@@ -709,11 +735,17 @@ void LlmClient::stopTimerFor(QNetworkReply *reply)
 
 QJsonArray LlmClient::advertisedTools() const
 {
+    if (!m_toolDefinitionsOverride.isEmpty()) {
+        return m_toolDefinitionsOverride;
+    }
     QJsonArray tools = toolDefinitions(m_toolAccess);
     for (const QJsonValue &tool : m_extraTools) {
         const QString name = tool.toObject().value(u"function"_s).toObject().value(u"name"_s).toString();
-        // An extra tool still has to be permitted by the active mode.
-        if (m_toolAccess.isEmpty() || m_toolAccess.allows(name)) {
+        // An extra tool still has to be permitted by the active mode. The
+        // registry bridge tools are the exception: they only route a call to a
+        // tool that is checked again when it executes.
+        if (name == u"tool_search"_s || name == u"tool_describe"_s || name == u"tool_call"_s
+            || m_toolAccess.isEmpty() || m_toolAccess.allows(name)) {
             tools.append(tool);
         }
     }
@@ -762,19 +794,37 @@ QJsonObject LlmClient::buildOpenAIRequest(const QList<ChatMessage> &messages, co
 
 QJsonObject LlmClient::buildAnthropicRequest(const QList<ChatMessage> &messages, const QString &model)
 {
+    const ModelProfile profile = ModelProfiles::resolve(m_settings.provider, model);
+    const bool cache = profile.cacheStyle == CacheStyle::Anthropic;
+
     QJsonObject body;
     body.insert(u"model"_s, model);
 
     // The system prompt is a top-level parameter, never a system-role message.
     const QStringList systemParts = anthropicSystemParts(messages);
     if (!systemParts.isEmpty()) {
-        body.insert(u"system"_s, systemParts.join(u"\n\n"_s));
+        const QString systemText = systemParts.join(u"\n\n"_s);
+        if (cache) {
+            // One cache breakpoint after the whole static prompt. Tool schemas
+            // are stable too, so the breakpoint covers the prefix up to the
+            // first turn message; editor state travels as a turn message.
+            QJsonObject block;
+            block.insert(u"type"_s, u"text"_s);
+            block.insert(u"text"_s, systemText);
+            block.insert(u"cache_control"_s, QJsonObject{{u"type"_s, u"ephemeral"_s}});
+            body.insert(u"system"_s, QJsonArray{block});
+        } else {
+            body.insert(u"system"_s, systemText);
+        }
     }
 
     body.insert(u"messages"_s, messagesToAnthropicJson(messages));
     body.insert(u"stream"_s, true);
     // max_tokens is required by the Messages API; fall back to a sane default.
-    const int maxTokens = m_settings.maxTokens > 0 ? m_settings.maxTokens : 4096;
+    int maxTokens = m_settings.maxTokens > 0 ? m_settings.maxTokens : 4096;
+    if (profile.maxOutputTokens > 0) {
+        maxTokens = qMin(maxTokens, profile.maxOutputTokens);
+    }
     body.insert(u"max_tokens"_s, maxTokens);
 
     // Extended thinking is the Messages API counterpart of the OpenAI
@@ -782,7 +832,15 @@ QJsonObject LlmClient::buildAnthropicRequest(const QList<ChatMessage> &messages,
     // Tools must be in Anthropic's {name, input_schema} shape, not OpenAI's.
     // Anthropic has no parallel_tool_calls flag; it always decides on its own
     // which tools to batch, and "none" would forbid tool calls entirely.
-    const QJsonArray tools = anthropicTools(advertisedTools());
+    QJsonArray tools = anthropicTools(advertisedTools());
+    if (cache && !tools.isEmpty()) {
+        // A breakpoint on the last tool makes the tool block part of the
+        // cached prefix. The editor state follows as a turn message, so a
+        // changing workspace does not invalidate it.
+        QJsonObject last = tools.last().toObject();
+        last.insert(u"cache_control"_s, QJsonObject{{u"type"_s, u"ephemeral"_s}});
+        tools.replace(tools.size() - 1, last);
+    }
 
     // Extended thinking blocks must be replayed with their signatures when a
     // tool_use turn is sent back. Kate does not retain those signatures, so
@@ -1200,8 +1258,21 @@ bool LlmClient::applySseChunk(const CompletionChunk &chunk)
     if (!chunk.completedTools.isEmpty()) {
         m_completedTools.append(chunk.completedTools);
     }
+    if (chunk.inputTokens > 0) {
+        m_usageInput = qMax(m_usageInput, chunk.inputTokens);
+    }
+    if (chunk.outputTokens > 0) {
+        m_usageOutput = qMax(m_usageOutput, chunk.outputTokens);
+    }
+    if (chunk.cachedInputTokens > 0) {
+        m_usageCached = qMax(m_usageCached, chunk.cachedInputTokens);
+    }
     if (chunk.finished) {
         m_sawDone = true;
+        if (!m_usageEmitted && (m_usageInput > 0 || m_usageOutput > 0)) {
+            m_usageEmitted = true;
+            Q_EMIT usageReceived(m_usageInput, m_usageOutput, m_usageCached);
+        }
     }
     return true;
 }

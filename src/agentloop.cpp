@@ -63,6 +63,16 @@ QString clipObservation(const QString &text, int maxChars = 80000)
         + text.right(tail);
 }
 
+QString oneLineForReport(QString text, int maxChars)
+{
+    text.replace(u'\n', u' ');
+    text = text.simplified();
+    if (text.size() > maxChars) {
+        text = text.left(maxChars) + u"…"_s;
+    }
+    return text;
+}
+
 } // namespace
 
 QString AgentLoop::turnStateId(TurnState state)
@@ -146,6 +156,7 @@ AgentLoop::AgentLoop(QObject *parent)
 {
     // Initialize the project graph for understanding and tracking the project
     m_projectGraph = std::make_unique<ProjectGraph>();
+    m_memory = std::make_unique<MemoryLoader>();
 
     m_mcp = new McpManager(this);
         m_locks = new WorkspaceLocks(this);
@@ -177,6 +188,25 @@ AgentLoop::AgentLoop(QObject *parent)
     connect(&m_client, &LlmClient::failed, this, &AgentLoop::onFailed);
     connect(&m_client, &LlmClient::modelsReceived, this, &AgentLoop::modelsReceived);
     connect(&m_client, &LlmClient::modelsFailed, this, &AgentLoop::modelsFailed);
+    connect(&m_client, &LlmClient::usageReceived, this,
+            [this](int inputTokens, int outputTokens, int cachedInputTokens) {
+                const QString model = modelFor(m_settings);
+                if (model != m_calibrationModel) {
+                    m_calibrationModel = model;
+                    m_tokenCalibrator = Tokens::Calibrator(
+                        ModelProfiles::resolve(m_settings.provider, model).tokenFactor);
+                }
+                if (inputTokens > 0 && m_lastRequestEstimate > 0) {
+                    m_tokenCalibrator.observe(m_lastRequestEstimate, inputTokens);
+                }
+                QJsonObject payload;
+                payload.insert(u"inputTokens"_s, inputTokens);
+                payload.insert(u"outputTokens"_s, outputTokens);
+                payload.insert(u"cachedInputTokens"_s, cachedInputTokens);
+                payload.insert(u"estimatedInputTokens"_s, m_lastRequestEstimate);
+                payload.insert(u"factor"_s, m_tokenCalibrator.factor());
+                emitHarnessEvent(EventTypes::Notice, payload);
+            });
 
     connect(&m_acp, &AcpClient::textDelta, this, [this](const QString &delta) {
         if (!m_thinkingFinishedEmitted && !m_currentThinking.isEmpty()) {
@@ -417,6 +447,17 @@ void AgentLoop::setSettings(const Settings &settings)
         || m_settings.checkpointRetention != settings.checkpointRetention;
 
     m_settings = settings;
+    const QString configuredModel = modelFor(m_settings);
+    if (configuredModel != m_calibrationModel) {
+        m_calibrationModel = configuredModel;
+        const ModelProfile profile = ModelProfiles::resolve(m_settings.provider, configuredModel);
+        m_tokenCalibrator = Tokens::Calibrator(profile.tokenFactor);
+        if (!configuredModel.isEmpty() && !profile.known) {
+            Q_EMIT noticeRaised(i18n("Unknown model '%1': using a conservative 32k context window and exact-match edits. "
+                                     "Set a context window in Settings if this model supports more.",
+                                     configuredModel));
+        }
+    }
     reloadHarnessConfig();
     // The mode may override the sampling knobs; everything else reaches the
     // client unchanged. Kept as a copy so the override never writes back into
@@ -507,6 +548,14 @@ void AgentLoop::rebuildTools()
 void AgentLoop::setWorkspace(const QString &workspace)
 {
     m_workspace = workspace;
+    if (m_memory) {
+        m_memory->setWorkspace(workspace);
+    }
+    m_touchedPaths.clear();
+    m_contextSummary.clear();
+    m_contextManifest.clear();
+    m_promptManifest = QJsonObject();
+    m_promptStaticHash.clear();
     m_acp.setWorkspace(workspace);
 
     m_modes.setWorkspace(m_workspace);
@@ -1195,8 +1244,37 @@ bool AgentLoop::exportTrace(const QString &path, QString *error)
 
 void AgentLoop::syncToolAccess()
 {
-    m_client.setToolAccess(activeToolAccess());
-    m_client.setExtraToolDefinitions(m_mcp ? m_mcp->toolDefinitions() : QJsonArray());
+    const ToolAccess access = activeToolAccess();
+    m_client.setToolAccess(access);
+
+    // The registry is rebuilt from the built-ins and the live MCP catalog.
+    // Discovered deferred tools survive the rebuild: the model should not have
+    // to search for a tool it already found in this conversation.
+    const QSet<QString> discovered = m_toolRegistry.discovered();
+    m_toolRegistry.clear();
+    m_toolRegistry.loadBuiltins();
+    if (m_mcp) {
+        const QJsonArray mcpTools = m_mcp->toolDefinitions();
+        for (const QJsonValue &value : mcpTools) {
+            m_toolRegistry.addMcpDefinition(value.toObject());
+        }
+    }
+    for (const QString &name : discovered) {
+        m_toolRegistry.markDiscovered(name);
+    }
+
+    if (m_harness.toolSearch) {
+        const int window = m_settings.contextWindow > 0
+            ? m_settings.contextWindow
+            : ModelProfiles::contextWindow(m_settings.provider, modelFor(m_settings));
+        const AdvertisedTools advertised = m_toolRegistry.advertised(access, window, true);
+        m_client.setToolDefinitionsOverride(advertised.tools);
+        m_client.setExtraToolDefinitions({});
+    } else {
+        m_client.setToolDefinitionsOverride({});
+        m_client.setExtraToolDefinitions(m_mcp ? m_mcp->toolDefinitions() : QJsonArray());
+    }
+
     if (usesAcpNative(m_settings)) {
         const bool readOnly = m_settings.planMode || activeMode().readOnly;
         if (readOnly) {
@@ -1383,6 +1461,81 @@ QList<GraphEdge*> AgentLoop::getProjectEdges() const
 QString AgentLoop::systemPrompt() const
 {
     const ModeDefinition mode = m_modes.modeOrDefault(m_settings.agentMode);
+
+    if (m_harness.promptV2) {
+        PromptRequest request;
+        request.settings = m_settings;
+        request.mode = mode;
+        request.provider = m_settings.provider;
+        request.modelName = modelFor(m_settings);
+        request.workspace = m_workspace;
+        request.verificationGate = m_harness.verificationGate;
+
+        const ToolAccess access = activeToolAccess();
+        for (const QString &name : allBuiltInToolNames()) {
+            if (access.allows(name)) {
+                request.toolNames.append(name);
+            }
+        }
+        if (m_mcp) {
+            for (const QString &name : m_mcp->toolNames()) {
+                if (access.allows(name)) {
+                    request.toolNames.append(name);
+                }
+            }
+        }
+        if (m_harness.toolSearch) {
+            // The bridge is advertised outside the mode's ToolAccess; the
+            // prompt has to mention it or the model does not know discovery
+            // exists when a tool is absent from the list.
+            const int window = m_settings.contextWindow > 0
+                ? m_settings.contextWindow
+                : ModelProfiles::contextWindow(m_settings.provider, request.modelName);
+            if (m_toolRegistry.advertised(access, window, true).deferralActive) {
+                request.toolNames.append({u"tool_search"_s, u"tool_describe"_s, u"tool_call"_s});
+            }
+        }
+
+        if (access.allows(subtaskToolName())) {
+            QString roster = u"You can delegate with new_task. Available agents:\n"_s
+                + m_team.describeRoster() + u"\n"_s;
+            roster += u"At most %1 sub-agents may run at once; independent subtasks in one response run in parallel. "_s
+                          .arg(qMax(1, m_settings.maxParallelSubtasks));
+            roster += u"A sub-agent cannot see this conversation: restate everything it needs, and read its answer "
+                      u"before relying on it.\n"_s;
+            request.subagentRoster = roster;
+        }
+
+        if (m_settings.loadAgentRules && !m_harness.memoryV2) {
+            request.rules = RulesLoader::render(
+                RulesLoader::load(m_workspace, mode.id), m_settings.globalRules);
+        }
+
+        if (m_harness.memoryV2 && m_memory) {
+            const QList<MemoryFile> files = memoryFilesForPrompt();
+            QString rendered = MemoryLoader::render(files);
+            if (!m_settings.globalRules.trimmed().isEmpty()) {
+                rendered = u"<global_rules>\n"_s + m_settings.globalRules.trimmed()
+                    + u"\n</global_rules>\n"_s + rendered;
+            }
+            request.memory = rendered;
+        }
+
+        if (m_projectGraph && m_projectGraph->getNodeCount() > 0 && m_settings.compressProjectGraph) {
+            request.graph = m_projectGraph->contextSummary(
+                m_settings.maxGraphNodes, m_settings.maxGraphEdges, m_settings.contextCompressionLevel);
+        }
+
+        const QJsonArray advertised = m_client.advertisedTools();
+        request.toolSchemaTokens = Tokens::estimate(QString::fromUtf8(
+            QJsonDocument(advertised).toJson(QJsonDocument::Compact)));
+
+        const PromptResult assembled = PromptAssembler::assemble(request);
+        m_promptManifest = assembled.manifest;
+        m_promptStaticHash = assembled.staticHash;
+        return assembled.text;
+    }
+
     QString prompt = defaultSystemPrompt(m_workspace);
 
     // The active mode replaces the persona; the generic coding protocol below
@@ -1560,9 +1713,154 @@ void AgentLoop::resetConversation()
     m_currentPlan = QJsonArray();
     m_planShown = false;
     m_currentAssistant.clear();
+    m_contextSummary.clear();
+    m_contextManifest.clear();
+    m_touchedPaths.clear();
     m_turnId.clear();
     m_lastTurnState = TurnState::Idle;
     m_terminalSignalled = true;
+}
+
+QString AgentLoop::currentPlanText() const
+{
+    if (m_currentPlan.isEmpty()) {
+        return QString();
+    }
+    QStringList lines;
+    for (const QJsonValue &value : m_currentPlan) {
+        const QJsonObject step = value.toObject();
+        const QString text = step.value(u"description"_s).toString(
+            step.value(u"text"_s).toString(step.value(u"title"_s).toString()));
+        if (text.trimmed().isEmpty()) {
+            continue;
+        }
+        const bool done = step.value(u"completed"_s).toBool()
+            || step.value(u"status"_s).toString() == u"completed"_s;
+        const bool active = step.value(u"status"_s).toString() == u"in_progress"_s;
+        lines.append((done ? u"- [x] "_s : active ? u"- [~] "_s : u"- [ ] "_s) + text.trimmed());
+    }
+    return lines.join(u'\n');
+}
+
+void AgentLoop::rememberTouchedPaths(const ToolCall &call)
+{
+    const QJsonObject args = effectiveArgs(call);
+    QStringList paths;
+    const QString path = args.value(u"path"_s).toString();
+    if (!path.isEmpty()) {
+        paths.append(path);
+    }
+    const QString file = args.value(u"file_path"_s).toString();
+    if (!file.isEmpty()) {
+        paths.append(file);
+    }
+    const QString patch = args.value(u"patch"_s).toString();
+    if (!patch.isEmpty()) {
+        for (const PatchFile &file : parseUnifiedPatch(patch)) {
+            paths.append(file.path);
+        }
+    }
+    for (const QString &item : paths) {
+        if (item.isEmpty()) {
+            continue;
+        }
+        QString relative = item;
+        if (!m_workspace.isEmpty() && QDir::isRelativePath(relative)) {
+            relative = QDir::cleanPath(relative);
+        } else if (!m_workspace.isEmpty()) {
+            relative = QDir(m_workspace).relativeFilePath(relative);
+        }
+        if (!relative.isEmpty() && !relative.startsWith(u"../"_s)
+            && !m_touchedPaths.contains(relative)) {
+            m_touchedPaths.append(relative);
+        }
+    }
+}
+
+QStringList AgentLoop::contextTouchedPaths() const
+{
+    QStringList paths = m_touchedPaths;
+    for (const QString &changed : m_changedPaths) {
+        if (m_workspace.isEmpty()) {
+            paths.append(changed);
+            continue;
+        }
+        const QString relative = QDir(m_workspace).relativeFilePath(changed);
+        if (!relative.startsWith(u"../"_s) && !paths.contains(relative)) {
+            paths.append(relative);
+        }
+    }
+    return paths;
+}
+
+QList<MemoryFile> AgentLoop::memoryFilesForPrompt() const
+{
+    if (!m_memory) {
+        return {};
+    }
+    QList<MemoryFile> files = m_memory->load(contextTouchedPaths());
+    if (!m_settings.loadAgentRules || !m_settings.loadProjectInstructions) {
+        QList<MemoryFile> filtered;
+        for (const MemoryFile &file : std::as_const(files)) {
+            const bool projectScope = file.scope == MemoryScope::Project
+                || file.scope == MemoryScope::Nested || file.scope == MemoryScope::Local;
+            if (!m_settings.loadAgentRules && projectScope) {
+                continue;
+            }
+            if (!m_settings.loadProjectInstructions && file.displayPath.endsWith(u"KATEAI.md"_s)) {
+                continue;
+            }
+            filtered.append(file);
+        }
+        return filtered;
+    }
+    return files;
+}
+
+ToolResult AgentLoop::runRegistryTool(const ToolCall &call)
+{
+    ToolResult result;
+    result.toolCallId = call.id;
+    result.name = call.name;
+    const QJsonObject args = effectiveArgs(call);
+
+    if (call.name == u"tool_search"_s) {
+        const QString query = args.value(u"query"_s).toString();
+        const int limit = qBound(1, args.value(u"limit"_s).toInt(8), 20);
+        const QStringList names = m_toolRegistry.search(query, activeToolAccess(), limit);
+        if (names.isEmpty()) {
+            result.output = u"No deferred tool matched '"_s + query
+                + u"'. Try a broader capability word (debug, web, graph, build, terminal, mcp)."_s;
+            return result;
+        }
+        QStringList lines;
+        for (const QString &name : names) {
+            const ToolSpec spec = m_toolRegistry.spec(name);
+            lines.append(u"- "_s + name + u": "_s + oneLineForReport(spec.description, 180));
+        }
+        result.output = u"Deferred tools matching '"_s + query + u"':\n"_s + lines.join(u'\n')
+            + u"\nCall tool_describe for the full schema, then tool_call to invoke one."_s;
+        return result;
+    }
+
+    if (call.name == u"tool_describe"_s) {
+        const QString name = args.value(u"name"_s).toString();
+        if (!m_toolRegistry.contains(name) || !activeToolAccess().allows(name)) {
+            result.ok = false;
+            result.output = u"Unknown or unavailable tool '"_s + name + u"'."_s;
+            return result;
+        }
+        const ToolSpec spec = m_toolRegistry.spec(name);
+        result.output = QString::fromUtf8(
+            QJsonDocument(spec.schema).toJson(QJsonDocument::Indented));
+        m_toolRegistry.markDiscovered(name);
+        syncToolAccess();
+        return result;
+    }
+
+    result.ok = false;
+    result.output = u"Not a tool-registry bridge tool."_s;
+    return result;
 }
 
 void AgentLoop::abort()
@@ -1876,13 +2174,50 @@ QString AgentLoop::turnContextMessage() const
 
 QList<ChatMessage> AgentLoop::m_messagesForRequest() const
 {
-    ContextManager::Options options;
-    options.contextWindow = m_settings.contextWindow > 0
+    const QString model = modelFor(m_settings);
+    const int window = m_settings.contextWindow > 0
         ? m_settings.contextWindow
-        : ContextManager::contextWindowFor(modelFor(m_settings));
-    options.reserveForResponse = m_settings.contextWindowReserve > 0
-        ? m_settings.contextWindowReserve
-        : 8192;
+        : ModelProfiles::contextWindow(m_settings.provider, model);
+    const int reserve = m_settings.contextWindowReserve > 0 ? m_settings.contextWindowReserve : 8192;
+    const QString context = turnContextMessage();
+
+    if (m_harness.contextV2) {
+        ContextOptions options;
+        options.contextWindow = window;
+        options.reserveForResponse = reserve;
+        options.autoCompact = m_settings.compressOldMessages;
+        options.compactionLevel = m_compactionLevel;
+        options.tokenFactor = m_calibrationModel == model ? m_tokenCalibrator.factor() : 1.0;
+        options.previousSummary = m_contextSummary;
+        options.projectGraph = m_projectGraph.get();
+        options.summarizeEverything = m_compactionLevel >= 6;
+        if (m_settings.keepRecentTokens > 0) {
+            options.keepRecentTokens = m_settings.keepRecentTokens;
+        }
+        options.plan = currentPlanText();
+        const QStringList touched = contextTouchedPaths();
+        options.modifiedFiles = touched.mid(qMax(0, touched.size() - 5));
+        options.runningTasks = m_activeSubtasks.keys();
+
+        ContextResult engine = ContextEngine::build(m_messages, options);
+        m_contextSummary = engine.summary;
+        m_contextManifest = engine.compacted ? ContextEngine::renderManifest(engine, window) : QString();
+
+        QList<ChatMessage> request = engine.messages;
+        if (!context.isEmpty()) {
+            ChatMessage ambient;
+            ambient.role = ChatMessage::Role::User;
+            ambient.transient = true;
+            ambient.content = context;
+            const int at = (!request.isEmpty() && request.first().role == ChatMessage::Role::System) ? 1 : 0;
+            request.insert(at, ambient);
+        }
+        return request;
+    }
+
+    ContextManager::Options options;
+    options.contextWindow = window;
+    options.reserveForResponse = reserve;
     options.autoCompact = m_settings.compressOldMessages;
     options.compactionLevel = m_compactionLevel;
     options.projectGraph = m_projectGraph.get();
@@ -1899,7 +2234,6 @@ QList<ChatMessage> AgentLoop::m_messagesForRequest() const
         options.keepRecentTokens = qMax(4000, usable / 3);
     }
     QList<ChatMessage> request = ContextManager::build(m_messages, options);
-    const QString context = turnContextMessage();
     if (!context.isEmpty()) {
         ChatMessage ambient;
         ambient.role = ChatMessage::Role::User;
@@ -1919,22 +2253,19 @@ QString AgentLoop::contextReport() const
 {
     const QString model = modelFor(m_settings);
     const int window = m_settings.contextWindow > 0 ? m_settings.contextWindow
-                                                    : ContextManager::contextWindowFor(model);
+                                                    : ModelProfiles::contextWindow(m_settings.provider, model);
     const int reserve = m_settings.contextWindowReserve > 0 ? m_settings.contextWindowReserve : 8192;
     const QList<ChatMessage> request = m_messagesForRequest();
-    const int requestTokens = ContextManager::estimateTokens(request);
-    const int historyTokens = ContextManager::estimateTokens(m_messages);
-    const int systemTokens = request.isEmpty() ? 0 : ContextManager::estimateTokens(request.first().content);
-    const int ambientTokens = ContextManager::estimateTokens(turnContextMessage());
+    const double factor = m_calibrationModel == model ? m_tokenCalibrator.factor() : 1.0;
+    const int requestTokens = Tokens::applyFactor(Tokens::estimate(request), factor);
+    const int historyTokens = Tokens::applyFactor(Tokens::estimate(m_messages), factor);
+    const int systemTokens = request.isEmpty() ? 0 : Tokens::applyFactor(Tokens::estimate(request.first().content), factor);
+    const int ambientTokens = Tokens::applyFactor(Tokens::estimate(turnContextMessage()), factor);
 
-    QJsonArray definitions = toolDefinitions(activeToolAccess());
-    if (m_mcp) {
-        const QJsonArray mcpTools = m_mcp->toolDefinitions();
-        for (const QJsonValue &tool : mcpTools) {
-            definitions.append(tool);
-        }
-    }
+    const QJsonArray definitions = m_client.advertisedTools();
     const int toolSchemaChars = QJsonDocument(definitions).toJson(QJsonDocument::Compact).size();
+    const int toolSchemaTokens = Tokens::estimate(QString::fromUtf8(
+        QJsonDocument(definitions).toJson(QJsonDocument::Compact)));
 
     int rulesChars = 0;
     if (m_settings.loadAgentRules) {
@@ -1958,16 +2289,21 @@ QString AgentLoop::contextReport() const
     auto tokens = [](int value) { return QString::number(value); };
 
     QString report;
+    const ModelProfile profile = ModelProfiles::resolve(m_settings.provider, model);
     report += i18n("Context window: %1 tokens (%2)\n", tokens(window), model);
+    report += i18n("Model profile: %1 (%2, %3)\n", profile.displayName,
+                   ModelProfiles::familyId(m_settings.provider, model),
+                   profile.known ? i18n("known") : i18n("conservative fallback"));
     report += i18n("Reserved for the reply: %1 tokens\n", tokens(reserve));
-    report += i18n("Request estimate: %1 tokens (level %2)\n", tokens(requestTokens + toolSchemaChars / 4),
-                   m_compactionLevel);
+    report += i18n("Request estimate: %1 tokens (level %2, calibration ×%3)\n",
+                   tokens(requestTokens + toolSchemaTokens), m_compactionLevel,
+                   QString::number(factor, 'f', 2));
     report += i18n("  system prompt: %1\n", tokens(systemTokens));
     report += i18n("  ambient context: %1\n", tokens(ambientTokens));
-    report += i18n("  tool schemas: %1 (%2 tools, %3 KB)\n", tokens(toolSchemaChars / 4),
+    report += i18n("  tool schemas: %1 (%2 tools, %3 KB)\n", tokens(toolSchemaTokens),
                    definitions.size(), kb(toolSchemaChars));
     report += i18n("  conversation: %1\n", tokens(historyTokens));
-    const int used = requestTokens + toolSchemaChars / 4;
+    const int used = requestTokens + toolSchemaTokens;
     report += i18n("  free: %1\n", tokens(qMax(0, window - reserve - used)));
     report += u"\n"_s;
     report += i18n("KATEAI.md: %1 KB\n", kb(instructionsChars));
@@ -1976,18 +2312,46 @@ QString AgentLoop::contextReport() const
     report += i18n("Project graph: %1 KB\n", kb(graphChars));
     report += i18n("Messages: %1\n", m_messages.size());
     report += i18n("Compaction level: %1 (higher = more aggressive)\n", m_compactionLevel);
-    report += i18n("\nEstimates use ~4 characters per token and are corrected only after a provider reports usage.");
+
+    if (m_harness.promptV2 && !m_promptManifest.isEmpty()) {
+        report += u"\n"_s + i18n("Prompt sections (%1, static prefix %2):\n",
+                                 m_promptManifest.value(u"variant"_s).toString(),
+                                 m_promptStaticHash);
+        const QJsonArray sections = m_promptManifest.value(u"sections"_s).toArray();
+        for (const QJsonValue &value : sections) {
+            const QJsonObject section = value.toObject();
+            report += u"  %1: %2 tokens (budget %3)\n"_s
+                          .arg(section.value(u"id"_s).toString())
+                          .arg(section.value(u"tokens"_s).toInt())
+                          .arg(section.value(u"budget"_s).toInt());
+        }
+    }
+    if (m_harness.contextV2) {
+        report += u"\n"_s + i18n("Context engine: incremental summary %1 chars\n",
+                                 m_contextSummary.size());
+        if (!m_contextManifest.isEmpty()) {
+            report += m_contextManifest;
+        }
+    }
+    report += i18n("\nEstimates use ~4 characters per token; the calibration factor is learned from provider usage when available.");
     return report;
 }
 
 QString AgentLoop::usageReport() const
 {
     const QString model = modelFor(m_settings);
+    const ModelProfile profile = ModelProfiles::resolve(m_settings.provider, model);
     const int window = m_settings.contextWindow > 0 ? m_settings.contextWindow
-                                                    : ContextManager::contextWindowFor(model);
+                                                    : profile.contextWindow;
+    const double factor = m_calibrationModel == model ? m_tokenCalibrator.factor() : 1.0;
+    const int estimatedTokens = Tokens::applyFactor(
+        Tokens::estimate(m_messagesForRequest()), factor);
     QString report;
     report += i18n("Provider: %1\n", providerId(m_settings.provider));
     report += i18n("Model: %1\n", model.isEmpty() ? i18n("(not selected)") : model);
+    report += i18n("Profile: %1 (%2, cache %3)\n", profile.displayName,
+                   ModelProfiles::familyId(m_settings.provider, model),
+                   ModelProfiles::toJson(profile).value(u"cacheStyle"_s).toString());
     report += i18n("Mode: %1\n", m_modes.modeOrDefault(m_settings.agentMode).id);
     report += i18n("Turn: %1 (%2)\n", m_turnId.isEmpty() ? i18n("none") : m_turnId,
                    turnStateId(turnState()));
@@ -1997,7 +2361,18 @@ QString AgentLoop::usageReport() const
                    m_settings.maxToolCalls > 0 ? i18n(" / %1", m_settings.maxToolCalls) : QString());
     report += i18n("Messages: %1\n", m_messages.size());
     report += i18n("Context window: %1 tokens\n", window);
-    report += i18n("Estimated request: %1 tokens\n", ContextManager::estimateTokens(m_messagesForRequest()));
+    report += i18n("Estimated request: %1 tokens (calibration ×%2)\n", estimatedTokens,
+                   QString::number(factor, 'f', 2));
+    if (profile.hasPricing()) {
+        const double inputCost = estimatedTokens * profile.inputPrice / 1000000.0;
+        report += i18n("Estimated request cost: $%1 (input only, at $%2/M)\n",
+                       QString::number(inputCost, 'f', 4), QString::number(profile.inputPrice, 'f', 2));
+        report += i18n("Cached-prefix price: $%1/M (only when the provider reports cache hits)\n",
+                       QString::number(profile.cacheReadPrice, 'f', 2));
+    } else {
+        report += i18n("Pricing: not known for this model; no cost is guessed.\n");
+    }
+    report += i18n("Calibration samples: %1\n", m_tokenCalibrator.samples());
     report += i18n("Recovery prompts: %1\n", m_recoveryPromptCount);
     report += i18n("Harness flags: %1\n", m_harness.enabledNames().isEmpty()
                                             ? i18n("none")
@@ -2008,8 +2383,96 @@ QString AgentLoop::usageReport() const
     report += i18n("Event log: %1 conversation %2\n",
                    m_harness.eventLog ? i18n("on") : i18n("off"),
                    currentConversationId().isEmpty() ? i18n("(none)") : currentConversationId());
-    report += i18n("\nProvider token usage and pricing are not exposed by every transport yet; this report counts requests and estimates context locally.");
+    report += i18n("\nToken counts are local estimates calibrated from provider-reported usage; pricing is per million input tokens and excludes cached and output tokens unless stated.");
     return report;
+}
+
+QString AgentLoop::promptReport() const
+{
+    const PromptResult report = [this]() {
+        PromptRequest request;
+        request.settings = m_settings;
+        request.mode = m_modes.modeOrDefault(m_settings.agentMode);
+        request.provider = m_settings.provider;
+        request.modelName = modelFor(m_settings);
+        request.workspace = m_workspace;
+        request.verificationGate = m_harness.verificationGate;
+        request.memory = m_harness.memoryV2 && m_memory
+            ? MemoryLoader::render(memoryFilesForPrompt())
+            : QString();
+        request.rules = m_settings.loadAgentRules && !m_harness.memoryV2
+            ? RulesLoader::render(RulesLoader::load(m_workspace, request.mode.id),
+                                  m_settings.globalRules)
+            : QString();
+        return PromptAssembler::assemble(request);
+    }();
+
+    QString text;
+    text += i18n("Prompt variant: %1\n", PromptAssembler::variantId(report.variant));
+    text += i18n("Static prefix hash: %1\n", report.staticHash);
+    text += i18n("Prompt tokens: %1 / budget %2%3\n", report.totalTokens, report.budgetTokens,
+                 report.truncated ? i18n(" (truncated)") : QString());
+    text += u"\n"_s + i18n("Sections:\n");
+    for (const PromptSection &section : report.sections) {
+        text += u"  %1. %2 [%3] %4 tokens (budget %5)\n"_s
+                    .arg(section.order)
+                    .arg(section.id, PromptAssembler::stabilityId(section.stability))
+                    .arg(Tokens::estimate(section.content))
+                    .arg(section.budgetTokens);
+    }
+    text += u"\n"_s + i18n("Exact system prompt:\n\n") + report.text;
+    return text;
+}
+
+QString AgentLoop::memoryReport() const
+{
+    QString text;
+    const QStringList touched = contextTouchedPaths();
+    const QList<MemoryFile> files = m_memory ? memoryFilesForPrompt()
+                                             : MemoryLoader::discover(m_workspace, touched);
+    text += i18n("Memory files: %1 (budget %2 KiB/file, %3 KiB total, %4 files)\n",
+                 files.size(), 32, 128, 32);
+    text += i18n("Touched paths: %1\n", touched.isEmpty() ? i18n("(none)") : touched.join(u", "_s));
+    for (const MemoryFile &file : files) {
+        text += u"- [%1] %2 — %3 bytes%4\n"_s
+                    .arg(MemoryLoader::scopeId(file.scope), file.displayPath)
+                    .arg(file.bytes)
+                    .arg(file.truncated ? i18n(" (truncated)") : QString());
+        if (!file.paths.isEmpty()) {
+            text += u"    paths: "_s + file.paths.join(u", "_s) + u'\n';
+        }
+        if (!file.description.isEmpty()) {
+            text += u"    "_s + file.description + u'\n';
+        }
+    }
+    return text;
+}
+
+QString AgentLoop::toolsReport() const
+{
+    const ToolAccess access = activeToolAccess();
+    const int window = m_settings.contextWindow > 0
+        ? m_settings.contextWindow
+        : ModelProfiles::contextWindow(m_settings.provider, modelFor(m_settings));
+    const AdvertisedTools advertised = m_toolRegistry.advertised(access, window, m_harness.toolSearch);
+    QString text;
+    text += i18n("Tools: %1 accessible, %2 advertised, %3 deferred%4\n",
+                 m_toolRegistry.specs().size(), advertised.tools.size(), advertised.deferred.size(),
+                 advertised.deferralActive ? i18n(" (search bridge active)") : QString());
+    text += i18n("Schema cost: %1 tokens\n", advertised.schemaTokens);
+    for (const ToolSpec &spec : m_toolRegistry.specs()) {
+        if (!access.isEmpty() && !access.allows(spec.name)) {
+            continue;
+        }
+        const bool deferred = advertised.deferred.contains(spec.name);
+        text += u"- %1 [%2, %3, %4] budget %5 chars\n"_s
+                    .arg(spec.name, spec.group,
+                         spec.risk == ToolRisk::Read ? u"read"_s
+                             : spec.risk == ToolRisk::Write ? u"write"_s : u"execute"_s,
+                         deferred ? i18n("deferred") : i18n("advertised"))
+                    .arg(spec.maxResultChars);
+    }
+    return text;
 }
 
 void AgentLoop::maybeCompactStoredHistory(const QList<ChatMessage> &requestMessages)
@@ -2161,6 +2624,12 @@ void AgentLoop::sendToModel()
 
     const QList<ChatMessage> requestMessages = m_messagesForRequest();
     maybeCompactStoredHistory(requestMessages);
+    m_lastRequestEstimate = Tokens::applyFactor(Tokens::estimate(requestMessages),
+                                                m_calibrationModel == modelFor(m_settings)
+                                                    ? m_tokenCalibrator.factor()
+                                                    : 1.0)
+        + Tokens::estimate(QString::fromUtf8(
+              QJsonDocument(m_client.advertisedTools()).toJson(QJsonDocument::Compact)));
 
     ++m_stepNumber;
     m_currentStepId = QUuid::createUuid().toString(QUuid::WithoutBraces);
@@ -2666,14 +3135,20 @@ void AgentLoop::appendToolResult(const ToolCall &call, ToolResult result)
     result.toolCallId = call.id;
     result.name = call.name;
     result.rawOutput = result.output;  // Preserve raw output for UI display
+    rememberTouchedPaths(call);
 
     // Large tool output is stored outside the conversation and replaced with a
     // bounded preview. The model can page it back with read_tool_result. The
     // raw copy remains in rawOutput for the card, but the transcript keeps the
     // preview.
+    const int resultBudget = m_harness.toolSearch
+        ? m_toolRegistry.resultBudgetFor(call.name)
+        : 40000;
     if (m_harness.resultBudget && call.name != u"read_tool_result"_s
-        && result.output.size() > 40000) {
-        const StoredToolResult stored = ToolResults::store(result.output);
+        && result.output.size() > resultBudget) {
+        const StoredToolResult stored = ToolResults::store(result.output,
+                                                           qMax(1000, resultBudget * 2 / 3),
+                                                           qMax(500, resultBudget / 3));
         if (!stored.id.isEmpty()) {
             result.output = stored.preview;
         }
@@ -3104,6 +3579,35 @@ void AgentLoop::processQueue()
     // use the same spelling. Otherwise "Read", "patch" or "terminal/exec"
     // passes the mode check and then fails as an unknown tool.
     call.name = canonicalToolName(call.name);
+
+    // tool_call is a transport for a deferred tool. Unwrap it before hooks,
+    // permission, and execution so the target gets the target's policy rather
+    // than the bridge's.
+    if (call.name == u"tool_call"_s) {
+        const QJsonObject args = effectiveArgs(call);
+        const QString targetName = canonicalToolName(args.value(u"name"_s).toString());
+        QJsonObject targetArgs = args.value(u"arguments"_s).toObject();
+        if (targetName.isEmpty()
+            || (targetArgs.isEmpty() && !args.value(u"arguments"_s).isObject())) {
+            ToolResult result;
+            result.toolCallId = call.id;
+            result.name = call.name;
+            result.ok = false;
+            result.output = u"tool_call needs a non-empty target name and an arguments object."_s;
+            appendToolResult(call, result);
+            processQueue();
+            return;
+        }
+        ToolCall target;
+        target.id = call.id;
+        target.name = targetName;
+        target.arguments = targetArgs;
+        target.argumentsJson = QString::fromUtf8(
+            QJsonDocument(targetArgs).toJson(QJsonDocument::Compact));
+        m_toolRegistry.markDiscovered(targetName);
+        call = target;
+    }
+
     if (!applyPreToolHooks(call)) {
         processQueue();
         return;
@@ -3161,7 +3665,10 @@ void AgentLoop::executeOne(const ToolCall &call)
     // The mode (and plan mode) decide which tools exist at all. Rejecting here
     // is the runtime half of the same rule the request advertises.
     const ToolAccess access = activeToolAccess();
-    if (!access.allows(call.name)) {
+    const bool registryBridge = m_harness.toolSearch
+        && (call.name == u"tool_search"_s || call.name == u"tool_describe"_s
+            || call.name == u"tool_call"_s);
+    if (!access.allows(call.name) && !registryBridge) {
         ToolResult result;
         result.ok = false;
         if (m_settings.planMode && !m_policy.isReadTool(call.name)) {
@@ -3174,6 +3681,17 @@ void AgentLoop::executeOne(const ToolCall &call)
                                 u"Use one of those, or switch modes."_s
                                     .arg(activeMode().name, call.name, accessList());
         }
+        appendToolResult(call, result);
+        processQueue();
+        return;
+    }
+
+    // Registry bridge calls are read-only and never touch the sandbox. They
+    // still appear as a tool card so the user sees discovery happening.
+    if (registryBridge && call.name != u"tool_call"_s) {
+        ++m_toolCalls;
+        Q_EMIT toolStarted(describeTool(call));
+        ToolResult result = runRegistryTool(call);
         appendToolResult(call, result);
         processQueue();
         return;
@@ -4289,6 +4807,8 @@ bool AgentLoop::compactContext()
         return false;
     }
     m_messages = compacted;
+    m_contextSummary.clear();
+    m_contextManifest.clear();
     m_compactionLevel = 0;
     m_contextOverflowRetries = 0;
 

@@ -12,10 +12,16 @@
 #include "documentbridge.h"
 #include "harness/harnessflags.h"
 #include "harness/checks.h"
+#include "harness/contextengine.h"
 #include "harness/eventstore.h"
 #include "harness/hooks.h"
+#include "harness/memory.h"
 #include "harness/middleware.h"
+#include "harness/models.h"
 #include "harness/policy.h"
+#include "harness/prompt.h"
+#include "harness/registry.h"
+#include "harness/tokens.h"
 #include "harness/turn.h"
 #include "llmclient.h"
 #include "lsp.h"
@@ -226,6 +232,13 @@ public:
     // by every transport yet, so the report says what it measured.
     QString contextReport() const;
     QString usageReport() const;
+    // Exact system prompt and section manifest from the prompt assembler. The
+    // report never includes conversation content or credentials.
+    QString promptReport() const;
+    // Scoped memory files, their provenance, and the bytes the prompt uses.
+    QString memoryReport() const;
+    // Effective tools, deferral state, and schema cost.
+    QString toolsReport() const;
 
     PermissionPolicy &policy() { return m_policy; }
 
@@ -433,6 +446,13 @@ private:
     bool applyPreToolHooks(ToolCall &call);
     void applyPostToolHooks(const ToolCall &call, ToolResult &result);
     bool runStopHooks();
+    // Runs the registry bridge tools (tool_search/tool_describe). Returns a
+    // false ok result for a name that is not a bridge tool.
+    ToolResult runRegistryTool(const ToolCall &call);
+    void rememberTouchedPaths(const ToolCall &call);
+    QStringList contextTouchedPaths() const;
+    QString currentPlanText() const;
+    QList<MemoryFile> memoryFilesForPrompt() const;
     // Appends any hook-provided context as a controller message once the batch
     // has no more tool results to send first.
     void flushHookContext();
@@ -567,6 +587,21 @@ LlmClient m_client;
     mutable QString m_cachedTurnContext;
     mutable QString m_cachedTurnContextTurnId;
     HarnessFlags m_harness;
+
+    // --- Harness 0.8 ---------------------------------------------------------
+    // Scoped instruction loader. mutable because the prompt is built from
+    // const paths (context reports) and lazy path-scoped files are loaded on
+    // demand.
+    mutable std::unique_ptr<MemoryLoader> m_memory;
+    ToolRegistry m_toolRegistry;
+    mutable QJsonObject m_promptManifest;
+    mutable QString m_promptStaticHash;
+    mutable QString m_contextManifest;
+    mutable QString m_contextSummary;
+    mutable QStringList m_touchedPaths;
+    QString m_calibrationModel;
+    Tokens::Calibrator m_tokenCalibrator;
+    int m_lastRequestEstimate = 0;
 
     // --- Harness 0.7 ---------------------------------------------------------
     EventStore m_events;

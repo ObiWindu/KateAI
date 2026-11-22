@@ -141,6 +141,9 @@ public:
     // Plain-text reports opened by ":kateai context" and ":kateai usage".
     void showContextReport();
     void showUsageReport();
+    void showPromptReport();
+    void showMemoryReport();
+    void showToolsReport();
     void showVerificationReport();
     void showPolicyReport();
     void showHooksReport();

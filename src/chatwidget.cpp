@@ -3695,6 +3695,39 @@ void ChatWidget::showUsageReport()
     box.exec();
 }
 
+void ChatWidget::showPromptReport()
+{
+    QMessageBox box(this);
+    box.setWindowTitle(i18n("Kate AI Prompt"));
+    box.setIcon(QMessageBox::Information);
+    box.setTextFormat(Qt::PlainText);
+    box.setText(m_agent.promptReport());
+    box.setStandardButtons(QMessageBox::Close);
+    box.exec();
+}
+
+void ChatWidget::showMemoryReport()
+{
+    QMessageBox box(this);
+    box.setWindowTitle(i18n("Kate AI Memory"));
+    box.setIcon(QMessageBox::Information);
+    box.setTextFormat(Qt::PlainText);
+    box.setText(m_agent.memoryReport());
+    box.setStandardButtons(QMessageBox::Close);
+    box.exec();
+}
+
+void ChatWidget::showToolsReport()
+{
+    QMessageBox box(this);
+    box.setWindowTitle(i18n("Kate AI Tools"));
+    box.setIcon(QMessageBox::Information);
+    box.setTextFormat(Qt::PlainText);
+    box.setText(m_agent.toolsReport());
+    box.setStandardButtons(QMessageBox::Close);
+    box.exec();
+}
+
 void ChatWidget::showVerificationReport()
 {
     QMessageBox box(this);

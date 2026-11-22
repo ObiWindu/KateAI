@@ -153,6 +153,7 @@ private:
     ToolResult question(const QJsonObject &args);
     // Multi-file unified diff (apply_patch). Atomic: all files or none.
     ToolResult applyPatch(const QJsonObject &args);
+    ToolResult memoryWrite(const QJsonObject &args);
     ToolResult todoWrite(const QJsonObject &args);
     ToolResult todoRead(const QJsonObject &args);
     ToolResult think(const QJsonObject &args);

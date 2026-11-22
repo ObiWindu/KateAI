@@ -43,6 +43,11 @@ public:
     // Overrides the directory for tests. An empty value restores the default.
     static void setDirectoryForTests(const QString &directory);
 
+    // Evicts the oldest stored results until the directory fits `maxBytes`.
+    // Returns the number of files removed. Never touches files outside the
+    // store directory.
+    static int prune(qint64 maxBytes = 200LL * 1024 * 1024);
+
 private:
     static bool validId(const QString &id);
     static QString s_directoryOverride;
