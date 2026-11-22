@@ -412,6 +412,10 @@ private:
     QString m_acpAgentModelViewAgentId;
     QString m_acpAgentModelViewAgentName;
     QString m_acpModelsLoading;
+    // Agent whose slash commands the composer is showing. Lets a settings
+    // change keep a live list (the cache may predate it) while an agent switch
+    // still clears the outgoing agent's commands.
+    QString m_acpCommandsAgentId;
     // Effort/thought levels advertised by the live ACP agent, plus the level
     // it last reported as selected. Drives the composer effort button.
     QStringList m_acpEfforts;

@@ -389,6 +389,54 @@ bool restoredResultWasCancelled(const QString &output)
         || lower.contains(u"cancelled before it finished"_s)
         || lower.startsWith(u"cancelled: turn stopped"_s);
 }
+
+// ACP advertises slash commands as {name, description} objects, but older
+// agents and extensions use "command" for the name. Both the live notification
+// and the per-agent cache go through this one converter so they cannot drift.
+QList<KateAi::PromptCommand> promptCommandsFromJson(const QJsonArray &commands)
+{
+    QList<KateAi::PromptCommand> result;
+    for (const QJsonValue &value : commands) {
+        const QJsonObject command = value.toObject();
+        KateAi::PromptCommand promptCommand;
+        promptCommand.name = command.value(u"name"_s).toString();
+        if (promptCommand.name.isEmpty()) {
+            promptCommand.name = command.value(u"command"_s).toString();
+        }
+        promptCommand.name = promptCommand.name.trimmed();
+        promptCommand.description = command.value(u"description"_s).toString().simplified();
+        if (!promptCommand.name.isEmpty()) {
+            result.append(promptCommand);
+        }
+    }
+    return result;
+}
+
+// The commands the agent advertised the last time it ran. A fresh window has
+// no live session yet, so this is what lets "/" show the real list (with
+// descriptions) from the first keystroke instead of after the first turn.
+QList<KateAi::PromptCommand> cachedAcpCommands(const KateAi::Settings &settings, const QString &agentId)
+{
+    if (agentId.isEmpty()) {
+        return {};
+    }
+    const QJsonDocument doc = QJsonDocument::fromJson(settings.acpAgentCommands.toUtf8());
+    if (!doc.isObject()) {
+        return {};
+    }
+    return promptCommandsFromJson(doc.object().value(agentId).toArray());
+}
+
+// Returns the command cache with one agent's list replaced. The caller compares
+// the result with the stored value before persisting, so an agent that repeats
+// the same list on every turn does not churn the settings file.
+QString withCachedAcpCommands(const QString &cache, const QString &agentId, const QJsonArray &commands)
+{
+    QJsonDocument doc = QJsonDocument::fromJson(cache.toUtf8());
+    QJsonObject all = doc.isObject() ? doc.object() : QJsonObject();
+    all.insert(agentId, commands);
+    return QString::fromUtf8(QJsonDocument(all).toJson(QJsonDocument::Compact));
+}
 } // namespace
 
 namespace KateAi
@@ -722,6 +770,11 @@ ChatWidget::ChatWidget(QWidget *parent)
     composerCardLayout->setSpacing(2);
 
     m_prompt = new PromptEdit(composerCard);
+    // The slash-command list is an overlay of the whole panel: it has to cover
+    // the transcript above the composer, not just the input card. Parenting it
+    // to the chat widget (rather than to the top-level window) also keeps it in
+    // front of the panel's own children once raised.
+    m_prompt->setCommandPopupHost(this);
     composerCardLayout->addWidget(m_prompt);
 
     auto *bottomRow = new QHBoxLayout;
@@ -741,11 +794,6 @@ ChatWidget::ChatWidget(QWidget *parent)
     bottomRow->addWidget(m_thinking);
 
     bottomRow->addStretch();
-
-    m_tokenCount = new QLabel(composerCard);
-    m_tokenCount->setObjectName(u"tokenCount"_s);
-    m_tokenCount->hide();
-    bottomRow->addWidget(m_tokenCount);
 
     // Thinking mode toggle button
     m_thinking->setParent(composerCard);
@@ -770,7 +818,21 @@ ChatWidget::ChatWidget(QWidget *parent)
     m_turnStatus = new TurnStatus(composerContainer);
     m_turnStatus->setIdleText(i18n("Enter to send · Shift+Enter for a new line · Ctrl+Alt+V for voice"));
     m_turnStatus->setMinimumHeight(18);
-    composerLayout->addWidget(m_turnStatus);
+
+    // The context readout shares the strip below the input card, pinned to its
+    // right edge. It used to sit in the card's control row, which made it read
+    // as part of the composer buttons and squeezed the model selector.
+    auto *statusRow = new QHBoxLayout;
+    statusRow->setContentsMargins(0, 0, 0, 0);
+    statusRow->setSpacing(8);
+    statusRow->addWidget(m_turnStatus, 1);
+
+    m_tokenCount = new QLabel(composerContainer);
+    m_tokenCount->setObjectName(u"tokenCount"_s);
+    m_tokenCount->hide();
+    statusRow->addWidget(m_tokenCount, 0, Qt::AlignRight | Qt::AlignVCenter);
+
+    composerLayout->addLayout(statusRow);
     connect(m_turnStatus, &TurnStatus::scrollToLatestRequested, this, &ChatWidget::forceScrollToBottom);
 
     root->addWidget(composerContainer);
@@ -1624,21 +1686,27 @@ ChatWidget::ChatWidget(QWidget *parent)
     // in-input hint: typing "/" as the first character opens a filtered list
     // above the cursor, with each command's description.
     connect(m_agent.acpClient(), &AcpClient::availableCommandsChanged, this, [this](const QJsonArray &commands) {
-        QList<PromptCommand> promptCommands;
-        for (const QJsonValue &value : commands) {
-            const QJsonObject command = value.toObject();
-            PromptCommand promptCommand;
-            promptCommand.name = command.value(u"name"_s).toString();
-            if (promptCommand.name.isEmpty()) {
-                promptCommand.name = command.value(u"command"_s).toString();
-            }
-            promptCommand.name = promptCommand.name.trimmed();
-            promptCommand.description = command.value(u"description"_s).toString().simplified();
-            if (!promptCommand.name.isEmpty()) {
-                promptCommands.append(promptCommand);
-            }
+        const QList<PromptCommand> advertised = promptCommandsFromJson(commands);
+        // A stop or a session reset clears the live list; fall back to the
+        // agent's cache so "/" keeps working while the next session starts.
+        m_prompt->setSlashCommands(advertised.isEmpty() && usesAcpNative(m_settings)
+                                       ? cachedAcpCommands(m_settings, m_settings.acpAgentId)
+                                       : advertised);
+        if (usesAcpNative(m_settings)) {
+            m_acpCommandsAgentId = m_settings.acpAgentId;
         }
-        m_prompt->setSlashCommands(promptCommands);
+        if (advertised.isEmpty() || !usesAcpNative(m_settings) || m_settings.acpAgentId.isEmpty()) {
+            return;
+        }
+        // Remember the list for the next window. Commands belong to the agent,
+        // not to one conversation, so the key is the agent id.
+        const QJsonDocument doc = QJsonDocument::fromJson(m_settings.acpAgentCommands.toUtf8());
+        const QJsonObject all = doc.isObject() ? doc.object() : QJsonObject();
+        if (all.value(m_settings.acpAgentId).toArray() == commands) {
+            return;
+        }
+        m_settings.acpAgentCommands = withCachedAcpCommands(m_settings.acpAgentCommands, m_settings.acpAgentId, commands);
+        Q_EMIT settingsChanged(m_settings);
     });
 
     // Retry status from LlmClient - show in info bar with bright brown/orange
@@ -3938,6 +4006,29 @@ void ChatWidget::setSettings(const Settings &settings)
         || settings.themePreset != m_settings.themePreset
         || settings.themeOverrides != m_settings.themeOverrides;
 
+    // The "/" hint belongs to the ACP composer. It is shown as soon as an ACP
+    // agent is selected, not only after a live session advertised its command
+    // list: a restored conversation starts with no process running, and the
+    // hint would otherwise be missing until the first turn finished.
+    const bool acpCommands = usesAcpNative(settings);
+    m_prompt->setSlashCommandHintEnabled(acpCommands);
+    // Commands arrive with a live session, which a freshly opened window does
+    // not have. Seed the composer from the agent's cached list so "/" opens the
+    // real menu right away; a non-ACP provider must not keep offering the
+    // outgoing agent's commands.
+    if (!acpCommands) {
+        m_prompt->setSlashCommands({});
+        m_acpCommandsAgentId.clear();
+    } else {
+        const QList<PromptCommand> cached = cachedAcpCommands(settings, settings.acpAgentId);
+        // An empty cache on an unchanged agent must not wipe a list the live
+        // session just advertised; an agent switch still clears the old one.
+        if (!cached.isEmpty() || m_acpCommandsAgentId != settings.acpAgentId) {
+            m_prompt->setSlashCommands(cached);
+            m_acpCommandsAgentId = settings.acpAgentId;
+        }
+    }
+
     // Detect ACP agent configuration changes and invalidate the cached model list
     // so the next model picker opens a fresh fetch (Zed-style dynamic loading).
     if (usesAcpNative(settings) && usesAcpNative(m_settings)) {
@@ -3953,6 +4044,8 @@ void ChatWidget::setSettings(const Settings &settings)
             Settings updated = settings;
             updated.acpAgentModels = QString::fromUtf8(QJsonDocument(agentModels).toJson(QJsonDocument::Compact));
             m_settings = updated;
+            // The composer was seeded from the new agent's cache above; the
+            // outgoing agent's list must not linger under the new one.
             m_agent.setSettings(updated);
             if (m_voiceInput) {
                 m_voiceInput->setSettings(updated);

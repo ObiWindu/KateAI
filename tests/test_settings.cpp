@@ -40,6 +40,7 @@ private Q_SLOTS:
         s.kiloApiKey = u"kilo-test"_s;
         s.kiloModel = u"kilo-model-test"_s;
         s.acpAgentModels = u"{\"grok\": [\"m1\"]}"_s;
+        s.acpAgentCommands = u"{\"grok\": [{\"name\":\"review\",\"description\":\"Review the changes\"}]}"_s;
         s.frequencyPenalty = 0.25;
         s.presencePenalty = 0.5;
         s.toolCallTimeoutMs = 45000;
@@ -79,6 +80,7 @@ private Q_SLOTS:
         QCOMPARE(loaded.kiloApiKey, s.kiloApiKey);
         QCOMPARE(loaded.kiloModel, s.kiloModel);
         QCOMPARE(loaded.acpAgentModels, s.acpAgentModels);
+        QCOMPARE(loaded.acpAgentCommands, s.acpAgentCommands);
         QCOMPARE(loaded.frequencyPenalty, s.frequencyPenalty);
         QCOMPARE(loaded.presencePenalty, s.presencePenalty);
         QCOMPARE(loaded.toolCallTimeoutMs, s.toolCallTimeoutMs);

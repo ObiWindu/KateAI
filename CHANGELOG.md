@@ -21,9 +21,11 @@
 - **Commands.** `:kateai verify`, `policy`, `hooks`, `trust-hooks` and `trace`
   join `context` and `usage`.
 - **Slash commands in the composer.** The old ACP **cmds** button is gone.
-  Typing `/` as the first character opens a filtered list above the cursor
-  with each command's description; the placeholder mentions `/` when the
-  active agent advertises commands.
+  With an ACP agent selected the placeholder mentions `/` from startup, and
+  typing `/` as the first character opens a filtered list above the cursor
+  with each command's description. The list is cached per agent, so reopening
+  Kate shows it before a new session starts; with no cached list, `/` explains
+  that the agent advertises its commands when a session starts.
 - All six harness flags default on (`eventLog`, `middleware`,
   `verificationGate`, `policyV2`, `hooks`) and can be disabled with
   `KATEAI_HARNESS_FLAGS` or `[Harness]`.

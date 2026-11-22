@@ -49,6 +49,7 @@
 #include <QSignalBlocker>
 #include <QSpinBox>
 #include <QTableWidget>
+#include <QTabBar>
 #include <QTabWidget>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -75,6 +76,15 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     rootLayout->setContentsMargins(0, 0, 0, 0);
 
     auto *tabs = new QTabWidget(this);
+    // Match the editor's document tabs: flat, content-sized tabs that share the
+    // pane edge, reorder by dragging, and scroll instead of wrapping when the
+    // settings dialog is narrow.
+    tabs->setDocumentMode(true);
+    tabs->setMovable(true);
+    tabs->tabBar()->setChangeCurrentOnDrag(true);
+    tabs->setUsesScrollButtons(true);
+    tabs->setElideMode(Qt::ElideRight);
+    tabs->tabBar()->setExpanding(false);
     rootLayout->addWidget(tabs);
 
     auto makeKey = [this]() {

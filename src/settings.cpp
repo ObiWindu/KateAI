@@ -60,6 +60,7 @@ Settings SettingsStore::load()
     s.acpApiKey = cred(u"acp-api-key"_s, u"AcpApiKey"_s, g);
     s.acpInstalledAgents = g.readEntry(u"AcpInstalledAgents"_s, QString());
     s.acpAgentModels = g.readEntry(u"AcpAgentModels"_s, QString());
+    s.acpAgentCommands = g.readEntry(u"AcpAgentCommands"_s, QString());
     // Models are read from the provider, not hard-coded here; an empty entry
     // simply means "not chosen yet" and the fetched catalogue fills it in.
     s.grokModel = g.readEntry(u"GrokModel"_s, QString());
@@ -356,6 +357,7 @@ void SettingsStore::save(const Settings &settings)
     g.deleteEntry(u"AcpApiKey"_s);
     g.writeEntry(u"AcpInstalledAgents"_s, settings.acpInstalledAgents);
     g.writeEntry(u"AcpAgentModels"_s, settings.acpAgentModels);
+    g.writeEntry(u"AcpAgentCommands"_s, settings.acpAgentCommands);
     storeCredential(u"opencode-api-key"_s, settings.opencodeApiKey);
     g.deleteEntry(u"OpenCodeApiKey"_s);
     g.writeEntry(u"OpenCodeModel"_s, settings.opencodeModel);

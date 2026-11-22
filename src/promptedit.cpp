@@ -12,18 +12,18 @@
 #include <QApplication>
 #include <QCompleter>
 #include <QFrame>
-#include <QGuiApplication>
 #include <QHelpEvent>
+#include <QHideEvent>
 #include <QIcon>
 #include <QKeyEvent>
 #include <QLabel>
 #include <QMouseEvent>
+#include <QMoveEvent>
 #include <QPainter>
 #include <QPainterPath>
 #include <QPixmap>
 #include <QPushButton>
 #include <QResizeEvent>
-#include <QScreen>
 #include <QScrollBar>
 #include <QStringListModel>
 #include <QTextBlock>
@@ -150,11 +150,18 @@ PromptEdit::PromptEdit(QWidget *parent)
     // Slash-command suggestions live in their own popup because the command
     // needs two lines (name and description) and must sit above the cursor,
     // which QCompleter's popup cannot do.
-    m_commandPopup = new QFrame(this, Qt::Tool | Qt::FramelessWindowHint
-                                          | Qt::WindowDoesNotAcceptFocus
-                                          | Qt::WindowStaysOnTopHint);
+    //
+    // The popup is an ordinary child widget, not a Qt::Tool window. Wayland
+    // compositors place toplevel windows themselves, so a native tool window
+    // ignored positionSlashCommandPopup() and showed up in the middle of the
+    // screen; mapping it could also bounce keyboard focus for a frame, which
+    // fired focusOutEvent() and hid it at once. A child widget is positioned in
+    // host coordinates, sits right above the caret, and never touches the focus
+    // chain. The host is the top-level window by default; the chat panel
+    // overrides it with setCommandPopupHost() so the list covers the transcript
+    // instead of being drawn behind it.
+    m_commandPopup = new QFrame(window());
     m_commandPopup->setObjectName(u"promptCommandPopup"_s);
-    m_commandPopup->setAttribute(Qt::WA_ShowWithoutActivating);
     m_commandPopup->setFocusPolicy(Qt::NoFocus);
     m_commandPopup->setStyleSheet(
         QStringLiteral("QFrame#promptCommandPopup { background-color: %1; border: 1px solid %2;"
@@ -323,6 +330,14 @@ void PromptEdit::positionVoiceButton()
     m_voiceButton->raise();
 }
 
+PromptEdit::~PromptEdit()
+{
+    // The popup lives in the hosting window rather than in the composer, so
+    // the window would otherwise outlive this editor holding a hidden frame.
+    delete m_commandPopup;
+    m_commandPopup = nullptr;
+}
+
 void PromptEdit::setCompletionWords(const QStringList &words)
 {
     if (m_completionModel) {
@@ -346,21 +361,49 @@ void PromptEdit::setSlashCommands(const QList<PromptCommand> &commands)
     }
 
     // The placeholder is the in-input hint that replaced the old "cmds"
-    // button. It only mentions "/" when an agent actually advertised commands.
-    setPlaceholderText(m_slashCommands.isEmpty()
-                           ? i18n("Ask anything, @ to mention…")
-                           : i18n("Ask anything, @ to mention, / for commands…"));
-    if (m_slashCommands.isEmpty()) {
-        hideSlashCommandPopup();
-    } else {
-        m_lastCommandQuery.clear();
+    // button. An ACP agent may already be selected before its command list is
+    // known (the list arrives with the live session), so the hint can also be
+    // enabled independently through setSlashCommandHintEnabled().
+    updateCommandPlaceholder();
+    // The list changed, so the popup has to be rebuilt even when the query is
+    // still the same. hide() also clears the "already shown for this query"
+    // shortcut that the other state leaves behind.
+    hideSlashCommandPopup();
+    // An empty list falls back to the hint row when "/" is already on screen.
+    if (!m_slashCommands.isEmpty() || m_slashHintEnabled) {
         updateSlashCommandPopup();
     }
 }
 
+void PromptEdit::setSlashCommandHintEnabled(bool enabled)
+{
+    if (m_slashHintEnabled == enabled) {
+        return;
+    }
+    m_slashHintEnabled = enabled;
+    updateCommandPlaceholder();
+    if (enabled) {
+        // The hint may fill in for a list that is still empty; if "/" is
+        // already on screen, show it now instead of waiting for the next key.
+        updateSlashCommandPopup();
+    } else if (m_slashCommands.isEmpty()) {
+        hideSlashCommandPopup();
+    }
+}
+
+void PromptEdit::updateCommandPlaceholder()
+{
+    setPlaceholderText(m_slashCommands.isEmpty() && !m_slashHintEnabled
+                           ? i18n("Ask anything, @ to mention…")
+                           : i18n("Ask anything, @ to mention, / for commands…"));
+}
+
 void PromptEdit::updateSlashCommandPopup()
 {
-    if (m_slashCommands.isEmpty()) {
+    // Before the agent's live session advertises its list (or for an agent
+    // that advertises none), the "/" gesture still has to explain itself.
+    const bool hintOnly = m_slashCommands.isEmpty();
+    if (hintOnly && !m_slashHintEnabled) {
         hideSlashCommandPopup();
         return;
     }
@@ -377,6 +420,11 @@ void PromptEdit::updateSlashCommandPopup()
         return;
     }
 
+    // The composer may have been reparented since the popup was created (the
+    // chat panel is built before it is docked into Kate's window), so keep the
+    // overlay a child of whatever window currently hosts the composer.
+    ensureCommandPopupParent();
+
     const QString query = slashQuery();
     if (query.contains(u' ') || query.contains(u'\t')) {
         hideSlashCommandPopup();
@@ -384,25 +432,31 @@ void PromptEdit::updateSlashCommandPopup()
     }
     if (m_commandPopupShown && query == m_lastCommandQuery) {
         positionSlashCommandPopup();
+        if (!m_commandPopup->isVisible()) {
+            m_commandPopup->show();
+            m_commandPopup->raise();
+        }
         return;
     }
     m_lastCommandQuery = query;
 
     m_filteredCommands.clear();
-    for (const PromptCommand &command : std::as_const(m_slashCommands)) {
-        if (query.isEmpty()
-            || command.name.contains(query, Qt::CaseInsensitive)
-            || command.description.contains(query, Qt::CaseInsensitive)) {
-            m_filteredCommands.append(command);
+    if (!hintOnly) {
+        for (const PromptCommand &command : std::as_const(m_slashCommands)) {
+            if (query.isEmpty()
+                || command.name.contains(query, Qt::CaseInsensitive)
+                || command.description.contains(query, Qt::CaseInsensitive)) {
+                m_filteredCommands.append(command);
+            }
         }
-    }
-    if (m_filteredCommands.isEmpty()) {
-        hideSlashCommandPopup();
-        return;
+        if (m_filteredCommands.isEmpty()) {
+            hideSlashCommandPopup();
+            return;
+        }
     }
 
     rebuildSlashCommandRows();
-    selectSlashCommand(0);
+    selectSlashCommand(hintOnly ? -1 : 0);
     positionSlashCommandPopup();
     m_commandPopup->show();
     m_commandPopup->raise();
@@ -424,7 +478,11 @@ QString PromptEdit::slashQuery() const
 
 void PromptEdit::rebuildSlashCommandRows()
 {
-    for (QLabel *row : std::as_const(m_commandRows)) {
+    // Every row is a direct child of the popup, including the hint row that is
+    // deliberately absent from m_commandRows (it is not selectable). Removing
+    // the layout items alone would leave that one on screen.
+    const QList<QLabel *> rows = m_commandPopup->findChildren<QLabel *>(QString(), Qt::FindDirectChildrenOnly);
+    for (QLabel *row : rows) {
         delete row;
     }
     m_commandRows.clear();
@@ -434,6 +492,25 @@ void PromptEdit::rebuildSlashCommandRows()
 
     constexpr int maxRows = 6;
     const int count = qMin(maxRows, m_filteredCommands.size());
+    if (count == 0 && m_slashCommands.isEmpty() && m_slashHintEnabled) {
+        // Nothing advertised yet. Say so rather than mapping an empty frame:
+        // the user pressed "/" expecting an answer, and a blank popup looks
+        // like the gesture is broken.
+        auto *row = new QLabel(m_commandPopup);
+        row->setObjectName(u"promptCommandHintRow"_s);
+        row->setTextFormat(Qt::RichText);
+        row->setWordWrap(true);
+        row->setMargin(0);
+        row->setContentsMargins(9, 6, 9, 6);
+        row->setText(QStringLiteral("<span style=\"color:%1; font-size:11px;\">%2</span>")
+                         .arg(ChatTheme::textMuted(),
+                              i18n("The agent advertises its commands when a session starts.").toHtmlEscaped()));
+        m_commandLayout->addWidget(row);
+        // Same reason as the command rows below: the layout only measures
+        // visible children.
+        row->show();
+        return;
+    }
     for (int i = 0; i < count; ++i) {
         const PromptCommand &command = m_filteredCommands.at(i);
         auto *row = new QLabel(m_commandPopup);
@@ -454,6 +531,14 @@ void PromptEdit::rebuildSlashCommandRows()
                               ChatTheme::textMuted(), description));
         row->installEventFilter(this);
         m_commandLayout->addWidget(row);
+        // A newly created child of an already visible popup stays hidden until
+        // something shows it. The layout's size hint skips hidden rows, so the
+        // popup would be measured as an empty frame (a 12px strip at the bottom
+        // of the panel) every time filtering replaced the list. Showing the row
+        // here makes the measurement below see the real height; the initial
+        // show() used to do this implicitly, which is why only the filtered
+        // list collapsed.
+        row->show();
         m_commandRows.append(row);
     }
 }
@@ -499,11 +584,52 @@ void PromptEdit::hideSlashCommandPopup()
     m_lastCommandQuery.clear();
 }
 
+void PromptEdit::ensureCommandPopupParent()
+{
+    if (!m_commandPopup) {
+        return;
+    }
+    // A panel host keeps the overlay inside the panel so it paints above the
+    // panel's own children (the transcript) rather than becoming a sibling of
+    // the docked panel in the main window.
+    QWidget *host = m_commandPopupHost ? m_commandPopupHost.data() : window();
+    // A standalone composer (tests, previews) is its own window; there the
+    // popup simply stays a child of the editor.
+    if (!host || host == this) {
+        return;
+    }
+    if (m_commandPopup->parentWidget() != host) {
+        m_commandPopup->setParent(host);
+        m_commandPopup->hide();
+    }
+}
+
+void PromptEdit::setCommandPopupHost(QWidget *host)
+{
+    if (m_commandPopupHost == host) {
+        return;
+    }
+    m_commandPopupHost = host;
+    if (m_commandPopup) {
+        // The list was positioned for the old host; start over on the new one.
+        hideSlashCommandPopup();
+        if (host && host != this && m_commandPopup->parentWidget() != host) {
+            m_commandPopup->setParent(host);
+        }
+    }
+}
+
 void PromptEdit::positionSlashCommandPopup()
 {
     if (!m_commandPopup) {
         return;
     }
+    ensureCommandPopupParent();
+    QWidget *host = m_commandPopup->parentWidget();
+    if (!host) {
+        return;
+    }
+
     const int width = qBound(280, viewport()->width() - 8, 520);
     m_commandPopup->setFixedWidth(width);
     m_commandPopup->adjustSize();
@@ -511,21 +637,24 @@ void PromptEdit::positionSlashCommandPopup()
     const int height = qMin(maxHeight, m_commandPopup->sizeHint().height());
     m_commandPopup->resize(width, height);
 
+    // Map the caret into the host so the list lands right above the line being
+    // typed on, wherever the composer sits inside that host. The popup is a
+    // child widget, so these coordinates really are honoured (unlike a Wayland
+    // toplevel, whose position the compositor decides).
     const QRect caret = cursorRect();
-    const QPoint anchor = viewport()->mapToGlobal(QPoint(caret.left(), caret.top()));
-    QScreen *screen = QGuiApplication::screenAt(anchor);
-    if (!screen) {
-        screen = QGuiApplication::primaryScreen();
-    }
-    const QRect available = screen ? screen->availableGeometry() : QRect(anchor, QSize(800, 600));
-    int x = qBound(available.left(), anchor.x(), available.right() - width);
+    const QPoint anchor = viewport()->mapTo(host, QPoint(caret.left(), caret.top()));
+    const int x = qBound(0, anchor.x(), qMax(0, host->width() - width));
     int y = anchor.y() - height - 8;
-    if (y < available.top()) {
-        // Not enough room above (a tall composer at the top of the screen):
+    if (y < 0) {
+        // Not enough room above (a tall composer at the top of the panel):
         // fall back below the caret rather than drawing off-screen.
         y = anchor.y() + caret.height() + 8;
     }
+    y = qBound(0, y, qMax(0, host->height() - height));
     m_commandPopup->move(x, y);
+    // The host may have gained children since the popup was shown (a new
+    // transcript card, the jump-to-latest button); keep the overlay on top.
+    m_commandPopup->raise();
 }
 
 void PromptEdit::addHistory(const QString &text)
@@ -580,6 +709,11 @@ void PromptEdit::resizeEvent(QResizeEvent *event)
 {
     QPlainTextEdit::resizeEvent(event);
     positionVoiceButton();
+    // Growing the composer (a new line, a wrapped prompt) moves the caret, so
+    // the open suggestion list has to follow it.
+    if (m_commandPopupShown) {
+        positionSlashCommandPopup();
+    }
 }
 
 bool PromptEdit::event(QEvent *event)
@@ -603,6 +737,17 @@ bool PromptEdit::event(QEvent *event)
 
 bool PromptEdit::eventFilter(QObject *watched, QEvent *event)
 {
+    const int index = m_commandRows.indexOf(qobject_cast<QLabel *>(watched));
+    if (index >= 0) {
+        if (event->type() == QEvent::MouseButtonRelease) {
+            applySlashCommand(index);
+            return true;
+        }
+        if (event->type() == QEvent::Enter) {
+            selectSlashCommand(index);
+            return false;
+        }
+    }
     if (watched == viewport() && event->type() == QEvent::ToolTip && m_voiceButton && m_voiceButton->isVisible()) {
         auto *helpEvent = static_cast<QHelpEvent *>(event);
         const QPoint localPos = viewport()->mapTo(this, helpEvent->pos());
@@ -628,27 +773,30 @@ void PromptEdit::focusInEvent(QFocusEvent *event)
 
 void PromptEdit::focusOutEvent(QFocusEvent *event)
 {
-    // The command popup does not take focus (WindowDoesNotAcceptFocus), so a
-    // focus-out means the user moved to another widget and the suggestions
-    // should go away.
+    // The popup is a plain child widget and never takes focus, so a focus-out
+    // means the user moved to another widget and the suggestions should go
+    // away.
     hideSlashCommandPopup();
     QPlainTextEdit::focusOutEvent(event);
 }
 
-bool PromptEdit::eventFilter(QObject *watched, QEvent *event)
+void PromptEdit::hideEvent(QHideEvent *event)
 {
-    const int index = m_commandRows.indexOf(qobject_cast<QLabel *>(watched));
-    if (index >= 0) {
-        if (event->type() == QEvent::MouseButtonRelease) {
-            applySlashCommand(index);
-            return true;
-        }
-        if (event->type() == QEvent::Enter) {
-            selectSlashCommand(index);
-            return false;
-        }
+    // The popup is a child of the window, not of the composer, so hiding the
+    // composer (panel closed, mode switched) would leave it floating. It must
+    // follow the composer out.
+    hideSlashCommandPopup();
+    QPlainTextEdit::hideEvent(event);
+}
+
+void PromptEdit::moveEvent(QMoveEvent *event)
+{
+    QPlainTextEdit::moveEvent(event);
+    // The composer itself moves when banners above it come and go; the popup
+    // is positioned in window coordinates, so it would otherwise stay put.
+    if (m_commandPopupShown) {
+        positionSlashCommandPopup();
     }
-    return QPlainTextEdit::eventFilter(watched, event);
 }
 
 int PromptEdit::atSymbolPosition() const
@@ -696,13 +844,15 @@ void PromptEdit::keyPressEvent(QKeyEvent *event)
             event->accept();
             return;
         case Qt::Key_Up:
-            selectSlashCommand(m_slashIndex - 1);
-            event->accept();
-            return;
         case Qt::Key_Down:
-            selectSlashCommand(m_slashIndex + 1);
-            event->accept();
-            return;
+            // The hint row is not selectable. Leave the arrow keys to history
+            // navigation when there is no command list to move through.
+            if (!m_commandRows.isEmpty()) {
+                selectSlashCommand(m_slashIndex + (event->key() == Qt::Key_Up ? -1 : 1));
+                event->accept();
+                return;
+            }
+            break;
         case Qt::Key_Return:
         case Qt::Key_Enter:
         case Qt::Key_Tab:

@@ -428,7 +428,13 @@ Native ACP works with any stdio agent. Pick a preset (command/args are filled in
 
 Kate is the ACP client: `session/prompt`, `session/update`, `session/request_permission`, `fs/read_text_file`, `fs/write_text_file`, `terminal/*`. Always-approve is handled in Kate for every agent. Grok Build also receives `--model` / `--always-approve` and Grok `_meta` (`yoloMode`).
 
-When the agent advertises slash commands, the composer hint mentions `/`. Type `/` as the first character to open a filtered list above the cursor; each command's description is shown, and Enter or Tab inserts the selected command.
+When an ACP agent is selected, the composer hint mentions `/` from startup,
+even before the live session advertises its command list. Type `/` as the first
+character to open a filtered list above the cursor; each command's description
+is shown, and Enter or Tab inserts the selected command. The list is remembered
+per agent, so reopening Kate shows the commands the agent advertised last time
+without waiting for a turn; before the first session, `/` explains that the
+agent advertises its commands when a session starts.
 
 ### ACP tool integration
 

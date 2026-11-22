@@ -7,6 +7,7 @@
 
 #include <QPlainTextEdit>
 #include <QList>
+#include <QPointer>
 #include <QStringList>
 
 class QCompleter;
@@ -39,6 +40,7 @@ public:
     };
 
     explicit PromptEdit(QWidget *parent = nullptr);
+    ~PromptEdit() override;
 
     QSize sizeHint() const override;
     QSize minimumSizeHint() const override;
@@ -48,6 +50,15 @@ public:
     // Slash-command suggestions shown above the cursor when the input starts
     // with "/". An empty list restores the plain placeholder.
     void setSlashCommands(const QList<PromptCommand> &commands);
+    // Whether the placeholder should mention "/" even before the agent has
+    // advertised any commands. An ACP agent is already selected when the
+    // editor starts, but its command list only arrives with the live session,
+    // so the hint has to lead the list rather than wait for it.
+    void setSlashCommandHintEnabled(bool enabled);
+    // Widget the slash-command popup should overlay. A panel (the chat) passes
+    // itself so the list can cover the transcript, not only the composer. When
+    // unset the popup follows the composer's top-level window.
+    void setCommandPopupHost(QWidget *host);
 
     // Microphone button embedded inside the text input area.
     QPushButton *voiceButton() const
@@ -70,7 +81,9 @@ protected:
     void keyPressEvent(QKeyEvent *event) override;
     void focusInEvent(QFocusEvent *event) override;
     void focusOutEvent(QFocusEvent *event) override;
+    void hideEvent(QHideEvent *event) override;
     void resizeEvent(QResizeEvent *event) override;
+    void moveEvent(QMoveEvent *event) override;
     bool event(QEvent *event) override;
     bool eventFilter(QObject *watched, QEvent *event) override;
 
@@ -92,7 +105,9 @@ private:
     void selectSlashCommand(int index);
     void applySlashCommand(int index);
     void hideSlashCommandPopup();
+    void ensureCommandPopupParent();
     void positionSlashCommandPopup();
+    void updateCommandPlaceholder();
     QString slashQuery() const;
 
     QCompleter *m_completer = nullptr;
@@ -106,11 +121,14 @@ private:
 
     QFrame *m_commandPopup = nullptr;
     QVBoxLayout *m_commandLayout = nullptr;
+    // Overlay host chosen by the panel, if any; null means "the window".
+    QPointer<QWidget> m_commandPopupHost;
     QList<QLabel *> m_commandRows;
     QList<PromptCommand> m_slashCommands;
     QList<PromptCommand> m_filteredCommands;
     int m_slashIndex = -1;
     bool m_commandPopupShown = false;
+    bool m_slashHintEnabled = false;
     QString m_lastCommandQuery;
 
     QStringList m_history;

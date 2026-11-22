@@ -64,10 +64,14 @@ alone. The editor integration, tools, sessions and checkpoints are unchanged.
 
 ## Slash commands
 
-The ACP command button is gone. When the active agent advertises commands, the
-composer placeholder mentions `/`, and typing `/` as the first character opens
-a filtered list above the cursor. Each row shows the command and its
-description; typing filters both, and Enter/Tab inserts the selected command.
+The ACP command button is gone. With an ACP agent selected, the composer
+placeholder mentions `/` from startup, even before the live session advertises
+its list. Typing `/` as the first character opens a filtered list above the
+cursor. Each row shows the command and its description; typing filters both,
+and Enter/Tab inserts the selected command. Commands are cached per agent, so a
+freshly opened window shows the last advertised list instead of waiting for a
+session; when no list has ever been seen, `/` says that the agent advertises
+its commands when a session starts.
 
 ## Middleware and turn identity
 

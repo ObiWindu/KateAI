@@ -303,6 +303,11 @@ struct Settings {
     // ACP agent models broadcasted as available by running agents.
     // Stores a JSON object mapping agent IDs to arrays of model names.
     QString acpAgentModels;
+    // Slash commands last advertised by each ACP agent. A JSON object mapping
+    // agent IDs to the advertised command arrays. Commands only arrive with a
+    // live session, so the cache lets a freshly opened window show the list
+    // before the agent process has started again.
+    QString acpAgentCommands;
     ApiFormat apiFormat = ApiFormat::AcpNative;
     PermissionMode permissionMode = PermissionMode::Ask;
     SandboxProfile sandbox = SandboxProfile::Workspace;
