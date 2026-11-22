@@ -37,14 +37,29 @@ QString truncateToTokens(const QString &text, int budgetTokens, bool *truncated,
     if (tokens <= budgetTokens) {
         return text;
     }
-    *truncated = true;
+    if (truncated) {
+        *truncated = true;
+    }
     // Keep the head rather than head+tail: instructions and rules put the
     // mandatory part first, and a tail would spend the budget on examples.
-    const int markerTokens = 32;
-    const int keepChars = qMax(64, (budgetTokens - markerTokens) * 4);
-    const QString marker = sectionMarker(tokens - budgetTokens);
-    *omitted = qMax(1, tokens - budgetTokens);
-    return text.left(keepChars) + marker;
+    // The marker itself costs tokens, and its text grows with the omitted
+    // count, so shrink the head until head+marker fits the requested budget.
+    int target = qMax(0, budgetTokens - 32);
+    QString head = Tokens::truncateToTokenBudget(text, target);
+    int kept = Tokens::estimate(head);
+    QString marker = sectionMarker(qMax(1, tokens - kept));
+    int total = kept + Tokens::estimate(marker);
+    for (int pass = 0; pass < 8 && total > budgetTokens && target > 0; ++pass) {
+        target = qMax(0, target - qMax(1, total - budgetTokens));
+        head = Tokens::truncateToTokenBudget(text, target);
+        kept = Tokens::estimate(head);
+        marker = sectionMarker(qMax(1, tokens - kept));
+        total = kept + Tokens::estimate(marker);
+    }
+    if (omitted) {
+        *omitted = qMax(1, tokens - kept);
+    }
+    return head + marker;
 }
 
 PromptSection makeSection(const QString &id, const QString &title, PromptStability stability,
@@ -157,7 +172,9 @@ QString reasoningProtocol(const Settings &settings, PromptVariant variant)
 int PromptAssembler::totalBudgetFor(int contextWindow)
 {
     const int window = contextWindow > 0 ? contextWindow : 32768;
-    return qMax(kMinTotalBudget, window / 4);
+    // Never budget more than the window itself: a tiny local model needs room
+    // for at least a couple of turns even when the 4k floor would not fit.
+    return qMax(512, qMin(window, qMax(kMinTotalBudget, window / 4)));
 }
 
 QString PromptAssembler::variantId(PromptVariant variant)
@@ -229,6 +246,10 @@ PromptResult PromptAssembler::assemble(const PromptRequest &request)
     }
     if (!request.toolNames.isEmpty()) {
         modeText += u"Available tools: "_s + request.toolNames.join(u", "_s) + u"\n"_s;
+    }
+    if (!request.deferredTools.trimmed().isEmpty()) {
+        modeText += u"Deferred tools (call tool_search, then tool_describe before use): "_s
+            + request.deferredTools.trimmed() + u"\n"_s;
     }
     if (!request.subagentRoster.trimmed().isEmpty()) {
         modeText += u"\nSUB-AGENTS:\n"_s + request.subagentRoster.trimmed() + u"\n"_s;
@@ -336,16 +357,21 @@ PromptResult PromptAssembler::assemble(const PromptRequest &request)
         return a.id < b.id;
     });
 
-    result.sections = sections;
+    // Tool schemas are part of the same 25% allowance, so reserve their cost
+    // before rendering the sections. The one-token floor avoids a negative
+    // budget when a large catalogue consumes the whole allowance.
+    const int sectionBudget = qMax(1, result.budgetTokens - qMax(0, request.toolSchemaTokens));
     bool truncated = false;
     QJsonObject manifest;
-    result.text = render(sections, result.budgetTokens, &manifest, &truncated);
+    QList<PromptSection> renderedSections;
+    result.text = render(sections, sectionBudget, &manifest, &truncated, &renderedSections);
+    result.sections = renderedSections;
     result.manifest = manifest;
     result.truncated = truncated;
     result.totalTokens = Tokens::estimate(result.text) + qMax(0, request.toolSchemaTokens);
 
     QStringList staticParts;
-    for (const PromptSection &section : std::as_const(sections)) {
+    for (const PromptSection &section : std::as_const(renderedSections)) {
         if (section.stability == PromptStability::Static && !section.isEmpty()) {
             staticParts.append(section.content.trimmed());
         }
@@ -356,12 +382,14 @@ PromptResult PromptAssembler::assemble(const PromptRequest &request)
     result.manifest.insert(u"variant"_s, variantId(result.variant));
     result.manifest.insert(u"toolSchemaTokens"_s, request.toolSchemaTokens);
     result.manifest.insert(u"totalTokens"_s, result.totalTokens);
+    result.manifest.insert(u"totalBudget"_s, result.budgetTokens);
     result.manifest.insert(u"staticHash"_s, result.staticHash);
     return result;
 }
 
 QString PromptAssembler::render(const QList<PromptSection> &sections, int totalBudget,
-                                QJsonObject *manifest, bool *truncated)
+                                QJsonObject *manifest, bool *truncated,
+                                QList<PromptSection> *renderedSections)
 {
     if (truncated) {
         *truncated = false;
@@ -393,7 +421,7 @@ QString PromptAssembler::render(const QList<PromptSection> &sections, int totalB
         auto isCore = [](const QString &id) {
             return id == u"identity"_s || id == u"mode"_s || id == u"execution"_s;
         };
-        for (int guard = 0; guard < 64; ++guard) {
+        for (int guard = 0; guard < 128; ++guard) {
             int total = 0;
             for (const PromptSection &section : std::as_const(kept)) {
                 total += Tokens::estimate(section.content);
@@ -427,15 +455,33 @@ QString PromptAssembler::render(const QList<PromptSection> &sections, int totalB
                 break;
             }
             const int excess = total - totalBudget;
-            const int targetTokens = qMax(50, Tokens::estimate(kept.at(victim).content) - excess);
+            const int before = Tokens::estimate(kept.at(victim).content);
+            const int targetTokens = qMax(1, before - excess);
             bool sectionTruncated = false;
             int omitted = 0;
-            kept[victim].content = truncateToTokens(kept.at(victim).content, targetTokens,
-                                                    &sectionTruncated, &omitted);
+            const QString shortened = truncateToTokens(kept.at(victim).content, targetTokens,
+                                                       &sectionTruncated, &omitted);
+            const int after = Tokens::estimate(shortened);
+            if (after >= before) {
+                // The marker alone no longer fits. Dropping the section is the
+                // only way to make progress; the loop will pick the next one.
+                kept[victim].content.clear();
+            } else {
+                kept[victim].content = shortened;
+            }
             if (truncated) {
-                *truncated = *truncated || sectionTruncated;
+                *truncated = *truncated || sectionTruncated || after >= before;
             }
         }
+        // A section that could not be shrunk below its marker is dropped
+        // entirely rather than rendered as an empty heading.
+        kept.erase(std::remove_if(kept.begin(), kept.end(),
+                                  [](const PromptSection &section) { return section.isEmpty(); }),
+                   kept.end());
+    }
+
+    if (renderedSections) {
+        *renderedSections = kept;
     }
 
     QStringList parts;

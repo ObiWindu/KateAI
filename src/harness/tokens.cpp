@@ -35,6 +35,47 @@ int applyFactor(int tokens, double factor)
     return qMax(1, qCeil(scaled));
 }
 
+QString truncateToTokenBudget(const QString &text, int budgetTokens, bool *truncated)
+{
+    if (truncated) {
+        *truncated = false;
+    }
+    if (text.isEmpty()) {
+        return text;
+    }
+    if (budgetTokens <= 0) {
+        if (truncated) {
+            *truncated = true;
+        }
+        return QString();
+    }
+    if (estimate(text) <= budgetTokens) {
+        return text;
+    }
+    if (truncated) {
+        *truncated = true;
+    }
+
+    // The estimate is monotonic as a prefix grows, so binary search the
+    // largest UTF-16 prefix that fits. This is correct for both the ASCII
+    // fast path and the UTF-8 byte heuristic used for non-ASCII text.
+    int low = 0;
+    int high = text.size();
+    while (low < high) {
+        const int mid = low + (high - low + 1) / 2;
+        if (estimate(text.left(mid)) <= budgetTokens) {
+            low = mid;
+        } else {
+            high = mid - 1;
+        }
+    }
+    while (low > 0 && low < text.size() && text.at(low - 1).isHighSurrogate()
+           && text.at(low).isLowSurrogate()) {
+        --low;
+    }
+    return text.left(low);
+}
+
 double Calibrator::observe(int estimated, int actual)
 {
     // Below a few hundred tokens the message overhead dominates and the ratio

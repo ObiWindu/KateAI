@@ -109,6 +109,20 @@ private Q_SLOTS:
         QVERIFY(!advertisedNames.contains(u"debug_stack"_s));
     }
 
+    void memoryWriteIsAlwaysAdvertised()
+    {
+        ToolRegistry registry;
+        const AdvertisedTools advertised = registry.advertised(
+            ToolAccess::unrestricted(), 128000, true);
+        bool found = false;
+        for (const QJsonValue &value : advertised.tools) {
+            const QString name = value.toObject().value(u"function"_s).toObject()
+                                     .value(u"name"_s).toString();
+            found = found || name == u"memory_write"_s;
+        }
+        QVERIFY(found);
+    }
+
     void discoveredToolIsAdvertisedNextRequest()
     {
         ToolRegistry registry;

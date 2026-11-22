@@ -36,6 +36,14 @@
   `:kateai prompt`, `memory`, and `tools` are new.
 - All four 0.8 flags default on (`promptV2`, `contextV2`, `memoryV2`,
   `toolSearch`) and degrade to the legacy path when disabled.
+- **0.8 hardening.** Prompt truncation is token-accurate for non-ASCII text and
+  reserves tool-schema cost; context summaries from both engines are
+  interchangeable and persisted once; memory discovery keeps Cline/Kilo and
+  mode-specific rules, scopes root config directories correctly, and enforces
+  byte budgets; globstar matches zero directories; usage parsing accepts both
+  streaming shapes and calibrates Anthropic cache hits; reports use the real
+  prompt/request; and `memory_write` honours sandbox read-only/deny rules and
+  writes through the document bridge.
 
 ## 0.7.0 — 2026-11-21
 

@@ -66,10 +66,30 @@ ModelProfile fallbackProfile(Provider provider, const QString &model)
     return profile;
 }
 
+// Resolve by the stable profile id, not by a hard-coded list index. Indexing
+// made inserting a profile silently map a whole family to the wrong row.
+ModelProfile profileById(const QList<ModelProfile> &all, const QString &id,
+                         Provider provider, const QString &model)
+{
+    for (const ModelProfile &profile : all) {
+        if (profile.id == id) {
+            ModelProfile copy = profile;
+            copy.id = model;
+            copy.provider = provider;
+            return copy;
+        }
+    }
+    return fallbackProfile(provider, model);
+}
+
 } // namespace
 
 QList<ModelProfile> ModelProfiles::catalog()
 {
+    // The catalogue is immutable. Building it once avoids re-allocating a
+    // dozen profiles for every resolve() call (prompt, context, reports and
+    // every edit-dialect lookup).
+    static const QList<ModelProfile> cached = []() {
     QList<ModelProfile> profiles;
 
     {
@@ -187,12 +207,20 @@ QList<ModelProfile> ModelProfiles::catalog()
         profiles.append(p);
     }
     {
+        ModelProfile p = makeProfile(u"command-r"_s, u"cohere"_s, u"Command R"_s, 128000, 4096);
+        p.promptVariant = PromptVariant::Local;
+        p.editDialect = EditDialect::Exact;
+        profiles.append(p);
+    }
+    {
         ModelProfile p = makeProfile(u"llama"_s, u"local"_s, u"Local model"_s, 32768, 4096);
         p.promptVariant = PromptVariant::Local;
         p.editDialect = EditDialect::Exact;
         profiles.append(p);
     }
     return profiles;
+    }();
+    return cached;
 }
 
 ModelProfile ModelProfiles::resolve(Provider provider, const QString &model)
@@ -201,91 +229,57 @@ ModelProfile ModelProfiles::resolve(Provider provider, const QString &model)
     if (name.isEmpty()) {
         return fallbackProfile(provider, model);
     }
+    const QList<ModelProfile> all = catalog();
 
     // Provider-specific gateway prefixes still carry the family in the name;
     // matching on the id is more reliable than on the transport.
     if (containsAny(name, {u"claude"_s})) {
-        ModelProfile p = catalog().at(0);
-        p.id = model;
-        p.provider = provider;
-        p.contextWindow = 200000;
-        return p;
+        return profileById(all, u"claude"_s, provider, model);
     }
     if (containsAny(name, {u"deepseek"_s})) {
-        ModelProfile p = catalog().at(5);
-        p.id = model;
-        p.provider = provider;
-        return p;
+        return profileById(all, u"deepseek"_s, provider, model);
     }
     if (containsAny(name, {u"gemini"_s})) {
-        ModelProfile p = catalog().at(6);
-        p.id = model;
-        p.provider = provider;
-        return p;
+        return profileById(all, u"gemini"_s, provider, model);
     }
     if (containsAny(name, {u"grok"_s})) {
-        ModelProfile p = catalog().at(7);
-        p.id = model;
-        p.provider = provider;
-        return p;
+        return profileById(all, u"grok"_s, provider, model);
     }
     if (containsAny(name, {u"qwen"_s, u"qwq"_s})) {
-        ModelProfile p = catalog().at(8);
-        p.id = model;
-        p.provider = provider;
-        return p;
+        return profileById(all, u"qwen"_s, provider, model);
     }
     if (containsAny(name, {u"glm"_s})) {
-        ModelProfile p = catalog().at(9);
-        p.id = model;
-        p.provider = provider;
-        return p;
+        return profileById(all, u"glm"_s, provider, model);
     }
     if (containsAny(name, {u"kimi"_s, u"moonshot"_s})) {
-        ModelProfile p = catalog().at(10);
-        p.id = model;
-        p.provider = provider;
-        return p;
+        return profileById(all, u"kimi"_s, provider, model);
     }
     if (containsAny(name, {u"mistral"_s, u"codestral"_s})) {
-        ModelProfile p = catalog().at(11);
-        p.id = model;
-        p.provider = provider;
-        return p;
+        return profileById(all, u"mistral"_s, provider, model);
+    }
+    if (containsAny(name, {u"command-r"_s, u"cohere"_s})) {
+        return profileById(all, u"command-r"_s, provider, model);
     }
     if (containsAny(name, {u"llama"_s, u"phi"_s, u"gemma"_s, u"local"_s})) {
-        ModelProfile p = catalog().at(12);
-        p.id = model;
-        p.provider = provider;
-        return p;
+        return profileById(all, u"llama"_s, provider, model);
     }
 
     if (startsWithAny(name, {u"gpt-4.1"_s})) {
-        ModelProfile p = catalog().at(1);
-        p.id = model;
-        p.provider = provider;
-        return p;
+        return profileById(all, u"gpt-4.1"_s, provider, model);
     }
     if (startsWithAny(name, {u"gpt-4o"_s, u"gpt-4-turbo"_s})) {
-        ModelProfile p = catalog().at(2);
-        p.id = model;
-        p.provider = provider;
-        return p;
+        return profileById(all, u"gpt-4o"_s, provider, model);
     }
     if (startsWithAny(name, {u"gpt-5"_s, u"codex"_s})) {
-        ModelProfile p = catalog().at(3);
-        p.id = model;
-        p.provider = provider;
-        return p;
+        return profileById(all, u"gpt-5"_s, provider, model);
     }
     if (startsWithAny(name, {u"o1"_s, u"o3"_s, u"o4"_s})) {
-        ModelProfile p = catalog().at(4);
-        p.id = model;
-        p.provider = provider;
-        return p;
+        return profileById(all, u"o3"_s, provider, model);
     }
     if (name.contains(u"gpt-3.5"_s)) {
         ModelProfile p = fallbackProfile(provider, model);
+        p.family = u"openai"_s;
+        p.displayName = u"GPT-3.5"_s;
         p.contextWindow = 16384;
         p.maxOutputTokens = 4096;
         p.promptVariant = PromptVariant::OpenAI;
@@ -294,6 +288,8 @@ ModelProfile ModelProfiles::resolve(Provider provider, const QString &model)
     }
     if (name.contains(u"gpt"_s)) {
         ModelProfile p = fallbackProfile(provider, model);
+        p.family = u"openai"_s;
+        p.displayName = u"GPT"_s;
         p.contextWindow = 128000;
         p.maxOutputTokens = 16384;
         p.promptVariant = PromptVariant::OpenAI;

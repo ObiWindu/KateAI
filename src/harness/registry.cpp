@@ -163,7 +163,7 @@ void ToolRegistry::loadBuiltins()
             || name == u"apply_patch"_s || name == u"bash"_s || name == u"grep"_s
             || name == u"glob"_s || name == u"list_dir"_s || name == u"read_tool_result"_s
             || name == u"todo_write"_s || name == u"todo_read"_s || name == u"question"_s
-            || name == u"think"_s || name == u"suggest"_s;
+            || name == u"think"_s || name == u"suggest"_s || name == u"memory_write"_s;
         spec.deferByDefault = name.startsWith(u"debug_"_s) || name.startsWith(u"lsp_"_s)
             || name == u"build_targets"_s || name == u"build_run"_s
             || name == u"terminal_run"_s || name == u"web_search"_s || name == u"web_fetch"_s
@@ -244,7 +244,8 @@ void ToolRegistry::addMcpDefinition(const QJsonObject &definition)
     }
     ToolSpec spec;
     spec.name = name;
-    spec.title = name.mid(name.lastIndexOf(u"__"_s) + 2);
+    const int separator = name.lastIndexOf(u"__"_s);
+    spec.title = separator >= 0 ? name.mid(separator + 2) : name;
     spec.description = function.value(u"description"_s).toString();
     spec.group = u"mcp"_s;
     spec.risk = ToolRisk::Execute;

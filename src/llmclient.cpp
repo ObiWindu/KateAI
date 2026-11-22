@@ -36,6 +36,22 @@ namespace
 // retryable TimeoutError instead of hanging forever.
 constexpr int kRequestIdleTimeoutMs = 180000;
 
+// OpenAI-compatible gateways that accept stream_options.include_usage. Local
+// servers often reject unknown request fields, so they are left alone.
+bool providerSupportsStreamUsage(Provider provider)
+{
+    switch (provider) {
+    case Provider::OpenAI:
+    case Provider::OpenRouter:
+    case Provider::DeepSeek:
+    case Provider::Grok:
+    case Provider::OpenCode:
+        return true;
+    default:
+        return false;
+    }
+}
+
 // Ceiling for backoff saturation, in seconds. Keeps the 64-bit multiply below
 // well inside range and is far beyond any sane wait.
 constexpr qint64 kRetryDelaySaturation = 1000000000;
@@ -450,19 +466,24 @@ CompletionChunk LlmClient::parseSseLine(const QByteArray &line, QHash<int, ToolC
         return chunk;
     }
 
+    const QJsonObject usage = root.value(u"usage"_s).toObject();
+    if (!usage.isEmpty()) {
+        // Most providers send a final usage-only chunk (choices is empty),
+        // but some attach the same object to the final choice. Parse it in
+        // both cases so calibration does not silently depend on the gateway.
+        chunk.inputTokens = usage.value(u"prompt_tokens"_s).toInt();
+        chunk.outputTokens = usage.value(u"completion_tokens"_s).toInt();
+        const QJsonObject details = usage.value(u"prompt_tokens_details"_s).toObject();
+        chunk.cachedInputTokens = details.value(u"cached_tokens"_s).toInt();
+        if (chunk.cachedInputTokens == 0) {
+            chunk.cachedInputTokens = usage.value(u"prompt_cache_hit_tokens"_s).toInt();
+        }
+    }
+
     const QJsonArray choices = root.value(u"choices"_s).toArray();
     if (choices.isEmpty()) {
-        // OpenAI-compatible streams report usage in a final chunk whose
-        // choices array is empty. Carry it on the chunk even without content.
-        const QJsonObject usage = root.value(u"usage"_s).toObject();
         if (!usage.isEmpty()) {
-            chunk.inputTokens = usage.value(u"prompt_tokens"_s).toInt();
-            chunk.outputTokens = usage.value(u"completion_tokens"_s).toInt();
-            const QJsonObject details = usage.value(u"prompt_tokens_details"_s).toObject();
-            chunk.cachedInputTokens = details.value(u"cached_tokens"_s).toInt();
-            if (chunk.cachedInputTokens == 0) {
-                chunk.cachedInputTokens = usage.value(u"prompt_cache_hit_tokens"_s).toInt();
-            }
+            // The usage-only chunk is the end of an OpenAI-compatible stream.
             chunk.finished = true;
         }
         return chunk;
@@ -754,6 +775,7 @@ QJsonArray LlmClient::advertisedTools() const
 
 QJsonObject LlmClient::buildOpenAIRequest(const QList<ChatMessage> &messages, const QString &model)
 {
+    const ModelProfile profile = ModelProfiles::resolve(m_settings.provider, model);
     QJsonObject body;
     body.insert(u"model"_s, model);
     body.insert(u"messages"_s, messagesToJson(messages));
@@ -761,13 +783,24 @@ QJsonObject LlmClient::buildOpenAIRequest(const QList<ChatMessage> &messages, co
     // "none" is not "no parallelism": it forbids tool calls altogether, so the
     // agent could not act at all when the user turned batching off. Batching is
     // controlled by parallel_tool_calls instead.
-    body.insert(u"tool_choice"_s, u"auto"_s);
-    body.insert(u"parallel_tool_calls"_s, m_settings.parallelToolCalls);
+    if (profile.supportsToolChoice) {
+        body.insert(u"tool_choice"_s, u"auto"_s);
+    }
+    body.insert(u"parallel_tool_calls"_s,
+                m_settings.parallelToolCalls && profile.supportsParallelToolCalls);
     body.insert(u"stream"_s, true);
+    if (providerSupportsStreamUsage(m_settings.provider)) {
+        body.insert(u"stream_options"_s,
+                    QJsonObject{{u"include_usage"_s, true}});
+    }
     body.insert(u"temperature"_s, m_settings.temperature);
     body.insert(u"top_p"_s, m_settings.topP);
     if (m_settings.maxTokens > 0) {
-        body.insert(u"max_tokens"_s, m_settings.maxTokens);
+        int maxTokens = m_settings.maxTokens;
+        if (profile.maxOutputTokens > 0) {
+            maxTokens = qMin(maxTokens, profile.maxOutputTokens);
+        }
+        body.insert(u"max_tokens"_s, maxTokens);
     }
     if (m_settings.frequencyPenalty != 0.0) {
         body.insert(u"frequency_penalty"_s, m_settings.frequencyPenalty);
@@ -864,7 +897,9 @@ QJsonObject LlmClient::buildAnthropicRequest(const QList<ChatMessage> &messages,
 
     if (!tools.isEmpty()) {
         body.insert(u"tools"_s, tools);
-        body.insert(u"tool_choice"_s, u"auto"_s);
+        if (profile.supportsToolChoice) {
+            body.insert(u"tool_choice"_s, u"auto"_s);
+        }
     }
     return body;
 }
@@ -872,6 +907,7 @@ QJsonObject LlmClient::buildAnthropicRequest(const QList<ChatMessage> &messages,
 QJsonObject LlmClient::buildAcpNativeRequest(const QList<ChatMessage> &messages, const QString &model)
 {
     // ACP Native format - similar to OpenAI but with ACP-specific extensions
+    const ModelProfile profile = ModelProfiles::resolve(m_settings.provider, model);
     QJsonObject body;
     body.insert(u"model"_s, model);
     body.insert(u"messages"_s, messagesToJson(messages));
@@ -879,13 +915,20 @@ QJsonObject LlmClient::buildAcpNativeRequest(const QList<ChatMessage> &messages,
     // "none" is not "no parallelism": it forbids tool calls altogether, so the
     // agent could not act at all when the user turned batching off. Batching is
     // controlled by parallel_tool_calls instead.
-    body.insert(u"tool_choice"_s, u"auto"_s);
-    body.insert(u"parallel_tool_calls"_s, m_settings.parallelToolCalls);
+    if (profile.supportsToolChoice) {
+        body.insert(u"tool_choice"_s, u"auto"_s);
+    }
+    body.insert(u"parallel_tool_calls"_s,
+                m_settings.parallelToolCalls && profile.supportsParallelToolCalls);
     body.insert(u"stream"_s, true);
     body.insert(u"temperature"_s, m_settings.temperature);
     body.insert(u"top_p"_s, m_settings.topP);
     if (m_settings.maxTokens > 0) {
-        body.insert(u"max_tokens"_s, m_settings.maxTokens);
+        int maxTokens = m_settings.maxTokens;
+        if (profile.maxOutputTokens > 0) {
+            maxTokens = qMin(maxTokens, profile.maxOutputTokens);
+        }
+        body.insert(u"max_tokens"_s, maxTokens);
     }
     // ACP-specific fields
     body.insert(u"acp_version"_s, u"1.0"_s);

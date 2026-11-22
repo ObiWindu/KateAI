@@ -7,6 +7,7 @@
 
 #include "../types.h"
 
+#include <QHash>
 #include <QJsonArray>
 #include <QList>
 #include <QString>
@@ -55,8 +56,14 @@ struct ContextOptions {
     int compactionLevel = 0;
     bool autoCompact = true;
     bool summarizeEverything = false;
+    // Reports can inspect the request without writing the content store.
+    bool allowContentStore = true;
     double tokenFactor = 1.0;
     ProjectGraph *projectGraph = nullptr;
+
+    // Per-tool result caps supplied by the registry. The engine still uses a
+    // conservative default for tools that are not in the map.
+    QHash<QString, int> toolResultBudgets;
 
     // The summary produced by an earlier compaction. Passing it back in is
     // what makes the merge incremental instead of lossy.

@@ -68,7 +68,7 @@ QString oneLineForReport(QString text, int maxChars)
     text.replace(u'\n', u' ');
     text = text.simplified();
     if (text.size() > maxChars) {
-        text = text.left(maxChars) + u"…"_s;
+        text = truncateSafe(text, maxChars) + u"…"_s;
     }
     return text;
 }
@@ -191,13 +191,25 @@ AgentLoop::AgentLoop(QObject *parent)
     connect(&m_client, &LlmClient::usageReceived, this,
             [this](int inputTokens, int outputTokens, int cachedInputTokens) {
                 const QString model = modelFor(m_settings);
-                if (model != m_calibrationModel) {
+                if (model != m_calibrationModel
+                    || m_settings.provider != m_calibrationProvider) {
                     m_calibrationModel = model;
+                    m_calibrationProvider = m_settings.provider;
                     m_tokenCalibrator = Tokens::Calibrator(
                         ModelProfiles::resolve(m_settings.provider, model).tokenFactor);
                 }
-                if (inputTokens > 0 && m_lastRequestEstimate > 0) {
-                    m_tokenCalibrator.observe(m_lastRequestEstimate, inputTokens);
+                // Anthropic's native wire format reports non-cached input
+                // separately. OpenAI-shaped transports include cached tokens
+                // in prompt_tokens, even for a Claude model behind a gateway.
+                // Adding cached tokens there would double-count them.
+                const bool anthropicWire =
+                    m_settings.provider == Provider::ClaudeCompatible
+                    || (m_settings.provider == Provider::Acp
+                        && m_settings.apiFormat == ApiFormat::AnthropicCompatible);
+                const int effectiveInput = inputTokens
+                    + (anthropicWire ? cachedInputTokens : 0);
+                if (effectiveInput > 0 && m_lastRequestEstimate > 0) {
+                    m_tokenCalibrator.observe(m_lastRequestEstimate, effectiveInput);
                 }
                 QJsonObject payload;
                 payload.insert(u"inputTokens"_s, inputTokens);
@@ -448,8 +460,10 @@ void AgentLoop::setSettings(const Settings &settings)
 
     m_settings = settings;
     const QString configuredModel = modelFor(m_settings);
-    if (configuredModel != m_calibrationModel) {
+    if (configuredModel != m_calibrationModel
+        || m_settings.provider != m_calibrationProvider) {
         m_calibrationModel = configuredModel;
+        m_calibrationProvider = m_settings.provider;
         const ModelProfile profile = ModelProfiles::resolve(m_settings.provider, configuredModel);
         m_tokenCalibrator = Tokens::Calibrator(profile.tokenFactor);
         if (!configuredModel.isEmpty() && !profile.known) {
@@ -569,8 +583,10 @@ void AgentLoop::setWorkspace(const QString &workspace)
         m_mcp->setTimeoutMs(m_settings.mcpTimeoutMs);
     }
     syncPermissionPolicy();
-    syncToolAccess();
+    // Load the new workspace's harness flags before deciding which tools to
+    // advertise; a workspace-level config can change toolSearch or memoryV2.
     reloadHarnessConfig();
+    syncToolAccess();
 
     if (!m_workspace.isEmpty()) {
         // A workspace change mid-turn is deferred like a sandbox change: the
@@ -1458,79 +1474,113 @@ QList<GraphEdge*> AgentLoop::getProjectEdges() const
     return QList<GraphEdge*>();
 }
 
-QString AgentLoop::systemPrompt() const
+PromptResult AgentLoop::assemblePrompt() const
 {
     const ModeDefinition mode = m_modes.modeOrDefault(m_settings.agentMode);
+    PromptRequest request;
+    request.settings = m_settings;
+    request.mode = mode;
+    request.provider = m_settings.provider;
+    request.modelName = modelFor(m_settings);
+    request.workspace = m_workspace;
+    request.verificationGate = m_harness.verificationGate;
 
-    if (m_harness.promptV2) {
-        PromptRequest request;
-        request.settings = m_settings;
-        request.mode = mode;
-        request.provider = m_settings.provider;
-        request.modelName = modelFor(m_settings);
-        request.workspace = m_workspace;
-        request.verificationGate = m_harness.verificationGate;
+    const ToolAccess access = activeToolAccess();
+    const int window = m_settings.contextWindow > 0
+        ? m_settings.contextWindow
+        : ModelProfiles::contextWindow(m_settings.provider, request.modelName);
+    const AdvertisedTools advertised = m_toolRegistry.advertised(
+        access, window, m_harness.toolSearch);
 
-        const ToolAccess access = activeToolAccess();
+    QSet<QString> seen;
+    for (const QJsonValue &value : advertised.tools) {
+        const QString name = value.toObject().value(u"function"_s).toObject()
+                                 .value(u"name"_s).toString();
+        if (!name.isEmpty() && !seen.contains(name)) {
+            request.toolNames.append(name);
+            seen.insert(name);
+        }
+    }
+    // A registry that was not rebuilt yet must not hide every built-in from
+    // the prompt. This mirrors the legacy fallback and keeps the first prompt
+    // of a session useful.
+    if (request.toolNames.isEmpty()) {
         for (const QString &name : allBuiltInToolNames()) {
             if (access.allows(name)) {
                 request.toolNames.append(name);
+                seen.insert(name);
             }
         }
         if (m_mcp) {
             for (const QString &name : m_mcp->toolNames()) {
                 if (access.allows(name)) {
                     request.toolNames.append(name);
+                    seen.insert(name);
                 }
             }
         }
-        if (m_harness.toolSearch) {
-            // The bridge is advertised outside the mode's ToolAccess; the
-            // prompt has to mention it or the model does not know discovery
-            // exists when a tool is absent from the list.
-            const int window = m_settings.contextWindow > 0
-                ? m_settings.contextWindow
-                : ModelProfiles::contextWindow(m_settings.provider, request.modelName);
-            if (m_toolRegistry.advertised(access, window, true).deferralActive) {
-                request.toolNames.append({u"tool_search"_s, u"tool_describe"_s, u"tool_call"_s});
+    }
+    if (m_harness.toolSearch && advertised.deferralActive) {
+        for (const QString &name : {u"tool_search"_s, u"tool_describe"_s, u"tool_call"_s}) {
+            if (!seen.contains(name)) {
+                request.toolNames.append(name);
+                seen.insert(name);
             }
         }
-
-        if (access.allows(subtaskToolName())) {
-            QString roster = u"You can delegate with new_task. Available agents:\n"_s
-                + m_team.describeRoster() + u"\n"_s;
-            roster += u"At most %1 sub-agents may run at once; independent subtasks in one response run in parallel. "_s
-                          .arg(qMax(1, m_settings.maxParallelSubtasks));
-            roster += u"A sub-agent cannot see this conversation: restate everything it needs, and read its answer "
-                      u"before relying on it.\n"_s;
-            request.subagentRoster = roster;
+    }
+    QStringList deferred;
+    for (const QString &name : advertised.deferred) {
+        if (deferred.size() >= 40) {
+            deferred.append(u"…"_s);
+            break;
         }
+        deferred.append(name);
+    }
+    request.deferredTools = deferred.join(u", "_s);
 
-        if (m_settings.loadAgentRules && !m_harness.memoryV2) {
-            request.rules = RulesLoader::render(
-                RulesLoader::load(m_workspace, mode.id), m_settings.globalRules);
+    if (access.allows(subtaskToolName())) {
+        QString roster = u"You can delegate with new_task. Available agents:\n"_s
+            + m_team.describeRoster() + u"\n"_s;
+        roster += u"At most %1 sub-agents may run at once; independent subtasks in one response run in parallel. "_s
+                      .arg(qMax(1, m_settings.maxParallelSubtasks));
+        roster += u"A sub-agent cannot see this conversation: restate everything it needs, and read its answer "
+                  u"before relying on it.\n"_s;
+        request.subagentRoster = roster;
+    }
+
+    if (m_settings.loadAgentRules && !m_harness.memoryV2) {
+        request.rules = RulesLoader::render(
+            RulesLoader::load(m_workspace, mode.id), m_settings.globalRules);
+    }
+
+    if (m_harness.memoryV2 && m_memory) {
+        const QList<MemoryFile> files = memoryFilesForPrompt();
+        QString rendered = MemoryLoader::render(files);
+        if (!m_settings.globalRules.trimmed().isEmpty()) {
+            rendered = u"<global_rules>\n"_s + m_settings.globalRules.trimmed()
+                + u"\n</global_rules>\n"_s + rendered;
         }
+        request.memory = rendered;
+    }
 
-        if (m_harness.memoryV2 && m_memory) {
-            const QList<MemoryFile> files = memoryFilesForPrompt();
-            QString rendered = MemoryLoader::render(files);
-            if (!m_settings.globalRules.trimmed().isEmpty()) {
-                rendered = u"<global_rules>\n"_s + m_settings.globalRules.trimmed()
-                    + u"\n</global_rules>\n"_s + rendered;
-            }
-            request.memory = rendered;
-        }
+    if (m_projectGraph && m_projectGraph->getNodeCount() > 0 && m_settings.compressProjectGraph) {
+        request.graph = m_projectGraph->contextSummary(
+            m_settings.maxGraphNodes, m_settings.maxGraphEdges, m_settings.contextCompressionLevel);
+    }
 
-        if (m_projectGraph && m_projectGraph->getNodeCount() > 0 && m_settings.compressProjectGraph) {
-            request.graph = m_projectGraph->contextSummary(
-                m_settings.maxGraphNodes, m_settings.maxGraphEdges, m_settings.contextCompressionLevel);
-        }
+    const QJsonArray advertisedJson = m_client.advertisedTools();
+    request.toolSchemaTokens = Tokens::estimate(QString::fromUtf8(
+        QJsonDocument(advertisedJson).toJson(QJsonDocument::Compact)));
 
-        const QJsonArray advertised = m_client.advertisedTools();
-        request.toolSchemaTokens = Tokens::estimate(QString::fromUtf8(
-            QJsonDocument(advertised).toJson(QJsonDocument::Compact)));
+    return PromptAssembler::assemble(request);
+}
 
-        const PromptResult assembled = PromptAssembler::assemble(request);
+QString AgentLoop::systemPrompt() const
+{
+    const ModeDefinition mode = m_modes.modeOrDefault(m_settings.agentMode);
+
+    if (m_harness.promptV2) {
+        const PromptResult assembled = assemblePrompt();
         m_promptManifest = assembled.manifest;
         m_promptStaticHash = assembled.staticHash;
         return assembled.text;
@@ -1736,7 +1786,8 @@ QString AgentLoop::currentPlanText() const
         }
         const bool done = step.value(u"completed"_s).toBool()
             || step.value(u"status"_s).toString() == u"completed"_s;
-        const bool active = step.value(u"status"_s).toString() == u"in_progress"_s;
+        const bool active = step.value(u"inProgress"_s).toBool()
+            || step.value(u"status"_s).toString() == u"in_progress"_s;
         lines.append((done ? u"- [x] "_s : active ? u"- [~] "_s : u"- [ ] "_s) + text.trimmed());
     }
     return lines.join(u'\n');
@@ -1798,6 +1849,15 @@ QList<MemoryFile> AgentLoop::memoryFilesForPrompt() const
     if (!m_memory) {
         return {};
     }
+    // Rule files named after a mode are mode-specific. The loader needs the
+    // active mode and the known ids so it can include the matching file and
+    // skip files belonging to other modes.
+    const ModeDefinition active = m_modes.modeOrDefault(m_settings.agentMode);
+    QStringList modeIds;
+    for (const ModeDefinition &mode : m_modes.modes()) {
+        modeIds.append(mode.id);
+    }
+    m_memory->setModeContext(active.id, modeIds);
     QList<MemoryFile> files = m_memory->load(contextTouchedPaths());
     if (!m_settings.loadAgentRules || !m_settings.loadProjectInstructions) {
         QList<MemoryFile> filtered;
@@ -1944,6 +2004,7 @@ void AgentLoop::abort()
     // Cancel all subtasks synchronously to avoid use-after-free
     const QList<AgentLoop *> children = m_activeSubtasks.values();
     m_activeSubtasks.clear();
+    m_activeSubtaskDescriptions.clear();
     for (AgentLoop *child : children) {
         if (m_locks) {
             m_locks->releaseAll(child->selfId());
@@ -2108,7 +2169,9 @@ void AgentLoop::start(const QString &userText)
 
 QString AgentLoop::turnContextMessage() const
 {
-    if (!m_harness.stablePromptPrefix) {
+    // With promptV2 the system prompt never contains editor state, so the turn
+    // message is required even when the legacy stable-prefix flag is off.
+    if (!m_harness.stablePromptPrefix && !m_harness.promptV2) {
         return {};
     }
     if (m_cachedTurnContextTurnId == m_turnId && !m_cachedTurnContext.isEmpty()) {
@@ -2172,7 +2235,7 @@ QString AgentLoop::turnContextMessage() const
     return m_cachedTurnContext;
 }
 
-QList<ChatMessage> AgentLoop::m_messagesForRequest() const
+QList<ChatMessage> AgentLoop::m_messagesForRequest(bool updateState) const
 {
     const QString model = modelFor(m_settings);
     const int window = m_settings.contextWindow > 0
@@ -2187,8 +2250,14 @@ QList<ChatMessage> AgentLoop::m_messagesForRequest() const
         options.reserveForResponse = reserve;
         options.autoCompact = m_settings.compressOldMessages;
         options.compactionLevel = m_compactionLevel;
+        options.allowContentStore = updateState;
         options.tokenFactor = m_calibrationModel == model ? m_tokenCalibrator.factor() : 1.0;
         options.previousSummary = m_contextSummary;
+        for (const ToolSpec &spec : m_toolRegistry.specs()) {
+            if (spec.maxResultChars > 0) {
+                options.toolResultBudgets.insert(spec.name, spec.maxResultChars);
+            }
+        }
         options.projectGraph = m_projectGraph.get();
         options.summarizeEverything = m_compactionLevel >= 6;
         if (m_settings.keepRecentTokens > 0) {
@@ -2197,11 +2266,21 @@ QList<ChatMessage> AgentLoop::m_messagesForRequest() const
         options.plan = currentPlanText();
         const QStringList touched = contextTouchedPaths();
         options.modifiedFiles = touched.mid(qMax(0, touched.size() - 5));
-        options.runningTasks = m_activeSubtasks.keys();
+        options.runningTasks = m_activeSubtaskDescriptions.isEmpty()
+            ? m_activeSubtasks.keys()
+            : m_activeSubtaskDescriptions.values();
 
         ContextResult engine = ContextEngine::build(m_messages, options);
-        m_contextSummary = engine.summary;
-        m_contextManifest = engine.compacted ? ContextEngine::renderManifest(engine, window) : QString();
+        if (updateState) {
+            // A no-op build returns an empty summary. Do not discard the last
+            // real one; the summary message may still be pending adoption.
+            if (engine.compacted || !engine.summary.isEmpty()) {
+                m_contextSummary = engine.summary;
+            }
+            m_contextManifest = engine.compacted
+                ? ContextEngine::renderManifest(engine, window)
+                : QString();
+        }
 
         QList<ChatMessage> request = engine.messages;
         if (!context.isEmpty()) {
@@ -2229,9 +2308,10 @@ QList<ChatMessage> AgentLoop::m_messagesForRequest() const
     } else {
         // Keep a substantial third of the usable window verbatim. A fixed
         // small tail made a 128k/1M model compact as if it were a 32k one,
-        // losing recent decisions the model still needed.
-        const int usable = qMax(2048, options.contextWindow - options.reserveForResponse);
-        options.keepRecentTokens = qMax(4000, usable / 3);
+        // losing recent decisions the model still needed. Never keep more
+        // than the usable window itself on a tiny model.
+        const int usable = qMax(512, options.contextWindow - options.reserveForResponse);
+        options.keepRecentTokens = qMin(qMax(4000, usable / 3), usable);
     }
     QList<ChatMessage> request = ContextManager::build(m_messages, options);
     if (!context.isEmpty()) {
@@ -2255,7 +2335,7 @@ QString AgentLoop::contextReport() const
     const int window = m_settings.contextWindow > 0 ? m_settings.contextWindow
                                                     : ModelProfiles::contextWindow(m_settings.provider, model);
     const int reserve = m_settings.contextWindowReserve > 0 ? m_settings.contextWindowReserve : 8192;
-    const QList<ChatMessage> request = m_messagesForRequest();
+    const QList<ChatMessage> request = m_messagesForRequest(false);
     const double factor = m_calibrationModel == model ? m_tokenCalibrator.factor() : 1.0;
     const int requestTokens = Tokens::applyFactor(Tokens::estimate(request), factor);
     const int historyTokens = Tokens::applyFactor(Tokens::estimate(m_messages), factor);
@@ -2268,7 +2348,13 @@ QString AgentLoop::contextReport() const
         QJsonDocument(definitions).toJson(QJsonDocument::Compact)));
 
     int rulesChars = 0;
-    if (m_settings.loadAgentRules) {
+    int memoryChars = 0;
+    if (m_harness.memoryV2 && m_settings.loadAgentRules && m_memory) {
+        const QList<MemoryFile> files = memoryFilesForPrompt();
+        for (const MemoryFile &file : files) {
+            memoryChars += file.content.size();
+        }
+    } else if (m_settings.loadAgentRules) {
         const ModeDefinition mode = m_modes.modeOrDefault(m_settings.agentMode);
         rulesChars = RulesLoader::render(RulesLoader::load(m_workspace, mode.id), m_settings.globalRules).size();
     }
@@ -2307,7 +2393,11 @@ QString AgentLoop::contextReport() const
     report += i18n("  free: %1\n", tokens(qMax(0, window - reserve - used)));
     report += u"\n"_s;
     report += i18n("KATEAI.md: %1 KB\n", kb(instructionsChars));
-    report += i18n("Project rules: %1 KB\n", kb(rulesChars));
+    if (m_harness.memoryV2) {
+        report += i18n("Memory instructions: %1 KB\n", kb(memoryChars));
+    } else {
+        report += i18n("Project rules: %1 KB\n", kb(rulesChars));
+    }
     report += i18n("Editor context: %1 KB\n", kb(m_editorContext.size()));
     report += i18n("Project graph: %1 KB\n", kb(graphChars));
     report += i18n("Messages: %1\n", m_messages.size());
@@ -2345,7 +2435,10 @@ QString AgentLoop::usageReport() const
                                                     : profile.contextWindow;
     const double factor = m_calibrationModel == model ? m_tokenCalibrator.factor() : 1.0;
     const int estimatedTokens = Tokens::applyFactor(
-        Tokens::estimate(m_messagesForRequest()), factor);
+        Tokens::estimate(m_messagesForRequest(false)), factor)
+        + Tokens::applyFactor(Tokens::estimate(QString::fromUtf8(
+              QJsonDocument(m_client.advertisedTools()).toJson(QJsonDocument::Compact))),
+              factor);
     QString report;
     report += i18n("Provider: %1\n", providerId(m_settings.provider));
     report += i18n("Model: %1\n", model.isEmpty() ? i18n("(not selected)") : model);
@@ -2389,23 +2482,10 @@ QString AgentLoop::usageReport() const
 
 QString AgentLoop::promptReport() const
 {
-    const PromptResult report = [this]() {
-        PromptRequest request;
-        request.settings = m_settings;
-        request.mode = m_modes.modeOrDefault(m_settings.agentMode);
-        request.provider = m_settings.provider;
-        request.modelName = modelFor(m_settings);
-        request.workspace = m_workspace;
-        request.verificationGate = m_harness.verificationGate;
-        request.memory = m_harness.memoryV2 && m_memory
-            ? MemoryLoader::render(memoryFilesForPrompt())
-            : QString();
-        request.rules = m_settings.loadAgentRules && !m_harness.memoryV2
-            ? RulesLoader::render(RulesLoader::load(m_workspace, request.mode.id),
-                                  m_settings.globalRules)
-            : QString();
-        return PromptAssembler::assemble(request);
-    }();
+    // Use the same builder as systemPrompt(), otherwise the report quietly
+    // diverges from the bytes actually sent (tool names, graph, global rules,
+    // schema cost, sub-agent roster).
+    const PromptResult report = assemblePrompt();
 
     QString text;
     text += i18n("Prompt variant: %1\n", PromptAssembler::variantId(report.variant));
@@ -2430,8 +2510,10 @@ QString AgentLoop::memoryReport() const
     const QStringList touched = contextTouchedPaths();
     const QList<MemoryFile> files = m_memory ? memoryFilesForPrompt()
                                              : MemoryLoader::discover(m_workspace, touched);
+    const MemoryLoader::Config config;
     text += i18n("Memory files: %1 (budget %2 KiB/file, %3 KiB total, %4 files)\n",
-                 files.size(), 32, 128, 32);
+                 files.size(), config.maxFileBytes / 1024, config.maxTotalBytes / 1024,
+                 config.maxFiles);
     text += i18n("Touched paths: %1\n", touched.isEmpty() ? i18n("(none)") : touched.join(u", "_s));
     for (const MemoryFile &file : files) {
         text += u"- [%1] %2 — %3 bytes%4\n"_s
@@ -2455,9 +2537,15 @@ QString AgentLoop::toolsReport() const
         ? m_settings.contextWindow
         : ModelProfiles::contextWindow(m_settings.provider, modelFor(m_settings));
     const AdvertisedTools advertised = m_toolRegistry.advertised(access, window, m_harness.toolSearch);
+    int accessible = 0;
+    for (const ToolSpec &spec : m_toolRegistry.specs()) {
+        if (access.isEmpty() || access.allows(spec.name)) {
+            ++accessible;
+        }
+    }
     QString text;
     text += i18n("Tools: %1 accessible, %2 advertised, %3 deferred%4\n",
-                 m_toolRegistry.specs().size(), advertised.tools.size(), advertised.deferred.size(),
+                 accessible, advertised.tools.size(), advertised.deferred.size(),
                  advertised.deferralActive ? i18n(" (search bridge active)") : QString());
     text += i18n("Schema cost: %1 tokens\n", advertised.schemaTokens);
     for (const ToolSpec &spec : m_toolRegistry.specs()) {
@@ -2477,16 +2565,27 @@ QString AgentLoop::toolsReport() const
 
 void AgentLoop::maybeCompactStoredHistory(const QList<ChatMessage> &requestMessages)
 {
-    // Only compact a settled history. While a turn is executing, tool calls
-    // in m_messages have not received their results yet, and replacing the
-    // list would break the provider's call/result pairing.
-    if (!m_settings.compressOldMessages || m_messages.size() < 8) {
+    if (!m_settings.compressOldMessages) {
         return;
     }
-    if (m_messages.size() <= requestMessages.size()) {
-        return;
-    }
-    // The ambient context message is request-only; never persist it.
+    auto firstSummary = [](const QList<ChatMessage> &messages) {
+        for (const ChatMessage &message : messages) {
+            if (ContextEngine::isSummary(message)) {
+                return message.content;
+            }
+        }
+        return QString();
+    };
+    const QString storedSummary = firstSummary(m_messages);
+    const QString requestSummary = firstSummary(requestMessages);
+    // A new or updated summary has to become part of the stored history even
+    // when the request is only slightly smaller. Otherwise the next build sees
+    // the same old turns, summarizes them again, and merges duplicate blocks.
+    const bool summaryChanged = !requestSummary.isEmpty()
+        && requestSummary != storedSummary;
+    // The ambient context and rehydration messages are request-only; never
+    // persist them. Compare counts after removing them, otherwise the extra
+    // transient message makes every compacted request look larger.
     QList<ChatMessage> persistent;
     persistent.reserve(requestMessages.size());
     for (const ChatMessage &message : requestMessages) {
@@ -2494,12 +2593,24 @@ void AgentLoop::maybeCompactStoredHistory(const QList<ChatMessage> &requestMessa
             persistent.append(message);
         }
     }
+    if (!summaryChanged) {
+        // Only compact a settled history. While a turn is executing, tool
+        // calls in m_messages have not received their results yet, and
+        // replacing the list would break the provider's call/result pairing.
+        if (m_messages.size() < 8 || persistent.size() >= m_messages.size()) {
+            return;
+        }
+    }
     const int storedTokens = ContextManager::estimateTokens(m_messages);
     const int requestTokens = ContextManager::estimateTokens(persistent);
+    const bool summaryDroppedMessages = summaryChanged
+        && persistent.size() < m_messages.size();
     // A small truncation is not worth losing the full transcript over. Once
     // compaction saves at least 30% of the prompt, adopt it as the stored
-    // history so both memory and every later SQLite save shrink.
-    if (storedTokens <= 0 || qint64(requestTokens) * 10 > qint64(storedTokens) * 7) {
+    // history so both memory and every later SQLite save shrink. A summary is
+    // the exception: persisting it is what prevents duplicate re-summarizing.
+    if (!summaryDroppedMessages
+        && (storedTokens <= 0 || qint64(requestTokens) * 10 > qint64(storedTokens) * 7)) {
         return;
     }
     emitHarnessEvent(EventTypes::Compaction,
@@ -2624,12 +2735,14 @@ void AgentLoop::sendToModel()
 
     const QList<ChatMessage> requestMessages = m_messagesForRequest();
     maybeCompactStoredHistory(requestMessages);
-    m_lastRequestEstimate = Tokens::applyFactor(Tokens::estimate(requestMessages),
-                                                m_calibrationModel == modelFor(m_settings)
-                                                    ? m_tokenCalibrator.factor()
-                                                    : 1.0)
-        + Tokens::estimate(QString::fromUtf8(
-              QJsonDocument(m_client.advertisedTools()).toJson(QJsonDocument::Compact)));
+    const double factor = m_calibrationModel == modelFor(m_settings)
+        ? m_tokenCalibrator.factor()
+        : 1.0;
+    m_lastRequestEstimate = Tokens::applyFactor(Tokens::estimate(requestMessages), factor)
+        + Tokens::applyFactor(
+              Tokens::estimate(QString::fromUtf8(
+                  QJsonDocument(m_client.advertisedTools()).toJson(QJsonDocument::Compact))),
+              factor);
 
     ++m_stepNumber;
     m_currentStepId = QUuid::createUuid().toString(QUuid::WithoutBraces);
@@ -3605,6 +3718,9 @@ void AgentLoop::processQueue()
         target.argumentsJson = QString::fromUtf8(
             QJsonDocument(targetArgs).toJson(QJsonDocument::Compact));
         m_toolRegistry.markDiscovered(targetName);
+        // Make a successful bridge call self-advertising on the next request;
+        // the model should not have to call tool_describe a second time.
+        syncToolAccess();
         call = target;
     }
 
@@ -4692,6 +4808,7 @@ void AgentLoop::dispatchSubtask(const ToolCall &call)
                 state->timer->stop();
             }
             m_activeSubtasks.remove(state->taskId);
+            m_activeSubtaskDescriptions.remove(state->taskId);
             if (m_locks) {
                 m_locks->releaseAll(child->selfId());
             }
@@ -4734,6 +4851,7 @@ void AgentLoop::dispatchSubtask(const ToolCall &call)
         Qt::SingleShotConnection);
 
     m_activeSubtasks.insert(taskId, child);
+    m_activeSubtaskDescriptions.insert(taskId, description);
     Q_EMIT subtaskStarted(taskId, profile.id, profile.name, childSettings.agentMode, description);
     state->timer->start();
     // Without this the child only ever sees its mode's generic persona, so a
@@ -4750,6 +4868,7 @@ void AgentLoop::cancelSubtask(const QString &taskId)
     if (taskId.isEmpty()) {
         const QList<AgentLoop *> children = m_activeSubtasks.values();
         m_activeSubtasks.clear();
+        m_activeSubtaskDescriptions.clear();
         for (AgentLoop *child : children) {
             if (m_locks) {
                 m_locks->releaseAll(child->selfId());
@@ -4766,6 +4885,7 @@ void AgentLoop::cancelSubtask(const QString &taskId)
         return;
     }
     m_activeSubtasks.remove(taskId);
+    m_activeSubtaskDescriptions.remove(taskId);
     if (m_locks) {
         m_locks->releaseAll(child->selfId());
     }
@@ -4786,7 +4906,7 @@ bool AgentLoop::compactContext()
     ContextManager::Options options;
     options.contextWindow = m_settings.contextWindow > 0
         ? m_settings.contextWindow
-        : ContextManager::contextWindowFor(modelFor(m_settings));
+        : ContextManager::contextWindowFor(m_settings.provider, modelFor(m_settings));
     options.reserveForResponse = m_settings.contextWindowReserve > 0
         ? m_settings.contextWindowReserve
         : 8192;
@@ -4795,8 +4915,8 @@ bool AgentLoop::compactContext()
     if (m_settings.keepRecentTokens > 0) {
         options.keepRecentTokens = m_settings.keepRecentTokens;
     } else {
-        const int usable = qMax(2048, options.contextWindow - options.reserveForResponse);
-        options.keepRecentTokens = qMax(4000, usable / 3);
+        const int usable = qMax(512, options.contextWindow - options.reserveForResponse);
+        options.keepRecentTokens = qMin(qMax(4000, usable / 3), usable);
     }
 
     const int before = ContextManager::estimateTokens(m_messages);

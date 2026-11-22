@@ -1495,6 +1495,27 @@ private Q_SLOTS:
         QVERIFY(rejected.output.contains(u"topic"_s));
     }
 
+    void testMemoryWriteHonoursReadOnlySandbox()
+    {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        Sandbox sandbox(tempDir.path(), SandboxProfile::ReadOnly);
+        DiskDocumentBridge bridge;
+        ToolRunner runner(sandbox, &bridge);
+
+        ToolCall call;
+        call.id = u"mem-ro"_s;
+        call.name = u"memory_write"_s;
+        call.arguments = QJsonObject{
+            {u"topic"_s, u"readonly-check"_s},
+            {u"content"_s, u"should not be written"_s},
+            {u"scope"_s, u"user"_s},
+        };
+        const ToolResult result = runner.run(call);
+        QVERIFY(!result.ok);
+        QVERIFY(result.output.contains(u"read-only"_s));
+    }
+
     void testEditFileCanonicalFallback()
     {
         QTemporaryDir tempDir;

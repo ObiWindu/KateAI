@@ -30,6 +30,11 @@ int estimate(const QString &text);
 int estimate(const QList<ChatMessage> &messages);
 // Applies a calibration factor, rounding up so a fractional token still costs.
 int applyFactor(int tokens, double factor);
+// Returns the longest prefix of `text` whose estimate stays within
+// `budgetTokens`. If the whole text fits it is returned unchanged. The cut
+// never splits a surrogate pair.
+QString truncateToTokenBudget(const QString &text, int budgetTokens,
+                              bool *truncated = nullptr);
 
 class Calibrator
 {

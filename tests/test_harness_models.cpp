@@ -41,6 +41,14 @@ private Q_SLOTS:
         QVERIFY(gpt.supportsReasoning);
     }
 
+    void legacyWindowFamiliesStillResolve()
+    {
+        const ModelProfile cohere =
+            ModelProfiles::resolve(Provider::OpenAICompatible, u"command-r-plus"_s);
+        QVERIFY(cohere.known);
+        QCOMPARE(cohere.contextWindow, 128000);
+    }
+
     void unknownModelGetsConservativeFallback()
     {
         const ModelProfile unknown = ModelProfiles::resolve(Provider::OpenAICompatible, u"mystery-1"_s);

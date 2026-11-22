@@ -56,8 +56,11 @@ struct PromptRequest {
     QString skills;
     QString graph;
     QString plan;
-    // Names the model may call, already filtered by the mode.
+    // Names the model may call directly, already filtered by the mode and by
+    // tool discovery. Deferred tools are listed separately so the prompt does
+    // not imply that their schemas are already advertised.
     QStringList toolNames;
+    QString deferredTools;
     QString subagentRoster;
     // Tokens the transport will spend on tool schemas; counted against the
     // same 25% prompt budget so the manifest explains the whole request.
@@ -97,9 +100,11 @@ public:
     static PromptResult assemble(const PromptRequest &request);
 
     // Renders already-prepared sections. Exposed for tests and for callers that
-    // only need a sub-prompt.
+    // only need a sub-prompt. When `renderedSections` is non-null it receives
+    // the sections after per-section and total-budget truncation.
     static QString render(const QList<PromptSection> &sections, int totalBudget,
-                          QJsonObject *manifest, bool *truncated);
+                          QJsonObject *manifest, bool *truncated,
+                          QList<PromptSection> *renderedSections = nullptr);
 
     static QString variantId(PromptVariant variant);
     static QString stabilityId(PromptStability stability);

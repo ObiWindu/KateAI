@@ -4299,7 +4299,7 @@ void ChatWidget::updateTokenDisplay()
     // keeping a second estimate that can disagree with the real budget.
     const int window = m_settings.contextWindow > 0
         ? m_settings.contextWindow
-        : ContextManager::contextWindowFor(modelFor(m_settings));
+        : ContextManager::contextWindowFor(m_settings.provider, modelFor(m_settings));
     if (window <= 0) {
         m_tokenCount->setText(QString());
         m_tokenCount->hide();

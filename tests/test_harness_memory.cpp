@@ -115,6 +115,59 @@ private Q_SLOTS:
         QVERIFY(!MemoryLoader::matchesPath({u"../secret"_s}, u"src/a.cpp"_s));
     }
 
+    void globstarMatchesZeroDirectories()
+    {
+        QVERIFY(MemoryLoader::matchesPath({u"**/*.cpp"_s}, u"main.cpp"_s));
+        QVERIFY(MemoryLoader::matchesPath({u"src/**/*.cpp"_s}, u"src/a.cpp"_s));
+        QVERIFY(MemoryLoader::matchesPath({u"src/**/*.cpp"_s}, u"src/api/a.cpp"_s));
+    }
+
+    void rootConfigDirectoriesAreProjectScope()
+    {
+        const QList<MemoryFile> files = MemoryLoader::discover(m_workspace->path());
+        bool found = false;
+        for (const MemoryFile &file : files) {
+            if (file.displayPath == u".kateai/rules/big.md"_s) {
+                found = true;
+                QCOMPARE(file.scope, MemoryScope::Project);
+            }
+        }
+        QVERIFY(found);
+    }
+
+    void byteBudgetIsEnforcedForUtf8()
+    {
+        const QString cjkPath = m_workspace->path() + u"/.kateai/memory/cjk.md"_s;
+        QVERIFY(writeFile(cjkPath, QString(4000, QChar(0x4E2D))));
+        MemoryLoader::Config config;
+        config.maxFileBytes = 2048;
+        config.maxTotalBytes = 4096;
+        qint64 total = 0;
+        const QList<MemoryFile> files =
+            MemoryLoader::discover(m_workspace->path(), {}, config);
+        for (const MemoryFile &file : files) {
+            total += file.content.toUtf8().size();
+        }
+        QVERIFY2(total <= config.maxTotalBytes,
+                 qPrintable(QStringLiteral("total %1").arg(total)));
+    }
+
+    void modeSpecificRulesAreFiltered()
+    {
+        QVERIFY(writeFile(m_workspace->path() + u"/.kateai/rules/ask.md"_s,
+                          u"ask mode rule\n"_s));
+        QVERIFY(writeFile(m_workspace->path() + u"/.kateai/rules/code.md"_s,
+                          u"code mode rule\n"_s));
+        MemoryLoader::Config config;
+        config.modeId = u"ask"_s;
+        config.knownModeIds = {u"ask"_s, u"code"_s};
+        const QList<MemoryFile> files =
+            MemoryLoader::discover(m_workspace->path(), {}, config);
+        const QString render = MemoryLoader::render(files);
+        QVERIFY(render.contains(u"ask mode rule"_s));
+        QVERIFY(!render.contains(u"code mode rule"_s));
+    }
+
     void budgetCapTruncatesWithAMarker()
     {
         MemoryLoader::Config config;

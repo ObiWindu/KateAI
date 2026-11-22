@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: LGPL-2.1-or-later
  */
 
+#include "contextmanager.h"
 #include "harness/contextengine.h"
 #include "harness/tokens.h"
 #include "harness/toolresults.h"
@@ -156,6 +157,38 @@ private Q_SLOTS:
         QVERIFY(found);
     }
 
+    void legacySummaryIsRecognised()
+    {
+        ChatMessage summary = message(ChatMessage::Role::User,
+                                      ContextManager::summaryHeader()
+                                          + u"\n\nEarlier decision: keep QHash."_s);
+        QVERIFY(ContextEngine::isSummary(summary));
+        summary.name = u"context_summary"_s;
+        summary.content = u"Summary body without a known header."_s;
+        QVERIFY(ContextEngine::isSummary(summary));
+    }
+
+    void rehydrationFitsTheRemainingBudget()
+    {
+        QList<ChatMessage> history;
+        history.append(message(ChatMessage::Role::System, u"system"_s));
+        history.append(message(ChatMessage::Role::User, u"hello"_s));
+        history.append(message(ChatMessage::Role::Assistant, u"hello"_s));
+        history.append(message(ChatMessage::Role::User, u"continue"_s));
+        ContextOptions options;
+        options.contextWindow = 12000;
+        options.reserveForResponse = 2000;
+        options.compactionLevel = 1;
+        options.plan = QString(200000, u'p');
+        const ContextResult result = ContextEngine::build(history, options);
+        const ContextBudget budget =
+            ContextEngine::budgetFor(options.contextWindow, options.reserveForResponse);
+        QVERIFY2(result.afterTokens <= budget.usable + 50,
+                 qPrintable(QStringLiteral("after %1 usable %2")
+                                .arg(result.afterTokens).arg(budget.usable)));
+        QVERIFY(result.shapers.contains(QJsonValue(u"rehydration"_s)));
+    }
+
     void calibratorMovesButIsClamped()
     {
         Tokens::Calibrator calibrator;
@@ -171,6 +204,16 @@ private Q_SLOTS:
             calibrator.observe(1000, 1);
         }
         QCOMPARE(calibrator.factor(), Tokens::kMinFactor);
+    }
+
+    void contentStorePruneKeepsTheNewFile()
+    {
+        const StoredToolResult stored = ToolResults::store(QString(20000, u'k'));
+        QVERIFY(!stored.id.isEmpty());
+        const QString path = QDir(ToolResults::directory()).filePath(stored.id + u".txt"_s);
+        QVERIFY(QFileInfo::exists(path));
+        ToolResults::prune(1, {path});
+        QVERIFY(QFileInfo::exists(path));
     }
 
     void contentStorePrunesOldestFirst()

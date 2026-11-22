@@ -48,12 +48,15 @@ schema. Other providers get a byte-stable prefix and their automatic cache.
 
 - Per-section budget: truncate the head and append a visible
   `[… section truncated: ~N tokens omitted …]` marker.
-- Total budget: 25% of the context window, floor 4096 tokens. While the total
-  is over, the largest non-core section is shrunk first; `identity`, `mode`,
-  and `execution` are core. If only core remains, the largest core section is
-  shrunk too.
-- Tool schema tokens are counted against the request estimate, not against the
-  text budget, and are shown separately in the manifest.
+- Total budget: 25% of the context window, with a 4096-token floor that never
+  exceeds the window itself. While the total is over, the largest non-core
+  section is shrunk first; `identity`, `mode`, and `execution` are core. If
+  only core remains, the largest core section is shrunk too, and sections that
+  cannot shrink below their marker are dropped.
+- Tool schema tokens are reserved from the same allowance before sections are
+  rendered. Truncation uses the same token estimator as the context engine, so
+  non-ASCII content cannot exceed its budget. The manifest records both the
+  total budget and the section budget.
 
 ## Profiles
 

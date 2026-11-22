@@ -6,6 +6,7 @@
 #pragma once
 
 #include <QString>
+#include <QStringList>
 
 namespace KateAi
 {
@@ -44,9 +45,11 @@ public:
     static void setDirectoryForTests(const QString &directory);
 
     // Evicts the oldest stored results until the directory fits `maxBytes`.
-    // Returns the number of files removed. Never touches files outside the
-    // store directory.
-    static int prune(qint64 maxBytes = 200LL * 1024 * 1024);
+    // `keep` names files that must survive (for example the result that was
+    // just written). Returns the number of files removed. Never touches files
+    // outside the store directory.
+    static int prune(qint64 maxBytes = 200LL * 1024 * 1024,
+                     const QStringList &keep = QStringList());
 
 private:
     static bool validId(const QString &id);

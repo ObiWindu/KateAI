@@ -19,6 +19,7 @@
 #include <QPointer>
 #include <QProcess>
 #include <QRegularExpression>
+#include <QSaveFile>
 #include <QStandardPaths>
 #include <QCryptographicHash>
 #include <QElapsedTimer>
@@ -596,6 +597,15 @@ QString memoryNotePath(const QJsonObject &args, const QString &workspace, QStrin
     return QDir(directory).filePath(topic);
 }
 
+QString yamlQuoted(QString value)
+{
+    value.replace(u'\\', u"\\\\"_s);
+    value.replace(u'"', u"\\\""_s);
+    value.replace(u'\r', u' ');
+    value.replace(u'\n', u' ');
+    return u"\""_s + value + u"\""_s;
+}
+
 QString memoryNoteBody(const QJsonObject &args)
 {
     const QString topic = args.value(u"topic"_s).toString().trimmed();
@@ -604,8 +614,52 @@ QString memoryNoteBody(const QJsonObject &args)
         content = content.left(32 * 1024) + u"\n... (memory note truncated)"_s;
     }
     const QString description = content.section(u'\n', 0, 0).simplified().left(160);
-    return u"---\ndescription: "_s + description + u"\nalwaysApply: true\n---\n# "_s + topic
+    return u"---\ndescription: "_s + yamlQuoted(description)
+        + u"\nalwaysApply: true\n---\n# "_s + topic
         + u"\n\n"_s + content + u"\n"_s;
+}
+
+// Resolve and policy-check a memory target. Project notes go through the
+// sandbox's normal workspace confinement. User notes live outside the
+// workspace by design, but still obey read-only and deny rules.
+QString memoryWriteTarget(const Sandbox &sandbox, const QJsonObject &args, QString *error)
+{
+    const QString scope = args.value(u"scope"_s).toString(u"project"_s);
+    const QString path = memoryNotePath(args, sandbox.workspaceRoot(), error);
+    if (path.isEmpty()) {
+        return {};
+    }
+    if (scope == u"project"_s) {
+        return sandbox.resolve(path, error, true);
+    }
+    if (sandbox.profile() == SandboxProfile::ReadOnly) {
+        if (error) {
+            *error = u"The sandbox is read-only; memory notes cannot be written."_s;
+        }
+        return {};
+    }
+    if (sandbox.isDenied(path)) {
+        if (error) {
+            *error = u"Access to this memory path is blocked by a deny rule: %1"_s.arg(path);
+        }
+        return {};
+    }
+    return path;
+}
+
+bool readMemoryFile(const QString &path, const DocumentBridge *bridge, QString *contents)
+{
+    if (bridge) {
+        return bridge->readDocument(path, contents);
+    }
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        return false;
+    }
+    if (contents) {
+        *contents = QString::fromUtf8(file.readAll());
+    }
+    return true;
 }
 
 // --- edit canonicalisation --------------------------------------------------
@@ -976,35 +1030,20 @@ PermissionRequest ToolRunner::describe(const ToolCall &call) const
         req.risk = ToolRisk::Write;
         req.mutatesFiles = true;
         QString pathError;
-        const QString path = memoryNotePath(args, m_sandbox.workspaceRoot(), &pathError);
-        if (path.isEmpty()) {
+        const QString resolved = memoryWriteTarget(m_sandbox, args, &pathError);
+        if (resolved.isEmpty()) {
             req.summary = pathError;
             req.details = pathError;
             return req;
         }
-        QString resolved = path;
-        if (args.value(u"scope"_s).toString(u"project"_s) == u"project"_s) {
-            QString error;
-            resolved = m_sandbox.resolve(path, &error, true);
-            if (resolved.isEmpty()) {
-                req.summary = error;
-                req.details = error;
-                return req;
-            }
-        }
-        req.path = m_sandbox.workspaceRoot().isEmpty()
-            ? path
-            : QDir(m_sandbox.workspaceRoot()).relativeFilePath(path);
+        const bool projectScope =
+            args.value(u"scope"_s).toString(u"project"_s) == u"project"_s;
+        req.path = (projectScope && !m_sandbox.workspaceRoot().isEmpty())
+            ? QDir(m_sandbox.workspaceRoot()).relativeFilePath(resolved)
+            : resolved;
         req.resolvedPath = resolved;
         QString existing;
-        if (m_bridge) {
-            m_bridge->readDocument(resolved, &existing);
-        } else {
-            QFile file(resolved);
-            if (file.open(QIODevice::ReadOnly | QIODevice::Text)) {
-                existing = QString::fromUtf8(file.readAll());
-            }
-        }
+        readMemoryFile(resolved, m_bridge, &existing);
         const QString updated = memoryNoteBody(args);
         req.describeDiff = unifiedDiff(req.path, existing, updated);
         req.details = req.describeDiff;
@@ -3510,21 +3549,11 @@ ToolResult ToolRunner::memoryWrite(const QJsonObject &args)
     }
 
     QString error;
-    const QString path = memoryNotePath(args, m_sandbox.workspaceRoot(), &error);
-    if (path.isEmpty()) {
+    const QString resolved = memoryWriteTarget(m_sandbox, args, &error);
+    if (resolved.isEmpty()) {
         result.ok = false;
         result.output = error;
         return result;
-    }
-
-    QString resolved = path;
-    if (args.value(u"scope"_s).toString(u"project"_s) == u"project"_s) {
-        resolved = m_sandbox.resolve(path, &error, true);
-        if (resolved.isEmpty()) {
-            result.ok = false;
-            result.output = error;
-            return result;
-        }
     }
     if (!QDir().mkpath(QFileInfo(resolved).absolutePath())) {
         result.ok = false;
@@ -3532,20 +3561,35 @@ ToolResult ToolRunner::memoryWrite(const QJsonObject &args)
         return result;
     }
 
-    QFile file(resolved);
-    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
+    const bool existed = QFileInfo::exists(resolved);
+    QString existing;
+    if (existed) {
+        readMemoryFile(resolved, m_bridge, &existing);
+    }
+    const QString body = memoryNoteBody(args);
+    const QByteArray payload = body.toUtf8();
+    bool written = false;
+    if (m_bridge) {
+        written = existed
+            ? m_bridge->writeDocumentIfUnchanged(resolved, existing, body, &error)
+            : m_bridge->writeDocumentIfMissing(resolved, body, &error);
+    } else {
+        QSaveFile file(resolved);
+        if (file.open(QIODevice::WriteOnly | QIODevice::Text)) {
+            if (file.write(payload) == payload.size() && file.commit()) {
+                written = true;
+            } else {
+                error = file.errorString();
+            }
+        } else {
+            error = file.errorString();
+        }
+    }
+    if (!written) {
         result.ok = false;
-        result.output = u"Could not write the memory note: %1"_s.arg(file.errorString());
+        result.output = u"Could not write the memory note: %1"_s.arg(error);
         return result;
     }
-    const QByteArray payload = memoryNoteBody(args).toUtf8();
-    if (file.write(payload) != payload.size()) {
-        result.ok = false;
-        result.output = u"Could not write the memory note: %1"_s.arg(file.errorString());
-        file.close();
-        return result;
-    }
-    file.close();
 
     result.ok = true;
     result.output = u"Remembered '%1' in the %2 memory scope. The note is loaded on future turns."_s

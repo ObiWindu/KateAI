@@ -338,7 +338,8 @@ private:
     bool canStartModelRequest(QString *error) const;
         // The history as it should be sent: budgeted and compacted to fit the
         // model's context window.
-        QList<ChatMessage> m_messagesForRequest() const;
+        QList<ChatMessage> m_messagesForRequest(bool updateState = true) const;
+    PromptResult assemblePrompt() const;
         // Replace the stored transcript with the compacted request history
         // once compaction has made a material difference. Without this the
         // full session stayed in memory and was rewritten to SQLite on every
@@ -498,6 +499,8 @@ LlmClient m_client;
     CheckpointManager m_checkpoints;
     // taskId -> child loop, for every sub-agent running right now.
     QHash<QString, AgentLoop *> m_activeSubtasks;
+    // Human-readable work for each running task, used by context rehydration.
+    QHash<QString, QString> m_activeSubtaskDescriptions;
     // How many async tools (MCP or sub-agent) have been dispatched but have
     // not reported back yet. The queue is held open while this is non-zero.
     int m_inFlight = 0;
@@ -600,6 +603,7 @@ LlmClient m_client;
     mutable QString m_contextSummary;
     mutable QStringList m_touchedPaths;
     QString m_calibrationModel;
+    Provider m_calibrationProvider = Provider::OpenAICompatible;
     Tokens::Calibrator m_tokenCalibrator;
     int m_lastRequestEstimate = 0;
 

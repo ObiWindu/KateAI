@@ -28,7 +28,7 @@ QString oneLine(QString text, int limit){
     text.replace(QRegularExpression(QStringLiteral("[\\r\\n]+")), u" "_s);
     text = text.simplified();
     if (limit > 0 && text.size() > limit) {
-        text = text.left(limit) + u"…"_s;
+        text = truncateSafe(text, limit) + u"…"_s;
     }
     return text;
 }
@@ -41,8 +41,12 @@ QString toolNameOf(const ChatMessage &message)
 bool looksLikeFailure(const QString &text)
 {
     const QString lower = text.toLower();
+    // Native tool messages are formatted with a STATUS line, so the raw
+    // "error"/"failed" prefixes are not present in the conversation.
     return lower.startsWith(u"error"_s) || lower.startsWith(u"failed"_s)
         || lower.startsWith(u"tool rejected"_s) || lower.startsWith(u"tool denied"_s)
+        || lower.contains(u"status: failure"_s) || lower.contains(u"status: failed"_s)
+        || lower.contains(u"tool rejected"_s) || lower.contains(u"tool denied"_s)
         || lower.contains(u"timed out"_s) || lower.contains(u"exit code "_s)
         || lower.contains(u"permission denied"_s);
 }
@@ -62,7 +66,10 @@ QString messagePath(const ChatMessage &message)
                 arguments = parsed.object();
             }
         }
-        const QString path = arguments.value(u"path"_s).toString();
+        QString path = arguments.value(u"path"_s).toString();
+        if (path.isEmpty()) {
+            path = arguments.value(u"file_path"_s).toString();
+        }
         if (!path.isEmpty()) {
             return path;
         }
@@ -138,22 +145,58 @@ QString ContextEngine::summaryHeader()
            u"lives in the content store and can be paged with read_tool_result.]"_s;
 }
 
+namespace
+{
+
+// Both engines have historically produced summaries. A summary created by the
+// legacy ContextManager must still be recognised here, or the next contextV2
+// turn treats it as a user request and summarizes it again.
+QString summaryBody(QString text)
+{
+    if (text.startsWith(ContextEngine::summaryHeader())) {
+        return text.mid(ContextEngine::summaryHeader().size()).trimmed();
+    }
+    if (text.startsWith(ContextManager::summaryHeader())) {
+        return text.mid(ContextManager::summaryHeader().size()).trimmed();
+    }
+    return text.trimmed();
+}
+
+QString canonicalSummary(const QString &text)
+{
+    const QString body = summaryBody(text);
+    if (body.isEmpty()) {
+        return QString();
+    }
+    return ContextEngine::summaryHeader() + u"\n\n"_s + body;
+}
+
+} // namespace
+
 bool ContextEngine::isSummary(const ChatMessage &message)
 {
     return message.role == ChatMessage::Role::User
-        && (message.name == u"context_summary"_s || message.content.startsWith(summaryHeader()));
+        && (message.name == u"context_summary"_s
+            || message.content.startsWith(summaryHeader())
+            || message.content.startsWith(ContextManager::summaryHeader()));
 }
 
 ContextBudget ContextEngine::budgetFor(int window, int reserve, int keepRecentTokens)
 {
     ContextBudget budget;
     budget.window = window > 0 ? window : 32768;
-    budget.reserve = reserve > 0 ? reserve : 8192;
-    budget.usable = qMax(2048, budget.window - budget.reserve);
+    // A reserve larger than the window would make every request overflow.
+    // Keep half the window available for the prompt and cap the reserve.
+    const int requestedReserve = reserve > 0 ? reserve : 8192;
+    budget.reserve = qMax(512, qMin(requestedReserve, qMax(512, budget.window / 2)));
+    budget.usable = qMax(512, budget.window - budget.reserve);
     // Leave a full new turn of headroom, but never compact before 10% of the
     // window: a tiny model would otherwise compact on every step.
     budget.trigger = qMax(budget.window / 10, budget.usable - 13000);
-    budget.keepRecent = keepRecentTokens > 0 ? keepRecentTokens : qMax(4000, budget.usable / 3);
+    const int defaultKeep = qMax(1024, budget.usable / 3);
+    budget.keepRecent = keepRecentTokens > 0
+        ? qMin(keepRecentTokens, budget.usable)
+        : qMin(defaultKeep, budget.usable);
     return budget;
 }
 
@@ -227,8 +270,11 @@ QString ContextEngine::summarizeDropped(const QList<ChatMessage> &dropped, int r
                     storedResults.append(match.captured(1));
                 }
             }
-            if (text.startsWith(QLatin1String("Tool rejected"))
-                || text.startsWith(QLatin1String("Tool denied"))) {
+            const QString lower = text.toLower();
+            if (lower.startsWith(QLatin1String("tool rejected"))
+                || lower.startsWith(QLatin1String("tool denied"))
+                || lower.contains(QLatin1String("tool rejected"))
+                || lower.contains(QLatin1String("tool denied"))) {
                 ++rejected;
             }
             if (looksLikeFailure(text)) {
@@ -291,15 +337,15 @@ QString ContextEngine::summarizeDropped(const QList<ChatMessage> &dropped, int r
 
 QString ContextEngine::mergeSummary(const QString &previous, const QString &addition, int maxChars)
 {
-    QString body = previous;
-    if (body.startsWith(summaryHeader())) {
-        body = body.mid(summaryHeader().size()).trimmed();
-    }
+    QString body = summaryBody(previous);
     if (!addition.trimmed().isEmpty()) {
-        if (!body.trimmed().isEmpty()) {
-            body += u"\n\n"_s;
-        }
-        body += u"Update after further compaction:\n"_s + addition.trimmed();
+        // Put the update label at the head of the merged body so the
+        // head/tail truncation below cannot cut it out. The first summary is
+        // just the summary; only later merges are "updates".
+        body = body.trimmed().isEmpty()
+            ? addition.trimmed()
+            : u"Update after further compaction:\n"_s + body.trimmed()
+                + u"\n\n"_s + addition.trimmed();
     }
     if (body.size() > maxChars) {
         // Keep a head and a tail: the first request and the pinned decisions
@@ -309,7 +355,11 @@ QString ContextEngine::mergeSummary(const QString &previous, const QString &addi
         const int room = qMax(0, maxChars - marker.size());
         const int head = room * 2 / 5;
         const int tail = room - head;
-        body = body.left(head) + marker + body.right(tail);
+        QString tailText = body.right(tail);
+        if (!tailText.isEmpty() && tailText.at(0).isLowSurrogate()) {
+            tailText.remove(0, 1);
+        }
+        body = truncateSafe(body, head) + marker + tailText;
     }
     return summaryHeader() + u"\n\n"_s + body.trimmed();
 }
@@ -365,7 +415,7 @@ ContextResult ContextEngine::build(const QList<ChatMessage> &history, const Cont
     for (int i = 0; i < result.messages.size(); ++i) {
         if (isSummary(result.messages.at(i))) {
             if (previousSummary.isEmpty()) {
-                previousSummary = result.messages.at(i).content;
+                previousSummary = canonicalSummary(result.messages.at(i).content);
             }
             continue;
         }
@@ -376,14 +426,19 @@ ContextResult ContextEngine::build(const QList<ChatMessage> &history, const Cont
     // store. This also covers output that was appended before the capture path
     // learned to budget it.
     for (ChatMessage &message : working) {
-        if (message.role != ChatMessage::Role::Tool
-            || message.content.size() <= ToolResultPreviewChars) {
+        if (!options.allowContentStore || message.role != ChatMessage::Role::Tool) {
+            continue;
+        }
+        const int toolBudget = qMax(1024, options.toolResultBudgets.value(
+            message.name, ToolResultPreviewChars));
+        if (message.content.size() <= toolBudget) {
             continue;
         }
         if (message.content.contains(u"tool_result id="_s)) {
             continue;
         }
-        const StoredToolResult stored = ToolResults::store(message.content);
+        const StoredToolResult stored = ToolResults::store(
+            message.content, qMax(1000, toolBudget * 2 / 3), qMax(500, toolBudget / 3));
         if (!stored.id.isEmpty()) {
             message.content = stored.preview;
             addShaper(u"tool-result-budget"_s);
@@ -500,6 +555,18 @@ ContextResult ContextEngine::build(const QList<ChatMessage> &history, const Cont
         legacy.projectGraph = options.projectGraph;
         legacy.summarizeEverything = options.summarizeEverything;
         kept = ContextManager::build(kept, legacy);
+        // The legacy builder may have produced the summary that actually
+        // survived. Fold it into the result so the next turn can merge it
+        // incrementally instead of dropping it or re-summarizing it.
+        for (const ChatMessage &message : std::as_const(kept)) {
+            if (isSummary(message)) {
+                const QString normalized = canonicalSummary(message.content);
+                if (!normalized.isEmpty()) {
+                    summary = normalized;
+                }
+                break;
+            }
+        }
         addShaper(u"full-compaction"_s);
         result.notes.append(u"fell back to full compaction for the preserved tail"_s);
         current = tokensOf(kept, options.tokenFactor);
@@ -543,18 +610,46 @@ ContextResult ContextEngine::build(const QList<ChatMessage> &history, const Cont
     }
     if (!rehydrate.isEmpty()) {
         QString body = u"<rehydration>\n"_s + rehydrate.join(u"\n"_s) + u"\n</rehydration>"_s;
+        bool rehydrateBodyWasTooLarge = false;
         if (body.size() > 50000) {
-            body = body.left(50000)
-                + u"\n[… rehydration truncated by the harness budget …]"_s;
+            body = truncateSafe(body, 50000);
+            rehydrateBodyWasTooLarge = true;
         }
-        ChatMessage message;
-        message.role = ChatMessage::Role::User;
-        message.name = u"context_rehydration"_s;
-        message.transient = true;
-        message.content = body;
-        const int at = (!kept.isEmpty() && kept.first().role == ChatMessage::Role::System) ? 1 : 0;
-        kept.insert(at, message);
-        addShaper(u"rehydration"_s);
+        // Rehydration is inserted after compaction, so it must fit the room
+        // that remains. Otherwise a large plan/task list can push a request
+        // that had just been compacted straight back over the window.
+        const int remaining = qMax(0, budget.usable - current);
+        bool bodyTruncated = false;
+        if (remaining <= 0) {
+            body.clear();
+        } else {
+            body = Tokens::truncateToTokenBudget(body, remaining, &bodyTruncated);
+        }
+        if (!body.trimmed().isEmpty()) {
+            if (bodyTruncated || rehydrateBodyWasTooLarge) {
+                const QString marker =
+                    u"\n[… rehydration truncated by the harness budget …]"_s;
+                const int markerTokens = Tokens::estimate(marker);
+                body = Tokens::truncateToTokenBudget(
+                    body, qMax(0, remaining - markerTokens));
+                if (!body.trimmed().isEmpty()) {
+                    body += marker;
+                }
+            }
+            if (body.trimmed().isEmpty()) {
+                body.clear();
+            }
+        }
+        if (!body.trimmed().isEmpty()) {
+            ChatMessage message;
+            message.role = ChatMessage::Role::User;
+            message.name = u"context_rehydration"_s;
+            message.transient = true;
+            message.content = body;
+            const int at = (!kept.isEmpty() && kept.first().role == ChatMessage::Role::System) ? 1 : 0;
+            kept.insert(at, message);
+            addShaper(u"rehydration"_s);
+        }
     }
 
     result.messages = kept;

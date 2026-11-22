@@ -23,6 +23,35 @@ private Q_SLOTS:
         QVERIFY(!chunk.finished);
     }
 
+    void usageOnFinalChoiceIsParsed()
+    {
+        // Some gateways attach usage to the final choice instead of sending a
+        // separate usage-only chunk.
+        QHash<int, ToolCall> acc;
+        const CompletionChunk chunk = LlmClient::parseSseLine(
+            QByteArray("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],"
+                       "\"usage\":{\"prompt_tokens\":120,\"completion_tokens\":8,"
+                       "\"prompt_tokens_details\":{\"cached_tokens\":40}}}"),
+            &acc);
+        QCOMPARE(chunk.inputTokens, 120);
+        QCOMPARE(chunk.outputTokens, 8);
+        QCOMPARE(chunk.cachedInputTokens, 40);
+        QCOMPARE(chunk.finishReason, u"stop"_s);
+    }
+
+    void anthropicUsageCarriesCacheHits()
+    {
+        QHash<int, ToolCall> acc;
+        const CompletionChunk chunk = LlmClient::parseSseLine(
+            QByteArray("data: {\"type\":\"message_start\",\"message\":{\"usage\":"
+                       "{\"input_tokens\":90,\"output_tokens\":1,"
+                       "\"cache_read_input_tokens\":1000}}}"),
+            &acc);
+        QCOMPARE(chunk.inputTokens, 90);
+        QCOMPARE(chunk.outputTokens, 1);
+        QCOMPARE(chunk.cachedInputTokens, 1000);
+    }
+
     void nullErrorFieldIsNotAnError()
     {
         // Some providers include {"error":null} on a successful chunk.

@@ -36,6 +36,8 @@ struct MemoryFile {
     bool alwaysApply = true;
     QString description;
     bool truncated = false;
+    // True for rules/<mode>.md files that belong to the active mode.
+    bool modeSpecific = false;
 };
 
 /**
@@ -54,12 +56,17 @@ public:
         int maxFileBytes = 32 * 1024;
         int maxTotalBytes = 128 * 1024;
         int maxFiles = 32;
+        // Rules directories may contain <mode>.md files. The loader includes
+        // the active one and skips files that name another known mode.
+        QString modeId;
+        QStringList knownModeIds;
     };
 
     explicit MemoryLoader(const QString &workspace = QString());
     MemoryLoader(const QString &workspace, const Config &config);
 
     void setWorkspace(const QString &workspace);
+    void setModeContext(const QString &modeId, const QStringList &knownModeIds);
     QString workspace() const
     {
         return m_workspace;
@@ -104,7 +111,8 @@ public:
 private:
     void discoverRoots();
     void loadNestedFor(const QString &relativePath);
-    bool addFile(const QString &path, MemoryScope scope, const QString &displayPath);
+    bool addFile(const QString &path, MemoryScope scope, const QString &displayPath,
+                 bool modeSpecific = false);
     bool alreadyLoaded(const QString &canonicalPath, const QString &hash) const;
 
     QString m_workspace;
@@ -114,6 +122,8 @@ private:
     QStringList m_loadedPaths;
     QSet<QString> m_loadedHashes;
     QSet<QString> m_nestedDirs;
+    QSet<QString> m_modeSpecificPaths;
+    QSet<QString> m_managedPaths;
     bool m_rootsDiscovered = false;
 };
 

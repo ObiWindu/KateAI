@@ -86,6 +86,42 @@ private Q_SLOTS:
         QVERIFY(result.manifest.value(u"truncated"_s).toBool());
     }
 
+    void nonAsciiContentStaysWithinTheTokenBudget()
+    {
+        PromptRequest request = makeRequest();
+        request.settings.contextWindow = 4096;
+        // CJK characters cost roughly three bytes each, so the old
+        // four-characters-per-token truncation kept about three times the
+        // requested budget.
+        request.rules = QString(4000, QChar(0x4E2D));
+        const PromptResult result = PromptAssembler::assemble(request);
+        QVERIFY(result.truncated);
+        QVERIFY2(result.totalTokens <= result.budgetTokens + 100,
+                 qPrintable(QStringLiteral("total %1 budget %2")
+                                .arg(result.totalTokens)
+                                .arg(result.budgetTokens)));
+    }
+
+    void toolSchemasAreReservedFromTheBudget()
+    {
+        PromptRequest request = makeRequest();
+        request.settings.contextWindow = 4096;
+        request.toolSchemaTokens = 3000;
+        const PromptResult result = PromptAssembler::assemble(request);
+        QVERIFY2(result.totalTokens <= result.budgetTokens + 100,
+                 qPrintable(QStringLiteral("total %1 budget %2")
+                                .arg(result.totalTokens)
+                                .arg(result.budgetTokens)));
+    }
+
+    void tinyWindowBudgetNeverExceedsTheWindow()
+    {
+        PromptRequest request = makeRequest();
+        request.settings.contextWindow = 2048;
+        const PromptResult result = PromptAssembler::assemble(request);
+        QVERIFY(result.budgetTokens <= 2048);
+    }
+
     void profileChangesGuidanceOnly()
     {
         PromptRequest openai = makeRequest();

@@ -51,13 +51,17 @@ project rules, memory, skills catalog, project graph, plan.
 `ModelProfile`: context window, max output, prices, cache style, prompt
 variant, edit dialect, schema dialect, parallel-call and reasoning support.
 The catalogue is family-based (`anthropic`, `openai`, `deepseek`, `gemini`,
-`grok`, `qwen`, `glm`, `kimi`, `mistral`, `local`) so a new point release of a
-known family inherits sane values. Unknown models get the conservative 32k
-window, exact editing, and no cache assumptions.
+`grok`, `qwen`, `glm`, `kimi`, `mistral`, `cohere`, `local`) so a new point
+release of a known family inherits sane values. Unknown models get the
+conservative 32k window, exact editing, and no cache assumptions. Profiles are
+resolved by stable id rather than catalogue position.
 
-The context manager's window table now delegates to this registry. Anthropic
-requests put a `cache_control` breakpoint after the static system prompt and
-the last tool schema; `max_tokens` is capped by the profile.
+The context manager's window table delegates to this registry, including the
+provider-aware overload. Anthropic requests put a `cache_control` breakpoint
+after the static system prompt and the last tool schema; `max_tokens` is capped
+by the profile. OpenAI-compatible providers that support streaming usage are
+asked for it, and Anthropic cache reads are included when calibrating the local
+token estimate.
 
 ## Context engine
 
@@ -77,9 +81,12 @@ first shaper that fits:
 5. **Full compaction** — the legacy `ContextManager::build` is the last
    resort.
 
-Rehydration then adds a transient user message with root instructions, the
-current plan, up to five touched files, running sub-agent tasks, and invoked
-skills, under explicit caps. Nothing in rehydration is persisted.
+Rehydration then adds a transient user message with the current plan, up to
+five touched files, running sub-agent task descriptions, and optional root
+instructions or invoked skills when the caller supplies them. Root instructions
+normally remain in the system prompt; rehydration never duplicates them
+implicitly. The message is capped to the room left in the context budget, not
+just to a fixed character count, and nothing in it is persisted.
 
 Provider-reported usage calibrates the local estimate through a per-model
 factor clamped to 0.5–2.0. `:kateai usage` shows the factor and sample count.
@@ -96,7 +103,8 @@ The content store prunes oldest-first at a 200 MiB cap.
 2. user: `$XDG_CONFIG_HOME/kateai/AGENTS.md`, `~/.config/kateai/memory/`,
    `~/.claude/CLAUDE.md`;
 3. project root: `AGENTS.override.md`, `AGENTS.md`, `CLAUDE.md`, `KATEAI.md`,
-   `.kateai/rules`, `.claude/rules`, `.agents/rules`, `.kateai/memory`;
+   `.clinerules`, `.kilocoderules`, `.kateai/rules`, `.claude/rules`,
+   `.agents/rules`, `.kateai/memory`;
 4. nested: the nearest ancestor directories of a path a tool touched;
 5. local: `*.local.md` files.
 
@@ -104,15 +112,22 @@ Frontmatter supports `paths`, `priority`, `alwaysApply`, and `description`.
 A file with `paths:` is lazy and loads only when a touched path matches; a
 nested `AGENTS.md` without `paths:` applies to its subtree. Files are
 deduplicated by canonical path and content hash, so a `CLAUDE.md` symlink or
-copy of `AGENTS.md` loads once.
+copy of `AGENTS.md` loads once. Rule files named after a mode are restricted to
+that mode; the active mode wins over the generic rules in the same scope.
+`.kateai`, `.claude`, and `.agents` files directly under the workspace are
+project-scoped, not nested.
 
 Budgets are 32 KiB per file, 128 KiB total, and 32 files. Truncation is
-visible in the rendered provenance.
+measured in UTF-8 bytes and is visible in the rendered provenance. Globstar
+patterns (`**/`) match zero or more directories, so `**/*.cpp` includes a
+root-level file.
 
 `memory_write` writes only to `.kateai/memory/<topic>.md` or the user memory
 directory. The topic is validated as a slug, so the model cannot traverse to
-`AGENTS.md` or an arbitrary path. The normal Write permission card shows the
-diff and the user must approve it.
+`AGENTS.md` or an arbitrary path. Project writes use the sandbox's workspace
+confinement; user writes still obey read-only and deny rules. The write goes
+through the document bridge when one is available, and the normal Write
+permission card shows the diff and asks for approval.
 
 ## Tool registry
 

@@ -150,7 +150,12 @@ int estimateTokens(const QList<ChatMessage> &messages)
 // agree. A model Kate does not recognise keeps the conservative 32k fallback.
 int contextWindowFor(const QString &model)
 {
-    return ModelProfiles::contextWindow(Provider::OpenAICompatible, model);
+    return contextWindowFor(Provider::OpenAICompatible, model);
+}
+
+int contextWindowFor(Provider provider, const QString &model)
+{
+    return ModelProfiles::contextWindow(provider, model);
 }
 
 QString summaryHeader()
@@ -164,7 +169,9 @@ namespace
 
 bool isSummary(const ChatMessage &message)
 {
-    return message.role == ChatMessage::Role::User && message.content.startsWith(summaryHeader());
+    return message.role == ChatMessage::Role::User
+        && (message.name == u"context_summary"_s
+            || message.content.startsWith(summaryHeader()));
 }
 
 QString buildSummary(const QList<ChatMessage> &dropped, int requestChars, ProjectGraph *projectGraph = nullptr)
@@ -511,6 +518,7 @@ QList<ChatMessage> build(const QList<ChatMessage> &history, const Options &optio
     if (keepFrom > bodyStart) {
         ChatMessage summary;
         summary.role = ChatMessage::Role::User;
+        summary.name = u"context_summary"_s;
         summary.content = buildSummary(history.mid(bodyStart, keepFrom - bodyStart), requestChars,
                                        options.useProjectGraph ? options.projectGraph : nullptr);
         result.append(summary);
