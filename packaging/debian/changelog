@@ -5,7 +5,7 @@ kateai (0.7.0-1) unstable; urgency=medium
     policy engine with an immutable hardline floor and audit trail, hooks v1
     for session/prompt/tool/stop lifecycle events, and turn middleware.
 
- -- ObiWindu <Obi.wandu@proton.me>  Sat, 21 Nov 2026 00:00:00 +0000
+ -- ObiWindu <Obi.wandu@proton.me>  Sun, 22 Nov 2026 00:00:00 +0000
 
 kateai (0.6.0-1) unstable; urgency=medium
 

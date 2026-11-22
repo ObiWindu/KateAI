@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.7.0 — 2026-11-21
+## 0.7.0 — 2026-11-22
 
 - **Session event log.** Conversations are now recorded as an append-only
   `session_event` log in the existing SQLite database, with a rebuildable
@@ -30,7 +30,7 @@
   `verificationGate`, `policyV2`, `hooks`) and can be disabled with
   `KATEAI_HARNESS_FLAGS` or `[Harness]`.
 
-## Unreleased — 0.6.1
+## 0.6.1 — 2026-11-22
 
 - **Context visibility.** `:kateai context` reports the model window, the
   request estimate, the system/ambient/tool-schema/conversation breakdown,
