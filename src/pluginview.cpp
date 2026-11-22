@@ -468,7 +468,8 @@ QString gitBranchForWorkspace(const QString &workspace)
         }
 
         auto *ac = actionCollection();
-        QPointer<QAction> toggle, fresh, ask, fix, refactor, tests, configure, stop, completeAction;
+        QPointer<QAction> toggle, fresh, ask, fix, refactor, tests, configure, stop, completeAction,
+            voicePromptAct, voiceCancelAct;
         QPointer<QAction> diagnoseStopAct, explainStackAct, fixDiagAct, fixBuildAct, launchJsonAct,
             snapshotDebugAct, reviewDiffTabAct, projectGraphTabAct, commitMsgAct, blameAct,
             backtraceAct, termSelAct;
@@ -487,6 +488,23 @@ QString gitBranchForWorkspace(const QString &workspace)
                 fresh->setText(i18n("Kate AI: New Chat"));
                 KActionCollection::setDefaultShortcut(fresh, QKeySequence(Qt::CTRL | Qt::ALT | Qt::Key_N));
                 connect(fresh, &QAction::triggered, this, &KateAiView::newChat);
+            }
+
+            voicePromptAct = ac->addAction(u"kateai_voice_prompt"_s);
+            if (voicePromptAct) {
+                voicePromptAct->setText(i18n("Kate AI: Voice Prompt (Start / Stop)"));
+                voicePromptAct->setIcon(QIcon::fromTheme(u"audio-input-microphone"_s));
+                KActionCollection::setDefaultShortcut(voicePromptAct, QKeySequence(Qt::CTRL | Qt::ALT | Qt::Key_V));
+                connect(voicePromptAct, &QAction::triggered, this, &KateAiView::toggleVoicePrompt);
+            }
+
+            voiceCancelAct = ac->addAction(u"kateai_voice_cancel"_s);
+            if (voiceCancelAct) {
+                voiceCancelAct->setText(i18n("Kate AI: Cancel Voice Prompt"));
+                voiceCancelAct->setIcon(QIcon::fromTheme(u"dialog-cancel"_s));
+                KActionCollection::setDefaultShortcut(
+                    voiceCancelAct, QKeySequence(Qt::CTRL | Qt::ALT | Qt::SHIFT | Qt::Key_V));
+                connect(voiceCancelAct, &QAction::triggered, this, &KateAiView::cancelVoicePrompt);
             }
 
             ask = ac->addAction(u"kateai_ask_selection"_s);
@@ -820,6 +838,21 @@ QString gitBranchForWorkspace(const QString &workspace)
         showPanel();
         if (m_chat) {
             m_chat->newChat();
+        }
+    }
+
+    void KateAiView::toggleVoicePrompt()
+    {
+        showPanel();
+        if (m_chat) {
+            m_chat->toggleVoicePrompt();
+        }
+    }
+
+    void KateAiView::cancelVoicePrompt()
+    {
+        if (m_chat) {
+            m_chat->cancelVoicePrompt();
         }
     }
 

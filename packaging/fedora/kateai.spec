@@ -1,5 +1,5 @@
 Name:           kateai
-Version:        0.6.0
+Version:        0.7.0
 Release:        1%{?dist}
 Summary:        AI coding agent plugin for the Kate text editor
 
@@ -54,6 +54,12 @@ asks before destructive actions. Works on Fedora and Fedora Asahi Remix.
 %{_libdir}/kateai/libpage4k.so
 
 %changelog
+* Sat Nov 21 2026 ObiWindu <Obi.wandu@proton.me> - 0.7.0-1
+- Release 0.7.0: append-only session event log with replay and JSONL export,
+  deterministic verification gate for mutating turns, deny-first policy engine
+  with an immutable hardline floor and audit trail, hooks v1 for
+  session/prompt/tool/stop lifecycle events, and turn middleware.
+
 * Sat Nov 21 2026 ObiWindu <Obi.wandu@proton.me> - 0.6.0-1
 - Release 0.6.0: live Kate debugger bridge and twelve debugger tools, build
   and terminal tools, structured LSP diagnostics from Kate's diagnostics

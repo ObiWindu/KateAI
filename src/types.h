@@ -303,6 +303,11 @@ struct Settings {
     // ACP agent models broadcasted as available by running agents.
     // Stores a JSON object mapping agent IDs to arrays of model names.
     QString acpAgentModels;
+    // Slash commands last advertised by each ACP agent. A JSON object mapping
+    // agent IDs to the advertised command arrays. Commands only arrive with a
+    // live session, so the cache lets a freshly opened window show the list
+    // before the agent process has started again.
+    QString acpAgentCommands;
     ApiFormat apiFormat = ApiFormat::AcpNative;
     PermissionMode permissionMode = PermissionMode::Ask;
     SandboxProfile sandbox = SandboxProfile::Workspace;
@@ -475,6 +480,28 @@ struct Settings {
     // JSON object mapping ChatTheme colour keys (panelBg, accent, ...) to hex
     // values, applied on top of the selected source. Empty means no overrides.
     QString themeOverrides;
+
+    // --- Voice prompting -----------------------------------------------------
+    // Backend id: "auto" (OpenAI key -> custom endpoint -> local Whisper CLI),
+    // "openai", "openai_compatible", or "local_cli".
+    QString voiceProvider = QStringLiteral("auto");
+    // Optional API key dedicated to speech-to-text (stored in CredentialStore).
+    // Empty falls back to the provider's chat API key when applicable.
+    QString voiceApiKey;
+    // Custom Whisper-compatible base URL or full /audio/transcriptions URL.
+    QString voiceEndpoint;
+    // Transcription model sent to HTTP speech-to-text endpoints.
+    QString voiceModel = QStringLiteral("whisper-1");
+    // Optional ISO-639-1 language hint (e.g. "en", "fr"); empty = auto-detect.
+    QString voiceLanguage;
+    // Local CLI transcription command template (use {file} for the WAV path).
+    QString voiceLocalCommand;
+    // Optional microphone device name override; empty = system default mic.
+    QString voiceInputDevice;
+    // Run noise removal before transcription.
+    bool voiceNoiseRemoval = true;
+    // Automatically submit transcribed text to chat when idle.
+    bool voiceAutoSend = true;
 };
 
 QString providerId(Provider provider);

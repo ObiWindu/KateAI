@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.7.0 — 2026-11-21
+
+- **Session event log.** Conversations are now recorded as an append-only
+  `session_event` log in the existing SQLite database, with a rebuildable
+  message projection, redaction before write, one-time legacy backfill, and
+  JSONL export via `:kateai trace`. See `docs/HARNESS_0.7.md`.
+- **Verification gate.** A mutating turn cannot finish while the discovered
+  check plan fails: failures are fed back with a retry cap, passes become the
+  cited evidence, and `:kateai verify` runs the plan on demand.
+- **Policy engine.** Managed/project/user rules are deny-first with
+  symlink-aware path matching and an immutable hardline floor that survives
+  always-approve. Decisions are audited in the event log and
+  `~/.local/share/kateai/audit.jsonl`. See `docs/POLICY.md`.
+- **Hooks v1.** Trusted user/managed hooks and approved project hooks run at
+  session, prompt, tool and stop events with timeouts, exit-code-2 blocking,
+  `updatedInput` and `onFailure`. See `docs/HOOKS.md`.
+- **Middleware.** Explicit turn phases plus a composable middleware chain;
+  verification is the first built-in.
+- **Commands.** `:kateai verify`, `policy`, `hooks`, `trust-hooks` and `trace`
+  join `context` and `usage`.
+- **Slash commands in the composer.** The old ACP **cmds** button is gone.
+  With an ACP agent selected the placeholder mentions `/` from startup, and
+  typing `/` as the first character opens a filtered list above the cursor
+  with each command's description. The list is cached per agent, so reopening
+  Kate shows it before a new session starts; with no cached list, `/` explains
+  that the agent advertises its commands when a session starts.
+- All six harness flags default on (`eventLog`, `middleware`,
+  `verificationGate`, `policyV2`, `hooks`) and can be disabled with
+  `KATEAI_HARNESS_FLAGS` or `[Harness]`.
+
 ## Unreleased — 0.6.1
 
 - **Context visibility.** `:kateai context` reports the model window, the

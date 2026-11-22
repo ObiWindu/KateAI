@@ -29,12 +29,13 @@ struct HarnessFlags {
     bool resultBudget = true;         // large tool results go to the content store
     bool contextReport = true;        // :kateai context / :kateai usage
 
-    // Substrate. Off until the implementation lands.
-    bool eventLog = false;
-    bool middleware = false;
-    bool verificationGate = false;
-    bool policyV2 = false;
-    bool hooks = false;
+    // Substrate: on by default in 0.7. Each one degrades to the legacy path
+    // when its configuration is absent or its flag is turned off.
+    bool eventLog = true;
+    bool middleware = true;
+    bool verificationGate = true;
+    bool policyV2 = true;
+    bool hooks = true;
 
     // Later releases.
     bool promptV2 = false;

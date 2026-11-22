@@ -19,6 +19,10 @@ class SessionStore
 public:
     static constexpr int CURRENT_VERSION = 3;
 
+    // The SQLite file backing the store. Exposed so the harness event log can
+    // live in the same database without duplicating the path policy.
+    static QString databasePath();
+
     struct SessionData {
         int version = CURRENT_VERSION;
         QList<ChatMessage> messages;

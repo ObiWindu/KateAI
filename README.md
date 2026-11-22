@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.6.0-orange" alt="Kate AI 0.6.0">
+  <img src="https://img.shields.io/badge/version-0.7.0-orange" alt="Kate AI 0.7.0">
   <img src="https://img.shields.io/badge/Kate-24.08%2B-1d99f3?logo=kde" alt="Kate 24.08+">
   <img src="https://img.shields.io/badge/Qt-6.5%2B-41cd52?logo=qt" alt="Qt 6.5+">
   <img src="https://img.shields.io/badge/KF-6-blue" alt="KDE Frameworks 6">
@@ -361,6 +361,35 @@ Common credential stores (`~/.ssh`, `~/.gnupg`, `~/.aws`, cloud CLI configs, key
 
 **Always blocked paths:** `.env`, `.env.*`, `*.pem`, `*.key`, `id_rsa` / `id_ecdsa` / `id_ed25519`, `.ssh/**`, AWS credentials, GnuPG, `.netrc`, `*.p12`, `*.pfx`. Extra deny globs can be added in settings.
 
+### Harness: events, verification, policy, hooks
+
+0.7 makes the turn replayable and makes "done" mean "the check passed".
+
+- **Event log.** Every turn, step, request, tool call/result, permission
+  decision and verification is appended to an event table in the session
+  database. The transcript is a projection. `:kateai trace` exports the
+  redacted log as JSONL.
+- **Verification.** After a file mutation Kate AI discovers checks from
+  `.kateai/config.json`, `## Commands` in `AGENTS.md`/`KATEAI.md`/`CLAUDE.md`,
+  or the build system (CTest, Cargo, npm/pnpm/yarn, pytest, Make). A failing
+  check sends the output back to the model and blocks completion; passing
+  checks become the evidence the final answer must cite. `:kateai verify` runs
+  the plan now.
+- **Policy.** `.kateai/policy.json`, the user policy and the managed policy
+  add deny-first rules for tools, paths, commands, risk and MCP tools. The
+  hardline floor (`.env`, private keys, `rm -rf /`, force-pushes to protected
+  refs) applies even in **Always approve**. `:kateai policy` shows the rules.
+- **Hooks.** `PreToolUse`, `PostToolUse`, `Stop` and session/prompt hooks can
+  block, rewrite arguments or add context. Project hooks require
+  `:kateai trust-hooks`; `:kateai hooks` shows the state. See
+  `docs/HOOKS.md` and `docs/POLICY.md`.
+
+All harness features default on. For a bisect or a minimal setup:
+
+```sh
+KATEAI_HARNESS_FLAGS=-verificationGate,-hooks,+eventLog kate
+```
+
 ### Providers and models
 
 | Provider | Default endpoint | Default model |
@@ -398,6 +427,14 @@ Native ACP works with any stdio agent. Pick a preset (command/args are filled in
 | Custom | (yours) | (yours) |
 
 Kate is the ACP client: `session/prompt`, `session/update`, `session/request_permission`, `fs/read_text_file`, `fs/write_text_file`, `terminal/*`. Always-approve is handled in Kate for every agent. Grok Build also receives `--model` / `--always-approve` and Grok `_meta` (`yoloMode`).
+
+When an ACP agent is selected, the composer hint mentions `/` from startup,
+even before the live session advertises its command list. Type `/` as the first
+character to open a filtered list above the cursor; each command's description
+is shown, and Enter or Tab inserts the selected command. The list is remembered
+per agent, so reopening Kate shows the commands the agent advertised last time
+without waiting for a turn; before the first session, `/` explains that the
+agent advertises its commands when a session starts.
 
 ### ACP tool integration
 

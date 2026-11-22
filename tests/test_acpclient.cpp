@@ -1649,7 +1649,7 @@ private Q_SLOTS:
     }
 
     // Binary registry agents record a command relative to the unpacked archive
-    // ("./agy_acp_server.par"). Kate installs them under its own data directory,
+    // ("./example_acp_server.bin"). Kate installs them under its own data directory,
     // so the launcher must resolve that path instead of using the process cwd.
     void binaryRegistryAgentResolvesFromInstallDir()
     {
@@ -1658,9 +1658,9 @@ private Q_SLOTS:
         const QByteArray previous = qgetenv("KATEAI_ACP_AGENTS_DIR");
         qputenv("KATEAI_ACP_AGENTS_DIR", temp.path().toUtf8());
 
-        const QString installDir = acpBinaryInstallDir(u"antigravity-acp"_s);
+        const QString installDir = acpBinaryInstallDir(u"example-binary-acp"_s);
         QVERIFY(QDir().mkpath(installDir));
-        const QString executable = installDir + u"/agy_acp_server.par"_s;
+        const QString executable = installDir + u"/example_acp_server.bin"_s;
         {
             QFile file(executable);
             QVERIFY(file.open(QIODevice::WriteOnly));
@@ -1670,8 +1670,8 @@ private Q_SLOTS:
                                                        | QFileDevice::ExeOwner));
 
         Settings settings;
-        settings.acpAgentId = u"antigravity-acp"_s;
-        settings.acpCommand = u"./agy_acp_server.par"_s;
+        settings.acpAgentId = u"example-binary-acp"_s;
+        settings.acpCommand = u"./example_acp_server.bin"_s;
         settings.acpArgs = u"--uid="_s;
         QJsonObject installed;
         installed.insert(u"id"_s, settings.acpAgentId);
@@ -2440,26 +2440,132 @@ private Q_SLOTS:
         QCOMPARE(acpAgentIdMatching(u"agy"_s, QString()), u"antigravity-acp"_s);
         QCOMPARE(acpAgentIdMatching(u"agy"_s, u"acp"_s), u"antigravity-acp"_s);
 
-        // Modern `agy` CLI gets `acp` subcommand and strips legacy gflags.
+        // Modern `agy` CLI gets `acp` subcommand and strips legacy gflags and --uid.
         Settings agySettings;
         agySettings.acpAgentId = u"antigravity-acp"_s;
         agySettings.acpCommand = u"agy"_s;
-        agySettings.acpArgs = u"--enforce_kernel_ipv6_support=false --core_sanitization_enabled=false --hugepage_text=false"_s;
+        agySettings.acpArgs = u"--uid= --enforce_kernel_ipv6_support=false --core_sanitization_enabled=false --hugepage_text=false"_s;
         QVERIFY(acpAgentIsAntigravity(agySettings));
         QVERIFY(!acpAgentIsLegacyAntigravityServer(agySettings));
         QCOMPARE(AcpClient::agentArguments(agySettings), (QStringList{u"acp"_s}));
 
-        // Legacy standalone `agy_acp_server.par` still receives its gflags.
+        agySettings.acpArgs = u"--uid 1000 --uid=42 --sandbox"_s;
+        QCOMPARE(AcpClient::agentArguments(agySettings), (QStringList{u"--sandbox"_s, u"acp"_s}));
+
+        // Legacy standalone `agy_acp_server.par` prefers native `agy` when
+        // installed (dropping `--uid=` and legacy gflags) and falls back to
+        // `agy_acp_server.par` with its gflags when `agy` is absent.
+        QTemporaryDir tempHome;
+        QTemporaryDir fakeBin;
+        QTemporaryDir agentsDir;
+        QVERIFY(tempHome.isValid());
+        QVERIFY(fakeBin.isValid());
+        QVERIFY(agentsDir.isValid());
+
+        const QByteArray prevPath = qgetenv("PATH");
+        const QByteArray prevHome = qgetenv("HOME");
+        const QByteArray prevAgents = qgetenv("KATEAI_ACP_AGENTS_DIR");
+        qputenv("HOME", tempHome.path().toUtf8());
+        qputenv("KATEAI_ACP_AGENTS_DIR", agentsDir.path().toUtf8());
+
+        const QString legacyDir = acpBinaryInstallDir(u"antigravity-acp"_s);
+        QVERIFY(QDir().mkpath(legacyDir));
+        const QString legacyExe = legacyDir + u"/agy_acp_server.par"_s;
+        {
+            QFile file(legacyExe);
+            QVERIFY(file.open(QIODevice::WriteOnly));
+            file.write("#!/bin/sh\n");
+        }
+        QVERIFY(QFile::setPermissions(legacyExe, QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner));
+
         Settings legacy;
         legacy.acpAgentId = u"antigravity-acp"_s;
-        legacy.acpCommand = u"./agy_acp_server.par"_s;
-        legacy.acpArgs.clear();
+        legacy.acpCommand = legacyExe;
+        legacy.acpArgs = u"--uid="_s;
         QVERIFY(acpAgentIsAntigravity(legacy));
         QVERIFY(acpAgentIsLegacyAntigravityServer(legacy));
+
+        // Case A: no native `agy` on PATH or in HOME -> stays on legacy server.
+        qputenv("PATH", fakeBin.path().toUtf8());
+        QCOMPARE(AcpClient::resolvedCommand(legacy), legacyExe);
         const QStringList legacyArgs = AcpClient::agentArguments(legacy);
         QVERIFY(legacyArgs.contains(u"--enforce_kernel_ipv6_support=false"_s));
         QVERIFY(legacyArgs.contains(u"--hugepage_text=false"_s));
         QVERIFY(!legacyArgs.contains(u"acp"_s));
+
+        // Case B: native `agy` installed -> upgrades automatically to `agy acp`
+        // and strips `--uid=` and legacy gflags.
+        const QString fakeAgy = fakeBin.path() + u"/agy"_s;
+        {
+            QFile file(fakeAgy);
+            QVERIFY(file.open(QIODevice::WriteOnly));
+            file.write("#!/bin/sh\n");
+        }
+        QVERIFY(QFile::setPermissions(fakeAgy, QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner));
+        QCOMPARE(AcpClient::resolvedCommand(legacy), fakeAgy);
+        QCOMPARE(AcpClient::agentArguments(legacy), (QStringList{u"acp"_s}));
+
+        if (prevPath.isNull()) qunsetenv("PATH"); else qputenv("PATH", prevPath);
+        if (prevHome.isNull()) qunsetenv("HOME"); else qputenv("HOME", prevHome);
+        if (prevAgents.isNull()) qunsetenv("KATEAI_ACP_AGENTS_DIR"); else qputenv("KATEAI_ACP_AGENTS_DIR", prevAgents);
+    }
+
+    void agyResumeSuggestsLoadFallback()
+    {
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+
+        AcpClient client;
+        client.setSettings(mockSettings(u"agy-resume-suggests-load"_s));
+        client.setWorkspace(workspace.path());
+        client.setResumeSessionId(u"34d283dd-5f8f-465e-8d16-35d6fa84e6db"_s);
+
+        bool isReady = false;
+        QString error;
+        connect(&client, &AcpClient::ready, this, [&]() { isReady = true; });
+        connect(&client, &AcpClient::failed, this, [&](const QString &msg) { error = msg; });
+
+        client.start();
+        QVERIFY2(waitFor([&] {
+            return isReady || !error.isEmpty();
+        }), qPrintable(error.isEmpty() ? u"timed out waiting for session/load fallback"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(client.sessionId(), u"34d283dd-5f8f-465e-8d16-35d6fa84e6db"_s);
+        client.stop();
+    }
+
+    void modelUnreachableBadGatewayRetriesAndRecovers()
+    {
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+
+        DiskDocumentBridge bridge;
+        AcpClient client;
+        Settings settings = mockSettings(u"flaky-model-unreachable"_s);
+        settings.baseRetryDelaySeconds = 1;
+        settings.maxRetryAttempts = 2;
+        settings.retryStrategy = u"fixed"_s;
+        client.setSettings(settings);
+        client.setWorkspace(workspace.path());
+        client.setDocumentBridge(&bridge);
+
+        QString finishedText;
+        QString error;
+        int retries = 0;
+        connect(&client, &AcpClient::promptFinished, this, [&](const QString &, const QString &text, const QJsonArray &) {
+            finishedText = text;
+        });
+        connect(&client, &AcpClient::failed, this, [&](const QString &msg) { error = msg; });
+        connect(&client, &AcpClient::retryStatus, this, [&](const QString &, int, int, int) { ++retries; });
+
+        client.prompt(u"hello"_s);
+        QVERIFY2(waitFor([&] {
+            return !finishedText.isEmpty() || !error.isEmpty();
+        }, 10000), qPrintable(error.isEmpty() ? u"timed out waiting for retry recovery"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(finishedText, u"model-unreachable-recovered"_s);
+        QCOMPARE(retries, 1);
+        client.stop();
     }
 
     void agyProtocolAuthModesUsageAndSystemPrompt()

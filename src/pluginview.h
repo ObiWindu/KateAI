@@ -49,6 +49,8 @@ public:
     void newChat();
     void askSelection();
     void showConfiguration();
+    void toggleVoicePrompt();
+    void cancelVoicePrompt();
 
     // Debugger, diagnostics, build, and editor-integration actions (also
     // dispatched by the ":kateai" command-line subcommands).

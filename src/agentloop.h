@@ -11,6 +11,12 @@
 #include "checkpoint.h"
 #include "documentbridge.h"
 #include "harness/harnessflags.h"
+#include "harness/checks.h"
+#include "harness/eventstore.h"
+#include "harness/hooks.h"
+#include "harness/middleware.h"
+#include "harness/policy.h"
+#include "harness/turn.h"
 #include "llmclient.h"
 #include "lsp.h"
 #include "mcp.h"
@@ -196,6 +202,24 @@ public:
     SessionStore::SessionData sessionData() const;
     void restoreSession(const SessionStore::SessionData &data);
     void clearSession();
+    // The conversation the harness event log writes to. Empty means "ask the
+    // session store for the active conversation at the next event".
+    void setConversationId(const QString &conversationId);
+    QString conversationId() const;
+
+    // Runs the discovered check plan now and returns the evidence. It never
+    // changes the turn state; the UI uses it for ":kateai verify".
+    QString verificationReport();
+    // A human-readable summary of the effective policy files and rules.
+    QString policyReport() const;
+    QString hooksReport() const;
+    // Approves the current project's hook file and remembers the approval
+    // under its workspace hash. Returns false when the hooks flag is off or
+    // there is no workspace.
+    bool trustProjectHooks();
+    // Exports the conversation's event log as JSONL. Returns false and fills
+    // `error` when the log is unavailable.
+    bool exportTrace(const QString &path, QString *error = nullptr);
 
     // Plain-text reports for ":kateai context" and ":kateai usage". Both are
     // best-effort estimates: the provider's own usage counters are not exposed
@@ -267,6 +291,9 @@ Q_SIGNALS:
     void subtaskMessageDelta(const QString &taskId, const QString &delta);
     void subtaskProgress(const QString &taskId, const QString &partialOutput);
     void subtaskFinished(const QString &taskId, bool ok);
+    // A durable harness event was appended (or would have been, when the log is
+    // disabled). Consumers can show it in a trace view or a test.
+    void harnessEvent(const QString &type, const QJsonObject &payload);
 
 private:
     enum class State {
@@ -391,6 +418,32 @@ private:
     // reset while a snapshot is still running.
     void markActionExecuted(const QString &signature);
     void syncPermissionPolicy();
+    // Loads policy/hook configuration after the workspace or flags change.
+    void reloadHarnessConfig();
+    // The conversation the event log writes to, or empty when no session is
+    // active. Never creates a conversation as a side effect.
+    QString currentConversationId() const;
+    QString currentStepId();
+    // Appends one event; does nothing when the event log is disabled or no
+    // conversation is active. Payloads are redacted by Events::encode.
+    void emitHarnessEvent(const QString &type, const QJsonObject &payload,
+                          const QString &stepId = QString());
+    // Runs the configured PreToolUse hooks. Returns false when a hook blocked
+    // the call (a result has already been appended); may rewrite `call`.
+    bool applyPreToolHooks(ToolCall &call);
+    void applyPostToolHooks(const ToolCall &call, ToolResult &result);
+    bool runStopHooks();
+    // Appends any hook-provided context as a controller message once the batch
+    // has no more tool results to send first.
+    void flushHookContext();
+    // Returns true when the verification gate handled the stop (scheduled a
+    // retry or finished the turn); false lets the legacy nudge run.
+    bool runVerificationGate();
+    // Records a permission decision in the event log and the audit file.
+    void recordPermissionDecision(const QString &toolName, const QString &decision,
+                                  const QString &ruleId, const QString &reason);
+    bool beginHarnessTurn(const QString &userText);
+    void endHarnessTurn(const QString &status, const QString &detail = QString());
     void setSubtaskDepth(int depth)
     {
         m_subtaskDepth = depth;
@@ -514,6 +567,26 @@ LlmClient m_client;
     mutable QString m_cachedTurnContext;
     mutable QString m_cachedTurnContextTurnId;
     HarnessFlags m_harness;
+
+    // --- Harness 0.7 ---------------------------------------------------------
+    EventStore m_events;
+    PolicyEngine m_policyEngine;
+    HookRegistry m_hooks;
+    TurnContext m_turnContext;
+    TurnController m_turnController;
+    MiddlewareChain m_middleware;
+    // Owned by m_middleware; reset whenever the chain is rebuilt.
+    VerificationMiddleware *m_verification = nullptr;
+    QString m_conversationId;
+    QString m_currentStepId;
+    QString m_pendingHookContext;
+    QString m_hookLoadError;
+    int m_stepNumber = 0;
+    bool m_eventLogBroken = false;
+    bool m_sessionStartRan = false;
+    bool m_verificationEvidenceSent = false;
+    bool m_harnessConfigLoaded = false;
+    QString m_harnessConfigWorkspace;
 };
 
 } // namespace KateAi
