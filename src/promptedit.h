@@ -6,13 +6,24 @@
 #pragma once
 
 #include <QPlainTextEdit>
+#include <QList>
 #include <QStringList>
 
 class QCompleter;
+class QFrame;
+class QLabel;
 class QStringListModel;
+class QVBoxLayout;
 
 namespace KateAi
 {
+
+// One slash command advertised by the active agent (or a future built-in
+// source). The name always includes the leading slash.
+struct PromptCommand {
+    QString name;
+    QString description;
+};
 
 class PromptEdit : public QPlainTextEdit
 {
@@ -26,6 +37,9 @@ public:
 
     void setCompletionWords(const QStringList &words);
     void addHistory(const QString &text);
+    // Slash-command suggestions shown above the cursor when the input starts
+    // with "/". An empty list restores the plain placeholder.
+    void setSlashCommands(const QList<PromptCommand> &commands);
 
 public Q_SLOTS:
     void autoGrow();
@@ -36,9 +50,12 @@ Q_SIGNALS:
 protected:
     void keyPressEvent(QKeyEvent *event) override;
     void focusInEvent(QFocusEvent *event) override;
+    void focusOutEvent(QFocusEvent *event) override;
+    bool eventFilter(QObject *watched, QEvent *event) override;
 
 private Q_SLOTS:
     void insertCompletion(const QString &completion);
+    void updateSlashCommandPopup();
 
 private:
     QString wordUnderCursor() const;
@@ -48,8 +65,24 @@ private:
     int minHeight() const;
     int maxHeight() const;
 
+    void rebuildSlashCommandRows();
+    void selectSlashCommand(int index);
+    void applySlashCommand(int index);
+    void hideSlashCommandPopup();
+    void positionSlashCommandPopup();
+    QString slashQuery() const;
+
     QCompleter *m_completer = nullptr;
     QStringListModel *m_completionModel = nullptr;
+
+    QFrame *m_commandPopup = nullptr;
+    QVBoxLayout *m_commandLayout = nullptr;
+    QList<QLabel *> m_commandRows;
+    QList<PromptCommand> m_slashCommands;
+    QList<PromptCommand> m_filteredCommands;
+    int m_slashIndex = -1;
+    bool m_commandPopupShown = false;
+    QString m_lastCommandQuery;
 
     QStringList m_history;
     int m_historyIndex = -1;

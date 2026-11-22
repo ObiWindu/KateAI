@@ -136,8 +136,6 @@ public:
     void showPolicyReport();
     void showHooksReport();
     void showTraceReport();
-    // Slash commands advertised by the live ACP agent. Hidden when empty.
-    void showAgentCommandsMenu();
 
     // Modes / MCP / checkpoints, exposed so the view can drive them too.
     void showModeMenu();
@@ -377,9 +375,6 @@ private:
     // Tool calls completed in the current turn, shown live in the status strip.
     int m_completedToolCount = 0;
     QLabel *m_infoBar = nullptr;
-    // Slash commands the live ACP agent advertised (empty for native providers).
-    QPushButton *m_agentCommandsButton = nullptr;
-    QJsonArray m_agentCommands;
     // Workspace switch notice, pinned above the info bar in the composer so
     // "Kate now works in this folder" is seen where the user is typing.
     QLabel *m_workspaceBanner = nullptr;

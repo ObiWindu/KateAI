@@ -11,10 +11,17 @@
 #include <QAbstractItemView>
 #include <QApplication>
 #include <QCompleter>
+#include <QFrame>
+#include <QGuiApplication>
 #include <QKeyEvent>
+#include <QLabel>
+#include <QMouseEvent>
+#include <QScreen>
 #include <QScrollBar>
 #include <QStringListModel>
 #include <QTextBlock>
+#include <QVBoxLayout>
+#include <algorithm>
 
 using namespace Qt::Literals::StringLiterals;
 
@@ -84,7 +91,28 @@ PromptEdit::PromptEdit(QWidget *parent)
     connect(m_completer, QOverload<const QString &>::of(&QCompleter::activated),
             this, &PromptEdit::insertCompletion);
 
+    // Slash-command suggestions live in their own popup because the command
+    // needs two lines (name and description) and must sit above the cursor,
+    // which QCompleter's popup cannot do.
+    m_commandPopup = new QFrame(this, Qt::Tool | Qt::FramelessWindowHint
+                                          | Qt::WindowDoesNotAcceptFocus
+                                          | Qt::WindowStaysOnTopHint);
+    m_commandPopup->setObjectName(u"promptCommandPopup"_s);
+    m_commandPopup->setAttribute(Qt::WA_ShowWithoutActivating);
+    m_commandPopup->setFocusPolicy(Qt::NoFocus);
+    m_commandPopup->setStyleSheet(
+        QStringLiteral("QFrame#promptCommandPopup { background-color: %1; border: 1px solid %2;"
+                       " border-radius: 8px; }")
+            .arg(ChatTheme::surfaceBg(), ChatTheme::border()));
+    m_commandLayout = new QVBoxLayout(m_commandPopup);
+    m_commandLayout->setContentsMargins(5, 5, 5, 5);
+    m_commandLayout->setSpacing(2);
+    m_commandPopup->hide();
+
     connect(this, &QPlainTextEdit::textChanged, this, &PromptEdit::autoGrow);
+    connect(this, &QPlainTextEdit::textChanged, this, &PromptEdit::updateSlashCommandPopup);
+    connect(this, &QPlainTextEdit::cursorPositionChanged, this,
+            &PromptEdit::updateSlashCommandPopup);
     autoGrow();
 }
 
@@ -93,6 +121,204 @@ void PromptEdit::setCompletionWords(const QStringList &words)
     if (m_completionModel) {
         m_completionModel->setStringList(words);
     }
+}
+
+void PromptEdit::setSlashCommands(const QList<PromptCommand> &commands)
+{
+    m_slashCommands.clear();
+    for (PromptCommand command : commands) {
+        command.name = command.name.trimmed();
+        if (command.name.isEmpty()) {
+            continue;
+        }
+        if (!command.name.startsWith(u'/')) {
+            command.name.prepend(u'/');
+        }
+        command.description = command.description.simplified();
+        m_slashCommands.append(command);
+    }
+
+    // The placeholder is the in-input hint that replaced the old "cmds"
+    // button. It only mentions "/" when an agent actually advertised commands.
+    setPlaceholderText(m_slashCommands.isEmpty()
+                           ? i18n("Ask anything, @ to mention…")
+                           : i18n("Ask anything, @ to mention, / for commands…"));
+    if (m_slashCommands.isEmpty()) {
+        hideSlashCommandPopup();
+    } else {
+        m_lastCommandQuery.clear();
+        updateSlashCommandPopup();
+    }
+}
+
+void PromptEdit::updateSlashCommandPopup()
+{
+    if (m_slashCommands.isEmpty()) {
+        hideSlashCommandPopup();
+        return;
+    }
+
+    const QString fullText = toPlainText();
+    const QTextCursor tc = textCursor();
+    const int cursorPosition = tc.position();
+    // Only the first character of the first line triggers the command menu.
+    // Once the user starts typing arguments the popup gets out of the way.
+    if (!fullText.startsWith(u'/') || cursorPosition < 1
+        || cursorPosition > fullText.size() || tc.hasSelection()
+        || tc.blockNumber() != 0) {
+        hideSlashCommandPopup();
+        return;
+    }
+
+    const QString query = slashQuery();
+    if (query.contains(u' ') || query.contains(u'\t')) {
+        hideSlashCommandPopup();
+        return;
+    }
+    if (m_commandPopupShown && query == m_lastCommandQuery) {
+        positionSlashCommandPopup();
+        return;
+    }
+    m_lastCommandQuery = query;
+
+    m_filteredCommands.clear();
+    for (const PromptCommand &command : std::as_const(m_slashCommands)) {
+        if (query.isEmpty()
+            || command.name.contains(query, Qt::CaseInsensitive)
+            || command.description.contains(query, Qt::CaseInsensitive)) {
+            m_filteredCommands.append(command);
+        }
+    }
+    if (m_filteredCommands.isEmpty()) {
+        hideSlashCommandPopup();
+        return;
+    }
+
+    rebuildSlashCommandRows();
+    selectSlashCommand(0);
+    positionSlashCommandPopup();
+    m_commandPopup->show();
+    m_commandPopup->raise();
+    m_commandPopupShown = true;
+    if (m_completer && m_completer->popup()->isVisible()) {
+        m_completer->popup()->hide();
+    }
+}
+
+QString PromptEdit::slashQuery() const
+{
+    const QString fullText = toPlainText();
+    const int cursorPosition = textCursor().position();
+    if (!fullText.startsWith(u'/') || cursorPosition <= 1) {
+        return {};
+    }
+    return fullText.mid(1, cursorPosition - 1);
+}
+
+void PromptEdit::rebuildSlashCommandRows()
+{
+    for (QLabel *row : std::as_const(m_commandRows)) {
+        delete row;
+    }
+    m_commandRows.clear();
+    while (QLayoutItem *item = m_commandLayout->takeAt(0)) {
+        delete item;
+    }
+
+    constexpr int maxRows = 6;
+    const int count = qMin(maxRows, m_filteredCommands.size());
+    for (int i = 0; i < count; ++i) {
+        const PromptCommand &command = m_filteredCommands.at(i);
+        auto *row = new QLabel(m_commandPopup);
+        row->setObjectName(u"promptCommandRow"_s);
+        row->setTextFormat(Qt::RichText);
+        row->setWordWrap(true);
+        row->setMargin(0);
+        row->setContentsMargins(9, 5, 9, 5);
+        row->setCursor(Qt::PointingHandCursor);
+        QString description = command.description.toHtmlEscaped();
+        if (description.isEmpty()) {
+            description = i18n("No description").toHtmlEscaped();
+        }
+        row->setText(QStringLiteral("<span style=\"color:%1; font-family:monospace; font-size:12px;"
+                                    " font-weight:600;\">%2</span><br>"
+                                    "<span style=\"color:%3; font-size:11px;\">%4</span>")
+                         .arg(ChatTheme::accent(), command.name.toHtmlEscaped(),
+                              ChatTheme::textMuted(), description));
+        row->installEventFilter(this);
+        m_commandLayout->addWidget(row);
+        m_commandRows.append(row);
+    }
+}
+
+void PromptEdit::selectSlashCommand(int index)
+{
+    if (m_commandRows.isEmpty()) {
+        m_slashIndex = -1;
+        return;
+    }
+    m_slashIndex = std::clamp(index, 0, static_cast<int>(m_commandRows.size()) - 1);
+    const int rowCount = static_cast<int>(m_commandRows.size());
+    for (int i = 0; i < rowCount; ++i) {
+        const bool selected = i == m_slashIndex;
+        m_commandRows.at(i)->setStyleSheet(
+            QStringLiteral("QLabel { background-color: %1; border-radius: 5px; }")
+                .arg(selected ? ChatTheme::hoverBg() : QStringLiteral("transparent")));
+    }
+}
+
+void PromptEdit::applySlashCommand(int index)
+{
+    if (index < 0 || index >= m_filteredCommands.size()) {
+        return;
+    }
+    const QTextCursor current = textCursor();
+    QTextCursor replace = current;
+    replace.setPosition(0);
+    replace.setPosition(current.position(), QTextCursor::KeepAnchor);
+    replace.insertText(m_filteredCommands.at(index).name + u' ');
+    setTextCursor(replace);
+    hideSlashCommandPopup();
+    setFocus();
+}
+
+void PromptEdit::hideSlashCommandPopup()
+{
+    if (m_commandPopup) {
+        m_commandPopup->hide();
+    }
+    m_slashIndex = -1;
+    m_commandPopupShown = false;
+    m_lastCommandQuery.clear();
+}
+
+void PromptEdit::positionSlashCommandPopup()
+{
+    if (!m_commandPopup) {
+        return;
+    }
+    const int width = qBound(280, viewport()->width() - 8, 520);
+    m_commandPopup->setFixedWidth(width);
+    m_commandPopup->adjustSize();
+    const int maxHeight = 300;
+    const int height = qMin(maxHeight, m_commandPopup->sizeHint().height());
+    m_commandPopup->resize(width, height);
+
+    const QRect caret = cursorRect();
+    const QPoint anchor = viewport()->mapToGlobal(QPoint(caret.left(), caret.top()));
+    QScreen *screen = QGuiApplication::screenAt(anchor);
+    if (!screen) {
+        screen = QGuiApplication::primaryScreen();
+    }
+    const QRect available = screen ? screen->availableGeometry() : QRect(anchor, QSize(800, 600));
+    int x = qBound(available.left(), anchor.x(), available.right() - width);
+    int y = anchor.y() - height - 8;
+    if (y < available.top()) {
+        // Not enough room above (a tall composer at the top of the screen):
+        // fall back below the caret rather than drawing off-screen.
+        y = anchor.y() + caret.height() + 8;
+    }
+    m_commandPopup->move(x, y);
 }
 
 void PromptEdit::addHistory(const QString &text)
@@ -150,6 +376,31 @@ void PromptEdit::focusInEvent(QFocusEvent *event)
     QPlainTextEdit::focusInEvent(event);
 }
 
+void PromptEdit::focusOutEvent(QFocusEvent *event)
+{
+    // The command popup does not take focus (WindowDoesNotAcceptFocus), so a
+    // focus-out means the user moved to another widget and the suggestions
+    // should go away.
+    hideSlashCommandPopup();
+    QPlainTextEdit::focusOutEvent(event);
+}
+
+bool PromptEdit::eventFilter(QObject *watched, QEvent *event)
+{
+    const int index = m_commandRows.indexOf(qobject_cast<QLabel *>(watched));
+    if (index >= 0) {
+        if (event->type() == QEvent::MouseButtonRelease) {
+            applySlashCommand(index);
+            return true;
+        }
+        if (event->type() == QEvent::Enter) {
+            selectSlashCommand(index);
+            return false;
+        }
+    }
+    return QPlainTextEdit::eventFilter(watched, event);
+}
+
 int PromptEdit::atSymbolPosition() const
 {
     const QTextCursor tc = textCursor();
@@ -188,6 +439,34 @@ void PromptEdit::insertCompletion(const QString &completion)
 
 void PromptEdit::keyPressEvent(QKeyEvent *event)
 {
+    if (m_commandPopup && m_commandPopupShown) {
+        switch (event->key()) {
+        case Qt::Key_Escape:
+            hideSlashCommandPopup();
+            event->accept();
+            return;
+        case Qt::Key_Up:
+            selectSlashCommand(m_slashIndex - 1);
+            event->accept();
+            return;
+        case Qt::Key_Down:
+            selectSlashCommand(m_slashIndex + 1);
+            event->accept();
+            return;
+        case Qt::Key_Return:
+        case Qt::Key_Enter:
+        case Qt::Key_Tab:
+            if (m_slashIndex >= 0) {
+                applySlashCommand(m_slashIndex);
+                event->accept();
+                return;
+            }
+            break;
+        default:
+            break;
+        }
+    }
+
     // Completer popup handling
     if (m_completer && m_completer->popup()->isVisible()) {
         switch (event->key()) {

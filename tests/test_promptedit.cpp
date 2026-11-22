@@ -1,8 +1,10 @@
 #include "promptedit.h"
 
-#include <QTest>
-#include <QSignalSpy>
+#include <QFrame>
 #include <QKeyEvent>
+#include <QLabel>
+#include <QSignalSpy>
+#include <QTest>
 
 using namespace Qt::Literals::StringLiterals;
 
@@ -86,6 +88,55 @@ private Q_SLOTS:
         // Test inserting completion directly
         QMetaObject::invokeMethod(&edit, "insertCompletion", Q_ARG(QString, u"chatwidget.cpp"_s));
         QVERIFY(edit.toPlainText().contains(u"@chatwidget.cpp "_s));
+    }
+
+    void testSlashCommandsFilterAndInsert()
+    {
+        PromptEdit edit;
+        edit.show();
+        QApplication::processEvents();
+
+        QList<PromptCommand> commands;
+        commands.append({u"/review"_s, u"Review the current diff"_s});
+        commands.append({u"/release"_s, u"Prepare a release"_s});
+        edit.setSlashCommands(commands);
+        QVERIFY(edit.placeholderText().contains(u"/ for commands"_s));
+
+        edit.setPlainText(u"/re"_s);
+        edit.moveCursor(QTextCursor::End);
+        QApplication::processEvents();
+
+        auto *popup = edit.findChild<QFrame *>(u"promptCommandPopup"_s);
+        QVERIFY(popup);
+        QCOMPARE(edit.findChildren<QLabel *>(u"promptCommandRow"_s).size(), 2);
+
+        // The typed text filters names and descriptions alike.
+        edit.setPlainText(u"/diff"_s);
+        edit.moveCursor(QTextCursor::End);
+        QApplication::processEvents();
+        QCOMPARE(edit.findChildren<QLabel *>(u"promptCommandRow"_s).size(), 1);
+
+        QKeyEvent enter(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
+        QApplication::sendEvent(&edit, &enter);
+        QCOMPARE(edit.toPlainText(), u"/review "_s);
+    }
+
+    void testSlashCommandsOnlyTriggerOnTheFirstCharacter()
+    {
+        PromptEdit edit;
+        edit.show();
+        QApplication::processEvents();
+        edit.setSlashCommands({{u"/review"_s, u"Review the current diff"_s}});
+
+        edit.setPlainText(u"please /rev"_s);
+        edit.moveCursor(QTextCursor::End);
+        QApplication::processEvents();
+        auto *popup = edit.findChild<QFrame *>(u"promptCommandPopup"_s);
+        QVERIFY(popup);
+        QCOMPARE(edit.findChildren<QLabel *>(u"promptCommandRow"_s).size(), 0);
+
+        edit.setSlashCommands({});
+        QVERIFY(!edit.placeholderText().contains(u"/ for commands"_s));
     }
 
     void testComposerIsAHalfTallerAgainAndATenthShorter()

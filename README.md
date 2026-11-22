@@ -428,6 +428,8 @@ Native ACP works with any stdio agent. Pick a preset (command/args are filled in
 
 Kate is the ACP client: `session/prompt`, `session/update`, `session/request_permission`, `fs/read_text_file`, `fs/write_text_file`, `terminal/*`. Always-approve is handled in Kate for every agent. Grok Build also receives `--model` / `--always-approve` and Grok `_meta` (`yoloMode`).
 
+When the agent advertises slash commands, the composer hint mentions `/`. Type `/` as the first character to open a filtered list above the cursor; each command's description is shown, and Enter or Tab inserts the selected command.
+
 ### ACP tool integration
 
 Different ACP agents name their tools differently (`fs/read_text_file`, `terminal/exec`, `edit`, `write`, `apply_patch`, `str_replace_editor`, …). KateAI normalises every ACP tool name to a canonical KateAI name on ingest, so cards, colours, summaries, permissions, edit tracking, and history restoration all behave consistently regardless of the agent:

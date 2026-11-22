@@ -62,6 +62,13 @@ alone. The editor integration, tools, sessions and checkpoints are unchanged.
 - **Trust.** Project hooks are listed but do not run until `:kateai
   trust-hooks`. `:kateai hooks` shows the state. See `docs/HOOKS.md`.
 
+## Slash commands
+
+The ACP command button is gone. When the active agent advertises commands, the
+composer placeholder mentions `/`, and typing `/` as the first character opens
+a filtered list above the cursor. Each row shows the command and its
+description; typing filters both, and Enter/Tab inserts the selected command.
+
 ## Middleware and turn identity
 
 - **Turn phases.** `TurnContext` and `TurnController` give events, middleware

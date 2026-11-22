@@ -20,6 +20,10 @@
   verification is the first built-in.
 - **Commands.** `:kateai verify`, `policy`, `hooks`, `trust-hooks` and `trace`
   join `context` and `usage`.
+- **Slash commands in the composer.** The old ACP **cmds** button is gone.
+  Typing `/` as the first character opens a filtered list above the cursor
+  with each command's description; the placeholder mentions `/` when the
+  active agent advertises commands.
 - All six harness flags default on (`eventLog`, `middleware`,
   `verificationGate`, `policyV2`, `hooks`) and can be disabled with
   `KATEAI_HARNESS_FLAGS` or `[Harness]`.

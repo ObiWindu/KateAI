@@ -739,14 +739,6 @@ ChatWidget::ChatWidget(QWidget *parent)
     // call to action.
     bottomRow->addWidget(m_thinking);
 
-    m_agentCommandsButton = new QPushButton(i18n("cmds"), composerCard);
-    m_agentCommandsButton->setCursor(Qt::PointingHandCursor);
-    m_agentCommandsButton->setFixedHeight(26);
-    m_agentCommandsButton->setToolTip(i18n("Slash commands advertised by the active ACP agent"));
-    m_agentCommandsButton->hide();
-    connect(m_agentCommandsButton, &QPushButton::clicked, this, &ChatWidget::showAgentCommandsMenu);
-    bottomRow->addWidget(m_agentCommandsButton);
-
     bottomRow->addStretch();
 
     m_tokenCount = new QLabel(composerCard);
@@ -1531,17 +1523,25 @@ ChatWidget::ChatWidget(QWidget *parent)
         updateSendButtonState();
     });
 
-    // Slash commands advertised by the live ACP agent: show a button that
-    // inserts the selected command into the prompt.
+    // Slash commands advertised by the live ACP agent. They are offered as an
+    // in-input hint: typing "/" as the first character opens a filtered list
+    // above the cursor, with each command's description.
     connect(m_agent.acpClient(), &AcpClient::availableCommandsChanged, this, [this](const QJsonArray &commands) {
-        m_agentCommands = commands;
-        if (!m_agentCommandsButton) {
-            return;
+        QList<PromptCommand> promptCommands;
+        for (const QJsonValue &value : commands) {
+            const QJsonObject command = value.toObject();
+            PromptCommand promptCommand;
+            promptCommand.name = command.value(u"name"_s).toString();
+            if (promptCommand.name.isEmpty()) {
+                promptCommand.name = command.value(u"command"_s).toString();
+            }
+            promptCommand.name = promptCommand.name.trimmed();
+            promptCommand.description = command.value(u"description"_s).toString().simplified();
+            if (!promptCommand.name.isEmpty()) {
+                promptCommands.append(promptCommand);
+            }
         }
-        m_agentCommandsButton->setVisible(!commands.isEmpty());
-        if (!commands.isEmpty()) {
-            m_agentCommandsButton->setText(i18n("cmds (%1)", commands.size()));
-        }
+        m_prompt->setSlashCommands(promptCommands);
     });
 
     // Retry status from LlmClient - show in info bar with bright brown/orange
@@ -3571,39 +3571,6 @@ void ChatWidget::showTraceReport()
     box.exec();
 }
 
-void ChatWidget::showAgentCommandsMenu()
-{
-    if (m_agentCommands.isEmpty()) {
-        return;
-    }
-    QMenu menu(this);
-    for (const QJsonValue &value : std::as_const(m_agentCommands)) {
-        const QJsonObject command = value.toObject();
-        QString name = command.value(u"name"_s).toString();
-        if (name.isEmpty()) {
-            name = command.value(u"command"_s).toString();
-        }
-        name = name.trimmed();
-        if (name.isEmpty()) {
-            continue;
-        }
-        if (!name.startsWith(u'/')) {
-            name.prepend(u'/');
-        }
-        const QString description = command.value(u"description"_s).toString().simplified();
-        QAction *action = menu.addAction(description.isEmpty() ? name
-                                                               : i18n("%1 — %2", name, description));
-        connect(action, &QAction::triggered, this, [this, name]() {
-            m_prompt->insertPlainText(name + u" "_s);
-            m_prompt->setFocus();
-        });
-    }
-    if (menu.isEmpty() || !m_agentCommandsButton) {
-        return;
-    }
-    menu.exec(m_agentCommandsButton->mapToGlobal(QPoint(0, m_agentCommandsButton->height())));
-}
-
 void ChatWidget::showInfoMessage(const QString &message, bool isError){
     if (!m_infoBar) {
         return;
@@ -3680,7 +3647,7 @@ void ChatWidget::restylePanel()
     if (m_threadTitle) {
         m_threadTitle->setStyleSheet(ChatTheme::headerTitle());
     }
-    for (auto *chip : {m_modelSelector, m_modeButton, m_permissionButton, m_agentCommandsButton}) {
+    for (auto *chip : {m_modelSelector, m_modeButton, m_permissionButton}) {
         if (chip) {
             chip->setStyleSheet(ChatTheme::chipButton());
         }
