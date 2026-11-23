@@ -10,6 +10,7 @@
 #include "toolresults.h"
 #include "tokens.h"
 
+#include <QJsonDocument>
 #include <QJsonObject>
 #include <QRegularExpression>
 
