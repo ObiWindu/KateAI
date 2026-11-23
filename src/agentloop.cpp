@@ -63,6 +63,23 @@ QString clipObservation(const QString &text, int maxChars = 80000)
         + text.right(tail);
 }
 
+// The display transcript intentionally survives compaction, so it needs its own
+// budget. It may hold slightly more than the widget retention caps because a
+// reload rebuilds the visible cards from it; beyond these limits old messages
+// are elided and only the recent part is kept.
+constexpr qsizetype kMaxTranscriptMessages = 1000;
+constexpr qsizetype kMaxTranscriptChars = 8 * 1024 * 1024;
+
+qsizetype transcriptMessageChars(const ChatMessage &message)
+{
+    return message.content.size() + message.thinking.size();
+}
+
+bool isTranscriptElision(const ChatMessage &message)
+{
+    return message.name == u"transcript_elision"_s;
+}
+
 QString oneLineForReport(QString text, int maxChars)
 {
     text.replace(u'\n', u' ');
@@ -155,7 +172,7 @@ AgentLoop::AgentLoop(QObject *parent)
     : QObject(parent)
 {
     // Initialize the project graph for understanding and tracking the project
-    m_projectGraph = std::make_unique<ProjectGraph>();
+    m_projectGraph = std::make_shared<ProjectGraph>();
     m_memory = std::make_unique<MemoryLoader>();
 
     m_mcp = new McpManager(this);
@@ -303,7 +320,7 @@ AgentLoop::AgentLoop(QObject *parent)
         toolMsg.toolCallId = result.toolCallId;
         toolMsg.name = result.name;
         toolMsg.content = result.output;
-        m_messages.append(toolMsg);
+        appendMessage(toolMsg);
         Q_EMIT toolFinished(result);
     });
     connect(&m_acp, &AcpClient::permissionNeeded, this, [this](const PermissionRequest &request) {
@@ -544,6 +561,13 @@ void AgentLoop::setSettings(const Settings &settings)
 void AgentLoop::rebuildTools()
 {
     if (m_workspace.isEmpty()) {
+        // No workspace means there is nothing to sandbox. Drop the tools too:
+        // they hold a raw pointer to the graph, and the next workspace change
+        // replaces that graph. Leaving them alive across the empty state is
+        // exactly how a later idle access could touch a freed graph.
+        m_tools.reset();
+        m_sandbox.reset();
+        m_sandboxDirty = false;
         return;
     }
     if (m_busy && (m_inFlight > 0 || !m_runningBashId.isEmpty())) {
@@ -555,7 +579,7 @@ void AgentLoop::rebuildTools()
                                           m_settings.allowReadsOutsideWorkspace);
     m_tools = std::make_unique<ToolRunner>(*m_sandbox, m_bridge, this);
     m_tools->setTimeoutMs(m_settings.bashTimeoutMs);
-    m_tools->setProjectGraph(m_projectGraph.get());
+    m_tools->setProjectGraph(m_projectGraph);
     m_tools->setLspProvider(m_lsp);
     m_tools->setDebugProvider(m_debug);
     m_tools->setEcosystemProvider(m_ecosystem);
@@ -564,15 +588,25 @@ void AgentLoop::rebuildTools()
 
 void AgentLoop::setWorkspace(const QString &workspace)
 {
+    const auto canonicalPath = [](const QString &path) {
+        return path.isEmpty() ? QString() : QDir::cleanPath(path);
+    };
+    // refreshWorkspace() calls this on every active-view change, mostly with
+    // the path that is already open. The per-turn state below must survive
+    // those calls: clearing it reset touched paths and the incremental
+    // summary while a turn was still running.
+    const bool workspaceChanged = canonicalPath(workspace) != canonicalPath(m_workspace);
     m_workspace = workspace;
     if (m_memory) {
         m_memory->setWorkspace(workspace);
     }
-    m_touchedPaths.clear();
-    m_contextSummary.clear();
-    m_contextManifest.clear();
-    m_promptManifest = QJsonObject();
-    m_promptStaticHash.clear();
+    if (workspaceChanged) {
+        m_touchedPaths.clear();
+        m_contextSummary.clear();
+        m_contextManifest.clear();
+        m_promptManifest = QJsonObject();
+        m_promptStaticHash.clear();
+    }
     m_acp.setWorkspace(workspace);
 
     m_modes.setWorkspace(m_workspace);
@@ -591,51 +625,113 @@ void AgentLoop::setWorkspace(const QString &workspace)
     reloadHarnessConfig();
     syncToolAccess();
 
-    if (!m_workspace.isEmpty()) {
-        // A workspace change mid-turn is deferred like a sandbox change: the
-        // running command keeps its old sandbox, and the new one takes effect
-        // when the turn ends (or the next turn starts).
-        if (m_busy && m_tools) {
+    // A workspace change mid-turn is deferred like a sandbox change: the
+    // running command keeps its old sandbox and graph, and the new ones take
+    // effect when the turn ends (or the next turn starts).
+    if (m_busy && m_tools) {
+        if (workspaceChanged) {
             m_sandboxDirty = true;
-        } else {
+            m_graphDirty = true;
+        }
+    } else if (m_workspace.isEmpty()) {
+        // No workspace: do not index the process working directory or create a
+        // graph cache next to the filesystem root. refreshWorkspace() reports
+        // an empty workspace whenever no folder/document is open, and it calls
+        // this on every active-view change.
+        m_graphDirty = false;
+        m_sandboxDirty = false;
+        rebuildTools();
+    } else {
+        // The graph has to be in place before rebuildTools(), which hands its
+        // raw pointer to the new ToolRunner.
+        applyProjectGraph();
+        // A same-workspace call must not recreate the ToolRunner: that would
+        // discard the read ledger and every debounced edit on a tab switch.
+        // It is only needed for a real switch, or when no tools exist yet.
+        if (workspaceChanged || !m_tools) {
             rebuildTools();
         }
     }
+}
 
-    if (m_projectGraph) {
-        // Create the metadata directory before the scan so the root directory
-        // timestamp the graph records is the one it will see on the next load.
-        QDir().mkpath(m_workspace + u"/.kateai"_s);
-        m_projectGraph->setWorkspacePath(m_workspace);
+void AgentLoop::applyProjectGraph(bool checkStale)
+{
+    if (!m_projectGraph) {
+        return;
+    }
+    // An empty workspace is not a directory to scan: QDir("") means the
+    // process working directory, which is often $HOME for a desktop launch.
+    // The graph cannot become ready for it either, so every call would rescan
+    // and try to write /.kateai again.
+    if (m_workspace.isEmpty()) {
+        m_graphDirty = false;
+        return;
+    }
+    // A sub-agent is handed the parent's graph before setWorkspace(). The
+    // graph already covers this workspace, so reloading the cache or
+    // rescanning here would duplicate the work and the memory for every
+    // delegation.
+    const bool graphReady = !m_workspace.isEmpty() && m_projectGraph->getNodeCount() > 0
+        && QDir::cleanPath(m_projectGraph->getWorkspacePath()) == QDir::cleanPath(m_workspace);
+    if (graphReady) {
+        m_graphDirty = false;
+        m_acp.setProjectGraph(m_projectGraph.get());
+        if (!checkStale) {
+            return;
+        }
+        const int stale = m_projectGraph->staleFileCount();
+        if (stale <= 0) {
+            return;
+        }
+        // Regenerate in place. ToolRunner holds a raw pointer to this graph,
+        // so replacing the object would leave that pointer dangling.
+        qWarning() << "Project graph cache is stale for" << stale
+                   << "file(s); regenerating";
+        m_projectGraph->generateGraph(m_workspace);
         const QString graphFilePath = m_workspace + u"/.kateai/project_graph.json"_s;
-        bool regenerated = false;
-        if (QFile::exists(graphFilePath)) {
-            // Load existing graph
-            if (!m_projectGraph->loadFromFile(graphFilePath)) {
-                qWarning() << "Failed to load existing graph from" << graphFilePath;
-                // Fall back to generating a new graph
-                m_projectGraph->generateGraph(m_workspace);
-                regenerated = true;
-            } else if (m_projectGraph->staleFileCount() > 0) {
-                // The cache was written by an earlier session; files changed
-                // on disk while Kate was closed would otherwise be served with
-                // stale metadata, so regenerate instead of trusting it.
-                qWarning() << "Project graph cache is stale for" << m_projectGraph->staleFileCount()
-                           << "file(s); regenerating";
-                m_projectGraph->generateGraph(m_workspace);
-                regenerated = true;
-            }
-        } else {
-            // First index of this workspace.
+        if (!m_projectGraph->saveToFile(graphFilePath)) {
+            qWarning() << "Could not write the project graph cache to" << graphFilePath;
+        }
+        m_acp.setProjectGraph(m_projectGraph.get());
+        return;
+    }
+
+    // A different workspace gets a fresh graph; the previous one may still be
+    // held by a child that started before the switch.
+    m_projectGraph = std::make_shared<ProjectGraph>();
+    // Create the metadata directory before the scan so the root directory
+    // timestamp the graph records is the one it will see on the next load.
+    QDir().mkpath(m_workspace + u"/.kateai"_s);
+    m_projectGraph->setWorkspacePath(m_workspace);
+    const QString graphFilePath = m_workspace + u"/.kateai/project_graph.json"_s;
+    bool regenerated = false;
+    if (QFile::exists(graphFilePath)) {
+        // Load existing graph
+        if (!m_projectGraph->loadFromFile(graphFilePath)) {
+            qWarning() << "Failed to load existing graph from" << graphFilePath;
+            // Fall back to generating a new graph
+            m_projectGraph->generateGraph(m_workspace);
+            regenerated = true;
+        } else if (m_projectGraph->staleFileCount() > 0) {
+            // The cache was written by an earlier session; files changed
+            // on disk while Kate was closed would otherwise be served with
+            // stale metadata, so regenerate instead of trusting it.
+            qWarning() << "Project graph cache is stale for" << m_projectGraph->staleFileCount()
+                       << "file(s); regenerating";
             m_projectGraph->generateGraph(m_workspace);
             regenerated = true;
         }
-        if (regenerated && !m_projectGraph->saveToFile(graphFilePath)) {
-            qWarning() << "Could not write the project graph cache to" << graphFilePath;
-        }
-        // Update ACP client with the project graph
-        m_acp.setProjectGraph(m_projectGraph.get());
+    } else {
+        // First index of this workspace.
+        m_projectGraph->generateGraph(m_workspace);
+        regenerated = true;
     }
+    if (regenerated && !m_projectGraph->saveToFile(graphFilePath)) {
+        qWarning() << "Could not write the project graph cache to" << graphFilePath;
+    }
+    m_graphDirty = false;
+    // Update ACP client with the project graph
+    m_acp.setProjectGraph(m_projectGraph.get());
 }
 
 void AgentLoop::setDocumentBridge(DocumentBridge *bridge)
@@ -653,7 +749,7 @@ void AgentLoop::setDocumentBridge(DocumentBridge *bridge)
         }
         m_tools = std::make_unique<ToolRunner>(*m_sandbox, m_bridge, this);
         m_tools->setTimeoutMs(m_settings.bashTimeoutMs);
-        m_tools->setProjectGraph(m_projectGraph.get());
+        m_tools->setProjectGraph(m_projectGraph);
         m_tools->setLspProvider(m_lsp);
     m_tools->setDebugProvider(m_debug);
     m_tools->setEcosystemProvider(m_ecosystem);
@@ -1448,8 +1544,10 @@ void AgentLoop::markActionExecuted(const QString &signature)
 
 void AgentLoop::updateProjectGraph(const QString &filePath, const QString &content)
 {
-    // Update the project graph with changes to a file
-    if (m_projectGraph) {
+    // Update the project graph with changes to a file. A turn can finish editing
+    // after its workspace was closed; there is no graph cache to write then,
+    // and an empty m_workspace would put it at the filesystem root.
+    if (m_projectGraph && !m_workspace.isEmpty()) {
         m_projectGraph->updateGraph(filePath, content);
         m_projectGraph->saveToFile(m_workspace + u"/.kateai/project_graph.json"_s);
         m_acp.setProjectGraph(m_projectGraph.get());
@@ -1745,6 +1843,8 @@ void AgentLoop::resetConversation()
     cancelSubtask();
     m_acp.resetSession();
     m_messages.clear();
+    m_transcriptMessages.clear();
+    m_transcriptChars = 0;
     m_policy.revokeSession();
     m_modelRequests = 0;
     m_toolCalls = 0;
@@ -2048,6 +2148,9 @@ void AgentLoop::abort()
 
     // The turn is over, so a sandbox or workspace change that was deferred
     // while it ran can be applied now.
+    if (m_graphDirty) {
+        applyProjectGraph();
+    }
     if (m_sandboxDirty) {
         rebuildTools();
     }
@@ -2079,6 +2182,15 @@ void AgentLoop::start(const QString &userText)
     }
     // A deferred sandbox/workspace change should have been applied at the
     // end of the previous turn; belt and braces in case it was not.
+    if (m_graphDirty) {
+        applyProjectGraph();
+    } else if (m_subtaskDepth == 0) {
+        // External edits (git checkout, a generator, another editor) do not
+        // call updateProjectGraph(). Stat the graph once per turn so they are
+        // still indexed, without paying that cost on every tab switch. A
+        // sub-agent shares the parent's graph and must not reindex it.
+        applyProjectGraph(true);
+    }
     if (m_sandboxDirty) {
         rebuildTools();
     }
@@ -2144,7 +2256,7 @@ void AgentLoop::start(const QString &userText)
         ChatMessage system;
         system.role = ChatMessage::Role::System;
         system.content = systemPrompt();
-        m_messages.append(system);
+        appendMessage(system);
     } else if (m_messages.first().role == ChatMessage::Role::System) {
         m_messages.first().content = systemPrompt();
     } else {
@@ -2155,12 +2267,17 @@ void AgentLoop::start(const QString &userText)
         system.role = ChatMessage::Role::System;
         system.content = systemPrompt();
         m_messages.prepend(system);
+        if (!m_transcriptMessages.isEmpty()) {
+            m_transcriptMessages.prepend(system);
+            m_transcriptChars += transcriptMessageChars(system);
+            pruneTranscript();
+        }
     }
 
     ChatMessage user;
     user.role = ChatMessage::Role::User;
     user.content = userText;
-    m_messages.append(user);
+    appendMessage(user);
     Q_EMIT userMessage(userText);
     Q_EMIT activityUpdated(u"I’ll inspect the relevant parts of the project and work through the task step by step."_s);
 
@@ -2571,6 +2688,12 @@ void AgentLoop::maybeCompactStoredHistory(const QList<ChatMessage> &requestMessa
     if (!m_settings.compressOldMessages) {
         return;
     }
+    // Only adopt a compacted shape once the batch is settled. While a call is
+    // queued or its result is still pending, the request does not contain the
+    // result yet, and storing it would break the provider's call/result pairing.
+    if (!m_queue.isEmpty() || !m_pendingResults.isEmpty()) {
+        return;
+    }
     auto firstSummary = [](const QList<ChatMessage> &messages) {
         for (const ChatMessage &message : messages) {
             if (ContextEngine::isSummary(message)) {
@@ -2883,7 +3006,7 @@ void AgentLoop::startAcpTurn(const QString &userText)
     ChatMessage user;
     user.role = ChatMessage::Role::User;
     user.content = userText;
-    m_messages.append(user);
+    appendMessage(user);
     Q_EMIT userMessage(userText);
     Q_EMIT activityUpdated(i18n("Talking to %1 over ACP…", acpAgentDisplayName(m_settings)));
     Q_EMIT statusChanged(u"Working on it…"_s);
@@ -2923,7 +3046,7 @@ void AgentLoop::onAcpPromptFinished(const QString &stopReason, const QString &te
     assistant.thinking = m_currentThinking;
     assistant.plan = m_currentPlan;
     assistant.toolCalls = toolCalls;
-    m_messages.append(assistant);
+    appendMessage(assistant);
     {
         QJsonObject payload;
         payload.insert(u"text"_s, text.left(16000));
@@ -3062,12 +3185,61 @@ bool AgentLoop::isRepeatSensitiveTool(const QString &toolName) const
     return !toolName.isEmpty();
 }
 
+void AgentLoop::appendMessage(const ChatMessage &message)
+{
+    m_messages.append(message);
+    m_transcriptMessages.append(message);
+    m_transcriptChars += transcriptMessageChars(message);
+    pruneTranscript();
+}
+
+void AgentLoop::pruneTranscript()
+{
+    const bool hasMarker = !m_transcriptMessages.isEmpty()
+        && isTranscriptElision(m_transcriptMessages.first());
+    const qsizetype liveCount = m_transcriptMessages.size() - (hasMarker ? 1 : 0);
+    if (liveCount <= kMaxTranscriptMessages && m_transcriptChars <= kMaxTranscriptChars) {
+        return;
+    }
+
+    int firstKept = 0;
+    if (hasMarker) {
+        m_transcriptChars -= transcriptMessageChars(m_transcriptMessages.first());
+        ++firstKept;
+    }
+    // Retain at least the newest few messages even when they alone exceed the
+    // budget: a single large tool result still has to stay inspectable.
+    constexpr qsizetype kMinRetainedMessages = 8;
+    // Trim in batches below the hard cap. Rebuilding the list on every append
+    // once it sits exactly at the limit would copy the whole transcript for
+    // each new tool result.
+    const qsizetype messageTarget = qMax(kMinRetainedMessages, kMaxTranscriptMessages * 9 / 10);
+    const qsizetype charTarget = kMaxTranscriptChars * 9 / 10;
+    while (m_transcriptMessages.size() - firstKept > kMinRetainedMessages
+           && (m_transcriptMessages.size() - firstKept > messageTarget
+               || m_transcriptChars > charTarget)) {
+        m_transcriptChars -= transcriptMessageChars(m_transcriptMessages.at(firstKept));
+        ++firstKept;
+    }
+    if (firstKept == 0) {
+        return;
+    }
+
+    m_transcriptMessages = m_transcriptMessages.mid(firstKept);
+    ChatMessage marker;
+    marker.role = ChatMessage::Role::System;
+    marker.name = u"transcript_elision"_s;
+    marker.content = u"… Earlier messages were omitted from this transcript."_s;
+    m_transcriptMessages.prepend(marker);
+    m_transcriptChars += transcriptMessageChars(marker);
+}
+
 void AgentLoop::appendControllerMessage(const QString &content)
 {
     ChatMessage controller;
     controller.role = ChatMessage::Role::User;
     controller.content = u"[KateAI agent controller] "_s + content;
-    m_messages.append(controller);
+    appendMessage(controller);
 }
 
 bool AgentLoop::isVerificationTool(const QString &toolName) const
@@ -3334,7 +3506,7 @@ void AgentLoop::appendToolResultsToConversation()
         toolMsg.toolCallId = result.toolCallId;
         toolMsg.name = result.name;
         toolMsg.content = result.output;
-        m_messages.append(toolMsg);
+        appendMessage(toolMsg);
     }
     m_pendingResults.clear();
 }
@@ -3377,7 +3549,9 @@ void AgentLoop::appendCancelledToolResults()
             answered.insert(id);
         }
     }
-    m_messages.append(additions);
+    for (const ChatMessage &message : std::as_const(additions)) {
+        appendMessage(message);
+    }
 }
 
 void AgentLoop::onFailed(const QString &error)
@@ -3451,7 +3625,7 @@ void AgentLoop::onFinished(const QString &text, const QList<ToolCall> &toolCalls
         assistant.toolCalls = encoded;
     }
 
-    m_messages.append(assistant);
+    appendMessage(assistant);
     {
         QJsonObject payload;
         payload.insert(u"text"_s, text.left(16000));
@@ -3576,6 +3750,9 @@ void AgentLoop::finishWithFailure(const QString &error)
     // here.
     cancelSubtask();
     // The turn is over, so a deferred sandbox or workspace change applies now.
+    if (m_graphDirty) {
+        applyProjectGraph();
+    }
     if (m_sandboxDirty) {
         rebuildTools();
     }
@@ -3596,7 +3773,7 @@ void AgentLoop::requestVerificationTurn()
     controller.content = u"[KateAI agent controller] You made project changes but have not verified them yet. "
                          u"Before giving the final answer, inspect the affected files and/or run the most relevant focused test, build, or check. "
                          u"Only finish after using the verification result as evidence."_s;
-    m_messages.append(controller);
+    appendMessage(controller);
     m_state = State::WaitingForNextModel;
     scheduleNextModelStep();
 }
@@ -3629,6 +3806,9 @@ void AgentLoop::finishTurn()
     }
     // The turn is over: apply a sandbox or workspace change that arrived
     // mid-turn and was deferred to keep the running command's environment.
+    if (m_graphDirty) {
+        applyProjectGraph();
+    }
     if (m_sandboxDirty) {
         rebuildTools();
     }
@@ -4656,6 +4836,9 @@ void AgentLoop::dispatchSubtask(const ToolCall &call)
     }
 
     child->setSettings(childSettings);
+    // The child works in the same workspace, so it uses the parent's graph
+    // instead of scanning the project again and holding a second copy.
+    child->m_projectGraph = m_projectGraph;
     child->setWorkspace(m_workspace);
     child->setDocumentBridge(m_bridge);
     child->setLspProvider(m_lsp);
@@ -5122,6 +5305,7 @@ SessionStore::SessionData AgentLoop::sessionData() const
 {
     SessionStore::SessionData data;
     data.messages = m_messages;
+    data.transcript = transcriptMessages();
     data.currentThinking = m_currentThinking;
     data.currentPlan = m_currentPlan;
     data.planShown = m_planShown;
@@ -5148,6 +5332,16 @@ void AgentLoop::restoreSession(const SessionStore::SessionData &data)
 
     // Restore messages
     m_messages = data.messages;
+    // The transcript is what the panel renders. A payload written before it
+    // existed has only the (possibly already compacted) model history, so use
+    // that as the transcript rather than dropping the restored cards. An old
+    // session may also predate the transcript budget; bound it on the way in.
+    m_transcriptMessages = data.transcript.isEmpty() ? data.messages : data.transcript;
+    m_transcriptChars = 0;
+    for (const ChatMessage &message : std::as_const(m_transcriptMessages)) {
+        m_transcriptChars += transcriptMessageChars(message);
+    }
+    pruneTranscript();
 
     // Restore turn state
     m_currentThinking = data.currentThinking;

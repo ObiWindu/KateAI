@@ -14,6 +14,7 @@
 #include "sandbox.h"
 #include "types.h"
 
+#include <QByteArray>
 #include <QHash>
 #include <QObject>
 #include <QPointer>
@@ -44,8 +45,17 @@ public:
     {
         m_timeoutMs = timeoutMs;
     }
+    // The agent passes its shared graph so the runner cannot outlive the
+    // object its raw working pointer refers to. A caller that owns the graph
+    // itself (tests) can still pass a plain pointer.
+    void setProjectGraph(const std::shared_ptr<ProjectGraph> &graph)
+    {
+        m_projectGraphOwner = graph;
+        m_projectGraph = m_projectGraphOwner.get();
+    }
     void setProjectGraph(ProjectGraph *graph)
     {
+        m_projectGraphOwner.reset();
         m_projectGraph = graph;
     }
     // The editor's language-server surface. Null means "no editor": the LSP
@@ -166,6 +176,7 @@ private:
 
     Sandbox m_sandbox;
     DocumentBridge *m_bridge = nullptr;
+    std::shared_ptr<ProjectGraph> m_projectGraphOwner;
     ProjectGraph *m_projectGraph = nullptr;
     LspProvider *m_lsp = nullptr;
     DebugProvider *m_debug = nullptr;
@@ -205,12 +216,14 @@ private:
     QThread *m_workerThread = nullptr;
     QObject *m_workerContext = nullptr;
     QList<std::shared_ptr<std::atomic_bool>> m_readJobs;
-    // Full content of files read this turn, keyed by canonical path. write_file
-    // compares against it before overwriting an existing file, so a change made
-    // by the user or another process after the read is a conflict rather than
-    // silently lost. Empty for files the agent never read: writing a new file
-    // (or overwriting without a read) keeps the pre-0.6.1 behaviour.
-    mutable QHash<QString, QString> m_readSnapshots;
+    // Fingerprint of each file read this turn, keyed by canonical path.
+    // write_file compares it before overwriting an existing file, so a change
+    // made by the user or another process after the read is a conflict rather
+    // than silently lost. A digest is enough for that check and keeps a turn
+    // that reads many large files from retaining their contents. Empty for
+    // files the agent never read: writing a new file (or overwriting without a
+    // read) keeps the pre-0.6.1 behaviour.
+    mutable QHash<QString, QByteArray> m_readSnapshots;
 };
 
 QString unifiedDiff(const QString &path, const QString &before, const QString &after);

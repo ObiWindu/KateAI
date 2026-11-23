@@ -49,6 +49,19 @@
   streaming shapes and calibrates Anthropic cache hits; reports use the real
   prompt/request; and `memory_write` honours sandbox read-only/deny rules and
   writes through the document bridge.
+- **Reopened conversations keep their whole history.** The transcript is now
+  stored separately from the model history, so context compaction (which
+  replaces older turns with a summary for the next request) no longer shrinks
+  what a reopened chat shows. The rebuild also iterates a snapshot and cannot
+  be cut short by the readout compacting an over-full history while its cards
+  are being created, which previously left the newest answer and everything
+  after the first user card out of the transcript. Older payloads without a
+  transcript fall back to their stored messages.
+- **ACP prompts lead with the user's message.** Editor context and the
+  once-per-session rules/client-method notes now follow the message, and both
+  carry an assistant-only ACP audience annotation. Agents that treated the
+  leading text block as the request no longer answer the editor context while
+  ignoring what the user typed.
 
 ## 0.7.0 — 2026-11-21
 

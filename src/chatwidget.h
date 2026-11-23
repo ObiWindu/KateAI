@@ -549,6 +549,15 @@ private:
     QMenu *m_historyMenu = nullptr;
     QString m_currentConversationId;
     bool m_loadingConversation = false;
+    // True while rebuildTranscript() is creating the history cards. The
+    // readout update that can compact an over-full history must not run then:
+    // it would replace the messages still being rendered.
+    bool m_renderingTranscript = false;
+    // The transcript card count at which pruneOldTranscriptCards() should next
+    // run. Pruning on every append above the threshold rescanned the whole
+    // transcript each time and made restoring a long conversation quadratic;
+    // after a prune the next check waits for a batch of new cards.
+    int m_nextTranscriptPrune = 512;
     QTimer *m_sessionSaveTimer = nullptr;
 
     // Global override of the tool-card budget. Auto means the budget decides;

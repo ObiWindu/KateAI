@@ -206,15 +206,15 @@ def outcome_summary(outcome):
 
 def handle_prompt(request_id, params):
     # Text blocks are joined by a line break, as a real agent reads them.
-    # user_text is the last block, the message the user typed: an agent answers
-    # that, not the editor context or the session notes sent before it.
+    # user_text is the first block, the message the user typed: agents answer
+    # that, not the editor context or the session notes sent after it.
     texts = [
         block.get("text") or ""
         for block in params.get("prompt") or []
         if isinstance(block, dict) and block.get("type") == "text"
     ]
     text = "\n".join(texts)
-    user_text = texts[-1] if texts else ""
+    user_text = texts[0] if texts else ""
 
     if SCENARIO == "agy-protocol":
         # Verify null-id notification is ignored cleanly as a notification,
@@ -322,6 +322,27 @@ def handle_prompt(request_id, params):
                 "content": {"type": "text", "text": "\n---\n".join(texts)},
             }
         )
+        result(request_id, {"stopReason": "end_turn"})
+        return
+
+    if SCENARIO == "prompt-blocks":
+        # Reports the text blocks in order, with their audience annotations,
+        # so a test can pin what the agent receives as the user's message.
+        blocks = []
+        for block in params.get("prompt") or []:
+            if not isinstance(block, dict) or block.get("type") != "text":
+                continue
+            annotations = block.get("annotations") or {}
+            blocks.append(
+                {
+                    "text": block.get("text") or "",
+                    "audience": annotations.get("audience") or [],
+                }
+            )
+        session_update({
+            "sessionUpdate": "agent_message_chunk",
+            "content": {"type": "text", "text": json.dumps(blocks, separators=(",", ":"))},
+        })
         result(request_id, {"stopReason": "end_turn"})
         return
 

@@ -3,6 +3,7 @@
 #include "types.h"
 
 #include <QHash>
+#include <QJsonDocument>
 #include <QNetworkRequest>
 #include <QTest>
 
@@ -26,6 +27,10 @@ public:
     QJsonObject geminiCacheBody(const QList<ChatMessage> &messages, const QString &model)
     {
         return buildGeminiCacheRequest(geminiCachePlan(messages, model), model);
+    }
+    QJsonObject openAiBody(const QList<ChatMessage> &messages, const QString &model)
+    {
+        return buildOpenAIRequest(messages, model);
     }
 };
 } // namespace KateAi
@@ -130,6 +135,77 @@ private Q_SLOTS:
 
         messages[0].content = u"System two"_s;
         QVERIFY(client.geminiCacheKey(messages, u"gemini-2.5-pro"_s) != first);
+    }
+
+    void geminiCacheIgnoresTransientTurnContext()
+    {
+        // The turn-context message is rebuilt every request. If it entered the
+        // cached prefix the key would change each turn, recreate the resource,
+        // and the cache would never hit.
+        TestableLlmClient client;
+        Settings settings;
+        settings.provider = Provider::OpenAICompatible;
+        settings.openaiCompatibleUrl =
+            u"https://generativelanguage.googleapis.com/v1beta"_s;
+        client.setSettings(settings);
+
+        QList<ChatMessage> persistent;
+        ChatMessage system;
+        system.role = ChatMessage::Role::System;
+        system.content = u"System prompt"_s;
+        persistent.append(system);
+        ChatMessage user;
+        user.role = ChatMessage::Role::User;
+        user.content = u"First request"_s;
+        persistent.append(user);
+        ChatMessage assistant;
+        assistant.role = ChatMessage::Role::Assistant;
+        assistant.content = u"First answer"_s;
+        persistent.append(assistant);
+
+        QList<ChatMessage> withContext = persistent;
+        ChatMessage ambient;
+        ambient.role = ChatMessage::Role::User;
+        ambient.content = u"Editor context: volatile"_s;
+        ambient.transient = true;
+        withContext.insert(1, ambient);
+
+        const QString key = client.geminiCacheKey(persistent, u"gemini-2.5-pro"_s);
+        QVERIFY(!key.isEmpty());
+        QCOMPARE(client.geminiCacheKey(withContext, u"gemini-2.5-pro"_s), key);
+
+        const QJsonObject body = client.geminiCacheBody(withContext, u"gemini-2.5-pro"_s);
+        const QString json = QString::fromUtf8(
+            QJsonDocument(body).toJson(QJsonDocument::Compact));
+        QVERIFY2(!json.contains(u"Editor context: volatile"_s),
+                 "the volatile turn context entered the cached prefix");
+    }
+
+    void unknownModelKeepsExplicitOutputLimit()
+    {
+        // A user-set max_tokens is only capped for a known hosted family. The
+        // conservative fallback must not silently truncate a local model.
+        TestableLlmClient client;
+        Settings settings;
+        settings.provider = Provider::OpenAICompatible;
+        settings.maxTokens = 30000;
+        client.setSettings(settings);
+
+        QList<ChatMessage> messages;
+        ChatMessage user;
+        user.role = ChatMessage::Role::User;
+        user.content = u"Hello"_s;
+        messages.append(user);
+
+        QCOMPARE(client.openAiBody(messages, u"mystery-model-7b"_s)
+                     .value(u"max_tokens"_s).toInt(),
+                 30000);
+        QCOMPARE(client.openAiBody(messages, u"my-local-model"_s)
+                     .value(u"max_tokens"_s).toInt(),
+                 30000);
+        QCOMPARE(client.openAiBody(messages, u"gpt-4o"_s)
+                     .value(u"max_tokens"_s).toInt(),
+                 16384);
     }
 
     void geminiCacheRequestCarriesThePrefix()

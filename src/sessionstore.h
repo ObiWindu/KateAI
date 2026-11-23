@@ -17,7 +17,7 @@ namespace KateAi
 class SessionStore
 {
 public:
-    static constexpr int CURRENT_VERSION = 3;
+    static constexpr int CURRENT_VERSION = 4;
 
     // The SQLite file backing the store. Exposed so the harness event log can
     // live in the same database without duplicating the path policy.
@@ -25,7 +25,15 @@ public:
 
     struct SessionData {
         int version = CURRENT_VERSION;
+        // The history as the model sees it. Context compaction replaces older
+        // turns with a summary here, so this list can be shorter than the
+        // transcript the user was reading.
         QList<ChatMessage> messages;
+        // The full conversation the transcript should render. Compaction does
+        // not touch it, so reopening a long thread still shows every turn.
+        // Payloads written before this field exist leave it empty; callers
+        // then fall back to `messages`.
+        QList<ChatMessage> transcript;
         QString currentThinking;
         QJsonArray currentPlan;
         bool planShown = false;

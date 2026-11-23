@@ -25,7 +25,8 @@ namespace
 {
 
 QString oneLine(QString text, int limit){
-    text.replace(QRegularExpression(QStringLiteral("[\\r\\n]+")), u" "_s);
+    static const QRegularExpression newlines(QStringLiteral("[\\r\\n]+"));
+    text.replace(newlines, u" "_s);
     text = text.simplified();
     if (limit > 0 && text.size() > limit) {
         text = truncateSafe(text, limit) + u"…"_s;
@@ -447,7 +448,19 @@ ContextResult ContextEngine::build(const QList<ChatMessage> &history, const Cont
         }
     }
 
-    int current = tokensOf(working, options.tokenFactor);
+    // Measure each message once. The shapers below walk the list several
+    // times, and tokensOf() has to serialise every tool-call object to weigh
+    // it; doing that again for each shaping pass made a long conversation cost
+    // far more than the compaction itself.
+    QList<int> workingCosts;
+    workingCosts.reserve(working.size());
+    qint64 workingTotal = 0;
+    for (const ChatMessage &message : std::as_const(working)) {
+        const int cost = tokensOf(message, options.tokenFactor);
+        workingCosts.append(cost);
+        workingTotal += cost;
+    }
+    int current = static_cast<int>(qMin<qint64>(workingTotal, std::numeric_limits<int>::max()));
 
     // Shaper 2: prune old tool output, preserving failures and the recent tail.
     if (current > budget.trigger) {
@@ -455,7 +468,7 @@ ContextResult ContextEngine::build(const QList<ChatMessage> &history, const Cont
         int recentFrom = qMax(bodyStart, working.size() - 1);
         int running = 0;
         for (int i = working.size() - 1; i >= bodyStart; --i) {
-            running += tokensOf(working.at(i), options.tokenFactor);
+            running += workingCosts.at(i);
             recentFrom = i;
             if (running >= budget.keepRecent / 2) {
                 break;
@@ -479,16 +492,17 @@ ContextResult ContextEngine::build(const QList<ChatMessage> &history, const Cont
                 continue;
             }
             const QString first = oneLine(message.content, PrunedToolChars);
+            const int before = workingCosts.at(i);
             message.content = u"[old tool output pruned: "_s + toolNameOf(message) + u"] "_s + first;
+            workingCosts[i] = tokensOf(message, options.tokenFactor);
+            current += workingCosts.at(i) - before;
             pruned = true;
         }
         if (pruned) {
             addShaper(u"prune-tool-outputs"_s);
             result.notes.append(u"pruned old tool output outside the recent window"_s);
-
             // Pruning only removed text, so older tool-call/result pairs stay
             // valid for the provider.
-            current = tokensOf(working, options.tokenFactor);
         }
     }
 
@@ -506,7 +520,7 @@ ContextResult ContextEngine::build(const QList<ChatMessage> &history, const Cont
         int running = 0;
         cut = working.size();
         for (int i = working.size() - 1; i >= bodyStart; --i) {
-            const int cost = tokensOf(working.at(i), options.tokenFactor);
+            const int cost = workingCosts.at(i);
             if (running + cost > keepTokens && i < working.size() - 1) {
                 cut = i + 1;
                 break;

@@ -126,6 +126,11 @@ bool EventStore::open(QString *error)
         pragmas.exec(u"PRAGMA synchronous=FULL"_s);
         pragmas.exec(u"PRAGMA busy_timeout=5000"_s);
         pragmas.exec(u"PRAGMA foreign_keys=ON"_s);
+        // The event log holds one small conversation per connection and is
+        // append-mostly. SQLite's default page cache is ~2 MiB per open
+        // connection, and every chat window keeps one open; a bounded 1 MiB
+        // cache keeps a multi-window session from multiplying that overhead.
+        pragmas.exec(u"PRAGMA cache_size=-1024"_s);
     }
 
     if (!ensureSchema(error)) {

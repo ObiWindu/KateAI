@@ -72,7 +72,8 @@ int safeBoundary(const QList<ChatMessage> &history, int start)
 QString oneLine(const QString &text, int limit)
 {
     QString flat = text.simplified();
-    flat.replace(QRegularExpression(QStringLiteral("[\\r\\n]+")), QStringLiteral(" "));
+    static const QRegularExpression newlines(QStringLiteral("[\\r\\n]+"));
+    flat.replace(newlines, QStringLiteral(" "));
     if (limit > 0 && flat.length() > limit) {
         flat = truncateSafe(flat, limit) + QStringLiteral("…");
     }

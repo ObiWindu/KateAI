@@ -303,7 +303,11 @@ private:
 
     void setState(State state, const QString &status);
     void spawnProcess();
-    void sendInitialize();
+    // The handshake request carries the same launch budget as the startup
+    // watchdog: a package runner such as npx may spend longer than 30 s fetching
+    // the agent before it can answer, and a shorter per-request deadline used
+    // to fail the handshake while the download was still in progress.
+    void sendInitialize(int timeoutMs);
     void maybeAuthenticate(const QJsonArray &authMethods, bool force = false);
     void openSession();
     void sendSessionNew();

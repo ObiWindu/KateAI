@@ -816,7 +816,8 @@ bool applyCanonicalEdit(const QString &contents, const QString &oldString,
 } // namespace
 
 QString unifiedDiff(const QString &path, const QString &before, const QString &after)
-{    QStringList oldLines = before.split(u'\n');
+{
+    QStringList oldLines = before.split(u'\n');
     QStringList newLines = after.split(u'\n');
     // Text that ends with a newline splits into one extra empty element: that
     // element is the line terminator, not a line. Keeping it inflates every
@@ -1361,7 +1362,11 @@ ToolResult ToolRunner::readFile(const QJsonObject &args) const
         QString full;
         constexpr qsizetype kMaxLedgerChars = 4 * 1024 * 1024;
         if (m_bridge->readDocument(readPath, &full) && full.size() <= kMaxLedgerChars) {
-            m_readSnapshots.insert(ledgerKey(readPath), full);
+            // Only the digest is retained: the conflict check compares the
+            // file as it is now against what the agent saw, and a turn that
+            // reads many large files must not keep them all in memory.
+            m_readSnapshots.insert(ledgerKey(readPath),
+                                   QCryptographicHash::hash(full.toUtf8(), QCryptographicHash::Sha256));
         }
     }
 
@@ -1504,7 +1509,7 @@ ToolResult ToolRunner::writeFile(const QJsonObject &args)
             result.output = u"%1 changed or disappeared after it was read. Re-read it before writing."_s.arg(path);
             return result;
         }
-        if (current != snapshot.value()) {
+        if (QCryptographicHash::hash(current.toUtf8(), QCryptographicHash::Sha256) != snapshot.value()) {
             result.ok = false;
             result.output = u"%1 changed after it was read. Re-read it, then apply the intended edit to the current content."_s.arg(path);
             return result;

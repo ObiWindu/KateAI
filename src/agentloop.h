@@ -203,6 +203,13 @@ public:
     QString diffAgainstCheckpoint(const QString &id) const;
 
     const QList<ChatMessage> &messages() const { return m_messages; }
+    // The full conversation for the transcript. Unlike messages(), compaction
+    // never replaces older turns with a summary here, so reopening the thread
+    // still renders everything the user saw.
+    const QList<ChatMessage> &transcriptMessages() const
+    {
+        return m_transcriptMessages.isEmpty() ? m_messages : m_transcriptMessages;
+    }
 
     // --- Session persistence -------------------------------------------------
     SessionStore::SessionData sessionData() const;
@@ -360,6 +367,14 @@ private:
     // yet a cancelled result, so the next request is not rejected by the
     // provider.
     void appendCancelledToolResults();
+    // Appends a message to the model history and to the user-visible
+    // transcript. Compaction rewrites only the model history, so the two lists
+    // diverge after a compaction but stay in sync for every new turn.
+    void appendMessage(const ChatMessage &message);
+    // Bounds the display transcript by a message and character budget. The
+    // oldest messages are replaced by a small elision marker; the model history
+    // is not touched.
+    void pruneTranscript();
     void addBudgetFailureResults(const QString &reason);
     void requestVerificationTurn();
     void emitPlanUpdate();
@@ -469,6 +484,12 @@ private:
     {
         m_subtaskDepth = depth;
     }
+    // Loads or generates the graph for the current workspace, reusing a graph
+    // already loaded for that workspace (a sub-agent's shared parent graph).
+    // `checkStale` also reindexes an already-loaded graph whose files changed
+    // on disk; set it once per turn, not on every active-view change, because
+    // the check stats every node.
+    void applyProjectGraph(bool checkStale = false);
 
     Settings m_settings;
     QString m_workspace;
@@ -485,7 +506,10 @@ LlmClient m_client;
     PermissionPolicy m_policy;
     std::unique_ptr<Sandbox> m_sandbox;
     std::unique_ptr<ToolRunner> m_tools;
-    std::unique_ptr<ProjectGraph> m_projectGraph;
+    // Shared with sub-agents so a delegation does not rescan the workspace and
+    // keep a second copy of the graph. A parent changing workspace replaces
+    // the pointer instead of mutating the graph a child still holds.
+    std::shared_ptr<ProjectGraph> m_projectGraph;
 
     ModeRegistry m_modes;
     AgentTeam m_team;
@@ -521,9 +545,20 @@ LlmClient m_client;
     // The sandbox/tool-runner configuration changed while a turn was running;
     // rebuildTools() applies it once the turn ends.
     bool m_sandboxDirty = false;
+    // The workspace changed while a tool could still hold the old graph;
+    // applyProjectGraph() runs once the turn ends.
+    bool m_graphDirty = false;
     QString m_taskSummary;
 
     QList<ChatMessage> m_messages;
+    // The full conversation as the user saw it. Compaction leaves this alone;
+    // it is what the transcript rebuilds from and what the session stores for
+    // display. Bounded by pruneTranscript() so a long tool-heavy session cannot
+    // grow the backing list (and every session save) without limit.
+    QList<ChatMessage> m_transcriptMessages;
+    // Running sum of the content/thinking characters in m_transcriptMessages,
+    // maintained so pruning does not have to walk the list on every append.
+    qsizetype m_transcriptChars = 0;
     QList<ToolCall> m_queue;
     QList<ToolResult> m_pendingResults;
     ToolCall m_waitingCall;

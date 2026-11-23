@@ -1025,6 +1025,19 @@ bool ToolCallWidget::isFileEditTool() const
     return isDiffTool(m_toolName) || m_hasDiffPreview;
 }
 
+qsizetype ToolCallWidget::retainedChars() const
+{
+    qsizetype total = m_resultOutput.size() + m_partialOutput.size() + m_runningInput.size()
+        + m_titleText.size() + m_filePath.size();
+    if (m_details) {
+        total += m_details->document()->characterCount();
+    }
+    if (m_describeDiff) {
+        total += m_describeDiff->document()->characterCount();
+    }
+    return total;
+}
+
 void ToolCallWidget::syncPreviewVisibility()
 {
 }

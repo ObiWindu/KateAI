@@ -8,6 +8,7 @@
 #include <QString>
 #include <QJsonObject>
 #include <QJsonArray>
+#include <QHash>
 #include <QMap>
 #include <QSet>
 #include <QStringList>
@@ -92,7 +93,6 @@ public:
 
     // Project analysis
     void analyzeFileDependencies();
-    void analyzeCodeStructure();
     void updateSecurityStatus();
     void generateSummaryReport() const;
 
@@ -155,6 +155,13 @@ private:
     // Directories already visited during the current scan, keyed by canonical
     // path, so a symlink loop cannot re-enter a directory it resolved from.
     QSet<QString> m_visitedDirs;
+    // Import statements collected during the scan, keyed by file node id.
+    // Resolving an import needs every node to exist, but the file text needed
+    // to extract it is large. Keeping the compact specifiers lets the scan
+    // release each file's text immediately instead of holding the whole
+    // workspace in memory until the dependency pass runs. Cleared once that
+    // pass has consumed it.
+    QHash<QString, QStringList> m_pendingImports;
     qint64 m_lastUpdateTime;
     bool m_isDirty;
 
@@ -169,16 +176,19 @@ private:
     // Raw import syntax is useful for display but cannot answer "what depends
     // on this file"; edges and dependency sets must point at node ids.
     QSet<QString> resolveImportTargets(const QString &content, const QString &sourcePath) const;
+    // The two halves of resolveImportTargets(), split so the scan can extract
+    // the compact specifiers from a file's text and drop the text, then
+    // resolve them after every node exists.
+    static QStringList extractImportSpecs(const QString &content);
+    QSet<QString> resolveImportSpecs(const QStringList &specs, const QString &sourcePath) const;
     void reindexFileDependencies(GraphNode *node);
     // Cuts the analysed text back to a bounded preview once the analysis has
     // run, so the graph does not hold every file of the workspace in memory.
     void trimContentPreviews();
     const GraphNode *findNodeByName(const QString &name) const;
-    // Both return the list of definitions, not a joined string: the only
-    // consumer needs the count, and QString::size() on the joined text measured
-    // characters instead of definitions.
-    QStringList extractClassDefinitions(const QString &content) const;
-    QStringList extractFunctionDefinitions(const QString &content) const;
+    // Node lookup by path, including the canonical-path fallback used when a
+    // caller and the scanner spell a symlinked prefix differently.
+    const GraphNode *findFileNode(const QString &filePath) const;
     bool isSafeRelationship(const GraphNode *source, const GraphNode *target, const QString &relationship) const;
 
     // Helper functions for graph operations

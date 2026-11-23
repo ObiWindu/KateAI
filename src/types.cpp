@@ -1124,7 +1124,11 @@ static QJsonObject toolDef(const QString &name, const QString &description, cons
     return tool;
 }
 
-QJsonArray toolDefinitions(const ToolAccess &access)
+// The complete built-in catalog. It is built once per process: the schema
+// objects are large and immutable, every AgentLoop and every model request
+// needs them, and rebuilding them per request cost both time and a transient
+// copy of the whole payload.
+static QJsonArray allToolDefinitions()
 {
     QJsonArray tools;
 
@@ -1585,12 +1589,18 @@ tools.append(toolDef(subtaskToolName(),
                           {u"description"_s},
                           false));
 
+    return tools;
+}
+
+QJsonArray toolDefinitions(const ToolAccess &access)
+{
+    static const QJsonArray all = allToolDefinitions();
     if (access.allowAll) {
-        return tools;
+        return all;
     }
 
     QJsonArray allowedTools;
-    for (const QJsonValue &tool : tools) {
+    for (const QJsonValue &tool : all) {
         const QString name = tool.toObject().value(u"function"_s).toObject().value(u"name"_s).toString();
         if (access.allows(name)) {
             allowedTools.append(tool);
@@ -2320,6 +2330,13 @@ AcpAgentQuirks acpAgentQuirks(const QString &agentId, const QString &command)
                        u"--boringssl_sanitization_enabled=false"_s,
                        u"--hugepage_text=false"_s};
     } else if (agentId == u"opencode"_s || lowerBase == u"opencode"_s) {
+        q.needsAcpSubcommand = true;
+    } else if (agentId == u"kilo"_s || lowerBase == u"kilo"_s
+               || lowerBase == u"kilo.exe"_s) {
+        // Kilo CLI is an OpenCode fork and has the same split: `kilo` starts
+        // the interactive TUI, `kilo acp` is the stdio ACP server. Without the
+        // subcommand the process runs but never answers initialize, which
+        // surfaced as "ACP 'initialize' timed out after 30000 ms".
         q.needsAcpSubcommand = true;
     } else if (agentId == u"claude-acp"_s || command.contains(u"claude-agent-acp"_s)) {
         q.modelFlag = true;

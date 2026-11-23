@@ -279,6 +279,73 @@ private Q_SLOTS:
         QCOMPARE(graph.getNodeCount(), 1000);
     }
 
+    // The scan must analyse each file while its text is in hand and then cut
+    // the text back to a bounded preview: holding every file until the
+    // dependency pass made the graph's peak memory grow with the whole
+    // workspace. A definition beyond that preview therefore has to survive in
+    // the symbol index even though the node no longer keeps the full text.
+    void testLargeFileSymbolsSurviveContentRelease()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        QByteArray content;
+        for (int i = 0; i < 3000; ++i) {
+            content += "// filler line that makes the file larger than a preview\n";
+        }
+        QVERIFY(content.size() > 64 * 1024);
+        content += "int lateFunction() { return 1; }\n";
+        writeFile(dir.path() + u"/late.cpp"_s, content);
+
+        ProjectGraph graph;
+        graph.generateGraph(dir.path());
+
+        const QString path = dir.path() + u"/late.cpp"_s;
+        const GraphNode *node = graph.findNodeByPath(path);
+        QVERIFY(node);
+        QVERIFY2(node->content.size() < content.size(),
+                 "the scan retained the whole file text");
+        QVERIFY2(node->content.size() <= 16 * 1024,
+                 "the scan retained more than the content preview");
+        const QList<GraphSymbol> symbols = graph.symbolsInFile(path);
+        const auto found = std::find_if(symbols.cbegin(), symbols.cend(),
+                                        [](const GraphSymbol &symbol) {
+                                            return symbol.name == u"lateFunction"_s;
+                                        });
+        QVERIFY2(found != symbols.cend(), "a definition past the preview was not indexed");
+        QVERIFY(found->line > 3000);
+    }
+
+    // The incremental path used to cut a new node's content to the preview
+    // before resolving its imports, so an include past the first 16 KiB was
+    // invisible until the next full scan.
+    void testNewFileImportsBeyondThePreviewAreIndexed()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        writeFile(dir.path() + u"/target.h"_s, "int target();\n");
+
+        ProjectGraph graph;
+        graph.generateGraph(dir.path());
+
+        QByteArray content;
+        for (int i = 0; i < 1200; ++i) {
+            content += "// filler line that pushes the include past the preview\n";
+        }
+        QVERIFY(content.size() > 16 * 1024);
+        content += "#include \"target.h\"\nint created() { return 1; }\n";
+        const QString newPath = dir.path() + u"/created.cpp"_s;
+        graph.updateGraph(newPath, QString::fromUtf8(content));
+
+        const GraphNode *created = graph.getNode(ProjectGraph::generateNodeId(newPath));
+        QVERIFY(created);
+        const QString targetId =
+            ProjectGraph::generateNodeId(dir.path() + u"/target.h"_s, u"file"_s);
+        QVERIFY2(created->dependencies.contains(targetId),
+                 "an include past the content preview was not resolved incrementally");
+        QVERIFY2(created->content.size() <= 16 * 1024,
+                 "the incremental path kept more than the content preview");
+    }
+
     void testUpdateAndRemoveNode()
     {
         QTemporaryDir dir;

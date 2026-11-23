@@ -56,6 +56,19 @@ bool providerSupportsStreamUsage(Provider provider)
     }
 }
 
+// A known hosted family publishes a real output limit; cap the configured
+// value there so the provider does not reject the request. An unknown or
+// local model has only the conservative fallback, and silently lowering a
+// user-set max_tokens there truncates answers that used to work.
+int effectiveMaxOutputTokens(const ModelProfile &profile, int requested)
+{
+    if (requested <= 0 || !profile.known || profile.maxOutputTokens <= 0
+        || profile.family == u"local"_s) {
+        return requested;
+    }
+    return qMin(requested, profile.maxOutputTokens);
+}
+
 // The OpenAI-compatible Gemini facade lives on the same host as the native
 // API. The native base is derived from it so cached-content resources and the
 // native streaming endpoint can be used without a separate provider setting.
@@ -1081,11 +1094,8 @@ QJsonObject LlmClient::buildOpenAIRequest(const QList<ChatMessage> &messages, co
     body.insert(u"temperature"_s, m_settings.temperature);
     body.insert(u"top_p"_s, m_settings.topP);
     if (m_settings.maxTokens > 0) {
-        int maxTokens = m_settings.maxTokens;
-        if (profile.maxOutputTokens > 0) {
-            maxTokens = qMin(maxTokens, profile.maxOutputTokens);
-        }
-        body.insert(u"max_tokens"_s, maxTokens);
+        body.insert(u"max_tokens"_s,
+                    effectiveMaxOutputTokens(profile, m_settings.maxTokens));
     }
     if (m_settings.frequencyPenalty != 0.0) {
         body.insert(u"frequency_penalty"_s, m_settings.frequencyPenalty);
@@ -1139,10 +1149,8 @@ QJsonObject LlmClient::buildAnthropicRequest(const QList<ChatMessage> &messages,
     body.insert(u"messages"_s, messagesToAnthropicJson(messages));
     body.insert(u"stream"_s, true);
     // max_tokens is required by the Messages API; fall back to a sane default.
-    int maxTokens = m_settings.maxTokens > 0 ? m_settings.maxTokens : 4096;
-    if (profile.maxOutputTokens > 0) {
-        maxTokens = qMin(maxTokens, profile.maxOutputTokens);
-    }
+    const int maxTokens = effectiveMaxOutputTokens(
+        profile, m_settings.maxTokens > 0 ? m_settings.maxTokens : 4096);
     body.insert(u"max_tokens"_s, maxTokens);
 
     // Extended thinking is the Messages API counterpart of the OpenAI
@@ -1301,11 +1309,8 @@ QJsonObject LlmClient::buildGeminiRequest(const QList<ChatMessage> &messages,
         generation.insert(u"topP"_s, m_settings.topP);
     }
     if (m_settings.maxTokens > 0) {
-        int maxTokens = m_settings.maxTokens;
-        if (profile.maxOutputTokens > 0) {
-            maxTokens = qMin(maxTokens, profile.maxOutputTokens);
-        }
-        generation.insert(u"maxOutputTokens"_s, maxTokens);
+        generation.insert(u"maxOutputTokens"_s,
+                          effectiveMaxOutputTokens(profile, m_settings.maxTokens));
     }
     body.insert(u"generationConfig"_s, generation);
     return body;
@@ -1317,24 +1322,40 @@ LlmClient::GeminiCachePlan LlmClient::geminiCachePlan(
     GeminiCachePlan plan;
     plan.requestMessages = messages;
 
+    // The turn-context message is transient: it is rebuilt for every request.
+    // Including it in the prefix would change the cache key each turn, so the
+    // resource would be recreated and never hit. Build the prefix from the
+    // persistent messages only.
+    QList<ChatMessage> stable;
+    QList<int> stableOriginalIndex;
+    stable.reserve(messages.size());
+    stableOriginalIndex.reserve(messages.size());
+    for (int i = 0; i < messages.size(); ++i) {
+        if (messages.at(i).transient) {
+            continue;
+        }
+        stable.append(messages.at(i));
+        stableOriginalIndex.append(i);
+    }
+
     int firstUser = -1;
     int prefixEnd = -1;
     QStringList systems;
-    for (int i = 0; i < messages.size(); ++i) {
-        if (messages.at(i).role == ChatMessage::Role::System) {
-            if (!messages.at(i).content.trimmed().isEmpty()) {
-                systems.append(messages.at(i).content.trimmed());
+    for (int i = 0; i < stable.size(); ++i) {
+        if (stable.at(i).role == ChatMessage::Role::System) {
+            if (!stable.at(i).content.trimmed().isEmpty()) {
+                systems.append(stable.at(i).content.trimmed());
             }
             continue;
         }
-        if (firstUser < 0 && messages.at(i).role == ChatMessage::Role::User) {
+        if (firstUser < 0 && stable.at(i).role == ChatMessage::Role::User) {
             firstUser = i;
             continue;
         }
         // Cache the first exchange, not just the first user turn. The suffix
         // then starts with a user/tool response, which keeps Gemini's content
         // roles valid and gives the cache a useful amount of content.
-        if (firstUser >= 0 && messages.at(i).role == ChatMessage::Role::Assistant) {
+        if (firstUser >= 0 && stable.at(i).role == ChatMessage::Role::Assistant) {
             prefixEnd = i;
             break;
         }
@@ -1343,7 +1364,7 @@ LlmClient::GeminiCachePlan LlmClient::geminiCachePlan(
         return plan;
     }
     plan.systemText = systems.join(u"\n\n"_s);
-    plan.prefixContents = messagesToGeminiJson(messages.mid(0, prefixEnd + 1), nullptr);
+    plan.prefixContents = messagesToGeminiJson(stable.mid(0, prefixEnd + 1), nullptr);
 
     const QJsonArray tools = geminiTools(advertisedTools());
     const QByteArray material = (model + u'\n' + plan.systemText + u'\n'
@@ -1356,14 +1377,29 @@ LlmClient::GeminiCachePlan LlmClient::geminiCachePlan(
     plan.key = QString::fromLatin1(
         QCryptographicHash::hash(material, QCryptographicHash::Sha1).toHex());
 
+    // Everything after the cached exchange is sent verbatim. A transient
+    // message that sat inside the prefix moves to the front of the suffix so
+    // the model still receives it; one after the split keeps its place.
+    const int splitOriginal = stableOriginalIndex.at(prefixEnd);
+    QList<ChatMessage> suffix;
+    for (int i = 0; i < messages.size(); ++i) {
+        if (i <= splitOriginal) {
+            if (messages.at(i).transient) {
+                suffix.append(messages.at(i));
+            }
+            continue;
+        }
+        suffix.append(messages.at(i));
+    }
+
     const bool cacheValid = !m_geminiCacheKey.isEmpty()
         && m_geminiCacheKey == plan.key
         && !m_geminiCacheName.isEmpty()
         && m_geminiCacheExpires > QDateTime::currentDateTimeUtc();
     // A cache without a suffix would leave the request without contents.
-    if (cacheValid && prefixEnd + 1 < messages.size()) {
+    if (cacheValid && !suffix.isEmpty()) {
         plan.cachedContent = m_geminiCacheName;
-        plan.requestMessages = messages.mid(prefixEnd + 1);
+        plan.requestMessages = suffix;
     }
     return plan;
 }
@@ -1545,11 +1581,8 @@ QJsonObject LlmClient::buildAcpNativeRequest(const QList<ChatMessage> &messages,
     body.insert(u"temperature"_s, m_settings.temperature);
     body.insert(u"top_p"_s, m_settings.topP);
     if (m_settings.maxTokens > 0) {
-        int maxTokens = m_settings.maxTokens;
-        if (profile.maxOutputTokens > 0) {
-            maxTokens = qMin(maxTokens, profile.maxOutputTokens);
-        }
-        body.insert(u"max_tokens"_s, maxTokens);
+        body.insert(u"max_tokens"_s,
+                    effectiveMaxOutputTokens(profile, m_settings.maxTokens));
     }
     // ACP-specific fields
     body.insert(u"acp_version"_s, u"1.0"_s);

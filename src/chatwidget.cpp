@@ -1139,7 +1139,11 @@ ChatWidget::ChatWidget(QWidget *parent)
         m_answerStarted = true;
         flushThinkingPacer();
         setThinkingIndicator(false);
-        setStreaming(m_streamText + delta);
+        // Append in place. `m_streamText + delta` allocated a new copy of the
+        // whole answer for every token, which made a long answer quadratic in
+        // both time and peak memory. QString append is amortised constant.
+        m_streamText += delta;
+        setStreaming(m_streamText);
     });
     connect(&m_agent, &AgentLoop::assistantReset, this, [this]() {
         // The streamed text belonged to a failed attempt and is replaced by the
@@ -2966,10 +2970,35 @@ void ChatWidget::applyTranscriptCollapse()
         }
     }
     // Reasoning blocks carry their own browser/document too. Keep recent
-    // turns and drop the oldest ones once the transcript is very long.
+    // turns and drop the oldest ones once the transcript is very long. As with
+    // tool cards, count content as well as cards: a few long reasoning blocks
+    // cost more than many short ones.
     constexpr int kMaxRetainedThinkingBlocks = 200;
-    while (m_thinkingBlocks.size() > kMaxRetainedThinkingBlocks) {
-        const ThinkingBlockRef entry = m_thinkingBlocks.takeFirst();
+    constexpr qsizetype kMaxRetainedThinkingChars = 2 * 1024 * 1024;
+    qsizetype thinkingChars = 0;
+    for (const auto &entry : std::as_const(m_thinkingBlocks)) {
+        if (entry.browser) {
+            thinkingChars += entry.browser->document()->characterCount();
+        }
+    }
+    // The live block is still receiving deltas and the newest entry is the one
+    // the next update will target. Pruning either mid-stream left
+    // m_thinkingBrowser null and silently dropped the rest of the reasoning. A
+    // single oversized live block is therefore allowed to exceed the budget.
+    for (int i = 0; i < m_thinkingBlocks.size()
+         && (m_thinkingBlocks.size() > kMaxRetainedThinkingBlocks
+             || thinkingChars > kMaxRetainedThinkingChars);) {
+        const ThinkingBlockRef entry = m_thinkingBlocks.at(i);
+        const bool protectedEntry = entry.block == m_thinkingBlock
+            || i == m_thinkingBlocks.size() - 1;
+        if (protectedEntry) {
+            ++i;
+            continue;
+        }
+        m_thinkingBlocks.removeAt(i);
+        if (entry.browser) {
+            thinkingChars -= entry.browser->document()->characterCount();
+        }
         if (entry.block) {
             entry.block->hide();
             entry.block->setParent(nullptr);
@@ -3022,14 +3051,21 @@ void ChatWidget::pruneOldTranscriptCards()
 {
     // Every tool card owns a QTextBrowser and its document. A long session
     // could otherwise retain thousands of them, so the oldest finished cards
-    // are dropped from the live widget tree once the retention cap is passed.
-    // The session still has the history and rebuilds them on reload.
+    // are dropped from the live widget tree once a retention cap is passed.
+    // The caps are both a card count and an approximate content size: a
+    // handful of 80 KB command outputs costs more memory than a hundred short
+    // reads, and the count alone cannot see that. The session still has the
+    // history and rebuilds it on reload.
     constexpr int kMaxRetainedToolCards = 400;
-    if (m_toolCallOrder.size() <= kMaxRetainedToolCards) {
-        return;
+    constexpr qsizetype kMaxRetainedToolChars = 6 * 1024 * 1024;
+    qsizetype toolChars = 0;
+    for (ToolCallWidget *widget : std::as_const(m_toolCallOrder)) {
+        if (widget) {
+            toolChars += widget->retainedChars();
+        }
     }
-    int toRemove = m_toolCallOrder.size() - kMaxRetainedToolCards;
-    for (int i = 0; i < m_toolCallOrder.size() && toRemove > 0;) {
+    for (int i = 0; i < m_toolCallOrder.size()
+         && (m_toolCallOrder.size() > kMaxRetainedToolCards || toolChars > kMaxRetainedToolChars);) {
         ToolCallWidget *widget = m_toolCallOrder.at(i);
         if (!widget || widget->isRunning()) {
             ++i;
@@ -3038,30 +3074,45 @@ void ChatWidget::pruneOldTranscriptCards()
         if (m_pinnedViewportWidget == widget) {
             m_pinnedViewportWidget = nullptr;
         }
+        toolChars -= widget->retainedChars();
         m_toolCallWidgets.remove(widget->toolCallId());
         m_toolCallOrder.removeAt(i);
         m_focusedToolCardIndex = -1;
         widget->hide();
         widget->setParent(nullptr);
         widget->deleteLater();
-        --toRemove;
     }
 
     // Text turns are lighter than tool cards but still unbounded. Keep the
-    // recent user/assistant cards and let the session restore the rest.
+    // recent user/assistant cards and let the session restore the rest. This
+    // must run even when the tool-card count is under its cap: a chat that
+    // never calls a tool would otherwise keep every message card forever.
     if (!m_transcriptLayout) {
         return;
     }
     constexpr int kMaxRetainedTextCards = 300;
+    constexpr qsizetype kMaxRetainedTextChars = 4 * 1024 * 1024;
+    // The rendered body is the memory-heavy part of a text card. Count the
+    // browsers rather than only the card count, so a few very long answers are
+    // bounded like many short ones.
+    const auto bodyChars = [](QWidget *widget) {
+        qsizetype chars = 0;
+        for (const QTextBrowser *browser : widget->findChildren<QTextBrowser *>()) {
+            chars += browser->document()->characterCount();
+        }
+        return chars;
+    };
     int textCards = 0;
+    qsizetype textChars = 0;
     for (int i = 0; i < m_transcriptLayout->count(); ++i) {
         QWidget *widget = m_transcriptLayout->itemAt(i) ? m_transcriptLayout->itemAt(i)->widget() : nullptr;
         if (widget && (widget->objectName() == u"userCard"_s || widget->objectName() == u"assistantCard"_s)) {
             ++textCards;
+            textChars += bodyChars(widget);
         }
     }
-    int textToRemove = textCards - kMaxRetainedTextCards;
-    for (int i = 0; i < m_transcriptLayout->count() && textToRemove > 0;) {
+    for (int i = 0; i < m_transcriptLayout->count()
+         && (textCards > kMaxRetainedTextCards || textChars > kMaxRetainedTextChars);) {
         QLayoutItem *item = m_transcriptLayout->itemAt(i);
         QWidget *widget = item ? item->widget() : nullptr;
         if (!widget || (widget->objectName() != u"userCard"_s && widget->objectName() != u"assistantCard"_s)
@@ -3069,12 +3120,13 @@ void ChatWidget::pruneOldTranscriptCards()
             ++i;
             continue;
         }
+        --textCards;
+        textChars -= bodyChars(widget);
         m_transcriptLayout->takeAt(i);
         widget->hide();
         widget->setParent(nullptr);
         widget->deleteLater();
         delete item;
-        --textToRemove;
     }
 }
 
@@ -3476,6 +3528,22 @@ void ChatWidget::appendTranscriptWidget(QWidget *widget)
         return;
     }
     m_transcriptLayout->insertWidget(transcriptInsertIndex(), widget);
+    // A restored conversation can hold thousands of cards. Waiting for the
+    // end of rebuildTranscript() to prune would build every one of them first
+    // and make the restore peak, not the steady state, the memory high-water
+    // mark. Trim in batches as the transcript grows.
+    //
+    // Prune only every `kPruneBatch` cards, not on every append: the check
+    // walks every retained card, so running it above the threshold on each
+    // insert made a long restore quadratic. The caps still bound memory; this
+    // only delays the next check by at most one batch.
+    constexpr int kPruneThreshold = 512;
+    constexpr int kPruneBatch = 128;
+    if (m_transcriptLayout->count() >= m_nextTranscriptPrune) {
+        pruneOldTranscriptCards();
+        m_nextTranscriptPrune = qMax(kPruneThreshold,
+                                     m_transcriptLayout->count() + kPruneBatch);
+    }
 }
 
 void ChatWidget::addIntentWidget(QWidget *widget)
@@ -4290,6 +4358,14 @@ void ChatWidget::updateModelSelectorLabel()
 void ChatWidget::updateTokenDisplay()
 {
     if (!m_tokenCount) {
+        return;
+    }
+    // A transcript rebuild renders the restored history card by card. Its
+    // updateTokenDisplay() calls must not compact that history: doing so
+    // mid-rebuild replaced the messages being rendered and left the newest
+    // answer out of the transcript. rebuildTranscript() updates the readout
+    // once, after every card is in place.
+    if (m_renderingTranscript) {
         return;
     }
     // What belongs here is how full the context window is, not the model name
@@ -6628,6 +6704,8 @@ bool ChatWidget::isInternalUserMessage(const QString &text)
 
 void ChatWidget::clearTranscriptContents()
 {
+    // A fresh transcript starts under the retention threshold again.
+    m_nextTranscriptPrune = 512;
     // Navigation is per transcript, and the global override with it: a fresh
     // transcript starts on automatic behaviour.
     m_focusedToolCardIndex = -1;
@@ -7044,6 +7122,9 @@ void ChatWidget::rebuildTranscript()
     // previous value back on every return.
     const bool wasLoadingConversation = m_loadingConversation;
     m_loadingConversation = true;
+    // Reading the history is safe, but the readout update that can compact an
+    // over-full history is not: it replaces the very list being rendered.
+    m_renderingTranscript = true;
 
     m_permissionBar->hideBar();
     clearTranscriptContents();
@@ -7064,7 +7145,15 @@ void ChatWidget::rebuildTranscript()
         syncIndicatorsOverlay();
     }
 
-    const auto &messages = m_agent.messages();
+    // Read the display transcript, not the model history: compaction replaces
+    // older model turns with a summary, and rebuilding from that list would
+    // make a long thread reopen with only a summary and its newest turns.
+    // Take a snapshot as well. Building the transcript must not be affected by
+    // the history changing under it: updateTokenDisplay() can compact the
+    // conversation while the cards are being created (a restored session that
+    // is already at its context limit), and a reference into the agent's list
+    // would then re-index the loop into the compacted history.
+    const QList<ChatMessage> messages = m_agent.transcriptMessages();
     if (messages.isEmpty()) {
         m_transcriptLayout->insertWidget(transcriptInsertIndex(), createWelcomeWidget());
         if (m_threadTitle) {
@@ -7072,6 +7161,7 @@ void ChatWidget::rebuildTranscript()
         }
         forceScrollToBottom();
         m_loadingConversation = wasLoadingConversation;
+        m_renderingTranscript = false;
         return;
     }
 
@@ -7371,7 +7461,18 @@ void ChatWidget::rebuildTranscript()
                 }
                 break;
             case ChatMessage::Role::System:
-                // System messages are not shown in transcript
+                // System messages are not shown in transcript, except the
+                // marker that says the oldest turns were elided by the
+                // transcript budget.
+                if (msg.name == u"transcript_elision"_s) {
+                    auto *marker = new QLabel(msg.content, m_transcriptContainer);
+                    marker->setObjectName(u"transcriptElision"_s);
+                    marker->setAlignment(Qt::AlignCenter);
+                    marker->setStyleSheet(
+                        QStringLiteral("color: %1; font-size: 11px; padding: 6px;")
+                            .arg(ChatTheme::textMuted()));
+                    appendTranscriptWidget(marker);
+                }
                 break;
         }
     }
@@ -7388,6 +7489,10 @@ void ChatWidget::rebuildTranscript()
     restoreCurrentTurn(sessionData);
 
     applyTranscriptCollapse();
+    // Clear the rebuild marker before the single readout update: that update is
+    // what folds a restored history that is already over its window, and it
+    // must run only now that every message has a card (see updateTokenDisplay).
+    m_renderingTranscript = false;
     updateTokenDisplay();
     updateModelSelectorLabel();
     QTimer::singleShot(0, this, [thisWeak = QPointer<ChatWidget>(this)]() {
