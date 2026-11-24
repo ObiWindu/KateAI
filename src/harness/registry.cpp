@@ -68,6 +68,7 @@ QString ToolRegistry::builtinTitle(const QString &name)
     if (name == u"write_plan_file"_s) return u"Write plan file"_s;
     if (name == u"suggest"_s) return u"Suggest improvement"_s;
     if (name == u"question"_s) return u"Ask the user"_s;
+    if (name == u"skill"_s) return u"Load skill"_s;
     if (name == u"todo_write"_s) return u"Update todo list"_s;
     if (name == u"todo_read"_s) return u"Read todo list"_s;
     if (name == u"think"_s) return u"Reason privately"_s;
@@ -77,6 +78,7 @@ QString ToolRegistry::builtinTitle(const QString &name)
     if (name == u"build_targets"_s) return u"List build targets"_s;
     if (name == u"build_run"_s) return u"Run build"_s;
     if (name == u"terminal_run"_s) return u"Run in terminal"_s;
+    if (name == u"subagent_transcript"_s) return u"Read sub-agent transcript"_s;
     if (name.startsWith(u"lsp_"_s)) return u"Language server"_s;
     if (name.startsWith(u"debug_"_s)) return u"Debugger"_s;
     if (name == subtaskToolName()) return u"Delegate to sub-agent"_s;
@@ -99,6 +101,9 @@ QString ToolRegistry::builtinGroup(const QString &name)
         return u"edit"_s;
     }
     if (name == subtaskToolName()) {
+        return u"orchestrate"_s;
+    }
+    if (name == u"subagent_transcript"_s) {
         return u"orchestrate"_s;
     }
     return u"read"_s;
@@ -163,7 +168,8 @@ void ToolRegistry::loadBuiltins()
             || name == u"apply_patch"_s || name == u"bash"_s || name == u"grep"_s
             || name == u"glob"_s || name == u"list_dir"_s || name == u"read_tool_result"_s
             || name == u"todo_write"_s || name == u"todo_read"_s || name == u"question"_s
-            || name == u"think"_s || name == u"suggest"_s || name == u"memory_write"_s;
+            || name == u"think"_s || name == u"suggest"_s || name == u"memory_write"_s
+            || name == u"skill"_s;
         spec.deferByDefault = name.startsWith(u"debug_"_s) || name.startsWith(u"lsp_"_s)
             || name == u"build_targets"_s || name == u"build_run"_s
             || name == u"terminal_run"_s || name == u"web_search"_s || name == u"web_fetch"_s
@@ -174,6 +180,10 @@ void ToolRegistry::loadBuiltins()
             spec.maxResultChars = 48000;
         } else if (name == u"read_file"_s) {
             spec.maxResultChars = 40000;
+        } else if (name == u"skill"_s) {
+            spec.maxResultChars = 48000;
+        } else if (name == u"subagent_transcript"_s) {
+            spec.maxResultChars = 48000;
         } else if (name == u"grep"_s) {
             spec.maxResultChars = 32000;
         } else if (name == u"glob"_s || name == u"list_dir"_s) {

@@ -1631,6 +1631,17 @@ void KateAiConfigPage::editCustomAgent()
     profile.modeId = modeCombo->currentData().toString();
     profile.description = descriptionEdit->toPlainText().trimmed();
     profile.enabled = true;
+    // The dialog only edits the original four fields; keep the AgentSpec
+    // fields that a project file or JSON roster may have set.
+    profile.model = existing.model;
+    profile.effort = existing.effort;
+    profile.permissionMode = existing.permissionMode;
+    profile.tools = existing.tools;
+    profile.disallowedTools = existing.disallowedTools;
+    profile.skills = existing.skills;
+    profile.maxTurns = existing.maxTurns;
+    profile.isolation = existing.isolation;
+    profile.memoryScope = existing.memoryScope;
 
     if (profile.id.isEmpty()) {
         QMessageBox::warning(this, i18n("Custom Agent"), i18n("The agent needs an id made of letters, digits, or dashes."));

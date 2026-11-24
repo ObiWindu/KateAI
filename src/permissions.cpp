@@ -52,6 +52,7 @@ bool PermissionPolicy::isReadTool(const QString &toolName) const
         || c == u"glob"_s || c == u"query_project_graph"_s
         || c == u"web_search"_s || c == u"web_fetch"_s
         || c == u"write_plan_file"_s || c == u"suggest"_s || c == u"question"_s
+        || c == u"skill"_s || c == u"subagent_transcript"_s
         // UI-state tools: the checklist, the reasoning note and the plan-mode
         // switch change no file. They belong to the read group and must never
         // prompt or trigger a checkpoint just to keep notes.

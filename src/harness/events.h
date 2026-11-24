@@ -38,6 +38,10 @@ inline const QString Compaction = QStringLiteral("compaction");
 inline const QString Notice = QStringLiteral("notice");
 inline const QString Verification = QStringLiteral("verification");
 inline const QString Message = QStringLiteral("message");
+inline const QString SubagentStart = QStringLiteral("subagent/start");
+inline const QString SubagentEnd = QStringLiteral("subagent/end");
+inline const QString SubagentApply = QStringLiteral("subagent/apply");
+inline const QString SubagentDiscard = QStringLiteral("subagent/discard");
 } // namespace EventTypes
 
 struct HarnessEvent {

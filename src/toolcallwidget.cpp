@@ -1149,6 +1149,8 @@ QString ToolCallWidget::iconForTool(const QString &toolName) const
     if (toolName == u"write_plan_file"_s) return u"📋"_s;
     if (toolName == u"suggest"_s) return u"💡"_s;
     if (toolName == u"question"_s) return u"❓"_s;
+    if (toolName == u"skill"_s) return u"🧩"_s;
+    if (toolName == u"subagent_transcript"_s) return u"🗂"_s;
     if (toolName == u"new_task"_s || toolName == u"task"_s) return u"🧩"_s;
     if (toolName.startsWith(u"mcp__"_s)) return u"🔌"_s;
     if (toolName.startsWith(u"terminal/"_s) || toolName == u"terminal"_s) return u"🖳"_s;
@@ -1213,6 +1215,7 @@ QString ToolCallWidget::languageForTool(const QString &toolName) const
     if (toolName == u"web_search"_s || toolName == u"web_fetch"_s) return u"JSON"_s;
     if (toolName == u"query_project_graph"_s) return u"JSON"_s;
     if (toolName == u"new_task"_s) return u"Text"_s;  // Sub-agent results are typically text
+    if (toolName == u"subagent_transcript"_s) return u"Text"_s;
     if (toolName.startsWith(u"mcp__"_s)) return u"JSON"_s;
 
     // Terminal tools

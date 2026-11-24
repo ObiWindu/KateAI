@@ -34,10 +34,11 @@ private Q_SLOTS:
         QVERIFY(flags.contextV2);
         QVERIFY(flags.memoryV2);
         QVERIFY(flags.toolSearch);
-        // 0.9 features stay off at the 0.8 gate.
-        QVERIFY(!flags.skills);
-        QVERIFY(!flags.agentsV2);
-        QVERIFY(!flags.inspector);
+        // 0.9 features are on at the 0.9 gate; telemetry remains opt-in.
+        QVERIFY(flags.skills);
+        QVERIFY(flags.agentsV2);
+        QVERIFY(flags.inspector);
+        QVERIFY(!flags.telemetry);
     }
 
     void flagsOverrides()

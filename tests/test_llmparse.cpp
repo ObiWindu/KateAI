@@ -600,12 +600,12 @@ private Q_SLOTS:
     void planModeOnlyAdvertisesReadTools()
     {
         const QJsonArray tools = toolDefinitions(ModeRegistry::toolAccessForGroups({ToolGroup::read()}));
-        QCOMPARE(tools.size(), 27);
+        QCOMPARE(tools.size(), 28);
         for (const QJsonValue &tool : tools) {
             const QString name = tool.toObject().value(u"function"_s).toObject().value(u"name"_s).toString();
             QVERIFY(name == u"read_file"_s || name == u"read_tool_result"_s || name == u"list_dir"_s || name == u"grep"_s || name == u"glob"_s
                     || name == u"query_project_graph"_s || name == u"write_plan_file"_s || name == u"suggest"_s
-                    || name == u"question"_s
+                    || name == u"question"_s || name == u"skill"_s
                     || name == u"todo_write"_s || name == u"todo_read"_s || name == u"think"_s
                     || name == u"exit_plan_mode"_s
                     || name == u"lsp_diagnostics"_s || name == u"lsp_symbols"_s || name == u"lsp_hover"_s

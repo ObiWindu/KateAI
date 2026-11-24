@@ -380,7 +380,7 @@ jobs:
           retention-days: 28
 
   # ----------------------------------------------------------------- Release
-  # Runs only for tags like v0.8.0 pushed on main. Attaches every artifact
+  # Runs only for tags like v0.9.0 pushed on main. Attaches every artifact
   # from the jobs above to the GitHub Release.
   release:
     name: Publish GitHub Release

@@ -30,6 +30,19 @@ private Q_SLOTS:
         QCOMPARE(g.readEntry(u"ConfigVersion"_s, 0), SettingsStore::configVersion());
     }
 
+    void versionOneConfigIsUpgradedOnTheNextSave()
+    {
+        KConfigGroup g = KConfigGroup(KSharedConfig::openConfig(), u"KateAI"_s);
+        g.writeEntry(u"ConfigVersion"_s, 1);
+        g.writeEntry(u"Provider"_s, u"deepseek"_s);
+        g.sync();
+
+        const Settings loaded = SettingsStore::load();
+        QCOMPARE(loaded.provider, Provider::DeepSeek);
+        SettingsStore::save(loaded);
+        QCOMPARE(g.readEntry(u"ConfigVersion"_s, 0), 2);
+    }
+
     void legacyMaxIterationsMigrates()
     {
         // Simulate a pre-0.4.0 config that only has MaxIterations.

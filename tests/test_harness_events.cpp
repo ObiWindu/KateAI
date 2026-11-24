@@ -109,6 +109,28 @@ private Q_SLOTS:
         QCOMPARE(store.headSeq(conversation), 0);
     }
 
+    void copyConversationKeepsASequencedPrefix()
+    {
+        EventStore store(m_dir.filePath(u"events-copy.sqlite"_s));
+        QVERIFY(store.open());
+        const QString source = u"conv-source"_s;
+        QList<HarnessEvent> events;
+        events.append(Events::make(EventTypes::TurnStart,
+                                   QJsonObject{{u"userText"_s, u"one"_s}}, u"turn-1"_s));
+        events.append(Events::make(EventTypes::AssistantMessage,
+                                   QJsonObject{{u"text"_s, u"two"_s}}, u"turn-1"_s));
+        events.append(Events::make(EventTypes::TurnStart,
+                                   QJsonObject{{u"userText"_s, u"three"_s}}, u"turn-2"_s));
+        QVERIFY(store.append(source, events));
+
+        QVERIFY(store.copyConversation(source, u"conv-copy"_s, 2));
+        const QList<HarnessEvent> copied = store.read(u"conv-copy"_s);
+        QCOMPARE(copied.size(), 2);
+        QCOMPARE(copied.first().conversationId, u"conv-copy"_s);
+        QCOMPARE(copied.last().payload.value(u"text"_s).toString(), u"two"_s);
+        QCOMPARE(store.read(source).size(), 3);
+    }
+
     void rejectsOutOfOrderSequence()
     {
         EventStore store(m_dir.filePath(u"events-order.sqlite"_s));

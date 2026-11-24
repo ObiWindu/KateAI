@@ -18,11 +18,13 @@
 #include "types.h"
 
 #include <QApplication>
+#include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLabel>
 #include <QLayout>
+#include <QPushButton>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QTextBrowser>
@@ -451,6 +453,170 @@ private Q_SLOTS:
                      && agent->parentWidget()->layout()->indexOf(agent) >= 0,
                  "the restored sub-agent never made it into the transcript");
         QVERIFY2(!dock->isVisible(), "the intent dock is on screen with no sub-agent running");
+    }
+
+    // A saved transcript can carry a delegation whose result was never
+    // persisted: Kate closed mid-run, or the call survives only in the display
+    // transcript after the model history was compacted. A reload has no child
+    // loop behind it, so recreating it in the intent dock left the dock on
+    // screen at launch with a card that could never finish.
+    void testConcurrentApprovalsAreQueuedInsteadOfCancelled()
+    {
+        ChatWidget widget;
+        widget.resize(900, 700);
+        widget.show();
+
+        PermissionRequest first;
+        first.toolCallId = u"subtask:agent-a:call-1"_s;
+        first.toolName = u"write_file"_s;
+        first.path = u"a.txt"_s;
+        first.summary = u"Write a.txt"_s;
+        first.risk = ToolRisk::Write;
+
+        PermissionRequest second = first;
+        second.toolCallId = u"subtask:agent-b:call-2"_s;
+        second.path = u"b.txt"_s;
+        second.summary = u"Write b.txt"_s;
+
+        Q_EMIT widget.agent()->permissionNeeded(first);
+        Q_EMIT widget.agent()->permissionNeeded(second);
+
+        auto *firstCard = qobject_cast<ToolCallWidget *>(cardForToolCallId(widget, first.toolCallId));
+        QVERIFY2(firstCard, "the first approval card was not created");
+        QVERIFY2(firstCard->isAwaitingApproval(),
+                 "a second child's request cancelled the visible approval");
+        QVERIFY2(!cardForToolCallId(widget, second.toolCallId),
+                 "the second request was shown while the first was still pending");
+
+        // If the first child is cancelled, the queued request must take its
+        // place instead of staying invisible forever.
+        Q_EMIT widget.agent()->permissionCancelled(first.toolCallId);
+        QTest::qWait(20);
+        auto *secondCard = qobject_cast<ToolCallWidget *>(cardForToolCallId(widget, second.toolCallId));
+        QVERIFY2(secondCard, "the queued approval never reached the dock");
+        QVERIFY(secondCard->isAwaitingApproval());
+
+        Q_EMIT widget.agent()->permissionCancelled(second.toolCallId);
+        QTest::qWait(20);
+        QVERIFY(!secondCard->isAwaitingApproval());
+    }
+
+    void testSavedWorktreePatchRestoresItsActions()
+    {
+        QTemporaryDir patches;
+        QVERIFY(patches.isValid());
+        const QString patchPath = patches.filePath(u"agent.patch"_s);
+        QFile patchFile(patchPath);
+        QVERIFY(patchFile.open(QIODevice::WriteOnly | QIODevice::Text));
+        patchFile.write("diff --git a/a.txt b/a.txt\n");
+        patchFile.close();
+
+        ChatWidget widget;
+        widget.resize(900, 700);
+        widget.show();
+
+        ChatMessage user;
+        user.role = ChatMessage::Role::User;
+        user.content = u"delegate in a worktree"_s;
+        ChatMessage assistant;
+        assistant.role = ChatMessage::Role::Assistant;
+        assistant.content = u"Done."_s;
+        QJsonArray calls;
+        calls.append(toolCall(u"call-sub-worktree"_s, u"new_task"_s,
+                              {{u"description"_s, u"Review the parser"_s},
+                               {u"agent"_s, u"reviewer"_s},
+                               {u"isolation"_s, u"worktree"_s}}));
+        assistant.toolCalls = calls;
+
+        QJsonObject record;
+        record.insert(u"taskId"_s, u"call-sub-worktree"_s);
+        record.insert(u"agentId"_s, u"reviewer"_s);
+        record.insert(u"agentName"_s, u"Reviewer"_s);
+        record.insert(u"status"_s, u"ok"_s);
+        record.insert(u"summary"_s, u"Reviewed in isolation."_s);
+        record.insert(u"isolation"_s, u"worktree"_s);
+        record.insert(u"patchPath"_s, patchPath);
+        record.insert(u"filesChanged"_s, QJsonArray{u"a.txt"_s});
+
+        SessionStore::SessionData data;
+        data.messages = {user, assistant,
+                         toolResultMessage(u"call-sub-worktree"_s, u"new_task"_s,
+                                           u"Reviewed in isolation."_s)};
+        data.subagents.append(record);
+        SessionStore::saveConversation(u"conv-subtask-worktree"_s, data,
+                                       u"Worktree chat"_s, 50);
+
+        widget.setCurrentConversationId(SessionStore::createNewConversation());
+        widget.switchToConversation(u"conv-subtask-worktree"_s);
+        QTest::qWait(60);
+
+        const auto agents = widget.findChildren<SubtaskWidget *>();
+        QCOMPARE(agents.size(), 1);
+        SubtaskWidget *agent = agents.first();
+        auto *apply = agent->findChild<QPushButton *>(u"subtaskApplyWorktree"_s);
+        auto *discard = agent->findChild<QPushButton *>(u"subtaskDiscardWorktree"_s);
+        QVERIFY2(apply && !apply->isHidden(), "the saved patch lost its Apply action");
+        QVERIFY2(discard && !discard->isHidden(), "the saved patch lost its Discard action");
+
+        discard->click();
+        QTRY_VERIFY(apply->isHidden());
+        QVERIFY(widget.agent()->subagent(u"call-sub-worktree"_s).discarded);
+    }
+
+    void testSubAgentWithoutALiveRunRestoresIntoTheTranscript()
+    {
+        ChatWidget widget;
+        widget.resize(900, 700);
+        widget.show();
+
+        ChatMessage user;
+        user.role = ChatMessage::Role::User;
+        user.content = u"delegate and close Kate"_s;
+
+        ChatMessage assistant;
+        assistant.role = ChatMessage::Role::Assistant;
+        assistant.content = QString();
+        QJsonArray calls;
+        calls.append(toolCall(u"call-orphan"_s, u"new_task"_s,
+                              {{u"description"_s, u"Review the parser"_s}, {u"agent"_s, u"reviewer"_s}}));
+        assistant.toolCalls = calls;
+
+        // The model history was compacted past the call, so restoreSession()
+        // has nothing to repair; only the display transcript remembers it.
+        ChatMessage summary;
+        summary.role = ChatMessage::Role::User;
+        summary.name = u"context_summary"_s;
+        summary.content = u"[Earlier conversation was compacted.]"_s;
+
+        SessionStore::SessionData data;
+        data.messages = {summary};
+        data.transcript = {user, assistant};
+        SessionStore::saveConversation(u"conv-orphan-sub"_s, data, u"Orphan delegation"_s, 50);
+
+        widget.setCurrentConversationId(SessionStore::createNewConversation());
+        widget.switchToConversation(u"conv-orphan-sub"_s);
+        QTest::qWait(60);
+
+        const auto agents = widget.findChildren<SubtaskWidget *>();
+        QCOMPARE(agents.size(), 1);
+        SubtaskWidget *agent = agents.first();
+        QVERIFY2(!agent->isRunning(), "a sub-agent with no live run was restored as running");
+
+        QWidget *dock = widget.findChild<QWidget *>(u"intentDock"_s);
+        QVERIFY(dock);
+        QVERIFY2(dock->isHidden(), "the intent dock opened for a sub-agent that is not running");
+
+        bool insideDock = false;
+        for (QWidget *parent = agent->parentWidget(); parent; parent = parent->parentWidget()) {
+            if (parent == dock) {
+                insideDock = true;
+                break;
+            }
+        }
+        QVERIFY2(!insideDock, "an orphaned sub-agent was docked above the composer");
+        QVERIFY2(agent->parentWidget() && agent->parentWidget()->layout()
+                     && agent->parentWidget()->layout()->indexOf(agent) >= 0,
+                 "the orphaned sub-agent never made it into the transcript");
     }
 
     void testARestoredAnswerIsNotShownTwice()

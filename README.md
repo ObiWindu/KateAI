@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.8.0-orange" alt="Kate AI 0.8.0">
+  <img src="https://img.shields.io/badge/version-0.9.0-orange" alt="Kate AI 0.9.0">
   <img src="https://img.shields.io/badge/Kate-24.08%2B-1d99f3?logo=kde" alt="Kate 24.08+">
   <img src="https://img.shields.io/badge/Qt-6.5%2B-41cd52?logo=qt" alt="Qt 6.5+">
   <img src="https://img.shields.io/badge/KF-6-blue" alt="KDE Frameworks 6">
@@ -428,6 +428,46 @@ KATEAI_HARNESS_FLAGS=-promptV2,-contextV2,-memoryV2,-toolSearch kate
 ```
 
 See `docs/HARNESS_0.8.md` and `docs/PROMPT.md`.
+
+### Harness 0.9: skills, agents, inspector
+
+0.9 makes the harness extensible and parallel. A project can ship procedures,
+agent specifications, policies, and hooks; a sub-agent can work in a temporary
+git worktree and return a patch without touching the parent tree.
+
+- **Skills.** `SKILL.md` bundles are discovered in `.kateai/skills`,
+  `.agents/skills`, `.claude/skills`, and the user skills directory. Only the
+  name and a short description enter the prompt; the body is loaded on demand
+  by the `skill` tool or `:kateai skill <name>` / `/<name>`. Project skills
+  require `:kateai trust-skill <name>` after the hash-keyed safety scan.
+  `context: fork` runs the skill in an isolated sub-agent. See
+  `docs/SKILLS.md`.
+- **Subagents v2.** Agent Markdown files can set model, effort, permission
+  mode, tool allow/deny lists, skills, max turns, memory scope, and
+  `isolation: worktree`. Each run gets a JSONL sidechain, a summary-only
+  return, cost/token attribution, and a `subagent_transcript` tool for audit.
+  Child questions and approvals are forwarded to the parent's intent dock;
+  cancel/timeout cleanup releases worktrees and locks. `:kateai apply-subtask`
+  and `:kateai discard-subtask` settle an isolated patch.
+- **Inspector.** `:kateai inspector` opens a read-only panel with Context,
+  Tools, Rules & Memory, Hooks & Skills, Trace, Cost, and Rewind tabs. It
+  reuses the same reports as the commands and never runs checks or changes a
+  turn. `:kateai fork` copies the current conversation into a new thread with
+  a parent link. `:kateai rewind [id]`, `/fork`, `/rewind`, `/inspector`,
+  `/skills`, and `/compact` are built-in commands.
+- **Edits.** A failed exact match now shows the closest matching block with
+  line numbers, in addition to the existing canonicalisation.
+- **Configuration.** On-disk configuration schema v2; v1 files are read as-is
+  and rewritten on the next save.
+
+The 0.9 flags (`skills`, `agentsV2`, `inspector`) default on. To compare
+against the 0.8 behaviour:
+
+```sh
+KATEAI_HARNESS_FLAGS=-skills,-agentsV2,-inspector kate
+```
+
+See `docs/HARNESS_0.9.md` and `docs/SKILLS.md`.
 
 ### Providers and models
 

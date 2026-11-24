@@ -18,6 +18,8 @@ and a future headless host can drive it without the editor.
 | `hooks.*` | Hook config, trust, sandboxed execution |
 | `audit.*` | Append-only JSONL permission trail |
 | `toolresults.*` | Content store for oversized tool output |
+| `skills.*` | `SKILL.md` discovery, catalog, trust scan/store, on-demand body |
+| `worktree.*` | Isolated git worktrees, patch collection, safe apply |
 
 Rules:
 

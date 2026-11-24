@@ -17,6 +17,7 @@
 #include "toolcallwidget.h"
 #include "subtaskwidget.h"
 #include "subtaskdock.h"
+#include "inspectorpanel.h"
 #include "suggestionwidget.h"
 #include "questionwidget.h"
 #include "todowidget.h"
@@ -1192,6 +1193,7 @@ ChatWidget::ChatWidget(QWidget *parent)
             connect(subtaskWidget, &SubtaskWidget::cancelRequested, this, [this](const QString &taskId) {
                 m_agent.cancelSubtask(taskId);
             });
+            wireSubtaskWorktreeActions(subtaskWidget);
             m_subtaskWidgets.insert(request.toolCallId, subtaskWidget);
             m_subtaskOrder.append(subtaskWidget);
             // Sub-agent cards are full transcript widgets; keep the recent
@@ -1528,74 +1530,14 @@ ChatWidget::ChatWidget(QWidget *parent)
 
     // Approval now happens on the card that triggered it. permissionNeeded fires
     // before toolStarted, so the card is created here and later reused by the
-    // toolStarted handler instead of a second card appearing.
+    // toolStarted handler instead of a second card appearing. Concurrent
+    // sub-agents can ask at the same time; only one strip fits in the dock, so
+    // the rest wait instead of cancelling the request already on screen.
     connect(&m_agent, &AgentLoop::permissionNeeded, this, [this](const PermissionRequest &request) {
-        // Only one request is live. A card left over from a request that was
-        // cancelled by a newer one must not keep an active Allow button.
-        for (auto it = m_toolCallWidgets.constBegin(); it != m_toolCallWidgets.constEnd(); ++it) {
-            if (it.key() != request.toolCallId && it.value()) {
-                it.value()->cancelApproval();
-            }
-        }
-        ToolCallWidget *widget = m_toolCallWidgets.value(request.toolCallId);
-        if (!widget) {
-            widget = new ToolCallWidget(request.toolCallId, m_transcriptContainer);
-            widget->setToolInfo(request.toolName, request.summary, request.risk);
-            widget->setDescribeDiff(request.describeDiff);
-            widget->setFilePath(request.path);
-            widget->setDurationVisible(true);
-            connect(widget, &ToolCallWidget::expandedChanged, this, [this, widget](bool) {
-                pinWidgetInViewport(widget);
-                QTimer::singleShot(240, this, [thisWeak = QPointer<ChatWidget>(this)]() {
-                    if (thisWeak) {
-                        thisWeak->m_pinnedViewportWidget = nullptr;
-                    }
-                });
-            });
-            connect(widget, &ToolCallWidget::openFileRequested, this, [this](const QString &path, int line){ Q_EMIT openFileAtLineRequested(path, line); });
-            m_toolCallWidgets.insert(request.toolCallId, widget);
-            m_toolCallOrder.append(widget);
-            appendTranscriptWidget(widget);
-            applyTranscriptCollapse();
-        } else {
-            // The card came from the tool_call, which may not have carried the
-            // diff or the path that the permission request now shows.
-            if (!request.describeDiff.isEmpty()) {
-                widget->setDescribeDiff(request.describeDiff);
-            }
-            if (!request.path.isEmpty()) {
-                widget->setFilePath(request.path);
-            }
-        }
-        widget->showApproval();
-        // Name the target in the docked strip. The card (and its diff) can be
-        // far up the transcript, so the buttons alone do not say what they are
-        // allowing.
-        {
-            const QString label = ChatTheme::toolLabel(request.toolName);
-            const QString subject = request.path.isEmpty() ? label
-                                                           : label + u"  ·  "_s + request.path;
-            widget->setApprovalSubject(subject);
-        }
-        // Lift the Allow / Deny strip out of the card and into the dock, so the
-        // decision is always on screen next to the input. The card stays
-        // expanded underneath, so the diff being judged is still one scroll away.
-        if (QWidget *approvalRow = widget->approvalRow()) {
-            moveToIntentDock(approvalRow);
-        }
-        connect(widget, &ToolCallWidget::approvalChosen, this,
-                [this, guard = QPointer<ToolCallWidget>(widget), callId = request.toolCallId](PermissionDecision decision) {
-                    if (guard) {
-                        guard->setApprovalResolved(decision);
-                    }
-                    updateIntentDockVisibility();
-                    m_agent.resolvePermission(decision, callId);
-                },
-                Qt::SingleShotConnection);
-        m_turnStatus->setActivity(i18n("Waiting for approval"));
-        m_prompt->setEnabled(false);
-        updateSendButtonState();
-        scrollToBottom();
+        enqueuePermissionRequest(request);
+    });
+    connect(&m_agent, &AgentLoop::permissionCancelled, this, [this](const QString &toolCallId) {
+        retirePermissionRequest(toolCallId);
     });
 
     connect(&m_agent, &AgentLoop::statusChanged, this, [this](const QString &status) {
@@ -1629,6 +1571,22 @@ ChatWidget::ChatWidget(QWidget *parent)
     connect(&m_agent, &AgentLoop::questionAsked, this, [this](const PermissionRequest &request) {
         showQuestionCard(request);
     });
+    connect(&m_agent, &AgentLoop::subtaskQuestionAsked, this,
+            [this](const QString &taskId, const PermissionRequest &request) {
+                m_subtaskQuestionTaskIds.insert(request.toolCallId, taskId);
+                showQuestionCard(request);
+            });
+    connect(&m_agent, &AgentLoop::subtaskQuestionCancelled, this,
+            [this](const QString &taskId, const QString &toolCallId) {
+                for (auto it = m_subtaskQuestionTaskIds.begin(); it != m_subtaskQuestionTaskIds.end();) {
+                    if (it.value() == taskId && (toolCallId.isEmpty() || it.key() == toolCallId)) {
+                        removeQuestionCard(it.key());
+                        it = m_subtaskQuestionTaskIds.erase(it);
+                    } else {
+                        ++it;
+                    }
+                }
+            });
     // The parked RPC was closed internally (a newer question, a permission
     // request, or a stop). Retire the old card so it cannot answer the next RPC.
     connect(m_agent.acpClient(), &AcpClient::questionCancelled, this, [this](const QString &toolCallId) {
@@ -1766,9 +1724,17 @@ ChatWidget::ChatWidget(QWidget *parent)
         // must not leave it docked: nothing can answer it now. The exception is
         // an agent-side ACP question, whose answer starts a fresh turn.
         clearQuestionCards(m_agent.pendingAcpToolQuestionId());
+        // A queued approval belonged to a turn that has ended; there is no
+        // request left to route its answer to.
+        m_queuedPermissionRequests.clear();
+        if (ToolCallWidget *card = m_toolCallWidgets.value(m_activePermissionCallId)) {
+            card->cancelApproval();
+        }
+        m_activePermissionCallId.clear();
         // Tool payloads that never produced a result are no longer routable;
         // drop them instead of retaining one entry per aborted call.
         m_questionTexts.clear();
+        m_subtaskQuestionTaskIds.clear();
         m_pendingSuggestions.clear();
         m_pendingProgress.clear();
         // The dock lost contents without a dock-aware call above: a cleared
@@ -1850,7 +1816,18 @@ ChatWidget::ChatWidget(QWidget *parent)
         Q_UNUSED(ok)
         m_turnStatus->setSubtaskCount(m_agent.runningSubtaskCount());
         updateTeamButton();
+        // The record (including a worktree patch path) changed when the child
+        // finished. Persist it promptly, not only when the parent turn ends.
+        scheduleSessionSave();
     });
+    connect(&m_agent, &AgentLoop::subtaskWorktreeReady, this,
+            [this](const QString &taskId, const QString &worktreePath, const QStringList &files) {
+                Q_UNUSED(worktreePath)
+                if (auto *widget = m_subtaskWidgets.value(taskId)) {
+                    widget->setWorktreeReady(files);
+                }
+                scheduleSessionSave();
+            });
     connect(&m_agent, &AgentLoop::turnFinished, this, &ChatWidget::markRunningSubtasksAbandoned);
 
     // Edit tracker signals
@@ -3794,6 +3771,32 @@ void ChatWidget::showToolsReport()
     box.setText(m_agent.toolsReport());
     box.setStandardButtons(QMessageBox::Close);
     box.exec();
+}
+
+void ChatWidget::showSkillsReport()
+{
+    QMessageBox box(this);
+    box.setWindowTitle(i18n("Kate AI Skills"));
+    box.setIcon(QMessageBox::Information);
+    box.setTextFormat(Qt::PlainText);
+    box.setText(m_agent.skillsReport());
+    box.setStandardButtons(QMessageBox::Close);
+    box.exec();
+}
+
+void ChatWidget::showInspector()
+{
+    if (!m_agent.harnessFlags().inspector) {
+        showInfoMessage(i18n("The harness inspector is disabled (flag 'inspector')."), true);
+        return;
+    }
+    if (!m_inspector) {
+        m_inspector = new InspectorPanel(&m_agent, this);
+    }
+    m_inspector->refresh();
+    m_inspector->show();
+    m_inspector->raise();
+    m_inspector->activateWindow();
 }
 
 void ChatWidget::showVerificationReport()
@@ -6154,10 +6157,16 @@ void ChatWidget::showQuestionCard(const PermissionRequest &request)
         allowFreeform = questionAllowFreeformFromToolArguments(args, request.allowFreeform);
     }
     card->setQuestion(questionText, options, allowFreeform);
-    connect(card, &QuestionWidget::answered, this, [this, card](const QString &, const QString &answer) {
+    connect(card, &QuestionWidget::answered, this, [this, card](const QString &questionCallId, const QString &answer) {
         // The agent resumes from the answer: the tool result *is* the user's
-        // words, so there is nothing else to hand back.
-        m_agent.answerQuestion(answer);
+        // words, so there is nothing else to hand back. A sub-agent's question
+        // is routed to that child instead of the parent's parked turn.
+        if (m_subtaskQuestionTaskIds.contains(questionCallId)) {
+            const QString taskId = m_subtaskQuestionTaskIds.take(questionCallId);
+            m_agent.answerSubtaskQuestion(taskId, answer);
+        } else {
+            m_agent.answerQuestion(answer);
+        }
         retireIntentWidget(card);
         updateSendButtonState();
         m_prompt->setFocus();
@@ -6208,6 +6217,190 @@ void ChatWidget::clearQuestionCards(const QString &keepId)
         card->deleteLater();
     }
     updateIntentDockVisibility();
+}
+
+void ChatWidget::enqueuePermissionRequest(const PermissionRequest &request)
+{
+    if (request.toolCallId.isEmpty()) {
+        return;
+    }
+    if (m_activePermissionCallId == request.toolCallId) {
+        return;
+    }
+    for (PermissionRequest &queued : m_queuedPermissionRequests) {
+        if (queued.toolCallId == request.toolCallId) {
+            queued = request;
+            return;
+        }
+    }
+    if (m_activePermissionCallId.isEmpty()) {
+        presentPermissionRequest(request);
+        return;
+    }
+    // Another child (or the parent) is already on screen. Keeping this request
+    // here is what stops the new card from cancelling the old one and leaving
+    // its owner parked with no way to resume.
+    m_queuedPermissionRequests.append(request);
+}
+
+void ChatWidget::presentPermissionRequest(const PermissionRequest &request)
+{
+    m_activePermissionCallId = request.toolCallId;
+    // Only one request is live. A card left over from a request that was
+    // cancelled by a newer one must not keep an active Allow button.
+    for (auto it = m_toolCallWidgets.constBegin(); it != m_toolCallWidgets.constEnd(); ++it) {
+        if (it.key() != request.toolCallId && it.value()) {
+            it.value()->cancelApproval();
+        }
+    }
+    ToolCallWidget *widget = m_toolCallWidgets.value(request.toolCallId);
+    if (!widget) {
+        widget = new ToolCallWidget(request.toolCallId, m_transcriptContainer);
+        widget->setToolInfo(request.toolName, request.summary, request.risk);
+        widget->setDescribeDiff(request.describeDiff);
+        widget->setFilePath(request.path);
+        widget->setDurationVisible(true);
+        connect(widget, &ToolCallWidget::expandedChanged, this, [this, widget](bool) {
+            pinWidgetInViewport(widget);
+            QTimer::singleShot(240, this, [thisWeak = QPointer<ChatWidget>(this)]() {
+                if (thisWeak) {
+                    thisWeak->m_pinnedViewportWidget = nullptr;
+                }
+            });
+        });
+        connect(widget, &ToolCallWidget::openFileRequested, this, [this](const QString &path, int line) {
+            Q_EMIT openFileAtLineRequested(path, line);
+        });
+        m_toolCallWidgets.insert(request.toolCallId, widget);
+        m_toolCallOrder.append(widget);
+        appendTranscriptWidget(widget);
+        applyTranscriptCollapse();
+    } else {
+        // The card came from the tool_call, which may not have carried the diff
+        // or the path that the permission request now shows.
+        if (!request.describeDiff.isEmpty()) {
+            widget->setDescribeDiff(request.describeDiff);
+        }
+        if (!request.path.isEmpty()) {
+            widget->setFilePath(request.path);
+        }
+    }
+    widget->showApproval();
+    // Name the target in the docked strip. The card (and its diff) can be far up
+    // the transcript, so the buttons alone do not say what they are allowing.
+    {
+        const QString label = ChatTheme::toolLabel(request.toolName);
+        const QString subject = request.path.isEmpty() ? label
+                                                       : label + u"  ·  "_s + request.path;
+        widget->setApprovalSubject(subject);
+    }
+    // Lift the Allow / Deny strip out of the card and into the dock, so the
+    // decision is always on screen next to the input. The card stays expanded
+    // underneath, so the diff being judged is still one scroll away.
+    if (QWidget *approvalRow = widget->approvalRow()) {
+        moveToIntentDock(approvalRow);
+    }
+    connect(widget, &ToolCallWidget::approvalChosen, this,
+            [this, guard = QPointer<ToolCallWidget>(widget), callId = request.toolCallId](
+                PermissionDecision decision) {
+                if (guard) {
+                    guard->setApprovalResolved(decision);
+                }
+                updateIntentDockVisibility();
+                m_agent.resolvePermission(decision, callId);
+                if (m_activePermissionCallId == callId) {
+                    m_activePermissionCallId.clear();
+                    QTimer::singleShot(0, this, &ChatWidget::showNextQueuedPermission);
+                }
+            },
+            Qt::SingleShotConnection);
+    m_turnStatus->setActivity(i18n("Waiting for approval"));
+    m_prompt->setEnabled(false);
+    updateSendButtonState();
+    scrollToBottom();
+}
+
+void ChatWidget::showNextQueuedPermission()
+{
+    if (!m_activePermissionCallId.isEmpty()) {
+        return;
+    }
+    while (!m_queuedPermissionRequests.isEmpty()) {
+        const PermissionRequest next = m_queuedPermissionRequests.takeFirst();
+        presentPermissionRequest(next);
+        if (!m_activePermissionCallId.isEmpty()) {
+            return;
+        }
+    }
+    m_prompt->setEnabled(!m_approvalPending());
+    updateSendButtonState();
+    updateIntentDockVisibility();
+}
+
+void ChatWidget::retirePermissionRequest(const QString &toolCallId)
+{
+    if (toolCallId.isEmpty()) {
+        return;
+    }
+    for (int i = m_queuedPermissionRequests.size() - 1; i >= 0; --i) {
+        if (m_queuedPermissionRequests.at(i).toolCallId == toolCallId) {
+            m_queuedPermissionRequests.removeAt(i);
+        }
+    }
+    if (m_activePermissionCallId != toolCallId) {
+        return;
+    }
+    m_activePermissionCallId.clear();
+    if (ToolCallWidget *widget = m_toolCallWidgets.value(toolCallId)) {
+        widget->cancelApproval();
+    }
+    updateIntentDockVisibility();
+    QTimer::singleShot(0, this, &ChatWidget::showNextQueuedPermission);
+}
+
+void ChatWidget::wireSubtaskWorktreeActions(SubtaskWidget *subtaskWidget)
+{
+    if (!subtaskWidget) {
+        return;
+    }
+    connect(subtaskWidget, &SubtaskWidget::applyWorktreeRequested, this,
+            [this, subtaskWidget](const QString &taskId) {
+                QString error;
+                if (!m_agent.applySubagentWorktree(taskId, &error)) {
+                    showInfoMessage(error.isEmpty()
+                                        ? i18n("Could not apply the sub-agent patch.")
+                                        : error, true);
+                    return;
+                }
+                subtaskWidget->setWorktreeResolved(true);
+                scheduleSessionSave();
+                showInfoMessage(i18n("Applied the isolated sub-agent patch."), false);
+            });
+    connect(subtaskWidget, &SubtaskWidget::discardWorktreeRequested, this,
+            [this, subtaskWidget](const QString &taskId) {
+                QString error;
+                if (!m_agent.discardSubagentWorktree(taskId, &error)) {
+                    showInfoMessage(error.isEmpty()
+                                        ? i18n("Could not discard the sub-agent worktree.")
+                                        : error, true);
+                    return;
+                }
+                subtaskWidget->setWorktreeResolved(false);
+                scheduleSessionSave();
+                showInfoMessage(i18n("Discarded the isolated sub-agent worktree."), false);
+            });
+}
+
+void ChatWidget::restoreSubtaskWorktree(SubtaskWidget *subtaskWidget, const SubagentRecord &record)
+{
+    if (!subtaskWidget || record.taskId.isEmpty() || record.applied || record.discarded) {
+        return;
+    }
+    if (record.patchPath.isEmpty() || !QFileInfo::exists(record.patchPath)) {
+        return;
+    }
+    wireSubtaskWorktreeActions(subtaskWidget);
+    subtaskWidget->setWorktreeReady(record.filesChanged);
 }
 
 void ChatWidget::markRunningSubtasksAbandoned()
@@ -6461,9 +6654,82 @@ void ChatWidget::showCheckpointMenuFor(const CheckpointInfo &info)
 
 void ChatWidget::submit()
 {
-    const QString text = m_prompt->toPlainText().trimmed();
+    QString text = m_prompt->toPlainText().trimmed();
     if (text.isEmpty() || m_agent.isBusy()) {
         return;
+    }
+    // Built-in slash commands that belong to the harness rather than to an ACP
+    // agent. Unknown slash commands are still left for the agent.
+    if (text.compare(u"/fork"_s, Qt::CaseInsensitive) == 0) {
+        m_prompt->clear();
+        forkConversation();
+        return;
+    }
+    if (text.compare(u"/inspector"_s, Qt::CaseInsensitive) == 0) {
+        m_prompt->clear();
+        showInspector();
+        return;
+    }
+    if (text.compare(u"/skills"_s, Qt::CaseInsensitive) == 0) {
+        m_prompt->clear();
+        showSkillsReport();
+        return;
+    }
+    if (text.compare(u"/compact"_s, Qt::CaseInsensitive) == 0) {
+        m_prompt->clear();
+        if (!m_agent.compactContext()) {
+            showInfoMessage(i18n("There is nothing to compact right now."), false);
+        } else {
+            showInfoMessage(i18n("Compacted the conversation context."), false);
+        }
+        return;
+    }
+    if (text.compare(u"/rewind"_s, Qt::CaseInsensitive) == 0) {
+        m_prompt->clear();
+        const QList<CheckpointInfo> checkpoints = m_agent.checkpoints();
+        if (checkpoints.isEmpty()) {
+            showInfoMessage(i18n("There is no checkpoint to rewind to."), false);
+            return;
+        }
+        QString error;
+        if (!m_agent.restoreCheckpoint(checkpoints.first().id, &error)) {
+            showInfoMessage(error.isEmpty() ? i18n("Could not restore the checkpoint.") : error, true);
+        } else {
+            showInfoMessage(i18n("Restored the latest checkpoint's files."), false);
+            Q_EMIT aboutToSubmit();
+        }
+        return;
+    }
+    // Native user invocation of a skill: `/skill <id>` or `/<id>` when the id
+    // names a discovered skill. ACP agents advertise their own slash commands,
+    // so an unknown command is left untouched for them.
+    if (text.startsWith(u'/') && m_agent.harnessFlags().skills) {
+        const QString command = text.section(u' ', 0, 0).mid(1).trimmed();
+        const QString argument = text.section(u' ', 1).trimmed();
+        QString skillId;
+        if (command.compare(u"skill"_s, Qt::CaseInsensitive) == 0) {
+            if (argument.isEmpty()) {
+                showSkillsReport();
+                m_prompt->clear();
+                return;
+            }
+            skillId = argument;
+        } else if (!command.isEmpty()) {
+            QString probeError;
+            if (!m_agent.skillInvocation(command, &probeError).isEmpty()) {
+                skillId = command;
+            }
+        }
+        if (!skillId.isEmpty()) {
+            QString error;
+            const QString prompt = m_agent.skillInvocation(skillId, &error);
+            if (prompt.isEmpty()) {
+                showInfoMessage(error.isEmpty() ? i18n("Skill not found.") : error, true);
+                return;
+            }
+            text = prompt;
+            m_prompt->clear();
+        }
     }
     m_prompt->addHistory(text);
     Q_EMIT aboutToSubmit();
@@ -6732,6 +6998,8 @@ void ChatWidget::clearTranscriptContents()
     // Detach docked approval rows first so their cards null the pointer;
     // deleting cards first would leave the dock delete with no owner to detach.
     clearQuestionCards();
+    m_queuedPermissionRequests.clear();
+    m_activePermissionCallId.clear();
     clearIntentDock();
     for (auto *card : std::as_const(m_toolCallWidgets)) {
         if (card && m_transcriptLayout && m_transcriptLayout->indexOf(card) >= 0) {
@@ -7300,6 +7568,7 @@ void ChatWidget::rebuildTranscript()
                                       restoredArgs.value(u"description"_s).toString());
             m_subtaskWidgets.insert(widgetKey, subtaskWidget);
             m_subtaskOrder.append(subtaskWidget);
+            const SubagentRecord restoredRecord = m_agent.subagent(spec.id);
             if (spec.hasResult) {
                 ToolResult result;
                 result.toolCallId = widgetKey;
@@ -7308,6 +7577,7 @@ void ChatWidget::rebuildTranscript()
                 result.cancelled = restoredResultWasCancelled(spec.output);
                 result.ok = !result.cancelled && !spec.output.contains(u"STATUS: failure"_s);
                 subtaskWidget->finishAgent(result);
+                restoreSubtaskWorktree(subtaskWidget, restoredRecord);
                 // A restored sub-agent that already reported back belongs to
                 // the thread, exactly like a live one that retired on finish.
                 // Docking it left every old sub-agent card pinned above the
@@ -7315,12 +7585,41 @@ void ChatWidget::rebuildTranscript()
                 subtaskWidget->setHeightBudget(0);
                 appendTranscriptWidget(subtaskWidget);
                 subtaskWidget->show();
-            } else {
+            } else if (m_agent.runningSubtaskIds().contains(spec.id)) {
                 // Still running (a rebuild during the turn): the card below
                 // whatever was placed just before it in the rebuild order,
                 // which is the position it ran in.
                 m_subtaskAnchors.insert(widgetKey, lastTranscriptContentWidget());
                 addIntentWidget(subtaskWidget);
+            } else if (!restoredRecord.taskId.isEmpty()
+                       && restoredRecord.status != u"running"_s
+                       && restoredRecord.status != u"interrupted"_s) {
+                // The result message was compacted out of the display
+                // transcript, but the structured record still has the
+                // summary and any worktree patch. Render that instead of
+                // declaring the run abandoned.
+                ToolResult result;
+                result.toolCallId = widgetKey;
+                result.name = spec.resultName.isEmpty() ? toolName : spec.resultName;
+                result.output = restoredRecord.summary;
+                result.ok = restoredRecord.status == u"ok"_s;
+                result.cancelled = restoredRecord.status == u"cancelled"_s;
+                subtaskWidget->finishAgent(result);
+                restoreSubtaskWorktree(subtaskWidget, restoredRecord);
+                subtaskWidget->setHeightBudget(0);
+                appendTranscriptWidget(subtaskWidget);
+                subtaskWidget->show();
+            } else {
+                // No result was saved and no child loop is running this id: the
+                // process closed mid-run, or the call survives only in a
+                // compacted display transcript. Docking it would recreate a
+                // "running" sub-agent with nothing behind it and leave the dock
+                // open on every launch with cards nothing can finish. Settle the
+                // card into the thread as stopped work instead.
+                subtaskWidget->markAbandoned(i18n("No result was saved for this sub-agent."));
+                subtaskWidget->setHeightBudget(0);
+                appendTranscriptWidget(subtaskWidget);
+                subtaskWidget->show();
             }
             return;
         }
@@ -7827,6 +8126,45 @@ bool ChatWidget::rejectPendingEdits(const QString &path)
 void ChatWidget::newChat()
 {
     resetForNewChat(true);
+}
+
+bool ChatWidget::forkConversation()
+{
+    if (m_agent.isBusy()) {
+        showInfoMessage(i18n("Stop the current turn before forking the conversation."), true);
+        return false;
+    }
+    if (m_agent.messages().isEmpty()) {
+        showInfoMessage(i18n("There is nothing to fork yet."), false);
+        return false;
+    }
+    saveCurrentConversation();
+    const QString sourceId = m_currentConversationId;
+    const QString newId = SessionStore::forkConversation(sourceId);
+    if (newId.isEmpty()) {
+        showInfoMessage(i18n("Could not fork the conversation."), true);
+        return false;
+    }
+    m_currentConversationId = newId;
+    m_agent.setConversationId(newId);
+    m_agent.setParentConversationId(sourceId);
+    // The source thread still owns its agent-side session. Drop only the
+    // fork's reference so its first turn starts a fresh session.
+    if (usesAcpNative(m_settings) && m_agent.acpClient()) {
+        m_agent.acpClient()->detachSession();
+    }
+    Q_EMIT conversationChanged(newId);
+    m_historyCount = -1;
+    updateHistoryButton();
+    if (m_threadTitle) {
+        m_threadTitle->setText(SessionStore::conversationTitle(newId));
+    }
+    // Pending worktree patches stay with the source thread; repaint so the
+    // fork's cards do not offer buttons for records it no longer owns.
+    m_agent.clearSubagentRecords();
+    rebuildTranscript();
+    showInfoMessage(i18n("Forked into a new conversation. The original is unchanged."), false);
+    return true;
 }
 
 void ChatWidget::resetForNewChat(bool saveCurrentConversation)

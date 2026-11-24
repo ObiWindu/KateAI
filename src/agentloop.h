@@ -21,6 +21,7 @@
 #include "harness/policy.h"
 #include "harness/prompt.h"
 #include "harness/registry.h"
+#include "harness/skills.h"
 #include "harness/tokens.h"
 #include "harness/turn.h"
 #include "llmclient.h"
@@ -37,6 +38,7 @@
 
 #include <QObject>
 #include <QMutex>
+#include <QPair>
 #include <QPointer>
 #include <QQueue>
 #include <QSet>
@@ -46,6 +48,35 @@
 
 namespace KateAi
 {
+
+// The result of one sub-agent run, kept by the root loop for the transcript
+// tool, the inspector, cost attribution, and worktree Apply/Discard.
+struct SubagentRecord {
+    QString taskId;
+    QString agentId;
+    QString agentName;
+    QString modeId;
+    QString description;
+    QString status = QStringLiteral("running"); // running|ok|failed|cancelled|budget
+    QString summary;
+    QString error;
+    QString isolation = QStringLiteral("in-process");
+    QString worktreePath;
+    QString baseCommit;
+    QString patch;
+    QString patchPath;
+    QString sidechainPath;
+    QStringList filesChanged;
+    QStringList checks;
+    qint64 startedAtMs = 0;
+    qint64 finishedAtMs = 0;
+    int inputTokens = 0;
+    int outputTokens = 0;
+    int cachedInputTokens = 0;
+    double costUsd = 0.0;
+    bool applied = false;
+    bool discarded = false;
+};
 
 class AgentLoop : public QObject
 {
@@ -170,6 +201,32 @@ public:
     {
         return m_activeSubtasks.size();
     }
+    // Results of sub-agents started in this conversation (running ones carry
+    // status "running"). Newest first.
+    QList<SubagentRecord> subagents() const;
+    SubagentRecord subagent(const QString &taskId) const;
+    // The records (and their worktree patch paths) belong to the conversation
+    // that produced them. A fork must not inherit them.
+    void clearSubagentRecords();
+    // Paged text of one sub-agent's sidechain, for debugging. Returns the
+    // summary and tool log when the sidechain file is unavailable.
+    QString subagentTranscript(const QString &taskId, int offset = 0,
+                               int maxChars = 20000) const;
+    QString subagentsReport() const;
+    // Human-readable last-conversation event trace, with replay problems.
+    QString traceReport() const;
+    // Provider-reported usage accumulated by this loop.
+    int inputTokensTotal() const { return m_inputTokensTotal; }
+    int outputTokensTotal() const { return m_outputTokensTotal; }
+    int cachedInputTokensTotal() const { return m_cachedInputTokensTotal; }
+    // Worktree results are never merged automatically: the user or parent
+    // explicitly applies or discards them.
+    bool applySubagentWorktree(const QString &taskId, QString *error = nullptr);
+    bool discardSubagentWorktree(const QString &taskId, QString *error = nullptr);
+    // Answered by the intent dock for a question asked by a child.
+    void answerSubtaskQuestion(const QString &taskId, const QString &answer);
+    void resolveSubtaskPermission(const QString &taskId, PermissionDecision decision,
+                                  const QString &toolCallId = QString());
     // Stops one sub-agent, or every sub-agent when taskId is empty.
     void cancelSubtask(const QString &taskId = QString());
     // Identity used for the shared edit locks; unique per sub-agent.
@@ -219,6 +276,14 @@ public:
     // session store for the active conversation at the next event".
     void setConversationId(const QString &conversationId);
     QString conversationId() const;
+    void setParentConversationId(const QString &id)
+    {
+        m_parentConversationId = id;
+    }
+    QString parentConversationId() const
+    {
+        return m_parentConversationId;
+    }
 
     // Runs the discovered check plan now and returns the evidence. It never
     // changes the turn state; the UI uses it for ":kateai verify".
@@ -247,6 +312,18 @@ public:
     // Effective tools, deferral state, and schema cost.
     QString toolsReport() const;
 
+    // The active rollout flags, for UI gating.
+    HarnessFlags harnessFlags() const
+    {
+        return m_harness;
+    }
+
+    // Skills: discovery, catalog cost, trust state, and scan findings.
+    QString skillsReport() const;
+    bool trustSkill(const QString &id, QString *error = nullptr);
+    // The text a user invocation sends to the model. Empty on error.
+    QString skillInvocation(const QString &id, QString *error = nullptr) const;
+
     PermissionPolicy &policy() { return m_policy; }
 
 Q_SIGNALS:
@@ -265,6 +342,9 @@ Q_SIGNALS:
     void toolStarted(const PermissionRequest &request);
     void toolFinished(const ToolResult &result);
     void permissionNeeded(const PermissionRequest &request);
+    // The request can no longer be answered (its child finished or was
+    // cancelled). The UI must retire any queued or visible approval card.
+    void permissionCancelled(const QString &toolCallId);
     // The agent asked the user something with the `question` tool and is
     // waiting. The request carries the question and the suggested answers.
     // Also emitted for ACP: an agent's ask_user client method or a question
@@ -311,6 +391,15 @@ Q_SIGNALS:
     void subtaskMessageDelta(const QString &taskId, const QString &delta);
     void subtaskProgress(const QString &taskId, const QString &partialOutput);
     void subtaskFinished(const QString &taskId, bool ok);
+    // A child's question is routed to the parent's intent dock; the answer is
+    // returned through answerSubtaskQuestion(). This keeps the parent turn
+    // running while the child is parked.
+    void subtaskQuestionAsked(const QString &taskId, const PermissionRequest &request);
+    void subtaskQuestionCancelled(const QString &taskId, const QString &toolCallId);
+    // An isolated child finished and produced a patch. The UI can offer Apply
+    // and Discard; nothing is merged automatically.
+    void subtaskWorktreeReady(const QString &taskId, const QString &worktreePath,
+                              const QStringList &filesChanged);
     // A durable harness event was appended (or would have been, when the log is
     // disabled). Consumers can show it in a trace view or a test.
     void harnessEvent(const QString &type, const QJsonObject &payload);
@@ -396,6 +485,11 @@ private:
     bool isAsyncTool(const QString &toolName) const;
     void dispatchAsyncTool(const ToolCall &call);
     void dispatchSubtask(const ToolCall &call);
+    void startSkillFork(const ToolCall &call, const SkillDefinition &skill);
+    void appendSubagentSidechain(const QString &taskId, const QString &type,
+                                 const QJsonObject &payload);
+    QString subagentSidechainPath(const QString &taskId) const;
+    void captureSubagentUsage(const QString &taskId, int input, int output, int cached);
     void finishAsyncTool(const ToolCall &call, const ToolResult &result);
     bool isSubtaskTool(const QString &toolName) const;
     // The one tool that stops the turn and waits for the user to type.
@@ -523,6 +617,12 @@ LlmClient m_client;
     CheckpointManager m_checkpoints;
     // taskId -> child loop, for every sub-agent running right now.
     QHash<QString, AgentLoop *> m_activeSubtasks;
+    // taskId -> sidechain/result record, root loop only. Children do not keep
+    // the parent's records.
+    mutable QHash<QString, SubagentRecord> m_subagentRecords;
+    // Prefixed permission card id -> (taskId, child's original call id). A
+    // child's approval is resolved in the parent's intent dock.
+    QHash<QString, QPair<QString, QString>> m_subtaskPermissionIds;
     // Human-readable work for each running task, used by context rehydration.
     QHash<QString, QString> m_activeSubtaskDescriptions;
     // How many async tools (MCP or sub-agent) have been dispatched but have
@@ -533,6 +633,13 @@ LlmClient m_client;
     // Paths this loop currently holds a lock on.
     QStringList m_owedPaths;
     int m_subtaskDepth = 0;
+    // Per-agent tool/skill restrictions from an AgentSpec. Empty means the
+    // mode's normal set. Entries may end in '*' for a prefix.
+    QStringList m_subagentAllowedTools;
+    QStringList m_subagentDisallowedTools;
+    QStringList m_subagentSkills;
+    QString m_subagentIsolation = QStringLiteral("in-process");
+    QString m_subagentMemoryScope = QStringLiteral("project");
     quint64 m_asyncCounter = 0;
     bool m_checkpointTaken = false;
     // A snapshot is being taken for the call below; the queue is held open
@@ -590,6 +697,11 @@ LlmClient m_client;
     quint64 m_turnGeneration = 0;
     int m_modelRequests = 0;
     int m_toolCalls = 0;
+    // Provider-reported usage, accumulated across requests, used for cost
+    // attribution and the inspector.
+    int m_inputTokensTotal = 0;
+    int m_outputTokensTotal = 0;
+    int m_cachedInputTokensTotal = 0;
     bool m_cancelRequested = false;
     // Extra compaction pressure after a context-window rejection. Reset at
     // the start of each user turn so a later overflow can compact further
@@ -632,11 +744,16 @@ LlmClient m_client;
     // demand.
     mutable std::unique_ptr<MemoryLoader> m_memory;
     ToolRegistry m_toolRegistry;
+    // SKILL.md discovery, progressive disclosure, and trust.
+    mutable SkillRegistry m_skills;
     mutable QJsonObject m_promptManifest;
     mutable QString m_promptStaticHash;
     mutable QString m_contextManifest;
     mutable QString m_contextSummary;
     mutable QStringList m_touchedPaths;
+    // Bodies of skills loaded in this conversation, rehydrated after a
+    // compaction. Capped by count in handleToolSideEffects().
+    mutable QStringList m_invokedSkills;
     QString m_calibrationModel;
     Provider m_calibrationProvider = Provider::OpenAICompatible;
     Tokens::Calibrator m_tokenCalibrator;
@@ -652,6 +769,8 @@ LlmClient m_client;
     // Owned by m_middleware; reset whenever the chain is rebuilt.
     VerificationMiddleware *m_verification = nullptr;
     QString m_conversationId;
+    // Parent id for a forked conversation, preserved across saves.
+    QString m_parentConversationId;
     QString m_currentStepId;
     QString m_pendingHookContext;
     QString m_hookLoadError;

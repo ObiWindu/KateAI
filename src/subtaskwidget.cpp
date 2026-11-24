@@ -244,6 +244,33 @@ SubtaskWidget::SubtaskWidget(const QString &taskId, QWidget *parent)
     activityFooter->addWidget(m_copyResult);
     activityLayout->addLayout(activityFooter);
 
+    // Isolated worktree result: nothing is merged until the user chooses.
+    auto *worktreeRow = new QHBoxLayout;
+    worktreeRow->setContentsMargins(0, 0, 0, 0);
+    worktreeRow->setSpacing(6);
+    m_worktreeNote = new QLabel(this);
+    m_worktreeNote->setObjectName(u"subtaskWorktreeNote"_s);
+    m_worktreeNote->setWordWrap(true);
+    m_worktreeNote->setVisible(false);
+    worktreeRow->addWidget(m_worktreeNote, 1);
+    m_applyWorktree = new QPushButton(i18n("Apply patch"), this);
+    m_applyWorktree->setObjectName(u"subtaskApplyWorktree"_s);
+    m_applyWorktree->setCursor(Qt::PointingHandCursor);
+    m_applyWorktree->setVisible(false);
+    m_discardWorktree = new QPushButton(i18n("Discard"), this);
+    m_discardWorktree->setObjectName(u"subtaskDiscardWorktree"_s);
+    m_discardWorktree->setCursor(Qt::PointingHandCursor);
+    m_discardWorktree->setVisible(false);
+    worktreeRow->addWidget(m_applyWorktree);
+    worktreeRow->addWidget(m_discardWorktree);
+    activityLayout->addLayout(worktreeRow);
+    connect(m_applyWorktree, &QPushButton::clicked, this, [this] {
+        Q_EMIT applyWorktreeRequested(m_taskId);
+    });
+    connect(m_discardWorktree, &QPushButton::clicked, this, [this] {
+        Q_EMIT discardWorktreeRequested(m_taskId);
+    });
+
     m_activity = new QTextBrowser(m_activityContainer);
     m_activity->setObjectName(u"subtaskActivity"_s);
     m_activity->setOpenExternalLinks(false);
@@ -319,6 +346,18 @@ void SubtaskWidget::startAgent(const QString &agentName, const QString &modeId, 
         m_copyResult->setVisible(false);
         m_copyResult->setText(i18n("Copy"));
     }
+    if (m_applyWorktree) {
+        m_applyWorktree->setVisible(false);
+        m_applyWorktree->setEnabled(true);
+    }
+    if (m_discardWorktree) {
+        m_discardWorktree->setVisible(false);
+        m_discardWorktree->setEnabled(true);
+    }
+    if (m_worktreeNote) {
+        m_worktreeNote->clear();
+        m_worktreeNote->setVisible(false);
+    }
     // A fresh run starts a fresh log; the previous run's steps left with its
     // card. The disclosure starts closed and opens itself on the first step,
     // unless the user has started choosing for themselves.
@@ -337,6 +376,36 @@ void SubtaskWidget::startAgent(const QString &agentName, const QString &modeId, 
         m_pendingStreamed.clear();
         appendMessageDelta(buffered);
     }
+}
+
+void SubtaskWidget::setWorktreeReady(const QStringList &filesChanged)
+{
+    if (!m_applyWorktree || !m_discardWorktree || !m_worktreeNote) {
+        return;
+    }
+    m_worktreeNote->setText(i18n("Isolated worktree: %1 file(s) changed. Nothing was merged.",
+                                 filesChanged.size()));
+    m_worktreeNote->setToolTip(filesChanged.join(u"\n"_s));
+    m_worktreeNote->setVisible(true);
+    m_applyWorktree->setVisible(true);
+    m_discardWorktree->setVisible(true);
+    reflowNow();
+}
+
+void SubtaskWidget::setWorktreeResolved(bool applied)
+{
+    if (m_applyWorktree) {
+        m_applyWorktree->setVisible(false);
+    }
+    if (m_discardWorktree) {
+        m_discardWorktree->setVisible(false);
+    }
+    if (m_worktreeNote) {
+        m_worktreeNote->setText(applied ? i18n("Worktree patch applied.")
+                                        : i18n("Worktree patch discarded."));
+        m_worktreeNote->setVisible(true);
+    }
+    reflowNow();
 }
 
 void SubtaskWidget::appendActivity(const QString &line, bool isError)

@@ -54,6 +54,12 @@ public:
         QString acpSessionId;
         // The editor folder active when this conversation was saved.
         QString workspace;
+        // Set when this conversation was forked from another one. Additive and
+        // not required for loading; old payloads leave it empty.
+        QString parentConversationId;
+        // Sub-agent result records (worktree patch, sidechain path, usage).
+        // Additive; an older payload leaves this empty.
+        QJsonArray subagents;
         // Set when the stored payload could not be read or parsed. It is not
         // persisted; callers use it to avoid treating a damaged transcript as
         // an empty one and overwriting it on the next save.
@@ -91,6 +97,10 @@ public:
     static bool saveConversation(const QString &conversationId, const SessionData &data, const QString &title = QString(), int maxConversations = 50);
     static void deleteConversation(const QString &conversationId);
     static QString createNewConversation();
+    // Copies a conversation into a new active conversation with a parent link.
+    // The fork keeps the full transcript and gets its own copy of the event
+    // log; the source is left untouched.
+    static QString forkConversation(const QString &sourceId, const QString &title = QString());
     static void setActiveConversation(const QString &conversationId);
     static QString getActiveConversationId();
     static void pruneOldConversations(int maxConversations);

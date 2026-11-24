@@ -1,3 +1,13 @@
+kateai (0.9.0-1) unstable; urgency=medium
+
+  * Release 0.9.0: SKILL.md discovery with progressive disclosure, trust
+    scanning and fork context; declarative AgentSpecs with JSONL sidechains,
+    summary-only returns, forwarded questions/permissions, cost attribution
+    and optional git-worktree isolation; a read-only Harness inspector; edit
+    near-match diagnostics; and configuration schema v2.
+
+ -- ObiWindu <Obi.wandu@proton.me>  Tue, 24 Nov 2026 00:00:00 +0000
+
 kateai (0.8.0-1) unstable; urgency=medium
 
   * Release 0.8.0: deterministic prompt assembler with a stable cached prefix,

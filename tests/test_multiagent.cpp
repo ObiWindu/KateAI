@@ -147,6 +147,73 @@ private Q_SLOTS:
         QCOMPARE(profile->description, u"Pulls dependencies."_s);
     }
 
+    void agentFileParsesTheV2SpecFields()
+    {
+        QTemporaryDir workspace;
+        QVERIFY(QDir().mkpath(workspace.path() + u"/.kateai/agents"_s));
+        writeFile(workspace.path() + u"/.kateai/agents/reviewer.md"_s,
+                  u"---\n"
+                  u"id: strict-reviewer\n"
+                  u"name: Strict Reviewer\n"
+                  u"description: Reviews a diff without editing.\n"
+                  u"mode: ask\n"
+                  u"model: inherit\n"
+                  u"effort: low\n"
+                  u"permissionMode: ask\n"
+                  u"tools: [read_file, grep, \"lsp_*\"]\n"
+                  u"disallowedTools: [bash]\n"
+                  u"skills: [review-diff, \"api-*\"]\n"
+                  u"maxTurns: 12\n"
+                  u"isolation: worktree\n"
+                  u"memory: project\n"
+                  u"---\n"
+                  u"Review only.\n"_s);
+
+        AgentTeam team;
+        team.setWorkspace(workspace.path());
+        const std::optional<AgentProfile> profile = team.byId(u"strict-reviewer"_s);
+        QVERIFY(profile.has_value());
+        QCOMPARE(profile->model, u"inherit"_s);
+        QCOMPARE(profile->effort, u"low"_s);
+        QCOMPARE(profile->permissionMode, u"ask"_s);
+        QCOMPARE(profile->tools, QStringList({u"read_file"_s, u"grep"_s, u"lsp_*"_s}));
+        QCOMPARE(profile->disallowedTools, QStringList({u"bash"_s}));
+        QCOMPARE(profile->skills, QStringList({u"review-diff"_s, u"api-*"_s}));
+        QCOMPARE(profile->maxTurns, 12);
+        QCOMPARE(profile->isolation, u"worktree"_s);
+        QVERIFY(profile->isWorktreeIsolated());
+        QCOMPARE(profile->memoryScope, u"project"_s);
+    }
+
+    void agentSpecRoundTripsThroughJson()
+    {
+        AgentProfile profile;
+        profile.id = u"isolated"_s;
+        profile.name = u"Isolated"_s;
+        profile.description = u"Runs in a worktree."_s;
+        profile.modeId = u"code"_s;
+        profile.model = u"deepseek-v4"_s;
+        profile.effort = u"medium"_s;
+        profile.permissionMode = u"accept-edits"_s;
+        profile.tools = {u"read_file"_s, u"write_file"_s};
+        profile.disallowedTools = {u"bash"_s};
+        profile.skills = {u"review-diff"_s};
+        profile.maxTurns = 7;
+        profile.isolation = u"worktree"_s;
+        profile.memoryScope = u"user"_s;
+
+        const AgentProfile parsed = AgentProfile::fromJson(profile.toJson());
+        QCOMPARE(parsed.model, profile.model);
+        QCOMPARE(parsed.effort, profile.effort);
+        QCOMPARE(parsed.permissionMode, profile.permissionMode);
+        QCOMPARE(parsed.tools, profile.tools);
+        QCOMPARE(parsed.disallowedTools, profile.disallowedTools);
+        QCOMPARE(parsed.skills, profile.skills);
+        QCOMPARE(parsed.maxTurns, profile.maxTurns);
+        QCOMPARE(parsed.isolation, profile.isolation);
+        QCOMPARE(parsed.memoryScope, profile.memoryScope);
+    }
+
     void unknownAgentIdsResolveToAUsableFallback()
     {
         AgentTeam team;

@@ -121,6 +121,18 @@ private Q_SLOTS:
         QCOMPARE(asked.toolName, u"edit_file"_s);
     }
 
+    void denyRulesBeatBroadAllows()
+    {
+        ToolAccess access = ToolAccess::unrestricted();
+        access.deny(u"bash"_s);
+        QVERIFY(!access.allows(u"bash"_s));
+        QVERIFY(access.allows(u"read_file"_s));
+
+        access.denyPrefix(u"mcp__github__"_s);
+        QVERIFY(!access.allows(u"mcp__github__create_issue"_s));
+        QVERIFY(access.allows(u"mcp__gitlab__create_issue"_s));
+    }
+
     void askModeAllowsReads()
     {
         // Read-only tools are in the read group, so they pass.

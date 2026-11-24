@@ -23,8 +23,10 @@ QString subtaskToolName()
 
 bool acpToolPermitted(const ToolAccess &access, const PermissionRequest &request)
 {
-    if (access.allowAll) {
-        return true;
+    // Denies apply even when the mode is otherwise unrestricted; the checks
+    // below use allows() for each capability and therefore inherit them too.
+    if (access.isDenied(request.toolName)) {
+        return false;
     }
     const QString canonical = canonicalToolName(request.toolName);
     // Reasoning changes nothing in the workspace, so every mode allows it.
@@ -60,7 +62,7 @@ QStringList builtInToolsForGroup(const QString &group)
         // here so Ask/Architect/Plan modes can inspect a paused debug session
         // or project targets without mutating state.
         return {u"read_file"_s, u"read_tool_result"_s, u"list_dir"_s, u"grep"_s, u"glob"_s, u"query_project_graph"_s,
-                u"write_plan_file"_s, u"suggest"_s, u"question"_s,
+                u"write_plan_file"_s, u"suggest"_s, u"question"_s, u"skill"_s,
                 u"todo_write"_s, u"todo_read"_s, u"think"_s, u"exit_plan_mode"_s,
                 u"lsp_diagnostics"_s, u"lsp_symbols"_s, u"lsp_hover"_s,
                 u"lsp_definition"_s, u"lsp_references"_s, u"lsp_code_actions"_s,
@@ -83,7 +85,7 @@ QStringList builtInToolsForGroup(const QString &group)
         return {u"web_search"_s, u"web_fetch"_s};
     }
     if (group == ToolGroup::orchestrate()) {
-        return {subtaskToolName()};
+        return {subtaskToolName(), u"subagent_transcript"_s};
     }
     // The "mcp" group is resolved by prefix at request time.
     return {};
@@ -106,6 +108,7 @@ QStringList allBuiltInToolNames()
             u"write_plan_file"_s,
             u"suggest"_s,
             u"question"_s,
+            u"skill"_s,
             u"apply_patch"_s,
             u"memory_write"_s,
             u"todo_write"_s,
@@ -133,6 +136,7 @@ QStringList allBuiltInToolNames()
             u"build_targets"_s,
             u"build_run"_s,
             u"terminal_run"_s,
+            u"subagent_transcript"_s,
             subtaskToolName()};
 }
 
@@ -185,6 +189,7 @@ DocumentFrontmatter ModeRegistry::parseFrontmatter(const QString &document)
     int pos = match.capturedLength();
     QStringList pendingKey;
     QString pendingBlock;
+    QString pendingListKey;
     bool inBlock = false;
 
     const QStringList lines = document.mid(pos).split(u'\n');
@@ -219,6 +224,23 @@ DocumentFrontmatter ModeRegistry::parseFrontmatter(const QString &document)
             continue;
         }
 
+        if (!pendingListKey.isEmpty()) {
+            // A `key:` followed by indented `- item` lines is a block list.
+            // Keep it as newline-separated items; parseList() in the agent and
+            // skill loaders already accepts that shape.
+            if ((line.startsWith(u' ') || line.startsWith(u'\t'))
+                && trimmed.startsWith(u'-')) {
+                QString items = out.keys.value(pendingListKey);
+                if (!items.isEmpty()) {
+                    items += u'\n';
+                }
+                items += trimmed;
+                out.keys.insert(pendingListKey, items);
+                continue;
+            }
+            pendingListKey.clear();
+        }
+
         const int colon = line.indexOf(u':');
         if (colon <= 0) {
             continue;
@@ -232,6 +254,9 @@ DocumentFrontmatter ModeRegistry::parseFrontmatter(const QString &document)
             continue;
         }
         out.keys.insert(key, value);
+        if (value.isEmpty()) {
+            pendingListKey = key;
+        }
     }
     if (inBlock && !pendingKey.isEmpty()) {
         out.keys.insert(pendingKey.join(u'\n'), pendingBlock);
