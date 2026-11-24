@@ -1,3 +1,14 @@
+kateai (0.8.0-1) unstable; urgency=medium
+
+  * Release 0.8.0: deterministic prompt assembler with a stable cached prefix,
+    model profiles and native Gemini cached-content resources, a graduated
+    context engine with tool-result paging and rehydration, a memory hierarchy
+    with scoped AGENTS/rules files and memory_write, a deferred tool registry
+    with tool_search/tool_describe/tool_call, and edit canonicalisation for
+    smart quotes, CRLF and whitespace drift.
+
+ -- ObiWindu <Obi.wandu@proton.me>  Tue, 24 Nov 2026 00:00:00 +0000
+
 kateai (0.7.0-1) unstable; urgency=medium
 
   * Release 0.7.0: append-only session event log with replay and JSONL
@@ -5,7 +16,7 @@ kateai (0.7.0-1) unstable; urgency=medium
     policy engine with an immutable hardline floor and audit trail, hooks v1
     for session/prompt/tool/stop lifecycle events, and turn middleware.
 
- -- ObiWindu <Obi.wandu@proton.me>  Sat, 21 Nov 2026 00:00:00 +0000
+ -- ObiWindu <Obi.wandu@proton.me>  Sun, 22 Nov 2026 00:00:00 +0000
 
 kateai (0.6.0-1) unstable; urgency=medium
 

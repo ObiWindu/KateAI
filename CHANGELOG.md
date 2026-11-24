@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — 0.8.0
+## 0.8.0 — 2026-11-24
 
 - **Prompt assembler v2.** The system prompt is now a deterministic, ordered
   section registry with per-section and total budgets and a stable static
@@ -68,7 +68,7 @@
   KDE's Windows binary cache does not contain them, which made every PR wait
   hours in the Windows job. The release bundle still passes `-WithKate`.
 
-## 0.7.0 — 2026-11-21
+## 0.7.0 — 2026-11-22
 
 - **Session event log.** Conversations are now recorded as an append-only
   `session_event` log in the existing SQLite database, with a rebuildable
@@ -98,7 +98,7 @@
   `verificationGate`, `policyV2`, `hooks`) and can be disabled with
   `KATEAI_HARNESS_FLAGS` or `[Harness]`.
 
-## Unreleased — 0.6.1
+## 0.6.1 — 2026-11-22
 
 - **Context visibility.** `:kateai context` reports the model window, the
   request estimate, the system/ambient/tool-schema/conversation breakdown,

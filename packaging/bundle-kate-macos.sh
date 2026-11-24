@@ -36,7 +36,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 VERSION="$(sed -n 's/^project(kateai VERSION \([^ ]*\).*/\1/p' "${ROOT}/CMakeLists.txt" | head -1)"
-VERSION="${VERSION:-0.7.0}"
+VERSION="${VERSION:-0.8.0}"
 ARCH="$(uname -m)"
 
 if [[ ! -f "${CRAFT_ROOT}/craft/craftenv.sh" ]]; then
