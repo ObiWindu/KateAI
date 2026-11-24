@@ -4,6 +4,7 @@
  */
 
 #include "configpage.h"
+#include "orchestration.h"
 #include "acpinstall.h"
 #include "plugin.h"
 #include "settings.h"
@@ -233,6 +234,99 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     acpForm->addRow(i18n("Effort Level:"), m_acpEffort);
     acpForm->addRow(i18n("Endpoint URL:"), m_acpUrl);
     providersLayout->addWidget(acpGroup);
+
+    // --- Two-model orchestration -------------------------------------------
+    auto *orchestrationGroup = new QGroupBox(i18n("Model Orchestration (API providers only)"), providersWidget);
+    auto *orchestrationLayout = new QVBoxLayout(orchestrationGroup);
+    m_orchestrationEnabled = new QCheckBox(i18n("Use a planner model and an executor model in one turn"), orchestrationGroup);
+    orchestrationLayout->addWidget(m_orchestrationEnabled);
+
+    auto *orchestrationForm = new QFormLayout();
+    auto *plannerRow = new QWidget(orchestrationGroup);
+    auto *plannerLayout = new QHBoxLayout(plannerRow);
+    plannerLayout->setContentsMargins(0, 0, 0, 0);
+    m_orchestrationPlannerProvider = new QComboBox(plannerRow);
+    m_orchestrationPlannerModel = new QComboBox(plannerRow);
+    m_orchestrationPlannerModel->setEditable(true);
+    m_orchestrationPlannerModel->setInsertPolicy(QComboBox::NoInsert);
+    m_orchestrationPlannerEffort = new QComboBox(plannerRow);
+    m_orchestrationPlannerEffort->addItem(i18n("Auto"), QString());
+    m_orchestrationPlannerEffort->addItem(i18n("Low"), u"low"_s);
+    m_orchestrationPlannerEffort->addItem(i18n("Medium"), u"medium"_s);
+    m_orchestrationPlannerEffort->addItem(i18n("High"), u"high"_s);
+    plannerLayout->addWidget(m_orchestrationPlannerProvider, 1);
+    plannerLayout->addWidget(m_orchestrationPlannerModel, 2);
+    plannerLayout->addWidget(m_orchestrationPlannerEffort);
+    orchestrationForm->addRow(i18n("Planner (read-only):"), plannerRow);
+
+    auto *executorRow = new QWidget(orchestrationGroup);
+    auto *executorLayout = new QHBoxLayout(executorRow);
+    executorLayout->setContentsMargins(0, 0, 0, 0);
+    m_orchestrationExecutorProvider = new QComboBox(executorRow);
+    m_orchestrationExecutorModel = new QComboBox(executorRow);
+    m_orchestrationExecutorModel->setEditable(true);
+    m_orchestrationExecutorModel->setInsertPolicy(QComboBox::NoInsert);
+    m_orchestrationExecutorEffort = new QComboBox(executorRow);
+    m_orchestrationExecutorEffort->addItem(i18n("Auto"), QString());
+    m_orchestrationExecutorEffort->addItem(i18n("Low"), u"low"_s);
+    m_orchestrationExecutorEffort->addItem(i18n("Medium"), u"medium"_s);
+    m_orchestrationExecutorEffort->addItem(i18n("High"), u"high"_s);
+    executorLayout->addWidget(m_orchestrationExecutorProvider, 1);
+    executorLayout->addWidget(m_orchestrationExecutorModel, 2);
+    executorLayout->addWidget(m_orchestrationExecutorEffort);
+    orchestrationForm->addRow(i18n("Executor:"), executorRow);
+
+    m_orchestrationReviewMode = new QComboBox(orchestrationGroup);
+    m_orchestrationReviewMode->addItem(i18n("Auto (changes or 3+ steps)"), u"auto"_s);
+    m_orchestrationReviewMode->addItem(i18n("Always"), u"always"_s);
+    m_orchestrationReviewMode->addItem(i18n("Off"), u"off"_s);
+    orchestrationForm->addRow(i18n("Planner review:"), m_orchestrationReviewMode);
+    m_orchestrationMaxReplans = new QSpinBox(orchestrationGroup);
+    m_orchestrationMaxReplans->setRange(0, 20);
+    orchestrationForm->addRow(i18n("Max replans per turn:"), m_orchestrationMaxReplans);
+    orchestrationLayout->addLayout(orchestrationForm);
+
+    const QList<Provider> orchestrationProviderList = orchestrationProviders(m_plugin->settings());
+    for (QComboBox *combo : {m_orchestrationPlannerProvider, m_orchestrationExecutorProvider}) {
+        for (Provider provider : orchestrationProviderList) {
+            combo->addItem(providerLabel(provider), providerId(provider));
+        }
+    }
+    auto providerFromCombo = [](QComboBox *combo) {
+        return providerFromId(combo->currentData().toString());
+    };
+    auto repopulateModels = [this, providerFromCombo]() {
+        const Provider plannerProvider = providerFromCombo(m_orchestrationPlannerProvider);
+        const QString plannerCurrent = m_orchestrationPlannerModel->currentText().trimmed();
+        m_orchestrationPlannerModel->clear();
+        m_orchestrationPlannerModel->addItems(m_modelCatalog.value(plannerProvider));
+        m_orchestrationPlannerModel->setCurrentText(plannerCurrent);
+
+        const Provider executorProvider = providerFromCombo(m_orchestrationExecutorProvider);
+        const QString executorCurrent = m_orchestrationExecutorModel->currentText().trimmed();
+        m_orchestrationExecutorModel->clear();
+        m_orchestrationExecutorModel->addItems(m_modelCatalog.value(executorProvider));
+        m_orchestrationExecutorModel->setCurrentText(executorCurrent);
+    };
+    connect(m_orchestrationPlannerProvider, &QComboBox::currentIndexChanged, this, [repopulateModels]() {
+        repopulateModels();
+    });
+    connect(m_orchestrationExecutorProvider, &QComboBox::currentIndexChanged, this, [repopulateModels]() {
+        repopulateModels();
+    });
+    connect(m_orchestrationEnabled, &QCheckBox::toggled, this, [this](bool enabled) {
+        for (QWidget *widget : {static_cast<QWidget *>(m_orchestrationPlannerProvider),
+                                static_cast<QWidget *>(m_orchestrationPlannerModel),
+                                static_cast<QWidget *>(m_orchestrationPlannerEffort),
+                                static_cast<QWidget *>(m_orchestrationExecutorProvider),
+                                static_cast<QWidget *>(m_orchestrationExecutorModel),
+                                static_cast<QWidget *>(m_orchestrationExecutorEffort),
+                                static_cast<QWidget *>(m_orchestrationReviewMode),
+                                static_cast<QWidget *>(m_orchestrationMaxReplans)}) {
+            widget->setEnabled(enabled);
+        }
+    });
+    providersLayout->addWidget(orchestrationGroup);
 
     providersLayout->addStretch();
     providersScroll->setWidget(providersWidget);
@@ -1994,6 +2088,20 @@ s.opencodeModel = m_opencodeModel->currentText().trimmed();
     s.voiceNoiseRemoval = m_voiceNoiseRemoval->isChecked();
     s.voiceAutoSend = m_voiceAutoSend->isChecked();
 
+    if (m_orchestrationEnabled) {
+        OrchestrationSettings orchestration;
+        orchestration.enabled = m_orchestrationEnabled->isChecked();
+        orchestration.planner.provider = providerFromId(m_orchestrationPlannerProvider->currentData().toString());
+        orchestration.planner.model = m_orchestrationPlannerModel->currentText().trimmed();
+        orchestration.planner.effort = m_orchestrationPlannerEffort->currentData().toString();
+        orchestration.executor.provider = providerFromId(m_orchestrationExecutorProvider->currentData().toString());
+        orchestration.executor.model = m_orchestrationExecutorModel->currentText().trimmed();
+        orchestration.executor.effort = m_orchestrationExecutorEffort->currentData().toString();
+        orchestration.maxReplans = m_orchestrationMaxReplans->value();
+        orchestration.reviewMode = m_orchestrationReviewMode->currentData().toString();
+        s.orchestration = orchestration;
+    }
+
     if (!m_workspace.isEmpty()) {
         QString error;
         if (!McpConfigStore::save(m_workspace, m_mcpServerConfigs, &error)) {
@@ -2036,6 +2144,24 @@ void KateAiConfigPage::reset()
         m_opencodeModel->setCurrentText(s.opencodeModel);
     m_acpModel->setCurrentText(s.acpModel);
     m_acpEffort->setCurrentText(s.acpEffort.trimmed().isEmpty() ? m_acpEffort->itemText(0) : s.acpEffort);
+
+    if (m_orchestrationEnabled) {
+        m_orchestrationEnabled->setChecked(s.orchestration.enabled);
+        m_orchestrationPlannerProvider->setCurrentIndex(std::max(
+            0, m_orchestrationPlannerProvider->findData(providerId(s.orchestration.planner.provider))));
+        m_orchestrationExecutorProvider->setCurrentIndex(std::max(
+            0, m_orchestrationExecutorProvider->findData(providerId(s.orchestration.executor.provider))));
+        refreshOrchestrationModels();
+        m_orchestrationPlannerModel->setCurrentText(s.orchestration.planner.model);
+        m_orchestrationExecutorModel->setCurrentText(s.orchestration.executor.model);
+        m_orchestrationPlannerEffort->setCurrentIndex(std::max(
+            0, m_orchestrationPlannerEffort->findData(s.orchestration.planner.effort)));
+        m_orchestrationExecutorEffort->setCurrentIndex(std::max(
+            0, m_orchestrationExecutorEffort->findData(s.orchestration.executor.effort)));
+        m_orchestrationMaxReplans->setValue(s.orchestration.maxReplans);
+        m_orchestrationReviewMode->setCurrentIndex(std::max(
+            0, m_orchestrationReviewMode->findData(s.orchestration.reviewMode)));
+    }
 
     m_deepseekUrl->setText(s.deepseekUrl);
     m_openaiCompatibleUrl->setText(s.openaiCompatibleUrl);
@@ -2265,6 +2391,28 @@ void KateAiConfigPage::setWorkspace(const QString &workspace)
     refreshMcpServerTable();
 }
 
+void KateAiConfigPage::refreshOrchestrationModels()
+{
+    if (!m_orchestrationPlannerProvider || !m_orchestrationExecutorProvider) {
+        return;
+    }
+    auto fill = [this](QComboBox *providerCombo, QComboBox *modelCombo) {
+        if (!providerCombo || !modelCombo) {
+            return;
+        }
+        const Provider provider = providerFromId(providerCombo->currentData().toString());
+        const QString current = modelCombo->currentText().trimmed();
+        modelCombo->clear();
+        modelCombo->addItems(m_modelCatalog.value(provider));
+        if (!current.isEmpty()) {
+            modelCombo->setCurrentText(current);
+        }
+    };
+    fill(m_orchestrationPlannerProvider, m_orchestrationPlannerModel);
+    fill(m_orchestrationExecutorProvider, m_orchestrationExecutorModel);
+}
+
+
 void KateAiConfigPage::updateModelCombo(Provider provider)
 {
     QComboBox *combo = nullptr;
@@ -2312,6 +2460,7 @@ void KateAiConfigPage::updateModelCombo(Provider provider)
     if (!currentText.isEmpty()) {
         combo->setCurrentText(currentText);
     }
+    refreshOrchestrationModels();
 }
 
 void KateAiConfigPage::defaults()

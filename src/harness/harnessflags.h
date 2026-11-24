@@ -46,6 +46,7 @@ struct HarnessFlags {
     bool skills = true;
     bool agentsV2 = true;
     bool inspector = true;
+    bool orchestration = true;
     bool telemetry = false;
 
     static HarnessFlags load();

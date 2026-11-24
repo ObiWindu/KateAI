@@ -17,7 +17,7 @@ namespace KateAi
 class SessionStore
 {
 public:
-    static constexpr int CURRENT_VERSION = 4;
+    static constexpr int CURRENT_VERSION = 5;
 
     // The SQLite file backing the store. Exposed so the harness event log can
     // live in the same database without duplicating the path policy.
@@ -60,6 +60,9 @@ public:
         // Sub-agent result records (worktree patch, sidechain path, usage).
         // Additive; an older payload leaves this empty.
         QJsonArray subagents;
+        // Two-model orchestration state (plan, role, counters, route keys).
+        // Additive; a single-model conversation leaves this empty.
+        QJsonObject orchestration;
         // Set when the stored payload could not be read or parsed. It is not
         // persisted; callers use it to avoid treating a damaged transcript as
         // an empty one and overwriting it on the next save.

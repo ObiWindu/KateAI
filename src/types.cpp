@@ -1051,6 +1051,11 @@ QString apiKeyFor(const Settings &settings)
     }
 }
 
+QString ModelRoute::key() const
+{
+    return providerId(provider) + u':' + model.trimmed();
+}
+
 QString modelFor(const Settings &settings)
 {
     switch (settings.provider) {

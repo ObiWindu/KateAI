@@ -41,6 +41,12 @@ kateai_test(test_providers)
 kateai_test(test_rules)
 kateai_test(test_transcriptlayout)
 kateai_test(test_modes)
+kateai_test(test_orchestration)
+add_executable(test_orchestrationflow test_orchestrationflow.cpp)
+target_link_libraries(test_orchestrationflow PRIVATE kateai_core Qt6::Test)
+add_test(NAME test_orchestrationflow COMMAND test_orchestrationflow
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
 kateai_test(test_toolalias)
 kateai_test(test_acpparsing)
 kateai_test(test_acpstreaming)
@@ -134,6 +140,9 @@ target_link_libraries(test_questionflow PRIVATE kateai_core Qt6::Test)
 add_test(NAME test_questionflow
          COMMAND test_questionflow -platform offscreen
          WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# Two-model planner/executor/reviewer flow against two loopback providers.
+
 
 # The tool-call budget: exhausting it must still ask the model for the closing
 # summary and finish the turn. Drives a real AgentLoop against an in-process

@@ -40,7 +40,7 @@ private Q_SLOTS:
         const Settings loaded = SettingsStore::load();
         QCOMPARE(loaded.provider, Provider::DeepSeek);
         SettingsStore::save(loaded);
-        QCOMPARE(g.readEntry(u"ConfigVersion"_s, 0), 2);
+        QCOMPARE(g.readEntry(u"ConfigVersion"_s, 0), SettingsStore::configVersion());
     }
 
     void legacyMaxIterationsMigrates()

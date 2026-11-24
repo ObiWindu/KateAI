@@ -1120,6 +1120,19 @@ ChatWidget::ChatWidget(QWidget *parent)
         setThinkingIndicator(false);
         addThinkingBlock(text);
     });
+    connect(&m_agent, &AgentLoop::orchestrationPhaseChanged, this,
+            [this](const QString &role, const QString &provider, const QString &model,
+                   const QString &reason) {
+                if (role.isEmpty()) {
+                    return;
+                }
+                QString label = role.left(1).toUpper() + role.mid(1);
+                QString text = i18n("%1 · %2 / %3", label, provider, model);
+                if (!reason.trimmed().isEmpty()) {
+                    text += u" — "_s + reason;
+                }
+                addActivityMessage(text);
+            });
     connect(&m_agent, &AgentLoop::planUpdated, this, &ChatWidget::showTodoList);
     connect(&m_agent, &AgentLoop::planUpdated, this, [this](const QJsonArray &) {
         scheduleSessionSave();
@@ -4326,6 +4339,22 @@ void ChatWidget::refreshModels()
 void ChatWidget::updateModelSelectorLabel()
 {
     if (!m_modelSelector) return;
+    if (m_settings.orchestration.enabled) {
+        const QString planner = m_settings.orchestration.planner.model.trimmed();
+        const QString executor = m_settings.orchestration.executor.model.trimmed();
+        const QString label = u"Orchestrator · %1 → %2"_s.arg(
+            planner.isEmpty() ? i18n("planner") : planner,
+            executor.isEmpty() ? i18n("executor") : executor);
+        m_modelSelector->setText(label + QChar(0x25BE));
+        QStringList parts{i18n("Planner: %1 / %2",
+                               providerLabel(m_settings.orchestration.planner.provider), planner)};
+        parts.append(i18n("Executor: %1 / %2",
+                          providerLabel(m_settings.orchestration.executor.provider), executor));
+        parts.append(i18n("Replans per turn: %1", m_settings.orchestration.maxReplans));
+        m_modelSelector->setToolTip(parts.join(u"  ·  "_s));
+        return;
+    }
+
     // The chip sits in a narrow row next to the mode chip, so it carries the
     // model alone. The provider (and the raw reasoning level) move into the
     // tooltip, where there is room for them and nobody has to read them twice.
@@ -4798,6 +4827,22 @@ void ChatWidget::showModelMenu()
             fillModelResultList();
             return;
         }
+        if (userRole == -3) {
+            const bool configured = m_settings.orchestration.planner.isValid()
+                && m_settings.orchestration.executor.isValid();
+            if (configured) {
+                m_settings.orchestration.enabled = true;
+                m_agent.setSettings(m_settings);
+                Q_EMIT settingsChanged(m_settings);
+                updateModelSelectorLabel();
+            } else {
+                Q_EMIT configureRequested();
+            }
+            if (m_modelPopup) {
+                m_modelPopup->close();
+            }
+            return;
+        }
         if (userRole < 0) {
             return;
         }
@@ -4830,6 +4875,22 @@ void ChatWidget::showModelMenu()
                 m_modelPickerTabs->setCurrentIndex(1); // Switch to ACP Agents tab
             }
             fillModelResultList();
+            return;
+        }
+        if (userRole == -3) {
+            const bool configured = m_settings.orchestration.planner.isValid()
+                && m_settings.orchestration.executor.isValid();
+            if (configured) {
+                m_settings.orchestration.enabled = true;
+                m_agent.setSettings(m_settings);
+                Q_EMIT settingsChanged(m_settings);
+                updateModelSelectorLabel();
+            } else {
+                Q_EMIT configureRequested();
+            }
+            if (m_modelPopup) {
+                m_modelPopup->close();
+            }
             return;
         }
         if (userRole < 0) {
@@ -5057,7 +5118,27 @@ void ChatWidget::fillModelResultList()
         return;
     }
 
-    // Normal mode: show all providers and their models
+    // Normal mode: show all providers and their models. The orchestration row
+    // stays at the top: selecting it enables the configured planner/executor
+    // pair; selecting any ordinary model below disables it.
+    {
+        const bool configured = m_settings.orchestration.planner.isValid()
+            && m_settings.orchestration.executor.isValid();
+        const QString planner = m_settings.orchestration.planner.model.trimmed();
+        const QString executor = m_settings.orchestration.executor.model.trimmed();
+        auto *item = new QListWidgetItem(configured
+            ? i18n("Orchestrator · %1 → %2", planner, executor)
+            : i18n("Orchestrator · configure planner and executor…"));
+        item->setData(Qt::UserRole, -3);
+        if (m_settings.orchestration.enabled) {
+            item->setForeground(QColor(ChatTheme::accent()));
+            QFont font = item->font();
+            font.setBold(true);
+            item->setFont(font);
+        }
+        m_modelResultList->addItem(item);
+    }
+
     if (m_acpAgentResultList) {
         QSignalBlocker acpBlocker(m_acpAgentResultList);
         m_acpAgentResultList->clear();
@@ -5253,6 +5334,8 @@ void ChatWidget::moveModelMenuSelection(int delta)
 
 void ChatWidget::selectModel(Provider provider, const QString &model)
 {
+    // Choosing an ordinary model is the explicit way out of a two-model turn.
+    m_settings.orchestration.enabled = false;
     m_settings.provider = provider;
     m_preferredProvider = provider;
     switch (provider) {

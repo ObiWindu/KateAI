@@ -515,6 +515,30 @@ per agent, so reopening Kate shows the commands the agent advertised last time
 without waiting for a turn; before the first session, `/` explains that the
 agent advertises its commands when a session starts.
 
+### Model orchestration (two models)
+
+Model orchestration pairs a **planner** model with an **executor** model in one
+turn. The planner is read-only: it inspects the project, writes a concrete plan
+and reviews the result. The executor performs the searches, edits, commands,
+builds and tests. The two models can use different API-key providers.
+
+Enable it under **Settings → Kate AI → AI Providers → Model Orchestration**, then
+pick a planner and executor. The model picker also shows an **Orchestrator** row;
+selecting an ordinary model turns the pair off.
+
+- The planner can explore with read tools and `submit_plan`. It never receives
+  edit, command or sub-agent tools.
+- The executor gets the plan as a transient directive and the active mode's
+  normal tools. It can hand control back with `request_replan`.
+- The planner reviews changed files and verification evidence through
+  `submit_review`, returning either approval or concrete fixes.
+- Replans and review rounds are bounded in settings.
+- Only API-key providers are supported. ACP agents and Telegram cannot be used
+  for either role.
+- Usage and cost are attributed per role in `:kateai usage`.
+
+See `docs/ORCHESTRATION.md` for the full design, triggers and edge cases.
+
 ### ACP tool integration
 
 Different ACP agents name their tools differently (`fs/read_text_file`, `terminal/exec`, `edit`, `write`, `apply_patch`, `str_replace_editor`, …). KateAI normalises every ACP tool name to a canonical KateAI name on ingest, so cards, colours, summaries, permissions, edit tracking, and history restoration all behave consistently regardless of the agent:

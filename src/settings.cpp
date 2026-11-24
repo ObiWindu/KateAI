@@ -10,6 +10,8 @@
 #include <KConfigGroup>
 #include <QDebug>
 #include <QFile>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <KSharedConfig>
 
 using namespace Qt::Literals::StringLiterals;
@@ -20,6 +22,58 @@ namespace KateAi
 static KConfigGroup group()
 {
     return KConfigGroup(KSharedConfig::openConfig(), u"KateAI"_s);
+}
+
+static QJsonObject routeToJson(const ModelRoute &route)
+{
+    return QJsonObject{{u"provider"_s, providerId(route.provider)},
+                       {u"model"_s, route.model},
+                       {u"effort"_s, route.effort}};
+}
+
+static ModelRoute routeFromJson(const QJsonObject &object, Provider fallback)
+{
+    ModelRoute route;
+    const QString id = object.value(u"provider"_s).toString().trimmed();
+    route.provider = id.isEmpty() ? fallback : providerFromId(id);
+    route.model = object.value(u"model"_s).toString();
+    route.effort = object.value(u"effort"_s).toString();
+    return route;
+}
+
+static QJsonObject orchestrationToJson(const OrchestrationSettings &settings)
+{
+    QJsonObject object;
+    object.insert(u"enabled"_s, settings.enabled);
+    object.insert(u"planner"_s, routeToJson(settings.planner));
+    object.insert(u"executor"_s, routeToJson(settings.executor));
+    object.insert(u"maxReplans"_s, settings.maxReplans);
+    object.insert(u"maxPlannerSteps"_s, settings.maxPlannerSteps);
+    object.insert(u"maxReviewRounds"_s, settings.maxReviewRounds);
+    object.insert(u"reviewMode"_s, settings.reviewMode);
+    object.insert(u"showPlannerActivity"_s, settings.showPlannerActivity);
+    return object;
+}
+
+static OrchestrationSettings orchestrationFromJson(const QJsonObject &object)
+{
+    OrchestrationSettings settings;
+    if (object.isEmpty()) {
+        return settings;
+    }
+    settings.enabled = object.value(u"enabled"_s).toBool(false);
+    settings.planner = routeFromJson(object.value(u"planner"_s).toObject(), Provider::OpenAI);
+    settings.executor = routeFromJson(object.value(u"executor"_s).toObject(), Provider::DeepSeek);
+    settings.maxReplans = qBound(0, object.value(u"maxReplans"_s).toInt(3), 20);
+    settings.maxPlannerSteps = qBound(1, object.value(u"maxPlannerSteps"_s).toInt(12), 100);
+    settings.maxReviewRounds = qBound(0, object.value(u"maxReviewRounds"_s).toInt(2), 10);
+    settings.reviewMode = object.value(u"reviewMode"_s).toString(QStringLiteral("auto")).toLower();
+    if (settings.reviewMode != u"auto"_s && settings.reviewMode != u"always"_s
+        && settings.reviewMode != u"off"_s) {
+        settings.reviewMode = u"auto"_s;
+    }
+    settings.showPlannerActivity = object.value(u"showPlannerActivity"_s).toBool(true);
+    return settings;
 }
 
 Settings SettingsStore::load()
@@ -39,9 +93,10 @@ Settings SettingsStore::load()
     }
     // v1 -> v2 (0.9): no key moved. The sub-agent and skill settings are
     // additive and default safely, so a v1 config is read as-is and rewritten
-    // with version 2 on the next save. The branch documents the boundary and
-    // is where a future move of [Harness]/[Skills] keys belongs.
-    if (storedVersion > 0 && storedVersion < 2) {
+    // with version 2 on the next save. v2 -> v3 (0.10) adds the Orchestration
+    // JSON block, also additive; a v2 config stays single-model until the user
+    // enables the pair.
+    if (storedVersion > 0 && storedVersion < 3) {
         qInfo() << "KateAI: upgrading configuration" << storedVersion << "->" << configVersion();
     }
     Settings s;
@@ -186,6 +241,18 @@ Settings SettingsStore::load()
     s.maxParallelSubtasks = g.readEntry(u"MaxParallelSubtasks"_s, 3);
     s.agentRoster = g.readEntry(u"AgentRoster"_s, QString());
     s.subtaskTimeoutMs = g.readEntry(u"SubtaskTimeoutMs"_s, 300000);
+    // Two-model orchestration. Stored as one JSON entry so the pair is copied
+    // and migrated as a unit; a malformed entry degrades to the defaults
+    // instead of rejecting the rest of the configuration.
+    const QString orchestrationJson = g.readEntry(u"Orchestration"_s, QString());
+    if (!orchestrationJson.trimmed().isEmpty()) {
+        const QJsonDocument document = QJsonDocument::fromJson(orchestrationJson.toUtf8());
+        if (document.isObject()) {
+            s.orchestration = orchestrationFromJson(document.object());
+        } else {
+            qWarning() << "KateAI: ignoring malformed Orchestration configuration";
+        }
+    }
     // Appearance
     s.themeSource = g.readEntry(u"ThemeSource"_s, QStringLiteral("preset"));
     if (s.themeSource != u"editor"_s) {
@@ -460,6 +527,9 @@ void SettingsStore::save(const Settings &settings)
     g.writeEntry(u"MaxParallelSubtasks"_s, settings.maxParallelSubtasks);
     g.writeEntry(u"AgentRoster"_s, settings.agentRoster);
     g.writeEntry(u"SubtaskTimeoutMs"_s, settings.subtaskTimeoutMs);
+    g.writeEntry(u"Orchestration"_s,
+                 QString::fromUtf8(QJsonDocument(orchestrationToJson(settings.orchestration))
+                                       .toJson(QJsonDocument::Compact)));
     // Appearance
     g.writeEntry(u"ThemeSource"_s, settings.themeSource);
     g.writeEntry(u"ThemePreset"_s, settings.themePreset);

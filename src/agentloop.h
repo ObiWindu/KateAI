@@ -28,6 +28,7 @@
 #include "lsp.h"
 #include "mcp.h"
 #include "modes.h"
+#include "orchestration.h"
 #include "permissions.h"
 #include "sandbox.h"
 #include "sessionstore.h"
@@ -336,6 +337,10 @@ Q_SIGNALS:
     void thinkingFinished(const QString &text);
     void assistantFinished(const QString &text);
     void planUpdated(const QJsonArray &plan);
+    // Which model is active in a two-model turn. Empty role means the ordinary
+    // single-model loop. The UI paints a phase pill and role badges from it.
+    void orchestrationPhaseChanged(const QString &role, const QString &provider,
+                                   const QString &model, const QString &reason);
     // An ACP agent posted a suggestion through the Kate client method; the
     // native suggest tool reaches the same card through toolStarted instead.
     void suggestionPosted(const Suggestion &suggestion);
@@ -434,8 +439,32 @@ private:
     bool canStartModelRequest(QString *error) const;
         // The history as it should be sent: budgeted and compacted to fit the
         // model's context window.
-        QList<ChatMessage> m_messagesForRequest(bool updateState = true) const;
+        QList<ChatMessage> m_messagesForRequest(bool updateState = true,
+                                                OrchestrationRole role = OrchestrationRole::Single) const;
     PromptResult assemblePrompt() const;
+    PromptResult assemblePrompt(OrchestrationRole role) const;
+    // The system prompt for one orchestration role. The executor uses the
+    // stored base prompt; planner/reviewer get a read-only variant.
+    QString systemPromptForRole(OrchestrationRole role) const;
+    ModeDefinition modeForRole(OrchestrationRole role) const;
+    ToolAccess accessForRole(OrchestrationRole role) const;
+    QJsonArray definitionsForRole(OrchestrationRole role) const;
+    Settings settingsForActiveRole() const;
+    ModelRoute routeForRole(OrchestrationRole role) const;
+    QString activeModelName() const;
+    void prepareRoleTools(OrchestrationRole role);
+    void enterOrchestrationRole(OrchestrationRole role, const QString &reason);
+    void emitOrchestrationPhase(const QString &reason);
+    void onPlannerFinished(const QString &text, const QList<ToolCall> &toolCalls);
+    void onReviewerFinished(const QString &text, const QList<ToolCall> &toolCalls);
+    void startOrchestrationReview();
+    bool executorTurnNeedsReview() const;
+    QString changedFilesSummary() const;
+    void resetOrchestrationRuntime();
+    QString orchestrationTransientMessage() const;
+    // Returns true when a tool call is the internal controller tool for the
+    // active role. The call is settled and the next role is scheduled.
+    bool interceptOrchestrationCall(const ToolCall &call);
         // Replace the stored transcript with the compacted request history
         // once compaction has made a material difference. Without this the
         // full session stayed in memory and was rewritten to SQLite on every
@@ -758,6 +787,32 @@ LlmClient m_client;
     Provider m_calibrationProvider = Provider::OpenAICompatible;
     Tokens::Calibrator m_tokenCalibrator;
     int m_lastRequestEstimate = 0;
+
+    // --- Model orchestration -------------------------------------------------
+    // Snapshot of the configured pair for the current turn. Settings changes
+    // apply to the next turn so a running handoff cannot change under itself.
+    OrchestrationSettings m_orchestration;
+    OrchestrationRole m_activeRole = OrchestrationRole::Single;
+    ModelRoute m_activeRoute;
+    Settings m_activeSettings;
+    ModeDefinition m_activeMode;
+    OrchestrationPlan m_orchestrationPlan;
+    int m_orchestrationReplans = 0;
+    int m_orchestrationPlannerSteps = 0;
+    int m_orchestrationReviewRounds = 0;
+    int m_orchestrationPlannerNudges = 0;
+    bool m_orchestrationPlanReady = false;
+    QString m_orchestrationLastReplanReason;
+    QString m_orchestrationReviewPacket;
+    QString m_executorFinalSummary;
+    QString m_reviewFixes;
+    // Per-route usage, so the cost report can separate planner and executor.
+    struct RouteUsage {
+        int input = 0;
+        int output = 0;
+        int cached = 0;
+    };
+    QHash<QString, RouteUsage> m_routeUsage;
 
     // --- Harness 0.7 ---------------------------------------------------------
     EventStore m_events;

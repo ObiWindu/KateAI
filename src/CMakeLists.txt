@@ -10,6 +10,7 @@ add_library(kateai_core STATIC
     llmclient.cpp
     acpclient.cpp
     agentloop.cpp
+    orchestration.cpp
     workspace.cpp
     documentbridge.cpp
     katelspbridge.cpp

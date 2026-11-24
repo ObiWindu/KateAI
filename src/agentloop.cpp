@@ -331,30 +331,35 @@ AgentLoop::AgentLoop(QObject *parent)
     connect(&m_client, &LlmClient::modelsFailed, this, &AgentLoop::modelsFailed);
     connect(&m_client, &LlmClient::usageReceived, this,
             [this](int inputTokens, int outputTokens, int cachedInputTokens) {
-                const QString model = modelFor(m_settings);
+                const Settings usageSettings = settingsForActiveRole();
+                const QString model = modelFor(usageSettings);
                 if (model != m_calibrationModel
-                    || m_settings.provider != m_calibrationProvider) {
+                    || usageSettings.provider != m_calibrationProvider) {
                     m_calibrationModel = model;
-                    m_calibrationProvider = m_settings.provider;
+                    m_calibrationProvider = usageSettings.provider;
                     m_tokenCalibrator = Tokens::Calibrator(
-                        ModelProfiles::resolve(m_settings.provider, model).tokenFactor);
+                        ModelProfiles::resolve(usageSettings.provider, model).tokenFactor);
                 }
                 // Anthropic's native wire format reports non-cached input
                 // separately. OpenAI-shaped transports include cached tokens
                 // in prompt_tokens, even for a Claude model behind a gateway.
                 // Adding cached tokens there would double-count them.
                 const bool anthropicWire =
-                    m_settings.provider == Provider::ClaudeCompatible
-                    || (m_settings.provider == Provider::Acp
-                        && m_settings.apiFormat == ApiFormat::AnthropicCompatible);
+                    usageSettings.provider == Provider::ClaudeCompatible
+                    || (usageSettings.provider == Provider::Acp
+                        && usageSettings.apiFormat == ApiFormat::AnthropicCompatible);
                 // Gemini's native usage reports promptTokenCount without the
                 // cached prefix; totalTokenCount includes it.
-                const bool geminiWire = LlmClient::usesGeminiNativeTransport(m_settings);
+                const bool geminiWire = LlmClient::usesGeminiNativeTransport(usageSettings);
                 const int effectiveInput = inputTokens
                     + ((anthropicWire || geminiWire) ? cachedInputTokens : 0);
                 m_inputTokensTotal += inputTokens;
                 m_outputTokensTotal += outputTokens;
                 m_cachedInputTokensTotal += cachedInputTokens;
+                RouteUsage &roleUsage = m_routeUsage[m_activeRoute.key()];
+                roleUsage.input += inputTokens;
+                roleUsage.output += outputTokens;
+                roleUsage.cached += cachedInputTokens;
                 if (effectiveInput > 0 && m_lastRequestEstimate > 0) {
                     m_tokenCalibrator.observe(m_lastRequestEstimate, effectiveInput);
                 }
@@ -1004,6 +1009,167 @@ ToolAccess AgentLoop::activeToolAccess() const
         }
     }
     return access;
+}
+
+Settings AgentLoop::settingsForActiveRole() const
+{
+    return m_activeRole == OrchestrationRole::Single ? m_settings : m_activeSettings;
+}
+
+ModelRoute AgentLoop::routeForRole(OrchestrationRole role) const
+{
+    switch (role) {
+    case OrchestrationRole::Planner:
+        return m_orchestration.planner;
+    case OrchestrationRole::Executor:
+        return m_orchestration.executor;
+    case OrchestrationRole::Reviewer:
+        return m_orchestration.planner;
+    case OrchestrationRole::Single:
+        break;
+    }
+    ModelRoute route;
+    route.provider = m_settings.provider;
+    route.model = modelFor(m_settings);
+    route.effort = m_settings.reasoningEffort;
+    return route;
+}
+
+QString AgentLoop::activeModelName() const
+{
+    return modelFor(settingsForActiveRole());
+}
+
+ModeDefinition AgentLoop::modeForRole(OrchestrationRole role) const
+{
+    ModeDefinition mode = activeMode();
+    if (role == OrchestrationRole::Planner || role == OrchestrationRole::Reviewer) {
+        mode.readOnly = true;
+        mode.groups = {ToolGroup::read(), ToolGroup::web()};
+        mode.name = mode.name + (role == OrchestrationRole::Planner ? u" Planner"_s
+                                                                   : u" Reviewer"_s);
+        mode.roleDefinition = mode.roleDefinition.trimmed() + u"\n\n"_s
+            + orchestrationRolePrompt(role);
+    }
+    return mode;
+}
+
+ToolAccess AgentLoop::accessForRole(OrchestrationRole role) const
+{
+    if (role == OrchestrationRole::Planner || role == OrchestrationRole::Reviewer) {
+        ToolAccess access = ModeRegistry::toolAccessForGroups(
+            {ToolGroup::read(), ToolGroup::web()});
+        // A planning turn must never delegate, fork a skill, or flip plan
+        // mode. Read tools remain, including LSP/debug inspection.
+        for (const QString &name : {u"exit_plan_mode"_s, u"skill"_s, subtaskToolName()}) {
+            access.deny(name);
+        }
+        access.allow(role == OrchestrationRole::Planner ? submitPlanToolName()
+                                                        : submitReviewToolName());
+        return access;
+    }
+    ToolAccess access = activeToolAccess();
+    access.allow(requestReplanToolName());
+    return access;
+}
+
+QJsonArray AgentLoop::definitionsForRole(OrchestrationRole role) const
+{
+    const ToolAccess access = accessForRole(role);
+    const Settings settings = role == OrchestrationRole::Single ? m_settings : m_activeSettings;
+    const int window = settings.contextWindow > 0
+        ? settings.contextWindow
+        : ModelProfiles::contextWindow(settings.provider, modelFor(settings));
+    QJsonArray definitions;
+    if (m_toolRegistry.specs().isEmpty()) {
+        definitions = toolDefinitions(access);
+    } else {
+        definitions = m_toolRegistry.advertised(access, window, m_harness.toolSearch).tools;
+    }
+    // The advertised() path already includes the live MCP catalogue. A fresh
+    // loop before syncToolAccess() does not, so append it explicitly.
+    if (role == OrchestrationRole::Executor && m_mcp) {
+        const QJsonArray mcpTools = m_mcp->toolDefinitions();
+        QSet<QString> present;
+        for (const QJsonValue &value : std::as_const(definitions)) {
+            present.insert(value.toObject().value(u"function"_s).toObject()
+                               .value(u"name"_s).toString());
+        }
+        for (const QJsonValue &value : mcpTools) {
+            const QString name = value.toObject().value(u"function"_s).toObject()
+                                     .value(u"name"_s).toString();
+            if (!name.isEmpty() && !present.contains(name) && access.allows(name)) {
+                definitions.append(value);
+            }
+        }
+    }
+    for (const QJsonValue &value : orchestrationToolDefinitions(role)) {
+        definitions.append(value);
+    }
+    return definitions;
+}
+
+void AgentLoop::prepareRoleTools(OrchestrationRole role)
+{
+    const ToolAccess access = accessForRole(role);
+    m_client.setToolAccess(access);
+    m_client.setToolDefinitionsOverride(definitionsForRole(role));
+    // The override is the complete request catalogue; extra MCP definitions
+    // would otherwise be added a second time or bypass the role's access.
+    m_client.setExtraToolDefinitions({});
+}
+
+void AgentLoop::resetOrchestrationRuntime()
+{
+    m_orchestration = OrchestrationSettings{};
+    m_activeRole = OrchestrationRole::Single;
+    m_activeRoute = ModelRoute{};
+    m_activeSettings = m_settings;
+    m_activeMode = activeMode();
+    m_orchestrationPlan = OrchestrationPlan{};
+    m_orchestrationReplans = 0;
+    m_orchestrationPlannerSteps = 0;
+    m_orchestrationReviewRounds = 0;
+    m_orchestrationPlannerNudges = 0;
+    m_orchestrationPlanReady = false;
+    m_orchestrationLastReplanReason.clear();
+    m_orchestrationReviewPacket.clear();
+    m_executorFinalSummary.clear();
+    m_reviewFixes.clear();
+}
+
+void AgentLoop::emitOrchestrationPhase(const QString &reason)
+{
+    if (!m_orchestration.enabled || m_activeRole == OrchestrationRole::Single) {
+        return;
+    }
+    Q_EMIT orchestrationPhaseChanged(orchestrationRoleId(m_activeRole),
+                                     providerId(m_activeRoute.provider),
+                                     m_activeRoute.model, reason);
+}
+
+void AgentLoop::enterOrchestrationRole(OrchestrationRole role, const QString &reason)
+{
+    m_activeRole = role;
+    m_activeRoute = routeForRole(role);
+    m_activeSettings = settingsForRoute(m_settings, m_activeRoute);
+    m_activeMode = modeForRole(role);
+    const QString label = orchestrationRoleLabel(role);
+    Q_EMIT statusChanged(i18n("%1 is working…", label));
+    emitOrchestrationPhase(reason);
+    m_state = State::WaitingForNextModel;
+    scheduleNextModelStep();
+}
+
+QString AgentLoop::systemPromptForRole(OrchestrationRole role) const
+{
+    if (role == OrchestrationRole::Single) {
+        return systemPrompt();
+    }
+    if (m_harness.promptV2) {
+        return assemblePrompt(role).text;
+    }
+    return systemPrompt() + u"\n\n"_s + orchestrationRolePrompt(role);
 }
 
 void AgentLoop::setMode(const QString &modeId)
@@ -1777,6 +1943,20 @@ bool AgentLoop::runVerificationGate()
 
     const MiddlewareResult result = m_middleware.runStop(m_turnContext);
     if (result.flow == MiddlewareFlow::Retry) {
+        // A second failed check is the point where the executor stops
+        // guessing and the planner repairs the plan, if a replan is available.
+        if (m_orchestration.enabled && m_activeRole == OrchestrationRole::Executor
+            && m_turnContext.verificationAttempts >= qMax(2, m_settings.maxVerificationAttempts)
+            && m_orchestrationReplans < m_orchestration.maxReplans) {
+            ++m_orchestrationReplans;
+            m_orchestrationLastReplanReason = i18n("Verification failed: %1", result.reason);
+            m_verificationAttempted = true;
+            appendControllerMessage(u"[KateAI orchestration] The executor returned control to the planner after "
+                                    "repeated verification failures."_s);
+            enterOrchestrationRole(OrchestrationRole::Planner,
+                                   i18n("Verification needs replanning"));
+            return true;
+        }
         m_verificationAttempted = true;
         emitHarnessEvent(EventTypes::Verification,
                          QJsonObject{{u"passed"_s, false},
@@ -2159,23 +2339,42 @@ QList<GraphEdge*> AgentLoop::getProjectEdges() const
 
 PromptResult AgentLoop::assemblePrompt() const
 {
-    const ModeDefinition mode = m_modes.modeOrDefault(m_settings.agentMode);
+    return assemblePrompt(OrchestrationRole::Single);
+}
+
+PromptResult AgentLoop::assemblePrompt(OrchestrationRole role) const
+{
+    const Settings active = role == OrchestrationRole::Single ? m_settings : m_activeSettings;
+    const ModeDefinition mode = role == OrchestrationRole::Single
+        ? m_modes.modeOrDefault(m_settings.agentMode)
+        : modeForRole(role);
     PromptRequest request;
-    request.settings = m_settings;
+    request.settings = active;
     request.mode = mode;
-    request.provider = m_settings.provider;
-    request.modelName = modelFor(m_settings);
+    request.provider = active.provider;
+    request.modelName = modelFor(active);
     request.workspace = m_workspace;
     request.verificationGate = m_harness.verificationGate;
 
-    const ToolAccess access = activeToolAccess();
-    const int window = m_settings.contextWindow > 0
-        ? m_settings.contextWindow
-        : ModelProfiles::contextWindow(m_settings.provider, request.modelName);
+    const ToolAccess access = role == OrchestrationRole::Single ? activeToolAccess()
+                                                                : accessForRole(role);
+    const int window = active.contextWindow > 0
+        ? active.contextWindow
+        : ModelProfiles::contextWindow(active.provider, request.modelName);
+    const QJsonArray roleDefinitions = role == OrchestrationRole::Single
+        ? m_client.advertisedTools() : definitionsForRole(role);
+    QSet<QString> seen;
+    for (const QJsonValue &value : roleDefinitions) {
+        const QString name = value.toObject().value(u"function"_s).toObject()
+                                 .value(u"name"_s).toString();
+        if (!name.isEmpty() && !seen.contains(name)) {
+            request.toolNames.append(name);
+            seen.insert(name);
+        }
+    }
     const AdvertisedTools advertised = m_toolRegistry.advertised(
         access, window, m_harness.toolSearch);
 
-    QSet<QString> seen;
     for (const QJsonValue &value : advertised.tools) {
         const QString name = value.toObject().value(u"function"_s).toObject()
                                  .value(u"name"_s).toString();
@@ -2228,22 +2427,22 @@ PromptResult AgentLoop::assemblePrompt() const
         QString roster = u"You can delegate with new_task. Available agents:\n"_s
             + m_team.describeRoster() + u"\n"_s;
         roster += u"At most %1 sub-agents may run at once; independent subtasks in one response run in parallel. "_s
-                      .arg(qMax(1, m_settings.maxParallelSubtasks));
+                      .arg(qMax(1, active.maxParallelSubtasks));
         roster += u"A sub-agent cannot see this conversation: restate everything it needs, and read its answer "
                   u"before relying on it.\n"_s;
         request.subagentRoster = roster;
     }
 
-    if (m_settings.loadAgentRules && !m_harness.memoryV2 && m_subagentMemoryScope != u"none"_s) {
+    if (active.loadAgentRules && !m_harness.memoryV2 && m_subagentMemoryScope != u"none"_s) {
         request.rules = RulesLoader::render(
-            RulesLoader::load(m_workspace, mode.id), m_settings.globalRules);
+            RulesLoader::load(m_workspace, mode.id), active.globalRules);
     }
 
     if (m_harness.memoryV2 && m_memory && m_subagentMemoryScope != u"none"_s) {
         const QList<MemoryFile> files = memoryFilesForPrompt();
         QString rendered = MemoryLoader::render(files);
-        if (!m_settings.globalRules.trimmed().isEmpty()) {
-            rendered = u"<global_rules>\n"_s + m_settings.globalRules.trimmed()
+        if (!active.globalRules.trimmed().isEmpty()) {
+            rendered = u"<global_rules>\n"_s + active.globalRules.trimmed()
                 + u"\n</global_rules>\n"_s + rendered;
         }
         request.memory = rendered;
@@ -2264,12 +2463,12 @@ PromptResult AgentLoop::assemblePrompt() const
         request.skills = catalog;
     }
 
-    if (m_projectGraph && m_projectGraph->getNodeCount() > 0 && m_settings.compressProjectGraph) {
+    if (m_projectGraph && m_projectGraph->getNodeCount() > 0 && active.compressProjectGraph) {
         request.graph = m_projectGraph->contextSummary(
-            m_settings.maxGraphNodes, m_settings.maxGraphEdges, m_settings.contextCompressionLevel);
+            active.maxGraphNodes, active.maxGraphEdges, active.contextCompressionLevel);
     }
 
-    const QJsonArray advertisedJson = m_client.advertisedTools();
+    const QJsonArray advertisedJson = roleDefinitions;
     request.toolSchemaTokens = Tokens::estimate(QString::fromUtf8(
         QJsonDocument(advertisedJson).toJson(QJsonDocument::Compact)));
 
@@ -2469,6 +2668,8 @@ void AgentLoop::resetConversation()
     m_currentPlan = QJsonArray();
     m_planShown = false;
     m_currentAssistant.clear();
+    resetOrchestrationRuntime();
+    m_routeUsage.clear();
     m_contextSummary.clear();
     m_contextManifest.clear();
     m_touchedPaths.clear();
@@ -2877,6 +3078,34 @@ void AgentLoop::start(const QString &userText)
     m_contextOverflowRetries = 0;
     m_taskSummary = userText.simplified().left(80);
 
+    // --- Two-model orchestration -------------------------------------------
+    // Snapshot the pair for this turn. A settings change while the turn runs
+    // applies to the next turn so a handoff cannot change model mid-flight.
+    resetOrchestrationRuntime();
+    m_orchestration = m_settings.orchestration;
+    bool orchestrationActive = m_harness.orchestration && m_orchestration.enabled
+        && !usesAcpNative(m_settings);
+    if (orchestrationActive) {
+        QString routeError;
+        if (!modelRouteUsable(m_settings, m_orchestration.planner, &routeError)) {
+            orchestrationActive = false;
+            Q_EMIT noticeRaised(i18n("Model orchestration is disabled for this turn: planner %1",
+                                     routeError));
+        } else if (!modelRouteUsable(m_settings, m_orchestration.executor, &routeError)) {
+            orchestrationActive = false;
+            Q_EMIT noticeRaised(i18n("Model orchestration is disabled for this turn: executor %1",
+                                     routeError));
+        }
+    }
+    m_orchestration.enabled = orchestrationActive;
+    if (orchestrationActive) {
+        m_activeRole = OrchestrationRole::Planner;
+        m_activeRoute = m_orchestration.planner;
+        m_activeSettings = settingsForRoute(m_settings, m_activeRoute);
+        m_activeMode = modeForRole(OrchestrationRole::Planner);
+        Q_EMIT activityUpdated(i18n("Orchestrating: the planner is inspecting the workspace."));
+    }
+
     if (m_messages.isEmpty()) {
         ChatMessage system;
         system.role = ChatMessage::Role::System;
@@ -2980,20 +3209,44 @@ QString AgentLoop::turnContextMessage() const
     return m_cachedTurnContext;
 }
 
-QList<ChatMessage> AgentLoop::m_messagesForRequest(bool updateState) const
+QList<ChatMessage> AgentLoop::m_messagesForRequest(bool updateState, OrchestrationRole role) const
 {
-    const QString model = modelFor(m_settings);
-    const int window = m_settings.contextWindow > 0
-        ? m_settings.contextWindow
-        : ModelProfiles::contextWindow(m_settings.provider, model);
-    const int reserve = m_settings.contextWindowReserve > 0 ? m_settings.contextWindowReserve : 8192;
+    const Settings active = role == OrchestrationRole::Single ? m_settings : m_activeSettings;
+    const QString model = modelFor(active);
+    const int window = active.contextWindow > 0
+        ? active.contextWindow
+        : ModelProfiles::contextWindow(active.provider, model);
+    const int reserve = active.contextWindowReserve > 0 ? active.contextWindowReserve : 8192;
     const QString context = turnContextMessage();
+
+    auto decorate = [this, role](QList<ChatMessage> request) {
+        if (role == OrchestrationRole::Single) {
+            return request;
+        }
+        // The role owns the system prompt for this request only. The stored
+        // system message stays the executor prompt so the transcript and a
+        // later single-model turn are unaffected.
+        if (!request.isEmpty() && request.first().role == ChatMessage::Role::System) {
+            request.first().content = systemPromptForRole(role);
+        }
+        const QString directive = orchestrationTransientMessage();
+        if (!directive.trimmed().isEmpty()) {
+            ChatMessage ambient;
+            ambient.role = ChatMessage::Role::User;
+            ambient.transient = true;
+            ambient.authorRole = orchestrationRoleId(role);
+            ambient.content = directive;
+            const int at = (!request.isEmpty() && request.first().role == ChatMessage::Role::System) ? 1 : 0;
+            request.insert(at, ambient);
+        }
+        return request;
+    };
 
     if (m_harness.contextV2) {
         ContextOptions options;
         options.contextWindow = window;
         options.reserveForResponse = reserve;
-        options.autoCompact = m_settings.compressOldMessages;
+        options.autoCompact = active.compressOldMessages;
         options.compactionLevel = m_compactionLevel;
         options.allowContentStore = updateState;
         options.tokenFactor = m_calibrationModel == model ? m_tokenCalibrator.factor() : 1.0;
@@ -3005,8 +3258,8 @@ QList<ChatMessage> AgentLoop::m_messagesForRequest(bool updateState) const
         }
         options.projectGraph = m_projectGraph.get();
         options.summarizeEverything = m_compactionLevel >= 6;
-        if (m_settings.keepRecentTokens > 0) {
-            options.keepRecentTokens = m_settings.keepRecentTokens;
+        if (active.keepRecentTokens > 0) {
+            options.keepRecentTokens = active.keepRecentTokens;
         }
         options.plan = currentPlanText();
         const QStringList touched = contextTouchedPaths();
@@ -3043,20 +3296,20 @@ QList<ChatMessage> AgentLoop::m_messagesForRequest(bool updateState) const
             const int at = (!request.isEmpty() && request.first().role == ChatMessage::Role::System) ? 1 : 0;
             request.insert(at, ambient);
         }
-        return request;
+        return decorate(request);
     }
 
     ContextManager::Options options;
     options.contextWindow = window;
     options.reserveForResponse = reserve;
-    options.autoCompact = m_settings.compressOldMessages;
+    options.autoCompact = active.compressOldMessages;
     options.compactionLevel = m_compactionLevel;
     options.projectGraph = m_projectGraph.get();
     // The graph is useful for preserving related files in a compaction even
     // when the user does not want its summary in the system prompt.
     options.useProjectGraph = true;
-    if (m_settings.keepRecentTokens > 0) {
-        options.keepRecentTokens = m_settings.keepRecentTokens;
+    if (active.keepRecentTokens > 0) {
+        options.keepRecentTokens = active.keepRecentTokens;
     } else {
         // Keep a substantial third of the usable window verbatim. A fixed
         // small tail made a 128k/1M model compact as if it were a 32k one,
@@ -3078,7 +3331,71 @@ QList<ChatMessage> AgentLoop::m_messagesForRequest(bool updateState) const
         const int at = (!request.isEmpty() && request.first().role == ChatMessage::Role::System) ? 1 : 0;
         request.insert(at, ambient);
     }
-    return request;
+    return decorate(request);
+}
+
+QString AgentLoop::orchestrationTransientMessage() const
+{
+    if (!m_orchestration.enabled) {
+        return QString();
+    }
+    switch (m_activeRole) {
+    case OrchestrationRole::Planner:
+        if (m_orchestrationReplans > 0 && !m_orchestrationLastReplanReason.isEmpty()) {
+            return renderHandoffDirective(m_orchestrationLastReplanReason, QString(),
+                                          changedFilesSummary(), m_orchestrationPlan);
+        }
+        return QString();
+    case OrchestrationRole::Executor:
+        if (!m_reviewFixes.trimmed().isEmpty()) {
+            return u"<orchestration_fixes>\n"_s + m_reviewFixes.trimmed()
+                + u"\n</orchestration_fixes>"_s;
+        }
+        if (m_orchestrationPlanReady) {
+            return renderPlanDirective(m_orchestrationPlan);
+        }
+        return QString();
+    case OrchestrationRole::Reviewer:
+        return m_orchestrationReviewPacket;
+    case OrchestrationRole::Single:
+        break;
+    }
+    return QString();
+}
+
+QString AgentLoop::changedFilesSummary() const
+{
+    QStringList paths;
+    for (const QString &path : m_changedPaths) {
+        paths.append(path);
+    }
+    paths.sort();
+    return paths.join(u", "_s);
+}
+
+bool AgentLoop::executorTurnNeedsReview() const
+{
+    return m_orchestration.enabled
+        && m_activeRole == OrchestrationRole::Executor
+        && m_orchestrationPlanReady
+        && shouldReviewOrchestratedTurn(m_orchestration, !m_changedPaths.isEmpty(),
+                                        m_orchestrationPlan.steps.size())
+        && m_orchestrationReviewRounds < m_orchestration.maxReviewRounds;
+}
+
+void AgentLoop::startOrchestrationReview()
+{
+    if (!executorTurnNeedsReview()) {
+        finishTurn();
+        return;
+    }
+    ++m_orchestrationReviewRounds;
+    m_orchestrationReviewPacket = renderReviewDirective(
+        m_orchestrationPlan, changedFilesSummary(), m_verificationEvidenceSent
+            ? i18n("The verification gate reported passing checks.") : QString(),
+        m_executorFinalSummary);
+    m_reviewFixes.clear();
+    enterOrchestrationRole(OrchestrationRole::Reviewer, i18n("Reviewing the result"));
 }
 
 QString AgentLoop::contextReport() const
@@ -3237,6 +3554,19 @@ QString AgentLoop::usageReport() const
         report += i18n("Sub-agents: %1 recorded, %2 input / %3 output tokens, $%4 attributed\n",
                        m_subagentRecords.size(), childInput, childOutput,
                        QString::number(childCost, 'f', 4));
+    }
+    if (m_orchestrationPlan.version > 0) {
+        report += i18n("Orchestration: planner %1/%2, executor %3/%4, plan v%5, replans %6, reviews %7\n",
+                       providerLabel(m_orchestration.planner.provider),
+                       m_orchestration.planner.model,
+                       providerLabel(m_orchestration.executor.provider),
+                       m_orchestration.executor.model,
+                       m_orchestrationPlan.version, m_orchestrationReplans,
+                       m_orchestrationReviewRounds);
+        for (auto it = m_routeUsage.constBegin(); it != m_routeUsage.constEnd(); ++it) {
+            report += i18n("  %1: %2 input, %3 output, %4 cached tokens\n", it.key(),
+                           it.value().input, it.value().output, it.value().cached);
+        }
     }
     report += i18n("Calibration samples: %1\n", m_tokenCalibrator.samples());
     report += i18n("Recovery prompts: %1\n", m_recoveryPromptCount);
@@ -3582,6 +3912,24 @@ void AgentLoop::sendToModel()
         return;
     }
 
+    // Resolve the route for this step. The executor keeps the ordinary loop's
+    // settings; planner/reviewer get their own provider, model and read-only
+    // tool set. m_settings stays untouched so the next turn starts from the
+    // same base configuration.
+    if (m_orchestration.enabled && m_activeRole != OrchestrationRole::Single) {
+        m_activeRoute = routeForRole(m_activeRole);
+        m_activeSettings = settingsForRoute(m_settings, m_activeRoute);
+        m_activeMode = modeForRole(m_activeRole);
+    } else {
+        m_activeRole = OrchestrationRole::Single;
+        m_activeRoute = ModelRoute{m_settings.provider, modelFor(m_settings), m_settings.reasoningEffort};
+        m_activeSettings = m_settings;
+        m_activeMode = activeMode();
+    }
+    prepareRoleTools(m_activeRole);
+    m_client.setSettings(ModeRegistry::settingsForMode(m_activeSettings, m_activeMode));
+    emitOrchestrationPhase(QString());
+
     const qint64 now = QDateTime::currentMSecsSinceEpoch();
     if (rateLimitDelayMs(now) > 0) {
         // Reschedule rather than send; the queued call has not consumed a slot.
@@ -3593,9 +3941,9 @@ void AgentLoop::sendToModel()
         m_modelRequestTimes.enqueue(now);
     }
 
-    const QList<ChatMessage> requestMessages = m_messagesForRequest();
+    const QList<ChatMessage> requestMessages = m_messagesForRequest(true, m_activeRole);
     maybeCompactStoredHistory(requestMessages);
-    const double factor = m_calibrationModel == modelFor(m_settings)
+    const double factor = m_calibrationModel == activeModelName()
         ? m_tokenCalibrator.factor()
         : 1.0;
     m_lastRequestEstimate = Tokens::applyFactor(Tokens::estimate(requestMessages), factor)
@@ -3624,13 +3972,17 @@ void AgentLoop::sendToModel()
     }
     QJsonObject stepPayload;
     stepPayload.insert(u"step"_s, m_stepNumber);
-    stepPayload.insert(u"provider"_s, providerId(m_settings.provider));
+    stepPayload.insert(u"role"_s, orchestrationRoleId(m_activeRole));
+    stepPayload.insert(u"provider"_s, providerId(m_activeSettings.provider));
+    stepPayload.insert(u"model"_s, activeModelName());
     stepPayload.insert(u"modelRequests"_s, m_turnContext.modelRequests);
     emitHarnessEvent(EventTypes::StepStart, stepPayload);
     QJsonObject headerPayload;
     headerPayload.insert(u"messages"_s, requestMessages.size());
     headerPayload.insert(u"estimatedTokens"_s, requestChars / 4);
-    headerPayload.insert(u"provider"_s, providerId(m_settings.provider));
+    headerPayload.insert(u"role"_s, orchestrationRoleId(m_activeRole));
+    headerPayload.insert(u"provider"_s, providerId(m_activeSettings.provider));
+    headerPayload.insert(u"model"_s, activeModelName());
     headerPayload.insert(u"permissionMode"_s, permissionModeId(m_settings.permissionMode));
     emitHarnessEvent(EventTypes::RequestHeaders, headerPayload);
 
@@ -3638,8 +3990,12 @@ void AgentLoop::sendToModel()
     m_currentAssistant.clear();
     m_currentThinking.clear();
     m_thinkingFinishedEmitted = false;
-    m_currentPlan = QJsonArray();
-    m_planShown = false;
+    if (!m_orchestration.enabled) {
+        // The plan checklist belongs to the executor across planner handoffs;
+        // clearing it on every model step would erase the plan the user sees.
+        m_currentPlan = QJsonArray();
+        m_planShown = false;
+    }
     m_state = State::WaitingForModel;
     setTurnState(TurnState::AwaitingModel);
 
@@ -3776,6 +4132,7 @@ void AgentLoop::onAcpPromptFinished(const QString &stopReason, const QString &te
 
     ChatMessage assistant;
     assistant.role = ChatMessage::Role::Assistant;
+    assistant.authorRole = orchestrationRoleId(m_activeRole);
     assistant.content = text;
     assistant.thinking = m_currentThinking;
     assistant.plan = m_currentPlan;
@@ -4327,6 +4684,7 @@ void AgentLoop::onFinished(const QString &text, const QList<ToolCall> &toolCalls
 
     ChatMessage assistant;
     assistant.role = ChatMessage::Role::Assistant;
+    assistant.authorRole = orchestrationRoleId(m_activeRole);
     assistant.content = text;
     assistant.thinking = m_currentThinking;
 
@@ -4383,6 +4741,9 @@ void AgentLoop::onFinished(const QString &text, const QList<ToolCall> &toolCalls
         }
         emitHarnessEvent(EventTypes::AssistantMessage, payload);
     }
+    if (m_activeRole == OrchestrationRole::Executor && !text.trimmed().isEmpty()) {
+        m_executorFinalSummary = text.trimmed();
+    }
     // The answer is committed to the transcript now. Keeping it in
     // m_currentAssistant as well would make a session that is saved during the
     // tool phase hold the same text twice, and the restore would show the
@@ -4397,6 +4758,15 @@ void AgentLoop::onFinished(const QString &text, const QList<ToolCall> &toolCalls
     // Emit plan if we have one
     if (!assistant.plan.isEmpty()) {
         Q_EMIT planUpdated(assistant.plan);
+    }
+
+    if (m_activeRole == OrchestrationRole::Planner) {
+        onPlannerFinished(text, toolCalls);
+        return;
+    }
+    if (m_activeRole == OrchestrationRole::Reviewer) {
+        onReviewerFinished(text, toolCalls);
+        return;
     }
 
     // The model is responsible for natural progress narration. If it returned
@@ -4427,6 +4797,10 @@ void AgentLoop::onFinished(const QString &text, const QList<ToolCall> &toolCalls
             requestVerificationTurn();
             return;
         }
+        if (executorTurnNeedsReview()) {
+            startOrchestrationReview();
+            return;
+        }
         finishTurn();
         return;
     }
@@ -4442,6 +4816,88 @@ void AgentLoop::onFinished(const QString &text, const QList<ToolCall> &toolCalls
     setTurnState(TurnState::AwaitingTool);
     processQueue();
 }
+
+void AgentLoop::onPlannerFinished(const QString &text, const QList<ToolCall> &toolCalls)
+{
+    if (!toolCalls.isEmpty()) {
+        m_actionsThisModelTurn.clear();
+        m_queue = bundleSimilarTools(toolCalls);
+        m_pendingResults.clear();
+        Q_EMIT activityUpdated(describePlannedWork(m_queue));
+        m_state = State::ExecutingTools;
+        setTurnState(TurnState::AwaitingTool);
+        processQueue();
+        return;
+    }
+
+    // The planner contract is the submit_plan tool. Accept the existing prose
+    // plan parser as a fallback so a provider that ignores the tool still
+    // produces a usable handoff.
+    const QJsonArray parsed = parsePlanFromText(text);
+    if (!parsed.isEmpty()) {
+        OrchestrationPlan plan;
+        plan.summary = text.section(u"## Plan"_s, 0, 0).trimmed().left(1000);
+        for (const QJsonValue &value : parsed) {
+            const QString step = value.toObject().value(u"description"_s).toString().trimmed();
+            if (!step.isEmpty()) {
+                plan.steps.append(step);
+            }
+        }
+        plan.acceptance = QStringList{i18n("The executor reports verification evidence for the changed files.")};
+        plan.needsChanges = true;
+        plan.hash = planHash(plan);
+        plan.version = ++m_orchestrationPlan.version;
+        m_orchestrationPlan = plan;
+        m_orchestrationPlanReady = true;
+        m_currentPlan = parsed;
+        Q_EMIT planUpdated(parsed);
+        if (m_settings.planMode || activeMode().readOnly) {
+            finishTurn();
+            return;
+        }
+        enterOrchestrationRole(OrchestrationRole::Executor, i18n("Plan ready"));
+        return;
+    }
+
+    if (m_orchestrationPlannerNudges < 1) {
+        ++m_orchestrationPlannerNudges;
+        appendControllerMessage(i18n("Use submit_plan to hand a concrete plan to the executor. If the request needs no "
+                                     "code change, submit_plan needs_changes=false with a direct answer."));
+        m_state = State::WaitingForNextModel;
+        scheduleNextModelStep();
+        return;
+    }
+    // A planner that still answers in prose is treated as a direct answer.
+    finishTurn();
+}
+
+void AgentLoop::onReviewerFinished(const QString &text, const QList<ToolCall> &toolCalls)
+{
+    if (!toolCalls.isEmpty()) {
+        m_actionsThisModelTurn.clear();
+        m_queue = bundleSimilarTools(toolCalls);
+        m_pendingResults.clear();
+        m_state = State::ExecutingTools;
+        setTurnState(TurnState::AwaitingTool);
+        processQueue();
+        return;
+    }
+
+    const QString lower = text.toLower();
+    if (lower.contains(u"approved"_s) || lower.contains(u"lgtm"_s)) {
+        Q_EMIT noticeRaised(i18n("Planner review approved the result."));
+        finishTurn();
+        return;
+    }
+    if (!text.trimmed().isEmpty() && m_orchestrationReviewRounds <= m_orchestration.maxReviewRounds) {
+        m_reviewFixes = text.trimmed();
+        enterOrchestrationRole(OrchestrationRole::Executor, i18n("Applying review fixes"));
+        return;
+    }
+    Q_EMIT noticeRaised(i18n("Planner review did not approve the result; finishing with the executor's summary."));
+    finishTurn();
+}
+
 
 void AgentLoop::finishWithFailure(const QString &error)
 {
@@ -4552,6 +5008,11 @@ void AgentLoop::finishTurn()
         && m_inFlight == 0 && m_runningBashId.isEmpty()) {
         maybeCompactStoredHistory(m_messagesForRequest());
     }
+    m_orchestration.enabled = false;
+    m_activeRole = OrchestrationRole::Single;
+    m_activeSettings = m_settings;
+    m_activeMode = activeMode();
+    m_client.setSettings(ModeRegistry::settingsForMode(m_settings, m_activeMode));
     Q_EMIT statusChanged(QString());
     Q_EMIT turnFinished();
     if (!pendingAnswer.isEmpty()) {
@@ -4561,6 +5022,162 @@ void AgentLoop::finishTurn()
             }
         });
     }
+}
+
+bool AgentLoop::interceptOrchestrationCall(const ToolCall &call)
+{
+    if (!m_orchestration.enabled || !isOrchestrationTool(canonicalToolName(call.name))) {
+        return false;
+    }
+
+    auto settle = [this, call](bool ok, const QString &output) {
+        ToolResult result;
+        result.toolCallId = call.id;
+        result.name = call.name;
+        result.ok = ok;
+        result.output = output;
+        appendToolResult(call, result);
+        appendToolResultsToConversation();
+    };
+
+    if (!m_queue.isEmpty() || m_inFlight > 0) {
+        settle(false, i18n("%1 must be the only tool call in its batch. Finish the other calls, then submit alone.",
+                           call.name));
+        m_state = State::WaitingForNextModel;
+        scheduleNextModelStep();
+        return true;
+    }
+
+    const QString name = canonicalToolName(call.name);
+    const QJsonObject args = effectiveArgs(call);
+    if (name == submitPlanToolName()) {
+        if (m_activeRole != OrchestrationRole::Planner) {
+            settle(false, i18n("submit_plan is only available to the planner."));
+            m_state = State::WaitingForNextModel;
+            scheduleNextModelStep();
+            return true;
+        }
+        OrchestrationPlan plan;
+        QString error;
+        if (!parseSubmitPlan(args, &plan, &error)) {
+            settle(false, error);
+            m_state = State::WaitingForNextModel;
+            scheduleNextModelStep();
+            return true;
+        }
+        plan.version = m_orchestrationPlan.version + 1;
+        m_orchestrationPlan = plan;
+        m_orchestrationPlanReady = true;
+        QJsonArray steps;
+        for (int i = 0; i < plan.steps.size(); ++i) {
+            steps.append(QJsonObject{{u"id"_s, u"step%1"_s.arg(i + 1)},
+                                     {u"description"_s, plan.steps.at(i)},
+                                     {u"completed"_s, false},
+                                     {u"inProgress"_s, false}});
+        }
+        m_currentPlan = steps;
+        Q_EMIT planUpdated(steps);
+        emitHarnessEvent(EventTypes::Notice,
+                         QJsonObject{{u"source"_s, u"orchestration/plan"_s},
+                                     {u"version"_s, plan.version},
+                                     {u"steps"_s, plan.steps.size()}});
+        settle(true, i18n("Plan v%1 accepted. Handing off to the executor.", plan.version));
+        if (!plan.needsChanges) {
+            // A direct answer is the whole turn. The assistant text is emitted
+            // as a normal message so the transcript shows it.
+            ChatMessage answer;
+            answer.role = ChatMessage::Role::Assistant;
+            answer.authorRole = orchestrationRoleId(OrchestrationRole::Planner);
+            answer.content = plan.directAnswer;
+            appendMessage(answer);
+            Q_EMIT assistantFinished(plan.directAnswer);
+            finishTurn();
+            return true;
+        }
+        if (m_settings.planMode || activeMode().readOnly) {
+            finishTurn();
+            return true;
+        }
+        enterOrchestrationRole(OrchestrationRole::Executor, i18n("Plan ready"));
+        return true;
+    }
+
+    if (name == requestReplanToolName()) {
+        if (m_activeRole != OrchestrationRole::Executor) {
+            settle(false, i18n("request_replan is only available to the executor."));
+            m_state = State::WaitingForNextModel;
+            scheduleNextModelStep();
+            return true;
+        }
+        QString reason;
+        QString error;
+        if (!parseRequestReplan(args, &reason, &error)) {
+            settle(false, error);
+            m_state = State::WaitingForNextModel;
+            scheduleNextModelStep();
+            return true;
+        }
+        if (m_orchestrationReplans >= m_orchestration.maxReplans) {
+            const QString exhausted = i18n("Replan budget exhausted after %1 handoffs.",
+                                           m_orchestrationReplans);
+            settle(false, exhausted);
+            finishWithFailure(exhausted + u' ' + reason);
+            return true;
+        }
+        ++m_orchestrationReplans;
+        m_orchestrationLastReplanReason = reason;
+        settle(true, i18n("Control returned to the planner."));
+        enterOrchestrationRole(OrchestrationRole::Planner, reason);
+        return true;
+    }
+
+    // submit_review
+    if (m_activeRole != OrchestrationRole::Reviewer) {
+        settle(false, i18n("submit_review is only available to the planner review."));
+        m_state = State::WaitingForNextModel;
+        scheduleNextModelStep();
+        return true;
+    }
+    OrchestrationReview review;
+    QString error;
+    if (!parseSubmitReview(args, &review, &error)) {
+        settle(false, error);
+        m_state = State::WaitingForNextModel;
+        scheduleNextModelStep();
+        return true;
+    }
+    if (!review.askUser.trimmed().isEmpty()) {
+        settle(true, i18n("Review requested a user decision."));
+        Q_EMIT noticeRaised(review.askUser);
+        finishTurn();
+        return true;
+    }
+    if (review.approved) {
+        settle(true, i18n("Review approved."));
+        emitHarnessEvent(EventTypes::Notice,
+                         QJsonObject{{u"source"_s, u"orchestration/review"_s},
+                                     {u"approved"_s, true}});
+        finishTurn();
+        return true;
+    }
+    if (m_orchestrationReviewRounds >= m_orchestration.maxReviewRounds) {
+        settle(true, i18n("Review round budget exhausted."));
+        Q_EMIT noticeRaised(i18n("Planner review still had fixes after %1 rounds; finishing with the executor's result.",
+                                 m_orchestrationReviewRounds));
+        finishTurn();
+        return true;
+    }
+    m_reviewFixes = review.fixes.join(u'\n');
+    if (m_reviewFixes.trimmed().isEmpty()) {
+        m_reviewFixes = review.summary;
+    }
+    settle(true, i18n("Fixes returned to the executor."));
+    emitHarnessEvent(EventTypes::Notice,
+                     QJsonObject{{u"source"_s, u"orchestration/review"_s},
+                                 {u"approved"_s, false},
+                                 {u"fixes"_s, review.fixes.size()}});
+    enterOrchestrationRole(OrchestrationRole::Executor, i18n("Applying review fixes"));
+    return true;
 }
 
 void AgentLoop::processQueue()
@@ -4686,6 +5303,10 @@ void AgentLoop::executeOne(const ToolCall &call)
         return;
     }
 
+    if (interceptOrchestrationCall(call)) {
+        return;
+    }
+
     if (!m_sandbox || !m_tools) {
         ToolResult result;
         result.ok = false;
@@ -4698,7 +5319,8 @@ void AgentLoop::executeOne(const ToolCall &call)
 
     // The mode (and plan mode) decide which tools exist at all. Rejecting here
     // is the runtime half of the same rule the request advertises.
-    const ToolAccess access = activeToolAccess();
+    const ToolAccess access = m_orchestration.enabled ? accessForRole(m_activeRole)
+                                                      : activeToolAccess();
     if (call.name == u"skill"_s && !m_harness.skills) {
         ToolResult result;
         result.ok = false;
@@ -5619,6 +6241,10 @@ void AgentLoop::startSkillFork(const ToolCall &call, const SkillDefinition &skil
                                  {u"description"_s, record.description}});
 
     Settings childSettings = m_settings;
+    if (m_orchestration.enabled) {
+        childSettings = settingsForRoute(childSettings, m_orchestration.executor);
+    }
+    childSettings.orchestration.enabled = false;
     childSettings.planMode = false;
     childSettings.checkpointsEnabled = false;
     if (m_settings.maxToolCalls > 0) {
@@ -5945,6 +6571,14 @@ void AgentLoop::dispatchSubtask(const ToolCall &call)
     }
 
     Settings childSettings = m_settings;
+    // The child runs on the executor route when the parent is orchestrating;
+    // its own model override still applies on top of that provider.
+    if (m_orchestration.enabled) {
+        childSettings = settingsForRoute(childSettings, m_orchestration.executor);
+    }
+    // A child must not start its own two-model pair: the parent already owns
+    // the planner/executor handoff, and nesting would multiply cost.
+    childSettings.orchestration.enabled = false;
     // A subtask must never narrow itself: plan mode belongs to the parent turn.
     childSettings.planMode = false;
     childSettings.agentMode = m_modes.modeById(modeId) ? modeId : m_settings.agentMode;
@@ -6712,6 +7346,25 @@ SessionStore::SessionData AgentLoop::sessionData() const
             data.subagents.append(subagentRecordToJson(record));
         }
     }
+    if (m_orchestration.enabled || m_orchestrationPlanReady || m_orchestrationPlan.version > 0) {
+        QJsonObject plan;
+        plan.insert(u"summary"_s, m_orchestrationPlan.summary);
+        plan.insert(u"steps"_s, QJsonArray::fromStringList(m_orchestrationPlan.steps));
+        plan.insert(u"acceptance"_s, QJsonArray::fromStringList(m_orchestrationPlan.acceptance));
+        plan.insert(u"replanIf"_s, QJsonArray::fromStringList(m_orchestrationPlan.replanIf));
+        plan.insert(u"needsChanges"_s, m_orchestrationPlan.needsChanges);
+        plan.insert(u"directAnswer"_s, m_orchestrationPlan.directAnswer);
+        plan.insert(u"hash"_s, m_orchestrationPlan.hash);
+        plan.insert(u"version"_s, m_orchestrationPlan.version);
+        QJsonObject orch;
+        orch.insert(u"enabled"_s, m_orchestration.enabled);
+        orch.insert(u"role"_s, orchestrationRoleId(m_activeRole));
+        orch.insert(u"plan"_s, plan);
+        orch.insert(u"planReady"_s, m_orchestrationPlanReady);
+        orch.insert(u"replans"_s, m_orchestrationReplans);
+        orch.insert(u"reviewRounds"_s, m_orchestrationReviewRounds);
+        data.orchestration = orch;
+    }
     return data;
 }
 
@@ -6729,6 +7382,43 @@ void AgentLoop::restoreSession(const SessionStore::SessionData &data)
         if (!record.taskId.isEmpty()) {
             m_subagentRecords.insert(record.taskId, record);
         }
+    }
+
+    if (!data.orchestration.isEmpty()) {
+        const QJsonObject orch = data.orchestration;
+        const QJsonObject plan = orch.value(u"plan"_s).toObject();
+        m_orchestrationPlan.summary = plan.value(u"summary"_s).toString();
+        for (const QJsonValue &v : plan.value(u"steps"_s).toArray()) {
+            m_orchestrationPlan.steps.append(v.toString());
+        }
+        for (const QJsonValue &v : plan.value(u"acceptance"_s).toArray()) {
+            m_orchestrationPlan.acceptance.append(v.toString());
+        }
+        for (const QJsonValue &v : plan.value(u"replanIf"_s).toArray()) {
+            m_orchestrationPlan.replanIf.append(v.toString());
+        }
+        m_orchestrationPlan.needsChanges = plan.value(u"needsChanges"_s).toBool(true);
+        m_orchestrationPlan.directAnswer = plan.value(u"directAnswer"_s).toString();
+        m_orchestrationPlan.hash = plan.value(u"hash"_s).toString();
+        m_orchestrationPlan.version = plan.value(u"version"_s).toInt();
+        m_orchestrationPlanReady = orch.value(u"planReady"_s).toBool();
+        m_orchestrationReplans = orch.value(u"replans"_s).toInt();
+        m_orchestrationReviewRounds = orch.value(u"reviewRounds"_s).toInt();
+        if (m_currentPlan.isEmpty() && !m_orchestrationPlan.steps.isEmpty()) {
+            QJsonArray steps;
+            for (int i = 0; i < m_orchestrationPlan.steps.size(); ++i) {
+                steps.append(QJsonObject{{u"id"_s, u"step%1"_s.arg(i + 1)},
+                                         {u"description"_s, m_orchestrationPlan.steps.at(i)},
+                                         {u"completed"_s, false},
+                                         {u"inProgress"_s, false}});
+            }
+            m_currentPlan = steps;
+            m_planShown = true;
+        }
+        // A restored turn is never resumed mid-step; the next user turn
+        // starts a fresh planning phase with the previous plan available.
+        m_orchestration.enabled = false;
+        m_activeRole = OrchestrationRole::Single;
     }
 
     // Restore messages
@@ -6767,6 +7457,7 @@ void AgentLoop::restoreSession(const SessionStore::SessionData &data)
     }
     m_toolCalls = data.toolCalls;
     m_parentConversationId = data.parentConversationId;
+
     // A session saved while a tool was still running has an assistant message
     // with tool_calls and no matching Tool messages. Repair the pairing before
     // the next provider request, which would otherwise be rejected with 400.

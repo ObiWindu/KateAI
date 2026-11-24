@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- **Two-model orchestration.** A read-only planner explores and writes a plan,
+  a cheaper executor applies it with the normal tools, and the planner reviews
+  the result. The pair can use different API-key providers. `request_replan`
+  returns control on friction; replans and reviews are bounded. Configure it in
+  Settings → AI Providers → Model Orchestration or select the Orchestrator row
+  in the model picker. See `docs/ORCHESTRATION.md`.
+
 ## 0.9.0 — 2026-11-24
 
 - **Skills v1.** `SKILL.md` bundles are discovered in `.kateai/skills`,

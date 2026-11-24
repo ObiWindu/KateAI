@@ -65,6 +65,12 @@ private Q_SLOTS:
         s.voiceInputDevice = u"alsa_input.usb-mic"_s;
         s.voiceNoiseRemoval = false;
         s.voiceAutoSend = false;
+        s.orchestration.enabled = true;
+        s.orchestration.planner = ModelRoute{Provider::OpenAI, u"planner-test"_s, u"high"_s};
+        s.orchestration.executor = ModelRoute{Provider::DeepSeek, u"executor-test"_s, u"low"_s};
+        s.orchestration.maxReplans = 5;
+        s.orchestration.maxReviewRounds = 3;
+        s.orchestration.reviewMode = u"always"_s;
 
         SettingsStore::save(s);
         const Settings loaded = SettingsStore::load();
@@ -105,6 +111,15 @@ private Q_SLOTS:
         QCOMPARE(loaded.voiceInputDevice, s.voiceInputDevice);
         QCOMPARE(loaded.voiceNoiseRemoval, s.voiceNoiseRemoval);
         QCOMPARE(loaded.voiceAutoSend, s.voiceAutoSend);
+        QCOMPARE(loaded.orchestration.enabled, true);
+        QCOMPARE(loaded.orchestration.planner.provider, Provider::OpenAI);
+        QCOMPARE(loaded.orchestration.planner.model, u"planner-test"_s);
+        QCOMPARE(loaded.orchestration.planner.effort, u"high"_s);
+        QCOMPARE(loaded.orchestration.executor.provider, Provider::DeepSeek);
+        QCOMPARE(loaded.orchestration.executor.model, u"executor-test"_s);
+        QCOMPARE(loaded.orchestration.maxReplans, 5);
+        QCOMPARE(loaded.orchestration.maxReviewRounds, 3);
+        QCOMPARE(loaded.orchestration.reviewMode, u"always"_s);
     }
 
     void loadingAnEmptyConfigKeepsTheDocumentedDefaults()
