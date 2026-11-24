@@ -30,7 +30,14 @@ private Q_SLOTS:
         QVERIFY(flags.verificationGate);
         QVERIFY(flags.policyV2);
         QVERIFY(flags.hooks);
-        QVERIFY(!flags.toolSearch);
+        QVERIFY(flags.promptV2);
+        QVERIFY(flags.contextV2);
+        QVERIFY(flags.memoryV2);
+        QVERIFY(flags.toolSearch);
+        // 0.9 features stay off at the 0.8 gate.
+        QVERIFY(!flags.skills);
+        QVERIFY(!flags.agentsV2);
+        QVERIFY(!flags.inspector);
     }
 
     void flagsOverrides()

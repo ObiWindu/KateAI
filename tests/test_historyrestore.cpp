@@ -82,6 +82,16 @@ QString transcriptText(ChatWidget &widget)
     return text;
 }
 
+bool messagesContain(const QList<ChatMessage> &messages, const QString &needle)
+{
+    for (const ChatMessage &message : messages) {
+        if (message.content.contains(needle)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 QJsonObject planStep(const QString &id, const QString &description)
 {
     QJsonObject step;
@@ -631,6 +641,152 @@ private Q_SLOTS:
         // showTodoList() honours the "show plan as checklist" setting, so the
         // dock is back exactly when that setting says it should be.
         QCOMPARE(todo->isVisible(), widget.settings().showPlanAsChecklist);
+    }
+
+    void testRestoreRendersTheWholeHistoryWhenTheContextIsFull()
+    {
+        // A restored conversation can already be at its context limit, and the
+        // readout update that follows folds it for the next request. That used
+        // to run while the transcript was still being rebuilt: the rebuild
+        // loop continued inside the compacted history and stopped early, so
+        // everything after the first user card -- including the newest answer
+        // the user came back to read -- never got a card.
+        SessionStore::SessionData data;
+        const QString filler = QStringLiteral("tool output line. ").repeated(30);
+
+        for (int i = 0; i < 60; ++i) {
+            ChatMessage tool;
+            tool.role = ChatMessage::Role::Tool;
+            tool.toolCallId = u"pre-%1"_s.arg(i);
+            tool.name = u"read_file"_s;
+            tool.content = filler;
+            data.messages.append(tool);
+        }
+
+        ChatMessage firstUser;
+        firstUser.role = ChatMessage::Role::User;
+        firstUser.content = u"first question"_s;
+        data.messages.append(firstUser);
+
+        for (int i = 0; i < 40; ++i) {
+            ChatMessage tool;
+            tool.role = ChatMessage::Role::Tool;
+            tool.toolCallId = u"mid-%1"_s.arg(i);
+            tool.name = u"read_file"_s;
+            tool.content = filler;
+            data.messages.append(tool);
+        }
+
+        ChatMessage user;
+        user.role = ChatMessage::Role::User;
+        user.content = u"final question"_s;
+        ChatMessage assistant;
+        assistant.role = ChatMessage::Role::Assistant;
+        assistant.content = u"THE FINAL ANSWER"_s;
+        data.messages.append(user);
+        data.messages.append(assistant);
+
+        SessionStore::saveConversation(u"conv-full-context"_s, data, u"Full context"_s, 50);
+
+        ChatWidget widget;
+        widget.resize(900, 700);
+        widget.show();
+        Settings settings = widget.settings();
+        settings.contextWindow = 1000; // the restored history is far over it
+        widget.setSettings(settings);
+
+        widget.setCurrentConversationId(u"conv-full-context"_s);
+        widget.agent()->restoreSession(SessionStore::loadConversation(u"conv-full-context"_s));
+        widget.rebuildTranscript();
+        QTest::qWait(80);
+
+        const QString transcript = transcriptText(widget);
+        QVERIFY2(transcript.contains(u"THE FINAL ANSWER"_s),
+                 "the newest answer is missing from a restored conversation at its context limit");
+        QVERIFY2(transcript.contains(u"first question"_s),
+                 "the start of the restored conversation was dropped");
+        // Every restored call keeps its card: the rebuild may not be cut short
+        // by the compaction that the readout triggers.
+        QCOMPARE(widget.findChildren<ToolCallWidget *>().size(), 100);
+    }
+
+    void testReopeningAfterCompactionKeepsTheWholeHistory()
+    {
+        SessionStore::SessionData data;
+        const QString filler = QStringLiteral("tool output line. ").repeated(30);
+
+        for (int i = 0; i < 60; ++i) {
+            ChatMessage tool;
+            tool.role = ChatMessage::Role::Tool;
+            tool.toolCallId = u"pre-%1"_s.arg(i);
+            tool.name = u"read_file"_s;
+            tool.content = filler;
+            data.messages.append(tool);
+        }
+
+        ChatMessage firstUser;
+        firstUser.role = ChatMessage::Role::User;
+        firstUser.content = u"first question"_s;
+        data.messages.append(firstUser);
+
+        for (int i = 0; i < 40; ++i) {
+            ChatMessage tool;
+            tool.role = ChatMessage::Role::Tool;
+            tool.toolCallId = u"mid-%1"_s.arg(i);
+            tool.name = u"read_file"_s;
+            tool.content = filler;
+            data.messages.append(tool);
+        }
+
+        ChatMessage user;
+        user.role = ChatMessage::Role::User;
+        user.content = u"final question"_s;
+        ChatMessage assistant;
+        assistant.role = ChatMessage::Role::Assistant;
+        assistant.content = u"THE FINAL ANSWER"_s;
+        data.messages.append(user);
+        data.messages.append(assistant);
+
+        SessionStore::saveConversation(u"conv-two-reopens"_s, data, u"Two reopens"_s, 50);
+
+        {
+            ChatWidget widget;
+            widget.resize(900, 700);
+            widget.show();
+            Settings settings = widget.settings();
+            settings.contextWindow = 1000;
+            widget.setSettings(settings);
+            widget.setCurrentConversationId(u"conv-two-reopens"_s);
+            widget.agent()->restoreSession(SessionStore::loadConversation(u"conv-two-reopens"_s));
+            widget.rebuildTranscript();
+            QTest::qWait(80);
+        }
+
+        const SessionStore::SessionData savedAfterFirstOpen =
+            SessionStore::loadConversation(u"conv-two-reopens"_s);
+        // The test has to keep exercising the compaction: the model history
+        // shrinks, while the transcript that gets persisted stays complete.
+        QVERIFY2(savedAfterFirstOpen.messages.size() < data.messages.size(),
+                 "the first reopen did not compact the model history");
+        QCOMPARE(savedAfterFirstOpen.transcript.size(), data.messages.size());
+        QVERIFY2(messagesContain(savedAfterFirstOpen.transcript, u"first question"_s),
+                 "the first reopen's save dropped the start of the history");
+
+        ChatWidget reopened;
+        reopened.resize(900, 700);
+        reopened.show();
+        Settings settings = reopened.settings();
+        settings.contextWindow = 1000;
+        reopened.setSettings(settings);
+        reopened.setCurrentConversationId(u"conv-two-reopens"_s);
+        reopened.agent()->restoreSession(savedAfterFirstOpen);
+        reopened.rebuildTranscript();
+        QTest::qWait(80);
+
+        const QString transcript = transcriptText(reopened);
+        QVERIFY2(transcript.contains(u"THE FINAL ANSWER"_s), qPrintable(transcript));
+        QVERIFY2(transcript.contains(u"first question"_s), qPrintable(transcript));
+        QCOMPARE(reopened.findChildren<ToolCallWidget *>().size(), 100);
     }
 };
 

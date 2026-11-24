@@ -114,6 +114,10 @@ public:
 
     QString toolCallId() const { return m_toolCallId; }
         QString toolName() const { return m_toolName; }
+    // Approximate heap held by this card's text: the retained result, the
+    // live stream, and the rendered documents. Used by the transcript to bound
+    // its memory by content size, not only by card count.
+    qsizetype retainedChars() const;
     int expandedHeight() const { return m_expandedHeight; }
     void setExpandedHeight(int h);
     void setExpanded(bool expanded);

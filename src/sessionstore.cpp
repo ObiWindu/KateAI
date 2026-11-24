@@ -210,6 +210,9 @@ static QByteArray sessionDataToJson(const SessionStore::SessionData &data)
     QJsonObject obj;
     obj[u"version"_s] = data.version;
     obj[u"messages"_s] = messagesToJson(data.messages);
+    if (!data.transcript.isEmpty()) {
+        obj[u"transcript"_s] = messagesToJson(data.transcript);
+    }
     obj[u"currentThinking"_s] = data.currentThinking;
     obj[u"currentPlan"_s] = data.currentPlan;
     obj[u"planShown"_s] = data.planShown;
@@ -241,6 +244,7 @@ static SessionStore::SessionData sessionDataFromJson(const QByteArray &payload)
     const QJsonObject obj = doc.object();
     data.version = obj[u"version"_s].toInt(SessionStore::CURRENT_VERSION);
     data.messages = messagesFromJson(obj[u"messages"_s].toArray());
+    data.transcript = messagesFromJson(obj[u"transcript"_s].toArray());
     data.currentThinking = obj[u"currentThinking"_s].toString();
     data.currentPlan = obj[u"currentPlan"_s].toArray();
     data.planShown = obj[u"planShown"_s].toBool();
@@ -260,10 +264,11 @@ static SessionStore::SessionData sessionDataFromJson(const QByteArray &payload)
     data.acpSessionId = obj[u"acpSessionId"_s].toString();
     data.workspace = obj[u"workspace"_s].toString();
 
-    // Version 2 added the version field, version 3 the last turn id. Both are
-    // additive: an older payload simply leaves the new field empty. A newer
-    // payload is not safe to rewrite, because saving it from this build would
-    // drop fields the newer build wrote.
+    // Version 2 added the version field, version 3 the last turn id, version 4
+    // the full display transcript. All are additive: an older payload simply
+    // leaves the new field empty. A newer payload is not safe to rewrite,
+    // because saving it from this build would drop fields the newer build
+    // wrote.
     if (data.version > SessionStore::CURRENT_VERSION) {
         data.loadFailed = true;
         return data;
@@ -441,6 +446,10 @@ static bool applySchema(QSqlDatabase &db)
     pragmas.exec(u"PRAGMA synchronous=FULL"_s);
     pragmas.exec(u"PRAGMA busy_timeout=5000"_s);
     pragmas.exec(u"PRAGMA foreign_keys=ON"_s);
+    // One connection per thread, each with SQLite's ~2 MiB default page
+    // cache. The store reads and writes a single conversation at a time, so a
+    // 1 MiB cache is ample and keeps the editor's resident set lower.
+    pragmas.exec(u"PRAGMA cache_size=-1024"_s);
 
     static const char *const statements[] = {
         "CREATE TABLE IF NOT EXISTS meta ("

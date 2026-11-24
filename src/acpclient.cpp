@@ -543,6 +543,7 @@ static QStringList agentToolDirectories()
         home + u"/.volta/bin"_s,
         home + u"/.bun/bin"_s,
         home + u"/.cargo/bin"_s,
+        home + u"/.kilo/bin"_s,
         home + u"/.local/share/pnpm"_s,
         home + u"/.asdf/shims"_s,
         home + u"/.fnm/aliases/default/bin"_s,
@@ -1292,6 +1293,25 @@ QString AcpClient::resolvedCommand(const Settings &settings)
             // adds that to the *shell* PATH; a Kate launched from the desktop
             // never sees it, so the agent cannot be started at all from there.
             fallbacks.append(home + u"/.opencode/bin/"_s + baseName);
+        }
+        // Kilo CLI uses the same installer layout as its upstream OpenCode: the
+        // standalone binary lives in ~/.kilo/bin and is not on the PATH a
+        // desktop-launched Kate inherits. Windows resolves/configured names
+        // carry an executable suffix, so match those too instead of only the
+        // bare Unix name.
+        const QString lowerBase = baseName.toLower();
+        if (lowerBase == u"kilo"_s || lowerBase == u"kilo.exe"_s
+            || lowerBase == u"kilo.cmd"_s || lowerBase == u"kilo.bat"_s) {
+            const QString installDir = home + u"/.kilo/bin/"_s;
+            fallbacks.append(installDir + baseName);
+            // A configured .cmd wrapper or a bare name may hide the standalone
+            // binary that is installed beside it; try the other spelling too.
+            if (lowerBase != u"kilo"_s) {
+                fallbacks.append(installDir + u"kilo"_s);
+            }
+            if (lowerBase != u"kilo.exe"_s) {
+                fallbacks.append(installDir + u"kilo.exe"_s);
+            }
         }
         if (baseName == u"agy"_s || baseName == u"agy.exe"_s) {
             fallbacks.append(home + u"/.gemini/antigravity-cli/bin/"_s + baseName);
@@ -2118,7 +2138,10 @@ void AcpClient::spawnProcess()
     } else if (packageRunner) {
         startupTimeoutMs = 180000;
     }
-    m_startupTimer->setInterval(startupTimeoutMs);
+    // The initialize request carries the real deadline; the watchdog only backs
+    // a handshake that stops between requests. It fires a little later so the
+    // initialize timeout reports the failure once, with the method name.
+    m_startupTimer->setInterval(startupTimeoutMs + 5000);
     connect(m_startupTimer, &QTimer::timeout, this, [this] {
         if (m_state == State::Starting) {
             const QString message = u"Timed out waiting for the ACP handshake."_s;
@@ -2129,7 +2152,7 @@ void AcpClient::spawnProcess()
     });
     m_startupTimer->start();
 
-    sendInitialize();
+    sendInitialize(startupTimeoutMs);
 }
 
 QProcessEnvironment AcpClient::processEnvironment() const
@@ -2218,7 +2241,7 @@ QProcessEnvironment AcpClient::processEnvironment() const
     return env;
 }
 
-void AcpClient::sendInitialize()
+void AcpClient::sendInitialize(int timeoutMs)
 {
     QJsonObject fs;
     fs.insert(u"readTextFile"_s, true);
@@ -2325,7 +2348,7 @@ void AcpClient::sendInitialize()
         m_authMethods = result.value(u"authMethods"_s).toArray();
         m_authRetryDone = false;
         maybeAuthenticate(m_authMethods);
-    });
+    }, timeoutMs);
 }
 
 void AcpClient::fetchModels()
@@ -2702,7 +2725,10 @@ void AcpClient::sendPromptNow(const QString &text)
     QJsonArray prompt = promptBlocks(text);
     const bool includeSessionNotes = !m_sessionNotesSent;
     if (includeSessionNotes) {
-        prompt.prepend(sessionNotesBlock());
+        // The user's message stays first: agents treat the leading text block
+        // as the request they answer. Kate's rules and client-method notes are
+        // context, so they follow the message instead of burying it.
+        prompt.insert(1, sessionNotesBlock());
     }
     params.insert(u"prompt"_s, prompt);
     const int promptRequestId = sendRequest(u"session/prompt"_s, params, [this](const QJsonObject &result, const QString &error) {
@@ -2743,18 +2769,27 @@ void AcpClient::sendPromptNow(const QString &text)
 
 QJsonArray AcpClient::promptBlocks(const QString &text) const
 {
+    // The user's message is the first block, not the last. Agents read the
+    // leading text block as the user's request (session titles, slash-command
+    // detection and the model's own reading of the turn all do), so sending
+    // editor context first made them answer the context and ignore the
+    // message. Context follows the message and is marked assistant-only so
+    // agents that honour ACP annotations keep it out of the user's message.
     QJsonArray prompt;
+    QJsonObject user;
+    user.insert(u"type"_s, u"text"_s);
+    user.insert(u"text"_s, text);
+    prompt.append(user);
+
     if (!m_editorContext.trimmed().isEmpty()) {
         QJsonObject context;
         context.insert(u"type"_s, u"text"_s);
         const QString contextText = u"Editor context:\n"_s + m_editorContext.trimmed();
         context.insert(u"text"_s, contextText);
+        context.insert(u"annotations"_s,
+                       QJsonObject{{u"audience"_s, QJsonArray{u"assistant"_s}}});
         prompt.append(context);
     }
-    QJsonObject user;
-    user.insert(u"type"_s, u"text"_s);
-    user.insert(u"text"_s, text);
-    prompt.append(user);
     return prompt;
 }
 
@@ -2798,6 +2833,11 @@ QJsonObject AcpClient::sessionNotesBlock() const
     QJsonObject block;
     block.insert(u"type"_s, u"text"_s);
     block.insert(u"text"_s, lines.join(u'\n'));
+    // The notes are prompt context for the model, not something the user
+    // typed. The annotation keeps them out of the user's message in agents
+    // that support ACP annotations.
+    block.insert(u"annotations"_s,
+                 QJsonObject{{u"audience"_s, QJsonArray{u"assistant"_s}}});
     return block;
 }
 

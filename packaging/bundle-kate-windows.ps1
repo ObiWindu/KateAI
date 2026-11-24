@@ -41,12 +41,13 @@ if (-not $arch) { $arch = "amd64" }
 $outWasProvided = -not [string]::IsNullOrWhiteSpace($Out)
 
 # Let the CI-tested Windows plugin build own the Craft bootstrap, iconv
-# workaround, `craft kate`, and the plugin build. The bundle job used to
-# duplicate that setup and then failed before Craft was ready; one code path
-# means the bundle and plugin artifacts are produced by the same recipe.
+# workaround, the KF6/KTextEditor stack, the optional Kate build and the plugin
+# build. The bundle job used to duplicate that setup and then failed before
+# Craft was ready; one code path means the bundle and plugin artifacts are
+# produced by the same recipe. -WithKate is what makes this a bundle build.
 $artifactsDir = Join-Path $Root "artifacts-windows-tmp"
 Write-Host "==> Building Kate and the plugin with packaging\ci\windows-build.ps1"
-& (Join-Path $Root "packaging\ci\windows-build.ps1") -BuildType Release -ArtifactsDir $artifactsDir -CraftRoot $CraftRoot
+& (Join-Path $Root "packaging\ci\windows-build.ps1") -BuildType Release -ArtifactsDir $artifactsDir -CraftRoot $CraftRoot -WithKate
 if (-not (Test-Path (Join-Path $artifactsDir "kateai.dll"))) {
     throw "The Windows build did not produce kateai.dll."
 }
@@ -80,6 +81,11 @@ try {
 } finally {
     $ErrorActionPreference = $prevEap
 }
+
+# craftenv.ps1 rebuilds the environment from Craft's setup JSON; keep Python
+# logs streaming and stop git from waiting on credentials for this session too.
+$env:PYTHONUNBUFFERED = "1"
+$env:GIT_TERMINAL_PROMPT = "0"
 
 $stage = Join-Path ([System.IO.Path]::GetTempPath()) ([System.IO.Path]::GetRandomFileName())
 New-Item -ItemType Directory -Force -Path $stage | Out-Null
@@ -115,8 +121,8 @@ $findKateInstaller = {
 if (Test-Path $tmpDir) {
     $found = & $findKateInstaller
     if (-not $found -or $found.Count -eq 0) {
-        Write-Host "No Craft Kate installer found; building one with: craft --package kate"
-        craft --package kate
+        Write-Host "No Craft Kate installer found; building one with: craft --ci-mode --package kate"
+        craft --ci-mode --package kate
         if ($LASTEXITCODE -ne 0) {
             Write-Warning "craft --package kate failed with exit code $LASTEXITCODE"
         }

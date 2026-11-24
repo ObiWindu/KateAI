@@ -195,6 +195,33 @@ private Q_SLOTS:
         QCOMPARE(restored.toolCalls, 5);
     }
 
+    // The display transcript survives compaction, so it needs its own bound:
+    // otherwise every tool result and reasoning string stays in memory and is
+    // rewritten into the session database on every save.
+    void testTranscriptBudgetElidesOldMessages()
+    {
+        AgentLoop agent;
+
+        SessionStore::SessionData data;
+        data.messages.reserve(1200);
+        for (int i = 0; i < 1200; ++i) {
+            ChatMessage msg;
+            msg.role = ChatMessage::Role::User;
+            msg.content = u"message %1"_s.arg(i);
+            data.messages.append(msg);
+        }
+
+        agent.restoreSession(data);
+        const auto restored = agent.sessionData();
+
+        // The model history is untouched; only the display transcript is cut.
+        QCOMPARE(restored.messages.size(), 1200);
+        QVERIFY2(restored.transcript.size() < restored.messages.size(),
+                 "the display transcript was not bounded");
+        QVERIFY(restored.transcript.first().name == u"transcript_elision"_s);
+        QCOMPARE(restored.transcript.last().content, u"message 1199"_s);
+    }
+
     void testAgentLoopClearSession()
     {
         AgentLoop agent;

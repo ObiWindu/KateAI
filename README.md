@@ -290,7 +290,7 @@ Kate AI is a first-class KTextEditor plugin, so it sees the same documents you d
   - **Refactor Selection** — clarity and maintainability, then apply
   - **Add Tests for Selection** — propose coverage first
 - **Stop Kate AI** action (Tools ▸ Kate AI, bindable in Kate's shortcut settings) aborts the running turn without hunting for the panel button
-- **Command line**: `:kateai ask <text>`, `:kateai explain|fix|refactor|tests|diagnostics|symbols` (act on the selection or the range the command line carries, vi-mode `'<,'>kateai fix` included), `:kateai debug|stack|break|snapshot` for the live debugger, `:kateai fix-errors|build-errors`, `:kateai launch-config` to generate `.vscode/launch.json`, `:kateai backtrace`, `:kateai terminal`, `:kateai blame|commit`, `:kateai diff-tab|graph-tab|annotations`, `:kateai context|usage` to inspect the context window and this turn's counters, `:kateai stop`, `:kateai new`, `:kateai mode <id>`, `:kateai panel`
+- **Command line**: `:kateai ask <text>`, `:kateai explain|fix|refactor|tests|diagnostics|symbols` (act on the selection or the range the command line carries, vi-mode `'<,'>kateai fix` included), `:kateai debug|stack|break|snapshot` for the live debugger, `:kateai fix-errors|build-errors`, `:kateai launch-config` to generate `.vscode/launch.json`, `:kateai backtrace`, `:kateai terminal`, `:kateai blame|commit`, `:kateai diff-tab|graph-tab|annotations`, `:kateai context|usage|prompt|memory|tools` to inspect the context window, this turn's counters, the exact prompt, loaded memory, and the effective tool catalog, `:kateai stop`, `:kateai new`, `:kateai mode <id>`, `:kateai panel`
 - Workspace root is the nearest parent with `.git` or `.kateproject`, otherwise the active file’s directory
 - When a different folder is opened in Kate, Kate AI switches to that workspace (agent context, checkpoints, MCP servers, completions) and shows a notice pinned above the input; the notice fades on its own or when the next turn starts
 
@@ -389,6 +389,45 @@ All harness features default on. For a bisect or a minimal setup:
 ```sh
 KATEAI_HARNESS_FLAGS=-verificationGate,-hooks,+eventLog kate
 ```
+
+### Harness 0.8: prompt, context, memory, tools
+
+0.8 keeps long sessions coherent and stops a large MCP catalog from consuming
+the window before work starts.
+
+- **Prompt.** The system prompt is deterministic and budgeted: identity, mode,
+  execution, model guidance, reasoning, verification, style, environment, rules,
+  memory, graph, and plan sections in a fixed order. Editor state stays in a
+  transient turn message, so the static prefix remains cacheable.
+  `:kateai prompt` shows the exact prompt and its section token table.
+- **Context.** Oversized tool output is paged to the content store, old output
+  is pruned, old turns are snipped, and the summary merges incrementally so an
+  early decision survives a second compaction. The plan, touched files, and
+  running sub-agents are rehydrated into a transient message. Provider usage
+  calibrates the local token estimate.
+- **Memory.** Kate reads `AGENTS.md`, `CLAUDE.md`, `KATEAI.md`,
+  `.kateai/rules`, `.claude/rules`, `.agents/rules`, and nested/path-scoped
+  files, with managed/user/project/local precedence. `memory_write` proposes a
+  note in `.kateai/memory/<topic>.md`; the user approves the diff.
+  `:kateai memory` lists what loaded and what it costs.
+- **Tools.** Every built-in tool has declarative metadata and its own result
+  budget. When the catalog is large, `tool_search`, `tool_describe`, and
+  `tool_call` discover deferred tools by intent; MCP tools defer by default.
+  `:kateai tools` shows the effective set and schema cost.
+- **Model profiles.** Context window, output limit, pricing, cache style,
+  prompt variant, and edit dialect come from a family registry. Unknown models
+  get a conservative 32k profile.
+- **Edits.** Exact matching stays primary; a failed `edit_file` retries with
+  smart quotes, CRLF, trailing whitespace, and whitespace runs normalised,
+  while ambiguous matches still fail.
+
+The four 0.8 flags default on. To compare against the legacy path:
+
+```sh
+KATEAI_HARNESS_FLAGS=-promptV2,-contextV2,-memoryV2,-toolSearch kate
+```
+
+See `docs/HARNESS_0.8.md` and `docs/PROMPT.md`.
 
 ### Providers and models
 
@@ -648,7 +687,7 @@ API keys:
 - [Grok / xAI](https://console.x.ai)
 - [OpenAI](https://platform.openai.com/api-keys)
 - [OpenRouter](https://openrouter.ai/keys)
-- OpenAI-compatible — local server URL (Ollama default `http://localhost:11434/v1`)
+- OpenAI-compatible — local server URL (Ollama default `http://localhost:11434/v1`). For Gemini with explicit cache resources, use `https://generativelanguage.googleapis.com/v1beta/openai`; Kate detects the Google host, switches to the native Gemini transport, and manages `cachedContents` for the stable prompt prefix.
 - Claude-compatible — Anthropic or compatible gateway
 - ACP — your ACP server endpoint and API key
 

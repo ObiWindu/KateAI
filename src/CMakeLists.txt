@@ -37,6 +37,12 @@ add_library(kateai_core STATIC
     editranges.cpp
     harness/harnessflags.cpp
     harness/toolresults.cpp
+    harness/models.cpp
+    harness/tokens.cpp
+    harness/prompt.cpp
+    harness/memory.cpp
+    harness/contextengine.cpp
+    harness/registry.cpp
     harness/events.cpp
     harness/eventstore.cpp
     harness/turn.cpp

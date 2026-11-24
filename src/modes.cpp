@@ -69,7 +69,8 @@ QStringList builtInToolsForGroup(const QString &group)
                 u"debug_snapshot"_s, u"build_targets"_s};
     }
     if (group == ToolGroup::edit()) {
-        return {u"write_file"_s, u"edit_file"_s, u"multi_edit_file"_s, u"apply_patch"_s};
+        return {u"write_file"_s, u"edit_file"_s, u"multi_edit_file"_s, u"apply_patch"_s,
+                u"memory_write"_s};
     }
     if (group == ToolGroup::command()) {
         return {u"bash"_s, u"build_run"_s, u"terminal_run"_s};
@@ -106,6 +107,7 @@ QStringList allBuiltInToolNames()
             u"suggest"_s,
             u"question"_s,
             u"apply_patch"_s,
+            u"memory_write"_s,
             u"todo_write"_s,
             u"todo_read"_s,
             u"think"_s,

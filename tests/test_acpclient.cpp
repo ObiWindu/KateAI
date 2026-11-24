@@ -1389,6 +1389,7 @@ private Q_SLOTS:
         client.setSettings(settings);
         client.setWorkspace(workspace.path());
         client.setDocumentBridge(&bridge);
+        client.setEditorContext(u"Active file: main.cpp"_s);
 
         QStringList replies;
         QString error;
@@ -1409,11 +1410,63 @@ private Q_SLOTS:
         }), qPrintable(error.isEmpty() ? u"timed out"_s : error));
         QVERIFY2(error.isEmpty(), qPrintable(error));
 
+        // The user's message leads every prompt: agents answer the first text
+        // block, so the editor context and the session notes must follow it.
+        QVERIFY2(replies.at(0).startsWith(u"first question"_s), qPrintable(replies.at(0).left(120)));
         QVERIFY(replies.at(0).contains(u"Always write tests."_s));
         QVERIFY(replies.at(0).contains(u"_kateai/write_plan_file"_s));
-        QVERIFY(replies.at(0).contains(u"first question"_s));
+        QVERIFY(replies.at(0).contains(u"Editor context:\nActive file: main.cpp"_s));
+        QVERIFY2(replies.at(1).startsWith(u"second question"_s), qPrintable(replies.at(1).left(120)));
         QVERIFY(!replies.at(1).contains(u"_kateai/write_plan_file"_s));
-        QVERIFY(replies.at(1).contains(u"second question"_s));
+        QVERIFY(replies.at(1).contains(u"Editor context:\nActive file: main.cpp"_s));
+        client.stop();
+    }
+
+    void userMessageLeadsPromptAndContextIsAssistantOnly()
+    {
+        // ACP agents read the first text block as the user's request. Editor
+        // context and the once-per-session notes must follow it, annotated as
+        // assistant-only so agents such as OpenCode keep them out of the
+        // user's message instead of folding everything into one context blob.
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+
+        DiskDocumentBridge bridge;
+        AcpClient client;
+        Settings settings = mockSettings(u"prompt-blocks"_s);
+        settings.globalRules = u"Always write tests."_s;
+        client.setSettings(settings);
+        client.setWorkspace(workspace.path());
+        client.setDocumentBridge(&bridge);
+        client.setEditorContext(u"Active file: main.cpp"_s);
+
+        QString reply;
+        QString error;
+        connect(&client, &AcpClient::promptFinished, this, [&](const QString &, const QString &full, const QJsonArray &) {
+            reply = full;
+        });
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+
+        client.prompt(u"fix the bug"_s);
+        QVERIFY2(waitFor([&] { return !reply.isEmpty() || !error.isEmpty(); }),
+                 qPrintable(error.isEmpty() ? u"timed out"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+
+        const QJsonArray blocks = QJsonDocument::fromJson(reply.toUtf8()).array();
+        QCOMPARE(blocks.size(), 3);
+        QCOMPARE(blocks.at(0).toObject().value(u"text"_s).toString(), u"fix the bug"_s);
+        QVERIFY(blocks.at(0).toObject().value(u"annotations"_s).isUndefined());
+        QVERIFY(blocks.at(1).toObject().value(u"text"_s).toString().contains(u"Always write tests."_s));
+        const QJsonArray notesAudience = blocks.at(1).toObject().value(u"audience"_s).toArray();
+        QCOMPARE(notesAudience.size(), 1);
+        QCOMPARE(notesAudience.at(0).toString(), u"assistant"_s);
+        QCOMPARE(blocks.at(2).toObject().value(u"text"_s).toString(),
+                 u"Editor context:\nActive file: main.cpp"_s);
+        const QJsonArray contextAudience = blocks.at(2).toObject().value(u"audience"_s).toArray();
+        QCOMPARE(contextAudience.size(), 1);
+        QCOMPARE(contextAudience.at(0).toString(), u"assistant"_s);
         client.stop();
     }
 
@@ -1606,6 +1659,59 @@ private Q_SLOTS:
         } else {
             QCOMPARE(AcpClient::resolvedCommand(settings), u"./opencode"_s);
         }
+    }
+
+    // Kilo CLI is an OpenCode fork and has the same split: a bare `kilo`
+    // starts the interactive TUI, which never answers the ACP handshake.
+    // `kilo acp` is the stdio server. Older launch lines and hand-written
+    // entries can lack the subcommand, so it is appended the same way it is
+    // for OpenCode.
+    void kiloLaunchesTheAcpSubcommand()
+    {
+        Settings settings;
+        settings.acpAgentId = u"kilo"_s;
+        settings.acpCommand = u"kilo"_s;
+        settings.acpArgs.clear();
+        QCOMPARE(AcpClient::agentArguments(settings), (QStringList{u"acp"_s}));
+
+        // An explicit subcommand is never duplicated.
+        settings.acpArgs = u"acp --print-logs"_s;
+        QCOMPARE(AcpClient::agentArguments(settings), (QStringList{u"acp"_s, u"--print-logs"_s}));
+
+        // The registry npx line already carries `acp`; it must pass through
+        // unchanged instead of gaining a second one.
+        settings.acpCommand = u"npx"_s;
+        settings.acpArgs = u"--yes @kilocode/cli@7.8.32 acp"_s;
+        QCOMPARE(AcpClient::agentArguments(settings),
+                 (QStringList{u"--yes"_s, u"@kilocode/cli@7.8.32"_s, u"acp"_s}));
+    }
+
+    // Kilo CLI's installer uses the same ~/.kilo/bin layout as OpenCode; a
+    // shell PATH that contains it is not inherited by a desktop-launched Kate.
+    void resolvedCommandFallsBackToTheKiloInstallDir()
+    {
+        Settings settings;
+        settings.acpAgentId = u"kilo"_s;
+        settings.acpCommand = u"kilo"_s;
+        settings.acpArgs = u"acp"_s;
+
+        QString expected = QStandardPaths::findExecutable(u"kilo"_s);
+        if (expected.isEmpty()) {
+            const QFileInfo ownInstall(QDir::homePath() + u"/.kilo/bin/kilo"_s);
+            if (ownInstall.exists() && ownInstall.isExecutable()) {
+                expected = ownInstall.absoluteFilePath();
+            }
+        }
+        if (expected.isEmpty()) {
+            const QFileInfo localBin(QDir::homePath() + u"/.local/bin/kilo"_s);
+            if (localBin.exists() && localBin.isExecutable()) {
+                expected = localBin.absoluteFilePath();
+            }
+        }
+        if (expected.isEmpty()) {
+            expected = u"kilo"_s;
+        }
+        QCOMPARE(AcpClient::resolvedCommand(settings), expected);
     }
 
     // MiniMax Code: the ACP registry records the npm distribution

@@ -71,6 +71,7 @@ int estimateTokens(const QList<ChatMessage> &messages);
 // A conservative context window for a model name, used when the provider does
 // not report one.
 int contextWindowFor(const QString &model);
+int contextWindowFor(Provider provider, const QString &model);
 
 /**
  * Returns a list that fits the budget. Never drops the leading system prompt

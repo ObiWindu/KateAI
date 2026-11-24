@@ -6,6 +6,7 @@
 #include "types.h"
 #include "contextmanager.h"
 #include "graph/projectgraph.h"
+#include "harness/models.h"
 
 #include <KLocalizedString>
 
@@ -71,7 +72,8 @@ int safeBoundary(const QList<ChatMessage> &history, int start)
 QString oneLine(const QString &text, int limit)
 {
     QString flat = text.simplified();
-    flat.replace(QRegularExpression(QStringLiteral("[\\r\\n]+")), QStringLiteral(" "));
+    static const QRegularExpression newlines(QStringLiteral("[\\r\\n]+"));
+    flat.replace(newlines, QStringLiteral(" "));
     if (limit > 0 && flat.length() > limit) {
         flat = truncateSafe(flat, limit) + QStringLiteral("…");
     }
@@ -144,52 +146,17 @@ int estimateTokens(const QList<ChatMessage> &messages)
     return (int)total;
 }
 
+// Token estimation lives here, but the window table belongs to the model
+// profile registry so the inspector, request shaping, and context manager all
+// agree. A model Kate does not recognise keeps the conservative 32k fallback.
 int contextWindowFor(const QString &model)
 {
-    const QString name = model.trimmed().toLower();
-    if (name.isEmpty()) {
-        return kDefaultContextWindow;
-    }
-    // Conservative family defaults. A provider catalogue or the explicit
-    // contextWindow setting still wins; these keep common coding models from
-    // compacting at the 32k fallback long before their real window is full.
-    // Values are intentionally below the advertised maximum where a model has
-    // several variants, so a wrong guess compacts early rather than overflowing.
-    if (name.contains(u"gemini"_s)) {
-        return 1000000;
-    }
-    if (name.contains(u"claude"_s)) {
-        return 200000;
-    }
-    if (name.contains(u"grok"_s)) {
-        return 256000;
-    }
-    if (name.contains(u"kimi"_s) || name.contains(u"moonshot"_s)) {
-        return 256000;
-    }
-    if (name.contains(u"deepseek"_s)) {
-        return 128000;
-    }
-    if (name.contains(u"qwen"_s) || name.contains(u"qwq"_s)) {
-        return 131072;
-    }
-    if (name.contains(u"glm"_s)) {
-        return 128000;
-    }
-    if (name.contains(u"codestral"_s) || name.contains(u"mistral"_s)) {
-        return 128000;
-    }
-    if (name.contains(u"command-r"_s)) {
-        return 128000;
-    }
-    if (name.contains(u"gpt-3.5"_s)) {
-        return 16384;
-    }
-    if (name.contains(u"gpt-4"_s) || name.contains(u"gpt-4o"_s) || name.startsWith(u"o1"_s)
-        || name.startsWith(u"o3"_s) || name.startsWith(u"o4"_s)) {
-        return 128000;
-    }
-    return kDefaultContextWindow;
+    return contextWindowFor(Provider::OpenAICompatible, model);
+}
+
+int contextWindowFor(Provider provider, const QString &model)
+{
+    return ModelProfiles::contextWindow(provider, model);
 }
 
 QString summaryHeader()
@@ -203,7 +170,9 @@ namespace
 
 bool isSummary(const ChatMessage &message)
 {
-    return message.role == ChatMessage::Role::User && message.content.startsWith(summaryHeader());
+    return message.role == ChatMessage::Role::User
+        && (message.name == u"context_summary"_s
+            || message.content.startsWith(summaryHeader()));
 }
 
 QString buildSummary(const QList<ChatMessage> &dropped, int requestChars, ProjectGraph *projectGraph = nullptr)
@@ -550,6 +519,7 @@ QList<ChatMessage> build(const QList<ChatMessage> &history, const Options &optio
     if (keepFrom > bodyStart) {
         ChatMessage summary;
         summary.role = ChatMessage::Role::User;
+        summary.name = u"context_summary"_s;
         summary.content = buildSummary(history.mid(bodyStart, keepFrom - bodyStart), requestChars,
                                        options.useProjectGraph ? options.projectGraph : nullptr);
         result.append(summary);

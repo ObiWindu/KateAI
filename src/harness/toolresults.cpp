@@ -10,8 +10,12 @@
 #include <QFileInfo>
 #include <QProcessEnvironment>
 #include <QRegularExpression>
+#include <QSet>
 #include <QStandardPaths>
 #include <QUuid>
+
+#include <algorithm>
+#include <utility>
 
 using namespace Qt::Literals::StringLiterals;
 
@@ -80,7 +84,8 @@ StoredToolResult ToolResults::store(const QString &text, int headChars, int tail
         result.preview = text.left(head + tail);
         return result;
     }
-    if (file.write(stored.toUtf8()) < 0) {
+    const QByteArray payload = stored.toUtf8();
+    if (file.write(payload) != payload.size()) {
         file.close();
         QFile::remove(path);
         result.preview = text.left(head + tail);
@@ -94,13 +99,74 @@ StoredToolResult ToolResults::store(const QString &text, int headChars, int tail
     result.id = id;
     result.totalChars = stored.size();
     const qsizetype omitted = stored.size() - head - tail;
-    result.preview = text.left(head)
+    QString previewHead = stored.left(head);
+    if (!previewHead.isEmpty() && previewHead.at(previewHead.size() - 1).isHighSurrogate()
+        && head < stored.size() && stored.at(head).isLowSurrogate()) {
+        previewHead.chop(1);
+    }
+    QString previewTail = stored.right(tail);
+    if (!previewTail.isEmpty() && previewTail.at(0).isLowSurrogate()
+        && stored.size() > tail && stored.at(stored.size() - tail - 1).isHighSurrogate()) {
+        previewTail.remove(0, 1);
+    }
+    result.preview = previewHead
         + u"\n\n… [tool output truncated: showing the first %1 and last %2 of %3 characters; %4 omitted] …\n"_s
               .arg(head).arg(tail).arg(stored.size()).arg(omitted)
         + u"Full output: tool_result id=" + id
         + u" (call read_tool_result with this id and optional offset/limit)\n\n"_s
-        + text.right(tail);
+        + previewTail;
+    // The store is shared by every conversation. Evict oldest-first so a long
+    // session cannot grow the cache without bound; the preview already says
+    // how to page, and an evicted id reports "unknown or expired". The file
+    // just written is always kept, even if timestamps tie.
+    prune(200LL * 1024 * 1024, {path});
     return result;
+}
+
+int ToolResults::prune(qint64 maxBytes, const QStringList &keep)
+{
+    const QString dirPath = directory();
+    QDir dir(dirPath);
+    if (!dir.exists()) {
+        return 0;
+    }
+    QFileInfoList entries = dir.entryInfoList({QStringLiteral("*.txt")},
+                                              QDir::Files, QDir::NoSort);
+    qint64 total = 0;
+    for (const QFileInfo &info : std::as_const(entries)) {
+        total += info.size();
+    }
+    if (total <= maxBytes) {
+        return 0;
+    }
+    // Sort explicitly oldest-first. QDir::Time leaves ties in unspecified
+    // order, which can delete the file that was just written on filesystems
+    // with coarse timestamps.
+    std::sort(entries.begin(), entries.end(), [](const QFileInfo &a, const QFileInfo &b) {
+        if (a.lastModified() != b.lastModified()) {
+            return a.lastModified() < b.lastModified();
+        }
+        return a.fileName() < b.fileName();
+    });
+    QSet<QString> keepPaths;
+    for (const QString &path : keep) {
+        keepPaths.insert(QFileInfo(path).absoluteFilePath());
+    }
+    int removed = 0;
+    for (const QFileInfo &info : std::as_const(entries)) {
+        if (total <= maxBytes) {
+            break;
+        }
+        if (keepPaths.contains(info.absoluteFilePath())) {
+            continue;
+        }
+        const qint64 size = info.size();
+        if (QFile::remove(info.absoluteFilePath())) {
+            total -= size;
+            ++removed;
+        }
+    }
+    return removed;
 }
 
 bool ToolResults::read(const QString &id, qint64 offset, int limit, QString *out,
