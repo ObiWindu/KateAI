@@ -17,15 +17,30 @@ namespace KateAi
 class SessionStore
 {
 public:
-    static constexpr int CURRENT_VERSION = 2;
+    static constexpr int CURRENT_VERSION = 5;
+
+    // The SQLite file backing the store. Exposed so the harness event log can
+    // live in the same database without duplicating the path policy.
+    static QString databasePath();
 
     struct SessionData {
         int version = CURRENT_VERSION;
+        // The history as the model sees it. Context compaction replaces older
+        // turns with a summary here, so this list can be shorter than the
+        // transcript the user was reading.
         QList<ChatMessage> messages;
+        // The full conversation the transcript should render. Compaction does
+        // not touch it, so reopening a long thread still shows every turn.
+        // Payloads written before this field exist leave it empty; callers
+        // then fall back to `messages`.
+        QList<ChatMessage> transcript;
         QString currentThinking;
         QJsonArray currentPlan;
         bool planShown = false;
         QString currentAssistant;
+        // Identifier of the last user turn. Persisted so a restored transcript
+        // and the live runtime agree on which turn the UI is describing.
+        QString lastTurnId;
         quint64 stateEpoch = 0;
         QList<QString> actionSignatures;
         QHash<QString, int> actionRepeatCounts;
@@ -39,6 +54,19 @@ public:
         QString acpSessionId;
         // The editor folder active when this conversation was saved.
         QString workspace;
+        // Set when this conversation was forked from another one. Additive and
+        // not required for loading; old payloads leave it empty.
+        QString parentConversationId;
+        // Sub-agent result records (worktree patch, sidechain path, usage).
+        // Additive; an older payload leaves this empty.
+        QJsonArray subagents;
+        // Two-model orchestration state (plan, role, counters, route keys).
+        // Additive; a single-model conversation leaves this empty.
+        QJsonObject orchestration;
+        // Set when the stored payload could not be read or parsed. It is not
+        // persisted; callers use it to avoid treating a damaged transcript as
+        // an empty one and overwriting it on the next save.
+        bool loadFailed = false;
     };
 
     struct ConversationInfo {
@@ -72,6 +100,10 @@ public:
     static bool saveConversation(const QString &conversationId, const SessionData &data, const QString &title = QString(), int maxConversations = 50);
     static void deleteConversation(const QString &conversationId);
     static QString createNewConversation();
+    // Copies a conversation into a new active conversation with a parent link.
+    // The fork keeps the full transcript and gets its own copy of the event
+    // log; the source is left untouched.
+    static QString forkConversation(const QString &sourceId, const QString &title = QString());
     static void setActiveConversation(const QString &conversationId);
     static QString getActiveConversationId();
     static void pruneOldConversations(int maxConversations);

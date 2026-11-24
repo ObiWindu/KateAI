@@ -10,6 +10,7 @@
 </p>
 
 <p align="center">
+  <img src="https://img.shields.io/badge/version-0.9.0-orange" alt="Kate AI 0.9.0">
   <img src="https://img.shields.io/badge/Kate-24.08%2B-1d99f3?logo=kde" alt="Kate 24.08+">
   <img src="https://img.shields.io/badge/Qt-6.5%2B-41cd52?logo=qt" alt="Qt 6.5+">
   <img src="https://img.shields.io/badge/KF-6-blue" alt="KDE Frameworks 6">
@@ -166,11 +167,12 @@ Anything after the frontmatter is extra guidance for the agent.
 - **One edit-lock table.** Two agents editing one file would silently overwrite each other, so the second one is refused with a clear message until the first reports back. Give each agent its own files.
 - **Separate budgets.** A sub-agent gets half the parent's tool-call and model-request budget so a runaway child cannot starve its siblings.
 - **Auditable.** `new_task` takes `include_transcript: true`, which returns the sub-agent's tool log alongside its answer so the orchestrator can check how it got there.
+- **Live.** The running card streams each tool start/finish, progress text and command output into its activity log; the card's "Doing:" line follows the latest step so the work is visible without waiting for the final answer.
 - **Cancelable.** Each sub-agent can be stopped on its own from the chat card, or all at once from the team menu.
 
 ### Chat panel
 
-Sub-agents get a card of their own rather than a generic tool row: agent name and mode, a live `running · 12s · 5 steps` status, a **Cancel** button, the answer when it lands, and an expandable activity log of everything it ran. The toolbar shows how many agents are in flight and opens a menu with the roster and *Cancel all*.
+Sub-agents get a card of their own rather than a generic tool row: agent name and mode, a live `Running · 12s · 3 tools` status, a **Cancel** button, and a headline that names the tool in flight (colour-coded by kind) instead of leaving only a spinner. The answer lands in the body with a **Copy** button, and an expandable activity log shows the tools and errors behind it; concurrent cards share one bounded tab strip. The toolbar shows how many agents are in flight and opens a menu with the roster and *Cancel all*.
 
 ### Agent loop
 
@@ -183,7 +185,7 @@ The model can call tools, read the results, and continue until the task is done 
 - Adaptive temperature (higher while exploring, lower while applying edits)
 - Automatic retry on rate limits, 5xx, and network errors (exponential backoff)
 - Repeat-call detection so the agent does not loop on the same failed tool
-- Context compression and smart truncation so long sessions stay within the window
+- Window-aware context compression that keeps a substantial recent tail and preserves requests, files, graph relationships, and recent failures
 
 ```text
 You ──► LLM (Grok / OpenAI / OpenRouter / local) or any ACP agent over stdio
@@ -202,14 +204,33 @@ You ──► LLM (Grok / OpenAI / OpenRouter / local) or any ACP agent over std
 | Tool | What it does |
 | --- | --- |
 | `read_file` | Read a UTF-8 file; `offset` / `limit` for large files |
-| `write_file` | Create or overwrite a file (open Kate buffer if the file is already open) |
+| `read_tool_result` | Page back a tool output that was too large to keep in the conversation |
+| `write_file` | Create or overwrite a file (open Kate buffer if the file is already open). Refuses an overwrite if the file changed since the agent read it. |
 | `edit_file` | Exact-string replace; optional `replace_all` |
 | `multi_edit_file` | Apply multiple non-contiguous edits to a file in a single tool call |
+| `apply_patch` | Apply a unified diff, possibly covering several files, atomically (all files or none) |
+| `todo_write` / `todo_read` | Replace / read the task checklist shown to the user (statuses: pending, in_progress, completed) |
+| `think` | Record reasoning into the transcript's thinking block |
+| `exit_plan_mode` | Leave plan mode once the plan is approved, so the turn can start editing |
 | `list_dir` | List a directory |
 | `grep` | Regex search with optional glob, case-insensitivity, and context lines |
 | `glob` | Find paths (`**/*.h`, `src/**/*.cpp`, …) |
 | `bash` | Run a command in the workspace under the active sandbox |
 | `query_project_graph` | Query indexed files, symbols, imports, dependents, and paths |
+| `lsp_diagnostics` | Language-server/editor diagnostics (errors, warnings) for one file or workspace-wide |
+| `lsp_symbols` | A file's classes and functions with line numbers |
+| `lsp_hover` | The enclosing symbol at a position plus its declaration |
+| `lsp_definition` / `lsp_references` | Where a symbol is defined / used across the workspace |
+| `lsp_code_actions` | Quick fixes the language server offers at a position |
+| `debug_status` / `debug_stack` / `debug_locals` / `debug_breakpoints` | Live Kate debugger: session state, backtrace, locals, breakpoints |
+| `debug_select_frame` / `debug_select_thread` | Change the frame or thread the debugger tools read |
+| `debug_snapshot` | Capture debugger state, or diff two snapshots |
+| `debug_set_breakpoint` | Set, condition, or remove a breakpoint |
+| `debug_step` | Continue, step over/into/out, or run to a line |
+| `debug_eval` / `debug_console` | Evaluate an expression in the paused frame, or run a debugger console command |
+| `debug_session` | Start, stop, or attach a debug session |
+| `build_targets` / `build_run` | List and build targets through Kate's Build plugin |
+| `terminal_run` | Run a command in Kate's embedded terminal |
 | `write_plan_file` | Write the implementation plan for a complicated task to a temp file the user can open and follow |
 | `suggest` | Post a suggestion card for the user to accept or dismiss instead of making an unrequested change |
 | `question` | Ask the user something and wait for the answer before continuing |
@@ -217,13 +238,13 @@ You ──► LLM (Grok / OpenAI / OpenRouter / local) or any ACP agent over std
 
 Plus every tool discovered from the connected MCP servers, as `mcp__<server>__<tool>`.
 
-In **Plan mode**, **Ask**, **Architect**, and **Orchestrator** the model only receives the read-only group (`read_file`, `list_dir`, `grep`, `glob`, `query_project_graph`, `write_plan_file`, `suggest`, `question`) plus MCP tools. Tool availability is enforced twice — once in the request that advertises the tools, and again when a call arrives — so a model that hallucinates a write gets a clear rejection instead of a silent one.
+In **Plan mode**, **Ask**, **Architect**, and **Orchestrator** the model only receives the read-only group (`read_file`, `read_tool_result`, `list_dir`, `grep`, `glob`, `query_project_graph`, `write_plan_file`, `suggest`, `question`, `todo_write`, `todo_read`, `think`, `exit_plan_mode`, `lsp_*`, the read-only `debug_*` tools, and `build_targets`) plus MCP tools. Tool availability is enforced twice — once in the request that advertises the tools, and again when a call arrives — so a model that hallucinates a write gets a clear rejection instead of a silent one. ACP agents run their own tools, so Kate cannot stop one that never asks permission; it shows a notice instead, and the permission card still lets you approve a tool the active mode does not list.
 
 `write_plan_file` is the one tool that writes a file without touching the project: the destination is a per-workspace temp file Kate picks itself, so it is safe in read-only modes and plan mode, never prompts, and never enters the edit tracker. Agents are told to keep it current as the work moves, which gives the user a running plan they can open next to the code.
 
-`suggest` is how the agent raises something the user did not ask for. It posts a card into the transcript with the suggestion as markdown, an optional `path:line` anchor, and **Accept** / **Dismiss** buttons. Accept opens the anchored file at that line in the editor; Dismiss removes the card. Suggestions touch nothing, so they are safe in read-only modes and never create a checkpoint. ACP agents reach the same card through the `suggest` client method.
+`suggest` is how the agent raises something the user did not ask for. It posts a card into the transcript with the suggestion as markdown, an optional `path:line` anchor, and **Accept** / **Dismiss** buttons. Accept opens the anchored file at that line in the editor; Dismiss removes the card. Suggestions touch nothing, so they are safe in read-only modes and never create a checkpoint. ACP agents reach the same card through the `suggest` client method or their own `suggest`/`suggestion` tool call, whose `text`/`message`/`file_path`/`start_line` shape is normalized onto the card's fields.
 
-`question` is how the agent asks instead of guessing. The turn stops, and a card appears in the intent dock above the input with the question, the likely answers as one-tap chips, and a line to type anything else. The answer becomes the tool result and the agent resumes from it — so a decision only the user can make (this approach or that one, a missing requirement, a destructive action) never turns into a guess. `allow_freeform: false` removes the typing line and leaves only the offered answers. Asking has no effect on the workspace, so it is safe in read-only modes and never prompts for permission.
+`question` is how the agent asks instead of guessing. The turn stops, and a card appears in the intent dock above the input with the question, the likely answers as one-tap chips, and a line to type anything else. The answer becomes the tool result and the agent resumes from it — so a decision only the user can make (this approach or that one, a missing requirement, a destructive action) never turns into a guess. `allow_freeform: false` removes the typing line and leaves only the offered answers. Asking has no effect on the workspace, so it is safe in read-only modes and never prompts for permission. ACP agents that expose their own question tool (including the Claude/OpenCode `questions[]` shape) get the same card; a permission request whose options are answer labels is shown as a question card too. Because ACP has no client-to-agent tool-result channel for ordinary tool calls, their answer is sent as the next prompt after the current turn; a permission request returns the selected option directly.
 
 ### Tool cards and diffs
 
@@ -254,8 +275,11 @@ The composer shows context-window usage as a percentage, turning amber at 70% an
 
 Kate AI is a first-class KTextEditor plugin, so it sees the same documents you do.
 
-- Active file, cursor line and column, selection with its line range (up to 4k of text), the file's language, unsaved state, bookmarks, and the list of open files are sent as editor context; an untitled buffer sends its content so the model can still see it
+- Active file, cursor line and column, selection with its line range (up to 4k of text), the file's language, unsaved state, bookmarks, and the list of open files are sent as editor context; an untitled buffer sends its content so the model can still see it. The context also carries the git branch, the enclosing symbol at the cursor (from the project graph), the LSP plugin state, and the active file's error/warning count — and it refreshes live as you move the cursor or change the selection
 - Reads and writes prefer the in-memory buffer over disk
+- **LSP integration**: Kate AI detects Kate's LSP client plugin (`lspclientplugin`) at runtime. The `lsp_*` tools (diagnostics, symbols, hover, definition, references, code actions) answer from it when it can and fall back to the project graph and text search otherwise; `lsp_diagnostics` reads structured rows from Kate's diagnostics model when it is available, so severity, source, code, and ranges survive, including for workspace files that are not open. Hovering a line with an error/warning mark shows the diagnostic; AI completions step aside while the native (LSP) completion popup is open. When no LSP server runs, the tools say so and the agent falls back to builds/tests via `bash`
+- **Live debugger**: Kate AI bridges Kate's debugger plugin (`kategdbplugin`, GDB/DAP). The current session, stop reason, frame, stack, locals, and breakpoints are part of the agent's context while paused; a crash or exception raises a banner with **Diagnose Stop**, and debugger state can be snapshotted and diffed. Inline variable notes and hover values appear on the paused line
+- **Kate ecosystem**: the Build plugin's targets, the embedded Konsole terminal, project-tree actions, and the Backtrace Browser are available to the agent; review diffs (**Accept All** / **Reject All**), debug diffs, and the project graph open in native Kate tabs
 - **Edit banners**: an in-editor banner appears on files the agent changed, with **Review** (opens the panel) and **Reject Changes** actions (configurable)
 - **Edit open files in buffer** (settings): agent edits to open documents land in the buffer and stay unsaved — Keep in the review queue saves, Reject restores the buffer. While a change is unsaved, commands the agent runs still read the previous state from disk, so this is off by default
 - Save-As carries the review queue along: pending edits follow the file to its new path
@@ -266,9 +290,21 @@ Kate AI is a first-class KTextEditor plugin, so it sees the same documents you d
   - **Refactor Selection** — clarity and maintainability, then apply
   - **Add Tests for Selection** — propose coverage first
 - **Stop Kate AI** action (Tools ▸ Kate AI, bindable in Kate's shortcut settings) aborts the running turn without hunting for the panel button
-- **Command line**: `:kateai ask <text>`, `:kateai explain|fix|refactor|tests` (act on the selection or the range the command line carries, vi-mode `'<,'>kateai fix` included), `:kateai stop`, `:kateai new`, `:kateai mode <id>`, `:kateai panel`
+- **Command line**: `:kateai ask <text>`, `:kateai explain|fix|refactor|tests|diagnostics|symbols` (act on the selection or the range the command line carries, vi-mode `'<,'>kateai fix` included), `:kateai debug|stack|break|snapshot` for the live debugger, `:kateai fix-errors|build-errors`, `:kateai launch-config` to generate `.vscode/launch.json`, `:kateai backtrace`, `:kateai terminal`, `:kateai blame|commit`, `:kateai diff-tab|graph-tab|annotations`, `:kateai context|usage|prompt|memory|tools` to inspect the context window, this turn's counters, the exact prompt, loaded memory, and the effective tool catalog, `:kateai stop`, `:kateai new`, `:kateai mode <id>`, `:kateai panel`
 - Workspace root is the nearest parent with `.git` or `.kateproject`, otherwise the active file’s directory
 - When a different folder is opened in Kate, Kate AI switches to that workspace (agent context, checkpoints, MCP servers, completions) and shows a notice pinned above the input; the notice fades on its own or when the next turn starts
+
+### Debugger and build
+
+Kate AI reads the debugger session you already have open, so a paused frame is context instead of something to describe.
+
+- `debug_status`, `debug_stack`, `debug_locals`, and `debug_breakpoints` report the live session; `debug_select_frame` / `debug_select_thread` move the context the other tools read
+- `debug_step` continues, steps over/into/out, and runs to a line; `debug_eval` evaluates in the paused frame; `debug_console` runs a raw debugger command; `debug_session` starts, stops, or attaches
+- A crash, signal, or exception stop raises a banner on the stopped file with **Diagnose Stop**, and the prompt starts with the stack and locals
+- `debug_snapshot` captures the state and can diff two snapshots, so "what changed between these stops?" is one call
+- `build_targets` and `build_run` use Kate's Build plugin; `terminal_run` runs in the embedded Konsole terminal; `:kateai launch-config` generates `.vscode/launch.json` from the project's targets
+- Read-only debugger tools and `build_targets` need no approval and remain available in plan mode. `debug_set_breakpoint` is a write (its path goes through the sandbox), and stepping, evaluating, running a session, building, and `terminal_run` are executes, so they use the normal permission bar and sandbox checks
+- Works with GDB/DAP through Kate's `kategdbplugin`; when the plugin is not loaded the tools say so and point at `bash` instead of failing
 
 ### Thinking and plan mode
 
@@ -308,14 +344,130 @@ Hard-denied commands (`rm -rf /`, `mkfs`, `dd` to devices, curl-piped-to-shell) 
 
 | Sandbox | Reads | Writes | Child network |
 | --- | --- | --- | --- |
-| **Workspace** | Anywhere except deny globs | Workspace only | Allowed |
-| **Read-only** | Anywhere except deny globs | Blocked | Blocked |
-| **Strict** | Workspace only | Workspace only | Blocked |
+| **Workspace** | Anywhere except deny globs | Workspace + private `/tmp` | Allowed |
+| **Read-only** | Anywhere except deny globs | Private `/tmp` only | Blocked |
+| **Strict** | Workspace only | Workspace + private `/tmp` | Blocked |
 | **Off** | Deny globs only | Deny globs only | Unsandboxed |
 
-Shell isolation depends on the OS: [bubblewrap](https://github.com/containers/bubblewrap) on Linux, `sandbox-exec` on macOS, and workspace-cwd plus command policy on Windows. File tools still work if the OS sandbox helper is missing.
+Shell commands run inside an OS-level sandbox, not just a command filter:
+
+- **Linux (validated):** [bubblewrap](https://github.com/containers/bubblewrap) creates user, PID, IPC, UTS and cgroup namespaces, drops all capabilities, starts a new session, replaces `/tmp` with a private tmpfs, and mounts the host read-only for **Workspace** / **Read-only**. **Strict** starts from a tmpfs root and mounts only the runtime (`/usr`, `/etc`, libraries, `/opt`, `/nix`) read-only. **Read-only** and **Strict** also unshare the network namespace. The workspace is the only writable persistent path in **Workspace** and **Strict**.
+- **macOS:** `sandbox-exec` seatbelt profiles deny writes outside the workspace and block the network in **Read-only** / **Strict**. The code path is built but was not runtime-validated for this release.
+- **Windows:** there is no bundled OS sandbox helper. **Workspace** runs with a workspace working directory plus the command policy, which is **not** a hard boundary; **Read-only** and **Strict** refuse to run instead of silently weakening their promise. Choose **Off** to run unsandboxed.
+
+If bubblewrap cannot start or create the required namespaces, sandboxed commands fail with an explanation rather than falling back to an unsandboxed run. The sandbox is not a virtual machine: it shares the host kernel, and `sandbox-exec` is deprecated by Apple.
+
+Common credential stores (`~/.ssh`, `~/.gnupg`, `~/.aws`, cloud CLI configs, keyrings, browser profiles, `~/.local/share/kateai`) and session channels (`/run/dbus`, Docker/Podman sockets, the per-user runtime directory) are masked inside the sandbox even when a command constructs the path dynamically. Sandboxed shell commands also start from a scrubbed environment: secret-shaped variables and DBus, X11, Wayland, SSH-agent, GPG-agent, and PulseAudio/PipeWire channels are removed, and the shell does not source the user's login profile (which could re-export them). Stdio MCP servers and ACP terminal commands use the same policy; add a variable explicitly in the server's `env` block or the terminal request when a command genuinely needs it.
 
 **Always blocked paths:** `.env`, `.env.*`, `*.pem`, `*.key`, `id_rsa` / `id_ecdsa` / `id_ed25519`, `.ssh/**`, AWS credentials, GnuPG, `.netrc`, `*.p12`, `*.pfx`. Extra deny globs can be added in settings.
+
+### Harness: events, verification, policy, hooks
+
+0.7 makes the turn replayable and makes "done" mean "the check passed".
+
+- **Event log.** Every turn, step, request, tool call/result, permission
+  decision and verification is appended to an event table in the session
+  database. The transcript is a projection. `:kateai trace` exports the
+  redacted log as JSONL.
+- **Verification.** After a file mutation Kate AI discovers checks from
+  `.kateai/config.json`, `## Commands` in `AGENTS.md`/`KATEAI.md`/`CLAUDE.md`,
+  or the build system (CTest, Cargo, npm/pnpm/yarn, pytest, Make). A failing
+  check sends the output back to the model and blocks completion; passing
+  checks become the evidence the final answer must cite. `:kateai verify` runs
+  the plan now.
+- **Policy.** `.kateai/policy.json`, the user policy and the managed policy
+  add deny-first rules for tools, paths, commands, risk and MCP tools. The
+  hardline floor (`.env`, private keys, `rm -rf /`, force-pushes to protected
+  refs) applies even in **Always approve**. `:kateai policy` shows the rules.
+- **Hooks.** `PreToolUse`, `PostToolUse`, `Stop` and session/prompt hooks can
+  block, rewrite arguments or add context. Project hooks require
+  `:kateai trust-hooks`; `:kateai hooks` shows the state. See
+  `docs/HOOKS.md` and `docs/POLICY.md`.
+
+All harness features default on. For a bisect or a minimal setup:
+
+```sh
+KATEAI_HARNESS_FLAGS=-verificationGate,-hooks,+eventLog kate
+```
+
+### Harness 0.8: prompt, context, memory, tools
+
+0.8 keeps long sessions coherent and stops a large MCP catalog from consuming
+the window before work starts.
+
+- **Prompt.** The system prompt is deterministic and budgeted: identity, mode,
+  execution, model guidance, reasoning, verification, style, environment, rules,
+  memory, graph, and plan sections in a fixed order. Editor state stays in a
+  transient turn message, so the static prefix remains cacheable.
+  `:kateai prompt` shows the exact prompt and its section token table.
+- **Context.** Oversized tool output is paged to the content store, old output
+  is pruned, old turns are snipped, and the summary merges incrementally so an
+  early decision survives a second compaction. The plan, touched files, and
+  running sub-agents are rehydrated into a transient message. Provider usage
+  calibrates the local token estimate.
+- **Memory.** Kate reads `AGENTS.md`, `CLAUDE.md`, `KATEAI.md`,
+  `.kateai/rules`, `.claude/rules`, `.agents/rules`, and nested/path-scoped
+  files, with managed/user/project/local precedence. `memory_write` proposes a
+  note in `.kateai/memory/<topic>.md`; the user approves the diff.
+  `:kateai memory` lists what loaded and what it costs.
+- **Tools.** Every built-in tool has declarative metadata and its own result
+  budget. When the catalog is large, `tool_search`, `tool_describe`, and
+  `tool_call` discover deferred tools by intent; MCP tools defer by default.
+  `:kateai tools` shows the effective set and schema cost.
+- **Model profiles.** Context window, output limit, pricing, cache style,
+  prompt variant, and edit dialect come from a family registry. Unknown models
+  get a conservative 32k profile.
+- **Edits.** Exact matching stays primary; a failed `edit_file` retries with
+  smart quotes, CRLF, trailing whitespace, and whitespace runs normalised,
+  while ambiguous matches still fail.
+
+The four 0.8 flags default on. To compare against the legacy path:
+
+```sh
+KATEAI_HARNESS_FLAGS=-promptV2,-contextV2,-memoryV2,-toolSearch kate
+```
+
+See `docs/HARNESS_0.8.md` and `docs/PROMPT.md`.
+
+### Harness 0.9: skills, agents, inspector
+
+0.9 makes the harness extensible and parallel. A project can ship procedures,
+agent specifications, policies, and hooks; a sub-agent can work in a temporary
+git worktree and return a patch without touching the parent tree.
+
+- **Skills.** `SKILL.md` bundles are discovered in `.kateai/skills`,
+  `.agents/skills`, `.claude/skills`, and the user skills directory. Only the
+  name and a short description enter the prompt; the body is loaded on demand
+  by the `skill` tool or `:kateai skill <name>` / `/<name>`. Project skills
+  require `:kateai trust-skill <name>` after the hash-keyed safety scan.
+  `context: fork` runs the skill in an isolated sub-agent. See
+  `docs/SKILLS.md`.
+- **Subagents v2.** Agent Markdown files can set model, effort, permission
+  mode, tool allow/deny lists, skills, max turns, memory scope, and
+  `isolation: worktree`. Each run gets a JSONL sidechain, a summary-only
+  return, cost/token attribution, and a `subagent_transcript` tool for audit.
+  Child questions and approvals are forwarded to the parent's intent dock;
+  cancel/timeout cleanup releases worktrees and locks. `:kateai apply-subtask`
+  and `:kateai discard-subtask` settle an isolated patch.
+- **Inspector.** `:kateai inspector` opens a read-only panel with Context,
+  Tools, Rules & Memory, Hooks & Skills, Trace, Cost, and Rewind tabs. It
+  reuses the same reports as the commands and never runs checks or changes a
+  turn. `:kateai fork` copies the current conversation into a new thread with
+  a parent link. `:kateai rewind [id]`, `/fork`, `/rewind`, `/inspector`,
+  `/skills`, and `/compact` are built-in commands.
+- **Edits.** A failed exact match now shows the closest matching block with
+  line numbers, in addition to the existing canonicalisation.
+- **Configuration.** On-disk configuration schema v2; v1 files are read as-is
+  and rewritten on the next save.
+
+The 0.9 flags (`skills`, `agentsV2`, `inspector`) default on. To compare
+against the 0.8 behaviour:
+
+```sh
+KATEAI_HARNESS_FLAGS=-skills,-agentsV2,-inspector kate
+```
+
+See `docs/HARNESS_0.9.md` and `docs/SKILLS.md`.
 
 ### Providers and models
 
@@ -355,11 +507,59 @@ Native ACP works with any stdio agent. Pick a preset (command/args are filled in
 
 Kate is the ACP client: `session/prompt`, `session/update`, `session/request_permission`, `fs/read_text_file`, `fs/write_text_file`, `terminal/*`. Always-approve is handled in Kate for every agent. Grok Build also receives `--model` / `--always-approve` and Grok `_meta` (`yoloMode`).
 
+When an ACP agent is selected, the composer hint mentions `/` from startup,
+even before the live session advertises its command list. Type `/` as the first
+character to open a filtered list above the cursor; each command's description
+is shown, and Enter or Tab inserts the selected command. The list is remembered
+per agent, so reopening Kate shows the commands the agent advertised last time
+without waiting for a turn; before the first session, `/` explains that the
+agent advertises its commands when a session starts.
+
+### Model orchestration (two models)
+
+Model orchestration pairs a **planner** model with an **executor** model in one
+turn. The planner is read-only: it inspects the project, writes a concrete plan
+and reviews the result. The executor performs the searches, edits, commands,
+builds and tests. The two models can use different API-key providers.
+
+Enable it under **Settings → Kate AI → AI Providers → Model Orchestration**, then
+pick a planner and executor. The model picker also shows an **Orchestrator** row;
+selecting an ordinary model turns the pair off.
+
+- The planner can explore with read tools and `submit_plan`. It never receives
+  edit, command or sub-agent tools.
+- The executor gets the plan as a transient directive and the active mode's
+  normal tools. It can hand control back with `request_replan`.
+- The planner reviews changed files and verification evidence through
+  `submit_review`, returning either approval or concrete fixes.
+- Replans and review rounds are bounded in settings.
+- Only API-key providers are supported. ACP agents and Telegram cannot be used
+  for either role.
+- Usage and cost are attributed per role in `:kateai usage`.
+
+See `docs/ORCHESTRATION.md` for the full design, triggers and edge cases.
+
+### ACP tool integration
+
+Different ACP agents name their tools differently (`fs/read_text_file`, `terminal/exec`, `edit`, `write`, `apply_patch`, `str_replace_editor`, …). KateAI normalises every ACP tool name to a canonical KateAI name on ingest, so cards, colours, summaries, permissions, edit tracking, and history restoration all behave consistently regardless of the agent:
+
+- **Alias map**: common ACP names map to canonical names (`read_file`, `write_file`, `edit_file`, `apply_patch`, `multi_edit_file`, `bash`, `list_dir`, `grep`, `glob`, `web_search`, `web_fetch`, `write_plan_file`, `query_project_graph`, `question` — including `ask_user`/`ask_user_question`, `todo_write`/`todo_read`, `exit_plan_mode`, `think`, `new_task`). MCP-prefixed names (`mcp__*`) are preserved. Unified-diff text in an `apply_patch` call is parsed into per-file diffs, so multi-file patches render one card entry per file.
+- **Tool cards**: icons, colours, and labels resolve via the canonical name, so an ACP edit card looks identical to a native edit card.
+- **Permissions**: risk classification and auto-approve lists work with both canonical and qualified names; session grants apply to ACP. In `AcceptEdits` mode, ACP edits are auto-approved but still tracked.
+- **Edit tracking**: ACP mutations are detected by protocol kind (`edit`/`write`/`delete`) or a diff block, plus name heuristics; multi-file edits from one call are tracked per file.
+- **History restoration**: stored ACP tool calls are normalised on restore, so cards show correct colours, diffs, and language highlighting.
+- **Mode restrictions**: mode-based tool access applies to ACP tools too; plan mode rejects mutating ACP calls.
+- **Streaming/errors**: progress is aggregated (cumulative or delta), errors surface in cards and turn status, cancellation cleans up live tools.
+
+Kate also exposes client methods to ACP agents: `fs/read_text_file`, `fs/write_text_file`, `terminal/*`, `query_project_graph`, `write_plan_file`, and `suggest`. Results are formatted to match native tool output (including the pagination note on reads).
+
 **Effort level for ACP agents.** Agents that expose a thinking/thought-level selector (Claude Agent, Gemini CLI, …) advertise it as a session config option. The composer's effort button shows the levels the live session advertised; picking one forces it onto the session (`session/set_config_option`) and pins it — an agent that changes its own level is switched back. **Auto** releases control and keeps the agent's default. The forced level is also settable in Settings → Kate AI → AI Providers → ACP Agent → **Effort Level** (editable, so agent-specific ids like `think_hard` can be typed).
 
-Kate also answers three of its own client methods, advertised in the `initialize` capabilities so agents can discover them: `query_project_graph` (the same graph the native agent queries), `write_plan_file` (files the implementation plan in a per-workspace temp file and returns its path, so the agent can point the user at a plan they can follow), and `suggest` (posts a suggestion card with an optional file anchor, so an agent can raise an idea without changing anything).
+Kate also answers its own client methods, advertised in the `initialize` capabilities under the `_kateai/` names the protocol reserves for extensions: `_kateai/query_project_graph` (the same graph the native agent queries), `_kateai/write_plan_file` (files the implementation plan in a per-workspace temp file and returns its path, so the agent can point the user at a plan they can follow), `_kateai/suggest` (posts a suggestion card with an optional file anchor, resolved against the workspace, so an agent can raise an idea without changing anything), `_kateai/ask_user` (asks the user a question and blocks until they answer — the answer is the RPC result, so ACP agents get the same park-the-turn question flow the native `question` tool has; the v2-draft `elicitation/create` method reaches the same UI when the agent offers it), `_kateai/todo_write` / `_kateai/todo_read` (the same checklist the native todo tools drive), and `_kateai/lsp_diagnostics` / `_kateai/lsp_symbols` / `_kateai/lsp_hover` / `_kateai/lsp_definition` / `_kateai/lsp_references` / `_kateai/lsp_code_actions` (the read-only language-server surface, formatted like the native `lsp_*` tools; when no LSP server runs they say so instead of failing). The bare names still work. Your global rules and extra system prompt, and these method names, are sent to the agent once at the start of each session, since agents do not receive Kate's own system prompt.
 
 To use Grok Build: install the Grok CLI, run `grok` once to log in, then set the provider to **ACP** with format **ACP native** and agent **Grok Build**. Other agents: install their CLI (or have `npx` on PATH), complete that agent's login, and pick the matching preset.
+
+**The ACP registry.** Settings → Kate AI → **ACP Registry** lists every agent in the [official ACP registry](https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json). Package agents (`npx`/`uvx`) are launched directly (`npx --yes <package>@<version>`, pinned to the registry version) with no global install, the way Zed does it; binary agents are downloaded, checksum-verified, and unpacked into Kate's data dir. Registry `env` requirements are merged into the agent's environment, per-agent CLI quirks (an `acp` subcommand, sanitizer flags, `--model` support) come from a registry-id-keyed table, and the registry list marks entries with an available update. Kate negotiates the protocol version at `initialize` instead of failing on a mismatch, and supports the v2-draft elicitation channel for asking the user when the agent advertises it.
 
 The model menu fetches live catalogs when the provider supports it; you can still type a model id. Only the selected provider’s key is sent. Keys live in Kate’s config (`KateAI` group).
 
@@ -372,7 +572,7 @@ The model menu fetches live catalogs when the provider supports it; you can stil
 
 ### Project graph
 
-On workspace load the plugin indexes files, symbols, imports, and relationships. The agent queries it with `query_project_graph` (`summary`, `nodes`, `edges`, `dependencies`, `dependents`, `find_related`, `find_path`, `dependency_chain`) so it can map structure before grepping blindly. Node/edge caps and content-preview length are configurable.
+On workspace load the plugin indexes files, symbols, imports, and relationships, writes the first index to `.kateai/project_graph.json`, and regenerates it when file or directory timestamps show the cache is stale. The native system prompt and ACP session notes receive a compact graph summary with workspace-relative paths, languages, line counts, symbols, and dependency edges, so agents can orient themselves before searching. The agent can then query it with `query_project_graph` (`summary`, `nodes`, `edges`, `dependencies`, `dependents`, `find_related`, `find_path`, `dependency_chain`), using a path, name, or node id. Node/edge caps and graph-prompt verbosity are configurable.
 
 ### Configuration surface
 
@@ -478,6 +678,8 @@ The script copies `kateai.so` into `~/Library/Application Support/kate/lib/qt6/p
 
 A Homebrew-built plugin may not load in the Craft-built Kate.app. For a matching ABI, build with [KDE Craft](https://develop.kde.org/docs/getting-started/building/craft/) using `packaging/craft/kateai.py`.
 
+Release macOS assets: `kate-bundle-*-macos-*.zip` is a Craft-built Kate.app with the plugin already installed, `kate-*-macos-*.dmg` is the Craft Kate installer, and `kateai-*-macos-*.zip` contains the plugin alone.
+
 ### Windows
 
 Kate for Windows is a Craft/MSVC build. The plugin has to use the same toolchain.
@@ -506,7 +708,7 @@ install -m 700 build/bin/kf6/ktexteditor/kateai.so ~/.local/lib/qt6/plugins/kf6/
 | --- | --- |
 | Arch / CachyOS / Manjaro | `kate extra-cmake-modules cmake ninja qt6-base ktexteditor kcoreaddons ki18n kxmlgui kconfigwidgets kconfig kwidgetsaddons bubblewrap` |
 | Fedora / Asahi | `kate extra-cmake-modules cmake gcc-c++ ninja-build qt6-qtbase-devel kf6-ktexteditor-devel kf6-kcoreaddons-devel kf6-ki18n-devel kf6-kxmlgui-devel kf6-kconfigwidgets-devel bubblewrap` |
-| Debian / Ubuntu (25.04+) | `kate cmake extra-cmake-modules ninja-build qt6-base-dev libkf6texteditor-dev libkf6coreaddons-dev libkf6i18n-dev libkf6xmlgui-dev libkf6configwidgets-dev libkf6config-dev libkf6widgetaddons-dev bubblewrap` |
+| Debian / Ubuntu (25.04+) | `kate cmake extra-cmake-modules ninja-build qt6-base-dev libkf6texteditor-dev libkf6coreaddons-dev libkf6i18n-dev libkf6xmlgui-dev libkf6configwidgets-dev libkf6config-dev libkf6widgetsaddons-dev bubblewrap` |
 | macOS | Homebrew: `cmake extra-cmake-modules ninja qtbase kcoreaddons ki18n kconfig kconfigwidgets kxmlgui kwidgetsaddons` and cask `kate`; Craft recommended to match Kate.app |
 | Windows | KDE Craft + Kate (MSVC). See `packaging/windows/install.ps1` |
 
@@ -549,11 +751,11 @@ API keys:
 - [Grok / xAI](https://console.x.ai)
 - [OpenAI](https://platform.openai.com/api-keys)
 - [OpenRouter](https://openrouter.ai/keys)
-- OpenAI-compatible — local server URL (Ollama default `http://localhost:11434/v1`)
+- OpenAI-compatible — local server URL (Ollama default `http://localhost:11434/v1`). For Gemini with explicit cache resources, use `https://generativelanguage.googleapis.com/v1beta/openai`; Kate detects the Google host, switches to the native Gemini transport, and manages `cachedContents` for the stable prompt prefix.
 - Claude-compatible — Anthropic or compatible gateway
 - ACP — your ACP server endpoint and API key
 
-Keys are stored in Kate’s config (`KateAI` group). Only the selected provider receives its key.
+Keys are stored through KDE Wallet when it is available. Without a wallet they go to an owner-only `credentials.json` (never the main Kate config); settings report which backend is active. Keys from earlier releases are migrated automatically. Only the selected provider receives its key.
 
 ---
 

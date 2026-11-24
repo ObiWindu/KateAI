@@ -37,12 +37,15 @@ class PermissionBar;
 class PromptEdit;
 class ToolCallWidget;
 class SubtaskWidget;
+class SubtaskDock;
 class SuggestionWidget;
 class QuestionWidget;
 class TodoWidget;
+class InspectorPanel;
 class EditTracker;
 class TurnStatus;
 class AcpBinaryInstaller;
+class VoiceInput;
 
 class ChatWidget : public QWidget
 {
@@ -76,6 +79,7 @@ public:
     void focusPrompt();
     void ask(const QString &text);
     void newChat();
+    bool forkConversation();
     void rebuildTranscript();
     void restoreCurrentTurn(const SessionStore::SessionData &sessionData);
     void updateHistoryButton();
@@ -123,9 +127,32 @@ public:
     PromptEdit *promptEdit() const { return m_prompt; }
     void setCompletionWords(const QStringList &words);
 
+    // Voice prompting: microphone availability check, capture, noise removal,
+    // transcription, and sending to chat.
+    VoiceInput *voiceInput() const { return m_voiceInput; }
+    bool isMicrophoneAvailable() const;
+    void refreshMicrophoneAvailability();
+    void toggleVoicePrompt();
+    void cancelVoicePrompt();
+
     // Announces that the Kate AI workspace switched (another folder was
     // opened in Kate). The notice is pinned to the top of the composer.
     void showWorkspaceNotice(const QString &workspace);
+    // Shows a transient notice (a retry, a failed restore) in the strip above
+    // the composer. Errors stay until dismissed.
+    void showInfoMessage(const QString &message, bool isError);
+    // Plain-text reports opened by ":kateai context" and ":kateai usage".
+    void showContextReport();
+    void showUsageReport();
+    void showPromptReport();
+    void showMemoryReport();
+    void showToolsReport();
+    void showSkillsReport();
+    void showInspector();
+    void showVerificationReport();
+    void showPolicyReport();
+    void showHooksReport();
+    void showTraceReport();
 
     // Modes / MCP / checkpoints, exposed so the view can drive them too.
     void showModeMenu();
@@ -218,7 +245,6 @@ private:
     bool ensureAcpBinaryInstalled(const QString &agentId);
     Settings settingsForAcpAgent(const QString &agentId) const;
     void updateModelSelectorLabel();
-    void showInfoMessage(const QString &message, bool isError);
     void applyInfoBarStyle();
     void applyWorkspaceBannerStyle();
     void saveCurrentConversation();
@@ -248,6 +274,21 @@ private:
     // right past it so the transcript keeps its time order instead of dropping
     // a long-running operation below everything that happened after it.
     void retireIntentWidget(QWidget *widget, QWidget *anchor = nullptr);
+    // Re-applies the quarter-of-the-panel height cap the docked sub-agent cards
+    // live under. Called whenever the panel is resized and whenever a card is
+    // docked, so a card never inherits a stale budget.
+    void applySubtaskHeightBudget();
+    // Approval cards are serialized: the first request is shown, later ones
+    // wait in m_queuedPermissionRequests until the visible decision is made.
+    void enqueuePermissionRequest(const PermissionRequest &request);
+    void presentPermissionRequest(const PermissionRequest &request);
+    void showNextQueuedPermission();
+    void retirePermissionRequest(const QString &toolCallId);
+    // Wires Apply/Discard for one sub-agent card. Used by both the live card
+    // and a card rebuilt from saved history, so a restored worktree patch can
+    // still be applied or discarded.
+    void wireSubtaskWorktreeActions(SubtaskWidget *subtaskWidget);
+    void restoreSubtaskWorktree(SubtaskWidget *subtaskWidget, const SubagentRecord &record);
 
     // --- Suggestion cards ------------------------------------------------------
     // One card per suggestion the agent posted, keyed by the tool call id that
@@ -266,7 +307,12 @@ private:
     // lives in the intent dock while it waits and is retired into the
     // transcript once it does. Keyed by tool call id, like the tool cards.
     void showQuestionCard(const PermissionRequest &request);
-    void clearQuestionCards();
+    // Retires one docked question card, e.g. when a newer question replaced the
+    // parked RPC or the turn stopped.
+    void removeQuestionCard(const QString &toolCallId);
+    // `keepId` is an agent-side ACP question that remains answerable after the
+    // turn ends; every other card is retired.
+    void clearQuestionCards(const QString &keepId = QString());
 
     void submit();
         // True while a tool card is showing its inline approval row.
@@ -275,6 +321,7 @@ private:
     void refreshProviders();
     void refreshModels();
     void updateSendButtonState();
+    void updateVoicePromptUi();
     void updateTokenDisplay();
     void updateThinkingButtonStyle();
     void updateReasoningEffortButton();
@@ -287,6 +334,9 @@ private:
     void syncIndicatorAnimation();
     bool registerThinkingBlock(QWidget *block, QTextBrowser *browser, QPushButton *toggle);
     void applyTranscriptCollapse();
+    // Drop the oldest finished tool cards once a long session keeps more than
+    // the retention cap. Restored history can rebuild them from the session.
+    void pruneOldTranscriptCards();
     void clearTranscriptContents();
     void reflowTranscriptMedia();
     void scheduleStreamHeightUpdate();
@@ -351,7 +401,12 @@ private:
     // Intent dock: sits between the transcript and the permission bar.
     QWidget *m_intentDock = nullptr;
     QVBoxLayout *m_intentDockLayout = nullptr;
+    // The dock's sub-agent slot: tabs over the one live sub-agent card, so
+    // concurrent delegations share a single bounded strip instead of stacking.
+    SubtaskDock *m_subtaskDock = nullptr;
     PromptEdit *m_prompt = nullptr;
+    VoiceInput *m_voiceInput = nullptr;
+    QTimer *m_micRefreshTimer = nullptr;
     TurnStatus *m_turnStatus = nullptr;
     // Tool calls completed in the current turn, shown live in the status strip.
     int m_completedToolCount = 0;
@@ -381,6 +436,10 @@ private:
     QString m_acpAgentModelViewAgentId;
     QString m_acpAgentModelViewAgentName;
     QString m_acpModelsLoading;
+    // Agent whose slash commands the composer is showing. Lets a settings
+    // change keep a live list (the cache may predate it) while an agent switch
+    // still clears the outgoing agent's commands.
+    QString m_acpCommandsAgentId;
     // Effort/thought levels advertised by the live ACP agent, plus the level
     // it last reported as selected. Drives the composer effort button.
     QStringList m_acpEfforts;
@@ -416,6 +475,11 @@ private:
     // the full turn's thinking when the answer text starts; this prefix is
     // what must not be drawn a second time in the later card.
     QString m_thinkingShownEarlierInTurn;
+    // True once the visible answer has started streaming in the current card.
+    // Some providers keep sending reasoning after the first text delta; those
+    // later deltas are buffered but not paced in, so the reasoning and the
+    // answer are never written into the chat at the same time.
+    bool m_answerStarted = false;
     int m_thinkingPacedLength = 0;
     QTimer *m_thinkingPacerTimer = nullptr;
 
@@ -489,6 +553,19 @@ private:
     // Live question cards, keyed by the tool call id that asked them.
     QHash<QString, QuestionWidget *> m_questionWidgets;
     QList<QPointer<QuestionWidget>> m_questionOrder;
+    // The question each question tool asked, keyed by the tool call id. The
+    // card shows it while the question is open; when the tool finishes the
+    // answer takes the body, so the question is folded back in.
+    QHash<QString, QString> m_questionTexts;
+    // A child question's card id -> task id. Answer is routed to the child,
+    // not to the parent's own parked question.
+    QHash<QString, QString> m_subtaskQuestionTaskIds;
+    // Only one approval strip is visible at a time. Concurrent children (or a
+    // parent and a child) queue their requests instead of each new card
+    // cancelling the previous one and leaving its owner parked forever.
+    QList<PermissionRequest> m_queuedPermissionRequests;
+    QString m_activePermissionCallId;
+    QPointer<InspectorPanel> m_inspector;
     // Latest live output per running tool, flushed on a timer so a chatty
     // command does not re-render its card once per chunk.
     QHash<QString, QString> m_pendingProgress;
@@ -502,6 +579,15 @@ private:
     QMenu *m_historyMenu = nullptr;
     QString m_currentConversationId;
     bool m_loadingConversation = false;
+    // True while rebuildTranscript() is creating the history cards. The
+    // readout update that can compact an over-full history must not run then:
+    // it would replace the messages still being rendered.
+    bool m_renderingTranscript = false;
+    // The transcript card count at which pruneOldTranscriptCards() should next
+    // run. Pruning on every append above the threshold rescanned the whole
+    // transcript each time and made restoring a long conversation quadratic;
+    // after a prune the next check waits for a batch of new cards.
+    int m_nextTranscriptPrune = 512;
     QTimer *m_sessionSaveTimer = nullptr;
 
     // Global override of the tool-card budget. Auto means the budget decides;

@@ -12,6 +12,7 @@ Usage: mock_llm_server.py <port-file>
 """
 
 import json
+import os
 import sys
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -57,6 +58,18 @@ STALLED = False
 WROTE = False
 STREAMED = False
 THOUGHT = False
+# Sent to make the model invoke a context:fork skill. The skill body carries
+# the child marker so the next request can be recognised as the forked child.
+SKILL_FORK_MARKER = "Run the fork skill."
+SKILL_CHILD_MARKER = "SKILL-CHILD-QUESTION"
+SKILL_WRITE_MARKER = "Run the fork write skill."
+SKILL_WRITE_CHILD_MARKER = "SKILL-WRITE-CHILD"
+SKILL_PATH_MARKER = "Run the path-scoped skill."
+SKILL_FORKED = False
+SKILL_ASKED = False
+SKILL_WRITE_FORKED = False
+SKILL_WROTE = False
+SKILL_PATH_ATTEMPTED = False
 
 
 def sse(payload):
@@ -125,6 +138,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         global DELEGATED, ASKED, ASKED_EMPTY, SUGGESTED, STALLED, WROTE, STREAMED, THOUGHT
+        global SKILL_FORKED, SKILL_ASKED, SKILL_WRITE_FORKED, SKILL_WROTE
+        global SKILL_PATH_ATTEMPTED
         length = int(self.headers.get("Content-Length", "0"))
         try:
             body = json.loads(self.rfile.read(length) or b"{}")
@@ -151,6 +166,11 @@ class Handler(BaseHTTPRequestHandler):
         is_write = WRITE_MARKER in last_user and not WROTE
         is_stream = STREAM_MARKER in last_user and not STREAMED
         is_think = THINK_MARKER in last_user and not THOUGHT
+        is_skill_fork = SKILL_FORK_MARKER in last_user and not SKILL_FORKED
+        is_skill_child = SKILL_CHILD_MARKER in last_user and not SKILL_ASKED
+        is_skill_write_fork = SKILL_WRITE_MARKER in last_user and not SKILL_WRITE_FORKED
+        is_skill_write_child = SKILL_WRITE_CHILD_MARKER in last_user and not SKILL_WROTE
+        is_skill_path = SKILL_PATH_MARKER in last_user and not SKILL_PATH_ATTEMPTED
         # Anthropic puts the system prompt at the top level, so its requests are
         # the ones without a system-role message in the array.
         is_anthropic = "anthropic-version" in self.headers
@@ -197,6 +217,29 @@ class Handler(BaseHTTPRequestHandler):
             who = "A" if "agent-a" in last_user else "B"
             emit(chunk_text(f"[sub-agent {who}] finished its share of the work."))
             emit(sse({"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}))
+        elif is_skill_fork:
+            SKILL_FORKED = True
+            respond("skill", "call_skill", {"name": "fork-ask", "task": "Ask before proceeding."})
+        elif is_skill_child:
+            SKILL_ASKED = True
+            respond(
+                "question",
+                "call_skill_q",
+                {"question": "Proceed with the forked skill?", "options": ["Yes", "No"]},
+            )
+        elif is_skill_write_fork:
+            SKILL_WRITE_FORKED = True
+            respond("skill", "call_skill_write", {"name": "fork-write", "task": "Write the note."})
+        elif is_skill_write_child:
+            SKILL_WROTE = True
+            respond(
+                "write_file",
+                "call_skill_write_file",
+                {"path": "skill-note.txt", "content": "written by the forked skill"},
+            )
+        elif is_skill_path:
+            SKILL_PATH_ATTEMPTED = True
+            respond("skill", "call_skill_path", {"name": "path-fork"})
         elif STALL_MARKER in last_user and not STALLED:
             STALLED = True
             # A command long enough that the stop button can be pressed while
@@ -298,8 +341,17 @@ def main():
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     server.daemon_threads = True
     if len(sys.argv) > 1:
-        with open(sys.argv[1], "w", encoding="utf-8") as handle:
-            handle.write(str(server.server_address[1]))
+        # Write the port atomically: create the file only once its contents are
+        # fully flushed, so a test that waits for the file to appear never reads
+        # a half-written (empty) port and parses it as 0.
+        port_path = sys.argv[1]
+        port_value = str(server.server_address[1])
+        tmp_path = port_path + ".tmp"
+        with open(tmp_path, "w", encoding="utf-8") as handle:
+            handle.write(port_value)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_path, port_path)
     server.serve_forever()
 
 

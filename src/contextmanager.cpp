@@ -5,11 +5,14 @@
 
 #include "types.h"
 #include "contextmanager.h"
+#include "graph/projectgraph.h"
+#include "harness/models.h"
 
 #include <KLocalizedString>
 
 #include <QJsonDocument>
 #include <QRegularExpression>
+#include <QDir>
 #include <limits>
 
 using namespace Qt::Literals::StringLiterals;
@@ -26,7 +29,7 @@ constexpr int kCharsPerToken = 4;
 constexpr int kTokensPerMessageOverhead = 4;
 constexpr int kDefaultContextWindow = 32768;
 constexpr int kDefaultReserve = 4096;
-constexpr int kDefaultSummaryRequestChars = 280;
+constexpr int kDefaultSummaryRequestChars = 600;
 constexpr int kMinBudget = 512;
 
 int tokensOf(const ChatMessage &message)
@@ -69,7 +72,8 @@ int safeBoundary(const QList<ChatMessage> &history, int start)
 QString oneLine(const QString &text, int limit)
 {
     QString flat = text.simplified();
-    flat.replace(QRegularExpression(QStringLiteral("[\\r\\n]+")), QStringLiteral(" "));
+    static const QRegularExpression newlines(QStringLiteral("[\\r\\n]+"));
+    flat.replace(newlines, QStringLiteral(" "));
     if (limit > 0 && flat.length() > limit) {
         flat = truncateSafe(flat, limit) + QStringLiteral("…");
     }
@@ -104,11 +108,25 @@ int estimateTokens(const QString &text)
     if (text.isEmpty()) {
         return 0;
     }
+    const int charCount = text.length();
+    // Fast path for the overwhelmingly common ASCII/code case: UTF-8 bytes
+    // equal UTF-16 code units, so no temporary QByteArray is needed. The
+    // previous implementation allocated a UTF-8 copy of every message on
+    // every token estimate, which is expensive for a long transcript.
+    bool ascii = true;
+    for (const QChar c : text) {
+        if (c.unicode() > 0x7f) {
+            ascii = false;
+            break;
+        }
+    }
+    if (ascii) {
+        return qMax(1, charCount / 4);
+    }
     // Better token estimation: use UTF-8 byte count / 4 for non-ASCII, chars / 4 for ASCII
     // This is more accurate for mixed content
     const QByteArray utf8 = text.toUtf8();
     const int byteCount = utf8.size();
-    const int charCount = text.length();
     // If mostly ASCII (1 byte per char), use char count. If multibyte, use byte count.
     if (byteCount <= charCount * 1.2) {
         return qMax(1, charCount / 4);
@@ -128,15 +146,17 @@ int estimateTokens(const QList<ChatMessage> &messages)
     return (int)total;
 }
 
+// Token estimation lives here, but the window table belongs to the model
+// profile registry so the inspector, request shaping, and context manager all
+// agree. A model Kate does not recognise keeps the conservative 32k fallback.
 int contextWindowFor(const QString &model)
 {
-    // Deliberately no per-model table: it went stale on every model release
-    // and could not know about new ones, and an overestimated window fails
-    // the request outright. The conservative default errs the safe way (it
-    // compacts a little early); settings.contextWindow or the provider
-    // catalogue overrides it. test_contextmanager pins this behaviour.
-    Q_UNUSED(model)
-    return kDefaultContextWindow;
+    return contextWindowFor(Provider::OpenAICompatible, model);
+}
+
+int contextWindowFor(Provider provider, const QString &model)
+{
+    return ModelProfiles::contextWindow(provider, model);
 }
 
 QString summaryHeader()
@@ -150,15 +170,19 @@ namespace
 
 bool isSummary(const ChatMessage &message)
 {
-    return message.role == ChatMessage::Role::User && message.content.startsWith(summaryHeader());
+    return message.role == ChatMessage::Role::User
+        && (message.name == u"context_summary"_s
+            || message.content.startsWith(summaryHeader()));
 }
 
-QString buildSummary(const QList<ChatMessage> &dropped, int requestChars)
+QString buildSummary(const QList<ChatMessage> &dropped, int requestChars, ProjectGraph *projectGraph = nullptr)
 {
     QStringList userRequests;
     QStringList files;
+    QSet<QString> fileSet;
     QStringList tools;
     QStringList outcomes;
+    QStringList failures;
     int rejected = 0;
 
     for (const ChatMessage &message : dropped) {
@@ -199,8 +223,11 @@ QString buildSummary(const QList<ChatMessage> &dropped, int requestChars)
                 if (path.isEmpty()) {
                     path = arguments.value(u"TargetFile"_s).toString();
                 }
-                if (!path.isEmpty() && !files.contains(path)) {
-                    files << path;
+                if (!path.isEmpty()) {
+                    if (!fileSet.contains(path)) {
+                        fileSet.insert(path);
+                        files << path;
+                    }
                 }
                 if (!toolName.isEmpty() && !tools.contains(toolName)) {
                     tools << toolName;
@@ -221,6 +248,23 @@ QString buildSummary(const QList<ChatMessage> &dropped, int requestChars)
                 || message.content.startsWith(QLatin1String("Tool denied"))) {
                 ++rejected;
             }
+            // Preserve the last few failures/constraints. Repeating a command
+            // whose real error was compacted away is exactly the loop this
+            // summary exists to prevent.
+            {
+                const QString text = message.content.trimmed();
+                if (text.startsWith(QLatin1String("Error"))
+                    || text.startsWith(QLatin1String("Failed"))
+                    || text.startsWith(QLatin1String("Tool rejected"))
+                    || text.startsWith(QLatin1String("Tool denied"))
+                    || text.contains(QLatin1String("timed out"), Qt::CaseInsensitive)
+                    || text.contains(QLatin1String("exit code "), Qt::CaseInsensitive)) {
+                    failures.append(oneLine(text, 300));
+                    while (failures.size() > 3) {
+                        failures.removeFirst();
+                    }
+                }
+            }
             break;
         case ChatMessage::Role::System:
             break;
@@ -238,24 +282,86 @@ QString buildSummary(const QList<ChatMessage> &dropped, int requestChars)
     }
     if (!files.isEmpty()) {
         QStringList shown = files;
-        if (shown.size() > 40) {
-            shown = shown.mid(0, 40);
-            shown << QStringLiteral("… (%1 more)").arg(files.size() - 40);
+        if (shown.size() > 60) {
+            shown = shown.mid(0, 60);
+            shown << QStringLiteral("… (%1 more)").arg(files.size() - 60);
         }
         lines << QStringLiteral("\nFiles touched:");
         lines << QStringLiteral("  %1").arg(shown.join(QStringLiteral(", ")));
     }
+    if (projectGraph && projectGraph->getNodeCount() > 0 && !files.isEmpty()) {
+        // Add related files from project graph to preserve important context
+        QSet<QString> related;
+        for (const QString &f : files) {
+            if (related.size() >= 30) break;
+            // Try to find node by path
+            GraphNode *node = projectGraph->findNodeByPath(f);
+            if (!node) {
+                // Try to find by ID or partial match
+                const QList<GraphNode*> all = projectGraph->getAllNodes();
+                for (GraphNode *n : all) {
+                    if (n && (n->path.endsWith(f) || f.endsWith(QFileInfo(n->path).fileName()))) {
+                        node = n;
+                        break;
+                    }
+                }
+            }
+            if (node) {
+                // Add dependencies/imports
+                const QList<GraphEdge*> edges = projectGraph->getEdgesFrom(node->id);
+                for (GraphEdge *e : edges) {
+                    if (e && e->targetId != node->id) {
+                        GraphNode *t = projectGraph->getNode(e->targetId);
+                        if (t && !fileSet.contains(t->path) && !related.contains(t->path)) {
+                            related.insert(t->path);
+                            if (related.size() >= 30) break;
+                        }
+                    }
+                }
+                const QList<GraphEdge*> inEdges = projectGraph->getEdgesTo(node->id);
+                for (GraphEdge *e : inEdges) {
+                    if (e && e->sourceId != node->id) {
+                        GraphNode *s = projectGraph->getNode(e->sourceId);
+                        if (s && !fileSet.contains(s->path) && !related.contains(s->path)) {
+                            related.insert(s->path);
+                            if (related.size() >= 30) break;
+                        }
+                    }
+                }
+            }
+        }
+        if (!related.isEmpty()) {
+            QStringList relList;
+            for (const QString &path : related) {
+                relList.append(projectGraph->displayPath(path));
+            }
+            relList.sort();
+            if (relList.size() > 20) {
+                relList = relList.mid(0, 20);
+                relList << QStringLiteral("…");
+            }
+            lines << QStringLiteral("\nRelated files (from project graph):");
+            lines << QStringLiteral("  %1").arg(relList.join(QStringLiteral(", ")));
+        }
+    }
     if (!tools.isEmpty()) {
         lines << QStringLiteral("\nTools used: %1").arg(tools.join(QStringLiteral(", ")));
     }
-    // Only the last two outcomes are reported.
-    while (outcomes.size() > 2) {
+    // Keep the last few outcomes so the compacted summary retains where the work
+    // got to. Four is a reasonable balance between fidelity and size.
+    while (outcomes.size() > 4) {
         outcomes.removeFirst();
     }
     if (!outcomes.isEmpty()) {
         lines << QStringLiteral("\nWhere it got to:");
         for (int i = 0; i < outcomes.size(); ++i) {
             lines << QStringLiteral("  %1. %2").arg(i + 1).arg(outcomes.at(i));
+        }
+    }
+    if (!failures.isEmpty()) {
+        lines << QStringLiteral("\nRecent errors or constraints:");
+        for (const QString &failure : failures) {
+            lines << QStringLiteral("  - %1").arg(failure);
         }
     }
     if (rejected > 0) {
@@ -413,7 +519,9 @@ QList<ChatMessage> build(const QList<ChatMessage> &history, const Options &optio
     if (keepFrom > bodyStart) {
         ChatMessage summary;
         summary.role = ChatMessage::Role::User;
-        summary.content = buildSummary(history.mid(bodyStart, keepFrom - bodyStart), requestChars);
+        summary.name = u"context_summary"_s;
+        summary.content = buildSummary(history.mid(bodyStart, keepFrom - bodyStart), requestChars,
+                                       options.useProjectGraph ? options.projectGraph : nullptr);
         result.append(summary);
     }
     for (int i = keepFrom; i < history.size(); ++i) {

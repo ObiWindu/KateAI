@@ -12,15 +12,19 @@
 #include "chattheme.h"
 #include "sessionstore.h"
 #include "sessionstoreisolation.h"
+#include "subtaskwidget.h"
 #include "todowidget.h"
 #include "toolcallwidget.h"
 #include "types.h"
 
 #include <QApplication>
+#include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLabel>
+#include <QLayout>
+#include <QPushButton>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QTextBrowser>
@@ -62,6 +66,32 @@ QWidget *cardForToolCallId(ChatWidget &widget, const QString &toolCallId)
         }
     }
     return nullptr;
+}
+
+QString transcriptText(ChatWidget &widget)
+{
+    QString text;
+    for (const QTextBrowser *browser : widget.findChildren<QTextBrowser *>()) {
+        text += browser->toPlainText();
+        text += u'\n';
+    }
+    for (const QLabel *label : widget.findChildren<QLabel *>()) {
+        if (!label->text().isEmpty()) {
+            text += label->text();
+            text += u'\n';
+        }
+    }
+    return text;
+}
+
+bool messagesContain(const QList<ChatMessage> &messages, const QString &needle)
+{
+    for (const ChatMessage &message : messages) {
+        if (message.content.contains(needle)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 QJsonObject planStep(const QString &id, const QString &description)
@@ -196,6 +226,98 @@ private Q_SLOTS:
                  qPrintable(QStringLiteral("edit_file details: %1").arg(editDetails->toPlainText())));
     }
 
+    // Closing and reopening the editor destroys and recreates the chat widget.
+    // The transcript has to come back from the conversation the widget saved on
+    // teardown, not from an empty agent state.
+    void testConversationSurvivesAWidgetTeardownAndRestore()
+    {
+        const QString conversationId = u"conv-restart"_s;
+
+        ChatMessage user;
+        user.role = ChatMessage::Role::User;
+        user.content = u"inspect the parser"_s;
+
+        ChatMessage assistant;
+        assistant.role = ChatMessage::Role::Assistant;
+        assistant.content = u"The parser looks fine."_s;
+        QJsonArray calls;
+        calls.append(toolCall(u"restart-read"_s, u"read_file"_s, {{u"path"_s, u"src/parser.cpp"_s}}));
+        assistant.toolCalls = calls;
+
+        SessionStore::SessionData data;
+        data.messages = {user, assistant,
+                         toolResultMessage(u"restart-read"_s, u"read_file"_s, u"int parse() { return 0; }"_s)};
+
+        {
+            ChatWidget widget;
+            widget.resize(900, 700);
+            widget.show();
+            widget.setCurrentConversationId(conversationId);
+            widget.agent()->restoreSession(data);
+            widget.rebuildTranscript();
+            QTest::qWait(40);
+        }
+
+        const SessionStore::SessionData reloaded = SessionStore::loadConversation(conversationId);
+        QVERIFY2(!reloaded.messages.isEmpty(), "the widget did not save its transcript on teardown");
+
+        ChatWidget reopened;
+        reopened.resize(900, 700);
+        reopened.show();
+        reopened.setCurrentConversationId(conversationId);
+        reopened.agent()->restoreSession(reloaded);
+        reopened.rebuildTranscript();
+        QTest::qWait(60);
+
+        QVERIFY2(transcriptText(reopened).contains(u"inspect the parser"_s),
+                 qPrintable(transcriptText(reopened)));
+        QVERIFY2(transcriptText(reopened).contains(u"The parser looks fine."_s),
+                 qPrintable(transcriptText(reopened)));
+        auto *card = qobject_cast<ToolCallWidget *>(cardForToolCallId(reopened, u"restart-read"_s));
+        QVERIFY2(card, "the tool card was lost across the restart");
+        auto *details = card->findChild<QTextBrowser *>(u"toolDetails"_s);
+        QVERIFY(details);
+        QVERIFY2(details->toPlainText().contains(u"int parse() { return 0; }"_s),
+                 qPrintable(details->toPlainText()));
+    }
+
+    void testApplyPatchCardKeepsItsDiff()
+    {
+        ChatWidget widget;
+        widget.resize(900, 700);
+        widget.show();
+
+        ChatMessage user;
+        user.role = ChatMessage::Role::User;
+        user.content = u"apply the patch"_s;
+
+        const QString patch = u"--- a/new.txt\n+++ b/new.txt\n@@ -0,0 +1,2 @@\n+hello\n+world\n"_s;
+        ChatMessage assistant;
+        assistant.role = ChatMessage::Role::Assistant;
+        assistant.content = QString();
+        QJsonArray calls;
+        calls.append(toolCall(u"call-patch"_s, u"apply_patch"_s, {{u"patch"_s, patch}}));
+        assistant.toolCalls = calls;
+
+        SessionStore::SessionData data;
+        data.messages = {user, assistant,
+                         toolResultMessage(u"call-patch"_s, u"apply_patch"_s, u"Applied patch to 1 file(s):\npatched new.txt"_s)};
+        SessionStore::saveConversation(u"conv-patch"_s, data, u"Patch chat"_s, 50);
+
+        widget.setCurrentConversationId(SessionStore::createNewConversation());
+        widget.switchToConversation(u"conv-patch"_s);
+        QTest::qWait(60);
+
+        auto *card = qobject_cast<ToolCallWidget *>(cardForToolCallId(widget, u"call-patch"_s));
+        QVERIFY2(card, "apply_patch card missing after the switch");
+        auto *diff = card->findChild<QTextBrowser *>(u"toolDiff"_s);
+        QVERIFY(diff);
+        QVERIFY2(diff->toPlainText().contains(u"hello"_s),
+                 qPrintable(QStringLiteral("apply_patch diff: %1").arg(diff->toPlainText())));
+        QVERIFY2(card->styleSheet().contains(ChatTheme::toolColor(u"apply_patch"_s)),
+                 qPrintable(card->styleSheet()));
+    }
+
     // ACP agents report tool results as they finish, while the assistant
     // message that declares the tool calls is only appended when the whole
     // prompt ends. Stored ACP conversations therefore carry the Tool results
@@ -271,6 +393,232 @@ private Q_SLOTS:
                  qPrintable(termCard->styleSheet()));
     }
 
+    // A reconstructed transcript must put sub-agents that already reported
+    // back into the thread. Recreating every one of them as a docked card left
+    // old, finished sub-agents pinned above the composer and the intent dock
+    // on screen for a conversation where nothing was running.
+    void testFinishedSubAgentCardsRestoreIntoTheTranscript()
+    {
+        ChatWidget widget;
+        widget.resize(900, 700);
+        widget.show();
+
+        ChatMessage user;
+        user.role = ChatMessage::Role::User;
+        user.content = u"delegate the parser work"_s;
+
+        ChatMessage assistant;
+        assistant.role = ChatMessage::Role::Assistant;
+        assistant.content = u"Both agents reported back."_s;
+        QJsonArray calls;
+        calls.append(toolCall(u"call-sub"_s, u"new_task"_s,
+                              {{u"description"_s, u"Review the parser"_s}, {u"agent"_s, u"reviewer"_s}}));
+        assistant.toolCalls = calls;
+
+        SessionStore::SessionData data;
+        data.messages = {user, assistant,
+                         toolResultMessage(u"call-sub"_s, u"new_task"_s,
+                                           u"The parser looks correct."_s)};
+        SessionStore::saveConversation(u"conv-subtask"_s, data, u"Delegation chat"_s, 50);
+
+        widget.setCurrentConversationId(SessionStore::createNewConversation());
+        widget.switchToConversation(u"conv-subtask"_s);
+        QTest::qWait(60);
+
+        const auto agents = widget.findChildren<SubtaskWidget *>();
+        QCOMPARE(agents.size(), 1);
+        SubtaskWidget *agent = agents.first();
+        QVERIFY2(!agent->isRunning(), "a restored sub-agent card was recreated as running");
+
+        bool showsResult = false;
+        for (const QTextBrowser *browser : agent->findChildren<QTextBrowser *>()) {
+            if (browser->isVisibleTo(agent)
+                && browser->toPlainText().contains(u"The parser looks correct."_s)) {
+                showsResult = true;
+            }
+        }
+        QVERIFY2(showsResult, "the restored sub-agent card lost its result");
+
+        QWidget *dock = widget.findChild<QWidget *>(u"intentDock"_s);
+        QVERIFY(dock);
+        bool insideDock = false;
+        for (QWidget *parent = agent->parentWidget(); parent; parent = parent->parentWidget()) {
+            if (parent == dock) {
+                insideDock = true;
+                break;
+            }
+        }
+        QVERIFY2(!insideDock, "a finished sub-agent was restored into the intent dock");
+        QVERIFY2(agent->parentWidget() && agent->parentWidget()->layout()
+                     && agent->parentWidget()->layout()->indexOf(agent) >= 0,
+                 "the restored sub-agent never made it into the transcript");
+        QVERIFY2(!dock->isVisible(), "the intent dock is on screen with no sub-agent running");
+    }
+
+    // A saved transcript can carry a delegation whose result was never
+    // persisted: Kate closed mid-run, or the call survives only in the display
+    // transcript after the model history was compacted. A reload has no child
+    // loop behind it, so recreating it in the intent dock left the dock on
+    // screen at launch with a card that could never finish.
+    void testConcurrentApprovalsAreQueuedInsteadOfCancelled()
+    {
+        ChatWidget widget;
+        widget.resize(900, 700);
+        widget.show();
+
+        PermissionRequest first;
+        first.toolCallId = u"subtask:agent-a:call-1"_s;
+        first.toolName = u"write_file"_s;
+        first.path = u"a.txt"_s;
+        first.summary = u"Write a.txt"_s;
+        first.risk = ToolRisk::Write;
+
+        PermissionRequest second = first;
+        second.toolCallId = u"subtask:agent-b:call-2"_s;
+        second.path = u"b.txt"_s;
+        second.summary = u"Write b.txt"_s;
+
+        Q_EMIT widget.agent()->permissionNeeded(first);
+        Q_EMIT widget.agent()->permissionNeeded(second);
+
+        auto *firstCard = qobject_cast<ToolCallWidget *>(cardForToolCallId(widget, first.toolCallId));
+        QVERIFY2(firstCard, "the first approval card was not created");
+        QVERIFY2(firstCard->isAwaitingApproval(),
+                 "a second child's request cancelled the visible approval");
+        QVERIFY2(!cardForToolCallId(widget, second.toolCallId),
+                 "the second request was shown while the first was still pending");
+
+        // If the first child is cancelled, the queued request must take its
+        // place instead of staying invisible forever.
+        Q_EMIT widget.agent()->permissionCancelled(first.toolCallId);
+        QTest::qWait(20);
+        auto *secondCard = qobject_cast<ToolCallWidget *>(cardForToolCallId(widget, second.toolCallId));
+        QVERIFY2(secondCard, "the queued approval never reached the dock");
+        QVERIFY(secondCard->isAwaitingApproval());
+
+        Q_EMIT widget.agent()->permissionCancelled(second.toolCallId);
+        QTest::qWait(20);
+        QVERIFY(!secondCard->isAwaitingApproval());
+    }
+
+    void testSavedWorktreePatchRestoresItsActions()
+    {
+        QTemporaryDir patches;
+        QVERIFY(patches.isValid());
+        const QString patchPath = patches.filePath(u"agent.patch"_s);
+        QFile patchFile(patchPath);
+        QVERIFY(patchFile.open(QIODevice::WriteOnly | QIODevice::Text));
+        patchFile.write("diff --git a/a.txt b/a.txt\n");
+        patchFile.close();
+
+        ChatWidget widget;
+        widget.resize(900, 700);
+        widget.show();
+
+        ChatMessage user;
+        user.role = ChatMessage::Role::User;
+        user.content = u"delegate in a worktree"_s;
+        ChatMessage assistant;
+        assistant.role = ChatMessage::Role::Assistant;
+        assistant.content = u"Done."_s;
+        QJsonArray calls;
+        calls.append(toolCall(u"call-sub-worktree"_s, u"new_task"_s,
+                              {{u"description"_s, u"Review the parser"_s},
+                               {u"agent"_s, u"reviewer"_s},
+                               {u"isolation"_s, u"worktree"_s}}));
+        assistant.toolCalls = calls;
+
+        QJsonObject record;
+        record.insert(u"taskId"_s, u"call-sub-worktree"_s);
+        record.insert(u"agentId"_s, u"reviewer"_s);
+        record.insert(u"agentName"_s, u"Reviewer"_s);
+        record.insert(u"status"_s, u"ok"_s);
+        record.insert(u"summary"_s, u"Reviewed in isolation."_s);
+        record.insert(u"isolation"_s, u"worktree"_s);
+        record.insert(u"patchPath"_s, patchPath);
+        record.insert(u"filesChanged"_s, QJsonArray{u"a.txt"_s});
+
+        SessionStore::SessionData data;
+        data.messages = {user, assistant,
+                         toolResultMessage(u"call-sub-worktree"_s, u"new_task"_s,
+                                           u"Reviewed in isolation."_s)};
+        data.subagents.append(record);
+        SessionStore::saveConversation(u"conv-subtask-worktree"_s, data,
+                                       u"Worktree chat"_s, 50);
+
+        widget.setCurrentConversationId(SessionStore::createNewConversation());
+        widget.switchToConversation(u"conv-subtask-worktree"_s);
+        QTest::qWait(60);
+
+        const auto agents = widget.findChildren<SubtaskWidget *>();
+        QCOMPARE(agents.size(), 1);
+        SubtaskWidget *agent = agents.first();
+        auto *apply = agent->findChild<QPushButton *>(u"subtaskApplyWorktree"_s);
+        auto *discard = agent->findChild<QPushButton *>(u"subtaskDiscardWorktree"_s);
+        QVERIFY2(apply && !apply->isHidden(), "the saved patch lost its Apply action");
+        QVERIFY2(discard && !discard->isHidden(), "the saved patch lost its Discard action");
+
+        discard->click();
+        QTRY_VERIFY(apply->isHidden());
+        QVERIFY(widget.agent()->subagent(u"call-sub-worktree"_s).discarded);
+    }
+
+    void testSubAgentWithoutALiveRunRestoresIntoTheTranscript()
+    {
+        ChatWidget widget;
+        widget.resize(900, 700);
+        widget.show();
+
+        ChatMessage user;
+        user.role = ChatMessage::Role::User;
+        user.content = u"delegate and close Kate"_s;
+
+        ChatMessage assistant;
+        assistant.role = ChatMessage::Role::Assistant;
+        assistant.content = QString();
+        QJsonArray calls;
+        calls.append(toolCall(u"call-orphan"_s, u"new_task"_s,
+                              {{u"description"_s, u"Review the parser"_s}, {u"agent"_s, u"reviewer"_s}}));
+        assistant.toolCalls = calls;
+
+        // The model history was compacted past the call, so restoreSession()
+        // has nothing to repair; only the display transcript remembers it.
+        ChatMessage summary;
+        summary.role = ChatMessage::Role::User;
+        summary.name = u"context_summary"_s;
+        summary.content = u"[Earlier conversation was compacted.]"_s;
+
+        SessionStore::SessionData data;
+        data.messages = {summary};
+        data.transcript = {user, assistant};
+        SessionStore::saveConversation(u"conv-orphan-sub"_s, data, u"Orphan delegation"_s, 50);
+
+        widget.setCurrentConversationId(SessionStore::createNewConversation());
+        widget.switchToConversation(u"conv-orphan-sub"_s);
+        QTest::qWait(60);
+
+        const auto agents = widget.findChildren<SubtaskWidget *>();
+        QCOMPARE(agents.size(), 1);
+        SubtaskWidget *agent = agents.first();
+        QVERIFY2(!agent->isRunning(), "a sub-agent with no live run was restored as running");
+
+        QWidget *dock = widget.findChild<QWidget *>(u"intentDock"_s);
+        QVERIFY(dock);
+        QVERIFY2(dock->isHidden(), "the intent dock opened for a sub-agent that is not running");
+
+        bool insideDock = false;
+        for (QWidget *parent = agent->parentWidget(); parent; parent = parent->parentWidget()) {
+            if (parent == dock) {
+                insideDock = true;
+                break;
+            }
+        }
+        QVERIFY2(!insideDock, "an orphaned sub-agent was docked above the composer");
+        QVERIFY2(agent->parentWidget() && agent->parentWidget()->layout()
+                     && agent->parentWidget()->layout()->indexOf(agent) >= 0,
+                 "the orphaned sub-agent never made it into the transcript");
+    }
+
     void testARestoredAnswerIsNotShownTwice()
     {
         // The snapshot of an unfinished turn holds the text of the answer, and
@@ -304,6 +652,102 @@ private Q_SLOTS:
             }
         }
         QCOMPARE(answers, 1);
+    }
+
+    // Providers and sub-agents reuse ids ("call_0", a retried delegation).
+    // Keying restored cards by id alone collapsed several calls into one card
+    // and kept only the last output, so the history looked like work vanished.
+    void testRepeatedToolCallIdsRestoreAsSeparateCards()
+    {
+        ChatWidget widget;
+        widget.resize(900, 700);
+        widget.show();
+
+        ChatMessage user;
+        user.role = ChatMessage::Role::User;
+        user.content = u"read and list"_s;
+
+        ChatMessage assistant;
+        assistant.role = ChatMessage::Role::Assistant;
+        assistant.content = QString();
+        QJsonArray calls;
+        calls.append(toolCall(u"call-0"_s, u"read_file"_s, {{u"path"_s, u"src/parser.cpp"_s}}));
+        calls.append(toolCall(u"call-0"_s, u"bash"_s, {{u"command"_s, u"ls -la"_s}}));
+        assistant.toolCalls = calls;
+
+        SessionStore::SessionData data;
+        data.messages = {user, assistant,
+                         toolResultMessage(u"call-0"_s, u"read_file"_s, u"parser contents"_s),
+                         toolResultMessage(u"call-0"_s, u"bash"_s, u"total 0\nfile1\n"_s)};
+        SessionStore::saveConversation(u"conv-repeat-id"_s, data, u"Repeated ids"_s, 50);
+
+        widget.setCurrentConversationId(SessionStore::createNewConversation());
+        widget.switchToConversation(u"conv-repeat-id"_s);
+        QTest::qWait(60);
+
+        const auto cards = widget.findChildren<ToolCallWidget *>();
+        QCOMPARE(cards.size(), 2);
+
+        QStringList titles;
+        QStringList details;
+        for (const ToolCallWidget *card : cards) {
+            if (const auto *title = card->findChild<QLabel *>(u"toolTitle"_s)) {
+                titles << title->text();
+            }
+            if (const auto *body = card->findChild<QTextBrowser *>(u"toolDetails"_s)) {
+                details << body->toPlainText();
+            }
+        }
+        const QString allTitles = titles.join(u'\n');
+        const QString allDetails = details.join(u'\n');
+        QVERIFY2(allTitles.contains(u"src/parser.cpp"_s), qPrintable(allTitles));
+        QVERIFY2(allTitles.contains(u"ls -la"_s), qPrintable(allTitles));
+        QVERIFY2(allDetails.contains(u"parser contents"_s), qPrintable(allDetails));
+        QVERIFY2(allDetails.contains(u"file1"_s), qPrintable(allDetails));
+    }
+
+    // A turn saved while a sub-agent was still running gets a synthetic
+    // cancelled result on restore. That is not a failure: the card has to say
+    // "Cancelled" and use the muted state, not paint a red error over a run the
+    // user deliberately stopped.
+    void testCancelledSubAgentRestoresAsCancelled()
+    {
+        ChatWidget widget;
+        widget.resize(900, 700);
+        widget.show();
+
+        ChatMessage user;
+        user.role = ChatMessage::Role::User;
+        user.content = u"delegate and stop"_s;
+
+        ChatMessage assistant;
+        assistant.role = ChatMessage::Role::Assistant;
+        assistant.content = QString();
+        QJsonArray calls;
+        calls.append(toolCall(u"call-stop"_s, u"new_task"_s,
+                              {{u"description"_s, u"Review the parser"_s}, {u"agent"_s, u"reviewer"_s}}));
+        assistant.toolCalls = calls;
+
+        SessionStore::SessionData data;
+        data.messages = {user, assistant,
+                         toolResultMessage(u"call-stop"_s, u"new_task"_s,
+                                           u"The tool call was cancelled before it ran."_s)};
+        SessionStore::saveConversation(u"conv-cancelled-sub"_s, data, u"Cancelled delegation"_s, 50);
+
+        widget.setCurrentConversationId(SessionStore::createNewConversation());
+        widget.switchToConversation(u"conv-cancelled-sub"_s);
+        QTest::qWait(60);
+
+        const auto agents = widget.findChildren<SubtaskWidget *>();
+        QCOMPARE(agents.size(), 1);
+        SubtaskWidget *agent = agents.first();
+        QVERIFY2(!agent->isRunning(), "a cancelled restored sub-agent must not spin");
+        auto *status = agent->findChild<QLabel *>(u"subtaskStatus"_s);
+        QVERIFY(status);
+        QVERIFY2(status->text().contains(u"Cancelled"_s), qPrintable(status->text()));
+        auto *caption = agent->findChild<QLabel *>(u"subtaskCaption"_s);
+        QVERIFY(caption);
+        QVERIFY2(caption->text() == u"Cancelled"_s, qPrintable(caption->text()));
     }
 
     void testPlanDockResetsWithTheConversation()
@@ -363,6 +807,152 @@ private Q_SLOTS:
         // showTodoList() honours the "show plan as checklist" setting, so the
         // dock is back exactly when that setting says it should be.
         QCOMPARE(todo->isVisible(), widget.settings().showPlanAsChecklist);
+    }
+
+    void testRestoreRendersTheWholeHistoryWhenTheContextIsFull()
+    {
+        // A restored conversation can already be at its context limit, and the
+        // readout update that follows folds it for the next request. That used
+        // to run while the transcript was still being rebuilt: the rebuild
+        // loop continued inside the compacted history and stopped early, so
+        // everything after the first user card -- including the newest answer
+        // the user came back to read -- never got a card.
+        SessionStore::SessionData data;
+        const QString filler = QStringLiteral("tool output line. ").repeated(30);
+
+        for (int i = 0; i < 60; ++i) {
+            ChatMessage tool;
+            tool.role = ChatMessage::Role::Tool;
+            tool.toolCallId = u"pre-%1"_s.arg(i);
+            tool.name = u"read_file"_s;
+            tool.content = filler;
+            data.messages.append(tool);
+        }
+
+        ChatMessage firstUser;
+        firstUser.role = ChatMessage::Role::User;
+        firstUser.content = u"first question"_s;
+        data.messages.append(firstUser);
+
+        for (int i = 0; i < 40; ++i) {
+            ChatMessage tool;
+            tool.role = ChatMessage::Role::Tool;
+            tool.toolCallId = u"mid-%1"_s.arg(i);
+            tool.name = u"read_file"_s;
+            tool.content = filler;
+            data.messages.append(tool);
+        }
+
+        ChatMessage user;
+        user.role = ChatMessage::Role::User;
+        user.content = u"final question"_s;
+        ChatMessage assistant;
+        assistant.role = ChatMessage::Role::Assistant;
+        assistant.content = u"THE FINAL ANSWER"_s;
+        data.messages.append(user);
+        data.messages.append(assistant);
+
+        SessionStore::saveConversation(u"conv-full-context"_s, data, u"Full context"_s, 50);
+
+        ChatWidget widget;
+        widget.resize(900, 700);
+        widget.show();
+        Settings settings = widget.settings();
+        settings.contextWindow = 1000; // the restored history is far over it
+        widget.setSettings(settings);
+
+        widget.setCurrentConversationId(u"conv-full-context"_s);
+        widget.agent()->restoreSession(SessionStore::loadConversation(u"conv-full-context"_s));
+        widget.rebuildTranscript();
+        QTest::qWait(80);
+
+        const QString transcript = transcriptText(widget);
+        QVERIFY2(transcript.contains(u"THE FINAL ANSWER"_s),
+                 "the newest answer is missing from a restored conversation at its context limit");
+        QVERIFY2(transcript.contains(u"first question"_s),
+                 "the start of the restored conversation was dropped");
+        // Every restored call keeps its card: the rebuild may not be cut short
+        // by the compaction that the readout triggers.
+        QCOMPARE(widget.findChildren<ToolCallWidget *>().size(), 100);
+    }
+
+    void testReopeningAfterCompactionKeepsTheWholeHistory()
+    {
+        SessionStore::SessionData data;
+        const QString filler = QStringLiteral("tool output line. ").repeated(30);
+
+        for (int i = 0; i < 60; ++i) {
+            ChatMessage tool;
+            tool.role = ChatMessage::Role::Tool;
+            tool.toolCallId = u"pre-%1"_s.arg(i);
+            tool.name = u"read_file"_s;
+            tool.content = filler;
+            data.messages.append(tool);
+        }
+
+        ChatMessage firstUser;
+        firstUser.role = ChatMessage::Role::User;
+        firstUser.content = u"first question"_s;
+        data.messages.append(firstUser);
+
+        for (int i = 0; i < 40; ++i) {
+            ChatMessage tool;
+            tool.role = ChatMessage::Role::Tool;
+            tool.toolCallId = u"mid-%1"_s.arg(i);
+            tool.name = u"read_file"_s;
+            tool.content = filler;
+            data.messages.append(tool);
+        }
+
+        ChatMessage user;
+        user.role = ChatMessage::Role::User;
+        user.content = u"final question"_s;
+        ChatMessage assistant;
+        assistant.role = ChatMessage::Role::Assistant;
+        assistant.content = u"THE FINAL ANSWER"_s;
+        data.messages.append(user);
+        data.messages.append(assistant);
+
+        SessionStore::saveConversation(u"conv-two-reopens"_s, data, u"Two reopens"_s, 50);
+
+        {
+            ChatWidget widget;
+            widget.resize(900, 700);
+            widget.show();
+            Settings settings = widget.settings();
+            settings.contextWindow = 1000;
+            widget.setSettings(settings);
+            widget.setCurrentConversationId(u"conv-two-reopens"_s);
+            widget.agent()->restoreSession(SessionStore::loadConversation(u"conv-two-reopens"_s));
+            widget.rebuildTranscript();
+            QTest::qWait(80);
+        }
+
+        const SessionStore::SessionData savedAfterFirstOpen =
+            SessionStore::loadConversation(u"conv-two-reopens"_s);
+        // The test has to keep exercising the compaction: the model history
+        // shrinks, while the transcript that gets persisted stays complete.
+        QVERIFY2(savedAfterFirstOpen.messages.size() < data.messages.size(),
+                 "the first reopen did not compact the model history");
+        QCOMPARE(savedAfterFirstOpen.transcript.size(), data.messages.size());
+        QVERIFY2(messagesContain(savedAfterFirstOpen.transcript, u"first question"_s),
+                 "the first reopen's save dropped the start of the history");
+
+        ChatWidget reopened;
+        reopened.resize(900, 700);
+        reopened.show();
+        Settings settings = reopened.settings();
+        settings.contextWindow = 1000;
+        reopened.setSettings(settings);
+        reopened.setCurrentConversationId(u"conv-two-reopens"_s);
+        reopened.agent()->restoreSession(savedAfterFirstOpen);
+        reopened.rebuildTranscript();
+        QTest::qWait(80);
+
+        const QString transcript = transcriptText(reopened);
+        QVERIFY2(transcript.contains(u"THE FINAL ANSWER"_s), qPrintable(transcript));
+        QVERIFY2(transcript.contains(u"first question"_s), qPrintable(transcript));
+        QCOMPARE(reopened.findChildren<ToolCallWidget *>().size(), 100);
     }
 };
 

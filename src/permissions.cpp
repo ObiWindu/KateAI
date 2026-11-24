@@ -35,7 +35,8 @@ bool PermissionPolicy::sessionGranted(const QString &toolName) const
 
 bool PermissionPolicy::isReadTool(const QString &toolName) const
 {
-    if (m_extraReadTools.contains(toolName)) {
+    const QString canonical = canonicalToolName(toolName);
+    if (m_extraReadTools.contains(toolName) || m_extraReadTools.contains(canonical)) {
         return true;
     }
     // Web tools are read-only: they cannot touch the workspace, so they are
@@ -46,15 +47,26 @@ bool PermissionPolicy::isReadTool(const QString &toolName) const
     // user to accept or dismiss.
     // question joins them for the same reason again: it neither reads the
     // workspace nor changes it -- it asks the user something.
-    return toolName == u"read_file"_s || toolName == u"list_dir"_s || toolName == u"grep"_s
-        || toolName == u"glob"_s || toolName == u"query_project_graph"_s
-        || toolName == u"web_search"_s || toolName == u"web_fetch"_s
-        || toolName == u"write_plan_file"_s || toolName == u"suggest"_s || toolName == u"question"_s;
+    const QString c = canonical;
+    return c == u"read_file"_s || c == u"read_tool_result"_s || c == u"list_dir"_s || c == u"grep"_s
+        || c == u"glob"_s || c == u"query_project_graph"_s
+        || c == u"web_search"_s || c == u"web_fetch"_s
+        || c == u"write_plan_file"_s || c == u"suggest"_s || c == u"question"_s
+        || c == u"skill"_s || c == u"subagent_transcript"_s
+        // UI-state tools: the checklist, the reasoning note and the plan-mode
+        // switch change no file. They belong to the read group and must never
+        // prompt or trigger a checkpoint just to keep notes.
+        || c == u"todo_write"_s || c == u"todo_read"_s || c == u"think"_s
+        || c == u"exit_plan_mode"_s
+        || c == u"lsp_diagnostics"_s || c == u"lsp_symbols"_s || c == u"lsp_hover"_s
+        || c == u"lsp_definition"_s || c == u"lsp_references"_s || c == u"lsp_code_actions"_s
+        || toolName == u"read"_s || toolName == u"list"_s || toolName == u"search"_s;
 }
 
 ToolRisk PermissionPolicy::riskFor(const QString &toolName) const
 {
-    if (toolName == u"bash"_s || toolName == u"new_task"_s) {
+    const QString canonical = canonicalToolName(toolName);
+    if (canonical == u"bash"_s || canonical == u"new_task"_s || toolName == u"execute"_s) {
         return ToolRisk::Execute;
     }
     // An MCP tool can do anything the server offers, whatever its hints say,
@@ -70,7 +82,12 @@ ToolRisk PermissionPolicy::riskFor(const QString &toolName) const
 
 PermissionPolicy::Verdict PermissionPolicy::evaluate(const QString &toolName, const QJsonObject &arguments, const Sandbox &sandbox, QString *reason) const
 {
-    if (toolName == u"bash"_s) {
+    // Access, risk and the hard-deny checks all use the canonical name. The
+    // raw comparison here used to let "BASH"/"execute" skip the command checks
+    // while still being classified as the bash tool everywhere else.
+    const QString canonical = canonicalToolName(toolName);
+    const bool isBash = canonical == u"bash"_s;
+    if (isBash) {
         const QString command = arguments.value(u"command"_s).toString();
         if (sandbox.isAlwaysDeniedCommand(command)) {
             if (reason) {
@@ -95,19 +112,28 @@ PermissionPolicy::Verdict PermissionPolicy::evaluate(const QString &toolName, co
     // Delegation is consent to spend, not a mutation of the workspace. Every
     // tool the sub-agent itself runs is still judged by this policy, so
     // allowing the spawn does not let it edit unattended.
-    if (toolName == u"new_task"_s) {
+    if (canonical == u"new_task"_s) {
         return Verdict::Allow;
+    }
+
+    // A dangerous command (sudo, recursive chmod, a system control command)
+    // must be seen by the user even when bash was auto-approved for the
+    // session. It used to be re-checked only in the session-grant branch,
+    // which left the read-only auto-approval below as an unprompted path to
+    // "sudo cat /etc/shadow".
+    if (isBash && sandbox.isDangerousCommand(arguments.value(u"command"_s).toString())) {
+        if (reason) {
+            *reason = u"This command is potentially destructive and needs your approval."_s;
+        }
+        return Verdict::Ask;
     }
 
     // Explicit auto-approval beats everything except the hard-deny list.
-    if (m_autoApprove.contains(toolName)) {
+    if (m_autoApprove.contains(toolName) || m_autoApprove.contains(canonical)) {
         return Verdict::Allow;
     }
 
-    if (sessionGranted(toolName)) {
-        if (toolName == u"bash"_s && sandbox.isDangerousCommand(arguments.value(u"command"_s).toString())) {
-            return Verdict::Ask;
-        }
+    if (sessionGranted(toolName) || sessionGranted(canonical)) {
         return Verdict::Allow;
     }
 
@@ -120,15 +146,16 @@ PermissionPolicy::Verdict PermissionPolicy::evaluate(const QString &toolName, co
     // contract is that only execute-risk calls stop to ask — and "allow for
     // this session" (or a server's alwaysAllow list, which the user wrote)
     // keeps it from asking twice.
-    if (isReadTool(toolName) && (m_mode == PermissionMode::AcceptEdits || !isMcpToolName(toolName))) {
+    if (isReadTool(canonical) && (m_mode == PermissionMode::AcceptEdits || !isMcpToolName(canonical))) {
         return Verdict::Allow;
     }
 
-    if (toolName == u"bash"_s && sandbox.isReadOnlyCommand(arguments.value(u"command"_s).toString())) {
+    if (isBash && sandbox.isReadOnlyCommand(arguments.value(u"command"_s).toString())
+        && !sandbox.commandTouchesOutsideWorkspace(arguments.value(u"command"_s).toString())) {
         return Verdict::Allow;
     }
 
-    if (m_mode == PermissionMode::AcceptEdits && riskFor(toolName) == ToolRisk::Write) {
+    if (m_mode == PermissionMode::AcceptEdits && riskFor(canonical) == ToolRisk::Write) {
         return Verdict::Allow;
     }
 

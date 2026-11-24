@@ -10,6 +10,7 @@
 class QLabel;
 class QLineEdit;
 class QPushButton;
+class QResizeEvent;
 class QTextBrowser;
 
 namespace KateAi
@@ -53,10 +54,15 @@ public:
 Q_SIGNALS:
     void answered(const QString &questionCallId, const QString &answer);
 
+protected:
+    void resizeEvent(QResizeEvent *event) override;
+
 private:
     void updateStatus();
+    void renderBody();
 
     QString m_questionCallId;
+    QString m_text;
     bool m_answered = false;
 
     QLabel *m_badge = nullptr;

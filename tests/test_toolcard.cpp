@@ -167,6 +167,58 @@ private Q_SLOTS:
         QVERIFY2(w.height() < 260, qPrintable(QStringLiteral("card grew to %1px").arg(w.height())));
     }
 
+    // --- JSON payloads --------------------------------------------------------
+
+    // The arguments of a tool call arrive as one long line of {"key": "value"}
+    // pairs. A card that shows that line as it came in is a wall of text, so
+    // the payload is re-indented before it is shown.
+    void testJsonArgumentsAreShownIndented()
+    {
+        QWidget host;
+        auto *layout = new QVBoxLayout(&host);
+        host.resize(440, 400);
+
+        ToolCallWidget w(QStringLiteral("t-json"), &host);
+        w.setToolInfo(QStringLiteral("write_file"), QStringLiteral("write_file"), ToolRisk::Write);
+        layout->addWidget(&w);
+        host.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&host));
+        QTest::qWait(60);
+
+        w.setRunningInput(QStringLiteral("{\"path\":\"src/main.cpp\",\"content\":\"int main() {}\",\"mode\":\"overwrite\"}"));
+        QTest::qWait(20);
+        const QString text = w.findChild<QTextBrowser *>(QStringLiteral("toolDetails"))->toPlainText();
+
+        QVERIFY2(text.contains(QStringLiteral("\"path\": \"src/main.cpp\"")),
+                 qPrintable(QStringLiteral("the payload was not indented: %1").arg(text)));
+        QVERIFY2(text.contains(QStringLiteral("\"mode\": \"overwrite\"")),
+                 qPrintable(QStringLiteral("the payload was not indented: %1").arg(text)));
+        // The keys are on their own lines, not run together on one.
+        QVERIFY2(text.contains(QStringLiteral("\n")), qPrintable(text));
+    }
+
+    // Text that is not JSON is left alone: a command's output and a diff are
+    // prose, and reformatting them would only lose information.
+    void testProseIsNotReformatted()
+    {
+        QWidget host;
+        auto *layout = new QVBoxLayout(&host);
+        host.resize(440, 400);
+
+        ToolCallWidget w(QStringLiteral("t-prose"), &host);
+        w.setToolInfo(QStringLiteral("bash"), QStringLiteral("make"), ToolRisk::Execute);
+        layout->addWidget(&w);
+        host.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&host));
+        QTest::qWait(60);
+
+        const QString output = QStringLiteral("{\"not\": \"json, just braces\"}\nnot json at all");
+        w.setPartialOutput(output);
+        QTest::qWait(20);
+        const QString text = w.findChild<QTextBrowser *>(QStringLiteral("toolDetails"))->toPlainText();
+        QVERIFY2(text.contains(output), qPrintable(text));
+    }
+
     // --- Live output ----------------------------------------------------------
 
     void testRunningToolShowsPartialOutput()

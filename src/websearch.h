@@ -95,8 +95,10 @@ public:
     // `maxResults` > 0 applies to this call only. The object is shared by every
     // loop and several searches can be in flight, so a per-call limit has to
     // travel with the call instead of overriding the shared setting.
-    void search(const QString &query, const QString &callId, int maxResults = 0);
-    void fetchPage(const QString &url, const QString &callId);
+    void search(const QString &query, const QString &callId, int maxResults = 0,
+                const QString &site = QString());
+    // timeoutMs/maxBytes <= 0 use the shared timeout and the schema default.
+    void fetchPage(const QString &url, const QString &callId, int timeoutMs = 0, qint64 maxBytes = 0);
     void abort();
 
     static QString providerId(Provider provider);
@@ -141,6 +143,11 @@ private:
     int m_maxResults = 5;
     // Per-call overrides, keyed by call id; consumed when the reply arrives.
     QHash<QString, int> m_callMaxResults;
+    // The provider a search call was sent to. Parsing with the provider that
+    // happens to be configured when the reply lands breaks if settings change
+    // while the request is in flight.
+    QHash<QString, Provider> m_callProviders;
+    QHash<QString, qint64> m_callMaxBytes;
     int m_timeoutMs = 20000;
     QNetworkAccessManager *m_nam = nullptr;
     // In-flight replies, so abort() can cancel them and the destructor does

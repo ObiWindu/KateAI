@@ -1,0 +1,498 @@
+# GitHub Actions: build the Kate AI plugin on every target distribution,
+# bundle the latest Kate editor with the plugin, and publish GitHub Releases.
+#
+# Coverage:
+#   Linux:   plugin build + ctest (Fedora container), native packages
+#            (.rpm Fedora/Asahi, .pkg.tar.zst Arch/CachyOS/Manjaro,
+#             .deb Debian/Ubuntu 25.04+) and a Linux bundle from the
+#            latest Kate master + plugin.
+#   macOS:   Homebrew build + tests (macos-15), plugin zip, Kate.app bundle.
+#   Windows: KDE Craft MSVC plugin build + tests (windows-2022), plugin zip,
+#            Kate + plugin bundle.
+#
+# Release flow (tag main — tags on side branches are ignored):
+#   git checkout main && git merge --ff-only <branch>   # ship to main first
+#   <bump versions to X.Y.Z> && git commit && git push origin main
+#   git tag vX.Y.Z && git push origin vX.Y.Z
+# Pushing the tag runs the `release` job, which attaches every artifact
+# below to the GitHub Release.
+#
+# Bundles rebuild Kate from scratch (~30 min Linux, longer on Windows), so
+# they only run on main, tags, or manual dispatch — not on every PR push.
+
+name: Build and Release
+
+on:
+  pull_request:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A new push to the same PR supersedes the previous run. Without this, several
+# Windows jobs can sit on the 2-core runner at once, which looks like a hang
+# and burns the release budget. Tags and main pushes are never cancelled so a
+# release run cannot be killed by a later manual dispatch.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # ------------------------------------------------------- Linux plugin build
+  build-plugin:
+    name: Plugin build + tests (Linux)
+    runs-on: ubuntu-latest
+    container:
+      image: fedora:latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          dnf install -y kate cmake extra-cmake-modules gcc-c++ ninja-build \
+            qt6-qtbase-devel kf6-ktexteditor-devel kf6-kcoreaddons-devel \
+            kf6-ki18n-devel kf6-kxmlgui-devel kf6-kconfigwidgets-devel \
+            kf6-kconfig-devel kf6-kwidgetsaddons-devel bubblewrap git
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo -G Ninja
+      - name: Build
+        run: cmake --build build -j"$(nproc)"
+      - name: Test
+        run: ctest --test-dir build --output-on-failure
+      - name: Stage artifacts
+        run: |
+          mkdir -p artifacts
+          cp "$(find build -name kateai.so | head -1)" artifacts/kateai.so
+          ./packaging/mk-source-tarball.sh
+          cp packaging/dist/*.tar.gz artifacts/
+          ls -l artifacts/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plugin-linux
+          path: artifacts/
+          retention-days: 28
+
+  # ---------------------------------------------------------- Linux packages
+  package-fedora:
+    name: RPM package (Fedora/Asahi) ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    container:
+      image: fedora:latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          dnf install -y rpm-build kate cmake extra-cmake-modules gcc-c++ \
+            ninja-build qt6-qtbase-devel kf6-ktexteditor-devel kf6-kcoreaddons-devel \
+            kf6-ki18n-devel kf6-kxmlgui-devel kf6-kconfigwidgets-devel \
+            kf6-kconfig-devel kf6-kwidgetsaddons-devel git tar gzip
+      - name: Build RPM
+        run: ./packaging/build-package.sh fedora
+      - name: Stage artifacts
+        run: |
+          mkdir -p artifacts
+          # Source/debug RPMs are build by-products, not user packages.
+          find packaging/dist -maxdepth 1 -type f -name '*.rpm' \
+            ! -name '*-debuginfo-*' ! -name '*-debugsource-*' ! -name '*.src.rpm' \
+            -exec cp -f {} artifacts/ \;
+          ls -l artifacts/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-fedora-${{ matrix.arch }}
+          path: artifacts/
+          retention-days: 28
+
+  # archlinux:latest is amd64-only. For aarch64, use the Arch Linux ARM
+  # image (same package names, ARM repos at archlinuxarm.org).
+  package-arch:
+    name: Arch package (Arch/CachyOS/Manjaro) ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+            image: archlinux:latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+            image: arch4edu/archlinuxarm:latest
+    container:
+      image: ${{ matrix.image }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Disable pacman sandbox (Landlock/alpm not available in containers)
+        run: |
+          # pacman 7+ uses Landlock + the alpm sandbox user, neither of
+          # which works inside unprivileged Docker containers.
+          if ! grep -q '^DisableSandbox' /etc/pacman.conf; then
+            if grep -q '^\[options\]' /etc/pacman.conf; then
+              sed -i '/^\[options\]/a DisableSandbox' /etc/pacman.conf
+            else
+              printf '\n[options]\nDisableSandbox\n' >> /etc/pacman.conf
+            fi
+          fi
+      - name: Init pacman keyring (Arch ARM images sometimes ship without it)
+        run: |
+          pacman-key --init || true
+          pacman-key --populate || true
+      - name: Install dependencies
+        run: |
+          pacman -Sy --noconfirm base-devel kate cmake extra-cmake-modules ninja \
+            qt6-base ktexteditor kcoreaddons ki18n kxmlgui kconfigwidgets kconfig \
+            kwidgetsaddons git tar gzip
+      - name: Build package
+        run: ./packaging/build-package.sh arch
+      - name: Stage artifacts
+        run: |
+          mkdir -p artifacts
+          # Arch emits a separate debug package; it is not a user install.
+          find packaging/dist -maxdepth 1 -type f -name '*.pkg.tar.*' \
+            ! -name '*-debug-*' ! -name '*-debugsymbols-*' \
+            -exec cp -f {} artifacts/ \;
+          ls -l artifacts/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-arch-${{ matrix.arch }}
+          path: artifacts/
+          retention-days: 28
+
+  # Built on Debian trixie (not Ubuntu) so the .deb resolves against
+  # Debian's library versions — Googlebook OS ships a Debian trixie VM,
+  # and a .deb built on Ubuntu 25.04 can pull in incompatible deps.
+  # amd64 + arm64: Googlebook runs on both Intel Core Ultra and
+  # Snapdragon X Elite.
+  package-debian:
+    name: DEB package (Debian/Ubuntu) ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    container:
+      image: debian:trixie
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install dependencies
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y kate cmake \
+            extra-cmake-modules ninja-build g++ pkg-config qt6-base-dev \
+            qt6-base-dev-tools qt6-tools-dev libkf6texteditor-dev \
+            libkf6coreaddons-dev libkf6i18n-dev libkf6xmlgui-dev \
+            libkf6configwidgets-dev libkf6config-dev libkf6widgetsaddons-dev \
+            bubblewrap git tar gzip dpkg-dev debhelper
+      - name: Build DEB
+        run: ./packaging/build-package.sh debian
+      - name: Stage artifacts
+        run: |
+          mkdir -p artifacts
+          # dpkg-buildpackage emits kateai-dbgsym alongside the installable
+          # kateai package. Only the installable package belongs in a release.
+          find packaging/dist -maxdepth 1 -type f -name '*.deb' \
+            ! -name '*-dbgsym_*' ! -name '*-dbg_*' \
+            -exec cp -f {} artifacts/ \;
+          ls -l artifacts/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-debian-${{ matrix.arch }}
+          path: artifacts/
+          retention-days: 28
+
+  # ------------------------------------------------------- macOS plugin build
+  # KDE Craft (same as Windows): there is no Homebrew ktexteditor formula,
+  # so a brew-only build cannot find KTextEditor. First run downloads a
+  # large binary cache — main/tags/dispatch only, like the bundles.
+  build-macos:
+    name: Plugin build + tests (macOS)
+    runs-on: macos-15
+    timeout-minutes: 300
+    if: github.ref == 'refs/heads/main' || github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and test
+        run: ./packaging/ci/macos-build.sh --build-type RelWithDebInfo --artifacts-dir artifacts
+      - name: Rename binary (avoid clashing with the Linux kateai.so in the release)
+        run: |
+          mv artifacts/kateai.so artifacts/kateai-macos.so
+          ls -l artifacts/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plugin-macos
+          path: artifacts/
+          retention-days: 28
+
+  package-macos:
+    name: Plugin zip (macOS)
+    runs-on: macos-15
+    timeout-minutes: 30
+    needs: build-macos
+    if: github.ref == 'refs/heads/main' || github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download tested macOS plugin
+        uses: actions/download-artifact@v4
+        with:
+          name: plugin-macos
+          path: artifacts
+      - name: Package plugin zip
+        run: |
+          set -euo pipefail
+          VERSION="$(sed -n 's/^project(kateai VERSION \([^ ]*\).*/\1/p' CMakeLists.txt | head -1)"
+          OUT="packaging/dist/kateai-${VERSION}-macos-$(uname -m).zip"
+          mkdir -p packaging/dist
+          rm -f "${OUT}"
+          (cd artifacts && zip -j "../${OUT}" kateai-macos.so)
+          ls -l "${OUT}"
+      - name: Stage artifacts
+        run: |
+          mkdir -p artifacts-out && cp packaging/dist/*.zip artifacts-out/
+          ls -l artifacts-out/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: package-macos
+          path: artifacts-out/
+          retention-days: 28
+
+  # ----------------------------------------------------- Windows plugin build
+  # Hosted Windows runners are admin PowerShell with VS Build Tools, CMake,
+  # Python and Git preinstalled; Qt/KF6 come from KDE Craft (MSVC ABI).
+  #
+  # The plugin only links KF6::TextEditor, so the script builds the KTextEditor
+  # framework and its cached dependencies. It deliberately does not run
+  # `craft kate`: Kate, Konsole and Markdownpart are absent from KDE's Windows
+  # binary cache, so Craft compiles them from source and the job can spend
+  # hours there. The bundle job (main/tags only) passes -WithKate instead.
+  build-windows:
+    name: Plugin build + tests (Windows)
+    # windows-latest now ships VS 2026 (v18); Craft's bootstrap only
+    # detects VS 2022 ([17,18)). Pin to windows-2022 until Craft adds
+    # VS 2026 support.
+    runs-on: windows-2022
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and test with Craft
+        run: powershell -ExecutionPolicy Bypass -File packaging\ci\windows-build.ps1 -BuildType RelWithDebInfo -ArtifactsDir artifacts
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plugin-windows
+          path: artifacts/
+          retention-days: 28
+
+  # ----------------------------------------------------------------- Bundles
+  # Heavy jobs (Kate rebuilt from scratch): main, tags, or manual only.
+  bundle-linux:
+    name: Kate master + plugin bundle (Linux)
+    runs-on: ubuntu-latest
+    container:
+      image: fedora:latest
+    if: github.ref == 'refs/heads/main' || github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Kate build dependencies
+        run: |
+          dnf install -y git cmake extra-cmake-modules gcc-c++ ninja-build \
+            qt6-qtbase-devel qt6-qtbase-private-devel qt6-qtdeclarative-devel qt6-qtsvg-devel \
+            kf6-ktexteditor-devel kf6-kcoreaddons-devel kf6-ki18n-devel \
+            kf6-kconfig-devel kf6-kconfigwidgets-devel kf6-kcrash-devel \
+            kf6-kdbusaddons-devel kf6-kguiaddons-devel kf6-kiconthemes-devel \
+            kf6-kio-devel kf6-kjobwidgets-devel kf6-knewstuff-devel \
+            kf6-knotifications-devel kf6-kparts-devel kf6-kservice-devel \
+            kf6-kwindowsystem-devel kf6-kxmlgui-devel kf6-kwidgetsaddons-devel \
+            kf6-sonnet-devel kf6-syndication-devel kf6-kdoctools-devel \
+            kate bubblewrap tar gzip sudo
+      - name: Bundle latest Kate + plugin
+        run: KATE_REF="${KATE_REF:-master}" ./packaging/bundle-kate.sh --release
+      - name: Stage artifacts
+        run: |
+          mkdir -p artifacts && cp packaging/dist/kate-bundle-*.tar.gz artifacts/
+          ls -l artifacts/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bundle-linux
+          path: artifacts/
+          retention-days: 28
+
+  bundle-macos:
+    name: Kate + plugin bundle (macOS)
+    runs-on: macos-15
+    timeout-minutes: 300
+    needs: build-macos
+    if: always() && (github.ref == 'refs/heads/main' || github.ref_type == 'tag' || github.event_name == 'workflow_dispatch')
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download tested macOS plugin
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: plugin-macos
+          path: artifacts-macos-tmp
+      - name: Bundle latest Kate + plugin (.dmg and preinstalled Kate.app)
+        run: ./packaging/bundle-kate-macos.sh --plugin-so artifacts-macos-tmp/kateai-macos.so
+      - name: Stage artifacts
+        run: |
+          mkdir -p artifacts
+          cp packaging/dist/kate-*-macos-*.dmg artifacts/ 2>/dev/null || echo "no .dmg (plugin-only bundle)"
+          cp packaging/dist/kate-bundle-*-macos-*.zip artifacts/ 2>/dev/null || echo "no Kate.app bundle"
+          ls -l artifacts/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bundle-macos
+          path: artifacts/
+          retention-days: 28
+
+  bundle-windows:
+    name: Kate + plugin bundle (Windows)
+    # Same as build-windows: pin to windows-2022 for VS 2022 / Craft.
+    runs-on: windows-2022
+    timeout-minutes: 300
+    if: github.ref == 'refs/heads/main' || github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+      - name: Bundle latest Kate + plugin
+        run: powershell -ExecutionPolicy Bypass -File packaging\bundle-kate-windows.ps1
+      - name: Stage artifacts
+        run: |
+          New-Item -ItemType Directory -Force -Path artifacts | Out-Null
+          Get-ChildItem packaging\dist\kate-bundle-*.zip -ErrorAction SilentlyContinue |
+            Copy-Item -Destination artifacts\ -Force
+          Get-ChildItem packaging\dist\kate-*.exe -ErrorAction SilentlyContinue |
+            Copy-Item -Destination artifacts\ -Force
+          Get-ChildItem artifacts\
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bundle-windows
+          path: artifacts/
+          retention-days: 28
+
+  # ----------------------------------------------------------------- Release
+  # Runs only for tags like v0.9.0 pushed on main. Attaches every artifact
+  # from the jobs above to the GitHub Release.
+  release:
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    # Always publish the artifacts that did build: a single optional bundle
+    # failure (historically the Windows Craft bundle) must not leave the tag
+    # with only GitHub's source archives. Missing artifacts are simply absent
+    # from the release.
+    if: always() && github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+    needs:
+      - build-plugin
+      - package-fedora
+      - package-arch
+      - package-debian
+      - build-macos
+      - package-macos
+      - build-windows
+      - bundle-linux
+      - bundle-macos
+      - bundle-windows
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Remove build-only packages from the release
+        run: |
+          set -euo pipefail
+          # Debug symbols and source RPMs are build by-products. They were
+          # previously uploaded and buried the actual Kate+plugin bundles in
+          # the release asset list.
+          find dist -maxdepth 1 -type f \
+            \( -iname '*debug*' -o -iname '*dbgsym*' -o -iname '*-dbg_*' -o -iname '*.src.rpm' \) \
+            -print -delete
+          ls -l dist/
+      - name: Align source tarball name with the tag
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          ls -l dist/
+          # The source tarball may already be named after the tag. Copying a
+          # file onto itself makes cp fail under set -e.
+          target="dist/kateai-${VERSION}.tar.gz"
+          for f in dist/kateai-*.tar.gz; do
+            [ -e "$f" ] || continue
+            [ "$f" = "$target" ] && break
+            cp "$f" "$target"
+            break
+          done
+          ls -l dist/
+      - name: Write release notes
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          cat > NOTES.md <<EOF
+          ## Kate AI ${GITHUB_REF_NAME}
+
+          ### Plugin only
+          - \`kateai.so\` — Linux: drop into \`<qt-plugin-dir>/kf6/ktexteditor/\` (\`./install.sh\` does this for you)
+          - \`kateai-macos.so\` / \`kateai-*-macos-*.zip\` — macOS Homebrew build; install with \`./install.sh\`
+          - \`kateai.dll\` / \`kateai-windows-*.zip\` — Windows Craft/MSVC plugin build; install with \`packaging\\\\windows\\\\install.ps1\`
+          - \`kateai-${VERSION}.tar.gz\` — source tarball
+          - \`.rpm\` (Fedora/Asahi, x86_64 + aarch64) · \`.pkg.tar.zst\` (Arch/CachyOS/Manjaro, x86_64 + aarch64) · \`.deb\` (Debian trixie / Ubuntu 25.04+, amd64 + arm64 — arm64 for Googlebook Snapdragon X Elite)
+
+          Debug symbols and source RPMs are intentionally excluded from the release.
+
+          ### Kate + plugin bundles (latest Kate)
+          - \`kate-bundle-*.tar.gz\` (Linux) — Kate master built from source with the plugin
+            pre-installed. Extract to \`/\` and run \`/opt/kate-ai-bundle/bin/kate-ai\`.
+          - \`kate-*-macos-*.dmg\` — latest Kate installer built via Craft.
+          - \`kate-bundle-*-macos-*.zip\` — Craft-built Kate.app with the plugin already
+            installed; unzip and drag Kate.app to Applications.
+          - \`kateai-*-macos-*.zip\` — plugin built against the same Craft stack;
+            install with \`./install.sh\` (copies it into Kate.app).
+          - \`kate-bundle-*-windows-*.zip\` plus \`kate-*.exe\` when Craft produced a Kate
+            installer. If the installer was unavailable, the Windows asset is the
+            plugin zip listed above.
+
+          Built from commit ${GITHUB_SHA}. See README.md for install instructions.
+          EOF
+          cat NOTES.md
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [[ "${GITHUB_REF_NAME}" == *"-"* ]]; then PRE="--prerelease"; else PRE=""; fi
+          # Re-runnable: if the release already exists (re-release), refresh
+          # its assets instead of failing the way `gh release create` would.
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            # Remove assets that are no longer produced (debug packages from an
+            # older run, stale plugin-only bundles, renamed files), then upload
+            # the current set. Without this, a re-run keeps the old debug
+            # packages next to the new release.
+            existing_assets="$(gh release view "${GITHUB_REF_NAME}" --json assets --jq '.assets[].name')"
+            while IFS= read -r asset; do
+              [ -z "$asset" ] && continue
+              if [ ! -e "dist/$asset" ]; then
+                echo "Removing stale release asset: $asset"
+                gh release delete-asset "${GITHUB_REF_NAME}" "$asset" --yes
+              fi
+            done <<< "$existing_assets"
+            # shellcheck disable=SC2086
+            gh release upload "${GITHUB_REF_NAME}" dist/* --clobber
+          else
+            # shellcheck disable=SC2086
+            gh release create "${GITHUB_REF_NAME}" \
+              --title "Kate AI ${GITHUB_REF_NAME}" \
+              --notes-file NOTES.md $PRE \
+              dist/*
+          fi

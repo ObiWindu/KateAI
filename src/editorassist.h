@@ -6,11 +6,14 @@
 #pragma once
 
 #include "completionengine.h"
+#include "debug.h"
 #include "editranges.h"
+#include "lsp.h"
 #include "types.h"
 
 #include <KTextEditor/Range>
 
+#include <QHash>
 #include <QList>
 #include <QObject>
 #include <QPointer>
@@ -30,14 +33,16 @@ namespace KateAi
 {
 
 class GhostNoteProvider;
+class DebugInlineNoteProvider;
 class EditHintProvider;
 class AiCompletionModel;
+class AiEditAnnotationModel;
 
 /**
- * The in-editor half of AI completions and agent-edit hints, one instance per
- * main window. Attaches to every View of its window (attachView() on
- * viewCreated), renders suggestions inline at the cursor or in the native
- * completion list, and answers hovers over lines the agent edited.
+ * The in-editor half of AI completions, agent-edit hints, live debugger
+ * inline values/hover hints, and toggleable AI-edit gutter annotations.
+ * One instance per main window. Attaches to every View of its window
+ * (attachView() on viewCreated).
  *
  * Never talks to AgentLoop: it only observes a busy flag and a busy check,
  * so a completion can never interleave with a running chat turn and a turn
@@ -83,7 +88,7 @@ public:
     // Drop the suggestion: Esc, cursor moved, or any typing.
     void clearSuggestion();
 
-    // --- Agent-edit hover hints ----------------------------------------------
+    // --- Agent-edit hover hints & gutter annotations ------------------------
     // Pushes the review queue's line ranges for one path into the anchored
     // range tracker, with the document they live in.
     void updateEditRanges(const QString &path,
@@ -92,6 +97,49 @@ public:
     EditRangeTracker *editRanges() const
     {
         return m_editRanges;
+    }
+
+    void setAnnotationGutterEnabled(bool enabled);
+    bool annotationGutterEnabled() const
+    {
+        return m_annotationGutterEnabled;
+    }
+
+    // The editor's language-server surface, used to show diagnostic hovers.
+    // Null in tests: the hint then just skips the diagnostic part.
+    void setLspProvider(LspProvider *provider)
+    {
+        m_lsp = provider;
+    }
+    LspProvider *lspProvider() const
+    {
+        return m_lsp;
+    }
+
+    // The editor's live debugger surface, used for inline variable values and
+    // hover tooltips while the debuggee is paused.
+    void setDebugProvider(DebugProvider *provider);
+    DebugProvider *debugProvider() const
+    {
+        return m_debug;
+    }
+
+    // Live cached debug state read by DebugInlineNoteProvider & EditHintProvider.
+    bool hasLiveDebugOverlay() const
+    {
+        return m_debugPaused && !m_debugPausedFile.isEmpty() && !m_debugLocalsByName.isEmpty();
+    }
+    QString debugPausedFile() const
+    {
+        return m_debugPausedFile;
+    }
+    int debugPausedLine() const
+    {
+        return m_debugPausedLine;
+    }
+    const QHash<QString, DebugVariable> &debugLocalsByName() const
+    {
+        return m_debugLocalsByName;
     }
 
 Q_SIGNALS:
@@ -105,6 +153,8 @@ private:
         QPointer<KTextEditor::View> view;
         QList<QMetaObject::Connection> documentConnections;
         QMetaObject::Connection cursorConnection;
+        QPointer<DebugInlineNoteProvider> debugNoteProvider;
+        QPointer<AiEditAnnotationModel> annotationModel;
     };
 
     void requestCompletion(KTextEditor::View *view);
@@ -114,17 +164,28 @@ private:
     void installAcceptShortcuts(KTextEditor::View *view);
     void removeAcceptShortcuts();
     void scheduleAutoTrigger(KTextEditor::View *view);
+    void refreshDebugOverlays();
+    void applyAnnotationGutter(ViewAttachment &attachment);
     ViewAttachment *findAttachment(KTextEditor::View *view);
 
     Settings m_settings;
     bool m_agentBusy = false;
+    bool m_annotationGutterEnabled = false;
     std::function<bool()> m_busyCheck;
 
     CompletionEngine *m_engine = nullptr;
     EditRangeTracker *m_editRanges = nullptr;
+    LspProvider *m_lsp = nullptr;
+    DebugProvider *m_debug = nullptr;
+    QList<QMetaObject::Connection> m_debugConnections;
     GhostNoteProvider *m_noteProvider = nullptr;
     EditHintProvider *m_hintProvider = nullptr;
     AiCompletionModel *m_popupModel = nullptr;
+
+    bool m_debugPaused = false;
+    QString m_debugPausedFile;
+    int m_debugPausedLine = 0;
+    QHash<QString, DebugVariable> m_debugLocalsByName;
 
     QPointer<KTextEditor::View> m_suggestionView;
     QString m_suggestion;
@@ -140,7 +201,9 @@ private:
     QList<ViewAttachment> m_attachments;
 
     friend class GhostNoteProvider;
+    friend class DebugInlineNoteProvider;
     friend class EditHintProvider;
+    friend class AiEditAnnotationModel;
 };
 
 } // namespace KateAi

@@ -289,7 +289,7 @@ void CompletionEngine::request(const CompletionPromptContext &context)
                     m_settings.maxTokens > 0 ? m_settings.maxTokens : kDefaultCompletionMaxTokens);
     }
 
-    QNetworkRequest networkRequest{QUrl(providerBaseUrl(m_settings) + endpoint)};
+    QNetworkRequest networkRequest{QUrl(joinApiEndpoint(providerBaseUrl(m_settings), endpoint))};
     networkRequest.setHeader(QNetworkRequest::ContentTypeHeader, u"application/json"_s);
     LlmClient::applyAuthHeaders(networkRequest, apiFormat, key);
     if (m_settings.provider == Provider::OpenRouter) {

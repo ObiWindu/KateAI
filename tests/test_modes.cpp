@@ -147,6 +147,102 @@ private Q_SLOTS:
         QCOMPARE(mode->temperature, 0.0);
         QCOMPARE(mode->topP, 0.1);
     }
+
+    void testReadOnlyModeKeepsTheEditGroupsOut()
+    {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+
+        const QString path = tempDir.path() + u"/.kateai/modes/reviewer.md"_s;
+        QVERIFY(QDir().mkpath(tempDir.path() + u"/.kateai/modes"_s));
+        {
+            QFile f(path);
+            QVERIFY(f.open(QIODevice::WriteOnly | QIODevice::Text));
+            f.write(u"---\nid: reviewer\nname: Reviewer\nreadOnly: true\ngroups: [read, edit, command]\n---\n"_s.toUtf8());
+        }
+
+        ModeRegistry registry;
+        registry.setWorkspace(tempDir.path());
+        const ModeDefinition *mode = registry.modeById(u"reviewer"_s);
+        QVERIFY(mode);
+        // The key was never read, so the mode kept the edit and command
+        // groups and the read-only promise was not kept.
+        QVERIFY(mode->readOnly);
+        QVERIFY(!mode->groups.contains(ToolGroup::edit()));
+        QVERIFY(!mode->groups.contains(ToolGroup::command()));
+        QVERIFY(mode->groups.contains(ToolGroup::read()));
+    }
+
+    void testBlockScalarMayContainTheFrontmatterDelimiter()
+    {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+
+        const QString path = tempDir.path() + u"/.kateai/modes/with-separator.md"_s;
+        QVERIFY(QDir().mkpath(tempDir.path() + u"/.kateai/modes"_s));
+        {
+            QFile f(path);
+            QVERIFY(f.open(QIODevice::WriteOnly | QIODevice::Text));
+            // A "---" inside the block scalar belongs to the scalar; it used to
+            // end the frontmatter, so the role definition was cut short.
+            f.write(u"---\nid: with-separator\nroleDefinition: |\n  First line\n  ---\n  Third line\n---\n"_s.toUtf8());
+        }
+
+        ModeRegistry registry;
+        registry.setWorkspace(tempDir.path());
+        const ModeDefinition *mode = registry.modeById(u"with-separator"_s);
+        QVERIFY(mode);
+        QVERIFY(mode->roleDefinition.contains(u"Third line"_s));
+    }
+
+    void testToolGroupsCoverTheNewTools()
+    {
+        // The read-only group must carry the planning/asking tools so plan
+        // mode and ask mode keep working with them; the edit group carries
+        // apply_patch.
+        const QStringList read = builtInToolsForGroup(ToolGroup::read());
+        for (const QString &name : {u"todo_write"_s, u"todo_read"_s, u"think"_s, u"exit_plan_mode"_s, u"question"_s, u"suggest"_s}) {
+            QVERIFY2(read.contains(name), qPrintable(name));
+        }
+        const QStringList edit = builtInToolsForGroup(ToolGroup::edit());
+        QVERIFY(edit.contains(u"apply_patch"_s));
+        // Every built-in name is reachable through some group or is the
+        // subtask tool (orchestrate group).
+        const QStringList all = allBuiltInToolNames();
+        const QStringList orchestrate = builtInToolsForGroup(ToolGroup::orchestrate());
+        const QStringList debug = builtInToolsForGroup(ToolGroup::debug());
+        for (const QString &name : all) {
+            const bool covered = read.contains(name) || edit.contains(name)
+                || builtInToolsForGroup(ToolGroup::command()).contains(name)
+                || builtInToolsForGroup(ToolGroup::web()).contains(name)
+                || debug.contains(name)
+                || orchestrate.contains(name);
+            QVERIFY2(covered, qPrintable(name));
+        }
+        // Plan mode therefore allows asking and todos but not patching.
+        ModeDefinition planLike;
+        planLike.groups = {ToolGroup::read()};
+        const ToolAccess planAccess = ModeRegistry::toolAccessFor(planLike, true);
+        QVERIFY(planAccess.allows(u"question"_s));
+        QVERIFY(planAccess.allows(u"todo_write"_s));
+        QVERIFY(planAccess.allows(u"debug_status"_s));
+        QVERIFY(planAccess.allows(u"debug_stack"_s));
+        QVERIFY(planAccess.allows(u"debug_locals"_s));
+        QVERIFY(!planAccess.allows(u"apply_patch"_s));
+        QVERIFY(!planAccess.allows(u"debug_eval"_s));
+        QVERIFY(!planAccess.allows(u"debug_step"_s));
+        QVERIFY(!planAccess.allows(u"build_run"_s));
+        QVERIFY(!planAccess.allows(u"terminal_run"_s));
+
+        // Read-only custom modes strip ToolGroup::debug() even if listed.
+        ModeDefinition roDebug;
+        roDebug.groups = {ToolGroup::read(), ToolGroup::debug()};
+        roDebug.readOnly = true;
+        const ToolAccess roAccess = ModeRegistry::toolAccessFor(roDebug, false);
+        QVERIFY(roAccess.allows(u"debug_status"_s));
+        QVERIFY(!roAccess.allows(u"debug_eval"_s));
+        QVERIFY(!roAccess.allows(u"debug_set_breakpoint"_s));
+    }
 };
 
 QTEST_GUILESS_MAIN(TestModes)

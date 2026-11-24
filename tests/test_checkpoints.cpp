@@ -1,8 +1,10 @@
 #include "checkpoint.h"
 
+#include <QCryptographicHash>
 #include <QDir>
 #include <QFile>
 #include <QProcess>
+#include <QStandardPaths>
 #include <QTemporaryDir>
 #include <QTest>
 
@@ -141,6 +143,104 @@ private Q_SLOTS:
         QCOMPARE(manager.changedFileCount(checkpoint), 0);
     }
 
+    void restoreRemovesSymlinkWithoutFollowingIt()
+    {
+#if defined(Q_OS_WIN)
+        QSKIP("symlink creation is not portable in this test");
+#else
+        if (!m_hasGit) {
+            QSKIP("git is not available");
+        }
+        QTemporaryDir outside;
+        QVERIFY(outside.isValid());
+        writeFile(outside.path() + u"/victim.txt"_s, u"do not delete"_s);
+
+        writeFile(m_workspace->path() + u"/a.txt"_s, u"original"_s);
+        CheckpointManager manager;
+        manager.setWorkspace(m_workspace->path());
+        QString error;
+        const QString checkpoint = manager.createCheckpoint(u"baseline"_s, &error);
+        QVERIFY2(!checkpoint.isEmpty(), qPrintable(error));
+
+        const QString link = m_workspace->path() + u"/outside"_s;
+        QVERIFY(QFile::link(outside.path(), link));
+        QVERIFY2(manager.restoreCheckpoint(checkpoint, &error), qPrintable(error));
+        // The link is removed; its target and the file inside it are not.
+        QVERIFY(!QFileInfo(link).isSymLink());
+        QVERIFY(QFileInfo::exists(outside.path() + u"/victim.txt"_s));
+        QCOMPARE(readFile(outside.path() + u"/victim.txt"_s), u"do not delete"_s);
+#endif
+    }
+
+    void restoreLeavesProtectedFilesUntouched()
+    {
+        if (!m_hasGit) {
+            QSKIP("git is not available");
+        }
+        writeFile(m_workspace->path() + u"/a.txt"_s, u"original"_s);
+        writeFile(m_workspace->path() + u"/.kateai/mcp.json"_s, u"safe config"_s);
+
+        CheckpointManager manager;
+        manager.setWorkspace(m_workspace->path());
+        QString error;
+        const QString checkpoint = manager.createCheckpoint(u"baseline"_s, &error);
+        QVERIFY2(!checkpoint.isEmpty(), qPrintable(error));
+
+        // After the snapshot the agent plants automation and breaks a file. The
+        // snapshot captured the safe mcp.json, so a restore that writes it back
+        // would reinstate snapshot content into a protected path.
+        writeFile(m_workspace->path() + u"/.kateai/mcp.json"_s, u"planted config"_s);
+        writeFile(m_workspace->path() + u"/a.txt"_s, u"broken"_s);
+
+        QVERIFY2(manager.restoreCheckpoint(checkpoint, &error), qPrintable(error));
+        // The snapshot's own content is restored...
+        QCOMPARE(readFile(m_workspace->path() + u"/a.txt"_s), u"original"_s);
+        // ...but a protected path is neither overwritten nor deleted: the
+        // working copy survives the restore exactly as it was.
+        QCOMPARE(readFile(m_workspace->path() + u"/.kateai/mcp.json"_s), u"planted config"_s);
+    }
+
+    // Every file RulesLoader feeds into the system prompt is automation the
+    // agent must not be able to plant through a snapshot, not just KATEAI.md.
+    void restoreLeavesRuleFilesUntouched()
+    {
+        if (!m_hasGit) {
+            QSKIP("git is not available");
+        }
+        const QStringList ruleFiles = {
+            u"/AGENTS.md"_s,
+            u"/CLAUDE.md"_s,
+            // .clinerules/.kilocoderules work as a root file *and* as a
+            // directory of rule files; both forms must survive. A workspace
+            // only has one form per name (git cannot track both), so each
+            // name exercises one here.
+            u"/.clinerules"_s,
+            u"/.kilocoderules/team.md"_s,
+            u"/.kateai/agents/reviewer.md"_s,
+        };
+        writeFile(m_workspace->path() + u"/a.txt"_s, u"original"_s);
+        for (const QString &relative : ruleFiles) {
+            writeFile(m_workspace->path() + relative, u"safe rules"_s);
+        }
+
+        CheckpointManager manager;
+        manager.setWorkspace(m_workspace->path());
+        QString error;
+        const QString checkpoint = manager.createCheckpoint(u"baseline"_s, &error);
+        QVERIFY2(!checkpoint.isEmpty(), qPrintable(error));
+
+        for (const QString &relative : ruleFiles) {
+            writeFile(m_workspace->path() + relative, u"planted rules"_s);
+        }
+        writeFile(m_workspace->path() + u"/a.txt"_s, u"broken"_s);
+
+        QVERIFY2(manager.restoreCheckpoint(checkpoint, &error), qPrintable(error));
+        QCOMPARE(readFile(m_workspace->path() + u"/a.txt"_s), u"original"_s);
+        for (const QString &relative : ruleFiles) {
+            QCOMPARE(readFile(m_workspace->path() + relative), u"planted rules"_s);
+        }
+    }
+
     void diffReportsChangesAgainstTheSnapshot()
     {
         if (!m_hasGit) {
@@ -207,6 +307,83 @@ private Q_SLOTS:
         QVERIFY(!manager.restoreCheckpoint(QString(), &error));
         // The workspace must be untouched by the failed restore.
         QCOMPARE(readFile(m_workspace->path() + u"/a.txt"_s), u"x"_s);
+    }
+
+    void restoreCreatesASafetySnapshot()
+    {
+        if (!m_hasGit) {
+            QSKIP("git is not available");
+        }
+        writeFile(m_workspace->path() + u"/a.txt"_s, u"original"_s);
+
+        CheckpointManager manager;
+        manager.setWorkspace(m_workspace->path());
+        QString error;
+        const QString checkpoint = manager.createCheckpoint(u"baseline"_s, &error);
+        QVERIFY2(!checkpoint.isEmpty(), qPrintable(error));
+
+        // Work that appeared after the checkpoint (possibly the user's) must
+        // not disappear silently when the restore overwrites it.
+        writeFile(m_workspace->path() + u"/a.txt"_s, u"later work"_s);
+        QVERIFY2(manager.restoreCheckpoint(checkpoint, &error), qPrintable(error));
+        QCOMPARE(readFile(m_workspace->path() + u"/a.txt"_s), u"original"_s);
+
+        const QList<CheckpointInfo> checkpoints = manager.checkpoints();
+        QVERIFY(checkpoints.size() >= 2);
+        const CheckpointInfo safety = checkpoints.first();
+        QVERIFY2(safety.label.startsWith(u"Before restoring "_s), qPrintable(safety.label));
+        // The snapshot holds the pre-restore state, so it differs from the
+        // worktree for the file the restore just rewrote.
+        QCOMPARE(manager.changedFileCount(safety.id), 1);
+
+        // Restoring the safety snapshot brings the newer work back.
+        QVERIFY2(manager.restoreCheckpoint(safety.id, &error), qPrintable(error));
+        QCOMPARE(readFile(m_workspace->path() + u"/a.txt"_s), u"later work"_s);
+    }
+
+    void restoreWithoutSafetySnapshotLeavesHistoryAlone()
+    {
+        if (!m_hasGit) {
+            QSKIP("git is not available");
+        }
+        writeFile(m_workspace->path() + u"/a.txt"_s, u"original"_s);
+
+        CheckpointManager manager;
+        manager.setWorkspace(m_workspace->path());
+        QString error;
+        const QString checkpoint = manager.createCheckpoint(u"baseline"_s, &error);
+        QVERIFY2(!checkpoint.isEmpty(), qPrintable(error));
+
+        writeFile(m_workspace->path() + u"/a.txt"_s, u"later work"_s);
+        QVERIFY2(manager.restoreCheckpoint(checkpoint, &error, false), qPrintable(error));
+        QCOMPARE(readFile(m_workspace->path() + u"/a.txt"_s), u"original"_s);
+        QCOMPARE(manager.checkpoints().size(), 1);
+    }
+
+    // An interrupted init (or a cache left by an older version) can leave the
+    // shadow repository as a bare directory: no HEAD, no objects. Treating
+    // that as "already initialised" made every snapshot fail for the rest of
+    // the session, so the manager has to rebuild it.
+    void recoversFromAnIncompleteShadowRepository()
+    {
+        if (!m_hasGit) {
+            QSKIP("git is not available");
+        }
+        writeFile(m_workspace->path() + u"/a.txt"_s, u"original"_s);
+
+        const QByteArray digest = QCryptographicHash::hash(m_workspace->path().toUtf8(),
+                                                           QCryptographicHash::Sha1)
+                                      .toHex();
+        const QString shadow = QStandardPaths::writableLocation(QStandardPaths::CacheLocation)
+            + u"/checkpoints/"_s + QString::fromLatin1(digest) + u"/repo/.git"_s;
+        QVERIFY(QDir().mkpath(shadow));
+        // The directory exists, but it is not a repository (no HEAD/objects).
+
+        CheckpointManager manager;
+        manager.setWorkspace(m_workspace->path());
+        QString error;
+        QVERIFY2(!manager.createCheckpoint(u"after a broken cache"_s, &error).isEmpty(), qPrintable(error));
+        QCOMPARE(manager.checkpoints().size(), 1);
     }
 
     void theProjectsOwnGitHistoryIsNeverTouched()

@@ -5,6 +5,10 @@
 
 #include "llmclient.h"
 
+#include "harness/models.h"
+#include "harness/tokens.h"
+
+#include <QCryptographicHash>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -12,8 +16,10 @@
 #include <QNetworkRequest>
 #include <QPointer>
 #include <QDateTime>
+#include <QSet>
 #include <QTimer>
 #include <QUrlQuery>
+#include <QUuid>
 
 #include <algorithm>
 #include <limits>
@@ -33,6 +39,168 @@ namespace
 // portal, proxy black hole, sleeping laptop) still ends the turn with a
 // retryable TimeoutError instead of hanging forever.
 constexpr int kRequestIdleTimeoutMs = 180000;
+
+// OpenAI-compatible gateways that accept stream_options.include_usage. Local
+// servers often reject unknown request fields, so they are left alone.
+bool providerSupportsStreamUsage(Provider provider)
+{
+    switch (provider) {
+    case Provider::OpenAI:
+    case Provider::OpenRouter:
+    case Provider::DeepSeek:
+    case Provider::Grok:
+    case Provider::OpenCode:
+        return true;
+    default:
+        return false;
+    }
+}
+
+// A known hosted family publishes a real output limit; cap the configured
+// value there so the provider does not reject the request. An unknown or
+// local model has only the conservative fallback, and silently lowering a
+// user-set max_tokens there truncates answers that used to work.
+int effectiveMaxOutputTokens(const ModelProfile &profile, int requested)
+{
+    if (requested <= 0 || !profile.known || profile.maxOutputTokens <= 0
+        || profile.family == u"local"_s) {
+        return requested;
+    }
+    return qMin(requested, profile.maxOutputTokens);
+}
+
+// The OpenAI-compatible Gemini facade lives on the same host as the native
+// API. The native base is derived from it so cached-content resources and the
+// native streaming endpoint can be used without a separate provider setting.
+bool isGoogleGenerativeLanguageHost(const QString &host)
+{
+    return host.compare(u"generativelanguage.googleapis.com"_s, Qt::CaseInsensitive) == 0;
+}
+
+QString geminiBaseUrlFor(const Settings &settings)
+{
+    QUrl url(settings.openaiCompatibleUrl.trimmed());
+    if (!url.isValid() || url.host().isEmpty()) {
+        url = QUrl(u"https://generativelanguage.googleapis.com/v1beta"_s);
+    }
+    QString path = url.path();
+    // Strip the compatibility suffix; native resources live under /v1beta.
+    const int beta = path.indexOf(u"/v1beta"_s);
+    if (beta >= 0) {
+        path = path.left(beta + 7);
+    } else {
+        const int v1 = path.indexOf(u"/v1"_s);
+        if (v1 >= 0) {
+            path = path.left(v1 + 3) + u"beta"_s;
+        } else {
+            path = u"/v1beta"_s;
+        }
+    }
+    url.setPath(path);
+    url.setQuery(QString());
+    url.setFragment(QString());
+    return url.toString();
+}
+
+QString geminiModelResource(const QString &model)
+{
+    const QString name = model.trimmed();
+    if (name.startsWith(u"models/"_s) || name.startsWith(u"tunedModels/"_s)) {
+        return name;
+    }
+    return u"models/"_s + name;
+}
+
+QJsonObject geminiTextPart(const QString &text)
+{
+    return QJsonObject{{u"text"_s, text}};
+}
+
+QJsonObject geminiContent(const QString &role, const QJsonArray &parts)
+{
+    return QJsonObject{{u"role"_s, role}, {u"parts"_s, parts}};
+}
+
+QJsonValue sanitizeGeminiSchema(const QJsonValue &value)
+{
+    if (value.isArray()) {
+        QJsonArray out;
+        for (const QJsonValue &entry : value.toArray()) {
+            out.append(sanitizeGeminiSchema(entry));
+        }
+        return out;
+    }
+    if (!value.isObject()) {
+        return value;
+    }
+    const QJsonObject source = value.toObject();
+    QJsonObject out;
+    // Gemini's Schema is an OpenAPI subset. Unknown keywords (strict,
+    // additionalProperties, $schema, anyOf, …) are rejected by the native API.
+    static const QSet<QString> allowed{
+        u"type"_s, u"description"_s, u"properties"_s, u"required"_s,
+        u"items"_s, u"enum"_s, u"format"_s};
+    for (auto it = source.constBegin(); it != source.constEnd(); ++it) {
+        if (!allowed.contains(it.key())) {
+            continue;
+        }
+        if (it.key() == u"properties"_s && it.value().isObject()) {
+            QJsonObject properties;
+            const QJsonObject sourceProperties = it.value().toObject();
+            for (auto property = sourceProperties.constBegin();
+                 property != sourceProperties.constEnd(); ++property) {
+                properties.insert(property.key(), sanitizeGeminiSchema(property.value()));
+            }
+            out.insert(it.key(), properties);
+        } else {
+            out.insert(it.key(), sanitizeGeminiSchema(it.value()));
+        }
+    }
+    return out;
+}
+
+QJsonArray geminiTools(const QJsonArray &openAiTools)
+{
+    QJsonArray declarations;
+    for (const QJsonValue &value : openAiTools) {
+        const QJsonObject function = value.toObject().value(u"function"_s).toObject();
+        const QString name = function.value(u"name"_s).toString();
+        if (name.isEmpty()) {
+            continue;
+        }
+        QJsonObject declaration;
+        declaration.insert(u"name"_s, name);
+        const QString description = function.value(u"description"_s).toString();
+        if (!description.isEmpty()) {
+            declaration.insert(u"description"_s, description);
+        }
+        const QJsonValue parameters = function.value(u"parameters"_s);
+        if (parameters.isObject()) {
+            declaration.insert(u"parameters"_s, sanitizeGeminiSchema(parameters));
+        }
+        declarations.append(declaration);
+    }
+    if (declarations.isEmpty()) {
+        return {};
+    }
+    return QJsonArray{QJsonObject{{u"functionDeclarations"_s, declarations}}};
+}
+
+QJsonObject geminiFunctionResponse(const ChatMessage &message)
+{
+    QString text = message.content;
+    QJsonObject response;
+    QJsonDocument parsed = QJsonDocument::fromJson(text.toUtf8());
+    if (parsed.isObject()) {
+        response = parsed.object();
+    } else {
+        response.insert(u"result"_s, text);
+    }
+    return QJsonObject{
+        {u"functionResponse"_s,
+         QJsonObject{{u"name"_s, message.name.isEmpty() ? u"tool"_s : message.name},
+                     {u"response"_s, response}}}};
+}
 
 // Ceiling for backoff saturation, in seconds. Keeps the 64-bit multiply below
 // well inside range and is far beyond any sane wait.
@@ -156,14 +324,9 @@ QJsonArray LlmClient::messagesToJson(const QList<ChatMessage> &messages)
         case ChatMessage::Role::Assistant:
             obj.insert(u"role"_s, u"assistant"_s);
             obj.insert(u"content"_s, msg.content);
-            // Hidden reasoning is sent back to the model so it can reference
-            // its own earlier analysis without re-deriving it.
-            if (!msg.thinking.isEmpty()) {
-                obj.insert(u"reasoning_content"_s, msg.thinking);
-            }
-            // The structured plan is a Kate-side artifact for the checklist
-            // UI; it is not a field any provider knows, and a strict gateway
-            // or proxy may reject the whole request over it.
+            // Hidden reasoning is deliberately not replayed. DeepSeek returns
+            // 400 when reasoning_content is present in an input message, and
+            // strict OpenAI-compatible gateways reject unknown message fields.
             if (!msg.toolCalls.isEmpty()) {
                 obj.insert(u"tool_calls"_s, msg.toolCalls);
             }
@@ -214,6 +377,65 @@ static QString toolArgumentsText(const QJsonValue &value)
     return QString();
 }
 
+// True when the accumulated argument text is a complete JSON value. A tool
+// call that is still being streamed has incomplete arguments, which is how a
+// continuation delta is told apart from the start of a new call.
+static bool isCompleteToolArguments(const QString &arguments)
+{
+    if (arguments.trimmed().isEmpty()) {
+        return false;
+    }
+    QJsonParseError error;
+    const QJsonDocument document = QJsonDocument::fromJson(arguments.toUtf8(), &error);
+    return error.error == QJsonParseError::NoError && !document.isNull();
+}
+
+// The accumulator slot an index-less tool-call delta belongs to.
+//
+// A provider that omits "index" cannot be handled by falling back to the next
+// free slot: a call that is streamed over several deltas - which is how every
+// OpenAI-compatible server sends one - would be split into one call per delta,
+// each with a fragment of the arguments and no name. The slot is therefore
+// derived from the delta itself:
+//
+//  - A delta that names a call continues that call.
+//  - A delta without an id is a continuation of the call whose arguments are
+//    still incomplete.
+//
+// Only when neither applies is a new slot opened.
+static int slotForIndexLessDelta(const QHash<int, ToolCall> &acc, const QJsonObject &delta)
+{
+    const QString deltaId = delta.value(u"id"_s).toString();
+    if (!deltaId.isEmpty()) {
+        for (auto it = acc.constBegin(); it != acc.constEnd(); ++it) {
+            if (it.value().id == deltaId) {
+                return it.key();
+            }
+        }
+    } else {
+        int openSlot = -1;
+        int openCalls = 0;
+        for (auto it = acc.constBegin(); it != acc.constEnd(); ++it) {
+            if (isCompleteToolArguments(it.value().argumentsJson)) {
+                continue;
+            }
+            ++openCalls;
+            // The highest slot is the call that was started last.
+            openSlot = qMax(openSlot, it.key());
+        }
+        if (openCalls > 0) {
+            return openSlot;
+        }
+    }
+    // A new call: the next free slot. The keys of a hash are not ordered, so
+    // the highest one is looked for explicitly.
+    int next = 0;
+    for (auto it = acc.constBegin(); it != acc.constEnd(); ++it) {
+        next = qMax(next, it.key() + 1);
+    }
+    return next;
+}
+
 void LlmClient::applyAuthHeaders(QNetworkRequest &request, ApiFormat format, const QString &key)
 {
     if (format == ApiFormat::AnthropicCompatible) {
@@ -222,6 +444,29 @@ void LlmClient::applyAuthHeaders(QNetworkRequest &request, ApiFormat format, con
         return;
     }
     request.setRawHeader("Authorization", QString(u"Bearer "_s + key).toUtf8());
+}
+
+bool LlmClient::usesGeminiNativeTransport(const Settings &settings)
+{
+    if (settings.provider != Provider::OpenAICompatible) {
+        return false;
+    }
+    const QUrl url(settings.openaiCompatibleUrl.trimmed());
+    return url.isValid() && isGoogleGenerativeLanguageHost(url.host());
+}
+
+QString LlmClient::geminiNativeBaseUrl(const Settings &settings)
+{
+    return geminiBaseUrlFor(settings);
+}
+
+QString LlmClient::geminiModelName(const QString &model)
+{
+    QString name = model.trimmed();
+    if (name.startsWith(u"models/"_s)) {
+        name = name.mid(7);
+    }
+    return name;
 }
 
 // Turns the streamed tool-call accumulator into finished ToolCalls. The
@@ -299,8 +544,9 @@ CompletionChunk LlmClient::parseSseLine(const QByteArray &line, QHash<int, ToolC
     }
 
     const QJsonObject root = doc.object();
-    if (root.contains(u"error"_s)) {
-        const QJsonValue error = root.value(u"error"_s);
+    const QJsonValue streamError = root.value(u"error"_s);
+    if (!streamError.isUndefined() && !streamError.isNull()) {
+        const QJsonValue error = streamError;
         chunk.error = error.isObject() ? error.toObject().value(u"message"_s).toString() : error.toString();
         if (chunk.error.isEmpty()) {
             chunk.error = QString::fromUtf8(payload);
@@ -329,7 +575,11 @@ CompletionChunk LlmClient::parseSseLine(const QByteArray &line, QHash<int, ToolC
             } else if (kind == u"input_json_delta"_s && acc) {
                 // Tool arguments are streamed as JSON fragments; keep them raw
                 // so drainToolAccumulator() can parse the assembled object.
-                ToolCall &tool = (*acc)[root.value(u"index"_s).toInt()];
+                const QJsonValue indexValue = root.value(u"index"_s);
+                const int index = indexValue.isDouble()
+                    ? indexValue.toInt()
+                    : (indexValue.isString() ? indexValue.toString().toInt() : 0);
+                ToolCall &tool = (*acc)[index];
                 const QString frag = delta.value(u"partial_json"_s).toString();
                 constexpr qsizetype kMaxToolArgsChars = 1024 * 1024;
                 if (tool.argumentsJson.size() + frag.size() <= kMaxToolArgsChars) {
@@ -339,7 +589,11 @@ CompletionChunk LlmClient::parseSseLine(const QByteArray &line, QHash<int, ToolC
         } else if (anthropicType == u"content_block_start"_s) {
             const QJsonObject block = root.value(u"content_block"_s).toObject();
             if (block.value(u"type"_s).toString() == u"tool_use"_s && acc) {
-                ToolCall &tool = (*acc)[root.value(u"index"_s).toInt()];
+                const QJsonValue indexValue = root.value(u"index"_s);
+                const int index = indexValue.isDouble()
+                    ? indexValue.toInt()
+                    : (indexValue.isString() ? indexValue.toString().toInt() : 0);
+                ToolCall &tool = (*acc)[index];
                 tool.id = block.value(u"id"_s).toString();
                 tool.name = block.value(u"name"_s).toString();
                 // A short input can arrive complete here, with no delta events.
@@ -356,8 +610,15 @@ CompletionChunk LlmClient::parseSseLine(const QByteArray &line, QHash<int, ToolC
                     tool.arguments = input.toObject();
                 }
             }
+        } else if (anthropicType == u"message_start"_s) {
+            const QJsonObject usage = root.value(u"message"_s).toObject().value(u"usage"_s).toObject();
+            chunk.inputTokens = usage.value(u"input_tokens"_s).toInt();
+            chunk.outputTokens = usage.value(u"output_tokens"_s).toInt();
+            chunk.cachedInputTokens = usage.value(u"cache_read_input_tokens"_s).toInt();
         } else if (anthropicType == u"message_delta"_s) {
             chunk.finishReason = root.value(u"delta"_s).toObject().value(u"stop_reason"_s).toString();
+            const QJsonObject usage = root.value(u"usage"_s).toObject();
+            chunk.outputTokens = usage.value(u"output_tokens"_s).toInt();
         } else if (anthropicType == u"message_stop"_s) {
             // Anthropic never sends "data: [DONE]".
             chunk.finished = true;
@@ -378,8 +639,109 @@ CompletionChunk LlmClient::parseSseLine(const QByteArray &line, QHash<int, ToolC
         return chunk;
     }
 
+    // Gemini native streaming uses candidates/parts rather than the OpenAI
+    // choices/delta envelope. It has no "[DONE]" sentinel; finishReason is the
+    // terminator.
+    const QJsonArray candidates = root.value(u"candidates"_s).toArray();
+    if (!candidates.isEmpty() || root.contains(u"usageMetadata"_s)
+        || root.contains(u"promptFeedback"_s)) {
+        const QJsonObject feedback = root.value(u"promptFeedback"_s).toObject();
+        const QString blockReason = feedback.value(u"blockReason"_s).toString();
+        if (!blockReason.isEmpty()) {
+            chunk.error = u"Gemini blocked the response (%1)."_s.arg(blockReason);
+            chunk.finished = true;
+            return chunk;
+        }
+        if (!candidates.isEmpty()) {
+            const QJsonObject candidate = candidates.first().toObject();
+            const QJsonArray parts = candidate.value(u"content"_s).toObject()
+                                         .value(u"parts"_s).toArray();
+            for (const QJsonValue &value : parts) {
+                const QJsonObject part = value.toObject();
+                const QJsonObject functionCall = part.value(u"functionCall"_s).toObject();
+                if (!functionCall.isEmpty()) {
+                    ToolCall tool;
+                    tool.id = u"call_"_s + QUuid::createUuid().toString(QUuid::WithoutBraces);
+                    tool.name = functionCall.value(u"name"_s).toString();
+                    const QJsonValue args = functionCall.value(u"args"_s);
+                    if (args.isObject()) {
+                        tool.arguments = args.toObject();
+                        tool.argumentsJson = QString::fromUtf8(
+                            QJsonDocument(tool.arguments).toJson(QJsonDocument::Compact));
+                    } else if (args.isString()) {
+                        tool.argumentsJson = args.toString();
+                        const QJsonDocument parsed = QJsonDocument::fromJson(
+                            tool.argumentsJson.toUtf8());
+                        if (parsed.isObject()) {
+                            tool.arguments = parsed.object();
+                        }
+                    }
+                    if (!tool.name.isEmpty()) {
+                        chunk.completedTools.append(tool);
+                    }
+                    continue;
+                }
+                const QString text = part.value(u"text"_s).toString();
+                if (!text.isEmpty()) {
+                    if (part.value(u"thought"_s).toBool()) {
+                        chunk.thinkingDelta += text;
+                    } else {
+                        chunk.contentDelta += text;
+                    }
+                }
+            }
+            QString finish = candidate.value(u"finishReason"_s).toString();
+            if (finish == u"STOP"_s) {
+                finish = u"stop"_s;
+            } else if (finish == u"MAX_TOKENS"_s) {
+                finish = u"max_tokens"_s;
+            } else if (finish == u"SAFETY"_s || finish == u"RECITATION"_s
+                       || finish == u"BLOCKLIST"_s || finish == u"PROHIBITED_CONTENT"_s
+                       || finish == u"SPII"_s) {
+                chunk.error = u"Gemini stopped the response (%1)."_s.arg(finish);
+                chunk.finished = true;
+                chunk.finishReason = u"content_filter"_s;
+                return chunk;
+            }
+            if (!finish.isEmpty()) {
+                chunk.finishReason = finish;
+                chunk.finished = true;
+            }
+        }
+        const QJsonObject geminiUsage = root.value(u"usageMetadata"_s).toObject();
+        if (!geminiUsage.isEmpty()) {
+            chunk.inputTokens = geminiUsage.value(u"promptTokenCount"_s).toInt();
+            chunk.outputTokens = geminiUsage.value(u"candidatesTokenCount"_s).toInt()
+                + geminiUsage.value(u"thoughtsTokenCount"_s).toInt();
+            chunk.cachedInputTokens =
+                geminiUsage.value(u"cachedContentTokenCount"_s).toInt();
+            if (candidates.isEmpty()) {
+                chunk.finished = true;
+            }
+        }
+        return chunk;
+    }
+
+    const QJsonObject usage = root.value(u"usage"_s).toObject();
+    if (!usage.isEmpty()) {
+        // Most providers send a final usage-only chunk (choices is empty),
+        // but some attach the same object to the final choice. Parse it in
+        // both cases so calibration does not silently depend on the gateway.
+        chunk.inputTokens = usage.value(u"prompt_tokens"_s).toInt();
+        chunk.outputTokens = usage.value(u"completion_tokens"_s).toInt();
+        const QJsonObject details = usage.value(u"prompt_tokens_details"_s).toObject();
+        chunk.cachedInputTokens = details.value(u"cached_tokens"_s).toInt();
+        if (chunk.cachedInputTokens == 0) {
+            chunk.cachedInputTokens = usage.value(u"prompt_cache_hit_tokens"_s).toInt();
+        }
+    }
+
     const QJsonArray choices = root.value(u"choices"_s).toArray();
     if (choices.isEmpty()) {
+        if (!usage.isEmpty()) {
+            // The usage-only chunk is the end of an OpenAI-compatible stream.
+            chunk.finished = true;
+        }
         return chunk;
     }
 
@@ -398,18 +760,25 @@ CompletionChunk LlmClient::parseSseLine(const QByteArray &line, QHash<int, ToolC
         const QJsonArray toolCalls = delta.value(u"tool_calls"_s).toArray();
         for (const QJsonValue &value : toolCalls) {
             const QJsonObject obj = value.toObject();
-            int index = obj.value(u"index"_s).toInt();
-            // A provider that omits "index" would send every parallel tool call
-            // as index 0, so they would overwrite each other. Fall back to the
-            // next free slot in that case.
-            if (!obj.contains(u"index"_s)) {
-                // The next free slot. The keys of a hash are not ordered, so
-                // the highest one is looked for explicitly.
-                int next = 0;
-                for (auto it = acc->constBegin(); it != acc->constEnd(); ++it) {
-                    next = qMax(next, it.key() + 1);
+            const QJsonValue indexValue = obj.value(u"index"_s);
+            int index = 0;
+            bool haveIndex = false;
+            if (indexValue.isDouble()) {
+                index = indexValue.toInt();
+                haveIndex = true;
+            } else if (indexValue.isString()) {
+                bool ok = false;
+                const int parsed = indexValue.toString().trimmed().toInt(&ok);
+                if (ok) {
+                    index = parsed;
+                    haveIndex = true;
                 }
-                index = next;
+            }
+            // A provider that omits (or sends a non-numeric) "index" would
+            // otherwise send every parallel tool call to slot 0. The slot
+            // comes from the delta instead.
+            if (!haveIndex) {
+                index = slotForIndexLessDelta(*acc, obj);
             }
             ToolCall &tool = (*acc)[index];
             if (obj.contains(u"id"_s) && !obj.value(u"id"_s).toString().isEmpty()) {
@@ -471,6 +840,7 @@ CompletionChunk LlmClient::parseSseLine(const QByteArray &line, QHash<int, ToolC
 void LlmClient::resetCompletionState()
 {
     m_buffer.clear();
+    m_pendingEventData.clear();
     m_responseBody.clear();
     m_text.clear();
     m_toolAcc.clear();
@@ -478,6 +848,11 @@ void LlmClient::resetCompletionState()
     m_completionError.clear();
     m_sawDone = false;
     m_finishEmitted = false;
+    m_usageEmitted = false;
+    m_usageInput = 0;
+    m_usageOutput = 0;
+    m_usageCached = 0;
+    m_geminiRequestUsedCache = false;
     // m_abortRequested is deliberately not cleared here: resetCompletionState()
     // runs at the start of every request and right after an abort, and the flag
     // has to survive the abort so the late "finished" signal is recognised as
@@ -541,48 +916,93 @@ void LlmClient::doComplete(const QList<ChatMessage> &messages)
     }
 
     QJsonObject body;
-    QString endpoint;
+    QString requestUrl;
     QByteArray requestBody;
     QString acceptHeader = u"text/event-stream"_s;
 
-    switch (apiFormat) {
-    case ApiFormat::AnthropicCompatible:
-        body = buildAnthropicRequest(messages, model);
-        endpoint = u"/v1/messages"_s;
+    const bool geminiNative = usesGeminiNativeTransport(m_settings);
+    GeminiCachePlan geminiPlan;
+    if (geminiNative) {
+        geminiPlan = geminiCachePlan(messages, model);
+        const bool expired = !m_geminiCacheKey.isEmpty()
+            && (!m_geminiCacheExpires.isValid()
+                || m_geminiCacheExpires <= QDateTime::currentDateTimeUtc());
+        if (!m_geminiCacheKey.isEmpty()
+            && (m_geminiCacheKey != geminiPlan.key || expired)) {
+            // The cache is for a different system prompt, tool set, model, or
+            // first user turn. Drop it before the request so an in-flight
+            // request cannot observe a resource being deleted underneath it.
+            clearGeminiCache();
+        }
+        body = buildGeminiRequest(geminiPlan.requestMessages, model,
+                                  geminiPlan.cachedContent);
+        QUrl url(geminiNativeBaseUrl(m_settings));
+        QString path = url.path();
+        if (!path.endsWith(u'/')) {
+            path += u'/';
+        }
+        path += QString::fromLatin1(QUrl::toPercentEncoding(geminiModelResource(model),
+                                                            QByteArray("/")))
+            + u":streamGenerateContent"_s;
+        url.setPath(path);
+        QUrlQuery query;
+        query.addQueryItem(u"alt"_s, u"sse"_s);
+        url.setQuery(query);
+        requestUrl = url.toString();
         requestBody = QJsonDocument(body).toJson(QJsonDocument::Compact);
         acceptHeader = u"text/event-stream"_s;
-        break;
-    case ApiFormat::AcpNative:
-        body = buildAcpNativeRequest(messages, model);
-        endpoint = u"/acp/v1/chat/completions"_s;
+    } else {
+        QString endpoint;
+        switch (apiFormat) {
+        case ApiFormat::AnthropicCompatible:
+            body = buildAnthropicRequest(messages, model);
+            endpoint = u"/v1/messages"_s;
+            break;
+        case ApiFormat::AcpNative:
+            body = buildAcpNativeRequest(messages, model);
+            endpoint = u"/acp/v1/chat/completions"_s;
+            break;
+        case ApiFormat::OpenAICompatible:
+        default:
+            body = buildOpenAIRequest(messages, model);
+            endpoint = u"/chat/completions"_s;
+            break;
+        }
+        requestUrl = joinApiEndpoint(providerBaseUrl(m_settings), endpoint);
         requestBody = QJsonDocument(body).toJson(QJsonDocument::Compact);
-        acceptHeader = u"text/event-stream"_s;
-        break;
-    case ApiFormat::OpenAICompatible:
-    default:
-        body = buildOpenAIRequest(messages, model);
-        endpoint = u"/chat/completions"_s;
-        requestBody = QJsonDocument(body).toJson(QJsonDocument::Compact);
-        acceptHeader = u"text/event-stream"_s;
-        break;
     }
 
-    QNetworkRequest request{QUrl(providerBaseUrl(m_settings) + endpoint)};
+    QNetworkRequest request{QUrl(requestUrl)};
     request.setHeader(QNetworkRequest::ContentTypeHeader, u"application/json"_s);
+    // Force a fresh connection per request. Reusing a keep-alive connection to
+    // the same host (notably localhost on macOS) serialised the sub-agents'
+    // requests and made them run one after another instead of in parallel.
+    request.setRawHeader("Connection", "close");
     // Idle watchdog: a provider that accepts the connection and then goes quiet
     // would otherwise leave the turn pending forever, because nothing else here
     // sets a deadline. Qt treats this as an *idle* timeout -- it only fires when
     // no bytes arrive -- so a long generation that keeps streaming is never cut
     // short, while a half-open connection still ends with a retryable error.
     request.setTransferTimeout(kRequestIdleTimeoutMs);
-    applyAuthHeaders(request, apiFormat, key);
+    if (geminiNative) {
+        request.setRawHeader("x-goog-api-key", key.toUtf8());
+    } else {
+        applyAuthHeaders(request, apiFormat, key);
+    }
     request.setRawHeader("Accept", acceptHeader.toUtf8());
     if (m_settings.provider == Provider::OpenRouter) {
         request.setRawHeader("HTTP-Referer", "https://kate-editor.org");
         request.setRawHeader("X-Title", "Kate AI");
     }
 
+    m_geminiRequestUsedCache = geminiNative && !geminiPlan.cachedContent.isEmpty();
     m_reply = m_nam.post(request, requestBody);
+    if (geminiNative) {
+        // Cache creation happens alongside the completion. It is used by the
+        // next request, never by this one, so a cold cache does not add a
+        // round-trip to the user's first turn.
+        startGeminiCache(messages, model, geminiPlan);
+    }
 
     // Watchdog: mirrors the request-level transfer timeout above. On expiry Qt
     // reports TimeoutError, which classifyError() already maps to a retryable
@@ -634,11 +1054,17 @@ void LlmClient::stopTimerFor(QNetworkReply *reply)
 
 QJsonArray LlmClient::advertisedTools() const
 {
+    if (!m_toolDefinitionsOverride.isEmpty()) {
+        return m_toolDefinitionsOverride;
+    }
     QJsonArray tools = toolDefinitions(m_toolAccess);
     for (const QJsonValue &tool : m_extraTools) {
         const QString name = tool.toObject().value(u"function"_s).toObject().value(u"name"_s).toString();
-        // An extra tool still has to be permitted by the active mode.
-        if (m_toolAccess.isEmpty() || m_toolAccess.allows(name)) {
+        // An extra tool still has to be permitted by the active mode. The
+        // registry bridge tools are the exception: they only route a call to a
+        // tool that is checked again when it executes.
+        if (name == u"tool_search"_s || name == u"tool_describe"_s || name == u"tool_call"_s
+            || m_toolAccess.isEmpty() || m_toolAccess.allows(name)) {
             tools.append(tool);
         }
     }
@@ -647,6 +1073,7 @@ QJsonArray LlmClient::advertisedTools() const
 
 QJsonObject LlmClient::buildOpenAIRequest(const QList<ChatMessage> &messages, const QString &model)
 {
+    const ModelProfile profile = ModelProfiles::resolve(m_settings.provider, model);
     QJsonObject body;
     body.insert(u"model"_s, model);
     body.insert(u"messages"_s, messagesToJson(messages));
@@ -654,13 +1081,21 @@ QJsonObject LlmClient::buildOpenAIRequest(const QList<ChatMessage> &messages, co
     // "none" is not "no parallelism": it forbids tool calls altogether, so the
     // agent could not act at all when the user turned batching off. Batching is
     // controlled by parallel_tool_calls instead.
-    body.insert(u"tool_choice"_s, u"auto"_s);
-    body.insert(u"parallel_tool_calls"_s, m_settings.parallelToolCalls);
+    if (profile.supportsToolChoice) {
+        body.insert(u"tool_choice"_s, u"auto"_s);
+    }
+    body.insert(u"parallel_tool_calls"_s,
+                m_settings.parallelToolCalls && profile.supportsParallelToolCalls);
     body.insert(u"stream"_s, true);
+    if (providerSupportsStreamUsage(m_settings.provider)) {
+        body.insert(u"stream_options"_s,
+                    QJsonObject{{u"include_usage"_s, true}});
+    }
     body.insert(u"temperature"_s, m_settings.temperature);
     body.insert(u"top_p"_s, m_settings.topP);
     if (m_settings.maxTokens > 0) {
-        body.insert(u"max_tokens"_s, m_settings.maxTokens);
+        body.insert(u"max_tokens"_s,
+                    effectiveMaxOutputTokens(profile, m_settings.maxTokens));
     }
     if (m_settings.frequencyPenalty != 0.0) {
         body.insert(u"frequency_penalty"_s, m_settings.frequencyPenalty);
@@ -671,40 +1106,76 @@ QJsonObject LlmClient::buildOpenAIRequest(const QList<ChatMessage> &messages, co
     if (!m_settings.reasoningEffort.trimmed().isEmpty()) {
         body.insert(u"reasoning_effort"_s, m_settings.reasoningEffort.trimmed());
     }
-    // Enhanced intelligence parameters
-    if (m_settings.structuredThinking) {
-        body.insert(u"include_reasoning"_s, true);
-    }
-    if (m_settings.maxThinkingTokens > 0) {
-        body.insert(u"max_reasoning_tokens"_s, m_settings.maxThinkingTokens);
+    // Enhanced intelligence parameters. These are OpenRouter extensions, not
+    // part of the OpenAI schema: sending them to OpenAI, DeepSeek or a local
+    // server can be rejected as an unknown request field.
+    if (m_settings.provider == Provider::OpenRouter) {
+        if (m_settings.structuredThinking) {
+            body.insert(u"include_reasoning"_s, true);
+        }
+        if (m_settings.maxThinkingTokens > 0) {
+            body.insert(u"max_reasoning_tokens"_s, m_settings.maxThinkingTokens);
+        }
     }
     return body;
 }
 
 QJsonObject LlmClient::buildAnthropicRequest(const QList<ChatMessage> &messages, const QString &model)
 {
+    const ModelProfile profile = ModelProfiles::resolve(m_settings.provider, model);
+    const bool cache = profile.cacheStyle == CacheStyle::Anthropic;
+
     QJsonObject body;
     body.insert(u"model"_s, model);
 
     // The system prompt is a top-level parameter, never a system-role message.
     const QStringList systemParts = anthropicSystemParts(messages);
     if (!systemParts.isEmpty()) {
-        body.insert(u"system"_s, systemParts.join(u"\n\n"_s));
+        const QString systemText = systemParts.join(u"\n\n"_s);
+        if (cache) {
+            // One cache breakpoint after the whole static prompt. Tool schemas
+            // are stable too, so the breakpoint covers the prefix up to the
+            // first turn message; editor state travels as a turn message.
+            QJsonObject block;
+            block.insert(u"type"_s, u"text"_s);
+            block.insert(u"text"_s, systemText);
+            block.insert(u"cache_control"_s, QJsonObject{{u"type"_s, u"ephemeral"_s}});
+            body.insert(u"system"_s, QJsonArray{block});
+        } else {
+            body.insert(u"system"_s, systemText);
+        }
     }
 
     body.insert(u"messages"_s, messagesToAnthropicJson(messages));
     body.insert(u"stream"_s, true);
     // max_tokens is required by the Messages API; fall back to a sane default.
-    const int maxTokens = m_settings.maxTokens > 0 ? m_settings.maxTokens : 4096;
+    const int maxTokens = effectiveMaxOutputTokens(
+        profile, m_settings.maxTokens > 0 ? m_settings.maxTokens : 4096);
     body.insert(u"max_tokens"_s, maxTokens);
 
     // Extended thinking is the Messages API counterpart of the OpenAI
     // include_reasoning/max_reasoning_tokens pair; without it the thinking
-    // toggle is a no-op on this provider even though the stream parser already
-    // handles thinking_delta. While it is on the API requires a budget of at
-    // least 1024 tokens that stays below max_tokens, and it pins both sampling
-    // knobs to their defaults: a clamped or configured value is rejected.
-    const bool thinkingEnabled = m_settings.structuredThinking && m_settings.maxThinkingTokens > 0;
+    // Tools must be in Anthropic's {name, input_schema} shape, not OpenAI's.
+    // Anthropic has no parallel_tool_calls flag; it always decides on its own
+    // which tools to batch, and "none" would forbid tool calls entirely.
+    QJsonArray tools = anthropicTools(advertisedTools());
+    if (cache && !tools.isEmpty()) {
+        // A breakpoint on the last tool makes the tool block part of the
+        // cached prefix. The editor state follows as a turn message, so a
+        // changing workspace does not invalidate it.
+        QJsonObject last = tools.last().toObject();
+        last.insert(u"cache_control"_s, QJsonObject{{u"type"_s, u"ephemeral"_s}});
+        tools.replace(tools.size() - 1, last);
+    }
+
+    // Extended thinking blocks must be replayed with their signatures when a
+    // tool_use turn is sent back. Kate does not retain those signatures, so
+    // enabling thinking on a tool-using turn would make the follow-up request
+    // fail with "Expected thinking ... but found tool_use". Keep thinking for
+    // plain chat turns, where no replay is required, and disable it whenever
+    // tools are advertised or the budget cannot satisfy budget < max_tokens.
+    const bool thinkingEnabled = tools.isEmpty() && m_settings.structuredThinking
+        && m_settings.maxThinkingTokens > 0 && maxTokens > 1024;
     body.insert(u"temperature"_s, thinkingEnabled ? 1.0 : qBound(0.0, m_settings.temperature, 1.0));
     if (!thinkingEnabled && m_settings.topP > 0.0) {
         body.insert(u"top_p"_s, qBound(0.0, m_settings.topP, 1.0));
@@ -712,25 +1183,388 @@ QJsonObject LlmClient::buildAnthropicRequest(const QList<ChatMessage> &messages,
     if (thinkingEnabled) {
         QJsonObject thinking;
         thinking.insert(u"type"_s, u"enabled"_s);
-        const int ceiling = qMax(1024, maxTokens - 1024);
+        const int ceiling = maxTokens - 1;
         thinking.insert(u"budget_tokens"_s, qBound(1024, m_settings.maxThinkingTokens, ceiling));
         body.insert(u"thinking"_s, thinking);
     }
 
-    // Tools must be in Anthropic's {name, input_schema} shape, not OpenAI's.
-    // Anthropic has no parallel_tool_calls flag; it always decides on its own
-    // which tools to batch, and "none" would forbid tool calls entirely.
-    const QJsonArray tools = anthropicTools(advertisedTools());
     if (!tools.isEmpty()) {
         body.insert(u"tools"_s, tools);
-        body.insert(u"tool_choice"_s, u"auto"_s);
+        if (profile.supportsToolChoice) {
+            body.insert(u"tool_choice"_s, u"auto"_s);
+        }
     }
     return body;
+}
+
+QJsonArray LlmClient::messagesToGeminiJson(const QList<ChatMessage> &messages,
+                                           QString *systemInstruction) const
+{
+    QJsonArray contents;
+    QStringList systemParts;
+    auto appendContent = [&contents](const QString &role, const QJsonArray &parts) {
+        if (parts.isEmpty()) {
+            return;
+        }
+        if (!contents.isEmpty()
+            && contents.last().toObject().value(u"role"_s).toString() == role) {
+            QJsonObject content = contents.last().toObject();
+            QJsonArray existing = content.value(u"parts"_s).toArray();
+            for (const QJsonValue &part : parts) {
+                existing.append(part);
+            }
+            content.insert(u"parts"_s, existing);
+            contents.replace(contents.size() - 1, content);
+            return;
+        }
+        contents.append(geminiContent(role, parts));
+    };
+
+    for (const ChatMessage &message : messages) {
+        switch (message.role) {
+        case ChatMessage::Role::System:
+            if (!message.content.trimmed().isEmpty()) {
+                systemParts.append(message.content.trimmed());
+            }
+            break;
+        case ChatMessage::Role::User: {
+            if (!message.content.isEmpty()) {
+                appendContent(u"user"_s,
+                              QJsonArray{geminiTextPart(message.content)});
+            }
+            break;
+        }
+        case ChatMessage::Role::Assistant: {
+            QJsonArray parts;
+            if (!message.content.isEmpty()) {
+                parts.append(geminiTextPart(message.content));
+            }
+            for (const QJsonValue &value : message.toolCalls) {
+                const QJsonObject object = value.toObject();
+                const QJsonObject function = object.value(u"function"_s).toObject();
+                const QString name = function.value(u"name"_s).toString();
+                if (name.isEmpty()) {
+                    continue;
+                }
+                QJsonObject args = function.value(u"arguments"_s).toObject();
+                if (args.isEmpty() && function.value(u"arguments"_s).isString()) {
+                    const QJsonDocument parsed = QJsonDocument::fromJson(
+                        function.value(u"arguments"_s).toString().toUtf8());
+                    if (parsed.isObject()) {
+                        args = parsed.object();
+                    }
+                }
+                parts.append(QJsonObject{
+                    {u"functionCall"_s,
+                     QJsonObject{{u"name"_s, name}, {u"args"_s, args}}}});
+            }
+            appendContent(u"model"_s, parts);
+            break;
+        }
+        case ChatMessage::Role::Tool:
+            appendContent(u"user"_s, QJsonArray{geminiFunctionResponse(message)});
+            break;
+        }
+    }
+    if (systemInstruction) {
+        *systemInstruction = systemParts.join(u"\n\n"_s);
+    }
+    return contents;
+}
+
+QJsonObject LlmClient::buildGeminiRequest(const QList<ChatMessage> &messages,
+                                          const QString &model,
+                                          const QString &cachedContent)
+{
+    const ModelProfile profile = ModelProfiles::resolve(m_settings.provider, model);
+    QJsonObject body;
+    QString systemInstruction;
+    QJsonArray contents = messagesToGeminiJson(messages, &systemInstruction);
+    if (contents.isEmpty()) {
+        contents.append(geminiContent(u"user"_s,
+                                      QJsonArray{geminiTextPart(u" "_s)}));
+    }
+    body.insert(u"contents"_s, contents);
+
+    if (cachedContent.isEmpty()) {
+        if (!systemInstruction.trimmed().isEmpty()) {
+            body.insert(u"systemInstruction"_s,
+                        QJsonObject{{u"parts"_s,
+                                     QJsonArray{geminiTextPart(systemInstruction)}}});
+        }
+        const QJsonArray tools = geminiTools(advertisedTools());
+        if (!tools.isEmpty()) {
+            body.insert(u"tools"_s, tools);
+            body.insert(u"toolConfig"_s,
+                        QJsonObject{{u"functionCallingConfig"_s,
+                                     QJsonObject{{u"mode"_s, u"AUTO"_s}}}});
+        }
+    } else {
+        body.insert(u"cachedContent"_s, cachedContent);
+    }
+
+    QJsonObject generation;
+    generation.insert(u"temperature"_s, m_settings.temperature);
+    if (m_settings.topP > 0.0) {
+        generation.insert(u"topP"_s, m_settings.topP);
+    }
+    if (m_settings.maxTokens > 0) {
+        generation.insert(u"maxOutputTokens"_s,
+                          effectiveMaxOutputTokens(profile, m_settings.maxTokens));
+    }
+    body.insert(u"generationConfig"_s, generation);
+    return body;
+}
+
+LlmClient::GeminiCachePlan LlmClient::geminiCachePlan(
+    const QList<ChatMessage> &messages, const QString &model) const
+{
+    GeminiCachePlan plan;
+    plan.requestMessages = messages;
+
+    // The turn-context message is transient: it is rebuilt for every request.
+    // Including it in the prefix would change the cache key each turn, so the
+    // resource would be recreated and never hit. Build the prefix from the
+    // persistent messages only.
+    QList<ChatMessage> stable;
+    QList<int> stableOriginalIndex;
+    stable.reserve(messages.size());
+    stableOriginalIndex.reserve(messages.size());
+    for (int i = 0; i < messages.size(); ++i) {
+        if (messages.at(i).transient) {
+            continue;
+        }
+        stable.append(messages.at(i));
+        stableOriginalIndex.append(i);
+    }
+
+    int firstUser = -1;
+    int prefixEnd = -1;
+    QStringList systems;
+    for (int i = 0; i < stable.size(); ++i) {
+        if (stable.at(i).role == ChatMessage::Role::System) {
+            if (!stable.at(i).content.trimmed().isEmpty()) {
+                systems.append(stable.at(i).content.trimmed());
+            }
+            continue;
+        }
+        if (firstUser < 0 && stable.at(i).role == ChatMessage::Role::User) {
+            firstUser = i;
+            continue;
+        }
+        // Cache the first exchange, not just the first user turn. The suffix
+        // then starts with a user/tool response, which keeps Gemini's content
+        // roles valid and gives the cache a useful amount of content.
+        if (firstUser >= 0 && stable.at(i).role == ChatMessage::Role::Assistant) {
+            prefixEnd = i;
+            break;
+        }
+    }
+    if (firstUser < 0 || prefixEnd < 0) {
+        return plan;
+    }
+    plan.systemText = systems.join(u"\n\n"_s);
+    plan.prefixContents = messagesToGeminiJson(stable.mid(0, prefixEnd + 1), nullptr);
+
+    const QJsonArray tools = geminiTools(advertisedTools());
+    const QByteArray material = (model + u'\n' + plan.systemText + u'\n'
+                                  + QString::fromUtf8(QJsonDocument(plan.prefixContents)
+                                                          .toJson(QJsonDocument::Compact))
+                                  + u'\n'
+                                  + QString::fromUtf8(QJsonDocument(tools).toJson(
+                                        QJsonDocument::Compact)))
+                                     .toUtf8();
+    plan.key = QString::fromLatin1(
+        QCryptographicHash::hash(material, QCryptographicHash::Sha1).toHex());
+
+    // Everything after the cached exchange is sent verbatim. A transient
+    // message that sat inside the prefix moves to the front of the suffix so
+    // the model still receives it; one after the split keeps its place.
+    const int splitOriginal = stableOriginalIndex.at(prefixEnd);
+    QList<ChatMessage> suffix;
+    for (int i = 0; i < messages.size(); ++i) {
+        if (i <= splitOriginal) {
+            if (messages.at(i).transient) {
+                suffix.append(messages.at(i));
+            }
+            continue;
+        }
+        suffix.append(messages.at(i));
+    }
+
+    const bool cacheValid = !m_geminiCacheKey.isEmpty()
+        && m_geminiCacheKey == plan.key
+        && !m_geminiCacheName.isEmpty()
+        && m_geminiCacheExpires > QDateTime::currentDateTimeUtc();
+    // A cache without a suffix would leave the request without contents.
+    if (cacheValid && !suffix.isEmpty()) {
+        plan.cachedContent = m_geminiCacheName;
+        plan.requestMessages = suffix;
+    }
+    return plan;
+}
+
+QJsonObject LlmClient::buildGeminiCacheRequest(const GeminiCachePlan &plan,
+                                               const QString &model) const
+{
+    QJsonObject payload;
+    payload.insert(u"model"_s, geminiModelResource(model));
+    payload.insert(u"displayName"_s, QString(u"kateai-"_s + plan.key.left(12)));
+    payload.insert(u"ttl"_s, u"1800s"_s);
+    payload.insert(u"contents"_s, plan.prefixContents);
+    if (!plan.systemText.trimmed().isEmpty()) {
+        payload.insert(u"systemInstruction"_s,
+                       QJsonObject{{u"parts"_s,
+                                    QJsonArray{geminiTextPart(plan.systemText)}}});
+    }
+    const QJsonArray tools = geminiTools(advertisedTools());
+    if (!tools.isEmpty()) {
+        payload.insert(u"tools"_s, tools);
+    }
+    return payload;
+}
+
+void LlmClient::clearGeminiCache()
+{
+    if (m_geminiCacheReply) {
+        m_geminiCacheReply->disconnect(this);
+        m_geminiCacheReply->abort();
+        m_geminiCacheReply->deleteLater();
+        m_geminiCacheReply = nullptr;
+    }
+    m_geminiCachePendingKey.clear();
+    if (!m_geminiCacheName.isEmpty()) {
+        deleteGeminiCacheResource(m_geminiCacheBaseUrl, m_geminiCacheName);
+    }
+    m_geminiCacheKey.clear();
+    m_geminiCacheName.clear();
+    m_geminiCacheBaseUrl.clear();
+    m_geminiCacheExpires = QDateTime();
+    m_geminiCacheFailedKey.clear();
+}
+
+void LlmClient::deleteGeminiCacheResource(const QString &baseUrl, const QString &name)
+{
+    if (baseUrl.isEmpty() || name.isEmpty()) {
+        return;
+    }
+    QUrl url(baseUrl);
+    QString path = url.path();
+    if (!path.endsWith(u'/')) {
+        path += u'/';
+    }
+    path += name;
+    url.setPath(path);
+    QNetworkRequest request(url);
+    request.setRawHeader("x-goog-api-key", apiKeyFor(m_settings).toUtf8());
+    request.setTransferTimeout(30000);
+    if (QNetworkReply *reply = m_nam.deleteResource(request)) {
+        connect(reply, &QNetworkReply::finished, reply, &QNetworkReply::deleteLater);
+    }
+}
+
+void LlmClient::startGeminiCache(const QList<ChatMessage> &messages,
+                                 const QString &model,
+                                 const GeminiCachePlan &plan)
+{
+    Q_UNUSED(messages)
+    if (plan.key.isEmpty() || !plan.cachedContent.isEmpty()) {
+        return;
+    }
+    if (m_geminiCacheFailedKey == plan.key) {
+        return;
+    }
+    if (m_geminiCacheKey == plan.key && !m_geminiCacheName.isEmpty()
+        && m_geminiCacheExpires > QDateTime::currentDateTimeUtc()) {
+        return;
+    }
+    if (m_geminiCachePendingKey == plan.key && m_geminiCacheReply) {
+        return;
+    }
+    const QString toolsJson = QString::fromUtf8(
+        QJsonDocument(geminiTools(advertisedTools())).toJson(QJsonDocument::Compact));
+    const QString prefixJson = QString::fromUtf8(
+        QJsonDocument(plan.prefixContents).toJson(QJsonDocument::Compact));
+    const int prefixTokens = Tokens::estimate(plan.systemText)
+        + Tokens::estimate(prefixJson)
+        + Tokens::estimate(toolsJson);
+    // Gemini rejects caches below its model-specific minimum. Pro models use a
+    // 4K floor; Flash and smaller use 1K.
+    const int minimumTokens =
+        geminiModelName(model).contains(u"pro"_s, Qt::CaseInsensitive) ? 4096 : 1024;
+    if (prefixTokens < minimumTokens) {
+        return;
+    }
+
+    const QJsonObject payload = buildGeminiCacheRequest(plan, model);
+
+    if (m_geminiCacheReply) {
+        m_geminiCacheReply->disconnect(this);
+        m_geminiCacheReply->abort();
+        m_geminiCacheReply->deleteLater();
+        m_geminiCacheReply = nullptr;
+    }
+
+    const QString base = geminiNativeBaseUrl(m_settings);
+    QNetworkRequest request(QUrl(base + u"/cachedContents"_s));
+    request.setHeader(QNetworkRequest::ContentTypeHeader, u"application/json"_s);
+    request.setRawHeader("x-goog-api-key", apiKeyFor(m_settings).toUtf8());
+    request.setRawHeader("Connection", "close");
+    request.setTransferTimeout(45000);
+
+    m_geminiCachePendingKey = plan.key;
+    m_geminiCacheReply = m_nam.post(
+        request, QJsonDocument(payload).toJson(QJsonDocument::Compact));
+    QNetworkReply *reply = m_geminiCacheReply;
+    const QString cacheKey = plan.key;
+    connect(reply, &QNetworkReply::finished, this, [this, reply, cacheKey, base] {
+        if (m_geminiCacheReply != reply && m_geminiCachePendingKey != cacheKey) {
+            reply->deleteLater();
+            return;
+        }
+        if (m_geminiCacheReply == reply) {
+            m_geminiCacheReply = nullptr;
+        }
+        if (m_geminiCachePendingKey == cacheKey) {
+            m_geminiCachePendingKey.clear();
+        }
+        const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const QByteArray body = reply->readAll();
+        const QNetworkReply::NetworkError networkError = reply->error();
+        const QString errorString = reply->errorString();
+        reply->deleteLater();
+        QJsonDocument document = QJsonDocument::fromJson(body);
+        const QJsonObject root = document.isObject() ? document.object() : QJsonObject();
+        const QString name = root.value(u"name"_s).toString();
+        if (networkError != QNetworkReply::NoError || status >= 400 || name.isEmpty()) {
+            // A local network failure may succeed on the next turn; a server
+            // rejection (bad schema, below minimum, unsupported model) will
+            // not, so remember only the latter.
+            if (networkError == QNetworkReply::NoError) {
+                m_geminiCacheFailedKey = cacheKey;
+            }
+            qWarning() << "KateAI: Gemini cache creation failed"
+                       << status << errorString << body.left(400);
+            return;
+        }
+        const QString oldName = m_geminiCacheName;
+        const QString oldBase = m_geminiCacheBaseUrl;
+        m_geminiCacheKey = cacheKey;
+        m_geminiCacheName = name;
+        m_geminiCacheBaseUrl = base;
+        // Leave a minute of headroom before the server-side expiry so a request
+        // does not cross the boundary mid-flight.
+        m_geminiCacheExpires = QDateTime::currentDateTimeUtc().addSecs(1800 - 60);
+        if (!oldName.isEmpty() && oldName != name) {
+            deleteGeminiCacheResource(oldBase, oldName);
+        }
+    });
 }
 
 QJsonObject LlmClient::buildAcpNativeRequest(const QList<ChatMessage> &messages, const QString &model)
 {
     // ACP Native format - similar to OpenAI but with ACP-specific extensions
+    const ModelProfile profile = ModelProfiles::resolve(m_settings.provider, model);
     QJsonObject body;
     body.insert(u"model"_s, model);
     body.insert(u"messages"_s, messagesToJson(messages));
@@ -738,13 +1572,17 @@ QJsonObject LlmClient::buildAcpNativeRequest(const QList<ChatMessage> &messages,
     // "none" is not "no parallelism": it forbids tool calls altogether, so the
     // agent could not act at all when the user turned batching off. Batching is
     // controlled by parallel_tool_calls instead.
-    body.insert(u"tool_choice"_s, u"auto"_s);
-    body.insert(u"parallel_tool_calls"_s, m_settings.parallelToolCalls);
+    if (profile.supportsToolChoice) {
+        body.insert(u"tool_choice"_s, u"auto"_s);
+    }
+    body.insert(u"parallel_tool_calls"_s,
+                m_settings.parallelToolCalls && profile.supportsParallelToolCalls);
     body.insert(u"stream"_s, true);
     body.insert(u"temperature"_s, m_settings.temperature);
     body.insert(u"top_p"_s, m_settings.topP);
     if (m_settings.maxTokens > 0) {
-        body.insert(u"max_tokens"_s, m_settings.maxTokens);
+        body.insert(u"max_tokens"_s,
+                    effectiveMaxOutputTokens(profile, m_settings.maxTokens));
     }
     // ACP-specific fields
     body.insert(u"acp_version"_s, u"1.0"_s);
@@ -902,6 +1740,7 @@ void LlmClient::fetchModels(Provider provider)
         apiFormat = ApiFormat::AnthropicCompatible;
     }
 
+    const bool geminiNative = usesGeminiNativeTransport(providerSettings);
     QString modelsEndpoint;
     switch (apiFormat) {
     case ApiFormat::AnthropicCompatible:
@@ -917,9 +1756,31 @@ void LlmClient::fetchModels(Provider provider)
     }
 
     // Respect the configured endpoint, not just the provider default, so a
-    // custom Ollama/LocalAI/ACP URL actually takes effect.
-    QNetworkRequest request{QUrl(providerBaseUrl(providerSettings) + modelsEndpoint)};
-    applyAuthHeaders(request, apiFormat, key);
+    // custom Ollama/LocalAI/ACP URL actually takes effect. The Gemini native
+    // catalogue lives under the native base, not the /openai compatibility
+    // suffix.
+    QString modelsUrl;
+    if (geminiNative) {
+        QUrl url(geminiNativeBaseUrl(providerSettings));
+        QString path = url.path();
+        if (!path.endsWith(u'/')) {
+            path += u'/';
+        }
+        path += u"models"_s;
+        url.setPath(path);
+        QUrlQuery query;
+        query.addQueryItem(u"pageSize"_s, u"1000"_s);
+        url.setQuery(query);
+        modelsUrl = url.toString();
+    } else {
+        modelsUrl = joinApiEndpoint(providerBaseUrl(providerSettings), modelsEndpoint);
+    }
+    QNetworkRequest request{QUrl(modelsUrl)};
+    if (geminiNative) {
+        request.setRawHeader("x-goog-api-key", key.toUtf8());
+    } else {
+        applyAuthHeaders(request, apiFormat, key);
+    }
     request.setHeader(QNetworkRequest::UserAgentHeader, u"Kate AI"_s);
     // A models listing is a single short response; it gets the same idle
     // watchdog so a stalled endpoint cannot hang the settings dialog.
@@ -943,6 +1804,14 @@ void LlmClient::abort()
     m_retryTimer.stop();
     m_retryScheduled = false;
     abortModelFetches();
+
+    if (m_geminiCacheReply) {
+        m_geminiCacheReply->disconnect(this);
+        m_geminiCacheReply->abort();
+        m_geminiCacheReply->deleteLater();
+        m_geminiCacheReply = nullptr;
+    }
+    m_geminiCachePendingKey.clear();
 
     const auto timers = m_requestTimers;
     m_requestTimers.clear();
@@ -1076,6 +1945,20 @@ void LlmClient::handleModelsFinished(QNetworkReply *reply, Provider provider)
         break;
     }
 
+    // Gemini's native catalogue uses {"models":[{"name":"models/gemini-…"}]}
+    // instead of the OpenAI {"data":[…]} envelope.
+    if (models.isEmpty()) {
+        for (const QJsonValue &value : root.value(u"models"_s).toArray()) {
+            QString id = value.toObject().value(u"name"_s).toString().trimmed();
+            if (id.startsWith(u"models/"_s)) {
+                id = id.mid(7);
+            }
+            if (!id.isEmpty() && !models.contains(id)) {
+                models.append(id);
+            }
+        }
+    }
+
     models.sort(Qt::CaseInsensitive);
     if (models.isEmpty()) {
         Q_EMIT modelsFailed(provider, u"The provider did not return any available models."_s);
@@ -1117,8 +2000,21 @@ bool LlmClient::applySseChunk(const CompletionChunk &chunk)
     if (!chunk.completedTools.isEmpty()) {
         m_completedTools.append(chunk.completedTools);
     }
+    if (chunk.inputTokens > 0) {
+        m_usageInput = qMax(m_usageInput, chunk.inputTokens);
+    }
+    if (chunk.outputTokens > 0) {
+        m_usageOutput = qMax(m_usageOutput, chunk.outputTokens);
+    }
+    if (chunk.cachedInputTokens > 0) {
+        m_usageCached = qMax(m_usageCached, chunk.cachedInputTokens);
+    }
     if (chunk.finished) {
         m_sawDone = true;
+        if (!m_usageEmitted && (m_usageInput > 0 || m_usageOutput > 0)) {
+            m_usageEmitted = true;
+            Q_EMIT usageReceived(m_usageInput, m_usageOutput, m_usageCached);
+        }
     }
     return true;
 }
@@ -1265,11 +2161,21 @@ void LlmClient::handleFinished()
         m_completedTools.append(completedToolsFromAccumulator());
     }
 
+    // Some streams report usage in a trailing event without a finishReason.
+    // Emit it at stream end so calibration still sees the provider's count.
+    if (!m_usageEmitted && (m_usageInput > 0 || m_usageOutput > 0)) {
+        m_usageEmitted = true;
+        Q_EMIT usageReceived(m_usageInput, m_usageOutput, m_usageCached);
+    }
+
     // Classify the error. Only trust the body as provider error text when the
     // request actually failed: on a 200 the body is the model's own output, and
     // an answer mentioning "blocked" or "safety" must not read as an error.
-    const bool requestFailed = networkError != QNetworkReply::NoError || status >= 400
-        || !m_completionError.isEmpty();
+    // A stream that already delivered [DONE] is complete even if the socket
+    // was reset afterwards. Treating the late transport error as a failure
+    // threw away the full answer and re-ran the model.
+    const bool requestFailed = !m_sawDone
+        && (networkError != QNetworkReply::NoError || status >= 400 || !m_completionError.isEmpty());
     if (requestFailed) {
         // The body reaches the user verbatim in the error text, and providers
         // echo request details in it: a key leaked into a 400 body would be
@@ -1277,12 +2183,20 @@ void LlmClient::handleFinished()
         m_completionError = sanitizeResponseBody(m_completionError.toUtf8());
         m_responseBody = sanitizeResponseBody(m_responseBody).toUtf8();
     }
+    if (requestFailed && m_geminiRequestUsedCache
+        && (status == 400 || status == 404)
+        && m_responseBody.toLower().contains(QByteArray("cached"))) {
+        // The server no longer knows the resource (expired or deleted out of
+        // band). Forget it so the next request goes out uncached.
+        clearGeminiCache();
+    }
     const QByteArray errorBody = requestFailed ? m_responseBody : QByteArray();
     RetryErrorCategory errorCategory = classifyError(status, m_completionError, errorBody, networkError);
     m_retryContext.lastErrorCategory = errorCategory;
 
     // Check if we should retry
-    if (errorCategory != RetryErrorCategory::NonRetryable && errorCategory != RetryErrorCategory::None
+    if (!m_sawDone
+        && errorCategory != RetryErrorCategory::NonRetryable && errorCategory != RetryErrorCategory::None
         && errorCategory != RetryErrorCategory::ContextOverflow) {
         // Extract provider-suggested retry delay
         std::optional<int> providerDelaySeconds = headerRetryAfter;
@@ -1521,6 +2435,13 @@ RetryErrorCategory LlmClient::classifyByMessage(const QString &lowerError, const
         || lowerError.contains(u"overloaded")) {
         return RetryErrorCategory::RateLimitExceeded;
     }
+    // Permanent billing/authorisation failures. Retrying these only delays the
+    // message the user has to act on.
+    if (lowerError.contains(u"credit balance") || lowerError.contains(u"insufficient")
+        || lowerError.contains(u"billing") || lowerError.contains(u"payment required")
+        || lowerBody.contains(u"credit balance") || lowerBody.contains(u"insufficient_quota")) {
+        return RetryErrorCategory::NonRetryable;
+    }
 
     return RetryErrorCategory::None;
 }
@@ -1594,7 +2515,9 @@ RetryErrorCategory LlmClient::classifyError(int httpStatus, const QString &error
             if (httpStatus >= 500 && httpStatus < 600) {
                 return RetryErrorCategory::ServerOverloaded;
             }
-            break;
+            // Any other 4xx is the client's fault (validation, method, media
+            // type, payment). It will not become valid on a retry.
+            return RetryErrorCategory::NonRetryable;
         }
 
         // An unknown error status still carries a body worth classifying.
@@ -1667,7 +2590,11 @@ std::optional<int> LlmClient::clampProviderDelay(qint64 seconds) const
     if (seconds <= 0) {
         return std::nullopt;
     }
-    const qint64 cap = m_retryContext.maxDelaySeconds > 0 ? m_retryContext.maxDelaySeconds : 300;
+    // 0 means "no configured cap"; use the same 24-hour ceiling the retry
+    // timer applies instead of silently turning it into five minutes.
+    const qint64 cap = m_retryContext.maxDelaySeconds > 0
+        ? m_retryContext.maxDelaySeconds
+        : 24 * 60 * 60;
     return static_cast<int>(qMin(seconds, cap));
 }
 
@@ -1727,7 +2654,7 @@ std::optional<int> LlmClient::parseRetryAfterHeader(const QNetworkReply *reply) 
         bool ok = false;
         int seconds = resetAfterHeader.toInt(&ok);
         if (ok && seconds > 0) {
-            return std::min(seconds, m_retryContext.maxDelaySeconds > 0 ? m_retryContext.maxDelaySeconds : 300);
+            return clampProviderDelay(seconds);
         }
     }
 
@@ -1759,15 +2686,17 @@ std::optional<int> LlmClient::parseRetryAfterFromBody(const QByteArray &body) co
                 bool ok = false;
                 double seconds = str.toDouble(&ok);
                 if (ok && seconds > 0) {
-                    return std::min(static_cast<int>(std::ceil(seconds)),
-                                   m_retryContext.maxDelaySeconds > 0 ? m_retryContext.maxDelaySeconds : 300);
+                    // Clamp in double space: casting an out-of-range double to
+                    // int is undefined and usually yields a negative delay.
+                    const qint64 rounded = static_cast<qint64>(std::ceil(std::min(seconds, 1.0e12)));
+                    return clampProviderDelay(rounded);
                 }
             }
         } else if (val.isDouble()) {
             double seconds = val.toDouble();
             if (seconds > 0) {
-                return std::min(static_cast<int>(std::ceil(seconds)),
-                               m_retryContext.maxDelaySeconds > 0 ? m_retryContext.maxDelaySeconds : 300);
+                const qint64 rounded = static_cast<qint64>(std::ceil(std::min(seconds, 1.0e12)));
+                return clampProviderDelay(rounded);
             }
         }
     }
@@ -2006,7 +2935,13 @@ void LlmClient::executeRetry()
     }
 
     // Check if we should still retry (user might have disabled auto-retry in settings)
-    if (!shouldRetry(m_retryContext)) {
+    // The last retry in the budget is the one with attempt == maxAttempts.
+    // shouldRetry() refuses to schedule anything beyond that, but it must not
+    // be used here: it refuses this final attempt too, which wasted a full
+    // backoff and made maxRetryAttempts = 1 run no retry at all.
+    const bool mayRun = m_settings.enableAutoRetry && !m_abortRequested
+        && m_retryContext.attempt <= m_retryContext.maxAttempts;
+    if (!mayRun) {
         QString finalError = formatRetryExhaustedMessage(m_retryContext.lastErrorCategory, m_retryContext.providerName);
         Q_EMIT failed(finalError);
         clearStoredRequest();

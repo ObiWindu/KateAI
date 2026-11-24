@@ -130,6 +130,18 @@ private Q_SLOTS:
         QVERIFY(rendered.contains(u"<\\/rules>"_s));
     }
 
+    void aRuleFileCannotCloseTheWrapperInAnySpelling()
+    {
+        // The closing tag was matched case-sensitively, so "</RULES>" and
+        // "</rules >" closed the wrapper just as well as the exact spelling.
+        for (const QString &spelling : {u"</RULES>"_s, u"</Rules>"_s, u"</rules >"_s, u"</rules\n>"_s}) {
+            const RulesLoader::Block block{u"AGENTS.md"_s, u"text "_s + spelling + u" more text"_s};
+            const QString rendered = RulesLoader::render({block}, QString());
+            QCOMPARE(rendered.count(u"</rules>"_s), 1);
+            QVERIFY2(rendered.contains(u"<\\/rules"_s), qPrintable(spelling));
+        }
+    }
+
 private:
     static void writeFile(const QString &path, const QString &content)
     {
@@ -140,5 +152,5 @@ private:
     }
 };
 
-QTEST_MAIN(TestRules)
+QTEST_GUILESS_MAIN(TestRules)
 #include "test_rules.moc"

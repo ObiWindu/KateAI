@@ -72,7 +72,6 @@ const IconEntry kMainIcons[] = {
     {"write_plan_file", u"\u{1F4CB}"},
     {"suggest", u"\u{1F4A1}"},
     {"question", u"\u{2753}"},
-    {"goal_report", u"\u{1F3AF}"},
     {"new_task", u"\u{1F9E9}"},
     {"mcp__weather", u"\u{1F50C}"},
     {"terminal/exec", u"\u{1F5B3}"},

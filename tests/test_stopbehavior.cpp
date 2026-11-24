@@ -17,6 +17,7 @@
 #include "questionwidget.h"
 #include "sessionstoreisolation.h"
 #include "subtaskwidget.h"
+#include "test_python.h"
 #include "toolcallwidget.h"
 #include "types.h"
 
@@ -233,11 +234,15 @@ private Q_SLOTS:
         m_server = new QProcess(this);
         const QString script = repoFile(u"tests/mock_llm_server.py"_s);
         QVERIFY2(!script.isEmpty(), "could not locate tests/mock_llm_server.py");
-        m_server->start(u"python3"_s, QStringList{script, m_portFile});
+        m_server->start(python3Command(), QStringList{script, m_portFile});
         QVERIFY(m_server->waitForStarted(10000));
 
         QVERIFY(waitFor([this] {
-            return QFileInfo::exists(m_portFile);
+            QFile f(m_portFile);
+            if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) {
+                return false;
+            }
+            return QString::fromUtf8(f.readAll()).trimmed().toInt() > 0;
         }, 15000));
         QFile portFile(m_portFile);
         QVERIFY(portFile.open(QIODevice::ReadOnly | QIODevice::Text));
@@ -247,12 +252,48 @@ private Q_SLOTS:
 
     void cleanup()
     {
-        if (m_server && m_server->state() != QProcess::NotRunning) {
-            m_server->kill();
-            m_server->waitForFinished(2000);
+        if (m_server) {
+            if (m_server->state() != QProcess::NotRunning) {
+                m_server->kill();
+                m_server->waitForFinished(5000);
+            }
+            delete m_server;
+            m_server = nullptr;
         }
-        m_server = nullptr;
         m_workspace.reset();
+    }
+
+    // A docked sub-agent card has to show what the sub-agent is doing while it
+    // runs. The status line and the activity log are the only evidence of
+    // progress; a card that only spins is indistinguishable from a stuck one.
+    void liveSubAgentCardShowsItsActivity()
+    {
+        std::unique_ptr<ChatWidget> widget(makeWidget());
+
+        widget->ask(u"Split this across two agents."_s);
+        QList<SubtaskWidget *> agents;
+        QVERIFY2(waitFor([&] {
+            agents = widget->findChildren<SubtaskWidget *>();
+            return agents.size() >= 2;
+        }, 15000), "the mock never started the sub-agents");
+
+        const auto showsActivity = [&] {
+            for (SubtaskWidget *agent : std::as_const(agents)) {
+                for (QTextBrowser *browser : agent->findChildren<QTextBrowser *>()) {
+                    // The card's own answer surface is a direct child; the
+                    // activity log lives inside its disclosure container.
+                    if (browser->parentWidget() == agent) {
+                        continue;
+                    }
+                    if (browser->isVisibleTo(agent) && !browser->toPlainText().trimmed().isEmpty()) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        };
+        QVERIFY2(waitFor(showsActivity, 8000),
+                 "a running sub-agent card showed no activity at all");
     }
 
     // A stop pressed while a command is still running has to end the turn
@@ -463,6 +504,36 @@ private Q_SLOTS:
 
         QWidget *dock = intentDock(widget.get());
         QVERIFY2(dock && dock->isVisible(), "the sub-agent cards were never docked");
+
+        // The two cards share the dock's slot as tabs: only one is on top, so
+        // the strip cannot stack up over the composer, and each docked card is
+        // capped to a quarter of the panel so a chatty sub-agent cannot
+        // outgrow it. (A card already retired into the transcript is a normal
+        // transcript card again and is deliberately uncapped.)
+        auto isDocked = [&](SubtaskWidget *agent) {
+            for (QWidget *w = agent; w; w = w->parentWidget()) {
+                if (w == dock) {
+                    return true;
+                }
+            }
+            return false;
+        };
+        int visibleDockedCards = 0;
+        for (SubtaskWidget *agent : std::as_const(agents)) {
+            if (!isDocked(agent)) {
+                continue;
+            }
+            if (agent->isVisible()) {
+                ++visibleDockedCards;
+            }
+            QVERIFY2(agent->maximumHeight() <= widget->height() / 4,
+                     qPrintable(QStringLiteral("docked card allows %1px, a quarter of the panel is %2px")
+                                    .arg(agent->maximumHeight())
+                                    .arg(widget->height() / 4)));
+        }
+        QCOMPARE(visibleDockedCards, 1);
+        QVERIFY2(!widget->findChildren<QPushButton *>(u"subtaskTab"_s).isEmpty(),
+                 "two docked sub-agents need tabs to pick between them");
 
         QPushButton *stop = sendButton(widget.get());
         QVERIFY2(stop && stop->isEnabled(), "the stop button was not available while the sub-agents ran");

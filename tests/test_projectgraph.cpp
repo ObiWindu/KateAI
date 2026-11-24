@@ -7,6 +7,10 @@
 
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QTemporaryDir>
 #include <QTest>
 
@@ -53,6 +57,74 @@ private Q_SLOTS:
         QVERIFY(!graph.getNode(ProjectGraph::generateNodeId(dir.path() + u"/node_modules/pkg/index.js"_s)));
     }
 
+    void dependentsWalkTheReverseDirection()
+    {
+        ProjectGraph graph;
+        GraphNode a; a.id = u"a"_s; a.type = u"file"_s;
+        GraphNode b; b.id = u"b"_s; b.type = u"file"_s;
+        GraphNode c; c.id = u"c"_s; c.type = u"file"_s;
+        graph.addNode(a);
+        graph.addNode(b);
+        graph.addNode(c);
+        graph.addEdge({u"a"_s, u"b"_s, u"imports"_s, {}, true});
+        graph.addEdge({u"b"_s, u"c"_s, u"imports"_s, {}, true});
+        const QSet<QString> dependents = graph.getTransitiveDependents(u"c"_s);
+        QVERIFY(dependents.contains(u"b"_s));
+        QVERIFY(dependents.contains(u"a"_s));
+        QVERIFY(!dependents.contains(u"c"_s));
+    }
+
+    void removingOneRelationshipKeepsTheOther()
+    {
+        ProjectGraph graph;
+        GraphNode a; a.id = u"a"_s; a.type = u"file"_s;
+        GraphNode b; b.id = u"b"_s; b.type = u"file"_s;
+        graph.addNode(a);
+        graph.addNode(b);
+        graph.addEdge({u"a"_s, u"b"_s, u"imports"_s, {}, true});
+        graph.addEdge({u"a"_s, u"b"_s, u"references"_s, {}, true});
+        graph.removeEdge(u"a"_s, u"b"_s);
+        QCOMPARE(graph.getEdgesFrom(u"a"_s).size(), 1);
+        graph.removeEdge(u"a"_s, u"b"_s);
+        QCOMPARE(graph.getEdgesFrom(u"a"_s).size(), 0);
+    }
+
+    void importPathIsANodeIdSequence()
+    {
+        ProjectGraph graph;
+        GraphNode a; a.id = u"a"_s; a.type = u"file"_s;
+        GraphNode b; b.id = u"b"_s; b.type = u"file"_s;
+        GraphNode c; c.id = u"c"_s; c.type = u"file"_s;
+        graph.addNode(a);
+        graph.addNode(b);
+        graph.addNode(c);
+        graph.addEdge({u"a"_s, u"b"_s, u"imports"_s, {}, true});
+        graph.addEdge({u"b"_s, u"c"_s, u"imports"_s, {}, true});
+        QCOMPARE(graph.findImportPaths(u"a"_s, u"c"_s), (QList<QString>{u"a"_s, u"b"_s, u"c"_s}));
+    }
+
+    void testSymbolsResolveThroughASymlinkedWorkspacePath()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        writeFile(dir.path() + u"/a.cpp"_s, "int compute() {\n    return 1;\n}\n");
+
+        QTemporaryDir links;
+        QVERIFY(links.isValid());
+        const QString link = links.filePath(u"workspace"_s);
+        if (!QFile::link(dir.path(), link) || !QFileInfo(link).isSymLink()) {
+            QSKIP("symlinks are not available on this filesystem");
+        }
+
+        ProjectGraph graph;
+        graph.generateGraph(dir.path());
+        // macOS names the same temporary directory /var/... or /private/var/...;
+        // lookups must not depend on which spelling the caller has.
+        const QList<GraphSymbol> symbols = graph.symbolsInFile(link + u"/a.cpp"_s);
+        QVERIFY2(!symbols.isEmpty(), "the graph did not find the file through the symlinked path");
+        QCOMPARE(symbols.first().name, u"compute"_s);
+    }
+
     void testNodeTypesAndLanguageMetadata()
     {
         QTemporaryDir dir;
@@ -73,13 +145,18 @@ private Q_SLOTS:
         QCOMPARE(file->complexity, 1);
     }
 
-    void testBinaryAndLargeFilesSkipped()
+    void testBinaryFilesAreSkippedAndLargeFilesAreIndexed()
     {
         QTemporaryDir dir;
         QVERIFY(dir.isValid());
-        // Over the 64 KB cap.
-        const QByteArray big(70 * 1024, 'x');
-        writeFile(dir.path() + u"/big.txt"_s, big);
+        // A file well over the old 64 KB cap, with real definitions in it.
+        constexpr int kLines = 4000;
+        QByteArray big;
+        for (int i = 0; i < kLines; ++i) {
+            big += "int function_" + QByteArray::number(i) + "() { return " + QByteArray::number(i) + "; }\n";
+        }
+        QVERIFY(big.size() > 64 * 1024);
+        writeFile(dir.path() + u"/big.cpp"_s, big);
         // Known binary extension.
         writeFile(dir.path() + u"/pic.png"_s, QByteArrayLiteral("\x89PNG\r\n\x1a\n") + QByteArray(32, '\0'));
         // Text extension, but NUL bytes in the head.
@@ -88,10 +165,62 @@ private Q_SLOTS:
         ProjectGraph graph;
         graph.generateGraph(dir.path());
 
-        QCOMPARE(graph.getNodeCount(), 1);
-        QVERIFY(!graph.getNode(ProjectGraph::generateNodeId(dir.path() + u"/big.txt"_s)));
+        // The big file is part of the project: dropping it left the graph
+        // without the very files an agent asks about most.
+        const GraphNode *node = graph.getNode(ProjectGraph::generateNodeId(dir.path() + u"/big.cpp"_s));
+        QVERIFY2(node, "a file over 64 KB is missing from the graph");
+        QCOMPARE(node->type, u"file"_s);
+        // Its own metrics, not those of the first page of it.
+        QCOMPARE(node->linesOfCode, kLines);
+        QCOMPARE(node->complexity, kLines);
+        // The binaries are still left out: the root and the one text file.
+        QCOMPARE(graph.getNodeCount(), 2);
         QVERIFY(!graph.getNode(ProjectGraph::generateNodeId(dir.path() + u"/pic.png"_s)));
         QVERIFY(!graph.getNode(ProjectGraph::generateNodeId(dir.path() + u"/sneaky.dat"_s)));
+    }
+
+    void testTheGraphIsSerialisedTheSameWayEveryTime()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        // Enough dependencies that the order of an unordered set cannot be the
+        // sorted order by accident.
+        QString source;
+        for (int i = 0; i < 12; ++i) {
+            const QString name = QStringLiteral("header_%1.h").arg(i);
+            writeFile(dir.path() + u'/' + name, QByteArrayLiteral("int function();\n"));
+            source += QStringLiteral("#include \"%1\"\n").arg(name);
+        }
+        writeFile(dir.path() + u"/a.cpp"_s, source.toUtf8());
+
+        ProjectGraph graph;
+        graph.generateGraph(dir.path());
+
+        // The cache is written into the project and compared and committed, so
+        // the same graph has to serialise to the same bytes every time. The
+        // dependency sets are unordered, and their order shifted with the hash
+        // seed of the process.
+        const QByteArray first = QJsonDocument(graph.toJson()).toJson();
+        const QByteArray second = QJsonDocument(graph.toJson()).toJson();
+        QCOMPARE(first, second);
+
+        // And the lists themselves are ordered, not left to the hash seed.
+        QJsonArray dependencies;
+        const QJsonArray nodes = graph.toJson().value(u"nodes"_s).toArray();
+        for (const QJsonValue &value : nodes) {
+            const QJsonObject node = value.toObject();
+            if (node.value(u"name"_s).toString() == QLatin1String("a.cpp")) {
+                dependencies = node.value(u"dependencies"_s).toArray();
+            }
+        }
+        QCOMPARE(dependencies.size(), 12);
+        QStringList ids;
+        for (const QJsonValue &value : dependencies) {
+            ids.append(value.toString());
+        }
+        QStringList sorted = ids;
+        sorted.sort();
+        QCOMPARE(ids, sorted);
     }
 
     void testSymlinkLoopTerminates()
@@ -135,19 +264,86 @@ private Q_SLOTS:
         QVERIFY(!graph.getNode(ProjectGraph::generateNodeId(outside.path() + u"/secret.txt"_s)));
     }
 
-    void testNodeBudgetCapsAtThreeHundred()
+    void testNodeBudgetCapsAtOneThousand()
     {
         QTemporaryDir dir;
         QVERIFY(dir.isValid());
-        for (int i = 0; i < 350; ++i) {
+        for (int i = 0; i < 1050; ++i) {
             writeFile(dir.path() + u"/f%1.txt"_s.arg(i), "x\n");
         }
 
         ProjectGraph graph;
         graph.generateGraph(dir.path());
 
-        // The cap counts the root node too, so the graph stops at exactly 300.
-        QCOMPARE(graph.getNodeCount(), 300);
+        // The cap counts the root node too, so the graph stops at 1000.
+        QCOMPARE(graph.getNodeCount(), 1000);
+    }
+
+    // The scan must analyse each file while its text is in hand and then cut
+    // the text back to a bounded preview: holding every file until the
+    // dependency pass made the graph's peak memory grow with the whole
+    // workspace. A definition beyond that preview therefore has to survive in
+    // the symbol index even though the node no longer keeps the full text.
+    void testLargeFileSymbolsSurviveContentRelease()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        QByteArray content;
+        for (int i = 0; i < 3000; ++i) {
+            content += "// filler line that makes the file larger than a preview\n";
+        }
+        QVERIFY(content.size() > 64 * 1024);
+        content += "int lateFunction() { return 1; }\n";
+        writeFile(dir.path() + u"/late.cpp"_s, content);
+
+        ProjectGraph graph;
+        graph.generateGraph(dir.path());
+
+        const QString path = dir.path() + u"/late.cpp"_s;
+        const GraphNode *node = graph.findNodeByPath(path);
+        QVERIFY(node);
+        QVERIFY2(node->content.size() < content.size(),
+                 "the scan retained the whole file text");
+        QVERIFY2(node->content.size() <= 16 * 1024,
+                 "the scan retained more than the content preview");
+        const QList<GraphSymbol> symbols = graph.symbolsInFile(path);
+        const auto found = std::find_if(symbols.cbegin(), symbols.cend(),
+                                        [](const GraphSymbol &symbol) {
+                                            return symbol.name == u"lateFunction"_s;
+                                        });
+        QVERIFY2(found != symbols.cend(), "a definition past the preview was not indexed");
+        QVERIFY(found->line > 3000);
+    }
+
+    // The incremental path used to cut a new node's content to the preview
+    // before resolving its imports, so an include past the first 16 KiB was
+    // invisible until the next full scan.
+    void testNewFileImportsBeyondThePreviewAreIndexed()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        writeFile(dir.path() + u"/target.h"_s, "int target();\n");
+
+        ProjectGraph graph;
+        graph.generateGraph(dir.path());
+
+        QByteArray content;
+        for (int i = 0; i < 1200; ++i) {
+            content += "// filler line that pushes the include past the preview\n";
+        }
+        QVERIFY(content.size() > 16 * 1024);
+        content += "#include \"target.h\"\nint created() { return 1; }\n";
+        const QString newPath = dir.path() + u"/created.cpp"_s;
+        graph.updateGraph(newPath, QString::fromUtf8(content));
+
+        const GraphNode *created = graph.getNode(ProjectGraph::generateNodeId(newPath));
+        QVERIFY(created);
+        const QString targetId =
+            ProjectGraph::generateNodeId(dir.path() + u"/target.h"_s, u"file"_s);
+        QVERIFY2(created->dependencies.contains(targetId),
+                 "an include past the content preview was not resolved incrementally");
+        QVERIFY2(created->content.size() <= 16 * 1024,
+                 "the incremental path kept more than the content preview");
     }
 
     void testUpdateAndRemoveNode()
@@ -205,6 +401,48 @@ private Q_SLOTS:
         QCOMPARE(preview.size(), 11);
         QVERIFY(preview.endsWith(u"\u2026"_s));
         QCOMPARE(ProjectGraph::extractContentPreview(u"anything"_s, 0), QString());
+    }
+
+    void testImportsResolveToFileNodeIds()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        QVERIFY(QDir(dir.path()).mkpath(u"src"_s));
+        writeFile(dir.path() + u"/src/a.cpp"_s, QByteArrayLiteral("#include \"b.h\"\nint a() { return 1; }\n"));
+        writeFile(dir.path() + u"/src/b.h"_s, QByteArrayLiteral("int b();\n"));
+
+        ProjectGraph graph;
+        graph.generateGraph(dir.path());
+        const QString aId = ProjectGraph::generateNodeId(dir.path() + u"/src/a.cpp"_s);
+        const QString bId = ProjectGraph::generateNodeId(dir.path() + u"/src/b.h"_s);
+        GraphNode *a = graph.getNode(aId);
+        QVERIFY(a);
+        QVERIFY2(a->dependencies.contains(bId), "the include did not resolve to the header node");
+        QVERIFY2(graph.getNode(bId)->dependents.contains(aId), "the header does not know its dependent");
+        const QString summary = graph.contextSummary(10, 10, 1);
+        QVERIFY2(summary.contains(u"src/a.cpp -> src/b.h (imports)"_s), qPrintable(summary));
+    }
+
+    void testContextSummaryUsesReadablePathsAndSymbols()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        QVERIFY(QDir(dir.path()).mkpath(u"src"_s));
+        writeFile(dir.path() + u"/src/main.cpp"_s,
+                  "class Widget { };\n\nint main() { return 0; }\n");
+
+        ProjectGraph graph;
+        graph.generateGraph(dir.path());
+
+        const QString summary = graph.contextSummary(10, 10, 1);
+        QVERIFY2(summary.contains(u"src/main.cpp"_s), qPrintable(summary));
+        QVERIFY2(summary.contains(u"Widget"_s), qPrintable(summary));
+        QVERIFY2(summary.contains(u"main"_s), qPrintable(summary));
+        // A compact description must not leak the internal hash id when a
+        // human-readable path is available.
+        const QString id = ProjectGraph::generateNodeId(dir.path() + u"/src/main.cpp"_s);
+        QVERIFY2(!summary.contains(id), qPrintable(summary));
+        QVERIFY(graph.findNodeByPath(u"src/main.cpp"_s));
     }
 
     void testJsonRoundTrip()

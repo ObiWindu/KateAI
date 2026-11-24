@@ -8,6 +8,7 @@
  */
 
 #include "agentloop.h"
+#include "test_python.h"
 #include "types.h"
 
 #include <QCoreApplication>
@@ -81,11 +82,15 @@ private Q_SLOTS:
         m_server = new QProcess(this);
         const QString script = repoFile(u"tests/mock_llm_server.py"_s);
         QVERIFY2(!script.isEmpty(), "could not locate tests/mock_llm_server.py");
-        m_server->start(u"python3"_s, QStringList{script, m_portFile});
+        m_server->start(python3Command(), QStringList{script, m_portFile});
         QVERIFY(m_server->waitForStarted(10000));
 
         QVERIFY(waitFor([this] {
-            return QFileInfo::exists(m_portFile);
+            QFile f(m_portFile);
+            if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) {
+                return false;
+            }
+            return QString::fromUtf8(f.readAll()).trimmed().toInt() > 0;
         }, 15000));
         QFile portFile(m_portFile);
         QVERIFY(portFile.open(QIODevice::ReadOnly | QIODevice::Text));
@@ -95,11 +100,14 @@ private Q_SLOTS:
 
     void cleanup()
     {
-        if (m_server && m_server->state() != QProcess::NotRunning) {
-            m_server->kill();
-            m_server->waitForFinished(2000);
+        if (m_server) {
+            if (m_server->state() != QProcess::NotRunning) {
+                m_server->kill();
+                m_server->waitForFinished(5000);
+            }
+            delete m_server;
+            m_server = nullptr;
         }
-        m_server = nullptr;
         m_workspace.reset();
     }
 

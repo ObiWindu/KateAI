@@ -3,11 +3,37 @@
 #include "types.h"
 
 #include <QHash>
+#include <QJsonDocument>
 #include <QNetworkRequest>
 #include <QTest>
 
 using namespace Qt::Literals::StringLiterals;
 using namespace KateAi;
+
+namespace KateAi
+{
+class TestableLlmClient : public LlmClient
+{
+public:
+    QJsonObject geminiBody(const QList<ChatMessage> &messages, const QString &model,
+                           const QString &cachedContent)
+    {
+        return buildGeminiRequest(messages, model, cachedContent);
+    }
+    QString geminiCacheKey(const QList<ChatMessage> &messages, const QString &model)
+    {
+        return geminiCachePlan(messages, model).key;
+    }
+    QJsonObject geminiCacheBody(const QList<ChatMessage> &messages, const QString &model)
+    {
+        return buildGeminiCacheRequest(geminiCachePlan(messages, model), model);
+    }
+    QJsonObject openAiBody(const QList<ChatMessage> &messages, const QString &model)
+    {
+        return buildOpenAIRequest(messages, model);
+    }
+};
+} // namespace KateAi
 
 class TestLlmParse : public QObject
 {
@@ -21,6 +47,291 @@ private Q_SLOTS:
             QByteArray("data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"}}]}"), &acc);
         QCOMPARE(chunk.contentDelta, u"Hello"_s);
         QVERIFY(!chunk.finished);
+    }
+
+    void geminiNativeEndpointIsDetected()
+    {
+        Settings settings;
+        settings.provider = Provider::OpenAICompatible;
+        settings.openaiCompatibleUrl =
+            u"https://generativelanguage.googleapis.com/v1beta/openai"_s;
+        QVERIFY(LlmClient::usesGeminiNativeTransport(settings));
+        QCOMPARE(LlmClient::geminiNativeBaseUrl(settings),
+                 u"https://generativelanguage.googleapis.com/v1beta"_s);
+
+        settings.openaiCompatibleUrl =
+            u"https://generativelanguage.googleapis.com/v1beta"_s;
+        QCOMPARE(LlmClient::geminiNativeBaseUrl(settings),
+                 u"https://generativelanguage.googleapis.com/v1beta"_s);
+
+        settings.openaiCompatibleUrl = u"http://localhost:11434/v1"_s;
+        QVERIFY(!LlmClient::usesGeminiNativeTransport(settings));
+    }
+
+    void geminiRequestUsesNativeShapeAndCacheReference()
+    {
+        TestableLlmClient client;
+        Settings settings;
+        settings.provider = Provider::OpenAICompatible;
+        settings.openaiCompatibleUrl =
+            u"https://generativelanguage.googleapis.com/v1beta/openai"_s;
+        client.setSettings(settings);
+
+        QList<ChatMessage> messages;
+        ChatMessage system;
+        system.role = ChatMessage::Role::System;
+        system.content = u"You are Kate."_s;
+        messages.append(system);
+        ChatMessage user;
+        user.role = ChatMessage::Role::User;
+        user.content = u"Read main.cpp"_s;
+        messages.append(user);
+
+        const QJsonObject body = client.geminiBody(messages, u"gemini-2.5-pro"_s, QString());
+        QCOMPARE(body.value(u"systemInstruction"_s).toObject()
+                     .value(u"parts"_s).toArray().first().toObject()
+                     .value(u"text"_s).toString(),
+                 u"You are Kate."_s);
+        QCOMPARE(body.value(u"contents"_s).toArray().first().toObject()
+                     .value(u"role"_s).toString(),
+                 u"user"_s);
+        QVERIFY(!body.value(u"tools"_s).toArray().isEmpty());
+        QVERIFY(body.contains(u"toolConfig"_s));
+
+        const QJsonObject cached = client.geminiBody(
+            messages, u"gemini-2.5-pro"_s, u"cachedContents/abc"_s);
+        QCOMPARE(cached.value(u"cachedContent"_s).toString(),
+                 u"cachedContents/abc"_s);
+        QVERIFY(!cached.contains(u"systemInstruction"_s));
+        QVERIFY(!cached.contains(u"tools"_s));
+    }
+
+    void geminiCacheKeyTracksPrefixChanges()
+    {
+        TestableLlmClient client;
+        Settings settings;
+        settings.provider = Provider::OpenAICompatible;
+        settings.openaiCompatibleUrl =
+            u"https://generativelanguage.googleapis.com/v1beta"_s;
+        client.setSettings(settings);
+
+        QList<ChatMessage> messages;
+        ChatMessage system;
+        system.role = ChatMessage::Role::System;
+        system.content = u"System one"_s;
+        messages.append(system);
+        ChatMessage user;
+        user.role = ChatMessage::Role::User;
+        user.content = u"First request"_s;
+        messages.append(user);
+        ChatMessage assistant;
+        assistant.role = ChatMessage::Role::Assistant;
+        assistant.content = u"First answer"_s;
+        messages.append(assistant);
+
+        const QString first = client.geminiCacheKey(messages, u"gemini-2.5-pro"_s);
+        QVERIFY(!first.isEmpty());
+        QCOMPARE(client.geminiCacheKey(messages, u"gemini-2.5-pro"_s), first);
+
+        messages[0].content = u"System two"_s;
+        QVERIFY(client.geminiCacheKey(messages, u"gemini-2.5-pro"_s) != first);
+    }
+
+    void geminiCacheIgnoresTransientTurnContext()
+    {
+        // The turn-context message is rebuilt every request. If it entered the
+        // cached prefix the key would change each turn, recreate the resource,
+        // and the cache would never hit.
+        TestableLlmClient client;
+        Settings settings;
+        settings.provider = Provider::OpenAICompatible;
+        settings.openaiCompatibleUrl =
+            u"https://generativelanguage.googleapis.com/v1beta"_s;
+        client.setSettings(settings);
+
+        QList<ChatMessage> persistent;
+        ChatMessage system;
+        system.role = ChatMessage::Role::System;
+        system.content = u"System prompt"_s;
+        persistent.append(system);
+        ChatMessage user;
+        user.role = ChatMessage::Role::User;
+        user.content = u"First request"_s;
+        persistent.append(user);
+        ChatMessage assistant;
+        assistant.role = ChatMessage::Role::Assistant;
+        assistant.content = u"First answer"_s;
+        persistent.append(assistant);
+
+        QList<ChatMessage> withContext = persistent;
+        ChatMessage ambient;
+        ambient.role = ChatMessage::Role::User;
+        ambient.content = u"Editor context: volatile"_s;
+        ambient.transient = true;
+        withContext.insert(1, ambient);
+
+        const QString key = client.geminiCacheKey(persistent, u"gemini-2.5-pro"_s);
+        QVERIFY(!key.isEmpty());
+        QCOMPARE(client.geminiCacheKey(withContext, u"gemini-2.5-pro"_s), key);
+
+        const QJsonObject body = client.geminiCacheBody(withContext, u"gemini-2.5-pro"_s);
+        const QString json = QString::fromUtf8(
+            QJsonDocument(body).toJson(QJsonDocument::Compact));
+        QVERIFY2(!json.contains(u"Editor context: volatile"_s),
+                 "the volatile turn context entered the cached prefix");
+    }
+
+    void unknownModelKeepsExplicitOutputLimit()
+    {
+        // A user-set max_tokens is only capped for a known hosted family. The
+        // conservative fallback must not silently truncate a local model.
+        TestableLlmClient client;
+        Settings settings;
+        settings.provider = Provider::OpenAICompatible;
+        settings.maxTokens = 30000;
+        client.setSettings(settings);
+
+        QList<ChatMessage> messages;
+        ChatMessage user;
+        user.role = ChatMessage::Role::User;
+        user.content = u"Hello"_s;
+        messages.append(user);
+
+        QCOMPARE(client.openAiBody(messages, u"mystery-model-7b"_s)
+                     .value(u"max_tokens"_s).toInt(),
+                 30000);
+        QCOMPARE(client.openAiBody(messages, u"my-local-model"_s)
+                     .value(u"max_tokens"_s).toInt(),
+                 30000);
+        QCOMPARE(client.openAiBody(messages, u"gpt-4o"_s)
+                     .value(u"max_tokens"_s).toInt(),
+                 16384);
+    }
+
+    void geminiCacheRequestCarriesThePrefix()
+    {
+        TestableLlmClient client;
+        Settings settings;
+        settings.provider = Provider::OpenAICompatible;
+        settings.openaiCompatibleUrl =
+            u"https://generativelanguage.googleapis.com/v1beta"_s;
+        client.setSettings(settings);
+
+        QList<ChatMessage> messages;
+        ChatMessage system;
+        system.role = ChatMessage::Role::System;
+        system.content = u"System prompt"_s;
+        messages.append(system);
+        ChatMessage user;
+        user.role = ChatMessage::Role::User;
+        user.content = u"First request"_s;
+        messages.append(user);
+        ChatMessage assistant;
+        assistant.role = ChatMessage::Role::Assistant;
+        assistant.content = u"First answer"_s;
+        messages.append(assistant);
+
+        const QJsonObject body = client.geminiCacheBody(messages, u"gemini-2.5-flash"_s);
+        QCOMPARE(body.value(u"model"_s).toString(), u"models/gemini-2.5-flash"_s);
+        QCOMPARE(body.value(u"ttl"_s).toString(), u"1800s"_s);
+        QVERIFY(!body.value(u"contents"_s).toArray().isEmpty());
+        QCOMPARE(body.value(u"systemInstruction"_s).toObject()
+                     .value(u"parts"_s).toArray().first().toObject()
+                     .value(u"text"_s).toString(),
+                 u"System prompt"_s);
+        QVERIFY(!body.value(u"tools"_s).toArray().isEmpty());
+    }
+
+    void parsesGeminiTextAndUsage()
+    {
+        QHash<int, ToolCall> acc;
+        const CompletionChunk chunk = LlmClient::parseSseLine(
+            QByteArray("data: {\"candidates\":[{\"content\":{\"role\":\"model\","
+                       "\"parts\":[{\"text\":\"Hello\"}]},\"finishReason\":\"STOP\"}],"
+                       "\"usageMetadata\":{\"promptTokenCount\":120,"
+                       "\"candidatesTokenCount\":8,\"cachedContentTokenCount\":100,"
+                       "\"thoughtsTokenCount\":4}}"),
+            &acc);
+        QCOMPARE(chunk.contentDelta, u"Hello"_s);
+        QCOMPARE(chunk.finishReason, u"stop"_s);
+        QVERIFY(chunk.finished);
+        QCOMPARE(chunk.inputTokens, 120);
+        QCOMPARE(chunk.outputTokens, 12);
+        QCOMPARE(chunk.cachedInputTokens, 100);
+    }
+
+    void parsesGeminiFunctionCall()
+    {
+        QHash<int, ToolCall> acc;
+        const CompletionChunk chunk = LlmClient::parseSseLine(
+            QByteArray("data: {\"candidates\":[{\"content\":{\"role\":\"model\","
+                       "\"parts\":[{\"functionCall\":{\"name\":\"read_file\","
+                       "\"args\":{\"path\":\"main.cpp\"}}}]},\"finishReason\":\"STOP\"}]}"),
+            &acc);
+        QCOMPARE(chunk.completedTools.size(), 1);
+        const ToolCall tool = chunk.completedTools.first();
+        QCOMPARE(tool.name, u"read_file"_s);
+        QCOMPARE(tool.arguments.value(u"path"_s).toString(), u"main.cpp"_s);
+        QVERIFY(!tool.id.isEmpty());
+    }
+
+    void parsesGeminiThoughtParts()
+    {
+        QHash<int, ToolCall> acc;
+        const CompletionChunk chunk = LlmClient::parseSseLine(
+            QByteArray("data: {\"candidates\":[{\"content\":{\"role\":\"model\","
+                       "\"parts\":[{\"text\":\"thinking\",\"thought\":true}]}}]}"),
+            &acc);
+        QCOMPARE(chunk.thinkingDelta, u"thinking"_s);
+        QVERIFY(chunk.contentDelta.isEmpty());
+    }
+
+    void geminiBlockedPromptIsAnError()
+    {
+        QHash<int, ToolCall> acc;
+        const CompletionChunk chunk = LlmClient::parseSseLine(
+            QByteArray("data: {\"promptFeedback\":{\"blockReason\":\"SAFETY\"}}"), &acc);
+        QVERIFY(chunk.finished);
+        QVERIFY(chunk.error.contains(u"Gemini blocked"_s));
+    }
+
+    void usageOnFinalChoiceIsParsed()
+    {
+        // Some gateways attach usage to the final choice instead of sending a
+        // separate usage-only chunk.
+        QHash<int, ToolCall> acc;
+        const CompletionChunk chunk = LlmClient::parseSseLine(
+            QByteArray("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],"
+                       "\"usage\":{\"prompt_tokens\":120,\"completion_tokens\":8,"
+                       "\"prompt_tokens_details\":{\"cached_tokens\":40}}}"),
+            &acc);
+        QCOMPARE(chunk.inputTokens, 120);
+        QCOMPARE(chunk.outputTokens, 8);
+        QCOMPARE(chunk.cachedInputTokens, 40);
+        QCOMPARE(chunk.finishReason, u"stop"_s);
+    }
+
+    void anthropicUsageCarriesCacheHits()
+    {
+        QHash<int, ToolCall> acc;
+        const CompletionChunk chunk = LlmClient::parseSseLine(
+            QByteArray("data: {\"type\":\"message_start\",\"message\":{\"usage\":"
+                       "{\"input_tokens\":90,\"output_tokens\":1,"
+                       "\"cache_read_input_tokens\":1000}}}"),
+            &acc);
+        QCOMPARE(chunk.inputTokens, 90);
+        QCOMPARE(chunk.outputTokens, 1);
+        QCOMPARE(chunk.cachedInputTokens, 1000);
+    }
+
+    void nullErrorFieldIsNotAnError()
+    {
+        // Some providers include {"error":null} on a successful chunk.
+        QHash<int, ToolCall> acc;
+        const CompletionChunk chunk = LlmClient::parseSseLine(
+            QByteArray("data: {\"error\":null,\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}"), &acc);
+        QVERIFY2(chunk.error.isEmpty(), qPrintable(chunk.error));
+        QCOMPARE(chunk.contentDelta, u"ok"_s);
     }
 
     void splitEventIsJoined()
@@ -48,6 +359,40 @@ private Q_SLOTS:
             QByteArray("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"b\",\"function\":{\"name\":\"grep\",\"arguments\":\"{}\"}}]}}]}"),
             &acc);
         QCOMPARE(acc.size(), 2);
+    }
+
+    void toolCallWithStringIndexUsesItsSlot()
+    {
+        // QJsonValue::toInt() yielded 0 for "index":"1", collapsing parallel
+        // calls into slot 0.
+        QHash<int, ToolCall> acc;
+        LlmClient::parseSseLine(
+            QByteArray("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"a\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{}\"}}]}}]}"),
+            &acc);
+        LlmClient::parseSseLine(
+            QByteArray("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":\"1\",\"id\":\"b\",\"function\":{\"name\":\"grep\",\"arguments\":\"{}\"}}]}}]}"),
+            &acc);
+        QCOMPARE(acc.size(), 2);
+        QCOMPARE(acc.value(1).name, u"grep"_s);
+    }
+
+    void toolCallStreamedWithoutIndexStaysOneCall()
+    {
+        // A provider that omits "index" and streams the arguments in fragments
+        // - the shape every OpenAI-compatible server uses - was split into one
+        // call per delta, each with a fragment of the arguments and no name.
+        QHash<int, ToolCall> acc;
+        LlmClient::parseSseLine(
+            QByteArray("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"id\":\"a\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\"}}]}}]}"),
+            &acc);
+        LlmClient::parseSseLine(
+            QByteArray("data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"arguments\":\"\\\"main.cpp\\\"}\"}}]}}]}"),
+            &acc);
+        QCOMPARE(acc.size(), 1);
+        const ToolCall tool = acc.value(0);
+        QCOMPARE(tool.id, u"a"_s);
+        QCOMPARE(tool.name, u"read_file"_s);
+        QCOMPARE(tool.argumentsJson, u"{\"path\":\"main.cpp\"}"_s);
     }
 
     void placeholderObjectDoesNotBreakTheArguments()
@@ -255,12 +600,20 @@ private Q_SLOTS:
     void planModeOnlyAdvertisesReadTools()
     {
         const QJsonArray tools = toolDefinitions(ModeRegistry::toolAccessForGroups({ToolGroup::read()}));
-        QCOMPARE(tools.size(), 8);
+        QCOMPARE(tools.size(), 28);
         for (const QJsonValue &tool : tools) {
             const QString name = tool.toObject().value(u"function"_s).toObject().value(u"name"_s).toString();
-            QVERIFY(name == u"read_file"_s || name == u"list_dir"_s || name == u"grep"_s || name == u"glob"_s
+            QVERIFY(name == u"read_file"_s || name == u"read_tool_result"_s || name == u"list_dir"_s || name == u"grep"_s || name == u"glob"_s
                     || name == u"query_project_graph"_s || name == u"write_plan_file"_s || name == u"suggest"_s
-                    || name == u"question"_s);
+                    || name == u"question"_s || name == u"skill"_s
+                    || name == u"todo_write"_s || name == u"todo_read"_s || name == u"think"_s
+                    || name == u"exit_plan_mode"_s
+                    || name == u"lsp_diagnostics"_s || name == u"lsp_symbols"_s || name == u"lsp_hover"_s
+                    || name == u"lsp_definition"_s || name == u"lsp_references"_s || name == u"lsp_code_actions"_s
+                    || name == u"debug_status"_s || name == u"debug_stack"_s || name == u"debug_locals"_s
+                    || name == u"debug_breakpoints"_s || name == u"debug_select_frame"_s
+                    || name == u"debug_select_thread"_s || name == u"debug_snapshot"_s
+                    || name == u"build_targets"_s);
         }
     }
 

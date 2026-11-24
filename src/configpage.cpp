@@ -4,6 +4,7 @@
  */
 
 #include "configpage.h"
+#include "orchestration.h"
 #include "acpinstall.h"
 #include "plugin.h"
 #include "settings.h"
@@ -13,6 +14,7 @@
 #include "agentteam.h"
 #include "acpclient.h"
 #include "chattheme.h"
+#include "voiceinput.h"
 
 #include <QDir>
 #include <QJsonArray>
@@ -48,6 +50,7 @@
 #include <QSignalBlocker>
 #include <QSpinBox>
 #include <QTableWidget>
+#include <QTabBar>
 #include <QTabWidget>
 #include <QTimer>
 #include <QVBoxLayout>
@@ -74,6 +77,15 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     rootLayout->setContentsMargins(0, 0, 0, 0);
 
     auto *tabs = new QTabWidget(this);
+    // Match the editor's document tabs: flat, content-sized tabs that share the
+    // pane edge, reorder by dragging, and scroll instead of wrapping when the
+    // settings dialog is narrow.
+    tabs->setDocumentMode(true);
+    tabs->setMovable(true);
+    tabs->tabBar()->setChangeCurrentOnDrag(true);
+    tabs->setUsesScrollButtons(true);
+    tabs->setElideMode(Qt::ElideRight);
+    tabs->tabBar()->setExpanding(false);
     rootLayout->addWidget(tabs);
 
     auto makeKey = [this]() {
@@ -201,6 +213,8 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     m_acpEffort->addItem(u"low"_s, u"low"_s);
     m_acpEffort->addItem(u"medium"_s, u"medium"_s);
     m_acpEffort->addItem(u"high"_s, u"high"_s);
+    m_acpEffort->addItem(u"xhigh"_s, u"xhigh"_s);
+    m_acpEffort->addItem(u"max"_s, u"max"_s);
     m_acpEffort->setToolTip(i18n("Effort / thinking level pushed to the agent session. "
                                  "Only agents that advertise an effort option honor it; "
                                  "any option id the agent supports can be typed here."));
@@ -220,6 +234,99 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     acpForm->addRow(i18n("Effort Level:"), m_acpEffort);
     acpForm->addRow(i18n("Endpoint URL:"), m_acpUrl);
     providersLayout->addWidget(acpGroup);
+
+    // --- Two-model orchestration -------------------------------------------
+    auto *orchestrationGroup = new QGroupBox(i18n("Model Orchestration (API providers only)"), providersWidget);
+    auto *orchestrationLayout = new QVBoxLayout(orchestrationGroup);
+    m_orchestrationEnabled = new QCheckBox(i18n("Use a planner model and an executor model in one turn"), orchestrationGroup);
+    orchestrationLayout->addWidget(m_orchestrationEnabled);
+
+    auto *orchestrationForm = new QFormLayout();
+    auto *plannerRow = new QWidget(orchestrationGroup);
+    auto *plannerLayout = new QHBoxLayout(plannerRow);
+    plannerLayout->setContentsMargins(0, 0, 0, 0);
+    m_orchestrationPlannerProvider = new QComboBox(plannerRow);
+    m_orchestrationPlannerModel = new QComboBox(plannerRow);
+    m_orchestrationPlannerModel->setEditable(true);
+    m_orchestrationPlannerModel->setInsertPolicy(QComboBox::NoInsert);
+    m_orchestrationPlannerEffort = new QComboBox(plannerRow);
+    m_orchestrationPlannerEffort->addItem(i18n("Auto"), QString());
+    m_orchestrationPlannerEffort->addItem(i18n("Low"), u"low"_s);
+    m_orchestrationPlannerEffort->addItem(i18n("Medium"), u"medium"_s);
+    m_orchestrationPlannerEffort->addItem(i18n("High"), u"high"_s);
+    plannerLayout->addWidget(m_orchestrationPlannerProvider, 1);
+    plannerLayout->addWidget(m_orchestrationPlannerModel, 2);
+    plannerLayout->addWidget(m_orchestrationPlannerEffort);
+    orchestrationForm->addRow(i18n("Planner (read-only):"), plannerRow);
+
+    auto *executorRow = new QWidget(orchestrationGroup);
+    auto *executorLayout = new QHBoxLayout(executorRow);
+    executorLayout->setContentsMargins(0, 0, 0, 0);
+    m_orchestrationExecutorProvider = new QComboBox(executorRow);
+    m_orchestrationExecutorModel = new QComboBox(executorRow);
+    m_orchestrationExecutorModel->setEditable(true);
+    m_orchestrationExecutorModel->setInsertPolicy(QComboBox::NoInsert);
+    m_orchestrationExecutorEffort = new QComboBox(executorRow);
+    m_orchestrationExecutorEffort->addItem(i18n("Auto"), QString());
+    m_orchestrationExecutorEffort->addItem(i18n("Low"), u"low"_s);
+    m_orchestrationExecutorEffort->addItem(i18n("Medium"), u"medium"_s);
+    m_orchestrationExecutorEffort->addItem(i18n("High"), u"high"_s);
+    executorLayout->addWidget(m_orchestrationExecutorProvider, 1);
+    executorLayout->addWidget(m_orchestrationExecutorModel, 2);
+    executorLayout->addWidget(m_orchestrationExecutorEffort);
+    orchestrationForm->addRow(i18n("Executor:"), executorRow);
+
+    m_orchestrationReviewMode = new QComboBox(orchestrationGroup);
+    m_orchestrationReviewMode->addItem(i18n("Auto (changes or 3+ steps)"), u"auto"_s);
+    m_orchestrationReviewMode->addItem(i18n("Always"), u"always"_s);
+    m_orchestrationReviewMode->addItem(i18n("Off"), u"off"_s);
+    orchestrationForm->addRow(i18n("Planner review:"), m_orchestrationReviewMode);
+    m_orchestrationMaxReplans = new QSpinBox(orchestrationGroup);
+    m_orchestrationMaxReplans->setRange(0, 20);
+    orchestrationForm->addRow(i18n("Max replans per turn:"), m_orchestrationMaxReplans);
+    orchestrationLayout->addLayout(orchestrationForm);
+
+    const QList<Provider> orchestrationProviderList = orchestrationProviders(m_plugin->settings());
+    for (QComboBox *combo : {m_orchestrationPlannerProvider, m_orchestrationExecutorProvider}) {
+        for (Provider provider : orchestrationProviderList) {
+            combo->addItem(providerLabel(provider), providerId(provider));
+        }
+    }
+    auto providerFromCombo = [](QComboBox *combo) {
+        return providerFromId(combo->currentData().toString());
+    };
+    auto repopulateModels = [this, providerFromCombo]() {
+        const Provider plannerProvider = providerFromCombo(m_orchestrationPlannerProvider);
+        const QString plannerCurrent = m_orchestrationPlannerModel->currentText().trimmed();
+        m_orchestrationPlannerModel->clear();
+        m_orchestrationPlannerModel->addItems(m_modelCatalog.value(plannerProvider));
+        m_orchestrationPlannerModel->setCurrentText(plannerCurrent);
+
+        const Provider executorProvider = providerFromCombo(m_orchestrationExecutorProvider);
+        const QString executorCurrent = m_orchestrationExecutorModel->currentText().trimmed();
+        m_orchestrationExecutorModel->clear();
+        m_orchestrationExecutorModel->addItems(m_modelCatalog.value(executorProvider));
+        m_orchestrationExecutorModel->setCurrentText(executorCurrent);
+    };
+    connect(m_orchestrationPlannerProvider, &QComboBox::currentIndexChanged, this, [repopulateModels]() {
+        repopulateModels();
+    });
+    connect(m_orchestrationExecutorProvider, &QComboBox::currentIndexChanged, this, [repopulateModels]() {
+        repopulateModels();
+    });
+    connect(m_orchestrationEnabled, &QCheckBox::toggled, this, [this](bool enabled) {
+        for (QWidget *widget : {static_cast<QWidget *>(m_orchestrationPlannerProvider),
+                                static_cast<QWidget *>(m_orchestrationPlannerModel),
+                                static_cast<QWidget *>(m_orchestrationPlannerEffort),
+                                static_cast<QWidget *>(m_orchestrationExecutorProvider),
+                                static_cast<QWidget *>(m_orchestrationExecutorModel),
+                                static_cast<QWidget *>(m_orchestrationExecutorEffort),
+                                static_cast<QWidget *>(m_orchestrationReviewMode),
+                                static_cast<QWidget *>(m_orchestrationMaxReplans)}) {
+            widget->setEnabled(enabled);
+        }
+    });
+    providersLayout->addWidget(orchestrationGroup);
 
     providersLayout->addStretch();
     providersScroll->setWidget(providersWidget);
@@ -319,21 +426,36 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
                 installInfo = distribution.value(u"uvx"_s).toObject();
             } else if (distribution.value(u"binary"_s).isObject()) {
                 kind = i18n("binary");
-                installable = true;
+                const QJsonObject binary = distribution.value(u"binary"_s).toObject();
                 installType = u"binary"_s;
-                installInfo = distribution.value(u"binary"_s).toObject();
+                installInfo = binary;
+                // Only offer a platform we actually have a binary for. The
+                // registry often publishes a subset; enabling Install anyway
+                // produced a guaranteed post-click failure.
+                installable = binary.value(acpCurrentPlatformKey()).isObject();
+                if (!installable) {
+                    kind = i18n("binary (not available for this platform)");
+                }
             }
             if (kind.isEmpty()) {
                 kind = i18n("manual install");
             }
             bool isInstalled = false;
+            QString installedVersion;
             for (const QJsonValue &installedValue : installedAgents) {
                 if (installedValue.toObject().value(u"id"_s).toString() == agent.value(u"id"_s).toString()) {
                     isInstalled = true;
+                    installedVersion = installedValue.toObject().value(u"version"_s).toString();
                     break;
                 }
             }
-            const QString marker = isInstalled ? i18n("  ✓ Installed") : QString();
+            QString marker;
+            if (isInstalled) {
+                const QString registryVersion = agent.value(u"version"_s).toString();
+                marker = (i18n("  ✓ Installed") + (!registryVersion.isEmpty() && registryVersion != installedVersion
+                                                        ? i18n("  (update: %1)", registryVersion)
+                                                        : QString()));
+            }
             auto *item = new QListWidgetItem(u"%1%2  ·  %3  ·  %4\n%5"_s.arg(name, marker,
                                                                                       agent.value(u"version"_s).toString(),
                                                                                       kind, description),
@@ -343,6 +465,8 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
             item->setData(Qt::UserRole + 2, installable);
             item->setData(Qt::UserRole + 3, installType);
             item->setData(Qt::UserRole + 4, installInfo);
+            item->setData(Qt::UserRole + 5, installedVersion);
+            item->setData(Qt::UserRole + 6, agent.value(u"version"_s).toString());
             item->setToolTip(agent.value(u"license_url"_s).toString());
             if (isInstalled) item->setForeground(QColor(QStringLiteral("#75c991")));
         }
@@ -361,7 +485,11 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
         // Binary agents can be reinstalled: entries created before downloads
         // were implemented have a relative command but no unpacked executable.
         const bool isBinary = item->data(Qt::UserRole + 3).toString() == u"binary"_s;
-        registryInstall->setEnabled((!alreadyInstalled || isBinary)
+        const QString installedVersion = item->data(Qt::UserRole + 5).toString();
+        const QString registryVersion = item->data(Qt::UserRole + 6).toString();
+        const bool updateAvailable = !installedVersion.isEmpty() && !registryVersion.isEmpty()
+            && installedVersion != registryVersion;
+        registryInstall->setEnabled((!alreadyInstalled || isBinary || updateAvailable)
                                     && item->data(Qt::UserRole + 2).toBool());
         registryUninstall->setEnabled(alreadyInstalled);
     });
@@ -376,48 +504,47 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
             const bool npm = installType == u"npx"_s;
             const QString package = installInfo.value(u"package"_s).toString();
             if (package.isEmpty()) return;
-            auto *process = new QProcess(this);
-            const QString program = npm ? u"npm"_s : u"uv"_s;
-            const QStringList args = npm ? QStringList{u"install"_s, u"--global"_s, package}
-                                         : QStringList{u"tool"_s, u"install"_s, package};
-            m_acpRegistryStatus->setText(i18n("Installing %1…", agent.value(u"name"_s).toString()));
-            connect(process, &QProcess::finished, this, [this, process, agent, installInfo, package, npm, showRegistryResults](int code, QProcess::ExitStatus status) {
-                const QString output = QString::fromLocal8Bit(process->readAllStandardError()).trimmed();
-                if (code != 0 || status != QProcess::NormalExit) {
-                    m_acpRegistryStatus->setText(i18n("Install failed: %1", output));
-                    process->deleteLater();
-                    return;
-                }
-                QJsonObject installed = agent;
-                QStringList argsList;
-                for (const QJsonValue &arg : installInfo.value(u"args"_s).toArray()) argsList.append(arg.toString());
-                QJsonArray launchArgs;
-                for (const QString &arg : argsList) launchArgs.append(arg);
-                installed.insert(u"command"_s, npm ? u"npx"_s : u"uvx"_s);
-                QJsonArray fullArgs;
-                if (npm) { fullArgs.append(u"--yes"_s); fullArgs.append(package); }
-                else fullArgs.append(package);
-                for (const QJsonValue &arg : launchArgs) fullArgs.append(arg);
-                installed.insert(u"args"_s, fullArgs);
-                installed.insert(u"package"_s, package);
-                installed.insert(u"distributionType"_s, npm ? u"npx"_s : u"uvx"_s);
-                QJsonArray agents = QJsonDocument::fromJson(m_plugin->settings().acpInstalledAgents.toUtf8()).array();
-                const QString id = agent.value(u"id"_s).toString();
-                for (qsizetype i = agents.size() - 1; i >= 0; --i) if (agents.at(i).toObject().value(u"id"_s).toString() == id) agents.removeAt(i);
-                agents.append(installed);
-                Settings settings = m_plugin->settings();
-                settings.acpInstalledAgents = QString::fromUtf8(QJsonDocument(agents).toJson(QJsonDocument::Compact));
-                m_plugin->setSettings(settings);
-                refreshAcpAgentCombo();
-                m_acpRegistryStatus->setText(i18n("Installed %1. Select it under ACP in the model selector.", agent.value(u"name"_s).toString()));
-                showRegistryResults(m_acpRegistrySearch->text());
-                process->deleteLater();
-            });
-            connect(process, &QProcess::errorOccurred, this, [this, process](QProcess::ProcessError) {
-                m_acpRegistryStatus->setText(i18n("Install failed: package manager not found or could not start."));
-                process->deleteLater();
-            });
-            process->start(program, args);
+            // Zed-style: no global package install. The launch line runs the
+            // package through npx -y / uvx directly (cached by the package
+            // manager on first run), pinned to the registry version, so
+            // installing never needs write access to the global prefix and
+            // never mutates the user's npm/uv state.
+            QJsonObject installed = agent;
+            QStringList argsList;
+            for (const QJsonValue &arg : installInfo.value(u"args"_s).toArray()) argsList.append(arg.toString());
+            QJsonArray fullArgs;
+            // Pin to the registry version when the entry carries one. npm
+            // spells a version as pkg@1.2.3; they are different package
+            // managers with different syntax.
+            QString pinned = package;
+            const QString version = agent.value(u"version"_s).toString().trimmed();
+            const bool alreadyPinned = npm ? (package.lastIndexOf(u'@') > 0)
+                                           : (package.contains(u"=="_s) || package.lastIndexOf(u'@') > 0);
+            if (!version.isEmpty() && !alreadyPinned) {
+                const QString suffix = npm ? u"@"_s : u"=="_s;
+                pinned = package + suffix + version;
+            }
+            if (npm) {
+                fullArgs.append(u"--yes"_s);
+            }
+            fullArgs.append(pinned);
+            for (const QString &arg : argsList) fullArgs.append(arg);
+            installed.insert(u"command"_s, npm ? u"npx"_s : u"uvx"_s);
+            installed.insert(u"args"_s, fullArgs);
+            installed.insert(u"package"_s, package);
+            installed.insert(u"pinnedPackage"_s, pinned);
+            installed.insert(u"distributionType"_s, npm ? u"npx"_s : u"uvx"_s);
+            QJsonArray agents = QJsonDocument::fromJson(m_plugin->settings().acpInstalledAgents.toUtf8()).array();
+            const QString id = agent.value(u"id"_s).toString();
+            for (qsizetype i = agents.size() - 1; i >= 0; --i) if (agents.at(i).toObject().value(u"id"_s).toString() == id) agents.removeAt(i);
+            agents.append(installed);
+            Settings settings = m_plugin->settings();
+            settings.acpInstalledAgents = QString::fromUtf8(QJsonDocument(agents).toJson(QJsonDocument::Compact));
+            m_plugin->setSettings(settings);
+            refreshAcpAgentCombo();
+            m_acpRegistryStatus->setText(i18n("Installed %1 (launched via %2, no global install needed). Select it under ACP in the model selector.",
+                                               agent.value(u"name"_s).toString(), npm ? u"npx --yes"_s : u"uvx"_s));
+            showRegistryResults(m_acpRegistrySearch->text());
         } else if (installType == u"binary"_s) {
             auto *installer = new AcpBinaryInstaller(agent, getBinaryPlatformKey(),
                                                      m_acpRegistryNetwork, this);
@@ -476,16 +603,27 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
         const bool isBinary = installedEntry.value(u"distributionType"_s).toString() == u"binary"_s
             || !installedEntry.value(u"binaryArchiveUrl"_s).toString().isEmpty();
         if (isBinary) {
-            const QString installDir = installedEntry.value(u"binaryInstallDir"_s).toString();
+            // Remove only the directory this id owns. The stored
+            // binaryInstallDir comes from a hand-editable/synced settings file
+            // and must not turn Uninstall into arbitrary recursive deletion.
+            const QString installDir = acpBinaryInstallDir(agentId);
             if (!installDir.isEmpty()) {
                 QDir(installDir).removeRecursively();
-            } else {
-                QDir(acpBinaryInstallDir(agentId)).removeRecursively();
             }
         }
 
         Settings settings = m_plugin->settings();
         settings.acpInstalledAgents = QString::fromUtf8(QJsonDocument(remaining).toJson(QJsonDocument::Compact));
+        if (settings.acpAgentId == agentId) {
+            // The launch line points at files that were just removed; do not
+            // try to start the deleted binary on the next turn.
+            settings.acpAgentId = u"custom"_s;
+            settings.acpCommand.clear();
+            settings.acpArgs.clear();
+            settings.acpApiKeyEnv.clear();
+            settings.acpModel.clear();
+            settings.acpEffort.clear();
+        }
         // Clear cached models for this agent; the old binary command must not
         // be reused after the files are removed.
         QJsonObject agentModels;
@@ -577,7 +715,6 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     m_speed->addItem(i18n("Slow"), 0);
     m_speed->addItem(i18n("Medium"), 1);
     m_speed->addItem(i18n("Fast"), 2);
-    agentForm->addRow(i18n("Message speed:"), m_speed);
 
     m_thinkingMode = new QCheckBox(i18n("Enable thinking mode (model outputs reasoning before answer)"), agentWidget);
     agentForm->addRow(i18n("Thinking mode:"), m_thinkingMode);
@@ -627,16 +764,8 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     m_maxGraphEdges->setRange(10, 500);
     agentForm->addRow(i18n("Max project graph edges:"), m_maxGraphEdges);
 
-    m_compressGraph = new QCheckBox(i18n("Compress project graph information"), agentWidget);
+    m_compressGraph = new QCheckBox(i18n("Include project graph summary in the system prompt"), agentWidget);
     agentForm->addRow(m_compressGraph);
-
-    m_includeFileContents = new QCheckBox(i18n("Include file contents in project graph"), agentWidget);
-    agentForm->addRow(m_includeFileContents);
-
-    m_maxFileContentLength = new QSpinBox(agentWidget);
-    m_maxFileContentLength->setRange(100, 5000);
-    m_maxFileContentLength->setSuffix(i18n(" chars"));
-    agentForm->addRow(i18n("Max file content length:"), m_maxFileContentLength);
 
     m_compressEditorContext = new QCheckBox(i18n("Compress editor context"), agentWidget);
     agentForm->addRow(m_compressEditorContext);
@@ -737,26 +866,10 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     m_maxVerificationAttempts->setRange(1, 5);
     agentForm->addRow(i18n("Max verification attempts:"), m_maxVerificationAttempts);
 
-    m_adaptiveTemperature = new QCheckBox(i18n("Adjust temperature based on task phase"), agentWidget);
-    agentForm->addRow(i18n("Adaptive temperature:"), m_adaptiveTemperature);
 
-    m_explorationTemperature = new QDoubleSpinBox(agentWidget);
-    m_explorationTemperature->setRange(0.0, 2.0);
-    m_explorationTemperature->setSingleStep(0.05);
-    m_explorationTemperature->setDecimals(2);
-    agentForm->addRow(i18n("Exploration temperature:"), m_explorationTemperature);
 
-    m_exploitationTemperature = new QDoubleSpinBox(agentWidget);
-    m_exploitationTemperature->setRange(0.0, 2.0);
-    m_exploitationTemperature->setSingleStep(0.05);
-    m_exploitationTemperature->setDecimals(2);
-    agentForm->addRow(i18n("Exploitation temperature:"), m_exploitationTemperature);
 
-    m_enablePlanUpdates = new QCheckBox(i18n("Allow plan updates during execution"), agentWidget);
-    agentForm->addRow(i18n("Enable plan updates:"), m_enablePlanUpdates);
 
-    m_narrativeProgress = new QCheckBox(i18n("Natural language progress narration"), agentWidget);
-    agentForm->addRow(i18n("Narrative progress:"), m_narrativeProgress);
 
     // Context management: compact older turns to fit the model window so a
     // long chat never stops prompting on a hard message cap.
@@ -766,9 +879,6 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
 
     m_compressOldMessages = new QCheckBox(i18n("Auto-compact older turns as the window fills"), agentWidget);
     agentForm->addRow(i18n("Auto-compact:"), m_compressOldMessages);
-
-    m_smartContextTruncation = new QCheckBox(i18n("Keep a recent tail verbatim when compacting"), agentWidget);
-    agentForm->addRow(i18n("Keep recent tail:"), m_smartContextTruncation);
 
     m_contextWindow = new QSpinBox(agentWidget);
     m_contextWindow->setRange(0, 2000000);
@@ -787,11 +897,6 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     m_keepRecentTokens->setSuffix(i18n(" tokens"));
     m_keepRecentTokens->setSpecialValueText(i18n("Auto"));
     agentForm->addRow(i18n("Keep recent context:"), m_keepRecentTokens);
-
-    m_compressionThreshold = new QSpinBox(agentWidget);
-    m_compressionThreshold->setRange(256, 100000);
-    m_compressionThreshold->setSuffix(i18n(" chars"));
-    agentForm->addRow(i18n("Recent-tail hint:"), m_compressionThreshold);
 
     agentScroll->setWidget(agentWidget);
     tabs->addTab(agentScroll, i18n("Agent & Context"));
@@ -1250,6 +1355,82 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     themeScroll->setWidget(themeWidget);
     tabs->addTab(themeScroll, i18n("Themes"));
 
+    // ==========================================
+    // TAB 10: Voice Prompting
+    // ==========================================
+    auto *voiceScroll = new QScrollArea(tabs);
+    voiceScroll->setWidgetResizable(true);
+    voiceScroll->setFrameShape(QFrame::NoFrame);
+    auto *voiceWidget = new QWidget(voiceScroll);
+    auto *voiceForm = new QFormLayout(voiceWidget);
+    voiceForm->setContentsMargins(12, 12, 12, 12);
+    voiceForm->setSpacing(8);
+
+    auto *voiceIntro = new QLabel(
+        i18n("Capture speech from your microphone, remove background noise, transcribe to text, and send to chat. "
+             "Shortcuts: <b>Ctrl+Alt+V</b> (window-wide), <b>Ctrl+Alt+M</b> (inside Kate AI), "
+             "<b>Ctrl+Alt+Shift+V</b> / <b>Esc</b> (cancel)."),
+        voiceWidget);
+    voiceIntro->setWordWrap(true);
+    voiceIntro->setStyleSheet(QStringLiteral(u"color: %1; font-size: 11px;").arg(ChatTheme::textMuted()));
+    voiceForm->addRow(voiceIntro);
+
+    auto *micRow = new QWidget(voiceWidget);
+    auto *micRowLayout = new QHBoxLayout(micRow);
+    micRowLayout->setContentsMargins(0, 0, 0, 0);
+    m_voiceMicStatus = new QLabel(micRow);
+    m_voiceMicStatus->setWordWrap(true);
+    auto *micRefreshBtn = new QPushButton(i18n("Re-check Mic"), micRow);
+    connect(micRefreshBtn, &QPushButton::clicked, this, &KateAiConfigPage::updateVoiceMicStatus);
+    micRowLayout->addWidget(m_voiceMicStatus, 1);
+    micRowLayout->addWidget(micRefreshBtn);
+    voiceForm->addRow(i18n("Microphone status:"), micRow);
+
+    m_voiceToolsStatus = new QLabel(VoiceInput::detectedToolsSummary(), voiceWidget);
+    m_voiceToolsStatus->setWordWrap(true);
+    m_voiceToolsStatus->setStyleSheet(QStringLiteral(u"color: %1; font-size: 11px;").arg(ChatTheme::textMuted()));
+    voiceForm->addRow(i18n("Detected tools:"), m_voiceToolsStatus);
+
+    m_voiceProvider = new QComboBox(voiceWidget);
+    m_voiceProvider->addItem(i18n("Auto (OpenAI key / custom endpoint / local Whisper)"), u"auto"_s);
+    m_voiceProvider->addItem(i18n("OpenAI Whisper API"), u"openai"_s);
+    m_voiceProvider->addItem(i18n("OpenAI-Compatible Endpoint (Groq, LocalAI, faster-whisper)"), u"openai_compatible"_s);
+    m_voiceProvider->addItem(i18n("Local CLI (whisper-cli / whisper)"), u"local_cli"_s);
+    voiceForm->addRow(i18n("Transcription backend:"), m_voiceProvider);
+
+    m_voiceApiKey = makeKey();
+    m_voiceApiKey->setPlaceholderText(i18n("Optional — falls back to OpenAI / OpenAI-Compatible API key"));
+    voiceForm->addRow(i18n("Voice API key:"), m_voiceApiKey);
+
+    m_voiceEndpoint = new QLineEdit(voiceWidget);
+    m_voiceEndpoint->setPlaceholderText(u"https://api.groq.com/openai/v1/audio/transcriptions"_s);
+    voiceForm->addRow(i18n("Custom endpoint URL:"), m_voiceEndpoint);
+
+    m_voiceModel = new QLineEdit(voiceWidget);
+    m_voiceModel->setPlaceholderText(u"whisper-1"_s);
+    voiceForm->addRow(i18n("Transcription model:"), m_voiceModel);
+
+    m_voiceLanguage = new QLineEdit(voiceWidget);
+    m_voiceLanguage->setPlaceholderText(i18n("Optional ISO-639-1 code (e.g. en, fr, de; empty = auto)"));
+    voiceForm->addRow(i18n("Language hint:"), m_voiceLanguage);
+
+    m_voiceLocalCommand = new QLineEdit(voiceWidget);
+    m_voiceLocalCommand->setPlaceholderText(i18n("e.g. whisper-cli -m ~/.local/share/whisper/ggml-base.bin -f {file}"));
+    voiceForm->addRow(i18n("Local CLI command:"), m_voiceLocalCommand);
+
+    m_voiceInputDevice = new QLineEdit(voiceWidget);
+    m_voiceInputDevice->setPlaceholderText(i18n("Optional — leave empty to use the system default microphone"));
+    voiceForm->addRow(i18n("Input device:"), m_voiceInputDevice);
+
+    m_voiceNoiseRemoval = new QCheckBox(i18n("Remove background noise before transcription"), voiceWidget);
+    voiceForm->addRow(i18n("Noise removal:"), m_voiceNoiseRemoval);
+
+    m_voiceAutoSend = new QCheckBox(i18n("Automatically send transcribed prompt to chat"), voiceWidget);
+    voiceForm->addRow(i18n("Auto-send:"), m_voiceAutoSend);
+
+    voiceScroll->setWidget(voiceWidget);
+    tabs->addTab(voiceScroll, i18n("Voice"));
+
     // Initialize model fetcher
     m_modelFetcher = new LlmClient(this);
     m_modelFetcher->setSettings(m_plugin->settings());
@@ -1397,8 +1578,6 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     connect(m_maxGraphNodes, &QSpinBox::valueChanged, this, markChanged);
     connect(m_maxGraphEdges, &QSpinBox::valueChanged, this, markChanged);
     connect(m_compressGraph, &QCheckBox::toggled, this, markChanged);
-    connect(m_includeFileContents, &QCheckBox::toggled, this, markChanged);
-    connect(m_maxFileContentLength, &QSpinBox::valueChanged, this, markChanged);
     connect(m_compressEditorContext, &QCheckBox::toggled, this, markChanged);
     connect(m_maxEditorContextLength, &QSpinBox::valueChanged, this, markChanged);
     connect(m_compressProjectInstructions, &QCheckBox::toggled, this, markChanged);
@@ -1424,19 +1603,12 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     connect(m_maxPlanSteps, &QSpinBox::valueChanged, this, markChanged);
     connect(m_requireVerification, &QCheckBox::toggled, this, markChanged);
     connect(m_maxVerificationAttempts, &QSpinBox::valueChanged, this, markChanged);
-    connect(m_adaptiveTemperature, &QCheckBox::toggled, this, markChanged);
-    connect(m_explorationTemperature, &QDoubleSpinBox::valueChanged, this, markChanged);
-    connect(m_exploitationTemperature, &QDoubleSpinBox::valueChanged, this, markChanged);
-    connect(m_enablePlanUpdates, &QCheckBox::toggled, this, markChanged);
-    connect(m_narrativeProgress, &QCheckBox::toggled, this, markChanged);
 
     // Context Management
-    connect(m_smartContextTruncation, &QCheckBox::toggled, this, markChanged);
     connect(m_contextWindow, &QSpinBox::valueChanged, this, markChanged);
     connect(m_keepRecentTokens, &QSpinBox::valueChanged, this, markChanged);
     connect(m_contextWindowReserve, &QSpinBox::valueChanged, this, markChanged);
     connect(m_compressOldMessages, &QCheckBox::toggled, this, markChanged);
-    connect(m_compressionThreshold, &QSpinBox::valueChanged, this, markChanged);
 
     // Modes, auto-approve and rules
     connect(m_agentMode, &QComboBox::currentIndexChanged, this, markChanged);
@@ -1478,6 +1650,20 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     connect(m_mcpServers, &QTableWidget::itemDoubleClicked, this, [this] {
         editMcpServer();
     });
+
+    // Voice prompting
+    connect(m_voiceProvider, &QComboBox::currentIndexChanged, this, [this, markChanged]() {
+        updateVoiceFieldStates();
+        markChanged();
+    });
+    connect(m_voiceApiKey, &QLineEdit::textChanged, this, markChanged);
+    connect(m_voiceEndpoint, &QLineEdit::textChanged, this, markChanged);
+    connect(m_voiceModel, &QLineEdit::textChanged, this, markChanged);
+    connect(m_voiceLanguage, &QLineEdit::textChanged, this, markChanged);
+    connect(m_voiceLocalCommand, &QLineEdit::textChanged, this, markChanged);
+    connect(m_voiceInputDevice, &QLineEdit::textChanged, this, markChanged);
+    connect(m_voiceNoiseRemoval, &QCheckBox::toggled, this, markChanged);
+    connect(m_voiceAutoSend, &QCheckBox::toggled, this, markChanged);
 
     reset();
 }
@@ -1575,6 +1761,17 @@ void KateAiConfigPage::editCustomAgent()
     profile.modeId = modeCombo->currentData().toString();
     profile.description = descriptionEdit->toPlainText().trimmed();
     profile.enabled = true;
+    // The dialog only edits the original four fields; keep the AgentSpec
+    // fields that a project file or JSON roster may have set.
+    profile.model = existing.model;
+    profile.effort = existing.effort;
+    profile.permissionMode = existing.permissionMode;
+    profile.tools = existing.tools;
+    profile.disallowedTools = existing.disallowedTools;
+    profile.skills = existing.skills;
+    profile.maxTurns = existing.maxTurns;
+    profile.isolation = existing.isolation;
+    profile.memoryScope = existing.memoryScope;
 
     if (profile.id.isEmpty()) {
         QMessageBox::warning(this, i18n("Custom Agent"), i18n("The agent needs an id made of letters, digits, or dashes."));
@@ -1825,14 +2022,11 @@ s.opencodeModel = m_opencodeModel->currentText().trimmed();
     s.completionContextPrefixChars = m_completionPrefixChars->value();
     s.completionContextSuffixChars = m_completionSuffixChars->value();
     s.completionAutoTriggerDelayMs = m_completionAutoDelay->value();
-    s.messageSpeed = m_speed->currentData().toInt();
 
     s.contextCompressionLevel = m_compressionLevel->value();
     s.maxGraphNodes = m_maxGraphNodes->value();
     s.maxGraphEdges = m_maxGraphEdges->value();
     s.compressProjectGraph = m_compressGraph->isChecked();
-    s.includeFileContents = m_includeFileContents->isChecked();
-    s.maxFileContentLength = m_maxFileContentLength->value();
     s.compressEditorContext = m_compressEditorContext->isChecked();
     s.maxEditorContextLength = m_maxEditorContextLength->value();
     s.compressProjectInstructions = m_compressProjectInstructions->isChecked();
@@ -1858,19 +2052,12 @@ s.opencodeModel = m_opencodeModel->currentText().trimmed();
     s.maxPlanSteps = m_maxPlanSteps->value();
     s.requireVerification = m_requireVerification->isChecked();
     s.maxVerificationAttempts = m_maxVerificationAttempts->value();
-    s.adaptiveTemperature = m_adaptiveTemperature->isChecked();
-    s.explorationTemperature = m_explorationTemperature->value();
-    s.exploitationTemperature = m_exploitationTemperature->value();
-    s.enablePlanUpdates = m_enablePlanUpdates->isChecked();
-    s.narrativeProgress = m_narrativeProgress->isChecked();
 
     // Context Management
-    s.smartContextTruncation = m_smartContextTruncation->isChecked();
     s.contextWindow = m_contextWindow->value();
     s.keepRecentTokens = m_keepRecentTokens->value();
     s.contextWindowReserve = m_contextWindowReserve->value();
     s.compressOldMessages = m_compressOldMessages->isChecked();
-    s.compressionThreshold = m_compressionThreshold->value();
 
     // Modes, auto-approve and rules
     s.agentMode = m_agentMode->currentData().toString();
@@ -1931,6 +2118,31 @@ s.opencodeModel = m_opencodeModel->currentText().trimmed();
         s.themeOverrides = QString::fromUtf8(QJsonDocument(overrides).toJson(QJsonDocument::Compact));
     }
 
+    // Voice prompting
+    s.voiceProvider = m_voiceProvider->currentData().toString();
+    s.voiceApiKey = m_voiceApiKey->text();
+    s.voiceEndpoint = m_voiceEndpoint->text().trimmed();
+    s.voiceModel = m_voiceModel->text().trimmed().isEmpty() ? u"whisper-1"_s : m_voiceModel->text().trimmed();
+    s.voiceLanguage = m_voiceLanguage->text().trimmed();
+    s.voiceLocalCommand = m_voiceLocalCommand->text().trimmed();
+    s.voiceInputDevice = m_voiceInputDevice->text().trimmed();
+    s.voiceNoiseRemoval = m_voiceNoiseRemoval->isChecked();
+    s.voiceAutoSend = m_voiceAutoSend->isChecked();
+
+    if (m_orchestrationEnabled) {
+        OrchestrationSettings orchestration;
+        orchestration.enabled = m_orchestrationEnabled->isChecked();
+        orchestration.planner.provider = providerFromId(m_orchestrationPlannerProvider->currentData().toString());
+        orchestration.planner.model = m_orchestrationPlannerModel->currentText().trimmed();
+        orchestration.planner.effort = m_orchestrationPlannerEffort->currentData().toString();
+        orchestration.executor.provider = providerFromId(m_orchestrationExecutorProvider->currentData().toString());
+        orchestration.executor.model = m_orchestrationExecutorModel->currentText().trimmed();
+        orchestration.executor.effort = m_orchestrationExecutorEffort->currentData().toString();
+        orchestration.maxReplans = m_orchestrationMaxReplans->value();
+        orchestration.reviewMode = m_orchestrationReviewMode->currentData().toString();
+        s.orchestration = orchestration;
+    }
+
     if (!m_workspace.isEmpty()) {
         QString error;
         if (!McpConfigStore::save(m_workspace, m_mcpServerConfigs, &error)) {
@@ -1973,6 +2185,24 @@ void KateAiConfigPage::reset()
         m_opencodeModel->setCurrentText(s.opencodeModel);
     m_acpModel->setCurrentText(s.acpModel);
     m_acpEffort->setCurrentText(s.acpEffort.trimmed().isEmpty() ? m_acpEffort->itemText(0) : s.acpEffort);
+
+    if (m_orchestrationEnabled) {
+        m_orchestrationEnabled->setChecked(s.orchestration.enabled);
+        m_orchestrationPlannerProvider->setCurrentIndex(std::max(
+            0, m_orchestrationPlannerProvider->findData(providerId(s.orchestration.planner.provider))));
+        m_orchestrationExecutorProvider->setCurrentIndex(std::max(
+            0, m_orchestrationExecutorProvider->findData(providerId(s.orchestration.executor.provider))));
+        refreshOrchestrationModels();
+        m_orchestrationPlannerModel->setCurrentText(s.orchestration.planner.model);
+        m_orchestrationExecutorModel->setCurrentText(s.orchestration.executor.model);
+        m_orchestrationPlannerEffort->setCurrentIndex(std::max(
+            0, m_orchestrationPlannerEffort->findData(s.orchestration.planner.effort)));
+        m_orchestrationExecutorEffort->setCurrentIndex(std::max(
+            0, m_orchestrationExecutorEffort->findData(s.orchestration.executor.effort)));
+        m_orchestrationMaxReplans->setValue(s.orchestration.maxReplans);
+        m_orchestrationReviewMode->setCurrentIndex(std::max(
+            0, m_orchestrationReviewMode->findData(s.orchestration.reviewMode)));
+    }
 
     m_deepseekUrl->setText(s.deepseekUrl);
     m_openaiCompatibleUrl->setText(s.openaiCompatibleUrl);
@@ -2056,14 +2286,11 @@ void KateAiConfigPage::reset()
     m_projectInstructions->setChecked(s.loadProjectInstructions);
     m_thinkingMode->setChecked(s.thinkingMode);
     m_system->setPlainText(s.extraSystemPrompt);
-    m_speed->setCurrentIndex(m_speed->findData(s.messageSpeed));
 
     m_compressionLevel->setValue(s.contextCompressionLevel);
     m_maxGraphNodes->setValue(s.maxGraphNodes);
     m_maxGraphEdges->setValue(s.maxGraphEdges);
     m_compressGraph->setChecked(s.compressProjectGraph);
-    m_includeFileContents->setChecked(s.includeFileContents);
-    m_maxFileContentLength->setValue(s.maxFileContentLength);
     m_compressEditorContext->setChecked(s.compressEditorContext);
     m_maxEditorContextLength->setValue(s.maxEditorContextLength);
     m_compressProjectInstructions->setChecked(s.compressProjectInstructions);
@@ -2090,19 +2317,12 @@ void KateAiConfigPage::reset()
     m_maxPlanSteps->setValue(s.maxPlanSteps);
     m_requireVerification->setChecked(s.requireVerification);
     m_maxVerificationAttempts->setValue(s.maxVerificationAttempts);
-    m_adaptiveTemperature->setChecked(s.adaptiveTemperature);
-    m_explorationTemperature->setValue(s.explorationTemperature);
-    m_exploitationTemperature->setValue(s.exploitationTemperature);
-    m_enablePlanUpdates->setChecked(s.enablePlanUpdates);
-    m_narrativeProgress->setChecked(s.narrativeProgress);
 
     // Context Management
-    m_smartContextTruncation->setChecked(s.smartContextTruncation);
     m_contextWindow->setValue(s.contextWindow);
     m_keepRecentTokens->setValue(s.keepRecentTokens);
     m_contextWindowReserve->setValue(s.contextWindowReserve);
     m_compressOldMessages->setChecked(s.compressOldMessages);
-    m_compressionThreshold->setValue(s.compressionThreshold);
 
     // Modes, auto-approve and rules
     int modeIndex = m_agentMode->findData(s.agentMode);
@@ -2188,6 +2408,23 @@ void KateAiConfigPage::reset()
         }
     }
     refreshThemeColorTable();
+
+    // Voice prompting
+    {
+        const QSignalBlocker blockVoice(m_voiceProvider);
+        const int idx = m_voiceProvider->findData(s.voiceProvider);
+        m_voiceProvider->setCurrentIndex(idx >= 0 ? idx : 0);
+    }
+    m_voiceApiKey->setText(s.voiceApiKey);
+    m_voiceEndpoint->setText(s.voiceEndpoint);
+    m_voiceModel->setText(s.voiceModel);
+    m_voiceLanguage->setText(s.voiceLanguage);
+    m_voiceLocalCommand->setText(s.voiceLocalCommand);
+    m_voiceInputDevice->setText(s.voiceInputDevice);
+    m_voiceNoiseRemoval->setChecked(s.voiceNoiseRemoval);
+    m_voiceAutoSend->setChecked(s.voiceAutoSend);
+    updateVoiceFieldStates();
+    updateVoiceMicStatus();
 }
 
 void KateAiConfigPage::setWorkspace(const QString &workspace)
@@ -2199,6 +2436,28 @@ void KateAiConfigPage::setWorkspace(const QString &workspace)
     m_mcpServerConfigs = McpConfigStore::load(workspace);
     refreshMcpServerTable();
 }
+
+void KateAiConfigPage::refreshOrchestrationModels()
+{
+    if (!m_orchestrationPlannerProvider || !m_orchestrationExecutorProvider) {
+        return;
+    }
+    auto fill = [this](QComboBox *providerCombo, QComboBox *modelCombo) {
+        if (!providerCombo || !modelCombo) {
+            return;
+        }
+        const Provider provider = providerFromId(providerCombo->currentData().toString());
+        const QString current = modelCombo->currentText().trimmed();
+        modelCombo->clear();
+        modelCombo->addItems(m_modelCatalog.value(provider));
+        if (!current.isEmpty()) {
+            modelCombo->setCurrentText(current);
+        }
+    };
+    fill(m_orchestrationPlannerProvider, m_orchestrationPlannerModel);
+    fill(m_orchestrationExecutorProvider, m_orchestrationExecutorModel);
+}
+
 
 void KateAiConfigPage::updateModelCombo(Provider provider)
 {
@@ -2247,6 +2506,7 @@ void KateAiConfigPage::updateModelCombo(Provider provider)
     if (!currentText.isEmpty()) {
         combo->setCurrentText(currentText);
     }
+    refreshOrchestrationModels();
 }
 
 void KateAiConfigPage::defaults()
@@ -2351,9 +2611,13 @@ void KateAiConfigPage::updateAcpModelCombo()
         m_acpModel->addItems(models);
     }
 
-    // Restore current text if it was set
-    if (!currentText.isEmpty()) {
+    // Restore the previous selection only when it still exists for this agent.
+    // Carrying another agent's model id into the new agent makes its --model
+    // flag or set_config_option invalid.
+    if (!currentText.isEmpty() && (models.isEmpty() || models.contains(currentText))) {
         m_acpModel->setCurrentText(currentText);
+    } else if (!models.isEmpty()) {
+        m_acpModel->setCurrentIndex(-1);
     }
 }
 
@@ -2393,7 +2657,7 @@ void KateAiConfigPage::autoFetchAcpModels()
 
 void KateAiConfigPage::fetchAcpModels()
 {
-    if (!usesAcpNative(m_plugin->settings())) {
+    if (m_apiFormat && apiFormatFromId(m_apiFormat->currentData().toString()) != ApiFormat::AcpNative) {
         return;
     }
 
@@ -2412,6 +2676,7 @@ void KateAiConfigPage::fetchAcpModels()
     }
     if (m_acpModelStatus) {
         m_acpModelStatus->setText(i18n("Loading models from agent..."));
+        m_acpModelStatus->setToolTip(QString());
     }
 
     // Use the selected agent ID and current UI values
@@ -2421,10 +2686,15 @@ void KateAiConfigPage::fetchAcpModels()
     auto *client = new AcpClient(this);
     m_acpFetchClient = client;
     Settings tempSettings = m_plugin->settings();
+    tempSettings.provider = Provider::Acp;
+    tempSettings.apiFormat = ApiFormat::AcpNative;
     tempSettings.acpAgentId = agentId;
     tempSettings.acpCommand = m_acpCommand->text().trimmed();
     tempSettings.acpArgs = m_acpArgs->text().trimmed();
     tempSettings.acpApiKeyEnv = m_acpApiKeyEnv->text().trimmed();
+    if (m_acpKey && !m_acpKey->text().trimmed().isEmpty()) {
+        tempSettings.acpApiKey = m_acpKey->text().trimmed();
+    }
     client->setSettings(tempSettings);
     client->setWorkspace(m_workspace);
 
@@ -2480,13 +2750,14 @@ void KateAiConfigPage::fetchAcpModels()
         client->deleteLater();
     });
 
-    connect(client, &AcpClient::failed, this, [this, client, btnWeak, statusWeak](const QString &) {
+    connect(client, &AcpClient::failed, this, [this, client, btnWeak, statusWeak](const QString &error) {
         if (btnWeak) {
             btnWeak->setEnabled(true);
             btnWeak->setText(i18n("Fetch Models"));
         }
         if (statusWeak) {
             statusWeak->setText(i18n("Failed to load models"));
+            statusWeak->setToolTip(error);
         }
         if (m_acpFetchClient == client) {
             m_acpFetchClient = nullptr;
@@ -2598,6 +2869,39 @@ void KateAiConfigPage::resetThemeColor(const QString &key)
     m_themeOverrideValues.remove(key);
     refreshThemeColorTable();
     Q_EMIT changed();
+}
+
+void KateAiConfigPage::updateVoiceMicStatus()
+{
+    if (!m_voiceMicStatus) {
+        return;
+    }
+    const QString device = m_voiceInputDevice ? m_voiceInputDevice->text().trimmed() : QString();
+    const VoiceInput::MicrophoneStatus status = VoiceInput::probeMicrophone(device);
+    if (status.available) {
+        m_voiceMicStatus->setText(i18n("Available: %1", status.deviceName.isEmpty() ? i18n("Default microphone") : status.deviceName));
+        m_voiceMicStatus->setStyleSheet(QStringLiteral(u"color: %1; font-weight: 600;").arg(ChatTheme::success()));
+    } else {
+        m_voiceMicStatus->setText(status.reason.isEmpty() ? i18n("No microphone is available or usable.") : status.reason);
+        m_voiceMicStatus->setStyleSheet(QStringLiteral(u"color: %1;").arg(ChatTheme::warning()));
+    }
+    if (m_voiceToolsStatus) {
+        m_voiceToolsStatus->setText(VoiceInput::detectedToolsSummary());
+    }
+}
+
+void KateAiConfigPage::updateVoiceFieldStates()
+{
+    if (!m_voiceProvider) {
+        return;
+    }
+    const QString backend = m_voiceProvider->currentData().toString();
+    const bool isLocal = (backend == u"local_cli"_s);
+    const bool isOpenAI = (backend == u"openai"_s);
+    m_voiceApiKey->setEnabled(!isLocal);
+    m_voiceEndpoint->setEnabled(!isLocal && !isOpenAI);
+    m_voiceModel->setEnabled(!isLocal);
+    m_voiceLocalCommand->setEnabled(isLocal || backend == u"auto"_s);
 }
 
 } // namespace KateAi

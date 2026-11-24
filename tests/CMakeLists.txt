@@ -1,13 +1,35 @@
+# Absolute path to python3, resolved at configure time so tests can spawn it
+# even when PATH is rewritten (Craft's craftenv.sh on macOS/Windows CI).
+if(Python3_Interpreter_FOUND)
+    # Escape backslashes so a Windows path survives the C++ string literal
+    # (raw backslashes would be misread as escape sequences).
+    set(KATEAI_PYTHON3 "${Python3_EXECUTABLE}")
+    string(REPLACE "\\" "\\\\" KATEAI_PYTHON3 "${KATEAI_PYTHON3}")
+    add_compile_definitions(KATEAI_PYTHON3="${KATEAI_PYTHON3}")
+endif()
+
 function(kateai_test name)
     add_executable(${name} ${name}.cpp)
     target_link_libraries(${name} PRIVATE kateai_core Qt6::Test)
-    add_test(NAME ${name} COMMAND ${name})
+    # Tests that drive a mock agent/server locate `tests/...` relative to the
+    # current directory. Pin it to the source tree so an out-of-tree build (for
+    # example /tmp/build) runs the same way as ./build.
+    add_test(NAME ${name} COMMAND ${name}
+             WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 endfunction()
 
 kateai_test(test_sandbox)
 kateai_test(test_telegrambridge)
 kateai_test(test_permissions)
 kateai_test(test_settings)
+kateai_test(test_configmigration)
+kateai_test(test_credentials)
+
+# These three all read and write the shared test-mode KConfig and credential
+# file. Running them in parallel made a save/load round-trip observe another
+# test's write, so serialize just this group.
+set_tests_properties(test_settings test_configmigration test_credentials
+                     PROPERTIES RESOURCE_LOCK kateai_test_credentials_config)
 kateai_test(test_llmparse)
 kateai_test(test_session)
 kateai_test(test_retry)
@@ -20,7 +42,54 @@ kateai_test(test_providers)
 kateai_test(test_rules)
 kateai_test(test_transcriptlayout)
 kateai_test(test_modes)
+kateai_test(test_orchestration)
+add_executable(test_orchestrationflow test_orchestrationflow.cpp)
+target_link_libraries(test_orchestrationflow PRIVATE kateai_core Qt6::Test)
+add_test(NAME test_orchestrationflow COMMAND test_orchestrationflow
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+kateai_test(test_toolalias)
+kateai_test(test_acpparsing)
+kateai_test(test_acpstreaming)
+kateai_test(test_modetools)
+kateai_test(test_harness_foundation)
+kateai_test(test_harness_models)
+kateai_test(test_harness_prompt)
+kateai_test(test_harness_context)
+kateai_test(test_harness_memory)
+kateai_test(test_harness_registry)
+kateai_test(test_harness_skills)
+kateai_test(test_skilltool)
+kateai_test(test_harness_events)
+kateai_test(test_worktree)
+# The inspector is a widget; it lives next to the chat panel, not in core.
+add_executable(test_inspector test_inspector.cpp ../src/inspectorpanel.cpp)
+target_link_libraries(test_inspector PRIVATE kateai_core Qt6::Test Qt6::Widgets)
+add_test(NAME test_inspector COMMAND test_inspector -platform offscreen
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+kateai_test(test_harness_middleware)
+kateai_test(test_harness_checks)
+kateai_test(test_harness_policy)
+kateai_test(test_harness_hooks)
+add_executable(test_harness_verification test_harness_verification.cpp)
+target_link_libraries(test_harness_verification PRIVATE kateai_core Qt6::Test)
+add_test(NAME test_harness_verification
+         COMMAND test_harness_verification -platform offscreen
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+kateai_test(test_sessionstore)
+kateai_test(test_sessionrecovery)
+kateai_test(test_processenv)
+kateai_test(test_acpclientmethods)
 kateai_test(test_projectgraph)
+# KTextEditor's editor singleton (reached through DiskDocumentBridge) needs a
+# QGuiApplication, so this runs offscreen like the other editor-facing suites.
+add_executable(test_lsp test_lsp.cpp)
+target_link_libraries(test_lsp PRIVATE kateai_core Qt6::Test Qt6::Widgets)
+add_test(NAME test_lsp COMMAND test_lsp -platform offscreen)
+
+add_executable(test_debug test_debug.cpp)
+target_link_libraries(test_debug PRIVATE kateai_core Qt6::Test Qt6::Widgets)
+add_test(NAME test_debug COMMAND test_debug -platform offscreen)
 # The requestable half of the in-editor completions: prompt building, staleness,
 # budget, response parsing. The HTTP cases talk to an in-process mock server on
 # the loopback interface, so no GUI and no provider are needed.
@@ -73,6 +142,9 @@ add_test(NAME test_questionflow
          COMMAND test_questionflow -platform offscreen
          WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
+# Two-model planner/executor/reviewer flow against two loopback providers.
+
+
 # The tool-call budget: exhausting it must still ask the model for the closing
 # summary and finish the turn. Drives a real AgentLoop against an in-process
 # mock LLM, so it needs an event loop.
@@ -106,6 +178,14 @@ add_test(NAME test_edittracker COMMAND test_edittracker -platform offscreen)
 add_executable(test_intentdock test_intentdock.cpp ../src/subtaskwidget.cpp ../src/chattheme.cpp)
 target_link_libraries(test_intentdock PRIVATE kateai_core Qt6::Test Qt6::Widgets)
 add_test(NAME test_intentdock COMMAND test_intentdock -platform offscreen)
+
+# The intent dock's sub-agent slot: concurrent sub-agents share one bounded
+# strip as tabs over the single card on show, instead of stacking.
+add_executable(test_subtaskdock test_subtaskdock.cpp ../src/subtaskdock.cpp ../src/subtaskwidget.cpp
+    ../src/chattheme.cpp)
+target_link_libraries(test_subtaskdock PRIVATE kateai_core Qt6::Test Qt6::Widgets)
+target_compile_definitions(test_subtaskdock PRIVATE TRANSLATION_DOMAIN="kateai")
+add_test(NAME test_subtaskdock COMMAND test_subtaskdock -platform offscreen)
 
 # The suggestion cards the suggest tool and the ACP client method post.
 # suggestionwidget.cpp is compiled in for the same reason as subtaskwidget.cpp:
@@ -151,16 +231,18 @@ add_executable(test_promptedit test_promptedit.cpp ../src/promptedit.cpp)
 target_link_libraries(test_promptedit PRIVATE kateai_core Qt6::Test)
 add_test(NAME test_promptedit COMMAND test_promptedit -platform offscreen)
 
-add_executable(test_overflow test_overflow.cpp ../src/chatwidget.cpp ../src/toolcallwidget.cpp
-    ../src/promptedit.cpp ../src/permissionbar.cpp ../src/subtaskwidget.cpp
+add_executable(test_overflow test_overflow.cpp ../src/chatwidget.cpp ../src/inspectorpanel.cpp ../src/toolcallwidget.cpp
+    ../src/promptedit.cpp ../src/permissionbar.cpp ../src/subtaskwidget.cpp ../src/subtaskdock.cpp
     ../src/suggestionwidget.cpp ../src/questionwidget.cpp ../src/todowidget.cpp ../src/edittracker.cpp
     ../src/turnstatus.cpp ../src/chattheme.cpp)
 target_link_libraries(test_overflow PRIVATE kateai_core Qt6::Test Qt6::Widgets)
 target_compile_definitions(test_overflow PRIVATE TRANSLATION_DOMAIN="kateai")
-add_test(NAME test_overflow COMMAND test_overflow -platform offscreen)
+add_test(NAME test_overflow
+         COMMAND test_overflow -platform offscreen
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
-add_executable(test_livecards test_livecards.cpp ../src/chatwidget.cpp ../src/toolcallwidget.cpp
-    ../src/promptedit.cpp ../src/permissionbar.cpp ../src/subtaskwidget.cpp
+add_executable(test_livecards test_livecards.cpp ../src/chatwidget.cpp ../src/inspectorpanel.cpp ../src/toolcallwidget.cpp
+    ../src/promptedit.cpp ../src/permissionbar.cpp ../src/subtaskwidget.cpp ../src/subtaskdock.cpp
     ../src/suggestionwidget.cpp ../src/questionwidget.cpp ../src/todowidget.cpp ../src/edittracker.cpp
     ../src/turnstatus.cpp ../src/chattheme.cpp)
 target_link_libraries(test_livecards PRIVATE kateai_core Qt6::Test Qt6::Widgets)
@@ -169,8 +251,8 @@ add_test(NAME test_livecards COMMAND test_livecards -platform offscreen)
 
 # The stop button and the new-thread button, driven through a real AgentLoop
 # against the mock LLM server. Same source list as test_livecards.
-add_executable(test_stopbehavior test_stopbehavior.cpp ../src/chatwidget.cpp ../src/toolcallwidget.cpp
-    ../src/promptedit.cpp ../src/permissionbar.cpp ../src/subtaskwidget.cpp
+add_executable(test_stopbehavior test_stopbehavior.cpp ../src/chatwidget.cpp ../src/inspectorpanel.cpp ../src/toolcallwidget.cpp
+    ../src/promptedit.cpp ../src/permissionbar.cpp ../src/subtaskwidget.cpp ../src/subtaskdock.cpp
     ../src/suggestionwidget.cpp ../src/questionwidget.cpp ../src/todowidget.cpp ../src/edittracker.cpp
     ../src/turnstatus.cpp ../src/chattheme.cpp)
 target_link_libraries(test_stopbehavior PRIVATE kateai_core Qt6::Test Qt6::Widgets)
@@ -182,8 +264,8 @@ add_test(NAME test_stopbehavior
 # A theme change has to reach the chat UI: the panel, the cards and the
 # transcript repaint from the installed palette. Same source list as
 # test_overflow, which also builds a full ChatWidget.
-add_executable(test_themeapply test_themeapply.cpp ../src/chatwidget.cpp ../src/toolcallwidget.cpp
-    ../src/promptedit.cpp ../src/permissionbar.cpp ../src/subtaskwidget.cpp
+add_executable(test_themeapply test_themeapply.cpp ../src/chatwidget.cpp ../src/inspectorpanel.cpp ../src/toolcallwidget.cpp
+    ../src/promptedit.cpp ../src/permissionbar.cpp ../src/subtaskwidget.cpp ../src/subtaskdock.cpp
     ../src/suggestionwidget.cpp ../src/questionwidget.cpp ../src/todowidget.cpp ../src/edittracker.cpp
     ../src/turnstatus.cpp ../src/chattheme.cpp)
 target_link_libraries(test_themeapply PRIVATE kateai_core Qt6::Test Qt6::Widgets)
@@ -192,10 +274,20 @@ add_test(NAME test_themeapply COMMAND test_themeapply -platform offscreen)
 
 # Switching to a conversation from history rebuilds the transcript: the tool
 # cards must come back with their icons, titles, colours and result boxes.
-add_executable(test_historyrestore test_historyrestore.cpp ../src/chatwidget.cpp ../src/toolcallwidget.cpp
-    ../src/promptedit.cpp ../src/permissionbar.cpp ../src/subtaskwidget.cpp
+add_executable(test_historyrestore test_historyrestore.cpp ../src/chatwidget.cpp ../src/inspectorpanel.cpp ../src/toolcallwidget.cpp
+    ../src/promptedit.cpp ../src/permissionbar.cpp ../src/subtaskwidget.cpp ../src/subtaskdock.cpp
     ../src/suggestionwidget.cpp ../src/questionwidget.cpp ../src/todowidget.cpp ../src/edittracker.cpp
     ../src/turnstatus.cpp ../src/chattheme.cpp)
 target_link_libraries(test_historyrestore PRIVATE kateai_core Qt6::Test Qt6::Widgets)
 target_compile_definitions(test_historyrestore PRIVATE TRANSLATION_DOMAIN="kateai")
 add_test(NAME test_historyrestore COMMAND test_historyrestore -platform offscreen)
+
+# Voice prompting: mic availability detection, DSP noise removal, HTTP/CLI
+# transcription, disabled-button hover tooltip, and chat submission wiring.
+add_executable(test_voiceinput test_voiceinput.cpp ../src/chatwidget.cpp ../src/inspectorpanel.cpp ../src/toolcallwidget.cpp
+    ../src/promptedit.cpp ../src/permissionbar.cpp ../src/subtaskwidget.cpp ../src/subtaskdock.cpp
+    ../src/suggestionwidget.cpp ../src/questionwidget.cpp ../src/todowidget.cpp ../src/edittracker.cpp
+    ../src/turnstatus.cpp ../src/chattheme.cpp)
+target_link_libraries(test_voiceinput PRIVATE kateai_core Qt6::Test Qt6::Widgets)
+target_compile_definitions(test_voiceinput PRIVATE TRANSLATION_DOMAIN="kateai")
+add_test(NAME test_voiceinput COMMAND test_voiceinput -platform offscreen)

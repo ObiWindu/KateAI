@@ -40,12 +40,10 @@ private Q_SLOTS:
         s.kiloApiKey = u"kilo-test"_s;
         s.kiloModel = u"kilo-model-test"_s;
         s.acpAgentModels = u"{\"grok\": [\"m1\"]}"_s;
-        s.messageSpeed = 1;
+        s.acpAgentCommands = u"{\"grok\": [{\"name\":\"review\",\"description\":\"Review the changes\"}]}"_s;
         s.frequencyPenalty = 0.25;
         s.presencePenalty = 0.5;
         s.toolCallTimeoutMs = 45000;
-        s.maxContextMessages = 40;
-        s.compactOnFailure = false;
         s.structuredThinking = false;
         s.structuredPlanning = false;
         s.showPlanAsChecklist = false;
@@ -53,16 +51,26 @@ private Q_SLOTS:
         s.maxPlanSteps = 4;
         s.requireVerification = false;
         s.maxVerificationAttempts = 1;
-        s.adaptiveTemperature = false;
-        s.explorationTemperature = 0.7;
-        s.exploitationTemperature = 0.05;
-        s.enablePlanUpdates = false;
-        s.narrativeProgress = false;
         s.enableAutoRetry = false;
         s.maxRetryAttempts = 1;
         s.baseRetryDelaySeconds = 1;
         s.maxRetryDelaySeconds = 30;
         s.retryStrategy = u"linear"_s;
+        s.voiceProvider = u"openai_compatible"_s;
+        s.voiceApiKey = u"sk-voice-test"_s;
+        s.voiceEndpoint = u"http://127.0.0.1:8000/v1/audio/transcriptions"_s;
+        s.voiceModel = u"whisper-large-v3-turbo"_s;
+        s.voiceLanguage = u"en"_s;
+        s.voiceLocalCommand = u"whisper-cli -m /tmp/model.bin -f {file}"_s;
+        s.voiceInputDevice = u"alsa_input.usb-mic"_s;
+        s.voiceNoiseRemoval = false;
+        s.voiceAutoSend = false;
+        s.orchestration.enabled = true;
+        s.orchestration.planner = ModelRoute{Provider::OpenAI, u"planner-test"_s, u"high"_s};
+        s.orchestration.executor = ModelRoute{Provider::DeepSeek, u"executor-test"_s, u"low"_s};
+        s.orchestration.maxReplans = 5;
+        s.orchestration.maxReviewRounds = 3;
+        s.orchestration.reviewMode = u"always"_s;
 
         SettingsStore::save(s);
         const Settings loaded = SettingsStore::load();
@@ -78,12 +86,10 @@ private Q_SLOTS:
         QCOMPARE(loaded.kiloApiKey, s.kiloApiKey);
         QCOMPARE(loaded.kiloModel, s.kiloModel);
         QCOMPARE(loaded.acpAgentModels, s.acpAgentModels);
-        QCOMPARE(loaded.messageSpeed, s.messageSpeed);
+        QCOMPARE(loaded.acpAgentCommands, s.acpAgentCommands);
         QCOMPARE(loaded.frequencyPenalty, s.frequencyPenalty);
         QCOMPARE(loaded.presencePenalty, s.presencePenalty);
         QCOMPARE(loaded.toolCallTimeoutMs, s.toolCallTimeoutMs);
-        QCOMPARE(loaded.maxContextMessages, s.maxContextMessages);
-        QCOMPARE(loaded.compactOnFailure, s.compactOnFailure);
         QCOMPARE(loaded.structuredThinking, s.structuredThinking);
         QCOMPARE(loaded.structuredPlanning, s.structuredPlanning);
         QCOMPARE(loaded.showPlanAsChecklist, s.showPlanAsChecklist);
@@ -91,16 +97,29 @@ private Q_SLOTS:
         QCOMPARE(loaded.maxPlanSteps, s.maxPlanSteps);
         QCOMPARE(loaded.requireVerification, s.requireVerification);
         QCOMPARE(loaded.maxVerificationAttempts, s.maxVerificationAttempts);
-        QCOMPARE(loaded.adaptiveTemperature, s.adaptiveTemperature);
-        QCOMPARE(loaded.explorationTemperature, s.explorationTemperature);
-        QCOMPARE(loaded.exploitationTemperature, s.exploitationTemperature);
-        QCOMPARE(loaded.enablePlanUpdates, s.enablePlanUpdates);
-        QCOMPARE(loaded.narrativeProgress, s.narrativeProgress);
         QCOMPARE(loaded.enableAutoRetry, s.enableAutoRetry);
         QCOMPARE(loaded.maxRetryAttempts, s.maxRetryAttempts);
         QCOMPARE(loaded.baseRetryDelaySeconds, s.baseRetryDelaySeconds);
         QCOMPARE(loaded.maxRetryDelaySeconds, s.maxRetryDelaySeconds);
         QCOMPARE(loaded.retryStrategy, s.retryStrategy);
+        QCOMPARE(loaded.voiceProvider, s.voiceProvider);
+        QCOMPARE(loaded.voiceApiKey, s.voiceApiKey);
+        QCOMPARE(loaded.voiceEndpoint, s.voiceEndpoint);
+        QCOMPARE(loaded.voiceModel, s.voiceModel);
+        QCOMPARE(loaded.voiceLanguage, s.voiceLanguage);
+        QCOMPARE(loaded.voiceLocalCommand, s.voiceLocalCommand);
+        QCOMPARE(loaded.voiceInputDevice, s.voiceInputDevice);
+        QCOMPARE(loaded.voiceNoiseRemoval, s.voiceNoiseRemoval);
+        QCOMPARE(loaded.voiceAutoSend, s.voiceAutoSend);
+        QCOMPARE(loaded.orchestration.enabled, true);
+        QCOMPARE(loaded.orchestration.planner.provider, Provider::OpenAI);
+        QCOMPARE(loaded.orchestration.planner.model, u"planner-test"_s);
+        QCOMPARE(loaded.orchestration.planner.effort, u"high"_s);
+        QCOMPARE(loaded.orchestration.executor.provider, Provider::DeepSeek);
+        QCOMPARE(loaded.orchestration.executor.model, u"executor-test"_s);
+        QCOMPARE(loaded.orchestration.maxReplans, 5);
+        QCOMPARE(loaded.orchestration.maxReviewRounds, 3);
+        QCOMPARE(loaded.orchestration.reviewMode, u"always"_s);
     }
 
     void loadingAnEmptyConfigKeepsTheDocumentedDefaults()
@@ -120,6 +139,15 @@ private Q_SLOTS:
         QCOMPARE(fresh.enableAutoRetry, defaults.enableAutoRetry);
         QCOMPARE(fresh.retryStrategy, defaults.retryStrategy);
         QCOMPARE(fresh.verbosity, defaults.verbosity);
+    }
+    void unlimitedSavedConversationsIsPreserved()
+    {
+        // 0 is the config UI's "Unlimited". Clamping it to 1 made the next
+        // save prune every other conversation.
+        Settings s;
+        s.maxSavedConversations = 0;
+        SettingsStore::save(s);
+        QCOMPARE(SettingsStore::load().maxSavedConversations, 0);
     }
 };
 

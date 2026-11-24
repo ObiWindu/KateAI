@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(kateai VERSION 0.1.0 LANGUAGES CXX)
+project(kateai VERSION 0.9.0 LANGUAGES C CXX)
 
 set(QT_MAJOR_VERSION "6")
 set(QT_MIN_VERSION "6.5.0")
@@ -33,8 +33,10 @@ if(KATEAI_USER_INSTALL)
         set(KDE_INSTALL_QTPLUGINDIR "${CMAKE_INSTALL_PREFIX}/lib/qt6/plugins" CACHE STRING "Qt plugins under the install prefix" FORCE)
     endif()
 else()
-    # System Kate only scans Qt's plugin dir, not /usr/local.
-    set(KDE_INSTALL_USE_QT_SYS_PATHS ON CACHE BOOL "Install into Qt plugin dir (required for Kate)" FORCE)
+    # System Kate only scans Qt's plugin dir, not /usr/local. Not forced:
+    # bundle builds pass -DKDE_INSTALL_USE_QT_SYS_PATHS=OFF with their own
+    # prefix so the plugin lands inside the bundle, not the system.
+    set(KDE_INSTALL_USE_QT_SYS_PATHS ON CACHE BOOL "Install into Qt plugin dir (required for Kate)")
 endif()
 
 find_package(ECM 6.0 REQUIRED NO_MODULE)
@@ -74,10 +76,37 @@ find_package(KF6 ${KF6_DEP_VERSION} REQUIRED COMPONENTS
     WidgetsAddons
 )
 
+find_package(KF6Wallet ${KF6_DEP_VERSION} QUIET)
+if(KF6Wallet_FOUND)
+    set(KATEAI_HAVE_KWALLET TRUE)
+    message(STATUS "KateAI: KDE Wallet available, enabling secure credential storage")
+else()
+    set(KATEAI_HAVE_KWALLET FALSE)
+    message(STATUS "KateAI: KDE Wallet not found, falling back to owner-only config file")
+endif()
+
 add_subdirectory(src)
 
 if(BUILD_TESTING)
     find_package(Qt6 ${QT_MIN_VERSION} CONFIG REQUIRED COMPONENTS Test)
+    # Tests spawn python3 (mock LLM server, mock ACP agent). Craft's
+    # craftenv.sh rewrites PATH on macOS/Windows CI, hiding the system
+    # python3 from QProcess. Resolve the absolute path at configure time
+    # so tests always find it regardless of PATH.
+    # Windows: prefer the runner's own Python over Craft's dev-utils Python,
+    # which can trigger a Windows Defender firewall prompt when a mock server
+    # binds a listening socket and hang the suite in CI.
+    if(WIN32 AND DEFINED ENV{KATEAI_PYTHON} AND EXISTS "$ENV{KATEAI_PYTHON}")
+        set(Python3_EXECUTABLE "$ENV{KATEAI_PYTHON}" CACHE FILEPATH "Python interpreter" FORCE)
+    endif()
+    find_package(Python3 COMPONENTS Interpreter)
+    # macOS: prefer the system (Apple-signed) python3 over Homebrew's. Homebrew's
+    # framework build triggers the application firewall / Gatekeeper on the
+    # runner when it binds a listening socket, which hangs the mock LLM server
+    # and makes every port-file wait time out.
+    if(APPLE AND EXISTS "/usr/bin/python3")
+        set(Python3_EXECUTABLE "/usr/bin/python3")
+    endif()
     add_subdirectory(tests)
 endif()
 

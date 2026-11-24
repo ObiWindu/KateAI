@@ -16,6 +16,17 @@ using namespace Qt::Literals::StringLiterals;
 namespace KateAi
 {
 
+// ACP/native tool name normalization. Maps known agent tool names (e.g. fs/read_text_file,
+// terminal/exec) to canonical KateAI tool names used for policy, UI, and tracking.
+QString canonicalToolName(const QString &name);
+QStringList toolNameAliases(const QString &canonicalName);
+// Resolve a path the agent reported, relative to the workspace when it is not
+// absolute. Returns an empty string for an empty input.
+QString resolvePath(const QString &path, const QString &workspace);
+// Normalise the raw input of an ACP tool call into a JSON object, whatever
+// shape the agent used (object, array, JSON string, plain text).
+QJsonObject normalizeRawInput(const QJsonValue &rawInput);
+
 enum class Provider {
     Grok,
     OpenAI,
@@ -67,6 +78,11 @@ enum class ToolRisk {
 struct ToolAccess {
     QSet<QString> exact;
     QStringList prefixes;
+    // Deny-first entries. A denied name wins over every allow rule, including
+    // allowAll, so an AgentSpec can subtract a single MCP tool (or a prefix of
+    // one) from a mode that otherwise allows the whole MCP namespace.
+    QSet<QString> deniedExact;
+    QStringList deniedPrefixes;
     bool allowAll = false;
 
     // Every tool, current and future.
@@ -90,26 +106,79 @@ struct ToolAccess {
             prefixes.append(prefix);
         }
     }
-    bool allows(const QString &toolName) const
+    void deny(const QString &toolName)
     {
-        if (allowAll) {
+        deniedExact.insert(toolName);
+    }
+    void denyPrefix(const QString &prefix)
+    {
+        if (!deniedPrefixes.contains(prefix)) {
+            deniedPrefixes.append(prefix);
+        }
+    }
+    bool isDenied(const QString &toolName) const
+    {
+        if (deniedExact.isEmpty() && deniedPrefixes.isEmpty()) {
+            return false;
+        }
+        const QString canonical = canonicalToolName(toolName);
+        if (deniedExact.contains(toolName) || deniedExact.contains(canonical)) {
             return true;
         }
-        if (exact.contains(toolName)) {
-            return true;
+        for (const QString &alias : toolNameAliases(canonical)) {
+            if (deniedExact.contains(alias)) {
+                return true;
+            }
         }
-        for (const QString &prefix : prefixes) {
-            if (toolName.startsWith(prefix)) {
+        for (const QString &prefix : deniedPrefixes) {
+            if (toolName.startsWith(prefix) || canonical.startsWith(prefix)) {
                 return true;
             }
         }
         return false;
     }
+    bool allows(const QString &toolName) const
+    {
+        if (isDenied(toolName)) {
+            return false;
+        }
+        if (allowAll) {
+            return true;
+        }
+        // Canonicalize so ACP aliases (fs/read_text_file, terminal/exec, etc.)
+        // are checked against the canonical tool names used in mode definitions.
+        const QString canonical = canonicalToolName(toolName);
+        if (exact.contains(toolName) || exact.contains(canonical)) {
+            return true;
+        }
+        for (const QString &prefix : prefixes) {
+            if (toolName.startsWith(prefix) || canonical.startsWith(prefix)) {
+                return true;
+            }
+        }
+        // Also check aliases of canonical names in exact set
+        const QStringList aliases = toolNameAliases(canonical);
+        for (const QString &alias : aliases) {
+            if (exact.contains(alias)) {
+                return true;
+            }
+        }
+        return false;
+    }
+    // Convenience: check the canonical form of a name directly.
+    bool allowsCanonical(const QString &canonicalName) const
+    {
+        return allows(canonicalName);
+    }
 };
 
+// Which model produced an assistant message in a two-model turn. Empty for
+// single-model messages and for every non-assistant role. Persisted so the
+// transcript can keep its planner/executor/reviewer badges after a restart.
 struct ChatMessage {
     enum class Role { System, User, Assistant, Tool };
     Role role = Role::User;
+    QString authorRole;
     QString content;
     // Hidden reasoning emitted by the model before the visible answer. Kept
     // separate so it can be collapsed in the transcript without losing context.
@@ -120,6 +189,9 @@ struct ChatMessage {
     QString toolCallId;
     QString name;
     QJsonArray toolCalls;
+    // Ambient context injected into a request only (editor state, git status).
+    // It is never stored in the conversation or the session database.
+    bool transient = false;
 };
 
 struct PlanStep {
@@ -143,6 +215,11 @@ struct CompletionChunk {
     bool finished = false;
     QString finishReason;
     QString error;
+    // Provider-reported usage when the stream carries it. 0 means "not
+    // reported by this chunk/provider". Used to calibrate local estimates.
+    int inputTokens = 0;
+    int outputTokens = 0;
+    int cachedInputTokens = 0;
 };
 
 struct PermissionRequest {
@@ -159,6 +236,12 @@ struct PermissionRequest {
     // Pre-formatted unified diff for write_file, or the old/new strings for
     // edit_file. Rendered inline by the tool-call card in the chat transcript.
     QString describeDiff;
+    // Additional diffs for multi-file ACP tool calls (path -> diff).
+    QStringList additionalPaths;
+    QStringList additionalDiffs;
+    // The original (un-normalized) tool name as reported by the agent, kept
+    // for display/debugging.
+    QString originalToolName;
     ToolRisk risk = ToolRisk::Write;
 
     // True when the call lands its result in a file. ToolRunner::describe sets
@@ -196,8 +279,69 @@ struct Suggestion {
     int line = 0;
 };
 
+// One hunk of a unified diff. `lines` keeps the leading marker character
+// (' ', '+', '-'); the '\\ No newline at end of file' line is kept as-is.
+struct PatchHunk {
+    int oldStart = 0;
+    int oldCount = 0;
+    int newStart = 0;
+    int newCount = 0;
+    QStringList lines;
+};
+
+// One file section of a unified diff, as produced by apply_patch-style tools
+// (Codex, aider, OpenCode, ...). Paths keep the a/ b/ prefixes stripped.
+struct PatchFile {
+    QString path; // target path (from the +++ line)
+    QString oldPath; // from the --- line
+    bool isNew = false; // /dev/null on the --- side
+    bool isDelete = false; // /dev/null on the +++ side
+    QList<PatchHunk> hunks;
+};
+
+// Parses a unified diff into per-file sections. Returns an empty list when the
+// text is not a unified diff. Shared by the native apply_patch tool and the
+// ACP ingest path, which turns agent patches into per-file card diffs.
+QList<PatchFile> parseUnifiedPatch(const QString &patch);
+// Applies hunks to `content` (LF-separated). Fails with an error when a hunk's
+// context does not match at its recorded position; applies nothing on failure.
+QString applyPatchToContent(const QString &content, const QList<PatchHunk> &hunks, QString *error);
+
+// One resolved model in a two-model orchestration pair. The route is stored in
+// settings instead of being derived from Settings::provider so the planner and
+// executor can live on different API providers.
+struct ModelRoute {
+    Provider provider = Provider::Grok;
+    QString model;
+    QString effort;
+
+    bool isValid() const
+    {
+        return provider != Provider::Acp && provider != Provider::Telegram
+            && !model.trimmed().isEmpty();
+    }
+    QString key() const;
+};
+
+struct OrchestrationSettings {
+    bool enabled = false;
+    ModelRoute planner;
+    ModelRoute executor;
+    // Bounds for one user turn. Replans and reviews are deliberately separate:
+    // a planner that keeps changing its mind must not consume the executor's
+    // retry budget, and vice versa.
+    int maxReplans = 3;
+    int maxPlannerSteps = 12;
+    int maxReviewRounds = 2;
+    // "auto", "always", "off". Auto reviews a turn that changed files or has
+    // at least three plan steps.
+    QString reviewMode = QStringLiteral("auto");
+    bool showPlannerActivity = true;
+};
+
 struct Settings {
     Provider provider = Provider::Grok;
+    OrchestrationSettings orchestration;
     QString grokApiKey;
     QString openaiApiKey;
     QString openrouterApiKey;
@@ -240,6 +384,11 @@ struct Settings {
     // ACP agent models broadcasted as available by running agents.
     // Stores a JSON object mapping agent IDs to arrays of model names.
     QString acpAgentModels;
+    // Slash commands last advertised by each ACP agent. A JSON object mapping
+    // agent IDs to the advertised command arrays. Commands only arrive with a
+    // live session, so the cache lets a freshly opened window show the list
+    // before the agent process has started again.
+    QString acpAgentCommands;
     ApiFormat apiFormat = ApiFormat::AcpNative;
     PermissionMode permissionMode = PermissionMode::Ask;
     SandboxProfile sandbox = SandboxProfile::Workspace;
@@ -273,18 +422,15 @@ struct Settings {
     // a prompt, so a confined read is what keeps the agent in the project.
     bool allowReadsOutsideWorkspace = false;
     int contextCompressionLevel = 1; // 0=full, 1=summary, 2=minimal, 3=ultra-minimal
-    int maxGraphNodes = 50; // Maximum number of nodes to include in project graph
-    int maxGraphEdges = 100; // Maximum number of edges to include in project graph
-    bool compressProjectGraph = true; // Whether to compress project graph information
-    bool includeFileContents = true; // Whether to include file content in project graph
-    int maxFileContentLength = 500; // Maximum characters per file content preview
+    int maxGraphNodes = 80; // Maximum number of file nodes to include in the graph prompt
+    int maxGraphEdges = 160; // Maximum number of dependency edges to include
+    bool compressProjectGraph = true; // Whether to include the graph summary in the prompt
     bool compressEditorContext = true; // Whether to compress editor context
-    int maxEditorContextLength = 4000; // Maximum characters for editor context
+    int maxEditorContextLength = 8000; // Maximum characters for editor context
     bool compressProjectInstructions = true; // Whether to compress project instructions
-    int maxProjectInstructionsLength = 2048; // Maximum characters for project instructions
+    int maxProjectInstructionsLength = 8192; // Maximum characters for project instructions
     bool compressSystemPrompt = true; // Whether to compress system prompt
-    int maxSystemPromptLength = 1024; // Maximum characters for system prompt
-    int messageSpeed = 2; // 0=slow, 1=medium, 2=fast (default fast)
+    int maxSystemPromptLength = 4096; // Maximum characters for system prompt
 
     // --- Optimal-intelligence generation parameters -----------------------
     // These are sent to the model per request and tuned for coding tasks:
@@ -303,8 +449,6 @@ struct Settings {
     bool selfCritique = true; // ask the model to check its own work before finishing
     bool parallelToolCalls = true; // let the model batch independent tool calls
     int toolCallTimeoutMs = 120000; // per-tool-call wall-clock budget
-    int maxContextMessages = 0; // 0 = keep full history; else sliding window size
-    bool compactOnFailure = true; // summarise history after a failed tool call
     int verbosity = 1; // 0= terse, 1= normal, 2= detailed narration
 
     // --- Enhanced Intelligence Parameters ---------------------------------
@@ -317,19 +461,12 @@ struct Settings {
     int maxPlanSteps = 15;           // Max steps in structured plan
     
     // Context management for performance
-    bool smartContextTruncation = true;  // Keep a recent tail verbatim when compacting
     int contextWindowReserve = 8192;     // Reserve tokens for the model's reply
     bool compressOldMessages = true;     // Auto-compact older turns to fit the window
-    int compressionThreshold = 2048;     // Soft hint for how much recent text to keep
     
     // Agent behavior tuning
     bool requireVerification = true;    // Require verification after mutations
     int maxVerificationAttempts = 2;    // Max verification retries
-    bool adaptiveTemperature = true;    // Adjust temperature based on task phase
-    double explorationTemperature = 0.4; // Higher temp for exploration phase
-    double exploitationTemperature = 0.1; // Lower temp for execution phase
-    bool enablePlanUpdates = true;      // Allow plan updates during execution
-    bool narrativeProgress = true;      // Natural language progress updates
 
     // --- Retry Configuration -----------------------------------------------
     // Automatic retry for transient API errors (rate limits, server errors, network issues)
@@ -386,7 +523,7 @@ struct Settings {
 
     // --- Editor integration --------------------------------------------------
     // AI completions at the cursor, rendered inline and accepted with Tab.
-    // Opt-in: off by default. See docs/ai-completion-plan.md.
+    // Opt-in: off by default. See the "Editor integration" section of README.md.
     bool completionEnabled = false;
     // "manual" (the Alt+\ action) or "auto" (idle timer after typing).
     QString completionTrigger = QStringLiteral("manual");
@@ -436,6 +573,28 @@ struct Settings {
     // JSON object mapping ChatTheme colour keys (panelBg, accent, ...) to hex
     // values, applied on top of the selected source. Empty means no overrides.
     QString themeOverrides;
+
+    // --- Voice prompting -----------------------------------------------------
+    // Backend id: "auto" (OpenAI key -> custom endpoint -> local Whisper CLI),
+    // "openai", "openai_compatible", or "local_cli".
+    QString voiceProvider = QStringLiteral("auto");
+    // Optional API key dedicated to speech-to-text (stored in CredentialStore).
+    // Empty falls back to the provider's chat API key when applicable.
+    QString voiceApiKey;
+    // Custom Whisper-compatible base URL or full /audio/transcriptions URL.
+    QString voiceEndpoint;
+    // Transcription model sent to HTTP speech-to-text endpoints.
+    QString voiceModel = QStringLiteral("whisper-1");
+    // Optional ISO-639-1 language hint (e.g. "en", "fr"); empty = auto-detect.
+    QString voiceLanguage;
+    // Local CLI transcription command template (use {file} for the WAV path).
+    QString voiceLocalCommand;
+    // Optional microphone device name override; empty = system default mic.
+    QString voiceInputDevice;
+    // Run noise removal before transcription.
+    bool voiceNoiseRemoval = true;
+    // Automatically submit transcribed text to chat when idle.
+    bool voiceAutoSend = true;
 };
 
 QString providerId(Provider provider);
@@ -443,6 +602,10 @@ QString providerLabel(Provider provider);
 Provider providerFromId(const QString &id);
 QString providerBaseUrl(Provider provider);
 QString providerBaseUrl(const Settings &settings);
+// Joins a provider base URL and an API path without doubling an existing
+// "/v1" segment. The Anthropic base already ends in /v1, while the endpoints
+// are written as /v1/messages, which used to produce /v1/v1/messages.
+QString joinApiEndpoint(const QString &baseUrl, const QString &endpoint);
 QStringList defaultModels(Provider provider);
 // True when the provider can be listed: it has a key and speaks an API we can
 // query a model catalogue on. Used to decide which providers to fetch from.
@@ -487,14 +650,43 @@ QString acpBinaryInstallDir(const QString &agentId);
 // as "./agy_acp_server.par", which are relative to the unpacked archive rather
 // than to Kate's working directory.
 QString acpInstalledBinaryCommand(const Settings &settings);
+// True when the agent's registry entry is a binary distribution. Such a
+// command is staged by the installer, so an unresolved relative path means the
+// install is missing rather than that the user meant a workspace file.
+bool acpAgentHasBinaryInstall(const Settings &settings);
 // True for the MiniMax Code ACP agent (`mcode`, registry id `minimax-code`).
 // Its standalone CLI (`mcode acp`) is preferred over the npm distribution the
 // ACP registry records, because the distribution's bundled native modules can
 // fail to load on current Node runtimes and the process exits before the ACP
 // handshake completes.
 bool acpAgentIsMinimaxCode(const Settings &settings);
-// True for Google Antigravity ACP agent (registry id `antigravity-acp`).
+// True for Google Antigravity ACP agent (`agy acp` CLI or legacy
+// `agy_acp_server` binary, registry id `antigravity-acp`).
 bool acpAgentIsAntigravity(const Settings &settings);
+// True only for the legacy standalone gflags/C++ `agy_acp_server` binary
+// (`.par` archive), which needs sanitizer-disabling gflags and the 4KB page
+// shim on >4KB hosts. The modern Go `agy` CLI (`agy acp`) rejects those flags
+// and runs natively without LD_PRELOAD.
+bool acpAgentIsLegacyAntigravityServer(const Settings &settings);
+// Launch-line quirks of one ACP agent, keyed by registry id so newly installed
+// registry agents get the same treatment as the built-in presets. Zed keeps the
+// equivalent knowledge in crates/agent_servers/<name>.rs.
+struct AcpAgentQuirks {
+    // Append an "acp" subcommand when the recorded args have none (opencode and
+    // friends start their TUI instead of the ACP server otherwise).
+    bool needsAcpSubcommand = false;
+    // Drop npm-only tokens ("--yes", "@scope/pkg") from recorded args.
+    bool stripNpmTokens = false;
+    // The agent accepts "--model <id>".
+    bool modelFlag = false;
+    // Always appended (e.g. antigravity's sanitizer-disabling flags).
+    QStringList extraArgs;
+    // Removed from the recorded args when present.
+    QStringList stripArgs;
+    // Present clientInfo as Zed at initialize (agents that gate models by client).
+    bool spoofZedClientInfo = false;
+};
+AcpAgentQuirks acpAgentQuirks(const QString &agentId, const QString &command);
 // True for the Mistral Vibe ACP agent (registry id `mistral-vibe`, binary
 // `vibe-acp`). It persists its selected model in its own global state and
 // reports it as current on every new session, so the model configured in
@@ -506,8 +698,18 @@ QString acpAgentIdMatching(const QString &command, const QString &args);
 // Agents that have not been queried yet contribute no names.
 QStringList acpAgentAvailableModels(const Settings &settings, const QString &agentId = QString());
 
-QString permissionModeId(PermissionMode mode);
-QString permissionModeLabel(PermissionMode mode);
+// Tolerant readers for the two UI-only tools. Agents commonly spell the same
+// payload differently (`question`/`prompt`/`message`, `suggestion`/`text`/
+// `advice`, nested `questions[]`, option objects instead of strings). Card
+// construction and tool validation share these so a synonym cannot leave a
+// question or suggestion card blank.
+QString firstStringToolArgument(const QJsonObject &args, const QStringList &keys);
+QString questionTextFromToolArguments(const QJsonObject &args);
+QStringList questionOptionsFromToolArguments(const QJsonObject &args);
+bool questionAllowFreeformFromToolArguments(const QJsonObject &args, bool fallback = true);
+QString suggestionTextFromToolArguments(const QJsonObject &args);
+
+QString permissionModeId(PermissionMode mode);QString permissionModeLabel(PermissionMode mode);
 PermissionMode permissionModeFromId(const QString &id);
 
 QString sandboxProfileId(SandboxProfile profile);

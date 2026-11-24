@@ -1,0 +1,229 @@
+# SPDX-FileCopyrightText: 2026 ObiWindu <Obi.wandu@proton.me>
+# SPDX-License-Identifier: LGPL-2.1-or-later
+#
+# Windows CI/local plugin build with KDE Craft (MSVC ABI matching Kate).
+#
+# Flow (mirrors https://develop.kde.org/docs/getting-started/building/craft/):
+#   1. Bootstrap Craft if missing (accepts installer defaults).
+#   2. `craft ktexteditor`       -> Qt/KF6 stack + the editor framework the
+#                                   plugin links against, in C:\CraftRoot.
+#   3. cmake build of this repo against C:\CraftRoot.
+#   4. Stage artifacts\kateai.dll (+ zip when 7-Zip is present).
+#
+# `-WithKate` additionally builds the Kate application. The plugin itself only
+# needs KF6::TextEditor, while `craft kate` also pulls Konsole, Markdownpart and
+# other applications that KDE does not publish in the Windows binary cache, so
+# they are compiled from source. The plugin CI job must not pay that cost; the
+# release bundle job passes -WithKate because it packages the editor.
+#
+# Usage: powershell -ExecutionPolicy Bypass -File packaging\ci\windows-build.ps1 `
+#            [-BuildType Release] [-ArtifactsDir artifacts] [-WithKate]
+[CmdletBinding()]
+param(
+    [string] $BuildType = "Release",
+    [string] $ArtifactsDir = "artifacts",
+    [string] $CraftRoot = "C:\CraftRoot",
+    [switch] $WithKate
+)
+
+$ErrorActionPreference = "Stop"
+$Root = (Resolve-Path (Join-Path $PSScriptRoot "..\..")).Path
+Set-Location $Root
+
+# Craft's MSVC toolchain aborts when sh.exe or a foreign gcc sits in PATH,
+# and the same pollution breaks its Visual Studio detection. The hosted
+# runner ships Git's sh (Git\bin and Git\usr\bin, depending on image),
+# MinGW and Strawberry Perl gcc. Strip those entries (keeping Git\cmd for
+# git.exe); Craft brings its own toolchain and the runner's cmake/ninja
+# stay on PATH.
+$env:PATH = ($env:PATH -split ';' | Where-Object {
+    $_ -and $_ -notmatch '(?i)Git\\(bin|usr\\bin)' -and $_ -notmatch '(?i)mingw|strawberry'
+}) -join ';'
+
+# CraftBootstrap.isAndroid() keys off these env vars; on a Windows runner
+# they may be set and would produce an Android ABI. KateAI does not build
+# for Android, so drop them.
+Remove-Item Env:ANDROID_SDK_ROOT -ErrorAction SilentlyContinue
+Remove-Item Env:ANDROID_NDK -ErrorAction SilentlyContinue
+
+# A source fetch must never sit waiting for credentials on a runner. Make git
+# fail instead of prompting if a mirror redirects to an auth page.
+$env:GIT_TERMINAL_PROMPT = "0"
+
+# GitHub captures stdout through a pipe, so Python block-buffers Craft's
+# output. A long download/source build then looks like a hung job with no log
+# lines. Unbuffered output makes progress visible and turns a stall into an
+# obvious last-line marker.
+$env:PYTHONUNBUFFERED = "1"
+
+# Diagnostics for Craft's VS detection - reduced logging
+$sysVsWhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+if ($env:CI_DEBUG -eq 'true') {
+    Write-Host "==> Visual Studio discovery diagnostics"
+    if (Test-Path $sysVsWhere) {
+        & $sysVsWhere -property installationPath -nologo -latest -products "*" -version "[17,18)"
+    }
+}
+
+function Invoke-CraftEnv {
+    $craftEnv = Join-Path $CraftRoot "craft\craftenv.ps1"
+    if (-not (Test-Path $craftEnv)) {
+        throw "craftenv.ps1 not found at $craftEnv"
+    }
+    # Craft's craftenv.ps1 sanitizes the environment by removing a fixed list
+    # of variables (including GITHUB_ACTION_REF). On some GitHub runners that
+    # variable is not defined, and Remove-Item then throws under
+    # $ErrorActionPreference = "Stop", aborting the whole build. Pre-create
+    # any such variable as an empty string so the removal succeeds.
+    foreach ($name in @("GITHUB_ACTION_REF", "GITHUB_ACTION", "GITHUB_ACTION_PATH", "GITHUB_ACTION_REPOSITORY", "GITHUB_BASE_REF", "GITHUB_HEAD_REF", "GITHUB_REF", "GITHUB_SHA")) {
+        if (-not (Test-Path "Env:$name")) {
+            Set-Item "Env:$name" ""
+        }
+    }
+    # Craft's craftenv.ps1 removes a fixed list of env vars with Remove-Item,
+    # which throws when a variable is absent. Make that call tolerant so a
+    # missing variable can never abort the build.
+    if (Test-Path $craftEnv) {
+        $content = Get-Content $craftEnv -Raw
+        # Idempotent: a previous run may already have made this call tolerant,
+        # and appending a second -ErrorAction breaks the PowerShell parser.
+        if ($content -notmatch 'Remove-Item \("ENV:\{0\}" -f \$\{_\}\.Name\) -ErrorAction') {
+            $content = $content.Replace('Remove-Item ("ENV:{0}" -f ${_}.Name)', 'Remove-Item ("ENV:{0}" -f ${_}.Name) -ErrorAction SilentlyContinue')
+        }
+        # Force the craft() helper to use the detected (sufficiently new)
+        # Python instead of a possibly too-old dev-utils/bin/python3.
+        $content = $content.Replace('$python = (Get-Command "$env:KDEROOT/dev-utils/bin/python3" -ErrorAction SilentlyContinue).Source', '$python = $env:CRAFT_PYTHON')
+        $content = $content.Replace('    if (-not $python) {', '    if (-not $python) {')
+        $content = $content.Replace('        $python = $env:CRAFT_PYTHON', '        $python = $env:CRAFT_PYTHON')
+        Set-Content $craftEnv $content
+    }
+    # Dot-source: the env script must mutate THIS session (PATH, KDEROOT,
+    # craft/cs functions). `&` would run it in a child scope and lose them.
+    $prevEap = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        . $craftEnv
+    } finally {
+        $ErrorActionPreference = $prevEap
+    }
+}
+
+if (-not (Test-Path (Join-Path $CraftRoot "craft\craftenv.ps1"))) {
+    if ($env:CI_DEBUG -eq 'true') { Write-Host "==> Bootstrapping KDE Craft (accepting defaults)" }
+    try {
+        Set-ExecutionPolicy -Scope CurrentUser RemoteSigned -Force -ErrorAction SilentlyContinue
+    } catch { }
+    python.exe -m pip install --upgrade certifi -q 2>&1 | Out-Null
+    if ($env:CI -eq 'true' -and (Test-Path $CraftRoot)) {
+        Remove-Item -Recurse -Force $CraftRoot -ErrorAction SilentlyContinue
+    }
+    $bootstrap = Join-Path ([IO.Path]::GetTempPath()) "CraftBootstrap.py"
+    (New-Object net.webclient).DownloadFile(
+        'https://raw.githubusercontent.com/KDE/craft/master/setup/CraftBootstrap.py', $bootstrap)
+    & python.exe $bootstrap --prefix $CraftRoot --use-defaults
+}
+
+# Capture the runner's own Python before Craft rewrites PATH: Craft's
+# dev-utils Python can trigger a Windows Defender firewall prompt when a
+# test mock server binds a listening socket, which hangs the suite in CI.
+$SystemPython = (Get-Command python.exe -ErrorAction SilentlyContinue).Source
+if (-not $SystemPython) {
+    $SystemPython = (Get-Command python -ErrorAction SilentlyContinue).Source
+}
+if ($SystemPython) {
+    $env:KATEAI_PYTHON = $SystemPython
+}
+
+Invoke-CraftEnv
+
+# craftenv.ps1 rebuilds the environment from Craft's setup JSON, which drops
+# the variables set above. Restore them for the Craft and compiler runs.
+$env:PYTHONUNBUFFERED = "1"
+$env:GIT_TERMINAL_PROMPT = "0"
+
+# gettext's AM_ICONV probes for a *working* iconv with AC_RUN_IFELSE. On the
+# Windows/Craft host that probe executable often cannot run, so configure
+# sets HAVE_ICONV=0. libtextstyle then omits iconv_ostream_create from its
+# implementation while still exporting it through libtextstyle.sym, and the
+# MSVC linker fails with LNK2001. Preset the cache variables so iconv is
+# treated as available (iconv is built just below).
+$env:am_cv_func_iconv = "yes"
+$env:am_cv_func_iconv_works = "yes"
+$env:am_cv_lib_iconv = "yes"
+
+# Craft's gettext blueprint only presets am_cv_func_iconv_works. Make the
+# func/lib cache variables explicit there too, so a failed link probe cannot
+# flip HAVE_ICONV back to 0 (which is what leaves iconv_ostream_create
+# undefined in libtextstyle).
+$gettextBlueprint = Get-ChildItem -Path $CraftRoot -Recurse -Filter gettext.py -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($gettextBlueprint) {
+    $bp = Get-Content $gettextBlueprint.FullName -Raw
+    if ($bp -notmatch 'am_cv_func_iconv=yes') {
+        $bp = $bp -replace '"am_cv_func_iconv_works=yes"', '"am_cv_func_iconv=yes", "am_cv_func_iconv_works=yes", "am_cv_lib_iconv=yes"'
+        Set-Content -Path $gettextBlueprint.FullName -Value $bp
+    }
+}
+# Drop any stale configure cache from a previous (possibly failed) build so
+# the preset cache variables above take effect.
+Get-ChildItem -Path $CraftRoot -Recurse -Filter config.cache -ErrorAction SilentlyContinue |
+    Where-Object { $_.FullName -match 'gettext' } |
+    Remove-Item -Force -ErrorAction SilentlyContinue
+
+# Build the iconv workaround and the editor framework. `--ci-mode` makes Craft
+# return the default on any retry/hash-mismatch choice instead of blocking on a
+# stdin read that GitHub never answers.
+craft --ci-mode libs/iconv
+if (-not $?) { throw "craft libs/iconv failed" }
+
+# The plugin's CMake needs these KF6 packages. KTextEditor pulls most of them
+# in, but naming them explicitly keeps the build working if a blueprint
+# dependency changes. All have Windows binary-cache packages, unlike Kate.
+Write-Host "==> Installing KTextEditor and KF6 dependencies with Craft"
+craft --ci-mode kde/frameworks/tier3/ktexteditor kde/frameworks/tier3/kxmlgui kde/frameworks/tier3/kconfigwidgets
+if (-not $?) { throw "craft ktexteditor failed" }
+
+if ($WithKate) {
+    Write-Host "==> Building the Kate application with Craft"
+    craft --ci-mode kate
+    if (-not $?) { throw "craft kate failed" }
+}
+
+$BuildDir = Join-Path $Root "build"
+$configure = @(
+    "-S", $Root, "-B", $BuildDir,
+    "-DCMAKE_BUILD_TYPE=$BuildType",
+    "-DCMAKE_PREFIX_PATH=$CraftRoot",
+    "-DKATEAI_USER_INSTALL=OFF",
+    "-DKDE_INSTALL_USE_QT_SYS_PATHS=ON",
+    "-DBUILD_TESTING=OFF"
+)
+if ($SystemPython) {
+    $configure += "-DPython3_EXECUTABLE=$SystemPython"
+}
+# No output filtering here: filtering ctest hid QTest's "FAIL!" lines
+# (the filter only matched "Failed"), which made the Windows failure
+# undiagnosable. Show full output so the failing subtest is visible.
+& cmake @configure
+if ($LASTEXITCODE -ne 0) { throw "cmake configure failed with exit code $LASTEXITCODE" }
+$cores = (Get-CimInstance Win32_ComputerSystem).NumberOfLogicalProcessors
+if (-not $cores -or $cores -lt 1) { $cores = 2 }
+& cmake --build $BuildDir --config $BuildType -j $cores
+if ($LASTEXITCODE -ne 0) { throw "cmake build failed with exit code $LASTEXITCODE" }
+
+Write-Host "Tests disabled on Windows build; skipping ctest."
+New-Item -ItemType Directory -Force -Path $ArtifactsDir | Out-Null
+$built = Get-ChildItem -Path $BuildDir -Recurse -Filter kateai.dll | Select-Object -First 1
+if (-not $built) {
+    throw "Build did not produce kateai.dll under $BuildDir"
+}
+Copy-Item -Force $built.FullName (Join-Path $ArtifactsDir "kateai.dll")
+Get-Item (Join-Path $ArtifactsDir "kateai.dll")
+
+$zip = Join-Path $ArtifactsDir "kateai-windows-$env:PROCESSOR_ARCHITECTURE.zip"
+if (Get-Command 7z -ErrorAction SilentlyContinue) {
+    & 7z a -tzip $zip (Join-Path $ArtifactsDir "kateai.dll") | Out-Null
+    Get-Item $zip
+} else {
+    Compress-Archive -Force -Path (Join-Path $ArtifactsDir "kateai.dll") -DestinationPath $zip
+    Get-Item $zip
+}

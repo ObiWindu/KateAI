@@ -1,5 +1,8 @@
 #include "acpclient.h"
+#include "acpinstall.h"
+#include "agentloop.h"
 #include "documentbridge.h"
+#include "test_python.h"
 #include "tools.h"
 #include "types.h"
 
@@ -12,11 +15,16 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QProcess>
 #include <QStandardPaths>
 #include <QTemporaryDir>
 #include <QTest>
 #include <QTextStream>
 #include <QTimer>
+
+#if defined(Q_OS_LINUX)
+#include <unistd.h>
+#endif
 
 using namespace Qt::Literals::StringLiterals;
 using namespace KateAi;
@@ -54,13 +62,33 @@ private:
         return true;
     }
 
+#ifdef Q_OS_UNIX
+    // A killed process can linger in /proc as a zombie until the container's
+    // PID 1 reaps it. It is not running; reading the state lets the test wait
+    // for the process to die without depending on init's reaping cadence.
+    static bool processStillRunning(const QString &pid)
+    {
+        QFile stat(u"/proc/"_s + pid + u"/stat"_s);
+        if (!stat.open(QIODevice::ReadOnly)) {
+            return false;
+        }
+        const QByteArray line = stat.readLine();
+        const int closeParen = line.lastIndexOf(')');
+        if (closeParen < 0 || closeParen + 2 >= line.size()) {
+            return true;
+        }
+        const char state = line.at(closeParen + 2);
+        return state != 'Z' && state != 'X';
+    }
+#endif
+
     Settings mockSettings(const QString &scenario) const
     {
         Settings settings;
         settings.provider = Provider::Acp;
         settings.apiFormat = ApiFormat::AcpNative;
         settings.acpAgentId = u"custom"_s;
-        settings.acpCommand = u"python3"_s;
+        settings.acpCommand = python3Command();
         settings.acpArgs = u'"' + m_agent + u"\" "_s + scenario;
         settings.permissionMode = PermissionMode::Ask;
         settings.sandbox = SandboxProfile::Off;
@@ -110,7 +138,7 @@ private Q_SLOTS:
         QVERIFY(!acpAgentIsGrok(settings));
 
         settings.acpAgentId = u"custom"_s;
-        settings.acpCommand = u"python3"_s;
+        settings.acpCommand = python3Command();
         settings.acpArgs = u"/tmp/mock_acp_agent.py echo"_s;
         QCOMPARE(AcpClient::agentArguments(settings),
                  (QStringList{u"/tmp/mock_acp_agent.py"_s, u"echo"_s}));
@@ -614,6 +642,104 @@ private Q_SLOTS:
         client.stop();
     }
 
+    void outputLimitStopIsContinuedWithChunkedWriteSteering()
+    {
+        // The agent's model is cut off at the output token limit while
+        // producing one oversized write tool call (a whole large file in a
+        // single call) and the turn ends with stopReason "max_tokens" — not an
+        // error. The client must continue the turn with steering to split the
+        // write instead of surfacing a dead turn.
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+
+        DiskDocumentBridge bridge;
+        AcpClient client;
+        Settings settings = mockSettings(u"output-limit"_s);
+        settings.baseRetryDelaySeconds = 1;
+        settings.retryStrategy = u"fixed"_s;
+        client.setSettings(settings);
+        client.setWorkspace(workspace.path());
+        client.setDocumentBridge(&bridge);
+
+        QString stopReason;
+        QString finishedText;
+        QString error;
+        int resets = 0;
+        int retries = 0;
+        connect(&client, &AcpClient::promptFinished, this, [&](const QString &reason, const QString &full, const QJsonArray &) {
+            stopReason = reason;
+            finishedText = full;
+        });
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+        connect(&client, &AcpClient::textReset, this, [&] {
+            ++resets;
+        });
+        connect(&client, &AcpClient::retryStatus, this, [&](const QString &, int, int, int) {
+            ++retries;
+        });
+
+        client.prompt(u"write a large readme"_s);
+        QVERIFY2(waitFor([&] {
+            return !stopReason.isEmpty() || !error.isEmpty();
+        }), "the turn never finished; the output-limit continuation was not sent");
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(stopReason, u"end_turn"_s);
+        // The continuation carried the steering ("nudged"), not a verbatim
+        // replay of the original prompt.
+        QCOMPARE(finishedText, u"output-limit-recovered:nudged"_s);
+        QCOMPARE(retries, 1);
+        // The announcement streamed before the cut-off belonged to the failed
+        // attempt and was dropped for the continuation.
+        QCOMPARE(resets, 1);
+        client.stop();
+    }
+
+    void persistentOutputLimitExhaustsTheRetryBudget()
+    {
+        // An agent that keeps hitting the output limit must not be continued
+        // forever: after the configured budget is spent, the turn ends with
+        // the "max_tokens" stop reason instead of an error.
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+
+        DiskDocumentBridge bridge;
+        AcpClient client;
+        Settings settings = mockSettings(u"output-limit-persistent"_s);
+        settings.baseRetryDelaySeconds = 1;
+        settings.maxRetryAttempts = 2;
+        settings.retryStrategy = u"fixed"_s;
+        client.setSettings(settings);
+        client.setWorkspace(workspace.path());
+        client.setDocumentBridge(&bridge);
+
+        QString stopReason;
+        QString error;
+        int retries = 0;
+        int finished = 0;
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+        connect(&client, &AcpClient::retryStatus, this, [&](const QString &, int, int, int) {
+            ++retries;
+        });
+        connect(&client, &AcpClient::promptFinished, this, [&](const QString &reason, const QString &, const QJsonArray &) {
+            stopReason = reason;
+            ++finished;
+        });
+
+        client.prompt(u"write a large readme"_s);
+        QVERIFY2(waitFor([&] {
+            return finished > 0 || !error.isEmpty();
+        }), "the turn never ended; the budget was not enforced");
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(retries, 2);
+        QCOMPARE(finished, 1);
+        QCOMPARE(stopReason, u"max_tokens"_s);
+        client.stop();
+    }
+
     void approvingWithoutAnAllowOnceOptionStillAllows()
     {
         // An agent that advertises only allow_always/reject_always leaves no
@@ -678,6 +804,12 @@ private Q_SLOTS:
         client.setWorkspace(workspace.path());
         client.setDocumentBridge(&bridge);
 
+        // fs/write_text_file is a mutating client method: it parks until the
+        // permission resolves. Approve it, as the user would.
+        connect(&client, &AcpClient::permissionNeeded, &client, [&](const PermissionRequest &) {
+            client.resolvePermission(PermissionDecision::AllowOnce);
+        });
+
         QString stopReason;
         QString error;
         connect(&client, &AcpClient::promptFinished, this, [&](const QString &reason, const QString &, const QJsonArray &) {
@@ -696,6 +828,48 @@ private Q_SLOTS:
         QString written;
         QVERIFY(bridge.readDocument(writePath, &written));
         QCOMPARE(written, u"from-agent:payload"_s);
+        client.stop();
+    }
+
+    void fsReadPaginationDoesNotCountPhantomTrailingLine()
+    {
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+        const QString readPath = workspace.filePath(u"in.txt"_s);
+        {
+            QFile file(readPath);
+            QVERIFY(file.open(QIODevice::WriteOnly | QIODevice::Text));
+            QTextStream(&file) << u"one\ntwo\n"_s;
+        }
+
+        DiskDocumentBridge bridge;
+        AcpClient client;
+        Settings settings = mockSettings(u"read-pagination"_s);
+        settings.sandbox = SandboxProfile::Workspace;
+        client.setSettings(settings);
+        client.setWorkspace(workspace.path());
+        client.setDocumentBridge(&bridge);
+
+        QString finishedText;
+        QString error;
+        connect(&client, &AcpClient::promptFinished, this,
+                [&](const QString &, const QString &full, const QJsonArray &) {
+            finishedText = full;
+        });
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+
+        client.prompt(u"READPATH:%1"_s.arg(readPath));
+        QVERIFY2(waitFor([&] {
+            return !finishedText.isEmpty() || !error.isEmpty();
+        }), qPrintable(error.isEmpty() ? u"timed out"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        // A two-line file with a trailing newline has exactly two lines. The
+        // empty element after the newline must not produce a "1 more line"
+        // note pointing at a line that does not exist.
+        QCOMPARE(finishedText, u"one\ntwo"_s);
+        QVERIFY(!finishedText.contains(u"more line"_s));
         client.stop();
     }
 
@@ -775,7 +949,9 @@ private Q_SLOTS:
         QCOMPARE(posted.size(), 1);
         const Suggestion suggestion = posted.first();
         QVERIFY(suggestion.text.contains(u"std::string_view"_s));
-        QCOMPARE(suggestion.path, u"src/main.cpp"_s);
+        // A workspace-relative anchor is resolved so Accept opens the right
+        // file even though the agent sent "src/main.cpp".
+        QCOMPARE(suggestion.path, QDir(workspace.path()).absoluteFilePath(u"src/main.cpp"_s));
         QCOMPARE(suggestion.line, 7);
 
         // Advice only: the workspace is untouched, exactly as with the native
@@ -794,6 +970,11 @@ private Q_SLOTS:
         client.setSettings(mockSettings(u"terminal"_s));
         client.setWorkspace(workspace.path());
         client.setDocumentBridge(&bridge);
+
+        // terminal/create parks until the permission resolves.
+        connect(&client, &AcpClient::permissionNeeded, &client, [&](const PermissionRequest &) {
+            client.resolvePermission(PermissionDecision::AllowOnce);
+        });
 
         QString text;
         QString stopReason;
@@ -828,6 +1009,11 @@ private Q_SLOTS:
         client.setWorkspace(workspace.path());
         client.setDocumentBridge(&bridge);
 
+        // terminal/create parks until the permission resolves.
+        connect(&client, &AcpClient::permissionNeeded, &client, [&](const PermissionRequest &) {
+            client.resolvePermission(PermissionDecision::AllowOnce);
+        });
+
         QString text;
         QString stopReason;
         QString error;
@@ -848,6 +1034,481 @@ private Q_SLOTS:
         QVERIFY2(error.isEmpty(), qPrintable(error));
         QVERIFY2(!text.contains(u"unexpected EOF"_s), qPrintable(text));
         QVERIFY2(text.contains(u"quoted-ok"_s), qPrintable(text));
+        client.stop();
+    }
+
+    void terminalOutputStreamsIntoLinkedToolCard()
+    {
+        // The agent embeds a terminal it created in its tool call. The output of
+        // that command reaches the card while it runs, and the reference itself
+        // is never printed as output.
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+
+        DiskDocumentBridge bridge;
+        AcpClient client;
+        client.setSettings(mockSettings(u"terminal-card"_s));
+        client.setWorkspace(workspace.path());
+        client.setDocumentBridge(&bridge);
+
+        // terminal/create parks until the permission resolves.
+        connect(&client, &AcpClient::permissionNeeded, &client, [&](const PermissionRequest &) {
+            client.resolvePermission(PermissionDecision::AllowOnce);
+        });
+
+        QString progress;
+        QString finishedOutput;
+        bool finishedOk = false;
+        QString stopReason;
+        QString error;
+        connect(&client, &AcpClient::toolProgress, this, [&](const QString &toolCallId, const QString &partial) {
+            if (toolCallId == u"call_term"_s) {
+                progress = partial;
+            }
+        });
+        connect(&client, &AcpClient::toolFinished, this, [&](const ToolResult &result) {
+            if (result.toolCallId == u"call_term"_s) {
+                finishedOutput = result.output;
+                finishedOk = result.ok;
+            }
+        });
+        connect(&client, &AcpClient::promptFinished, this, [&](const QString &reason, const QString &, const QJsonArray &) {
+            stopReason = reason;
+        });
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+
+        client.prompt(u"run the probe"_s);
+        QVERIFY2(waitFor([&] {
+            return !stopReason.isEmpty() || !error.isEmpty();
+        }), qPrintable(error.isEmpty() ? u"timed out"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QVERIFY(progress.contains(u"term-card-out"_s));
+        QVERIFY(finishedOk);
+        QVERIFY(finishedOutput.contains(u"term-card-out"_s));
+        QVERIFY(!finishedOutput.contains(u"terminalId"_s));
+        client.stop();
+    }
+
+    void fsWriteDeniedByTheUserNeverReachesTheDisk()
+    {
+        // The agent writes without asking first: the call parks, the user
+        // denies it, and the file is never created.
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+        const QString readPath = workspace.filePath(u"in.txt"_s);
+        const QString writePath = workspace.filePath(u"out.txt"_s);
+        {
+            QFile file(readPath);
+            QVERIFY(file.open(QIODevice::WriteOnly | QIODevice::Text));
+            QTextStream(&file) << u"payload"_s;
+        }
+
+        DiskDocumentBridge bridge;
+        AcpClient client;
+        Settings settings = mockSettings(u"fs"_s);
+        settings.sandbox = SandboxProfile::Workspace;
+        client.setSettings(settings);
+        client.setWorkspace(workspace.path());
+        client.setDocumentBridge(&bridge);
+
+        PermissionRequest asked;
+        QString stopReason;
+        QString error;
+        connect(&client, &AcpClient::permissionNeeded, &client, [&](const PermissionRequest &request) {
+            asked = request;
+            client.resolvePermission(PermissionDecision::Deny);
+        });
+        connect(&client, &AcpClient::promptFinished, this, [&](const QString &reason, const QString &, const QJsonArray &) {
+            stopReason = reason;
+        });
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+
+        client.prompt(u"READPATH:%1 WRITEPATH:%2"_s.arg(readPath, writePath));
+        QVERIFY2(waitFor([&] {
+            return !stopReason.isEmpty() || !error.isEmpty();
+        }), qPrintable(error.isEmpty() ? u"timed out"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(stopReason, u"end_turn"_s);
+
+        // The parked call presented the write, and the denial stopped it.
+        QCOMPARE(asked.toolName, u"write_file"_s);
+        QCOMPARE(asked.risk, ToolRisk::Write);
+        QCOMPARE(asked.path, writePath);
+        QVERIFY(!QFile::exists(writePath));
+        client.stop();
+    }
+
+    void terminalCreateDeniedByTheUserNeverStarts()
+    {
+        // Same contract for commands: a denied terminal/create never starts, so
+        // the mock's chain of terminal calls all fail and no output appears.
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+
+        DiskDocumentBridge bridge;
+        AcpClient client;
+        client.setSettings(mockSettings(u"terminal"_s));
+        client.setWorkspace(workspace.path());
+        client.setDocumentBridge(&bridge);
+
+        PermissionRequest asked;
+        QString text;
+        QString stopReason;
+        QString error;
+        connect(&client, &AcpClient::permissionNeeded, &client, [&](const PermissionRequest &request) {
+            asked = request;
+            client.resolvePermission(PermissionDecision::Deny);
+        });
+        connect(&client, &AcpClient::textDelta, this, [&](const QString &delta) {
+            text += delta;
+        });
+        connect(&client, &AcpClient::promptFinished, this, [&](const QString &reason, const QString &, const QJsonArray &) {
+            stopReason = reason;
+        });
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+
+        client.prompt(u"run"_s);
+        QVERIFY2(waitFor([&] {
+            return !stopReason.isEmpty() || !error.isEmpty();
+        }, 20000), qPrintable(error.isEmpty() ? u"timed out"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(asked.toolName, u"bash"_s);
+        QCOMPARE(asked.risk, ToolRisk::Execute);
+        QVERIFY(!text.contains(u"hello-term"_s));
+        client.stop();
+    }
+
+    void approvalOfAnAnnouncedEditCoversTheWrite()
+    {
+        // The agent announces the edit, asks permission, then writes: the
+        // approval covers the matching fs/write_text_file, so the user is asked
+        // once, not twice for the same action.
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+        const QString writePath = workspace.filePath(u"out.txt"_s);
+
+        DiskDocumentBridge bridge;
+        AcpClient client;
+        Settings settings = mockSettings(u"fs-approved"_s);
+        settings.sandbox = SandboxProfile::Workspace;
+        client.setSettings(settings);
+        client.setWorkspace(workspace.path());
+        client.setDocumentBridge(&bridge);
+
+        int askedCount = 0;
+        QString stopReason;
+        QString error;
+        connect(&client, &AcpClient::permissionNeeded, &client, [&](const PermissionRequest &) {
+            ++askedCount;
+            client.resolvePermission(PermissionDecision::AllowOnce);
+        });
+        connect(&client, &AcpClient::promptFinished, this, [&](const QString &reason, const QString &, const QJsonArray &) {
+            stopReason = reason;
+        });
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+
+        client.prompt(u"WRITEPATH:%1"_s.arg(writePath));
+        QVERIFY2(waitFor([&] {
+            return !stopReason.isEmpty() || !error.isEmpty();
+        }), qPrintable(error.isEmpty() ? u"timed out"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+
+        QCOMPARE(askedCount, 1);
+        QString written;
+        QVERIFY(bridge.readDocument(writePath, &written));
+        QCOMPARE(written, u"approved write"_s);
+        client.stop();
+    }
+
+    void terminalKillTakesDownTheWholeProcessTree()
+    {
+#ifdef Q_OS_UNIX
+        // The agent runs a shell that backgrounds a child. terminal/kill must
+        // reach the whole process group: the child may not outlive the terminal.
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+
+        DiskDocumentBridge bridge;
+        AcpClient client;
+        client.setSettings(mockSettings(u"terminal-tree"_s));
+        client.setWorkspace(workspace.path());
+        client.setDocumentBridge(&bridge);
+        connect(&client, &AcpClient::permissionNeeded, &client, [&](const PermissionRequest &) {
+            client.resolvePermission(PermissionDecision::AllowOnce);
+        });
+
+        QString text;
+        QString stopReason;
+        QString error;
+        connect(&client, &AcpClient::textDelta, this, [&](const QString &delta) {
+            text += delta;
+        });
+        connect(&client, &AcpClient::promptFinished, this, [&](const QString &reason, const QString &, const QJsonArray &) {
+            stopReason = reason;
+        });
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+
+        client.prompt(u"run"_s);
+        QVERIFY2(waitFor([&] {
+            return !stopReason.isEmpty() || !error.isEmpty();
+        }, 20000), qPrintable(error.isEmpty() ? u"timed out"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QVERIFY2(text.startsWith(u"pid:"_s), qPrintable(text));
+        const QString pid = text.mid(4).trimmed();
+        QVERIFY2(!pid.isEmpty(), qPrintable(text));
+        // The kill reaches the backgrounded child, not just the shell. A zombie
+        // entry can survive until PID 1 reaps it, so check the process state,
+        // not merely whether /proc still has a directory for the pid.
+        QTRY_VERIFY_WITH_TIMEOUT(!processStillRunning(pid), 5000);
+        client.stop();
+#else
+        QSKIP("process groups are a Unix feature");
+#endif
+    }
+
+    void permissionRequestKeepsTheAnnouncedToolCall()
+    {
+        // The permission request names only the tool call's id. The request Kate
+        // shows is still the edit the agent announced, with its file and diff,
+        // and not an unnamed "tool" that an "always allow" would be keyed on.
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+        const QString target = workspace.filePath(u"notes.txt"_s);
+
+        DiskDocumentBridge bridge;
+        AcpClient client;
+        client.setSettings(mockSettings(u"bare-permission"_s));
+        client.setWorkspace(workspace.path());
+        client.setDocumentBridge(&bridge);
+
+        PermissionRequest asked;
+        int askedCount = 0;
+        QString text;
+        QString stopReason;
+        QString error;
+        connect(&client, &AcpClient::permissionNeeded, this, [&](const PermissionRequest &request) {
+            asked = request;
+            ++askedCount;
+            client.resolvePermission(PermissionDecision::AllowOnce);
+        });
+        connect(&client, &AcpClient::textDelta, this, [&](const QString &delta) {
+            text += delta;
+        });
+        connect(&client, &AcpClient::promptFinished, this, [&](const QString &reason, const QString &, const QJsonArray &) {
+            stopReason = reason;
+        });
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+
+        client.prompt(u"EDITPATH:%1"_s.arg(target));
+        QVERIFY2(waitFor([&] {
+            return !stopReason.isEmpty() || !error.isEmpty();
+        }), qPrintable(error.isEmpty() ? u"timed out"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(askedCount, 1);
+        QCOMPARE(asked.toolName, u"edit_file"_s);
+        QCOMPARE(asked.path, target);
+        QVERIFY(asked.describeDiff.contains(u"+new"_s));
+        QCOMPARE(text, u"outcome:allow-once"_s);
+        client.stop();
+    }
+
+    void lateDiffReachesTheCard()
+    {
+        // The diff of an edit can arrive in a tool_call_update after the call has
+        // started. It is announced once, so the card and the review can show it.
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+        const QString target = workspace.filePath(u"notes.txt"_s);
+
+        DiskDocumentBridge bridge;
+        AcpClient client;
+        client.setSettings(mockSettings(u"late-diff"_s));
+        client.setWorkspace(workspace.path());
+        client.setDocumentBridge(&bridge);
+
+        bool sawStart = false;
+        PermissionRequest started;
+        PermissionRequest changed;
+        int changes = 0;
+        QString stopReason;
+        QString error;
+        connect(&client, &AcpClient::toolStarted, this, [&](const PermissionRequest &request) {
+            if (request.toolCallId == u"call_late"_s) {
+                started = request;
+                sawStart = true;
+            }
+        });
+        connect(&client, &AcpClient::toolDetailsChanged, this, [&](const PermissionRequest &request) {
+            changed = request;
+            ++changes;
+        });
+        connect(&client, &AcpClient::promptFinished, this, [&](const QString &reason, const QString &, const QJsonArray &) {
+            stopReason = reason;
+        });
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+
+        client.prompt(u"EDITPATH:%1"_s.arg(target));
+        QVERIFY2(waitFor([&] {
+            return !stopReason.isEmpty() || !error.isEmpty();
+        }), qPrintable(error.isEmpty() ? u"timed out"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QVERIFY(sawStart);
+        QVERIFY(started.describeDiff.isEmpty());
+        QCOMPARE(changes, 1);
+        QVERIFY(changed.describeDiff.contains(u"+new"_s));
+        QCOMPARE(changed.path, target);
+        client.stop();
+    }
+
+    void sessionNotesReachTheFirstPromptOnly()
+    {
+        // Kate's rules and its client methods reach the agent once per session,
+        // in front of the first prompt. Later prompts of the session do not
+        // repeat them.
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+
+        DiskDocumentBridge bridge;
+        AcpClient client;
+        Settings settings = mockSettings(u"prompt-probe"_s);
+        settings.globalRules = u"Always write tests."_s;
+        client.setSettings(settings);
+        client.setWorkspace(workspace.path());
+        client.setDocumentBridge(&bridge);
+        client.setEditorContext(u"Active file: main.cpp"_s);
+
+        QStringList replies;
+        QString error;
+        connect(&client, &AcpClient::promptFinished, this, [&](const QString &, const QString &full, const QJsonArray &) {
+            replies.append(full);
+        });
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+
+        client.prompt(u"first question"_s);
+        QVERIFY2(waitFor([&] {
+            return replies.size() == 1 || !error.isEmpty();
+        }), qPrintable(error.isEmpty() ? u"timed out"_s : error));
+        client.prompt(u"second question"_s);
+        QVERIFY2(waitFor([&] {
+            return replies.size() == 2 || !error.isEmpty();
+        }), qPrintable(error.isEmpty() ? u"timed out"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+
+        // The user's message leads every prompt: agents answer the first text
+        // block, so the editor context and the session notes must follow it.
+        QVERIFY2(replies.at(0).startsWith(u"first question"_s), qPrintable(replies.at(0).left(120)));
+        QVERIFY(replies.at(0).contains(u"Always write tests."_s));
+        QVERIFY(replies.at(0).contains(u"_kateai/write_plan_file"_s));
+        QVERIFY(replies.at(0).contains(u"Editor context:\nActive file: main.cpp"_s));
+        QVERIFY2(replies.at(1).startsWith(u"second question"_s), qPrintable(replies.at(1).left(120)));
+        QVERIFY(!replies.at(1).contains(u"_kateai/write_plan_file"_s));
+        QVERIFY(replies.at(1).contains(u"Editor context:\nActive file: main.cpp"_s));
+        client.stop();
+    }
+
+    void userMessageLeadsPromptAndContextIsAssistantOnly()
+    {
+        // ACP agents read the first text block as the user's request. Editor
+        // context and the once-per-session notes must follow it, annotated as
+        // assistant-only so agents such as OpenCode keep them out of the
+        // user's message instead of folding everything into one context blob.
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+
+        DiskDocumentBridge bridge;
+        AcpClient client;
+        Settings settings = mockSettings(u"prompt-blocks"_s);
+        settings.globalRules = u"Always write tests."_s;
+        client.setSettings(settings);
+        client.setWorkspace(workspace.path());
+        client.setDocumentBridge(&bridge);
+        client.setEditorContext(u"Active file: main.cpp"_s);
+
+        QString reply;
+        QString error;
+        connect(&client, &AcpClient::promptFinished, this, [&](const QString &, const QString &full, const QJsonArray &) {
+            reply = full;
+        });
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+
+        client.prompt(u"fix the bug"_s);
+        QVERIFY2(waitFor([&] { return !reply.isEmpty() || !error.isEmpty(); }),
+                 qPrintable(error.isEmpty() ? u"timed out"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+
+        const QJsonArray blocks = QJsonDocument::fromJson(reply.toUtf8()).array();
+        QCOMPARE(blocks.size(), 3);
+        QCOMPARE(blocks.at(0).toObject().value(u"text"_s).toString(), u"fix the bug"_s);
+        QVERIFY(blocks.at(0).toObject().value(u"annotations"_s).isUndefined());
+        QVERIFY(blocks.at(1).toObject().value(u"text"_s).toString().contains(u"Always write tests."_s));
+        const QJsonArray notesAudience = blocks.at(1).toObject().value(u"audience"_s).toArray();
+        QCOMPARE(notesAudience.size(), 1);
+        QCOMPARE(notesAudience.at(0).toString(), u"assistant"_s);
+        QCOMPARE(blocks.at(2).toObject().value(u"text"_s).toString(),
+                 u"Editor context:\nActive file: main.cpp"_s);
+        const QJsonArray contextAudience = blocks.at(2).toObject().value(u"audience"_s).toArray();
+        QCOMPARE(contextAudience.size(), 1);
+        QCOMPARE(contextAudience.at(0).toString(), u"assistant"_s);
+        client.stop();
+    }
+
+    void extensionMethodNamesReachTheirHandlers()
+    {
+        // Kate's client methods, called by the _kateai/ names the capability
+        // advertises, reach the same handlers as the bare names.
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+
+        DiskDocumentBridge bridge;
+        AcpClient client;
+        client.setSettings(mockSettings(u"kateai-ext"_s));
+        client.setWorkspace(workspace.path());
+        client.setDocumentBridge(&bridge);
+
+        QList<Suggestion> posted;
+        QString text;
+        QString stopReason;
+        QString error;
+        connect(&client, &AcpClient::suggestionPosted, this, [&](const Suggestion &suggestion) {
+            posted.append(suggestion);
+        });
+        connect(&client, &AcpClient::textDelta, this, [&](const QString &delta) {
+            text += delta;
+        });
+        connect(&client, &AcpClient::promptFinished, this, [&](const QString &reason, const QString &, const QJsonArray &) {
+            stopReason = reason;
+        });
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+
+        client.prompt(u"go"_s);
+        QVERIFY2(waitFor([&] {
+            return !stopReason.isEmpty() || !error.isEmpty();
+        }), qPrintable(error.isEmpty() ? u"timed out"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(posted.size(), 1);
+        QCOMPARE(posted.first().text, u"extract a helper"_s);
+        QCOMPARE(posted.first().line, 3);
+        QCOMPARE(text, u"ext-ok"_s);
         client.stop();
     }
 
@@ -1000,6 +1661,59 @@ private Q_SLOTS:
         }
     }
 
+    // Kilo CLI is an OpenCode fork and has the same split: a bare `kilo`
+    // starts the interactive TUI, which never answers the ACP handshake.
+    // `kilo acp` is the stdio server. Older launch lines and hand-written
+    // entries can lack the subcommand, so it is appended the same way it is
+    // for OpenCode.
+    void kiloLaunchesTheAcpSubcommand()
+    {
+        Settings settings;
+        settings.acpAgentId = u"kilo"_s;
+        settings.acpCommand = u"kilo"_s;
+        settings.acpArgs.clear();
+        QCOMPARE(AcpClient::agentArguments(settings), (QStringList{u"acp"_s}));
+
+        // An explicit subcommand is never duplicated.
+        settings.acpArgs = u"acp --print-logs"_s;
+        QCOMPARE(AcpClient::agentArguments(settings), (QStringList{u"acp"_s, u"--print-logs"_s}));
+
+        // The registry npx line already carries `acp`; it must pass through
+        // unchanged instead of gaining a second one.
+        settings.acpCommand = u"npx"_s;
+        settings.acpArgs = u"--yes @kilocode/cli@7.8.32 acp"_s;
+        QCOMPARE(AcpClient::agentArguments(settings),
+                 (QStringList{u"--yes"_s, u"@kilocode/cli@7.8.32"_s, u"acp"_s}));
+    }
+
+    // Kilo CLI's installer uses the same ~/.kilo/bin layout as OpenCode; a
+    // shell PATH that contains it is not inherited by a desktop-launched Kate.
+    void resolvedCommandFallsBackToTheKiloInstallDir()
+    {
+        Settings settings;
+        settings.acpAgentId = u"kilo"_s;
+        settings.acpCommand = u"kilo"_s;
+        settings.acpArgs = u"acp"_s;
+
+        QString expected = QStandardPaths::findExecutable(u"kilo"_s);
+        if (expected.isEmpty()) {
+            const QFileInfo ownInstall(QDir::homePath() + u"/.kilo/bin/kilo"_s);
+            if (ownInstall.exists() && ownInstall.isExecutable()) {
+                expected = ownInstall.absoluteFilePath();
+            }
+        }
+        if (expected.isEmpty()) {
+            const QFileInfo localBin(QDir::homePath() + u"/.local/bin/kilo"_s);
+            if (localBin.exists() && localBin.isExecutable()) {
+                expected = localBin.absoluteFilePath();
+            }
+        }
+        if (expected.isEmpty()) {
+            expected = u"kilo"_s;
+        }
+        QCOMPARE(AcpClient::resolvedCommand(settings), expected);
+    }
+
     // MiniMax Code: the ACP registry records the npm distribution
     // (@minimax-ai/code) as the launch entry, but the standalone CLI the agent
     // installs through its own installer is the binary that actually speaks the
@@ -1012,20 +1726,25 @@ private Q_SLOTS:
         settings.acpCommand = u"npx"_s;
         settings.acpArgs = u"--yes @minimax-ai/code@0.2.7 acp"_s;
 
-        // npm-only tokens from the registry entry are dropped and the ACP
-        // subcommand is kept, so the standalone binary is launched properly.
-        QCOMPARE(AcpClient::agentArguments(settings), (QStringList{u"acp"_s}));
-
         // Without a standalone install the recorded npx launch is kept, still
         // resolved through PATH like any other agent command.
         const QString localInstall = QDir::homePath() + u"/.minimax-code/bin/mcode"_s;
+        const bool standalone = QFileInfo(localInstall).exists() && QFileInfo(localInstall).isExecutable();
         const QString npxOnPath = QStandardPaths::findExecutable(u"npx"_s);
         const QString expectedNpx = npxOnPath.isEmpty() ? u"npx"_s : npxOnPath;
-        if (QFileInfo(localInstall).exists() && QFileInfo(localInstall).isExecutable()) {
+        if (standalone) {
             QCOMPARE(AcpClient::resolvedCommand(settings), localInstall);
         } else {
             QCOMPARE(AcpClient::resolvedCommand(settings), expectedNpx);
         }
+
+        // npm-only tokens from the registry entry are dropped and the ACP
+        // subcommand is kept when the standalone binary is what launches. With
+        // the npx launch line the package must stay: "npx acp" would fetch an
+        // unrelated package instead of MiniMax Code.
+        QCOMPARE(AcpClient::agentArguments(settings),
+                 (standalone ? QStringList{u"acp"_s}
+                             : QStringList{u"--yes"_s, u"@minimax-ai/code@0.2.7"_s, u"acp"_s}));
 
         // A bare "mcode" with no arguments must run the ACP server, not the
         // interactive TUI that never answers the handshake.
@@ -1036,7 +1755,7 @@ private Q_SLOTS:
     }
 
     // Binary registry agents record a command relative to the unpacked archive
-    // ("./agy_acp_server.par"). Kate installs them under its own data directory,
+    // ("./example_acp_server.bin"). Kate installs them under its own data directory,
     // so the launcher must resolve that path instead of using the process cwd.
     void binaryRegistryAgentResolvesFromInstallDir()
     {
@@ -1045,9 +1764,9 @@ private Q_SLOTS:
         const QByteArray previous = qgetenv("KATEAI_ACP_AGENTS_DIR");
         qputenv("KATEAI_ACP_AGENTS_DIR", temp.path().toUtf8());
 
-        const QString installDir = acpBinaryInstallDir(u"antigravity-acp"_s);
+        const QString installDir = acpBinaryInstallDir(u"example-binary-acp"_s);
         QVERIFY(QDir().mkpath(installDir));
-        const QString executable = installDir + u"/agy_acp_server.par"_s;
+        const QString executable = installDir + u"/example_acp_server.bin"_s;
         {
             QFile file(executable);
             QVERIFY(file.open(QIODevice::WriteOnly));
@@ -1057,8 +1776,8 @@ private Q_SLOTS:
                                                        | QFileDevice::ExeOwner));
 
         Settings settings;
-        settings.acpAgentId = u"antigravity-acp"_s;
-        settings.acpCommand = u"./agy_acp_server.par"_s;
+        settings.acpAgentId = u"example-binary-acp"_s;
+        settings.acpCommand = u"./example_acp_server.bin"_s;
         settings.acpArgs = u"--uid="_s;
         QJsonObject installed;
         installed.insert(u"id"_s, settings.acpAgentId);
@@ -1069,10 +1788,10 @@ private Q_SLOTS:
 
         QCOMPARE(AcpClient::resolvedCommand(settings), executable);
 
-        // Without the unpacked file the recorded command is preserved, so the
-        // failure still points at the missing binary instead of an empty path.
+        // Without the unpacked file the relative command is not allowed to
+        // fall through to the workspace as a working-directory lookup.
         QVERIFY(QFile::remove(executable));
-        QCOMPARE(AcpClient::resolvedCommand(settings), settings.acpCommand);
+        QVERIFY(AcpClient::resolvedCommand(settings).isEmpty());
 
         if (previous.isNull()) {
             qunsetenv("KATEAI_ACP_AGENTS_DIR");
@@ -1307,6 +2026,974 @@ private Q_SLOTS:
         QCOMPARE(finishedText, u"effort:high"_s);
         QCOMPARE(client.currentEffortId(), u"high"_s);
         client.stop();
+    }
+
+    // The ask_user client method parks the RPC, surfaces the question, and
+    // the user's answer comes back as the RPC result.
+    void askUserMethodParksUntilAnswered()
+    {
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+
+        DiskDocumentBridge bridge;
+        AcpClient client;
+        client.setSettings(mockSettings(u"ask_user"_s));
+        client.setWorkspace(workspace.path());
+        client.setDocumentBridge(&bridge);
+
+        bool asked = false;
+        PermissionRequest question;
+        QString stopReason;
+        QString finishedText;
+        QString error;
+        connect(&client, &AcpClient::questionAsked, this, [&](const PermissionRequest &request) {
+            asked = true;
+            question = request;
+        });
+        connect(&client, &AcpClient::promptFinished, this,
+                [&](const QString &reason, const QString &full, const QJsonArray &) {
+            stopReason = reason;
+            finishedText = full;
+        });
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+
+        client.prompt(u"ask me something"_s);
+        QVERIFY2(waitFor([&] {
+            return asked || !error.isEmpty();
+        }), qPrintable(error.isEmpty() ? u"timed out waiting for the question"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QVERIFY(client.hasPendingQuestion());
+        QCOMPARE(question.questionText, u"Rewrite the file, or patch it in place?"_s);
+        QCOMPARE(question.questionOptions, QStringList({u"Rewrite"_s, u"Patch"_s}));
+        QVERIFY(question.allowFreeform);
+
+        // The turn must not finish while the question is parked: the agent is
+        // blocked on the RPC, so an early finish would mean Kate dropped it.
+        QTest::qWait(1000);
+        QVERIFY(stopReason.isEmpty());
+
+        client.answerQuestion(u"Patch"_s);
+        QVERIFY2(waitFor([&] {
+            return !stopReason.isEmpty() || !error.isEmpty();
+        }), qPrintable(error.isEmpty() ? u"timed out waiting for the turn"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(stopReason, u"end_turn"_s);
+        QCOMPARE(finishedText, u"answer:Patch"_s);
+        QVERIFY(!client.hasPendingQuestion());
+        client.stop();
+    }
+
+    void elicitationUsesSpecResponseShape()
+    {
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+
+        DiskDocumentBridge bridge;
+        AcpClient client;
+        client.setSettings(mockSettings(u"elicitation"_s));
+        client.setWorkspace(workspace.path());
+        client.setDocumentBridge(&bridge);
+
+        bool asked = false;
+        PermissionRequest question;
+        QString finishedText;
+        QString error;
+        connect(&client, &AcpClient::questionAsked, this, [&](const PermissionRequest &request) {
+            asked = true;
+            question = request;
+        });
+        connect(&client, &AcpClient::promptFinished, this,
+                [&](const QString &, const QString &full, const QJsonArray &) {
+            finishedText = full;
+        });
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+
+        client.prompt(u"ask me something"_s);
+        QVERIFY2(waitFor([&] {
+            return asked || !error.isEmpty();
+        }), qPrintable(error.isEmpty() ? u"timed out waiting for the elicitation"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(question.questionOptions, QStringList({u"conservative"_s, u"balanced"_s}));
+
+        client.answerQuestion(u"balanced"_s);
+        QVERIFY2(waitFor([&] {
+            return !finishedText.isEmpty() || !error.isEmpty();
+        }), qPrintable(error.isEmpty() ? u"timed out"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        // The mock echoes back what it parsed from the ACP accept response.
+        QCOMPARE(finishedText, u"accept:balanced"_s);
+        client.stop();
+    }
+
+    void askUserCancelledWhenTurnStops()
+    {
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+
+        DiskDocumentBridge bridge;
+        AcpClient client;
+        client.setSettings(mockSettings(u"ask_user"_s));
+        client.setWorkspace(workspace.path());
+        client.setDocumentBridge(&bridge);
+
+        bool asked = false;
+        bool cancelled = false;
+        QString finishedText;
+        QString error;
+        connect(&client, &AcpClient::questionAsked, this, [&](const PermissionRequest &) {
+            asked = true;
+        });
+        connect(&client, &AcpClient::questionCancelled, this, [&](const QString &toolCallId) {
+            cancelled = !toolCallId.isEmpty();
+        });
+        connect(&client, &AcpClient::promptFinished, this,
+                [&](const QString &, const QString &full, const QJsonArray &) {
+            finishedText = full;
+        });
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+
+        client.prompt(u"ask me something"_s);
+        QVERIFY2(waitFor([&] {
+            return asked;
+        }), "the mock never asked");
+        // Stopping the turn answers the parked RPC as cancelled so the agent
+        // does not block on it forever.
+        client.cancel();
+        QVERIFY2(waitFor([&] {
+            return finishedText == u"cancelled"_s || !error.isEmpty();
+        }), qPrintable(error.isEmpty() ? u"timed out"_s : error));
+        QVERIFY(!client.hasPendingQuestion());
+        QVERIFY(cancelled);
+        client.stop();
+    }
+
+    void todoMethodsShareOneStore()
+    {
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+
+        DiskDocumentBridge bridge;
+        AcpClient client;
+        client.setSettings(mockSettings(u"todo"_s));
+        client.setWorkspace(workspace.path());
+        client.setDocumentBridge(&bridge);
+
+        QJsonArray stored;
+        client.setTodoStore([&stored]() {
+            return stored;
+        }, [&stored](const QJsonArray &todos) {
+            stored = todos;
+        });
+
+        QList<QJsonArray> updates;
+        QString finishedText;
+        QString error;
+        connect(&client, &AcpClient::todosChanged, this, [&](const QJsonArray &todos) {
+            updates.append(todos);
+        });
+        connect(&client, &AcpClient::promptFinished, this,
+                [&](const QString &, const QString &full, const QJsonArray &) {
+            finishedText = full;
+        });
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+
+        client.prompt(u"update the todo list"_s);
+        QVERIFY2(waitFor([&] {
+            return !finishedText.isEmpty() || !error.isEmpty();
+        }), qPrintable(error.isEmpty() ? u"timed out"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(updates.size(), 1);
+        QCOMPARE(updates.first().size(), 2);
+        QCOMPARE(stored.size(), 2);
+        // The read-back the mock performed went through the same store.
+        QVERIFY(finishedText.contains(u"[completed] step one"_s));
+        QVERIFY(finishedText.contains(u"[in_progress] step two"_s));
+        client.stop();
+    }
+
+    void lspSymbolsMethodAnswersOrReportsUnavailable()
+    {
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+
+        DiskDocumentBridge bridge;
+        AcpClient client;
+        client.setSettings(mockSettings(u"lsp-symbols"_s));
+        client.setWorkspace(workspace.path());
+        client.setDocumentBridge(&bridge);
+        // No LspProvider: the method must answer "unavailable", not fail.
+
+        QString finishedText;
+        QString error;
+        connect(&client, &AcpClient::promptFinished, this,
+                [&](const QString &, const QString &full, const QJsonArray &) {
+            finishedText = full;
+        });
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+
+        client.prompt(u"list symbols"_s);
+        QVERIFY2(waitFor([&] {
+            return !finishedText.isEmpty() || !error.isEmpty();
+        }), qPrintable(error.isEmpty() ? u"timed out"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(finishedText, u"lsp-unavailable"_s);
+        client.stop();
+    }
+
+    void titleOnlyUpdateAnnouncesDetailsChanged()
+    {
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+
+        DiskDocumentBridge bridge;
+        AcpClient client;
+        client.setSettings(mockSettings(u"title-update"_s));
+        client.setWorkspace(workspace.path());
+        client.setDocumentBridge(&bridge);
+
+        QStringList detailTitles;
+        QString stopReason;
+        QString error;
+        connect(&client, &AcpClient::toolDetailsChanged, this, [&](const PermissionRequest &request) {
+            detailTitles.append(request.summary);
+        });
+        connect(&client, &AcpClient::promptFinished, this, [&](const QString &reason, const QString &, const QJsonArray &) {
+            stopReason = reason;
+        });
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+
+        client.prompt(u"run the suite"_s);
+        QVERIFY2(waitFor([&] {
+            return !stopReason.isEmpty() || !error.isEmpty();
+        }), qPrintable(error.isEmpty() ? u"timed out"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QVERIFY2(detailTitles.contains(u"Running the full test suite"_s),
+                 qPrintable(detailTitles.join(u", "_s)));
+        client.stop();
+    }
+
+    void applyPatchCallGetsPerFileDiffs()
+    {
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+
+        DiskDocumentBridge bridge;
+        AcpClient client;
+        client.setSettings(mockSettings(u"apply-patch"_s));
+        client.setWorkspace(workspace.path());
+        client.setDocumentBridge(&bridge);
+
+        QList<PermissionRequest> started;
+        QString stopReason;
+        QString error;
+        connect(&client, &AcpClient::toolStarted, this, [&](const PermissionRequest &request) {
+            started.append(request);
+        });
+        connect(&client, &AcpClient::promptFinished, this, [&](const QString &reason, const QString &, const QJsonArray &) {
+            stopReason = reason;
+        });
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+
+        client.prompt(u"apply this patch"_s);
+        QVERIFY2(waitFor([&] {
+            return !stopReason.isEmpty() || !error.isEmpty();
+        }), qPrintable(error.isEmpty() ? u"timed out"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(started.size(), 1);
+        const PermissionRequest request = started.first();
+        QCOMPARE(request.toolName, u"apply_patch"_s);
+        QVERIFY(request.mutatesFiles);
+        QCOMPARE(request.path, u"src/a.cpp"_s);
+        QCOMPARE(request.additionalPaths, QStringList{u"src/b.cpp"_s});
+        QVERIFY(request.describeDiff.contains(u"+++ b/src/a.cpp"_s));
+        QCOMPARE(request.additionalDiffs.size(), 1);
+        client.stop();
+    }
+
+    void toolQuestionIsNormalizedForTheCard()
+    {
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+        DiskDocumentBridge bridge;
+        AcpClient client;
+        client.setSettings(mockSettings(u"tool-question"_s));
+        client.setWorkspace(workspace.path());
+        client.setDocumentBridge(&bridge);
+
+        PermissionRequest question;
+        QString error;
+        connect(&client, &AcpClient::toolStarted, this, [&](const PermissionRequest &request) {
+            if (request.toolName == u"question"_s) {
+                question = request;
+            }
+        });
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+
+        client.prompt(u"go"_s);
+        QVERIFY2(waitFor([&] {
+            return !question.toolCallId.isEmpty() || !error.isEmpty();
+        }), qPrintable(error.isEmpty() ? u"timed out waiting for the question tool"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(question.questionText, u"Which strategy should I use?"_s);
+        QCOMPARE(question.questionOptions, QStringList({u"conservative"_s, u"balanced"_s}));
+        QCOMPARE(question.risk, ToolRisk::Read);
+        const QJsonObject details = QJsonDocument::fromJson(question.details.toUtf8()).object();
+        QCOMPARE(details.value(u"question"_s).toString(), u"Which strategy should I use?"_s);
+        client.stop();
+    }
+
+    void permissionRequestWithAnswerChoicesBecomesAQuestionCard()
+    {
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+        DiskDocumentBridge bridge;
+        AcpClient client;
+        client.setSettings(mockSettings(u"permission-question"_s));
+        client.setWorkspace(workspace.path());
+        client.setDocumentBridge(&bridge);
+
+        PermissionRequest question;
+        QString finishedText;
+        QString error;
+        connect(&client, &AcpClient::questionAsked, this, [&](const PermissionRequest &request) {
+            question = request;
+        });
+        connect(&client, &AcpClient::promptFinished, this,
+                [&](const QString &, const QString &full, const QJsonArray &) {
+            finishedText = full;
+        });
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+
+        client.prompt(u"go"_s);
+        QVERIFY2(waitFor([&] {
+            return !question.toolCallId.isEmpty() || !error.isEmpty();
+        }), qPrintable(error.isEmpty() ? u"timed out waiting for the question card"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(question.questionText, u"Which strategy should I use?"_s);
+        QCOMPARE(question.questionOptions, QStringList({u"conservative"_s, u"balanced"_s}));
+        QCOMPARE(question.risk, ToolRisk::Read);
+
+        client.answerQuestion(u"balanced"_s);
+        QVERIFY2(waitFor([&] {
+            return !finishedText.isEmpty() || !error.isEmpty();
+        }), qPrintable(error.isEmpty() ? u"timed out waiting for the selected option"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(finishedText, u"choice:opt-balanced"_s);
+        client.stop();
+    }
+
+    void agentLoopAnswerToAcpToolQuestionBecomesNextPrompt()
+    {
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+
+        AgentLoop loop;
+        Settings settings = mockSettings(u"tool-question"_s);
+        settings.checkpointsEnabled = false;
+        loop.setSettings(settings);
+        loop.setWorkspace(workspace.path());
+        DiskDocumentBridge bridge;
+        loop.setDocumentBridge(&bridge);
+
+        QString asked;
+        QStringList options;
+        QString finalText;
+        QString error;
+        bool answered = false;
+        connect(&loop, &AgentLoop::questionAsked, this, [&](const PermissionRequest &request) {
+            asked = request.questionText;
+            options = request.questionOptions;
+        });
+        connect(&loop, &AgentLoop::turnFinished, this, [&]() {
+            // The agent's turn may end before the user answers. The card (and
+            // the pending id) must survive so the late answer can still start
+            // the answer turn.
+            if (!asked.isEmpty() && !answered) {
+                answered = true;
+                loop.answerQuestion(u"balanced"_s);
+            }
+        });
+        connect(&loop, &AgentLoop::assistantFinished, this, [&](const QString &text) {
+            finalText += text;
+        });
+        connect(&loop, &AgentLoop::failed, this, [&](const QString &message) {
+            error = message;
+        });
+
+        loop.start(u"go"_s);
+        QVERIFY2(waitFor([&] {
+            return finalText.contains(u"answer:balanced"_s) || !error.isEmpty();
+        }), qPrintable(error.isEmpty() ? u"timed out waiting for the answered turn"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(asked, u"Which strategy should I use?"_s);
+        QCOMPARE(options, QStringList({u"conservative"_s, u"balanced"_s}));
+    }
+
+    void toolSuggestionIsNormalizedForTheCard()
+    {
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+        DiskDocumentBridge bridge;
+        AcpClient client;
+        client.setSettings(mockSettings(u"tool-suggestion"_s));
+        client.setWorkspace(workspace.path());
+        client.setDocumentBridge(&bridge);
+
+        PermissionRequest suggestion;
+        QString error;
+        connect(&client, &AcpClient::toolStarted, this, [&](const PermissionRequest &request) {
+            if (request.toolName == u"suggest"_s) {
+                suggestion = request;
+            }
+        });
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+
+        client.prompt(u"go"_s);
+        QVERIFY2(waitFor([&] {
+            return !suggestion.toolCallId.isEmpty() || !error.isEmpty();
+        }), qPrintable(error.isEmpty() ? u"timed out waiting for the suggestion tool"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(suggestion.risk, ToolRisk::Read);
+        const QJsonObject details = QJsonDocument::fromJson(suggestion.details.toUtf8()).object();
+        QCOMPARE(details.value(u"suggestion"_s).toString(), u"Use std::string_view here"_s);
+        QCOMPARE(details.value(u"path"_s).toString(), u"src/main.cpp"_s);
+        QCOMPARE(details.value(u"line"_s).toInt(), 7);
+        client.stop();
+    }
+
+    void availableCommandsFromSessionSetup()
+    {
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+
+        AcpClient client;
+        client.setSettings(mockSettings(u"commands_setup"_s));
+        client.setWorkspace(workspace.path());
+
+        QList<QJsonArray> commands;
+        QString error;
+        connect(&client, &AcpClient::availableCommandsChanged, this, [&](const QJsonArray &cmds) {
+            commands.append(cmds);
+        });
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+
+        client.fetchModels();
+        QVERIFY2(waitFor([&] {
+            return !commands.isEmpty() || !error.isEmpty();
+        }), qPrintable(error.isEmpty() ? u"timed out"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(commands.first().size(), 1);
+        client.stop();
+    }
+
+    void availableCommandsUpdateIsAnnounced()
+    {
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+
+        AcpClient client;
+        client.setSettings(mockSettings(u"commands"_s));
+        client.setWorkspace(workspace.path());
+
+        QList<QJsonArray> commands;
+        QString error;
+        connect(&client, &AcpClient::availableCommandsChanged, this, [&](const QJsonArray &cmds) {
+            commands.append(cmds);
+        });
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+
+        client.fetchModels();
+        QVERIFY2(waitFor([&] {
+            return !commands.isEmpty() || !error.isEmpty();
+        }), qPrintable(error.isEmpty() ? u"timed out"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(commands.first().size(), 2);
+        client.stop();
+    }
+
+    void agyCliQuirksAndPresetAvoidLegacyGflags()
+    {
+        // Built-in preset exists and launches `agy acp` with GEMINI_API_KEY.
+        const AcpAgentPreset preset = acpAgentPreset(u"antigravity-acp"_s);
+        QCOMPARE(preset.id, u"antigravity-acp"_s);
+        QCOMPARE(preset.command, u"agy"_s);
+        QCOMPARE(preset.args, u"acp"_s);
+        QCOMPARE(preset.apiKeyEnv, u"GEMINI_API_KEY"_s);
+        QCOMPARE(acpAgentIdMatching(u"agy"_s, QString()), u"antigravity-acp"_s);
+        QCOMPARE(acpAgentIdMatching(u"agy"_s, u"acp"_s), u"antigravity-acp"_s);
+
+        // Modern `agy` CLI gets `acp` subcommand and strips legacy gflags and --uid.
+        Settings agySettings;
+        agySettings.acpAgentId = u"antigravity-acp"_s;
+        agySettings.acpCommand = u"agy"_s;
+        agySettings.acpArgs = u"--uid= --enforce_kernel_ipv6_support=false --core_sanitization_enabled=false --hugepage_text=false"_s;
+        QVERIFY(acpAgentIsAntigravity(agySettings));
+        QVERIFY(!acpAgentIsLegacyAntigravityServer(agySettings));
+        QCOMPARE(AcpClient::agentArguments(agySettings), (QStringList{u"acp"_s}));
+
+        agySettings.acpArgs = u"--uid 1000 --uid=42 --sandbox"_s;
+        QCOMPARE(AcpClient::agentArguments(agySettings), (QStringList{u"--sandbox"_s, u"acp"_s}));
+
+        // Legacy standalone `agy_acp_server.par` prefers native `agy` when
+        // installed (dropping `--uid=` and legacy gflags) and falls back to
+        // `agy_acp_server.par` with its gflags when `agy` is absent.
+        QTemporaryDir tempHome;
+        QTemporaryDir fakeBin;
+        QTemporaryDir agentsDir;
+        QVERIFY(tempHome.isValid());
+        QVERIFY(fakeBin.isValid());
+        QVERIFY(agentsDir.isValid());
+
+        const QByteArray prevPath = qgetenv("PATH");
+        const QByteArray prevHome = qgetenv("HOME");
+        const QByteArray prevAgents = qgetenv("KATEAI_ACP_AGENTS_DIR");
+        qputenv("HOME", tempHome.path().toUtf8());
+        qputenv("KATEAI_ACP_AGENTS_DIR", agentsDir.path().toUtf8());
+
+        const QString legacyDir = acpBinaryInstallDir(u"antigravity-acp"_s);
+        QVERIFY(QDir().mkpath(legacyDir));
+        const QString legacyExe = legacyDir + u"/agy_acp_server.par"_s;
+        {
+            QFile file(legacyExe);
+            QVERIFY(file.open(QIODevice::WriteOnly));
+            file.write("#!/bin/sh\n");
+        }
+        QVERIFY(QFile::setPermissions(legacyExe, QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner));
+
+        Settings legacy;
+        legacy.acpAgentId = u"antigravity-acp"_s;
+        legacy.acpCommand = legacyExe;
+        legacy.acpArgs = u"--uid="_s;
+        QVERIFY(acpAgentIsAntigravity(legacy));
+        QVERIFY(acpAgentIsLegacyAntigravityServer(legacy));
+
+        // Case A: no native `agy` on PATH or in HOME -> stays on legacy server.
+        qputenv("PATH", fakeBin.path().toUtf8());
+        QCOMPARE(AcpClient::resolvedCommand(legacy), legacyExe);
+        const QStringList legacyArgs = AcpClient::agentArguments(legacy);
+        QVERIFY(legacyArgs.contains(u"--enforce_kernel_ipv6_support=false"_s));
+        QVERIFY(legacyArgs.contains(u"--hugepage_text=false"_s));
+        QVERIFY(!legacyArgs.contains(u"acp"_s));
+
+        // Case B: native `agy` installed -> upgrades automatically to `agy acp`
+        // and strips `--uid=` and legacy gflags.
+        const QString fakeAgy = fakeBin.path() + u"/agy"_s;
+        {
+            QFile file(fakeAgy);
+            QVERIFY(file.open(QIODevice::WriteOnly));
+            file.write("#!/bin/sh\n");
+        }
+        QVERIFY(QFile::setPermissions(fakeAgy, QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner));
+        QCOMPARE(AcpClient::resolvedCommand(legacy), fakeAgy);
+        QCOMPARE(AcpClient::agentArguments(legacy), (QStringList{u"acp"_s}));
+
+        if (prevPath.isNull()) qunsetenv("PATH"); else qputenv("PATH", prevPath);
+        if (prevHome.isNull()) qunsetenv("HOME"); else qputenv("HOME", prevHome);
+        if (prevAgents.isNull()) qunsetenv("KATEAI_ACP_AGENTS_DIR"); else qputenv("KATEAI_ACP_AGENTS_DIR", prevAgents);
+    }
+
+    void agyResumeSuggestsLoadFallback()
+    {
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+
+        AcpClient client;
+        client.setSettings(mockSettings(u"agy-resume-suggests-load"_s));
+        client.setWorkspace(workspace.path());
+        client.setResumeSessionId(u"34d283dd-5f8f-465e-8d16-35d6fa84e6db"_s);
+
+        bool isReady = false;
+        QString error;
+        connect(&client, &AcpClient::ready, this, [&]() { isReady = true; });
+        connect(&client, &AcpClient::failed, this, [&](const QString &msg) { error = msg; });
+
+        client.start();
+        QVERIFY2(waitFor([&] {
+            return isReady || !error.isEmpty();
+        }), qPrintable(error.isEmpty() ? u"timed out waiting for session/load fallback"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(client.sessionId(), u"34d283dd-5f8f-465e-8d16-35d6fa84e6db"_s);
+        client.stop();
+    }
+
+    void modelUnreachableBadGatewayRetriesAndRecovers()
+    {
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+
+        DiskDocumentBridge bridge;
+        AcpClient client;
+        Settings settings = mockSettings(u"flaky-model-unreachable"_s);
+        settings.baseRetryDelaySeconds = 1;
+        settings.maxRetryAttempts = 2;
+        settings.retryStrategy = u"fixed"_s;
+        client.setSettings(settings);
+        client.setWorkspace(workspace.path());
+        client.setDocumentBridge(&bridge);
+
+        QString finishedText;
+        QString error;
+        int retries = 0;
+        connect(&client, &AcpClient::promptFinished, this, [&](const QString &, const QString &text, const QJsonArray &) {
+            finishedText = text;
+        });
+        connect(&client, &AcpClient::failed, this, [&](const QString &msg) { error = msg; });
+        connect(&client, &AcpClient::retryStatus, this, [&](const QString &, int, int, int) { ++retries; });
+
+        client.prompt(u"hello"_s);
+        QVERIFY2(waitFor([&] {
+            return !finishedText.isEmpty() || !error.isEmpty();
+        }, 10000), qPrintable(error.isEmpty() ? u"timed out waiting for retry recovery"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QCOMPARE(finishedText, u"model-unreachable-recovered"_s);
+        QCOMPARE(retries, 1);
+        client.stop();
+    }
+
+    void agyProtocolAuthModesUsageAndSystemPrompt()
+    {
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+
+        // Case 1: No API key -> session/new triggers auth retry with oauth-personal
+        // (NOT gemini-api-key), forwards globalRules via _meta.systemPrompt.append,
+        // syncs desired mode, handles usage_update and cancelled tool status.
+        {
+            const QByteArray prevGeminiKey = qgetenv("GEMINI_API_KEY");
+            qunsetenv("GEMINI_API_KEY");
+
+            Settings settings = mockSettings(u"agy-protocol"_s);
+            settings.acpAgentId = u"antigravity-acp"_s;
+            settings.acpApiKey.clear();
+            settings.globalRules = u"Always write clean C++."_s;
+
+            DiskDocumentBridge bridge;
+            AcpClient client;
+            client.setSettings(settings);
+            client.setWorkspace(workspace.path());
+            client.setDocumentBridge(&bridge);
+            client.setDesiredMode(u"plan"_s);
+
+            QString finalText;
+            QString error;
+            qint64 seenUsed = -1;
+            qint64 seenSize = -1;
+            bool seenCancelledTool = false;
+            QString toolOutput;
+            connect(&client, &AcpClient::usageUpdated, this, [&](qint64 used, qint64 size) {
+                seenUsed = used;
+                seenSize = size;
+            });
+            connect(&client, &AcpClient::toolFinished, this, [&](const ToolResult &res) {
+                if (res.toolCallId == u"call_cancel"_s) {
+                    seenCancelledTool = res.cancelled && !res.ok;
+                    toolOutput = res.output;
+                }
+            });
+            connect(&client, &AcpClient::promptFinished, this, [&](const QString &, const QString &text, const QJsonArray &) {
+                finalText = text;
+            });
+            connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+                error = message;
+            });
+
+            client.prompt(u"ping"_s);
+            QVERIFY2(waitFor([&] {
+                return !finalText.isEmpty() || !error.isEmpty();
+            }), qPrintable(error.isEmpty() ? u"timed out"_s : error));
+            QVERIFY2(error.isEmpty(), qPrintable(error));
+            QVERIFY2(finalText.contains(u"auth=oauth-personal"_s), qPrintable(finalText));
+            QVERIFY2(finalText.contains(u"sys=Always write clean C++."_s), qPrintable(finalText));
+            QVERIFY2(finalText.contains(u"mode=plan"_s), qPrintable(finalText));
+            QCOMPARE(client.currentModeId(), u"plan"_s);
+            QCOMPARE(seenUsed, 1234);
+            QCOMPARE(seenSize, 1048576);
+            QVERIFY(seenCancelledTool);
+            QCOMPARE(toolOutput, u"[Image: image/png]"_s);
+            client.stop();
+
+            if (!prevGeminiKey.isNull()) {
+                qputenv("GEMINI_API_KEY", prevGeminiKey);
+            }
+        }
+
+        // Case 2: API key configured -> selects gemini-api-key and sends _meta.apiKey.
+        {
+            Settings settings = mockSettings(u"agy-protocol"_s);
+            settings.acpAgentId = u"antigravity-acp"_s;
+            settings.acpApiKey = u"test-secret-key"_s;
+
+            DiskDocumentBridge bridge;
+            AcpClient client;
+            client.setSettings(settings);
+            client.setWorkspace(workspace.path());
+            client.setDocumentBridge(&bridge);
+
+            QString finalText;
+            QString error;
+            connect(&client, &AcpClient::promptFinished, this, [&](const QString &, const QString &text, const QJsonArray &) {
+                finalText = text;
+            });
+            connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+                error = message;
+            });
+
+            client.prompt(u"ping"_s);
+            QVERIFY2(waitFor([&] {
+                return !finalText.isEmpty() || !error.isEmpty();
+            }), qPrintable(error.isEmpty() ? u"timed out"_s : error));
+            QVERIFY2(error.isEmpty(), qPrintable(error));
+            QVERIFY2(finalText.contains(u"auth=gemini-api-key"_s), qPrintable(finalText));
+            QVERIFY2(finalText.contains(u"key=test-secret-key"_s), qPrintable(finalText));
+            client.stop();
+        }
+    }
+
+    void acpClientSupportsAllWorkspaceAndTerminalTools()
+    {
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+
+        const QString f1 = workspace.path() + u"/alpha.txt"_s;
+        const QString f2 = workspace.path() + u"/beta.txt"_s;
+        {
+            QFile file1(f1);
+            QVERIFY(file1.open(QIODevice::WriteOnly));
+            file1.write("hello world\nline2\n");
+            QFile file2(f2);
+            QVERIFY(file2.open(QIODevice::WriteOnly));
+            file2.write("remove me\n");
+        }
+
+        DiskDocumentBridge bridge;
+        AcpClient client;
+        client.setSettings(mockSettings(u"acp-all-tools"_s));
+        client.setWorkspace(workspace.path());
+        client.setDocumentBridge(&bridge);
+
+        bool exitPlanEmitted = false;
+        QString finalText;
+        QString error;
+        connect(&client, &AcpClient::permissionNeeded, this, [&](const PermissionRequest &req) {
+            client.resolvePermission(PermissionDecision::AllowOnce, req.toolCallId);
+        });
+        connect(&client, &AcpClient::exitPlanModeRequested, this, [&]() {
+            exitPlanEmitted = true;
+        });
+        connect(&client, &AcpClient::promptFinished, this, [&](const QString &, const QString &text, const QJsonArray &) {
+            finalText = text;
+        });
+        connect(&client, &AcpClient::failed, this, [&](const QString &message) {
+            error = message;
+        });
+
+        client.prompt(workspace.path());
+        QVERIFY2(waitFor([&] {
+            return !finalText.isEmpty() || !error.isEmpty();
+        }), qPrintable(error.isEmpty() ? u"timed out"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+
+        const QJsonObject report = QJsonDocument::fromJson(finalText.toUtf8()).object();
+        QVERIFY2(report.value(u"list"_s).toBool(), qPrintable(finalText));
+        QVERIFY2(report.value(u"glob"_s).toBool(), qPrintable(finalText));
+        QVERIFY2(report.value(u"grep"_s).toBool(), qPrintable(finalText));
+        QVERIFY2(report.value(u"edit"_s).toBool(), qPrintable(finalText));
+        QVERIFY2(report.value(u"multi"_s).toBool(), qPrintable(finalText));
+        QVERIFY2(report.value(u"patch"_s).toBool(), qPrintable(finalText));
+        QVERIFY2(report.value(u"del"_s).toBool(), qPrintable(finalText));
+        QVERIFY2(report.value(u"exit_plan"_s).toBool(), qPrintable(finalText));
+        QVERIFY2(report.value(u"term_in"_s).toBool(), qPrintable(finalText));
+        QVERIFY2(report.value(u"term_out"_s).toBool(), qPrintable(finalText));
+        QVERIFY(exitPlanEmitted);
+        QVERIFY(!QFileInfo::exists(f2));
+
+        QString finalContent;
+        QVERIFY(bridge.readDocument(f1, &finalContent));
+        QCOMPARE(finalContent, u"patched acp\nlineTWO\n"_s);
+        client.stop();
+    }
+
+    void realAgyAcpHandshakeAndSessionControl()
+    {
+        const QString agyPath = QStandardPaths::findExecutable(u"agy"_s);
+        if (agyPath.isEmpty()) {
+            QSKIP("agy CLI is not installed on PATH");
+        }
+        QTemporaryDir tempHome;
+        QTemporaryDir workspace;
+        QVERIFY(tempHome.isValid());
+        QVERIFY(workspace.isValid());
+
+        const QByteArray prevHome = qgetenv("HOME");
+        qputenv("HOME", tempHome.path().toUtf8());
+
+        Settings settings;
+        settings.provider = Provider::Acp;
+        settings.apiFormat = ApiFormat::AcpNative;
+        settings.acpAgentId = u"antigravity-acp"_s;
+        settings.acpCommand = agyPath;
+        settings.acpArgs = u"acp --log-file="_s + tempHome.path() + u"/agy_test.log"_s;
+        settings.acpApiKeyEnv = u"GEMINI_API_KEY"_s;
+        settings.acpApiKey = u"test-dummy-key"_s;
+        settings.globalRules = u"Prefer concise C++."_s;
+
+        AcpClient client;
+        client.setSettings(settings);
+        client.setWorkspace(workspace.path());
+
+        QStringList models;
+        QStringList efforts;
+        QStringList modes;
+        QString error;
+        bool isReady = false;
+        connect(&client, &AcpClient::ready, this, [&]() { isReady = true; });
+        connect(&client, &AcpClient::modelsReceived, this, [&](const QStringList &m) { models = m; });
+        connect(&client, &AcpClient::effortsReceived, this, [&](const QStringList &e) { efforts = e; });
+        connect(&client, &AcpClient::modesReceived, this, [&](const QStringList &m) { modes = m; });
+        connect(&client, &AcpClient::failed, this, [&](const QString &msg) { error = msg; });
+
+        client.start();
+        QVERIFY2(waitFor([&] {
+            return isReady || !error.isEmpty();
+        }, 15000), qPrintable(error.isEmpty() ? u"timed out waiting for agy acp ready"_s : error));
+        QVERIFY2(error.isEmpty(), qPrintable(error));
+        QVERIFY(!client.sessionId().isEmpty());
+        QVERIFY(!models.isEmpty());
+        QVERIFY(!efforts.isEmpty());
+        QVERIFY(modes.contains(u"plan"_s));
+
+        QVERIFY(client.setSessionMode(u"plan"_s));
+        QVERIFY2(waitFor([&] {
+            return client.currentModeId() == u"plan"_s || !error.isEmpty();
+        }, 10000), qPrintable(error.isEmpty() ? u"timed out switching agy mode to plan"_s : error));
+        QCOMPARE(client.currentModeId(), u"plan"_s);
+
+        client.stop();
+        if (prevHome.isNull()) {
+            qunsetenv("HOME");
+        } else {
+            qputenv("HOME", prevHome);
+        }
+    }
+
+    void page4kShimPreservesRealPageSizeForAllocatorsAndUpdatesStaleCopy()
+    {
+#if !defined(Q_OS_LINUX)
+        QSKIP("Linux-only 4KB page shim test");
+#else
+        const QString builtShim = QDir(QCoreApplication::applicationDirPath()).filePath(u"libpage4k.so"_s);
+        if (!QFileInfo::exists(builtShim)) {
+            QSKIP("libpage4k.so not present next to test binary");
+        }
+
+        // acpEnsurePageShim must overwrite a stale libpage4k.so with the
+        // current trusted build so users upgrading KateAI stop loading an old shim.
+        QTemporaryDir agentDir;
+        QVERIFY(agentDir.isValid());
+        const QString targetShim = QDir(agentDir.path()).filePath(u"libpage4k.so"_s);
+        {
+            QFile stale(targetShim);
+            QVERIFY(stale.open(QIODevice::WriteOnly));
+            stale.write("stale-shim-bytes");
+        }
+        const QString ensured = acpEnsurePageShim(agentDir.path());
+        QCOMPARE(ensured, targetShim);
+        {
+            QFile srcFile(builtShim);
+            QFile dstFile(targetShim);
+            QVERIFY(srcFile.open(QIODevice::ReadOnly));
+            QVERIFY(dstFile.open(QIODevice::ReadOnly));
+            QCOMPARE(dstFile.readAll(), srcFile.readAll());
+        }
+
+        const long hostPage = ::sysconf(_SC_PAGESIZE);
+        if (hostPage <= 4096) {
+            return;
+        }
+        const QString cc = QStandardPaths::findExecutable(u"gcc"_s).isEmpty()
+            ? QStandardPaths::findExecutable(u"cc"_s)
+            : QStandardPaths::findExecutable(u"gcc"_s);
+        if (cc.isEmpty()) {
+            QSKIP("No C compiler available to verify LD_PRELOAD shim behavior");
+        }
+
+        // Verify that under LD_PRELOAD=libpage4k.so:
+        // 1. Allocator / normal callers still observe the real kernel page size
+        //    (preventing TCMalloc from issuing sub-page madvise(MADV_DONTNEED)).
+        // 2. Direct and GoogleInitializer-wrapped verify_page_size checks get 4096.
+        const QString probeSrc = QDir(agentDir.path()).filePath(u"probe.c"_s);
+        const QString probeBin = QDir(agentDir.path()).filePath(u"probe"_s);
+        {
+            QFile f(probeSrc);
+            QVERIFY(f.open(QIODevice::WriteOnly));
+            f.write(
+                "#include <stdio.h>\n"
+                "#include <unistd.h>\n"
+                "__attribute__((noinline)) long tcmalloc_like_GetPageSize(void) {\n"
+                "    volatile long v = sysconf(_SC_PAGESIZE);\n"
+                "    return v;\n"
+                "}\n"
+                "__attribute__((noinline)) long bamm2_init_verify_page_size(void) {\n"
+                "    volatile long v = sysconf(_SC_PAGESIZE);\n"
+                "    return v;\n"
+                "}\n"
+                "__attribute__((noinline)) static long static_verify_page_size(void) {\n"
+                "    volatile long v = sysconf(_SC_PAGESIZE);\n"
+                "    return v;\n"
+                "}\n"
+                "__attribute__((noinline)) long GoogleInitializer_RunIfNecessary(void) {\n"
+                "    volatile long v = static_verify_page_size();\n"
+                "    return v;\n"
+                "}\n"
+                "int main(void) {\n"
+                "    printf(\"alloc=%ld getpagesize=%d direct_verify=%ld init_verify=%ld\\n\",\n"
+                "           tcmalloc_like_GetPageSize(), getpagesize(),\n"
+                "           bamm2_init_verify_page_size(), GoogleInitializer_RunIfNecessary());\n"
+                "    return 0;\n"
+                "}\n");
+        }
+
+        QProcess compile;
+        compile.start(cc, {u"-O2"_s, u"-fno-omit-frame-pointer"_s, u"-fno-ipa-icf"_s, u"-rdynamic"_s,
+                           u"-o"_s, probeBin, probeSrc});
+        QVERIFY(compile.waitForFinished(10000));
+        QCOMPARE(compile.exitCode(), 0);
+
+        QProcess run;
+        QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+        env.insert(u"LD_PRELOAD"_s, ensured);
+        run.setProcessEnvironment(env);
+        run.start(probeBin);
+        QVERIFY(run.waitForFinished(10000));
+        QCOMPARE(run.exitCode(), 0);
+        const QString output = QString::fromUtf8(run.readAllStandardOutput()).trimmed();
+        const QString expected = u"alloc=%1 getpagesize=%1 direct_verify=4096 init_verify=4096"_s.arg(hostPage);
+        QCOMPARE(output, expected);
+#endif
     }
 
 private:

@@ -8,6 +8,7 @@
 #include "types.h"
 
 #include <QHash>
+#include <QProcessEnvironment>
 #include <QRegularExpression>
 #include <QString>
 #include <QStringList>
@@ -65,11 +66,23 @@ public:
     // "cat ~/.ssh/id_rsa". Deny globs apply to file tools already; the shell
     // needs the same guard or a read-only command sidesteps them entirely.
     bool commandTouchesDeniedPath(const QString &command) const;
+    // True when a shell command names a path outside the workspace. Read-only
+    // commands are approved without a prompt, so their operands must obey the
+    // same confinement the read tools enforce; otherwise "cat ~/.bash_history"
+    // is an unprompted read of the whole host.
+    bool commandTouchesOutsideWorkspace(const QString &command) const;
 
-    QStringList wrapCommand(const QString &command, QString *error) const;
+    QStringList wrapCommand(const QString &command, QString *error, const QString &workingDirectory = QString()) const;
     // Wrap an argv vector (ACP terminal/create). The program and each argument
-    // stay separate; nothing is re-quoted into `bash -c`.
-    QStringList wrapArgv(const QString &program, const QStringList &args, QString *error) const;
+    // stay separate; nothing is re-quoted into `bash -c`. `workingDirectory`
+    // is confined to the workspace when it is set.
+    QStringList wrapArgv(const QString &program, const QStringList &args, QString *error,
+                         const QString &workingDirectory = QString()) const;
+    // The environment a sandboxed child may inherit. Secrets and session
+    // channels (DBus, X11, Wayland, SSH agents, display servers) are removed;
+    // the strict profile gets a private HOME and runtime directory. `Off`
+    // deliberately returns the ambient environment unchanged.
+    QProcessEnvironment processEnvironment() const;
     bool bubblewrapAvailable() const;
     bool isolationAvailable() const;
 
@@ -81,6 +94,14 @@ private:
     bool pathInsideWorkspace(const QString &absolutePath) const;
     QString normalizePath(const QString &path, QString *error, bool forWrite) const;
     bool globMatchCached(const QString &pattern, const QString &path) const;
+    // Expands a shell glob token into the paths it currently matches, so the
+    // deny scan looks at real files instead of the pattern text. A pattern
+    // such as ".e*" names a set of files, and checking the text alone lets the
+    // shell expand it straight past a deny rule.
+    QStringList expandGlobToken(const QString &pattern) const;
+    // True when a glob pattern could name a path the deny rules cover, even
+    // when nothing on disk matches it at this moment.
+    bool patternCouldMatchDeniedName(const QString &pattern) const;
 
     QString m_workspaceRoot;
     SandboxProfile m_profile = SandboxProfile::Workspace;
@@ -88,6 +109,8 @@ private:
     bool m_allowOutsideReads = false;
     // Compiled deny-glob patterns. globToRegex() is cheap but QRegularExpression
     // construction is not, and isDenied() runs one per glob per candidate path.
+    // Both caches are populated lazily without synchronization: Sandbox is used
+    // from the main thread only. Guard them if isDenied() ever runs on a worker.
     mutable QHash<QString, QRegularExpression> m_globCache;
     mutable QStringList m_cachedDenyGlobs;
 };

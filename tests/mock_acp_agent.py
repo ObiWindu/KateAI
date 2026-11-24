@@ -7,13 +7,20 @@ session/request_permission, fs/*, and terminal/* back to the client.
 
 import json
 import sys
+import time
 
 SCENARIO = sys.argv[1] if len(sys.argv) > 1 else "echo"
 NEXT_ID = 1000
 SESSION_ID = "sess_kateai_test"
 CURRENT_MODEL = "grok-4.5"
 CURRENT_EFFORT = "medium"
+CURRENT_MODE = "default"
+AUTHENTICATED = False
+AUTH_METHOD_SEEN = None
+AUTH_API_KEY_SEEN = None
+SYSTEM_PROMPT_APPEND_SEEN = None
 PROMPT_COUNT = 0
+TOOL_QUESTION_COUNT = 0
 EFFORT_CONFIG_ID = "thinking" if SCENARIO == "mistral-thinking" else "thinking_level"
 
 
@@ -198,17 +205,187 @@ def outcome_summary(outcome):
 
 
 def handle_prompt(request_id, params):
-    text = ""
-    for block in params.get("prompt") or []:
-        if isinstance(block, dict) and block.get("type") == "text":
-            text += block.get("text") or ""
+    # Text blocks are joined by a line break, as a real agent reads them.
+    # user_text is the first block, the message the user typed: agents answer
+    # that, not the editor context or the session notes sent after it.
+    texts = [
+        block.get("text") or ""
+        for block in params.get("prompt") or []
+        if isinstance(block, dict) and block.get("type") == "text"
+    ]
+    text = "\n".join(texts)
+    user_text = texts[0] if texts else ""
+
+    if SCENARIO == "agy-protocol":
+        # Verify null-id notification is ignored cleanly as a notification,
+        # usage_update and current_mode_update work, and cancelled tool status
+        # + resource_link/image content blocks are handled without leaking JSON.
+        send({
+            "jsonrpc": "2.0",
+            "id": None,
+            "method": "session/update",
+            "params": {
+                "sessionId": SESSION_ID,
+                "update": {"sessionUpdate": "usage_update", "used": 1234, "size": 1048576},
+            },
+        })
+        session_update({"sessionUpdate": "current_mode_update", "currentModeId": CURRENT_MODE})
+        session_update({
+            "sessionUpdate": "tool_call",
+            "toolCallId": "call_cancel",
+            "name": "run_command",
+            "kind": "execute",
+            "title": "Run build",
+            "rawInput": {"CommandLine": "cmake --build build"},
+            "status": "cancelled",
+            "content": [{"type": "image", "mimeType": "image/png", "data": "AAAA"}],
+        })
+        summary = f"auth={AUTH_METHOD_SEEN};key={AUTH_API_KEY_SEEN};mode={CURRENT_MODE};sys={SYSTEM_PROMPT_APPEND_SEEN}"
+        session_update({
+            "sessionUpdate": "agent_message_chunk",
+            "content": {"type": "text", "text": summary},
+        })
+        result(request_id, {"stopReason": "end_turn"})
+        return
+
+    if SCENARIO == "acp-all-tools":
+        # Exercises all newly added ACP client tools over JSON-RPC.
+        cwd = user_text.strip()
+        f1 = f"{cwd}/alpha.txt"
+        f2 = f"{cwd}/beta.txt"
+        r_list = call_client("fs/list_directory", {"sessionId": SESSION_ID, "path": cwd})
+        r_glob = call_client("fs/glob", {"sessionId": SESSION_ID, "path": cwd, "pattern": "*.txt"})
+        r_grep = call_client("fs/grep", {"sessionId": SESSION_ID, "path": cwd, "pattern": "hello"})
+        r_edit = call_client("fs/edit_file", {
+            "sessionId": SESSION_ID,
+            "path": f1,
+            "old_string": "hello world",
+            "new_string": "hello acp",
+        })
+        r_multi = call_client("fs/multi_edit_file", {
+            "sessionId": SESSION_ID,
+            "path": f1,
+            "edits": [
+                {"old_string": "hello acp", "new_string": "hi acp"},
+                {"old_string": "line2", "new_string": "lineTWO"},
+            ],
+        })
+        patch = (
+            f"--- a/alpha.txt\n+++ b/alpha.txt\n"
+            f"@@ -1,2 +1,2 @@\n"
+            f"-hi acp\n+patched acp\n lineTWO\n"
+        )
+        r_patch = call_client("_kateai/apply_patch", {"sessionId": SESSION_ID, "patch": patch})
+        r_del = call_client("fs/delete_file", {"sessionId": SESSION_ID, "path": f2})
+        r_exit = call_client("_kateai/exit_plan_mode", {"sessionId": SESSION_ID})
+        r_term = call_client("terminal/create", {
+            "sessionId": SESSION_ID,
+            "command": "cat",
+            "cwd": cwd,
+            "env": {"TEST_ENV_MAP": "yes"},
+        })
+        term_id = (r_term or {}).get("result", {}).get("terminalId", "")
+        r_in = call_client("terminal/send_input", {
+            "sessionId": SESSION_ID,
+            "terminalId": term_id,
+            "input": "ping\n",
+            "eof": True,
+        })
+        call_client("terminal/wait_for_exit", {"sessionId": SESSION_ID, "terminalId": term_id})
+        r_out = call_client("terminal/output", {"sessionId": SESSION_ID, "terminalId": term_id})
+        call_client("terminal/release", {"sessionId": SESSION_ID, "terminalId": term_id})
+        report = {
+            "list": "result" in (r_list or {}),
+            "glob": "alpha.txt" in ((r_glob or {}).get("result", {}).get("content", "")),
+            "grep": "hello world" in ((r_grep or {}).get("result", {}).get("content", "")),
+            "edit": "result" in (r_edit or {}),
+            "multi": "result" in (r_multi or {}),
+            "patch": "result" in (r_patch or {}),
+            "del": "result" in (r_del or {}),
+            "exit_plan": (r_exit or {}).get("result", {}).get("ok") is True,
+            "term_in": (r_in or {}).get("result", {}).get("bytesWritten", 0) == 5,
+            "term_out": "ping" in ((r_out or {}).get("result", {}).get("output", "")),
+        }
+        session_update({
+            "sessionUpdate": "agent_message_chunk",
+            "content": {"type": "text", "text": json.dumps(report, separators=(",", ":"))},
+        })
+        result(request_id, {"stopReason": "end_turn"})
+        return
+
+    if SCENARIO == "prompt-probe":
+        # Reports every text block the prompt carried, so a test can see what
+        # the agent was sent and what it was not.
+        session_update(
+            {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "\n---\n".join(texts)},
+            }
+        )
+        result(request_id, {"stopReason": "end_turn"})
+        return
+
+    if SCENARIO == "prompt-blocks":
+        # Reports the text blocks in order, with their audience annotations,
+        # so a test can pin what the agent receives as the user's message.
+        blocks = []
+        for block in params.get("prompt") or []:
+            if not isinstance(block, dict) or block.get("type") != "text":
+                continue
+            annotations = block.get("annotations") or {}
+            blocks.append(
+                {
+                    "text": block.get("text") or "",
+                    "audience": annotations.get("audience") or [],
+                }
+            )
+        session_update({
+            "sessionUpdate": "agent_message_chunk",
+            "content": {"type": "text", "text": json.dumps(blocks, separators=(",", ":"))},
+        })
+        result(request_id, {"stopReason": "end_turn"})
+        return
+
+    if SCENARIO == "kateai-ext":
+        # Kate's client methods called by their extension names, as the
+        # capability advertises them.
+        call_client(
+            "_kateai/suggest",
+            {"sessionId": SESSION_ID, "suggestion": "extract a helper", "path": "/tmp/a.cpp", "line": 3},
+        )
+        session_update(
+            {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "ext-ok"},
+            }
+        )
+        result(request_id, {"stopReason": "end_turn"})
+        return
+
+    if SCENARIO == "flaky-model-unreachable":
+        global PROMPT_COUNT
+        PROMPT_COUNT += 1
+        if PROMPT_COUNT == 1:
+            error(
+                request_id,
+                "Agent execution error: model unreachable: Error 502, Message: Bad Gateway: Failed to connect to backend API, Status: 502 Bad Gateway",
+                -32603,
+            )
+            return
+        session_update(
+            {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "model-unreachable-recovered"},
+            }
+        )
+        result(request_id, {"stopReason": "end_turn"})
+        return
 
     if SCENARIO in ("flaky", "flaky-persistent"):
         # A transient drop of the agent's stream to its model provider: the
         # turn fails mid-response and Rust agents report the hyper/reqwest
         # transport error verbatim. "flaky" recovers on the next attempt;
         # "flaky-persistent" never does, so the client exhausts its budget.
-        global PROMPT_COUNT
         PROMPT_COUNT += 1
         if SCENARIO == "flaky" and PROMPT_COUNT > 1:
             kind = "nudged" if "transient network error" in text else "replayed"
@@ -231,6 +408,32 @@ def handle_prompt(request_id, params):
             "peer closed connection without sending complete message body (incomplete chunked read)",
             -32603,
         )
+        return
+
+    if SCENARIO in ("output-limit", "output-limit-persistent"):
+        # Mistral Vibe's failure mode for a large file: the model announces the
+        # write, then the completion is cut off at the output token limit, so
+        # the turn ends with stopReason "max_tokens" and no tool call ran.
+        # "output-limit" recovers once the client nudges it to split the write;
+        # "output-limit-persistent" never does, so the client exhausts its budget.
+        PROMPT_COUNT += 1
+        if SCENARIO == "output-limit" and PROMPT_COUNT > 1:
+            kind = "nudged" if "output token limit" in text else "replayed"
+            session_update(
+                {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": "output-limit-recovered:" + kind},
+                }
+            )
+            result(request_id, {"stopReason": "end_turn"})
+            return
+        session_update(
+            {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "Now I will write the file"},
+            }
+        )
+        result(request_id, {"stopReason": "max_tokens"})
         return
 
     if SCENARIO == "effort-drift":
@@ -383,6 +586,35 @@ def handle_prompt(request_id, params):
         result(request_id, {"stopReason": "end_turn"})
         return
 
+    if SCENARIO == "permission-question":
+        # An agent without ask_user tunnels its question through permission:
+        # the options are answer labels, not allow/reject decisions.
+        response = call_client(
+            "session/request_permission",
+            {
+                "sessionId": SESSION_ID,
+                "toolCall": {
+                    "toolCallId": "call_question",
+                    "title": "Ask a question",
+                    "kind": "other",
+                    "rawInput": {"question": "Which strategy should I use?"},
+                },
+                "options": [
+                    {"optionId": "opt-conservative", "name": "conservative"},
+                    {"optionId": "opt-balanced", "name": "balanced"},
+                ],
+            },
+        )
+        option = (((response or {}).get("result") or {}).get("outcome") or {}).get("optionId")
+        session_update(
+            {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": f"choice:{option}"},
+            }
+        )
+        result(request_id, {"stopReason": "end_turn"})
+        return
+
     if SCENARIO == "permission-double":
         # Two questions outstanding at once. Only one can be answered at a time,
         # so the first must be closed by the client rather than left unanswered.
@@ -510,6 +742,25 @@ def handle_prompt(request_id, params):
         result(request_id, {"stopReason": "end_turn"})
         return
 
+    if SCENARIO == "read-pagination":
+        read_path = ""
+        for token in text.split():
+            if token.startswith("READPATH:"):
+                read_path = token.split(":", 1)[1]
+        read = call_client(
+            "fs/read_text_file",
+            {"sessionId": SESSION_ID, "path": read_path, "line": 1, "limit": 2},
+        )
+        content = ((read or {}).get("result") or {}).get("content", "")
+        session_update(
+            {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": content},
+            }
+        )
+        result(request_id, {"stopReason": "end_turn"})
+        return
+
     if SCENARIO == "plan":
         written = call_client(
             "write_plan_file",
@@ -544,6 +795,235 @@ def handle_prompt(request_id, params):
         result(request_id, {"stopReason": "end_turn"})
         return
 
+    if SCENARIO == "tool-question":
+        # An agent-side question tool, shaped like Claude Code/OpenCode
+        # (questions[] with option objects). The client should surface the
+        # same question card as _kateai/ask_user.
+        global TOOL_QUESTION_COUNT
+        TOOL_QUESTION_COUNT += 1
+        if TOOL_QUESTION_COUNT == 1:
+            session_update(
+                {
+                    "sessionUpdate": "tool_call",
+                    "toolCallId": "tool-question-1",
+                    "title": "Ask a question",
+                    "kind": "other",
+                    "rawInput": {
+                        "questions": [
+                            {
+                                "question": "Which strategy should I use?",
+                                "options": [
+                                    {"label": "conservative", "description": "small steps"},
+                                    {"label": "balanced", "description": "normal pace"},
+                                ],
+                            }
+                        ]
+                    },
+                }
+            )
+            session_update(
+                {
+                    "sessionUpdate": "tool_call_update",
+                    "toolCallId": "tool-question-1",
+                    "status": "completed",
+                    "rawOutput": "waiting for the user",
+                }
+            )
+        else:
+            session_update(
+                {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": "answer:" + text},
+                }
+            )
+        result(request_id, {"stopReason": "end_turn"})
+        return
+
+    if SCENARIO == "tool-suggestion":
+        # A suggestion tool that uses text/file_path/start_line rather than
+        # Kate's own suggestion/path/line names.
+        session_update(
+            {
+                "sessionUpdate": "tool_call",
+                "toolCallId": "tool-suggestion-1",
+                "title": "Suggest an improvement",
+                "kind": "other",
+                "rawInput": {
+                    "text": "Use std::string_view here",
+                    "file_path": "src/main.cpp",
+                    "start_line": 7,
+                },
+            }
+        )
+        session_update(
+            {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "tool-suggestion-1",
+                "status": "completed",
+                "content": {"type": "text", "text": "posted"},
+            }
+        )
+        result(request_id, {"stopReason": "end_turn"})
+        return
+
+    if SCENARIO == "ask_user":
+        # Kate's ask-user extension: the RPC blocks until the client replies
+        # with the user's answer, and the agent echoes it back.
+        reply = call_client(
+            "_kateai/ask_user",
+            {
+                "sessionId": SESSION_ID,
+                "question": "Rewrite the file, or patch it in place?",
+                "options": ["Rewrite", "Patch"],
+                "allow_freeform": True,
+            },
+        )
+        answer = ((reply or {}).get("result") or {}).get("answer", "")
+        cancelled = ((reply or {}).get("result") or {}).get("cancelled", False)
+        session_update(
+            {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {
+                    "type": "text",
+                    "text": ("cancelled" if cancelled else "answer:" + answer),
+                },
+            }
+        )
+        result(request_id, {"stopReason": "end_turn"})
+        return
+
+    if SCENARIO == "elicitation":
+        # ACP v2 elicitation: the response uses {action, content}, not Kate's
+        # extension shape.
+        reply = call_client(
+            "elicitation/create",
+            {
+                "sessionId": SESSION_ID,
+                "message": "Which strategy should I use?",
+                "requestedSchema": {
+                    "type": "object",
+                    "properties": {
+                        "strategy": {
+                            "type": "string",
+                            "enum": ["conservative", "balanced"],
+                        }
+                    },
+                    "required": ["strategy"],
+                },
+            },
+        )
+        response = ((reply or {}).get("result") or {})
+        action = response.get("action", "")
+        strategy = (response.get("content") or {}).get("strategy", "")
+        session_update(
+            {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "%s:%s" % (action, strategy)},
+            }
+        )
+        result(request_id, {"stopReason": "end_turn"})
+        return
+
+    if SCENARIO == "todo":
+        call_client(
+            "_kateai/todo_write",
+            {
+                "sessionId": SESSION_ID,
+                "todos": [
+                    {"content": "step one", "status": "completed"},
+                    {"content": "step two", "status": "in_progress"},
+                ],
+            },
+        )
+        read = call_client("_kateai/todo_read", {"sessionId": SESSION_ID})
+        content = ((read or {}).get("result") or {}).get("content", "")
+        session_update(
+            {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "todo:" + content.replace("\n", "|")},
+            }
+        )
+        result(request_id, {"stopReason": "end_turn"})
+        return
+
+    if SCENARIO == "lsp-symbols":
+        reply = call_client(
+            "_kateai/lsp_symbols", {"sessionId": SESSION_ID, "path": "src/main.cpp"}
+        )
+        if reply is None or "error" in reply:
+            body = "lsp-unavailable"
+        else:
+            body = "lsp:" + ((reply.get("result") or {}).get("content", "")).replace("\n", "|")
+        session_update(
+            {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": body},
+            }
+        )
+        result(request_id, {"stopReason": "end_turn"})
+        return
+
+    if SCENARIO == "title-update":
+        # A tool call whose only later update is a new title: the card header
+        # must follow it (toolDetailsChanged), and the call then completes.
+        session_update(
+            {
+                "sessionUpdate": "tool_call",
+                "toolCallId": "call_title",
+                "name": "bash",
+                "kind": "execute",
+                "title": "Starting",
+                "status": "in_progress",
+            }
+        )
+        session_update(
+            {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "call_title",
+                "title": "Running the full test suite",
+                "status": "in_progress",
+            }
+        )
+        session_update(
+            {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "call_title",
+                "status": "completed",
+                "content": [{"type": "text", "text": "title-done"}],
+            }
+        )
+        result(request_id, {"stopReason": "end_turn"})
+        return
+
+    if SCENARIO == "apply-patch":
+        # A multi-file unified diff in a text content block: Kate must parse
+        # it into per-file diffs for the card.
+        patch = (
+            "--- a/src/a.cpp\n+++ b/src/a.cpp\n@@ -1,2 +1,2 @@\n-old\n+new\n"
+            "--- a/src/b.cpp\n+++ b/src/b.cpp\n@@ -5,1 +5,1 @@\n-x\n+y\n"
+        )
+        session_update(
+            {
+                "sessionUpdate": "tool_call",
+                "toolCallId": "call_patch",
+                "name": "apply_patch",
+                "kind": "edit",
+                "title": "Apply patch",
+                "status": "in_progress",
+                "content": [{"type": "text", "text": patch}],
+            }
+        )
+        session_update(
+            {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "call_patch",
+                "status": "completed",
+                "content": [{"type": "text", "text": "patched"}],
+            }
+        )
+        result(request_id, {"stopReason": "end_turn"})
+        return
+
     if SCENARIO == "quoted":
         created = call_client(
             "terminal/create",
@@ -561,6 +1041,144 @@ def handle_prompt(request_id, params):
             {
                 "sessionUpdate": "agent_message_chunk",
                 "content": {"type": "text", "text": body.strip()},
+            }
+        )
+        result(request_id, {"stopReason": "end_turn"})
+        return
+
+    if SCENARIO == "terminal-card":
+        # A command the agent runs in a terminal it created, announced inside its
+        # tool call the way the spec describes. Kate shows the terminal's output
+        # in that tool card while the command runs.
+        session_update(
+            {
+                "sessionUpdate": "tool_call",
+                "toolCallId": "call_term",
+                "title": "Run the probe",
+                "kind": "execute",
+                "status": "pending",
+                "rawInput": {"command": "probe"},
+            }
+        )
+        created = call_client(
+            "terminal/create",
+            {
+                "sessionId": SESSION_ID,
+                "command": "python3",
+                "args": ["-c", "print('term-card-out')"],
+            },
+        )
+        terminal_id = ((created or {}).get("result") or {}).get("terminalId")
+        session_update(
+            {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "call_term",
+                "status": "in_progress",
+                "content": [{"type": "terminal", "terminalId": terminal_id}],
+            }
+        )
+        call_client("terminal/wait_for_exit", {"sessionId": SESSION_ID, "terminalId": terminal_id})
+        session_update(
+            {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "call_term",
+                "status": "completed",
+                "content": [{"type": "terminal", "terminalId": terminal_id}],
+            }
+        )
+        call_client("terminal/release", {"sessionId": SESSION_ID, "terminalId": terminal_id})
+        session_update(
+            {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "terminal-done"},
+            }
+        )
+        result(request_id, {"stopReason": "end_turn"})
+        return
+
+    if SCENARIO == "late-diff":
+        # The diff arrives in a tool_call_update, not in the tool_call that
+        # announced the edit. Kate must show it on the card once it arrives.
+        path = ""
+        for token in user_text.split():
+            if token.startswith("EDITPATH:"):
+                path = token.split(":", 1)[1]
+        session_update(
+            {
+                "sessionUpdate": "tool_call",
+                "toolCallId": "call_late",
+                "title": "Edit notes.txt",
+                "kind": "edit",
+                "status": "pending",
+            }
+        )
+        session_update(
+            {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "call_late",
+                "status": "in_progress",
+                "content": [{"type": "diff", "path": path, "oldText": "old", "newText": "new"}],
+            }
+        )
+        session_update(
+            {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "call_late",
+                "status": "completed",
+            }
+        )
+        session_update(
+            {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "late-ok"},
+            }
+        )
+        result(request_id, {"stopReason": "end_turn"})
+        return
+
+    if SCENARIO == "bare-permission":
+        # The permission request names the tool call and nothing else, which
+        # the spec allows. Kate must keep the identity and the diff that the
+        # tool_call announced, not treat the call as an unnamed "tool".
+        path = ""
+        for token in user_text.split():
+            if token.startswith("EDITPATH:"):
+                path = token.split(":", 1)[1]
+        session_update(
+            {
+                "sessionUpdate": "tool_call",
+                "toolCallId": "call_bare",
+                "title": "Edit notes.txt",
+                "kind": "edit",
+                "status": "pending",
+                "locations": [{"path": path}],
+                "rawInput": {"file_path": path, "old_string": "old", "new_string": "new"},
+            }
+        )
+        permission = request_no_wait(
+            "session/request_permission",
+            {
+                "sessionId": SESSION_ID,
+                "toolCall": {"toolCallId": "call_bare"},
+                "options": [
+                    {"optionId": "allow-once", "name": "Allow once", "kind": "allow_once"},
+                    {"optionId": "reject-once", "name": "Reject", "kind": "reject_once"},
+                ],
+            },
+        )
+        outcome = None
+        while True:
+            message = read_message()
+            if message is None:
+                return
+            if message.get("id") == permission:
+                outcome = (message.get("result") or {}).get("outcome") or {}
+                break
+            handle(message)
+        session_update(
+            {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "outcome:" + outcome_summary(outcome)},
             }
         )
         result(request_id, {"stopReason": "end_turn"})
@@ -584,6 +1202,86 @@ def handle_prompt(request_id, params):
             {
                 "sessionUpdate": "agent_message_chunk",
                 "content": {"type": "text", "text": body.strip()},
+            }
+        )
+        result(request_id, {"stopReason": "end_turn"})
+        return
+
+    if SCENARIO == "fs-approved":
+        # A well-behaved agent: announce the edit, ask permission, then write.
+        # The approval covers the matching fs/write_text_file, so the write must
+        # not be parked for a second question.
+        path = ""
+        for token in text.split():
+            if token.startswith("WRITEPATH:"):
+                path = token.split(":", 1)[1]
+        session_update(
+            {
+                "sessionUpdate": "tool_call",
+                "toolCallId": "call_fs",
+                "title": "Write out.txt",
+                "kind": "edit",
+                "status": "pending",
+                "locations": [{"path": path}],
+                "rawInput": {"path": path, "content": "approved write"},
+            }
+        )
+        response = call_client(
+            "session/request_permission",
+            {
+                "sessionId": SESSION_ID,
+                "toolCall": {"toolCallId": "call_fs", "title": "Write out.txt", "kind": "edit"},
+                "options": [
+                    {"optionId": "allow-once", "name": "Allow once", "kind": "allow_once"},
+                    {"optionId": "reject-once", "name": "Reject", "kind": "reject_once"},
+                ],
+            },
+        )
+        option = (((response or {}).get("result") or {}).get("outcome") or {}).get("optionId")
+        call_client(
+            "fs/write_text_file",
+            {"sessionId": SESSION_ID, "path": path, "content": "approved write"},
+        )
+        session_update(
+            {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "fs-approved:" + str(option)},
+            }
+        )
+        result(request_id, {"stopReason": "end_turn"})
+        return
+
+    if SCENARIO == "terminal-tree":
+        # A shell that backgrounds a child and waits. terminal/kill must take
+        # down the whole process group, not just the shell. The child's pid is
+        # reported so the test can check it is gone.
+        created = call_client(
+            "terminal/create",
+            {
+                "sessionId": SESSION_ID,
+                "command": "sh",
+                "args": ["-c", "sleep 60 & echo $!; wait"],
+            },
+        )
+        terminal_id = ((created or {}).get("result") or {}).get("terminalId")
+        pid = ""
+        for _ in range(50):
+            output = call_client(
+                "terminal/output", {"sessionId": SESSION_ID, "terminalId": terminal_id}
+            )
+            pid = ((output or {}).get("result") or {}).get("output", "").strip()
+            if pid:
+                break
+            time.sleep(0.1)
+        call_client("terminal/kill", {"sessionId": SESSION_ID, "terminalId": terminal_id})
+        call_client(
+            "terminal/wait_for_exit", {"sessionId": SESSION_ID, "terminalId": terminal_id}
+        )
+        call_client("terminal/release", {"sessionId": SESSION_ID, "terminalId": terminal_id})
+        session_update(
+            {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "pid:" + pid},
             }
         )
         result(request_id, {"stopReason": "end_turn"})
@@ -653,33 +1351,55 @@ def handle_prompt(request_id, params):
     session_update(
         {
             "sessionUpdate": "agent_message_chunk",
-            "content": {"type": "text", "text": text.strip()},
+            "content": {"type": "text", "text": user_text.strip()},
         }
     )
     result(request_id, {"stopReason": "end_turn"})
 
 
 def handle(message):
-    global CURRENT_MODEL, CURRENT_EFFORT
+    global CURRENT_MODEL, CURRENT_EFFORT, CURRENT_MODE, AUTHENTICATED
+    global AUTH_METHOD_SEEN, AUTH_API_KEY_SEEN, SYSTEM_PROMPT_APPEND_SEEN
     method = message.get("method")
     request_id = message.get("id")
     params = message.get("params") or {}
 
     if method == "initialize":
+        agent_capabilities = {
+            "loadSession": True,
+            "promptCapabilities": {"embeddedContext": True},
+            "sessionCapabilities": {"resume": {}, "close": {}},
+        }
+        auth_methods = []
+        if SCENARIO == "commands":
+            # v2-draft capability advertised by the commands scenario.
+            agent_capabilities["elicitation"] = {}
+        if SCENARIO == "agy-protocol":
+            agent_capabilities["_meta"] = {
+                "antigravity": {"tier": True, "systemPrompt": {"append": True}}
+            }
+            auth_methods = [
+                {"id": "oauth-personal", "name": "Log in with Google"},
+                {"id": "oauth-business", "name": "Log in with Gemini Enterprise"},
+                {"id": "gemini-api-key", "name": "Gemini API key"},
+                {"id": "agent-platform", "name": "Vertex AI"},
+            ]
         result(
             request_id,
             {
                 "protocolVersion": 1,
-                "agentCapabilities": {
-                    "loadSession": True,
-                    "promptCapabilities": {"embeddedContext": True},
-                    "sessionCapabilities": {"resume": {}, "close": {}},
-                },
+                "agentCapabilities": agent_capabilities,
                 "agentInfo": {"name": "mock-acp", "title": "Mock ACP", "version": "1"},
-                "authMethods": [],
+                "authMethods": auth_methods,
             },
         )
     elif method == "authenticate":
+        AUTH_METHOD_SEEN = params.get("methodId")
+        AUTH_API_KEY_SEEN = (params.get("_meta") or {}).get("apiKey")
+        if SCENARIO == "agy-protocol" and AUTH_METHOD_SEEN == "gemini-api-key" and not AUTH_API_KEY_SEEN:
+            error(request_id, "GEMINI_API_KEY is not set; pass an API key in _meta.apiKey", -32602)
+            return
+        AUTHENTICATED = True
         result(request_id, {})
     elif method == "session/new":
         # Strict like the real agents: opencode answers a non-absolute cwd
@@ -687,6 +1407,63 @@ def handle(message):
         cwd = params.get("cwd")
         if not isinstance(cwd, str) or not cwd.startswith("/"):
             error(request_id, "Invalid params: cwd must be an absolute path: %s" % cwd, -32602)
+        elif SCENARIO == "agy-protocol":
+            if not AUTHENTICATED:
+                error(request_id, "Authentication required", -32000)
+                return
+            meta = params.get("_meta") or {}
+            SYSTEM_PROMPT_APPEND_SEEN = (meta.get("systemPrompt") or {}).get("append")
+            agy_opts = [
+                {
+                    "id": "model",
+                    "name": "Model",
+                    "category": "model",
+                    "type": "select",
+                    "currentValue": "gemini-3.1-pro",
+                    "options": [
+                        {"value": "gemini-4-neon", "name": "Gemini 4 Neon"},
+                        {"value": "gemini-3.1-pro", "name": "Gemini 3.1 Pro"},
+                    ],
+                },
+                {
+                    "id": "thought_level",
+                    "name": "Thinking Level",
+                    "category": "thought_level",
+                    "type": "select",
+                    "currentValue": "low",
+                    "options": [
+                        {"value": "low", "name": "Low"},
+                        {"value": "high", "name": "High"},
+                    ],
+                },
+                {
+                    "id": "mode",
+                    "name": "Mode",
+                    "category": "mode",
+                    "type": "select",
+                    "currentValue": CURRENT_MODE,
+                    "options": [
+                        {"value": "default", "name": "Default"},
+                        {"value": "accept-edits", "name": "Accept edits"},
+                        {"value": "plan", "name": "Plan"},
+                    ],
+                },
+            ]
+            result(
+                request_id,
+                {
+                    "sessionId": SESSION_ID,
+                    "modes": {
+                        "currentModeId": CURRENT_MODE,
+                        "availableModes": [
+                            {"id": "default", "name": "Default"},
+                            {"id": "accept-edits", "name": "Accept edits"},
+                            {"id": "plan", "name": "Plan"},
+                        ],
+                    },
+                    "configOptions": agy_opts,
+                },
+            )
         elif SCENARIO == "models":
             result(
                 request_id,
@@ -740,10 +1517,67 @@ def handle(message):
                 -32603,
                 {"details": "The OAuth credential file permissions are not private."},
             )
+        elif SCENARIO == "commands":
+            # Advertises slash commands and the v2-draft elicitation capability.
+            result(request_id, {"sessionId": SESSION_ID})
+            # The protocol-defined form: a session/update variant, not a
+            # top-level notification.
+            session_update(
+                {
+                    "sessionUpdate": "available_commands_update",
+                    "availableCommands": [
+                        {"name": "review", "description": "Review the changes"},
+                        {"name": "test", "description": "Run the tests"},
+                    ],
+                },
+            )
+        elif SCENARIO == "commands_setup":
+            # ACP v2 lets setup responses advertise the initial command list;
+            # recent v1 agents do the same.
+            result(
+                request_id,
+                {
+                    "sessionId": SESSION_ID,
+                    "availableCommands": [
+                        {"name": "review", "description": "Review the changes"},
+                    ],
+                },
+            )
         else:
             result(request_id, {"sessionId": SESSION_ID})
     elif method == "session/set_config_option":
-        if params.get("configId") == EFFORT_CONFIG_ID:
+        if params.get("configId") == "mode":
+            CURRENT_MODE = params.get("value") or CURRENT_MODE
+            if SCENARIO == "agy-protocol":
+                agy_opts = [
+                    {
+                        "id": "model",
+                        "name": "Model",
+                        "category": "model",
+                        "type": "select",
+                        "currentValue": "gemini-3.1-pro",
+                        "options": [
+                            {"value": "gemini-4-neon", "name": "Gemini 4 Neon"},
+                            {"value": "gemini-3.1-pro", "name": "Gemini 3.1 Pro"},
+                        ],
+                    },
+                    {
+                        "id": "mode",
+                        "name": "Mode",
+                        "category": "mode",
+                        "type": "select",
+                        "currentValue": CURRENT_MODE,
+                        "options": [
+                            {"value": "default", "name": "Default"},
+                            {"value": "accept-edits", "name": "Accept edits"},
+                            {"value": "plan", "name": "Plan"},
+                        ],
+                    },
+                ]
+                session_update({"sessionUpdate": "current_mode_update", "currentModeId": CURRENT_MODE})
+                result(request_id, {"configOptions": agy_opts})
+                return
+        elif params.get("configId") == EFFORT_CONFIG_ID:
             CURRENT_EFFORT = params.get("value") or CURRENT_EFFORT
         else:
             CURRENT_MODEL = params.get("value") or CURRENT_MODEL
@@ -755,9 +1589,19 @@ def handle(message):
         options = full_options(model, CURRENT_EFFORT)
         session_update({"sessionUpdate": "config_option_update", "configOptions": options})
         result(request_id, {"configOptions": options})
+    elif method == "session/set_mode":
+        CURRENT_MODE = params.get("modeId") or CURRENT_MODE
+        session_update({"sessionUpdate": "current_mode_update", "currentModeId": CURRENT_MODE})
+        result(request_id, {})
     elif method == "session/set_model":
         result(request_id, {})
-    elif method == "session/load" or method == "session/resume":
+    elif method == "session/resume":
+        if SCENARIO == "agy-resume-suggests-load":
+            sid = params.get("sessionId") or "unknown"
+            error(request_id, f"Failed to read session {sid}; retry, or load it with session/load", -32603)
+        else:
+            result(request_id, {})
+    elif method == "session/load":
         result(request_id, {})
     elif method == "session/close":
         result(request_id, {})

@@ -60,7 +60,7 @@ bool stepCompleted(const QJsonObject &step)
     if (step.value(u"completed"_s).isBool()) {
         return step.value(u"completed"_s).toBool();
     }
-    const QString status = step.value(u"status"_s).toString().toLower().replace(u'-', u'_');
+    const QString status = step.value(u"status"_s).toString().toLower().replace(QChar(u'-'), QChar(u'_'));
     return status == u"completed"_s || status == u"done"_s;
 }
 
@@ -69,7 +69,7 @@ bool stepInProgress(const QJsonObject &step)
     if (step.value(u"inProgress"_s).isBool()) {
         return step.value(u"inProgress"_s).toBool();
     }
-    const QString status = step.value(u"status"_s).toString().toLower().replace(u'-', u'_');
+    const QString status = step.value(u"status"_s).toString().toLower().replace(QChar(u'-'), QChar(u'_'));
     return status == u"in_progress"_s || status == u"started"_s;
 }
 

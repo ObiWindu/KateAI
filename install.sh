@@ -105,6 +105,14 @@ if [[ "${MODE}" == "user" ]]; then
     echo "Installed: ${INSTALLED}"
     ls -l "${INSTALLED}"
 
+    if [[ -f "${BUILD_DIR}/bin/libpage4k.so" ]]; then
+        SHIM_DIR="${HOME}/.local/lib/kateai"
+        mkdir -p "${SHIM_DIR}"
+        chmod 700 "${SHIM_DIR}" 2>/dev/null || true
+        install -m 700 "${BUILD_DIR}/bin/libpage4k.so" "${SHIM_DIR}/libpage4k.so"
+        echo "Installed: ${SHIM_DIR}/libpage4k.so"
+    fi
+
     if [[ "${FAMILY}" == "macos" ]]; then
         copied=0
         while IFS= read -r kdir; do

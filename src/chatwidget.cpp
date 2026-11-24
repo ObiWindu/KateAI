@@ -16,6 +16,8 @@
 #include "settings.h"
 #include "toolcallwidget.h"
 #include "subtaskwidget.h"
+#include "subtaskdock.h"
+#include "inspectorpanel.h"
 #include "suggestionwidget.h"
 #include "questionwidget.h"
 #include "todowidget.h"
@@ -26,6 +28,7 @@
 #include "mcp.h"
 #include "modes.h"
 #include "types.h"
+#include "voiceinput.h"
 
 #include <KLocalizedString>
 
@@ -65,6 +68,7 @@
 #include <QTabWidget>
 #include <QTextDocument>
 #include <QJsonDocument>
+#include <QUrl>
 #include <QSet>
 #include <QTimer>
 #include <QtMath>
@@ -111,9 +115,40 @@ static KateAi::Suggestion suggestionFromRequest(const KateAi::PermissionRequest 
     const QJsonDocument argsDoc = QJsonDocument::fromJson(request.details.toUtf8());
     if (!argsDoc.isNull() && argsDoc.isObject()) {
         const QJsonObject args = argsDoc.object();
-        suggestion.text = args.value(u"suggestion"_s).toString();
-        suggestion.path = args.value(u"path"_s).toString();
-        suggestion.line = args.value(u"line"_s).toInt();
+        suggestion.text = KateAi::suggestionTextFromToolArguments(args);
+        suggestion.path = KateAi::firstStringToolArgument(
+            args, {u"path"_s, u"file_path"_s, u"filePath"_s, u"file"_s, u"target"_s, u"uri"_s});
+        if (suggestion.path.startsWith(u"file://"_s)) {
+            suggestion.path = QUrl(suggestion.path).toLocalFile();
+        }
+        // The model often sends numbers as strings ("5"); toInt() silently
+        // yields 0 for those and drops the anchor.
+        const QJsonValue lineValue = args.contains(u"line"_s)
+            ? args.value(u"line"_s)
+            : (args.contains(u"start_line"_s) ? args.value(u"start_line"_s) : args.value(u"startLine"_s));
+        if (lineValue.isDouble()) {
+            suggestion.line = lineValue.toInt();
+        } else if (lineValue.isString()) {
+            suggestion.line = lineValue.toString().trimmed().toInt();
+        } else {
+            suggestion.line = 0;
+        }
+    }
+    // ToolRunner fills path separately; prefer arguments, fall back to it.
+    if (suggestion.path.isEmpty() && !request.path.isEmpty()) {
+        suggestion.path = request.path;
+    }
+    // ACP agents can send the advice as plain text or only a title. Never let
+    // the branch above drop the one thing the card exists to show.
+    if (suggestion.text.trimmed().isEmpty() && !request.details.trimmed().isEmpty()
+        && !request.details.trimmed().startsWith(u'{')) {
+        suggestion.text = request.details.trimmed();
+    }
+    if (suggestion.text.trimmed().isEmpty()
+        && !request.summary.isEmpty()
+        && request.summary != request.toolName
+        && request.summary != request.originalToolName) {
+        suggestion.text = request.summary;
     }
     return suggestion;
 }
@@ -125,14 +160,23 @@ static KateAi::Suggestion suggestionFromRequest(const KateAi::PermissionRequest 
 // queue.
 bool isFileMutatingTool(const QString &toolName)
 {
+    const QString canonical = KateAi::canonicalToolName(toolName);
     // Native names plus the OpenCode ACP aliases (write, edit, patch), which
     // the edit tracker also learns about through mutatesFiles on live cards;
     // this list drives risk colouring and the working label, where the ACP
     // kind is not available.
-    return toolName == u"write_file"_s || toolName == u"edit_file"_s || toolName == u"multi_edit_file"_s
-        || toolName == u"multi_replace_file_content"_s
-        || toolName == u"fs/write_text_file"_s
-        || toolName == u"write"_s || toolName == u"edit"_s || toolName == u"patch"_s;
+    if (canonical == u"write_file"_s || canonical == u"edit_file"_s || canonical == u"multi_edit_file"_s
+        || canonical == u"apply_patch"_s) {
+        return true;
+    }
+    return toolName == u"multi_replace_file_content"_s
+        || toolName == u"fs/write_text_file"_s || toolName == u"fs/write_file"_s
+        || toolName == u"fs/append_file"_s || toolName == u"fs/edit_file"_s
+        || toolName == u"fs/multi_edit_file"_s || toolName == u"fs/str_replace_editor"_s
+        || toolName == u"fs/delete_file"_s || toolName == u"fs/remove_file"_s
+        || toolName == u"fs/move_file"_s || toolName == u"fs/rename_file"_s
+        || toolName == u"write"_s || toolName == u"edit"_s || toolName == u"str_replace"_s
+        || toolName == u"str_replace_editor"_s || toolName == u"apply_patch"_s || toolName == u"patch"_s;
 }
 
 // The welcome screen's suggestion chips share one style; kept in a function so
@@ -186,7 +230,10 @@ QString jsonArg(const QString &details, const QStringList &keys)
 // different one entirely.
 QString elideMiddle(QString text, int max)
 {
-    text = text.simplified().replace(u'\n', u' ', Qt::CaseInsensitive);
+    // QChar-wrapped: a bare u'\n' is char16_t, and Qt versions without a
+    // replace(char16_t, char16_t, ...) overload resolve the call ambiguously
+    // (seen on the Qt 6.8 in Ubuntu plucky; newer Qt accepts it directly).
+    text = text.simplified().replace(QChar(u'\n'), QChar(u' '), Qt::CaseInsensitive);
     text.replace(u"  "_s, u" "_s);
     if (max <= 4) {
         return text.left(qMax(0, max));
@@ -219,14 +266,16 @@ QString toolTargetLabel(const QString &toolName, const KateAi::PermissionRequest
     // ACP calls, which Kate does not get to name itself.
     QString path = request.path;
     if (path.isEmpty()) {
-        path = jsonArg(request.details, {u"path"_s, u"file_path"_s, u"filePath"_s, u"file"_s,
+        path = jsonArg(request.details, {u"path"_s, u"Path"_s, u"file_path"_s, u"filePath"_s, u"file"_s, u"File"_s,
+                                        u"TargetFile"_s, u"AbsolutePath"_s, u"DirectoryPath"_s,
+                                        u"SearchPath"_s, u"SearchDirectory"_s,
                                         u"dir_path"_s, u"dirPath"_s, u"directory"_s,
                                         u"root_path"_s, u"rootPath"_s});
     }
 
     const bool searches = toolName == u"grep"_s || toolName == u"glob"_s || toolName == u"web_search"_s
         || toolName == u"websearch"_s || toolName == u"query_project_graph"_s || toolName == u"search"_s;
-    QString pattern = jsonArg(request.details, {u"pattern"_s, u"query"_s, u"regex"_s, u"question"_s});
+    QString pattern = jsonArg(request.details, {u"pattern"_s, u"Pattern"_s, u"query"_s, u"Query"_s, u"regex"_s, u"question"_s});
     if (pattern.isEmpty()) {
         pattern = request.summary.trimmed();
     }
@@ -237,12 +286,12 @@ QString toolTargetLabel(const QString &toolName, const KateAi::PermissionRequest
         return i18n("for \u201C%1\u201D%2", pattern, scope);
     }
 
-    const QString command = jsonArg(request.details, {u"command"_s, u"cmd"_s, u"script"_s});
+    const QString command = jsonArg(request.details, {u"command"_s, u"CommandLine"_s, u"cmd"_s, u"script"_s});
     if (!command.isEmpty()) {
         return u" " % elideMiddle(command, 64);
     }
 
-    const QString url = jsonArg(request.details, {u"url"_s, u"link"_s});
+    const QString url = jsonArg(request.details, {u"url"_s, u"Url"_s, u"link"_s});
     if (!url.isEmpty()) {
         return u" " % elideMiddle(url, 64);
     }
@@ -284,7 +333,18 @@ QString workingLabelForTool(const QString &toolName, const KateAi::PermissionReq
         return i18n("Working") + target;
     }
 
-    if (toolName == u"question"_s) {
+    const QString canonical = KateAi::canonicalToolName(toolName);
+    if (canonical == u"todo_write"_s || canonical == u"todo_read"_s) {
+        return i18n("Updating the task list");
+    }
+    if (canonical == u"think"_s) {
+        return i18n("Thinking");
+    }
+    if (canonical == u"exit_plan_mode"_s) {
+        return i18n("Leaving plan mode");
+    }
+
+    if (canonical == u"question"_s) {
         return i18n("Waiting for your answer");
     }
 
@@ -313,6 +373,71 @@ QString diffPathFromOutput(const QString &output)
     }
     return fromOld;
 }
+
+// Stored tool results are text only; there is no ok/cancelled flag in the
+// transcript schema. These are the exact markers both the loop and the UI write
+// when a call never produced an answer, so a restored card can say "cancelled"
+// instead of painting it as a successful (green) result.
+bool restoredResultWasCancelled(const QString &output)
+{
+    const QString text = output.trimmed();
+    if (text.isEmpty()) {
+        return false;
+    }
+    const QString lower = text.toLower();
+    return lower.startsWith(u"the tool call was cancelled before it ran"_s)
+        || lower.startsWith(u"stopped before it finished"_s)
+        || lower.contains(u"cancelled before it finished"_s)
+        || lower.startsWith(u"cancelled: turn stopped"_s);
+}
+
+// ACP advertises slash commands as {name, description} objects, but older
+// agents and extensions use "command" for the name. Both the live notification
+// and the per-agent cache go through this one converter so they cannot drift.
+QList<KateAi::PromptCommand> promptCommandsFromJson(const QJsonArray &commands)
+{
+    QList<KateAi::PromptCommand> result;
+    for (const QJsonValue &value : commands) {
+        const QJsonObject command = value.toObject();
+        KateAi::PromptCommand promptCommand;
+        promptCommand.name = command.value(u"name"_s).toString();
+        if (promptCommand.name.isEmpty()) {
+            promptCommand.name = command.value(u"command"_s).toString();
+        }
+        promptCommand.name = promptCommand.name.trimmed();
+        promptCommand.description = command.value(u"description"_s).toString().simplified();
+        if (!promptCommand.name.isEmpty()) {
+            result.append(promptCommand);
+        }
+    }
+    return result;
+}
+
+// The commands the agent advertised the last time it ran. A fresh window has
+// no live session yet, so this is what lets "/" show the real list (with
+// descriptions) from the first keystroke instead of after the first turn.
+QList<KateAi::PromptCommand> cachedAcpCommands(const KateAi::Settings &settings, const QString &agentId)
+{
+    if (agentId.isEmpty()) {
+        return {};
+    }
+    const QJsonDocument doc = QJsonDocument::fromJson(settings.acpAgentCommands.toUtf8());
+    if (!doc.isObject()) {
+        return {};
+    }
+    return promptCommandsFromJson(doc.object().value(agentId).toArray());
+}
+
+// Returns the command cache with one agent's list replaced. The caller compares
+// the result with the stored value before persisting, so an agent that repeats
+// the same list on every turn does not churn the settings file.
+QString withCachedAcpCommands(const QString &cache, const QString &agentId, const QJsonArray &commands)
+{
+    QJsonDocument doc = QJsonDocument::fromJson(cache.toUtf8());
+    QJsonObject all = doc.isObject() ? doc.object() : QJsonObject();
+    all.insert(agentId, commands);
+    return QString::fromUtf8(QJsonDocument(all).toJson(QJsonDocument::Compact));
+}
 } // namespace
 
 namespace KateAi
@@ -328,7 +453,10 @@ ChatWidget::ChatWidget(QWidget *parent)
 {
     m_sessionSaveTimer = new QTimer(this);
     m_sessionSaveTimer->setSingleShot(true);
-    m_sessionSaveTimer->setInterval(500);
+    // A long turn can finish tools many times per second. Serializing the
+    // whole transcript on every one of those saves is the largest avoidable
+    // disk cost in a long session; 1.5 s still persists work continuously.
+    m_sessionSaveTimer->setInterval(1500);
     connect(m_sessionSaveTimer, &QTimer::timeout, this, &ChatWidget::saveCurrentConversation);
 
     // A stable name the panel stylesheet can select: a class selector like
@@ -589,6 +717,10 @@ ChatWidget::ChatWidget(QWidget *parent)
     m_intentDockLayout->setContentsMargins(10, 6, 10, 0);
     m_intentDockLayout->setSpacing(6);
     m_intentDock->hide();
+    // The sub-agent slot: tabs over the one card on show. It is only put into
+    // the dock's layout when the first sub-agent starts, so an approval row
+    // keeps its place in the strip while no agent is running.
+    m_subtaskDock = new SubtaskDock(m_intentDock);
     root->addWidget(m_intentDock);
 
     // The todo dock: the running plan, pinned to the bottom of the chat so it
@@ -639,6 +771,11 @@ ChatWidget::ChatWidget(QWidget *parent)
     composerCardLayout->setSpacing(2);
 
     m_prompt = new PromptEdit(composerCard);
+    // The slash-command list is an overlay of the whole panel: it has to cover
+    // the transcript above the composer, not just the input card. Parenting it
+    // to the chat widget (rather than to the top-level window) also keeps it in
+    // front of the panel's own children once raised.
+    m_prompt->setCommandPopupHost(this);
     composerCardLayout->addWidget(m_prompt);
 
     auto *bottomRow = new QHBoxLayout;
@@ -658,11 +795,6 @@ ChatWidget::ChatWidget(QWidget *parent)
     bottomRow->addWidget(m_thinking);
 
     bottomRow->addStretch();
-
-    m_tokenCount = new QLabel(composerCard);
-    m_tokenCount->setObjectName(u"tokenCount"_s);
-    m_tokenCount->hide();
-    bottomRow->addWidget(m_tokenCount);
 
     // Thinking mode toggle button
     m_thinking->setParent(composerCard);
@@ -685,16 +817,119 @@ ChatWidget::ChatWidget(QWidget *parent)
     // The status strip is now a live widget: keyboard hint while idle, elapsed
     // time and current activity while a turn runs.
     m_turnStatus = new TurnStatus(composerContainer);
-    m_turnStatus->setIdleText(i18n("Enter to send · Shift+Enter for a new line"));
+    m_turnStatus->setIdleText(i18n("Enter to send · Shift+Enter for a new line · Ctrl+Alt+V for voice"));
     m_turnStatus->setMinimumHeight(18);
-    composerLayout->addWidget(m_turnStatus);
+
+    // The context readout shares the strip below the input card, pinned to its
+    // right edge. It used to sit in the card's control row, which made it read
+    // as part of the composer buttons and squeezed the model selector.
+    auto *statusRow = new QHBoxLayout;
+    statusRow->setContentsMargins(0, 0, 0, 0);
+    statusRow->setSpacing(8);
+    statusRow->addWidget(m_turnStatus, 1);
+
+    m_tokenCount = new QLabel(composerContainer);
+    m_tokenCount->setObjectName(u"tokenCount"_s);
+    m_tokenCount->hide();
+    statusRow->addWidget(m_tokenCount, 0, Qt::AlignRight | Qt::AlignVCenter);
+
+    composerLayout->addLayout(statusRow);
     connect(m_turnStatus, &TurnStatus::scrollToLatestRequested, this, &ChatWidget::forceScrollToBottom);
 
     root->addWidget(composerContainer);
 
+    // Voice capture, noise removal, and transcription pipeline
+    m_voiceInput = new VoiceInput(this);
+    m_micRefreshTimer = new QTimer(this);
+    m_micRefreshTimer->setInterval(8000);
+    connect(m_micRefreshTimer, &QTimer::timeout, this, [this]() {
+        if (m_voiceInput && !m_voiceInput->isActive()) {
+            m_voiceInput->refreshMicrophoneAvailability();
+        }
+    });
+    m_micRefreshTimer->start();
+
+    connect(m_voiceInput, &VoiceInput::microphoneAvailabilityChanged, this, [this](bool, const QString &) {
+        updateVoicePromptUi();
+    });
+    connect(m_voiceInput, &VoiceInput::stateChanged, this, [this](VoiceInput::State state) {
+        updateVoicePromptUi();
+        if (!m_turnStatus) {
+            return;
+        }
+        switch (state) {
+        case VoiceInput::State::Recording:
+            m_turnStatus->flash(i18n("Listening (0:00)… click mic or press Ctrl+Alt+V to send, Esc to cancel"), false);
+            break;
+        case VoiceInput::State::Denoising:
+            m_turnStatus->flash(i18n("Removing background noise…"), false);
+            break;
+        case VoiceInput::State::Transcribing:
+            m_turnStatus->flash(i18n("Transcribing voice prompt…"), false);
+            break;
+        case VoiceInput::State::Idle:
+            if (!m_agent.isBusy()) {
+                m_turnStatus->reset();
+                m_turnStatus->setIdleText(i18n("Enter to send · Shift+Enter for a new line · Ctrl+Alt+V for voice"));
+            }
+            break;
+        }
+    });
+    connect(m_voiceInput, &VoiceInput::recordingTick, this, [this](int elapsedMs) {
+        const int totalSec = std::max(0, elapsedMs / 1000);
+        const QString dur = QStringLiteral("%1:%2").arg(totalSec / 60).arg(totalSec % 60, 2, 10, QLatin1Char('0'));
+        if (m_turnStatus) {
+            m_turnStatus->flash(
+                i18n("Listening (%1)… click mic or press Ctrl+Alt+V to send, Esc to cancel", dur), false);
+        }
+        if (m_prompt) {
+            m_prompt->setVoiceVisualState(
+                PromptEdit::VoiceVisualState::Recording,
+                i18n("Recording (%1) — click or press Ctrl+Alt+V to stop and send, Esc to cancel", dur));
+        }
+    });
+    connect(m_voiceInput, &VoiceInput::transcribed, this, [this](const QString &text) {
+        const QString clean = text.trimmed();
+        if (clean.isEmpty()) {
+            showInfoMessage(i18n("No speech was detected in the recording."), false);
+            return;
+        }
+        if (m_prompt) {
+            const QString existing = m_prompt->toPlainText().trimmed();
+            m_prompt->setPlainText(existing.isEmpty() ? clean : (existing + u" "_s + clean));
+            m_prompt->moveCursor(QTextCursor::End);
+        }
+        updateSendButtonState();
+        if (m_settings.voiceAutoSend && !m_agent.isBusy() && !m_approvalPending()) {
+            submit();
+        } else {
+            if (m_prompt) {
+                m_prompt->setFocus();
+            }
+            if (m_turnStatus && !m_agent.isBusy()) {
+                m_turnStatus->flash(i18n("Voice prompt transcribed — press Enter to send"), false);
+            }
+        }
+    });
+    connect(m_voiceInput, &VoiceInput::errorOccurred, this, [this](const QString &message) {
+        showInfoMessage(message, true);
+        updateVoicePromptUi();
+    });
+    connect(m_voiceInput, &VoiceInput::cancelled, this, [this]() {
+        updateVoicePromptUi();
+        if (m_turnStatus && !m_agent.isBusy()) {
+            m_turnStatus->flash(i18n("Voice prompt cancelled"), false);
+        }
+    });
+
     // Signal connections
     connect(m_prompt, &PromptEdit::submitRequested, this, &ChatWidget::submit);
+    connect(m_prompt, &PromptEdit::voiceRequested, this, &ChatWidget::toggleVoicePrompt);
     connect(m_prompt, &PromptEdit::escapePressed, this, [this]() {
+        if (m_voiceInput && m_voiceInput->isActive()) {
+            m_voiceInput->cancel();
+            return;
+        }
         if (m_agent.isBusy()) {
             m_permissionBar->hideBar();
             m_agent.abort();
@@ -760,9 +995,18 @@ ChatWidget::ChatWidget(QWidget *parent)
     connect(nextModelShortcut, &QShortcut::activated, this, [this]() {
         cycleModel(1);
     });
+
+    // Panel-scoped voice prompt shortcut (window-wide Ctrl+Alt+V is registered
+    // on Kate's KActionCollection so both shortcuts remain unambiguous).
+    auto *voiceShortcut = new QShortcut(QKeySequence(Qt::CTRL | Qt::ALT | Qt::Key_M), this);
+    voiceShortcut->setContext(Qt::WidgetWithChildrenShortcut);
+    voiceShortcut->setObjectName(u"shortcutVoicePrompt"_s);
+    connect(voiceShortcut, &QShortcut::activated, this, &ChatWidget::toggleVoicePrompt);
     connect(m_configure, &QPushButton::clicked, this, &ChatWidget::showSettingsMenu);
     connect(m_modelSelector, &QPushButton::clicked, this, &ChatWidget::showModelMenu);
-    connect(m_permissionBar, &PermissionBar::decided, &m_agent, &AgentLoop::resolvePermission);
+    connect(m_permissionBar, &PermissionBar::decided, this, [this](PermissionDecision decision) {
+        m_agent.resolvePermission(decision);
+    });
     m_telegram.setAgentLoop(&m_agent);
 
     connect(m_provider, &QComboBox::currentIndexChanged, this, [this]() {
@@ -860,9 +1104,15 @@ ChatWidget::ChatWidget(QWidget *parent)
         }
         if (m_thinkingBrowser) {
             appendThinkingDelta(delta);
-            scrollToBottom();
+            if (!m_answerStarted) {
+                scrollToBottom();
+            }
         }
-        setThinkingIndicator(true);
+        // In the answer phase late reasoning is buffered for the transcript but
+        // must not restart the thinking pill next to the streaming answer.
+        if (!m_answerStarted) {
+            setThinkingIndicator(true);
+        }
     });
     connect(&m_agent, &AgentLoop::thinkingFinished, this, [this](const QString &text) {
         // Stop thinking indicator BEFORE adding thinking block so that
@@ -871,21 +1121,50 @@ ChatWidget::ChatWidget(QWidget *parent)
         setThinkingIndicator(false);
         addThinkingBlock(text);
     });
+    connect(&m_agent, &AgentLoop::orchestrationPhaseChanged, this,
+            [this](const QString &role, const QString &provider, const QString &model,
+                   const QString &reason) {
+                if (role.isEmpty()) {
+                    return;
+                }
+                QString label = role.left(1).toUpper() + role.mid(1);
+                QString text = i18n("%1 · %2 / %3", label, provider, model);
+                if (!reason.trimmed().isEmpty()) {
+                    text += u" — "_s + reason;
+                }
+                addActivityMessage(text);
+            });
     connect(&m_agent, &AgentLoop::planUpdated, this, &ChatWidget::showTodoList);
     connect(&m_agent, &AgentLoop::planUpdated, this, [this](const QJsonArray &) {
         scheduleSessionSave();
     });
+    // The agent finished planning and called exit_plan_mode: leave plan mode
+    // so the next turn may edit. Outside plan mode this is a no-op.
+    connect(&m_agent, &AgentLoop::exitPlanModeRequested, this, [this]() {
+        if (m_settings.planMode) {
+            togglePlanMode();
+        }
+    });
     connect(&m_agent, &AgentLoop::assistantDelta, this, [this](const QString &delta) {
         scheduleSessionSave();
         // Reasoning stays open for the whole turn. Collapsing it when the answer
-        // started hid the only record of what the agent was doing.
+        // started hid the only record of what the agent was doing. It is
+        // flushed (not just stopped) first, so everything the agent reasoned
+        // before answering is on screen before the answer starts arriving.
+        m_answerStarted = true;
         flushThinkingPacer();
         setThinkingIndicator(false);
-        setStreaming(m_streamText + delta);
+        // Append in place. `m_streamText + delta` allocated a new copy of the
+        // whole answer for every token, which made a long answer quadratic in
+        // both time and peak memory. QString append is amortised constant.
+        m_streamText += delta;
+        setStreaming(m_streamText);
     });
     connect(&m_agent, &AgentLoop::assistantReset, this, [this]() {
         // The streamed text belonged to a failed attempt and is replaced by the
-        // retry. Drop it, otherwise the transcript shows both.
+        // retry. Drop it, otherwise the transcript shows both. The retry may
+        // reason again, so it starts back in the reasoning phase.
+        m_answerStarted = false;
         m_streamText.clear();
         if (m_activeAssistantBrowser) {
             m_activeAssistantBrowser->setDocument(makeMarkdownDocument(closedMarkdown(m_streamText), ChatTheme::messageCss()));
@@ -920,14 +1199,45 @@ ChatWidget::ChatWidget(QWidget *parent)
         // it gets a dedicated card instead of the flat tool-call card. The card
         // carries a Cancel button, which makes it something the user may need
         // to act on, so it lives in the intent dock above the input rather than
-        // down in the transcript.
-        if (request.toolName == subtaskToolName()) {
+        // down in the transcript. Only Kate's own native delegation has a child
+        // loop behind it; an ACP agent's similarly named "task" tool runs inside
+        // the agent and would otherwise sit in a forever-empty sub-agent card.
+        if (request.toolName == subtaskToolName() && !usesAcpNative(m_settings)) {
             auto *subtaskWidget = new SubtaskWidget(request.toolCallId, m_intentDock);
             connect(subtaskWidget, &SubtaskWidget::cancelRequested, this, [this](const QString &taskId) {
                 m_agent.cancelSubtask(taskId);
             });
+            wireSubtaskWorktreeActions(subtaskWidget);
             m_subtaskWidgets.insert(request.toolCallId, subtaskWidget);
             m_subtaskOrder.append(subtaskWidget);
+            // Sub-agent cards are full transcript widgets; keep the recent
+            // ones after a very long orchestration session.
+            constexpr int kMaxSubtaskCards = 40;
+            while (m_subtaskOrder.size() > kMaxSubtaskCards) {
+                int victimIndex = -1;
+                for (int i = 0; i < m_subtaskOrder.size(); ++i) {
+                    SubtaskWidget *candidate = m_subtaskOrder.at(i);
+                    if (candidate && !candidate->isRunning()) {
+                        victimIndex = i;
+                        break;
+                    }
+                }
+                if (victimIndex < 0) {
+                    break;
+                }
+                SubtaskWidget *victim = m_subtaskOrder.takeAt(victimIndex);
+                m_subtaskWidgets.remove(victim->taskId());
+                m_subtaskAnchors.remove(victim->taskId());
+                if (m_subtaskDock) {
+                    m_subtaskDock->removeCard(victim);
+                }
+                if (m_transcriptLayout) {
+                    m_transcriptLayout->removeWidget(victim);
+                }
+                victim->hide();
+                victim->setParent(nullptr);
+                victim->deleteLater();
+            }
             // Where the sub-agent's card belongs in the transcript once it
             // retires: right below whatever was last when it started.
             m_subtaskAnchors.insert(request.toolCallId, lastTranscriptContentWidget());
@@ -941,7 +1251,13 @@ ChatWidget::ChatWidget(QWidget *parent)
         // it is posted rather than only once the call has reported back; the
         // parsed arguments are stashed as well, so a failure can be reported
         // against this same card instead of a second one appearing.
-        if (request.toolName == u"suggest"_s) {
+        //
+        // The name is compared canonically: an agent may hand its advice over
+        // as suggestion, propose or advice, and the restored card already
+        // matches on the canonical name. A live call that answered to a
+        // different name got the generic card and a JSON blob instead of the
+        // advice it was carrying.
+        if (canonicalToolName(request.toolName) == u"suggest"_s) {
             const Suggestion suggestion = suggestionFromRequest(request);
             m_pendingSuggestions.insert(request.toolCallId, suggestion);
             if (!suggestion.text.isEmpty()) {
@@ -973,9 +1289,25 @@ ChatWidget::ChatWidget(QWidget *parent)
         toolWidget->setRunning();
         // What the call is working on, up in the body while it runs. A question
         // is the one tool whose payload is prose rather than arguments, so its
-        // card carries the question instead of a JSON blob of it.
-        if (request.toolName == u"question"_s) {
-            toolWidget->setRunningInput(request.questionText.isEmpty() ? request.summary : request.questionText);
+        // card carries the question instead of a JSON blob of it. The tool name
+        // is compared canonically: an agent may ask under ask_user & friends.
+        if (canonicalToolName(request.toolName) == u"question"_s) {
+            QString asked = request.questionText;
+            if (asked.trimmed().isEmpty()) {
+                const QJsonDocument doc = QJsonDocument::fromJson(request.details.toUtf8());
+                if (doc.isObject()) {
+                    asked = questionTextFromToolArguments(doc.object());
+                }
+            }
+            if (asked.trimmed().isEmpty() && request.summary != request.toolName
+                && request.summary != request.originalToolName) {
+                asked = request.summary;
+            }
+            // Kept for the finished card: setFinished clears the running input,
+            // and the card would otherwise show the answer without the question
+            // that produced it.
+            m_questionTexts.insert(request.toolCallId, asked);
+            toolWidget->setRunningInput(asked);
         } else {
             toolWidget->setRunningInput(request.details);
         }
@@ -995,20 +1327,40 @@ ChatWidget::ChatWidget(QWidget *parent)
         // recognised by the mutatesFiles flag rather than by name.
         const bool editTracking = m_settings.permissionMode == PermissionMode::AcceptEdits
             || usesAcpNative(m_settings);
-        if (editTracking && (isFileMutatingTool(request.toolName) || request.mutatesFiles)) {
+        if (editTracking && (isFileMutatingTool(request.toolName) || request.mutatesFiles
+                             || !request.describeDiff.isEmpty())) {
+            // Primary file
+            const QString workspace = m_agent.workspace();
+            const auto trackerPath = [&workspace](const QString &raw) {
+                if (raw.isEmpty() || workspace.isEmpty() || QFileInfo(raw).isAbsolute()) {
+                    return raw;
+                }
+                return QDir::cleanPath(QDir(workspace).absoluteFilePath(raw));
+            };
             PendingEdit pending;
             pending.toolName = request.toolName;
-            // The tracker works on the file the tool actually writes to. The
-            // path in the request is what the model asked for, which can be
-            // relative; resolving it against the process directory instead of
-            // the workspace would read, restore and delete the wrong file.
-            pending.path = request.resolvedPath.isEmpty() ? request.path : request.resolvedPath;
+            pending.path = trackerPath(request.resolvedPath.isEmpty() ? request.path : request.resolvedPath);
             pending.diff = request.describeDiff;
-            // existed == false means write_file just created the file, which is
-            // the one case where rejecting has to delete rather than restore.
             pending.existed = m_agent.documentBridge()
                 && m_agent.documentBridge()->readDocument(pending.path, &pending.oldContent);
             m_pendingToolCalls.insert(request.toolCallId, pending);
+
+            // Additional files (multi-file ACP edits / apply_patch). The
+            // protocol paths are often workspace-relative; the tracker and
+            // document bridge need absolute paths or they would resolve
+            // against the process CWD and snapshot/revert the wrong file.
+            for (int i = 0; i < request.additionalPaths.size(); ++i) {
+                const QString ap = trackerPath(request.additionalPaths.at(i));
+                if (ap.isEmpty() || ap == pending.path) continue;
+                PendingEdit addPending;
+                addPending.toolName = request.toolName;
+                addPending.path = ap;
+                if (i < request.additionalDiffs.size()) addPending.diff = request.additionalDiffs.at(i);
+                addPending.existed = m_agent.documentBridge()
+                    && m_agent.documentBridge()->readDocument(addPending.path, &addPending.oldContent);
+                // Store with a derived id
+                m_pendingToolCalls.insert(request.toolCallId + u"_add"_s + QString::number(i), addPending);
+            }
         }
 
         scrollToBottom();
@@ -1049,6 +1401,19 @@ ChatWidget::ChatWidget(QWidget *parent)
             if (!result.rawOutput.isEmpty()) {
                 displayResult.output = result.rawOutput;
             }
+            // A question's payload is prose, not arguments: setFinished clears
+            // the running input, so without this the finished card shows only
+            // the answer and the question that prompted it is lost. The
+            // restored card keeps it (see restoreHistoricalTool); a live card
+            // has to read the same.
+            const QString asked = m_questionTexts.take(result.toolCallId);
+            if (!asked.trimmed().isEmpty()) {
+                if (displayResult.output.trimmed().isEmpty()) {
+                    displayResult.output = asked;
+                } else if (!displayResult.output.contains(asked.left(40))) {
+                    displayResult.output = asked + u"\n\n— Answer: "_s + displayResult.output;
+                }
+            }
             widget->setFinished(displayResult);
         }
         ++m_completedToolCount;
@@ -1060,8 +1425,17 @@ ChatWidget::ChatWidget(QWidget *parent)
         // "pending" row for a failed write invited the user to approve a
         // change that never landed.
         if (m_settings.permissionMode == PermissionMode::AcceptEdits || usesAcpNative(m_settings)) {
-            auto it = m_pendingToolCalls.find(result.toolCallId);
-            if (it != m_pendingToolCalls.end()) {
+            // Process primary + any additional pending edits for this tool call
+            QStringList keysToProcess;
+            keysToProcess.append(result.toolCallId);
+            for (auto kit = m_pendingToolCalls.begin(); kit != m_pendingToolCalls.end(); ++kit) {
+                if (kit.key().startsWith(result.toolCallId + u"_add"_s)) {
+                    keysToProcess.append(kit.key());
+                }
+            }
+            for (const QString &key : keysToProcess) {
+                auto it = m_pendingToolCalls.find(key);
+                if (it == m_pendingToolCalls.end()) continue;
                 const PendingEdit pending = it.value();
                 if (result.ok) {
                     QString newContent;
@@ -1070,9 +1444,6 @@ ChatWidget::ChatWidget(QWidget *parent)
                     }
                     m_editTracker->addEdit(pending.path, pending.toolName, pending.diff,
                                            pending.oldContent, newContent, !pending.existed);
-                    // The view turns this into an in-editor banner on the
-                    // open document, so the change is visible where the file
-                    // lives, not only inside the chat panel.
                     Q_EMIT agentEditedFile(pending.path);
                 }
                 m_pendingToolCalls.erase(it);
@@ -1094,67 +1465,118 @@ ChatWidget::ChatWidget(QWidget *parent)
         scrollToBottom();
     });
 
+    connect(&m_agent, &AgentLoop::toolDetailsChanged, this, [this](const PermissionRequest &request) {
+        // A running ACP tool reported its diff or path after it started. The
+        // card shows it now, and the review entry catches up: a call announced
+        // without a path/diff cannot be tracked until the update supplies them.
+        if (auto *widget = m_toolCallWidgets.value(request.toolCallId)) {
+            if (!request.describeDiff.isEmpty()) {
+                widget->setDescribeDiff(request.describeDiff);
+            }
+            if (!request.path.isEmpty()) {
+                widget->setFilePath(request.path);
+            }
+        }
+
+        const QString workspace = m_agent.workspace();
+        const auto trackerPath = [&workspace](const QString &raw) {
+            if (raw.isEmpty() || workspace.isEmpty() || QFileInfo(raw).isAbsolute()) {
+                return raw;
+            }
+            return QDir::cleanPath(QDir(workspace).absoluteFilePath(raw));
+        };
+
+        auto pending = m_pendingToolCalls.find(request.toolCallId);
+        const bool editTracking = m_settings.permissionMode == PermissionMode::AcceptEdits
+            || usesAcpNative(m_settings);
+        if (pending == m_pendingToolCalls.end() && editTracking && !request.path.isEmpty()
+            && (request.mutatesFiles || !request.describeDiff.isEmpty())) {
+            PendingEdit created;
+            created.toolName = request.toolName;
+            created.path = trackerPath(request.resolvedPath.isEmpty() ? request.path : request.resolvedPath);
+            created.diff = request.describeDiff;
+            created.existed = m_agent.documentBridge()
+                && m_agent.documentBridge()->readDocument(created.path, &created.oldContent);
+            m_pendingToolCalls.insert(request.toolCallId, created);
+            pending = m_pendingToolCalls.find(request.toolCallId);
+        }
+        if (pending != m_pendingToolCalls.end()) {
+            if (pending->path.isEmpty() && !request.path.isEmpty()) {
+                pending->path = trackerPath(request.resolvedPath.isEmpty() ? request.path : request.resolvedPath);
+                pending->existed = m_agent.documentBridge()
+                    && m_agent.documentBridge()->readDocument(pending->path, &pending->oldContent);
+            }
+            if (pending->diff.isEmpty()) {
+                pending->diff = request.describeDiff;
+            }
+        }
+
+        if (editTracking) {
+            const QString primaryPath = pending != m_pendingToolCalls.end()
+                ? pending->path
+                : trackerPath(request.resolvedPath.isEmpty() ? request.path : request.resolvedPath);
+            for (int i = 0; i < request.additionalPaths.size(); ++i) {
+                const QString path = trackerPath(request.additionalPaths.at(i));
+                if (path.isEmpty() || path == primaryPath) {
+                    continue;
+                }
+                const QString key = request.toolCallId + u"_add"_s + QString::number(i);
+                auto extra = m_pendingToolCalls.find(key);
+                if (extra == m_pendingToolCalls.end()) {
+                    PendingEdit addPending;
+                    addPending.toolName = request.toolName;
+                    addPending.path = path;
+                    addPending.existed = m_agent.documentBridge()
+                        && m_agent.documentBridge()->readDocument(path, &addPending.oldContent);
+                    if (i < request.additionalDiffs.size()) {
+                        addPending.diff = request.additionalDiffs.at(i);
+                    }
+                    m_pendingToolCalls.insert(key, addPending);
+                } else if (extra->diff.isEmpty() && i < request.additionalDiffs.size()) {
+                    extra->diff = request.additionalDiffs.at(i);
+                }
+            }
+        }
+    });
+    connect(&m_agent, &AgentLoop::noticeRaised, this, [this](const QString &text) {
+        showInfoMessage(text, false);
+    });
+
     // Approval now happens on the card that triggered it. permissionNeeded fires
     // before toolStarted, so the card is created here and later reused by the
-    // toolStarted handler instead of a second card appearing.
+    // toolStarted handler instead of a second card appearing. Concurrent
+    // sub-agents can ask at the same time; only one strip fits in the dock, so
+    // the rest wait instead of cancelling the request already on screen.
     connect(&m_agent, &AgentLoop::permissionNeeded, this, [this](const PermissionRequest &request) {
-        ToolCallWidget *widget = m_toolCallWidgets.value(request.toolCallId);
-        if (!widget) {
-            widget = new ToolCallWidget(request.toolCallId, m_transcriptContainer);
-            widget->setToolInfo(request.toolName, request.summary, request.risk);
-            widget->setDescribeDiff(request.describeDiff);
-            widget->setFilePath(request.path);
-            widget->setDurationVisible(true);
-            connect(widget, &ToolCallWidget::expandedChanged, this, [this, widget](bool) {
-                pinWidgetInViewport(widget);
-                QTimer::singleShot(240, this, [thisWeak = QPointer<ChatWidget>(this)]() {
-                    if (thisWeak) {
-                        thisWeak->m_pinnedViewportWidget = nullptr;
-                    }
-                });
-            });
-            connect(widget, &ToolCallWidget::openFileRequested, this, [this](const QString &path, int line){ Q_EMIT openFileAtLineRequested(path, line); });
-            m_toolCallWidgets.insert(request.toolCallId, widget);
-            m_toolCallOrder.append(widget);
-            appendTranscriptWidget(widget);
-            applyTranscriptCollapse();
-        }
-        widget->showApproval();
-        // Name the target in the docked strip. The card (and its diff) can be
-        // far up the transcript, so the buttons alone do not say what they are
-        // allowing.
-        {
-            const QString label = ChatTheme::toolLabel(request.toolName);
-            const QString subject = request.path.isEmpty() ? label
-                                                           : label + u"  ·  "_s + request.path;
-            widget->setApprovalSubject(subject);
-        }
-        // Lift the Allow / Deny strip out of the card and into the dock, so the
-        // decision is always on screen next to the input. The card stays
-        // expanded underneath, so the diff being judged is still one scroll away.
-        if (QWidget *approvalRow = widget->approvalRow()) {
-            moveToIntentDock(approvalRow);
-        }
-        connect(widget, &ToolCallWidget::approvalChosen, this,
-                [this, guard = QPointer<ToolCallWidget>(widget)](PermissionDecision decision) {
-                    if (guard) {
-                        guard->setApprovalResolved(decision);
-                    }
-                    updateIntentDockVisibility();
-                    m_agent.resolvePermission(decision);
-                },
-                Qt::SingleShotConnection);
-        m_turnStatus->setActivity(i18n("Waiting for approval"));
-        m_prompt->setEnabled(false);
-        updateSendButtonState();
-        scrollToBottom();
+        enqueuePermissionRequest(request);
+    });
+    connect(&m_agent, &AgentLoop::permissionCancelled, this, [this](const QString &toolCallId) {
+        retirePermissionRequest(toolCallId);
     });
 
     connect(&m_agent, &AgentLoop::statusChanged, this, [this](const QString &status) {
-        m_turnStatus->setIdleText(i18n("Enter to send · Shift+Enter for a new line"));
+        m_turnStatus->setIdleText(i18n("Enter to send · Shift+Enter for a new line · Ctrl+Alt+V for voice"));
         m_prompt->setEnabled(!m_approvalPending());
         updateSendButtonState();
         Q_UNUSED(status)
+    });
+
+    // Drive the status strip from the stable turn vocabulary. Tool/ACP signals
+    // still provide the specific activity text; these are the phases where no
+    // other signal has described what the turn is waiting on.
+    connect(&m_agent, &AgentLoop::turnStateChanged, this, [this](const QString &turnId, const QString &stateId) {
+        if (turnId != m_agent.turnId()) {
+            return; // a late event from a turn the user already left
+        }
+        using TurnState = AgentLoop::TurnState;
+        if (stateId == AgentLoop::turnStateId(TurnState::Preparing)) {
+            m_turnStatus->setActivity(i18n("Starting…"));
+        } else if (stateId == AgentLoop::turnStateId(TurnState::AwaitingModel)) {
+            m_turnStatus->setActivity(i18n("Waiting for the model"));
+        } else if (stateId == AgentLoop::turnStateId(TurnState::Cancelling)) {
+            m_turnStatus->setActivity(i18n("Stopping…"));
+        }
+        // Terminal states settle the strip through turnFinished below.
     });
 
     // The question tool stops the turn until the user answers, so its card goes
@@ -1163,6 +1585,28 @@ ChatWidget::ChatWidget(QWidget *parent)
     connect(&m_agent, &AgentLoop::questionAsked, this, [this](const PermissionRequest &request) {
         showQuestionCard(request);
     });
+    connect(&m_agent, &AgentLoop::subtaskQuestionAsked, this,
+            [this](const QString &taskId, const PermissionRequest &request) {
+                m_subtaskQuestionTaskIds.insert(request.toolCallId, taskId);
+                showQuestionCard(request);
+            });
+    connect(&m_agent, &AgentLoop::subtaskQuestionCancelled, this,
+            [this](const QString &taskId, const QString &toolCallId) {
+                for (auto it = m_subtaskQuestionTaskIds.begin(); it != m_subtaskQuestionTaskIds.end();) {
+                    if (it.value() == taskId && (toolCallId.isEmpty() || it.key() == toolCallId)) {
+                        removeQuestionCard(it.key());
+                        it = m_subtaskQuestionTaskIds.erase(it);
+                    } else {
+                        ++it;
+                    }
+                }
+            });
+    // The parked RPC was closed internally (a newer question, a permission
+    // request, or a stop). Retire the old card so it cannot answer the next RPC.
+    connect(m_agent.acpClient(), &AcpClient::questionCancelled, this, [this](const QString &toolCallId) {
+        removeQuestionCard(toolCallId);
+    });
+    connect(&m_agent, &AgentLoop::questionCancelled, this, &ChatWidget::removeQuestionCard);
 
     // Live tool output. Every chunk is forwarded to the card, so a long command
     // reads as it runs; a chatty one is coalesced onto a timer, because
@@ -1182,7 +1626,12 @@ ChatWidget::ChatWidget(QWidget *parent)
             m_progressTimer->setInterval(50);
             connect(m_progressTimer, &QTimer::timeout, this, &ChatWidget::flushToolProgress);
         }
+        // Large streamed outputs are expensive to re-HTML on every tick.
+        // Only change the interval while the timer is stopped: setInterval()
+        // on a running timer restarts it, which would starve a steady stream
+        // exactly like the old restart-on-every-chunk bug.
         if (!m_progressTimer->isActive()) {
+            m_progressTimer->setInterval(partial.size() > 20000 ? 150 : 50);
             flushToolProgress();
             m_progressTimer->start();
         }
@@ -1207,6 +1656,33 @@ ChatWidget::ChatWidget(QWidget *parent)
         }
         showInfoMessage(i18n("Error: %1", error), true);
         updateSendButtonState();
+    });
+
+    // Slash commands advertised by the live ACP agent. They are offered as an
+    // in-input hint: typing "/" as the first character opens a filtered list
+    // above the cursor, with each command's description.
+    connect(m_agent.acpClient(), &AcpClient::availableCommandsChanged, this, [this](const QJsonArray &commands) {
+        const QList<PromptCommand> advertised = promptCommandsFromJson(commands);
+        // A stop or a session reset clears the live list; fall back to the
+        // agent's cache so "/" keeps working while the next session starts.
+        m_prompt->setSlashCommands(advertised.isEmpty() && usesAcpNative(m_settings)
+                                       ? cachedAcpCommands(m_settings, m_settings.acpAgentId)
+                                       : advertised);
+        if (usesAcpNative(m_settings)) {
+            m_acpCommandsAgentId = m_settings.acpAgentId;
+        }
+        if (advertised.isEmpty() || !usesAcpNative(m_settings) || m_settings.acpAgentId.isEmpty()) {
+            return;
+        }
+        // Remember the list for the next window. Commands belong to the agent,
+        // not to one conversation, so the key is the agent id.
+        const QJsonDocument doc = QJsonDocument::fromJson(m_settings.acpAgentCommands.toUtf8());
+        const QJsonObject all = doc.isObject() ? doc.object() : QJsonObject();
+        if (all.value(m_settings.acpAgentId).toArray() == commands) {
+            return;
+        }
+        m_settings.acpAgentCommands = withCachedAcpCommands(m_settings.acpAgentCommands, m_settings.acpAgentId, commands);
+        Q_EMIT settingsChanged(m_settings);
     });
 
     // Retry status from LlmClient - show in info bar with bright brown/orange
@@ -1259,8 +1735,22 @@ ChatWidget::ChatWidget(QWidget *parent)
             }
         }
         // A turn that ended with a question still on screen (abort, budget stop)
-        // must not leave it docked: nothing can answer it now.
-        clearQuestionCards();
+        // must not leave it docked: nothing can answer it now. The exception is
+        // an agent-side ACP question, whose answer starts a fresh turn.
+        clearQuestionCards(m_agent.pendingAcpToolQuestionId());
+        // A queued approval belonged to a turn that has ended; there is no
+        // request left to route its answer to.
+        m_queuedPermissionRequests.clear();
+        if (ToolCallWidget *card = m_toolCallWidgets.value(m_activePermissionCallId)) {
+            card->cancelApproval();
+        }
+        m_activePermissionCallId.clear();
+        // Tool payloads that never produced a result are no longer routable;
+        // drop them instead of retaining one entry per aborted call.
+        m_questionTexts.clear();
+        m_subtaskQuestionTaskIds.clear();
+        m_pendingSuggestions.clear();
+        m_pendingProgress.clear();
         // The dock lost contents without a dock-aware call above: a cleared
         // question, and approval rows hidden together with the cards that
         // carried them. Recompute, or the strip stays on screen over the
@@ -1329,12 +1819,29 @@ ChatWidget::ChatWidget(QWidget *parent)
             widget->appendMessageDelta(delta);
         }
     });
+    connect(&m_agent, &AgentLoop::subtaskProgress, this, [this](const QString &taskId, const QString &partial) {
+        if (auto *widget = m_subtaskWidgets.value(taskId)) {
+            widget->setPartialOutput(partial);
+        }
+        forceScrollToBottom();
+    });
     connect(&m_agent, &AgentLoop::subtaskFinished, this, [this](const QString &taskId, bool ok) {
         Q_UNUSED(taskId)
         Q_UNUSED(ok)
         m_turnStatus->setSubtaskCount(m_agent.runningSubtaskCount());
         updateTeamButton();
+        // The record (including a worktree patch path) changed when the child
+        // finished. Persist it promptly, not only when the parent turn ends.
+        scheduleSessionSave();
     });
+    connect(&m_agent, &AgentLoop::subtaskWorktreeReady, this,
+            [this](const QString &taskId, const QString &worktreePath, const QStringList &files) {
+                Q_UNUSED(worktreePath)
+                if (auto *widget = m_subtaskWidgets.value(taskId)) {
+                    widget->setWorktreeReady(files);
+                }
+                scheduleSessionSave();
+            });
     connect(&m_agent, &AgentLoop::turnFinished, this, &ChatWidget::markRunningSubtasksAbandoned);
 
     // Edit tracker signals
@@ -1354,6 +1861,38 @@ ChatWidget::ChatWidget(QWidget *parent)
             }
         }
         showInfoMessage(i18n("Kept changes to %1", QFileInfo(path).fileName()), false);
+    });
+    connect(m_editTracker, &EditTracker::editRestored, this, [this](const QString &path, const QString &toolName,
+                                                                    const QString &newContent,
+                                                                    const QString &expectedContent) {
+        Q_UNUSED(toolName);
+        if (!m_agent.documentBridge()) {
+            showInfoMessage(i18n("Cannot restore edit for %1: document bridge not available", path), true);
+            return;
+        }
+        QString current;
+        const bool exists = m_agent.documentBridge()->readDocument(path, &current);
+        if (expectedContent.isNull()) {
+            // The rejection deleted a file the agent had created. Only
+            // re-create it if it is still absent.
+            if (exists) {
+                showInfoMessage(i18n("Cannot restore %1: the file exists again", QFileInfo(path).fileName()), true);
+                return;
+            }
+        } else if (!exists || current != expectedContent) {
+            showInfoMessage(i18n("Cannot restore %1: it changed after the rejection", QFileInfo(path).fileName()), true);
+            return;
+        }
+        QString error;
+        if (!m_agent.documentBridge()->writeDocument(path, newContent, &error)) {
+            showInfoMessage(i18n("Could not restore %1: %2", QFileInfo(path).fileName(), error), true);
+            return;
+        }
+        if (!m_agent.documentBridge()->saveDocumentIfOpen(path, &error)) {
+            showInfoMessage(i18n("Could not save %1: %2", QFileInfo(path).fileName(), error), true);
+            return;
+        }
+        showInfoMessage(i18n("Restored the edit to %1", QFileInfo(path).fileName()), false);
     });
     connect(m_editTracker, &EditTracker::editRejected, this, [this](const QString &path, const QString &toolName,
                                                                     const QString &oldContent) {
@@ -1379,8 +1918,12 @@ ChatWidget::ChatWidget(QWidget *parent)
     // Writing the empty pre-edit content back instead would leave a zero-byte
     // file behind, which is worse than the file never having existed.
     connect(m_editTracker, &EditTracker::fileCreatedThenRejected, this, [this](const QString &path) {
-        if (!QFile::remove(path)) {
-            showInfoMessage(i18n("Failed to delete %1", QFileInfo(path).fileName()), true);
+        QString error;
+        const bool removed = m_agent.documentBridge()
+            ? m_agent.documentBridge()->removeDocument(path, &error)
+            : QFile::remove(path);
+        if (!removed) {
+            showInfoMessage(i18n("Failed to delete %1: %2", QFileInfo(path).fileName(), error), true);
             return;
         }
         showInfoMessage(i18n("Deleted %1", QFileInfo(path).fileName()), false);
@@ -1484,6 +2027,10 @@ ChatWidget::ChatWidget(QWidget *parent)
     restylePanel();
     updateModelSelectorLabel();
     updateTokenDisplay();
+    updateVoicePromptUi();
+    if (m_voiceInput) {
+        m_voiceInput->refreshMicrophoneAvailability();
+    }
 
     if (QCoreApplication::instance()) {
         connect(QCoreApplication::instance(), &QCoreApplication::aboutToQuit,
@@ -1504,6 +2051,13 @@ ChatWidget::~ChatWidget()
     }
     if (m_streamHeightTimer) {
         m_streamHeightTimer->stop();
+    }
+    if (m_micRefreshTimer) {
+        m_micRefreshTimer->stop();
+    }
+    if (m_voiceInput) {
+        m_voiceInput->disconnect(this);
+        m_voiceInput->cancel();
     }
 
     // Tear the model popup down here, while the members it resets still live.
@@ -1561,17 +2115,18 @@ void ChatWidget::saveCurrentConversation()
             m_currentConversationId = SessionStore::createNewConversation();
         }
     }
+    m_agent.setConversationId(m_currentConversationId);
 
     const bool isNew = SessionStore::saveConversation(
         m_currentConversationId, sessionData, QString(),
-        m_settings.maxSavedConversations > 0 ? m_settings.maxSavedConversations : 50);
+        m_settings.maxSavedConversations);
     // The number of conversations only changes when one is created or
     // deleted. A save of an existing conversation keeps the cached count, so
     // the button is repainted without a query.
     if (isNew) {
         m_historyCount = -1;
+        updateHistoryButton();
     }
-    updateHistoryButton();
 }
 
 void ChatWidget::scheduleSessionSave()
@@ -1772,8 +2327,13 @@ void ChatWidget::scheduleStreamRender()
     }
     // Restarting is safe because it is single-shot: a burst of chunks collapses
     // into one rebuild, while a steady stream still renders ~20 times a second,
-    // which is well past the eye's ability to notice on text arriving.
+    // which is well past the eye's ability to notice on text arriving. A very
+    // long answer costs more per rebuild, so back off the rate as it grows.
+    // Only set the interval while stopped: setInterval() on a running timer
+    // restarts it, which would starve a continuous stream.
     if (!m_streamRenderTimer->isActive()) {
+        const int length = m_streamText.size();
+        m_streamRenderTimer->setInterval(length > 60000 ? 200 : (length > 20000 ? 100 : 50));
         m_streamRenderTimer->start();
     }
 }
@@ -1907,7 +2467,11 @@ void ChatWidget::addThinkingBlock(const QString &text)
     }
     m_thinkingBlock->show();
     registerThinkingBlock(m_thinkingBlock, m_thinkingBrowser, m_thinkingToggle);
-    if (!m_isThinking) {
+    if (m_answerStarted) {
+        // The answer is already streaming. Keep this reasoning in the buffer
+        // and render it when the card freezes instead of writing it next to
+        // the answer.
+    } else if (!m_isThinking) {
         flushThinkingPacer();
     } else {
         startThinkingPacer();
@@ -1925,7 +2489,9 @@ void ChatWidget::appendThinkingDelta(const QString &delta)
     }
     // Only auto-expand if the user hasn't manually collapsed the thinking block.
     // We track this via m_thinkingExpanded - if it's false, the user explicitly collapsed.
-    if (m_thinkingExpanded) {
+    // Once the answer has started, later reasoning is buffered for the final
+    // transcript but not paced in: reasoning and answer must stay sequential.
+    if (m_thinkingExpanded && !m_answerStarted) {
         startThinkingPacer();
     }
 }
@@ -2396,6 +2962,42 @@ void ChatWidget::applyTranscriptCollapse()
             m_thinkingBlocks.removeAt(i);
         }
     }
+    // Reasoning blocks carry their own browser/document too. Keep recent
+    // turns and drop the oldest ones once the transcript is very long. As with
+    // tool cards, count content as well as cards: a few long reasoning blocks
+    // cost more than many short ones.
+    constexpr int kMaxRetainedThinkingBlocks = 200;
+    constexpr qsizetype kMaxRetainedThinkingChars = 2 * 1024 * 1024;
+    qsizetype thinkingChars = 0;
+    for (const auto &entry : std::as_const(m_thinkingBlocks)) {
+        if (entry.browser) {
+            thinkingChars += entry.browser->document()->characterCount();
+        }
+    }
+    // The live block is still receiving deltas and the newest entry is the one
+    // the next update will target. Pruning either mid-stream left
+    // m_thinkingBrowser null and silently dropped the rest of the reasoning. A
+    // single oversized live block is therefore allowed to exceed the budget.
+    for (int i = 0; i < m_thinkingBlocks.size()
+         && (m_thinkingBlocks.size() > kMaxRetainedThinkingBlocks
+             || thinkingChars > kMaxRetainedThinkingChars);) {
+        const ThinkingBlockRef entry = m_thinkingBlocks.at(i);
+        const bool protectedEntry = entry.block == m_thinkingBlock
+            || i == m_thinkingBlocks.size() - 1;
+        if (protectedEntry) {
+            ++i;
+            continue;
+        }
+        m_thinkingBlocks.removeAt(i);
+        if (entry.browser) {
+            thinkingChars -= entry.browser->document()->characterCount();
+        }
+        if (entry.block) {
+            entry.block->hide();
+            entry.block->setParent(nullptr);
+            entry.block->deleteLater();
+        }
+    }
     // Reasoning is part of the turn, not a disclosure the transcript budget
     // is allowed to close. Every block stays expanded.
     for (int i = m_thinkingBlocks.size() - 1; i >= 0; --i) {
@@ -2434,6 +3036,90 @@ void ChatWidget::applyTranscriptCollapse()
         } else {
             widget->setExpanded(false);
         }
+    }
+    pruneOldTranscriptCards();
+}
+
+void ChatWidget::pruneOldTranscriptCards()
+{
+    // Every tool card owns a QTextBrowser and its document. A long session
+    // could otherwise retain thousands of them, so the oldest finished cards
+    // are dropped from the live widget tree once a retention cap is passed.
+    // The caps are both a card count and an approximate content size: a
+    // handful of 80 KB command outputs costs more memory than a hundred short
+    // reads, and the count alone cannot see that. The session still has the
+    // history and rebuilds it on reload.
+    constexpr int kMaxRetainedToolCards = 400;
+    constexpr qsizetype kMaxRetainedToolChars = 6 * 1024 * 1024;
+    qsizetype toolChars = 0;
+    for (ToolCallWidget *widget : std::as_const(m_toolCallOrder)) {
+        if (widget) {
+            toolChars += widget->retainedChars();
+        }
+    }
+    for (int i = 0; i < m_toolCallOrder.size()
+         && (m_toolCallOrder.size() > kMaxRetainedToolCards || toolChars > kMaxRetainedToolChars);) {
+        ToolCallWidget *widget = m_toolCallOrder.at(i);
+        if (!widget || widget->isRunning()) {
+            ++i;
+            continue;
+        }
+        if (m_pinnedViewportWidget == widget) {
+            m_pinnedViewportWidget = nullptr;
+        }
+        toolChars -= widget->retainedChars();
+        m_toolCallWidgets.remove(widget->toolCallId());
+        m_toolCallOrder.removeAt(i);
+        m_focusedToolCardIndex = -1;
+        widget->hide();
+        widget->setParent(nullptr);
+        widget->deleteLater();
+    }
+
+    // Text turns are lighter than tool cards but still unbounded. Keep the
+    // recent user/assistant cards and let the session restore the rest. This
+    // must run even when the tool-card count is under its cap: a chat that
+    // never calls a tool would otherwise keep every message card forever.
+    if (!m_transcriptLayout) {
+        return;
+    }
+    constexpr int kMaxRetainedTextCards = 300;
+    constexpr qsizetype kMaxRetainedTextChars = 4 * 1024 * 1024;
+    // The rendered body is the memory-heavy part of a text card. Count the
+    // browsers rather than only the card count, so a few very long answers are
+    // bounded like many short ones.
+    const auto bodyChars = [](QWidget *widget) {
+        qsizetype chars = 0;
+        for (const QTextBrowser *browser : widget->findChildren<QTextBrowser *>()) {
+            chars += browser->document()->characterCount();
+        }
+        return chars;
+    };
+    int textCards = 0;
+    qsizetype textChars = 0;
+    for (int i = 0; i < m_transcriptLayout->count(); ++i) {
+        QWidget *widget = m_transcriptLayout->itemAt(i) ? m_transcriptLayout->itemAt(i)->widget() : nullptr;
+        if (widget && (widget->objectName() == u"userCard"_s || widget->objectName() == u"assistantCard"_s)) {
+            ++textCards;
+            textChars += bodyChars(widget);
+        }
+    }
+    for (int i = 0; i < m_transcriptLayout->count()
+         && (textCards > kMaxRetainedTextCards || textChars > kMaxRetainedTextChars);) {
+        QLayoutItem *item = m_transcriptLayout->itemAt(i);
+        QWidget *widget = item ? item->widget() : nullptr;
+        if (!widget || (widget->objectName() != u"userCard"_s && widget->objectName() != u"assistantCard"_s)
+            || widget == m_activeAssistantWidget || widget == m_pinnedViewportWidget) {
+            ++i;
+            continue;
+        }
+        --textCards;
+        textChars -= bodyChars(widget);
+        m_transcriptLayout->takeAt(i);
+        widget->hide();
+        widget->setParent(nullptr);
+        widget->deleteLater();
+        delete item;
     }
 }
 
@@ -2614,6 +3300,9 @@ void ChatWidget::resizeEvent(QResizeEvent *event)
     updateScrollButtonPosition();
     updateIndicatorsPosition();
     reflowTranscriptMedia();
+    // The docked sub-agent cards are capped to a quarter of the panel, so the
+    // cap follows the panel.
+    applySubtaskHeightBudget();
 }
 
 void ChatWidget::setCompletionWords(const QStringList &words)
@@ -2832,11 +3521,41 @@ void ChatWidget::appendTranscriptWidget(QWidget *widget)
         return;
     }
     m_transcriptLayout->insertWidget(transcriptInsertIndex(), widget);
+    // A restored conversation can hold thousands of cards. Waiting for the
+    // end of rebuildTranscript() to prune would build every one of them first
+    // and make the restore peak, not the steady state, the memory high-water
+    // mark. Trim in batches as the transcript grows.
+    //
+    // Prune only every `kPruneBatch` cards, not on every append: the check
+    // walks every retained card, so running it above the threshold on each
+    // insert made a long restore quadratic. The caps still bound memory; this
+    // only delays the next check by at most one batch.
+    constexpr int kPruneThreshold = 512;
+    constexpr int kPruneBatch = 128;
+    if (m_transcriptLayout->count() >= m_nextTranscriptPrune) {
+        pruneOldTranscriptCards();
+        m_nextTranscriptPrune = qMax(kPruneThreshold,
+                                     m_transcriptLayout->count() + kPruneBatch);
+    }
 }
 
 void ChatWidget::addIntentWidget(QWidget *widget)
 {
     if (!m_intentDockLayout || !widget) {
+        return;
+    }
+    // Sub-agents share one slot in the dock: a tab strip over the single card
+    // that is on show. They used to stack, and a handful of delegations pushed
+    // the composer off the screen.
+    if (auto *card = qobject_cast<SubtaskWidget *>(widget); card && m_subtaskDock) {
+        if (m_intentDockLayout->indexOf(m_subtaskDock) < 0) {
+            // Appended like any other dock widget, so the newest thing to need
+            // the user stays nearest the input.
+            m_intentDockLayout->addWidget(m_subtaskDock);
+        }
+        m_subtaskDock->addCard(card);
+        applySubtaskHeightBudget();
+        updateIntentDockVisibility();
         return;
     }
     m_intentDockLayout->addWidget(widget);
@@ -2878,6 +3597,14 @@ void ChatWidget::retireIntentWidget(QWidget *widget, QWidget *anchor)
     if (!widget) {
         return;
     }
+    if (auto *card = qobject_cast<SubtaskWidget *>(widget)) {
+        // Back out of the tab strip, and back to full height: as a transcript
+        // card it may be as tall as its own content again.
+        if (m_subtaskDock) {
+            m_subtaskDock->removeCard(card);
+        }
+        card->setHeightBudget(0);
+    }
     if (m_intentDockLayout) {
         m_intentDockLayout->removeWidget(widget);
     }
@@ -2900,6 +3627,17 @@ void ChatWidget::retireIntentWidget(QWidget *widget, QWidget *anchor)
     // thread now, so show it explicitly.
     widget->show();
     updateIntentDockVisibility();
+}
+
+void ChatWidget::applySubtaskHeightBudget()
+{
+    if (!m_subtaskDock) {
+        return;
+    }
+    // The docked card shares a strip with approvals and sits over the input, so
+    // it may not grow like a transcript card: a quarter of the panel is its
+    // whole budget, and its body scrolls inside that instead.
+    m_subtaskDock->setHeightBudget(height() / 4);
 }
 
 void ChatWidget::updateIntentDockVisibility()
@@ -2940,7 +3678,16 @@ void ChatWidget::clearIntentDock()
                     break;
                 }
             }
-            delete widget;
+            if (widget == m_subtaskDock) {
+                // The host outlives the conversation: the cards inside it are
+                // owned by m_subtaskWidgets and swept by the caller just below,
+                // so drop them from the strip without deleting anything and
+                // leave the (now empty) host out of the dock until a sub-agent
+                // starts again.
+                m_subtaskDock->clearCards();
+            } else {
+                delete widget;
+            }
         }
         delete item;
     }
@@ -2987,8 +3734,140 @@ void ChatWidget::applyWorkspaceBannerStyle()
             .arg(colour, ChatTheme::tinted(colour, 0.10), ChatTheme::tinted(colour, 0.35)));
 }
 
-void ChatWidget::showInfoMessage(const QString &message, bool isError)
+void ChatWidget::showContextReport()
 {
+    QMessageBox box(this);
+    box.setWindowTitle(i18n("Kate AI Context"));
+    box.setIcon(QMessageBox::Information);
+    box.setTextFormat(Qt::PlainText);
+    box.setText(m_agent.contextReport());
+    box.setStandardButtons(QMessageBox::Close);
+    box.exec();
+}
+
+void ChatWidget::showUsageReport()
+{
+    QMessageBox box(this);
+    box.setWindowTitle(i18n("Kate AI Usage"));
+    box.setIcon(QMessageBox::Information);
+    box.setTextFormat(Qt::PlainText);
+    box.setText(m_agent.usageReport());
+    box.setStandardButtons(QMessageBox::Close);
+    box.exec();
+}
+
+void ChatWidget::showPromptReport()
+{
+    QMessageBox box(this);
+    box.setWindowTitle(i18n("Kate AI Prompt"));
+    box.setIcon(QMessageBox::Information);
+    box.setTextFormat(Qt::PlainText);
+    box.setText(m_agent.promptReport());
+    box.setStandardButtons(QMessageBox::Close);
+    box.exec();
+}
+
+void ChatWidget::showMemoryReport()
+{
+    QMessageBox box(this);
+    box.setWindowTitle(i18n("Kate AI Memory"));
+    box.setIcon(QMessageBox::Information);
+    box.setTextFormat(Qt::PlainText);
+    box.setText(m_agent.memoryReport());
+    box.setStandardButtons(QMessageBox::Close);
+    box.exec();
+}
+
+void ChatWidget::showToolsReport()
+{
+    QMessageBox box(this);
+    box.setWindowTitle(i18n("Kate AI Tools"));
+    box.setIcon(QMessageBox::Information);
+    box.setTextFormat(Qt::PlainText);
+    box.setText(m_agent.toolsReport());
+    box.setStandardButtons(QMessageBox::Close);
+    box.exec();
+}
+
+void ChatWidget::showSkillsReport()
+{
+    QMessageBox box(this);
+    box.setWindowTitle(i18n("Kate AI Skills"));
+    box.setIcon(QMessageBox::Information);
+    box.setTextFormat(Qt::PlainText);
+    box.setText(m_agent.skillsReport());
+    box.setStandardButtons(QMessageBox::Close);
+    box.exec();
+}
+
+void ChatWidget::showInspector()
+{
+    if (!m_agent.harnessFlags().inspector) {
+        showInfoMessage(i18n("The harness inspector is disabled (flag 'inspector')."), true);
+        return;
+    }
+    if (!m_inspector) {
+        m_inspector = new InspectorPanel(&m_agent, this);
+    }
+    m_inspector->refresh();
+    m_inspector->show();
+    m_inspector->raise();
+    m_inspector->activateWindow();
+}
+
+void ChatWidget::showVerificationReport()
+{
+    QMessageBox box(this);
+    box.setWindowTitle(i18n("Kate AI Verification"));
+    box.setIcon(QMessageBox::Information);
+    box.setTextFormat(Qt::PlainText);
+    box.setText(m_agent.verificationReport());
+    box.setStandardButtons(QMessageBox::Close);
+    box.exec();
+}
+
+void ChatWidget::showPolicyReport()
+{
+    QMessageBox box(this);
+    box.setWindowTitle(i18n("Kate AI Policy"));
+    box.setIcon(QMessageBox::Information);
+    box.setTextFormat(Qt::PlainText);
+    box.setText(m_agent.policyReport());
+    box.setStandardButtons(QMessageBox::Close);
+    box.exec();
+}
+
+void ChatWidget::showHooksReport()
+{
+    QMessageBox box(this);
+    box.setWindowTitle(i18n("Kate AI Hooks"));
+    box.setIcon(QMessageBox::Information);
+    box.setTextFormat(Qt::PlainText);
+    box.setText(m_agent.hooksReport());
+    box.setStandardButtons(QMessageBox::Close);
+    box.exec();
+}
+
+void ChatWidget::showTraceReport()
+{
+    const QString conversation = m_agent.conversationId();
+    const QString fileName = conversation.isEmpty()
+        ? u"kateai-trace.jsonl"_s
+        : u"kateai-trace-%1.jsonl"_s.arg(conversation);
+    const QString path = QDir(QDir::tempPath()).filePath(fileName);
+    QString error;
+    const bool ok = m_agent.exportTrace(path, &error);
+    QMessageBox box(this);
+    box.setWindowTitle(i18n("Kate AI Trace"));
+    box.setIcon(ok ? QMessageBox::Information : QMessageBox::Warning);
+    box.setTextFormat(Qt::PlainText);
+    box.setText(ok ? i18n("Exported the harness event log to:\n%1", path)
+                   : i18n("Could not export the trace:\n%1", error));
+    box.setStandardButtons(QMessageBox::Close);
+    box.exec();
+}
+
+void ChatWidget::showInfoMessage(const QString &message, bool isError){
     if (!m_infoBar) {
         return;
     }
@@ -3108,6 +3987,7 @@ void ChatWidget::restylePanel()
     }
     if (m_prompt) {
         m_prompt->setStyleSheet(ChatTheme::promptInput());
+        m_prompt->applyTheme();
     }
     if (m_permissionBar) {
         m_permissionBar->applyStyle();
@@ -3188,6 +4068,9 @@ void ChatWidget::restyleLiveCards()
             card->applyStyle();
         }
     }
+    if (m_subtaskDock) {
+        m_subtaskDock->applyStyle();
+    }
     for (auto *card : m_suggestionOrder) {
         if (card) {
             card->applyStyle();
@@ -3243,6 +4126,29 @@ void ChatWidget::setSettings(const Settings &settings)
         || settings.themePreset != m_settings.themePreset
         || settings.themeOverrides != m_settings.themeOverrides;
 
+    // The "/" hint belongs to the ACP composer. It is shown as soon as an ACP
+    // agent is selected, not only after a live session advertised its command
+    // list: a restored conversation starts with no process running, and the
+    // hint would otherwise be missing until the first turn finished.
+    const bool acpCommands = usesAcpNative(settings);
+    m_prompt->setSlashCommandHintEnabled(acpCommands);
+    // Commands arrive with a live session, which a freshly opened window does
+    // not have. Seed the composer from the agent's cached list so "/" opens the
+    // real menu right away; a non-ACP provider must not keep offering the
+    // outgoing agent's commands.
+    if (!acpCommands) {
+        m_prompt->setSlashCommands({});
+        m_acpCommandsAgentId.clear();
+    } else {
+        const QList<PromptCommand> cached = cachedAcpCommands(settings, settings.acpAgentId);
+        // An empty cache on an unchanged agent must not wipe a list the live
+        // session just advertised; an agent switch still clears the old one.
+        if (!cached.isEmpty() || m_acpCommandsAgentId != settings.acpAgentId) {
+            m_prompt->setSlashCommands(cached);
+            m_acpCommandsAgentId = settings.acpAgentId;
+        }
+    }
+
     // Detect ACP agent configuration changes and invalidate the cached model list
     // so the next model picker opens a fresh fetch (Zed-style dynamic loading).
     if (usesAcpNative(settings) && usesAcpNative(m_settings)) {
@@ -3258,7 +4164,12 @@ void ChatWidget::setSettings(const Settings &settings)
             Settings updated = settings;
             updated.acpAgentModels = QString::fromUtf8(QJsonDocument(agentModels).toJson(QJsonDocument::Compact));
             m_settings = updated;
+            // The composer was seeded from the new agent's cache above; the
+            // outgoing agent's list must not linger under the new one.
             m_agent.setSettings(updated);
+            if (m_voiceInput) {
+                m_voiceInput->setSettings(updated);
+            }
             refreshProviders();
             updateModelSelectorLabel();
             updateTokenDisplay();
@@ -3295,6 +4206,9 @@ void ChatWidget::setSettings(const Settings &settings)
 
     // Propagate settings to agent
     m_agent.setSettings(settings);
+    if (m_voiceInput) {
+        m_voiceInput->setSettings(settings);
+    }
     refreshProviders();
     updateModelSelectorLabel();
     updateTokenDisplay();
@@ -3468,6 +4382,22 @@ void ChatWidget::refreshModels()
 void ChatWidget::updateModelSelectorLabel()
 {
     if (!m_modelSelector) return;
+    if (m_settings.orchestration.enabled) {
+        const QString planner = m_settings.orchestration.planner.model.trimmed();
+        const QString executor = m_settings.orchestration.executor.model.trimmed();
+        const QString label = u"Orchestrator · %1 → %2"_s.arg(
+            planner.isEmpty() ? i18n("planner") : planner,
+            executor.isEmpty() ? i18n("executor") : executor);
+        m_modelSelector->setText(label + QChar(0x25BE));
+        QStringList parts{i18n("Planner: %1 / %2",
+                               providerLabel(m_settings.orchestration.planner.provider), planner)};
+        parts.append(i18n("Executor: %1 / %2",
+                          providerLabel(m_settings.orchestration.executor.provider), executor));
+        parts.append(i18n("Replans per turn: %1", m_settings.orchestration.maxReplans));
+        m_modelSelector->setToolTip(parts.join(u"  ·  "_s));
+        return;
+    }
+
     // The chip sits in a narrow row next to the mode chip, so it carries the
     // model alone. The provider (and the raw reasoning level) move into the
     // tooltip, where there is room for them and nobody has to read them twice.
@@ -3505,6 +4435,14 @@ void ChatWidget::updateTokenDisplay()
     if (!m_tokenCount) {
         return;
     }
+    // A transcript rebuild renders the restored history card by card. Its
+    // updateTokenDisplay() calls must not compact that history: doing so
+    // mid-rebuild replaced the messages being rendered and left the newest
+    // answer out of the transcript. rebuildTranscript() updates the readout
+    // once, after every card is in place.
+    if (m_renderingTranscript) {
+        return;
+    }
     // What belongs here is how full the context window is, not the model name
     // (which duplicates the chip two buttons to the left) and not the raw token
     // count (which means nothing without the denominator). Both are already
@@ -3512,7 +4450,7 @@ void ChatWidget::updateTokenDisplay()
     // keeping a second estimate that can disagree with the real budget.
     const int window = m_settings.contextWindow > 0
         ? m_settings.contextWindow
-        : ContextManager::contextWindowFor(modelFor(m_settings));
+        : ContextManager::contextWindowFor(m_settings.provider, modelFor(m_settings));
     if (window <= 0) {
         m_tokenCount->setText(QString());
         m_tokenCount->hide();
@@ -3932,6 +4870,22 @@ void ChatWidget::showModelMenu()
             fillModelResultList();
             return;
         }
+        if (userRole == -3) {
+            const bool configured = m_settings.orchestration.planner.isValid()
+                && m_settings.orchestration.executor.isValid();
+            if (configured) {
+                m_settings.orchestration.enabled = true;
+                m_agent.setSettings(m_settings);
+                Q_EMIT settingsChanged(m_settings);
+                updateModelSelectorLabel();
+            } else {
+                Q_EMIT configureRequested();
+            }
+            if (m_modelPopup) {
+                m_modelPopup->close();
+            }
+            return;
+        }
         if (userRole < 0) {
             return;
         }
@@ -3964,6 +4918,22 @@ void ChatWidget::showModelMenu()
                 m_modelPickerTabs->setCurrentIndex(1); // Switch to ACP Agents tab
             }
             fillModelResultList();
+            return;
+        }
+        if (userRole == -3) {
+            const bool configured = m_settings.orchestration.planner.isValid()
+                && m_settings.orchestration.executor.isValid();
+            if (configured) {
+                m_settings.orchestration.enabled = true;
+                m_agent.setSettings(m_settings);
+                Q_EMIT settingsChanged(m_settings);
+                updateModelSelectorLabel();
+            } else {
+                Q_EMIT configureRequested();
+            }
+            if (m_modelPopup) {
+                m_modelPopup->close();
+            }
             return;
         }
         if (userRole < 0) {
@@ -4191,7 +5161,27 @@ void ChatWidget::fillModelResultList()
         return;
     }
 
-    // Normal mode: show all providers and their models
+    // Normal mode: show all providers and their models. The orchestration row
+    // stays at the top: selecting it enables the configured planner/executor
+    // pair; selecting any ordinary model below disables it.
+    {
+        const bool configured = m_settings.orchestration.planner.isValid()
+            && m_settings.orchestration.executor.isValid();
+        const QString planner = m_settings.orchestration.planner.model.trimmed();
+        const QString executor = m_settings.orchestration.executor.model.trimmed();
+        auto *item = new QListWidgetItem(configured
+            ? i18n("Orchestrator · %1 → %2", planner, executor)
+            : i18n("Orchestrator · configure planner and executor…"));
+        item->setData(Qt::UserRole, -3);
+        if (m_settings.orchestration.enabled) {
+            item->setForeground(QColor(ChatTheme::accent()));
+            QFont font = item->font();
+            font.setBold(true);
+            item->setFont(font);
+        }
+        m_modelResultList->addItem(item);
+    }
+
     if (m_acpAgentResultList) {
         QSignalBlocker acpBlocker(m_acpAgentResultList);
         m_acpAgentResultList->clear();
@@ -4387,6 +5377,8 @@ void ChatWidget::moveModelMenuSelection(int delta)
 
 void ChatWidget::selectModel(Provider provider, const QString &model)
 {
+    // Choosing an ordinary model is the explicit way out of a two-model turn.
+    m_settings.orchestration.enabled = false;
     m_settings.provider = provider;
     m_preferredProvider = provider;
     switch (provider) {
@@ -4510,14 +5502,25 @@ bool ChatWidget::ensureAcpBinaryInstalled(const QString &agentId)
         if (!isBinary) {
             return false;
         }
-        if (!acpInstalledBinaryCommand(settingsForAcpAgent(agentId)).isEmpty()) {
-            if (agentId == u"antigravity-acp"_s && acpNeedsPageShim()) {
+        const Settings agentSettings = settingsForAcpAgent(agentId);
+        // When Antigravity resolves to the native `agy` CLI instead of the
+        // legacy `agy_acp_server.par` archive, no archive unpack or 4KB page
+        // shim is needed.
+        if (acpAgentIsLegacyAntigravityServer(agentSettings)) {
+            const QString resolved = AcpClient::resolvedCommand(agentSettings);
+            if (!resolved.isEmpty()
+                && !QFileInfo(resolved).fileName().contains(u"agy_acp_server"_s, Qt::CaseInsensitive)) {
+                return false;
+            }
+        }
+        if (!acpInstalledBinaryCommand(agentSettings).isEmpty()) {
+            if (acpAgentIsLegacyAntigravityServer(agentSettings) && acpNeedsPageShim()) {
                 acpEnsurePageShim(acpBinaryInstallDir(agentId));
             }
             return false;
         }
 
-        auto *installer = new AcpBinaryInstaller(agent, agent.value(u"binaryPlatform"_s).toString(),
+        auto *installer = new AcpBinaryInstaller(agent, acpCurrentPlatformKey(),
                                                  nullptr, this);
         m_acpBinaryInstaller = installer;
         m_acpInstallingAgentId = agentId;
@@ -4535,13 +5538,12 @@ bool ChatWidget::ensureAcpBinaryInstalled(const QString &agentId)
             agents.append(installedAgent);
             m_settings.acpInstalledAgents = QString::fromUtf8(QJsonDocument(agents).toJson(QJsonDocument::Compact));
             if (m_settings.acpAgentId == agentId) {
-                m_settings.acpCommand = installedAgent.value(u"command"_s).toString();
-                QStringList args;
-                for (const QJsonValue &arg : installedAgent.value(u"args"_s).toArray()) {
-                    args.append(arg.toString());
+                const AcpAgentPreset launch = acpAgentLaunchLine(m_settings, agentId);
+                if (!launch.command.isEmpty()) {
+                    m_settings.acpCommand = launch.command;
+                    m_settings.acpArgs = launch.args;
+                    m_settings.acpApiKeyEnv = launch.apiKeyEnv;
                 }
-                m_settings.acpArgs = args.join(u' ');
-                m_settings.acpApiKeyEnv = installedAgent.value(u"apiKeyEnv"_s).toString();
                 m_agent.setSettings(m_settings);
             }
             Q_EMIT settingsChanged(m_settings);
@@ -4854,7 +5856,15 @@ void ChatWidget::showSettingsMenu()
         action->setCheckable(true);
         action->setChecked(m_settings.acpAgentId == preset.id);
         connect(action, &QAction::triggered, this, [this, id = preset.id, &menu]() {
+            const bool agentChanged = m_settings.acpAgentId != id;
             m_settings.acpAgentId = id;
+            // A model/effort id belongs to one agent's catalogue. Carrying the
+            // previous agent's selection into a newly selected agent makes its
+            // --model flag or set_config_option invalid.
+            if (agentChanged) {
+                m_settings.acpModel.clear();
+                m_settings.acpEffort.clear();
+            }
             m_settings.provider = Provider::Acp;
             m_preferredProvider = Provider::Acp;
             // Update command, args, and env from the registry entry or preset.
@@ -5014,8 +6024,10 @@ void ChatWidget::setMcpToolAutoApproved(const McpTool &tool, bool enabled)
             config.alwaysAllow.removeAll(tool.name);
         }
     }
-    manager->saveToDisk();
+    // Apply first, then persist the applied list. Saving before setServers()
+    // serialized the old m_configs and the toggle reverted on reload.
     manager->setServers(updated);
+    manager->saveToDisk();
 }
 
 void ChatWidget::showModeMenu()
@@ -5116,7 +6128,16 @@ void ChatWidget::addSuggestionCard(const QString &id, const Suggestion &suggesti
         return;
     }
     auto *card = new SuggestionWidget(id, m_transcriptContainer);
-    card->setSuggestion(suggestion.text, suggestion.path, suggestion.line);
+    // The agent may anchor the suggestion to a workspace-relative path; resolve
+    // it so Accept opens the right file even when the agent wrote "src/…".
+    Suggestion anchored = suggestion;
+    if (!anchored.path.isEmpty() && !QFileInfo(anchored.path).isAbsolute()) {
+        const QString workspace = m_agent.workspace();
+        if (!workspace.isEmpty()) {
+            anchored.path = QDir(workspace).absoluteFilePath(anchored.path);
+        }
+    }
+    card->setSuggestion(anchored.text, anchored.path, anchored.line);
     // Live while its tool is still running: the advice is on screen already,
     // but the call carrying it has not reported back yet.
     if (running) {
@@ -5136,6 +6157,25 @@ void ChatWidget::addSuggestionCard(const QString &id, const Suggestion &suggesti
     m_suggestionWidgets.insert(id, card);
     m_suggestionOrder.append(card);
     appendTranscriptWidget(card);
+    // Suggestion cards are transcript widgets with their own browsers; keep
+    // only the recent ones in a very long session.
+    constexpr int kMaxSuggestionCards = 100;
+    while (m_suggestionOrder.size() > kMaxSuggestionCards) {
+        SuggestionWidget *oldest = m_suggestionOrder.first();
+        if (!oldest) {
+            m_suggestionOrder.removeFirst();
+            continue;
+        }
+        const QString oldestId = oldest->suggestionId();
+        m_suggestionWidgets.remove(oldestId);
+        m_suggestionOrder.removeFirst();
+        if (m_transcriptLayout) {
+            m_transcriptLayout->removeWidget(oldest);
+        }
+        oldest->hide();
+        oldest->setParent(nullptr);
+        oldest->deleteLater();
+    }
     applyTranscriptCollapse();
     scrollToBottom();
 }
@@ -5150,6 +6190,25 @@ void ChatWidget::addSuggestionErrorCard(const QString &id, const QString &messag
     m_suggestionWidgets.insert(id, card);
     m_suggestionOrder.append(card);
     appendTranscriptWidget(card);
+    // Suggestion cards are transcript widgets with their own browsers; keep
+    // only the recent ones in a very long session.
+    constexpr int kMaxSuggestionCards = 100;
+    while (m_suggestionOrder.size() > kMaxSuggestionCards) {
+        SuggestionWidget *oldest = m_suggestionOrder.first();
+        if (!oldest) {
+            m_suggestionOrder.removeFirst();
+            continue;
+        }
+        const QString oldestId = oldest->suggestionId();
+        m_suggestionWidgets.remove(oldestId);
+        m_suggestionOrder.removeFirst();
+        if (m_transcriptLayout) {
+            m_transcriptLayout->removeWidget(oldest);
+        }
+        oldest->hide();
+        oldest->setParent(nullptr);
+        oldest->deleteLater();
+    }
     applyTranscriptCollapse();
     scrollToBottom();
 }
@@ -5190,11 +6249,50 @@ void ChatWidget::showQuestionCard(const PermissionRequest &request)
         return;
     }
     auto *card = new QuestionWidget(request.toolCallId, m_intentDock);
-    card->setQuestion(request.questionText, request.questionOptions, request.allowFreeform);
-    connect(card, &QuestionWidget::answered, this, [this, card](const QString &, const QString &answer) {
+    QJsonObject args;
+    const QJsonDocument argsDoc = QJsonDocument::fromJson(request.details.toUtf8());
+    if (argsDoc.isObject()) {
+        args = argsDoc.object();
+    }
+    QString questionText = request.questionText.trimmed();
+    if (questionText.isEmpty() && !args.isEmpty()) {
+        questionText = questionTextFromToolArguments(args);
+    }
+    // ACP can carry the question as plain text rather than JSON. Never render
+    // a card whose only content is the literal tool name.
+    if (questionText.isEmpty() && !request.details.trimmed().isEmpty()
+        && !request.details.trimmed().startsWith(u'{')) {
+        questionText = request.details.trimmed();
+    }
+    if (questionText.isEmpty() && !request.summary.isEmpty()
+        && request.summary != request.toolName && request.summary != request.originalToolName) {
+        questionText = request.summary;
+    }
+    if (questionText.isEmpty()) {
+        questionText = i18n("The agent is waiting for your answer.");
+    }
+    QStringList options = request.questionOptions;
+    if (options.isEmpty() && !args.isEmpty()) {
+        options = questionOptionsFromToolArguments(args);
+    }
+    bool allowFreeform = request.allowFreeform;
+    if (options.isEmpty()) {
+        // A card with neither chips nor a text box cannot be answered.
+        allowFreeform = true;
+    } else if (args.contains(u"allow_freeform"_s) || args.contains(u"allowFreeform"_s)) {
+        allowFreeform = questionAllowFreeformFromToolArguments(args, request.allowFreeform);
+    }
+    card->setQuestion(questionText, options, allowFreeform);
+    connect(card, &QuestionWidget::answered, this, [this, card](const QString &questionCallId, const QString &answer) {
         // The agent resumes from the answer: the tool result *is* the user's
-        // words, so there is nothing else to hand back.
-        m_agent.answerQuestion(answer);
+        // words, so there is nothing else to hand back. A sub-agent's question
+        // is routed to that child instead of the parent's parked turn.
+        if (m_subtaskQuestionTaskIds.contains(questionCallId)) {
+            const QString taskId = m_subtaskQuestionTaskIds.take(questionCallId);
+            m_agent.answerSubtaskQuestion(taskId, answer);
+        } else {
+            m_agent.answerQuestion(answer);
+        }
         retireIntentWidget(card);
         updateSendButtonState();
         m_prompt->setFocus();
@@ -5207,11 +6305,33 @@ void ChatWidget::showQuestionCard(const PermissionRequest &request)
     scrollToBottom();
 }
 
-void ChatWidget::clearQuestionCards()
+void ChatWidget::removeQuestionCard(const QString &toolCallId)
+{
+    auto *card = m_questionWidgets.take(toolCallId);
+    if (!card) {
+        return;
+    }
+    m_questionOrder.removeAll(card);
+    if (m_intentDockLayout) {
+        m_intentDockLayout->removeWidget(card);
+    }
+    card->hide();
+    card->deleteLater();
+    updateIntentDockVisibility();
+}
+
+void ChatWidget::clearQuestionCards(const QString &keepId)
 {
     // Called when a turn ends: a question that was never answered must not sit
-    // in the dock offering buttons that can no longer resume anything.
-    for (auto *card : std::as_const(m_questionWidgets)) {
+    // in the dock offering buttons that can no longer resume anything. The
+    // exception is an agent-side ACP question tool: its turn may end before the
+    // user answers, and the answer still becomes the next prompt.
+    const QList<QuestionWidget *> cards = m_questionWidgets.values();
+    for (auto *card : cards) {
+        if (card->questionCallId() == keepId) {
+            continue;
+        }
+        m_questionWidgets.remove(card->questionCallId());
         m_questionOrder.removeAll(card);
         if (m_intentDockLayout) {
             m_intentDockLayout->removeWidget(card);
@@ -5222,9 +6342,191 @@ void ChatWidget::clearQuestionCards()
         card->hide();
         card->deleteLater();
     }
-    m_questionWidgets.clear();
-    m_questionOrder.clear();
     updateIntentDockVisibility();
+}
+
+void ChatWidget::enqueuePermissionRequest(const PermissionRequest &request)
+{
+    if (request.toolCallId.isEmpty()) {
+        return;
+    }
+    if (m_activePermissionCallId == request.toolCallId) {
+        return;
+    }
+    for (PermissionRequest &queued : m_queuedPermissionRequests) {
+        if (queued.toolCallId == request.toolCallId) {
+            queued = request;
+            return;
+        }
+    }
+    if (m_activePermissionCallId.isEmpty()) {
+        presentPermissionRequest(request);
+        return;
+    }
+    // Another child (or the parent) is already on screen. Keeping this request
+    // here is what stops the new card from cancelling the old one and leaving
+    // its owner parked with no way to resume.
+    m_queuedPermissionRequests.append(request);
+}
+
+void ChatWidget::presentPermissionRequest(const PermissionRequest &request)
+{
+    m_activePermissionCallId = request.toolCallId;
+    // Only one request is live. A card left over from a request that was
+    // cancelled by a newer one must not keep an active Allow button.
+    for (auto it = m_toolCallWidgets.constBegin(); it != m_toolCallWidgets.constEnd(); ++it) {
+        if (it.key() != request.toolCallId && it.value()) {
+            it.value()->cancelApproval();
+        }
+    }
+    ToolCallWidget *widget = m_toolCallWidgets.value(request.toolCallId);
+    if (!widget) {
+        widget = new ToolCallWidget(request.toolCallId, m_transcriptContainer);
+        widget->setToolInfo(request.toolName, request.summary, request.risk);
+        widget->setDescribeDiff(request.describeDiff);
+        widget->setFilePath(request.path);
+        widget->setDurationVisible(true);
+        connect(widget, &ToolCallWidget::expandedChanged, this, [this, widget](bool) {
+            pinWidgetInViewport(widget);
+            QTimer::singleShot(240, this, [thisWeak = QPointer<ChatWidget>(this)]() {
+                if (thisWeak) {
+                    thisWeak->m_pinnedViewportWidget = nullptr;
+                }
+            });
+        });
+        connect(widget, &ToolCallWidget::openFileRequested, this, [this](const QString &path, int line) {
+            Q_EMIT openFileAtLineRequested(path, line);
+        });
+        m_toolCallWidgets.insert(request.toolCallId, widget);
+        m_toolCallOrder.append(widget);
+        appendTranscriptWidget(widget);
+        applyTranscriptCollapse();
+    } else {
+        // The card came from the tool_call, which may not have carried the diff
+        // or the path that the permission request now shows.
+        if (!request.describeDiff.isEmpty()) {
+            widget->setDescribeDiff(request.describeDiff);
+        }
+        if (!request.path.isEmpty()) {
+            widget->setFilePath(request.path);
+        }
+    }
+    widget->showApproval();
+    // Name the target in the docked strip. The card (and its diff) can be far up
+    // the transcript, so the buttons alone do not say what they are allowing.
+    {
+        const QString label = ChatTheme::toolLabel(request.toolName);
+        const QString subject = request.path.isEmpty() ? label
+                                                       : label + u"  ·  "_s + request.path;
+        widget->setApprovalSubject(subject);
+    }
+    // Lift the Allow / Deny strip out of the card and into the dock, so the
+    // decision is always on screen next to the input. The card stays expanded
+    // underneath, so the diff being judged is still one scroll away.
+    if (QWidget *approvalRow = widget->approvalRow()) {
+        moveToIntentDock(approvalRow);
+    }
+    connect(widget, &ToolCallWidget::approvalChosen, this,
+            [this, guard = QPointer<ToolCallWidget>(widget), callId = request.toolCallId](
+                PermissionDecision decision) {
+                if (guard) {
+                    guard->setApprovalResolved(decision);
+                }
+                updateIntentDockVisibility();
+                m_agent.resolvePermission(decision, callId);
+                if (m_activePermissionCallId == callId) {
+                    m_activePermissionCallId.clear();
+                    QTimer::singleShot(0, this, &ChatWidget::showNextQueuedPermission);
+                }
+            },
+            Qt::SingleShotConnection);
+    m_turnStatus->setActivity(i18n("Waiting for approval"));
+    m_prompt->setEnabled(false);
+    updateSendButtonState();
+    scrollToBottom();
+}
+
+void ChatWidget::showNextQueuedPermission()
+{
+    if (!m_activePermissionCallId.isEmpty()) {
+        return;
+    }
+    while (!m_queuedPermissionRequests.isEmpty()) {
+        const PermissionRequest next = m_queuedPermissionRequests.takeFirst();
+        presentPermissionRequest(next);
+        if (!m_activePermissionCallId.isEmpty()) {
+            return;
+        }
+    }
+    m_prompt->setEnabled(!m_approvalPending());
+    updateSendButtonState();
+    updateIntentDockVisibility();
+}
+
+void ChatWidget::retirePermissionRequest(const QString &toolCallId)
+{
+    if (toolCallId.isEmpty()) {
+        return;
+    }
+    for (int i = m_queuedPermissionRequests.size() - 1; i >= 0; --i) {
+        if (m_queuedPermissionRequests.at(i).toolCallId == toolCallId) {
+            m_queuedPermissionRequests.removeAt(i);
+        }
+    }
+    if (m_activePermissionCallId != toolCallId) {
+        return;
+    }
+    m_activePermissionCallId.clear();
+    if (ToolCallWidget *widget = m_toolCallWidgets.value(toolCallId)) {
+        widget->cancelApproval();
+    }
+    updateIntentDockVisibility();
+    QTimer::singleShot(0, this, &ChatWidget::showNextQueuedPermission);
+}
+
+void ChatWidget::wireSubtaskWorktreeActions(SubtaskWidget *subtaskWidget)
+{
+    if (!subtaskWidget) {
+        return;
+    }
+    connect(subtaskWidget, &SubtaskWidget::applyWorktreeRequested, this,
+            [this, subtaskWidget](const QString &taskId) {
+                QString error;
+                if (!m_agent.applySubagentWorktree(taskId, &error)) {
+                    showInfoMessage(error.isEmpty()
+                                        ? i18n("Could not apply the sub-agent patch.")
+                                        : error, true);
+                    return;
+                }
+                subtaskWidget->setWorktreeResolved(true);
+                scheduleSessionSave();
+                showInfoMessage(i18n("Applied the isolated sub-agent patch."), false);
+            });
+    connect(subtaskWidget, &SubtaskWidget::discardWorktreeRequested, this,
+            [this, subtaskWidget](const QString &taskId) {
+                QString error;
+                if (!m_agent.discardSubagentWorktree(taskId, &error)) {
+                    showInfoMessage(error.isEmpty()
+                                        ? i18n("Could not discard the sub-agent worktree.")
+                                        : error, true);
+                    return;
+                }
+                subtaskWidget->setWorktreeResolved(false);
+                scheduleSessionSave();
+                showInfoMessage(i18n("Discarded the isolated sub-agent worktree."), false);
+            });
+}
+
+void ChatWidget::restoreSubtaskWorktree(SubtaskWidget *subtaskWidget, const SubagentRecord &record)
+{
+    if (!subtaskWidget || record.taskId.isEmpty() || record.applied || record.discarded) {
+        return;
+    }
+    if (record.patchPath.isEmpty() || !QFileInfo::exists(record.patchPath)) {
+        return;
+    }
+    wireSubtaskWorktreeActions(subtaskWidget);
+    subtaskWidget->setWorktreeReady(record.filesChanged);
 }
 
 void ChatWidget::markRunningSubtasksAbandoned()
@@ -5403,7 +6705,7 @@ void ChatWidget::showCheckpointMenu()
     connect(create, &QAction::triggered, this, [this] {
         const QString label = i18n("Manual checkpoint");
         QString error;
-        const QString id = m_agent.createCheckpoint(label);
+        const QString id = m_agent.createCheckpoint(label, &error);
         if (id.isEmpty()) {
             showInfoMessage(i18n("Could not create a checkpoint: %1", error.isEmpty() ? i18n("git is unavailable") : error), true);
         } else {
@@ -5455,8 +6757,9 @@ void ChatWidget::showCheckpointMenuFor(const CheckpointInfo &info)
                                                                    i18n("Restore checkpoint"),
                                                                    i18n("Restore the workspace to checkpoint %1?\n\n"
                                                                        "Files changed since then will be overwritten and files "
-                                                                       "added afterwards will be removed. Your own git "
-                                                                       "history is not touched.")
+                                                                       "added afterwards will be removed. A \"Before restoring\" "
+                                                                       "checkpoint is saved first, so this step can be undone. "
+                                                                       "Your own git history is not touched.")
                                                                        .arg(info.shortId),
                                                                    QMessageBox::Yes | QMessageBox::No,
                                                                    QMessageBox::No);
@@ -5477,9 +6780,82 @@ void ChatWidget::showCheckpointMenuFor(const CheckpointInfo &info)
 
 void ChatWidget::submit()
 {
-    const QString text = m_prompt->toPlainText().trimmed();
+    QString text = m_prompt->toPlainText().trimmed();
     if (text.isEmpty() || m_agent.isBusy()) {
         return;
+    }
+    // Built-in slash commands that belong to the harness rather than to an ACP
+    // agent. Unknown slash commands are still left for the agent.
+    if (text.compare(u"/fork"_s, Qt::CaseInsensitive) == 0) {
+        m_prompt->clear();
+        forkConversation();
+        return;
+    }
+    if (text.compare(u"/inspector"_s, Qt::CaseInsensitive) == 0) {
+        m_prompt->clear();
+        showInspector();
+        return;
+    }
+    if (text.compare(u"/skills"_s, Qt::CaseInsensitive) == 0) {
+        m_prompt->clear();
+        showSkillsReport();
+        return;
+    }
+    if (text.compare(u"/compact"_s, Qt::CaseInsensitive) == 0) {
+        m_prompt->clear();
+        if (!m_agent.compactContext()) {
+            showInfoMessage(i18n("There is nothing to compact right now."), false);
+        } else {
+            showInfoMessage(i18n("Compacted the conversation context."), false);
+        }
+        return;
+    }
+    if (text.compare(u"/rewind"_s, Qt::CaseInsensitive) == 0) {
+        m_prompt->clear();
+        const QList<CheckpointInfo> checkpoints = m_agent.checkpoints();
+        if (checkpoints.isEmpty()) {
+            showInfoMessage(i18n("There is no checkpoint to rewind to."), false);
+            return;
+        }
+        QString error;
+        if (!m_agent.restoreCheckpoint(checkpoints.first().id, &error)) {
+            showInfoMessage(error.isEmpty() ? i18n("Could not restore the checkpoint.") : error, true);
+        } else {
+            showInfoMessage(i18n("Restored the latest checkpoint's files."), false);
+            Q_EMIT aboutToSubmit();
+        }
+        return;
+    }
+    // Native user invocation of a skill: `/skill <id>` or `/<id>` when the id
+    // names a discovered skill. ACP agents advertise their own slash commands,
+    // so an unknown command is left untouched for them.
+    if (text.startsWith(u'/') && m_agent.harnessFlags().skills) {
+        const QString command = text.section(u' ', 0, 0).mid(1).trimmed();
+        const QString argument = text.section(u' ', 1).trimmed();
+        QString skillId;
+        if (command.compare(u"skill"_s, Qt::CaseInsensitive) == 0) {
+            if (argument.isEmpty()) {
+                showSkillsReport();
+                m_prompt->clear();
+                return;
+            }
+            skillId = argument;
+        } else if (!command.isEmpty()) {
+            QString probeError;
+            if (!m_agent.skillInvocation(command, &probeError).isEmpty()) {
+                skillId = command;
+            }
+        }
+        if (!skillId.isEmpty()) {
+            QString error;
+            const QString prompt = m_agent.skillInvocation(skillId, &error);
+            if (prompt.isEmpty()) {
+                showInfoMessage(error.isEmpty() ? i18n("Skill not found.") : error, true);
+                return;
+            }
+            text = prompt;
+            m_prompt->clear();
+        }
     }
     m_prompt->addHistory(text);
     Q_EMIT aboutToSubmit();
@@ -5568,6 +6944,81 @@ void ChatWidget::ask(const QString &text)
     submit();
 }
 
+bool ChatWidget::isMicrophoneAvailable() const
+{
+    return m_voiceInput && m_voiceInput->isMicrophoneAvailable();
+}
+
+void ChatWidget::refreshMicrophoneAvailability()
+{
+    if (m_voiceInput) {
+        m_voiceInput->refreshMicrophoneAvailability();
+    }
+}
+
+void ChatWidget::toggleVoicePrompt()
+{
+    if (!m_voiceInput) {
+        return;
+    }
+    if (m_voiceInput->isActive()) {
+        m_voiceInput->toggle();
+        return;
+    }
+    if (!m_voiceInput->isMicrophoneAvailable()) {
+        const QString reason = m_voiceInput->microphoneStatus().reason.trimmed();
+        showInfoMessage(reason.isEmpty() ? i18n("No microphone is available or usable.") : reason, false);
+        m_voiceInput->refreshMicrophoneAvailability();
+        return;
+    }
+    if (m_approvalPending()) {
+        showInfoMessage(i18n("Resolve the pending approval before starting voice prompting."), false);
+        return;
+    }
+    m_voiceInput->startRecording();
+}
+
+void ChatWidget::cancelVoicePrompt()
+{
+    if (m_voiceInput && m_voiceInput->isActive()) {
+        m_voiceInput->cancel();
+    }
+}
+
+void ChatWidget::updateVoicePromptUi()
+{
+    if (!m_prompt || !m_voiceInput) {
+        return;
+    }
+    const VoiceInput::MicrophoneStatus mic = m_voiceInput->microphoneStatus();
+    const QString detail = mic.available
+        ? mic.deviceName
+        : (mic.reason.isEmpty() ? i18n("No microphone is available or usable.") : mic.reason);
+    m_prompt->setVoiceAvailability(mic.available, detail, u"Ctrl+Alt+V / Ctrl+Alt+M"_s);
+
+    switch (m_voiceInput->state()) {
+    case VoiceInput::State::Idle:
+        m_prompt->setVoiceVisualState(
+            mic.available ? PromptEdit::VoiceVisualState::Idle : PromptEdit::VoiceVisualState::Unavailable);
+        break;
+    case VoiceInput::State::Recording:
+        m_prompt->setVoiceVisualState(
+            PromptEdit::VoiceVisualState::Recording,
+            i18n("Recording — click or press Ctrl+Alt+V to stop and send, Esc to cancel"));
+        break;
+    case VoiceInput::State::Denoising:
+        m_prompt->setVoiceVisualState(
+            PromptEdit::VoiceVisualState::Processing,
+            i18n("Removing background noise… click or press Esc to cancel"));
+        break;
+    case VoiceInput::State::Transcribing:
+        m_prompt->setVoiceVisualState(
+            PromptEdit::VoiceVisualState::Processing,
+            i18n("Transcribing voice prompt… click or press Esc to cancel"));
+        break;
+    }
+}
+
 QString ChatWidget::escape(const QString &text)
 {
     return text.toHtmlEscaped();
@@ -5624,6 +7075,7 @@ void ChatWidget::clearStreamingPointers()
     m_thinkingBuffer.clear();
     m_thinkingPacedLength = 0;
     m_thinkingExpanded = true;
+    m_answerStarted = false;
     m_streamText.clear();
     m_isStreaming = false;
 }
@@ -5633,6 +7085,7 @@ void ChatWidget::resetThinkingState()
     m_thinkingBuffer.clear();
     m_thinkingPacedLength = 0;
     m_thinkingExpanded = true;
+    m_answerStarted = false;
     stopThinkingPacer();
 }
 
@@ -5643,6 +7096,8 @@ bool ChatWidget::isInternalUserMessage(const QString &text)
 
 void ChatWidget::clearTranscriptContents()
 {
+    // A fresh transcript starts under the retention threshold again.
+    m_nextTranscriptPrune = 512;
     // Navigation is per transcript, and the global override with it: a fresh
     // transcript starts on automatic behaviour.
     m_focusedToolCardIndex = -1;
@@ -5650,10 +7105,14 @@ void ChatWidget::clearTranscriptContents()
     if (m_streamHeightTimer) {
         m_streamHeightTimer->stop();
     }
+    if (m_voiceInput && m_voiceInput->isActive()) {
+        m_voiceInput->cancel();
+    }
     if (m_progressTimer) {
         m_progressTimer->stop();
     }
     m_pendingProgress.clear();
+    m_questionTexts.clear();
     if (m_streamRenderTimer) {
         m_streamRenderTimer->stop();
     }
@@ -5665,6 +7124,8 @@ void ChatWidget::clearTranscriptContents()
     // Detach docked approval rows first so their cards null the pointer;
     // deleting cards first would leave the dock delete with no owner to detach.
     clearQuestionCards();
+    m_queuedPermissionRequests.clear();
+    m_activePermissionCallId.clear();
     clearIntentDock();
     for (auto *card : std::as_const(m_toolCallWidgets)) {
         if (card && m_transcriptLayout && m_transcriptLayout->indexOf(card) >= 0) {
@@ -5743,6 +7204,12 @@ void ChatWidget::flushToolProgress()
         if (auto *widget = m_toolCallWidgets.value(it.key())) {
             widget->setPartialOutput(it.value());
         }
+        // Sub-agent cards are keyed by the same toolCallId (taskId == call.id):
+        // a parent-level progress chunk for a new_task call is the child's
+        // live output and belongs on the sub-agent card, not dropped.
+        if (auto *subtask = m_subtaskWidgets.value(it.key())) {
+            subtask->setPartialOutput(it.value());
+        }
     }
     scrollToBottom();
 }
@@ -5820,18 +7287,24 @@ void ChatWidget::reflowTranscriptMedia()
 void ChatWidget::restoreHistoricalTool(const QString &toolCallId, const QString &toolName,
                                        const QString &argumentsJson, const QString &output, bool hasResult)
 {
+    const QString canonicalName = KateAi::canonicalToolName(toolName);
     auto *toolWidget = new ToolCallWidget(toolCallId, m_transcriptContainer);
 
     ToolRisk risk = ToolRisk::Read;
     // ACP kinds are not in isFileMutatingTool on purpose: that list drives the
     // edit tracker, which already learns about ACP writes from mutatesFiles.
     // isEditToolName covers the OpenCode aliases (write, edit, patch) here so
-    // restored history cards colour like live ones.
-    if (isFileMutatingTool(toolName) || ChatTheme::isEditToolName(toolName) || toolName == u"edit"_s
-        || toolName == u"str_replace"_s || toolName == u"write"_s || toolName == u"delete"_s
-        || toolName == u"patch"_s) {
+    // restored history cards colour like live ones. Canonical names only: the
+    // old `startsWith("fs/")` painted fs/read_text_file as a write, so a
+    // restored read looked like an edit in the history.
+    if (isFileMutatingTool(canonicalName) || ChatTheme::isEditToolName(canonicalName) || canonicalName == u"edit_file"_s
+        || canonicalName == u"write_file"_s || canonicalName == u"multi_edit_file"_s
+        || canonicalName == u"edit"_s || canonicalName == u"str_replace"_s || canonicalName == u"str_replace_editor"_s
+        || canonicalName == u"write"_s || canonicalName == u"delete"_s || canonicalName == u"patch"_s
+        || canonicalName == u"apply_patch"_s) {
         risk = ToolRisk::Write;
-    } else if (toolName == u"bash"_s || toolName == u"execute"_s || toolName.startsWith(u"terminal"_s)) {
+    } else if (canonicalName == u"bash"_s || canonicalName == u"execute"_s || canonicalName.startsWith(u"terminal"_s)
+               || canonicalName.startsWith(u"shell"_s)) {
         risk = ToolRisk::Execute;
     }
 
@@ -5843,11 +7316,14 @@ void ChatWidget::restoreHistoricalTool(const QString &toolCallId, const QString 
             argsObj = argsDoc.object();
         }
     }
-    QString summary = shellCommandFor(toolName, argsObj);
+    QString summary = shellCommandFor(canonicalName, argsObj);
+    if (summary.isEmpty()) {
+        summary = shellCommandFor(toolName, argsObj);
+    }
     // An unknown kind summarises as its own name ("edit"), and "{}" is not a
     // command. A path from the arguments or from the diff header is what the
     // card is about; failing that, the first line of the result.
-    if (summary.isEmpty() || summary == toolName || argsObj.isEmpty()) {
+    if (summary.isEmpty() || summary == canonicalName || summary == toolName || argsObj.isEmpty()) {
         QString path = argsObj.value(u"path"_s).toString();
         if (path.isEmpty()) {
             path = argsObj.value(u"file_path"_s).toString();
@@ -5874,7 +7350,7 @@ void ChatWidget::restoreHistoricalTool(const QString &toolCallId, const QString 
         }
     }
 
-    toolWidget->setToolInfo(toolName, summary, risk);
+    toolWidget->setToolInfo(canonicalName, summary, risk);
     // The live card learns the target path at toolStarted; the result box uses
     // its extension to pick a highlighting language, so the restored card needs
     // it too or the output comes back as uncoloured plain text.
@@ -5903,12 +7379,32 @@ void ChatWidget::restoreHistoricalTool(const QString &toolCallId, const QString 
         });
     });
 
-    if (toolName == u"edit_file"_s) {
-        const QString path = argsObj.value(u"path"_s).toString();
-        toolWidget->setDescribeDiff(unifiedDiff(path,
-            argsObj.value(u"old_string"_s).toString(),
-            argsObj.value(u"new_string"_s).toString()));
-    } else if (toolName == u"multi_edit_file"_s || toolName == u"multi_replace_file_content"_s) {
+    if (canonicalName == u"apply_patch"_s) {
+        // The patch itself is the diff; it may span several files. Do not run
+        // it through the old_string/new_string branch, which has neither.
+        const QString patch = argsObj.value(u"patch"_s).toString();
+        const QList<PatchFile> files = parseUnifiedPatch(patch);
+        QString path = argsObj.value(u"path"_s).toString();
+        if (path.isEmpty() && !files.isEmpty()) {
+            path = files.first().path;
+        }
+        if (!path.isEmpty()) {
+            toolWidget->setFilePath(path);
+        }
+        toolWidget->setDescribeDiff(patch);
+    } else if (canonicalName == u"edit_file"_s || toolName == u"edit"_s || toolName == u"str_replace"_s
+        || toolName == u"str_replace_editor"_s) {
+        QString path = argsObj.value(u"path"_s).toString();
+        if (path.isEmpty()) path = argsObj.value(u"file_path"_s).toString();
+        if (path.isEmpty()) path = argsObj.value(u"filePath"_s).toString();
+        if (path.isEmpty()) path = argsObj.value(u"file"_s).toString();
+        if (path.isEmpty()) path = argsObj.value(u"TargetFile"_s).toString();
+        const QString oldText = argsObj.value(u"old_string"_s).toString().isEmpty()
+            ? argsObj.value(u"oldText"_s).toString() : argsObj.value(u"old_string"_s).toString();
+        const QString newText = argsObj.value(u"new_string"_s).toString().isEmpty()
+            ? argsObj.value(u"newText"_s).toString() : argsObj.value(u"new_string"_s).toString();
+        toolWidget->setDescribeDiff(unifiedDiff(path, oldText, newText));
+    } else if (canonicalName == u"multi_edit_file"_s || toolName == u"multi_replace_file_content"_s) {
         QString path = argsObj.value(u"path"_s).toString();
         if (path.isEmpty()) {
             path = argsObj.value(u"TargetFile"_s).toString();
@@ -5934,10 +7430,14 @@ void ChatWidget::restoreHistoricalTool(const QString &toolCallId, const QString 
             newCombined += n;
         }
         toolWidget->setDescribeDiff(unifiedDiff(path, oldCombined, newCombined));
-    } else if (toolName == u"write_file"_s) {
-        const QString path = argsObj.value(u"path"_s).toString();
-        toolWidget->setDescribeDiff(unifiedDiff(path, QString(),
-            argsObj.value(u"content"_s).toString()));
+    } else if (canonicalName == u"write_file"_s || toolName == u"write"_s) {
+        QString path = argsObj.value(u"path"_s).toString();
+        if (path.isEmpty()) path = argsObj.value(u"file_path"_s).toString();
+        if (path.isEmpty()) path = argsObj.value(u"filePath"_s).toString();
+        if (path.isEmpty()) path = argsObj.value(u"file"_s).toString();
+        QString content = argsObj.value(u"content"_s).toString();
+        if (content.isEmpty()) content = argsObj.value(u"contents"_s).toString();
+        toolWidget->setDescribeDiff(unifiedDiff(path, QString(), content));
     } else if (ChatTheme::isEditToolName(toolName)) {
         // ACP agents spell the same work "Edit", "Write", "StrReplace",
         // "apply_patch". The arguments still carry the before/after text, and
@@ -5984,9 +7484,24 @@ void ChatWidget::restoreHistoricalTool(const QString &toolCallId, const QString 
     // in the result text rather than in the arguments.
     ToolResult result;
     result.toolCallId = toolCallId;
-    result.name = toolName;
+    result.name = canonicalName;
     result.output = hasResult ? output : QString();
-    result.ok = !result.output.contains(u"STATUS: failure"_s);
+    result.cancelled = hasResult && restoredResultWasCancelled(result.output);
+    result.ok = !result.cancelled && !result.output.contains(u"STATUS: failure"_s);
+    // A question's payload is prose, not arguments: without this the restored
+    // card shows only the answer and the question that prompted it is lost.
+    // setFinished clears the running input, so the question is folded into the
+    // finished body instead.
+    if (canonicalName == u"question"_s || toolName == u"question"_s) {
+        const QString asked = questionTextFromToolArguments(argsObj);
+        if (!asked.isEmpty()) {
+            if (result.output.trimmed().isEmpty()) {
+                result.output = asked;
+            } else if (!result.output.contains(asked.left(40))) {
+                result.output = asked + u"\n\n— Answer: "_s + result.output;
+            }
+        }
+    }
     toolWidget->setFinished(result);
 
     m_toolCallWidgets.insert(toolCallId, toolWidget);
@@ -6001,6 +7516,9 @@ void ChatWidget::rebuildTranscript()
     // previous value back on every return.
     const bool wasLoadingConversation = m_loadingConversation;
     m_loadingConversation = true;
+    // Reading the history is safe, but the readout update that can compact an
+    // over-full history is not: it replaces the very list being rendered.
+    m_renderingTranscript = true;
 
     m_permissionBar->hideBar();
     clearTranscriptContents();
@@ -6021,7 +7539,15 @@ void ChatWidget::rebuildTranscript()
         syncIndicatorsOverlay();
     }
 
-    const auto &messages = m_agent.messages();
+    // Read the display transcript, not the model history: compaction replaces
+    // older model turns with a summary, and rebuilding from that list would
+    // make a long thread reopen with only a summary and its newest turns.
+    // Take a snapshot as well. Building the transcript must not be affected by
+    // the history changing under it: updateTokenDisplay() can compact the
+    // conversation while the cards are being created (a restored session that
+    // is already at its context limit), and a reference into the agent's list
+    // would then re-index the loop into the compacted history.
+    const QList<ChatMessage> messages = m_agent.transcriptMessages();
     if (messages.isEmpty()) {
         m_transcriptLayout->insertWidget(transcriptInsertIndex(), createWelcomeWidget());
         if (m_threadTitle) {
@@ -6029,142 +7555,242 @@ void ChatWidget::rebuildTranscript()
         }
         forceScrollToBottom();
         m_loadingConversation = wasLoadingConversation;
+        m_renderingTranscript = false;
         return;
     }
 
     // Specs live on assistant messages and results on Role::Tool messages, and
-    // ACP writes the results first. Gather both before walking so a card can
-    // be created, already filled, at whichever message appears first. A later
-    // duplicate id keeps the last non-empty output. "{}" is not useful args.
+    // ACP writes the results first. Build one entry per *call occurrence*, not
+    // per id: providers and sub-agents reuse ids ("call_0", a retried task), and
+    // keying by id alone silently collapsed several cards into one. Results are
+    // paired with occurrences in order, so duplicates still come back as
+    // separate cards with their own output.
     struct HistoricalTool {
+        QString id;
         QString specName;
         QString resultName;
         QString argumentsJson;
         QString output;
         bool hasResult = false;
+        // Unique key for the widget maps. The first occurrence keeps the plain
+        // id so live routing for a still-running call keeps working.
+        QString widgetKey;
     };
-    QHash<QString, HistoricalTool> catalog;
-    for (const auto &msg : messages) {
-        if (msg.role == ChatMessage::Role::Assistant) {
-            for (const QJsonValue &toolCallVal : msg.toolCalls) {
-                const QJsonObject toolCallObj = toolCallVal.toObject();
-                const QString toolCallId = toolCallObj.value(u"id"_s).toString();
-                if (toolCallId.isEmpty()) {
-                    continue;
-                }
-                HistoricalTool &slot = catalog[toolCallId];
-                const QJsonObject functionObj = toolCallObj.value(u"function"_s).toObject();
-                const QString name = functionObj.value(u"name"_s).toString();
-                if (!name.isEmpty()) {
-                    slot.specName = name;
-                }
-                const QString argumentsJson = functionObj.value(u"arguments"_s).toString().trimmed();
-                if (!argumentsJson.isEmpty() && argumentsJson != u"{}"_s) {
-                    slot.argumentsJson = argumentsJson;
-                }
-            }
-        } else if (msg.role == ChatMessage::Role::Tool) {
-            if (msg.toolCallId.isEmpty()) {
+    QList<HistoricalTool> calls;
+    QHash<QString, QList<int>> callIndexesById;
+    QList<QList<int>> callOccurrencesByMessage(messages.size());
+    QSet<QString> usedWidgetKeys;
+    auto makeWidgetKey = [&usedWidgetKeys](const QString &id) {
+        QString key = id;
+        int suffix = 2;
+        while (usedWidgetKeys.contains(key)) {
+            key = id + u"#"_s + QString::number(suffix++);
+        }
+        usedWidgetKeys.insert(key);
+        return key;
+    };
+
+    for (int mi = 0; mi < messages.size(); ++mi) {
+        const ChatMessage &msg = messages.at(mi);
+        if (msg.role != ChatMessage::Role::Assistant) {
+            continue;
+        }
+        QList<int> occurrences;
+        for (const QJsonValue &toolCallVal : msg.toolCalls) {
+            const QJsonObject toolCallObj = toolCallVal.toObject();
+            const QString toolCallId = toolCallObj.value(u"id"_s).toString();
+            if (toolCallId.isEmpty()) {
+                occurrences.append(-1);
                 continue;
             }
-            HistoricalTool &slot = catalog[msg.toolCallId];
-            if (!msg.name.isEmpty()) {
-                slot.resultName = msg.name;
+            HistoricalTool slot;
+            slot.id = toolCallId;
+            slot.widgetKey = makeWidgetKey(toolCallId);
+            const QJsonObject functionObj = toolCallObj.value(u"function"_s).toObject();
+            slot.specName = functionObj.value(u"name"_s).toString();
+            const QString argumentsJson = functionObj.value(u"arguments"_s).toString().trimmed();
+            if (!argumentsJson.isEmpty() && argumentsJson != u"{}"_s) {
+                slot.argumentsJson = argumentsJson;
             }
-            slot.hasResult = true;
-            if (!msg.content.isEmpty()) {
-                slot.output = msg.content;
-            }
+            const int index = calls.size();
+            calls.append(slot);
+            callIndexesById[toolCallId].append(index);
+            occurrences.append(index);
         }
+        callOccurrencesByMessage[mi] = occurrences;
     }
 
-    QSet<QString> placed;
-    // First sight of an id is where the card goes. A later sight (ACP's
-    // trailing assistant toolCalls, or a native tool message after the bubble)
-    // must not create a second, empty card.
-    auto place = [&](const QString &toolCallId) {
-        if (toolCallId.isEmpty() || placed.contains(toolCallId)) {
+    // Tool results are stored as separate messages, and their position relative
+    // to the assistant message that declares the call depends on the driver:
+    // the native loop appends the declaring message first and the results after
+    // it, while an ACP agent reports each result as it finishes and the
+    // declaring assistant message only lands when the whole prompt ends. Bind
+    // every result to its call occurrence up front: reuse the next unmatched
+    // occurrence for the id. A result with no declaration at all still gets a
+    // card, so an interrupted history does not drop work the user can see.
+    QHash<QString, int> nextCallForResult;
+    QList<int> resultOccurrence(messages.size(), -1);
+    for (int mi = 0; mi < messages.size(); ++mi) {
+        const ChatMessage &msg = messages.at(mi);
+        if (msg.role != ChatMessage::Role::Tool || msg.toolCallId.isEmpty()) {
+            continue;
+        }
+        const QList<int> candidates = callIndexesById.value(msg.toolCallId);
+        const int next = nextCallForResult.value(msg.toolCallId, 0);
+        int occurrence = -1;
+        if (next < candidates.size()) {
+            occurrence = candidates.at(next);
+        } else {
+            HistoricalTool orphan;
+            orphan.id = msg.toolCallId;
+            orphan.widgetKey = makeWidgetKey(msg.toolCallId);
+            occurrence = calls.size();
+            calls.append(orphan);
+            callIndexesById[msg.toolCallId].append(occurrence);
+        }
+        nextCallForResult[msg.toolCallId] = next + 1;
+
+        HistoricalTool &slot = calls[occurrence];
+        if (!msg.name.isEmpty()) {
+            slot.resultName = msg.name;
+        }
+        slot.hasResult = true;
+        if (!msg.content.isEmpty()) {
+            slot.output = msg.content;
+        }
+        resultOccurrence[mi] = occurrence;
+    }
+
+    QSet<int> placedCalls;
+    // First sight of a call occurrence is where its card goes. A later sight
+    // (ACP's trailing assistant toolCalls, or a native tool message after the
+    // bubble) must not create a second, empty card.
+    auto place = [&](int occurrenceIndex) {
+        if (occurrenceIndex < 0 || occurrenceIndex >= calls.size()
+            || placedCalls.contains(occurrenceIndex)) {
             return;
         }
-        const HistoricalTool spec = catalog.value(toolCallId);
+        placedCalls.insert(occurrenceIndex);
+        const HistoricalTool spec = calls.at(occurrenceIndex);
+        const QString widgetKey = spec.widgetKey;
         const QString toolName = !spec.specName.isEmpty() ? spec.specName : spec.resultName;
+        const QString canonicalToolName = KateAi::canonicalToolName(toolName);
         const QString argumentsJson = spec.argumentsJson;
 
-        if (toolName == subtaskToolName()) {
+        if (canonicalToolName == subtaskToolName()) {
             QJsonObject restoredArgs;
             const QJsonDocument restoredDoc = QJsonDocument::fromJson(argumentsJson.toUtf8());
             if (!restoredDoc.isNull() && restoredDoc.isObject()) {
                 restoredArgs = restoredDoc.object();
             }
-            auto *subtaskWidget = new SubtaskWidget(toolCallId, m_intentDock);
-            connect(subtaskWidget, &SubtaskWidget::cancelRequested, this, [this](const QString &taskId) {
-                m_agent.cancelSubtask(taskId);
+            auto *subtaskWidget = new SubtaskWidget(widgetKey, m_intentDock);
+            const QString liveTaskId = spec.id;
+            connect(subtaskWidget, &SubtaskWidget::cancelRequested, this, [this, liveTaskId](const QString &) {
+                m_agent.cancelSubtask(liveTaskId);
             });
             const QString agentName = restoredArgs.value(u"agent"_s).toString();
             subtaskWidget->startAgent(agentName.isEmpty() ? i18n("Sub-agent") : agentName,
                                       restoredArgs.value(u"mode"_s).toString(),
                                       restoredArgs.value(u"description"_s).toString());
-            m_subtaskWidgets.insert(toolCallId, subtaskWidget);
+            m_subtaskWidgets.insert(widgetKey, subtaskWidget);
             m_subtaskOrder.append(subtaskWidget);
-            // The card below whatever was placed just before it in the rebuild
-            // order, which is the position it ran in during the live turn.
-            m_subtaskAnchors.insert(toolCallId, lastTranscriptContentWidget());
-            addIntentWidget(subtaskWidget);
-            placed.insert(toolCallId);
+            const SubagentRecord restoredRecord = m_agent.subagent(spec.id);
             if (spec.hasResult) {
                 ToolResult result;
-                result.toolCallId = toolCallId;
+                result.toolCallId = widgetKey;
                 result.name = spec.resultName.isEmpty() ? toolName : spec.resultName;
                 result.output = spec.output;
-                result.ok = !spec.output.contains(u"STATUS: failure"_s);
+                result.cancelled = restoredResultWasCancelled(spec.output);
+                result.ok = !result.cancelled && !spec.output.contains(u"STATUS: failure"_s);
                 subtaskWidget->finishAgent(result);
+                restoreSubtaskWorktree(subtaskWidget, restoredRecord);
+                // A restored sub-agent that already reported back belongs to
+                // the thread, exactly like a live one that retired on finish.
+                // Docking it left every old sub-agent card pinned above the
+                // composer -- and the dock on screen with nothing running.
+                subtaskWidget->setHeightBudget(0);
+                appendTranscriptWidget(subtaskWidget);
+                subtaskWidget->show();
+            } else if (m_agent.runningSubtaskIds().contains(spec.id)) {
+                // Still running (a rebuild during the turn): the card below
+                // whatever was placed just before it in the rebuild order,
+                // which is the position it ran in.
+                m_subtaskAnchors.insert(widgetKey, lastTranscriptContentWidget());
+                addIntentWidget(subtaskWidget);
+            } else if (!restoredRecord.taskId.isEmpty()
+                       && restoredRecord.status != u"running"_s
+                       && restoredRecord.status != u"interrupted"_s) {
+                // The result message was compacted out of the display
+                // transcript, but the structured record still has the
+                // summary and any worktree patch. Render that instead of
+                // declaring the run abandoned.
+                ToolResult result;
+                result.toolCallId = widgetKey;
+                result.name = spec.resultName.isEmpty() ? toolName : spec.resultName;
+                result.output = restoredRecord.summary;
+                result.ok = restoredRecord.status == u"ok"_s;
+                result.cancelled = restoredRecord.status == u"cancelled"_s;
+                subtaskWidget->finishAgent(result);
+                restoreSubtaskWorktree(subtaskWidget, restoredRecord);
+                subtaskWidget->setHeightBudget(0);
+                appendTranscriptWidget(subtaskWidget);
+                subtaskWidget->show();
+            } else {
+                // No result was saved and no child loop is running this id: the
+                // process closed mid-run, or the call survives only in a
+                // compacted display transcript. Docking it would recreate a
+                // "running" sub-agent with nothing behind it and leave the dock
+                // open on every launch with cards nothing can finish. Settle the
+                // card into the thread as stopped work instead.
+                subtaskWidget->markAbandoned(i18n("No result was saved for this sub-agent."));
+                subtaskWidget->setHeightBudget(0);
+                appendTranscriptWidget(subtaskWidget);
+                subtaskWidget->show();
             }
             return;
         }
 
-        if (toolName == u"suggest"_s) {
+        if (canonicalToolName == u"suggest"_s || toolName == u"suggest"_s) {
             QJsonObject restoredArgs;
             const QJsonDocument restoredDoc = QJsonDocument::fromJson(argumentsJson.toUtf8());
             if (!restoredDoc.isNull() && restoredDoc.isObject()) {
                 restoredArgs = restoredDoc.object();
             }
             Suggestion suggestion;
-            suggestion.text = restoredArgs.value(u"suggestion"_s).toString();
-            suggestion.path = restoredArgs.value(u"path"_s).toString();
-            suggestion.line = restoredArgs.value(u"line"_s).toInt();
-            placed.insert(toolCallId);
+            suggestion.text = suggestionTextFromToolArguments(restoredArgs);
+            suggestion.path = firstStringToolArgument(
+                restoredArgs, {u"path"_s, u"file_path"_s, u"filePath"_s, u"file"_s, u"target"_s, u"uri"_s});
+            if (suggestion.path.startsWith(u"file://"_s)) {
+                suggestion.path = QUrl(suggestion.path).toLocalFile();
+            }
+            const QJsonValue restoredLine = restoredArgs.contains(u"line"_s)
+                ? restoredArgs.value(u"line"_s)
+                : (restoredArgs.contains(u"start_line"_s) ? restoredArgs.value(u"start_line"_s)
+                                                          : restoredArgs.value(u"startLine"_s));
+            if (restoredLine.isDouble()) {
+                suggestion.line = restoredLine.toInt();
+            } else if (restoredLine.isString()) {
+                suggestion.line = restoredLine.toString().trimmed().toInt();
+            } else {
+                suggestion.line = 0;
+            }
             if (suggestion.text.isEmpty()) {
                 return;
             }
-            auto *card = new SuggestionWidget(toolCallId, m_transcriptContainer);
+            auto *card = new SuggestionWidget(widgetKey, m_transcriptContainer);
             card->setSuggestion(suggestion.text, suggestion.path, suggestion.line);
             card->markDecided();
-            m_suggestionWidgets.insert(toolCallId, card);
+            m_suggestionWidgets.insert(widgetKey, card);
             m_suggestionOrder.append(card);
             appendTranscriptWidget(card);
             return;
         }
 
-        restoreHistoricalTool(toolCallId, toolName, argumentsJson, spec.output, spec.hasResult);
-        placed.insert(toolCallId);
+        restoreHistoricalTool(widgetKey, toolName, argumentsJson, spec.output, spec.hasResult);
     };
 
-    // Tool results are stored as separate messages, and their position relative
-    // to the assistant message that declares the call depends on the driver:
-    // the native loop appends the declaring message first and the results after
-    // it, while an ACP agent reports each result as it finishes and the
-    // declaring assistant message only lands when the whole prompt ends. Index
-    // the results up front so a card can be created already finished, whichever
-    // order the history has — matching results to widgets in the loop below
-    // alone would drop every ACP result and leave the restored card's box empty.
-    QHash<QString, ChatMessage> toolResultsById;
-    for (const auto &msg : messages) {
-        if (msg.role == ChatMessage::Role::Tool && !msg.toolCallId.isEmpty()) {
-            toolResultsById.insert(msg.toolCallId, msg);
-        }
-    }
-
-    for (const auto &msg : messages) {
+    for (int mi = 0; mi < messages.size(); ++mi) {
+        const ChatMessage &msg = messages.at(mi);
         switch (msg.role) {
             case ChatMessage::Role::User:
                 if (!isInternalUserMessage(msg.content)) {
@@ -6247,17 +7873,31 @@ void ChatWidget::rebuildTranscript()
                 // message earlier in the transcript already placed them (ACP
                 // stores the result before this bubble). Native order still
                 // lands the card here, already filled from the pre-scan.
-                for (const QJsonValue &toolCallVal : msg.toolCalls) {
-                    place(toolCallVal.toObject().value(u"id"_s).toString());
+                for (int occurrence : callOccurrencesByMessage.at(mi)) {
+                    place(occurrence);
                 }
                 break;
             case ChatMessage::Role::Tool:
                 // Place here when the result precedes the assistant message.
-                // An id already placed (native: card follows the bubble) is skipped.
-                place(msg.toolCallId);
+                // A call already placed (native: card follows the bubble) is
+                // skipped because its occurrence is already in placedCalls.
+                if (mi < resultOccurrence.size()) {
+                    place(resultOccurrence.at(mi));
+                }
                 break;
             case ChatMessage::Role::System:
-                // System messages are not shown in transcript
+                // System messages are not shown in transcript, except the
+                // marker that says the oldest turns were elided by the
+                // transcript budget.
+                if (msg.name == u"transcript_elision"_s) {
+                    auto *marker = new QLabel(msg.content, m_transcriptContainer);
+                    marker->setObjectName(u"transcriptElision"_s);
+                    marker->setAlignment(Qt::AlignCenter);
+                    marker->setStyleSheet(
+                        QStringLiteral("color: %1; font-size: 11px; padding: 6px;")
+                            .arg(ChatTheme::textMuted()));
+                    appendTranscriptWidget(marker);
+                }
                 break;
         }
     }
@@ -6274,6 +7914,10 @@ void ChatWidget::rebuildTranscript()
     restoreCurrentTurn(sessionData);
 
     applyTranscriptCollapse();
+    // Clear the rebuild marker before the single readout update: that update is
+    // what folds a restored history that is already over its window, and it
+    // must run only now that every message has a card (see updateTokenDisplay).
+    m_renderingTranscript = false;
     updateTokenDisplay();
     updateModelSelectorLabel();
     QTimer::singleShot(0, this, [thisWeak = QPointer<ChatWidget>(this)]() {
@@ -6386,7 +8030,7 @@ void ChatWidget::updateHistoryButton()
     // cheap repaint into a database round trip. The cache is dropped wherever
     // the number of conversations can change.
     if (m_historyCount < 0) {
-        const int maxConversations = m_settings.maxSavedConversations > 0 ? m_settings.maxSavedConversations : 50;
+        const int maxConversations = m_settings.maxSavedConversations;
         m_historyCount = SessionStore::listConversations(maxConversations).size();
     }
     const int count = m_historyCount;
@@ -6409,7 +8053,7 @@ void ChatWidget::showConversationHistory()
         m_historyMenu->clear();
     }
 
-    const int maxConversations = m_settings.maxSavedConversations > 0 ? m_settings.maxSavedConversations : 50;
+    const int maxConversations = m_settings.maxSavedConversations;
     const auto conversations = SessionStore::listConversations(maxConversations);
     // The list is the count the button shows, so the cache is filled from it
     // instead of querying a second time.
@@ -6445,6 +8089,14 @@ void ChatWidget::showConversationHistory()
 
         auto *clearAllAction = m_historyMenu->addAction(QIcon::fromTheme(u"edit-clear"_s), i18n("Clear All History"));
         connect(clearAllAction, &QAction::triggered, this, [this]() {
+            // This permanently deletes every transcript, so it needs an
+            // explicit confirmation rather than one click in a popup menu.
+            if (QMessageBox::question(this, i18n("Clear All History"),
+                                      i18n("Delete every saved conversation? This cannot be undone."),
+                                      QMessageBox::Yes | QMessageBox::No, QMessageBox::No)
+                != QMessageBox::Yes) {
+                return;
+            }
             SessionStore::clearAllConversations();
             m_currentConversationId.clear();
             // Clear All means the current transcript must not be saved again
@@ -6476,21 +8128,30 @@ void ChatWidget::switchToConversation(const QString &conversationId)
     // The running turn belongs to the conversation that is being left. Without
     // this the agent keeps streaming, and a delta that arrives after the
     // switch would be rendered into the new transcript and saved under the
-    // new id.
+    // new id. The flag goes up first: abort() emits turnFinished synchronously,
+    // and a re-entrant save/delta must see the loading state, not the old
+    // transcript.
+    m_loadingConversation = true;
     m_agent.abort();
 
     // Save current conversation before switching
     if (!m_agent.messages().isEmpty() && !m_currentConversationId.isEmpty()) {
         const auto sessionData = m_agent.sessionData();
         if (!sessionData.messages.isEmpty()) {
-            SessionStore::saveConversation(m_currentConversationId, sessionData, QString(), m_settings.maxSavedConversations > 0 ? m_settings.maxSavedConversations : 50);
+            SessionStore::saveConversation(m_currentConversationId, sessionData, QString(), m_settings.maxSavedConversations);
         }
     }
 
-    m_loadingConversation = true;
-
     // Load the new conversation
     const auto sessionData = SessionStore::loadConversation(conversationId);
+    if (sessionData.loadFailed) {
+        // The stored transcript could not be read. Showing it as an empty chat
+        // and then autosaving would overwrite the very history that is still
+        // on disk, so refuse the switch and keep the current conversation.
+        m_loadingConversation = false;
+        showInfoMessage(i18n("Could not load that conversation: its stored history is unreadable."), true);
+        return;
+    }
     m_agent.restoreSession(sessionData);
     if (!sessionData.workspace.isEmpty()) {
         Q_EMIT conversationWorkspaceRequested(sessionData.workspace);
@@ -6507,6 +8168,7 @@ void ChatWidget::switchToConversation(const QString &conversationId)
     m_editTracker->clear();
     m_currentConversationId = conversationId;
     SessionStore::setActiveConversation(conversationId);
+    m_agent.setConversationId(conversationId);
 
     // Rebuild transcript
     rebuildTranscript();
@@ -6554,6 +8216,7 @@ void ChatWidget::deleteConversation(const QString &conversationId)
 void ChatWidget::setCurrentConversationId(const QString &conversationId)
 {
     m_currentConversationId = conversationId;
+    m_agent.setConversationId(conversationId);
     if (m_threadTitle) {
         // A single-row lookup: listing every conversation just to find one
         // title materialised the whole history table.
@@ -6591,6 +8254,45 @@ void ChatWidget::newChat()
     resetForNewChat(true);
 }
 
+bool ChatWidget::forkConversation()
+{
+    if (m_agent.isBusy()) {
+        showInfoMessage(i18n("Stop the current turn before forking the conversation."), true);
+        return false;
+    }
+    if (m_agent.messages().isEmpty()) {
+        showInfoMessage(i18n("There is nothing to fork yet."), false);
+        return false;
+    }
+    saveCurrentConversation();
+    const QString sourceId = m_currentConversationId;
+    const QString newId = SessionStore::forkConversation(sourceId);
+    if (newId.isEmpty()) {
+        showInfoMessage(i18n("Could not fork the conversation."), true);
+        return false;
+    }
+    m_currentConversationId = newId;
+    m_agent.setConversationId(newId);
+    m_agent.setParentConversationId(sourceId);
+    // The source thread still owns its agent-side session. Drop only the
+    // fork's reference so its first turn starts a fresh session.
+    if (usesAcpNative(m_settings) && m_agent.acpClient()) {
+        m_agent.acpClient()->detachSession();
+    }
+    Q_EMIT conversationChanged(newId);
+    m_historyCount = -1;
+    updateHistoryButton();
+    if (m_threadTitle) {
+        m_threadTitle->setText(SessionStore::conversationTitle(newId));
+    }
+    // Pending worktree patches stay with the source thread; repaint so the
+    // fork's cards do not offer buttons for records it no longer owns.
+    m_agent.clearSubagentRecords();
+    rebuildTranscript();
+    showInfoMessage(i18n("Forked into a new conversation. The original is unchanged."), false);
+    return true;
+}
+
 void ChatWidget::resetForNewChat(bool saveCurrentConversation)
 {
     if (m_sessionSaveTimer) {
@@ -6608,7 +8310,7 @@ void ChatWidget::resetForNewChat(bool saveCurrentConversation)
                 m_currentConversationId = QUuid::createUuid().toString(QUuid::WithoutBraces);
             }
             SessionStore::saveConversation(m_currentConversationId, sessionData, QString(),
-                                          m_settings.maxSavedConversations > 0 ? m_settings.maxSavedConversations : 50);
+                                          m_settings.maxSavedConversations);
         }
     }
 
@@ -6637,6 +8339,7 @@ void ChatWidget::resetForNewChat(bool saveCurrentConversation)
     // registered in the history list once saveConversation() is called with
     // real messages, so no empty ghost entry appears immediately.
     m_currentConversationId = SessionStore::createNewConversation();
+    m_agent.setConversationId(m_currentConversationId);
     Q_EMIT conversationChanged(m_currentConversationId);
 
     // Update history button to reflect any newly saved previous conversation.

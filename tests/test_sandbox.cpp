@@ -3,11 +3,112 @@
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
+#include <QProcess>
+#include <QStandardPaths>
 #include <QTemporaryDir>
+#include <QTemporaryFile>
 #include <QTest>
 
 using namespace Qt::Literals::StringLiterals;
 using namespace KateAi;
+
+namespace
+{
+
+struct SandboxRunResult
+{
+    bool started = false;
+    bool timedOut = false;
+    int exitCode = -1;
+    QString output;
+};
+
+SandboxRunResult runSandboxed(const Sandbox &box, const QString &command, int timeoutMs = 20000)
+{
+    SandboxRunResult result;
+    QString error;
+    const QStringList wrapped = box.wrapCommand(command, &error);
+    if (wrapped.isEmpty()) {
+        result.output = error;
+        return result;
+    }
+
+    QProcess process;
+    process.setProcessChannelMode(QProcess::MergedChannels);
+    process.setWorkingDirectory(box.workspaceRoot());
+    process.setProcessEnvironment(box.processEnvironment());
+    process.start(wrapped.first(), wrapped.mid(1));
+    if (!process.waitForStarted(5000)) {
+        result.output = process.errorString();
+        return result;
+    }
+    result.started = true;
+    if (!process.waitForFinished(timeoutMs)) {
+        result.timedOut = true;
+        process.kill();
+        process.waitForFinished(3000);
+    }
+    result.exitCode = process.exitCode();
+    result.output = QString::fromUtf8(process.readAll());
+    return result;
+}
+
+bool bubblewrapRuntimeWorks()
+{
+#if defined(Q_OS_LINUX)
+    static const bool works = []() {
+        const QString bwrap = QStandardPaths::findExecutable(u"bwrap"_s);
+        if (bwrap.isEmpty()) {
+            return false;
+        }
+        QProcess probe;
+        probe.setProcessChannelMode(QProcess::MergedChannels);
+        probe.start(bwrap, {u"--die-with-parent"_s, u"--unshare-user-try"_s, u"--unshare-pid"_s,
+                            u"--ro-bind"_s, u"/"_s, u"/"_s, u"--"_s, u"/bin/sh"_s, u"-c"_s, u"true"_s});
+        if (!probe.waitForStarted(5000)) {
+            return false;
+        }
+        if (!probe.waitForFinished(10000)) {
+            probe.kill();
+            probe.waitForFinished(2000);
+            return false;
+        }
+        return probe.exitStatus() == QProcess::NormalExit && probe.exitCode() == 0;
+    }();
+    return works;
+#else
+    return false;
+#endif
+}
+
+QStringList hostNetworkInterfaces()
+{
+    QStringList names;
+#if defined(Q_OS_LINUX)
+    QFile file(u"/proc/net/dev"_s);
+    if (!file.open(QIODevice::ReadOnly)) {
+        return names;
+    }
+    const QStringList lines = QString::fromLatin1(file.readAll()).split(u'\n');
+    for (int i = 2; i < lines.size(); ++i) {
+        const int colon = lines.at(i).indexOf(u':');
+        if (colon > 0) {
+            names.append(lines.at(i).left(colon).trimmed());
+        }
+    }
+#endif
+    return names;
+}
+
+QString shellQuote(const QString &value)
+{
+    QString escaped = value;
+    escaped.replace(u'\'', u"'\\''"_s);
+    return u"'"_s + escaped + u"'"_s;
+}
+
+} // namespace
 
 class TestSandbox : public QObject
 {
@@ -29,12 +130,15 @@ private Q_SLOTS:
     {
         // The containment check used to run only on the canonical path, which
         // does not exist when neither the file nor its parent directory does.
-        // A write to /tmp/<new-dir>/x.txt therefore succeeded in every
-        // profile, including Strict.
+        // A write to <new-dir>/x.txt therefore succeeded in every profile,
+        // including Strict. The escape target is a sibling of the workspace
+        // under the system temp dir, so it is outside on every platform
+        // (Windows included: no Unix-only "/tmp" literal).
         QTemporaryDir dir;
         QVERIFY(dir.isValid());
-        const QString target = QStringLiteral("/tmp/kateai-sandbox-escape-%1/outside.txt")
-                                   .arg(QCoreApplication::applicationPid());
+        const QString target = QDir::tempPath() + u"/kateai-sandbox-escape-%1-%2/outside.txt"_s
+                                   .arg(QCoreApplication::applicationPid())
+                                   .arg(reinterpret_cast<quintptr>(&dir));
         for (SandboxProfile profile : {SandboxProfile::Workspace, SandboxProfile::Strict}) {
             Sandbox box(dir.path(), profile);
             QString error;
@@ -51,11 +155,17 @@ private Q_SLOTS:
     {
         // The read tools are approved without a prompt, so a profile that
         // does not confine them lets the agent read any file of the host.
+        // The "outside" file lives in a second temp dir: portable on every
+        // platform (no Unix-only "/etc/passwd" literal, which maps to a
+        // drive-relative path on Windows).
         QTemporaryDir dir;
         QVERIFY(dir.isValid());
+        QTemporaryDir outside;
+        QVERIFY(outside.isValid());
+        const QString outsideFile = outside.filePath(u"secret.txt"_s);
         Sandbox box(dir.path(), SandboxProfile::Workspace);
         QString error;
-        QVERIFY(!box.allowsRead(u"/etc/passwd"_s, &error));
+        QVERIFY(!box.allowsRead(outsideFile, &error));
         // Inside the workspace it still works.
         QFile file(dir.filePath(u"inside.txt"_s));
         QVERIFY(file.open(QIODevice::WriteOnly));
@@ -64,7 +174,7 @@ private Q_SLOTS:
         QVERIFY(box.allowsRead(u"inside.txt"_s, &error));
         // The opt-in lifts the confinement again.
         Sandbox open(dir.path(), SandboxProfile::Workspace, {}, true);
-        QVERIFY(open.allowsRead(u"/etc/passwd"_s, &error));
+        QVERIFY(open.allowsRead(outsideFile, &error));
     }
 
     void readOnlyCommandRejectsSubstitution()
@@ -78,6 +188,31 @@ private Q_SLOTS:
         // The ordinary read-only commands are unaffected.
         QVERIFY(box.isReadOnlyCommand(u"ls -la"_s));
         QVERIFY(box.isReadOnlyCommand(u"cat file.txt"_s));
+        // A newline separates commands just like ';'. The second command used
+        // to be auto-approved with the first.
+        QVERIFY(!box.isReadOnlyCommand(u"ls\npython3 -c 'print(1)'"_s));
+        QVERIFY(!box.isReadOnlyCommand(u"cat f\rpython3 -c 'print(1)'"_s));
+        // Privilege escalation is never read-only.
+        QVERIFY(!box.isReadOnlyCommand(u"sudo cat /etc/shadow"_s));
+        // Attached/output forms of a write flag are not read-only.
+        QVERIFY(!box.isReadOnlyCommand(u"sort -oout.txt list.txt"_s));
+        QVERIFY(!box.isReadOnlyCommand(u"sort --output=out.txt list.txt"_s));
+        QVERIFY(!box.isReadOnlyCommand(u"git branch -D main"_s));
+        QVERIFY(!box.isReadOnlyCommand(u"git log --output=out.txt"_s));
+    }
+
+    void shellReadsAreConfinedToTheWorkspace()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        Sandbox box(dir.path(), SandboxProfile::Workspace);
+        QVERIFY(box.commandTouchesOutsideWorkspace(u"cat /etc/passwd"_s));
+        QVERIFY(box.commandTouchesOutsideWorkspace(u"cat ~/.bash_history"_s));
+        QVERIFY(!box.commandTouchesOutsideWorkspace(u"cat notes.txt"_s));
+        QVERIFY(!box.commandTouchesOutsideWorkspace(u"grep -rn foo src"_s));
+        // The opt-in lifts the restriction, matching allowsRead().
+        Sandbox open(dir.path(), SandboxProfile::Workspace, {}, true);
+        QVERIFY(!open.commandTouchesOutsideWorkspace(u"cat /etc/passwd"_s));
     }
 
     void envWrapperIsNotReadOnly()
@@ -129,6 +264,10 @@ private Q_SLOTS:
         QVERIFY(box.isDenied(dir.filePath(u".env"_s)));
         QVERIFY(Sandbox::globMatch(u"**/.env"_s, dir.filePath(u".env"_s)));
         QVERIFY(Sandbox::globMatch(u"**/*.pem"_s, u"/tmp/cert.pem"_s));
+        // The shell removes the backslash; the deny scan must too.
+        QVERIFY(box.commandTouchesDeniedPath(u"cat .\\env"_s));
+        QVERIFY(box.commandTouchesDeniedPath(u"(cat .env)"_s));
+        QVERIFY(box.commandTouchesDeniedPath(u"sh -c 'cat .env'"_s));
     }
 
     void readOnlyBlocksWrites()
@@ -145,12 +284,23 @@ private Q_SLOTS:
     {
         QTemporaryDir dir;
         QVERIFY(dir.isValid());
+        QTemporaryDir outside;
+        QVERIFY(outside.isValid());
         Sandbox box(dir.path(), SandboxProfile::Strict);
         QString error;
-        QVERIFY(!box.allowsRead(u"/etc/passwd"_s, &error));
+        QVERIFY(!box.allowsRead(outside.filePath(u"secret.txt"_s), &error));
         QVERIFY(box.allowsRead(u"src/foo.cpp"_s, &error) || error.isEmpty() || !error.contains(u"deny"_s));
-        const QString resolved = box.resolve(u"src/foo.cpp"_s, &error, true);
-        QVERIFY(resolved.startsWith(QDir(dir.path()).absolutePath()));
+        const QString resolved = QDir::fromNativeSeparators(box.resolve(u"src/foo.cpp"_s, &error, true));
+        const QString root = QDir::fromNativeSeparators(QDir(dir.path()).canonicalPath().isEmpty()
+                                                            ? QDir(dir.path()).absolutePath()
+                                                            : QDir(dir.path()).canonicalPath());
+#if defined(Q_OS_WIN)
+        // Windows filesystems are case-insensitive; the temp dir may be
+        // addressed through an 8.3 short name vs. the long canonical form.
+        QVERIFY(resolved.startsWith(root, Qt::CaseInsensitive));
+#else
+        QVERIFY(resolved.startsWith(root));
+#endif
     }
 
     void dangerousCommands()
@@ -168,6 +318,8 @@ private Q_SLOTS:
         Sandbox box(QDir::tempPath(), SandboxProfile::Workspace);
         QVERIFY(box.isAlwaysDeniedCommand(u"rm -rf /"_s));
         QVERIFY(box.isAlwaysDeniedCommand(u"rm -rf /*"_s));
+        QVERIFY(box.isAlwaysDeniedCommand(u"rm -rf //"_s));
+        QVERIFY(box.isAlwaysDeniedCommand(u"rm -rf /./*"_s));
         QVERIFY(box.isAlwaysDeniedCommand(u"rm -rf ~"_s));
         QVERIFY(box.isAlwaysDeniedCommand(u"rm -rf ~/Documents"_s));
         QVERIFY(box.isAlwaysDeniedCommand(u"rm -r /"_s));
@@ -180,6 +332,52 @@ private Q_SLOTS:
         QVERIFY(!box.isAlwaysDeniedCommand(u"rm -rf /tmp/build"_s));
         QVERIFY(!box.isAlwaysDeniedCommand(u"rm -rf src"_s));
         QVERIFY(!box.isAlwaysDeniedCommand(u"rm -rf ./build"_s));
+    }
+
+    void globPatternCannotWalkAroundDenyGlobs()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        QFile envFile(dir.filePath(u".env"_s));
+        QVERIFY(envFile.open(QIODevice::WriteOnly));
+        envFile.write("SECRET=1\n");
+        envFile.close();
+        QVERIFY(QDir().mkpath(dir.filePath(u".kateai"_s)));
+        QFile mcpFile(dir.filePath(u".kateai/mcp.json"_s));
+        QVERIFY(mcpFile.open(QIODevice::WriteOnly));
+        mcpFile.write("{}");
+        mcpFile.close();
+
+        Sandbox box(dir.path(), SandboxProfile::Workspace);
+        // The pattern text does not match the deny glob, but the shell expands
+        // it to the denied file, so the check has to look at the expansion.
+        QVERIFY(box.commandTouchesDeniedPath(u"cat .e*"_s));
+        QVERIFY(box.commandTouchesDeniedPath(u"cat .*nv"_s));
+        QVERIFY(box.commandTouchesDeniedPath(u"cat .kateai/mcp.jso?"_s));
+        // A quoted word must not swallow the rest of the command: the token
+        // after the closing quote is a path of its own.
+        QVERIFY(box.commandTouchesDeniedPath(u"cat \"a b.txt\" .env"_s));
+        // A pattern that expands to nothing denied keeps running.
+        QVERIFY(!box.commandTouchesDeniedPath(u"cat *.cpp"_s));
+        QVERIFY(!box.commandTouchesDeniedPath(u"cat nonexistent/*.txt"_s));
+    }
+
+    void alwaysDeniedCoversSeparatorAndHomeVariable()
+    {
+        Sandbox box(QDir::tempPath(), SandboxProfile::Workspace);
+        // "--" separates the flags from the target, and the home directory can
+        // be spelled with a variable. Both used to slip past the rule.
+        QVERIFY(box.isAlwaysDeniedCommand(u"rm -rf -- /"_s));
+        QVERIFY(box.isAlwaysDeniedCommand(u"rm -rf $HOME"_s));
+        QVERIFY(box.isAlwaysDeniedCommand(u"rm -rf ${HOME}"_s));
+        QVERIFY(box.isAlwaysDeniedCommand(u"rm --force --recursive /"_s));
+        QVERIFY(box.isAlwaysDeniedCommand(u"rm -rf --no-preserve-root -- /"_s));
+        // The program itself may be quoted or spelled with a path.
+        QVERIFY(box.isAlwaysDeniedCommand(u"\"/bin/rm\" -rf /"_s));
+        QVERIFY(box.isAlwaysDeniedCommand(u"/bin/rm -rf /"_s));
+        // A command that is not blocked must not be called dangerous either.
+        QVERIFY(box.isDangerousCommand(u"rm -rf -- /"_s));
+        QVERIFY(!box.isAlwaysDeniedCommand(u"rm -rf -- /etc/keep"_s));
     }
 
     void emptyWorkspaceRootStaysEmpty()
@@ -281,15 +479,27 @@ private Q_SLOTS:
         if (!QFile::link(dir.path() + u"/real"_s, dir.path() + u"/link"_s)) {
             QSKIP("Symlinks unavailable on this filesystem");
         }
-        QFile(dir.path() + u"/real/existing.txt"_s).open(QIODevice::WriteOnly);
+        {
+            QFile f(dir.path() + u"/real/existing.txt"_s);
+            QVERIFY(f.open(QIODevice::WriteOnly));
+        }
 
         Sandbox box(dir.path(), SandboxProfile::Workspace);
         QString error;
         // A link that stays inside the workspace must resolve and keep working.
-        const QString resolved = box.resolve(u"link/existing.txt"_s, &error, true);
+        // Normalize separators first: canonicalFilePath() may return native
+        // backslashes on Windows while the test compares with "/".
+        const QString resolved = QDir::fromNativeSeparators(box.resolve(u"link/existing.txt"_s, &error, true));
         QVERIFY2(!resolved.isEmpty(), qPrintable(error));
-        QVERIFY(resolved.startsWith(QDir(dir.path()).canonicalPath()));
+        const QString root = QDir::fromNativeSeparators(QDir(dir.path()).canonicalPath());
+#if defined(Q_OS_WIN)
+        QVERIFY(resolved.startsWith(root, Qt::CaseInsensitive));
+        QVERIFY(resolved.endsWith(u"existing.txt"_s));
+        QVERIFY(resolved.contains(QChar(u'/')));
+#else
+        QVERIFY(resolved.startsWith(root));
         QVERIFY(resolved.endsWith(u"/existing.txt"_s));
+#endif
         QVERIFY(box.allowsWrite(u"link/new.txt"_s, &error));
         // A link that points at the workspace root itself resolves inside too.
         if (QFile::link(dir.path(), dir.path() + u"/rootlink"_s)) {
@@ -431,20 +641,27 @@ private Q_SLOTS:
         Sandbox box(dir.path(), SandboxProfile::Strict);
         QString error;
         const QStringList command = box.wrapCommand(u"pwd"_s, &error);
+#if defined(Q_OS_LINUX)
         if (command.isEmpty()) {
             QSKIP(qPrintable(error));
         }
-#if defined(Q_OS_LINUX)
         QVERIFY(command.contains(u"--tmpfs"_s));
         QVERIFY(!command.contains(u"/bin/sh"_s));
         for (int i = 0; i + 2 < command.size(); ++i) {
             QVERIFY(!(command.at(i) == u"--ro-bind"_s && command.at(i + 1) == u"/"_s && command.at(i + 2) == u"/"_s));
         }
 #elif defined(Q_OS_MACOS)
+        if (command.isEmpty()) {
+            QSKIP(qPrintable(error));
+        }
         QVERIFY(command.contains(u"-p"_s));
         QVERIFY(command.join(u' ').contains(u"(deny default)"_s));
 #else
-        QVERIFY(!command.isEmpty());
+        // No isolation mechanism here: the strict profile must be refused
+        // rather than run unsandboxed. No SKIP: an empty command is the
+        // expected result on this platform.
+        QVERIFY(command.isEmpty());
+        QVERIFY(error.contains(u"not available"_s));
 #endif
     }
 
@@ -454,12 +671,20 @@ private Q_SLOTS:
         // leave files there that outlive the sandbox.
         QTemporaryDir dir;
         QVERIFY(dir.isValid());
-        for (SandboxProfile profile : {SandboxProfile::Strict, SandboxProfile::ReadOnly}) {
+        for (SandboxProfile profile : {SandboxProfile::Strict, SandboxProfile::ReadOnly, SandboxProfile::Workspace}) {
             Sandbox box(dir.path(), profile);
             QString error;
             const QStringList command = box.wrapCommand(u"pwd"_s, &error);
             if (command.isEmpty()) {
+#if defined(Q_OS_LINUX)
                 QSKIP(qPrintable(error));
+#else
+                // Outside Linux there is no bubblewrap: Strict is refused
+                // (empty), other profiles run unsandboxed. Neither writes to
+                // the host tmp through a sandbox mount, so there is nothing
+                // to check.
+                continue;
+#endif
             }
 #if defined(Q_OS_LINUX)
             // A private tmpfs, not the /tmp of the host.
@@ -490,6 +715,401 @@ private Q_SLOTS:
 #else
         QVERIFY(command.isEmpty());
         QVERIFY(error.contains(u"not available"_s));
+#endif
+    }
+
+    void linuxSandboxCommandCarriesNamespaceFlags()
+    {
+#if !defined(Q_OS_LINUX)
+        QSKIP("bubblewrap command construction is Linux-only");
+#else
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+
+        auto hasPair = [](const QStringList &args, const QString &first, const QString &second) {
+            for (int i = 0; i + 1 < args.size(); ++i) {
+                if (args.at(i) == first && args.at(i + 1) == second) {
+                    return true;
+                }
+            }
+            return false;
+        };
+
+        Sandbox strictBox(dir.path(), SandboxProfile::Strict);
+        QString error;
+        const QStringList strict = strictBox.wrapCommand(u"true"_s, &error);
+        if (strict.isEmpty()) {
+            QSKIP(qPrintable(error));
+        }
+        // Namespace isolation: PID, IPC, UTS, cgroup and network have their own
+        // view, and capabilities are dropped before the command starts.
+        QVERIFY(strict.contains(u"--unshare-pid"_s));
+        QVERIFY(strict.contains(u"--unshare-ipc"_s));
+        QVERIFY(strict.contains(u"--unshare-uts"_s));
+        QVERIFY(strict.contains(u"--unshare-cgroup-try"_s));
+        QVERIFY(strict.contains(u"--unshare-net"_s));
+        QVERIFY(strict.contains(u"--new-session"_s));
+        QVERIFY(hasPair(strict, u"--cap-drop"_s, u"ALL"_s));
+        QVERIFY(hasPair(strict, u"--tmpfs"_s, u"/"_s));
+        QVERIFY(hasPair(strict, u"--tmpfs"_s, u"/tmp"_s));
+        QVERIFY(hasPair(strict, u"--ro-bind"_s, u"/etc"_s));
+        // The host root must never be bound read-only as a whole.
+        QVERIFY(!hasPair(strict, u"--ro-bind"_s, u"/"_s));
+
+        Sandbox workspaceBox(dir.path(), SandboxProfile::Workspace);
+        const QStringList workspace = workspaceBox.wrapCommand(u"true"_s, &error);
+        QVERIFY(!workspace.isEmpty());
+        QVERIFY(!workspace.contains(u"--unshare-net"_s));
+        // The host /tmp is replaced by a private tmpfs, never bound through.
+        QVERIFY(hasPair(workspace, u"--tmpfs"_s, u"/tmp"_s));
+        QVERIFY(!hasPair(workspace, u"--bind"_s, u"/tmp"_s));
+        QVERIFY(hasPair(workspace, u"--ro-bind"_s, u"/"_s));
+        // Sandboxed commands do not source the login profile, which could
+        // re-export the variables the environment policy removed.
+        QVERIFY(workspace.contains(u"-c"_s));
+        QVERIFY(!workspace.contains(u"-lc"_s));
+        // A credential directory that exists on the host is masked with an
+        // empty tmpfs inside the sandbox, not merely blocked by the scanner.
+        const QString sshDirectory = QDir::homePath() + u"/.ssh"_s;
+        if (QFileInfo(sshDirectory).isDir()) {
+            QVERIFY2(hasPair(workspace, u"--tmpfs"_s, sshDirectory),
+                     "the SSH directory was not masked in the bubblewrap command");
+        }
+
+        Sandbox readOnlyBox(dir.path(), SandboxProfile::ReadOnly);
+        const QStringList readOnly = readOnlyBox.wrapCommand(u"true"_s, &error);
+        QVERIFY(!readOnly.isEmpty());
+        QVERIFY(readOnly.contains(u"--unshare-net"_s));
+        QVERIFY(hasPair(readOnly, u"--tmpfs"_s, u"/tmp"_s));
+
+        // A strict sandbox rooted at "/" would bind the host root writable over
+        // the tmpfs root, so it is refused instead of pretending to isolate.
+        Sandbox rootBox(QDir::rootPath(), SandboxProfile::Strict);
+        error.clear();
+        QVERIFY(rootBox.wrapCommand(u"true"_s, &error).isEmpty());
+        QVERIFY(error.contains(u"filesystem root"_s));
+#endif
+    }
+
+    void sandboxEnvironmentRemovesSecretsAndSessionChannels()
+    {
+#if !defined(Q_OS_UNIX)
+        QSKIP("Unix environment policy test");
+#else
+        const QByteArray oldSecret = qgetenv("KATEAI_TEST_API_KEY");
+        const QByteArray oldVisible = qgetenv("KATEAI_TEST_VISIBLE");
+        const QByteArray oldSock = qgetenv("SSH_AUTH_SOCK");
+        const QByteArray oldDisplay = qgetenv("DISPLAY");
+
+        qputenv("KATEAI_TEST_API_KEY", "do-not-leak");
+        qputenv("KATEAI_TEST_VISIBLE", "visible-value");
+        qputenv("SSH_AUTH_SOCK", "/tmp/fake-agent.sock");
+        qputenv("DISPLAY", ":99");
+
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        Sandbox workspaceBox(dir.path(), SandboxProfile::Workspace);
+        const QProcessEnvironment env = workspaceBox.processEnvironment();
+        QVERIFY(!env.contains(u"KATEAI_TEST_API_KEY"_s));
+        QCOMPARE(env.value(u"KATEAI_TEST_VISIBLE"_s), u"visible-value"_s);
+        QVERIFY(!env.contains(u"SSH_AUTH_SOCK"_s));
+        QVERIFY(!env.contains(u"DISPLAY"_s));
+        QCOMPARE(env.value(u"TMPDIR"_s), u"/tmp"_s);
+        QVERIFY(!env.value(u"XDG_RUNTIME_DIR"_s).isEmpty());
+
+        Sandbox strictBox(dir.path(), SandboxProfile::Strict);
+        const QProcessEnvironment strictEnv = strictBox.processEnvironment();
+#if defined(Q_OS_LINUX)
+        QCOMPARE(strictEnv.value(u"HOME"_s), u"/tmp/kateai-home"_s);
+        QCOMPARE(strictEnv.value(u"XDG_RUNTIME_DIR"_s), u"/tmp/kateai-home/run"_s);
+        QCOMPARE(strictEnv.value(u"TMPDIR"_s), u"/tmp"_s);
+        QCOMPARE(strictEnv.value(u"PATH"_s), u"/usr/local/bin:/usr/bin:/bin"_s);
+#endif
+
+        // Off is explicitly unsandboxed and keeps the ambient environment.
+        Sandbox offBox(dir.path(), SandboxProfile::Off);
+        QCOMPARE(offBox.processEnvironment().value(u"KATEAI_TEST_VISIBLE"_s), u"visible-value"_s);
+
+        auto restore = [](const char *name, const QByteArray &value) {
+            if (value.isNull()) {
+                qunsetenv(name);
+            } else {
+                qputenv(name, value);
+            }
+        };
+        restore("KATEAI_TEST_API_KEY", oldSecret);
+        restore("KATEAI_TEST_VISIBLE", oldVisible);
+        restore("SSH_AUTH_SOCK", oldSock);
+        restore("DISPLAY", oldDisplay);
+#endif
+    }
+
+    void strictRuntimeConfinesFilesystemNetworkPidAndEnvironment()
+    {
+#if !defined(Q_OS_LINUX)
+        QSKIP("bubblewrap runtime isolation is Linux-only");
+#else
+        if (!bubblewrapRuntimeWorks()) {
+            QSKIP("bubblewrap cannot create the required namespaces in this environment");
+        }
+
+        QTemporaryDir workspace;
+        QTemporaryDir outside;
+        QVERIFY(workspace.isValid());
+        QVERIFY(outside.isValid());
+        const QString secretPath = outside.filePath(u"secret.txt"_s);
+        {
+            QFile secret(secretPath);
+            QVERIFY(secret.open(QIODevice::WriteOnly));
+            secret.write("outside-secret\n");
+        }
+        {
+            QFile inside(workspace.filePath(u"inside.txt"_s));
+            QVERIFY(inside.open(QIODevice::WriteOnly));
+            inside.write("inside\n");
+        }
+
+        Sandbox box(workspace.path(), SandboxProfile::Strict);
+
+        // A path outside the workspace is not mounted at all.
+        SandboxRunResult result = runSandboxed(box, u"cat "_s + shellQuote(secretPath) + u" 2>&1"_s);
+        if (!result.started) {
+            QSKIP(qPrintable(result.output));
+        }
+        QVERIFY2(result.exitCode != 0, qPrintable(result.output));
+        QVERIFY(!result.output.contains(u"outside-secret"_s));
+
+        // The workspace is writable through the relative path...
+        result = runSandboxed(box, u"printf 'workspace-write' > relative.txt && cat relative.txt"_s);
+        QVERIFY2(result.exitCode == 0, qPrintable(result.output));
+        QVERIFY(result.output.contains(u"workspace-write"_s));
+        QVERIFY(QFileInfo::exists(workspace.filePath(u"relative.txt"_s)));
+
+        // ...and through its absolute host path.
+        result = runSandboxed(box, u"printf 'absolute-write' > "_s
+                                       + shellQuote(workspace.filePath(u"absolute.txt"_s)));
+        QVERIFY2(result.exitCode == 0, qPrintable(result.output));
+        QVERIFY(QFileInfo::exists(workspace.filePath(u"absolute.txt"_s)));
+
+        // Writing to a sibling of the workspace does not reach the host.
+        const QString escapePath = outside.filePath(u"escaped.txt"_s);
+        result = runSandboxed(box, u"echo escaped > "_s + shellQuote(escapePath));
+        QVERIFY2(result.exitCode != 0, qPrintable(result.output));
+        QVERIFY(!QFileInfo::exists(escapePath));
+
+        // A file in the host /tmp is not visible: /tmp is a private tmpfs.
+        QTemporaryFile hostTmp(QDir::tempPath() + u"/kateai-host-tmp-XXXXXX"_s);
+        QVERIFY(hostTmp.open());
+        hostTmp.write("host-tmp-secret\n");
+        hostTmp.flush();
+        result = runSandboxed(box, u"cat "_s + shellQuote(hostTmp.fileName()) + u" 2>&1"_s);
+        QVERIFY(result.exitCode != 0);
+        QVERIFY(!result.output.contains(u"host-tmp-secret"_s));
+
+        // The host PID is not visible in the new PID namespace.
+        result = runSandboxed(box, u"test -e /proc/"_s
+                                       + QString::number(QCoreApplication::applicationPid())
+                                       + u" && echo visible || echo hidden"_s);
+        QVERIFY2(result.exitCode == 0, qPrintable(result.output));
+        QVERIFY(result.output.contains(u"hidden"_s));
+        QVERIFY(!result.output.contains(u"visible"_s));
+
+        // The strict profile gets a private HOME, not the real one.
+        result = runSandboxed(box, u"printf %s \"$HOME\""_s);
+        QVERIFY2(result.exitCode == 0, qPrintable(result.output));
+        QCOMPARE(result.output.trimmed(), u"/tmp/kateai-home"_s);
+
+        // The network namespace has only loopback; the host interfaces are gone.
+        const QStringList hostInterfaces = hostNetworkInterfaces();
+        result = runSandboxed(box, u"cat /proc/net/dev"_s);
+        QVERIFY2(result.exitCode == 0, qPrintable(result.output));
+        QVERIFY(result.output.contains(u"lo:"_s));
+        for (const QString &interface : hostInterfaces) {
+            if (interface == u"lo"_s || interface.isEmpty()) {
+                continue;
+            }
+            QVERIFY2(!result.output.contains(interface + u':'),
+                     qPrintable(u"host interface %1 leaked into the sandbox"_s.arg(interface)));
+        }
+
+        // Ambient credentials are not present in the command's environment.
+        qputenv("KATEAI_TEST_API_KEY", "do-not-leak");
+        result = runSandboxed(box, u"printenv KATEAI_TEST_API_KEY || true"_s);
+        qunsetenv("KATEAI_TEST_API_KEY");
+        QVERIFY2(result.exitCode == 0, qPrintable(result.output));
+        QVERIFY(!result.output.contains(u"do-not-leak"_s));
+#endif
+    }
+
+    void mountPointsBelowADirectoryThatCannotBeReadAreCreated()
+    {
+#if !defined(Q_OS_LINUX)
+        QSKIP("bubblewrap mount setup is Linux-only");
+#else
+        // A parent the user may only traverse is enough for a shell, but
+        // bubblewrap used to open every mount point parent for reading and
+        // failed with "Can't mkdir parents ... Permission denied" before a
+        // single command ran. The sandbox has to cover such a parent with a
+        // private tmpfs and bind the workspace back, or no mount inside the
+        // workspace can be created.
+        const QString base = QDir::homePath();
+        const QString tempRoot = QDir::cleanPath(QDir::tempPath());
+        if (base.isEmpty() || base == u"/"_s || base == tempRoot || base.startsWith(tempRoot + u'/')) {
+            QSKIP("the home directory is not usable for this check");
+        }
+        QTemporaryDir outer(base + u"/.kateai-sandbox-XXXXXX"_s);
+        QVERIFY(outer.isValid());
+        const QString blocked = outer.filePath(u"blocked"_s);
+        const QString workspace = blocked + u"/workspace"_s;
+        QVERIFY(QDir().mkpath(workspace));
+
+        const QFileDevice::Permissions restricted = QFileDevice::WriteOwner | QFileDevice::ExeOwner;
+        const QFileDevice::Permissions restored =
+            QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner;
+        QVERIFY(QFile::setPermissions(blocked, restricted));
+        if (QFileInfo(blocked).isReadable()) {
+            QFile::setPermissions(blocked, restored);
+            QSKIP("the test user can read every directory (running as root?)");
+        }
+        if (!bubblewrapRuntimeWorks()) {
+            QFile::setPermissions(blocked, restored);
+            QSKIP("bubblewrap cannot create the required namespaces in this environment");
+        }
+
+        Sandbox box(workspace, SandboxProfile::Workspace);
+        QString error;
+        const QStringList wrapped = box.wrapCommand(u"pwd"_s, &error);
+        SandboxRunResult result = runSandboxed(box, u"echo inside > inside.txt"_s);
+        // Restore before any assertion can return early, so the temporary
+        // directory stays removable.
+        QFile::setPermissions(blocked, restored);
+
+        QVERIFY2(!wrapped.isEmpty(), qPrintable(error));
+        // The unreadable directory (or the unreadable ancestor that hides it)
+        // is replaced by a tmpfs and the child on the way to the workspace is
+        // bound back, so the mount points below it stay usable.
+        bool covered = false;
+        for (int i = 0; i + 1 < wrapped.size(); ++i) {
+            if (wrapped.at(i) != u"--tmpfs"_s) {
+                continue;
+            }
+            const QString ancestor = wrapped.at(i + 1);
+            if (ancestor.isEmpty() || ancestor == u"/"_s
+                || !(workspace == ancestor || workspace.startsWith(ancestor + u'/'))) {
+                continue;
+            }
+            const QString relative = workspace.mid(ancestor.size() + 1);
+            const QString child = ancestor + u'/' + relative.section(u'/', 0, 0);
+            for (int j = 0; j + 2 < wrapped.size(); ++j) {
+                if ((wrapped.at(j) == u"--ro-bind"_s || wrapped.at(j) == u"--bind"_s)
+                    && wrapped.at(j + 1) == child && wrapped.at(j + 2) == child) {
+                    covered = true;
+                }
+            }
+        }
+        QVERIFY2(covered, "the unreadable parent was not covered and restored");
+        QVERIFY2(result.exitCode == 0, qPrintable(result.output));
+        QVERIFY(QFileInfo::exists(workspace + u"/inside.txt"_s));
+#endif
+    }
+
+    void workspaceRuntimeCannotWriteOutsideTheWorkspace()
+    {
+#if !defined(Q_OS_LINUX)
+        QSKIP("bubblewrap runtime isolation is Linux-only");
+#else
+        if (!bubblewrapRuntimeWorks()) {
+            QSKIP("bubblewrap cannot create the required namespaces in this environment");
+        }
+
+        QTemporaryDir workspace;
+        QTemporaryDir outside;
+        QVERIFY(workspace.isValid());
+        QVERIFY(outside.isValid());
+
+        Sandbox box(workspace.path(), SandboxProfile::Workspace);
+
+        SandboxRunResult result = runSandboxed(box, u"echo inside > inside.txt"_s);
+        if (!result.started) {
+            QSKIP(qPrintable(result.output));
+        }
+        QVERIFY2(result.exitCode == 0, qPrintable(result.output));
+        QVERIFY(QFileInfo::exists(workspace.filePath(u"inside.txt"_s)));
+
+        const QString escapePath = outside.filePath(u"escaped.txt"_s);
+        result = runSandboxed(box, u"echo escaped > "_s + shellQuote(escapePath));
+        QVERIFY2(result.exitCode != 0, qPrintable(result.output));
+        QVERIFY(!QFileInfo::exists(escapePath));
+
+        // The workspace is writable even when named by its absolute path.
+        result = runSandboxed(box, u"echo absolute > "_s
+                                       + shellQuote(workspace.filePath(u"absolute.txt"_s)));
+        QVERIFY2(result.exitCode == 0, qPrintable(result.output));
+        QVERIFY(QFileInfo::exists(workspace.filePath(u"absolute.txt"_s)));
+#endif
+    }
+
+    void readOnlyRuntimeBlocksWritesAndNetwork()
+    {
+#if !defined(Q_OS_LINUX)
+        QSKIP("bubblewrap runtime isolation is Linux-only");
+#else
+        if (!bubblewrapRuntimeWorks()) {
+            QSKIP("bubblewrap cannot create the required namespaces in this environment");
+        }
+
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+        Sandbox box(workspace.path(), SandboxProfile::ReadOnly);
+
+        SandboxRunResult result = runSandboxed(box, u"echo nope > blocked.txt"_s);
+        if (!result.started) {
+            QSKIP(qPrintable(result.output));
+        }
+        QVERIFY2(result.exitCode != 0, qPrintable(result.output));
+        QVERIFY(!QFileInfo::exists(workspace.filePath(u"blocked.txt"_s)));
+
+        const QStringList hostInterfaces = hostNetworkInterfaces();
+        result = runSandboxed(box, u"cat /proc/net/dev"_s);
+        QVERIFY2(result.exitCode == 0, qPrintable(result.output));
+        QVERIFY(result.output.contains(u"lo:"_s));
+        for (const QString &interface : hostInterfaces) {
+            if (interface == u"lo"_s || interface.isEmpty()) {
+                continue;
+            }
+            QVERIFY2(!result.output.contains(interface + u':'),
+                     qPrintable(u"host interface %1 leaked into the sandbox"_s.arg(interface)));
+        }
+#endif
+    }
+
+    void sandboxedWorkingDirectoryIsConfinedToTheWorkspace()
+    {
+#if !defined(Q_OS_LINUX)
+        QSKIP("bubblewrap working-directory handling is Linux-only");
+#else
+        QTemporaryDir workspace;
+        QTemporaryDir outside;
+        QVERIFY(workspace.isValid());
+        QVERIFY(outside.isValid());
+        QVERIFY(QDir().mkpath(workspace.filePath(u"sub/dir"_s)));
+
+        Sandbox box(workspace.path(), SandboxProfile::Workspace);
+        QString error;
+        const QStringList inside = box.wrapCommand(u"pwd"_s, &error, workspace.filePath(u"sub/dir"_s));
+        QVERIFY2(!inside.isEmpty(), qPrintable(error));
+        bool changed = false;
+        for (int i = 0; i + 1 < inside.size(); ++i) {
+            if (inside.at(i) == u"--chdir"_s && inside.at(i + 1) == workspace.filePath(u"sub/dir"_s)) {
+                changed = true;
+            }
+        }
+        QVERIFY(changed);
+
+        error.clear();
+        const QStringList escaped = box.wrapCommand(u"pwd"_s, &error, outside.path());
+        QVERIFY(escaped.isEmpty());
+        QVERIFY(error.contains(u"workspace"_s));
 #endif
     }
 

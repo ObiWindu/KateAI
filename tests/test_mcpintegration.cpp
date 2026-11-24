@@ -1,6 +1,7 @@
 #include "mcp.h"
 #include "permissions.h"
 #include "sandbox.h"
+#include "test_python.h"
 #include "types.h"
 
 #include <QCoreApplication>
@@ -95,7 +96,7 @@ private Q_SLOTS:
     {
         McpServerConfig config;
         config.name = u"mock"_s;
-        config.command = u"python3"_s;
+        config.command = python3Command();
         config.args = QStringList({m_server});
         config.timeoutMs = 10000;
 
@@ -140,7 +141,7 @@ private Q_SLOTS:
     {
         McpServerConfig config;
         config.name = u"mock"_s;
-        config.command = u"python3"_s;
+        config.command = python3Command();
         config.args = QStringList({m_server});
         config.timeoutMs = 10000;
 
@@ -223,7 +224,7 @@ private Q_SLOTS:
     {
         McpServerConfig config;
         config.name = u"off"_s;
-        config.command = u"python3"_s;
+        config.command = python3Command();
         config.args = QStringList({m_server});
         config.enabled = false;
 

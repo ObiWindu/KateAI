@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <QAtomicInt>
 #include <QDateTime>
 #include <QList>
 #include <QMutex>
@@ -60,12 +61,18 @@ public:
     // checkpointCreated() or failed(); there is no return value.
     void createCheckpointAsync(const QString &label);
     QList<CheckpointInfo> checkpoints() const;
-    // Writes the checkpoint's file contents back into the workspace.
-    bool restoreCheckpoint(const QString &id, QString *error = nullptr);
+    // Writes the checkpoint's file contents back into the workspace. Unless
+    // `createSafetySnapshot` is false, the current worktree is snapshotted
+    // first, so changes made after the checkpoint -- including edits made
+    // outside KateAI -- can still be recovered from the new checkpoint.
+    // The restore fails closed when that snapshot cannot be written.
+    bool restoreCheckpoint(const QString &id, QString *error = nullptr, bool createSafetySnapshot = true);
     // Unified diff between the checkpoint and the current working tree.
     QString diffAgainstCheckpoint(const QString &id, int maxLines = 400) const;
     // Number of files that differ from the checkpoint.
     int changedFileCount(const QString &id) const;
+    // Paths (relative to the workspace) that differ from the checkpoint.
+    QStringList changedFiles(const QString &id) const;
 
 Q_SIGNALS:
     void checkpointCreated(const QString &id, const QString &label);
@@ -96,6 +103,11 @@ private:
     void pruneStaleShadowRepositories() const;
     // Mutex for thread-safe checkpoint operations (recursive to allow prune() from createCheckpoint())
     mutable QRecursiveMutex m_checkpointMutex;
+    // Snapshots currently running on the global thread pool. The destructor
+    // waits for them: a worker holds m_checkpointMutex and must never
+    // outlive it (destroying a locked QMutex then touching freed memory
+    // crashes, e.g. stopping a turn while its pre-mutation snapshot runs).
+    QAtomicInt m_inFlightSnapshots{0};
     // The git commands that run in the background. They are stopped with the
     // manager.
     QList<QProcess *> m_detachedProcesses;
@@ -105,6 +117,7 @@ private:
     int m_retention = 20;
     mutable bool m_gitChecked = false;
     mutable bool m_gitAvailable = false;
+    mutable qint64 m_gitProbeMs = 0;
     mutable QString m_unavailableReason;
 };
 

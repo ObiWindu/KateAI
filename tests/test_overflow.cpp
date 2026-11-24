@@ -2,7 +2,9 @@
 #include "agentloop.h"
 #include "chattheme.h"
 #include "chatwidget.h"
+#include "promptedit.h"
 #include "sessionstoreisolation.h"
+#include "test_python.h"
 #include "toolcallwidget.h"
 #include "types.h"
 
@@ -28,6 +30,7 @@
 #include <QTemporaryDir>
 #include <QTest>
 #include <QTimer>
+#include <QVBoxLayout>
 
 using namespace Qt::Literals::StringLiterals;
 using namespace KateAi;
@@ -163,7 +166,7 @@ private Q_SLOTS:
         settings.provider = Provider::Acp;
         settings.apiFormat = ApiFormat::AcpNative;
         settings.acpAgentId = u"mock-perm"_s;
-        settings.acpCommand = u"python3"_s;
+        settings.acpCommand = python3Command();
         settings.acpArgs = u'"' + m_agent + u"\" permission"_s;
         settings.permissionMode = PermissionMode::Ask;
         settings.sandbox = SandboxProfile::Off;
@@ -370,7 +373,7 @@ private Q_SLOTS:
         settings.provider = Provider::Acp;
         settings.apiFormat = ApiFormat::AcpNative;
         settings.acpAgentId = u"mock-live"_s;
-        settings.acpCommand = u"python3"_s;
+        settings.acpCommand = python3Command();
         settings.acpArgs = u'"' + m_agent + u"\" plain"_s;
         settings.permissionMode = PermissionMode::AlwaysApprove;
         settings.sandbox = SandboxProfile::Off;
@@ -469,7 +472,7 @@ private Q_SLOTS:
         settings.provider = Provider::Acp;
         settings.apiFormat = ApiFormat::AcpNative;
         settings.acpAgentId = u"mock-stream"_s;
-        settings.acpCommand = u"python3"_s;
+        settings.acpCommand = python3Command();
         settings.acpArgs = u'"' + m_agent + u"\" toolstream"_s;
         settings.permissionMode = PermissionMode::AlwaysApprove;
         settings.sandbox = SandboxProfile::Off;
@@ -522,6 +525,105 @@ private Q_SLOTS:
         QVERIFY2(readout->isVisible(), "context readout is hidden");
         QVERIFY2(QRegularExpression(u"^\\d{1,3}% ctx$"_s).match(readout->text()).hasMatch(),
                  qPrintable(u"context readout text was '%1'"_s.arg(readout->text())));
+
+        // The readout belongs to the strip below the input card and hugs its
+        // right edge, not the card's button row.
+        auto *card = widget.findChild<QWidget *>(u"composerCard"_s);
+        QVERIFY2(card, "input card not found");
+        QVERIFY2(!card->isAncestorOf(readout), "context readout is still inside the input card");
+
+        QApplication::processEvents();
+        const int cardBottom = card->mapTo(&widget, QPoint(0, card->height())).y();
+        const int readoutTop = readout->mapTo(&widget, QPoint(0, 0)).y();
+        QVERIFY2(readoutTop >= cardBottom,
+                 qPrintable(QStringLiteral("readout top %1 is above the card bottom %2")
+                                .arg(readoutTop)
+                                .arg(cardBottom)));
+        QVERIFY2(readout->mapTo(&widget, readout->rect().topRight()).x() > widget.width() * 3 / 4,
+                 "context readout is not flush with the right edge");
+    }
+
+    void acpAgentShowsTheSlashHintBeforeCommandsArrive()
+    {
+        // Restoring an ACP conversation leaves the agent process stopped, so
+        // no available_commands notification has arrived when the composer is
+        // first shown. The "/" hint still has to be there with the rest.
+        ChatWidget widget;
+        widget.resize(900, 700);
+        widget.show();
+        Settings settings;
+        settings.provider = Provider::Acp;
+        settings.apiFormat = ApiFormat::AcpNative;
+        // The agent advertised these commands in an earlier session. They are
+        // cached per agent so a freshly opened window can show the real menu
+        // without waiting for a live session.
+        settings.acpAgentCommands =
+            u"{\"grok-build\":[{\"name\":\"review\",\"description\":\"Review the changes\"}]}"_s;
+        widget.setSettings(settings);
+        QApplication::processEvents();
+
+        auto *prompt = widget.findChild<PromptEdit *>();
+        QVERIFY2(prompt, "composer not found");
+        QVERIFY2(prompt->placeholderText().contains(u"/ for commands"_s),
+                 qPrintable(u"placeholder was '%1'"_s.arg(prompt->placeholderText())));
+
+        prompt->setPlainText(u"/"_s);
+        prompt->moveCursor(QTextCursor::End);
+        QApplication::processEvents();
+        auto *popup = widget.findChild<QWidget *>(u"promptCommandPopup"_s);
+        QVERIFY2(popup, "command popup not found");
+        QVERIFY2(popup->isVisible(), "the cached commands did not open the popup");
+        QCOMPARE(widget.findChildren<QLabel *>(u"promptCommandRow"_s).size(), 1);
+
+        // A non-ACP provider cannot run the advertised commands, so the hint
+        // goes away with the agent.
+        settings.provider = Provider::OpenAI;
+        settings.apiFormat = ApiFormat::OpenAICompatible;
+        widget.setSettings(settings);
+        QVERIFY(!prompt->placeholderText().contains(u"/ for commands"_s));
+        QVERIFY(!popup->isVisible());
+    }
+
+    void slashPopupOverlaysTheWholeChatPanel()
+    {
+        // A chat panel docked inside a host window: the command list has to
+        // cover the transcript above the composer. Parented to the window it
+        // was painted behind the docked panel and only the part over the input
+        // area showed.
+        QWidget window;
+        auto *layout = new QVBoxLayout(&window);
+        auto *widget = new ChatWidget(&window);
+        layout->addWidget(widget);
+        window.resize(900, 700);
+        window.show();
+
+        Settings settings;
+        settings.provider = Provider::Acp;
+        settings.apiFormat = ApiFormat::AcpNative;
+        settings.acpAgentCommands =
+            u"{\"grok-build\":[{\"name\":\"review\",\"description\":\"Review the changes\"}]}"_s;
+        widget->setSettings(settings);
+        QApplication::processEvents();
+
+        auto *prompt = widget->findChild<PromptEdit *>();
+        QVERIFY2(prompt, "composer not found");
+        prompt->setPlainText(u"/"_s);
+        prompt->moveCursor(QTextCursor::End);
+        QApplication::processEvents();
+
+        auto *popup = widget->findChild<QWidget *>(u"promptCommandPopup"_s);
+        QVERIFY2(popup, "command popup not found");
+        QVERIFY2(popup->isVisible(), "the popup stayed hidden");
+        QCOMPARE(popup->parentWidget(), widget);
+
+        // It sits over the transcript, not just over the input card.
+        auto *composer = widget->findChild<QWidget *>(u"composerContainer"_s);
+        QVERIFY2(composer, "composer container not found");
+        const int composerTop = composer->mapTo(widget, QPoint(0, 0)).y();
+        QVERIFY2(popup->geometry().top() < composerTop,
+                 qPrintable(QStringLiteral("popup top %1 is not above the composer top %2")
+                                .arg(popup->geometry().top())
+                                .arg(composerTop)));
     }
 
     void installedAgentClickShowsModels()
@@ -534,7 +636,7 @@ private Q_SLOTS:
         settings.provider = Provider::Acp;
         settings.apiFormat = ApiFormat::AcpNative;
         settings.acpAgentId = u"mock-one"_s;
-        settings.acpCommand = u"python3"_s;
+        settings.acpCommand = python3Command();
         settings.acpArgs = u'"' + m_agent + u"\" models"_s;
         settings.permissionMode = PermissionMode::Ask;
         settings.sandbox = SandboxProfile::Off;
@@ -545,7 +647,7 @@ private Q_SLOTS:
         one.insert(u"name"_s, u"Mock One"_s);
         one.insert(u"description"_s, u"first mock agent"_s);
         one.insert(u"version"_s, u"1.0"_s);
-        one.insert(u"command"_s, u"python3"_s);
+        one.insert(u"command"_s, python3Command());
         one.insert(u"args"_s, QJsonArray{m_agent, u"models"_s});
         installed.append(one);
         QJsonObject two;
@@ -553,7 +655,7 @@ private Q_SLOTS:
         two.insert(u"name"_s, u"Mock Two"_s);
         two.insert(u"description"_s, u"second mock agent"_s);
         two.insert(u"version"_s, u"1.0"_s);
-        two.insert(u"command"_s, u"python3"_s);
+        two.insert(u"command"_s, python3Command());
         two.insert(u"args"_s, QJsonArray{m_agent, u"legacy-models"_s});
         installed.append(two);
         settings.acpInstalledAgents = QString::fromUtf8(QJsonDocument(installed).toJson(QJsonDocument::Compact));

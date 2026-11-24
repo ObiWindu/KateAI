@@ -4,11 +4,14 @@
  */
 
 #include "settings.h"
+#include "credentialstore.h"
 #include "websearch.h"
 
 #include <KConfigGroup>
 #include <QDebug>
 #include <QFile>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <KSharedConfig>
 
 using namespace Qt::Literals::StringLiterals;
@@ -21,21 +24,105 @@ static KConfigGroup group()
     return KConfigGroup(KSharedConfig::openConfig(), u"KateAI"_s);
 }
 
+static QJsonObject routeToJson(const ModelRoute &route)
+{
+    return QJsonObject{{u"provider"_s, providerId(route.provider)},
+                       {u"model"_s, route.model},
+                       {u"effort"_s, route.effort}};
+}
+
+static ModelRoute routeFromJson(const QJsonObject &object, Provider fallback)
+{
+    ModelRoute route;
+    const QString id = object.value(u"provider"_s).toString().trimmed();
+    route.provider = id.isEmpty() ? fallback : providerFromId(id);
+    route.model = object.value(u"model"_s).toString();
+    route.effort = object.value(u"effort"_s).toString();
+    return route;
+}
+
+static QJsonObject orchestrationToJson(const OrchestrationSettings &settings)
+{
+    QJsonObject object;
+    object.insert(u"enabled"_s, settings.enabled);
+    object.insert(u"planner"_s, routeToJson(settings.planner));
+    object.insert(u"executor"_s, routeToJson(settings.executor));
+    object.insert(u"maxReplans"_s, settings.maxReplans);
+    object.insert(u"maxPlannerSteps"_s, settings.maxPlannerSteps);
+    object.insert(u"maxReviewRounds"_s, settings.maxReviewRounds);
+    object.insert(u"reviewMode"_s, settings.reviewMode);
+    object.insert(u"showPlannerActivity"_s, settings.showPlannerActivity);
+    return object;
+}
+
+static OrchestrationSettings orchestrationFromJson(const QJsonObject &object)
+{
+    OrchestrationSettings settings;
+    if (object.isEmpty()) {
+        return settings;
+    }
+    settings.enabled = object.value(u"enabled"_s).toBool(false);
+    settings.planner = routeFromJson(object.value(u"planner"_s).toObject(), Provider::OpenAI);
+    settings.executor = routeFromJson(object.value(u"executor"_s).toObject(), Provider::DeepSeek);
+    settings.maxReplans = qBound(0, object.value(u"maxReplans"_s).toInt(3), 20);
+    settings.maxPlannerSteps = qBound(1, object.value(u"maxPlannerSteps"_s).toInt(12), 100);
+    settings.maxReviewRounds = qBound(0, object.value(u"maxReviewRounds"_s).toInt(2), 10);
+    settings.reviewMode = object.value(u"reviewMode"_s).toString(QStringLiteral("auto")).toLower();
+    if (settings.reviewMode != u"auto"_s && settings.reviewMode != u"always"_s
+        && settings.reviewMode != u"off"_s) {
+        settings.reviewMode = u"auto"_s;
+    }
+    settings.showPlannerActivity = object.value(u"showPlannerActivity"_s).toBool(true);
+    return settings;
+}
+
 Settings SettingsStore::load()
 {
+    // Move any pre-0.4.0 plaintext keys into the secure store before reading.
+    CredentialStore::migrateLegacyKateConfig();
     const KConfigGroup g = group();
+
+    // Versioned configuration migration. v0 -> v1 relocated API keys from this
+    // plaintext file into CredentialStore (the call above); no setting changes
+    // shape. A config written by a newer KateAI is read on a best-effort basis
+    // and the unknown keys are ignored rather than rewritten.
+    const int storedVersion = g.readEntry(u"ConfigVersion"_s, 0);
+    if (storedVersion > configVersion()) {
+        qWarning() << "KateAI: the configuration was written by a newer release"
+                   << storedVersion << ">" << configVersion();
+    }
+    // v1 -> v2 (0.9): no key moved. The sub-agent and skill settings are
+    // additive and default safely, so a v1 config is read as-is and rewritten
+    // with version 2 on the next save. v2 -> v3 (0.10) adds the Orchestration
+    // JSON block, also additive; a v2 config stays single-model until the user
+    // enables the pair.
+    if (storedVersion > 0 && storedVersion < 3) {
+        qInfo() << "KateAI: upgrading configuration" << storedVersion << "->" << configVersion();
+    }
     Settings s;
     s.provider = providerFromId(g.readEntry(u"Provider"_s, providerId(Provider::Grok)));
-    s.grokApiKey = g.readEntry(u"GrokApiKey"_s, QString());
-    s.openaiApiKey = g.readEntry(u"OpenAIApiKey"_s, QString());
-    s.openrouterApiKey = g.readEntry(u"OpenRouterApiKey"_s, QString());
-    s.deepseekApiKey = g.readEntry(u"DeepSeekApiKey"_s, QString());
-    s.openaiCompatibleApiKey = g.readEntry(u"OpenAICompatibleApiKey"_s, QString());
-    s.claudeCompatibleApiKey = g.readEntry(u"ClaudeCompatibleApiKey"_s, QString());
-    s.kiloApiKey = g.readEntry(u"KiloApiKey"_s, QString());
-    s.acpApiKey = g.readEntry(u"AcpApiKey"_s, QString());
+    // Credentials live in the secure store (KWallet or owner-only fallback).
+    // Fall back to the legacy plaintext entry so a not-yet-migrated install
+    // keeps working; migration clears the legacy copy on the next save.
+    auto cred = [](const QString &id, const QString &legacyKey, const KConfigGroup &grp) {
+        bool ok = false;
+        const QString v = CredentialStore::load(id, &ok);
+        if (ok && !v.isEmpty()) {
+            return v;
+        }
+        return grp.readEntry(legacyKey, QString());
+    };
+    s.grokApiKey = cred(u"grok-api-key"_s, u"GrokApiKey"_s, g);
+    s.openaiApiKey = cred(u"openai-api-key"_s, u"OpenAIApiKey"_s, g);
+    s.openrouterApiKey = cred(u"openrouter-api-key"_s, u"OpenRouterApiKey"_s, g);
+    s.deepseekApiKey = cred(u"deepseek-api-key"_s, u"DeepSeekApiKey"_s, g);
+    s.openaiCompatibleApiKey = cred(u"openai-compatible-api-key"_s, u"OpenAICompatibleApiKey"_s, g);
+    s.claudeCompatibleApiKey = cred(u"claude-compatible-api-key"_s, u"ClaudeCompatibleApiKey"_s, g);
+    s.kiloApiKey = cred(u"kilo-api-key"_s, u"KiloApiKey"_s, g);
+    s.acpApiKey = cred(u"acp-api-key"_s, u"AcpApiKey"_s, g);
     s.acpInstalledAgents = g.readEntry(u"AcpInstalledAgents"_s, QString());
     s.acpAgentModels = g.readEntry(u"AcpAgentModels"_s, QString());
+    s.acpAgentCommands = g.readEntry(u"AcpAgentCommands"_s, QString());
     // Models are read from the provider, not hard-coded here; an empty entry
     // simply means "not chosen yet" and the fetched catalogue fills it in.
     s.grokModel = g.readEntry(u"GrokModel"_s, QString());
@@ -47,7 +134,7 @@ Settings SettingsStore::load()
     s.kiloModel = g.readEntry(u"KiloModel"_s, QString());
     s.acpModel = g.readEntry(u"AcpModel"_s, QString());
     s.acpEffort = g.readEntry(u"AcpEffort"_s, QString());
-    s.opencodeApiKey = g.readEntry(u"OpenCodeApiKey"_s, QString());
+    s.opencodeApiKey = cred(u"opencode-api-key"_s, u"OpenCodeApiKey"_s, g);
     s.opencodeModel = g.readEntry(u"OpenCodeModel"_s, QString());
     s.opencodeUrl = g.readEntry(u"OpenCodeUrl"_s, u"https://opencode.ai/zen/v1"_s);
     s.deepseekUrl = g.readEntry(u"DeepSeekUrl"_s, u"https://api.deepseek.com"_s);
@@ -111,17 +198,15 @@ Settings SettingsStore::load()
     s.completionContextSuffixChars = g.readEntry(u"CompletionContextSuffixChars"_s, 1500);
     s.completionAutoTriggerDelayMs = g.readEntry(u"CompletionAutoTriggerDelayMs"_s, 800);
     s.contextCompressionLevel = g.readEntry(u"ContextCompressionLevel"_s, 1);
-    s.maxGraphNodes = g.readEntry(u"MaxGraphNodes"_s, 50);
-    s.maxGraphEdges = g.readEntry(u"MaxGraphEdges"_s, 100);
+    s.maxGraphNodes = g.readEntry(u"MaxGraphNodes"_s, 80);
+    s.maxGraphEdges = g.readEntry(u"MaxGraphEdges"_s, 160);
     s.compressProjectGraph = g.readEntry(u"CompressProjectGraph"_s, true);
-    s.includeFileContents = g.readEntry(u"IncludeFileContents"_s, true);
-    s.maxFileContentLength = g.readEntry(u"MaxFileContentLength"_s, 500);
     s.compressEditorContext = g.readEntry(u"CompressEditorContext"_s, true);
-    s.maxEditorContextLength = g.readEntry(u"MaxEditorContextLength"_s, 4000);
+    s.maxEditorContextLength = g.readEntry(u"MaxEditorContextLength"_s, 8000);
     s.compressProjectInstructions = g.readEntry(u"CompressProjectInstructions"_s, true);
-    s.maxProjectInstructionsLength = g.readEntry(u"MaxProjectInstructionsLength"_s, 2048);
+    s.maxProjectInstructionsLength = g.readEntry(u"MaxProjectInstructionsLength"_s, 8192);
     s.compressSystemPrompt = g.readEntry(u"CompressSystemPrompt"_s, true);
-    s.maxSystemPromptLength = g.readEntry(u"MaxSystemPromptLength"_s, 1024);
+    s.maxSystemPromptLength = g.readEntry(u"MaxSystemPromptLength"_s, 4096);
     // Optimal Intelligence Parameters
     s.temperature = g.readEntry(u"Temperature"_s, 0.2);
     s.topP = g.readEntry(u"TopP"_s, 0.95);
@@ -137,17 +222,17 @@ Settings SettingsStore::load()
     s.mcpEnabled = g.readEntry(u"McpEnabled"_s, true);
     s.mcpAutoConnect = g.readEntry(u"McpAutoConnect"_s, true);
     s.mcpTimeoutMs = g.readEntry(u"McpTimeoutMs"_s, 60000);
-        // Web search
-        s.webSearchProvider = g.readEntry(u"WebSearchProvider"_s, QStringLiteral("duckduckgo"));
+    // Web search
+    s.webSearchProvider = g.readEntry(u"WebSearchProvider"_s, QStringLiteral("duckduckgo"));
     // An unknown value would silently disable the web search, because the
     // provider falls back to "disabled" for it.
     if (WebSearch::providerFromId(s.webSearchProvider) == WebSearch::Provider::Disabled) {
         s.webSearchProvider = QStringLiteral("duckduckgo");
     }
-        s.webSearchApiKey = g.readEntry(u"WebSearchApiKey"_s);
-        s.webSearchEndpoint = g.readEntry(u"WebSearchEndpoint"_s);
-        s.webSearchMaxResults = g.readEntry(u"WebSearchMaxResults"_s, 5);
-        s.webSearchTimeoutMs = g.readEntry(u"WebSearchTimeoutMs"_s, 20000);
+    s.webSearchApiKey = cred(u"web-search-api-key"_s, u"WebSearchApiKey"_s, g);
+    s.webSearchEndpoint = g.readEntry(u"WebSearchEndpoint"_s);
+    s.webSearchMaxResults = g.readEntry(u"WebSearchMaxResults"_s, 5);
+    s.webSearchTimeoutMs = g.readEntry(u"WebSearchTimeoutMs"_s, 20000);
     // Checkpoints
     s.checkpointsEnabled = g.readEntry(u"CheckpointsEnabled"_s, true);
     s.checkpointRetention = g.readEntry(u"CheckpointRetention"_s, 20);
@@ -156,6 +241,18 @@ Settings SettingsStore::load()
     s.maxParallelSubtasks = g.readEntry(u"MaxParallelSubtasks"_s, 3);
     s.agentRoster = g.readEntry(u"AgentRoster"_s, QString());
     s.subtaskTimeoutMs = g.readEntry(u"SubtaskTimeoutMs"_s, 300000);
+    // Two-model orchestration. Stored as one JSON entry so the pair is copied
+    // and migrated as a unit; a malformed entry degrades to the defaults
+    // instead of rejecting the rest of the configuration.
+    const QString orchestrationJson = g.readEntry(u"Orchestration"_s, QString());
+    if (!orchestrationJson.trimmed().isEmpty()) {
+        const QJsonDocument document = QJsonDocument::fromJson(orchestrationJson.toUtf8());
+        if (document.isObject()) {
+            s.orchestration = orchestrationFromJson(document.object());
+        } else {
+            qWarning() << "KateAI: ignoring malformed Orchestration configuration";
+        }
+    }
     // Appearance
     s.themeSource = g.readEntry(u"ThemeSource"_s, QStringLiteral("preset"));
     if (s.themeSource != u"editor"_s) {
@@ -163,26 +260,32 @@ Settings SettingsStore::load()
     }
     s.themePreset = g.readEntry(u"ThemePreset"_s, QStringLiteral("kateai-dark"));
     s.themeOverrides = g.readEntry(u"ThemeOverrides"_s, QString());
+    // Voice prompting
+    s.voiceProvider = g.readEntry(u"VoiceProvider"_s, QStringLiteral("auto"));
+    if (s.voiceProvider != u"auto"_s && s.voiceProvider != u"openai"_s
+        && s.voiceProvider != u"openai_compatible"_s && s.voiceProvider != u"local_cli"_s) {
+        s.voiceProvider = QStringLiteral("auto");
+    }
+    s.voiceApiKey = cred(u"voice-api-key"_s, u"VoiceApiKey"_s, g);
+    s.voiceEndpoint = g.readEntry(u"VoiceEndpoint"_s, QString());
+    s.voiceModel = g.readEntry(u"VoiceModel"_s, QStringLiteral("whisper-1"));
+    s.voiceLanguage = g.readEntry(u"VoiceLanguage"_s, QString());
+    s.voiceLocalCommand = g.readEntry(u"VoiceLocalCommand"_s, QString());
+    s.voiceInputDevice = g.readEntry(u"VoiceInputDevice"_s, QString());
+    s.voiceNoiseRemoval = g.readEntry(u"VoiceNoiseRemoval"_s, true);
+    s.voiceAutoSend = g.readEntry(u"VoiceAutoSend"_s, true);
     // Behavioural toggles and budgets. These used to be dropped by save(), so
     // any value the UI wrote reverted to the struct default on the next start.
     s.toolCallTimeoutMs = g.readEntry(u"ToolCallTimeoutMs"_s, 120000);
-    s.maxContextMessages = g.readEntry(u"MaxContextMessages"_s, 0);
-    s.compactOnFailure = g.readEntry(u"CompactOnFailure"_s, true);
     s.structuredThinking = g.readEntry(u"StructuredThinking"_s, true);
     s.structuredPlanning = g.readEntry(u"StructuredPlanning"_s, true);
     s.showPlanAsChecklist = g.readEntry(u"ShowPlanAsChecklist"_s, true);
     s.maxThinkingTokens = g.readEntry(u"MaxThinkingTokens"_s, 4096);
     s.maxPlanSteps = g.readEntry(u"MaxPlanSteps"_s, 15);
-    s.enablePlanUpdates = g.readEntry(u"EnablePlanUpdates"_s, true);
-    s.narrativeProgress = g.readEntry(u"NarrativeProgress"_s, true);
-    s.messageSpeed = g.readEntry(u"MessageSpeed"_s, 2);
     s.frequencyPenalty = g.readEntry(u"FrequencyPenalty"_s, 0.0);
     s.presencePenalty = g.readEntry(u"PresencePenalty"_s, 0.0);
     s.requireVerification = g.readEntry(u"RequireVerification"_s, true);
     s.maxVerificationAttempts = g.readEntry(u"MaxVerificationAttempts"_s, 2);
-    s.adaptiveTemperature = g.readEntry(u"AdaptiveTemperature"_s, true);
-    s.explorationTemperature = g.readEntry(u"ExplorationTemperature"_s, 0.4);
-    s.exploitationTemperature = g.readEntry(u"ExploitationTemperature"_s, 0.1);
     s.enableAutoRetry = g.readEntry(u"EnableAutoRetry"_s, true);
     s.maxRetryAttempts = g.readEntry(u"MaxRetryAttempts"_s, 4);
     s.baseRetryDelaySeconds = g.readEntry(u"BaseRetryDelaySeconds"_s, 5);
@@ -225,24 +328,19 @@ Settings SettingsStore::load()
     // hand-edited or migrated config must not be able to store a zero budget, a
     // plan with no steps, or a temperature no provider accepts.
     s.toolCallTimeoutMs = qBound(1000, s.toolCallTimeoutMs, 30 * 60 * 1000);
-    s.maxContextMessages = qMax(0, s.maxContextMessages);
     s.maxThinkingTokens = qBound(0, s.maxThinkingTokens, 200000);
     s.maxPlanSteps = qBound(1, s.maxPlanSteps, 50);
     s.maxVerificationAttempts = qBound(0, s.maxVerificationAttempts, 10);
-    s.messageSpeed = qBound(0, s.messageSpeed, 5);
     s.frequencyPenalty = qBound(-2.0, s.frequencyPenalty, 2.0);
     s.presencePenalty = qBound(-2.0, s.presencePenalty, 2.0);
     // Generation temperature, not the adaptive pair below.
     if (s.temperature < 0.0) {
         s.temperature = 0.0;
     }
-    s.explorationTemperature = qBound(0.0, s.explorationTemperature, 2.0);
-    s.exploitationTemperature = qBound(0.0, s.exploitationTemperature, 2.0);
     s.maxRetryAttempts = qBound(1, s.maxRetryAttempts, 10);
     s.baseRetryDelaySeconds = qBound(1, s.baseRetryDelaySeconds, 60);
     // The length budgets need a lower bound: a negative value would empty the
     // system prompt or the editor context without saying so.
-    s.maxFileContentLength = qBound(1, s.maxFileContentLength, 1000000);
     s.maxEditorContextLength = qBound(1, s.maxEditorContextLength, 1000000);
     s.maxProjectInstructionsLength = qBound(1, s.maxProjectInstructionsLength, 1000000);
     s.maxSystemPromptLength = qBound(1, s.maxSystemPromptLength, 1000000);
@@ -278,7 +376,7 @@ Settings SettingsStore::load()
         s.maxTokens = 200000;
     }
     s.verbosity = qBound(0, s.verbosity, 3);
-    s.maxSavedConversations = qBound(1, s.maxSavedConversations, 1000);
+    s.maxSavedConversations = qBound(0, s.maxSavedConversations, 1000);
     s.maxExpandedToolCards = qBound(0, s.maxExpandedToolCards, 100);
     s.maxGraphNodes = qBound(1, s.maxGraphNodes, 10000);
     s.maxGraphEdges = qBound(1, s.maxGraphEdges, 50000);
@@ -286,8 +384,6 @@ Settings SettingsStore::load()
     s.keepRecentTokens = g.readEntry(u"KeepRecentTokens"_s, 0);
     s.contextWindowReserve = g.readEntry(u"ContextWindowReserve"_s, 8192);
     s.compressOldMessages = g.readEntry(u"CompressOldMessages"_s, true);
-    s.smartContextTruncation = g.readEntry(u"SmartContextTruncation"_s, true);
-    s.compressionThreshold = g.readEntry(u"CompressionThreshold"_s, 2048);
     // Telegram remote bridge (fail-closed: disabled + empty allowlist).
     s.telegramEnabled = g.readEntry(u"TelegramEnabled"_s, false);
     s.telegramBotToken = g.readEntry(u"TelegramBotToken"_s, QString());
@@ -312,17 +408,37 @@ void SettingsStore::save(const Settings &settings)
 {
     KConfigGroup g = group();
     g.writeEntry(u"Provider"_s, providerId(settings.provider));
-    g.writeEntry(u"GrokApiKey"_s, settings.grokApiKey);
-    g.writeEntry(u"OpenAIApiKey"_s, settings.openaiApiKey);
-    g.writeEntry(u"OpenRouterApiKey"_s, settings.openrouterApiKey);
-    g.writeEntry(u"DeepSeekApiKey"_s, settings.deepseekApiKey);
-    g.writeEntry(u"OpenAICompatibleApiKey"_s, settings.openaiCompatibleApiKey);
-    g.writeEntry(u"ClaudeCompatibleApiKey"_s, settings.claudeCompatibleApiKey);
-    g.writeEntry(u"KiloApiKey"_s, settings.kiloApiKey);
-    g.writeEntry(u"AcpApiKey"_s, settings.acpApiKey);
+    // Credentials are persisted through the secure store, never in the main
+    // config file. Clear any legacy plaintext copy at the same time. A failed
+    // store is reported: silently dropping a key would look like the user's
+    // provider stopped authenticating for no reason.
+    const auto storeCredential = [](const QString &id, const QString &secret) {
+        QString error;
+        if (!CredentialStore::store(id, secret, &error)) {
+            qWarning() << "KateAI: could not store credential" << id << ":" << error;
+        }
+    };
+    storeCredential(u"grok-api-key"_s, settings.grokApiKey);
+    storeCredential(u"openai-api-key"_s, settings.openaiApiKey);
+    storeCredential(u"openrouter-api-key"_s, settings.openrouterApiKey);
+    storeCredential(u"deepseek-api-key"_s, settings.deepseekApiKey);
+    storeCredential(u"openai-compatible-api-key"_s, settings.openaiCompatibleApiKey);
+    storeCredential(u"claude-compatible-api-key"_s, settings.claudeCompatibleApiKey);
+    storeCredential(u"kilo-api-key"_s, settings.kiloApiKey);
+    storeCredential(u"acp-api-key"_s, settings.acpApiKey);
+    g.deleteEntry(u"GrokApiKey"_s);
+    g.deleteEntry(u"OpenAIApiKey"_s);
+    g.deleteEntry(u"OpenRouterApiKey"_s);
+    g.deleteEntry(u"DeepSeekApiKey"_s);
+    g.deleteEntry(u"OpenAICompatibleApiKey"_s);
+    g.deleteEntry(u"ClaudeCompatibleApiKey"_s);
+    g.deleteEntry(u"KiloApiKey"_s);
+    g.deleteEntry(u"AcpApiKey"_s);
     g.writeEntry(u"AcpInstalledAgents"_s, settings.acpInstalledAgents);
     g.writeEntry(u"AcpAgentModels"_s, settings.acpAgentModels);
-    g.writeEntry(u"OpenCodeApiKey"_s, settings.opencodeApiKey);
+    g.writeEntry(u"AcpAgentCommands"_s, settings.acpAgentCommands);
+    storeCredential(u"opencode-api-key"_s, settings.opencodeApiKey);
+    g.deleteEntry(u"OpenCodeApiKey"_s);
     g.writeEntry(u"OpenCodeModel"_s, settings.opencodeModel);
     g.writeEntry(u"OpenCodeUrl"_s, settings.opencodeUrl);
     g.writeEntry(u"GrokModel"_s, settings.grokModel);
@@ -381,8 +497,6 @@ void SettingsStore::save(const Settings &settings)
     g.writeEntry(u"MaxGraphNodes"_s, settings.maxGraphNodes);
     g.writeEntry(u"MaxGraphEdges"_s, settings.maxGraphEdges);
     g.writeEntry(u"CompressProjectGraph"_s, settings.compressProjectGraph);
-    g.writeEntry(u"IncludeFileContents"_s, settings.includeFileContents);
-    g.writeEntry(u"MaxFileContentLength"_s, settings.maxFileContentLength);
     g.writeEntry(u"CompressEditorContext"_s, settings.compressEditorContext);
     g.writeEntry(u"MaxEditorContextLength"_s, settings.maxEditorContextLength);
     g.writeEntry(u"CompressProjectInstructions"_s, settings.compressProjectInstructions);
@@ -404,11 +518,12 @@ void SettingsStore::save(const Settings &settings)
     g.writeEntry(u"McpEnabled"_s, settings.mcpEnabled);
     g.writeEntry(u"McpAutoConnect"_s, settings.mcpAutoConnect);
     g.writeEntry(u"McpTimeoutMs"_s, settings.mcpTimeoutMs);
-        g.writeEntry(u"WebSearchProvider"_s, settings.webSearchProvider);
-        g.writeEntry(u"WebSearchApiKey"_s, settings.webSearchApiKey);
-        g.writeEntry(u"WebSearchEndpoint"_s, settings.webSearchEndpoint);
-        g.writeEntry(u"WebSearchMaxResults"_s, settings.webSearchMaxResults);
-        g.writeEntry(u"WebSearchTimeoutMs"_s, settings.webSearchTimeoutMs);
+    g.writeEntry(u"WebSearchProvider"_s, settings.webSearchProvider);
+    storeCredential(u"web-search-api-key"_s, settings.webSearchApiKey);
+    g.deleteEntry(u"WebSearchApiKey"_s);
+    g.writeEntry(u"WebSearchEndpoint"_s, settings.webSearchEndpoint);
+    g.writeEntry(u"WebSearchMaxResults"_s, settings.webSearchMaxResults);
+    g.writeEntry(u"WebSearchTimeoutMs"_s, settings.webSearchTimeoutMs);
     // Checkpoints
     g.writeEntry(u"CheckpointsEnabled"_s, settings.checkpointsEnabled);
     g.writeEntry(u"CheckpointRetention"_s, settings.checkpointRetention);
@@ -417,30 +532,36 @@ void SettingsStore::save(const Settings &settings)
     g.writeEntry(u"MaxParallelSubtasks"_s, settings.maxParallelSubtasks);
     g.writeEntry(u"AgentRoster"_s, settings.agentRoster);
     g.writeEntry(u"SubtaskTimeoutMs"_s, settings.subtaskTimeoutMs);
+    g.writeEntry(u"Orchestration"_s,
+                 QString::fromUtf8(QJsonDocument(orchestrationToJson(settings.orchestration))
+                                       .toJson(QJsonDocument::Compact)));
     // Appearance
     g.writeEntry(u"ThemeSource"_s, settings.themeSource);
     g.writeEntry(u"ThemePreset"_s, settings.themePreset);
     g.writeEntry(u"ThemeOverrides"_s, settings.themeOverrides);
+    // Voice prompting
+    g.writeEntry(u"VoiceProvider"_s, settings.voiceProvider);
+    storeCredential(u"voice-api-key"_s, settings.voiceApiKey);
+    g.deleteEntry(u"VoiceApiKey"_s);
+    g.writeEntry(u"VoiceEndpoint"_s, settings.voiceEndpoint);
+    g.writeEntry(u"VoiceModel"_s, settings.voiceModel);
+    g.writeEntry(u"VoiceLanguage"_s, settings.voiceLanguage);
+    g.writeEntry(u"VoiceLocalCommand"_s, settings.voiceLocalCommand);
+    g.writeEntry(u"VoiceInputDevice"_s, settings.voiceInputDevice);
+    g.writeEntry(u"VoiceNoiseRemoval"_s, settings.voiceNoiseRemoval);
+    g.writeEntry(u"VoiceAutoSend"_s, settings.voiceAutoSend);
     // Keep every field the UI can write, so a restart restores the same
     // configuration instead of silently falling back to struct defaults.
     g.writeEntry(u"ToolCallTimeoutMs"_s, settings.toolCallTimeoutMs);
-    g.writeEntry(u"MaxContextMessages"_s, settings.maxContextMessages);
-    g.writeEntry(u"CompactOnFailure"_s, settings.compactOnFailure);
     g.writeEntry(u"StructuredThinking"_s, settings.structuredThinking);
     g.writeEntry(u"StructuredPlanning"_s, settings.structuredPlanning);
     g.writeEntry(u"ShowPlanAsChecklist"_s, settings.showPlanAsChecklist);
     g.writeEntry(u"MaxThinkingTokens"_s, settings.maxThinkingTokens);
     g.writeEntry(u"MaxPlanSteps"_s, settings.maxPlanSteps);
-    g.writeEntry(u"EnablePlanUpdates"_s, settings.enablePlanUpdates);
-    g.writeEntry(u"NarrativeProgress"_s, settings.narrativeProgress);
-    g.writeEntry(u"MessageSpeed"_s, settings.messageSpeed);
     g.writeEntry(u"FrequencyPenalty"_s, settings.frequencyPenalty);
     g.writeEntry(u"PresencePenalty"_s, settings.presencePenalty);
     g.writeEntry(u"RequireVerification"_s, settings.requireVerification);
     g.writeEntry(u"MaxVerificationAttempts"_s, settings.maxVerificationAttempts);
-    g.writeEntry(u"AdaptiveTemperature"_s, settings.adaptiveTemperature);
-    g.writeEntry(u"ExplorationTemperature"_s, settings.explorationTemperature);
-    g.writeEntry(u"ExploitationTemperature"_s, settings.exploitationTemperature);
     g.writeEntry(u"EnableAutoRetry"_s, settings.enableAutoRetry);
     g.writeEntry(u"MaxRetryAttempts"_s, settings.maxRetryAttempts);
     g.writeEntry(u"BaseRetryDelaySeconds"_s, settings.baseRetryDelaySeconds);
@@ -450,13 +571,20 @@ void SettingsStore::save(const Settings &settings)
     g.writeEntry(u"KeepRecentTokens"_s, settings.keepRecentTokens);
     g.writeEntry(u"ContextWindowReserve"_s, settings.contextWindowReserve);
     g.writeEntry(u"CompressOldMessages"_s, settings.compressOldMessages);
-    g.writeEntry(u"SmartContextTruncation"_s, settings.smartContextTruncation);
-    g.writeEntry(u"CompressionThreshold"_s, settings.compressionThreshold);
     g.writeEntry(u"TelegramEnabled"_s, settings.telegramEnabled);
     g.writeEntry(u"TelegramBotToken"_s, settings.telegramBotToken);
     g.writeEntry(u"TelegramAllowedChatIds"_s, settings.telegramAllowedChatIds);
     g.writeEntry(u"TelegramAllowWrites"_s, settings.telegramAllowWrites);
-    
+
+    // Drop settings that no longer have a consumer, so an upgraded config does
+    // not keep advertising knobs that do nothing.
+    for (const QString &removed : {u"MaxContextMessages"_s, u"IncludeFileContents"_s,
+                                   u"MaxFileContentLength"_s, u"SmartContextTruncation"_s,
+                                   u"CompressionThreshold"_s}) {
+        g.deleteEntry(removed);
+    }
+    g.writeEntry(u"ConfigVersion"_s, configVersion());
+
     g.sync();
 
     // The API keys live in this file in plain text. The file is created with

@@ -25,6 +25,23 @@ struct AgentProfile {
     QString description;
     // The mode the sub-agent runs in. Any mode id, including custom ones.
     QString modeId;
+    // "inherit" keeps the parent's choice. A model id is applied only when the
+    // active provider supports it; an unusable value is ignored with a notice.
+    QString model = QStringLiteral("inherit");
+    QString effort;
+    // "inherit", "ask", "accept-edits", or "always-approve".
+    QString permissionMode = QStringLiteral("inherit");
+    // Optional allow/deny lists. Entries may be exact tool names or prefixes
+    // ending in '*'. An empty allow list means "whatever the mode provides".
+    QStringList tools;
+    QStringList disallowedTools;
+    QStringList skills;
+    // Zero means the parent's budget (halved for the child, as before).
+    int maxTurns = 0;
+    // "in-process" or "worktree".
+    QString isolation = QStringLiteral("in-process");
+    // "project", "user", "none". Reserved for the memory-scope contract.
+    QString memoryScope = QStringLiteral("project");
     bool enabled = true;
     bool builtIn = false;
 
@@ -34,6 +51,10 @@ struct AgentProfile {
     bool isValid() const
     {
         return !id.trimmed().isEmpty();
+    }
+    bool isWorktreeIsolated() const
+    {
+        return isolation.compare(QStringLiteral("worktree"), Qt::CaseInsensitive) == 0;
     }
 };
 
@@ -63,11 +84,16 @@ public:
 
     // Enabled agents, built-ins first.
     QList<AgentProfile> agents() const;
+    // Every agent with this id, enabled or not. Returned by value because the
+    // roster is rebuilt per call and a pointer into it would not outlive us.
+    std::optional<AgentProfile> byIdIncludingDisabled(const QString &id) const;
     // The enabled agent with this id, if any. Returned by value because the
     // roster is rebuilt per call and a pointer into it would not outlive us.
     std::optional<AgentProfile> byId(const QString &id) const;
     // Resolves a requested agent id to a profile, falling back to the Code
-    // mode with the id as its name.
+    // mode with the id as its name. An agent the user disabled never runs with
+    // the mode it was declared with: it falls back to the read-only Ask mode
+    // instead, so naming it cannot hand out write rights the roster withheld.
     AgentProfile resolve(const QString &id) const;
     // Ids and names for the orchestrator's system prompt.
     QString describeRoster() const;

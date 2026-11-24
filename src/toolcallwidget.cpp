@@ -16,6 +16,8 @@
 #include <QFontMetrics>
 #include <QGuiApplication>
 #include <QHBoxLayout>
+#include <QJsonDocument>
+#include <QJsonParseError>
 #include <QLabel>
 #include <QMouseEvent>
 #include <QPropertyAnimation>
@@ -133,6 +135,54 @@ QString clampToLines(const QString &text, int maxLines)
     lines = lines.mid(0, maxLines);
     lines.append(i18n("… %1 more lines", hidden));
     return lines.join(u'\n');
+}
+
+// A payload that is JSON is re-indented before it is shown.
+//
+// The arguments of a tool call arrive as one long line of {"key": "value"}
+// pairs -- from the model, from an ACP agent, from a tool description -- and
+// a card that shows that line as it came in is a wall of text with no
+// structure to it: the keys run into the values and the reader has to parse
+// the line by eye. Re-indenting puts every key on its own line, which is what
+// the payload was meant to be read as.
+//
+// Everything that is not JSON is left exactly as it was: a command's output
+// and a diff are prose, and touching them would only lose information.
+QString formatJsonPayload(const QString &text)
+{
+    const QString trimmed = text.trimmed();
+    if (trimmed.size() < 2) {
+        return text;
+    }
+    const QChar first = trimmed.front();
+    if (first != u'{' && first != u'[') {
+        return text;
+    }
+    QJsonParseError error;
+    const QJsonDocument doc = QJsonDocument::fromJson(trimmed.toUtf8(), &error);
+    if (error.error != QJsonParseError::NoError || (!doc.isObject() && !doc.isArray())) {
+        // Not JSON, or JSON that has not arrived whole yet: a stream that
+        // arrives in pieces is not valid JSON until the last piece is in.
+        return text;
+    }
+    return QString::fromUtf8(doc.toJson(QJsonDocument::Indented));
+}
+
+// Whether a payload is a JSON object or array, which is also the language the
+// card should label it with.
+bool isJsonPayload(const QString &text)
+{
+    const QString trimmed = text.trimmed();
+    if (trimmed.size() < 2) {
+        return false;
+    }
+    const QChar first = trimmed.front();
+    if (first != u'{' && first != u'[') {
+        return false;
+    }
+    QJsonParseError error;
+    const QJsonDocument doc = QJsonDocument::fromJson(trimmed.toUtf8(), &error);
+    return error.error == QJsonParseError::NoError && (doc.isObject() || doc.isArray());
 }
 
 // A unified diff starts with a "--- " file header and a "+++ " header within
@@ -558,10 +608,21 @@ void ToolCallWidget::showApproval()
     updateStyle();
 }
 
+void ToolCallWidget::cancelApproval()
+{
+    m_awaitingApproval = false;
+    if (m_approvalRow) {
+        m_approvalRow->hide();
+    }
+    updateStyle();
+}
+
 void ToolCallWidget::setApprovalResolved(PermissionDecision decision)
 {
     m_awaitingApproval = false;
-    m_approvalRow->hide();
+    if (m_approvalRow) {
+        m_approvalRow->hide();
+    }
     if (decision == PermissionDecision::Deny) {
         m_denied = true;
         m_status->setText(u"✗"_s);
@@ -686,7 +747,7 @@ void ToolCallWidget::setRunningInput(const QString &input)
     // flight that says nothing but the tool name tells the user nothing about
     // the work it is doing.
     m_showingInput = true;
-    m_details->setHtml(partialToHtml(clampToLines(input, kMaxInputLines)));
+    m_details->setHtml(partialToHtml(clampToLines(formatJsonPayload(input), kMaxInputLines)));
     applyDetailView();
     if (!m_details->toPlainText().isEmpty()) {
         setExpanded(true);
@@ -828,7 +889,8 @@ void ToolCallWidget::setPartialOutput(const QString &partialOutput)
     // the final answer. Command output is capped by lines; file reads stay
     // complete so the user can inspect the full contents in the transcript.
     const QString body = diff.isEmpty() ? partialOutput : textBeforeDiff(partialOutput);
-    m_details->setHtml(partialToHtml(m_risk == ToolRisk::Read ? body : clampToLines(body, kMaxResultLines)));
+    m_details->setHtml(partialToHtml(m_risk == ToolRisk::Read ? formatJsonPayload(body)
+                                                               : clampToLines(formatJsonPayload(body), kMaxResultLines)));
     // A stream is worth watching, so it opens itself; a card the user collapsed
     // themselves stays collapsed, because setExpanded tracks their choice.
     if (!m_details->toPlainText().isEmpty() || m_hasDiffPreview) {
@@ -909,8 +971,12 @@ void ToolCallWidget::setFinished(const ToolResult &result)
         setDescribeDiff(diff);
     }
     const QString shownSource = diff.isEmpty() ? result.output : textBeforeDiff(result.output);
-    const QString shown = m_risk == ToolRisk::Read ? shownSource : clampToLines(shownSource, kMaxResultLines);
-    const QString language = languageForTool(m_toolName);
+    // A result that is JSON is shown re-indented, and labelled as JSON: the
+    // language of the tool is what its output looks like, not what it happens
+    // to contain.
+    const QString formatted = formatJsonPayload(shownSource);
+    const QString shown = m_risk == ToolRisk::Read ? formatted : clampToLines(formatted, kMaxResultLines);
+    const QString language = isJsonPayload(formatted) ? QStringLiteral("JSON") : languageForTool(m_toolName);
     // Nothing to show must not paint an empty code block: a tool that reports
     // no output (an edit whose result never arrived, an ACP turn whose
     // arguments were never recorded) would otherwise render the block's frame
@@ -957,6 +1023,19 @@ void ToolCallWidget::setExpanded(bool expanded)
 bool ToolCallWidget::isFileEditTool() const
 {
     return isDiffTool(m_toolName) || m_hasDiffPreview;
+}
+
+qsizetype ToolCallWidget::retainedChars() const
+{
+    qsizetype total = m_resultOutput.size() + m_partialOutput.size() + m_runningInput.size()
+        + m_titleText.size() + m_filePath.size();
+    if (m_details) {
+        total += m_details->document()->characterCount();
+    }
+    if (m_describeDiff) {
+        total += m_describeDiff->document()->characterCount();
+    }
+    return total;
 }
 
 void ToolCallWidget::syncPreviewVisibility()
@@ -1054,10 +1133,24 @@ QString ToolCallWidget::iconForTool(const QString &toolName) const
         if (toolName == u"web_search"_s || toolName == u"websearch"_s) return u"🌐"_s;
         if (toolName == u"web_fetch"_s || toolName == u"webfetch"_s) return u"📖"_s;
     if (toolName == u"query_project_graph"_s) return u"🕸"_s;
+    if (toolName == u"lsp_diagnostics"_s) return u"🩺"_s;
+    if (toolName == u"lsp_symbols"_s) return u"🔣"_s;
+    if (toolName == u"lsp_hover"_s) return u"💬"_s;
+    if (toolName == u"lsp_definition"_s) return u"📍"_s;
+    if (toolName == u"lsp_references"_s) return u"🔗"_s;
+    if (toolName == u"lsp_code_actions"_s) return u"🛠"_s;
+    if (key == u"debug_set_breakpoint"_s || key == u"debug_breakpoints"_s) return u"🔴"_s;
+    if (key == u"debug_step"_s || key == u"debug_session"_s) return u"⏯"_s;
+    if (key == u"debug_eval"_s || key == u"debug_console"_s) return u"🧮"_s;
+    if (key == u"debug_snapshot"_s) return u"📸"_s;
+    if (key.startsWith(u"debug_"_s)) return u"🐞"_s;
+    if (key == u"build_targets"_s || key == u"build_run"_s) return u"🔨"_s;
+    if (key == u"terminal_run"_s) return u"🖳"_s;
     if (toolName == u"write_plan_file"_s) return u"📋"_s;
     if (toolName == u"suggest"_s) return u"💡"_s;
     if (toolName == u"question"_s) return u"❓"_s;
-    if (toolName == u"goal_report"_s) return u"🎯"_s;
+    if (toolName == u"skill"_s) return u"🧩"_s;
+    if (toolName == u"subagent_transcript"_s) return u"🗂"_s;
     if (toolName == u"new_task"_s || toolName == u"task"_s) return u"🧩"_s;
     if (toolName.startsWith(u"mcp__"_s)) return u"🔌"_s;
     if (toolName.startsWith(u"terminal/"_s) || toolName == u"terminal"_s) return u"🖳"_s;
@@ -1122,6 +1215,7 @@ QString ToolCallWidget::languageForTool(const QString &toolName) const
     if (toolName == u"web_search"_s || toolName == u"web_fetch"_s) return u"JSON"_s;
     if (toolName == u"query_project_graph"_s) return u"JSON"_s;
     if (toolName == u"new_task"_s) return u"Text"_s;  // Sub-agent results are typically text
+    if (toolName == u"subagent_transcript"_s) return u"Text"_s;
     if (toolName.startsWith(u"mcp__"_s)) return u"JSON"_s;
 
     // Terminal tools
@@ -1387,7 +1481,7 @@ void ToolCallWidget::updateTitleText()
     // Clamp before measuring, so the height below matches what is drawn.
     const QString wrapped = clampToLines(wrapToWidth(m_titleText, fm, firstW, avail), kMaxTitleLines, fm, avail);
     QString cmdHtml = escapeHtml(wrapped);
-    cmdHtml.replace(u'\n', u"<br>"_s);
+    cmdHtml.replace(QChar(u'\n'), u"<br>"_s);
     m_title->setText(QStringLiteral("<span style=\"color:%1\"><b>%2</b></span>&nbsp; <span style=\"color:%3\">%4</span>")
                          .arg(ChatTheme::toolColor(m_toolName), escapeHtml(label),
                               ChatTheme::ToolCard::textPrimary(), cmdHtml));

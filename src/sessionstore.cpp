@@ -5,9 +5,13 @@
 
 #include "sessionstore.h"
 
+#include "contextmanager.h"
+#include "harness/eventstore.h"
+#include "harness/worktree.h"
 #include "types.h"
 
 #include <KConfigGroup>
+#include <KLocalizedString>
 #include <KSharedConfig>
 #include <QJsonDocument>
 #include <QJsonArray>
@@ -23,6 +27,7 @@
 #include <QMutexLocker>
 #include <QSqlDatabase>
 #include <QSqlError>
+#include <QProcessEnvironment>
 #include <QSqlQuery>
 #include <QStandardPaths>
 #include <QThread>
@@ -35,12 +40,82 @@ namespace KateAi
 {
 
 // Helper functions (defined first so they can be used by static methods)
+static QString subagentRoot()
+{
+    QString base = QProcessEnvironment::systemEnvironment().value(u"KATEAI_SUBAGENT_DIR"_s);
+    if (base.trimmed().isEmpty()) {
+        base = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+        if (base.isEmpty()) {
+            // Never let an empty location turn the joined path into "/subagents"
+            // at the filesystem root; deletion walks this tree.
+            base = QDir::tempPath() + u"/kateai"_s;
+        }
+        base += u"/subagents"_s;
+    }
+    return base;
+}
+
+struct ConversationCleanup {
+    QString workspace;
+    QJsonArray subagents;
+};
+
+// Deletion only needs the workspace and the worktree records. Parsing the
+// whole payload into messages would make pruning a conversation with a long
+// transcript needlessly expensive.
+static ConversationCleanup cleanupInfoFromPayload(const QByteArray &payload)
+{
+    ConversationCleanup info;
+    const QJsonDocument doc = QJsonDocument::fromJson(payload);
+    if (!doc.isObject()) {
+        return info;
+    }
+    const QJsonObject object = doc.object();
+    info.workspace = object.value(u"workspace"_s).toString();
+    info.subagents = object.value(u"subagents"_s).toArray();
+    return info;
+}
+
+static void removeSubagentWorktrees(const QString &workspace, const QJsonArray &records)
+{
+    for (const QJsonValue &value : records) {
+        const QString path = value.toObject().value(u"worktreePath"_s).toString();
+        if (path.isEmpty()) {
+            continue;
+        }
+        QString error;
+        // Best effort: a worktree may already be gone, or git may be missing.
+        // The record is being deleted, so there is nothing to report to the UI.
+        SubagentWorktree::remove(workspace, path, &error);
+    }
+}
+
+static void removeSidechains(const QString &conversationId)
+{
+    if (conversationId.isEmpty()) {
+        return;
+    }
+    QString safe;
+    for (const QChar c : conversationId) {
+        if (c.isLetterOrNumber() || c == u'-' || c == u'_') {
+            safe.append(c);
+        }
+    }
+    if (safe.isEmpty()) {
+        return;
+    }
+    QDir(subagentRoot() + u'/' + safe).removeRecursively();
+}
+
 static QJsonArray messagesToJson(const QList<ChatMessage> &messages)
 {
     QJsonArray arr;
     for (const auto &msg : messages) {
         QJsonObject obj;
         obj[u"role"_s] = static_cast<int>(msg.role);
+        if (!msg.authorRole.isEmpty()) {
+            obj[u"authorRole"_s] = msg.authorRole;
+        }
         obj[u"content"_s] = msg.content;
         obj[u"thinking"_s] = msg.thinking;
         obj[u"plan"_s] = msg.plan;
@@ -69,6 +144,7 @@ static QList<ChatMessage> messagesFromJson(const QJsonArray &arr)
         } else {
             msg.role = static_cast<ChatMessage::Role>(roleValue);
         }
+        msg.authorRole = obj[u"authorRole"_s].toString();
         msg.content = obj[u"content"_s].toString();
         msg.thinking = obj[u"thinking"_s].toString();
         msg.plan = obj[u"plan"_s].toArray();
@@ -121,17 +197,83 @@ static QString generateConversationId()
     return QUuid::createUuid().toString(QUuid::WithoutBraces);
 }
 
+static bool isBadTitle(const QString &title)
+{
+    const QString trimmed = title.trimmed();
+    if (trimmed.isEmpty()) {
+        return true;
+    }
+    // Compaction summaries must never become a conversation title. Older
+    // builds stored the first line of a compacted summary as the title, so a
+    // title that starts with (or is a truncated prefix of) the summary header
+    // is treated as missing and regenerated.
+    if (trimmed.startsWith(ContextManager::summaryHeader().left(20))) {
+        return true;
+    }
+    if (trimmed.contains(u"compacted to fit the context window"_s)) {
+        return true;
+    }
+    if (trimmed.startsWith(u"[Earlier conversation was compacted"_s)) {
+        return true;
+    }
+    return false;
+}
+
 static QString generateTitleFromMessages(const QList<ChatMessage> &messages)
 {
+    // First pass: a real user request that survived compaction.
     for (const auto &msg : messages) {
-        if (msg.role == ChatMessage::Role::User && !msg.content.isEmpty()) {
-            QString title = msg.content.trimmed().split(u'\n').first();
-            if (title.length() > 50) {
-                title = truncateSafe(title, 47) + u"...";
-            }
+        if (msg.role != ChatMessage::Role::User || msg.content.trimmed().isEmpty()) {
+            continue;
+        }
+        if (msg.content.trimmed().startsWith(ContextManager::summaryHeader())) {
+            continue; // compaction summary, not a real request
+        }
+        if (msg.content.trimmed().startsWith(u"[KateAI agent controller]"_s)) {
+            continue;
+        }
+        QString title = msg.content.trimmed().split(u'\n').first();
+        if (title.length() > 50) {
+            title = truncateSafe(title, 47) + u"...";
+        }
+        if (!title.isEmpty() && !isBadTitle(title)) {
             return title;
         }
     }
+
+    // Second pass: if every user message was folded into a summary, recover the
+    // first request the summary still records instead of showing the marker.
+    for (const auto &msg : messages) {
+        if (msg.role != ChatMessage::Role::User || msg.content.trimmed().isEmpty()) {
+            continue;
+        }
+        if (!msg.content.trimmed().startsWith(ContextManager::summaryHeader())) {
+            continue;
+        }
+        const QStringList lines = msg.content.split(u'\n');
+        bool inAsked = false;
+        for (const QString &line : lines) {
+            const QString trimmedLine = line.trimmed();
+            if (trimmedLine.startsWith(u"What was asked:"_s)) {
+                inAsked = true;
+                continue;
+            }
+            if (inAsked && trimmedLine.startsWith(u"1. "_s)) {
+                QString title = trimmedLine.mid(3).trimmed();
+                if (title.length() > 50) {
+                    title = truncateSafe(title, 47) + u"...";
+                }
+                if (!title.isEmpty() && !isBadTitle(title)) {
+                    return title;
+                }
+                break;
+            }
+            if (inAsked && trimmedLine.isEmpty()) {
+                break;
+            }
+        }
+    }
+
     return QDateTime::currentDateTime().toString(u"yyyy-MM-dd hh:mm"_s);
 }
 
@@ -142,10 +284,14 @@ static QByteArray sessionDataToJson(const SessionStore::SessionData &data)
     QJsonObject obj;
     obj[u"version"_s] = data.version;
     obj[u"messages"_s] = messagesToJson(data.messages);
+    if (!data.transcript.isEmpty()) {
+        obj[u"transcript"_s] = messagesToJson(data.transcript);
+    }
     obj[u"currentThinking"_s] = data.currentThinking;
     obj[u"currentPlan"_s] = data.currentPlan;
     obj[u"planShown"_s] = data.planShown;
     obj[u"currentAssistant"_s] = data.currentAssistant;
+    obj[u"lastTurnId"_s] = data.lastTurnId;
     obj[u"stateEpoch"_s] = static_cast<qint64>(data.stateEpoch);
     obj[u"actionSignatures"_s] = stringListToJson(data.actionSignatures);
     obj[u"actionRepeatCounts"_s] = hashToJson(data.actionRepeatCounts);
@@ -157,6 +303,15 @@ static QByteArray sessionDataToJson(const SessionStore::SessionData &data)
     obj[u"toolCalls"_s] = data.toolCalls;
     obj[u"acpSessionId"_s] = data.acpSessionId;
     obj[u"workspace"_s] = data.workspace;
+    if (!data.parentConversationId.isEmpty()) {
+        obj[u"parentConversationId"_s] = data.parentConversationId;
+    }
+    if (!data.subagents.isEmpty()) {
+        obj[u"subagents"_s] = data.subagents;
+    }
+    if (!data.orchestration.isEmpty()) {
+        obj[u"orchestration"_s] = data.orchestration;
+    }
     return QJsonDocument(obj).toJson(QJsonDocument::Compact);
 }
 
@@ -165,16 +320,19 @@ static SessionStore::SessionData sessionDataFromJson(const QByteArray &payload)
     SessionStore::SessionData data;
     const QJsonDocument doc = QJsonDocument::fromJson(payload);
     if (doc.isNull() || !doc.isObject()) {
+        data.loadFailed = true;
         return data;
     }
 
     const QJsonObject obj = doc.object();
     data.version = obj[u"version"_s].toInt(SessionStore::CURRENT_VERSION);
     data.messages = messagesFromJson(obj[u"messages"_s].toArray());
+    data.transcript = messagesFromJson(obj[u"transcript"_s].toArray());
     data.currentThinking = obj[u"currentThinking"_s].toString();
     data.currentPlan = obj[u"currentPlan"_s].toArray();
     data.planShown = obj[u"planShown"_s].toBool();
     data.currentAssistant = obj[u"currentAssistant"_s].toString();
+    data.lastTurnId = obj[u"lastTurnId"_s].toString();
     // The epoch counts up, so a negative value is nonsense. Casting it to an
     // unsigned type would turn it into a huge number.
     data.stateEpoch = static_cast<quint64>(qMax<qint64>(0, obj[u"stateEpoch"_s].toInteger()));
@@ -188,8 +346,19 @@ static SessionStore::SessionData sessionDataFromJson(const QByteArray &payload)
     data.toolCalls = obj[u"toolCalls"_s].toInt();
     data.acpSessionId = obj[u"acpSessionId"_s].toString();
     data.workspace = obj[u"workspace"_s].toString();
+    data.parentConversationId = obj[u"parentConversationId"_s].toString();
+    data.subagents = obj[u"subagents"_s].toArray();
+    data.orchestration = obj[u"orchestration"_s].toObject();
 
-    // Version 2 adds the version field - no data migration needed, just ensure version is set
+    // Version 2 added the version field, version 3 the last turn id, version 4
+    // the full display transcript. All are additive: an older payload simply
+    // leaves the new field empty. A newer payload is not safe to rewrite,
+    // because saving it from this build would drop fields the newer build
+    // wrote.
+    if (data.version > SessionStore::CURRENT_VERSION) {
+        data.loadFailed = true;
+        return data;
+    }
     if (data.version < SessionStore::CURRENT_VERSION) {
         data.version = SessionStore::CURRENT_VERSION;
     }
@@ -197,10 +366,68 @@ static SessionStore::SessionData sessionDataFromJson(const QByteArray &payload)
     return data;
 }
 
+static void repairBadConversationTitles(const QSqlDatabase &db)
+{
+    // Only titles are scanned up front. The full payload is fetched for the
+    // (rare) rows whose title actually needs repair, instead of loading every
+    // transcript at startup.
+    QSqlQuery query(db);
+    if (!query.exec(u"SELECT id, title FROM conversations"_s)) {
+        return;
+    }
+
+    struct Row {
+        QString id;
+        QString title;
+    };
+    QList<Row> rows;
+    while (query.next()) {
+        Row row;
+        row.id = query.value(0).toString();
+        row.title = query.value(1).toString();
+        if (isBadTitle(row.title)) {
+            rows.append(row);
+        }
+    }
+
+    for (const Row &row : rows) {
+        QSqlQuery payloadQuery(db);
+        payloadQuery.prepare(u"SELECT payload FROM conversations WHERE id = ?"_s);
+        payloadQuery.addBindValue(row.id);
+        if (!payloadQuery.exec() || !payloadQuery.next()) {
+            continue;
+        }
+        const SessionStore::SessionData data = sessionDataFromJson(payloadQuery.value(0).toByteArray());
+        const QString newTitle = generateTitleFromMessages(data.messages);
+        if (newTitle.isEmpty() || isBadTitle(newTitle) || newTitle == row.title) {
+            continue;
+        }
+        QSqlQuery update(db);
+        update.prepare(u"UPDATE conversations SET title = ? WHERE id = ?"_s);
+        update.addBindValue(newTitle);
+        update.addBindValue(row.id);
+        if (!update.exec()) {
+            qWarning() << "KateAI: cannot repair conversation title" << row.id << update.lastError().text();
+        }
+    }
+}
+
 // --- session database ---------------------------------------------------
+
+static QString databaseFilePath();
+
+QString SessionStore::databasePath()
+{
+    return databaseFilePath();
+}
 
 static const QString ACTIVE_CONVERSATION_KEY = u"active_conversation"_s;
 static const QString LEGACY_IMPORT_KEY = u"legacy_kconfig_imported"_s;
+static const QString SCHEMA_VERSION_KEY = u"schema_version"_s;
+
+// Incremented whenever a statement below changes the on-disk shape. The
+// migration step for each version lives in migrateSchema().
+static constexpr int CURRENT_SCHEMA_VERSION = 1;
 
 // Guards the database handle and every read-modify-write sequence below.
 // Recursive because the public helpers call each other (save() -> saveConversation(),
@@ -225,13 +452,90 @@ static QString databaseFilePath()
     return dataDir + u"/kateai/sessions.sqlite"_s;
 }
 
+// `PRAGMA quick_check` walks the b-trees without the full integrity-check
+// cost. It catches the damage that makes a SQLite file unusable (truncated
+// pages, a broken freelist, an unreadable schema), which otherwise surfaced
+// only as "no history" on every start.
+static bool databaseIsHealthy(const QSqlDatabase &db, QString *detail)
+{
+    QSqlQuery check(db);
+    if (!check.exec(u"PRAGMA quick_check"_s)) {
+        if (detail) {
+            *detail = check.lastError().text();
+        }
+        return false;
+    }
+    QStringList rows;
+    while (check.next()) {
+        rows.append(check.value(0).toString());
+    }
+    if (rows.size() == 1 && rows.first().compare(u"ok"_s, Qt::CaseInsensitive) == 0) {
+        return true;
+    }
+    if (detail) {
+        *detail = rows.join(u"; "_s);
+    }
+    // A successful quick_check always reports one row, "ok". No rows means the
+    // check did not actually run, which is not evidence of a healthy database.
+    return false;
+}
+
+// Moves an unreadable database out of the way instead of deleting it. The
+// data may still be recoverable with sqlite3, and the user deserves the
+// chance; the application starts with an empty history rather than failing
+// forever.
+static void quarantineDatabase(const QString &path)
+{
+    if (!QFileInfo::exists(path)) {
+        return;
+    }
+    const QString suffix = QDateTime::currentDateTimeUtc().toString(u"yyyyMMdd-hhmmss"_s);
+    const QString target = path + u".corrupt-"_s + suffix;
+    bool moved = QFile::rename(path, target);
+    if (!moved) {
+        // Cross-device rename is not expected (same directory), but a
+        // read-only file can still refuse. Copy then remove as a fallback.
+        moved = QFile::copy(path, target) && QFile::remove(path);
+    }
+    if (moved) {
+        // Move the WAL/SHM sidecars next to the quarantined copy instead of
+        // deleting them. In WAL mode the newest committed transactions often
+        // live only in the -wal file, so deleting it discards the very history
+        // the quarantine is meant to preserve.
+        for (const QByteArray &suffix : {QByteArrayLiteral("-wal"), QByteArrayLiteral("-shm")}) {
+            const QString sidecar = path + QLatin1String(suffix);
+            if (QFileInfo::exists(sidecar)) {
+                const QString sidecarTarget = target + QLatin1String(suffix);
+                if (!QFile::rename(sidecar, sidecarTarget)) {
+                    QFile::copy(sidecar, sidecarTarget);
+                    QFile::remove(sidecar);
+                }
+            }
+        }
+        qWarning() << "KateAI: the session database was unreadable; moved it to" << target;
+    } else {
+        qWarning() << "KateAI: could not move the unreadable session database" << path;
+    }
+}
+
 // WAL keeps readers from blocking on a write, which is what makes restoring the
 // last session fast even while a request is streaming in.
 static bool applySchema(QSqlDatabase &db)
 {
     QSqlQuery pragmas(db);
+    // FULL makes a committed conversation durable across a power loss. The
+    // store writes a few times per turn, not on a hot path, so the extra
+    // fsync is worth it. The earlier NORMAL setting could lose the last
+    // transaction after an unclean shutdown, which looked like messages
+    // vanishing from the transcript.
     pragmas.exec(u"PRAGMA journal_mode=WAL"_s);
-    pragmas.exec(u"PRAGMA synchronous=NORMAL"_s);
+    pragmas.exec(u"PRAGMA synchronous=FULL"_s);
+    pragmas.exec(u"PRAGMA busy_timeout=5000"_s);
+    pragmas.exec(u"PRAGMA foreign_keys=ON"_s);
+    // One connection per thread, each with SQLite's ~2 MiB default page
+    // cache. The store reads and writes a single conversation at a time, so a
+    // 1 MiB cache is ample and keeps the editor's resident set lower.
+    pragmas.exec(u"PRAGMA cache_size=-1024"_s);
 
     static const char *const statements[] = {
         "CREATE TABLE IF NOT EXISTS meta ("
@@ -256,6 +560,35 @@ static bool applySchema(QSqlDatabase &db)
         QSqlQuery query(db);
         if (!query.exec(QString::fromLatin1(statement))) {
             qWarning() << "KateAI: cannot create the session database schema:" << query.lastError().text();
+            return false;
+        }
+    }
+
+    // Versioned migration. Version 1 is the initial schema; later versions add
+    // their statements here and bump CURRENT_SCHEMA_VERSION. A database from a
+    // newer KateAI is left untouched (only a warning is logged) so a downgrade
+    // cannot corrupt data it does not understand.
+    QSqlQuery readVersion(db);
+    readVersion.prepare(u"SELECT value FROM meta WHERE key = ?"_s);
+    readVersion.addBindValue(SCHEMA_VERSION_KEY);
+    int storedVersion = 0;
+    if (readVersion.exec() && readVersion.next()) {
+        storedVersion = readVersion.value(0).toInt();
+    }
+    if (storedVersion > CURRENT_SCHEMA_VERSION) {
+        qWarning() << "KateAI: the session database schema is newer than this build"
+                   << storedVersion << ">" << CURRENT_SCHEMA_VERSION << "- leaving it unchanged";
+        return true;
+    }
+    if (storedVersion < CURRENT_SCHEMA_VERSION) {
+        QSqlQuery writeVersion(db);
+        writeVersion.prepare(u"INSERT INTO meta (key, value) VALUES (?, ?) "
+                             "ON CONFLICT(key) DO UPDATE SET value = excluded.value"_s);
+        writeVersion.addBindValue(SCHEMA_VERSION_KEY);
+        writeVersion.addBindValue(QString::number(CURRENT_SCHEMA_VERSION));
+        if (!writeVersion.exec()) {
+            qWarning() << "KateAI: cannot record the session schema version:"
+                       << writeVersion.lastError().text();
             return false;
         }
     }
@@ -308,6 +641,9 @@ static QSqlDatabase openStore(bool *ok)
     if (!QDir().mkpath(directory)) {
         qWarning() << "KateAI: cannot create the session database directory:" << directory;
     }
+    // Transcripts contain source code and whatever the agent saw. Keep them
+    // owner-only instead of inheriting the umask (usually 0644).
+    QFile::setPermissions(directory, QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner);
 
     // A thread that ends frees its address, and a new thread can get the same
     // one. A counter keeps the connection names unique, and the connection is
@@ -318,26 +654,67 @@ static QSqlDatabase openStore(bool *ok)
                                        .arg(++connectionCounter);
     QString error;
 
-    {
-        // The handle must be destroyed before removeDatabase() runs.
-        QSqlDatabase db = QSqlDatabase::addDatabase(u"QSQLITE"_s, connectionName);
-        db.setDatabaseName(path);
-        if (!db.open()) {
-            error = db.lastError().text();
-        } else if (!applySchema(db)) {
-            error = u"cannot create the schema"_s;
-            db.close();
-        }
-    }
+    // Open, verify and, when the file is damaged, quarantine it and start over
+    // once. Without this a single bad page made every later start report "no
+    // history" while the file sat there blocking the store.
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        error.clear();
+        bool corrupt = false;
+        {
+            // The handle must be destroyed before removeDatabase() runs.
+            QSqlDatabase db = QSqlDatabase::addDatabase(u"QSQLITE"_s, connectionName);
+            db.setDatabaseName(path);
+            if (!db.open()) {
+                error = db.lastError().text();
+            } else {
+                // Wait for a competing writer before probing. Without this a
+                // second Kate process could make quick_check fail with "busy"
+                // and, before the fix, get the healthy database quarantined.
+                QSqlQuery timeout(db);
+                timeout.exec(u"PRAGMA busy_timeout=5000"_s);
 
-    if (!error.isEmpty()) {
-        qWarning() << "KateAI: cannot open the session database" << path << error;
+                QString damage;
+                if (!databaseIsHealthy(db, &damage)) {
+                    qWarning() << "KateAI: session database failed its integrity check:"
+                               << (damage.isEmpty() ? QStringLiteral("unknown damage") : damage);
+                    // Contention is transient and must never move the file.
+                    corrupt = !damage.contains(u"locked"_s, Qt::CaseInsensitive)
+                        && !damage.contains(u"busy"_s, Qt::CaseInsensitive);
+                    db.close();
+                    error = u"integrity check failed"_s;
+                } else if (!applySchema(db)) {
+                    // A schema failure can be a permission or lock problem;
+                    // only a demonstrably damaged file is quarantined.
+                    error = u"cannot create the schema"_s;
+                    db.close();
+                }
+            }
+        }
+
+        if (error.isEmpty()) {
+            break;
+        }
+
         QSqlDatabase::removeDatabase(connectionName);
+        if (attempt == 0 && corrupt) {
+            quarantineDatabase(path);
+            continue;
+        }
+        qWarning() << "KateAI: cannot open the session database" << path << error;
         return {};
     }
 
     QSqlDatabase db = QSqlDatabase::database(connectionName, true);
+    // SQLite creates the main file (and its WAL sidecars) with the process
+    // umask. Tighten them now that they exist.
+    const QStringList sessionFiles{path, path + u"-wal"_s, path + u"-shm"_s};
+    for (const QString &file : sessionFiles) {
+        if (QFileInfo::exists(file)) {
+            QFile::setPermissions(file, QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+        }
+    }
     importLegacyConversations(db);
+    repairBadConversationTitles(db);
 
     // The connection belongs to the thread that opened it. When the thread
     // ends, the connection has to go with it, or the next thread with the same
@@ -539,7 +916,8 @@ static void importLegacyConversations(QSqlDatabase db)
     const qint64 now = nextTimestamp();
     bool complete = true;
 
-    for (const QString &id : conversationIds) {
+    for (int index = 0; index < conversationIds.size(); ++index) {
+        const QString &id = conversationIds.at(index);
         const SessionStore::SessionData data = legacyConversationData(id);
         const KConfigGroup convGroup(config, LEGACY_CONVERSATION_GROUP_PREFIX + id);
         const QDateTime createdAt = QDateTime::fromString(convGroup.readEntry(u"CreatedAt"_s, QString()), Qt::ISODate);
@@ -549,8 +927,12 @@ static void importLegacyConversations(QSqlDatabase db)
         insert.prepare(u"INSERT OR IGNORE INTO conversations (id, title, created_at, updated_at, message_count, version, payload) VALUES (?, ?, ?, ?, ?, ?, ?)"_s);
         insert.addBindValue(id);
         insert.addBindValue(convGroup.readEntry(u"Title"_s, generateTitleFromMessages(data.messages)));
-        insert.addBindValue(createdAt.isValid() ? createdAt.toMSecsSinceEpoch() : now);
-        insert.addBindValue(updatedAt.isValid() ? updatedAt.toMSecsSinceEpoch() : now);
+        // Legacy entries without a timestamp must still sort deterministically.
+        // Giving every imported conversation the same "now" made the history
+        // order arbitrary.
+        const qint64 fallbackTime = now - (conversationIds.size() - index);
+        insert.addBindValue(createdAt.isValid() ? createdAt.toMSecsSinceEpoch() : fallbackTime);
+        insert.addBindValue(updatedAt.isValid() ? updatedAt.toMSecsSinceEpoch() : fallbackTime);
         insert.addBindValue(data.messages.size());
         insert.addBindValue(SessionStore::CURRENT_VERSION);
         insert.addBindValue(sessionDataToJson(data));
@@ -582,6 +964,7 @@ static void importLegacyConversations(QSqlDatabase db)
 
     if (!db.commit()) {
         qWarning() << "KateAI: cannot commit the session history import:" << db.lastError().text();
+        db.rollback();
         return;
     }
 
@@ -673,6 +1056,30 @@ QList<SessionStore::ConversationInfo> SessionStore::listConversations(int maxCon
         info.updatedAt = QDateTime::fromMSecsSinceEpoch(query.value(3).toLongLong());
         info.messageCount = query.value(4).toInt();
         info.isActive = (info.id == activeId);
+
+        // Repair any title that still carries a compaction marker so the history
+        // list never shows "earlier conversation was compacted...".
+        if (isBadTitle(info.title)) {
+            // Payload is only fetched for the rare bad title, not for every
+            // row in the history.
+            QSqlQuery payloadQuery(db);
+            payloadQuery.prepare(u"SELECT payload FROM conversations WHERE id = ?"_s);
+            payloadQuery.addBindValue(info.id);
+            SessionStore::SessionData data;
+            if (payloadQuery.exec() && payloadQuery.next()) {
+                data = sessionDataFromJson(payloadQuery.value(0).toByteArray());
+            }
+            const QString repaired = generateTitleFromMessages(data.messages);
+            if (!repaired.isEmpty() && !isBadTitle(repaired)) {
+                info.title = repaired;
+                QSqlQuery upd(db);
+                upd.prepare(u"UPDATE conversations SET title = ? WHERE id = ?"_s);
+                upd.addBindValue(repaired);
+                upd.addBindValue(info.id);
+                upd.exec();
+            }
+        }
+
         conversations.append(info);
     }
 
@@ -693,12 +1100,25 @@ QString SessionStore::conversationTitle(const QString &conversationId)
     }
 
     QSqlQuery query(db);
-    query.prepare(u"SELECT title FROM conversations WHERE id = ?"_s);
+    query.prepare(u"SELECT title, payload FROM conversations WHERE id = ?"_s);
     query.addBindValue(conversationId);
     if (!query.exec() || !query.next()) {
         return QString();
     }
-    return query.value(0).toString();
+    QString title = query.value(0).toString();
+    if (isBadTitle(title)) {
+        const SessionStore::SessionData data = sessionDataFromJson(query.value(1).toByteArray());
+        const QString repaired = generateTitleFromMessages(data.messages);
+        if (!repaired.isEmpty() && !isBadTitle(repaired)) {
+            title = repaired;
+            QSqlQuery upd(db);
+            upd.prepare(u"UPDATE conversations SET title = ? WHERE id = ?"_s);
+            upd.addBindValue(repaired);
+            upd.addBindValue(conversationId);
+            upd.exec();
+        }
+    }
+    return title;
 }
 
 SessionStore::SessionData SessionStore::loadConversation(const QString &conversationId)
@@ -714,7 +1134,14 @@ SessionStore::SessionData SessionStore::loadConversation(const QString &conversa
     QSqlQuery query(db);
     query.prepare(u"SELECT payload FROM conversations WHERE id = ?"_s);
     query.addBindValue(conversationId);
-    if (!query.exec() || !query.next()) {
+    if (!query.exec()) {
+        SessionData failed;
+        failed.loadFailed = true;
+        return failed;
+    }
+    if (!query.next()) {
+        // The row is gone (deleted or pruned). An empty conversation is the
+        // right answer here; it is not a load failure.
         return SessionData();
     }
 
@@ -750,16 +1177,51 @@ bool SessionStore::saveConversation(const QString &conversationId, const Session
     // number of stored conversations grew.
     const bool isNew = !conversationExists(db, conversationId);
 
+    QString convTitleToUse = convTitle;
+    if (!isNew && title.isEmpty()) {
+        // Preserve existing title when updating (e.g. after context compaction)
+        // so titles don't get lost or regenerated from compacted messages.
+        // A previously stored bad/compacted title is treated as missing and
+        // regenerated from the (possibly compacted) messages instead of being
+        // kept forever.
+        QSqlQuery getTitle(db);
+        getTitle.prepare(u"SELECT title FROM conversations WHERE id = ?"_s);
+        getTitle.addBindValue(conversationId);
+        if (getTitle.exec() && getTitle.next()) {
+            const QString existingTitle = getTitle.value(0).toString();
+            if (!existingTitle.isEmpty() && !isBadTitle(existingTitle)) {
+                convTitleToUse = existingTitle;
+            } else {
+                convTitleToUse = generateTitleFromMessages(data.messages);
+            }
+        } else {
+            convTitleToUse = generateTitleFromMessages(data.messages);
+        }
+    } else if (isNew && title.isEmpty()) {
+        convTitleToUse = generateTitleFromMessages(data.messages);
+    } else if (!title.isEmpty()) {
+        convTitleToUse = title;
+    }
+
     if (!isNew) {
         QSqlQuery update(db);
         update.prepare(u"UPDATE conversations SET title = ?, updated_at = ?, message_count = ?, version = ?, payload = ? WHERE id = ?"_s);
-        update.addBindValue(convTitle);
+        update.addBindValue(convTitleToUse);
         update.addBindValue(now);
         update.addBindValue(data.messages.size());
         update.addBindValue(CURRENT_VERSION);
         update.addBindValue(sessionDataToJson(data));
         update.addBindValue(conversationId);
         stored = update.exec();
+        if (stored) {
+            const int affected = update.numRowsAffected();
+            // The row was pruned by another process between isNew and the
+            // UPDATE. An UPDATE that affects no rows is not a save.
+            if (affected == 0) {
+                db.rollback();
+                return saveConversation(conversationId, data, title, maxConversations);
+            }
+        }
         if (!stored) {
             qWarning() << "KateAI: cannot update conversation" << conversationId << update.lastError().text();
         }
@@ -796,8 +1258,12 @@ bool SessionStore::saveConversation(const QString &conversationId, const Session
         return false;
     }
 
-    // Prune old conversations if needed
-    pruneOldConversations(maxConversations);
+    // Pruning is only needed when a conversation was added. Running the
+    // DELETE subquery on every autosave of an existing thread was wasted
+    // work in long sessions.
+    if (isNew) {
+        pruneOldConversations(maxConversations);
+    }
     return isNew;
 }
 
@@ -809,6 +1275,18 @@ void SessionStore::deleteConversation(const QString &conversationId)
     QSqlDatabase db = openStore(&ok);
     if (!ok) {
         return;
+    }
+    // Read the payload before the row disappears: it names the isolated
+    // worktrees that must not outlive the conversation. Only the workspace and
+    // sub-agent records are decoded, not the transcript.
+    ConversationCleanup cleanup;
+    {
+        QSqlQuery payloadQuery(db);
+        payloadQuery.prepare(u"SELECT payload FROM conversations WHERE id = ?"_s);
+        payloadQuery.addBindValue(conversationId);
+        if (payloadQuery.exec() && payloadQuery.next()) {
+            cleanup = cleanupInfoFromPayload(payloadQuery.value(0).toByteArray());
+        }
     }
 
     if (!db.transaction()) {
@@ -832,7 +1310,16 @@ void SessionStore::deleteConversation(const QString &conversationId)
 
     if (!db.commit()) {
         qWarning() << "KateAI: cannot commit the deletion of conversation" << conversationId << db.lastError().text();
+        db.rollback();
+        return;
     }
+    // The event log is part of the same history. Removing the payload without
+    // it would leave replayable turns for a conversation that no longer
+    // exists.
+    EventStore events;
+    events.removeConversation(conversationId);
+    removeSidechains(conversationId);
+    removeSubagentWorktrees(cleanup.workspace, cleanup.subagents);
 }
 
 QString SessionStore::createNewConversation()
@@ -845,6 +1332,44 @@ QString SessionStore::createNewConversation()
     // from appearing in the history menu.
     setActiveConversation(newId);
 
+    return newId;
+}
+
+QString SessionStore::forkConversation(const QString &sourceId, const QString &title)
+{
+    if (sourceId.isEmpty()) {
+        return {};
+    }
+    SessionData data = loadConversation(sourceId);
+    if (data.loadFailed) {
+        return {};
+    }
+    const QString newId = generateConversationId();
+    data.parentConversationId = sourceId;
+    // An agent-side session belongs to the source thread. A fork starts its
+    // own ACP session instead of resuming (and contaminating) the original.
+    data.acpSessionId.clear();
+    // Worktree records point at paths and patch files owned by the source
+    // conversation. Copying them would let either branch discard the other's
+    // worktree, so the fork keeps the transcript but not the pending patches.
+    data.subagents = QJsonArray();
+    QString forkTitle = title.trimmed();
+    if (forkTitle.isEmpty()) {
+        const QString sourceTitle = conversationTitle(sourceId);
+        forkTitle = sourceTitle.isEmpty() ? i18n("Forked conversation")
+                                          : i18n("%1 (fork)", sourceTitle);
+    }
+    if (!saveConversation(newId, data, forkTitle)) {
+        return {};
+    }
+    // Copy the replayable prefix by value. A failure here does not invalidate
+    // the transcript fork; the payload is the fast-load path.
+    EventStore events;
+    QString eventError;
+    if (!events.copyConversation(sourceId, newId, -1, &eventError) && !eventError.isEmpty()) {
+        qWarning() << "KateAI: could not copy the event log into the fork:" << eventError;
+    }
+    setActiveConversation(newId);
     return newId;
 }
 
@@ -897,14 +1422,29 @@ void SessionStore::pruneOldConversations(int maxConversations)
     // conversation is kept: pruning it would leave the restore pointer
     // naming a row that no longer exists, and the app would silently fall
     // back to another conversation on the next start.
-    QSqlQuery query(db);
-    query.prepare(u"DELETE FROM conversations WHERE id NOT IN (SELECT id FROM conversations ORDER BY updated_at DESC LIMIT ?) "
-                  u"AND id IS NOT (SELECT value FROM meta WHERE key = ?)"_s);
-    query.addBindValue(maxConversations);
-    query.addBindValue(ACTIVE_CONVERSATION_KEY);
-    if (!query.exec()) {
-        qWarning() << "KateAI: cannot prune old conversations:" << query.lastError().text();
+    QStringList victims;
+    {
+        QSqlQuery query(db);
+        query.prepare(u"SELECT id FROM conversations WHERE id NOT IN "
+                      u"(SELECT id FROM conversations ORDER BY updated_at DESC LIMIT ?) "
+                      u"AND id IS NOT (SELECT value FROM meta WHERE key = ?)"_s);
+        query.addBindValue(maxConversations);
+        query.addBindValue(ACTIVE_CONVERSATION_KEY);
+        if (!query.exec()) {
+            qWarning() << "KateAI: cannot prune old conversations:" << query.lastError().text();
+            return;
+        }
+        while (query.next()) {
+            victims.append(query.value(0).toString());
+        }
     }
+    // deleteConversation() also removes each conversation's sidechains,
+    // worktrees and event rows; the old bulk DELETE leaked all three.
+    for (const QString &id : victims) {
+        deleteConversation(id);
+    }
+    EventStore events;
+    events.pruneOrphans();
 }
 
 void SessionStore::clearAllConversations()
@@ -922,6 +1462,24 @@ void SessionStore::clearAllConversations()
         return;
     }
 
+    // Read the payloads inside the same transaction as the delete: a
+    // concurrent window must not add a conversation between the SELECT and
+    // the DELETE and leave its worktree unreachable.
+    QStringList conversationIds;
+    QList<ConversationCleanup> removed;
+    {
+        QSqlQuery read(db);
+        if (!read.exec(u"SELECT id, payload FROM conversations"_s)) {
+            db.rollback();
+            qWarning() << "KateAI: cannot read the conversation history:" << read.lastError().text();
+            return;
+        }
+        while (read.next()) {
+            conversationIds.append(read.value(0).toString());
+            removed.append(cleanupInfoFromPayload(read.value(1).toByteArray()));
+        }
+    }
+
     QSqlQuery query(db);
     if (!query.exec(u"DELETE FROM conversations"_s)) {
         db.rollback();
@@ -932,7 +1490,16 @@ void SessionStore::clearAllConversations()
     clearMeta(db, ACTIVE_CONVERSATION_KEY);
     if (!db.commit()) {
         qWarning() << "KateAI: cannot commit the conversation history clear:" << db.lastError().text();
+        db.rollback();
+        return;
     }
+    EventStore events;
+    events.clearAll();
+    for (int i = 0; i < conversationIds.size(); ++i) {
+        removeSidechains(conversationIds.at(i));
+        removeSubagentWorktrees(removed.at(i).workspace, removed.at(i).subagents);
+    }
+    QDir(subagentRoot()).removeRecursively();
 }
 
 } // namespace KateAi

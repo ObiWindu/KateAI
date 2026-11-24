@@ -27,9 +27,12 @@
 #include "types.h"
 
 #include <QApplication>
+#include <QFile>
 #include <QFontMetrics>
 #include <QJsonArray>
 #include <QJsonObject>
+#include <QLabel>
+#include <QPushButton>
 #include <QSignalSpy>
 #include <QTest>
 #include <QTemporaryDir>
@@ -170,6 +173,20 @@ private Q_SLOTS:
         teardown();
     }
 
+    void testFirstWorkspaceIndexWritesTheGraphCache()
+    {
+        setup();
+        // The first workspace load must persist the index immediately, so the
+        // next start and ACP session can read it even before any edit.
+        const QString cache = m_workspace->path() + u"/.kateai/project_graph.json"_s;
+        QVERIFY2(QFile::exists(cache), qPrintable(cache));
+        QFile file(cache);
+        QVERIFY(file.open(QIODevice::ReadOnly));
+        const QByteArray data = file.readAll();
+        QVERIFY(data.contains("\"nodes\""));
+        QVERIFY(data.contains("\"edges\""));
+    }
+
     // A read is the plainest card there is: no output to stream, no change to
     // show. While it runs it used to be a header row and nothing else.
     void testRunningToolCardShowsWhatItIsWorkingOn()
@@ -240,6 +257,98 @@ private Q_SLOTS:
         QuestionWidget *prompt = questionCard(u"tc-question"_s);
         QVERIFY2(prompt, "no question prompt in the intent dock");
         QVERIFY2(prompt->height() > 40, qPrintable(QStringLiteral("the prompt is header-only at %1px").arg(prompt->height())));
+        QTextBrowser *promptBody = prompt->findChild<QTextBrowser *>();
+        QVERIFY2(promptBody, "the prompt has no body");
+        QVERIFY2(promptBody->height() > 20,
+                 qPrintable(QStringLiteral("the prompt body collapsed to %1px").arg(promptBody->height())));
+        QVERIFY2(promptBody->toPlainText().contains(QStringLiteral("patch it in place")),
+                 qPrintable(promptBody->toPlainText()));
+    }
+
+    // The question card is the only card whose payload is prose. Once the
+    // question is answered the answer takes the body, and the question that
+    // prompted it has to stay in the card: the restored card keeps it, and a
+    // live card that dropped it read as "the agent answered ok" with no
+    // question anywhere near it.
+    void testQuestionCardKeepsTheQuestionAfterItIsAnswered()
+    {
+        setup();
+        PermissionRequest req = request(u"question"_s, u"tc-q2"_s, u"{\"question\": \"Which one?\"}"_s);
+        req.questionText = u"Which one?"_s;
+        req.questionOptions = QStringList({u"Rewrite"_s});
+        req.allowFreeform = true;
+        Q_EMIT m_widget->agent()->toolStarted(req);
+        Q_EMIT m_widget->agent()->questionAsked(req);
+        QTest::qWait(80);
+
+        ToolCallWidget *card = cardOfClass<ToolCallWidget>(QStringLiteral("ToolCallWidget_tc-q2"));
+        QVERIFY2(card, "no card was created for the question");
+        QTextBrowser *body = cardBody(card);
+        QVERIFY2(body, "the question card has no body surface");
+        QVERIFY2(body->toPlainText().contains(QStringLiteral("Which one?")),
+                 qPrintable(body->toPlainText()));
+
+        // The answer lands in the same card, and the question stays with it.
+        Q_EMIT m_widget->agent()->toolFinished(result(u"question"_s, u"tc-q2"_s, u"Rewrite"_s));
+        QTest::qWait(80);
+        const QString finished = body->toPlainText();
+        QVERIFY2(finished.contains(QStringLiteral("Which one?")),
+                 qPrintable(QStringLiteral("the finished card lost the question: %1").arg(finished)));
+        QVERIFY2(finished.contains(QStringLiteral("Rewrite")),
+                 qPrintable(QStringLiteral("the finished card lost the answer: %1").arg(finished)));
+    }
+
+    // An agent hands its advice over under a name of its own. The advice is
+    // still advice: the card has to show it, not the arguments as a JSON blob.
+    // The restored card already matched on the canonical name, so a live call
+    // that answered to a different name read completely differently from the
+    // same conversation after a reload.
+    void testAdviceUnderAnAliasNameStillGetsASuggestionCard()
+    {
+        setup();
+        PermissionRequest suggestion = request(u"suggestion"_s, u"tc-suggest-alias-name"_s, QString());
+        suggestion.originalToolName = u"suggestion"_s;
+        suggestion.details = QStringLiteral(
+            "{\"suggestion\": \"Hoist this allocation out of the loop\", \"path\": \"src/agentloop.cpp\", \"line\": 2100}");
+        Q_EMIT m_widget->agent()->toolStarted(suggestion);
+        QTest::qWait(80);
+
+        SuggestionWidget *card = suggestionCard(u"tc-suggest-alias-name"_s);
+        QVERIFY2(card, "advice under another name produced no suggestion card");
+        const QList<QTextBrowser *> bodies = card->findChildren<QTextBrowser *>();
+        QVERIFY(!bodies.isEmpty());
+        QVERIFY2(bodies.first()->toPlainText().contains(u"Hoist this allocation"_s),
+                 qPrintable(bodies.first()->toPlainText()));
+        // The generic card would render the arguments as a JSON blob instead of
+        // the advice they carry.
+        QVERIFY2(!cardOfClass<ToolCallWidget>(QStringLiteral("ToolCallWidget_tc-suggest-alias-name")),
+                 "advice must not get the generic tool card");
+    }
+
+    // The same for a question: the card in the transcript carries the question
+    // and the prompt above the composer repeats it.
+    void testQuestionUnderAnAliasNameStillShowsTheQuestion()
+    {
+        setup();
+        PermissionRequest question = request(u"ask_user"_s, u"tc-question-alias-name"_s,
+                                             u"{\"question\": \"Which strategy should I use?\"}"_s);
+        question.originalToolName = u"ask_user"_s;
+        Q_EMIT m_widget->agent()->toolStarted(question);
+        Q_EMIT m_widget->agent()->questionAsked(question);
+        QTest::qWait(80);
+
+        ToolCallWidget *card = cardOfClass<ToolCallWidget>(QStringLiteral("ToolCallWidget_tc-question-alias-name"));
+        QVERIFY2(card, "no card was created for the question");
+        QTextBrowser *body = cardBody(card);
+        QVERIFY2(body->toPlainText().contains(u"Which strategy should I use?"_s),
+                 qPrintable(body->toPlainText()));
+
+        QuestionWidget *prompt = questionCard(u"tc-question-alias-name"_s);
+        QVERIFY2(prompt, "no question prompt in the intent dock");
+        QTextBrowser *promptBody = prompt->findChild<QTextBrowser *>();
+        QVERIFY(promptBody);
+        QVERIFY2(promptBody->toPlainText().contains(u"Which strategy should I use?"_s),
+                 qPrintable(promptBody->toPlainText()));
     }
 
     // A suggestion is advice the user is meant to read, and it is fully written
@@ -259,6 +368,8 @@ private Q_SLOTS:
         QVERIFY2(!bodies.isEmpty(), "the posted card has no body");
         QVERIFY2(bodies.first()->toPlainText().contains(QStringLiteral("std::string_view")),
                  qPrintable(bodies.first()->toPlainText()));
+        QVERIFY2(bodies.first()->height() > 20,
+                 qPrintable(QStringLiteral("the posted card body collapsed to %1px").arg(bodies.first()->height())));
 
         // The result settles the card instead of posting a second one.
         Q_EMIT m_widget->agent()->toolFinished(result(u"suggest"_s, u"tc-suggest"_s, u"ok"_s));
@@ -531,6 +642,140 @@ private Q_SLOTS:
         QTextBrowser *body = cardBody(card);
         QVERIFY2(body && body->toPlainText().contains(QStringLiteral("patched src/main.cpp")),
                  qPrintable(body ? body->toPlainText() : QString()));
+    }
+
+    void testReasoningAfterAnswerStartsDoesNotStreamAlongsideIt()
+    {
+        setup();
+        Q_EMIT m_widget->agent()->thinkingDelta(u"Initial reasoning. "_s);
+        auto *reasoning = m_widget->findChild<QTextBrowser *>(QStringLiteral("reasoningBrowser"));
+        QVERIFY2(reasoning, "the reasoning browser was not found");
+        QVERIFY2(QTest::qWaitFor([reasoning] {
+            return reasoning->toPlainText().contains(QStringLiteral("Initial reasoning."));
+        }), qPrintable(reasoning->toPlainText()));
+
+        // The first visible text chunk starts the answer phase. Everything the
+        // agent reasoned before it has to be on screen first.
+        Q_EMIT m_widget->agent()->assistantDelta(u"The answer starts. "_s);
+        QVERIFY(QTest::qWaitFor([reasoning] {
+            return reasoning->toPlainText().contains(QStringLiteral("Initial reasoning."));
+        }));
+        auto *pill = m_widget->findChild<QLabel *>(QStringLiteral("thinkingIndicator"));
+        QVERIFY(pill);
+        QVERIFY2(!pill->isVisible(), "the thinking pill kept running while the answer streamed");
+
+        // Some providers keep emitting reasoning after the answer started. It
+        // may be kept for the transcript, but it must not animate into the
+        // reasoning block while the answer is being written.
+        Q_EMIT m_widget->agent()->thinkingDelta(u"Late reasoning that must not animate."_s);
+        QTest::qWait(300);
+        QVERIFY2(!reasoning->toPlainText().contains(QStringLiteral("Late reasoning")),
+                 qPrintable(reasoning->toPlainText()));
+        QVERIFY2(!pill->isVisible(), "late reasoning restarted the thinking pill during the answer");
+
+        // Freezing the turn keeps that reasoning in the transcript without
+        // having shown it alongside the answer.
+        Q_EMIT m_widget->agent()->assistantFinished(u"The answer starts. "_s);
+        QVERIFY2(QTest::qWaitFor([reasoning] {
+            return reasoning->toPlainText().contains(QStringLiteral("Late reasoning"));
+        }), qPrintable(reasoning->toPlainText()));
+        auto *answer = m_widget->findChild<QTextBrowser *>(QStringLiteral("assistantBrowser"));
+        QVERIFY(answer);
+        QVERIFY2(answer->toPlainText().contains(QStringLiteral("The answer starts.")),
+                 qPrintable(answer->toPlainText()));
+    }
+
+    void testHistoryRestoresSuggestionAndQuestionText()
+    {
+        setup();
+        SessionStore::SessionData data;
+
+        ChatMessage assistant;
+        assistant.role = ChatMessage::Role::Assistant;
+        assistant.content = u"Posting advice and asking a question."_s;
+        assistant.toolCalls = QJsonArray{
+            functionCall(u"call-suggest"_s, u"suggest"_s,
+                         u"{\"suggestion\":\"Use std::string_view here\",\"path\":\"src/main.cpp\",\"line\":42}"_s),
+            functionCall(u"call-question"_s, u"question"_s,
+                         u"{\"question\":\"Rewrite the file, or patch it in place?\",\"options\":[\"Rewrite\",\"Patch\"]}"_s)};
+
+        ChatMessage suggestResult;
+        suggestResult.role = ChatMessage::Role::Tool;
+        suggestResult.name = u"suggest"_s;
+        suggestResult.toolCallId = u"call-suggest"_s;
+        suggestResult.content = u"Suggestion posted for the user to accept or dismiss."_s;
+
+        ChatMessage questionResult;
+        questionResult.role = ChatMessage::Role::Tool;
+        questionResult.name = u"question"_s;
+        questionResult.toolCallId = u"call-question"_s;
+        questionResult.content = u"Rewrite"_s;
+
+        data.messages = {assistant, suggestResult, questionResult};
+        m_widget->agent()->restoreSession(data);
+        m_widget->rebuildTranscript();
+        QTest::qWait(150);
+
+        SuggestionWidget *suggestion = suggestionCard(u"call-suggest"_s);
+        QVERIFY2(suggestion, "history restore dropped the suggestion card");
+        QTextBrowser *suggestionBody = suggestion->findChild<QTextBrowser *>();
+        QVERIFY(suggestionBody);
+        QVERIFY2(suggestionBody->toPlainText().contains(u"std::string_view"_s),
+                 qPrintable(suggestionBody->toPlainText()));
+
+        ToolCallWidget *question = cardOfClass<ToolCallWidget>(QStringLiteral("ToolCallWidget_call-question"));
+        QVERIFY2(question, "history restore dropped the question card");
+        QTextBrowser *questionBody = cardBody(question);
+        QVERIFY(questionBody);
+        QVERIFY2(questionBody->toPlainText().contains(u"Rewrite the file, or patch it in place?"_s),
+                 qPrintable(questionBody->toPlainText()));
+    }
+
+    // Providers do not all use the canonical field names. A card that only
+    // reads request.questionText / details["suggestion"] is blank when the
+    // call carries the same content as prompt/message/description.
+    void testCardsReadAliasFields()
+    {
+        setup();
+
+        PermissionRequest question = request(u"question"_s, u"tc-question-alias"_s,
+                                             u"{\"questions\":[{\"prompt\":\"Which strategy should I use?\",\"choices\":[{\"label\":\"Fast\"},{\"label\":\"Correct\"}],\"allowFreeform\":false}]}"_s);
+        Q_EMIT m_widget->agent()->toolStarted(question);
+        Q_EMIT m_widget->agent()->questionAsked(question);
+        QTest::qWait(80);
+
+        QuestionWidget *prompt = questionCard(u"tc-question-alias"_s);
+        QVERIFY2(prompt, "the alias-shaped question produced no prompt");
+        QTextBrowser *promptBody = prompt->findChild<QTextBrowser *>();
+        QVERIFY(promptBody);
+        QVERIFY2(promptBody->toPlainText().contains(u"Which strategy should I use?"_s),
+                 qPrintable(promptBody->toPlainText()));
+        QStringList labels;
+        for (QPushButton *button : prompt->findChildren<QPushButton *>()) {
+            labels << button->text();
+        }
+        QVERIFY2(labels.contains(u"Fast"_s) && labels.contains(u"Correct"_s),
+                 qPrintable(labels.join(u", "_s)));
+
+        PermissionRequest suggestion = request(u"suggest"_s, u"tc-suggest-alias"_s,
+                                              u"{\"message\":\"Use std::string_view here\",\"file_path\":\"src/main.cpp\",\"start_line\":\"42\"}"_s);
+        Q_EMIT m_widget->agent()->toolStarted(suggestion);
+        QTest::qWait(80);
+
+        SuggestionWidget *card = suggestionCard(u"tc-suggest-alias"_s);
+        QVERIFY2(card, "the alias-shaped suggestion produced no card");
+        const QList<QTextBrowser *> bodies = card->findChildren<QTextBrowser *>();
+        QVERIFY(!bodies.isEmpty());
+        QVERIFY2(bodies.first()->toPlainText().contains(u"std::string_view"_s),
+                 qPrintable(bodies.first()->toPlainText()));
+        QVERIFY2(card->findChildren<QLabel *>().size() > 0, "the suggestion card has no labels");
+        bool anchored = false;
+        for (QLabel *label : card->findChildren<QLabel *>()) {
+            if (label->text().contains(u"src/main.cpp:42"_s)) {
+                anchored = true;
+            }
+        }
+        QVERIFY2(anchored, "the alias-shaped suggestion lost its anchor");
     }
 
     // The plan's todo list docks at the bottom of the chat: a compact strip

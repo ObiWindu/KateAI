@@ -203,6 +203,21 @@ QString detectWorkspace(KTextEditor::MainWindow *mainWindow)
 {
     QObject *projects = projectPlugin();
 
+    // The Projects panel's active folder is the user's explicit choice (Open
+    // Folder, the dropdown, Prev/Next, clicking the tree). Kate syncs the
+    // panel to the active document, so when the two disagree the panel is
+    // the fresher intent: opening a folder never touches an editor view, and
+    // the still-open document of the previous folder would otherwise drag
+    // the workspace straight back (viewChanged/aboutToSubmit refreshes run
+    // without an explicit folder and would revert the switch).
+    const QString panelActive = mainWindow ? pluginViewProjectBaseDir(mainWindow) : QString();
+    const auto panelWins = [&panelActive](const QString &docProject) -> QString {
+        if (!panelActive.isEmpty() && QDir::cleanPath(panelActive) != QDir::cleanPath(docProject)) {
+            return panelActive;
+        }
+        return docProject;
+    };
+
     // Ask Kate itself which project owns a document: it knows projectRoots,
     // not just baseDir prefixes, so it stays right for nested/out-of-source
     // layouts where a prefix check would pick the wrong folder.
@@ -235,20 +250,24 @@ QString detectWorkspace(KTextEditor::MainWindow *mainWindow)
                                                  Q_RETURN_ARG(QString, viaApi),
                                                  Q_ARG(KTextEditor::Document *, view->document()))
                     && !viaApi.trimmed().isEmpty()) {
-                    return QDir::cleanPath(viaApi.trimmed());
+                    return panelWins(QDir::cleanPath(viaApi.trimmed()));
                 }
                 const QString base = baseDirForLocalFile(local);
                 if (!base.isEmpty()) {
-                    return base;
+                    return panelWins(base);
                 }
                 return detectWorkspaceFromPath(local);
             }
             // Active view is untitled/remote but a project is active in the
             // panel: that panel selection is the folder the user opened.
-            const QString active = pluginViewProjectBaseDir(mainWindow);
-            if (!active.isEmpty()) {
-                return active;
+            if (!panelActive.isEmpty()) {
+                return panelActive;
             }
+        }
+        // No usable active document: the panel's explicit selection beats the
+        // stale background tabs, so check it before the per-view fallback.
+        if (!panelActive.isEmpty()) {
+            return panelActive;
         }
         for (auto *v : mainWindow->views()) {
             const QString local = v->document()->url().toLocalFile();
@@ -268,14 +287,8 @@ QString detectWorkspace(KTextEditor::MainWindow *mainWindow)
                 return detectWorkspaceFromPath(local);
             }
         }
-        // No local document: "Open Folder" still shows up as a project,
-        // while the process working directory still points where Kate was
-        // started. Prefer the panel's active project (what the user
-        // selected), then the newest opened folder.
-        const QString active = pluginViewProjectBaseDir(mainWindow);
-        if (!active.isEmpty()) {
-            return active;
-        }
+        // No local document and no panel selection: fall through to the
+        // newest opened folder below.
     }
 
     const QObjectList list = openProjects(projects);

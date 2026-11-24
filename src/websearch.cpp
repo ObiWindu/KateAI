@@ -35,7 +35,7 @@ namespace
 {
 // The page is read into memory in one piece, so the download needs a ceiling.
 // Five megabytes is far more than a readable web page and far less than a
-// denial of service.
+// denial of service. A per-call max_bytes can lower it; it cannot raise it.
 constexpr qint64 kMaxFetchBytes = 5 * 1024 * 1024;
 }
 
@@ -70,9 +70,28 @@ QString collapseWhitespace(const QString &text)
 
 QString WebSearchResult::toMarkdown(int index) const
 {
-    QString out = QStringLiteral("%1. [%2](%3)").arg(index).arg(title.isEmpty() ? url : title, url);
+    // Results come from a search provider and are rendered into the model's
+    // prompt. A newline or "](…)" in a title could break the list or inject
+    // text, and a ')' in a URL would end the link early.
+    QString safeTitle = title.isEmpty() ? url : title;
+    safeTitle.replace(u'[', u"\\["_s);
+    safeTitle.replace(u']', u"\\]"_s);
+    safeTitle.replace(u'\n', u' ');
+    safeTitle.replace(u'\r', u' ');
+    QString safeUrl = url;
+    safeUrl.replace(u'\n', QString());
+    safeUrl.replace(u'\r', QString());
+    // Angle brackets are only needed when the URL itself would end the link
+    // early; plain URLs keep the conventional [title](url) form.
+    const QString linkTarget = (safeUrl.contains(u'(') || safeUrl.contains(u')') || safeUrl.contains(u' '))
+        ? u"<%1>"_s.arg(safeUrl)
+        : safeUrl;
+    QString out = QStringLiteral("%1. [%2](%3)").arg(index).arg(safeTitle, linkTarget);
     if (!snippet.isEmpty()) {
-        out += u"\n   "_s + snippet;
+        QString safeSnippet = snippet;
+        safeSnippet.replace(u'\n', u' ');
+        safeSnippet.replace(u'\r', u' ');
+        out += u"\n   "_s + safeSnippet;
     }
     return out;
 }
@@ -238,7 +257,13 @@ bool WebSearch::isFetchableUrl(const QString &url)
 
 bool WebSearch::isBlockedHost(const QString &host)
 {
-    const QString name = host.trimmed().toLower();
+    QString name = host.trimmed().toLower();
+    // A trailing dot is the explicit root label: "localhost." and
+    // "127.0.0.1." resolve exactly like their dotless spellings, but are not
+    // equal to them as strings.
+    while (name.endsWith(u'.')) {
+        name.chop(1);
+    }
     if (name.isEmpty()) {
         return true;
     }
@@ -327,9 +352,11 @@ void WebSearch::abort()
         }
     }
     m_callMaxResults.clear();
+    m_callProviders.clear();
+    m_callMaxBytes.clear();
 }
 
-void WebSearch::search(const QString &query, const QString &callId, int maxResults)
+void WebSearch::search(const QString &query, const QString &callId, int maxResults, const QString &site)
 {
     if (!isConfigured()) {
         finishSearch(callId, {}, configurationError());
@@ -340,12 +367,21 @@ void WebSearch::search(const QString &query, const QString &callId, int maxResul
         finishSearch(callId, {}, i18n("The search query was empty."));
         return;
     }
+    // Every provider accepts the site: operator in its query text, which is
+    // also what the model would type manually. Strip whitespace so a stray
+    // newline cannot split the query into separate terms.
+    const QString siteFilter = site.trimmed();
+    QString siteValue = siteFilter.simplified();
+    siteValue.remove(u' ');
+    const QString effectiveQuery = siteValue.isEmpty() ? trimmed
+        : trimmed + u" site:"_s + siteValue;
 
     // Register the per-call limit only once the request is actually going out:
     // an early return above (unconfigured provider, empty query) never reaches
     // onReplyFinished(), which is the only place the entry is removed.
     if (maxResults > 0) {
         m_callMaxResults.insert(callId, qBound(1, maxResults, 20));
+        m_callProviders.insert(callId, m_provider);
     }
 
     // The provider request and the reply parser must agree on the count, so
@@ -360,7 +396,7 @@ void WebSearch::search(const QString &query, const QString &callId, int maxResul
         // JS runtime to interpret the response.
         QUrl url(QStringLiteral("https://html.duckduckgo.com/html/"));
         QUrlQuery queryItems;
-        queryItems.addQueryItem(QStringLiteral("q"), trimmed);
+        queryItems.addQueryItem(QStringLiteral("q"), effectiveQuery);
         queryItems.addQueryItem(QStringLiteral("kl"), QStringLiteral("wt-wt"));
         url.setQuery(queryItems);
         reply = m_nam->get(makeRequest(url, m_timeoutMs));
@@ -370,7 +406,7 @@ void WebSearch::search(const QString &query, const QString &callId, int maxResul
         QNetworkRequest request = makeRequest(QUrl(QStringLiteral("https://api.tavily.com/search")), m_timeoutMs);
         request.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
         const QJsonObject payload{{QStringLiteral("api_key"), m_apiKey},
-                                  {QStringLiteral("query"), trimmed},
+                                  {QStringLiteral("query"), effectiveQuery},
                                   {QStringLiteral("max_results"), effectiveLimit},
                                   {QStringLiteral("search_depth"), QStringLiteral("basic")}};
         reply = m_nam->post(request, QJsonDocument(payload).toJson(QJsonDocument::Compact));
@@ -379,7 +415,7 @@ void WebSearch::search(const QString &query, const QString &callId, int maxResul
     case Provider::Brave: {
         QUrl url(QStringLiteral("https://api.search.brave.com/res/v1/web/search"));
         QUrlQuery braveItems;
-        braveItems.addQueryItem(QStringLiteral("q"), trimmed);
+        braveItems.addQueryItem(QStringLiteral("q"), effectiveQuery);
         braveItems.addQueryItem(QStringLiteral("count"), QString::number(effectiveLimit));
         url.setQuery(braveItems);
         QNetworkRequest request = makeRequest(url, m_timeoutMs);
@@ -390,8 +426,11 @@ void WebSearch::search(const QString &query, const QString &callId, int maxResul
     }
     case Provider::SearXNG: {
         QUrl url(m_endpoint);
-        QUrlQuery searxItems;
-        searxItems.addQueryItem(QStringLiteral("q"), trimmed);
+        // The endpoint may carry its own query - an instance token, a
+        // language, a category. They are kept: replacing the query dropped
+        // them, and a SearXNG that needs a token then answered with an error.
+        QUrlQuery searxItems(url.query());
+        searxItems.addQueryItem(QStringLiteral("q"), effectiveQuery);
         searxItems.addQueryItem(QStringLiteral("format"), QStringLiteral("json"));
         url.setQuery(searxItems);
         reply = m_nam->get(makeRequest(url, m_timeoutMs));
@@ -426,6 +465,7 @@ void WebSearch::search(const QString &query, const QString &callId, int maxResul
         // Only onReplyFinished() used to clear it, and this path never
         // reaches it.
         m_callMaxResults.remove(callId);
+        m_callProviders.remove(callId);
         finishSearch(callId, {}, i18n("The search for '%1' timed out after %2 seconds.", trimmed, m_timeoutMs / 1000));
     });
     timer->start();
@@ -435,7 +475,7 @@ void WebSearch::search(const QString &query, const QString &callId, int maxResul
     });
 }
 
-void WebSearch::fetchPage(const QString &url, const QString &callId)
+void WebSearch::fetchPage(const QString &url, const QString &callId, int timeoutMs, qint64 maxBytes)
 {
     if (!isConfigured()) {
         // Fetching does not strictly need a search provider, but tying the
@@ -448,29 +488,52 @@ void WebSearch::fetchPage(const QString &url, const QString &callId)
         return;
     }
 
-    QNetworkReply *reply = m_nam->get(makeRequest(QUrl(url.trimmed()), m_timeoutMs));
+    // Per-call override from the tool arguments. Clamp both ends: a timeout
+    // below a second is useless and the hard cap still protects memory.
+    const int effectiveTimeout = timeoutMs > 0 ? qBound(1000, timeoutMs, 24 * 3600 * 1000) : m_timeoutMs;
+    const qint64 effectiveMaxBytes = maxBytes > 0 ? qBound<qint64>(1, maxBytes, kMaxFetchBytes) : kMaxFetchBytes;
+    m_callMaxBytes.insert(callId, effectiveMaxBytes);
+
+    QNetworkReply *reply = m_nam->get(makeRequest(QUrl(url.trimmed()), effectiveTimeout));
     m_replies.append(reply);
+
+    // Refuse a redirect to a host that the initial URL check would have
+    // blocked, before the redirected request is followed. The final-target
+    // check in onReplyFinished remains as a second line of defence.
+    connect(reply, &QNetworkReply::redirected, this, [this, reply](const QUrl &target) {
+        if (!WebSearch::isFetchableUrl(target.toString())) {
+            reply->abort();
+        }
+    });
 
     // Stream the fetch as it lands. Only the byte count is read, never the
     // body itself: the reply is still consumed in one piece when it finishes,
     // and draining it here would empty the buffer the extraction depends on.
     auto lastEmit = QSharedPointer<QElapsedTimer>::create();
     lastEmit->start();
-    connect(reply, &QNetworkReply::readyRead, this, [this, reply, callId, lastEmit] {
+    connect(reply, &QNetworkReply::readyRead, this, [this, reply, callId, lastEmit, effectiveMaxBytes] {
         if (!reply) {
             return;
         }
         // The body is read in one piece when the reply finishes, so nothing
         // bounds the memory a page (or a URL the model chose) can take. The
-        // download is stopped as soon as the cap is reached.
-        if (reply->bytesAvailable() + reply->header(QNetworkRequest::ContentLengthHeader).toLongLong() > kMaxFetchBytes) {
+        // download is stopped as soon as the per-call cap is reached.
+        //
+        // The declared length is the size of the whole body and the available
+        // bytes are what has arrived so far. Adding the two counted the body
+        // twice, so every page of more than half the cap was rejected - with
+        // a message about a cap it was well below.
+        const qint64 declaredSize = reply->header(QNetworkRequest::ContentLengthHeader).toLongLong();
+        const qint64 received = reply->bytesAvailable();
+        if ((declaredSize > 0 && declaredSize > effectiveMaxBytes) || received > effectiveMaxBytes) {
             stopTimerFor(reply);
             reply->disconnect(this);
             m_replies.removeAll(reply);
+            m_callMaxBytes.remove(callId);
             reply->abort();
             reply->deleteLater();
             finishFetch(callId, QString(), QString(),
-                        i18n("The page is larger than %1 KB and was not downloaded.").arg(kMaxFetchBytes / 1024));
+                        i18n("The page is larger than %1 KB and was not downloaded.").arg(effectiveMaxBytes / 1024));
             return;
         }
         if (lastEmit->elapsed() < 200) {
@@ -489,9 +552,9 @@ void WebSearch::fetchPage(const QString &url, const QString &callId)
 
     auto *timer = new QTimer(this);
     timer->setSingleShot(true);
-    timer->setInterval(m_timeoutMs);
+    timer->setInterval(effectiveTimeout);
     m_timers.insert(reply, timer);
-    connect(timer, &QTimer::timeout, this, [this, reply, callId] {
+    connect(timer, &QTimer::timeout, this, [this, reply, callId, effectiveTimeout] {
         if (!reply || !reply->isRunning()) {
             return;
         }
@@ -500,9 +563,10 @@ void WebSearch::fetchPage(const QString &url, const QString &callId)
         // report this fetch twice.
         reply->disconnect(this);
         m_replies.removeAll(reply);
+        m_callMaxBytes.remove(callId);
         reply->abort();
         reply->deleteLater();
-        finishFetch(callId, QString(), QString(), i18n("The page did not load within %1 seconds.", m_timeoutMs / 1000));
+        finishFetch(callId, QString(), QString(), i18n("The page did not load within %1 seconds.", effectiveTimeout / 1000));
     });
     timer->start();
 
@@ -521,6 +585,9 @@ void WebSearch::onReplyFinished(QNetworkReply *reply, const QString &callId, boo
     // leave it behind. Keep the value: it belongs to this reply, which is about
     // to be consumed below.
     const int pendingLimit = m_callMaxResults.take(callId);
+    const Provider replyProvider = m_callProviders.take(callId);
+    const qint64 pendingMaxBytes = m_callMaxBytes.take(callId);
+    const qint64 fetchLimit = isFetch && pendingMaxBytes > 0 ? pendingMaxBytes : kMaxFetchBytes;
     reply->deleteLater();
 
     if (reply->error() != QNetworkReply::NoError) {
@@ -535,11 +602,13 @@ void WebSearch::onReplyFinished(QNetworkReply *reply, const QString &callId, boo
 
     const QByteArray rawBody = reply->readAll();
     // Bound memory: search providers return small JSON; a malicious endpoint
-    // answering with gigabytes must not OOM the client (fetch path caps at 5 MiB).
-    if (rawBody.size() > kMaxFetchBytes) {
+    // answering with gigabytes must not OOM the client. A fetch honours its
+    // per-call cap, and the hard ceiling still protects the process.
+    const qint64 bodyLimit = isFetch ? fetchLimit : kMaxFetchBytes;
+    if (rawBody.size() > bodyLimit) {
         if (isFetch) {
             finishFetch(callId, QString(), QString(),
-                        i18n("The page is larger than %1 KB and was not read.").arg(kMaxFetchBytes / 1024));
+                        i18n("The page is larger than %1 KB and was not read.").arg(bodyLimit / 1024));
         } else {
             finishSearch(callId, {}, i18n("The search response was larger than %1 KB and was discarded.").arg(kMaxFetchBytes / 1024));
         }
@@ -567,9 +636,9 @@ void WebSearch::onReplyFinished(QNetworkReply *reply, const QString &callId, boo
         }
         // The cap is enforced while the page downloads; this is the case of a
         // response without a content length, whose size is only known here.
-        if (body.size() > kMaxFetchBytes) {
+        if (body.size() > fetchLimit) {
             finishFetch(callId, QString(), QString(),
-                        i18n("The page is larger than %1 KB and was not read.").arg(kMaxFetchBytes / 1024));
+                        i18n("The page is larger than %1 KB and was not read.").arg(fetchLimit / 1024));
             return;
         }
         const QString contentType = reply->header(QNetworkRequest::ContentTypeHeader).toString().toLower();
@@ -602,14 +671,14 @@ void WebSearch::onReplyFinished(QNetworkReply *reply, const QString &callId, boo
     const int maxResults = pendingLimit > 0 ? pendingLimit : m_maxResults;
     // Soft-200 HTML error pages parse as empty JSON and previously surfaced as
     // misleading "no results". Surface provider errors instead.
-    if (m_provider == Provider::Tavily || m_provider == Provider::Brave || m_provider == Provider::SearXNG) {
+    if (replyProvider == Provider::Tavily || replyProvider == Provider::Brave || replyProvider == Provider::SearXNG) {
         QJsonParseError parseError{};
         const QJsonDocument doc = QJsonDocument::fromJson(body, &parseError);
         if (parseError.error != QJsonParseError::NoError || !doc.isObject()) {
             finishSearch(callId, {}, i18n("The search provider returned an unreadable response (%1).").arg(parseError.errorString()));
             return;
         }
-        switch (m_provider) {
+        switch (replyProvider) {
         case Provider::Tavily:
             results = parseTavily(doc.object(), maxResults);
             break;
@@ -623,7 +692,7 @@ void WebSearch::onReplyFinished(QNetworkReply *reply, const QString &callId, boo
             break;
         }
     } else {
-        switch (m_provider) {
+        switch (replyProvider) {
         case Provider::Tavily:
             results = parseTavily(QJsonDocument::fromJson(body).object(), maxResults);
             break;
@@ -679,6 +748,15 @@ QList<WebSearchResult> WebSearch::parseDuckDuckGo(const QByteArray &html, int ma
     auto snippetIt = snippetPattern.globalMatch(QString::fromUtf8(html));
     while (it.hasNext() && results.size() < maxResults) {
         const QRegularExpressionMatch match = it.next();
+        // The snippet belongs to the anchor that is being read, so it is taken
+        // here - before a result can be skipped. Taking it only for a result
+        // that is kept left the snippet iterator one behind, and every
+        // following result then showed the snippet of the one before it.
+        QString rawSnippet;
+        if (snippetIt.hasNext()) {
+            rawSnippet = snippetIt.next().captured(1);
+            rawSnippet.replace(tagPattern, QString());
+        }
         QString href = match.captured(1);
         // Unwrap the redirect wrapper.
         const int marker = href.indexOf(QLatin1String("uddg="));
@@ -695,6 +773,9 @@ QList<WebSearchResult> WebSearch::parseDuckDuckGo(const QByteArray &html, int ma
             }
             href = QUrl::fromPercentEncoding(encoded.toUtf8());
         }
+        // A direct href keeps HTML entities ("?a=1&amp;b=2"); the redirect
+        // target is percent-encoded instead.
+        href = decodeHtmlEntities(href);
         if (href.isEmpty() || !isFetchableUrl(href)) {
             continue;
         }
@@ -703,11 +784,7 @@ QList<WebSearchResult> WebSearch::parseDuckDuckGo(const QByteArray &html, int ma
         QString title = match.captured(2);
         title.replace(tagPattern, QString());
         result.title = collapseWhitespace(decodeHtmlEntities(title));
-        if (snippetIt.hasNext()) {
-            QString raw = snippetIt.next().captured(1);
-            raw.replace(tagPattern, QString());
-            result.snippet = collapseWhitespace(decodeHtmlEntities(raw));
-        }
+        result.snippet = collapseWhitespace(decodeHtmlEntities(rawSnippet));
         results.append(result);
     }
     return results;
@@ -791,16 +868,24 @@ QString WebSearch::htmlTitle(const QByteArray &html)
 // lone surrogates.
 QString decodeHtmlEntities(const QString &input)
 {
-    static const QHash<QString, QString> kEntities = {
-        {QStringLiteral("&nbsp;"), QStringLiteral(" ")},  {QStringLiteral("&amp;"), QStringLiteral("&")},
-        {QStringLiteral("&lt;"), QStringLiteral("<")},    {QStringLiteral("&gt;"), QStringLiteral(">")},
-        {QStringLiteral("&quot;"), QStringLiteral("\"")},{QStringLiteral("&#39;"), QStringLiteral("'")},
-        {QStringLiteral("&apos;"), QStringLiteral("'")}, {QStringLiteral("&mdash;"), QStringLiteral("\u2014")},
-        {QStringLiteral("&ndash;"), QStringLiteral("\u2013")},{QStringLiteral("&hellip;"), QStringLiteral("\u2026")},
+    // The order is the order of the list, not the order of a hash: "&amp;"
+    // produces an "&", so decoding it before "&lt;" would turn "&amp;lt;" into
+    // "<" instead of the literal text "&lt;".
+    static const QList<QPair<QString, QString>> kEntities = {
+        {QStringLiteral("&nbsp;"), QStringLiteral(" ")},
+        {QStringLiteral("&lt;"), QStringLiteral("<")},
+        {QStringLiteral("&gt;"), QStringLiteral(">")},
+        {QStringLiteral("&quot;"), QStringLiteral("\"")},
+        {QStringLiteral("&#39;"), QStringLiteral("'")},
+        {QStringLiteral("&apos;"), QStringLiteral("'")},
+        {QStringLiteral("&mdash;"), QStringLiteral("\u2014")},
+        {QStringLiteral("&ndash;"), QStringLiteral("\u2013")},
+        {QStringLiteral("&hellip;"), QStringLiteral("\u2026")},
+        {QStringLiteral("&amp;"), QStringLiteral("&")},
     };
     QString text = input;
-    for (auto it = kEntities.constBegin(); it != kEntities.constEnd(); ++it) {
-        text.replace(it.key(), it.value());
+    for (const QPair<QString, QString> &entity : kEntities) {
+        text.replace(entity.first, entity.second);
     }
 
     static const QRegularExpression numericEntity(QStringLiteral("&#(x?)([0-9a-fA-F]+);"));
@@ -814,7 +899,8 @@ QString decodeHtmlEntities(const QString &input)
         bool converted = false;
         const uint code = match.captured(2).toUInt(&converted, match.captured(1).isEmpty() ? 10 : 16);
         if (converted && code > 0 && code <= 0x10FFFF) {
-            decoded += QString::fromUcs4(&code, 1);
+            const char32_t codepoint = static_cast<char32_t>(code);
+            decoded += QString::fromUcs4(&codepoint, 1);
         } else {
             decoded += match.captured(0);
         }

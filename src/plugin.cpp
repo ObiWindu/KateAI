@@ -10,6 +10,7 @@
 #include "pluginview.h"
 #include "settings.h"
 
+#include <QDateTime>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -26,6 +27,7 @@
 
 #include <KConfigGroup>
 #include <KLocalizedString>
+#include <KSharedConfig>
 #include <KPluginFactory>
 
 using namespace Qt::Literals::StringLiterals;
@@ -55,6 +57,19 @@ public:
 
     void start()
     {
+        // The check shells out to package managers and queries the ACP
+        // registry; running it on every Kate launch is wasteful and can be a
+        // network surprise, so run it at most once a week.
+        {
+            KConfigGroup g(KSharedConfig::openConfig(), u"KateAI"_s);
+            const qint64 lastCheck = g.readEntry(u"AcpUpdateLastCheck"_s, 0LL);
+            const qint64 now = QDateTime::currentSecsSinceEpoch();
+            if (lastCheck > 0 && now - lastCheck < 7 * 24 * 3600) {
+                return;
+            }
+            g.writeEntry(u"AcpUpdateLastCheck"_s, now);
+            g.sync();
+        }
         if (!m_plugin) {
             return;
         }
@@ -163,6 +178,38 @@ private:
         return packageName(package) + u"@latest"_s;
     }
 
+    static QString pinPackage(const QString &package, const QString &version, bool npm)
+    {
+        if (version.trimmed().isEmpty()) {
+            return package;
+        }
+        const bool alreadyPinned = npm ? (package.lastIndexOf(u'@') > 0)
+                                       : (package.contains(u"=="_s) || package.lastIndexOf(u'@') > 0);
+        if (alreadyPinned) {
+            return package;
+        }
+        const QString suffix = npm ? u"@"_s : u"=="_s;
+        return package + suffix + version.trimmed();
+    }
+
+    static QStringList stringList(const QJsonArray &array)
+    {
+        QStringList out;
+        for (const QJsonValue &value : array) {
+            out.append(value.toString());
+        }
+        return out;
+    }
+
+    static QJsonArray jsonArray(const QStringList &values)
+    {
+        QJsonArray out;
+        for (const QString &value : values) {
+            out.append(value);
+        }
+        return out;
+    }
+
     void checkStandaloneMistral()
     {
         auto *process = new QProcess(this);
@@ -228,6 +275,31 @@ private:
         }
 
         const bool npm = update.type == u"npx"_s;
+        if (!update.latest.isEmpty()) {
+            // A registry package agent is launched directly through npx/uvx
+            // with the version pinned in its args, so an update is just a new
+            // pinned launch line. Running `npm install --global` both mutated
+            // the user's global prefix and left the old pinned args in place,
+            // so the old version kept running.
+            const QJsonObject distribution = update.latest.value(u"distribution"_s).toObject();
+            const QJsonObject packageInfo = distribution.value(update.type).toObject();
+            QStringList launch;
+            if (npm) {
+                launch.append(u"--yes"_s);
+            }
+            launch.append(pinPackage(update.package, update.latest.value(u"version"_s).toString(), npm));
+            launch += stringList(packageInfo.value(u"args"_s).toArray());
+            QJsonObject updated = update.latest;
+            updated.insert(u"command"_s, npm ? u"npx"_s : u"uvx"_s);
+            updated.insert(u"args"_s, jsonArray(launch));
+            updated.insert(u"package"_s, update.package);
+            updated.insert(u"pinnedPackage"_s, pinPackage(update.package, update.latest.value(u"version"_s).toString(), npm));
+            updated.insert(u"distributionType"_s, update.type);
+            saveUpdatedAgent(updated);
+            updateNext();
+            return;
+        }
+
         auto *process = new QProcess(this);
         m_process = process;
         const QString package = packageAtLatest(update.package);
@@ -290,6 +362,14 @@ private:
             return;
         }
         settings.acpInstalledAgents = QString::fromUtf8(QJsonDocument(agents).toJson(QJsonDocument::Compact));
+        if (settings.acpAgentId == id) {
+            const AcpAgentPreset launch = acpAgentLaunchLine(settings, id);
+            if (!launch.command.isEmpty()) {
+                settings.acpCommand = launch.command;
+                settings.acpArgs = launch.args;
+                settings.acpApiKeyEnv = launch.apiKeyEnv;
+            }
+        }
         m_plugin->setSettings(settings);
     }
 
@@ -350,9 +430,10 @@ void KateAiPlugin::readSessionConfig(const KConfigGroup &config)
     // session was saved. Views claim them in the same order as Kate
     // recreates the windows.
     m_sessionConversations = config.readEntry(kConversationIdsKey, QStringList());
+    m_lastConversationIds = m_sessionConversations;
 }
 
-void KateAiPlugin::writeSessionConfig(KConfigGroup &config)
+QStringList KateAiPlugin::liveConversationIds() const
 {
     QStringList ids;
     for (KateAiView *view : m_views) {
@@ -362,6 +443,23 @@ void KateAiPlugin::writeSessionConfig(KConfigGroup &config)
         if (!id.isEmpty()) {
             ids.append(id);
         }
+    }
+    return ids;
+}
+
+void KateAiPlugin::writeSessionConfig(KConfigGroup &config)
+{
+    // Normally the live views are still here and are the authoritative list.
+    // Kate may write the session config after it has destroyed the windows
+    // (the plugin and its views are separate objects), so when every view has
+    // already unregistered, fall back to the order captured on the last change
+    // or unregister. Writing an empty list there made every restart open a
+    // blank chat even though the transcripts were safely stored.
+    QStringList ids = liveConversationIds();
+    if (ids.isEmpty()) {
+        ids = m_lastConversationIds;
+    } else {
+        m_lastConversationIds = ids;
     }
     config.writeEntry(kConversationIdsKey, ids);
 }
@@ -375,6 +473,12 @@ void KateAiPlugin::registerView(KateAiView *view)
 
 void KateAiPlugin::unregisterView(KateAiView *view)
 {
+    // Snapshot before dropping the view: this may be the last place the session
+    // id is available if Kate tears the window down before writing the session.
+    const QStringList ids = liveConversationIds();
+    if (!ids.isEmpty()) {
+        m_lastConversationIds = ids;
+    }
     m_views.removeAll(view);
     m_viewConversations.remove(view);
 }
@@ -393,6 +497,10 @@ void KateAiPlugin::noteConversationChanged(KateAiView *view, const QString &conv
         return;
     }
     m_viewConversations.insert(view, conversationId);
+    const QStringList ids = liveConversationIds();
+    if (!ids.isEmpty()) {
+        m_lastConversationIds = ids;
+    }
 }
 
 } // namespace KateAi

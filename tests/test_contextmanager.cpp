@@ -1,5 +1,9 @@
 #include "contextmanager.h"
+#include "graph/projectgraph.h"
 
+#include <QDir>
+#include <QFile>
+#include <QTemporaryDir>
 #include <QTest>
 
 using namespace Qt::Literals::StringLiterals;
@@ -87,19 +91,21 @@ private Q_SLOTS:
                 > ContextManager::estimateTokens(QString(40, QLatin1Char('x'))));
     }
 
-    void contextWindowFallsBackWithoutAModelNameTable()
+    void contextWindowUsesSafeModelFamilyDefaults()
     {
-        // Deliberately no per-model table any more: it went stale on every
-        // model release and could not know about new ones. Every name must now
-        // return the same safe default, which is what settings.contextWindow or
-        // the provider catalogue overrides.
-        const int fallback = ContextManager::contextWindowFor(QStringLiteral("anything"));
-        QVERIFY(fallback > 0);
-        for (const QString &name : {QStringLiteral("gpt-4o-mini"), QStringLiteral("claude-sonnet-4-5"),
-                                    QStringLiteral("grok-4.5"), QStringLiteral("some-unreleased-model")}) {
-            QCOMPARE(ContextManager::contextWindowFor(name), fallback);
-        }
-        QCOMPARE(ContextManager::contextWindowFor(QString()), fallback);
+        // Common coding models have very different windows. Using the 32k
+        // fallback for a 200k Claude or 1M Gemini compacts long before the
+        // model needs it and throws away pertinent history.
+        QCOMPARE(ContextManager::contextWindowFor(u"claude-sonnet-4-5"_s), 200000);
+        QCOMPARE(ContextManager::contextWindowFor(u"gpt-4o-mini"_s), 128000);
+        QCOMPARE(ContextManager::contextWindowFor(u"gemini-2.5-pro"_s), 1000000);
+        QCOMPARE(ContextManager::contextWindowFor(u"grok-4.5"_s), 256000);
+        QCOMPARE(ContextManager::contextWindowFor(u"deepseek-chat"_s), 128000);
+        QCOMPARE(ContextManager::contextWindowFor(u"qwen2.5-coder"_s), 131072);
+        // Unknown/local names still get a safe fallback rather than an
+        // invented, oversized window.
+        QCOMPARE(ContextManager::contextWindowFor(u"some-unreleased-model"_s), 32768);
+        QCOMPARE(ContextManager::contextWindowFor(QString()), 32768);
     }
 
     void shortConversationIsSentUntouched()
@@ -172,6 +178,76 @@ private Q_SLOTS:
         }
         QVERIFY2(joined.contains(QStringLiteral("src/file0.cpp")),
                  "the tool call's arguments are JSON text; the path must still reach the summary");
+    }
+
+    void summaryPreservesGraphRelatedFiles()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        QVERIFY(QDir(dir.path()).mkpath(u"src"_s));
+        auto write = [](const QString &path, const QByteArray &data) {
+            QFile file(path);
+            if (file.open(QIODevice::WriteOnly)) {
+                file.write(data);
+            }
+        };
+        write(dir.path() + u"/src/a.cpp"_s, "#include \"b.h\"\nint a() { return 1; }\n");
+        write(dir.path() + u"/src/b.h"_s, "int b();\n");
+
+        ProjectGraph graph;
+        graph.generateGraph(dir.path());
+
+        QList<ChatMessage> history;
+        history << system(QStringLiteral("system"));
+        for (int i = 0; i < 30; ++i) {
+            history << user(QStringLiteral("Request %1").arg(i));
+            history << toolCallWithTextArguments(QStringLiteral("edit_file"), QStringLiteral("src/a.cpp"));
+            history << toolResult(QStringLiteral("Edited a.cpp. %1").arg(i).repeated(40));
+        }
+        history << user(QStringLiteral("before editing a.cpp, what includes it?"));
+        history << assistant(QStringLiteral("I will inspect the header relationships."));
+
+        ContextManager::Options options;
+        options.contextWindow = 4096;
+        options.reserveForResponse = 1024;
+        options.keepRecentTokens = 200;
+        options.projectGraph = &graph;
+        options.useProjectGraph = true;
+        const auto result = ContextManager::build(history, options);
+
+        QString joined;
+        for (const ChatMessage &m : result) {
+            joined += m.content + QLatin1Char('\n');
+        }
+        QVERIFY2(joined.contains(QStringLiteral("Related files (from project graph)")),
+                 qPrintable(joined));
+        QVERIFY2(joined.contains(QStringLiteral("src/b.h")), qPrintable(joined));
+    }
+
+    void recentFailuresSurviveCompaction()
+    {
+        QList<ChatMessage> history;
+        history << system(QStringLiteral("system"));
+        history << user(QStringLiteral("Run the build."));
+        history << toolCallWithTextArguments(QStringLiteral("bash"), QStringLiteral("."));
+        history << toolResult(QStringLiteral("Error: build failed: missing header foo.h"));
+        for (int i = 0; i < 30; ++i) {
+            history << user(QStringLiteral("Continue %1").arg(i));
+            history << assistant(QStringLiteral("Working. %1").arg(i).repeated(40));
+        }
+        history << user(QStringLiteral("Fix the build."));
+
+        ContextManager::Options options;
+        options.contextWindow = 4096;
+        options.reserveForResponse = 1024;
+        options.keepRecentTokens = 200;
+        const auto result = ContextManager::build(history, options);
+        QString joined;
+        for (const ChatMessage &m : result) {
+            joined += m.content + QLatin1Char('\n');
+        }
+        QVERIFY2(joined.contains(QStringLiteral("Recent errors or constraints")), qPrintable(joined));
+        QVERIFY2(joined.contains(QStringLiteral("missing header foo.h")), qPrintable(joined));
     }
 
     void toolCallsAreNeverSplitFromResults()

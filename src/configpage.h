@@ -99,6 +99,18 @@ private:
     QNetworkAccessManager *m_acpRegistryNetwork = nullptr;
     QJsonArray m_acpRegistryAgents;
     QComboBox *m_apiFormat = nullptr;
+
+    // Two-model orchestration (planner = strong/read-only, executor = cheap).
+    QCheckBox *m_orchestrationEnabled = nullptr;
+    QComboBox *m_orchestrationPlannerProvider = nullptr;
+    QComboBox *m_orchestrationPlannerModel = nullptr;
+    QComboBox *m_orchestrationPlannerEffort = nullptr;
+    QComboBox *m_orchestrationExecutorProvider = nullptr;
+    QComboBox *m_orchestrationExecutorModel = nullptr;
+    QComboBox *m_orchestrationExecutorEffort = nullptr;
+    QSpinBox *m_orchestrationMaxReplans = nullptr;
+    QComboBox *m_orchestrationReviewMode = nullptr;
+    void refreshOrchestrationModels();
     void applySelectedAcpPreset();
     // Rebuilds the ACP Agent list from the presets plus the currently installed
     // registry agents, keeping the selection. Called after an install or an
@@ -155,8 +167,6 @@ private:
     QSpinBox *m_maxGraphNodes = nullptr;
     QSpinBox *m_maxGraphEdges = nullptr;
     QCheckBox *m_compressGraph = nullptr;
-    QCheckBox *m_includeFileContents = nullptr;
-    QSpinBox *m_maxFileContentLength = nullptr;
     QCheckBox *m_compressEditorContext = nullptr;
     QSpinBox *m_maxEditorContextLength = nullptr;
     QCheckBox *m_compressProjectInstructions = nullptr;
@@ -182,19 +192,12 @@ private:
     QSpinBox *m_maxPlanSteps = nullptr;
     QCheckBox *m_requireVerification = nullptr;
     QSpinBox *m_maxVerificationAttempts = nullptr;
-    QCheckBox *m_adaptiveTemperature = nullptr;
-    QDoubleSpinBox *m_explorationTemperature = nullptr;
-    QDoubleSpinBox *m_exploitationTemperature = nullptr;
-    QCheckBox *m_enablePlanUpdates = nullptr;
-    QCheckBox *m_narrativeProgress = nullptr;
 
     // Context Management
-    QCheckBox *m_smartContextTruncation = nullptr;
     QSpinBox *m_contextWindow = nullptr;
     QSpinBox *m_keepRecentTokens = nullptr;
     QSpinBox *m_contextWindowReserve = nullptr;
     QCheckBox *m_compressOldMessages = nullptr;
-    QSpinBox *m_compressionThreshold = nullptr;
 
     // Modes & Tools
     QComboBox *m_agentMode = nullptr;
@@ -253,6 +256,21 @@ private:
     void pickThemeColor(const QString &key);
     void resetThemeColor(const QString &key);
     void updateThemePresetEnabled();
+
+    // Voice prompting
+    QComboBox *m_voiceProvider = nullptr;
+    QLineEdit *m_voiceApiKey = nullptr;
+    QLineEdit *m_voiceEndpoint = nullptr;
+    QLineEdit *m_voiceModel = nullptr;
+    QLineEdit *m_voiceLanguage = nullptr;
+    QLineEdit *m_voiceLocalCommand = nullptr;
+    QLineEdit *m_voiceInputDevice = nullptr;
+    QCheckBox *m_voiceNoiseRemoval = nullptr;
+    QCheckBox *m_voiceAutoSend = nullptr;
+    QLabel *m_voiceMicStatus = nullptr;
+    QLabel *m_voiceToolsStatus = nullptr;
+    void updateVoiceMicStatus();
+    void updateVoiceFieldStates();
 
     QString getBinaryPlatformKey() const;
 };

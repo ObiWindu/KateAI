@@ -6,6 +6,9 @@
 #pragma once
 
 #include "documentbridge.h"
+#include "debug.h"
+#include "ecosystem.h"
+#include "lsp.h"
 #include "mcp.h"
 #include "sandbox.h"
 #include "types.h"
@@ -18,10 +21,12 @@
 #include <QObject>
 #include <QPointer>
 #include <QProcess>
+#include <QSet>
 #include <QString>
 #include <QStringList>
 #include <functional>
 #include <memory>
+#include <optional>
 
 namespace KateAi {
 class ProjectGraph;
@@ -54,6 +59,19 @@ public:
     void setMcpServers(const QList<McpServerConfig> &servers);
     void setEditorContext(const QString &context);
     void setProjectGraph(ProjectGraph *graph);
+    // The editor's language-server surface; null when there is no editor.
+    void setLspProvider(LspProvider *provider)
+    {
+        m_lsp = provider;
+    }
+    void setDebugProvider(DebugProvider *provider)
+    {
+        m_debug = provider;
+    }
+    void setEcosystemProvider(EcosystemProvider *provider)
+    {
+        m_ecosystem = provider;
+    }
     // Session id from a previous Kate conversation, used with session/load
     // or session/resume when the agent advertises those capabilities.
     void setResumeSessionId(const QString &sessionId);
@@ -87,9 +105,32 @@ public:
     void stop();
     // Drops the current ACP session so the next prompt creates a new one.
     void resetSession();
+    // Forgets the local session id without closing the agent-side session.
+    // Used when a conversation is forked: the fork needs its own session, but
+    // the source thread still owns the old one.
+    void detachSession();
 
     void prompt(const QString &text);
     void resolvePermission(PermissionDecision decision);
+    void resolvePermission(PermissionDecision decision, const QString &toolCallId);
+    // True while an ask_user / elicitation RPC is parked waiting for the
+    // user's answer, or a session/request_permission carrying answer choices
+    // is being shown as a question card.
+    bool hasPendingQuestion() const
+    {
+        return (!m_questionRpcId.isUndefined() && !m_questionRpcId.isNull()) || m_permissionQuestion;
+    }
+    // Answers the parked question with the user's text; an empty answer
+    // replies as cancelled. No-op when no question is pending.
+    void answerQuestion(const QString &answer);
+    // The structured todo list is shared with the native path: the loop hands
+    // over a getter/setter pair so _kateai/todo_write and the native
+    // todo_write tool update the same list the TodoWidget renders.
+    void setTodoStore(std::function<QJsonArray()> getter, std::function<void(const QJsonArray &)> setter)
+    {
+        m_todosGetter = std::move(getter);
+        m_todosSetter = std::move(setter);
+    }
 
     // Command used to launch the agent. Grok Build also receives --model /
     // --always-approve; other agents get the configured args unchanged.
@@ -119,6 +160,32 @@ public:
         return m_currentEffortId;
     }
 
+    // Session modes the agent advertised (e.g. default, accept-edits, plan).
+    QStringList agentModes() const
+    {
+        return m_agentModes;
+    }
+    QString currentModeId() const
+    {
+        return m_currentModeId;
+    }
+    // Switch the live session mode through session/set_config_option or
+    // session/set_mode. Returns false when no live session or matching mode exists.
+    bool setSessionMode(const QString &modeId);
+    // Records the desired ACP mode (e.g. "plan", "accept-edits", "default") so
+    // it is pushed as soon as the session opens or immediately when ready.
+    void setDesiredMode(const QString &modeId);
+
+    // Last context usage reported via ACP usage_update notifications.
+    qint64 contextUsedTokens() const
+    {
+        return m_contextUsedTokens;
+    }
+    qint64 contextWindowSize() const
+    {
+        return m_contextWindowSize;
+    }
+
     // Read the model list from the live session. Starts the agent when it
     // is not running so the list can arrive with session/new.
     void fetchModels();
@@ -137,6 +204,11 @@ public:
     // the JSON: public so tests can pin the OpenCode argument shapes
     // (camelCase filePath, oldText/newText, content/contents).
     PermissionRequest permissionFromToolCall(const QJsonObject &toolCall) const;
+    // Combines what an agent said about one tool call in two messages (the
+    // tool_call and a later update, or the tool_call and its permission
+    // request). The base keeps every field it has; the other message fills
+    // the gaps. An identity-less base takes the other message's tool name.
+    static PermissionRequest mergeToolCallDetails(const PermissionRequest &base, const PermissionRequest &other);
 
 Q_SIGNALS:
     void ready();
@@ -155,9 +227,25 @@ Q_SIGNALS:
     // final status, and that incremental text is what lets a card stream
     // instead of sitting blank until the command ends.
     void toolProgress(const QString &toolCallId, const QString &partialOutput);
+    // A running tool gained details it did not have when it started (a diff or
+    // a path the agent reported later). The card and the review queue use it.
+    void toolDetailsChanged(const PermissionRequest &request);
 
     void permissionNeeded(const PermissionRequest &request);
+    // The agent asked the user something through the ask_user client method (or
+    // an elicitation request when the negotiated protocol offers it). The RPC
+    // is parked until answerQuestion() replies to it.
+    void questionAsked(const PermissionRequest &request);
+    // The parked question was closed by the client (a newer question arrived,
+    // a permission request needed the slot, or the turn stopped). The UI must
+    // retire the matching card; otherwise it would answer the next RPC.
+    void questionCancelled(const QString &toolCallId);
     void promptFinished(const QString &stopReason, const QString &text, const QJsonArray &toolCalls);
+    // The agent advertised slash commands (available_commands_update).
+    void availableCommandsChanged(const QJsonArray &commands);
+    // The agent replaced the task list through _kateai/todo_write; the loop
+    // forwards this to the same checklist the native todo_write drives.
+    void todosChanged(const QJsonArray &todos);
     // The streamed text belonged to an attempt that failed with a transient
     // error and is retried. The transcript must drop it, like LlmClient does.
     void textReset();
@@ -167,6 +255,10 @@ Q_SIGNALS:
     void sessionIdChanged(const QString &sessionId);
     void modelsReceived(const QStringList &models);
     void effortsReceived(const QStringList &efforts);
+    void modesReceived(const QStringList &modes);
+    void modeChanged(const QString &modeId);
+    void usageUpdated(qint64 used, qint64 size);
+    void exitPlanModeRequested();
 
 private:
     enum class State {
@@ -193,16 +285,34 @@ private:
         int exitCode = 0;
         QString signal;
         QList<QJsonValue> waiters;
+        qint64 lastProgressMs = 0;
     };
 
     struct QueuedPrompt {
         QString text;
     };
 
+    // A mutating client method (fs/write_text_file, terminal/create) parked
+    // until its permission resolves. The permission bar is the contract for
+    // every write and every command, so an agent that skips
+    // session/request_permission cannot execute unprompted: the call waits
+    // here until the policy or the user answers, and is refused otherwise.
+    struct ParkedMethod {
+        QJsonValue rpcId;
+        QString method;
+        QJsonObject params;
+        QString grantKey;
+        PermissionRequest request;
+    };
+
     void setState(State state, const QString &status);
     void spawnProcess();
-    void sendInitialize();
-    void maybeAuthenticate(const QJsonArray &authMethods);
+    // The handshake request carries the same launch budget as the startup
+    // watchdog: a package runner such as npx may spend longer than 30 s fetching
+    // the agent before it can answer, and a shorter per-request deadline used
+    // to fail the handshake while the download was still in progress.
+    void sendInitialize(int timeoutMs);
+    void maybeAuthenticate(const QJsonArray &authMethods, bool force = false);
     void openSession();
     void sendSessionNew();
     void sendSessionLoadOrResume();
@@ -217,7 +327,10 @@ private:
                     std::function<void(const QJsonObject &, const QString &)> done = {},
                     int timeoutMs = 30000);
     void sendNotification(const QString &method, const QJsonObject &params);
-    void writeMessage(const QJsonObject &message);
+    // Writes a message to the agent. False when the agent is not running or
+    // the pipe did not take the whole message, so the caller can settle the
+    // request instead of waiting for an answer that cannot arrive.
+    bool writeMessage(const QJsonObject &message);
     void replyResult(const QJsonValue &id, const QJsonObject &result);
     void replyError(const QJsonValue &id, int code, const QString &message);
     // Answers whichever permission request is waiting with a "cancelled" outcome
@@ -228,9 +341,20 @@ private:
     // Emits toolFinished for every tool still open and forgets them, so a card is
     // never left spinning because the turn it belonged to is gone.
     void finishLiveTools(const QString &message);
+    // Ties a terminal the agent created to the tool call that shows it: its
+    // output then streams into that card. The link ends with the tool call.
+    void linkToolTerminals(const QString &toolCallId, const QJsonValue &content);
+    void forgetToolTerminal(const QString &toolCallId);
+    // The guidance an agent cannot know otherwise: the user's rules and Kate's
+    // own client methods. Sent once per session as a leading text block.
+    QJsonObject sessionNotesBlock() const;
 
     void onStdioReadyRead();
     void handleBuffer();
+    // Fails the turn after a protocol frame exceeded the size limit. The frame
+    // cannot be parsed, so the answer it carried is lost and the agent would
+    // otherwise wait for a response that never comes.
+    void reportOversizedFrame();
     void handleMessage(const QJsonObject &message);
     void handleResponse(const QJsonObject &message);
     void handleIncomingRequest(const QJsonObject &message);
@@ -241,15 +365,45 @@ private:
 
     void handleFsRead(const QJsonValue &id, const QJsonObject &params);
     void handleFsWrite(const QJsonValue &id, const QJsonObject &params);
+    void handleFsEdit(const QJsonValue &id, const QJsonObject &params);
+    void handleFsMultiEdit(const QJsonValue &id, const QJsonObject &params);
+    void handleFsDelete(const QJsonValue &id, const QJsonObject &params);
+    void handleFsListDir(const QJsonValue &id, const QJsonObject &params);
+    void handleFsGrep(const QJsonValue &id, const QJsonObject &params);
+    void handleFsGlob(const QJsonValue &id, const QJsonObject &params);
+    void handleApplyPatch(const QJsonValue &id, const QJsonObject &params);
+    void handleExitPlanMode(const QJsonValue &id, const QJsonObject &params);
     void handleWritePlanFile(const QJsonValue &id, const QJsonObject &params);
     void handleSuggest(const QJsonValue &id, const QJsonObject &params);
     void handleQueryProjectGraph(const QJsonValue &id, const QJsonObject &params);
+    void handleLspDiagnostics(const QJsonValue &id, const QJsonObject &params);
+    void handleLspSymbols(const QJsonValue &id, const QJsonObject &params);
+    void handleLspHover(const QJsonValue &id, const QJsonObject &params);
+    void handleLspDefinition(const QJsonValue &id, const QJsonObject &params);
+    void handleLspReferences(const QJsonValue &id, const QJsonObject &params);
+    void handleLspCodeActions(const QJsonValue &id, const QJsonObject &params);
+    void handleKateToolMethod(const QString &toolName, const QJsonValue &id, const QJsonObject &params);
+    void handleAskUser(const QJsonValue &id, const QJsonObject &params);
+    void handleElicitationCreate(const QJsonValue &id, const QJsonObject &params);
+    void handleTodoWrite(const QJsonValue &id, const QJsonObject &params);
+    void handleTodoRead(const QJsonValue &id, const QJsonObject &params);
+    // Stores and announces a complete replacement command list, from a setup
+    // response or an available_commands_update session notification.
+    void setAvailableCommands(const QJsonArray &commands);
+    // Shared body of the ask-user paths (Kate extension + v2 elicitation).
+    // `elicitationProperty` names the schema property the single-line answer
+    // fills when the request is an elicitation/create call.
+    void askUser(const QJsonValue &id, const QString &question, const QStringList &options, bool allowFreeform,
+                 bool elicitation = false, const QString &elicitationProperty = QString());
+    // Answers a parked ask-user RPC as cancelled and clears the state.
+    void cancelPendingQuestion();
     void handleRequestPermission(const QJsonValue &id, const QJsonObject &params);
     void handleTerminalCreate(const QJsonValue &id, const QJsonObject &params);
     void handleTerminalOutput(const QJsonValue &id, const QJsonObject &params);
     void handleTerminalWait(const QJsonValue &id, const QJsonObject &params);
     void handleTerminalKill(const QJsonValue &id, const QJsonObject &params);
     void handleTerminalRelease(const QJsonValue &id, const QJsonObject &params);
+    void handleTerminalSendInput(const QJsonValue &id, const QJsonObject &params);
 
     void appendTerminalOutput(Terminal *term, const QByteArray &chunk);
     void markTerminalExited(Terminal *term, int exitCode, const QString &signal);
@@ -259,8 +413,26 @@ private:
     QJsonObject sessionMeta() const;
     QJsonArray promptBlocks(const QString &text) const;
     QString pickPermissionOption(PermissionDecision decision) const;
-    bool autoResolvePermission(const PermissionRequest &request);
-    QString sliceLines(const QString &text, int line, int limit) const;
+    // True when the call may run. A grant covers it when a permission request
+    // for the same path or command line was approved; otherwise the RPC is
+    // parked and a permission request is emitted, and the RPC is answered from
+    // resolvePermission().
+    bool ensureMethodPermission(const QString &grantKey, PermissionRequest request,
+                                const QJsonValue &rpcId, const QString &method, const QJsonObject &params);
+    void askNextParkedMethod();
+    void dispatchParkedMethod(const ParkedMethod &parked);
+    // Answers every parked RPC as refused, so an agent never blocks on a call
+    // whose approval never came.
+    void cancelParkedMethods();
+    // Grant keys: a write by its resolved path, a terminal by its exact command
+    // line. Both sides (the approval and the client method) normalise to the
+    // same key, or the grant never matches.
+    QString writeGrantKey(const QString &path) const;
+    QString execGrantKey(const QString &command, const QStringList &args) const;
+    // Records the grants an approval of an agent-initiated permission request
+    // covers, so a well-behaved agent that announces its edit or command before
+    // asking is not asked twice for one action.
+    void recordApprovalGrants(const PermissionRequest &request, PermissionDecision decision);
     bool pathAllowed(const QString &path, bool forWrite, QString *error) const;
     Sandbox currentSandbox() const;
     QProcessEnvironment processEnvironment() const;
@@ -276,6 +448,11 @@ private:
     void ingestSessionEfforts(const QJsonObject &result);
     void applyForcedEffort();
     void sendSetEffortOption(const QString &effortId);
+    void ingestSessionModes(const QJsonObject &result);
+    void applyDesiredMode();
+    void sendSetModeOption(const QString &modeId);
+    void sendSetSessionMode(const QString &modeId);
+    static bool isAuthFailureError(const QString &error);
 
     // Transient errors (broken HTTP stream to the model provider, timeouts,
     // overloaded providers) are worth retrying; auth or protocol failures are
@@ -284,6 +461,16 @@ private:
     // Retries the failed turn after a backoff delay. Returns false when the
     // error is not transient, retries are disabled, or the budget is spent.
     bool scheduleTurnRetry(const QString &error);
+    // A turn that ended with stopReason "max_tokens" was cut off at the
+    // model's output limit before it finished — almost always inside one
+    // oversized tool call, like a whole large file in a single write. The
+    // continuation asks the agent to carry on and split the work. Returns
+    // false when retries are disabled or the budget is spent.
+    bool scheduleOutputLimitRetry();
+    // Shared scheduling for both retry kinds: budget check, backoff delay,
+    // transcript reset, and the retry timer. The reason is the first half of
+    // the status message ("… Retrying in Ns (attempt X of Y).").
+    bool scheduleTurnRetryWithMessage(const QString &reason);
     void executeTurnRetry();
     void stopTurnRetry();
     QString turnRetryPrompt() const;
@@ -296,6 +483,9 @@ private:
     QList<McpServerConfig> m_mcpServers;
 
     ProjectGraph *m_projectGraph = nullptr;
+    LspProvider *m_lsp = nullptr;
+    DebugProvider *m_debug = nullptr;
+    EcosystemProvider *m_ecosystem = nullptr;
 
     State m_state = State::Stopped;
     QString m_status;
@@ -304,16 +494,39 @@ private:
     QString m_stderrBuffer;
     bool m_antigravityAuthUrlOpened = false;
     bool m_discardingStdoutFrame = false;
+    // The tool call that was announced last. An update that omits its id
+    // belongs to it.
+    QString m_lastToolCallId;
+    // Set once a frame exceeded the size limit, so the failure is reported a
+    // single time per turn.
+    bool m_oversizedFrameReported = false;
     bool m_shuttingDown = false;
 
     int m_nextId = 1;
     QHash<int, Pending> m_pending;
 
     QString m_sessionId;
+    // A session/new or session/load request is in flight. A second prompt
+    // must queue instead of opening a second agent-side session.
+    bool m_sessionOpening = false;
+    bool m_failingAll = false;
+    // session/load replays the old conversation as session/update events.
+    // Those are history, not a new answer; suppress them while loading.
+    bool m_replayingLoad = false;
+    // MCP transports the agent says it supports. Older agents do not advertise
+    // these; stdio is the universally supported default.
+    bool m_mcpStdioCapable = true;
+    bool m_mcpHttpCapable = false;
+    // Methods the agent advertised during initialize, kept so a session
+    // failure that turns out to be an auth failure can authenticate once and
+    // retry instead of failing the whole turn.
+    QJsonArray m_authMethods;
+    bool m_authRetryDone = false;
     bool m_loadSession = false;
     bool m_resumeSession = false;
     bool m_closeSession = false;
     bool m_embeddedContext = false;
+    bool m_supportsSystemPromptAppend = false;
     int m_protocolVersion = 1;
 
     int m_promptId = 0;
@@ -323,6 +536,11 @@ private:
     QJsonArray m_currentPlan;
     QJsonArray m_toolCalls;
     QHash<QString, PermissionRequest> m_liveTools;
+    // Terminals the agent embedded in a tool call, in both directions.
+    QHash<QString, QString> m_toolTerminals;   // toolCallId -> terminalId
+    QHash<QString, QString> m_terminalTools;   // terminalId -> toolCallId
+    // The session notes went out with the first prompt of this session.
+    bool m_sessionNotesSent = false;
 
     // Automatic retry of a turn that failed with a transient error. The wait
     // between attempts holds no request, so nothing is in flight; the pending
@@ -330,16 +548,55 @@ private:
     bool m_turnRetryPending = false;
     int m_turnRetryAttempt = 0;
     QPointer<QTimer> m_turnRetryTimer;
+    // Which failure the pending retry answers: a transient transport error or
+    // a turn cut off at the model output limit. turnRetryPrompt() steers the
+    // continuation to match.
+    bool m_retryIsOutputLimit = false;
+    // The user's original request, kept across retries: sendPromptNow()
+    // overwrites m_promptText with the retry prompt itself, and a chained
+    // retry must quote the task, not the previous retry.
+    QString m_taskPrompt;
 
     // The last partial output streamed for each live tool call, so an agent that
     // repeats identical content on a heartbeat does not force a re-render.
     QHash<QString, QString> m_toolStreamed;
+    QHash<QString, qint64> m_toolProgressAt;
 
     QList<QueuedPrompt> m_queued;
 
     QJsonValue m_permissionRpcId;
     QJsonArray m_permissionOptions;
     PermissionRequest m_permissionRequest;
+    // A session/request_permission whose options are answer choices, not
+    // allow/reject decisions. It is answered with the selected option id.
+    bool m_permissionQuestion = false;
+
+    // A parked ask-user RPC (Kate's _kateai/ask_user or v2 elicitation/create).
+    // The agent blocks on this request until the user answers, which is what
+    // makes asking work over ACP at all.
+    QJsonValue m_questionRpcId;
+    PermissionRequest m_questionRequest;
+    bool m_questionIsElicitation = false;
+    QString m_questionElicitationProperty;
+    QHash<QString, QString> m_questionElicitationValueMap;
+
+    // The shared todo store (native todo_write and _kateai/todo_write).
+    std::function<QJsonArray()> m_todosGetter;
+    std::function<void(const QJsonArray &)> m_todosSetter;
+
+    // Slash commands the agent advertised via available_commands_update.
+    QJsonArray m_availableCommands;
+
+    // Mutating client methods waiting for a permission decision. At most one
+    // is active (its request is the one being shown); the rest queue behind it.
+    QList<ParkedMethod> m_parkedMethods;
+    std::optional<ParkedMethod> m_activeParked;
+    // Approvals remembered by grant key: paths and command lines the user (or
+    // the policy) already allowed. Once-grants are consumed by the first
+    // matching call; session grants live until the session or the agent goes
+    // away.
+    QSet<QString> m_sessionGrants;
+    QSet<QString> m_onceGrants;
 
     QHash<QString, Terminal *> m_terminals;
     int m_nextTerminal = 1;
@@ -359,6 +616,16 @@ private:
     QString m_currentEffortId;
     QString m_effortConfigId;
     bool m_effortSetInFlight = false;
+
+    QStringList m_agentModes;
+    QString m_currentModeId;
+    QString m_desiredModeId;
+    QString m_modeConfigId;
+    bool m_legacySetMode = false;
+    bool m_modeSetInFlight = false;
+
+    qint64 m_contextUsedTokens = 0;
+    qint64 m_contextWindowSize = 0;
 };
 
 } // namespace KateAi

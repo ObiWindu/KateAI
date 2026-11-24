@@ -1,3 +1,75 @@
+kateai (0.9.0-1) unstable; urgency=medium
+
+  * Release 0.9.0: SKILL.md discovery with progressive disclosure, trust
+    scanning and fork context; declarative AgentSpecs with JSONL sidechains,
+    summary-only returns, forwarded questions/permissions, cost attribution
+    and optional git-worktree isolation; a read-only Harness inspector; edit
+    near-match diagnostics; and configuration schema v2.
+
+ -- ObiWindu <Obi.wandu@proton.me>  Tue, 24 Nov 2026 00:00:00 +0000
+
+kateai (0.8.0-1) unstable; urgency=medium
+
+  * Release 0.8.0: deterministic prompt assembler with a stable cached prefix,
+    model profiles and native Gemini cached-content resources, a graduated
+    context engine with tool-result paging and rehydration, a memory hierarchy
+    with scoped AGENTS/rules files and memory_write, a deferred tool registry
+    with tool_search/tool_describe/tool_call, and edit canonicalisation for
+    smart quotes, CRLF and whitespace drift.
+
+ -- ObiWindu <Obi.wandu@proton.me>  Tue, 24 Nov 2026 00:00:00 +0000
+
+kateai (0.7.0-1) unstable; urgency=medium
+
+  * Release 0.7.0: append-only session event log with replay and JSONL
+    export, deterministic verification gate for mutating turns, deny-first
+    policy engine with an immutable hardline floor and audit trail, hooks v1
+    for session/prompt/tool/stop lifecycle events, and turn middleware.
+
+ -- ObiWindu <Obi.wandu@proton.me>  Sun, 22 Nov 2026 00:00:00 +0000
+
+kateai (0.6.0-1) unstable; urgency=medium
+
+  * Release 0.6.0: live Kate debugger integration with twelve debugger tools,
+    build and terminal tools, structured LSP diagnostics from Kate's
+    diagnostics model, ecosystem bridges (build, terminal, project tree,
+    backtrace browser), native review/debug/graph tabs, and debugger-aware
+    editor assistance. The package now ships the 4K-page sandbox shim.
+
+ -- ObiWindu <Obi.wandu@proton.me>  Sat, 21 Nov 2026 00:00:00 +0000
+
+kateai (0.5.1-1) unstable; urgency=medium
+
+  * Release 0.5.1: make the sandbox runtime test portable to Fedora aarch64
+    hosts that cannot create the network or cgroup namespaces required by the
+    Strict/Read-only profiles. No user-facing behavior changes.
+
+ -- ObiWindu <Obi.wandu@proton.me>  Wed, 18 Nov 2026 00:00:00 +0000
+
+kateai (0.5.0-1) unstable; urgency=medium
+
+  * Release 0.5.0: hardened ACP agent launch and protocol handling, stricter
+    sandbox and permission checks, safer checkpoints and patches, reliable
+    conversation restore, and reworked sub-agent cards.
+
+ -- ObiWindu <Obi.wandu@proton.me>  Wed, 18 Nov 2026 00:00:00 +0000
+
+kateai (0.4.0-1) unstable; urgency=medium
+
+  * Release 0.4.0: secure credential storage with migration, session database
+    recovery, checkpoint safety snapshots, stale-edit conflict detection,
+    explicit agent turn lifecycle, sanitized MCP/ACP process environments,
+    and versioned configuration/session schema migration.
+
+ -- ObiWindu <Obi.wandu@proton.me>  Mon, 16 Nov 2026 00:00:00 +0000
+
+kateai (0.3.0-1) unstable; urgency=medium
+
+  * Release 0.3.0: ACP question/suggestion cards, apply_patch hardening,
+    safe async reads, live sub-agent activity, and tool permission fixes.
+
+ -- ObiWindu <Obi.wandu@proton.me>  Sun, 15 Nov 2026 00:00:00 +0000
+
 kateai (0.1.0-1) unstable; urgency=medium
 
   * Initial package.

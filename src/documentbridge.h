@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <QHash>
 #include <QSet>
 #include <QString>
 #include <QStringList>
@@ -25,6 +26,20 @@ public:
     virtual bool readDocumentLines(const QString &path, int startLine, int maxLines,
                                    QStringList *page, int *totalLines) const;
     virtual bool writeDocument(const QString &path, const QString &contents, QString *error) = 0;
+    // Optimistic write for read-modify-write tools: the write only happens
+    // when the file still holds exactly `expectedContents`. If the user (or
+    // another process) changed it between the tool's read and its write, the
+    // tool fails with a conflict instead of silently clobbering newer content.
+    virtual bool writeDocumentIfUnchanged(const QString &path, const QString &expectedContents,
+                                          const QString &contents, QString *error);
+    // The create half of the same contract: only writes when the path does not
+    // exist yet. A file created between planning and applying a patch is a
+    // conflict, not something to overwrite.
+    virtual bool writeDocumentIfMissing(const QString &path, const QString &contents, QString *error);
+    // Deletes a file. The default removes it from disk; the Kate bridge refuses
+    // a document the user has unsaved changes in, so a deletion can never
+    // silently discard an editor buffer.
+    virtual bool removeDocument(const QString &path, QString *error);
     // Restores a file the agent changed to an earlier content. The default is
     // a plain write; the Kate bridge can instead put the content back into the
     // open buffer, which is the review semantics of edit-in-buffer mode.
@@ -42,8 +57,22 @@ public:
     bool readDocumentLines(const QString &path, int startLine, int maxLines,
                            QStringList *page, int *totalLines) const override;
     bool writeDocument(const QString &path, const QString &contents, QString *error) override;
+    bool writeDocumentIfMissing(const QString &path, const QString &contents, QString *error) override;
+    bool removeDocument(const QString &path, QString *error) override;
     bool restoreDocument(const QString &path, const QString &contents, QString *error) override;
     bool saveDocumentIfOpen(const QString &path, QString *error) override;
+
+    // Off-main-thread use: a worker must not touch KTextEditor documents. With
+    // this false, reads/writes go straight to disk and never call
+    // documentForPath(). Default true preserves editor-aware behaviour.
+    void setUseOpenDocuments(bool enabled)
+    {
+        m_useOpenDocuments = enabled;
+    }
+    bool useOpenDocuments() const
+    {
+        return m_useOpenDocuments;
+    }
 
     // Edit-in-buffer mode: writes to documents that are open in the editor
     // land in the buffer and stay unsaved, so the user reviews and saves
@@ -66,9 +95,19 @@ private:
     bool writeDocumentToDisk(const QString &path, const QString &contents, QString *error);
 
     bool m_editInBuffer = false;
+    bool m_useOpenDocuments = true;
     // Open paths whose current modification is the bridge's own unsaved
     // edit, so a later write may build on it instead of refusing.
     QSet<QString> m_bufferedPaths;
+    // SHA-256 of the content the bridge last wrote into each buffered path.
+    // Before overwriting a buffered path, the current buffer is compared
+    // against it: if they differ, someone (the user) edited the file after
+    // the agent's last write, and overwriting would throw those changes away.
+    QHash<QString, QByteArray> m_bufferedHashes;
+    // The content this bridge last wrote through an open document, regardless
+    // of buffer mode. restoreDocument() uses it to refuse a revert when the
+    // user typed into the document after the agent's edit.
+    QHash<QString, QByteArray> m_lastWrittenHashes;
 };
 
 // The open KTextEditor document for a local path, or null when Kate does not
