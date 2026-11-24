@@ -162,7 +162,15 @@ QString hashDocument(const SkillDefinition &skill)
         hash.addData(QByteArray::number(info.size()));
         QFile content(info.absoluteFilePath());
         if (content.open(QIODevice::ReadOnly)) {
-            hash.addData(content.read(64 * 1024));
+            // Hash the whole file, not only the first 64 KiB: a change after
+            // the prefix must invalidate a project skill's approval too.
+            while (!content.atEnd()) {
+                const QByteArray chunk = content.read(64 * 1024);
+                if (chunk.isEmpty()) {
+                    break;
+                }
+                hash.addData(chunk);
+            }
         }
     }
     return QString::fromLatin1(hash.result().toHex());
@@ -309,6 +317,32 @@ bool SkillRegistry::matchesPath(const QStringList &globs, const QString &path)
     return MemoryLoader::matchesPath(globs, path);
 }
 
+bool SkillRegistry::matchesAllowed(const QStringList &patterns, const QString &id)
+{
+    if (patterns.isEmpty()) {
+        return true;
+    }
+    const QString wanted = slug(id);
+    for (const QString &entry : patterns) {
+        const QString pattern = entry.trimmed();
+        if (pattern.isEmpty()) {
+            continue;
+        }
+        if (pattern.endsWith(u'*')) {
+            QString prefix = pattern.left(pattern.size() - 1).trimmed().toLower();
+            prefix.replace(u'_', u'-');
+            if (prefix.isEmpty() || wanted.startsWith(prefix)) {
+                return true;
+            }
+            continue;
+        }
+        if (slug(pattern) == wanted) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void SkillRegistry::setTrustStorePath(const QString &path)
 {
     g_trustStorePath = path;
@@ -443,25 +477,10 @@ void SkillRegistry::discover()
         }
     };
 
-    if (!m_workspace.isEmpty()) {
-        const QStringList projectRoots = {
-            m_workspace + u"/.kateai/skills"_s,
-            m_workspace + u"/.agents/skills"_s,
-            m_workspace + u"/.claude/skills"_s,
-        };
-        for (const QString &root : projectRoots) {
-            appendAll(discoverDirectory(root, SkillScope::Project, &m_warnings));
-        }
-    }
-
-    const QStringList userRoots = {
-        configHome() + u"/kateai/skills"_s,
-        configHome() + u"/.claude/skills"_s,
-    };
-    for (const QString &root : userRoots) {
-        appendAll(discoverDirectory(root, SkillScope::User, &m_warnings));
-    }
-
+    // Managed > user > project > bundled, the order SKILLS.md documents. The
+    // first definition with an id wins, so an administrator's skill cannot be
+    // replaced by a repository, and a user's skill cannot be replaced by a
+    // project that happens to clone it.
     QStringList managedRoots;
     const QString managed = QProcessEnvironment::systemEnvironment().value(u"KATEAI_MANAGED_SKILLS"_s);
     if (!managed.trimmed().isEmpty()) {
@@ -474,7 +493,33 @@ void SkillRegistry::discover()
         appendAll(discoverDirectory(root, SkillScope::Managed, &m_warnings));
     }
 
-    appendAll(bundledSkills());
+    const QString configHomePath = configHome();
+    if (!configHomePath.isEmpty()) {
+        // Without both HOME and XDG_CONFIG_HOME, configHome() is empty. Joining
+        // the relative names to it would read /kateai/skills and
+        // /.claude/skills from the filesystem root as if they were the user's.
+        const QStringList userRoots = {
+            configHomePath + u"/kateai/skills"_s,
+            configHomePath + u"/.claude/skills"_s,
+        };
+        for (const QString &root : userRoots) {
+            appendAll(discoverDirectory(root, SkillScope::User, &m_warnings));
+        }
+    }
+
+    if (!m_workspace.isEmpty()) {
+        const QStringList projectRoots = {
+            m_workspace + u"/.kateai/skills"_s,
+            m_workspace + u"/.agents/skills"_s,
+            m_workspace + u"/.claude/skills"_s,
+        };
+        for (const QString &root : projectRoots) {
+            appendAll(discoverDirectory(root, SkillScope::Project, &m_warnings));
+        }
+    }
+
+    const QList<SkillDefinition> bundled = bundledSkills();
+    appendAll(bundled);
 
     const QHash<QString, QString> trust = readTrustStore();
     for (SkillDefinition &skill : discovered) {
@@ -493,7 +538,6 @@ void SkillRegistry::discover()
     // An untrusted project skill may shadow a bundled skill with the same id,
     // but it must not make the trusted built-in unreachable. Restore the
     // bundled definition in that case.
-    const QList<SkillDefinition> bundled = bundledSkills();
     for (const SkillDefinition &builtin : bundled) {
         for (SkillDefinition &skill : discovered) {
             if (skill.id == builtin.id && !skill.trusted) {
@@ -546,16 +590,23 @@ QString SkillRegistry::catalog(const QStringList &touchedPaths, int maxChars) co
     QString out;
     for (const SkillDefinition &skill : active) {
         QString line = u"- %1: %2"_s.arg(skill.id, skill.description.simplified());
-        if (out.size() + line.size() + 1 > maxChars) {
-            const int room = maxChars - out.size() - 1;
+        const int separator = out.isEmpty() ? 0 : 1;
+        if (out.size() + separator + line.size() > maxChars) {
+            const int room = maxChars - out.size() - separator;
             if (room <= 8) {
                 break;
             }
+            if (separator > 0) {
+                out += u'\n';
+            }
+            // Shorten the last entry instead of dropping it; the separator is
+            // added first so the truncated line never runs into the previous
+            // catalog entry.
             line = line.left(room - 1) + u"…"_s;
             out += line;
             break;
         }
-        if (!out.isEmpty()) {
+        if (separator > 0) {
             out += u'\n';
         }
         out += line;
@@ -599,10 +650,21 @@ bool SkillRegistry::load(const QString &id, SkillDefinition *out, QString *error
         }
         return false;
     }
+    // The body was just re-read, so use the scan of the bytes that are about
+    // to run rather than the discovery-time result. Otherwise a user skill
+    // that turned malicious after discovery would keep its earlier clean
+    // verdict until the next registry reload.
+    loaded.warnings = scan(loaded);
     loaded.trusted = found->trusted;
     if (loaded.scope == SkillScope::Project) {
         const QHash<QString, QString> trust = readTrustStore();
         loaded.trusted = trust.value(loaded.id) == loaded.hash;
+    } else if (loaded.scope == SkillScope::User) {
+        const QHash<QString, QString> trust = readTrustStore();
+        const QString stored = trust.value(loaded.id);
+        loaded.trusted = stored == u"revoked"_s
+            ? false
+            : (stored == loaded.hash || !hasCriticalFinding(loaded.warnings));
     }
     if (out) {
         *out = loaded;

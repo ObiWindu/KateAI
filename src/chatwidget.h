@@ -78,7 +78,7 @@ public:
     void focusPrompt();
     void ask(const QString &text);
     void newChat();
-    void forkConversation();
+    bool forkConversation();
     void rebuildTranscript();
     void restoreCurrentTurn(const SessionStore::SessionData &sessionData);
     void updateHistoryButton();
@@ -277,6 +277,17 @@ private:
     // live under. Called whenever the panel is resized and whenever a card is
     // docked, so a card never inherits a stale budget.
     void applySubtaskHeightBudget();
+    // Approval cards are serialized: the first request is shown, later ones
+    // wait in m_queuedPermissionRequests until the visible decision is made.
+    void enqueuePermissionRequest(const PermissionRequest &request);
+    void presentPermissionRequest(const PermissionRequest &request);
+    void showNextQueuedPermission();
+    void retirePermissionRequest(const QString &toolCallId);
+    // Wires Apply/Discard for one sub-agent card. Used by both the live card
+    // and a card rebuilt from saved history, so a restored worktree patch can
+    // still be applied or discarded.
+    void wireSubtaskWorktreeActions(SubtaskWidget *subtaskWidget);
+    void restoreSubtaskWorktree(SubtaskWidget *subtaskWidget, const SubagentRecord &record);
 
     // --- Suggestion cards ------------------------------------------------------
     // One card per suggestion the agent posted, keyed by the tool call id that
@@ -543,6 +554,11 @@ private:
     // A child question's card id -> task id. Answer is routed to the child,
     // not to the parent's own parked question.
     QHash<QString, QString> m_subtaskQuestionTaskIds;
+    // Only one approval strip is visible at a time. Concurrent children (or a
+    // parent and a child) queue their requests instead of each new card
+    // cancelling the previous one and leaving its owner parked forever.
+    QList<PermissionRequest> m_queuedPermissionRequests;
+    QString m_activePermissionCallId;
     QPointer<InspectorPanel> m_inspector;
     // Latest live output per running tool, flushed on a timer so a chatty
     // command does not re-render its card once per chunk.

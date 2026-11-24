@@ -140,6 +140,10 @@ public:
     static QString scopeId(SkillScope scope);
     static QString scopeLabel(SkillScope scope);
     static bool matchesPath(const QStringList &globs, const QString &path);
+    // Matches a skill id against an AgentSpec's allowed list. An empty list
+    // allows every skill; entries may end in '*' to match a prefix, the same
+    // way tool allow-lists do.
+    static bool matchesAllowed(const QStringList &patterns, const QString &id);
 
     // Tests set an isolated store and home so they never read the developer's
     // skills or approvals.

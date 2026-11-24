@@ -205,6 +205,9 @@ public:
     // status "running"). Newest first.
     QList<SubagentRecord> subagents() const;
     SubagentRecord subagent(const QString &taskId) const;
+    // The records (and their worktree patch paths) belong to the conversation
+    // that produced them. A fork must not inherit them.
+    void clearSubagentRecords();
     // Paged text of one sub-agent's sidechain, for debugging. Returns the
     // summary and tool log when the sidechain file is unavailable.
     QString subagentTranscript(const QString &taskId, int offset = 0,
@@ -339,6 +342,9 @@ Q_SIGNALS:
     void toolStarted(const PermissionRequest &request);
     void toolFinished(const ToolResult &result);
     void permissionNeeded(const PermissionRequest &request);
+    // The request can no longer be answered (its child finished or was
+    // cancelled). The UI must retire any queued or visible approval card.
+    void permissionCancelled(const QString &toolCallId);
     // The agent asked the user something with the `question` tool and is
     // waiting. The request carries the question and the suggested answers.
     // Also emitted for ACP: an agent's ask_user client method or a question

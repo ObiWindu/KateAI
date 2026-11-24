@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: LGPL-2.1-or-later
  */
 
+#include "harness/worktree.h"
 #include "sessionstore.h"
 
 #include <QJsonDocument>
@@ -27,6 +28,11 @@ private Q_SLOTS:
     {
         QVERIFY(m_dir.isValid());
         qputenv("KATEAI_SESSION_DB", m_dir.filePath(u"sessions.sqlite"_s).toUtf8());
+    }
+
+    void cleanup()
+    {
+        SubagentWorktree::setCacheRootForTests(QString());
     }
 
     void titlePreservedAcrossSaves()
@@ -146,6 +152,30 @@ private Q_SLOTS:
         QVERIFY(loaded.transcript.isEmpty());
     }
 
+    void subagentRecordsSurviveARoundTrip()
+    {
+        const QString id = SessionStore::createNewConversation();
+        QVERIFY(!id.isEmpty());
+
+        QJsonObject record;
+        record.insert(u"taskId"_s, u"call-1"_s);
+        record.insert(u"status"_s, u"ok"_s);
+        record.insert(u"worktreePath"_s, u"/tmp/worktree"_s);
+        record.insert(u"patchPath"_s, u"/tmp/worktree.patch"_s);
+        record.insert(u"filesChanged"_s, QJsonArray{u"src/a.cpp"_s});
+
+        SessionStore::SessionData data;
+        data.subagents.append(record);
+        QVERIFY(SessionStore::saveConversation(id, data, u"Sub-agents"_s));
+
+        const SessionStore::SessionData loaded = SessionStore::loadConversation(id);
+        QCOMPARE(loaded.subagents.size(), 1);
+        const QJsonObject restored = loaded.subagents.first().toObject();
+        QCOMPARE(restored.value(u"taskId"_s).toString(), u"call-1"_s);
+        QCOMPARE(restored.value(u"patchPath"_s).toString(), u"/tmp/worktree.patch"_s);
+        QCOMPARE(restored.value(u"filesChanged"_s).toArray().size(), 1);
+    }
+
     void forkConversationCopiesTheTranscriptAndRecordsItsParent()
     {
         const QString sourceId = SessionStore::createNewConversation();
@@ -161,6 +191,11 @@ private Q_SLOTS:
         SessionStore::SessionData data;
         data.messages = {question, answer};
         data.transcript = {question, answer};
+        data.acpSessionId = u"acp-source-session"_s;
+        QJsonObject worktreeRecord;
+        worktreeRecord.insert(u"taskId"_s, u"call-source-worktree"_s);
+        worktreeRecord.insert(u"worktreePath"_s, u"/tmp/source-worktree"_s);
+        data.subagents.append(worktreeRecord);
         QVERIFY(SessionStore::saveConversation(sourceId, data, u"Source"_s));
 
         const QString forkId = SessionStore::forkConversation(sourceId, u"Branch"_s);
@@ -174,11 +209,45 @@ private Q_SLOTS:
         QCOMPARE(fork.messages.first().content, u"fork me"_s);
         QCOMPARE(fork.transcript.size(), 2);
         QCOMPARE(SessionStore::conversationTitle(forkId), u"Branch"_s);
+        // The fork must not attach to the source thread's ACP session or
+        // inherit its pending worktree paths.
+        QVERIFY(fork.acpSessionId.isEmpty());
+        QVERIFY(fork.subagents.isEmpty());
 
-        // The source remains untouched.
+        // The source remains untouched, including its agent-side session and
+        // the worktree it still owns.
         const SessionStore::SessionData source = SessionStore::loadConversation(sourceId);
         QVERIFY(source.parentConversationId.isEmpty());
         QCOMPARE(source.messages.size(), 2);
+        QCOMPARE(source.acpSessionId, u"acp-source-session"_s);
+        QCOMPARE(source.subagents.size(), 1);
+    }
+
+    void deletingAConversationRemovesItsSavedWorktrees()
+    {
+        QTemporaryDir cache;
+        QVERIFY(cache.isValid());
+        SubagentWorktree::setCacheRootForTests(cache.path());
+        const QString worktree = cache.filePath(u"kateai-test-worktree"_s);
+        QVERIFY(QDir().mkpath(worktree));
+        QVERIFY(QFileInfo(worktree).isDir());
+
+        const QString id = SessionStore::createNewConversation();
+        QVERIFY(!id.isEmpty());
+        SessionStore::SessionData data;
+        ChatMessage msg;
+        msg.role = ChatMessage::Role::User;
+        msg.content = u"isolated work"_s;
+        data.messages = {msg};
+        QJsonObject record;
+        record.insert(u"taskId"_s, u"call-worktree"_s);
+        record.insert(u"worktreePath"_s, worktree);
+        data.subagents.append(record);
+        QVERIFY(SessionStore::saveConversation(id, data, u"Worktree"_s));
+
+        SessionStore::deleteConversation(id);
+        QVERIFY2(!QFileInfo::exists(worktree),
+                 "deleting a conversation left its isolated worktree on disk");
     }
 };
 

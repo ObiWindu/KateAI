@@ -86,8 +86,9 @@ bool pathUnder(const QString &path, const QString &root)
     if (canonical.isEmpty() || canonicalRoot.isEmpty()) {
         return false;
     }
-    return canonical == canonicalRoot
-        || canonical.startsWith(canonicalRoot + QDir::separator());
+    // The cache root itself is not a worktree. Allowing equality here would
+    // let remove() recursively delete every isolated worktree at once.
+    return canonical.startsWith(canonicalRoot + QDir::separator());
 }
 
 } // namespace
@@ -154,7 +155,8 @@ QString SubagentWorktree::repositoryRoot(const QString &workspace)
     return root.ok ? QDir::cleanPath(root.out.trimmed()) : QString();
 }
 
-WorktreeResult SubagentWorktree::create(const QString &workspace, const QString &taskId)
+WorktreeResult SubagentWorktree::create(const QString &workspace, const QString &taskId,
+                                        const QString &scopeKey)
 {
     WorktreeResult result;
     QString reason;
@@ -176,9 +178,14 @@ WorktreeResult SubagentWorktree::create(const QString &workspace, const QString 
 
     const QString repoKey = QString::fromLatin1(
         QCryptographicHash::hash(root.toUtf8(), QCryptographicHash::Sha1).toHex().left(8));
+    const QString scopePart = scopeKey.isEmpty()
+        ? QString()
+        : u"-"_s + QString::fromLatin1(
+                       QCryptographicHash::hash(scopeKey.toUtf8(), QCryptographicHash::Sha1)
+                           .toHex().left(8));
     const QString base = cacheRoot();
     QDir().mkpath(base);
-    const QString path = base + u"/kateai-%1-%2"_s.arg(repoKey, safeName(taskId));
+    const QString path = base + u"/kateai-%1%2-%3"_s.arg(repoKey, scopePart, safeName(taskId));
     if (QFileInfo::exists(path)) {
         // A previous run was killed before cleanup. The path is under our
         // cache root, so removing it is safe; then prune the stale entry.
@@ -215,7 +222,9 @@ bool SubagentWorktree::remove(const QString &workspace, const QString &worktreeP
         }
         return false;
     }
-    const QString root = repositoryRoot(workspace);
+    // An empty workspace means the conversation had no repository context.
+    // Do not let git resolve whatever directory the process happens to be in.
+    const QString root = workspace.isEmpty() ? QString() : repositoryRoot(workspace);
     bool ok = false;
     if (!root.isEmpty()) {
         const GitResult removed = runGit(root, {u"worktree"_s, u"remove"_s, u"--force"_s, worktreePath}, 30000);

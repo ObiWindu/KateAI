@@ -105,6 +105,10 @@ public:
     void stop();
     // Drops the current ACP session so the next prompt creates a new one.
     void resetSession();
+    // Forgets the local session id without closing the agent-side session.
+    // Used when a conversation is forked: the fork needs its own session, but
+    // the source thread still owns the old one.
+    void detachSession();
 
     void prompt(const QString &text);
     void resolvePermission(PermissionDecision decision);

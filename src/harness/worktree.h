@@ -36,8 +36,11 @@ public:
     static QString repositoryRoot(const QString &workspace);
 
     // Creates a detached worktree at HEAD. `taskId` only names the directory;
-    // unsafe characters are replaced.
-    static WorktreeResult create(const QString &workspace, const QString &taskId);
+    // unsafe characters are replaced. `scopeKey` separates runs that may reuse
+    // a task id in different conversations or windows; an empty key keeps the
+    // legacy per-repository path so a killed run can still be reclaimed.
+    static WorktreeResult create(const QString &workspace, const QString &taskId,
+                                 const QString &scopeKey = QString());
     static bool remove(const QString &workspace, const QString &worktreePath,
                        QString *error = nullptr);
 

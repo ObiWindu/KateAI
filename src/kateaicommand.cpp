@@ -264,7 +264,10 @@ bool KateAiCommand::exec(KTextEditor::View *view, const QString &cmd, QString &m
         return true;
     }
     if (sub == u"fork"_s) {
-        target->chat()->forkConversation();
+        if (!target->chat()->forkConversation()) {
+            msg = i18n("Kate AI: the conversation was not forked.");
+            return false;
+        }
         msg = i18n("Kate AI: forked the conversation.");
         return true;
     }

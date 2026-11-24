@@ -78,6 +78,11 @@ enum class ToolRisk {
 struct ToolAccess {
     QSet<QString> exact;
     QStringList prefixes;
+    // Deny-first entries. A denied name wins over every allow rule, including
+    // allowAll, so an AgentSpec can subtract a single MCP tool (or a prefix of
+    // one) from a mode that otherwise allows the whole MCP namespace.
+    QSet<QString> deniedExact;
+    QStringList deniedPrefixes;
     bool allowAll = false;
 
     // Every tool, current and future.
@@ -101,8 +106,42 @@ struct ToolAccess {
             prefixes.append(prefix);
         }
     }
+    void deny(const QString &toolName)
+    {
+        deniedExact.insert(toolName);
+    }
+    void denyPrefix(const QString &prefix)
+    {
+        if (!deniedPrefixes.contains(prefix)) {
+            deniedPrefixes.append(prefix);
+        }
+    }
+    bool isDenied(const QString &toolName) const
+    {
+        if (deniedExact.isEmpty() && deniedPrefixes.isEmpty()) {
+            return false;
+        }
+        const QString canonical = canonicalToolName(toolName);
+        if (deniedExact.contains(toolName) || deniedExact.contains(canonical)) {
+            return true;
+        }
+        for (const QString &alias : toolNameAliases(canonical)) {
+            if (deniedExact.contains(alias)) {
+                return true;
+            }
+        }
+        for (const QString &prefix : deniedPrefixes) {
+            if (toolName.startsWith(prefix) || canonical.startsWith(prefix)) {
+                return true;
+            }
+        }
+        return false;
+    }
     bool allows(const QString &toolName) const
     {
+        if (isDenied(toolName)) {
+            return false;
+        }
         if (allowAll) {
             return true;
         }

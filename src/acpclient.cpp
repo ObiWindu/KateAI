@@ -1802,6 +1802,25 @@ void AcpClient::resetSession()
     Q_EMIT sessionIdChanged(QString());
 }
 
+void AcpClient::detachSession()
+{
+    // Same reset as resetSession(), except the agent-side session is left
+    // open: it still belongs to the conversation being forked.
+    cancelPendingPermission();
+    m_sessionGrants.clear();
+    m_onceGrants.clear();
+    m_resumeSessionId.clear();
+    m_queued.clear();
+    m_sessionNotesSent = false;
+    if (!m_availableCommands.isEmpty()) {
+        setAvailableCommands(QJsonArray());
+    }
+    m_sessionId.clear();
+    m_sessionOpening = false;
+    m_replayingLoad = false;
+    Q_EMIT sessionIdChanged(QString());
+}
+
 void AcpClient::prompt(const QString &text)
 {
     if (text.trimmed().isEmpty()) {

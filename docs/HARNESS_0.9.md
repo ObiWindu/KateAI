@@ -84,7 +84,9 @@ On completion the child's staged diff and changed-file list become a patch
 artifact. The parent tool result says nothing was merged. The UI offers
 **Apply patch** and **Discard** on the sub-agent card; `:kateai
 apply-subtask <id>` and `:kateai discard-subtask <id>` do the same. Applying
-takes a safety checkpoint first when checkpoints are enabled. A worktree
+takes a safety checkpoint first when checkpoints are enabled. The record and
+patch path are saved with the conversation, so the actions survive a restart;
+deleting or pruning the conversation removes its worktree. A worktree
 preflight failure falls back to in-process with a visible notice.
 
 ## Inspector

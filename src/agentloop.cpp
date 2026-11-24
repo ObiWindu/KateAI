@@ -34,6 +34,8 @@
 #include <QSharedPointer>
 #include <QStandardPaths>
 #include <QSaveFile>
+#include <QStringConverter>
+#include <QTextStream>
 #include <QTimer>
 #include <QUuid>
 #include <QUrl>
@@ -112,6 +114,84 @@ void applyModelOverride(Settings &settings, const QString &model)
         settings.grokModel = value;
         break;
     }
+}
+
+// Sub-agent records travel with the conversation so a finished worktree patch
+// stays applicable after a restart. The unified diff itself lives in the patch
+// file next to the sidechain; this keeps the session payload small.
+QJsonObject subagentRecordToJson(const SubagentRecord &record)
+{
+    QJsonObject object;
+    object.insert(u"taskId"_s, record.taskId);
+    object.insert(u"agentId"_s, record.agentId);
+    object.insert(u"agentName"_s, record.agentName);
+    object.insert(u"modeId"_s, record.modeId);
+    object.insert(u"description"_s, record.description);
+    object.insert(u"status"_s, record.status);
+    object.insert(u"summary"_s, record.summary.left(8000));
+    object.insert(u"error"_s, record.error.left(4000));
+    object.insert(u"isolation"_s, record.isolation);
+    object.insert(u"worktreePath"_s, record.worktreePath);
+    object.insert(u"baseCommit"_s, record.baseCommit);
+    object.insert(u"patchPath"_s, record.patchPath);
+    object.insert(u"sidechainPath"_s, record.sidechainPath);
+    object.insert(u"filesChanged"_s, QJsonArray::fromStringList(record.filesChanged));
+    object.insert(u"checks"_s, QJsonArray::fromStringList(record.checks));
+    object.insert(u"startedAtMs"_s, static_cast<double>(record.startedAtMs));
+    object.insert(u"finishedAtMs"_s, static_cast<double>(record.finishedAtMs));
+    object.insert(u"inputTokens"_s, record.inputTokens);
+    object.insert(u"outputTokens"_s, record.outputTokens);
+    object.insert(u"cachedInputTokens"_s, record.cachedInputTokens);
+    object.insert(u"costUsd"_s, record.costUsd);
+    object.insert(u"applied"_s, record.applied);
+    object.insert(u"discarded"_s, record.discarded);
+    return object;
+}
+
+QStringList jsonStringList(const QJsonArray &array)
+{
+    QStringList values;
+    for (const QJsonValue &value : array) {
+        const QString text = value.toString();
+        if (!text.isEmpty()) {
+            values.append(text);
+        }
+    }
+    return values;
+}
+
+SubagentRecord subagentRecordFromJson(const QJsonObject &object)
+{
+    SubagentRecord record;
+    record.taskId = object.value(u"taskId"_s).toString();
+    record.agentId = object.value(u"agentId"_s).toString();
+    record.agentName = object.value(u"agentName"_s).toString();
+    record.modeId = object.value(u"modeId"_s).toString();
+    record.description = object.value(u"description"_s).toString();
+    record.status = object.value(u"status"_s).toString(u"interrupted"_s);
+    record.summary = object.value(u"summary"_s).toString();
+    record.error = object.value(u"error"_s).toString();
+    record.isolation = object.value(u"isolation"_s).toString(u"in-process"_s);
+    record.worktreePath = object.value(u"worktreePath"_s).toString();
+    record.baseCommit = object.value(u"baseCommit"_s).toString();
+    record.patchPath = object.value(u"patchPath"_s).toString();
+    record.sidechainPath = object.value(u"sidechainPath"_s).toString();
+    record.filesChanged = jsonStringList(object.value(u"filesChanged"_s).toArray());
+    record.checks = jsonStringList(object.value(u"checks"_s).toArray());
+    record.startedAtMs = static_cast<qint64>(object.value(u"startedAtMs"_s).toDouble());
+    record.finishedAtMs = static_cast<qint64>(object.value(u"finishedAtMs"_s).toDouble());
+    record.inputTokens = object.value(u"inputTokens"_s).toInt();
+    record.outputTokens = object.value(u"outputTokens"_s).toInt();
+    record.cachedInputTokens = object.value(u"cachedInputTokens"_s).toInt();
+    record.costUsd = object.value(u"costUsd"_s).toDouble();
+    record.applied = object.value(u"applied"_s).toBool();
+    record.discarded = object.value(u"discarded"_s).toBool();
+    // No child loop survives a restore, so a record saved mid-run is no longer
+    // running. Keep the worktree path for the normal cleanup path.
+    if (record.status == u"running"_s) {
+        record.status = u"interrupted"_s;
+    }
+    return record;
 }
 
 qsizetype transcriptMessageChars(const ChatMessage &message)
@@ -851,7 +931,14 @@ ToolAccess AgentLoop::activeToolAccess() const
     if (m_subagentAllowedTools.isEmpty() && m_subagentDisallowedTools.isEmpty()) {
         return access;
     }
-    if (!m_subagentAllowedTools.isEmpty()) {
+    bool allToolsAllowed = false;
+    for (const QString &entry : m_subagentAllowedTools) {
+        if (entry.trimmed() == u"*"_s) {
+            allToolsAllowed = true;
+            break;
+        }
+    }
+    if (!m_subagentAllowedTools.isEmpty() && !allToolsAllowed) {
         ToolAccess restricted;
         for (const QString &entry : m_subagentAllowedTools) {
             QString name = entry.trimmed();
@@ -879,6 +966,20 @@ ToolAccess AgentLoop::activeToolAccess() const
                 narrowed.allowPrefix(prefix);
             }
         }
+        // Exact MCP tools have no entry in allBuiltInToolNames(), so the
+        // built-in intersection above drops them. Keep the ones the mode's
+        // own access still permits; this is what lets an AgentSpec list one
+        // mcp__server__tool instead of the whole server.
+        const QStringList builtInNames = allBuiltInToolNames();
+        const QSet<QString> builtIns(builtInNames.cbegin(), builtInNames.cend());
+        for (const QString &name : restricted.exact) {
+            if (builtIns.contains(name) || builtIns.contains(canonicalToolName(name))) {
+                continue;
+            }
+            if (access.allows(name)) {
+                narrowed.allow(name);
+            }
+        }
         narrowed.allowAll = false;
         access = narrowed;
     }
@@ -889,22 +990,17 @@ ToolAccess AgentLoop::activeToolAccess() const
         }
         if (name.endsWith(u'*')) {
             name.chop(1);
-            access.prefixes.removeAll(name);
-            // Exact tools under a denied prefix are denied too.
-            for (auto it = access.exact.begin(); it != access.exact.end();) {
-                if (it->startsWith(name)) {
-                    it = access.exact.erase(it);
-                } else {
-                    ++it;
-                }
-            }
+            // A deny prefix is the only way to subtract one MCP server from a
+            // mode's broad mcp__ allow. Pruning the allow list cannot express
+            // that: the mode has only the mcp__ prefix, not per-tool entries.
+            access.denyPrefix(name);
             continue;
         }
         const QString canonical = canonicalToolName(name);
-        access.exact.remove(name);
-        access.exact.remove(canonical);
+        access.deny(name);
+        access.deny(canonical);
         for (const QString &alias : toolNameAliases(canonical)) {
-            access.exact.remove(alias);
+            access.deny(alias);
         }
     }
     return access;
@@ -942,7 +1038,11 @@ QString AgentLoop::subagentSidechainPath(const QString &taskId) const
 {
     QString base = QProcessEnvironment::systemEnvironment().value(u"KATEAI_SUBAGENT_DIR"_s);
     if (base.trimmed().isEmpty()) {
-        base = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + u"/subagents"_s;
+        base = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+        if (base.isEmpty()) {
+            base = QDir::tempPath() + u"/kateai"_s;
+        }
+        base += u"/subagents"_s;
     }
     const QString conversation = conversationId().isEmpty() ? u"unsaved"_s : conversationId();
     QString safeConversation;
@@ -1013,35 +1113,77 @@ SubagentRecord AgentLoop::subagent(const QString &taskId) const
     return m_subagentRecords.value(taskId);
 }
 
+void AgentLoop::clearSubagentRecords()
+{
+    m_subagentRecords.clear();
+}
+
 QString AgentLoop::subagentTranscript(const QString &taskId, int offset, int maxChars) const
 {
     const SubagentRecord record = m_subagentRecords.value(taskId);
-    QString text;
     const QString path = record.sidechainPath.isEmpty()
         ? subagentSidechainPath(taskId)
         : record.sidechainPath;
+    const int start = qMax(0, offset);
+    const qint64 length = qMax(1, maxChars);
+
+    // Stream to the requested character offset instead of reading a fixed
+    // prefix. A long sidechain stays pageable past the first megabyte without
+    // loading the whole file into memory.
     QFile file(path);
+    QString page;
+    bool sawContent = false;
+    bool more = false;
     if (file.open(QIODevice::ReadOnly | QIODevice::Text)) {
-        text = QString::fromUtf8(file.read(1024 * 1024));
+        QTextStream stream(&file);
+        stream.setEncoding(QStringConverter::Utf8);
+        qint64 remaining = start;
+        while (remaining > 0 && !stream.atEnd()) {
+            const QString skipped = stream.read(qMin<qint64>(remaining, 64 * 1024));
+            if (skipped.isEmpty()) {
+                break;
+            }
+            sawContent = true;
+            remaining -= skipped.size();
+        }
+        page = stream.read(length);
+        if (!page.isEmpty()) {
+            sawContent = true;
+        }
+        more = !stream.atEnd();
     }
-    if (text.trimmed().isEmpty()) {
+
+    if (!sawContent) {
+        // No bytes on disk, or the file is empty. Fall back to the structured
+        // record so an old or crashed run still has a readable summary.
         if (record.taskId.isEmpty()) {
             return u"No sub-agent with that id was recorded."_s;
         }
-        text = u"# %1 (%2)\n%3\n"_s.arg(record.agentName, record.status, record.summary);
+        QString text = u"# %1 (%2)\n%3\n"_s.arg(record.agentName, record.status, record.summary);
         if (!record.error.isEmpty()) {
             text += u"\nError: "_s + record.error + u'\n';
         }
         if (!record.filesChanged.isEmpty()) {
             text += u"\nFiles changed: "_s + record.filesChanged.join(u", "_s) + u'\n';
         }
+        const int fallbackStart = qBound(0, start, text.size());
+        QString fallback = text.mid(fallbackStart, static_cast<int>(length));
+        if (fallbackStart > 0 || fallbackStart + length < text.size()) {
+            fallback = u"[subagent transcript %1: characters %2..%3 of %4]\n"_s
+                           .arg(taskId)
+                           .arg(fallbackStart)
+                           .arg(qMin<qint64>(text.size(), fallbackStart + length))
+                           .arg(text.size())
+                + fallback;
+        }
+        return fallback;
     }
-    const int start = qBound(0, offset, text.size());
-    const int length = qMax(1, maxChars);
-    QString page = text.mid(start, length);
-    if (start > 0 || start + length < text.size()) {
-        page = u"[subagent transcript %1: characters %2..%3 of %4]\n"_s
-                   .arg(taskId).arg(start).arg(qMin(text.size(), start + length)).arg(text.size())
+
+    if (start > 0 || more) {
+        page = u"[subagent transcript %1: from character %2%3]\n"_s
+                   .arg(taskId)
+                   .arg(start)
+                   .arg(more ? u", more follows"_s : u", end reached"_s)
             + page;
     }
     return page;
@@ -1132,6 +1274,37 @@ bool AgentLoop::applySubagentWorktree(const QString &taskId, QString *error)
         return false;
     }
     SubagentRecord &record = it.value();
+    if (record.applied) {
+        if (error) {
+            *error = i18n("That sub-agent patch was already applied.");
+        }
+        return false;
+    }
+    if (record.discarded) {
+        if (error) {
+            *error = i18n("That sub-agent worktree was already discarded.");
+        }
+        return false;
+    }
+    if (record.patch.trimmed().isEmpty() && !record.patchPath.isEmpty()) {
+        // Restored records keep the diff on disk instead of inflating the
+        // session payload. Load it only when the user decides to apply.
+        QFile patchFile(record.patchPath);
+        constexpr qint64 kMaxPatchBytes = 32 * 1024 * 1024;
+        if (!patchFile.open(QIODevice::ReadOnly)) {
+            if (error) {
+                *error = i18n("Could not read the saved sub-agent patch: %1", patchFile.errorString());
+            }
+            return false;
+        }
+        if (patchFile.size() > kMaxPatchBytes) {
+            if (error) {
+                *error = i18n("The saved sub-agent patch is too large to apply.");
+            }
+            return false;
+        }
+        record.patch = QString::fromUtf8(patchFile.readAll());
+    }
     if (record.patch.trimmed().isEmpty()) {
         if (error) {
             *error = i18n("That sub-agent produced no patch.");
@@ -1179,8 +1352,15 @@ bool AgentLoop::discardSubagentWorktree(const QString &taskId, QString *error)
         return false;
     }
     SubagentRecord &record = it.value();
+    if (record.applied) {
+        if (error) {
+            *error = i18n("That sub-agent patch was already applied.");
+        }
+        return false;
+    }
     if (!record.worktreePath.isEmpty()) {
-        if (!SubagentWorktree::remove(m_workspace, record.worktreePath, error)) {
+        if (QFileInfo::exists(record.worktreePath)
+            && !SubagentWorktree::remove(m_workspace, record.worktreePath, error)) {
             return false;
         }
         record.worktreePath.clear();
@@ -2075,7 +2255,7 @@ PromptResult AgentLoop::assemblePrompt() const
             QStringList filtered;
             for (const QString &line : catalog.split(u'\n')) {
                 const QString id = line.section(u':', 0, 0).trimmed().mid(2);
-                if (m_subagentSkills.contains(id)) {
+                if (SkillRegistry::matchesAllowed(m_subagentSkills, id)) {
                     filtered.append(line);
                 }
             }
@@ -2294,7 +2474,11 @@ void AgentLoop::resetConversation()
     m_touchedPaths.clear();
     m_invokedSkills.clear();
     m_subagentRecords.clear();
+    const QStringList cancelledPermissions = m_subtaskPermissionIds.keys();
     m_subtaskPermissionIds.clear();
+    for (const QString &id : cancelledPermissions) {
+        Q_EMIT permissionCancelled(id);
+    }
     m_turnId.clear();
     m_parentConversationId.clear();
     m_lastTurnState = TurnState::Idle;
@@ -4523,8 +4707,31 @@ void AgentLoop::executeOne(const ToolCall &call)
         processQueue();
         return;
     }
+    const bool registryBridge = m_harness.toolSearch
+        && (call.name == u"tool_search"_s || call.name == u"tool_describe"_s
+            || call.name == u"tool_call"_s);
+    if (!access.allows(call.name) && !registryBridge) {
+        ToolResult result;
+        result.ok = false;
+        if (m_settings.planMode && !m_policy.isReadTool(call.name)) {
+            result.output = u"Tool rejected: plan mode only permits read-only tools. Choose a read-only tool."_s;
+        } else if (m_mcp && isMcpToolName(call.name) && !m_mcp->hasTool(call.name)) {
+            result.output = u"Tool rejected: no MCP server named '%1' is currently connected, so '%2' is unavailable."_s
+                                .arg(call.name.mid(mcpToolPrefix().size()).section(u"__"_s, 0, 0), call.name);
+        } else {
+            result.output = u"Tool rejected: the %1 mode does not provide the '%2' tool. Available tools: %3. "_s
+                                u"Use one of those, or switch modes."_s
+                                    .arg(activeMode().name, call.name, accessList());
+        }
+        appendToolResult(call, result);
+        processQueue();
+        return;
+    }
+
     // Sub-agent sidechains are read by the root loop; the transcript store is
     // not part of ToolRunner because it belongs to the orchestration layer.
+    // This runs after the access check so plan/ask modes and an AgentSpec's
+    // denied-tool list apply to it like any other tool.
     if (call.name == u"subagent_transcript"_s) {
         const QJsonObject args = effectiveArgs(call);
         const QString taskId = args.value(u"task_id"_s).toString().trimmed();
@@ -4545,26 +4752,6 @@ void AgentLoop::executeOne(const ToolCall &call)
         }
         ++m_toolCalls;
         Q_EMIT toolStarted(describeTool(call));
-        appendToolResult(call, result);
-        processQueue();
-        return;
-    }
-    const bool registryBridge = m_harness.toolSearch
-        && (call.name == u"tool_search"_s || call.name == u"tool_describe"_s
-            || call.name == u"tool_call"_s);
-    if (!access.allows(call.name) && !registryBridge) {
-        ToolResult result;
-        result.ok = false;
-        if (m_settings.planMode && !m_policy.isReadTool(call.name)) {
-            result.output = u"Tool rejected: plan mode only permits read-only tools. Choose a read-only tool."_s;
-        } else if (m_mcp && isMcpToolName(call.name) && !m_mcp->hasTool(call.name)) {
-            result.output = u"Tool rejected: no MCP server named '%1' is currently connected, so '%2' is unavailable."_s
-                                .arg(call.name.mid(mcpToolPrefix().size()).section(u"__"_s, 0, 0), call.name);
-        } else {
-            result.output = u"Tool rejected: the %1 mode does not provide the '%2' tool. Available tools: %3. "_s
-                                u"Use one of those, or switch modes."_s
-                                    .arg(activeMode().name, call.name, accessList());
-        }
         appendToolResult(call, result);
         processQueue();
         return;
@@ -4590,7 +4777,11 @@ void AgentLoop::executeOne(const ToolCall &call)
         QString skillError;
         if (!skillId.isEmpty() && m_skills.load(skillId, &skill, &skillError)
             && skill.isFork() && skill.trusted && !skill.disableModelInvocation
-            && (m_subagentSkills.isEmpty() || m_subagentSkills.contains(skill.id))) {
+            && SkillRegistry::matchesAllowed(m_subagentSkills, skill.id)
+            // Path gating lives in ToolRunner::skill(), but a fork skill is
+            // intercepted before that call. Apply the same rule here so a
+            // path-scoped skill cannot be forked from an unrelated file.
+            && (skill.paths.isEmpty() || skill.isActiveFor(contextTouchedPaths()))) {
             startSkillFork(call, skill);
             return;
         }
@@ -5378,11 +5569,31 @@ void AgentLoop::startSkillFork(const ToolCall &call, const SkillDefinition &skil
         prompt += i18n("\nSupporting files in %1: %2", skill.directory, skill.supportingFiles.join(u", "_s));
     }
 
+    const int parallelLimit = qMax(1, m_settings.maxParallelSubtasks);
+    if (m_activeSubtasks.size() >= parallelLimit) {
+        ToolResult result;
+        result.ok = false;
+        result.output = u"Too many sub-agents are already running (%1 of %2). Wait for one to finish before running a forked skill."_s
+                            .arg(m_activeSubtasks.size())
+                            .arg(parallelLimit);
+        appendToolResult(call, result);
+        processQueue();
+        return;
+    }
+    QString taskId = call.id.isEmpty() ? QStringLiteral("skill-%1").arg(++m_asyncCounter) : call.id;
+    if (m_activeSubtasks.contains(taskId)) {
+        ToolResult result;
+        result.ok = false;
+        result.output = u"A sub-agent with id '%1' is already running. Use a unique task id."_s.arg(taskId);
+        appendToolResult(call, result);
+        processQueue();
+        return;
+    }
+
     auto *child = new AgentLoop(this);
     child->setMcpManager(m_mcp);
     child->setLocks(m_locks);
     child->setSubtaskDepth(m_subtaskDepth + 1);
-    QString taskId = call.id.isEmpty() ? QStringLiteral("skill-%1").arg(++m_asyncCounter) : call.id;
     child->setSelfId(taskId);
 
     SubagentRecord record;
@@ -5418,9 +5629,25 @@ void AgentLoop::startSkillFork(const ToolCall &call, const SkillDefinition &skil
         const int parentBudget = m_settings.maxModelRequests;
         childSettings.maxModelRequests = qMax(4, parentBudget / 2);
     }
+    // The skill frontmatter advertises model/effort alongside context:fork;
+    // apply them to the isolated run the same way an AgentSpec does.
+    applyModelOverride(childSettings, skill.model);
+    if (!skill.effort.trimmed().isEmpty()) {
+        childSettings.reasoningEffort = skill.effort.trimmed();
+    }
     child->setSettings(childSettings);
     child->m_projectGraph = m_projectGraph;
-    child->m_subagentAllowedTools = skill.allowedTools;
+    // A forked skill inherits the AgentSpec restrictions that shaped its
+    // parent. The skill's own allowed-tools list is narrower, not a grant:
+    // when a parent allow-list exists it wins, so a fork can never reach a
+    // tool the agent was denied.
+    child->m_subagentAllowedTools = m_subagentAllowedTools.isEmpty()
+        ? skill.allowedTools : m_subagentAllowedTools;
+    child->m_subagentDisallowedTools = m_subagentDisallowedTools;
+    // A forked skill runs under its parent's skill allow-list. Without this a
+    // reviewer AgentSpec restricted to one skill could reach every other
+    // skill from inside the fork.
+    child->m_subagentSkills = m_subagentSkills;
     child->setWorkspace(m_workspace);
     child->setDocumentBridge(m_bridge);
     child->setLspProvider(m_lsp);
@@ -5433,6 +5660,7 @@ void AgentLoop::startSkillFork(const ToolCall &call, const SkillDefinition &skil
         QString answer;
         QString streamed;
         QString error;
+        QTimer *timer = nullptr;
         bool ok = true;
     };
     auto state = std::make_shared<State>();
@@ -5449,7 +5677,46 @@ void AgentLoop::startSkillFork(const ToolCall &call, const SkillDefinition &skil
         state->ok = false;
         state->error = error;
     });
-    connect(child, &AgentLoop::turnFinished, this, [this, child, state, taskId] {
+    // A forked skill can ask a question or need an approval. Without these
+    // forwarders the child would park forever with nothing in the user's
+    // intent dock able to resume it. The prefixed card id keeps the child's
+    // request from colliding with one from the parent or a sibling.
+    connect(child, &AgentLoop::questionAsked, child, [this, taskId](const PermissionRequest &request) {
+        PermissionRequest forwarded = request;
+        forwarded.toolCallId = u"subtask:%1:%2"_s.arg(taskId, request.toolCallId);
+        appendSubagentSidechain(taskId, u"question"_s,
+                                QJsonObject{{u"question"_s, request.questionText},
+                                            {u"options"_s, QJsonArray::fromStringList(request.questionOptions)}});
+        Q_EMIT subtaskQuestionAsked(taskId, forwarded);
+    });
+    connect(child, &AgentLoop::permissionNeeded, child, [this, taskId](const PermissionRequest &request) {
+        PermissionRequest forwarded = request;
+        forwarded.toolCallId = u"subtask:%1:%2"_s.arg(taskId, request.toolCallId);
+        m_subtaskPermissionIds.insert(forwarded.toolCallId,
+                                      qMakePair(taskId, request.toolCallId));
+        appendSubagentSidechain(taskId, u"permission"_s,
+                                QJsonObject{{u"tool"_s, request.toolName},
+                                            {u"summary"_s, request.summary},
+                                            {u"risk"_s, static_cast<int>(request.risk)}});
+        Q_EMIT permissionNeeded(forwarded);
+    });
+    state->timer = new QTimer(child);
+    state->timer->setSingleShot(true);
+    state->timer->setInterval(qBound(10000, m_settings.subtaskTimeoutMs, 30 * 60 * 1000));
+    connect(state->timer, &QTimer::timeout, this, [this, child, state, taskId] {
+        if (!m_activeSubtasks.contains(taskId)) {
+            return;
+        }
+        // abort() emits turnFinished synchronously, and that handler reads
+        // state, so record the failure first.
+        state->ok = false;
+        state->error = u"The forked skill exceeded its time budget."_s;
+        child->abort();
+    });
+    connect(child, &AgentLoop::turnFinished, this, [this, child, state, taskId, childSettings] {
+        if (state->timer) {
+            state->timer->stop();
+        }
         m_activeSubtasks.remove(taskId);
         m_activeSubtaskDescriptions.remove(taskId);
         if (m_locks) {
@@ -5465,8 +5732,8 @@ void AgentLoop::startSkillFork(const ToolCall &call, const SkillDefinition &skil
         record.inputTokens = child->inputTokensTotal();
         record.outputTokens = child->outputTokensTotal();
         record.cachedInputTokens = child->cachedInputTokensTotal();
-        const ModelProfile profile = ModelProfiles::resolve(m_settings.provider,
-                                                            modelFor(m_settings));
+        const ModelProfile profile = ModelProfiles::resolve(childSettings.provider,
+                                                            modelFor(childSettings));
         if (profile.hasPricing()) {
             record.costUsd = (record.inputTokens * profile.inputPrice
                               + record.outputTokens * profile.outputPrice
@@ -5500,8 +5767,22 @@ void AgentLoop::startSkillFork(const ToolCall &call, const SkillDefinition &skil
                                      {u"status"_s, record.status},
                                      {u"inputTokens"_s, record.inputTokens},
                                      {u"outputTokens"_s, record.outputTokens}});
+        // A finished child cannot use a forwarded approval or question.
+        QStringList cancelledPermissions;
+        for (auto it = m_subtaskPermissionIds.begin(); it != m_subtaskPermissionIds.end();) {
+            if (it->first == taskId) {
+                cancelledPermissions.append(it.key());
+                it = m_subtaskPermissionIds.erase(it);
+            } else {
+                ++it;
+            }
+        }
+        for (const QString &id : std::as_const(cancelledPermissions)) {
+            Q_EMIT permissionCancelled(id);
+        }
         Q_EMIT subtaskQuestionCancelled(taskId, QString());
         const ToolCall pending = state->call;
+        state->timer = nullptr;
         child->deleteLater();
         finishAsyncTool(pending, result);
     }, Qt::SingleShotConnection);
@@ -5514,6 +5795,7 @@ void AgentLoop::startSkillFork(const ToolCall &call, const SkillDefinition &skil
         i18n("Skill: %1", skill.name));
     Q_EMIT subtaskStarted(taskId, skill.id, skill.name, childSettings.agentMode,
                           task.isEmpty() ? skill.description : task);
+    state->timer->start();
     child->start(prompt);
 }
 
@@ -5621,7 +5903,10 @@ void AgentLoop::dispatchSubtask(const ToolCall &call)
         worktreeIsolation = wanted.compare(u"worktree"_s, Qt::CaseInsensitive) == 0;
     }
     if (worktreeIsolation) {
-        worktree = SubagentWorktree::create(m_workspace, taskId);
+        // Scope the directory by conversation: model-supplied call ids are not
+        // unique across threads, and clearing the cache path on create must
+        // never delete a sibling window's live worktree.
+        worktree = SubagentWorktree::create(m_workspace, taskId, currentConversationId());
         if (!worktree.ok) {
             worktreeIsolation = false;
             Q_EMIT noticeRaised(i18n("Sub-agent '%1' could not run in a worktree (%2); using the shared workspace.",
@@ -5994,6 +6279,14 @@ void AgentLoop::dispatchSubtask(const ToolCall &call)
                     QString cleanupError;
                     SubagentWorktree::remove(m_workspace, record.worktreePath, &cleanupError);
                     record.worktreePath.clear();
+                } else if (record.patch.trimmed().isEmpty() && diffError.isEmpty()) {
+                    // The child finished without changing a file. There is no
+                    // patch to apply or discard, so clean up its worktree now;
+                    // otherwise the card offers Apply for an empty patch and the
+                    // directory stays in the cache indefinitely.
+                    QString cleanupError;
+                    SubagentWorktree::remove(m_workspace, record.worktreePath, &cleanupError);
+                    record.worktreePath.clear();
                 }
             }
 
@@ -6050,12 +6343,17 @@ void AgentLoop::dispatchSubtask(const ToolCall &call)
             }
             // Drop forwarded approval mappings and any question card that is
             // still waiting for an answer; a finished child cannot use them.
+            QStringList cancelledPermissions;
             for (auto it = m_subtaskPermissionIds.begin(); it != m_subtaskPermissionIds.end();) {
                 if (it->first == state->taskId) {
+                    cancelledPermissions.append(it.key());
                     it = m_subtaskPermissionIds.erase(it);
                 } else {
                     ++it;
                 }
+            }
+            for (const QString &id : std::as_const(cancelledPermissions)) {
+                Q_EMIT permissionCancelled(id);
             }
             Q_EMIT subtaskQuestionCancelled(state->taskId, QString());
             const ToolCall pendingCall = state->call;
@@ -6101,7 +6399,11 @@ void AgentLoop::cancelSubtask(const QString &taskId)
                 }
             }
         }
+        const QStringList cancelledPermissions = m_subtaskPermissionIds.keys();
         m_subtaskPermissionIds.clear();
+        for (const QString &id : cancelledPermissions) {
+            Q_EMIT permissionCancelled(id);
+        }
         for (AgentLoop *child : children) {
             if (m_locks) {
                 m_locks->releaseAll(child->selfId());
@@ -6127,12 +6429,17 @@ void AgentLoop::cancelSubtask(const QString &taskId)
             record->worktreePath.clear();
         }
     }
+    QStringList cancelledPermissions;
     for (auto it = m_subtaskPermissionIds.begin(); it != m_subtaskPermissionIds.end();) {
         if (it->first == taskId) {
+            cancelledPermissions.append(it.key());
             it = m_subtaskPermissionIds.erase(it);
         } else {
             ++it;
         }
+    }
+    for (const QString &id : std::as_const(cancelledPermissions)) {
+        Q_EMIT permissionCancelled(id);
     }
     if (m_locks) {
         m_locks->releaseAll(child->selfId());
@@ -6399,6 +6706,12 @@ SessionStore::SessionData AgentLoop::sessionData() const
     data.acpSessionId = m_acp.sessionId();
     data.workspace = m_workspace;
     data.parentConversationId = m_parentConversationId;
+    const QList<SubagentRecord> records = subagents();
+    for (const SubagentRecord &record : records) {
+        if (!record.taskId.isEmpty()) {
+            data.subagents.append(subagentRecordToJson(record));
+        }
+    }
     return data;
 }
 
@@ -6406,6 +6719,17 @@ void AgentLoop::restoreSession(const SessionStore::SessionData &data)
 {
     // Clear current state first
     resetConversation();
+
+    // Sub-agent records are restored with the conversation so an isolated
+    // worktree patch can still be applied after a restart. A record saved
+    // mid-run is marked interrupted (there is no child loop behind it).
+    for (const QJsonValue &value : data.subagents) {
+        const QJsonObject object = value.toObject();
+        SubagentRecord record = subagentRecordFromJson(object);
+        if (!record.taskId.isEmpty()) {
+            m_subagentRecords.insert(record.taskId, record);
+        }
+    }
 
     // Restore messages
     m_messages = data.messages;

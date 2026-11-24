@@ -23,8 +23,10 @@ QString subtaskToolName()
 
 bool acpToolPermitted(const ToolAccess &access, const PermissionRequest &request)
 {
-    if (access.allowAll) {
-        return true;
+    // Denies apply even when the mode is otherwise unrestricted; the checks
+    // below use allows() for each capability and therefore inherit them too.
+    if (access.isDenied(request.toolName)) {
+        return false;
     }
     const QString canonical = canonicalToolName(request.toolName);
     // Reasoning changes nothing in the workspace, so every mode allows it.

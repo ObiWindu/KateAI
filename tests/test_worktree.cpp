@@ -115,6 +115,25 @@ private Q_SLOTS:
         QVERIFY(!QFileInfo::exists(worktree.path));
     }
 
+    void theSameTaskIdInDifferentScopesDoesNotShareAWorktree()
+    {
+        const WorktreeResult first =
+            SubagentWorktree::create(m_repo->path(), u"shared"_s, u"conversation-a"_s);
+        QVERIFY2(first.ok, qPrintable(first.error));
+        const WorktreeResult second =
+            SubagentWorktree::create(m_repo->path(), u"shared"_s, u"conversation-b"_s);
+        QVERIFY2(second.ok, qPrintable(second.error));
+        QVERIFY(first.path != second.path);
+        QVERIFY(QFileInfo(first.path).isDir());
+        QVERIFY(QFileInfo(second.path).isDir());
+
+        QString error;
+        QVERIFY2(SubagentWorktree::remove(m_repo->path(), first.path, &error), qPrintable(error));
+        QVERIFY2(QFileInfo(second.path).isDir(),
+                 "removing one conversation's worktree deleted its sibling");
+        QVERIFY2(SubagentWorktree::remove(m_repo->path(), second.path, &error), qPrintable(error));
+    }
+
     void aConflictingPatchIsRejectedBeforeWriting()
     {
         const WorktreeResult worktree = SubagentWorktree::create(m_repo->path(), u"conflict"_s);
@@ -136,6 +155,11 @@ private Q_SLOTS:
         QString error;
         QVERIFY(!SubagentWorktree::remove(m_repo->path(), m_repo->path() + u"/README.md"_s, &error));
         QVERIFY(QFileInfo::exists(m_repo->path() + u"/README.md"_s));
+
+        // The cache root is a container, not a worktree: removing it would
+        // take every sibling worktree with it.
+        QVERIFY(!SubagentWorktree::remove(m_repo->path(), m_cache->path(), &error));
+        QVERIFY(QFileInfo(m_cache->path()).isDir());
     }
 
 private:

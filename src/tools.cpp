@@ -3385,7 +3385,7 @@ ToolResult ToolRunner::skill(const QJsonObject &args) const
         result.output = u"Skill '%1' can only be invoked by the user, not by the model."_s.arg(skill.id);
         return result;
     }
-    if (!m_allowedSkills.isEmpty() && !m_allowedSkills.contains(skill.id)) {
+    if (!SkillRegistry::matchesAllowed(m_allowedSkills, skill.id)) {
         result.ok = false;
         result.output = u"Skill '%1' is not in this agent's allowed skill list."_s.arg(skill.id);
         return result;

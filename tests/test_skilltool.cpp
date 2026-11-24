@@ -140,6 +140,12 @@ private Q_SLOTS:
         const ToolResult result = runner.run(skillCall(u"one"_s));
         QVERIFY(!result.ok);
         QVERIFY(result.output.contains(u"allowed skill list"_s));
+
+        // AgentSpec skill lists accept a trailing '*' the same way tool lists
+        // do (the fixture in test_multiagent uses "api-*").
+        runner.setAllowedSkills({u"on*"_s});
+        const ToolResult wildcard = runner.run(skillCall(u"one"_s));
+        QVERIFY2(wildcard.ok, qPrintable(wildcard.output));
     }
 
 private:

@@ -7,6 +7,7 @@
 
 #include "contextmanager.h"
 #include "harness/eventstore.h"
+#include "harness/worktree.h"
 #include "types.h"
 
 #include <KConfigGroup>
@@ -43,9 +44,50 @@ static QString subagentRoot()
 {
     QString base = QProcessEnvironment::systemEnvironment().value(u"KATEAI_SUBAGENT_DIR"_s);
     if (base.trimmed().isEmpty()) {
-        base = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + u"/subagents"_s;
+        base = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+        if (base.isEmpty()) {
+            // Never let an empty location turn the joined path into "/subagents"
+            // at the filesystem root; deletion walks this tree.
+            base = QDir::tempPath() + u"/kateai"_s;
+        }
+        base += u"/subagents"_s;
     }
     return base;
+}
+
+struct ConversationCleanup {
+    QString workspace;
+    QJsonArray subagents;
+};
+
+// Deletion only needs the workspace and the worktree records. Parsing the
+// whole payload into messages would make pruning a conversation with a long
+// transcript needlessly expensive.
+static ConversationCleanup cleanupInfoFromPayload(const QByteArray &payload)
+{
+    ConversationCleanup info;
+    const QJsonDocument doc = QJsonDocument::fromJson(payload);
+    if (!doc.isObject()) {
+        return info;
+    }
+    const QJsonObject object = doc.object();
+    info.workspace = object.value(u"workspace"_s).toString();
+    info.subagents = object.value(u"subagents"_s).toArray();
+    return info;
+}
+
+static void removeSubagentWorktrees(const QString &workspace, const QJsonArray &records)
+{
+    for (const QJsonValue &value : records) {
+        const QString path = value.toObject().value(u"worktreePath"_s).toString();
+        if (path.isEmpty()) {
+            continue;
+        }
+        QString error;
+        // Best effort: a worktree may already be gone, or git may be missing.
+        // The record is being deleted, so there is nothing to report to the UI.
+        SubagentWorktree::remove(workspace, path, &error);
+    }
 }
 
 static void removeSidechains(const QString &conversationId)
@@ -260,6 +302,9 @@ static QByteArray sessionDataToJson(const SessionStore::SessionData &data)
     if (!data.parentConversationId.isEmpty()) {
         obj[u"parentConversationId"_s] = data.parentConversationId;
     }
+    if (!data.subagents.isEmpty()) {
+        obj[u"subagents"_s] = data.subagents;
+    }
     return QJsonDocument(obj).toJson(QJsonDocument::Compact);
 }
 
@@ -295,6 +340,7 @@ static SessionStore::SessionData sessionDataFromJson(const QByteArray &payload)
     data.acpSessionId = obj[u"acpSessionId"_s].toString();
     data.workspace = obj[u"workspace"_s].toString();
     data.parentConversationId = obj[u"parentConversationId"_s].toString();
+    data.subagents = obj[u"subagents"_s].toArray();
 
     // Version 2 added the version field, version 3 the last turn id, version 4
     // the full display transcript. All are additive: an older payload simply
@@ -1222,6 +1268,18 @@ void SessionStore::deleteConversation(const QString &conversationId)
     if (!ok) {
         return;
     }
+    // Read the payload before the row disappears: it names the isolated
+    // worktrees that must not outlive the conversation. Only the workspace and
+    // sub-agent records are decoded, not the transcript.
+    ConversationCleanup cleanup;
+    {
+        QSqlQuery payloadQuery(db);
+        payloadQuery.prepare(u"SELECT payload FROM conversations WHERE id = ?"_s);
+        payloadQuery.addBindValue(conversationId);
+        if (payloadQuery.exec() && payloadQuery.next()) {
+            cleanup = cleanupInfoFromPayload(payloadQuery.value(0).toByteArray());
+        }
+    }
 
     if (!db.transaction()) {
         qWarning() << "KateAI: cannot delete conversation" << conversationId << db.lastError().text();
@@ -1253,6 +1311,7 @@ void SessionStore::deleteConversation(const QString &conversationId)
     EventStore events;
     events.removeConversation(conversationId);
     removeSidechains(conversationId);
+    removeSubagentWorktrees(cleanup.workspace, cleanup.subagents);
 }
 
 QString SessionStore::createNewConversation()
@@ -1279,6 +1338,13 @@ QString SessionStore::forkConversation(const QString &sourceId, const QString &t
     }
     const QString newId = generateConversationId();
     data.parentConversationId = sourceId;
+    // An agent-side session belongs to the source thread. A fork starts its
+    // own ACP session instead of resuming (and contaminating) the original.
+    data.acpSessionId.clear();
+    // Worktree records point at paths and patch files owned by the source
+    // conversation. Copying them would let either branch discard the other's
+    // worktree, so the fork keeps the transcript but not the pending patches.
+    data.subagents = QJsonArray();
     QString forkTitle = title.trimmed();
     if (forkTitle.isEmpty()) {
         const QString sourceTitle = conversationTitle(sourceId);
@@ -1348,14 +1414,26 @@ void SessionStore::pruneOldConversations(int maxConversations)
     // conversation is kept: pruning it would leave the restore pointer
     // naming a row that no longer exists, and the app would silently fall
     // back to another conversation on the next start.
-    QSqlQuery query(db);
-    query.prepare(u"DELETE FROM conversations WHERE id NOT IN (SELECT id FROM conversations ORDER BY updated_at DESC LIMIT ?) "
-                  u"AND id IS NOT (SELECT value FROM meta WHERE key = ?)"_s);
-    query.addBindValue(maxConversations);
-    query.addBindValue(ACTIVE_CONVERSATION_KEY);
-    if (!query.exec()) {
-        qWarning() << "KateAI: cannot prune old conversations:" << query.lastError().text();
-        return;
+    QStringList victims;
+    {
+        QSqlQuery query(db);
+        query.prepare(u"SELECT id FROM conversations WHERE id NOT IN "
+                      u"(SELECT id FROM conversations ORDER BY updated_at DESC LIMIT ?) "
+                      u"AND id IS NOT (SELECT value FROM meta WHERE key = ?)"_s);
+        query.addBindValue(maxConversations);
+        query.addBindValue(ACTIVE_CONVERSATION_KEY);
+        if (!query.exec()) {
+            qWarning() << "KateAI: cannot prune old conversations:" << query.lastError().text();
+            return;
+        }
+        while (query.next()) {
+            victims.append(query.value(0).toString());
+        }
+    }
+    // deleteConversation() also removes each conversation's sidechains,
+    // worktrees and event rows; the old bulk DELETE leaked all three.
+    for (const QString &id : victims) {
+        deleteConversation(id);
     }
     EventStore events;
     events.pruneOrphans();
@@ -1376,6 +1454,24 @@ void SessionStore::clearAllConversations()
         return;
     }
 
+    // Read the payloads inside the same transaction as the delete: a
+    // concurrent window must not add a conversation between the SELECT and
+    // the DELETE and leave its worktree unreachable.
+    QStringList conversationIds;
+    QList<ConversationCleanup> removed;
+    {
+        QSqlQuery read(db);
+        if (!read.exec(u"SELECT id, payload FROM conversations"_s)) {
+            db.rollback();
+            qWarning() << "KateAI: cannot read the conversation history:" << read.lastError().text();
+            return;
+        }
+        while (read.next()) {
+            conversationIds.append(read.value(0).toString());
+            removed.append(cleanupInfoFromPayload(read.value(1).toByteArray()));
+        }
+    }
+
     QSqlQuery query(db);
     if (!query.exec(u"DELETE FROM conversations"_s)) {
         db.rollback();
@@ -1391,6 +1487,10 @@ void SessionStore::clearAllConversations()
     }
     EventStore events;
     events.clearAll();
+    for (int i = 0; i < conversationIds.size(); ++i) {
+        removeSidechains(conversationIds.at(i));
+        removeSubagentWorktrees(removed.at(i).workspace, removed.at(i).subagents);
+    }
     QDir(subagentRoot()).removeRecursively();
 }
 
