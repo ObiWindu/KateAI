@@ -473,6 +473,7 @@ QString gitBranchForWorkspace(const QString &workspace)
         QPointer<QAction> diagnoseStopAct, explainStackAct, fixDiagAct, fixBuildAct, launchJsonAct,
             snapshotDebugAct, reviewDiffTabAct, projectGraphTabAct, commitMsgAct, blameAct,
             backtraceAct, termSelAct;
+        QPointer<QAction> inspectorAct;
 
         if (ac) {
             toggle = ac->addAction(u"kateai_toggle"_s);
@@ -555,6 +556,13 @@ QString gitBranchForWorkspace(const QString &workspace)
                 configure->setText(i18n("Configure Kate AI…"));
                 configure->setIcon(QIcon::fromTheme(u"settings-configure"_s));
                 connect(configure, &QAction::triggered, this, &KateAiView::showConfiguration);
+            }
+
+            inspectorAct = ac->addAction(u"kateai_inspector"_s);
+            if (inspectorAct) {
+                inspectorAct->setText(i18n("Open Harness Inspector"));
+                inspectorAct->setIcon(QIcon::fromTheme(u"view-statistics"_s));
+                connect(inspectorAct, &QAction::triggered, this, &KateAiView::showInspector);
             }
 
             // Manual completion trigger. The shortcut only reaches the panel's
@@ -830,6 +838,14 @@ QString gitBranchForWorkspace(const QString &workspace)
             if (m_chat) {
                 m_chat->focusPrompt();
             }
+        }
+    }
+
+    void KateAiView::showInspector()
+    {
+        showPanel();
+        if (m_chat) {
+            m_chat->showInspector();
         }
     }
 

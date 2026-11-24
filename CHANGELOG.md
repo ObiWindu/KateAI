@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.9.0 — 2026-11-24
+
+- **Skills v1.** `SKILL.md` bundles are discovered in `.kateai/skills`,
+  `.agents/skills`, `.claude/skills`, the user skills directory, managed
+  paths, and the binary's three first-party skills. The prompt only receives a
+  1.5K-character name/description catalog; the body loads through the `skill`
+  tool, `:kateai skill <name>`, or `/<name>`. Frontmatter supports `paths`,
+  `allowed-tools`, `disable-model-invocation`, `context: inline|fork`, model,
+  effort, version, and license. Project skills require a hash-keyed
+  `:kateai trust-skill`; the scan flags injection phrases, traversal, network
+  commands, executables, and escaping files. See `docs/SKILLS.md`.
+- **Subagents v2.** Agent Markdown/JSON specs now carry model, effort,
+  permission mode, tool allow/deny lists, skills, max turns, memory scope, and
+  worktree isolation. Each run records a structured result, a redacted JSONL
+  sidechain, token/cost attribution, and `subagent/start|end` events. Results
+  are summary-only by default and pageable with `subagent_transcript`.
+  Child questions and approvals are forwarded to the parent intent dock.
+  `isolation: worktree` runs the child in a detached git worktree, returns a
+  patch, and offers Apply/Discard on the card plus `:kateai apply-subtask` /
+  `discard-subtask`; nothing is merged automatically.
+- **Harness inspector.** `:kateai inspector` opens a read-only seven-tab panel
+  for Context, Tools, Rules & Memory, Hooks & Skills, Trace, Cost, and Rewind.
+  It reuses the command reports and never runs checks or changes a turn.
+  Conversation rewind is explicitly not included; checkpoint restore is
+  files-only. `:kateai fork` copies the current conversation into a new active
+  thread with a parent link.
+- **Edit diagnostics.** A failed exact/canonical `edit_file` now reports the
+  closest matching block with line numbers.
+- **Configuration schema v2.** A v1 config is read as-is and rewritten with
+  version 2 on the next save. The `skills`, `agentsV2`, and `inspector` flags
+  default on; telemetry remains opt-in.
+- Version metadata updated to 0.9.0 across CMake, plugin metadata, README, ACP
+  client identity, and packaging. See `docs/HARNESS_0.9.md` and
+  `changelogs/CHANGELOG_0.9.0.md`.
+
 ## 0.8.0 — 2026-11-24
 
 - **Prompt assembler v2.** The system prompt is now a deterministic, ordered

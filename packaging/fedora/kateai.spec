@@ -1,5 +1,5 @@
 Name:           kateai
-Version:        0.8.0
+Version:        0.9.0
 Release:        1%{?dist}
 Summary:        AI coding agent plugin for the Kate text editor
 
@@ -54,6 +54,13 @@ asks before destructive actions. Works on Fedora and Fedora Asahi Remix.
 %{_libdir}/kateai/libpage4k.so
 
 %changelog
+* Tue Nov 24 2026 ObiWindu <Obi.wandu@proton.me> - 0.9.0-1
+- Release 0.9.0: SKILL.md discovery with progressive disclosure, trust
+  scanning and fork context; declarative AgentSpecs with JSONL sidechains,
+  summary-only returns, forwarded questions/permissions, cost attribution and
+  optional git-worktree isolation; a read-only Harness inspector; edit
+  near-match diagnostics; and configuration schema v2.
+
 * Tue Nov 24 2026 ObiWindu <Obi.wandu@proton.me> - 0.8.0-1
 - Release 0.8.0: deterministic prompt assembler with a stable cached prefix,
   model profiles and native Gemini cached-content resources, a graduated

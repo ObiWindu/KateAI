@@ -10,6 +10,7 @@
 #include "types.h"
 
 #include <KConfigGroup>
+#include <KLocalizedString>
 #include <KSharedConfig>
 #include <QJsonDocument>
 #include <QJsonArray>
@@ -25,6 +26,7 @@
 #include <QMutexLocker>
 #include <QSqlDatabase>
 #include <QSqlError>
+#include <QProcessEnvironment>
 #include <QSqlQuery>
 #include <QStandardPaths>
 #include <QThread>
@@ -37,6 +39,32 @@ namespace KateAi
 {
 
 // Helper functions (defined first so they can be used by static methods)
+static QString subagentRoot()
+{
+    QString base = QProcessEnvironment::systemEnvironment().value(u"KATEAI_SUBAGENT_DIR"_s);
+    if (base.trimmed().isEmpty()) {
+        base = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + u"/subagents"_s;
+    }
+    return base;
+}
+
+static void removeSidechains(const QString &conversationId)
+{
+    if (conversationId.isEmpty()) {
+        return;
+    }
+    QString safe;
+    for (const QChar c : conversationId) {
+        if (c.isLetterOrNumber() || c == u'-' || c == u'_') {
+            safe.append(c);
+        }
+    }
+    if (safe.isEmpty()) {
+        return;
+    }
+    QDir(subagentRoot() + u'/' + safe).removeRecursively();
+}
+
 static QJsonArray messagesToJson(const QList<ChatMessage> &messages)
 {
     QJsonArray arr;
@@ -229,6 +257,9 @@ static QByteArray sessionDataToJson(const SessionStore::SessionData &data)
     obj[u"toolCalls"_s] = data.toolCalls;
     obj[u"acpSessionId"_s] = data.acpSessionId;
     obj[u"workspace"_s] = data.workspace;
+    if (!data.parentConversationId.isEmpty()) {
+        obj[u"parentConversationId"_s] = data.parentConversationId;
+    }
     return QJsonDocument(obj).toJson(QJsonDocument::Compact);
 }
 
@@ -263,6 +294,7 @@ static SessionStore::SessionData sessionDataFromJson(const QByteArray &payload)
     data.toolCalls = obj[u"toolCalls"_s].toInt();
     data.acpSessionId = obj[u"acpSessionId"_s].toString();
     data.workspace = obj[u"workspace"_s].toString();
+    data.parentConversationId = obj[u"parentConversationId"_s].toString();
 
     // Version 2 added the version field, version 3 the last turn id, version 4
     // the full display transcript. All are additive: an older payload simply
@@ -1220,6 +1252,7 @@ void SessionStore::deleteConversation(const QString &conversationId)
     // exists.
     EventStore events;
     events.removeConversation(conversationId);
+    removeSidechains(conversationId);
 }
 
 QString SessionStore::createNewConversation()
@@ -1232,6 +1265,37 @@ QString SessionStore::createNewConversation()
     // from appearing in the history menu.
     setActiveConversation(newId);
 
+    return newId;
+}
+
+QString SessionStore::forkConversation(const QString &sourceId, const QString &title)
+{
+    if (sourceId.isEmpty()) {
+        return {};
+    }
+    SessionData data = loadConversation(sourceId);
+    if (data.loadFailed) {
+        return {};
+    }
+    const QString newId = generateConversationId();
+    data.parentConversationId = sourceId;
+    QString forkTitle = title.trimmed();
+    if (forkTitle.isEmpty()) {
+        const QString sourceTitle = conversationTitle(sourceId);
+        forkTitle = sourceTitle.isEmpty() ? i18n("Forked conversation")
+                                          : i18n("%1 (fork)", sourceTitle);
+    }
+    if (!saveConversation(newId, data, forkTitle)) {
+        return {};
+    }
+    // Copy the replayable prefix by value. A failure here does not invalidate
+    // the transcript fork; the payload is the fast-load path.
+    EventStore events;
+    QString eventError;
+    if (!events.copyConversation(sourceId, newId, -1, &eventError) && !eventError.isEmpty()) {
+        qWarning() << "KateAI: could not copy the event log into the fork:" << eventError;
+    }
+    setActiveConversation(newId);
     return newId;
 }
 
@@ -1327,6 +1391,7 @@ void SessionStore::clearAllConversations()
     }
     EventStore events;
     events.clearAll();
+    QDir(subagentRoot()).removeRecursively();
 }
 
 } // namespace KateAi

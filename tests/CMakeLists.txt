@@ -51,7 +51,15 @@ kateai_test(test_harness_prompt)
 kateai_test(test_harness_context)
 kateai_test(test_harness_memory)
 kateai_test(test_harness_registry)
+kateai_test(test_harness_skills)
+kateai_test(test_skilltool)
 kateai_test(test_harness_events)
+kateai_test(test_worktree)
+# The inspector is a widget; it lives next to the chat panel, not in core.
+add_executable(test_inspector test_inspector.cpp ../src/inspectorpanel.cpp)
+target_link_libraries(test_inspector PRIVATE kateai_core Qt6::Test Qt6::Widgets)
+add_test(NAME test_inspector COMMAND test_inspector -platform offscreen
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 kateai_test(test_harness_middleware)
 kateai_test(test_harness_checks)
 kateai_test(test_harness_policy)
@@ -213,7 +221,7 @@ add_executable(test_promptedit test_promptedit.cpp ../src/promptedit.cpp)
 target_link_libraries(test_promptedit PRIVATE kateai_core Qt6::Test)
 add_test(NAME test_promptedit COMMAND test_promptedit -platform offscreen)
 
-add_executable(test_overflow test_overflow.cpp ../src/chatwidget.cpp ../src/toolcallwidget.cpp
+add_executable(test_overflow test_overflow.cpp ../src/chatwidget.cpp ../src/inspectorpanel.cpp ../src/toolcallwidget.cpp
     ../src/promptedit.cpp ../src/permissionbar.cpp ../src/subtaskwidget.cpp ../src/subtaskdock.cpp
     ../src/suggestionwidget.cpp ../src/questionwidget.cpp ../src/todowidget.cpp ../src/edittracker.cpp
     ../src/turnstatus.cpp ../src/chattheme.cpp)
@@ -223,7 +231,7 @@ add_test(NAME test_overflow
          COMMAND test_overflow -platform offscreen
          WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 
-add_executable(test_livecards test_livecards.cpp ../src/chatwidget.cpp ../src/toolcallwidget.cpp
+add_executable(test_livecards test_livecards.cpp ../src/chatwidget.cpp ../src/inspectorpanel.cpp ../src/toolcallwidget.cpp
     ../src/promptedit.cpp ../src/permissionbar.cpp ../src/subtaskwidget.cpp ../src/subtaskdock.cpp
     ../src/suggestionwidget.cpp ../src/questionwidget.cpp ../src/todowidget.cpp ../src/edittracker.cpp
     ../src/turnstatus.cpp ../src/chattheme.cpp)
@@ -233,7 +241,7 @@ add_test(NAME test_livecards COMMAND test_livecards -platform offscreen)
 
 # The stop button and the new-thread button, driven through a real AgentLoop
 # against the mock LLM server. Same source list as test_livecards.
-add_executable(test_stopbehavior test_stopbehavior.cpp ../src/chatwidget.cpp ../src/toolcallwidget.cpp
+add_executable(test_stopbehavior test_stopbehavior.cpp ../src/chatwidget.cpp ../src/inspectorpanel.cpp ../src/toolcallwidget.cpp
     ../src/promptedit.cpp ../src/permissionbar.cpp ../src/subtaskwidget.cpp ../src/subtaskdock.cpp
     ../src/suggestionwidget.cpp ../src/questionwidget.cpp ../src/todowidget.cpp ../src/edittracker.cpp
     ../src/turnstatus.cpp ../src/chattheme.cpp)
@@ -246,7 +254,7 @@ add_test(NAME test_stopbehavior
 # A theme change has to reach the chat UI: the panel, the cards and the
 # transcript repaint from the installed palette. Same source list as
 # test_overflow, which also builds a full ChatWidget.
-add_executable(test_themeapply test_themeapply.cpp ../src/chatwidget.cpp ../src/toolcallwidget.cpp
+add_executable(test_themeapply test_themeapply.cpp ../src/chatwidget.cpp ../src/inspectorpanel.cpp ../src/toolcallwidget.cpp
     ../src/promptedit.cpp ../src/permissionbar.cpp ../src/subtaskwidget.cpp ../src/subtaskdock.cpp
     ../src/suggestionwidget.cpp ../src/questionwidget.cpp ../src/todowidget.cpp ../src/edittracker.cpp
     ../src/turnstatus.cpp ../src/chattheme.cpp)
@@ -256,7 +264,7 @@ add_test(NAME test_themeapply COMMAND test_themeapply -platform offscreen)
 
 # Switching to a conversation from history rebuilds the transcript: the tool
 # cards must come back with their icons, titles, colours and result boxes.
-add_executable(test_historyrestore test_historyrestore.cpp ../src/chatwidget.cpp ../src/toolcallwidget.cpp
+add_executable(test_historyrestore test_historyrestore.cpp ../src/chatwidget.cpp ../src/inspectorpanel.cpp ../src/toolcallwidget.cpp
     ../src/promptedit.cpp ../src/permissionbar.cpp ../src/subtaskwidget.cpp ../src/subtaskdock.cpp
     ../src/suggestionwidget.cpp ../src/questionwidget.cpp ../src/todowidget.cpp ../src/edittracker.cpp
     ../src/turnstatus.cpp ../src/chattheme.cpp)
@@ -266,7 +274,7 @@ add_test(NAME test_historyrestore COMMAND test_historyrestore -platform offscree
 
 # Voice prompting: mic availability detection, DSP noise removal, HTTP/CLI
 # transcription, disabled-button hover tooltip, and chat submission wiring.
-add_executable(test_voiceinput test_voiceinput.cpp ../src/chatwidget.cpp ../src/toolcallwidget.cpp
+add_executable(test_voiceinput test_voiceinput.cpp ../src/chatwidget.cpp ../src/inspectorpanel.cpp ../src/toolcallwidget.cpp
     ../src/promptedit.cpp ../src/permissionbar.cpp ../src/subtaskwidget.cpp ../src/subtaskdock.cpp
     ../src/suggestionwidget.cpp ../src/questionwidget.cpp ../src/todowidget.cpp ../src/edittracker.cpp
     ../src/turnstatus.cpp ../src/chattheme.cpp)

@@ -40,6 +40,7 @@ class SubtaskDock;
 class SuggestionWidget;
 class QuestionWidget;
 class TodoWidget;
+class InspectorPanel;
 class EditTracker;
 class TurnStatus;
 class AcpBinaryInstaller;
@@ -77,6 +78,7 @@ public:
     void focusPrompt();
     void ask(const QString &text);
     void newChat();
+    void forkConversation();
     void rebuildTranscript();
     void restoreCurrentTurn(const SessionStore::SessionData &sessionData);
     void updateHistoryButton();
@@ -144,6 +146,8 @@ public:
     void showPromptReport();
     void showMemoryReport();
     void showToolsReport();
+    void showSkillsReport();
+    void showInspector();
     void showVerificationReport();
     void showPolicyReport();
     void showHooksReport();
@@ -536,6 +540,10 @@ private:
     // card shows it while the question is open; when the tool finishes the
     // answer takes the body, so the question is folded back in.
     QHash<QString, QString> m_questionTexts;
+    // A child question's card id -> task id. Answer is routed to the child,
+    // not to the parent's own parked question.
+    QHash<QString, QString> m_subtaskQuestionTaskIds;
+    QPointer<InspectorPanel> m_inspector;
     // Latest live output per running tool, flushed on a timer so a chatty
     // command does not re-render its card once per chunk.
     QHash<QString, QString> m_pendingProgress;

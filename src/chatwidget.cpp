@@ -17,6 +17,7 @@
 #include "toolcallwidget.h"
 #include "subtaskwidget.h"
 #include "subtaskdock.h"
+#include "inspectorpanel.h"
 #include "suggestionwidget.h"
 #include "questionwidget.h"
 #include "todowidget.h"
@@ -1192,6 +1193,30 @@ ChatWidget::ChatWidget(QWidget *parent)
             connect(subtaskWidget, &SubtaskWidget::cancelRequested, this, [this](const QString &taskId) {
                 m_agent.cancelSubtask(taskId);
             });
+            connect(subtaskWidget, &SubtaskWidget::applyWorktreeRequested, this,
+                    [this, subtaskWidget](const QString &taskId) {
+                        QString error;
+                        if (!m_agent.applySubagentWorktree(taskId, &error)) {
+                            showInfoMessage(error.isEmpty()
+                                                ? i18n("Could not apply the sub-agent patch.")
+                                                : error, true);
+                            return;
+                        }
+                        subtaskWidget->setWorktreeResolved(true);
+                        showInfoMessage(i18n("Applied the isolated sub-agent patch."), false);
+                    });
+            connect(subtaskWidget, &SubtaskWidget::discardWorktreeRequested, this,
+                    [this, subtaskWidget](const QString &taskId) {
+                        QString error;
+                        if (!m_agent.discardSubagentWorktree(taskId, &error)) {
+                            showInfoMessage(error.isEmpty()
+                                                ? i18n("Could not discard the sub-agent worktree.")
+                                                : error, true);
+                            return;
+                        }
+                        subtaskWidget->setWorktreeResolved(false);
+                        showInfoMessage(i18n("Discarded the isolated sub-agent worktree."), false);
+                    });
             m_subtaskWidgets.insert(request.toolCallId, subtaskWidget);
             m_subtaskOrder.append(subtaskWidget);
             // Sub-agent cards are full transcript widgets; keep the recent
@@ -1629,6 +1654,22 @@ ChatWidget::ChatWidget(QWidget *parent)
     connect(&m_agent, &AgentLoop::questionAsked, this, [this](const PermissionRequest &request) {
         showQuestionCard(request);
     });
+    connect(&m_agent, &AgentLoop::subtaskQuestionAsked, this,
+            [this](const QString &taskId, const PermissionRequest &request) {
+                m_subtaskQuestionTaskIds.insert(request.toolCallId, taskId);
+                showQuestionCard(request);
+            });
+    connect(&m_agent, &AgentLoop::subtaskQuestionCancelled, this,
+            [this](const QString &taskId, const QString &toolCallId) {
+                for (auto it = m_subtaskQuestionTaskIds.begin(); it != m_subtaskQuestionTaskIds.end();) {
+                    if (it.value() == taskId && (toolCallId.isEmpty() || it.key() == toolCallId)) {
+                        removeQuestionCard(it.key());
+                        it = m_subtaskQuestionTaskIds.erase(it);
+                    } else {
+                        ++it;
+                    }
+                }
+            });
     // The parked RPC was closed internally (a newer question, a permission
     // request, or a stop). Retire the old card so it cannot answer the next RPC.
     connect(m_agent.acpClient(), &AcpClient::questionCancelled, this, [this](const QString &toolCallId) {
@@ -1769,6 +1810,7 @@ ChatWidget::ChatWidget(QWidget *parent)
         // Tool payloads that never produced a result are no longer routable;
         // drop them instead of retaining one entry per aborted call.
         m_questionTexts.clear();
+        m_subtaskQuestionTaskIds.clear();
         m_pendingSuggestions.clear();
         m_pendingProgress.clear();
         // The dock lost contents without a dock-aware call above: a cleared
@@ -1851,6 +1893,13 @@ ChatWidget::ChatWidget(QWidget *parent)
         m_turnStatus->setSubtaskCount(m_agent.runningSubtaskCount());
         updateTeamButton();
     });
+    connect(&m_agent, &AgentLoop::subtaskWorktreeReady, this,
+            [this](const QString &taskId, const QString &worktreePath, const QStringList &files) {
+                Q_UNUSED(worktreePath)
+                if (auto *widget = m_subtaskWidgets.value(taskId)) {
+                    widget->setWorktreeReady(files);
+                }
+            });
     connect(&m_agent, &AgentLoop::turnFinished, this, &ChatWidget::markRunningSubtasksAbandoned);
 
     // Edit tracker signals
@@ -3794,6 +3843,32 @@ void ChatWidget::showToolsReport()
     box.setText(m_agent.toolsReport());
     box.setStandardButtons(QMessageBox::Close);
     box.exec();
+}
+
+void ChatWidget::showSkillsReport()
+{
+    QMessageBox box(this);
+    box.setWindowTitle(i18n("Kate AI Skills"));
+    box.setIcon(QMessageBox::Information);
+    box.setTextFormat(Qt::PlainText);
+    box.setText(m_agent.skillsReport());
+    box.setStandardButtons(QMessageBox::Close);
+    box.exec();
+}
+
+void ChatWidget::showInspector()
+{
+    if (!m_agent.harnessFlags().inspector) {
+        showInfoMessage(i18n("The harness inspector is disabled (flag 'inspector')."), true);
+        return;
+    }
+    if (!m_inspector) {
+        m_inspector = new InspectorPanel(&m_agent, this);
+    }
+    m_inspector->refresh();
+    m_inspector->show();
+    m_inspector->raise();
+    m_inspector->activateWindow();
 }
 
 void ChatWidget::showVerificationReport()
@@ -6154,10 +6229,16 @@ void ChatWidget::showQuestionCard(const PermissionRequest &request)
         allowFreeform = questionAllowFreeformFromToolArguments(args, request.allowFreeform);
     }
     card->setQuestion(questionText, options, allowFreeform);
-    connect(card, &QuestionWidget::answered, this, [this, card](const QString &, const QString &answer) {
+    connect(card, &QuestionWidget::answered, this, [this, card](const QString &questionCallId, const QString &answer) {
         // The agent resumes from the answer: the tool result *is* the user's
-        // words, so there is nothing else to hand back.
-        m_agent.answerQuestion(answer);
+        // words, so there is nothing else to hand back. A sub-agent's question
+        // is routed to that child instead of the parent's parked turn.
+        if (m_subtaskQuestionTaskIds.contains(questionCallId)) {
+            const QString taskId = m_subtaskQuestionTaskIds.take(questionCallId);
+            m_agent.answerSubtaskQuestion(taskId, answer);
+        } else {
+            m_agent.answerQuestion(answer);
+        }
         retireIntentWidget(card);
         updateSendButtonState();
         m_prompt->setFocus();
@@ -6461,9 +6542,82 @@ void ChatWidget::showCheckpointMenuFor(const CheckpointInfo &info)
 
 void ChatWidget::submit()
 {
-    const QString text = m_prompt->toPlainText().trimmed();
+    QString text = m_prompt->toPlainText().trimmed();
     if (text.isEmpty() || m_agent.isBusy()) {
         return;
+    }
+    // Built-in slash commands that belong to the harness rather than to an ACP
+    // agent. Unknown slash commands are still left for the agent.
+    if (text.compare(u"/fork"_s, Qt::CaseInsensitive) == 0) {
+        m_prompt->clear();
+        forkConversation();
+        return;
+    }
+    if (text.compare(u"/inspector"_s, Qt::CaseInsensitive) == 0) {
+        m_prompt->clear();
+        showInspector();
+        return;
+    }
+    if (text.compare(u"/skills"_s, Qt::CaseInsensitive) == 0) {
+        m_prompt->clear();
+        showSkillsReport();
+        return;
+    }
+    if (text.compare(u"/compact"_s, Qt::CaseInsensitive) == 0) {
+        m_prompt->clear();
+        if (!m_agent.compactContext()) {
+            showInfoMessage(i18n("There is nothing to compact right now."), false);
+        } else {
+            showInfoMessage(i18n("Compacted the conversation context."), false);
+        }
+        return;
+    }
+    if (text.compare(u"/rewind"_s, Qt::CaseInsensitive) == 0) {
+        m_prompt->clear();
+        const QList<CheckpointInfo> checkpoints = m_agent.checkpoints();
+        if (checkpoints.isEmpty()) {
+            showInfoMessage(i18n("There is no checkpoint to rewind to."), false);
+            return;
+        }
+        QString error;
+        if (!m_agent.restoreCheckpoint(checkpoints.first().id, &error)) {
+            showInfoMessage(error.isEmpty() ? i18n("Could not restore the checkpoint.") : error, true);
+        } else {
+            showInfoMessage(i18n("Restored the latest checkpoint's files."), false);
+            Q_EMIT aboutToSubmit();
+        }
+        return;
+    }
+    // Native user invocation of a skill: `/skill <id>` or `/<id>` when the id
+    // names a discovered skill. ACP agents advertise their own slash commands,
+    // so an unknown command is left untouched for them.
+    if (text.startsWith(u'/') && m_agent.harnessFlags().skills) {
+        const QString command = text.section(u' ', 0, 0).mid(1).trimmed();
+        const QString argument = text.section(u' ', 1).trimmed();
+        QString skillId;
+        if (command.compare(u"skill"_s, Qt::CaseInsensitive) == 0) {
+            if (argument.isEmpty()) {
+                showSkillsReport();
+                m_prompt->clear();
+                return;
+            }
+            skillId = argument;
+        } else if (!command.isEmpty()) {
+            QString probeError;
+            if (!m_agent.skillInvocation(command, &probeError).isEmpty()) {
+                skillId = command;
+            }
+        }
+        if (!skillId.isEmpty()) {
+            QString error;
+            const QString prompt = m_agent.skillInvocation(skillId, &error);
+            if (prompt.isEmpty()) {
+                showInfoMessage(error.isEmpty() ? i18n("Skill not found.") : error, true);
+                return;
+            }
+            text = prompt;
+            m_prompt->clear();
+        }
     }
     m_prompt->addHistory(text);
     Q_EMIT aboutToSubmit();
@@ -7827,6 +7981,35 @@ bool ChatWidget::rejectPendingEdits(const QString &path)
 void ChatWidget::newChat()
 {
     resetForNewChat(true);
+}
+
+void ChatWidget::forkConversation()
+{
+    if (m_agent.isBusy()) {
+        showInfoMessage(i18n("Stop the current turn before forking the conversation."), true);
+        return;
+    }
+    if (m_agent.messages().isEmpty()) {
+        showInfoMessage(i18n("There is nothing to fork yet."), false);
+        return;
+    }
+    saveCurrentConversation();
+    const QString sourceId = m_currentConversationId;
+    const QString newId = SessionStore::forkConversation(sourceId);
+    if (newId.isEmpty()) {
+        showInfoMessage(i18n("Could not fork the conversation."), true);
+        return;
+    }
+    m_currentConversationId = newId;
+    m_agent.setConversationId(newId);
+    m_agent.setParentConversationId(sourceId);
+    Q_EMIT conversationChanged(newId);
+    m_historyCount = -1;
+    updateHistoryButton();
+    if (m_threadTitle) {
+        m_threadTitle->setText(SessionStore::conversationTitle(newId));
+    }
+    showInfoMessage(i18n("Forked into a new conversation. The original is unchanged."), false);
 }
 
 void ChatWidget::resetForNewChat(bool saveCurrentConversation)

@@ -53,6 +53,10 @@ public:
     void appendMessageDelta(const QString &delta);
     // Finishes the card; `output` is the answer the orchestrator received.
     void finishAgent(const ToolResult &result);
+    // The isolated child produced a patch. Shows Apply/Discard; the patch is
+    // never merged without this explicit action.
+    void setWorktreeReady(const QStringList &filesChanged);
+    void setWorktreeResolved(bool applied);
     // Stops the card without a result, e.g. when the whole turn is aborted.
     void markAbandoned(const QString &reason);
 
@@ -88,6 +92,8 @@ public:
 
 Q_SIGNALS:
     void cancelRequested(const QString &taskId);
+    void applyWorktreeRequested(const QString &taskId);
+    void discardWorktreeRequested(const QString &taskId);
     // The card's headline changed (state, name, elapsed time, step count): the
     // tab pointing at it has to be redrawn.
     void appearanceChanged();
@@ -173,6 +179,9 @@ protected:
     QPushButton *m_cancel = nullptr;
     QPushButton *m_toggle = nullptr;
     QPushButton *m_copyResult = nullptr;
+    QPushButton *m_applyWorktree = nullptr;
+    QPushButton *m_discardWorktree = nullptr;
+    QLabel *m_worktreeNote = nullptr;
     QTextBrowser *m_answer = nullptr;
     QTextBrowser *m_activity = nullptr;
     QWidget *m_activityContainer = nullptr;

@@ -46,6 +46,7 @@ public:
     ~KateAiView() override;
 
     void showPanel();
+    void showInspector();
     void newChat();
     void askSelection();
     void showConfiguration();

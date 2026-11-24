@@ -29,6 +29,8 @@ class QThread;
 namespace KateAi
 {
 
+class SkillRegistry;
+
 class ToolRunner : public QObject
 {
     Q_OBJECT
@@ -74,6 +76,22 @@ public:
     void setEcosystemProvider(EcosystemProvider *provider)
     {
         m_ecosystem = provider;
+    }
+    // Skill bodies are loaded on demand. Null means no skills are available
+    // and the tool explains how to add one.
+    void setSkillRegistry(SkillRegistry *skills)
+    {
+        m_skills = skills;
+    }
+    // An AgentSpec may list the skills its agent is allowed to use. Empty
+    // means every visible skill.
+    void setAllowedSkills(const QStringList &ids)
+    {
+        m_allowedSkills = ids;
+    }
+    void setTouchedPaths(const QStringList &paths)
+    {
+        m_touchedPaths = paths;
     }
 
     ToolResult run(const ToolCall &call);
@@ -159,6 +177,7 @@ private:
     ToolResult terminalRun(const QJsonObject &args);
     ToolResult writePlanFile(const QJsonObject &args);
     ToolResult suggest(const QJsonObject &args);
+    ToolResult skill(const QJsonObject &args) const;
     // Defensive only: a question is answered by the UI, never by the runner.
     ToolResult question(const QJsonObject &args);
     // Multi-file unified diff (apply_patch). Atomic: all files or none.
@@ -181,6 +200,9 @@ private:
     LspProvider *m_lsp = nullptr;
     DebugProvider *m_debug = nullptr;
     EcosystemProvider *m_ecosystem = nullptr;
+    SkillRegistry *m_skills = nullptr;
+    QStringList m_allowedSkills;
+    QStringList m_touchedPaths;
     int m_timeoutMs = 60000;
     // Running async bash commands, keyed by tool call id, so progress and
     // cancellation can find the right process, plus the output captured from

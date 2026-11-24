@@ -42,6 +42,10 @@ public:
     // head; a caller-supplied seq must be greater than the current head.
     bool append(const QString &conversationId, const QList<HarnessEvent> &events,
                 QString *error = nullptr);
+    // Copies events (by value) up to `throughSeq` into a new conversation.
+    // Used by conversation fork so the child starts with a replayable prefix.
+    bool copyConversation(const QString &sourceId, const QString &targetId,
+                          qint64 throughSeq = -1, QString *error = nullptr);
 
     QList<HarnessEvent> read(const QString &conversationId, qint64 fromSeq = 0, int limit = -1,
                              QString *error = nullptr) const;

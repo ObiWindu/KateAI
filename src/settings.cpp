@@ -37,6 +37,13 @@ Settings SettingsStore::load()
         qWarning() << "KateAI: the configuration was written by a newer release"
                    << storedVersion << ">" << configVersion();
     }
+    // v1 -> v2 (0.9): no key moved. The sub-agent and skill settings are
+    // additive and default safely, so a v1 config is read as-is and rewritten
+    // with version 2 on the next save. The branch documents the boundary and
+    // is where a future move of [Harness]/[Skills] keys belongs.
+    if (storedVersion > 0 && storedVersion < 2) {
+        qInfo() << "KateAI: upgrading configuration" << storedVersion << "->" << configVersion();
+    }
     Settings s;
     s.provider = providerFromId(g.readEntry(u"Provider"_s, providerId(Provider::Grok)));
     // Credentials live in the secure store (KWallet or owner-only fallback).

@@ -17,6 +17,8 @@
 #include <QSqlQuery>
 #include <QUuid>
 
+#include <algorithm>
+
 using namespace Qt::Literals::StringLiterals;
 
 namespace KateAi
@@ -256,10 +258,32 @@ qint64 EventStore::headSeq(const QString &conversationId) const
     return 0;
 }
 
+bool EventStore::copyConversation(const QString &sourceId, const QString &targetId,
+                                  qint64 throughSeq, QString *error)
+{
+    if (sourceId.isEmpty() || targetId.isEmpty()) {
+        m_lastError = u"Cannot copy events without source and target conversation ids."_s;
+        if (error) {
+            *error = m_lastError;
+        }
+        return false;
+    }
+    QList<HarnessEvent> events = read(sourceId, 0, -1);
+    if (throughSeq >= 0) {
+        events.erase(std::remove_if(events.begin(), events.end(), [throughSeq](const HarnessEvent &event) {
+                         return event.seq > throughSeq;
+                     }),
+                     events.end());
+    }
+    for (HarnessEvent &event : events) {
+        event.conversationId = targetId;
+    }
+    return append(targetId, events, error);
+}
+
 bool EventStore::append(const QString &conversationId, const QList<HarnessEvent> &events,
                         QString *error)
-{
-    if (conversationId.isEmpty()) {
+{    if (conversationId.isEmpty()) {
         m_lastError = u"Cannot append events without a conversation id."_s;
         if (error) {
             *error = m_lastError;

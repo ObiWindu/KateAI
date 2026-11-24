@@ -25,6 +25,23 @@ struct AgentProfile {
     QString description;
     // The mode the sub-agent runs in. Any mode id, including custom ones.
     QString modeId;
+    // "inherit" keeps the parent's choice. A model id is applied only when the
+    // active provider supports it; an unusable value is ignored with a notice.
+    QString model = QStringLiteral("inherit");
+    QString effort;
+    // "inherit", "ask", "accept-edits", or "always-approve".
+    QString permissionMode = QStringLiteral("inherit");
+    // Optional allow/deny lists. Entries may be exact tool names or prefixes
+    // ending in '*'. An empty allow list means "whatever the mode provides".
+    QStringList tools;
+    QStringList disallowedTools;
+    QStringList skills;
+    // Zero means the parent's budget (halved for the child, as before).
+    int maxTurns = 0;
+    // "in-process" or "worktree".
+    QString isolation = QStringLiteral("in-process");
+    // "project", "user", "none". Reserved for the memory-scope contract.
+    QString memoryScope = QStringLiteral("project");
     bool enabled = true;
     bool builtIn = false;
 
@@ -34,6 +51,10 @@ struct AgentProfile {
     bool isValid() const
     {
         return !id.trimmed().isEmpty();
+    }
+    bool isWorktreeIsolated() const
+    {
+        return isolation.compare(QStringLiteral("worktree"), Qt::CaseInsensitive) == 0;
     }
 };
 

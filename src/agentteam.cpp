@@ -19,6 +19,72 @@ using namespace Qt::Literals::StringLiterals;
 namespace KateAi
 {
 
+namespace
+{
+
+QString unquoteValue(const QString &value)
+{
+    QString v = value.trimmed();
+    if (v.size() >= 2
+        && ((v.startsWith(u'"') && v.endsWith(u'"'))
+            || (v.startsWith(u'\'') && v.endsWith(u'\'')))) {
+        v = v.mid(1, v.size() - 2);
+    }
+    return v.trimmed();
+}
+
+QStringList parseFrontmatterList(const QString &raw)
+{
+    QString value = raw.trimmed();
+    if (value.isEmpty()) {
+        return {};
+    }
+    if (value.startsWith(u'[') && value.endsWith(u']')) {
+        value = value.mid(1, value.size() - 2);
+    }
+    QStringList out;
+    const QStringList parts = value.contains(u'\n') ? value.split(u'\n', Qt::SkipEmptyParts)
+                                                    : value.split(u',', Qt::SkipEmptyParts);
+    for (const QString &part : parts) {
+        QString item = part.trimmed();
+        if (item.startsWith(u'-')) {
+            item = item.mid(1).trimmed();
+        }
+        item = unquoteValue(item);
+        if (!item.isEmpty() && !out.contains(item)) {
+            out.append(item);
+        }
+    }
+    return out;
+}
+
+QStringList stringListFromJson(const QJsonValue &value)
+{
+    QStringList out;
+    if (value.isArray()) {
+        for (const QJsonValue &item : value.toArray()) {
+            const QString text = item.toString().trimmed();
+            if (!text.isEmpty() && !out.contains(text)) {
+                out.append(text);
+            }
+        }
+    } else if (value.isString()) {
+        out = parseFrontmatterList(value.toString());
+    }
+    return out;
+}
+
+QJsonArray jsonFromStringList(const QStringList &values)
+{
+    QJsonArray array;
+    for (const QString &value : values) {
+        array.append(value);
+    }
+    return array;
+}
+
+} // namespace
+
 QJsonObject AgentProfile::toJson() const
 {
     QJsonObject object;
@@ -27,6 +93,17 @@ QJsonObject AgentProfile::toJson() const
     object.insert(u"description"_s, description);
     object.insert(u"mode"_s, modeId);
     object.insert(u"enabled"_s, enabled);
+    object.insert(u"model"_s, model);
+    if (!effort.isEmpty()) {
+        object.insert(u"effort"_s, effort);
+    }
+    object.insert(u"permissionMode"_s, permissionMode);
+    object.insert(u"tools"_s, jsonFromStringList(tools));
+    object.insert(u"disallowedTools"_s, jsonFromStringList(disallowedTools));
+    object.insert(u"skills"_s, jsonFromStringList(skills));
+    object.insert(u"maxTurns"_s, maxTurns);
+    object.insert(u"isolation"_s, isolation);
+    object.insert(u"memory"_s, memoryScope);
     return object;
 }
 
@@ -37,6 +114,18 @@ AgentProfile AgentProfile::fromJson(const QJsonObject &object, const QString &fa
     profile.name = object.value(u"name"_s).toString(profile.id).trimmed();
     profile.description = object.value(u"description"_s).toString().trimmed();
     profile.modeId = object.value(u"mode"_s).toString(QStringLiteral("code")).trimmed();
+    profile.model = object.value(u"model"_s).toString(QStringLiteral("inherit")).trimmed();
+    if (profile.model.isEmpty()) {
+        profile.model = u"inherit"_s;
+    }
+    profile.effort = object.value(u"effort"_s).toString().trimmed();
+    profile.permissionMode = object.value(u"permissionMode"_s).toString(QStringLiteral("inherit")).trimmed();
+    profile.tools = stringListFromJson(object.value(u"tools"_s));
+    profile.disallowedTools = stringListFromJson(object.value(u"disallowedTools"_s));
+    profile.skills = stringListFromJson(object.value(u"skills"_s));
+    profile.maxTurns = object.value(u"maxTurns"_s).toInt(0);
+    profile.isolation = object.value(u"isolation"_s).toString(QStringLiteral("in-process")).trimmed();
+    profile.memoryScope = object.value(u"memory"_s).toString(QStringLiteral("project")).trimmed();
     profile.enabled = object.value(u"enabled"_s).toBool(true);
     return profile;
 }
@@ -214,7 +303,24 @@ QString AgentTeam::describeRoster() const
 {
     QStringList lines;
     for (const AgentProfile &profile : agents()) {
-        lines.append(u"- %1 (mode: %2): %3"_s.arg(profile.name, profile.modeId, profile.description));
+        QString line = u"- %1 (mode: %2"_s.arg(profile.name, profile.modeId);
+        if (!profile.model.isEmpty() && profile.model != u"inherit"_s) {
+            line += u", model: "_s + profile.model;
+        }
+        if (!profile.effort.isEmpty()) {
+            line += u", effort: "_s + profile.effort;
+        }
+        if (profile.isWorktreeIsolated()) {
+            line += u", isolation: worktree"_s;
+        }
+        if (!profile.tools.isEmpty()) {
+            line += u", tools: "_s + profile.tools.join(u", "_s);
+        }
+        if (!profile.disallowedTools.isEmpty()) {
+            line += u", disallowed: "_s + profile.disallowedTools.join(u", "_s);
+        }
+        line += u"): "_s + profile.description;
+        lines.append(line);
     }
     return lines.join(u'\n');
 }
@@ -279,6 +385,34 @@ AgentProfile AgentTeam::parseAgentDocument(const QString &document, const QStrin
         profile.modeId = profile.id;
     } else {
         profile.modeId = u"code"_s;
+    }
+
+    QHash<QString, QString> keys;
+    for (auto it = frontmatter.keys.constBegin(); it != frontmatter.keys.constEnd(); ++it) {
+        keys.insert(it.key().trimmed().toLower().replace(u'-', u'_'), it.value().trimmed());
+    }
+    profile.model = unquoteValue(keys.value(u"model"_s));
+    if (profile.model.isEmpty()) {
+        profile.model = u"inherit"_s;
+    }
+    profile.effort = unquoteValue(keys.value(u"effort"_s));
+    profile.permissionMode = unquoteValue(keys.value(u"permissionmode"_s,
+                                                     keys.value(u"permission_mode"_s)));
+    if (profile.permissionMode.isEmpty()) {
+        profile.permissionMode = u"inherit"_s;
+    }
+    profile.tools = parseFrontmatterList(keys.value(u"tools"_s));
+    profile.disallowedTools = parseFrontmatterList(keys.value(
+        u"disallowedtools"_s, keys.value(u"disallowed_tools"_s)));
+    profile.skills = parseFrontmatterList(keys.value(u"skills"_s));
+    profile.maxTurns = keys.value(u"maxturns"_s, keys.value(u"max_turns"_s)).toInt();
+    profile.isolation = unquoteValue(keys.value(u"isolation"_s));
+    if (profile.isolation.isEmpty()) {
+        profile.isolation = u"in-process"_s;
+    }
+    profile.memoryScope = unquoteValue(keys.value(u"memory"_s, keys.value(u"memory_scope"_s)));
+    if (profile.memoryScope.isEmpty()) {
+        profile.memoryScope = u"project"_s;
     }
 
     if (ok) {

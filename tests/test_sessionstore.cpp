@@ -102,8 +102,7 @@ private Q_SLOTS:
     }
 
     void oldPayloadWithoutTranscriptLoadsItsMessages()
-    {
-        // A conversation saved by an earlier build has no transcript field.
+    {        // A conversation saved by an earlier build has no transcript field.
         // It must decode as an empty transcript (AgentLoop::restoreSession
         // then falls back to the messages) and must not look damaged.
         const QString id = SessionStore::createNewConversation();
@@ -145,6 +144,41 @@ private Q_SLOTS:
         QCOMPARE(loaded.messages.size(), 1);
         QCOMPARE(loaded.messages.first().content, u"legacy question"_s);
         QVERIFY(loaded.transcript.isEmpty());
+    }
+
+    void forkConversationCopiesTheTranscriptAndRecordsItsParent()
+    {
+        const QString sourceId = SessionStore::createNewConversation();
+        QVERIFY(!sourceId.isEmpty());
+
+        ChatMessage question;
+        question.role = ChatMessage::Role::User;
+        question.content = u"fork me"_s;
+        ChatMessage answer;
+        answer.role = ChatMessage::Role::Assistant;
+        answer.content = u"forked answer"_s;
+
+        SessionStore::SessionData data;
+        data.messages = {question, answer};
+        data.transcript = {question, answer};
+        QVERIFY(SessionStore::saveConversation(sourceId, data, u"Source"_s));
+
+        const QString forkId = SessionStore::forkConversation(sourceId, u"Branch"_s);
+        QVERIFY(!forkId.isEmpty());
+        QVERIFY(forkId != sourceId);
+        QCOMPARE(SessionStore::getActiveConversationId(), forkId);
+
+        const SessionStore::SessionData fork = SessionStore::loadConversation(forkId);
+        QCOMPARE(fork.parentConversationId, sourceId);
+        QCOMPARE(fork.messages.size(), 2);
+        QCOMPARE(fork.messages.first().content, u"fork me"_s);
+        QCOMPARE(fork.transcript.size(), 2);
+        QCOMPARE(SessionStore::conversationTitle(forkId), u"Branch"_s);
+
+        // The source remains untouched.
+        const SessionStore::SessionData source = SessionStore::loadConversation(sourceId);
+        QVERIFY(source.parentConversationId.isEmpty());
+        QCOMPARE(source.messages.size(), 2);
     }
 };
 

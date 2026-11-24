@@ -43,9 +43,9 @@ struct HarnessFlags {
     bool contextV2 = true;
     bool memoryV2 = true;
     bool toolSearch = true;
-    bool skills = false;
-    bool agentsV2 = false;
-    bool inspector = false;
+    bool skills = true;
+    bool agentsV2 = true;
+    bool inspector = true;
     bool telemetry = false;
 
     static HarnessFlags load();

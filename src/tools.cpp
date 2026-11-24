@@ -6,6 +6,7 @@
 #include "tools.h"
 
 #include "harness/toolresults.h"
+#include "harness/skills.h"
 #include "mcp.h"
 
 #include <QDir>
@@ -1107,8 +1108,8 @@ PermissionRequest ToolRunner::describe(const ToolCall &call) const
         req.describeDiff = diffs.isEmpty() ? args.value(u"patch"_s).toString() : diffs.first();
         req.details = req.describeDiff;
     } else if (call.name == u"todo_write"_s || call.name == u"todo_read"_s || call.name == u"think"_s
-               || call.name == u"exit_plan_mode"_s) {
-        // Checklist, reasoning and plan-mode bookkeeping touch no file.
+               || call.name == u"exit_plan_mode"_s || call.name == u"skill"_s) {
+        // Checklist, reasoning, plan-mode and skill loading touch no file.
         req.risk = ToolRisk::Read;
         req.details = QString::fromUtf8(QJsonDocument(args).toJson(QJsonDocument::Compact));
     } else if (call.name == u"debug_status"_s || call.name == u"debug_stack"_s
@@ -1263,6 +1264,9 @@ ToolResult ToolRunner::run(const ToolCall &call)
     }
     if (call.name == u"suggest"_s) {
         return suggest(args);
+    }
+    if (call.name == u"skill"_s) {
+        return skill(args);
     }
     if (call.name == u"question"_s) {
         return question(args);
@@ -1601,6 +1605,36 @@ ToolResult ToolRunner::editFile(const QJsonObject &args)
                 }
                 if (!nearby.isEmpty()) {
                     hint = u" Nearby lines:\n"_s + nearby.join(u'\n');
+                } else {
+                    // The first line did not match either. Point at the most
+                    // similar line so the model can copy the real text instead
+                    // of re-reading the whole file.
+                    int bestLine = -1;
+                    int bestScore = 0;
+                    const QStringList needleWords = needle.split(u' ', Qt::SkipEmptyParts);
+                    for (int i = 0; i < lines.size(); ++i) {
+                        int score = 0;
+                        for (const QString &word : needleWords) {
+                            if (word.size() > 2 && lines.at(i).contains(word, Qt::CaseInsensitive)) {
+                                ++score;
+                            }
+                        }
+                        if (score > bestScore) {
+                            bestScore = score;
+                            bestLine = i;
+                        }
+                    }
+                    if (bestLine >= 0) {
+                        const int from = qMax(0, bestLine - 1);
+                        const int to = qMin(lines.size() - 1, bestLine + 1);
+                        QStringList snippet;
+                        for (int i = from; i <= to; ++i) {
+                            snippet.append(u"%1: %2"_s.arg(i + 1).arg(lines.at(i).left(300)));
+                        }
+                        hint = u" Closest match near line %1:\n%2"_s
+                                   .arg(bestLine + 1)
+                                   .arg(snippet.join(u'\n'));
+                    }
                 }
             }
             if (canonicalError == u"ambiguous"_s) {
@@ -3308,6 +3342,86 @@ ToolResult ToolRunner::suggest(const QJsonObject &args)
     // call itself, and this confirmation is what goes back to the model.
     result.ok = true;
     result.output = u"Suggestion posted for the user to accept or dismiss."_s;
+    return result;
+}
+
+ToolResult ToolRunner::skill(const QJsonObject &args) const
+{
+    ToolResult result;
+    result.name = u"skill"_s;
+
+    const QString name = args.value(u"name"_s).toString().trimmed();
+    if (name.isEmpty()) {
+        result.ok = false;
+        result.output = u"name must not be empty: pass a skill id from the skills catalog."_s;
+        return result;
+    }
+    if (!m_skills) {
+        result.ok = false;
+        result.output = u"No skills are available. Add SKILL.md bundles under .kateai/skills/<name>/ "
+                        u"or the user skills directory."_s;
+        return result;
+    }
+
+    SkillDefinition skill;
+    QString error;
+    if (!m_skills->load(name, &skill, &error)) {
+        QStringList available;
+        for (const SkillDefinition &candidate : m_skills->skills()) {
+            if (!candidate.disableModelInvocation) {
+                available.append(candidate.id);
+            }
+        }
+        result.ok = false;
+        result.output = error;
+        if (!available.isEmpty()) {
+            result.output += u"\nAvailable skills: "_s + available.join(u", "_s);
+        }
+        return result;
+    }
+
+    if (skill.disableModelInvocation) {
+        result.ok = false;
+        result.output = u"Skill '%1' can only be invoked by the user, not by the model."_s.arg(skill.id);
+        return result;
+    }
+    if (!m_allowedSkills.isEmpty() && !m_allowedSkills.contains(skill.id)) {
+        result.ok = false;
+        result.output = u"Skill '%1' is not in this agent's allowed skill list."_s.arg(skill.id);
+        return result;
+    }
+    if (!skill.paths.isEmpty() && !skill.isActiveFor(m_touchedPaths)) {
+        result.ok = false;
+        result.output = u"Skill '%1' is path-scoped and none of its paths matched a file touched in this turn."_s
+                            .arg(skill.id);
+        return result;
+    }
+    if (!skill.trusted) {
+        result.ok = false;
+        result.output = u"Skill '%1' is not trusted yet. Tell the user to review it and run "
+                        u"`:kateai trust-skill %1` before you use it."_s.arg(skill.id);
+        if (!skill.warnings.isEmpty()) {
+            result.output += u"\nScan findings:\n- "_s + skill.warnings.join(u"\n- "_s);
+        }
+        return result;
+    }
+
+    QStringList header;
+    header.append(u"<skill name=\"%1\" scope=\"%2\" context=\"%3\">"_s
+                      .arg(skill.id, SkillRegistry::scopeId(skill.scope), skill.contextMode));
+    header.append(skill.body);
+    header.append(u"</skill>"_s);
+    if (!skill.supportingFiles.isEmpty()) {
+        header.append(u"Supporting files in %1 (read only the ones you need): %2"_s
+                          .arg(skill.directory, skill.supportingFiles.join(u", "_s)));
+    }
+    if (!skill.allowedTools.isEmpty()) {
+        header.append(u"This skill expects these tools: "_s + skill.allowedTools.join(u", "_s));
+    }
+
+    result.ok = true;
+    result.output = clip(header.join(u'\n'), 40000);
+    result.rawOutput = skill.body;
     return result;
 }
 

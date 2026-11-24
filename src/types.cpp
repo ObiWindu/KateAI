@@ -1508,6 +1508,19 @@ static QJsonArray allToolDefinitions()
                          {u"question"_s},
                          false));
 
+    tools.append(toolDef(u"skill"_s,
+                         u"Load a skill: a packaged procedure the project or user provides. The skills catalog in "
+                         u"the system prompt lists the available names and when to use each one. Call this tool with "
+                         u"the skill's name to load its full instructions before following them. Skills can also "
+                         u"be run by the user with the :kateai skill command. Read-only: loading a skill changes "
+                         u"nothing."_s,
+                         QJsonObject{
+                             {u"name"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"Skill id from the catalog, e.g. diagnose-test-failure."_s}}},
+                             {u"task"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"Optional task for a skill whose context is fork. The isolated sub-agent receives the skill body and this task."_s}}},
+                         },
+                         {u"name"_s},
+                         false));
+
     tools.append(toolDef(u"todo_write"_s,
                          u"Replace the task list with the given todos, each with a status of pending, in_progress, "
                          u"or completed. Use it to plan a multi-step task and to keep the user's checklist current "
@@ -1574,6 +1587,18 @@ static QJsonArray allToolDefinitions()
                              false));
 
 
+    tools.append(toolDef(u"subagent_transcript"_s,
+                         u"Read the stored sidechain transcript of a sub-agent you started, paged by character offset. "
+                         u"Use it to audit how an isolated agent reached its answer; the regular new_task result is a "
+                         u"summary. Read-only."_s,
+                         QJsonObject{
+                             {u"task_id"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"The task id returned by new_task."_s}}},
+                             {u"offset"_s, QJsonObject{{u"type"_s, u"integer"_s}, {u"description"_s, u"Character offset to start from. Defaults to 0."_s}}},
+                             {u"max_chars"_s, QJsonObject{{u"type"_s, u"integer"_s}, {u"description"_s, u"Maximum characters to return (1000-40000). Defaults to 20000."_s}}},
+                         },
+                         {u"task_id"_s},
+                         false));
+
 tools.append(toolDef(subtaskToolName(),
                           u"Spawn a sub-agent to handle a self-contained piece of work, then return its result to you. "
                           u"Give it a complete task description with all context it needs, since it cannot see this "
@@ -1585,6 +1610,7 @@ tools.append(toolDef(subtaskToolName(),
                               {u"agent"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"A named agent that suits the work: scout (read-only questions), architect (design and plans), coder (implementation), debugger (root-cause fixes), reviewer (check someone else's work), or a custom agent."_s}}},
                               {u"mode"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"description"_s, u"Mode id to run the sub-agent in, overriding the agent's default: code, ask, architect, debug, orchestrator, or a custom mode. Defaults to the agent's mode, or code."_s}}},
                               {u"include_transcript"_s, QJsonObject{{u"type"_s, u"boolean"_s}, {u"description"_s, u"If true, the result also includes the sub-agent's tool log, so you can see how it reached its answer. Use it when you need to verify the work."_s}}},
+                              {u"isolation"_s, QJsonObject{{u"type"_s, u"string"_s}, {u"enum"_s, QJsonArray{u"inherit"_s, u"in-process"_s, u"worktree"_s}}, {u"description"_s, u"Optional isolation override. worktree runs the child in a temporary git worktree and returns a patch instead of touching the parent tree. Defaults to the agent specification."_s}}},
                           },
                           {u"description"_s},
                           false));

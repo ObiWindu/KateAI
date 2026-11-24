@@ -36,7 +36,7 @@ QString usageText()
         "usage: kateai ask <text> | explain | fix | refactor | tests | diagnostics | symbols | "
         "debug | explain-stop | stack | break [cond] | snapshot | fix-errors | build-errors | "
         "launch-config | backtrace | terminal | blame | commit | diff-tab | graph-tab | annotations | "
-        "context | usage | prompt | memory | tools | verify | policy | hooks | trace | trust-hooks | voice | stop | new | mode <id> | panel");
+        "context | usage | prompt | memory | tools | skills | skill <name> | trust-skill <name> | inspector | verify | policy | hooks | trace | trust-hooks | apply-subtask <id> | discard-subtask <id> | rewind [id] | fork | voice | stop | new | mode <id> | panel");
 }
 
 // The instruction of the one-word review subcommands. Kept next to the
@@ -95,7 +95,9 @@ KCompletion *KateAiCommand::completionObject(KTextEditor::View *view, const QStr
                           u"backtrace"_s, u"terminal"_s, u"blame"_s, u"commit"_s,
                           u"diff-tab"_s, u"graph-tab"_s, u"annotations"_s,
                           u"context"_s, u"usage"_s, u"prompt"_s, u"memory"_s, u"tools"_s,
-                          u"verify"_s, u"policy"_s,
+                          u"skills"_s, u"skill "_s, u"trust-skill "_s,
+                          u"inspector"_s, u"apply-subtask "_s, u"discard-subtask "_s,
+                          u"rewind"_s, u"fork"_s, u"verify"_s, u"policy"_s,
                           u"hooks"_s, u"trace"_s, u"trust-hooks"_s, u"voice"_s,
                           u"stop"_s, u"new"_s, u"mode "_s, u"panel"_s});
     return completion;
@@ -172,6 +174,61 @@ bool KateAiCommand::exec(KTextEditor::View *view, const QString &cmd, QString &m
         target->chat()->showToolsReport();
         return true;
     }
+    if (sub == u"skills"_s) {
+        target->chat()->showSkillsReport();
+        return true;
+    }
+    if (sub == u"skill"_s) {
+        if (rest.isEmpty()) {
+            target->chat()->showSkillsReport();
+            return true;
+        }
+        QString error;
+        const QString prompt = target->chat()->agent()->skillInvocation(rest, &error);
+        if (prompt.isEmpty()) {
+            msg = error.isEmpty() ? i18n("Kate AI: skill not found.") : error;
+            return false;
+        }
+        target->showPanel();
+        target->chat()->ask(prompt);
+        msg = i18n("Kate AI: running skill %1.", rest);
+        return true;
+    }
+    if (sub == u"trust-skill"_s) {
+        if (rest.isEmpty()) {
+            msg = i18n("usage: kateai trust-skill <name>");
+            return false;
+        }
+        QString error;
+        if (!target->chat()->agent()->trustSkill(rest, &error)) {
+            msg = error.isEmpty() ? i18n("Kate AI: could not trust that skill.") : error;
+            return false;
+        }
+        msg = i18n("Kate AI: trusted skill %1.", rest);
+        return true;
+    }
+    if (sub == u"inspector"_s) {
+        target->chat()->showInspector();
+        return true;
+    }
+    if (sub == u"apply-subtask"_s || sub == u"discard-subtask"_s) {
+        if (rest.isEmpty()) {
+            msg = i18n("usage: kateai %1 <task-id>", sub);
+            return false;
+        }
+        QString error;
+        const bool ok = sub == u"apply-subtask"_s
+            ? target->chat()->agent()->applySubagentWorktree(rest, &error)
+            : target->chat()->agent()->discardSubagentWorktree(rest, &error);
+        if (!ok) {
+            msg = error.isEmpty() ? i18n("Kate AI: that sub-agent has no isolated patch.") : error;
+            return false;
+        }
+        msg = sub == u"apply-subtask"_s
+            ? i18n("Kate AI: applied the patch from %1.", rest)
+            : i18n("Kate AI: discarded the worktree from %1.", rest);
+        return true;
+    }
     if (sub == u"verify"_s) {
         target->chat()->showVerificationReport();
         return true;
@@ -204,6 +261,36 @@ bool KateAiCommand::exec(KTextEditor::View *view, const QString &cmd, QString &m
     if (sub == u"new"_s || sub == u"newchat"_s) {
         target->newChat();
         msg = i18n("Kate AI: new chat.");
+        return true;
+    }
+    if (sub == u"fork"_s) {
+        target->chat()->forkConversation();
+        msg = i18n("Kate AI: forked the conversation.");
+        return true;
+    }
+    if (sub == u"rewind"_s) {
+        const QList<CheckpointInfo> checkpoints = target->chat()->agent()->checkpoints();
+        if (checkpoints.isEmpty()) {
+            msg = i18n("Kate AI: there is no checkpoint to rewind to.");
+            return false;
+        }
+        QString id = rest;
+        if (id.isEmpty()) {
+            id = checkpoints.first().id;
+        } else {
+            for (const CheckpointInfo &checkpoint : checkpoints) {
+                if (checkpoint.id.startsWith(id)) {
+                    id = checkpoint.id;
+                    break;
+                }
+            }
+        }
+        QString error;
+        if (!target->chat()->agent()->restoreCheckpoint(id, &error)) {
+            msg = error.isEmpty() ? i18n("Kate AI: could not restore the checkpoint.") : error;
+            return false;
+        }
+        msg = i18n("Kate AI: restored checkpoint files %1. The conversation is unchanged.", id.left(8));
         return true;
     }
     if (sub == u"panel"_s || sub == u"show"_s) {

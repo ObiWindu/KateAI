@@ -68,6 +68,7 @@ private Q_SLOTS:
     {
         m_workspace = std::make_unique<QTemporaryDir>();
         QVERIFY(m_workspace->isValid());
+        qputenv("KATEAI_SUBAGENT_DIR", (m_workspace->path() + u"/subagents"_s).toUtf8());
         QFile marker(m_workspace->path() + u"/README.md"_s);
         QVERIFY(marker.open(QIODevice::WriteOnly | QIODevice::Text));
         marker.write("workspace\n");
@@ -94,6 +95,7 @@ private Q_SLOTS:
 
     void cleanup()
     {
+        qunsetenv("KATEAI_SUBAGENT_DIR");
         if (m_server) {
             if (m_server->state() != QProcess::NotRunning) {
                 m_server->kill();
@@ -169,6 +171,19 @@ private Q_SLOTS:
             }
         }
         QVERIFY(sawAnswer);
+
+        // Each run has a structured record and a readable sidechain, even
+        // though the parent only received the summary prose.
+        const QList<SubagentRecord> records = agent.subagents();
+        QCOMPARE(records.size(), 2);
+        for (const SubagentRecord &record : records) {
+            QCOMPARE(record.status, u"ok"_s);
+            QVERIFY(!record.summary.isEmpty());
+            QVERIFY(!record.sidechainPath.isEmpty());
+            const QString transcript = agent.subagentTranscript(record.taskId);
+            QVERIFY(transcript.contains(u"assistant"_s));
+            QVERIFY(!transcript.contains(u"No sub-agent"_s));
+        }
     }
 
     void mutationRunsAfterItsCheckpoint()

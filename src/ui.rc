@@ -33,6 +33,7 @@
         <Action name="kateai_explain_git_blame"/>
         <Separator/>
         <Action name="kateai_configure"/>
+        <Action name="kateai_inspector"/>
       </Menu>
     </Menu>
   </MenuBar>

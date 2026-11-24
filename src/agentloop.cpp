@@ -9,6 +9,7 @@
 #include "harness/toolresults.h"
 #include "harness/audit.h"
 #include "harness/replay.h"
+#include "harness/worktree.h"
 #include "rules.h"
 
 #include <KLocalizedString>
@@ -28,8 +29,11 @@
 #include <QElapsedTimer>
 #include <QMetaObject>
 #include <QProcess>
+#include <QProcessEnvironment>
 #include <QSignalBlocker>
 #include <QSharedPointer>
+#include <QStandardPaths>
+#include <QSaveFile>
 #include <QTimer>
 #include <QUuid>
 #include <QUrl>
@@ -69,6 +73,46 @@ QString clipObservation(const QString &text, int maxChars = 80000)
 // are elided and only the recent part is kept.
 constexpr qsizetype kMaxTranscriptMessages = 1000;
 constexpr qsizetype kMaxTranscriptChars = 8 * 1024 * 1024;
+
+// Applies an AgentSpec model override to the provider-specific slot the
+// current settings use. "inherit" and empty are ignored.
+void applyModelOverride(Settings &settings, const QString &model)
+{
+    const QString value = model.trimmed();
+    if (value.isEmpty() || value.compare(u"inherit"_s, Qt::CaseInsensitive) == 0) {
+        return;
+    }
+    switch (settings.provider) {
+    case Provider::OpenAI:
+        settings.openaiModel = value;
+        break;
+    case Provider::OpenRouter:
+        settings.openrouterModel = value;
+        break;
+    case Provider::DeepSeek:
+        settings.deepseekModel = value;
+        break;
+    case Provider::OpenAICompatible:
+        settings.openaiCompatibleModel = value;
+        break;
+    case Provider::ClaudeCompatible:
+        settings.claudeCompatibleModel = value;
+        break;
+    case Provider::Kilo:
+        settings.kiloModel = value;
+        break;
+    case Provider::Acp:
+        settings.acpModel = value;
+        break;
+    case Provider::OpenCode:
+        settings.opencodeModel = value;
+        break;
+    case Provider::Grok:
+    default:
+        settings.grokModel = value;
+        break;
+    }
+}
 
 qsizetype transcriptMessageChars(const ChatMessage &message)
 {
@@ -228,6 +272,9 @@ AgentLoop::AgentLoop(QObject *parent)
                 const bool geminiWire = LlmClient::usesGeminiNativeTransport(m_settings);
                 const int effectiveInput = inputTokens
                     + ((anthropicWire || geminiWire) ? cachedInputTokens : 0);
+                m_inputTokensTotal += inputTokens;
+                m_outputTokensTotal += outputTokens;
+                m_cachedInputTokensTotal += cachedInputTokens;
                 if (effectiveInput > 0 && m_lastRequestEstimate > 0) {
                     m_tokenCalibrator.observe(m_lastRequestEstimate, effectiveInput);
                 }
@@ -583,6 +630,8 @@ void AgentLoop::rebuildTools()
     m_tools->setLspProvider(m_lsp);
     m_tools->setDebugProvider(m_debug);
     m_tools->setEcosystemProvider(m_ecosystem);
+    m_tools->setSkillRegistry(&m_skills);
+    m_tools->setAllowedSkills(m_subagentSkills);
     m_sandboxDirty = false;
 }
 
@@ -600,6 +649,7 @@ void AgentLoop::setWorkspace(const QString &workspace)
     if (m_memory) {
         m_memory->setWorkspace(workspace);
     }
+    m_skills.setWorkspace(workspace);
     if (workspaceChanged) {
         m_touchedPaths.clear();
         m_contextSummary.clear();
@@ -614,10 +664,15 @@ void AgentLoop::setWorkspace(const QString &workspace)
     m_checkpoints.setWorkspace(m_workspace);
     m_checkpoints.setRetention(m_settings.checkpointRetention);
     if (m_mcp) {
-        m_mcp->setWorkspace(m_workspace);
-        m_mcp->setEnabled(m_settings.mcpEnabled);
-        m_mcp->setAutoConnect(m_settings.mcpAutoConnect);
-        m_mcp->setTimeoutMs(m_settings.mcpTimeoutMs);
+        // A sub-agent borrows the parent's manager. Repointing a shared
+        // manager at a worktree would silently change the parent's and its
+        // siblings' MCP working directory.
+        if (m_ownsMcp) {
+            m_mcp->setWorkspace(m_workspace);
+            m_mcp->setEnabled(m_settings.mcpEnabled);
+            m_mcp->setAutoConnect(m_settings.mcpAutoConnect);
+            m_mcp->setTimeoutMs(m_settings.mcpTimeoutMs);
+        }
     }
     syncPermissionPolicy();
     // Load the new workspace's harness flags before deciding which tools to
@@ -792,7 +847,67 @@ void AgentLoop::setEditorContext(const QString &context)
 
 ToolAccess AgentLoop::activeToolAccess() const
 {
-    return ModeRegistry::toolAccessFor(activeMode(), m_settings.planMode);
+    ToolAccess access = ModeRegistry::toolAccessFor(activeMode(), m_settings.planMode);
+    if (m_subagentAllowedTools.isEmpty() && m_subagentDisallowedTools.isEmpty()) {
+        return access;
+    }
+    if (!m_subagentAllowedTools.isEmpty()) {
+        ToolAccess restricted;
+        for (const QString &entry : m_subagentAllowedTools) {
+            QString name = entry.trimmed();
+            if (name.isEmpty()) {
+                continue;
+            }
+            if (name.endsWith(u'*')) {
+                name.chop(1);
+                if (!name.isEmpty()) {
+                    restricted.allowPrefix(name);
+                }
+            } else {
+                restricted.allow(canonicalToolName(name));
+            }
+        }
+        // A restriction can never widen the mode's own access.
+        ToolAccess narrowed;
+        for (const QString &name : allBuiltInToolNames()) {
+            if (restricted.allows(name) && access.allows(name)) {
+                narrowed.allow(name);
+            }
+        }
+        for (const QString &prefix : restricted.prefixes) {
+            if (access.allows(prefix + u"probe"_s)) {
+                narrowed.allowPrefix(prefix);
+            }
+        }
+        narrowed.allowAll = false;
+        access = narrowed;
+    }
+    for (const QString &entry : m_subagentDisallowedTools) {
+        QString name = entry.trimmed();
+        if (name.isEmpty()) {
+            continue;
+        }
+        if (name.endsWith(u'*')) {
+            name.chop(1);
+            access.prefixes.removeAll(name);
+            // Exact tools under a denied prefix are denied too.
+            for (auto it = access.exact.begin(); it != access.exact.end();) {
+                if (it->startsWith(name)) {
+                    it = access.exact.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+            continue;
+        }
+        const QString canonical = canonicalToolName(name);
+        access.exact.remove(name);
+        access.exact.remove(canonical);
+        for (const QString &alias : toolNameAliases(canonical)) {
+            access.exact.remove(alias);
+        }
+    }
+    return access;
 }
 
 void AgentLoop::setMode(const QString &modeId)
@@ -821,6 +936,278 @@ void AgentLoop::setLocks(WorkspaceLocks *locks)
 QStringList AgentLoop::runningSubtaskIds() const
 {
     return m_activeSubtasks.keys();
+}
+
+QString AgentLoop::subagentSidechainPath(const QString &taskId) const
+{
+    QString base = QProcessEnvironment::systemEnvironment().value(u"KATEAI_SUBAGENT_DIR"_s);
+    if (base.trimmed().isEmpty()) {
+        base = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation) + u"/subagents"_s;
+    }
+    const QString conversation = conversationId().isEmpty() ? u"unsaved"_s : conversationId();
+    QString safeConversation;
+    for (const QChar c : conversation) {
+        if (c.isLetterOrNumber() || c == u'-' || c == u'_') {
+            safeConversation.append(c);
+        }
+    }
+    QString safeTask;
+    for (const QChar c : taskId) {
+        if (c.isLetterOrNumber() || c == u'-' || c == u'_') {
+            safeTask.append(c);
+        } else if (!safeTask.endsWith(u'-')) {
+            safeTask.append(u'-');
+        }
+    }
+    return base + u'/' + (safeConversation.isEmpty() ? u"unsaved"_s : safeConversation)
+        + u'/' + (safeTask.isEmpty() ? u"task"_s : safeTask) + u".jsonl"_s;
+}
+
+void AgentLoop::appendSubagentSidechain(const QString &taskId, const QString &type,
+                                        const QJsonObject &payload)
+{
+    QString path = m_subagentRecords.value(taskId).sidechainPath;
+    if (path.isEmpty()) {
+        path = subagentSidechainPath(taskId);
+    }
+    QDir().mkpath(QFileInfo(path).absolutePath());
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
+        return;
+    }
+    QJsonObject line;
+    line.insert(u"ts"_s, static_cast<double>(QDateTime::currentMSecsSinceEpoch()));
+    line.insert(u"type"_s, type);
+    line.insert(u"taskId"_s, taskId);
+    // Sidechains are local debugging data too; redact them exactly like the
+    // durable event log so a token cannot leak through `subagent_transcript`.
+    line.insert(u"payload"_s, Events::redact(payload));
+    file.write(QJsonDocument(line).toJson(QJsonDocument::Compact));
+    file.write("\n");
+}
+
+void AgentLoop::captureSubagentUsage(const QString &taskId, int input, int output, int cached)
+{
+    SubagentRecord &record = m_subagentRecords[taskId];
+    record.inputTokens += input;
+    record.outputTokens += output;
+    record.cachedInputTokens += cached;
+    const ModelProfile profile = ModelProfiles::resolve(m_settings.provider, modelFor(m_settings));
+    if (profile.hasPricing()) {
+        record.costUsd += (input * profile.inputPrice + output * profile.outputPrice
+                           + cached * profile.cacheReadPrice) / 1000000.0;
+    }
+}
+
+QList<SubagentRecord> AgentLoop::subagents() const
+{
+    QList<SubagentRecord> records = m_subagentRecords.values();
+    std::sort(records.begin(), records.end(), [](const SubagentRecord &a, const SubagentRecord &b) {
+        return a.startedAtMs > b.startedAtMs;
+    });
+    return records;
+}
+
+SubagentRecord AgentLoop::subagent(const QString &taskId) const
+{
+    return m_subagentRecords.value(taskId);
+}
+
+QString AgentLoop::subagentTranscript(const QString &taskId, int offset, int maxChars) const
+{
+    const SubagentRecord record = m_subagentRecords.value(taskId);
+    QString text;
+    const QString path = record.sidechainPath.isEmpty()
+        ? subagentSidechainPath(taskId)
+        : record.sidechainPath;
+    QFile file(path);
+    if (file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        text = QString::fromUtf8(file.read(1024 * 1024));
+    }
+    if (text.trimmed().isEmpty()) {
+        if (record.taskId.isEmpty()) {
+            return u"No sub-agent with that id was recorded."_s;
+        }
+        text = u"# %1 (%2)\n%3\n"_s.arg(record.agentName, record.status, record.summary);
+        if (!record.error.isEmpty()) {
+            text += u"\nError: "_s + record.error + u'\n';
+        }
+        if (!record.filesChanged.isEmpty()) {
+            text += u"\nFiles changed: "_s + record.filesChanged.join(u", "_s) + u'\n';
+        }
+    }
+    const int start = qBound(0, offset, text.size());
+    const int length = qMax(1, maxChars);
+    QString page = text.mid(start, length);
+    if (start > 0 || start + length < text.size()) {
+        page = u"[subagent transcript %1: characters %2..%3 of %4]\n"_s
+                   .arg(taskId).arg(start).arg(qMin(text.size(), start + length)).arg(text.size())
+            + page;
+    }
+    return page;
+}
+
+QString AgentLoop::subagentsReport() const
+{
+    const QList<SubagentRecord> records = subagents();
+    QString text;
+    text += i18n("Sub-agents: %1 recorded, %2 running\n", records.size(),
+                 m_activeSubtasks.size());
+    for (const SubagentRecord &record : records) {
+        text += u"- %1 [%2, %3] %4: %5"_s
+                    .arg(record.taskId, record.agentName.isEmpty() ? record.agentId : record.agentName,
+                         record.status, record.isolation, record.summary.left(200));
+        text += i18n(" — %1 in / %2 out / %3 cached tokens, $%4",
+                     record.inputTokens, record.outputTokens, record.cachedInputTokens,
+                     QString::number(record.costUsd, 'f', 4));
+        if (!record.filesChanged.isEmpty()) {
+            text += i18n(", %1 files changed", record.filesChanged.size());
+        }
+        if (record.applied) {
+            text += i18n(" (applied)");
+        } else if (record.discarded) {
+            text += i18n(" (discarded)");
+        } else if (!record.worktreePath.isEmpty() && record.status != u"running"_s) {
+            text += i18n(" (patch ready)");
+        }
+        text += u'\n';
+        if (!record.error.isEmpty()) {
+            text += u"    error: "_s + record.error + u'\n';
+        }
+    }
+    return text;
+}
+
+QString AgentLoop::traceReport() const
+{
+    const QString conversation = currentConversationId();
+    if (!m_harness.eventLog) {
+        return i18n("The event log is off (harness flag 'eventLog').");
+    }
+    if (conversation.isEmpty()) {
+        return i18n("No conversation is active yet.");
+    }
+    const QList<HarnessEvent> events = m_events.read(conversation, 0, -1);
+    QString text;
+    text += i18n("Conversation: %1\nEvents: %2, head sequence: %3\n\n",
+                 conversation, events.size(), m_events.headSeq(conversation));
+    const ReplayReport replay = Replay::analyze(events);
+    if (!replay.ok) {
+        text += i18n("Replay problems:\n");
+        for (const QString &error : replay.errors) {
+            text += u"- "_s + error + u'\n';
+        }
+        text += u'\n';
+    }
+    for (const HarnessEvent &event : events) {
+        const QString payload = QString::fromUtf8(
+            QJsonDocument(event.payload).toJson(QJsonDocument::Compact));
+        text += u"#%1 %2 %3 %4\n"_s
+                    .arg(event.seq)
+                    .arg(QDateTime::fromMSecsSinceEpoch(event.timestampMs).toString(u"HH:mm:ss.zzz"_s),
+                         event.type,
+                         event.turnId.isEmpty() ? QString() : u"["_s + event.turnId.left(8) + u']')
+            + u"    "_s + payload.left(500)
+            + (payload.size() > 500 ? u" …"_s : QString()) + u'\n';
+    }
+    return text;
+}
+
+bool AgentLoop::applySubagentWorktree(const QString &taskId, QString *error)
+{
+    if (error) {
+        error->clear();
+    }
+    if (m_busy) {
+        if (error) {
+            *error = i18n("Stop the current turn before applying a sub-agent patch.");
+        }
+        return false;
+    }
+    auto it = m_subagentRecords.find(taskId);
+    if (it == m_subagentRecords.end()) {
+        if (error) {
+            *error = i18n("No sub-agent named '%1'.", taskId);
+        }
+        return false;
+    }
+    SubagentRecord &record = it.value();
+    if (record.patch.trimmed().isEmpty()) {
+        if (error) {
+            *error = i18n("That sub-agent produced no patch.");
+        }
+        return false;
+    }
+    // Applying a child's patch is a workspace mutation outside the normal
+    // checkpoint pipeline, so take a safety snapshot first when possible.
+    if (m_checkpoints.isEnabled() && !m_busy) {
+        QString checkpointError;
+        if (m_checkpoints.createCheckpoint(i18n("Before applying sub-agent %1", taskId),
+                                           &checkpointError).isEmpty()
+            && !checkpointError.isEmpty()) {
+            if (error) {
+                *error = i18n("Could not take a safety checkpoint: %1", checkpointError);
+            }
+            return false;
+        }
+    }
+    if (!SubagentWorktree::apply(m_workspace, record.patch, error)) {
+        return false;
+    }
+    record.applied = true;
+    if (!record.worktreePath.isEmpty()) {
+        QString cleanupError;
+        SubagentWorktree::remove(m_workspace, record.worktreePath, &cleanupError);
+        record.worktreePath.clear();
+    }
+    emitHarnessEvent(EventTypes::SubagentApply,
+                     QJsonObject{{u"taskId"_s, taskId},
+                                 {u"filesChanged"_s, QJsonArray::fromStringList(record.filesChanged)}});
+    return true;
+}
+
+bool AgentLoop::discardSubagentWorktree(const QString &taskId, QString *error)
+{
+    if (error) {
+        error->clear();
+    }
+    auto it = m_subagentRecords.find(taskId);
+    if (it == m_subagentRecords.end()) {
+        if (error) {
+            *error = i18n("No sub-agent named '%1'.", taskId);
+        }
+        return false;
+    }
+    SubagentRecord &record = it.value();
+    if (!record.worktreePath.isEmpty()) {
+        if (!SubagentWorktree::remove(m_workspace, record.worktreePath, error)) {
+            return false;
+        }
+        record.worktreePath.clear();
+    }
+    record.discarded = true;
+    emitHarnessEvent(EventTypes::SubagentDiscard, QJsonObject{{u"taskId"_s, taskId}});
+    return true;
+}
+
+void AgentLoop::answerSubtaskQuestion(const QString &taskId, const QString &answer)
+{
+    AgentLoop *child = m_activeSubtasks.value(taskId);
+    if (!child) {
+        return;
+    }
+    Q_EMIT subtaskQuestionCancelled(taskId, QString());
+    child->answerQuestion(answer);
+}
+
+void AgentLoop::resolveSubtaskPermission(const QString &taskId, PermissionDecision decision,
+                                         const QString &toolCallId)
+{
+    AgentLoop *child = m_activeSubtasks.value(taskId);
+    if (!child) {
+        return;
+    }
+    child->resolvePermission(decision, toolCallId);
 }
 
 void AgentLoop::setMcpManager(McpManager *manager)
@@ -1368,6 +1755,11 @@ void AgentLoop::syncToolAccess()
     const QSet<QString> discovered = m_toolRegistry.discovered();
     m_toolRegistry.clear();
     m_toolRegistry.loadBuiltins();
+    if (!m_harness.skills) {
+        // Rollback path: no skills catalog and no skill tool. Direct calls are
+        // rejected in executeOne() as well.
+        m_toolRegistry.removeSpec(u"skill"_s);
+    }
     if (m_mcp) {
         const QJsonArray mcpTools = m_mcp->toolDefinitions();
         for (const QJsonValue &value : mcpTools) {
@@ -1386,7 +1778,17 @@ void AgentLoop::syncToolAccess()
         m_client.setToolDefinitionsOverride(advertised.tools);
         m_client.setExtraToolDefinitions({});
     } else {
-        m_client.setToolDefinitionsOverride({});
+        QJsonArray definitions = toolDefinitions(access);
+        if (!m_harness.skills) {
+            for (int i = definitions.size() - 1; i >= 0; --i) {
+                const QString name = definitions.at(i).toObject().value(u"function"_s)
+                                         .toObject().value(u"name"_s).toString();
+                if (name == u"skill"_s) {
+                    definitions.removeAt(i);
+                }
+            }
+        }
+        m_client.setToolDefinitionsOverride(definitions);
         m_client.setExtraToolDefinitions(m_mcp ? m_mcp->toolDefinitions() : QJsonArray());
     }
 
@@ -1607,6 +2009,9 @@ PromptResult AgentLoop::assemblePrompt() const
     // of a session useful.
     if (request.toolNames.isEmpty()) {
         for (const QString &name : allBuiltInToolNames()) {
+            if (name == u"skill"_s && !m_harness.skills) {
+                continue;
+            }
             if (access.allows(name)) {
                 request.toolNames.append(name);
                 seen.insert(name);
@@ -1649,12 +2054,12 @@ PromptResult AgentLoop::assemblePrompt() const
         request.subagentRoster = roster;
     }
 
-    if (m_settings.loadAgentRules && !m_harness.memoryV2) {
+    if (m_settings.loadAgentRules && !m_harness.memoryV2 && m_subagentMemoryScope != u"none"_s) {
         request.rules = RulesLoader::render(
             RulesLoader::load(m_workspace, mode.id), m_settings.globalRules);
     }
 
-    if (m_harness.memoryV2 && m_memory) {
+    if (m_harness.memoryV2 && m_memory && m_subagentMemoryScope != u"none"_s) {
         const QList<MemoryFile> files = memoryFilesForPrompt();
         QString rendered = MemoryLoader::render(files);
         if (!m_settings.globalRules.trimmed().isEmpty()) {
@@ -1662,6 +2067,21 @@ PromptResult AgentLoop::assemblePrompt() const
                 + u"\n</global_rules>\n"_s + rendered;
         }
         request.memory = rendered;
+    }
+
+    if (m_harness.skills) {
+        QString catalog = m_skills.catalog(contextTouchedPaths());
+        if (!m_subagentSkills.isEmpty() && !catalog.isEmpty()) {
+            QStringList filtered;
+            for (const QString &line : catalog.split(u'\n')) {
+                const QString id = line.section(u':', 0, 0).trimmed().mid(2);
+                if (m_subagentSkills.contains(id)) {
+                    filtered.append(line);
+                }
+            }
+            catalog = filtered.join(u'\n');
+        }
+        request.skills = catalog;
     }
 
     if (m_projectGraph && m_projectGraph->getNodeCount() > 0 && m_settings.compressProjectGraph) {
@@ -1848,6 +2268,9 @@ void AgentLoop::resetConversation()
     m_policy.revokeSession();
     m_modelRequests = 0;
     m_toolCalls = 0;
+    m_inputTokensTotal = 0;
+    m_outputTokensTotal = 0;
+    m_cachedInputTokensTotal = 0;
     m_stateEpoch = 0;
     m_actionSignatures.clear();
     m_actionRepeatCounts.clear();
@@ -1869,7 +2292,11 @@ void AgentLoop::resetConversation()
     m_contextSummary.clear();
     m_contextManifest.clear();
     m_touchedPaths.clear();
+    m_invokedSkills.clear();
+    m_subagentRecords.clear();
+    m_subtaskPermissionIds.clear();
     m_turnId.clear();
+    m_parentConversationId.clear();
     m_lastTurnState = TurnState::Idle;
     m_terminalSignalled = true;
 }
@@ -1952,6 +2379,9 @@ QList<MemoryFile> AgentLoop::memoryFilesForPrompt() const
     if (!m_memory) {
         return {};
     }
+    if (m_subagentMemoryScope == u"none"_s) {
+        return {};
+    }
     // Rule files named after a mode are mode-specific. The loader needs the
     // active mode and the known ids so it can include the matching file and
     // skip files belonging to other modes.
@@ -1962,6 +2392,12 @@ QList<MemoryFile> AgentLoop::memoryFilesForPrompt() const
     }
     m_memory->setModeContext(active.id, modeIds);
     QList<MemoryFile> files = m_memory->load(contextTouchedPaths());
+    if (m_subagentMemoryScope == u"user"_s) {
+        files.erase(std::remove_if(files.begin(), files.end(), [](const MemoryFile &file) {
+                        return file.scope != MemoryScope::User && file.scope != MemoryScope::Managed;
+                    }),
+                    files.end());
+    }
     if (!m_settings.loadAgentRules || !m_settings.loadProjectInstructions) {
         QList<MemoryFile> filtered;
         for (const MemoryFile &file : std::as_const(files)) {
@@ -2180,6 +2616,11 @@ void AgentLoop::start(const QString &userText)
     if (!m_tools) {
         setWorkspace(m_workspace);
     }
+    if (m_harness.skills) {
+        // Pick up SKILL.md files added or edited between turns without
+        // requiring a workspace switch.
+        m_skills.reload();
+    }
     // A deferred sandbox/workspace change should have been applied at the
     // end of the previous turn; belt and braces in case it was not.
     if (m_graphDirty) {
@@ -2389,6 +2830,13 @@ QList<ChatMessage> AgentLoop::m_messagesForRequest(bool updateState) const
         options.runningTasks = m_activeSubtaskDescriptions.isEmpty()
             ? m_activeSubtasks.keys()
             : m_activeSubtaskDescriptions.values();
+        if (m_harness.skills && !m_invokedSkills.isEmpty()) {
+            QStringList bodies;
+            for (const QString &body : m_invokedSkills) {
+                bodies.append(body);
+            }
+            options.skills = bodies.join(u"\n\n");
+        }
 
         ContextResult engine = ContextEngine::build(m_messages, options);
         if (updateState) {
@@ -2582,8 +3030,29 @@ QString AgentLoop::usageReport() const
                        QString::number(inputCost, 'f', 4), QString::number(profile.inputPrice, 'f', 2));
         report += i18n("Cached-prefix price: $%1/M (only when the provider reports cache hits)\n",
                        QString::number(profile.cacheReadPrice, 'f', 2));
+        if (m_inputTokensTotal > 0 || m_outputTokensTotal > 0) {
+            const double actual = (m_inputTokensTotal * profile.inputPrice
+                                   + m_outputTokensTotal * profile.outputPrice
+                                   + m_cachedInputTokensTotal * profile.cacheReadPrice) / 1000000.0;
+            report += i18n("Provider usage this session: %1 input, %2 output, %3 cached tokens; cost $%4\n",
+                           m_inputTokensTotal, m_outputTokensTotal, m_cachedInputTokensTotal,
+                           QString::number(actual, 'f', 4));
+        }
     } else {
         report += i18n("Pricing: not known for this model; no cost is guessed.\n");
+    }
+    if (!m_subagentRecords.isEmpty()) {
+        double childCost = 0.0;
+        int childInput = 0;
+        int childOutput = 0;
+        for (const SubagentRecord &record : std::as_const(m_subagentRecords)) {
+            childCost += record.costUsd;
+            childInput += record.inputTokens;
+            childOutput += record.outputTokens;
+        }
+        report += i18n("Sub-agents: %1 recorded, %2 input / %3 output tokens, $%4 attributed\n",
+                       m_subagentRecords.size(), childInput, childOutput,
+                       QString::number(childCost, 'f', 4));
     }
     report += i18n("Calibration samples: %1\n", m_tokenCalibrator.samples());
     report += i18n("Recovery prompts: %1\n", m_recoveryPromptCount);
@@ -2681,6 +3150,87 @@ QString AgentLoop::toolsReport() const
                     .arg(spec.maxResultChars);
     }
     return text;
+}
+
+QString AgentLoop::skillsReport() const
+{
+    if (m_harness.skills) {
+        m_skills.reload();
+    }
+    const QStringList touched = contextTouchedPaths();
+    const QString catalog = m_skills.catalog(touched);
+    QString text;
+    text += i18n("Skills: %1 discovered, catalog %2 characters (budget 1500)\n",
+                 m_skills.skills().size(), catalog.size());
+    text += i18n("Skills flag: %1, touched paths: %2\n",
+                 m_harness.skills ? i18n("on") : i18n("off"),
+                 touched.isEmpty() ? i18n("(none)") : touched.join(u", "_s));
+    if (!m_invokedSkills.isEmpty()) {
+        text += i18n("Invoked bodies: %1 (rehydrated until the conversation resets)\n",
+                     m_invokedSkills.size());
+    }
+    for (const QString &warning : m_skills.warnings()) {
+        text += i18n("Discovery warning: %1\n", warning);
+    }
+    for (const SkillDefinition &skill : m_skills.skills()) {
+        text += u"- %1 [%2, %3] %4 — %5"_s
+                    .arg(skill.id, SkillRegistry::scopeId(skill.scope),
+                         skill.trusted ? i18n("trusted") : i18n("untrusted"),
+                         skill.disableModelInvocation ? i18n("user-only") : i18n("model-invocable"),
+                         skill.description);
+        if (skill.isFork()) {
+            text += i18n(" (context: fork)");
+        }
+        text += u'\n';
+        if (!skill.paths.isEmpty()) {
+            text += u"    paths: "_s + skill.paths.join(u", "_s) + u"\n"_s;
+        }
+        if (!skill.allowedTools.isEmpty()) {
+            text += u"    tools: "_s + skill.allowedTools.join(u", "_s) + u"\n"_s;
+        }
+        for (const QString &warning : skill.warnings) {
+            text += u"    warning: "_s + warning + u"\n"_s;
+        }
+    }
+    if (!catalog.isEmpty()) {
+        text += i18n("\nCatalog as sent to the model:\n") + catalog + u'\n';
+    }
+    return text;
+}
+
+bool AgentLoop::trustSkill(const QString &id, QString *error)
+{
+    if (m_harness.skills) {
+        m_skills.reload();
+    }
+    return m_skills.trust(id, error);
+}
+
+QString AgentLoop::skillInvocation(const QString &id, QString *error) const
+{
+    if (error) {
+        error->clear();
+    }
+    if (m_harness.skills) {
+        m_skills.reload();
+    }
+    SkillDefinition skill;
+    if (!m_skills.load(id, &skill, error)) {
+        return {};
+    }
+    if (!skill.trusted) {
+        if (error) {
+            *error = i18n("Skill '%1' is not trusted. Run `:kateai trust-skill %1` after reviewing it.", skill.id);
+        }
+        return {};
+    }
+    QString prompt = u"<skill name=\"%1\" scope=\"%2\">\n%3\n</skill>\n\n"_s
+                         .arg(skill.id, SkillRegistry::scopeId(skill.scope), skill.body);
+    prompt += i18n("Apply this skill to the current task. Follow its procedure, using only tools the active mode allows.");
+    if (!skill.supportingFiles.isEmpty()) {
+        prompt += i18n("\nSupporting files in %1: %2", skill.directory, skill.supportingFiles.join(u", "_s));
+    }
+    return prompt;
 }
 
 void AgentLoop::maybeCompactStoredHistory(const QList<ChatMessage> &requestMessages)
@@ -3960,10 +4510,45 @@ void AgentLoop::executeOne(const ToolCall &call)
         processQueue();
         return;
     }
+    m_tools->setTouchedPaths(contextTouchedPaths());
 
     // The mode (and plan mode) decide which tools exist at all. Rejecting here
     // is the runtime half of the same rule the request advertises.
     const ToolAccess access = activeToolAccess();
+    if (call.name == u"skill"_s && !m_harness.skills) {
+        ToolResult result;
+        result.ok = false;
+        result.output = u"Skills are disabled (harness flag 'skills')."_s;
+        appendToolResult(call, result);
+        processQueue();
+        return;
+    }
+    // Sub-agent sidechains are read by the root loop; the transcript store is
+    // not part of ToolRunner because it belongs to the orchestration layer.
+    if (call.name == u"subagent_transcript"_s) {
+        const QJsonObject args = effectiveArgs(call);
+        const QString taskId = args.value(u"task_id"_s).toString().trimmed();
+        const int offset = qMax(0, args.value(u"offset"_s).toInt(0));
+        const int maxChars = qBound(1000, args.value(u"max_chars"_s).toInt(20000), 40000);
+        ToolResult result;
+        result.name = call.name;
+        result.toolCallId = call.id;
+        if (taskId.isEmpty()) {
+            result.ok = false;
+            result.output = u"task_id must not be empty."_s;
+        } else if (!m_subagentRecords.contains(taskId)
+                   && !QFileInfo::exists(subagentSidechainPath(taskId))) {
+            result.ok = false;
+            result.output = u"No sub-agent named '%1' was recorded in this conversation."_s.arg(taskId);
+        } else {
+            result.output = subagentTranscript(taskId, offset, maxChars);
+        }
+        ++m_toolCalls;
+        Q_EMIT toolStarted(describeTool(call));
+        appendToolResult(call, result);
+        processQueue();
+        return;
+    }
     const bool registryBridge = m_harness.toolSearch
         && (call.name == u"tool_search"_s || call.name == u"tool_describe"_s
             || call.name == u"tool_call"_s);
@@ -3994,6 +4579,21 @@ void AgentLoop::executeOne(const ToolCall &call)
         appendToolResult(call, result);
         processQueue();
         return;
+    }
+
+    // A skill with `context: fork` runs in an isolated child context and only
+    // returns a summary. Inline skills fall through to the normal read-only
+    // tool path.
+    if (m_harness.skills && call.name == u"skill"_s) {
+        const QString skillId = effectiveArgs(call).value(u"name"_s).toString().trimmed();
+        SkillDefinition skill;
+        QString skillError;
+        if (!skillId.isEmpty() && m_skills.load(skillId, &skill, &skillError)
+            && skill.isFork() && skill.trusted && !skill.disableModelInvocation
+            && (m_subagentSkills.isEmpty() || m_subagentSkills.contains(skill.id))) {
+            startSkillFork(call, skill);
+            return;
+        }
     }
 
     const QString signature = actionSignature(call);
@@ -4234,6 +4834,16 @@ void AgentLoop::handleToolSideEffects(const ToolCall &call, const ToolResult &re
         }
     } else if (call.name == u"exit_plan_mode"_s) {
         Q_EMIT exitPlanModeRequested();
+    } else if (call.name == u"skill"_s && m_harness.skills) {
+        const QString id = effectiveArgs(call).value(u"name"_s).toString().trimmed();
+        if (!id.isEmpty() && !m_invokedSkills.contains(result.output)) {
+            // Keep the loaded body for rehydration. It is a transient context
+            // message, never a persisted system-prompt section.
+            m_invokedSkills.append(result.output);
+            if (m_invokedSkills.size() > 8) {
+                m_invokedSkills.removeFirst();
+            }
+        }
     }
 }
 
@@ -4313,6 +4923,17 @@ PermissionRequest AgentLoop::describeTool(const ToolCall &call) const
             description.isEmpty() ? i18n("delegated work") : description.left(200));
         request.details = QString::fromUtf8(QJsonDocument(eff).toJson(QJsonDocument::Indented));
         request.risk = ToolRisk::Execute;
+        return request;
+    }
+
+    if (call.name == u"subagent_transcript"_s) {
+        PermissionRequest request;
+        request.toolName = call.name;
+        request.toolCallId = call.id;
+        request.risk = ToolRisk::Read;
+        request.summary = i18n("Read sub-agent transcript: %1",
+                               eff.value(u"task_id"_s).toString());
+        request.details = QString::fromUtf8(QJsonDocument(eff).toJson(QJsonDocument::Indented));
         return request;
     }
 
@@ -4726,6 +5347,176 @@ static QString subtaskLog(const QStringList &log, int toolCount)
     return QStringLiteral("\n\n<subtask_log tools=\"%1\">\n%2\n</subtask_log>").arg(toolCount).arg(log.join(u'\n'));
 }
 
+void AgentLoop::startSkillFork(const ToolCall &call, const SkillDefinition &skill)
+{
+    if (m_settings.maxToolCalls > 0 && m_toolCalls >= m_settings.maxToolCalls) {
+        ToolResult result;
+        result.ok = false;
+        result.output = u"The tool-call budget is exhausted; the skill was not run."_s;
+        appendToolResult(call, result);
+        processQueue();
+        return;
+    }
+    if (m_subtaskDepth >= qMax(1, m_settings.maxSubtaskDepth)) {
+        ToolResult result;
+        result.ok = false;
+        result.output = u"Subtask nesting limit reached; loading the skill inline instead:\n"_s
+            + skill.body;
+        appendToolResult(call, result);
+        processQueue();
+        return;
+    }
+
+    const QJsonObject args = effectiveArgs(call);
+    const QString task = args.value(u"task"_s).toString().trimmed();
+    QString prompt = u"<skill name=\"%1\" scope=\"%2\">\n%3\n</skill>\n\n"_s
+                         .arg(skill.id, SkillRegistry::scopeId(skill.scope), skill.body);
+    prompt += task.isEmpty()
+        ? i18n("Apply this skill to the current task in this workspace, then report what you did and how you verified it.")
+        : i18n("Task: %1\n\nApply the skill to this task, then report what you did and how you verified it.", task);
+    if (!skill.supportingFiles.isEmpty()) {
+        prompt += i18n("\nSupporting files in %1: %2", skill.directory, skill.supportingFiles.join(u", "_s));
+    }
+
+    auto *child = new AgentLoop(this);
+    child->setMcpManager(m_mcp);
+    child->setLocks(m_locks);
+    child->setSubtaskDepth(m_subtaskDepth + 1);
+    QString taskId = call.id.isEmpty() ? QStringLiteral("skill-%1").arg(++m_asyncCounter) : call.id;
+    child->setSelfId(taskId);
+
+    SubagentRecord record;
+    record.taskId = taskId;
+    record.agentId = skill.id;
+    record.agentName = skill.name;
+    record.modeId = m_settings.agentMode;
+    record.description = task.isEmpty() ? skill.description : task;
+    record.status = u"running"_s;
+    record.isolation = u"in-process"_s;
+    record.startedAtMs = QDateTime::currentMSecsSinceEpoch();
+    record.sidechainPath = subagentSidechainPath(taskId);
+    m_subagentRecords.insert(taskId, record);
+    appendSubagentSidechain(taskId, u"start"_s,
+                            QJsonObject{{u"skill"_s, skill.id},
+                                        {u"name"_s, skill.name},
+                                        {u"context"_s, u"fork"_s},
+                                        {u"description"_s, record.description}});
+    emitHarnessEvent(EventTypes::SubagentStart,
+                     QJsonObject{{u"taskId"_s, taskId},
+                                 {u"skill"_s, skill.id},
+                                 {u"context"_s, u"fork"_s},
+                                 {u"description"_s, record.description}});
+
+    Settings childSettings = m_settings;
+    childSettings.planMode = false;
+    childSettings.checkpointsEnabled = false;
+    if (m_settings.maxToolCalls > 0) {
+        const int parentBudget = m_settings.maxToolCalls;
+        childSettings.maxToolCalls = qMax(4, parentBudget / 2);
+    }
+    if (m_settings.maxModelRequests > 0) {
+        const int parentBudget = m_settings.maxModelRequests;
+        childSettings.maxModelRequests = qMax(4, parentBudget / 2);
+    }
+    child->setSettings(childSettings);
+    child->m_projectGraph = m_projectGraph;
+    child->m_subagentAllowedTools = skill.allowedTools;
+    child->setWorkspace(m_workspace);
+    child->setDocumentBridge(m_bridge);
+    child->setLspProvider(m_lsp);
+    child->setDebugProvider(m_debug);
+    child->setEcosystemProvider(m_ecosystem);
+    child->setEditorContext(m_editorContext);
+
+    struct State {
+        ToolCall call;
+        QString answer;
+        QString streamed;
+        QString error;
+        bool ok = true;
+    };
+    auto state = std::make_shared<State>();
+    state->call = call;
+    connect(child, &AgentLoop::assistantFinished, child, [state](const QString &text) {
+        if (!text.trimmed().isEmpty()) {
+            state->answer = text;
+        }
+    });
+    connect(child, &AgentLoop::assistantDelta, child, [state](const QString &delta) {
+        state->streamed += delta;
+    });
+    connect(child, &AgentLoop::failed, child, [state](const QString &error) {
+        state->ok = false;
+        state->error = error;
+    });
+    connect(child, &AgentLoop::turnFinished, this, [this, child, state, taskId] {
+        m_activeSubtasks.remove(taskId);
+        m_activeSubtaskDescriptions.remove(taskId);
+        if (m_locks) {
+            m_locks->releaseAll(child->selfId());
+        }
+        ToolResult result;
+        result.toolCallId = state->call.id;
+        result.name = state->call.name;
+        result.ok = state->ok && !child->cancelRequested();
+        result.cancelled = child->cancelRequested();
+        SubagentRecord &record = m_subagentRecords[taskId];
+        record.finishedAtMs = QDateTime::currentMSecsSinceEpoch();
+        record.inputTokens = child->inputTokensTotal();
+        record.outputTokens = child->outputTokensTotal();
+        record.cachedInputTokens = child->cachedInputTokensTotal();
+        const ModelProfile profile = ModelProfiles::resolve(m_settings.provider,
+                                                            modelFor(m_settings));
+        if (profile.hasPricing()) {
+            record.costUsd = (record.inputTokens * profile.inputPrice
+                              + record.outputTokens * profile.outputPrice
+                              + record.cachedInputTokens * profile.cacheReadPrice) / 1000000.0;
+        }
+        if (!child->cancelRequested()) {
+            record.filesChanged = child->sessionData().changedPaths;
+        }
+        record.status = result.cancelled ? u"cancelled"_s : (state->ok ? u"ok"_s : u"failed"_s);
+        record.error = state->error;
+        if (result.cancelled) {
+            result.output = u"The skill was cancelled before it finished."_s;
+        } else if (result.ok) {
+            QString answer = !state->answer.trimmed().isEmpty() ? state->answer : state->streamed;
+            result.output = answer.trimmed().isEmpty()
+                ? u"The skill finished without producing a summary."_s
+                : answer;
+            record.summary = result.output;
+        } else {
+            result.output = u"The skill failed: %1"_s.arg(state->error);
+        }
+        result.output += i18n("\n\n[subagent taskId=%1 status=%2 context=fork; use subagent_transcript for the sidechain]",
+                              taskId, record.status);
+        appendSubagentSidechain(taskId, u"end"_s,
+                                QJsonObject{{u"status"_s, record.status},
+                                            {u"summary"_s, record.summary.left(8000)},
+                                            {u"inputTokens"_s, record.inputTokens},
+                                            {u"outputTokens"_s, record.outputTokens}});
+        emitHarnessEvent(EventTypes::SubagentEnd,
+                         QJsonObject{{u"taskId"_s, taskId},
+                                     {u"status"_s, record.status},
+                                     {u"inputTokens"_s, record.inputTokens},
+                                     {u"outputTokens"_s, record.outputTokens}});
+        Q_EMIT subtaskQuestionCancelled(taskId, QString());
+        const ToolCall pending = state->call;
+        child->deleteLater();
+        finishAsyncTool(pending, result);
+    }, Qt::SingleShotConnection);
+
+    ++m_inFlight;
+    ++m_toolCalls;
+    Q_EMIT toolStarted(describeTool(call));
+    m_activeSubtasks.insert(taskId, child);
+    m_activeSubtaskDescriptions.insert(taskId,
+        i18n("Skill: %1", skill.name));
+    Q_EMIT subtaskStarted(taskId, skill.id, skill.name, childSettings.agentMode,
+                          task.isEmpty() ? skill.description : task);
+    child->start(prompt);
+}
+
 void AgentLoop::dispatchSubtask(const ToolCall &call)
 {
     // Use the unified args: on the LLM path call.arguments is empty and only
@@ -4735,6 +5526,10 @@ void AgentLoop::dispatchSubtask(const ToolCall &call)
     const QString description = eff.value(u"description"_s).toString().trimmed();
     const QString requestedMode = eff.value(u"mode"_s).toString().trimmed();
     const QString requestedAgent = eff.value(u"agent"_s).toString().trimmed();
+    QString requestedIsolation = eff.value(u"isolation"_s).toString().trimmed().toLower();
+    if (requestedIsolation == u"inherit"_s) {
+        requestedIsolation.clear();
+    }
     const QJsonValue transcriptValue = eff.value(u"include_transcript"_s);
     bool includeTranscript = false;
     if (transcriptValue.isBool()) {
@@ -4816,6 +5611,54 @@ void AgentLoop::dispatchSubtask(const ToolCall &call)
     }
     child->setSelfId(taskId);
 
+    // AgentSpec isolation. A worktree is opt-in per agent (or per call) and is
+    // only attempted when the 0.9 flag is on. A failed preflight falls back to
+    // in-process with a visible notice instead of failing the delegation.
+    bool worktreeIsolation = false;
+    WorktreeResult worktree;
+    if (m_harness.agentsV2) {
+        const QString wanted = requestedIsolation.isEmpty() ? profile.isolation : requestedIsolation;
+        worktreeIsolation = wanted.compare(u"worktree"_s, Qt::CaseInsensitive) == 0;
+    }
+    if (worktreeIsolation) {
+        worktree = SubagentWorktree::create(m_workspace, taskId);
+        if (!worktree.ok) {
+            worktreeIsolation = false;
+            Q_EMIT noticeRaised(i18n("Sub-agent '%1' could not run in a worktree (%2); using the shared workspace.",
+                                     profile.name, worktree.error));
+        }
+    }
+
+    SubagentRecord record;
+    record.taskId = taskId;
+    record.agentId = profile.id;
+    record.agentName = profile.name;
+    record.modeId = modeId;
+    record.description = description;
+    record.status = u"running"_s;
+    record.isolation = worktreeIsolation ? u"worktree"_s : u"in-process"_s;
+    record.worktreePath = worktree.path;
+    record.baseCommit = worktree.baseCommit;
+    record.startedAtMs = QDateTime::currentMSecsSinceEpoch();
+    record.sidechainPath = subagentSidechainPath(taskId);
+    m_subagentRecords.insert(taskId, record);
+    appendSubagentSidechain(taskId, u"start"_s,
+                            QJsonObject{{u"agent"_s, profile.id},
+                                        {u"name"_s, profile.name},
+                                        {u"mode"_s, modeId},
+                                        {u"description"_s, description},
+                                        {u"isolation"_s, record.isolation}});
+    emitHarnessEvent(EventTypes::SubagentStart,
+                     QJsonObject{{u"taskId"_s, taskId},
+                                 {u"agent"_s, profile.id},
+                                 {u"mode"_s, modeId},
+                                 {u"isolation"_s, record.isolation},
+                                 {u"description"_s, description}});
+    if (!worktreeIsolation && requestedIsolation == u"worktree"_s) {
+        appendSubagentSidechain(taskId, u"notice"_s,
+                                QJsonObject{{u"message"_s, u"Worktree unavailable; ran in-process."_s}});
+    }
+
     Settings childSettings = m_settings;
     // A subtask must never narrow itself: plan mode belongs to the parent turn.
     childSettings.planMode = false;
@@ -4834,17 +5677,79 @@ void AgentLoop::dispatchSubtask(const ToolCall &call)
         const int childBudget = qMax(4, parentBudget / 2);
         childSettings.maxModelRequests = qMin(childBudget, parentBudget);
     }
+    if (m_harness.agentsV2) {
+        const QString permission = profile.permissionMode.trimmed().toLower();
+        if (!permission.isEmpty() && permission != u"inherit"_s) {
+            if (permission == u"accept-edits"_s || permission == u"acceptedits"_s) {
+                childSettings.permissionMode = PermissionMode::AcceptEdits;
+            } else if (permission == u"always-approve"_s || permission == u"alwaysapprove"_s
+                       || permission == u"bypasspermissions"_s) {
+                childSettings.permissionMode = PermissionMode::AlwaysApprove;
+            } else if (permission == u"ask"_s) {
+                childSettings.permissionMode = PermissionMode::Ask;
+            }
+        }
+        applyModelOverride(childSettings, profile.model);
+        if (!profile.effort.trimmed().isEmpty()) {
+            childSettings.reasoningEffort = profile.effort.trimmed();
+        }
+        if (profile.maxTurns > 0) {
+            childSettings.maxModelRequests = m_settings.maxModelRequests > 0
+                ? qMin(profile.maxTurns, m_settings.maxModelRequests)
+                : profile.maxTurns;
+        }
+    }
 
     child->setSettings(childSettings);
-    // The child works in the same workspace, so it uses the parent's graph
-    // instead of scanning the project again and holding a second copy.
-    child->m_projectGraph = m_projectGraph;
-    child->setWorkspace(m_workspace);
+    child->m_subagentAllowedTools = profile.tools;
+    child->m_subagentDisallowedTools = profile.disallowedTools;
+    child->m_subagentSkills = profile.skills;
+    child->m_subagentIsolation = record.isolation;
+    child->m_subagentMemoryScope = profile.memoryScope.trimmed().toLower();
+    if (worktreeIsolation) {
+        // The worktree must not see the parent's graph cache or its raw
+        // pointer. setWorkspace() builds a graph for the isolated tree.
+        QString worktreeWorkspace = worktree.path;
+        const QString repoRoot = SubagentWorktree::repositoryRoot(m_workspace);
+        if (!repoRoot.isEmpty()) {
+            const QString relative = QDir(repoRoot).relativeFilePath(QDir::cleanPath(m_workspace));
+            if (relative != u"."_s && !relative.startsWith(u".."_s)
+                && QFileInfo(worktree.path + u'/' + relative).isDir()) {
+                // Preserve the workspace's subdirectory so tools and relative
+                // paths behave exactly as they do in the parent.
+                worktreeWorkspace = worktree.path + u'/' + relative;
+            }
+        }
+        child->setWorkspace(worktreeWorkspace);
+        // `.kateai` is usually gitignored, so a bare worktree has no project
+        // modes, agents, rules, or skills. Keep configuration discovery on the
+        // real project while the sandbox and tool working root stay isolated.
+        child->m_modes.setWorkspace(m_workspace);
+        child->m_team.setWorkspace(m_workspace);
+        child->m_skills.setWorkspace(m_workspace);
+        if (child->m_memory) {
+            child->m_memory->setWorkspace(m_workspace);
+        }
+        if (child->m_tools) {
+            child->m_tools->setSkillRegistry(&child->m_skills);
+            child->m_tools->setAllowedSkills(profile.skills);
+        }
+    } else {
+        // The child works in the same workspace, so it uses the parent's graph
+        // instead of scanning the project again and holding a second copy.
+        child->m_projectGraph = m_projectGraph;
+        child->setWorkspace(m_workspace);
+    }
     child->setDocumentBridge(m_bridge);
     child->setLspProvider(m_lsp);
     child->setDebugProvider(m_debug);
     child->setEcosystemProvider(m_ecosystem);
     child->setEditorContext(m_editorContext);
+    // The tool runner is rebuilt by setWorkspace after settings, so apply the
+    // per-agent skill allow-list to the live runner as well.
+    if (child->m_tools) {
+        child->m_tools->setAllowedSkills(profile.skills);
+    }
 
     struct SubtaskState {
         ToolCall call;
@@ -4874,13 +5779,15 @@ void AgentLoop::dispatchSubtask(const ToolCall &call)
     state->startedAt = QDateTime::currentMSecsSinceEpoch();
     state->elapsed.start();
 
-    connect(child, &AgentLoop::assistantFinished, child, [state](const QString &text) {
+    connect(child, &AgentLoop::assistantFinished, child, [this, state](const QString &text) {
         // The child's report is the text of its last turn that actually said
         // something. A turn that only made tool calls leaves the text empty,
         // and overwriting the answer with it would throw away what the child
         // reported before.
         if (!text.trimmed().isEmpty()) {
             state->answer = text;
+            appendSubagentSidechain(state->taskId, u"assistant"_s,
+                                    QJsonObject{{u"content"_s, text}});
         }
     });
     connect(child, &AgentLoop::assistantDelta, child, [this, state](const QString &delta) {
@@ -4897,12 +5804,19 @@ void AgentLoop::dispatchSubtask(const ToolCall &call)
         ++state->toolCount;
         const QString line = request.summary.isEmpty() ? request.toolName : QStringLiteral("%1 %2").arg(request.toolName, request.summary);
         state->log.append(QStringLiteral("→ %1").arg(line.left(400)));
+        appendSubagentSidechain(state->taskId, u"tool/call"_s,
+                                QJsonObject{{u"tool"_s, request.toolName},
+                                            {u"summary"_s, request.summary.left(1000)}});
         Q_EMIT subtaskActivity(state->taskId, QStringLiteral("→ %1").arg(line.left(200)), false);
     });
     connect(child, &AgentLoop::toolFinished, child, [this, state](const ToolResult &result) {
         const QString marker = result.ok ? QStringLiteral("✓") : QStringLiteral("✗");
         const QString detail = result.ok ? QString() : QStringLiteral(" — %1").arg(result.output.left(160));
         state->log.append(QStringLiteral("  %1 %2%3").arg(marker, result.name, detail));
+        appendSubagentSidechain(state->taskId, u"tool/result"_s,
+                                QJsonObject{{u"tool"_s, result.name},
+                                            {u"ok"_s, result.ok},
+                                            {u"output"_s, result.output.left(4000)}});
         Q_EMIT subtaskActivity(state->taskId, QStringLiteral("  %1 %2").arg(marker, result.name), !result.ok);
     });
     // Live tool output (bash stream, web fetch progress, MCP updates): the
@@ -4935,12 +5849,22 @@ void AgentLoop::dispatchSubtask(const ToolCall &call)
     connect(child, &AgentLoop::planUpdated, child, [this, state](const QJsonArray &plan) {
         Q_EMIT subtaskActivity(state->taskId, i18n("Plan updated (%1 steps)", plan.size()), false);
     });
-    // A child that asks its own question or waits for permission cannot use
-    // the user's intent dock: the parent has no channel to route the answer
-    // back into the child's parked request. Rather than stall forever, answer
-    // the question with a clear instruction and deny approvals the child
-    // cannot justify. The activity line tells the user what happened.
+    // A child question or permission request is routed to the parent's intent
+    // dock when agentsV2 is on. The child stays parked; the parent turn keeps
+    // its place in the queue. With the flag off we keep the old fail-fast
+    // behavior. The prefixed card id cannot collide with a parent request.
     connect(child, &AgentLoop::questionAsked, child, [this, state, child](const PermissionRequest &request) {
+        if (m_harness.agentsV2) {
+            PermissionRequest forwarded = request;
+            forwarded.toolCallId = u"subtask:%1:%2"_s.arg(state->taskId, request.toolCallId);
+            appendSubagentSidechain(state->taskId, u"question"_s,
+                                    QJsonObject{{u"question"_s, request.questionText},
+                                                {u"options"_s, QJsonArray::fromStringList(request.questionOptions)}});
+            Q_EMIT subtaskQuestionAsked(state->taskId, forwarded);
+            Q_EMIT subtaskActivity(state->taskId,
+                                   i18n("Waiting for your answer: %1", request.questionText.left(200)), false);
+            return;
+        }
         const QString asked = request.questionText.trimmed().isEmpty() ? request.summary : request.questionText;
         Q_EMIT subtaskActivity(state->taskId,
                                i18n("Answered automatically (sub-agents cannot ask you): %1", asked.left(200)), false);
@@ -4951,6 +5875,18 @@ void AgentLoop::dispatchSubtask(const ToolCall &call)
         }, Qt::QueuedConnection);
     });
     connect(child, &AgentLoop::permissionNeeded, child, [this, state, child](const PermissionRequest &request) {
+        if (m_harness.agentsV2) {
+            PermissionRequest forwarded = request;
+            forwarded.toolCallId = u"subtask:%1:%2"_s.arg(state->taskId, request.toolCallId);
+            m_subtaskPermissionIds.insert(forwarded.toolCallId,
+                                          qMakePair(state->taskId, request.toolCallId));
+            appendSubagentSidechain(state->taskId, u"permission"_s,
+                                    QJsonObject{{u"tool"_s, request.toolName},
+                                                {u"summary"_s, request.summary},
+                                                {u"risk"_s, static_cast<int>(request.risk)}});
+            Q_EMIT permissionNeeded(forwarded);
+            return;
+        }
         const QString label = request.summary.isEmpty() ? request.toolName : request.summary;
         Q_EMIT subtaskActivity(state->taskId,
                                i18n("Denied (sub-agents cannot ask you): %1", label.left(200)), false);
@@ -4989,7 +5925,7 @@ void AgentLoop::dispatchSubtask(const ToolCall &call)
         child,
         &AgentLoop::turnFinished,
         this,
-        [this, child, state] {
+        [this, child, state, childSettings] {
             if (state->timer) {
                 state->timer->stop();
             }
@@ -5003,7 +5939,64 @@ void AgentLoop::dispatchSubtask(const ToolCall &call)
             result.toolCallId = state->call.id;
             result.name = state->call.name;
             result.ok = state->ok && !child->cancelRequested();
-                        result.cancelled = child->cancelRequested();
+            result.cancelled = child->cancelRequested();
+
+            // The structured record is the source for subagent_transcript,
+            // cost attribution, and worktree Apply/Discard. It is updated
+            // before the result is appended so a report built in the same
+            // turn sees the final state.
+            SubagentRecord &record = m_subagentRecords[state->taskId];
+            record.taskId = state->taskId;
+            record.finishedAtMs = QDateTime::currentMSecsSinceEpoch();
+            record.inputTokens = child->inputTokensTotal();
+            record.outputTokens = child->outputTokensTotal();
+            record.cachedInputTokens = child->cachedInputTokensTotal();
+            const ModelProfile profile = ModelProfiles::resolve(childSettings.provider,
+                                                                modelFor(childSettings));
+            if (profile.hasPricing()) {
+                record.costUsd = (record.inputTokens * profile.inputPrice
+                                  + record.outputTokens * profile.outputPrice
+                                  + record.cachedInputTokens * profile.cacheReadPrice) / 1000000.0;
+            }
+            if (result.cancelled) {
+                record.status = u"cancelled"_s;
+            } else if (state->ok) {
+                record.status = u"ok"_s;
+            } else {
+                record.status = state->error.contains(u"budget"_s, Qt::CaseInsensitive)
+                    ? u"budget"_s : u"failed"_s;
+            }
+            record.error = state->error;
+            if (record.filesChanged.isEmpty() && !child->cancelRequested()) {
+                record.filesChanged = child->sessionData().changedPaths;
+            }
+
+            if (!record.worktreePath.isEmpty()) {
+                QString diffError;
+                record.patch = SubagentWorktree::diff(record.worktreePath, record.baseCommit, &diffError);
+                record.filesChanged = SubagentWorktree::changedFiles(record.worktreePath,
+                                                                     record.baseCommit, &diffError);
+                if (!record.patch.trimmed().isEmpty()) {
+                    const QString patchPath = subagentSidechainPath(state->taskId + u"-patch"_s)
+                        .replace(u".jsonl"_s, u".patch"_s);
+                    QDir().mkpath(QFileInfo(patchPath).absolutePath());
+                    QSaveFile patchFile(patchPath);
+                    if (patchFile.open(QIODevice::WriteOnly)) {
+                        patchFile.write(record.patch.toUtf8());
+                        patchFile.commit();
+                    }
+                    record.patchPath = patchPath;
+                    appendSubagentSidechain(state->taskId, u"worktree/diff"_s,
+                                            QJsonObject{{u"path"_s, patchPath},
+                                                        {u"files"_s, QJsonArray::fromStringList(record.filesChanged)}});
+                }
+                if (result.cancelled || record.status == u"budget"_s) {
+                    QString cleanupError;
+                    SubagentWorktree::remove(m_workspace, record.worktreePath, &cleanupError);
+                    record.worktreePath.clear();
+                }
+            }
+
             if (child->cancelRequested()) {
                 result.output = u"Subtask cancelled by the user before it finished."_s;
             } else if (state->ok) {
@@ -5013,25 +6006,67 @@ void AgentLoop::dispatchSubtask(const ToolCall &call)
                 if (answer.trimmed().isEmpty()) {
                     answer = u"The sub-agent finished without producing a visible answer."_s;
                 }
+                record.summary = answer;
                 if (state->includeTranscript) {
                     answer += subtaskLog(state->log, state->toolCount);
                 }
+                if (!record.filesChanged.isEmpty()) {
+                    answer += i18n("\n\n[isolated worktree: %1 file(s) changed: %2. Patch saved at %3. "
+                                   "Nothing was merged into the parent tree; apply or discard it explicitly.]",
+                                   record.filesChanged.size(),
+                                   record.filesChanged.join(u", "_s),
+                                   record.patchPath);
+                }
                 result.output = answer;
             } else {
+                record.summary = state->error;
                 result.output = u"Sub-agent failed: %1"_s.arg(state->error);
                 if (state->includeTranscript) {
                     result.output += subtaskLog(state->log, state->toolCount);
                 }
             }
 
+            result.output += i18n("\n\n[subagent taskId=%1 status=%2 isolation=%3; %4 input / %5 output tokens; use subagent_transcript for the sidechain]",
+                                  state->taskId, record.status, record.isolation,
+                                  record.inputTokens, record.outputTokens);
+
+            appendSubagentSidechain(state->taskId, u"end"_s,
+                                    QJsonObject{{u"status"_s, record.status},
+                                                {u"summary"_s, record.summary.left(8000)},
+                                                {u"filesChanged"_s, QJsonArray::fromStringList(record.filesChanged)},
+                                                {u"inputTokens"_s, record.inputTokens},
+                                                {u"outputTokens"_s, record.outputTokens},
+                                                {u"cachedInputTokens"_s, record.cachedInputTokens},
+                                                {u"costUsd"_s, record.costUsd}});
+            emitHarnessEvent(EventTypes::SubagentEnd,
+                             QJsonObject{{u"taskId"_s, state->taskId},
+                                         {u"status"_s, record.status},
+                                         {u"inputTokens"_s, record.inputTokens},
+                                         {u"outputTokens"_s, record.outputTokens},
+                                         {u"costUsd"_s, record.costUsd},
+                                         {u"filesChanged"_s, QJsonArray::fromStringList(record.filesChanged)}});
+            if (!record.worktreePath.isEmpty()) {
+                Q_EMIT subtaskWorktreeReady(state->taskId, record.worktreePath, record.filesChanged);
+            }
+            // Drop forwarded approval mappings and any question card that is
+            // still waiting for an answer; a finished child cannot use them.
+            for (auto it = m_subtaskPermissionIds.begin(); it != m_subtaskPermissionIds.end();) {
+                if (it->first == state->taskId) {
+                    it = m_subtaskPermissionIds.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+            Q_EMIT subtaskQuestionCancelled(state->taskId, QString());
             const ToolCall pendingCall = state->call;
             const QString finishedId = state->taskId;
+            Q_EMIT subtaskFinished(finishedId, result.ok);
+
             // The state is shared with the child's other handlers, which may
             // still fire with a queued signal. It is released when the last
             // reference goes away.
             state->timer = nullptr;
             child->deleteLater();
-            Q_EMIT subtaskFinished(finishedId, result.ok);
             finishAsyncTool(pendingCall, result);
         },
         Qt::SingleShotConnection);
@@ -5053,8 +6088,20 @@ void AgentLoop::cancelSubtask(const QString &taskId)
 {
     if (taskId.isEmpty()) {
         const QList<AgentLoop *> children = m_activeSubtasks.values();
+        const QStringList ids = m_activeSubtasks.keys();
         m_activeSubtasks.clear();
         m_activeSubtaskDescriptions.clear();
+        for (const QString &id : ids) {
+            auto it = m_subagentRecords.find(id);
+            if (it != m_subagentRecords.end()) {
+                it->status = u"cancelled"_s;
+                if (!it->worktreePath.isEmpty()) {
+                    SubagentWorktree::remove(m_workspace, it->worktreePath);
+                    it->worktreePath.clear();
+                }
+            }
+        }
+        m_subtaskPermissionIds.clear();
         for (AgentLoop *child : children) {
             if (m_locks) {
                 m_locks->releaseAll(child->selfId());
@@ -5072,6 +6119,21 @@ void AgentLoop::cancelSubtask(const QString &taskId)
     }
     m_activeSubtasks.remove(taskId);
     m_activeSubtaskDescriptions.remove(taskId);
+    auto record = m_subagentRecords.find(taskId);
+    if (record != m_subagentRecords.end()) {
+        record->status = u"cancelled"_s;
+        if (!record->worktreePath.isEmpty()) {
+            SubagentWorktree::remove(m_workspace, record->worktreePath);
+            record->worktreePath.clear();
+        }
+    }
+    for (auto it = m_subtaskPermissionIds.begin(); it != m_subtaskPermissionIds.end();) {
+        if (it->first == taskId) {
+            it = m_subtaskPermissionIds.erase(it);
+        } else {
+            ++it;
+        }
+    }
     if (m_locks) {
         m_locks->releaseAll(child->selfId());
     }
@@ -5184,6 +6246,20 @@ void AgentLoop::resolvePermission(PermissionDecision decision)
 
 void AgentLoop::resolvePermission(PermissionDecision decision, const QString &toolCallId)
 {
+    // A child's approval card carries a prefixed id. Route it to the child
+    // instead of the parent's (unrelated) parked request.
+    if (!toolCallId.isEmpty()) {
+        auto forwarded = m_subtaskPermissionIds.find(toolCallId);
+        if (forwarded != m_subtaskPermissionIds.end()) {
+            const QString taskId = forwarded->first;
+            const QString childCallId = forwarded->second;
+            m_subtaskPermissionIds.erase(forwarded);
+            if (AgentLoop *child = m_activeSubtasks.value(taskId)) {
+                child->resolvePermission(decision, childCallId);
+            }
+            return;
+        }
+    }
     if (!m_busy || m_state != State::WaitingForPermission || m_waitingCall.name.isEmpty()) {
         return;
     }
@@ -5322,6 +6398,7 @@ SessionStore::SessionData AgentLoop::sessionData() const
     data.toolCalls = m_toolCalls;
     data.acpSessionId = m_acp.sessionId();
     data.workspace = m_workspace;
+    data.parentConversationId = m_parentConversationId;
     return data;
 }
 
@@ -5365,6 +6442,7 @@ void AgentLoop::restoreSession(const SessionStore::SessionData &data)
         m_acp.setResumeSessionId(data.acpSessionId);
     }
     m_toolCalls = data.toolCalls;
+    m_parentConversationId = data.parentConversationId;
     // A session saved while a tool was still running has an assistant message
     // with tool_calls and no matching Tool messages. Repair the pairing before
     // the next provider request, which would otherwise be rejected with 400.

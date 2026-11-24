@@ -43,6 +43,8 @@ add_library(kateai_core STATIC
     harness/memory.cpp
     harness/contextengine.cpp
     harness/registry.cpp
+    harness/skills.cpp
+    harness/worktree.cpp
     harness/events.cpp
     harness/eventstore.cpp
     harness/turn.cpp
@@ -91,6 +93,7 @@ target_sources(kateai PRIVATE
     configpage.cpp
     turnstatus.cpp
     chatwidget.cpp
+    inspectorpanel.cpp
     toolcallwidget.cpp
     promptedit.cpp
     permissionbar.cpp
