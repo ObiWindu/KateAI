@@ -533,11 +533,44 @@ selecting an ordinary model turns the pair off.
 - The planner reviews changed files and verification evidence through
   `submit_review`, returning either approval or concrete fixes.
 - Replans and review rounds are bounded in settings.
-- Only API-key providers are supported. ACP agents and Telegram cannot be used
-  for either role.
+- Only API-key providers are supported. ACP agents cannot be used for either
+  role. The separate Telegram remote bridge is not a model provider (see below).
 - Usage and cost are attributed per role in `:kateai usage`.
 
 See `docs/ORCHESTRATION.md` for the full design, triggers and edge cases.
+
+### Telegram remote bridge (separate branch only)
+
+The Telegram bridge is **not part of mainline Kate AI** and is not included in
+normal builds or releases. It lives only on the `telegram_bot_bridge` branch so
+that the default build does not expose an agent to an external chat service.
+Treat it as an experimental remote-control surface with a materially larger
+security and privacy footprint than the local editor plugin.
+
+To use it, build from that branch explicitly:
+
+```bash
+git clone https://github.com/KateAI/kate-ai.git
+cd kate-ai
+git switch telegram_bot_bridge
+./install.sh --deps
+./install.sh
+```
+
+Telegram is disabled by default (`TelegramEnabled=false`). If you enable it:
+
+- Create a dedicated bot and keep its token out of the repository and shell
+  history. The token is stored in Kate's settings/credential path, not in the
+  README or a committed config file.
+- Set `TelegramAllowedChatIds` to a private chat or a small explicit allowlist.
+  An empty or broad allowlist lets other chats drive the agent.
+- Leave `TelegramAllowWrites=false` unless you specifically need remote edits.
+  Read-only remote access is the safer default.
+- Do not invite the bot to public groups, and revoke the token immediately if it
+  is exposed.
+
+Because this surface is branch-only, it does not receive the normal mainline
+release testing. Use it only if you accept that risk.
 
 ### ACP tool integration
 
