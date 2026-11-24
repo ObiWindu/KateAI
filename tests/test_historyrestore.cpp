@@ -453,6 +453,67 @@ private Q_SLOTS:
         QVERIFY2(!dock->isVisible(), "the intent dock is on screen with no sub-agent running");
     }
 
+    // A saved transcript can carry a delegation whose result was never
+    // persisted: Kate closed mid-run, or the call survives only in the display
+    // transcript after the model history was compacted. A reload has no child
+    // loop behind it, so recreating it in the intent dock left the dock on
+    // screen at launch with a card that could never finish.
+    void testSubAgentWithoutALiveRunRestoresIntoTheTranscript()
+    {
+        ChatWidget widget;
+        widget.resize(900, 700);
+        widget.show();
+
+        ChatMessage user;
+        user.role = ChatMessage::Role::User;
+        user.content = u"delegate and close Kate"_s;
+
+        ChatMessage assistant;
+        assistant.role = ChatMessage::Role::Assistant;
+        assistant.content = QString();
+        QJsonArray calls;
+        calls.append(toolCall(u"call-orphan"_s, u"new_task"_s,
+                              {{u"description"_s, u"Review the parser"_s}, {u"agent"_s, u"reviewer"_s}}));
+        assistant.toolCalls = calls;
+
+        // The model history was compacted past the call, so restoreSession()
+        // has nothing to repair; only the display transcript remembers it.
+        ChatMessage summary;
+        summary.role = ChatMessage::Role::User;
+        summary.name = u"context_summary"_s;
+        summary.content = u"[Earlier conversation was compacted.]"_s;
+
+        SessionStore::SessionData data;
+        data.messages = {summary};
+        data.transcript = {user, assistant};
+        SessionStore::saveConversation(u"conv-orphan-sub"_s, data, u"Orphan delegation"_s, 50);
+
+        widget.setCurrentConversationId(SessionStore::createNewConversation());
+        widget.switchToConversation(u"conv-orphan-sub"_s);
+        QTest::qWait(60);
+
+        const auto agents = widget.findChildren<SubtaskWidget *>();
+        QCOMPARE(agents.size(), 1);
+        SubtaskWidget *agent = agents.first();
+        QVERIFY2(!agent->isRunning(), "a sub-agent with no live run was restored as running");
+
+        QWidget *dock = widget.findChild<QWidget *>(u"intentDock"_s);
+        QVERIFY(dock);
+        QVERIFY2(dock->isHidden(), "the intent dock opened for a sub-agent that is not running");
+
+        bool insideDock = false;
+        for (QWidget *parent = agent->parentWidget(); parent; parent = parent->parentWidget()) {
+            if (parent == dock) {
+                insideDock = true;
+                break;
+            }
+        }
+        QVERIFY2(!insideDock, "an orphaned sub-agent was docked above the composer");
+        QVERIFY2(agent->parentWidget() && agent->parentWidget()->layout()
+                     && agent->parentWidget()->layout()->indexOf(agent) >= 0,
+                 "the orphaned sub-agent never made it into the transcript");
+    }
+
     void testARestoredAnswerIsNotShownTwice()
     {
         // The snapshot of an unfinished turn holds the text of the answer, and

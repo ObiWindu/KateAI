@@ -7469,12 +7469,23 @@ void ChatWidget::rebuildTranscript()
                 subtaskWidget->setHeightBudget(0);
                 appendTranscriptWidget(subtaskWidget);
                 subtaskWidget->show();
-            } else {
+            } else if (m_agent.runningSubtaskIds().contains(spec.id)) {
                 // Still running (a rebuild during the turn): the card below
                 // whatever was placed just before it in the rebuild order,
                 // which is the position it ran in.
                 m_subtaskAnchors.insert(widgetKey, lastTranscriptContentWidget());
                 addIntentWidget(subtaskWidget);
+            } else {
+                // No result was saved and no child loop is running this id: the
+                // process closed mid-run, or the call survives only in a
+                // compacted display transcript. Docking it would recreate a
+                // "running" sub-agent with nothing behind it and leave the dock
+                // open on every launch with cards nothing can finish. Settle the
+                // card into the thread as stopped work instead.
+                subtaskWidget->markAbandoned(i18n("No result was saved for this sub-agent."));
+                subtaskWidget->setHeightBudget(0);
+                appendTranscriptWidget(subtaskWidget);
+                subtaskWidget->show();
             }
             return;
         }
