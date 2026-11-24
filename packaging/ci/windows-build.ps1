@@ -5,17 +5,25 @@
 #
 # Flow (mirrors https://develop.kde.org/docs/getting-started/building/craft/):
 #   1. Bootstrap Craft if missing (accepts installer defaults).
-#   2. `craft kate`              -> latest Kate + Qt/KF6 stack in C:\CraftRoot.
-#   3. cmake build of this repo against C:\CraftRoot + ctest.
+#   2. `craft ktexteditor`       -> Qt/KF6 stack + the editor framework the
+#                                   plugin links against, in C:\CraftRoot.
+#   3. cmake build of this repo against C:\CraftRoot.
 #   4. Stage artifacts\kateai.dll (+ zip when 7-Zip is present).
 #
+# `-WithKate` additionally builds the Kate application. The plugin itself only
+# needs KF6::TextEditor, while `craft kate` also pulls Konsole, Markdownpart and
+# other applications that KDE does not publish in the Windows binary cache, so
+# they are compiled from source. The plugin CI job must not pay that cost; the
+# release bundle job passes -WithKate because it packages the editor.
+#
 # Usage: powershell -ExecutionPolicy Bypass -File packaging\ci\windows-build.ps1 `
-#            [-BuildType Release] [-ArtifactsDir artifacts]
+#            [-BuildType Release] [-ArtifactsDir artifacts] [-WithKate]
 [CmdletBinding()]
 param(
     [string] $BuildType = "Release",
     [string] $ArtifactsDir = "artifacts",
-    [string] $CraftRoot = "C:\CraftRoot"
+    [string] $CraftRoot = "C:\CraftRoot",
+    [switch] $WithKate
 )
 
 $ErrorActionPreference = "Stop"
@@ -37,6 +45,16 @@ $env:PATH = ($env:PATH -split ';' | Where-Object {
 # for Android, so drop them.
 Remove-Item Env:ANDROID_SDK_ROOT -ErrorAction SilentlyContinue
 Remove-Item Env:ANDROID_NDK -ErrorAction SilentlyContinue
+
+# A source fetch must never sit waiting for credentials on a runner. Make git
+# fail instead of prompting if a mirror redirects to an auth page.
+$env:GIT_TERMINAL_PROMPT = "0"
+
+# GitHub captures stdout through a pipe, so Python block-buffers Craft's
+# output. A long download/source build then looks like a hung job with no log
+# lines. Unbuffered output makes progress visible and turns a stall into an
+# obvious last-line marker.
+$env:PYTHONUNBUFFERED = "1"
 
 # Diagnostics for Craft's VS detection - reduced logging
 $sysVsWhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
@@ -118,6 +136,11 @@ if ($SystemPython) {
 
 Invoke-CraftEnv
 
+# craftenv.ps1 rebuilds the environment from Craft's setup JSON, which drops
+# the variables set above. Restore them for the Craft and compiler runs.
+$env:PYTHONUNBUFFERED = "1"
+$env:GIT_TERMINAL_PROMPT = "0"
+
 # gettext's AM_ICONV probes for a *working* iconv with AC_RUN_IFELSE. On the
 # Windows/Craft host that probe executable often cannot run, so configure
 # sets HAVE_ICONV=0. libtextstyle then omits iconv_ostream_create from its
@@ -146,11 +169,24 @@ Get-ChildItem -Path $CraftRoot -Recurse -Filter config.cache -ErrorAction Silent
     Where-Object { $_.FullName -match 'gettext' } |
     Remove-Item -Force -ErrorAction SilentlyContinue
 
-# Build deps and kate with filtered output
-craft libs/iconv
+# Build the iconv workaround and the editor framework. `--ci-mode` makes Craft
+# return the default on any retry/hash-mismatch choice instead of blocking on a
+# stdin read that GitHub never answers.
+craft --ci-mode libs/iconv
 if (-not $?) { throw "craft libs/iconv failed" }
-craft kate
-if (-not $?) { throw "craft kate failed" }
+
+# The plugin's CMake needs these KF6 packages. KTextEditor pulls most of them
+# in, but naming them explicitly keeps the build working if a blueprint
+# dependency changes. All have Windows binary-cache packages, unlike Kate.
+Write-Host "==> Installing KTextEditor and KF6 dependencies with Craft"
+craft --ci-mode kde/frameworks/tier3/ktexteditor kde/frameworks/tier3/kxmlgui kde/frameworks/tier3/kconfigwidgets
+if (-not $?) { throw "craft ktexteditor failed" }
+
+if ($WithKate) {
+    Write-Host "==> Building the Kate application with Craft"
+    craft --ci-mode kate
+    if (-not $?) { throw "craft kate failed" }
+}
 
 $BuildDir = Join-Path $Root "build"
 $configure = @(

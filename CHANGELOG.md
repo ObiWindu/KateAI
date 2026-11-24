@@ -62,6 +62,11 @@
   carry an assistant-only ACP audience annotation. Agents that treated the
   leading text block as the request no longer answer the editor context while
   ignoring what the user typed.
+- **Windows CI builds the plugin, not the editor.** The Windows plugin job now
+  installs only KTextEditor and the KF6 packages the plugin links against.
+  `craft kate` also builds Kate, Konsole and Markdownpart from source because
+  KDE's Windows binary cache does not contain them, which made every PR wait
+  hours in the Windows job. The release bundle still passes `-WithKate`.
 
 ## 0.7.0 — 2026-11-21
 

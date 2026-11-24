@@ -7,7 +7,7 @@
 #             .deb Debian/Ubuntu 25.04+) and a Linux bundle from the
 #            latest Kate master + plugin.
 #   macOS:   Homebrew build + tests (macos-15), plugin zip, Kate.app bundle.
-#   Windows: KDE Craft MSVC build + tests (windows-latest), plugin zip,
+#   Windows: KDE Craft MSVC plugin build + tests (windows-2022), plugin zip,
 #            Kate + plugin bundle.
 #
 # Release flow (tag main — tags on side branches are ignored):
@@ -30,6 +30,14 @@ on:
 
 permissions:
   contents: read
+
+# A new push to the same PR supersedes the previous run. Without this, several
+# Windows jobs can sit on the 2-core runner at once, which looks like a hang
+# and burns the release budget. Tags and main pushes are never cancelled so a
+# release run cannot be killed by a later manual dispatch.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   # ------------------------------------------------------- Linux plugin build
@@ -262,14 +270,19 @@ jobs:
   # ----------------------------------------------------- Windows plugin build
   # Hosted Windows runners are admin PowerShell with VS Build Tools, CMake,
   # Python and Git preinstalled; Qt/KF6 come from KDE Craft (MSVC ABI).
-  # First run downloads a large binary cache — allow up to 5 hours.
+  #
+  # The plugin only links KF6::TextEditor, so the script builds the KTextEditor
+  # framework and its cached dependencies. It deliberately does not run
+  # `craft kate`: Kate, Konsole and Markdownpart are absent from KDE's Windows
+  # binary cache, so Craft compiles them from source and the job can spend
+  # hours there. The bundle job (main/tags only) passes -WithKate instead.
   build-windows:
     name: Plugin build + tests (Windows)
     # windows-latest now ships VS 2026 (v18); Craft's bootstrap only
     # detects VS 2022 ([17,18)). Pin to windows-2022 until Craft adds
     # VS 2026 support.
     runs-on: windows-2022
-    timeout-minutes: 300
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v4
       - name: Build and test with Craft
