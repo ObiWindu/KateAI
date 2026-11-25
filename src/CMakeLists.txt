@@ -55,6 +55,10 @@ add_library(kateai_core STATIC
     harness/audit.cpp
     harness/hooks.cpp
     harness/replay.cpp
+    harness/cost.cpp
+    harness/telemetry.cpp
+    harness/otlp.cpp
+    harness/acpserver.cpp
 )
 
 set_target_properties(kateai_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
@@ -122,6 +126,22 @@ if(UNIX)
         VERBATIM
     )
 endif()
+
+# One core, many clients: the headless CLI and ACP server drive the same
+# AgentLoop as the editor plugin. They link the core library and install next
+# to the plugin.
+add_executable(kateai-headless
+    headless/main.cpp
+    headless/args.cpp
+    headless/session.cpp
+    headless/acpsession.cpp
+)
+target_compile_definitions(kateai-headless PRIVATE
+    TRANSLATION_DOMAIN="kateai"
+    KATEAI_VERSION="${PROJECT_VERSION}"
+)
+target_link_libraries(kateai-headless PRIVATE kateai_core)
+install(TARGETS kateai-headless RUNTIME DESTINATION "${KDE_INSTALL_BINDIR}")
 
 # The 4 KiB page shim is a Linux-only interposer: it relies on <link.h>,
 # dladdr1(), ElfW and the Linux __NR_* syscall numbers, and it spoofs glibc

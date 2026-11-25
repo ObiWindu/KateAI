@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.9.0-orange" alt="Kate AI 0.9.0">
+  <img src="https://img.shields.io/badge/version-1.0.0-orange" alt="Kate AI 1.0.0">
   <img src="https://img.shields.io/badge/Kate-24.08%2B-1d99f3?logo=kde" alt="Kate 24.08+">
   <img src="https://img.shields.io/badge/Qt-6.5%2B-41cd52?logo=qt" alt="Qt 6.5+">
   <img src="https://img.shields.io/badge/KF-6-blue" alt="KDE Frameworks 6">
@@ -469,6 +469,42 @@ KATEAI_HARNESS_FLAGS=-skills,-agentsV2,-inspector kate
 
 See `docs/HARNESS_0.9.md` and `docs/SKILLS.md`.
 
+### Harness 1.0: telemetry, evals, headless, ACP
+
+1.0 makes the harness a platform. The editor plugin and the new headless client
+run the same loop, tools, policy, verification gate, and event log.
+
+- **Cost and traces.** The cost ledger prices provider-reported input, output,
+  cache-read, and cache-write tokens per model; unknown prices are reported as
+  unknown. `:kateai usage` and the inspector Cost tab show per-role and
+  sub-agent attribution. `:kateai trace` now prints a turn/step/tool/permission
+  waterfall derived from the event log and exports both events and spans. A
+  soft per-conversation budget warns once and never fails a turn. See
+  `docs/TELEMETRY.md`.
+- **OTLP export.** Off by default. Enable `telemetry` and set an endpoint in
+  Settings → Agent & Context to export OTLP/HTTP JSON spans (for example to a
+  local collector on `127.0.0.1:4318`). A collector failure is a notice, not a
+  turn failure.
+- **Evaluation harness.** `tests/evals` runs the real headless binary against a
+  scripted provider and fixtures, with assertions on files, events, exit codes,
+  verification evidence, tool failures, and cost. `cmake --build build
+  --target harness_eval` runs the smoke and injection suites; see
+  `docs/EVALS.md`.
+- **Headless CLI.** `kateai-headless run` accepts a workspace, prompt, provider,
+  permission/sandbox mode, budgets, and an output directory. It writes
+  `events.jsonl`, `summary.json`, `trace.jsonl`, and `patch.diff`, with
+  deterministic exit codes (`0` success, `2` failure, `4` permission required,
+  `5` question required). `kateai-headless replay` validates a recorded turn
+  without a model. See `docs/HEADLESS.md`.
+- **ACP server.** `kateai-headless acp --stdio` lets another editor or host
+  create sessions, stream message/thought/tool/plan updates, answer permission
+  requests and questions, and cancel. Each session has its own conversation and
+  event log. See `docs/ACP_SERVER.md`.
+- **Configuration.** Schema v4 is additive: telemetry, budget, and no-key
+  defaults keep the 0.9 behaviour when unset.
+
+See `docs/HARNESS_1.0.md`.
+
 ### Providers and models
 
 | Provider | Default endpoint | Default model |
@@ -765,7 +801,12 @@ Keys are stored through KDE Wallet when it is available. Without a wallet they g
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
 cmake --build build -j"$(nproc)"
 ctest --test-dir build --output-on-failure
+# Scripted harness scenarios against the real CLI:
+cmake --build build --target harness_eval
 ```
+
+Add `-DKATEAI_ENABLE_EVALS=ON` to a CI configure to run the smoke suite from
+CTest. See `docs/EVALS.md`.
 
 Always configure out-of-source (`-B build`, not `cmake .`). Do not copy a `build/` directory between machines or users — it embeds absolute paths such as `/home/<someone>/…`. `./install.sh` and `./build.sh` throw away a cache that belongs to another source path, or they switch to `build-$USER` if `build/` is not writable.
 
@@ -786,6 +827,9 @@ Always configure out-of-source (`-B build`, not `cmake .`). Do not copy a `build
 | `src/permissions.cpp` | Ask / accept-edits / always-approve |
 | `src/sessionstore.cpp` | Conversation persistence |
 | `src/documentbridge.cpp` | Open Kate buffers vs disk |
+| `src/harness/` | Event log, turn middleware, policy, hooks, checks, prompt/context, tools, skills, cost, telemetry, ACP server |
+| `src/headless/` | `kateai-headless` CLI: run, replay, ACP |
+| `tests/evals/` | Scripted provider, fixtures, scenario runner and reports |
 | `tests/` | Sandbox, permission, SSE parser, retry, session, prompt tests |
 
 ---

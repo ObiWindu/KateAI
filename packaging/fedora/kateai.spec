@@ -1,5 +1,5 @@
 Name:           kateai
-Version:        0.9.0
+Version:        1.0.0
 Release:        1%{?dist}
 Summary:        AI coding agent plugin for the Kate text editor
 
@@ -49,11 +49,19 @@ asks before destructive actions. Works on Fedora and Fedora Asahi Remix.
 %license LICENSE
 %doc README.md
 %{_libdir}/qt6/plugins/kf6/ktexteditor/kateai.so
+%{_bindir}/kateai-headless
 # Page-size shim used by the agent sandbox on 4K-page systems (e.g. Asahi).
 %dir %{_libdir}/kateai
 %{_libdir}/kateai/libpage4k.so
 
 %changelog
+* Wed Nov 25 2026 ObiWindu <Obi.wandu@proton.me> - 1.0.0-1
+- Release 1.0.0: per-model cost ledger with cache accounting and soft
+  budgets; event-derived trace spans with opt-in OTLP/HTTP export; a scripted
+  scenario eval suite with smoke and injection fixtures; the kateai-headless
+  CLI with JSONL events, patches, summaries and deterministic exit codes; an
+  ACP v1 stdio server; and configuration schema v4.
+
 * Tue Nov 24 2026 ObiWindu <Obi.wandu@proton.me> - 0.9.0-1
 - Release 0.9.0: SKILL.md discovery with progressive disclosure, trust
   scanning and fork context; declarative AgentSpecs with JSONL sidechains,

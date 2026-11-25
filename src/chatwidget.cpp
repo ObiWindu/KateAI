@@ -3852,14 +3852,23 @@ void ChatWidget::showTraceReport()
         ? u"kateai-trace.jsonl"_s
         : u"kateai-trace-%1.jsonl"_s.arg(conversation);
     const QString path = QDir(QDir::tempPath()).filePath(fileName);
+    const QString spanName = conversation.isEmpty()
+        ? u"kateai-spans.jsonl"_s
+        : u"kateai-spans-%1.jsonl"_s.arg(conversation);
+    const QString spanPath = QDir(QDir::tempPath()).filePath(spanName);
     QString error;
     const bool ok = m_agent.exportTrace(path, &error);
+    QString spanError;
+    const bool spansOk = m_agent.exportTelemetry(spanPath, &spanError);
     QMessageBox box(this);
     box.setWindowTitle(i18n("Kate AI Trace"));
     box.setIcon(ok ? QMessageBox::Information : QMessageBox::Warning);
     box.setTextFormat(Qt::PlainText);
-    box.setText(ok ? i18n("Exported the harness event log to:\n%1", path)
-                   : i18n("Could not export the trace:\n%1", error));
+    QString text = ok ? i18n("Exported the harness event log to:\n%1", path)
+                      : i18n("Could not export the trace:\n%1", error);
+    text += spansOk ? i18n("\n\nExported the span trace to:\n%1", spanPath)
+                    : i18n("\n\nCould not export the span trace:\n%1", spanError);
+    box.setText(text);
     box.setStandardButtons(QMessageBox::Close);
     box.exec();
 }

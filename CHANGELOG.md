@@ -1,13 +1,45 @@
 # Changelog
 
-## Unreleased
+## 1.0.0 — 2026-11-25
 
+- **Cost ledger and traces.** Provider usage is priced per model, cache reads
+  and writes are reported separately, and per-role/sub-agent attribution feeds
+  `:kateai usage`, the inspector Cost tab, and headless artifacts. A turn's
+  trace is derived from the append-only event log and shown as a
+  turn/step/tool/permission waterfall in `:kateai trace`, which now exports
+  both events and spans. An optional per-conversation budget raises one notice
+  and never fails a turn. See `docs/TELEMETRY.md`.
+- **OTLP export.** Opt-in OTLP/HTTP JSON span export with retries and no remote
+  default. A collector failure is a notice; it never changes a turn's outcome.
+  Enable the `telemetry` flag and set an endpoint in Settings → Agent & Context.
+- **Evaluation harness.** `tests/evals` runs the real headless binary against a
+  deterministic scripted provider, fixture repositories, and smoke/injection
+  scenarios. Assertions cover files, event order, exit codes, verification
+  evidence, failed tools, and cost. `harness_eval` target; opt-in CTest via
+  `-DKATEAI_ENABLE_EVALS=ON`. See `docs/EVALS.md`.
+- **`kateai-headless`.** A CLI that drives the same `AgentLoop`, tools, policy,
+  hooks, sandbox, and verification gate as the plugin. `run` writes
+  `events.jsonl`, `summary.json`, `trace.jsonl`, and `patch.diff` and uses
+  deterministic exit codes; `replay` validates a recorded turn without a model;
+  `acp` serves ACP v1 over stdio. See `docs/HEADLESS.md` and
+  `docs/ACP_SERVER.md`.
+- **ACP server.** Session creation/close, deferred prompts, streamed
+  message/thought/tool/plan updates, permission and question round-trips,
+  cancellation, and `_kateai/ping`/`capabilities`. Each session owns its
+  conversation and event log; the hardline/policy layers still run first.
+- **Configuration schema v4.** Telemetry (`TelemetryEnabled`,
+  `TelemetryEndpoint`, `TelemetryContentCapture`) and `CostBudgetUsd` are
+  additive; defaults keep 0.9 behaviour. The developer settings page exposes
+  the opt-in controls.
 - **Two-model orchestration.** A read-only planner explores and writes a plan,
   a cheaper executor applies it with the normal tools, and the planner reviews
   the result. The pair can use different API-key providers. `request_replan`
   returns control on friction; replans and reviews are bounded. Configure it in
   Settings → AI Providers → Model Orchestration or select the Orchestrator row
   in the model picker. See `docs/ORCHESTRATION.md`.
+- Version metadata updated to 1.0.0 across CMake, README, ACP identity, and
+  packaging. Release notes: `docs/HARNESS_1.0.md` and
+  `changelogs/CHANGELOG_1.0.0.md`.
 
 ## 0.9.0 — 2026-11-24
 

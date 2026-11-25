@@ -95,8 +95,9 @@ Settings SettingsStore::load()
     // additive and default safely, so a v1 config is read as-is and rewritten
     // with version 2 on the next save. v2 -> v3 (0.10) adds the Orchestration
     // JSON block, also additive; a v2 config stays single-model until the user
-    // enables the pair.
-    if (storedVersion > 0 && storedVersion < 3) {
+    // enables the pair. v3 -> v4 (1.0) adds the telemetry/cost block, again
+    // additive and off by default.
+    if (storedVersion > 0 && storedVersion < 4) {
         qInfo() << "KateAI: upgrading configuration" << storedVersion << "->" << configVersion();
     }
     Settings s;
@@ -286,6 +287,10 @@ Settings SettingsStore::load()
     s.presencePenalty = g.readEntry(u"PresencePenalty"_s, 0.0);
     s.requireVerification = g.readEntry(u"RequireVerification"_s, true);
     s.maxVerificationAttempts = g.readEntry(u"MaxVerificationAttempts"_s, 2);
+    s.telemetryEnabled = g.readEntry(u"TelemetryEnabled"_s, false);
+    s.telemetryEndpoint = g.readEntry(u"TelemetryEndpoint"_s, QString());
+    s.telemetryContentCapture = g.readEntry(u"TelemetryContentCapture"_s, false);
+    s.costBudgetUsd = g.readEntry(u"CostBudgetUsd"_s, 0.0);
     s.enableAutoRetry = g.readEntry(u"EnableAutoRetry"_s, true);
     s.maxRetryAttempts = g.readEntry(u"MaxRetryAttempts"_s, 4);
     s.baseRetryDelaySeconds = g.readEntry(u"BaseRetryDelaySeconds"_s, 5);
@@ -331,6 +336,8 @@ Settings SettingsStore::load()
     s.maxThinkingTokens = qBound(0, s.maxThinkingTokens, 200000);
     s.maxPlanSteps = qBound(1, s.maxPlanSteps, 50);
     s.maxVerificationAttempts = qBound(0, s.maxVerificationAttempts, 10);
+    s.costBudgetUsd = qMax(0.0, s.costBudgetUsd);
+    s.telemetryEndpoint = s.telemetryEndpoint.trimmed();
     s.frequencyPenalty = qBound(-2.0, s.frequencyPenalty, 2.0);
     s.presencePenalty = qBound(-2.0, s.presencePenalty, 2.0);
     // Generation temperature, not the adaptive pair below.
@@ -557,6 +564,10 @@ void SettingsStore::save(const Settings &settings)
     g.writeEntry(u"PresencePenalty"_s, settings.presencePenalty);
     g.writeEntry(u"RequireVerification"_s, settings.requireVerification);
     g.writeEntry(u"MaxVerificationAttempts"_s, settings.maxVerificationAttempts);
+    g.writeEntry(u"TelemetryEnabled"_s, settings.telemetryEnabled);
+    g.writeEntry(u"TelemetryEndpoint"_s, settings.telemetryEndpoint);
+    g.writeEntry(u"TelemetryContentCapture"_s, settings.telemetryContentCapture);
+    g.writeEntry(u"CostBudgetUsd"_s, settings.costBudgetUsd);
     g.writeEntry(u"EnableAutoRetry"_s, settings.enableAutoRetry);
     g.writeEntry(u"MaxRetryAttempts"_s, settings.maxRetryAttempts);
     g.writeEntry(u"BaseRetryDelaySeconds"_s, settings.baseRetryDelaySeconds);

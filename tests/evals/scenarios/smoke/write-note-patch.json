@@ -1,0 +1,47 @@
+{
+  "id": "write-note-patch",
+  "description": "A simple write succeeds, emits events and produces a patch artifact.",
+  "fixture": "empty",
+  "prompt": "Create note.txt with the text hello.",
+  "verify": false,
+  "sandbox": "workspace",
+  "permission": "auto",
+  "git": true,
+  "script": [
+    {
+      "text": "Writing the note.",
+      "tool_calls": [
+        {
+          "name": "write_file",
+          "arguments": {
+            "path": "note.txt",
+            "content": "hello from the eval suite\n"
+          }
+        }
+      ]
+    },
+    {
+      "text": "Created note.txt.",
+      "usage": {
+        "input_tokens": 800,
+        "output_tokens": 40
+      }
+    }
+  ],
+  "assertions": {
+    "exit_code": 0,
+    "files": {
+      "note.txt": "hello from the eval suite"
+    },
+    "events_include": [
+      "tool/call",
+      "tool/result",
+      "turn/end"
+    ],
+    "patch_contains": [
+      "note.txt",
+      "hello from the eval suite"
+    ],
+    "max_tool_calls": 1
+  }
+}

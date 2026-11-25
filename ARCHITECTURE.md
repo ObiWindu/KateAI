@@ -92,6 +92,23 @@ stdio JSON-RPC, sub-agents (`new_task`) run as nested `AgentLoop`s.
 - `CheckDiscovery`/`CheckRunner` run the repository's checks through the active
   sandbox; `Replay` validates recorded call/result pairing.
 
+### Harness layer (1.0)
+
+The 1.0 additions keep the same core:
+
+- `CostLedger` prices provider usage per model, role, and sub-agent and applies a
+  soft conversation budget. `Telemetry` derives spans from the event log and
+  `OtlpExporter` is the only optional network path (off by default).
+- `AcpServer` implements ACP v1 over stdio for host clients. It owns session ids
+  and JSON-RPC, but every session is a `HeadlessSession` around the same
+  `AgentLoop`.
+- `src/headless/` builds `kateai-headless`: `run` drives one prompt with a
+  disk-only `DocumentBridge`, `replay` validates an event log, and `acp` serves
+  the ACP profile. The executable is additive; the plugin does not depend on it.
+- `tests/evals` drives the real binary against a scripted provider with fixture
+  repositories and assertions on files, events, verification, failures, and
+  cost.
+
 ## ACP tool integration
 
 When the provider is an ACP agent (`usesAcpNative`), `AgentLoop` delegates the

@@ -1,3 +1,13 @@
+kateai (1.0.0-1) unstable; urgency=medium
+
+  * Release 1.0.0: per-model cost ledger with cache accounting and soft
+    budgets; event-derived trace spans with opt-in OTLP/HTTP export; a
+    scripted scenario eval suite with smoke and injection fixtures; the
+    kateai-headless CLI with JSONL events, patches, summaries and deterministic
+    exit codes; an ACP v1 stdio server; and configuration schema v4.
+
+ -- ObiWindu <Obi.wandu@proton.me>  Wed, 25 Nov 2026 00:00:00 +0000
+
 kateai (0.9.0-1) unstable; urgency=medium
 
   * Release 0.9.0: SKILL.md discovery with progressive disclosure, trust

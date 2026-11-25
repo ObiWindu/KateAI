@@ -866,6 +866,31 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     m_maxVerificationAttempts->setRange(1, 5);
     agentForm->addRow(i18n("Max verification attempts:"), m_maxVerificationAttempts);
 
+    auto *telemetrySeparator = new QLabel(i18n("--- Telemetry & Cost ---"), agentWidget);
+    telemetrySeparator->setStyleSheet(u"font-weight: bold; margin-top: 10px;"_s);
+    agentForm->addRow(telemetrySeparator);
+
+    m_telemetryEnabled = new QCheckBox(
+        i18n("Export local trace spans to an OTLP/HTTP collector (opt-in)"), agentWidget);
+    agentForm->addRow(i18n("OTLP export:"), m_telemetryEnabled);
+
+    m_telemetryEndpoint = new QLineEdit(agentWidget);
+    m_telemetryEndpoint->setPlaceholderText(i18n("http://127.0.0.1:4318"));
+    agentForm->addRow(i18n("OTLP endpoint:"), m_telemetryEndpoint);
+
+    m_telemetryContentCapture = new QCheckBox(
+        i18n("Include message/tool content in spans (off: sizes and hashes only)"),
+        agentWidget);
+    agentForm->addRow(i18n("Content capture:"), m_telemetryContentCapture);
+
+    m_costBudget = new QDoubleSpinBox(agentWidget);
+    m_costBudget->setRange(0.0, 10000.0);
+    m_costBudget->setDecimals(2);
+    m_costBudget->setSingleStep(0.5);
+    m_costBudget->setSpecialValueText(i18n("No budget"));
+    m_costBudget->setPrefix(u"$"_s);
+    agentForm->addRow(i18n("Per-conversation budget:"), m_costBudget);
+
 
 
 
@@ -1567,6 +1592,10 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     connect(m_maxPlanSteps, &QSpinBox::valueChanged, this, markChanged);
     connect(m_requireVerification, &QCheckBox::toggled, this, markChanged);
     connect(m_maxVerificationAttempts, &QSpinBox::valueChanged, this, markChanged);
+    connect(m_telemetryEnabled, &QCheckBox::toggled, this, markChanged);
+    connect(m_telemetryEndpoint, &QLineEdit::textChanged, this, markChanged);
+    connect(m_telemetryContentCapture, &QCheckBox::toggled, this, markChanged);
+    connect(m_costBudget, &QDoubleSpinBox::valueChanged, this, markChanged);
 
     // Context Management
     connect(m_contextWindow, &QSpinBox::valueChanged, this, markChanged);
@@ -2016,6 +2045,10 @@ s.opencodeModel = m_opencodeModel->currentText().trimmed();
     s.maxPlanSteps = m_maxPlanSteps->value();
     s.requireVerification = m_requireVerification->isChecked();
     s.maxVerificationAttempts = m_maxVerificationAttempts->value();
+    s.telemetryEnabled = m_telemetryEnabled->isChecked();
+    s.telemetryEndpoint = m_telemetryEndpoint->text().trimmed();
+    s.telemetryContentCapture = m_telemetryContentCapture->isChecked();
+    s.costBudgetUsd = m_costBudget->value();
 
     // Context Management
     s.contextWindow = m_contextWindow->value();
@@ -2276,6 +2309,10 @@ void KateAiConfigPage::reset()
     m_maxPlanSteps->setValue(s.maxPlanSteps);
     m_requireVerification->setChecked(s.requireVerification);
     m_maxVerificationAttempts->setValue(s.maxVerificationAttempts);
+    m_telemetryEnabled->setChecked(s.telemetryEnabled);
+    m_telemetryEndpoint->setText(s.telemetryEndpoint);
+    m_telemetryContentCapture->setChecked(s.telemetryContentCapture);
+    m_costBudget->setValue(s.costBudgetUsd);
 
     // Context Management
     m_contextWindow->setValue(s.contextWindow);

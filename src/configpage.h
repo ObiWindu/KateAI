@@ -193,6 +193,12 @@ private:
     QCheckBox *m_requireVerification = nullptr;
     QSpinBox *m_maxVerificationAttempts = nullptr;
 
+    // Telemetry and cost
+    QCheckBox *m_telemetryEnabled = nullptr;
+    QLineEdit *m_telemetryEndpoint = nullptr;
+    QCheckBox *m_telemetryContentCapture = nullptr;
+    QDoubleSpinBox *m_costBudget = nullptr;
+
     // Context Management
     QSpinBox *m_contextWindow = nullptr;
     QSpinBox *m_keepRecentTokens = nullptr;

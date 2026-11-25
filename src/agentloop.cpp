@@ -356,6 +356,10 @@ AgentLoop::AgentLoop(QObject *parent)
                 m_inputTokensTotal += inputTokens;
                 m_outputTokensTotal += outputTokens;
                 m_cachedInputTokensTotal += cachedInputTokens;
+                const ModelProfile usageProfile =
+                    ModelProfiles::resolve(usageSettings.provider, model);
+                m_costs.record(m_activeRoute.key(), model, usageProfile,
+                               CostUsage{inputTokens, outputTokens, cachedInputTokens, 0});
                 RouteUsage &roleUsage = m_routeUsage[m_activeRoute.key()];
                 roleUsage.input += inputTokens;
                 roleUsage.output += outputTokens;
@@ -369,6 +373,9 @@ AgentLoop::AgentLoop(QObject *parent)
                 payload.insert(u"cachedInputTokens"_s, cachedInputTokens);
                 payload.insert(u"estimatedInputTokens"_s, m_lastRequestEstimate);
                 payload.insert(u"factor"_s, m_tokenCalibrator.factor());
+                payload.insert(u"model"_s, model);
+                payload.insert(u"provider"_s, providerId(usageSettings.provider));
+                payload.insert(u"role"_s, orchestrationRoleId(m_activeRole));
                 emitHarnessEvent(EventTypes::Notice, payload);
             });
 
@@ -625,6 +632,10 @@ void AgentLoop::setSettings(const Settings &settings)
         }
     }
     reloadHarnessConfig();
+    if (m_costs.budgetUsd() != m_settings.costBudgetUsd) {
+        m_costBudgetNotified = false;
+    }
+    m_costs.setBudgetUsd(m_settings.costBudgetUsd);
     // The mode may override the sampling knobs; everything else reaches the
     // client unchanged. Kept as a copy so the override never writes back into
     // the settings the config page shows.
@@ -1263,6 +1274,8 @@ void AgentLoop::captureSubagentUsage(const QString &taskId, int input, int outpu
         record.costUsd += (input * profile.inputPrice + output * profile.outputPrice
                            + cached * profile.cacheReadPrice) / 1000000.0;
     }
+    m_costs.recordSubagent(taskId, modelFor(m_settings), profile,
+                           CostUsage{input, output, cached, 0});
 }
 
 QList<SubagentRecord> AgentLoop::subagents() const
@@ -1395,10 +1408,19 @@ QString AgentLoop::traceReport() const
     if (conversation.isEmpty()) {
         return i18n("No conversation is active yet.");
     }
-    const QList<HarnessEvent> events = m_events.read(conversation, 0, -1);
+    QString openError;
+    EventStore store;
+    if (!store.open(&openError)) {
+        return i18n("The event log is unavailable: %1", openError);
+    }
+    const QList<HarnessEvent> events = store.read(conversation, 0, -1);
     QString text;
     text += i18n("Conversation: %1\nEvents: %2, head sequence: %3\n\n",
-                 conversation, events.size(), m_events.headSeq(conversation));
+                 conversation, events.size(), store.headSeq(conversation));
+    text += Telemetry::report(
+                Telemetry::fromEvents(events, m_settings.telemetryContentCapture))
+        + u'\n';
+    text += i18n("Event log:\n");
     const ReplayReport replay = Replay::analyze(events);
     if (!replay.ok) {
         text += i18n("Replay problems:\n");
@@ -1763,6 +1785,35 @@ void AgentLoop::endHarnessTurn(const QString &status, const QString &detail)
     payload.insert(u"changedPaths"_s, QJsonArray::fromStringList(m_turnContext.changedPaths.values()));
     emitHarnessEvent(EventTypes::TurnEnd, payload);
     m_middleware.runTurnEnd(m_turnContext);
+    if (m_settings.costBudgetUsd > 0.0 && m_costs.overBudget() && !m_costBudgetNotified) {
+        m_costBudgetNotified = true;
+        const QString message =
+            i18n("The conversation cost budget was exceeded: %1 of %2.",
+                 CostBreakdown::formatUsd(m_costs.total().totalUsd()),
+                 CostBreakdown::formatUsd(m_settings.costBudgetUsd));
+        Q_EMIT noticeRaised(message);
+        emitHarnessEvent(EventTypes::Notice,
+                         QJsonObject{{u"source"_s, u"cost"_s},
+                                     {u"message"_s, message},
+                                     {u"totalUsd"_s, m_costs.total().totalUsd()},
+                                     {u"budgetUsd"_s, m_settings.costBudgetUsd}});
+    }
+    if (m_harness.telemetry && m_settings.telemetryEnabled) {
+        const QUrl endpoint(m_settings.telemetryEndpoint.trimmed());
+        if (endpoint.isValid() && !endpoint.isEmpty()) {
+            auto *exporter = new OtlpExporter(this);
+            exporter->setEndpoint(endpoint);
+            connect(exporter, &OtlpExporter::exportFinished, this,
+                    [this, exporter](bool ok, int status, const QString &error) {
+                        if (!ok) {
+                            Q_EMIT noticeRaised(i18n("Telemetry export failed (%1): %2",
+                                                     status, error));
+                        }
+                        exporter->deleteLater();
+                    });
+            exporter->exportSpans(traceSpans());
+        }
+    }
 }
 
 void AgentLoop::recordPermissionDecision(const QString &toolName, const QString &decision,
@@ -2670,6 +2721,8 @@ void AgentLoop::resetConversation()
     m_currentAssistant.clear();
     resetOrchestrationRuntime();
     m_routeUsage.clear();
+    m_costs.reset();
+    m_costBudgetNotified = false;
     m_contextSummary.clear();
     m_contextManifest.clear();
     m_touchedPaths.clear();
@@ -3568,6 +3621,12 @@ QString AgentLoop::usageReport() const
                            it.value().input, it.value().output, it.value().cached);
         }
     }
+    report += i18n("\nCost ledger:\n") + m_costs.summary();
+    if (m_costs.overBudget()) {
+        report += i18n("Budget exceeded: %1 of %2\n",
+                       CostBreakdown::formatUsd(m_costs.total().totalUsd()),
+                       CostBreakdown::formatUsd(m_costs.budgetUsd()));
+    }
     report += i18n("Calibration samples: %1\n", m_tokenCalibrator.samples());
     report += i18n("Recovery prompts: %1\n", m_recoveryPromptCount);
     report += i18n("Harness flags: %1\n", m_harness.enabledNames().isEmpty()
@@ -3580,6 +3639,114 @@ QString AgentLoop::usageReport() const
                    m_harness.eventLog ? i18n("on") : i18n("off"),
                    currentConversationId().isEmpty() ? i18n("(none)") : currentConversationId());
     report += i18n("\nToken counts are local estimates calibrated from provider-reported usage; pricing is per million input tokens and excludes cached and output tokens unless stated.");
+    return report;
+}
+
+QJsonObject AgentLoop::costReportJson() const
+{
+    QJsonObject report = m_costs.toJson();
+    QJsonObject context;
+    context.insert(u"provider"_s, providerId(m_settings.provider));
+    context.insert(u"model"_s, modelFor(m_settings));
+    context.insert(u"conversationId"_s, currentConversationId());
+    context.insert(u"turnId"_s, m_turnId);
+    context.insert(u"budgetUsd"_s, m_settings.costBudgetUsd);
+    report.insert(u"context"_s, context);
+    QJsonArray subagentRecords;
+    QStringList taskIds = m_subagentRecords.keys();
+    std::sort(taskIds.begin(), taskIds.end());
+    for (const QString &taskId : std::as_const(taskIds)) {
+        const SubagentRecord record = m_subagentRecords.value(taskId);
+        QJsonObject object;
+        object.insert(u"taskId"_s, record.taskId);
+        object.insert(u"agentId"_s, record.agentId);
+        object.insert(u"model"_s, record.agentId.isEmpty() ? modelFor(m_settings) : record.agentId);
+        object.insert(u"inputTokens"_s, record.inputTokens);
+        object.insert(u"outputTokens"_s, record.outputTokens);
+        object.insert(u"cachedInputTokens"_s, record.cachedInputTokens);
+        object.insert(u"costUsd"_s, record.costUsd);
+        subagentRecords.append(object);
+    }
+    report.insert(u"subagentRecords"_s, subagentRecords);
+    return report;
+}
+
+double AgentLoop::sessionCostUsd() const
+{
+    return m_costs.total().totalUsd();
+}
+
+QList<Span> AgentLoop::traceSpans() const
+{
+    const QString conversation = currentConversationId();
+    if (conversation.isEmpty()) {
+        return {};
+    }
+    EventStore store;
+    QString error;
+    if (!store.open(&error)) {
+        return {};
+    }
+    const QList<HarnessEvent> events = store.read(conversation, 0, -1, &error);
+    if (!error.isEmpty()) {
+        return {};
+    }
+    return Telemetry::fromEvents(events, m_settings.telemetryContentCapture);
+}
+
+QJsonObject AgentLoop::traceJson() const
+{
+    const QList<Span> spans = traceSpans();
+    return Telemetry::toJsonObject(spans, currentConversationId()
+                                             + (m_turnId.isEmpty() ? QString() : u"/"_s + m_turnId));
+}
+
+bool AgentLoop::exportTelemetry(const QString &path, QString *error)
+{
+    const QList<Span> spans = traceSpans();
+    if (spans.isEmpty()) {
+        if (error) {
+            *error = i18n("No trace spans are available for this conversation.");
+        }
+        return false;
+    }
+    if (!Telemetry::exportJsonl(spans, path, error)) {
+        return false;
+    }
+    if (!m_harness.telemetry || !m_settings.telemetryEnabled) {
+        return true;
+    }
+    const QUrl endpoint(m_settings.telemetryEndpoint.trimmed());
+    if (!endpoint.isValid() || endpoint.isEmpty()) {
+        return true;
+    }
+    auto *exporter = new OtlpExporter(this);
+    exporter->setEndpoint(endpoint);
+    connect(exporter, &OtlpExporter::exportFinished, this,
+            [this, exporter](bool ok, int status, const QString &exportError) {
+                if (!ok) {
+                    Q_EMIT noticeRaised(i18n("Telemetry export failed (%1): %2",
+                                             status, exportError));
+                }
+                exporter->deleteLater();
+            });
+    exporter->exportSpans(spans);
+    return true;
+}
+
+QString AgentLoop::telemetryReport() const
+{
+    const QList<Span> spans = traceSpans();
+    QString report = Telemetry::report(spans);
+    report += u"\n"_s + i18n("Cost ledger:\n") + m_costs.summary();
+    if (m_settings.telemetryEnabled) {
+        report += i18n("OTLP export: %1\n",
+                       m_settings.telemetryEndpoint.isEmpty()
+                           ? i18n("enabled, no endpoint configured")
+                           : m_settings.telemetryEndpoint);
+    } else {
+        report += i18n("OTLP export: off\n");
+    }
     return report;
 }
 
@@ -4793,7 +4960,8 @@ void AgentLoop::onFinished(const QString &text, const QList<ToolCall> &toolCalls
         if (runVerificationGate()) {
             return;
         }
-        if (m_changesNeedVerification && !m_verificationAttempted && m_verificationPromptCount < 1) {
+        if (m_settings.requireVerification && m_changesNeedVerification
+            && !m_verificationAttempted && m_verificationPromptCount < 1) {
             requestVerificationTurn();
             return;
         }

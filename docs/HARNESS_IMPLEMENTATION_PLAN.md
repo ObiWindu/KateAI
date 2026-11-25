@@ -4,8 +4,8 @@
 
 | | |
 | --- | --- |
-| Status | Execution plan (proposal; estimates are planning ranges, not commitments) |
-| Branch | `feat/state-of-the-art-harness` |
+| Status | Implemented through 1.0 in `feature/harness_complete`; see `docs/HARNESS_1.0.md` |
+| Branch | `feature/harness_complete` |
 | Baseline | 0.6.0, 55 CTest cases green, Linux sandbox validated |
 | Target releases | 0.6.1 (quick wins) → 0.7.0 (substrate) → 0.8.0 (context/tools) → 0.9.0 (extensibility/agents) → 1.0.0 (platform) |
 | Related | `docs/HARNESS_ROADMAP.md` (research and design), `ARCHITECTURE.md`, `CHANGELOG.md` |

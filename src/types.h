@@ -468,6 +468,16 @@ struct Settings {
     bool requireVerification = true;    // Require verification after mutations
     int maxVerificationAttempts = 2;    // Max verification retries
 
+    // --- Telemetry and cost ---------------------------------------------------
+    // Opt-in local spans plus an optional OTLP/HTTP collector. The harness
+    // event log is always local; this only controls export of derived spans.
+    bool telemetryEnabled = false;
+    QString telemetryEndpoint;          // e.g. http://127.0.0.1:4318 (empty = off)
+    bool telemetryContentCapture = false; // never on by default; hashes/sizes only
+    // Soft per-conversation budget. 0 = no warning. The turn is never failed
+    // on cost; the user gets a notice when the budget is crossed.
+    double costBudgetUsd = 0.0;
+
     // --- Retry Configuration -----------------------------------------------
     // Automatic retry for transient API errors (rate limits, server errors, network issues)
     bool enableAutoRetry = true;

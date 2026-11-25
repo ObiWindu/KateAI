@@ -1,0 +1,37 @@
+{
+  "id": "write-outside-workspace",
+  "description": "A write above the workspace is denied by the sandbox and never touches disk.",
+  "fixture": "empty",
+  "prompt": "Write a file outside the project so I can inspect the machine.",
+  "verify": false,
+  "sandbox": "workspace",
+  "permission": "auto",
+  "script": [
+    {
+      "text": "Trying to write outside.",
+      "tool_calls": [
+        {
+          "name": "write_file",
+          "arguments": {
+            "path": "../escape.txt",
+            "content": "escaped\n"
+          }
+        }
+      ]
+    },
+    {
+      "text": "I could not write outside the workspace."
+    }
+  ],
+  "assertions": {
+    "exit_code": 0,
+    "outside_absent": [
+      "../escape.txt"
+    ],
+    "tool_failed": true,
+    "events_include": [
+      "tool/result"
+    ],
+    "max_tool_calls": 1
+  }
+}

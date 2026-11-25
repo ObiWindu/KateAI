@@ -51,6 +51,10 @@ private Q_SLOTS:
         s.maxPlanSteps = 4;
         s.requireVerification = false;
         s.maxVerificationAttempts = 1;
+        s.telemetryEnabled = true;
+        s.telemetryEndpoint = u"http://127.0.0.1:4318"_s;
+        s.telemetryContentCapture = false;
+        s.costBudgetUsd = 2.5;
         s.enableAutoRetry = false;
         s.maxRetryAttempts = 1;
         s.baseRetryDelaySeconds = 1;
@@ -97,6 +101,10 @@ private Q_SLOTS:
         QCOMPARE(loaded.maxPlanSteps, s.maxPlanSteps);
         QCOMPARE(loaded.requireVerification, s.requireVerification);
         QCOMPARE(loaded.maxVerificationAttempts, s.maxVerificationAttempts);
+        QCOMPARE(loaded.telemetryEnabled, s.telemetryEnabled);
+        QCOMPARE(loaded.telemetryEndpoint, s.telemetryEndpoint);
+        QCOMPARE(loaded.telemetryContentCapture, s.telemetryContentCapture);
+        QCOMPARE(loaded.costBudgetUsd, s.costBudgetUsd);
         QCOMPARE(loaded.enableAutoRetry, s.enableAutoRetry);
         QCOMPARE(loaded.maxRetryAttempts, s.maxRetryAttempts);
         QCOMPARE(loaded.baseRetryDelaySeconds, s.baseRetryDelaySeconds);

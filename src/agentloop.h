@@ -13,15 +13,18 @@
 #include "harness/harnessflags.h"
 #include "harness/checks.h"
 #include "harness/contextengine.h"
+#include "harness/cost.h"
 #include "harness/eventstore.h"
 #include "harness/hooks.h"
 #include "harness/memory.h"
 #include "harness/middleware.h"
 #include "harness/models.h"
+#include "harness/otlp.h"
 #include "harness/policy.h"
 #include "harness/prompt.h"
 #include "harness/registry.h"
 #include "harness/skills.h"
+#include "harness/telemetry.h"
 #include "harness/tokens.h"
 #include "harness/turn.h"
 #include "llmclient.h"
@@ -305,6 +308,20 @@ public:
     // by every transport yet, so the report says what it measured.
     QString contextReport() const;
     QString usageReport() const;
+    // Stable cost accounting for the inspector, the headless artifact and
+    // tests. Contains provider-reported token counts, per-model prices, cache
+    // reads/writes and the configured budget.
+    QJsonObject costReportJson() const;
+    double sessionCostUsd() const;
+    // Spans derived from this conversation's event log, not a second log. The
+    // trace is empty when no conversation is bound or the log is disabled.
+    QList<Span> traceSpans() const;
+    QJsonObject traceJson() const;
+    // Writes the span trace as JSONL. With `telemetry` enabled and an OTLP
+    // endpoint configured, also posts the batch; a failure never affects the
+    // turn and is reported through the notice channel.
+    bool exportTelemetry(const QString &path, QString *error = nullptr);
+    QString telemetryReport() const;
     // Exact system prompt and section manifest from the prompt assembler. The
     // report never includes conversation content or credentials.
     QString promptReport() const;
@@ -813,6 +830,12 @@ LlmClient m_client;
         int cached = 0;
     };
     QHash<QString, RouteUsage> m_routeUsage;
+    // Per-model/role cost accounting for the session. Reset with the
+    // conversation, never with compaction.
+    mutable CostLedger m_costs;
+    // Set to the configured soft budget so an over-budget turn raises one
+    // notice instead of failing the turn.
+    bool m_costBudgetNotified = false;
 
     // --- Harness 0.7 ---------------------------------------------------------
     EventStore m_events;
