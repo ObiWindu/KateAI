@@ -17,7 +17,7 @@ public:
     static void save(const Settings &settings);
     // Current on-disk configuration schema version. Bumped whenever a
     // migration step is added to load().
-    static int configVersion() { return 2; }
+    static int configVersion() { return 4; }
 };
 
 } // namespace KateAi

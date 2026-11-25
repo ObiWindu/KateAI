@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.25)
-project(kateai VERSION 0.9.0 LANGUAGES C CXX)
+project(kateai VERSION 1.0.0 LANGUAGES C CXX)
 
 set(QT_MAJOR_VERSION "6")
 set(QT_MIN_VERSION "6.5.0")
@@ -10,6 +10,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(KATEAI_USER_INSTALL "Install into a per-user prefix (mode 700, no sudo)" OFF)
+option(KATEAI_ENABLE_EVALS "Add the scripted harness scenario suite to CTest" OFF)
 
 if(KATEAI_USER_INSTALL)
     if(WIN32)

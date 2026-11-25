@@ -2309,7 +2309,7 @@ void AcpClient::sendInitialize(int timeoutMs)
 #ifdef KATEAI_VERSION
     clientInfo.insert(u"version"_s, QStringLiteral(KATEAI_VERSION));
 #else
-    clientInfo.insert(u"version"_s, u"0.9.0"_s);
+    clientInfo.insert(u"version"_s, u"1.0.0"_s);
 #endif
 
     QJsonObject params;

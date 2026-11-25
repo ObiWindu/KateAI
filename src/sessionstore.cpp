@@ -113,6 +113,9 @@ static QJsonArray messagesToJson(const QList<ChatMessage> &messages)
     for (const auto &msg : messages) {
         QJsonObject obj;
         obj[u"role"_s] = static_cast<int>(msg.role);
+        if (!msg.authorRole.isEmpty()) {
+            obj[u"authorRole"_s] = msg.authorRole;
+        }
         obj[u"content"_s] = msg.content;
         obj[u"thinking"_s] = msg.thinking;
         obj[u"plan"_s] = msg.plan;
@@ -141,6 +144,7 @@ static QList<ChatMessage> messagesFromJson(const QJsonArray &arr)
         } else {
             msg.role = static_cast<ChatMessage::Role>(roleValue);
         }
+        msg.authorRole = obj[u"authorRole"_s].toString();
         msg.content = obj[u"content"_s].toString();
         msg.thinking = obj[u"thinking"_s].toString();
         msg.plan = obj[u"plan"_s].toArray();
@@ -305,6 +309,9 @@ static QByteArray sessionDataToJson(const SessionStore::SessionData &data)
     if (!data.subagents.isEmpty()) {
         obj[u"subagents"_s] = data.subagents;
     }
+    if (!data.orchestration.isEmpty()) {
+        obj[u"orchestration"_s] = data.orchestration;
+    }
     return QJsonDocument(obj).toJson(QJsonDocument::Compact);
 }
 
@@ -341,6 +348,7 @@ static SessionStore::SessionData sessionDataFromJson(const QByteArray &payload)
     data.workspace = obj[u"workspace"_s].toString();
     data.parentConversationId = obj[u"parentConversationId"_s].toString();
     data.subagents = obj[u"subagents"_s].toArray();
+    data.orchestration = obj[u"orchestration"_s].toObject();
 
     // Version 2 added the version field, version 3 the last turn id, version 4
     // the full display transcript. All are additive: an older payload simply

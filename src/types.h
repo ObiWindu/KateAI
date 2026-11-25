@@ -172,9 +172,13 @@ struct ToolAccess {
     }
 };
 
+// Which model produced an assistant message in a two-model turn. Empty for
+// single-model messages and for every non-assistant role. Persisted so the
+// transcript can keep its planner/executor/reviewer badges after a restart.
 struct ChatMessage {
     enum class Role { System, User, Assistant, Tool };
     Role role = Role::User;
+    QString authorRole;
     QString content;
     // Hidden reasoning emitted by the model before the visible answer. Kept
     // separate so it can be collapsed in the transcript without losing context.
@@ -303,8 +307,41 @@ QList<PatchFile> parseUnifiedPatch(const QString &patch);
 // context does not match at its recorded position; applies nothing on failure.
 QString applyPatchToContent(const QString &content, const QList<PatchHunk> &hunks, QString *error);
 
+// One resolved model in a two-model orchestration pair. The route is stored in
+// settings instead of being derived from Settings::provider so the planner and
+// executor can live on different API providers.
+struct ModelRoute {
+    Provider provider = Provider::Grok;
+    QString model;
+    QString effort;
+
+    bool isValid() const
+    {
+        return provider != Provider::Acp && provider != Provider::Telegram
+            && !model.trimmed().isEmpty();
+    }
+    QString key() const;
+};
+
+struct OrchestrationSettings {
+    bool enabled = false;
+    ModelRoute planner;
+    ModelRoute executor;
+    // Bounds for one user turn. Replans and reviews are deliberately separate:
+    // a planner that keeps changing its mind must not consume the executor's
+    // retry budget, and vice versa.
+    int maxReplans = 3;
+    int maxPlannerSteps = 12;
+    int maxReviewRounds = 2;
+    // "auto", "always", "off". Auto reviews a turn that changed files or has
+    // at least three plan steps.
+    QString reviewMode = QStringLiteral("auto");
+    bool showPlannerActivity = true;
+};
+
 struct Settings {
     Provider provider = Provider::Grok;
+    OrchestrationSettings orchestration;
     QString grokApiKey;
     QString openaiApiKey;
     QString openrouterApiKey;
@@ -430,6 +467,16 @@ struct Settings {
     // Agent behavior tuning
     bool requireVerification = true;    // Require verification after mutations
     int maxVerificationAttempts = 2;    // Max verification retries
+
+    // --- Telemetry and cost ---------------------------------------------------
+    // Opt-in local spans plus an optional OTLP/HTTP collector. The harness
+    // event log is always local; this only controls export of derived spans.
+    bool telemetryEnabled = false;
+    QString telemetryEndpoint;          // e.g. http://127.0.0.1:4318 (empty = off)
+    bool telemetryContentCapture = false; // never on by default; hashes/sizes only
+    // Soft per-conversation budget. 0 = no warning. The turn is never failed
+    // on cost; the user gets a notice when the budget is crossed.
+    double costBudgetUsd = 0.0;
 
     // --- Retry Configuration -----------------------------------------------
     // Automatic retry for transient API errors (rate limits, server errors, network issues)

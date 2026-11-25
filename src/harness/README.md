@@ -18,6 +18,10 @@ and a future headless host can drive it without the editor.
 | `hooks.*` | Hook config, trust, sandboxed execution |
 | `audit.*` | Append-only JSONL permission trail |
 | `toolresults.*` | Content store for oversized tool output |
+| `cost.*` | Per-model cost arithmetic, ledger and soft budgets |
+| `telemetry.*` | Deterministic span tree derived from events |
+| `otlp.*` | Opt-in OTLP/HTTP JSON span export |
+| `acpserver.*` | ACP v1 JSON-RPC server over stdio |
 | `skills.*` | `SKILL.md` discovery, catalog, trust scan/store, on-demand body |
 | `worktree.*` | Isolated git worktrees, patch collection, safe apply |
 

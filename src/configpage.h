@@ -99,6 +99,18 @@ private:
     QNetworkAccessManager *m_acpRegistryNetwork = nullptr;
     QJsonArray m_acpRegistryAgents;
     QComboBox *m_apiFormat = nullptr;
+
+    // Two-model orchestration (planner = strong/read-only, executor = cheap).
+    QCheckBox *m_orchestrationEnabled = nullptr;
+    QComboBox *m_orchestrationPlannerProvider = nullptr;
+    QComboBox *m_orchestrationPlannerModel = nullptr;
+    QComboBox *m_orchestrationPlannerEffort = nullptr;
+    QComboBox *m_orchestrationExecutorProvider = nullptr;
+    QComboBox *m_orchestrationExecutorModel = nullptr;
+    QComboBox *m_orchestrationExecutorEffort = nullptr;
+    QSpinBox *m_orchestrationMaxReplans = nullptr;
+    QComboBox *m_orchestrationReviewMode = nullptr;
+    void refreshOrchestrationModels();
     void applySelectedAcpPreset();
     // Rebuilds the ACP Agent list from the presets plus the currently installed
     // registry agents, keeping the selection. Called after an install or an
@@ -180,6 +192,12 @@ private:
     QSpinBox *m_maxPlanSteps = nullptr;
     QCheckBox *m_requireVerification = nullptr;
     QSpinBox *m_maxVerificationAttempts = nullptr;
+
+    // Telemetry and cost
+    QCheckBox *m_telemetryEnabled = nullptr;
+    QLineEdit *m_telemetryEndpoint = nullptr;
+    QCheckBox *m_telemetryContentCapture = nullptr;
+    QDoubleSpinBox *m_costBudget = nullptr;
 
     // Context Management
     QSpinBox *m_contextWindow = nullptr;

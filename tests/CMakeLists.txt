@@ -41,6 +41,12 @@ kateai_test(test_providers)
 kateai_test(test_rules)
 kateai_test(test_transcriptlayout)
 kateai_test(test_modes)
+kateai_test(test_orchestration)
+add_executable(test_orchestrationflow test_orchestrationflow.cpp)
+target_link_libraries(test_orchestrationflow PRIVATE kateai_core Qt6::Test)
+add_test(NAME test_orchestrationflow COMMAND test_orchestrationflow
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
 kateai_test(test_toolalias)
 kateai_test(test_acpparsing)
 kateai_test(test_acpstreaming)
@@ -64,6 +70,20 @@ kateai_test(test_harness_middleware)
 kateai_test(test_harness_checks)
 kateai_test(test_harness_policy)
 kateai_test(test_harness_hooks)
+kateai_test(test_harness_cost)
+kateai_test(test_harness_telemetry)
+add_executable(test_headless_args test_headless_args.cpp ../src/headless/args.cpp)
+target_link_libraries(test_headless_args PRIVATE kateai_core Qt6::Test)
+add_test(NAME test_headless_args COMMAND test_headless_args
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+kateai_test(test_acpserver)
+add_executable(test_headless_cli test_headless_cli.cpp)
+target_link_libraries(test_headless_cli PRIVATE kateai_core Qt6::Test)
+target_compile_definitions(test_headless_cli PRIVATE
+    KATEAI_HEADLESS_BIN="$<TARGET_FILE:kateai-headless>")
+add_dependencies(test_headless_cli kateai-headless)
+add_test(NAME test_headless_cli COMMAND test_headless_cli
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
 add_executable(test_harness_verification test_harness_verification.cpp)
 target_link_libraries(test_harness_verification PRIVATE kateai_core Qt6::Test)
 add_test(NAME test_harness_verification
@@ -134,6 +154,9 @@ target_link_libraries(test_questionflow PRIVATE kateai_core Qt6::Test)
 add_test(NAME test_questionflow
          COMMAND test_questionflow -platform offscreen
          WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
+# Two-model planner/executor/reviewer flow against two loopback providers.
+
 
 # The tool-call budget: exhausting it must still ask the model for the closing
 # summary and finish the turn. Drives a real AgentLoop against an in-process
@@ -281,3 +304,28 @@ add_executable(test_voiceinput test_voiceinput.cpp ../src/chatwidget.cpp ../src/
 target_link_libraries(test_voiceinput PRIVATE kateai_core Qt6::Test Qt6::Widgets)
 target_compile_definitions(test_voiceinput PRIVATE TRANSLATION_DOMAIN="kateai")
 add_test(NAME test_voiceinput COMMAND test_voiceinput -platform offscreen)
+
+# --- Harness eval suite -----------------------------------------------------
+# The suite drives the real kateai-headless binary against a scripted provider.
+# It is opt-in for CTest (a PR job can enable it); the target is always
+# available for local runs:
+#   cmake --build build --target harness_eval
+if(Python3_Interpreter_FOUND)
+    add_custom_target(harness_eval
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/evals/run.py
+                --suite all --headless $<TARGET_FILE:kateai-headless>
+                --output ${CMAKE_BINARY_DIR}/evals
+        DEPENDS kateai-headless
+        WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+        USES_TERMINAL
+        VERBATIM
+    )
+    if(KATEAI_ENABLE_EVALS)
+        add_test(NAME harness_eval
+                 COMMAND ${Python3_EXECUTABLE} ${CMAKE_SOURCE_DIR}/tests/evals/run.py
+                         --suite smoke --headless $<TARGET_FILE:kateai-headless>
+                         --output ${CMAKE_BINARY_DIR}/evals
+                 WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+        set_tests_properties(harness_eval PROPERTIES TIMEOUT 600)
+    endif()
+endif()

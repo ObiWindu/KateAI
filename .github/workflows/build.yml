@@ -111,8 +111,10 @@ jobs:
           path: artifacts/
           retention-days: 28
 
-  # archlinux:latest is amd64-only. For aarch64, use the Arch Linux ARM
-  # image (same package names, ARM repos at archlinuxarm.org).
+  # archlinux:latest is amd64-only. For aarch64, use a maintained Arch Linux
+  # ARM image. The arch4edu image was last refreshed in August and its stale
+  # package set produced partial-upgrade 404s (mesa) against the current ARM
+  # repositories; menci's base-devel image is rebuilt daily.
   package-arch:
     name: Arch package (Arch/CachyOS/Manjaro) ${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
@@ -125,7 +127,7 @@ jobs:
             image: archlinux:latest
           - arch: aarch64
             runner: ubuntu-24.04-arm
-            image: arch4edu/archlinuxarm:latest
+            image: menci/archlinuxarm:base-devel
     container:
       image: ${{ matrix.image }}
     steps:
@@ -146,11 +148,53 @@ jobs:
           pacman-key --init || true
           pacman-key --populate || true
       - name: Install dependencies
+        shell: bash
         run: |
-          pacman -Sy --noconfirm base-devel kate cmake extra-cmake-modules ninja \
-            qt6-base ktexteditor kcoreaddons ki18n kxmlgui kconfigwidgets kconfig \
-            kwidgetsaddons git tar gzip
+          set -euo pipefail
+          # Build-time dependencies only. `kate` is a runtime dependency of
+          # the finished package; installing it here pulls a large Qt/mesa
+          # chain that is irrelevant to compiling the plugin. makepkg checks
+          # runtime deps unless --nodeps is passed (see Build package).
+          packages=(
+            base-devel
+            cmake
+            extra-cmake-modules
+            ninja
+            qt6-base
+            ktexteditor
+            kcoreaddons
+            ki18n
+            kxmlgui
+            kconfigwidgets
+            kconfig
+            kwidgetsaddons
+            git
+            tar
+            gzip
+          )
+          # Arch does not support partial upgrades. `pacman -Sy pkg` can
+          # resolve a dependency version (commonly mesa) that the mirror has
+          # already replaced, producing a 404 mid-transaction. Upgrade the
+          # container first, and force a second database sync plus retry if a
+          # mirror is still catching up.
+          for attempt in 1 2 3; do
+            if pacman -Syu --noconfirm --needed "${packages[@]}"; then
+              exit 0
+            fi
+            if (( attempt == 3 )); then
+              echo "pacman dependency install failed after ${attempt} attempts" >&2
+              exit 1
+            fi
+            echo "pacman failed; forcing a fresh sync and retrying (attempt $((attempt + 1))/3)" >&2
+            sleep $((attempt * 5))
+            pacman -Syy --noconfirm || true
+          done
       - name: Build package
+        env:
+          # The plugin only needs build-time deps to compile. Runtime deps
+          # (kate, bubblewrap) are declared in PKGBUILD and resolved by the
+          # user's package manager on install.
+          KATEAI_MAKEPKG_NODEPS: "1"
         run: ./packaging/build-package.sh arch
       - name: Stage artifacts
         run: |

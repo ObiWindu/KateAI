@@ -51,6 +51,10 @@ private Q_SLOTS:
         s.maxPlanSteps = 4;
         s.requireVerification = false;
         s.maxVerificationAttempts = 1;
+        s.telemetryEnabled = true;
+        s.telemetryEndpoint = u"http://127.0.0.1:4318"_s;
+        s.telemetryContentCapture = false;
+        s.costBudgetUsd = 2.5;
         s.enableAutoRetry = false;
         s.maxRetryAttempts = 1;
         s.baseRetryDelaySeconds = 1;
@@ -65,6 +69,12 @@ private Q_SLOTS:
         s.voiceInputDevice = u"alsa_input.usb-mic"_s;
         s.voiceNoiseRemoval = false;
         s.voiceAutoSend = false;
+        s.orchestration.enabled = true;
+        s.orchestration.planner = ModelRoute{Provider::OpenAI, u"planner-test"_s, u"high"_s};
+        s.orchestration.executor = ModelRoute{Provider::DeepSeek, u"executor-test"_s, u"low"_s};
+        s.orchestration.maxReplans = 5;
+        s.orchestration.maxReviewRounds = 3;
+        s.orchestration.reviewMode = u"always"_s;
 
         SettingsStore::save(s);
         const Settings loaded = SettingsStore::load();
@@ -91,6 +101,10 @@ private Q_SLOTS:
         QCOMPARE(loaded.maxPlanSteps, s.maxPlanSteps);
         QCOMPARE(loaded.requireVerification, s.requireVerification);
         QCOMPARE(loaded.maxVerificationAttempts, s.maxVerificationAttempts);
+        QCOMPARE(loaded.telemetryEnabled, s.telemetryEnabled);
+        QCOMPARE(loaded.telemetryEndpoint, s.telemetryEndpoint);
+        QCOMPARE(loaded.telemetryContentCapture, s.telemetryContentCapture);
+        QCOMPARE(loaded.costBudgetUsd, s.costBudgetUsd);
         QCOMPARE(loaded.enableAutoRetry, s.enableAutoRetry);
         QCOMPARE(loaded.maxRetryAttempts, s.maxRetryAttempts);
         QCOMPARE(loaded.baseRetryDelaySeconds, s.baseRetryDelaySeconds);
@@ -105,6 +119,15 @@ private Q_SLOTS:
         QCOMPARE(loaded.voiceInputDevice, s.voiceInputDevice);
         QCOMPARE(loaded.voiceNoiseRemoval, s.voiceNoiseRemoval);
         QCOMPARE(loaded.voiceAutoSend, s.voiceAutoSend);
+        QCOMPARE(loaded.orchestration.enabled, true);
+        QCOMPARE(loaded.orchestration.planner.provider, Provider::OpenAI);
+        QCOMPARE(loaded.orchestration.planner.model, u"planner-test"_s);
+        QCOMPARE(loaded.orchestration.planner.effort, u"high"_s);
+        QCOMPARE(loaded.orchestration.executor.provider, Provider::DeepSeek);
+        QCOMPARE(loaded.orchestration.executor.model, u"executor-test"_s);
+        QCOMPARE(loaded.orchestration.maxReplans, 5);
+        QCOMPARE(loaded.orchestration.maxReviewRounds, 3);
+        QCOMPARE(loaded.orchestration.reviewMode, u"always"_s);
     }
 
     void loadingAnEmptyConfigKeepsTheDocumentedDefaults()

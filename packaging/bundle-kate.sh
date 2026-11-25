@@ -46,7 +46,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 VERSION="$(sed -n 's/^project(kateai VERSION \([^ ]*\).*/\1/p' "${ROOT}/CMakeLists.txt" | head -1)"
-VERSION="${VERSION:-0.9.0}"
+VERSION="${VERSION:-1.0.0}"
 KATE_SHORT="$(echo "${KATE_REF}" | tr '/ ' '__')"
 if [[ -z "${OUT}" ]]; then
     OUT="${ROOT}/packaging/dist/kate-bundle-${VERSION}-kate-${KATE_SHORT}-$(uname -m).tar.gz"

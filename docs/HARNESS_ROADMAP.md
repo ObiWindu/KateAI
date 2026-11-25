@@ -4,8 +4,8 @@
 
 | | |
 | --- | --- |
-| Status | Research report and proposal (not yet scheduled) |
-| Branch | `feat/state-of-the-art-harness` |
+| Status | Research report and proposal (implementation through 1.0 tracked in `HARNESS_IMPLEMENTATION_PLAN.md`; release notes in `HARNESS_1.0.md`) |
+| Branch | `feature/harness_complete` |
 | Date | 2026-11-21 |
 | Scope | The agent harness around the model: loop, context, tools, safety, orchestration, extensibility, evaluation, and the editor surface. Not model training, not Kate itself. |
 | Audience | KateAI maintainers; contributors touching `src/agentloop.*`, `src/tools.*`, `src/contextmanager.*`, `src/sandbox.*`, `src/mcp.*`, `src/acpclient.*` |
@@ -1320,6 +1320,9 @@ Effort is in engineer-weeks for one experienced C++/Qt developer, including test
 | Evals | Scenario runner, fixture repos, scripted provider, injection corpus, model matrix, CI nightly |
 | Observability | OTel export, cost budgets, managed policy, privacy controls |
 | Docs | Harness spec, plugin API, contributor guide, migration notes |
+
+**Delivered in 1.0:** cost/telemetry, scripted evals, `kateai-headless`, and the
+ACP server are implemented in this tree; see `docs/HARNESS_1.0.md`.
 
 **Exit criteria:** CI runs the scenario suite across 3 providers; another host drives KateAI over ACP; a release can be gated on eval deltas.
 

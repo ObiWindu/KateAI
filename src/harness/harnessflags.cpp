@@ -38,6 +38,7 @@ const FlagRef kFlags[] = {
     {"skills", &HarnessFlags::skills},
     {"agentsV2", &HarnessFlags::agentsV2},
     {"inspector", &HarnessFlags::inspector},
+    {"orchestration", &HarnessFlags::orchestration},
     {"telemetry", &HarnessFlags::telemetry},
 };
 

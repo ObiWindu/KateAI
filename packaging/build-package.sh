@@ -24,6 +24,12 @@ case "${FAMILY}" in
         if makepkg --help 2>&1 | grep -q -- '--nosandbox'; then
             makepkg_extra="--nosandbox"
         fi
+        # CI installs only the build-time dependencies. --nodeps skips the
+        # runtime-dependency check (`kate`, `bubblewrap`) for a package we are
+        # only compiling; the finished PKGBUILD still declares them for users.
+        if [[ "${KATEAI_MAKEPKG_NODEPS:-0}" == "1" ]]; then
+            makepkg_extra="${makepkg_extra} --nodeps"
+        fi
         if [[ "$(id -u)" -eq 0 ]]; then
             # makepkg refuses to run as root (CI containers are root): build
             # as an unprivileged user instead. Deps are already installed
@@ -63,7 +69,7 @@ case "${FAMILY}" in
     macos)
         # Plugin zip for macOS: Homebrew Kate + KF6 build (see packaging/ci/macos-build.sh).
         VERSION="$(sed -n 's/^project(kateai VERSION \([^ ]*\).*/\1/p' "${ROOT}/CMakeLists.txt" | head -1)"
-        VERSION="${VERSION:-0.9.0}"
+        VERSION="${VERSION:-1.0.0}"
         "${ROOT}/packaging/ci/macos-build.sh" --build-type Release --artifacts-dir "${ROOT}/artifacts-macos-tmp"
         mkdir -p "${ROOT}/packaging/dist"
         OUT="${ROOT}/packaging/dist/kateai-${VERSION}-macos-$(uname -m).zip"

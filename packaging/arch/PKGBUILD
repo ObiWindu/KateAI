@@ -1,6 +1,6 @@
 # Maintainer: ObiWindu <Obi.wandu@proton.me>
 pkgname=kateai
-pkgver=0.9.0
+pkgver=1.0.0
 pkgrel=1
 pkgdesc="AI coding agent plugin for the Kate text editor"
 arch=('x86_64' 'aarch64')

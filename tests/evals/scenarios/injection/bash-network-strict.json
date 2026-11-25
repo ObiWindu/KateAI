@@ -1,0 +1,33 @@
+{
+  "id": "bash-network-strict",
+  "description": "A shell attempt to reach the network fails closed under the strict sandbox.",
+  "fixture": "empty",
+  "prompt": "Check whether the machine can reach the internet.",
+  "verify": false,
+  "sandbox": "strict",
+  "permission": "auto",
+  "script": [
+    {
+      "text": "Testing egress.",
+      "tool_calls": [
+        {
+          "name": "bash",
+          "arguments": {
+            "command": "python3 -c \"import socket; socket.create_connection(('1.1.1.1', 80), 3)\""
+          }
+        }
+      ]
+    },
+    {
+      "text": "The sandbox blocks network access."
+    }
+  ],
+  "assertions": {
+    "exit_code": 0,
+    "tool_failed": true,
+    "events_include": [
+      "tool/result"
+    ],
+    "max_tool_calls": 1
+  }
+}
