@@ -22,6 +22,7 @@
 #include <QUuid>
 
 #include <algorithm>
+#include <utility>
 #include <limits>
 #include <optional>
 
@@ -212,6 +213,9 @@ constexpr qint64 kRetryDelaySaturation = 1000000000;
 // parser), so keeping only the tail is enough and bounds memory for long
 // generations.
 constexpr qsizetype kMaxRetainedResponseBytes = 256 * 1024;
+constexpr qsizetype kMaxSseEventBytes = 8 * 1024 * 1024;
+constexpr qsizetype kMaxAssistantChars = 4 * 1024 * 1024;
+constexpr int kMaxCompletedToolCalls = 64;
 
 // Patterns that may indicate sensitive data in response bodies
 static const QStringList sensitivePatterns = {
@@ -1967,8 +1971,44 @@ void LlmClient::handleModelsFinished(QNetworkReply *reply, Provider provider)
     Q_EMIT modelsReceived(provider, models);
 }
 
+void LlmClient::failStream(const QString &error)
+{
+    m_completionError = error;
+    if (!m_reply) {
+        return;
+    }
+    // Same detach/re-enter pattern as a provider error event: abort() emits
+    // finished() synchronously, so handleFinished() must not run twice.
+    m_reply->disconnect(this);
+    m_reply->abort();
+    handleFinished();
+}
+
 bool LlmClient::applySseChunk(const CompletionChunk &chunk)
 {
+    if (m_text.size() + chunk.contentDelta.size() > kMaxAssistantChars) {
+        failStream(u"The provider response exceeded the %1 MB safety limit."_s
+                       .arg(kMaxAssistantChars / (1024 * 1024)));
+        return false;
+    }
+    if (m_completedTools.size() + chunk.completedTools.size() > kMaxCompletedToolCalls) {
+        failStream(u"The provider returned more than %1 tool calls in one response."_s
+                       .arg(kMaxCompletedToolCalls));
+        return false;
+    }
+    qsizetype toolChars = 0;
+    for (const ToolCall &call : chunk.completedTools) {
+        toolChars += call.argumentsJson.size();
+    }
+    for (const ToolCall &call : std::as_const(m_completedTools)) {
+        toolChars += call.argumentsJson.size();
+    }
+    constexpr qsizetype kMaxToolArgsPerResponse = 8 * 1024 * 1024;
+    if (toolChars > kMaxToolArgsPerResponse) {
+        failStream(u"The provider returned tool arguments larger than %1 MB in one response."_s
+                       .arg(kMaxToolArgsPerResponse / (1024 * 1024)));
+        return false;
+    }
     if (!chunk.error.isEmpty()) {
         m_completionError = chunk.error;
         if (m_reply) {
@@ -2032,6 +2072,14 @@ bool LlmClient::feedSseLine(const QByteArray &line)
         const QByteArray payload = trimmed.mid(5).trimmed();
         if (payload.isEmpty()) {
             return true;
+        }
+        // A server that never sends the blank line that terminates an event
+        // could otherwise grow this buffer without bound. A single SSE event
+        // that large cannot be a valid tool call or answer anyway.
+        if (m_pendingEventData.size() + payload.size() > kMaxSseEventBytes) {
+            failStream(u"The provider sent an SSE event larger than %1 MB."_s
+                           .arg(kMaxSseEventBytes / (1024 * 1024)));
+            return false;
         }
         // The SSE specification allows one event to be spread over several
         // "data:" lines, which are joined with a newline. The provider sends a

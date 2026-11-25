@@ -11,6 +11,7 @@
 #include <KSharedConfig>
 #include <QCryptographicHash>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
 #include <QJsonArray>
@@ -345,17 +346,41 @@ HookOutcome HookRegistry::runOne(const HookDefinition &hook, const QJsonObject &
     }
     process.write(stdinData);
     process.closeWriteChannel();
-    if (!process.waitForFinished(qMax(100, hook.timeoutMs))) {
-        outcome.timedOut = true;
-        process.kill();
-        process.waitForFinished(1000);
-        outcome.reason = u"Hook %1 timed out after %2 ms."_s.arg(hook.event).arg(hook.timeoutMs);
-        outcome.blocked = hook.blockOnFailure;
-        outcome.warnings.append(outcome.reason);
-        return outcome;
+    constexpr qint64 kMaxDrainedBytes = 8 * 1024 * 1024;
+    QByteArray drained;
+    QElapsedTimer elapsed;
+    elapsed.start();
+    bool outputCapped = false;
+    while (true) {
+        drained += process.readAll();
+        if (drained.size() > kMaxDrainedBytes) {
+            outputCapped = true;
+            process.kill();
+            process.waitForFinished(1000);
+            break;
+        }
+        if (process.waitForFinished(20)) {
+            break;
+        }
+        if (process.state() == QProcess::NotRunning) {
+            break;
+        }
+        if (elapsed.elapsed() >= qMax(100, hook.timeoutMs)) {
+            outcome.timedOut = true;
+            process.kill();
+            process.waitForFinished(1000);
+            outcome.reason = u"Hook %1 timed out after %2 ms."_s.arg(hook.event).arg(hook.timeoutMs);
+            outcome.blocked = hook.blockOnFailure;
+            outcome.warnings.append(outcome.reason);
+            return outcome;
+        }
     }
+    drained += process.readAll();
 
-    const QString output = capOutput(QString::fromUtf8(process.readAll()));
+    QString output = capOutput(QString::fromUtf8(drained.left(kMaxDrainedBytes)));
+    if (outputCapped) {
+        output += u"\n… (hook output exceeded 8 MB and was stopped) …"_s;
+    }
     const QJsonObject parsed = parseHookOutput(output.toUtf8());
     outcome.updatedInput = parsed.value(u"updatedInput"_s).toObject();
     outcome.additionalContext = parsed.value(u"additionalContext"_s).toString();

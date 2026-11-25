@@ -202,6 +202,9 @@ private:
     bool shouldRetry(const RetryContext &ctx) const;
     void storeRequestForRetry(const QList<ChatMessage> &messages);
     void clearStoredRequest();
+    // Stops the live stream with a clear error. Used for bounded accumulators
+    // where silently truncating would leave an invalid partial tool call.
+    void failStream(const QString &error);
 
 protected:
     // Protected accessors for testing

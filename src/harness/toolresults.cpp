@@ -12,6 +12,8 @@
 #include <QRegularExpression>
 #include <QSet>
 #include <QStandardPaths>
+#include <QStringConverter>
+#include <QTextStream>
 #include <QUuid>
 
 #include <algorithm>
@@ -95,6 +97,15 @@ StoredToolResult ToolResults::store(const QString &text, int headChars, int tail
     // Tool output can contain source code or command output the user considers
     // sensitive; keep the cache owner-only.
     QFile::setPermissions(path, QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+    // Total character count for paging. Without it, read() had to parse the
+    // whole file just to fill totalChars, even for a 20 KB page.
+    QFile meta(path + u".len"_s);
+    if (meta.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        meta.write(QByteArray::number(stored.size()));
+        meta.close();
+        QFile::setPermissions(meta.fileName(),
+                              QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+    }
 
     result.id = id;
     result.totalChars = stored.size();
@@ -162,6 +173,8 @@ int ToolResults::prune(qint64 maxBytes, const QStringList &keep)
         }
         const qint64 size = info.size();
         if (QFile::remove(info.absoluteFilePath())) {
+            // The sidecar is only a character count for the paging path.
+            QFile::remove(info.absoluteFilePath() + u".len"_s);
             total -= size;
             ++removed;
         }
@@ -213,14 +226,54 @@ bool ToolResults::read(const QString &id, qint64 offset, int limit, QString *out
         }
         return false;
     }
-    const QString text = QString::fromUtf8(file.readAll());
-    if (totalChars) {
-        *totalChars = text.size();
+
+    // The total is written next to the result at store time. Older stores do
+    // not have it; in that case the stream below counts while it reads.
+    qint64 knownTotal = -1;
+    QFile meta(path + u".len"_s);
+    if (meta.open(QIODevice::ReadOnly)) {
+        bool ok = false;
+        const qint64 value = meta.readAll().trimmed().toLongLong(&ok);
+        if (ok && value >= 0) {
+            knownTotal = value;
+        }
     }
-    const qint64 start = qMin<qint64>(offset, text.size());
-    const qint64 count = qMin<qint64>(limit, text.size() - start);
+
+    QTextStream stream(&file);
+    stream.setEncoding(QStringConverter::Utf8);
+    QString page;
+    qint64 total = 0;
+    qint64 skipped = 0;
+    while (!stream.atEnd()) {
+        QString chunk = stream.read(64 * 1024);
+        if (chunk.isEmpty() && stream.atEnd()) {
+            break;
+        }
+        if (knownTotal < 0) {
+            total += chunk.size();
+        }
+        if (skipped < offset) {
+            const qint64 drop = qMin<qint64>(chunk.size(), offset - skipped);
+            chunk.remove(0, static_cast<int>(drop));
+            skipped += drop;
+        }
+        if (!chunk.isEmpty() && page.size() < limit) {
+            page += chunk.left(limit - page.size());
+        }
+        // With a valid sidecar the page is complete without walking the rest
+        // of a possibly 32 MiB result.
+        if (knownTotal >= 0 && page.size() >= limit) {
+            break;
+        }
+    }
+    if (knownTotal >= 0) {
+        total = knownTotal;
+    }
+    if (totalChars) {
+        *totalChars = total;
+    }
     if (out) {
-        *out = text.mid(static_cast<int>(start), static_cast<int>(count));
+        *out = page;
     }
     return true;
 }

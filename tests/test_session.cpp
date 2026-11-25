@@ -222,6 +222,24 @@ private Q_SLOTS:
         QCOMPARE(restored.transcript.last().content, u"message 1199"_s);
     }
 
+    // A normal conversation has no reason to serialize the display transcript
+    // as a second full copy of the model history.
+    void testIdenticalTranscriptIsNotPersisted()
+    {
+        AgentLoop agent;
+        SessionStore::SessionData data;
+        ChatMessage message;
+        message.role = ChatMessage::Role::User;
+        message.content = u"one copy is enough"_s;
+        data.messages = {message};
+        agent.restoreSession(data);
+
+        const auto saved = agent.sessionData();
+        QCOMPARE(saved.messages.size(), 1);
+        QVERIFY2(saved.transcript.isEmpty(),
+                 "an identical display transcript was serialized again");
+    }
+
     void testAgentLoopClearSession()
     {
         AgentLoop agent;
@@ -372,7 +390,8 @@ private Q_SLOTS:
         QVERIFY(!finalData.planShown);
         QCOMPARE(finalData.currentAssistant, u"Assistant response"_s);
         QCOMPARE(finalData.stateEpoch, quint64(999));
-        QCOMPARE(finalData.actionSignatures.size(), 2);
+        // actionSignatures is legacy-only: AgentLoop no longer repopulates it.
+        QVERIFY(finalData.actionSignatures.isEmpty());
         QCOMPARE(finalData.actionRepeatCounts[u"action1"_s], 2);
         QCOMPARE(finalData.changedPaths.size(), 1);
         QVERIFY(finalData.changesNeedVerification);

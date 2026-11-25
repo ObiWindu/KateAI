@@ -117,11 +117,24 @@ static QJsonArray messagesToJson(const QList<ChatMessage> &messages)
             obj[u"authorRole"_s] = msg.authorRole;
         }
         obj[u"content"_s] = msg.content;
-        obj[u"thinking"_s] = msg.thinking;
-        obj[u"plan"_s] = msg.plan;
-        obj[u"toolCallId"_s] = msg.toolCallId;
-        obj[u"name"_s] = msg.name;
-        obj[u"toolCalls"_s] = msg.toolCalls;
+        // Empty fields are common on plain user/tool messages. Omitting them
+        // keeps the session JSON smaller without changing the reader, which
+        // already treats a missing value as empty.
+        if (!msg.thinking.isEmpty()) {
+            obj[u"thinking"_s] = msg.thinking;
+        }
+        if (!msg.plan.isEmpty()) {
+            obj[u"plan"_s] = msg.plan;
+        }
+        if (!msg.toolCallId.isEmpty()) {
+            obj[u"toolCallId"_s] = msg.toolCallId;
+        }
+        if (!msg.name.isEmpty()) {
+            obj[u"name"_s] = msg.name;
+        }
+        if (!msg.toolCalls.isEmpty()) {
+            obj[u"toolCalls"_s] = msg.toolCalls;
+        }
         arr.append(obj);
     }
     return arr;
@@ -1100,14 +1113,21 @@ QString SessionStore::conversationTitle(const QString &conversationId)
     }
 
     QSqlQuery query(db);
-    query.prepare(u"SELECT title, payload FROM conversations WHERE id = ?"_s);
+    query.prepare(u"SELECT title FROM conversations WHERE id = ?"_s);
     query.addBindValue(conversationId);
     if (!query.exec() || !query.next()) {
         return QString();
     }
     QString title = query.value(0).toString();
     if (isBadTitle(title)) {
-        const SessionStore::SessionData data = sessionDataFromJson(query.value(1).toByteArray());
+        // Only a bad title needs the (possibly very large) payload.
+        QSqlQuery payloadQuery(db);
+        payloadQuery.prepare(u"SELECT payload FROM conversations WHERE id = ?"_s);
+        payloadQuery.addBindValue(conversationId);
+        SessionStore::SessionData data;
+        if (payloadQuery.exec() && payloadQuery.next()) {
+            data = sessionDataFromJson(payloadQuery.value(0).toByteArray());
+        }
         const QString repaired = generateTitleFromMessages(data.messages);
         if (!repaired.isEmpty() && !isBadTitle(repaired)) {
             title = repaired;

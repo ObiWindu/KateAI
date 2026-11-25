@@ -496,6 +496,14 @@ void McpClient::start()
     m_discardingStdoutFrame = false;
     setState(McpServerState::Starting, u"Connecting…"_s);
 
+    // A retry/reconnect must not leave the previous watchdog parented to this
+    // client and still counting down against the new handshake.
+    if (m_startupTimer) {
+        m_startupTimer->stop();
+        m_startupTimer->deleteLater();
+        m_startupTimer = nullptr;
+    }
+
     m_startupTimer = new QTimer(this);
     m_startupTimer->setSingleShot(true);
     m_startupTimer->setInterval(30000);
@@ -592,6 +600,8 @@ void McpClient::stop()
     m_shuttingDown = true;
     if (m_startupTimer) {
         m_startupTimer->stop();
+        m_startupTimer->deleteLater();
+        m_startupTimer = nullptr;
     }
     failAll(u"Server disconnected."_s);
     for (auto it = m_pending.constBegin(); it != m_pending.constEnd(); ++it) {

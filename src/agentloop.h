@@ -138,6 +138,9 @@ public:
     void setEcosystemProvider(EcosystemProvider *provider);
 
     void updateProjectGraph(const QString &filePath, const QString &content);
+    // Writes the graph cache if it is dirty. Public users schedule it on a
+    // debounce; turn boundaries flush it synchronously.
+    void flushProjectGraph();
     ProjectGraph *getProjectGraph() const { return m_projectGraph.get(); }
     QList<GraphNode *> getProjectNodes() const;
     QList<GraphEdge *> getProjectEdges() const;
@@ -308,6 +311,9 @@ public:
     // by every transport yet, so the report says what it measured.
     QString contextReport() const;
     QString usageReport() const;
+    // Lightweight retained-state counters for diagnostics and the memory-budget
+    // tests. Never includes message or tool content.
+    QJsonObject memoryCounters() const;
     // Stable cost accounting for the inspector, the headless artifact and
     // tests. Contains provider-reported token counts, per-model prices, cache
     // reads/writes and the configured budget.
@@ -701,6 +707,7 @@ LlmClient m_client;
     // The workspace changed while a tool could still hold the old graph;
     // applyProjectGraph() runs once the turn ends.
     bool m_graphDirty = false;
+    bool m_graphSavePending = false;
     QString m_taskSummary;
 
     QList<ChatMessage> m_messages;
@@ -712,6 +719,10 @@ LlmClient m_client;
     // Running sum of the content/thinking characters in m_transcriptMessages,
     // maintained so pruning does not have to walk the list on every append.
     qsizetype m_transcriptChars = 0;
+    // True once the display transcript no longer has the same shape as the
+    // model history (elision or compaction). Persisting both lists is only
+    // necessary then; otherwise the transcript falls back to messages.
+    bool m_transcriptDiverged = false;
     QList<ToolCall> m_queue;
     QList<ToolResult> m_pendingResults;
     ToolCall m_waitingCall;
@@ -759,9 +770,9 @@ LlmClient m_client;
     // expired entries without const_cast.
     mutable QMutex m_rateMutex;
     QTimer m_nextModelTimer;
+    QTimer m_graphSaveTimer;
 
     quint64 m_stateEpoch = 0;
-    QSet<QString> m_actionSignatures;
     QHash<QString, int> m_actionRepeatCounts;
     QSet<QString> m_actionsThisModelTurn;
     int m_recoveryPromptCount = 0;

@@ -48,6 +48,9 @@ constexpr int kMaxTitleLines = 3;
 // thousands of lines, and left whole one card grew tall enough to bury the
 // conversation around it.
 constexpr int kMaxResultLines = 200;
+// Beyond this, JSON re-indenting and syntax highlighting cost more than the
+// card can usefully show. The full result stays in m_resultOutput for copy.
+constexpr qsizetype kMaxFormattedResultChars = 256 * 1024;
 
 // How much of the arguments a card shows before the tool has produced anything.
 // An edit's old/new strings are long by nature, and this body is a placeholder
@@ -747,7 +750,9 @@ void ToolCallWidget::setRunningInput(const QString &input)
     // flight that says nothing but the tool name tells the user nothing about
     // the work it is doing.
     m_showingInput = true;
-    m_details->setHtml(partialToHtml(clampToLines(formatJsonPayload(input), kMaxInputLines)));
+    const QString cardInput = input.size() > kMaxFormattedResultChars
+        ? input.left(kMaxFormattedResultChars) : input;
+    m_details->setHtml(partialToHtml(clampToLines(formatJsonPayload(cardInput), kMaxInputLines)));
     applyDetailView();
     if (!m_details->toPlainText().isEmpty()) {
         setExpanded(true);
@@ -888,7 +893,9 @@ void ToolCallWidget::setPartialOutput(const QString &partialOutput)
     // still arriving" while it runs, and setFinished's white text is clearly
     // the final answer. Command output is capped by lines; file reads stay
     // complete so the user can inspect the full contents in the transcript.
-    const QString body = diff.isEmpty() ? partialOutput : textBeforeDiff(partialOutput);
+    const QString fullBody = diff.isEmpty() ? partialOutput : textBeforeDiff(partialOutput);
+    const QString body = fullBody.size() > kMaxFormattedResultChars
+        ? fullBody.left(kMaxFormattedResultChars) : fullBody;
     m_details->setHtml(partialToHtml(m_risk == ToolRisk::Read ? formatJsonPayload(body)
                                                                : clampToLines(formatJsonPayload(body), kMaxResultLines)));
     // A stream is worth watching, so it opens itself; a card the user collapsed
@@ -974,7 +981,16 @@ void ToolCallWidget::setFinished(const ToolResult &result)
     // A result that is JSON is shown re-indented, and labelled as JSON: the
     // language of the tool is what its output looks like, not what it happens
     // to contain.
-    const QString formatted = formatJsonPayload(shownSource);
+    QString formatted;
+    if (shownSource.size() > kMaxFormattedResultChars) {
+        const qsizetype head = kMaxFormattedResultChars * 3 / 4;
+        const qsizetype tail = kMaxFormattedResultChars - head;
+        formatted = shownSource.left(head)
+            + u"\n\n… [rendered output truncated; full result is kept for copy] …\n\n"_s
+            + shownSource.right(tail);
+    } else {
+        formatted = formatJsonPayload(shownSource);
+    }
     const QString shown = m_risk == ToolRisk::Read ? formatted : clampToLines(formatted, kMaxResultLines);
     const QString language = isJsonPayload(formatted) ? QStringLiteral("JSON") : languageForTool(m_toolName);
     // Nothing to show must not paint an empty code block: a tool that reports

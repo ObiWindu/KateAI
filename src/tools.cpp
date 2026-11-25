@@ -1363,14 +1363,24 @@ ToolResult ToolRunner::readFile(const QJsonObject &args) const
     // The cap keeps a multi-hundred-megabyte read from sitting in memory just
     // for the conflict check.
     if (m_bridge) {
-        QString full;
         constexpr qsizetype kMaxLedgerChars = 4 * 1024 * 1024;
-        if (m_bridge->readDocument(readPath, &full) && full.size() <= kMaxLedgerChars) {
-            // Only the digest is retained: the conflict check compares the
-            // file as it is now against what the agent saw, and a turn that
-            // reads many large files must not keep them all in memory.
-            m_readSnapshots.insert(ledgerKey(readPath),
-                                   QCryptographicHash::hash(full.toUtf8(), QCryptographicHash::Sha256));
+        // Stat first. readDocument() used to materialize a multi-hundred-MB
+        // file only for the size check below, even though the ledger is skipped
+        // for exactly that case. A file that is too large on disk is never
+        // snapshotted, so there is nothing to read.
+        const QFileInfo ledgerInfo(readPath);
+        const bool ledgerTooLarge = ledgerInfo.exists()
+            && ledgerInfo.isFile()
+            && ledgerInfo.size() > kMaxLedgerChars;
+        if (!ledgerTooLarge) {
+            QString full;
+            if (m_bridge->readDocument(readPath, &full) && full.size() <= kMaxLedgerChars) {
+                // Only the digest is retained: the conflict check compares the
+                // file as it is now against what the agent saw, and a turn that
+                // reads many large files must not keep them all in memory.
+                m_readSnapshots.insert(ledgerKey(readPath),
+                                       QCryptographicHash::hash(full.toUtf8(), QCryptographicHash::Sha256));
+            }
         }
     }
 

@@ -19,6 +19,7 @@
 #include <QPushButton>
 #include <QTabWidget>
 #include <QTextBrowser>
+#include <QTimer>
 #include <QVBoxLayout>
 
 using namespace Qt::Literals::StringLiterals;
@@ -94,24 +95,36 @@ InspectorPanel::InspectorPanel(AgentLoop *agent, QWidget *parent)
     connect(closeButton, &QPushButton::clicked, this, &QDialog::hide);
 
     if (m_agent) {
-        connect(m_agent, &AgentLoop::turnFinished, this, [this] {
-            QPointer<InspectorPanel> guard(this);
-            if (guard) {
-                refresh();
-            }
-        });
-        connect(m_agent, &AgentLoop::harnessEvent, this, [this](const QString &, const QJsonObject &) {
-            QPointer<InspectorPanel> guard(this);
-            if (guard && isVisible()) {
-                refresh();
-            }
-        });
+        connect(m_agent, &AgentLoop::turnFinished, this, &InspectorPanel::scheduleRefresh);
+        connect(m_agent, &AgentLoop::harnessEvent, this,
+                [this](const QString &, const QJsonObject &) {
+                    if (isVisible()) {
+                        scheduleRefresh();
+                    }
+                });
     }
 
     refresh();
 }
 
 InspectorPanel::~InspectorPanel() = default;
+
+void InspectorPanel::scheduleRefresh()
+{
+    if (m_refreshPending) {
+        return;
+    }
+    m_refreshPending = true;
+    // Harness events arrive at every tool/step boundary. Rebuilding the
+    // prompt, trace and skill reports synchronously for each one made an open
+    // inspector progressively more expensive during a long turn.
+    QTimer::singleShot(250, this, [this] {
+        m_refreshPending = false;
+        if (isVisible()) {
+            refresh();
+        }
+    });
+}
 
 void InspectorPanel::addTextTab(const QString &title, QTextBrowser **view)
 {

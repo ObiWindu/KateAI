@@ -561,6 +561,11 @@ private:
     // repeats identical content on a heartbeat does not force a re-render.
     QHash<QString, QString> m_toolStreamed;
     QHash<QString, qint64> m_toolProgressAt;
+    // Aggregate ceilings: per-map counts alone let a hostile agent keep many
+    // large details/diffs/streams alive.
+    qsizetype m_liveToolBytes = 0;
+    qsizetype m_toolStreamBytes = 0;
+    qsizetype m_terminalBytes = 0;
 
     QList<QueuedPrompt> m_queued;
 

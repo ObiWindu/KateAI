@@ -7,6 +7,7 @@
 
 #include <QFile>
 #include <QDir>
+#include <QDirIterator>
 #include <QFileInfo>
 #include <QSaveFile>
 #include <QTextStream>
@@ -41,7 +42,7 @@ constexpr qint64 kMaxAnalysedBytes = 1024 * 1024;
 // What the graph keeps of each file once the analysis has run. The content is
 // analysis input, not graph data: holding every file in memory would make the
 // graph grow with the workspace.
-constexpr int kContentPreviewChars = 16 * 1024;
+constexpr int kContentPreviewChars = 4 * 1024;
 
 // Node ids hash the path as it was scanned. On macOS a temporary directory is
 // commonly /var/... while QFileInfo resolves the same file to /private/var/...;
@@ -157,14 +158,18 @@ void ProjectGraph::scanDirectory(const QString &dirPath, const QString &parentNo
     }
     m_visitedDirs.insert(resolvedDir);
 
-    QDir dir(dirPath);
-    // NoSymLinks keeps a link from being treated as a directory to descend into.
-    const QFileInfoList entries = dir.entryInfoList(QDir::AllEntries | QDir::NoDotAndDotDot | QDir::NoSymLinks);
-
-    for (const QFileInfo &entry : entries) {
+    // NoSymLinks keeps a link from being treated as a directory to descend
+    // into. Iterate instead of entryInfoList(): a directory with a very large
+    // number of files would otherwise allocate one QFileInfo per entry before
+    // the graph node budget is applied.
+    QDirIterator entries(dirPath,
+                         QDir::AllEntries | QDir::NoDotAndDotDot | QDir::NoSymLinks);
+    while (entries.hasNext()) {
         if (m_nodes.size() >= kMaxGraphNodes) {
             break;
         }
+        entries.next();
+        const QFileInfo entry = entries.fileInfo();
 
         const QString fileName = entry.fileName();
 

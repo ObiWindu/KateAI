@@ -268,17 +268,39 @@ bool EventStore::copyConversation(const QString &sourceId, const QString &target
         }
         return false;
     }
-    QList<HarnessEvent> events = read(sourceId, 0, -1);
-    if (throughSeq >= 0) {
-        events.erase(std::remove_if(events.begin(), events.end(), [throughSeq](const HarnessEvent &event) {
-                         return event.seq > throughSeq;
-                     }),
-                     events.end());
+    // Copy in pages so a long event log does not become two full lists.
+    constexpr int kPageSize = 256;
+    qint64 fromSeq = 0;
+    while (true) {
+        QList<HarnessEvent> events = read(sourceId, fromSeq, kPageSize);
+        if (events.isEmpty()) {
+            break;
+        }
+        if (throughSeq >= 0) {
+            events.erase(std::remove_if(events.begin(), events.end(),
+                                        [throughSeq](const HarnessEvent &event) {
+                                            return event.seq > throughSeq;
+                                        }),
+                         events.end());
+        }
+        for (HarnessEvent &event : events) {
+            event.conversationId = targetId;
+        }
+        if (!events.isEmpty() && !append(targetId, events, error)) {
+            return false;
+        }
+        const qint64 lastSeq = events.isEmpty()
+            ? fromSeq + kPageSize
+            : events.constLast().seq;
+        if (throughSeq >= 0 && lastSeq >= throughSeq) {
+            break;
+        }
+        fromSeq = lastSeq;
+        if (events.size() < kPageSize) {
+            break;
+        }
     }
-    for (HarnessEvent &event : events) {
-        event.conversationId = targetId;
-    }
-    return append(targetId, events, error);
+    return true;
 }
 
 bool EventStore::append(const QString &conversationId, const QList<HarnessEvent> &events,
@@ -546,12 +568,29 @@ bool EventStore::rebuildProjection(const QString &conversationId, QString *error
         }
         return false;
     }
-    const QList<HarnessEvent> events = read(conversationId, 0, -1, error);
-    for (const HarnessEvent &event : events) {
-        if (!applyProjection(event, db, error)) {
+    // Apply page by page; the projection is append-only, so each page can be
+    // released before the next is read.
+    constexpr int kPageSize = 256;
+    qint64 fromSeq = 0;
+    while (true) {
+        const QList<HarnessEvent> events = read(conversationId, fromSeq, kPageSize, error);
+        if (error && !error->isEmpty()) {
             db.rollback();
             return false;
         }
+        if (events.isEmpty()) {
+            break;
+        }
+        for (const HarnessEvent &event : events) {
+            if (!applyProjection(event, db, error)) {
+                db.rollback();
+                return false;
+            }
+        }
+        if (events.size() < kPageSize) {
+            break;
+        }
+        fromSeq = events.constLast().seq;
     }
     if (!db.commit()) {
         m_lastError = db.lastError().text();

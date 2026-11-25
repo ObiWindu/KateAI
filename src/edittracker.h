@@ -33,6 +33,11 @@ struct EditEntry
     QString diff;     // Unified diff showing the changes
     QString oldContent;
     QString newContent;
+    // Large contents live in the tracker's temporary blob directory. The
+    // inline strings stay empty so a review queue of big files does not retain
+    // several copies of each file.
+    QString oldContentId;
+    QString newContentId;
     // Set when the file did not exist before the agent created it. Rejecting
     // such an edit has to remove the file rather than truncate it to empty,
     // which would leave a zero-byte file where there was nothing before.
@@ -60,6 +65,7 @@ class EditTracker : public QWidget
 
 public:
     explicit EditTracker(QWidget *parent = nullptr);
+    ~EditTracker() override;
 
     void addEdit(const QString &path, const QString &toolName, const QString &diff,
                  const QString &oldContent = QString(), const QString &newContent = QString(),
@@ -130,6 +136,7 @@ private:
         QList<EditEntry> pending;
         bool createdFile = false;
         QString lastKnownContent;
+        QString lastKnownContentId;
         int added = 0;
         int removed = 0;
     };
@@ -143,8 +150,9 @@ private:
         bool createdFile = false;
         // File content as it stood before these edits, so undoing an acceptance
         // can restore it. A null QString means "never read", which is different
-        // from "read as empty".
+        // from "read as empty". Large contents are referenced by id instead.
         QString previousContent;
+        QString previousContentId;
         // The line ranges this decision settled, mirrored in
         // m_settledRanges so undo can retract exactly them.
         QList<KTextEditor::Range> settledRanges;
@@ -161,6 +169,12 @@ private:
     QString combinedDiff(const Group &group) const;
     QString previewDiffPath(const QString &path) const;
     void settle(const QString &path, bool accepted);
+    // Large edit bodies are written outside the widget tree. Keep the review
+    // and undo metadata small; read a blob only when a decision needs it.
+    QString storeBlob(const QString &content);
+    QString loadBlob(const QString &id, const QString &fallback) const;
+    void clearBlobs();
+    QString m_blobDirectory;
     void pruneGroups();
     Group makeGroup(const QString &path) const;
     void refreshTotals(Group &group) const;

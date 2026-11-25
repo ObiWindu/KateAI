@@ -31,6 +31,7 @@ set_tests_properties(test_settings test_configmigration test_credentials
                      PROPERTIES RESOURCE_LOCK kateai_test_credentials_config)
 kateai_test(test_llmparse)
 kateai_test(test_session)
+kateai_test(test_memory_budget)
 kateai_test(test_retry)
 kateai_test(test_agentparity)
 kateai_test(test_checkpoints)

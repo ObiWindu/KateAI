@@ -455,9 +455,13 @@ ChatWidget::ChatWidget(QWidget *parent)
     m_sessionSaveTimer->setSingleShot(true);
     // A long turn can finish tools many times per second. Serializing the
     // whole transcript on every one of those saves is the largest avoidable
-    // disk cost in a long session; 1.5 s still persists work continuously.
-    m_sessionSaveTimer->setInterval(1500);
-    connect(m_sessionSaveTimer, &QTimer::timeout, this, &ChatWidget::saveCurrentConversation);
+    // disk cost in a long session. Turn boundaries still save immediately.
+    m_sessionSaveTimer->setInterval(5000);
+    connect(m_sessionSaveTimer, &QTimer::timeout, this, [this]() {
+        if (m_sessionDirty) {
+            saveCurrentConversation();
+        }
+    });
 
     // A stable name the panel stylesheet can select: a class selector like
     // `ChatWidget { ... }` never matches, because Qt compares it against the
@@ -1438,7 +1442,11 @@ ChatWidget::ChatWidget(QWidget *parent)
                 const PendingEdit pending = it.value();
                 if (result.ok) {
                     QString newContent;
-                    if (m_agent.documentBridge()) {
+                    constexpr qint64 kMaxTrackedEditBytes = 4 * 1024 * 1024;
+                    const QFileInfo trackedInfo(pending.path);
+                    if (m_agent.documentBridge()
+                        && (!trackedInfo.exists() || !trackedInfo.isFile()
+                            || trackedInfo.size() <= kMaxTrackedEditBytes)) {
                         m_agent.documentBridge()->readDocument(pending.path, &newContent);
                     }
                     m_editTracker->addEdit(pending.path, pending.toolName, pending.diff,
@@ -1484,26 +1492,38 @@ ChatWidget::ChatWidget(QWidget *parent)
             }
             return QDir::cleanPath(QDir(workspace).absoluteFilePath(raw));
         };
+        // A pending edit only needs the old bytes to support Reject/Undo. Do
+        // not read a multi-megabyte file just to retain a second copy; refusal
+        // to revert is safer than an OOM, and the checkpoint remains available.
+        const auto readOldContent = [this](const QString &path, QString *out) {
+            constexpr qint64 kMaxPendingBaselineBytes = 4 * 1024 * 1024;
+            const QFileInfo info(path);
+            if (info.exists() && info.isFile() && info.size() > kMaxPendingBaselineBytes) {
+                return true;
+            }
+            return m_agent.documentBridge()
+                && m_agent.documentBridge()->readDocument(path, out);
+        };
 
         auto pending = m_pendingToolCalls.find(request.toolCallId);
         const bool editTracking = m_settings.permissionMode == PermissionMode::AcceptEdits
             || usesAcpNative(m_settings);
+        constexpr int kMaxPendingToolCalls = 64;
         if (pending == m_pendingToolCalls.end() && editTracking && !request.path.isEmpty()
+            && m_pendingToolCalls.size() < kMaxPendingToolCalls
             && (request.mutatesFiles || !request.describeDiff.isEmpty())) {
             PendingEdit created;
             created.toolName = request.toolName;
             created.path = trackerPath(request.resolvedPath.isEmpty() ? request.path : request.resolvedPath);
             created.diff = request.describeDiff;
-            created.existed = m_agent.documentBridge()
-                && m_agent.documentBridge()->readDocument(created.path, &created.oldContent);
+            created.existed = readOldContent(created.path, &created.oldContent);
             m_pendingToolCalls.insert(request.toolCallId, created);
             pending = m_pendingToolCalls.find(request.toolCallId);
         }
         if (pending != m_pendingToolCalls.end()) {
             if (pending->path.isEmpty() && !request.path.isEmpty()) {
                 pending->path = trackerPath(request.resolvedPath.isEmpty() ? request.path : request.resolvedPath);
-                pending->existed = m_agent.documentBridge()
-                    && m_agent.documentBridge()->readDocument(pending->path, &pending->oldContent);
+                pending->existed = readOldContent(pending->path, &pending->oldContent);
             }
             if (pending->diff.isEmpty()) {
                 pending->diff = request.describeDiff;
@@ -1521,12 +1541,12 @@ ChatWidget::ChatWidget(QWidget *parent)
                 }
                 const QString key = request.toolCallId + u"_add"_s + QString::number(i);
                 auto extra = m_pendingToolCalls.find(key);
-                if (extra == m_pendingToolCalls.end()) {
+                if (extra == m_pendingToolCalls.end()
+                    && m_pendingToolCalls.size() < kMaxPendingToolCalls) {
                     PendingEdit addPending;
                     addPending.toolName = request.toolName;
                     addPending.path = path;
-                    addPending.existed = m_agent.documentBridge()
-                        && m_agent.documentBridge()->readDocument(path, &addPending.oldContent);
+                    addPending.existed = readOldContent(path, &addPending.oldContent);
                     if (i < request.additionalDiffs.size()) {
                         addPending.diff = request.additionalDiffs.at(i);
                     }
@@ -1750,6 +1770,10 @@ ChatWidget::ChatWidget(QWidget *parent)
         m_subtaskQuestionTaskIds.clear();
         m_pendingSuggestions.clear();
         m_pendingProgress.clear();
+        // An edit whose result never arrived can no longer be reviewed. Drop
+        // the snapshot now instead of retaining a full old file until the next
+        // conversation switch.
+        m_pendingToolCalls.clear();
         // The dock lost contents without a dock-aware call above: a cleared
         // question, and approval rows hidden together with the cards that
         // carried them. Recompute, or the strip stays on screen over the
@@ -2103,6 +2127,7 @@ void ChatWidget::saveCurrentConversation()
     }
     const SessionStore::SessionData sessionData = m_agent.sessionData();
     if (sessionData.messages.isEmpty()) {
+        m_sessionDirty = false;
         return;
     }
 
@@ -2117,6 +2142,9 @@ void ChatWidget::saveCurrentConversation()
     const bool isNew = SessionStore::saveConversation(
         m_currentConversationId, sessionData, QString(),
         m_settings.maxSavedConversations);
+    // The payload on disk now matches the in-memory conversation. A failed
+    // save leaves the flag set so the next tick retries.
+    m_sessionDirty = false;
     // The number of conversations only changes when one is created or
     // deleted. A save of an existing conversation keeps the cached count, so
     // the button is repainted without a query.
@@ -2129,6 +2157,7 @@ void ChatWidget::saveCurrentConversation()
 void ChatWidget::scheduleSessionSave()
 {
     if (!m_loadingConversation && m_sessionSaveTimer) {
+        m_sessionDirty = true;
         // The timer is single-shot. Restarting it on every chunk would keep
         // pushing the deadline away while the answer streams, so nothing would
         // ever be saved while the turn is in progress -- exactly the case the
@@ -2232,8 +2261,23 @@ void ChatWidget::addActivityMessage(const QString &text)
         return;
     }
     auto *pill = new QLabel(escape(text), m_transcriptContainer);
+    pill->setObjectName(u"activityPill"_s);
     pill->setStyleSheet(ChatTheme::hintLabel());
     appendTranscriptWidget(pill);
+    m_activityPills.append(pill);
+    constexpr int kMaxActivityPills = 50;
+    while (m_activityPills.size() > kMaxActivityPills) {
+        QLabel *oldest = m_activityPills.takeFirst();
+        if (!oldest) {
+            continue;
+        }
+        if (m_transcriptLayout) {
+            m_transcriptLayout->removeWidget(oldest);
+        }
+        oldest->hide();
+        oldest->setParent(nullptr);
+        oldest->deleteLater();
+    }
     scrollToBottom();
 }
 
@@ -2330,7 +2374,13 @@ void ChatWidget::scheduleStreamRender()
     // restarts it, which would starve a continuous stream.
     if (!m_streamRenderTimer->isActive()) {
         const int length = m_streamText.size();
-        m_streamRenderTimer->setInterval(length > 60000 ? 200 : (length > 20000 ? 100 : 50));
+        // Big answers cost proportionally more per full markdown rebuild. Keep
+        // the final result identical, but stop rebuilding a pathological
+        // answer several times per second.
+        const int interval = length > 500000 ? 1000
+            : (length > 200000 ? 500
+               : (length > 60000 ? 200 : (length > 20000 ? 100 : 50)));
+        m_streamRenderTimer->setInterval(interval);
         m_streamRenderTimer->start();
     }
 }
@@ -4632,7 +4682,7 @@ void ChatWidget::showReasoningEffortMenu()
     QMenu menu(this);
     menu.setStyleSheet(ChatTheme::menu());
 
-    auto *reasoningGroup = new QActionGroup(this);
+    auto *reasoningGroup = new QActionGroup(&menu);
     const QStringList reasoningLevels = {QString(), QStringLiteral("minimal"), QStringLiteral("low"), QStringLiteral("medium"), QStringLiteral("high")};
     const QStringList reasoningLabels = {i18n("Auto (provider default)"), i18n("Minimal"), i18n("Low"), i18n("Medium"), i18n("High")};
     const QStringList reasoningIcons = {u"🧠"_s, u"1"_s, u"2"_s, u"3"_s, u"4"_s};
@@ -4669,7 +4719,7 @@ void ChatWidget::showAcpEffortMenu()
     QMenu menu(this);
     menu.setStyleSheet(ChatTheme::menu());
 
-    auto *group = new QActionGroup(this);
+    auto *group = new QActionGroup(&menu);
     auto *autoAction = menu.addAction(i18n("Auto (agent default)"));
     autoAction->setCheckable(true);
     autoAction->setChecked(forced.isEmpty());
@@ -5690,7 +5740,7 @@ void ChatWidget::showSettingsMenu()
     // Permission Mode
     auto *permMenu = menu.addMenu(i18n("Permission Mode"));
     permMenu->setStyleSheet(menu.styleSheet());
-    auto *permGroup = new QActionGroup(this);
+    auto *permGroup = new QActionGroup(&menu);
     for (int i = 0; i < m_permission->count(); ++i) {
         auto *action = permMenu->addAction(m_permission->itemText(i));
         action->setCheckable(true);
@@ -5705,7 +5755,7 @@ void ChatWidget::showSettingsMenu()
     // Sandbox Profile
     auto *sandboxMenu = menu.addMenu(i18n("Sandbox Profile"));
     sandboxMenu->setStyleSheet(menu.styleSheet());
-    auto *sandboxGroup = new QActionGroup(this);
+    auto *sandboxGroup = new QActionGroup(&menu);
     for (int i = 0; i < m_sandbox->count(); ++i) {
         auto *action = sandboxMenu->addAction(m_sandbox->itemText(i));
         action->setCheckable(true);
@@ -5726,7 +5776,7 @@ void ChatWidget::showSettingsMenu()
     // Agent Mode
     auto *modeMenu = menu.addMenu(i18n("Mode"));
     modeMenu->setStyleSheet(menu.styleSheet());
-    auto *modeGroup = new QActionGroup(this);
+    auto *modeGroup = new QActionGroup(&menu);
     for (int i = 0; i < m_mode->count(); ++i) {
         auto *action = modeMenu->addAction(m_mode->itemText(i));
         action->setCheckable(true);
@@ -6259,6 +6309,10 @@ void ChatWidget::showQuestionCard(const PermissionRequest &request)
         } else {
             m_agent.answerQuestion(answer);
         }
+        // The card is becoming transcript history, not a live request. Drop it
+        // from the routing map so turn-end cleanup cannot delete an answered
+        // card and so the map cannot grow one entry per question.
+        m_questionWidgets.remove(questionCallId);
         retireIntentWidget(card);
         updateSendButtonState();
         m_prompt->setFocus();
@@ -6990,11 +7044,6 @@ QString ChatWidget::escape(const QString &text)
     return text.toHtmlEscaped();
 }
 
-QString ChatWidget::markdownToHtml(const QString &text)
-{
-    return makeMarkdownDocument(text, ChatTheme::messageCss())->toHtml();
-}
-
 QString ChatWidget::closedMarkdown(const QString &text)
 {
     return closeMarkdown(text);
@@ -7078,6 +7127,8 @@ void ChatWidget::clearTranscriptContents()
         m_progressTimer->stop();
     }
     m_pendingProgress.clear();
+    m_activityPills.clear();
+    m_pinnedViewportWidget = nullptr;
     m_questionTexts.clear();
     if (m_streamRenderTimer) {
         m_streamRenderTimer->stop();
@@ -7660,6 +7711,35 @@ void ChatWidget::rebuildTranscript()
                                       restoredArgs.value(u"description"_s).toString());
             m_subtaskWidgets.insert(widgetKey, subtaskWidget);
             m_subtaskOrder.append(subtaskWidget);
+            // The live path caps sub-agent cards; a restored conversation must
+            // obey the same budget or reopening a long orchestration session
+            // materializes every historical card at once.
+            constexpr int kMaxRestoredSubtaskCards = 40;
+            while (m_subtaskOrder.size() > kMaxRestoredSubtaskCards) {
+                int victimIndex = -1;
+                for (int i = 0; i < m_subtaskOrder.size(); ++i) {
+                    SubtaskWidget *candidate = m_subtaskOrder.at(i);
+                    if (candidate && !candidate->isRunning()) {
+                        victimIndex = i;
+                        break;
+                    }
+                }
+                if (victimIndex < 0) {
+                    break;
+                }
+                SubtaskWidget *victim = m_subtaskOrder.takeAt(victimIndex);
+                m_subtaskWidgets.remove(victim->taskId());
+                m_subtaskAnchors.remove(victim->taskId());
+                if (m_subtaskDock) {
+                    m_subtaskDock->removeCard(victim);
+                }
+                if (m_transcriptLayout) {
+                    m_transcriptLayout->removeWidget(victim);
+                }
+                victim->hide();
+                victim->setParent(nullptr);
+                victim->deleteLater();
+            }
             const SubagentRecord restoredRecord = m_agent.subagent(spec.id);
             if (spec.hasResult) {
                 ToolResult result;
@@ -7749,6 +7829,20 @@ void ChatWidget::rebuildTranscript()
             m_suggestionWidgets.insert(widgetKey, card);
             m_suggestionOrder.append(card);
             appendTranscriptWidget(card);
+            constexpr int kMaxRestoredSuggestionCards = 100;
+            while (m_suggestionOrder.size() > kMaxRestoredSuggestionCards) {
+                SuggestionWidget *oldest = m_suggestionOrder.takeFirst();
+                if (!oldest) {
+                    continue;
+                }
+                m_suggestionWidgets.remove(oldest->suggestionId());
+                if (m_transcriptLayout) {
+                    m_transcriptLayout->removeWidget(oldest);
+                }
+                oldest->hide();
+                oldest->setParent(nullptr);
+                oldest->deleteLater();
+            }
             return;
         }
 

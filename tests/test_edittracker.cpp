@@ -40,6 +40,20 @@ private Q_SLOTS:
         QVERIFY(tracker.hasPendingEdits());
     }
 
+    void testLargeEditContentsSurviveBlobStorage()
+    {
+        EditTracker tracker;
+        QSignalSpy rejected(&tracker, &EditTracker::editRejected);
+        const QString oldContent(300 * 1024, u'a');
+        const QString newContent(300 * 1024, u'b');
+        tracker.addEdit(u"/tmp/large.cpp"_s, u"write_file"_s,
+                        diffFor(1, 0), oldContent, newContent);
+        tracker.rejectEdit(u"/tmp/large.cpp"_s);
+
+        QCOMPARE(rejected.size(), 1);
+        QCOMPARE(rejected.first().at(2).toString(), oldContent);
+    }
+
     void testEmptyQueueReportsNothingPending()
     {
         EditTracker tracker;

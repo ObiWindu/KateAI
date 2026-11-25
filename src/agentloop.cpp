@@ -19,6 +19,7 @@
 
 #include <QJsonArray>
 #include <QSet>
+#include <QCryptographicHash>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QFile>
@@ -65,6 +66,25 @@ QString clipObservation(const QString &text, int maxChars = 80000)
     const int tail = maxChars - head;
     return text.left(head)
         + u"\n\n… [observation truncated: %1 characters omitted; showing the first %2 and last %3] …\n\n"_s
+              .arg(text.size() - head - tail).arg(head).arg(tail)
+        + text.right(tail);
+}
+
+// ACP agents own their own model context; Kate keeps their result for the
+// transcript and session only. Bound that copy just like a native tool result,
+// while leaving the full text in the content store for paging.
+constexpr qsizetype kMaxAcpHistoryChars = 80 * 1024;
+constexpr qsizetype kMaxAcpUiChars = 1024 * 1024;
+
+QString clipToolUiText(const QString &text)
+{
+    if (text.size() <= kMaxAcpUiChars) {
+        return text;
+    }
+    const qsizetype head = kMaxAcpUiChars * 3 / 4;
+    const qsizetype tail = kMaxAcpUiChars - head;
+    return text.left(head)
+        + u"\n\n… [display truncated: %1 characters omitted; showing the first %2 and last %3] …\n\n"_s
               .arg(text.size() - head - tail).arg(head).arg(tail)
         + text.right(tail);
 }
@@ -196,12 +216,57 @@ SubagentRecord subagentRecordFromJson(const QJsonObject &object)
 
 qsizetype transcriptMessageChars(const ChatMessage &message)
 {
-    return message.content.size() + message.thinking.size();
+    // The transcript budget has to include the tool-call payload. A write_file
+    // carries the whole file body in the assistant message arguments; counting
+    // only prose let a few large writes bypass the 8 MB transcript cap and
+    // inflated every session save.
+    qsizetype total = message.content.size() + message.thinking.size();
+    for (const QJsonValue &value : message.toolCalls) {
+        const QJsonObject call = value.toObject();
+        total += call.value(u"id"_s).toString().size();
+        const QJsonObject function = call.value(u"function"_s).toObject();
+        total += function.value(u"name"_s).toString().size();
+        total += function.value(u"arguments"_s).toString().size();
+        // Field names, punctuation, and object overhead. The exact value does
+        // not matter; the point is that the estimate cannot ignore the payload.
+        total += 32;
+    }
+    for (const QJsonValue &value : message.plan) {
+        total += value.toObject().value(u"description"_s).toString().size();
+        total += 16;
+    }
+    return total;
 }
 
 bool isTranscriptElision(const ChatMessage &message)
 {
     return message.name == u"transcript_elision"_s;
+}
+
+bool sameMessage(const ChatMessage &left, const ChatMessage &right)
+{
+    return left.role == right.role
+        && left.authorRole == right.authorRole
+        && left.content == right.content
+        && left.thinking == right.thinking
+        && left.plan == right.plan
+        && left.toolCallId == right.toolCallId
+        && left.name == right.name
+        && left.toolCalls == right.toolCalls
+        && left.transient == right.transient;
+}
+
+bool sameTranscript(const QList<ChatMessage> &left, const QList<ChatMessage> &right)
+{
+    if (left.size() != right.size()) {
+        return false;
+    }
+    for (qsizetype i = 0; i < left.size(); ++i) {
+        if (!sameMessage(left.at(i), right.at(i))) {
+            return false;
+        }
+    }
+    return true;
 }
 
 QString oneLineForReport(QString text, int maxChars)
@@ -304,6 +369,11 @@ AgentLoop::AgentLoop(QObject *parent)
 
     m_nextModelTimer.setSingleShot(true);
     connect(&m_nextModelTimer, &QTimer::timeout, this, &AgentLoop::sendToModel);
+    // Typing updates the graph continuously; writing the whole JSON cache on
+    // every 1.5 s pause made the UI re-serialize it while the user typed.
+    m_graphSaveTimer.setSingleShot(true);
+    m_graphSaveTimer.setInterval(30000);
+    connect(&m_graphSaveTimer, &QTimer::timeout, this, &AgentLoop::flushProjectGraph);
 
     connect(&m_client, &LlmClient::textDelta, this, [this](const QString &delta) {
         if (!m_thinkingFinishedEmitted && !m_currentThinking.isEmpty()) {
@@ -454,13 +524,32 @@ AgentLoop::AgentLoop(QObject *parent)
         Q_EMIT toolDetailsChanged(request);
     });
     connect(&m_acp, &AcpClient::toolFinished, this, [this](const ToolResult &result) {
+        // The ACP agent has already executed the tool and owns its own context;
+        // this copy exists for the transcript and session. A 16 MiB protocol
+        // frame used to become a 16 MiB history/session entry (and a second
+        // copy in the UI card), so bound it exactly like a native result.
+        ToolResult bounded = result;
+        if (bounded.output.size() > kMaxAcpHistoryChars) {
+            const StoredToolResult stored = ToolResults::store(
+                bounded.output, qMax(1000, static_cast<int>(kMaxAcpHistoryChars) * 2 / 3),
+                qMax(500, static_cast<int>(kMaxAcpHistoryChars) / 3));
+            if (!stored.id.isEmpty()) {
+                bounded.output = stored.preview;
+            } else {
+                bounded.output = clipObservation(bounded.output,
+                                                 static_cast<int>(kMaxAcpHistoryChars));
+            }
+        }
+        const QString uiText = result.rawOutput.isEmpty() ? result.output : result.rawOutput;
+        bounded.rawOutput = clipToolUiText(uiText);
+
         ChatMessage toolMsg;
         toolMsg.role = ChatMessage::Role::Tool;
-        toolMsg.toolCallId = result.toolCallId;
-        toolMsg.name = result.name;
-        toolMsg.content = result.output;
+        toolMsg.toolCallId = bounded.toolCallId;
+        toolMsg.name = bounded.name;
+        toolMsg.content = bounded.output;
         appendMessage(toolMsg);
-        Q_EMIT toolFinished(result);
+        Q_EMIT toolFinished(bounded);
     });
     connect(&m_acp, &AcpClient::permissionNeeded, this, [this](const PermissionRequest &request) {
         // The agent runs its own tools, but the active mode still decides
@@ -594,6 +683,8 @@ AgentLoop::AgentLoop(QObject *parent)
 
 AgentLoop::~AgentLoop()
 {
+    // Flush a debounced graph edit before the graph is destroyed.
+    flushProjectGraph();
     // A running sub-agent owns its own network client and is not parented to
     // this object, so it has to be stopped explicitly or it outlives us.
     cancelSubtask();
@@ -1413,10 +1504,16 @@ QString AgentLoop::traceReport() const
     if (!store.open(&openError)) {
         return i18n("The event log is unavailable: %1", openError);
     }
-    const QList<HarnessEvent> events = store.read(conversation, 0, -1);
+    // The report is a human-readable trace, not an export. Reading every event
+    // of a long conversation just to show the inspector made memory grow with
+    // the whole log; exportTrace() is the complete-data path.
+    constexpr int kMaxReportEvents = 2000;
+    const qint64 head = store.headSeq(conversation);
+    const qint64 fromSeq = qMax<qint64>(0, head - kMaxReportEvents);
+    const QList<HarnessEvent> events = store.read(conversation, fromSeq, kMaxReportEvents);
     QString text;
-    text += i18n("Conversation: %1\nEvents: %2, head sequence: %3\n\n",
-                 conversation, events.size(), store.headSeq(conversation));
+    text += i18n("Conversation: %1\nEvents: %2 (showing up to %3), head sequence: %4\n\n",
+                 conversation, events.size(), kMaxReportEvents, head);
     text += Telemetry::report(
                 Telemetry::fromEvents(events, m_settings.telemetryContentCapture))
         + u'\n';
@@ -1515,6 +1612,7 @@ bool AgentLoop::applySubagentWorktree(const QString &taskId, QString *error)
     if (!SubagentWorktree::apply(m_workspace, record.patch, error)) {
         return false;
     }
+    record.patch.clear();
     record.applied = true;
     if (!record.worktreePath.isEmpty()) {
         QString cleanupError;
@@ -1553,6 +1651,7 @@ bool AgentLoop::discardSubagentWorktree(const QString &taskId, QString *error)
         }
         record.worktreePath.clear();
     }
+    record.patch.clear();
     record.discarded = true;
     emitHarnessEvent(EventTypes::SubagentDiscard, QJsonObject{{u"taskId"_s, taskId}});
     return true;
@@ -2145,14 +2244,51 @@ bool AgentLoop::exportTrace(const QString &path, QString *error)
         }
         return false;
     }
-    const QList<HarnessEvent> events = m_events.read(conversation, 0, -1, &localError);
-    if (!localError.isEmpty()) {
+    QFile output(path);
+    if (!output.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
         if (error) {
-            *error = localError;
+            *error = output.errorString();
         }
         return false;
     }
-    return Replay::exportJsonl(events, path, error);
+    // Stream the log in pages. Export is the complete-data path, but it does
+    // not need the whole conversation resident at once.
+    constexpr int kEventPageSize = 256;
+    qint64 fromSeq = 0;
+    while (true) {
+        const QList<HarnessEvent> page =
+            m_events.read(conversation, fromSeq, kEventPageSize, &localError);
+        if (!localError.isEmpty()) {
+            if (error) {
+                *error = localError;
+            }
+            return false;
+        }
+        for (const HarnessEvent &event : page) {
+            QJsonObject object;
+            object.insert(u"conversationId"_s, event.conversationId);
+            object.insert(u"seq"_s, event.seq);
+            object.insert(u"ts"_s, event.timestampMs);
+            object.insert(u"turnId"_s, event.turnId);
+            object.insert(u"stepId"_s, event.stepId);
+            object.insert(u"type"_s, event.type);
+            object.insert(u"payload"_s, Events::redact(event.payload));
+            object.insert(u"imported"_s, event.imported);
+            const QByteArray line =
+                QJsonDocument(object).toJson(QJsonDocument::Compact) + '\n';
+            if (output.write(line) != line.size()) {
+                if (error) {
+                    *error = output.errorString();
+                }
+                return false;
+            }
+        }
+        if (page.size() < kEventPageSize) {
+            break;
+        }
+        fromSeq = page.constLast().seq;
+    }
+    return true;
 }
 
 void AgentLoop::syncToolAccess()
@@ -2351,7 +2487,12 @@ void AgentLoop::clearCheckpointWait()
 void AgentLoop::markActionExecuted(const QString &signature)
 {
     m_actionsThisModelTurn.insert(signature);
-    m_actionSignatures.insert(signature);
+    // Bound the cross-turn repeat table. It is normally cleared by every
+    // mutation; a read-only turn can still accumulate one entry per call.
+    constexpr int kMaxRepeatEntries = 4096;
+    if (m_actionRepeatCounts.size() >= kMaxRepeatEntries) {
+        m_actionRepeatCounts.clear();
+    }
     m_actionRepeatCounts.insert(QString::number(m_stateEpoch) + u"|"_s + signature, 1);
 }
 
@@ -2362,8 +2503,24 @@ void AgentLoop::updateProjectGraph(const QString &filePath, const QString &conte
     // and an empty m_workspace would put it at the filesystem root.
     if (m_projectGraph && !m_workspace.isEmpty()) {
         m_projectGraph->updateGraph(filePath, content);
-        m_projectGraph->saveToFile(m_workspace + u"/.kateai/project_graph.json"_s);
         m_acp.setProjectGraph(m_projectGraph.get());
+        m_graphSavePending = true;
+        if (!m_graphSaveTimer.isActive()) {
+            m_graphSaveTimer.start();
+        }
+    }
+}
+
+void AgentLoop::flushProjectGraph()
+{
+    if (!m_projectGraph || m_workspace.isEmpty() || !m_graphSavePending) {
+        return;
+    }
+    m_graphSavePending = false;
+    m_graphSaveTimer.stop();
+    if (!m_projectGraph->saveToFile(m_workspace + u"/.kateai/project_graph.json"_s)) {
+        qWarning() << "Could not write the project graph cache to"
+                   << m_workspace + u"/.kateai/project_graph.json"_s;
     }
 }
 
@@ -2695,6 +2852,7 @@ void AgentLoop::resetConversation()
     m_messages.clear();
     m_transcriptMessages.clear();
     m_transcriptChars = 0;
+    m_transcriptDiverged = false;
     m_policy.revokeSession();
     m_modelRequests = 0;
     m_toolCalls = 0;
@@ -2702,7 +2860,6 @@ void AgentLoop::resetConversation()
     m_outputTokensTotal = 0;
     m_cachedInputTokensTotal = 0;
     m_stateEpoch = 0;
-    m_actionSignatures.clear();
     m_actionRepeatCounts.clear();
     m_actionsThisModelTurn.clear();
     m_recoveryPromptCount = 0;
@@ -3110,7 +3267,6 @@ void AgentLoop::start(const QString &userText)
     m_waitingCall = {};
     m_waitingRequest = {};
     m_currentAssistant.clear();
-    m_actionSignatures.clear();
     m_actionRepeatCounts.clear();
     m_actionsThisModelTurn.clear();
     if (m_tools) {
@@ -3549,6 +3705,24 @@ QString AgentLoop::contextReport() const
     return report;
 }
 
+QJsonObject AgentLoop::memoryCounters() const
+{
+    qsizetype subagentPatchChars = 0;
+    for (auto it = m_subagentRecords.cbegin(); it != m_subagentRecords.cend(); ++it) {
+        subagentPatchChars += it.value().patch.size();
+    }
+    QJsonObject counters;
+    counters.insert(u"messages"_s, m_messages.size());
+    counters.insert(u"transcriptMessages"_s, m_transcriptMessages.size());
+    counters.insert(u"transcriptChars"_s, static_cast<double>(m_transcriptChars));
+    counters.insert(u"transcriptDiverged"_s, m_transcriptDiverged);
+    counters.insert(u"actionRepeatEntries"_s, m_actionRepeatCounts.size());
+    counters.insert(u"subagentRecords"_s, m_subagentRecords.size());
+    counters.insert(u"subagentPatchChars"_s, static_cast<double>(subagentPatchChars));
+    counters.insert(u"changedPaths"_s, m_changedPaths.size());
+    return counters;
+}
+
 QString AgentLoop::usageReport() const
 {
     const QString model = modelFor(m_settings);
@@ -3835,9 +4009,8 @@ QString AgentLoop::toolsReport() const
 
 QString AgentLoop::skillsReport() const
 {
-    if (m_harness.skills) {
-        m_skills.reload();
-    }
+    // Reports are read-only. Reloading here re-read every SKILL.md whenever the
+    // inspector refreshed (often several times per turn).
     const QStringList touched = contextTouchedPaths();
     const QString catalog = m_skills.catalog(touched);
     QString text;
@@ -3976,6 +4149,9 @@ void AgentLoop::maybeCompactStoredHistory(const QList<ChatMessage> &requestMessa
                                  {u"beforeMessages"_s, m_messages.size()},
                                  {u"afterMessages"_s, persistent.size()}});
     m_messages = persistent;
+    // The display transcript is intentionally left untouched by compaction.
+    // From now on it has to be persisted separately.
+    m_transcriptDiverged = true;
 }
 
 bool AgentLoop::canStartModelRequest(QString *error) const
@@ -4378,7 +4554,16 @@ QString AgentLoop::actionSignature(const ToolCall &call) const
     // same model response remain duplicates even if the first call mutates the
     // project. The epoch is added separately when checking repetition across
     // model turns.
-    return call.name + u"|"_s + QString::fromUtf8(args);
+    //
+    // Hash the canonical form: a write_file signature used to contain the whole
+    // file body, and every executed action kept one of those strings for the
+    // lifetime of the conversation. Only equality matters here, so a fixed
+    // fingerprint preserves the behavior without retaining tool arguments.
+    QByteArray material = call.name.toUtf8();
+    material.append('\0');
+    material.append(args);
+    return QString::fromLatin1(
+        QCryptographicHash::hash(material, QCryptographicHash::Sha256).toHex());
 }
 
 QJsonObject AgentLoop::effectiveArgs(const ToolCall &call) const
@@ -4484,6 +4669,7 @@ void AgentLoop::pruneTranscript()
     }
 
     m_transcriptMessages = m_transcriptMessages.mid(firstKept);
+    m_transcriptDiverged = true;
     ChatMessage marker;
     marker.role = ChatMessage::Role::System;
     marker.name = u"transcript_elision"_s;
@@ -4680,7 +4866,10 @@ void AgentLoop::appendToolResult(const ToolCall &call, ToolResult result)
 {
     result.toolCallId = call.id;
     result.name = call.name;
-    result.rawOutput = result.output;  // Preserve raw output for UI display
+    // The card shows the raw result, so it needs its own ceiling: ACP/MCP can
+    // return megabytes and formatting a full JSON/HTML body is expensive even
+    // when the model observation is clipped.
+    result.rawOutput = clipToolUiText(result.output);
     rememberTouchedPaths(call);
 
     // Large tool output is stored outside the conversation and replaced with a
@@ -4729,7 +4918,6 @@ void AgentLoop::appendToolResult(const ToolCall &call, ToolResult result)
         if (m_stateEpoch == std::numeric_limits<quint64>::max()) {
             m_stateEpoch = 0;
             m_actionRepeatCounts.clear();
-            m_actionSignatures.clear();
         } else {
             ++m_stateEpoch;
         }
@@ -5170,6 +5358,8 @@ void AgentLoop::finishTurn()
     if (m_sandboxDirty) {
         rebuildTools();
     }
+    // Persist the graph at the turn boundary rather than on every typing pause.
+    flushProjectGraph();
     // Native turns compact when the next request is built; ACP turns do not
     // go through that path, so their stored transcript is bounded here.
     if (usesAcpNative(m_settings) && m_messages.size() > 200
@@ -7068,14 +7258,17 @@ void AgentLoop::dispatchSubtask(const ToolCall &call)
                         .replace(u".jsonl"_s, u".patch"_s);
                     QDir().mkpath(QFileInfo(patchPath).absolutePath());
                     QSaveFile patchFile(patchPath);
-                    if (patchFile.open(QIODevice::WriteOnly)) {
-                        patchFile.write(record.patch.toUtf8());
-                        patchFile.commit();
+                    bool patchSaved = false;
+                    if (patchFile.open(QIODevice::WriteOnly)
+                        && patchFile.write(record.patch.toUtf8()) >= 0) {
+                        patchSaved = patchFile.commit();
                     }
-                    record.patchPath = patchPath;
-                    appendSubagentSidechain(state->taskId, u"worktree/diff"_s,
-                                            QJsonObject{{u"path"_s, patchPath},
-                                                        {u"files"_s, QJsonArray::fromStringList(record.filesChanged)}});
+                    if (patchSaved) {
+                        record.patchPath = patchPath;
+                        appendSubagentSidechain(state->taskId, u"worktree/diff"_s,
+                                                QJsonObject{{u"path"_s, patchPath},
+                                                            {u"files"_s, QJsonArray::fromStringList(record.filesChanged)}});
+                    }
                 }
                 if (result.cancelled || record.status == u"budget"_s) {
                     QString cleanupError;
@@ -7140,6 +7333,11 @@ void AgentLoop::dispatchSubtask(const ToolCall &call)
                                          {u"outputTokens"_s, record.outputTokens},
                                          {u"costUsd"_s, record.costUsd},
                                          {u"filesChanged"_s, QJsonArray::fromStringList(record.filesChanged)}});
+            // The full diff is now on disk and the record keeps patchPath. Do
+            // not retain a second copy in memory for the rest of the session.
+            if (!record.patchPath.isEmpty()) {
+                record.patch.clear();
+            }
             if (!record.worktreePath.isEmpty()) {
                 Q_EMIT subtaskWorktreeReady(state->taskId, record.worktreePath, record.filesChanged);
             }
@@ -7284,6 +7482,9 @@ bool AgentLoop::compactContext()
         return false;
     }
     m_messages = compacted;
+    // The display transcript still contains every turn the user saw. From this
+    // point it has to be persisted separately from the compacted model history.
+    m_transcriptDiverged = true;
     m_contextSummary.clear();
     m_contextManifest.clear();
     m_compactionLevel = 0;
@@ -7490,14 +7691,21 @@ SessionStore::SessionData AgentLoop::sessionData() const
 {
     SessionStore::SessionData data;
     data.messages = m_messages;
-    data.transcript = transcriptMessages();
+    // A normal, uncompacted conversation has an identical display transcript.
+    // Writing it twice doubles the JSON payload and its transient allocation.
+    // Restore falls back to messages when the field is empty.
+    if (m_transcriptDiverged) {
+        data.transcript = transcriptMessages();
+    }
     data.currentThinking = m_currentThinking;
     data.currentPlan = m_currentPlan;
     data.planShown = m_planShown;
     data.currentAssistant = m_currentAssistant;
     data.lastTurnId = m_turnId;
     data.stateEpoch = m_stateEpoch;
-    data.actionSignatures = m_actionSignatures.values();
+    // actionSignatures is intentionally not populated: it was dead state
+    // containing the full tool arguments. actionRepeatCounts now stores fixed
+    // fingerprints instead of argument text.
     data.actionRepeatCounts = m_actionRepeatCounts;
     data.changedPaths = m_changedPaths.values();
     data.changesNeedVerification = m_changesNeedVerification;
@@ -7596,6 +7804,7 @@ void AgentLoop::restoreSession(const SessionStore::SessionData &data)
     // that as the transcript rather than dropping the restored cards. An old
     // session may also predate the transcript budget; bound it on the way in.
     m_transcriptMessages = data.transcript.isEmpty() ? data.messages : data.transcript;
+    m_transcriptDiverged = !data.transcript.isEmpty() && !sameTranscript(data.transcript, data.messages);
     m_transcriptChars = 0;
     for (const ChatMessage &message : std::as_const(m_transcriptMessages)) {
         m_transcriptChars += transcriptMessageChars(message);
@@ -7613,8 +7822,18 @@ void AgentLoop::restoreSession(const SessionStore::SessionData &data)
 
     // Restore tracking state
     m_stateEpoch = data.stateEpoch;
-    m_actionSignatures = QSet<QString>(data.actionSignatures.constBegin(), data.actionSignatures.constEnd());
-    m_actionRepeatCounts = data.actionRepeatCounts;
+    m_actionRepeatCounts.clear();
+    // Older payloads keyed repeat counts by the full action signature. Those
+    // strings can be as large as the file the agent wrote. Keep only the new
+    // fixed-size fingerprints; legacy entries are not needed after an upgrade.
+    for (auto it = data.actionRepeatCounts.cbegin(); it != data.actionRepeatCounts.cend(); ++it) {
+        // New keys are an epoch plus a 64-character fingerprint. Keep short
+        // legacy/test keys too; drop the old keys that embedded whole tool
+        // arguments (the reason this table could become huge).
+        if (it.key().size() <= 256) {
+            m_actionRepeatCounts.insert(it.key(), it.value());
+        }
+    }
     m_changedPaths = QSet<QString>(data.changedPaths.constBegin(), data.changedPaths.constEnd());
     m_changesNeedVerification = data.changesNeedVerification;
     m_verificationAttempted = data.verificationAttempted;

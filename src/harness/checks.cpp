@@ -335,19 +335,49 @@ QList<CheckResult> CheckRunner::run(const QString &workspace, const CheckPlan &p
             remaining -= result.durationMs;
             continue;
         }
-        if (!process.waitForFinished(timeout)) {
-            result.timedOut = true;
-            process.kill();
-            if (!process.waitForFinished(2000)) {
-                process.terminate();
-                process.waitForFinished(1000);
+        // Drain while the check runs. `waitForFinished(timeout)` followed by
+        // readAll() materialised a chatty suite's entire output before the
+        // 20 KB display cap had any effect.
+        constexpr qint64 kMaxDrainedBytes = 8 * 1024 * 1024;
+        QByteArray drained;
+        bool outputCapped = false;
+        while (true) {
+            drained += process.readAll();
+            if (drained.size() > kMaxDrainedBytes) {
+                outputCapped = true;
+                process.kill();
+                if (!process.waitForFinished(2000)) {
+                    process.terminate();
+                    process.waitForFinished(1000);
+                }
+                break;
+            }
+            if (process.waitForFinished(20)) {
+                break;
+            }
+            if (process.state() == QProcess::NotRunning) {
+                break;
+            }
+            if (timer.elapsed() >= timeout) {
+                result.timedOut = true;
+                process.kill();
+                if (!process.waitForFinished(2000)) {
+                    process.terminate();
+                    process.waitForFinished(1000);
+                }
+                break;
             }
         }
+        drained += process.readAll();
         result.durationMs = timer.elapsed();
         result.exitCode = static_cast<int>(process.exitCode());
-        result.ok = !result.timedOut && process.exitStatus() == QProcess::NormalExit
+        result.ok = !result.timedOut && !outputCapped
+            && process.exitStatus() == QProcess::NormalExit
             && result.exitCode == 0;
-        QString output = QString::fromUtf8(process.readAll());
+        QString output = QString::fromUtf8(drained.left(kMaxDrainedBytes));
+        if (outputCapped) {
+            output += u"\n… (check output exceeded 8 MB and was stopped) …\n"_s;
+        }
         if (output.size() > kMaxOutputChars) {
             const int head = kMaxOutputChars / 2;
             const int tail = kMaxOutputChars - head;
