@@ -34,6 +34,80 @@ class TestProjectGraph : public QObject
     Q_OBJECT
 
 private Q_SLOTS:
+    void sqliteRoundTripThroughASymlinkedWorkspace()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        // main.cpp is deliberately NOT created: the node names a file that does
+        // not exist, so QFileInfo::canonicalFilePath() is empty for it.
+
+        // Reach the workspace through a symlink, the way macOS reaches /var
+        // through /private/var: canonicalisation changes the spelling.
+        QTemporaryDir linkHolder;
+        QVERIFY(linkHolder.isValid());
+        const QString link = linkHolder.filePath(u"link"_s);
+        QVERIFY(QFile::link(dir.path(), link));
+
+        QDir().mkpath(link + u"/nested");
+        const QString path = link + u"/nested/graph.SQLITE3"_s;
+
+        ProjectGraph graph;
+        graph.setWorkspacePath(link);
+        GraphNode root;
+        root.id = u"root"_s;
+        root.name = u"root"_s;
+        root.type = u"directory"_s;
+        root.path = link;
+        root.isReadOnly = false;
+        root.lastModified = 123;
+        graph.addNode(root);
+        GraphNode file;
+        file.id = u"file"_s;
+        file.name = u"main.cpp"_s;
+        file.type = u"file"_s;
+        file.path = link + u"/main.cpp"_s;
+        file.isReadOnly = true;
+        file.lastModified = 456;
+        graph.addNode(file);
+        graph.addEdge({u"root"_s, u"file"_s, u"contains"_s, {}, true});
+
+        QVERIFY(graph.saveToFile(path));
+
+        ProjectGraph restored;
+        restored.setWorkspacePath(link);
+        QVERIFY2(restored.loadFromDatabase(path), "round trip through a symlinked workspace");
+    }
+
+    void sqliteStillRejectsNodesOutsideTheWorkspace()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        writeFile(dir.path() + u"/main.cpp"_s, "int main() {}\n");
+        const QString path = dir.filePath(u"nested/graph.SQLITE3"_s);
+
+        ProjectGraph graph;
+        graph.setWorkspacePath(dir.path());
+        GraphNode root;
+        root.id = u"root"_s;
+        root.name = u"root"_s;
+        root.type = u"directory"_s;
+        root.path = dir.path();
+        graph.addNode(root);
+        GraphNode escaped;
+        escaped.id = u"escaped"_s;
+        escaped.name = u"passwd"_s;
+        escaped.type = u"file"_s;
+        escaped.path = u"/etc/passwd"_s;
+        graph.addNode(escaped);
+
+        QVERIFY(graph.saveToFile(path));
+
+        ProjectGraph restored;
+        restored.setWorkspacePath(dir.path());
+        // A node outside the workspace must still fail the load.
+        QVERIFY(!restored.loadFromDatabase(path));
+    }
+
     void testBasicScanSkipsHiddenAndHeavyDirs()
     {
         QTemporaryDir dir;

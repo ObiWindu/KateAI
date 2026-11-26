@@ -87,6 +87,45 @@ bool execGraphSql(QSqlDatabase &database, const QString &sql, QString *error)
     return true;
 }
 
+// Resolves a path to the spelling that containment checks must compare.
+//
+// QFileInfo::canonicalFilePath() follows every symlink and answers empty for a
+// path that does not exist. Graph nodes routinely name files that are not on
+// disk (a deleted file, a generated path, a node from an older scan), so they
+// keep whatever spelling was serialised. On a system whose temp or workspace
+// root is itself a symlink -- macOS reaches /var through /private/var, so CI
+// workspaces live under /private/var/folders/... -- the root then canonicalises
+// to a different spelling than the nodes, and containment fails even though
+// every node is inside the workspace.
+//
+// Canonicalising the nearest existing ancestor and re-appending the remainder
+// keeps the two spellings consistent whether or not the leaf exists.
+QString resolveGraphPath(const QString &path)
+{
+    const QString clean = QDir::cleanPath(path);
+    if (clean.isEmpty()) {
+        return clean;
+    }
+    QString prefix = clean;
+    QStringList remainder;
+    while (true) {
+        const QString canonical = QFileInfo(prefix).canonicalFilePath();
+        if (!canonical.isEmpty()) {
+            QString resolved = canonical;
+            for (auto it = remainder.crbegin(); it != remainder.crend(); ++it) {
+                resolved = QDir(resolved).filePath(*it);
+            }
+            return QDir::cleanPath(resolved);
+        }
+        const QString parent = QFileInfo(prefix).absolutePath();
+        if (parent.isEmpty() || parent == prefix) {
+            return clean;
+        }
+        remainder.append(QFileInfo(prefix).fileName());
+        prefix = parent;
+    }
+}
+
 ProjectGraph::SqliteLoadError classifyGraphSqlError(const QString &message)
 {
     const QString lowered = message.toLower();
@@ -2146,13 +2185,10 @@ bool ProjectGraph::fromJson(const QJsonObject &json)
     }
     const QString effectiveWorkspace = m_workspacePath.isEmpty() ? serializedWorkspace : m_workspacePath;
     const QString absoluteRoot = QFileInfo(effectiveWorkspace).absoluteFilePath();
-    const QString canonicalRoot = QFileInfo(absoluteRoot).canonicalFilePath().isEmpty()
-        ? QDir::cleanPath(absoluteRoot) : QFileInfo(absoluteRoot).canonicalFilePath();
+    const QString canonicalRoot = resolveGraphPath(absoluteRoot);
     if (!m_workspacePath.isEmpty()) {
-        const QString expectedCanonical = QFileInfo(m_workspacePath).canonicalFilePath().isEmpty()
-            ? QDir(m_workspacePath).absolutePath() : QFileInfo(m_workspacePath).canonicalFilePath();
-        const QString actualCanonical = QFileInfo(serializedWorkspace).canonicalFilePath().isEmpty()
-            ? QDir(serializedWorkspace).absolutePath() : QFileInfo(serializedWorkspace).canonicalFilePath();
+        const QString expectedCanonical = resolveGraphPath(m_workspacePath);
+        const QString actualCanonical = resolveGraphPath(serializedWorkspace);
         if (!pathWithinRoot(expectedCanonical, actualCanonical)
             || !pathWithinRoot(actualCanonical, expectedCanonical)) {
             return false;
@@ -2175,8 +2211,7 @@ bool ProjectGraph::fromJson(const QJsonObject &json)
         if (QDir::cleanPath(nodePath) == QDir::cleanPath(effectiveWorkspace)) {
             absoluteNode = absoluteRoot;
         }
-        const QString canonicalNode = QFileInfo(absoluteNode).canonicalFilePath().isEmpty()
-            ? QDir::cleanPath(absoluteNode) : QFileInfo(absoluteNode).canonicalFilePath();
+        const QString canonicalNode = resolveGraphPath(absoluteNode);
         if (!pathWithinRoot(canonicalNode, canonicalRoot)) {
             return false;
         }
