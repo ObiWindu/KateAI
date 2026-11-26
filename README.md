@@ -1,7 +1,7 @@
 # Kate AI
 
 <p align="center">
-  <img src="docs/images/banner.jpg" alt="Kate AI — an agent panel inside the Kate text editor" width="100%">
+  <img src="docs/images/banner.png" alt="Kate AI — an agent panel inside the Kate text editor" width="100%">
 </p>
 
 <p align="center">
