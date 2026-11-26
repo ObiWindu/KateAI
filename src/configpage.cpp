@@ -70,36 +70,144 @@ QString KateAiConfigPage::getBinaryPlatformKey() const
     return acpCurrentPlatformKey();
 }
 
-KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
-    : KTextEditor::ConfigPage(parent)
-    , m_plugin(plugin)
+QStringList KateAiConfigPage::configTabLabels()
 {
-    auto *rootLayout = new QVBoxLayout(this);
-    rootLayout->setContentsMargins(0, 0, 0, 0);
-
-    auto *tabs = new QTabWidget(this);
-    // Match the editor's document tabs: flat, content-sized tabs that share the
-    // pane edge, reorder by dragging, and scroll instead of wrapping when the
-    // settings dialog is narrow.
-    tabs->setDocumentMode(true);
-    tabs->setMovable(true);
-    tabs->tabBar()->setChangeCurrentOnDrag(true);
-    tabs->setUsesScrollButtons(true);
-    tabs->setElideMode(Qt::ElideRight);
-    tabs->tabBar()->setExpanding(false);
-    rootLayout->addWidget(tabs);
-
-    auto makeKey = [this]() {
-        auto *edit = new QLineEdit(this);
-        edit->setEchoMode(QLineEdit::Password);
-        edit->setClearButtonEnabled(true);
-        return edit;
+    const QStringList labels = {
+        i18n("AI Providers"),
+        i18n("ACP Registry"),
+        i18n("Security & Permissions"),
+        i18n("Agent & Context"),
+        i18n("Modes & Tools"),
+        i18n("MCP Servers"),
+        i18n("Web Search"),
+        i18n("Completion"),
+        i18n("Checkpoints & Subtasks"),
+        i18n("Agent Team"),
+        i18n("Themes"),
+        i18n("Voice"),
     };
+    // The labels and the Tab ids are two lists that must not drift apart: a
+    // label without an id would be a tab that cannot be built.
+    Q_ASSERT(labels.size() == int(Tab::Count));
+    return labels;
+}
 
+QLineEdit *KateAiConfigPage::createKeyField()
+{
+    auto *edit = new QLineEdit(this);
+    edit->setEchoMode(QLineEdit::Password);
+    edit->setClearButtonEnabled(true);
+    return edit;
+}
+
+void KateAiConfigPage::markChanged()
+{
+    Q_EMIT changed();
+}
+
+bool KateAiConfigPage::isTabBuilt(Tab tab) const
+{
+    const int id = int(tab);
+    return id >= 0 && id < m_tabBuilt.size() && m_tabBuilt.at(id);
+}
+
+void KateAiConfigPage::buildTab(Tab tab)
+{
+    const int id = int(tab);
+    if (id < 0 || id >= m_tabPages.size() || m_tabBuilt.at(id)) {
+        return;
+    }
+    // Mark the tab first: building can reorder the tab bar and re-emit
+    // currentChanged, which must not re-enter this tab.
+    m_tabBuilt[id] = true;
+
+    QWidget *page = nullptr;
+    switch (tab) {
+    case Tab::Providers:
+        page = buildProvidersTab();
+        break;
+    case Tab::AcpRegistry:
+        page = buildAcpRegistryTab();
+        break;
+    case Tab::Security:
+        page = buildSecurityTab();
+        break;
+    case Tab::Agent:
+        page = buildAgentTab();
+        break;
+    case Tab::Modes:
+        page = buildModesTab();
+        break;
+    case Tab::Mcp:
+        page = buildMcpTab();
+        break;
+    case Tab::Web:
+        page = buildWebTab();
+        break;
+    case Tab::Completion:
+        page = buildCompletionTab();
+        break;
+    case Tab::Checkpoints:
+        page = buildCheckpointsTab();
+        break;
+    case Tab::AgentTeam:
+        page = buildAgentTeamTab();
+        break;
+    case Tab::Themes:
+        page = buildThemesTab();
+        break;
+    case Tab::Voice:
+        page = buildVoiceTab();
+        break;
+    case Tab::Count:
+        break;
+    }
+    if (!page) {
+        return;
+    }
+    page->setProperty("kateaiConfigTab", id);
+
+    // Swap the built page in where its placeholder was, keeping the tab's
+    // position (the user may have reordered it) and its current state.
+    QWidget *placeholder = m_tabPages.at(id);
+    const int index = m_tabs->indexOf(placeholder);
+    if (index < 0) {
+        return;
+    }
+    m_tabPages[id] = page;
+    const QString label = m_tabs->tabText(index);
+    const bool wasCurrent = m_tabs->currentIndex() == index;
+    {
+        // Replacing the page is not the user switching tabs.
+        const QSignalBlocker block(m_tabs);
+        m_tabs->removeTab(index);
+        m_tabs->insertTab(index, page, label);
+        if (wasCurrent) {
+            m_tabs->setCurrentIndex(index);
+        }
+    }
+    placeholder->deleteLater();
+}
+
+void KateAiConfigPage::showTab(int index)
+{
+    QWidget *page = m_tabs->widget(index);
+    if (!page) {
+        return;
+    }
+    const QVariant id = page->property("kateaiConfigTab");
+    if (!id.isValid()) {
+        return;
+    }
+    buildTab(static_cast<Tab>(id.toInt()));
+}
+
+QWidget *KateAiConfigPage::buildProvidersTab()
+{
     // ==========================================
     // TAB 1: AI Providers & Models
     // ==========================================
-    auto *providersScroll = new QScrollArea(tabs);
+    auto *providersScroll = new QScrollArea(m_tabs);
     providersScroll->setWidgetResizable(true);
     providersScroll->setFrameShape(QFrame::NoFrame);
     auto *providersWidget = new QWidget(providersScroll);
@@ -143,37 +251,37 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
         return combo;
     };
 
-    m_grokKey = makeKey();
+    m_grokKey = createKeyField();
     m_grokModel = makeModelCombo();
     addProviderGroup(i18n("xAI (Grok)"), m_grokKey, m_grokModel);
 
-    m_openaiKey = makeKey();
+    m_openaiKey = createKeyField();
     m_openaiModel = makeModelCombo();
     addProviderGroup(i18n("OpenAI"), m_openaiKey, m_openaiModel);
 
-    m_openrouterKey = makeKey();
+    m_openrouterKey = createKeyField();
     m_openrouterModel = makeModelCombo();
     addProviderGroup(i18n("OpenRouter"), m_openrouterKey, m_openrouterModel);
 
-    m_deepseekKey = makeKey();
+    m_deepseekKey = createKeyField();
     m_deepseekModel = makeModelCombo();
     m_deepseekUrl = new QLineEdit(this);
     m_deepseekUrl->setPlaceholderText(u"https://api.deepseek.com"_s);
     addProviderGroup(i18n("DeepSeek"), m_deepseekKey, m_deepseekModel, m_deepseekUrl);
 
-    m_openaiCompatibleKey = makeKey();
+    m_openaiCompatibleKey = createKeyField();
     m_openaiCompatibleModel = makeModelCombo();
     m_openaiCompatibleUrl = new QLineEdit(this);
     m_openaiCompatibleUrl->setPlaceholderText(u"http://localhost:11434/v1"_s);
     addProviderGroup(i18n("OpenAI Compatible (Ollama, LocalAI, vLLM)"), m_openaiCompatibleKey, m_openaiCompatibleModel, m_openaiCompatibleUrl);
 
-    m_claudeCompatibleKey = makeKey();
+    m_claudeCompatibleKey = createKeyField();
     m_claudeCompatibleModel = makeModelCombo();
     m_claudeCompatibleUrl = new QLineEdit(this);
     m_claudeCompatibleUrl->setPlaceholderText(u"https://api.anthropic.com/v1"_s);
     addProviderGroup(i18n("Claude Compatible (Anthropic, Bedrock)"), m_claudeCompatibleKey, m_claudeCompatibleModel, m_claudeCompatibleUrl);
 
-        m_opencodeKey = makeKey();
+        m_opencodeKey = createKeyField();
         m_opencodeModel = makeModelCombo();
         m_opencodePlan = new QComboBox(this);
         m_opencodePlan->addItem(openCodePlanLabel(OpenCodePlan::PayAsYouGo),
@@ -187,7 +295,7 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
         addProviderGroup(i18n("OpenCode (Console models and Go subscription)"),
                          m_opencodeKey, m_opencodeModel, m_opencodeUrl, m_opencodePlan);
 
-    m_acpKey = makeKey();
+    m_acpKey = createKeyField();
     m_acpKey->setPlaceholderText(i18n("Optional — most agents use their own CLI login"));
     m_acpModel = makeModelCombo();
     m_acpModel->setPlaceholderText(i18n("Model name (e.g., mistral-large, mistral-small)"));
@@ -343,12 +451,136 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
 
     providersLayout->addStretch();
     providersScroll->setWidget(providersWidget);
-    tabs->addTab(providersScroll, i18n("AI Providers"));
 
+    connect(m_provider, &QComboBox::currentIndexChanged, this, [this]() {
+        markChanged();
+        // Refresh models for the newly selected provider
+        const Provider provider = providerFromId(m_provider->currentData().toString());
+        if (m_modelFetcher && providerSupportsModelListing(provider)) {
+            Settings s = m_plugin->settings();
+            s.provider = provider;
+            m_modelFetcher->setSettings(s);
+            m_modelFetcher->fetchModels(provider);
+        }
+    });
+    connect(m_grokKey, &QLineEdit::textChanged, this, &KateAiConfigPage::markChanged);
+    connect(m_openaiKey, &QLineEdit::textChanged, this, &KateAiConfigPage::markChanged);
+    connect(m_openrouterKey, &QLineEdit::textChanged, this, &KateAiConfigPage::markChanged);
+    connect(m_deepseekKey, &QLineEdit::textChanged, this, &KateAiConfigPage::markChanged);
+    connect(m_openaiCompatibleKey, &QLineEdit::textChanged, this, &KateAiConfigPage::markChanged);
+    connect(m_claudeCompatibleKey, &QLineEdit::textChanged, this, &KateAiConfigPage::markChanged);
+        connect(m_opencodeKey, &QLineEdit::textChanged, this, &KateAiConfigPage::markChanged);
+        connect(m_opencodeUrl, &QLineEdit::textChanged, this, &KateAiConfigPage::markChanged);
+        connect(m_opencodePlan, &QComboBox::currentIndexChanged, this, [this]() {
+            // The base URL changes with the plan; refresh the catalogue from
+            // the selected gateway, not from whichever plan was used before.
+            const QString key = m_opencodeKey->text().trimmed();
+            if (!key.isEmpty()) {
+                Settings s = m_plugin->settings();
+                s.provider = Provider::OpenCode;
+                s.opencodeApiKey = key;
+                s.opencodePlan = openCodePlanFromId(m_opencodePlan->currentData().toString());
+                s.opencodeUrl = m_opencodeUrl->text().trimmed();
+                m_modelFetcher->setSettings(s);
+                m_modelCatalog.remove(Provider::OpenCode);
+                updateModelCombo(Provider::OpenCode);
+                m_modelFetcher->fetchModels(Provider::OpenCode);
+            }
+            Q_EMIT changed();
+        });
+        connect(m_opencodeModel, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &KateAiConfigPage::markChanged);
+    connect(m_grokModel, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &KateAiConfigPage::markChanged);
+    connect(m_openaiModel, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &KateAiConfigPage::markChanged);
+    connect(m_openrouterModel, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &KateAiConfigPage::markChanged);
+    connect(m_deepseekModel, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &KateAiConfigPage::markChanged);
+    connect(m_openaiCompatibleModel, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &KateAiConfigPage::markChanged);
+    connect(m_claudeCompatibleModel, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &KateAiConfigPage::markChanged);
+    connect(m_acpModel, QOverload<int>::of(&QComboBox::currentIndexChanged), this, &KateAiConfigPage::markChanged);
+    connect(m_acpEffort, &QComboBox::currentTextChanged, this, &KateAiConfigPage::markChanged);
+    connect(m_deepseekUrl, &QLineEdit::textChanged, this, &KateAiConfigPage::markChanged);
+    connect(m_openaiCompatibleUrl, &QLineEdit::textChanged, this, &KateAiConfigPage::markChanged);
+    connect(m_claudeCompatibleUrl, &QLineEdit::textChanged, this, &KateAiConfigPage::markChanged);
+    connect(m_acpUrl, &QLineEdit::textChanged, this, &KateAiConfigPage::markChanged);
+    connect(m_acpCommand, &QLineEdit::textChanged, this, &KateAiConfigPage::markChanged);
+    connect(m_acpArgs, &QLineEdit::textChanged, this, &KateAiConfigPage::markChanged);
+    connect(m_acpApiKeyEnv, &QLineEdit::textChanged, this, &KateAiConfigPage::markChanged);
+    connect(m_acpAgent, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this]() {
+        applySelectedAcpPreset();
+        updateAcpModelCombo();
+        Q_EMIT changed();
+    });
+    connect(m_apiFormat, &QComboBox::currentIndexChanged, this, [this]() {
+        updateAcpNativeEnabled();
+        Q_EMIT changed();
+    });
+    // Auto-fetch ACP models when the agent command/args/env change (Zed-style)
+    connect(m_acpCommand, &QLineEdit::textChanged, this, &KateAiConfigPage::autoFetchAcpModels);
+    connect(m_acpArgs, &QLineEdit::textChanged, this, &KateAiConfigPage::autoFetchAcpModels);
+    connect(m_acpApiKeyEnv, &QLineEdit::textChanged, this, &KateAiConfigPage::autoFetchAcpModels);
+    // Connect API key changes to fetch models
+    auto fetchModelsForProvider = [this](Provider provider, QLineEdit *keyEdit, QComboBox *modelCombo) {
+        connect(keyEdit, &QLineEdit::textChanged, this, [this, provider, keyEdit, modelCombo]() {
+            QString key = keyEdit->text().trimmed();
+            if (!key.isEmpty()) {
+                Settings s = m_plugin->settings();
+                // Update the correct API key field for the provider
+                switch (provider) {
+                    case Provider::Grok:
+                        s.grokApiKey = key;
+                        break;
+                    case Provider::OpenAI:
+                        s.openaiApiKey = key;
+                        break;
+                    case Provider::OpenRouter:
+                        s.openrouterApiKey = key;
+                        break;
+                    case Provider::DeepSeek:
+                        s.deepseekApiKey = key;
+                        break;
+                    case Provider::OpenAICompatible:
+                        s.openaiCompatibleApiKey = key;
+                        break;
+                    case Provider::ClaudeCompatible:
+                        s.claudeCompatibleApiKey = key;
+                        break;
+                    case Provider::OpenCode:
+                        s.opencodeApiKey = key;
+                        s.opencodePlan = openCodePlanFromId(
+                            m_opencodePlan->currentData().toString());
+                        s.opencodeUrl = m_opencodeUrl->text().trimmed();
+                        break;
+                    case Provider::Acp:
+                        s.acpApiKey = key;
+                        break;
+                    default:
+                        break;
+                }
+                s.provider = provider;
+                m_modelFetcher->setSettings(s);
+                m_modelFetcher->fetchModels(provider);
+            } else {
+                modelCombo->clear();
+                m_modelCatalog.remove(provider);
+            }
+        });
+    };
+    fetchModelsForProvider(Provider::Grok, m_grokKey, m_grokModel);
+    fetchModelsForProvider(Provider::OpenAI, m_openaiKey, m_openaiModel);
+    fetchModelsForProvider(Provider::OpenRouter, m_openrouterKey, m_openrouterModel);
+    fetchModelsForProvider(Provider::DeepSeek, m_deepseekKey, m_deepseekModel);
+    fetchModelsForProvider(Provider::OpenAICompatible, m_openaiCompatibleKey, m_openaiCompatibleModel);
+    fetchModelsForProvider(Provider::ClaudeCompatible, m_claudeCompatibleKey, m_claudeCompatibleModel);
+        fetchModelsForProvider(Provider::OpenCode, m_opencodeKey, m_opencodeModel);
+    resetProvidersTab();
+    return providersScroll;
+}
+
+QWidget *KateAiConfigPage::buildAcpRegistryTab()
+{
     // ==========================================
     // ACP Registry
     // ==========================================
-    auto *registryWidget = new QWidget(tabs);
+    auto *registryWidget = new QWidget(m_tabs);
     auto *registryLayout = new QVBoxLayout(registryWidget);
     auto *registryIntro = new QLabel(i18n("Find ACP agents in the official registry and install package based agents."), registryWidget);
     registryIntro->setWordWrap(true);
@@ -373,9 +605,10 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     registryButtons->addWidget(registryUninstall);
     registryButtons->addStretch();
     registryLayout->addLayout(registryButtons);
-    tabs->addTab(registryWidget, i18n("ACP Registry"));
-    m_acpRegistryTab = tabs->indexOf(registryWidget);
-    m_acpRegistryNetwork = new QNetworkAccessManager(this);
+    m_acpRegistryNetwork = m_plugin ? m_plugin->networkManager() : nullptr;
+    if (!m_acpRegistryNetwork) {
+        m_acpRegistryNetwork = new QNetworkAccessManager(this);
+    }
 
     auto refreshRegistry = [this]() {
         m_acpRegistryStatus->setText(i18n("Loading ACP registry…"));
@@ -660,20 +893,21 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
         m_acpRegistryStatus->setText(i18n("Uninstalled %1.", name));
         showRegistryResults(m_acpRegistrySearch->text());
     });
-    // Fetch the registry only when its tab is first opened. Building the
-    // settings dialog should not download and parse a remote JSON document the
-    // user may never look at.
-    connect(tabs, &QTabWidget::currentChanged, this, [this, refreshRegistry](int index) {
-        if (index == m_acpRegistryTab && !m_acpRegistryFetchStarted) {
-            m_acpRegistryFetchStarted = true;
-            refreshRegistry();
-        }
-    });
 
+    // The registry is a remote document, so fetch it when this tab is built --
+    // that is, the first time it is opened -- rather than with the dialog.
+    refreshRegistry();
+    m_acpRegistryFetchStarted = true;
+
+    return registryWidget;
+}
+
+QWidget *KateAiConfigPage::buildSecurityTab()
+{
     // ==========================================
     // TAB 2: Security & Permissions
     // ==========================================
-    auto *securityWidget = new QWidget(tabs);
+    auto *securityWidget = new QWidget(m_tabs);
     auto *securityForm = new QFormLayout(securityWidget);
     securityForm->setContentsMargins(12, 12, 12, 12);
     securityForm->setSpacing(8);
@@ -726,12 +960,25 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     m_maxExpandedToolCards->setSuffix(i18n(" cards"));
     securityForm->addRow(i18n("Recent Kate AI chats kept expanded:"), m_maxExpandedToolCards);
 
-    tabs->addTab(securityWidget, i18n("Security & Permissions"));
 
+    connect(m_permission, &QComboBox::currentIndexChanged, this, &KateAiConfigPage::markChanged);
+    connect(m_sandbox, &QComboBox::currentIndexChanged, this, &KateAiConfigPage::markChanged);
+    connect(m_timeout, &QSpinBox::valueChanged, this, &KateAiConfigPage::markChanged);
+    connect(m_deny, &QPlainTextEdit::textChanged, this, &KateAiConfigPage::markChanged);
+    connect(m_allowOutsideReads, &QCheckBox::toggled, this, &KateAiConfigPage::markChanged);
+    connect(m_editInBuffer, &QCheckBox::toggled, this, &KateAiConfigPage::markChanged);
+    connect(m_editBanners, &QCheckBox::toggled, this, &KateAiConfigPage::markChanged);
+    connect(m_maxExpandedToolCards, &QSpinBox::valueChanged, this, &KateAiConfigPage::markChanged);
+    resetSecurityTab();
+    return securityWidget;
+}
+
+QWidget *KateAiConfigPage::buildAgentTab()
+{
     // ==========================================
     // TAB 3: Agent & Context
     // ==========================================
-    auto *agentScroll = new QScrollArea(tabs);
+    auto *agentScroll = new QScrollArea(m_tabs);
     agentScroll->setWidgetResizable(true);
     agentScroll->setFrameShape(QFrame::NoFrame);
     auto *agentWidget = new QWidget(agentScroll);
@@ -961,10 +1208,62 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     agentForm->addRow(i18n("Keep recent context:"), m_keepRecentTokens);
 
     agentScroll->setWidget(agentWidget);
-    tabs->addTab(agentScroll, i18n("Agent & Context"));
 
+    connect(m_planMode, &QCheckBox::toggled, this, &KateAiConfigPage::markChanged);
+    connect(m_projectInstructions, &QCheckBox::toggled, this, &KateAiConfigPage::markChanged);
+    connect(m_speed, &QComboBox::currentIndexChanged, this, &KateAiConfigPage::markChanged);
+    connect(m_maxIter, &QSpinBox::valueChanged, this, &KateAiConfigPage::markChanged);
+    connect(m_maxModelRequests, &QSpinBox::valueChanged, this, &KateAiConfigPage::markChanged);
+    connect(m_requestsPerMinute, &QSpinBox::valueChanged, this, &KateAiConfigPage::markChanged);
+    connect(m_system, &QPlainTextEdit::textChanged, this, &KateAiConfigPage::markChanged);
+
+    connect(m_compressionLevel, &QSpinBox::valueChanged, this, &KateAiConfigPage::markChanged);
+    connect(m_maxGraphNodes, &QSpinBox::valueChanged, this, &KateAiConfigPage::markChanged);
+    connect(m_maxGraphEdges, &QSpinBox::valueChanged, this, &KateAiConfigPage::markChanged);
+    connect(m_compressGraph, &QCheckBox::toggled, this, &KateAiConfigPage::markChanged);
+    connect(m_compressEditorContext, &QCheckBox::toggled, this, &KateAiConfigPage::markChanged);
+    connect(m_maxEditorContextLength, &QSpinBox::valueChanged, this, &KateAiConfigPage::markChanged);
+    connect(m_compressProjectInstructions, &QCheckBox::toggled, this, &KateAiConfigPage::markChanged);
+    connect(m_maxProjectInstructionsLength, &QSpinBox::valueChanged, this, &KateAiConfigPage::markChanged);
+    connect(m_compressSystemPrompt, &QCheckBox::toggled, this, &KateAiConfigPage::markChanged);
+    connect(m_maxSystemPromptLength, &QSpinBox::valueChanged, this, &KateAiConfigPage::markChanged);
+
+    connect(m_thinkingMode, &QCheckBox::toggled, this, &KateAiConfigPage::markChanged);
+    connect(m_temperature, &QDoubleSpinBox::valueChanged, this, &KateAiConfigPage::markChanged);
+    connect(m_topP, &QDoubleSpinBox::valueChanged, this, &KateAiConfigPage::markChanged);
+    connect(m_maxTokens, &QSpinBox::valueChanged, this, &KateAiConfigPage::markChanged);
+    connect(m_reasoningEffort, &QComboBox::currentIndexChanged, this, &KateAiConfigPage::markChanged);
+    connect(m_selfCritique, &QCheckBox::toggled, this, &KateAiConfigPage::markChanged);
+    connect(m_parallelToolCalls, &QCheckBox::toggled, this, &KateAiConfigPage::markChanged);
+    connect(m_verbosity, &QComboBox::currentIndexChanged, this, &KateAiConfigPage::markChanged);
+
+    // Enhanced Intelligence Parameters
+    connect(m_structuredThinking, &QCheckBox::toggled, this, &KateAiConfigPage::markChanged);
+    connect(m_structuredPlanning, &QCheckBox::toggled, this, &KateAiConfigPage::markChanged);
+    connect(m_autoCollapseThinking, &QCheckBox::toggled, this, &KateAiConfigPage::markChanged);
+    connect(m_showPlanAsChecklist, &QCheckBox::toggled, this, &KateAiConfigPage::markChanged);
+    connect(m_maxThinkingTokens, &QSpinBox::valueChanged, this, &KateAiConfigPage::markChanged);
+    connect(m_maxPlanSteps, &QSpinBox::valueChanged, this, &KateAiConfigPage::markChanged);
+    connect(m_requireVerification, &QCheckBox::toggled, this, &KateAiConfigPage::markChanged);
+    connect(m_maxVerificationAttempts, &QSpinBox::valueChanged, this, &KateAiConfigPage::markChanged);
+    connect(m_telemetryEnabled, &QCheckBox::toggled, this, &KateAiConfigPage::markChanged);
+    connect(m_telemetryEndpoint, &QLineEdit::textChanged, this, &KateAiConfigPage::markChanged);
+    connect(m_telemetryContentCapture, &QCheckBox::toggled, this, &KateAiConfigPage::markChanged);
+    connect(m_costBudget, &QDoubleSpinBox::valueChanged, this, &KateAiConfigPage::markChanged);
+
+    // Context Management
+    connect(m_contextWindow, &QSpinBox::valueChanged, this, &KateAiConfigPage::markChanged);
+    connect(m_keepRecentTokens, &QSpinBox::valueChanged, this, &KateAiConfigPage::markChanged);
+    connect(m_contextWindowReserve, &QSpinBox::valueChanged, this, &KateAiConfigPage::markChanged);
+    connect(m_compressOldMessages, &QCheckBox::toggled, this, &KateAiConfigPage::markChanged);
+    resetAgentTab();
+    return agentScroll;
+}
+
+QWidget *KateAiConfigPage::buildModesTab()
+{
     // --- Modes, auto-approve, and rules ---------------------------------------
-    auto *modesScroll = new QScrollArea(tabs);
+    auto *modesScroll = new QScrollArea(m_tabs);
     modesScroll->setWidgetResizable(true);
     auto *modesWidget = new QWidget(modesScroll);
     auto *modesForm = new QFormLayout(modesWidget);
@@ -1015,10 +1314,22 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     modesForm->addRow(i18n("Global rules:"), m_globalRules);
 
     modesScroll->setWidget(modesWidget);
-    tabs->addTab(modesScroll, i18n("Modes & Tools"));
 
+    // Modes, auto-approve and rules
+    connect(m_agentMode, &QComboBox::currentIndexChanged, this, &KateAiConfigPage::markChanged);
+    for (auto it = m_autoApproveBoxes.constBegin(); it != m_autoApproveBoxes.constEnd(); ++it) {
+        connect(it.value(), &QCheckBox::toggled, this, &KateAiConfigPage::markChanged);
+    }
+    connect(m_loadAgentRules, &QCheckBox::toggled, this, &KateAiConfigPage::markChanged);
+    connect(m_globalRules, &QPlainTextEdit::textChanged, this, &KateAiConfigPage::markChanged);
+    resetModesTab();
+    return modesScroll;
+}
+
+QWidget *KateAiConfigPage::buildMcpTab()
+{
     // --- MCP servers ----------------------------------------------------------
-    auto *mcpScroll = new QScrollArea(tabs);
+    auto *mcpScroll = new QScrollArea(m_tabs);
     mcpScroll->setWidgetResizable(true);
     auto *mcpWidget = new QWidget(mcpScroll);
     auto *mcpForm = new QFormLayout(mcpWidget);
@@ -1071,10 +1382,26 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     mcpForm->addRow(mcpPathHint);
 
     mcpScroll->setWidget(mcpWidget);
-    tabs->addTab(mcpScroll, i18n("MCP Servers"));
 
+    // MCP
+    connect(m_mcpEnabled, &QCheckBox::toggled, this, &KateAiConfigPage::markChanged);
+    connect(m_mcpAutoConnect, &QCheckBox::toggled, this, &KateAiConfigPage::markChanged);
+    connect(m_mcpTimeout, &QSpinBox::valueChanged, this, &KateAiConfigPage::markChanged);
+
+    connect(mcpAdd, &QPushButton::clicked, this, &KateAiConfigPage::addMcpServer);
+    connect(mcpEdit, &QPushButton::clicked, this, &KateAiConfigPage::editMcpServer);
+    connect(mcpRemove, &QPushButton::clicked, this, &KateAiConfigPage::removeMcpServer);
+    connect(m_mcpServers, &QTableWidget::itemDoubleClicked, this, [this] {
+        editMcpServer();
+    });
+    resetMcpTab();
+    return mcpScroll;
+}
+
+QWidget *KateAiConfigPage::buildWebTab()
+{
     // --- Web search -----------------------------------------------------------
-    auto *webScroll = new QScrollArea(tabs);
+    auto *webScroll = new QScrollArea(m_tabs);
     webScroll->setWidgetResizable(true);
     auto *webWidget = new QWidget(webScroll);
     auto *webForm = new QFormLayout(webWidget);
@@ -1134,10 +1461,21 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     syncWebRows();
 
     webScroll->setWidget(webWidget);
-    tabs->addTab(webScroll, i18n("Web Search"));
 
+    // Web search
+    connect(m_webProvider, &QComboBox::currentIndexChanged, this, &KateAiConfigPage::markChanged);
+    connect(m_webApiKey, &QLineEdit::textChanged, this, &KateAiConfigPage::markChanged);
+    connect(m_webEndpoint, &QLineEdit::textChanged, this, &KateAiConfigPage::markChanged);
+    connect(m_webMaxResults, &QSpinBox::valueChanged, this, &KateAiConfigPage::markChanged);
+    connect(m_webTimeout, &QSpinBox::valueChanged, this, &KateAiConfigPage::markChanged);
+    resetWebTab();
+    return webScroll;
+}
+
+QWidget *KateAiConfigPage::buildCompletionTab()
+{
     // --- AI completions at the cursor ------------------------------------------
-    auto *completionScroll = new QScrollArea(tabs);
+    auto *completionScroll = new QScrollArea(m_tabs);
     completionScroll->setWidgetResizable(true);
     completionScroll->setFrameShape(QFrame::NoFrame);
     auto *completionWidget = new QWidget(completionScroll);
@@ -1194,10 +1532,23 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     completionForm->addRow(completionHelp);
 
     completionScroll->setWidget(completionWidget);
-    tabs->addTab(completionScroll, i18n("Completion"));
 
+    connect(m_completionEnabled, &QCheckBox::toggled, this, &KateAiConfigPage::markChanged);
+    connect(m_completionTrigger, &QComboBox::currentIndexChanged, this, &KateAiConfigPage::markChanged);
+    connect(m_completionRenderMode, &QComboBox::currentIndexChanged, this, &KateAiConfigPage::markChanged);
+    connect(m_completionModel, &QLineEdit::textChanged, this, &KateAiConfigPage::markChanged);
+    connect(m_completionRequestsPerMinute, &QSpinBox::valueChanged, this, &KateAiConfigPage::markChanged);
+    connect(m_completionPrefixChars, &QSpinBox::valueChanged, this, &KateAiConfigPage::markChanged);
+    connect(m_completionSuffixChars, &QSpinBox::valueChanged, this, &KateAiConfigPage::markChanged);
+    connect(m_completionAutoDelay, &QSpinBox::valueChanged, this, &KateAiConfigPage::markChanged);
+    resetCompletionTab();
+    return completionScroll;
+}
+
+QWidget *KateAiConfigPage::buildCheckpointsTab()
+{
     // --- Checkpoints and subtasks ---------------------------------------------
-    auto *safetyScroll = new QScrollArea(tabs);
+    auto *safetyScroll = new QScrollArea(m_tabs);
     safetyScroll->setWidgetResizable(true);
     auto *safetyWidget = new QWidget(safetyScroll);
     auto *safetyForm = new QFormLayout(safetyWidget);
@@ -1245,10 +1596,21 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     safetyForm->addRow(i18n("Subtask timeout:"), m_subtaskTimeout);
 
     safetyScroll->setWidget(safetyWidget);
-    tabs->addTab(safetyScroll, i18n("Checkpoints & Subtasks"));
 
+    // Checkpoints and subtasks
+    connect(m_checkpointsEnabled, &QCheckBox::toggled, this, &KateAiConfigPage::markChanged);
+    connect(m_checkpointRetention, &QSpinBox::valueChanged, this, &KateAiConfigPage::markChanged);
+    connect(m_maxSubtaskDepth, &QSpinBox::valueChanged, this, &KateAiConfigPage::markChanged);
+    connect(m_maxParallelSubtasks, &QSpinBox::valueChanged, this, &KateAiConfigPage::markChanged);
+    connect(m_subtaskTimeout, &QSpinBox::valueChanged, this, &KateAiConfigPage::markChanged);
+    resetCheckpointsTab();
+    return safetyScroll;
+}
+
+QWidget *KateAiConfigPage::buildAgentTeamTab()
+{
     // --- Agent team --------------------------------------------------------------
-    auto *teamScroll = new QScrollArea(tabs);
+    auto *teamScroll = new QScrollArea(m_tabs);
     teamScroll->setWidgetResizable(true);
     auto *teamWidget = new QWidget(teamScroll);
     auto *teamForm = new QFormLayout(teamWidget);
@@ -1308,12 +1670,23 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     teamForm->addRow(agentHint);
 
     teamScroll->setWidget(teamWidget);
-    tabs->addTab(teamScroll, i18n("Agent Team"));
 
+    connect(agentAdd, &QPushButton::clicked, this, &KateAiConfigPage::addCustomAgent);
+    connect(agentEdit, &QPushButton::clicked, this, &KateAiConfigPage::editCustomAgent);
+    connect(agentRemove, &QPushButton::clicked, this, &KateAiConfigPage::removeCustomAgent);
+    connect(m_customAgents, &QTableWidget::itemDoubleClicked, this, [this] {
+        editCustomAgent();
+    });
+    resetAgentTeamTab();
+    return teamScroll;
+}
+
+QWidget *KateAiConfigPage::buildThemesTab()
+{
     // ==========================================
     // TAB 9: Themes
     // ==========================================
-    auto *themeScroll = new QScrollArea(tabs);
+    auto *themeScroll = new QScrollArea(m_tabs);
     themeScroll->setWidgetResizable(true);
     themeScroll->setFrameShape(QFrame::NoFrame);
     auto *themeWidget = new QWidget(themeScroll);
@@ -1379,12 +1752,16 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     themeLayout->addStretch();
 
     themeScroll->setWidget(themeWidget);
-    tabs->addTab(themeScroll, i18n("Themes"));
+    resetThemesTab();
+    return themeScroll;
+}
 
+QWidget *KateAiConfigPage::buildVoiceTab()
+{
     // ==========================================
     // TAB 10: Voice Prompting
     // ==========================================
-    auto *voiceScroll = new QScrollArea(tabs);
+    auto *voiceScroll = new QScrollArea(m_tabs);
     voiceScroll->setWidgetResizable(true);
     voiceScroll->setFrameShape(QFrame::NoFrame);
     auto *voiceWidget = new QWidget(voiceScroll);
@@ -1424,7 +1801,7 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     m_voiceProvider->addItem(i18n("Local CLI (whisper-cli / whisper)"), u"local_cli"_s);
     voiceForm->addRow(i18n("Transcription backend:"), m_voiceProvider);
 
-    m_voiceApiKey = makeKey();
+    m_voiceApiKey = createKeyField();
     m_voiceApiKey->setPlaceholderText(i18n("Optional — falls back to OpenAI / OpenAI-Compatible API key"));
     voiceForm->addRow(i18n("Voice API key:"), m_voiceApiKey);
 
@@ -1455,7 +1832,59 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     voiceForm->addRow(i18n("Auto-send:"), m_voiceAutoSend);
 
     voiceScroll->setWidget(voiceWidget);
-    tabs->addTab(voiceScroll, i18n("Voice"));
+
+    // Voice prompting
+    connect(m_voiceProvider, &QComboBox::currentIndexChanged, this, [this]() {
+        updateVoiceFieldStates();
+        markChanged();
+    });
+    connect(m_voiceApiKey, &QLineEdit::textChanged, this, &KateAiConfigPage::markChanged);
+    connect(m_voiceEndpoint, &QLineEdit::textChanged, this, &KateAiConfigPage::markChanged);
+    connect(m_voiceModel, &QLineEdit::textChanged, this, &KateAiConfigPage::markChanged);
+    connect(m_voiceLanguage, &QLineEdit::textChanged, this, &KateAiConfigPage::markChanged);
+    connect(m_voiceLocalCommand, &QLineEdit::textChanged, this, &KateAiConfigPage::markChanged);
+    connect(m_voiceInputDevice, &QLineEdit::textChanged, this, &KateAiConfigPage::markChanged);
+    connect(m_voiceNoiseRemoval, &QCheckBox::toggled, this, &KateAiConfigPage::markChanged);
+    connect(m_voiceAutoSend, &QCheckBox::toggled, this, &KateAiConfigPage::markChanged);
+    resetVoiceTab();
+    return voiceScroll;
+}
+
+KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
+    : KTextEditor::ConfigPage(parent)
+    , m_plugin(plugin)
+{
+    auto *rootLayout = new QVBoxLayout(this);
+    rootLayout->setContentsMargins(0, 0, 0, 0);
+
+    m_tabs = new QTabWidget(this);
+    // Match the editor's document tabs: flat, content-sized tabs that share the
+    // pane edge, reorder by dragging, and scroll instead of wrapping when the
+    // settings dialog is narrow.
+    m_tabs->setDocumentMode(true);
+    m_tabs->setMovable(true);
+    m_tabs->tabBar()->setChangeCurrentOnDrag(true);
+    m_tabs->setUsesScrollButtons(true);
+    m_tabs->setElideMode(Qt::ElideRight);
+    m_tabs->tabBar()->setExpanding(false);
+    rootLayout->addWidget(m_tabs);
+
+    // Settings is opened far more often than any one tab is read, so opening it
+    // must not build twelve pages, their tables and their model combos. Every
+    // label exists from the start -- a lazily built tab must stay reachable --
+    // and a tab's widgets are created the first time it is shown.
+    {
+        const QSignalBlocker block(m_tabs);
+        const QStringList labels = configTabLabels();
+        for (int id = 0; id < labels.size(); ++id) {
+            auto *placeholder = new QWidget(m_tabs);
+            placeholder->setProperty("kateaiConfigTab", id);
+            m_tabs->addTab(placeholder, labels.at(id));
+            m_tabPages.append(placeholder);
+            m_tabBuilt.append(false);
+        }
+    }
+    connect(m_tabs, &QTabWidget::currentChanged, this, &KateAiConfigPage::showTab);
 
     // Initialize model fetcher
     m_modelFetcher = new LlmClient(this);
@@ -1470,255 +1899,8 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
         Q_UNUSED(error);
     });
 
-    // Connect markChanged
-    const auto markChanged = [this]() {
-        Q_EMIT changed();
-    };
-
-    connect(m_provider, &QComboBox::currentIndexChanged, this, [this, markChanged]() {
-        markChanged();
-        // Refresh models for the newly selected provider
-        const Provider provider = providerFromId(m_provider->currentData().toString());
-        if (m_modelFetcher && providerSupportsModelListing(provider)) {
-            Settings s = m_plugin->settings();
-            s.provider = provider;
-            m_modelFetcher->setSettings(s);
-            m_modelFetcher->fetchModels(provider);
-        }
-    });
-    connect(m_grokKey, &QLineEdit::textChanged, this, markChanged);
-    connect(m_openaiKey, &QLineEdit::textChanged, this, markChanged);
-    connect(m_openrouterKey, &QLineEdit::textChanged, this, markChanged);
-    connect(m_deepseekKey, &QLineEdit::textChanged, this, markChanged);
-    connect(m_openaiCompatibleKey, &QLineEdit::textChanged, this, markChanged);
-    connect(m_claudeCompatibleKey, &QLineEdit::textChanged, this, markChanged);
-        connect(m_opencodeKey, &QLineEdit::textChanged, this, markChanged);
-        connect(m_opencodeUrl, &QLineEdit::textChanged, this, markChanged);
-        connect(m_opencodePlan, &QComboBox::currentIndexChanged, this, [this]() {
-            // The base URL changes with the plan; refresh the catalogue from
-            // the selected gateway, not from whichever plan was used before.
-            const QString key = m_opencodeKey->text().trimmed();
-            if (!key.isEmpty()) {
-                Settings s = m_plugin->settings();
-                s.provider = Provider::OpenCode;
-                s.opencodeApiKey = key;
-                s.opencodePlan = openCodePlanFromId(m_opencodePlan->currentData().toString());
-                s.opencodeUrl = m_opencodeUrl->text().trimmed();
-                m_modelFetcher->setSettings(s);
-                m_modelCatalog.remove(Provider::OpenCode);
-                updateModelCombo(Provider::OpenCode);
-                m_modelFetcher->fetchModels(Provider::OpenCode);
-            }
-            Q_EMIT changed();
-        });
-        connect(m_opencodeModel, QOverload<int>::of(&QComboBox::currentIndexChanged), this, markChanged);
-    connect(m_grokModel, QOverload<int>::of(&QComboBox::currentIndexChanged), this, markChanged);
-    connect(m_openaiModel, QOverload<int>::of(&QComboBox::currentIndexChanged), this, markChanged);
-    connect(m_openrouterModel, QOverload<int>::of(&QComboBox::currentIndexChanged), this, markChanged);
-    connect(m_deepseekModel, QOverload<int>::of(&QComboBox::currentIndexChanged), this, markChanged);
-    connect(m_openaiCompatibleModel, QOverload<int>::of(&QComboBox::currentIndexChanged), this, markChanged);
-    connect(m_claudeCompatibleModel, QOverload<int>::of(&QComboBox::currentIndexChanged), this, markChanged);
-    connect(m_acpModel, QOverload<int>::of(&QComboBox::currentIndexChanged), this, markChanged);
-    connect(m_acpEffort, &QComboBox::currentTextChanged, this, markChanged);
-    connect(m_deepseekUrl, &QLineEdit::textChanged, this, markChanged);
-    connect(m_openaiCompatibleUrl, &QLineEdit::textChanged, this, markChanged);
-    connect(m_claudeCompatibleUrl, &QLineEdit::textChanged, this, markChanged);
-    connect(m_acpUrl, &QLineEdit::textChanged, this, markChanged);
-    connect(m_acpCommand, &QLineEdit::textChanged, this, markChanged);
-    connect(m_acpArgs, &QLineEdit::textChanged, this, markChanged);
-    connect(m_acpApiKeyEnv, &QLineEdit::textChanged, this, markChanged);
-    connect(m_acpAgent, QOverload<int>::of(&QComboBox::currentIndexChanged), this, [this]() {
-        applySelectedAcpPreset();
-        updateAcpModelCombo();
-        Q_EMIT changed();
-    });
-    connect(m_apiFormat, &QComboBox::currentIndexChanged, this, [this]() {
-        updateAcpNativeEnabled();
-        Q_EMIT changed();
-    });
-
-    // Auto-fetch ACP models when the agent command/args/env change (Zed-style)
-    connect(m_acpCommand, &QLineEdit::textChanged, this, &KateAiConfigPage::autoFetchAcpModels);
-    connect(m_acpArgs, &QLineEdit::textChanged, this, &KateAiConfigPage::autoFetchAcpModels);
-    connect(m_acpApiKeyEnv, &QLineEdit::textChanged, this, &KateAiConfigPage::autoFetchAcpModels);
-
-    // Connect API key changes to fetch models
-    auto fetchModelsForProvider = [this](Provider provider, QLineEdit *keyEdit, QComboBox *modelCombo) {
-        connect(keyEdit, &QLineEdit::textChanged, this, [this, provider, keyEdit, modelCombo]() {
-            QString key = keyEdit->text().trimmed();
-            if (!key.isEmpty()) {
-                Settings s = m_plugin->settings();
-                // Update the correct API key field for the provider
-                switch (provider) {
-                    case Provider::Grok:
-                        s.grokApiKey = key;
-                        break;
-                    case Provider::OpenAI:
-                        s.openaiApiKey = key;
-                        break;
-                    case Provider::OpenRouter:
-                        s.openrouterApiKey = key;
-                        break;
-                    case Provider::DeepSeek:
-                        s.deepseekApiKey = key;
-                        break;
-                    case Provider::OpenAICompatible:
-                        s.openaiCompatibleApiKey = key;
-                        break;
-                    case Provider::ClaudeCompatible:
-                        s.claudeCompatibleApiKey = key;
-                        break;
-                    case Provider::OpenCode:
-                        s.opencodeApiKey = key;
-                        s.opencodePlan = openCodePlanFromId(
-                            m_opencodePlan->currentData().toString());
-                        s.opencodeUrl = m_opencodeUrl->text().trimmed();
-                        break;
-                    case Provider::Acp:
-                        s.acpApiKey = key;
-                        break;
-                    default:
-                        break;
-                }
-                s.provider = provider;
-                m_modelFetcher->setSettings(s);
-                m_modelFetcher->fetchModels(provider);
-            } else {
-                modelCombo->clear();
-                m_modelCatalog.remove(provider);
-            }
-        });
-    };
-    fetchModelsForProvider(Provider::Grok, m_grokKey, m_grokModel);
-    fetchModelsForProvider(Provider::OpenAI, m_openaiKey, m_openaiModel);
-    fetchModelsForProvider(Provider::OpenRouter, m_openrouterKey, m_openrouterModel);
-    fetchModelsForProvider(Provider::DeepSeek, m_deepseekKey, m_deepseekModel);
-    fetchModelsForProvider(Provider::OpenAICompatible, m_openaiCompatibleKey, m_openaiCompatibleModel);
-    fetchModelsForProvider(Provider::ClaudeCompatible, m_claudeCompatibleKey, m_claudeCompatibleModel);
-        fetchModelsForProvider(Provider::OpenCode, m_opencodeKey, m_opencodeModel);
-    // ACP has no catalogue endpoint; the default model is typed by the user.
-
-    connect(m_permission, &QComboBox::currentIndexChanged, this, markChanged);
-    connect(m_sandbox, &QComboBox::currentIndexChanged, this, markChanged);
-    connect(m_timeout, &QSpinBox::valueChanged, this, markChanged);
-    connect(m_deny, &QPlainTextEdit::textChanged, this, markChanged);
-    connect(m_allowOutsideReads, &QCheckBox::toggled, this, markChanged);
-    connect(m_editInBuffer, &QCheckBox::toggled, this, markChanged);
-    connect(m_editBanners, &QCheckBox::toggled, this, markChanged);
-    connect(m_completionEnabled, &QCheckBox::toggled, this, markChanged);
-    connect(m_completionTrigger, &QComboBox::currentIndexChanged, this, markChanged);
-    connect(m_completionRenderMode, &QComboBox::currentIndexChanged, this, markChanged);
-    connect(m_completionModel, &QLineEdit::textChanged, this, markChanged);
-    connect(m_completionRequestsPerMinute, &QSpinBox::valueChanged, this, markChanged);
-    connect(m_completionPrefixChars, &QSpinBox::valueChanged, this, markChanged);
-    connect(m_completionSuffixChars, &QSpinBox::valueChanged, this, markChanged);
-    connect(m_completionAutoDelay, &QSpinBox::valueChanged, this, markChanged);
-    connect(m_maxExpandedToolCards, &QSpinBox::valueChanged, this, markChanged);
-
-    connect(m_planMode, &QCheckBox::toggled, this, markChanged);
-    connect(m_projectInstructions, &QCheckBox::toggled, this, markChanged);
-    connect(m_speed, &QComboBox::currentIndexChanged, this, markChanged);
-    connect(m_maxIter, &QSpinBox::valueChanged, this, markChanged);
-    connect(m_maxModelRequests, &QSpinBox::valueChanged, this, markChanged);
-    connect(m_requestsPerMinute, &QSpinBox::valueChanged, this, markChanged);
-    connect(m_system, &QPlainTextEdit::textChanged, this, markChanged);
-
-    connect(m_compressionLevel, &QSpinBox::valueChanged, this, markChanged);
-    connect(m_maxGraphNodes, &QSpinBox::valueChanged, this, markChanged);
-    connect(m_maxGraphEdges, &QSpinBox::valueChanged, this, markChanged);
-    connect(m_compressGraph, &QCheckBox::toggled, this, markChanged);
-    connect(m_compressEditorContext, &QCheckBox::toggled, this, markChanged);
-    connect(m_maxEditorContextLength, &QSpinBox::valueChanged, this, markChanged);
-    connect(m_compressProjectInstructions, &QCheckBox::toggled, this, markChanged);
-    connect(m_maxProjectInstructionsLength, &QSpinBox::valueChanged, this, markChanged);
-    connect(m_compressSystemPrompt, &QCheckBox::toggled, this, markChanged);
-    connect(m_maxSystemPromptLength, &QSpinBox::valueChanged, this, markChanged);
-
-    connect(m_thinkingMode, &QCheckBox::toggled, this, markChanged);
-    connect(m_temperature, &QDoubleSpinBox::valueChanged, this, markChanged);
-    connect(m_topP, &QDoubleSpinBox::valueChanged, this, markChanged);
-    connect(m_maxTokens, &QSpinBox::valueChanged, this, markChanged);
-    connect(m_reasoningEffort, &QComboBox::currentIndexChanged, this, markChanged);
-    connect(m_selfCritique, &QCheckBox::toggled, this, markChanged);
-    connect(m_parallelToolCalls, &QCheckBox::toggled, this, markChanged);
-    connect(m_verbosity, &QComboBox::currentIndexChanged, this, markChanged);
-
-    // Enhanced Intelligence Parameters
-    connect(m_structuredThinking, &QCheckBox::toggled, this, markChanged);
-    connect(m_structuredPlanning, &QCheckBox::toggled, this, markChanged);
-    connect(m_autoCollapseThinking, &QCheckBox::toggled, this, markChanged);
-    connect(m_showPlanAsChecklist, &QCheckBox::toggled, this, markChanged);
-    connect(m_maxThinkingTokens, &QSpinBox::valueChanged, this, markChanged);
-    connect(m_maxPlanSteps, &QSpinBox::valueChanged, this, markChanged);
-    connect(m_requireVerification, &QCheckBox::toggled, this, markChanged);
-    connect(m_maxVerificationAttempts, &QSpinBox::valueChanged, this, markChanged);
-    connect(m_telemetryEnabled, &QCheckBox::toggled, this, markChanged);
-    connect(m_telemetryEndpoint, &QLineEdit::textChanged, this, markChanged);
-    connect(m_telemetryContentCapture, &QCheckBox::toggled, this, markChanged);
-    connect(m_costBudget, &QDoubleSpinBox::valueChanged, this, markChanged);
-
-    // Context Management
-    connect(m_contextWindow, &QSpinBox::valueChanged, this, markChanged);
-    connect(m_keepRecentTokens, &QSpinBox::valueChanged, this, markChanged);
-    connect(m_contextWindowReserve, &QSpinBox::valueChanged, this, markChanged);
-    connect(m_compressOldMessages, &QCheckBox::toggled, this, markChanged);
-
-    // Modes, auto-approve and rules
-    connect(m_agentMode, &QComboBox::currentIndexChanged, this, markChanged);
-    for (auto it = m_autoApproveBoxes.constBegin(); it != m_autoApproveBoxes.constEnd(); ++it) {
-        connect(it.value(), &QCheckBox::toggled, this, markChanged);
-    }
-    connect(m_loadAgentRules, &QCheckBox::toggled, this, markChanged);
-    connect(m_globalRules, &QPlainTextEdit::textChanged, this, markChanged);
-
-    // MCP
-    connect(m_mcpEnabled, &QCheckBox::toggled, this, markChanged);
-    connect(m_mcpAutoConnect, &QCheckBox::toggled, this, markChanged);
-    connect(m_mcpTimeout, &QSpinBox::valueChanged, this, markChanged);
-
-    // Web search
-    connect(m_webProvider, &QComboBox::currentIndexChanged, this, markChanged);
-    connect(m_webApiKey, &QLineEdit::textChanged, this, markChanged);
-    connect(m_webEndpoint, &QLineEdit::textChanged, this, markChanged);
-    connect(m_webMaxResults, &QSpinBox::valueChanged, this, markChanged);
-    connect(m_webTimeout, &QSpinBox::valueChanged, this, markChanged);
-
-    // Checkpoints and subtasks
-    connect(m_checkpointsEnabled, &QCheckBox::toggled, this, markChanged);
-    connect(m_checkpointRetention, &QSpinBox::valueChanged, this, markChanged);
-    connect(m_maxSubtaskDepth, &QSpinBox::valueChanged, this, markChanged);
-    connect(m_maxParallelSubtasks, &QSpinBox::valueChanged, this, markChanged);
-    connect(m_subtaskTimeout, &QSpinBox::valueChanged, this, markChanged);
-
-    connect(agentAdd, &QPushButton::clicked, this, &KateAiConfigPage::addCustomAgent);
-    connect(agentEdit, &QPushButton::clicked, this, &KateAiConfigPage::editCustomAgent);
-    connect(agentRemove, &QPushButton::clicked, this, &KateAiConfigPage::removeCustomAgent);
-    connect(m_customAgents, &QTableWidget::itemDoubleClicked, this, [this] {
-        editCustomAgent();
-    });
-
-    connect(mcpAdd, &QPushButton::clicked, this, &KateAiConfigPage::addMcpServer);
-    connect(mcpEdit, &QPushButton::clicked, this, &KateAiConfigPage::editMcpServer);
-    connect(mcpRemove, &QPushButton::clicked, this, &KateAiConfigPage::removeMcpServer);
-    connect(m_mcpServers, &QTableWidget::itemDoubleClicked, this, [this] {
-        editMcpServer();
-    });
-
-    // Voice prompting
-    connect(m_voiceProvider, &QComboBox::currentIndexChanged, this, [this, markChanged]() {
-        updateVoiceFieldStates();
-        markChanged();
-    });
-    connect(m_voiceApiKey, &QLineEdit::textChanged, this, markChanged);
-    connect(m_voiceEndpoint, &QLineEdit::textChanged, this, markChanged);
-    connect(m_voiceModel, &QLineEdit::textChanged, this, markChanged);
-    connect(m_voiceLanguage, &QLineEdit::textChanged, this, markChanged);
-    connect(m_voiceLocalCommand, &QLineEdit::textChanged, this, markChanged);
-    connect(m_voiceInputDevice, &QLineEdit::textChanged, this, markChanged);
-    connect(m_voiceNoiseRemoval, &QCheckBox::toggled, this, markChanged);
-    connect(m_voiceAutoSend, &QCheckBox::toggled, this, markChanged);
-
-    reset();
+    // The page opens on the first tab, so that one is built immediately.
+    buildTab(Tab::Providers);
 }
 
 KateAiConfigPage::~KateAiConfigPage()
@@ -1847,6 +2029,9 @@ void KateAiConfigPage::editCustomAgent()
 
 void KateAiConfigPage::refreshMcpServerTable()
 {
+    if (!m_mcpServers) {
+        return;
+    }
     m_mcpServers->setRowCount(0);
     for (const McpServerConfig &config : m_mcpServerConfigs) {
         const int row = m_mcpServers->rowCount();
@@ -2017,471 +2202,255 @@ QIcon KateAiConfigPage::icon() const
 void KateAiConfigPage::apply()
 {
     Settings s = m_plugin->settings();
-    s.provider = providerFromId(m_provider->currentData().toString());
-    s.grokApiKey = m_grokKey->text();
-    s.openaiApiKey = m_openaiKey->text();
-    s.openrouterApiKey = m_openrouterKey->text();
-    s.deepseekApiKey = m_deepseekKey->text();
-    s.openaiCompatibleApiKey = m_openaiCompatibleKey->text();
-    s.claudeCompatibleApiKey = m_claudeCompatibleKey->text();
-        s.opencodeApiKey = m_opencodeKey->text();
-    s.acpApiKey = m_acpKey->text();
-    s.grokModel = m_grokModel->currentText().trimmed();
-    s.openaiModel = m_openaiModel->currentText().trimmed();
-    s.openrouterModel = m_openrouterModel->currentText().trimmed();
-    s.deepseekModel = m_deepseekModel->currentText().trimmed();
-    s.openaiCompatibleModel = m_openaiCompatibleModel->currentText().trimmed();
-    s.claudeCompatibleModel = m_claudeCompatibleModel->currentText().trimmed();
-s.opencodeModel = m_opencodeModel->currentText().trimmed();
-    s.opencodePlan = openCodePlanFromId(m_opencodePlan->currentData().toString());
-    s.opencodeUrl = m_opencodeUrl->text().trimmed();
-    s.acpModel = m_acpModel->currentText().trimmed();
-    // The first entry is "Auto (agent default)" and maps to an empty value;
-    // anything else (picked or typed) is an agent option id.
-    s.acpEffort = m_acpEffort->currentIndex() == 0 && m_acpEffort->currentText() == m_acpEffort->itemText(0)
-        ? QString()
-        : m_acpEffort->currentText().trimmed();
-    s.deepseekUrl = m_deepseekUrl->text().trimmed();
-    s.openaiCompatibleUrl = m_openaiCompatibleUrl->text().trimmed();
-    s.claudeCompatibleUrl = m_claudeCompatibleUrl->text().trimmed();
-    s.acpUrl = m_acpUrl->text().trimmed();
-    s.acpAgentId = m_acpAgent->currentData().toString();
-    s.acpCommand = m_acpCommand->text().trimmed();
-    s.acpArgs = m_acpArgs->text().trimmed();
-    s.acpApiKeyEnv = m_acpApiKeyEnv->text().trimmed();
-    s.apiFormat = apiFormatFromId(m_apiFormat->currentData().toString());
 
-    s.permissionMode = permissionModeFromId(m_permission->currentData().toString());
-    s.acceptAllAcpTools = m_acceptAllAcpTools->isChecked();
-    s.sandbox = sandboxProfileFromId(m_sandbox->currentData().toString());
-    s.maxToolCalls = m_maxIter->value();
-    s.maxIterations = s.maxToolCalls;
-    s.maxModelRequests = m_maxModelRequests->value();
-    s.requestsPerMinute = m_requestsPerMinute->value();
-    s.maxSavedConversations = m_maxSavedConversations->value();
-    s.bashTimeoutMs = m_timeout->value() * 1000;
-    s.maxExpandedToolCards = m_maxExpandedToolCards->value();
-    s.planMode = m_planMode->isChecked();
-    s.loadProjectInstructions = m_projectInstructions->isChecked();
-    s.thinkingMode = m_thinkingMode->isChecked();
-    s.extraSystemPrompt = m_system->toPlainText();
-    s.extraDenyGlobs = m_deny->toPlainText().split(u'\n', Qt::SkipEmptyParts);
-    s.allowReadsOutsideWorkspace = m_allowOutsideReads->isChecked();
-    s.editInBuffer = m_editInBuffer->isChecked();
-    s.editBannersEnabled = m_editBanners->isChecked();
-    s.completionEnabled = m_completionEnabled->isChecked();
-    s.completionTrigger = m_completionTrigger->currentData().toString();
-    s.completionRenderMode = m_completionRenderMode->currentData().toString();
-    s.completionModel = m_completionModel->text().trimmed();
-    s.completionRequestsPerMinute = m_completionRequestsPerMinute->value();
-    s.completionContextPrefixChars = m_completionPrefixChars->value();
-    s.completionContextSuffixChars = m_completionSuffixChars->value();
-    s.completionAutoTriggerDelayMs = m_completionAutoDelay->value();
-
-    s.contextCompressionLevel = m_compressionLevel->value();
-    s.maxGraphNodes = m_maxGraphNodes->value();
-    s.maxGraphEdges = m_maxGraphEdges->value();
-    s.compressProjectGraph = m_compressGraph->isChecked();
-    s.compressEditorContext = m_compressEditorContext->isChecked();
-    s.maxEditorContextLength = m_maxEditorContextLength->value();
-    s.compressProjectInstructions = m_compressProjectInstructions->isChecked();
-    s.maxProjectInstructionsLength = m_maxProjectInstructionsLength->value();
-    s.compressSystemPrompt = m_compressSystemPrompt->isChecked();
-    s.maxSystemPromptLength = m_maxSystemPromptLength->value();
-
-    // Optimal Intelligence Parameters
-    s.temperature = m_temperature->value();
-    s.topP = m_topP->value();
-    s.maxTokens = m_maxTokens->value();
-    s.reasoningEffort = m_reasoningEffort->currentData().toString();
-    s.selfCritique = m_selfCritique->isChecked();
-    s.parallelToolCalls = m_parallelToolCalls->isChecked();
-    s.verbosity = m_verbosity->currentData().toInt();
-
-    // Enhanced Intelligence Parameters
-    s.structuredThinking = m_structuredThinking->isChecked();
-    s.structuredPlanning = m_structuredPlanning->isChecked();
-    s.autoCollapseThinking = m_autoCollapseThinking->isChecked();
-    s.showPlanAsChecklist = m_showPlanAsChecklist->isChecked();
-    s.maxThinkingTokens = m_maxThinkingTokens->value();
-    s.maxPlanSteps = m_maxPlanSteps->value();
-    s.requireVerification = m_requireVerification->isChecked();
-    s.maxVerificationAttempts = m_maxVerificationAttempts->value();
-    s.telemetryEnabled = m_telemetryEnabled->isChecked();
-    s.telemetryEndpoint = m_telemetryEndpoint->text().trimmed();
-    s.telemetryContentCapture = m_telemetryContentCapture->isChecked();
-    s.costBudgetUsd = m_costBudget->value();
-
-    // Context Management
-    s.contextWindow = m_contextWindow->value();
-    s.keepRecentTokens = m_keepRecentTokens->value();
-    s.contextWindowReserve = m_contextWindowReserve->value();
-    s.compressOldMessages = m_compressOldMessages->isChecked();
-
-    // Modes, auto-approve and rules
-    s.agentMode = m_agentMode->currentData().toString();
-    s.autoApproveTools.clear();
-    for (auto it = m_autoApproveBoxes.constBegin(); it != m_autoApproveBoxes.constEnd(); ++it) {
-        if (it.value()->isChecked()) {
-            s.autoApproveTools.append(it.key());
+    // A tab the user has not opened has no edits of its own, so its stored
+    // values must survive Apply untouched.
+    if (isTabBuilt(Tab::Providers)) {
+        s.provider = providerFromId(m_provider->currentData().toString());
+        s.grokApiKey = m_grokKey->text();
+        s.openaiApiKey = m_openaiKey->text();
+        s.openrouterApiKey = m_openrouterKey->text();
+        s.deepseekApiKey = m_deepseekKey->text();
+        s.openaiCompatibleApiKey = m_openaiCompatibleKey->text();
+        s.claudeCompatibleApiKey = m_claudeCompatibleKey->text();
+            s.opencodeApiKey = m_opencodeKey->text();
+        s.acpApiKey = m_acpKey->text();
+        s.grokModel = m_grokModel->currentText().trimmed();
+        s.openaiModel = m_openaiModel->currentText().trimmed();
+        s.openrouterModel = m_openrouterModel->currentText().trimmed();
+        s.deepseekModel = m_deepseekModel->currentText().trimmed();
+        s.openaiCompatibleModel = m_openaiCompatibleModel->currentText().trimmed();
+        s.claudeCompatibleModel = m_claudeCompatibleModel->currentText().trimmed();
+    s.opencodeModel = m_opencodeModel->currentText().trimmed();
+        s.opencodePlan = openCodePlanFromId(m_opencodePlan->currentData().toString());
+        s.opencodeUrl = m_opencodeUrl->text().trimmed();
+        s.acpModel = m_acpModel->currentText().trimmed();
+        // The first entry is "Auto (agent default)" and maps to an empty value;
+        // anything else (picked or typed) is an agent option id.
+        s.acpEffort = m_acpEffort->currentIndex() == 0 && m_acpEffort->currentText() == m_acpEffort->itemText(0)
+            ? QString()
+            : m_acpEffort->currentText().trimmed();
+        s.deepseekUrl = m_deepseekUrl->text().trimmed();
+        s.openaiCompatibleUrl = m_openaiCompatibleUrl->text().trimmed();
+        s.claudeCompatibleUrl = m_claudeCompatibleUrl->text().trimmed();
+        s.acpUrl = m_acpUrl->text().trimmed();
+        s.acpAgentId = m_acpAgent->currentData().toString();
+        s.acpCommand = m_acpCommand->text().trimmed();
+        s.acpArgs = m_acpArgs->text().trimmed();
+        s.acpApiKeyEnv = m_acpApiKeyEnv->text().trimmed();
+        s.apiFormat = apiFormatFromId(m_apiFormat->currentData().toString());
+        if (m_orchestrationEnabled) {
+            OrchestrationSettings orchestration;
+            orchestration.enabled = m_orchestrationEnabled->isChecked();
+            orchestration.planner.provider = providerFromId(m_orchestrationPlannerProvider->currentData().toString());
+            orchestration.planner.model = m_orchestrationPlannerModel->currentText().trimmed();
+            orchestration.planner.effort = m_orchestrationPlannerEffort->currentData().toString();
+            orchestration.executor.provider = providerFromId(m_orchestrationExecutorProvider->currentData().toString());
+            orchestration.executor.model = m_orchestrationExecutorModel->currentText().trimmed();
+            orchestration.executor.effort = m_orchestrationExecutorEffort->currentData().toString();
+            orchestration.maxReplans = m_orchestrationMaxReplans->value();
+            orchestration.reviewMode = m_orchestrationReviewMode->currentData().toString();
+            s.orchestration = orchestration;
         }
     }
-    s.loadAgentRules = m_loadAgentRules->isChecked();
-    s.globalRules = m_globalRules->toPlainText();
 
-    // MCP
-    s.mcpEnabled = m_mcpEnabled->isChecked();
-    s.mcpAutoConnect = m_mcpAutoConnect->isChecked();
-    s.mcpTimeoutMs = m_mcpTimeout->value();
-        // Web search
-        s.webSearchProvider = m_webProvider->currentData().toString();
-        s.webSearchApiKey = m_webApiKey->text().trimmed();
-        s.webSearchEndpoint = m_webEndpoint->text().trimmed();
-        s.webSearchMaxResults = m_webMaxResults->value();
-        s.webSearchTimeoutMs = m_webTimeout->value() * 1000;
-
-    // Checkpoints and subtasks
-    s.checkpointsEnabled = m_checkpointsEnabled->isChecked();
-    s.checkpointRetention = m_checkpointRetention->value();
-    s.maxSubtaskDepth = m_maxSubtaskDepth->value();
-    s.maxParallelSubtasks = m_maxParallelSubtasks->value();
-    s.subtaskTimeoutMs = m_subtaskTimeout->value();
-
-    // The roster is stored as a JSON array so it stays readable in the config
-    // file and can be copied between machines.
-    QJsonArray rosterArray;
-    for (const AgentProfile &profile : m_customAgentList) {
-        rosterArray.append(profile.toJson());
-    }
-    s.agentRoster = rosterArray.isEmpty() ? QString() : QString::fromUtf8(QJsonDocument(rosterArray).toJson(QJsonDocument::Compact));
-
-    // Appearance / Themes
-    s.themeSource = m_themeSource->currentData().toString();
-    s.themePreset = m_themePreset->currentData().toString();
-    if (m_themeOverrideValues.isEmpty()) {
-        s.themeOverrides.clear();
-    } else {
-        const QJsonObject overrides = QJsonObject::fromVariantMap(
-            [&]() {
-                QVariantMap map;
-                for (auto it = m_themeOverrideValues.constBegin(); it != m_themeOverrideValues.constEnd(); ++it) {
-                    map.insert(it.key(), it.value());
-                }
-                return map;
-            }());
-        s.themeOverrides = QString::fromUtf8(QJsonDocument(overrides).toJson(QJsonDocument::Compact));
+    // A tab the user has not opened has no edits of its own, so its stored
+    // values must survive Apply untouched.
+    if (isTabBuilt(Tab::Security)) {
+        s.permissionMode = permissionModeFromId(m_permission->currentData().toString());
+        s.acceptAllAcpTools = m_acceptAllAcpTools->isChecked();
+        s.sandbox = sandboxProfileFromId(m_sandbox->currentData().toString());
+        s.bashTimeoutMs = m_timeout->value() * 1000;
+        s.maxExpandedToolCards = m_maxExpandedToolCards->value();
+        s.extraDenyGlobs = m_deny->toPlainText().split(u'\n', Qt::SkipEmptyParts);
+        s.allowReadsOutsideWorkspace = m_allowOutsideReads->isChecked();
+        s.editInBuffer = m_editInBuffer->isChecked();
+        s.editBannersEnabled = m_editBanners->isChecked();
     }
 
-    // Voice prompting
-    s.voiceProvider = m_voiceProvider->currentData().toString();
-    s.voiceApiKey = m_voiceApiKey->text();
-    s.voiceEndpoint = m_voiceEndpoint->text().trimmed();
-    s.voiceModel = m_voiceModel->text().trimmed().isEmpty() ? u"whisper-1"_s : m_voiceModel->text().trimmed();
-    s.voiceLanguage = m_voiceLanguage->text().trimmed();
-    s.voiceLocalCommand = m_voiceLocalCommand->text().trimmed();
-    s.voiceInputDevice = m_voiceInputDevice->text().trimmed();
-    s.voiceNoiseRemoval = m_voiceNoiseRemoval->isChecked();
-    s.voiceAutoSend = m_voiceAutoSend->isChecked();
-
-    if (m_orchestrationEnabled) {
-        OrchestrationSettings orchestration;
-        orchestration.enabled = m_orchestrationEnabled->isChecked();
-        orchestration.planner.provider = providerFromId(m_orchestrationPlannerProvider->currentData().toString());
-        orchestration.planner.model = m_orchestrationPlannerModel->currentText().trimmed();
-        orchestration.planner.effort = m_orchestrationPlannerEffort->currentData().toString();
-        orchestration.executor.provider = providerFromId(m_orchestrationExecutorProvider->currentData().toString());
-        orchestration.executor.model = m_orchestrationExecutorModel->currentText().trimmed();
-        orchestration.executor.effort = m_orchestrationExecutorEffort->currentData().toString();
-        orchestration.maxReplans = m_orchestrationMaxReplans->value();
-        orchestration.reviewMode = m_orchestrationReviewMode->currentData().toString();
-        s.orchestration = orchestration;
+    // A tab the user has not opened has no edits of its own, so its stored
+    // values must survive Apply untouched.
+    if (isTabBuilt(Tab::Agent)) {
+        s.maxToolCalls = m_maxIter->value();
+        s.maxIterations = s.maxToolCalls;
+        s.maxModelRequests = m_maxModelRequests->value();
+        s.requestsPerMinute = m_requestsPerMinute->value();
+        s.maxSavedConversations = m_maxSavedConversations->value();
+        s.planMode = m_planMode->isChecked();
+        s.loadProjectInstructions = m_projectInstructions->isChecked();
+        s.thinkingMode = m_thinkingMode->isChecked();
+        s.extraSystemPrompt = m_system->toPlainText();
+        s.contextCompressionLevel = m_compressionLevel->value();
+        s.maxGraphNodes = m_maxGraphNodes->value();
+        s.maxGraphEdges = m_maxGraphEdges->value();
+        s.compressProjectGraph = m_compressGraph->isChecked();
+        s.compressEditorContext = m_compressEditorContext->isChecked();
+        s.maxEditorContextLength = m_maxEditorContextLength->value();
+        s.compressProjectInstructions = m_compressProjectInstructions->isChecked();
+        s.maxProjectInstructionsLength = m_maxProjectInstructionsLength->value();
+        s.compressSystemPrompt = m_compressSystemPrompt->isChecked();
+        s.maxSystemPromptLength = m_maxSystemPromptLength->value();
+        // Optimal Intelligence Parameters
+        s.temperature = m_temperature->value();
+        s.topP = m_topP->value();
+        s.maxTokens = m_maxTokens->value();
+        s.reasoningEffort = m_reasoningEffort->currentData().toString();
+        s.selfCritique = m_selfCritique->isChecked();
+        s.parallelToolCalls = m_parallelToolCalls->isChecked();
+        s.verbosity = m_verbosity->currentData().toInt();
+        // Enhanced Intelligence Parameters
+        s.structuredThinking = m_structuredThinking->isChecked();
+        s.structuredPlanning = m_structuredPlanning->isChecked();
+        s.autoCollapseThinking = m_autoCollapseThinking->isChecked();
+        s.showPlanAsChecklist = m_showPlanAsChecklist->isChecked();
+        s.maxThinkingTokens = m_maxThinkingTokens->value();
+        s.maxPlanSteps = m_maxPlanSteps->value();
+        s.requireVerification = m_requireVerification->isChecked();
+        s.maxVerificationAttempts = m_maxVerificationAttempts->value();
+        s.telemetryEnabled = m_telemetryEnabled->isChecked();
+        s.telemetryEndpoint = m_telemetryEndpoint->text().trimmed();
+        s.telemetryContentCapture = m_telemetryContentCapture->isChecked();
+        s.costBudgetUsd = m_costBudget->value();
+        // Context Management
+        s.contextWindow = m_contextWindow->value();
+        s.keepRecentTokens = m_keepRecentTokens->value();
+        s.contextWindowReserve = m_contextWindowReserve->value();
+        s.compressOldMessages = m_compressOldMessages->isChecked();
     }
 
-    if (!m_workspace.isEmpty()) {
-        QString error;
-        if (!McpConfigStore::save(m_workspace, m_mcpServerConfigs, &error)) {
-            qWarning().noquote() << u"Kate AI could not save MCP servers:"_s << error;
+    // A tab the user has not opened has no edits of its own, so its stored
+    // values must survive Apply untouched.
+    if (isTabBuilt(Tab::Completion)) {
+        s.completionEnabled = m_completionEnabled->isChecked();
+        s.completionTrigger = m_completionTrigger->currentData().toString();
+        s.completionRenderMode = m_completionRenderMode->currentData().toString();
+        s.completionModel = m_completionModel->text().trimmed();
+        s.completionRequestsPerMinute = m_completionRequestsPerMinute->value();
+        s.completionContextPrefixChars = m_completionPrefixChars->value();
+        s.completionContextSuffixChars = m_completionSuffixChars->value();
+        s.completionAutoTriggerDelayMs = m_completionAutoDelay->value();
+    }
+
+    // A tab the user has not opened has no edits of its own, so its stored
+    // values must survive Apply untouched.
+    if (isTabBuilt(Tab::Modes)) {
+        // Modes, auto-approve and rules
+        s.agentMode = m_agentMode->currentData().toString();
+        s.autoApproveTools.clear();
+        for (auto it = m_autoApproveBoxes.constBegin(); it != m_autoApproveBoxes.constEnd(); ++it) {
+            if (it.value()->isChecked()) {
+                s.autoApproveTools.append(it.key());
+            }
         }
+        s.loadAgentRules = m_loadAgentRules->isChecked();
+        s.globalRules = m_globalRules->toPlainText();
+    }
+
+    // A tab the user has not opened has no edits of its own, so its stored
+    // values must survive Apply untouched.
+    if (isTabBuilt(Tab::Mcp)) {
+        // MCP
+        s.mcpEnabled = m_mcpEnabled->isChecked();
+        s.mcpAutoConnect = m_mcpAutoConnect->isChecked();
+        s.mcpTimeoutMs = m_mcpTimeout->value();
+    }
+
+    // A tab the user has not opened has no edits of its own, so its stored
+    // values must survive Apply untouched.
+    if (isTabBuilt(Tab::Web)) {
+            // Web search
+            s.webSearchProvider = m_webProvider->currentData().toString();
+            s.webSearchApiKey = m_webApiKey->text().trimmed();
+            s.webSearchEndpoint = m_webEndpoint->text().trimmed();
+            s.webSearchMaxResults = m_webMaxResults->value();
+            s.webSearchTimeoutMs = m_webTimeout->value() * 1000;
+    }
+
+    // A tab the user has not opened has no edits of its own, so its stored
+    // values must survive Apply untouched.
+    if (isTabBuilt(Tab::Checkpoints)) {
+        // Checkpoints and subtasks
+        s.checkpointsEnabled = m_checkpointsEnabled->isChecked();
+        s.checkpointRetention = m_checkpointRetention->value();
+        s.maxSubtaskDepth = m_maxSubtaskDepth->value();
+        s.maxParallelSubtasks = m_maxParallelSubtasks->value();
+        s.subtaskTimeoutMs = m_subtaskTimeout->value();
+    }
+
+    // A tab the user has not opened has no edits of its own, so its stored
+    // values must survive Apply untouched.
+    if (isTabBuilt(Tab::AgentTeam)) {
+        // The roster is stored as a JSON array so it stays readable in the config
+        // file and can be copied between machines.
+        QJsonArray rosterArray;
+        for (const AgentProfile &profile : m_customAgentList) {
+            rosterArray.append(profile.toJson());
+        }
+        s.agentRoster = rosterArray.isEmpty() ? QString() : QString::fromUtf8(QJsonDocument(rosterArray).toJson(QJsonDocument::Compact));
+    }
+
+    // A tab the user has not opened has no edits of its own, so its stored
+    // values must survive Apply untouched.
+    if (isTabBuilt(Tab::Themes)) {
+        // Appearance / Themes
+        s.themeSource = m_themeSource->currentData().toString();
+        s.themePreset = m_themePreset->currentData().toString();
+        if (m_themeOverrideValues.isEmpty()) {
+            s.themeOverrides.clear();
+        } else {
+            const QJsonObject overrides = QJsonObject::fromVariantMap(
+                [&]() {
+                    QVariantMap map;
+                    for (auto it = m_themeOverrideValues.constBegin(); it != m_themeOverrideValues.constEnd(); ++it) {
+                        map.insert(it.key(), it.value());
+                    }
+                    return map;
+                }());
+            s.themeOverrides = QString::fromUtf8(QJsonDocument(overrides).toJson(QJsonDocument::Compact));
+        }
+    }
+
+    // A tab the user has not opened has no edits of its own, so its stored
+    // values must survive Apply untouched.
+    if (isTabBuilt(Tab::Voice)) {
+        // Voice prompting
+        s.voiceProvider = m_voiceProvider->currentData().toString();
+        s.voiceApiKey = m_voiceApiKey->text();
+        s.voiceEndpoint = m_voiceEndpoint->text().trimmed();
+        s.voiceModel = m_voiceModel->text().trimmed().isEmpty() ? u"whisper-1"_s : m_voiceModel->text().trimmed();
+        s.voiceLanguage = m_voiceLanguage->text().trimmed();
+        s.voiceLocalCommand = m_voiceLocalCommand->text().trimmed();
+        s.voiceInputDevice = m_voiceInputDevice->text().trimmed();
+        s.voiceNoiseRemoval = m_voiceNoiseRemoval->isChecked();
+        s.voiceAutoSend = m_voiceAutoSend->isChecked();
+    }
+
+    // The server list is workspace state: an unbuilt MCP tab must not rewrite
+    // the stored file from a list that was never loaded.
+    if (isTabBuilt(Tab::Mcp) && !m_workspace.isEmpty()) {
+            QString error;
+            if (!McpConfigStore::save(m_workspace, m_mcpServerConfigs, &error)) {
+                qWarning().noquote() << u"Kate AI could not save MCP servers:"_s << error;
+            }
     }
 
     m_plugin->setSettings(s);
 }
-
 void KateAiConfigPage::reset()
 {
-    const Settings s = m_plugin->settings();
-    m_provider->setCurrentIndex(std::max(0, m_provider->findData(providerId(s.provider))));
-    m_grokKey->setText(s.grokApiKey);
-    m_openaiKey->setText(s.openaiApiKey);
-    m_openrouterKey->setText(s.openrouterApiKey);
-    m_deepseekKey->setText(s.deepseekApiKey);
-    m_openaiCompatibleKey->setText(s.openaiCompatibleApiKey);
-    m_claudeCompatibleKey->setText(s.claudeCompatibleApiKey);
-        m_opencodeKey->setText(s.opencodeApiKey);
-        m_opencodePlan->setCurrentIndex(std::max(
-            0, m_opencodePlan->findData(openCodePlanId(s.opencodePlan))));
-        m_opencodeUrl->setText(s.opencodeUrl);
-    m_acpKey->setText(s.acpApiKey);
-
-    // Update model combos with catalog and set current model
-    updateModelCombo(Provider::Grok);
-    updateModelCombo(Provider::OpenAI);
-    updateModelCombo(Provider::OpenRouter);
-    updateModelCombo(Provider::DeepSeek);
-    updateModelCombo(Provider::OpenAICompatible);
-    updateModelCombo(Provider::ClaudeCompatible);
-    updateModelCombo(Provider::OpenCode);
-    updateModelCombo(Provider::Acp);
-
-    m_grokModel->setCurrentText(s.grokModel);
-    m_openaiModel->setCurrentText(s.openaiModel);
-    m_openrouterModel->setCurrentText(s.openrouterModel);
-    m_deepseekModel->setCurrentText(s.deepseekModel);
-    m_openaiCompatibleModel->setCurrentText(s.openaiCompatibleModel);
-    m_claudeCompatibleModel->setCurrentText(s.claudeCompatibleModel);
-        m_opencodeModel->setCurrentText(s.opencodeModel);
-    m_acpModel->setCurrentText(s.acpModel);
-    m_acpEffort->setCurrentText(s.acpEffort.trimmed().isEmpty() ? m_acpEffort->itemText(0) : s.acpEffort);
-
-    if (m_orchestrationEnabled) {
-        m_orchestrationEnabled->setChecked(s.orchestration.enabled);
-        m_orchestrationPlannerProvider->setCurrentIndex(std::max(
-            0, m_orchestrationPlannerProvider->findData(providerId(s.orchestration.planner.provider))));
-        m_orchestrationExecutorProvider->setCurrentIndex(std::max(
-            0, m_orchestrationExecutorProvider->findData(providerId(s.orchestration.executor.provider))));
-        refreshOrchestrationModels();
-        m_orchestrationPlannerModel->setCurrentText(s.orchestration.planner.model);
-        m_orchestrationExecutorModel->setCurrentText(s.orchestration.executor.model);
-        m_orchestrationPlannerEffort->setCurrentIndex(std::max(
-            0, m_orchestrationPlannerEffort->findData(s.orchestration.planner.effort)));
-        m_orchestrationExecutorEffort->setCurrentIndex(std::max(
-            0, m_orchestrationExecutorEffort->findData(s.orchestration.executor.effort)));
-        m_orchestrationMaxReplans->setValue(s.orchestration.maxReplans);
-        m_orchestrationReviewMode->setCurrentIndex(std::max(
-            0, m_orchestrationReviewMode->findData(s.orchestration.reviewMode)));
-    }
-
-    m_deepseekUrl->setText(s.deepseekUrl);
-    m_openaiCompatibleUrl->setText(s.openaiCompatibleUrl);
-    m_claudeCompatibleUrl->setText(s.claudeCompatibleUrl);
-    m_acpUrl->setText(s.acpUrl);
-    {
-        const QSignalBlocker blockAgent(m_acpAgent);
-        int agentIndex = m_acpAgent->findData(s.acpAgentId);
-        if (agentIndex < 0 && !s.acpAgentId.isEmpty()) {
-            // An agent the combo does not know (installed from the registry in
-            // another session, or removed since). Keep it selected and keep its
-            // id: falling back to "custom" here silently rewrote the setting on
-            // the next Apply and left the model combo showing another agent's
-            // cached list.
-            QString label = s.acpAgentId;
-            for (const AcpAgentPreset &preset : acpAgentChoices(s)) {
-                if (preset.id == s.acpAgentId) {
-                    label = preset.label;
-                    break;
-                }
-            }
-            m_acpAgent->insertItem(m_acpAgent->count(), label, s.acpAgentId);
-            agentIndex = m_acpAgent->count() - 1;
-        }
-        if (agentIndex < 0) {
-            agentIndex = m_acpAgent->findData(u"custom"_s);
-        }
-        m_acpAgent->setCurrentIndex(std::max(0, agentIndex));
-    }
-    m_acpCommand->setText(s.acpCommand);
-    m_acpArgs->setText(s.acpArgs);
-    m_acpApiKeyEnv->setText(s.acpApiKeyEnv);
-    {
-        const QSignalBlocker blockFormat(m_apiFormat);
-        m_apiFormat->setCurrentIndex(std::max(0, m_apiFormat->findData(apiFormatId(s.apiFormat))));
-    }
-    updateAcpNativeEnabled();
-    updateAcpModelCombo();
-
-    // Fetch models for providers that have API keys configured
-    if (m_modelFetcher) {
-        auto fetchIfKey = [this, &s](Provider provider, const QString &key) {
-            if (!key.trimmed().isEmpty()) {
-                Settings providerSettings = s;
-                providerSettings.provider = provider;
-                m_modelFetcher->setSettings(providerSettings);
-                m_modelFetcher->fetchModels(provider);
-            }
-        };
-        fetchIfKey(Provider::Grok, s.grokApiKey);
-        fetchIfKey(Provider::OpenAI, s.openaiApiKey);
-        fetchIfKey(Provider::OpenRouter, s.openrouterApiKey);
-        fetchIfKey(Provider::DeepSeek, s.deepseekApiKey);
-        fetchIfKey(Provider::OpenAICompatible, s.openaiCompatibleApiKey);
-        fetchIfKey(Provider::ClaudeCompatible, s.claudeCompatibleApiKey);
-        // ACP has no catalogue; keep the typed default model as-is.
-    }
-
-    m_permission->setCurrentIndex(std::max(0, m_permission->findData(permissionModeId(s.permissionMode))));
-    m_acceptAllAcpTools->setChecked(s.acceptAllAcpTools);
-    m_sandbox->setCurrentIndex(std::max(0, m_sandbox->findData(sandboxProfileId(s.sandbox))));
-    m_timeout->setValue(std::max(1, s.bashTimeoutMs / 1000));
-    m_deny->setPlainText(s.extraDenyGlobs.join(u'\n'));
-    m_allowOutsideReads->setChecked(s.allowReadsOutsideWorkspace);
-    m_editInBuffer->setChecked(s.editInBuffer);
-    m_editBanners->setChecked(s.editBannersEnabled);
-    m_completionEnabled->setChecked(s.completionEnabled);
-    m_completionTrigger->setCurrentIndex(std::max(0, m_completionTrigger->findData(s.completionTrigger)));
-    m_completionRenderMode->setCurrentIndex(std::max(0, m_completionRenderMode->findData(s.completionRenderMode)));
-    m_completionModel->setText(s.completionModel);
-    m_completionRequestsPerMinute->setValue(s.completionRequestsPerMinute);
-    m_completionPrefixChars->setValue(s.completionContextPrefixChars);
-    m_completionSuffixChars->setValue(s.completionContextSuffixChars);
-    m_completionAutoDelay->setValue(s.completionAutoTriggerDelayMs);
-    m_maxExpandedToolCards->setValue(s.maxExpandedToolCards);
-
-    m_maxIter->setValue(s.maxToolCalls);
-    m_maxModelRequests->setValue(s.maxModelRequests);
-    m_requestsPerMinute->setValue(s.requestsPerMinute);
-    m_maxSavedConversations->setValue(s.maxSavedConversations);
-    m_planMode->setChecked(s.planMode);
-    m_projectInstructions->setChecked(s.loadProjectInstructions);
-    m_thinkingMode->setChecked(s.thinkingMode);
-    m_system->setPlainText(s.extraSystemPrompt);
-
-    m_compressionLevel->setValue(s.contextCompressionLevel);
-    m_maxGraphNodes->setValue(s.maxGraphNodes);
-    m_maxGraphEdges->setValue(s.maxGraphEdges);
-    m_compressGraph->setChecked(s.compressProjectGraph);
-    m_compressEditorContext->setChecked(s.compressEditorContext);
-    m_maxEditorContextLength->setValue(s.maxEditorContextLength);
-    m_compressProjectInstructions->setChecked(s.compressProjectInstructions);
-    m_maxProjectInstructionsLength->setValue(s.maxProjectInstructionsLength);
-    m_compressSystemPrompt->setChecked(s.compressSystemPrompt);
-    m_maxSystemPromptLength->setValue(s.maxSystemPromptLength);
-
-    // Optimal Intelligence Parameters
-    m_temperature->setValue(s.temperature);
-    m_topP->setValue(s.topP);
-    m_maxTokens->setValue(s.maxTokens);
-    int reasoningIdx = m_reasoningEffort->findData(s.reasoningEffort);
-    m_reasoningEffort->setCurrentIndex(std::max(0, reasoningIdx));
-    m_selfCritique->setChecked(s.selfCritique);
-    m_parallelToolCalls->setChecked(s.parallelToolCalls);
-    m_verbosity->setCurrentIndex(m_verbosity->findData(s.verbosity));
-
-    // Enhanced Intelligence Parameters
-    m_structuredThinking->setChecked(s.structuredThinking);
-    m_structuredPlanning->setChecked(s.structuredPlanning);
-    m_autoCollapseThinking->setChecked(s.autoCollapseThinking);
-    m_showPlanAsChecklist->setChecked(s.showPlanAsChecklist);
-    m_maxThinkingTokens->setValue(s.maxThinkingTokens);
-    m_maxPlanSteps->setValue(s.maxPlanSteps);
-    m_requireVerification->setChecked(s.requireVerification);
-    m_maxVerificationAttempts->setValue(s.maxVerificationAttempts);
-    m_telemetryEnabled->setChecked(s.telemetryEnabled);
-    m_telemetryEndpoint->setText(s.telemetryEndpoint);
-    m_telemetryContentCapture->setChecked(s.telemetryContentCapture);
-    m_costBudget->setValue(s.costBudgetUsd);
-
-    // Context Management
-    m_contextWindow->setValue(s.contextWindow);
-    m_keepRecentTokens->setValue(s.keepRecentTokens);
-    m_contextWindowReserve->setValue(s.contextWindowReserve);
-    m_compressOldMessages->setChecked(s.compressOldMessages);
-
-    // Modes, auto-approve and rules
-    int modeIndex = m_agentMode->findData(s.agentMode);
-    if (modeIndex < 0) {
-        modeIndex = m_agentMode->findData(QStringLiteral("code"));
-    }
-    m_agentMode->setCurrentIndex(std::max(0, modeIndex));
-    for (auto it = m_autoApproveBoxes.constBegin(); it != m_autoApproveBoxes.constEnd(); ++it) {
-        it.value()->setChecked(s.autoApproveTools.contains(it.key()));
-    }
-    m_loadAgentRules->setChecked(s.loadAgentRules);
-    m_globalRules->setPlainText(s.globalRules);
-
-    // MCP
-    m_mcpEnabled->setChecked(s.mcpEnabled);
-    m_mcpAutoConnect->setChecked(s.mcpAutoConnect);
-    m_mcpTimeout->setValue(s.mcpTimeoutMs);
-        // Web search
-        {
-            const int index = m_webProvider->findData(s.webSearchProvider);
-            m_webProvider->setCurrentIndex(index >= 0 ? index : 0);
-            m_webApiKey->setText(s.webSearchApiKey);
-            m_webEndpoint->setText(s.webSearchEndpoint);
-            m_webMaxResults->setValue(qBound(1, s.webSearchMaxResults, 20));
-            m_webTimeout->setValue(qBound(1, s.webSearchTimeoutMs / 1000, 120));
-        }
-    if (!m_mcpServerConfigs.isEmpty()) {
-        refreshMcpServerTable();
-    }
-
-    // Checkpoints and subtasks
-    m_checkpointsEnabled->setChecked(s.checkpointsEnabled);
-    m_checkpointRetention->setValue(s.checkpointRetention);
-
-    m_customAgentList.clear();
-    const QString roster = s.agentRoster.trimmed();
-    if (!roster.isEmpty()) {
-        const QJsonDocument document = QJsonDocument::fromJson(roster.toUtf8());
-        if (document.isArray()) {
-            const QJsonArray array = document.array();
-            for (const QJsonValue &value : array) {
-                const AgentProfile profile = AgentProfile::fromJson(value.toObject());
-                if (profile.isValid()) {
-                    m_customAgentList.append(profile);
-                }
-            }
-        }
-    }
-    refreshCustomAgentTable();
-    m_maxSubtaskDepth->setValue(s.maxSubtaskDepth);
-    m_maxParallelSubtasks->setValue(s.maxParallelSubtasks);
-    m_subtaskTimeout->setValue(s.subtaskTimeoutMs);
-
-    // Appearance / Themes
-    {
-        const QSignalBlocker blockSource(m_themeSource);
-        const int srcIdx = m_themeSource->findData(s.themeSource);
-        m_themeSource->setCurrentIndex(srcIdx >= 0 ? srcIdx : 0);
-    }
-    {
-        const QSignalBlocker blockPreset(m_themePreset);
-        const int presetIdx = m_themePreset->findData(s.themePreset);
-        m_themePreset->setCurrentIndex(presetIdx >= 0 ? presetIdx : 0);
-    }
-    updateThemePresetEnabled();
-
-    // Load overrides from settings
-    m_themeOverrideValues.clear();
-    if (!s.themeOverrides.trimmed().isEmpty()) {
-        const QJsonDocument doc = QJsonDocument::fromJson(s.themeOverrides.toUtf8());
-        if (doc.isObject()) {
-            const QJsonObject obj = doc.object();
-            for (auto it = obj.constBegin(); it != obj.constEnd(); ++it) {
-                if (QColor(it.value().toString()).isValid()) {
-                    m_themeOverrideValues.insert(it.key(), it.value().toString());
-                }
-            }
-        }
-    }
-    refreshThemeColorTable();
-
-    // Voice prompting
-    {
-        const QSignalBlocker blockVoice(m_voiceProvider);
-        const int idx = m_voiceProvider->findData(s.voiceProvider);
-        m_voiceProvider->setCurrentIndex(idx >= 0 ? idx : 0);
-    }
-    m_voiceApiKey->setText(s.voiceApiKey);
-    m_voiceEndpoint->setText(s.voiceEndpoint);
-    m_voiceModel->setText(s.voiceModel);
-    m_voiceLanguage->setText(s.voiceLanguage);
-    m_voiceLocalCommand->setText(s.voiceLocalCommand);
-    m_voiceInputDevice->setText(s.voiceInputDevice);
-    m_voiceNoiseRemoval->setChecked(s.voiceNoiseRemoval);
-    m_voiceAutoSend->setChecked(s.voiceAutoSend);
-    updateVoiceFieldStates();
-    updateVoiceMicStatus();
+    // Only built tabs have widgets to refresh. A tab that is built later loads
+    // the settings that are current at that moment, so this stays complete.
+    resetProvidersTab();
+    resetSecurityTab();
+    resetAgentTab();
+    resetModesTab();
+    resetMcpTab();
+    resetWebTab();
+    resetCompletionTab();
+    resetCheckpointsTab();
+    resetAgentTeamTab();
+    resetThemesTab();
+    resetVoiceTab();
 }
 
 void KateAiConfigPage::setWorkspace(const QString &workspace)
@@ -2962,6 +2931,358 @@ void KateAiConfigPage::updateVoiceFieldStates()
     m_voiceEndpoint->setEnabled(!isLocal && !isOpenAI);
     m_voiceModel->setEnabled(!isLocal);
     m_voiceLocalCommand->setEnabled(isLocal || backend == u"auto"_s);
+}
+
+void KateAiConfigPage::resetProvidersTab()
+{
+    if (!isTabBuilt(Tab::Providers)) {
+        return;
+    }
+    const Settings s = m_plugin->settings();
+    m_provider->setCurrentIndex(std::max(0, m_provider->findData(providerId(s.provider))));
+    m_grokKey->setText(s.grokApiKey);
+    m_openaiKey->setText(s.openaiApiKey);
+    m_openrouterKey->setText(s.openrouterApiKey);
+    m_deepseekKey->setText(s.deepseekApiKey);
+    m_openaiCompatibleKey->setText(s.openaiCompatibleApiKey);
+    m_claudeCompatibleKey->setText(s.claudeCompatibleApiKey);
+        m_opencodeKey->setText(s.opencodeApiKey);
+        m_opencodePlan->setCurrentIndex(std::max(
+            0, m_opencodePlan->findData(openCodePlanId(s.opencodePlan))));
+        m_opencodeUrl->setText(s.opencodeUrl);
+    m_acpKey->setText(s.acpApiKey);
+
+    // Update model combos with catalog and set current model
+    updateModelCombo(Provider::Grok);
+    updateModelCombo(Provider::OpenAI);
+    updateModelCombo(Provider::OpenRouter);
+    updateModelCombo(Provider::DeepSeek);
+    updateModelCombo(Provider::OpenAICompatible);
+    updateModelCombo(Provider::ClaudeCompatible);
+    updateModelCombo(Provider::OpenCode);
+    updateModelCombo(Provider::Acp);
+
+    m_grokModel->setCurrentText(s.grokModel);
+    m_openaiModel->setCurrentText(s.openaiModel);
+    m_openrouterModel->setCurrentText(s.openrouterModel);
+    m_deepseekModel->setCurrentText(s.deepseekModel);
+    m_openaiCompatibleModel->setCurrentText(s.openaiCompatibleModel);
+    m_claudeCompatibleModel->setCurrentText(s.claudeCompatibleModel);
+        m_opencodeModel->setCurrentText(s.opencodeModel);
+    m_acpModel->setCurrentText(s.acpModel);
+    m_acpEffort->setCurrentText(s.acpEffort.trimmed().isEmpty() ? m_acpEffort->itemText(0) : s.acpEffort);
+
+    if (m_orchestrationEnabled) {
+        m_orchestrationEnabled->setChecked(s.orchestration.enabled);
+        m_orchestrationPlannerProvider->setCurrentIndex(std::max(
+            0, m_orchestrationPlannerProvider->findData(providerId(s.orchestration.planner.provider))));
+        m_orchestrationExecutorProvider->setCurrentIndex(std::max(
+            0, m_orchestrationExecutorProvider->findData(providerId(s.orchestration.executor.provider))));
+        refreshOrchestrationModels();
+        m_orchestrationPlannerModel->setCurrentText(s.orchestration.planner.model);
+        m_orchestrationExecutorModel->setCurrentText(s.orchestration.executor.model);
+        m_orchestrationPlannerEffort->setCurrentIndex(std::max(
+            0, m_orchestrationPlannerEffort->findData(s.orchestration.planner.effort)));
+        m_orchestrationExecutorEffort->setCurrentIndex(std::max(
+            0, m_orchestrationExecutorEffort->findData(s.orchestration.executor.effort)));
+        m_orchestrationMaxReplans->setValue(s.orchestration.maxReplans);
+        m_orchestrationReviewMode->setCurrentIndex(std::max(
+            0, m_orchestrationReviewMode->findData(s.orchestration.reviewMode)));
+    }
+
+    m_deepseekUrl->setText(s.deepseekUrl);
+    m_openaiCompatibleUrl->setText(s.openaiCompatibleUrl);
+    m_claudeCompatibleUrl->setText(s.claudeCompatibleUrl);
+    m_acpUrl->setText(s.acpUrl);
+    {
+        const QSignalBlocker blockAgent(m_acpAgent);
+        int agentIndex = m_acpAgent->findData(s.acpAgentId);
+        if (agentIndex < 0 && !s.acpAgentId.isEmpty()) {
+            // An agent the combo does not know (installed from the registry in
+            // another session, or removed since). Keep it selected and keep its
+            // id: falling back to "custom" here silently rewrote the setting on
+            // the next Apply and left the model combo showing another agent's
+            // cached list.
+            QString label = s.acpAgentId;
+            for (const AcpAgentPreset &preset : acpAgentChoices(s)) {
+                if (preset.id == s.acpAgentId) {
+                    label = preset.label;
+                    break;
+                }
+            }
+            m_acpAgent->insertItem(m_acpAgent->count(), label, s.acpAgentId);
+            agentIndex = m_acpAgent->count() - 1;
+        }
+        if (agentIndex < 0) {
+            agentIndex = m_acpAgent->findData(u"custom"_s);
+        }
+        m_acpAgent->setCurrentIndex(std::max(0, agentIndex));
+    }
+    m_acpCommand->setText(s.acpCommand);
+    m_acpArgs->setText(s.acpArgs);
+    m_acpApiKeyEnv->setText(s.acpApiKeyEnv);
+    {
+        const QSignalBlocker blockFormat(m_apiFormat);
+        m_apiFormat->setCurrentIndex(std::max(0, m_apiFormat->findData(apiFormatId(s.apiFormat))));
+    }
+    updateAcpNativeEnabled();
+    updateAcpModelCombo();
+
+    // Fetch models for providers that have API keys configured
+    if (m_modelFetcher) {
+        auto fetchIfKey = [this, &s](Provider provider, const QString &key) {
+            if (!key.trimmed().isEmpty()) {
+                Settings providerSettings = s;
+                providerSettings.provider = provider;
+                m_modelFetcher->setSettings(providerSettings);
+                m_modelFetcher->fetchModels(provider);
+            }
+        };
+        fetchIfKey(Provider::Grok, s.grokApiKey);
+        fetchIfKey(Provider::OpenAI, s.openaiApiKey);
+        fetchIfKey(Provider::OpenRouter, s.openrouterApiKey);
+        fetchIfKey(Provider::DeepSeek, s.deepseekApiKey);
+        fetchIfKey(Provider::OpenAICompatible, s.openaiCompatibleApiKey);
+        fetchIfKey(Provider::ClaudeCompatible, s.claudeCompatibleApiKey);
+        // ACP has no catalogue; keep the typed default model as-is.
+    }
+}
+
+void KateAiConfigPage::resetSecurityTab()
+{
+    if (!isTabBuilt(Tab::Security)) {
+        return;
+    }
+    const Settings s = m_plugin->settings();
+    m_permission->setCurrentIndex(std::max(0, m_permission->findData(permissionModeId(s.permissionMode))));
+    m_acceptAllAcpTools->setChecked(s.acceptAllAcpTools);
+    m_sandbox->setCurrentIndex(std::max(0, m_sandbox->findData(sandboxProfileId(s.sandbox))));
+    m_timeout->setValue(std::max(1, s.bashTimeoutMs / 1000));
+    m_deny->setPlainText(s.extraDenyGlobs.join(u'\n'));
+    m_allowOutsideReads->setChecked(s.allowReadsOutsideWorkspace);
+    m_editInBuffer->setChecked(s.editInBuffer);
+    m_editBanners->setChecked(s.editBannersEnabled);
+    m_maxExpandedToolCards->setValue(s.maxExpandedToolCards);
+}
+
+void KateAiConfigPage::resetCompletionTab()
+{
+    if (!isTabBuilt(Tab::Completion)) {
+        return;
+    }
+    const Settings s = m_plugin->settings();
+    m_completionEnabled->setChecked(s.completionEnabled);
+    m_completionTrigger->setCurrentIndex(std::max(0, m_completionTrigger->findData(s.completionTrigger)));
+    m_completionRenderMode->setCurrentIndex(std::max(0, m_completionRenderMode->findData(s.completionRenderMode)));
+    m_completionModel->setText(s.completionModel);
+    m_completionRequestsPerMinute->setValue(s.completionRequestsPerMinute);
+    m_completionPrefixChars->setValue(s.completionContextPrefixChars);
+    m_completionSuffixChars->setValue(s.completionContextSuffixChars);
+    m_completionAutoDelay->setValue(s.completionAutoTriggerDelayMs);
+}
+
+void KateAiConfigPage::resetAgentTab()
+{
+    if (!isTabBuilt(Tab::Agent)) {
+        return;
+    }
+    const Settings s = m_plugin->settings();
+    m_maxIter->setValue(s.maxToolCalls);
+    m_maxModelRequests->setValue(s.maxModelRequests);
+    m_requestsPerMinute->setValue(s.requestsPerMinute);
+    m_maxSavedConversations->setValue(s.maxSavedConversations);
+    m_planMode->setChecked(s.planMode);
+    m_projectInstructions->setChecked(s.loadProjectInstructions);
+    m_thinkingMode->setChecked(s.thinkingMode);
+    m_system->setPlainText(s.extraSystemPrompt);
+
+    m_compressionLevel->setValue(s.contextCompressionLevel);
+    m_maxGraphNodes->setValue(s.maxGraphNodes);
+    m_maxGraphEdges->setValue(s.maxGraphEdges);
+    m_compressGraph->setChecked(s.compressProjectGraph);
+    m_compressEditorContext->setChecked(s.compressEditorContext);
+    m_maxEditorContextLength->setValue(s.maxEditorContextLength);
+    m_compressProjectInstructions->setChecked(s.compressProjectInstructions);
+    m_maxProjectInstructionsLength->setValue(s.maxProjectInstructionsLength);
+    m_compressSystemPrompt->setChecked(s.compressSystemPrompt);
+    m_maxSystemPromptLength->setValue(s.maxSystemPromptLength);
+
+    // Optimal Intelligence Parameters
+    m_temperature->setValue(s.temperature);
+    m_topP->setValue(s.topP);
+    m_maxTokens->setValue(s.maxTokens);
+    int reasoningIdx = m_reasoningEffort->findData(s.reasoningEffort);
+    m_reasoningEffort->setCurrentIndex(std::max(0, reasoningIdx));
+    m_selfCritique->setChecked(s.selfCritique);
+    m_parallelToolCalls->setChecked(s.parallelToolCalls);
+    m_verbosity->setCurrentIndex(m_verbosity->findData(s.verbosity));
+
+    // Enhanced Intelligence Parameters
+    m_structuredThinking->setChecked(s.structuredThinking);
+    m_structuredPlanning->setChecked(s.structuredPlanning);
+    m_autoCollapseThinking->setChecked(s.autoCollapseThinking);
+    m_showPlanAsChecklist->setChecked(s.showPlanAsChecklist);
+    m_maxThinkingTokens->setValue(s.maxThinkingTokens);
+    m_maxPlanSteps->setValue(s.maxPlanSteps);
+    m_requireVerification->setChecked(s.requireVerification);
+    m_maxVerificationAttempts->setValue(s.maxVerificationAttempts);
+    m_telemetryEnabled->setChecked(s.telemetryEnabled);
+    m_telemetryEndpoint->setText(s.telemetryEndpoint);
+    m_telemetryContentCapture->setChecked(s.telemetryContentCapture);
+    m_costBudget->setValue(s.costBudgetUsd);
+
+    // Context Management
+    m_contextWindow->setValue(s.contextWindow);
+    m_keepRecentTokens->setValue(s.keepRecentTokens);
+    m_contextWindowReserve->setValue(s.contextWindowReserve);
+    m_compressOldMessages->setChecked(s.compressOldMessages);
+}
+
+void KateAiConfigPage::resetModesTab()
+{
+    if (!isTabBuilt(Tab::Modes)) {
+        return;
+    }
+    const Settings s = m_plugin->settings();
+    // Modes, auto-approve and rules
+    int modeIndex = m_agentMode->findData(s.agentMode);
+    if (modeIndex < 0) {
+        modeIndex = m_agentMode->findData(QStringLiteral("code"));
+    }
+    m_agentMode->setCurrentIndex(std::max(0, modeIndex));
+    for (auto it = m_autoApproveBoxes.constBegin(); it != m_autoApproveBoxes.constEnd(); ++it) {
+        it.value()->setChecked(s.autoApproveTools.contains(it.key()));
+    }
+    m_loadAgentRules->setChecked(s.loadAgentRules);
+    m_globalRules->setPlainText(s.globalRules);
+}
+
+void KateAiConfigPage::resetMcpTab()
+{
+    if (!isTabBuilt(Tab::Mcp)) {
+        return;
+    }
+    const Settings s = m_plugin->settings();
+    // MCP
+    m_mcpEnabled->setChecked(s.mcpEnabled);
+    m_mcpAutoConnect->setChecked(s.mcpAutoConnect);
+    m_mcpTimeout->setValue(s.mcpTimeoutMs);
+    if (!m_mcpServerConfigs.isEmpty()) {
+        refreshMcpServerTable();
+    }
+}
+
+void KateAiConfigPage::resetWebTab()
+{
+    if (!isTabBuilt(Tab::Web)) {
+        return;
+    }
+    const Settings s = m_plugin->settings();
+        // Web search
+        {
+            const int index = m_webProvider->findData(s.webSearchProvider);
+            m_webProvider->setCurrentIndex(index >= 0 ? index : 0);
+            m_webApiKey->setText(s.webSearchApiKey);
+            m_webEndpoint->setText(s.webSearchEndpoint);
+            m_webMaxResults->setValue(qBound(1, s.webSearchMaxResults, 20));
+            m_webTimeout->setValue(qBound(1, s.webSearchTimeoutMs / 1000, 120));
+        }
+}
+
+void KateAiConfigPage::resetCheckpointsTab()
+{
+    if (!isTabBuilt(Tab::Checkpoints)) {
+        return;
+    }
+    const Settings s = m_plugin->settings();
+    // Checkpoints and subtasks
+    m_checkpointsEnabled->setChecked(s.checkpointsEnabled);
+    m_checkpointRetention->setValue(s.checkpointRetention);
+    m_maxSubtaskDepth->setValue(s.maxSubtaskDepth);
+    m_maxParallelSubtasks->setValue(s.maxParallelSubtasks);
+    m_subtaskTimeout->setValue(s.subtaskTimeoutMs);
+}
+
+void KateAiConfigPage::resetAgentTeamTab()
+{
+    if (!isTabBuilt(Tab::AgentTeam)) {
+        return;
+    }
+    const Settings s = m_plugin->settings();
+    m_customAgentList.clear();
+    const QString roster = s.agentRoster.trimmed();
+    if (!roster.isEmpty()) {
+        const QJsonDocument document = QJsonDocument::fromJson(roster.toUtf8());
+        if (document.isArray()) {
+            const QJsonArray array = document.array();
+            for (const QJsonValue &value : array) {
+                const AgentProfile profile = AgentProfile::fromJson(value.toObject());
+                if (profile.isValid()) {
+                    m_customAgentList.append(profile);
+                }
+            }
+        }
+    }
+    refreshCustomAgentTable();
+}
+
+void KateAiConfigPage::resetThemesTab()
+{
+    if (!isTabBuilt(Tab::Themes)) {
+        return;
+    }
+    const Settings s = m_plugin->settings();
+    // Appearance / Themes
+    {
+        const QSignalBlocker blockSource(m_themeSource);
+        const int srcIdx = m_themeSource->findData(s.themeSource);
+        m_themeSource->setCurrentIndex(srcIdx >= 0 ? srcIdx : 0);
+    }
+    {
+        const QSignalBlocker blockPreset(m_themePreset);
+        const int presetIdx = m_themePreset->findData(s.themePreset);
+        m_themePreset->setCurrentIndex(presetIdx >= 0 ? presetIdx : 0);
+    }
+    updateThemePresetEnabled();
+
+    // Load overrides from settings
+    m_themeOverrideValues.clear();
+    if (!s.themeOverrides.trimmed().isEmpty()) {
+        const QJsonDocument doc = QJsonDocument::fromJson(s.themeOverrides.toUtf8());
+        if (doc.isObject()) {
+            const QJsonObject obj = doc.object();
+            for (auto it = obj.constBegin(); it != obj.constEnd(); ++it) {
+                if (QColor(it.value().toString()).isValid()) {
+                    m_themeOverrideValues.insert(it.key(), it.value().toString());
+                }
+            }
+        }
+    }
+    refreshThemeColorTable();
+}
+
+void KateAiConfigPage::resetVoiceTab()
+{
+    if (!isTabBuilt(Tab::Voice)) {
+        return;
+    }
+    const Settings s = m_plugin->settings();
+    // Voice prompting
+    {
+        const QSignalBlocker blockVoice(m_voiceProvider);
+        const int idx = m_voiceProvider->findData(s.voiceProvider);
+        m_voiceProvider->setCurrentIndex(idx >= 0 ? idx : 0);
+    }
+    m_voiceApiKey->setText(s.voiceApiKey);
+    m_voiceEndpoint->setText(s.voiceEndpoint);
+    m_voiceModel->setText(s.voiceModel);
+    m_voiceLanguage->setText(s.voiceLanguage);
+    m_voiceLocalCommand->setText(s.voiceLocalCommand);
+    m_voiceInputDevice->setText(s.voiceInputDevice);
+    m_voiceNoiseRemoval->setChecked(s.voiceNoiseRemoval);
+    m_voiceAutoSend->setChecked(s.voiceAutoSend);
+    updateVoiceFieldStates();
+    updateVoiceMicStatus();
 }
 
 } // namespace KateAi

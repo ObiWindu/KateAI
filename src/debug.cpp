@@ -4,6 +4,7 @@
  */
 
 #include "debug.h"
+#include "boundedfile.h"
 
 #include <QDir>
 #include <QDirIterator>
@@ -420,7 +421,12 @@ QJsonDocument DebugProvider::generateLaunchConfig(const QString &workspace, QStr
         QString mainEntry = u"${workspaceFolder}/index.js"_s;
         QFile pkg(root.absoluteFilePath(u"package.json"_s));
         if (pkg.open(QIODevice::ReadOnly)) {
-            const QString m = QJsonDocument::fromJson(pkg.readAll()).object().value(u"main"_s).toString();
+            pkg.close();
+            // A project-owned manifest: bound it instead of reading whatever
+            // the path resolves to.
+            const QString text = readBoundedFile(pkg.fileName(), 1024 * 1024);
+            const QString m = QJsonDocument::fromJson(text.toUtf8()).object()
+                                  .value(u"main"_s).toString();
             if (!m.isEmpty()) {
                 mainEntry = u"${workspaceFolder}/"_s + m;
             }

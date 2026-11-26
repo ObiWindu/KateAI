@@ -303,6 +303,15 @@ SubtaskWidget::SubtaskWidget(const QString &taskId, QWidget *parent)
     m_streamTimer->setInterval(80);
     connect(m_streamTimer, &QTimer::timeout, this, &SubtaskWidget::flushStreamOutput);
 
+    // The answer body is a Markdown document, and rebuilding it costs far more
+    // than appending the delta. A child that streams hundreds of tokens per
+    // second rebuilt the whole document for each one, so the text is
+    // accumulated and rendered at most every animation interval.
+    m_answerTimer = new QTimer(this);
+    m_answerTimer->setSingleShot(true);
+    m_answerTimer->setInterval(80);
+    connect(m_answerTimer, &QTimer::timeout, this, &SubtaskWidget::flushStreamedAnswer);
+
     m_elapsed.start();
     updateHeader();
     applyStyle();
@@ -551,11 +560,26 @@ void SubtaskWidget::appendMessageDelta(const QString &delta)
         return;
     }
     m_streamedMessage += delta.size() > room ? delta.left(room) : delta;
-    m_answer->setDocument(makeMarkdownDocument(closeMarkdown(m_streamedMessage), ChatTheme::messageCss()));
     m_answer->setToolTip(QString());
     m_answer->setVisible(true);
     m_bodyCaption->setText(i18n("Progress"));
     m_bodyCaption->setVisible(true);
+    // Coalesce: the document is rebuilt by flushStreamedAnswer(), which also
+    // runs when the run settles so no text is ever left unrendered.
+    m_answerDirty = true;
+    if (!m_answerTimer->isActive()) {
+        m_answerTimer->start();
+    }
+}
+
+void SubtaskWidget::flushStreamedAnswer()
+{
+    m_answerTimer->stop();
+    if (!m_answerDirty) {
+        return;
+    }
+    m_answerDirty = false;
+    m_answer->setDocument(makeMarkdownDocument(closeMarkdown(m_streamedMessage), ChatTheme::messageCss()));
     reflowNow();
 }
 
@@ -624,6 +648,12 @@ void SubtaskWidget::finishAgent(const ToolResult &result)
     if (m_streamTimer) {
         m_streamTimer->stop();
     }
+    // The answer is rendered below from the final result, so a pending
+    // coalesced render must not fire afterwards and overwrite it.
+    m_answerDirty = false;
+    if (m_answerTimer) {
+        m_answerTimer->stop();
+    }
     m_pendingStreamed.clear();
     m_pendingStreamDelta.clear();
     m_partialOutput.clear();
@@ -668,6 +698,10 @@ void SubtaskWidget::markAbandoned(const QString &reason)
     flushStreamOutput();
     if (m_streamTimer) {
         m_streamTimer->stop();
+    }
+    m_answerDirty = false;
+    if (m_answerTimer) {
+        m_answerTimer->stop();
     }
     m_pendingStreamDelta.clear();
     m_partialOutput.clear();

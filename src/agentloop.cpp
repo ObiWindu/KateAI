@@ -1909,6 +1909,9 @@ void AgentLoop::setConversationId(const QString &conversationId)
     m_client.setSessionId(conversationId);
     m_sessionStartRan = false;
     m_eventLogBroken = false;
+    // The counter is per conversation. Seeding it with the stored head keeps the
+    // memory counters accurate after a session switch without a query per read.
+    m_eventSeqHigh = conversationId.isEmpty() ? 0 : eventStore().headSeq(conversationId);
 }
 
 QString AgentLoop::conversationId() const
@@ -1958,7 +1961,11 @@ void AgentLoop::emitHarnessEvent(const QString &type, const QJsonObject &payload
     if (!eventStore().append(conversation, events, &error)) {
         m_eventLogBroken = true;
         qWarning() << "KateAI: cannot append a harness event:" << error;
+        return;
     }
+    // The store assigns the sequence numbers. Track the high-water mark so the
+    // memory counters do not have to query it.
+    m_eventSeqHigh += events.size();
 }
 
 bool AgentLoop::beginHarnessTurn(const QString &userText)
@@ -3905,7 +3912,10 @@ QJsonObject AgentLoop::memoryCounters() const
     counters.insert(u"transcriptMessages"_s, m_transcriptMessages.size());
     counters.insert(u"transcriptChars"_s, static_cast<double>(m_transcriptChars));
     counters.insert(u"transcriptDiverged"_s, m_transcriptDiverged);
-    counters.insert(u"eventSeq"_s, static_cast<double>(eventStore().headSeq(m_conversationId)));
+    // Deliberately not headSeq(): that runs a SQL query, and memoryCounters is
+    // polled by the Inspector. The newest sequence number this loop appended is
+    // what the counter is for, and it is already tracked in memory.
+    counters.insert(u"eventSeq"_s, static_cast<double>(m_eventSeqHigh));
     counters.insert(u"actionRepeatEntries"_s, m_actionRepeatCounts.size());
     counters.insert(u"subagentRecords"_s, m_subagentRecords.size());
     counters.insert(u"subagentPatchChars"_s, static_cast<double>(subagentPatchChars));
@@ -6937,6 +6947,11 @@ void AgentLoop::startSkillFork(const ToolCall &call, const SkillDefinition &skil
     child->setLocks(m_locks);
     child->setSubtaskDepth(m_subtaskDepth + 1);
     child->setSelfId(taskId);
+    // A sub-agent reads the same workspace. Sharing the parent's graph and
+    // event store keeps every parallel child from indexing the project again
+    // and from opening its own SQLite connection and page cache.
+    child->setHarnessServices(m_projectGraph, m_mcp,
+                              m_sharedEvents ? m_sharedEvents : std::shared_ptr<EventStore>());
 
     SubagentRecord record;
     record.taskId = taskId;

@@ -23,6 +23,7 @@
 #include "todowidget.h"
 #include "edittracker.h"
 #include "harness/models.h"
+#include "harness/retainedcost.h"
 #include "tools.h"
 #include "transcriptlayout.h"
 #include "transcriptvirtualizer.h"
@@ -3046,7 +3047,12 @@ void ChatWidget::applyTranscriptCollapse()
     // tool cards, count content as well as cards: a few long reasoning blocks
     // cost more than many short ones.
     constexpr int kMaxRetainedThinkingBlocks = 200;
-    constexpr qsizetype kMaxRetainedThinkingChars = 2 * 1024 * 1024;
+    // A character budget described a QTextDocument as if it were a plain
+    // string. Express the ceiling in bytes and convert it once through the
+    // shared cost factor instead.
+    constexpr double kMaxRetainedThinkingBytes = 24.0 * 1024 * 1024;
+    const qsizetype kMaxRetainedThinkingChars =
+        RetainedCost::richCharsForBudget(kMaxRetainedThinkingBytes);
     qsizetype thinkingChars = 0;
     for (const auto &entry : std::as_const(m_thinkingBlocks)) {
         if (entry.browser) {
@@ -3133,7 +3139,11 @@ void ChatWidget::pruneOldTranscriptCards()
     // reads, and the count alone cannot see that. The session still has the
     // history and rebuilds it on reload.
     constexpr int kMaxRetainedToolCards = 400;
-    constexpr qsizetype kMaxRetainedToolChars = 6 * 1024 * 1024;
+    // Same correction as the reasoning blocks: the cap is a byte budget, and a
+    // card's document costs more per retained character than one.
+    constexpr double kMaxRetainedToolBytes = 64.0 * 1024 * 1024;
+    constexpr qsizetype kMaxRetainedToolChars =
+        RetainedCost::richCharsForBudget(kMaxRetainedToolBytes);
     qsizetype toolChars = 0;
     for (ToolCallWidget *widget : std::as_const(m_toolCallOrder)) {
         if (widget) {

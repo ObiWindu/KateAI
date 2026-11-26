@@ -17,6 +17,7 @@
 #include <memory>
 
 class KConfigGroup;
+class QNetworkAccessManager;
 
 namespace KateAi
 {
@@ -70,6 +71,14 @@ public:
     // closing the last one releases the resources.
     std::shared_ptr<WorkspaceServices> workspaceServices(const QString &workspace);
 
+    // The plugin-wide network manager. Settings dialogs used to construct their
+    // own, so every open allocated a fresh connection pool and re-downloaded
+    // the ACP registry; sharing one also lets Qt reuse the connections.
+    QNetworkAccessManager *networkManager() const
+    {
+        return m_network;
+    }
+
 Q_SIGNALS:
     void settingsChanged(const Settings &settings);
 
@@ -91,6 +100,10 @@ private:
     // Canonical workspace path -> shared services. Weak so services are
     // released when the last view on the workspace goes away.
     QHash<QString, std::weak_ptr<WorkspaceServices>> m_workspaceServices;
+    // One network manager for the plugin: the update check, the settings
+    // dialogs and the ACP installer share its connection pool instead of each
+    // allocating their own.
+    QNetworkAccessManager *m_network = nullptr;
     QStringList liveConversationIds() const;
     // The ":kateai" command line command. One instance for the whole
     // process: a second registration of the same command name would replace

@@ -908,6 +908,9 @@ LlmClient m_client;
     QString m_hookLoadError;
     int m_stepNumber = 0;
     bool m_eventLogBroken = false;
+    // Newest harness event sequence appended for this conversation. Tracked so
+    // memoryCounters() does not need a SQL query for a diagnostic counter.
+    qint64 m_eventSeqHigh = 0;
     bool m_sessionStartRan = false;
     bool m_verificationEvidenceSent = false;
     bool m_harnessConfigLoaded = false;

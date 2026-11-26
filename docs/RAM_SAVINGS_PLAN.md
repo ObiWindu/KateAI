@@ -127,6 +127,22 @@ current behavior.
   append path unchanged (P3).
 - [x] Extend `memoryCounters` with `thinkingChars`, `liveBufferChars` and
   `eventSeq`, and cover reasoning retention in `test_memory_budget` (F10).
+- [x] Build `KateAiConfigPage` tabs lazily so opening Settings costs one tab
+  instead of twelve, and keep stored values for tabs that were never opened
+  (T6).
+- [x] Re-render a sub-agent's streamed answer at most every 80 ms instead of
+  rebuilding its Markdown document once per delta (T12).
+- [x] Reap ACP server sessions that have no prompt in flight and no client
+  traffic for 15 minutes (F6).
+- [x] Express the transcript card budgets as byte budgets converted once through
+  a conservative cost factor, and share one plugin network manager with the
+  settings page and the ACP installer (P2, P9).
+- [x] Build the project graph's forward adjacency from its edges on demand
+  instead of retaining a second copy of every dependency, and give a forked
+  sub-agent the parent's graph, event store and MCP manager (P7, P8).
+- [x] Prune edit-tracker snapshots as edits settle, bound the remaining
+  workspace-owned reads (`.gitignore`, `package.json`, blobs), and stop
+  `memoryCounters()` from running a query (P10, P11).
 
 ## Progress log
 
@@ -266,3 +282,40 @@ current behavior.
     and sorting it;
   - `memoryCounters` also reports `thinkingChars`, `liveBufferChars` and
     `eventSeq`.
+
+- 2026-11-26 (settings page tabs):
+  - `KateAiConfigPage` now lists all twelve tab labels up front but builds a
+    tab's widgets the first time that tab is shown; the ACP registry fetch
+    follows its tab, as before;
+  - `apply()` guards each section with `isTabBuilt()`, so a tab the user never
+    opened keeps its stored values instead of writing widget defaults, and the
+    workspace `mcp.json` is only rewritten when the MCP tab was loaded;
+  - `tests/test_configpage.cpp` (added to CTest) asserts every label is present,
+    that opening the page builds exactly one tab, that visiting a tab
+    materialises it, and that unvisited fields survive Apply;
+  - all 82 CTest tests pass.
+
+- 2026-11-26 (retained memory and per-loop resources):
+  - the transcript caps are byte budgets converted once through
+    `RetainedCost`: a single conservative bytes-per-character factor replacing
+    the 2 MiB and 6 MiB character figures that counted a `QTextDocument` as if
+    it were a plain string. The factor is a deliberate upper estimate, not a
+    calibration; measuring the real bytes-per-char is still open (P2);
+  - a sub-agent's streamed answer is accumulated and its Markdown document
+    rebuilt at most every 80 ms instead of once per delta; a finished or
+    abandoned card discards the pending render (T12);
+  - an ACP session with no prompt in flight and no unanswered permission or
+    question is closed after 15 minutes of silence, swept once a minute (F6);
+  - `KateAiPlugin` owns one `QNetworkAccessManager` and the update check, the
+    ACP installer and the settings page share it, so the per-dialog connection
+    pool is gone (P9);
+  - the project graph's forward adjacency is derived from `m_edges` on demand
+    and dropped when the edges change, instead of retaining a copy of every
+    dependency beside them (P7);
+  - a forked sub-agent adopts the parent's project graph, event store and MCP
+    manager, so parallel children do not index the workspace again or open one
+    SQLite connection each (P8);
+  - `AgentLoop` tracks the newest event sequence it appended, so the polled
+    `memoryCounters()` no longer runs a query; edit-tracker snapshots are pruned
+    when edits settle rather than at `clear()`, and the `.gitignore`,
+    `package.json` and blob reads go through `readBoundedFile()` (P10, P11).

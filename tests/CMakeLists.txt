@@ -20,6 +20,19 @@ endfunction()
 
 kateai_test(test_sandbox)
 kateai_test(test_permissions)
+# The settings page is part of kateai_core, so the test only adds itself.
+add_executable(test_configpage test_configpage.cpp ../src/configpage.cpp ../src/plugin.cpp
+    ../src/kateaicommand.cpp ../src/pluginview.cpp ../src/editorassist.cpp
+    ../src/chatwidget.cpp ../src/inspectorpanel.cpp ../src/toolcallwidget.cpp
+    ../src/promptedit.cpp ../src/permissionbar.cpp ../src/subtaskwidget.cpp
+    ../src/subtaskdock.cpp ../src/suggestionwidget.cpp ../src/questionwidget.cpp
+    ../src/todowidget.cpp ../src/edittracker.cpp ../src/turnstatus.cpp
+    ../src/chattheme.cpp ../src/transcriptlayout.cpp)
+target_link_libraries(test_configpage PRIVATE kateai_core Qt6::Test Qt6::Widgets)
+target_compile_definitions(test_configpage PRIVATE TRANSLATION_DOMAIN="kateai")
+add_test(NAME test_configpage COMMAND test_configpage -platform offscreen
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
 kateai_test(test_settings)
 kateai_test(test_configmigration)
 kateai_test(test_credentials)

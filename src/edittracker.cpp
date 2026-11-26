@@ -4,6 +4,7 @@
  */
 
 #include "edittracker.h"
+#include "boundedfile.h"
 
 #include "chattheme.h"
 #include "editranges.h"
@@ -42,6 +43,11 @@ namespace
 // part of the chat's usual type scale. The scale was raised by 15% so the
 // small type stays legible next to the transcript.
 constexpr qreal kTrackerFontScale = 0.69;
+
+// A spilled edit snapshot is loaded back for the diff view. The file is written
+// by this tracker, but it lives in a shared temp directory, so the read is
+// bounded to a size well above the largest snapshot worth showing.
+constexpr qint64 MaxBlobBytes = 64 * 1024 * 1024;
 
 QString trackerFontSize(int pixels)
 {
@@ -292,11 +298,12 @@ QString EditTracker::loadBlob(const QString &id, const QString &fallback) const
     if (id.isEmpty()) {
         return fallback;
     }
-    QFile file(QDir(m_blobDirectory).filePath(id + u".blob"_s));
-    if (!file.open(QIODevice::ReadOnly)) {
-        return fallback;
-    }
-    return QString::fromUtf8(file.readAll());
+    // A blob is a file this tracker wrote, so its size is known, but the temp
+    // directory is world-writable: bound the read in case the path was swapped
+    // for something larger between the write and the read.
+    const QString text = readBoundedFile(QDir(m_blobDirectory).filePath(id + u".blob"_s),
+                                         MaxBlobBytes);
+    return text.isEmpty() ? fallback : text;
 }
 
 void EditTracker::clearBlobs()
@@ -304,6 +311,42 @@ void EditTracker::clearBlobs()
     if (!m_blobDirectory.isEmpty()) {
         QDir(m_blobDirectory).removeRecursively();
         m_blobDirectory.clear();
+    }
+}
+
+void EditTracker::pruneUnreferencedBlobs()
+{
+    if (m_blobDirectory.isEmpty()) {
+        return;
+    }
+    QSet<QString> referenced;
+    auto addId = [&referenced](const QString &id) {
+        if (!id.isEmpty()) {
+            referenced.insert(id);
+        }
+    };
+    for (const Group &group : std::as_const(m_groups)) {
+        addId(group.lastKnownContentId);
+        for (const EditEntry &entry : group.pending) {
+            addId(entry.newContentId);
+        }
+    }
+    for (const Decision &decision : std::as_const(m_undoStack)) {
+        addId(decision.previousContentId);
+        for (const EditEntry &entry : decision.pending) {
+            addId(entry.newContentId);
+        }
+    }
+
+    // Only files this tracker named are considered, so a stray file in the
+    // shared temp directory is never removed.
+    const QDir dir(m_blobDirectory);
+    const QStringList files = dir.entryList({u"*.blob"_s}, QDir::Files);
+    for (const QString &file : files) {
+        if (referenced.contains(file.chopped(5))) {
+            continue;
+        }
+        QFile::remove(dir.filePath(file));
     }
 }
 
@@ -1028,6 +1071,12 @@ void EditTracker::settle(const QString &path, bool accepted)
         Q_EMIT editRejected(path, toolName, restoreTo);
     }
     Q_EMIT editsChanged(hasPendingEdits());
+    // Accepted edits used to leave their spilled snapshots in the temp directory
+    // until the whole tracker was cleared, so a long session kept every baseline
+    // it had ever read. A blob is removable once nothing can restore from it:
+    // the undo stack drops its oldest decisions, and a group's baseline moves
+    // forward as its edits are accepted.
+    pruneUnreferencedBlobs();
 }
 
 void EditTracker::renamePath(const QString &oldPath, const QString &newPath)

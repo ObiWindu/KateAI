@@ -174,6 +174,8 @@ private:
     QString storeBlob(const QString &content);
     QString loadBlob(const QString &id, const QString &fallback) const;
     void clearBlobs();
+    // Removes spilled snapshots that no group or undo decision can restore from.
+    void pruneUnreferencedBlobs();
     QString m_blobDirectory;
     void pruneGroups();
     Group makeGroup(const QString &path) const;

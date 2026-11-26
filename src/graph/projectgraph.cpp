@@ -521,12 +521,7 @@ void ProjectGraph::removeNode(const QString &nodeId)
         ++it;
     }
 
-    // Update adjacency list
-    for (const QString &connectedId : connectedNodes) {
-        if (m_adjacencyList.contains(connectedId)) {
-            m_adjacencyList[connectedId].remove(nodeId);
-        }
-    }
+    m_adjacencyValid = false;
 
     // Remove the node itself
     delete m_nodes.take(nodeId);
@@ -545,7 +540,10 @@ void ProjectGraph::clear()
     m_nodes.clear();
     qDeleteAll(m_edges);
     m_edges.clear();
+    // The adjacency cache is derived from m_edges, so it is only dropped here;
+    // it is rebuilt on the next traversal that needs it.
     m_adjacencyList.clear();
+    m_adjacencyValid = false;
     m_pendingImports.clear();
     m_isDirty = true;
 }
@@ -555,7 +553,8 @@ void ProjectGraph::takeStateFrom(ProjectGraph &other)
     clear();
     m_nodes = std::move(other.m_nodes);
     m_edges = std::move(other.m_edges);
-    m_adjacencyList = std::move(other.m_adjacencyList);
+    m_adjacencyList.clear();
+    m_adjacencyValid = false;
     m_pendingImports = std::move(other.m_pendingImports);
     m_visitedDirs = std::move(other.m_visitedDirs);
     m_workspacePath = std::move(other.m_workspacePath);
@@ -564,6 +563,7 @@ void ProjectGraph::takeStateFrom(ProjectGraph &other)
     other.m_nodes.clear();
     other.m_edges.clear();
     other.m_adjacencyList.clear();
+    other.m_adjacencyValid = false;
     other.m_pendingImports.clear();
     other.m_visitedDirs.clear();
     other.m_workspacePath.clear();
@@ -578,10 +578,7 @@ void ProjectGraph::addNode(const GraphNode &node)
     GraphNode *newNode = new GraphNode(node);
     m_nodes[node.id] = newNode;
 
-    // Update adjacency list
-    if (!m_adjacencyList.contains(node.id)) {
-        m_adjacencyList[node.id] = QSet<QString>();
-    }
+    m_adjacencyValid = false;
 }
 
 GraphNode* ProjectGraph::getNode(const QString &nodeId)
@@ -641,11 +638,7 @@ void ProjectGraph::addEdge(const GraphEdge &edge)
     GraphEdge *newEdge = new GraphEdge(edge);
     m_edges[edgeKey] = newEdge;
 
-    // Update adjacency list
-    if (!m_adjacencyList.contains(edge.sourceId)) {
-        m_adjacencyList[edge.sourceId] = QSet<QString>();
-    }
-    m_adjacencyList[edge.sourceId].insert(edge.targetId);
+    m_adjacencyValid = false;
 
     // Update node dependencies
     GraphNode *sourceNode = getNode(edge.sourceId);
@@ -678,9 +671,7 @@ void ProjectGraph::removeEdge(const QString &sourceId, const QString &targetId)
             return;
         }
     }
-    if (m_adjacencyList.contains(sourceId)) {
-        m_adjacencyList[sourceId].remove(targetId);
-    }
+    m_adjacencyValid = false;
     GraphNode *sourceNode = getNode(sourceId);
     GraphNode *targetNode = getNode(targetId);
     if (sourceNode) {
@@ -744,8 +735,9 @@ QList<GraphNode*> ProjectGraph::findRelatedNodes(const QString &nodeId, int maxD
         }
 
         if (depth < maxDepth) {
-            if (m_adjacencyList.contains(currentId)) {
-                for (const QString &neighborId : m_adjacencyList[currentId]) {
+            const QHash<QString, QStringList> &adjacency = adjacencyList();
+            if (auto neighbors = adjacency.constFind(currentId); neighbors != adjacency.cend()) {
+                for (const QString &neighborId : *neighbors) {
                     if (!visited.contains(neighborId)) {
                         visited.insert(neighborId);
                         queue.enqueue({neighborId, depth + 1});
@@ -827,7 +819,7 @@ QSet<QString> ProjectGraph::getTransitiveDependents(const QString &nodeId) const
 
     while (!queue.isEmpty()) {
         const QString currentId = queue.dequeue();
-        // m_adjacencyList[source] holds source's dependencies (the forward
+        // The adjacency cache holds source's dependencies (the forward
         // direction). Dependents are the reverse edges, kept on the node.
         const GraphNode *current = getNode(currentId);
         if (!current) {
@@ -2238,16 +2230,19 @@ bool ProjectGraph::fromJson(const QJsonObject &json)
     return true;
 }
 
-void ProjectGraph::buildAdjacencyList()
+const QHash<QString, QStringList> &ProjectGraph::adjacencyList() const
 {
-    m_adjacencyList.clear();
-    for (auto it = m_edges.begin(); it != m_edges.end(); ++it) {
-        const GraphEdge *edge = it.value();
-        if (!m_adjacencyList.contains(edge->sourceId)) {
-            m_adjacencyList[edge->sourceId] = QSet<QString>();
-        }
-        m_adjacencyList[edge->sourceId].insert(edge->targetId);
+    if (m_adjacencyValid) {
+        return m_adjacencyList;
     }
+    m_adjacencyList.clear();
+    m_adjacencyList.reserve(m_edges.size());
+    for (auto it = m_edges.cbegin(); it != m_edges.cend(); ++it) {
+        const GraphEdge *edge = it.value();
+        m_adjacencyList[edge->sourceId].append(edge->targetId);
+    }
+    m_adjacencyValid = true;
+    return m_adjacencyList;
 }
 
 void ProjectGraph::cleanupDeletedNodes()
@@ -2273,16 +2268,9 @@ void ProjectGraph::cleanupDeletedNodes()
         }
     }
 
-    for (auto it = m_adjacencyList.begin(); it != m_adjacencyList.end(); ++it) {
-        QSet<QString> &neighbors = it.value();
-        QSet<QString> newNeighbors;
-        for (const QString &neighborId : neighbors) {
-            if (existingNodeIds.contains(neighborId)) {
-                newNeighbors.insert(neighborId);
-            }
-        }
-        neighbors = newNeighbors;
-    }
+    // Nodes were removed above, so the derived adjacency cache is stale.
+    m_adjacencyList.clear();
+    m_adjacencyValid = false;
 }
 
 int ProjectGraph::lineCount(const QString &content)

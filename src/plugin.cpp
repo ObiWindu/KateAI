@@ -54,8 +54,15 @@ public:
     explicit AcpAgentAutoUpdater(KateAiPlugin *plugin)
         : QObject(plugin)
         , m_plugin(plugin)
-        , m_network(new QNetworkAccessManager(this))
     {
+    }
+
+    // The plugin owns one network manager for the whole process.
+    void setNetwork(QNetworkAccessManager *network)
+    {
+        if (network) {
+            m_network = network;
+        }
     }
 
     void start()
@@ -401,6 +408,7 @@ private:
 KateAiPlugin::KateAiPlugin(QObject *parent, const QVariantList &args)
     : KTextEditor::Plugin(parent)
     , m_settings(SettingsStore::load())
+    , m_network(new QNetworkAccessManager(this))
 {
     Q_UNUSED(args);
     // Initialize the plugin with default settings loaded from persistent storage
@@ -408,6 +416,7 @@ KateAiPlugin::KateAiPlugin(QObject *parent, const QVariantList &args)
     // editor process and dispatches to the view of the window it was used in.
     m_command = new KateAiCommand(this, this);
     auto *acpUpdater = new AcpAgentAutoUpdater(this);
+    acpUpdater->setNetwork(m_network);
     QTimer::singleShot(0, acpUpdater, [acpUpdater]() { acpUpdater->start(); });
 }
 

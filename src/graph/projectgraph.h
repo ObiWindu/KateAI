@@ -163,7 +163,14 @@ public:
 private:
     QMap<QString, GraphNode*> m_nodes;
     QMap<QString, GraphEdge*> m_edges;
-    QMap<QString, QSet<QString>> m_adjacencyList;
+    // Forward adjacency (source -> dependencies) was maintained by hand beside
+    // m_edges, so every dependency string was retained twice for the life of
+    // the graph. It is now built from m_edges on demand and dropped whenever the
+    // edges change: only the traversal queries need it, and they are rare
+    // compared with a scan that touches every edge.
+    mutable QHash<QString, QStringList> m_adjacencyList;
+    mutable bool m_adjacencyValid = false;
+    const QHash<QString, QStringList> &adjacencyList() const;
     QString m_workspacePath;
     // Directories already visited during the current scan, keyed by canonical
     // path, so a symlink loop cannot re-enter a directory it resolved from.
@@ -179,7 +186,7 @@ private:
     bool m_isDirty;
 
     void takeStateFrom(ProjectGraph &other);
-    void buildAdjacencyList();
+
     void cleanupDeletedNodes();
     void updateNodeMetrics(GraphNode *node);
     // Both counters live here so the scan and the update path agree on what a

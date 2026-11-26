@@ -27,7 +27,7 @@ original text below is kept as the audit record. See the Phase 7 entries in
 | F3 sub-agent records | Implemented: 16 KB summary, 256 KB child stream. |
 | F4 bookkeeping sets | Partially implemented: changed paths, settled ranges and sub-agent cost entries capped. |
 | F5 ACP ceilings | Implemented: 8 MiB frames, 128 live tools / 8 MiB live-tool bytes, 32 parked methods / 8 MiB, 2 MiB single payload, 16 MiB file reads. |
-| F6 ACP server sessions | Implemented: 64 concurrent sessions; no idle timeout yet. |
+| F6 ACP server sessions | Implemented: 64 concurrent sessions, plus a 15-minute idle reap that closes a session with no prompt in flight and no unanswered permission or question. |
 | F7 Inspector retention | Implemented: documents cleared on hide. |
 | F8 MCP ownership | Implemented: the constructor-owned manager sets `m_ownsMcp`; project config loads only after confirmation; shared managers use the confirmed state. |
 | F9 completion body | Implemented: completion, model-list and ACP-registry replies are rejected above their byte cap before the copy and the JSON parse. |
@@ -37,22 +37,26 @@ original text below is kept as the audit record. See the Phase 7 entries in
 | T3 OTLP export | Implemented: newest 5,000 events, 30 s timeout, batch released on final failure. |
 | T4 whole-file edits | Implemented: 16 MB file limit, 32 MB patch working set. |
 | T5 graph typing update | Implemented: 1 MB analysis cap and 4 MB editor skip. |
-| T6 ConfigPage tabs | Partially implemented: the remote ACP registry is deferred until its tab is opened; the remaining tabs are still built eagerly. |
+| T6 ConfigPage tabs | Implemented: a tab's widgets are built the first time it is shown, including the remote ACP registry fetch; an unbuilt tab's stored fields survive Apply. |
 | T7 compaction copies | Not changed. |
 | T8 clear-all payloads | Mitigated: the cleanup path still reads payloads, but large message lists no longer live there. |
 | T9 voice WAV copies | Implemented: the multipart upload streams the recording from disk instead of copying it into a body part. |
 | T10 ACP stdout | Implemented: stdout is read in bounded 64 KiB chunks. |
 | T11 streaming copies | Mitigated by the reasoning/answer caps. |
-| T12 sub-task render | Implemented: live text capped; per-delta render still open. |
+| T12 sub-task render | Implemented: live text capped, and the streamed answer is re-rendered at most every 80 ms instead of once per delta. |
 | T13 headless diff | Implemented: 32 MB diff cap and 8 MB untracked-file skip. |
 | P1 per-workspace services | Implemented: graph, MCP manager and event store shared by every window on a workspace (`WorkspaceServices`). |
 | P5 session journal | Implemented: threshold-gated incremental message journal with a full rewrite on compaction. |
 | P6 event-log retention | Implemented: 20,000 events per conversation, newest-window auto export. |
 | P3 transcript virtualiser | Implemented: wired for restored transcripts, with a 256-entry window; the live append path is unchanged. |
 | P4 reasoning retention | Implemented: reasoning is stripped from model-history turns older than `kThinkingRetainedTurns` (2), on both append and restore; the display transcript keeps its copy. |
-| P10 bounded readers | Partially implemented: policy/hooks/ecosystem use the file helper; HTTP replies are capped before they are copied. |
-| P11 minor savings | Implemented: `sessionData()` iterates the sub-agent map directly instead of copying and sorting it. P2/P7/P8/P9 remain recommendations. |
-| Remaining structural | `ConfigPage` tab construction, the calibration half of P2, the graph-layout rewrite (P7), the per-loop event connection (P8) and the shared network managers (P9) are still open. |
+| P2 card budgets | Partially implemented: the transcript caps are byte budgets converted once through a conservative `RetainedCost` factor. Calibration against measured bytes-per-char and per-card lazy rendering remain. |
+| P7 graph layout | Partially implemented: the hand-maintained adjacency map is derived from the edges on demand and dropped when they change. Interned ids/paths and lazy symbols remain. |
+| P8 per-loop event store | Partially implemented: a forked sub-agent shares the parent's event store, project graph and MCP manager; each root loop still opens its own connection. |
+| P9 shared network managers | Implemented: the plugin owns one `QNetworkAccessManager` shared by the update check, the ACP installer and the settings page, which falls back to its own only when it has no plugin. |
+| P10 bounded readers | Partially implemented: policy/hooks/ecosystem, the graph `.gitignore`, `package.json` and edit-tracker blobs use the file helper; HTTP replies are capped before they are copied. |
+| P11 minor savings | Implemented: `sessionData()` iterates the sub-agent map directly instead of copying and sorting it, and edit-tracker snapshots are pruned as edits settle rather than at `clear()`. |
+| Remaining structural | The calibration and per-card lazy rendering of P2, interned graph ids with lazy symbols (P7), one event-store connection per conversation (P8) and the graph-layout rewrite are still open. |
 
 | Severity | Meaning |
 | --- | --- |
@@ -510,7 +514,14 @@ graph re-indexing for documents beyond it and store a metadata-only node. For
 large documents, compute line count and imports incrementally from the editor's
 changed range.
 
-### T6 — Configuration dialog constructs all 12 tabs eagerly — **Medium**
+### T6 — Configuration dialog constructs all 12 tabs eagerly — **Medium** *(fixed)*
+
+Implemented: `KateAiConfigPage` lists all twelve labels up front and builds a
+tab's widgets on first activation (`buildTab`/`showTab`). `apply()` guards each
+section on `isTabBuilt`, so a tab the user never opened keeps its stored values
+instead of writing widget defaults, and the workspace MCP file is only rewritten
+when its tab was loaded. `tests/test_configpage.cpp` asserts that opening the
+page builds one tab and that an unvisited tab survives Apply.
 
 **Where:** `src/configpage.cpp:101-1421` (twelve `addTab` calls at `333`, `363`,
 `695`, `927`, `981`, `1037`, `1100`, `1160`, `1211`, `1274`, `1345`, `1421`),
@@ -681,7 +692,7 @@ inject it into each `AgentLoop`. Keep per-loop what is genuinely per-conversatio
 single largest steady-state reduction for multi-window users, and it also fixes
 F8 cleanly.
 
-### P2 — Card budgets are measured in characters, but `QTextDocument` costs far more per character — **High impact**
+### P2 — Card budgets are measured in characters, but `QTextDocument` costs far more per character — **High impact** *(partly fixed)*
 
 **Where:** `src/chatwidget.cpp:3099-3160` (`kMaxRetainedToolCards = 400` /
 6 MiB chars, `kMaxRetainedTextCards = 300` / 4 MiB chars,
@@ -772,7 +783,7 @@ with head trimming, preserving the first `TurnStart` and the last N turns. Make
 `Replay::analyze` page, and make the headless export stream pages instead of
 `read(..., -1)`.
 
-### P7 — Project graph memory layout — **Medium impact**
+### P7 — Project graph memory layout — **Medium impact** *(partly fixed)*
 
 **Where:** `src/graph/projectgraph.h:27-45` (`GraphNode` with `QString`,
 `QSet<QString>` dependencies/dependents, `QJsonObject metadata`, `content`),

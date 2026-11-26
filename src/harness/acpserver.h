@@ -15,6 +15,7 @@
 
 class QIODevice;
 class QThread;
+class QTimer;
 
 namespace KateAi
 {
@@ -106,9 +107,18 @@ private:
     void finishSessionPrompt(const QString &sessionId, bool ok, const QString &stopReason,
                              const QString &error);
     QString permissionKind(ToolRisk risk) const;
+    // Records that a session did something, so the idle sweep leaves it alone.
+    void touchSession(const QString &sessionId);
+    // Closes sessions that have had no prompt in flight and no traffic for
+    // kIdleSessionMs, so an abandoned client cannot pin harness loops.
+    void reapIdleSessions();
 
     SessionFactory m_factory;
     QHash<QString, AcpServerSession *> m_sessions;
+    // session id -> last activity, in ms since the epoch. Only sessions that
+    // saw traffic since the server started appear here.
+    QHash<QString, qint64> m_sessionActivity;
+    QTimer *m_idleTimer = nullptr;
     // session id -> pending session/prompt request id
     QHash<QString, QJsonValue> m_pendingPrompts;
     // outbound request id -> session id (permission/question requests)

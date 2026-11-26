@@ -4,6 +4,7 @@
  */
 
 #include "checkpoint.h"
+#include "boundedfile.h"
 
 #include <QCryptographicHash>
 #include <QDir>
@@ -35,6 +36,10 @@ namespace
 // ancestor reachable and retention pruning would never reclaim anything.
 const QString TagPrefix = QStringLiteral("refs/tags/");
 const QString TagNamespace = TagPrefix + QStringLiteral("kateai/");
+
+// A project .gitignore is copied verbatim into the snapshot excludes file. It is
+// a workspace-owned path, so bound it rather than reading whatever it points at.
+constexpr qint64 kMaxIgnoreFileBytes = 1024 * 1024;
 
 // Never restore through these; they hold state this plugin regenerates, plus
 // automation/config the agent must not be able to plant via a snapshot.
@@ -254,9 +259,15 @@ bool writeExcludesFor(const QString &gitDir, const QString &workspace)
     // Reuse the project's own ignore rules so snapshots stay small.
     QFile projectIgnore(workspace + u"/.gitignore"_s);
     if (projectIgnore.open(QIODevice::ReadOnly | QIODevice::Text)) {
-        lines.append(QString());
-        lines.append(u"# From the project .gitignore"_s);
-        lines.append(QString::fromUtf8(projectIgnore.readAll()));
+        // A project-owned path: a symlink to /dev/zero or a huge file must not
+        // be read whole just to copy ignore rules into an excludes file.
+        projectIgnore.close();
+        const QString ignoreText = readBoundedFile(projectIgnore.fileName(), kMaxIgnoreFileBytes);
+        if (!ignoreText.isEmpty()) {
+            lines.append(QString());
+            lines.append(u"# From the project .gitignore"_s);
+            lines.append(ignoreText);
+        }
     }
 
     QFile file(excludePath);
