@@ -251,6 +251,7 @@ void ProjectGraph::generateGraph(const QString &workspacePath)
     analyzeFileDependencies();
     updateSecurityStatus();
     trimContentPreviews();
+    m_visitedDirs.clear();
 
     m_lastUpdateTime = QDateTime::currentSecsSinceEpoch();
     m_isDirty = false;
@@ -545,6 +546,7 @@ void ProjectGraph::clear()
     m_adjacencyList.clear();
     m_adjacencyValid = false;
     m_pendingImports.clear();
+    m_visitedDirs.clear();
     m_isDirty = true;
 }
 

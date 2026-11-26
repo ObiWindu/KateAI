@@ -616,6 +616,7 @@ void CheckpointManager::runGitDetached(const QStringList &arguments, int timeout
     });
     m_detachedProcesses.append(git);
     git->start(u"git"_s, full);
+    guard->start();
 }
 
 bool CheckpointManager::runGit(const QStringList &arguments, QString *output, QString *error, int timeoutMs) const

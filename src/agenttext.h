@@ -7,7 +7,9 @@
 
 #include <QString>
 
+class QObject;
 class QTextDocument;
+class QTextEdit;
 
 namespace KateAi
 {
@@ -32,11 +34,16 @@ QString closeMarkdown(const QString &text);
  */
 void renderMarkdown(QTextDocument *doc, const QString &markdown);
 
-// Renders markdown into a document owned by the caller, ready for a QTextBrowser.
-// `styleSheet`, when given, becomes the document's default stylesheet. It must be
-// set before the markdown is parsed: callers that hand the document to a
-// QTextBrowser via setDocument() lose the browser's own stylesheet, because
-// setDocument() replaces that document wholesale.
-QTextDocument *makeMarkdownDocument(const QString &markdown, const QString &styleSheet = QString());
+// Renders markdown into a new QTextDocument owned by `parent` (or the caller
+// when `parent` is null). Prefer setMarkdownContent() when updating a
+// QTextEdit/QTextBrowser: QTextEdit::setDocument() does not take ownership of
+// external documents.
+QTextDocument *makeMarkdownDocument(const QString &markdown, const QString &styleSheet = QString(),
+                                    QObject *parent = nullptr);
+
+// Renders markdown into `view`'s existing QTextDocument in place, applying
+// `styleSheet` before parsing. Reuses the document owned by `view` so
+// streaming ticks and evicted cards do not leak QTextDocument instances.
+void setMarkdownContent(QTextEdit *view, const QString &markdown, const QString &styleSheet = QString());
 
 } // namespace KateAi

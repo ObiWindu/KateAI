@@ -1666,7 +1666,10 @@ bool AgentLoop::applySubagentWorktree(const QString &taskId, QString *error)
         }
         return false;
     }
-    if (record.patch.trimmed().isEmpty() && !record.patchPath.isEmpty()) {
+    // Load the on-disk diff into a local buffer so a failed checkpoint or
+    // apply does not leave up to 32 MiB pinned inside record.patch.
+    QString patch = record.patch;
+    if (patch.trimmed().isEmpty() && !record.patchPath.isEmpty()) {
         // Restored records keep the diff on disk instead of inflating the
         // session payload. Load it only when the user decides to apply.
         QFile patchFile(record.patchPath);
@@ -1683,9 +1686,9 @@ bool AgentLoop::applySubagentWorktree(const QString &taskId, QString *error)
             }
             return false;
         }
-        record.patch = QString::fromUtf8(patchFile.readAll());
+        patch = QString::fromUtf8(patchFile.readAll());
     }
-    if (record.patch.trimmed().isEmpty()) {
+    if (patch.trimmed().isEmpty()) {
         if (error) {
             *error = i18n("That sub-agent produced no patch.");
         }
@@ -1704,7 +1707,7 @@ bool AgentLoop::applySubagentWorktree(const QString &taskId, QString *error)
             return false;
         }
     }
-    if (!SubagentWorktree::apply(m_workspace, record.patch, error)) {
+    if (!SubagentWorktree::apply(m_workspace, patch, error)) {
         return false;
     }
     record.patch.clear();
@@ -2079,7 +2082,9 @@ void AgentLoop::endHarnessTurn(const QString &status, const QString &detail)
                         }
                         exporter->deleteLater();
                     });
-            exporter->exportSpans(traceSpans(kMaxAutoTelemetryEvents));
+            if (exporter->exportSpans(traceSpans(kMaxAutoTelemetryEvents)) == 0) {
+                exporter->deleteLater();
+            }
         }
     }
 }
@@ -4135,7 +4140,9 @@ bool AgentLoop::exportTelemetry(const QString &path, QString *error)
                 }
                 exporter->deleteLater();
             });
-    exporter->exportSpans(spans);
+    if (exporter->exportSpans(spans) == 0) {
+        exporter->deleteLater();
+    }
     return true;
 }
 
@@ -7234,21 +7241,13 @@ void AgentLoop::dispatchSubtask(const ToolCall &call)
         modeId = requestedMode;
     }
 
-    // The child is parented to this loop: the parent's lambdas capture the
-    // parent, so a child that outlived it could dereference a destroyed
-    // object. Parenting the child also removes its signal connections when
-    // the parent goes away.
-    auto *child = new AgentLoop(this);
-    child->setMcpManager(m_mcp);
-    child->setLocks(m_locks);
-    child->setSubtaskDepth(m_subtaskDepth + 1);
-
     // Use the tool call id so the chat card, the activity log and the tool
     // result all key off the same string.
     QString taskId = call.id.isEmpty() ? QStringLiteral("sub-%1").arg(++m_asyncCounter) : call.id;
     // Ids are model-supplied and not guaranteed unique. A duplicate would
     // overwrite the first child in m_activeSubtasks (orphaning it) and give
-    // both children the same lock identity.
+    // both children the same lock identity. Validate before allocating the
+    // child loop so a rejected duplicate does not leak an AgentLoop.
     if (m_activeSubtasks.contains(taskId)) {
         ToolResult result;
         result.ok = false;
@@ -7256,6 +7255,18 @@ void AgentLoop::dispatchSubtask(const ToolCall &call)
         finishAsyncTool(call, result);
         return;
     }
+
+    // The child is parented to this loop: the parent's lambdas capture the
+    // parent, so a child that outlived it could dereference a destroyed
+    // object. Parenting the child also removes its signal connections when
+    // the parent goes away.
+    auto *child = new AgentLoop(this);
+    child->setMcpManager(m_mcp);
+    if (m_sharedEvents) {
+        child->m_sharedEvents = m_sharedEvents;
+    }
+    child->setLocks(m_locks);
+    child->setSubtaskDepth(m_subtaskDepth + 1);
     child->setSelfId(taskId);
 
     // AgentSpec isolation. A worktree is opt-in per agent (or per call) and is

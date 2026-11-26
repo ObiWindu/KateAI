@@ -4,6 +4,7 @@
 
 #include <QTest>
 #include <QTextBlock>
+#include <QTextBrowser>
 #include <QTextDocument>
 #include <QTextFragment>
 #include <QTextFrame>
@@ -284,6 +285,31 @@ private Q_SLOTS:
         QVERIFY2(css.contains(QStringLiteral("table.codeblock")), "messageCss() no longer styles table.codeblock");
         QVERIFY2(css.contains(QStringLiteral("td.codeblock-lang")), "messageCss() no longer styles the language strip");
         QVERIFY2(css.contains(QStringLiteral("pre.codeblock")), "messageCss() no longer styles pre.codeblock");
+    }
+
+    // Re-rendering a streaming QTextBrowser must reuse its owned QTextDocument
+    // rather than swapping in unparented documents that QTextEdit never deletes.
+    void setMarkdownContentReusesBrowserDocument()
+    {
+        QTextBrowser browser;
+        QTextDocument *initial = browser.document();
+        QVERIFY(initial != nullptr);
+        QVERIFY(initial->parent() != nullptr);
+
+        setMarkdownContent(&browser, QStringLiteral("First."), ChatTheme::messageCss());
+        QCOMPARE(browser.document(), initial);
+        QVERIFY(!initial->defaultStyleSheet().isEmpty());
+        QVERIFY(browser.toPlainText().contains(QStringLiteral("First.")));
+
+        setMarkdownContent(&browser, QStringLiteral("Second.\n\n```cpp\nint y = 2;\n```\n"),
+                           ChatTheme::messageCss());
+        QCOMPARE(browser.document(), initial);
+        QVERIFY(!browser.toPlainText().contains(QStringLiteral("First.")));
+        QVERIFY(browser.toPlainText().contains(QStringLiteral("int y = 2;")));
+
+        QObject owner;
+        QTextDocument *owned = makeMarkdownDocument(QStringLiteral("Owned."), ChatTheme::messageCss(), &owner);
+        QCOMPARE(owned->parent(), &owner);
     }
 };
 

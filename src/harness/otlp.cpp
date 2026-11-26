@@ -10,6 +10,7 @@
 #include <QJsonValue>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#include <QPointer>
 #include <QTimer>
 
 using namespace Qt::Literals::StringLiterals;
@@ -158,8 +159,11 @@ int OtlpExporter::exportSpans(const QList<Span> &spans)
         return 0;
     }
     if (m_reply) {
-        m_reply->abort();
+        QNetworkReply *oldReply = m_reply;
         m_reply = nullptr;
+        oldReply->disconnect(this);
+        oldReply->abort();
+        oldReply->deleteLater();
     }
     m_pending = spans;
     m_attempt = 0;
@@ -174,7 +178,11 @@ void OtlpExporter::cancel()
     m_cancelled = true;
     m_pending.clear();
     if (m_reply) {
-        m_reply->abort();
+        QNetworkReply *oldReply = m_reply;
+        m_reply = nullptr;
+        oldReply->disconnect(this);
+        oldReply->abort();
+        oldReply->deleteLater();
     }
 }
 
@@ -184,6 +192,7 @@ void OtlpExporter::send(const QList<Span> &spans)
         return;
     }
     ++m_attempt;
+    const int requestId = m_requestId;
     QNetworkRequest request(tracesEndpoint());
     request.setHeader(QNetworkRequest::ContentTypeHeader, u"application/json"_s);
     request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
@@ -201,19 +210,25 @@ void OtlpExporter::send(const QList<Span> &spans)
 #endif
     const QByteArray body = QJsonDocument(payload(spans, m_serviceName, version))
                                 .toJson(QJsonDocument::Compact);
-    m_reply = m_network.post(request, body);
-    connect(m_reply, &QNetworkReply::finished, this, [this] {
-        if (!m_reply) {
+    QPointer<QNetworkReply> reply = m_network.post(request, body);
+    m_reply = reply;
+    connect(reply, &QNetworkReply::finished, this, [this, reply, requestId] {
+        if (!reply) {
             return;
         }
-        QNetworkReply *reply = m_reply;
-        m_reply = nullptr;
+        const bool isCurrent = (m_reply == reply);
+        if (isCurrent) {
+            m_reply = nullptr;
+        }
         const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         const QString error = reply->error() == QNetworkReply::NoError
             ? QString()
             : reply->errorString();
         const bool ok = reply->error() == QNetworkReply::NoError && status >= 200 && status < 300;
         reply->deleteLater();
+        if (!isCurrent || m_cancelled || requestId != m_requestId) {
+            return;
+        }
         if (ok) {
             m_pending.clear();
             Q_EMIT exportFinished(true, status, QString());
@@ -221,8 +236,10 @@ void OtlpExporter::send(const QList<Span> &spans)
         }
         if (!m_cancelled && m_attempt < m_maxAttempts) {
             const int delay = 500 * m_attempt;
-            QTimer::singleShot(delay, this, [this] {
-                send(m_pending);
+            QTimer::singleShot(delay, this, [this, requestId] {
+                if (!m_cancelled && requestId == m_requestId) {
+                    send(m_pending);
+                }
             });
             return;
         }

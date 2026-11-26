@@ -188,7 +188,7 @@ void QuestionWidget::renderBody()
     // palette inherited from a different editor theme can leave the text the
     // same colour as the surface. The body therefore bakes textPrimary into
     // the document and keeps the viewport transparent over the card.
-    m_question->setDocument(makeMarkdownDocument(closeMarkdown(m_text), ChatTheme::messageCss()));
+    setMarkdownContent(m_question, closeMarkdown(m_text), ChatTheme::messageCss());
     QPalette palette = m_question->palette();
     palette.setColor(QPalette::Base, Qt::transparent);
     palette.setColor(QPalette::Text, QColor(ChatTheme::textPrimary()));

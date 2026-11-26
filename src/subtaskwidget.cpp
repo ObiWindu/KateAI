@@ -331,8 +331,8 @@ void SubtaskWidget::startAgent(const QString &agentName, const QString &modeId, 
     // the agent works and is replaced by the answer once it arrives. It used to
     // be cleared here, which left the running card saying nothing at all about
     // the work in flight.
-    m_answer->setDocument(makeMarkdownDocument(closeMarkdown(m_description.left(RunningDescriptionChars)),
-                                               ChatTheme::messageCss()));
+    setMarkdownContent(m_answer, closeMarkdown(m_description.left(RunningDescriptionChars)),
+                       ChatTheme::messageCss());
     m_answer->setToolTip(m_description);
     m_answer->setVisible(!m_description.isEmpty());
     m_bodyCaption->setText(i18n("Task"));
@@ -534,7 +534,7 @@ void SubtaskWidget::rebuildActivityLog()
         m_activityLog.removeFirst();
         joined = markdown();
     }
-    m_activity->setDocument(makeMarkdownDocument(closeMarkdown(joined), ChatTheme::messageCss()));
+    setMarkdownContent(m_activity, closeMarkdown(joined), ChatTheme::messageCss());
     m_activity->verticalScrollBar()->setValue(m_activity->verticalScrollBar()->maximum());
     updateActivityToggle();
 }
@@ -579,7 +579,7 @@ void SubtaskWidget::flushStreamedAnswer()
         return;
     }
     m_answerDirty = false;
-    m_answer->setDocument(makeMarkdownDocument(closeMarkdown(m_streamedMessage), ChatTheme::messageCss()));
+    setMarkdownContent(m_answer, closeMarkdown(m_streamedMessage), ChatTheme::messageCss());
     reflowNow();
 }
 
@@ -664,7 +664,7 @@ void SubtaskWidget::finishAgent(const ToolResult &result)
     // A sub-agent's answer is markdown like any assistant turn, so it gets the
     // same body table styling for any fenced code it contains.
     m_resultOutput = result.output;
-    m_answer->setDocument(makeMarkdownDocument(closeMarkdown(result.output), ChatTheme::messageCss()));
+    setMarkdownContent(m_answer, closeMarkdown(result.output), ChatTheme::messageCss());
     m_answer->setToolTip(QString());
     m_answer->setVisible(true);
     if (m_cancelled) {
@@ -710,7 +710,7 @@ void SubtaskWidget::markAbandoned(const QString &reason)
     }
     m_cancel->setVisible(false);
     m_resultOutput = reason;
-    m_answer->setDocument(makeMarkdownDocument(closeMarkdown(reason), ChatTheme::messageCss()));
+    setMarkdownContent(m_answer, closeMarkdown(reason), ChatTheme::messageCss());
     m_answer->setToolTip(QString());
     m_answer->setVisible(true);
     m_bodyCaption->setText(i18n("Cancelled"));

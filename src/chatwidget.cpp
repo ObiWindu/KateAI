@@ -1196,7 +1196,7 @@ ChatWidget::ChatWidget(QWidget *parent)
         m_answerStarted = false;
         m_streamText.clear();
         if (m_activeAssistantBrowser) {
-            m_activeAssistantBrowser->setDocument(makeMarkdownDocument(closedMarkdown(m_streamText), ChatTheme::messageCss()));
+            setMarkdownContent(m_activeAssistantBrowser, closedMarkdown(m_streamText), ChatTheme::messageCss());
         }
     });
     connect(&m_agent, &AgentLoop::assistantFinished, this, [this](const QString &text) {
@@ -2426,7 +2426,7 @@ void ChatWidget::flushStreamRender()
     if (!m_activeAssistantBrowser) {
         return;
     }
-    m_activeAssistantBrowser->setDocument(makeMarkdownDocument(closedMarkdown(m_streamText), ChatTheme::messageCss()));
+    setMarkdownContent(m_activeAssistantBrowser, closedMarkdown(m_streamText), ChatTheme::messageCss());
     scheduleStreamHeightUpdate();
 }
 
@@ -2506,7 +2506,7 @@ void ChatWidget::updateThinkingDisplay()
             }
         }
     }
-    m_thinkingBrowser->setDocument(makeMarkdownDocument(closedMarkdown(markdown), ChatTheme::thinkingCss()));
+    setMarkdownContent(m_thinkingBrowser, closedMarkdown(markdown), ChatTheme::thinkingCss());
     if (m_thinkingBlock && !m_thinkingBuffer.isEmpty()) {
         m_thinkingBlock->show();
     }
@@ -2783,7 +2783,7 @@ void ChatWidget::freezeStreaming()
         // The live renderer closes an unterminated code fence, so the frozen
         // card has to do the same. Otherwise a reply is rendered differently
         // after a restart than it was while it streamed.
-        m_activeAssistantBrowser->setDocument(makeMarkdownDocument(closedMarkdown(m_streamText), ChatTheme::messageCss()));
+        setMarkdownContent(m_activeAssistantBrowser, closedMarkdown(m_streamText), ChatTheme::messageCss());
         const int docH = std::max(30, static_cast<int>(m_activeAssistantBrowser->document()->size().height()) + 16);
         if (m_activeAssistantBrowser->height() != docH) {
             m_activeAssistantBrowser->setFixedHeight(docH);
@@ -4220,7 +4220,7 @@ void ChatWidget::restylePanel()
     // re-render it now so a theme change is visible even while the model is
     // thinking between chunks.
     if (m_isStreaming && m_activeAssistantBrowser && !m_streamText.isEmpty()) {
-        m_activeAssistantBrowser->setDocument(makeMarkdownDocument(closedMarkdown(m_streamText), ChatTheme::messageCss()));
+        setMarkdownContent(m_activeAssistantBrowser, closedMarkdown(m_streamText), ChatTheme::messageCss());
     }
 
     // Re-polish so the new stylesheets take effect immediately.
@@ -7346,6 +7346,7 @@ void ChatWidget::clearTranscriptContents()
     // Detach docked approval rows first so their cards null the pointer;
     // deleting cards first would leave the dock delete with no owner to detach.
     clearQuestionCards();
+    m_questionOrder.clear();
     m_queuedPermissionRequests.clear();
     m_activePermissionCallId.clear();
     clearIntentDock();
@@ -8137,7 +8138,7 @@ void ChatWidget::rebuildTranscript()
                         QPushButton *thinkingToggle = nullptr;
                         auto *thinkingBlock = createThinkingBlock(assistantWidget, thinkingBrowser, thinkingToggle, true);
                         if (thinkingBrowser) {
-                            thinkingBrowser->setDocument(makeMarkdownDocument(closedMarkdown(msg.thinking), ChatTheme::thinkingCss()));
+                            setMarkdownContent(thinkingBrowser, closedMarkdown(msg.thinking), ChatTheme::thinkingCss());
                         }
                         thinkingBlock->show();
                         layout->addWidget(thinkingBlock);
@@ -8161,10 +8162,7 @@ void ChatWidget::rebuildTranscript()
                         QStringLiteral("background: transparent; color: %1; border: none; padding: 0px;")
                             .arg(ChatTheme::textPrimary()));
                     if (hasVisibleText) {
-                        // The stylesheet is carried by the document itself: the
-                        // setDocument() below replaces this browser's document,
-                        // so a stylesheet installed on it would never apply.
-                        browser->setDocument(makeMarkdownDocument(msg.content, ChatTheme::messageCss()));
+                        setMarkdownContent(browser, msg.content, ChatTheme::messageCss());
                     } else {
                         browser->hide();
                     }

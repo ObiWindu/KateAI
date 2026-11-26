@@ -178,7 +178,7 @@ void SuggestionWidget::renderBody()
     if (!m_body) {
         return;
     }
-    m_body->setDocument(makeMarkdownDocument(closeMarkdown(m_text), ChatTheme::messageCss()));
+    setMarkdownContent(m_body, closeMarkdown(m_text), ChatTheme::messageCss());
     QPalette palette = m_body->palette();
     palette.setColor(QPalette::Base, Qt::transparent);
     palette.setColor(QPalette::Text, QColor(ChatTheme::textPrimary()));
