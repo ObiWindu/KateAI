@@ -81,6 +81,7 @@ private:
     QComboBox *m_claudeCompatibleModel = nullptr;
     QComboBox *m_kiloModel = nullptr;
     QComboBox *m_opencodeModel = nullptr;
+    QComboBox *m_opencodePlan = nullptr;
     QComboBox *m_acpModel = nullptr;
     QComboBox *m_acpEffort = nullptr;
     QLineEdit *m_deepseekUrl = nullptr;

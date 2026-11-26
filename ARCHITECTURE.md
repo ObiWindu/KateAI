@@ -9,6 +9,7 @@ src/
   plugin.cpp / pluginview.cpp     KTextEditor plugin + tool view, actions, shortcuts
   kateaicommand.cpp               the ":kateai" editor command-line command
   chatwidget.cpp                  transcript, composer, model picker, mode menus
+  transcriptvirtualizer.cpp       lazy materialization for long transcript histories
   toolcallwidget.cpp              one tool-call card (header, diff, output, copy)
   turnstatus.cpp                  live status strip (elapsed time, current activity)
   agentloop.cpp                   the turn: prompt -> model -> tools -> model -> ...
@@ -358,9 +359,12 @@ tools `write_plan_file`, `suggest`, `question`, `todo_write`/`todo_read`,
 
 ## UI structure
 
-- `ChatWidget` builds the transcript as a vertical list of widgets (user
-  bubbles, assistant text, thinking blocks, plan checklists, tool cards,
-  suggestion/question cards, sub-task cards) inside a `QScrollArea`.
+- `ChatWidget` builds the transcript inside a `QScrollArea`. Short threads use
+  the eager vertical layout; long threads use `TranscriptVirtualizer`, which
+  keeps a lightweight row for every logical entry and materializes only the
+  visible/overscan window plus pinned live work. Offscreen cards are destroyed,
+  not hidden, and rebuilt from history when scrolled back. Tool navigation uses
+  occurrence-specific keys and per-card expansion choices survive eviction.
 - Tool cards (`ToolCallWidget`) are stateful: header summary, expand/collapse,
   diff preview, live output while running, copy button (full output, not the
   truncated view), and a file-path jump signal wired to `openFileAtLineRequested`
@@ -403,7 +407,8 @@ Useful single suites:
 - `test_sandbox` — path escapes, deny globs, command classification, namespace/
   mount construction, and live bubblewrap confinement checks where available
 - `test_modes` — mode parsing, tool groups, per-mode sampling overrides
-- `test_projectgraph` — scan limits, binary detection, symlink loops, round-trip
+- `test_projectgraph` — scan limits, binary detection, symlink loops, JSON/SQLite round-trip
+- `test_transcriptvirtualizer` — bounded mounting, aliases, eviction and clear
 - `test_livecards` / `test_toolcard` / `test_overflow` — widget-level behaviour
 - `test_subtaskparallel` / `test_multiagent` — sub-agent concurrency and locks
 - `test_lsp` — diagnostics parsing (structured rows and mark fallback), symbol/hover lookups
@@ -415,4 +420,5 @@ Useful single suites:
 - **Conversations**: SQLite through `SessionStore`; every turn autosaves, and the
   active conversation id is repaired to the newest transcript when stale.
 - **Workspace state**: `.kateai/` — `KATEAI.md`, `modes/`, the MCP server
-  config, and the cached `project_graph.json`.
+  config, and the cached SQLite `project_graph.sqlite` (with one-time migration
+  from the legacy JSON cache).

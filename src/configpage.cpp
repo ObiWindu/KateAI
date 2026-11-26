@@ -120,10 +120,14 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     defaultProviderForm->addRow(i18n("Default Provider:"), m_provider);
     providersLayout->addLayout(defaultProviderForm);
 
-    auto addProviderGroup = [&](const QString &title, QLineEdit *key, QComboBox *model, QLineEdit *url = nullptr) {
+    auto addProviderGroup = [&](const QString &title, QLineEdit *key, QComboBox *model,
+                                QLineEdit *url = nullptr, QComboBox *plan = nullptr) {
         auto *group = new QGroupBox(title, providersWidget);
         auto *gForm = new QFormLayout(group);
         gForm->addRow(i18n("API Key:"), key);
+        if (plan) {
+            gForm->addRow(i18n("Plan:"), plan);
+        }
         gForm->addRow(i18n("Default Model:"), model);
         if (url) {
             gForm->addRow(i18n("Endpoint URL:"), url);
@@ -170,9 +174,17 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
 
         m_opencodeKey = makeKey();
         m_opencodeModel = makeModelCombo();
+        m_opencodePlan = new QComboBox(this);
+        m_opencodePlan->addItem(openCodePlanLabel(OpenCodePlan::PayAsYouGo),
+                                openCodePlanId(OpenCodePlan::PayAsYouGo));
+        m_opencodePlan->addItem(openCodePlanLabel(OpenCodePlan::Go),
+                                openCodePlanId(OpenCodePlan::Go));
+        m_opencodePlan->setToolTip(i18n("Choose the OpenCode Console pay-as-you-go gateway, or the Go endpoint shared by Go, Go Plus and Go Teams."));
         m_opencodeUrl = new QLineEdit(this);
-        m_opencodeUrl->setPlaceholderText(u"https://opencode.ai/zen/v1"_s);
-        addProviderGroup(i18n("OpenCode Zen (curated coding models)"), m_opencodeKey, m_opencodeModel, m_opencodeUrl);
+        m_opencodeUrl->setPlaceholderText(i18n("Automatic from the selected plan (e.g. %1)", u"https://opencode.ai/inference/v1"_s));
+        m_opencodeUrl->setToolTip(i18n("Optional. Leave empty to use the plan's base URL, or enter a custom Console-compatible endpoint."));
+        addProviderGroup(i18n("OpenCode (Console models and Go subscription)"),
+                         m_opencodeKey, m_opencodeModel, m_opencodeUrl, m_opencodePlan);
 
     m_acpKey = makeKey();
     m_acpKey->setPlaceholderText(i18n("Optional — most agents use their own CLI login"));
@@ -832,6 +844,9 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     m_reasoningEffort->addItem(i18n("Low"), u"low"_s);
     m_reasoningEffort->addItem(i18n("Medium"), u"medium"_s);
     m_reasoningEffort->addItem(i18n("High"), u"high"_s);
+    m_reasoningEffort->addItem(i18n("Extra high"), u"xhigh"_s);
+    m_reasoningEffort->addItem(i18n("Max"), u"max"_s);
+    m_reasoningEffort->setToolTip(i18n("Sent as reasoning_effort. OpenCode models advertise which levels they accept; unsupported levels are not sent."));
     agentForm->addRow(i18n("Reasoning effort:"), m_reasoningEffort);
 
     m_selfCritique = new QCheckBox(i18n("Ask model to self-critique before finishing"), agentWidget);
@@ -1470,6 +1485,23 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     connect(m_claudeCompatibleKey, &QLineEdit::textChanged, this, markChanged);
         connect(m_opencodeKey, &QLineEdit::textChanged, this, markChanged);
         connect(m_opencodeUrl, &QLineEdit::textChanged, this, markChanged);
+        connect(m_opencodePlan, &QComboBox::currentIndexChanged, this, [this]() {
+            // The base URL changes with the plan; refresh the catalogue from
+            // the selected gateway, not from whichever plan was used before.
+            const QString key = m_opencodeKey->text().trimmed();
+            if (!key.isEmpty()) {
+                Settings s = m_plugin->settings();
+                s.provider = Provider::OpenCode;
+                s.opencodeApiKey = key;
+                s.opencodePlan = openCodePlanFromId(m_opencodePlan->currentData().toString());
+                s.opencodeUrl = m_opencodeUrl->text().trimmed();
+                m_modelFetcher->setSettings(s);
+                m_modelCatalog.remove(Provider::OpenCode);
+                updateModelCombo(Provider::OpenCode);
+                m_modelFetcher->fetchModels(Provider::OpenCode);
+            }
+            Q_EMIT changed();
+        });
         connect(m_opencodeModel, QOverload<int>::of(&QComboBox::currentIndexChanged), this, markChanged);
     connect(m_grokModel, QOverload<int>::of(&QComboBox::currentIndexChanged), this, markChanged);
     connect(m_openaiModel, QOverload<int>::of(&QComboBox::currentIndexChanged), this, markChanged);
@@ -1526,6 +1558,12 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
                         break;
                     case Provider::ClaudeCompatible:
                         s.claudeCompatibleApiKey = key;
+                        break;
+                    case Provider::OpenCode:
+                        s.opencodeApiKey = key;
+                        s.opencodePlan = openCodePlanFromId(
+                            m_opencodePlan->currentData().toString());
+                        s.opencodeUrl = m_opencodeUrl->text().trimmed();
                         break;
                     case Provider::Acp:
                         s.acpApiKey = key;
@@ -1986,6 +2024,7 @@ void KateAiConfigPage::apply()
     s.openaiCompatibleModel = m_openaiCompatibleModel->currentText().trimmed();
     s.claudeCompatibleModel = m_claudeCompatibleModel->currentText().trimmed();
 s.opencodeModel = m_opencodeModel->currentText().trimmed();
+    s.opencodePlan = openCodePlanFromId(m_opencodePlan->currentData().toString());
     s.opencodeUrl = m_opencodeUrl->text().trimmed();
     s.acpModel = m_acpModel->currentText().trimmed();
     // The first entry is "Auto (agent default)" and maps to an empty value;
@@ -2170,6 +2209,8 @@ void KateAiConfigPage::reset()
     m_openaiCompatibleKey->setText(s.openaiCompatibleApiKey);
     m_claudeCompatibleKey->setText(s.claudeCompatibleApiKey);
         m_opencodeKey->setText(s.opencodeApiKey);
+        m_opencodePlan->setCurrentIndex(std::max(
+            0, m_opencodePlan->findData(openCodePlanId(s.opencodePlan))));
         m_opencodeUrl->setText(s.opencodeUrl);
     m_acpKey->setText(s.acpApiKey);
 
@@ -2180,6 +2221,7 @@ void KateAiConfigPage::reset()
     updateModelCombo(Provider::DeepSeek);
     updateModelCombo(Provider::OpenAICompatible);
     updateModelCombo(Provider::ClaudeCompatible);
+    updateModelCombo(Provider::OpenCode);
     updateModelCombo(Provider::Acp);
 
     m_grokModel->setCurrentText(s.grokModel);
@@ -2486,6 +2528,9 @@ void KateAiConfigPage::updateModelCombo(Provider provider)
             break;
         case Provider::ClaudeCompatible:
             combo = m_claudeCompatibleModel;
+            break;
+        case Provider::OpenCode:
+            combo = m_opencodeModel;
             break;
         case Provider::Acp:
             combo = m_acpModel;

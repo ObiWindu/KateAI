@@ -40,7 +40,9 @@ const QString TagNamespace = TagPrefix + QStringLiteral("kateai/");
 // automation/config the agent must not be able to plant via a snapshot.
 bool isProtectedPath(const QString &relativePath)
 {
-    if (relativePath.startsWith(u".git/"_s) || relativePath == u".git"_s || relativePath.startsWith(u".kateai/project_graph.json"_s)) {
+    if (relativePath.startsWith(u".git/"_s) || relativePath == u".git"_s
+        || relativePath.startsWith(u".kateai/project_graph.json"_s)
+        || relativePath.startsWith(u".kateai/project_graph.sqlite"_s)) {
         return true;
     }
     // Restoring these would reinstate agent-planted automation without prompt.
@@ -234,6 +236,9 @@ bool writeExcludesFor(const QString &gitDir, const QString &workspace)
         u"# Kate AI checkpoints. The project history is managed by its own repo."_s,
         u"/.git/"_s,
         u".kateai/project_graph.json"_s,
+        u".kateai/project_graph.sqlite"_s,
+        u".kateai/project_graph.sqlite-*"_s,
+        u".kateai/project_graph.sqlite.corrupt-*"_s,
         QString(),
         u"# Common build and dependency directories."_s,
         u"node_modules/"_s,

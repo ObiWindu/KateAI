@@ -581,10 +581,10 @@ Different ACP agents name their tools differently (`fs/read_text_file`, `termina
 
 - **Alias map**: common ACP names map to canonical names (`read_file`, `write_file`, `edit_file`, `apply_patch`, `multi_edit_file`, `bash`, `list_dir`, `grep`, `glob`, `web_search`, `web_fetch`, `write_plan_file`, `query_project_graph`, `question` — including `ask_user`/`ask_user_question`, `todo_write`/`todo_read`, `exit_plan_mode`, `think`, `new_task`). MCP-prefixed names (`mcp__*`) are preserved. Unified-diff text in an `apply_patch` call is parsed into per-file diffs, so multi-file patches render one card entry per file.
 - **Tool cards**: icons, colours, and labels resolve via the canonical name, so an ACP edit card looks identical to a native edit card.
-- **Permissions**: risk classification and auto-approve lists work with both canonical and qualified names; session grants apply to ACP. In `AcceptEdits` mode, ACP edits are auto-approved but still tracked.
+- **Permissions**: ACP permission requests are accepted by default. **Security & Permissions → ACP tools** can turn this off. Kate-hosted ACP client methods also override mode access and ordinary policy rules, so they do not enter the repeated-decline loop; immutable hard denies and handler sandbox checks still apply. Risk classification and auto-approve lists work with canonical and qualified names; in `AcceptEdits` mode, ACP edits are still tracked.
 - **Edit tracking**: ACP mutations are detected by protocol kind (`edit`/`write`/`delete`) or a diff block, plus name heuristics; multi-file edits from one call are tracked per file.
 - **History restoration**: stored ACP tool calls are normalised on restore, so cards show correct colours, diffs, and language highlighting.
-- **Mode restrictions**: mode-based tool access applies to ACP tools too; plan mode rejects mutating ACP calls.
+- **Mode restrictions**: mode-based tool access applies to an external agent's own ACP tools. Kate-hosted client methods follow the default ACP auto-accept policy above.
 - **Streaming/errors**: progress is aggregated (cumulative or delta), errors surface in cards and turn status, cancellation cleans up live tools.
 
 Kate also exposes client methods to ACP agents: `fs/read_text_file`, `fs/write_text_file`, `terminal/*`, `query_project_graph`, `write_plan_file`, and `suggest`. Results are formatted to match native tool output (including the pagination note on reads).
@@ -604,18 +604,19 @@ The model menu fetches live catalogs when the provider supports it; you can stil
 - The active conversation is restored when Kate restarts
 - Conversation list in the panel: switch, delete, start new (`Ctrl+Alt+N`)
 - Configurable cap on saved conversations (default 50)
+- Long transcripts are virtualized: every retained turn stays scrollable while only nearby cards are rendered
 - Extra system prompt and `KATEAI.md` (optional compression) are included as project context
 
 ### Project graph
 
-On workspace load the plugin indexes files, symbols, imports, and relationships, writes the first index to `.kateai/project_graph.json`, and regenerates it when file or directory timestamps show the cache is stale. The native system prompt and ACP session notes receive a compact graph summary with workspace-relative paths, languages, line counts, symbols, and dependency edges, so agents can orient themselves before searching. The agent can then query it with `query_project_graph` (`summary`, `nodes`, `edges`, `dependencies`, `dependents`, `find_related`, `find_path`, `dependency_chain`), using a path, name, or node id. Node/edge caps and graph-prompt verbosity are configurable.
+On workspace load the plugin indexes files, symbols, imports, and relationships, writes the first index to `.kateai/project_graph.sqlite`, and regenerates it when file or directory timestamps show the cache is stale. A legacy `project_graph.json` is migrated once and left untouched. The native system prompt and ACP session notes receive a compact graph summary with workspace-relative paths, languages, line counts, symbols, and dependency edges, so agents can orient themselves before searching. The agent can then query it with `query_project_graph` (`summary`, `nodes`, `edges`, `dependencies`, `dependents`, `find_related`, `find_path`, `dependency_chain`), using a path, name, or node id. Node/edge caps and graph-prompt verbosity are configurable.
 
 ### Configuration surface
 
 **Settings → Configure Kate → Kate AI**, or the gear in the panel. Tabs:
 
 - **AI Providers** — keys, default models, custom endpoints, ACP format
-- **Security & Permissions** — permission mode, sandbox, command timeout, extra deny globs, tool-card collapse
+- **Security & Permissions** — permission mode, ACP auto-accept, sandbox, command timeout, extra deny globs, tool-card collapse
 - **Agent & Context** — plan mode, thinking, budgets, `KATEAI.md`, extra instructions, compression, temperature / top-p / max tokens, reasoning effort, self-critique, parallel tools, verbosity, structured thinking/planning, verification, adaptive temperature, context window reserve, saved-conversation cap
 - **Modes & Tools** — default mode, per-tool auto-approval, project rules toggle, global rules
 - **MCP Servers** — server list editor, enable/auto-connect, tool timeout
@@ -632,7 +633,7 @@ Everything a team shares lives next to the code:
 ├── modes/            # custom mode definitions (*.md)
 ├── agents/           # custom sub-agent definitions (*.md)
 ├── rules/            # project rules (*.md)
-└── project_graph.json  # generated, excluded from checkpoints
+└── project_graph.sqlite # generated SQLite cache, excluded from checkpoints
 ```
 
 ---

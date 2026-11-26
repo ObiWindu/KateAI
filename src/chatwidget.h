@@ -43,6 +43,7 @@ class TodoWidget;
 class InspectorPanel;
 class EditTracker;
 class TurnStatus;
+class TranscriptVirtualizer;
 class AcpBinaryInstaller;
 class VoiceInput;
 
@@ -226,6 +227,7 @@ private:
     QWidget *createIndicatorsRow();
     int transcriptInsertIndex() const;
     void appendTranscriptWidget(QWidget *widget);
+    void releaseVirtualTranscriptWidget(QWidget *widget);
     void showSettingsMenu();
     void showModelMenu();
     void positionModelMenu();
@@ -387,6 +389,8 @@ private:
     QScrollArea *m_scrollArea = nullptr;
     QWidget *m_transcriptContainer = nullptr;
     QVBoxLayout *m_transcriptLayout = nullptr;
+    TranscriptVirtualizer *m_transcriptVirtualizer = nullptr;
+    QHash<QString, bool> m_toolExpansionState;
     QPointer<QWidget> m_activeAssistantWidget;
     QPointer<QTextBrowser> m_activeAssistantBrowser;
 

@@ -433,7 +433,8 @@ AgentLoop::AgentLoop(QObject *parent)
     connect(&m_client, &LlmClient::modelsReceived, this, &AgentLoop::modelsReceived);
     connect(&m_client, &LlmClient::modelsFailed, this, &AgentLoop::modelsFailed);
     connect(&m_client, &LlmClient::usageReceived, this,
-            [this](int inputTokens, int outputTokens, int cachedInputTokens) {
+            [this](int inputTokens, int outputTokens, int cachedInputTokens,
+                   int cacheWriteTokens) {
                 const Settings usageSettings = settingsForActiveRole();
                 const QString model = modelFor(usageSettings);
                 if (model != m_calibrationModel
@@ -443,10 +444,9 @@ AgentLoop::AgentLoop(QObject *parent)
                     m_tokenCalibrator = Tokens::Calibrator(
                         ModelProfiles::resolve(usageSettings.provider, model).tokenFactor);
                 }
-                // Anthropic's native wire format reports non-cached input
-                // separately. OpenAI-shaped transports include cached tokens
-                // in prompt_tokens, even for a Claude model behind a gateway.
-                // Adding cached tokens there would double-count them.
+                // Some wires report input without the cached prefix, others
+                // include it in prompt_tokens. Normalise to a total first so
+                // calibration and the cost ledger agree.
                 const bool anthropicWire =
                     usageSettings.provider == Provider::ClaudeCompatible
                     || (usageSettings.provider == Provider::Acp
@@ -454,32 +454,57 @@ AgentLoop::AgentLoop(QObject *parent)
                 // Gemini's native usage reports promptTokenCount without the
                 // cached prefix; totalTokenCount includes it.
                 const bool geminiWire = LlmClient::usesGeminiNativeTransport(usageSettings);
+                // OpenCode reports the billed uncached input separately from
+                // cache reads/writes in opencode.tokens.
+                const bool openCodeWire = usageSettings.provider == Provider::OpenCode;
+                const bool inputExcludesCaches = anthropicWire || geminiWire || openCodeWire;
                 const int effectiveInput = inputTokens
-                    + ((anthropicWire || geminiWire) ? cachedInputTokens : 0);
-                m_inputTokensTotal += inputTokens;
+                    + (inputExcludesCaches ? cachedInputTokens + cacheWriteTokens : 0);
+                m_inputTokensTotal += effectiveInput;
                 m_outputTokensTotal += outputTokens;
                 m_cachedInputTokensTotal += cachedInputTokens;
+                m_cacheWriteTokensTotal += cacheWriteTokens;
                 const ModelProfile usageProfile =
                     ModelProfiles::resolve(usageSettings.provider, model);
-                m_costs.record(m_activeRoute.key(), model, usageProfile,
-                               CostUsage{inputTokens, outputTokens, cachedInputTokens, 0});
+                // Charge only the uncached, non-cache-write input at the input
+                // price; the cache buckets have their own prices.
+                const CostUsage usage{effectiveInput - cachedInputTokens - cacheWriteTokens,
+                                      outputTokens, cachedInputTokens, cacheWriteTokens};
+                m_costs.record(m_activeRoute.key(), model, usageProfile, usage);
                 RouteUsage &roleUsage = m_routeUsage[m_activeRoute.key()];
-                roleUsage.input += inputTokens;
+                roleUsage.input += effectiveInput;
                 roleUsage.output += outputTokens;
                 roleUsage.cached += cachedInputTokens;
                 if (effectiveInput > 0 && m_lastRequestEstimate > 0) {
                     m_tokenCalibrator.observe(m_lastRequestEstimate, effectiveInput);
                 }
                 QJsonObject payload;
-                payload.insert(u"inputTokens"_s, inputTokens);
+                payload.insert(u"inputTokens"_s, effectiveInput);
                 payload.insert(u"outputTokens"_s, outputTokens);
                 payload.insert(u"cachedInputTokens"_s, cachedInputTokens);
+                payload.insert(u"cacheWriteTokens"_s, cacheWriteTokens);
                 payload.insert(u"estimatedInputTokens"_s, m_lastRequestEstimate);
                 payload.insert(u"factor"_s, m_tokenCalibrator.factor());
                 payload.insert(u"model"_s, model);
                 payload.insert(u"provider"_s, providerId(usageSettings.provider));
                 payload.insert(u"role"_s, orchestrationRoleId(m_activeRole));
                 emitHarnessEvent(EventTypes::Notice, payload);
+            });
+
+    connect(&m_client, &LlmClient::usageCostReceived, this,
+            [this](double costUsd, double listCostUsd, double allowanceUsd,
+                   const QString &billingSource) {
+                m_hasReportedCost = true;
+                if (costUsd >= 0.0) {
+                    m_reportedCostUsd += costUsd;
+                }
+                if (listCostUsd >= 0.0) {
+                    m_listCostUsd += listCostUsd;
+                }
+                m_allowanceUsd += allowanceUsd;
+                if (!billingSource.isEmpty()) {
+                    m_billingSource = billingSource;
+                }
             });
 
     connect(&m_acp, &AcpClient::textDelta, this, [this](const QString &delta) {
@@ -963,7 +988,7 @@ void AgentLoop::applyProjectGraph(bool checkStale)
         qWarning() << "Project graph cache is stale for" << stale
                    << "file(s); regenerating";
         m_projectGraph->generateGraph(m_workspace);
-        const QString graphFilePath = m_workspace + u"/.kateai/project_graph.json"_s;
+        const QString graphFilePath = m_workspace + u"/.kateai/project_graph.sqlite"_s;
         if (!m_projectGraph->saveToFile(graphFilePath)) {
             qWarning() << "Could not write the project graph cache to" << graphFilePath;
         }
@@ -978,30 +1003,60 @@ void AgentLoop::applyProjectGraph(bool checkStale)
     // timestamp the graph records is the one it will see on the next load.
     QDir().mkpath(m_workspace + u"/.kateai"_s);
     m_projectGraph->setWorkspacePath(m_workspace);
-    const QString graphFilePath = m_workspace + u"/.kateai/project_graph.json"_s;
+    const QString graphFilePath = m_workspace + u"/.kateai/project_graph.sqlite"_s;
+    const QString legacyGraphFilePath = m_workspace + u"/.kateai/project_graph.json"_s;
+    const auto quarantineGraphCache = [](const QString &path) {
+        const QString suffix = u".corrupt-%1-%2"_s.arg(QDateTime::currentMSecsSinceEpoch())
+            .arg(QUuid::createUuid().toString(QUuid::WithoutBraces).left(8));
+        const QString backup = path + suffix;
+        if (!QFile::rename(path, backup)) {
+            return false;
+        }
+        for (const QString &sidecar : {u"-journal"_s, u"-wal"_s, u"-shm"_s}) {
+            if (QFile::exists(path + sidecar)) {
+                QFile::rename(path + sidecar, backup + sidecar);
+            }
+        }
+        return true;
+    };
     bool regenerated = false;
+    bool migrated = false;
     if (QFile::exists(graphFilePath)) {
-        // Load existing graph
-        if (!m_projectGraph->loadFromFile(graphFilePath)) {
+        ProjectGraph::SqliteLoadError cacheError = ProjectGraph::SqliteLoadError::None;
+        if (!m_projectGraph->loadFromSqlite(graphFilePath, &cacheError)) {
             qWarning() << "Failed to load existing graph from" << graphFilePath;
-            // Fall back to generating a new graph
+            if (cacheError == ProjectGraph::SqliteLoadError::Corrupt) {
+                if (quarantineGraphCache(graphFilePath)) {
+                    qWarning() << "Quarantined the corrupt project graph cache";
+                } else {
+                    qWarning() << "Could not quarantine the corrupt project graph cache";
+                }
+            } else if (cacheError == ProjectGraph::SqliteLoadError::Io) {
+                qWarning() << "Project graph cache is temporarily unavailable; preserving it";
+            } else {
+                qWarning() << "Project graph cache has an unsupported schema; preserving it";
+            }
             m_projectGraph->generateGraph(m_workspace);
             regenerated = true;
         } else if (m_projectGraph->staleFileCount() > 0) {
-            // The cache was written by an earlier session; files changed
-            // on disk while Kate was closed would otherwise be served with
-            // stale metadata, so regenerate instead of trusting it.
             qWarning() << "Project graph cache is stale for" << m_projectGraph->staleFileCount()
                        << "file(s); regenerating";
             m_projectGraph->generateGraph(m_workspace);
             regenerated = true;
         }
+    } else if (QFile::exists(legacyGraphFilePath)
+               && m_projectGraph->loadFromFile(legacyGraphFilePath)) {
+        migrated = m_projectGraph->staleFileCount() == 0;
+        if (!migrated) {
+            qWarning() << "Legacy project graph cache is stale; regenerating";
+            m_projectGraph->generateGraph(m_workspace);
+            regenerated = true;
+        }
     } else {
-        // First index of this workspace.
         m_projectGraph->generateGraph(m_workspace);
         regenerated = true;
     }
-    if (regenerated && !m_projectGraph->saveToFile(graphFilePath)) {
+    if ((regenerated || migrated) && !m_projectGraph->saveToFile(graphFilePath)) {
         qWarning() << "Could not write the project graph cache to" << graphFilePath;
     }
     m_graphDirty = false;
@@ -1842,6 +1897,9 @@ void AgentLoop::setConversationId(const QString &conversationId)
         return;
     }
     m_conversationId = conversationId;
+    // OpenCode caches by conversation; keep the model client's session header
+    // in step with the conversation whose history is being sent.
+    m_client.setSessionId(conversationId);
     m_sessionStartRan = false;
     m_eventLogBroken = false;
 }
@@ -2615,9 +2673,12 @@ void AgentLoop::flushProjectGraph()
     }
     m_graphSavePending = false;
     m_graphSaveTimer.stop();
-    if (!m_projectGraph->saveToFile(m_workspace + u"/.kateai/project_graph.json"_s)) {
-        qWarning() << "Could not write the project graph cache to"
-                   << m_workspace + u"/.kateai/project_graph.json"_s;
+    const QString graphFilePath = m_workspace + u"/.kateai/project_graph.sqlite"_s;
+    if (!m_projectGraph->saveToFile(graphFilePath)) {
+        // Keep the dirty flag so a turn boundary or the next edit retries a
+        // transient SQLite lock instead of silently losing the cache update.
+        m_graphSavePending = true;
+        qWarning() << "Could not write the project graph cache to" << graphFilePath;
     }
 }
 
@@ -2957,6 +3018,12 @@ void AgentLoop::resetConversation()
     m_inputTokensTotal = 0;
     m_outputTokensTotal = 0;
     m_cachedInputTokensTotal = 0;
+    m_cacheWriteTokensTotal = 0;
+    m_hasReportedCost = false;
+    m_reportedCostUsd = 0.0;
+    m_listCostUsd = 0.0;
+    m_allowanceUsd = 0.0;
+    m_billingSource.clear();
     m_stateEpoch = 0;
     m_actionRepeatCounts.clear();
     m_actionsThisModelTurn.clear();
@@ -3864,15 +3931,29 @@ QString AgentLoop::usageReport() const
         report += i18n("Cached-prefix price: $%1/M (only when the provider reports cache hits)\n",
                        QString::number(profile.cacheReadPrice, 'f', 2));
         if (m_inputTokensTotal > 0 || m_outputTokensTotal > 0) {
-            const double actual = (m_inputTokensTotal * profile.inputPrice
+            const int uncachedInput = qMax(0, m_inputTokensTotal - m_cachedInputTokensTotal
+                                                  - m_cacheWriteTokensTotal);
+            const double actual = (uncachedInput * profile.inputPrice
                                    + m_outputTokensTotal * profile.outputPrice
-                                   + m_cachedInputTokensTotal * profile.cacheReadPrice) / 1000000.0;
-            report += i18n("Provider usage this session: %1 input, %2 output, %3 cached tokens; cost $%4\n",
+                                   + m_cachedInputTokensTotal * profile.cacheReadPrice
+                                   + m_cacheWriteTokensTotal * profile.cacheWritePrice) / 1000000.0;
+            report += i18n("Provider usage this session: %1 input, %2 output, %3 cache read, %4 cache write tokens; list cost $%5\n",
                            m_inputTokensTotal, m_outputTokensTotal, m_cachedInputTokensTotal,
-                           QString::number(actual, 'f', 4));
+                           m_cacheWriteTokensTotal, QString::number(actual, 'f', 4));
         }
     } else {
         report += i18n("Pricing: not known for this model; no cost is guessed.\n");
+    }
+    if (m_hasReportedCost) {
+        const QString source = m_billingSource.isEmpty()
+            ? QString() : i18n(" (%1)", m_billingSource);
+        report += i18n("Provider-reported cost: $%1%2; list value $%3\n",
+                       QString::number(m_reportedCostUsd, 'f', 6), source,
+                       QString::number(m_listCostUsd, 'f', 6));
+        if (m_allowanceUsd > 0.0) {
+            report += i18n("OpenCode Go allowance used this session: $%1\n",
+                           QString::number(m_allowanceUsd, 'f', 6));
+        }
     }
     if (!m_subagentRecords.isEmpty()) {
         double childCost = 0.0;
@@ -3930,6 +4011,13 @@ QJsonObject AgentLoop::costReportJson() const
     context.insert(u"conversationId"_s, currentConversationId());
     context.insert(u"turnId"_s, m_turnId);
     context.insert(u"budgetUsd"_s, m_settings.costBudgetUsd);
+    context.insert(u"cacheWriteTokens"_s, m_cacheWriteTokensTotal);
+    if (m_hasReportedCost) {
+        context.insert(u"reportedCostUsd"_s, m_reportedCostUsd);
+        context.insert(u"listCostUsd"_s, m_listCostUsd);
+        context.insert(u"allowanceUsd"_s, m_allowanceUsd);
+        context.insert(u"billingSource"_s, m_billingSource);
+    }
     report.insert(u"context"_s, context);
     QJsonArray subagentRecords;
     QStringList taskIds = m_subagentRecords.keys();

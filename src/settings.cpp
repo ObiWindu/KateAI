@@ -137,7 +137,17 @@ Settings SettingsStore::load()
     s.acpEffort = g.readEntry(u"AcpEffort"_s, QString());
     s.opencodeApiKey = cred(u"opencode-api-key"_s, u"OpenCodeApiKey"_s, g);
     s.opencodeModel = g.readEntry(u"OpenCodeModel"_s, QString());
-    s.opencodeUrl = g.readEntry(u"OpenCodeUrl"_s, u"https://opencode.ai/zen/v1"_s);
+    s.opencodePlan = openCodePlanFromId(
+        g.readEntry(u"OpenCodePlan"_s, openCodePlanId(OpenCodePlan::PayAsYouGo)));
+    // The old Zen endpoint and the explicit pay-as-you-go base are now selected
+    // by the plan, so they are kept out of the custom-URL slot. A user who
+    // intentionally typed either value still gets the same endpoint.
+    s.opencodeUrl = g.readEntry(u"OpenCodeUrl"_s, QString());
+    const QString openCodeUrl = s.opencodeUrl.trimmed();
+    if (openCodeUrl == u"https://opencode.ai/zen/v1"_s
+        || openCodeUrl == u"https://opencode.ai/inference/v1"_s) {
+        s.opencodeUrl.clear();
+    }
     s.deepseekUrl = g.readEntry(u"DeepSeekUrl"_s, u"https://api.deepseek.com"_s);
     s.openaiCompatibleUrl = g.readEntry(u"OpenAICompatibleUrl"_s, u"http://localhost:11434/v1"_s);
     s.claudeCompatibleUrl = g.readEntry(u"ClaudeCompatibleUrl"_s, u"https://api.anthropic.com/v1"_s);
@@ -443,6 +453,7 @@ void SettingsStore::save(const Settings &settings)
     storeCredential(u"opencode-api-key"_s, settings.opencodeApiKey);
     g.deleteEntry(u"OpenCodeApiKey"_s);
     g.writeEntry(u"OpenCodeModel"_s, settings.opencodeModel);
+    g.writeEntry(u"OpenCodePlan"_s, openCodePlanId(settings.opencodePlan));
     g.writeEntry(u"OpenCodeUrl"_s, settings.opencodeUrl);
     g.writeEntry(u"GrokModel"_s, settings.grokModel);
     g.writeEntry(u"OpenAIModel"_s, settings.openaiModel);

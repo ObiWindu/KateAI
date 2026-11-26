@@ -231,6 +231,7 @@ public:
     int inputTokensTotal() const { return m_inputTokensTotal; }
     int outputTokensTotal() const { return m_outputTokensTotal; }
     int cachedInputTokensTotal() const { return m_cachedInputTokensTotal; }
+    int cacheWriteTokensTotal() const { return m_cacheWriteTokensTotal; }
     // Worktree results are never merged automatically: the user or parent
     // explicitly applies or discards them.
     bool applySubagentWorktree(const QString &taskId, QString *error = nullptr);
@@ -778,6 +779,15 @@ LlmClient m_client;
     int m_inputTokensTotal = 0;
     int m_outputTokensTotal = 0;
     int m_cachedInputTokensTotal = 0;
+    int m_cacheWriteTokensTotal = 0;
+    // OpenCode reports the amount charged and, on Go, the allowance used.
+    // Kept beside the token ledger rather than folded into it: a Go request
+    // can cost $0 while still consuming the subscription.
+    bool m_hasReportedCost = false;
+    double m_reportedCostUsd = 0.0;
+    double m_listCostUsd = 0.0;
+    double m_allowanceUsd = 0.0;
+    QString m_billingSource;
     bool m_cancelRequested = false;
     // Extra compaction pressure after a context-window rejection. Reset at
     // the start of each user turn so a later overflow can compact further

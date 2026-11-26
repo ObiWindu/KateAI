@@ -1,3 +1,4 @@
+#include "harness/models.h"
 #include "llmclient.h"
 #include "modes.h"
 #include "types.h"
@@ -311,17 +312,83 @@ private Q_SLOTS:
         QCOMPARE(chunk.finishReason, u"stop"_s);
     }
 
-    void anthropicUsageCarriesCacheHits()
+    void anthropicUsageCarriesCacheHitsAndWrites()
     {
         QHash<int, ToolCall> acc;
         const CompletionChunk chunk = LlmClient::parseSseLine(
             QByteArray("data: {\"type\":\"message_start\",\"message\":{\"usage\":"
                        "{\"input_tokens\":90,\"output_tokens\":1,"
-                       "\"cache_read_input_tokens\":1000}}}"),
+                       "\"cache_read_input_tokens\":1000,"
+                       "\"cache_creation_input_tokens\":250}}}"),
             &acc);
         QCOMPARE(chunk.inputTokens, 90);
         QCOMPARE(chunk.outputTokens, 1);
         QCOMPARE(chunk.cachedInputTokens, 1000);
+        QCOMPARE(chunk.cacheWriteTokens, 250);
+    }
+
+    void openCodeUsageCarriesBilledTokensCacheAndCost()
+    {
+        QHash<int, ToolCall> acc;
+        const CompletionChunk chunk = LlmClient::parseSseLine(
+            QByteArray("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],"
+                       "\"usage\":{\"prompt_tokens\":8200,\"completion_tokens\":9,"
+                       "\"cost\":0.00412,"
+                       "\"opencode\":{\"billing_source\":\"go\","
+                       "\"list_cost\":0.01,\"allowance\":0.01,"
+                       "\"tokens\":{\"input\":100,\"output\":9,\"reasoning\":2,"
+                       "\"cache_read\":8000,\"cache_write_5m\":100,"
+                       "\"cache_write_1h\":50}}}}"),
+            &acc);
+        // opencode.tokens is the authoritative billed breakdown: input
+        // excludes cache reads/writes, output includes reasoning.
+        QCOMPARE(chunk.inputTokens, 100);
+        QCOMPARE(chunk.outputTokens, 9);
+        QCOMPARE(chunk.cachedInputTokens, 8000);
+        QCOMPARE(chunk.cacheWriteTokens, 150);
+        QVERIFY(qAbs(chunk.reportedCostUsd - 0.00412) < 1e-12);
+        QVERIFY(qAbs(chunk.listCostUsd - 0.01) < 1e-12);
+        QVERIFY(qAbs(chunk.allowanceUsd - 0.01) < 1e-12);
+        QCOMPARE(chunk.billingSource, u"go"_s);
+    }
+
+    void openCodeReasoningEffortIsConstrainedToCatalogue()
+    {
+        QJsonObject model;
+        model.insert(u"id"_s, u"claude-sonnet-5-5"_s);
+        model.insert(u"limit"_s, QJsonObject{{u"context"_s, 1000000}});
+        model.insert(u"cost"_s, QJsonObject{{u"text"_s, QJsonObject{
+            {u"input"_s, QJsonObject{{u"price"_s, 2.0}}},
+            {u"output"_s, QJsonObject{{u"price"_s, 10.0}}}}}});
+        model.insert(u"capabilities"_s, QJsonObject{
+            {u"reasoning"_s, QJsonObject{
+                {u"supported"_s, true},
+                {u"effort"_s, QJsonArray{u"low"_s, u"high"_s}}}}});
+        ModelProfiles::registerModels(Provider::OpenCode, QJsonArray{model});
+
+        TestableLlmClient client;
+        Settings settings;
+        settings.provider = Provider::OpenCode;
+        settings.reasoningEffort = u"high"_s;
+        client.setSettings(settings);
+
+        QList<ChatMessage> messages;
+        ChatMessage user;
+        user.role = ChatMessage::Role::User;
+        user.content = u"Hello"_s;
+        messages.append(user);
+
+        QJsonObject body = client.openAiBody(messages, u"claude-sonnet-5-5"_s);
+        QCOMPARE(body.value(u"reasoning_effort"_s).toString(), u"high"_s);
+
+        // A level the catalogue did not publish is not sent, so the gateway
+        // cannot reject an otherwise valid request.
+        settings.reasoningEffort = u"minimal"_s;
+        client.setSettings(settings);
+        body = client.openAiBody(messages, u"claude-sonnet-5-5"_s);
+        QVERIFY(!body.contains(u"reasoning_effort"_s));
+
+        ModelProfiles::clearRegisteredModels(Provider::OpenCode);
     }
 
     void nullErrorFieldIsNotAnError()

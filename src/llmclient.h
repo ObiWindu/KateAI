@@ -81,6 +81,18 @@ public:
     {
         m_toolDefinitionsOverride = tools;
     }
+    // Stable conversation id. OpenCode uses x-opencode-session to route a
+    // conversation and reuse its prompt cache; Go requires it. The loop sets
+    // this when the conversation changes.
+    void setSessionId(const QString &sessionId)
+    {
+        m_sessionId = sessionId.trimmed();
+        // OpenCode documents the `ses_` prefix; keep a bare UUID compatible
+        // instead of inventing a second id when the loop supplies one.
+        if (!m_sessionId.isEmpty() && !m_sessionId.startsWith(u"ses_"_s)) {
+            m_sessionId.prepend(u"ses_"_s);
+        }
+    }
     // Built-in tools filtered by the active access, plus the runtime tools.
     QJsonArray advertisedTools() const;
 
@@ -122,7 +134,12 @@ Q_SIGNALS:
     void modelsFailed(Provider provider, const QString &error);
     // Token usage the provider reported for the request that just streamed.
     // Emitted at most once per request when the transport exposes it.
-    void usageReceived(int inputTokens, int outputTokens, int cachedInputTokens);
+    void usageReceived(int inputTokens, int outputTokens, int cachedInputTokens,
+                       int cacheWriteTokens);
+    // OpenCode Console's billed/list cost and Go allowance for the request.
+    // `costUsd` is -1 when the provider did not report it.
+    void usageCostReceived(double costUsd, double listCostUsd, double allowanceUsd,
+                           const QString &billingSource);
     // Retry status signals for UI
     void retryStatus(const QString &message, int attempt, int maxAttempts, int delaySeconds);
     void retryScheduled(int attempt, int maxAttempts, int delaySeconds);
@@ -219,10 +236,17 @@ private:
     ToolAccess m_toolAccess = ToolAccess::unrestricted();
     QJsonArray m_extraTools;
     QJsonArray m_toolDefinitionsOverride;
+    QString m_sessionId;
     bool m_usageEmitted = false;
+    bool m_usageCostEmitted = false;
     int m_usageInput = 0;
     int m_usageOutput = 0;
     int m_usageCached = 0;
+    int m_usageCacheWrite = 0;
+    double m_usageCostUsd = -1.0;
+    double m_usageListCostUsd = -1.0;
+    double m_usageAllowanceUsd = 0.0;
+    QString m_usageBillingSource;
 
     // The cache resource currently suitable for this conversation. There is
     // at most one: a changed system prompt, tool set, model, or first user

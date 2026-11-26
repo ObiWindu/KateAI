@@ -11,6 +11,8 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QSqlDatabase>
+#include <QSqlQuery>
 #include <QTemporaryDir>
 #include <QTest>
 
@@ -443,6 +445,161 @@ private Q_SLOTS:
         const QString id = ProjectGraph::generateNodeId(dir.path() + u"/src/main.cpp"_s);
         QVERIFY2(!summary.contains(id), qPrintable(summary));
         QVERIFY(graph.findNodeByPath(u"src/main.cpp"_s));
+    }
+
+    void sqliteRoundTripPreservesTheRelationalGraph()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        ProjectGraph graph;
+        graph.setWorkspacePath(dir.path());
+        GraphNode root;
+        root.id = u"root"_s;
+        root.name = u"root"_s;
+        root.type = u"directory"_s;
+        root.path = dir.path();
+        root.isReadOnly = false;
+        root.lastModified = 123;
+        graph.addNode(root);
+        GraphNode file;
+        file.id = u"file"_s;
+        file.name = u"main.cpp"_s;
+        file.type = u"file"_s;
+        file.path = dir.filePath(u"main.cpp"_s);
+        file.content = u"int main() {}"_s;
+        file.complexity = 2;
+        file.linesOfCode = 3;
+        file.isReadOnly = true;
+        file.lastModified = 456;
+        file.metadata.insert(u"language"_s, u"cpp"_s);
+        graph.addNode(file);
+        graph.addEdge({u"root"_s, u"file"_s, u"contains"_s, {}, true});
+        graph.addEdge({u"file"_s, u"root"_s, u"references"_s, u"root"_s, false});
+        const QJsonObject expected = graph.toJson();
+        const QString path = dir.filePath(u"nested/graph.SQLITE3"_s);
+        QVERIFY(graph.saveToFile(path));
+        {
+            const QString connection = u"graph-sqlite-inspect"_s;
+            {
+                QSqlDatabase database = QSqlDatabase::addDatabase(u"QSQLITE"_s, connection);
+                database.setDatabaseName(path);
+                QVERIFY(database.open());
+                QSqlQuery nodes(database);
+                QVERIFY(nodes.exec(u"SELECT COUNT(*) FROM kateai_graph_nodes"_s));
+                QVERIFY(nodes.next());
+                QCOMPARE(nodes.value(0).toInt(), 2);
+                QSqlQuery edges(database);
+                QVERIFY(edges.exec(u"SELECT COUNT(*) FROM kateai_graph_edges"_s));
+                QVERIFY(edges.next());
+                QCOMPARE(edges.value(0).toInt(), 2);
+                database.close();
+            }
+            QSqlDatabase::removeDatabase(connection);
+        }
+        ProjectGraph restored;
+        restored.setWorkspacePath(dir.path());
+        QVERIFY(restored.loadFromDatabase(path));
+        QCOMPARE(restored.toJson(), expected);
+        QVERIFY(restored.getNode(u"file"_s)->dependencies.contains(u"root"_s));
+        QVERIFY(restored.getNode(u"root"_s)->dependents.contains(u"file"_s));
+    }
+
+    void sqliteRejectsIncompatibleCorruptAndLockedCaches()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        ProjectGraph graph;
+        graph.setWorkspacePath(dir.path());
+        graph.generateGraph(dir.path());
+        const QString path = dir.filePath(u"graph.db"_s);
+        QVERIFY(graph.saveToDb(path));
+        const QJsonObject expected = graph.toJson();
+        {
+            const QString connection = u"graph-sqlite-version"_s;
+            {
+                QSqlDatabase database = QSqlDatabase::addDatabase(u"QSQLITE"_s, connection);
+                database.setDatabaseName(path);
+                QVERIFY(database.open());
+                QSqlQuery query(database);
+                QVERIFY(query.exec(u"PRAGMA user_version = 99"_s));
+                database.close();
+            }
+            QSqlDatabase::removeDatabase(connection);
+        }
+        QVERIFY(!graph.saveToDatabase(path));
+        QCOMPARE(graph.toJson(), expected);
+        ProjectGraph restored;
+        restored.setWorkspacePath(dir.path());
+        ProjectGraph::SqliteLoadError error = ProjectGraph::SqliteLoadError::None;
+        QVERIFY(!restored.loadFromSqlite(path, &error));
+        QCOMPARE(error, ProjectGraph::SqliteLoadError::InvalidSchema);
+        QVERIFY(restored.getNodes().isEmpty());
+
+        const QString corruptPath = dir.filePath(u"corrupt.sqlite"_s);
+        const QByteArray corrupt = QByteArrayLiteral("not a sqlite database\n");
+        writeFile(corruptPath, corrupt);
+        QVERIFY(!graph.saveToSqlite(corruptPath));
+        QFile corruptFile(corruptPath);
+        QVERIFY(corruptFile.open(QIODevice::ReadOnly));
+        QCOMPARE(corruptFile.readAll(), corrupt);
+        QVERIFY(!restored.loadFromSqlite(corruptPath, &error));
+        QCOMPARE(error, ProjectGraph::SqliteLoadError::Corrupt);
+
+        const QString lockedPath = dir.filePath(u"locked.sqlite"_s);
+        QVERIFY(graph.saveToSqlite(lockedPath));
+        const QString connection = u"graph-sqlite-lock"_s;
+        {
+            QSqlDatabase database = QSqlDatabase::addDatabase(u"QSQLITE"_s, connection);
+            database.setDatabaseName(lockedPath);
+            QVERIFY(database.open());
+            QSqlQuery lock(database);
+            QVERIFY(lock.exec(u"BEGIN EXCLUSIVE"_s));
+            QVERIFY(!restored.loadFromSqlite(lockedPath, &error));
+            QCOMPARE(error, ProjectGraph::SqliteLoadError::Io);
+            database.rollback();
+            database.close();
+        }
+        QSqlDatabase::removeDatabase(connection);
+    }
+
+    void jsonValidationIsExactAndDoesNotMutateOnFailure()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        QTemporaryDir other;
+        QVERIFY(other.isValid());
+        ProjectGraph graph;
+        graph.setWorkspacePath(dir.path());
+        graph.generateGraph(dir.path());
+        const QJsonObject expected = graph.toJson();
+        QJsonObject newer = expected;
+        newer.insert(u"schemaVersion"_s, 99);
+        QVERIFY(!graph.fromJson(newer));
+        QCOMPARE(graph.toJson(), expected);
+
+        QJsonObject foreign = expected;
+        foreign.insert(u"workspacePath"_s, other.path());
+        QVERIFY(!graph.fromJson(foreign));
+        QCOMPARE(graph.toJson(), expected);
+
+        QJsonArray nodes = expected.value(u"nodes"_s).toArray();
+        QJsonObject outside = nodes.first().toObject();
+        outside.insert(u"id"_s, u"outside"_s);
+        outside.insert(u"path"_s, other.filePath(u"secret.txt"_s));
+        nodes.append(outside);
+        QJsonObject escaped = expected;
+        escaped.insert(u"nodes"_s, nodes);
+        QVERIFY(!graph.fromJson(escaped));
+        QCOMPARE(graph.toJson(), expected);
+
+        QJsonObject dangling = expected;
+        QJsonArray edges = expected.value(u"edges"_s).toArray();
+        edges.append(QJsonObject{{u"sourceId"_s, u"missing"_s},
+                                 {u"targetId"_s, u"missing"_s},
+                                 {u"relationship"_s, u"imports"_s}});
+        dangling.insert(u"edges"_s, edges);
+        QVERIFY(!graph.fromJson(dangling));
+        QCOMPARE(graph.toJson(), expected);
     }
 
     void testJsonRoundTrip()

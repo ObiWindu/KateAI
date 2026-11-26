@@ -39,6 +39,10 @@ private Q_SLOTS:
         s.openaiCompatibleUrl = u"http://127.0.0.1:11434/v1"_s;
         s.kiloApiKey = u"kilo-test"_s;
         s.kiloModel = u"kilo-model-test"_s;
+        s.opencodeApiKey = u"oc_sk_test"_s;
+        s.opencodeModel = u"claude-sonnet-5-5"_s;
+        s.opencodePlan = OpenCodePlan::Go;
+        s.opencodeUrl = u"https://opencode.example.invalid/inference/go/v1"_s;
         s.acpAgentModels = u"{\"grok\": [\"m1\"]}"_s;
         s.acpAgentCommands = u"{\"grok\": [{\"name\":\"review\",\"description\":\"Review the changes\"}]}"_s;
         s.acceptAllAcpTools = false;
@@ -90,6 +94,10 @@ private Q_SLOTS:
         QCOMPARE(loaded.openaiCompatibleUrl, s.openaiCompatibleUrl);
         QCOMPARE(loaded.kiloApiKey, s.kiloApiKey);
         QCOMPARE(loaded.kiloModel, s.kiloModel);
+        QCOMPARE(loaded.opencodeApiKey, s.opencodeApiKey);
+        QCOMPARE(loaded.opencodeModel, s.opencodeModel);
+        QCOMPARE(loaded.opencodePlan, s.opencodePlan);
+        QCOMPARE(loaded.opencodeUrl, s.opencodeUrl);
         QCOMPARE(loaded.acpAgentModels, s.acpAgentModels);
         QCOMPARE(loaded.acpAgentCommands, s.acpAgentCommands);
         QCOMPARE(loaded.acceptAllAcpTools, false);
@@ -145,6 +153,8 @@ private Q_SLOTS:
         QCOMPARE(fresh.structuredPlanning, defaults.structuredPlanning);
         QCOMPARE(fresh.structuredThinking, defaults.structuredThinking);
         QCOMPARE(fresh.acceptAllAcpTools, true);
+        QCOMPARE(fresh.opencodePlan, OpenCodePlan::PayAsYouGo);
+        QCOMPARE(fresh.opencodeUrl, QString());
         QCOMPARE(fresh.maxPlanSteps, defaults.maxPlanSteps);
         QCOMPARE(fresh.requireVerification, defaults.requireVerification);
         QCOMPARE(fresh.enableAutoRetry, defaults.enableAutoRetry);
