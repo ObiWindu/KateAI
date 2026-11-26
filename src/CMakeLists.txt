@@ -143,7 +143,18 @@ target_compile_definitions(kateai-headless PRIVATE
     KATEAI_VERSION="${PROJECT_VERSION}"
 )
 target_link_libraries(kateai-headless PRIVATE kateai_core)
-install(TARGETS kateai-headless RUNTIME DESTINATION "${KDE_INSTALL_BINDIR}")
+# The CLI is not a bundle: KDECMakeSettings defaults MACOSX_BUNDLE on for
+# Apple executables, which would both wrap a command-line tool in a .app and
+# fail configure because the install rule below has no BUNDLE DESTINATION.
+if(APPLE)
+    set_target_properties(kateai-headless PROPERTIES MACOSX_BUNDLE FALSE)
+endif()
+# BUNDLE DESTINATION keeps install() valid if MACOSX_BUNDLE is ever true
+# again; CMake ignores it on platforms without bundle support.
+install(TARGETS kateai-headless
+    RUNTIME DESTINATION "${KDE_INSTALL_BINDIR}"
+    BUNDLE DESTINATION "${KDE_INSTALL_BINDIR}"
+)
 
 # The 4 KiB page shim is a Linux-only interposer: it relies on <link.h>,
 # dladdr1(), ElfW and the Linux __NR_* syscall numbers, and it spoofs glibc
