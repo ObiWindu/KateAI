@@ -156,6 +156,7 @@ Settings SettingsStore::load()
     }
     s.apiFormat = apiFormatFromId(g.readEntry(u"ApiFormat"_s, apiFormatId(ApiFormat::AcpNative)));
     s.permissionMode = permissionModeFromId(g.readEntry(u"PermissionMode"_s, permissionModeId(PermissionMode::Ask)));
+    s.acceptAllAcpTools = g.readEntry(u"AcceptAllAcpTools"_s, true);
     s.sandbox = sandboxProfileFromId(g.readEntry(u"Sandbox"_s, sandboxProfileId(SandboxProfile::Workspace)));
 
     // Read new fields first, then fall back to legacy MaxIterations for maxToolCalls
@@ -462,6 +463,7 @@ void SettingsStore::save(const Settings &settings)
     g.writeEntry(u"AcpApiKeyEnv"_s, settings.acpApiKeyEnv);
     g.writeEntry(u"ApiFormat"_s, apiFormatId(settings.apiFormat));
     g.writeEntry(u"PermissionMode"_s, permissionModeId(settings.permissionMode));
+    g.writeEntry(u"AcceptAllAcpTools"_s, settings.acceptAllAcpTools);
     g.writeEntry(u"Sandbox"_s, sandboxProfileId(settings.sandbox));
     g.writeEntry(u"MaxModelRequests"_s, settings.maxModelRequests);
     g.writeEntry(u"MaxToolCalls"_s, settings.maxToolCalls);

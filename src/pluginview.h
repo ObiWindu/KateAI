@@ -16,6 +16,8 @@
 #include <QPointer>
 #include <QSet>
 
+#include <memory>
+
 class QAction;
 class QDialog;
 class QTimer;
@@ -35,6 +37,7 @@ class KateAiPlugin;
 class KateDebugBridge;
 class KateEcosystemBridge;
 class KateLspBridge;
+class WorkspaceServices;
 struct DebugStopInfo;
 
 class KateAiView : public QObject, public KXMLGUIClient
@@ -195,6 +198,10 @@ private:
     QString m_lastEditorThemeBg;
     QString m_lastWindowBg;
     QString m_workspace;
+    // Graph, MCP manager and event store shared with every other window on
+    // this workspace. Holding the shared pointer keeps them alive while this
+    // view needs them.
+    std::shared_ptr<WorkspaceServices> m_workspaceServices;
     QElapsedTimer m_viewAge;
 };
 

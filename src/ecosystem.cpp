@@ -5,6 +5,8 @@
 
 #include "ecosystem.h"
 
+#include "boundedfile.h"
+
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -79,11 +81,12 @@ QList<BuildTargetInfo> EcosystemProvider::discoverWorkspaceBuildTargets(const QS
         if (replyDir.exists()) {
             const QStringList files = replyDir.entryList({u"target-*.json"_s}, QDir::Files, QDir::Name);
             for (const QString &file : files) {
-                QFile f(replyDir.absoluteFilePath(file));
-                if (!f.open(QIODevice::ReadOnly)) {
+                const QString text = readBoundedFile(replyDir.absoluteFilePath(file),
+                                                     4 * 1024 * 1024);
+                if (text.isEmpty()) {
                     continue;
                 }
-                const QJsonObject obj = QJsonDocument::fromJson(f.readAll()).object();
+                const QJsonObject obj = QJsonDocument::fromJson(text.toUtf8()).object();
                 const QString name = obj.value(u"name"_s).toString();
                 const QString type = obj.value(u"type"_s).toString();
                 if (name.isEmpty()) {
@@ -159,9 +162,11 @@ QList<BuildTargetInfo> EcosystemProvider::discoverWorkspaceBuildTargets(const QS
 
     // 4. package.json scripts
     if (root.exists(u"package.json"_s)) {
-        QFile pkg(root.absoluteFilePath(u"package.json"_s));
-        if (pkg.open(QIODevice::ReadOnly)) {
-            const QJsonObject scripts = QJsonDocument::fromJson(pkg.readAll()).object().value(u"scripts"_s).toObject();
+        const QString text = readBoundedFile(root.absoluteFilePath(u"package.json"_s),
+                                             4 * 1024 * 1024);
+        if (!text.isEmpty()) {
+            const QJsonObject scripts =
+                QJsonDocument::fromJson(text.toUtf8()).object().value(u"scripts"_s).toObject();
             for (auto it = scripts.constBegin(); it != scripts.constEnd(); ++it) {
                 BuildTargetInfo info;
                 info.name = u"npm:%1"_s.arg(it.key());

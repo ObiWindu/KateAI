@@ -35,6 +35,10 @@ namespace
 // Keeps very chatty sub-agents from growing the transcript without bound.
 constexpr int MaxActivityLines = 200;
 constexpr int MaxActivityChars = 12000;
+// The live answer is replaced by the final result. Keeping the whole stream in
+// the card duplicates what the parent already holds and grows without bound.
+constexpr qsizetype MaxStreamedTextChars = 256 * 1024;
+constexpr qsizetype MaxPendingStreamChars = 64 * 1024;
 // How much of the delegated task is shown while the agent works. The answer
 // replaces this text at the end anyway, and an unbounded description would
 // push the dock (and the input with it) off the screen.
@@ -534,11 +538,19 @@ void SubtaskWidget::appendMessageDelta(const QString &delta)
     if (!m_running) {
         // The card exists (toolStarted) but the agent has not started yet
         // (subtaskStarted): buffer instead of dropping, so early streaming
-        // text survives.
-        m_pendingStreamed += delta;
+        // text survives. This buffer is short-lived, but a stalled stream must
+        // not grow it without bound.
+        const qsizetype room = MaxPendingStreamChars - m_pendingStreamed.size();
+        if (room > 0) {
+            m_pendingStreamed += delta.size() > room ? delta.left(room) : delta;
+        }
         return;
     }
-    m_streamedMessage += delta;
+    const qsizetype room = MaxStreamedTextChars - m_streamedMessage.size();
+    if (room <= 0) {
+        return;
+    }
+    m_streamedMessage += delta.size() > room ? delta.left(room) : delta;
     m_answer->setDocument(makeMarkdownDocument(closeMarkdown(m_streamedMessage), ChatTheme::messageCss()));
     m_answer->setToolTip(QString());
     m_answer->setVisible(true);

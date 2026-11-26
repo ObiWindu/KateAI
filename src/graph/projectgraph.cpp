@@ -17,8 +17,13 @@
 #include <QQueue>
 #include <QVector>
 #include <QCryptographicHash>
+#include <QSqlDatabase>
+#include <QSqlError>
+#include <QSqlQuery>
+#include <QUuid>
 #include <algorithm>
 #include <cmath>
+#include <utility>
 
 using namespace Qt::Literals::StringLiterals;
 
@@ -59,6 +64,140 @@ QString canonicalLookupPath(const QString &path, const QString &workspace)
     }
     const QString canonical = QFileInfo(absolute).canonicalFilePath();
     return QDir::cleanPath(canonical.isEmpty() ? absolute : canonical);
+}
+
+constexpr const char *kMetadataTable = "kateai_graph_metadata";
+constexpr const char *kNodesTable = "kateai_graph_nodes";
+constexpr const char *kEdgesTable = "kateai_graph_edges";
+
+QString graphConnectionName()
+{
+    return u"kateai-project-graph-"_s + QUuid::createUuid().toString(QUuid::WithoutBraces);
+}
+
+bool execGraphSql(QSqlDatabase &database, const QString &sql, QString *error)
+{
+    QSqlQuery query(database);
+    if (!query.exec(sql)) {
+        if (error) {
+            *error = query.lastError().text();
+        }
+        return false;
+    }
+    return true;
+}
+
+ProjectGraph::SqliteLoadError classifyGraphSqlError(const QString &message)
+{
+    const QString lowered = message.toLower();
+    if (lowered.contains(u"locked"_s) || lowered.contains(u"busy"_s)
+        || lowered.contains(u"unable to open"_s) || lowered.contains(u"cannot open"_s)
+        || lowered.contains(u"permission denied"_s) || lowered.contains(u"readonly"_s)
+        || lowered.contains(u"read-only"_s)) {
+        return ProjectGraph::SqliteLoadError::Io;
+    }
+    if (lowered.contains(u"file is not a database"_s) || lowered.contains(u"malformed"_s)
+        || lowered.contains(u"disk i/o"_s) || lowered.contains(u"corrupt"_s)) {
+        return ProjectGraph::SqliteLoadError::Corrupt;
+    }
+    return ProjectGraph::SqliteLoadError::InvalidSchema;
+}
+
+bool prepareGraphSchema(QSqlDatabase &database, bool create, QString *error,
+                        ProjectGraph::SqliteLoadError *errorKind = nullptr)
+{
+    if (errorKind) {
+        *errorKind = ProjectGraph::SqliteLoadError::None;
+    }
+    const auto fail = [error, errorKind](const QString &message,
+                                         ProjectGraph::SqliteLoadError kind) {
+        if (error) {
+            *error = message;
+        }
+        if (errorKind) {
+            *errorKind = kind;
+        }
+        return false;
+    };
+    QSet<QString> tables;
+    QSqlQuery tableQuery(database);
+    if (!tableQuery.exec(u"SELECT name FROM sqlite_master WHERE type = 'table'"_s)) {
+        const QString message = tableQuery.lastError().text();
+        return fail(message, classifyGraphSqlError(message));
+    }
+    while (tableQuery.next()) {
+        tables.insert(tableQuery.value(0).toString());
+    }
+
+    const bool anyGraphTable = tables.contains(QLatin1String(kMetadataTable))
+        || tables.contains(QLatin1String(kNodesTable))
+        || tables.contains(QLatin1String(kEdgesTable));
+    if (!anyGraphTable) {
+        if (!create) {
+            return fail(u"database has no KateAI graph schema"_s,
+                        ProjectGraph::SqliteLoadError::InvalidSchema);
+        }
+        const QStringList statements = {
+            u"CREATE TABLE %1 (key TEXT PRIMARY KEY, value TEXT NOT NULL)"_s.arg(QLatin1String(kMetadataTable)),
+            u"CREATE TABLE %1 ("
+             u"id TEXT PRIMARY KEY, name TEXT NOT NULL, type TEXT NOT NULL, path TEXT NOT NULL,"
+             u"complexity INTEGER NOT NULL, lines_of_code INTEGER NOT NULL, is_read_only INTEGER NOT NULL,"
+             u"last_modified INTEGER NOT NULL, metadata_json TEXT NOT NULL,"
+             u"dependencies_json TEXT NOT NULL, dependents_json TEXT NOT NULL)"_s.arg(QLatin1String(kNodesTable)),
+            u"CREATE TABLE %1 ("
+             u"source_id TEXT NOT NULL REFERENCES %2(id) ON DELETE CASCADE,"
+             u"target_id TEXT NOT NULL REFERENCES %2(id) ON DELETE CASCADE,"
+             u"relationship TEXT NOT NULL, details TEXT NOT NULL, is_safe INTEGER NOT NULL,"
+             u"PRIMARY KEY (source_id, target_id, relationship))"_s.arg(QLatin1String(kEdgesTable), QLatin1String(kNodesTable)),
+            u"CREATE INDEX kateai_graph_nodes_path_idx ON %1(path)"_s.arg(QLatin1String(kNodesTable)),
+            u"CREATE INDEX kateai_graph_edges_source_idx ON %1(source_id)"_s.arg(QLatin1String(kEdgesTable)),
+            u"CREATE INDEX kateai_graph_edges_target_idx ON %1(target_id)"_s.arg(QLatin1String(kEdgesTable)),
+        };
+        for (const QString &statement : statements) {
+            QString statementError;
+            if (!execGraphSql(database, statement, &statementError)) {
+                return fail(statementError, classifyGraphSqlError(statementError));
+            }
+        }
+        return true;
+    }
+
+    if (!tables.contains(QLatin1String(kMetadataTable))
+        || !tables.contains(QLatin1String(kNodesTable))
+        || !tables.contains(QLatin1String(kEdgesTable))) {
+        return fail(u"database has an incomplete KateAI graph schema"_s,
+                    ProjectGraph::SqliteLoadError::InvalidSchema);
+    }
+    QSqlQuery metadataQuery(database);
+    if (!metadataQuery.exec(u"SELECT value FROM %1 WHERE key = 'schemaVersion'"_s.arg(QLatin1String(kMetadataTable)))) {
+        const QString message = metadataQuery.lastError().text();
+        return fail(message, classifyGraphSqlError(message));
+    }
+    if (!metadataQuery.next() || metadataQuery.value(0).toInt() != kGraphSchemaVersion) {
+        return fail(u"database has an incompatible KateAI graph schema version"_s,
+                    ProjectGraph::SqliteLoadError::InvalidSchema);
+    }
+    QSqlQuery versionQuery(database);
+    if (!versionQuery.exec(u"PRAGMA user_version"_s)) {
+        const QString message = versionQuery.lastError().text();
+        return fail(message, classifyGraphSqlError(message));
+    }
+    if (!versionQuery.next() || versionQuery.value(0).toInt() != kGraphSchemaVersion) {
+        return fail(u"database has an incompatible KateAI graph schema version"_s,
+                    ProjectGraph::SqliteLoadError::InvalidSchema);
+    }
+    return true;
+}
+
+QByteArray sortedStringSetJson(const QSet<QString> &values)
+{
+    QStringList sorted = values.values();
+    sorted.sort();
+    QJsonArray array;
+    for (const QString &value : sorted) {
+        array.append(value);
+    }
+    return QJsonDocument(array).toJson(QJsonDocument::Compact);
 }
 
 } // namespace
@@ -265,6 +404,13 @@ void ProjectGraph::scanDirectory(const QString &dirPath, const QString &parentNo
 
 void ProjectGraph::updateGraph(const QString &filePath, const QString &content)
 {
+    // The editor path passes the whole document. Analysis is capped like the
+    // initial scan, because the node keeps only a 4 KiB preview anyway; a
+    // multi-megabyte log would otherwise be copied and regex-scanned on every
+    // typing pause.
+    const QString analysed = content.size() > kMaxAnalysedBytes
+        ? content.left(static_cast<qsizetype>(kMaxAnalysedBytes))
+        : content;
     QString nodeId = generateNodeId(filePath);
     GraphNode *node = getNode(nodeId);
     if (!node) {
@@ -282,7 +428,7 @@ void ProjectGraph::updateGraph(const QString &filePath, const QString &content)
 
     if (node) {
         // Update node content and metrics
-        node->content = content;
+        node->content = analysed;
         updateNodeMetrics(node);
         indexFileSymbols(node);
         node->lastModified = QFileInfo(node->path).lastModified().toSecsSinceEpoch();
@@ -307,7 +453,7 @@ void ProjectGraph::updateGraph(const QString &filePath, const QString &content)
         newNode.type = u"file"_s;
         newNode.metadata.insert(u"language"_s, getNodeTypeFromPath(absolutePath));
         newNode.path = absolutePath;
-        newNode.content = content;
+        newNode.content = analysed;
         newNode.isReadOnly = false;
         newNode.lastModified = QDateTime::currentSecsSinceEpoch();
         updateNodeMetrics(&newNode);
@@ -402,6 +548,25 @@ void ProjectGraph::clear()
     m_adjacencyList.clear();
     m_pendingImports.clear();
     m_isDirty = true;
+}
+
+void ProjectGraph::takeStateFrom(ProjectGraph &other)
+{
+    clear();
+    m_nodes = std::move(other.m_nodes);
+    m_edges = std::move(other.m_edges);
+    m_adjacencyList = std::move(other.m_adjacencyList);
+    m_pendingImports = std::move(other.m_pendingImports);
+    m_visitedDirs = std::move(other.m_visitedDirs);
+    m_workspacePath = std::move(other.m_workspacePath);
+    m_lastUpdateTime = other.m_lastUpdateTime;
+    m_isDirty = other.m_isDirty;
+    other.m_nodes.clear();
+    other.m_edges.clear();
+    other.m_adjacencyList.clear();
+    other.m_pendingImports.clear();
+    other.m_visitedDirs.clear();
+    other.m_workspacePath.clear();
 }
 
 void ProjectGraph::addNode(const GraphNode &node)
@@ -1549,6 +1714,11 @@ QString ProjectGraph::contextSummary(int maxNodes, int maxEdges, int level) cons
 
 bool ProjectGraph::saveToFile(const QString &filePath) const
 {
+    if (filePath.endsWith(u".sqlite"_s, Qt::CaseInsensitive)
+        || filePath.endsWith(u".sqlite3"_s, Qt::CaseInsensitive)
+        || filePath.endsWith(u".db"_s, Qt::CaseInsensitive)) {
+        return saveToSqlite(filePath);
+    }
     const QString directory = QFileInfo(filePath).absolutePath();
     if (!directory.isEmpty() && !QDir().mkpath(directory)) {
         return false;
@@ -1570,8 +1740,294 @@ bool ProjectGraph::saveToFile(const QString &filePath) const
     return file.commit();
 }
 
+bool ProjectGraph::saveToSqlite(const QString &filePath) const
+{
+    if (filePath.isEmpty()) {
+        return false;
+    }
+    const QString directory = QFileInfo(filePath).absolutePath();
+    if (directory.isEmpty() || !QDir().mkpath(directory)) {
+        return false;
+    }
+    const QFileInfo destination(filePath);
+    if (destination.isSymLink() || (destination.exists() && !destination.isFile())) {
+        return false;
+    }
+    const QString connectionName = graphConnectionName();
+    QString error;
+    bool saved = false;
+    {
+        QSqlDatabase database = QSqlDatabase::addDatabase(u"QSQLITE"_s, connectionName);
+        database.setDatabaseName(filePath);
+        database.setConnectOptions(u"QSQLITE_BUSY_TIMEOUT=5000"_s);
+        if (database.open()) {
+            database.setNumericalPrecisionPolicy(QSql::HighPrecision);
+            if (!execGraphSql(database, u"PRAGMA foreign_keys = ON"_s, &error)
+                || !execGraphSql(database, u"PRAGMA synchronous = FULL"_s, &error)
+                || !execGraphSql(database, u"BEGIN IMMEDIATE"_s, &error)
+                || !prepareGraphSchema(database, true, &error)
+                || !execGraphSql(database, u"PRAGMA user_version = %1"_s.arg(kGraphSchemaVersion), &error)
+                || !execGraphSql(database, u"DELETE FROM %1"_s.arg(QLatin1String(kEdgesTable)), &error)
+                || !execGraphSql(database, u"DELETE FROM %1"_s.arg(QLatin1String(kNodesTable)), &error)
+                || !execGraphSql(database, u"DELETE FROM %1"_s.arg(QLatin1String(kMetadataTable)), &error)) {
+                database.rollback();
+            } else {
+                QSqlQuery metadata(database);
+                metadata.prepare(u"INSERT INTO %1 (key, value) VALUES (?, COALESCE(?, ''))"_s.arg(QLatin1String(kMetadataTable)));
+                const auto insertMetadata = [&](const QString &key, const QString &value) {
+                    metadata.bindValue(0, key);
+                    metadata.bindValue(1, value);
+                    return metadata.exec();
+                };
+                QSqlQuery nodes(database);
+                nodes.prepare(u"INSERT INTO %1 (id, name, type, path, complexity, lines_of_code,"
+                              u"is_read_only, last_modified, metadata_json, dependencies_json, dependents_json)"
+                              u" VALUES (COALESCE(?, ''), COALESCE(?, ''), COALESCE(?, ''), COALESCE(?, ''),"
+                              u" ?, ?, ?, ?, ?, ?, ?)"_s.arg(QLatin1String(kNodesTable)));
+                QSqlQuery edges(database);
+                edges.prepare(u"INSERT INTO %1 (source_id, target_id, relationship, details, is_safe)"
+                              u" VALUES (?, ?, ?, COALESCE(?, ''), ?)"_s.arg(QLatin1String(kEdgesTable)));
+
+                saved = insertMetadata(u"schemaVersion"_s, QString::number(kGraphSchemaVersion))
+                    && insertMetadata(u"workspacePath"_s, m_workspacePath)
+                    && insertMetadata(u"savedAt"_s, QString::number(QDateTime::currentSecsSinceEpoch()));
+                for (auto it = m_nodes.constBegin(); saved && it != m_nodes.constEnd(); ++it) {
+                    const GraphNode *node = it.value();
+                    if (!node) {
+                        continue;
+                    }
+                    nodes.bindValue(0, node->id);
+                    nodes.bindValue(1, node->name);
+                    nodes.bindValue(2, node->type);
+                    nodes.bindValue(3, node->path);
+                    nodes.bindValue(4, node->complexity);
+                    nodes.bindValue(5, node->linesOfCode);
+                    nodes.bindValue(6, node->isReadOnly ? 1 : 0);
+                    nodes.bindValue(7, node->lastModified);
+                    nodes.bindValue(8, QJsonDocument(node->metadata).toJson(QJsonDocument::Compact));
+                    nodes.bindValue(9, sortedStringSetJson(node->dependencies));
+                    nodes.bindValue(10, sortedStringSetJson(node->dependents));
+                    saved = nodes.exec();
+                    if (!saved) {
+                        error = nodes.lastError().text();
+                    }
+                }
+                for (auto it = m_edges.constBegin(); saved && it != m_edges.constEnd(); ++it) {
+                    const GraphEdge *edge = it.value();
+                    if (!edge) {
+                        continue;
+                    }
+                    edges.bindValue(0, edge->sourceId);
+                    edges.bindValue(1, edge->targetId);
+                    edges.bindValue(2, edge->relationship);
+                    edges.bindValue(3, edge->details);
+                    edges.bindValue(4, edge->isSafe ? 1 : 0);
+                    saved = edges.exec();
+                    if (!saved) {
+                        error = edges.lastError().text();
+                    }
+                }
+                if (saved) {
+                    saved = database.commit();
+                    if (!saved) {
+                        error = database.lastError().text();
+                        database.rollback();
+                    }
+                } else {
+                    database.rollback();
+                }
+            }
+            database.close();
+        } else {
+            error = database.lastError().text();
+        }
+    }
+    QSqlDatabase::removeDatabase(connectionName);
+    if (!saved) {
+        // Never unlink here: another process may have committed a valid cache
+        // while this connection failed. AgentLoop quarantines only recognized
+        // corruption before its next regeneration attempt.
+        qWarning() << "KateAI: could not save SQLite project graph" << filePath << error;
+    }
+    return saved;
+}
+
+bool ProjectGraph::loadFromSqlite(const QString &filePath, SqliteLoadError *errorKind)
+{
+    if (errorKind) {
+        *errorKind = SqliteLoadError::None;
+    }
+    const QFileInfo source(filePath);
+    constexpr qint64 kMaxGraphBytes = 64 * 1024 * 1024;
+    if (filePath.isEmpty() || !source.exists() || !source.isFile() || source.isSymLink()
+        || source.size() > kMaxGraphBytes) {
+        if (errorKind) {
+            *errorKind = SqliteLoadError::Io;
+        }
+        return false;
+    }
+
+    const QString connectionName = graphConnectionName();
+    QString error;
+    QJsonObject json;
+    {
+        QSqlDatabase database = QSqlDatabase::addDatabase(u"QSQLITE"_s, connectionName);
+        database.setDatabaseName(filePath);
+        database.setConnectOptions(u"QSQLITE_BUSY_TIMEOUT=5000"_s);
+        if (database.open()) {
+            if (!execGraphSql(database, u"PRAGMA query_only = ON"_s, &error)
+                || !database.transaction()) {
+                if (error.isEmpty()) {
+                    error = database.lastError().text();
+                }
+                if (errorKind) {
+                    *errorKind = classifyGraphSqlError(error);
+                }
+            } else if (prepareGraphSchema(database, false, &error, errorKind)) {
+                QHash<QString, QString> metadata;
+                QSqlQuery metadataQuery(database);
+                if (metadataQuery.exec(u"SELECT key, value FROM %1"_s.arg(QLatin1String(kMetadataTable)))) {
+                    while (metadataQuery.next()) {
+                        metadata.insert(metadataQuery.value(0).toString(), metadataQuery.value(1).toString());
+                    }
+                } else {
+                    error = metadataQuery.lastError().text();
+                    if (errorKind) {
+                        *errorKind = classifyGraphSqlError(error);
+                    }
+                }
+                if (error.isEmpty()) {
+                    json.insert(u"schemaVersion"_s, metadata.value(u"schemaVersion"_s).toInt());
+                    json.insert(u"workspacePath"_s, metadata.value(u"workspacePath"_s));
+                }
+
+                QJsonArray nodesArray;
+                QSqlQuery nodesQuery(database);
+                if (error.isEmpty()
+                    && nodesQuery.exec(u"SELECT id, name, type, path, complexity, lines_of_code, is_read_only,"
+                                       u"last_modified, metadata_json, dependencies_json, dependents_json"
+                                       u" FROM %1 ORDER BY id"_s.arg(QLatin1String(kNodesTable)))) {
+                    while (nodesQuery.next()) {
+                        const QJsonDocument metadataDocument = QJsonDocument::fromJson(nodesQuery.value(8).toByteArray());
+                        const QJsonDocument dependenciesDocument = QJsonDocument::fromJson(nodesQuery.value(9).toByteArray());
+                        const QJsonDocument dependentsDocument = QJsonDocument::fromJson(nodesQuery.value(10).toByteArray());
+                        if (!metadataDocument.isObject() || !dependenciesDocument.isArray()
+                            || !dependentsDocument.isArray()) {
+                            error = u"a graph node contains invalid JSON"_s;
+                            if (errorKind) {
+                                *errorKind = SqliteLoadError::Corrupt;
+                            }
+                            break;
+                        }
+                        QJsonObject node;
+                        node.insert(u"id"_s, nodesQuery.value(0).toString());
+                        node.insert(u"name"_s, nodesQuery.value(1).toString());
+                        node.insert(u"type"_s, nodesQuery.value(2).toString());
+                        node.insert(u"path"_s, nodesQuery.value(3).toString());
+                        node.insert(u"content"_s, QString());
+                        node.insert(u"complexity"_s, nodesQuery.value(4).toInt());
+                        node.insert(u"linesOfCode"_s, nodesQuery.value(5).toInt());
+                        node.insert(u"isReadOnly"_s, nodesQuery.value(6).toBool());
+                        node.insert(u"lastModified"_s, nodesQuery.value(7).toLongLong());
+                        node.insert(u"metadata"_s, metadataDocument.object());
+                        node.insert(u"dependencies"_s, dependenciesDocument.array());
+                        node.insert(u"dependents"_s, dependentsDocument.array());
+                        nodesArray.append(node);
+                    }
+                    if (error.isEmpty()) {
+                        json.insert(u"nodes"_s, nodesArray);
+                    }
+                } else if (error.isEmpty()) {
+                    error = nodesQuery.lastError().text();
+                    if (errorKind) {
+                        *errorKind = classifyGraphSqlError(error);
+                    }
+                }
+
+                QJsonArray edgesArray;
+                QSqlQuery edgesQuery(database);
+                if (error.isEmpty()
+                    && edgesQuery.exec(u"SELECT source_id, target_id, relationship, details, is_safe"
+                                       u" FROM %1 ORDER BY source_id, target_id, relationship"_s.arg(QLatin1String(kEdgesTable)))) {
+                    while (edgesQuery.next()) {
+                        QJsonObject edge;
+                        edge.insert(u"sourceId"_s, edgesQuery.value(0).toString());
+                        edge.insert(u"targetId"_s, edgesQuery.value(1).toString());
+                        edge.insert(u"relationship"_s, edgesQuery.value(2).toString());
+                        edge.insert(u"details"_s, edgesQuery.value(3).toString());
+                        edge.insert(u"isSafe"_s, edgesQuery.value(4).toBool());
+                        edgesArray.append(edge);
+                    }
+                    if (error.isEmpty()) {
+                        json.insert(u"edges"_s, edgesArray);
+                    }
+                } else if (error.isEmpty()) {
+                    error = edgesQuery.lastError().text();
+                    if (errorKind) {
+                        *errorKind = classifyGraphSqlError(error);
+                    }
+                }
+            }
+            database.rollback();
+            database.close();
+        } else {
+            error = database.lastError().text();
+            if (errorKind) {
+                *errorKind = SqliteLoadError::Io;
+            }
+        }
+    }
+    QSqlDatabase::removeDatabase(connectionName);
+
+    if (!error.isEmpty()) {
+        if (errorKind && *errorKind == SqliteLoadError::None) {
+            *errorKind = classifyGraphSqlError(error);
+        }
+        qWarning() << "KateAI: could not load SQLite project graph" << filePath << error;
+        return false;
+    }
+    QSet<QString> nodeIds;
+    for (const QJsonValue &value : json.value(u"nodes"_s).toArray()) {
+        const QString id = value.toObject().value(u"id"_s).toString();
+        if (id.isEmpty()) {
+            if (errorKind) {
+                *errorKind = SqliteLoadError::Corrupt;
+            }
+            return false;
+        }
+        nodeIds.insert(id);
+    }
+    for (const QJsonValue &value : json.value(u"edges"_s).toArray()) {
+        const QJsonObject edge = value.toObject();
+        if (!nodeIds.contains(edge.value(u"sourceId"_s).toString())
+            || !nodeIds.contains(edge.value(u"targetId"_s).toString())
+            || edge.value(u"relationship"_s).toString().isEmpty()) {
+            if (errorKind) {
+                *errorKind = SqliteLoadError::Corrupt;
+            }
+            return false;
+        }
+    }
+    ProjectGraph staged;
+    if (!staged.fromJson(json)) {
+        if (errorKind) {
+            *errorKind = SqliteLoadError::InvalidSchema;
+        }
+        return false;
+    }
+    takeStateFrom(staged);
+    m_lastUpdateTime = QDateTime::currentSecsSinceEpoch();
+    m_isDirty = false;
+    return true;
+}
+
 bool ProjectGraph::loadFromFile(const QString &filePath)
 {
+    if (filePath.endsWith(u".sqlite"_s, Qt::CaseInsensitive)
+        || filePath.endsWith(u".sqlite3"_s, Qt::CaseInsensitive)
+        || filePath.endsWith(u".db"_s, Qt::CaseInsensitive)) {
+        return loadFromSqlite(filePath);
+    }
     // A project-controlled path can be a FIFO, a device or a symlink to
     // /dev/zero; opening/readAll() would block or exhaust memory at workspace
     // open. Only a regular, non-symlink file of bounded size is read.
@@ -1687,21 +2143,69 @@ QJsonObject ProjectGraph::toJson() const
 
 bool ProjectGraph::fromJson(const QJsonObject &json)
 {
-    if (json.value(u"schemaVersion"_s).toInt() < kGraphSchemaVersion) {
+    if (json.value(u"schemaVersion"_s).toInt() != kGraphSchemaVersion) {
         return false;
     }
-    if (m_workspacePath.isEmpty()) {
-        m_workspacePath = json.value(u"workspacePath"_s).toString();
+    const QString serializedWorkspace = json.value(u"workspacePath"_s).toString();
+    if (serializedWorkspace.isEmpty()) {
+        return false;
     }
-    // Clear existing graph
-    clear();
+    const QString effectiveWorkspace = m_workspacePath.isEmpty() ? serializedWorkspace : m_workspacePath;
+    const QString absoluteRoot = QFileInfo(effectiveWorkspace).absoluteFilePath();
+    const QString canonicalRoot = QFileInfo(absoluteRoot).canonicalFilePath().isEmpty()
+        ? QDir::cleanPath(absoluteRoot) : QFileInfo(absoluteRoot).canonicalFilePath();
+    if (!m_workspacePath.isEmpty()) {
+        const QString expectedCanonical = QFileInfo(m_workspacePath).canonicalFilePath().isEmpty()
+            ? QDir(m_workspacePath).absolutePath() : QFileInfo(m_workspacePath).canonicalFilePath();
+        const QString actualCanonical = QFileInfo(serializedWorkspace).canonicalFilePath().isEmpty()
+            ? QDir(serializedWorkspace).absolutePath() : QFileInfo(serializedWorkspace).canonicalFilePath();
+        if (!pathWithinRoot(expectedCanonical, actualCanonical)
+            || !pathWithinRoot(actualCanonical, expectedCanonical)) {
+            return false;
+        }
+    }
 
-    // Load nodes
-    QJsonArray nodesArray = json.value(u"nodes"_s).toArray();
+    const QJsonArray nodesArray = json.value(u"nodes"_s).toArray();
+    QSet<QString> nodeIds;
     for (const QJsonValue &nodeValue : nodesArray) {
-        QJsonObject nodeJson = nodeValue.toObject();
-        GraphNode node;
+        const QJsonObject nodeJson = nodeValue.toObject();
+        const QString id = nodeJson.value(u"id"_s).toString();
+        const QString nodePath = nodeJson.value(u"path"_s).toString();
+        if (id.isEmpty() || nodeIds.contains(id) || nodePath.isEmpty()) {
+            return false;
+        }
+        QString absoluteNode = QDir::isAbsolutePath(nodePath)
+            ? QDir::cleanPath(nodePath) : QDir(absoluteRoot).absoluteFilePath(nodePath);
+        // A graph generated from a relative workspace stores that same spelling
+        // on its root node.
+        if (QDir::cleanPath(nodePath) == QDir::cleanPath(effectiveWorkspace)) {
+            absoluteNode = absoluteRoot;
+        }
+        const QString canonicalNode = QFileInfo(absoluteNode).canonicalFilePath().isEmpty()
+            ? QDir::cleanPath(absoluteNode) : QFileInfo(absoluteNode).canonicalFilePath();
+        if (!pathWithinRoot(canonicalNode, canonicalRoot)) {
+            return false;
+        }
+        nodeIds.insert(id);
+    }
 
+    const QJsonArray edgesArray = json.value(u"edges"_s).toArray();
+    for (const QJsonValue &edgeValue : edgesArray) {
+        const QJsonObject edgeJson = edgeValue.toObject();
+        if (!nodeIds.contains(edgeJson.value(u"sourceId"_s).toString())
+            || !nodeIds.contains(edgeJson.value(u"targetId"_s).toString())
+            || edgeJson.value(u"relationship"_s).toString().isEmpty()) {
+            return false;
+        }
+    }
+
+    // Build into a staging graph. A rejected cache must not clear or partially
+    // replace the live graph, and loading cannot fail after validation.
+    ProjectGraph staged;
+    staged.m_workspacePath = effectiveWorkspace;
+    for (const QJsonValue &nodeValue : nodesArray) {
+        const QJsonObject nodeJson = nodeValue.toObject();
+        GraphNode node;
         node.id = nodeJson.value(u"id"_s).toString();
         node.name = nodeJson.value(u"name"_s).toString();
         node.type = nodeJson.value(u"type"_s).toString();
@@ -1709,41 +2213,28 @@ bool ProjectGraph::fromJson(const QJsonObject &json)
         node.content = nodeJson.value(u"content"_s).toString();
         node.isReadOnly = nodeJson.value(u"isReadOnly"_s).toBool();
         node.lastModified = nodeJson.value(u"lastModified"_s).toInteger();
-
-        // Load dependencies
-        QJsonArray dependenciesArray = nodeJson.value(u"dependencies"_s).toArray();
-        for (const QJsonValue &depValue : dependenciesArray) {
+        for (const QJsonValue &depValue : nodeJson.value(u"dependencies"_s).toArray()) {
             node.dependencies.insert(depValue.toString());
         }
-
-        // Load dependents
-        QJsonArray dependentsArray = nodeJson.value(u"dependents"_s).toArray();
-        for (const QJsonValue &depValue : dependentsArray) {
+        for (const QJsonValue &depValue : nodeJson.value(u"dependents"_s).toArray()) {
             node.dependents.insert(depValue.toString());
         }
-
         node.complexity = nodeJson.value(u"complexity"_s).toInteger();
         node.linesOfCode = nodeJson.value(u"linesOfCode"_s).toInteger();
         node.metadata = nodeJson.value(u"metadata"_s).toObject();
-
-        addNode(node);
+        staged.addNode(node);
     }
-
-    // Load edges
-    QJsonArray edgesArray = json.value(u"edges"_s).toArray();
     for (const QJsonValue &edgeValue : edgesArray) {
-        QJsonObject edgeJson = edgeValue.toObject();
+        const QJsonObject edgeJson = edgeValue.toObject();
         GraphEdge edge;
-
         edge.sourceId = edgeJson.value(u"sourceId"_s).toString();
         edge.targetId = edgeJson.value(u"targetId"_s).toString();
         edge.relationship = edgeJson.value(u"relationship"_s).toString();
         edge.details = edgeJson.value(u"details"_s).toString();
         edge.isSafe = edgeJson.value(u"isSafe"_s).toBool();
-
-        addEdge(edge);
+        staged.addEdge(edge);
     }
-
+    takeStateFrom(staged);
     return true;
 }
 
@@ -1872,6 +2363,16 @@ QString ProjectGraph::generateNodeId(const QString &path, const QString &type)
         id += u"_"_s + type;
     }
     return id;
+}
+
+bool ProjectGraph::pathWithinRoot(const QString &path, const QString &root)
+{
+    const QString cleanPath = QDir::cleanPath(path);
+    const QString cleanRoot = QDir::cleanPath(root);
+    if (cleanRoot == u"/"_s) {
+        return cleanPath.startsWith(u'/');
+    }
+    return cleanPath == cleanRoot || cleanPath.startsWith(cleanRoot + u'/');
 }
 
 bool ProjectGraph::isBinaryFile(const QString &path)

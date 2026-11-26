@@ -271,6 +271,14 @@ QJsonObject AcpServer::dispatch(const QJsonObject &message)
     }
 
     if (method == u"session/new"_s) {
+        // Every session owns a full harness loop, graph and SQLite connection.
+        // A client that opens sessions without closing them must not be able to
+        // grow the process without bound.
+        constexpr int kMaxSessions = 64;
+        if (m_sessions.size() >= kMaxSessions) {
+            return fail(kServerError,
+                        u"Too many open sessions; close one before creating another."_s);
+        }
         const QString cwd = params.value(u"cwd"_s).toString();
         const QString workdir = cwd.isEmpty() ? QDir::currentPath() : cwd;
         if (!QFileInfo(workdir).isDir()) {

@@ -41,6 +41,7 @@ private Q_SLOTS:
         s.kiloModel = u"kilo-model-test"_s;
         s.acpAgentModels = u"{\"grok\": [\"m1\"]}"_s;
         s.acpAgentCommands = u"{\"grok\": [{\"name\":\"review\",\"description\":\"Review the changes\"}]}"_s;
+        s.acceptAllAcpTools = false;
         s.frequencyPenalty = 0.25;
         s.presencePenalty = 0.5;
         s.toolCallTimeoutMs = 45000;
@@ -91,6 +92,7 @@ private Q_SLOTS:
         QCOMPARE(loaded.kiloModel, s.kiloModel);
         QCOMPARE(loaded.acpAgentModels, s.acpAgentModels);
         QCOMPARE(loaded.acpAgentCommands, s.acpAgentCommands);
+        QCOMPARE(loaded.acceptAllAcpTools, false);
         QCOMPARE(loaded.frequencyPenalty, s.frequencyPenalty);
         QCOMPARE(loaded.presencePenalty, s.presencePenalty);
         QCOMPARE(loaded.toolCallTimeoutMs, s.toolCallTimeoutMs);
@@ -142,6 +144,7 @@ private Q_SLOTS:
         QCOMPARE(fresh.openaiCompatibleUrl, defaults.openaiCompatibleUrl);
         QCOMPARE(fresh.structuredPlanning, defaults.structuredPlanning);
         QCOMPARE(fresh.structuredThinking, defaults.structuredThinking);
+        QCOMPARE(fresh.acceptAllAcpTools, true);
         QCOMPARE(fresh.maxPlanSteps, defaults.maxPlanSteps);
         QCOMPARE(fresh.requireVerification, defaults.requireVerification);
         QCOMPARE(fresh.enableAutoRetry, defaults.enableAutoRetry);

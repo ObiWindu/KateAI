@@ -8,6 +8,7 @@
 #include <QDialog>
 #include <QPointer>
 
+class QHideEvent;
 class QLabel;
 class QListWidget;
 class QPushButton;
@@ -36,6 +37,9 @@ public:
     ~InspectorPanel() override;
 
     void refresh();
+
+protected:
+    void hideEvent(QHideEvent *event) override;
 
 private:
     void scheduleRefresh();

@@ -249,6 +249,9 @@ struct PermissionRequest {
     // for ACP tool calls of kind edit/write/delete, so the edit tracker can
     // review ACP edits whose tool names Kate does not know.
     bool mutatesFiles = false;
+    // True when an ACP agent invoked one of Kate's client methods rather than
+    // reporting one of the external agent's own tools.
+    bool acpClientMethod = false;
 
     // Filled only for the `question` tool: what is being asked, the answers
     // offered as one-tap chips, and whether the user may type their own. The
@@ -391,6 +394,10 @@ struct Settings {
     QString acpAgentCommands;
     ApiFormat apiFormat = ApiFormat::AcpNative;
     PermissionMode permissionMode = PermissionMode::Ask;
+    // Accept ACP permission requests by default. Kate-hosted client methods
+    // also override mode access and ordinary policy rules; immutable hard
+    // denies and the handler's sandbox checks still apply.
+    bool acceptAllAcpTools = true;
     SandboxProfile sandbox = SandboxProfile::Workspace;
     // Agent budgets are intentionally separate: API model turns, tool calls, and provider rate.
     // 0 = unlimited. A positive value is a safety ceiling, not a required cap.

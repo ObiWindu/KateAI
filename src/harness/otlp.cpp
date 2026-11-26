@@ -188,6 +188,9 @@ void OtlpExporter::send(const QList<Span> &spans)
     request.setHeader(QNetworkRequest::ContentTypeHeader, u"application/json"_s);
     request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
                          QNetworkRequest::NoLessSafeRedirectPolicy);
+    // A collector that accepts the connection and then stalls must not pin the
+    // span batch and the request body for the lifetime of the loop.
+    request.setTransferTimeout(30000);
     for (auto it = m_headers.constBegin(); it != m_headers.constEnd(); ++it) {
         request.setRawHeader(it.key().toUtf8(), it.value().toString().toUtf8());
     }
@@ -223,6 +226,9 @@ void OtlpExporter::send(const QList<Span> &spans)
             });
             return;
         }
+        // The retry budget is spent; release the batch before reporting the
+        // failure. The exporter is usually deleted right after the signal.
+        m_pending.clear();
         Q_EMIT exportFinished(false, status, error);
     });
 }

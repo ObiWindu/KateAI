@@ -125,8 +125,20 @@ public:
     QString contextSummary(int maxNodes, int maxEdges, int level) const;
 
     // Serialization
+    enum class SqliteLoadError {
+        None,
+        Io,
+        InvalidSchema,
+        Corrupt,
+    };
     bool saveToFile(const QString &filePath) const;
     bool loadFromFile(const QString &filePath);
+    bool saveToSqlite(const QString &filePath) const;
+    bool loadFromSqlite(const QString &filePath, SqliteLoadError *error = nullptr);
+    bool saveToDatabase(const QString &filePath) const { return saveToSqlite(filePath); }
+    bool loadFromDatabase(const QString &filePath) { return loadFromSqlite(filePath); }
+    bool saveToDb(const QString &filePath) const { return saveToSqlite(filePath); }
+    bool loadFromDb(const QString &filePath) { return loadFromSqlite(filePath); }
     QJsonObject toJson() const;
     bool fromJson(const QJsonObject &json);
 
@@ -134,6 +146,7 @@ public:
     static QString generateNodeId(const QString &path, const QString &type = QStringLiteral("file"));
     static QString getNodeTypeFromPath(const QString &path);
     static bool isBinaryFile(const QString &path);
+    static bool pathWithinRoot(const QString &path, const QString &root);
     static QString extractContentPreview(const QString &content, int maxLength);
 
     // Getters
@@ -165,6 +178,7 @@ private:
     qint64 m_lastUpdateTime;
     bool m_isDirty;
 
+    void takeStateFrom(ProjectGraph &other);
     void buildAdjacencyList();
     void cleanupDeletedNodes();
     void updateNodeMetrics(GraphNode *node);

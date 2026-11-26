@@ -116,6 +116,13 @@ void CostLedger::recordSubagent(const QString &taskId, const QString &model,
     if (taskId.isEmpty() || usage.isEmpty()) {
         return;
     }
+    // Cost attribution is useful for the current session, but a long-running
+    // conversation must not accumulate one entry per sub-agent forever. The
+    // per-model totals in m_total stay exact regardless of this cap.
+    constexpr int kMaxSubagentEntries = 256;
+    if (!m_subagents.contains(taskId) && m_subagents.size() >= kMaxSubagentEntries) {
+        m_subagents.erase(m_subagents.begin());
+    }
     Entry &entry = m_subagents[taskId];
     entry.key = taskId;
     entry.model = model;

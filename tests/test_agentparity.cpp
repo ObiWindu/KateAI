@@ -117,6 +117,73 @@ private Q_SLOTS:
         Q_UNUSED(access)
     }
 
+    void acpClientMethodsUseTheDefaultAcceptPolicy()
+    {
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+        QVERIFY(QDir().mkpath(workspace.filePath(u".kateai"_s)));
+        QFile policyFile(workspace.filePath(u".kateai/policy.json"_s));
+        QVERIFY(policyFile.open(QIODevice::WriteOnly));
+        policyFile.write(QJsonDocument(QJsonObject{{u"rules"_s, QJsonArray{
+            QJsonObject{{u"id"_s, u"blocked-client-write"_s},
+                        {u"decision"_s, u"deny"_s},
+                        {u"match"_s, QJsonObject{{u"tool"_s, u"write_file"_s},
+                                                {u"path"_s, u"client.txt"_s}}}}
+        }}}).toJson());
+        policyFile.close();
+        qputenv("KATEAI_POLICY_V2", "1");
+
+        AgentLoop agent;
+        Settings settings;
+        settings.provider = Provider::Acp;
+        settings.apiFormat = ApiFormat::AcpNative;
+        settings.permissionMode = PermissionMode::Ask;
+        settings.planMode = true;
+        settings.sandbox = SandboxProfile::Workspace;
+        QVERIFY(settings.acceptAllAcpTools);
+        agent.setSettings(settings);
+        agent.setWorkspace(workspace.path());
+
+        int prompts = 0;
+        QStringList activity;
+        connect(&agent, &AgentLoop::permissionNeeded, &agent,
+                [&](const PermissionRequest &) { ++prompts; });
+        connect(&agent, &AgentLoop::activityUpdated, &agent,
+                [&](const QString &message) { activity.append(message); });
+
+        PermissionRequest clientWrite;
+        clientWrite.acpClientMethod = true;
+        clientWrite.toolName = u"write_file"_s;
+        clientWrite.toolCallId = u"acp-client-write"_s;
+        clientWrite.risk = ToolRisk::Write;
+        clientWrite.mutatesFiles = true;
+        clientWrite.path = u"client.txt"_s;
+        clientWrite.details = u"{\"path\":\"client.txt\",\"content\":\"accepted\"}"_s;
+        Q_EMIT agent.acpClient()->permissionNeeded(clientWrite);
+        QCOMPARE(prompts, 0);
+        QVERIFY(activity.isEmpty());
+
+        PermissionRequest hardline;
+        hardline.acpClientMethod = true;
+        hardline.toolName = u"bash"_s;
+        hardline.toolCallId = u"acp-client-hardline"_s;
+        hardline.risk = ToolRisk::Execute;
+        hardline.details = u"{\"command\":\"git push --force origin main\"}"_s;
+        Q_EMIT agent.acpClient()->permissionNeeded(hardline);
+        QVERIFY(!activity.isEmpty());
+
+        settings.acceptAllAcpTools = false;
+        settings.planMode = false;
+        agent.setSettings(settings);
+        PermissionRequest optedOut = clientWrite;
+        optedOut.toolCallId = u"acp-client-opt-out"_s;
+        const int before = activity.size();
+        Q_EMIT agent.acpClient()->permissionNeeded(optedOut);
+        QVERIFY(activity.size() > before);
+        QVERIFY(activity.last().contains(u"blocked-client-write"_s));
+        qunsetenv("KATEAI_POLICY_V2");
+    }
+
     void toolAccessMatchesMcpToolsByPrefix()
     {
         ToolAccess access = ModeRegistry::toolAccessForGroups({ToolGroup::read(), ToolGroup::mcp()});

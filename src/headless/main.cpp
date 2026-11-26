@@ -13,6 +13,7 @@
 
 #include <QCoreApplication>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
 #include <QJsonArray>
@@ -62,16 +63,51 @@ bool writeFile(const QString &path, const QByteArray &contents, QString *error)
     return true;
 }
 
+// A workspace diff is an artifact, not a live buffer: cap it so a large
+// binary or an accidental build directory cannot exhaust memory.
+constexpr qsizetype kMaxDiffChars = 32 * 1024 * 1024;
+constexpr qint64 kMaxUntrackedFileBytes = 8 * 1024 * 1024;
+
+QByteArray readProcessCapped(QProcess &process, qsizetype cap, bool *capped)
+{
+    QByteArray out;
+    QElapsedTimer timer;
+    timer.start();
+    while (process.state() != QProcess::NotRunning) {
+        out += process.readAllStandardOutput();
+        if (out.size() > cap) {
+            *capped = true;
+            process.kill();
+            break;
+        }
+        if (timer.elapsed() > 30000) {
+            process.kill();
+            break;
+        }
+        process.waitForFinished(50);
+    }
+    out += process.readAllStandardOutput();
+    return out;
+}
+
 QString gitDiff(const QString &workspace)
 {
     QProcess git;
     git.setWorkingDirectory(workspace);
     git.start(u"git"_s, {u"-C"_s, workspace, u"diff"_s, u"--no-ext-diff"_s, u"--binary"_s});
-    if (!git.waitForFinished(30000) || git.exitStatus() != QProcess::NormalExit
-        || git.exitCode() != 0) {
+    if (!git.waitForStarted(5000)) {
         return QString();
     }
-    QString patch = QString::fromUtf8(git.readAllStandardOutput());
+    bool capped = false;
+    const QByteArray tracked = readProcessCapped(git, kMaxDiffChars, &capped);
+    if (!capped && (git.exitStatus() != QProcess::NormalExit || git.exitCode() != 0)) {
+        return QString();
+    }
+    QString patch = QString::fromUtf8(tracked.left(kMaxDiffChars));
+    if (capped) {
+        patch += u"\n... (diff truncated at %1 bytes)\n"_s.arg(kMaxDiffChars);
+        return patch;
+    }
 
     git.start(u"git"_s, {u"-C"_s, workspace, u"ls-files"_s, u"--others"_s,
                          u"--exclude-standard"_s});
@@ -82,6 +118,15 @@ QString gitDiff(const QString &workspace)
         QString::fromUtf8(git.readAllStandardOutput()).split(u'\n', Qt::SkipEmptyParts);
     for (const QString &relative : untracked) {
         const QString absolute = QDir(workspace).filePath(relative);
+        // A single huge untracked file (a disk image, a build artifact) would
+        // otherwise be materialised twice: by git and by the patch string.
+        const QFileInfo info(absolute);
+        if (info.exists() && info.isFile() && info.size() > kMaxUntrackedFileBytes) {
+            patch += u"\n... (skipped untracked %1: %2 bytes)\n"_s
+                         .arg(relative)
+                         .arg(info.size());
+            continue;
+        }
         QProcess diff;
         diff.start(u"git"_s, {u"diff"_s, u"--no-index"_s, u"--binary"_s, u"--"_s,
                               QStringLiteral("/dev/null"), absolute});
@@ -89,6 +134,11 @@ QString gitDiff(const QString &workspace)
             continue;
         }
         patch += QString::fromUtf8(diff.readAllStandardOutput());
+        if (patch.size() > kMaxDiffChars) {
+            patch = patch.left(kMaxDiffChars);
+            patch += u"\n... (diff truncated at %1 bytes)\n"_s.arg(kMaxDiffChars);
+            break;
+        }
     }
     return patch;
 }

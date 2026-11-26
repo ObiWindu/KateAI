@@ -59,6 +59,48 @@ private Q_SLOTS:
         QCOMPARE(loaded.messages.size(), 2);
     }
 
+    void largeConversationRoundTripsThroughJournal()
+    {
+        const QString id = SessionStore::createNewConversation();
+        QVERIFY(!id.isEmpty());
+
+        SessionStore::SessionData data;
+        for (int i = 0; i < 250; ++i) {
+            ChatMessage msg;
+            msg.role = (i % 2) ? ChatMessage::Role::Assistant : ChatMessage::Role::User;
+            msg.content = QStringLiteral("message-%1-").arg(i) + QString(1000, u'x');
+            data.messages.append(msg);
+        }
+        // saveConversation() returns whether the conversation was new, so an
+        // update intentionally returns false; the loaded state is the check.
+        QVERIFY(SessionStore::saveConversation(id, data, u"Large"_s));
+
+        for (int i = 250; i < 260; ++i) {
+            ChatMessage msg;
+            msg.role = ChatMessage::Role::User;
+            msg.content = QStringLiteral("message-%1-").arg(i) + QString(1000, u'x');
+            data.messages.append(msg);
+        }
+        SessionStore::saveConversation(id, data);
+
+        const SessionStore::SessionData loaded = SessionStore::loadConversation(id);
+        QCOMPARE(loaded.messages.size(), 260);
+        QCOMPARE(loaded.messages.last().content, data.messages.last().content);
+
+        // Compaction replaces the shape of the list. The journal must fall
+        // back to a full revision instead of appending to the old prefix.
+        data.messages = data.messages.mid(200);
+        SessionStore::saveConversation(id, data);
+        const SessionStore::SessionData compacted = SessionStore::loadConversation(id);
+        QCOMPARE(compacted.messages.size(), 60);
+        QCOMPARE(compacted.messages.first().content, data.messages.first().content);
+        QCOMPARE(compacted.messages.last().content, data.messages.last().content);
+
+        SessionStore::deleteConversation(id);
+        const SessionStore::SessionData removed = SessionStore::loadConversation(id);
+        QVERIFY(removed.messages.isEmpty());
+    }
+
     void lastTurnIdSurvivesARoundTrip()
     {
         const QString id = SessionStore::createNewConversation();

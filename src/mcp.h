@@ -301,8 +301,10 @@ private:
     QHash<QString, McpClient *> m_clients;
     bool m_enabled = true;
     bool m_autoConnect = true;
-    // Whether the server list of the workspace may be loaded from disk.
-    bool m_loadWorkspaceConfig = true;
+    // Whether the server list of the workspace may be loaded from disk. A
+    // project's server list is a program that runs with the user's
+    // privileges, so it stays unloaded until the user confirms it.
+    bool m_loadWorkspaceConfig = false;
     int m_timeoutMs = 60000;
     QStringList m_autoApproved;
     QStringList m_readOnlyTools;

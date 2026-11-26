@@ -361,6 +361,7 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     registryButtons->addStretch();
     registryLayout->addLayout(registryButtons);
     tabs->addTab(registryWidget, i18n("ACP Registry"));
+    m_acpRegistryTab = tabs->indexOf(registryWidget);
     m_acpRegistryNetwork = new QNetworkAccessManager(this);
 
     auto refreshRegistry = [this]() {
@@ -638,7 +639,15 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
         m_acpRegistryStatus->setText(i18n("Uninstalled %1.", name));
         showRegistryResults(m_acpRegistrySearch->text());
     });
-    refreshRegistry();
+    // Fetch the registry only when its tab is first opened. Building the
+    // settings dialog should not download and parse a remote JSON document the
+    // user may never look at.
+    connect(tabs, &QTabWidget::currentChanged, this, [this, refreshRegistry](int index) {
+        if (index == m_acpRegistryTab && !m_acpRegistryFetchStarted) {
+            m_acpRegistryFetchStarted = true;
+            refreshRegistry();
+        }
+    });
 
     // ==========================================
     // TAB 2: Security & Permissions
@@ -653,6 +662,10 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
     m_permission->addItem(permissionModeLabel(PermissionMode::AcceptEdits), permissionModeId(PermissionMode::AcceptEdits));
     m_permission->addItem(permissionModeLabel(PermissionMode::AlwaysApprove), permissionModeId(PermissionMode::AlwaysApprove));
     securityForm->addRow(i18n("Permission mode:"), m_permission);
+
+    m_acceptAllAcpTools = new QCheckBox(i18n("Accept all ACP tools automatically"), securityWidget);
+    m_acceptAllAcpTools->setToolTip(i18n("Avoids a second approval prompt after an ACP agent requests a tool. Kate-hosted ACP client methods also override mode access and ordinary policy rules; immutable hard denies and sandbox checks still apply."));
+    securityForm->addRow(i18n("ACP tools:"), m_acceptAllAcpTools);
 
     m_sandbox = new QComboBox(securityWidget);
     m_sandbox->addItem(sandboxProfileLabel(SandboxProfile::Workspace), sandboxProfileId(SandboxProfile::Workspace));
@@ -1991,6 +2004,7 @@ s.opencodeModel = m_opencodeModel->currentText().trimmed();
     s.apiFormat = apiFormatFromId(m_apiFormat->currentData().toString());
 
     s.permissionMode = permissionModeFromId(m_permission->currentData().toString());
+    s.acceptAllAcpTools = m_acceptAllAcpTools->isChecked();
     s.sandbox = sandboxProfileFromId(m_sandbox->currentData().toString());
     s.maxToolCalls = m_maxIter->value();
     s.maxIterations = s.maxToolCalls;
@@ -2254,6 +2268,7 @@ void KateAiConfigPage::reset()
     }
 
     m_permission->setCurrentIndex(std::max(0, m_permission->findData(permissionModeId(s.permissionMode))));
+    m_acceptAllAcpTools->setChecked(s.acceptAllAcpTools);
     m_sandbox->setCurrentIndex(std::max(0, m_sandbox->findData(sandboxProfileId(s.sandbox))));
     m_timeout->setValue(std::max(1, s.bashTimeoutMs / 1000));
     m_deny->setPlainText(s.extraDenyGlobs.join(u'\n'));

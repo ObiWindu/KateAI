@@ -30,6 +30,13 @@ namespace
 const QString kSchemaVersionKey = QStringLiteral("event_schema_version");
 constexpr int kEventSchemaVersion = 1;
 
+// A conversation's event log is append-only, and the trace/export paths read
+// it. Twenty thousand events is far above a normal session but keeps a
+// pathological one from growing the SQLite file and every full read without a
+// bound. The message projection and the session payload keep the display
+// history, so trimming the oldest events does not erase the transcript.
+constexpr qint64 kMaxEventsPerConversation = 20000;
+
 QString connectionNameFor(EventStore *store)
 {
     static quint64 counter = 0;
@@ -391,6 +398,25 @@ bool EventStore::append(const QString &conversationId, const QList<HarnessEvent>
             *error = m_lastError;
         }
         return false;
+    }
+
+    if (head > kMaxEventsPerConversation) {
+        // Keep the newest window. The first turns survive in the compaction
+        // summary and the projection; replay/export simply start at the
+        // oldest retained sequence.
+        QSqlQuery trim(db);
+        trim.prepare(u"DELETE FROM session_event "
+                     "WHERE conversation_id = ? AND seq <= ?"_s);
+        trim.addBindValue(conversationId);
+        trim.addBindValue(head - kMaxEventsPerConversation);
+        if (!trim.exec()) {
+            m_lastError = trim.lastError().text();
+            db.rollback();
+            if (error) {
+                *error = m_lastError;
+            }
+            return false;
+        }
     }
 
     if (!db.commit()) {

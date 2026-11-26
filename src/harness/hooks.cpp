@@ -5,6 +5,7 @@
 
 #include "hooks.h"
 
+#include "boundedfile.h"
 #include "sandbox.h"
 
 #include <KConfigGroup>
@@ -31,11 +32,9 @@ namespace
 
 QString readFile(const QString &path)
 {
-    QFile file(path);
-    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
-        return {};
-    }
-    return QString::fromUtf8(file.readAll());
+    // Hook files are small. A bounded read keeps a FIFO or a huge project file
+    // from becoming a GUI-thread allocation.
+    return readBoundedFile(path, 1024 * 1024);
 }
 
 bool matchesEventMatcher(const QString &matcher, const QJsonObject &payload)

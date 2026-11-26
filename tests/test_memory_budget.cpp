@@ -7,6 +7,7 @@
 #include "graph/projectgraph.h"
 #include "harness/toolresults.h"
 #include "sessionstore.h"
+#include "workspaceservices.h"
 
 #include <QDir>
 #include <QFile>
@@ -85,6 +86,29 @@ private Q_SLOTS:
                  qPrintable(QStringLiteral("restore delta %1 bytes exceeds 40 MB").arg(delta)));
     }
 
+    void restoredHistoryStaysBounded()
+    {
+        SessionStore::SessionData data;
+        data.messages.reserve(2000);
+        for (int i = 0; i < 2000; ++i) {
+            ChatMessage message;
+            message.role = ChatMessage::Role::User;
+            message.content = QString(16000, u'x');
+            data.messages.append(message);
+        }
+
+        AgentLoop agent;
+        agent.restoreSession(data);
+        const QJsonObject counters = agent.memoryCounters();
+        qInfo() << "restoredHistoryStaysBounded" << counters;
+        QVERIFY2(counters.value(u"messageChars"_s).toDouble() <= 16.0 * 1024 * 1024,
+                 "the model history exceeded its safety ceiling");
+        QVERIFY2(counters.value(u"messages"_s).toInt() < data.messages.size(),
+                 "a restored oversized history was not trimmed");
+        QVERIFY2(agent.messages().first().role == ChatMessage::Role::User,
+                 "the trim broke the first retained turn boundary");
+    }
+
     void writeHeavyTranscriptStaysBounded()
     {
         SessionStore::SessionData data;
@@ -120,6 +144,32 @@ private Q_SLOTS:
                 || counters.value(u"transcriptMessages"_s).toInt() <= 8);
         QVERIFY2(counters.value(u"actionRepeatEntries"_s).toInt() == 0,
                  "restored action repeat state was not reset");
+    }
+
+    void workspaceServicesAreShared()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        QVERIFY(writeFile(dir.filePath(u"main.cpp"_s),
+                          QByteArrayLiteral("int main() { return 0; }\n")));
+
+        WorkspaceServices services(dir.path());
+        QVERIFY(services.graph());
+        QVERIFY(services.mcpManager());
+        QVERIFY(services.eventStore());
+        QVERIFY(!services.mcpManager()->loadsWorkspaceConfig());
+        QVERIFY(services.graph()->getNodeCount() > 0);
+
+        AgentLoop first;
+        AgentLoop second;
+        // Both loops adopt the same objects; the second install must not
+        // create a second graph or event connection.
+        first.setHarnessServices(services.graph(), services.mcpManager(), services.eventStore());
+        second.setHarnessServices(services.graph(), services.mcpManager(), services.eventStore());
+        QCOMPARE(first.getProjectGraph(), services.graph().get());
+        QCOMPARE(second.getProjectGraph(), services.graph().get());
+        QCOMPARE(first.mcpManager(), services.mcpManager());
+        QCOMPARE(second.mcpManager(), services.mcpManager());
     }
 
     void toolResultPageStaysBounded()

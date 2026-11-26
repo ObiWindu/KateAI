@@ -96,6 +96,33 @@ QString clipToolUiText(const QString &text)
 constexpr qsizetype kMaxTranscriptMessages = 1000;
 constexpr qsizetype kMaxTranscriptChars = 8 * 1024 * 1024;
 
+// The model history is normally bounded by context compaction, not by a count.
+// A large context window, a disabled auto-compact setting or a very long tool
+// loop can still keep it growing, so it needs an independent safety ceiling.
+// Trimming happens only at user-turn boundaries: an assistant tool-call message
+// and its tool results must never be split.
+constexpr qsizetype kHistoryTargetMessages = 3000;
+constexpr qsizetype kHistoryTargetChars = 12 * 1024 * 1024;
+constexpr qsizetype kMinRetainedHistoryMessages = 16;
+
+// Reasoning is not needed at its full length for the next request. Providers
+// can stream far more than the requested thinking budget; cap what is retained
+// and forwarded so a broken or reasoning-heavy model cannot pin megabytes.
+constexpr qsizetype kMaxThinkingChars = 1024 * 1024;
+
+// A completed sub-agent's record is kept for the rest of the conversation. The
+// sidechain has the full transcript, so the in-memory copy can be bounded.
+constexpr qsizetype kMaxSubagentSummaryChars = 16 * 1024;
+constexpr qsizetype kMaxSubagentStreamChars = 256 * 1024;
+
+// One entry per path is enough for verification and the transcript. A monorepo
+// sweep can touch thousands; the old history is not needed after that.
+constexpr qsizetype kMaxChangedPaths = 4096;
+
+// Automatic OTLP export happens at every turn end and must not read a whole
+// long conversation's event log. Explicit export still uses the complete data.
+constexpr int kMaxAutoTelemetryEvents = 5000;
+
 // Applies an AgentSpec model override to the provider-specific slot the
 // current settings use. "inherit" and empty are ignored.
 void applyModelOverride(Settings &settings, const QString &model)
@@ -189,7 +216,7 @@ SubagentRecord subagentRecordFromJson(const QJsonObject &object)
     record.modeId = object.value(u"modeId"_s).toString();
     record.description = object.value(u"description"_s).toString();
     record.status = object.value(u"status"_s).toString(u"interrupted"_s);
-    record.summary = object.value(u"summary"_s).toString();
+    record.summary = object.value(u"summary"_s).toString().left(kMaxSubagentSummaryChars);
     record.error = object.value(u"error"_s).toString();
     record.isolation = object.value(u"isolation"_s).toString(u"in-process"_s);
     record.worktreePath = object.value(u"worktreePath"_s).toString();
@@ -365,7 +392,8 @@ AgentLoop::AgentLoop(QObject *parent)
     m_memory = std::make_unique<MemoryLoader>();
 
     m_mcp = new McpManager(this);
-        m_locks = new WorkspaceLocks(this);
+    m_ownsMcp = true;
+    m_locks = new WorkspaceLocks(this);
 
     m_nextModelTimer.setSingleShot(true);
     connect(&m_nextModelTimer, &QTimer::timeout, this, &AgentLoop::sendToModel);
@@ -384,8 +412,13 @@ AgentLoop::AgentLoop(QObject *parent)
         Q_EMIT assistantDelta(delta);
     });
     connect(&m_client, &LlmClient::thinkingDelta, this, [this](const QString &delta) {
-        m_currentThinking += delta;
-        Q_EMIT thinkingDelta(delta);
+        const qsizetype room = kMaxThinkingChars - m_currentThinking.size();
+        if (room <= 0) {
+            return;
+        }
+        const QString kept = delta.size() > room ? delta.left(room) : delta;
+        m_currentThinking += kept;
+        Q_EMIT thinkingDelta(kept);
     });
     connect(&m_client, &LlmClient::textReset, this, [this]() {
         // A retry replaces the answer that was streamed so far, including the
@@ -458,8 +491,13 @@ AgentLoop::AgentLoop(QObject *parent)
         Q_EMIT assistantDelta(delta);
     });
     connect(&m_acp, &AcpClient::thinkingDelta, this, [this](const QString &delta) {
-        m_currentThinking += delta;
-        Q_EMIT thinkingDelta(delta);
+        const qsizetype room = kMaxThinkingChars - m_currentThinking.size();
+        if (room <= 0) {
+            return;
+        }
+        const QString kept = delta.size() > room ? delta.left(room) : delta;
+        m_currentThinking += kept;
+        Q_EMIT thinkingDelta(kept);
     });
     connect(&m_acp, &AcpClient::planUpdated, this, [this](const QJsonArray &plan) {
         m_currentPlan = plan;
@@ -552,10 +590,11 @@ AgentLoop::AgentLoop(QObject *parent)
         Q_EMIT toolFinished(bounded);
     });
     connect(&m_acp, &AcpClient::permissionNeeded, this, [this](const PermissionRequest &request) {
+        const bool acceptedClientMethod = m_settings.acceptAllAcpTools && request.acpClientMethod;
         // The agent runs its own tools, but the active mode still decides
-        // which actions exist. Without this check a plan/ask turn could let
-        // an agent write or run commands through AlwaysApprove/AcceptEdits.
-        if (!acpToolAllowed(request)) {
+        // which actions exist. Kate-hosted client methods are accepted by the
+        // desktop ACP policy unless the user opted out.
+        if (!acceptedClientMethod && !acpToolAllowed(request)) {
             m_acp.resolvePermission(PermissionDecision::Deny);
             Q_EMIT activityUpdated(i18n("Declined '%1': the active mode does not allow it.", request.toolName));
             return;
@@ -568,10 +607,18 @@ AgentLoop::AgentLoop(QObject *parent)
             }
             const PolicyDecision policy = m_policyEngine.evaluate(request.toolName, arguments,
                                                                  *m_sandbox, m_workspace);
-            if (policy.verdict == PolicyVerdict::Deny) {
+            if (policy.verdict == PolicyVerdict::Deny
+                && (!acceptedClientMethod || policy.ruleId == u"hardline"_s)) {
                 recordPermissionDecision(request.toolName, u"deny"_s, policy.ruleId, policy.reason);
                 m_acp.resolvePermission(PermissionDecision::Deny);
                 Q_EMIT activityUpdated(i18n("Declined '%1': %2", request.toolName, policy.reason));
+                return;
+            }
+            if (acceptedClientMethod) {
+                recordPermissionDecision(request.toolName, u"allow-once"_s,
+                                         policy.verdict == PolicyVerdict::NoMatch ? u"acp-client-auto"_s : policy.ruleId,
+                                         u"Accepted by the default ACP client-tool policy."_s);
+                m_acp.resolvePermission(PermissionDecision::AllowOnce);
                 return;
             }
             if (policy.verdict == PolicyVerdict::Allow) {
@@ -646,21 +693,7 @@ AgentLoop::AgentLoop(QObject *parent)
     });
 
     // --- MCP ------------------------------------------------------------------
-    connect(m_mcp, &McpManager::toolsChanged, this, [this] {
-        // Newly discovered MCP tools change what may be auto-approved.
-        syncPermissionPolicy();
-        syncToolAccess();
-        Q_EMIT mcpToolsChanged();
-        Q_EMIT mcpStatusChanged(m_mcp->statusSummary());
-    });
-    connect(m_mcp, &McpManager::serversChanged, this, [this] {
-        syncToolAccess();
-        Q_EMIT mcpStatusChanged(m_mcp->statusSummary());
-    });
-    connect(m_mcp, &McpManager::serverStatusChanged, this, [this] {
-        Q_EMIT mcpStatusChanged(m_mcp->statusSummary());
-    });
-    connect(m_mcp, &McpManager::logMessage, this, &AgentLoop::mcpLogMessage);
+    wireMcpManager();
 
     // --- Checkpoints -----------------------------------------------------------
     connect(&m_checkpoints, &CheckpointManager::checkpointCreated, this, [this](const QString &id, const QString &label) {
@@ -1677,15 +1710,79 @@ void AgentLoop::resolveSubtaskPermission(const QString &taskId, PermissionDecisi
     child->resolvePermission(decision, toolCallId);
 }
 
+void AgentLoop::wireMcpManager()
+{
+    if (!m_mcp) {
+        return;
+    }
+    connect(m_mcp, &McpManager::toolsChanged, this, [this] {
+        // Newly discovered MCP tools change what may be auto-approved.
+        syncPermissionPolicy();
+        syncToolAccess();
+        Q_EMIT mcpToolsChanged();
+        Q_EMIT mcpStatusChanged(m_mcp->statusSummary());
+    });
+    connect(m_mcp, &McpManager::serversChanged, this, [this] {
+        syncToolAccess();
+        Q_EMIT mcpStatusChanged(m_mcp->statusSummary());
+    });
+    connect(m_mcp, &McpManager::serverStatusChanged, this, [this] {
+        Q_EMIT mcpStatusChanged(m_mcp->statusSummary());
+    });
+    connect(m_mcp, &McpManager::logMessage, this, &AgentLoop::mcpLogMessage);
+}
+
 void AgentLoop::setMcpManager(McpManager *manager)
 {
+    if (m_mcp == manager) {
+        syncPermissionPolicy();
+        syncToolAccess();
+        return;
+    }
+    if (m_mcp) {
+        disconnect(m_mcp, nullptr, this, nullptr);
+    }
     if (m_ownsMcp && m_mcp) {
         m_mcp->deleteLater();
     }
     m_mcp = manager;
     m_ownsMcp = false;
+    wireMcpManager();
     syncPermissionPolicy();
     syncToolAccess();
+}
+
+void AgentLoop::setHarnessServices(std::shared_ptr<ProjectGraph> graph, McpManager *mcp,
+                                   std::shared_ptr<EventStore> events)
+{
+    // A workspace switch can land mid-turn. Replacing the graph or the MCP
+    // manager then could free objects an in-flight tool still points at; the
+    // existing setWorkspace() path already defers those changes to the turn
+    // boundary, and the next refresh installs the shared services afterwards.
+    if (m_busy) {
+        return;
+    }
+    if (mcp && mcp != m_mcp) {
+        setMcpManager(mcp);
+        // The shared manager is configured per workspace; make sure the
+        // current settings are applied even if this loop was created before
+        // the service was installed.
+        if (m_mcp) {
+            m_mcp->setEnabled(m_settings.mcpEnabled);
+            m_mcp->setAutoConnect(m_settings.mcpAutoConnect);
+            m_mcp->setTimeoutMs(m_settings.mcpTimeoutMs);
+        }
+    }
+    if (graph) {
+        m_projectGraph = std::move(graph);
+        m_acp.setProjectGraph(m_projectGraph.get());
+        if (m_tools) {
+            m_tools->setProjectGraph(m_projectGraph);
+        }
+    }
+    if (events) {
+        m_sharedEvents = std::move(events);
+    }
 }
 
 void AgentLoop::syncPermissionPolicy()
@@ -1785,7 +1882,7 @@ void AgentLoop::emitHarnessEvent(const QString &type, const QJsonObject &payload
         return;
     }
     QString error;
-    if (!m_events.open(&error)) {
+    if (!eventStore().open(&error)) {
         m_eventLogBroken = true;
         qWarning() << "KateAI: the harness event log is unavailable:" << error;
         return;
@@ -1793,7 +1890,7 @@ void AgentLoop::emitHarnessEvent(const QString &type, const QJsonObject &payload
     QList<HarnessEvent> events;
     events.append(Events::make(type, payload, m_turnId,
                                stepId.isEmpty() ? m_currentStepId : stepId));
-    if (!m_events.append(conversation, events, &error)) {
+    if (!eventStore().append(conversation, events, &error)) {
         m_eventLogBroken = true;
         qWarning() << "KateAI: cannot append a harness event:" << error;
     }
@@ -1814,8 +1911,8 @@ bool AgentLoop::beginHarnessTurn(const QString &userText)
 
     if (m_harness.eventLog && !m_conversationId.isEmpty()) {
         QString eventError;
-        if (m_events.open(&eventError)) {
-            m_events.backfillConversation(m_conversationId);
+        if (eventStore().open(&eventError)) {
+            eventStore().backfillConversation(m_conversationId);
         } else if (!m_eventLogBroken) {
             m_eventLogBroken = true;
             qWarning() << "KateAI: the harness event log is unavailable:" << eventError;
@@ -1910,7 +2007,7 @@ void AgentLoop::endHarnessTurn(const QString &status, const QString &detail)
                         }
                         exporter->deleteLater();
                     });
-            exporter->exportSpans(traceSpans());
+            exporter->exportSpans(traceSpans(kMaxAutoTelemetryEvents));
         }
     }
 }
@@ -2238,7 +2335,7 @@ bool AgentLoop::exportTrace(const QString &path, QString *error)
         return false;
     }
     QString localError;
-    if (!m_events.open(&localError)) {
+    if (!eventStore().open(&localError)) {
         if (error) {
             *error = localError;
         }
@@ -2257,7 +2354,7 @@ bool AgentLoop::exportTrace(const QString &path, QString *error)
     qint64 fromSeq = 0;
     while (true) {
         const QList<HarnessEvent> page =
-            m_events.read(conversation, fromSeq, kEventPageSize, &localError);
+            eventStore().read(conversation, fromSeq, kEventPageSize, &localError);
         if (!localError.isEmpty()) {
             if (error) {
                 *error = localError;
@@ -2850,6 +2947,7 @@ void AgentLoop::resetConversation()
     cancelSubtask();
     m_acp.resetSession();
     m_messages.clear();
+    m_messagesChars = 0;
     m_transcriptMessages.clear();
     m_transcriptChars = 0;
     m_transcriptDiverged = false;
@@ -3321,7 +3419,9 @@ void AgentLoop::start(const QString &userText)
         system.content = systemPrompt();
         appendMessage(system);
     } else if (m_messages.first().role == ChatMessage::Role::System) {
+        const qsizetype previousChars = transcriptMessageChars(m_messages.first());
         m_messages.first().content = systemPrompt();
+        m_messagesChars += transcriptMessageChars(m_messages.first()) - previousChars;
     } else {
         // A conversation that starts without a system message (restored
         // history, a prompt compacted away) gets a fresh one prepended:
@@ -3330,6 +3430,7 @@ void AgentLoop::start(const QString &userText)
         system.role = ChatMessage::Role::System;
         system.content = systemPrompt();
         m_messages.prepend(system);
+        m_messagesChars += transcriptMessageChars(system);
         if (!m_transcriptMessages.isEmpty()) {
             m_transcriptMessages.prepend(system);
             m_transcriptChars += transcriptMessageChars(system);
@@ -3708,17 +3809,21 @@ QString AgentLoop::contextReport() const
 QJsonObject AgentLoop::memoryCounters() const
 {
     qsizetype subagentPatchChars = 0;
+    qsizetype subagentSummaryChars = 0;
     for (auto it = m_subagentRecords.cbegin(); it != m_subagentRecords.cend(); ++it) {
         subagentPatchChars += it.value().patch.size();
+        subagentSummaryChars += it.value().summary.size();
     }
     QJsonObject counters;
     counters.insert(u"messages"_s, m_messages.size());
+    counters.insert(u"messageChars"_s, static_cast<double>(m_messagesChars));
     counters.insert(u"transcriptMessages"_s, m_transcriptMessages.size());
     counters.insert(u"transcriptChars"_s, static_cast<double>(m_transcriptChars));
     counters.insert(u"transcriptDiverged"_s, m_transcriptDiverged);
     counters.insert(u"actionRepeatEntries"_s, m_actionRepeatCounts.size());
     counters.insert(u"subagentRecords"_s, m_subagentRecords.size());
     counters.insert(u"subagentPatchChars"_s, static_cast<double>(subagentPatchChars));
+    counters.insert(u"subagentSummaryChars"_s, static_cast<double>(subagentSummaryChars));
     counters.insert(u"changedPaths"_s, m_changedPaths.size());
     return counters;
 }
@@ -3850,7 +3955,7 @@ double AgentLoop::sessionCostUsd() const
     return m_costs.total().totalUsd();
 }
 
-QList<Span> AgentLoop::traceSpans() const
+QList<Span> AgentLoop::traceSpans(int maxEvents) const
 {
     const QString conversation = currentConversationId();
     if (conversation.isEmpty()) {
@@ -3861,7 +3966,16 @@ QList<Span> AgentLoop::traceSpans() const
     if (!store.open(&error)) {
         return {};
     }
-    const QList<HarnessEvent> events = store.read(conversation, 0, -1, &error);
+    qint64 fromSeq = 0;
+    if (maxEvents > 0) {
+        // The automatic export runs at every turn end. Reading the complete
+        // log there made memory grow with the whole conversation; keep only the
+        // recent window. An explicit export passes -1 and still gets all of it.
+        const qint64 head = store.headSeq(conversation);
+        fromSeq = qMax<qint64>(0, head - maxEvents);
+    }
+    const QList<HarnessEvent> events =
+        store.read(conversation, fromSeq, maxEvents > 0 ? maxEvents : -1, &error);
     if (!error.isEmpty()) {
         return {};
     }
@@ -4149,6 +4263,7 @@ void AgentLoop::maybeCompactStoredHistory(const QList<ChatMessage> &requestMessa
                                  {u"beforeMessages"_s, m_messages.size()},
                                  {u"afterMessages"_s, persistent.size()}});
     m_messages = persistent;
+    recomputeMessageChars();
     // The display transcript is intentionally left untouched by compaction.
     // From now on it has to be persisted separately.
     m_transcriptDiverged = true;
@@ -4365,6 +4480,10 @@ bool AgentLoop::acpAutoDecision(const PermissionRequest &request, PermissionDeci
         return true;
     }
     if (m_policy.isAutoApproved(request.toolName) || m_policy.isAutoApproved(canonical)) {
+        *decision = PermissionDecision::AllowOnce;
+        return true;
+    }
+    if (m_settings.acceptAllAcpTools) {
         *decision = PermissionDecision::AllowOnce;
         return true;
     }
@@ -4631,9 +4750,107 @@ bool AgentLoop::isRepeatSensitiveTool(const QString &toolName) const
 void AgentLoop::appendMessage(const ChatMessage &message)
 {
     m_messages.append(message);
+    m_messagesChars += transcriptMessageChars(message);
     m_transcriptMessages.append(message);
     m_transcriptChars += transcriptMessageChars(message);
+    pruneModelHistory();
     pruneTranscript();
+}
+
+void AgentLoop::recomputeMessageChars()
+{
+    m_messagesChars = 0;
+    for (const ChatMessage &message : std::as_const(m_messages)) {
+        m_messagesChars += transcriptMessageChars(message);
+    }
+}
+
+void AgentLoop::pruneModelHistory()
+{
+    // The fast path runs on every append. The ceiling is deliberately high: it
+    // is a safety net for sessions that compaction cannot shrink, not a normal
+    // history limit.
+    if (m_messages.size() <= kHistoryTargetMessages
+        && m_messagesChars <= kHistoryTargetChars) {
+        return;
+    }
+    if (m_messages.size() <= kMinRetainedHistoryMessages) {
+        return;
+    }
+
+    // Preserve the system prompt and a compacted summary at the head. The
+    // summary is a Role::User message with a known prefix; dropping it would
+    // lose the only record of the turns that were compacted away.
+    qsizetype leadingEnd = 0;
+    while (leadingEnd < m_messages.size()) {
+        const ChatMessage &message = m_messages.at(leadingEnd);
+        if (message.role == ChatMessage::Role::System
+            || ContextEngine::isSummary(message)) {
+            ++leadingEnd;
+            continue;
+        }
+        break;
+    }
+    if (leadingEnd == 0 && m_messages.first().role != ChatMessage::Role::User) {
+        // Nothing safe to anchor the retained suffix to.
+        return;
+    }
+
+    QList<qsizetype> boundaries;
+    for (qsizetype i = leadingEnd; i < m_messages.size(); ++i) {
+        if (m_messages.at(i).role == ChatMessage::Role::User) {
+            boundaries.append(i);
+        }
+    }
+    // The newest turn is always kept. With only one boundary there is nothing
+    // older to drop.
+    if (boundaries.size() < 2) {
+        return;
+    }
+
+    qsizetype leadingChars = 0;
+    for (qsizetype i = 0; i < leadingEnd; ++i) {
+        leadingChars += transcriptMessageChars(m_messages.at(i));
+    }
+
+    qsizetype charsBefore = leadingChars;
+    qsizetype scanned = leadingEnd;
+    qsizetype chosen = -1;
+    for (const qsizetype boundary : std::as_const(boundaries)) {
+        while (scanned < boundary) {
+            charsBefore += transcriptMessageChars(m_messages.at(scanned));
+            ++scanned;
+        }
+        const qsizetype retainedChars = leadingChars + (m_messagesChars - charsBefore);
+        const qsizetype retainedCount = leadingEnd + (m_messages.size() - boundary);
+        if (retainedCount >= kMinRetainedHistoryMessages
+            && retainedCount <= kHistoryTargetMessages
+            && retainedChars <= kHistoryTargetChars) {
+            chosen = boundary;
+            break;
+        }
+    }
+    if (chosen < 0) {
+        // Even the newest complete turn does not fit the target. Keep that turn
+        // rather than cutting inside it; the next append will try again.
+        chosen = boundaries.last();
+    }
+    if (chosen <= leadingEnd) {
+        return;
+    }
+
+    QList<ChatMessage> kept;
+    kept.reserve(leadingEnd + (m_messages.size() - chosen));
+    for (qsizetype i = 0; i < leadingEnd; ++i) {
+        kept.append(m_messages.at(i));
+    }
+    for (qsizetype i = chosen; i < m_messages.size(); ++i) {
+        kept.append(m_messages.at(i));
+    }
+    m_messages = std::move(kept);
+    recomputeMessageChars();
+    // The display transcript still contains the turns the model no longer has.
+    m_transcriptDiverged = true;
 }
 
 void AgentLoop::pruneTranscript()
@@ -4923,7 +5140,12 @@ void AgentLoop::appendToolResult(const ToolCall &call, ToolResult result)
         }
         m_actionRepeatCounts.clear();
         for (const QString &path : mutationPathsForCall(call)) {
-            m_changedPaths.insert(lockKeyForPath(path));
+            const QString key = lockKeyForPath(path);
+            // The set is a safety trail, not a complete audit log. Stop growing
+            // it once a monorepo-wide sweep has touched thousands of paths.
+            if (m_changedPaths.size() < kMaxChangedPaths || m_changedPaths.contains(key)) {
+                m_changedPaths.insert(key);
+            }
             m_turnContext.noteMutation(path);
         }
         m_changesNeedVerification = true;
@@ -6477,7 +6699,11 @@ void AgentLoop::dispatchAsyncTool(const ToolCall &call)
     }
 
     const quint64 generation = m_turnGeneration;
-    const QString token = QStringLiteral("mcp-%1").arg(++m_asyncCounter);
+    // The MCP manager is shared by every window on a workspace, and it emits
+    // toolResult() to all connected loops. A per-loop counter ("mcp-1") is not
+    // unique across loops; a UUID keeps one window's result from being applied
+    // to another window's identical call.
+    const QString token = u"mcp-"_s + QUuid::createUuid().toString(QUuid::WithoutBraces);
     // A single-shot connection would be consumed by the FIRST toolResult()
     // emission, whatever its token: with several MCP calls in flight, one
     // sibling's result would disconnect this handler before this call's own
@@ -6655,7 +6881,10 @@ void AgentLoop::startSkillFork(const ToolCall &call, const SkillDefinition &skil
         }
     });
     connect(child, &AgentLoop::assistantDelta, child, [state](const QString &delta) {
-        state->streamed += delta;
+        const qsizetype room = kMaxSubagentStreamChars - state->streamed.size();
+        if (room > 0) {
+            state->streamed += delta.size() > room ? delta.left(room) : delta;
+        }
     });
     connect(child, &AgentLoop::failed, child, [state](const QString &error) {
         state->ok = false;
@@ -6735,8 +6964,9 @@ void AgentLoop::startSkillFork(const ToolCall &call, const SkillDefinition &skil
             result.output = answer.trimmed().isEmpty()
                 ? u"The skill finished without producing a summary."_s
                 : answer;
-            record.summary = result.output;
+            record.summary = result.output.left(kMaxSubagentSummaryChars);
         } else {
+            record.summary = state->error.left(kMaxSubagentSummaryChars);
             result.output = u"The skill failed: %1"_s.arg(state->error);
         }
         result.output += i18n("\n\n[subagent taskId=%1 status=%2 context=fork; use subagent_transcript for the sidechain]",
@@ -7068,8 +7298,13 @@ void AgentLoop::dispatchSubtask(const ToolCall &call)
         }
     });
     connect(child, &AgentLoop::assistantDelta, child, [this, state](const QString &delta) {
-        state->streamed += delta;
-        Q_EMIT subtaskMessageDelta(state->taskId, delta);
+        const qsizetype room = kMaxSubagentStreamChars - state->streamed.size();
+        if (room <= 0) {
+            return;
+        }
+        const QString kept = delta.size() > room ? delta.left(room) : delta;
+        state->streamed += kept;
+        Q_EMIT subtaskMessageDelta(state->taskId, kept);
     });
     connect(child, &AgentLoop::failed, child, [state](const QString &error) {
         state->ok = false;
@@ -7294,7 +7529,7 @@ void AgentLoop::dispatchSubtask(const ToolCall &call)
                 if (answer.trimmed().isEmpty()) {
                     answer = u"The sub-agent finished without producing a visible answer."_s;
                 }
-                record.summary = answer;
+                record.summary = answer.left(kMaxSubagentSummaryChars);
                 if (state->includeTranscript) {
                     answer += subtaskLog(state->log, state->toolCount);
                 }
@@ -7307,7 +7542,7 @@ void AgentLoop::dispatchSubtask(const ToolCall &call)
                 }
                 result.output = answer;
             } else {
-                record.summary = state->error;
+                record.summary = state->error.left(kMaxSubagentSummaryChars);
                 result.output = u"Sub-agent failed: %1"_s.arg(state->error);
                 if (state->includeTranscript) {
                     result.output += subtaskLog(state->log, state->toolCount);
@@ -7482,6 +7717,7 @@ bool AgentLoop::compactContext()
         return false;
     }
     m_messages = compacted;
+    recomputeMessageChars();
     // The display transcript still contains every turn the user saw. From this
     // point it has to be persisted separately from the compacted model history.
     m_transcriptDiverged = true;
@@ -7799,6 +8035,7 @@ void AgentLoop::restoreSession(const SessionStore::SessionData &data)
 
     // Restore messages
     m_messages = data.messages;
+    recomputeMessageChars();
     // The transcript is what the panel renders. A payload written before it
     // existed has only the (possibly already compacted) model history, so use
     // that as the transcript rather than dropping the restored cards. An old
@@ -7810,6 +8047,9 @@ void AgentLoop::restoreSession(const SessionStore::SessionData &data)
         m_transcriptChars += transcriptMessageChars(message);
     }
     pruneTranscript();
+    // A session written before the history ceiling existed (or with a much
+    // larger context window) must not restore an unbounded model history.
+    pruneModelHistory();
 
     // Restore turn state
     m_currentThinking = data.currentThinking;
@@ -7834,7 +8074,13 @@ void AgentLoop::restoreSession(const SessionStore::SessionData &data)
             m_actionRepeatCounts.insert(it.key(), it.value());
         }
     }
-    m_changedPaths = QSet<QString>(data.changedPaths.constBegin(), data.changedPaths.constEnd());
+    m_changedPaths.clear();
+    for (const QString &path : data.changedPaths) {
+        if (m_changedPaths.size() >= kMaxChangedPaths) {
+            break;
+        }
+        m_changedPaths.insert(path);
+    }
     m_changesNeedVerification = data.changesNeedVerification;
     m_verificationAttempted = data.verificationAttempted;
     m_verificationPromptCount = data.verificationPromptCount;

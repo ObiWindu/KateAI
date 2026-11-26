@@ -109,6 +109,25 @@ InspectorPanel::InspectorPanel(AgentLoop *agent, QWidget *parent)
 
 InspectorPanel::~InspectorPanel() = default;
 
+void InspectorPanel::hideEvent(QHideEvent *event)
+{
+    QDialog::hideEvent(event);
+    // The panel is reused across openings. Its six text documents can hold the
+    // full context/trace reports, so hiding must not keep them until the chat
+    // window closes.
+    for (QTextBrowser *browser : {m_context, m_tools, m_memory, m_skills, m_trace, m_cost}) {
+        if (browser) {
+            browser->clear();
+        }
+    }
+    if (m_checkpoints) {
+        m_checkpoints->clear();
+    }
+    if (m_rewindNote) {
+        m_rewindNote->clear();
+    }
+}
+
 void InspectorPanel::scheduleRefresh()
 {
     if (m_refreshPending) {

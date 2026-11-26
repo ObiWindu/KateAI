@@ -84,6 +84,34 @@ current behavior.
 - [x] Coalesce graph saves; stop saving on every typing pause.
 - [x] Stream graph directory scanning with `QDirIterator`.
 
+### Phase 7 — Follow-up audit hardening
+
+- [x] Add a hard byte/count ceiling for the model history, trimmed only at
+  user-turn boundaries.
+- [x] Cap native/ACP reasoning and ACP answer buffers.
+- [x] Cap sub-agent record summaries, streamed text and sub-task card buffers.
+- [x] Bound automatic OTLP export to recent events and add a transfer timeout.
+- [x] Cap changed-path, settled-range and sub-agent cost bookkeeping.
+- [x] Bound `ProjectGraph::updateGraph` input and skip oversized editor
+  documents.
+- [x] Reject whole-file edits above 16 MB and cap `apply_patch` working sets.
+- [x] Clear Inspector documents when hidden.
+- [x] Cap concurrent ACP server sessions.
+- [x] Extend `memoryCounters` with message/sub-agent summary bytes.
+
+### Phase 8 — Structural follow-up
+
+- [x] Share the project graph, MCP manager and event store per workspace across
+  windows (`WorkspaceServices`); views hold the shared reference.
+- [x] Fix `m_ownsMcp` ownership and make project MCP configuration load only
+  after the user confirms it.
+- [x] Add an incremental session message journal for large conversations
+  (threshold 200 messages, full rewrite on compaction/prune).
+- [x] Retain the newest 20,000 events per conversation.
+- [x] Defer the remote ACP registry fetch until its settings tab is opened.
+- [x] Read ACP stdout in bounded chunks; cap headless workspace diffs.
+- [x] Bound policy, hook and ecosystem config reads with a shared helper.
+
 ## Progress log
 
 - 2026-11-25: Plan created. Starting Phase 1 implementation.
@@ -154,4 +182,53 @@ current behavior.
   - 100 KB tool arguments: transcript bounded to 75 messages / ~7.5 MB,
   - 8 MB tool-result page: 0-byte measured page delta,
   - 3,000-file graph scan: ~0.13 MB delta, 1,000-node cap.
-- `git diff --check` is clean. All 38 plan checkboxes are complete.
+- `git diff --check` is clean. All 38 original plan checkboxes are complete;
+  Phase 7/8 add the follow-up hardening and structural items.
+
+- 2026-11-25 (follow-up audit):
+  - the model history now has an independent 16 MB / 3,000-message safety
+    ceiling; trimming cuts only at user-turn boundaries and preserves the
+    system prompt and compaction summary;
+  - reasoning is capped at 1 MB in `AgentLoop` and `AcpClient`; ACP answers are
+    capped at 4 MB;
+  - sub-agent summaries are capped at 16 KB, child stream buffers at 256 KB and
+    sub-task card live text at 256 KB (pending text 64 KB);
+  - automatic OTLP export reads at most the newest 5,000 events, sets a 30 s
+    transfer timeout and releases the batch when retries are exhausted;
+  - changed paths (4,096), settled edit ranges (64 per path) and per-sub-agent
+    cost entries (256) are capped;
+  - project-graph updates analyse at most 1 MB and skip files above 4 MB;
+  - native and ACP whole-file edit tools reject files above 16 MB;
+    `apply_patch` caps the old+new working set at 32 MB;
+  - the Inspector clears its text documents on hide, and the ACP server caps
+    concurrent sessions at 64;
+  - session autosave while streaming moved from 5 s to 15 s; the completed turn
+    is still saved synchronously;
+  - `memoryCounters` now reports `messageChars` and `subagentSummaryChars`, and
+    `test_memory_budget` covers an oversized restored history.
+
+- 2026-11-25 (structural pass):
+  - `WorkspaceServices` now owns the project graph, MCP manager and event store
+    for a workspace; `KateAiPlugin` keeps weak references and every view on the
+    same folder shares one instance. Closing the last view releases the graph,
+    stops the MCP servers and closes the event connection.
+  - `AgentLoop` adopts the shared services before `setWorkspace()`, so the
+    already-built graph is not indexed a second time. A mid-turn workspace
+    switch is deferred to the turn boundary to keep in-flight tool pointers
+    valid.
+  - `m_ownsMcp` is now true for a loop's constructor-created manager, and the
+    default `m_loadWorkspaceConfig` is false: a project's `mcp.json` starts
+    servers only after the view's confirmation, including for shared managers.
+  - large sessions (200+ messages) store their message lists in
+    `session_message_chunk` and append only the new tail on autosave. The
+    payload keeps the metadata, title repair reads the journal, and compaction
+    or transcript pruning triggers one full revision. The journal is deleted
+    with its conversation.
+  - the session schema version is 2 and adds only the chunk table.
+  - conversation event logs retain the newest 20,000 events; automatic OTLP
+    export already reads the newest 5,000.
+  - the ACP registry is fetched when its settings tab is first opened, and ACP
+    stdout is drained in 64 KiB chunks.
+  - headless `gitDiff` caps the patch at 32 MB and skips untracked files above
+    8 MB.
+  - policy, hook and ecosystem config reads use `readBoundedFile()`.

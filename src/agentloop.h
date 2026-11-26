@@ -190,6 +190,11 @@ public:
     }
     // Sub-agents borrow the pointer; ownership stays with the root loop.
     void setMcpManager(McpManager *manager);
+    // Installs services shared by every window on one workspace: the project
+    // graph, the MCP manager and the event store. Passing null leaves the
+    // existing component in place.
+    void setHarnessServices(std::shared_ptr<ProjectGraph> graph, McpManager *mcp,
+                            std::shared_ptr<EventStore> events);
 
     // --- Agent team -------------------------------------------------------------
     AgentTeam *agentTeam()
@@ -321,7 +326,9 @@ public:
     double sessionCostUsd() const;
     // Spans derived from this conversation's event log, not a second log. The
     // trace is empty when no conversation is bound or the log is disabled.
-    QList<Span> traceSpans() const;
+    // `maxEvents` bounds the automatic per-turn export; the default reads the
+    // complete log for an explicit export.
+    QList<Span> traceSpans(int maxEvents = -1) const;
     QJsonObject traceJson() const;
     // Writes the span trace as JSONL. With `telemetry` enabled and an OTLP
     // endpoint configured, also posts the batch; a failure never affects the
@@ -512,6 +519,10 @@ private:
     // transcript. Compaction rewrites only the model history, so the two lists
     // diverge after a compaction but stay in sync for every new turn.
     void appendMessage(const ChatMessage &message);
+    // Bounds the model history independently of the display transcript. Cuts
+    // only at user-turn boundaries so tool call/result pairs stay intact.
+    void pruneModelHistory();
+    void recomputeMessageChars();
     // Bounds the display transcript by a message and character budget. The
     // oldest messages are replaced by a small elision marker; the model history
     // is not touched.
@@ -593,6 +604,10 @@ private:
     // reset while a snapshot is still running.
     void markActionExecuted(const QString &signature);
     void syncPermissionPolicy();
+    // Connects the tool/permission/status signals of the current MCP manager.
+    // A shared manager can replace the constructor-created one, and the new
+    // manager must feed the same updates.
+    void wireMcpManager();
     // Loads policy/hook configuration after the workspace or flags change.
     void reloadHarnessConfig();
     // The conversation the event log writes to, or empty when no session is
@@ -711,6 +726,10 @@ LlmClient m_client;
     QString m_taskSummary;
 
     QList<ChatMessage> m_messages;
+    // Running sum of the content/thinking/tool-argument characters in
+    // m_messages. Kept alongside the list so the safety ceiling can be checked
+    // without walking every message on each append.
+    qsizetype m_messagesChars = 0;
     // The full conversation as the user saw it. Compaction leaves this alone;
     // it is what the transcript rebuilds from and what the session stores for
     // display. Bounded by pruneTranscript() so a long tool-heavy session cannot
@@ -849,7 +868,18 @@ LlmClient m_client;
     bool m_costBudgetNotified = false;
 
     // --- Harness 0.7 ---------------------------------------------------------
+    // The loop owns an event store unless a workspace service provides one.
+    // The shared pointer keeps the store alive for as long as any loop uses it.
+    EventStore &eventStore()
+    {
+        return m_sharedEvents ? *m_sharedEvents : m_events;
+    }
+    const EventStore &eventStore() const
+    {
+        return m_sharedEvents ? *m_sharedEvents : m_events;
+    }
     EventStore m_events;
+    std::shared_ptr<EventStore> m_sharedEvents;
     PolicyEngine m_policyEngine;
     HookRegistry m_hooks;
     TurnContext m_turnContext;

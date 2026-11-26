@@ -9,8 +9,10 @@
 #include "kateaicommand.h"
 #include "pluginview.h"
 #include "settings.h"
+#include "workspaceservices.h"
 
 #include <QDateTime>
+#include <QDir>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -422,6 +424,36 @@ void KateAiPlugin::setSettings(const Settings &settings)
     m_settings = settings;
     SettingsStore::save(m_settings);
     Q_EMIT settingsChanged(m_settings);
+}
+
+std::shared_ptr<WorkspaceServices> KateAiPlugin::workspaceServices(const QString &workspace)
+{
+    if (workspace.trimmed().isEmpty() || !QFileInfo(workspace).isDir()) {
+        return {};
+    }
+    QString key = QFileInfo(workspace).canonicalFilePath();
+    if (key.isEmpty()) {
+        key = QDir::cleanPath(workspace);
+    }
+    // Drop entries whose services were released with the last view. Without
+    // this, every folder ever opened leaves a dead key for the session.
+    for (auto it = m_workspaceServices.begin(); it != m_workspaceServices.end();) {
+        if (it->expired()) {
+            it = m_workspaceServices.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    const auto existing = m_workspaceServices.constFind(key);
+    if (existing != m_workspaceServices.constEnd()) {
+        if (const auto live = existing->lock()) {
+            return live;
+        }
+    }
+
+    auto services = std::make_shared<WorkspaceServices>(key);
+    m_workspaceServices.insert(key, services);
+    return services;
 }
 
 void KateAiPlugin::readSessionConfig(const KConfigGroup &config)

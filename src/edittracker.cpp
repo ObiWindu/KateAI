@@ -992,7 +992,15 @@ void EditTracker::settle(const QString &path, bool accepted)
     const EditEntry settledEntry = group.pending.last();
     group.pending.clear();
     if (!settledNow.isEmpty()) {
-        m_settledRanges[path].append(settledNow);
+        QList<KTextEditor::Range> &ranges = m_settledRanges[path];
+        ranges.append(settledNow);
+        // The undo stack only keeps the newest 50 decisions. Ranges older than
+        // that can no longer be retracted, and keeping every accepted edit of a
+        // long session made this hash grow without bound.
+        constexpr int kMaxSettledRangesPerPath = 64;
+        while (ranges.size() > kMaxSettledRangesPerPath) {
+            ranges.removeFirst();
+        }
     }
     if (accepted && (!settledTo.isNull() || !settledEntry.newContentId.isEmpty())) {
         // The file is already in this state, so accepting only settles the queue.

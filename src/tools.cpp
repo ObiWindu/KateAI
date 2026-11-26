@@ -46,6 +46,31 @@ namespace
 // A command that writes gigabytes must not fill the memory: the output is
 // kept while the command runs, and the ceiling is applied here.
 constexpr int kMaxBashOutputChars = 80000; // keep in sync with clip()
+
+// Editing tools need the whole file in memory. Above this ceiling the read and
+// the rewritten copy would be the dominant allocation in the process; the model
+// can split the work or use a targeted command instead.
+constexpr qint64 kMaxEditableFileBytes = 16 * 1024 * 1024;
+
+// apply_patch validates every file before writing any of them. Cap the sum of
+// old + new contents so a patch touching many large files cannot pin hundreds
+// of megabytes at once.
+constexpr qsizetype kMaxPatchWorkingChars = 32 * 1024 * 1024;
+
+bool fileTooLargeToEdit(const QString &path, QString *error)
+{
+    const QFileInfo info(path);
+    if (!info.exists() || !info.isFile() || info.size() <= kMaxEditableFileBytes) {
+        return false;
+    }
+    if (error) {
+        *error = u"File is %1 bytes; editing files larger than %2 bytes is disabled to keep memory bounded. "
+                 u"Use a targeted command instead."_s
+                     .arg(info.size())
+                     .arg(kMaxEditableFileBytes);
+    }
+    return true;
+}
 } // namespace
 
 // Unified tool argument parsing - canonicalizes arguments from ToolCall
@@ -1572,6 +1597,12 @@ ToolResult ToolRunner::editFile(const QJsonObject &args)
         return result;
     }
 
+    if (fileTooLargeToEdit(resolved, &error)) {
+        result.ok = false;
+        result.output = error;
+        return result;
+    }
+
     // Read the current file contents through the document bridge
     QString contents;
     if (!m_bridge || !m_bridge->readDocument(resolved, &contents)) {
@@ -1725,6 +1756,12 @@ ToolResult ToolRunner::multiEditFile(const QJsonObject &args)
     if (edits.isEmpty()) {
         result.ok = false;
         result.output = u"No edit chunks provided in 'edits'."_s;
+        return result;
+    }
+
+    if (fileTooLargeToEdit(resolved, &error)) {
+        result.ok = false;
+        result.output = error;
         return result;
     }
 
@@ -3503,6 +3540,7 @@ ToolResult ToolRunner::applyPatch(const QJsonObject &args)
     };
     QList<PlannedWrite> planned;
     QSet<QString> plannedPaths;
+    qsizetype plannedChars = 0;
     for (const PatchFile &file : files) {
         // A deletion may arrive without hunks (the whole file goes away); an
         // edit must have at least one.
@@ -3530,6 +3568,12 @@ ToolResult ToolRunner::applyPatch(const QJsonObject &args)
         }
         plannedPaths.insert(resolved);
 
+        if (fileTooLargeToEdit(resolved, &error)) {
+            result.ok = false;
+            result.output = error;
+            return result;
+        }
+
         QString current;
         bool existed = false;
         if (m_bridge && m_bridge->readDocument(resolved, &current)) {
@@ -3554,6 +3598,12 @@ ToolResult ToolRunner::applyPatch(const QJsonObject &args)
         }
         if (file.isDelete) {
             // +++ /dev/null: the whole file goes away; no hunks to apply.
+            if (plannedChars + current.size() > kMaxPatchWorkingChars) {
+                result.ok = false;
+                result.output = u"The patch is too large to validate in memory; split it into smaller patches."_s;
+                return result;
+            }
+            plannedChars += current.size();
             planned.append({resolved, file.path, QString(), current, existed, true});
             continue;
         }
@@ -3564,6 +3614,14 @@ ToolResult ToolRunner::applyPatch(const QJsonObject &args)
             result.output = u"Patch does not apply to %1: %2"_s.arg(file.path, applyError);
             return result;
         }
+        // The all-or-nothing contract needs the original for rollback, so both
+        // copies are counted against one working-set ceiling.
+        if (plannedChars + current.size() + newContent.size() > kMaxPatchWorkingChars) {
+            result.ok = false;
+            result.output = u"The patch is too large to validate in memory; split it into smaller patches."_s;
+            return result;
+        }
+        plannedChars += current.size() + newContent.size();
         planned.append({resolved, file.path, newContent, current, existed, false});
     }
 

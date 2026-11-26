@@ -98,6 +98,10 @@ private:
     QLabel *m_acpRegistryStatus = nullptr;
     QNetworkAccessManager *m_acpRegistryNetwork = nullptr;
     QJsonArray m_acpRegistryAgents;
+    // The registry is remote and only useful when its tab is opened. Defer the
+    // request until then instead of fetching on every Settings open.
+    int m_acpRegistryTab = -1;
+    bool m_acpRegistryFetchStarted = false;
     QComboBox *m_apiFormat = nullptr;
 
     // Two-model orchestration (planner = strong/read-only, executor = cheap).
@@ -133,6 +137,7 @@ private:
 
     // Security
     QComboBox *m_permission = nullptr;
+    QCheckBox *m_acceptAllAcpTools = nullptr;
     QComboBox *m_sandbox = nullptr;
     QSpinBox *m_timeout = nullptr;
     QSpinBox *m_maxExpandedToolCards = nullptr;

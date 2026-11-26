@@ -456,7 +456,11 @@ ChatWidget::ChatWidget(QWidget *parent)
     // A long turn can finish tools many times per second. Serializing the
     // whole transcript on every one of those saves is the largest avoidable
     // disk cost in a long session. Turn boundaries still save immediately.
-    m_sessionSaveTimer->setInterval(5000);
+    // Crash-recovery snapshot while a turn is streaming. The completed turn is
+    // saved synchronously in the turnFinished handler, so this only has to
+    // bound how much work a crash can lose; 15 s cuts the full-conversation
+    // serialisation peak to a third without changing normal save behavior.
+    m_sessionSaveTimer->setInterval(15000);
     connect(m_sessionSaveTimer, &QTimer::timeout, this, [this]() {
         if (m_sessionDirty) {
             saveCurrentConversation();

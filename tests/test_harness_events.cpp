@@ -31,6 +31,33 @@ private Q_SLOTS:
         qputenv("KATEAI_SESSION_DB", m_dir.filePath(u"sessions.sqlite"_s).toUtf8());
     }
 
+    void eventLogKeepsOnlyRecentEvents()
+    {
+        EventStore store(m_dir.filePath(u"events-retention.sqlite"_s));
+        QVERIFY(store.open());
+
+        const QString conversation = u"conv-retention"_s;
+        constexpr int kTotal = 20500;
+        for (int start = 0; start < kTotal; start += 1000) {
+            QList<HarnessEvent> batch;
+            const int end = qMin(start + 1000, kTotal);
+            batch.reserve(end - start);
+            for (int i = start; i < end; ++i) {
+                QJsonObject payload;
+                payload.insert(u"index"_s, i);
+                batch.append(Events::make(u"test"_s, payload, u"turn-retention"_s));
+            }
+            QString error;
+            QVERIFY2(store.append(conversation, batch, &error), qPrintable(error));
+        }
+
+        QCOMPARE(store.headSeq(conversation), qint64(kTotal));
+        const QList<HarnessEvent> events = store.read(conversation, 0, -1);
+        QVERIFY2(events.size() <= 20000, "the event log exceeded its retention window");
+        QVERIFY(!events.isEmpty());
+        QVERIFY2(events.first().seq > 1, "the oldest events were not trimmed");
+    }
+
     void redactsCredentials()
     {
         QJsonObject nested;

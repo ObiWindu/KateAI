@@ -14,6 +14,8 @@
 #include <QList>
 #include <QStringList>
 
+#include <memory>
+
 class KConfigGroup;
 
 namespace KateAi
@@ -21,6 +23,7 @@ namespace KateAi
 
 class KateAiCommand;
 class KateAiView;
+class WorkspaceServices;
 
 class KateAiPlugin : public KTextEditor::Plugin, public KTextEditor::SessionConfigInterface
 {
@@ -62,6 +65,11 @@ public:
     }
     void setSettings(const Settings &settings);
 
+    // The shared graph/MCP/event-store bundle for a workspace. The plugin
+    // keeps only a weak reference; the views that use it keep it alive, and
+    // closing the last one releases the resources.
+    std::shared_ptr<WorkspaceServices> workspaceServices(const QString &workspace);
+
 Q_SIGNALS:
     void settingsChanged(const Settings &settings);
 
@@ -80,6 +88,9 @@ private:
     // asks the plugin to write the session config; without this snapshot every
     // view had unregistered first and the next session reopened blank.
     QStringList m_lastConversationIds;
+    // Canonical workspace path -> shared services. Weak so services are
+    // released when the last view on the workspace goes away.
+    QHash<QString, std::weak_ptr<WorkspaceServices>> m_workspaceServices;
     QStringList liveConversationIds() const;
     // The ":kateai" command line command. One instance for the whole
     // process: a second registration of the same command name would replace
