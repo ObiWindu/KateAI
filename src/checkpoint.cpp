@@ -4,6 +4,7 @@
  */
 
 #include "checkpoint.h"
+#include "boundedfile.h"
 
 #include <QCryptographicHash>
 #include <QDir>
@@ -36,11 +37,17 @@ namespace
 const QString TagPrefix = QStringLiteral("refs/tags/");
 const QString TagNamespace = TagPrefix + QStringLiteral("kateai/");
 
+// A project .gitignore is copied verbatim into the snapshot excludes file. It is
+// a workspace-owned path, so bound it rather than reading whatever it points at.
+constexpr qint64 kMaxIgnoreFileBytes = 1024 * 1024;
+
 // Never restore through these; they hold state this plugin regenerates, plus
 // automation/config the agent must not be able to plant via a snapshot.
 bool isProtectedPath(const QString &relativePath)
 {
-    if (relativePath.startsWith(u".git/"_s) || relativePath == u".git"_s || relativePath.startsWith(u".kateai/project_graph.json"_s)) {
+    if (relativePath.startsWith(u".git/"_s) || relativePath == u".git"_s
+        || relativePath.startsWith(u".kateai/project_graph.json"_s)
+        || relativePath.startsWith(u".kateai/project_graph.sqlite"_s)) {
         return true;
     }
     // Restoring these would reinstate agent-planted automation without prompt.
@@ -234,6 +241,9 @@ bool writeExcludesFor(const QString &gitDir, const QString &workspace)
         u"# Kate AI checkpoints. The project history is managed by its own repo."_s,
         u"/.git/"_s,
         u".kateai/project_graph.json"_s,
+        u".kateai/project_graph.sqlite"_s,
+        u".kateai/project_graph.sqlite-*"_s,
+        u".kateai/project_graph.sqlite.corrupt-*"_s,
         QString(),
         u"# Common build and dependency directories."_s,
         u"node_modules/"_s,
@@ -249,9 +259,15 @@ bool writeExcludesFor(const QString &gitDir, const QString &workspace)
     // Reuse the project's own ignore rules so snapshots stay small.
     QFile projectIgnore(workspace + u"/.gitignore"_s);
     if (projectIgnore.open(QIODevice::ReadOnly | QIODevice::Text)) {
-        lines.append(QString());
-        lines.append(u"# From the project .gitignore"_s);
-        lines.append(QString::fromUtf8(projectIgnore.readAll()));
+        // A project-owned path: a symlink to /dev/zero or a huge file must not
+        // be read whole just to copy ignore rules into an excludes file.
+        projectIgnore.close();
+        const QString ignoreText = readBoundedFile(projectIgnore.fileName(), kMaxIgnoreFileBytes);
+        if (!ignoreText.isEmpty()) {
+            lines.append(QString());
+            lines.append(u"# From the project .gitignore"_s);
+            lines.append(ignoreText);
+        }
     }
 
     QFile file(excludePath);
@@ -600,6 +616,7 @@ void CheckpointManager::runGitDetached(const QStringList &arguments, int timeout
     });
     m_detachedProcesses.append(git);
     git->start(u"git"_s, full);
+    guard->start();
 }
 
 bool CheckpointManager::runGit(const QStringList &arguments, QString *output, QString *error, int timeoutMs) const

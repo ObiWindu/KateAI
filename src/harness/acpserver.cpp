@@ -6,6 +6,7 @@
 #include "acpserver.h"
 
 #include <QCoreApplication>
+#include <QDateTime>
 #include <QDir>
 #include <QFileInfo>
 #include <QIODevice>
@@ -13,6 +14,7 @@
 #include <QJsonDocument>
 #include <QPointer>
 #include <QThread>
+#include <QTimer>
 #include <QUuid>
 
 #include <cstdio>
@@ -32,6 +34,12 @@ constexpr int kInvalidRequest = -32600;
 constexpr int kMethodNotFound = -32601;
 constexpr int kInvalidParams = -32602;
 constexpr int kServerError = -32000;
+
+// A session with no prompt in flight and no traffic for this long is closed.
+// Long enough that a client can think between turns, short enough that an
+// abandoned window does not hold a harness loop for the whole process.
+constexpr qint64 kIdleSessionMs = 15 * 60 * 1000;
+constexpr int kIdleSweepMs = 60 * 1000;
 constexpr int kAcpProtocolVersion = 1;
 
 QString textFromBlocks(const QJsonArray &blocks)
@@ -102,6 +110,14 @@ AcpServer::AcpServer(SessionFactory factory, QObject *parent)
     : QObject(parent)
     , m_factory(std::move(factory))
 {
+    // A client that opens a session and walks away used to keep a full harness
+    // loop, project graph and SQLite connection alive for the life of the
+    // process. Sessions are cheap to recreate and ACP clients may open a new
+    // one per turn, so idle sessions are reaped.
+    m_idleTimer = new QTimer(this);
+    m_idleTimer->setInterval(kIdleSweepMs);
+    connect(m_idleTimer, &QTimer::timeout, this, &AcpServer::reapIdleSessions);
+    m_idleTimer->start();
 }
 
 AcpServer::~AcpServer()
@@ -109,6 +125,7 @@ AcpServer::~AcpServer()
     stop();
     qDeleteAll(m_sessions);
     m_sessions.clear();
+    m_sessionActivity.clear();
 }
 
 void AcpServer::startStdio()
@@ -271,6 +288,14 @@ QJsonObject AcpServer::dispatch(const QJsonObject &message)
     }
 
     if (method == u"session/new"_s) {
+        // Every session owns a full harness loop, graph and SQLite connection.
+        // A client that opens sessions without closing them must not be able to
+        // grow the process without bound.
+        constexpr int kMaxSessions = 64;
+        if (m_sessions.size() >= kMaxSessions) {
+            return fail(kServerError,
+                        u"Too many open sessions; close one before creating another."_s);
+        }
         const QString cwd = params.value(u"cwd"_s).toString();
         const QString workdir = cwd.isEmpty() ? QDir::currentPath() : cwd;
         if (!QFileInfo(workdir).isDir()) {
@@ -289,6 +314,7 @@ QJsonObject AcpServer::dispatch(const QJsonObject &message)
                                           : sessionError);
         }
         m_sessions.insert(sessionId, session);
+        touchSession(sessionId);
         connectSession(sessionId, session);
         return ok(QJsonObject{{u"sessionId"_s, sessionId}});
     }
@@ -307,6 +333,7 @@ QJsonObject AcpServer::dispatch(const QJsonObject &message)
             return fail(kInvalidParams, u"The prompt has no text content."_s);
         }
         m_pendingPrompts.insert(sessionId, id);
+        touchSession(sessionId);
         session->startPrompt(text);
         return QJsonObject();
     }
@@ -318,6 +345,7 @@ QJsonObject AcpServer::dispatch(const QJsonObject &message)
             return fail(kInvalidParams, u"Unknown session: %1"_s.arg(sessionId));
         }
         m_pendingPrompts.remove(sessionId);
+        m_sessionActivity.remove(sessionId);
         session->deleteLater();
         return ok(QJsonObject());
     }
@@ -606,6 +634,57 @@ void AcpServer::finishSessionPrompt(const QString &sessionId, bool ok,
 bool AcpServer::hasPendingPrompt(const QString &sessionId) const
 {
     return m_pendingPrompts.contains(sessionId);
+}
+
+void AcpServer::touchSession(const QString &sessionId)
+{
+    m_sessionActivity.insert(sessionId, QDateTime::currentMSecsSinceEpoch());
+}
+
+void AcpServer::reapIdleSessions()
+{
+    if (m_sessions.isEmpty()) {
+        return;
+    }
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    const QStringList ids = m_sessions.keys();
+    for (const QString &sessionId : ids) {
+        // A turn in flight, or a permission/question the client has not
+        // answered, is live work: only a session with nothing outstanding is a
+        // candidate for reaping.
+        if (m_pendingPrompts.contains(sessionId)) {
+            touchSession(sessionId);
+            continue;
+        }
+        bool waitingOnClient = false;
+        for (auto it = m_permissionRequests.cbegin(); it != m_permissionRequests.cend(); ++it) {
+            if (it.value() == sessionId) {
+                waitingOnClient = true;
+                break;
+            }
+        }
+        if (!waitingOnClient) {
+            for (auto it = m_questionRequests.cbegin(); it != m_questionRequests.cend(); ++it) {
+                if (it.value() == sessionId) {
+                    waitingOnClient = true;
+                    break;
+                }
+            }
+        }
+        if (waitingOnClient) {
+            touchSession(sessionId);
+            continue;
+        }
+        const qint64 last = m_sessionActivity.value(sessionId, now);
+        if (now - last < kIdleSessionMs) {
+            continue;
+        }
+        AcpServerSession *session = m_sessions.take(sessionId);
+        m_sessionActivity.remove(sessionId);
+        if (session) {
+            session->deleteLater();
+        }
+    }
 }
 
 QString AcpServer::permissionKind(ToolRisk risk) const

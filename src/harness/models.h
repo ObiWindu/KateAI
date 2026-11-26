@@ -72,6 +72,10 @@ struct ModelProfile {
     QString toolSchemaDialect = QStringLiteral("openai");
     bool supportsParallelToolCalls = true;
     bool supportsReasoning = false;
+    // Levels the model advertises, e.g. {"low", "medium", "high", "xhigh"}.
+    // Empty means "reasoning is supported, but the catalogue did not list
+    // levels"; the UI then offers the generic set.
+    QStringList reasoningEfforts;
     bool supportsToolChoice = true;
 
     // Multiplier applied to the character/4 estimate. Learned values come from
@@ -106,6 +110,18 @@ public:
     // Resolves a model for a provider. The provider is used to fill prices and
     // cache semantics when the family is shared across gateways.
     static ModelProfile resolve(Provider provider, const QString &model);
+
+    // Replaces the dynamically learned entries for one provider with the
+    // metadata from a model-list response. Models.dev-style fields (limit,
+    // cost, capabilities, family, display name) override the bundled family
+    // defaults; absent fields keep them. This is what lets OpenCode's new
+    // subscription models report the right window, cache prices and thinking
+    // levels without shipping a hard-coded catalogue.
+    static void registerModels(Provider provider, const QJsonArray &models);
+    static void clearRegisteredModels(Provider provider);
+    // The levels a model advertises. Falls back to the generic set when the
+    // model supports reasoning but no explicit list was published.
+    static QStringList reasoningEfforts(Provider provider, const QString &model);
 
     // Convenience for callers that only need the window.
     static int contextWindow(Provider provider, const QString &model);

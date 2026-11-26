@@ -7,6 +7,7 @@
 
 #include <QCryptographicHash>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
 #include <QProcess>
@@ -47,15 +48,45 @@ GitResult runGit(const QString &workingDir, const QStringList &arguments, int ti
         result.err = u"git could not be started"_s;
         return result;
     }
-    if (!git.waitForFinished(timeoutMs)) {
-        git.kill();
-        git.waitForFinished(1000);
-        result.err = u"git timed out"_s;
+    // Drain while git runs. A large `git diff --binary` used to sit whole in
+    // the pipe and then in one QString; cap it instead of risking an OOM.
+    constexpr qint64 kMaxGitOutputBytes = 32 * 1024 * 1024;
+    QByteArray stdOut;
+    QByteArray stdErr;
+    QElapsedTimer elapsed;
+    elapsed.start();
+    bool capped = false;
+    while (true) {
+        stdOut += git.readAllStandardOutput();
+        stdErr += git.readAllStandardError();
+        if (stdOut.size() > kMaxGitOutputBytes) {
+            capped = true;
+            git.kill();
+            git.waitForFinished(1000);
+            break;
+        }
+        if (git.waitForFinished(20)) {
+            break;
+        }
+        if (git.state() == QProcess::NotRunning) {
+            break;
+        }
+        if (elapsed.elapsed() >= timeoutMs) {
+            git.kill();
+            git.waitForFinished(1000);
+            result.err = u"git timed out"_s;
+            return result;
+        }
+    }
+    stdOut += git.readAllStandardOutput();
+    stdErr += git.readAllStandardError();
+    if (capped) {
+        result.err = u"git output exceeded the 32 MB limit"_s;
         return result;
     }
     result.exitCode = git.exitCode();
-    result.out = QString::fromUtf8(git.readAllStandardOutput());
-    result.err = QString::fromUtf8(git.readAllStandardError());
+    result.out = QString::fromUtf8(stdOut);
+    result.err = QString::fromUtf8(stdErr);
     result.ok = git.exitStatus() == QProcess::NormalExit && result.exitCode == 0;
     return result;
 }

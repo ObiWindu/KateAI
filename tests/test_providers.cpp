@@ -131,14 +131,16 @@ private Q_SLOTS:
         QCOMPARE(providerFromId(u"opencode"_s), Provider::OpenCode);
         QVERIFY(!providerLabel(Provider::OpenCode).isEmpty());
 
-        // Documented endpoint: opencode.ai serves its curated catalogue from
-        // /zen/v1, which is also where the model list is fetched from.
-        QCOMPARE(providerBaseUrl(Provider::OpenCode), u"https://opencode.ai/zen/v1"_s);
+        // Documented Console endpoint: the catalogue and OpenAI-compatible
+        // requests are served from /inference/v1.
+        QCOMPARE(providerBaseUrl(Provider::OpenCode), u"https://opencode.ai/inference/v1"_s);
 
         Settings settings;
         settings.provider = Provider::OpenCode;
         settings.opencodeUrl.clear();
-        QCOMPARE(providerBaseUrl(settings), u"https://opencode.ai/zen/v1"_s);
+        QCOMPARE(providerBaseUrl(settings), u"https://opencode.ai/inference/v1"_s);
+        settings.opencodePlan = OpenCodePlan::Go;
+        QCOMPARE(providerBaseUrl(settings), u"https://opencode.ai/inference/go/v1"_s);
         settings.opencodeUrl = u"http://127.0.0.1:1234/v1"_s;
         QCOMPARE(providerBaseUrl(settings), u"http://127.0.0.1:1234/v1"_s);
 
@@ -149,6 +151,17 @@ private Q_SLOTS:
 
         // It is OpenAI-compatible, so its catalogue can be listed.
         QVERIFY(providerSupportsModelListing(Provider::OpenCode));
+    }
+
+    void openCodePlanIdsRoundTrip()
+    {
+        QCOMPARE(openCodePlanFromId(openCodePlanId(OpenCodePlan::PayAsYouGo)),
+                 OpenCodePlan::PayAsYouGo);
+        QCOMPARE(openCodePlanFromId(openCodePlanId(OpenCodePlan::Go)),
+                 OpenCodePlan::Go);
+        QCOMPARE(openCodePlanFromId(u"GO"_s), OpenCodePlan::Go);
+        QCOMPARE(openCodePlanFromId(QString()), OpenCodePlan::PayAsYouGo);
+        QVERIFY(!openCodePlanLabel(OpenCodePlan::Go).isEmpty());
     }
 
     void everyProviderRoundTripsThroughItsId()

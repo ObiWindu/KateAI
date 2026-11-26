@@ -8,6 +8,7 @@
 #include <QDialog>
 #include <QPointer>
 
+class QHideEvent;
 class QLabel;
 class QListWidget;
 class QPushButton;
@@ -37,7 +38,11 @@ public:
 
     void refresh();
 
+protected:
+    void hideEvent(QHideEvent *event) override;
+
 private:
+    void scheduleRefresh();
     void addTextTab(const QString &title, QTextBrowser **view);
     void refreshRewind();
 
@@ -52,6 +57,7 @@ private:
     QListWidget *m_checkpoints = nullptr;
     QLabel *m_rewindNote = nullptr;
     QPushButton *m_restore = nullptr;
+    bool m_refreshPending = false;
 };
 
 } // namespace KateAi

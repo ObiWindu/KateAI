@@ -115,6 +115,9 @@ void EditRangeTracker::setRanges(const QString &path, KTextEditor::Document *doc
 {
     auto existing = m_paths.find(path);
     if (existing != m_paths.end()) {
+        if (existing.value().destroyedConnection) {
+            disconnect(existing.value().destroyedConnection);
+        }
         if (!existing.value().document.isNull()) {
             releaseAnchored(existing.value().pending);
             releaseAnchored(existing.value().settled);
@@ -133,12 +136,28 @@ void EditRangeTracker::setRanges(const QString &path, KTextEditor::Document *doc
     ranges.document = document;
     ranges.pending = anchor(document, pending);
     ranges.settled = anchor(document, settled);
+    // destroyed() is emitted while the document is still alive enough to
+    // release its MovingCursors. Without this, closing a document with pending
+    // ranges leaked the anchors and left a stale path entry behind.
+    ranges.destroyedConnection = connect(document, &QObject::destroyed, this,
+        [this, path, document]() {
+            auto it = m_paths.find(path);
+            if (it == m_paths.end() || it.value().document != document) {
+                return;
+            }
+            releaseAnchored(it.value().pending);
+            releaseAnchored(it.value().settled);
+            m_paths.erase(it);
+        });
     m_paths.insert(path, ranges);
 }
 
 void EditRangeTracker::clear()
 {
     for (auto it = m_paths.begin(); it != m_paths.end(); ++it) {
+        if (it.value().destroyedConnection) {
+            disconnect(it.value().destroyedConnection);
+        }
         if (it.value().document.isNull()) {
             it.value().pending.clear();
             it.value().settled.clear();

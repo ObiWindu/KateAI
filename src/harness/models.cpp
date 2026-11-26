@@ -5,6 +5,7 @@
 
 #include "models.h"
 
+#include <QHash>
 #include <QJsonObject>
 
 using namespace Qt::Literals::StringLiterals;
@@ -223,13 +224,15 @@ QList<ModelProfile> ModelProfiles::catalog()
     return cached;
 }
 
-ModelProfile ModelProfiles::resolve(Provider provider, const QString &model)
+// The bundled family defaults. Callers normally go through resolve(), which
+// first consults the metadata learned from a provider's model list.
+static ModelProfile staticProfile(Provider provider, const QString &model)
 {
     const QString name = model.trimmed().toLower();
     if (name.isEmpty()) {
         return fallbackProfile(provider, model);
     }
-    const QList<ModelProfile> all = catalog();
+    const QList<ModelProfile> all = ModelProfiles::catalog();
 
     // Provider-specific gateway prefixes still carry the family in the name;
     // matching on the id is more reliable than on the transport.
@@ -270,7 +273,7 @@ ModelProfile ModelProfiles::resolve(Provider provider, const QString &model)
     if (startsWithAny(name, {u"gpt-4o"_s, u"gpt-4-turbo"_s})) {
         return profileById(all, u"gpt-4o"_s, provider, model);
     }
-    if (startsWithAny(name, {u"gpt-5"_s, u"codex"_s})) {
+    if (startsWithAny(name, {u"gpt-5"_s, u"gpt-6"_s, u"codex"_s})) {
         return profileById(all, u"gpt-5"_s, provider, model);
     }
     if (startsWithAny(name, {u"o1"_s, u"o3"_s, u"o4"_s})) {
@@ -300,6 +303,164 @@ ModelProfile ModelProfiles::resolve(Provider provider, const QString &model)
     }
 
     return fallbackProfile(provider, model);
+}
+
+namespace
+{
+
+QHash<QString, ModelProfile> &dynamicModels()
+{
+    static QHash<QString, ModelProfile> models;
+    return models;
+}
+
+QString dynamicKey(Provider provider, const QString &model)
+{
+    return providerId(provider) + u':' + model.trimmed();
+}
+
+double jsonPrice(const QJsonObject &object, double fallback = -1.0)
+{
+    const QJsonValue value = object.value(u"price"_s);
+    return value.isDouble() ? value.toDouble() : fallback;
+}
+
+} // namespace
+
+void ModelProfiles::registerModels(Provider provider, const QJsonArray &models)
+{
+    QHash<QString, ModelProfile> &registry = dynamicModels();
+    const QString prefix = providerId(provider) + u':';
+    for (auto it = registry.begin(); it != registry.end();) {
+        if (it.key().startsWith(prefix)) {
+            it = registry.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    for (const QJsonValue &value : models) {
+        const QJsonObject object = value.toObject();
+        const QString id = object.value(u"id"_s).toString().trimmed();
+        if (id.isEmpty()) {
+            continue;
+        }
+        const QString type = object.value(u"type"_s).toString();
+        if (!type.isEmpty() && type != u"chat"_s) {
+            continue;
+        }
+
+        // Start from the bundled family defaults so a catalogue that only
+        // publishes a name still gets the right prompt and edit dialect.
+        ModelProfile profile = staticProfile(provider, id);
+        profile.id = id;
+        profile.provider = provider;
+        profile.known = true;
+        const QString name = object.value(u"name"_s).toString().trimmed();
+        if (!name.isEmpty()) {
+            profile.displayName = name;
+        }
+        const QString family = object.value(u"family"_s).toString().trimmed();
+        if (!family.isEmpty()) {
+            profile.family = family;
+        }
+
+        const QJsonObject limit = object.value(u"limit"_s).toObject();
+        const int context = limit.value(u"context"_s).toInt();
+        if (context > 0) {
+            profile.contextWindow = context;
+        }
+        const int output = limit.value(u"output"_s).toInt();
+        if (output > 0) {
+            profile.maxOutputTokens = output;
+        }
+
+        const QJsonObject textCost = object.value(u"cost"_s).toObject()
+                                         .value(u"text"_s).toObject();
+        const QJsonObject inputCost = textCost.value(u"input"_s).toObject();
+        const QJsonObject cacheCost = inputCost.value(u"cache"_s).toObject();
+        const double inputPrice = jsonPrice(inputCost);
+        if (inputPrice >= 0.0) {
+            profile.inputPrice = inputPrice;
+        }
+        const double outputPrice = jsonPrice(textCost.value(u"output"_s).toObject());
+        if (outputPrice >= 0.0) {
+            profile.outputPrice = outputPrice;
+        }
+        const QJsonValue cacheReadValue = cacheCost.value(u"read"_s);
+        if (cacheReadValue.isDouble()) {
+            profile.cacheReadPrice = cacheReadValue.toDouble();
+        }
+        const QJsonValue cacheWriteValue = cacheCost.value(u"write"_s);
+        if (cacheWriteValue.isDouble()) {
+            profile.cacheWritePrice = cacheWriteValue.toDouble();
+        }
+        // OpenCode caches a stable session prefix automatically. Publishing a
+        // cache price means the model has prompt caching at all.
+        if (cacheCost.contains(u"read"_s) || cacheCost.contains(u"write"_s)) {
+            profile.cacheStyle = CacheStyle::Automatic;
+        }
+
+        const QJsonObject capabilities = object.value(u"capabilities"_s).toObject();
+        const QJsonObject reasoning = capabilities.value(u"reasoning"_s).toObject();
+        if (reasoning.contains(u"supported"_s)) {
+            profile.supportsReasoning = reasoning.value(u"supported"_s).toBool();
+        }
+        profile.reasoningEfforts.clear();
+        if (profile.supportsReasoning) {
+            const QJsonArray efforts = reasoning.value(u"effort"_s).toArray();
+            for (const QJsonValue &effort : efforts) {
+                const QString level = effort.toString().trimmed().toLower();
+                if (!level.isEmpty() && !profile.reasoningEfforts.contains(level)) {
+                    profile.reasoningEfforts.append(level);
+                }
+            }
+        }
+        const QJsonObject tools = capabilities.value(u"tools"_s).toObject();
+        if (tools.contains(u"supported"_s)) {
+            const bool supported = tools.value(u"supported"_s).toBool();
+            profile.supportsToolChoice = supported;
+            if (!supported) {
+                profile.supportsParallelToolCalls = false;
+            }
+        }
+
+        registry.insert(dynamicKey(provider, id), profile);
+    }
+}
+
+void ModelProfiles::clearRegisteredModels(Provider provider)
+{
+    QHash<QString, ModelProfile> &registry = dynamicModels();
+    const QString prefix = providerId(provider) + u':';
+    for (auto it = registry.begin(); it != registry.end();) {
+        if (it.key().startsWith(prefix)) {
+            it = registry.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+ModelProfile ModelProfiles::resolve(Provider provider, const QString &model)
+{
+    const auto it = dynamicModels().constFind(dynamicKey(provider, model));
+    if (it != dynamicModels().constEnd()) {
+        return it.value();
+    }
+    return staticProfile(provider, model);
+}
+
+QStringList ModelProfiles::reasoningEfforts(Provider provider, const QString &model)
+{
+    const ModelProfile profile = resolve(provider, model);
+    if (!profile.reasoningEfforts.isEmpty()) {
+        return profile.reasoningEfforts;
+    }
+    if (profile.supportsReasoning) {
+        return {u"minimal"_s, u"low"_s, u"medium"_s, u"high"_s};
+    }
+    return {};
 }
 
 int ModelProfiles::contextWindow(Provider provider, const QString &model)
@@ -399,6 +560,11 @@ QJsonObject ModelProfiles::toJson(const ModelProfile &profile)
     obj.insert(u"toolSchemaDialect"_s, profile.toolSchemaDialect);
     obj.insert(u"supportsParallelToolCalls"_s, profile.supportsParallelToolCalls);
     obj.insert(u"supportsReasoning"_s, profile.supportsReasoning);
+    QJsonArray efforts;
+    for (const QString &effort : profile.reasoningEfforts) {
+        efforts.append(effort);
+    }
+    obj.insert(u"reasoningEfforts"_s, efforts);
     obj.insert(u"tokenFactor"_s, profile.tokenFactor);
     obj.insert(u"known"_s, profile.known);
     return obj;

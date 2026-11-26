@@ -4,13 +4,16 @@
  */
 
 #include "plugin.h"
+#include "boundedfile.h"
 #include "acpinstall.h"
 #include "configpage.h"
 #include "kateaicommand.h"
 #include "pluginview.h"
 #include "settings.h"
+#include "workspaceservices.h"
 
 #include <QDateTime>
+#include <QDir>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -51,8 +54,15 @@ public:
     explicit AcpAgentAutoUpdater(KateAiPlugin *plugin)
         : QObject(plugin)
         , m_plugin(plugin)
-        , m_network(new QNetworkAccessManager(this))
     {
+    }
+
+    // The plugin owns one network manager for the whole process.
+    void setNetwork(QNetworkAccessManager *network)
+    {
+        if (network) {
+            m_network = network;
+        }
     }
 
     void start()
@@ -94,6 +104,19 @@ public:
         request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
         QNetworkReply *reply = m_network->get(request);
         connect(reply, &QNetworkReply::finished, this, [this, reply, installed, registryHasMistral]() {
+            // Same registry document as the settings page: bound it before the
+            // copy and the JSON parse.
+            constexpr qint64 kMaxRegistryBodyBytes = 4 * 1024 * 1024;
+            if (!replyBodyWithinLimit(reply, kMaxRegistryBodyBytes)) {
+                reply->deleteLater();
+                qWarning() << "KateAI: ACP agent update check failed: the registry response is too large";
+                if (!registryHasMistral && !QStandardPaths::findExecutable(u"vibe-acp"_s).isEmpty()) {
+                    checkStandaloneMistral();
+                } else {
+                    updateNext();
+                }
+                return;
+            }
             const QByteArray body = reply->readAll();
             const QString error = reply->errorString();
             const bool ok = reply->error() == QNetworkReply::NoError;
@@ -385,6 +408,7 @@ private:
 KateAiPlugin::KateAiPlugin(QObject *parent, const QVariantList &args)
     : KTextEditor::Plugin(parent)
     , m_settings(SettingsStore::load())
+    , m_network(new QNetworkAccessManager(this))
 {
     Q_UNUSED(args);
     // Initialize the plugin with default settings loaded from persistent storage
@@ -392,6 +416,7 @@ KateAiPlugin::KateAiPlugin(QObject *parent, const QVariantList &args)
     // editor process and dispatches to the view of the window it was used in.
     m_command = new KateAiCommand(this, this);
     auto *acpUpdater = new AcpAgentAutoUpdater(this);
+    acpUpdater->setNetwork(m_network);
     QTimer::singleShot(0, acpUpdater, [acpUpdater]() { acpUpdater->start(); });
 }
 
@@ -422,6 +447,36 @@ void KateAiPlugin::setSettings(const Settings &settings)
     m_settings = settings;
     SettingsStore::save(m_settings);
     Q_EMIT settingsChanged(m_settings);
+}
+
+std::shared_ptr<WorkspaceServices> KateAiPlugin::workspaceServices(const QString &workspace)
+{
+    if (workspace.trimmed().isEmpty() || !QFileInfo(workspace).isDir()) {
+        return {};
+    }
+    QString key = QFileInfo(workspace).canonicalFilePath();
+    if (key.isEmpty()) {
+        key = QDir::cleanPath(workspace);
+    }
+    // Drop entries whose services were released with the last view. Without
+    // this, every folder ever opened leaves a dead key for the session.
+    for (auto it = m_workspaceServices.begin(); it != m_workspaceServices.end();) {
+        if (it->expired()) {
+            it = m_workspaceServices.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    const auto existing = m_workspaceServices.constFind(key);
+    if (existing != m_workspaceServices.constEnd()) {
+        if (const auto live = existing->lock()) {
+            return live;
+        }
+    }
+
+    auto services = std::make_shared<WorkspaceServices>(key);
+    m_workspaceServices.insert(key, services);
+    return services;
 }
 
 void KateAiPlugin::readSessionConfig(const KConfigGroup &config)

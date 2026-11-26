@@ -125,8 +125,20 @@ public:
     QString contextSummary(int maxNodes, int maxEdges, int level) const;
 
     // Serialization
+    enum class SqliteLoadError {
+        None,
+        Io,
+        InvalidSchema,
+        Corrupt,
+    };
     bool saveToFile(const QString &filePath) const;
     bool loadFromFile(const QString &filePath);
+    bool saveToSqlite(const QString &filePath) const;
+    bool loadFromSqlite(const QString &filePath, SqliteLoadError *error = nullptr);
+    bool saveToDatabase(const QString &filePath) const { return saveToSqlite(filePath); }
+    bool loadFromDatabase(const QString &filePath) { return loadFromSqlite(filePath); }
+    bool saveToDb(const QString &filePath) const { return saveToSqlite(filePath); }
+    bool loadFromDb(const QString &filePath) { return loadFromSqlite(filePath); }
     QJsonObject toJson() const;
     bool fromJson(const QJsonObject &json);
 
@@ -134,6 +146,7 @@ public:
     static QString generateNodeId(const QString &path, const QString &type = QStringLiteral("file"));
     static QString getNodeTypeFromPath(const QString &path);
     static bool isBinaryFile(const QString &path);
+    static bool pathWithinRoot(const QString &path, const QString &root);
     static QString extractContentPreview(const QString &content, int maxLength);
 
     // Getters
@@ -150,7 +163,14 @@ public:
 private:
     QMap<QString, GraphNode*> m_nodes;
     QMap<QString, GraphEdge*> m_edges;
-    QMap<QString, QSet<QString>> m_adjacencyList;
+    // Forward adjacency (source -> dependencies) was maintained by hand beside
+    // m_edges, so every dependency string was retained twice for the life of
+    // the graph. It is now built from m_edges on demand and dropped whenever the
+    // edges change: only the traversal queries need it, and they are rare
+    // compared with a scan that touches every edge.
+    mutable QHash<QString, QStringList> m_adjacencyList;
+    mutable bool m_adjacencyValid = false;
+    const QHash<QString, QStringList> &adjacencyList() const;
     QString m_workspacePath;
     // Directories already visited during the current scan, keyed by canonical
     // path, so a symlink loop cannot re-enter a directory it resolved from.
@@ -165,7 +185,8 @@ private:
     qint64 m_lastUpdateTime;
     bool m_isDirty;
 
-    void buildAdjacencyList();
+    void takeStateFrom(ProjectGraph &other);
+
     void cleanupDeletedNodes();
     void updateNodeMetrics(GraphNode *node);
     // Both counters live here so the scan and the update path agree on what a

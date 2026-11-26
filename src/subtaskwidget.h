@@ -114,6 +114,8 @@ private:
     // activity log at a coalesced cadence, so a long command reads live instead
     // of only appearing when it exits.
     void flushStreamOutput();
+    // Renders the coalesced answer text accumulated by appendMessageDelta().
+    void flushStreamedAnswer();
     void appendLogLine(const QString &line, bool isError, bool countStep = true);
     // The part of the card that is not the two scrolling documents -- header,
     // caption, status line -- which a height budget has to leave room for.
@@ -137,6 +139,9 @@ protected:
     // without bound.
     QList<QPair<QString, bool>> m_activityLog;
     QString m_streamedMessage;
+    // Set when new delta text has been accumulated but not yet rendered.
+    bool m_answerDirty = false;
+    QTimer *m_answerTimer = nullptr;
     // Deltas that arrived before startAgent (toolStarted creates the card
     // before subtaskStarted marks it running). Kept so early streaming text
     // is not silently dropped.

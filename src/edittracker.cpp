@@ -4,6 +4,7 @@
  */
 
 #include "edittracker.h"
+#include "boundedfile.h"
 
 #include "chattheme.h"
 #include "editranges.h"
@@ -24,6 +25,7 @@
 #include <QShortcut>
 #include <QVBoxLayout>
 #include <QStandardPaths>
+#include <QUuid>
 #include <QWidget>
 
 #include <algorithm>
@@ -41,6 +43,11 @@ namespace
 // part of the chat's usual type scale. The scale was raised by 15% so the
 // small type stays legible next to the transcript.
 constexpr qreal kTrackerFontScale = 0.69;
+
+// A spilled edit snapshot is loaded back for the diff view. The file is written
+// by this tracker, but it lives in a shared temp directory, so the read is
+// bounded to a size well above the largest snapshot worth showing.
+constexpr qint64 MaxBlobBytes = 64 * 1024 * 1024;
 
 QString trackerFontSize(int pixels)
 {
@@ -252,6 +259,97 @@ EditTracker::EditTracker(QWidget *parent)
     m_listContainer->hide();
 }
 
+EditTracker::~EditTracker()
+{
+    clearBlobs();
+}
+
+QString EditTracker::storeBlob(const QString &content)
+{
+    constexpr qsizetype kInlineLimit = 256 * 1024;
+    if (content.isNull() || content.size() <= kInlineLimit) {
+        return {};
+    }
+    if (m_blobDirectory.isEmpty()) {
+        m_blobDirectory = QDir::tempPath() + u"/kateai-edits-"_s
+            + QUuid::createUuid().toString(QUuid::WithoutBraces);
+    }
+    if (!QDir().mkpath(m_blobDirectory)) {
+        return {};
+    }
+    const QString id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    QFile file(QDir(m_blobDirectory).filePath(id + u".blob"_s));
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        return {};
+    }
+    const QByteArray bytes = content.toUtf8();
+    if (file.write(bytes) != bytes.size()) {
+        file.close();
+        QFile::remove(file.fileName());
+        return {};
+    }
+    file.close();
+    QFile::setPermissions(file.fileName(), QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+    return id;
+}
+
+QString EditTracker::loadBlob(const QString &id, const QString &fallback) const
+{
+    if (id.isEmpty()) {
+        return fallback;
+    }
+    // A blob is a file this tracker wrote, so its size is known, but the temp
+    // directory is world-writable: bound the read in case the path was swapped
+    // for something larger between the write and the read.
+    const QString text = readBoundedFile(QDir(m_blobDirectory).filePath(id + u".blob"_s),
+                                         MaxBlobBytes);
+    return text.isEmpty() ? fallback : text;
+}
+
+void EditTracker::clearBlobs()
+{
+    if (!m_blobDirectory.isEmpty()) {
+        QDir(m_blobDirectory).removeRecursively();
+        m_blobDirectory.clear();
+    }
+}
+
+void EditTracker::pruneUnreferencedBlobs()
+{
+    if (m_blobDirectory.isEmpty()) {
+        return;
+    }
+    QSet<QString> referenced;
+    auto addId = [&referenced](const QString &id) {
+        if (!id.isEmpty()) {
+            referenced.insert(id);
+        }
+    };
+    for (const Group &group : std::as_const(m_groups)) {
+        addId(group.lastKnownContentId);
+        for (const EditEntry &entry : group.pending) {
+            addId(entry.newContentId);
+        }
+    }
+    for (const Decision &decision : std::as_const(m_undoStack)) {
+        addId(decision.previousContentId);
+        for (const EditEntry &entry : decision.pending) {
+            addId(entry.newContentId);
+        }
+    }
+
+    // Only files this tracker named are considered, so a stray file in the
+    // shared temp directory is never removed.
+    const QDir dir(m_blobDirectory);
+    const QStringList files = dir.entryList({u"*.blob"_s}, QDir::Files);
+    for (const QString &file : files) {
+        if (referenced.contains(file.chopped(5))) {
+            continue;
+        }
+        QFile::remove(dir.filePath(file));
+    }
+}
+
 void EditTracker::applyStyle()
 {
     m_countLabel->setStyleSheet(
@@ -294,6 +392,14 @@ void EditTracker::addEdit(const QString &path, const QString &toolName, const QS
     entry.diff = diff;
     entry.oldContent = oldContent;
     entry.newContent = newContent;
+    entry.oldContentId = storeBlob(entry.oldContent);
+    entry.newContentId = storeBlob(entry.newContent);
+    if (!entry.oldContentId.isEmpty()) {
+        entry.oldContent = QString();
+    }
+    if (!entry.newContentId.isEmpty()) {
+        entry.newContent = QString();
+    }
     entry.createdFile = createdFile;
 
     Group *group = nullptr;
@@ -308,7 +414,8 @@ void EditTracker::addEdit(const QString &path, const QString &toolName, const QS
         fresh.path = path;
         // The baseline a rejection restores: the file as it looked before the
         // first pending edit, which for a brand-new file is nothing at all.
-        fresh.lastKnownContent = oldContent;
+        fresh.lastKnownContent = entry.oldContent;
+        fresh.lastKnownContentId = entry.oldContentId;
         fresh.createdFile = createdFile;
         m_groups.append(fresh);
         group = &m_groups.last();
@@ -359,11 +466,15 @@ void EditTracker::updateEdit(const QString &path, const QString &toolName, const
         if (!group->pending.isEmpty()) {
             group->pending.last().diff = diff;
             group->pending.last().toolName = toolName;
-            if (oldContent.isEmpty() == false) {
-                group->pending.last().oldContent = oldContent;
+            if (!oldContent.isEmpty()) {
+                EditEntry &entry = group->pending.last();
+                entry.oldContentId = storeBlob(oldContent);
+                entry.oldContent = entry.oldContentId.isEmpty() ? oldContent : QString();
             }
             if (!newContent.isEmpty()) {
-                group->pending.last().newContent = newContent;
+                EditEntry &entry = group->pending.last();
+                entry.newContentId = storeBlob(newContent);
+                entry.newContent = entry.newContentId.isEmpty() ? newContent : QString();
             }
         }
     } else {
@@ -381,6 +492,7 @@ void EditTracker::clear()
     m_groups.clear();
     m_undoStack.clear();
     m_settledRanges.clear();
+    clearBlobs();
     m_fileListVisible = false;
     updateUI();
     m_barWidget->hide();
@@ -553,6 +665,7 @@ void EditTracker::undoLast()
     restored.pending = decision.pending;
     restored.createdFile = decision.createdFile;
     restored.lastKnownContent = decision.previousContent;
+    restored.lastKnownContentId = decision.previousContentId;
     refreshTotals(restored);
 
     bool replaced = false;
@@ -570,26 +683,28 @@ void EditTracker::undoLast()
     // Undoing an acceptance has to undo the file too. Restoring the pre-edit
     // content for a file the agent created means deleting it again, otherwise
     // "undo" would leave behind exactly the file the user said to undo.
+    const QString previous = loadBlob(decision.previousContentId, decision.previousContent);
     if (decision.kind == Decision::Accepted) {
         if (decision.createdFile) {
             Q_EMIT fileCreatedThenRejected(decision.path);
-        } else if (!decision.previousContent.isNull()) {
-            Q_EMIT editRejected(decision.path, decision.toolName, decision.previousContent);
+        } else if (!previous.isNull()) {
+            Q_EMIT editRejected(decision.path, decision.toolName, previous);
         }
     } else {
         // Undoing a rejection has to put the edit back: the file on disk holds
         // the reverted content, and the tracker now shows the edit as pending
         // again. Without this the two disagree.
         const EditEntry *last = decision.pending.isEmpty() ? nullptr : &decision.pending.last();
+        const QString newContent = last ? loadBlob(last->newContentId, last->newContent) : QString();
         if (decision.createdFile) {
             // The file was created by the agent and then deleted by the
             // rejection. Putting it back means writing the content again; a
             // null expectedContent tells the receiver the file should be gone.
-            if (last && !last->newContent.isNull()) {
-                Q_EMIT editRestored(decision.path, decision.toolName, last->newContent, QString());
+            if (last && !newContent.isNull()) {
+                Q_EMIT editRestored(decision.path, decision.toolName, newContent, QString());
             }
-        } else if (last && !last->newContent.isNull()) {
-            Q_EMIT editRestored(decision.path, decision.toolName, last->newContent, decision.previousContent);
+        } else if (last && !newContent.isNull()) {
+            Q_EMIT editRestored(decision.path, decision.toolName, newContent, previous);
         }
     }
 
@@ -872,7 +987,8 @@ void EditTracker::settle(const QString &path, bool accepted)
     }
 
     Group &group = *it;
-    if (!accepted && !group.createdFile && group.lastKnownContent.isNull()) {
+    if (!accepted && !group.createdFile
+        && group.lastKnownContent.isNull() && group.lastKnownContentId.isEmpty()) {
         // Without a baseline a revert would either write an empty file or
         // clear the queue without touching anything. Keep the entries: the
         // user can still Keep them.
@@ -898,6 +1014,7 @@ void EditTracker::settle(const QString &path, bool accepted)
     decision.pending = group.pending;
     decision.createdFile = group.createdFile;
     decision.previousContent = group.lastKnownContent;
+    decision.previousContentId = group.lastKnownContentId;
     decision.settledRanges = settledNow;
 
     // Mutate our own state before emitting anything. The slots write files and
@@ -906,18 +1023,35 @@ void EditTracker::settle(const QString &path, bool accepted)
     // pending.
     const bool createdFile = group.createdFile;
     const QString toolName = decision.toolName;
-    const QString restoreTo = group.lastKnownContent;
-    const QString settledTo = group.pending.last().newContent;
+    const QString restoreTo = loadBlob(group.lastKnownContentId, group.lastKnownContent);
+    if (!accepted && !createdFile && !group.lastKnownContentId.isEmpty()
+        && restoreTo.isNull()) {
+        Q_EMIT statusMessage(i18n("Cannot revert %1: its saved baseline is unavailable.",
+                                  QFileInfo(path).fileName()), true);
+        return;
+    }
+    const QString settledTo = loadBlob(group.pending.last().newContentId,
+                                       group.pending.last().newContent);
+    const EditEntry settledEntry = group.pending.last();
     group.pending.clear();
     if (!settledNow.isEmpty()) {
-        m_settledRanges[path].append(settledNow);
+        QList<KTextEditor::Range> &ranges = m_settledRanges[path];
+        ranges.append(settledNow);
+        // The undo stack only keeps the newest 50 decisions. Ranges older than
+        // that can no longer be retracted, and keeping every accepted edit of a
+        // long session made this hash grow without bound.
+        constexpr int kMaxSettledRangesPerPath = 64;
+        while (ranges.size() > kMaxSettledRangesPerPath) {
+            ranges.removeFirst();
+        }
     }
-    if (accepted && !settledTo.isNull()) {
+    if (accepted && (!settledTo.isNull() || !settledEntry.newContentId.isEmpty())) {
         // The file is already in this state, so accepting only settles the queue.
         // A null content means the post-edit read failed, so the state of the
         // file is unknown: the previous baseline is kept, because a null
         // baseline would be restored as an empty file later.
-        group.lastKnownContent = settledTo;
+        group.lastKnownContent = settledEntry.newContentId.isEmpty() ? settledTo : QString();
+        group.lastKnownContentId = settledEntry.newContentId;
     }
     m_undoStack.append(decision);
     // Keep undo useful without retaining every edit of a long session (each
@@ -937,6 +1071,12 @@ void EditTracker::settle(const QString &path, bool accepted)
         Q_EMIT editRejected(path, toolName, restoreTo);
     }
     Q_EMIT editsChanged(hasPendingEdits());
+    // Accepted edits used to leave their spilled snapshots in the temp directory
+    // until the whole tracker was cleared, so a long session kept every baseline
+    // it had ever read. A blob is removable once nothing can restore from it:
+    // the undo stack drops its oldest decisions, and a group's baseline moves
+    // forward as its edits are accepted.
+    pruneUnreferencedBlobs();
 }
 
 void EditTracker::renamePath(const QString &oldPath, const QString &newPath)
@@ -965,8 +1105,10 @@ void EditTracker::renamePath(const QString &oldPath, const QString &newPath)
             if (existingTarget && existingTarget != &group) {
                 existingTarget->pending.append(group.pending);
                 existingTarget->createdFile = existingTarget->createdFile || group.createdFile;
-                if (existingTarget->lastKnownContent.isNull()) {
+                if (existingTarget->lastKnownContent.isNull()
+                    && existingTarget->lastKnownContentId.isEmpty()) {
                     existingTarget->lastKnownContent = group.lastKnownContent;
+                    existingTarget->lastKnownContentId = group.lastKnownContentId;
                 }
                 group.pending.clear();
             }

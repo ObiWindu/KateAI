@@ -601,14 +601,25 @@ private Q_SLOTS:
         agent.setSettings(settings);
         agent.restoreSession(data);
         QCOMPARE(agent.subagent(u"restored"_s).taskId, u"restored"_s);
+        QCOMPARE(agent.subagent(u"restored"_s).patchPath, patchPath);
         QVERIFY2(agent.subagent(u"restored"_s).patch.isEmpty(),
                  "the patch was loaded during restore instead of on demand");
 
+        // Apply reads the diff into a local buffer and hands it to the
+        // worktree apply; the record never holds it again, so a failed apply
+        // cannot pin the loaded patch in memory.
         QString error;
         QVERIFY(!agent.applySubagentWorktree(u"restored"_s, &error));
-        QVERIFY(!error.isEmpty());
-        QVERIFY2(agent.subagent(u"restored"_s).patch.contains(u"RESTORED-PATCH-CONTENT"_s),
-                 "apply did not load the saved patch file");
+        QVERIFY2(!error.isEmpty(), "apply did not report a failure");
+        QVERIFY2(agent.subagent(u"restored"_s).patch.isEmpty(),
+                 "apply pinned the loaded patch in the record");
+
+        // The diff reads on demand: once the file is gone, the failure moves
+        // to the load step, which restore itself never performed.
+        QVERIFY(QFile::remove(patchPath));
+        error.clear();
+        QVERIFY(!agent.applySubagentWorktree(u"restored"_s, &error));
+        QVERIFY2(error.contains(u"saved sub-agent patch"_s), qPrintable(error));
     }
 
     void transcriptPagingReadsPastTheOldOneMiBPrefix()

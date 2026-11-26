@@ -4,6 +4,7 @@
  */
 
 #include "completionengine.h"
+#include "boundedfile.h"
 #include "llmclient.h"
 
 #include <QDateTime>
@@ -315,9 +316,18 @@ void CompletionEngine::handleReplyFinished()
     m_reply = nullptr;
     const CompletionPromptContext context = m_activeContext;
 
-    const QByteArray body = reply->readAll();
     const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
     const bool transportOk = reply->error() == QNetworkReply::NoError;
+    // A sane completion response is a few KB. Anything above this is a
+    // misconfigured endpoint or a hostile one, so it is rejected before the
+    // body is copied and parsed into a JSON tree.
+    constexpr qint64 kMaxCompletionBodyBytes = 256 * 1024;
+    if (transportOk && status < 400 && !replyBodyWithinLimit(reply, kMaxCompletionBodyBytes)) {
+        reply->deleteLater();
+        Q_EMIT failed(u"The completion response was larger than 256 KB and was ignored."_s);
+        return;
+    }
+    const QByteArray body = reply->readAll();
     reply->deleteLater();
 
     if (!transportOk || status >= 400) {

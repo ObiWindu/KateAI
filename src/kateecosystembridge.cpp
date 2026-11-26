@@ -24,6 +24,7 @@
 #include <QMenu>
 #include <QMetaObject>
 #include <QPlainTextEdit>
+#include <QPointer>
 #include <QPushButton>
 #include <QSyntaxHighlighter>
 #include <QTextCharFormat>
@@ -435,12 +436,33 @@ QWidget *KateEcosystemBridge::openNativeTab(const QString &title,
         return nullptr;
     }
     auto *container = new QWidget();
+    container->setAttribute(Qt::WA_DeleteOnClose);
     container->setWindowTitle(title);
     container->setWindowIcon(QIcon::fromTheme(isDiff ? u"vcs-diff"_s : u"help-hint"_s));
 
     auto *layout = new QVBoxLayout(container);
     layout->setContentsMargins(8, 8, 8, 8);
     layout->setSpacing(6);
+
+    auto *viewer = new QPlainTextEdit(container);
+    viewer->setReadOnly(true);
+    viewer->setLineWrapMode(QPlainTextEdit::NoWrap);
+    viewer->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
+    viewer->setPlainText(content);
+    if (isDiff) {
+        new DiffSyntaxHighlighter(viewer->document());
+    }
+
+    auto closeTab = [self = QPointer<KateEcosystemBridge>(this), containerWeak = QPointer<QWidget>(container)]() {
+        if (!containerWeak) {
+            return;
+        }
+        if (self && self->m_mainWindow) {
+            self->m_mainWindow->removeWidget(containerWeak);
+        }
+        // KTextEditor::MainWindow::removeWidget() detaches without deleting.
+        containerWeak->deleteLater();
+    };
 
     auto *header = new QHBoxLayout();
     auto *titleLbl = new QLabel(u"<b>%1</b>"_s.arg(title.toHtmlEscaped()), container);
@@ -453,51 +475,37 @@ QWidget *KateEcosystemBridge::openNativeTab(const QString &title,
     header->addStretch(1);
 
     auto *copyBtn = new QPushButton(QIcon::fromTheme(u"edit-copy"_s), i18n("Copy"), container);
-    connect(copyBtn, &QPushButton::clicked, container, [content]() {
+    connect(copyBtn, &QPushButton::clicked, container, [viewerWeak = QPointer<QPlainTextEdit>(viewer)]() {
+        if (!viewerWeak) {
+            return;
+        }
         if (QClipboard *cb = QGuiApplication::clipboard()) {
-            cb->setText(content);
+            cb->setText(viewerWeak->toPlainText());
         }
     });
     header->addWidget(copyBtn);
 
     if (onAcceptAll) {
         auto *acceptBtn = new QPushButton(QIcon::fromTheme(u"dialog-ok-apply"_s), i18n("Accept All"), container);
-        connect(acceptBtn, &QPushButton::clicked, container, [this, container, onAcceptAll]() {
+        connect(acceptBtn, &QPushButton::clicked, container, [closeTab, onAcceptAll]() {
             onAcceptAll();
-            if (m_mainWindow) {
-                m_mainWindow->removeWidget(container);
-            }
+            closeTab();
         });
         header->addWidget(acceptBtn);
     }
     if (onRejectAll) {
         auto *rejectBtn = new QPushButton(QIcon::fromTheme(u"dialog-cancel"_s), i18n("Reject All"), container);
-        connect(rejectBtn, &QPushButton::clicked, container, [this, container, onRejectAll]() {
+        connect(rejectBtn, &QPushButton::clicked, container, [closeTab, onRejectAll]() {
             onRejectAll();
-            if (m_mainWindow) {
-                m_mainWindow->removeWidget(container);
-            }
+            closeTab();
         });
         header->addWidget(rejectBtn);
     }
 
     auto *closeBtn = new QPushButton(QIcon::fromTheme(u"tab-close"_s), i18n("Close"), container);
-    connect(closeBtn, &QPushButton::clicked, container, [this, container]() {
-        if (m_mainWindow) {
-            m_mainWindow->removeWidget(container);
-        }
-    });
+    connect(closeBtn, &QPushButton::clicked, container, closeTab);
     header->addWidget(closeBtn);
     layout->addLayout(header);
-
-    auto *viewer = new QPlainTextEdit(container);
-    viewer->setReadOnly(true);
-    viewer->setLineWrapMode(QPlainTextEdit::NoWrap);
-    viewer->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
-    viewer->setPlainText(content);
-    if (isDiff) {
-        new DiffSyntaxHighlighter(viewer->document());
-    }
     layout->addWidget(viewer, 1);
 
     if (!m_mainWindow->addWidget(container)) {

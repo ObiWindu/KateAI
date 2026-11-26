@@ -32,6 +32,8 @@ add_library(kateai_core STATIC
     codehighlight.cpp
     contextmanager.cpp
     transcriptlayout.cpp
+    transcriptvirtualizer.cpp
+    workspaceservices.cpp
     websearch.cpp
     voiceinput.cpp
     completionengine.cpp

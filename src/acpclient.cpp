@@ -43,8 +43,33 @@ static const int kInternalError = -32603;
 static const int kServerError = -32000;
 // The largest protocol frame the client accepts. A frame above it is dropped,
 // and the turn is failed rather than left waiting for an answer that cannot
-// arrive.
-static constexpr qsizetype MaxFrameBytes = 16 * 1024 * 1024;
+// arrive. Frames carry streamed deltas, so 8 MiB is already far above a normal
+// chunk; the previous 16 MiB only widened the peak a broken agent could force.
+static constexpr qsizetype MaxFrameBytes = 8 * 1024 * 1024;
+// ACP agents own their model context, but their streamed answer and reasoning
+// are copied into our history and session. Bound those copies just like the
+// native client's assistant buffer. The frame cap alone allows an 8 MiB delta
+// and does not bound the sum.
+static constexpr qsizetype MaxPromptTextChars = 4 * 1024 * 1024;
+static constexpr qsizetype MaxPromptThinkingChars = 1024 * 1024;
+// ACP edit methods must materialise the whole file to apply old/new strings.
+// Keep that allocation bounded like the native edit tools.
+static constexpr qint64 MaxEditableFileBytes = 16 * 1024 * 1024;
+static constexpr qsizetype MaxPatchWorkingChars = 32 * 1024 * 1024;
+
+static bool acpFileTooLargeToEdit(const QString &path, QString *error)
+{
+    const QFileInfo info(path);
+    if (!info.exists() || !info.isFile() || info.size() <= MaxEditableFileBytes) {
+        return false;
+    }
+    if (error) {
+        *error = u"File is %1 bytes; editing files larger than %2 bytes is disabled to keep memory bounded."_s
+                     .arg(info.size())
+                     .arg(MaxEditableFileBytes);
+    }
+    return true;
+}
 
 static QString jsonText(const QJsonValue &value)
 {
@@ -205,6 +230,19 @@ static ToolResult completedToolResult(const QString &toolCallId, const QString &
 // Streamed tool content is retained for the final card when an agent sends a
 // terminal status without content. Bound it like the command buffers: a very
 // chatty tool must not pin an unbounded string per live call.
+static qsizetype permissionRequestBytes(const PermissionRequest &request)
+{
+    qsizetype total = request.details.size() + request.describeDiff.size()
+        + request.summary.size() + request.path.size() + request.resolvedPath.size();
+    for (const QString &diff : request.additionalDiffs) {
+        total += diff.size();
+    }
+    for (const QString &path : request.additionalPaths) {
+        total += path.size();
+    }
+    return total;
+}
+
 static QString capToolStream(QString text)
 {
     constexpr int kMaxStreamChars = 1024 * 1024;
@@ -1616,6 +1654,9 @@ void AcpClient::finishLiveTools(const QString &message)
     }
     m_liveTools.clear();
     m_toolStreamed.clear();
+    m_liveToolBytes = 0;
+    m_toolStreamBytes = 0;
+    m_terminalBytes = 0;
     m_toolProgressAt.clear();
     m_toolTerminals.clear();
     m_terminalTools.clear();
@@ -2008,6 +2049,9 @@ void AcpClient::spawnProcess()
     m_lastToolCallId.clear();
     m_liveTools.clear();
     m_toolStreamed.clear();
+    m_liveToolBytes = 0;
+    m_toolStreamBytes = 0;
+    m_terminalBytes = 0;
     m_toolProgressAt.clear();
     m_toolTerminals.clear();
     m_terminalTools.clear();
@@ -3101,14 +3145,17 @@ void AcpClient::onStdioReadyRead()
         return;
     }
     QPointer<AcpClient> self(this);
-    const QByteArray output = m_process->readAllStandardOutput();
-    for (qsizetype offset = 0; offset < output.size();) {
+    // Read in bounded chunks instead of readAllStandardOutput(): a chatty
+    // agent can make QProcess buffer a lot between readyRead deliveries, and
+    // the frame buffer is the only structure that needs to grow.
+    while (m_process && m_process->bytesAvailable() > 0) {
+        const QByteArray chunk = m_process->read(64 * 1024);
+        if (chunk.isEmpty()) {
+            break;
+        }
         if (!self || m_shuttingDown) {
             return;
         }
-        const qsizetype chunkSize = qMin<qsizetype>(64 * 1024, output.size() - offset);
-        const QByteArray chunk = output.mid(offset, chunkSize);
-        offset += chunkSize;
         if (m_discardingStdoutFrame) {
             const qsizetype newline = chunk.indexOf('\n');
             if (newline < 0) {
@@ -3526,16 +3573,24 @@ void AcpClient::handleSessionUpdate(const QJsonObject &update)
     if (kind == u"agent_message_chunk"_s) {
         const QString delta = contentBlockText(update.value(u"content"_s));
         if (!delta.isEmpty()) {
-            m_currentText += delta;
-            Q_EMIT textDelta(delta);
+            const qsizetype room = MaxPromptTextChars - m_currentText.size();
+            if (room > 0) {
+                const QString kept = delta.size() > room ? delta.left(room) : delta;
+                m_currentText += kept;
+                Q_EMIT textDelta(kept);
+            }
         }
         return;
     }
     if (kind == u"agent_thought_chunk"_s) {
         const QString delta = contentBlockText(update.value(u"content"_s));
         if (!delta.isEmpty()) {
-            m_currentThinking += delta;
-            Q_EMIT thinkingDelta(delta);
+            const qsizetype room = MaxPromptThinkingChars - m_currentThinking.size();
+            if (room > 0) {
+                const QString kept = delta.size() > room ? delta.left(room) : delta;
+                m_currentThinking += kept;
+                Q_EMIT thinkingDelta(kept);
+            }
         }
         return;
     }
@@ -3573,11 +3628,19 @@ void AcpClient::handleSessionUpdate(const QJsonObject &update)
             // "" and leak the entry in m_liveTools; give the call a local id.
             request.toolCallId = QUuid::createUuid().toString(QUuid::WithoutBraces);
         }
-        constexpr int kMaxLiveTools = 2000;
-        if (!m_liveTools.contains(request.toolCallId) && m_liveTools.size() >= kMaxLiveTools) {
+        constexpr int kMaxLiveTools = 128;
+        constexpr qsizetype kMaxLiveToolBytes = 8 * 1024 * 1024;
+        const qsizetype requestBytes = permissionRequestBytes(request);
+        if (!m_liveTools.contains(request.toolCallId)
+            && (m_liveTools.size() >= kMaxLiveTools
+                || m_liveToolBytes + requestBytes > kMaxLiveToolBytes)) {
             // A broken or hostile agent must not be able to grow the per-turn
             // live-tool maps without bound.
+            Q_EMIT logMessage(u"The ACP agent exceeded the live tool memory budget; an oversized tool call was not tracked."_s);
             return;
+        }
+        if (!m_liveTools.contains(request.toolCallId)) {
+            m_liveToolBytes += requestBytes;
         }
         m_liveTools.insert(request.toolCallId, request);
         // Remembered so a later update that omits the id can be filed under
@@ -3600,9 +3663,17 @@ void AcpClient::handleSessionUpdate(const QJsonObject &update)
         if (isTerminalToolStatus(status)) {
             const ToolResult result = completedToolResult(request.toolCallId, request.toolName, update,
                                                           m_toolStreamed.value(request.toolCallId));
-            m_liveTools.remove(request.toolCallId);
+            m_liveToolBytes -= permissionRequestBytes(m_liveTools.value(request.toolCallId));
+            if (m_liveToolBytes < 0) {
+                m_liveToolBytes = 0;
+            }
+            m_toolStreamBytes -= m_toolStreamed.value(request.toolCallId).size();
+            if (m_toolStreamBytes < 0) {
+                m_toolStreamBytes = 0;
+            }
             m_toolStreamed.remove(request.toolCallId);
             m_toolProgressAt.remove(request.toolCallId);
+            m_liveTools.remove(request.toolCallId);
             forgetToolTerminal(request.toolCallId);
             Q_EMIT toolFinished(result);
         }
@@ -3623,12 +3694,17 @@ void AcpClient::handleSessionUpdate(const QJsonObject &update)
         const QString status = update.value(u"status"_s).toString();
         PermissionRequest existing = m_liveTools.value(toolCallId);
         if (existing.toolCallId.isEmpty()) {
-            constexpr int kMaxLiveTools = 2000;
-            if (m_liveTools.size() >= kMaxLiveTools) {
-                return;
-            }
+            constexpr int kMaxLiveTools = 128;
+            constexpr qsizetype kMaxLiveToolBytes = 8 * 1024 * 1024;
             existing = permissionFromToolCall(update);
             existing.toolCallId = toolCallId;
+            const qsizetype existingBytes = permissionRequestBytes(existing);
+            if (m_liveTools.size() >= kMaxLiveTools
+                || m_liveToolBytes + existingBytes > kMaxLiveToolBytes) {
+                Q_EMIT logMessage(u"The ACP agent exceeded the live tool memory budget; an oversized tool update was not tracked."_s);
+                return;
+            }
+            m_liveToolBytes += existingBytes;
             m_liveTools.insert(toolCallId, existing);
             QJsonObject function;
             function.insert(u"name"_s, existing.toolName);
@@ -3684,7 +3760,15 @@ void AcpClient::handleSessionUpdate(const QJsonObject &update)
             // last complete stream as the final card output.
             const ToolResult result = completedToolResult(toolCallId, existing.toolName, update,
                                                           m_toolStreamed.value(toolCallId));
+            m_liveToolBytes -= permissionRequestBytes(m_liveTools.value(toolCallId));
+            if (m_liveToolBytes < 0) {
+                m_liveToolBytes = 0;
+            }
             m_liveTools.remove(toolCallId);
+            m_toolStreamBytes -= m_toolStreamed.value(toolCallId).size();
+            if (m_toolStreamBytes < 0) {
+                m_toolStreamBytes = 0;
+            }
             m_toolStreamed.remove(toolCallId);
             m_toolProgressAt.remove(toolCallId);
             forgetToolTerminal(toolCallId);
@@ -3729,10 +3813,22 @@ void AcpClient::handleSessionUpdate(const QJsonObject &update)
             return;
         }
         // An agent that repeats the same content word for word must not force a
-        // re-render of the whole stream on every heartbeat.
-        const QString capped = capToolStream(finalStreamed);
-        if (m_toolStreamed.value(toolCallId) == capped) {
+        // re-render of the whole stream on every heartbeat, and many live tools
+        // must not add up to an unbounded stream cache.
+        constexpr qsizetype kMaxToolStreamBytes = 8 * 1024 * 1024;
+        const QString previousStream = m_toolStreamed.value(toolCallId);
+        QString capped = capToolStream(finalStreamed);
+        const qsizetype available = qMax<qsizetype>(
+            0, kMaxToolStreamBytes - (m_toolStreamBytes - previousStream.size()));
+        if (capped.size() > available) {
+            capped = capped.left(available);
+        }
+        if (previousStream == capped) {
             return;
+        }
+        m_toolStreamBytes += capped.size() - previousStream.size();
+        if (m_toolStreamBytes < 0) {
+            m_toolStreamBytes = 0;
         }
         m_toolStreamed.insert(toolCallId, capped);
         // A multi-megabyte card update every few milliseconds is expensive even
@@ -4360,8 +4456,8 @@ bool AcpClient::ensureMethodPermission(const QString &grantKey, PermissionReques
     // An agent can issue these methods far faster than a user can approve
     // them. Bound the queue so a misbehaving agent cannot grow it without
     // limit; the refused call gets a normal error response.
-    constexpr int kMaxParkedMethods = 64;
-    constexpr qint64 kMaxParkedBytes = 32 * 1024 * 1024;
+    constexpr int kMaxParkedMethods = 32;
+    constexpr qint64 kMaxParkedBytes = 8 * 1024 * 1024;
     if (m_parkedMethods.size() >= kMaxParkedMethods) {
         replyError(rpcId, kServerError, u"Too many permission requests are queued; retry after they settle."_s);
         return false;
@@ -4371,7 +4467,7 @@ bool AcpClient::ensureMethodPermission(const QString &grantKey, PermissionReques
     for (const ParkedMethod &queued : std::as_const(m_parkedMethods)) {
         parkedBytes += QJsonDocument(queued.params).toJson(QJsonDocument::Compact).size();
     }
-    if (incomingBytes > 8 * 1024 * 1024 || parkedBytes > kMaxParkedBytes) {
+    if (incomingBytes > 2 * 1024 * 1024 || parkedBytes > kMaxParkedBytes) {
         replyError(rpcId, kServerError, u"The queued permission payload is too large."_s);
         return false;
     }
@@ -4532,9 +4628,9 @@ void AcpClient::handleFsRead(const QJsonValue &id, const QJsonObject &params)
     // multi-gigabyte log, and QTextStream::readAll() would copy it several
     // times on the GUI thread. Paginated reads are the supported shape.
     const QFileInfo fileInfo(resolved);
-    constexpr qint64 kMaxAcpReadBytes = 64 * 1024 * 1024;
+    constexpr qint64 kMaxAcpReadBytes = 16 * 1024 * 1024;
     if (fileInfo.exists() && fileInfo.size() > kMaxAcpReadBytes) {
-        replyError(id, kServerError, u"File is larger than 64 MB; read it in line ranges."_s);
+        replyError(id, kServerError, u"File is larger than 16 MB; read it in line ranges."_s);
         return;
     }
     int line = qMax(0, jsonIntValue(params.value(u"line"_s), 0));
@@ -4599,6 +4695,7 @@ void AcpClient::handleFsWrite(const QJsonValue &id, const QJsonObject &params)
     // exact path lets the call through, anything else parks it until the user
     // or the policy answers.
     PermissionRequest request;
+    request.acpClientMethod = true;
     request.toolName = u"write_file"_s;
     request.toolCallId = QUuid::createUuid().toString(QUuid::WithoutBraces);
     request.path = path;
@@ -4606,11 +4703,21 @@ void AcpClient::handleFsWrite(const QJsonValue &id, const QJsonObject &params)
     request.risk = ToolRisk::Write;
     request.mutatesFiles = true;
     request.summary = u"Write %1"_s.arg(path);
-    QString existingForDiff;
-    if (m_bridge && m_bridge->readDocument(path, &existingForDiff)) {
-        request.describeDiff = unifiedDiff(path, existingForDiff, content);
-    } else {
-        request.describeDiff = unifiedDiff(path, QString(), content);
+    // A permission card should not read a multi-hundred-MB existing file just
+    // to show a diff. Above a bounded size the card shows the write summary
+    // and the operation can still be approved normally.
+    constexpr qint64 kMaxInlineDiffBytes = 8 * 1024 * 1024;
+    const QFileInfo existingInfo(path);
+    const bool inlineDiffWorthIt = !existingInfo.exists()
+        || !existingInfo.isFile()
+        || existingInfo.size() <= kMaxInlineDiffBytes;
+    if (inlineDiffWorthIt) {
+        QString existingForDiff;
+        if (m_bridge && m_bridge->readDocument(path, &existingForDiff)) {
+            request.describeDiff = unifiedDiff(path, existingForDiff, content);
+        } else {
+            request.describeDiff = unifiedDiff(path, QString(), content);
+        }
     }
     request.details = QString::fromUtf8(QJsonDocument(params).toJson(QJsonDocument::Compact));
     if (!ensureMethodPermission(writeGrantKey(path), std::move(request), id, u"fs/write_text_file"_s, params)) {
@@ -4667,6 +4774,7 @@ void AcpClient::handleFsEdit(const QJsonValue &id, const QJsonObject &params)
     }
 
     PermissionRequest request;
+    request.acpClientMethod = true;
     request.toolName = u"edit_file"_s;
     request.toolCallId = QUuid::createUuid().toString(QUuid::WithoutBraces);
     request.path = path;
@@ -4674,13 +4782,18 @@ void AcpClient::handleFsEdit(const QJsonValue &id, const QJsonObject &params)
     request.risk = ToolRisk::Write;
     request.mutatesFiles = true;
     request.summary = u"Edit %1"_s.arg(path);
-    if (isFullReplacement && m_bridge) {
+    constexpr qint64 kMaxInlineDiffBytes = 8 * 1024 * 1024;
+    const QFileInfo existingInfo(path);
+    const bool inlineDiffWorthIt = !existingInfo.exists()
+        || !existingInfo.isFile()
+        || existingInfo.size() <= kMaxInlineDiffBytes;
+    if (isFullReplacement && m_bridge && inlineDiffWorthIt) {
         QString docBefore;
         if (m_bridge->readDocument(path, &docBefore)) {
             request.describeDiff = unifiedDiff(path, docBefore, newText);
         }
     }
-    if (request.describeDiff.isEmpty()) {
+    if (request.describeDiff.isEmpty() && inlineDiffWorthIt) {
         request.describeDiff = unifiedDiff(path, oldText, newText);
     }
     request.details = QString::fromUtf8(QJsonDocument(params).toJson(QJsonDocument::Compact));
@@ -4700,6 +4813,10 @@ void AcpClient::handleFsEdit(const QJsonValue &id, const QJsonObject &params)
     }
     if (!m_bridge) {
         replyError(id, kInternalError, u"No document bridge is available."_s);
+        return;
+    }
+    if (acpFileTooLargeToEdit(resolved, &error)) {
+        replyError(id, kServerError, error);
         return;
     }
     QString contents;
@@ -4752,6 +4869,7 @@ void AcpClient::handleFsMultiEdit(const QJsonValue &id, const QJsonObject &param
     }
 
     PermissionRequest request;
+    request.acpClientMethod = true;
     request.toolName = u"multi_edit_file"_s;
     request.toolCallId = QUuid::createUuid().toString(QUuid::WithoutBraces);
     request.path = path;
@@ -4776,6 +4894,10 @@ void AcpClient::handleFsMultiEdit(const QJsonValue &id, const QJsonObject &param
     }
     if (!m_bridge) {
         replyError(id, kInternalError, u"No document bridge is available."_s);
+        return;
+    }
+    if (acpFileTooLargeToEdit(resolved, &error)) {
+        replyError(id, kServerError, error);
         return;
     }
     QString original;
@@ -4839,6 +4961,7 @@ void AcpClient::handleFsDelete(const QJsonValue &id, const QJsonObject &params)
     }
 
     PermissionRequest request;
+    request.acpClientMethod = true;
     request.toolName = u"edit_file"_s;
     request.originalToolName = u"delete_file"_s;
     request.toolCallId = QUuid::createUuid().toString(QUuid::WithoutBraces);
@@ -5131,6 +5254,7 @@ void AcpClient::handleApplyPatch(const QJsonValue &id, const QJsonObject &params
     }
 
     PermissionRequest request;
+    request.acpClientMethod = true;
     request.toolName = u"apply_patch"_s;
     request.toolCallId = QUuid::createUuid().toString(QUuid::WithoutBraces);
     request.path = targetPaths.first();
@@ -5159,6 +5283,7 @@ void AcpClient::handleApplyPatch(const QJsonValue &id, const QJsonObject &params
         bool isDelete = false;
     };
     QList<PlannedFile> planned;
+    qsizetype plannedChars = 0;
     for (const PatchFile &pf : files) {
         const QString raw = pf.isDelete ? pf.oldPath : pf.path;
         const QString abs = (!QFileInfo(raw).isAbsolute() && !m_workspace.isEmpty())
@@ -5179,6 +5304,10 @@ void AcpClient::handleApplyPatch(const QJsonValue &id, const QJsonObject &params
         plan.isNew = pf.isNew;
         plan.isDelete = pf.isDelete;
         if (!pf.isNew) {
+            if (acpFileTooLargeToEdit(resolved, &error)) {
+                replyError(id, kServerError, error);
+                return;
+            }
             if (!m_bridge->readDocument(resolved, &plan.original)) {
                 replyError(id, kServerError, u"Could not read %1."_s.arg(raw));
                 return;
@@ -5192,6 +5321,12 @@ void AcpClient::handleApplyPatch(const QJsonValue &id, const QJsonObject &params
                 return;
             }
         }
+        if (plannedChars + plan.original.size() + plan.updated.size() > MaxPatchWorkingChars) {
+            replyError(id, kInvalidParams,
+                       u"The patch is too large to validate in memory; split it into smaller patches."_s);
+            return;
+        }
+        plannedChars += plan.original.size() + plan.updated.size();
         planned.append(std::move(plan));
     }
 
@@ -5707,6 +5842,7 @@ void AcpClient::handleKateToolMethod(const QString &toolName, const QJsonValue &
     call.arguments = params;
 
     PermissionRequest req = runner.describe(call);
+    req.acpClientMethod = true;
     if (req.risk != ToolRisk::Read) {
         const QString grantKey = u"kateai:%1:%2"_s.arg(toolName, req.summary);
         if (!ensureMethodPermission(grantKey, req, id, toolName, params)) {
@@ -5940,6 +6076,7 @@ void AcpClient::handleTerminalCreate(const QJsonValue &id, const QJsonObject &pa
     // Same contract as the native bash tool: running a command needs an
     // approval for this exact command line first.
     PermissionRequest request;
+    request.acpClientMethod = true;
     request.toolName = u"bash"_s;
     request.toolCallId = QUuid::createUuid().toString(QUuid::WithoutBraces);
     request.risk = ToolRisk::Execute;
@@ -5976,7 +6113,7 @@ void AcpClient::handleTerminalCreate(const QJsonValue &id, const QJsonObject &pa
     // would otherwise disable the cap; use the documented 1 MiB default for
     // those, and a 4 MiB ceiling for memory safety.
     const int requestedLimit = params.value(u"outputByteLimit"_s).toInt(1024 * 1024);
-    term->outputByteLimit = requestedLimit <= 0 ? 1024 * 1024 : qMin(requestedLimit, 4 * 1024 * 1024);
+    term->outputByteLimit = requestedLimit <= 0 ? 1024 * 1024 : qMin(requestedLimit, 1024 * 1024);
     term->process = new QProcess(this);
     term->process->setProcessChannelMode(QProcess::MergedChannels);
 #ifdef Q_OS_UNIX
@@ -6041,7 +6178,7 @@ void AcpClient::handleTerminalCreate(const QJsonValue &id, const QJsonObject &pa
     // Agents are not required to call terminal/release. Bound the retained
     // terminals so a long session cannot accumulate processes and output
     // buffers indefinitely; reclaim the oldest exited one first.
-    constexpr int kMaxRetainedTerminals = 24;
+    constexpr int kMaxRetainedTerminals = 8;
     while (m_terminals.size() >= kMaxRetainedTerminals) {
         auto victim = m_terminals.end();
         for (auto it = m_terminals.begin(); it != m_terminals.end(); ++it) {

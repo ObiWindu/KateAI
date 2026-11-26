@@ -339,7 +339,10 @@ void KateLspBridge::trackDocument(KTextEditor::Document *document)
         refreshDocumentMarks(document);
     });
     connect(document, &QObject::destroyed, this, [this, document]() {
-        m_docPaths.remove(document);
+        const QString path = m_docPaths.take(document);
+        if (!path.isEmpty()) {
+            m_markCounts.remove(path);
+        }
     });
     refreshDocumentMarks(document);
 }

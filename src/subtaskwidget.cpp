@@ -35,6 +35,10 @@ namespace
 // Keeps very chatty sub-agents from growing the transcript without bound.
 constexpr int MaxActivityLines = 200;
 constexpr int MaxActivityChars = 12000;
+// The live answer is replaced by the final result. Keeping the whole stream in
+// the card duplicates what the parent already holds and grows without bound.
+constexpr qsizetype MaxStreamedTextChars = 256 * 1024;
+constexpr qsizetype MaxPendingStreamChars = 64 * 1024;
 // How much of the delegated task is shown while the agent works. The answer
 // replaces this text at the end anyway, and an unbounded description would
 // push the dock (and the input with it) off the screen.
@@ -299,6 +303,15 @@ SubtaskWidget::SubtaskWidget(const QString &taskId, QWidget *parent)
     m_streamTimer->setInterval(80);
     connect(m_streamTimer, &QTimer::timeout, this, &SubtaskWidget::flushStreamOutput);
 
+    // The answer body is a Markdown document, and rebuilding it costs far more
+    // than appending the delta. A child that streams hundreds of tokens per
+    // second rebuilt the whole document for each one, so the text is
+    // accumulated and rendered at most every animation interval.
+    m_answerTimer = new QTimer(this);
+    m_answerTimer->setSingleShot(true);
+    m_answerTimer->setInterval(80);
+    connect(m_answerTimer, &QTimer::timeout, this, &SubtaskWidget::flushStreamedAnswer);
+
     m_elapsed.start();
     updateHeader();
     applyStyle();
@@ -318,8 +331,8 @@ void SubtaskWidget::startAgent(const QString &agentName, const QString &modeId, 
     // the agent works and is replaced by the answer once it arrives. It used to
     // be cleared here, which left the running card saying nothing at all about
     // the work in flight.
-    m_answer->setDocument(makeMarkdownDocument(closeMarkdown(m_description.left(RunningDescriptionChars)),
-                                               ChatTheme::messageCss()));
+    setMarkdownContent(m_answer, closeMarkdown(m_description.left(RunningDescriptionChars)),
+                       ChatTheme::messageCss());
     m_answer->setToolTip(m_description);
     m_answer->setVisible(!m_description.isEmpty());
     m_bodyCaption->setText(i18n("Task"));
@@ -521,7 +534,7 @@ void SubtaskWidget::rebuildActivityLog()
         m_activityLog.removeFirst();
         joined = markdown();
     }
-    m_activity->setDocument(makeMarkdownDocument(closeMarkdown(joined), ChatTheme::messageCss()));
+    setMarkdownContent(m_activity, closeMarkdown(joined), ChatTheme::messageCss());
     m_activity->verticalScrollBar()->setValue(m_activity->verticalScrollBar()->maximum());
     updateActivityToggle();
 }
@@ -534,16 +547,39 @@ void SubtaskWidget::appendMessageDelta(const QString &delta)
     if (!m_running) {
         // The card exists (toolStarted) but the agent has not started yet
         // (subtaskStarted): buffer instead of dropping, so early streaming
-        // text survives.
-        m_pendingStreamed += delta;
+        // text survives. This buffer is short-lived, but a stalled stream must
+        // not grow it without bound.
+        const qsizetype room = MaxPendingStreamChars - m_pendingStreamed.size();
+        if (room > 0) {
+            m_pendingStreamed += delta.size() > room ? delta.left(room) : delta;
+        }
         return;
     }
-    m_streamedMessage += delta;
-    m_answer->setDocument(makeMarkdownDocument(closeMarkdown(m_streamedMessage), ChatTheme::messageCss()));
+    const qsizetype room = MaxStreamedTextChars - m_streamedMessage.size();
+    if (room <= 0) {
+        return;
+    }
+    m_streamedMessage += delta.size() > room ? delta.left(room) : delta;
     m_answer->setToolTip(QString());
     m_answer->setVisible(true);
     m_bodyCaption->setText(i18n("Progress"));
     m_bodyCaption->setVisible(true);
+    // Coalesce: the document is rebuilt by flushStreamedAnswer(), which also
+    // runs when the run settles so no text is ever left unrendered.
+    m_answerDirty = true;
+    if (!m_answerTimer->isActive()) {
+        m_answerTimer->start();
+    }
+}
+
+void SubtaskWidget::flushStreamedAnswer()
+{
+    m_answerTimer->stop();
+    if (!m_answerDirty) {
+        return;
+    }
+    m_answerDirty = false;
+    setMarkdownContent(m_answer, closeMarkdown(m_streamedMessage), ChatTheme::messageCss());
     reflowNow();
 }
 
@@ -612,6 +648,12 @@ void SubtaskWidget::finishAgent(const ToolResult &result)
     if (m_streamTimer) {
         m_streamTimer->stop();
     }
+    // The answer is rendered below from the final result, so a pending
+    // coalesced render must not fire afterwards and overwrite it.
+    m_answerDirty = false;
+    if (m_answerTimer) {
+        m_answerTimer->stop();
+    }
     m_pendingStreamed.clear();
     m_pendingStreamDelta.clear();
     m_partialOutput.clear();
@@ -622,7 +664,7 @@ void SubtaskWidget::finishAgent(const ToolResult &result)
     // A sub-agent's answer is markdown like any assistant turn, so it gets the
     // same body table styling for any fenced code it contains.
     m_resultOutput = result.output;
-    m_answer->setDocument(makeMarkdownDocument(closeMarkdown(result.output), ChatTheme::messageCss()));
+    setMarkdownContent(m_answer, closeMarkdown(result.output), ChatTheme::messageCss());
     m_answer->setToolTip(QString());
     m_answer->setVisible(true);
     if (m_cancelled) {
@@ -657,6 +699,10 @@ void SubtaskWidget::markAbandoned(const QString &reason)
     if (m_streamTimer) {
         m_streamTimer->stop();
     }
+    m_answerDirty = false;
+    if (m_answerTimer) {
+        m_answerTimer->stop();
+    }
     m_pendingStreamDelta.clear();
     m_partialOutput.clear();
     if (m_ticker) {
@@ -664,7 +710,7 @@ void SubtaskWidget::markAbandoned(const QString &reason)
     }
     m_cancel->setVisible(false);
     m_resultOutput = reason;
-    m_answer->setDocument(makeMarkdownDocument(closeMarkdown(reason), ChatTheme::messageCss()));
+    setMarkdownContent(m_answer, closeMarkdown(reason), ChatTheme::messageCss());
     m_answer->setToolTip(QString());
     m_answer->setVisible(true);
     m_bodyCaption->setText(i18n("Cancelled"));

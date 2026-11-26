@@ -780,7 +780,7 @@ QString providerLabel(Provider provider)
     case Provider::Acp:
         return i18n("ACP");
     case Provider::OpenCode:
-        return i18n("OpenCode Zen");
+        return i18n("OpenCode (Console / Go)");
     case Provider::Grok:
     default:
         return i18n("Grok (xAI)");
@@ -837,7 +837,7 @@ QString providerBaseUrl(Provider provider)
     case Provider::Acp:
         return u"http://localhost:8080"_s;
     case Provider::OpenCode:
-        return u"https://opencode.ai/zen/v1"_s;
+        return u"https://opencode.ai/inference/v1"_s;
     case Provider::Grok:
     default:
         return u"https://api.x.ai/v1"_s;
@@ -860,7 +860,12 @@ QString providerBaseUrl(const Settings &settings)
     case Provider::ClaudeCompatible:
         return settings.claudeCompatibleUrl.isEmpty() ? u"https://api.anthropic.com/v1"_s : settings.claudeCompatibleUrl;
     case Provider::OpenCode:
-        return settings.opencodeUrl.isEmpty() ? u"https://opencode.ai/zen/v1"_s : settings.opencodeUrl;
+        if (!settings.opencodeUrl.trimmed().isEmpty()) {
+            return settings.opencodeUrl.trimmed();
+        }
+        return settings.opencodePlan == OpenCodePlan::Go
+            ? u"https://opencode.ai/inference/go/v1"_s
+            : u"https://opencode.ai/inference/v1"_s;
     case Provider::Kilo:
         return u"https://api.kilo.ai/v1"_s;
     case Provider::Acp:
@@ -869,6 +874,35 @@ QString providerBaseUrl(const Settings &settings)
     default:
         return u"https://api.x.ai/v1"_s;
     }
+}
+
+QString openCodePlanId(OpenCodePlan plan)
+{
+    switch (plan) {
+    case OpenCodePlan::Go:
+        return u"go"_s;
+    case OpenCodePlan::PayAsYouGo:
+    default:
+        return u"payg"_s;
+    }
+}
+
+QString openCodePlanLabel(OpenCodePlan plan)
+{
+    switch (plan) {
+    case OpenCodePlan::Go:
+        return i18n("Go subscription (Go, Go Plus, Go Teams)");
+    case OpenCodePlan::PayAsYouGo:
+    default:
+        return i18n("Pay as you go (Console credits)");
+    }
+}
+
+OpenCodePlan openCodePlanFromId(const QString &id)
+{
+    return id.trimmed().compare(u"go"_s, Qt::CaseInsensitive) == 0
+        ? OpenCodePlan::Go
+        : OpenCodePlan::PayAsYouGo;
 }
 
 QString joinApiEndpoint(const QString &baseUrl, const QString &endpoint)

@@ -682,6 +682,16 @@ void EditorAssist::attachView(KTextEditor::View *view)
     if (m_annotationGutterEnabled) {
         applyAnnotationGutter(attachment);
     }
+    // A destroyed view otherwise leaves a permanent attachment entry (with
+    // dead connection handles) for the rest of the editor session.
+    connect(view, &QObject::destroyed, this, [this, view]() {
+        for (int i = m_attachments.size() - 1; i >= 0; --i) {
+            if (m_attachments.at(i).view.isNull()
+                || m_attachments.at(i).view.data() == view) {
+                m_attachments.removeAt(i);
+            }
+        }
+    });
     m_attachments.append(attachment);
 }
 

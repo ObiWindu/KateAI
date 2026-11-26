@@ -13,11 +13,15 @@
 #include <KSyntaxHighlighting/Repository>
 #include <KSyntaxHighlighting/State>
 #include <KSyntaxHighlighting/Theme>
+#include <KTextEditor/Editor>
 
 #include <QColor>
+#include <QCoreApplication>
+#include <QGuiApplication>
 #include <QHash>
-#include <QPointer>
 #include <QStringList>
+
+#include <memory>
 
 using namespace Qt::Literals::StringLiterals;
 
@@ -29,9 +33,11 @@ namespace CodeHighlight
 namespace
 {
 
-// Repository construction walks the installed definition files, which is far too
-// expensive to repeat on every streamed token.
-QPointer<KSyntaxHighlighting::Repository> g_repository;
+// Reuse Kate's own KSyntaxHighlighting::Repository when running inside
+// KTextEditor so we do not duplicate ~350+ syntax definitions in RAM, and own
+// the fallback via unique_ptr for headless/test runs without leaking it.
+std::unique_ptr<KSyntaxHighlighting::Repository> g_ownedRepository;
+const KSyntaxHighlighting::Repository *g_lastRepository = nullptr;
 QHash<QString, KSyntaxHighlighting::Definition> g_definitionCache;
 KSyntaxHighlighting::Theme g_theme;
 QString g_themeName;
@@ -80,13 +86,25 @@ const QHash<QString, QString> &languageAliases()
     return aliases;
 }
 
-KSyntaxHighlighting::Repository *repository()
+const KSyntaxHighlighting::Repository *repository()
 {
-    if (!g_repository) {
-        g_repository = new KSyntaxHighlighting::Repository();
-        g_definitionCache.clear();
+    const KSyntaxHighlighting::Repository *repo = nullptr;
+    if (qobject_cast<QGuiApplication *>(QCoreApplication::instance())) {
+        if (auto *editor = KTextEditor::Editor::instance()) {
+            repo = &editor->repository();
+        }
     }
-    return g_repository.data();
+    if (!repo) {
+        if (!g_ownedRepository) {
+            g_ownedRepository = std::make_unique<KSyntaxHighlighting::Repository>();
+        }
+        repo = g_ownedRepository.get();
+    }
+    if (g_lastRepository != repo) {
+        g_definitionCache.clear();
+        g_lastRepository = repo;
+    }
+    return repo;
 }
 
 // Resolves a definition, tolerating the many case and separator spellings.
@@ -101,7 +119,7 @@ KSyntaxHighlighting::Definition definitionFor(const QString &language)
         return cached.value();
     }
 
-    KSyntaxHighlighting::Repository *repo = repository();
+    const KSyntaxHighlighting::Repository *repo = repository();
     KSyntaxHighlighting::Definition definition;
 
     const QString canonical = normaliseLanguage(key);
@@ -128,7 +146,7 @@ KSyntaxHighlighting::Theme theme()
     if (g_resolvedTheme) {
         return g_theme;
     }
-    KSyntaxHighlighting::Repository *repo = repository();
+    const KSyntaxHighlighting::Repository *repo = repository();
     KSyntaxHighlighting::Theme selected;
     if (!g_themeName.isEmpty()) {
         // An explicitly named theme wins.

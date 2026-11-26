@@ -13,6 +13,7 @@
 #include <KConfigGroup>
 #include <KLocalizedString>
 #include <KSharedConfig>
+#include <QCryptographicHash>
 #include <QJsonDocument>
 #include <QJsonArray>
 #include <QJsonObject>
@@ -107,22 +108,40 @@ static void removeSidechains(const QString &conversationId)
     QDir(subagentRoot() + u'/' + safe).removeRecursively();
 }
 
+static QJsonObject messageToJson(const ChatMessage &msg)
+{
+    QJsonObject obj;
+    obj[u"role"_s] = static_cast<int>(msg.role);
+    if (!msg.authorRole.isEmpty()) {
+        obj[u"authorRole"_s] = msg.authorRole;
+    }
+    obj[u"content"_s] = msg.content;
+    // Empty fields are common on plain user/tool messages. Omitting them
+    // keeps the session JSON smaller without changing the reader, which
+    // already treats a missing value as empty.
+    if (!msg.thinking.isEmpty()) {
+        obj[u"thinking"_s] = msg.thinking;
+    }
+    if (!msg.plan.isEmpty()) {
+        obj[u"plan"_s] = msg.plan;
+    }
+    if (!msg.toolCallId.isEmpty()) {
+        obj[u"toolCallId"_s] = msg.toolCallId;
+    }
+    if (!msg.name.isEmpty()) {
+        obj[u"name"_s] = msg.name;
+    }
+    if (!msg.toolCalls.isEmpty()) {
+        obj[u"toolCalls"_s] = msg.toolCalls;
+    }
+    return obj;
+}
+
 static QJsonArray messagesToJson(const QList<ChatMessage> &messages)
 {
     QJsonArray arr;
     for (const auto &msg : messages) {
-        QJsonObject obj;
-        obj[u"role"_s] = static_cast<int>(msg.role);
-        if (!msg.authorRole.isEmpty()) {
-            obj[u"authorRole"_s] = msg.authorRole;
-        }
-        obj[u"content"_s] = msg.content;
-        obj[u"thinking"_s] = msg.thinking;
-        obj[u"plan"_s] = msg.plan;
-        obj[u"toolCallId"_s] = msg.toolCallId;
-        obj[u"name"_s] = msg.name;
-        obj[u"toolCalls"_s] = msg.toolCalls;
-        arr.append(obj);
+        arr.append(messageToJson(msg));
     }
     return arr;
 }
@@ -277,15 +296,19 @@ static QString generateTitleFromMessages(const QList<ChatMessage> &messages)
     return QDateTime::currentDateTime().toString(u"yyyy-MM-dd hh:mm"_s);
 }
 
-// The whole session state lives in a single JSON blob: it is always read and
-// written as one unit, so there is nothing to gain from splitting it up.
-static QByteArray sessionDataToJson(const SessionStore::SessionData &data)
+// The metadata is a small JSON object. Large message lists are stored in
+// session_message_chunk and appended incrementally instead of being
+// reserialized into this blob on every autosave.
+static QByteArray sessionDataToJson(const SessionStore::SessionData &data,
+                                    bool includeMessages = true)
 {
     QJsonObject obj;
     obj[u"version"_s] = data.version;
-    obj[u"messages"_s] = messagesToJson(data.messages);
-    if (!data.transcript.isEmpty()) {
-        obj[u"transcript"_s] = messagesToJson(data.transcript);
+    if (includeMessages) {
+        obj[u"messages"_s] = messagesToJson(data.messages);
+        if (!data.transcript.isEmpty()) {
+            obj[u"transcript"_s] = messagesToJson(data.transcript);
+        }
     }
     obj[u"currentThinking"_s] = data.currentThinking;
     obj[u"currentPlan"_s] = data.currentPlan;
@@ -366,6 +389,212 @@ static SessionStore::SessionData sessionDataFromJson(const QByteArray &payload)
     return data;
 }
 
+// Large conversations keep their message lists in session_message_chunk so an
+// autosave only appends the new tail. Small sessions stay in the single
+// payload, which keeps the common path and old payloads byte-for-byte
+// compatible.
+static constexpr int kJournalThresholdMessages = 200;
+static const QString kModelStream = u"model"_s;
+static const QString kTranscriptStream = u"transcript"_s;
+
+static QString streamPrefixHash(const QList<ChatMessage> &messages, int count)
+{
+    QCryptographicHash hash(QCryptographicHash::Sha256);
+    const int end = qBound(0, count, messages.size());
+    for (int i = 0; i < end; ++i) {
+        hash.addData(QJsonDocument(messageToJson(messages.at(i)))
+                         .toJson(QJsonDocument::Compact));
+        hash.addData("\n");
+    }
+    return QString::fromLatin1(hash.result().toHex());
+}
+
+static bool failJournal(QSqlDatabase &db, const QString &error, QString *outError)
+{
+    db.rollback();
+    if (outError) {
+        *outError = error;
+    }
+    return false;
+}
+
+static bool deleteJournalStream(QSqlDatabase &db, const QString &conversationId,
+                                const QString &stream, QString *error)
+{
+    QSqlQuery query(db);
+    query.prepare(u"DELETE FROM session_message_chunk "
+                  "WHERE conversation_id = ? AND stream = ?"_s);
+    query.addBindValue(conversationId);
+    query.addBindValue(stream);
+    if (!query.exec()) {
+        return failJournal(db, query.lastError().text(), error);
+    }
+    return true;
+}
+
+static bool writeJournalStream(QSqlDatabase &db, const QString &conversationId,
+                               const QString &stream, const QList<ChatMessage> &messages,
+                               QString *error)
+{
+    if (messages.isEmpty()) {
+        return deleteJournalStream(db, conversationId, stream, error);
+    }
+
+    qint64 revision = 0;
+    int storedCount = 0;
+    QString storedHash;
+    {
+        QSqlQuery latest(db);
+        latest.prepare(u"SELECT revision, message_count, prefix_hash "
+                       "FROM session_message_chunk "
+                       "WHERE conversation_id = ? AND stream = ? "
+                       "ORDER BY revision DESC LIMIT 1"_s);
+        latest.addBindValue(conversationId);
+        latest.addBindValue(stream);
+        if (!latest.exec()) {
+            return failJournal(db, latest.lastError().text(), error);
+        }
+        if (latest.next()) {
+            revision = latest.value(0).toLongLong();
+            storedCount = latest.value(1).toInt();
+            storedHash = latest.value(2).toString();
+        }
+    }
+
+    // Every autosave adds a revision. A long session would otherwise turn into
+    // thousands of chunk rows, slowing every load; fold them into one full
+    // chunk periodically.
+    constexpr qint64 kMaxJournalRevisions = 512;
+    const int total = messages.size();
+    const bool canAppend = revision > 0 && revision < kMaxJournalRevisions
+        && storedCount > 0 && storedCount <= total
+        && storedHash == streamPrefixHash(messages, storedCount);
+    if (canAppend && storedCount == total) {
+        return true;
+    }
+
+    const int baseCount = canAppend ? storedCount : 0;
+    if (!canAppend) {
+        // Compaction or a pruned transcript replaced the shape; the old
+        // chunks cannot be extended.
+        if (!deleteJournalStream(db, conversationId, stream, error)) {
+            return false;
+        }
+    }
+
+    const QJsonArray chunk = messagesToJson(messages.mid(baseCount));
+    QSqlQuery insert(db);
+    insert.prepare(u"INSERT INTO session_message_chunk "
+                   "(conversation_id, stream, revision, base_count, message_count, "
+                   "prefix_hash, payload) "
+                   "VALUES (?, ?, ?, ?, ?, ?, ?)"_s);
+    insert.addBindValue(conversationId);
+    insert.addBindValue(stream);
+    insert.addBindValue(canAppend ? revision + 1 : 1);
+    insert.addBindValue(baseCount);
+    insert.addBindValue(total);
+    insert.addBindValue(streamPrefixHash(messages, total));
+    insert.addBindValue(QString::fromUtf8(
+        QJsonDocument(chunk).toJson(QJsonDocument::Compact)));
+    if (!insert.exec()) {
+        return failJournal(db, insert.lastError().text(), error);
+    }
+    return true;
+}
+
+static bool deleteMessageJournal(QSqlDatabase &db, const QString &conversationId,
+                                 QString *error)
+{
+    QSqlQuery query(db);
+    query.prepare(u"DELETE FROM session_message_chunk WHERE conversation_id = ?"_s);
+    query.addBindValue(conversationId);
+    if (!query.exec()) {
+        return failJournal(db, query.lastError().text(), error);
+    }
+    return true;
+}
+
+static bool loadJournalStream(const QSqlDatabase &db, const QString &conversationId,
+                              const QString &stream, QList<ChatMessage> *messages,
+                              bool *found)
+{
+    if (found) {
+        *found = false;
+    }
+    QSqlQuery query(db);
+    query.prepare(u"SELECT payload FROM session_message_chunk "
+                  "WHERE conversation_id = ? AND stream = ? "
+                  "ORDER BY revision ASC"_s);
+    query.addBindValue(conversationId);
+    query.addBindValue(stream);
+    if (!query.exec()) {
+        return false;
+    }
+    while (query.next()) {
+        const QJsonDocument document = QJsonDocument::fromJson(query.value(0).toByteArray());
+        if (!document.isArray()) {
+            return false;
+        }
+        if (found) {
+            *found = true;
+        }
+        const QList<ChatMessage> chunk = messagesFromJson(document.array());
+        for (const ChatMessage &message : chunk) {
+            if (messages) {
+                messages->append(message);
+            }
+        }
+    }
+    return true;
+}
+
+// The payload is the metadata and, for small or legacy sessions, the message
+// lists. Large sessions reconstruct the lists from the journal.
+static SessionStore::SessionData sessionDataFromStore(const QSqlDatabase &db,
+                                                      const QString &conversationId)
+{
+    QSqlQuery query(db);
+    query.prepare(u"SELECT payload FROM conversations WHERE id = ?"_s);
+    query.addBindValue(conversationId);
+    if (!query.exec()) {
+        SessionStore::SessionData failed;
+        failed.loadFailed = true;
+        return failed;
+    }
+    if (!query.next()) {
+        return {};
+    }
+
+    SessionStore::SessionData data =
+        sessionDataFromJson(query.value(0).toByteArray());
+    if (data.loadFailed || !data.messages.isEmpty()) {
+        return data;
+    }
+
+    QList<ChatMessage> messages;
+    bool found = false;
+    if (!loadJournalStream(db, conversationId, kModelStream, &messages, &found)) {
+        data.loadFailed = true;
+        return data;
+    }
+    if (found) {
+        data.messages = std::move(messages);
+    }
+    // The transcript is a separate stream because it survives compaction. It
+    // can exist even when the model stream is empty, so load it independently.
+    QList<ChatMessage> transcript;
+    bool transcriptFound = false;
+    if (!loadJournalStream(db, conversationId, kTranscriptStream, &transcript,
+                           &transcriptFound)) {
+        data.loadFailed = true;
+        return data;
+    }
+    if (transcriptFound) {
+        data.transcript = std::move(transcript);
+    }
+    return data;
+}
+
 static void repairBadConversationTitles(const QSqlDatabase &db)
 {
     // Only titles are scanned up front. The full payload is fetched for the
@@ -391,13 +620,10 @@ static void repairBadConversationTitles(const QSqlDatabase &db)
     }
 
     for (const Row &row : rows) {
-        QSqlQuery payloadQuery(db);
-        payloadQuery.prepare(u"SELECT payload FROM conversations WHERE id = ?"_s);
-        payloadQuery.addBindValue(row.id);
-        if (!payloadQuery.exec() || !payloadQuery.next()) {
+        const SessionStore::SessionData data = sessionDataFromStore(db, row.id);
+        if (data.loadFailed) {
             continue;
         }
-        const SessionStore::SessionData data = sessionDataFromJson(payloadQuery.value(0).toByteArray());
         const QString newTitle = generateTitleFromMessages(data.messages);
         if (newTitle.isEmpty() || isBadTitle(newTitle) || newTitle == row.title) {
             continue;
@@ -427,7 +653,7 @@ static const QString SCHEMA_VERSION_KEY = u"schema_version"_s;
 
 // Incremented whenever a statement below changes the on-disk shape. The
 // migration step for each version lives in migrateSchema().
-static constexpr int CURRENT_SCHEMA_VERSION = 1;
+static constexpr int CURRENT_SCHEMA_VERSION = 2;
 
 // Guards the database handle and every read-modify-write sequence below.
 // Recursive because the public helpers call each other (save() -> saveConversation(),
@@ -554,6 +780,20 @@ static bool applySchema(QSqlDatabase &db)
         "payload BLOB NOT NULL)",
 
         "CREATE INDEX IF NOT EXISTS conversations_updated_at ON conversations (updated_at DESC)",
+
+        // Large sessions append message chunks instead of rewriting the whole
+        // payload. `base_count` is the number of messages already covered by
+        // earlier revisions; `prefix_hash` lets the next save detect whether
+        // the stored prefix is still the prefix of the current list.
+        "CREATE TABLE IF NOT EXISTS session_message_chunk ("
+        "conversation_id TEXT NOT NULL,"
+        "stream TEXT NOT NULL,"
+        "revision INTEGER NOT NULL,"
+        "base_count INTEGER NOT NULL,"
+        "message_count INTEGER NOT NULL,"
+        "prefix_hash TEXT NOT NULL,"
+        "payload TEXT NOT NULL,"
+        "PRIMARY KEY (conversation_id, stream, revision))",
     };
 
     for (const char *statement : statements) {
@@ -1100,14 +1340,15 @@ QString SessionStore::conversationTitle(const QString &conversationId)
     }
 
     QSqlQuery query(db);
-    query.prepare(u"SELECT title, payload FROM conversations WHERE id = ?"_s);
+    query.prepare(u"SELECT title FROM conversations WHERE id = ?"_s);
     query.addBindValue(conversationId);
     if (!query.exec() || !query.next()) {
         return QString();
     }
     QString title = query.value(0).toString();
     if (isBadTitle(title)) {
-        const SessionStore::SessionData data = sessionDataFromJson(query.value(1).toByteArray());
+        // Only a bad title needs the message list (payload or journal).
+        const SessionStore::SessionData data = sessionDataFromStore(db, conversationId);
         const QString repaired = generateTitleFromMessages(data.messages);
         if (!repaired.isEmpty() && !isBadTitle(repaired)) {
             title = repaired;
@@ -1131,21 +1372,7 @@ SessionStore::SessionData SessionStore::loadConversation(const QString &conversa
         return SessionData();
     }
 
-    QSqlQuery query(db);
-    query.prepare(u"SELECT payload FROM conversations WHERE id = ?"_s);
-    query.addBindValue(conversationId);
-    if (!query.exec()) {
-        SessionData failed;
-        failed.loadFailed = true;
-        return failed;
-    }
-    if (!query.next()) {
-        // The row is gone (deleted or pruned). An empty conversation is the
-        // right answer here; it is not a load failure.
-        return SessionData();
-    }
-
-    return sessionDataFromJson(query.value(0).toByteArray());
+    return sessionDataFromStore(db, conversationId);
 }
 
 bool SessionStore::saveConversation(const QString &conversationId, const SessionData &data, const QString &title, int maxConversations)
@@ -1176,6 +1403,13 @@ bool SessionStore::saveConversation(const QString &conversationId, const Session
     // Whether the conversation is new. The caller uses it to know if the
     // number of stored conversations grew.
     const bool isNew = !conversationExists(db, conversationId);
+
+    // A large session stores its message lists in the journal so an autosave
+    // appends only the new tail. Small sessions keep the historical
+    // single-payload format.
+    const bool useJournal =
+        data.messages.size() + data.transcript.size() >= kJournalThresholdMessages;
+    const QByteArray payload = sessionDataToJson(data, !useJournal);
 
     QString convTitleToUse = convTitle;
     if (!isNew && title.isEmpty()) {
@@ -1210,7 +1444,7 @@ bool SessionStore::saveConversation(const QString &conversationId, const Session
         update.addBindValue(now);
         update.addBindValue(data.messages.size());
         update.addBindValue(CURRENT_VERSION);
-        update.addBindValue(sessionDataToJson(data));
+        update.addBindValue(payload);
         update.addBindValue(conversationId);
         stored = update.exec();
         if (stored) {
@@ -1234,10 +1468,25 @@ bool SessionStore::saveConversation(const QString &conversationId, const Session
         insert.addBindValue(now);
         insert.addBindValue(data.messages.size());
         insert.addBindValue(CURRENT_VERSION);
-        insert.addBindValue(sessionDataToJson(data));
+        insert.addBindValue(payload);
         stored = insert.exec();
         if (!stored) {
             qWarning() << "KateAI: cannot store conversation" << conversationId << insert.lastError().text();
+        }
+    }
+
+    if (stored) {
+        QString journalError;
+        const bool journalOk = useJournal
+            ? (writeJournalStream(db, conversationId, kModelStream, data.messages,
+                                  &journalError)
+               && writeJournalStream(db, conversationId, kTranscriptStream,
+                                     data.transcript, &journalError))
+            : deleteMessageJournal(db, conversationId, &journalError);
+        if (!journalOk) {
+            stored = false;
+            qWarning() << "KateAI: cannot update the session journal"
+                       << conversationId << journalError;
         }
     }
 
@@ -1300,6 +1549,16 @@ void SessionStore::deleteConversation(const QString &conversationId)
     if (!query.exec()) {
         db.rollback();
         qWarning() << "KateAI: cannot delete conversation" << conversationId << query.lastError().text();
+        return;
+    }
+
+    QSqlQuery journal(db);
+    journal.prepare(u"DELETE FROM session_message_chunk WHERE conversation_id = ?"_s);
+    journal.addBindValue(conversationId);
+    if (!journal.exec()) {
+        db.rollback();
+        qWarning() << "KateAI: cannot delete the message journal" << conversationId
+                   << journal.lastError().text();
         return;
     }
 
@@ -1484,6 +1743,12 @@ void SessionStore::clearAllConversations()
     if (!query.exec(u"DELETE FROM conversations"_s)) {
         db.rollback();
         qWarning() << "KateAI: cannot clear the conversation history:" << query.lastError().text();
+        return;
+    }
+    QSqlQuery journal(db);
+    if (!journal.exec(u"DELETE FROM session_message_chunk"_s)) {
+        db.rollback();
+        qWarning() << "KateAI: cannot clear the message journal:" << journal.lastError().text();
         return;
     }
 

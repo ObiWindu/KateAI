@@ -66,6 +66,7 @@ private:
         QPointer<KTextEditor::Document> document;
         QList<AnchoredRange> pending;
         QList<AnchoredRange> settled;
+        QMetaObject::Connection destroyedConnection;
     };
 
     static QList<AnchoredRange> anchor(KTextEditor::Document *document,

@@ -43,6 +43,7 @@ class TodoWidget;
 class InspectorPanel;
 class EditTracker;
 class TurnStatus;
+class TranscriptVirtualizer;
 class AcpBinaryInstaller;
 class VoiceInput;
 
@@ -226,6 +227,7 @@ private:
     QWidget *createIndicatorsRow();
     int transcriptInsertIndex() const;
     void appendTranscriptWidget(QWidget *widget);
+    void releaseVirtualTranscriptWidget(QWidget *widget);
     void showSettingsMenu();
     void showModelMenu();
     void positionModelMenu();
@@ -360,7 +362,6 @@ private:
     void resetThinkingState();
     void clearStreamingPointers();
     static QString escape(const QString &text);
-    static QString markdownToHtml(const QString &text);
     static QString closedMarkdown(const QString &text);
 
     Settings m_settings;
@@ -388,6 +389,8 @@ private:
     QScrollArea *m_scrollArea = nullptr;
     QWidget *m_transcriptContainer = nullptr;
     QVBoxLayout *m_transcriptLayout = nullptr;
+    TranscriptVirtualizer *m_transcriptVirtualizer = nullptr;
+    QHash<QString, bool> m_toolExpansionState;
     QPointer<QWidget> m_activeAssistantWidget;
     QPointer<QTextBrowser> m_activeAssistantBrowser;
 
@@ -564,6 +567,9 @@ private:
     // command does not re-render its card once per chunk.
     QHash<QString, QString> m_pendingProgress;
     QTimer *m_progressTimer = nullptr;
+    // Activity notes are ephemeral status lines, not messages. Keep only the
+    // recent ones so a long turn cannot accumulate one QLabel per event.
+    QList<QPointer<QLabel>> m_activityPills;
 
     // Conversation history
     QPushButton *m_historyButton = nullptr;
@@ -583,6 +589,7 @@ private:
     // after a prune the next check waits for a batch of new cards.
     int m_nextTranscriptPrune = 512;
     QTimer *m_sessionSaveTimer = nullptr;
+    bool m_sessionDirty = false;
 
     // Global override of the tool-card budget. Auto means the budget decides;
     // the other two are a deliberate "all of them" / "none of them".

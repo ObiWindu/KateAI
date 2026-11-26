@@ -138,6 +138,9 @@ public:
     void setEcosystemProvider(EcosystemProvider *provider);
 
     void updateProjectGraph(const QString &filePath, const QString &content);
+    // Writes the graph cache if it is dirty. Public users schedule it on a
+    // debounce; turn boundaries flush it synchronously.
+    void flushProjectGraph();
     ProjectGraph *getProjectGraph() const { return m_projectGraph.get(); }
     QList<GraphNode *> getProjectNodes() const;
     QList<GraphEdge *> getProjectEdges() const;
@@ -187,6 +190,11 @@ public:
     }
     // Sub-agents borrow the pointer; ownership stays with the root loop.
     void setMcpManager(McpManager *manager);
+    // Installs services shared by every window on one workspace: the project
+    // graph, the MCP manager and the event store. Passing null leaves the
+    // existing component in place.
+    void setHarnessServices(std::shared_ptr<ProjectGraph> graph, McpManager *mcp,
+                            std::shared_ptr<EventStore> events);
 
     // --- Agent team -------------------------------------------------------------
     AgentTeam *agentTeam()
@@ -223,6 +231,7 @@ public:
     int inputTokensTotal() const { return m_inputTokensTotal; }
     int outputTokensTotal() const { return m_outputTokensTotal; }
     int cachedInputTokensTotal() const { return m_cachedInputTokensTotal; }
+    int cacheWriteTokensTotal() const { return m_cacheWriteTokensTotal; }
     // Worktree results are never merged automatically: the user or parent
     // explicitly applies or discards them.
     bool applySubagentWorktree(const QString &taskId, QString *error = nullptr);
@@ -308,6 +317,9 @@ public:
     // by every transport yet, so the report says what it measured.
     QString contextReport() const;
     QString usageReport() const;
+    // Lightweight retained-state counters for diagnostics and the memory-budget
+    // tests. Never includes message or tool content.
+    QJsonObject memoryCounters() const;
     // Stable cost accounting for the inspector, the headless artifact and
     // tests. Contains provider-reported token counts, per-model prices, cache
     // reads/writes and the configured budget.
@@ -315,7 +327,9 @@ public:
     double sessionCostUsd() const;
     // Spans derived from this conversation's event log, not a second log. The
     // trace is empty when no conversation is bound or the log is disabled.
-    QList<Span> traceSpans() const;
+    // `maxEvents` bounds the automatic per-turn export; the default reads the
+    // complete log for an explicit export.
+    QList<Span> traceSpans(int maxEvents = -1) const;
     QJsonObject traceJson() const;
     // Writes the span trace as JSONL. With `telemetry` enabled and an OTLP
     // endpoint configured, also posts the batch; a failure never affects the
@@ -506,6 +520,13 @@ private:
     // transcript. Compaction rewrites only the model history, so the two lists
     // diverge after a compaction but stay in sync for every new turn.
     void appendMessage(const ChatMessage &message);
+    // Bounds the model history independently of the display transcript. Cuts
+    // only at user-turn boundaries so tool call/result pairs stay intact.
+    void pruneModelHistory();
+    // Drops reasoning from model-history messages that are further back than
+    // kThinkingRetainedTurns user turns. The display transcript keeps its copy.
+    void dropStaleThinking();
+    void recomputeMessageChars();
     // Bounds the display transcript by a message and character budget. The
     // oldest messages are replaced by a small elision marker; the model history
     // is not touched.
@@ -587,6 +608,10 @@ private:
     // reset while a snapshot is still running.
     void markActionExecuted(const QString &signature);
     void syncPermissionPolicy();
+    // Connects the tool/permission/status signals of the current MCP manager.
+    // A shared manager can replace the constructor-created one, and the new
+    // manager must feed the same updates.
+    void wireMcpManager();
     // Loads policy/hook configuration after the workspace or flags change.
     void reloadHarnessConfig();
     // The conversation the event log writes to, or empty when no session is
@@ -701,9 +726,14 @@ LlmClient m_client;
     // The workspace changed while a tool could still hold the old graph;
     // applyProjectGraph() runs once the turn ends.
     bool m_graphDirty = false;
+    bool m_graphSavePending = false;
     QString m_taskSummary;
 
     QList<ChatMessage> m_messages;
+    // Running sum of the content/thinking/tool-argument characters in
+    // m_messages. Kept alongside the list so the safety ceiling can be checked
+    // without walking every message on each append.
+    qsizetype m_messagesChars = 0;
     // The full conversation as the user saw it. Compaction leaves this alone;
     // it is what the transcript rebuilds from and what the session stores for
     // display. Bounded by pruneTranscript() so a long tool-heavy session cannot
@@ -712,6 +742,10 @@ LlmClient m_client;
     // Running sum of the content/thinking characters in m_transcriptMessages,
     // maintained so pruning does not have to walk the list on every append.
     qsizetype m_transcriptChars = 0;
+    // True once the display transcript no longer has the same shape as the
+    // model history (elision or compaction). Persisting both lists is only
+    // necessary then; otherwise the transcript falls back to messages.
+    bool m_transcriptDiverged = false;
     QList<ToolCall> m_queue;
     QList<ToolResult> m_pendingResults;
     ToolCall m_waitingCall;
@@ -748,6 +782,15 @@ LlmClient m_client;
     int m_inputTokensTotal = 0;
     int m_outputTokensTotal = 0;
     int m_cachedInputTokensTotal = 0;
+    int m_cacheWriteTokensTotal = 0;
+    // OpenCode reports the amount charged and, on Go, the allowance used.
+    // Kept beside the token ledger rather than folded into it: a Go request
+    // can cost $0 while still consuming the subscription.
+    bool m_hasReportedCost = false;
+    double m_reportedCostUsd = 0.0;
+    double m_listCostUsd = 0.0;
+    double m_allowanceUsd = 0.0;
+    QString m_billingSource;
     bool m_cancelRequested = false;
     // Extra compaction pressure after a context-window rejection. Reset at
     // the start of each user turn so a later overflow can compact further
@@ -759,9 +802,9 @@ LlmClient m_client;
     // expired entries without const_cast.
     mutable QMutex m_rateMutex;
     QTimer m_nextModelTimer;
+    QTimer m_graphSaveTimer;
 
     quint64 m_stateEpoch = 0;
-    QSet<QString> m_actionSignatures;
     QHash<QString, int> m_actionRepeatCounts;
     QSet<QString> m_actionsThisModelTurn;
     int m_recoveryPromptCount = 0;
@@ -838,7 +881,18 @@ LlmClient m_client;
     bool m_costBudgetNotified = false;
 
     // --- Harness 0.7 ---------------------------------------------------------
+    // The loop owns an event store unless a workspace service provides one.
+    // The shared pointer keeps the store alive for as long as any loop uses it.
+    EventStore &eventStore()
+    {
+        return m_sharedEvents ? *m_sharedEvents : m_events;
+    }
+    const EventStore &eventStore() const
+    {
+        return m_sharedEvents ? *m_sharedEvents : m_events;
+    }
     EventStore m_events;
+    std::shared_ptr<EventStore> m_sharedEvents;
     PolicyEngine m_policyEngine;
     HookRegistry m_hooks;
     TurnContext m_turnContext;
@@ -854,6 +908,9 @@ LlmClient m_client;
     QString m_hookLoadError;
     int m_stepNumber = 0;
     bool m_eventLogBroken = false;
+    // Newest harness event sequence appended for this conversation. Tracked so
+    // memoryCounters() does not need a SQL query for a diagnostic counter.
+    qint64 m_eventSeqHigh = 0;
     bool m_sessionStartRan = false;
     bool m_verificationEvidenceSent = false;
     bool m_harnessConfigLoaded = false;

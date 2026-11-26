@@ -5,6 +5,7 @@
 
 #include "policy.h"
 
+#include "boundedfile.h"
 #include "sandbox.h"
 
 #include <QDir>
@@ -27,11 +28,9 @@ namespace
 
 QString readFile(const QString &path)
 {
-    QFile file(path);
-    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
-        return {};
-    }
-    return QString::fromUtf8(file.readAll());
+    // Policy files are small. Bound the read so a FIFO, device or accidental
+    // huge file cannot stall the GUI thread or exhaust memory.
+    return readBoundedFile(path, 1024 * 1024);
 }
 
 QString resolveForMatch(const QString &workspace, const QString &path)

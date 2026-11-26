@@ -30,6 +30,13 @@ namespace
 const QString kSchemaVersionKey = QStringLiteral("event_schema_version");
 constexpr int kEventSchemaVersion = 1;
 
+// A conversation's event log is append-only, and the trace/export paths read
+// it. Twenty thousand events is far above a normal session but keeps a
+// pathological one from growing the SQLite file and every full read without a
+// bound. The message projection and the session payload keep the display
+// history, so trimming the oldest events does not erase the transcript.
+constexpr qint64 kMaxEventsPerConversation = 20000;
+
 QString connectionNameFor(EventStore *store)
 {
     static quint64 counter = 0;
@@ -268,17 +275,39 @@ bool EventStore::copyConversation(const QString &sourceId, const QString &target
         }
         return false;
     }
-    QList<HarnessEvent> events = read(sourceId, 0, -1);
-    if (throughSeq >= 0) {
-        events.erase(std::remove_if(events.begin(), events.end(), [throughSeq](const HarnessEvent &event) {
-                         return event.seq > throughSeq;
-                     }),
-                     events.end());
+    // Copy in pages so a long event log does not become two full lists.
+    constexpr int kPageSize = 256;
+    qint64 fromSeq = 0;
+    while (true) {
+        QList<HarnessEvent> events = read(sourceId, fromSeq, kPageSize);
+        if (events.isEmpty()) {
+            break;
+        }
+        if (throughSeq >= 0) {
+            events.erase(std::remove_if(events.begin(), events.end(),
+                                        [throughSeq](const HarnessEvent &event) {
+                                            return event.seq > throughSeq;
+                                        }),
+                         events.end());
+        }
+        for (HarnessEvent &event : events) {
+            event.conversationId = targetId;
+        }
+        if (!events.isEmpty() && !append(targetId, events, error)) {
+            return false;
+        }
+        const qint64 lastSeq = events.isEmpty()
+            ? fromSeq + kPageSize
+            : events.constLast().seq;
+        if (throughSeq >= 0 && lastSeq >= throughSeq) {
+            break;
+        }
+        fromSeq = lastSeq;
+        if (events.size() < kPageSize) {
+            break;
+        }
     }
-    for (HarnessEvent &event : events) {
-        event.conversationId = targetId;
-    }
-    return append(targetId, events, error);
+    return true;
 }
 
 bool EventStore::append(const QString &conversationId, const QList<HarnessEvent> &events,
@@ -369,6 +398,25 @@ bool EventStore::append(const QString &conversationId, const QList<HarnessEvent>
             *error = m_lastError;
         }
         return false;
+    }
+
+    if (head > kMaxEventsPerConversation) {
+        // Keep the newest window. The first turns survive in the compaction
+        // summary and the projection; replay/export simply start at the
+        // oldest retained sequence.
+        QSqlQuery trim(db);
+        trim.prepare(u"DELETE FROM session_event "
+                     "WHERE conversation_id = ? AND seq <= ?"_s);
+        trim.addBindValue(conversationId);
+        trim.addBindValue(head - kMaxEventsPerConversation);
+        if (!trim.exec()) {
+            m_lastError = trim.lastError().text();
+            db.rollback();
+            if (error) {
+                *error = m_lastError;
+            }
+            return false;
+        }
     }
 
     if (!db.commit()) {
@@ -546,12 +594,29 @@ bool EventStore::rebuildProjection(const QString &conversationId, QString *error
         }
         return false;
     }
-    const QList<HarnessEvent> events = read(conversationId, 0, -1, error);
-    for (const HarnessEvent &event : events) {
-        if (!applyProjection(event, db, error)) {
+    // Apply page by page; the projection is append-only, so each page can be
+    // released before the next is read.
+    constexpr int kPageSize = 256;
+    qint64 fromSeq = 0;
+    while (true) {
+        const QList<HarnessEvent> events = read(conversationId, fromSeq, kPageSize, error);
+        if (error && !error->isEmpty()) {
             db.rollback();
             return false;
         }
+        if (events.isEmpty()) {
+            break;
+        }
+        for (const HarnessEvent &event : events) {
+            if (!applyProjection(event, db, error)) {
+                db.rollback();
+                return false;
+            }
+        }
+        if (events.size() < kPageSize) {
+            break;
+        }
+        fromSeq = events.constLast().seq;
     }
     if (!db.commit()) {
         m_lastError = db.lastError().text();

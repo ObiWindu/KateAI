@@ -4,6 +4,7 @@
  */
 
 #include "pluginview.h"
+#include "workspaceservices.h"
 #include "chatwidget.h"
 #include "edittracker.h"
 #include "editorassist.h"
@@ -231,6 +232,15 @@ QString gitBranchForWorkspace(const QString &workspace)
             }
             const QString path = m_pendingGraphPath;
             m_pendingGraphPath.clear();
+            // The graph keeps a 4 KiB preview. Reading a huge generated file
+            // into the GUI thread only to discard it is wasted memory, so skip
+            // the update above the analysis ceiling (ProjectGraph applies the
+            // same cap to what it does receive).
+            constexpr qint64 kMaxGraphUpdateBytes = 4 * 1024 * 1024;
+            const QFileInfo info(path);
+            if (info.exists() && info.isFile() && info.size() > kMaxGraphUpdateBytes) {
+                return;
+            }
             QString content;
             if (m_bridge.readDocument(path, &content)) {
                 m_chat->agent()->updateProjectGraph(path, content);
@@ -1121,11 +1131,19 @@ QString gitBranchForWorkspace(const QString &workspace)
         if (!manager) {
             return;
         }
+        // Another window on the same workspace already confirmed the list. The
+        // manager is shared, so its answer applies here too.
+        if (manager->loadsWorkspaceConfig()) {
+            return;
+        }
         // The answer is remembered for the session: refreshWorkspace() runs on
         // every editor change, and the question would pop up again and again.
         const auto known = m_mcpTrust.constFind(workspace);
         if (known != m_mcpTrust.constEnd()) {
             manager->setLoadWorkspaceConfig(known.value());
+            if (known.value()) {
+                manager->reloadFromDisk();
+            }
             return;
         }
 
@@ -1133,6 +1151,7 @@ QString gitBranchForWorkspace(const QString &workspace)
         if (servers.isEmpty()) {
             m_mcpTrust.insert(workspace, true);
             manager->setLoadWorkspaceConfig(true);
+            manager->reloadFromDisk();
             return;
         }
 
@@ -1161,7 +1180,9 @@ QString gitBranchForWorkspace(const QString &workspace)
         const bool trusted = box.exec() == QMessageBox::Yes;
         m_mcpTrust.insert(workspace, trusted);
         manager->setLoadWorkspaceConfig(trusted);
-        if (!trusted) {
+        if (trusted) {
+            manager->reloadFromDisk();
+        } else {
             // Nothing of the file is started, and the servers of the previous
             // workspace are stopped as well.
             manager->setServers({});
@@ -1330,6 +1351,18 @@ QString gitBranchForWorkspace(const QString &workspace)
             m_workspace = workspace;
             if (announce) {
                 m_chat->showWorkspaceNotice(workspace);
+            }
+        }
+        // Share the expensive harness state with every other window on this
+        // workspace. The services are installed before setWorkspace(), so the
+        // loop adopts the already-built graph instead of indexing the project
+        // a second time.
+        if (m_plugin && !workspace.isEmpty() && !m_chat->agent()->isBusy()) {
+            if (auto services = m_plugin->workspaceServices(workspace)) {
+                m_workspaceServices = services;
+                m_chat->agent()->setHarnessServices(services->graph(),
+                                                    services->mcpManager(),
+                                                    services->eventStore());
             }
         }
         confirmWorkspaceMcpServers(workspace);

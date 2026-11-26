@@ -34,10 +34,13 @@
 #include <QLabel>
 #include <QPushButton>
 #include <QSignalSpy>
+#include <QSqlDatabase>
+#include <QSqlQuery>
 #include <QTest>
 #include <QTemporaryDir>
 #include <QPoint>
 #include <QScrollArea>
+#include <QScrollBar>
 #include <QTextBrowser>
 #include <QVBoxLayout>
 #include <QWidget>
@@ -178,13 +181,91 @@ private Q_SLOTS:
         setup();
         // The first workspace load must persist the index immediately, so the
         // next start and ACP session can read it even before any edit.
-        const QString cache = m_workspace->path() + u"/.kateai/project_graph.json"_s;
+        const QString cache = m_workspace->path() + u"/.kateai/project_graph.sqlite"_s;
         QVERIFY2(QFile::exists(cache), qPrintable(cache));
+        QVERIFY(QFileInfo(cache).size() > 0);
+        ProjectGraph graph;
+        graph.setWorkspacePath(m_workspace->path());
+        QVERIFY(graph.loadFromSqlite(cache));
+        QVERIFY(graph.getNodeCount() > 0);
+    }
+
+    void legacyJsonGraphCacheMigratesWithoutBeingRewritten()
+    {
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+        QFile source(workspace.filePath(u"README.md"_s));
+        QVERIFY(source.open(QIODevice::WriteOnly));
+        QCOMPARE(source.write("legacy workspace\n"), QByteArray("legacy workspace\n").size());
+        source.close();
+        ProjectGraph legacy;
+        legacy.setWorkspacePath(workspace.path());
+        legacy.generateGraph(workspace.path());
+        const QString jsonPath = workspace.filePath(u".kateai/project_graph.json"_s);
+        QVERIFY(legacy.saveToFile(jsonPath));
+        QFile jsonFile(jsonPath);
+        QVERIFY(jsonFile.open(QIODevice::ReadOnly));
+        const QByteArray original = jsonFile.readAll();
+        jsonFile.close();
+
+        AgentLoop agent;
+        agent.setWorkspace(workspace.path());
+        const QString sqlitePath = workspace.filePath(u".kateai/project_graph.sqlite"_s);
+        QVERIFY(QFile::exists(sqlitePath));
+        ProjectGraph migrated;
+        migrated.setWorkspacePath(workspace.path());
+        QVERIFY(migrated.loadFromSqlite(sqlitePath));
+        QVERIFY(migrated.getNodeCount() > 0);
+        QVERIFY(jsonFile.open(QIODevice::ReadOnly));
+        QCOMPARE(jsonFile.readAll(), original);
+    }
+
+    void corruptGraphCacheIsQuarantinedButNewerSchemasArePreserved()
+    {
+        QTemporaryDir workspace;
+        QVERIFY(workspace.isValid());
+        QVERIFY(QDir().mkpath(workspace.filePath(u".kateai"_s)));
+        const QString cache = workspace.filePath(u".kateai/project_graph.sqlite"_s);
+        const QByteArray corrupt = QByteArrayLiteral("not a sqlite database\n");
         QFile file(cache);
-        QVERIFY(file.open(QIODevice::ReadOnly));
-        const QByteArray data = file.readAll();
-        QVERIFY(data.contains("\"nodes\""));
-        QVERIFY(data.contains("\"edges\""));
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        QCOMPARE(file.write(corrupt), corrupt.size());
+        file.close();
+        AgentLoop agent;
+        agent.setWorkspace(workspace.path());
+        ProjectGraph restored;
+        restored.setWorkspacePath(workspace.path());
+        QVERIFY(restored.loadFromSqlite(cache));
+        const QStringList backups = QDir(workspace.filePath(u".kateai"_s))
+            .entryList({u"project_graph.sqlite.corrupt-*"_s}, QDir::Files);
+        QCOMPARE(backups.size(), 1);
+        QFile backup(workspace.filePath(u".kateai/"_s + backups.first()));
+        QVERIFY(backup.open(QIODevice::ReadOnly));
+        QCOMPARE(backup.readAll(), corrupt);
+
+        QTemporaryDir newerWorkspace;
+        QVERIFY(newerWorkspace.isValid());
+        ProjectGraph graph;
+        graph.setWorkspacePath(newerWorkspace.path());
+        graph.generateGraph(newerWorkspace.path());
+        const QString newerCache = newerWorkspace.filePath(u".kateai/project_graph.sqlite"_s);
+        QVERIFY(graph.saveToSqlite(newerCache));
+        {
+            const QString connection = u"graph-newer-schema"_s;
+            {
+                QSqlDatabase database = QSqlDatabase::addDatabase(u"QSQLITE"_s, connection);
+                database.setDatabaseName(newerCache);
+                QVERIFY(database.open());
+                QSqlQuery query(database);
+                QVERIFY(query.exec(u"PRAGMA user_version = 99"_s));
+                database.close();
+            }
+            QSqlDatabase::removeDatabase(connection);
+        }
+        AgentLoop newerAgent;
+        newerAgent.setWorkspace(newerWorkspace.path());
+        QVERIFY(QDir(newerWorkspace.filePath(u".kateai"_s))
+                    .entryList({u"project_graph.sqlite.corrupt-*"_s}, QDir::Files).isEmpty());
     }
 
     // A read is the plainest card there is: no output to stream, no change to
@@ -538,6 +619,171 @@ private Q_SLOTS:
     // ACP stores every tool result before the assistant message that lists the
     // calls, and those calls carry arguments "{}". Rebuilding used to drop the
     // results and append empty cards after the answer.
+    void longHistoryIsVirtualizedWithoutLosingEitherEnd()
+    {
+        setup();
+        SessionStore::SessionData data;
+        data.messages.reserve(600);
+        for (int i = 0; i < 300; ++i) {
+            ChatMessage user;
+            user.role = ChatMessage::Role::User;
+            user.content = i == 0 ? u"first question"_s : u"question %1: "_s.arg(i) + QString(180, u'q');
+            data.messages.append(user);
+            ChatMessage assistant;
+            assistant.role = ChatMessage::Role::Assistant;
+            assistant.content = i == 299 ? u"last answer"_s : u"answer %1: "_s.arg(i) + QString(180, u'a');
+            data.messages.append(assistant);
+        }
+        m_widget->agent()->restoreSession(data);
+        m_widget->rebuildTranscript();
+        QVERIFY(QTest::qWaitFor([this] {
+            return !m_widget->findChildren<QWidget *>(u"userCard"_s).isEmpty();
+        }, 1000));
+        QCOMPARE(m_widget->agent()->transcriptMessages().size(), 600);
+        QCOMPARE(m_widget->findChildren<QWidget *>(u"transcriptVirtualRow"_s).size(), 600);
+        const int mounted = m_widget->findChildren<QWidget *>(u"userCard"_s).size();
+        QVERIFY(mounted > 0 && mounted < 40);
+        QVERIFY(m_widget->findChildren<QTextBrowser *>().size() < 80);
+        QVERIFY(QTest::qWaitFor([this] {
+            for (const QTextBrowser *browser : m_widget->findChildren<QTextBrowser *>(u"assistantBrowser"_s)) {
+                if (browser->toPlainText().contains(u"last answer"_s)) {
+                    return true;
+                }
+            }
+            return false;
+        }, 1000));
+        // Let rebuildTranscript's deferred initial scroll-to-tail finish before
+        // simulating the user's scroll-up.
+        QTest::qWait(50);
+        auto *scroll = m_widget->findChild<QScrollArea *>();
+        QVERIFY(scroll);
+        scroll->verticalScrollBar()->setValue(0);
+        QVERIFY(QTest::qWaitFor([this] {
+            for (const QTextBrowser *browser : m_widget->findChildren<QTextBrowser *>(u"userMessageBody"_s)) {
+                if (browser->toPlainText().contains(u"first question"_s)) {
+                    return true;
+                }
+            }
+            return false;
+        }, 1000));
+        QVERIFY(m_widget->findChildren<QWidget *>(u"userCard"_s).size() < 40);
+        scroll->verticalScrollBar()->setValue(scroll->verticalScrollBar()->maximum());
+        QTest::qWait(50);
+        QCOMPARE(m_widget->agent()->transcriptMessages().size(), 600);
+    }
+
+    void sparseLongHistoryFallsBackToTheEagerRenderer()
+    {
+        setup();
+        SessionStore::SessionData data;
+        for (int i = 0; i < 300; ++i) {
+            ChatMessage internal;
+            internal.role = ChatMessage::Role::System;
+            internal.name = u"internal"_s;
+            internal.content = u"not rendered"_s;
+            data.messages.append(internal);
+        }
+        ChatMessage user;
+        user.role = ChatMessage::Role::User;
+        user.content = u"visible question"_s;
+        data.messages.append(user);
+        ChatMessage answer;
+        answer.role = ChatMessage::Role::Assistant;
+        answer.content = u"visible answer"_s;
+        data.messages.append(answer);
+        m_widget->agent()->restoreSession(data);
+        m_widget->rebuildTranscript();
+        QTest::qWait(30);
+        QVERIFY(m_widget->findChild<QWidget *>(u"userCard"_s));
+        QVERIFY(m_widget->findChild<QTextBrowser *>(u"assistantBrowser"_s));
+        QVERIFY(m_widget->findChildren<QWidget *>(u"transcriptVirtualRow"_s).isEmpty());
+    }
+
+    void reusedHistoricalIdDoesNotHijackLiveRouting()
+    {
+        setup();
+        SessionStore::SessionData data;
+        ChatMessage user;
+        user.role = ChatMessage::Role::User;
+        user.content = u"run reads"_s;
+        data.messages.append(user);
+        for (int i = 0; i < 300; ++i) {
+            ChatMessage tool;
+            tool.role = ChatMessage::Role::Tool;
+            tool.toolCallId = u"reused"_s;
+            tool.name = u"read_file"_s;
+            tool.content = u"historical output %1"_s.arg(i);
+            data.messages.append(tool);
+        }
+        m_widget->agent()->restoreSession(data);
+        m_widget->rebuildTranscript();
+        QTest::qWait(50);
+        Q_EMIT m_widget->agent()->toolStarted(request(u"read_file"_s, u"reused"_s, u"live input"_s));
+        ToolCallWidget *live = nullptr;
+        for (ToolCallWidget *card : m_widget->findChildren<ToolCallWidget *>()) {
+            if (card->toolCallId() == u"reused"_s && card->isRunning()) {
+                live = card;
+                break;
+            }
+        }
+        QVERIFY(live);
+        m_widget->focusToolCard(1);
+        QTest::qWait(30);
+        m_widget->focusToolCard(300);
+        QCOMPARE(m_widget->focusedToolCardIndex(), 300);
+        QVERIFY(live->isExpanded());
+        Q_EMIT m_widget->agent()->toolFinished(result(u"read_file"_s, u"reused"_s, u"live result"_s));
+        QVERIFY(!live->isRunning());
+        QTextBrowser *body = cardBody(live);
+        QVERIFY(body);
+        QVERIFY(body->toPlainText().contains(u"live result"_s));
+    }
+
+    void toolNavigationMaterializesOffscreenHistoryAndRemembersExpansion()
+    {
+        setup();
+        SessionStore::SessionData data;
+        ChatMessage user;
+        user.role = ChatMessage::Role::User;
+        user.content = u"run the reads"_s;
+        data.messages.append(user);
+        for (int i = 0; i < 300; ++i) {
+            ChatMessage tool;
+            tool.role = ChatMessage::Role::Tool;
+            tool.toolCallId = u"call-%1"_s.arg(i);
+            tool.name = u"read_file"_s;
+            tool.content = u"output %1"_s.arg(i);
+            data.messages.append(tool);
+        }
+        ChatMessage answer;
+        answer.role = ChatMessage::Role::Assistant;
+        answer.content = u"all reads complete"_s;
+        data.messages.append(answer);
+        m_widget->agent()->restoreSession(data);
+        m_widget->rebuildTranscript();
+        QTest::qWait(80);
+        QVERIFY(m_widget->findChildren<ToolCallWidget *>().size() < 40);
+        m_widget->focusToolCard(1);
+        QTest::qWait(30);
+        QCOMPARE(m_widget->focusedToolCardIndex(), 0);
+        ToolCallWidget *first = cardOfClass<ToolCallWidget>(u"ToolCallWidget_call-0"_s);
+        QVERIFY(first);
+        QVERIFY(first->isExpanded());
+        m_widget->focusToolCard(299);
+        QTest::qWait(50);
+        QVERIFY(cardOfClass<ToolCallWidget>(u"ToolCallWidget_call-299"_s));
+        QVERIFY(m_widget->findChildren<ToolCallWidget *>().size() < 80);
+        m_widget->focusToolCard(-299);
+        QTest::qWait(50);
+        first = cardOfClass<ToolCallWidget>(u"ToolCallWidget_call-0"_s);
+        QVERIFY(first);
+        QVERIFY(first->isExpanded());
+        Q_EMIT m_widget->agent()->toolStarted(request(u"read_file"_s, u"live-after-restore"_s, u"live tail"_s));
+        m_widget->focusToolCard(300);
+        QCOMPARE(m_widget->focusedToolCardIndex(), 300);
+        QVERIFY(cardOfClass<ToolCallWidget>(u"ToolCallWidget_live-after-restore"_s));
+    }
+
     void testAcpHistoryPlacesFilledToolCardsWhereTheToolsRan()
     {
         setup();

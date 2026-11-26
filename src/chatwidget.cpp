@@ -22,8 +22,11 @@
 #include "questionwidget.h"
 #include "todowidget.h"
 #include "edittracker.h"
+#include "harness/models.h"
+#include "harness/retainedcost.h"
 #include "tools.h"
 #include "transcriptlayout.h"
+#include "transcriptvirtualizer.h"
 #include "checkpoint.h"
 #include "mcp.h"
 #include "modes.h"
@@ -77,6 +80,8 @@
 #include <QUuid>
 
 #include <algorithm>
+#include <functional>
+#include <memory>
 
 using namespace Qt::Literals::StringLiterals;
 
@@ -455,9 +460,17 @@ ChatWidget::ChatWidget(QWidget *parent)
     m_sessionSaveTimer->setSingleShot(true);
     // A long turn can finish tools many times per second. Serializing the
     // whole transcript on every one of those saves is the largest avoidable
-    // disk cost in a long session; 1.5 s still persists work continuously.
-    m_sessionSaveTimer->setInterval(1500);
-    connect(m_sessionSaveTimer, &QTimer::timeout, this, &ChatWidget::saveCurrentConversation);
+    // disk cost in a long session. Turn boundaries still save immediately.
+    // Crash-recovery snapshot while a turn is streaming. The completed turn is
+    // saved synchronously in the turnFinished handler, so this only has to
+    // bound how much work a crash can lose; 15 s cuts the full-conversation
+    // serialisation peak to a third without changing normal save behavior.
+    m_sessionSaveTimer->setInterval(15000);
+    connect(m_sessionSaveTimer, &QTimer::timeout, this, [this]() {
+        if (m_sessionDirty) {
+            saveCurrentConversation();
+        }
+    });
 
     // A stable name the panel stylesheet can select: a class selector like
     // `ChatWidget { ... }` never matches, because Qt compares it against the
@@ -642,6 +655,23 @@ ChatWidget::ChatWidget(QWidget *parent)
     // tool-card disclosures appear to open upward.
     m_transcriptLayout->addWidget(createWelcomeWidget());
     m_transcriptLayout->addStretch();
+
+    m_transcriptVirtualizer = new TranscriptVirtualizer(m_scrollArea, m_transcriptLayout, 256, this);
+    connect(m_transcriptVirtualizer, &TranscriptVirtualizer::entryWillEvict, this,
+            [this](const QString &, QWidget *widget) { releaseVirtualTranscriptWidget(widget); });
+    connect(m_transcriptVirtualizer, &TranscriptVirtualizer::entryMaterialized, this,
+            [this](const QString &) {
+                applyTranscriptCollapse();
+                if (m_toolCardsOverride == ToolCardsOverride::Auto) {
+                    for (ToolCallWidget *card : std::as_const(m_toolCallOrder)) {
+                        const auto state = m_toolExpansionState.constFind(card->toolCallId());
+                        if (state != m_toolExpansionState.cend()) {
+                            card->setExpanded(state.value());
+                        }
+                    }
+                }
+                reflowTranscriptMedia();
+            });
 
     // Live thinking/working indicators float over the transcript's bottom
     // left corner; they are not part of the transcript's flow.
@@ -1166,7 +1196,7 @@ ChatWidget::ChatWidget(QWidget *parent)
         m_answerStarted = false;
         m_streamText.clear();
         if (m_activeAssistantBrowser) {
-            m_activeAssistantBrowser->setDocument(makeMarkdownDocument(closedMarkdown(m_streamText), ChatTheme::messageCss()));
+            setMarkdownContent(m_activeAssistantBrowser, closedMarkdown(m_streamText), ChatTheme::messageCss());
         }
     });
     connect(&m_agent, &AgentLoop::assistantFinished, this, [this](const QString &text) {
@@ -1212,7 +1242,8 @@ ChatWidget::ChatWidget(QWidget *parent)
             // Sub-agent cards are full transcript widgets; keep the recent
             // ones after a very long orchestration session.
             constexpr int kMaxSubtaskCards = 40;
-            while (m_subtaskOrder.size() > kMaxSubtaskCards) {
+            while (m_subtaskOrder.size() > kMaxSubtaskCards
+                   && !(m_transcriptVirtualizer && m_transcriptVirtualizer->isActive())) {
                 int victimIndex = -1;
                 for (int i = 0; i < m_subtaskOrder.size(); ++i) {
                     SubtaskWidget *candidate = m_subtaskOrder.at(i);
@@ -1438,7 +1469,11 @@ ChatWidget::ChatWidget(QWidget *parent)
                 const PendingEdit pending = it.value();
                 if (result.ok) {
                     QString newContent;
-                    if (m_agent.documentBridge()) {
+                    constexpr qint64 kMaxTrackedEditBytes = 4 * 1024 * 1024;
+                    const QFileInfo trackedInfo(pending.path);
+                    if (m_agent.documentBridge()
+                        && (!trackedInfo.exists() || !trackedInfo.isFile()
+                            || trackedInfo.size() <= kMaxTrackedEditBytes)) {
                         m_agent.documentBridge()->readDocument(pending.path, &newContent);
                     }
                     m_editTracker->addEdit(pending.path, pending.toolName, pending.diff,
@@ -1484,26 +1519,38 @@ ChatWidget::ChatWidget(QWidget *parent)
             }
             return QDir::cleanPath(QDir(workspace).absoluteFilePath(raw));
         };
+        // A pending edit only needs the old bytes to support Reject/Undo. Do
+        // not read a multi-megabyte file just to retain a second copy; refusal
+        // to revert is safer than an OOM, and the checkpoint remains available.
+        const auto readOldContent = [this](const QString &path, QString *out) {
+            constexpr qint64 kMaxPendingBaselineBytes = 4 * 1024 * 1024;
+            const QFileInfo info(path);
+            if (info.exists() && info.isFile() && info.size() > kMaxPendingBaselineBytes) {
+                return true;
+            }
+            return m_agent.documentBridge()
+                && m_agent.documentBridge()->readDocument(path, out);
+        };
 
         auto pending = m_pendingToolCalls.find(request.toolCallId);
         const bool editTracking = m_settings.permissionMode == PermissionMode::AcceptEdits
             || usesAcpNative(m_settings);
+        constexpr int kMaxPendingToolCalls = 64;
         if (pending == m_pendingToolCalls.end() && editTracking && !request.path.isEmpty()
+            && m_pendingToolCalls.size() < kMaxPendingToolCalls
             && (request.mutatesFiles || !request.describeDiff.isEmpty())) {
             PendingEdit created;
             created.toolName = request.toolName;
             created.path = trackerPath(request.resolvedPath.isEmpty() ? request.path : request.resolvedPath);
             created.diff = request.describeDiff;
-            created.existed = m_agent.documentBridge()
-                && m_agent.documentBridge()->readDocument(created.path, &created.oldContent);
+            created.existed = readOldContent(created.path, &created.oldContent);
             m_pendingToolCalls.insert(request.toolCallId, created);
             pending = m_pendingToolCalls.find(request.toolCallId);
         }
         if (pending != m_pendingToolCalls.end()) {
             if (pending->path.isEmpty() && !request.path.isEmpty()) {
                 pending->path = trackerPath(request.resolvedPath.isEmpty() ? request.path : request.resolvedPath);
-                pending->existed = m_agent.documentBridge()
-                    && m_agent.documentBridge()->readDocument(pending->path, &pending->oldContent);
+                pending->existed = readOldContent(pending->path, &pending->oldContent);
             }
             if (pending->diff.isEmpty()) {
                 pending->diff = request.describeDiff;
@@ -1521,12 +1568,12 @@ ChatWidget::ChatWidget(QWidget *parent)
                 }
                 const QString key = request.toolCallId + u"_add"_s + QString::number(i);
                 auto extra = m_pendingToolCalls.find(key);
-                if (extra == m_pendingToolCalls.end()) {
+                if (extra == m_pendingToolCalls.end()
+                    && m_pendingToolCalls.size() < kMaxPendingToolCalls) {
                     PendingEdit addPending;
                     addPending.toolName = request.toolName;
                     addPending.path = path;
-                    addPending.existed = m_agent.documentBridge()
-                        && m_agent.documentBridge()->readDocument(path, &addPending.oldContent);
+                    addPending.existed = readOldContent(path, &addPending.oldContent);
                     if (i < request.additionalDiffs.size()) {
                         addPending.diff = request.additionalDiffs.at(i);
                     }
@@ -1750,6 +1797,10 @@ ChatWidget::ChatWidget(QWidget *parent)
         m_subtaskQuestionTaskIds.clear();
         m_pendingSuggestions.clear();
         m_pendingProgress.clear();
+        // An edit whose result never arrived can no longer be reviewed. Drop
+        // the snapshot now instead of retaining a full old file until the next
+        // conversation switch.
+        m_pendingToolCalls.clear();
         // The dock lost contents without a dock-aware call above: a cleared
         // question, and approval rows hidden together with the cards that
         // carried them. Recompute, or the strip stays on screen over the
@@ -2103,6 +2154,7 @@ void ChatWidget::saveCurrentConversation()
     }
     const SessionStore::SessionData sessionData = m_agent.sessionData();
     if (sessionData.messages.isEmpty()) {
+        m_sessionDirty = false;
         return;
     }
 
@@ -2117,6 +2169,9 @@ void ChatWidget::saveCurrentConversation()
     const bool isNew = SessionStore::saveConversation(
         m_currentConversationId, sessionData, QString(),
         m_settings.maxSavedConversations);
+    // The payload on disk now matches the in-memory conversation. A failed
+    // save leaves the flag set so the next tick retries.
+    m_sessionDirty = false;
     // The number of conversations only changes when one is created or
     // deleted. A save of an existing conversation keeps the cached count, so
     // the button is repainted without a query.
@@ -2129,6 +2184,7 @@ void ChatWidget::saveCurrentConversation()
 void ChatWidget::scheduleSessionSave()
 {
     if (!m_loadingConversation && m_sessionSaveTimer) {
+        m_sessionDirty = true;
         // The timer is single-shot. Restarting it on every chunk would keep
         // pushing the deadline away while the answer streams, so nothing would
         // ever be saved while the turn is in progress -- exactly the case the
@@ -2152,8 +2208,11 @@ void ChatWidget::addUserMessage(const QString &text)
     }
 
     // A new user message starts a new turn, so reasoning rendered in the
-    // previous turn's cards no longer counts as already shown.
-    m_thinkingShownEarlierInTurn.clear();
+    // previous turn's cards no longer counts as already shown. Reconstructing
+    // an offscreen historical row must not alter the live turn's reasoning.
+    if (!(m_transcriptVirtualizer && m_transcriptVirtualizer->isMaterializing())) {
+        m_thinkingShownEarlierInTurn.clear();
+    }
 
     // Auto-update thread title on the first user message
     if (m_threadTitle && m_threadTitle->text() == i18n("New Thread")) {
@@ -2214,7 +2273,8 @@ void ChatWidget::addUserMessage(const QString &text)
     // layout runs, so a live message reflows once that width exists. A history
     // rebuild fits every body in one pass instead of scheduling one per card.
     fitUserMessageBody(msgLabel);
-    if (!m_loadingConversation) {
+    if (!m_loadingConversation
+        && !(m_transcriptVirtualizer && m_transcriptVirtualizer->isMaterializing())) {
         forceScrollToBottom();
         QTimer::singleShot(0, this, [thisWeak = QPointer<ChatWidget>(this)]() {
             if (thisWeak) {
@@ -2222,7 +2282,9 @@ void ChatWidget::addUserMessage(const QString &text)
             }
         });
     }
-    updateTokenDisplay();
+    if (!(m_transcriptVirtualizer && m_transcriptVirtualizer->isMaterializing())) {
+        updateTokenDisplay();
+    }
 }
 
 void ChatWidget::addActivityMessage(const QString &text)
@@ -2232,8 +2294,23 @@ void ChatWidget::addActivityMessage(const QString &text)
         return;
     }
     auto *pill = new QLabel(escape(text), m_transcriptContainer);
+    pill->setObjectName(u"activityPill"_s);
     pill->setStyleSheet(ChatTheme::hintLabel());
     appendTranscriptWidget(pill);
+    m_activityPills.append(pill);
+    constexpr int kMaxActivityPills = 50;
+    while (m_activityPills.size() > kMaxActivityPills) {
+        QLabel *oldest = m_activityPills.takeFirst();
+        if (!oldest) {
+            continue;
+        }
+        if (m_transcriptLayout) {
+            m_transcriptLayout->removeWidget(oldest);
+        }
+        oldest->hide();
+        oldest->setParent(nullptr);
+        oldest->deleteLater();
+    }
     scrollToBottom();
 }
 
@@ -2330,7 +2407,13 @@ void ChatWidget::scheduleStreamRender()
     // restarts it, which would starve a continuous stream.
     if (!m_streamRenderTimer->isActive()) {
         const int length = m_streamText.size();
-        m_streamRenderTimer->setInterval(length > 60000 ? 200 : (length > 20000 ? 100 : 50));
+        // Big answers cost proportionally more per full markdown rebuild. Keep
+        // the final result identical, but stop rebuilding a pathological
+        // answer several times per second.
+        const int interval = length > 500000 ? 1000
+            : (length > 200000 ? 500
+               : (length > 60000 ? 200 : (length > 20000 ? 100 : 50)));
+        m_streamRenderTimer->setInterval(interval);
         m_streamRenderTimer->start();
     }
 }
@@ -2343,7 +2426,7 @@ void ChatWidget::flushStreamRender()
     if (!m_activeAssistantBrowser) {
         return;
     }
-    m_activeAssistantBrowser->setDocument(makeMarkdownDocument(closedMarkdown(m_streamText), ChatTheme::messageCss()));
+    setMarkdownContent(m_activeAssistantBrowser, closedMarkdown(m_streamText), ChatTheme::messageCss());
     scheduleStreamHeightUpdate();
 }
 
@@ -2423,7 +2506,7 @@ void ChatWidget::updateThinkingDisplay()
             }
         }
     }
-    m_thinkingBrowser->setDocument(makeMarkdownDocument(closedMarkdown(markdown), ChatTheme::thinkingCss()));
+    setMarkdownContent(m_thinkingBrowser, closedMarkdown(markdown), ChatTheme::thinkingCss());
     if (m_thinkingBlock && !m_thinkingBuffer.isEmpty()) {
         m_thinkingBlock->show();
     }
@@ -2700,7 +2783,7 @@ void ChatWidget::freezeStreaming()
         // The live renderer closes an unterminated code fence, so the frozen
         // card has to do the same. Otherwise a reply is rendered differently
         // after a restart than it was while it streamed.
-        m_activeAssistantBrowser->setDocument(makeMarkdownDocument(closedMarkdown(m_streamText), ChatTheme::messageCss()));
+        setMarkdownContent(m_activeAssistantBrowser, closedMarkdown(m_streamText), ChatTheme::messageCss());
         const int docH = std::max(30, static_cast<int>(m_activeAssistantBrowser->document()->size().height()) + 16);
         if (m_activeAssistantBrowser->height() != docH) {
             m_activeAssistantBrowser->setFixedHeight(docH);
@@ -2964,7 +3047,12 @@ void ChatWidget::applyTranscriptCollapse()
     // tool cards, count content as well as cards: a few long reasoning blocks
     // cost more than many short ones.
     constexpr int kMaxRetainedThinkingBlocks = 200;
-    constexpr qsizetype kMaxRetainedThinkingChars = 2 * 1024 * 1024;
+    // A character budget described a QTextDocument as if it were a plain
+    // string. Express the ceiling in bytes and convert it once through the
+    // shared cost factor instead.
+    constexpr double kMaxRetainedThinkingBytes = 24.0 * 1024 * 1024;
+    const qsizetype kMaxRetainedThinkingChars =
+        RetainedCost::richCharsForBudget(kMaxRetainedThinkingBytes);
     qsizetype thinkingChars = 0;
     for (const auto &entry : std::as_const(m_thinkingBlocks)) {
         if (entry.browser) {
@@ -2975,7 +3063,8 @@ void ChatWidget::applyTranscriptCollapse()
     // the next update will target. Pruning either mid-stream left
     // m_thinkingBrowser null and silently dropped the rest of the reasoning. A
     // single oversized live block is therefore allowed to exceed the budget.
-    for (int i = 0; i < m_thinkingBlocks.size()
+    const bool virtualized = m_transcriptVirtualizer && m_transcriptVirtualizer->isActive();
+    for (int i = 0; !virtualized && i < m_thinkingBlocks.size()
          && (m_thinkingBlocks.size() > kMaxRetainedThinkingBlocks
              || thinkingChars > kMaxRetainedThinkingChars);) {
         const ThinkingBlockRef entry = m_thinkingBlocks.at(i);
@@ -3039,6 +3128,9 @@ void ChatWidget::applyTranscriptCollapse()
 
 void ChatWidget::pruneOldTranscriptCards()
 {
+    if (m_transcriptVirtualizer && m_transcriptVirtualizer->isActive()) {
+        return;
+    }
     // Every tool card owns a QTextBrowser and its document. A long session
     // could otherwise retain thousands of them, so the oldest finished cards
     // are dropped from the live widget tree once a retention cap is passed.
@@ -3047,7 +3139,11 @@ void ChatWidget::pruneOldTranscriptCards()
     // reads, and the count alone cannot see that. The session still has the
     // history and rebuilds it on reload.
     constexpr int kMaxRetainedToolCards = 400;
-    constexpr qsizetype kMaxRetainedToolChars = 6 * 1024 * 1024;
+    // Same correction as the reasoning blocks: the cap is a byte budget, and a
+    // card's document costs more per retained character than one.
+    constexpr double kMaxRetainedToolBytes = 64.0 * 1024 * 1024;
+    constexpr qsizetype kMaxRetainedToolChars =
+        RetainedCost::richCharsForBudget(kMaxRetainedToolBytes);
     qsizetype toolChars = 0;
     for (ToolCallWidget *widget : std::as_const(m_toolCallOrder)) {
         if (widget) {
@@ -3194,31 +3290,65 @@ bool ChatWidget::cycleModel(int delta)
 
 void ChatWidget::focusToolCard(int delta)
 {
-    for (int i = m_toolCallOrder.size() - 1; i >= 0; --i) {
-        if (m_toolCallOrder.at(i).isNull()) {
-            m_toolCallOrder.removeAt(i);
+    const bool virtualized = m_transcriptVirtualizer && m_transcriptVirtualizer->isActive();
+    QStringList keys;
+    QHash<QString, QString> liveRoutes;
+    if (virtualized) {
+        keys = m_transcriptVirtualizer->toolAliases();
+        int liveIndex = 0;
+        for (const auto &card : m_toolCallOrder) {
+            if (card && !m_transcriptVirtualizer->containsWidget(card)) {
+                const QString alias = u"live:%1#%2"_s.arg(card->toolCallId()).arg(liveIndex++);
+                keys.append(alias);
+                liveRoutes.insert(alias, card->toolCallId());
+            }
+        }
+    } else {
+        for (int i = m_toolCallOrder.size() - 1; i >= 0; --i) {
+            if (m_toolCallOrder.at(i).isNull()) {
+                m_toolCallOrder.removeAt(i);
+            }
+        }
+        for (const auto &card : m_toolCallOrder) {
+            if (card) {
+                keys.append(card->toolCallId());
+            }
         }
     }
-    const int count = m_toolCallOrder.size();
+    const int count = keys.size();
     if (count == 0 || delta == 0) {
         return;
     }
     int index = m_focusedToolCardIndex;
     if (index < 0 || index >= count) {
-        // Nothing selected yet, or the selection pointed past the end after a
-        // rebuild: the first jump lands on an end rather than doing nothing.
         index = delta > 0 ? -1 : count;
     }
     index += delta;
     index = qBound(0, index, count - 1);
     m_focusedToolCardIndex = index;
-    ToolCallWidget *card = m_toolCallOrder.at(index);
+    const QString key = keys.at(index);
+    ToolCallWidget *card = nullptr;
+    if (virtualized) {
+        if (liveRoutes.contains(key)) {
+            card = m_toolCallWidgets.value(liveRoutes.value(key));
+        } else {
+            QWidget *target = m_transcriptVirtualizer->ensureAliasVisible(key);
+            card = qobject_cast<ToolCallWidget *>(target);
+            if (!card) {
+                const QString widgetKey = m_transcriptVirtualizer->toolWidgetKey(key);
+                if (!widgetKey.isEmpty()) {
+                    card = m_toolCallWidgets.value(widgetKey);
+                }
+            }
+        }
+    } else {
+        card = m_toolCallWidgets.value(key);
+    }
     if (!card) {
         return;
     }
-    // The card being read through is open: a collapsed card among expanded
-    // ones shows nothing to land on.
     card->setExpanded(true);
+    m_toolExpansionState.insert(card->toolCallId(), true);
     card->flashAttention();
     if (m_scrollArea) {
         m_scrollArea->ensureWidgetVisible(card, 24, 40);
@@ -3495,6 +3625,9 @@ void ChatWidget::syncIndicatorsOverlay()
 
 int ChatWidget::transcriptInsertIndex() const
 {
+    if (m_transcriptVirtualizer && m_transcriptVirtualizer->isActive()) {
+        return m_transcriptVirtualizer->appendIndex();
+    }
     if (!m_transcriptLayout) {
         return 0;
     }
@@ -3512,9 +3645,60 @@ int ChatWidget::transcriptInsertIndex() const
                                     m_transcriptLayout->count());
 }
 
+void ChatWidget::releaseVirtualTranscriptWidget(QWidget *widget)
+{
+    if (!widget) {
+        return;
+    }
+    if (auto *card = qobject_cast<ToolCallWidget *>(widget)) {
+        m_toolExpansionState.insert(card->toolCallId(), card->isExpanded());
+        if (m_toolCallWidgets.value(card->toolCallId()) == card) {
+            m_toolCallWidgets.remove(card->toolCallId());
+        }
+        m_toolCallOrder.removeAll(card);
+        if (m_pinnedViewportWidget == card) {
+            m_pinnedViewportWidget = nullptr;
+        }
+    } else if (auto *card = qobject_cast<SubtaskWidget *>(widget)) {
+        if (m_subtaskWidgets.value(card->taskId()) == card) {
+            m_subtaskWidgets.remove(card->taskId());
+        }
+        m_subtaskOrder.removeAll(card);
+        for (auto it = m_subtaskAnchors.begin(); it != m_subtaskAnchors.end();) {
+            if (it.value() == card) {
+                it = m_subtaskAnchors.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    } else if (auto *card = qobject_cast<SuggestionWidget *>(widget)) {
+        if (m_suggestionWidgets.value(card->suggestionId()) == card) {
+            m_suggestionWidgets.remove(card->suggestionId());
+        }
+        m_suggestionOrder.removeAll(card);
+    }
+    for (int i = m_thinkingBlocks.size() - 1; i >= 0; --i) {
+        const ThinkingBlockRef &ref = m_thinkingBlocks.at(i);
+        if (ref.block == widget || (ref.block && widget->isAncestorOf(ref.block))) {
+            m_thinkingBlocks.removeAt(i);
+        }
+    }
+    if (m_welcomeWidget == widget) {
+        m_welcomeWidget = nullptr;
+    }
+}
+
 void ChatWidget::appendTranscriptWidget(QWidget *widget)
 {
     if (!m_transcriptLayout || !widget) {
+        return;
+    }
+    if (m_transcriptVirtualizer && m_transcriptVirtualizer->isMaterializing()) {
+        m_transcriptVirtualizer->appendToCurrent(widget);
+        return;
+    }
+    if (m_transcriptVirtualizer && m_transcriptVirtualizer->isActive()) {
+        m_transcriptLayout->insertWidget(m_transcriptVirtualizer->appendIndex(), widget);
         return;
     }
     m_transcriptLayout->insertWidget(transcriptInsertIndex(), widget);
@@ -3576,6 +3760,9 @@ void ChatWidget::moveToIntentDock(QWidget *widget, int index)
 
 QWidget *ChatWidget::lastTranscriptContentWidget() const
 {
+    if (m_transcriptVirtualizer && m_transcriptVirtualizer->isActive()) {
+        return m_transcriptVirtualizer->lastWidget();
+    }
     if (!m_transcriptLayout) {
         return nullptr;
     }
@@ -4033,7 +4220,7 @@ void ChatWidget::restylePanel()
     // re-render it now so a theme change is visible even while the model is
     // thinking between chunks.
     if (m_isStreaming && m_activeAssistantBrowser && !m_streamText.isEmpty()) {
-        m_activeAssistantBrowser->setDocument(makeMarkdownDocument(closedMarkdown(m_streamText), ChatTheme::messageCss()));
+        setMarkdownContent(m_activeAssistantBrowser, closedMarkdown(m_streamText), ChatTheme::messageCss());
     }
 
     // Re-polish so the new stylesheets take effect immediately.
@@ -4186,6 +4373,14 @@ void ChatWidget::setSettings(const Settings &settings)
             }
             return;
         }
+    }
+
+    // Pay-as-you-go and Go expose different catalogues. A plan, endpoint or
+    // key change must refetch instead of showing the previous gateway's list.
+    if (settings.opencodePlan != m_settings.opencodePlan
+        || settings.opencodeUrl != m_settings.opencodeUrl
+        || settings.opencodeApiKey != m_settings.opencodeApiKey) {
+        m_modelCatalog.remove(Provider::OpenCode);
     }
 
     m_settings = settings;
@@ -4518,9 +4713,23 @@ void ChatWidget::updateReasoningEffortButton()
     } else if (m_settings.reasoningEffort == u"high"_s) {
         text = i18n("High");
         toolTip = i18n("Reasoning effort: High");
+    } else if (m_settings.reasoningEffort == u"xhigh"_s) {
+        text = i18n("Extra high");
+        toolTip = i18n("Reasoning effort: Extra high");
+    } else if (m_settings.reasoningEffort == u"max"_s) {
+        text = i18n("Max");
+        toolTip = i18n("Reasoning effort: Max");
     } else {
         text = m_settings.reasoningEffort;
         toolTip = i18n("Reasoning effort: %1", m_settings.reasoningEffort);
+    }
+
+    const QString configuredEffort = m_settings.reasoningEffort.trimmed();
+    const QStringList supportedEfforts = ModelProfiles::reasoningEfforts(
+        m_settings.provider, modelFor(m_settings));
+    if (!configuredEffort.isEmpty() && !supportedEfforts.isEmpty()
+        && !supportedEfforts.contains(configuredEffort)) {
+        toolTip += i18n(" — not offered by this model, so it is not sent");
     }
 
     m_reasoningEffort->setText(text);
@@ -4588,6 +4797,14 @@ bool ChatWidget::modelSupportsReasoningEffort() const
     const QString model = modelFor(m_settings).toLower();
     const Provider provider = m_settings.provider;
 
+    // The provider's catalogue can publish exact capabilities. A model that
+    // advertises reasoning there (OpenCode Console does, with explicit effort
+    // levels) gets the control even when its name contains no hint.
+    const ModelProfile profile = ModelProfiles::resolve(provider, modelFor(m_settings));
+    if (profile.known && profile.supportsReasoning) {
+        return true;
+    }
+
     // Model names are no longer matched against a hard-coded list. The only
     // signal used here is the fetched catalogue: if the provider listed the
     // model, and its name advertises reasoning, offer the control. A model the
@@ -4632,24 +4849,60 @@ void ChatWidget::showReasoningEffortMenu()
     QMenu menu(this);
     menu.setStyleSheet(ChatTheme::menu());
 
-    auto *reasoningGroup = new QActionGroup(this);
-    const QStringList reasoningLevels = {QString(), QStringLiteral("minimal"), QStringLiteral("low"), QStringLiteral("medium"), QStringLiteral("high")};
-    const QStringList reasoningLabels = {i18n("Auto (provider default)"), i18n("Minimal"), i18n("Low"), i18n("Medium"), i18n("High")};
-    const QStringList reasoningIcons = {u"🧠"_s, u"1"_s, u"2"_s, u"3"_s, u"4"_s};
+    auto *reasoningGroup = new QActionGroup(&menu);
+    // Prefer the levels the model actually advertises (OpenCode publishes
+    // low/medium/high/xhigh/max per model). Keep the generic set as a fallback
+    // and always include the configured value so it can be cleared.
+    QStringList levels = ModelProfiles::reasoningEfforts(m_settings.provider,
+                                                         modelFor(m_settings));
+    if (levels.isEmpty()) {
+        levels = {u"minimal"_s, u"low"_s, u"medium"_s, u"high"_s};
+    }
+    const QString configured = m_settings.reasoningEffort.trimmed();
+    if (!configured.isEmpty() && !levels.contains(configured)) {
+        levels.prepend(configured);
+    }
+    auto levelLabel = [](const QString &level) {
+        if (level == u"minimal"_s) {
+            return i18n("Minimal");
+        }
+        if (level == u"low"_s) {
+            return i18n("Low");
+        }
+        if (level == u"medium"_s) {
+            return i18n("Medium");
+        }
+        if (level == u"high"_s) {
+            return i18n("High");
+        }
+        if (level == u"xhigh"_s) {
+            return i18n("Extra high");
+        }
+        if (level == u"max"_s) {
+            return i18n("Max");
+        }
+        return level;
+    };
 
-    for (int i = 0; i < reasoningLevels.size(); ++i) {
-        auto *action = menu.addAction(reasoningIcons[i] + u"  "_s + reasoningLabels[i]);
+    auto addLevel = [&](const QString &level, const QString &label) {
+        auto *action = menu.addAction(label);
         action->setCheckable(true);
-        action->setChecked(m_settings.reasoningEffort == reasoningLevels[i]);
-        action->setData(reasoningLevels[i]);
+        action->setChecked(configured == level);
+        action->setData(level);
         reasoningGroup->addAction(action);
-        connect(action, &QAction::triggered, this, [this, effort = reasoningLevels[i]]() {
+        connect(action, &QAction::triggered, this, [this, effort = level]() {
             m_settings.reasoningEffort = effort;
             updateReasoningEffortButton();
             updateModelSelectorLabel();
             m_agent.setSettings(m_settings);
             Q_EMIT settingsChanged(m_settings);
         });
+    };
+
+    addLevel(QString(), i18n("Auto (provider default)"));
+    int index = 1;
+    for (const QString &level : std::as_const(levels)) {
+        addLevel(level, QStringLiteral("%1  %2").arg(index++).arg(levelLabel(level)));
     }
 
     menu.exec(m_reasoningEffort->mapToGlobal(QPoint(0, m_reasoningEffort->height() + 2)));
@@ -4669,7 +4922,7 @@ void ChatWidget::showAcpEffortMenu()
     QMenu menu(this);
     menu.setStyleSheet(ChatTheme::menu());
 
-    auto *group = new QActionGroup(this);
+    auto *group = new QActionGroup(&menu);
     auto *autoAction = menu.addAction(i18n("Auto (agent default)"));
     autoAction->setCheckable(true);
     autoAction->setChecked(forced.isEmpty());
@@ -5690,7 +5943,7 @@ void ChatWidget::showSettingsMenu()
     // Permission Mode
     auto *permMenu = menu.addMenu(i18n("Permission Mode"));
     permMenu->setStyleSheet(menu.styleSheet());
-    auto *permGroup = new QActionGroup(this);
+    auto *permGroup = new QActionGroup(&menu);
     for (int i = 0; i < m_permission->count(); ++i) {
         auto *action = permMenu->addAction(m_permission->itemText(i));
         action->setCheckable(true);
@@ -5705,7 +5958,7 @@ void ChatWidget::showSettingsMenu()
     // Sandbox Profile
     auto *sandboxMenu = menu.addMenu(i18n("Sandbox Profile"));
     sandboxMenu->setStyleSheet(menu.styleSheet());
-    auto *sandboxGroup = new QActionGroup(this);
+    auto *sandboxGroup = new QActionGroup(&menu);
     for (int i = 0; i < m_sandbox->count(); ++i) {
         auto *action = sandboxMenu->addAction(m_sandbox->itemText(i));
         action->setCheckable(true);
@@ -5726,7 +5979,7 @@ void ChatWidget::showSettingsMenu()
     // Agent Mode
     auto *modeMenu = menu.addMenu(i18n("Mode"));
     modeMenu->setStyleSheet(menu.styleSheet());
-    auto *modeGroup = new QActionGroup(this);
+    auto *modeGroup = new QActionGroup(&menu);
     for (int i = 0; i < m_mode->count(); ++i) {
         auto *action = modeMenu->addAction(m_mode->itemText(i));
         action->setCheckable(true);
@@ -6126,7 +6379,8 @@ void ChatWidget::addSuggestionCard(const QString &id, const Suggestion &suggesti
     // Suggestion cards are transcript widgets with their own browsers; keep
     // only the recent ones in a very long session.
     constexpr int kMaxSuggestionCards = 100;
-    while (m_suggestionOrder.size() > kMaxSuggestionCards) {
+    while (m_suggestionOrder.size() > kMaxSuggestionCards
+           && !(m_transcriptVirtualizer && m_transcriptVirtualizer->isActive())) {
         SuggestionWidget *oldest = m_suggestionOrder.first();
         if (!oldest) {
             m_suggestionOrder.removeFirst();
@@ -6159,7 +6413,8 @@ void ChatWidget::addSuggestionErrorCard(const QString &id, const QString &messag
     // Suggestion cards are transcript widgets with their own browsers; keep
     // only the recent ones in a very long session.
     constexpr int kMaxSuggestionCards = 100;
-    while (m_suggestionOrder.size() > kMaxSuggestionCards) {
+    while (m_suggestionOrder.size() > kMaxSuggestionCards
+           && !(m_transcriptVirtualizer && m_transcriptVirtualizer->isActive())) {
         SuggestionWidget *oldest = m_suggestionOrder.first();
         if (!oldest) {
             m_suggestionOrder.removeFirst();
@@ -6259,6 +6514,10 @@ void ChatWidget::showQuestionCard(const PermissionRequest &request)
         } else {
             m_agent.answerQuestion(answer);
         }
+        // The card is becoming transcript history, not a live request. Drop it
+        // from the routing map so turn-end cleanup cannot delete an answered
+        // card and so the map cannot grow one entry per question.
+        m_questionWidgets.remove(questionCallId);
         retireIntentWidget(card);
         updateSendButtonState();
         m_prompt->setFocus();
@@ -6990,11 +7249,6 @@ QString ChatWidget::escape(const QString &text)
     return text.toHtmlEscaped();
 }
 
-QString ChatWidget::markdownToHtml(const QString &text)
-{
-    return makeMarkdownDocument(text, ChatTheme::messageCss())->toHtml();
-}
-
 QString ChatWidget::closedMarkdown(const QString &text)
 {
     return closeMarkdown(text);
@@ -7078,6 +7332,8 @@ void ChatWidget::clearTranscriptContents()
         m_progressTimer->stop();
     }
     m_pendingProgress.clear();
+    m_activityPills.clear();
+    m_pinnedViewportWidget = nullptr;
     m_questionTexts.clear();
     if (m_streamRenderTimer) {
         m_streamRenderTimer->stop();
@@ -7090,9 +7346,14 @@ void ChatWidget::clearTranscriptContents()
     // Detach docked approval rows first so their cards null the pointer;
     // deleting cards first would leave the dock delete with no owner to detach.
     clearQuestionCards();
+    m_questionOrder.clear();
     m_queuedPermissionRequests.clear();
     m_activePermissionCallId.clear();
     clearIntentDock();
+    if (m_transcriptVirtualizer) {
+        m_transcriptVirtualizer->clear();
+    }
+    m_toolExpansionState.clear();
     for (auto *card : std::as_const(m_toolCallWidgets)) {
         if (card && m_transcriptLayout && m_transcriptLayout->indexOf(card) >= 0) {
             m_transcriptLayout->removeWidget(card);
@@ -7470,7 +7731,9 @@ void ChatWidget::restoreHistoricalTool(const QString &toolCallId, const QString 
     }
     toolWidget->setFinished(result);
 
-    m_toolCallWidgets.insert(toolCallId, toolWidget);
+    if (!m_toolCallWidgets.contains(toolCallId)) {
+        m_toolCallWidgets.insert(toolCallId, toolWidget);
+    }
     m_toolCallOrder.append(toolWidget);
     appendTranscriptWidget(toolWidget);
 }
@@ -7523,6 +7786,20 @@ void ChatWidget::rebuildTranscript()
         m_loadingConversation = wasLoadingConversation;
         m_renderingTranscript = false;
         return;
+    }
+
+    if (m_threadTitle && m_threadTitle->text() == i18n("New Thread")) {
+        for (const ChatMessage &message : messages) {
+            if (message.role != ChatMessage::Role::User || isInternalUserMessage(message.content)) {
+                continue;
+            }
+            QString title = message.content.trimmed().split(u'\n').first();
+            if (title.length() > 32) {
+                title = title.left(30) + u"…"_s;
+            }
+            m_threadTitle->setText(title);
+            break;
+        }
     }
 
     // Specs live on assistant messages and results on Role::Tool messages, and
@@ -7627,16 +7904,29 @@ void ChatWidget::rebuildTranscript()
         resultOccurrence[mi] = occurrence;
     }
 
+    QList<QList<int>> ownedCallsByMessage(messages.size());
     QSet<int> placedCalls;
-    // First sight of a call occurrence is where its card goes. A later sight
-    // (ACP's trailing assistant toolCalls, or a native tool message after the
-    // bubble) must not create a second, empty card.
-    auto place = [&](int occurrenceIndex) {
-        if (occurrenceIndex < 0 || occurrenceIndex >= calls.size()
-            || placedCalls.contains(occurrenceIndex)) {
+    for (int mi = 0; mi < messages.size(); ++mi) {
+        const ChatMessage &msg = messages.at(mi);
+        QList<int> candidates;
+        if (msg.role == ChatMessage::Role::Assistant) {
+            candidates = callOccurrencesByMessage.at(mi);
+        } else if (msg.role == ChatMessage::Role::Tool && mi < resultOccurrence.size()) {
+            candidates.append(resultOccurrence.at(mi));
+        }
+        for (int occurrence : candidates) {
+            if (occurrence >= 0 && !placedCalls.contains(occurrence)) {
+                placedCalls.insert(occurrence);
+                ownedCallsByMessage[mi].append(occurrence);
+            }
+        }
+    }
+    auto callsStorage = std::make_shared<QList<HistoricalTool>>(std::move(calls));
+    auto place = [this, callsStorage](int occurrenceIndex) {
+        const QList<HistoricalTool> &calls = *callsStorage;
+        if (occurrenceIndex < 0 || occurrenceIndex >= calls.size()) {
             return;
         }
-        placedCalls.insert(occurrenceIndex);
         const HistoricalTool spec = calls.at(occurrenceIndex);
         const QString widgetKey = spec.widgetKey;
         const QString toolName = !spec.specName.isEmpty() ? spec.specName : spec.resultName;
@@ -7658,8 +7948,40 @@ void ChatWidget::rebuildTranscript()
             subtaskWidget->startAgent(agentName.isEmpty() ? i18n("Sub-agent") : agentName,
                                       restoredArgs.value(u"mode"_s).toString(),
                                       restoredArgs.value(u"description"_s).toString());
-            m_subtaskWidgets.insert(widgetKey, subtaskWidget);
+            if (!m_subtaskWidgets.contains(widgetKey)) {
+                m_subtaskWidgets.insert(widgetKey, subtaskWidget);
+            }
             m_subtaskOrder.append(subtaskWidget);
+            // The live path caps sub-agent cards; a restored conversation must
+            // obey the same budget or reopening a long orchestration session
+            // materializes every historical card at once.
+            constexpr int kMaxRestoredSubtaskCards = 40;
+            while (m_subtaskOrder.size() > kMaxRestoredSubtaskCards
+                   && !(m_transcriptVirtualizer && m_transcriptVirtualizer->isActive())) {
+                int victimIndex = -1;
+                for (int i = 0; i < m_subtaskOrder.size(); ++i) {
+                    SubtaskWidget *candidate = m_subtaskOrder.at(i);
+                    if (candidate && !candidate->isRunning()) {
+                        victimIndex = i;
+                        break;
+                    }
+                }
+                if (victimIndex < 0) {
+                    break;
+                }
+                SubtaskWidget *victim = m_subtaskOrder.takeAt(victimIndex);
+                m_subtaskWidgets.remove(victim->taskId());
+                m_subtaskAnchors.remove(victim->taskId());
+                if (m_subtaskDock) {
+                    m_subtaskDock->removeCard(victim);
+                }
+                if (m_transcriptLayout) {
+                    m_transcriptLayout->removeWidget(victim);
+                }
+                victim->hide();
+                victim->setParent(nullptr);
+                victim->deleteLater();
+            }
             const SubagentRecord restoredRecord = m_agent.subagent(spec.id);
             if (spec.hasResult) {
                 ToolResult result;
@@ -7746,16 +8068,33 @@ void ChatWidget::rebuildTranscript()
             auto *card = new SuggestionWidget(widgetKey, m_transcriptContainer);
             card->setSuggestion(suggestion.text, suggestion.path, suggestion.line);
             card->markDecided();
-            m_suggestionWidgets.insert(widgetKey, card);
+            if (!m_suggestionWidgets.contains(widgetKey)) {
+                m_suggestionWidgets.insert(widgetKey, card);
+            }
             m_suggestionOrder.append(card);
             appendTranscriptWidget(card);
+            constexpr int kMaxRestoredSuggestionCards = 100;
+            while (m_suggestionOrder.size() > kMaxRestoredSuggestionCards
+                   && !(m_transcriptVirtualizer && m_transcriptVirtualizer->isActive())) {
+                SuggestionWidget *oldest = m_suggestionOrder.takeFirst();
+                if (!oldest) {
+                    continue;
+                }
+                m_suggestionWidgets.remove(oldest->suggestionId());
+                if (m_transcriptLayout) {
+                    m_transcriptLayout->removeWidget(oldest);
+                }
+                oldest->hide();
+                oldest->setParent(nullptr);
+                oldest->deleteLater();
+            }
             return;
         }
 
         restoreHistoricalTool(widgetKey, toolName, argumentsJson, spec.output, spec.hasResult);
     };
 
-    for (int mi = 0; mi < messages.size(); ++mi) {
+    auto renderMessage = [this, messages, ownedCallsByMessage, place](int mi) {
         const ChatMessage &msg = messages.at(mi);
         switch (msg.role) {
             case ChatMessage::Role::User:
@@ -7799,15 +8138,17 @@ void ChatWidget::rebuildTranscript()
                         QPushButton *thinkingToggle = nullptr;
                         auto *thinkingBlock = createThinkingBlock(assistantWidget, thinkingBrowser, thinkingToggle, true);
                         if (thinkingBrowser) {
-                            thinkingBrowser->setDocument(makeMarkdownDocument(closedMarkdown(msg.thinking), ChatTheme::thinkingCss()));
+                            setMarkdownContent(thinkingBrowser, closedMarkdown(msg.thinking), ChatTheme::thinkingCss());
                         }
                         thinkingBlock->show();
                         layout->addWidget(thinkingBlock);
                         registerThinkingBlock(thinkingBlock, thinkingBrowser, thinkingToggle);
                     }
 
-                    // Add the todo list if the message carried a plan
-                    if (!msg.plan.isEmpty()) {
+                    // The dock describes the current turn, not an old plan
+                    // scrolled back into view.
+                    if (!msg.plan.isEmpty()
+                        && !(m_transcriptVirtualizer && m_transcriptVirtualizer->isMaterializing())) {
                         showTodoList(msg.plan);
                     }
 
@@ -7821,10 +8162,7 @@ void ChatWidget::rebuildTranscript()
                         QStringLiteral("background: transparent; color: %1; border: none; padding: 0px;")
                             .arg(ChatTheme::textPrimary()));
                     if (hasVisibleText) {
-                        // The stylesheet is carried by the document itself: the
-                        // setDocument() below replaces this browser's document,
-                        // so a stylesheet installed on it would never apply.
-                        browser->setDocument(makeMarkdownDocument(msg.content, ChatTheme::messageCss()));
+                        setMarkdownContent(browser, msg.content, ChatTheme::messageCss());
                     } else {
                         browser->hide();
                     }
@@ -7839,7 +8177,7 @@ void ChatWidget::rebuildTranscript()
                 // message earlier in the transcript already placed them (ACP
                 // stores the result before this bubble). Native order still
                 // lands the card here, already filled from the pre-scan.
-                for (int occurrence : callOccurrencesByMessage.at(mi)) {
+                for (int occurrence : ownedCallsByMessage.at(mi)) {
                     place(occurrence);
                 }
                 break;
@@ -7847,8 +8185,8 @@ void ChatWidget::rebuildTranscript()
                 // Place here when the result precedes the assistant message.
                 // A call already placed (native: card follows the bubble) is
                 // skipped because its occurrence is already in placedCalls.
-                if (mi < resultOccurrence.size()) {
-                    place(resultOccurrence.at(mi));
+                for (int occurrence : ownedCallsByMessage.at(mi)) {
+                    place(occurrence);
                 }
                 break;
             case ChatMessage::Role::System:
@@ -7865,6 +8203,63 @@ void ChatWidget::rebuildTranscript()
                     appendTranscriptWidget(marker);
                 }
                 break;
+        }
+    };
+
+    constexpr int kVirtualizeAfterMessages = 256;
+    if (messages.size() <= kVirtualizeAfterMessages) {
+        for (int mi = 0; mi < messages.size(); ++mi) {
+            renderMessage(mi);
+        }
+    } else {
+        QList<TranscriptVirtualizer::Entry> entries;
+        entries.reserve(messages.size());
+        for (int mi = 0; mi < messages.size(); ++mi) {
+            const ChatMessage &msg = messages.at(mi);
+            const QList<int> owned = ownedCallsByMessage.at(mi);
+            bool visible = false;
+            if (msg.role == ChatMessage::Role::User) {
+                visible = !isInternalUserMessage(msg.content);
+            } else if (msg.role == ChatMessage::Role::Assistant) {
+                visible = !msg.content.trimmed().isEmpty() || !msg.thinking.isEmpty() || !owned.isEmpty();
+            } else if (msg.role == ChatMessage::Role::Tool) {
+                visible = !owned.isEmpty();
+            } else if (msg.role == ChatMessage::Role::System) {
+                visible = msg.name == u"transcript_elision"_s;
+            }
+            if (!visible) {
+                continue;
+            }
+            TranscriptVirtualizer::Entry entry;
+            entry.key = u"message:%1"_s.arg(mi);
+            entry.estimatedHeight = 72;
+            if (msg.role == ChatMessage::Role::User) {
+                entry.estimatedHeight += static_cast<int>(qMin<qsizetype>(750, msg.content.size() / 80)) * 16;
+            } else if (msg.role == ChatMessage::Role::Assistant) {
+                entry.estimatedHeight += static_cast<int>(qMin<qsizetype>(1000, msg.content.size() / 80)) * 16;
+                entry.estimatedHeight += static_cast<int>(qMin<qsizetype>(500, msg.thinking.size() / 80)) * 16;
+            }
+            for (int occurrence : owned) {
+                const HistoricalTool &spec = callsStorage->at(occurrence);
+                const QString toolName = !spec.specName.isEmpty() ? spec.specName : spec.resultName;
+                const QString canonical = canonicalToolName(toolName);
+                if (canonical != subtaskToolName() && canonical != u"suggest"_s) {
+                    entry.toolKeys.append(spec.widgetKey);
+                }
+                entry.estimatedHeight += spec.output.size() > 0 || spec.hasResult ? 130 : 90;
+                if (canonical == subtaskToolName() && m_agent.runningSubtaskIds().contains(spec.id)) {
+                    entry.pinned = true;
+                }
+            }
+            entry.materialize = [renderMessage, mi] { renderMessage(mi); };
+            entries.append(entry);
+        }
+        if (entries.size() <= kVirtualizeAfterMessages) {
+            for (int mi = 0; mi < messages.size(); ++mi) {
+                renderMessage(mi);
+            }
+        } else {
+            m_transcriptVirtualizer->setEntries(entries);
         }
     }
 

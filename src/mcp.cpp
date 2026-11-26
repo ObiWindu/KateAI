@@ -496,6 +496,14 @@ void McpClient::start()
     m_discardingStdoutFrame = false;
     setState(McpServerState::Starting, u"Connecting…"_s);
 
+    // A retry/reconnect must not leave the previous watchdog parented to this
+    // client and still counting down against the new handshake.
+    if (m_startupTimer) {
+        m_startupTimer->stop();
+        m_startupTimer->deleteLater();
+        m_startupTimer = nullptr;
+    }
+
     m_startupTimer = new QTimer(this);
     m_startupTimer->setSingleShot(true);
     m_startupTimer->setInterval(30000);
@@ -592,6 +600,8 @@ void McpClient::stop()
     m_shuttingDown = true;
     if (m_startupTimer) {
         m_startupTimer->stop();
+        m_startupTimer->deleteLater();
+        m_startupTimer = nullptr;
     }
     failAll(u"Server disconnected."_s);
     for (auto it = m_pending.constBegin(); it != m_pending.constEnd(); ++it) {
@@ -919,6 +929,18 @@ void McpClient::onHttpFinished(QNetworkReply *reply, int id)
     const auto it = m_pending.constFind(id);
     const QString token = it == m_pending.constEnd() ? QString() : it.value().callToken;
     const QString method = it == m_pending.constEnd() ? QString() : it.value().method;
+    auto releasePending = [this](int requestId) {
+        const auto pendingIt = m_pending.find(requestId);
+        if (pendingIt == m_pending.end()) {
+            return;
+        }
+        QTimer *timeout = pendingIt.value().timeout.data();
+        m_pending.erase(pendingIt);
+        if (timeout) {
+            timeout->stop();
+            timeout->deleteLater();
+        }
+    };
 
     if (reply->error() != QNetworkReply::NoError) {
         // Qt reports an error for every HTTP status >= 400. The status code
@@ -928,7 +950,7 @@ void McpClient::onHttpFinished(QNetworkReply *reply, int id)
             ? i18n("HTTP %1: %2").arg(status).arg(reply->errorString())
             : reply->errorString();
         if (id > 0 && !token.isEmpty()) {
-            m_pending.remove(id);
+            releasePending(id);
             Q_EMIT toolResult(token, false, QString(), u"Request failed: %1"_s.arg(detail));
             return;
         }
@@ -937,7 +959,7 @@ void McpClient::onHttpFinished(QNetworkReply *reply, int id)
             // reply was still in flight. The server itself is fine; one slow
             // call must not mark it as failed, or the manager tears it down and
             // restarts it.
-            m_pending.remove(id);
+            releasePending(id);
             Q_EMIT logMessage(i18n("MCP request failed after it had already timed out: %1").arg(detail));
             return;
         }
@@ -952,13 +974,13 @@ void McpClient::onHttpFinished(QNetworkReply *reply, int id)
             // A tools/call that answers with 202 and no body still has to be
             // settled; otherwise the agent would wait forever.
             if (!token.isEmpty()) {
-                m_pending.remove(id);
+                releasePending(id);
                 Q_EMIT toolResult(token, false, QString(), u"The server accepted the call but returned no result."_s);
             }
             return;
         }
         if (id > 0) {
-            m_pending.remove(id);
+            releasePending(id);
             if (!token.isEmpty()) {
                 Q_EMIT toolResult(token, false, QString(), u"Empty response from the server."_s);
             } else if (method == u"initialize"_s) {

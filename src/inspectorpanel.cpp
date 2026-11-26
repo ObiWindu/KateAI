@@ -19,6 +19,7 @@
 #include <QPushButton>
 #include <QTabWidget>
 #include <QTextBrowser>
+#include <QTimer>
 #include <QVBoxLayout>
 
 using namespace Qt::Literals::StringLiterals;
@@ -94,24 +95,55 @@ InspectorPanel::InspectorPanel(AgentLoop *agent, QWidget *parent)
     connect(closeButton, &QPushButton::clicked, this, &QDialog::hide);
 
     if (m_agent) {
-        connect(m_agent, &AgentLoop::turnFinished, this, [this] {
-            QPointer<InspectorPanel> guard(this);
-            if (guard) {
-                refresh();
-            }
-        });
-        connect(m_agent, &AgentLoop::harnessEvent, this, [this](const QString &, const QJsonObject &) {
-            QPointer<InspectorPanel> guard(this);
-            if (guard && isVisible()) {
-                refresh();
-            }
-        });
+        connect(m_agent, &AgentLoop::turnFinished, this, &InspectorPanel::scheduleRefresh);
+        connect(m_agent, &AgentLoop::harnessEvent, this,
+                [this](const QString &, const QJsonObject &) {
+                    if (isVisible()) {
+                        scheduleRefresh();
+                    }
+                });
     }
 
     refresh();
 }
 
 InspectorPanel::~InspectorPanel() = default;
+
+void InspectorPanel::hideEvent(QHideEvent *event)
+{
+    QDialog::hideEvent(event);
+    // The panel is reused across openings. Its six text documents can hold the
+    // full context/trace reports, so hiding must not keep them until the chat
+    // window closes.
+    for (QTextBrowser *browser : {m_context, m_tools, m_memory, m_skills, m_trace, m_cost}) {
+        if (browser) {
+            browser->clear();
+        }
+    }
+    if (m_checkpoints) {
+        m_checkpoints->clear();
+    }
+    if (m_rewindNote) {
+        m_rewindNote->clear();
+    }
+}
+
+void InspectorPanel::scheduleRefresh()
+{
+    if (m_refreshPending) {
+        return;
+    }
+    m_refreshPending = true;
+    // Harness events arrive at every tool/step boundary. Rebuilding the
+    // prompt, trace and skill reports synchronously for each one made an open
+    // inspector progressively more expensive during a long turn.
+    QTimer::singleShot(250, this, [this] {
+        m_refreshPending = false;
+        if (isVisible()) {
+            refresh();
+        }
+    });
+}
 
 void InspectorPanel::addTextTab(const QString &title, QTextBrowser **view)
 {

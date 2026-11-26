@@ -13,6 +13,7 @@
 #include <QList>
 #include <QJsonArray>
 #include <QPointer>
+#include <QStringList>
 #include <QWidget>
 #include "llmclient.h"
 
@@ -31,6 +32,7 @@ class QTreeWidget;
 class QListWidget;
 class QNetworkAccessManager;
 class QProcess;
+class QTabWidget;
 
 namespace KateAi
 {
@@ -62,6 +64,64 @@ public:
 private:
     KateAiPlugin *m_plugin = nullptr;
 
+    // --- Lazy tabs -----------------------------------------------------------
+    // Opening Settings used to build twelve pages, their tables and their model
+    // combos before the user saw the first one. A tab is listed from the start,
+    // but its widgets are created the first time it is shown, so the settings
+    // dialog costs one tab instead of twelve. A tab that is never opened is
+    // never built, and `apply()` then keeps the stored value for its fields.
+    enum class Tab {
+        Providers = 0,
+        AcpRegistry,
+        Security,
+        Agent,
+        Modes,
+        Mcp,
+        Web,
+        Completion,
+        Checkpoints,
+        AgentTeam,
+        Themes,
+        Voice,
+        Count,
+    };
+
+    QTabWidget *m_tabs = nullptr;
+    QList<QWidget *> m_tabPages;
+    QList<bool> m_tabBuilt;
+
+    static QStringList configTabLabels();
+    bool isTabBuilt(Tab tab) const;
+    void buildTab(Tab tab);
+    void showTab(int index);
+    void markChanged();
+    QLineEdit *createKeyField();
+
+    QWidget *buildProvidersTab();
+    QWidget *buildAcpRegistryTab();
+    QWidget *buildSecurityTab();
+    QWidget *buildAgentTab();
+    QWidget *buildModesTab();
+    QWidget *buildMcpTab();
+    QWidget *buildWebTab();
+    QWidget *buildCompletionTab();
+    QWidget *buildCheckpointsTab();
+    QWidget *buildAgentTeamTab();
+    QWidget *buildThemesTab();
+    QWidget *buildVoiceTab();
+
+    void resetProvidersTab();
+    void resetSecurityTab();
+    void resetAgentTab();
+    void resetModesTab();
+    void resetMcpTab();
+    void resetWebTab();
+    void resetCompletionTab();
+    void resetCheckpointsTab();
+    void resetAgentTeamTab();
+    void resetThemesTab();
+    void resetVoiceTab();
+
     // Providers
     QComboBox *m_provider = nullptr;
     QLineEdit *m_grokKey = nullptr;
@@ -81,6 +141,7 @@ private:
     QComboBox *m_claudeCompatibleModel = nullptr;
     QComboBox *m_kiloModel = nullptr;
     QComboBox *m_opencodeModel = nullptr;
+    QComboBox *m_opencodePlan = nullptr;
     QComboBox *m_acpModel = nullptr;
     QComboBox *m_acpEffort = nullptr;
     QLineEdit *m_deepseekUrl = nullptr;
@@ -98,6 +159,9 @@ private:
     QLabel *m_acpRegistryStatus = nullptr;
     QNetworkAccessManager *m_acpRegistryNetwork = nullptr;
     QJsonArray m_acpRegistryAgents;
+    // The registry is remote and only useful when its tab is opened. Defer the
+    // request until then instead of fetching on every Settings open.
+    bool m_acpRegistryFetchStarted = false;
     QComboBox *m_apiFormat = nullptr;
 
     // Two-model orchestration (planner = strong/read-only, executor = cheap).
@@ -133,6 +197,7 @@ private:
 
     // Security
     QComboBox *m_permission = nullptr;
+    QCheckBox *m_acceptAllAcpTools = nullptr;
     QComboBox *m_sandbox = nullptr;
     QSpinBox *m_timeout = nullptr;
     QSpinBox *m_maxExpandedToolCards = nullptr;

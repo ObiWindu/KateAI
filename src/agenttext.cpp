@@ -9,6 +9,7 @@
 
 #include <QRegularExpression>
 #include <QTextDocument>
+#include <QTextEdit>
 
 using namespace Qt::Literals::StringLiterals;
 
@@ -201,19 +202,31 @@ void renderMarkdown(QTextDocument *doc, const QString &markdown)
     doc->setHtml(html);
 }
 
-QTextDocument *makeMarkdownDocument(const QString &markdown, const QString &styleSheet)
+QTextDocument *makeMarkdownDocument(const QString &markdown, const QString &styleSheet, QObject *parent)
 {
-    auto *doc = new QTextDocument;
+    auto *doc = new QTextDocument(parent);
     // The stylesheet must be set BEFORE the markdown is parsed:
     // QTextDocument::setDefaultStyleSheet() only affects content that is parsed
-    // afterwards, and nothing re-applies it. Setting it here (rather than on the
-    // QTextBrowser's own document) is what makes it survive setDocument(), which
-    // swaps in this document and discards the browser's.
+    // afterwards, and nothing re-applies it.
     if (!styleSheet.isEmpty()) {
         doc->setDefaultStyleSheet(styleSheet);
     }
     renderMarkdown(doc, markdown);
     return doc;
+}
+
+void setMarkdownContent(QTextEdit *view, const QString &markdown, const QString &styleSheet)
+{
+    if (!view) {
+        return;
+    }
+    QTextDocument *doc = view->document();
+    if (!doc) {
+        return;
+    }
+    doc->clear();
+    doc->setDefaultStyleSheet(styleSheet);
+    renderMarkdown(doc, markdown);
 }
 
 } // namespace KateAi

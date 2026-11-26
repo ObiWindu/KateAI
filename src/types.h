@@ -36,8 +36,9 @@ enum class Provider {
     ClaudeCompatible,
     Kilo,
     Acp,
-    // OpenCode Zen, the gateway at opencode.ai that curates models for coding
-    // agents. OpenAI-compatible, with the catalogue served from /zen/v1/models.
+    // OpenCode Console, the gateway at opencode.ai that curates models for
+    // coding agents. OpenAI-compatible, with the catalogue served from
+    // /inference/v1/models (pay-as-you-go) or /inference/go/v1/models (Go).
     OpenCode,
     Telegram,
 };
@@ -46,6 +47,14 @@ enum class ApiFormat {
     OpenAICompatible,
     AnthropicCompatible,
     AcpNative,
+};
+
+// Which OpenCode gateway a key belongs to. Both speak the same API; only the
+// base path and the billing model differ. Go, Go Plus and Go Teams share the
+// Go endpoint (and one monthly allowance), so they need no separate entries.
+enum class OpenCodePlan {
+    PayAsYouGo,
+    Go,
 };
 
 enum class PermissionMode {
@@ -220,6 +229,15 @@ struct CompletionChunk {
     int inputTokens = 0;
     int outputTokens = 0;
     int cachedInputTokens = 0;
+    // Tokens written into a prompt cache. Anthropic reports this separately;
+    // OpenCode reports cache_write_5m plus cache_write_1h.
+    int cacheWriteTokens = 0;
+    // OpenCode Console reports the charged amount and, for Go, how much of the
+    // subscription allowance the request consumed. -1 means "not reported".
+    double reportedCostUsd = -1.0;
+    double listCostUsd = -1.0;
+    double allowanceUsd = 0.0;
+    QString billingSource;
 };
 
 struct PermissionRequest {
@@ -249,6 +267,9 @@ struct PermissionRequest {
     // for ACP tool calls of kind edit/write/delete, so the edit tracker can
     // review ACP edits whose tool names Kate does not know.
     bool mutatesFiles = false;
+    // True when an ACP agent invoked one of Kate's client methods rather than
+    // reporting one of the external agent's own tools.
+    bool acpClientMethod = false;
 
     // Filled only for the `question` tool: what is being asked, the answers
     // offered as one-tap chips, and whether the user may type their own. The
@@ -366,7 +387,10 @@ struct Settings {
     // Model names are no longer hard-coded: they are fetched from whichever
     // providers have a valid key. These stay empty until then.
     QString opencodeApiKey;
-    QString opencodeUrl = QStringLiteral("https://opencode.ai/zen/v1");
+    // OpenCode Console (pay-as-you-go) or the Go subscription gateway.
+    OpenCodePlan opencodePlan = OpenCodePlan::PayAsYouGo;
+    // Optional custom base URL. Empty selects the base URL for opencodePlan.
+    QString opencodeUrl;
     QString deepseekUrl = QStringLiteral("https://api.deepseek.com");
     QString openaiCompatibleUrl = QStringLiteral("http://localhost:11434/v1");
     QString claudeCompatibleUrl = QStringLiteral("https://api.anthropic.com/v1");
@@ -391,6 +415,10 @@ struct Settings {
     QString acpAgentCommands;
     ApiFormat apiFormat = ApiFormat::AcpNative;
     PermissionMode permissionMode = PermissionMode::Ask;
+    // Accept ACP permission requests by default. Kate-hosted client methods
+    // also override mode access and ordinary policy rules; immutable hard
+    // denies and the handler's sandbox checks still apply.
+    bool acceptAllAcpTools = true;
     SandboxProfile sandbox = SandboxProfile::Workspace;
     // Agent budgets are intentionally separate: API model turns, tool calls, and provider rate.
     // 0 = unlimited. A positive value is a safety ceiling, not a required cap.
@@ -600,6 +628,9 @@ QString providerLabel(Provider provider);
 Provider providerFromId(const QString &id);
 QString providerBaseUrl(Provider provider);
 QString providerBaseUrl(const Settings &settings);
+QString openCodePlanId(OpenCodePlan plan);
+QString openCodePlanLabel(OpenCodePlan plan);
+OpenCodePlan openCodePlanFromId(const QString &id);
 // Joins a provider base URL and an API path without doubling an existing
 // "/v1" segment. The Anthropic base already ends in /v1, while the endpoints
 // are written as /v1/messages, which used to produce /v1/v1/messages.

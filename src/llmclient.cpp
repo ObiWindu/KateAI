@@ -4,6 +4,7 @@
  */
 
 #include "llmclient.h"
+#include "boundedfile.h"
 
 #include "harness/models.h"
 #include "harness/tokens.h"
@@ -22,6 +23,7 @@
 #include <QUuid>
 
 #include <algorithm>
+#include <utility>
 #include <limits>
 #include <optional>
 
@@ -212,6 +214,9 @@ constexpr qint64 kRetryDelaySaturation = 1000000000;
 // parser), so keeping only the tail is enough and bounds memory for long
 // generations.
 constexpr qsizetype kMaxRetainedResponseBytes = 256 * 1024;
+constexpr qsizetype kMaxSseEventBytes = 8 * 1024 * 1024;
+constexpr qsizetype kMaxAssistantChars = 4 * 1024 * 1024;
+constexpr int kMaxCompletedToolCalls = 64;
 
 // Patterns that may indicate sensitive data in response bodies
 static const QStringList sensitivePatterns = {
@@ -615,6 +620,7 @@ CompletionChunk LlmClient::parseSseLine(const QByteArray &line, QHash<int, ToolC
             chunk.inputTokens = usage.value(u"input_tokens"_s).toInt();
             chunk.outputTokens = usage.value(u"output_tokens"_s).toInt();
             chunk.cachedInputTokens = usage.value(u"cache_read_input_tokens"_s).toInt();
+            chunk.cacheWriteTokens = usage.value(u"cache_creation_input_tokens"_s).toInt();
         } else if (anthropicType == u"message_delta"_s) {
             chunk.finishReason = root.value(u"delta"_s).toObject().value(u"stop_reason"_s).toString();
             const QJsonObject usage = root.value(u"usage"_s).toObject();
@@ -734,6 +740,44 @@ CompletionChunk LlmClient::parseSseLine(const QByteArray &line, QHash<int, ToolC
         if (chunk.cachedInputTokens == 0) {
             chunk.cachedInputTokens = usage.value(u"prompt_cache_hit_tokens"_s).toInt();
         }
+        chunk.cacheWriteTokens = details.value(u"cache_write_tokens"_s).toInt();
+        if (chunk.cacheWriteTokens == 0) {
+            chunk.cacheWriteTokens = usage.value(u"cache_write_tokens"_s).toInt();
+        }
+        if (chunk.cacheWriteTokens == 0) {
+            chunk.cacheWriteTokens = usage.value(u"cache_creation_input_tokens"_s).toInt();
+        }
+
+        // OpenCode Console includes its billing details next to the standard
+        // usage object. `opencode.tokens.input` excludes cache reads/writes,
+        // so use it when present: it is the exact billed breakdown and avoids
+        // guessing from prompt_tokens, which includes the cached prefix.
+        const QJsonObject openCode = usage.value(u"opencode"_s).toObject();
+        const QJsonObject openCodeTokens = openCode.value(u"tokens"_s).toObject();
+        if (!openCodeTokens.isEmpty()) {
+            const int uncachedInput = openCodeTokens.value(u"input"_s).toInt();
+            const int cacheRead = openCodeTokens.value(u"cache_read"_s).toInt();
+            const int cacheWrite = openCodeTokens.value(u"cache_write_5m"_s).toInt()
+                + openCodeTokens.value(u"cache_write_1h"_s).toInt();
+            if (uncachedInput > 0 || cacheRead > 0 || cacheWrite > 0) {
+                chunk.inputTokens = uncachedInput;
+                chunk.cachedInputTokens = cacheRead;
+                chunk.cacheWriteTokens = cacheWrite;
+            }
+            if (openCodeTokens.contains(u"output"_s)) {
+                chunk.outputTokens = openCodeTokens.value(u"output"_s).toInt();
+            }
+        }
+        if (usage.contains(u"cost"_s)) {
+            chunk.reportedCostUsd = usage.value(u"cost"_s).toDouble();
+        }
+        if (openCode.contains(u"list_cost"_s)) {
+            chunk.listCostUsd = openCode.value(u"list_cost"_s).toDouble();
+        }
+        if (openCode.contains(u"allowance"_s)) {
+            chunk.allowanceUsd = openCode.value(u"allowance"_s).toDouble();
+        }
+        chunk.billingSource = openCode.value(u"billing_source"_s).toString();
     }
 
     const QJsonArray choices = root.value(u"choices"_s).toArray();
@@ -849,9 +893,15 @@ void LlmClient::resetCompletionState()
     m_sawDone = false;
     m_finishEmitted = false;
     m_usageEmitted = false;
+    m_usageCostEmitted = false;
     m_usageInput = 0;
     m_usageOutput = 0;
     m_usageCached = 0;
+    m_usageCacheWrite = 0;
+    m_usageCostUsd = -1.0;
+    m_usageListCostUsd = -1.0;
+    m_usageAllowanceUsd = 0.0;
+    m_usageBillingSource.clear();
     m_geminiRequestUsedCache = false;
     // m_abortRequested is deliberately not cleared here: resetCompletionState()
     // runs at the start of every request and right after an abort, and the flag
@@ -994,6 +1044,17 @@ void LlmClient::doComplete(const QList<ChatMessage> &messages)
         request.setRawHeader("HTTP-Referer", "https://kate-editor.org");
         request.setRawHeader("X-Title", "Kate AI");
     }
+    if (m_settings.provider == Provider::OpenCode) {
+        // OpenCode routes a conversation by this id and reuses its prompt
+        // cache. Go also requires it. One LlmClient serves one conversation,
+        // so a generated id is stable for the lifetime of the session.
+        if (m_sessionId.isEmpty()) {
+            m_sessionId = u"ses_"_s
+                + QUuid::createUuid().toString(QUuid::WithoutBraces);
+        }
+        request.setRawHeader("x-opencode-session", m_sessionId.toUtf8());
+        request.setHeader(QNetworkRequest::UserAgentHeader, u"Kate AI"_s);
+    }
 
     m_geminiRequestUsedCache = geminiNative && !geminiPlan.cachedContent.isEmpty();
     m_reply = m_nam.post(request, requestBody);
@@ -1103,8 +1164,18 @@ QJsonObject LlmClient::buildOpenAIRequest(const QList<ChatMessage> &messages, co
     if (m_settings.presencePenalty != 0.0) {
         body.insert(u"presence_penalty"_s, m_settings.presencePenalty);
     }
-    if (!m_settings.reasoningEffort.trimmed().isEmpty()) {
-        body.insert(u"reasoning_effort"_s, m_settings.reasoningEffort.trimmed());
+    const QString reasoningEffort = m_settings.reasoningEffort.trimmed();
+    if (!reasoningEffort.isEmpty()) {
+        // A catalogue can publish the exact levels a model accepts. Do not
+        // send a level the model did not advertise: an unknown value is
+        // rejected by some gateways and silently coerced by others, which
+        // makes the setting look applied when it is not. Other providers keep
+        // the previous pass-through behaviour.
+        const bool constrained = m_settings.provider == Provider::OpenCode
+            && profile.supportsReasoning && !profile.reasoningEfforts.isEmpty();
+        if (!constrained || profile.reasoningEfforts.contains(reasoningEffort)) {
+            body.insert(u"reasoning_effort"_s, reasoningEffort);
+        }
     }
     // Enhanced intelligence parameters. These are OpenRouter extensions, not
     // part of the OpenAI schema: sending them to OpenAI, DeepSeek or a local
@@ -1789,6 +1860,9 @@ void LlmClient::fetchModels(Provider provider)
         request.setRawHeader("HTTP-Referer", "https://kate-editor.org");
         request.setRawHeader("X-Title", "Kate AI");
     }
+    if (provider == Provider::OpenCode) {
+        request.setHeader(QNetworkRequest::UserAgentHeader, u"Kate AI"_s);
+    }
 
     QNetworkReply *reply = m_nam.get(request);
     reply->setParent(this);
@@ -1882,10 +1956,18 @@ void LlmClient::emitCompletedOnce()
 
 void LlmClient::handleModelsFinished(QNetworkReply *reply, Provider provider)
 {
-    const QByteArray body = reply->readAll();
     const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
     const QString networkError = reply->errorString();
     const bool ok = reply->error() == QNetworkReply::NoError;
+    // A model catalog is a small JSON document even for the largest providers.
+    // Reject a larger body before copying and parsing it.
+    constexpr qint64 kMaxModelListBodyBytes = 4 * 1024 * 1024;
+    if (ok && !replyBodyWithinLimit(reply, kMaxModelListBodyBytes)) {
+        reply->deleteLater();
+        Q_EMIT modelsFailed(provider, u"The model list response is larger than 4 MB."_s);
+        return;
+    }
+    const QByteArray body = reply->readAll();
     reply->deleteLater();
 
     QJsonParseError parseError;
@@ -1959,6 +2041,24 @@ void LlmClient::handleModelsFinished(QNetworkReply *reply, Provider provider)
         }
     }
 
+    // A catalogue that carries models.dev metadata (OpenCode Console does)
+    // teaches the resolver the real window, prices, cache support and thinking
+    // levels. A plain OpenAI-style {"id": ...} list carries none of that and
+    // must not turn unknown models into "known" fallbacks.
+    const QJsonArray entries = root.value(u"data"_s).toArray();
+    bool hasMetadata = false;
+    for (const QJsonValue &value : entries) {
+        const QJsonObject entry = value.toObject();
+        if (entry.contains(u"limit"_s) || entry.contains(u"cost"_s)
+            || entry.contains(u"capabilities"_s) || entry.contains(u"family"_s)) {
+            hasMetadata = true;
+            break;
+        }
+    }
+    if (hasMetadata) {
+        ModelProfiles::registerModels(provider, entries);
+    }
+
     models.sort(Qt::CaseInsensitive);
     if (models.isEmpty()) {
         Q_EMIT modelsFailed(provider, u"The provider did not return any available models."_s);
@@ -1967,8 +2067,44 @@ void LlmClient::handleModelsFinished(QNetworkReply *reply, Provider provider)
     Q_EMIT modelsReceived(provider, models);
 }
 
+void LlmClient::failStream(const QString &error)
+{
+    m_completionError = error;
+    if (!m_reply) {
+        return;
+    }
+    // Same detach/re-enter pattern as a provider error event: abort() emits
+    // finished() synchronously, so handleFinished() must not run twice.
+    m_reply->disconnect(this);
+    m_reply->abort();
+    handleFinished();
+}
+
 bool LlmClient::applySseChunk(const CompletionChunk &chunk)
 {
+    if (m_text.size() + chunk.contentDelta.size() > kMaxAssistantChars) {
+        failStream(u"The provider response exceeded the %1 MB safety limit."_s
+                       .arg(kMaxAssistantChars / (1024 * 1024)));
+        return false;
+    }
+    if (m_completedTools.size() + chunk.completedTools.size() > kMaxCompletedToolCalls) {
+        failStream(u"The provider returned more than %1 tool calls in one response."_s
+                       .arg(kMaxCompletedToolCalls));
+        return false;
+    }
+    qsizetype toolChars = 0;
+    for (const ToolCall &call : chunk.completedTools) {
+        toolChars += call.argumentsJson.size();
+    }
+    for (const ToolCall &call : std::as_const(m_completedTools)) {
+        toolChars += call.argumentsJson.size();
+    }
+    constexpr qsizetype kMaxToolArgsPerResponse = 8 * 1024 * 1024;
+    if (toolChars > kMaxToolArgsPerResponse) {
+        failStream(u"The provider returned tool arguments larger than %1 MB in one response."_s
+                       .arg(kMaxToolArgsPerResponse / (1024 * 1024)));
+        return false;
+    }
     if (!chunk.error.isEmpty()) {
         m_completionError = chunk.error;
         if (m_reply) {
@@ -2009,11 +2145,33 @@ bool LlmClient::applySseChunk(const CompletionChunk &chunk)
     if (chunk.cachedInputTokens > 0) {
         m_usageCached = qMax(m_usageCached, chunk.cachedInputTokens);
     }
+    if (chunk.cacheWriteTokens > 0) {
+        m_usageCacheWrite = qMax(m_usageCacheWrite, chunk.cacheWriteTokens);
+    }
+    if (chunk.reportedCostUsd >= 0.0) {
+        m_usageCostUsd = chunk.reportedCostUsd;
+    }
+    if (chunk.listCostUsd >= 0.0) {
+        m_usageListCostUsd = chunk.listCostUsd;
+    }
+    if (chunk.allowanceUsd > 0.0) {
+        m_usageAllowanceUsd = chunk.allowanceUsd;
+    }
+    if (!chunk.billingSource.isEmpty()) {
+        m_usageBillingSource = chunk.billingSource;
+    }
     if (chunk.finished) {
         m_sawDone = true;
         if (!m_usageEmitted && (m_usageInput > 0 || m_usageOutput > 0)) {
             m_usageEmitted = true;
-            Q_EMIT usageReceived(m_usageInput, m_usageOutput, m_usageCached);
+            Q_EMIT usageReceived(m_usageInput, m_usageOutput, m_usageCached,
+                                 m_usageCacheWrite);
+        }
+        if (!m_usageCostEmitted
+            && (m_usageCostUsd >= 0.0 || m_usageListCostUsd >= 0.0)) {
+            m_usageCostEmitted = true;
+            Q_EMIT usageCostReceived(m_usageCostUsd, m_usageListCostUsd,
+                                     m_usageAllowanceUsd, m_usageBillingSource);
         }
     }
     return true;
@@ -2032,6 +2190,14 @@ bool LlmClient::feedSseLine(const QByteArray &line)
         const QByteArray payload = trimmed.mid(5).trimmed();
         if (payload.isEmpty()) {
             return true;
+        }
+        // A server that never sends the blank line that terminates an event
+        // could otherwise grow this buffer without bound. A single SSE event
+        // that large cannot be a valid tool call or answer anyway.
+        if (m_pendingEventData.size() + payload.size() > kMaxSseEventBytes) {
+            failStream(u"The provider sent an SSE event larger than %1 MB."_s
+                           .arg(kMaxSseEventBytes / (1024 * 1024)));
+            return false;
         }
         // The SSE specification allows one event to be spread over several
         // "data:" lines, which are joined with a newline. The provider sends a
@@ -2165,7 +2331,14 @@ void LlmClient::handleFinished()
     // Emit it at stream end so calibration still sees the provider's count.
     if (!m_usageEmitted && (m_usageInput > 0 || m_usageOutput > 0)) {
         m_usageEmitted = true;
-        Q_EMIT usageReceived(m_usageInput, m_usageOutput, m_usageCached);
+        Q_EMIT usageReceived(m_usageInput, m_usageOutput, m_usageCached,
+                             m_usageCacheWrite);
+    }
+    if (!m_usageCostEmitted
+        && (m_usageCostUsd >= 0.0 || m_usageListCostUsd >= 0.0)) {
+        m_usageCostEmitted = true;
+        Q_EMIT usageCostReceived(m_usageCostUsd, m_usageListCostUsd,
+                                 m_usageAllowanceUsd, m_usageBillingSource);
     }
 
     // Classify the error. Only trust the body as provider error text when the

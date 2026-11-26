@@ -20,6 +20,19 @@ endfunction()
 
 kateai_test(test_sandbox)
 kateai_test(test_permissions)
+# The settings page is part of kateai_core, so the test only adds itself.
+add_executable(test_configpage test_configpage.cpp ../src/configpage.cpp ../src/plugin.cpp
+    ../src/kateaicommand.cpp ../src/pluginview.cpp ../src/editorassist.cpp
+    ../src/chatwidget.cpp ../src/inspectorpanel.cpp ../src/toolcallwidget.cpp
+    ../src/promptedit.cpp ../src/permissionbar.cpp ../src/subtaskwidget.cpp
+    ../src/subtaskdock.cpp ../src/suggestionwidget.cpp ../src/questionwidget.cpp
+    ../src/todowidget.cpp ../src/edittracker.cpp ../src/turnstatus.cpp
+    ../src/chattheme.cpp ../src/transcriptlayout.cpp)
+target_link_libraries(test_configpage PRIVATE kateai_core Qt6::Test Qt6::Widgets)
+target_compile_definitions(test_configpage PRIVATE TRANSLATION_DOMAIN="kateai")
+add_test(NAME test_configpage COMMAND test_configpage -platform offscreen
+         WORKING_DIRECTORY ${CMAKE_SOURCE_DIR})
+
 kateai_test(test_settings)
 kateai_test(test_configmigration)
 kateai_test(test_credentials)
@@ -31,6 +44,7 @@ set_tests_properties(test_settings test_configmigration test_credentials
                      PROPERTIES RESOURCE_LOCK kateai_test_credentials_config)
 kateai_test(test_llmparse)
 kateai_test(test_session)
+kateai_test(test_memory_budget)
 kateai_test(test_retry)
 kateai_test(test_agentparity)
 kateai_test(test_checkpoints)
@@ -40,6 +54,8 @@ kateai_test(test_contextmanager)
 kateai_test(test_providers)
 kateai_test(test_rules)
 kateai_test(test_transcriptlayout)
+kateai_test(test_transcriptvirtualizer)
+set_tests_properties(test_transcriptvirtualizer PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 kateai_test(test_modes)
 kateai_test(test_orchestration)
 add_executable(test_orchestrationflow test_orchestrationflow.cpp)
@@ -329,3 +345,39 @@ if(Python3_Interpreter_FOUND)
         set_tests_properties(harness_eval PROPERTIES TIMEOUT 600)
     endif()
 endif()
+
+# Give every test its own HOME, temp directory and config/cache/data roots
+# inside the build tree.
+#
+# Several tests deliberately exercise home-path rules: the sandbox test creates
+# a directory below $HOME with restricted permissions, and the settings and
+# credential tests write Qt's test-mode config below $HOME. Pointed at the real
+# home those tests write outside the build tree, which fails under a confined CI
+# or agent sandbox and leaves stray files in the developer's config. Redirecting
+# the environment keeps the code paths under test intact and makes the suite
+# hermetic. Tests that already set ENVIRONMENT (a Qt platform override, for
+# example) keep their entry and are merged with these.
+function(kateai_isolate_test name)
+    set(root "${CMAKE_BINARY_DIR}/test-home/${name}")
+    get_property(existing TEST ${name} PROPERTY ENVIRONMENT)
+    set(extra
+        "HOME=${root}"
+        "XDG_CONFIG_HOME=${root}/config"
+        "XDG_CACHE_HOME=${root}/cache"
+        "XDG_DATA_HOME=${root}/data"
+    )
+    if(existing)
+        list(APPEND extra ${existing})
+    endif()
+    set_tests_properties(${name} PROPERTIES ENVIRONMENT "${extra}")
+endfunction()
+
+# Every test registered above runs under the isolated home. The eval suite is
+# excluded: it drives the headless binary with its own workspace and does not
+# touch the home directory.
+get_property(_kateai_tests DIRECTORY PROPERTY TESTS)
+foreach(_test IN LISTS _kateai_tests)
+    if(NOT _test MATCHES "^harness_eval$")
+        kateai_isolate_test(${_test})
+    endif()
+endforeach()
