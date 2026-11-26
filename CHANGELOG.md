@@ -38,8 +38,7 @@
   Settings → AI Providers → Model Orchestration or select the Orchestrator row
   in the model picker. See `docs/ORCHESTRATION.md`.
 - Version metadata updated to 1.0.0 across CMake, README, ACP identity, and
-  packaging. Release notes: `docs/HARNESS_1.0.md` and
-  `changelogs/CHANGELOG_1.0.0.md`.
+  packaging. Release notes: `changelogs/CHANGELOG_1.0.0.md`.
 
 ## 0.9.0 — 2026-11-24
 
@@ -73,8 +72,7 @@
   version 2 on the next save. The `skills`, `agentsV2`, and `inspector` flags
   default on; telemetry remains opt-in.
 - Version metadata updated to 0.9.0 across CMake, plugin metadata, README, ACP
-  client identity, and packaging. See `docs/HARNESS_0.9.md` and
-  `changelogs/CHANGELOG_0.9.0.md`.
+  client identity, and packaging. See `changelogs/CHANGELOG_0.9.0.md`.
 
 ## 0.8.0 — 2026-11-24
 
@@ -83,7 +81,7 @@
   prefix. Editor state, git status, and workspace listings stay in a transient
   turn message, verification prose is consolidated, and `:kateai prompt` dumps
   the exact prompt with its token manifest. See `docs/PROMPT.md` and
-  `docs/HARNESS_0.8.md`.
+  `changelogs/CHANGELOG_0.8.0.md`.
 - **Model profiles.** A family registry now supplies context windows, output
   limits, prices, cache semantics, prompt variant, and edit dialect for every
   provider. Unknown models get a conservative 32k fallback and a visible
@@ -149,7 +147,7 @@
 - **Session event log.** Conversations are now recorded as an append-only
   `session_event` log in the existing SQLite database, with a rebuildable
   message projection, redaction before write, one-time legacy backfill, and
-  JSONL export via `:kateai trace`. See `docs/HARNESS_0.7.md`.
+  JSONL export via `:kateai trace`. See `changelogs/CHANGELOG_0.7.0.md`.
 - **Verification gate.** A mutating turn cannot finish while the discovered
   check plan fails: failures are fed back with a retry cap, passes become the
   cited evidence, and `:kateai verify` runs the plan on demand.

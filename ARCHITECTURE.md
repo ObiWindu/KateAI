@@ -24,7 +24,7 @@ src/
                                   replay, turn middleware, verification checks,
                                   deny-first policy, hooks, audit and the
                                   tool-result content store. See
-                                  docs/HARNESS_0.7.md.
+                                  changelogs/CHANGELOG_0.7.0.md.
   lsp.h / lsp.cpp                 the editor's language-server surface (LspProvider) the core queries
   katelspbridge.cpp               Kate-facing LspProvider: probes the lspclientplugin at runtime,
                                   reads the diagnostics model (document marks as fallback), captures LSP messages

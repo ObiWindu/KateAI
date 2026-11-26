@@ -427,7 +427,7 @@ The four 0.8 flags default on. To compare against the legacy path:
 KATEAI_HARNESS_FLAGS=-promptV2,-contextV2,-memoryV2,-toolSearch kate
 ```
 
-See `docs/HARNESS_0.8.md` and `docs/PROMPT.md`.
+See `changelogs/CHANGELOG_0.8.0.md` and `docs/PROMPT.md`.
 
 ### Harness 0.9: skills, agents, inspector
 
@@ -467,7 +467,7 @@ against the 0.8 behaviour:
 KATEAI_HARNESS_FLAGS=-skills,-agentsV2,-inspector kate
 ```
 
-See `docs/HARNESS_0.9.md` and `docs/SKILLS.md`.
+See `changelogs/CHANGELOG_0.9.0.md` and `docs/SKILLS.md`.
 
 ### Harness 1.0: telemetry, evals, headless, ACP
 
@@ -503,7 +503,7 @@ run the same loop, tools, policy, verification gate, and event log.
 - **Configuration.** Schema v4 is additive: telemetry, budget, and no-key
   defaults keep the 0.9 behaviour when unset.
 
-See `docs/HARNESS_1.0.md`.
+See `changelogs/CHANGELOG_1.0.0.md`.
 
 ### Providers and models
 
