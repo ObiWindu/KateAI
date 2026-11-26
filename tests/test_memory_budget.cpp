@@ -86,6 +86,43 @@ private Q_SLOTS:
                  qPrintable(QStringLiteral("restore delta %1 bytes exceeds 40 MB").arg(delta)));
     }
 
+    void reasoningIsNotRetainedForEveryTurn()
+    {
+        // Every turn's reasoning used to stay in the model history for the rest
+        // of the conversation, so a reasoning-heavy model doubled or tripled the
+        // request, the session payload and every copy made from them. Only the
+        // newest turns keep theirs.
+        SessionStore::SessionData data;
+        constexpr int kTurns = 6;
+        data.messages.reserve(kTurns * 2);
+        for (int i = 0; i < kTurns; ++i) {
+            ChatMessage user;
+            user.role = ChatMessage::Role::User;
+            user.content = u"turn %1"_s.arg(i);
+            data.messages.append(user);
+
+            ChatMessage assistant;
+            assistant.role = ChatMessage::Role::Assistant;
+            assistant.content = u"answer %1"_s.arg(i);
+            assistant.thinking = QString(4000, u't');
+            data.messages.append(assistant);
+        }
+
+        AgentLoop agent;
+        agent.restoreSession(data);
+        const QJsonObject counters = agent.memoryCounters();
+        qInfo() << "reasoningIsNotRetainedForEveryTurn" << counters;
+
+        // Restore keeps the whole session as the display transcript, but
+        // memoryCounters reports what the model history still carries: only the
+        // newest kThinkingRetainedTurns turns keep their reasoning.
+        QVERIFY2(counters.value(u"thinkingChars"_s).toDouble() <= 2.0 * 4000.0,
+                 qPrintable(u"retained %1 reasoning chars"_s.arg(
+                     counters.value(u"thinkingChars"_s).toDouble())));
+        QVERIFY2(agent.messages().last().thinking.size() == 4000,
+                 "the newest turn lost its reasoning");
+    }
+
     void restoredHistoryStaysBounded()
     {
         SessionStore::SessionData data;

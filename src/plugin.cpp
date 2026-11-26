@@ -4,6 +4,7 @@
  */
 
 #include "plugin.h"
+#include "boundedfile.h"
 #include "acpinstall.h"
 #include "configpage.h"
 #include "kateaicommand.h"
@@ -96,6 +97,19 @@ public:
         request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
         QNetworkReply *reply = m_network->get(request);
         connect(reply, &QNetworkReply::finished, this, [this, reply, installed, registryHasMistral]() {
+            // Same registry document as the settings page: bound it before the
+            // copy and the JSON parse.
+            constexpr qint64 kMaxRegistryBodyBytes = 4 * 1024 * 1024;
+            if (!replyBodyWithinLimit(reply, kMaxRegistryBodyBytes)) {
+                reply->deleteLater();
+                qWarning() << "KateAI: ACP agent update check failed: the registry response is too large";
+                if (!registryHasMistral && !QStandardPaths::findExecutable(u"vibe-acp"_s).isEmpty()) {
+                    checkStandaloneMistral();
+                } else {
+                    updateNext();
+                }
+                return;
+            }
             const QByteArray body = reply->readAll();
             const QString error = reply->errorString();
             const bool ok = reply->error() == QNetworkReply::NoError;

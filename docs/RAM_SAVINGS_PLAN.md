@@ -112,6 +112,22 @@ current behavior.
 - [x] Read ACP stdout in bounded chunks; cap headless workspace diffs.
 - [x] Bound policy, hook and ecosystem config reads with a shared helper.
 
+### Phase 9 — Remaining audit follow-up
+
+- [x] Strip reasoning from model-history turns older than two, on both append
+  and restore, while the display transcript keeps its copy (P4).
+- [x] Reject oversized non-streaming HTTP bodies before the copy and the JSON
+  parse: completions (256 KB), model lists and the ACP registry (4 MB) (F9, P10).
+- [x] Lower the ACP ceilings to 8 MiB frames, 128 live tools / 8 MiB, 32 parked
+  methods / 8 MiB, a 2 MiB single payload and 16 MiB file reads (F5).
+- [x] Stream the voice multipart upload from disk instead of copying the
+  recording into a body part (T9).
+- [x] Iterate the sub-agent map directly in `sessionData()` (P11).
+- [x] Wire `TranscriptVirtualizer` for restored transcripts, keeping the live
+  append path unchanged (P3).
+- [x] Extend `memoryCounters` with `thinkingChars`, `liveBufferChars` and
+  `eventSeq`, and cover reasoning retention in `test_memory_budget` (F10).
+
 ## Progress log
 
 - 2026-11-25: Plan created. Starting Phase 1 implementation.
@@ -232,3 +248,21 @@ current behavior.
   - headless `gitDiff` caps the patch at 32 MB and skips untracked files above
     8 MB.
   - policy, hook and ecosystem config reads use `readBoundedFile()`.
+
+- 2026-11-26 (remaining audit follow-up):
+  - reasoning is stripped from model-history messages further back than two
+    user turns, both when a turn appends and when a session restores; the
+    display transcript keeps its own copy, so scrollback is unaffected. A
+    restored session is measured by `thinkingChars` in `test_memory_budget`;
+  - `boundedfile.h` gained `replyBodyWithinLimit()` and it is applied before
+    every non-streaming body copy: completions (256 KB), model lists (4 MB) and
+    the ACP registry in both the settings page and the update check (4 MB);
+  - the ACP ceilings were lowered to 8 MiB frames, 128 live tools / 8 MiB,
+    32 parked methods / 8 MiB, a 2 MiB single parked payload and 16 MiB for
+    `fs/read_text_file`, with the user-facing messages updated to match;
+  - the voice upload streams the recording from disk through
+    `QHttpPart::setBodyDevice()` instead of holding a second full copy;
+  - `sessionData()` iterates `m_subagentRecords` directly rather than copying
+    and sorting it;
+  - `memoryCounters` also reports `thinkingChars`, `liveBufferChars` and
+    `eventSeq`.

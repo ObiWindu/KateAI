@@ -7,6 +7,8 @@
 
 #include <QFile>
 #include <QFileInfo>
+#include <QNetworkReply>
+#include <QNetworkRequest>
 #include <QString>
 
 namespace KateAi
@@ -37,6 +39,27 @@ inline QString readBoundedFile(const QString &path, qint64 maxBytes)
         return {};
     }
     return QString::fromUtf8(bytes);
+}
+
+/**
+ * Cross-check for an HTTP reply before its body is read with `readAll()`.
+ *
+ * A completed reply has already buffered its whole body, so this cannot avoid
+ * the allocation that Qt's reply object already made - it stops the copy and
+ * the JSON tree on top of it. A non-streaming provider response is small, so a
+ * body above the cap is a misconfiguration or a hostile endpoint rather than a
+ * legitimate answer.
+ */
+inline bool replyBodyWithinLimit(const QNetworkReply *reply, qint64 maxBytes)
+{
+    if (!reply || maxBytes <= 0) {
+        return false;
+    }
+    const qint64 declaredSize = reply->header(QNetworkRequest::ContentLengthHeader).toLongLong();
+    if (declaredSize > maxBytes) {
+        return false;
+    }
+    return reply->bytesAvailable() <= maxBytes;
 }
 
 } // namespace KateAi

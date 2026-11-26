@@ -1676,14 +1676,14 @@ void VoiceInput::beginTranscription(const QString &wavPath)
 
 void VoiceInput::transcribeViaHttp(const QString &wavPath, const QString &endpointUrl, const QString &apiKey)
 {
-    QFile file(wavPath);
-    if (!file.open(QIODevice::ReadOnly)) {
+    auto *file = new QFile(wavPath);
+    if (!file->open(QIODevice::ReadOnly)) {
+        delete file;
         fail(i18n("Could not read recorded audio for transcription."));
         return;
     }
-    const QByteArray wavBytes = file.readAll();
-    file.close();
-    if (wavBytes.isEmpty()) {
+    if (file->size() <= 0) {
+        delete file;
         fail(i18n("Recorded audio is empty."));
         return;
     }
@@ -1694,7 +1694,12 @@ void VoiceInput::transcribeViaHttp(const QString &wavPath, const QString &endpoi
     filePart.setHeader(QNetworkRequest::ContentTypeHeader, u"audio/wav"_s);
     filePart.setHeader(QNetworkRequest::ContentDispositionHeader,
                        u"form-data; name=\"file\"; filename=\"voice.wav\""_s);
-    filePart.setBody(wavBytes);
+    // Stream from disk rather than copying the whole recording into a body
+    // part: a five-minute capture is ~9.6 MB and the copy would sit beside the
+    // raw, denoised and decoded buffers. The multipart takes the file as its
+    // child so it lives until the reply is sent.
+    filePart.setBodyDevice(file);
+    file->setParent(multiPart);
     multiPart->append(filePart);
 
     const QString model = m_settings.voiceModel.trimmed().isEmpty()

@@ -4,6 +4,7 @@
  */
 
 #include "llmclient.h"
+#include "boundedfile.h"
 
 #include "harness/models.h"
 #include "harness/tokens.h"
@@ -1955,10 +1956,18 @@ void LlmClient::emitCompletedOnce()
 
 void LlmClient::handleModelsFinished(QNetworkReply *reply, Provider provider)
 {
-    const QByteArray body = reply->readAll();
     const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
     const QString networkError = reply->errorString();
     const bool ok = reply->error() == QNetworkReply::NoError;
+    // A model catalog is a small JSON document even for the largest providers.
+    // Reject a larger body before copying and parsing it.
+    constexpr qint64 kMaxModelListBodyBytes = 4 * 1024 * 1024;
+    if (ok && !replyBodyWithinLimit(reply, kMaxModelListBodyBytes)) {
+        reply->deleteLater();
+        Q_EMIT modelsFailed(provider, u"The model list response is larger than 4 MB."_s);
+        return;
+    }
+    const QByteArray body = reply->readAll();
     reply->deleteLater();
 
     QJsonParseError parseError;

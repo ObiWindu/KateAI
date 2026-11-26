@@ -523,6 +523,9 @@ private:
     // Bounds the model history independently of the display transcript. Cuts
     // only at user-turn boundaries so tool call/result pairs stay intact.
     void pruneModelHistory();
+    // Drops reasoning from model-history messages that are further back than
+    // kThinkingRetainedTurns user turns. The display transcript keeps its copy.
+    void dropStaleThinking();
     void recomputeMessageChars();
     // Bounds the display transcript by a message and character budget. The
     // oldest messages are replaced by a small elision marker; the model history

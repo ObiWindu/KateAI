@@ -4,6 +4,7 @@
  */
 
 #include "configpage.h"
+#include "boundedfile.h"
 #include "orchestration.h"
 #include "acpinstall.h"
 #include "plugin.h"
@@ -382,6 +383,14 @@ KateAiConfigPage::KateAiConfigPage(QWidget *parent, KateAiPlugin *plugin)
         request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
         QNetworkReply *reply = m_acpRegistryNetwork->get(request);
         connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+            // The registry is a small JSON document. A body beyond the cap is
+            // treated as a failed fetch rather than parsed or retained.
+            constexpr qint64 kMaxRegistryBodyBytes = 4 * 1024 * 1024;
+            if (!replyBodyWithinLimit(reply, kMaxRegistryBodyBytes)) {
+                reply->deleteLater();
+                m_acpRegistryStatus->setText(i18n("Could not load registry: the response is larger than 4 MB."));
+                return;
+            }
             const QByteArray body = reply->readAll();
             const QString error = reply->errorString();
             const bool ok = reply->error() == QNetworkReply::NoError;

@@ -26,12 +26,12 @@ original text below is kept as the audit record. See the Phase 7 entries in
 | F2 unbounded reasoning/text | Implemented: 1 MB reasoning in both clients, 4 MB ACP answer. |
 | F3 sub-agent records | Implemented: 16 KB summary, 256 KB child stream. |
 | F4 bookkeeping sets | Partially implemented: changed paths, settled ranges and sub-agent cost entries capped. |
-| F5 ACP ceilings | Not changed in this pass (safety tuning only). |
+| F5 ACP ceilings | Implemented: 8 MiB frames, 128 live tools / 8 MiB live-tool bytes, 32 parked methods / 8 MiB, 2 MiB single payload, 16 MiB file reads. |
 | F6 ACP server sessions | Implemented: 64 concurrent sessions; no idle timeout yet. |
 | F7 Inspector retention | Implemented: documents cleared on hide. |
 | F8 MCP ownership | Implemented: the constructor-owned manager sets `m_ownsMcp`; project config loads only after confirmation; shared managers use the confirmed state. |
-| F9 completion body | Not changed. |
-| F10 memory counters | Implemented: `messageChars`, `subagentSummaryChars`, plus a restore test. |
+| F9 completion body | Implemented: completion, model-list and ACP-registry replies are rejected above their byte cap before the copy and the JSON parse. |
+| F10 memory counters | Implemented: `messageChars`, `thinkingChars`, `liveBufferChars`, `eventSeq`, `subagentSummaryChars`, plus restore and reasoning-retention tests. |
 | T1 autosave | Implemented for large sessions: a message journal appends only the new tail; small sessions keep the single payload. |
 | T2 restore peak | Mitigated by the journal: large sessions load chunked lists instead of one payload array. |
 | T3 OTLP export | Implemented: newest 5,000 events, 30 s timeout, batch released on final failure. |
@@ -40,7 +40,7 @@ original text below is kept as the audit record. See the Phase 7 entries in
 | T6 ConfigPage tabs | Partially implemented: the remote ACP registry is deferred until its tab is opened; the remaining tabs are still built eagerly. |
 | T7 compaction copies | Not changed. |
 | T8 clear-all payloads | Mitigated: the cleanup path still reads payloads, but large message lists no longer live there. |
-| T9 voice WAV copies | Not changed. |
+| T9 voice WAV copies | Implemented: the multipart upload streams the recording from disk instead of copying it into a body part. |
 | T10 ACP stdout | Implemented: stdout is read in bounded 64 KiB chunks. |
 | T11 streaming copies | Mitigated by the reasoning/answer caps. |
 | T12 sub-task render | Implemented: live text capped; per-delta render still open. |
@@ -48,8 +48,11 @@ original text below is kept as the audit record. See the Phase 7 entries in
 | P1 per-workspace services | Implemented: graph, MCP manager and event store shared by every window on a workspace (`WorkspaceServices`). |
 | P5 session journal | Implemented: threshold-gated incremental message journal with a full rewrite on compaction. |
 | P6 event-log retention | Implemented: 20,000 events per conversation, newest-window auto export. |
-| P2/P3/P4/P7–P11 | P4's thinking retention is partially addressed by the cap; P2/P3/P7–P11 remain recommendations (P10's config-reader helper is implemented for policy/hooks/ecosystem). |
-| Remaining structural | `ConfigPage` tab construction, transcript virtualisation, full graph-layout rewrite and the remaining ACP/file-read ceilings are still open. |
+| P3 transcript virtualiser | Implemented: wired for restored transcripts, with a 256-entry window; the live append path is unchanged. |
+| P4 reasoning retention | Implemented: reasoning is stripped from model-history turns older than `kThinkingRetainedTurns` (2), on both append and restore; the display transcript keeps its copy. |
+| P10 bounded readers | Partially implemented: policy/hooks/ecosystem use the file helper; HTTP replies are capped before they are copied. |
+| P11 minor savings | Implemented: `sessionData()` iterates the sub-agent map directly instead of copying and sorting it. P2/P7/P8/P9 remain recommendations. |
+| Remaining structural | `ConfigPage` tab construction, the calibration half of P2, the graph-layout rewrite (P7), the per-loop event connection (P8) and the shared network managers (P9) are still open. |
 
 | Severity | Meaning |
 | --- | --- |

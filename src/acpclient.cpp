@@ -43,11 +43,12 @@ static const int kInternalError = -32603;
 static const int kServerError = -32000;
 // The largest protocol frame the client accepts. A frame above it is dropped,
 // and the turn is failed rather than left waiting for an answer that cannot
-// arrive.
-static constexpr qsizetype MaxFrameBytes = 16 * 1024 * 1024;
+// arrive. Frames carry streamed deltas, so 8 MiB is already far above a normal
+// chunk; the previous 16 MiB only widened the peak a broken agent could force.
+static constexpr qsizetype MaxFrameBytes = 8 * 1024 * 1024;
 // ACP agents own their model context, but their streamed answer and reasoning
 // are copied into our history and session. Bound those copies just like the
-// native client's assistant buffer. The frame cap alone allows a 16 MiB delta
+// native client's assistant buffer. The frame cap alone allows an 8 MiB delta
 // and does not bound the sum.
 static constexpr qsizetype MaxPromptTextChars = 4 * 1024 * 1024;
 static constexpr qsizetype MaxPromptThinkingChars = 1024 * 1024;
@@ -3627,8 +3628,8 @@ void AcpClient::handleSessionUpdate(const QJsonObject &update)
             // "" and leak the entry in m_liveTools; give the call a local id.
             request.toolCallId = QUuid::createUuid().toString(QUuid::WithoutBraces);
         }
-        constexpr int kMaxLiveTools = 512;
-        constexpr qsizetype kMaxLiveToolBytes = 32 * 1024 * 1024;
+        constexpr int kMaxLiveTools = 128;
+        constexpr qsizetype kMaxLiveToolBytes = 8 * 1024 * 1024;
         const qsizetype requestBytes = permissionRequestBytes(request);
         if (!m_liveTools.contains(request.toolCallId)
             && (m_liveTools.size() >= kMaxLiveTools
@@ -3693,8 +3694,8 @@ void AcpClient::handleSessionUpdate(const QJsonObject &update)
         const QString status = update.value(u"status"_s).toString();
         PermissionRequest existing = m_liveTools.value(toolCallId);
         if (existing.toolCallId.isEmpty()) {
-            constexpr int kMaxLiveTools = 512;
-            constexpr qsizetype kMaxLiveToolBytes = 32 * 1024 * 1024;
+            constexpr int kMaxLiveTools = 128;
+            constexpr qsizetype kMaxLiveToolBytes = 8 * 1024 * 1024;
             existing = permissionFromToolCall(update);
             existing.toolCallId = toolCallId;
             const qsizetype existingBytes = permissionRequestBytes(existing);
@@ -4455,8 +4456,8 @@ bool AcpClient::ensureMethodPermission(const QString &grantKey, PermissionReques
     // An agent can issue these methods far faster than a user can approve
     // them. Bound the queue so a misbehaving agent cannot grow it without
     // limit; the refused call gets a normal error response.
-    constexpr int kMaxParkedMethods = 64;
-    constexpr qint64 kMaxParkedBytes = 32 * 1024 * 1024;
+    constexpr int kMaxParkedMethods = 32;
+    constexpr qint64 kMaxParkedBytes = 8 * 1024 * 1024;
     if (m_parkedMethods.size() >= kMaxParkedMethods) {
         replyError(rpcId, kServerError, u"Too many permission requests are queued; retry after they settle."_s);
         return false;
@@ -4466,7 +4467,7 @@ bool AcpClient::ensureMethodPermission(const QString &grantKey, PermissionReques
     for (const ParkedMethod &queued : std::as_const(m_parkedMethods)) {
         parkedBytes += QJsonDocument(queued.params).toJson(QJsonDocument::Compact).size();
     }
-    if (incomingBytes > 8 * 1024 * 1024 || parkedBytes > kMaxParkedBytes) {
+    if (incomingBytes > 2 * 1024 * 1024 || parkedBytes > kMaxParkedBytes) {
         replyError(rpcId, kServerError, u"The queued permission payload is too large."_s);
         return false;
     }
@@ -4627,9 +4628,9 @@ void AcpClient::handleFsRead(const QJsonValue &id, const QJsonObject &params)
     // multi-gigabyte log, and QTextStream::readAll() would copy it several
     // times on the GUI thread. Paginated reads are the supported shape.
     const QFileInfo fileInfo(resolved);
-    constexpr qint64 kMaxAcpReadBytes = 64 * 1024 * 1024;
+    constexpr qint64 kMaxAcpReadBytes = 16 * 1024 * 1024;
     if (fileInfo.exists() && fileInfo.size() > kMaxAcpReadBytes) {
-        replyError(id, kServerError, u"File is larger than 64 MB; read it in line ranges."_s);
+        replyError(id, kServerError, u"File is larger than 16 MB; read it in line ranges."_s);
         return;
     }
     int line = qMax(0, jsonIntValue(params.value(u"line"_s), 0));

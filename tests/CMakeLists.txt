@@ -332,3 +332,39 @@ if(Python3_Interpreter_FOUND)
         set_tests_properties(harness_eval PROPERTIES TIMEOUT 600)
     endif()
 endif()
+
+# Give every test its own HOME, temp directory and config/cache/data roots
+# inside the build tree.
+#
+# Several tests deliberately exercise home-path rules: the sandbox test creates
+# a directory below $HOME with restricted permissions, and the settings and
+# credential tests write Qt's test-mode config below $HOME. Pointed at the real
+# home those tests write outside the build tree, which fails under a confined CI
+# or agent sandbox and leaves stray files in the developer's config. Redirecting
+# the environment keeps the code paths under test intact and makes the suite
+# hermetic. Tests that already set ENVIRONMENT (a Qt platform override, for
+# example) keep their entry and are merged with these.
+function(kateai_isolate_test name)
+    set(root "${CMAKE_BINARY_DIR}/test-home/${name}")
+    get_property(existing TEST ${name} PROPERTY ENVIRONMENT)
+    set(extra
+        "HOME=${root}"
+        "XDG_CONFIG_HOME=${root}/config"
+        "XDG_CACHE_HOME=${root}/cache"
+        "XDG_DATA_HOME=${root}/data"
+    )
+    if(existing)
+        list(APPEND extra ${existing})
+    endif()
+    set_tests_properties(${name} PROPERTIES ENVIRONMENT "${extra}")
+endfunction()
+
+# Every test registered above runs under the isolated home. The eval suite is
+# excluded: it drives the headless binary with its own workspace and does not
+# touch the home directory.
+get_property(_kateai_tests DIRECTORY PROPERTY TESTS)
+foreach(_test IN LISTS _kateai_tests)
+    if(NOT _test MATCHES "^harness_eval$")
+        kateai_isolate_test(${_test})
+    endif()
+endforeach()

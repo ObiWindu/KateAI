@@ -110,6 +110,13 @@ constexpr qsizetype kMinRetainedHistoryMessages = 16;
 // and forwarded so a broken or reasoning-heavy model cannot pin megabytes.
 constexpr qsizetype kMaxThinkingChars = 1024 * 1024;
 
+// Reasoning from older turns is still useful to the model that produced it for
+// the turn it belongs to, and for the one after that when a tool loop spans it.
+// Beyond that it only inflates the request, the session payload and every copy
+// made from them, so the retained history drops it. The display transcript
+// keeps its own copy for the transcript cards.
+constexpr int kThinkingRetainedTurns = 2;
+
 // A completed sub-agent's record is kept for the rest of the conversation. The
 // sidechain has the full transcript, so the in-memory copy can be bounded.
 constexpr qsizetype kMaxSubagentSummaryChars = 16 * 1024;
@@ -3881,12 +3888,24 @@ QJsonObject AgentLoop::memoryCounters() const
         subagentPatchChars += it.value().patch.size();
         subagentSummaryChars += it.value().summary.size();
     }
+    qsizetype thinkingChars = 0;
+    for (const ChatMessage &message : std::as_const(m_messages)) {
+        thinkingChars += message.thinking.size();
+    }
     QJsonObject counters;
     counters.insert(u"messages"_s, m_messages.size());
     counters.insert(u"messageChars"_s, static_cast<double>(m_messagesChars));
+    // Reasoning retained in the model history. Stays bounded because messages
+    // beyond the newest turns have it stripped by dropStaleThinking().
+    counters.insert(u"thinkingChars"_s, static_cast<double>(thinkingChars));
+    // The buffers of the turn that is currently streaming, which are copied
+    // into the history when it completes.
+    counters.insert(u"liveBufferChars"_s,
+                    static_cast<double>(m_currentThinking.size() + m_currentAssistant.size()));
     counters.insert(u"transcriptMessages"_s, m_transcriptMessages.size());
     counters.insert(u"transcriptChars"_s, static_cast<double>(m_transcriptChars));
     counters.insert(u"transcriptDiverged"_s, m_transcriptDiverged);
+    counters.insert(u"eventSeq"_s, static_cast<double>(eventStore().headSeq(m_conversationId)));
     counters.insert(u"actionRepeatEntries"_s, m_actionRepeatCounts.size());
     counters.insert(u"subagentRecords"_s, m_subagentRecords.size());
     counters.insert(u"subagentPatchChars"_s, static_cast<double>(subagentPatchChars));
@@ -4841,8 +4860,37 @@ void AgentLoop::appendMessage(const ChatMessage &message)
     m_messagesChars += transcriptMessageChars(message);
     m_transcriptMessages.append(message);
     m_transcriptChars += transcriptMessageChars(message);
+    if (message.role == ChatMessage::Role::User) {
+        // A new turn starts here, so everything before it is history. Done on
+        // the turn boundary rather than per message to keep the scan amortised.
+        dropStaleThinking();
+    }
     pruneModelHistory();
     pruneTranscript();
+}
+
+void AgentLoop::dropStaleThinking()
+{
+    // Count turn starts from the newest backwards. `turnsSeen` is the number of
+    // newer turns already behind the current position, so a message is kept
+    // while fewer than kThinkingRetainedTurns newer turns exist and cleared
+    // once it is further back than that.
+    int turnsSeen = 0;
+    for (qsizetype i = m_messages.size() - 1; i >= 0; --i) {
+        const ChatMessage &message = m_messages.at(i);
+        if (message.role == ChatMessage::Role::User) {
+            ++turnsSeen;
+            continue;
+        }
+        if (turnsSeen < kThinkingRetainedTurns || message.thinking.isEmpty()) {
+            continue;
+        }
+        m_messagesChars -= message.thinking.size();
+        m_messages[i].thinking.clear();
+        if (m_messagesChars < 0) {
+            m_messagesChars = 0;
+        }
+    }
 }
 
 void AgentLoop::recomputeMessageChars()
@@ -8040,10 +8088,12 @@ SessionStore::SessionData AgentLoop::sessionData() const
     data.acpSessionId = m_acp.sessionId();
     data.workspace = m_workspace;
     data.parentConversationId = m_parentConversationId;
-    const QList<SubagentRecord> records = subagents();
-    for (const SubagentRecord &record : records) {
-        if (!record.taskId.isEmpty()) {
-            data.subagents.append(subagentRecordToJson(record));
+    // Iterate the map directly: the serialised order does not matter because
+    // restore keys each record by taskId, and subagents() would copy and sort
+    // every record just to append them again.
+    for (auto it = m_subagentRecords.cbegin(); it != m_subagentRecords.cend(); ++it) {
+        if (!it.value().taskId.isEmpty()) {
+            data.subagents.append(subagentRecordToJson(it.value()));
         }
     }
     if (m_orchestration.enabled || m_orchestrationPlanReady || m_orchestrationPlan.version > 0) {
@@ -8138,6 +8188,11 @@ void AgentLoop::restoreSession(const SessionStore::SessionData &data)
     // A session written before the history ceiling existed (or with a much
     // larger context window) must not restore an unbounded model history.
     pruneModelHistory();
+    // Likewise for reasoning: a session saved before reasoning was dropped from
+    // older turns would otherwise keep every turn's thinking in every request.
+    // m_messagesChars was recomputed right after the history was restored, so
+    // dropStaleThinking() can subtract from it directly.
+    dropStaleThinking();
 
     // Restore turn state
     m_currentThinking = data.currentThinking;
