@@ -10,6 +10,7 @@
 #include <QJsonObject>
 #include <QList>
 #include <QObject>
+#include <QNetworkAccessManager>
 #include <QPointer>
 #include <QString>
 
@@ -59,6 +60,7 @@ public:
     explicit WebSearch(QObject *parent = nullptr);
     ~WebSearch() override;
 
+    void setNetworkManager(QNetworkAccessManager *network);
     void setProvider(Provider provider);
     Provider provider() const
     {
@@ -149,6 +151,9 @@ private:
     QHash<QString, Provider> m_callProviders;
     QHash<QString, qint64> m_callMaxBytes;
     int m_timeoutMs = 20000;
+    QNetworkAccessManager *ensureNam();
+
+    QPointer<QNetworkAccessManager> m_sharedNam;
     QNetworkAccessManager *m_nam = nullptr;
     // In-flight replies, so abort() can cancel them and the destructor does
     // not leave sockets running against a destroyed object.

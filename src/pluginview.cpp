@@ -149,12 +149,14 @@ QString gitBranchForWorkspace(const QString &workspace)
         // Create the chat widget that will contain the AI interface
         if (m_toolView) {
             m_chat = new ChatWidget(m_toolView);
+            m_chat->setNetworkManager(plugin->networkManager());
         }
 
         // The in-editor assist: AI completions at the cursor and hover hints
         // over agent-edited lines. One per window, attached to every editor
         // view of the window. Completions are opt-in through the settings.
         m_assist = new EditorAssist(this);
+        m_assist->setNetworkManager(plugin->networkManager());
         m_assist->setSettings(plugin->settings());
         m_assist->setBusyCheck([this]() {
             return m_chat && m_chat->agent() && m_chat->agent()->isBusy();

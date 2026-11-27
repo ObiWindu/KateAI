@@ -58,10 +58,22 @@ bool AuditLog::record(const QString &type, const QJsonObject &payload)
     if (!QDir().mkpath(directory)) {
         return false;
     }
+    QFile::setPermissions(directory, QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner);
+
+    // Rotate the audit log once it reaches 8 MiB so long-lived installations do
+    // not accumulate an unbounded append-only file.
+    constexpr qint64 kMaxAuditBytes = 8 * 1024 * 1024;
+    if (QFileInfo::exists(path) && QFileInfo(path).size() >= kMaxAuditBytes) {
+        const QString rotated = path + u".1"_s;
+        QFile::remove(rotated);
+        QFile::rename(path, rotated);
+    }
+
     QFile file(path);
     if (!file.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
         return false;
     }
+    QFile::setPermissions(path, QFileDevice::ReadOwner | QFileDevice::WriteOwner);
 
     QJsonObject entry = Events::redact(payload);
     entry.insert(u"type"_s, type);
@@ -90,7 +102,22 @@ QStringList AuditLog::recentLines(int maxLines)
     if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
         return {};
     }
-    const QStringList lines = QString::fromUtf8(file.readAll()).split(u'\n', Qt::SkipEmptyParts);
+    // When bounded, read only the tail of the log so inspecting recent entries
+    // does not load a multi-megabyte file into memory.
+    constexpr qint64 kMaxTailReadBytes = 2 * 1024 * 1024;
+    bool trimmedHead = false;
+    if (maxLines > 0 && file.size() > kMaxTailReadBytes) {
+        file.seek(file.size() - kMaxTailReadBytes);
+        trimmedHead = true;
+    }
+    QByteArray raw = file.readAll();
+    if (trimmedHead) {
+        const qsizetype nl = raw.indexOf('\n');
+        if (nl >= 0) {
+            raw.remove(0, nl + 1);
+        }
+    }
+    const QStringList lines = QString::fromUtf8(raw).split(u'\n', Qt::SkipEmptyParts);
     if (maxLines <= 0 || lines.size() <= maxLines) {
         return lines;
     }

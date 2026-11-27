@@ -98,8 +98,23 @@ QString WebSearchResult::toMarkdown(int index) const
 
 WebSearch::WebSearch(QObject *parent)
     : QObject(parent)
-    , m_nam(new QNetworkAccessManager(this))
 {
+}
+
+void WebSearch::setNetworkManager(QNetworkAccessManager *network)
+{
+    m_sharedNam = network;
+}
+
+QNetworkAccessManager *WebSearch::ensureNam()
+{
+    if (m_sharedNam) {
+        return m_sharedNam.data();
+    }
+    if (!m_nam) {
+        m_nam = new QNetworkAccessManager(this);
+    }
+    return m_nam;
 }
 
 WebSearch::~WebSearch()
@@ -420,7 +435,7 @@ void WebSearch::search(const QString &query, const QString &callId, int maxResul
         queryItems.addQueryItem(QStringLiteral("q"), effectiveQuery);
         queryItems.addQueryItem(QStringLiteral("kl"), QStringLiteral("wt-wt"));
         url.setQuery(queryItems);
-        reply = m_nam->get(makeRequest(url, m_timeoutMs));
+        reply = ensureNam()->get(makeRequest(url, m_timeoutMs));
         break;
     }
     case Provider::Tavily: {
@@ -430,7 +445,7 @@ void WebSearch::search(const QString &query, const QString &callId, int maxResul
                                   {QStringLiteral("query"), effectiveQuery},
                                   {QStringLiteral("max_results"), effectiveLimit},
                                   {QStringLiteral("search_depth"), QStringLiteral("basic")}};
-        reply = m_nam->post(request, QJsonDocument(payload).toJson(QJsonDocument::Compact));
+        reply = ensureNam()->post(request, QJsonDocument(payload).toJson(QJsonDocument::Compact));
         break;
     }
     case Provider::Brave: {
@@ -442,7 +457,7 @@ void WebSearch::search(const QString &query, const QString &callId, int maxResul
         QNetworkRequest request = makeRequest(url, m_timeoutMs);
         request.setRawHeader("X-Subscription-Token", m_apiKey.toUtf8());
         request.setRawHeader("Accept", "application/json");
-        reply = m_nam->get(request);
+        reply = ensureNam()->get(request);
         break;
     }
     case Provider::SearXNG: {
@@ -454,7 +469,7 @@ void WebSearch::search(const QString &query, const QString &callId, int maxResul
         searxItems.addQueryItem(QStringLiteral("q"), effectiveQuery);
         searxItems.addQueryItem(QStringLiteral("format"), QStringLiteral("json"));
         url.setQuery(searxItems);
-        reply = m_nam->get(makeRequest(url, m_timeoutMs));
+        reply = ensureNam()->get(makeRequest(url, m_timeoutMs));
         break;
     }
     case Provider::Disabled:
@@ -535,7 +550,7 @@ void WebSearch::fetchPage(const QString &url, const QString &callId, int timeout
     const qint64 effectiveMaxBytes = maxBytes > 0 ? qBound<qint64>(1, maxBytes, kMaxFetchBytes) : kMaxFetchBytes;
     m_callMaxBytes.insert(callId, effectiveMaxBytes);
 
-    QNetworkReply *reply = m_nam->get(makeRequest(QUrl(url.trimmed()), effectiveTimeout));
+    QNetworkReply *reply = ensureNam()->get(makeRequest(QUrl(url.trimmed()), effectiveTimeout));
     m_replies.append(reply);
 
     // Refuse a redirect to a host that the initial URL check would have

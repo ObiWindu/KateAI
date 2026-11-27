@@ -58,6 +58,11 @@ public:
     explicit LlmClient(QObject *parent = nullptr);
     ~LlmClient() override;
 
+    void setNetworkManager(QNetworkAccessManager *network)
+    {
+        m_sharedNam = network;
+    }
+
     void setSettings(Settings settings)
     {
         m_settings = std::move(settings);
@@ -260,7 +265,10 @@ private:
     QString m_geminiCacheFailedKey;
     bool m_geminiRequestUsedCache = false;
 
-    QNetworkAccessManager m_nam;
+    QNetworkAccessManager *ensureNam();
+
+    QPointer<QNetworkAccessManager> m_sharedNam;
+    QNetworkAccessManager *m_ownedNam = nullptr;
     QNetworkReply *m_reply = nullptr;
     QList<QPointer<QNetworkReply>> m_modelReplies;
     QByteArray m_buffer;

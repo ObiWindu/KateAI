@@ -212,7 +212,8 @@ VoiceInput::VoiceInput(QObject *parent)
     m_micStatus.available = false;
     m_micStatus.reason = noMicDefaultReason();
 
-    m_network = new QNetworkAccessManager(this);
+    // Lazily allocate a local QNetworkAccessManager only if no shared one
+    // is injected via setNetworkManager().
 
     m_tickTimer = new QTimer(this);
     m_tickTimer->setInterval(250);
@@ -254,6 +255,22 @@ VoiceInput::~VoiceInput()
 {
     cancelMicProbe();
     cleanupSession();
+}
+
+void VoiceInput::setNetworkManager(QNetworkAccessManager *network)
+{
+    m_sharedNetwork = network;
+}
+
+QNetworkAccessManager *VoiceInput::ensureNetworkManager()
+{
+    if (m_sharedNetwork) {
+        return m_sharedNetwork.data();
+    }
+    if (!m_network) {
+        m_network = new QNetworkAccessManager(this);
+    }
+    return m_network;
 }
 
 void VoiceInput::setSettings(const Settings &settings)
@@ -1728,7 +1745,7 @@ void VoiceInput::transcribeViaHttp(const QString &wavPath, const QString &endpoi
         req.setRawHeader("Authorization", "Bearer " + apiKey.toUtf8());
     }
 
-    QNetworkReply *reply = m_network->post(req, multiPart);
+    QNetworkReply *reply = ensureNetworkManager()->post(req, multiPart);
     multiPart->setParent(reply);
     m_reply = reply;
     m_httpTimeout->start();
@@ -1808,17 +1825,41 @@ void VoiceInput::transcribeViaCli(const QString &wavPath, const QString &cliSpec
         proc->setWorkingDirectory(m_tempDir->path());
     }
 
-    connect(proc, &QProcess::errorOccurred, this, [this, proc, program](QProcess::ProcessError) {
+    auto *cliTimer = new QTimer(proc);
+    cliTimer->setSingleShot(true);
+    cliTimer->setInterval(5 * 60 * 1000);
+    connect(cliTimer, &QTimer::timeout, this, [this, proc, program]() {
         if (m_cliProcess != proc || m_cancelling) {
             return;
         }
+        m_cliProcess = nullptr;
+        proc->disconnect(this);
+        if (proc->state() != QProcess::NotRunning) {
+            proc->kill();
+            proc->waitForFinished(1000);
+        }
+        proc->deleteLater();
+        fail(i18n("Local transcription command '%1' timed out.", program));
+    });
+
+    connect(proc, &QProcess::errorOccurred, this, [this, proc, cliTimer, program](QProcess::ProcessError) {
+        if (m_cliProcess != proc || m_cancelling) {
+            return;
+        }
+        cliTimer->stop();
         const QString err = proc->errorString();
         m_cliProcess = nullptr;
+        proc->disconnect(this);
+        if (proc->state() != QProcess::NotRunning) {
+            proc->kill();
+            proc->waitForFinished(1000);
+        }
         proc->deleteLater();
         fail(i18n("Could not run local transcription command '%1': %2", program, err));
     });
 
-    connect(proc, &QProcess::finished, this, [this, proc, wavPath](int exitCode, QProcess::ExitStatus exitStatus) {
+    connect(proc, &QProcess::finished, this, [this, proc, cliTimer, wavPath](int exitCode, QProcess::ExitStatus exitStatus) {
+        cliTimer->stop();
         if (m_cliProcess != proc) {
             return;
         }
@@ -1860,6 +1901,7 @@ void VoiceInput::transcribeViaCli(const QString &wavPath, const QString &cliSpec
     });
 
     proc->start(program, tokens);
+    cliTimer->start();
 }
 
 void VoiceInput::finishWithText(const QString &rawText)

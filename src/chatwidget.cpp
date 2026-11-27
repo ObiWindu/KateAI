@@ -659,11 +659,14 @@ ChatWidget::ChatWidget(QWidget *parent)
     m_transcriptVirtualizer = new TranscriptVirtualizer(m_scrollArea, m_transcriptLayout, 256, this);
     connect(m_transcriptVirtualizer, &TranscriptVirtualizer::entryWillEvict, this,
             [this](const QString &, QWidget *widget) { releaseVirtualTranscriptWidget(widget); });
-    connect(m_transcriptVirtualizer, &TranscriptVirtualizer::entryMaterialized, this,
-            [this](const QString &) {
+    connect(m_transcriptVirtualizer, &TranscriptVirtualizer::viewportUpdated, this,
+            [this]() {
                 applyTranscriptCollapse();
                 if (m_toolCardsOverride == ToolCardsOverride::Auto) {
                     for (ToolCallWidget *card : std::as_const(m_toolCallOrder)) {
+                        if (!card) {
+                            continue;
+                        }
                         const auto state = m_toolExpansionState.constFind(card->toolCallId());
                         if (state != m_toolExpansionState.cend()) {
                             card->setExpanded(state.value());
@@ -1183,10 +1186,12 @@ ChatWidget::ChatWidget(QWidget *parent)
         m_answerStarted = true;
         flushThinkingPacer();
         setThinkingIndicator(false);
-        // Append in place. `m_streamText + delta` allocated a new copy of the
-        // whole answer for every token, which made a long answer quadratic in
-        // both time and peak memory. QString append is amortised constant.
-        m_streamText += delta;
+        // Append in place, bounded to protect UI memory on pathological streams.
+        constexpr qsizetype kMaxStreamTextChars = 2 * 1024 * 1024;
+        const qsizetype room = kMaxStreamTextChars - m_streamText.size();
+        if (room > 0) {
+            m_streamText += (delta.size() > room ? delta.left(room) : delta);
+        }
         setStreaming(m_streamText);
     });
     connect(&m_agent, &AgentLoop::assistantReset, this, [this]() {
@@ -2807,7 +2812,13 @@ void ChatWidget::freezeStreaming()
     // Whatever this card revealed is on screen now; the loop re-reports the
     // full turn's reasoning when the answer text starts, and that re-report
     // must not draw this part again inside the next card.
-    m_thinkingShownEarlierInTurn += m_thinkingBuffer;
+    constexpr qsizetype kMaxTrackedThinkingChars = 1024 * 1024;
+    const qsizetype thinkingRoom = kMaxTrackedThinkingChars - m_thinkingShownEarlierInTurn.size();
+    if (thinkingRoom > 0) {
+        m_thinkingShownEarlierInTurn += (m_thinkingBuffer.size() > thinkingRoom
+                                             ? m_thinkingBuffer.left(thinkingRoom)
+                                             : m_thinkingBuffer);
+    }
     // A card with neither answer text nor reasoning is pure chrome: a header
     // and a copy button around nothing, sitting in the middle of the thread.
     // Nothing of the turn is lost by dropping it.
@@ -3432,6 +3443,14 @@ void ChatWidget::resizeEvent(QResizeEvent *event)
     applySubtaskHeightBudget();
 }
 
+void ChatWidget::setNetworkManager(QNetworkAccessManager *network)
+{
+    m_agent.setNetworkManager(network);
+    if (m_voiceInput) {
+        m_voiceInput->setNetworkManager(network);
+    }
+}
+
 void ChatWidget::setCompletionWords(const QStringList &words)
 {
     if (m_prompt) {
@@ -3651,6 +3670,11 @@ void ChatWidget::releaseVirtualTranscriptWidget(QWidget *widget)
         return;
     }
     if (auto *card = qobject_cast<ToolCallWidget *>(widget)) {
+        constexpr int kMaxToolExpansionEntries = 2048;
+        if (m_toolExpansionState.size() >= kMaxToolExpansionEntries
+            && !m_toolExpansionState.contains(card->toolCallId())) {
+            m_toolExpansionState.erase(m_toolExpansionState.begin());
+        }
         m_toolExpansionState.insert(card->toolCallId(), card->isExpanded());
         if (m_toolCallWidgets.value(card->toolCallId()) == card) {
             m_toolCallWidgets.remove(card->toolCallId());
@@ -3676,6 +3700,11 @@ void ChatWidget::releaseVirtualTranscriptWidget(QWidget *widget)
             m_suggestionWidgets.remove(card->suggestionId());
         }
         m_suggestionOrder.removeAll(card);
+    } else if (auto *card = qobject_cast<QuestionWidget *>(widget)) {
+        if (m_questionWidgets.value(card->questionCallId()) == card) {
+            m_questionWidgets.remove(card->questionCallId());
+        }
+        m_questionOrder.removeAll(card);
     }
     for (int i = m_thinkingBlocks.size() - 1; i >= 0; --i) {
         const ThinkingBlockRef &ref = m_thinkingBlocks.at(i);
@@ -7354,6 +7383,7 @@ void ChatWidget::clearTranscriptContents()
         m_transcriptVirtualizer->clear();
     }
     m_toolExpansionState.clear();
+    m_thinkingShownEarlierInTurn.clear();
     for (auto *card : std::as_const(m_toolCallWidgets)) {
         if (card && m_transcriptLayout && m_transcriptLayout->indexOf(card) >= 0) {
             m_transcriptLayout->removeWidget(card);

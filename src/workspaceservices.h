@@ -9,6 +9,8 @@
 
 #include <memory>
 
+class QNetworkAccessManager;
+
 namespace KateAi
 {
 
@@ -32,7 +34,7 @@ class ProjectGraph;
 class WorkspaceServices
 {
 public:
-    explicit WorkspaceServices(QString workspace);
+    explicit WorkspaceServices(QString workspace, QNetworkAccessManager *network = nullptr);
     ~WorkspaceServices();
 
     WorkspaceServices(const WorkspaceServices &) = delete;

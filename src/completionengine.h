@@ -10,6 +10,7 @@
 #include <QList>
 #include <QMetaType>
 #include <QObject>
+#include <QNetworkAccessManager>
 #include <QPointer>
 #include <QString>
 
@@ -57,6 +58,7 @@ public:
     explicit CompletionEngine(QObject *parent = nullptr);
     ~CompletionEngine() override;
 
+    void setNetworkManager(QNetworkAccessManager *network);
     void setSettings(Settings settings)
     {
         m_settings = std::move(settings);
@@ -109,6 +111,9 @@ private:
     void pruneBudgetWindow() const;
 
     Settings m_settings;
+    QNetworkAccessManager *ensureNam();
+
+    QPointer<QNetworkAccessManager> m_sharedNam;
     QNetworkAccessManager *m_nam = nullptr;
     QNetworkReply *m_reply = nullptr;
     CompletionPromptContext m_activeContext;

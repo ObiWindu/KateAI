@@ -19,7 +19,7 @@ using namespace Qt::Literals::StringLiterals;
 namespace KateAi
 {
 
-WorkspaceServices::WorkspaceServices(QString workspace)
+WorkspaceServices::WorkspaceServices(QString workspace, QNetworkAccessManager *network)
     : m_workspace(std::move(workspace))
 {
     m_graph = std::make_shared<ProjectGraph>();
@@ -40,6 +40,9 @@ WorkspaceServices::WorkspaceServices(QString workspace)
     m_events = std::make_shared<EventStore>();
 
     m_mcp = std::make_unique<McpManager>();
+    if (network) {
+        m_mcp->setNetworkManager(network);
+    }
     // Record the workspace without loading its server list. The view calls
     // setLoadWorkspaceConfig(true) + reloadFromDisk() only after the user has
     // seen the commands the project wants to run.

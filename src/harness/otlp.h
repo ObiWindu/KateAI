@@ -9,6 +9,7 @@
 
 #include <QJsonObject>
 #include <QNetworkAccessManager>
+#include <QPointer>
 #include <QObject>
 #include <QUrl>
 
@@ -31,6 +32,7 @@ class OtlpExporter : public QObject
 public:
     explicit OtlpExporter(QObject *parent = nullptr);
 
+    void setNetworkManager(QNetworkAccessManager *network);
     void setEndpoint(const QUrl &endpoint);
     QUrl endpoint() const
     {
@@ -59,7 +61,10 @@ private:
     void send(const QList<Span> &spans);
     QUrl tracesEndpoint() const;
 
-    QNetworkAccessManager m_network;
+    QNetworkAccessManager *ensureNetwork();
+
+    QPointer<QNetworkAccessManager> m_sharedNetwork;
+    QNetworkAccessManager *m_ownedNetwork = nullptr;
     QUrl m_endpoint;
     QString m_serviceName = QStringLiteral("kateai");
     QJsonObject m_headers;

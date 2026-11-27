@@ -18,6 +18,7 @@
 #include <QUuid>
 
 #include <algorithm>
+#include <atomic>
 
 using namespace Qt::Literals::StringLiterals;
 
@@ -39,10 +40,10 @@ constexpr qint64 kMaxEventsPerConversation = 20000;
 
 QString connectionNameFor(EventStore *store)
 {
-    static quint64 counter = 0;
+    static std::atomic<quint64> counter{0};
     return QStringLiteral("kateai-events-%1-%2")
         .arg(reinterpret_cast<quintptr>(store))
-        .arg(++counter);
+        .arg(counter.fetch_add(1, std::memory_order_relaxed) + 1);
 }
 
 QString toolCallsJson(const QJsonArray &calls)
@@ -118,6 +119,7 @@ bool EventStore::open(QString *error)
         }
     }
 
+    bool opened = false;
     {
         QSqlDatabase db = QSqlDatabase::addDatabase(u"QSQLITE"_s, m_connectionName);
         db.setDatabaseName(path);
@@ -126,20 +128,25 @@ bool EventStore::open(QString *error)
             if (error) {
                 *error = m_lastError;
             }
-            QSqlDatabase::removeDatabase(m_connectionName);
-            return false;
+        } else {
+            opened = true;
+            QSqlQuery pragmas(db);
+            pragmas.exec(u"PRAGMA journal_mode=WAL"_s);
+            pragmas.exec(u"PRAGMA synchronous=FULL"_s);
+            pragmas.exec(u"PRAGMA busy_timeout=5000"_s);
+            pragmas.exec(u"PRAGMA foreign_keys=ON"_s);
+            // The event log holds one small conversation per connection and is
+            // append-mostly. SQLite's default page cache is ~2 MiB per open
+            // connection, and every chat window keeps one open; a bounded 1 MiB
+            // cache keeps a multi-window session from multiplying that overhead.
+            pragmas.exec(u"PRAGMA cache_size=-1024"_s);
         }
-
-        QSqlQuery pragmas(db);
-        pragmas.exec(u"PRAGMA journal_mode=WAL"_s);
-        pragmas.exec(u"PRAGMA synchronous=FULL"_s);
-        pragmas.exec(u"PRAGMA busy_timeout=5000"_s);
-        pragmas.exec(u"PRAGMA foreign_keys=ON"_s);
-        // The event log holds one small conversation per connection and is
-        // append-mostly. SQLite's default page cache is ~2 MiB per open
-        // connection, and every chat window keeps one open; a bounded 1 MiB
-        // cache keeps a multi-window session from multiplying that overhead.
-        pragmas.exec(u"PRAGMA cache_size=-1024"_s);
+    }
+    if (!opened) {
+        // Remove the connection only after the local QSqlDatabase handle has
+        // gone out of scope, otherwise Qt warns that it is still in use.
+        QSqlDatabase::removeDatabase(m_connectionName);
+        return false;
     }
 
     if (!ensureSchema(error)) {

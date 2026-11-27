@@ -109,6 +109,8 @@ constexpr qsizetype kMinRetainedHistoryMessages = 16;
 // can stream far more than the requested thinking budget; cap what is retained
 // and forwarded so a broken or reasoning-heavy model cannot pin megabytes.
 constexpr qsizetype kMaxThinkingChars = 1024 * 1024;
+constexpr qsizetype kMaxAssistantChars = 2 * 1024 * 1024;
+constexpr int kMaxSubagentRecords = 128;
 
 // Reasoning from older turns is still useful to the model that produced it for
 // the turn it belongs to, and for the one after that when a tool loop spans it.
@@ -415,8 +417,13 @@ AgentLoop::AgentLoop(QObject *parent)
             m_thinkingFinishedEmitted = true;
             Q_EMIT thinkingFinished(m_currentThinking);
         }
-        m_currentAssistant += delta;
-        Q_EMIT assistantDelta(delta);
+        const qsizetype room = kMaxAssistantChars - m_currentAssistant.size();
+        if (room <= 0) {
+            return;
+        }
+        const QString kept = delta.size() > room ? delta.left(room) : delta;
+        m_currentAssistant += kept;
+        Q_EMIT assistantDelta(kept);
     });
     connect(&m_client, &LlmClient::thinkingDelta, this, [this](const QString &delta) {
         const qsizetype room = kMaxThinkingChars - m_currentThinking.size();
@@ -519,8 +526,13 @@ AgentLoop::AgentLoop(QObject *parent)
             m_thinkingFinishedEmitted = true;
             Q_EMIT thinkingFinished(m_currentThinking);
         }
-        m_currentAssistant += delta;
-        Q_EMIT assistantDelta(delta);
+        const qsizetype room = kMaxAssistantChars - m_currentAssistant.size();
+        if (room <= 0) {
+            return;
+        }
+        const QString kept = delta.size() > room ? delta.left(room) : delta;
+        m_currentAssistant += kept;
+        Q_EMIT assistantDelta(kept);
     });
     connect(&m_acp, &AcpClient::thinkingDelta, this, [this](const QString &delta) {
         const qsizetype room = kMaxThinkingChars - m_currentThinking.size();
@@ -1483,6 +1495,27 @@ void AgentLoop::clearSubagentRecords()
     m_subagentRecords.clear();
 }
 
+void AgentLoop::pruneSubagentRecords()
+{
+    while (m_subagentRecords.size() > kMaxSubagentRecords) {
+        QString oldestId;
+        qint64 oldestStart = std::numeric_limits<qint64>::max();
+        for (auto it = m_subagentRecords.cbegin(); it != m_subagentRecords.cend(); ++it) {
+            if (m_activeSubtasks.contains(it.key())) {
+                continue;
+            }
+            if (it.value().startedAtMs < oldestStart) {
+                oldestStart = it.value().startedAtMs;
+                oldestId = it.key();
+            }
+        }
+        if (oldestId.isEmpty()) {
+            break;
+        }
+        m_subagentRecords.remove(oldestId);
+    }
+}
+
 QString AgentLoop::subagentTranscript(const QString &taskId, int offset, int maxChars) const
 {
     const SubagentRecord record = m_subagentRecords.value(taskId);
@@ -1817,6 +1850,21 @@ void AgentLoop::setMcpManager(McpManager *manager)
     syncToolAccess();
 }
 
+void AgentLoop::setNetworkManager(QNetworkAccessManager *network)
+{
+    m_sharedNam = network;
+    m_client.setNetworkManager(network);
+    m_web.setNetworkManager(network);
+    if (m_ownsMcp && m_mcp) {
+        m_mcp->setNetworkManager(network);
+    }
+    for (AgentLoop *child : std::as_const(m_activeSubtasks)) {
+        if (child) {
+            child->setNetworkManager(network);
+        }
+    }
+}
+
 void AgentLoop::setHarnessServices(std::shared_ptr<ProjectGraph> graph, McpManager *mcp,
                                    std::shared_ptr<EventStore> events)
 {
@@ -2073,6 +2121,7 @@ void AgentLoop::endHarnessTurn(const QString &status, const QString &detail)
         const QUrl endpoint(m_settings.telemetryEndpoint.trimmed());
         if (endpoint.isValid() && !endpoint.isEmpty()) {
             auto *exporter = new OtlpExporter(this);
+            exporter->setNetworkManager(m_sharedNam);
             exporter->setEndpoint(endpoint);
             connect(exporter, &OtlpExporter::exportFinished, this,
                     [this, exporter](bool ok, int status, const QString &error) {
@@ -4131,6 +4180,7 @@ bool AgentLoop::exportTelemetry(const QString &path, QString *error)
         return true;
     }
     auto *exporter = new OtlpExporter(this);
+    exporter->setNetworkManager(m_sharedNam);
     exporter->setEndpoint(endpoint);
     connect(exporter, &OtlpExporter::exportFinished, this,
             [this, exporter](bool ok, int status, const QString &exportError) {
@@ -6375,8 +6425,13 @@ void AgentLoop::handleToolSideEffects(const ToolCall &call, const ToolResult &re
     } else if (call.name == u"think"_s) {
         const QString thought = result.rawOutput.isEmpty() ? result.output : result.rawOutput;
         if (!thought.isEmpty()) {
-            m_currentThinking += thought + u'\n';
-            Q_EMIT thinkingDelta(thought + u'\n');
+            const QString chunk = thought + u'\n';
+            const qsizetype room = kMaxThinkingChars - m_currentThinking.size();
+            if (room > 0) {
+                const QString kept = chunk.size() > room ? chunk.left(room) : chunk;
+                m_currentThinking += kept;
+                Q_EMIT thinkingDelta(kept);
+            }
         }
     } else if (call.name == u"exit_plan_mode"_s) {
         Q_EMIT exitPlanModeRequested();
@@ -6950,6 +7005,7 @@ void AgentLoop::startSkillFork(const ToolCall &call, const SkillDefinition &skil
     }
 
     auto *child = new AgentLoop(this);
+    child->setNetworkManager(m_sharedNam);
     child->setMcpManager(m_mcp);
     child->setLocks(m_locks);
     child->setSubtaskDepth(m_subtaskDepth + 1);
@@ -6971,6 +7027,7 @@ void AgentLoop::startSkillFork(const ToolCall &call, const SkillDefinition &skil
     record.startedAtMs = QDateTime::currentMSecsSinceEpoch();
     record.sidechainPath = subagentSidechainPath(taskId);
     m_subagentRecords.insert(taskId, record);
+    pruneSubagentRecords();
     appendSubagentSidechain(taskId, u"start"_s,
                             QJsonObject{{u"skill"_s, skill.id},
                                         {u"name"_s, skill.name},
@@ -7261,6 +7318,7 @@ void AgentLoop::dispatchSubtask(const ToolCall &call)
     // object. Parenting the child also removes its signal connections when
     // the parent goes away.
     auto *child = new AgentLoop(this);
+    child->setNetworkManager(m_sharedNam);
     child->setMcpManager(m_mcp);
     if (m_sharedEvents) {
         child->m_sharedEvents = m_sharedEvents;
@@ -7303,6 +7361,7 @@ void AgentLoop::dispatchSubtask(const ToolCall &call)
     record.startedAtMs = QDateTime::currentMSecsSinceEpoch();
     record.sidechainPath = subagentSidechainPath(taskId);
     m_subagentRecords.insert(taskId, record);
+    pruneSubagentRecords();
     appendSubagentSidechain(taskId, u"start"_s,
                             QJsonObject{{u"agent"_s, profile.id},
                                         {u"name"_s, profile.name},
@@ -8159,6 +8218,7 @@ void AgentLoop::restoreSession(const SessionStore::SessionData &data)
             m_subagentRecords.insert(record.taskId, record);
         }
     }
+    pruneSubagentRecords();
 
     if (!data.orchestration.isEmpty()) {
         const QJsonObject orch = data.orchestration;

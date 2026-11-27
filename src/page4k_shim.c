@@ -226,30 +226,66 @@ struct MapEntry {
     void *real_ptr;
     size_t real_length;
 };
-#define MAX_MAPS 4096
-static struct MapEntry maps[MAX_MAPS];
-static int num_maps = 0;
+#define INITIAL_MAPS 4096
+#define MAX_MAPS_CAP (1024 * 1024)
+static struct MapEntry static_maps[INITIAL_MAPS];
+static struct MapEntry *maps_table = static_maps;
+static size_t maps_capacity = INITIAL_MAPS;
+static size_t num_maps = 0;
 static pthread_mutex_t map_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-static void record_map(void *user_ptr, void *real_ptr, size_t real_length) {
+static int grow_maps_locked(void) {
+    if (maps_capacity >= MAX_MAPS_CAP) {
+        return 0;
+    }
+    void *(*orig_mmap_fn)(void *, size_t, int, int, int, off_t) = get_orig_mmap();
+    int (*orig_munmap_fn)(void *, size_t) = get_orig_munmap();
+    if (!orig_mmap_fn || !orig_munmap_fn) {
+        return 0;
+    }
+    size_t new_cap = maps_capacity * 2;
+    if (new_cap > MAX_MAPS_CAP) {
+        new_cap = MAX_MAPS_CAP;
+    }
+    size_t new_bytes = new_cap * sizeof(struct MapEntry);
+    void *mem = orig_mmap_fn(NULL, new_bytes, PROT_READ | PROT_WRITE,
+                             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (mem == MAP_FAILED) {
+        return 0;
+    }
+    memcpy(mem, maps_table, num_maps * sizeof(struct MapEntry));
+    if (maps_table != static_maps) {
+        orig_munmap_fn(maps_table, maps_capacity * sizeof(struct MapEntry));
+    }
+    maps_table = (struct MapEntry *)mem;
+    maps_capacity = new_cap;
+    return 1;
+}
+
+static int record_map(void *user_ptr, void *real_ptr, size_t real_length) {
+    int ok = 1;
     pthread_mutex_lock(&map_mutex);
-    if (num_maps < MAX_MAPS) {
-        maps[num_maps].user_ptr = user_ptr;
-        maps[num_maps].real_ptr = real_ptr;
-        maps[num_maps].real_length = real_length;
+    if (num_maps >= maps_capacity) {
+        ok = grow_maps_locked();
+    }
+    if (ok) {
+        maps_table[num_maps].user_ptr = user_ptr;
+        maps_table[num_maps].real_ptr = real_ptr;
+        maps_table[num_maps].real_length = real_length;
         num_maps++;
     }
     pthread_mutex_unlock(&map_mutex);
+    return ok;
 }
 
 static int unrecord_map(void *addr, void **out_real_ptr, size_t *out_real_length) {
     int found = 0;
     pthread_mutex_lock(&map_mutex);
-    for (int i = 0; i < num_maps; i++) {
-        if (maps[i].user_ptr == addr) {
-            *out_real_ptr = maps[i].real_ptr;
-            *out_real_length = maps[i].real_length;
-            maps[i] = maps[num_maps - 1];
+    for (size_t i = 0; i < num_maps; i++) {
+        if (maps_table[i].user_ptr == addr) {
+            *out_real_ptr = maps_table[i].real_ptr;
+            *out_real_length = maps_table[i].real_length;
+            maps_table[i] = maps_table[num_maps - 1];
             num_maps--;
             found = 1;
             break;
@@ -272,7 +308,14 @@ SHIM_EXPORT void *mmap(void *addr, size_t length, int prot, int flags, int fd, o
             return MAP_FAILED;
         }
         void *user_ptr = (char *)real_ptr + diff;
-        record_map(user_ptr, real_ptr, aligned_length);
+        if (!record_map(user_ptr, real_ptr, aligned_length)) {
+            int (*munmap_fn)(void *, size_t) = get_orig_munmap();
+            if (munmap_fn) {
+                munmap_fn(real_ptr, aligned_length);
+            }
+            errno = ENOMEM;
+            return MAP_FAILED;
+        }
         return user_ptr;
     }
     return fn(addr, length, prot, flags, fd, offset);
@@ -319,7 +362,11 @@ SHIM_EXPORT long syscall(long number, ...) {
                 return res;
             }
             void *user_ptr = (char *)res + diff;
-            record_map(user_ptr, (void *)res, aligned_length);
+            if (!record_map(user_ptr, (void *)res, aligned_length)) {
+                fn(__NR_munmap, (void *)res, aligned_length);
+                errno = ENOMEM;
+                return (long)MAP_FAILED;
+            }
             return (long)user_ptr;
         }
     } else if (number == __NR_munmap) {

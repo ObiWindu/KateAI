@@ -223,8 +223,12 @@ QWidget *TranscriptVirtualizer::ensureAliasVisible(const QString &alias)
         return nullptr;
     }
     EntryState &entry = m_entries[entryIndex];
+    const bool wasMaterialized = entry.materialized;
     m_requiredEntry = entryIndex;
     materialize(entryIndex);
+    if (!wasMaterialized && entry.materialized) {
+        Q_EMIT viewportUpdated();
+    }
     QPointer<QWidget> target = entry.row;
     QPointer<QWidget> firstWidget;
     const QString toolKey = toolWidgetKey(alias);
@@ -335,6 +339,7 @@ void TranscriptVirtualizer::refresh()
         scrollBar->setValue(entryOffset(anchor) + offsetInAnchor);
     }
     m_refreshing = false;
+    Q_EMIT viewportUpdated();
 }
 
 void TranscriptVirtualizer::refreshTail()
@@ -348,6 +353,7 @@ void TranscriptVirtualizer::refreshTail()
             materialize(i);
         }
     }
+    Q_EMIT viewportUpdated();
     if (m_scrollArea) {
         QTimer::singleShot(0, this, [this] {
             if (m_scrollArea && m_scrollArea->verticalScrollBar()) {
@@ -420,7 +426,8 @@ void TranscriptVirtualizer::evict(int index, bool force)
             entry.rowLayout->removeWidget(widget);
         }
         widget->hide();
-        delete widget;
+        widget->setParent(nullptr);
+        widget->deleteLater();
     }
     entry.widgets.clear();
     entry.materialized = false;

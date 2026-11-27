@@ -663,8 +663,16 @@ void PromptEdit::addHistory(const QString &text)
     if (trimmed.isEmpty()) {
         return;
     }
-    if (m_history.isEmpty() || m_history.last() != trimmed) {
-        m_history.append(trimmed);
+    constexpr int kMaxHistoryEntries = 200;
+    constexpr qsizetype kMaxHistoryEntryChars = 64 * 1024;
+    const QString stored = trimmed.size() > kMaxHistoryEntryChars
+        ? trimmed.left(kMaxHistoryEntryChars)
+        : trimmed;
+    if (m_history.isEmpty() || m_history.last() != stored) {
+        m_history.append(stored);
+        while (m_history.size() > kMaxHistoryEntries) {
+            m_history.removeFirst();
+        }
     }
     m_historyIndex = -1;
     m_draft.clear();

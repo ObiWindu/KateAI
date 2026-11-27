@@ -292,6 +292,17 @@ LlmClient::LlmClient(QObject *parent)
     connect(&m_retryTimer, &QTimer::timeout, this, &LlmClient::executeRetry);
 }
 
+QNetworkAccessManager *LlmClient::ensureNam()
+{
+    if (m_sharedNam) {
+        return m_sharedNam.data();
+    }
+    if (!m_ownedNam) {
+        m_ownedNam = new QNetworkAccessManager(this);
+    }
+    return m_ownedNam;
+}
+
 LlmClient::~LlmClient()
 {
     abort();
@@ -1057,7 +1068,7 @@ void LlmClient::doComplete(const QList<ChatMessage> &messages)
     }
 
     m_geminiRequestUsedCache = geminiNative && !geminiPlan.cachedContent.isEmpty();
-    m_reply = m_nam.post(request, requestBody);
+    m_reply = ensureNam()->post(request, requestBody);
     if (geminiNative) {
         // Cache creation happens alongside the completion. It is used by the
         // next request, never by this one, so a cold cache does not add a
@@ -1529,7 +1540,7 @@ void LlmClient::deleteGeminiCacheResource(const QString &baseUrl, const QString 
     QNetworkRequest request(url);
     request.setRawHeader("x-goog-api-key", apiKeyFor(m_settings).toUtf8());
     request.setTransferTimeout(30000);
-    if (QNetworkReply *reply = m_nam.deleteResource(request)) {
+    if (QNetworkReply *reply = ensureNam()->deleteResource(request)) {
         connect(reply, &QNetworkReply::finished, reply, &QNetworkReply::deleteLater);
     }
 }
@@ -1584,7 +1595,7 @@ void LlmClient::startGeminiCache(const QList<ChatMessage> &messages,
     request.setTransferTimeout(45000);
 
     m_geminiCachePendingKey = plan.key;
-    m_geminiCacheReply = m_nam.post(
+    m_geminiCacheReply = ensureNam()->post(
         request, QJsonDocument(payload).toJson(QJsonDocument::Compact));
     QNetworkReply *reply = m_geminiCacheReply;
     const QString cacheKey = plan.key;
@@ -1866,7 +1877,7 @@ void LlmClient::fetchModels(Provider provider)
         request.setHeader(QNetworkRequest::UserAgentHeader, u"Kate AI"_s);
     }
 
-    QNetworkReply *reply = m_nam.get(request);
+    QNetworkReply *reply = ensureNam()->get(request);
     reply->setParent(this);
     m_modelReplies.append(reply);
     connect(reply, &QNetworkReply::finished, this, [this, reply, provider]() {

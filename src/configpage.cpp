@@ -614,7 +614,9 @@ QWidget *KateAiConfigPage::buildAcpRegistryTab()
         m_acpRegistryStatus->setText(i18n("Loading ACP registry…"));
         QNetworkRequest request(QUrl(u"https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json"_s));
         request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+        request.setTransferTimeout(30000);
         QNetworkReply *reply = m_acpRegistryNetwork->get(request);
+        reply->setReadBufferSize(4 * 1024 * 1024 + 1);
         connect(reply, &QNetworkReply::finished, this, [this, reply]() {
             // The registry is a small JSON document. A body beyond the cap is
             // treated as a failed fetch rather than parsed or retained.
