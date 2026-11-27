@@ -1471,9 +1471,14 @@ namespace
 
 constexpr auto kCredentialMarker = "${kateai-credential:";
 
+QString workspaceCredentialScope(const QString &workspace)
+{
+    return QString::fromLatin1(QCryptographicHash::hash(workspace.toUtf8(), QCryptographicHash::Sha1).toHex().left(12));
+}
+
 QString credentialId(const QString &workspace, const QString &server, const QString &kind, const QString &key)
 {
-    const QString scope = QString::fromLatin1(QCryptographicHash::hash(workspace.toUtf8(), QCryptographicHash::Sha1).toHex().left(12));
+    const QString scope = workspaceCredentialScope(workspace);
     const QString name = QString::fromLatin1(
         QCryptographicHash::hash((kind + u':' + server + u':' + key).toUtf8(), QCryptographicHash::Sha1).toHex().left(24));
     return u"mcp-%1-%2"_s.arg(scope, name);
@@ -1501,13 +1506,20 @@ bool protectValue(const QString &workspace, const QString &server, const QString
     return true;
 }
 
-QString resolveValue(const QString &value)
+QString resolveValue(const QString &workspace, const QString &value)
 {
     if (!isCredentialMarker(value)) {
         return value;
     }
     const QString id = value.mid(int(QLatin1String(kCredentialMarker).size()));
     const QString trimmed = id.left(id.size() - 1);
+    // Only resolve credentials that belong to this workspace's MCP scope.
+    // Without this check, a repository's .kateai/mcp.json could reference
+    // global LLM API keys or another workspace's MCP tokens.
+    const QString requiredPrefix = u"mcp-%1-"_s.arg(workspaceCredentialScope(workspace));
+    if (!trimmed.startsWith(requiredPrefix)) {
+        return {};
+    }
     bool ok = false;
     const QString secret = CredentialStore::load(trimmed, &ok);
     return ok ? secret : QString();
@@ -1554,10 +1566,10 @@ QList<McpServerConfig> load(const QString &workspace)
     QList<McpServerConfig> servers = McpServerConfig::serversFromJson(document.object());
     for (McpServerConfig &server : servers) {
         for (auto it = server.headers.begin(); it != server.headers.end(); ++it) {
-            it.value() = resolveValue(it.value());
+            it.value() = resolveValue(workspace, it.value());
         }
         for (auto it = server.env.begin(); it != server.env.end(); ++it) {
-            it.value() = resolveValue(it.value());
+            it.value() = resolveValue(workspace, it.value());
         }
     }
     return servers;

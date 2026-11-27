@@ -43,15 +43,86 @@ QString resolveForMatch(const QString &workspace, const QString &path)
         info = QFileInfo(QDir(workspace).absoluteFilePath(path));
     }
     const QString canonical = info.canonicalFilePath();
-    return canonical.isEmpty() ? QDir::cleanPath(info.absoluteFilePath()) : canonical;
+    if (!canonical.isEmpty()) {
+        return canonical;
+    }
+    // When the target file does not yet exist (e.g. write_file / apply_patch
+    // creating a new file under a symlinked directory), resolve the deepest
+    // existing ancestor so symlinked directories cannot bypass path rules.
+    QString current = QDir::cleanPath(info.absoluteFilePath());
+    QStringList suffix;
+    int symlinkHops = 0;
+    while (!current.isEmpty()) {
+        const QFileInfo curInfo(current);
+        const QString curCanonical = curInfo.canonicalFilePath();
+        if (!curCanonical.isEmpty()) {
+            QString resolved = curCanonical;
+            for (auto it = suffix.crbegin(); it != suffix.crend(); ++it) {
+                resolved = QDir(resolved).filePath(*it);
+            }
+            return QDir::cleanPath(resolved);
+        }
+        if (curInfo.isSymLink() && symlinkHops < 16) {
+            const QString target = curInfo.symLinkTarget();
+            if (!target.isEmpty()) {
+                ++symlinkHops;
+                current = QDir::cleanPath(target);
+                continue;
+            }
+        }
+        const QString parent = QFileInfo(current).path();
+        if (parent == current || parent.isEmpty()) {
+            break;
+        }
+        suffix.append(QFileInfo(current).fileName());
+        current = parent;
+    }
+    return QDir::cleanPath(info.absoluteFilePath());
+}
+
+void extractPatchPaths(const QString &patchText, QStringList *values)
+{
+    if (patchText.isEmpty() || !values) {
+        return;
+    }
+    const QStringList lines = patchText.split(u'\n');
+    for (QString line : lines) {
+        if (line.endsWith(u'\r')) {
+            line.chop(1);
+        }
+        QString raw;
+        if (line.startsWith(u"+++ "_s) || line.startsWith(u"--- "_s)) {
+            raw = line.mid(4);
+            const qsizetype tab = raw.indexOf(u'\t');
+            if (tab >= 0) {
+                raw = raw.left(tab);
+            }
+            raw = raw.trimmed();
+            if (raw.size() >= 2 && raw.startsWith(u'"') && raw.endsWith(u'"')) {
+                raw = raw.mid(1, raw.size() - 2);
+            }
+            if (raw.isEmpty() || raw == u"/dev/null"_s) {
+                continue;
+            }
+            if (raw.startsWith(u"a/"_s) || raw.startsWith(u"b/"_s)) {
+                raw = raw.mid(2);
+            }
+            if (!raw.isEmpty()) {
+                values->append(raw);
+            }
+        }
+    }
 }
 
 QStringList pathValues(const QJsonObject &arguments)
 {
     QStringList values;
-    const QString path = arguments.value(u"path"_s).toString();
-    if (!path.isEmpty()) {
-        values.append(path);
+    for (const QString &key : {u"path"_s, u"file_path"_s, u"filePath"_s, u"file"_s,
+                               u"target"_s, u"destination"_s, u"source"_s}) {
+        const QString item = arguments.value(key).toString();
+        if (!item.isEmpty()) {
+            values.append(item);
+        }
     }
     for (const QString &key : {u"paths"_s, u"files"_s}) {
         for (const QJsonValue &value : arguments.value(key).toArray()) {
@@ -61,7 +132,20 @@ QStringList pathValues(const QJsonObject &arguments)
             }
         }
     }
+    extractPatchPaths(arguments.value(u"patch"_s).toString(), &values);
+    extractPatchPaths(arguments.value(u"diff"_s).toString(), &values);
     return values;
+}
+
+bool hasShellMetacharacters(const QString &rawCommand)
+{
+    for (const QChar ch : rawCommand) {
+        if (ch == u'\n' || ch == u'\r' || ch == u';' || ch == u'|' || ch == u'&'
+            || ch == u'`' || ch == u'>' || ch == u'<') {
+            return true;
+        }
+    }
+    return rawCommand.contains(u"$("_s);
 }
 
 QStringList commandPathTokens(const QString &command)
@@ -94,7 +178,7 @@ bool wildcardMatch(const QString &pattern, const QString &value)
 QString riskFor(const QString &toolName)
 {
     const QString canonical = canonicalToolName(toolName);
-    if (canonical == u"bash"_s || canonical == u"new_task"_s
+    if (canonical == u"bash"_s || canonical == u"new_task"_s || canonical == u"build_run"_s
         || canonical.startsWith(u"mcp__"_s) || canonical == u"terminal_run"_s
         || canonical == u"debug_session"_s || canonical == u"debug_step"_s
         || canonical == u"debug_set_breakpoint"_s || canonical == u"debug_console"_s) {
@@ -184,7 +268,15 @@ bool ruleMatches(const PolicyRule &rule, const QString &toolName, const QJsonObj
         if (canonical != u"bash"_s) {
             return false;
         }
-        const QString command = arguments.value(u"command"_s).toString().simplified();
+        const QString rawCommand = arguments.value(u"command"_s).toString();
+        const QString command = rawCommand.simplified();
+        // A commandPrefix Allow rule must never auto-approve chained, piped,
+        // redirected, subshell, or multi-line commands (e.g. `git status && rm ...`).
+        // Deny/Ask/Review rules still match so restrictions cannot be bypassed.
+        if (!rule.match.commandPrefixes.isEmpty() && rule.verdict == PolicyVerdict::Allow
+            && hasShellMetacharacters(rawCommand)) {
+            return false;
+        }
         bool matched = rule.match.commandPrefixes.isEmpty();
         for (const QString &prefix : rule.match.commandPrefixes) {
             const QString normalized = prefix.simplified();
@@ -284,7 +376,7 @@ QString scopeForFile(const QString &path)
 }
 
 void parseRules(const QString &file, const QString &scope, QList<PolicyRule> *rules,
-                QList<PolicyWarning> *warnings)
+                QList<PolicyWarning> *warnings, bool allowProjectAllow)
 {
     const QJsonDocument document = QJsonDocument::fromJson(readFile(file).toUtf8());
     if (!document.isObject() && !document.isArray()) {
@@ -315,6 +407,11 @@ void parseRules(const QString &file, const QString &scope, QList<PolicyRule> *ru
         if (rule.verdict == PolicyVerdict::NoMatch) {
             warnings->append({file,
                               u"Rule %1 has an unknown decision; it is ignored."_s.arg(rule.id)});
+            continue;
+        }
+        if (scope == u"project"_s && !allowProjectAllow && rule.verdict == PolicyVerdict::Allow) {
+            warnings->append({file,
+                              u"Rule %1 in project policy cannot auto-allow actions; ignoring allow rule."_s.arg(rule.id)});
             continue;
         }
         const QJsonObject match = object.value(u"match"_s).toObject();
@@ -389,7 +486,7 @@ void PolicyEngine::clear()
     m_warnings.clear();
 }
 
-bool PolicyEngine::load(const QString &workspace, QString *error)
+bool PolicyEngine::load(const QString &workspace, QString *error, bool allowProjectAllow)
 {
     QStringList files;
     files.append(managedPolicyPath());
@@ -397,17 +494,17 @@ bool PolicyEngine::load(const QString &workspace, QString *error)
         files.append(QDir(workspace).filePath(u".kateai/policy.json"_s));
     }
     files.append(userPolicyPath());
-    return loadFiles(files, error);
+    return loadFiles(files, error, allowProjectAllow);
 }
 
-bool PolicyEngine::loadFiles(const QStringList &files, QString *error)
+bool PolicyEngine::loadFiles(const QStringList &files, QString *error, bool allowProjectAllow)
 {
     clear();
     for (const QString &file : files) {
         if (!QFileInfo::exists(file)) {
             continue;
         }
-        parseRules(file, scopeForFile(file), &m_rules, &m_warnings);
+        parseRules(file, scopeForFile(file), &m_rules, &m_warnings, allowProjectAllow);
         m_files.append(file);
     }
     // Managed rules are the most restrictive, then project, then user. The

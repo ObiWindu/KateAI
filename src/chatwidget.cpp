@@ -2254,7 +2254,8 @@ void ChatWidget::addUserMessage(const QString &text)
     // in the transcript; plain text preserves every character and newline.
     auto *msgLabel = new QTextBrowser(card);
     msgLabel->setObjectName(u"userMessageBody"_s);
-    msgLabel->setOpenExternalLinks(true);
+    msgLabel->setOpenExternalLinks(false);
+    connect(msgLabel, &QTextBrowser::anchorClicked, this, [](const QUrl &url) { openSafeExternalUrl(url); });
     msgLabel->setFrameShape(QFrame::NoFrame);
     msgLabel->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     msgLabel->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
@@ -2369,7 +2370,9 @@ void ChatWidget::setStreaming(const QString &text)
 
         m_activeAssistantBrowser = new QTextBrowser(m_activeAssistantWidget);
         m_activeAssistantBrowser->setObjectName(u"assistantBrowser"_s);
-        m_activeAssistantBrowser->setOpenExternalLinks(true);
+        m_activeAssistantBrowser->setOpenExternalLinks(false);
+        connect(m_activeAssistantBrowser, &QTextBrowser::anchorClicked, this,
+                [](const QUrl &url) { openSafeExternalUrl(url); });
         m_activeAssistantBrowser->setFrameShape(QFrame::NoFrame);
         m_activeAssistantBrowser->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
         m_activeAssistantBrowser->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
@@ -8184,7 +8187,9 @@ void ChatWidget::rebuildTranscript()
 
                     auto *browser = new QTextBrowser(assistantWidget);
                     browser->setObjectName(u"assistantBrowser"_s);
-                    browser->setOpenExternalLinks(true);
+                    browser->setOpenExternalLinks(false);
+                    connect(browser, &QTextBrowser::anchorClicked, this,
+                            [](const QUrl &url) { openSafeExternalUrl(url); });
                     browser->setFrameShape(QFrame::NoFrame);
                     browser->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
                     browser->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);

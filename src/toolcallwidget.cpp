@@ -5,6 +5,7 @@
 
 #include "toolcallwidget.h"
 
+#include "agenttext.h"
 #include "chattheme.h"
 #include "codehighlight.h"
 
@@ -420,8 +421,16 @@ ToolCallWidget::ToolCallWidget(const QString &toolCallId, QWidget *parent)
     // private members.
     m_describeDiff->setObjectName(u"toolDiff"_s);
     m_describeDiff->setReadOnly(true);
-    m_describeDiff->setOpenExternalLinks(true);
-    connect(m_describeDiff, &QTextBrowser::anchorClicked, this, [this](const QUrl &url){ if(url.isLocalFile()) Q_EMIT openFileRequested(url.toLocalFile(), 0); else if(url.scheme()==u"file"_s) Q_EMIT openFileRequested(url.path(), 0); });
+    m_describeDiff->setOpenExternalLinks(false);
+    connect(m_describeDiff, &QTextBrowser::anchorClicked, this, [this](const QUrl &url) {
+        if (url.isLocalFile()) {
+            Q_EMIT openFileRequested(url.toLocalFile(), 0);
+        } else if (url.scheme() == u"file"_s) {
+            Q_EMIT openFileRequested(url.path(), 0);
+        } else {
+            openSafeExternalUrl(url);
+        }
+    });
     m_describeDiff->setMinimumWidth(0);
     m_describeDiff->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     m_describeDiff->setLineWrapMode(QTextEdit::WidgetWidth);
@@ -436,8 +445,16 @@ ToolCallWidget::ToolCallWidget(const QString &toolCallId, QWidget *parent)
     // into private members.
     m_details->setObjectName(u"toolDetails"_s);
     m_details->setReadOnly(true);
-    m_details->setOpenExternalLinks(true);
-    connect(m_details, &QTextBrowser::anchorClicked, this, [this](const QUrl &url){ if(url.isLocalFile()) Q_EMIT openFileRequested(url.toLocalFile(), 0); else if(url.scheme()==u"file"_s) Q_EMIT openFileRequested(url.path(), 0); });
+    m_details->setOpenExternalLinks(false);
+    connect(m_details, &QTextBrowser::anchorClicked, this, [this](const QUrl &url) {
+        if (url.isLocalFile()) {
+            Q_EMIT openFileRequested(url.toLocalFile(), 0);
+        } else if (url.scheme() == u"file"_s) {
+            Q_EMIT openFileRequested(url.path(), 0);
+        } else {
+            openSafeExternalUrl(url);
+        }
+    });
     m_details->setMinimumWidth(0);
     m_details->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     m_details->setLineWrapMode(QTextEdit::WidgetWidth);

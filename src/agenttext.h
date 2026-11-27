@@ -6,6 +6,7 @@
 #pragma once
 
 #include <QString>
+#include <QUrl>
 
 class QObject;
 class QTextDocument;
@@ -45,5 +46,9 @@ QTextDocument *makeMarkdownDocument(const QString &markdown, const QString &styl
 // `styleSheet` before parsing. Reuses the document owned by `view` so
 // streaming ticks and evicted cards do not leak QTextDocument instances.
 void setMarkdownContent(QTextEdit *view, const QString &markdown, const QString &styleSheet = QString());
+
+// Opens an external link only when it uses an explicit http/https scheme,
+// preventing model-generated markdown from launching file:// or custom URI handlers.
+bool openSafeExternalUrl(const QUrl &url);
 
 } // namespace KateAi

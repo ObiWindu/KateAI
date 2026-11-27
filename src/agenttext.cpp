@@ -7,6 +7,7 @@
 
 #include "codehighlight.h"
 
+#include <QDesktopServices>
 #include <QRegularExpression>
 #include <QTextDocument>
 #include <QTextEdit>
@@ -227,6 +228,18 @@ void setMarkdownContent(QTextEdit *view, const QString &markdown, const QString 
     doc->clear();
     doc->setDefaultStyleSheet(styleSheet);
     renderMarkdown(doc, markdown);
+}
+
+bool openSafeExternalUrl(const QUrl &url)
+{
+    if (!url.isValid()) {
+        return false;
+    }
+    const QString scheme = url.scheme().toLower();
+    if ((scheme != u"http"_s && scheme != u"https"_s) || url.host().isEmpty()) {
+        return false;
+    }
+    return QDesktopServices::openUrl(url);
 }
 
 } // namespace KateAi
