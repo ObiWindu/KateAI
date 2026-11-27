@@ -56,10 +56,21 @@ GitResult runGit(const QString &workingDir, const QStringList &arguments, int ti
     QElapsedTimer elapsed;
     elapsed.start();
     bool capped = false;
+    auto drainStreams = [&]() {
+        const qint64 outRem = kMaxGitOutputBytes - stdOut.size() + 1;
+        if (outRem > 0) {
+            git.setReadChannel(QProcess::StandardOutput);
+            stdOut += git.read(outRem);
+        }
+        const qint64 errRem = kMaxGitOutputBytes - stdErr.size() + 1;
+        if (errRem > 0) {
+            git.setReadChannel(QProcess::StandardError);
+            stdErr += git.read(errRem);
+        }
+    };
     while (true) {
-        stdOut += git.readAllStandardOutput();
-        stdErr += git.readAllStandardError();
-        if (stdOut.size() > kMaxGitOutputBytes) {
+        drainStreams();
+        if (stdOut.size() > kMaxGitOutputBytes || stdErr.size() > kMaxGitOutputBytes) {
             capped = true;
             git.kill();
             git.waitForFinished(1000);
@@ -78,8 +89,12 @@ GitResult runGit(const QString &workingDir, const QStringList &arguments, int ti
             return result;
         }
     }
-    stdOut += git.readAllStandardOutput();
-    stdErr += git.readAllStandardError();
+    if (!capped) {
+        drainStreams();
+        if (stdOut.size() > kMaxGitOutputBytes || stdErr.size() > kMaxGitOutputBytes) {
+            capped = true;
+        }
+    }
     if (capped) {
         result.err = u"git output exceeded the 32 MB limit"_s;
         return result;
@@ -358,8 +373,14 @@ bool SubagentWorktree::apply(const QString &workspace, const QString &patch, QSt
         }
         return false;
     }
-    file.write(patch.toUtf8());
-    file.flush();
+    const QByteArray patchBytes = patch.toUtf8();
+    if (file.write(patchBytes) != patchBytes.size() || !file.flush()) {
+        if (error) {
+            *error = u"Could not write the patch: "_s + file.errorString();
+        }
+        return false;
+    }
+    file.close();
     const QString path = file.fileName();
     const GitResult check = runGit(root, {u"apply"_s, u"--check"_s, u"--whitespace=nowarn"_s, path}, 30000);
     if (!check.ok) {

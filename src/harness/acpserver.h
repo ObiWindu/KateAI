@@ -11,7 +11,9 @@
 #include <QJsonObject>
 #include <QObject>
 #include <QString>
+#include <atomic>
 #include <functional>
+#include <memory>
 
 class QIODevice;
 class QThread;
@@ -129,6 +131,7 @@ private:
     QIODevice *m_output = nullptr;
     QThread *m_readerThread = nullptr;
     QObject *m_reader = nullptr;
+    std::shared_ptr<std::atomic<bool>> m_readerStop;
     bool m_initialized = false;
 };
 

@@ -21,6 +21,12 @@
 #include <iostream>
 #include <string>
 
+#ifdef Q_OS_UNIX
+#include <cerrno>
+#include <poll.h>
+#include <unistd.h>
+#endif
+
 using namespace Qt::Literals::StringLiterals;
 
 namespace KateAi
@@ -66,42 +72,145 @@ QString textFromBlocks(const QJsonArray &blocks)
 class StdinReader : public QObject
 {
 public:
-    explicit StdinReader(AcpServer *server)
+    StdinReader(AcpServer *server, std::shared_ptr<std::atomic<bool>> stopFlag)
         : m_server(server)
+        , m_stop(std::move(stopFlag))
     {
     }
 
     void readLoop()
     {
-        std::string line;
-        while (std::getline(std::cin, line)) {
-            const QByteArray data = QByteArray::fromStdString(line);
+        constexpr qsizetype kMaxLineBytes = 16 * 1024 * 1024;
+        auto dispatchLine = [this](const QByteArray &data) {
             if (data.trimmed().isEmpty()) {
-                continue;
+                return;
             }
             QPointer<AcpServer> server = m_server;
+            if (!server) {
+                return;
+            }
             QMetaObject::invokeMethod(
-                m_server,
+                server.data(),
                 [server, data] {
                     if (server) {
                         server->handleLine(data);
                     }
                 },
                 Qt::QueuedConnection);
-        }
-        QPointer<AcpServer> server = m_server;
-        QMetaObject::invokeMethod(
-            m_server,
-            [server] {
-                if (server) {
-                    Q_EMIT server->stdioClosed();
+        };
+        auto emitOversized = [this]() {
+            QPointer<AcpServer> server = m_server;
+            if (!server) {
+                return;
+            }
+            QMetaObject::invokeMethod(
+                server.data(),
+                [server] {
+                    if (server) {
+                        Q_EMIT server->protocolError(u"ACP JSON-RPC message exceeded the 16 MB line limit."_s);
+                    }
+                },
+                Qt::QueuedConnection);
+        };
+
+#ifdef Q_OS_UNIX
+        QByteArray buffer;
+        bool droppingOversized = false;
+        char chunk[4096];
+        while (!m_stop || !m_stop->load(std::memory_order_acquire)) {
+            struct pollfd pfd {};
+            pfd.fd = STDIN_FILENO;
+            pfd.events = POLLIN;
+            const int ready = ::poll(&pfd, 1, 100);
+            if (ready == 0) {
+                continue;
+            }
+            if (ready < 0) {
+                if (errno == EINTR) {
+                    continue;
                 }
-            },
-            Qt::QueuedConnection);
+                break;
+            }
+            if (pfd.revents & (POLLERR | POLLNVAL)) {
+                break;
+            }
+            if (!(pfd.revents & (POLLIN | POLLHUP))) {
+                continue;
+            }
+            const ssize_t n = ::read(STDIN_FILENO, chunk, sizeof(chunk));
+            if (n == 0) {
+                break;
+            }
+            if (n < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                break;
+            }
+            qsizetype pos = 0;
+            const QByteArrayView view(chunk, static_cast<qsizetype>(n));
+            while (pos < view.size()) {
+                const qsizetype nl = view.indexOf('\n', pos);
+                if (nl < 0) {
+                    if (!droppingOversized) {
+                        if (buffer.size() + (view.size() - pos) > kMaxLineBytes) {
+                            buffer.clear();
+                            droppingOversized = true;
+                            emitOversized();
+                        } else {
+                            buffer.append(view.sliced(pos));
+                        }
+                    }
+                    break;
+                }
+                const qsizetype segLen = nl - pos;
+                if (droppingOversized) {
+                    droppingOversized = false;
+                } else if (buffer.size() + segLen > kMaxLineBytes) {
+                    buffer.clear();
+                    emitOversized();
+                } else {
+                    buffer.append(view.sliced(pos, segLen));
+                    if (buffer.endsWith('\r')) {
+                        buffer.chop(1);
+                    }
+                    dispatchLine(buffer);
+                    buffer.clear();
+                }
+                pos = nl + 1;
+            }
+        }
+        if (!droppingOversized && !buffer.isEmpty() && (!m_stop || !m_stop->load(std::memory_order_acquire))) {
+            dispatchLine(buffer);
+        }
+#else
+        std::string line;
+        while ((!m_stop || !m_stop->load(std::memory_order_acquire)) && std::getline(std::cin, line)) {
+            if (static_cast<qsizetype>(line.size()) > kMaxLineBytes) {
+                emitOversized();
+                continue;
+            }
+            dispatchLine(QByteArray::fromStdString(line));
+        }
+#endif
+        if (!m_stop || !m_stop->load(std::memory_order_acquire)) {
+            QPointer<AcpServer> server = m_server;
+            if (server) {
+                QMetaObject::invokeMethod(
+                    server.data(),
+                    [server] {
+                        if (server) {
+                            Q_EMIT server->stdioClosed();
+                        }
+                    },
+                    Qt::QueuedConnection);
+            }
+        }
     }
 
 private:
-    AcpServer *m_server = nullptr;
+    QPointer<AcpServer> m_server;
+    std::shared_ptr<std::atomic<bool>> m_stop;
 };
 
 } // namespace
@@ -133,27 +242,38 @@ void AcpServer::startStdio()
     if (m_readerThread) {
         return;
     }
-    m_readerThread = new QThread(this);
-    m_reader = new StdinReader(this);
-    m_reader->moveToThread(m_readerThread);
-    connect(m_readerThread, &QThread::started, m_reader, [this] {
-        static_cast<StdinReader *>(m_reader)->readLoop();
-        if (m_readerThread) {
-            m_readerThread->quit();
+    m_readerStop = std::make_shared<std::atomic<bool>>(false);
+    // Keep the thread unparented so stop() owns its shutdown cleanly and
+    // ~QObject cannot abort by destroying a still-running child QThread.
+    m_readerThread = new QThread;
+    auto *reader = new StdinReader(this, m_readerStop);
+    m_reader = reader;
+    reader->moveToThread(m_readerThread);
+    connect(m_readerThread, &QThread::started, reader, [reader] {
+        reader->readLoop();
+        if (QThread *current = QThread::currentThread()) {
+            current->quit();
         }
     });
-    connect(m_readerThread, &QThread::finished, m_reader, &QObject::deleteLater);
+    connect(m_readerThread, &QThread::finished, reader, &QObject::deleteLater);
     m_readerThread->start();
 }
 
 void AcpServer::stop()
 {
+    if (m_readerStop) {
+        m_readerStop->store(true, std::memory_order_release);
+    }
     if (m_readerThread) {
-        m_readerThread->quit();
-        m_readerThread->wait(2000);
-        m_readerThread->deleteLater();
+        QThread *thread = m_readerThread;
         m_readerThread = nullptr;
         m_reader = nullptr;
+        thread->quit();
+        if (thread->wait(2000)) {
+            delete thread;
+        } else {
+            connect(thread, &QThread::finished, thread, &QObject::deleteLater);
+        }
     }
 }
 

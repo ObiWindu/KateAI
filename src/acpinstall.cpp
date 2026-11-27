@@ -21,6 +21,7 @@
 #include <QSysInfo>
 #include <QStandardPaths>
 #include <QTemporaryFile>
+#include <QTimer>
 #include <QUuid>
 #include <QUrl>
 
@@ -36,17 +37,37 @@ namespace KateAi
 
 namespace
 {
+bool isTarArchive(const QString &archiveUrl, const QString &archivePath)
+{
+    QFile file(archivePath);
+    if (file.open(QIODevice::ReadOnly)) {
+        const QByteArray head = file.read(512);
+        if (head.startsWith("PK\x03\x04") || head.startsWith("PK\x05\x06")) {
+            return false;
+        }
+        if (head.startsWith("\x1f\x8b") || head.startsWith("BZh")
+            || (head.size() >= 6 && head.startsWith("\xfd" "7zXZ"))
+            || (head.size() >= 4 && head.startsWith("\x28\xb5\x2f\xfd"))
+            || (head.size() >= 262 && head.mid(257, 5) == "ustar")) {
+            return true;
+        }
+    }
+    const QString path = QUrl(archiveUrl).path().toLower();
+    return path.contains(u".tar"_s)
+        || path.endsWith(u".tgz"_s)
+        || path.endsWith(u".tbz2"_s)
+        || path.endsWith(u".tbz"_s)
+        || path.endsWith(u".txz"_s)
+        || path.endsWith(u".tzst"_s);
+}
+
 QString findArchiveExtractor(const QString &archiveUrl, const QString &archive,
                              const QString &destination, QStringList *arguments)
 {
     // Some registry entries ship tar archives (Mistral Vibe, OpenCode),
-    // others ZIP files (Antigravity, Kilo). Pick the matching extractor.
-    const bool tarArchive = archiveUrl.contains(u".tar"_s, Qt::CaseInsensitive)
-        || archiveUrl.endsWith(u".tgz"_s, Qt::CaseInsensitive)
-        || archiveUrl.endsWith(u".tbz2"_s, Qt::CaseInsensitive)
-        || archiveUrl.endsWith(u".tbz"_s, Qt::CaseInsensitive)
-        || archiveUrl.endsWith(u".txz"_s, Qt::CaseInsensitive)
-        || archiveUrl.endsWith(u".tzst"_s, Qt::CaseInsensitive);
+    // others ZIP files (Antigravity, Kilo). Pick the matching extractor from
+    // file magic first, falling back to URL suffix.
+    const bool tarArchive = isTarArchive(archiveUrl, archive);
     if (tarArchive) {
         const QString tar = QStandardPaths::findExecutable(u"tar"_s);
         if (!tar.isEmpty()) {
@@ -118,6 +139,9 @@ bool archiveIsArchive(const QString &archiveUrl, const QString &archivePath)
     if (head.size() >= 6 && head.startsWith("\xfd" "7zXZ")) {
         return true;
     }
+    if (head.size() >= 4 && head.startsWith("\x28\xb5\x2f\xfd")) {
+        return true;
+    }
     if (head.size() >= 262 && head.mid(257, 5) == "ustar") {
         return true;
     }
@@ -152,58 +176,185 @@ QString findInstalledBinary(const QString &installDir, const QString &recordedCo
 // entry or the download is compromised. Reject absolute paths and ".."
 // components before handing it to tar/unzip, which would otherwise write
 // outside the per-agent install directory (zip-slip).
+bool isSafeRelativeArchivePath(const QString &entry)
+{
+    const QString unix = QDir::fromNativeSeparators(entry.trimmed());
+    if (unix.isEmpty()) {
+        return true;
+    }
+    if (unix.startsWith(u'/') || (unix.size() > 1 && unix.at(1) == u':')) {
+        return false;
+    }
+    const QStringList parts = QDir::cleanPath(unix).split(u'/');
+    return !parts.contains(u".."_s);
+}
+
 bool archiveEntriesAreSafe(const QString &archiveUrl, const QString &archive, QString *badEntry)
 {
-    const bool tarArchive = archiveUrl.contains(u".tar"_s, Qt::CaseInsensitive)
-        || archiveUrl.endsWith(u".tgz"_s, Qt::CaseInsensitive)
-        || archiveUrl.endsWith(u".tbz2"_s, Qt::CaseInsensitive)
-        || archiveUrl.endsWith(u".tbz"_s, Qt::CaseInsensitive)
-        || archiveUrl.endsWith(u".txz"_s, Qt::CaseInsensitive)
-        || archiveUrl.endsWith(u".tzst"_s, Qt::CaseInsensitive);
+    const bool tarArchive = isTarArchive(archiveUrl, archive);
     QString program;
     QStringList args;
+    bool verboseModeCheck = false;
+    bool pythonChecked = false;
     if (tarArchive) {
         program = QStandardPaths::findExecutable(u"tar"_s);
-        args = {u"-tf"_s, archive};
-    } else {
-        program = QStandardPaths::findExecutable(u"unzip"_s);
         if (!program.isEmpty()) {
-            args = {u"-Z1"_s, archive};
+            // -tvf lists mode + symlink/hardlink targets so links escaping the
+            // install directory can be rejected before extraction.
+            args = {u"-tvf"_s, archive};
+            verboseModeCheck = true;
         } else {
             program = QStandardPaths::findExecutable(u"python3"_s);
             if (!program.isEmpty()) {
-                args = {u"-c"_s,
-                        u"import sys,zipfile; [print(n) for n in zipfile.ZipFile(sys.argv[1]).namelist()]"_s,
-                        archive};
+                const QString tarCheck = uR"PY(
+import posixpath, sys, tarfile
+with tarfile.open(sys.argv[1], "r:*") as tf:
+    for m in tf.getmembers():
+        n = m.name.replace("\\", "/")
+        if n.startswith("/") or (len(n) > 1 and n[1] == ":") or ".." in posixpath.normpath(n).split("/"):
+            print("UNSAFE:" + m.name)
+            sys.exit(2)
+        if m.isdev() or m.isfifo():
+            print("UNSAFE:" + m.name)
+            sys.exit(2)
+        if m.issym() or m.islnk():
+            t = m.linkname.replace("\\", "/")
+            if t.startswith("/") or (len(t) > 1 and t[1] == ":"):
+                print("UNSAFE:" + m.name + " -> " + m.linkname)
+                sys.exit(2)
+            base = posixpath.dirname(n) if m.issym() else ""
+            resolved = posixpath.normpath(posixpath.join(base, t))
+            if resolved == ".." or resolved.startswith("../"):
+                print("UNSAFE:" + m.name + " -> " + m.linkname)
+                sys.exit(2)
+)PY"_s;
+                args = {u"-c"_s, tarCheck, archive};
+                pythonChecked = true;
+            }
+        }
+    } else {
+        program = QStandardPaths::findExecutable(u"python3"_s);
+        if (!program.isEmpty()) {
+            const QString zipCheck = uR"PY(
+import posixpath, stat, sys, zipfile
+with zipfile.ZipFile(sys.argv[1]) as zf:
+    for info in zf.infolist():
+        n = info.filename.replace("\\", "/")
+        if n.startswith("/") or (len(n) > 1 and n[1] == ":") or ".." in posixpath.normpath(n).split("/"):
+            print("UNSAFE:" + info.filename)
+            sys.exit(2)
+        mode = info.external_attr >> 16
+        if stat.S_ISLNK(mode):
+            print("UNSAFE_SYMLINK:" + info.filename)
+            sys.exit(2)
+)PY"_s;
+            args = {u"-c"_s, zipCheck, archive};
+            pythonChecked = true;
+        } else {
+            program = QStandardPaths::findExecutable(u"unzip"_s);
+            if (!program.isEmpty()) {
+                args = {u"-Z"_s, archive};
+                verboseModeCheck = true;
             }
         }
     }
     if (program.isEmpty()) {
-        // No lister is available; extraction itself will use the same tools,
-        // and refusing here would make installation impossible.
-        return true;
+        // Fail closed when no archive inspector is available.
+        if (badEntry) {
+            *badEntry = u"no archive inspector available"_s;
+        }
+        return false;
     }
     QProcess list;
     list.start(program, args);
-    if (!list.waitForFinished(15000) || list.exitCode() != 0) {
-        // The archive could not be inspected, so its paths cannot be trusted.
-        if (badEntry) *badEntry = u"archive listing failed"_s;
+    if (!list.waitForFinished(15000)) {
+        list.kill();
+        list.waitForFinished(1000);
+        if (badEntry) {
+            *badEntry = u"archive listing timed out"_s;
+        }
         return false;
     }
-    const QStringList entries = QString::fromLocal8Bit(list.readAllStandardOutput()).split(u'\n', Qt::SkipEmptyParts);
-    for (const QString &raw : entries) {
-        const QString entry = raw.trimmed();
-        if (entry.isEmpty()) {
+    if (list.exitStatus() != QProcess::NormalExit || list.exitCode() != 0) {
+        const QString out = QString::fromLocal8Bit(list.readAllStandardOutput()).trimmed();
+        if (badEntry) {
+            *badEntry = out.isEmpty() ? u"archive listing failed"_s : out;
+        }
+        return false;
+    }
+    if (pythonChecked) {
+        return true;
+    }
+    const QStringList lines = QString::fromLocal8Bit(list.readAllStandardOutput()).split(u'\n', Qt::SkipEmptyParts);
+    for (const QString &raw : lines) {
+        const QString line = raw.trimmed();
+        if (line.isEmpty()) {
             continue;
         }
-        const QString unix = QDir::fromNativeSeparators(entry);
-        if (unix.startsWith(u'/') || (unix.size() > 1 && unix.at(1) == u':')) {
-            if (badEntry) *badEntry = entry;
-            return false;
-        }
-        const QStringList parts = QDir::cleanPath(unix).split(u'/');
-        if (parts.contains(u".."_s)) {
-            if (badEntry) *badEntry = entry;
+        if (verboseModeCheck) {
+            if (tarArchive) {
+                const QChar kind = line.at(0);
+                // Reject block/char devices and FIFOs outright.
+                if (kind == u'b' || kind == u'c' || kind == u'p') {
+                    if (badEntry) *badEntry = line;
+                    return false;
+                }
+                // tar -tvf format: perms owner/group size date time path [-> target | link to target]
+                const QStringList cols = line.split(u' ', Qt::SkipEmptyParts);
+                if (cols.size() < 6) {
+                    continue;
+                }
+                const QString remainder = cols.mid(5).join(u' ');
+                if (kind == u'l' || kind == u'h') {
+                    const QString sep = (kind == u'l') ? u" -> "_s : u" link to "_s;
+                    const qsizetype sepIdx = remainder.indexOf(sep);
+                    if (sepIdx < 0) {
+                        if (badEntry) *badEntry = remainder;
+                        return false;
+                    }
+                    const QString entryPath = remainder.left(sepIdx);
+                    const QString linkTarget = remainder.mid(sepIdx + sep.size());
+                    if (!isSafeRelativeArchivePath(entryPath) || !isSafeRelativeArchivePath(linkTarget)) {
+                        if (badEntry) *badEntry = remainder;
+                        return false;
+                    }
+                    // For symlinks, also verify the target resolved relative to the link's parent stays inside root.
+                    if (kind == u'l') {
+                        const QString parent = QFileInfo(QDir::fromNativeSeparators(entryPath)).path();
+                        const QString joined = (parent.isEmpty() || parent == u"."_s)
+                            ? linkTarget
+                            : (parent + u'/' + linkTarget);
+                        if (!isSafeRelativeArchivePath(joined)) {
+                            if (badEntry) *badEntry = remainder;
+                            return false;
+                        }
+                    }
+                } else if (!isSafeRelativeArchivePath(remainder)) {
+                    if (badEntry) *badEntry = remainder;
+                    return false;
+                }
+            } else {
+                // unzip -Z header/footer lines start with "Archive:" or digit counts;
+                // member lines begin with a Unix permission mode (e.g. -rwxr-xr-x, drwxr-xr-x, lrwxrwxrwx).
+                if (line.startsWith(u"Archive:"_s) || line.startsWith(u"Zip file size:"_s)
+                    || line.at(0).isDigit()) {
+                    continue;
+                }
+                if (line.startsWith(u'l')) {
+                    if (badEntry) *badEntry = line;
+                    return false;
+                }
+                const QStringList cols = line.split(u' ', Qt::SkipEmptyParts);
+                if (cols.size() >= 9) {
+                    const QString entryPath = cols.mid(8).join(u' ');
+                    if (!isSafeRelativeArchivePath(entryPath)) {
+                        if (badEntry) *badEntry = entryPath;
+                        return false;
+                    }
+                }
+            }
+        } else if (!isSafeRelativeArchivePath(line)) {
+            if (badEntry) *badEntry = line;
             return false;
         }
     }
@@ -498,19 +649,26 @@ void AcpBinaryInstaller::start()
     m_reply = m_network->get(request);
 
     connect(m_reply, &QNetworkReply::readyRead, this, [this]() {
+        if (m_done || !m_reply || !m_archive) {
+            return;
+        }
         const QByteArray chunk = m_reply->readAll();
-        m_archive->write(chunk);
+        if (m_archive->write(chunk) != chunk.size()) {
+            fail(i18n("Download failed: could not write archive to disk."));
+            return;
+        }
         m_hash.addData(chunk);
     });
     connect(m_reply, &QNetworkReply::downloadProgress, this, [this](qint64 received, qint64 total) {
+        if (m_done || !m_reply) {
+            return;
+        }
         // A registry download is a program archive. Bound it so a broken or
         // malicious endpoint cannot fill the disk before the checksum runs.
         constexpr qint64 kMaxArchiveBytes = 1024LL * 1024 * 1024;
         if (received > kMaxArchiveBytes || total > kMaxArchiveBytes) {
+            // fail() -> cleanUp() disconnects and aborts m_reply safely.
             fail(i18n("The agent archive is larger than 1 GB and was not downloaded."));
-            if (m_reply) {
-                m_reply->abort();
-            }
             return;
         }
         if (total > 0) {
@@ -520,13 +678,19 @@ void AcpBinaryInstaller::start()
         }
     });
     connect(m_reply, &QNetworkReply::finished, this, [this]() {
+        if (m_done || !m_reply || !m_archive) {
+            return;
+        }
         if (m_reply->error() != QNetworkReply::NoError) {
             fail(i18n("Download failed: %1", m_reply->errorString()));
             return;
         }
         const QByteArray tail = m_reply->readAll();
         if (!tail.isEmpty()) {
-            m_archive->write(tail);
+            if (m_archive->write(tail) != tail.size()) {
+                fail(i18n("Download failed: could not write archive to disk."));
+                return;
+            }
             m_hash.addData(tail);
         }
         m_archive->flush();
@@ -604,12 +768,25 @@ void AcpBinaryInstaller::extractArchive()
     }
 
     m_extractor = new QProcess(this);
+    auto *extractTimer = new QTimer(m_extractor);
+    extractTimer->setSingleShot(true);
+    extractTimer->setInterval(5 * 60 * 1000);
+    connect(extractTimer, &QTimer::timeout, this, [this]() {
+        if (m_done) {
+            return;
+        }
+        fail(i18n("Could not extract the archive: extraction timed out."));
+    });
     connect(m_extractor, &QProcess::errorOccurred, this, [this](QProcess::ProcessError) {
+        if (m_done) {
+            return;
+        }
         fail(i18n("Could not extract the archive: the extractor failed to start."));
     });
     connect(m_extractor, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
-            [this](int code, QProcess::ExitStatus status) {
-        if (m_done) {
+            [this, extractTimer](int code, QProcess::ExitStatus status) {
+        extractTimer->stop();
+        if (m_done || !m_extractor) {
             return;
         }
         if (code != 0 || status != QProcess::NormalExit) {
@@ -625,6 +802,7 @@ void AcpBinaryInstaller::extractArchive()
         finishInstall(executable);
     });
     m_extractor->start(extractor, extractorArgs);
+    extractTimer->start();
 }
 
 void AcpBinaryInstaller::finishInstall(const QString &executable)
@@ -637,10 +815,25 @@ void AcpBinaryInstaller::finishInstall(const QString &executable)
         fail(i18n("The extracted executable is outside the install directory."));
         return;
     }
-    QDir(m_installDir).removeRecursively();
+    // Move any previous install aside before moving staging into place so a
+    // failed rename restores the working binary instead of leaving nothing.
+    QString backupDir;
+    if (QFileInfo::exists(m_installDir)) {
+        backupDir = m_installDir + u".bak-"_s + QUuid::createUuid().toString(QUuid::Id128);
+        if (!QDir().rename(m_installDir, backupDir)) {
+            fail(i18n("Could not replace the existing agent installation."));
+            return;
+        }
+    }
     if (!QDir().rename(m_stagingDir, m_installDir)) {
+        if (!backupDir.isEmpty()) {
+            QDir().rename(backupDir, m_installDir);
+        }
         fail(i18n("Could not move the installed agent into place."));
         return;
+    }
+    if (!backupDir.isEmpty()) {
+        QDir(backupDir).removeRecursively();
     }
     m_stagingDir.clear();
     const QString installedExecutable = QDir(m_installDir).filePath(relative);
@@ -689,12 +882,23 @@ void AcpBinaryInstaller::fail(const QString &message)
 void AcpBinaryInstaller::cleanUp()
 {
     if (m_reply) {
-        m_reply->deleteLater();
+        QNetworkReply *reply = m_reply;
         m_reply = nullptr;
+        reply->disconnect(this);
+        if (reply->isRunning()) {
+            reply->abort();
+        }
+        reply->deleteLater();
     }
     if (m_extractor) {
-        m_extractor->deleteLater();
+        QProcess *extractor = m_extractor;
         m_extractor = nullptr;
+        extractor->disconnect(this);
+        if (extractor->state() != QProcess::NotRunning) {
+            extractor->kill();
+            extractor->waitForFinished(1000);
+        }
+        extractor->deleteLater();
     }
     if (m_archive) {
         m_archive->deleteLater();

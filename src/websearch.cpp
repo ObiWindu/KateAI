@@ -113,6 +113,7 @@ WebSearch::~WebSearch()
         if (reply) {
             reply->disconnect(this);
             reply->abort();
+            reply->deleteLater();
         }
     }
     // Stop the watchdogs so none of them can fire against a reply that the
@@ -267,6 +268,9 @@ bool WebSearch::isBlockedHost(const QString &host)
     if (name.isEmpty()) {
         return true;
     }
+    if (name.startsWith(u'[') && name.endsWith(u']') && name.size() > 2) {
+        name = name.mid(1, name.size() - 2);
+    }
     // A literal address is checked directly. A name is resolved by the network
     // stack, which is the only way to know what it points at; the resolution
     // itself is checked by the network layer's own policy below.
@@ -275,17 +279,33 @@ bool WebSearch::isBlockedHost(const QString &host)
         // Loopback, the "any" address, the private ranges and the link-local
         // range are all off limits. The link-local range holds the cloud
         // metadata endpoint.
-        if (address.isLoopback() || address.isLinkLocal() || address.isPrivateUse()) {
+        if (address.isLoopback() || address.isLinkLocal() || address.isPrivateUse()
+            || address.isMulticast() || address.isBroadcast()) {
             return true;
         }
-        if (address.protocol() == QAbstractSocket::IPv4Protocol) {
-            const quint32 ip = address.toIPv4Address();
-            if (ip == 0 || ip == 0xffffffffu) {
+        // Unwrap IPv4-mapped IPv6 addresses (e.g. ::ffff:127.0.0.1 or
+        // ::ffff:169.254.169.254) as well as native IPv4 literals.
+        bool isV4 = false;
+        const quint32 ip = address.toIPv4Address(&isV4);
+        if (isV4) {
+            if (ip == 0 || ip == 0xffffffffu
+                || (ip & 0xff000000u) == 0x00000000u   // 0.0.0.0/8 ("this" network)
+                || (ip & 0xff000000u) == 0x7f000000u   // 127.0.0.0/8 loopback
+                || (ip & 0xff000000u) == 0x0a000000u   // 10.0.0.0/8 private
+                || (ip & 0xfff00000u) == 0xac100000u   // 172.16.0.0/12 private
+                || (ip & 0xffff0000u) == 0xc0a80000u   // 192.168.0.0/16 private
+                || (ip & 0xffff0000u) == 0xa9fe0000u   // 169.254.0.0/16 link-local / cloud metadata
+                || (ip & 0xffc00000u) == 0x64400000u) { // 100.64.0.0/10 shared CGNAT
                 return true;
             }
-            // 169.254.0.0/16 is the link-local range, which contains the
-            // cloud metadata endpoint (169.254.169.254).
-            if ((ip & 0xffff0000u) == 0xa9fe0000u) {
+        }
+        if (address.protocol() == QAbstractSocket::IPv6Protocol) {
+            if (address == QHostAddress(QHostAddress::AnyIPv6)) {
+                return true;
+            }
+            const Q_IPV6ADDR v6 = address.toIPv6Address();
+            // fc00::/7 unique local addresses, fe80::/10 link-local
+            if ((v6[0] & 0xfe) == 0xfc || (v6[0] == 0xfe && (v6[1] & 0xc0) == 0x80)) {
                 return true;
             }
         }
@@ -349,6 +369,7 @@ void WebSearch::abort()
             // a finished search that produces a tool result after a stop.
             reply->disconnect(this);
             reply->abort();
+            reply->deleteLater();
         }
     }
     m_callMaxResults.clear();
@@ -376,12 +397,12 @@ void WebSearch::search(const QString &query, const QString &callId, int maxResul
     const QString effectiveQuery = siteValue.isEmpty() ? trimmed
         : trimmed + u" site:"_s + siteValue;
 
-    // Register the per-call limit only once the request is actually going out:
-    // an early return above (unconfigured provider, empty query) never reaches
-    // onReplyFinished(), which is the only place the entry is removed.
+    // Register the per-call provider and optional limit only once the request
+    // is actually going out: an early return above never reaches
+    // onReplyFinished(), which is the only place these entries are removed.
+    m_callProviders.insert(callId, m_provider);
     if (maxResults > 0) {
         m_callMaxResults.insert(callId, qBound(1, maxResults, 20));
-        m_callProviders.insert(callId, m_provider);
     }
 
     // The provider request and the reply parser must agree on the count, so
@@ -442,6 +463,26 @@ void WebSearch::search(const QString &query, const QString &callId, int maxResul
     }
 
     m_replies.append(reply);
+    // Abort oversized search responses while streaming so a misbehaving or
+    // malicious endpoint cannot buffer gigabytes before finished() fires.
+    connect(reply, &QNetworkReply::readyRead, this, [this, reply, callId] {
+        if (!reply) {
+            return;
+        }
+        const qint64 declaredSize = reply->header(QNetworkRequest::ContentLengthHeader).toLongLong();
+        const qint64 received = reply->bytesAvailable();
+        if ((declaredSize > 0 && declaredSize > kMaxFetchBytes) || received > kMaxFetchBytes) {
+            stopTimerFor(reply);
+            reply->disconnect(this);
+            m_replies.removeAll(reply);
+            m_callMaxResults.remove(callId);
+            m_callProviders.remove(callId);
+            reply->abort();
+            reply->deleteLater();
+            finishSearch(callId, {},
+                         i18n("The search response was larger than %1 KB and was discarded.").arg(kMaxFetchBytes / 1024));
+        }
+    });
     // A hard ceiling: the agent has already moved on by the time a slow
     // provider answers, and a hung socket would outlive the turn.
     auto *timer = new QTimer(this);
