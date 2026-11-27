@@ -696,6 +696,41 @@ private Q_SLOTS:
         QCOMPARE(node->type, u"file"_s);
         QCOMPARE(node->metadata.value(u"language"_s).toString(), u"python"_s);
     }
+
+    void edgeIndexesStayConsistentAcrossMutationsAndSqliteReload()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        writeFile(dir.path() + u"/src/a.h"_s, "int a();\n");
+        writeFile(dir.path() + u"/src/b.cpp"_s, "#include \"a.h\"\nint b() { return a(); }\n");
+
+        ProjectGraph graph;
+        graph.generateGraph(dir.path());
+        const QString aId = ProjectGraph::generateNodeId(dir.path() + u"/src/a.h"_s);
+        const QString bId = ProjectGraph::generateNodeId(dir.path() + u"/src/b.cpp"_s);
+
+        QVERIFY(!graph.getEdgesFrom(bId).isEmpty());
+        QVERIFY(!graph.getEdgesTo(aId).isEmpty());
+        QCOMPARE(graph.getFilesInDirectory(dir.path() + u"/src"_s).size(), 2);
+
+        const QString dbPath = dir.path() + u"/graph.sqlite"_s;
+        QVERIFY(graph.saveToSqlite(dbPath));
+
+        ProjectGraph reloaded;
+        QVERIFY(reloaded.loadFromSqlite(dbPath));
+        QCOMPARE(reloaded.getEdgesFrom(bId).size(), graph.getEdgesFrom(bId).size());
+        QCOMPARE(reloaded.getEdgesTo(aId).size(), graph.getEdgesTo(aId).size());
+        QCOMPARE(reloaded.getFilesInDirectory(dir.path() + u"/src"_s).size(), 2);
+
+        reloaded.removeEdge(bId, aId);
+        for (const GraphEdge *edge : reloaded.getEdgesFrom(bId)) {
+            QVERIFY(edge->targetId != aId);
+        }
+        reloaded.removeNode(aId);
+        QVERIFY(reloaded.getNode(aId) == nullptr);
+        QVERIFY(reloaded.getEdgesTo(aId).isEmpty());
+        QCOMPARE(reloaded.getFilesInDirectory(dir.path() + u"/src"_s).size(), 1);
+    }
 };
 
 QTEST_GUILESS_MAIN(TestProjectGraph)
