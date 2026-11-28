@@ -57,6 +57,29 @@ public:
     {
     }
 
+    ~AcpAgentAutoUpdater() override
+    {
+        if (m_installer) {
+            AcpBinaryInstaller *installer = m_installer;
+            m_installer = nullptr;
+            installer->disconnect(this);
+            delete installer;
+        }
+        if (m_process) {
+            QProcess *process = m_process;
+            m_process = nullptr;
+            process->disconnect(this);
+            if (process->state() != QProcess::NotRunning) {
+                process->terminate();
+                if (!process->waitForFinished(1000)) {
+                    process->kill();
+                    process->waitForFinished(1000);
+                }
+            }
+            process->deleteLater();
+        }
+    }
+
     // The plugin owns one network manager for the whole process.
     void setNetwork(QNetworkAccessManager *network)
     {
@@ -102,7 +125,9 @@ public:
 
         QNetworkRequest request(QUrl(u"https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json"_s));
         request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+        request.setTransferTimeout(30000);
         QNetworkReply *reply = m_network->get(request);
+        reply->setReadBufferSize(4 * 1024 * 1024 + 1);
         connect(reply, &QNetworkReply::finished, this, [this, reply, installed, registryHasMistral]() {
             // Same registry document as the settings page: bound it before the
             // copy and the JSON parse.
@@ -474,7 +499,7 @@ std::shared_ptr<WorkspaceServices> KateAiPlugin::workspaceServices(const QString
         }
     }
 
-    auto services = std::make_shared<WorkspaceServices>(key);
+    auto services = std::make_shared<WorkspaceServices>(key, m_network);
     m_workspaceServices.insert(key, services);
     return services;
 }

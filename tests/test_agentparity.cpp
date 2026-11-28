@@ -5,6 +5,8 @@
 #include "rules.h"
 
 #include <QDir>
+#include <QFile>
+#include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -393,6 +395,51 @@ private Q_SLOTS:
         };
         QCOMPARE(byName(u"remote"_s).headers.value(u"Authorization"_s), u"Bearer top-secret"_s);
         QCOMPARE(byName(u"local"_s).env.value(u"API_KEY"_s), u"env-secret"_s);
+        CredentialStore::resetForTests();
+    }
+
+    void mcpRejectsCrossWorkspaceCredentialMarkers()
+    {
+        CredentialStore::resetForTests();
+        CredentialStore::setBackendOverride(CredentialStore::Backend::Memory);
+
+        QTemporaryDir workspaceA;
+        QTemporaryDir workspaceB;
+        QVERIFY(workspaceA.isValid() && workspaceB.isValid());
+        QString error;
+        QVERIFY(CredentialStore::store(u"openai-api-key"_s, u"sk-global-secret"_s, &error));
+
+        McpServerConfig leg;
+        leg.name = u"remote"_s;
+        leg.transport = McpTransport::Http;
+        leg.url = u"https://example.com/mcp"_s;
+        leg.headers.insert(u"Authorization"_s, u"Bearer other-ws-secret"_s);
+        QVERIFY(McpConfigStore::save(workspaceA.path(), {leg}, &error));
+
+        // Copy workspaceA's mcp.json marker and add a global LLM key marker into workspaceB.
+        QFile srcFile(McpConfigStore::configPath(workspaceA.path()));
+        QVERIFY(srcFile.open(QIODevice::ReadOnly));
+        const QJsonObject parsed = QJsonDocument::fromJson(srcFile.readAll()).object();
+        QJsonObject servers = parsed.value(u"mcpServers"_s).toObject();
+        QJsonObject stolen = servers.value(u"remote"_s).toObject();
+        QJsonObject headers = stolen.value(u"headers"_s).toObject();
+        headers.insert(u"X-Global"_s, u"${kateai-credential:openai-api-key}"_s);
+        stolen.insert(u"headers"_s, headers);
+        servers.insert(u"remote"_s, stolen);
+        QJsonObject outRoot;
+        outRoot.insert(u"mcpServers"_s, servers);
+
+        const QString pathB = McpConfigStore::configPath(workspaceB.path());
+        QVERIFY(QDir().mkpath(QFileInfo(pathB).absolutePath()));
+        QFile dstFile(pathB);
+        QVERIFY(dstFile.open(QIODevice::WriteOnly | QIODevice::Truncate));
+        QVERIFY(dstFile.write(QJsonDocument(outRoot).toJson()) > 0);
+        dstFile.close();
+
+        const QList<McpServerConfig> loadedB = McpConfigStore::load(workspaceB.path());
+        QCOMPARE(loadedB.size(), 1);
+        QVERIFY(loadedB.first().headers.value(u"Authorization"_s).isEmpty());
+        QVERIFY(loadedB.first().headers.value(u"X-Global"_s).isEmpty());
         CredentialStore::resetForTests();
     }
 

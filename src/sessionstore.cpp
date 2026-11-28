@@ -957,10 +957,9 @@ static QSqlDatabase openStore(bool *ok)
     repairBadConversationTitles(db);
 
     // The connection belongs to the thread that opened it. When the thread
-    // ends, the connection has to go with it, or the next thread with the same
-    // address would find the connection of a dead thread.
-    auto *cleanup = new QObject(thread);
-    QObject::connect(thread, &QThread::finished, cleanup, [thread, connectionName]() {
+    // ends, close and remove the connection directly on QThread::finished
+    // without cross-thread parenting a helper QObject onto `thread`.
+    QObject::connect(thread, &QThread::finished, thread, [thread, connectionName]() {
         {
             QSqlDatabase connection = QSqlDatabase::database(connectionName, false);
             if (connection.isValid()) {
@@ -977,7 +976,7 @@ static QSqlDatabase openStore(bool *ok)
             QMutexLocker locker(&storeMutex());
             names->remove(thread);
         }
-    });
+    }, Qt::DirectConnection);
 
     if (names) {
         names->insert(thread, connectionName);

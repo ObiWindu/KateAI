@@ -68,6 +68,9 @@ public:
 
 Q_SIGNALS:
     void entryMaterialized(const QString &key);
+    // Emitted once after a viewport refresh or navigation batch finishes
+    // materializing entries, so listeners can coalesce collapse/reflow work.
+    void viewportUpdated();
     // Emitted before an entry widget is destroyed. Owners use this to remove
     // their raw-pointer indexes without deleting the widget a second time.
     void entryWillEvict(const QString &key, QWidget *widget);

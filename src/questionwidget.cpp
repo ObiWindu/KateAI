@@ -82,7 +82,8 @@ QuestionWidget::QuestionWidget(const QString &questionCallId, QWidget *parent)
     // The question itself, as markdown so a code path or file in the question
     // reads the same way it would in the editor.
     m_question = new QTextBrowser(this);
-    m_question->setOpenExternalLinks(true);
+    m_question->setOpenExternalLinks(false);
+    connect(m_question, &QTextBrowser::anchorClicked, this, [](const QUrl &url) { openSafeExternalUrl(url); });
     m_question->setFrameShape(QFrame::NoFrame);
     m_question->setMinimumHeight(0);
     m_question->setVisible(false);

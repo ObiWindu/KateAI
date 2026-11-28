@@ -517,6 +517,13 @@ EditorAssist::~EditorAssist()
     }
 }
 
+void EditorAssist::setNetworkManager(QNetworkAccessManager *network)
+{
+    if (m_engine) {
+        m_engine->setNetworkManager(network);
+    }
+}
+
 void EditorAssist::setSettings(const Settings &settings)
 {
     m_settings = settings;

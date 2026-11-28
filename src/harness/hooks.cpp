@@ -213,7 +213,7 @@ bool HookRegistry::loadFile(const QString &path, bool project, QString *error)
             HookDefinition hook;
             hook.event = event;
             hook.matcher = object.value(u"matcher"_s).toString();
-            hook.timeoutMs = object.value(u"timeoutMs"_s).toInt(5000);
+            hook.timeoutMs = qBound(100, object.value(u"timeoutMs"_s).toInt(5000), 60000);
             hook.blockOnFailure = object.value(u"onFailure"_s).toString() == u"block"_s;
             hook.shell = object.value(u"shell"_s).toBool(false);
             hook.source = path;
@@ -343,15 +343,32 @@ HookOutcome HookRegistry::runOne(const HookDefinition &hook, const QJsonObject &
         outcome.blocked = hook.blockOnFailure;
         return outcome;
     }
-    process.write(stdinData);
-    process.closeWriteChannel();
     constexpr qint64 kMaxDrainedBytes = 8 * 1024 * 1024;
+    const int effectiveTimeoutMs = qBound(100, hook.timeoutMs, 60000);
     QByteArray drained;
     QElapsedTimer elapsed;
     elapsed.start();
     bool outputCapped = false;
+    bool stdinClosed = stdinData.isEmpty();
+    if (!stdinData.isEmpty()) {
+        process.write(stdinData);
+    } else {
+        process.closeWriteChannel();
+    }
     while (true) {
-        drained += process.readAll();
+        if (!stdinClosed) {
+            if (process.bytesToWrite() > 0) {
+                process.waitForBytesWritten(20);
+            }
+            if (process.bytesToWrite() == 0) {
+                process.closeWriteChannel();
+                stdinClosed = true;
+            }
+        }
+        const qint64 remaining = kMaxDrainedBytes - drained.size() + 1;
+        if (remaining > 0) {
+            drained += process.read(remaining);
+        }
         if (drained.size() > kMaxDrainedBytes) {
             outputCapped = true;
             process.kill();
@@ -364,23 +381,35 @@ HookOutcome HookRegistry::runOne(const HookDefinition &hook, const QJsonObject &
         if (process.state() == QProcess::NotRunning) {
             break;
         }
-        if (elapsed.elapsed() >= qMax(100, hook.timeoutMs)) {
+        if (elapsed.elapsed() >= effectiveTimeoutMs) {
             outcome.timedOut = true;
             process.kill();
             process.waitForFinished(1000);
-            outcome.reason = u"Hook %1 timed out after %2 ms."_s.arg(hook.event).arg(hook.timeoutMs);
+            outcome.reason = u"Hook %1 timed out after %2 ms."_s.arg(hook.event).arg(effectiveTimeoutMs);
             outcome.blocked = hook.blockOnFailure;
             outcome.warnings.append(outcome.reason);
             return outcome;
         }
     }
-    drained += process.readAll();
+    if (!outputCapped) {
+        const qint64 remaining = kMaxDrainedBytes - drained.size() + 1;
+        if (remaining > 0) {
+            drained += process.read(remaining);
+        }
+        if (drained.size() > kMaxDrainedBytes) {
+            outputCapped = true;
+        }
+    }
 
-    QString output = capOutput(QString::fromUtf8(drained.left(kMaxDrainedBytes)));
+    // Parse structured JSON from the raw (bounded) stdout BEFORE applying the
+    // human-display output cap, which would otherwise truncate valid JSON
+    // responses containing additionalContext or updatedInput.
+    const QByteArray rawPayload = drained.left(kMaxDrainedBytes);
+    const QJsonObject parsed = outputCapped ? QJsonObject{} : parseHookOutput(rawPayload);
+    QString output = capOutput(QString::fromUtf8(rawPayload));
     if (outputCapped) {
         output += u"\n… (hook output exceeded 8 MB and was stopped) …"_s;
     }
-    const QJsonObject parsed = parseHookOutput(output.toUtf8());
     outcome.updatedInput = parsed.value(u"updatedInput"_s).toObject();
     outcome.additionalContext = parsed.value(u"additionalContext"_s).toString();
     const QString decision = parsed.value(u"decision"_s).toString().toLower();

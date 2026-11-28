@@ -90,7 +90,8 @@ SuggestionWidget::SuggestionWidget(const QString &suggestionId, QWidget *parent)
     // The suggestion itself, rendered as markdown so a snippet inside it gets
     // the same highlighting it would have in the editor.
     m_body = new QTextBrowser(this);
-    m_body->setOpenExternalLinks(true);
+    m_body->setOpenExternalLinks(false);
+    connect(m_body, &QTextBrowser::anchorClicked, this, [](const QUrl &url) { openSafeExternalUrl(url); });
     m_body->setFrameShape(QFrame::NoFrame);
     m_body->setMinimumHeight(0);
     m_body->setVisible(false);

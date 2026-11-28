@@ -73,6 +73,7 @@ StoredToolResult ToolResults::store(const QString &text, int headChars, int tail
         result.preview = text.left(head + tail);
         return result;
     }
+    QFile::setPermissions(dir, QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner);
 
     // 32 MiB cap. A command that produced more than that is already a problem
     // for the user; storing unbounded output would be worse.
@@ -86,6 +87,9 @@ StoredToolResult ToolResults::store(const QString &text, int headChars, int tail
         result.preview = text.left(head + tail);
         return result;
     }
+    // Tool output can contain source code or command output the user considers
+    // sensitive; tighten permissions before writing any payload.
+    file.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner);
     const QByteArray payload = stored.toUtf8();
     if (file.write(payload) != payload.size()) {
         file.close();
@@ -94,17 +98,13 @@ StoredToolResult ToolResults::store(const QString &text, int headChars, int tail
         return result;
     }
     file.close();
-    // Tool output can contain source code or command output the user considers
-    // sensitive; keep the cache owner-only.
-    QFile::setPermissions(path, QFileDevice::ReadOwner | QFileDevice::WriteOwner);
     // Total character count for paging. Without it, read() had to parse the
     // whole file just to fill totalChars, even for a 20 KB page.
     QFile meta(path + u".len"_s);
     if (meta.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        meta.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner);
         meta.write(QByteArray::number(stored.size()));
         meta.close();
-        QFile::setPermissions(meta.fileName(),
-                              QFileDevice::ReadOwner | QFileDevice::WriteOwner);
     }
 
     result.id = id;

@@ -47,6 +47,7 @@
 #include <QQueue>
 #include <QSet>
 #include <QHash>
+#include <QNetworkAccessManager>
 #include <QTimer>
 #include <memory>
 
@@ -190,6 +191,8 @@ public:
     }
     // Sub-agents borrow the pointer; ownership stays with the root loop.
     void setMcpManager(McpManager *manager);
+    // Installs a shared network manager for LLM, web search, OTLP, MCP, and child sub-agents.
+    void setNetworkManager(QNetworkAccessManager *network);
     // Installs services shared by every window on one workspace: the project
     // graph, the MCP manager and the event store. Passing null leaves the
     // existing component in place.
@@ -655,6 +658,7 @@ private:
     // on disk; set it once per turn, not on every active-view change, because
     // the check stats every node.
     void applyProjectGraph(bool checkStale = false);
+    void pruneSubagentRecords();
 
     Settings m_settings;
     QString m_workspace;
@@ -663,6 +667,7 @@ private:
     LspProvider *m_lsp = nullptr;
     DebugProvider *m_debug = nullptr;
     EcosystemProvider *m_ecosystem = nullptr;
+    QPointer<QNetworkAccessManager> m_sharedNam;
 LlmClient m_client;
     AcpClient m_acp;
     // Shared by every loop in a turn, so the in-flight replies can be cancelled

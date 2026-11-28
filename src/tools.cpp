@@ -29,6 +29,7 @@
 #include <QVector>
 
 #include <algorithm>
+#include <memory>
 
 #ifdef Q_OS_UNIX
 #include <signal.h>
@@ -2469,6 +2470,26 @@ void ToolRunner::cancelReadTools()
 
 ToolRunner::~ToolRunner()
 {
+    // Terminate and reap any running async bash commands so child process
+    // groups are not orphaned when the runner is destroyed.
+    const auto processes = m_bashProcesses.values();
+    m_bashProcesses.clear();
+    m_bashAccumulated.clear();
+    m_bashTimedOut.clear();
+    for (QProcess *process : processes) {
+        if (!process) {
+            continue;
+        }
+        process->disconnect(this);
+#ifdef Q_OS_UNIX
+        if (process->processId() > 0) {
+            ::kill(-static_cast<pid_t>(process->processId()), SIGKILL);
+        }
+#endif
+        process->kill();
+        process->waitForFinished(500);
+        process->deleteLater();
+    }
     // Stop the worker thread here, while the QApplication is still alive:
     // a worker thread that outlives the application crashes teardown in some
     // KF6 builds (KDirWatch's destructor calls deleteLater on a dead thread).
@@ -2595,15 +2616,15 @@ void ToolRunner::runBashAsync(const ToolCall &call)
     }
     m_bashProcesses.insert(callId, process);
 
-    // Reads whatever has arrived since the last visit and returns the
-    // accumulated buffer, so both the progress and the timeout path drain the
-    // pipe exactly once.
-    auto drain = [this, callId]() -> QString {
-        auto *process = m_bashProcesses.value(callId);
-        if (!process) {
-            return {};
+    // Reads whatever has arrived since the last visit into the bounded
+    // buffer. Accepts an explicit process pointer so the finished handler can
+    // still drain trailing output after taking the process out of the map.
+    auto drainIntoBuffer = [this, callId](QProcess *proc = nullptr) -> bool {
+        QProcess *target = proc ? proc : m_bashProcesses.value(callId);
+        if (!target) {
+            return false;
         }
-        const QString chunk = QString::fromUtf8(process->readAll());
+        const QString chunk = QString::fromUtf8(target->readAll());
         if (!chunk.isEmpty()) {
             // The output is accumulated until the command finishes, and the
             // clipping happens only then. A command that writes gigabytes
@@ -2611,12 +2632,29 @@ void ToolRunner::runBashAsync(const ToolCall &call)
             // ceiling that keeps both ends, like clip() does for a finished
             // result: the tail is where a failure summary lives.
             m_bashAccumulated[callId].append(chunk, kMaxBashOutputChars);
+            return true;
         }
+        return false;
+    };
+    auto drain = [this, callId, drainIntoBuffer](QProcess *proc = nullptr) -> QString {
+        drainIntoBuffer(proc);
         return m_bashAccumulated.value(callId).view();
     };
 
-    connect(process, &QProcess::readyReadStandardOutput, this, [this, callId, drain] {
-        const QString soFar = drain();
+    auto progressTimer = std::make_shared<QElapsedTimer>();
+    connect(process, &QProcess::readyReadStandardOutput, this, [this, callId, drainIntoBuffer, progressTimer] {
+        if (!drainIntoBuffer()) {
+            return;
+        }
+        // Throttle live UI progress snapshots to avoid O(N^2) full-buffer
+        // string assembly on chatty commands; the finished/timeout handlers
+        // always emit the complete final snapshot.
+        constexpr qint64 kProgressThrottleMs = 50;
+        if (progressTimer->isValid() && progressTimer->elapsed() < kProgressThrottleMs) {
+            return;
+        }
+        progressTimer->start();
+        const QString soFar = m_bashAccumulated.value(callId).view();
         if (!soFar.isEmpty()) {
             Q_EMIT bashProgress(callId, soFar);
         }
@@ -2688,7 +2726,7 @@ void ToolRunner::runBashAsync(const ToolCall &call)
             return;
         }
         const bool timedOut = m_bashTimedOut.remove(callId);
-        const QString soFar = drain();
+        const QString soFar = drain(process);
         if (!soFar.isEmpty()) {
             // A final progress emission, so the live text in the card is exactly
             // what the finished result reports.
@@ -2722,13 +2760,10 @@ void ToolRunner::cancelBash(const QString &toolCallId)
     // the caller waits for a result that never comes.
     m_bashAccumulated.remove(toolCallId);
     m_bashTimedOut.remove(toolCallId);
-    ToolResult cancelled;
-    cancelled.toolCallId = toolCallId;
-    cancelled.name = u"bash"_s;
-    cancelled.ok = false;
-    cancelled.cancelled = true;
-    cancelled.output = u"The command was cancelled."_s;
-    Q_EMIT bashFinished(cancelled);
+    // Detach, terminate and reap the child process BEFORE emitting
+    // bashFinished(): a slot connected to bashFinished() may synchronously
+    // destroy this ToolRunner (and its child QProcess).
+    process->disconnect(this);
 #ifdef Q_OS_UNIX
     if (process->processId() > 0) {
         ::kill(-static_cast<pid_t>(process->processId()), SIGKILL);
@@ -2741,6 +2776,14 @@ void ToolRunner::cancelBash(const QString &toolCallId)
     // and "running" on the Qt side until teardown.
     process->waitForFinished(500);
     process->deleteLater();
+
+    ToolResult cancelled;
+    cancelled.toolCallId = toolCallId;
+    cancelled.name = u"bash"_s;
+    cancelled.ok = false;
+    cancelled.cancelled = true;
+    cancelled.output = u"The command was cancelled."_s;
+    Q_EMIT bashFinished(cancelled);
 }
 
 ToolResult ToolRunner::queryProjectGraph(const QJsonObject &args) const

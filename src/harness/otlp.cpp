@@ -68,6 +68,22 @@ OtlpExporter::OtlpExporter(QObject *parent)
 {
 }
 
+void OtlpExporter::setNetworkManager(QNetworkAccessManager *network)
+{
+    m_sharedNetwork = network;
+}
+
+QNetworkAccessManager *OtlpExporter::ensureNetwork()
+{
+    if (m_sharedNetwork) {
+        return m_sharedNetwork.data();
+    }
+    if (!m_ownedNetwork) {
+        m_ownedNetwork = new QNetworkAccessManager(this);
+    }
+    return m_ownedNetwork;
+}
+
 void OtlpExporter::setEndpoint(const QUrl &endpoint)
 {
     m_endpoint = endpoint;
@@ -210,7 +226,7 @@ void OtlpExporter::send(const QList<Span> &spans)
 #endif
     const QByteArray body = QJsonDocument(payload(spans, m_serviceName, version))
                                 .toJson(QJsonDocument::Compact);
-    QPointer<QNetworkReply> reply = m_network.post(request, body);
+    QPointer<QNetworkReply> reply = ensureNetwork()->post(request, body);
     m_reply = reply;
     connect(reply, &QNetworkReply::finished, this, [this, reply, requestId] {
         if (!reply) {

@@ -277,11 +277,14 @@ QString EditTracker::storeBlob(const QString &content)
     if (!QDir().mkpath(m_blobDirectory)) {
         return {};
     }
+    QFile::setPermissions(m_blobDirectory,
+                          QFileDevice::ReadOwner | QFileDevice::WriteOwner | QFileDevice::ExeOwner);
     const QString id = QUuid::createUuid().toString(QUuid::WithoutBraces);
     QFile file(QDir(m_blobDirectory).filePath(id + u".blob"_s));
     if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
         return {};
     }
+    file.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner);
     const QByteArray bytes = content.toUtf8();
     if (file.write(bytes) != bytes.size()) {
         file.close();
@@ -289,7 +292,6 @@ QString EditTracker::storeBlob(const QString &content)
         return {};
     }
     file.close();
-    QFile::setPermissions(file.fileName(), QFileDevice::ReadOwner | QFileDevice::WriteOwner);
     return id;
 }
 

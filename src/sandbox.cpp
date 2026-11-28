@@ -1722,7 +1722,11 @@ static QStringList linuxBubblewrapPrefix(const QString &workspaceRoot, SandboxPr
 
     const bool strict = profile == SandboxProfile::Strict;
     const bool readOnlyFs = profile == SandboxProfile::ReadOnly;
-    const QString workspace = QDir::cleanPath(QDir::fromNativeSeparators(workspaceRoot));
+    QString workspace = QDir::cleanPath(QDir::fromNativeSeparators(workspaceRoot));
+    const QString canonicalWorkspace = QFileInfo(workspace).canonicalFilePath();
+    if (!canonicalWorkspace.isEmpty()) {
+        workspace = QDir::cleanPath(QDir::fromNativeSeparators(canonicalWorkspace));
+    }
     if (strict && workspace == QDir::rootPath()) {
         if (error) {
             *error = u"The strict profile cannot use the filesystem root as its workspace."_s;
@@ -1935,14 +1939,20 @@ static QString macSandboxProfile(const QString &workspaceRoot, SandboxProfile pr
         return profileText;
     }
 
-    // Workspace and ReadOnly can read the host but write only the workspace
-    // and temporary directories. Sensitive credential stores are denied after
-    // the broad allow rule, so a dynamic path cannot bypass the deny globs.
+    // Workspace can write only the workspace and temporary directories;
+    // ReadOnly can write only temporary directories (never the workspace).
+    // Sensitive credential stores are denied after the broad allow rule.
     profileText = u"(version 1)\n(allow default)\n(deny file-write*)\n"_s;
-    profileText += u"(allow file-write* (subpath \""_s + ws
-                   + u"\") (subpath \"/tmp\") (subpath \"/private/tmp\") "
-                     "(subpath \"/private/var/folders\") (subpath \"/var/folders\") "
-                     "(subpath \"/dev\"))\n"_s;
+    if (profile == SandboxProfile::ReadOnly) {
+        profileText += u"(allow file-write* (subpath \"/tmp\") (subpath \"/private/tmp\") "
+                         "(subpath \"/private/var/folders\") (subpath \"/var/folders\") "
+                         "(subpath \"/dev\"))\n"_s;
+    } else {
+        profileText += u"(allow file-write* (subpath \""_s + ws
+                       + u"\") (subpath \"/tmp\") (subpath \"/private/tmp\") "
+                         "(subpath \"/private/var/folders\") (subpath \"/var/folders\") "
+                         "(subpath \"/dev\"))\n"_s;
+    }
     for (const QString &path : sensitiveSandboxPaths()) {
         if (pathIsWithinOrEqual(QDir::cleanPath(workspaceRoot), path)) {
             continue;

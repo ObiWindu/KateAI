@@ -190,7 +190,8 @@ SubtaskWidget::SubtaskWidget(const QString &taskId, QWidget *parent)
     // was actually delegated without expanding anything.
     m_answer = new QTextBrowser(this);
     m_answer->setObjectName(u"subtaskBody"_s);
-    m_answer->setOpenExternalLinks(true);
+    m_answer->setOpenExternalLinks(false);
+    connect(m_answer, &QTextBrowser::anchorClicked, this, [](const QUrl &url) { openSafeExternalUrl(url); });
     m_answer->setFrameShape(QFrame::NoFrame);
     m_answer->setMinimumHeight(0);
     root->addWidget(m_answer);

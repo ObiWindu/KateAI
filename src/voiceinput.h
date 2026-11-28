@@ -10,6 +10,7 @@
 #include <QByteArray>
 #include <QElapsedTimer>
 #include <QObject>
+#include <QNetworkAccessManager>
 #include <QPointer>
 #include <QString>
 #include <QStringList>
@@ -57,6 +58,7 @@ public:
     explicit VoiceInput(QObject *parent = nullptr);
     ~VoiceInput() override;
 
+    void setNetworkManager(QNetworkAccessManager *network);
     void setSettings(const Settings &settings);
     Settings settings() const
     {
@@ -192,6 +194,9 @@ private:
     QPointer<QProcess> m_recordProcess;
     QPointer<QProcess> m_denoiseProcess;
     QPointer<QProcess> m_cliProcess;
+    QNetworkAccessManager *ensureNetworkManager();
+
+    QPointer<QNetworkAccessManager> m_sharedNetwork;
     QNetworkAccessManager *m_network = nullptr;
     QPointer<QNetworkReply> m_reply;
 

@@ -27,6 +27,7 @@ class QTimer;
 class QVBoxLayout;
 class QMenu;
 class QListWidget;
+class QNetworkAccessManager;
 class QTabWidget;
 
 namespace KateAi
@@ -124,6 +125,7 @@ public:
     // banner's action). Returns false when nothing was pending.
     bool rejectPendingEdits(const QString &path);
 
+    void setNetworkManager(QNetworkAccessManager *network);
     PromptEdit *promptEdit() const { return m_prompt; }
     void setCompletionWords(const QStringList &words);
 

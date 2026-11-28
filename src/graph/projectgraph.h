@@ -62,6 +62,8 @@ class ProjectGraph {
 public:
     ProjectGraph();
     ~ProjectGraph();
+    ProjectGraph(const ProjectGraph &) = delete;
+    ProjectGraph &operator=(const ProjectGraph &) = delete;
 
     // Graph generation
     void generateGraph(const QString &workspacePath);
@@ -163,6 +165,9 @@ public:
 private:
     QMap<QString, GraphNode*> m_nodes;
     QMap<QString, GraphEdge*> m_edges;
+    // O(deg) adjacency indexes referencing the edges owned in m_edges.
+    QHash<QString, QList<GraphEdge*>> m_outgoingEdges;
+    QHash<QString, QList<GraphEdge*>> m_incomingEdges;
     // Forward adjacency (source -> dependencies) was maintained by hand beside
     // m_edges, so every dependency string was retained twice for the life of
     // the graph. It is now built from m_edges on demand and dropped whenever the
@@ -186,6 +191,7 @@ private:
     bool m_isDirty;
 
     void takeStateFrom(ProjectGraph &other);
+    void unindexEdge(GraphEdge *edge);
 
     void cleanupDeletedNodes();
     void updateNodeMetrics(GraphNode *node);

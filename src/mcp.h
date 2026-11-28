@@ -13,6 +13,7 @@
 #include <QList>
 #include <QMap>
 #include <QObject>
+#include <QNetworkAccessManager>
 #include <QPointer>
 #include <QSet>
 #include <QProcess>
@@ -126,6 +127,10 @@ public:
     {
         m_timeoutMs = timeoutMs;
     }
+    void setNetworkManager(QNetworkAccessManager *network)
+    {
+        m_sharedNam = network;
+    }
 
     const McpServerConfig &config() const
     {
@@ -195,6 +200,9 @@ private:
     QByteArray m_stdoutBuffer;
     bool m_discardingStdoutFrame = false;
 
+    QNetworkAccessManager *activeNetworkManager() const;
+
+    QPointer<QNetworkAccessManager> m_sharedNam;
     QNetworkAccessManager *m_nam = nullptr;
     QString m_sessionId;
     int m_timeoutMs = 0;
@@ -260,6 +268,15 @@ public:
             }
         }
     }
+    void setNetworkManager(QNetworkAccessManager *network)
+    {
+        m_sharedNam = network;
+        for (McpClient *client : std::as_const(m_clients)) {
+            if (client) {
+                client->setNetworkManager(network);
+            }
+        }
+    }
 
     // Connects every enabled server that is not connected yet.
     void connectAll();
@@ -305,6 +322,7 @@ private:
     // project's server list is a program that runs with the user's
     // privileges, so it stays unloaded until the user confirms it.
     bool m_loadWorkspaceConfig = false;
+    QPointer<QNetworkAccessManager> m_sharedNam;
     int m_timeoutMs = 60000;
     QStringList m_autoApproved;
     QStringList m_readOnlyTools;

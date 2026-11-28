@@ -42,8 +42,23 @@ QString completionModelFor(const Settings &settings)
 
 CompletionEngine::CompletionEngine(QObject *parent)
     : QObject(parent)
-    , m_nam(new QNetworkAccessManager(this))
 {
+}
+
+void CompletionEngine::setNetworkManager(QNetworkAccessManager *network)
+{
+    m_sharedNam = network;
+}
+
+QNetworkAccessManager *CompletionEngine::ensureNam()
+{
+    if (m_sharedNam) {
+        return m_sharedNam.data();
+    }
+    if (!m_nam) {
+        m_nam = new QNetworkAccessManager(this);
+    }
+    return m_nam;
 }
 
 CompletionEngine::~CompletionEngine()
@@ -303,7 +318,7 @@ void CompletionEngine::request(const CompletionPromptContext &context)
 
     m_activeContext = context;
     recordRequestTime();
-    m_reply = m_nam->post(networkRequest, QJsonDocument(body).toJson(QJsonDocument::Compact));
+    m_reply = ensureNam()->post(networkRequest, QJsonDocument(body).toJson(QJsonDocument::Compact));
     connect(m_reply, &QNetworkReply::finished, this, &CompletionEngine::handleReplyFinished);
 }
 

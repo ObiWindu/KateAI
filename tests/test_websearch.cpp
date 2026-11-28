@@ -191,6 +191,21 @@ private Q_SLOTS:
         QVERIFY(!WebSearch::isFetchableUrl(QString()));
     }
 
+    void privateAndMappedAddressesAreBlocked()
+    {
+        // IPv4-mapped IPv6, CGNAT, unspecified, ULA, and link-local addresses must be blocked.
+        QVERIFY(WebSearch::isBlockedHost(QStringLiteral("::ffff:127.0.0.1")));
+        QVERIFY(WebSearch::isBlockedHost(QStringLiteral("[::ffff:169.254.169.254]")));
+        QVERIFY(WebSearch::isBlockedHost(QStringLiteral("100.64.0.1")));
+        QVERIFY(WebSearch::isBlockedHost(QStringLiteral("0.0.0.0")));
+        QVERIFY(WebSearch::isBlockedHost(QStringLiteral("fc00::1")));
+        QVERIFY(WebSearch::isBlockedHost(QStringLiteral("fe80::1")));
+        QVERIFY(WebSearch::isBlockedHost(QStringLiteral("::")));
+        QVERIFY(!WebSearch::isFetchableUrl(QStringLiteral("http://[::ffff:127.0.0.1]/admin")));
+        QVERIFY(!WebSearch::isFetchableUrl(QStringLiteral("http://[::ffff:169.254.169.254]/latest/meta-data")));
+        QVERIFY(!WebSearch::isBlockedHost(QStringLiteral("93.184.216.34")));
+    }
+
     void providerIdRoundTrips()
     {
         for (const auto provider : {WebSearch::Provider::DuckDuckGo,

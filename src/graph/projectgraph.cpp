@@ -23,6 +23,7 @@
 #include <QUuid>
 #include <algorithm>
 #include <cmath>
+#include <memory>
 #include <utility>
 
 using namespace Qt::Literals::StringLiterals;
@@ -530,52 +531,79 @@ void ProjectGraph::updateGraph(const QString &filePath, const QString &content)
     m_isDirty = true;
 }
 
+void ProjectGraph::unindexEdge(GraphEdge *edge)
+{
+    if (!edge) {
+        return;
+    }
+    auto outIt = m_outgoingEdges.find(edge->sourceId);
+    if (outIt != m_outgoingEdges.end()) {
+        outIt.value().removeOne(edge);
+        if (outIt.value().isEmpty()) {
+            m_outgoingEdges.erase(outIt);
+        }
+    }
+    auto inIt = m_incomingEdges.find(edge->targetId);
+    if (inIt != m_incomingEdges.end()) {
+        inIt.value().removeOne(edge);
+        if (inIt.value().isEmpty()) {
+            m_incomingEdges.erase(inIt);
+        }
+    }
+}
+
 void ProjectGraph::removeNode(const QString &nodeId)
 {
-    if (!m_nodes.contains(nodeId)) {
+    auto nodeIt = m_nodes.find(nodeId);
+    if (nodeIt == m_nodes.end()) {
         return;
     }
 
-    // Remove all edges connected to this node
+    // Remove all edges connected to this node in O(deg) via the edge indexes.
+    QSet<GraphEdge *> incidentEdges;
+    const QList<GraphEdge *> outgoing = m_outgoingEdges.value(nodeId);
+    for (GraphEdge *edge : outgoing) {
+        incidentEdges.insert(edge);
+    }
+    const QList<GraphEdge *> incoming = m_incomingEdges.value(nodeId);
+    for (GraphEdge *edge : incoming) {
+        incidentEdges.insert(edge);
+    }
+
     QSet<QString> connectedNodes;
-    for (auto it = m_edges.begin(); it != m_edges.end(); ) {
-        const QString &edgeKey = it.key();
-        // Parse edgeKey to get sourceId, targetId, and relationship
-        // Format: sourceId->targetId->relationship. targetId may itself contain
-        // "->" (raw import line, e.g. "#include <foo->bar>"), so split the
-        // relationship off from the right; sourceIds never contain "->".
-        int arrow1 = edgeKey.indexOf(u"->"_s);
-        int arrow2 = edgeKey.lastIndexOf(u"->"_s);
-        if (arrow1 != -1 && arrow2 != -1) {
-            QString sourceId = edgeKey.mid(0, arrow1);
-            QString targetId = edgeKey.mid(arrow1 + 2, arrow2 - arrow1 - 2);
-            // relationship = edgeKey.mid(arrow2 + 2); // Not needed for removal
-            if (sourceId == nodeId || targetId == nodeId) {
-                connectedNodes.insert(sourceId);
-                connectedNodes.insert(targetId);
-                delete it.value();
-                it = m_edges.erase(it);
-                continue;
-            }
-        }
-        ++it;
+    for (GraphEdge *edge : std::as_const(incidentEdges)) {
+        connectedNodes.insert(edge->sourceId);
+        connectedNodes.insert(edge->targetId);
+        const QString edgeKey = edge->sourceId + u"->"_s + edge->targetId + u"->"_s + edge->relationship;
+        unindexEdge(edge);
+        delete m_edges.take(edgeKey);
     }
 
     m_adjacencyValid = false;
 
-    // Remove the node itself
-    delete m_nodes.take(nodeId);
+    // Also include any neighbor ids recorded on the node itself.
+    std::unique_ptr<GraphNode> removed(nodeIt.value());
+    m_nodes.erase(nodeIt);
+    for (const QString &dep : std::as_const(removed->dependencies)) {
+        connectedNodes.insert(dep);
+    }
+    for (const QString &dep : std::as_const(removed->dependents)) {
+        connectedNodes.insert(dep);
+    }
+    connectedNodes.remove(nodeId);
 
-    // Update dependent nodes
-    for (auto it = m_nodes.begin(); it != m_nodes.end(); ++it) {
-        GraphNode *node = it.value();
-        node->dependencies.remove(nodeId);
-        node->dependents.remove(nodeId);
+    for (const QString &neighborId : std::as_const(connectedNodes)) {
+        if (GraphNode *neighbor = m_nodes.value(neighborId, nullptr)) {
+            neighbor->dependencies.remove(nodeId);
+            neighbor->dependents.remove(nodeId);
+        }
     }
 }
 
 void ProjectGraph::clear()
 {
+    m_outgoingEdges.clear();
+    m_incomingEdges.clear();
     qDeleteAll(m_nodes);
     m_nodes.clear();
     qDeleteAll(m_edges);
@@ -594,6 +622,8 @@ void ProjectGraph::takeStateFrom(ProjectGraph &other)
     clear();
     m_nodes = std::move(other.m_nodes);
     m_edges = std::move(other.m_edges);
+    m_outgoingEdges = std::move(other.m_outgoingEdges);
+    m_incomingEdges = std::move(other.m_incomingEdges);
     m_adjacencyList.clear();
     m_adjacencyValid = false;
     m_pendingImports = std::move(other.m_pendingImports);
@@ -603,6 +633,8 @@ void ProjectGraph::takeStateFrom(ProjectGraph &other)
     m_isDirty = other.m_isDirty;
     other.m_nodes.clear();
     other.m_edges.clear();
+    other.m_outgoingEdges.clear();
+    other.m_incomingEdges.clear();
     other.m_adjacencyList.clear();
     other.m_adjacencyValid = false;
     other.m_pendingImports.clear();
@@ -616,8 +648,9 @@ void ProjectGraph::addNode(const GraphNode &node)
         return;
     }
 
-    GraphNode *newNode = new GraphNode(node);
-    m_nodes[node.id] = newNode;
+    auto newNode = std::make_unique<GraphNode>(node);
+    m_nodes.insert(node.id, newNode.get());
+    newNode.release();
 
     m_adjacencyValid = false;
 }
@@ -655,9 +688,9 @@ QList<GraphNode*> ProjectGraph::getFilesInDirectory(const QString &dirPath) cons
     const GraphNode *dirNode = getNode(dirNodeId);
 
     if (dirNode) {
-        for (auto it = m_edges.begin(); it != m_edges.end(); ++it) {
-            const GraphEdge *edge = it.value();
-            if (edge->sourceId == dirNodeId && edge->relationship == u"contains"_s) {
+        const QList<GraphEdge *> outgoing = m_outgoingEdges.value(dirNodeId);
+        for (const GraphEdge *edge : outgoing) {
+            if (edge->relationship == u"contains"_s) {
                 const GraphNode *childNode = getNode(edge->targetId);
                 if (childNode && childNode->type == u"file"_s) {
                     result.append(const_cast<GraphNode*>(childNode));
@@ -676,8 +709,12 @@ void ProjectGraph::addEdge(const GraphEdge &edge)
         return;
     }
 
-    GraphEdge *newEdge = new GraphEdge(edge);
-    m_edges[edgeKey] = newEdge;
+    auto newEdge = std::make_unique<GraphEdge>(edge);
+    GraphEdge *rawEdge = newEdge.get();
+    m_edges.insert(edgeKey, rawEdge);
+    m_outgoingEdges[rawEdge->sourceId].append(rawEdge);
+    m_incomingEdges[rawEdge->targetId].append(rawEdge);
+    newEdge.release();
 
     m_adjacencyValid = false;
 
@@ -692,23 +729,26 @@ void ProjectGraph::addEdge(const GraphEdge &edge)
 
 void ProjectGraph::removeEdge(const QString &sourceId, const QString &targetId)
 {
-    QString edgeKey;
-    for (auto it = m_edges.begin(); it != m_edges.end(); ++it) {
-        if (it.key().startsWith(sourceId + u"->"_s + targetId + u"->"_s)) {
-            edgeKey = it.key();
+    GraphEdge *match = nullptr;
+    const QList<GraphEdge *> outgoing = m_outgoingEdges.value(sourceId);
+    for (GraphEdge *edge : outgoing) {
+        if (edge->targetId == targetId) {
+            match = edge;
             break;
         }
     }
-
-    if (edgeKey.isEmpty()) {
+    if (!match) {
         return;
     }
+    const QString edgeKey = match->sourceId + u"->"_s + match->targetId + u"->"_s + match->relationship;
+    unindexEdge(match);
     delete m_edges.take(edgeKey);
 
     // Another relationship between the same pair may still exist. Only drop
     // the adjacency entry and the node back-links when this was the last one.
-    for (auto it = m_edges.constBegin(); it != m_edges.constEnd(); ++it) {
-        if (it.key().startsWith(sourceId + u"->"_s + targetId + u"->"_s)) {
+    const QList<GraphEdge *> remaining = m_outgoingEdges.value(sourceId);
+    for (const GraphEdge *edge : remaining) {
+        if (edge->targetId == targetId) {
             return;
         }
     }
@@ -725,24 +765,12 @@ void ProjectGraph::removeEdge(const QString &sourceId, const QString &targetId)
 
 QList<GraphEdge*> ProjectGraph::getEdgesFrom(const QString &sourceId) const
 {
-    QList<GraphEdge*> result;
-    for (auto it = m_edges.begin(); it != m_edges.end(); ++it) {
-        if (it.key().startsWith(sourceId + u"->"_s)) {
-            result.append(it.value());
-        }
-    }
-    return result;
+    return m_outgoingEdges.value(sourceId);
 }
 
 QList<GraphEdge*> ProjectGraph::getEdgesTo(const QString &targetId) const
 {
-    QList<GraphEdge*> result;
-    for (auto it = m_edges.begin(); it != m_edges.end(); ++it) {
-        if (it.key().contains(u"->"_s + targetId + u"->"_s)) {
-            result.append(it.value());
-        }
-    }
-    return result;
+    return m_incomingEdges.value(targetId);
 }
 
 QList<GraphEdge*> ProjectGraph::getEdgesByRelationship(const QString &relationship) const
@@ -1902,7 +1930,8 @@ bool ProjectGraph::loadFromSqlite(const QString &filePath, SqliteLoadError *erro
 
     const QString connectionName = graphConnectionName();
     QString error;
-    QJsonObject json;
+    SqliteLoadError validationError = SqliteLoadError::None;
+    ProjectGraph staged;
     {
         QSqlDatabase database = QSqlDatabase::addDatabase(u"QSQLITE"_s, connectionName);
         database.setDatabaseName(filePath);
@@ -1929,14 +1958,35 @@ bool ProjectGraph::loadFromSqlite(const QString &filePath, SqliteLoadError *erro
                         *errorKind = classifyGraphSqlError(error);
                     }
                 }
+
+                QString effectiveWorkspace;
+                QString absoluteRoot;
+                QString canonicalRoot;
                 if (error.isEmpty()) {
-                    json.insert(u"schemaVersion"_s, metadata.value(u"schemaVersion"_s).toInt());
-                    json.insert(u"workspacePath"_s, metadata.value(u"workspacePath"_s));
+                    const int schemaVersion = metadata.value(u"schemaVersion"_s).toInt();
+                    const QString serializedWorkspace = metadata.value(u"workspacePath"_s);
+                    if (schemaVersion != kGraphSchemaVersion || serializedWorkspace.isEmpty()) {
+                        validationError = SqliteLoadError::InvalidSchema;
+                    } else {
+                        effectiveWorkspace = m_workspacePath.isEmpty() ? serializedWorkspace : m_workspacePath;
+                        absoluteRoot = QFileInfo(effectiveWorkspace).absoluteFilePath();
+                        canonicalRoot = resolveGraphPath(absoluteRoot);
+                        if (!m_workspacePath.isEmpty()) {
+                            const QString expectedCanonical = resolveGraphPath(m_workspacePath);
+                            const QString actualCanonical = resolveGraphPath(serializedWorkspace);
+                            if (!pathWithinRoot(expectedCanonical, actualCanonical)
+                                || !pathWithinRoot(actualCanonical, expectedCanonical)) {
+                                validationError = SqliteLoadError::InvalidSchema;
+                            }
+                        }
+                        staged.m_workspacePath = effectiveWorkspace;
+                    }
                 }
 
-                QJsonArray nodesArray;
+                // Hydrate directly into the staging graph instead of building an
+                // intermediate full-graph QJsonObject.
                 QSqlQuery nodesQuery(database);
-                if (error.isEmpty()
+                if (error.isEmpty() && validationError == SqliteLoadError::None
                     && nodesQuery.exec(u"SELECT id, name, type, path, complexity, lines_of_code, is_read_only,"
                                        u"last_modified, metadata_json, dependencies_json, dependents_json"
                                        u" FROM %1 ORDER BY id"_s.arg(QLatin1String(kNodesTable)))) {
@@ -1952,49 +2002,69 @@ bool ProjectGraph::loadFromSqlite(const QString &filePath, SqliteLoadError *erro
                             }
                             break;
                         }
-                        QJsonObject node;
-                        node.insert(u"id"_s, nodesQuery.value(0).toString());
-                        node.insert(u"name"_s, nodesQuery.value(1).toString());
-                        node.insert(u"type"_s, nodesQuery.value(2).toString());
-                        node.insert(u"path"_s, nodesQuery.value(3).toString());
-                        node.insert(u"content"_s, QString());
-                        node.insert(u"complexity"_s, nodesQuery.value(4).toInt());
-                        node.insert(u"linesOfCode"_s, nodesQuery.value(5).toInt());
-                        node.insert(u"isReadOnly"_s, nodesQuery.value(6).toBool());
-                        node.insert(u"lastModified"_s, nodesQuery.value(7).toLongLong());
-                        node.insert(u"metadata"_s, metadataDocument.object());
-                        node.insert(u"dependencies"_s, dependenciesDocument.array());
-                        node.insert(u"dependents"_s, dependentsDocument.array());
-                        nodesArray.append(node);
+                        GraphNode node;
+                        node.id = nodesQuery.value(0).toString();
+                        node.name = nodesQuery.value(1).toString();
+                        node.type = nodesQuery.value(2).toString();
+                        node.path = nodesQuery.value(3).toString();
+                        node.complexity = nodesQuery.value(4).toInt();
+                        node.linesOfCode = nodesQuery.value(5).toInt();
+                        node.isReadOnly = nodesQuery.value(6).toBool();
+                        node.lastModified = nodesQuery.value(7).toLongLong();
+                        node.metadata = metadataDocument.object();
+                        if (node.id.isEmpty()) {
+                            validationError = SqliteLoadError::Corrupt;
+                            break;
+                        }
+                        if (staged.m_nodes.contains(node.id) || node.path.isEmpty()) {
+                            validationError = SqliteLoadError::InvalidSchema;
+                            break;
+                        }
+                        QString absoluteNode = QDir::isAbsolutePath(node.path)
+                            ? QDir::cleanPath(node.path) : QDir(absoluteRoot).absoluteFilePath(node.path);
+                        if (QDir::cleanPath(node.path) == QDir::cleanPath(effectiveWorkspace)) {
+                            absoluteNode = absoluteRoot;
+                        }
+                        const QString canonicalNode = resolveGraphPath(absoluteNode);
+                        if (!pathWithinRoot(canonicalNode, canonicalRoot)) {
+                            validationError = SqliteLoadError::InvalidSchema;
+                            break;
+                        }
+                        for (const QJsonValue &depValue : dependenciesDocument.array()) {
+                            node.dependencies.insert(depValue.toString());
+                        }
+                        for (const QJsonValue &depValue : dependentsDocument.array()) {
+                            node.dependents.insert(depValue.toString());
+                        }
+                        staged.addNode(node);
                     }
-                    if (error.isEmpty()) {
-                        json.insert(u"nodes"_s, nodesArray);
-                    }
-                } else if (error.isEmpty()) {
+                } else if (error.isEmpty() && validationError == SqliteLoadError::None) {
                     error = nodesQuery.lastError().text();
                     if (errorKind) {
                         *errorKind = classifyGraphSqlError(error);
                     }
                 }
 
-                QJsonArray edgesArray;
                 QSqlQuery edgesQuery(database);
-                if (error.isEmpty()
+                if (error.isEmpty() && validationError == SqliteLoadError::None
                     && edgesQuery.exec(u"SELECT source_id, target_id, relationship, details, is_safe"
                                        u" FROM %1 ORDER BY source_id, target_id, relationship"_s.arg(QLatin1String(kEdgesTable)))) {
                     while (edgesQuery.next()) {
-                        QJsonObject edge;
-                        edge.insert(u"sourceId"_s, edgesQuery.value(0).toString());
-                        edge.insert(u"targetId"_s, edgesQuery.value(1).toString());
-                        edge.insert(u"relationship"_s, edgesQuery.value(2).toString());
-                        edge.insert(u"details"_s, edgesQuery.value(3).toString());
-                        edge.insert(u"isSafe"_s, edgesQuery.value(4).toBool());
-                        edgesArray.append(edge);
+                        GraphEdge edge;
+                        edge.sourceId = edgesQuery.value(0).toString();
+                        edge.targetId = edgesQuery.value(1).toString();
+                        edge.relationship = edgesQuery.value(2).toString();
+                        edge.details = edgesQuery.value(3).toString();
+                        edge.isSafe = edgesQuery.value(4).toBool();
+                        if (!staged.m_nodes.contains(edge.sourceId)
+                            || !staged.m_nodes.contains(edge.targetId)
+                            || edge.relationship.isEmpty()) {
+                            validationError = SqliteLoadError::Corrupt;
+                            break;
+                        }
+                        staged.addEdge(edge);
                     }
-                    if (error.isEmpty()) {
-                        json.insert(u"edges"_s, edgesArray);
-                    }
-                } else if (error.isEmpty()) {
+                } else if (error.isEmpty() && validationError == SqliteLoadError::None) {
                     error = edgesQuery.lastError().text();
                     if (errorKind) {
                         *errorKind = classifyGraphSqlError(error);
@@ -2019,32 +2089,9 @@ bool ProjectGraph::loadFromSqlite(const QString &filePath, SqliteLoadError *erro
         qWarning() << "KateAI: could not load SQLite project graph" << filePath << error;
         return false;
     }
-    QSet<QString> nodeIds;
-    for (const QJsonValue &value : json.value(u"nodes"_s).toArray()) {
-        const QString id = value.toObject().value(u"id"_s).toString();
-        if (id.isEmpty()) {
-            if (errorKind) {
-                *errorKind = SqliteLoadError::Corrupt;
-            }
-            return false;
-        }
-        nodeIds.insert(id);
-    }
-    for (const QJsonValue &value : json.value(u"edges"_s).toArray()) {
-        const QJsonObject edge = value.toObject();
-        if (!nodeIds.contains(edge.value(u"sourceId"_s).toString())
-            || !nodeIds.contains(edge.value(u"targetId"_s).toString())
-            || edge.value(u"relationship"_s).toString().isEmpty()) {
-            if (errorKind) {
-                *errorKind = SqliteLoadError::Corrupt;
-            }
-            return false;
-        }
-    }
-    ProjectGraph staged;
-    if (!staged.fromJson(json)) {
+    if (validationError != SqliteLoadError::None) {
         if (errorKind) {
-            *errorKind = SqliteLoadError::InvalidSchema;
+            *errorKind = validationError;
         }
         return false;
     }
@@ -2284,25 +2331,15 @@ const QHash<QString, QStringList> &ProjectGraph::adjacencyList() const
 
 void ProjectGraph::cleanupDeletedNodes()
 {
-    QSet<QString> existingNodeIds;
-    for (auto it = m_nodes.begin(); it != m_nodes.end(); ++it) {
-        existingNodeIds.insert(it.key());
-    }
-
-    for (auto it = m_edges.begin(); it != m_edges.end(); ++it) {
-        const QString &edgeKey = it.key();
-        // Parse edgeKey to get sourceId and targetId (see removeNode: split
-        // from the right so a targetId containing "->" survives).
-        int arrow1 = edgeKey.indexOf(u"->"_s);
-        int arrow2 = edgeKey.lastIndexOf(u"->"_s);
-        if (arrow1 != -1 && arrow2 != -1) {
-            QString sourceId = edgeKey.mid(0, arrow1);
-            QString targetId = edgeKey.mid(arrow1 + 2, arrow2 - arrow1 - 2);
-            if (!existingNodeIds.contains(sourceId) || !existingNodeIds.contains(targetId)) {
-                delete it.value();
-                it = m_edges.erase(it);
-            }
+    for (auto it = m_edges.begin(); it != m_edges.end(); ) {
+        GraphEdge *edge = it.value();
+        if (!edge || !m_nodes.contains(edge->sourceId) || !m_nodes.contains(edge->targetId)) {
+            unindexEdge(edge);
+            delete edge;
+            it = m_edges.erase(it);
+            continue;
         }
+        ++it;
     }
 
     // Nodes were removed above, so the derived adjacency cache is stale.

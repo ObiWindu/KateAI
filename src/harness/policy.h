@@ -69,8 +69,8 @@ class PolicyEngine
 {
 public:
     void clear();
-    bool load(const QString &workspace, QString *error = nullptr);
-    bool loadFiles(const QStringList &files, QString *error = nullptr);
+    bool load(const QString &workspace, QString *error = nullptr, bool allowProjectAllow = false);
+    bool loadFiles(const QStringList &files, QString *error = nullptr, bool allowProjectAllow = true);
 
     QList<PolicyRule> rules() const
     {

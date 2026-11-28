@@ -26,6 +26,7 @@
 #include <QFileInfo>
 #include <QJsonObject>
 #include <QMetaObject>
+#include <QPointer>
 #include <QRegularExpression>
 #include <QSet>
 #include <QTabWidget>
@@ -797,8 +798,12 @@ QList<DebugVariable> KateDebugBridge::expandVariable(int variablesReference, int
     QElapsedTimer timer;
     timer.start();
     const int cap = qBound(100, timeoutMs, 5000);
+    QPointer<KateDebugBridge> self(this);
     while (timer.elapsed() < cap) {
         QCoreApplication::processEvents(QEventLoop::AllEvents, 40);
+        if (!self || !m_backend) {
+            return {};
+        }
         const QList<DebugVariable> all = locals();
         std::function<QList<DebugVariable>(const QList<DebugVariable> &)> findRef =
             [&](const QList<DebugVariable> &vars) -> QList<DebugVariable> {
@@ -1083,19 +1088,25 @@ bool KateDebugBridge::waitForNextPauseOrEnd(int timeoutMs, bool *ended)
             loop.quit();
         }
     });
+    const auto c5 = connect(this, &QObject::destroyed, &loop, [&]() {
+        didEnd = true;
+        loop.quit();
+    });
 
+    QPointer<KateDebugBridge> self(this);
     timer.start(qBound(500, timeoutMs, 60000));
     loop.exec(QEventLoop::AllEvents);
 
-    disconnect(c1);
-    disconnect(c2);
-    disconnect(c3);
-    disconnect(c4);
+    QObject::disconnect(c1);
+    QObject::disconnect(c2);
+    QObject::disconnect(c3);
+    QObject::disconnect(c4);
+    QObject::disconnect(c5);
 
     if (ended) {
-        *ended = didEnd;
+        *ended = didEnd || !self;
     }
-    return done;
+    return self ? done : false;
 }
 
 DebugActionResult KateDebugBridge::selectFrame(int frameLevel)
@@ -1110,7 +1121,11 @@ DebugActionResult KateDebugBridge::selectFrame(int frameLevel)
         return {false, u"Failed to invoke changeStackFrame on Kate's debugger backend."_s, {}};
     }
     m_activeFrameLevel = frameLevel;
+    QPointer<KateDebugBridge> self(this);
     QCoreApplication::processEvents(QEventLoop::AllEvents, 120);
+    if (!self) {
+        return {false, u"Debug bridge was closed while switching frames."_s, {}};
+    }
     return {true, u"Selected stack frame #%1."_s.arg(frameLevel), currentStop()};
 }
 
@@ -1125,7 +1140,11 @@ DebugActionResult KateDebugBridge::selectThread(int threadId)
     if (!QMetaObject::invokeMethod(m_backend, "changeThread", Qt::DirectConnection, Q_ARG(int, threadId))) {
         return {false, u"Failed to invoke changeThread on Kate's debugger backend."_s, {}};
     }
+    QPointer<KateDebugBridge> self(this);
     QCoreApplication::processEvents(QEventLoop::AllEvents, 120);
+    if (!self) {
+        return {false, u"Debug bridge was closed while switching threads."_s, {}};
+    }
     return {true, u"Selected thread %1."_s.arg(threadId), currentStop()};
 }
 
@@ -1179,7 +1198,11 @@ DebugActionResult KateDebugBridge::setBreakpoint(const QString &file,
             cmd += u" on %1"_s.arg(cleanFile);
         }
         if (sendDapReplCommand(cmd)) {
+            QPointer<KateDebugBridge> self(this);
             QCoreApplication::processEvents(QEventLoop::AllEvents, 150);
+            if (!self) {
+                return {false, u"Debug bridge was closed while updating breakpoint."_s, {}};
+            }
             Q_EMIT breakpointsChanged();
             QString msg = remove
                 ? u"Removed breakpoint at %1:%2."_s.arg(cleanFile).arg(line)
@@ -1242,7 +1265,11 @@ DebugActionResult KateDebugBridge::step(const QString &action, const QString &fi
             return {false, u"Failed to pause debugger."_s, {}};
         }
         bool ended = false;
+        QPointer<KateDebugBridge> self(this);
         waitForNextPauseOrEnd(timeoutMs, &ended);
+        if (!self) {
+            return {false, u"Debug bridge was closed while pausing execution."_s, {}};
+        }
         return {true, ended ? u"Program ended."_s : u"Paused execution."_s, currentStop()};
     }
 
@@ -1277,7 +1304,11 @@ DebugActionResult KateDebugBridge::step(const QString &action, const QString &fi
     }
 
     bool ended = false;
+    QPointer<KateDebugBridge> self(this);
     const bool settled = waitForNextPauseOrEnd(timeoutMs, &ended);
+    if (!self) {
+        return {false, u"Debug bridge was closed during stepping."_s, {}};
+    }
     const DebugStopInfo stop = currentStop();
     if (ended) {
         return {true, u"Program terminated."_s, stop};
@@ -1325,8 +1356,12 @@ DebugActionResult KateDebugBridge::evaluate(const QString &expression, int timeo
     QElapsedTimer timer;
     timer.start();
     const int cap = qBound(300, timeoutMs, 15000);
+    QPointer<KateDebugBridge> self(this);
     while (m_evalPending && !m_evalCaptured && timer.elapsed() < cap) {
         QCoreApplication::processEvents(QEventLoop::AllEvents, 40);
+        if (!self) {
+            return {false, u"Debug bridge was closed during expression evaluation."_s, {}};
+        }
     }
     m_evalPending = false;
     if (m_evalCaptured) {
@@ -1374,7 +1409,11 @@ DebugActionResult KateDebugBridge::controlSession(const QString &action, const Q
             return {false, u"Failed to start debugging session."_s, {}};
         }
         bool ended = false;
+        QPointer<KateDebugBridge> self(this);
         const bool settled = waitForNextPauseOrEnd(timeoutMs, &ended);
+        if (!self) {
+            return {false, u"Debug bridge was closed while starting session."_s, {}};
+        }
         const DebugStopInfo stop = currentStop();
         if (ended) {
             return {true, u"Debug session ran to completion."_s, stop};
@@ -1395,7 +1434,11 @@ DebugActionResult KateDebugBridge::controlSession(const QString &action, const Q
             return {false, u"Failed to restart debug session."_s, {}};
         }
         bool ended = false;
+        QPointer<KateDebugBridge> self(this);
         waitForNextPauseOrEnd(timeoutMs, &ended);
+        if (!self) {
+            return {false, u"Debug bridge was closed while restarting session."_s, {}};
+        }
         return {true, ended ? u"Restarted and ran to completion."_s : u"Debug session restarted."_s, currentStop()};
     }
 
@@ -1404,7 +1447,11 @@ DebugActionResult KateDebugBridge::controlSession(const QString &action, const Q
         if (!ok) {
             return {false, u"Failed to stop debug session."_s, {}};
         }
+        QPointer<KateDebugBridge> self(this);
         QCoreApplication::processEvents(QEventLoop::AllEvents, 150);
+        if (!self) {
+            return {true, u"Debug session stopped."_s, {}};
+        }
         return {true, u"Debug session stopped."_s, {}};
     }
 
@@ -1432,8 +1479,12 @@ DebugActionResult KateDebugBridge::sendConsoleCommand(const QString &command)
     }
     QElapsedTimer timer;
     timer.start();
+    QPointer<KateDebugBridge> self(this);
     while (timer.elapsed() < 800) {
         QCoreApplication::processEvents(QEventLoop::AllEvents, 40);
+        if (!self) {
+            return {false, u"Debug bridge was closed while running console command."_s, {}};
+        }
         if (m_outputBuffer.size() > beforeLen + command.size() + 2) {
             break;
         }

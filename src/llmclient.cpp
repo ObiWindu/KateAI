@@ -292,6 +292,17 @@ LlmClient::LlmClient(QObject *parent)
     connect(&m_retryTimer, &QTimer::timeout, this, &LlmClient::executeRetry);
 }
 
+QNetworkAccessManager *LlmClient::ensureNam()
+{
+    if (m_sharedNam) {
+        return m_sharedNam.data();
+    }
+    if (!m_ownedNam) {
+        m_ownedNam = new QNetworkAccessManager(this);
+    }
+    return m_ownedNam;
+}
+
 LlmClient::~LlmClient()
 {
     abort();
@@ -1057,7 +1068,7 @@ void LlmClient::doComplete(const QList<ChatMessage> &messages)
     }
 
     m_geminiRequestUsedCache = geminiNative && !geminiPlan.cachedContent.isEmpty();
-    m_reply = m_nam.post(request, requestBody);
+    m_reply = ensureNam()->post(request, requestBody);
     if (geminiNative) {
         // Cache creation happens alongside the completion. It is used by the
         // next request, never by this one, so a cold cache does not add a
@@ -1529,7 +1540,7 @@ void LlmClient::deleteGeminiCacheResource(const QString &baseUrl, const QString 
     QNetworkRequest request(url);
     request.setRawHeader("x-goog-api-key", apiKeyFor(m_settings).toUtf8());
     request.setTransferTimeout(30000);
-    if (QNetworkReply *reply = m_nam.deleteResource(request)) {
+    if (QNetworkReply *reply = ensureNam()->deleteResource(request)) {
         connect(reply, &QNetworkReply::finished, reply, &QNetworkReply::deleteLater);
     }
 }
@@ -1584,7 +1595,7 @@ void LlmClient::startGeminiCache(const QList<ChatMessage> &messages,
     request.setTransferTimeout(45000);
 
     m_geminiCachePendingKey = plan.key;
-    m_geminiCacheReply = m_nam.post(
+    m_geminiCacheReply = ensureNam()->post(
         request, QJsonDocument(payload).toJson(QJsonDocument::Compact));
     QNetworkReply *reply = m_geminiCacheReply;
     const QString cacheKey = plan.key;
@@ -1610,8 +1621,10 @@ void LlmClient::startGeminiCache(const QList<ChatMessage> &messages,
         if (networkError != QNetworkReply::NoError || status >= 400 || name.isEmpty()) {
             // A local network failure may succeed on the next turn; a server
             // rejection (bad schema, below minimum, unsupported model) will
-            // not, so remember only the latter.
-            if (networkError == QNetworkReply::NoError) {
+            // not, so remember only the latter. Note that Qt sets a non-NoError
+            // networkError for HTTP 4xx responses as well.
+            const bool permanentClientRejection = (status >= 400 && status < 500 && status != 429);
+            if (networkError == QNetworkReply::NoError || permanentClientRejection) {
                 m_geminiCacheFailedKey = cacheKey;
             }
             qWarning() << "KateAI: Gemini cache creation failed"
@@ -1864,7 +1877,7 @@ void LlmClient::fetchModels(Provider provider)
         request.setHeader(QNetworkRequest::UserAgentHeader, u"Kate AI"_s);
     }
 
-    QNetworkReply *reply = m_nam.get(request);
+    QNetworkReply *reply = ensureNam()->get(request);
     reply->setParent(this);
     m_modelReplies.append(reply);
     connect(reply, &QNetworkReply::finished, this, [this, reply, provider]() {
@@ -2217,9 +2230,13 @@ bool LlmClient::feedSseLine(const QByteArray &line)
         m_pendingEventData.clear();
         return applySseChunk(chunk);
     }
-    // "event:", "id:", "retry:" and comment lines carry no payload. A pending
-    // event that never parsed is dropped here: more data will not make it
-    // valid.
+    // "event:", "id:", "retry:" and comment lines (keep-alives starting with
+    // ':') carry no payload. Per the SSE specification, keep-alive comments or
+    // metadata fields between "data:" lines must not discard pending event data.
+    if (trimmed.startsWith(':') || trimmed.startsWith("event:") || trimmed.startsWith("id:")
+        || trimmed.startsWith("retry:")) {
+        return true;
+    }
     m_pendingEventData.clear();
     return true;
 }
@@ -2249,21 +2266,35 @@ void LlmClient::handleReadyRead()
     if (QTimer *idleTimer = m_requestTimers.value(m_reply)) {
         idleTimer->start(kRequestIdleTimeoutMs);
     }
-    while (true) {
-        const int idx = m_buffer.indexOf('\n');
+    // Scan lines with a forward cursor instead of front-removing on each line
+    // (which was O(N^2) on large multi-line bursts).
+    const QByteArray buffer = std::move(m_buffer);
+    m_buffer.clear();
+    qsizetype pos = 0;
+    while (pos < buffer.size()) {
+        const qsizetype idx = buffer.indexOf('\n', pos);
         if (idx < 0) {
             break;
         }
-        const QByteArray line = m_buffer.left(idx);
-        m_buffer.remove(0, idx + 1);
+        const QByteArray line = buffer.mid(pos, idx - pos);
+        pos = idx + 1;
         if (line.trimmed().isEmpty()) {
             feedSseLine(line);
+            if (!m_reply || m_abortRequested) {
+                return;
+            }
             continue;
         }
 
         if (!feedSseLine(line)) {
             return;
         }
+        if (!m_reply || m_abortRequested) {
+            return;
+        }
+    }
+    if (pos < buffer.size() && m_reply && !m_abortRequested) {
+        m_buffer.prepend(buffer.mid(pos));
     }
 }
 
@@ -2612,7 +2643,7 @@ RetryErrorCategory LlmClient::classifyByMessage(const QString &lowerError, const
     // message the user has to act on.
     if (lowerError.contains(u"credit balance") || lowerError.contains(u"insufficient")
         || lowerError.contains(u"billing") || lowerError.contains(u"payment required")
-        || lowerBody.contains(u"credit balance") || lowerBody.contains(u"insufficient_quota")) {
+        || lowerBody.contains(u"credit balance")) {
         return RetryErrorCategory::NonRetryable;
     }
 

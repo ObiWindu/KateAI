@@ -526,7 +526,9 @@ void McpClient::start()
             m_nam->deleteLater();
             m_nam = nullptr;
         }
-        m_nam = new QNetworkAccessManager(this);
+        if (!m_sharedNam) {
+            m_nam = new QNetworkAccessManager(this);
+        }
     } else {
         // A previous run may still own a process: starting a new one next to
         // it would mix their output.
@@ -604,12 +606,6 @@ void McpClient::stop()
         m_startupTimer = nullptr;
     }
     failAll(u"Server disconnected."_s);
-    for (auto it = m_pending.constBegin(); it != m_pending.constEnd(); ++it) {
-        if (it.value().reply) {
-            it.value().reply->abort();
-        }
-    }
-    m_pending.clear();
 
     stopProcess();
     m_tools.clear();
@@ -681,7 +677,13 @@ bool McpClient::callTool(const QString &callToken, const QString &toolName, cons
             return;
         }
         const QString token = it.value().callToken;
+        QPointer<QNetworkReply> reply = it.value().reply;
         m_pending.remove(id);
+        if (reply) {
+            reply->disconnect(this);
+            reply->abort();
+            reply->deleteLater();
+        }
         Q_EMIT toolResult(token, false, QString(), u"Tool '%1' timed out after %2 ms."_s.arg(toolName).arg(budget));
     });
     pending.timeout = timeout;
@@ -725,7 +727,13 @@ int McpClient::sendRequest(const QString &method, const QJsonObject &params)
             if (it == m_pending.constEnd()) {
                 return;
             }
+            QPointer<QNetworkReply> reply = it.value().reply;
             m_pending.remove(id);
+            if (reply) {
+                reply->disconnect(this);
+                reply->abort();
+                reply->deleteLater();
+            }
             if (method == u"initialize"_s) {
                 failAll(u"Timed out waiting for the server handshake."_s);
                 setState(McpServerState::Failed, u"Handshake timed out"_s);
@@ -748,7 +756,8 @@ void McpClient::sendRequestForId(const QString &method, const QJsonObject &param
     message.insert(u"params"_s, params);
 
     if (m_config.transport == McpTransport::Http) {
-        if (!m_nam) {
+        QNetworkAccessManager *nam = activeNetworkManager();
+        if (!nam) {
             return;
         }
         QNetworkRequest request{QUrl(m_config.url)};
@@ -771,7 +780,7 @@ void McpClient::sendRequestForId(const QString &method, const QJsonObject &param
             request.setSslConfiguration(sslConfig);
         }
 
-        QNetworkReply *reply = m_nam->post(request, QJsonDocument(message).toJson(QJsonDocument::Compact));
+        QNetworkReply *reply = nam->post(request, QJsonDocument(message).toJson(QJsonDocument::Compact));
         // Stop QNetworkReply from buffering more than the body cap; readAll()
         // still sees the first 16 MiB plus one byte, which is enough to detect
         // an oversized response.
@@ -800,14 +809,21 @@ void McpClient::sendNotification(const QString &method, const QJsonObject &param
     writeMessage(message);
 }
 
+QNetworkAccessManager *McpClient::activeNetworkManager() const
+{
+    return m_sharedNam ? m_sharedNam.data() : m_nam;
+}
+
 void McpClient::writeMessage(const QJsonObject &message)
 {
     if (m_config.transport == McpTransport::Http) {
         // Notifications have no reply to wait for.
-        if (!m_nam) {
+        QNetworkAccessManager *nam = activeNetworkManager();
+        if (!nam) {
             return;
         }
         QNetworkRequest request{QUrl(m_config.url)};
+        request.setTransferTimeout(15000);
         request.setHeader(QNetworkRequest::ContentTypeHeader, u"application/json"_s);
         request.setRawHeader("Accept", "application/json, text/event-stream");
         request.setRawHeader("MCP-Protocol-Version", McpProtocolVersion.toUtf8());
@@ -827,7 +843,7 @@ void McpClient::writeMessage(const QJsonObject &message)
             request.setSslConfiguration(sslConfig);
         }
 
-        QNetworkReply *reply = m_nam->post(request, QJsonDocument(message).toJson(QJsonDocument::Compact));
+        QNetworkReply *reply = nam->post(request, QJsonDocument(message).toJson(QJsonDocument::Compact));
         reply->setReadBufferSize(16 * 1024 * 1024 + 1);
         connect(reply, &QNetworkReply::finished, reply, &QNetworkReply::deleteLater);
         return;
@@ -1102,7 +1118,9 @@ void McpClient::failAll(const QString &error)
             entry.timeout->deleteLater();
         }
         if (entry.reply) {
+            entry.reply->disconnect(this);
             entry.reply->abort();
+            entry.reply->deleteLater();
         }
         if (!entry.callToken.isEmpty()) {
             Q_EMIT toolResult(entry.callToken, false, QString(), error);
@@ -1256,6 +1274,7 @@ void McpManager::rebuildClients()
             continue;
         }
         auto *client = new McpClient(config, this);
+        client->setNetworkManager(m_sharedNam);
         client->setTimeoutMs(m_timeoutMs);
         connect(client, &McpClient::toolsChanged, this, [this, name = config.name] {
             refreshDerived();
@@ -1452,9 +1471,14 @@ namespace
 
 constexpr auto kCredentialMarker = "${kateai-credential:";
 
+QString workspaceCredentialScope(const QString &workspace)
+{
+    return QString::fromLatin1(QCryptographicHash::hash(workspace.toUtf8(), QCryptographicHash::Sha1).toHex().left(12));
+}
+
 QString credentialId(const QString &workspace, const QString &server, const QString &kind, const QString &key)
 {
-    const QString scope = QString::fromLatin1(QCryptographicHash::hash(workspace.toUtf8(), QCryptographicHash::Sha1).toHex().left(12));
+    const QString scope = workspaceCredentialScope(workspace);
     const QString name = QString::fromLatin1(
         QCryptographicHash::hash((kind + u':' + server + u':' + key).toUtf8(), QCryptographicHash::Sha1).toHex().left(24));
     return u"mcp-%1-%2"_s.arg(scope, name);
@@ -1482,13 +1506,20 @@ bool protectValue(const QString &workspace, const QString &server, const QString
     return true;
 }
 
-QString resolveValue(const QString &value)
+QString resolveValue(const QString &workspace, const QString &value)
 {
     if (!isCredentialMarker(value)) {
         return value;
     }
     const QString id = value.mid(int(QLatin1String(kCredentialMarker).size()));
     const QString trimmed = id.left(id.size() - 1);
+    // Only resolve credentials that belong to this workspace's MCP scope.
+    // Without this check, a repository's .kateai/mcp.json could reference
+    // global LLM API keys or another workspace's MCP tokens.
+    const QString requiredPrefix = u"mcp-%1-"_s.arg(workspaceCredentialScope(workspace));
+    if (!trimmed.startsWith(requiredPrefix)) {
+        return {};
+    }
     bool ok = false;
     const QString secret = CredentialStore::load(trimmed, &ok);
     return ok ? secret : QString();
@@ -1535,10 +1566,10 @@ QList<McpServerConfig> load(const QString &workspace)
     QList<McpServerConfig> servers = McpServerConfig::serversFromJson(document.object());
     for (McpServerConfig &server : servers) {
         for (auto it = server.headers.begin(); it != server.headers.end(); ++it) {
-            it.value() = resolveValue(it.value());
+            it.value() = resolveValue(workspace, it.value());
         }
         for (auto it = server.env.begin(); it != server.env.end(); ++it) {
-            it.value() = resolveValue(it.value());
+            it.value() = resolveValue(workspace, it.value());
         }
     }
     return servers;

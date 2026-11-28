@@ -24,6 +24,8 @@
 class QShortcut;
 class QTimer;
 
+class QNetworkAccessManager;
+
 namespace KTextEditor
 {
 class View;
@@ -56,6 +58,7 @@ public:
     explicit EditorAssist(QObject *parent = nullptr);
     ~EditorAssist() override;
 
+    void setNetworkManager(QNetworkAccessManager *network);
     void setSettings(const Settings &settings);
     // Chat turn running: completions are switched off while this is true.
     void setAgentBusy(bool busy);
